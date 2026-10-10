@@ -1102,6 +1102,8 @@ func (rt *jsrt) rubyMainObj() *jsObject {
 // ruby_respond_test.go keeps the two equal.
 var rubyRespondNames = map[string][]string{
 	"*": {"!", "!=", "==", "===", "class", "inspect", "respond_to?", "to_s"},
+	"private": {"format", "lambda", "loop", "p", "print", "printf", "proc", "puts", "raise",
+		"rand", "require", "sprintf"},
 	"Integer": {"%", "&", "*", "**", "+", "+@", "-", "-@", "/", "<", "<=", "<=>", ">", ">=",
 		"^", "abs", "ceil", "div", "divmod", "equal?", "even?", "fdiv", "floor", "frozen?",
 		"instance_of?", "integer?", "is_a?", "kind_of?", "modulo", "negative?", "next", "nil?",
@@ -1214,15 +1216,63 @@ func rubyResponds(cls, name string) bool {
 	return rubyRespondSet["*#"+name] || rubyRespondSet[cls+"#"+name]
 }
 
-// rubyRespond is `x.respond_to?(n)` (js_rrespond): a builtin answers from the
-// table, a user instance or class from its own tables in rubyMethod. Twin of
-// js_rrespond in lib/ruby-rt.metajs.
+// rubyRespond is `x.respond_to?(n, include_all)` (js_rrespond): a builtin answers
+// from the table, a user instance or class from its own tables. A private or
+// protected method counts only with include_all, and so do the private methods
+// every object has: the "private" row and the top-level defs, which are private
+// methods of Object recorded as "$p$" slots on the Object class object. Twin of
+// js_rrespond in lib/ruby-rt.metajs and respondTo in ruby-interpreter.abnf.
 func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} {
+	pos, _ := rubyBlockArgs(args)
+	n := rt.rubyStr(argAt(pos, 0))
+	all := rubyTruthy(argAt(pos, 1))
 	if cls := rt.rubyRespondClass(target); cls != "" {
-		pos, _ := rubyBlockArgs(args)
-		return rubyResponds(cls, rt.rubyStr(argAt(pos, 0)))
+		return rubyResponds(cls, n) || (all && rt.rubyRespondsPrivate(n))
 	}
-	return rt.rubyMethod(target, "respond_to?", args)
+	o, isObj := target.(*jsObject)
+	if !isObj {
+		return rt.rubyMethod(target, "respond_to?", args)
+	}
+	if rubyResponds("", n) {
+		return true
+	}
+	if _, ok := rubySingFind(o, n); ok {
+		return true
+	}
+	if rubyRestricted(o, n) {
+		return all
+	}
+	return rubySingRespond(o, n) || (all && rt.rubyRespondsPrivate(n))
+}
+
+// rubyRespondsPrivate: is n a private method every object has?
+func (rt *jsrt) rubyRespondsPrivate(n string) bool {
+	if rubyRespondSet["private#"+n] {
+		return true
+	}
+	_, top := rt.rubyBuiltinClass("Object").props["$p$"+n]
+	return top
+}
+
+// rubyRestricted: is n a private or protected method of an instance's class chain?
+// The emitter keeps such a method under "$q$" + n (methodKey in
+// ruby-to-llvm-ir.abnf), and a nearer class holding only the plain name overrides
+// it as a public one.
+func rubyRestricted(o *jsObject, n string) bool {
+	for cls := o.props["__class"]; cls != nil; {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if _, has := clsObj.props["$q$"+n]; has {
+			return true
+		}
+		if _, has := clsObj.props[n]; has {
+			return false
+		}
+		cls = clsObj.props["__super"]
+	}
+	return false
 }
 
 // rubyRespondClass is the builtin class respond_to? looks up, "" for a user

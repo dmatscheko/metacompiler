@@ -7658,7 +7658,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "class") { return classOf(target) }
         // A user instance or class answers from its own tables further down.
         if (name == "respond_to?" && !isUserObj(target) && !isClassObj(target)) {
-            return rbResponds(classOf(target).__name, rstr(args[0]))
+            return rbResponds(classOf(target).__name, rstr(args[0])) || (args.length > 1 && rtest(args[1]) && respondsPrivate(rstr(args[0])))
         }
         if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
             if (name == "instance_of?") { return classOf(target) === args[0] }
@@ -7993,7 +7993,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return singDefine(target, args, blk)
             }
             if (name == "singleton_methods") { return singNames(target) }
-            if (name == "respond_to?") { return rbResponds("", rstr(args[0])) || singRespond(target, rstr(args[0])) }
+            if (name == "respond_to?") { return respondTo(target, args) }
             // Object#method with an explicit receiver. Kernel#method (no receiver)
             // Object#method with an explicit receiver: the one way a singleton method
             // is reachable as a value.
@@ -8118,7 +8118,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "define_singleton_method") { return singDefine(target, args, blk) }
             if (name == "singleton_methods") { return singNames(target) }
-            if (name == "respond_to?") { return rbResponds("", rstr(args[0])) || singRespond(target, rstr(args[0])) }
+            if (name == "respond_to?") { return respondTo(target, args) }
             // A class method is stored under a "$s$" prefix so it cannot collide with
             // an instance method of the same name; `extend M` puts M's methods there.
             var sm = anytype
@@ -10298,6 +10298,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         return out
+    }
+    // Object#respond_to?(name, include_all) on a user instance or class object. A
+    // private or protected method counts only with include_all, and so do the
+    // private methods every object has (respondsPrivate). Twin of rubyRespond in
+    // abnf/jsrtruby.go and js_rrespond in lib/ruby-rt.metajs.
+    function respondTo(target, args) {
+        var n = rstr(args[0])
+        var all = args.length > 1 && rtest(args[1])
+        if (rbResponds("", n)) { return true }
+        if (typeof singFind(target, n) == "function") { return true }
+        if (target.__isclass !== true && typeof lookupMethod(target.__class, n) == "function"
+            && visOf(target.__class, n) != "public") { return all }
+        return singRespond(target, n) || (all && respondsPrivate(n))
+    }
+    // The private Kernel methods (the "private" row of ruby-respond.js) and the
+    // top-level defs, which are private methods of Object.
+    function respondsPrivate(n) {
+        return rbRespondsPrivate(n) || hasOwn(globalScope, "$d$" + n)
     }
     // Object#respond_to?: the singleton table, then the class chain (an instance) or
     // the $s$ / $x$ class-method tables (a class object).

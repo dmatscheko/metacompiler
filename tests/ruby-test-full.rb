@@ -3390,6 +3390,48 @@ def s73
                  {c[2] => 1}.inspect == "{C73i=>1}")
 end
 
+# ===== SECTION 74: respond_to?'s include_all =====
+# A private or protected method answers respond_to? only when include_all is true,
+# and so do the private methods every object has: Kernel's (puts) and the
+# top-level defs, which are private methods of Object once the def has run. A
+# subclass's public redefinition is public. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+S74A = [respond_to?(:s74top, true)]
+def s74top
+  1
+end
+S74A.push(respond_to?(:s74top), respond_to?(:s74top, true))
+class S74K
+  def pub
+    [respond_to?(:priv), respond_to?(:priv, true)]
+  end
+
+  private
+
+  def priv
+    1
+  end
+
+  protected
+
+  def prot
+    2
+  end
+end
+class S74L < S74K
+  def priv
+    3
+  end
+end
+def s74
+  v = [S74K.new, 5, "s", S74L.new, nil]
+  check("ra74a", S74A == [false, false, true] && v[0].pub == [false, true] && v[0].respond_to?(:prot) == false &&
+                 v[0].respond_to?(:prot, true) && v[3].respond_to?(:priv) && v[0].send(:respond_to?, :priv, true))
+  check("ra74b", v[1].respond_to?(:s74top, true) && !v[2].respond_to?(:s74top) && v[4].respond_to?(:puts, true) &&
+                 !v[4].respond_to?(:puts) && v[0].respond_to?(:format, true) && S74K.respond_to?(:s74top, true) &&
+                 !v[1].respond_to?(:s74nope, true))
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3425,5 +3467,6 @@ s70() # SECTION-CALL 70
 s71() # SECTION-CALL 71
 s72() # SECTION-CALL 72
 s73() # SECTION-CALL 73
+s74() # SECTION-CALL 74
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

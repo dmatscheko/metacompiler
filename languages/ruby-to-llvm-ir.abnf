@@ -6445,6 +6445,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var cloV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), fn.params)
             if (!knownLocal(fn.name)) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name), cloV]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$d$" + fn.name), cloV])
+            // A top-level def is a private method of Object, which respond_to? with
+            // include_all reports for every object (rubyRespondsPrivate).
+            callExt(b, "js_set", [callExt(b, "js_rclass", [emitStr(b, "Object")]), emitStr(b, "$p$" + fn.name), hTrue])
             return {b: b, v: hNull}
         }
     }

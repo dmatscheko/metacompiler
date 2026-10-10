@@ -6311,13 +6311,41 @@ function rbRespondClass(v) {
     return rbClassName(v)
 }
 
-// `x.respond_to?(n)`, which the emitter lowers here rather than to js_rxmcall so
-// no other call pays for the test. A user instance or class answers from its own
-// tables in rbMethod. Twin of js_rrespond in abnf/jsrtruby.go.
+// `x.respond_to?(n, include_all)`, which the emitter lowers here rather than to
+// js_rxmcall so no other call pays for the test. A builtin answers from the table,
+// a user instance or class from its own tables; a private or protected method
+// counts only with include_all, and so do the private methods every object has.
+// Twin of rubyRespond in abnf/jsrtruby.go.
 function js_rrespond(target, args) {
+    var n = rbStr(rbArgAt(args, 0))
+    var all = rbNPos(args) > 1 && rbTruthy(rbArgAt(args, 1))
     var rcls = rbRespondClass(target)
-    if (rcls != "") { return rbResponds(rcls, rbStr(rbArgAt(args, 0))) }
-    return rbMethod(target, "respond_to?", args)
+    if (rcls != "") { return rbResponds(rcls, n) || (all && rbRespondsPriv(n)) }
+    if (!rbIsObj(target)) { return rbMethod(target, "respond_to?", args) }
+    if (rbResponds("", n)) { return true }
+    if (rbSingFind(target, n) !== undefined) { return true }
+    if (rbRestricted(target, n)) { return all }
+    return rbSingRespond(target, n) || (all && rbRespondsPriv(n))
+}
+
+// The private methods every object has: the "private" row of ruby-respond.js and
+// the top-level defs, recorded as "$p$" slots on the Object class object. Twin of
+// rubyRespondsPrivate in abnf/jsrtruby.go.
+function rbRespondsPriv(n) {
+    return rbRespondsPrivate(n) || rbBuiltinClass("Object")["$p$" + n] !== undefined
+}
+
+// Is n a private or protected method of an instance's class chain? The emitter
+// keeps such a method under "$q$" + n, and a nearer class holding only the plain
+// name overrides it as a public one. Twin of rubyRestricted in abnf/jsrtruby.go.
+function rbRestricted(o, n) {
+    var c = o["__class"]
+    while (c !== undefined && c !== null && rbIsObj(c)) {
+        if (c["$q$" + n] !== undefined) { return true }
+        if (c[n] !== undefined) { return false }
+        c = c["__super"]
+    }
+    return false
 }
 
 function rbMethod(target, name, args) {
@@ -6663,7 +6691,7 @@ function rbMethod(target, name, args) {
                 return rbSym(dnm)
             }
             if (name == "singleton_methods") { return rbSingNames(target) }
-            if (name == "respond_to?") { return rbResponds("", rbStr(rbArgAt(args, 0))) || rbSingRespond(target, rbStr(rbArgAt(args, 0))) }
+            if (name == "respond_to?") { return js_rrespond(target, args) }
             // Object#method with an explicit RECEIVER (Kernel#method with none is
             // js_rmethodval), the one way a singleton method is reachable as a
             // value. A user class that defines `method' itself still wins - the

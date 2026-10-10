@@ -8,7 +8,8 @@
 // name missing here that an engine does answer only makes respond_to? say false.
 //
 // Row 0 ("*") holds the names every builtin class answers; each other row is a
-// class name followed by its own names.
+// class name followed by its own names. Row "private" holds the private Kernel
+// methods every object has, which respond_to? reports only with include_all.
 //
 // Included by ruby-interpreter.abnf (include("lib/ruby-respond.js")) and
 // imported by lib/ruby-rt.metajs. The Go twin's copy is rubyRespondNames in
@@ -19,6 +20,8 @@
 function rbRespondRows() {
     return [
         ["*", "!", "!=", "==", "===", "class", "inspect", "respond_to?", "to_s"],
+        ["private", "format", "lambda", "loop", "p", "print", "printf", "proc", "puts", "raise",
+         "rand", "require", "sprintf"],
         ["Integer", "%", "&", "*", "**", "+", "+@", "-", "-@", "/", "<", "<=", "<=>", ">",
          ">=", "^", "abs", "ceil", "div", "divmod", "equal?", "even?", "fdiv", "floor",
          "frozen?", "instance_of?", "integer?", "is_a?", "kind_of?", "modulo", "negative?",
@@ -141,4 +144,10 @@ function rbResponds(cls, name) {
         rbRespondReady = true
     }
     return rbRespondSet["$*#" + name] === true || rbRespondSet["$" + cls + "#" + name] === true
+}
+
+// The private Kernel methods of the "private" row (rbResponds has built the set).
+function rbRespondsPrivate(name) {
+    rbResponds("", name)
+    return rbRespondSet["$private#" + name] === true
 }
