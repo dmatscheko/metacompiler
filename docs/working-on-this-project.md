@@ -315,10 +315,6 @@ contract on amd64, so the Go twin's digits are already architecture-dependent an
 no spelling matches both. Note also that **assigning the product to a local does
 not stop Go fusing it; only an explicit `float64()` conversion does.**
 
-**`(float)x` in the C subset is a silent no-op.** `c-to-llvm-ir.abnf` compiles the
-cast and narrows nothing, so a float32 round-trip written that way is measurably
-absent. Narrow on the bit pattern.
-
 **Only the NATIVE leg sees some IR errors.** Building a phi inline inside a
 `js_scope_set` argument list compiled, verified and ran correctly under
 `llvm.Run`, then failed `clang` with *PHI nodes not grouped at top of basic

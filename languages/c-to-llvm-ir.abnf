@@ -13,8 +13,9 @@ mantissa field with guard/round/sticky bits and rounds once at the end. Infiniti
 NaNs, subnormals and the sign of zero are all carried - overflow saturates, underflow
 is gradual, a NaN operand comes through with its payload and is unordered against
 everything. cc and this agree BIT FOR BIT over a 90,000-case differential probe
-covering all five of those. A float is computed at double precision, like in the
-interpreter. A constant expression still folds at compile time and never reaches a
+covering all five of those. A float is carried as a double holding a binary32 value:
+every conversion to float and every float operation rounds through __mec_d2f, like in
+the interpreter. A constant expression still folds at compile time and never reaches a
 helper.
 Pointers compile to real addresses (alloca values), arrays to alloca [N x T] plus
 getelementptr, globals to module globals. Structs become real LLVM struct types:
@@ -1410,7 +1411,9 @@ KwDefault   = "default" KwEnd ;
 
     var funcs = {}
     // Declared return / parameter types by name (prototype or definition, whichever comes
-    // first). Only 64-bit types (long, double) are recorded: they change the signature.
+    // first). A return type is recorded only when it is 64-bit (long, double), which
+    // changes the signature; parameter types whenever one is arithmetic, which is what a
+    // call converts its arguments to.
     var funcRetCt = {}
     var funcParamCts = {}
     function noteRetCt(name, ct) {
@@ -1447,8 +1450,7 @@ KwDefault   = "default" KwEnd ;
         if (hasOwn(funcs, name)) { return }
         for (var i = 0; i < params.length; i++) {
             var pct = params[i].ct
-            if (pct != undefined && (pct.k == "flt" || (pct.k == "int" && pct.w >= 8)) &&
-                params[i].ptr != true) { any = true }
+            if (pct != undefined && (pct.k == "flt" || pct.k == "int") && params[i].ptr != true) { any = true }
             cts.push(pct)
             ptrs.push(params[i].ptr == true)
             if (params[i].ptr == true) { anyPtr = true }
@@ -1457,7 +1459,7 @@ KwDefault   = "default" KwEnd ;
         if (anyPtr) { funcParamPtrs[name] = ptrs }
     }
     // The parameter types a call should convert its arguments to, or undefined when
-    // the function has none that is wider than the model's i32.
+    // the function has no arithmetic parameter.
     function paramCtsOf(name) { return hasOwn(funcParamCts, name) ? funcParamCts[name] : undefined }
     function paramPtrsOf(name) { return hasOwn(funcParamPtrs, name) ? funcParamPtrs[name] : undefined }
     // Functions that return a struct or union BY VALUE, name -> the returned C type.
@@ -1869,9 +1871,30 @@ KwDefault   = "default" KwEnd ;
     // Truncation towards zero, which is what C's integer conversions and its
     // float-to-integer conversion both do.
     function trunc0(x) { return Math.trunc(x) }
-    // A COMPILE-TIME value given the representation its C type pins.
+    // A double ROUNDED TO binary32: nearest, ties to even, an infinity past FLT_MAX,
+    // gradual underflow below 2^-126. Scaling by two is exact, so the value is moved
+    // until its last binary32 bit is the units digit, rounded there, and moved back.
+    // Twin of cRoundF32 in languages/c-interpreter.abnf; __mec_d2f (buildD2F) is the
+    // run-time form.
+    function cRoundF32(x) {
+        if (x != x || x == 0) return x
+        var a = x < 0 ? 0 - x : x
+        if (a * 0.5 == a) return x
+        var e = 0
+        while (a >= 16777216) { a = a / 2; e = e + 1 }
+        while (a < 8388608 && e > -149) { a = a * 2; e = e - 1 }
+        var r = Math.floor(a)
+        var frac = a - r
+        if (frac > 0.5 || (frac == 0.5 && r % 2 == 1)) { r = r + 1 }
+        while (e > 0) { r = r * 2; e = e - 1 }
+        while (e < 0) { r = r / 2; e = e + 1 }
+        if (r >= Math.pow(2, 128)) { r = Math.pow(2, 1024) }
+        return x < 0 ? -r : r
+    }
+    // A COMPILE-TIME value given the representation its C type pins: a float rounds to
+    // binary32 (C11 6.3.1.5).
     function convertNum(ct, x) {
-        if (ct.k == "flt") return x
+        if (ct.k == "flt") return ct.w == 4 ? cRoundF32(x) : x
         if (ct.bool == true) { return x == 0 ? 0 : 1 }
         if (ct.k == "int") {
             var n = trunc0(x)
@@ -1968,7 +1991,7 @@ KwDefault   = "default" KwEnd ;
     // pointer (a funcId in an i32) are the cells whose size differs from sizeof.
     function machBytes(ct) {
         if (ct.k == "ptr") return 8
-        if (ct.k == "flt") return 8      // every float is carried at double precision
+        if (ct.k == "flt") return 8      // every float is carried in a double's cell
         if (ct.k == "struct") return structOf(ct.s).bytes
         if (ct.k == "arr") return ct.n * machBytes(ct.e)
         if (ct.k == "fnp") return 4      // a funcId, not an address
@@ -2368,7 +2391,7 @@ KwDefault   = "default" KwEnd ;
     // branchless (select instead of branches), so it needs no basic blocks of its own
     // and can be emitted while another function is being built.
     // Rounding is to nearest, ties to even (see roundPack); infinities, NaNs, subnormals
-    // and signed zeros are carried. A float is computed at double precision.
+    // and signed zeros are carried. A float is a double rounded to binary32 (buildD2F).
     var i64 = llvm.types.I64
     function k64(n) { return llvm.constant.NewInt(i64, n) }
 
@@ -2448,6 +2471,13 @@ KwDefault   = "default" KwEnd ;
         var e = 0
         while (v >= 2) { v = v / 2; e = e + 1 }
         while (v < 1) { v = v * 2; e = e - 1 }
+        if (e < -1022) {
+            // A SUBNORMAL: exponent field 0, no implicit bit, the value counted in units
+            // of 2^-1074 - an integer below 2^52, so the product is exact.
+            var u = v * Math.pow(2, e + 1074)
+            var uh = Math.floor(u / 4294967296)
+            return {hi: s * 2147483648 + uh, lo: u - uh * 4294967296}
+        }
         var f = v - 1                                   // the fraction, in [0, 1)
         var top = Math.floor(f * 1048576)               // its top 20 bits
         var rest = f * 1048576 - top
@@ -2810,6 +2840,40 @@ KwDefault   = "default" KwEnd ;
         var unc = b.NewICmp(llvm.enum.IPredNE, un, zero64)
         return toInt(b, b.NewSelect(unc, (op == "!=") ? trueBit(b) : falseBit(b), c))
     }
+    // A double rounded to binary32 precision and range, still carried as a double: what
+    // a conversion to float does (C11 6.3.1.5). The significand keeps its top 24 bits
+    // (fewer below 2^-126, none below 2^-150), rounded to nearest, ties to even; a
+    // carry out of the top steps the exponent, past 2^127 the result is an infinity. A
+    // NaN keeps the payload bits binary32 has room for, quieted, as the hardware does.
+    // Twin of cRoundF32, which does the same to a constant.
+    function buildD2F(b, f) {
+        var x = f.Params[0]
+        var sg = b.NewLShr(x, k64(63))
+        var ex = b.NewAnd(b.NewLShr(x, k64(52)), kExpMask)
+        var mn = b.NewAnd(x, kM52)
+        var sig = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, ex, zero64), b.NewOr(mn, kB52), mn)
+        // 29 bits go for a normal binary32; one more per binade below 2^-126 (field 897).
+        // At 54 nothing survives, which is also the answer for every smaller value.
+        var under = b.NewSub(k64(897), ex)
+        var d0 = b.NewAdd(k64(29), b.NewSelect(b.NewICmp(llvm.enum.IPredSGT, under, zero64), under, zero64))
+        var d = b.NewSelect(b.NewICmp(llvm.enum.IPredSGT, d0, k64(54)), k64(54), d0)
+        var r = b.NewLShr(sig, d)
+        var rem = b.NewAnd(sig, b.NewSub(b.NewShl(one64, d), one64))
+        var half = b.NewShl(one64, b.NewSub(d, one64))
+        var tie = b.NewAnd(b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, rem, half), i64), b.NewAnd(r, one64))
+        var up = b.NewOr(b.NewZExt(b.NewICmp(llvm.enum.IPredUGT, rem, half), i64), tie)
+        var ns = b.NewShl(b.NewAdd(r, up), d)
+        // ns is 0 (the value underflowed), or in [2^52, 2^53] with the leading bit in place.
+        var carry = b.NewICmp(llvm.enum.IPredEQ, ns, kB53)
+        var ne = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ns, zero64), zero64,
+                             b.NewAdd(ex, b.NewZExt(carry, i64)))
+        var res = pack(b, sg, ne, b.NewSelect(carry, zero64, ns))
+        res = b.NewSelect(b.NewICmp(llvm.enum.IPredUGT, ne, k64(1150)), signedInf(b, sg), res)
+        var nanBits = b.NewAnd(b.NewOr(x, kQuiet), k64(-536870912))
+        res = b.NewSelect(isNanOf(b, x), nanBits, res)
+        return b.NewSelect(isInfOf(b, x), x, res)
+    }
+    function emitD2F(b, v) { return b.NewCall(softFn("__mec_d2f", 1, buildD2F), [v]) }
     // int -> double and double -> int through the soft-float helpers.
     function emitI2D(b, ct, v) {
         // A 64-bit operand is ALREADY an i64 register and must not be extended again.
@@ -3206,11 +3270,14 @@ KwDefault   = "default" KwEnd ;
     // One operand of a floating-point operation as its i64 bit pattern, converting
     // an integer operand on the way (the usual arithmetic conversions already said
     // the common type is floating point).
+    // A float destination rounds what is not a float already.
     function fltOperand(b, r, ct) {
         var rct = r.ct != undefined ? r.ct : ctInt
-        if (isFlt(rct)) return dblOf(b, r)
-        if (r.cv != undefined) return emitDblConst(b, r.cv)
-        return emitI2D(b, rct, r.v)
+        var toF = ct.w == 4 && !(isFlt(rct) && rct.w == 4)
+        if (r.cv != undefined) return emitDblConst(b, toF ? cRoundF32(r.cv) : r.cv)
+        if (isFlt(rct)) return toF ? emitD2F(b, r.v) : r.v
+        var dv = emitI2D(b, rct, r.v)
+        return toF ? emitD2F(b, dv) : dv
     }
     // One value as the representation the destination type needs: an integer becomes
     // a double when the destination is floating point, and a double truncates to an
@@ -3272,7 +3339,11 @@ KwDefault   = "default" KwEnd ;
             var xf = fltOperand(b, lr, ct)
             var yf = fltOperand(b, rr, ct)
             if (isCmpOp(op)) return {b: b, v: emitDCmp(b, op, xf, yf), ct: ctInt}
-            return {b: b, v: emitDBin(b, op, xf, yf), ct: ct}
+            // A float operation rounds its exact result once, to binary32. Doing it to the
+            // double result instead is the same answer for + - * /: binary64 carries more
+            // than twice binary32's precision, so the first rounding cannot cause a tie.
+            var dv = emitDBin(b, op, xf, yf)
+            return {b: b, v: ct.w == 4 ? emitD2F(b, dv) : dv, ct: ct}
         }
         var lv = emitConv(b, ct, l, lct)
         // The shift COUNT keeps its own type in C, but LLVM wants both operands of a
@@ -3441,6 +3512,9 @@ KwDefault   = "default" KwEnd ;
                 var ra = applyOp(b, op, cur, r)
                 b = ra.b
                 v = ra.v
+                // The result converts to the place's type (C11 6.5.16.2p3): `f += d` with a
+                // double d computes in double and rounds on the store, `i += 2.5` truncates.
+                if (p.ct != undefined && (p.ct.k == "int" || isFlt(p.ct))) { v = coerce(b, p.ct, ra) }
             } else {
                 v = coerce(b, p.ct, r)
             }
@@ -3455,6 +3529,11 @@ KwDefault   = "default" KwEnd ;
         if (ct != undefined && ct.k == "ptr") {
             var off = llvm.constant.NewInt(llvm.types.I64, (op == "++") ? 1 : -1)
             return b.NewGetElementPtr(ctLTy(ct.p), old, [off])
+        }
+        // A floating-point place steps by 1.0 in its own precision.
+        if (ct != undefined && isFlt(ct)) {
+            var dv = emitDBin(b, (op == "++") ? "+" : "-", old, emitDblConst(b, 1))
+            return ct.w == 4 ? emitD2F(b, dv) : dv
         }
         return (op == "++") ? b.NewAdd(old, one) : b.NewSub(old, one)
     }
@@ -3542,17 +3621,17 @@ KwDefault   = "default" KwEnd ;
             // that f(0) and f(NULL) still typecheck once the signature says i32*.
             // ptrOperand sign-extends an integer to the pointer's 64 bits first.
             if (pptrs != undefined && i < pptrs.length && pptrs[i]) { into.push(ptrOperand(b, r.v)); continue }
-            // Pointer arguments (&pt, &nodes[i]) become uniform i32* like the parameters;
-            // a floating-point argument travels as its i64 bit pattern.
-            if (r.ct != undefined && isFlt(r.ct)) { into.push(dblOf(b, r)); continue }
-            if (llvm.types.IsPointer(r.v.Type())) { into.push(b.NewBitCast(r.v, i32p)); continue }
-            // A declared parameter type fixes the argument's register width, so a
-            // long parameter receives an i64 and an int parameter an i32.
             var pct = (pcts != undefined && i < pcts.length) ? pcts[i] : undefined
-            // A DOUBLE parameter converts its integer argument here, the way C11
-            // 6.5.2.2p7 says a declared parameter type does: f(1) with 'double d'
-            // sees 1.0, not the bit pattern 1.
-            if (pct != undefined && (pct.k == "int" || isFlt(pct))) { into.push(coerce(b, pct, r)); continue }
+            var isP = llvm.types.IsPointer(r.v.Type())
+            // A declared arithmetic parameter converts its argument here, the way C11
+            // 6.5.2.2p7 says: f(1) with 'double d' sees 1.0, not the bit pattern 1, a
+            // float parameter rounds a double, an int one truncates it, and the
+            // parameter fixes the register width (a long receives an i64).
+            if (!isP && pct != undefined && (pct.k == "int" || isFlt(pct))) { into.push(coerce(b, pct, r)); continue }
+            // Pointer arguments (&pt, &nodes[i]) become uniform i32* like the parameters;
+            // an undeclared floating-point argument travels as its i64 bit pattern.
+            if (r.ct != undefined && isFlt(r.ct)) { into.push(dblOf(b, r)); continue }
+            if (isP) { into.push(b.NewBitCast(r.v, i32p)); continue }
             into.push(emitWiden(b, r.v, r.ct != undefined && r.ct.k == "int" && r.ct.u == true, false))
         }
         return b

@@ -895,7 +895,7 @@ entry:
 
 5:
 	%6 = icmp ne i32 1, 0
-	br i1 %6, label %7, label %39
+	br i1 %6, label %7, label %43
 
 7:
 	%8 = alloca i8
@@ -904,63 +904,67 @@ entry:
 	%11 = getelementptr i8, i32* %10, i32 %9
 	%12 = load i8, i8* %11
 	%13 = sext i8 %12 to i32
-	%14 = call i32 @rt_lc(i32 %13)
-	%15 = shl i32 %14, 24
-	%16 = ashr i32 %15, 24
+	%14 = shl i32 %13, 24
+	%15 = ashr i32 %14, 24
+	%16 = call i32 @rt_lc(i32 %15)
 	%17 = shl i32 %16, 24
 	%18 = ashr i32 %17, 24
-	%19 = trunc i32 %18 to i8
-	store i8 %19, i8* %8
-	%20 = alloca i8
-	%21 = load i32, i32* %4
-	%22 = load i32*, i32** %3
-	%23 = getelementptr i8, i32* %22, i32 %21
-	%24 = load i8, i8* %23
-	%25 = sext i8 %24 to i32
-	%26 = call i32 @rt_lc(i32 %25)
-	%27 = shl i32 %26, 24
-	%28 = ashr i32 %27, 24
-	%29 = shl i32 %28, 24
-	%30 = ashr i32 %29, 24
-	%31 = trunc i32 %30 to i8
-	store i8 %31, i8* %20
-	%32 = load i8, i8* %8
-	%33 = sext i8 %32 to i32
-	%34 = load i8, i8* %20
-	%35 = sext i8 %34 to i32
-	%36 = icmp ne i32 %33, %35
-	%37 = zext i1 %36 to i32
-	%38 = icmp ne i32 %37, 0
-	br i1 %38, label %40, label %41
+	%19 = shl i32 %18, 24
+	%20 = ashr i32 %19, 24
+	%21 = trunc i32 %20 to i8
+	store i8 %21, i8* %8
+	%22 = alloca i8
+	%23 = load i32, i32* %4
+	%24 = load i32*, i32** %3
+	%25 = getelementptr i8, i32* %24, i32 %23
+	%26 = load i8, i8* %25
+	%27 = sext i8 %26 to i32
+	%28 = shl i32 %27, 24
+	%29 = ashr i32 %28, 24
+	%30 = call i32 @rt_lc(i32 %29)
+	%31 = shl i32 %30, 24
+	%32 = ashr i32 %31, 24
+	%33 = shl i32 %32, 24
+	%34 = ashr i32 %33, 24
+	%35 = trunc i32 %34 to i8
+	store i8 %35, i8* %22
+	%36 = load i8, i8* %8
+	%37 = sext i8 %36 to i32
+	%38 = load i8, i8* %22
+	%39 = sext i8 %38 to i32
+	%40 = icmp ne i32 %37, %39
+	%41 = zext i1 %40 to i32
+	%42 = icmp ne i32 %41, 0
+	br i1 %42, label %44, label %45
 
-39:
+43:
 	ret i32 0
 
-40:
+44:
 	ret i32 0
 
-41:
-	%42 = load i8, i8* %8
-	%43 = sext i8 %42 to i32
-	%44 = icmp eq i32 %43, 0
-	%45 = zext i1 %44 to i32
-	%46 = icmp ne i32 %45, 0
-	br i1 %46, label %47, label %48
+45:
+	%46 = load i8, i8* %8
+	%47 = sext i8 %46 to i32
+	%48 = icmp eq i32 %47, 0
+	%49 = zext i1 %48 to i32
+	%50 = icmp ne i32 %49, 0
+	br i1 %50, label %51, label %52
 
 dead12:
-	br label %41
+	br label %45
 
-47:
+51:
 	ret i32 1
 
-48:
-	%49 = load i32, i32* %4
-	%50 = add i32 %49, 1
-	store i32 %50, i32* %4
+52:
+	%53 = load i32, i32* %4
+	%54 = add i32 %53, 1
+	store i32 %54, i32* %4
 	br label %5
 
 dead13:
-	br label %48
+	br label %52
 
 dead14:
 	ret i32 0
@@ -1394,7 +1398,7 @@ entry:
 	%32 = icmp ne i32 %31, 0
 	%33 = zext i1 %32 to i32
 	%34 = icmp ne i32 %33, 0
-	br i1 %34, label %58, label %65
+	br i1 %34, label %62, label %69
 
 35:
 	%36 = load i32, i32* %14
@@ -1404,64 +1408,68 @@ entry:
 	%40 = getelementptr i8, i32* %39, i32 %38
 	%41 = load i8, i8* %40
 	%42 = sext i8 %41 to i32
-	%43 = call i32 @rt_lc(i32 %42)
-	%44 = load i32, i32* %25
-	%45 = load i32*, i32** %4
-	%46 = getelementptr i8, i32* %45, i32 %44
-	%47 = load i8, i8* %46
-	%48 = sext i8 %47 to i32
-	%49 = call i32 @rt_lc(i32 %48)
-	%50 = icmp ne i32 %43, %49
-	%51 = zext i1 %50 to i32
-	%52 = icmp ne i32 %51, 0
-	br i1 %52, label %68, label %70
+	%43 = shl i32 %42, 24
+	%44 = ashr i32 %43, 24
+	%45 = call i32 @rt_lc(i32 %44)
+	%46 = load i32, i32* %25
+	%47 = load i32*, i32** %4
+	%48 = getelementptr i8, i32* %47, i32 %46
+	%49 = load i8, i8* %48
+	%50 = sext i8 %49 to i32
+	%51 = shl i32 %50, 24
+	%52 = ashr i32 %51, 24
+	%53 = call i32 @rt_lc(i32 %52)
+	%54 = icmp ne i32 %45, %53
+	%55 = zext i1 %54 to i32
+	%56 = icmp ne i32 %55, 0
+	br i1 %56, label %72, label %74
 
-53:
-	%54 = load i32, i32* %26
-	%55 = icmp eq i32 %54, 0
-	%56 = zext i1 %55 to i32
-	%57 = icmp ne i32 %56, 0
-	br i1 %57, label %73, label %75
+57:
+	%58 = load i32, i32* %26
+	%59 = icmp eq i32 %58, 0
+	%60 = zext i1 %59 to i32
+	%61 = icmp ne i32 %60, 0
+	br i1 %61, label %77, label %79
 
-58:
-	%59 = load i32, i32* %25
-	%60 = load i32, i32* %10
-	%61 = icmp slt i32 %59, %60
-	%62 = zext i1 %61 to i32
-	%63 = icmp ne i32 %62, 0
-	%64 = zext i1 %63 to i32
-	br label %65
-
-65:
-	%66 = phi i32 [ %33, %28 ], [ %64, %58 ]
+62:
+	%63 = load i32, i32* %25
+	%64 = load i32, i32* %10
+	%65 = icmp slt i32 %63, %64
+	%66 = zext i1 %65 to i32
 	%67 = icmp ne i32 %66, 0
-	br i1 %67, label %35, label %53
-
-68:
-	store i32 1, i32* %26
+	%68 = zext i1 %67 to i32
 	br label %69
 
 69:
-	br label %28
+	%70 = phi i32 [ %33, %28 ], [ %68, %62 ]
+	%71 = icmp ne i32 %70, 0
+	br i1 %71, label %35, label %57
 
-70:
-	%71 = load i32, i32* %25
-	%72 = add i32 %71, 1
-	store i32 %72, i32* %25
-	br label %69
+72:
+	store i32 1, i32* %26
+	br label %73
 
 73:
-	%74 = load i32, i32* %14
-	ret i32 %74
+	br label %28
 
-75:
-	%76 = load i32, i32* %14
-	%77 = add i32 %76, 1
-	store i32 %77, i32* %14
+74:
+	%75 = load i32, i32* %25
+	%76 = add i32 %75, 1
+	store i32 %76, i32* %25
+	br label %73
+
+77:
+	%78 = load i32, i32* %14
+	ret i32 %78
+
+79:
+	%80 = load i32, i32* %14
+	%81 = add i32 %80, 1
+	store i32 %81, i32* %14
 	br label %16
 
 dead24:
-	br label %75
+	br label %79
 
 dead25:
 	ret i32 0

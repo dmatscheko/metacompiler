@@ -1812,10 +1812,33 @@ KwDefault   = "default" KwEnd ;
     // Truncation towards zero, which is what C's integer conversions and its
     // float-to-integer conversion both do.
     function trunc0(x) { return Math.trunc(x) }
+    // A double ROUNDED TO binary32: nearest, ties to even, an infinity past FLT_MAX,
+    // gradual underflow below 2^-126. Scaling by two is exact, so the value is moved
+    // until its last binary32 bit is the units digit, rounded there, and moved back.
+    // Twin of cRoundF32 in languages/c-to-llvm-ir.abnf, which also emits it as __mec_d2f.
+    function cRoundF32(x) {
+        if (x != x || x == 0) return x
+        var a = x < 0 ? 0 - x : x
+        if (a * 0.5 == a) return x
+        var e = 0
+        while (a >= 16777216) { a = a / 2; e = e + 1 }
+        while (a < 8388608 && e > -149) { a = a * 2; e = e - 1 }
+        var r = Math.floor(a)
+        var frac = a - r
+        if (frac > 0.5 || (frac == 0.5 && r % 2 == 1)) { r = r + 1 }
+        while (e > 0) { r = r * 2; e = e - 1 }
+        while (e < 0) { r = r / 2; e = e + 1 }
+        if (r >= Math.pow(2, 128)) { r = Math.pow(2, 1024) }
+        return x < 0 ? -r : r
+    }
     // Give a value the representation its C type pins: an integer wraps to its
-    // declared width and signedness (C11 6.3.1.3), a float keeps its value.
+    // declared width and signedness (C11 6.3.1.3), a double keeps its value and a
+    // float rounds to binary32 (C11 6.3.1.5).
     function convert(ct, x) {
-        if (ct.k == "flt") return szIs(x) ? szNum(x) : x
+        if (ct.k == "flt") {
+            var d = szIs(x) ? szNum(x) : x
+            return ct.w == 4 ? cRoundF32(d) : d
+        }
         // _Bool first: its conversion is not a truncation but a TEST against zero
         // (C11 6.3.1.2), so 5, 256 and -3 all become 1. nzv is the same nonzero test
         // a condition uses, and it is safe on a boxed 64-bit value.
@@ -2423,7 +2446,8 @@ KwDefault   = "default" KwEnd ;
         var r = f.body()
         scopes = callerScopes
         if (r == undefined || !r.isRet) return val(0, ctInt)
-        if (f.ret != undefined && f.ret.k == "int" && r.v.t != undefined && r.v.t.k == "int") {
+        // The value converts to the return type as if by assignment (C11 6.8.6.4p3).
+        if (f.ret != undefined && isNum(f.ret) && r.v.t != undefined && isNum(r.v.t)) {
             return val(convert(f.ret, r.v.v), f.ret)
         }
         return r.v

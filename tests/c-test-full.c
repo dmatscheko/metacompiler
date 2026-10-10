@@ -1879,6 +1879,69 @@ int s50(void) {
     return 0;
 }
 
+// ===== SECTION 51: float is binary32 =====
+/* A conversion to float rounds to binary32 (C11 6.5.4, 6.3.1.5) - a cast, an
+   assignment, a parameter, a return - and a float operation rounds its result to it,
+   to nearest, ties to even, with an infinity past FLT_MAX and gradual underflow below
+   2^-126. A conversion to a parameter or a compound assignment converts a double to
+   int as well. Every expected value was printed by cc.
+
+   The operands come out of an array, so the emitted code is under test and not the
+   constant folder; the last two rows check the folder against the same rule. */
+double s51_d[12];
+float s51_half(float x) { return x / 3; }
+double s51_widen(float x) { return x; }
+float s51_narrow(double x) { return x; }
+int s51_int(int x) { return x; }
+int s51(void) {
+    float f; float s; double d; int i; long l;
+    s51_d[0] = 0.1; s51_d[1] = 0.7; s51_d[2] = 16777217.0; s51_d[3] = 1.5;
+    s51_d[4] = 3.4028235677973366e38; s51_d[5] = 1e-40; s51_d[6] = 7.006492321624085e-46;
+    s51_d[7] = 7.0064923216240862e-46; s51_d[8] = 33554435.0; s51_d[9] = 123456789.0;
+    s51_d[10] = 1e-50; s51_d[11] = -0.1;
+    check(5101, (double)(float)s51_d[0] == 0.10000000149011612);
+    f = s51_d[0];
+    check(5102, (double)f == 0.10000000149011612);
+    check(5103, (float)s51_d[0] != s51_d[0]);
+    check(5104, (double)(float)s51_d[2] == 16777216.0);     /* a tie, to even */
+    check(5105, (double)(float)s51_d[8] == 33554436.0);     /* the other side of a tie */
+    check(5106, (double)(float)s51_d[9] == 123456792.0);
+    check(5107, (float)s51_d[4] > 1e300);                    /* past FLT_MAX */
+    check(5108, (double)(float)s51_d[5] == 9.9999461011147596e-41);  /* subnormal */
+    check(5109, (double)(float)s51_d[6] == 0.0);             /* half the least: to even */
+    check(5110, (double)(float)s51_d[7] == 1.4012984643248171e-45);
+    check(5111, (double)(float)s51_d[10] == 0.0);
+    check(5112, (double)(float)s51_d[11] == -0.10000000149011612);
+    s = 0;
+    for (i = 0; i < 10; i++) { s = s + f; }
+    check(5113, (double)s == 1.0000001192092896);
+    f = s51_d[1];
+    f++;
+    check(5114, (double)f == 1.7000000476837158);
+    d = s51_d[3];
+    d++;
+    check(5115, d == 2.5);
+    f = s51_d[2];
+    f += s51_d[3];
+    check(5116, (double)f == 16777218.0);
+    i = s51_d[2];
+    f = i;
+    check(5117, (double)f == 16777216.0);
+    check(5118, (double)s51_half(1.0f) == 0.3333333432674408);
+    check(5119, s51_widen(s51_d[0]) == 0.10000000149011612);
+    check(5120, (double)s51_narrow(s51_d[0]) == 0.10000000149011612);
+    check(5121, s51_int(s51_d[3] + 1) == 2);
+    i = 1;
+    i += s51_d[3];
+    check(5122, i == 2);
+    l = 3;
+    l *= s51_d[3];
+    check(5123, l == 4);
+    check(5124, (double)(0.1f + 0.2f) == 0.30000001192092896);
+    check(5125, (double)(float)0.1 == 0.10000000149011612);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -1932,6 +1995,7 @@ int main() {
     s48(); // SECTION-CALL 48
     s49(); // SECTION-CALL 49
     s50(); // SECTION-CALL 50
+    s51(); // SECTION-CALL 51
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);
