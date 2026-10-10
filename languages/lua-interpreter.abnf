@@ -2234,6 +2234,80 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // 0.33333333333333331 - the digits come from luaNumStr, never from the host's
     // own number-to-string. Twin of lua_strarg in lua-to-llvm-ir.abnf.
     function luaStrArg(s) { if (isNum(s)) { return luaNumStr(s) } return s }
+
+    // ----- library argument checks (lauxlib's luaL_check*) -----
+    // `nargs` is how many arguments the call passed, which is what tells "got no
+    // value" (an absent argument) from "got nil".
+    function luaArgErr(fn, n, msg) { fail("bad argument #" + n + " to '" + fn + "' (" + msg + ")") }
+    function luaArgTypeErr(fn, n, want, v, nargs) {
+        luaArgErr(fn, n, want + " expected, got " + (n > nargs ? "no value" : luaType(v)))
+    }
+    function luaCheckStr(fn, n, v, nargs) {
+        if (typeof v == "string") { return v }
+        if (isNum(v)) { return luaNumStr(v) }
+        luaArgTypeErr(fn, n, "string", v, nargs)
+        return ""
+    }
+    // An integer argument, as a double: a float with an integral value and a
+    // numeric string convert; anything else is an error.
+    function luaCheckInt(fn, n, v, nargs) {
+        var a = anytype
+        a = toNumV(v)
+        if (a === undefined) { luaArgTypeErr(fn, n, "number", v, nargs) }
+        var d = numOf(a)
+        if (!isInt(a) && (d - d !== 0 || Math.floor(d) !== d)) { luaArgErr(fn, n, "number has no integer representation") }
+        return d
+    }
+    function luaOptInt(fn, n, v, nargs, dflt) {
+        if (v === undefined || v === null) { return dflt }
+        return luaCheckInt(fn, n, v, nargs)
+    }
+
+    // ----- patterns: lib/lua-strlib.js, shared with layer 2 -----
+    include("lib/lua-strlib.js")
+    lsFail = function(msg) { fail(msg) }
+    // string.find / string.match: the result list, or nil.
+    function luaFind(args, find) {
+        var fn = find ? "find" : "match"
+        var s = luaCheckStr(fn, 1, args[0], args.length)
+        var p = luaCheckStr(fn, 2, args[1], args.length)
+        var init = luaOptInt(fn, 3, args[2], args.length, 1)
+        var r = lsFindAux(s, p, init, find && luatruthy(args[3]), find)
+        if (r === null) { return undefined }
+        return mkMulti(r)
+    }
+    // A gsub replacement value: false or nil keeps the match, a string or a number
+    // replaces it, anything else is an error.
+    function luaReplVal(v) {
+        if (v === undefined || v === null || v === false) { return null }
+        if (typeof v == "string") { return v }
+        if (isNum(v)) { return luaNumStr(v) }
+        fail("invalid replacement value (a " + luaType(v) + ")")
+        return null
+    }
+    function luaGsubTable(t) { return function(caps) { return luaReplVal(luaIndex(t, caps[0])) } }
+    function luaGsubFunc(f) { return function(caps) { return luaReplVal(luaFirst(f.apply(undefined, caps))) } }
+    function luaGmatchIter(gm) {
+        return function() {
+            var r = lsGmatchNext(gm)
+            if (r === null) { return undefined }
+            return mkMulti(r)
+        }
+    }
+    // select(n, ...): the arguments from the n-th on (a negative n counts from the
+    // end), or their count for select('#', ...).
+    globalScope["select"] = function() {
+        var nargs = arguments.length
+        var sel = anytype
+        sel = arguments[0]
+        if (typeof sel == "string" && sel.length > 0 && sel.charAt(0) == "#") { return nargs - 1 }
+        var i = luaCheckInt("select", 1, sel, nargs)
+        if (i < 0) { i = nargs + i } else if (i > nargs) { i = nargs }
+        if (i < 1) { luaArgErr("select", 1, "index out of range") }
+        var out = []
+        for (var k = i; k < nargs; k++) { out.push(arguments[k]) }
+        return mkMulti(out)
+    }
     globalScope["string"] = {
         len: function(s) { return luaStrArg(s).length },
         // ASCII only: real Lua case-maps with the C library in the C locale, which leaves
@@ -2257,7 +2331,56 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var str = luaStrArg(s)
             while (k < cnt) { out = out + str; k = k + 1 }
             return out
-        }
+        },
+        find: function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return luaFind(args, true)
+        },
+        match: function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return luaFind(args, false)
+        },
+        gmatch: function(s, p, init) {
+            var nargs = arguments.length
+            var str = luaCheckStr("gmatch", 1, s, nargs)
+            var pat = luaCheckStr("gmatch", 2, p, nargs)
+            return luaGmatchIter(lsGmatchNew(str, pat, luaOptInt("gmatch", 3, init, nargs, 1)))
+        },
+        gsub: function(s, p, repl, maxN) {
+            var nargs = arguments.length
+            var str = luaCheckStr("gsub", 1, s, nargs)
+            var pat = luaCheckStr("gsub", 2, p, nargs)
+            var rs = anytype
+            rs = null
+            var cb = anytype
+            cb = null
+            if (typeof repl == "string" || isNum(repl)) { rs = luaStrArg(repl) }
+            else if (typeof repl == "function") { cb = luaGsubFunc(repl) }
+            else if (isTbl(repl)) { cb = luaGsubTable(repl) }
+            else { luaArgTypeErr("gsub", 3, "string/function/table", repl, nargs) }
+            var mx = luaOptInt("gsub", 4, maxN, nargs, 0 - 1)
+            if (maxN !== undefined && maxN !== null && mx < 0) { mx = 0 }
+            var r = lsGsub(str, pat, rs, cb, mx)
+            return mkMulti([r.r, r.n])
+        },
+        byte: function(s, i, j) {
+            var nargs = arguments.length
+            var str = luaCheckStr("byte", 1, s, nargs)
+            var pi = luaOptInt("byte", 2, i, nargs, 1)
+            return mkMulti(lsByte(str, pi, luaOptInt("byte", 3, j, nargs, pi)))
+        },
+        char: function() {
+            var out = ""
+            for (var k = 0; k < arguments.length; k++) {
+                var c = luaCheckInt("char", k + 1, arguments[k], arguments.length)
+                if (c < 0 || c > 255) { luaArgErr("char", k + 1, "value out of range") }
+                out = out + String.fromCharCode(c)
+            }
+            return out
+        },
+        reverse: function(s) { return lsReverse(luaCheckStr("reverse", 1, s, arguments.length)) }
     }
 
     // table.*: insert appends at the sequence border (#t + 1); remove drops and returns

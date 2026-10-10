@@ -1461,10 +1461,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // that uses none of them emits none of them. makeVarRef is the
     // single read path for a bare name, so it is where a reference is noticed.
     var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false,
-                   error: false, pcall: false, xpcall: false}
+                   error: false, pcall: false, xpcall: false, select: false}
     makeVarRef = function(name) {
         if (name == "math" || name == "string" || name == "table" || name == "next"
-            || name == "ipairs" || name == "pairs" || name == "error" || name == "pcall" || name == "xpcall") {
+            || name == "ipairs" || name == "pairs" || name == "error" || name == "pcall" || name == "xpcall"
+            || name == "select") {
             libNeed[name] = true
         }
         return function(b) {
@@ -2338,6 +2339,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: exitB, v: aFin}
     }
 
+    // The pattern half of the string library, string.byte/char/reverse and select:
+    // one extern each over the call's whole ARGUMENT ARRAY (abnf/jsrtluastr.go,
+    // over lib/lua-strlib.js in layer 2), which answers the results as one Lua value.
+    function libArgsExt(ext) {
+        return function(bb, argsH) { return {b: bb, v: callExt(bb, ext, [argsH])} }
+    }
+    function libFind(find) {
+        return function(bb, argsH) { return {b: bb, v: callExt(bb, "js_lufind", [argsH, find ? hTrue : hFalse])} }
+    }
+    // gmatch answers an iterator closing over the iteration state.
+    function libGmatch(bb, argsH) {
+        var sc = callExt(bb, "js_scope_new", [curScopeV])
+        callExt(bb, "js_scope_decl", [sc, emitStr(bb, "0gm"), callExt(bb, "js_lugmatch", [argsH])])
+        return {b: bb, v: callExt(bb, "js_closure", [handle(emitLibFunc(libGmatchNext)), sc])}
+    }
+    function libGmatchNext(bb, argsH) {
+        return {b: bb, v: callExt(bb, "js_lugmatchnext", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0gm")])])}
+    }
+
     // table.insert(t, v): append at the border+1. table.remove(t): read the last element,
     // clear its slot (so #t shrinks), and return it.
     function libInsert(bb, argsH) {
@@ -2536,6 +2556,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (libNeed.pairs) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "pairs"), callExt(b, "js_closure", [handle(emitLibFunc(libPairs)), curScopeV])])
         }
+        if (libNeed.select) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "select"), callExt(b, "js_closure", [handle(emitLibFunc(libArgsExt("js_luselect"))), curScopeV])])
+        }
         if (libNeed.next) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "next"), callExt(b, "js_closure", [handle(emitLibFunc(libNext)), curScopeV])])
         }
@@ -2580,6 +2603,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = libSet(b, st, "lower", emitLibFunc(libLower))
             b = libSet(b, st, "sub", emitLibFunc(libSub))
             b = libSet(b, st, "rep", emitLibFunc(libRep))
+            b = libSet(b, st, "find", emitLibFunc(libFind(true)))
+            b = libSet(b, st, "match", emitLibFunc(libFind(false)))
+            b = libSet(b, st, "gmatch", emitLibFunc(libGmatch))
+            b = libSet(b, st, "gsub", emitLibFunc(libArgsExt("js_lugsub")))
+            b = libSet(b, st, "byte", emitLibFunc(libArgsExt("js_lubyte")))
+            b = libSet(b, st, "char", emitLibFunc(libArgsExt("js_luchar")))
+            b = libSet(b, st, "reverse", emitLibFunc(libArgsExt("js_lureverse")))
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "string"), st])
             // The same table under a name no Lua program can spell, so the string
             // metatable lookup cannot be broken by `local string = 1`.

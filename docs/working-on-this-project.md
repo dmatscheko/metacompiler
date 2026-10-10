@@ -961,7 +961,9 @@ declaration allows it to become.**
 ```
 runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt
 regex.js                  <- js python ruby kotlin java
-lua-rt.metajs             <- imports NOTHING
+lua-rt.metajs             <- imports lua-strlib.js ONLY
+lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns; Go
+                             twin: abnf/jsrtluastr.go)
 js-rt.metajs              <- imports regex.js and json.js ONLY
 json.js                   <- js-rt.metajs, js and typescript interpreters
                              (Go twin: abnf/jsrtjson.go)

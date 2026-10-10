@@ -1121,7 +1121,7 @@ function js_luminint() { return luNorm(luMinPair()) }
 // (RuneError, 1) answer makes the Go twin do.
 //
 // luChar is BYTE-IDENTICAL to swift-rt.metajs's js_char, and deliberately not
-// shared: lua-rt.metajs imports no shared file (lib/runtime.metajs would bring
+// shared: lua-rt.metajs does not import lib/runtime.metajs (it would bring
 // externs and rtk* hooks Lua does not want), and lib/runtime.metajs's own js_char
 // has a different contract (the {__char} box). Keep the two texts in step by hand.
 function luChar(cp) {
@@ -1214,4 +1214,142 @@ function js_pystr(v) {
 function js_mcall(recv, name, args) {
     var f = recv[name]
     return f.apply(recv, args)
+}
+
+// ============================================== the string library, select ===
+// The pattern matcher is lib/lua-strlib.js, shared with the interpreter half; the
+// externs below are its value-model glue, twins of abnf/jsrtluastr.go function
+// for function. Each takes the call's ARGUMENT ARRAY, which is what tells an
+// absent argument ("got no value") from a nil one.
+import "./lua-strlib.js"
+
+// ----- the lauxlib argument checks -----
+function luArgErr(fn, n, msg) { luFail("bad argument #" + n + " to '" + fn + "' (" + msg + ")") }
+function luArgTypeErr(fn, n, want, args) {
+    var got = n > args.length ? "no value" : luTypeName(args[n - 1])
+    luArgErr(fn, n, want + " expected, got " + got)
+}
+function luArgAt(args, n) {
+    if (n <= args.length) { return args[n - 1] }
+    return undefined
+}
+function luCheckStr(fn, n, args) {
+    var v = luArgAt(args, n)
+    if (typeof v == "string") { return v }
+    if (luIsNum(v)) { return js_lustr(v) }
+    luArgTypeErr(fn, n, "string", args)
+    return ""
+}
+// An integer argument as a double: a float with an integral value and a numeric
+// string convert; anything else is an error.
+function luCheckInt(fn, n, args) {
+    var a = luToNum(luArgAt(args, n))
+    if (a === undefined) { luArgTypeErr(fn, n, "number", args) }
+    var d = luNumOf(a)
+    if (!luIsInt(a) && (d - d !== 0 || Math.floor(d) !== d)) { luArgErr(fn, n, "number has no integer representation") }
+    return d
+}
+function luOptInt(fn, n, args, dflt) {
+    var v = luArgAt(args, n)
+    if (v === undefined || v === null) { return dflt }
+    return luCheckInt(fn, n, args)
+}
+// Several results as ONE Lua value: exactly one stays unwrapped, any other count
+// becomes the {__mv} box lua_mk builds in the emitted module.
+function luMk(vals) {
+    if (vals.length === 1) { return vals[0] }
+    var o = {}
+    o["__mv"] = vals
+    return o
+}
+function luFirstOf(v) {
+    if (v !== null && v !== undefined && typeof v == "object" && v["__mv"] !== undefined) {
+        var a = v["__mv"]
+        if (a.length === 0) { return undefined }
+        return a[0]
+    }
+    return v
+}
+
+// string.find (find true) and string.match.
+function js_lufind(args, find) {
+    var fn = find ? "find" : "match"
+    var s = luCheckStr(fn, 1, args)
+    var p = luCheckStr(fn, 2, args)
+    var init = luOptInt(fn, 3, args, 1)
+    var pl = luArgAt(args, 4)
+    var r = lsFindAux(s, p, init, find && pl !== undefined && pl !== null && pl !== false, find)
+    if (r === null) { return undefined }
+    return luMk(r)
+}
+// gmatch's iteration state, and one step of it.
+function js_lugmatch(args) {
+    var s = luCheckStr("gmatch", 1, args)
+    var p = luCheckStr("gmatch", 2, args)
+    return lsGmatchNew(s, p, luOptInt("gmatch", 3, args, 1))
+}
+function js_lugmatchnext(gm) {
+    var r = lsGmatchNext(gm)
+    if (r === null) { return undefined }
+    return luMk(r)
+}
+// A gsub replacement value: false or nil keeps the match, a string or a number
+// replaces it, anything else is an error.
+function luReplVal(v) {
+    if (v === undefined || v === null || v === false) { return null }
+    if (typeof v == "string") { return v }
+    if (luIsNum(v)) { return js_lustr(v) }
+    luFail("invalid replacement value (a " + luTypeName(v) + ")")
+    return null
+}
+function luGsubTable(t) { return function(caps) { return luReplVal(t[js_lukey(caps[0])]) } }
+function luGsubFunc(f) { return function(caps) { return luReplVal(luFirstOf(f.apply(undefined, caps))) } }
+function js_lugsub(args) {
+    var s = luCheckStr("gsub", 1, args)
+    var p = luCheckStr("gsub", 2, args)
+    var repl = luArgAt(args, 3)
+    var rs = anytype
+    rs = null
+    var cb = anytype
+    cb = null
+    if (typeof repl == "string" || luIsNum(repl)) { rs = luCheckStr("gsub", 3, args) }
+    else if (typeof repl == "function") { cb = luGsubFunc(repl) }
+    else if (repl !== undefined && repl !== null && typeof repl == "object") { cb = luGsubTable(repl) }
+    else { luArgTypeErr("gsub", 3, "string/function/table", args) }
+    var mx = 0 - 1
+    var mv = luArgAt(args, 4)
+    if (mv !== undefined && mv !== null) {
+        mx = luCheckInt("gsub", 4, args)
+        if (mx < 0) { mx = 0 }
+    }
+    var r = lsGsub(s, p, rs, cb, mx)
+    return luMk([r.r, r.n])
+}
+function js_lubyte(args) {
+    var s = luCheckStr("byte", 1, args)
+    var pi = luOptInt("byte", 2, args, 1)
+    return luMk(lsByte(s, pi, luOptInt("byte", 3, args, pi)))
+}
+function js_luchar(args) {
+    var out = ""
+    for (var k = 0; k < args.length; k++) {
+        var c = luCheckInt("char", k + 1, args)
+        if (c < 0 || c > 255) { luArgErr("char", k + 1, "value out of range") }
+        out = out + String.fromCharCode(c)
+    }
+    return out
+}
+function js_lureverse(args) { return lsReverse(luCheckStr("reverse", 1, args)) }
+// select(n, ...): the arguments from the n-th on, a negative n counting from the
+// end, or their count for select('#', ...).
+function js_luselect(args) {
+    var n = args.length
+    var sel = luArgAt(args, 1)
+    if (typeof sel == "string" && sel.length > 0 && sel.charAt(0) == "#") { return n - 1 }
+    var i = luCheckInt("select", 1, args)
+    if (i < 0) { i = n + i } else if (i > n) { i = n }
+    if (i < 1) { luArgErr("select", 1, "index out of range") }
+    var out = []
+    for (var k = i; k < n; k++) { out.push(args[k]) }
+    return luMk(out)
 }

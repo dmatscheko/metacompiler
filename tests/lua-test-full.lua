@@ -22,10 +22,10 @@
 -- lower/rep, ipairs, pairs, next, table.insert/remove, math.floor/ceil/abs/
 -- max/min) plus the five names through which Lua 5.3+ makes the integer
 -- subtype visible at all - math.type/tointeger/fmod/maxinteger/mininteger,
--- without which sections 21 and 22 could not be written. That rules out setmetatable - so metatables, the operator
+-- without which sections 21 and 22 could not be written - and the pattern
+-- half of the string library with select (SECTION 30). That rules out setmetatable - so metatables, the operator
 -- metamethods and the <close> attribute (needs __close) stay untested - and
--- likewise tostring, select (varargs are counted by packing into {...}) and
--- coroutine.* (library calls, not syntax). error/pcall/xpcall are in, because
+-- likewise tostring and coroutine.* (library calls, not syntax). error/pcall/xpcall are in, because
 -- without them no error is observable at all (SECTION 27). Lua has no
 -- chained comparisons (a < b < c is a type error by design), so none appear.
 --
@@ -1219,10 +1219,69 @@ function s29()
     check("snum8", string.lower(xs[2]), "0.33333333333333331")
 end
 
+-- ===== SECTION 30: string patterns, byte/char/reverse, select =====
+-- Lua patterns are not regular expressions: one class per quantifier, %b and %f,
+-- position captures, back-references. Every expected value was printed by lua 5.5.
+function s30()
+    local s = "key = val; k2=v2"
+    local a, b, k, v = string.find(s, "(%w+)%s*=%s*(%w+)")
+    check("pat1", a == 1 and b == 9 and k == "key" and v == "val", true)
+    check("pat2", string.find("a.b", ".", 1, true), 2)
+    check("pat3", string.find("abc", "b", -1), nil)
+    local e1, e2 = string.find("abc", "", 4)
+    check("pat4", e1 == 4 and e2 == 3, true)
+    check("pat5", string.match("  trim  ", "^%s*(.-)%s*$"), "trim")
+    check("pat6", string.match("f(a(b)c)d", "%b()"), "(a(b)c)")
+    check("pat7", string.match("THE (quick) fox", "%f[%a]%a+", 5), "quick")
+    check("pat8", string.match("xaay", "(a)%1"), "a")
+    local p1, p2 = string.match("hello", "()ll()")
+    check("pat9", p1 == 3 and p2 == 5, true)
+    local r, n = string.gsub("hello world", "o", "0", 1)
+    check("gs1", r == "hell0 world" and n == 1, true)
+    check("gs2", (string.gsub("one two", "(%w+) (%w+)", "%2 %1")), "two one")
+    check("gs3", (string.gsub("abc", "%w", "%0%0")), "aabbcc")
+    check("gs4", (string.gsub("abc", "", "-")), "-a-b-c-")
+    check("gs5", (string.gsub("hello world", "%w+", function(w) return w:upper() end)), "HELLO WORLD")
+    check("gs6", (string.gsub("hello world", "(%w+)", {hello = "HI", world = false})), "HI world")
+    check("gs7", (string.gsub("12 34", "%d+", function(d) return d * 2 end)), "24 68")
+    local r8, n8 = string.gsub("aaa", "^a", "b")
+    check("gs8", r8 == "baa" and n8 == 1, true)
+    check("gs9", (string.gsub("abc", "b*", "-")), "-a-c-")
+    local words = ""
+    for w in string.gmatch("one two  three", "%a+") do words = words .. "<" .. w .. ">" end
+    check("gm1", words, "<one><two><three>")
+    local kv = ""
+    for key, val in string.gmatch("a=1, b=2", "(%w+)=(%w+)") do kv = kv .. key .. val end
+    check("gm2", kv, "a1b2")
+    local b1, b2, b3 = string.byte("abc", 1, -1)
+    check("by1", b1 == 97 and b2 == 98 and b3 == 99, true)
+    check("by2", string.byte("abc", -1), 99)
+    check("by3", select("#", string.byte("abc", 0)), 0)
+    check("ch1", string.char(72, 105), "Hi")
+    check("rv1", string.reverse("abc"), "cba")
+    check("rv2", ("abc"):reverse(), "cba")
+    check("sel1", select("#"), 0)
+    check("sel2", select("#", nil, nil), 2)
+    check("sel3", select(-1, "a", "b", "c"), "c")
+    local s2, s3 = select(2, "a", "b", "c")
+    check("sel4", s2 == "b" and s3 == "c", true)
+    check("sel5", select("#", select(3, "a")), 0)
+    local ok1, m1 = pcall(string.find, "abc", "[a")
+    check("pe1", m1, "malformed pattern (missing ']')")
+    local ok2, m2 = pcall(string.gsub, "abc", "a", "%2")
+    check("pe2", m2, "invalid capture index %2")
+    local ok3, m3 = pcall(string.gsub, "abc", "(a)", {a = {}})
+    check("pe3", ok1 or ok2 or ok3, false)
+    check("pe4", m3, "invalid replacement value (a table)")
+    local ok5, m5 = pcall(select, 0, 1)
+    check("pe5", m5, "bad argument #1 to 'select' (index out of range)")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
 s28() -- SECTION-CALL 28
 s29() -- SECTION-CALL 29
+s30() -- SECTION-CALL 30
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
