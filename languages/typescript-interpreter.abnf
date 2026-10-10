@@ -494,7 +494,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // gets its own production (which never resolves the name through getVar) and is tried
 // before the general form.
 TypeofName  <~~ push(makeTypeofName(pop())) ~~>
-            = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotSuffix ;
+            = KwTypeof NotReserved Id <~~ push(jsbRef(idName(up.in))) ~~> NotSuffix ;
 Typeof      <~~ push(makeTypeof(pop())) ~~>
             = KwTypeof UnaryExpr ;
 
@@ -1379,7 +1379,7 @@ TypeNumLit  = [ "-" | "+" ] ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } 
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
 Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(idName(up.in))) ~~>
+VarRef      <~~ push(makeVarRef(jsbRef(idName(up.in)))) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-interpreter.abnf.
@@ -2979,6 +2979,10 @@ NotFuncHead = :script(~~
             if (psr !== jpMiss) { return {v: psr} }
         }
         if (target === jsObjectGlobal) { return jsObjectStatic(name, args) }
+        if (target === jsArrayFn) {
+            if (name == "isArray") { return {v: Array.isArray(args[0])} }
+            return null
+        }
         if (target === jsStringFn) {
             if (name == "fromCharCode") {
                 var fs = ""
@@ -3325,6 +3329,24 @@ NotFuncHead = :script(~~
         return jsStr(v)
     }
     // See the twin of this comment in js-interpreter.abnf.
+    function jsArrayFn() {
+        var out = []
+        if (arguments.length == 1 && typeof arguments[0] == "number") {
+            var n = arguments[0]
+            if (!(n >= 0 && n <= 4294967295 && Math.floor(n) === n)) { biRaise("RangeError: Invalid array length") }
+            for (var i = 0; i < n; i++) { out.push(undefined) }
+            return out
+        }
+        for (var j = 0; j < arguments.length; j++) { out.push(arguments[j]) }
+        return out
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsIsArrayV = anytype
+    function jsIsArrayValue() {
+        if (jsIsArrayV === undefined) { jsIsArrayV = fnMetaPut(function (v) { return Array.isArray(v) }, "isArray", 1) }
+        return jsIsArrayV
+    }
+    // See the twin of this comment in js-interpreter.abnf.
     function biRaise(msg) { throw {__exc: true, v: jsErrFromText(msg)} }
     function jsBigIntFn(v) {
         if (arguments.length == 0) { biRaise("TypeError: Cannot convert undefined to a BigInt") }
@@ -3408,7 +3430,7 @@ NotFuncHead = :script(~~
         // back out of a BigInt, since unary '+' refuses it.
         "BigInt": jsBigIntFn, "Number": jsNumberFn,
         // Object is OURS, not the host's (see jsObjectGlobal).
-        "Object": jsObjectGlobal, "Array": Array, "JSON": jsJsonObj,
+        "Object": jsObjectGlobal, "Array": jsArrayFn, "JSON": jsJsonObj,
         // The Promise global: a function value, so `new Promise(exec)` constructs one
         // and `typeof Promise` is "function". The statics resolve through jsBuiltin.
         "Promise": jsPromiseFn,
@@ -3734,6 +3756,7 @@ NotFuncHead = :script(~~
         var v = anytype // A member is of any type.
         v = getMemberRaw(o, k)
         if (v != undefined) { return v }
+        if (o === jsArrayFn && k === "isArray") { return jsIsArrayValue() }
         // isPrivateKey: a private METHOD lives on the class descriptor under '__#m', so
         // the __-name skip would hide it from the walk.
         if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" &&
@@ -5451,7 +5474,15 @@ NotFuncHead = :script(~~
         return undefined
     }
     // See the twin of this comment in js-interpreter.abnf.
+    function jsIterOf(v) {
+        if (v == undefined || v == null || typeof v != "object") { return v }
+        var f = anytype // The "@@iterator" member, of any type at all.
+        f = getMember(v, "@@iterator")
+        if (typeof f != "function") { return v }
+        return callWithThis(f, v, [])
+    }
     function iterArr(v, n) {
+        v = jsIterOf(v)
         var nx = anytype
         nx = (v != undefined && v != null && typeof v == "object") ? getMember(v, "next") : undefined
         if (typeof nx != "function") { return v }
@@ -5520,7 +5551,7 @@ NotFuncHead = :script(~~
         }
         return function() {
             var it = anytype // The iterable is an array, a string or a generator.
-            it = iterT()
+            it = jsIterOf(iterT())
             scopes.push({}) // The loop header/variable get their own scope.
             var res = undefined
             // An ITERATOR is not indexable, so it is driven through next() until done,
@@ -5741,6 +5772,7 @@ NotFuncHead = :script(~~
             last = undefined
             if (v != undefined && v != null) {
                 // See the twin of this comment in js-interpreter.abnf.
+                v = jsIterOf(v)
                 var dnx = anytype // The delegate's `next` member, of any type.
                 dnx = (typeof v == "object") ? getMember(v, "next") : undefined
                 if (typeof dnx == "function") {
@@ -7641,12 +7673,33 @@ NotFuncHead = :script(~~
         c.compile(asg)
         c.popSource()
         var mod = popg()
+        jsbLoad()
         mod()
         return true
     }
 
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsbWant = false
+    var jsbDone = false
+    function jsbRef(name) {
+        if (name == "Set" || name == "Map" || name == "Array") { jsbWant = true }
+        return name
+    }
+    function jsbLoad() {
+        if (!jsbWant || jsbDone) { return }
+        jsbDone = true
+        var text = load("lib/js-builtins.js")
+        var asg = c.parse(c.agrammar, text, null, "js-builtins.js")
+        c.pushSource("js-builtins.js", text)
+        c.compile(asg)
+        c.popSource()
+        var mod = popg()
+        mod()
+    }
+
     c.compile(c.asg)
     var progT = popg()
+    jsbLoad()
 
     // See the twin of this comment in js-interpreter.abnf.
     try {

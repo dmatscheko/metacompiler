@@ -1062,6 +1062,72 @@ function s31(): void {
         && !((1n as any) < undefined) && !((1n as any) < "") && 2n > 1.5);
 }
 
+// ===== SECTION 53: Set, Map, Array.from and the Array global =====
+// The runtime half of the lib types a program meets first: Set and Map iterate in
+// insertion order through every iteration site (for-of, spread, destructuring,
+// yield*), Array.from / Array.of, and Array as a function. Values read off node 24.
+function s53err(f: () => any): string {
+    try { f(); return "none"; } catch (e: any) { return e.constructor.name + ": " + e.message; }
+}
+const s53log: string[] = [];
+class S53It {
+    i: number = 0;
+    n: number;
+    constructor(n: number) { this.n = n; }
+    next(): {done: boolean, value: any} { this.i++; return this.i > this.n ? {done: true, value: undefined} : {done: false, value: this.i}; }
+    return(): {done: boolean} { s53log.push("ret" + this.i); return {done: true}; }
+}
+// node iterates only through Symbol.iterator, which this subset does not have; these
+// engines drive any value with a callable next().
+if (typeof Symbol !== "undefined") { (S53It.prototype as any)[Symbol.iterator] = function (this: any) { return this; }; }
+function s53() {
+    const src: number[] = [3, 1, 3, 2];
+    function* g53(): Generator<number> { yield src[0]; yield src[1]; yield src[0]; }
+    check("col01", Array.from([1, 2]).join(",") === "1,2" && Array.from("abc", (c: string, i: number) => c + i).join() === "a0,b1,c2"
+        && Array.from({length: 3, 0: "a", 2: "c"} as any).join("|") === "a||c" && Array.from(g53()).join() === "3,1,3");
+    check("col02", Array.from([1, 2], function (this: any, x: number) { return x * this.k; }, {k: 10}).join() === "10,20"
+        && Array.of(src[0]).length === 1 && Array.of(1, 2, 3).join() === "1,2,3");
+    check("col03", s53err(() => Array.from(null as any)) === "TypeError: object null is not iterable (cannot read property Symbol(Symbol.iterator))"
+        && s53err(() => Array.from([1], src[0] as any)) === "TypeError: number 3 is not a function");
+    const s = new Set<any>(g53());
+    check("col04", s.size === 2 && Array.from(s).join() === "3,1" && [...s].join() === "3,1" && s.has(1) && !s.has("1"));
+    check("col05", new Set<any>([NaN, NaN, 0, -0, "0", undefined, null, undefined]).size === 5 && 1 / [...new Set([-0])][0] === Infinity
+        && [...new Set("hello")].join("") === "helo");
+    s.add(src[3]).add(src[0]);
+    check("col06", s.size === 3 && s.delete(1) === true && s.delete(1) === false && [...s].join() === "3,2");
+    const live = new Set<number>([1, 2, 3]);
+    const order: number[] = [];
+    for (const w of live) { order.push(w); if (w === 1) { live.delete(2); live.add(4); } }
+    check("col07", order.join() === "1,3,4");
+    const m = new Map<any, string>([[1, "a"], ["1", "b"]]);
+    m.set(src[1], "c").set(src[3], "d");
+    check("col08", m.size === 3 && m.get(1) === "c" && m.get("1") === "b" && m.get(2) === "d" && m.get(9) === undefined
+        && [...m.keys()].join() === "1,1,2" && [...m.values()].join() === "c,b,d");
+    const pairs: string[] = [];
+    for (const [k, val] of m) { pairs.push(k + "=" + val); }
+    const each: string[] = [];
+    m.forEach((x: string, y: any, mm: Map<any, string>) => { each.push(y + ":" + x + (mm === m)); });
+    check("col09", pairs.join() === "1=c,1=b,2=d" && each.join() === "1:ctrue,1:btrue,2:dtrue");
+    const key = {};
+    const om = new Map<object, number>([[key, 1], [{}, 2]]);
+    check("col10", om.get(key) === 1 && om.get({}) === undefined && om.size === 2 && new Map([[NaN, 7]]).get(NaN) === 7);
+    m.clear();
+    check("col11", m.size === 0 && m.get(1) === undefined && s53err(() => new Map([1] as any)) === "TypeError: Iterator value 1 is not an entry object");
+    function* d53(): Generator<number> { yield* new Set([8, 9]); }
+    const [a53, b53] = new Set([5, 6, 7]);
+    check("col12", [...d53()].join() === "8,9" && a53 + b53 === 11 && new Set() instanceof Set && !(new Set() instanceof Map)
+        && String(new Set()) === "[object Set]" && JSON.stringify(new Map([[1, 2]])) === "{}");
+    check("col13", typeof Set === "function" && typeof Map === "function" && typeof Array === "function");
+    check("col14", Array(src[0]).length === 3 && Array(src[0]).join("-") === "--" && new Array(src[3], src[0]).join() === "2,3"
+        && Array("3").length === 1 && [] instanceof Array && Array.isArray([]) && !Array.isArray("x")
+        && s53err(() => Array(-1)) === "RangeError: Invalid array length");
+    const isArr = Array.isArray;
+    check("col15", typeof isArr === "function" && [[1], [2]].every(Array.isArray) && !isArr("x"));
+    for (const v of new S53It(src[3] + src[0]) as any) { if (v == 2) { break; } }
+    const [c53] = new S53It(src[0]) as any;
+    check("col16", s53log.join() === "ret2,ret1" && c53 === 1);
+}
+
 // ===== END SECTIONS =====
 
 // ===== SECTION 32: shift and logical assignment through an expression member =====
@@ -3129,6 +3195,7 @@ function main(): number {
     s50(); // SECTION-CALL 50
     s51(); // SECTION-CALL 51
     s52(); // SECTION-CALL 52
+    s53(); // SECTION-CALL 53
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

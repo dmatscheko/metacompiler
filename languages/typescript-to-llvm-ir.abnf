@@ -773,7 +773,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // See the twin of this comment in js-to-llvm-ir.abnf.
 Typeof      = TypeofName | TypeofExpr ;
 TypeofName  <~~ push(makeTypeofName(pop())) ~~>
-            = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotChain ;
+            = KwTypeof NotReserved Id <~~ push(jsbRef(idName(up.in))) ~~> NotChain ;
 TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
             = KwTypeof UnaryExpr ;
 
@@ -1454,7 +1454,7 @@ GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(idName(up.in))) ~~>
+VarRef      <~~ push(makeVarRef(jsbRef(idName(up.in)))) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -2507,6 +2507,28 @@ NotFuncHead = :script(~~
         return true
     }
 
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var jsbWant = false
+    var jsbDone = false
+    function jsbRef(name) {
+        if (name == "Set" || name == "Map" || name == "Array") { jsbWant = true }
+        return name
+    }
+    function jsbLoad() {
+        if (!jsbWant || jsbDone) { return }
+        jsbDone = true
+        var text = load("lib/js-builtins.js")
+        var asg = c.parse(c.agrammar, text, null, "js-builtins.js")
+        c.pushSource("js-builtins.js", text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        var groups = [importedGroups[importedGroups.length - 1]]
+        for (var gi = 0; gi + 1 < importedGroups.length; gi++) { groups.push(importedGroups[gi]) }
+        importedGroups = groups
+    }
+
     // ----- The emitter state -----
 
     var i8 = llvm.types.I8
@@ -2580,8 +2602,21 @@ NotFuncHead = :script(~~
         return exitB
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
+    function emitIterOf(b, v) {
+        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "@@iterator")])
+        var callB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, joinB)
+        var rV = callExt(jsThisSet(callB, v), "js_call", [fV, v, callExt(callB, "js_arr_new", [])])
+        callB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(rV, callB)])}
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitIterArr(b, srcV, n) {
-        var nxV = callExt(b, memGetExt(), [srcV, emitStr(b, "next")])
+        var io = emitIterOf(b, srcV)
+        b = io.b
+        srcV = io.v
+        var nxV = callExt(b, "js_jsvget", [srcV, emitStr(b, "next")])
         var isIt = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [nxV]), emitStr(b, "function")]))
         var initB = curF.NewBlock("")
         var headB = curF.NewBlock("")
@@ -2598,7 +2633,7 @@ NotFuncHead = :script(~~
             var lenV = callExt(headB, memGetExt(), [arrV, emitStr(headB, "length")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [lenV, callExt(headB, "js_num_i", [handle(n)])])),
                             stepB, closeB)
-            var retV = callExt(closeB, memGetExt(), [srcV, emitStr(closeB, "return")])
+            var retV = callExt(closeB, "js_jsvget", [srcV, emitStr(closeB, "return")])
             closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                     [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                              doCloseB, joinB)
@@ -3086,7 +3121,7 @@ NotFuncHead = :script(~~
             bb.NewCondBr(truthy(bb, opV), cB, skB)
             callExt(cB, "js_scope_set", [curScopeV, emitStr(cB, "0yopen"), hFalse])
             var srcV = callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, "0ysrc")])
-            var rfV = callExt(cB, memGetExt(), [srcV, emitStr(cB, "return")])
+            var rfV = callExt(cB, "js_jsvget", [srcV, emitStr(cB, "return")])
             cB.NewCondBr(truthy(cB, callExt(cB, "js_seq",
                                  [callExt(cB, "js_typeof", [rfV]), emitStr(cB, "function")])), callB, skB)
             callExt(jsThisSet(callB, srcV), "js_call", [rfV, srcV, callExt(callB, "js_arr_new", [])])
@@ -3101,8 +3136,10 @@ NotFuncHead = :script(~~
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
             // See the twin of this comment in js-to-llvm-ir.abnf.
-            var seqV = r.v
-            var ynxV = callExt(b, memGetExt(), [seqV, emitStr(b, "next")])
+            var yio = emitIterOf(b, r.v)
+            b = yio.b
+            var seqV = yio.v
+            var ynxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])
             var yisItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [ynxV]), emitStr(b, "function")])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysrc"), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yi"), callExt(b, "js_num_i", [handle(0)])])
@@ -3147,7 +3184,7 @@ NotFuncHead = :script(~~
                             hchkB, splitB)
             hchkB.NewCondBr(truthy(hchkB, callExt(hchkB, memGetExt(), [hsentV, emitStr(hchkB, "__athrow")])),
                             ythrB, splitB)
-            var ytfV = callExt(ythrB, memGetExt(), [seqV, emitStr(ythrB, "throw")])
+            var ytfV = callExt(ythrB, "js_jsvget", [seqV, emitStr(ythrB, "throw")])
             ythrB.NewCondBr(truthy(ythrB, callExt(ythrB, "js_seq",
                                 [callExt(ythrB, "js_typeof", [ytfV]), emitStr(ythrB, "function")])),
                             ythrCallB, ythrNoB)
@@ -3159,7 +3196,7 @@ NotFuncHead = :script(~~
             ythrCallB.NewBr(joinB)
             // No throw method: close the delegate through return(), then raise the
             // TypeError node raises, spelled as the string its message renders to.
-            var yrfV = callExt(ythrNoB, memGetExt(), [seqV, emitStr(ythrNoB, "return")])
+            var yrfV = callExt(ythrNoB, "js_jsvget", [seqV, emitStr(ythrNoB, "return")])
             ythrNoB.NewCondBr(truthy(ythrNoB, callExt(ythrNoB, "js_seq",
                                   [callExt(ythrNoB, "js_typeof", [yrfV]), emitStr(ythrNoB, "function")])),
                               yretB, ythrowB)
@@ -3956,7 +3993,10 @@ NotFuncHead = :script(~~
             isItV = hFalse
             nxV = hUndef
             if (lazy) {
-                nxV = callExt(b, memGetExt(), [seqV, emitStr(b, "next")])
+                var sio = emitIterOf(b, seqV)
+                b = sio.b
+                seqV = sio.v
+                nxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])
                 isItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [nxV]), emitStr(b, "function")])
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), seqV])
@@ -4035,7 +4075,7 @@ NotFuncHead = :script(~~
                 var closeB = curF.NewBlock("")
                 var doCloseB = curF.NewBlock("")
                 brkB = closeB
-                var retV = callExt(closeB, memGetExt(), [seqV, emitStr(closeB, "return")])
+                var retV = callExt(closeB, "js_jsvget", [seqV, emitStr(closeB, "return")])
                 closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                         [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                                  doCloseB, exitB)
@@ -5595,6 +5635,7 @@ NotFuncHead = :script(~~
     }
 
     function buildMain(itemsIn) {
+        if (importDepth == 0) { jsbLoad() }
         // See the twin of this comment in js-to-llvm-ir.abnf.
         var items = []
         for (var bi = 0; bi < itemsIn.length; bi++) {
@@ -5635,6 +5676,8 @@ NotFuncHead = :script(~~
         // this is a real function, and String.fromCharCode still resolves through
         // js_jsmcall.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "String"), callExt(b, "js_jsstringfn", [])])
+        // See the twin of this comment in js-to-llvm-ir.abnf.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Array"), callExt(b, "js_jsarrayfn", [])])
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BigInt"), callExt(b, "js_jsbigintfn", [])])
