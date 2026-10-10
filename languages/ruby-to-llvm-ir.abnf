@@ -1039,7 +1039,11 @@ BParamDefault <~~ var n = takeAll(); push({param: n[0], defT: n[1]}) ~~>
 BGroup      <~~ push({pgroup: takeAll()}) ~~>
             = "(" BParam { "," BParam } ")" ;
 
-Primary     = "(" Expression ")" | ParenBody | LambdaLit | SingletonDecl
+// `(m -1)` is the command call m(-1) when m is not a local, exactly as at statement
+// level; ParenCmd is tried first because the Expression reading (a subtraction)
+// would otherwise always win.
+ParenCmd    = "(" CommandForm ")" ;
+Primary     = ParenCmd | "(" Expression ")" | ParenBody | LambdaLit | SingletonDecl
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
             | CmdLit | HeredocLit | HeredocRef

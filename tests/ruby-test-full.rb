@@ -3274,6 +3274,19 @@ def s68
   check("lv68a", S68A == [10, 3, 10, 4, 7, 10, 5, 50, 1] && s68in == 10)
 end
 
+# ===== SECTION 69: a command call inside parentheses =====
+# `(m -1)` passes -1 to the method m exactly as `m -1` does at statement level, while
+# `(m - 1)` subtracts and `(x -1)` subtracts from a local x. Every right-hand side
+# is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s69m(x = 5)
+  x * 10
+end
+def s69
+  x = 3
+  r = [(s69m -1), (s69m - 1), (x -1), (s69m -2) + 1]
+  check("pc69a", r == [-10, 49, 2, -19])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3304,5 +3317,6 @@ s65() # SECTION-CALL 65
 s66() # SECTION-CALL 66
 s67() # SECTION-CALL 67
 s68() # SECTION-CALL 68
+s69() # SECTION-CALL 69
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
