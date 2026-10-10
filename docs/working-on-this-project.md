@@ -980,8 +980,10 @@ fdlibm.js                 <- java-rt.metajs, java interpreter
 
 Grammar-level includes shared by one language's grammars only: `go-constfold.js`
 (go), `java-decltypes.js` (both java grammars: declared types for assignment
-conversion), `js-callee.js` (all four js/ts grammars: V8's re-printing of a callee
-in "is not a function"). Each is ONE implementation of a feature, not a home for
+conversion and static overload selection), `java-util.java` (both java grammars:
+java.util's list types WRITTEN IN JAVA and compiled with a program that imports
+them, so one implementation serves all three engines), `js-callee.js` (all four
+js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ONE implementation of a feature, not a home for
 helpers that happen to be duplicated (7.12 still holds for those).
 
 `lib/js-builtins.js` is different in kind: it is JAVASCRIPT, not MetaJS - Set, Map,

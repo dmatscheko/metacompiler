@@ -20,7 +20,10 @@ object creation with new, arrays (new int[n], the multi dimensional new int[a][b
 and the partial new int[a][], bare initializers like {1, 2}, C style declarators,
 a.length, indexing), varargs (a trailing array parameter, fed either by the extra
 arguments or by an array), the enhanced for loop
-(for (var x : arr)), int / boolean / char / String / var / class types (types are
+(for (var x : arr), and over any Iterable), the java.util ArrayList / List of an
+import (lib/java-util.java, compiled with the program), new String(...),
+Math's and StrictMath's transcendentals as fdlibm answers them,
+int / boolean / char / String / var / class types (types are
 parsed; the semantics are dynamic, but char is a value of its own that prints as its
 glyph and computes on its code), String concatenation with +, the String methods
 length(), charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a
@@ -285,7 +288,7 @@ Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
 // It is the SECOND alternative on purpose: `module` is a restricted keyword, so
 // `import module.foo.Bar;` is still a legal ordinary import of a package called
 // `module`, and trying the plain form first keeps that reading.
-Import      <~~ resolveImport(pop(), up.pos) ~~>
+Import      <~~ jImport(pop(), up.pos) ~~>
             = KwImport [ "static" KwEnd ] QualName ";"
             | KwImport "module" KwEnd QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
@@ -3037,7 +3040,18 @@ HasStatic   = :script(~~
             if (typeof items[q] == "string") { clsName = items[q] } else { args.push(items[q]) }
         }
         noteTypeUse(clsName)
+        // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
+        if (clsName == "String") { jUsesStrIdx = true }
         return function(b) {
+            if (clsName == "String" && classNames["$String"] != true) {
+                var sargsV = callExt(b, "js_arr_new", [])
+                for (var si = 0; si < args.length; si++) {
+                    var sr = args[si](b)
+                    b = sr.b
+                    callExt(b, "js_arr_push", [sargsV, sr.v])
+                }
+                return {b: b, v: callExt(b, "js_jvnewstr", [sargsV])}
+            }
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
@@ -3962,26 +3976,48 @@ HasStatic   = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
-            var headB = curF.NewBlock("")
+            // Anything but an array is an Iterable (JLS 14.14.2): its iterator()
+            // is kept in place of the index, and hasNext() / next() replace the
+            // bound check and the element read. Which kind it is is decided
+            // once, before the loop. Twin of makeForEach in java-interpreter.abnf.
+            var isArr = truthy(b, callExt(b, "js_is_type", [r.v, emitStr(b, "Array")]))
+            var arrHeadB = curF.NewBlock("")
+            var itHeadB = curF.NewBlock("")
+            var itInitB = curF.NewBlock("")
+            var arrElemB = curF.NewBlock("")
+            var itElemB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            var condV = callExt(headB, "js_lt", [iV, lenV])
-            headB.NewCondBr(truthy(headB, condV), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name),
-                                              declConvert(bodyB, callExt(bodyB, "js_get", [aV2, iV2]), cty)])
+            b.NewCondBr(isArr, arrHeadB, itInitB)
+            callExt(itInitB, "js_scope_set", [curScopeV, emitStr(itInitB, iName),
+                                              callExt(itInitB, "js_mcall", [r.v, emitStr(itInitB, "iterator"), callExt(itInitB, "js_arr_new", [])])])
+            itInitB.NewBr(itHeadB)
+            var iV = callExt(arrHeadB, "js_scope_get", [curScopeV, emitStr(arrHeadB, iName)])
+            var aV = callExt(arrHeadB, "js_scope_get", [curScopeV, emitStr(arrHeadB, aName)])
+            var lenV = callExt(arrHeadB, "js_get", [aV, emitStr(arrHeadB, "length")])
+            var condV = callExt(arrHeadB, "js_lt", [iV, lenV])
+            arrHeadB.NewCondBr(truthy(arrHeadB, condV), arrElemB, exitB)
+            var itV = callExt(itHeadB, "js_scope_get", [curScopeV, emitStr(itHeadB, iName)])
+            var hasV = callExt(itHeadB, "js_mcall", [itV, emitStr(itHeadB, "hasNext"), callExt(itHeadB, "js_arr_new", [])])
+            itHeadB.NewCondBr(truthy(itHeadB, hasV), itElemB, exitB)
+            var iV2 = callExt(arrElemB, "js_scope_get", [curScopeV, emitStr(arrElemB, iName)])
+            var aV2 = callExt(arrElemB, "js_scope_get", [curScopeV, emitStr(arrElemB, aName)])
+            var arrEl = callExt(arrElemB, "js_get", [aV2, iV2])
+            arrElemB.NewBr(bodyB)
+            var itV2 = callExt(itElemB, "js_scope_get", [curScopeV, emitStr(itElemB, iName)])
+            var itEl = callExt(itElemB, "js_mcall", [itV2, emitStr(itElemB, "next"), callExt(itElemB, "js_arr_new", [])])
+            itElemB.NewBr(bodyB)
+            var elV = bodyB.NewPhi([llvm.ir.NewIncoming(arrEl, arrElemB), llvm.ir.NewIncoming(itEl, itElemB)])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), declConvert(bodyB, elV, cty)])
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
-            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
-            postB.NewBr(headB)
+            var stepB = curF.NewBlock("")
+            postB.NewCondBr(isArr, stepB, itHeadB)
+            var iV3 = callExt(stepB, "js_scope_get", [curScopeV, emitStr(stepB, iName)])
+            callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, iName), callExt(stepB, "js_jadd", [iV3, emitNum(stepB, 1)])])
+            stepB.NewBr(arrHeadB)
             curScopeV = saved
             return exitB
         }
@@ -4221,10 +4257,31 @@ HasStatic   = :script(~~
     var jBinStack = []
     var jCurBin = ""
     var jBinName = {}
+    // A java.util import compiles lib/java-util.java with the program, once
+    // (jUtilWants in lib/java-decltypes.js); every other import resolves as
+    // before. Its types are the java.util package's, which is their binary
+    // name's prefix (jPkgPrefix), as getName and an uncaught exception spell it.
+    var jUtilLoaded = false
+    var jPkgPrefix = ""
+    function jImport(path, pos) {
+        if (!jUtilLoaded && jUtilWants(stripWs(path))) {
+            jUtilLoaded = true
+            var text = load("lib/java-util.java")
+            var asg = c.parse(c.agrammar, text, null, "lib/java-util.java")
+            jPkgPrefix = "java.util."
+            c.pushSource("lib/java-util.java", text)
+            importDepth = importDepth + 1
+            c.compile(asg)
+            importDepth = importDepth - 1
+            c.popSource()
+            jPkgPrefix = ""
+        }
+        resolveImport(path, pos)
+    }
     function jEnterClass(n) {
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
-        jCurBin = (jCurBin == "") ? n : jCurBin + "$" + n
+        jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + n
         jBinName["$" + n] = jCurBin
         curClassName = n
     }

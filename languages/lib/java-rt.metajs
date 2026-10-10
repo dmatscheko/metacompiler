@@ -1766,6 +1766,41 @@ function jvEqKind(v) {
 
 // String.toCharArray: one char per UTF-16 unit. Anything else is an ordinary
 // call of a method by that name. Twin of js_jvchars in abnf/jsrtjava.go.
+// new String(...): (), (String), (char[]) and (char[] or int[] of code points,
+// offset, count) - and a CharSequence's text. A String has no identity in this
+// value model, so the copy is the same value. Twin of js_jvnewstr in
+// abnf/jsrtjava.go.
+function js_jvnewstr(args) {
+    if (args.length == 0) { return "" }
+    var a = args[0]
+    if (!Array.isArray(a)) { return jpStr(a) }
+    var off = 0
+    var cnt = a.length
+    if (args.length >= 3) {
+        off = rtjNum(args[1])
+        cnt = rtjNum(args[2])
+        if (off < 0 || cnt < 0 || off > a.length - cnt) {
+            jvThrowCls(jvSioobeCls, "Range [" + off + ", " + off + " + " + cnt + ") out of bounds for length " + a.length)
+        }
+    }
+    var out = ""
+    var i = off
+    while (i < off + cnt) {
+        var e = a[i]
+        if (jvIsChar(e)) {
+            out = out + String.fromCharCode(e["__char"])
+        } else {
+            var cp = rtjNum(e)
+            if (cp < 65536) {
+                out = out + String.fromCharCode(cp)
+            } else {
+                out = out + String.fromCharCode(55296 + Math.floor((cp - 65536) / 1024)) + String.fromCharCode(56320 + (cp - 65536) % 1024)
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
 function js_jvchars(v) {
     if (typeof v == "string") {
         var out = []

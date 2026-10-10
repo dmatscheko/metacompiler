@@ -727,6 +727,21 @@ function jOvBox(k) {
     return "Boolean"
 }
 
+// ----- java.util -----
+//
+// Does this import name a type lib/java-util.java declares (`java.util.List`,
+// `java.util.*`, `import static java.util.List.of`, `import module
+// java.base`)? Then the grammar compiles that file with the program
+// (jLoadUtil); without such an import none of its names is visible, as in Java.
+function jUtilWants(path) {
+    if (path == "java.util.*" || path == "java.base") { return true }
+    if (path.length < 11 || path.substring(0, 10) != "java.util.") { return false }
+    var rest = path.substring(10)
+    var dot = rest.indexOf(".")
+    if (dot >= 0) { rest = rest.substring(0, dot) }
+    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,".indexOf("," + rest + ",") >= 0
+}
+
 // ----- Static overload selection (JLS 15.12.2 is static) -----
 //
 // javac picks an overload from the arguments' STATIC types, which the value

@@ -40,6 +40,10 @@ arrays with bare initializers and the C-style declarators, lambdas and method
 references (static, bound, unbound and constructor) that become real values of the
 functional interface they are assigned to, the full operator set including the
 bitwise and shift operators with Java int semantics, and the compound assignments.
+The enhanced for runs over an array or any Iterable. Importing java.util's
+ArrayList, List, Collection or Iterator compiles lib/java-util.java with the
+program (shared with java-to-llvm-ir.abnf): an ArrayList and List.of in Java's own
+terms. Math's and StrictMath's transcendentals are fdlibm's (lib/fdlibm.js).
 
 UNQUALIFIED calls work - check(x), not just this.check(x) - and pick their
 receiver by Java's own rule: a method the enclosing class or an ancestor declares
@@ -302,7 +306,7 @@ Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
 // `import module.foo.Bar;` is still a legal ordinary import of a package called
 // `module`, and trying the plain form first keeps that reading. Either
 // alternative leaves exactly one name on the stack for resolveImport.
-Import      <~~ resolveImport(pop(), up.pos) ~~>
+Import      <~~ jImport(pop(), up.pos) ~~>
             = KwImport [ "static" KwEnd ] QualName ";"
             | KwImport "module" KwEnd QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
@@ -3853,11 +3857,45 @@ HasStatic   = :script(~~
         if (b.indexOf("$") < 0) { return undefined }
         return jEnclSelf()
     }
+    // new String(...): (), (String), (char[]) and (char[] or int[] of code
+    // points, offset, count) - and a CharSequence's text. A String has no
+    // identity in this value model, so the copy is the same value. Twin of
+    // js_jvnewstr in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jNewString(args) {
+        if (args.length == 0) { return "" }
+        var a = args[0]
+        if (!Array.isArray(a)) { return jstr(a) }
+        var off = 0
+        var cnt = a.length
+        if (args.length >= 3) {
+            off = jNum(args[1])
+            cnt = jNum(args[2])
+            if (off < 0 || cnt < 0 || off > a.length - cnt) {
+                jThrowExc("StringIndexOutOfBoundsException", "Range [" + off + ", " + off + " + " + cnt + ") out of bounds for length " + a.length)
+            }
+        }
+        var out = ""
+        for (var i = off; i < off + cnt; i++) {
+            var e = a[i]
+            if (jIsChar(e)) { out = out + String.fromCharCode(e.__char) }
+            else {
+                var cp = jNum(e)
+                if (cp < 65536) { out = out + String.fromCharCode(cp) }
+                else { out = out + String.fromCharCode(55296 + Math.floor((cp - 65536) / 1024)) + String.fromCharCode(56320 + (cp - 65536) % 1024) }
+            }
+        }
+        return out
+    }
     function makeNew(items) {
         var clsName = items[0]
         var args = items.slice(1)
         return function() {
             var cls = jResolveClass(clsName)
+            if (clsName == "String" && cls == undefined) {
+                var sargs = []
+                for (var si = 0; si < args.length; si++) { sargs.push(args[si]()) }
+                return jNewString(sargs)
+            }
             if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + clsName)
             // A NESTED type created without a qualifier (`new Inner()` inside an
             // instance method of Outer) captures the enclosing instance exactly as
@@ -4637,12 +4675,22 @@ HasStatic   = :script(~~
         return function() {
             var lbl = pendingLabel
             pendingLabel = null
-            var arr = arrT()
+            var arr = anytype // an array, or any Iterable
+            arr = arrT()
+            // Anything but an array is an Iterable (JLS 14.14.2): iterator(),
+            // then hasNext() / next() around each pass. Twin of makeForEach in
+            // java-to-llvm-ir.abnf.
+            var it = anytype
+            it = Array.isArray(arr) ? null : mcall(arr, "iterator", [])
             scopes.push({})
             declVar(name, undefined)
             var res = undefined
-            for (var i = 0; i < arr.length; i++) {
-                setVar(name, cty == "" ? arr[i] : jTypeAdopt(arr[i], cty))
+            var i = 0
+            while (it == null ? i < arr.length : mcall(it, "hasNext", [])) {
+                var ev = anytype
+                ev = it == null ? arr[i] : mcall(it, "next", [])
+                i++
+                setVar(name, cty == "" ? ev : jTypeAdopt(ev, cty))
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
@@ -5523,10 +5571,29 @@ HasStatic   = :script(~~
     var jBinStack = []
     var jCurBin = ""
     var jBinName = {}
+    // A java.util import compiles lib/java-util.java with the program, once
+    // (jUtilWants in lib/java-decltypes.js); every other import resolves as
+    // before. Its types are the java.util package's, which is their binary
+    // name's prefix (jPkgPrefix), as getName and an uncaught exception spell it.
+    var jUtilLoaded = false
+    var jPkgPrefix = ""
+    function jImport(path, pos) {
+        if (!jUtilLoaded && jUtilWants(stripWs(path))) {
+            jUtilLoaded = true
+            var text = load("lib/java-util.java")
+            var asg = c.parse(c.agrammar, text, null, "lib/java-util.java")
+            jPkgPrefix = "java.util."
+            c.pushSource("lib/java-util.java", text)
+            c.compile(asg)
+            c.popSource()
+            jPkgPrefix = ""
+        }
+        resolveImport(path, pos)
+    }
     function jEnterClass(n) {
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
-        jCurBin = (jCurBin == "") ? n : jCurBin + "$" + n
+        jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + n
         jBinName["$" + n] = jCurBin
         curClassName = n
     }

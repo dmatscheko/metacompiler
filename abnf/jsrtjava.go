@@ -1384,6 +1384,39 @@ func init() {
 			}
 			return baseMcall([]uint64{a[0], w("toCharArray"), w(&jsArray{})})
 		}
+		// new String(...): (), (String), (char[]) and (char[] or int[] of code
+		// points, offset, count) - and a CharSequence's text. A String has no
+		// identity in this value model, so the copy is the same value. Twin of
+		// jNewString in java-interpreter.abnf and js_jvnewstr in
+		// languages/lib/java-rt.metajs.
+		m["js_jvnewstr"] = func(a []uint64) uint64 {
+			args, _ := u(a[0]).(*jsArray)
+			if args == nil || len(args.elems) == 0 {
+				return rt.wrapStr("")
+			}
+			arr, isArr := args.elems[0].(*jsArray)
+			if !isArr {
+				return rt.wrapStr(rt.jvpStr(args.elems[0]))
+			}
+			n := len(arr.elems)
+			off, cnt := 0, n
+			if len(args.elems) >= 3 {
+				off = jsToInt(rt.toNumber(args.elems[1]))
+				cnt = jsToInt(rt.toNumber(args.elems[2]))
+				if off < 0 || cnt < 0 || off > n-cnt {
+					rt.jvThrowCls(jvSioobeCls, fmt.Sprintf("Range [%d, %d + %d) out of bounds for length %d", off, off, cnt, n))
+				}
+			}
+			units := make([]uint16, 0, cnt)
+			for _, e := range arr.elems[off : off+cnt] {
+				if c, ok := e.(jsChar); ok {
+					units = append(units, uint16(c.code))
+				} else {
+					units = utf16.AppendRune(units, rune(jsToInt(rt.toNumber(e))))
+				}
+			}
+			return rt.wrapStr(string(utf16.Decode(units)))
+		}
 		m["js_jvsub"] = func(a []uint64) uint64 {
 			if str, isStr := u(a[0]).(string); isStr {
 				if args, ok := u(a[1]).(*jsArray); ok {

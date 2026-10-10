@@ -20,9 +20,9 @@
 //     and exits with the failure count (exit 0 == full support, verified)
 //
 // Deliberately out of scope (not core syntax, or unrunnable in this harness):
-// packages and imports - and with them the whole standard library beyond the
-// java.lang implicits the feature test already uses (String, Math, System and
-// friends); the functional interfaces here are declared locally instead of
+// packages, and the standard library beyond the java.lang implicits (String,
+// Math, StrictMath, System and friends) and the java.util list types imported
+// below; the functional interfaces here are declared locally instead of
 // importing java.util.function. Also out: modules - a module-info.java IS parsed
 // (see ModuleDecl in the grammar) but is a file of its own, so it cannot be a
 // section here - threads (and synchronized), reflection, javadoc.
@@ -30,6 +30,10 @@
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the Java Language Specification (SE 21) with the
 // ANTLR grammars-v4 java grammar as a coverage checklist.
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 
 class Main {
     static int failures = 0;
@@ -89,6 +93,7 @@ class Main {
         S43.run(); // SECTION-CALL 43
         S44.run(); // SECTION-CALL 44
         S45.run(); // SECTION-CALL 45
+        S46.run(); // SECTION-CALL 46
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2582,5 +2587,65 @@ class S45 {
             && s(Math.atan(x[9])).equals("1.4711276743037347") && s(Math.atan2(x[13], x[14])).equals("2.7621227700656026"));
         Main.check("fd5", s(Math.pow(x[15], x[16])).equals("7.415544782946163E109") && s(Math.hypot(x[17], x[18])).equals("1.8574710814746076")
             && s(StrictMath.pow(x[14], x[4])).equals("52.09197164103867") && s(StrictMath.exp(x[10])).equals("2.7182818284590455"));
+    }
+}
+
+// ===== SECTION 46: new String(...), ArrayList / List, and for over an Iterable =====
+//
+// The String constructors copy (and range-check) a char[] or code points; the
+// java.util.ArrayList / List of an import are java's own, error messages
+// included; remove(Object) and remove(int) are told apart by the argument's
+// static type; an enhanced for over anything but an array runs iterator(),
+// hasNext() and next() in step with the body. Every expected string is java
+// 24.0.2's output.
+class S46Range implements Iterable<Integer> {
+    int lo;
+    int hi;
+    String log = "";
+    S46Range(int lo, int hi) { this.lo = lo; this.hi = hi; }
+    public Iterator<Integer> iterator() {
+        return new Iterator<Integer>() {
+            int cur = lo;
+            public boolean hasNext() { return cur < hi; }
+            public Integer next() { log = log + "n" + cur; cur++; return cur - 1; }
+        };
+    }
+}
+class S46 {
+    static void run() {
+        char[] cs = { 'h', 'i', '!' };
+        int[] cps = { 72, 0x1F600, 105 };
+        String sio = "";
+        try { sio = new String(cs, 1, 5); } catch (StringIndexOutOfBoundsException e) { sio = e.getMessage(); }
+        Main.check("ns1", new String("ab").equals("ab") && new String().isEmpty() && new String(cs).equals("hi!")
+            && new String(cs, 1, 2).equals("i!") && new String(cps, 0, 3).length() == 4);
+        Main.check("ns2", sio.equals("Range [1, 1 + 5) out of bounds for length 3"));
+        List<Integer> xs = new ArrayList<>();
+        for (int i = 0; i < 6; i++) { xs.add(i * i); }
+        xs.remove(Integer.valueOf(9));
+        xs.remove(0);
+        Integer four = 4;
+        xs.remove(four);
+        Main.check("al1", ("" + xs).equals("[1, 16, 25]") && xs.size() == 3 && xs.get(1) == 16 && xs.indexOf(25) == 2
+            && xs.contains(1) && !xs.contains(4));
+        int sum = 0;
+        for (int x : xs) { sum += x; }
+        ArrayList<String> ss = new ArrayList<>(List.of("b", "a"));
+        ss.add(1, "z");
+        String old = ss.set(0, "q");
+        Main.check("al2", sum == 42 && ("" + ss).equals("[q, z, a]") && old.equals("b") && ss.equals(List.of("q", "z", "a"))
+            && List.of(1, 2, 3).hashCode() == 30817);
+        String err = "";
+        try { xs.get(5); } catch (IndexOutOfBoundsException e) { err = e.getMessage(); }
+        String err2 = "";
+        try { List.of(1).add(2); } catch (UnsupportedOperationException e) { err2 = "" + e; }
+        Main.check("al3", err.equals("Index 5 out of bounds for length 3") && err2.equals("java.lang.UnsupportedOperationException"));
+        S46Range r = new S46Range(1, 4);
+        String seen = "";
+        for (int v : r) {
+            seen = seen + v;
+            if (v == 2) { break; }
+        }
+        Main.check("it1", seen.equals("12") && r.log.equals("n1n2"));
     }
 }
