@@ -421,6 +421,17 @@ extension ExList<T> on List<T> { T orElse(int i, T fb) => i < length ? this[i] :
 extension ExStr on String {
   int lenPlus() => length + 1;
   bool emptyq() => isEmpty;
+  int bAt() => indexOf("b");
+  String tail() => substring(1);
+}
+// Unqualified METHOD CALLS of a non-object receiver take the call's arguments: inside
+// an extension an unqualified member invocation is `this.m(args)` on the extended
+// object (Dart language specification, "Extensions").
+extension ExNum on int {
+  bool evenq() => isEven;
+  String desc() => "n=" + toString() + " abs=" + abs().toString();
+  int cl() => clamp(0, 3);
+  String hex() => toRadixString(16);
 }
 extension type ExMeters(int value) { // extension type (3.3)
   ExMeters operator +(ExMeters o) => ExMeters(value + o.value);
@@ -434,6 +445,10 @@ void s17() {
   check("ex4", m.value == 7 && ExMeters(2).doubledUp == 4);
   check("ex5", "abcd".lenPlus() == 5); // unqualified getter of a String receiver
   check("ex6", "".emptyq() && !"a".emptyq());
+  var ns = [4, -5, 255];
+  check("ex7", ns[0].evenq() && !ns[1].evenq() && ns[1].desc() == "n=-5 abs=5");
+  check("ex8", ns[1].cl() == 0 && ns[2].cl() == 3 && ns[2].hex() == "ff" && ns[1].hex() == "-5");
+  check("ex9", "xyzb".bAt() == 3 && "xyzb".tail() == "yzb");
 }
 
 // ===== SECTION 18: generics =====

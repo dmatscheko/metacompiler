@@ -569,12 +569,21 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	// the runtime's ordinary member dispatch - so the Dart compiler can emit this
 	// one extern for every method call and a String's compareTo still reaches the
 	// String. The interpreter half does exactly this in mcall / readField.
+	// The signature a function declaration carries in js_jsfnmeta's name slot, "" for
+	// any other value. See dtFnSub in languages/dart-to-llvm-ir.abnf; twin of
+	// js_dartfnsig in languages/lib/dart-rt.metajs.
+	m["js_dartfnsig"] = func(a []uint64) uint64 { return rt.wrapStr(jsvFnMeta(u(a[0])).name) }
 	m["js_dartnm"] = func(a []uint64) uint64 {
 		recv := u(a[0])
 		name := rt.toString(u(a[1]))
 		args, ok := u(a[2]).(*jsArray)
 		if !ok {
 			rt.fail("js_dartnm args must be an array")
+		}
+		// x.toString() is Object.toString() unless the class overrides it, and
+		// dartStr answers both - the interpreter's mcall has the same first arm.
+		if name == "toString" && len(args.elems) == 0 {
+			return rt.wrapStr(rt.dartStr(recv))
 		}
 		if dartIsNum(recv) {
 			if v, hit := rt.dartNumMember(recv, name, args.elems); hit {

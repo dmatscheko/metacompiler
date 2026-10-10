@@ -168,6 +168,9 @@ class FSubBox extends FBox<int> { }
 class FRelay<X> extends FBox<X> { }
 class FColl<T> { bool t(Object v) => v is T; }
 int fDouble(int x) => x * 2;
+bool fNegate(bool e) => !e;
+int fFromNum(num x) => 1;
+typedef FNumToInt = int Function(num n);
 
 int risky(int n) {
   if (n > 3) {
@@ -788,7 +791,12 @@ int main() {
   // dynamic would have made both answer yes.
   check("tdef-function-alias", (fDouble is FIntFn));
   check("tdef-function-alias-negative", !(3 is FIntFn));
-  check("tdef-legacy-form", (fDouble is FOldStyle));
+  // The legacy form is `dynamic Function(bool)`, and a function type's parameters are
+  // CONTRAVARIANT: `int Function(int)` would have to accept every bool, so it is not one
+  // (Dart language specification, "Subtypes", function types).
+  check("tdef-legacy-form", !(fDouble is FOldStyle) && (fNegate is FOldStyle));
+  check("fntype-param-contravariant", (fFromNum is FIntFn) && !(fDouble is FNumToInt));
+  check("fntype-return-covariant", (fDouble is Object Function(int)) && !(fFromNum is double Function(num)));
   check("tdef-collection-alias", <String>["a"] is FNames);
   check("tdef-collection-alias-element-type", !(<int>[1] is FNames));
   check("tdef-alias-of-alias", <String>["a"] is FAlias);
@@ -812,11 +820,13 @@ int main() {
   // A boolean, not the raw 1 a bitwise js_band would leave (see is-typed-list above).
   check("tparam-answers-a-bool", "${FBox<int>().isT(3)}" == "true");
 
-  // ----- a CHAIN of type-test postfixes parses -----
-  // TypeTestExpr takes a repetition, so `o as FShape is FShape` parses.
+  // ----- type tests on a parenthesised cast -----
+  // Dart's relationalExpression takes at most ONE typeTest or typeCast (language
+  // specification, "Relational Expressions"), so `o as T is T` is not Dart and a chain
+  // is written with parentheses. A type test still binds below equality.
   Object tchO = tpSq;
-  check("typetest-chain-as-then-is", (tchO as FShape is FShape));
-  check("typetest-chain-as-as-isnot", (tchO as FShape as FShape is! int));
+  check("typetest-cast-then-is", ((tchO as FShape) is FShape));
+  check("typetest-cast-cast-isnot", (((tchO as FShape) as FShape) is! int));
   check("typetest-chain-still-binds-below-equality", (1 is int == true));
 
   // ----- everything combined in one small pipeline -----

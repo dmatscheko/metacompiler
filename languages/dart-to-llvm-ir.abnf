@@ -148,12 +148,14 @@ ExtTypeField <~~ push({etfield: popName()}) ~~>
 TypedefDecl <~~ push(function(b) { return b }) ~~>
             = KwTypedef ( TypedefNew | TypedefOld | TypedefBare ) ;
 TypedefNew  = TdName [ TParams ] "=" TdTarget ";" ;
-TypedefOld  = Type TdName [ TParams ] TdParen ";" ;
+TypedefOld  = TdRet TdName [ TParams ] TdParen ";" ;
 // The legacy form with no return type: typedef Handler(bool e);
-TypedefBare = TdName [ TParams ] TdParen ";" ;
+TypedefBare = TdName [ TParams ] TdParenBare ";" ;
 TdName      <~~ tdCur = up.in; tpPending = [] ~~> = Id ;
-TdTarget    <~~ tdReg(tdCur, up.in) ~~> = Type ;
-TdParen     <~~ tdReg(tdCur, "Function") ~~> = SkipParen ;
+TdTarget    <~~ tdReg(tdCur, up.in); dtFnNoteType(up.in, up.pos) ~~> = Type ;
+TdRet       <~~ tdRet = up.in ~~> = Type ;
+TdParen     <~~ tdReg(tdCur, "Function"); dtFnNoteLegacy(tdCur, tdRet, up.in, up.pos) ~~> = SkipParen ;
+TdParenBare <~~ tdReg(tdCur, "Function"); dtFnNoteLegacy(tdCur, "", up.in, up.pos) ~~> = SkipParen ;
 
 // A type-PARAMETER list (`<T>` in `class Box<T>`). Twin of TParams in
 // dart-interpreter.abnf; see there.
@@ -305,7 +307,8 @@ FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
 // type does not get stuck when it is absent.
 FuncDecl    = FuncTyped | FuncPlain ;
 FuncTyped   <~~ push(makeFuncDecl(takeAll())) ~~>
-            = Type FName [ TParams ] ParamList FnBody ;
+            = FRetType FName [ TParams ] ParamList FnBody ;
+FRetType    <~~ push({fret: up.in}) ~~> = Type ;
 FuncPlain   <~~ push(makeFuncDecl(takeAll())) ~~>
             = FName [ TParams ] ParamList FnBody ;
 FName       <~~ push({fname: up.in}) ~~> = Id ;
@@ -334,11 +337,12 @@ SuperParam  <~~ push(makeSuperParam(false, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
 // A parameter may itself be function-typed, in the old positional style:
 // `void forEach(callback(E element))`, `bool test(Object error)?`.
-TypedParam  <~~ push({pname: popName()}) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] [ SkipParen ] [ "?" ] ;
-FnPlainParam <~~ push({pname: popName()}) ~~>
+TypedParam  <~~ push({pname: popName(), ptype: dtParamType(up.in, pop())}) ~~>
+            = PType Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] [ SkipParen ] [ "?" ] ;
+FnPlainParam <~~ push({pname: popName(), ptype: ""}) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] SkipParen [ "?" ] ;
 PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
+PType       <~~ push({ptype: up.in}) ~~> = Type ;
 
 // Named (curly) parameters: foo({int a = 1, required int b, this.x = 0}). Optional, each
 // with a default; unsupplied ones fall back to the default, else null. Marked named:true.
@@ -825,7 +829,7 @@ TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
             = BitOrExpr { TypeTestOp TestType } ;
 // The type of an `is` / `as` is NOT the ordinary Type rule: its trailing "?" collides
 // with the conditional operator. Twin of TestType in dart-interpreter.abnf; see there.
-TestType    <~~ push({tname: up.in}) ~~> = TestTypeT ;
+TestType    <~~ push({tname: up.in}); dtFnNoteType(up.in, up.pos) ~~> = TestTypeT ;
 TestTypeT   = TestTypePrim { TypeFn } ;
 TestTypePrim = TypeRecord | TypeFn | TestTypeNamed ;
 TestTypeNamed = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ NotCondQ "?" ] ;
@@ -1539,6 +1543,7 @@ KwSuper     = "super" KwEnd ;
     var classNameReg = {}  // every declared class name: it stands in where nothing else can
     var classSuperReg = {} // class name -> its `extends` type, arguments included
     var tdCur = ""
+    var tdRet = ""   // a legacy typedef's return type, for TdParen
     function tdReg(n, target) {
         if (n == "") { return }
         typedefReg["$" + n] = stripWs(target)
@@ -1590,14 +1595,240 @@ KwSuper     = "super" KwEnd ;
         return (s.length > 0 && s.charAt(s.length - 1) == "?") ? "?" : ""
     }
     // A function TYPE: `int Function(int)`, `void Function()`. stripWs has already run, so
-    // the test is "names Function and ends in a parameter list". The value model has no
-    // function SIGNATURE, so every function type collapses to `Function`: `f is IntFn` is
-    // answerable, `f is StrFn` cannot be refused. Recorded in the :description block.
+    // the test is "names Function and ends in a parameter list". dtResolveStatic collapses
+    // one to `Function`; emitDartIsType first asks dtFnTarget / dtFnSub, which test the
+    // signature a function declaration carries.
     function dtIsFnType(t) {
         var s = stripWs(t)
         if (s.length == 0 || s.charAt(s.length - 1) != ")") { return false }
         return s.indexOf("Function(") >= 0
     }
+    // ----- function types -----
+    // `f is int Function(int)` tests the function's SIGNATURE. A function type S is a
+    // subtype of T when both take the same positional parameters, every parameter type
+    // of T is a subtype of S's (contravariance) and S's return type is a subtype of T's
+    // (covariance) - Dart language specification, "Subtypes", function types. So
+    // `int f(int)` is not a `dynamic Function(bool)`, and `int g(num)` is an
+    // `int Function(int)`.
+    //
+    // A signature is the text "R|P1,P2" of stripped type texts. A function DECLARATION
+    // with only required positional parameters carries its own on the function value
+    // (fnMeta's name slot, js_jsfnmeta in the compiled halves); a lambda, a method and a
+    // function with optional or named parameters carry none, and neither does a target
+    // type this does not model (optional or named parameters, a generic function type, a
+    // nullable one): the test is then only "is it a function", as before. fnTypeReg maps
+    // a typedef name, or a stripped function-type text written in an `is`, to its
+    // signature ("" when it is not modelled). The source as written is read back because
+    // up.in has lost the spaces that separate a parameter's type from its name.
+    // Twin of the same block in dart-interpreter.abnf.
+    var fnTypeReg = {}
+    var declSigs = {}    // "$" + signature -> 1, of every function declaration
+    var declSigList = [] // the same signatures, in order
+    function dtIsWsC(cc) { return cc == 32 || cc == 9 || cc == 10 || cc == 13 }
+    function dtIsIdC(cc) {
+        return (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (cc >= 48 && cc <= 57) || cc == 95 || cc == 36
+    }
+    function dtIsIdent(s) {
+        if (s.length == 0) { return false }
+        var c0 = s.charCodeAt(0)
+        if (c0 >= 48 && c0 <= 57) { return false }
+        for (var i = 0; i < s.length; i++) { if (!dtIsIdC(s.charCodeAt(i))) { return false } }
+        return true
+    }
+    // The source text a tag matched, read back from its end offset: the characters of
+    // txt (which up.in hands over without the whitespace), with the whitespace between
+    // them. "" when the source does not read back as txt.
+    function dtSrc(txt, end) {
+        var src = c.srcSlice(end - txt.length * 4 - 64, end)
+        var i = src.length - 1
+        var j = txt.length - 1
+        while (j >= 0) {
+            if (i < 0) { return "" }
+            var sc = src.charCodeAt(i)
+            if (sc == txt.charCodeAt(j)) { j = j - 1 }
+            else if (!dtIsWsC(sc)) { return "" }
+            i = i - 1
+        }
+        return src.substring(i + 1, src.length)
+    }
+    // The pieces of s split at top-level commas (sep 44) or whitespace runs (sep 32).
+    function dtSplitTop(s, sep) {
+        var out = []
+        var cur = ""
+        var depth = 0
+        for (var i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc == 60 || cc == 40 || cc == 91 || cc == 123) { depth = depth + 1 }
+            else if (cc == 62 || cc == 41 || cc == 93 || cc == 125) { depth = depth - 1 }
+            var cut = depth == 0 && (sep == 44 ? cc == 44 : dtIsWsC(cc))
+            if (cut) {
+                if (sep != 32 || cur != "") { out.push(cur) }
+                cur = ""
+            } else { cur = cur + s.charAt(i) }
+        }
+        if (cur != "" || (sep == 44 && out.length > 0)) { out.push(cur) }
+        return out
+    }
+    // The parameter types of a parameter list's inside, or null when it has an optional
+    // or named group or a parameter this does not model. In the LEGACY typedef form a
+    // lone identifier is a parameter NAME (of type dynamic); in a function type it is a
+    // type.
+    function dtFnParams(inner, legacy) {
+        var out = []
+        if (stripWs(inner) == "") { return out }
+        var parts = dtSplitTop(inner, 44)
+        for (var i = 0; i < parts.length; i++) {
+            var p = parts[i]
+            if (p.indexOf("[") >= 0 || p.indexOf("{") >= 0) { return null }
+            var toks = dtSplitTop(p, 32)
+            var n = toks.length
+            if (n == 0) { return null }
+            for (var k = 0; k < n; k++) {
+                if (toks[k].indexOf("(") >= 0 && (legacy || toks[k].indexOf("Function") != 0)) { return null }
+            }
+            if (n == 1 && legacy && dtIsIdent(toks[0])) { out.push("dynamic"); continue }
+            if (n >= 2 && dtIsIdent(toks[n - 1])) { n = n - 1 }
+            var t = ""
+            for (var q = 0; q < n; q++) { t = t + toks[q] }
+            out.push(stripWs(t))
+        }
+        return out
+    }
+    function dtSigText(ret, ps) {
+        var s = ret + "|"
+        for (var i = 0; i < ps.length; i++) { if (i > 0) { s = s + "," }; s = s + ps[i] }
+        return s
+    }
+    // The signature of a function type written as source text, or "".
+    function dtFnSigOfType(src) {
+        var depth = 0
+        for (var i = 0; i + 8 <= src.length; i++) {
+            var cc = src.charCodeAt(i)
+            if (cc == 60 || cc == 40) { depth = depth + 1 }
+            else if (cc == 62 || cc == 41) { depth = depth - 1 }
+            if (depth != 0 || src.substring(i, i + 8) != "Function") { continue }
+            if (i > 0 && dtIsIdC(src.charCodeAt(i - 1))) { continue }
+            var j = i + 8
+            while (j < src.length && dtIsWsC(src.charCodeAt(j))) { j = j + 1 }
+            if (j >= src.length || src.charAt(j) != "(") { return "" }
+            var k = j
+            var d = 0
+            while (k < src.length) {
+                if (src.charAt(k) == "(") { d = d + 1 }
+                if (src.charAt(k) == ")") { d = d - 1; if (d == 0) { break } }
+                k = k + 1
+            }
+            if (k >= src.length || stripWs(src.substring(k + 1, src.length)) != "") { return "" }
+            var ret = stripWs(src.substring(0, i))
+            var ps = dtFnParams(src.substring(j + 1, k), false)
+            if (ps == null) { return "" }
+            return dtSigText(ret == "" ? "dynamic" : ret, ps)
+        }
+        return ""
+    }
+    // An `is` target or a `typedef N = ...` target (txt is its up.in, end its up.pos).
+    function dtFnNoteType(txt, end) {
+        if (!dtIsFnType(txt)) { return }
+        var k = "$" + stripWs(txt)
+        if (fnTypeReg[k] != undefined) { return }
+        var src = dtSrc(txt, end)
+        fnTypeReg[k] = src == "" ? "" : dtFnSigOfType(src)
+    }
+    // A legacy typedef, `typedef R N(params);`: paren is the parameter list's up.in.
+    function dtFnNoteLegacy(name, ret, paren, end) {
+        if (name == "") { return }
+        var src = dtSrc(paren, end)
+        var ps = src.length < 2 ? null : dtFnParams(src.substring(1, src.length - 1), true)
+        fnTypeReg["$" + name] = ps == null ? "" : dtSigText(ret == "" ? "dynamic" : stripWs(ret), ps)
+    }
+    // A declaration's signature from its ParamList items, or "" when one is not modelled.
+    function dtDeclSig(ret, params) {
+        var ps = []
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p == undefined || p == null || p.pname == undefined || p.def != undefined || p.named != undefined) { return "" }
+            if (p.ptype == undefined) { ps.push("dynamic") }
+            else if (p.ptype == "") { return "" }
+            else { ps.push(p.ptype) }
+        }
+        return dtSigText(ret == "" ? "dynamic" : stripWs(ret), ps)
+    }
+    // A typed parameter's type, or "" when the parameter is itself written in the old
+    // function-typed style (`int f(int x)`), whose type is not its leading text.
+    function dtParamType(whole, pt) {
+        var w = stripWs(whole)
+        if (w.length > 0 && w.charAt(w.length - 1) == "?") { w = w.substring(0, w.length - 1) }
+        if (w.length > 0 && w.charAt(w.length - 1) == ")") { return "" }
+        return stripWs(pt.ptype)
+    }
+    // The signature a type name tests for, through typedefs, or "".
+    function dtFnTarget(tname) {
+        var out = stripWs(tname)
+        var hops = 0
+        while (hops < 8) {
+            hops = hops + 1
+            var r = fnTypeReg["$" + out]
+            if (r != undefined) { return r }
+            var b = dtBase(out)
+            if (b == "" || b != out || typedefReg["$" + b] == undefined) { return "" }
+            out = typedefReg["$" + b]
+        }
+        return ""
+    }
+    function dtSigRet(s) { return s.substring(0, s.indexOf("|")) }
+    function dtSigPs(s) {
+        var r = s.substring(s.indexOf("|") + 1, s.length)
+        if (r == "") { return [] }
+        return dtSplitTop(r, 44)
+    }
+    // S <: T for two signatures.
+    function dtFnSub(s, t) {
+        var sp = dtSigPs(s)
+        var tp = dtSigPs(t)
+        if (sp.length != tp.length) { return false }
+        for (var i = 0; i < sp.length; i++) { if (!dtTySub(tp[i], sp[i])) { return false } }
+        return dtTySub(dtSigRet(s), dtSigRet(t))
+    }
+    function dtEndsQ(s) { return s.length > 0 && s.charAt(s.length - 1) == "?" }
+    function dtDropQ(s) { return s.substring(0, s.length - 1) }
+    // a <: b for two stripped type texts. A nested function type is not refused by
+    // another one (its parameter names are glued to their types in the stripped text).
+    function dtTySub(a, b) {
+        if (a == b) { return true }
+        if (b == "dynamic" || b == "void" || b == "Object?") { return true }
+        if (a == "Never") { return true }
+        var aq = dtEndsQ(a)
+        if (b == "Object") { return !aq && a != "Null" && a != "dynamic" && a != "void" }
+        if (dtEndsQ(b)) {
+            if (a == "Null") { return true }
+            return dtTySub(aq ? dtDropQ(a) : a, dtDropQ(b))
+        }
+        if (aq || a == "Null" || a == "dynamic" || a == "void") { return false }
+        var af = dtIsFnType(a)
+        if (b == "Function") { return af }
+        if (af || dtIsFnType(b)) { return af && dtIsFnType(b) }
+        var ab = dtBase(a)
+        var bb = dtBase(b)
+        var ba = dtArgTexts(b)
+        if (ba.length > 0) {
+            var aa = dtArgTexts(a)
+            if (aa.length != ba.length) { return false }
+            if (ab != bb && !(bb == "Iterable" && (ab == "List" || ab == "Set"))) { return false }
+            for (var i = 0; i < aa.length; i++) { if (!dtTySub(aa[i], ba[i])) { return false } }
+            return true
+        }
+        if (ab == bb) { return true }
+        if (bb == "num") { return ab == "int" || ab == "double" }
+        if (bb == "Iterable") { return ab == "List" || ab == "Set" }
+        if (bb == "Comparable") { return ab == "num" || ab == "int" || ab == "double" || ab == "String" }
+        return dtClassSub(ab, bb)
+    }
+    // A user class's nominal supertype set, as dtAncOf flattens it.
+    function dtClassSub(x, y) {
+        if (classBases["$" + x] == undefined) { return false }
+        return dtAncOf(x).indexOf("|" + y + "|") >= 0
+    }
+
     // Expand the typedefs out of a type name. A cap rather than a visited set: a cyclic
     // typedef is a compile error in Dart and the walk must terminate, not diagnose it.
     function dtResolveStatic(tname) {
@@ -1719,6 +1950,20 @@ KwSuper     = "super" KwEnd ;
     // while `null is int` is false. A '?' inside the type arguments (List<int?>) is not
     // the type's own, so only a FINAL one counts.
     function emitDartIsType(b, val, tnameIn) {
+        // A function type with a signature: a function value whose own signature
+        // (js_dartfnsig, "" for none) is one of the program's declarations that dtFnSub
+        // accepts - decided here, since every declaration is known - or that has none.
+        var fsig = dtFnTarget(tnameIn)
+        if (fsig != "") {
+            var sigV = callExt(b, "js_dartfnsig", [val])
+            var okV = callExt(b, "js_seq", [sigV, emitStr(b, "")])
+            for (var ki = 0; ki < declSigList.length; ki++) {
+                var s = declSigList[ki]
+                if (dtFnSub(s, fsig)) { okV = callExt(b, "js_bor", [okV, callExt(b, "js_seq", [sigV, emitStr(b, s)])]) }
+            }
+            var isF = callExt(b, "js_dartis", [val, emitStr(b, "Function")])
+            return {b: b, v: callExt(b, "js_not", [callExt(b, "js_not", [callExt(b, "js_band", [isF, okV])])])}
+        }
         var tname = dtResolveStatic(tnameIn)
         // A type parameter: the name to test is only known at run time.
         var tp = dtTParamOf(tname)
@@ -2168,15 +2413,28 @@ KwSuper     = "super" KwEnd ;
         }
     }
     function makeFuncDecl(items) {
-        var name = items[0].fname
+        var name = ""
+        var params = []
+        var fret = ""
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (it.fname != undefined) { name = it.fname }
+            else if (it.params != undefined) { params = it.params }
+            else if (it.fret != undefined) { fret = it.fret }
+        }
         dxNoteDecl(name)
-        var params = items[1].params
         var bodyStmt = bodyToStmt(items[items.length - 1])
         if (isGenBody(items)) { bodyStmt = genWrap(bodyStmt) }
+        // The declaration's signature rides on the closure (see dtFnSub); every one in
+        // the program is known by the time a type test is emitted.
+        var sig = dtDeclSig(fret, params)
+        if (sig != "" && declSigs["$" + sig] == undefined) { declSigs["$" + sig] = 1; declSigList.push(sig) }
         return function(b) {
             var idx = emitFunc(params, bodyStmt, false)
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
-                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            var clo = callExt(b, "js_closure", [handle(idx), curScopeV])
+            if (sig != "") { clo = callExt(b, "js_jsfnmeta", [clo, emitStr(b, sig), emitNum(b, params.length)]) }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clo])
             return b
         }
     }
@@ -2243,14 +2501,12 @@ KwSuper     = "super" KwEnd ;
             }
             // dart:core's own errors and exceptions: FormatException("x"), ...
             if (dxIsName(name)) { return emitDartExc(b, name, "", args) }
-            // dt_kgetc, not dt_kget: the callee is resolved in CALL position, so the helper
-            // keeps its abort instead of reading a zero-argument member of a builtin `this`.
-            // See the long note at that arm - a getter read is not a method call, and
-            // answering one for the other would make `indexOf("b")` in a String extension -1.
-            var fV = b.NewCall(rtKGetC(), [curScopeV, emitStr(b, name)])
+            // dt_kcall, not dt_kget: the name is resolved in CALL position and the helper
+            // makes the call itself, so a member of a builtin `this` receives these
+            // arguments - see the long note at that arm.
             var argsV2 = callExt(b, "js_arr_new", [])
             b = emitCallArgsInto(b, argsV2, args)
-            return {b: b, v: callExt(b, "js_call", [fV, hUndef, argsV2])}
+            return {b: b, v: b.NewCall(rtKCall(), [curScopeV, emitStr(b, name), argsV2])}
         }
     }
 
@@ -2790,24 +3046,25 @@ KwSuper     = "super" KwEnd ;
             noB.NewRet(hUndef)
         })
     }
-    // ONE body, TWO emitted functions, and no third parameter: `iscall` is a constant at
-    // every call site (a name in value position, or makeCall's callee), so it is decided
-    // HERE, at emit time, and neither function carries a runtime branch for it. kotlin's
-    // kt_ktget / kt_ktgetp pair spends a call and a parameter on the same distinction
-    // because its sites are not all statically known; dart's are. It matters because
-    // dt_kget is dart's hottest helper - 5 per iteration of tests/bench/mod.dart - and a
-    // wrapper would have put an extra call in front of every local read in the language.
-    // dt_kgetc is emitted only if some call site asks for it (rtFunc is lazy and keyed by
-    // name), so a program with no unqualified call never carries it.
+    // ONE body, TWO emitted functions: dt_kget(scope, name) reads a name in value
+    // position, dt_kcall(scope, name, args) resolves makeCall's callee and CALLS it.
+    // `iscall` is a constant at every site, so it is decided HERE, at emit time, and
+    // neither function carries a runtime branch for it. kotlin's kt_ktget / kt_ktgetp
+    // pair spends a call and a parameter on the same distinction because its sites are
+    // not all statically known; dart's are. It matters because dt_kget is dart's hottest
+    // helper - 5 per iteration of tests/bench/mod.dart - and a wrapper would have put an
+    // extra call in front of every local read in the language. dt_kcall is emitted only
+    // if some call site asks for it (rtFunc is lazy and keyed by name).
     function rtKGet() { return rtKGetB("dt_kget", false) }
-    function rtKGetC() { return rtKGetB("dt_kgetc", true) }
+    function rtKCall() { return rtKGetB("dt_kcall", true) }
     function rtKGetB(nm, iscall) {
-        return rtFunc(nm, 2, function(b, ps) {
+        return rtFunc(nm, iscall ? 3 : 2, function(b, ps) {
             var localB = curF.NewBlock("")
             var selfB = curF.NewBlock("")
             var t = callExt(b, "js_scope_typeof", [ps[0], ps[1]])
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), selfB, localB)
-            localB.NewRet(callExt(localB, "js_scope_get", [ps[0], ps[1]]))
+            var lv = callExt(localB, "js_scope_get", [ps[0], ps[1]])
+            localB.NewRet(iscall ? callExt(localB, "js_call", [lv, hUndef, ps[2]]) : lv)
             // No local of that name: the FIRST `this` up the chain, if there is one.
             var probeB = curF.NewBlock("")
             var missB = curF.NewBlock("")
@@ -2816,12 +3073,9 @@ KwSuper     = "super" KwEnd ;
             var selfV = callExt(probeB, "js_scope_get", [ps[0], emitStr(probeB, "this")])
             var mV = probeB.NewCall(rtSafeGet(), [selfV, ps[1]])
             var hitB = curF.NewBlock("")
-            // In CALL position `this` having no property of that name is the end of it; in
-            // value position there is one arm more, below.
-            var noPropB = missB
-            if (!iscall) { noPropB = curF.NewBlock("") }
+            var noPropB = curF.NewBlock("")
             probeB.NewCondBr(truthy(probeB, callExt(probeB, "js_sne", [mV, hUndef])), hitB, noPropB)
-            hitB.NewRet(mV)
+            hitB.NewRet(iscall ? callExt(hitB, "js_call", [mV, hUndef, ps[2]]) : mV)
             // ===== AN UNQUALIFIED MEMBER OF A NON-OBJECT RECEIVER =====
             //
             // `this` is bound and has no PROPERTY of that name. For an ordinary instance
@@ -2836,27 +3090,21 @@ KwSuper     = "super" KwEnd ;
             // WHAT IS HERE INSTEAD is DART's own curated member dispatch, js_dartnm - the
             // same extern the qualified `.name` chain uses, so an unqualified read answers
             // exactly what a qualified one would and no name enters the language through
-            // the back door. Two guards, and both are load bearing:
+            // the back door. NOT FOR AN OBJECT WITH A __class: those are the instances the
+            // property arm above already served, and letting js_dartnm see one would turn a
+            // missing name into a call of a same-named METHOD. dt_safeget answers undefined
+            // for a non-object AND for an object without a descriptor, which is precisely
+            // the set that has members but no properties.
             //
-            //   * NOT FOR AN OBJECT WITH A __class. Those are the instances the property
-            //     arm above already served; letting js_dartnm see one would turn a missing
-            //     name into a zero-argument call of a same-named METHOD. dt_safeget answers
-            //     undefined for a non-object AND for an object without a descriptor, which
-            //     is precisely the set that has members but no properties.
-            //   * NOT IN CALL POSITION. js_dartnm(recv, name, []) is a zero-argument member
-            //     read, which is what a Dart GETTER is - `length`, `isEmpty` - and it is
-            //     not what `indexOf("b")` is. makeCall resolves its callee with iscall
-            //     TRUE, so a call keeps the abort below rather than calling the member with
-            //     no arguments and then calling its result. This is kotlin's
-            //     kt_ktgetp third parameter decided at emit time instead of run time, and
-            //     its note is the general form: what the name alone cannot decide, the
-            //     SITE can.
-            if (!iscall) {
-                var clsV = noPropB.NewCall(rtSafeGet(), [selfV, emitStr(noPropB, "__class")])
-                var dnB = curF.NewBlock("")
-                noPropB.NewCondBr(truthy(noPropB, callExt(noPropB, "js_seq", [clsV, hUndef])), dnB, missB)
-                dnB.NewRet(callExt(dnB, "js_dartnm", [selfV, ps[1], callExt(dnB, "js_arr_new", [])]))
-            }
+            // In value position js_dartnm(recv, name, []) is a zero-argument member read,
+            // which is what a Dart GETTER is - `length`, `isEmpty`. In call position it is
+            // the method call with the call's own arguments - `indexOf("b")`, `abs()` -
+            // which is why dt_kcall makes the call rather than answering a callee: a
+            // builtin's method is not a value the program could call afterwards.
+            var clsV = noPropB.NewCall(rtSafeGet(), [selfV, emitStr(noPropB, "__class")])
+            var dnB = curF.NewBlock("")
+            noPropB.NewCondBr(truthy(noPropB, callExt(noPropB, "js_seq", [clsV, hUndef])), dnB, missB)
+            dnB.NewRet(callExt(dnB, "js_dartnm", [selfV, ps[1], iscall ? ps[2] : callExt(dnB, "js_arr_new", [])]))
             // Nothing anywhere: js_scope_get is the abort, so a program that reads an
             // unknown name dies.
             missB.NewRet(callExt(missB, "js_scope_get", [ps[0], ps[1]]))

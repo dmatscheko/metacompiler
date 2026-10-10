@@ -39,9 +39,10 @@ type. Where nothing written supplies one - a bare `Box()`, an instance from a na
 constructor, a generic FUNCTION's `<T>` (this front end does no call-site inference) - the
 parameter reads as `dynamic`, which is an always-true test; a declared class of the same
 name stands in first if there is one. A typedef DENOTES the type it names and `is` tests
-that type, except that a function-typed alias collapses to `Function`, because the value
-model carries no function signature: `f is IntFn` is answerable and `f is StrFn` cannot be
-refused. The nullable type marker ? is accepted and erased. `void main()` and `int main()`
+that type. A function type is tested against the signature a function declaration
+carries (parameter types contravariant, the return type covariant); a lambda, a method and a
+function with optional or named parameters carry none, and for them `f is IntFn` only asks
+whether f is a function. The nullable type marker ? is accepted and erased. `void main()` and `int main()`
 are both accepted; the return value of an int main() is the exit code of the metacompiler
 run, so the test programs are self checking (0 on success). The same subset is compiled to
 LLVM IR by dart-to-llvm-ir.abnf.") ;
@@ -172,12 +173,14 @@ ExtTypeField <~~ push({etfield: popName()}) ~~>
 TypedefDecl <~~ push(function() {}) ~~>
             = KwTypedef ( TypedefNew | TypedefOld | TypedefBare ) ;
 TypedefNew  = TdName [ TParams ] "=" TdTarget ";" ;
-TypedefOld  = Type TdName [ TParams ] TdParen ";" ;
+TypedefOld  = TdRet TdName [ TParams ] TdParen ";" ;
 // The legacy form with no return type: typedef Handler(bool e);
-TypedefBare = TdName [ TParams ] TdParen ";" ;
+TypedefBare = TdName [ TParams ] TdParenBare ";" ;
 TdName      <~~ tdCur = up.in; tpPending = [] ~~> = Id ;
-TdTarget    <~~ tdReg(tdCur, up.in) ~~> = Type ;
-TdParen     <~~ tdReg(tdCur, "Function") ~~> = SkipParen ;
+TdTarget    <~~ tdReg(tdCur, up.in); dtFnNoteType(up.in, up.pos) ~~> = Type ;
+TdRet       <~~ tdRet = up.in ~~> = Type ;
+TdParen     <~~ tdReg(tdCur, "Function"); dtFnNoteLegacy(tdCur, tdRet, up.in, up.pos) ~~> = SkipParen ;
+TdParenBare <~~ tdReg(tdCur, "Function"); dtFnNoteLegacy(tdCur, "", up.in, up.pos) ~~> = SkipParen ;
 
 // A type-PARAMETER list, as opposed to a type-ARGUMENT list: `<T>` in `class Box<T>` and
 // in `void f<T>()` binds T, while `<int>` in `Box<int>()` supplies it. Only the binding
@@ -337,7 +340,8 @@ FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
 // type does not get stuck when it is absent.
 FuncDecl    = FuncTyped | FuncPlain ;
 FuncTyped   <~~ push(makeFuncDecl(takeAll())) ~~>
-            = Type FName [ TParams ] ParamList FnBody ;
+            = FRetType FName [ TParams ] ParamList FnBody ;
+FRetType    <~~ push({fret: up.in}) ~~> = Type ;
 FuncPlain   <~~ push(makeFuncDecl(takeAll())) ~~>
             = FName [ TParams ] ParamList FnBody ;
 FName       <~~ push({fname: up.in}) ~~> = Id ;
@@ -366,11 +370,12 @@ SuperParam  <~~ push(makeSuperParam(false, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
 // A parameter may itself be function-typed, in the old positional style:
 // `void forEach(callback(E element))`, `bool test(Object error)?`.
-TypedParam  <~~ push({pname: popName()}) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] [ SkipParen ] [ "?" ] ;
-FnPlainParam <~~ push({pname: popName()}) ~~>
+TypedParam  <~~ push({pname: popName(), ptype: dtParamType(up.in, pop())}) ~~>
+            = PType Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] [ SkipParen ] [ "?" ] ;
+FnPlainParam <~~ push({pname: popName(), ptype: ""}) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] SkipParen [ "?" ] ;
 PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
+PType       <~~ push({ptype: up.in}) ~~> = Type ;
 
 // Named (curly) parameters: foo({int a = 1, required int b, this.x = 0}). Optional, each
 // with a default; unsupplied ones fall back to the default, else null. Marked named:true.
@@ -869,7 +874,7 @@ TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
 // `o is Shape ? a : b` would eat the "?" as a nullable marker and then fail at the ":"
 // with no way to retry. Only the OUTERMOST "?" is at risk (one inside TypeArgs is followed by
 // "," or ">"), so only that one is guarded; a record or Function type keeps its own.
-TestType    <~~ push({tname: up.in}) ~~> = TestTypeT ;
+TestType    <~~ push({tname: up.in}); dtFnNoteType(up.in, up.pos) ~~> = TestTypeT ;
 TestTypeT   = TestTypePrim { TypeFn } ;
 TestTypePrim = TypeRecord | TypeFn | TestTypeNamed ;
 TestTypeNamed = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ NotCondQ "?" ] ;
@@ -2420,6 +2425,14 @@ KwDeferred  = "deferred" KwEnd ;
     // ones, so the dart:core types are answered here and everything else (user classes,
     // the ? suffix, generic arguments) falls through to the shared walker.
     function dartIsType(v, tnameIn) {
+        // A function with a signature, against a function type that has one: dtFnSub.
+        if (typeof v == "function") {
+            var fsig = dtFnTarget(tnameIn)
+            if (fsig != "") {
+                var vsig = fnMeta(v, "name")
+                if (typeof vsig == "string" && vsig.indexOf("|") >= 0) { return dtFnSub(vsig, fsig) }
+            }
+        }
         // A typedef name and a type-parameter name both stand for another type; everything
         // below tests the type they stand for. See dtResolve.
         var tname = dtResolve(tnameIn)
@@ -2506,9 +2519,8 @@ KwDeferred  = "deferred" KwEnd ;
     //
     //  * a TYPEDEF denotes the aliased type (Dart spec, Type Aliases), statically, so it
     //    expands to the recorded target text. A function-typed alias collapses to
-    //    `Function`: the value model has no function SIGNATURE, so `f is IntFn` can be
-    //    answered ("is it a function") but `f is StrFn` cannot be refused. Stated in the
-    //    :description block.
+    //    `Function` here; dartIsType first asks dtFnTarget / dtFnSub, which test the
+    //    signature a function declaration carries.
     //  * a TYPE PARAMETER is reified in Dart - `case T t` inside `class Box<T>` tests the
     //    INSTANTIATED argument, so `Box<int>().w(3)` is `yes` and `Box<int>().w("s")` is
     //    `no`. The argument written at the creation site is stamped on the instance as
@@ -2524,6 +2536,7 @@ KwDeferred  = "deferred" KwEnd ;
     var classNameReg = {}  // every declared class name: it stands in where nothing else can
     var classSuperReg = {} // class name -> its `extends` type, arguments included
     var tdCur = ""
+    var tdRet = ""   // a legacy typedef's return type, for TdParen
     function tdReg(n, target) {
         if (n == "") { return }
         typedefReg["$" + n] = stripWs(target)
@@ -2580,6 +2593,234 @@ KwDeferred  = "deferred" KwEnd ;
         if (s.length == 0 || s.charAt(s.length - 1) != ")") { return false }
         return s.indexOf("Function(") >= 0
     }
+    // ----- function types -----
+    // `f is int Function(int)` tests the function's SIGNATURE. A function type S is a
+    // subtype of T when both take the same positional parameters, every parameter type
+    // of T is a subtype of S's (contravariance) and S's return type is a subtype of T's
+    // (covariance) - Dart language specification, "Subtypes", function types. So
+    // `int f(int)` is not a `dynamic Function(bool)`, and `int g(num)` is an
+    // `int Function(int)`.
+    //
+    // A signature is the text "R|P1,P2" of stripped type texts. A function DECLARATION
+    // with only required positional parameters carries its own on the function value
+    // (fnMeta's name slot, js_jsfnmeta in the compiled halves); a lambda, a method and a
+    // function with optional or named parameters carry none, and neither does a target
+    // type this does not model (optional or named parameters, a generic function type, a
+    // nullable one): the test is then only "is it a function", as before. fnTypeReg maps
+    // a typedef name, or a stripped function-type text written in an `is`, to its
+    // signature ("" when it is not modelled). The source as written is read back because
+    // up.in has lost the spaces that separate a parameter's type from its name.
+    // Twin of the same block in dart-to-llvm-ir.abnf.
+    var fnTypeReg = {}
+    function dtIsWsC(cc) { return cc == 32 || cc == 9 || cc == 10 || cc == 13 }
+    function dtIsIdC(cc) {
+        return (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (cc >= 48 && cc <= 57) || cc == 95 || cc == 36
+    }
+    function dtIsIdent(s) {
+        if (s.length == 0) { return false }
+        var c0 = s.charCodeAt(0)
+        if (c0 >= 48 && c0 <= 57) { return false }
+        for (var i = 0; i < s.length; i++) { if (!dtIsIdC(s.charCodeAt(i))) { return false } }
+        return true
+    }
+    // The source text a tag matched, read back from its end offset: the characters of
+    // txt (which up.in hands over without the whitespace), with the whitespace between
+    // them. "" when the source does not read back as txt.
+    function dtSrc(txt, end) {
+        var src = c.srcSlice(end - txt.length * 4 - 64, end)
+        var i = src.length - 1
+        var j = txt.length - 1
+        while (j >= 0) {
+            if (i < 0) { return "" }
+            var sc = src.charCodeAt(i)
+            if (sc == txt.charCodeAt(j)) { j = j - 1 }
+            else if (!dtIsWsC(sc)) { return "" }
+            i = i - 1
+        }
+        return src.substring(i + 1, src.length)
+    }
+    // The pieces of s split at top-level commas (sep 44) or whitespace runs (sep 32).
+    function dtSplitTop(s, sep) {
+        var out = []
+        var cur = ""
+        var depth = 0
+        for (var i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc == 60 || cc == 40 || cc == 91 || cc == 123) { depth = depth + 1 }
+            else if (cc == 62 || cc == 41 || cc == 93 || cc == 125) { depth = depth - 1 }
+            var cut = depth == 0 && (sep == 44 ? cc == 44 : dtIsWsC(cc))
+            if (cut) {
+                if (sep != 32 || cur != "") { out.push(cur) }
+                cur = ""
+            } else { cur = cur + s.charAt(i) }
+        }
+        if (cur != "" || (sep == 44 && out.length > 0)) { out.push(cur) }
+        return out
+    }
+    // The parameter types of a parameter list's inside, or null when it has an optional
+    // or named group or a parameter this does not model. In the LEGACY typedef form a
+    // lone identifier is a parameter NAME (of type dynamic); in a function type it is a
+    // type.
+    function dtFnParams(inner, legacy) {
+        var out = []
+        if (stripWs(inner) == "") { return out }
+        var parts = dtSplitTop(inner, 44)
+        for (var i = 0; i < parts.length; i++) {
+            var p = parts[i]
+            if (p.indexOf("[") >= 0 || p.indexOf("{") >= 0) { return null }
+            var toks = dtSplitTop(p, 32)
+            var n = toks.length
+            if (n == 0) { return null }
+            for (var k = 0; k < n; k++) {
+                if (toks[k].indexOf("(") >= 0 && (legacy || toks[k].indexOf("Function") != 0)) { return null }
+            }
+            if (n == 1 && legacy && dtIsIdent(toks[0])) { out.push("dynamic"); continue }
+            if (n >= 2 && dtIsIdent(toks[n - 1])) { n = n - 1 }
+            var t = ""
+            for (var q = 0; q < n; q++) { t = t + toks[q] }
+            out.push(stripWs(t))
+        }
+        return out
+    }
+    function dtSigText(ret, ps) {
+        var s = ret + "|"
+        for (var i = 0; i < ps.length; i++) { if (i > 0) { s = s + "," }; s = s + ps[i] }
+        return s
+    }
+    // The signature of a function type written as source text, or "".
+    function dtFnSigOfType(src) {
+        var depth = 0
+        for (var i = 0; i + 8 <= src.length; i++) {
+            var cc = src.charCodeAt(i)
+            if (cc == 60 || cc == 40) { depth = depth + 1 }
+            else if (cc == 62 || cc == 41) { depth = depth - 1 }
+            if (depth != 0 || src.substring(i, i + 8) != "Function") { continue }
+            if (i > 0 && dtIsIdC(src.charCodeAt(i - 1))) { continue }
+            var j = i + 8
+            while (j < src.length && dtIsWsC(src.charCodeAt(j))) { j = j + 1 }
+            if (j >= src.length || src.charAt(j) != "(") { return "" }
+            var k = j
+            var d = 0
+            while (k < src.length) {
+                if (src.charAt(k) == "(") { d = d + 1 }
+                if (src.charAt(k) == ")") { d = d - 1; if (d == 0) { break } }
+                k = k + 1
+            }
+            if (k >= src.length || stripWs(src.substring(k + 1, src.length)) != "") { return "" }
+            var ret = stripWs(src.substring(0, i))
+            var ps = dtFnParams(src.substring(j + 1, k), false)
+            if (ps == null) { return "" }
+            return dtSigText(ret == "" ? "dynamic" : ret, ps)
+        }
+        return ""
+    }
+    // An `is` target or a `typedef N = ...` target (txt is its up.in, end its up.pos).
+    function dtFnNoteType(txt, end) {
+        if (!dtIsFnType(txt)) { return }
+        var k = "$" + stripWs(txt)
+        if (fnTypeReg[k] != undefined) { return }
+        var src = dtSrc(txt, end)
+        fnTypeReg[k] = src == "" ? "" : dtFnSigOfType(src)
+    }
+    // A legacy typedef, `typedef R N(params);`: paren is the parameter list's up.in.
+    function dtFnNoteLegacy(name, ret, paren, end) {
+        if (name == "") { return }
+        var src = dtSrc(paren, end)
+        var ps = src.length < 2 ? null : dtFnParams(src.substring(1, src.length - 1), true)
+        fnTypeReg["$" + name] = ps == null ? "" : dtSigText(ret == "" ? "dynamic" : stripWs(ret), ps)
+    }
+    // A declaration's signature from its ParamList items, or "" when one is not modelled.
+    function dtDeclSig(ret, params) {
+        var ps = []
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p == undefined || p == null || p.pname == undefined || p.def != undefined || p.named != undefined) { return "" }
+            if (p.ptype == undefined) { ps.push("dynamic") }
+            else if (p.ptype == "") { return "" }
+            else { ps.push(p.ptype) }
+        }
+        return dtSigText(ret == "" ? "dynamic" : stripWs(ret), ps)
+    }
+    // A typed parameter's type, or "" when the parameter is itself written in the old
+    // function-typed style (`int f(int x)`), whose type is not its leading text.
+    function dtParamType(whole, pt) {
+        var w = stripWs(whole)
+        if (w.length > 0 && w.charAt(w.length - 1) == "?") { w = w.substring(0, w.length - 1) }
+        if (w.length > 0 && w.charAt(w.length - 1) == ")") { return "" }
+        return stripWs(pt.ptype)
+    }
+    // The signature a type name tests for, through typedefs, or "".
+    function dtFnTarget(tname) {
+        var out = stripWs(tname)
+        var hops = 0
+        while (hops < 8) {
+            hops = hops + 1
+            var r = fnTypeReg["$" + out]
+            if (r != undefined) { return r }
+            var b = dtBase(out)
+            if (b == "" || b != out || typedefReg["$" + b] == undefined) { return "" }
+            out = typedefReg["$" + b]
+        }
+        return ""
+    }
+    function dtSigRet(s) { return s.substring(0, s.indexOf("|")) }
+    function dtSigPs(s) {
+        var r = s.substring(s.indexOf("|") + 1, s.length)
+        if (r == "") { return [] }
+        return dtSplitTop(r, 44)
+    }
+    // S <: T for two signatures.
+    function dtFnSub(s, t) {
+        var sp = dtSigPs(s)
+        var tp = dtSigPs(t)
+        if (sp.length != tp.length) { return false }
+        for (var i = 0; i < sp.length; i++) { if (!dtTySub(tp[i], sp[i])) { return false } }
+        return dtTySub(dtSigRet(s), dtSigRet(t))
+    }
+    function dtEndsQ(s) { return s.length > 0 && s.charAt(s.length - 1) == "?" }
+    function dtDropQ(s) { return s.substring(0, s.length - 1) }
+    // a <: b for two stripped type texts. A nested function type is not refused by
+    // another one (its parameter names are glued to their types in the stripped text).
+    function dtTySub(a, b) {
+        if (a == b) { return true }
+        if (b == "dynamic" || b == "void" || b == "Object?") { return true }
+        if (a == "Never") { return true }
+        var aq = dtEndsQ(a)
+        if (b == "Object") { return !aq && a != "Null" && a != "dynamic" && a != "void" }
+        if (dtEndsQ(b)) {
+            if (a == "Null") { return true }
+            return dtTySub(aq ? dtDropQ(a) : a, dtDropQ(b))
+        }
+        if (aq || a == "Null" || a == "dynamic" || a == "void") { return false }
+        var af = dtIsFnType(a)
+        if (b == "Function") { return af }
+        if (af || dtIsFnType(b)) { return af && dtIsFnType(b) }
+        var ab = dtBase(a)
+        var bb = dtBase(b)
+        var ba = dtArgTexts(b)
+        if (ba.length > 0) {
+            var aa = dtArgTexts(a)
+            if (aa.length != ba.length) { return false }
+            if (ab != bb && !(bb == "Iterable" && (ab == "List" || ab == "Set"))) { return false }
+            for (var i = 0; i < aa.length; i++) { if (!dtTySub(aa[i], ba[i])) { return false } }
+            return true
+        }
+        if (ab == bb) { return true }
+        if (bb == "num") { return ab == "int" || ab == "double" }
+        if (bb == "Iterable") { return ab == "List" || ab == "Set" }
+        if (bb == "Comparable") { return ab == "num" || ab == "int" || ab == "double" || ab == "String" }
+        return dtClassSub(ab, bb)
+    }
+    // A user class's nominal supertype set, through its descriptor.
+    function dtClassSub(x, y) {
+        var box = tryGetVar(x)
+        if (box == null) { return false }
+        var cls = anytype
+        cls = box.v
+        if (cls === null || cls === undefined || typeof cls != "object" || cls.__isclass !== true) { return false }
+        return dxUserAnc(cls).indexOf("|" + y + "|") >= 0
+    }
+
     // The type argument this instance was created with for the parameter nm, or "" when
     // there is none to read.
     function dtTypeArg(nm) {
@@ -3526,7 +3767,13 @@ KwDeferred  = "deferred" KwEnd ;
         var bodyStmt = bodyToStmt(m.body)
         var params = m.params
         var gen = m.amod == "sync*" || m.amod == "async*"
-        return function() { declVar(m.name, makeClosure(params, bodyStmt, scopes, gen)) }
+        // The declaration's signature rides on the function value (see dtFnSub).
+        var sig = dtDeclSig(m.fret, params)
+        return function() {
+            var f = makeClosure(params, bodyStmt, scopes, gen)
+            if (sig != "") { fnMetaSet(f, sig, params.length) }
+            declVar(m.name, f)
+        }
     }
 
     // ----- generators -----
@@ -3617,6 +3864,14 @@ KwDeferred  = "deferred" KwEnd ;
                 // StateError("x"), ... The scope was searched first, so a program that
                 // declares a class of the same name keeps its own.
                 if (dxIsName(name)) { return dxNew(name, "", argv) }
+                // An unqualified METHOD of a non-object receiver: `extension IX on int {
+                // String d() => abs().toString(); }`. Same guard and same curated mcall as
+                // the getter arm in core.getMiss; twin of dt_kcall in dart-to-llvm-ir.abnf.
+                if (self != undefined && self != null) {
+                    var plainRecv = true
+                    if (typeof self == "object") { if (self.__class != undefined) { plainRecv = false } }
+                    if (plainRecv) { return mcall(self, name, argv) }
+                }
                 fail("unknown name: " + name)
             }
             var f = anytype
@@ -4215,11 +4470,12 @@ KwDeferred  = "deferred" KwEnd ;
         }
     }
     function collectFn2(items) {
-        var m = {name: "", params: [], body: null, amod: ""}
+        var m = {name: "", params: [], body: null, amod: "", fret: ""}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it == undefined || it == null) { continue }
             if (hasOwn(it, "fname")) { m.name = it.fname }
+            else if (hasOwn(it, "fret")) { m.fret = it.fret }
             else if (hasOwn(it, "params")) { m.params = it.params }
             else if (hasOwn(it, "amod")) { m.amod = it.amod }
             else if (hasOwn(it, "body") || hasOwn(it, "ebody") || hasOwn(it, "none")) { m.body = it }

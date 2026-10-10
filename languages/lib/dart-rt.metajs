@@ -1984,12 +1984,24 @@ function js_dartneg(v) {
 // ~x flips all 64 bits (Dart's int is 64-bit two's complement).
 function js_dartnot(v) { return dtIntOp("^", dtToInt(v), 0 - 1) }
 
+// The signature a function declaration carries in the floor's function-name slot
+// (js_jsfnmeta), "" for any other value. See dtFnSub in
+// languages/dart-to-llvm-ir.abnf; twin of js_dartfnsig in abnf/jsrtdart.go.
+function js_dartfnsig(v) {
+    var s = fnMeta(v, "name")
+    if (typeof s == "string") { return s }
+    return ""
+}
+
 // A METHOD CALL, in the shape js_mcall has: (receiver, name, args array). It
 // answers num's own members (toInt, round, isEven, ...) when the receiver is a
 // number and the name is one of them, and otherwise hands the call straight to
 // the runtime's ordinary member dispatch.
 function js_dartnm(recv, name, args) {
     if (!rtIsArr(args)) { fail("js_dartnm args must be an array") }
+    // x.toString() is Object.toString() unless the class overrides it, and dtStr
+    // answers both - the interpreter's mcall has the same first arm.
+    if (name == "toString" && args.length == 0) { return dtStr(recv) }
     if (dtIsNum(recv)) {
         var hit = dtNumMember(recv, name, args)
         if (hit.hit) { return hit.v }
