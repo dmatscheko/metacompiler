@@ -663,6 +663,17 @@ function js_luarith(op_raw, lv, rv) {
         // falls through to the general path, which makes it a float.
         if (op === 7) { return fa * fb }
     }
+    // Past int32 - an accumulator soon is - + - * of two integral plain doubles
+    // below 2^53 are still exact whenever the result stays below 2^53, so they
+    // need not take the 64 bit pair path, which allocates. `% 1` is the floor's
+    // fmod, not a call; the range test rules out a sized integer as above.
+    if (op <= 2 && typeof lv == "number" && typeof rv == "number" &&
+        lv > -9007199254740992 && lv < 9007199254740992 && rv > -9007199254740992 && rv < 9007199254740992 &&
+        lv % 1 === 0 && rv % 1 === 0) {
+        var d = lv * rv
+        if (op === 0) { d = lv + rv } else if (op === 1) { d = lv - rv }
+        if (d > -9007199254740992 && d < 9007199254740992) { return d }
+    }
     var l = luToNum(lv)
     var r = luToNum(rv)
     if (l === undefined || r === undefined) { luArithFail(op, lv, rv, l !== undefined) }
@@ -921,6 +932,10 @@ function luExpFix(s) {
 // integer past 2^53 has to become its exact decimal TEXT, because its double
 // reading would collide with its neighbour's.
 function js_lukey(v) {
+    // An int32 plain number - the common key - is answered with no call at all:
+    // luNorm builds a sized integer only past 2^53, so ToInt32 of one can never
+    // round-trip (the same guard js_lunum uses).
+    if (typeof v == "number" && (v | 0) === v) { return v }
     // Before the plain arm: a sized integer handed back as itself would be a key
     // the object map cannot hold, and its double reading would collide with its
     // neighbour's - so it addresses the table by its exact decimal TEXT.

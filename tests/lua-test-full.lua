@@ -1355,6 +1355,27 @@ function s32()
     check("pos5", ln(p5) - ln(p0), 12)
 end
 
+-- ===== SECTION 33: integer + - * past int32 =====
+-- Integer sums, differences and products beyond int32 stay exact integers below
+-- 2^53, become exact 64 bit integers above it, and wrap at 2^64; a float operand
+-- makes a float. The operands come from a table so nothing folds at compile time.
+-- Checked against lua 5.5.
+function s33()
+    local v = {3000000000, 9007199254740991, 4294967296, 3037000499, 0.5, 2 ^ 31, 1, 2}
+    check("big1", v[1] + v[1], 6000000000)
+    check("big2", math.type(v[1] + v[1]), "integer")
+    check("big3", v[2] + v[7], 9007199254740992)
+    check("big4", v[2] + v[8] == 9007199254740993 and math.type(v[2] + v[8]) == "integer", true)
+    check("big5", v[3] * v[3], 0)
+    check("big6", v[4] * v[4], 9223372030926249001)
+    check("big7", -v[1] - v[1], -6000000000)
+    check("big8", v[1] + v[5], 3000000000.5)
+    check("big9", math.type(v[6] + v[7]), "float")
+    local acc = 0
+    for i = 1, 2000 do acc = acc + i * 3000000 end
+    check("big10", acc, 6003000000000)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1363,5 +1384,6 @@ s29() -- SECTION-CALL 29
 s30() -- SECTION-CALL 30
 s31() -- SECTION-CALL 31
 s32() -- SECTION-CALL 32
+s33() -- SECTION-CALL 33
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
