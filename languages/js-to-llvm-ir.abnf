@@ -550,7 +550,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // the property/call, not the name, is what is being typed.
 Typeof      = TypeofName | TypeofExpr ;
 TypeofName  <~~ push(makeTypeofName(pop())) ~~>
-            = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotChain ;
+            = KwTypeof NotReserved Id <~~ push(jsbRef(idName(up.in))) ~~> NotChain ;
 TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
             = KwTypeof UnaryExpr ;
 
@@ -1312,7 +1312,7 @@ GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(idName(up.in))) ~~>
+VarRef      <~~ push(makeVarRef(jsbRef(idName(up.in)))) ~~>
             = NotReserved Id ;
 
 // JavaScript's own string literals, deliberately NOT the shared lib's
@@ -3548,6 +3548,31 @@ NotFuncHead = :script(~~
         return true
     }
 
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of) is JavaScript, compiled into a
+    // program that names Set, Map or Array (jsbRef, at the VarRef and typeof-name tags),
+    // like an imported file but emitted FIRST, before every imported file's top level,
+    // since any of them may use it. Twin of jsbLoad in js-interpreter.abnf.
+    var jsbWant = false
+    var jsbDone = false
+    function jsbRef(name) {
+        if (name == "Set" || name == "Map" || name == "Array") { jsbWant = true }
+        return name
+    }
+    function jsbLoad() {
+        if (!jsbWant || jsbDone) { return }
+        jsbDone = true
+        var text = load("lib/js-builtins.js")
+        var asg = c.parse(c.agrammar, text, null, "js-builtins.js")
+        c.pushSource("js-builtins.js", text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        var groups = [importedGroups[importedGroups.length - 1]]
+        for (var gi = 0; gi + 1 < importedGroups.length; gi++) { groups.push(importedGroups[gi]) }
+        importedGroups = groups
+    }
+
     // ----- The emitter state -----
 
     var i8 = llvm.types.I8
@@ -3626,13 +3651,33 @@ NotFuncHead = :script(~~
         curScopeV = saved
         return exitB
     }
+    // What a for-of, a spread, a destructuring or a yield* iterates: what the value's
+    // "@@iterator" method answers when it has one - a Set or a Map of
+    // lib/js-builtins.js, since this subset has no Symbol.iterator - and the value
+    // itself otherwise. Twin of jsIterOf in js-interpreter.abnf.
+    //
+    // This probe and the `next` probes of the iteration sites read with js_jsvget, the
+    // member VALUE read: a class instance's methods live on its __class descriptor, and
+    // under llvm.Run only js_jsvget finds them there.
+    function emitIterOf(b, v) {
+        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "@@iterator")])
+        var callB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, joinB)
+        var rV = callExt(jsThisSet(callB, v), "js_call", [fV, v, callExt(callB, "js_arr_new", [])])
+        callB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(rV, callB)])}
+    }
     // What a spread or an array pattern reads from an ITERATOR (a callable `next`, the
     // structural test makeForOf makes): its values as a fresh array - all of them for
     // n < 0, else at most n, closing an iterator that is not done yet (its return()), as
     // array destructuring does. Any other value passes through and is read by index.
     // Answers {b, v}. Twin of iterArr in js-interpreter.abnf.
     function emitIterArr(b, srcV, n) {
-        var nxV = callExt(b, memGetExt(), [srcV, emitStr(b, "next")])
+        var io = emitIterOf(b, srcV)
+        b = io.b
+        srcV = io.v
+        var nxV = callExt(b, "js_jsvget", [srcV, emitStr(b, "next")])
         var isIt = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [nxV]), emitStr(b, "function")]))
         var initB = curF.NewBlock("")
         var headB = curF.NewBlock("")
@@ -4260,8 +4305,10 @@ NotFuncHead = :script(~~
             // ITERATOR one next() at a time, so 'yield* endless()' is a legal generator
             // rather than a hang inside js_iterable's drain, and anything else - an array,
             // a string - by index.
-            var seqV = r.v
-            var ynxV = callExt(b, memGetExt(), [seqV, emitStr(b, "next")])
+            var yio = emitIterOf(b, r.v)
+            b = yio.b
+            var seqV = yio.v
+            var ynxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])
             var yisItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [ynxV]), emitStr(b, "function")])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysrc"), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yi"), callExt(b, "js_num_i", [handle(0)])])
@@ -5352,7 +5399,10 @@ NotFuncHead = :script(~~
             isItV = hFalse
             nxV = hUndef
             if (lazy) {
-                nxV = callExt(b, memGetExt(), [seqV, emitStr(b, "next")])
+                var sio = emitIterOf(b, seqV)
+                b = sio.b
+                seqV = sio.v
+                nxV = callExt(b, "js_jsvget", [seqV, emitStr(b, "next")])
                 isItV = callExt(b, "js_seq", [callExt(b, "js_typeof", [nxV]), emitStr(b, "function")])
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), seqV])
@@ -6781,6 +6831,7 @@ NotFuncHead = :script(~~
     }
 
     function buildMain(itemsIn) {
+        if (importDepth == 0) { jsbLoad() }
         // The file's own directive prologue decides the strictness every top-level
         // function inherits. The mark is stripped before the statements are emitted.
         // An IMPORTED file's own file-level directive is dropped rather than carried:
@@ -6836,6 +6887,9 @@ NotFuncHead = :script(~~
         // this is a real function, and String.fromCharCode still resolves through
         // js_jsmcall.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "String"), callExt(b, "js_jsstringfn", [])])
+        // The Array global: a real function (Array(n), new Array(n)); Array.isArray
+        // resolves through js_jsmcall, and lib/js-builtins.js adds Array.from / of.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Array"), callExt(b, "js_jsarrayfn", [])])
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BigInt"), callExt(b, "js_jsbigintfn", [])])

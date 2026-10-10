@@ -254,8 +254,12 @@ func jsvIsObjectGlobal(v interface{}) bool {
 	return ok && o.props["__jsobject"] != nil
 }
 
-// jsvIsArrayGlobal recognizes the root scope's `Array` binding by its one member.
+// jsvIsArrayGlobal recognizes the `Array` global: a js program's own (js_jsarrayfn)
+// or the root scope's binding, by its one member.
 func jsvIsArrayGlobal(v interface{}) bool {
+	if hf, ok := v.(*hostFunc); ok {
+		return hf.name == "Array"
+	}
 	o, ok := v.(*jsObject)
 	if !ok {
 		return false
@@ -899,6 +903,16 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			return argAt(args, 0), true
 		case "is":
 			return rt.strictEq(argAt(args, 0), argAt(args, 1)), true
+		}
+		return nil, false
+	}
+
+	// Array.isArray on a js program's `Array` global (js_jsarrayfn). Array.from and
+	// Array.of are lib/js-builtins.js's own properties of it, found by the fallback.
+	if hf, ok := target.(*hostFunc); ok && hf.name == "Array" {
+		if name == "isArray" {
+			_, isArr := argAt(args, 0).(*jsArray)
+			return isArr, true
 		}
 		return nil, false
 	}
@@ -1623,6 +1637,33 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}))
 	}
 
+	// A js program's `Array` global, declared in its own scope like String: Array(n)
+	// and new Array(n) are n empty slots (read as undefined), any other argument list
+	// is the array of the arguments. Twins: js_jsarrayfn in languages/lib/js-rt.metajs
+	// and jsArrayFn in js-interpreter.abnf.
+	// Array.isArray READ AS A VALUE (js_jsvget); a call is answered by jsvMethod.
+	isArrayFn := jsHostFunc("isArray", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		_, isArr := argAt(args, 0).(*jsArray)
+		return isArr
+	})
+	m["js_jsarrayfn"] = func(a []uint64) uint64 {
+		return w(jsHostFunc("Array", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if len(args) == 1 {
+				if n, isNum := args[0].(float64); isNum {
+					if !(n >= 0 && n <= 4294967295 && n == math.Trunc(n)) {
+						rt.bigRaise("RangeError: Invalid array length")
+					}
+					out := &jsArray{elems: make([]interface{}, int(n))}
+					for i := range out.elems {
+						out.elems[i] = jsUndef
+					}
+					return out
+				}
+			}
+			return &jsArray{elems: append([]interface{}{}, args...)}
+		}))
+	}
+
 	// The equality and relational operators WITH ToPrimitive.
 	m["js_jseq"] = func(a []uint64) uint64 { return boolH(rt.jsvLooseEq(u(a[0]), u(a[1]))) }
 	m["js_jsne"] = func(a []uint64) uint64 { return boolH(!rt.jsvLooseEq(u(a[0]), u(a[1]))) }
@@ -1884,6 +1925,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			// an own `f.toString = ...` still wins.
 			if m := rt.jsvFnMethod(u(a[0]), rt.toString(u(a[1]))); m != nil {
 				return w(m)
+			}
+			if hf, isFn := u(a[0]).(*hostFunc); isFn && hf.name == "Array" && rt.toString(u(a[1])) == "isArray" {
+				return w(isArrayFn)
 			}
 			return r
 		}

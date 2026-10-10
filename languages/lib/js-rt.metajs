@@ -287,6 +287,11 @@ var jvMathHid = anytype
 // recognize the receiver of String.fromCharCode (the Go twin tests hf.name).
 var jvStringFn = anytype
 
+// The `Array` global js_jsarrayfn handed out, for Array.isArray and instanceof, and
+// Array.isArray read as a value (jvValueMiss).
+var jvArrayFn = anytype
+var jvIsArrayV = anytype
+
 // ===================================================== function properties ==
 //
 // `f.p = 1` on a FUNCTION. A function value is a closure handle and the C floor's
@@ -1332,6 +1337,10 @@ function jvValueMiss(o, key) {
             return undefined
         }
     }
+    if (key == "isArray" && jvArrayFn !== undefined && o === jvArrayFn) {
+        if (jvIsArrayV === undefined) { jvIsArrayV = function (v) { return Array.isArray(v) } }
+        return jvIsArrayV
+    }
     return undefined
 }
 
@@ -1650,14 +1659,15 @@ function jvCtorDescOf(fn) {
     return undefined
 }
 
-// The `Object` global is a bare marked object; the `Array` global is the root
-// binding, recognized by its ONE member.
+// The `Object` global is a bare marked object; the `Array` global is js_jsarrayfn's
+// function, or the root binding, recognized by its ONE member.
 function jvIsObjectGlobal(v) {
     if (!jvIsObj(v)) { return false }
     return v["__jsobject"] !== undefined
 }
 
 function jvIsArrayGlobal(v) {
+    if (jvArrayFn !== undefined && v === jvArrayFn) { return true }
     if (!jvIsObj(v)) { return false }
     if (v["isArray"] === undefined) { return false }
     return keysOf(v).length === 1
@@ -1948,6 +1958,28 @@ function js_jsstringfn() {
         }
     }
     return jvStringFn
+}
+
+// A js program's `Array` global: Array(n) and new Array(n) are n empty slots (read as
+// undefined), any other argument list is the array of the arguments. Twins:
+// js_jsarrayfn in abnf/jsrtjsprint.go and jsArrayFn in js-interpreter.abnf.
+function js_jsarrayfn() {
+    if (jvArrayFn === undefined) {
+        jvArrayFn = function () {
+            var out = []
+            if (arguments.length === 1 && typeof arguments[0] == "number") {
+                var n = arguments[0]
+                if (!(n >= 0 && n <= 4294967295 && Math.floor(n) === n)) { jbRaise("RangeError: Invalid array length") }
+                var i = 0
+                while (i < n) { out.push(undefined); i = i + 1 }
+                return out
+            }
+            var j = 0
+            while (j < arguments.length) { out.push(arguments[j]); j = j + 1 }
+            return out
+        }
+    }
+    return jvArrayFn
 }
 
 // js_jsprintfn("println"|"print") answers the host FUNCTION VALUE the grammar
@@ -3117,6 +3149,10 @@ function js_jsmcall(recv, key, args) {
         var nm = jvNumMethod(recv, name, args)
         if (nm !== jvMiss) { return nm }
     }
+    // Array.isArray on the `Array` global, last: no other receiver is a function
+    // value. Array.from and Array.of are lib/js-builtins.js's own properties of it,
+    // which jvFallbackCall finds.
+    if (name == "isArray" && jvArrayFn !== undefined && recv === jvArrayFn) { return Array.isArray(args[0]) }
     return jvFallbackCall(recv, name, args)
 }
 

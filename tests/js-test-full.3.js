@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,8 +6,9 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56, the call/class/private-name model, the Unicode
-//                             identifier tables, iterators, derived constructors, JSON, guards
+//   tests/js-test-full.3.js   sections 44-56 and 58, the call/class/private-name model, the
+//                             Unicode identifier tables, iterators, derived constructors,
+//                             JSON, guards, Set and Map
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1109,6 +1110,62 @@ function anyErr(f) {
     catch (e) { return [e instanceof TypeError, e instanceof SyntaxError, e.message] }
 }
 
+// ===== SECTION 58: Set, Map, Array.from and the Array global =====
+// Set, Map, Array.from and Array.of are lib/js-builtins.js, JavaScript compiled into
+// every program that names them; a Set or a Map iterates through its "@@iterator"
+// method, which every iteration site asks for (this subset has no Symbol.iterator).
+// The Array global is the engines' own function: Array(n), new Array(n), isArray.
+// Values read off node 24.
+function s58() {
+    var src = [3, 1, 3, 2]
+    function* g58() { yield src[0]; yield src[1]; yield src[0] }
+    function err58(f) { try { f(); return "none" } catch (e) { return e.constructor.name + ": " + e.message } }
+    check("col1", Array.from([1, 2]).join(",") === "1,2" && Array.from("abc", (c, i) => c + i).join() === "a0,b1,c2"
+        && Array.from({length: 3, 0: "a", 2: "c"}).join("|") === "a||c" && Array.from(g58()).join() === "3,1,3")
+    check("col2", Array.from([1, 2], function (x) { return x * this.k }, {k: 10}).join() === "10,20"
+        && Array.from(src[0]).length === 0 && Array.of(src[0]).length === 1 && Array.of(1, 2, 3).join() === "1,2,3")
+    check("col3", err58(() => Array.from(null)) === "TypeError: object null is not iterable (cannot read property Symbol(Symbol.iterator))"
+        && err58(() => Array.from([1], src[0])) === "TypeError: number 3 is not a function")
+    var s = new Set(g58())
+    check("col4", s.size === 2 && Array.from(s).join() === "3,1" && [...s].join() === "3,1" && s.has(1) && !s.has("1"))
+    check("col5", new Set([NaN, NaN, 0, -0, "0", undefined, null, undefined]).size === 5 && 1 / [...new Set([-0])][0] === Infinity
+        && [...new Set("hello")].join("") === "helo")
+    s.add(src[3]).add(src[0])
+    check("col6", s.size === 3 && s.delete(1) === true && s.delete(1) === false && [...s].join() === "3,2")
+    var seen = []
+    for (var v of new Set([1, 2, 3])) { seen.push(v) }
+    var live = new Set([1, 2, 3])
+    var order = []
+    for (var w of live) { order.push(w); if (w === 1) { live.delete(2); live.add(4) } }
+    check("col7", seen.join() === "1,2,3" && order.join() === "1,3,4")
+    var m = new Map([[1, "a"], ["1", "b"]])
+    m.set(src[1], "c").set(src[3], "d")
+    check("col8", m.size === 3 && m.get(1) === "c" && m.get("1") === "b" && m.get(2) === "d" && m.get(9) === undefined
+        && [...m.keys()].join() === "1,1,2" && [...m.values()].join() === "c,b,d")
+    var pairs = []
+    for (var [k, val] of m) { pairs.push(k + "=" + val) }
+    var each = []
+    m.forEach(function (x, y, mm) { each.push(y + ":" + x + (mm === m)) })
+    check("col9", pairs.join() === "1=c,1=b,2=d" && each.join() === "1:ctrue,1:btrue,2:dtrue")
+    var key = {}
+    var om = new Map([[key, 1], [{}, 2]])
+    check("col10", om.get(key) === 1 && om.get({}) === undefined && om.size === 2 && new Map([[NaN, 7]]).get(NaN) === 7)
+    m.clear()
+    check("col11", m.size === 0 && m.get(1) === undefined && err58(() => new Map([1])) === "TypeError: Iterator value 1 is not an entry object"
+        && err58(() => new Set(src[0])) === "TypeError: number 3 is not iterable (cannot read property Symbol(Symbol.iterator))")
+    function* d58() { yield* new Set([8, 9]) }
+    var [a58, b58] = new Set([5, 6, 7])
+    check("col12", [...d58()].join() === "8,9" && a58 + b58 === 11 && new Set() instanceof Set && !(new Set() instanceof Map)
+        && String(new Set()) === "[object Set]" && JSON.stringify(new Map([[1, 2]])) === "{}" && Object.keys(new Set([1])).length === 0)
+    check("col13", typeof Set === "function" && typeof Map === "function" && typeof Array === "function"
+        && Map.name + Set.name + Array.from.name + Array.of.name === "MapSetfromof")
+    check("col14", Array(src[0]).length === 3 && Array(src[0]).join("-") === "--" && new Array(src[3], src[0]).join() === "2,3"
+        && Array("3").length === 1 && Array().length === 0 && [] instanceof Array && Array.isArray([]) && !Array.isArray("x")
+        && err58(() => Array(-1)) === "RangeError: Invalid array length" && err58(() => Array(1.5)) === "RangeError: Invalid array length")
+    var isArr = Array.isArray
+    check("col15", typeof isArr === "function" && [[1], [2]].every(Array.isArray) && !isArr("x"))
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1125,6 +1182,7 @@ function main() {
     s54() // SECTION-CALL 54
     s55() // SECTION-CALL 55
     s56() // SECTION-CALL 56
+    s58() // SECTION-CALL 58
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
