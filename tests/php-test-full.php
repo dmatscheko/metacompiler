@@ -1282,6 +1282,32 @@ function s32() {
     check("vs10", (new S32K())->m() === 34);
 }
 
+// ===== SECTION 33: empty() never diagnoses; an index write vivifies =====
+class S33M {
+    public $log = "";
+    function __isset($n) { $this->log .= "i"; return $n === "yes"; }
+    function __get($n) { $this->log .= "g"; return 1; }
+}
+function s33() {
+    check("em1", empty($s33undef) && empty($s33undef[0]) && empty($s33undef[0][1]));
+    $n = null;
+    check("em2", empty($n->p) && empty($s33undef->p));
+    $s = "ab";
+    check("em3", empty($s[5]) && !empty($s[1]));
+    // empty() asks __isset first and reads (__get) only what is set.
+    $m = new S33M();
+    check("em4", empty($m->no) && $m->log === "i");
+    check("em5", !empty($m->yes) && $m->log === "iig");
+    $i = 0;
+    $a = [0, 5];
+    check("em6", !empty($a[++$i]) && $i === 1);
+    $u[0] = 1;
+    $u[] = 2;
+    $w = null;
+    $w[] = 7;
+    check("viv1", $u === [1, 2] && $w === [7]);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1320,6 +1346,7 @@ function main() {
     s30(); // SECTION-CALL 30
     s31(); // SECTION-CALL 31
     s32(); // SECTION-CALL 32
+    s33(); // SECTION-CALL 33
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

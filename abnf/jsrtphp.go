@@ -2059,9 +2059,8 @@ func init() {
 		// The ROOT of the walk: `$e = null; $e["x"]["y"] = 5` makes $e an array.
 		// A pure function of the value - the caller writes the answer back with
 		// its own setVarV, so a $e that is a REFERENCE has the array installed
-		// through its cell. Only a target with more than one step gets this,
-		// exactly as in the interpreter (resolveRefPhp guards on path.length > 1),
-		// so `$a[0] = 1` on a null $a stays an error in both halves.
+		// through its cell. A one-step target (`$a[0] = 1`) is vivified inline by
+		// the emitter (vivRootV in php-to-llvm-ir.abnf).
 		m["js_phvivroot"] = func(a []uint64) uint64 {
 			if cur := u(a[0]); !isNullish(cur) {
 				return a[0]

@@ -920,12 +920,17 @@ Primary     = "(" Expression ")"
             | IncludeExpr
             | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
-            | IssetExpr | EmptyExpr | VarVar | VarRef | StaticExpr | Call | ConstRef ;
+            | IssetExpr | EmptyTgt | EmptyExpr | VarVar | VarRef | StaticExpr | Call | ConstRef ;
 
 // isset()/empty() are language constructs, not calls: isset() must NOT evaluate a
 // missing variable into an error, and empty() applies PHP truthiness.
 IssetExpr   <~~ push(makeIsset(takeAll())) ~~>
             = KwIsset "(" IsTarget { "," IsTarget } [ "," ] ")" ;
+// empty() of a STORAGE LOCATION is decided here, at parse time: it reads like
+// isset() and never diagnoses (`empty($undef[0])` is true); any other operand is
+// an ordinary expression.
+EmptyTgt    <~~ push(makeEmptyTgt(pop())) ~~>
+            = KwEmpty "(" TgtOnly ")" ;
 EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
             = KwEmpty "(" Expression ")" ;
 // $$name / ${expr}: a variable variable - the NAME is computed at run time.
@@ -2390,6 +2395,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     function refExists(ref) {
+        var v = anytype
+        v = refProbe(ref)
+        return v !== null && v !== undefined
+    }
+    // The value at a storage location, or null when any step of it is missing -
+    // the walk isset() and empty() share, which never diagnoses.
+    function refProbe(ref) {
         var o = anytype
         // A CALL head has no variable to probe: the call runs and the walk starts
         // from what it returned.
@@ -2400,43 +2412,43 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         else if (ref.sref != null && ref.sref != undefined) {
             var cell = anytype
             cell = null
-            try { cell = ref.sref() } catch (e) { return false }
-            if (cell == null || cell == undefined) { return false }
+            try { cell = ref.sref() } catch (e) { return null }
+            if (cell == null || cell == undefined) { return null }
             o = deref(cell.v)
         }
         else {
             var nm = refName(ref)
-            if (!varExists(nm)) { return false }
+            if (!varExists(nm)) { return null }
             o = getVar(nm)
         }
         for (var i = 0; i < ref.path.length; i++) {
-            if (o === null || o === undefined) { return false }
+            if (o === null || o === undefined) { return null }
             var st = stepOf(ref.path[i])
-            if (st.append === true) { return false }
+            if (st.append === true) { return null }
             if (st.key != undefined) {
                 if (isObj(o)) {
                     var at = dictFind(o.p, st.key)
                     if (at < 0) {
                         var mi = classFind(o.__class, "__isset")
-                        if (mi != null && !phptest(mi(o, argsOf([st.key])))) { return false }
-                        if (mi == null) { return false }
+                        if (mi != null && !phptest(mi(o, argsOf([st.key])))) { return null }
+                        if (mi == null) { return null }
                         o = phpGetProp(o, st.key)
                     } else { o = deref(o.p.vals[at]) }
-                } else { return false }
+                } else { return null }
                 continue
             }
             var k = anytype
             k = st.idx()
-            if (isArr(o)) { if (!arrHas(o, k)) { return false } }
+            if (isArr(o)) { if (!arrHas(o, k)) { return null } }
             // A STRING OFFSET is a containment question too: phpIndex answers "" for
             // an offset outside the string, which is not null, so the walk alone would
             // say true. PHP 8 says false for an out-of-range, a too-negative and a
             // non-numeric offset - isset() never diagnoses, it just answers. Twins:
             // phArrHas in languages/lib/php-rt.metajs, phpArrHas in abnf/jsrtphp.go.
-            else if (typeof o == "string") { if (!strOffsetExists(o, k)) { return false } }
+            else if (typeof o == "string") { if (!strOffsetExists(o, k)) { return null } }
             o = phpIndex(o, k)
         }
-        return o !== null && o !== undefined
+        return o
     }
     // Is `k` a valid, OCCUPIED offset of the string `s`? An integer-ish key inside
     // [-length, length-1]; a negative one counts from the end (PHP 7.1+), which is
@@ -2457,6 +2469,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return n < s.length
     }
     function makeEmpty(t) { return function() { return !phptest(t()) } }
+    function makeEmptyTgt(ref) { return function() { return !phptest(refProbe(ref)) } }
     function makeUnset(items) {
         var refs = []
         for (var i = 0; i < items.length; i++) { if (items[i].istgt != undefined) { refs.push(items[i].istgt) } }
@@ -3694,7 +3707,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var sc = ref.sref == null ? null : ref.sref()
         o = sc == null ? getVar(refName(ref)) : deref(sc.v)
-        if (viv && ref.path.length > 1 && (o === null || o === undefined)) {
+        // `$u[0] = 1` and `$u[] = 1` make a null variable an array as well; a
+        // single `->p` step does not (PHP raises on a property of null).
+        if (viv && (o === null || o === undefined)
+            && (ref.path.length > 1 || (ref.path[0].key == undefined && ref.path[0].keyT == undefined))) {
             o = newArr()
             if (sc == null) { phpSet(refName(ref), o) } else { sc.v = o }
         }

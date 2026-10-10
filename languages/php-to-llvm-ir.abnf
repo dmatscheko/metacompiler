@@ -947,7 +947,7 @@ StaticSfx   <~~ push(makeStaticSfx(takeAll())) ~~>
             = "::" StaticMember [ StaticArgs ] ;
 
 Primary     = "(" Expression ")"
-            | IssetExpr | EmptyExpr
+            | IssetExpr | EmptyTgt | EmptyExpr
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
             | IncludeExpr
             | HeredocLit | DqStr | SqStr | NumLit
@@ -985,6 +985,11 @@ ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
 // empty(e) is the negation of PHP truthiness, and unset() removes the binding.
 IssetExpr   <~~ push(makeIsset(takeAll())) ~~>
             = KwIsset "(" TgtOnly { "," TgtOnly } [ "," ] ")" ;
+// empty() of a STORAGE LOCATION is decided here, at parse time: it walks the
+// location like isset() and never diagnoses (`empty($undef[0])` is true); any
+// other operand is an ordinary expression.
+EmptyTgt    <~~ push(makeEmptyTgt(pop())) ~~>
+            = KwEmpty "(" TgtOnly ")" ;
 EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
             = KwEmpty "(" Expression ")" ;
 UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
@@ -3512,6 +3517,39 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: r.b, v: callExt(r.b, "js_phnot", [r.v])}
         }
     }
+    // empty() of a location: true when it is not set, else the negated truthiness of
+    // what it holds. ONE non-creating walk serves both questions, so an index
+    // expression on the path runs once. Twin of makeEmptyTgt in php-interpreter.abnf.
+    function makeEmptyTgt(ref) {
+        return function(b) {
+            if (ref.path.length == 0) {
+                var r0 = anytype
+                if (ref.sbase != undefined) {
+                    var rb = ref.sbase(b)
+                    var rs = sNameV(rb.b, ref)
+                    r0 = {b: rs.b, v: callExt(rs.b, "js_phsget", [rb.v, rs.v])}
+                } else {
+                    var rn = refNameV(b, ref)
+                    r0 = readVarV(rn.b, rn.v)
+                }
+                return {b: r0.b, v: callExt(r0.b, "js_phnot", [r0.v])}
+            }
+            var p = emitRefPath(b, ref)
+            b = p.b
+            if (p.kind == "append") { return {b: b, v: hTrue} }
+            var is = anytype
+            if (p.kind == "field") { is = emitPropIsset(b, p.obj, p.key) }
+            else { is = {b: b, v: callExt(b, "js_phisset", [p.obj, p.key])} }
+            b = is.b
+            var setB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, is.v), setB, mergeB)
+            var rv = readRefSlot(setB, p)
+            var nv = callExt(rv.b, "js_phnot", [rv.v])
+            rv.b.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(hTrue, b), llvm.ir.NewIncoming(nv, rv.b)])}
+        }
+    }
     // unset($x): drop the binding. A variable becomes undefined in its own slot - NOT
     // through a cell, since unset() breaks the reference rather than clearing what it
     // points at - an element is removed from the array and a property is cleared.
@@ -4027,6 +4065,21 @@ KwInstanceof = "instanceof" KwEnd ;
         if (!viv) { return phDeref(rn.b, rawVarV(rn.b, rn.v)) }
         return {b: rn.b, v: rawVarV(rn.b, rn.v)}
     }
+    // An index or '[]' write into a null or undefined variable makes it an array
+    // (`$u[0] = 1`, `$u[] = 1`; PHP converts null silently). `v` is the variable's
+    // dereferenced value; the answer is the container to write into. The test is
+    // inline because a write into an existing array is the hot case.
+    function vivRootV(b, nameV, v) {
+        var vivB = curF.NewBlock("")
+        var haveB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isNullishHandle(b, v), vivB, haveB)
+        var na = callExt(vivB, "js_pharr", [])
+        vivB = setVarV(vivB, nameV, na)
+        vivB.NewBr(mergeB)
+        haveB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(na, vivB), llvm.ir.NewIncoming(v, haveB)])}
+    }
     // emitRefPath walks a target's path down to the container the LAST step writes
     // into. `viv` says whether the walk may create what is missing: PHP auto-vivifies
     // the intermediate levels of an assignment target ($a[0]["k"] = 1 makes $a[0] an
@@ -4042,14 +4095,22 @@ KwInstanceof = "instanceof" KwEnd ;
         var rr = refRootV(b, ref, viv)
         b = rr.b
         var o = rr.v
-        // A multi-step target on a null variable makes that variable an array, and the
-        // answer is written back so a $x that is a REFERENCE gets it through its cell.
+        // A target on a null variable makes that variable an array, and the answer is
+        // written back so a $x that is a REFERENCE gets it through its cell. A
+        // one-step '->p' target is left alone: PHP raises on a property of null.
         if (viv && ref.path.length > 1 && ref.sbase == undefined && ref.headT == undefined) {
             var rd0 = phDeref(b, o)
             b = rd0.b
             o = callExt(b, "js_phvivroot", [rd0.v])
             var rn9 = refNameV(b, ref)
             b = setVarV(rn9.b, rn9.v, o)
+        } else if (viv && ref.sbase == undefined && ref.headT == undefined
+                   && (ref.path[0].append === true || ref.path[0].idx != undefined)) {
+            var rd1 = phDeref(b, o)
+            var rn8 = refNameV(rd1.b, ref)
+            var rv1 = vivRootV(rn8.b, rn8.v, rd1.v)
+            b = rv1.b
+            o = rv1.v
         }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
@@ -4172,6 +4233,8 @@ KwInstanceof = "instanceof" KwEnd ;
                 var rn6 = refNameV(b, ref)
                 b = rn6.b
                 var rcv = readVarV(b, rn6.v)
+                b = rcv.b
+                rcv = vivRootV(b, rn6.v, rcv.v)
                 b = rcv.b
                 var rk6 = ref.path[0].idx(b)
                 b = rk6.b
