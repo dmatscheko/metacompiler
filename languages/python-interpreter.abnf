@@ -903,10 +903,10 @@ FBrace      = "{{" | "}}" ;
 // `f'\N{GREEK CAPITAL LETTER DELTA}'` would not parse.
 // It has to be tried BEFORE StrEsc2, which would otherwise take the `\N` and commit.
 // The name characters are exactly the ones a Unicode character name may hold -
-// upper-case letters, digits, spaces and hyphens - which keeps the rule from running
+// letters, digits, spaces and hyphens - which keeps the rule from running
 // past a missing `}` and eating the closing quote; an unterminated `\N{` therefore
 // falls back to StrEsc2. The NAME TABLE is a small subset (pyUniNames); a name outside
-// it parses and renders as the empty string.
+// it is the SyntaxError CPython raises for an unknown name.
 FNamedEsc   = "\\N{" FNameCh { FNameCh } "}" ;
 // A backslash escape inside an f-string never consumes a BRACE. CPython's f-string
 // lexer treats `{` and `}` as structural first: `f'\{6*7}'` is a (warned about, still
@@ -918,7 +918,7 @@ FNamedEsc   = "\\N{" FNameCh { FNameCh } "}" ;
 FStrEsc     = "\\" FEscCh ;
 FEscCh      = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 FBksl       = "\\" ;
-FNameCh     = "0"..."9" | "A"..."Z" | " " | "-" ;
+FNameCh     = "0"..."9" | "A"..."Z" | "a"..."z" | " " | "-" ;
 FPlainD     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 FPlainS     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 FPlain3D    = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
@@ -6413,8 +6413,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- String, bytes and f-string literals -----
     // Decode a Python string body. `raw` keeps every backslash; otherwise the escapes
     // are Python's: the single-character ones, \OOO octal, \xHH, \uXXXX, \UXXXXXXXX,
-    // \N{NAME} (a small table of the names a program is likely to spell out) and a
-    // backslash before a newline, which joins the lines.
+    // \N{NAME} (a small table of the names a program is likely to spell out, matched
+    // without regard to case as CPython does) and a backslash before a newline,
+    // which joins the lines. The full name table is ~34,000 names and 1 MB of text
+    // beyond the algorithmic ones, so a name outside the table is an error rather
+    // than a silent "".
     var pyUniNames = {}
     pyUniNames["BULLET"] = 8226
     pyUniNames["DEGREE SIGN"] = 176
@@ -6430,6 +6433,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyUniNames["EM DASH"] = 8212
     pyUniNames["SNOWMAN"] = 9731
     pyUniNames["NO-BREAK SPACE"] = 160
+    // An unknown name is CPython's compile-time SyntaxError, whose positions are
+    // the escape's first and last BYTE in the UTF-8 of the literal chunk.
+    // Twin of pyUniNameErr in python-to-llvm-ir.abnf.
+    function pyUniNameErr(text, at, close) {
+        fail("SyntaxError: (unicode error) 'unicodeescape' codec can't decode bytes in position " +
+             pyUtf8Len(text, 0, at) + "-" + pyUtf8Len(text, 0, close) + ": unknown Unicode character name")
+    }
+    function pyUtf8Len(text, from, to) {
+        var n = 0
+        for (var q = from; q < to; q++) {
+            var cu = text.charCodeAt(q)
+            if (cu < 128) { n += 1 } else if (cu < 2048) { n += 2 } else if (cu >= 55296 && cu <= 57343) { n += 2 } else { n += 3 }
+        }
+        return n
+    }
     function pyUnescape(text, raw) {
         if (raw) { return text }
         var out = ""
@@ -6467,8 +6485,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (text.charAt(cj) == "}") { close = cj; break }
                 }
                 if (close > 0) {
-                    var nm = text.substring(i + 3, close)
-                    out += hasOwn(pyUniNames, nm) ? codePoint(pyUniNames[nm]) : ""
+                    var nm = text.substring(i + 3, close).toUpperCase()
+                    if (!hasOwn(pyUniNames, nm)) { pyUniNameErr(text, i, close) }
+                    out += codePoint(pyUniNames[nm])
                     i = close + 1
                     continue
                 }

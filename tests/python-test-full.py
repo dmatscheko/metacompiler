@@ -3228,6 +3228,10 @@ def s52():
     check("aug1", c.k == 6 and a == [1, 7, 1, 7, 3, 4])
     check("aug2", log == ["f", "v", "g1", "v", "g0", "g2", "g3", "get3", "v", "set3=5"])
 
+# ===== SECTION 53: a \N{...} name is matched without regard to case =====
+def s53():
+    check("uname1", "\N{bullet}" == "\u2022" and "\N{Euro Sign}" == "\u20ac" and f"x\N{em dash}{1}" == "x\u20141")
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3282,5 +3286,6 @@ def main():
     s50() # SECTION-CALL 50
     s51() # SECTION-CALL 51
     s52() # SECTION-CALL 52
+    s53() # SECTION-CALL 53
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

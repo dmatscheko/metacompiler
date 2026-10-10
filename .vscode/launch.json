@@ -629,6 +629,18 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-import.py", "-q"]
         },
         {
+            "name": "Python unknown \\N{} name (interpreter) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-fail-test-uniname.py", "-q"]
+        },
+        {
+            "name": "Python unknown \\N{} name (compiler) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-uniname.py", "-q"]
+        },
+        {
             "name": "Python unresolved import warned+ignored",
             "type": "go",
             "request": "launch",
