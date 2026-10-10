@@ -3172,6 +3172,46 @@ def s64
   check("ib64b", n[3][70] == 1 && n[3][69] == 0 && n[3][71] == 0 && n[4][70] == 1 && n[4][69] == 0 && n[4][300] == 1)
 end
 
+# ===== SECTION 65: a singleton #to_s / #inspect; instance_variable_get / _set =====
+# A `def o.to_s` is what puts and interpolation print and a `def o.inspect` what p
+# prints. instance_variable_set writes the slot an @ivar reads, and a name that is
+# not an @ivar name is a NameError. Every right-hand side is /usr/bin/ruby 2.6.10's
+# own answer. THIS SECTION RUNS UNDER REAL RUBY.
+class S65K
+  def initialize
+    @x = 1
+  end
+
+  def x
+    @x
+  end
+end
+def s65
+  o = Object.new
+  def o.to_s
+    "S65"
+  end
+  q = Object.new
+  def q.inspect
+    "Q65"
+  end
+  check("sg65a", "#{o}" == "S65" && o.to_s == "S65" && [q].inspect == "[Q65]" && q.inspect == "Q65")
+  k = S65K.new
+  names = [:@x, "@y"]
+  r = names.map { |n| k.instance_variable_set(n, 7) }
+  check("iv65a", r == [7, 7] && k.x == 7 && k.instance_variable_get("@y") == 7 && k.instance_variable_get(:@nope).nil?)
+  bad = ["a", "@@a", "@1"]
+  msgs = bad.map do |n|
+    begin
+      k.instance_variable_get(n)
+    rescue NameError => e
+      e.message
+    end
+  end
+  check("iv65b", msgs == ["`a' is not allowed as an instance variable name", "`@@a' is not allowed as an instance variable name",
+                          "`@1' is not allowed as an instance variable name"])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3198,5 +3238,6 @@ s61() # SECTION-CALL 61
 s62() # SECTION-CALL 62
 s63() # SECTION-CALL 63
 s64() # SECTION-CALL 64
+s65() # SECTION-CALL 65
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

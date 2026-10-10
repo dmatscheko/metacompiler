@@ -6361,6 +6361,11 @@ function rbMethod(target, name, args) {
             return rbSingCopy(target, name == "clone")
         }
     }
+    if (name == "instance_variable_get" || name == "instance_variable_set") {
+        if (rbUserObj(target) && rbFindMethod(target, name) === undefined) {
+            return rbIvarAccess(target, name, args)
+        }
+    }
     if (name == "frozen?") {
         if (typeof target == "string") { return true }
         return rbIsNum(target)
@@ -7037,6 +7042,35 @@ function js_rsplitw(v, asSym) {
 
 // Ruby indexing: a Proc calls itself, a user class dispatches `def [](i)`, a Hash
 // answers nil for a missing key and an Array answers nil out of range.
+// Object#instance_variable_get / _set. Twin of ivarAccess in ruby-interpreter.abnf.
+function rbIvarAccess(o, name, args) {
+    var n = rbStr(rbArgAt(args, 0))
+    if (!rbIvarNameOk(n)) { rbRaiseErr("NameError", "`" + n + "' is not allowed as an instance variable name") }
+    var k = n.substring(1)
+    if (name == "instance_variable_set") {
+        var v = rbArgAt(args, 1)
+        o[k] = v
+        return v
+    }
+    var got = o[k]
+    if (got === undefined) { return null }
+    return got
+}
+
+// Twin of ivarNameOk in ruby-interpreter.abnf.
+function rbIvarNameOk(n) {
+    if (n.length < 2 || n.charCodeAt(0) != 64) { return false }
+    var i = 1
+    while (i < n.length) {
+        var c = n.charCodeAt(i)
+        var ok = c == 95 || c >= 128 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+        if (i > 1 && c >= 48 && c <= 57) { ok = true }
+        if (!ok) { return false }
+        i = i + 1
+    }
+    return true
+}
+
 // Integer#[]. Twin of intBitAt in ruby-interpreter.abnf.
 function rbIntBit(n, i) {
     if (rbToF(i) < 0) { return 0 }

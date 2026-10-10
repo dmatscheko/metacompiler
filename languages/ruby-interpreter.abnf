@@ -5285,9 +5285,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isMatchD(v)) { return rxGroup(v.rev.prog, v.text, v.m, 0) }
         if (Array.isArray(v)) { return rinspect(v) }
         if (isDict(v)) { return rinspect(v) }
-        // to_s may be inherited (Exception#to_s lives on the base class), so the whole
-        // ancestor chain has to be searched - a direct property read on v.__class misses it.
-        if (isUserObj(v) && typeof lookupMethod(v.__class, "to_s") == "function") { return rstr(mcall(v, "to_s", [], null)) }
+        // to_s may be a singleton (`def o.to_s`) or inherited (Exception#to_s lives on
+        // the base class): singRespond searches both, as mcall dispatches.
+        if (isUserObj(v) && singRespond(v, "to_s")) { return rstr(mcall(v, "to_s", [], null)) }
         // A plain instance with no #to_s of its own. MRI writes
         // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
         // the address and the instance variables are left off rather than invented -
@@ -5379,7 +5379,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // charge. Twins: rubyExcInspect of abnf/jsrt.go and rbExcInspect of
         // lib/ruby-rt.metajs.
         if (isUserObj(v)) {
-            if (typeof lookupMethod(v.__class, "inspect") == "function") {
+            if (singRespond(v, "inspect")) {
                 return rstr(mcall(v, "inspect", [], null))
             }
             if (isExcObj(v)) { return excInspect(v.__class.__name, rstr(v)) }
@@ -7916,6 +7916,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // class over and #dup does not.
                 // Reached only when the class defines neither, so a user #dup wins.
                 if (name == "dup" || name == "clone") { return singCopy(target, name == "clone") }
+                if (name == "instance_variable_get" || name == "instance_variable_set") {
+                    return ivarAccess(target, name == "instance_variable_set", args)
+                }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
             }
             // The block is BOTH put on blockStack (so `yield` in the body finds it) and
@@ -9403,6 +9406,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Object#dup / #clone would have nothing to copy without this list. It is
     // __-prefixed, so it stays out of every other reader. The compiled halves need
     // no list: keysOf / o.keys answer exactly the same set there.
+    // Object#instance_variable_get / _set: the slot an @ivar reference reads, named
+    // with its "@". Anything that is not an @ivar name is MRI's NameError. Twins:
+    // rubyIvarAccess in abnf/jsrtruby.go, rbIvarAccess in lib/ruby-rt.metajs.
+    function ivarAccess(o, set, args) {
+        var n = rstr(args[0])
+        if (!ivarNameOk(n)) {
+            throw {__exc: true, v: mkExc(hostGlobals["NameError"], "`" + n + "' is not allowed as an instance variable name")}
+        }
+        if (set) { ivarPut(o, n.slice(1), args[1]); return args[1] }
+        return hasOwn(o, n.slice(1)) ? o[n.slice(1)] : null
+    }
+    // "@" and then an identifier: a letter, "_" or a non-ASCII character first,
+    // digits allowed after it.
+    function ivarNameOk(n) {
+        if (n.length < 2 || n.charCodeAt(0) != 64) { return false }
+        for (var i = 1; i < n.length; i++) {
+            var c = n.charCodeAt(i)
+            var ok = c == 95 || c >= 128 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+            if (i > 1 && c >= 48 && c <= 57) { ok = true }
+            if (!ok) { return false }
+        }
+        return true
+    }
     function ivarPut(s, name, v) {
         if (!hasOwn(s, name)) {
             if (s.__ivn == undefined) { s.__ivn = [] }

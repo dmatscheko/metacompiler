@@ -1055,6 +1055,42 @@ func rubyRatIntOpB(n, d *big.Int, mode byte) *big.Int {
 	return new(big.Int).Neg(new(big.Int).Div(new(big.Int).Sub(d, n2), d2))
 }
 
+// rubyIvarAccess is Object#instance_variable_get / _set on an instance: an @ivar
+// is the slot of its name without the "@". Twin of ivarAccess in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyIvarAccess(o *jsObject, name string, args []interface{}) interface{} {
+	pos, _ := rubyBlockArgs(args)
+	n := rt.rubyStr(argAt(pos, 0))
+	if !rubyIvarNameOk(n) {
+		rt.rubyRaiseErr("NameError", "`"+n+"' is not allowed as an instance variable name")
+	}
+	if name == "instance_variable_set" {
+		v := argAt(pos, 1)
+		o.set(n[1:], v)
+		return v
+	}
+	if v, has := o.props[n[1:]]; has {
+		return v
+	}
+	return jsNull
+}
+
+// rubyIvarNameOk: "@" and then an identifier (a letter, "_" or a non-ASCII
+// character first, digits allowed after it).
+func rubyIvarNameOk(n string) bool {
+	if len(n) < 2 || n[0] != '@' {
+		return false
+	}
+	for i := 1; i < len(n); i++ {
+		c := n[i]
+		ok := c == '_' || c >= 128 || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (i > 1 && c >= '0' && c <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // rubyIntBit is Integer#[]: bit i of the infinite two's complement, 0 for a
 // negative i. Twin of intBitAt in ruby-interpreter.abnf.
 func (rt *jsrt) rubyIntBit(n, i interface{}) interface{} {
