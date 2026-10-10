@@ -277,7 +277,7 @@ receiver carries a kind - see T-081. Also absent: `reduceOrNull`/`reduceRightOrN
 ### T-081 boxed values know their KIND but not their declared class · P2 · KT + SW + CORE · OPEN [V]
 Two boxed values of one primitive kind and different declared classes cannot be told
 apart: kotlin's mixed Float/Double set key, swift's `Int` vs `Int64` (`8 as Int64 is
-Int` is true where swiftc says false), kotlin's empty-range `first`, T-080. One
+Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's `%!s(uint64=...)` note (T-073) and T-240. One
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
 
