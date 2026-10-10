@@ -39,6 +39,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"math/rand/v2"
 	"strconv"
 	"strings"
@@ -720,6 +721,69 @@ func jvRadixOf(rt *jsrt, v interface{}, w uint8, radix int, uns bool) string {
 	return strconv.FormatInt(p, radix)
 }
 
+// jvBitOps adds Integer / Long .sum, signum and the bit queries - bitCount,
+// numberOfLeadingZeros / numberOfTrailingZeros, highestOneBit /
+// lowestOneBit - at the width w. Twin of jAddBitOps in java-interpreter.abnf
+// and jvBitOps in languages/lib/java-rt.metajs.
+func jvBitOps(o *jsObject, w uint8) {
+	bitsOf := func(rt *jsrt, v interface{}) uint64 {
+		p := uint64(jvToLong(rt, jvNarrow(rt, v, w)))
+		if w == 32 {
+			return uint64(uint32(p))
+		}
+		return p
+	}
+	ofInt := func(n int) interface{} { return float64(n) }
+	o.set("sum", jsHostFunc("sum", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jvNarrow(rt, rt.jvArith("+", argAt(args, 0), argAt(args, 1)), w)
+	}))
+	o.set("signum", jsHostFunc("signum", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		if rt.jvCmp("<", v, float64(0)) {
+			return float64(-1)
+		}
+		if rt.jvCmp(">", v, float64(0)) {
+			return float64(1)
+		}
+		return float64(0)
+	}))
+	o.set("bitCount", jsHostFunc("bitCount", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return ofInt(bits.OnesCount64(bitsOf(rt, argAt(args, 0))))
+	}))
+	lead := func(x uint64) int {
+		if w == 32 {
+			return bits.LeadingZeros32(uint32(x))
+		}
+		return bits.LeadingZeros64(x)
+	}
+	trail := func(x uint64) int {
+		if w == 32 {
+			return bits.TrailingZeros32(uint32(x))
+		}
+		return bits.TrailingZeros64(x)
+	}
+	o.set("numberOfLeadingZeros", jsHostFunc("numberOfLeadingZeros", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return ofInt(lead(bitsOf(rt, argAt(args, 0))))
+	}))
+	o.set("numberOfTrailingZeros", jsHostFunc("numberOfTrailingZeros", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return ofInt(trail(bitsOf(rt, argAt(args, 0))))
+	}))
+	oneBit := func(rt *jsrt, x uint64, k int) interface{} {
+		if x == 0 {
+			return jvNarrow(rt, float64(0), w)
+		}
+		return jvNarrow(rt, jvBox(int64(uint64(1)<<uint(k))), w)
+	}
+	o.set("highestOneBit", jsHostFunc("highestOneBit", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		x := bitsOf(rt, argAt(args, 0))
+		return oneBit(rt, x, int(w)-1-lead(x))
+	}))
+	o.set("lowestOneBit", jsHostFunc("lowestOneBit", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		x := bitsOf(rt, argAt(args, 0))
+		return oneBit(rt, x, trail(x))
+	}))
+}
+
 // jvRadixMembers adds toString(v [, radix]) and the three unsigned renderings
 // to the Integer (w 32) or Long (w 64) descriptor.
 func jvRadixMembers(o *jsObject, w uint8) {
@@ -794,6 +858,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		}))
 		o.set("valueOf", jvValueOfHost(32))
 		jvRadixMembers(o, 32)
+		jvBitOps(o, 32)
 	case "Long":
 		o.set("MAX_VALUE", jvBox(math.MaxInt64))
 		o.set("MIN_VALUE", jvBox(math.MinInt64))
@@ -803,6 +868,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		}))
 		o.set("valueOf", jvValueOfHost(64))
 		jvRadixMembers(o, 64)
+		jvBitOps(o, 64)
 	case "Byte":
 		o.set("MAX_VALUE", jsGInt{v: 127, w: 8})
 		o.set("MIN_VALUE", jsGInt{v: -128, w: 8})

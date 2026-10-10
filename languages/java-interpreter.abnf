@@ -2343,6 +2343,66 @@ HasStatic   = :script(~~
         if (c >= 65 && c <= 90) { return c - 55 }
         return 99
     }
+    // Integer / Long .sum, signum and the bit queries - bitCount,
+    // numberOfLeadingZeros / numberOfTrailingZeros, highestOneBit /
+    // lowestOneBit - at the width w, on the value's two unsigned 32 bit halves.
+    // Twin of jvBitOps in languages/lib/java-rt.metajs and abnf/jsrtjava.go.
+    function jAddBitOps(o, w) {
+        o.sum = function(a, b) { return jNarrow(jArith("+", a, b), w) }
+        o.signum = function(v) { return jCmp("<", v, 0) ? jNegOne : (jCmp(">", v, 0) ? 1 : 0) }
+        o.bitCount = function(v) { var p = jHalves(v, w); return jPop32(p.h) + jPop32(p.l) }
+        o.numberOfLeadingZeros = function(v) { return jLeadZeros(jHalves(v, w), w) }
+        o.numberOfTrailingZeros = function(v) { return jTrailZeros(jHalves(v, w), w) }
+        o.highestOneBit = function(v) {
+            var p = jHalves(v, w)
+            return (p.h == 0 && p.l == 0) ? jNarrow(0, w) : jOneBit(w - 1 - jLeadZeros(p, w), w)
+        }
+        o.lowestOneBit = function(v) {
+            var p = jHalves(v, w)
+            return (p.h == 0 && p.l == 0) ? jNarrow(0, w) : jOneBit(jTrailZeros(p, w), w)
+        }
+    }
+    // The value's two unsigned 32 bit halves at width w (h is 0 at 32).
+    function jHalves(v, w) {
+        var p = szPair(jNarrow(v, 64))
+        return w == 32 ? i64Make(0, p.l) : p
+    }
+    function jPop32(x) {
+        var n = 0
+        var y = x
+        while (y > 0) {
+            if (y % 2 == 1) { n++ }
+            y = (y - y % 2) / 2
+        }
+        return n
+    }
+    function jClz32(x) {
+        if (x == 0) { return 32 }
+        var n = 0
+        var y = x
+        while (y < 2147483648) { y = y * 2; n++ }
+        return n
+    }
+    function jCtz32(x) {
+        if (x == 0) { return 32 }
+        var n = 0
+        var y = x
+        while (y % 2 == 0) { y = y / 2; n++ }
+        return n
+    }
+    function jLeadZeros(p, w) {
+        if (w == 32) { return jClz32(p.l) }
+        return p.h != 0 ? jClz32(p.h) : 32 + jClz32(p.l)
+    }
+    function jTrailZeros(p, w) {
+        if (w == 32) { return jCtz32(p.l) }
+        return p.l != 0 ? jCtz32(p.l) : 32 + jCtz32(p.h)
+    }
+    // The value of width w with only bit k set.
+    function jOneBit(k, w) {
+        var p = k >= 32 ? i64Make(jPow2(k - 32), 0) : i64Make(0, jPow2(k))
+        return jNarrow(szMake(p, 64, jNoU), w)
+    }
     // Integer / Long .toString(v, radix), toHexString, toOctalString and
     // toBinaryString. toString is the SIGNED reading ("-ff"; a radix outside
     // 2..36 means 10); the other three are the UNSIGNED reading AT THE VALUE'S
@@ -2410,6 +2470,8 @@ HasStatic   = :script(~~
         max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) },
         min: function(a, b) { return jCmp("<", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) }
     }
+    jAddBitOps(hostGlobals["Integer"], 32)
+    jAddBitOps(hostGlobals["Long"], 64)
     // Built with szMake / i64Make rather than through the helpers below, because
     // this runs at SCRIPT BODY time and only the included lib is textually in
     // scope by now; the pairs are the sign-extended 64 bit readings of each width's

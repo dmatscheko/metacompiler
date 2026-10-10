@@ -680,6 +680,7 @@ function jvBoxType(name) {
         o["parseInt"] = function(s, r) { return jvParseInt(jpStr(s), 32, jvRadixOf(r)) }
         o["valueOf"] = function(v, r) { return jvValueOf(v, 32, r) }
         jvRadixMembers(o, 32)
+        jvBitOps(o, 32)
         return o
     }
     if (name == "Long") {
@@ -689,6 +690,7 @@ function jvBoxType(name) {
         o["parseLong"] = function(s, r) { return jvParseInt(jpStr(s), 64, jvRadixOf(r)) }
         o["valueOf"] = function(v, r) { return jvValueOf(v, 64, r) }
         jvRadixMembers(o, 64)
+        jvBitOps(o, 64)
         return o
     }
     if (name == "Byte") {
@@ -1014,6 +1016,90 @@ function jvFloType(o, f32) {
 function jvFloOf(f, f32) {
     if (f32) { return flo(rtF32Round(f), 3) }
     return flo(f, 0)
+}
+
+// Integer / Long .sum, signum and the bit queries - bitCount,
+// numberOfLeadingZeros / numberOfTrailingZeros, highestOneBit / lowestOneBit -
+// at the width w, on the value's two unsigned 32 bit halves. Twin of jvBitOps
+// in abnf/jsrtjava.go and jAddBitOps in java-interpreter.abnf.
+function jvBitOps(o, w) {
+    o["sum"] = function(a, b) { return jvNarrow(jvArith("+", a, b), w) }
+    o["signum"] = function(v) {
+        if (jvCmp("<", v, 0)) { return 0 - 1 }
+        if (jvCmp(">", v, 0)) { return 1 }
+        return 0
+    }
+    o["bitCount"] = function(v) { return jvPop32(jvHiOf(v, w)) + jvPop32(jvLow32(v)) }
+    o["numberOfLeadingZeros"] = function(v) { return jvLeadZeros(jvHiOf(v, w), jvLow32(v), w) }
+    o["numberOfTrailingZeros"] = function(v) { return jvTrailZeros(jvHiOf(v, w), jvLow32(v), w) }
+    o["highestOneBit"] = function(v) {
+        var h = jvHiOf(v, w)
+        var l = jvLow32(v)
+        if (h == 0 && l == 0) { return jvNarrow(0, w) }
+        return jvOneBit(w - 1 - jvLeadZeros(h, l, w), w)
+    }
+    o["lowestOneBit"] = function(v) {
+        var h = jvHiOf(v, w)
+        var l = jvLow32(v)
+        if (h == 0 && l == 0) { return jvNarrow(0, w) }
+        return jvOneBit(jvTrailZeros(h, l, w), w)
+    }
+}
+
+// The unsigned upper 32 bits of a value at width w (0 at 32).
+function jvHiOf(v, w) {
+    if (w == 32) { return 0 }
+    return sintHi(jvToLongBox(v))
+}
+
+function jvPop32(x) {
+    var n = 0
+    var y = x
+    while (y > 0) {
+        if (y % 2 == 1) { n = n + 1 }
+        y = (y - y % 2) / 2
+    }
+    return n
+}
+
+function jvClz32(x) {
+    if (x == 0) { return 32 }
+    var n = 0
+    var y = x
+    while (y < 2147483648) {
+        y = y * 2
+        n = n + 1
+    }
+    return n
+}
+
+function jvCtz32(x) {
+    if (x == 0) { return 32 }
+    var n = 0
+    var y = x
+    while (y % 2 == 0) {
+        y = y / 2
+        n = n + 1
+    }
+    return n
+}
+
+function jvLeadZeros(h, l, w) {
+    if (w == 32) { return jvClz32(l) }
+    if (h != 0) { return jvClz32(h) }
+    return 32 + jvClz32(l)
+}
+
+function jvTrailZeros(h, l, w) {
+    if (w == 32) { return jvCtz32(l) }
+    if (l != 0) { return jvCtz32(l) }
+    return 32 + jvCtz32(h)
+}
+
+// The value of width w with only bit k set.
+function jvOneBit(k, w) {
+    if (k >= 32) { return jvNarrow(sintRaw(jvPow2(k - 32), 0, 64, false), w) }
+    return jvNarrow(sintRaw(0, jvPow2(k), 64, false), w)
 }
 
 // toString(v [, radix]) and the three unsigned renderings of Integer (w 32) or

@@ -2198,6 +2198,12 @@ class S36 {
         Main.check("rx1", Integer.toString(n[0], 16).equals("ff") && Integer.toString(n[1], 16).equals("-ff") && Integer.toString(n[0], 99).equals("255"));
         Main.check("rx2", Integer.toBinaryString(n[1]).equals("11111111111111111111111100000001") && Integer.toOctalString(n[2]).equals("20000000000"));
         Main.check("rx3", Long.toString(Long.MIN_VALUE, 36).equals("-1y2p0ij32e8e8") && Long.toBinaryString(5L).equals("101"));
+
+        long[] q = { -255L, 4294967296L, 6L };
+        Main.check("bo1", Integer.bitCount(n[1]) == 25 && Integer.numberOfLeadingZeros(n[0]) == 24 && Integer.numberOfTrailingZeros(n[2]) == 31);
+        Main.check("bo2", Integer.highestOneBit(n[1]) == Integer.MIN_VALUE && Integer.lowestOneBit(n[0]) == 1 && Integer.signum(n[1]) == -1);
+        Main.check("bo3", Long.bitCount(q[0]) == 57 && Long.numberOfLeadingZeros(q[1]) == 31 && Long.numberOfTrailingZeros(q[1]) == 32);
+        Main.check("bo4", Long.highestOneBit(q[2]) == 4L && Long.lowestOneBit(q[0]) == 1L && Integer.sum(Integer.MAX_VALUE, n[0]) == -2147483394);
     }
 }
 
