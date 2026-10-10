@@ -178,25 +178,25 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-250 ts: no Set, Map, Array.from · P1 · JS · OPEN [V]
+### T-250 ts: no Set, Map, Array.from · P1 · JS · IN PROGRESS (JS worker, round 3) [V]
 `new Set()` is a ReferenceError in both TS legs. Port js's jsbLoad
 (languages/lib/js-builtins.js), the "@@iterator" iteration probes and the Array
 function to the two TS grammars.
 
-### T-251 js: `Math.hasOwnProperty("abs")` · P3 · JS · OPEN [V]
+### T-251 js: `Math.hasOwnProperty("abs")` · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
 "TypeError: Math.hasOwnProperty is not a function" in all legs; node true. (No
 Object.prototype chain; at least the builtin objects should answer it.)
 
-### T-252 js: a class-instance iterator's `return()` is not called compiled · P1 · JS · OPEN [V]
+### T-252 js: a class-instance iterator's `return()` is not called compiled · P1 · JS · IN PROGRESS (JS worker, round 3) [V]
 On a for-of `break` or array destructuring the run and native legs skip `return()`;
 the interpreter calls it (= node). The close sites (js-to-llvm-ir ~3697, 4290, 4376,
 5488 and js_jsiterclose) read with memGetExt / rt.getMember, which do not find class
 methods - use js_jsvget as the iteration probes do.
 
-### T-253 ts: `delete (Math as any).sqrt` aborts in the interpreter · P3 · JS · OPEN [V]
+### T-253 ts: `delete (Math as any).sqrt` aborts in the interpreter · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
 "delete operator not implemented" for delete through a parenthesised cast.
 
-### T-254 js: "is not a function" for a comma/arrow callee · P3 · JS · OPEN [V]
+### T-254 js: "is not a function" for a comma/arrow callee · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
 `(index => 1, "intro" in o)()` prints the raw callee; node
 `((intermediate value) , ("intro" in o))`. cpPrint declines on `=>`, function and
 object literals. Also `Object.keys(Array)` is `["from","of"]` (node `[]`).
