@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-266** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-269** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -277,19 +277,26 @@ throws NumberFormatException. Check toInt/toLong/toFloat/toDoubleOrNull the same
 
 # GO — Go  (oracle: `go run`)
 
-### T-239 go: panic texts name user types without `main.` · P1 · GO · IN PROGRESS (GO worker, round 3) [V]
-go writes `main.T` (e.g. `interface conversion: interface {} is main.T, not int`); every
-engine writes `T`. Check every panic and `%v`-of-type site.
-
 ### T-240 go: a value of a defined non-struct type is the underlying value · P2 · GO · OPEN [V]
 `type MyInt int; var v interface{} = MyInt(4); _ = v.(int)` succeeds in all engines; go
 panics. Same family: int vs int64, rune vs int32 in type switches/asserts. Value-model:
 see T-081.
 
-### T-241 go: fmt `%T`, `%p`, `%#v`, `%!(EXTRA ...)`, printability · P1 · GO · IN PROGRESS (GO worker, round 3) [V]
-`%T` and `%p` render as bad verbs, `%#v` as `%v`, extra operands get no
-`%!(EXTRA type=value)`; `%q` printability approximates strconv.IsPrint (U+2028 prints
-raw, go escapes it). See the gap list in languages/lib/go-fmt.js. Oracle: go run.
+### T-266 go: pointers, nil typed values and panic values in fmt and panics · P2 · GO · OPEN [V]
+A pointer to a struct is the struct: `&T{}.(T)` does not panic (go `interface {} is
+*main.T, not main.T`), `%#v` of `&T{}` prints `main.T{...}` (go `&main.T{...}`). A nil
+chan/func/pointer operand reads as a nil interface (`%T` prints `<nil>`); `%T` of a
+func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` where
+llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
+0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
+
+### T-267 go: `panic(any(nil))`, `any`, `fmt.Errorf` · P1 · GO · OPEN [V]
+"unknown name: any", "unknown method 'Errorf'" in both halves. go prints `panic: nil`
+(go 1.21+ `panic called with nil argument`; check go run) and supports Errorf (with
+`%w`, errors.Is/As/Unwrap if cheap).
+
+### T-268 go: `gofmt -l abnf/` lists abnf/jsrtgolang.go · P3 · GO · OPEN [V]
+One line in goConvFail; gofmt it.
 
 ---
 
@@ -601,6 +608,8 @@ T-219 python: `f().k += 1` evaluates `f()` twice — DONE eb01ea3
 T-220 python: astral characters in indexing, iteration and find — DONE 9197d07 (UTF-16 kept, positions converted; js_pyidx)
 T-221 python: `\N{...}` outside a 14-entry table silently becomes "" — DONE 901d9ef (unknown name is a SyntaxError; full table DECLINED: 34,137 names, 1.09 MB per grammar)
 T-222 python: complex numbers - abs, infinities, general powers, division — DONE 7f150bf (software FMA in MetaJS; non-integral powers inherit the libm last-digit gap, T-265)
+T-239 go: panic texts name user types without `main.` — DONE 13a26a4
+T-241 go: fmt `%T`, `%p`, `%#v`, `%!(EXTRA ...)`, printability — DONE c907fc9 (pointer/nil-chan/func-signature limits are T-266)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
