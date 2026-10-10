@@ -960,7 +960,7 @@ declaration allows it to become.**
 
 ```
 runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt
-regex.js                  <- js python ruby kotlin
+regex.js                  <- js python ruby kotlin java
 lua-rt.metajs             <- imports NOTHING
 js-rt.metajs              <- imports regex.js and json.js ONLY
 json.js                   <- js-rt.metajs, js and typescript interpreters
@@ -971,6 +971,8 @@ fdlibm.js                 <- java-rt.metajs, java interpreter
                              (Go twin: abnf/jsrtfdlibm.go)
 java-chars.js             <- java-rt.metajs, java interpreter
                              (Go twin: abnf/jsrtjavachars.go)
+java-strings.js           <- java-rt.metajs, java interpreter (String's methods
+                             and String.format; Go twin: abnf/jsrtjavastr.go)
 ruby-respond.js           <- ruby-rt.metajs, ruby interpreter (respond_to? on a
                              builtin; Go twin: rubyRespondNames in
                              abnf/jsrtruby.go, kept equal by a go test)
@@ -980,7 +982,8 @@ Grammar-level includes shared by one language's grammars only: `go-constfold.js`
 (go), `java-decltypes.js` (both java grammars: declared types for assignment
 conversion and static overload selection), `java-util.java` (both java grammars:
 java.util's list types WRITTEN IN JAVA and compiled with a program that imports
-them, so one implementation serves all three engines), `js-callee.js` (all four
+them, so one implementation serves all three engines), `java-lang.java` (the
+same for java.lang's StringBuilder, compiled when a program creates one), `js-callee.js` (all four
 js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ONE implementation of a feature, not a home for
 helpers that happen to be duplicated (7.12 still holds for those).
 

@@ -767,6 +767,10 @@ function jUtilWants(path) {
     return ",ArrayList,List,Collection,Iterator,NoSuchElementException,AbstractList,".indexOf("," + rest + ",") >= 0
 }
 
+// Does `new cls(...)` create a type lib/java-lang.java declares? Then the
+// grammar compiles that file with the program.
+function jLangWants(cls) { return cls == "StringBuilder" }
+
 // ----- Static overload selection (JLS 15.12.2 is static) -----
 //
 // javac picks an overload from the arguments' STATIC types, which the value

@@ -79,6 +79,11 @@
 import "./runtime.metajs"
 import "./fdlibm.js"
 import "./java-chars.js"
+import "./regex.js"
+import "./java-strings.js"
+
+// rxFail is regex.js's error knob, overridden by assignment.
+rxFail = function (msg) { fail("regexp: " + msg) }
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return jvCmp(op, l, r) }
@@ -268,6 +273,7 @@ var jvSioobeCls = undefined
 var jvNegArrCls = undefined
 var jvNpeCls = undefined
 var jvNfeCls = undefined
+var jvIaeCls = undefined
 
 function jvThrowCls(cls, msg) {
     if (cls === undefined) {
@@ -1533,6 +1539,7 @@ function js_jvexc(name, cls) {
     else if (name == "NegativeArraySizeException") { jvNegArrCls = cls }
     else if (name == "NullPointerException") { jvNpeCls = cls }
     else if (name == "NumberFormatException") { jvNfeCls = cls }
+    else if (name == "IllegalArgumentException") { jvIaeCls = cls }
     return undefined
 }
 
@@ -1813,6 +1820,237 @@ function js_jvchars(v) {
         return out
     }
     return js_mcall(v, "toCharArray", [])
+}
+
+// ----- Object#getClass ------------------------------------------------------
+//
+// One java.lang.Class object per class, so == compares classes: an instance of
+// the Class descriptor carrying the binary and the simple name. Twin of
+// js_jvgetclass in abnf/jsrtjavastr.go and jGetClass in java-interpreter.abnf.
+var jvClassCls = undefined
+var jvClassObjs = {}
+function jvClassOf(name, simple) {
+    if (jvClassCls === undefined) {
+        var cc = {}
+        cc["__isclass"] = true
+        cc["__name"] = "Class"
+        cc["__bname"] = "java.lang.Class"
+        cc["getName"] = function(self) { return self["__cname"] }
+        cc["getSimpleName"] = function(self) { return self["__csimple"] }
+        cc["toString"] = function(self) { return "class " + self["__cname"] }
+        jvClassCls = cc
+    }
+    var key = "$" + name
+    var got = jvClassObjs[key]
+    if (got !== undefined) { return got }
+    var c = {}
+    c["__class"] = jvClassCls
+    c["__cname"] = name
+    c["__csimple"] = simple
+    jvClassObjs[key] = c
+    return c
+}
+function jvLangClass(simple) { return jvClassOf("java.lang." + simple, simple) }
+// An array's simple name from its (inferred) binary name: [I is int[].
+function jvArraySimple(tag) {
+    var c = tag.charAt(1)
+    if (c == "L") {
+        var dot = 0
+        var i = 0
+        while (i < tag.length) {
+            if (tag.charAt(i) == ".") { dot = i }
+            i = i + 1
+        }
+        return tag.substring(dot + 1, tag.length - 1) + "[]"
+    }
+    if (c == "I") { return "int[]" }
+    if (c == "J") { return "long[]" }
+    if (c == "D") { return "double[]" }
+    if (c == "F") { return "float[]" }
+    if (c == "Z") { return "boolean[]" }
+    if (c == "C") { return "char[]" }
+    if (c == "S") { return "short[]" }
+    return "byte[]"
+}
+function js_jvgetclass(v) {
+    if (v === undefined || v === null) {
+        fail("method call .getClass() on null")
+        return undefined
+    }
+    if (typeof v == "string") { return jvLangClass("String") }
+    if (typeof v == "boolean") { return jvLangClass("Boolean") }
+    if (jvIsChar(v)) { return jvLangClass("Character") }
+    if (floIs(v)) {
+        if (floStyle(v) == 3) { return jvLangClass("Float") }
+        return jvLangClass("Double")
+    }
+    if (sintIs(v)) {
+        var w = sintWidth(v)
+        if (w == 64) { return jvLangClass("Long") }
+        if (w == 16) { return jvLangClass("Short") }
+        return jvLangClass("Byte")
+    }
+    if (typeof v == "number") { return jvLangClass("Integer") }
+    if (Array.isArray(v)) {
+        var tag = jpArrayTag(v)
+        return jvClassOf(tag, jvArraySimple(tag))
+    }
+    if (typeof v == "object") {
+        var cls = v["__class"]
+        if (cls !== undefined) { return jvClassOf(jpClassName(cls), cls["__name"]) }
+    }
+    fail("getClass() of a value with no class")
+    return undefined
+}
+
+// ----- java.lang.String's methods and statics (lib/java-strings.js) -----------
+
+// The value-model hooks lib/java-strings.js asks through.
+function jxkKind(v) {
+    if (v === undefined || v === null) { return "null" }
+    if (typeof v == "boolean") { return "bool" }
+    if (typeof v == "string") { return "str" }
+    if (jvIsChar(v)) { return "char" }
+    if (floIs(v)) { return "float" }
+    if (typeof v == "number") { return "int" }
+    return "obj"
+}
+function jxkStr(v) { return jpStr(v) }
+function jxkCode(v) { return jvCharCode(v) }
+function jxkDec(v) { return jpStr(v) }
+function jxkRadix(v, r) {
+    if (jvIsLong(v)) { return jvRadixStr(v, 64, r, true) }
+    if (sintIs(v)) {
+        var mask = 65535
+        if (sintWidth(v) == 8) { mask = 255 }
+        return jvRadixStr(jvLow32(v) & mask, 32, r, true)
+    }
+    return jvRadixStr(v, 32, r, true)
+}
+function jxkDbl(v) { return rtjNum(v) }
+function jxkDblStr(a) { return floStr(flo(a, 0)) }
+function jxkFail(msg) { fail(msg) }
+
+// A String method's CharSequence or char argument as a string, and indexOf's
+// first argument, which may also be an int code point.
+function jvStrArg(v) {
+    if (typeof v == "string") { return v }
+    if (jvIsChar(v)) { return String.fromCharCode(v["__char"]) }
+    return jpStr(v)
+}
+function jvStrPat(v) {
+    if (typeof v == "string") { return v }
+    return jxCpStr(jvCharCode(v))
+}
+function jvArgInt(args, i, dflt) {
+    if (args.length > i) { return jvI(args[i]) }
+    return dflt
+}
+
+// A java.lang.String method on a string receiver; any other receiver is an
+// ordinary call of a method by that name. Twin of js_jvstrm in
+// abnf/jsrtjavastr.go and jStrMethod in java-interpreter.abnf.
+function js_jvstrm(s, name, args) {
+    if (typeof s != "string") { return js_mcall(s, name, args) }
+    var a0 = args[0]
+    if (name == "isEmpty") { return s.length == 0 }
+    if (name == "isBlank") { return jxIsBlank(s) }
+    if (name == "indexOf") { return jxIndexOf(s, jvStrPat(a0), jvArgInt(args, 1, 0)) }
+    if (name == "lastIndexOf") { return jxLastIndexOf(s, jvStrPat(a0), jvArgInt(args, 1, s.length)) }
+    if (name == "contains") { return jxIndexOf(s, jvStrArg(a0), 0) >= 0 }
+    if (name == "startsWith") { return jxAt(s, jvStrArg(a0), jvArgInt(args, 1, 0)) }
+    if (name == "endsWith") {
+        var suf = jvStrArg(a0)
+        return jxAt(s, suf, s.length - suf.length)
+    }
+    if (name == "equalsIgnoreCase") {
+        if (typeof a0 != "string") { return false }
+        if (a0.length != s.length) { return false }
+        return jxCompareIC(s, a0) == 0
+    }
+    if (name == "compareTo") { return jxCompare(s, jvStrArg(a0)) }
+    if (name == "compareToIgnoreCase") { return jxCompareIC(s, jvStrArg(a0)) }
+    if (name == "concat") { return s + jvStrArg(a0) }
+    if (name == "replace") { return jxReplace(s, jvStrArg(a0), jvStrArg(args[1])) }
+    if (name == "replaceAll") { return jxRxReplace(s, jvStrArg(a0), jvStrArg(args[1]), true) }
+    if (name == "replaceFirst") { return jxRxReplace(s, jvStrArg(a0), jvStrArg(args[1]), false) }
+    if (name == "matches") { return jxMatches(s, jvStrArg(a0)) }
+    if (name == "split") { return jxSplit(s, jvStrArg(a0), jvArgInt(args, 1, 0)) }
+    if (name == "trim") { return jxTrim(s) }
+    if (name == "strip") { return jxStrip(s, true, true) }
+    if (name == "stripLeading") { return jxStrip(s, true, false) }
+    if (name == "stripTrailing") { return jxStrip(s, false, true) }
+    if (name == "toUpperCase") { return jxUpper(s) }
+    if (name == "toLowerCase") { return jxLower(s) }
+    if (name == "repeat") {
+        var cnt = jvI(a0)
+        if (cnt < 0) { jvThrowCls(jvIaeCls, "count is negative: " + cnt) }
+        return jxRepeat(s, cnt)
+    }
+    if (name == "codePointAt") {
+        var i = jvI(a0)
+        if (i < 0 || i >= s.length) { jvThrowSioobe(i, s.length) }
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c < 56320 && i + 1 < s.length) {
+            var lo = s.charCodeAt(i + 1)
+            if (lo >= 56320 && lo < 57344) { return 65536 + (c - 55296) * 1024 + lo - 56320 }
+        }
+        return c
+    }
+    if (name == "subSequence") { return js_mcall(s, "substring", args) }
+    if (name == "intern") { return s }
+    return js_mcall(s, name, args)
+}
+
+// String.valueOf / copyValueOf / join / format. Twin of js_jvstrstatic in
+// abnf/jsrtjavastr.go and jStrStatic in java-interpreter.abnf.
+function js_jvstrstatic(name, args) {
+    if (args.length == 0) {
+        fail("unknown method 'String." + name + "'")
+        return undefined
+    }
+    if (name == "valueOf" || name == "copyValueOf") {
+        if (Array.isArray(args[0])) { return js_jvnewstr(args) }
+        return jpStr(args[0])
+    }
+    var rest = []
+    var i = 1
+    while (i < args.length) {
+        rest.push(args[i])
+        i = i + 1
+    }
+    if (name == "join") {
+        var es = jvJoinElems(rest)
+        var parts = []
+        var k = 0
+        while (k < es.length) {
+            parts.push(jpStr(es[k]))
+            k = k + 1
+        }
+        return jxJoin(jvStrArg(args[0]), parts)
+    }
+    if (name == "format") {
+        if (rest.length == 1 && Array.isArray(rest[0])) {
+            if (jpArrayTag(rest[0]).substring(0, 2) == "[L") { return jxFormat(jvStrArg(args[0]), rest[0]) }
+        }
+        return jxFormat(jvStrArg(args[0]), rest)
+    }
+    fail("unknown method 'String." + name + "'")
+    return undefined
+}
+// String.join's elements: the varargs, the one array they came as, or what one
+// Iterable's iterator() yields.
+function jvJoinElems(rest) {
+    if (rest.length != 1) { return rest }
+    var e = rest[0]
+    if (Array.isArray(e)) { return e }
+    if (typeof e == "object" && e !== null && e["__class"] !== undefined) {
+        var out = []
+        var it = js_mcall(e, "iterator", [])
+        while (js_mcall(it, "hasNext", []) === true) { out.push(js_mcall(it, "next", [])) }
+        return out
+    }
+    return rest
 }
 
 // ----- Overload resolution ---------------------------------------------------
@@ -2429,30 +2667,15 @@ function jvCharMembers(o) {
     }
     o["isUpperCase"] = function(v) { return jcIsUpper(jvCharCode(v)) }
     o["isLowerCase"] = function(v) { return jcIsLower(jvCharCode(v)) }
-    o["isWhitespace"] = function(v) {
-        var c = jvCharCode(v)
-        if ((c >= 9 && c <= 13) || (c >= 28 && c <= 32)) { return true }
-        if (c == 5760 || (c >= 8192 && c <= 8198) || (c >= 8200 && c <= 8202)) { return true }
-        return c == 8232 || c == 8233 || c == 8287 || c == 12288
-    }
-    o["toUpperCase"] = function(v) { return jvCharLike(v, jvChUp(jvCharCode(v))) }
-    o["toLowerCase"] = function(v) { return jvCharLike(v, jvChLo(jvCharCode(v))) }
+    o["isWhitespace"] = function(v) { return jxIsWs(jvCharCode(v)) }
+    o["toUpperCase"] = function(v) { return jvCharLike(v, jxChUp(jvCharCode(v))) }
+    o["toLowerCase"] = function(v) { return jvCharLike(v, jxChLo(jvCharCode(v))) }
     o["getNumericValue"] = function(v) { return jcNumericValue(jvCharCode(v)) }
     o["digit"] = function(v, radix) {
         var d = jcDigitVal(jvCharCode(v))
         if (d < rtjNum(radix)) { return d }
         return 0 - 1
     }
-}
-function jvChUp(c) {
-    var s = String.fromCharCode(c).toUpperCase()
-    if (s.length == 1) { return s.charCodeAt(0) }
-    return c
-}
-function jvChLo(c) {
-    var s = String.fromCharCode(c).toLowerCase()
-    if (s.length == 1) { return s.charCodeAt(0) }
-    return c
 }
 
 // Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0. Twin of

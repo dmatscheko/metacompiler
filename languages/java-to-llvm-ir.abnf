@@ -25,9 +25,10 @@ import (lib/java-util.java, compiled with the program), new String(...),
 Math's and StrictMath's transcendentals as fdlibm answers them,
 int / boolean / char / String / var / class types (types are
 parsed; the semantics are dynamic, but char is a value of its own that prints as its
-glyph and computes on its code), String concatenation with +, the String methods
-length(), charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a
-char, so it prints as its glyph and computes on its code),
+glyph and computes on its code), String concatenation with +, java.lang.String's
+methods (lib/java-strings.js, the regex ones over lib/regex.js; charAt yields a
+char, so it prints as its glyph and computes on its code), String.valueOf / join /
+format, Object and getClass(), StringBuilder (lib/java-lang.java),
 System.out.println/print, System.exit, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
 (fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
@@ -3041,6 +3042,7 @@ HasStatic   = :script(~~
             if (typeof items[q] == "string") { clsName = items[q] } else { args.push(items[q]) }
         }
         noteTypeUse(clsName)
+        if (jLangWants(clsName)) { jLangWant = true }
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
         if (clsName == "String") { jUsesStrIdx = true }
@@ -3371,21 +3373,46 @@ HasStatic   = :script(~~
     // calls are unaffected. This overrides the compile-core foldCallMember.
     // A named method call: js_jvsigcall where javac's static resolution is
     // known (jSfxSig in lib/java-decltypes.js), the ordinary js_mcall otherwise.
+    // A java.lang.String method name goes to js_jvstrm when the receiver may be a
+    // String (its static type is String or unread); js_jvstrm hands any other
+    // receiver on to js_mcall.
     function jEmitMcall(b, recv, s, argsV) {
         var sig = jSfxSig(s)
         if (sig != "") { return callExt(b, "js_jvsigcall", [recv, emitStr(b, s.name), emitStr(b, sig), argsV]) }
+        if (jStrMethods["$" + s.name] == true && (s.rty == undefined || s.rty == "" || jOvBare(s.rty) == "String")) {
+            return callExt(b, "js_jvstrm", [recv, emitStr(b, s.name), argsV])
+        }
         return callExt(b, "js_mcall", [recv, emitStr(b, s.name), argsV])
     }
+    var jStrMethods = {}
+    var jStrMethodList = ["isEmpty", "isBlank", "indexOf", "lastIndexOf", "contains", "startsWith", "endsWith",
+                          "equalsIgnoreCase", "compareTo", "compareToIgnoreCase", "concat", "replace", "replaceAll",
+                          "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing",
+                          "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern"]
+    for (var jsm = 0; jsm < jStrMethodList.length; jsm++) { jStrMethods["$" + jStrMethodList[jsm]] = true }
     foldCallMember = function(items, text) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
         if (text != undefined) { jChainRecvTys(suffixes, text) }
         return function(b) {
-            var r = primary(b)
-            b = r.b
-            var cur = r.v
-            for (var i = 0; i < suffixes.length; i++) {
+            var cur = hUndef
+            var i0 = 0
+            // String.valueOf / copyValueOf / join / format: java.lang.String's
+            // statics, which no scope value carries.
+            var s0 = suffixes[0]
+            if (s0.kind == "mcall" && s0.rty == "static:String"
+                && (s0.name == "valueOf" || s0.name == "copyValueOf" || s0.name == "join" || s0.name == "format")) {
+                var sa = emitArgs(b, s0.args)
+                b = sa.b
+                cur = callExt(b, "js_jvstrstatic", [emitStr(b, s0.name), sa.v])
+                i0 = 1
+            } else {
+                var r = primary(b)
+                b = r.b
+                cur = r.v
+            }
+            for (var i = i0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
                     var ea = emitArgs(b, s.args)
@@ -3428,13 +3455,15 @@ HasStatic   = :script(~~
                              ? callExt(mcallB, "js_jvchars", [cur])
                              : ((s.name == "charAt")
                              ? callExt(mcallB, "js_jcharat", [cur, ea.v])
+                             : ((s.name == "getClass" && s.args.length == 0)
+                             ? callExt(mcallB, "js_jvgetclass", [cur])
                              : ((s.name == "hashCode" && s.args.length == 0)
                                 ? callExt(mcallB, "js_jhash", [cur])
                                 : ((s.name == "toString" && s.args.length == 0)
                                    ? callExt(mcallB, "js_jvstr", [cur])
                                    : ((s.name == "equals" && s.args.length == 1)
                                       ? callExt(mcallB, "js_jvaleq", [cur, callExt(mcallB, "js_arg", [ea.v, handle(0)])])
-                                      : jEmitMcall(mcallB, cur, s, ea.v))))))
+                                      : jEmitMcall(mcallB, cur, s, ea.v)))))))
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -4269,20 +4298,27 @@ HasStatic   = :script(~~
     // (jUtilWants in lib/java-decltypes.js); every other import resolves as
     // before. Its types are the java.util package's, which is their binary
     // name's prefix (jPkgPrefix), as getName and an uncaught exception spell it.
+    // lib/java-lang.java is compiled the same way when the program creates one
+    // of its types (jLangWants): at the end of the walk, by buildMain, so its
+    // classes are stashed with the imported ones.
     var jUtilLoaded = false
+    var jLangWant = false
     var jPkgPrefix = ""
+    function jLoadLib(file, prefix) {
+        var text = load(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        jPkgPrefix = prefix
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        jPkgPrefix = ""
+    }
     function jImport(path, pos) {
         if (!jUtilLoaded && jUtilWants(stripWs(path))) {
             jUtilLoaded = true
-            var text = load("lib/java-util.java")
-            var asg = c.parse(c.agrammar, text, null, "lib/java-util.java")
-            jPkgPrefix = "java.util."
-            c.pushSource("lib/java-util.java", text)
-            importDepth = importDepth + 1
-            c.compile(asg)
-            importDepth = importDepth - 1
-            c.popSource()
-            jPkgPrefix = ""
+            jLoadLib("lib/java-util.java", "java.util.")
         }
         resolveImport(path, pos)
     }
@@ -4793,7 +4829,9 @@ HasStatic   = :script(~~
     // provides them: a descriptor with the usual __super chain, a constructor taking
     // an optional message and getMessage(). Only the ones a program actually names
     // (as a superclass or a `new` target), plus their ancestors, are emitted.
-    var builtinExcOrder = ["Throwable", "Exception", "Error", "VirtualMachineError", "RuntimeException",
+    // java.lang.Object rides along: `new Object()` and `extends Object` name it,
+    // and it is not a Throwable (the hierarchy is not rooted in it here).
+    var builtinExcOrder = ["Object", "Throwable", "Exception", "Error", "VirtualMachineError", "RuntimeException",
                            "IllegalArgumentException", "IllegalStateException",
                            "NullPointerException", "ArithmeticException",
                            "IndexOutOfBoundsException", "ArrayIndexOutOfBoundsException",
@@ -4812,7 +4850,7 @@ HasStatic   = :script(~~
         if (name == "IOException") { return "java.io." + name }
         return "java.lang." + name
     }
-    var builtinExcParent = {"$Throwable": "", "$Exception": "Throwable", "$Error": "Throwable",
+    var builtinExcParent = {"$Object": "", "$Throwable": "", "$Exception": "Throwable", "$Error": "Throwable",
                             "$RuntimeException": "Exception",
                             "$IllegalArgumentException": "RuntimeException",
                             "$IllegalStateException": "RuntimeException",
@@ -4842,9 +4880,12 @@ HasStatic   = :script(~~
     var jUsesStrIdx = false     // charAt/substring -> StringIndexOutOfBoundsException
     var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
     var jUsesParse = false      // parseInt/parseDouble/valueOf ... -> NumberFormatException
+    var jUsesRepeat = false     // String.repeat    -> IllegalArgumentException
     function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
     function jNoteMSfx(sfx) {
-        if (sfx.name == "charAt" || sfx.name == "substring") { jUsesStrIdx = true }
+        if (sfx.name == "charAt" || sfx.name == "substring" || sfx.name == "codePointAt"
+            || sfx.name == "subSequence") { jUsesStrIdx = true }
+        if (sfx.name == "repeat") { jUsesRepeat = true }
         if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "parseDouble"
             || sfx.name == "parseFloat" || sfx.name == "valueOf") { jUsesParse = true }
         return sfx
@@ -4855,7 +4896,8 @@ HasStatic   = :script(~~
     // ArrayIndexOutOfBoundsException on every out-of-range array access (JLS 10.4,
     // js_jvidx), StringIndexOutOfBoundsException from charAt/substring and
     // NegativeArraySizeException from `new int[-1]` (JLS 15.10.1, js_jvnewlen),
-    // NumberFormatException from Integer.parseInt and its kin.
+    // NumberFormatException from Integer.parseInt and its kin, IllegalArgumentException
+    // from String.repeat.
     // js_jvexc registers each descriptor by NAME. ArithmeticException alone is
     // unconditional: an integer divide by zero is reachable from arithmetic the
     // emitter cannot see around; the others are gated on the flags above.
@@ -4882,6 +4924,10 @@ HasStatic   = :script(~~
         if (jUsesParse) {
             runtimeExc["$NumberFormatException"] = true
             noteTypeUse("NumberFormatException")
+        }
+        if (jUsesRepeat) {
+            runtimeExc["$IllegalArgumentException"] = true
+            noteTypeUse("IllegalArgumentException")
         }
     }
     var userDeclared = {}
@@ -5283,6 +5329,10 @@ HasStatic   = :script(~~
         if (importDepth > 0) {
             stashImported(items) // stashed with its file; emitted later (compile-core)
             return
+        }
+        if (jLangWant) {
+            jLangWant = false
+            jLoadLib("lib/java-lang.java", "java.lang.")
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f

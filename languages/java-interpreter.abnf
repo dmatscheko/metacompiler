@@ -41,9 +41,13 @@ references (static, bound, unbound and constructor) that become real values of t
 functional interface they are assigned to, the full operator set including the
 bitwise and shift operators with Java int semantics, and the compound assignments.
 The enhanced for runs over an array or any Iterable. Importing java.util's
-ArrayList, AbstractList, List, Collection or Iterator compiles lib/java-util.java with the
-program (shared with java-to-llvm-ir.abnf): an ArrayList and List.of in Java's own
-terms, and an AbstractList a user List extends. Math's and StrictMath's transcendentals are fdlibm's (lib/fdlibm.js).
+ArrayList, AbstractList, List, Collection or Iterator compiles lib/java-util.java
+with the program (shared with java-to-llvm-ir.abnf): an ArrayList and List.of in
+Java's own terms, and an AbstractList a user List extends. java.lang.String's
+methods and String.valueOf / join / format are lib/java-strings.js (the regex ones
+over lib/regex.js), StringBuilder is lib/java-lang.java, compiled the same way, and
+Object and getClass() are built in. Math's and StrictMath's transcendentals are
+fdlibm's (lib/fdlibm.js).
 
 UNQUALIFIED calls work - check(x), not just this.check(x) - and pick their
 receiver by Java's own rule: a method the enclosing class or an ancestor declares
@@ -2133,6 +2137,10 @@ HasStatic   = :script(~~
     include("lib/interp-core.js")
     include("lib/fdlibm.js")
     include("lib/java-chars.js")
+    include("lib/regex.js")
+    include("lib/java-strings.js")
+    // rxFail is regex.js's error KNOB, overridden by assignment.
+    rxFail = function (msg) { fail("regexp: " + msg) }
 
     // The host names a program can see. System and Math are built here.
     hostGlobals["System"] = {
@@ -2625,8 +2633,8 @@ HasStatic   = :script(~~
     // java.lang.Character's classification and case mapping. Each takes a char
     // or an int code point, and toUpperCase / toLowerCase answer the argument's
     // own type. The classes are java's own table (lib/java-chars.js); the case
-    // mapping is the host's one-character mapping, the Unicode simple mapping
-    // Java's is. Twin of jvCharMembers in abnf/jsrtjava.go and
+    // mapping is the Unicode simple mapping Java's is (jxChUp / jxChLo in
+    // lib/java-strings.js). Twin of jvCharMembers in abnf/jsrtjava.go and
     // languages/lib/java-rt.metajs.
     function jCharMembers(o) {
         var code = function(v) { return jIsChar(v) ? v.__char : jNum(v) }
@@ -2637,19 +2645,13 @@ HasStatic   = :script(~~
         o.isLetterOrDigit = function(v) { var c = code(v); return jcIsLetter(c) || jcIsDigit(c) }
         o.isUpperCase = function(v) { return jcIsUpper(code(v)) }
         o.isLowerCase = function(v) { return jcIsLower(code(v)) }
-        o.isWhitespace = function(v) {
-            var c = code(v)
-            return (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 5760 || (c >= 8192 && c <= 8198)
-                || (c >= 8200 && c <= 8202) || c == 8232 || c == 8233 || c == 8287 || c == 12288
-        }
-        o.toUpperCase = function(v) { return like(v, jChUp(code(v))) }
-        o.toLowerCase = function(v) { return like(v, jChLo(code(v))) }
+        o.isWhitespace = function(v) { return jxIsWs(code(v)) }
+        o.toUpperCase = function(v) { return like(v, jxChUp(code(v))) }
+        o.toLowerCase = function(v) { return like(v, jxChLo(code(v))) }
         o.getNumericValue = function(v) { return jcNumericValue(code(v)) }
         o.digit = function(v, radix) { var d = jcDigitVal(code(v)); return d < jNum(radix) ? d : 0 - 1 }
     }
     jCharMembers(hostGlobals["Character"])
-    function jChUp(c) { var s = String.fromCharCode(c).toUpperCase(); return s.length == 1 ? s.charCodeAt(0) : c }
-    function jChLo(c) { var s = String.fromCharCode(c).toLowerCase(); return s.length == 1 ? s.charCodeAt(0) : c }
     // Java's Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0.
     // Double.max / min and Float.max / min are these.
     function jMaxD(a, b) {
@@ -3302,6 +3304,177 @@ HasStatic   = :script(~~
         return "" + v
     }
 
+    // ----- Object#getClass -----
+    // A java.lang.Class is one object per class, so == compares classes: an
+    // instance of the Class descriptor carrying the binary and the simple name.
+    // Twin of js_jvgetclass in abnf/jsrtjavastr.go and languages/lib/java-rt.metajs.
+    var jClassCls = {__isclass: true, __name: "Class", __bname: "java.lang.Class"}
+    jClassCls.getName = function(self) { return self.__cname }
+    jClassCls.getSimpleName = function(self) { return self.__csimple }
+    jClassCls.toString = function(self) { return "class " + self.__cname }
+    var jClassObjs = {}
+    function jClassOf(name, simple) {
+        var key = "$" + name
+        if (hasOwn(jClassObjs, key)) { return jClassObjs[key] }
+        var c = {__class: jClassCls, __cname: name, __csimple: simple}
+        jClassObjs[key] = c
+        return c
+    }
+    function jLangClass(simple) { return jClassOf("java.lang." + simple, simple) }
+    // An array's simple name from its (inferred) binary name: [I is int[].
+    function jArraySimple(tag) {
+        if (tag.charAt(1) == "L") { return tag.substring(tag.lastIndexOf(".") + 1, tag.length - 1) + "[]" }
+        var c = tag.charAt(1)
+        if (c == "I") { return "int[]" }
+        if (c == "J") { return "long[]" }
+        if (c == "D") { return "double[]" }
+        if (c == "F") { return "float[]" }
+        if (c == "Z") { return "boolean[]" }
+        if (c == "C") { return "char[]" }
+        if (c == "S") { return "short[]" }
+        return "byte[]"
+    }
+    function jGetClass(v) {
+        if (v === null || v === undefined) { fail("method call .getClass() on null") }
+        if (typeof v == "string") { return jLangClass("String") }
+        if (typeof v == "boolean") { return jLangClass("Boolean") }
+        if (typeof v == "number") { return jLangClass("Integer") }
+        if (Array.isArray(v)) {
+            var tag = jArrayTag(v)
+            return jClassOf(tag, jArraySimple(tag))
+        }
+        if (typeof v == "object") {
+            if (v.__char !== undefined) { return jLangClass("Character") }
+            if (v.__flo !== undefined) { return jLangClass(v.__f32 === true ? "Float" : "Double") }
+            if (v.__sz === true) { return jLangClass(v.w == 64 ? "Long" : (v.w == 16 ? "Short" : "Byte")) }
+            if (v.__class != undefined) { return jClassOf(jClassBin(v.__class), v.__class.__name) }
+        }
+        fail("getClass() of a value with no class")
+    }
+
+    // ----- java.lang.String's methods and statics (lib/java-strings.js) -----
+    // The value-model hooks lib/java-strings.js asks through.
+    function jxkKind(v) {
+        if (v === null || v === undefined) { return "null" }
+        if (typeof v == "boolean") { return "bool" }
+        if (typeof v == "string") { return "str" }
+        if (typeof v == "number") { return "int" }
+        if (typeof v == "object") {
+            if (v.__char !== undefined) { return "char" }
+            if (v.__sz === true) { return "int" }
+            if (v.__flo !== undefined) { return "float" }
+        }
+        return "obj"
+    }
+    function jxkStr(v) { return jstr(v) }
+    function jxkCode(v) { return jIsChar(v) ? v.__char : jI(v) }
+    function jxkDec(v) { return jIsSz(v) ? szStr(v) : "" + jI(v) }
+    function jxkRadix(v, r) {
+        if (jIsSz(v) && v.w < 32) { return jRadixStr(jI(v) & (v.w == 8 ? 255 : 65535), 32, r, true) }
+        return jRadixStr(v, jIsLong(v) ? 64 : 32, r, true)
+    }
+    function jxkDbl(v) { return v.__flo }
+    function jxkDblStr(a) { return jFloStr(a) }
+    function jxkFail(msg) { fail(msg) }
+    // A String method's CharSequence or char argument as a string, and indexOf's
+    // first argument, which may also be an int code point.
+    function jStrArg(v) {
+        if (typeof v == "string") { return v }
+        if (jIsChar(v)) { return String.fromCharCode(v.__char) }
+        return jstr(v)
+    }
+    function jStrPat(v) {
+        if (typeof v == "string") { return v }
+        return jxCpStr(jxkCode(v))
+    }
+    // The java.lang.String methods past the handful mcall answers itself. Twin
+    // of js_jvstrm in abnf/jsrtjavastr.go and languages/lib/java-rt.metajs.
+    function jStrMethod(s, name, args) {
+        var a0 = args[0]
+        var n1 = args.length > 1
+        if (name == "isEmpty") { return s.length == 0 }
+        if (name == "isBlank") { return jxIsBlank(s) }
+        if (name == "indexOf") { return jxIndexOf(s, jStrPat(a0), n1 ? jI(args[1]) : 0) }
+        if (name == "lastIndexOf") { return jxLastIndexOf(s, jStrPat(a0), n1 ? jI(args[1]) : s.length) }
+        if (name == "contains") { return jxIndexOf(s, jStrArg(a0), 0) >= 0 }
+        if (name == "startsWith") { return jxAt(s, jStrArg(a0), n1 ? jI(args[1]) : 0) }
+        if (name == "endsWith") {
+            var suf = jStrArg(a0)
+            return jxAt(s, suf, s.length - suf.length)
+        }
+        if (name == "equalsIgnoreCase") { return typeof a0 == "string" && a0.length == s.length && jxCompareIC(s, a0) == 0 }
+        if (name == "compareTo") { return jxCompare(s, jStrArg(a0)) }
+        if (name == "compareToIgnoreCase") { return jxCompareIC(s, jStrArg(a0)) }
+        if (name == "concat") { return s + jStrArg(a0) }
+        if (name == "replace") { return jxReplace(s, jStrArg(a0), jStrArg(args[1])) }
+        if (name == "replaceAll") { return jxRxReplace(s, jStrArg(a0), jStrArg(args[1]), true) }
+        if (name == "replaceFirst") { return jxRxReplace(s, jStrArg(a0), jStrArg(args[1]), false) }
+        if (name == "matches") { return jxMatches(s, jStrArg(a0)) }
+        if (name == "split") { return jxSplit(s, jStrArg(a0), n1 ? jI(args[1]) : 0) }
+        if (name == "trim") { return jxTrim(s) }
+        if (name == "strip") { return jxStrip(s, true, true) }
+        if (name == "stripLeading") { return jxStrip(s, true, false) }
+        if (name == "stripTrailing") { return jxStrip(s, false, true) }
+        if (name == "toUpperCase") { return jxUpper(s) }
+        if (name == "toLowerCase") { return jxLower(s) }
+        if (name == "repeat") {
+            var cnt = jI(a0)
+            if (cnt < 0) { jThrowExc("IllegalArgumentException", "count is negative: " + cnt) }
+            return jxRepeat(s, cnt)
+        }
+        if (name == "codePointAt") {
+            var i = jStrIdx(s, a0)
+            var c = s.charCodeAt(i)
+            if (c >= 55296 && c < 56320 && i + 1 < s.length) {
+                var lo = s.charCodeAt(i + 1)
+                if (lo >= 56320 && lo < 57344) { return 65536 + (c - 55296) * 1024 + lo - 56320 }
+            }
+            return c
+        }
+        if (name == "subSequence") { return jSubstr(s, args) }
+        if (name == "intern") { return s }
+        fail("unknown String method: " + name)
+    }
+    // String.valueOf / copyValueOf / join / format, reached through the String
+    // namespace object. Twin of js_jvstrstatic in abnf/jsrtjavastr.go and
+    // languages/lib/java-rt.metajs.
+    var jStrNS = {}
+    hostGlobals["String"] = jStrNS
+    function jStrStatic(name, args) {
+        if (args.length == 0) { fail("unknown method 'String." + name + "'") }
+        if (name == "valueOf" || name == "copyValueOf") {
+            if (Array.isArray(args[0])) { return jNewString(args) }
+            return jstr(args[0])
+        }
+        var rest = []
+        for (var i = 1; i < args.length; i++) { rest.push(args[i]) }
+        if (name == "join") {
+            var es = jJoinElems(rest)
+            var parts = []
+            for (var k = 0; k < es.length; k++) { parts.push(jstr(es[k])) }
+            return jxJoin(jStrArg(args[0]), parts)
+        }
+        if (name == "format") {
+            if (rest.length == 1 && Array.isArray(rest[0]) && jArrayTag(rest[0]).substring(0, 2) == "[L") { rest = rest[0] }
+            return jxFormat(jStrArg(args[0]), rest)
+        }
+        fail("unknown method 'String." + name + "'")
+    }
+    // String.join's elements: the varargs, the one array they came as, or what
+    // one Iterable's iterator() yields.
+    function jJoinElems(rest) {
+        if (rest.length != 1) { return rest }
+        var e = rest[0]
+        if (Array.isArray(e)) { return e }
+        if (e !== null && typeof e == "object" && e.__class != undefined) {
+            var out = []
+            var it = mcall(e, "iterator", [])
+            while (mcall(it, "hasNext", []) === true) { out.push(mcall(it, "next", [])) }
+            return out
+        }
+        return rest
+    }
+
     // The class whose body is currently being built (for super calls).
     var curClassName = ""
 
@@ -3318,6 +3491,7 @@ HasStatic   = :script(~~
         // interception in foldCallMember, routed to the js_jhash extern. Only the
         // no-argument form is Object#hashCode.
         if (name == "hashCode" && args.length == 0) { return jHash(target) }
+        if (name == "getClass" && args.length == 0) { return jGetClass(target) }
         if (typeof target == "string") {
             if (name == "length") return target.length
             if (name == "charCodeAt") return target.charCodeAt(args[0])
@@ -3329,15 +3503,14 @@ HasStatic   = :script(~~
             // BEFORE the Object fallback further down, so it has to say so.
             if (name == "toString") return target
             if (name == "substring") return jSubstr(target, args)
-            if (name == "indexOf") return target.indexOf(args[0])
-            if (name == "isEmpty") return target.length == 0
             if (name == "toCharArray") {
                 var cs = []
                 for (var ci = 0; ci < target.length; ci++) { cs.push(jChar(target.charCodeAt(ci))) }
                 return cs
             }
-            fail("unknown String method: " + name)
+            return jStrMethod(target, name, args)
         }
+        if (target === jStrNS) { return jStrStatic(name, args) }
         // A char answers the handful of methods a program calls on one. equals()
         // accepts both a char and the one-character string it renders as.
         if (typeof target == "object" && target !== null && target.__char !== undefined) {
@@ -3867,6 +4040,7 @@ HasStatic   = :script(~~
     }
     function makeNew(items, text) {
         var clsName = items[0]
+        if (jLangWants(clsName)) { jLangWant = true }
         var args = items.slice(1)
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         var sig = anytype // the static constructor signature, resolved at the first run
@@ -4243,6 +4417,10 @@ HasStatic   = :script(~~
                     "NumberFormatException", "IllegalArgumentException",
                     "StackOverflowError", "VirtualMachineError",
                     "AssertionError", "Error"]
+    // java.lang.Object: `new Object()` and `extends Object`; its constructor
+    // does nothing.
+    globalScope["Object"] = {__isclass: true, __name: "Object", __bname: "java.lang.Object",
+                             __ctor: function() { return undefined }}
     for (var jei = 0; jei < jExcTree.length; jei = jei + 2) {
         jDefExc(jExcTree[jei], jExcTree[jei + 1] == "" ? null : jExcTree[jei + 1])
     }
@@ -5594,18 +5772,24 @@ HasStatic   = :script(~~
     // (jUtilWants in lib/java-decltypes.js); every other import resolves as
     // before. Its types are the java.util package's, which is their binary
     // name's prefix (jPkgPrefix), as getName and an uncaught exception spell it.
+    // lib/java-lang.java is compiled the same way, after the program's walk,
+    // when the program creates one of its types (jLangWants).
     var jUtilLoaded = false
+    var jLangWant = false
     var jPkgPrefix = ""
+    function jLoadLib(file, prefix) {
+        var text = load(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        jPkgPrefix = prefix
+        c.pushSource(file, text)
+        c.compile(asg)
+        c.popSource()
+        jPkgPrefix = ""
+    }
     function jImport(path, pos) {
         if (!jUtilLoaded && jUtilWants(stripWs(path))) {
             jUtilLoaded = true
-            var text = load("lib/java-util.java")
-            var asg = c.parse(c.agrammar, text, null, "lib/java-util.java")
-            jPkgPrefix = "java.util."
-            c.pushSource("lib/java-util.java", text)
-            c.compile(asg)
-            c.popSource()
-            jPkgPrefix = ""
+            jLoadLib("lib/java-util.java", "java.util.")
         }
         resolveImport(path, pos)
     }
@@ -5999,6 +6183,7 @@ HasStatic   = :script(~~
     }
 
     c.compile(c.asg)
+    if (jLangWant) { jLoadLib("lib/java-lang.java", "java.lang.") }
     jWalkDone = true
 
     // The entry point defaults to the static main of class Main, but the -main flag
