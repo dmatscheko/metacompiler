@@ -13443,11 +13443,59 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(jsNull)
 		},
-		"js_rdefined": func(a []uint64) uint64 { // (scope, name, kind) -> kind | nil
+		// (scope, name, kind) -> kind | "method" | nil. A Ruby local is visible
+		// up to the nearest scope declaring "$blk" - the method's own frame, or
+		// the program's main scope - and never beyond it: not the top-level
+		// locals from inside a def, nor the host's root scope (MetaJS's own
+		// print/printf/sprintf). A name bound nowhere is "method" when self has
+		// one. Twin of js_rdefined in languages/lib/ruby-rt.metajs.
+		"js_rdefined": func(a []uint64) uint64 {
 			name := rt.toString(u(a[1]))
+			var self interface{} = jsNull
 			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
 				if s.has(name) {
 					return w(u(a[2]))
+				}
+				if v, ok := s.get("self"); ok && isUndefOrNull(self) {
+					self = v
+				}
+				if s.has("$blk") {
+					break
+				}
+			}
+			if _, found := rubyFindMethod(self, name); found && !isUndefOrNull(self) {
+				return w("method")
+			}
+			return w(jsNull)
+		},
+		// (scope, "@x" | "@@x") -> "instance-variable" / "class variable" | nil:
+		// defined only once ASSIGNED, on self or up its class chain. Twin of
+		// js_rvardefined in languages/lib/ruby-rt.metajs.
+		"js_rvardefined": func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			var self interface{} = jsNull
+			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+				if v, ok := s.get("self"); ok {
+					self = v
+					break
+				}
+			}
+			if strings.HasPrefix(name, "@@") {
+				for cls := rubyClassOfSelf(self); cls != nil; {
+					o, ok := cls.(*jsObject)
+					if !ok {
+						break
+					}
+					if _, has := o.props[name]; has {
+						return w("class variable")
+					}
+					cls = o.props["__super"]
+				}
+				return w(jsNull)
+			}
+			if o, ok := self.(*jsObject); ok {
+				if _, has := o.props[name[1:]]; has {
+					return w("instance-variable")
 				}
 			}
 			return w(jsNull)

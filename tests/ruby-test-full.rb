@@ -2932,6 +2932,28 @@ def s54
   check("pa54d", v == 3 && (s54two 3, 4) == 7)
 end
 
+# ===== SECTION 55: defined? of Kernel names, instance variables and outer locals =====
+# The Kernel functions are "method" unless a local shadows them; an @ivar is
+# defined only once assigned; a local of the caller is invisible inside a method,
+# and a method of self is "method". Every right-hand side is /usr/bin/ruby
+# 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+class S55C
+  def initialize; @a = nil; end
+  def probe; [defined?(@a), defined?(@b), defined?(probe), defined?(s55_nope)]; end
+end
+def s55inner
+  [defined?(s55outer), defined?(p), defined?(@zz)]
+end
+def s55
+  s55outer = 1
+  check("df55a", [defined?(p), defined?(sprintf), defined?(format), defined?(lambda), defined?(proc),
+                  defined?(rand), defined?(printf), defined?(print)].uniq == ["method"])
+  check("df55b", defined?(@s55_never) == nil && defined?(s55outer) == "local-variable")
+  check("df55c", s55inner == [nil, "method", nil] && S55C.new.probe == ["instance-variable", nil, "method", nil])
+  p = 5
+  check("df55d", defined?(p) == "local-variable" && p == 5)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2948,5 +2970,6 @@ s51() # SECTION-CALL 51
 s52() # SECTION-CALL 52
 s53() # SECTION-CALL 53
 s54() # SECTION-CALL 54
+s55() # SECTION-CALL 55
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

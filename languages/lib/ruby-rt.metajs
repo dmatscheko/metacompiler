@@ -8244,14 +8244,53 @@ function js_rgdefined(name, kind) {
 // CAN tell the two apart, and it is a HOST BUILTIN (ids 65..68), reachable only
 // from here - the same wall and the same answer as js_rmethodval above. The call
 // site is `defined?` itself, which no hot path in any test program contains.
+//
+// A Ruby local is visible up to the nearest scope declaring "$blk" - the
+// method's own frame, or the program's main scope - and never beyond it, which
+// also keeps out the host's root scope (MetaJS's own print/printf/sprintf). A
+// name bound nowhere is "method" when self has one. Twin of js_rdefined in
+// abnf/jsrt.go.
 function js_rdefined(scope, name, kind) {
     var n = rbStr(name)
     var s = anytype
+    var self = anytype
     s = scope
+    self = null
     while (s !== undefined && s !== null) {
         if (scopeHas(s, n)) { return kind }
+        if (self === null && scopeHas(s, "self")) { self = scopeGet(s, "self") }
+        if (scopeHas(s, "$blk")) {
+            s = null
+        } else {
+            s = scopeParent(s)
+        }
+    }
+    if (self !== null && self !== undefined && rbFindMethod(self, n) !== undefined) { return "method" }
+    return null
+}
+
+// defined?(@x) / defined?(@@x): defined only once ASSIGNED, on self or up its
+// class chain. Twin of js_rvardefined in abnf/jsrt.go.
+function js_rvardefined(scope, name) {
+    var n = rbStr(name)
+    var s = anytype
+    var self = anytype
+    s = scope
+    self = null
+    while (s !== undefined && s !== null && self === null) {
+        if (scopeHas(s, "self")) { self = scopeGet(s, "self") }
         s = scopeParent(s)
     }
+    if (n.charAt(1) == "@") {
+        var cls = rbClassOfSelf(self)
+        while (cls !== undefined && cls !== null) {
+            if (!rbIsObj(cls)) { return null }
+            if (cls[n] !== undefined) { return "class variable" }
+            cls = cls["__super"]
+        }
+        return null
+    }
+    if (rbIsObj(self) && self[n.substring(1)] !== undefined) { return "instance-variable" }
     return null
 }
 

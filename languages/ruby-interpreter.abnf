@@ -2300,6 +2300,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (h == null) { fail("@@" + name + " outside of a class") }
         h["@@" + name] = v
     }
+    // The Kernel functions MRI's defined? calls "method". Twin of the list of the
+    // same name in ruby-to-llvm-ir.abnf.
+    var definedKernelNames = ["puts", "print", "p", "printf", "sprintf", "format", "rand",
+                              "require", "loop", "raise", "lambda", "proc"]
     // defined?(X): classified from the SOURCE TEXT of the argument, which is what
     // Ruby's own answer amounts to - the argument is never evaluated.
     function makeDefined(items) {
@@ -2310,7 +2314,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (t.length == 0) { return null }
             var c0 = t.charAt(0)
             if (c0 == "$") { return hasOwn(rubyGlobals, t.slice(1)) ? "global-variable" : null }
-            if (c0 == "@") { return "instance-variable" }
+            // An @ivar or @@cvar is defined once ASSIGNED (even to nil), not merely named.
+            if (c0 == "@") {
+                if (t.charAt(1) == "@") { return cvarHolder(t.slice(2)) != null ? "class variable" : null }
+                var ds = anytype
+                ds = findSelf()
+                if (ds === null || ds === undefined || typeof ds != "object") { return null }
+                return hasOwn(ds, t.slice(1)) ? "instance-variable" : null
+            }
             if (t == "self") { return "self" }
             // MRI gives each keyword literal its OWN kind - `defined?(nil)` is "nil",
             // not "expression". These are KEYWORDS - no local, method or constant can
@@ -2321,8 +2332,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return hasOwn(hostGlobals, t) ? "constant" : null
             }
             for (var j = scopes.length - 1; j >= 1; j--) { if (hasOwn(scopes[j], t)) { return "local-variable" } }
+            // globalScope holds the top-level locals AND the top-level defs; a local
+            // there is only visible outside every method.
             if (rubyMethods["$" + t] === true) { return "method" }
-            if (hasOwn(globalScope, t) || hasOwn(hostGlobals, t)) { return "method" }
+            if (hasOwn(globalScope, t) && frameScopeOf(scopes) == null) { return "local-variable" }
+            if (definedKernelNames.indexOf(t) >= 0 || hasOwn(hostGlobals, t)) { return "method" }
+            if (typeof selfMethod(t) == "function") { return "method" }
             return null
         }
     }

@@ -5513,6 +5513,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: callExt(b, "js_rcvget", [selfV, emitStr(b, name)])}
         }
     }
+    // The Kernel functions MRI's defined? calls "method". Twin of the list of the
+    // same name in ruby-interpreter.abnf.
+    var definedKernelNames = ["puts", "print", "p", "printf", "sprintf", "format", "rand",
+                              "require", "loop", "raise", "lambda", "proc"]
     // defined?(X) answers WHAT X is - "constant", "global-variable", "local-variable",
     // "method", "expression" - or nil when it is nothing. The argument is never
     // evaluated, so the kind is decided here from the shape of the source text and only
@@ -5533,11 +5537,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rgdefined", [emitStr(b, gname), emitStr(b, "global-variable")])}
             }
         }
-        if (txt == "puts" || txt == "print" || txt == "require" || txt == "loop" || txt == "raise") {
-            return function(b) { return {b: b, v: emitStr(b, "method")} }
+        // A Kernel function is "method" unless a local of that name shadows it.
+        // js_rdefined, not the fast probe: the root scope is the HOST's and carries
+        // MetaJS's own print/printf/sprintf, which js_rdefined never reaches.
+        if (definedKernelNames.indexOf(txt) >= 0 && rubyAllMethods["$" + txt] !== true) {
+            return function(b) {
+                var kv = callExt(b, "js_rdefined", [curScopeV, emitStr(b, txt), emitStr(b, "local-variable")])
+                return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, kv, hNull), emitStr(b, "method"), kv)}
+            }
         }
-        if (txt.length > 0 && txt.charAt(0) == "@") {
-            return function(b) { return {b: b, v: emitStr(b, "instance-variable")} }
+        if (txt.length > 1 && txt.charAt(0) == "@") {
+            return function(b) { return {b: b, v: callExt(b, "js_rvardefined", [curScopeV, emitStr(b, txt)])} }
         }
         if (!isPlainName(txt)) {
             return function(b) { return {b: b, v: emitStr(b, "expression")} }
@@ -5560,6 +5570,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             // A def of that name is a method, whatever else the scope holds.
             var k = rubyAllMethods["$" + txt] === true ? "method" : kind
+            // Inside a def the fast probe would see the top-level locals through the
+            // scope chain; js_rdefined stops at the method's own frame.
+            if (curMethodTag != 0 && k == "local-variable") {
+                return {b: b, v: callExt(b, "js_rdefined", [curScopeV, emitStr(b, txt), emitStr(b, k)])}
+            }
             return {b: b, v: rbScopeProbe(b, emitStr(b, txt), emitStr(b, k))}
         }
     }
