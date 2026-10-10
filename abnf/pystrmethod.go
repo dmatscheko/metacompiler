@@ -141,9 +141,119 @@ func (e *pyStrEnv) loCh(ch string) string {
 	return u
 }
 
-func (e *pyStrEnv) isCased(ch string) bool { return e.upCh(ch) != e.loCh(ch) }
-func (e *pyStrEnv) isUpCh(ch string) bool  { return e.isCased(ch) && ch == e.upCh(ch) }
-func (e *pyStrEnv) isLoCh(ch string) bool  { return e.isCased(ch) && ch == e.loCh(ch) }
+// CASED CHARACTERS THE SIMPLE MAPPING LEAVES ALONE. CPython's cased / lower /
+// upper tests read the Unicode Lowercase and Uppercase properties, and some
+// characters carry one with no single-character mapping to tell: sharp s (whose
+// upper case is "SS"), kra, the IPA and modifier letters, the mathematical
+// alphanumerics. Without these, "straße".title() would start a word after the ß.
+// [lo, hi] code point pairs, generated with CPython 3.14 (Unicode 16) over every
+// code point Go's simple mapping fixes.
+// Twin of pySLowOnly / pySUpOnly in languages/lib/python-rt.metajs and
+// languages/python-interpreter.abnf.
+var pysLowOnly = []int{
+	170, 170, 186, 186, 223, 223, 312, 312, 329, 329, 397, 397, 426, 427, 442, 442, 446,
+	446, 496, 496, 545, 545, 564, 569, 597, 597, 600, 600, 602, 602, 605, 607, 610, 610,
+	615, 615, 621, 622, 624, 624, 627, 628, 630, 636, 638, 639, 641, 641, 644, 646, 653,
+	657, 659, 659, 661, 668, 671, 696, 704, 705, 736, 740, 890, 890, 912, 912, 944, 944,
+	1020, 1020, 1376, 1376, 1415, 1416, 4348, 4348, 7424, 7544, 7546, 7548, 7550, 7565,
+	7567, 7615, 7830, 7834, 7836, 7837, 7839, 7839, 8016, 8016, 8018, 8018, 8020, 8020,
+	8022, 8022, 8114, 8114, 8116, 8116, 8118, 8119, 8130, 8130, 8132, 8132, 8134, 8135,
+	8146, 8147, 8150, 8151, 8162, 8164, 8166, 8167, 8178, 8178, 8180, 8180, 8182, 8183,
+	8305, 8305, 8319, 8319, 8336, 8348, 8458, 8458, 8462, 8463, 8467, 8467, 8495, 8495,
+	8500, 8500, 8505, 8505, 8508, 8509, 8518, 8521, 11377, 11377, 11380, 11380, 11383,
+	11389, 11492, 11492, 42652, 42653, 42800, 42801, 42864, 42872, 42894, 42894, 42901,
+	42901, 42927, 42927, 42994, 42996, 43000, 43002, 43824, 43858, 43860, 43866, 43868,
+	43881, 64256, 64262, 64275, 64279, 67456, 67456, 67459, 67461, 67463, 67504, 67506,
+	67514, 119834, 119859, 119886, 119892, 119894, 119911, 119938, 119963, 119990, 119993,
+	119995, 119995, 119997, 120003, 120005, 120015, 120042, 120067, 120094, 120119,
+	120146, 120171, 120198, 120223, 120250, 120275, 120302, 120327, 120354, 120379,
+	120406, 120431, 120458, 120485, 120514, 120538, 120540, 120545, 120572, 120596,
+	120598, 120603, 120630, 120654, 120656, 120661, 120688, 120712, 120714, 120719,
+	120746, 120770, 120772, 120777, 120779, 120779, 122624, 122633, 122635, 122654,
+	122661, 122666, 122928, 122989}
+var pysUpOnly = []int{
+	978, 980, 8450, 8450, 8455, 8455, 8459, 8461, 8464, 8466, 8469, 8469, 8473, 8477,
+	8484, 8484, 8488, 8488, 8492, 8493, 8496, 8497, 8499, 8499, 8510, 8511, 8517, 8517,
+	119808, 119833, 119860, 119885, 119912, 119937, 119964, 119964, 119966, 119967,
+	119970, 119970, 119973, 119974, 119977, 119980, 119982, 119989, 120016, 120041,
+	120068, 120069, 120071, 120074, 120077, 120084, 120086, 120092, 120120, 120121,
+	120123, 120126, 120128, 120132, 120134, 120134, 120138, 120144, 120172, 120197,
+	120224, 120249, 120276, 120301, 120328, 120353, 120380, 120405, 120432, 120457,
+	120488, 120512, 120546, 120570, 120604, 120628, 120662, 120686, 120720, 120744,
+	120778, 120778, 127280, 127305, 127312, 127337, 127344, 127369}
+
+func pysInRanges(t []int, c int) bool {
+	lo, hi := 0, len(t)/2-1
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		if c < t[2*mid] {
+			hi = mid - 1
+		} else if c > t[2*mid+1] {
+			lo = mid + 1
+		} else {
+			return true
+		}
+	}
+	return false
+}
+
+// The TITLECASE letters (category Lt): neither upper nor lower case to CPython,
+// but they open a title-cased word the way an uppercase letter does.
+var pysTitleOnly = []int{453, 453, 456, 456, 459, 459, 498, 498, 8072, 8079, 8088, 8095, 8104, 8111, 8124, 8124, 8140, 8140, 8188, 8188}
+
+// 1 for a lowercase and 2 for an uppercase character of those tables, 3 for a
+// titlecase one, else 0.
+func (e *pyStrEnv) caseOnly(ch string) int {
+	c := e.sCode(ch, 0)
+	if c < 170 {
+		return 0
+	}
+	if e.sLen(ch) == 2 {
+		c = (c-55296)*1024 + (e.sCode(ch, 1) - 56320) + 65536
+	}
+	if pysInRanges(pysTitleOnly, c) {
+		return 3
+	}
+	if pysInRanges(pysLowOnly, c) {
+		return 1
+	}
+	if pysInRanges(pysUpOnly, c) {
+		return 2
+	}
+	return 0
+}
+
+func (e *pyStrEnv) isCased(ch string) bool { return e.upCh(ch) != e.loCh(ch) || e.caseOnly(ch) != 0 }
+
+// The character that opens a title-cased word: the titlecase form of the four
+// Latin digraphs (U+01C4..U+01CC, U+01F1..U+01F3 - DZ, LJ, NJ, DZ), whose
+// titlecase differs from their uppercase, else the uppercase.
+func (e *pyStrEnv) tiCh(ch string) string {
+	c := e.sCode(ch, 0)
+	if c >= 452 && c <= 460 {
+		return pysFromCode(c - (c-452)%3 + 1)
+	}
+	if c >= 497 && c <= 499 {
+		return pysFromCode(498)
+	}
+	return e.upCh(ch)
+}
+
+func (e *pyStrEnv) isUpCh(ch string) bool {
+	if k := e.caseOnly(ch); k != 0 {
+		return k == 2
+	}
+	u := e.upCh(ch)
+	return u != e.loCh(ch) && ch == u
+}
+
+func (e *pyStrEnv) isLoCh(ch string) bool {
+	if k := e.caseOnly(ch); k != 0 {
+		return k == 1
+	}
+	l := e.loCh(ch)
+	return e.upCh(ch) != l && ch == l
+}
 
 func (e *pyStrEnv) isAlphaCh(ch string) bool {
 	c := e.sCode(ch, 0)
@@ -466,7 +576,7 @@ func (e *pyStrEnv) title(s string) string {
 		if prev {
 			out += e.loCh(ch)
 		} else {
-			out += e.upCh(ch)
+			out += e.tiCh(ch)
 		}
 		prev = e.isCased(ch)
 	}
@@ -476,7 +586,7 @@ func (e *pyStrEnv) title(s string) string {
 func (e *pyStrEnv) isTitle(s string) bool {
 	prev, any := false, false
 	for _, ch := range e.chars(s) {
-		if e.isUpCh(ch) {
+		if e.isUpCh(ch) || e.caseOnly(ch) == 3 {
 			if prev {
 				return false
 			}
@@ -497,7 +607,7 @@ func (e *pyStrEnv) capitalize(s string) string {
 	out := ""
 	for i, ch := range e.chars(s) {
 		if i == 0 {
-			out += e.upCh(ch)
+			out += e.tiCh(ch)
 		} else {
 			out += e.loCh(ch)
 		}

@@ -798,7 +798,7 @@ and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs
 print the character now. JS: `(-0.4).toFixed(0)` is `"0"`,
 `(0.1).toString(3)` emits 52 fraction digits, the `d` flag builds no `m.indices`.
 Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
-`Infinity`/`NaN`, no `ZeroDivisionError`, the format mini-language is a subset,
+`Infinity`/`NaN`, the format mini-language is a subset,
 and **`js_pylen` counts CODE POINTS while `js_pyget`'s string indexing counts
 UTF-16 CODE UNITS** — an `abnf/jsrt.go` inconsistency reproduced rather than
 repaired. `abnf/jsrtphp.go` misreads `"1e400"` as 1 where both our halves answer

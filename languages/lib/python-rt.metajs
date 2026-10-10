@@ -927,6 +927,34 @@ function pyInstanceDict(inst) {
     return d
 }
 
+// C.__mro__ and C.__bases__. The class chains here leave out `object`, which owns
+// nothing a lookup could find, while CPython ends every resolution order with it
+// and gives a root class the base (object,); a builtin type is its own chain,
+// bool's going through int. Go: rt.pyMroAttr in abnf/jsrt.go.
+function pyMroAttr(cls, name) {
+    var obj = pyBuiltinClass("object")
+    if (cls === obj) {
+        if (name == "__bases__") { return [] }
+        return [obj]
+    }
+    var out = []
+    if (name == "__bases__") {
+        var bl = cls["__basesl"]
+        if (pyIsArr(bl)) { out = pyCCopyArr(bl) }
+    } else if (pyIsArr(cls["__mro"])) {
+        out = pyCCopyArr(cls["__mro"])
+    } else {
+        out.push(cls)
+    }
+    if (pyBuiltinClsName(cls) == "bool") { out.push(pyBuiltinClass("int")) }
+    if (out.length == 0) {
+        out.push(obj)
+    } else if (name == "__mro__" && out[out.length - 1] !== obj) {
+        out.push(obj)
+    }
+    return out
+}
+
 function pyGetAttr(obj, name) {
     // None has no attributes and CPython says so with a catchable AttributeError
     // rather than the floor's uncatchable "member 'x' of undefined". __class__ is
@@ -943,12 +971,7 @@ function pyGetAttr(obj, name) {
         // write: CPython qualifies only a NESTED class, and a nested `class` here
         // is bound by the same name as a top-level one.
         if (name == "__name__" || name == "__qualname__") { return pyShortName(pyToStr(obj["__name"])) }
-        if (name == "__mro__") { return obj["__mro"] }
-        if (name == "__bases__") {
-            var bl = obj["__basesl"]
-            if (pyIsArr(bl)) { return bl }
-            return []
-        }
+        if (name == "__mro__" || name == "__bases__") { return pyMroAttr(obj, name) }
         if (pyLookupHas(obj, name)) {
             var cv = pyLookupVal(obj, name)
             // A staticmethod / classmethod read off the CLASS: the static one
@@ -956,6 +979,8 @@ function pyGetAttr(obj, name) {
             if (pyDIsStatic(cv) || pyDIsClsM(cv)) { return pyDDescGet(cv, obj, name) }
             return cv
         }
+        // C.mro(), type's own method: the resolution order as a fresh list.
+        if (name == "mro") { return function() { return pyMroAttr(obj, "__mro__") } }
         // A CATCHABLE AttributeError, as CPython raises: fail() cannot be caught
         // from layer 2.
         pyRaiseExc("AttributeError",
@@ -998,6 +1023,9 @@ function pyGetAttr(obj, name) {
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
     var bcm = pyBuiltinClsMethod(obj, name)
     if (bcm !== undefined) { return bcm }
+    if (name == "__mro__" || name == "__bases__") {
+        if (pyClassName(obj) !== null) { return pyMroAttr(obj, name) }
+    }
     // list.count / str.upper / dict.get read off the BUILTIN type object: an
     // unbound method descriptor. It sits HERE rather than in the pyIsClass branch
     // above because a builtin type object carries only a __name and no __mro, so
@@ -1171,12 +1199,27 @@ function pySetAttr(obj, name, v) {
         obj[name] = v
         return v
     }
+    pyNoDictAttr(obj, name)
     if (pyIsObj(obj)) {
         obj[name] = v
         return v
     }
     fail("cannot set '" + name + "' on a " + pyTypeName(obj))
     return v
+}
+
+// A builtin value with no __dict (None, a number, a str, a list, a dict, a set)
+// refuses a new attribute, and its deletion, with a catchable AttributeError.
+// Go: rt.pyNoDictAttr in abnf/jsrt.go.
+function pyNoDictAttr(obj, name) {
+    var tn = pyTypeName(obj)
+    if (pyIsCplx(obj)) { tn = "complex" }
+    if (tn == "NoneType" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
+        tn == "list" || tn == "dict" || tn == "set" || tn == "complex") {
+        pyRaiseExc("AttributeError", "'" + tn + "' object has no attribute '" + name +
+                   "' and no __dict__ for setting new attributes")
+    }
+    return undefined
 }
 
 // ===================================================== builtin classes ======
@@ -1890,6 +1933,7 @@ function pyAToF(v) {
 // `x - math.Floor(x/y)*y`, it is not the expression clang refuses to fuse, so
 // this is a byte-for-byte match rather than an approximation.
 function pyAFloorMod(x, y) {
+    if (y == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
     var r = x % y
     if (r != 0 && (r < 0) != (y < 0)) { return r + y }
     return r
@@ -2391,8 +2435,17 @@ function js_pybin(opv, l, r) {
     }
     // Python's `/` is TRUE division: it answers a float even from two ints, so
     // 4 / 2 is 2.0 and 10**30 / 1 is 1e+30.
-    if (op == "/") { return pyMkFlo(pyAToF(l) / pyAToF(r)) }
-    if (op == "//") { return pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r) }
+    // A numeric zero divisor raises ZeroDivisionError. Go: rt.pyZeroDiv in abnf/jsrt.go.
+    if (op == "/") {
+        var fr = pyAToF(r)
+        if (fr == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
+        return pyMkFlo(pyAToF(l) / fr)
+    }
+    if (op == "//") {
+        var qr = pyNum(r)
+        if (qr == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
+        return pyIntOrFlo(Math.floor(pyNum(l) / qr), l, r)
+    }
     // "fmt" % args is printf-style FORMATTING, not a remainder.
     if (op == "%" && typeof l == "string") { return pyBPct(l, r) }
     if (op == "%") { return pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r) }
@@ -3003,12 +3056,26 @@ function pyAIntOp(op, l, r) {
     return pyAFloorMod(pyNum(l), pyNum(r))
 }
 
+// An exception that escaped the program: abort with CPython's last traceback
+// line. Go: js_pyuncaught in abnf/jsrt.go.
+function js_pyuncaught(v) {
+    var text = pyStr(v)
+    var cls = pyInstClassOf(v)
+    if (cls !== null) {
+        var nm = cls["__name"]
+        if (typeof nm != "string") { nm = "object" }
+        if (text == "") { text = nm } else { text = nm + ": " + text }
+    }
+    pyFail("uncaught exception: " + text)
+    return undefined
+}
+
 // divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
 // remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list in this value model
 // (docs/working-on-this-project.md 7.9).
 function js_pydivmod(l, r) {
     if (pyNum(r) == 0) {
-        throw pyExcInstance("ZeroDivisionError", "integer division or modulo by zero")
+        pyRaiseExc("ZeroDivisionError", "division by zero")
     }
     return [pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r),
             pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r)]
@@ -3123,7 +3190,7 @@ function pyDHasAttr(obj, name) {
         return pySuperFind(obj, name) !== undefined
     }
     if (pyIsClass(obj)) {
-        if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__") { return true }
+        if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro") { return true }
         return pyLookupHas(obj, name)
     }
     var cls = pyInstClassOf(obj)
@@ -3140,6 +3207,14 @@ function pyDHasAttr(obj, name) {
             if (obj["__pymod"] === "math") { return pyMHas(name) }
             return false
         }
+    }
+    // What pyGetAttr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
+    // unbound methods (list.count).
+    if (pyBuiltinClsMethod(obj, name) !== undefined) { return true }
+    var htn = pyClassName(obj)
+    if (htn !== null) {
+        var hsamp = pyDTypeSample(htn)
+        if (hsamp !== undefined && pyDBuiltinAttr(hsamp, name)) { return true }
     }
     // The BUILT-IN methods of str / list / dict / set, and __class__, which
     // EVERY value has (None.__class__ is NoneType).
@@ -4921,6 +4996,7 @@ function js_pysetattr(obj, name, v) {
 // 63); it drops the key AND its insertion-order entry, which is what keeps
 // keysOf, and therefore vars()/dir(), right after a delete.
 function js_pydel_attr(obj, name) {
+    if (pyInstClassOf(obj) === null) { pyNoDictAttr(obj, pyToStr(name)) }
     if (obj === null || obj === undefined || typeof obj != "object") {
         fail("attribute deletion on a " + pyTypeName(obj))
     }
@@ -5348,6 +5424,7 @@ function pyDMethodCall(target, name, args, kw) {
             if (pyIsCallable(cm)) { return pyCall(cm, pyBindCall(cm, args, kw)) }
             return pyDCallPyValue(cm, args, kw)
         }
+        if (name == "mro") { return pyMroAttr(cls, "__mro__") }
         fail("type object '" + pyToStr(cls["__name"]) + "' has no method '" + name + "'")
     }
     var icls = pyInstClassOf(target)
@@ -5645,12 +5722,8 @@ function pyKwArg(kw, name) {
 //
 // The NAME SETS first, so that hasattr()/getattr() ask exactly what the
 // dispatcher answers. Keep in step with pyIsDictMethod/pyIsSetMethod in
-// abnf/jsrt.go and in languages/python-interpreter.abnf.
-//
-// NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
-// symmetric_difference/isdisjoint/issuperset and their *_update forms are
-// absent, hasattr() therefore says False for them, and a written call ABORTS
-// rather than raising. The operators & - ^ <= >= are complete.
+// abnf/jsrt.go and in languages/python-interpreter.abnf. dict.fromkeys lives on
+// the TYPE object (pyBuiltinClsMethod), not here.
 function pyIsDictMethod(name) {
     if (name == "keys" || name == "values" || name == "items") { return true }
     if (name == "get" || name == "pop" || name == "clear") { return true }
@@ -5663,7 +5736,7 @@ function pyIsSetMethod(name) {
     if (name == "add" || name == "pop" || name == "clear") { return true }
     if (name == "copy" || name == "remove" || name == "discard") { return true }
     if (name == "union" || name == "update" || name == "issubset") { return true }
-    return false
+    return pyIsSetOnlyAlgebra(name)
 }
 
 // The names one of the two types owns and the other does NOT, which is exactly
@@ -5678,7 +5751,15 @@ function pyIsDictOnly(name) {
 function pyIsSetOnly(name) {
     if (name == "add" || name == "remove") { return true }
     if (name == "discard" || name == "union" || name == "issubset") { return true }
-    return false
+    return pyIsSetOnlyAlgebra(name)
+}
+
+// The set algebra methods, which a dict does not have either.
+function pyIsSetOnlyAlgebra(name) {
+    if (name == "issuperset" || name == "isdisjoint") { return true }
+    if (name == "intersection" || name == "difference" || name == "symmetric_difference") { return true }
+    if (name == "intersection_update" || name == "difference_update") { return true }
+    return name == "symmetric_difference_update"
 }
 
 // Every error below is a CATCHABLE Python exception with CPython 3.14's exact
@@ -5926,8 +6007,70 @@ function pySetMethod(els, name, args) {
         }
         return true
     }
+    // issuperset(other) and isdisjoint(other) take ANY iterable too.
+    if (name == "issuperset" || name == "isdisjoint") {
+        var want = name == "isdisjoint"
+        var oth = pyElemsOf(pyEArgAt(args, 0))
+        var pi = 0
+        while (pi < oth.length) {
+            if (pySetHas(els, oth[pi]) == want) { return false }
+            pi = pi + 1
+        }
+        return true
+    }
+    // intersection / difference (any number of iterables) and
+    // symmetric_difference (exactly one) answer a NEW set; each _update form
+    // writes the same answer back into the receiver and returns None.
+    if (name == "intersection" || name == "difference" || name == "symmetric_difference") {
+        return pyNewSet(pySetAlgebra(els, name, args))
+    }
+    if (name == "intersection_update" || name == "difference_update" || name == "symmetric_difference_update") {
+        var upd = pySetAlgebra(els, name.substring(0, name.length - 7), args)
+        pyCTruncate(els)
+        var ki = 0
+        while (ki < upd.length) {
+            pySetAdd(els, upd[ki])
+            ki = ki + 1
+        }
+        return undefined
+    }
     fail("unknown set method: " + name)
     return undefined
+}
+
+// The members of the answer, receiver order first, then (symmetric_difference)
+// the argument's. Go: rt.pySetAlgebra in abnf/jsrt.go.
+function pySetAlgebra(els, name, args) {
+    var out = pyCCopyArr(els)
+    var i = 0
+    if (name == "symmetric_difference") {
+        var o = []
+        pySetAddAll(o, [pyEArgAt(args, 0)])
+        var sym = []
+        while (i < els.length) {
+            if (!pySetHas(o, els[i])) { pySetAdd(sym, els[i]) }
+            i = i + 1
+        }
+        var j = 0
+        while (j < o.length) {
+            if (!pySetHas(els, o[j])) { pySetAdd(sym, o[j]) }
+            j = j + 1
+        }
+        return sym
+    }
+    var keep = name == "intersection"
+    while (i < args.length) {
+        var other = pyElemsOf(args[i])
+        var kept = []
+        var k = 0
+        while (k < out.length) {
+            if (pySetHas(other, out[k]) == keep) { pySetAdd(kept, out[k]) }
+            k = k + 1
+        }
+        out = kept
+        i = i + 1
+    }
+    return out
 }
 
 // hasattr()/getattr() on a builtin value: the same question the DISPATCHER
@@ -7585,9 +7728,94 @@ function pySLoCh(ch) {
     return u
 }
 
-function pySIsCased(ch) { return pySUpCh(ch) != pySLoCh(ch) }
-function pySIsUpCh(ch) { return pySIsCased(ch) && ch == pySUpCh(ch) }
-function pySIsLoCh(ch) { return pySIsCased(ch) && ch == pySLoCh(ch) }
+// CASED CHARACTERS THE SIMPLE MAPPING LEAVES ALONE. CPython's cased / lower /
+// upper tests read the Unicode Lowercase and Uppercase properties, and some
+// characters carry one with no single-character mapping to tell: sharp s (whose
+// upper case is "SS"), kra, the IPA and modifier letters, the mathematical
+// alphanumerics. Without these, "straße".title() would start a word after the ß.
+// [lo, hi] code point pairs, generated with CPython 3.14 (Unicode 16) over every
+// code point Go's simple mapping fixes.
+var pySLowOnly = [
+    170, 170, 186, 186, 223, 223, 312, 312, 329, 329, 397, 397, 426, 427, 442, 442,
+    446, 446, 496, 496, 545, 545, 564, 569, 597, 597, 600, 600, 602, 602, 605, 607,
+    610, 610, 615, 615, 621, 622, 624, 624, 627, 628, 630, 636, 638, 639, 641, 641,
+    644, 646, 653, 657, 659, 659, 661, 668, 671, 696, 704, 705, 736, 740, 890, 890,
+    912, 912, 944, 944, 1020, 1020, 1376, 1376, 1415, 1416, 4348, 4348, 7424, 7544,
+    7546, 7548, 7550, 7565, 7567, 7615, 7830, 7834, 7836, 7837, 7839, 7839, 8016, 8016,
+    8018, 8018, 8020, 8020, 8022, 8022, 8114, 8114, 8116, 8116, 8118, 8119, 8130, 8130,
+    8132, 8132, 8134, 8135, 8146, 8147, 8150, 8151, 8162, 8164, 8166, 8167, 8178, 8178,
+    8180, 8180, 8182, 8183, 8305, 8305, 8319, 8319, 8336, 8348, 8458, 8458, 8462, 8463,
+    8467, 8467, 8495, 8495, 8500, 8500, 8505, 8505, 8508, 8509, 8518, 8521, 11377,
+    11377, 11380, 11380, 11383, 11389, 11492, 11492, 42652, 42653, 42800, 42801, 42864,
+    42872, 42894, 42894, 42901, 42901, 42927, 42927, 42994, 42996, 43000, 43002, 43824,
+    43858, 43860, 43866, 43868, 43881, 64256, 64262, 64275, 64279, 67456, 67456, 67459,
+    67461, 67463, 67504, 67506, 67514, 119834, 119859, 119886, 119892, 119894, 119911,
+    119938, 119963, 119990, 119993, 119995, 119995, 119997, 120003, 120005, 120015,
+    120042, 120067, 120094, 120119, 120146, 120171, 120198, 120223, 120250, 120275,
+    120302, 120327, 120354, 120379, 120406, 120431, 120458, 120485, 120514, 120538,
+    120540, 120545, 120572, 120596, 120598, 120603, 120630, 120654, 120656, 120661,
+    120688, 120712, 120714, 120719, 120746, 120770, 120772, 120777, 120779, 120779,
+    122624, 122633, 122635, 122654, 122661, 122666, 122928, 122989
+]
+var pySUpOnly = [
+    978, 980, 8450, 8450, 8455, 8455, 8459, 8461, 8464, 8466, 8469, 8469, 8473, 8477,
+    8484, 8484, 8488, 8488, 8492, 8493, 8496, 8497, 8499, 8499, 8510, 8511, 8517, 8517,
+    119808, 119833, 119860, 119885, 119912, 119937, 119964, 119964, 119966, 119967,
+    119970, 119970, 119973, 119974, 119977, 119980, 119982, 119989, 120016, 120041,
+    120068, 120069, 120071, 120074, 120077, 120084, 120086, 120092, 120120, 120121,
+    120123, 120126, 120128, 120132, 120134, 120134, 120138, 120144, 120172, 120197,
+    120224, 120249, 120276, 120301, 120328, 120353, 120380, 120405, 120432, 120457,
+    120488, 120512, 120546, 120570, 120604, 120628, 120662, 120686, 120720, 120744,
+    120778, 120778, 127280, 127305, 127312, 127337, 127344, 127369
+]
+function pySInRanges(t, c) {
+    var lo = 0
+    var hi = t.length / 2 - 1
+    while (lo <= hi) {
+        var mid = Math.floor((lo + hi) / 2)
+        if (c < t[2 * mid]) { hi = mid - 1 }
+        else if (c > t[2 * mid + 1]) { lo = mid + 1 }
+        else { return true }
+    }
+    return false
+}
+// The TITLECASE letters (category Lt): neither upper nor lower case to CPython,
+// but they open a title-cased word the way an uppercase letter does.
+var pySTitleOnly = [453, 453, 456, 456, 459, 459, 498, 498, 8072, 8079, 8088, 8095, 8104, 8111, 8124, 8124, 8140, 8140, 8188, 8188]
+// 1 for a lowercase and 2 for an uppercase character of those tables, 3 for a
+// titlecase one, else 0.
+function pySCaseOnly(ch) {
+    var c = ch.charCodeAt(0)
+    if (c < 170) { return 0 }
+    if (ch.length == 2) { c = (c - 55296) * 1024 + (ch.charCodeAt(1) - 56320) + 65536 }
+    if (pySInRanges(pySTitleOnly, c)) { return 3 }
+    if (pySInRanges(pySLowOnly, c)) { return 1 }
+    if (pySInRanges(pySUpOnly, c)) { return 2 }
+    return 0
+}
+
+function pySIsCased(ch) { return pySUpCh(ch) != pySLoCh(ch) || pySCaseOnly(ch) != 0 }
+// The character that opens a title-cased word: the titlecase form of the four
+// Latin digraphs (U+01C4..U+01CC, U+01F1..U+01F3 - DZ, LJ, NJ, DZ), whose
+// titlecase differs from their uppercase, else the uppercase.
+function pySTiCh(ch) {
+    var c = ch.charCodeAt(0)
+    if (c >= 452 && c <= 460) { return String.fromCharCode(c - (c - 452) % 3 + 1) }
+    if (c >= 497 && c <= 499) { return String.fromCharCode(498) }
+    return pySUpCh(ch)
+}
+function pySIsUpCh(ch) {
+    var k = pySCaseOnly(ch)
+    if (k != 0) { return k == 2 }
+    var u = pySUpCh(ch)
+    return u != pySLoCh(ch) && ch == u
+}
+function pySIsLoCh(ch) {
+    var k = pySCaseOnly(ch)
+    if (k != 0) { return k == 1 }
+    var l = pySLoCh(ch)
+    return pySUpCh(ch) != l && ch == l
+}
 
 function pySIsAlphaCh(ch) {
     var c = ch.charCodeAt(0)
@@ -7870,7 +8098,7 @@ function pySTitle(s) {
     while (i < cs.length) {
         var ch = cs[i]
         if (prev) { out = out + pySLoCh(ch) }
-        else { out = out + pySUpCh(ch) }
+        else { out = out + pySTiCh(ch) }
         prev = pySIsCased(ch)
         i = i + 1
     }
@@ -7884,7 +8112,7 @@ function pySIsTitle(s) {
     var i = 0
     while (i < cs.length) {
         var ch = cs[i]
-        if (pySIsUpCh(ch)) {
+        if (pySIsUpCh(ch) || pySCaseOnly(ch) == 3) {
             if (prev) { return false }
             prev = true
             any = true
@@ -7905,7 +8133,7 @@ function pySCapitalize(s) {
     var out = ""
     var i = 0
     while (i < cs.length) {
-        if (i == 0) { out = out + pySUpCh(cs[i]) }
+        if (i == 0) { out = out + pySTiCh(cs[i]) }
         else { out = out + pySLoCh(cs[i]) }
         i = i + 1
     }

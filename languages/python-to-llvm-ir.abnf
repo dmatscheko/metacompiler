@@ -3469,6 +3469,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // what tells a bare 'raise' that there is an active exception to re-raise (it
     // lives in the catch closure's scope as __caught).
     var handlerDepth = 0
+    // `except E as NAME`: CPython ends the handler with `NAME = None; del NAME`
+    // however it is left, so the name is unbound afterwards even when it was bound
+    // before the try. The OUTER binding is therefore unbound up front - the
+    // "pydel*" sentinel written through py_setvar, which reaches the slot an
+    // assignment would - and the caught value is declared in the catch closure's
+    // own scope, which a raise, return or break leaves behind with it. Twin of
+    // runHandler in languages/python-interpreter.abnf.
+    function pyBindHandlerName(b, name, v) {
+        if (name == undefined) { return }
+        pySetVar(b, curScopeV, name, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "pydel*")]))
+        pyDeclInner(name)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+    }
     // The body of the ONE catch closure js_try takes: it dispatches over every
     // except clause of the statement in source order. A clause with a type runs
     // only when js_pyisinst accepts the caught value (a tuple of classes works,
@@ -3500,10 +3513,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 } else {
                     open = false
                 }
-                if (cl.hname != undefined) {
-                    pyDeclInner(cl.hname)
-                    callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, cl.hname), caught])
-                }
+                pyBindHandlerName(bodyB, cl.hname, caught)
                 handlerDepth++
                 var outB = cl.handler(bodyB)
                 handlerDepth--
@@ -3540,10 +3550,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var missB = curF.NewBlock("")
             cur.NewCondBr(truthy(cur, callExt(cur, "js_seq", [subV, hUndef])), missB, hitB)
             callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, "__ehit"), hTrue])
-            if (cl.hname != undefined) {
-                pyDeclInner(cl.hname)
-                callExt(hitB, "js_scope_decl", [curScopeV, emitStr(hitB, cl.hname), subV])
-            }
+            pyBindHandlerName(hitB, cl.hname, subV)
             handlerDepth++
             var outB = cl.handler(hitB)
             handlerDepth--
@@ -4362,6 +4369,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nmCls = callExt(nmb, "js_scope_get", [nmf.Params[0], emitStr(nmb, "NameError")])
         nmb.NewRet(callExt(nmb, "js_pycall", [nmCls, nmArgs, handle(0)]))
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(nmIdx), curScopeV])])
+
+        // An exception nobody catches aborts with CPython's last traceback line,
+        // `KeyError: 1`, which only python's own str() and class name can render:
+        // the program runs as the try body of one js_try whose catch hands the
+        // value to js_pyuncaught. The body is a function of its own that reads
+        // the module scope straight from its env, so the top level gains no
+        // scope level. Twin of runProgram in languages/python-interpreter.abnf.
+        funcCount++
+        var ucIdx = funcCount
+        var ucf = m.NewFunc("jsf_" + ucIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var ucb = ucf.NewBlock("entry")
+        callExt(ucb, "js_pyuncaught", [ucb.NewCall(getExtern("js_arg", 2), [ucf.Params[1], handle(0)])])
+        ucb.NewRet(hUndef)
+        var ucClo = callExt(b, "js_closure", [handle(ucIdx), curScopeV])
+        funcCount++
+        var topIdx = funcCount
+        var topClo = callExt(b, "js_closure", [handle(topIdx), curScopeV])
+        b.NewRet(callExt(b, "js_try", [topClo, ucClo, hUndef]))
+        curF = m.NewFunc("jsf_" + topIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        b = curF.NewBlock("entry")
+        curScopeV = curF.Params[0]
+
         b = emitImported(b)
         b = makeSeq(items)(b)
 

@@ -1728,8 +1728,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pySuperFind(o, name) != null
         }
         if (typeof o == "object" && o.__isclass == true) {
-            if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__") { return true }
-            return clsFind(o, name) != null
+            if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro") { return true }
+            if (clsFind(o, name) != null) { return true }
+            // What pyattr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
+            // unbound methods (list.count).
+            if (pyBuiltinClsMethod(o, name) != null) { return true }
+            if (o.__builtin == true) {
+                var samp = pyTypeSample(o.__name)
+                return samp !== undefined && pyBuiltinAttr(samp, name)
+            }
+            return false
         }
         // A MODULE object, mirroring pyattr's module arm - hasattr(math, "sqrt")
         // has to agree with what `math.sqrt` answers.
@@ -2418,6 +2426,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             guard = guard + 1
         }
         return false
+    }
+    // C.__mro__ and C.__bases__. The class chains here leave out `object`, which
+    // owns nothing a lookup could find, while CPython ends every resolution order
+    // with it and gives a root class the base (object,); a builtin type is its own
+    // chain, bool's going through int. Twin of rt.pyMroAttr in abnf/jsrt.go and
+    // pyMroAttr in languages/lib/python-rt.metajs.
+    function pyMroAttr(cls, name) {
+        var obj = hostGlobals["object"]
+        if (cls === obj) { return name == "__bases__" ? [] : [obj] }
+        var out = []
+        if (name == "__bases__") {
+            if (hasOwn(cls, "__bases")) { out = cls.__bases.slice(0) }
+        } else {
+            out = clsMRO(cls).slice(0)
+        }
+        if (cls.__builtin == true && cls.__name == "bool") { out.push(hostGlobals["int"]) }
+        if (out.length == 0) {
+            out.push(obj)
+        } else if (name == "__mro__" && out[out.length - 1] !== obj) {
+            out.push(obj)
+        }
+        return out
     }
     // The resolution order of a class, itself first. Every class this half builds
     // carries a "__mro" (the C3 linearization, computed once by clsLinearize when
@@ -3286,9 +3316,95 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return u
     }
 
-    function pySIsCased(ch) { return pySUpCh(ch) != pySLoCh(ch) }
-    function pySIsUpCh(ch) { return pySIsCased(ch) && ch == pySUpCh(ch) }
-    function pySIsLoCh(ch) { return pySIsCased(ch) && ch == pySLoCh(ch) }
+    // CASED CHARACTERS THE SIMPLE MAPPING LEAVES ALONE. CPython's cased / lower /
+    // upper tests read the Unicode Lowercase and Uppercase properties, and some
+    // characters carry one with no single-character mapping to tell: sharp s (whose
+    // upper case is "SS"), kra, the IPA and modifier letters, the mathematical
+    // alphanumerics. Without these, "straße".title() would start a word after the ß.
+    // [lo, hi] code point pairs, generated with CPython 3.14 (Unicode 16) over every
+    // code point Go's simple mapping fixes.
+    var pySLowOnly = [
+        170, 170, 186, 186, 223, 223, 312, 312, 329, 329, 397, 397, 426, 427, 442, 442,
+        446, 446, 496, 496, 545, 545, 564, 569, 597, 597, 600, 600, 602, 602, 605, 607,
+        610, 610, 615, 615, 621, 622, 624, 624, 627, 628, 630, 636, 638, 639, 641, 641,
+        644, 646, 653, 657, 659, 659, 661, 668, 671, 696, 704, 705, 736, 740, 890, 890,
+        912, 912, 944, 944, 1020, 1020, 1376, 1376, 1415, 1416, 4348, 4348, 7424, 7544,
+        7546, 7548, 7550, 7565, 7567, 7615, 7830, 7834, 7836, 7837, 7839, 7839, 8016,
+        8016, 8018, 8018, 8020, 8020, 8022, 8022, 8114, 8114, 8116, 8116, 8118, 8119,
+        8130, 8130, 8132, 8132, 8134, 8135, 8146, 8147, 8150, 8151, 8162, 8164, 8166,
+        8167, 8178, 8178, 8180, 8180, 8182, 8183, 8305, 8305, 8319, 8319, 8336, 8348,
+        8458, 8458, 8462, 8463, 8467, 8467, 8495, 8495, 8500, 8500, 8505, 8505, 8508,
+        8509, 8518, 8521, 11377, 11377, 11380, 11380, 11383, 11389, 11492, 11492,
+        42652, 42653, 42800, 42801, 42864, 42872, 42894, 42894, 42901, 42901, 42927,
+        42927, 42994, 42996, 43000, 43002, 43824, 43858, 43860, 43866, 43868, 43881,
+        64256, 64262, 64275, 64279, 67456, 67456, 67459, 67461, 67463, 67504, 67506,
+        67514, 119834, 119859, 119886, 119892, 119894, 119911, 119938, 119963, 119990,
+        119993, 119995, 119995, 119997, 120003, 120005, 120015, 120042, 120067, 120094,
+        120119, 120146, 120171, 120198, 120223, 120250, 120275, 120302, 120327, 120354,
+        120379, 120406, 120431, 120458, 120485, 120514, 120538, 120540, 120545, 120572,
+        120596, 120598, 120603, 120630, 120654, 120656, 120661, 120688, 120712, 120714,
+        120719, 120746, 120770, 120772, 120777, 120779, 120779, 122624, 122633, 122635,
+        122654, 122661, 122666, 122928, 122989
+    ]
+    var pySUpOnly = [
+        978, 980, 8450, 8450, 8455, 8455, 8459, 8461, 8464, 8466, 8469, 8469, 8473,
+        8477, 8484, 8484, 8488, 8488, 8492, 8493, 8496, 8497, 8499, 8499, 8510, 8511,
+        8517, 8517, 119808, 119833, 119860, 119885, 119912, 119937, 119964, 119964,
+        119966, 119967, 119970, 119970, 119973, 119974, 119977, 119980, 119982, 119989,
+        120016, 120041, 120068, 120069, 120071, 120074, 120077, 120084, 120086, 120092,
+        120120, 120121, 120123, 120126, 120128, 120132, 120134, 120134, 120138, 120144,
+        120172, 120197, 120224, 120249, 120276, 120301, 120328, 120353, 120380, 120405,
+        120432, 120457, 120488, 120512, 120546, 120570, 120604, 120628, 120662, 120686,
+        120720, 120744, 120778, 120778, 127280, 127305, 127312, 127337, 127344, 127369
+    ]
+    function pySInRanges(t, c) {
+        var lo = 0
+        var hi = t.length / 2 - 1
+        while (lo <= hi) {
+            var mid = Math.floor((lo + hi) / 2)
+            if (c < t[2 * mid]) { hi = mid - 1 }
+            else if (c > t[2 * mid + 1]) { lo = mid + 1 }
+            else { return true }
+        }
+        return false
+    }
+    // The TITLECASE letters (category Lt): neither upper nor lower case to CPython,
+    // but they open a title-cased word the way an uppercase letter does.
+    var pySTitleOnly = [453, 453, 456, 456, 459, 459, 498, 498, 8072, 8079, 8088, 8095, 8104, 8111, 8124, 8124, 8140, 8140, 8188, 8188]
+    // 1 for a lowercase and 2 for an uppercase character of those tables, 3 for a
+    // titlecase one, else 0.
+    function pySCaseOnly(ch) {
+        var c = ch.charCodeAt(0)
+        if (c < 170) { return 0 }
+        if (ch.length == 2) { c = (c - 55296) * 1024 + (ch.charCodeAt(1) - 56320) + 65536 }
+        if (pySInRanges(pySTitleOnly, c)) { return 3 }
+        if (pySInRanges(pySLowOnly, c)) { return 1 }
+        if (pySInRanges(pySUpOnly, c)) { return 2 }
+        return 0
+    }
+
+    function pySIsCased(ch) { return pySUpCh(ch) != pySLoCh(ch) || pySCaseOnly(ch) != 0 }
+    // The character that opens a title-cased word: the titlecase form of the four
+    // Latin digraphs (U+01C4..U+01CC, U+01F1..U+01F3 - DZ, LJ, NJ, DZ), whose
+    // titlecase differs from their uppercase, else the uppercase.
+    function pySTiCh(ch) {
+        var c = ch.charCodeAt(0)
+        if (c >= 452 && c <= 460) { return String.fromCharCode(c - (c - 452) % 3 + 1) }
+        if (c >= 497 && c <= 499) { return String.fromCharCode(498) }
+        return pySUpCh(ch)
+    }
+    function pySIsUpCh(ch) {
+        var k = pySCaseOnly(ch)
+        if (k != 0) { return k == 2 }
+        var u = pySUpCh(ch)
+        return u != pySLoCh(ch) && ch == u
+    }
+    function pySIsLoCh(ch) {
+        var k = pySCaseOnly(ch)
+        if (k != 0) { return k == 1 }
+        var l = pySLoCh(ch)
+        return pySUpCh(ch) != l && ch == l
+    }
 
     function pySIsAlphaCh(ch) {
         var c = ch.charCodeAt(0)
@@ -3571,7 +3687,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (i < cs.length) {
             var ch = cs[i]
             if (prev) { out = out + pySLoCh(ch) }
-            else { out = out + pySUpCh(ch) }
+            else { out = out + pySTiCh(ch) }
             prev = pySIsCased(ch)
             i = i + 1
         }
@@ -3585,7 +3701,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         while (i < cs.length) {
             var ch = cs[i]
-            if (pySIsUpCh(ch)) {
+            if (pySIsUpCh(ch) || pySCaseOnly(ch) == 3) {
                 if (prev) { return false }
                 prev = true
                 any = true
@@ -3606,7 +3722,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var out = ""
         var i = 0
         while (i < cs.length) {
-            if (i == 0) { out = out + pySUpCh(cs[i]) }
+            if (i == 0) { out = out + pySTiCh(cs[i]) }
             else { out = out + pySLoCh(cs[i]) }
             i = i + 1
         }
@@ -4369,14 +4485,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The NAME SETS first, so that
     // hasattr()/getattr() ask exactly what the dispatcher answers. Keep in step
     // with pyIsDictMethod/pyIsSetMethod in abnf/jsrt.go and in
-    // languages/lib/python-rt.metajs.
-    //
-    // NOT the whole of CPython's: set.intersection/difference/
-    // symmetric_difference/isdisjoint/issuperset and their *_update forms are
-    // absent, hasattr() therefore says False for them, and a written call ABORTS
-    // rather than raising: a hard stop says "this project does not have it"
-    // where an AttributeError would say "Python does not have it". The operators
-    // & - ^ <= >= are complete.
+    // languages/lib/python-rt.metajs. dict.fromkeys lives on the TYPE object
+    // (pyBuiltinClsMethod), not here.
     function pyIsDictMethod(name) {
         if (name == "keys" || name == "values" || name == "items") { return true }
         if (name == "get" || name == "pop" || name == "clear") { return true }
@@ -4388,7 +4498,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "add" || name == "pop" || name == "clear") { return true }
         if (name == "copy" || name == "remove" || name == "discard") { return true }
         if (name == "union" || name == "update" || name == "issubset") { return true }
-        return false
+        return pyIsSetOnlyAlgebra(name)
     }
     // The names one of the two types owns and the other does NOT, which is
     // exactly what CPython raises AttributeError for. They are narrower than the
@@ -4401,7 +4511,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyIsSetOnly(name) {
         if (name == "add" || name == "remove") { return true }
         if (name == "discard" || name == "union" || name == "issubset") { return true }
-        return false
+        return pyIsSetOnlyAlgebra(name)
+    }
+    // The set algebra methods, which a dict does not have either.
+    function pyIsSetOnlyAlgebra(name) {
+        if (name == "issuperset" || name == "isdisjoint") { return true }
+        if (name == "intersection" || name == "difference" || name == "symmetric_difference") { return true }
+        if (name == "intersection_update" || name == "difference_update") { return true }
+        return name == "symmetric_difference_update"
     }
     // Every error below is a CATCHABLE Python exception with CPython 3.14's
     // exact text, not fail(), for the same reason the list surface is:
@@ -4585,8 +4702,58 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return true
         }
+        // issuperset(other) and isdisjoint(other) take ANY iterable too.
+        if (name == "issuperset") {
+            var sup = pyIterOrTypeErr(pyArgAt(args, 0))
+            for (var pi = 0; pi < sup.length; pi++) {
+                if (dictFind(s, sup[pi]) < 0) { return false }
+            }
+            return true
+        }
+        if (name == "isdisjoint") {
+            var dis = pyIterOrTypeErr(pyArgAt(args, 0))
+            for (var di = 0; di < dis.length; di++) {
+                if (dictFind(s, dis[di]) >= 0) { return false }
+            }
+            return true
+        }
+        // intersection / difference (any number of iterables) and
+        // symmetric_difference (exactly one) answer a NEW set; each _update form
+        // writes the same answer back into the receiver and returns None.
+        if (name == "intersection" || name == "difference" || name == "symmetric_difference") {
+            return pySetAlgebra(s, name, args)
+        }
+        if (name == "intersection_update" || name == "difference_update" || name == "symmetric_difference_update") {
+            var upd = pySetAlgebra(s, name.substring(0, name.length - 7), args)
+            pyDictClear(s)
+            for (var ki = 0; ki < upd.keys.length; ki++) { setAdd(s, upd.keys[ki]) }
+            return undefined
+        }
         fail("unknown dict method: " + name)
         return undefined
+    }
+    // The member order follows the receiver, then (symmetric_difference) the
+    // argument - the insertion order every set here keeps. Twin of pySetAlgebra in
+    // abnf/jsrt.go and languages/lib/python-rt.metajs.
+    function pySetAlgebra(s, name, args) {
+        var out = pySetOf(s.keys)
+        if (name == "symmetric_difference") {
+            var o = pySetOf(pyIterOrTypeErr(pyArgAt(args, 0)))
+            var sym = newSet()
+            for (var i = 0; i < s.keys.length; i++) { if (dictFind(o, s.keys[i]) < 0) { setAdd(sym, s.keys[i]) } }
+            for (var j = 0; j < o.keys.length; j++) { if (dictFind(s, o.keys[j]) < 0) { setAdd(sym, o.keys[j]) } }
+            return sym
+        }
+        for (var ai = 0; ai < args.length; ai++) {
+            var other = pySetOf(pyIterOrTypeErr(args[ai]))
+            var kept = newSet()
+            for (var k = 0; k < out.keys.length; k++) {
+                var hit = dictFind(other, out.keys[k]) >= 0
+                if (hit == (name == "intersection")) { setAdd(kept, out.keys[k]) }
+            }
+            out = kept
+        }
+        return out
     }
     function pySetOf(els) {
         var out = newSet()
@@ -4706,8 +4873,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    function fdiv(a, b) { return Math.floor(a / b) }
+    // `/`, `//` and `%` by a numeric zero (an int, a float or False) raise
+    // ZeroDivisionError rather than answer an infinity or a NaN. Twin of the `/`,
+    // `//` and `%` arms of js_pybin in abnf/jsrt.go and languages/lib/python-rt.metajs.
+    // The test is inlined at each site so the ordinary division pays no call.
+    function pyZeroDiv() { pyRaise(pyMakeExc("ZeroDivisionError", ["division by zero"])) }
+    function fdiv(a, b) {
+        if (b === 0 || b === false) { pyZeroDiv() }
+        return Math.floor(a / b)
+    }
     function fmod(a, b) {
+        if (b === 0 || b === false) { pyZeroDiv() }
         var r = a % b
         if (r != 0 && ((r < 0) != (b < 0))) r += b
         return r
@@ -4957,7 +5133,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "+") { return {v: pyFlo(x + y)} }
         if (op == "-") { return {v: pyFlo(x - y)} }
         if (op == "*") { return {v: pyFlo(x * y)} }
-        if (op == "/") { return {v: pyFlo(x / y)} }
+        if (op == "/") {
+            if (y === 0) { pyZeroDiv() }
+            return {v: pyFlo(x / y)}
+        }
         // Python's // and % answer an int from two ints and a float as soon as
         // either side is one - and one side always is, to be here at all.
         if (op == "//") { return {v: pyFlo(fdiv(x, y))} }
@@ -5405,7 +5584,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python floors: the quotient rounds towards minus infinity and the remainder
     // takes the sign of the DIVISOR, so a truncating division is corrected by one.
     function bigDivMod(a, b) {
-        if (bigIsZero(b)) { fail("ZeroDivisionError: integer division or modulo by zero") }
+        if (bigIsZero(b)) { pyZeroDiv() }
         var dm = magDivMod(a.limbs, b.limbs)
         var qs = (a.sign == b.sign) ? 1 : -1
         var q = bigOb(qs, dm.q)
@@ -5440,7 +5619,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "%") { return {v: bigOut(bigDivMod(a, b).r)} }
         // A Python bigint is an arbitrary precision INT, so `/` on it is still
         // true division: 10**30 / 1 is the float 1e+30.
-        if (op == "/") { return {v: pyFlo(bigToNum(l) / bigToNum(r))} }
+        if (op == "/") {
+            if (bigToNum(r) === 0 || r === false) { pyZeroDiv() }
+            return {v: pyFlo(bigToNum(l) / bigToNum(r))}
+        }
         if (op == "**") {
             var e = bigToNum(r)
             if (e < 0) { return {v: pyFlo(Math.pow(bigToNum(l), e))} }
@@ -5612,7 +5794,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // Python's `/` is TRUE division: it answers a float even from two ints,
         // so 4 / 2 is 2.0 and not 2. `//` and `%` keep the int.
-        if (op == "/") return pyFlo(l / r)
+        if (op == "/") {
+            if (r === 0 || r === false) { pyZeroDiv() }
+            return pyFlo(l / r)
+        }
         if (op == "//") return fdiv(l, r)
         if (op == "%") return fmod(l, r)
         // int ** negative int is a float in Python (2 ** -1 is 0.5); every other
@@ -6978,7 +7163,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < ref.path.length - 1; i++) o = pathStep(o, ref.path[i])
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
-            if (o === null || o === undefined || typeof o != "object") fail("AttributeError: '" + last.name + "'")
+            if (o === null || o === undefined || typeof o != "object") {
+                pyNoDictAttr(o, last.name)
+                fail("AttributeError: '" + last.name + "'")
+            }
             pySetAttr(o, last.name, v)
             return
         }
@@ -7132,7 +7320,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) { o = pathStep(o, ref.path[i]) }
         var last = ref.path[ref.path.length - 1]
-        if (last.tattr == true) { scopePut(o, last.name, pyDeleted); return }
+        if (last.tattr == true) {
+            pyNoDictAttr(o, last.name)
+            scopePut(o, last.name, pyDeleted)
+            return
+        }
         if (last.kind == "slice") {
             var ix = sliceIdx(o.length, last.lo != null ? last.lo() : undefined,
                               last.hi != null ? last.hi() : undefined,
@@ -7577,22 +7769,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An except HANDLER BODY IS NOT A SCOPE in Python: `except E: r = 1`
     // followed by `print(r)` prints 1, so a name FIRST bound inside a handler
     // must survive the handler (pushing a scope of its own would lose it). The
-    // `as NAME` binding lands in the enclosing scope too, as js_scope_decl puts
-    // it in the other two engines.
+    // `as NAME` binding is an ordinary assignment (pySet, so `global NAME` is
+    // honoured), and CPython ends the handler with `NAME = None; del NAME` however
+    // it is left, so the name is unbound afterwards even when it was bound before
+    // the try. Twin of pyBindHandlerName in languages/python-to-llvm-ir.abnf.
     function runHandler(cl, val) {
         pyCurExc.push(val)
-        var sc = scopes[scopes.length - 1]
-        var had = false
-        var prev = anytype
-        if (cl.hname != undefined) {
-            if (hasOwn(sc, cl.hname)) { had = true; prev = sc[cl.hname] }
-            declVar(cl.hname, val)
-        }
+        if (cl.hname != undefined) { pySet(cl.hname, val) }
         var r = anytype
         try { r = cl.handler() } finally {
-            if (cl.hname != undefined) {
-                if (had) { scopePut(sc, cl.hname, prev) } else { scopePut(sc, cl.hname, pyDeleted) }
-            }
+            if (cl.hname != undefined) { pySet(cl.hname, pyDeleted) }
             pyCurExc.pop()
         }
         return r
@@ -7763,7 +7949,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // method. Reading off a CLASS gives the raw attribute (so Base.m(self) works).
     // Writing an attribute: a data descriptor's __set__ takes over, and __slots__
     // (when the class declares them) restricts which names an instance may carry.
+    // A builtin value with no __dict (None, a number, a str, a list, a dict, a set)
+    // refuses a new attribute, and its deletion, with a catchable AttributeError.
+    // Twin of pyNoDictAttr in abnf/jsrt.go and languages/lib/python-rt.metajs.
+    function pyNoDictAttr(o, name) {
+        if (pyUser(o)) { return }
+        var tn = pyTypeOf(o).__name
+        if (tn == "NoneType" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
+            tn == "list" || tn == "dict" || tn == "set" || tn == "complex") {
+            pyRaise(pyMakeExc("AttributeError", ["'" + tn + "' object has no attribute '" + name +
+                                                 "' and no __dict__ for setting new attributes"]))
+        }
+    }
     function pySetAttr(o, name, v) {
+        // An instance, the common case, pays no call.
+        if (o === null || o === undefined || typeof o != "object" || o.__class == undefined) { pyNoDictAttr(o, name) }
         var cls = o.__class
         if (cls != undefined && cls != null) {
             var d = clsFind(cls, name)
@@ -7802,13 +8002,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // can write: CPython qualifies only a NESTED class, and a nested
             // `class` here is bound by the same name as a top-level one.
             if (name == "__name__" || name == "__qualname__") { return pyShortName(o.__name) }
-            // The resolution order, as the two compiled halves answer it
-            // (pyGetAttr in abnf/jsrt.go and in languages/lib/python-rt.metajs).
-            // A tuple prints as a list in this subset and `object` is not a member
-            // of the model's hierarchy, so CPython's trailing <class 'object'> is
-            // absent in all three engines.
-            if (name == "__mro__") { return clsMRO(o).slice(0) }
-            if (name == "__bases__") { return hasOwn(o, "__bases") ? o.__bases.slice(0) : [] }
+            // A tuple prints as a list in this subset.
+            if (name == "__mro__" || name == "__bases__") { return pyMroAttr(o, name) }
             var cv = clsFind(o, name)
             if (cv != null) {
                 // A staticmethod / classmethod read off the CLASS: the static one
@@ -7816,6 +8011,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pyIsStatic(cv) || pyIsClsM(cv)) { return pyDescGet(cv, o, name) }
                 return cv
             }
+            // C.mro(), type's own method: the resolution order as a fresh list.
+            if (name == "mro") { return function() { return pyMroAttr(o, "__mro__") } }
             // A method the TYPE OBJECT itself carries - dict.fromkeys.
             var bcm = pyBuiltinClsMethod(o, name)
             if (bcm != null) { return bcm }
@@ -8577,11 +8774,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         try {
             progT()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + pstr(excValue(e))) }
+            if (excIsUser(e)) { fail("uncaught exception: " + pyUncaughtText(excValue(e))) }
             throw e
         }
     }
     function excValue(e) { return e.v }
+    // CPython's last traceback line for an exception nobody caught: `Name: str(e)`,
+    // or the bare name when str(e) is empty. Twin of js_pyuncaught in abnf/jsrt.go
+    // and languages/lib/python-rt.metajs.
+    function pyUncaughtText(v) {
+        var s = pstr(v)
+        if (!pyUser(v)) { return s }
+        if (s == "") { return v.__class.__name }
+        return v.__class.__name + ": " + s
+    }
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "python"
@@ -8735,7 +8941,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         try {
             ret = globalScope[entry]()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + pstr(excValue(e))) }
+            if (excIsUser(e)) { fail("uncaught exception: " + pyUncaughtText(excValue(e))) }
             throw e
         }
         exit(ret === undefined || ret === null ? 0 : ret | 0)

@@ -4902,6 +4902,13 @@ func pyBitBin(op string, x, y *big.Int) (*big.Int, bool) {
 // neither is Python's answer for a negative divisor (1e30 % -7 is -6, not +1).
 // ok is false for an operator with no exact integer form, so the caller falls
 // through to the double path it always had.
+// pyZeroDiv raises CPython's ZeroDivisionError for `/`, `//`, `%` and divmod by a
+// numeric zero. Twin of pyZeroDiv in languages/python-interpreter.abnf and of the
+// same arms of js_pybin in languages/lib/python-rt.metajs.
+func (rt *jsrt) pyZeroDiv() {
+	panic(&jsThrown{value: rt.pyExcInstance("ZeroDivisionError", "division by zero")})
+}
+
 func pyBigBin(op string, x, y *big.Int) (*big.Int, bool) {
 	out := new(big.Int)
 	switch op {
@@ -15502,13 +15509,22 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case "/":
 				// Python's `/` is TRUE division: it answers a float even from two
 				// ints, so 4 / 2 is 2.0 and 10**30 / 1 is 1e+30.
+				if rt.pyToF(r) == 0 {
+					rt.pyZeroDiv()
+				}
 				return w(&jsPyFlo{f: rt.pyToF(l) / rt.pyToF(r)})
 			case "//":
+				if rt.toNumber(r) == 0 {
+					rt.pyZeroDiv()
+				}
 				return w(pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r))
 			case "%":
 				// "fmt" % args is printf-style FORMATTING, not a remainder.
 				if s, isStr := l.(string); isStr {
 					return w(rt.pyPct(s, r))
+				}
+				if rt.toNumber(r) == 0 {
+					rt.pyZeroDiv()
 				}
 				return w(pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r))
 			case "**":
@@ -15637,6 +15653,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pydel_attr": func(a []uint64) uint64 {
+			if _, _, isInst := pyInstance(u(a[0])); !isInst {
+				rt.pyNoDictAttr(u(a[0]), rt.toString(u(a[1])))
+			}
 			o, ok := u(a[0]).(*jsObject)
 			if !ok {
 				rt.fail("attribute deletion on a %s", rt.typeOf(u(a[0])))
@@ -16179,10 +16198,27 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// divmod(a, b) is the PAIR (a // b, a % b) - floor division and the
 		// floored remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list here
 		// (docs/working-on-this-project.md 7.9).
+		// An exception that escaped the program: abort with CPython's last
+		// traceback line, `Name: str(e)`, or the bare name when str(e) is empty.
+		// Twin of pyUncaughtText in languages/python-interpreter.abnf and
+		// js_pyuncaught in languages/lib/python-rt.metajs.
+		"js_pyuncaught": func(a []uint64) uint64 {
+			v := u(a[0])
+			text := rt.pyString(v)
+			if _, cls, ok := pyInstance(v); ok {
+				if text == "" {
+					text = rt.pyClsName(cls)
+				} else {
+					text = rt.pyClsName(cls) + ": " + text
+				}
+			}
+			rt.fail("uncaught exception: %s", text)
+			return 0
+		},
 		"js_pydivmod": func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
 			if rt.toNumber(r) == 0 {
-				panic(&jsThrown{value: rt.pyExcInstance("ZeroDivisionError", "integer division or modulo by zero")})
+				rt.pyZeroDiv()
 			}
 			q := pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r)
 			m := pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r)
@@ -17940,6 +17976,38 @@ func pyIsDescriptor(v interface{}, hook string) (interface{}, bool) {
 	return m, true
 }
 
+// pyMroAttr answers C.__mro__ and C.__bases__. The class chains here leave out
+// `object`, which owns nothing a lookup could find, while CPython ends every
+// resolution order with it and gives a root class the base (object,); a builtin
+// type is its own chain, bool's going through int. Twin of pyMroAttr in
+// languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
+func (rt *jsrt) pyMroAttr(cls *jsObject, name string) *jsArray {
+	obj := rt.pyBuiltinClass("object")
+	if cls == obj {
+		if name == "__bases__" {
+			return &jsArray{}
+		}
+		return &jsArray{elems: []interface{}{obj}}
+	}
+	var out []interface{}
+	if name == "__bases__" {
+		if bl, ok := cls.props["__basesl"].(*jsArray); ok {
+			out = append(out, bl.elems...)
+		}
+	} else if mro, ok := cls.props["__mro"].(*jsArray); ok {
+		out = append(out, mro.elems...)
+	} else {
+		out = append(out, cls)
+	}
+	if pyBuiltinClsName(cls) == "bool" {
+		out = append(out, rt.pyBuiltinClass("int"))
+	}
+	if len(out) == 0 || (name == "__mro__" && out[len(out)-1] != obj) {
+		out = append(out, obj)
+	}
+	return &jsArray{elems: out}
+}
+
 // pyGetAttr reads obj.name with Python's lookup order.
 func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	// None has no attributes and CPython says so with a catchable AttributeError
@@ -17961,13 +18029,8 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 				return pyShortName(n)
 			}
 			return cls.props["__name"]
-		case "__mro__":
-			return cls.props["__mro"]
-		case "__bases__":
-			if bl, has := cls.props["__basesl"]; has {
-				return bl
-			}
-			return &jsArray{}
+		case "__mro__", "__bases__":
+			return rt.pyMroAttr(cls, name)
 		}
 		if v, found := pyLookup(cls, name); found {
 			// A staticmethod / classmethod read off the CLASS: the static one
@@ -17977,6 +18040,12 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 				return rt.pyDescGet(v, cls, name)
 			}
 			return v
+		}
+		// C.mro(), type's own method: the resolution order as a fresh list.
+		if name == "mro" {
+			return jsHostFunc("mro", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return rt.pyMroAttr(cls, "__mro__")
+			})
 		}
 		// A CATCHABLE AttributeError, as CPython raises, so `try: getattr(C,
 		// "nope") except AttributeError:` works.
@@ -18028,6 +18097,11 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
 	if m, ok := rt.pyBuiltinClsMethod(obj, name); ok {
 		return m
+	}
+	if name == "__mro__" || name == "__bases__" {
+		if _, isType := rt.pyClassName(obj); isType {
+			return rt.pyMroAttr(obj.(*jsObject), name)
+		}
 	}
 	// list.count / str.upper / dict.get read off the BUILTIN type object: an
 	// unbound method descriptor. It sits HERE rather than in
@@ -18190,7 +18264,24 @@ func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
 		cls.set(name, v)
 		return
 	}
+	rt.pyNoDictAttr(obj, name)
 	rt.setMember(obj, name, v)
+}
+
+// pyNoDictAttr: a builtin value with no __dict (None, a number, a str, a list, a
+// dict, a set) refuses a new attribute, and its deletion, with a catchable
+// AttributeError. Twin of pyNoDictAttr in languages/python-interpreter.abnf and
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyNoDictAttr(obj interface{}, name string) {
+	tn := pyTypeName(rt, obj)
+	if isPyComplex(obj) {
+		tn = "complex"
+	}
+	switch tn {
+	case "NoneType", "int", "float", "bool", "str", "list", "dict", "set", "complex":
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'"+tn+"' object has no attribute '"+name+"' and no __dict__ for setting new attributes")})
+	}
 }
 
 // pySlotsAllow applies __slots__ over the WHOLE resolution order, which is
@@ -18372,6 +18463,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 				return rt.call(m, jsUndef, rt.pyBindCall(m, args, kw))
 			}
 			return rt.callPyValue(m, args, kw)
+		}
+		if name == "mro" {
+			return rt.pyMroAttr(cls, "__mro__")
 		}
 		rt.fail("type object '%s' has no method '%s'", rt.toString(cls.props["__name"]), name)
 	}
@@ -18691,11 +18785,7 @@ func (rt *jsrt) pyDictFromKeys(ks, dv interface{}) interface{} {
 // The NAME SETS first, so hasattr()/getattr() can ask exactly what the
 // dispatcher answers. Keep in step with pyIsDictMethod/pyIsSetMethod in
 // languages/lib/python-rt.metajs and in languages/python-interpreter.abnf.
-//
-// NOT the whole of CPython's: dict.fromkeys and set.intersection/difference/
-// symmetric_difference/isdisjoint/issuperset and their *_update forms are
-// absent, hasattr() therefore says False for them, and a written call ABORTS
-// rather than raising. The operators & - ^ <= >= are complete.
+// dict.fromkeys lives on the TYPE object (pyBuiltinClsMethod), not here.
 func pyIsDictMethod(name string) bool {
 	if name == "popitem" {
 		return true
@@ -18710,6 +18800,16 @@ func pyIsDictMethod(name string) bool {
 func pyIsSetMethod(name string) bool {
 	switch name {
 	case "add", "pop", "clear", "copy", "remove", "discard", "union", "update", "issubset":
+		return true
+	}
+	return pyIsSetAlgebra(name)
+}
+
+// pyIsSetAlgebra: the set algebra methods, which a dict does not have either.
+func pyIsSetAlgebra(name string) bool {
+	switch name {
+	case "issuperset", "isdisjoint", "intersection", "difference", "symmetric_difference",
+		"intersection_update", "difference_update", "symmetric_difference_update":
 		return true
 	}
 	return false
@@ -18734,7 +18834,7 @@ func pyIsSetOnly(name string) bool {
 	case "add", "remove", "discard", "union", "issubset":
 		return true
 	}
-	return false
+	return pyIsSetAlgebra(name)
 }
 
 // pyDictMethod runs one of the dict methods. Every error is a CATCHABLE Python
@@ -18973,9 +19073,68 @@ func (rt *jsrt) pySetMethod(els *jsArray, name string, args []interface{}) inter
 			}
 		}
 		return true
+	case "issuperset", "isdisjoint":
+		// issuperset(other) and isdisjoint(other) take ANY iterable too.
+		want := name == "isdisjoint"
+		for _, e := range rt.pyElemsOf(argAt(args, 0)) {
+			if rt.pySetHas(els, e) == want {
+				return false
+			}
+		}
+		return true
+	case "intersection", "difference", "symmetric_difference":
+		// intersection / difference (any number of iterables) and
+		// symmetric_difference (exactly one) answer a NEW set; each _update form
+		// writes the same answer back into the receiver and returns None.
+		return newPySet(rt.pySetAlgebra(els, name, args))
+	case "intersection_update", "difference_update", "symmetric_difference_update":
+		upd := rt.pySetAlgebra(els, strings.TrimSuffix(name, "_update"), args)
+		els.elems = els.elems[:0]
+		els.dropIdx()
+		for _, e := range upd.elems {
+			rt.pySetAdd(els, e)
+		}
+		return jsUndef
 	}
 	rt.fail("unknown set method '%s'", name)
 	return nil
+}
+
+// pySetAlgebra: the members of the answer, receiver order first, then
+// (symmetric_difference) the argument's. Twin of pySetAlgebra in
+// languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
+func (rt *jsrt) pySetAlgebra(els *jsArray, name string, args []interface{}) *jsArray {
+	if name == "symmetric_difference" {
+		o := &jsArray{}
+		for _, e := range rt.pyElemsOf(argAt(args, 0)) {
+			rt.pySetAdd(o, e)
+		}
+		sym := &jsArray{}
+		for _, e := range els.elems {
+			if !rt.pySetHas(o, e) {
+				rt.pySetAdd(sym, e)
+			}
+		}
+		for _, e := range o.elems {
+			if !rt.pySetHas(els, e) {
+				rt.pySetAdd(sym, e)
+			}
+		}
+		return sym
+	}
+	out := &jsArray{elems: append([]interface{}{}, els.elems...)}
+	keep := name == "intersection"
+	for _, a := range args {
+		other := &jsArray{elems: rt.pyElemsOf(a)}
+		kept := &jsArray{}
+		for _, e := range out.elems {
+			if rt.pySetHas(other, e) == keep {
+				rt.pySetAdd(kept, e)
+			}
+		}
+		out = kept
+	}
+	return out
 }
 
 // pyBuiltinAttr is the hasattr()/getattr() question for BUILTIN methods
@@ -19368,7 +19527,7 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		return found
 	}
 	if cls, ok := pyClassObj(obj); ok {
-		if name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" {
+		if name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro" {
 			return true
 		}
 		_, found := pyLookup(cls, name)
@@ -19389,6 +19548,16 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 	if mod, isMod := pyIsModule(obj); isMod {
 		_, has := rt.pyModuleAttr(mod, name)
 		return has
+	}
+	// What pyGetAttr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
+	// unbound methods (list.count).
+	if _, ok := rt.pyBuiltinClsMethod(obj, name); ok {
+		return true
+	}
+	if tn, isType := rt.pyClassName(obj); isType {
+		if samp := pyDescTypeSample(tn); samp != nil && rt.pyBuiltinAttr(samp, name) {
+			return true
+		}
 	}
 	// The BUILT-IN methods of str / list / dict / set, and
 	// __class__, which EVERY value has (None.__class__ is NoneType).

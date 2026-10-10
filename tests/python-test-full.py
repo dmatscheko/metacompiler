@@ -2235,7 +2235,7 @@ def s38():
     # --- the diamond: D -> B -> C -> A, which is C3 and NOT depth first ---
     d = D(vals[1])
     check("su03", d.who() == "DBC" and d.v == 4)
-    check("su04", [k.__name__ for k in type(d).__mro__] == ["D", "B", "C", "A"])
+    check("su04", [k.__name__ for k in type(d).__mro__] == ["D", "B", "C", "A", "object"])
     check("su05", [k.__name__ for k in D.__bases__] == ["B", "C"])
     # B's own super() lands on C when the instance is a D, and on A when it is a
     # B - the whole point of a linearization rather than a parent pointer.
@@ -2613,12 +2613,8 @@ def s39():
         return hv2 + 1
 
     check("it70", handler_scope() == 42)
-    # The `as` name does NOT escape the handler, in any engine. CPython DELETES
-    # it (so an outer binding of the same name is deleted too and a later read is
-    # a NameError); the compiled halves scope it to the handler and leave an
-    # outer binding standing, and the interpreter half restores it the same
-    # way. A DELIBERATE non-convergence: doing it CPython's way needs the emitter
-    # to unbind a name in an enclosing scope on every exit path out of a handler.
+    # The `as` name does NOT escape the handler: CPython DELETES it, so an outer
+    # binding of the same name is deleted too and a later read raises.
     ex2 = "outer"
     try:
         raise ValueError("v")
@@ -2627,8 +2623,8 @@ def s39():
     try:
         after_as = ex2
     except Exception:
-        after_as = "DELETED"        # CPython lands here, and only CPython
-    check("it71", after_as == "outer")
+        after_as = "DELETED"
+    check("it71", after_as == "DELETED")
 
     # ----- repr() of the three host-backed shapes -----
     # A GENERATOR, a compiled PATTERN and a MATCH, through str() and repr().

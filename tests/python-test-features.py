@@ -1360,7 +1360,7 @@ class SD(SB, SC):
 
 check("super-diamond-c3", SD().who(), "DC")
 check("super-mro", str([k.__name__ for k in type(SD()).__mro__]),
-      "['SD', 'SB', 'SC', 'SA']")
+      "['SD', 'SB', 'SC', 'SA', 'object']")
 check("super-bases", str([k.__name__ for k in SD.__bases__]), "['SB', 'SC']")
 check("super-explicit", super(SD, SD()).who(), "C")
 check_true("super-bound-value", SD().who() == SD().who())
@@ -2205,6 +2205,210 @@ check("mv-absent-name", desc_err(lambda: math.nope),
 # so a structural "has next" test would call it one (layer 2's pyIsGen; only an
 # -exe run sees it).
 check("mv-module-not-generator", type(builtins).__name__, "module")
+
+
+
+# ----- SECTION: division by zero -----
+#
+# `/`, `//`, `%` and divmod by a numeric zero (an int, a float, -0.0, False, or
+# with an arbitrary precision left operand) raise ZeroDivisionError; CPython 3.14
+# words all of them "division by zero".
+def zd_err(f):
+    try:
+        return "no-raise " + str(f())
+    except ArithmeticError as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+zd_l = [7, 2.5, 10**30, True]
+zd_z = [0, 0.0, -0.0, False]
+zd_seen = []
+for zl in zd_l:
+    for zz in zd_z:
+        zd_seen.append(zd_err(lambda: zl / zz))
+        zd_seen.append(zd_err(lambda: zl // zz))
+        zd_seen.append(zd_err(lambda: zl % zz))
+        zd_seen.append(zd_err(lambda: divmod(zl, zz)))
+check("zd-all-raise", zd_seen, ["ZeroDivisionError: division by zero"] * 64)
+zd_x = zd_l[0]
+try:
+    zd_x //= zd_z[0]
+    zd_aug = "no-raise"
+except ZeroDivisionError as e:
+    zd_aug = str(e)
+check("zd-augmented", zd_aug, "division by zero")
+check("zd-nonzero-still-divides", [zd_l[0] // 2, zd_l[0] % 3, zd_l[1] / 0.5], [3, 1, 5.0])
+
+
+# ----- SECTION: cased letters with no simple case mapping -----
+#
+# ß, ĸ and the modifier letters are LOWERCASE to CPython although no single
+# character maps them, so a word goes on past them; a titlecase digraph (ǅ) opens
+# a word like an uppercase letter and is what title() and capitalize() write.
+cz = ["straße", "Straße", "ĸa ĸb", "ªb cd", "ǆa", "ǅa", "ǈǉ " + chr(454)]
+check("case-title-sharp-s", cz[0].title(), "Straße")
+check("case-istitle-sharp-s", [cz[0].istitle(), cz[1].istitle()], [False, True])
+check("case-capitalize-sharp-s", cz[0].capitalize(), "Straße")
+check("case-islower-sharp-s", [cz[0].islower(), cz[0][4].islower(), cz[0][4].isupper()], [True, True, False])
+check("case-title-kra", cz[2].title(), "ĸa ĸb")
+check("case-title-ordinal", cz[3].title(), "ªb Cd")
+check("case-title-digraph", [cz[4].title(), cz[4].capitalize(), cz[6].title()], ["ǅa", "ǅa", "ǈǉ ǅ"])
+check("case-istitle-digraph", [cz[5].istitle(), cz[5].isupper(), cz[5].islower()], [True, False, False])
+check("case-swapcase-ordinal", cz[3].swapcase(), "ªB CD")
+
+
+# ----- SECTION: the set algebra methods -----
+#
+# Each takes ANY iterable (the operator forms insist on sets); the _update forms
+# write back and answer None. hasattr answers what the call can do, on a value
+# and on the builtin type object alike.
+sa = {1, 2, 3}
+sa_args = [{2, 3, 4}, [2, 9], (3, 1), "ab"]
+check("set-issuperset", [sa.issuperset({2}), sa.issuperset(sa_args[1])], [True, False])
+check("set-isdisjoint", [sa.isdisjoint({9}), sa.isdisjoint(sa_args[2]), sa.isdisjoint(sa_args[3])], [True, False, True])
+check("set-intersection", [sorted(sa.intersection(sa_args[0])), sorted(sa.intersection(sa_args[1], sa_args[2])), sorted(sa.intersection())], [[2, 3], [], [1, 2, 3]])
+check("set-difference", [sorted(sa.difference({2})), sorted(sa.difference([1], sa_args[2]))], [[1, 3], [2]])
+check("set-symmetric-difference", sorted(sa.symmetric_difference([3, 4])), [1, 2, 4])
+check("set-algebra-new-set", [type(sa.intersection([1])).__name__, sorted(sa)], ["set", [1, 2, 3]])
+sb = {1, 2, 3, 4}
+check("set-intersection-update", sb.intersection_update({1, 2, 9}), None)
+check("set-intersection-update-in-place", sorted(sb), [1, 2])
+sb.difference_update([1])
+sb.symmetric_difference_update({2, 5})
+check("set-update-forms-in-place", sorted(sb), [5])
+check("set-operators", [sorted(sa & {2, 3, 4}), sorted(sa - {2}), sorted(sa ^ {3, 4}), sa >= {2}, sa > sa], [[2, 3], [1, 3], [1, 2, 4], True, False])
+sa_names = ["issuperset", "isdisjoint", "intersection", "difference", "symmetric_difference", "intersection_update"]
+check("set-hasattr", [hasattr(sa, n) for n in sa_names], [True] * 6)
+check("set-hasattr-not-on-dict", [hasattr({}, n) for n in sa_names], [False] * 6)
+check("type-hasattr", [hasattr(dict, "fromkeys"), hasattr(list, "count"), hasattr(set, "isdisjoint"), hasattr(dict, "nope")], [True, True, True, False])
+check("set-unbound-method", sorted(getattr(set, "intersection")({1, 2}, [2])), [2])
+
+
+# ----- SECTION: `except E as NAME` unbinds NAME -----
+#
+# CPython ends every handler with `NAME = None; del NAME`, however the handler is
+# left and whether or not NAME was bound before the try.
+def ub_read(f):
+    try:
+        return repr(f())
+    except NameError as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+ub_vals = [5, "x"]
+ub_w = ub_vals[0]
+try:
+    raise ValueError(ub_vals[1])
+except ValueError as ub_w:
+    ub_w = 7
+check("except-as-unbinds-prior-global", ub_read(lambda: ub_w), "NameError: name 'ub_w' is not defined")
+for ub_i in range(3):
+    try:
+        raise ValueError(ub_i)
+    except ValueError as ub_b:
+        if ub_i == 1:
+            break
+check("except-as-unbinds-on-break", ub_read(lambda: ub_b), "NameError: name 'ub_b' is not defined")
+try:
+    try:
+        raise ValueError(ub_vals[1])
+    except ValueError as ub_r:
+        raise
+except ValueError:
+    pass
+check("except-as-unbinds-on-raise", ub_read(lambda: ub_r), "NameError: name 'ub_r' is not defined")
+
+
+def ub_local():
+    ub_e = ub_vals[0]
+    try:
+        raise KeyError(1)
+    except KeyError as ub_e:
+        seen = str(ub_e)
+    try:
+        return seen + " " + str(ub_e)
+    except UnboundLocalError as e:
+        return seen + " " + type(e).__name__
+
+
+check("except-as-unbinds-local", ub_local(), "1 UnboundLocalError")
+ub_g = "g"
+
+
+def ub_global():
+    global ub_g
+    try:
+        raise ValueError(ub_vals[1])
+    except ValueError as ub_g:
+        return str(ub_g)
+
+
+check("except-as-global", [ub_global(), ub_read(lambda: ub_g)], ["x", "NameError: name 'ub_g' is not defined"])
+
+
+# ----- SECTION: every resolution order ends with object -----
+class MoA:
+    pass
+
+
+class MoB(MoA):
+    pass
+
+
+class MoE(ValueError):
+    pass
+
+
+mo_names = lambda ks: [k.__name__ for k in ks]
+check("mro-ends-with-object", mo_names(MoB.__mro__), ["MoB", "MoA", "object"])
+check_true("mro-object-identity", MoB.__mro__[-1] is object)
+check("mro-exception", mo_names(MoE.__mro__), ["MoE", "ValueError", "Exception", "BaseException", "object"])
+check("mro-builtin-types", [mo_names(object.__mro__), mo_names(int.__mro__), mo_names(bool.__mro__)],
+      [["object"], ["int", "object"], ["bool", "int", "object"]])
+check("bases-root-class", [mo_names(MoA.__bases__), mo_names(MoB.__bases__), mo_names(object.__bases__), mo_names(bool.__bases__)],
+      [["object"], ["MoA"], [], ["int"]])
+check("mro-method", mo_names(MoB.mro()), ["MoB", "MoA", "object"])
+
+
+# ----- SECTION: no attribute can be set on a builtin value -----
+#
+# None, a number, a str, a list, a dict and a set have no __dict__, so a new
+# attribute - written, set with setattr() or deleted - is a catchable
+# AttributeError.
+def na_set(v):
+    try:
+        v.k = 3
+        return "set"
+    except AttributeError as e:
+        return str(e)
+
+
+na_vals = [None, 5, 2.5, True, "s", [1], {}, {1}, 3j]
+check("noattr-set", [na_set(v) for v in na_vals],
+      ["'" + t + "' object has no attribute 'k' and no __dict__ for setting new attributes"
+       for t in ["NoneType", "int", "float", "bool", "str", "list", "dict", "set", "complex"]])
+na_none = na_vals[0]
+try:
+    setattr(na_none, "k", 1)
+    na_got = "set"
+except AttributeError as e:
+    na_got = type(e).__name__
+check("noattr-setattr", na_got, "AttributeError")
+try:
+    del na_none.k
+    na_got = "deleted"
+except AttributeError as e:
+    na_got = str(e)
+check("noattr-del", na_got, "'NoneType' object has no attribute 'k' and no __dict__ for setting new attributes")
+
+
+class NaC:
+    pass
+
+
+na_c = NaC()
+na_c.k = 1
+check("noattr-instance-still-sets", na_c.k, 1)
 
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

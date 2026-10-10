@@ -2224,6 +2224,18 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-abort-test.py", "-q", "-exe", "tests/python-abort.out"]
         },
         {
+            "name": "Python abort probe, uncaught KeyError (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-abort-test-uncaught.py", "-q"]
+        },
+        {
+            "name": "Python abort probe uncaught, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-abort-test-uncaught.py", "-q", "-exe", "tests/python-abort-uncaught.out"]
+        },
+        {
             "name": "JavaScript abort probe, uncaught Error (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
