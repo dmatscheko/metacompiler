@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-211** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-217** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -198,32 +198,30 @@ decline each with its pair unless a spec-based rule separates them.
 
 # JV — Java
 
-### T-192 java: the interpreter prints some doubles with too many digits · P1 · JV · Shared: interp-core.js? · IN PROGRESS (JV worker, round 2) [V]
-`System.out.println(1.0/16777216)`: interpreter (goja and -frozen) `5.9604644775390625E-8`;
-llvm.Run, native and java `5.960464477539063E-8`. The shortest-digits path (jFloStr /
-coreDecDigits). A halves divergence; probe other powers of two and boundaries.
+### T-212 java: Character classification beyond U+024F is approximate · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
+Past U+024F a letter is only a cased letter and only 0-9 are digits: a U+0250..U+3000
+probe differs from java on ~4,000 `isLetter` rows (uncased scripts). Needs Unicode
+category tables (java 24's Unicode version) in all three engines; case mapping and
+isWhitespace are already exact there.
 
-### T-193 java: overloads are chosen by argument count only · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
-`pick(int,int)` and `pick(double,double)`: `pick(1,2)` prints `2.0` (java `2`); likewise
-`show(long)` vs `show(String)`. All engines. JLS 15.12.2 (most specific method).
+### T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
+Interpreter: "unknown name: StrictMath", `new String("ab")` "unknown class: String",
+"unknown class: ArrayList". Probe each in the compiled halves too and match java.
 
-### T-194 java: missing standard-library pieces · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
-All engines: `String.toCharArray` ("unknown String method"); `Runnable` as a
-supertype ("unknown superclass: Runnable" / "variable not defined: Runnable");
-Character.isDigit/isLetter/toUpperCase/getNumericValue; Math.addExact and relatives
-(ArithmeticException "integer overflow"); Double.sum/max/min. Oracle: java 24.
+### T-214 java: overload resolution uses the argument's runtime class · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
+`Object o = "s"; f(o)` with `f(Object)` and `f(String)` picks f(String); javac picks
+f(Object) (JLS 15.12.2 is static). Also an enum's or an anonymous class's own
+overloads are not registered (not resolved). Needs the argument's static type
+(java-decltypes.js already records declared types).
 
-### T-195 java: typed functional-interface lambdas do not convert their parameters · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
-`DoubleUnaryOperator op = x -> x+1; op.applyAsDouble(2)` prints `3` (java `3.0`). All
-engines.
+### T-215 java: duplicate assertion IDs in tests/java-test-full.java · P3 · JV · IN PROGRESS (JV worker, round 3) [V]
+`int27`, `int28`, `iof5` appear twice; rename so every ID is unique.
 
-### T-196 java: `Math.exp(1)` is one ulp off · P3 · JV · IN PROGRESS (JV worker, round 2) [V]
-java `2.718281828459045`, every engine `2.7182818284590455`. Java's Math.exp may use
-an intrinsic but StrictMath.exp is fdlibm; check whether java's Math.exp agrees with
-fdlibm on a boundary-value probe and, if so, port fdlibm's exp (all engines). Else DECLINE.
-
-### T-197 java: `Double.parseDouble` does not read hex significands · P3 · JV · IN PROGRESS (JV worker, round 2) [V]
-`Double.parseDouble("0x1p3")` throws; java `8.0`.
+### T-216 java: transcendentals other than exp vs java · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
+`Math.exp` differed from java on 78 of 3,276 rows (now fdlibm). Probe `log`, `log10`,
+`log1p`, `expm1`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`,
+`tanh`, `cbrt`, `hypot`, `pow` on boundary values against java (and StrictMath) and port
+fdlibm where java's answer is fdlibm's.
 
 ---
 
@@ -419,6 +417,11 @@ The C subset's float cast does not round to binary32. Oracle: cc.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
+### T-211 the C floor's case table is an older Unicode · P1 · CORE · Shared: runtime.c · OPEN [V]
+Native only: `Character.toUpperCase` of U+019B, U+0264, U+1C89, U+1C8A differs from
+llvm.Run and java (U+019B → U+A7DC is Unicode 16). Regenerate the floor's table from
+the Unicode version the oracles use; check every language's upper/lower on the delta.
+
 ### T-151 MetaJS: the lexer reads `"\f"` / `"\v"` as letters · P1 · CORE · OPEN [V]
 `"\f".charCodeAt(0)` is 102 in MetaJS. tools/metajs-lint guards known sites (it found
 two native-only defects this way), but the lexer in metajs-to-llvm-ir.abnf is the
@@ -546,6 +549,12 @@ T-045 js: Error own-property introspection — DONE e6d1ab8
 T-046 js: "is not a function" names the callee without node's spacing — PARTIAL f23e9e8 (V8 spacing/parens/folding via js-callee.js); word operators are T-209
 T-050 js: sloppy-mode primitive `this` is not boxed — DECLINED: needs Number/String/Boolean wrapper objects (ToPrimitive, ===, typeof, member dispatch) in all four engines; out of proportion for sloppy-mode `this` boxing
 T-180 corpus: JS reject side — PARTIAL 7e7be24 (reject 703→711, must-parse unchanged 2623); rest is T-210
+T-192 java: the interpreter prints some doubles with too many digits — DONE 1bead91
+T-193 java: overloads are chosen by argument count only — DONE eb6cbac
+T-194 java: missing standard-library pieces — PARTIAL 26eedb1 (all members added; Character exact through U+024F); the rest is T-212
+T-195 java: typed functional-interface lambdas do not convert their parameters — DONE 65d2b1a
+T-196 java: `Math.exp(1)` is one ulp off — DONE 1c463b4 (the ticket had the values swapped: java prints 2.7182818284590455)
+T-197 java: `Double.parseDouble` does not read hex significands — DONE 72bb39a
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
