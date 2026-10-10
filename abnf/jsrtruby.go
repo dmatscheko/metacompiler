@@ -25,6 +25,7 @@ package abnf
 
 import (
 	"math"
+	"math/big"
 	"strings"
 )
 
@@ -692,4 +693,194 @@ func rubyHexDirective(f float64, flags string, width, prec int, upper bool) stri
 		}
 	}
 	return body
+}
+
+// ===== Numeric#div / #divmod / #modulo / #rationalize =====
+//
+// Twin of numDivOp in languages/ruby-interpreter.abnf, which states the rules,
+// and rbNumDivOp in languages/lib/ruby-rt.metajs.
+
+func (rt *jsrt) rubyNumDivOp(t interface{}, name string, args []interface{}) interface{} {
+	y := argAt(args, 0)
+	switch name {
+	case "rationalize":
+		return rt.rubyRationalize(t, args)
+	case "modulo":
+		return rt.rubyNumBin("%", t, y)
+	}
+	_, tf := t.(jsFlo)
+	_, yf := y.(jsFlo)
+	if name == "divmod" && (tf || yf) {
+		return rt.rubyFloDivmod(rubyToF(t), rubyToF(y))
+	}
+	if rubyToF(y) == 0 {
+		rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+	}
+	q := rt.rubyNumBin("/", t, y)
+	switch qv := q.(type) {
+	case jsFlo:
+		rubyFloDomain(rt, qv.f)
+		q = rt.rubyIntFromF(math.Floor(qv.f))
+	case jsRat:
+		q = rt.rubyRatDigitOp(qv, 'f', 0)
+	}
+	if name == "div" {
+		return q
+	}
+	return &jsArray{elems: []interface{}{q, rt.rubyNumBin("-", t, rt.rubyNumBin("*", y, q))}}
+}
+
+// rubyFloDivmod is MRI's flodivmod.
+func (rt *jsrt) rubyFloDivmod(x, y float64) interface{} {
+	if y != y {
+		rubyFloDomain(rt, y)
+	}
+	if y == 0 {
+		rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+	}
+	xInf, yInf := math.IsInf(x, 0), math.IsInf(y, 0)
+	mod := x
+	if !(x == 0 || (yInf && !xInf)) {
+		mod = math.Mod(x, y)
+	}
+	div := x
+	if !(xInf && !yInf) {
+		if dq := (x - mod) / y; dq < 0 {
+			div = -math.Floor(0.5 - dq)
+		} else {
+			div = math.Floor(dq + 0.5)
+		}
+	}
+	if y*mod < 0 {
+		mod += y
+		div--
+	}
+	rubyFloDomain(rt, div)
+	return &jsArray{elems: []interface{}{rt.rubyIntFromF(div), jsFlo{f: mod}}}
+}
+
+func (rt *jsrt) rubyRationalize(t interface{}, args []interface{}) interface{} {
+	switch v := t.(type) {
+	case float64, *jsBigInt:
+		return rubyMkRat(rubyToF(t), 1)
+	case jsRat:
+		if len(args) == 0 {
+			return v
+		}
+		if _, ef := args[0].(jsFlo); !ef {
+			er := rt.rubyAsRat(args[0])
+			if er.n == 0 {
+				return v
+			}
+			d := new(big.Int).Mul(rubyExactInt(v.d), rubyExactInt(er.d))
+			c := new(big.Int).Mul(rubyExactInt(math.Abs(v.n)), rubyExactInt(er.d))
+			e := new(big.Int).Mul(rubyExactInt(math.Abs(er.n)), rubyExactInt(v.d))
+			r, _ := rubyRatSimplest(new(big.Rat).SetFrac(new(big.Int).Sub(c, e), d), new(big.Rat).SetFrac(new(big.Int).Add(c, e), d))
+			if v.n < 0 {
+				r.n = -r.n
+			}
+			return r
+		}
+	}
+	x := rubyToF(t)
+	rubyFloDomain(rt, x)
+	ax := math.Abs(x)
+	var r jsRat
+	ok := true
+	switch {
+	case len(args) > 0:
+		ef := math.Abs(rubyToF(args[0]))
+		lo, hi := ax-ef, ax+ef
+		if lo == hi {
+			return rt.rubyAsRat(t)
+		}
+		r, ok = rubyFloSimplest(lo, hi)
+	case ax == 0:
+		return rubyMkRat(0, 1)
+	default:
+		f, n := ax, 0
+		for f < 4503599627370496 {
+			f, n = f*2, n-1
+		}
+		for f >= 9007199254740992 {
+			f, n = f/2, n+1
+		}
+		if n >= 0 {
+			return rubyMkRat(x, 1)
+		}
+		den := new(big.Int).Lsh(big.NewInt(1), uint(1-n))
+		twoF := big.NewInt(2 * int64(f))
+		r, ok = rubyRatSimplest(new(big.Rat).SetFrac(new(big.Int).Sub(twoF, big.NewInt(1)), den),
+			new(big.Rat).SetFrac(new(big.Int).Add(twoF, big.NewInt(1)), den))
+	}
+	if !ok {
+		return rt.rubyAsRat(t)
+	}
+	if x < 0 {
+		r.n = -r.n
+	}
+	return r
+}
+
+func rubyExactInt(x float64) *big.Int {
+	b, _ := big.NewFloat(x).Int(nil)
+	return b
+}
+
+func rubyBigIntToF(x *big.Int) float64 {
+	f, _ := new(big.Float).SetInt(x).Float64()
+	return f
+}
+
+// rubyRatSimplest is MRI's nurat_rationalize_internal over exact bounds a < b.
+// ok is false when the answer does not fit a Rational's double parts.
+func rubyRatSimplest(a, b *big.Rat) (jsRat, bool) {
+	p0, p1, q0, q1 := big.NewInt(0), big.NewInt(1), big.NewInt(1), big.NewInt(0)
+	var c *big.Int
+	for {
+		c = new(big.Int).Neg(new(big.Int).Div(new(big.Int).Neg(a.Num()), a.Denom()))
+		if new(big.Rat).SetInt(c).Cmp(b) < 0 {
+			break
+		}
+		k := new(big.Int).Sub(c, big.NewInt(1))
+		p2 := new(big.Int).Add(new(big.Int).Mul(k, p1), p0)
+		q2 := new(big.Int).Add(new(big.Int).Mul(k, q1), q0)
+		kr := new(big.Rat).SetInt(k)
+		t := new(big.Rat).Inv(new(big.Rat).Sub(b, kr))
+		b = new(big.Rat).Inv(new(big.Rat).Sub(a, kr))
+		a = t
+		p0, q0, p1, q1 = p1, q1, p2, q2
+	}
+	p := new(big.Int).Add(new(big.Int).Mul(c, p1), p0)
+	q := new(big.Int).Add(new(big.Int).Mul(c, q1), q0)
+	return rubyFiniteRat(rubyBigIntToF(p), rubyBigIntToF(q))
+}
+
+func rubyFiniteRat(p, q float64) (jsRat, bool) {
+	if math.IsInf(p, 0) || math.IsInf(q, 0) {
+		return jsRat{}, false
+	}
+	return rubyMkRat(p, q), true
+}
+
+// rubyFloSimplest is the same walk in doubles, as MRI does once eps made the
+// bounds Floats. float64() on each product stops arm64 fusing it into an FMA
+// (manual chapter 4), which the other two engines cannot do.
+func rubyFloSimplest(a, b float64) (jsRat, bool) {
+	p0, p1, q0, q1 := 0.0, 1.0, 1.0, 0.0
+	c := 0.0
+	for {
+		c = math.Ceil(a)
+		if c < b {
+			break
+		}
+		k := c - 1
+		p2 := float64(k*p1) + p0
+		q2 := float64(k*q1) + q0
+		t := 1 / (b - k)
+		b = 1 / (a - k)
+		a = t
+		p0, q0, p1, q1 = p1, q1, p2, q2
+	}
+	return rubyFiniteRat(float64(c*p1)+p0, float64(c*q1)+q0)
 }

@@ -5791,14 +5791,8 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			rt.call(dblk, jsUndef, []interface{}{i})
 		}
 		return t, true
-	case "divmod":
-		// The remainder is the FUSED subtraction, spelled so it does not depend on
-		// the compiler choosing to fuse it - see the "%" arm of rubyNumBin, and
-		// rbFmaSub in languages/lib/ruby-rt.metajs, which is layer 2's emulation of
-		// exactly this operation.
-		y := rubyToF(argAt(args, 0))
-		q := math.Floor(x / y)
-		return &jsArray{elems: []interface{}{q, math.FMA(-q, y, x)}}, true
+	case "div", "divmod", "modulo", "rationalize":
+		return rt.rubyNumDivOp(t, name, args), true
 	case "fdiv":
 		return jsFlo{f: x / rubyToF(argAt(args, 0))}, true
 	case "pow", "**":

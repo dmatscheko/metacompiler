@@ -4235,6 +4235,179 @@ function rbCall3(f, a, b, c) { return f.apply(undefined, [a, b, c]) }
 // rubyNumMethod: the Integer / Float / Rational / Complex method set. It answers
 // `undefined` for a name it does not know, so the caller carries on with the
 // generic dispatch (and its error message).
+// ----- Numeric#div / #divmod / #modulo / #rationalize ----------------------
+//
+// Twin of numDivOp in ruby-interpreter.abnf, which states the rules, and
+// rubyNumDivOp in abnf/jsrtruby.go.
+function rbNumDivOp(t, name, args) {
+    var y = rbArgAt(args, 0)
+    if (name == "rationalize") { return rbRationalize(t, args) }
+    if (name == "modulo") { return rbNumBin("%", t, y) }
+    if (name == "divmod" && (rbIsFlo(t) || rbIsFlo(y))) { return rbFloDivmod(rbToF(t), rbToF(y)) }
+    if (rbToF(y) == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    var q = anytype
+    q = rbNumBin("/", t, y)
+    if (rbIsFlo(q)) {
+        rbFloDomain(q["f"])
+        q = rbIntFromF(Math.floor(q["f"]))
+    } else {
+        if (rbIsRat(q)) { q = rbRatDigitOp(q, "f", 0) }
+    }
+    if (name == "div") { return q }
+    return [q, rbNumBin("-", t, rbNumBin("*", y, q))]
+}
+
+// MRI's flodivmod. rbZeroSign gives a zero modulo the dividend's sign, which
+// fmod carries and the tag engine drops.
+function rbFloDivmod(x, y) {
+    if (y !== y) { rbFloDomain(y) }
+    if (y == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    var xInf = x === x && x - x !== 0
+    var yInf = y - y !== 0
+    var mod = x
+    if (!(x == 0 || (yInf && !xInf))) {
+        mod = x % y
+        if (mod == 0) { mod = rbZeroSign(x) }
+    }
+    var div = x
+    if (!(xInf && !yInf)) {
+        var dq = (x - mod) / y
+        if (dq < 0) {
+            div = 0 - Math.floor(0.5 - dq)
+        } else {
+            div = Math.floor(dq + 0.5)
+        }
+    }
+    if (y * mod < 0) {
+        mod = mod + y
+        div = div - 1
+    }
+    rbFloDomain(div)
+    return [rbIntFromF(div), rbMkFlo(mod)]
+}
+
+function rbRationalize(t, args) {
+    if (typeof t == "number" || rbIsBig(t)) { return rbMkRat(rbToF(t), 1) }
+    if (rbIsRat(t) && args.length == 0) { return t }
+    var e = anytype
+    e = 0
+    if (args.length > 0) { e = args[0] }
+    if (rbIsRat(t) && !rbIsFlo(e)) {
+        var er = rbAsRat(e)
+        if (er["n"] == 0) { return t }
+        var rd = rbNumBin("*", t["d"], er["d"])
+        var rc = rbNumBin("*", Math.abs(t["n"]), er["d"])
+        var re = rbNumBin("*", Math.abs(er["n"]), t["d"])
+        var rr = rbRatSimplest(rbNumBin("-", rc, re), rd, rbNumBin("+", rc, re), rd)
+        if (t["n"] < 0) { return rbMkRat(0 - rr["n"], rr["d"]) }
+        return rr
+    }
+    var x = rbToF(t)
+    rbFloDomain(x)
+    var r = rbFloRatBounds(Math.abs(x), args.length > 0, e)
+    if (r === null) { return rbAsRat(t) }
+    if (x < 0) { return rbMkRat(0 - r["n"], r["d"]) }
+    return r
+}
+
+function rbFloRatBounds(ax, hasEps, e) {
+    if (hasEps) {
+        var ef = Math.abs(rbToF(e))
+        var lo = ax - ef
+        var hi = ax + ef
+        if (lo == hi) { return null }
+        return rbFloSimplest(lo, hi)
+    }
+    if (ax == 0) { return rbMkRat(0, 1) }
+    var f = ax
+    var n = 0
+    while (f < 4503599627370496) {
+        f = f * 2
+        n = n - 1
+    }
+    while (f >= 9007199254740992) {
+        f = f / 2
+        n = n + 1
+    }
+    if (n >= 0) { return rbMkRat(ax, 1) }
+    var den = anytype
+    den = rbNumBin("**", 2, 1 - n)
+    return rbRatSimplest(rbNumBin("-", 2 * f, 1), den, rbNumBin("+", 2 * f, 1), den)
+}
+
+function rbRatSimplest(an0, ad0, bn0, bd0) {
+    var an = anytype
+    var ad = anytype
+    var bn = anytype
+    var bd = anytype
+    var p0 = anytype
+    var p1 = anytype
+    var q0 = anytype
+    var q1 = anytype
+    var c = anytype
+    an = an0
+    ad = ad0
+    bn = bn0
+    bd = bd0
+    p0 = 0
+    p1 = 1
+    q0 = 1
+    q1 = 0
+    c = 0
+    var walking = true
+    while (walking) {
+        c = rbNumBin("-", 0, rbNumBin("/", rbNumBin("-", 0, an), ad))
+        if (rbNumCmp(rbNumBin("*", c, bd), bn) < 0) {
+            walking = false
+        } else {
+            var k = anytype
+            k = rbNumBin("-", c, 1)
+            var p2 = rbNumBin("+", rbNumBin("*", k, p1), p0)
+            var q2 = rbNumBin("+", rbNumBin("*", k, q1), q0)
+            var tn = bd
+            var td = rbNumBin("-", bn, rbNumBin("*", k, bd))
+            bn = ad
+            bd = rbNumBin("-", an, rbNumBin("*", k, ad))
+            an = tn
+            ad = td
+            p0 = p1
+            q0 = q1
+            p1 = p2
+            q1 = q2
+        }
+    }
+    return rbFiniteRat(rbToF(rbNumBin("+", rbNumBin("*", c, p1), p0)), rbToF(rbNumBin("+", rbNumBin("*", c, q1), q0)))
+}
+
+function rbFiniteRat(p, q) {
+    if (p - p != 0 || q - q != 0) { return null }
+    return rbMkRat(p, q)
+}
+
+function rbFloSimplest(a0, b0) {
+    var a = a0
+    var b = b0
+    var p0 = 0
+    var p1 = 1
+    var q0 = 1
+    var q1 = 0
+    var c = Math.ceil(a)
+    while (!(c < b)) {
+        var k = c - 1
+        var p2 = k * p1 + p0
+        var q2 = k * q1 + q0
+        var t = 1 / (b - k)
+        b = 1 / (a - k)
+        a = t
+        p0 = p1
+        q0 = q1
+        p1 = p2
+        q1 = q2
+        c = Math.ceil(a)
+    }
+    return rbFiniteRat(c * p1 + p0, c * q1 + q0)
+}
+
 function rbNumMethod(t, name, args) {
     if (typeof t != "number" && rtTag(t, "__bint")) {
         var bm = rbABigMethod(t, name, args)
@@ -4347,10 +4520,7 @@ function rbNumMethod(t, name, args) {
         }
         return t
     }
-    if (name == "divmod") {
-        var y = rbToF(rbArgAt(args, 0))
-        return [Math.floor(x / y), rbFmaSub(x, Math.floor(x / y), y)]
-    }
+    if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return rbNumDivOp(t, name, args) }
     if (name == "fdiv") { return rbMkFlo(x / rbToF(rbArgAt(args, 0))) }
     if (name == "pow" || name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
     if (name == "gcd") { return rbGcd(x, rbToF(rbArgAt(args, 0))) }

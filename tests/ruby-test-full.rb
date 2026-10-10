@@ -2865,6 +2865,38 @@ def s51
                  LocalJumpError.superclass == StandardError)
 end
 
+# ===== SECTION 52: Numeric#div / #divmod / #modulo / #rationalize =====
+# div is (self / y).floor, an Integer; divmod with a Float on either side is
+# MRI's flodivmod; rationalize answers the SIMPLEST rational inside the bounds -
+# the Float's own rounding interval, or self -/+ |eps|. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s52z
+  begin
+    yield
+    "none"
+  rescue ZeroDivisionError => e
+    "ZE " + e.message
+  end
+end
+def s52
+  xs = [7.5, -7.5, 0.1, 3.14159]
+  check("dv52a", xs.map { |x| x.div(2) } == [3, -4, 0, 1] && 7.5.div(0.5) == 15 &&
+                 7.5.div(Rational(1, 3)) == 22 && 1e20.div(3) == 33333333333333331968)
+  check("dv52b", xs[0].divmod(-2) == [-4, -0.5] && xs[1].divmod(2) == [-4, 0.5] &&
+                 xs[3].divmod(2) == [1, 1.1415899999999999] && 7.5.divmod(Rational(1, 3)) == [22, 0.16666666666666707])
+  check("dv52c", 7.div(2.5) == 2 && 7.divmod(2.5) == [2, 2.0] && (-7).divmod(2.5) == [-3, 0.5] &&
+                 7.modulo(2.5) == 2.0 && (-7).div(2) == -4 && Rational(7, 2).divmod(Rational(1, 3)) == [10, Rational(1, 6)])
+  check("dv52d", s52z { 1.5.div(0) } == "ZE divided by 0" && s52z { 1.5.divmod(0.0) } == "ZE divided by 0")
+  check("dv52e", 0.1.rationalize == Rational(1, 10) && 0.333.rationalize == Rational(333, 1000) &&
+                 (1.0 / 3).rationalize == Rational(1, 3) && -2.25.rationalize == Rational(-9, 4) &&
+                 3.14159.rationalize == Rational(314159, 100000))
+  check("dv52f", 3.14159.rationalize(Rational(1, 100)) == Rational(22, 7) && 0.333.rationalize(0.01) == Rational(1, 3) &&
+                 3.141592653589793.rationalize(1e-6) == Rational(355, 113) && 1e20.rationalize == 100000000000000000000)
+  check("dv52g", 7.rationalize == Rational(7, 1) && Rational(7, 2).rationalize == Rational(7, 2) &&
+                 Rational(355, 113).rationalize(Rational(1, 100)) == Rational(22, 7) &&
+                 Rational(-7, 3).rationalize(1) == -2)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2878,5 +2910,6 @@ s48() # SECTION-CALL 48
 s49() # SECTION-CALL 49
 s50() # SECTION-CALL 50
 s51() # SECTION-CALL 51
+s52() # SECTION-CALL 52
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

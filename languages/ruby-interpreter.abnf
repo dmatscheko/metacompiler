@@ -6616,8 +6616,153 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "pow") { return rbin("**", t, args[0]) }
         return numberMethod(t, name, args, blk)
     }
+    // ----- Numeric#div / #divmod / #modulo / #rationalize -----
+    // div is (self / y).floor; divmod pairs it with the modulo, and as soon as a
+    // Float is involved it is MRI's flodivmod. Twins: rubyNumDivOp in abnf/jsrt.go and rbNumDivOp in lib/ruby-rt.metajs.
+    function numDivOp(t, name, args) {
+        if (name == "rationalize") { return numRationalize(t, args) }
+        if (name == "modulo") { return rbin("%", t, args[0]) }
+        var y = args[0]
+        if (isFlo(t) || isFlo(y)) {
+            if (name == "divmod") { return floDivmod(toF(t), toF(y)) }
+        }
+        if (toF(y) == 0) { raiseErr("ZeroDivisionError", "divided by 0") }
+        var q = anytype
+        q = rbin("/", t, y)
+        if (isFlo(q)) { floDomainGuard(q.f); q = intFromF(Math.floor(q.f)) }
+        else if (isRat(q)) { q = ratDigitOp(q, "f", 0) }
+        if (name == "div") { return q }
+        return [q, numBin("-", t, numBin("*", y, q))]
+    }
+    // MRI's flodivmod: the quotient is the ROUNDED exact division, and the modulo
+    // takes the divisor's sign.
+    function floDivmod(x, y) {
+        if (y !== y) { floDomainGuard(y) }
+        if (y == 0) { raiseErr("ZeroDivisionError", "divided by 0") }
+        var xInf = x === x && x - x !== 0
+        var yInf = y - y !== 0
+        var mod = x
+        if (!(x == 0 || (yInf && !xInf))) { mod = x % y }
+        var div = x
+        if (!(xInf && !yInf)) {
+            var dq = (x - mod) / y
+            div = dq < 0 ? 0 - Math.floor(0.5 - dq) : Math.floor(dq + 0.5)
+        }
+        if (y * mod < 0) { mod = mod + y; div = div - 1 }
+        floDomainGuard(div)
+        return [intFromF(div), mkFlo(mod)]
+    }
+    // #rationalize: the SIMPLEST rational within the bounds, found for the magnitude
+    // and given the receiver's sign. Without an argument a
+    // Float's bounds are its own rounding interval (2f-1)/2^(1-n)..(2f+1)/2^(1-n),
+    // searched exactly; with one they are self -/+ |eps| in the receiver's own
+    // arithmetic (doubles for a Float, as MRI does).
+    function numRationalize(t, args) {
+        if (typeof t == "number" || isBig(t)) { return mkRat(toF(t), 1) }
+        if (isRat(t) && args.length == 0) { return t }
+        var e = args.length > 0 ? args[0] : 0
+        if (isRat(t) && !isFlo(e)) {
+            var er = asRat(e)
+            if (er.n == 0) { return t }
+            var en = er.n < 0 ? 0 - er.n : er.n
+            var tn = t.n < 0 ? 0 - t.n : t.n
+            var rd = numBin("*", t.d, er.d)
+            var rc = numBin("*", tn, er.d)
+            var re = numBin("*", en, t.d)
+            var rr = ratSimplest(numBin("-", rc, re), rd, numBin("+", rc, re), rd)
+            return t.n < 0 ? mkRat(0 - rr.n, rr.d) : rr
+        }
+        var x = toF(t)
+        floDomainGuard(x)
+        var neg = x < 0
+        var ax = neg ? 0 - x : x
+        var r = floRatBounds(ax, args.length > 0, e)
+        if (r === null) { return asRat(t) }
+        return neg ? mkRat(0 - r.n, r.d) : r
+    }
+    // The simplest rational for a non-negative Float ax, or null when the bounds
+    // coincide (eps 0), which MRI answers with #to_r, or the answer is no double.
+    function floRatBounds(ax, hasEps, e) {
+        if (hasEps) {
+            var ef = toF(e)
+            if (ef < 0) { ef = 0 - ef }
+            var lo = ax - ef
+            var hi = ax + ef
+            if (lo == hi) { return null }
+            return floSimplest(lo, hi)
+        }
+        if (ax == 0) { return mkRat(0, 1) }
+        var f = ax
+        var n = 0
+        while (f < 4503599627370496) { f = f * 2; n = n - 1 }
+        while (f >= 9007199254740992) { f = f / 2; n = n + 1 }
+        if (n >= 0) { return mkRat(ax, 1) }
+        var den = anytype
+        den = numBin("**", 2, 1 - n)
+        return ratSimplest(numBin("-", 2 * f, 1), den, numBin("+", 2 * f, 1), den)
+    }
+    // The continued-fraction walk of MRI's nurat_rationalize_internal over the
+    // EXACT bounds an/ad < bn/bd (Integer parts, a big where needed).
+    function ratSimplest(an0, ad0, bn0, bd0) {
+        var an = anytype
+        var ad = anytype
+        var bn = anytype
+        var bd = anytype
+        var p0 = anytype
+        var p1 = anytype
+        var q0 = anytype
+        var q1 = anytype
+        var c = anytype
+        an = an0; ad = ad0; bn = bn0; bd = bd0
+        p0 = 0; p1 = 1; q0 = 1; q1 = 0
+        while (true) {
+            c = numBin("-", 0, numBin("/", numBin("-", 0, an), ad))
+            if (numCmp(numBin("*", c, bd), bn) < 0) { break }
+            var k = anytype
+            k = numBin("-", c, 1)
+            var p2 = numBin("+", numBin("*", k, p1), p0)
+            var q2 = numBin("+", numBin("*", k, q1), q0)
+            var tn = bd
+            var td = numBin("-", bn, numBin("*", k, bd))
+            bn = ad
+            bd = numBin("-", an, numBin("*", k, ad))
+            an = tn
+            ad = td
+            p0 = p1; q0 = q1; p1 = p2; q1 = q2
+        }
+        return finiteRat(toF(numBin("+", numBin("*", c, p1), p0)), toF(numBin("+", numBin("*", c, q1), q0)))
+    }
+    // A Rational's parts are doubles, so an answer past them (the rationalize of
+    // a subnormal) is null, and the caller falls back to #to_r.
+    function finiteRat(p, q) {
+        if (p - p != 0 || q - q != 0) { return null }
+        return mkRat(p, q)
+    }
+    // The same walk in doubles, which is what MRI does once eps made the bounds Floats.
+    function floSimplest(a0, b0) {
+        var a = a0
+        var b = b0
+        var p0 = 0
+        var p1 = 1
+        var q0 = 1
+        var q1 = 0
+        var c = 0
+        while (true) {
+            c = Math.ceil(a)
+            if (c < b) { break }
+            var k = c - 1
+            var p2 = k * p1 + p0
+            var q2 = k * q1 + q0
+            var t = 1 / (b - k)
+            b = 1 / (a - k)
+            a = t
+            p0 = p1; q0 = q1; p1 = p2; q1 = q2
+        }
+        return finiteRat(c * p1 + p0, c * q1 + q0)
+    }
     // The methods of the boxed numerics (Float, Rational, Complex).
     function numberMethod(t, name, args, blk) {
+        if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(t, name, args) }
         // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes.
         if (name == "inspect") { return rinspect(t) }
         if (name == "to_s") { return rstr(t) }
@@ -6815,7 +6960,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "odd?") { return imod(target, 2) != 0 }
             if (name == "succ" || name == "next") { return numBin("+", target, 1) }
             if (name == "pred") { return numBin("-", target, 1) }
-            if (name == "divmod") { return [idiv(target, toF(args[0])), imod(target, toF(args[0]))] }
+            if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(target, name, args) }
             if (name == "fdiv") { return mkFlo(target / toF(args[0])) }
             if (name == "pow") { return rbin("**", target, args[0]) }
             if (name == "times") {
