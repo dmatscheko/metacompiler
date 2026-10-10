@@ -14151,9 +14151,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(vals.elems[i])
 			}
-			idx := int(rt.toNumber(u(a[1])))
+			idx := 0
 			switch o := u(a[0]).(type) {
 			case *jsArray:
+				idx = rt.pySeqIdx(o, u(a[1]))
 				if idx < 0 {
 					idx += len(o.elems)
 				}
@@ -14162,6 +14163,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(o.elems[idx])
 			case string:
+				idx = rt.pySeqIdx(o, u(a[1]))
 				n := rt.strLen(o)
 				if idx < 0 {
 					idx += n
@@ -14177,7 +14179,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// emitter has no separate range path, and a miss here is silent (the
 			// loop simply runs zero times). Only ruby builds a __rrange object.
 			if r, isRng := rubyIsRange(u(a[0])); isRng {
-				return w(rt.rubyRangeAt(r, idx))
+				return w(rt.rubyRangeAt(r, int(rt.toNumber(u(a[1])))))
 			}
 			// list[int] / dict[str, int]: subscripting a TYPE (a class object or a
 			// builtin like list) is a generic alias, not an indexing. One object per
@@ -14206,14 +14208,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			arr, ok := u(a[0]).(*jsArray)
 			if !ok {
-				rt.fail("item assignment on a %s", rt.typeOf(u(a[0])))
+				rt.pyNoItemOp(u(a[0]), false)
 			}
-			idx := int(rt.toNumber(u(a[1])))
+			idx := rt.pySeqIdx(arr, u(a[1]))
 			if idx < 0 {
 				idx += len(arr.elems)
 			}
 			if idx < 0 || idx >= len(arr.elems) {
-				rt.fail("list assignment index out of range")
+				panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list assignment index out of range")})
 			}
 			arr.dropIdx()
 			arr.elems[idx] = u(a[2])
@@ -15709,6 +15711,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// del obj[k] / del obj.name.
 		"js_pydel_item": func(a []uint64) uint64 {
+			if _, cls, isInst := pyInstance(u(a[0])); isInst { // A user class may define __delitem__.
+				if m, found := pyLookup(cls, "__delitem__"); found && isCallable(m) {
+					rt.call(m, jsUndef, []interface{}{u(a[0]), u(a[1])})
+					return 0
+				}
+			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				i := rt.pyDictFind(keys, u(a[1]))
 				if i < 0 {
@@ -15721,14 +15729,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			arr, ok := u(a[0]).(*jsArray)
 			if !ok {
-				rt.fail("del on a %s", rt.typeOf(u(a[0])))
+				rt.pyNoItemOp(u(a[0]), true)
 			}
-			i := int(rt.toNumber(u(a[1])))
+			i := rt.pySeqIdx(arr, u(a[1]))
 			if i < 0 {
 				i += len(arr.elems)
 			}
 			if i < 0 || i >= len(arr.elems) {
-				panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list index out of range")})
+				panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list assignment index out of range")})
 			}
 			arr.dropIdx()
 			arr.elems = append(arr.elems[:i], arr.elems[i+1:]...)
@@ -17498,6 +17506,9 @@ func (rt *jsrt) pyGenericAlias(origin, param interface{}) (interface{}, bool) {
 	switch origin.(type) {
 	case *jsObject, *jsClosure, *hostFunc, *boundMethod:
 	default:
+		return nil, false
+	}
+	if pyTypeName(rt, origin) != "type" { // Only a type takes parameters.
 		return nil, false
 	}
 	if _, _, isDict := dictParts(origin); isDict {
@@ -20054,6 +20065,53 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 	return false
 }
 
+// pySeqIdx is the position a list or str subscript names: an int (a bool is
+// one), or CPython's TypeError naming the key's type. Twin of pySeqIdx in
+// python-interpreter.abnf and lib/python-rt.metajs. js_pyset is shared, so a
+// key of a type python never makes (another language's sized int) still reads
+// as its number.
+func (rt *jsrt) pySeqIdx(c, k interface{}) int {
+	switch x := k.(type) {
+	case float64:
+		return int(x)
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case *jsBigInt:
+		panic(&jsThrown{value: rt.pyExcInstance("IndexError", "cannot fit 'int' into an index-sized integer")})
+	case string, jsUndefT, jsNullT, *jsPyFlo, *jsObject, *jsArray:
+	default:
+		if !isCallable(k) {
+			return int(rt.toNumber(k))
+		}
+	}
+	tn := pyTypeName(rt, k)
+	if _, isStr := c.(string); isStr {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "string indices must be integers, not '"+tn+"'")})
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "list indices must be integers or slices, not "+tn)})
+}
+
+// pyNoItemOp raises CPython's TypeError for an item write or delete on a value
+// with no such slot. Twin of pyNoItemOp in python-interpreter.abnf, which
+// explains the two spellings of the deletion message.
+func (rt *jsrt) pyNoItemOp(c interface{}, del bool) {
+	tn := pyTypeName(rt, c)
+	if !del {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+tn+"' object does not support item assignment")})
+	}
+	how := "does not"
+	_, isStr := c.(string)
+	_, isSet := pySetElems(c)
+	_, _, isInst := pyInstance(c)
+	if isStr || isSet || isInst {
+		how = "doesn't"
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+tn+"' object "+how+" support item deletion")})
+}
+
 // pyRangeArg is one range() argument: an int (a bool is one), anything else the
 // TypeError CPython raises. Twin of pyListIdx in lib/python-rt.metajs.
 func (rt *jsrt) pyRangeArg(v interface{}) float64 {
@@ -20262,6 +20320,12 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		}
 		if _, isMod := t.props["__pymod"]; isMod {
 			return "module"
+		}
+		// An instance of a user class is a "'C' object" in every message.
+		if _, cls, isInst := pyInstance(t); isInst {
+			if n, has := cls.props["__name"]; has {
+				return rt.toString(n)
+			}
 		}
 		return "object"
 	case *jsGenerator:

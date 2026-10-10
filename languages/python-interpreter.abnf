@@ -2627,27 +2627,53 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A subscript MISS is a catchable exception (`try: d[k] / except KeyError`),
         // not an abort. The KeyError carries the KEY ITSELF, never its repr:
         // CPython's KeyError.__str__ is repr(args[0]).
-        if (isDict(o)) {
+        if (isDict(o) && !isSet(o)) {
             var di = dictFind(o, i)
             if (di < 0) { pyRaise(pyMakeExc("KeyError", [i])) }
             return o.vals[di]
         }
+        // A key is a typed local in MetaJS, so the position gets its own: a bool
+        // key would otherwise pin it to boolean.
         if (typeof o == "string") {
-            if (i < 0) i += o.length
-            if (i < 0 || i >= o.length) { pyRaise(pyMakeExc("IndexError", ["string index out of range"])) }
-            return o.charAt(i)
+            var si = pySeqIdx(o, i)
+            if (si < 0) si += o.length
+            if (si < 0 || si >= o.length) { pyRaise(pyMakeExc("IndexError", ["string index out of range"])) }
+            return o.charAt(si)
         }
         // Subscripting something that is not a sequence, a mapping or a generic
         // alias is CPython's TypeError, not a host crash reading `.length` of
         // undefined (`None[0]`). The test is "has no numeric length" rather than
         // "is not an array", so nothing that indexes successfully can start raising.
-        if (o === null || o === undefined || typeof o.length != "number") {
+        if (o === null || o === undefined || typeof o == "function" || isSet(o) || pyUser(o) || typeof o.length != "number") {
             pyRaise(pyMakeExc("TypeError",
                 ["'" + pyTypeOf(o).__name + "' object is not subscriptable"]))
         }
-        if (i < 0) i += o.length
-        if (i < 0 || i >= o.length) { pyRaise(pyMakeExc("IndexError", ["list index out of range"])) }
-        return o[i]
+        var li = pySeqIdx(o, i)
+        if (li < 0) li += o.length
+        if (li < 0 || li >= o.length) { pyRaise(pyMakeExc("IndexError", ["list index out of range"])) }
+        return o[li]
+    }
+    // The position a list or str subscript names: an int (a bool is one), or
+    // CPython's TypeError naming the key's type. Twin of pySeqIdx in
+    // lib/python-rt.metajs and abnf/jsrt.go.
+    function pySeqIdx(o, i) {
+        if (typeof i == "number") { return i }
+        if (typeof i == "boolean") { return i ? 1 : 0 }
+        var tn = pyTypeOf(i).__name
+        if (tn == "int") { pyListErr("IndexError", "cannot fit 'int' into an index-sized integer") }
+        if (typeof o == "string") { pyListErr("TypeError", "string indices must be integers, not '" + tn + "'") }
+        pyListErr("TypeError", "list indices must be integers or slices, not " + tn)
+        return 0
+    }
+    // CPython's TypeError for an item write or delete on a value that has no
+    // such slot. Deletion says "doesn't" for a type with sequence slots (str,
+    // set, a user class) and "does not" otherwise, as PyObject_DelItem does.
+    // Twin of pyNoItemOp in lib/python-rt.metajs and abnf/jsrt.go.
+    function pyNoItemOp(o, del) {
+        var tn = pyTypeOf(o).__name
+        if (!del) { pyListErr("TypeError", "'" + tn + "' object does not support item assignment") }
+        var seq = typeof o == "string" || isSet(o) || pyUser(o)
+        pyListErr("TypeError", "'" + tn + "' object " + (seq ? "doesn't" : "does not") + " support item deletion")
     }
     // Slicing with Python bounds: open ends, negative wrap around, clamping.
     function pySlice(o, lo, hi) {
@@ -7682,10 +7708,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var si = clsFind(o.__class, "__setitem__")
             if (si != null) { si(o, idx, v); return }
         }
-        if (isDict(o)) { dictSet(o, idx, v); return }
-        if (idx < 0) idx += o.length
-        if (idx < 0 || idx >= o.length) fail("list assignment index out of range")
-        o[idx] = v
+        if (isDict(o) && !isSet(o)) { dictSet(o, idx, v); return }
+        if (!Array.isArray(o)) { pyNoItemOp(o, false) }
+        var pos = pySeqIdx(o, idx)
+        if (pos < 0) pos += o.length
+        if (pos < 0 || pos >= o.length) { pyListErr("IndexError", "list assignment index out of range") }
+        o[pos] = v
     }
     function readRef(ref) {
         if (ref.path.length == 0) { return pyReadName(ref.name) }
@@ -7833,7 +7861,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         var idx = last.idx()
-        if (isDict(o)) {
+        if (pyUser(o)) {
+            var dl = clsFind(o.__class, "__delitem__")
+            if (dl != null) { dl(o, idx); return }
+        }
+        if (isDict(o) && !isSet(o)) {
             var di = dictFind(o, idx)
             if (di < 0) { pyRaise(pyMakeExc("KeyError", [idx])) }
             listRemoveAt(o.keys, di)
@@ -7841,8 +7873,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             o.__idx = null
             return
         }
-        if (idx < 0) { idx += o.length }
-        listRemoveAt(o, idx)
+        if (!Array.isArray(o)) { pyNoItemOp(o, true) }
+        var pos = pySeqIdx(o, idx)
+        if (pos < 0) { pos += o.length }
+        if (pos < 0 || pos >= o.length) { pyListErr("IndexError", "list assignment index out of range") }
+        listRemoveAt(o, pos)
     }
     // Remove one element in place. splice is not available on the frozen engine's
     // arrays and `length` is not assignable there, so the tail shifts down and the

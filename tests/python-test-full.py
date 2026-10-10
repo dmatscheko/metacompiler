@@ -3142,6 +3142,60 @@ def s50():
             msgs.append(type(e).__name__ + ": " + str(e))
     check("rng3", msgs == ["ValueError: range() arg 3 must not be zero", "TypeError: 'float' object cannot be interpreted as an integer"])
 
+# ===== SECTION 51: item assignment and deletion errors are catchable =====
+# Writing, reading or deleting an item of a value with no such slot is CPython's
+# TypeError, a list or str index must be an int, and a user class may define
+# __delitem__.
+def s51():
+    def fn():
+        pass
+    class C:
+        pass
+    class D:
+        def __delitem__(self, k):
+            got.append(k)
+    got = []
+    for v in [None, 5, 2.5, "ab", fn, 1+2j, {1}, C()]:
+        for op in range(3):
+            try:
+                if op == 0:
+                    v[0] = 1
+                elif op == 1:
+                    got.append(v[1])
+                else:
+                    del v[0]
+            except TypeError as e:
+                got.append(str(e))
+    check("item1", got[:6] == ["'NoneType' object does not support item assignment", "'NoneType' object is not subscriptable",
+                               "'NoneType' object does not support item deletion", "'int' object does not support item assignment",
+                               "'int' object is not subscriptable", "'int' object does not support item deletion"])
+    check("item2", got[9:12] == ["'str' object does not support item assignment", "b", "'str' object doesn't support item deletion"])
+    check("item3", got[12:] == ["'function' object does not support item assignment", "'function' object is not subscriptable",
+                                "'function' object does not support item deletion", "'complex' object does not support item assignment",
+                                "'complex' object is not subscriptable", "'complex' object does not support item deletion",
+                                "'set' object does not support item assignment", "'set' object is not subscriptable",
+                                "'set' object doesn't support item deletion", "'C' object does not support item assignment",
+                                "'C' object is not subscriptable", "'C' object doesn't support item deletion"])
+    xs = [1, 2]
+    msgs = []
+    for k in ["a", 1.5, None, 5]:
+        for op in range(3):
+            try:
+                if op == 0:
+                    xs[k] = 0
+                elif op == 1:
+                    msgs.append("ab"[k])
+                else:
+                    del xs[k]
+            except (TypeError, IndexError) as e:
+                msgs.append(str(e))
+    check("item4", msgs[:3] == ["list indices must be integers or slices, not str", "string indices must be integers, not 'str'",
+                                "list indices must be integers or slices, not str"] and msgs[5] == "list indices must be integers or slices, not float")
+    check("item5", msgs[9:] == ["list assignment index out of range", "string index out of range", "list assignment index out of range"])
+    del D()[3]
+    xs[True] = 7
+    check("item6", got[-1] == 3 and xs == [1, 7])
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3194,5 +3248,6 @@ def main():
     s48() # SECTION-CALL 48
     s49() # SECTION-CALL 49
     s50() # SECTION-CALL 50
+    s51() # SECTION-CALL 51
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

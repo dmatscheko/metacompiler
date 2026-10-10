@@ -863,6 +863,9 @@ function pyTypeName(v) {
         if (v["__pysm"] !== undefined) { return "staticmethod" }
         if (v["__pycm"] !== undefined) { return "classmethod" }
         if (v["__pymod"] !== undefined) { return "module" }
+        // An instance of a user class is a "'C' object" in every message.
+        var ic = pyInstClassOf(v)
+        if (ic !== null && ic["__name"] !== undefined) { return pyToStr(ic["__name"]) }
         return "object"
     }
     return "object"
@@ -4573,6 +4576,7 @@ function pyCGenericAlias(origin, param) {
     // Go's switch admits *jsObject / *jsClosure / *hostFunc / *boundMethod;
     // an array is neither (Array.isArray is excluded by pyIsObj).
     if (pyIsDict(origin)) { return undefined }
+    if (pyTypeName(origin) != "type") { return undefined } // Only a type takes parameters.
     var name = pyStr(origin)
     if (isObj && origin["__name"] !== undefined) {
         name = pyToStr(origin["__name"])
@@ -4616,13 +4620,15 @@ function js_pyget(c, k) {
         if (di < 0) { pyRaiseExcV("KeyError", k) }
         return c["vals"][di]
     }
-    var idx = Math.trunc(pyNum(k))
+    var idx = 0
     if (pyIsArr(c)) {
+        idx = pySeqIdx(c, k)
         if (idx < 0) { idx = idx + c.length }
         if (idx < 0 || idx >= c.length) { pyRaiseExc("IndexError", "list index out of range") }
         return c[idx]
     }
     if (typeof c == "string") {
+        idx = pySeqIdx(c, k)
         // Go: rt.strLen / rt.strAt - UTF-16 code units. See the banner.
         var n = c.length
         if (idx < 0) { idx = idx + n }
@@ -4637,6 +4643,34 @@ function js_pyget(c, k) {
     // CPython's TypeError, and CATCHABLE, so `None[0]` runs the except clause.
     pyRaiseExc("TypeError", "'" + pyTypeName(c) + "' object is not subscriptable")
     return undefined
+}
+
+
+// The position a list or str subscript names: an int (a bool is one), or
+// CPython's TypeError naming the key's type. Twin of pySeqIdx in
+// python-interpreter.abnf and abnf/jsrt.go.
+function pySeqIdx(c, k) {
+    if (typeof k == "number") { return k }
+    if (typeof k == "boolean") {
+        if (k) { return 1 }
+        return 0
+    }
+    var tn = pyTypeName(k)
+    if (tn == "int") { pyRaiseExc("IndexError", "cannot fit 'int' into an index-sized integer") }
+    if (typeof c == "string") { pyRaiseExc("TypeError", "string indices must be integers, not '" + tn + "'") }
+    pyRaiseExc("TypeError", "list indices must be integers or slices, not " + tn)
+    return 0
+}
+
+// CPython's TypeError for an item write or delete on a value with no such slot;
+// deletion says "doesn't" for a type with sequence slots. Twin of pyNoItemOp in
+// python-interpreter.abnf, which explains the two spellings.
+function pyNoItemOp(c, del) {
+    var tn = pyTypeName(c)
+    if (!del) { pyRaiseExc("TypeError", "'" + tn + "' object does not support item assignment") }
+    var how = "does not"
+    if (typeof c == "string" || pySetElemsOf(c) !== null || pyInstClassOf(c) !== null) { how = "doesn't" }
+    pyRaiseExc("TypeError", "'" + tn + "' object " + how + " support item deletion")
 }
 
 
@@ -4658,10 +4692,10 @@ function js_pyset(c, k, v) {
         pyDictSet(c, k, v)
         return undefined
     }
-    if (!pyIsArr(c)) { fail("item assignment on a " + typeof c) }
-    var idx = Math.trunc(pyNum(k))
+    if (!pyIsArr(c)) { pyNoItemOp(c, false) }
+    var idx = pySeqIdx(c, k)
     if (idx < 0) { idx = idx + c.length }
-    if (idx < 0 || idx >= c.length) { fail("list assignment index out of range") }
+    if (idx < 0 || idx >= c.length) { pyRaiseExc("IndexError", "list assignment index out of range") }
     c[idx] = v
     return undefined
 }
@@ -5029,6 +5063,16 @@ function js_pyellipsis() {
 // del obj[k]. Unlike js_pyget, whose miss is an rt.fail, this one RAISES a
 // catchable KeyError / IndexError - the Go twin panics with a jsThrown.
 function js_pydel_item(c, k) {
+    var cls = pyInstClassOf(c) // A user class may define __delitem__.
+    if (cls !== null && cls !== undefined) {
+        if (pyLookupHas(cls, "__delitem__")) {
+            var m = pyLookupVal(cls, "__delitem__")
+            if (pyIsCallable(m)) {
+                pyCallSelf(m, c, [k])
+                return undefined
+            }
+        }
+    }
     if (pyIsDict(c)) {
         var keys = c["keys"]
         var vals = c["vals"]
@@ -5038,10 +5082,10 @@ function js_pydel_item(c, k) {
         pyCRemoveAt(vals, i)
         return undefined
     }
-    if (!pyIsArr(c)) { fail("del on a " + typeof c) }
-    var ai = Math.trunc(pyNum(k))
+    if (!pyIsArr(c)) { pyNoItemOp(c, true) }
+    var ai = pySeqIdx(c, k)
     if (ai < 0) { ai = ai + c.length }
-    if (ai < 0 || ai >= c.length) { pyRaiseExc("IndexError", "list index out of range") }
+    if (ai < 0 || ai >= c.length) { pyRaiseExc("IndexError", "list assignment index out of range") }
     pyCRemoveAt(c, ai)
     return undefined
 }
