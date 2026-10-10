@@ -3671,6 +3671,11 @@ func (rt *jsrt) pyString(v interface{}) string {
 		// A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
 		// reads <class 'float'> rather than the default object rendering.
 		if name, ok := rt.pyClassName(t); ok {
+			// A class a `class` statement made carries its defining module in
+			// an own __module__ (<class '__main__.B'>); a builtin has none.
+			if mod, ok := t.props["__module__"].(string); ok {
+				name = mod + "." + name
+			}
 			return "<class '" + name + "'>"
 		}
 		if els, ok := pySetElems(t); ok {
@@ -18270,13 +18275,12 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			return bi.fn
 		}
 	}
-	// DECLINED, and it is worth saying where: __doc__ and __module__ stay
-	// unanswered (an AttributeError, like any other absent attribute). __doc__
-	// needs a def's leading string statement recorded in three engines AND
-	// CPython's own text for every builtin, which this project will never carry;
-	// __module__ needs a builtin-vs-user marker on a CLASS object, and neither
-	// compiled half has one - a builtin exception class is indistinguishable
-	// from a user class here, so 'builtins' could not be told from '__main__'.
+	// DECLINED, and it is worth saying where: __doc__ and a function's
+	// __module__ stay unanswered (an AttributeError, like any other absent
+	// attribute). __doc__ needs a def's leading string statement recorded in
+	// three engines AND CPython's own text for every builtin, which this project
+	// will never carry; a function's __module__ needs the defining module
+	// recorded at every def site.
 	// __qualname__ rides with __name__ everywhere below. It is EXACT for a
 	// module-level def, a lambda, a builtin function and a builtin type, and it
 	// is wrong for exactly one shape: a function read off a class body, where

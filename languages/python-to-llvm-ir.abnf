@@ -3912,6 +3912,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var name = anytype
         var bases = []
         var bodyT = anytype
+        var modName = pyCurMod
         for (var i = 0; i < items.length; i++) {
             if (items[i].cname != undefined) { name = items[i].cname }
             else if (items[i].cbase != undefined) { bases.push(items[i].cbase) }
@@ -3931,6 +3932,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 callExt(b, "js_arr_push", [basesV, rb.v])
             }
             var cls = callExt(b, "js_pyclass_new", [emitStr(b, name), basesV])
+            // CPython seeds the body namespace with __module__, so a body binding
+            // of its own overrides it; pyString prefixes the class repr with it.
+            callExt(b, "js_set", [cls, emitStr(b, "__module__"), emitStr(b, modName)])
             var savedSuperCls = pySuperCls
             var saved = curScopeV
             // A class body is a namespace of its own: what it binds becomes a
@@ -4486,6 +4490,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // directly (flat, no module object), so use the from-import style.
     var importedFiles = {}
     var importDepth = 0
+    // The module whose file is being walked: a class records it as __module__.
+    var pyCurMod = "__main__"
     // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         var rel = path.split(".").join("/")
@@ -4502,7 +4508,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var asg = c.parse(c.agrammar, text, null, file)
             c.pushSource(file, text)
             importDepth = importDepth + 1
+            var outerMod = pyCurMod
+            pyCurMod = i == 0 ? path : path.substring(0, cut)
             c.compile(asg)
+            pyCurMod = outerMod
             importDepth = importDepth - 1
             c.popSource()
             return true

@@ -1197,6 +1197,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v.__pymod != undefined) { return pyBuiltinTypeObj("module") }
         return hostGlobals["object"]
     }
+    // A class's name as its repr shows it: a class a `class` statement made
+    // carries its defining module in an own __module__ (CPython's
+    // <class '__main__.B'>); a builtin type or exception has none and stays
+    // <class 'int'>. Twin of rt.pyClassName in abnf/jsrt.go and pyClassName in
+    // languages/lib/python-rt.metajs.
+    function pyClsQualName(c) {
+        if (hasOwn(c, "__module__") && typeof c.__module__ == "string") { return c.__module__ + "." + c.__name }
+        return c.__name
+    }
     // The last component of a possibly module-qualified type name. Keep in step
     // with pyShortName in languages/lib/python-rt.metajs and pyShortName in
     // abnf/jsrt.go.
@@ -2320,7 +2329,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
         // reads <class 'float'> rather than the default object rendering.
         if (v !== null && v !== undefined && typeof v == "object" && v.__isclass == true) {
-            return "<class '" + v.__name + "'>"
+            return "<class '" + pyClsQualName(v) + "'>"
         }
         // A compiled pattern and a match render the way CPython's repr does.
         if (isPyRe(v)) { return "re.compile(" + prepr(v.pattern) + ")" }
@@ -8142,6 +8151,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sbPop()
         sbName(name)
         var baseArgs = null
+        var modName = pyCurMod
         var bodyT = items[items.length - 1]
         for (var i = 1; i < items.length - 1; i++) {
             if (items[i] != undefined && items[i] != null && items[i].bases != undefined) { baseArgs = items[i].bases }
@@ -8161,7 +8171,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             scopes.push(ns)
             bodyT()
             scopes.pop()
-            var cls = {__isclass: true, __name: name, __bases: bases}
+            var cls = {__isclass: true, __name: name, __bases: bases, __module__: modName}
             clsSetMRO(cls, bases)
             // The __class__ cell, exactly as CPython builds one: the class body's
             // namespace is what every method in it closes over (makeDef captures
@@ -8366,12 +8376,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // asks it, so len.__name__ is 'len' rather than the '<lambda>' fnName
         // answers for a function no `def` ever named. The two tables are keyed
         // by identity, so a user `def len(...)` still answers its own name.
-        // NOT ANSWERED, on purpose: __doc__ and __module__ stay
+        // NOT ANSWERED, on purpose: __doc__ and a function's __module__ stay
         // unanswered (an AttributeError, like any other absent attribute).
         // __doc__ needs a def's leading string statement recorded in three
         // engines AND CPython's own text for every builtin, which this project
-        // will never carry; __module__ needs a builtin-vs-user marker on a CLASS
-        // object, and neither compiled half has one.
+        // will never carry; a function's __module__ needs the defining module
+        // recorded at every def site.
         // __qualname__ rides with __name__ here. It is EXACT for a module-level
         // def, a lambda, a builtin function and a builtin type, and wrong for
         // exactly one shape: a function read off a class body, where CPython
@@ -9164,6 +9174,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // are no-ops. Deviation from real Python: the module's top-level names bind
     // directly (flat, no module object), so use the from-import style.
     var importedFiles = {}
+    // The module whose file is being walked: a class records it as __module__.
+    var pyCurMod = "__main__"
     core.importFile = function(path, pos) {
         var rel = path.split(".").join("/")
         var cands = [rel + ".py"]
@@ -9178,7 +9190,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var text = c.readFile(file)
             var asg = c.parse(c.agrammar, text, null, file)
             c.pushSource(file, text)
+            var outerMod = pyCurMod
+            pyCurMod = i == 0 ? path : path.substring(0, cut)
             c.compile(asg)
+            pyCurMod = outerMod
             c.popSource()
             return true
         }

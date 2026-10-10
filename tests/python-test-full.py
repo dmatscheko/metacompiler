@@ -2973,6 +2973,25 @@ def s43():
         return w43
     check("gsc9", exnonlocal() == 88)
 
+# ===== SECTION 44: a class repr carries its module =====
+# A class a `class` statement makes renders as <class '__main__.B'> and answers
+# __module__; a builtin type or exception stays <class 'int'>.
+class Mod44A:
+    pass
+class Mod44B(Mod44A):
+    pass
+class Mod44E(ValueError):
+    pass
+class Mod44C:
+    __module__ = "elsewhere"
+def s44():
+    check("cmod1", str(Mod44B) == "<class '__main__.Mod44B'>" and repr(Mod44A) == "<class '__main__.Mod44A'>")
+    check("cmod2", str(Mod44B.__mro__[1]) == "<class '__main__.Mod44A'>" and str(Mod44B.__mro__[2]) == "<class 'object'>")
+    check("cmod3", Mod44B.__module__ == "__main__" and Mod44B().__module__ == "__main__")
+    check("cmod4", str(Mod44E) == "<class '__main__.Mod44E'>" and str(ValueError) == "<class 'ValueError'>")
+    check("cmod5", str(type(Mod44B())) == "<class '__main__.Mod44B'>" and str(int) == "<class 'int'>")
+    check("cmod6", str(Mod44C) == "<class 'elsewhere.Mod44C'>" and Mod44C.__name__ == "Mod44C")
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3018,5 +3037,6 @@ def main():
     s41() # SECTION-CALL 41
     s42() # SECTION-CALL 42
     s43() # SECTION-CALL 43
+    s44() # SECTION-CALL 44
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -442,7 +442,11 @@ function pyStr(v) {
     // A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
     // reads <class 'float'>. rt.pyClassName in the Go twin.
     var cn = pyClassName(v)
-    if (cn !== null) { return "<class '" + cn + "'>" }
+    if (cn !== null) {
+        var cmod = v["__module__"]
+        if (typeof cmod == "string") { return "<class '" + cmod + "." + cn + "'>" }
+        return "<class '" + cn + "'>"
+    }
     if (Array.isArray(v)) {
         var out = "["
         for (var i = 0; i < v.length; i++) {
@@ -1071,10 +1075,10 @@ function pyGetAttr(obj, name) {
             }
         }
     }
-    // Not answered: __doc__ and __module__ (an AttributeError, like any other
-    // absent attribute). __doc__ needs a def's leading string statement recorded
-    // in three engines AND CPython's own text for every builtin; __module__ needs
-    // a builtin-vs-user marker on a CLASS object, which neither compiled half has.
+    // Not answered: __doc__ and a function's __module__ (an AttributeError, like
+    // any other absent attribute). __doc__ needs a def's leading string statement
+    // recorded in three engines AND CPython's own text for every builtin; a
+    // function's __module__ needs the defining module recorded at every def site.
     // __qualname__ rides with __name__ below. It is EXACT for a module-level
     // def, a lambda, a builtin function and a builtin type, and wrong for exactly
     // one shape: a function read off a class body, where CPython says 'C.m' and
