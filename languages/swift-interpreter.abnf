@@ -539,18 +539,9 @@ Statement   = AttrDecl
             | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
             | Continue | Fallthrough | Do | Defer | Empty | TupleAssign
-            | TrailCallStmt | ExprStmt ;
+            | ExprStmt ;
 
 AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
-
-// TrailCallStmt: `keep11 { 20 }` - a call of a plain function written with one trailing closure and
-// no parentheses. It is a STATEMENT form rather than an expression form on purpose:
-// as an expression, `cond { ... }` would swallow the block of `if cond { ... }`, and
-// PEG never goes back to re-read the condition. Every keyword-led statement is
-// matched before this rule, so only a bare `name { ... }` reaches it.
-TrailCallStmt <~~ push(exprToStmt(pop())) ~~> = TrailCall [ ";" ] ;
-TrailCall   <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> TrailArg { LabTrail } ;
 
 // A loop (or switch) label: `outer: for ... { ... break outer }`. It is part of the
 // loop production rather than a statement of its own, so the builder sees its own
@@ -1034,7 +1025,7 @@ NoSpaceParen = :script(~~
 MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
             | NoTrailCtx TrailArg { LabTrail } ;
 // A zero-width guard that FAILS when the `{` ahead is the BODY of an
-// if / while / switch / for / guard rather than a trailing closure. Swift resolves
+// if / while / switch / for / guard / catch rather than a trailing closure. Swift resolves
 // this ambiguity with a parser flag ("no trailing closure in a condition"); a guard
 // here has to re-derive the same answer from (source, position) alone, so it walks
 // BACKWARDS to the start of the enclosing statement - tracking bracket depth, and
@@ -1048,6 +1039,13 @@ NoTrailCtx  = :script(~~
         var ch = c.peek(j)
         while (ch === 32 || ch === 9 || ch === 10 || ch === 13) { j++; ch = c.peek(j) }
         if (ch !== 123) { return undefined }
+        // `var w = v { didSet { ... } }`: the braces are the property's observers.
+        var oj = j + 1
+        var oc = c.peek(oj)
+        while (oc === 32 || oc === 9 || oc === 10 || oc === 13) { oj++; oc = c.peek(oj) }
+        var ow = ""
+        while ((oc >= 97 && oc <= 122) || (oc >= 65 && oc <= 90)) { ow = ow + String.fromCharCode(oc); oj++; oc = c.peek(oj) }
+        if (ow === "willSet" || ow === "didSet") { return abnf.newToken("\x01property-observers", 0) }
         var depth = 0
         var i = -1
         var steps = 0
@@ -1083,7 +1081,8 @@ NoTrailCtx  = :script(~~
             }
             if (w !== "else") { break }
         }
-        if (w === "if" || w === "while" || w === "switch" || w === "for" || w === "guard") {
+        if (w === "if" || w === "while" || w === "switch" || w === "for" || w === "guard"
+            || w === "catch" || w === "do") {
             return abnf.newToken("\x01trailing-closure-in-condition", 0)
         }
         return undefined
@@ -1118,7 +1117,7 @@ InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | ArrayTypeLit | DictLit | ArrayLit
-            | Shorthand | MultiTrail | Call | VarRef ;
+            | Shorthand | TrailCall | Call | VarRef ;
 
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
@@ -1222,9 +1221,7 @@ CapMode     = ( "weak" | "unowned" ) KwEnd ;
 LamStmt     = LamCtrl | LamExpr ;
 // A closure body is an ordinary body: every statement form except the bare
 // expression (which LamExpr takes, so that the closure's VALUE is its last
-// expression) belongs here. TrailCallStmt is deliberately absent - `g { 1 }` is
-// already an expression through MultiTrail, and as a statement it would stop being
-// the closure's result.
+// expression) belongs here, which includes `g { 1 }` (TrailCall).
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = AttrDecl | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
@@ -1253,11 +1250,11 @@ TypeLitDict <~~ push({dictty: 1}) ~~> = ":" Type ;
 // f(args): a global function or a struct/class constructor (calls init).
 Call        <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
-// f { ... } label: { ... }: a call written with two or more trailing closures and no
-// parentheses. Only the MULTI-closure form is accepted without parentheses - a bare
-// `name { ... }` would make `if cond { ... }` parse as a call of cond.
-MultiTrail  <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> TrailArg LabTrail { LabTrail } ;
+// f { ... } label: { ... }: a call written with only trailing closures, in any
+// expression position (`return filter { $0 > 1 }`). NoTrailCtx is what keeps
+// `if cond { ... }` from reading as a call of cond.
+TrailCall   <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> NoTrailCtx TrailArg { LabTrail } ;
 
 // String interpolation: "sum = \(a + b)".
 Template    <~~ push(makeTemplate(takeAll())) ~~>

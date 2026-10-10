@@ -2553,6 +2553,28 @@ func s42() {
     check("42c", o!.shout == "k!" && use42(K42(), K42()) == "k!|own|K req")
 }
 
+// ===== SECTION 43: a call written with only a trailing closure, as an expression =====
+// `name { ... }` is a call in every expression position: a return value, an
+// initializer, an argument, and the implicit-self member call inside an extension.
+// `if`/`while`/`guard`/`switch`/`for`/`catch` braces and `didSet` observer braces
+// are never a trailing closure. Every value is swiftc 6.1.2's.
+extension Array where Element == Int {
+    func big43() -> [Int] { return filter { $0 > 1 } }
+    func dbl43() -> [Int] { map { $0 * 2 } }
+}
+func apply43(_ f: () -> Int) -> Int { return f() }
+func ret43() -> Int { return apply43 { 8 } }
+func s43() {
+    let v = apply43 { 7 }
+    check("43a", v == 7 && ret43() == 8 && apply43 { 2 } + 1 == 3)
+    check("43b", [1, 2, 3].big43() == [2, 3] && [1, 2].dbl43() == [2, 4])
+    var hits = 0
+    let ok = v == 7
+    if ok { hits += 1 }
+    while hits < 3 { hits += 1 }
+    check("43c", hits == 3 && [apply43 { 4 }, apply43 { 5 }] == [4, 5])
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2598,6 +2620,7 @@ func main() {
     s40() // SECTION-CALL 40
     s41() // SECTION-CALL 41
     s42() // SECTION-CALL 42
+    s43() // SECTION-CALL 43
     print("full: \(checks) checks, \(fails) failures")
 }
 
