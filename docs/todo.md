@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-300** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-303** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,23 +66,23 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-290 python: `sorted`/`min`/`max` with `key=` / `reverse=` · P1 · PY · OPEN [V]
+### T-290 python: `sorted`/`min`/`max` with `key=` / `reverse=` · P1 · PY · IN PROGRESS (PY worker, round 5) [V]
 Interpreter ignores the keyword (`sorted([3,1,2], key=lambda x:-x)` gives `[1, 2, 3]`);
 compiled halves abort "sorted(): key= and reverse= are not supported". CPython
 `[3, 2, 1]`; `max([1,2], key=lambda x:-x)` is 1. Also list.sort(key=, reverse=).
 
-### T-291 python: `sum()` of floats, `math.cbrt`, `int(x, base=)` keywords · P1 · PY · OPEN [V]
+### T-291 python: `sum()` of floats, `math.cbrt`, `int(x, base=)` keywords · P1 · PY · IN PROGRESS (PY worker, round 5) [V]
 `sum([0.1]*10)` is 0.9999999999999999 in all engines; CPython 3.12+ uses Neumaier
 compensated summation: 1.0. `math.cbrt` missing (AttributeError). `int("10", base=2)`
 drops the keyword (and other conversion builtins' keywords).
 
-### T-292 python: unpacking with the wrong count · P1 · PY · OPEN [V]
+### T-292 python: unpacking with the wrong count · P1 · PY · IN PROGRESS (PY worker, round 5) [V]
 `a, b = [1, 2, 3]`: compiled halves do not check; the interpreter aborts
 uncatchably "ValueError: cannot unpack 3 values into 2 targets". CPython catchable
 `too many values to unpack (expected 2, got 3)` / `not enough values to unpack
 (expected 2, got 1)`.
 
-### T-294 python: subclasses of builtins; `bytes.decode` · P2 · PY · OPEN [V]
+### T-294 python: subclasses of builtins; `bytes.decode` · P2 · PY · IN PROGRESS (PY worker, round 5) [V]
 `class S(str)` / `class L(list)` / `class I(int)`: `len(S("ab"))` aborts, `s.upper()`
 AttributeError. `bytes.decode()` is "unknown list method" (bytes are lists - value
 model, see T-170/T-259).
@@ -268,24 +268,17 @@ One line in goConvFail; gofmt it.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-269 swift: a top-level observed var does not fire · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
-`var w = 0 { didSet { print("set", w) } }; w = 3`: swiftc `set 3`; all engines print
-nothing.
+### T-300 swift: unqualified `.none` builds an enum case · P1 · SW · OPEN [V]
+`let n: Int? = .none; print(n == nil)`: swiftc `true`, ours `false`. Fix needs to know
+no user enum declares `none` (or resolve by the declared Optional type).
 
-### T-270 swift: generic-argument call syntax · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
-`Optional<Int>(5)` - the interpreter reads a comparison and prints `false`, the
-compiler "variable not defined" / no parse; `Array<Int>()`, `Dictionary<String,
-Int>()`, `Set<Int>()`. swiftc `5`, `0`.
+### T-301 swift: in-place mutation of an observed variable does not fire didSet · P1 · SW · OPEN [V]
+`var a = [1] { didSet { print("d", a.count) } }; a.append(2); a[0] = 5`: swiftc
+prints `d 2` twice; we print nothing. Only `=` and compound assignment are observed.
 
-### T-271 swift: missing String/Array/Dictionary members · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
-All engines abort: String `split(separator:)`, `firstIndex(of:)`/`firstIndex(where:)`,
-`.utf8`/`.unicodeScalars`/`.lazy` (`.count`), `Character("b")`, `Set(s)`; Array
-`split`, `starts(with:)`, `elementsEqual`, `drop(while:)`; Dictionary `mapValues`;
-`s.description` is nil. `[3,1,2].prefix(while: { $0 > 2 })` gives `[]` in the
-interpreter and llvm.Run (swiftc `[3]`).
-
-### T-272 swift: an untyped closure parameter is not inferred from the return type · P2 · SW · IN PROGRESS (SW worker, round 4) [V]
-`{ x -> Double in x / 2 }(3)` gives 1.0, swiftc 1.5. All engines.
+### T-302 swift: `print(x as Any)` on an Optional; nested Unicode.Scalar · P2 · SW · OPEN [V]
+`print(Optional(7) as Any)` prints `7` (swiftc `Optional(7)`: the Optional-box
+limit); a Unicode.Scalar in a collection prints `"é"` (swiftc `"\u{00E9}"`).
 
 ---
 
@@ -602,6 +595,10 @@ T-251 js: `Math.hasOwnProperty("abs")` — DONE ab15b93
 T-252 js: a class-instance iterator's `return()` is not called compiled — DONE 02cb79d
 T-253 ts: `delete (Math as any).sqrt` aborts in the interpreter — DONE b1b9f75
 T-254 js: "is not a function" for a comma/arrow callee — DONE 4cfd788 (ASI-separated and keyword-statement bodies declined)
+T-269 swift: a top-level observed var does not fire — DONE 7425564
+T-270 swift: generic-argument call syntax — DONE 6e99635 (with a Set type in all engines)
+T-271 swift: missing String/Array/Dictionary members — DONE c54bba9 (String.Index prints as an Int offset; no ArraySlice type)
+T-272 swift: an untyped closure parameter is not inferred from the return type — DONE 33151d0
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
