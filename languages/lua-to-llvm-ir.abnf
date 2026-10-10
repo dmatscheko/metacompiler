@@ -163,19 +163,22 @@ ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in))
 ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
+            = KwIf Cond KwThen Block { ElseIf } [ Else ] KwEndKw ;
 ElseIf      <~~ push(makeElseIf(pop(), pop())) ~~>
-            = KwElseif Expression KwThen Block ;
+            = KwElseif Cond KwThen Block ;
 Else        <~~ push(makeElse(pop())) ~~>
             = KwElse Block ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile Expression KwDo Block KwEndKw ;
+            = KwWhile Cond KwDo Block KwEndKw ;
+// A condition reads ONE value: a call's first result (luaTrunc).
+Cond        <~~ push(luaTrunc(pop(), luaOpnd(up.in))) ~~>
+            = Expression ;
 
 // repeat ... until cond: the body runs at least once and repeats while cond is false;
 // unlike while, the condition sees the locals declared in the body (same scope).
 Repeat      <~~ var cond = pop(); var block = pop(); push(makeRepeat(block, cond)) ~~>
-            = KwRepeat Block KwUntil Expression ;
+            = KwRepeat Block KwUntil Cond ;
 
 // for i = start, limit [, step] do ... end. The loop variable is local to the loop.
 NumFor      <~~ push(makeNumFor(takeAll())) ~~>
@@ -259,50 +262,50 @@ ExprList    = Expression { "," Expression } ;
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = OrExpr ;
 
-OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
-            = AndExpr { KwOr AndExpr } ;
-AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = CmpExpr { KwAnd CmpExpr } ;
+OrExpr      <~~ push(luaOrAnd(takeAll(), true)) ~~>
+            = AndExpr <~~ push(luaOpnd(up.in)) ~~> { KwOr AndExpr <~~ push(luaOpnd(up.in)) ~~> } ;
+AndExpr     <~~ push(luaOrAnd(takeAll(), false)) ~~>
+            = CmpExpr <~~ push(luaOpnd(up.in)) ~~> { KwAnd CmpExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 CmpExpr     <~~ push(foldBinary(luaPosCmp(takeAll(), up.pos))) ~~>
-            = BOrExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BOrExpr } ;
+            = BOrExpr <~~ push(luaOpnd(up.in)) ~~> { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BOrExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 // The bitwise operators of Lua 5.3+, one precedence level each. Twin of BOrExpr in
 // lua-interpreter.abnf; see there.
 BOrExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = BXorExpr { "|" <~~ push(luaOpTok(up.in, up.pos)) ~~> BXorExpr } ;
+            = BXorExpr <~~ push(luaOpnd(up.in)) ~~> { "|" <~~ push(luaOpTok(up.in, up.pos)) ~~> BXorExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 BXorExpr    <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = BAndExpr { ( "~" !"=" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BAndExpr } ;
+            = BAndExpr <~~ push(luaOpnd(up.in)) ~~> { ( "~" !"=" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BAndExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 BAndExpr    <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = ShiftExpr { "&" <~~ push(luaOpTok(up.in, up.pos)) ~~> ShiftExpr } ;
+            = ShiftExpr <~~ push(luaOpnd(up.in)) ~~> { "&" <~~ push(luaOpTok(up.in, up.pos)) ~~> ShiftExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 ShiftExpr   <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = ConcatExpr { ( "<<" | ">>" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> ConcatExpr } ;
+            = ConcatExpr <~~ push(luaOpnd(up.in)) ~~> { ( "<<" | ">>" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> ConcatExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 // Concatenation is right associative, so it recurses on its own right hand side.
 ConcatExpr  <~~ push(makeConcat(luaPosPair(takeAll()))) ~~>
-            = AddExpr [ ".." <~~ push(luaOpPos(up.pos)) ~~> ConcatExpr ] ;
+            = AddExpr <~~ push(luaOpnd(up.in)) ~~> [ ".." <~~ push(luaOpPos(up.pos)) ~~> ConcatExpr <~~ push(luaOpnd(up.in)) ~~> ] ;
 
 AddExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> MulExpr } ;
+            = MulExpr <~~ push(luaOpnd(up.in)) ~~> { ( "+" | "-" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> MulExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 // The floor division // must be tried before the true division /.
 MulExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = UnaryExpr { ( "*" | "//" | "/" | "%" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> UnaryExpr } ;
+            = UnaryExpr <~~ push(luaOpnd(up.in)) ~~> { ( "*" | "//" | "/" | "%" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 UnaryExpr   = NotExpr | LenExpr | NegExpr | BNotExpr | PowExpr ;
-NotExpr     <~~ push(makeNot(pop())) ~~>
-            = KwNot UnaryExpr ;
-LenExpr     <~~ var t = pop(); push(makeLen(luaPosArg(t, pop()))) ~~>
-            = "#" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
-NegExpr     <~~ var t = pop(); push(makeNeg(luaPosArg(t, pop()))) ~~>
-            = "-" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
+NotExpr     <~~ var o = pop(); push(makeNot(luaTrunc(pop(), o))) ~~>
+            = KwNot UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
+LenExpr     <~~ var o = pop(); var t = pop(); push(makeLen(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+            = "#" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
+NegExpr     <~~ var o = pop(); var t = pop(); push(makeNeg(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+            = "-" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
 // Unary bitwise not ~x (Lua 5.3+), guarded against '~=': the 64-bit complement.
-BNotExpr    <~~ var t = pop(); push(makeBNot(luaPosArg(t, pop()))) ~~>
-            = ( "~" !"=" ) <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
+BNotExpr    <~~ var o = pop(); var t = pop(); push(makeBNot(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+            = ( "~" !"=" ) <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
 // Exponentiation a ^ b: right associative (its right operand is a UnaryExpr, which
 // descends into PowExpr again) and binding tighter than the unary operators, so -2^2
 // is -(2^2) and 2^-1 is legal. The result is always a float, like in Lua.
 PowExpr     <~~ push(makePow(luaPosPair(takeAll()))) ~~>
-            = SuffixedExpr [ "^" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ] ;
+            = SuffixedExpr <~~ push(luaOpnd(up.in)) ~~> [ "^" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll(), up.in)) ~~>
@@ -324,7 +327,7 @@ MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, at: 
 MethodName  <~~ push({mname: up.in}) ~~>
             = Id ;
 DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+IndexSfx    <~~ push({kind:"index", idx: pop(), src: up.in}) ~~>
             = "[" Expression "]" ;
 
 Primary     = ParenExpr | FuncExpr | TableLit | LongString | VarargExpr
@@ -845,20 +848,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return f
     }
     function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
-    var luaFnArity = {lua_catstr: 1, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
+    var luaFnArity = {lua_catstr: 2, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
                       lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
                       lua_tail: 2, lua_shift: 3, lua_strall: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
                       lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1,
-                      lua_argerr: 3, lua_argmsg: 2, lua_needany: 3, lua_needtab: 2}
+                      lua_argerr: 3, lua_argmsg: 2, lua_needany: 3, lua_needtab: 2, lua_opmsg: 2}
     // Inside a helper the tested value is already a real boolean, so the plain host test
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
     function luaFnBody(name, b, ps) {
         if (name == "lua_catstr") {
             // A concatenation operand: a string as it is, a number as tostring
-            // renders it, anything else a Lua error. Twin of luaCatStr in
-            // lua-interpreter.abnf.
+            // renders it, anything else a Lua error naming the operand (p1, which
+            // one). Twin of luaCatStr in lua-interpreter.abnf.
             var isStrB = curF.NewBlock("")
             var notStrB = curF.NewBlock("")
             var numB = curF.NewBlock("")
@@ -867,9 +870,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             isStrB.NewRet(ps[0])
             notStrB.NewCondBr(rawTruthy(notStrB, callLua(notStrB, "lua_isnum", [ps[0]])), numB, badB)
             numB.NewRet(callExt(numB, "js_lustr", [ps[0]]))
-            callLua(badB, "lua_raise", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to concatenate a "),
-                callExt(badB, "js_lutname", [ps[0]])]), emitStr(badB, " value")])])
-            badB.NewRet(hUndef)
+            var catMk = luaMarker(badB, callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to concatenate a "),
+                callExt(badB, "js_lutname", [ps[0]])]), emitStr(badB, " value")]))
+            callExt(badB, "js_set", [catMk, emitStr(badB, "__luop"), ps[1]])
+            badB.NewRet(callExt(badB, "js_throw", [catMk]))
             return
         }
         if (name == "lua_where") {
@@ -959,7 +963,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var msgV = callExt(objB, "js_get", [ps[0], emitStr(objB, "__luerr")])
             objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_sne", [msgV, hUndef])), markB, asIsB)
             markB.NewRet(callExt(markB, "js_add", [callLua(markB, "lua_where", [markB.NewLoad(i64, gLuaPos)]),
-                                                   callLua(markB, "lua_argmsg", [ps[0], msgV])]))
+                callLua(markB, "lua_opmsg", [ps[0], callLua(markB, "lua_argmsg", [ps[0], msgV])])]))
             asIsB.NewRet(ps[0])
             return
         }
@@ -982,16 +986,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             argB.NewCondBr(argB.NewICmp(llvm.enum.IPredEQ, code, handle(0)), plainB, namedB)
             var nameV = namedB.NewCall(luaCallNameFn(), [namedB.NewLShr(code, handle(1))])
             var detail = callExt(namedB, "js_get", [ps[0], emitStr(namedB, "__lumsg")])
-            namedB.NewCondBr(namedB.NewICmp(llvm.enum.IPredNE, namedB.NewAnd(code, handle(1)), handle(0)), methB, fmtB)
+            var hasNameB = curF.NewBlock("")
+            namedB.NewCondBr(rawTruthy(namedB, callExt(namedB, "js_seq", [nameV, emitStr(namedB, "")])), plainB, hasNameB)
+            hasNameB.NewCondBr(hasNameB.NewICmp(llvm.enum.IPredNE, hasNameB.NewAnd(code, handle(1)), handle(0)), methB, fmtB)
             var selfN = callExt(methB, "js_sub", [argV, emitNum(methB, 1)])
             methB.NewCondBr(rawTruthy(methB, callExt(methB, "js_seq", [selfN, emitNum(methB, 0)])), selfB, fmtB)
             selfB.NewRet(callExt(selfB, "js_add", [callExt(selfB, "js_add", [callExt(selfB, "js_add", [callExt(selfB, "js_add",
                 [emitStr(selfB, "calling '"), nameV]), emitStr(selfB, "' on bad self (")]), detail]), emitStr(selfB, ")")]))
-            var nV = fmtB.NewPhi([llvm.ir.NewIncoming(argV, namedB), llvm.ir.NewIncoming(selfN, methB)])
+            var nV = fmtB.NewPhi([llvm.ir.NewIncoming(argV, hasNameB), llvm.ir.NewIncoming(selfN, methB)])
             var txt = callExt(fmtB, "js_add", [emitStr(fmtB, "bad argument #"), nV])
             txt = callExt(fmtB, "js_add", [callExt(fmtB, "js_add", [txt, emitStr(fmtB, " to '")]), nameV])
             txt = callExt(fmtB, "js_add", [callExt(fmtB, "js_add", [txt, emitStr(fmtB, "' (")]), detail])
             fmtB.NewRet(callExt(fmtB, "js_add", [txt, emitStr(fmtB, ")")]))
+            return
+        }
+        if (name == "lua_opmsg") {
+            // An operation's error ({__luop}: which operand) names that operand when
+            // the running site (lua.opsite) has a name for it - after the message,
+            // or after "number" in lua's luaG_tointerror wording.
+            var opV = callExt(b, "js_get", [ps[0], emitStr(b, "__luop")])
+            var asIsB = curF.NewBlock("")
+            var siteB = curF.NewBlock("")
+            var namedB = curF.NewBlock("")
+            var intB = curF.NewBlock("")
+            var tailB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [opV, hUndef])), asIsB, siteB)
+            asIsB.NewRet(ps[1])
+            var site = siteB.NewLoad(i64, gLuaOpSite)
+            siteB.NewCondBr(siteB.NewICmp(llvm.enum.IPredEQ, site, handle(0)), asIsB, namedB)
+            var second = rawTruthy(namedB, callExt(namedB, "js_seq", [opV, emitNum(namedB, 2)]))
+            var slot = namedB.NewAdd(namedB.NewMul(namedB.NewSub(site, handle(1)), handle(2)),
+                                     namedB.NewSelect(second, handle(1), handle(0)))
+            var sfx = namedB.NewCall(luaOpDescFn(), [slot])
+            namedB.NewCondBr(rawTruthy(namedB, callExt(namedB, "js_seq", [ps[1], emitStr(namedB, "number has no integer representation")])), intB, tailB)
+            intB.NewRet(callExt(intB, "js_add", [callExt(intB, "js_add", [emitStr(intB, "number"), sfx]), emitStr(intB, " has no integer representation")]))
+            tailB.NewRet(callExt(tailB, "js_add", [ps[1], sfx]))
             return
         }
         if (name == "lua_needany") {
@@ -1308,45 +1337,67 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gLuaCsp = m.NewGlobalDef("lua.csp", handle(0))
     // 1 between a tail call's js_call and the callee's luaEnter.
     var gLuaTail = m.NewGlobalDef("lua.tail", handle(0))
-    // The function name the running call site spelled (luaCalleeNames), which an
-    // argument error reports: 2*k, plus 1 for a method call, with k indexing
-    // luaCallNames from 1; 0 for a call the library makes itself (pcall's).
+    // The running call site: the function name it spelled (luaCalleeNames), which
+    // an argument error reports, and the name of the called expression, which a
+    // call error appends ("(global 'f')"). 2*k, plus 1 for a method call, with k
+    // indexing luaCallNames / luaCallDescs from 1; 0 for a call the library makes
+    // itself (pcall's).
     var gLuaCallee = m.NewGlobalDef("lua.callee", handle(0))
     // The empty multi-value a function that runs off its end returns; nothing
     // writes into a multi-value's array, so one serves every such return.
     var gLuaNone = m.NewGlobalDef("lua.none", handle(0))
     var luaCallNames = []
-    function luaCalleeCode(nm) {
-        if (nm === null) { return 0 }
+    var luaCallDescs = []
+    function luaCalleeCode(nm, dtext) {
+        var n = nm === null ? "" : nm.n
+        if (n == "" && dtext == "") { return 0 }
         var k = 0
-        for (var i = 0; i < luaCallNames.length; i++) { if (luaCallNames[i] == nm.n) { k = i + 1 } }
+        for (var i = 0; i < luaCallNames.length; i++) { if (luaCallNames[i] == n && luaCallDescs[i] == dtext) { k = i + 1 } }
         if (k == 0) {
-            luaCallNames.push(nm.n)
+            luaCallNames.push(n)
+            luaCallDescs.push(dtext)
             k = luaCallNames.length
         }
-        return k * 2 + (nm.m ? 1 : 0)
+        return k * 2 + (nm !== null && nm.m ? 1 : 0)
     }
-    // lua_callname(k): the k-th name as a string. Its body is written once the whole
-    // program is emitted (finishCallNames), when every call site has been seen.
+    // String tables an error path reads by index - lua_callname(k), lua_calldesc(k)
+    // and lua_opdesc(i) - written once the whole program is emitted
+    // (finishStrTables), when every site has been seen.
     var luaCallNameF = null
+    var luaCallDescF = null
+    var luaOpDescF = null
+    function luaStrFn(name) { return m.NewFunc(name, i64, [llvm.ir.NewParam("k", i64)]) }
     function luaCallNameFn() {
-        if (luaCallNameF === null) { luaCallNameF = m.NewFunc("lua_callname", i64, [llvm.ir.NewParam("k", i64)]) }
+        if (luaCallNameF === null) { luaCallNameF = luaStrFn("lua_callname") }
         return luaCallNameF
     }
-    function finishCallNames() {
-        if (luaCallNameF === null) { return }
+    function luaCallDescFn() {
+        if (luaCallDescF === null) { luaCallDescF = luaStrFn("lua_calldesc") }
+        return luaCallDescF
+    }
+    function luaOpDescFn() {
+        if (luaOpDescF === null) { luaOpDescF = luaStrFn("lua_opdesc") }
+        return luaOpDescF
+    }
+    // f(k) answers list[k - base], "" past either end.
+    function fillStrTable(f, list, base) {
         var savedF = curF
-        curF = luaCallNameF
-        var cur = luaCallNameF.NewBlock("entry")
-        for (var i = 0; i < luaCallNames.length; i++) {
+        curF = f
+        var cur = f.NewBlock("entry")
+        for (var i = 0; i < list.length; i++) {
             var hitB = curF.NewBlock("")
             var nextB = curF.NewBlock("")
-            cur.NewCondBr(cur.NewICmp(llvm.enum.IPredEQ, luaCallNameF.Params[0], handle(i + 1)), hitB, nextB)
-            hitB.NewRet(emitStr(hitB, luaCallNames[i]))
+            cur.NewCondBr(cur.NewICmp(llvm.enum.IPredEQ, f.Params[0], handle(i + base)), hitB, nextB)
+            hitB.NewRet(emitStr(hitB, list[i]))
             cur = nextB
         }
-        cur.NewRet(emitStr(cur, "?"))
+        cur.NewRet(emitStr(cur, ""))
         curF = savedF
+    }
+    function finishStrTables() {
+        if (luaCallNameF !== null) { fillStrTable(luaCallNameF, luaCallNames, 1) }
+        if (luaCallDescF !== null) { fillStrTable(luaCallDescF, luaCallDescs, 1) }
+        if (luaOpDescF !== null) { fillStrTable(luaOpDescF, luaOpSites, 0) }
     }
     // The chunk names a position's file number indexes (luaO_chunkid of each file).
     var luaFiles = []
@@ -1357,6 +1408,167 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         luaFiles.push(id)
         return luaFiles.length - 1
     }
+    // ----- Operand names (lua's varinfo) -----
+    // An error about a value names the expression it came from when that is a
+    // variable or a field: "attempt to index a nil value (local 't')". A descriptor
+    // is false (no name: it travels the tag stack, where a null would end takeAll),
+    // {k: "var", n} - local, upvalue or global, decided where the operation runs
+    // (luaVarKind) - or {k: "field" | "method", n}. luaOpnd reads one from an
+    // operand's source text, luaPrefixDescs from a suffix chain. Twin of the same
+    // helpers in lua-interpreter.abnf.
+    function luaIsIdStart(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 }
+    function luaIsIdChar(c) { return luaIsIdStart(c) || (c >= 48 && c <= 57) }
+    // The field an index step `[e]` (its source, brackets included) reads: a string
+    // constant's text, "integer index" for an integer constant up to 255 (lua's
+    // GETI), "?" for anything else.
+    function luaIndexDesc(src) {
+        var inner = src.substring(1, src.length - 1)
+        var q = inner.length > 1 ? inner.charAt(0) : ""
+        if ((q == "\"" || q == "'") && inner.charAt(inner.length - 1) == q) {
+            var body = inner.substring(1, inner.length - 1)
+            if (body.indexOf("\\") < 0 && body.indexOf(q) < 0) { return {k: "field", n: body} }
+        }
+        var v = 0
+        var digits = inner.length > 0 && inner.length <= 3
+        for (var i = 0; i < inner.length; i++) {
+            var c = inner.charCodeAt(i)
+            if (c < 48 || c > 57) { digits = false } else { v = v * 10 + (c - 48) }
+        }
+        if (digits && v <= 255) { return {k: "field", n: "integer index"} }
+        return {k: "field", n: "?"}
+    }
+    // The '[' opening the index that ends `text`, or -1.
+    function luaBracketOpen(text) {
+        var depth = 0
+        var i = text.length - 1
+        while (i >= 0) {
+            var c = text.charCodeAt(i)
+            if (c === 93) { depth = depth + 1 }
+            else if (c === 91) {
+                depth = depth - 1
+                if (depth === 0) { return i }
+            }
+            i = i - 1
+        }
+        return 0 - 1
+    }
+    function luaVarDesc(name) {
+        if (name === null || name == "nil" || name == "true" || name == "false") { return false }
+        return {k: "var", n: name}
+    }
+    // What an operator needs to know of an operand, from its source text: its
+    // descriptor `d`, and `mv` - whether it may be a call, i.e. several values, of
+    // which an operator reads the first (luaTrunc).
+    function luaOpnd(text) { return {d: luaOpndDesc(text), mv: luaMayMulti(text)} }
+    function luaMayMulti(text) {
+        var n = text.length
+        if (text == "...") { return true }
+        if (n == 0) { return false }
+        var c = text.charCodeAt(n - 1)
+        if (c === 41 || c === 34 || c === 39 || c === 125) { return true }
+        return c === 93 && n > 1 && (text.charCodeAt(n - 2) === 93 || text.charCodeAt(n - 2) === 61)
+    }
+    // The descriptor of an operand: the variable it is, or the field its last
+    // step reads.
+    function luaOpndDesc(text) {
+        var n = text.length
+        if (n == 0) { return false }
+        if (luaLeadName(text) === text) { return luaVarDesc(text) }
+        if (text.charCodeAt(n - 1) === 93) {
+            var open = luaBracketOpen(text)
+            if (open < 1) { return false }
+            return luaIndexDesc(text.substring(open, n))
+        }
+        var i = n
+        while (i > 0 && luaIsIdChar(text.charCodeAt(i - 1))) { i = i - 1 }
+        if (i < n && i >= 2 && luaIsIdStart(text.charCodeAt(i)) && text.charCodeAt(i - 1) === 46
+            && text.charCodeAt(i - 2) !== 46) {
+            return {k: "field", n: text.substring(i)}
+        }
+        return false
+    }
+    // The descriptor of a suffix chain's primary, from the chain's text: its
+    // variable, or what a parenthesized expression names - (t.a).b reads field 'a'.
+    function luaChainFirst(text) {
+        var lead = luaLeadName(text)
+        if (lead !== null) { return luaVarDesc(lead) }
+        if (text.length == 0 || text.charCodeAt(0) !== 40) { return false }
+        var depth = 0
+        for (var i = 0; i < text.length; i++) {
+            var c = text.charCodeAt(i)
+            if (c === 40) { depth = depth + 1 }
+            else if (c === 41) {
+                depth = depth - 1
+                if (depth === 0) { return luaOpndDesc(text.substring(1, i)) }
+            }
+        }
+        return false
+    }
+    // The descriptor of the value each step of a suffix chain works on: the chain's
+    // primary (`first`, a descriptor) before the first step, then whatever the
+    // previous step read.
+    function luaPrefixDescs(first, suffixes) {
+        var out = []
+        var d = anytype
+        d = first
+        for (var i = 0; i < suffixes.length; i++) {
+            out.push(d)
+            var st = suffixes[i]
+            if (st.kind == "field") { d = {k: "field", n: st.name} }
+            else if (st.kind == "index") { d = luaIndexDesc(st.src) }
+            else { d = false }
+        }
+        return out
+    }
+    // The names the emitter has declared so far, innermost scope last; a scope with
+    // fn set is a function's outermost one, so a name found past it is an upvalue.
+    // Blocks (makeSeq), functions (emitFunction) and the loops' own variables push
+    // one; makeLocal / makeLocalFunc declare into the innermost.
+    var luaDeclNames = [[]]
+    var luaDeclFn = [true]
+    function luaDeclPush(isFn) {
+        luaDeclNames.push([])
+        luaDeclFn.push(isFn)
+    }
+    function luaDeclPop() {
+        luaDeclNames.pop()
+        luaDeclFn.pop()
+    }
+    function luaDeclare(name) {
+        var top = luaDeclNames[luaDeclNames.length - 1]
+        top.push(name)
+        luaDeclNames[luaDeclNames.length - 1] = top
+    }
+    function luaVarKind(name) {
+        var crossed = false
+        for (var i = luaDeclNames.length - 1; i >= 0; i--) {
+            var names = luaDeclNames[i]
+            for (var j = 0; j < names.length; j++) { if (names[j] == name) { return crossed ? "upvalue" : "local" } }
+            if (luaDeclFn[i]) { crossed = true }
+        }
+        return "global"
+    }
+    // A descriptor as the text an error message appends, resolved where it is emitted.
+    function luaDescText(d) {
+        if (!d) { return "" }
+        var k = d.k == "var" ? luaVarKind(d.n) : d.k
+        return " (" + k + " '" + d.n + "')"
+    }
+    // The operand names of the operation running, for an error its extern raises
+    // (whose marker's __luop says which operand): lua.opsite is k, indexing pairs of
+    // texts in luaOpSites from 1 (lua_opdesc); 0 when neither operand has a name.
+    var gLuaOpSite = m.NewGlobalDef("lua.opsite", handle(0))
+    var luaOpSites = []
+    function luaOpSiteCode(s0, s1) {
+        if (s0 == "" && s1 == "") { return 0 }
+        for (var i = 0; i + 1 < luaOpSites.length; i += 2) {
+            if (luaOpSites[i] == s0 && luaOpSites[i + 1] == s1) { return i / 2 + 1 }
+        }
+        luaOpSites.push(s0)
+        luaOpSites.push(s1)
+        return luaOpSites.length / 2
+    }
+
     // ----- Operation positions -----
     // An error is positioned at the line of the OPERATION that raised it, as lua 5.5
     // does - an operator's line, or for a call the line its arguments open on -
@@ -1366,41 +1578,62 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lua-interpreter.abnf.
     function luaOpPos(pos) { return {code: luaFileNo(c.curFile()) * 16777216 + c.lineOf(pos)} }
     function luaOpTok(op, pos) { return {op: op, code: luaOpPos(pos).code} }
-    function luaPosArg(t, rec) {
+    // `descs` are the operands' descriptors, stored as the operation's site.
+    function luaPosArg(t, rec, descs) {
         var code = rec.code
         return function(b) {
             var r = t(b)
             r.b.NewStore(handle(code), gLuaPos)
+            if (descs !== null) {
+                r.b.NewStore(handle(luaOpSiteCode(luaDescText(descs[0]), luaDescText(descs[1]))), gLuaOpSite)
+            }
             return r
         }
     }
-    // A binary fold's items with each operator record reduced to its operator and
-    // its right operand wrapped; == and ~= cannot raise.
-    function luaPosOps(items) {
-        var out = [items[0]]
-        for (var i = 1; i + 1 < items.length; i += 2) {
+    // An operand that may be several values (luaOpnd's mv) as its first value. A
+    // lone operand is left alone: it may stand in a list, where all of them count.
+    function luaTrunc(t, o) {
+        if (!o.mv) { return t }
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callLua(r.b, "lua_first", [r.v])}
+        }
+    }
+    // A binary fold's items [t0, o0, op, t1, o1, ...] (o: luaOpnd) as foldBinary's
+    // [t0, op, t1, ...]: every operand truncated, each right operand wrapped (the
+    // left operand of the first operator is the only other source operand); == and
+    // ~= cannot raise. `rec` is the comparisons' one position (luaPosCmp), or null.
+    function luaPosFold(items, rec) {
+        if (items.length < 5) { return [items[0]] }
+        var out = [luaTrunc(items[0], items[1])]
+        for (var i = 2; i + 2 < items.length; i += 3) {
             var op = items[i].op
             out.push(op)
-            out.push(op == "==" || op == "~=" ? items[i + 1] : luaPosArg(items[i + 1], items[i]))
+            var dl = anytype
+            dl = i == 2 ? items[1].d : false
+            var r = luaTrunc(items[i + 1], items[i + 2])
+            if (op == "==" || op == "~=") { out.push(r) }
+            else if (rec !== null) { out.push(luaPosArg(r, rec, null)) }
+            else { out.push(luaPosArg(r, items[i], [dl, items[i + 2].d])) }
         }
         return out
     }
+    function luaPosOps(items) { return luaPosFold(items, null) }
     // A comparison is positioned where its right operand ENDS (lua emits it after
     // reading that operand and fixes no line), which is where the fold ends.
-    function luaPosCmp(items, pos) {
-        var rec = luaOpPos(pos)
-        var out = [items[0]]
-        for (var i = 1; i + 1 < items.length; i += 2) {
-            var op = items[i].op
-            out.push(op)
-            out.push(op == "==" || op == "~=" ? items[i + 1] : luaPosArg(items[i + 1], rec))
-        }
-        return out
-    }
-    // [l, rec, r] of a right-associative operator (.., ^) as [l, r].
+    function luaPosCmp(items, pos) { return luaPosFold(items, luaOpPos(pos)) }
+    // [l, ol, rec, r, or] of a right-associative operator (.., ^) as [l, r].
     function luaPosPair(items) {
-        if (items.length < 3) { return items }
-        return [items[0], luaPosArg(items[2], items[1])]
+        if (items.length < 5) { return [items[0]] }
+        return [luaTrunc(items[0], items[1]), luaPosArg(luaTrunc(items[3], items[4]), items[2], [items[1].d, items[4].d])]
+    }
+    // and / or over [t0, o0, t1, o1, ...]: the operands truncated when there are two
+    // or more, then core's makeOrAnd.
+    function luaOrAnd(items, isOr) {
+        if (items.length < 3) { return items[0] }
+        var ts = []
+        for (var i = 0; i + 1 < items.length; i += 2) { ts.push(luaTrunc(items[i], items[i + 1])) }
+        return makeOrAnd(ts, isOr)
     }
     // A runtime error raised by emitted code: the {__luerr} marker luFail throws.
     function luaMarker(b, msgV) {
@@ -1452,6 +1685,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     makeSeq = function(items) {
         return function(b) {
+            luaDeclPush(false)
             var scope = {}
             var any = false
             for (var i = 0; i < items.length; i++) {
@@ -1474,6 +1708,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = it(b)
             }
             if (any) { labelScopes.pop() }
+            luaDeclPop()
             return b
         }
     }
@@ -1609,8 +1844,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var badB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "string")])), strB, notStrB)
             notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_seq", [tyV, emitStr(notStrB, "object")])), headB, badB)
-            callLua(badB, "lua_raise", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to get length of a "),
-                callExt(badB, "js_lutname", [tv])]), emitStr(badB, " value")])])
+            var lenMk = luaMarker(badB, callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to get length of a "),
+                callExt(badB, "js_lutname", [tv])]), emitStr(badB, " value")]))
+            callExt(badB, "js_set", [lenMk, emitStr(badB, "__luop"), emitNum(badB, 1)])
+            callExt(badB, "js_throw", [lenMk])
             badB.NewBr(joinB)
             callExt(strB, "js_scope_set", [curScopeV, emitStr(strB, rName), callExt(strB, "js_get", [tv, emitStr(strB, "length")])])
             strB.NewBr(joinB)
@@ -1640,8 +1877,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rl.b
             var rr = r(b)
             b = rr.b
-            var ls = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rl.v])])
-            var rs = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rr.v])])
+            var ls = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rl.v]), emitNum(b, 1)])
+            var rs = callLua(b, "lua_catstr", [callLua(b, "lua_first", [rr.v]), emitNum(b, 2)])
             return {b: b, v: callExt(b, "js_add", [ls, rs])}
         }
     }
@@ -1675,21 +1912,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // reads. Answers {b, v, call} - `call` is the next step's `pre`.
     // A call step with `tail` set is the call of `return f(...)`: lua.tail tells the
     // callee's luaEnter to take over this frame.
-    function emitLuaStep(b, cur, s, pre, tail, cname) {
+    // `pd` is the descriptor of the value the step works on (luaPrefixDescs).
+    function emitLuaStep(b, cur, s, pre, tail, cname, pd) {
         var v = cur
         if (pre) { v = callLua(b, "lua_first", [v]) } // Only one value feeds a step.
+        var sfx = luaDescText(pd)
         if (s.kind == "call") {
             var ea = emitListArr(b, s.args)
             b = ea.b
             b.NewStore(handle(s.at.code), gLuaPos)
-            b.NewStore(handle(luaCalleeCode(cname)), gLuaCallee)
+            b.NewStore(handle(luaCalleeCode(cname, sfx)), gLuaCallee)
             return {b: b, v: luaCallTail(b, tail, v, ea.v), call: true}
         }
         if (s.kind == "method") {
             // obj:m(args): look up m on the receiver, then call it with the
             // receiver prepended as the first argument (self).
             b.NewStore(handle(s.at.code), gLuaPos)
-            var mr = emitMemberGet(b, v, emitStr(b, s.name))
+            var mr = emitMemberGet(b, v, emitStr(b, s.name), sfx)
             b = mr.b
             var fn = mr.v
             var margs = callExt(b, "js_arr_new", [])
@@ -1698,16 +1937,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = ma.b
             b = emitArrExtend(b, margs, ma.v)
             b.NewStore(handle(s.at.code), gLuaPos)
-            b.NewStore(handle(luaCalleeCode(cname)), gLuaCallee)
+            b.NewStore(handle(luaCalleeCode(cname, luaDescText({k: "method", n: s.name}))), gLuaCallee)
             return {b: b, v: luaCallTail(b, tail, fn, margs), call: true}
         }
         if (s.kind == "field") {
-            var fr = emitMemberGet(b, v, emitStr(b, s.name))
+            var fr = emitMemberGet(b, v, emitStr(b, s.name), sfx)
             return {b: fr.b, v: fr.v, call: false}
         }
         var ir = s.idx(b)
         b = ir.b
-        var xr = emitMemberGet(b, v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])]))
+        var xr = emitMemberGet(b, v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])]), sfx)
         return {b: xr.b, v: xr.v, call: false}
     }
     function luaCallTail(b, tail, fn, args) {
@@ -1727,7 +1966,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Any other value that is not a table is a Lua error ("attempt to index a
     // number value"), as in luaIndex; the table test comes first, so a table
     // access still pays one compare.
-    function emitMemberGet(b, v, kV) {
+    // `sfx` names the indexed expression in an error (luaDescText).
+    function emitMemberGet(b, v, kV, sfx) {
         var tyV = callExt(b, "js_typeof", [v])
         var objB = curF.NewBlock("")
         var notObjB = curF.NewBlock("")
@@ -1744,21 +1984,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         hitB.NewBr(joinB)
         var boxB = curF.NewBlock("")
         missB.NewCondBr(rawTruthy(missB, callExt(missB, "js_sne", [callExt(missB, "js_get", [v, emitStr(missB, "__f")]), hUndef])), boxB, joinB)
-        luaIndexError(boxB, v)
+        luaIndexError(boxB, v, sfx)
         boxB.NewBr(joinB)
         notObjB.NewCondBr(rawTruthy(notObjB, callExt(notObjB, "js_seq", [tyV, emitStr(notObjB, "string")])), strB, badB)
         var libV = callLua(strB, "lua_getvar", [curScopeV, emitStr(strB, "0strlib")])
         var sv = callExt(strB, "js_get", [libV, kV])
         strB.NewBr(joinB)
-        luaIndexError(badB, v)
+        luaIndexError(badB, v, sfx)
         badB.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(ov, hitB), llvm.ir.NewIncoming(hUndef, missB),
                                            llvm.ir.NewIncoming(hUndef, boxB), llvm.ir.NewIncoming(sv, strB),
                                            llvm.ir.NewIncoming(hUndef, badB)])}
     }
-    function luaIndexError(b, v) {
+    function luaIndexError(b, v, sfx) {
         callLua(b, "lua_raise", [callExt(b, "js_add", [callExt(b, "js_add", [emitStr(b, "attempt to index a "),
-            callExt(b, "js_lutname", [v])]), emitStr(b, " value")])])
+            callExt(b, "js_lutname", [v])]), emitStr(b, " value" + sfx)])])
     }
     // The name lua 5.5 gives the function each call step of a chain calls, which is
     // the name an argument error reports: a method's own name, the field a call
@@ -1807,6 +2047,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (suffixes[q].kind != "call") { libNeed.string = true }
         }
         var cnames = luaCalleeNames(luaLeadName(text), suffixes)
+        var pdescs = luaPrefixDescs(luaChainFirst(text), suffixes)
         var mk = function(tail) {
             return function(b) {
                 var r = primary(b)
@@ -1814,7 +2055,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cur = r.v
                 var afterCall = false
                 for (var i = 0; i < suffixes.length; i++) {
-                    var st = emitLuaStep(b, cur, suffixes[i], afterCall, tail && i === last, cnames[i])
+                    var st = emitLuaStep(b, cur, suffixes[i], afterCall, tail && i === last, cnames[i], pdescs[i])
                     b = st.b
                     cur = st.v
                     afterCall = st.call
@@ -1879,8 +2120,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // (getmetatable(t).__index = f), which is ordinary Lua - see the Target production.
         var afterCall = false
         var cnames = luaCalleeNames(ref.name, ref.path)
+        var pdescs = luaPrefixDescs(luaVarDesc(ref.name), ref.path)
         for (var i = 0; i < ref.path.length - 1; i++) {
-            var st = emitLuaStep(b, o, ref.path[i], afterCall, false, cnames[i])
+            var st = emitLuaStep(b, o, ref.path[i], afterCall, false, cnames[i], pdescs[i])
             b = st.b
             o = st.v
             afterCall = st.call
@@ -1898,7 +2140,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_seq", [callExt(objB, "js_get", [o, emitStr(objB, "__f")]), hUndef])), setB, badB)
         callExt(setB, "js_set", [o, lk.v, v])
         setB.NewBr(doneB)
-        luaIndexError(badB, o)
+        luaIndexError(badB, o, luaDescText(pdescs[ref.path.length - 1]))
         badB.NewBr(doneB)
         return doneB
     }
@@ -1945,6 +2187,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var v1 = callLua(b, "lua_first", [r1.v])
                 if (funcCount != before) { curScopeV = callExt(b, "js_scope_new", [curScopeV]) }
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[0]), v1])
+                luaDeclare(names[0])
                 return b
             }
             var ra = emitListArr(b, vals)
@@ -1957,6 +2200,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (funcCount != before) { curScopeV = callExt(b, "js_scope_new", [curScopeV]) }
             for (var n = 0; n < names.length; n++) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), callExt(b, "js_get", [ra.v, emitNum(b, n)])])
+                luaDeclare(names[n])
             }
             return b
         }
@@ -1976,6 +2220,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var savedFrame = luaFrame
         luaFrame = luaEnter(b, true)
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        luaDeclPush(true)
         for (var i = 0; i < params.length; i++) {
             // A trailing '...' marks the function variadic: the arguments beyond the
             // named ones go into the frame under that very name, where makeVararg
@@ -1986,8 +2231,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 continue
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), callExt(b, "js_arg", [f.Params[1], handle(i)])])
+            luaDeclare(params[i])
         }
         var endB = bodyT(b)
+        luaDeclPop()
         luaLeave(endB, luaFrame)
         // Running off the end returns NO value (select('#', f()) is 0, print(f())
         // an empty line) - the one empty multi-value jsmain made.
@@ -2045,6 +2292,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeLocalFunc(bodyT, plist, name) {
         return function(b) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            luaDeclare(name)
             var idx = emitFunction(plist.params, bodyT)
             var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_scope_set", [curScopeV, emitStr(b, name), cl])
@@ -2145,7 +2393,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             testB.NewCondBr(truthy(testB, condH), bodyB, exitB)
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])])
             loopStack.push({cont: postB, brk: exitB})
+            luaDeclPush(false)
+            luaDeclare(name)
             block(bodyB).NewBr(postB)
+            luaDeclPop()
             loopStack.pop()
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             var stpV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, stepName)])
@@ -2241,7 +2492,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, names[n2]), callExt(bodyB, "js_get", [allV, emitNum(bodyB, n2)])])
             }
             loopStack.push({cont: postB, brk: exitB})
+            luaDeclPush(false)
+            for (var n3 = 0; n3 < names.length; n3++) { luaDeclare(names[n3]) }
             block(bodyB).NewBr(postB)
+            luaDeclPop()
             loopStack.pop()
             postB.NewBr(headB)
             curScopeV = saved
@@ -2669,14 +2923,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(hUndef)
-        finishCallNames()
+        finishStrTables()
     }
     function libIndexNil(bb, argsH) {
         return {b: bb, v: luaMarker(bb, emitStr(bb, "attempt to index a nil value"))}
     }
     function libCallBad(bb, argsH) {
         var msg = callExt(bb, "js_add", [callExt(bb, "js_add", [emitStr(bb, "attempt to call a "), callExt(bb, "js_lutname", [libArg(bb, argsH, 0)])]), emitStr(bb, " value")])
-        return {b: bb, v: luaMarker(bb, msg)}
+        var code = bb.NewLoad(i64, gLuaCallee)
+        var namedB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        bb.NewCondBr(bb.NewICmp(llvm.enum.IPredEQ, code, handle(0)), doneB, namedB)
+        var named = callExt(namedB, "js_add", [msg, namedB.NewCall(luaCallDescFn(), [namedB.NewLShr(code, handle(1))])])
+        namedB.NewBr(doneB)
+        var full = doneB.NewPhi([llvm.ir.NewIncoming(msg, bb), llvm.ir.NewIncoming(named, namedB)])
+        return {b: doneB, v: luaMarker(doneB, full)}
     }
     function libUncaught(bb, argsH) {
         var text = callLua(bb, "lua_errtext", [callLua(bb, "lua_errval", [libArg(bb, argsH, 0)])])

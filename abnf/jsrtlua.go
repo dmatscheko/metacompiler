@@ -362,6 +362,17 @@ func (rt *jsrt) luFail(format string, args ...interface{}) {
 	panic(&jsThrown{value: o})
 }
 
+// luFailOp raises an operation's error about operand opnd (1 or 2): the marker
+// carries it as __luop, and the emitted lua_opmsg appends that operand's name
+// when the running site has one ("(local 'x')"). Twin of luFailOp in
+// languages/lib/lua-rt.metajs.
+func (rt *jsrt) luFailOp(opnd int, format string, args ...interface{}) {
+	o := newJSObject()
+	o.set("__luerr", fmt.Sprintf(format, args...))
+	o.set("__luop", float64(opnd))
+	panic(&jsThrown{value: o})
+}
+
 // luTypeName is Lua's type() for an error message.
 func (rt *jsrt) luTypeName(v interface{}) string {
 	if v == nil || v == jsUndef {
@@ -492,30 +503,31 @@ func (rt *jsrt) luArithFail(op int, lv, rv interface{}, lok bool) {
 	if ls || rs {
 		rt.luFail("attempt to %s a '%s' with a '%s'", luArithNames[op], rt.luTypeName(lv), rt.luTypeName(rv))
 	}
+	opnd := 1
 	if lok {
-		lv = rv
+		lv, opnd = rv, 2
 	}
-	rt.luFail("attempt to perform arithmetic on a %s value", rt.luTypeName(lv))
+	rt.luFailOp(opnd, "attempt to perform arithmetic on a %s value", rt.luTypeName(lv))
 }
 
 // luToIntOp is a bitwise operand: an integer, or a float whose value is an exact
 // integer inside the 64 bit range. A string does not coerce here (lua 5.5).
 // Anything else is an error, and Lua distinguishes the two reasons.
-func (rt *jsrt) luToIntOp(v interface{}) int64 {
+func (rt *jsrt) luToIntOp(v interface{}, opnd int) int64 {
 	a, ok := v, luIsNum(v)
 	if !ok {
-		rt.luFail("attempt to perform bitwise operation on a %s value", rt.luTypeName(v))
+		rt.luFailOp(opnd, "attempt to perform bitwise operation on a %s value", rt.luTypeName(v))
 	}
 	if luIsInt(a) {
 		return luInt64(a)
 	}
 	n := luNumOf(a)
 	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
-		rt.luFail("number has no integer representation")
+		rt.luFailOp(opnd, "number has no integer representation")
 	}
 	iv, fits := luI64(n)
 	if !fits {
-		rt.luFail("number has no integer representation")
+		rt.luFailOp(opnd, "number has no integer representation")
 	}
 	return luInt64(iv)
 }
@@ -524,9 +536,14 @@ func (rt *jsrt) luToIntOp(v interface{}) int64 {
 // LOGICAL in both directions - Lua's >> never sign-extends - a count of 64 or
 // more clears the value, and a negative count shifts the other way.
 func (rt *jsrt) luBit(op int, lv, rv interface{}) interface{} {
-	a := rt.luToIntOp(lv)
+	// lua blames the first operand that is no number at all, and only when both
+	// are numbers the first that is no integer (luaT_trybinTM).
+	if luIsNum(lv) && !luIsNum(rv) {
+		rt.luToIntOp(rv, 2)
+	}
+	a := rt.luToIntOp(lv, 1)
 	if op == 3 || op == 4 {
-		k := rt.luToIntOp(rv)
+		k := rt.luToIntOp(rv, 2)
 		left := op == 3
 		if k < 0 {
 			k = -k
@@ -540,7 +557,7 @@ func (rt *jsrt) luBit(op int, lv, rv interface{}) interface{} {
 		}
 		return giNorm(int64(uint64(a)>>uint(k)), 64, false)
 	}
-	b := rt.luToIntOp(rv)
+	b := rt.luToIntOp(rv, 2)
 	switch op {
 	case 0:
 		return giNorm(a&b, 64, false)
@@ -832,7 +849,7 @@ func init() {
 			return w(rt.luBit(int(a[0]), u(a[1]), u(a[2])))
 		}
 		m["js_lubnot"] = func(a []uint64) uint64 {
-			return w(giNorm(^rt.luToIntOp(u(a[0])), 64, false))
+			return w(giNorm(^rt.luToIntOp(u(a[0]), 1), 64, false))
 		}
 		m["js_lueq"] = func(a []uint64) uint64 { return boolH(rt.luEq(u(a[0]), u(a[1]))) }
 		m["js_lucmp"] = func(a []uint64) uint64 {

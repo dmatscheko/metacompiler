@@ -1376,6 +1376,47 @@ function s33()
     check("big10", acc, 6003000000000)
 end
 
+-- ===== SECTION 34: an error names its operand; an operator reads one value =====
+-- lua 5.5 appends what the failing value IS - a local, an upvalue, a global, a
+-- field (an integer constant index reads 'integer index', a computed one '?'), a
+-- method - and nothing for any other expression. An operator, a comparison and a
+-- condition read only the first value of a call. Every text was printed by lua 5.5.
+local s34top = nil
+function s34()
+    local function msg(f, ...)
+        local ok, m = pcall(f, ...)
+        if ok then return "no error" end
+        return (string.gsub(m, "^.-:%d+: ", ""))
+    end
+    local t = {}
+    check("vn1", msg(function() local x = nil; return x.y end), "attempt to index a nil value (local 'x')")
+    check("vn2", msg(function() return s34top.y end), "attempt to index a nil value (upvalue 's34top')")
+    check("vn3", msg(function() return s34nope.y end), "attempt to index a nil value (global 's34nope')")
+    check("vn4", msg(function() return t.a.b end), "attempt to index a nil value (field 'a')")
+    check("vn5", msg(function() local k = "a"; return t[k].b end), "attempt to index a nil value (field '?')")
+    check("vn6", msg(function() return t[1].b end), "attempt to index a nil value (field 'integer index')")
+    check("vn7", msg(function() s34nofn() end), "attempt to call a nil value (global 's34nofn')")
+    check("vn8", msg(function() t:nomethod() end), "attempt to call a nil value (method 'nomethod')")
+    check("vn9", msg(function() local a, b = 1, nil; return a + b end), "attempt to perform arithmetic on a nil value (local 'b')")
+    check("vn10", msg(function() return t.x .. "" end), "attempt to concatenate a nil value (field 'x')")
+    check("vn11", msg(function() return #s34nope end), "attempt to get length of a nil value (global 's34nope')")
+    check("vn12", msg(function() local x = 1.5; return x | 1 end), "number (local 'x') has no integer representation")
+    check("vn13", msg(function() local function f() end; return f() + 1 end), "attempt to perform arithmetic on a nil value")
+    check("vn14", msg(function() return (t.a).b end), "attempt to index a nil value (field 'a')")
+    check("vn15", msg(function() local x = nil; x.y = 1 end), "attempt to index a nil value (local 'x')")
+    check("vn16", msg(function(p) return -p end), "attempt to perform arithmetic on a nil value (local 'p')")
+    local function none() end
+    local function two() return nil, 5 end
+    local function three4() return 3, 4 end
+    check("mv1", none() == nil and two() == nil, true)
+    check("mv2", three4() + 1, 4)
+    check("mv3", (two() and "a" or "b") .. (none() or "c"), "bc")
+    local hit = "no"
+    if two() then hit = "yes" end
+    check("mv4", hit, "no")
+    check("mv5", -three4() .. (three4() < 4 and "<" or ">="), "-3<")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1385,5 +1426,6 @@ s30() -- SECTION-CALL 30
 s31() -- SECTION-CALL 31
 s32() -- SECTION-CALL 32
 s33() -- SECTION-CALL 33
+s34() -- SECTION-CALL 34
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

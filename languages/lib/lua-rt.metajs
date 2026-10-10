@@ -289,6 +289,15 @@ function luFail(msg) {
     o["__luerr"] = msg
     throw o
 }
+// luFailOp raises an operation's error about operand opnd (1 or 2): the marker
+// carries it as __luop, and the emitted lua_opmsg appends that operand's name when
+// the running site has one ("(local 'x')"). Twin of rt.luFailOp in abnf/jsrtlua.go.
+function luFailOp(opnd, msg) {
+    var o = {}
+    o["__luerr"] = msg
+    o["__luop"] = opnd
+    throw o
+}
 // The end of a program whose error nobody caught: the text arrives rendered by
 // the emitter's lua_errtext. fail() is a host builtin of the C floor
 // (languages/lib/runtime.c): the text behind "js runtime error: ", and exit 1.
@@ -510,16 +519,16 @@ function luIMod(a, b) {
 // luToIntOp is a bitwise operand: an integer, or a float whose value is an exact
 // integer inside the 64 bit range. A string does not coerce here (lua 5.5).
 // Anything else is an error, and Lua distinguishes the two reasons.
-function luToIntOp(v) {
+function luToIntOp(v, opnd) {
     var a = v
-    if (!luIsNum(v)) { luFail("attempt to perform bitwise operation on a " + luTypeName(v) + " value") }
+    if (!luIsNum(v)) { luFailOp(opnd, "attempt to perform bitwise operation on a " + luTypeName(v) + " value") }
     if (luIsInt(a)) { return luPair(a) }
     var n = luNumOf(a)
-    if (n !== n) { luFail("number has no integer representation") }
-    if (n === luInf() || n === 0 - luInf()) { luFail("number has no integer representation") }
-    if (Math.floor(n) !== n) { luFail("number has no integer representation") }
+    if (n !== n) { luFailOp(opnd, "number has no integer representation") }
+    if (n === luInf() || n === 0 - luInf()) { luFailOp(opnd, "number has no integer representation") }
+    if (Math.floor(n) !== n) { luFailOp(opnd, "number has no integer representation") }
     var iv = luI64(n)
-    if (iv === undefined) { luFail("number has no integer representation") }
+    if (iv === undefined) { luFailOp(opnd, "number has no integer representation") }
     return luPair(iv)
 }
 
@@ -614,7 +623,7 @@ function luArithFail(op, lv, rv, lok) {
     if (typeof lv == "string" || typeof r == "string") {
         luFail("attempt to " + ops[op] + " a '" + luTypeName(lv) + "' with a '" + luTypeName(r) + "'")
     }
-    luFail("attempt to perform arithmetic on a " + luTypeName(lok ? rv : lv) + " value")
+    luFailOp(lok ? 2 : 1, "attempt to perform arithmetic on a " + luTypeName(lok ? rv : lv) + " value")
 }
 
 // One of + - * / // % ^ and unary minus, by index (0..7, see luArithFail). The operator index arrives as a RAW
@@ -713,9 +722,12 @@ function js_luarith(op_raw, lv, rv) {
 // the value, and a negative count shifts the other way.
 function js_lubit(op_raw, lv, rv) {
     var op = op_raw
-    var a = luToIntOp(lv)
+    // lua blames the first operand that is no number at all, and only when both
+    // are numbers the first that is no integer (luaT_trybinTM).
+    if (luIsNum(lv) && !luIsNum(rv)) { luToIntOp(rv, 2) }
+    var a = luToIntOp(lv, 1)
     if (op === 3 || op === 4) {
-        var kp = luToIntOp(rv)
+        var kp = luToIntOp(rv, 2)
         var left = op === 3
         if (i64IsNeg(kp)) {
             kp = i64Neg(kp)
@@ -728,13 +740,13 @@ function js_lubit(op_raw, lv, rv) {
         if (left) { return luNorm(i64Shl(a, kp.l)) }
         return luNorm(i64ShrU(a, kp.l))
     }
-    var b = luToIntOp(rv)
+    var b = luToIntOp(rv, 2)
     if (op === 0) { return luNorm(i64And(a, b)) }
     if (op === 1) { return luNorm(i64Or(a, b)) }
     return luNorm(i64Xor(a, b))   // Lua spells exclusive-or '~'
 }
 
-function js_lubnot(v) { return luNorm(i64Not(luToIntOp(v))) }
+function js_lubnot(v) { return luNorm(i64Not(luToIntOp(v, 1))) }
 
 // Two integers compare on the exact 64 bit value, because past 2^53 their double
 // readings are equal for values that are not.

@@ -177,19 +177,22 @@ ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in))
 ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
+            = KwIf Cond KwThen Block { ElseIf } [ Else ] KwEndKw ;
 ElseIf      <~~ push(makeElseIf(pop(), pop())) ~~>
-            = KwElseif Expression KwThen Block ;
+            = KwElseif Cond KwThen Block ;
 Else        <~~ push(makeElse(pop())) ~~>
             = KwElse Block ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile Expression KwDo Block KwEndKw ;
+            = KwWhile Cond KwDo Block KwEndKw ;
+// A condition reads ONE value: a call's first result (luaTrunc).
+Cond        <~~ push(luaTrunc(pop(), luaOpnd(up.in))) ~~>
+            = Expression ;
 
 // repeat ... until cond: the body runs at least once and repeats while cond is false;
 // unlike while, the condition sees the locals declared in the body (same scope).
 Repeat      <~~ var cond = pop(); var block = pop(); push(makeRepeat(block, cond)) ~~>
-            = KwRepeat Block KwUntil Expression ;
+            = KwRepeat Block KwUntil Cond ;
 
 // for i = start, limit [, step] do ... end. The loop variable is local to the loop.
 NumFor      <~~ push(makeNumFor(takeAll())) ~~>
@@ -277,13 +280,13 @@ ExprList    = Expression { "," Expression } ;
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = OrExpr ;
 
-OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
-            = AndExpr { KwOr AndExpr } ;
-AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = CmpExpr { KwAnd CmpExpr } ;
+OrExpr      <~~ push(luaOrAnd(takeAll(), true)) ~~>
+            = AndExpr <~~ push(luaOpnd(up.in)) ~~> { KwOr AndExpr <~~ push(luaOpnd(up.in)) ~~> } ;
+AndExpr     <~~ push(luaOrAnd(takeAll(), false)) ~~>
+            = CmpExpr <~~ push(luaOpnd(up.in)) ~~> { KwAnd CmpExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 CmpExpr     <~~ push(foldBinary(luaPosCmp(takeAll(), up.pos))) ~~>
-            = BOrExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BOrExpr } ;
+            = BOrExpr <~~ push(luaOpnd(up.in)) ~~> { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BOrExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 // The bitwise operators of Lua 5.3+, each on its own precedence level: | binds loosest,
 // then binary ~ (exclusive or), then &, then the shifts - all below the comparisons and
@@ -291,39 +294,39 @@ CmpExpr     <~~ push(foldBinary(luaPosCmp(takeAll(), up.pos))) ~~>
 // float operand with an integral value converts and everything else is an error. Binary
 // '~' carries a !"=" lookahead so that a '~=' comparison is left to CmpExpr above.
 BOrExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = BXorExpr { "|" <~~ push(luaOpTok(up.in, up.pos)) ~~> BXorExpr } ;
+            = BXorExpr <~~ push(luaOpnd(up.in)) ~~> { "|" <~~ push(luaOpTok(up.in, up.pos)) ~~> BXorExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 BXorExpr    <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = BAndExpr { ( "~" !"=" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BAndExpr } ;
+            = BAndExpr <~~ push(luaOpnd(up.in)) ~~> { ( "~" !"=" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BAndExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 BAndExpr    <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = ShiftExpr { "&" <~~ push(luaOpTok(up.in, up.pos)) ~~> ShiftExpr } ;
+            = ShiftExpr <~~ push(luaOpnd(up.in)) ~~> { "&" <~~ push(luaOpTok(up.in, up.pos)) ~~> ShiftExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 ShiftExpr   <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = ConcatExpr { ( "<<" | ">>" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> ConcatExpr } ;
+            = ConcatExpr <~~ push(luaOpnd(up.in)) ~~> { ( "<<" | ">>" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> ConcatExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 // Concatenation is right associative, so it recurses on its own right hand side.
 ConcatExpr  <~~ push(makeConcat(luaPosPair(takeAll()))) ~~>
-            = AddExpr [ ".." <~~ push(luaOpPos(up.pos)) ~~> ConcatExpr ] ;
+            = AddExpr <~~ push(luaOpnd(up.in)) ~~> [ ".." <~~ push(luaOpPos(up.pos)) ~~> ConcatExpr <~~ push(luaOpnd(up.in)) ~~> ] ;
 
 AddExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> MulExpr } ;
+            = MulExpr <~~ push(luaOpnd(up.in)) ~~> { ( "+" | "-" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> MulExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 // The floor division // must be tried before the true division /.
 MulExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
-            = UnaryExpr { ( "*" | "//" | "/" | "%" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> UnaryExpr } ;
+            = UnaryExpr <~~ push(luaOpnd(up.in)) ~~> { ( "*" | "//" | "/" | "%" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> } ;
 
 UnaryExpr   = NotExpr | LenExpr | NegExpr | BNotExpr | PowExpr ;
-NotExpr     <~~ push(makeNot(pop())) ~~>
-            = KwNot UnaryExpr ;
-LenExpr     <~~ var t = pop(); push(makeLen(luaPosArg(t, pop()))) ~~>
-            = "#" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
-NegExpr     <~~ var t = pop(); push(makeNeg(luaPosArg(t, pop()))) ~~>
-            = "-" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
+NotExpr     <~~ var o = pop(); push(makeNot(luaTrunc(pop(), o))) ~~>
+            = KwNot UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
+LenExpr     <~~ var o = pop(); var t = pop(); push(makeLen(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+            = "#" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
+NegExpr     <~~ var o = pop(); var t = pop(); push(makeNeg(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+            = "-" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
 // Unary bitwise not ~x (Lua 5.3+), guarded against '~=': the 64-bit complement.
-BNotExpr    <~~ var t = pop(); push(makeBNot(luaPosArg(t, pop()))) ~~>
-            = ( "~" !"=" ) <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
+BNotExpr    <~~ var o = pop(); var t = pop(); push(makeBNot(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+            = ( "~" !"=" ) <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
 // Exponentiation a ^ b: right associative (its right operand is a UnaryExpr, which
 // descends into PowExpr again) and binding tighter than the unary operators, so -2^2
 // is -(2^2) and 2^-1 is legal. The result is always a float, like in Lua.
 PowExpr     <~~ push(makePow(luaPosPair(takeAll()))) ~~>
-            = SuffixedExpr [ "^" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ] ;
+            = SuffixedExpr <~~ push(luaOpnd(up.in)) ~~> [ "^" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll(), up.in)) ~~>
@@ -345,7 +348,7 @@ MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, at: 
 MethodName  <~~ push({mname: up.in}) ~~>
             = Id ;
 DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+IndexSfx    <~~ push({kind:"index", idx: pop(), src: up.in}) ~~>
             = "[" Expression "]" ;
 
 Primary     = ParenExpr | FuncExpr | TableLit | LongString | VarargExpr
@@ -591,7 +594,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function stmtPos(t) {
         if (typeof t != "function") { return t }
         var here = luaChunkId(c.curFile()) + ":" + c.lineOf(up.pos) + ": "
-        return function() { luaPos = here; return t() }
+        return function() {
+            luaPos = here
+            luaOpDesc = null
+            return t()
+        }
     }
     // luaO_chunkid for a file chunk: the name as given, or "..." and its last 56
     // characters when it does not fit LUA_IDSIZE (60, the '@' and the NUL included).
@@ -609,42 +616,194 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // helpers in lua-to-llvm-ir.abnf.
     function luaOpPos(pos) { return {here: luaChunkId(c.curFile()) + ":" + c.lineOf(pos) + ": "} }
     function luaOpTok(op, pos) { return {op: op, here: luaOpPos(pos).here} }
-    function luaPosArg(t, rec) {
+    // ----- Operand names (lua's varinfo) -----
+    // An error about a value names the expression it came from when that is a
+    // variable or a field: "attempt to index a nil value (local 't')". A descriptor
+    // is false (no name: it travels the tag stack, where a null would end takeAll),
+    // {k: "var", n} - local, upvalue or global, decided where the operation runs
+    // (luaVarKind) - or {k: "field" | "method", n}. luaOpnd reads one from an
+    // operand's source text, luaPrefixDescs from a suffix chain. Twin of the same
+    // helpers in lua-to-llvm-ir.abnf.
+    function luaIsIdStart(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 }
+    function luaIsIdChar(c) { return luaIsIdStart(c) || (c >= 48 && c <= 57) }
+    // The field an index step `[e]` (its source, brackets included) reads: a string
+    // constant's text, "integer index" for an integer constant up to 255 (lua's
+    // GETI), "?" for anything else.
+    function luaIndexDesc(src) {
+        var inner = src.substring(1, src.length - 1)
+        var q = inner.length > 1 ? inner.charAt(0) : ""
+        if ((q == "\"" || q == "'") && inner.charAt(inner.length - 1) == q) {
+            var body = inner.substring(1, inner.length - 1)
+            if (body.indexOf("\\") < 0 && body.indexOf(q) < 0) { return {k: "field", n: body} }
+        }
+        var v = 0
+        var digits = inner.length > 0 && inner.length <= 3
+        for (var i = 0; i < inner.length; i++) {
+            var c = inner.charCodeAt(i)
+            if (c < 48 || c > 57) { digits = false } else { v = v * 10 + (c - 48) }
+        }
+        if (digits && v <= 255) { return {k: "field", n: "integer index"} }
+        return {k: "field", n: "?"}
+    }
+    // The '[' opening the index that ends `text`, or -1.
+    function luaBracketOpen(text) {
+        var depth = 0
+        var i = text.length - 1
+        while (i >= 0) {
+            var c = text.charCodeAt(i)
+            if (c === 93) { depth = depth + 1 }
+            else if (c === 91) {
+                depth = depth - 1
+                if (depth === 0) { return i }
+            }
+            i = i - 1
+        }
+        return 0 - 1
+    }
+    function luaVarDesc(name) {
+        if (name === null || name == "nil" || name == "true" || name == "false") { return false }
+        return {k: "var", n: name}
+    }
+    // What an operator needs to know of an operand, from its source text: its
+    // descriptor `d`, and `mv` - whether it may be a call, i.e. several values, of
+    // which an operator reads the first (luaTrunc).
+    function luaOpnd(text) { return {d: luaOpndDesc(text), mv: luaMayMulti(text)} }
+    function luaMayMulti(text) {
+        var n = text.length
+        if (text == "...") { return true }
+        if (n == 0) { return false }
+        var c = text.charCodeAt(n - 1)
+        if (c === 41 || c === 34 || c === 39 || c === 125) { return true }
+        return c === 93 && n > 1 && (text.charCodeAt(n - 2) === 93 || text.charCodeAt(n - 2) === 61)
+    }
+    // The descriptor of an operand: the variable it is, or the field its last
+    // step reads.
+    function luaOpndDesc(text) {
+        var n = text.length
+        if (n == 0) { return false }
+        if (luaLeadName(text) === text) { return luaVarDesc(text) }
+        if (text.charCodeAt(n - 1) === 93) {
+            var open = luaBracketOpen(text)
+            if (open < 1) { return false }
+            return luaIndexDesc(text.substring(open, n))
+        }
+        var i = n
+        while (i > 0 && luaIsIdChar(text.charCodeAt(i - 1))) { i = i - 1 }
+        if (i < n && i >= 2 && luaIsIdStart(text.charCodeAt(i)) && text.charCodeAt(i - 1) === 46
+            && text.charCodeAt(i - 2) !== 46) {
+            return {k: "field", n: text.substring(i)}
+        }
+        return false
+    }
+    // The descriptor of a suffix chain's primary, from the chain's text: its
+    // variable, or what a parenthesized expression names - (t.a).b reads field 'a'.
+    function luaChainFirst(text) {
+        var lead = luaLeadName(text)
+        if (lead !== null) { return luaVarDesc(lead) }
+        if (text.length == 0 || text.charCodeAt(0) !== 40) { return false }
+        var depth = 0
+        for (var i = 0; i < text.length; i++) {
+            var c = text.charCodeAt(i)
+            if (c === 40) { depth = depth + 1 }
+            else if (c === 41) {
+                depth = depth - 1
+                if (depth === 0) { return luaOpndDesc(text.substring(1, i)) }
+            }
+        }
+        return false
+    }
+    // The descriptor of the value each step of a suffix chain works on: the chain's
+    // primary (`first`, a descriptor) before the first step, then whatever the
+    // previous step read.
+    function luaPrefixDescs(first, suffixes) {
+        var out = []
+        var d = anytype
+        d = first
+        for (var i = 0; i < suffixes.length; i++) {
+            out.push(d)
+            var st = suffixes[i]
+            if (st.kind == "field") { d = {k: "field", n: st.name} }
+            else if (st.kind == "index") { d = luaIndexDesc(st.src) }
+            else { d = false }
+        }
+        return out
+    }
+    // The operand descriptors of the operation running (luaPosArg), which its error
+    // reads (luaOpSfx); a statement clears them.
+    var luaOpDesc = anytype
+    luaOpDesc = null
+    // `descs` are the operands' descriptors (luaOpnd's d), or null.
+    function luaPosArg(t, rec, descs) {
         var here = rec.here
         return function() {
             var v = anytype
             v = t()
             luaPos = here
+            luaOpDesc = descs
             return v
         }
     }
-    // A binary fold's items with each operator record reduced to its operator and
-    // its right operand wrapped; == and ~= cannot raise.
-    function luaPosOps(items) {
+    // The name of operand i (0 or 1) of the running operation, as an error appends it.
+    function luaOpSfx(i) {
+        var ds = anytype
+        ds = luaOpDesc
+        if (ds === null) { return "" }
+        return luaDescText(ds[i])
+    }
+    // The interpreter's operators read the first value of a multi-value themselves,
+    // so the compiler's truncation is the identity here.
+    function luaTrunc(t, o) { return t }
+    // A binary fold's items [t0, o0, op, t1, o1, ...] (o: luaOpnd) as foldBinary's
+    // [t0, op, t1, ...], each right operand wrapped (the left operand of the first
+    // operator is the only other source operand); == and ~= cannot raise. `rec` is
+    // the comparisons' one position (luaPosCmp), or null.
+    function luaPosFold(items, rec) {
+        if (items.length < 5) { return [items[0]] }
         var out = [items[0]]
-        for (var i = 1; i + 1 < items.length; i += 2) {
+        for (var i = 2; i + 2 < items.length; i += 3) {
             var op = items[i].op
             out.push(op)
-            out.push(op == "==" || op == "~=" ? items[i + 1] : luaPosArg(items[i + 1], items[i]))
+            var dl = anytype
+            dl = i == 2 ? items[1].d : false
+            var r = items[i + 1]
+            if (op == "==" || op == "~=") { out.push(r) }
+            else if (rec !== null) { out.push(luaPosArg(r, rec, null)) }
+            else { out.push(luaPosArg(r, items[i], [dl, items[i + 2].d])) }
         }
         return out
     }
+    function luaPosOps(items) { return luaPosFold(items, null) }
     // A comparison is positioned where its right operand ENDS (lua emits it after
     // reading that operand and fixes no line), which is where the fold ends.
-    function luaPosCmp(items, pos) {
-        var rec = luaOpPos(pos)
-        var out = [items[0]]
-        for (var i = 1; i + 1 < items.length; i += 2) {
-            var op = items[i].op
-            out.push(op)
-            out.push(op == "==" || op == "~=" ? items[i + 1] : luaPosArg(items[i + 1], rec))
-        }
-        return out
-    }
-    // [l, rec, r] of a right-associative operator (.., ^) as [l, r].
+    function luaPosCmp(items, pos) { return luaPosFold(items, luaOpPos(pos)) }
+    // [l, ol, rec, r, or] of a right-associative operator (.., ^) as [l, r].
     function luaPosPair(items) {
-        if (items.length < 3) { return items }
-        return [items[0], luaPosArg(items[2], items[1])]
+        if (items.length < 5) { return [items[0]] }
+        return [items[0], luaPosArg(items[3], items[2], [items[1].d, items[4].d])]
+    }
+    // and / or over [t0, o0, t1, o1, ...].
+    function luaOrAnd(items, isOr) {
+        if (items.length < 3) { return items[0] }
+        var ts = []
+        for (var i = 0; i + 1 < items.length; i += 2) { ts.push(items[i]) }
+        return makeOrAnd(ts, isOr)
+    }
+    // Where a name is declared, asked at run time: in the running function's own
+    // frames (from luaFnBase on) it is a local, in an enclosing function's an
+    // upvalue, and in globalScope - or nowhere - a global. Each chunk runs in a
+    // frame of its own (buildChunk), so its locals are not globals.
+    var luaFnBase = 1
+    function luaVarKind(name) {
+        for (var i = scopes.length - 1; i >= 1; i--) {
+            if (hasOwn(scopes[i], name)) { return i >= luaFnBase ? "local" : "upvalue" }
+        }
+        return "global"
+    }
+    // A descriptor as the text an error message appends.
+    function luaDescText(d) {
+        if (!d) { return "" }
+        var k = d.k == "var" ? luaVarKind(d.n) : d.k
+        return " (" + k + " '" + d.n + "')"
     }
 
     // A no-op statement thunk for an empty ';' statement.
@@ -1299,7 +1458,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof l == "string" || typeof r == "string") {
             fail("attempt to " + luaArithNames[op] + " a '" + luaType(l) + "' with a '" + luaType(r) + "'")
         }
-        fail("attempt to perform arithmetic on a " + luaType(lok ? r : l) + " value")
+        fail("attempt to perform arithmetic on a " + luaType(lok ? r : l) + " value" + luaOpSfx(lok ? 1 : 0))
     }
 
     // ----- 64-bit integer bit operations -----
@@ -1315,33 +1474,37 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // signed; a count of 64 or more clears the value and a negative count shifts the
     // other way, both Lua's rules rather than the host's.
     // A string does not coerce in a bitwise operation (lua 5.5).
-    function toIntOp(v) {
+    // `opnd` (1 or 2) is which operand v is, for the name an error appends.
+    function toIntOp(v, opnd) {
         var a = anytype // The operand, a number or an error.
         a = v
-        if (!isNum(v)) { fail("attempt to perform bitwise operation on a " + luaType(v) + " value") }
+        if (!isNum(v)) { fail("attempt to perform bitwise operation on a " + luaType(v) + " value" + luaOpSfx(opnd - 1)) }
         if (szIs(a)) { return a }
         var n = numOf(a)
-        if (n - n !== 0 || Math.floor(n) !== n) { fail("number has no integer representation") }
+        if (n - n !== 0 || Math.floor(n) !== n) { fail("number" + luaOpSfx(opnd - 1) + " has no integer representation") }
         var iv = luaI64(n)
-        if (iv === undefined) { fail("number has no integer representation") }
+        if (iv === undefined) { fail("number" + luaOpSfx(opnd - 1) + " has no integer representation") }
         return iv
     }
     function luaBit(op, l, r) {
-        var a = toIntOp(l)
+        // lua blames the first operand that is no number at all, and only when both
+        // are numbers the first that is no integer (luaT_trybinTM).
+        if (isNum(l) && !isNum(r)) { toIntOp(r, 2) }
+        var a = toIntOp(l, 1)
         if (op == "<<" || op == ">>") {
-            var k = numOf(toIntOp(r))
+            var k = numOf(toIntOp(r, 2))
             var left = op == "<<"
             if (k < 0) { k = 0 - k; left = !left }
             if (k >= 64) { return 0 }
             var u = szConv(a, 64, true)
             return szConv(szArith(left ? "<<" : ">>", u, k), 64, false)
         }
-        var b = toIntOp(r)
+        var b = toIntOp(r, 2)
         if (op == "&") { return szArith("&", a, b) }
         if (op == "|") { return szArith("|", a, b) }
         return szArith("^", a, b)   // Lua spells exclusive-or '~'
     }
-    function luaBitNot(v) { return szNot(toIntOp(v)) }
+    function luaBitNot(v) { return szNot(toIntOp(v, 1)) }
 
     // ----- Overridden operator / expression builders -----
 
@@ -1471,7 +1634,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     makeNot = function(t) { return function() { return !luatruthy(t()) } }
-    function makeLen(t) { return function() { return luaLen(luaFirst(t())) } }
+    function makeLen(t) {
+        return function() {
+            var v = anytype
+            v = luaFirst(t())
+            if (typeof v != "string" && !isTbl(v)) { fail("attempt to get length of a " + luaType(v) + " value" + luaOpSfx(0)) }
+            return luaLen(v)
+        }
+    }
     function makeBNot(t) { return function() { return luaBitNot(luaFirst(t())) } }
     // a ^ b: right associative (the grammar recurses on its right operand) and always a
     // float result. A single collected operand means the '^' was absent.
@@ -1493,13 +1663,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             a = luaFirst(l())
             var b = anytype
             b = luaFirst(r())
-            return luaCatStr(a) + luaCatStr(b)
+            return luaCatStr(a, 1) + luaCatStr(b, 2)
         }
     }
-    function luaCatStr(v) {
+    function luaCatStr(v, opnd) {
         if (typeof v == "string") { return v }
         if (isNum(v)) { return luaNumStr(v) }
-        fail("attempt to concatenate a " + luaType(v) + " value")
+        fail("attempt to concatenate a " + luaType(v) + " value" + luaOpSfx(opnd - 1))
     }
     // and / or keep the deciding operand, with Lua truthiness.
     makeOrAnd = function(items, isOr) {
@@ -1525,14 +1695,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A call step with `tail` set is the call of `return f(...)` inside a Lua
     // function: the callee takes over the caller's frame (see makeClosure). `cname`
     // is the step's entry of luaCalleeNames.
-    function luaStep(cur, s, tail, cname) {
+    // `pd` is the descriptor of the value the step works on (luaPrefixDescs).
+    function luaStep(cur, s, tail, cname, pd) {
         var out = anytype // A member chain hops between types.
         if (s.kind == "call") {
             var argv = evalList(s.args)
             luaPos = s.at.here
             var fv = anytype // The callee, truncated to one value.
             fv = luaFirst(cur)
-            if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value") }
+            if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value" + luaDescText(pd)) }
             if (tail && luaCallPos.length > 0) { luaTail = true }
             luaCallName = cname
             out = fv.apply(undefined, argv)
@@ -1542,20 +1713,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var recv = anytype // The receiver, truncated to one value.
             recv = luaFirst(cur)
             luaPos = s.at.here
-            fn = luaIndex(recv, s.name)
-            if (typeof fn != "function") { fail("attempt to call method '" + s.name + "' (a " + luaType(fn) + " value)") }
+            fn = luaIndexAt(recv, s.name, pd)
             var margv = evalList(s.args)
             luaPos = s.at.here
+            if (typeof fn != "function") { fail("attempt to call a " + luaType(fn) + " value" + luaDescText({k: "method", n: s.name})) }
             if (tail && luaCallPos.length > 0) { luaTail = true }
             luaCallName = cname
             out = fn.apply(undefined, [recv].concat(margv))
             luaTail = false
         } else if (s.kind == "field") {
-            out = luaIndex(luaFirst(cur), s.name)
+            out = luaIndexAt(luaFirst(cur), s.name, pd)
         } else {
-            out = luaIndex(luaFirst(cur), luaFirst(s.idx()))
+            var o = anytype // The indexed value, read before its key.
+            o = luaFirst(cur)
+            out = luaIndexAt(o, luaFirst(s.idx()), pd)
         }
         return out
+    }
+    // luaIndex with lua's naming of the indexed expression in its error.
+    function luaIndexAt(o, k, pd) {
+        if (o === undefined || o === null || (typeof o != "string" && !isTbl(o))) {
+            fail("attempt to index a " + luaType(o) + " value" + luaDescText(pd))
+        }
+        return luaIndex(o, k)
     }
     // The name lua 5.5 gives the function each call step of a chain calls, which is
     // the name an argument error reports: a method's own name, the field a call
@@ -1601,11 +1781,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var suffixes = items.slice(1)
         var last = suffixes.length - 1
         var cnames = luaCalleeNames(luaLeadName(text), suffixes)
+        var pdescs = luaPrefixDescs(luaChainFirst(text), suffixes)
         var mk = function(tail) {
             return function() {
                 var cur = anytype // A member chain hops between types.
                 cur = primary()
-                for (var i = 0; i < suffixes.length; i++) { cur = luaStep(cur, suffixes[i], tail && i === last, cnames[i]) }
+                for (var i = 0; i < suffixes.length; i++) { cur = luaStep(cur, suffixes[i], tail && i === last, cnames[i], pdescs[i]) }
                 return cur
             }
         }
@@ -1649,8 +1830,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         o = getVar(ref.name)
         // luaStep, not luaIndex: the leading steps of a target may be calls (f(a).x = 1).
         var cnames = luaCalleeNames(ref.name, ref.path)
-        for (var i = 0; i < ref.path.length - 1; i++) { o = luaStep(o, ref.path[i], false, cnames[i]) }
-        luaSetIndex(luaFirst(o), pathKey(ref.path[ref.path.length - 1]), v)
+        var pdescs = luaPrefixDescs(luaVarDesc(ref.name), ref.path)
+        for (var i = 0; i < ref.path.length - 1; i++) { o = luaStep(o, ref.path[i], false, cnames[i], pdescs[i]) }
+        var tgt = anytype // The table written into.
+        tgt = luaFirst(o)
+        if (!isTbl(tgt)) { fail("attempt to index a " + luaType(tgt) + " value" + luaDescText(pdescs[ref.path.length - 1])) }
+        luaSetIndex(tgt, pathKey(ref.path[ref.path.length - 1]), v)
     }
     // items interleave targets (objects) and value thunks (functions); all right hand
     // sides are evaluated first, then assigned positionally (missing values are nil).
@@ -1719,6 +1904,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 frame["..."] = extra
             }
             scopes.push(frame)
+            var savedBase = luaFnBase
+            luaFnBase = scopes.length - 1
             // A tail call reuses its caller's luaCallPos entry instead of pushing
             // one, so the frame below it is the caller's caller - lua's level count.
             var ep = luaPos
@@ -1728,6 +1915,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             while (luaCallPos.length > sp) { luaCallPos.pop() }
             luaPos = ep
             scopes = saved
+            luaFnBase = savedBase
             return (r != undefined && r.isRet) ? r.v : LUA_NONE
         }
     }
@@ -1983,8 +2171,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // nobody caught ends the run with lua's own text for its error object. A required
     // file runs here too, in the middle of the main file's parse, hence the restore.
     var luaRunning = false
+    // A chunk runs in a frame of its own, so its locals are not globals.
     function buildChunk(items) {
         var was = luaRunning
+        var savedScopes = scopes
+        var savedBase = luaFnBase
+        scopes = scopes.concat([{}])
+        luaFnBase = scopes.length - 1
         luaRunning = true
         try {
             items[0]()
@@ -1994,6 +2187,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             exit(1)
         }
         luaRunning = was
+        scopes = savedScopes
+        luaFnBase = savedBase
     }
     // lua.c's msghandler: a string or a number is the message, anything else is
     // named by its type.
@@ -2060,6 +2255,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function luaProtect(f, args, handler) {
         var savedChain = scopes.slice()
+        var savedBase = luaFnBase
         var depth = luaCallPos.length
         var savedPos = luaPos
         luaTail = false
@@ -2077,6 +2273,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         } catch (e) {
             if (!excIsUser(e)) { throw e }
             scopes = savedChain.slice()
+            luaFnBase = savedBase
             var ev = anytype // The error object, or what the handler made of it.
             ev = e.v
             if (handler !== undefined) { ev = luaHandle(handler, ev) }
