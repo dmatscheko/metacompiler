@@ -802,6 +802,11 @@ function s26() {
     // Pairs added in Unicode 16: the case table must not be older than that.
     var u16 = String.fromCharCode(0x019B, 0x0264, 0x1C89)
     check("sm21a", u16.toUpperCase() === "\uA7DC\uA7CB\u1C89" && u16.toLowerCase() === "\u019B\u0264\u1C8A")
+    // A lone surrogate has no case and passes through.
+    var lone = String.fromCharCode(0xD800) + "a" + String.fromCharCode(0xDC00)
+    var lu = lone.toUpperCase()
+    check("sm21b", lu.length === 3 && lu.charCodeAt(0) === 0xD800 && lu.charCodeAt(1) === 65 &&
+                   lu.charCodeAt(2) === 0xDC00 && lone.toLowerCase() === lone)
     check("sm22", "aa".replace("a", function (m, i) { return m + i }) === "a0a")
 }
 

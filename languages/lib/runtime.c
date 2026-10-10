@@ -4173,12 +4173,10 @@ long builtin_method(long recv, long mid, long args) {
 					}
 				}
 				if (adv == 1 && cu >= 55296 && cu <= 57343) {
-					/* An UNPAIRED surrogate is not valid UTF-8, and the Go twin is
-					 * strings.ToUpper, which replaces each of the three bytes it is
-					 * carried in with U+FFFD. Lossy, and matched here on purpose:
-					 * the two engines have to give the same answer. */
-					u[k] = 65533; u[k + 1] = 65533; u[k + 2] = 65533;
-					k = k + 3;
+					/* An unpaired surrogate has no case: it passes through, as in
+					 * node. Twin of caseMapWTF8 in abnf/jsrt.go. */
+					u[k] = cu;
+					k = k + 1;
 					i = i + 1;
 					continue;
 				}

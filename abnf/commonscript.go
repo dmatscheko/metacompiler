@@ -469,9 +469,26 @@ func installGojaCaseMapping(vm *goja.Runtime) {
 	vm.Set("__goStrLower", strings.ToLower)
 	// String.prototype so it reaches a primitive receiver too; `this` is boxed
 	// there, hence the explicit String(this).
+	// A Go string cannot carry a lone surrogate (goja hands one over as U+FFFD),
+	// and a lone surrogate has no case, so the text between them is mapped and
+	// they pass through - caseMapWTF8 in abnf/jsrt.go is the frozen engine's twin.
 	if _, err := vm.RunString(`
-		String.prototype.toUpperCase = function () { return __goStrUpper(String(this)) };
-		String.prototype.toLowerCase = function () { return __goStrLower(String(this)) };
+		function __caseMap(s, f) {
+			var out = "", start = 0;
+			for (var i = 0; i < s.length; i++) {
+				var c = s.charCodeAt(i);
+				if (c < 0xD800 || c > 0xDFFF) continue;
+				if (c <= 0xDBFF && i + 1 < s.length) {
+					var d = s.charCodeAt(i + 1);
+					if (d >= 0xDC00 && d <= 0xDFFF) { i++; continue; }
+				}
+				out += f(s.substring(start, i)) + String.fromCharCode(c);
+				start = i + 1;
+			}
+			return start === 0 ? f(s) : out + f(s.substring(start));
+		}
+		String.prototype.toUpperCase = function () { return __caseMap(String(this), __goStrUpper) };
+		String.prototype.toLowerCase = function () { return __caseMap(String(this), __goStrLower) };
 	`); err != nil {
 		panic(err)
 	}

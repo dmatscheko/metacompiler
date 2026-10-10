@@ -1086,9 +1086,9 @@ func (rt *jsrt) jsvStringMethod(s string, name string, args []interface{}) (inte
 		}
 		return out, true
 	case "toUpperCase":
-		return strings.ToUpper(s), true
+		return caseMapWTF8(s, strings.ToUpper), true
 	case "toLowerCase":
-		return strings.ToLower(s), true
+		return caseMapWTF8(s, strings.ToLower), true
 	case "trim":
 		return strings.Trim(s, jsvSpace), true
 	case "trimStart":

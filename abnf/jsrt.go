@@ -11685,9 +11685,9 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			}
 			return out
 		case "toUpperCase":
-			return strings.ToUpper(recv)
+			return caseMapWTF8(recv, strings.ToUpper)
 		case "toLowerCase":
-			return strings.ToLower(recv)
+			return caseMapWTF8(recv, strings.ToLower)
 		case "trim":
 			return strings.TrimSpace(recv)
 		}
@@ -11777,6 +11777,28 @@ func wtf8Surrogate(s string) rune {
 		return 0
 	}
 	return rune(s[0]&0x0F)<<12 | rune(s[1]&0x3F)<<6 | rune(s[2]&0x3F)
+}
+
+// caseMapWTF8 applies a strings.ToUpper / ToLower to a WTF-8 string: a lone
+// surrogate has no case and passes through, as in node, where strings.Map alone
+// would turn each of its three bytes into a U+FFFD. Twin of builtin_method mids
+// 27/28 in languages/lib/runtime.c and of installGojaCaseMapping's.
+func caseMapWTF8(s string, f func(string) string) string {
+	if !strings.Contains(s, "\xED") {
+		return f(s)
+	}
+	var b strings.Builder
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0xED && wtf8Surrogate(s[i:]) != 0 {
+			b.WriteString(f(s[start:i]))
+			b.WriteString(s[i : i+3])
+			i += 2
+			start = i + 1
+		}
+	}
+	b.WriteString(f(s[start:]))
+	return b.String()
 }
 
 // strUnits returns s as UTF-16 code units, decoding WTF-8 lone surrogates back

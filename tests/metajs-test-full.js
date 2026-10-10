@@ -1776,6 +1776,11 @@ function s32() {
     check("cm09", String.fromCharCode(55297, 56360).toUpperCase() ===
                   String.fromCharCode(55297, 56320))
     check("cm10", "".toUpperCase() === "" && " ".toUpperCase() === " ")
+    // A lone surrogate has no case and passes through (node), in every engine.
+    var lone = String.fromCharCode(55296) + "a" + String.fromCharCode(56320)
+    var lu = lone.toUpperCase()
+    check("cm11", lu.length === 3 && lu.charCodeAt(0) === 55296 && lu.charCodeAt(1) === 65 &&
+                  lu.charCodeAt(2) === 56320 && lone.toLowerCase() === lone)
 }
 
 function main() {

@@ -174,6 +174,7 @@ check("str-substring-open", "metajs".substring(4), "js");
 check("str-substring-swap", str.substring(3, 1), "el");
 check("str-case-up", "aBc".toUpperCase(), "ABC");
 check("str-case-down", "DoWn".toLowerCase(), "down");
+check("str-case-lone-surrogate", (String.fromCharCode(55296) + "a").toUpperCase().charCodeAt(0), 55296);
 check("str-trim", "  pad  ".trim(), "pad");
 check("str-split-count", "a,b,c".split(",").length, 3);
 check("str-split-part", "a,b,c".split(",")[1], "b");
