@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-245** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-250** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -102,7 +102,7 @@ that part may need a floor primitive: cost it.
 
 # RB — Ruby
 
-### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · OPEN [V]
+### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
 Round 1 measured it: `respond_to?` on a builtin aborts in every leg ("unknown Integer
 method: respond_to?"). MRI's surface is ~730 names over 13 classes × 3 engines.
 Decision: answer the ENGINE'S IMPLEMENTED surface (true iff the call would dispatch).
@@ -115,41 +115,41 @@ two, and a probe checking every listed name dispatches in all three engines.
 `lambda`, `proc`, `loop`, `raise`, `require`/`exit`/`gets` answers NameError where MRI
 answers a Method - identical in all legs, reasons recorded at the site.
 
-### T-223 ruby: `Integer#[]` (bit reference) answers nil · P1 · RB · OPEN [V]
+### T-223 ruby: `Integer#[]` (bit reference) answers nil · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
 `5[0]` and `(-3)[0]` must be 1 (MRI); nil in every leg. Also `5[1..2]` is Ruby 2.7+,
 skip that.
 
-### T-224 ruby: `(m -1)` inside parentheses is a subtraction · P3 · RB · OPEN [V]
+### T-224 ruby: `(m -1)` inside parentheses is a subtraction · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
 A method `m` (no local `m`): `(m -1)` calls m(-1) in MRI; every leg subtracts. The
 parenthesised Expression path never tries the command form.
 
-### T-225 ruby: top-level `p self` · P1 · RB · OPEN [V]
+### T-225 ruby: top-level `p self` · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
 Interpreter prints nil, compiler aborts; MRI prints `main` (and `self.to_s` is "main").
 
-### T-226 ruby: the interpreter ignores singleton `to_s`/`inspect`; no `instance_variable_set` · P1 · RB · OPEN [V]
+### T-226 ruby: the interpreter ignores singleton `to_s`/`inspect`; no `instance_variable_set` · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
 `def o.to_s; "X"; end; puts o` / `p o` with a singleton inspect: the compiled halves
 honour it, the interpreter does not (halves divergence). `instance_variable_set` is
 missing in the interpreter.
 
-### T-227 ruby: `sym.length` aborts compiled · P1 · RB · OPEN [V]
+### T-227 ruby: `sym.length` aborts compiled · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
 `:abc.length` / `.size`: compiled halves "len() of a symbol" (the lowered `js_pylen`
 has no Symbol arm; the Go `js_pylen` is shared - prefer a ruby-specific lowering).
 
-### T-228 ruby: top-level locals and top-level defs share one namespace · P1 · RB · OPEN [V]
+### T-228 ruby: top-level locals and top-level defs share one namespace · P1 · RB · IN PROGRESS (RB worker, round 3) [V]
 `def w; 10; end; w = 4; p w -1` - compiler calls 4 ("call of a non function value: 4")
 and the def is overwritten; MRI prints 3, and `w()` still calls the method.
 
-### T-229 ruby: `Math.atan2` is one ulp from MRI · P3 · RB · OPEN [V]
+### T-229 ruby: `Math.atan2` is one ulp from MRI · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
 e.g. `Math.atan2(3, 0.5)`, all three engines agree with each other. Check whether MRI
 uses the platform libm (then compare against C atan2 on this machine) before porting.
 
-### T-231 ruby: `NotLocalCmd` reads scopes from indentation · P3 · RB · OPEN [V]
+### T-231 ruby: `NotLocalCmd` reads scopes from indentation · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
 The parse guard that keeps `x -1` (local x) a subtraction rebuilds the local table from
 the source by indentation; unusual indentation misleads it. Replace with a walk-time
 local table (the grammar sees assignments before uses) if the PEG allows it; else
 document the limit at the site and close.
 
-### T-232 ruby: `defined?` residual gaps · P3 · RB · OPEN [V]
+### T-232 ruby: `defined?` residual gaps · P3 · RB · IN PROGRESS (RB worker, round 3) [V]
 `defined?(nil + 1)` and `defined?(x.nope)` give "method" (MRI nil - the receiver's
 respond-check); `defined?(Math::PI)` nil (MRI "constant"); `defined?(not x)` nil (MRI
 "method").
@@ -374,15 +374,34 @@ justifying the cell contradicts the spec).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-130 lua: no `error` / `pcall` / `xpcall` · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-Without them, "catchable" is vacuous, and the compiled halves' `member 'q' of
-undefined` cannot be brought onto the interpreter's `attempt to index a nil value`.
-Needs a throw/catch surface: 2 grammars + layer 2 + twin. Error values, levels and
-the `file:line:` prefix: match lua.
+### T-245 lua: the string library lacks `find`, `gsub` (and check `match`, `gmatch`, `format`, `byte`, `char`, `reverse`) · P1 · LUA · OPEN [V]
+`print(string.find("abc","b",1,true), string.gsub("aa","a","b"))`: "attempt to call a
+nil value" in all engines; lua `2 2 bb 2`. Lua patterns (not regex) - implement once,
+shared by the interpreter and layer 2 if possible. Also `select` (and `select('#')`).
 
-### T-131 lua: a subnormal float key read back through `pairs()` compares unequal · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
-Compiled halves only (the interpreter was fixed): the key comes back as a different
-double, so `k == orig` is false.
+### T-246 lua: errors lack lua 5.5's variable-name suffix · P2 · LUA · OPEN [V]
+lua says `attempt to index a nil value (local 't')` / `(global 'x')` / `(upvalue 'u')` /
+`(field 'a')` / `(method 'm')` / `(constant '3')`; no engine does. Needs declared-name
+tracking in the emitter, the failing operand from js_luarith, and a top-level frame in
+the interpreter to tell top-level locals from globals.
+
+### T-247 lua: "bad argument" wording and argument checks · P1 · LUA · OPEN [V]
+Ours `bad argument to 'floor' (number expected)`; lua `bad argument #1 to 'floor'
+(number expected, got string)` ('math.floor' when pcall calls it directly).
+`math.sqrt("x")` answers nan compiled where the interpreter raises.
+
+### T-248 lua: smaller error-semantics gaps · P2 · LUA · OPEN [V]
+(a) a function that runs off its end returns nil instead of no value (`print(f())`
+prints "nil", lua an empty line; `pcall(function() end)` gives "true nil") - assertable
+once `select('#')` exists (T-245); (b) indexing a float holding an integer (`2.0`)
+answers nil compiled, lua raises; (c) errors are positioned at the statement's first
+line, lua uses the failing operation's line; (d) an error inside an xpcall handler
+propagates, lua answers "error in error handling". Also: the Lua native SHOULD ABORT
+matrix row could now compare all three engines.
+
+### T-249 lua: numeric table keys are very slow natively · P2 · LUA · OPEN [V]
+`t[i%100] = i; s = s + t[i%50]` for 3,000,000 passes retires ~422e9 instructions
+(~140k per pass). Profile (`sample`) and fix; add a bench row if it is a common shape.
 
 ---
 
@@ -575,6 +594,8 @@ T-120 php: an undefined `$variable` aborts — DONE dfacc00 (new floor primitive
 T-121 php: variable scope leaks into every function — PARTIAL dfacc00 (frame-local variables, global, use, closures); `$GLOBALS` is T-242
 T-122 php: `empty($undef)` aborts; `$u[0] = 1` does not vivify — DONE 43216af
 T-123 php: top-level `label:`/`goto` or a bare `{ … }` block aborts — DONE 6a92762 (no compile-core change needed)
+T-130 lua: no `error` / `pcall` / `xpcall` — DONE d481647 867a60c 4a6a09d f7bc81a c51b379
+T-131 lua: a subnormal float key read back through `pairs()` compares unequal — DONE 6575958 (every numeric key, not only subnormals)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
