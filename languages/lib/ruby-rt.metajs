@@ -8151,6 +8151,9 @@ function js_rmethodval(scope, name) {
     self = undefined
     s = scope
     while (s !== undefined && s !== null) {
+        // A def's own slot, which a local of the same name cannot overwrite
+        // (curTopLocals in ruby-to-llvm-ir.abnf).
+        if (scopeHas(s, "$d$" + n)) { return rbMarkMethodVal(scopeGet(s, "$d$" + n), "Object", n) }
         if (scopeHas(s, n)) {
             v = scopeGet(s, n)
             // A top-level `def' is a scope variable holding its own closure, so

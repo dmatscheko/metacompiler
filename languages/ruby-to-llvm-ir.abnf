@@ -3633,6 +3633,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function defLocalAdd(name) {
         if (curDefLocals.m["$" + name] !== true) { curDefLocals.m["$" + name] = true; curDefLocals.l.push(name) }
     }
+    // The same set for the code outside every def (the top level and the blocks in
+    // it). A local and a def of one name are two things in MRI: a bare name bound
+    // as a local so far reads the local, anything else calls the def - which lives
+    // under "$d$" + name as well, because the local overwrites the plain slot.
+    var curTopLocals = {m: {}, l: []}
+    function topLocalAdd(name) {
+        if (curTopLocals.m["$" + name] !== true) { curTopLocals.m["$" + name] = true; curTopLocals.l.push(name) }
+    }
+    function knownLocal(name) {
+        if (curDefLocals != null) { return curDefLocals.m["$" + name] === true }
+        return curTopLocals.m["$" + name] === true
+    }
     function isLocalName(name) {
         var c0 = name.charCodeAt(0)
         return (c0 >= 97 && c0 <= 122) || c0 == 95
@@ -3657,7 +3669,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         } else {
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
         }
-        if (curDefLocals != null) { defLocalAdd(name) }
+        if (curDefLocals != null) { defLocalAdd(name) } else if (local) { topLocalAdd(name) }
         return b
     }
     // The write half of emitHead: the four kinds of un-pathed target.
@@ -4880,12 +4892,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (callHasBlk) {
                 return emitBlkBreakCall(b, function(bb) {
-                    var fv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, name)])
+                    var fv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, calleeKey(name))])
                     var ia = emitArgs(bb, args)
                     return {b: ia.b, v: callExt(ia.b, "js_call", [fv, hUndef, ia.v])}
                 })
             }
-            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, calleeKey(name))])
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
@@ -4894,6 +4906,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The no-block tail of makeCall, as a function: what a plain `name(args)` emits
     // when nothing above claimed the name. It is what the printf / p arms fall back
     // to when the program defines a method of that name itself.
+    // The scope slot a call of `name` reads: a def's own (see curTopLocals).
+    function calleeKey(name) { return rubyMethods["$" + name] === true ? "$d$" + name : name }
     function makePlainCall(name, args) {
         return function(b) {
             if (selfMethod(curClsName, name)) {
@@ -4902,7 +4916,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = eam.b
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
             }
-            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, calleeKey(name))])
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
@@ -5097,6 +5111,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // but keeps what it binds itself; a begin/rescue/ensure closure IS its
         // enclosing scope as far as Ruby is concerned.
         var savedDefLocals = curDefLocals
+        var savedTopLocals = curTopLocals
         var savedDefFn = curDefFn
         var savedCtlDepth = curCtlDepth
         curDefFn = declBlk === true
@@ -5110,6 +5125,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (curDefLocals != null) {
             var pn = paramNames(params)
             for (var pi = 0; pi < pn.length; pi++) { if (typeof pn[pi] == "string") { defLocalAdd(pn[pi]) } }
+        } else if (isCtl !== true) {
+            var outerT = curTopLocals
+            curTopLocals = {m: {}, l: []}
+            for (var tk = 0; tk < outerT.l.length; tk++) { topLocalAdd(outerT.l[tk]) }
+            var tpn = paramNames(params)
+            for (var tpi = 0; tpi < tpn.length; tpi++) { if (typeof tpn[tpi] == "string") { topLocalAdd(tpn[tpi]) } }
         }
         // A def (or a method in a class body) is the frame a block's `return' leaves;
         // a block inherits the method it was written in. emitBlkArg is consumed once
@@ -5164,6 +5185,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         emitBlkArg = savedBlkArg
         curHasSelf = savedHasSelf
         curDefLocals = savedDefLocals
+        curTopLocals = savedTopLocals
         curDefFn = savedDefFn
         curCtlDepth = savedCtlDepth
         return idx
@@ -6156,11 +6178,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rubyMethods["$" + name] !== true && inDefFrame(name)) {
                 return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])}
             }
-            var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
-            if (rubyMethods["$" + name] === true) {
-                v = callExt(b, "js_call", [v, hUndef, callExt(b, "js_arr_new", [])])
+            if (rubyMethods["$" + name] === true && !knownLocal(name)) {
+                var dV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$d$" + name)])
+                return {b: b, v: callExt(b, "js_call", [dV, hUndef, callExt(b, "js_arr_new", [])])}
             }
-            return {b: b, v: v}
+            return {b: b, v: callExt(b, inDefFrame(name) ? "js_rlvar" : "js_scope_get", [curScopeV, emitStr(b, name)])}
         }
     }
     // The class registry: filled by makeClassStmt while the tags run, consulted while
@@ -6259,9 +6281,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curMethName = savedMN
             curMethParams = savedMP
             // Recorded for Proc#arity exactly as a class method is - see emitMethods.
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name),
-                                         emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]),
-                                                   fn.params)])
+            // A local of the same name bound earlier keeps its slot (see
+            // curTopLocals); every call reads "$d$" + name.
+            var cloV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), fn.params)
+            if (!knownLocal(fn.name)) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name), cloV]) }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$d$" + fn.name), cloV])
             return {b: b, v: hNull}
         }
     }

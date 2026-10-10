@@ -3249,6 +3249,31 @@ def s67
   check("le67b", o[0].length == 3 && o[0].size == 4 && o[0]&.length == 3 && m.size == 3 && m.length == 3)
 end
 
+# ===== SECTION 68: a top-level local and a def of the same name are two things =====
+# Once `s68w = 4` binds the local, a bare `s68w` reads it and `s68w -1` subtracts,
+# while `s68w()` and `s68w 1` still call the method, and a def body (which cannot
+# see the local) calls it too. A def after the local does not overwrite it. Every
+# right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER
+# REAL RUBY.
+def s68w(x = 10)
+  x
+end
+S68A = [s68w]
+s68w = 4
+S68A.push(s68w -1, s68w(), s68w, s68w(7), method(:s68w).call)
+s68k = 5
+def s68k
+  50
+end
+S68A.push(s68k, s68k())
+[1].each { |s68w| S68A.push(s68w) }
+def s68in
+  s68w
+end
+def s68
+  check("lv68a", S68A == [10, 3, 10, 4, 7, 10, 5, 50, 1] && s68in == 10)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3278,5 +3303,6 @@ s64() # SECTION-CALL 64
 s65() # SECTION-CALL 65
 s66() # SECTION-CALL 66
 s67() # SECTION-CALL 67
+s68() # SECTION-CALL 68
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -9598,6 +9598,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (bf == null) { return mcall(findSelf(), name, argv, null) }
                 return catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) })
             }
+            if ((f == undefined || typeof f != "function") && rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
+                f = getVar("$d$" + name)
+            }
             if (f == undefined) { f = getVar(name) }
             // Kernel#Integer / #Float / #String / #Array before the class arm: the
             // name resolves to the builtin CLASS object, and calling that would build
@@ -10253,7 +10256,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return function() { return singPut(recvT(), fn.name, makeMethodClosure(fn)) }
         }
         rubyMethods["$" + fn.name] = true
-        return function() { declVar(fn.name, makeFunClosure(fn)); return null }
+        return function() { defDecl(fn.name, makeFunClosure(fn)); return null }
+    }
+    // A local and a def of one name are two things in MRI: the def also lives under
+    // "$d$" + name, which is what a call reads, because a local assignment overwrites
+    // the plain slot - and a def does not overwrite a local bound before it. Twin of
+    // curTopLocals in ruby-to-llvm-ir.abnf.
+    function defDecl(name, clo) {
+        var sc = scopes[scopes.length - 1]
+        if (!hasOwn(sc, name) || (hasOwn(sc, "$d$" + name) && sc[name] === sc["$d$" + name])) { declVar(name, clo) }
+        declVar("$d$" + name, clo)
     }
     // A bare name inside a method body may also be a method of `self` (Ruby's
     // implicit receiver), which is how `intro` reaches the overridden `speak`.
@@ -10286,10 +10298,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var sm2 = anytype
             sm2 = selfMethod(name)
             if (typeof sm2 == "function") { return mcall(findSelf(), name, [], null) }
-            if (rubyMethods["$" + name] === true) {
+            // A def, unless a top-level local of its name has been bound (a def body
+            // cannot see that local).
+            if (rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
                 var f = anytype
-                f = hasOwn(globalScope, name) ? globalScope[name] : undefined
-                if (typeof f == "function") { return f() }
+                f = getVar("$d$" + name)
+                if (frameScopeOf(scopes) != null || !hasOwn(globalScope, name) || globalScope[name] === f) { return f() }
             }
             // A def does not see the locals around it: inside a method the loop above
             // searched its whole own frame, and what globalScope holds under a local
@@ -10513,7 +10527,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // to the same closure, and registered as a no-argument method so a bare
             // reference to it CALLS it (which is what makeDefStmt does for a def).
             rubyMethods["$" + newName] = true
-            rubySet(newName, getVar(oldName))
+            var am = anytype
+            am = hasVar("$d$" + oldName) ? getVar("$d$" + oldName) : getVar(oldName)
+            defDecl(newName, am)
             return null
         }
     }
@@ -11711,7 +11727,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var res = anytype
         res = undefined
         for (var mi = scopes.length - 1; mi >= 0 && res == undefined; mi--) {
-            if (hasOwn(scopes[mi], n)) { res = scopes[mi][n] }
+            if (hasOwn(scopes[mi], "$d$" + n)) { res = scopes[mi]["$d$" + n] }
+            else if (hasOwn(scopes[mi], n)) { res = scopes[mi][n] }
         }
         // A top-level `def' is a scope variable holding its own closure, so THAT is
         // the Method value - MRI's owner for one is Object.

@@ -13462,6 +13462,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			name := rt.toString(u(a[1]))
 			var self interface{} = jsNull
 			for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+				// A def's own slot, which a local of the same name cannot overwrite
+				// (curTopLocals in ruby-to-llvm-ir.abnf).
+				if v, ok := sc.get("$d$" + name); ok && isCallable(v) {
+					return w(rt.rubyMarkMethodVal(v, "Object", name))
+				}
 				if v, ok := sc.get(name); ok && isCallable(v) {
 					// A top-level `def` is a scope variable holding its own
 					// closure, so THAT is the Method value; MRI's owner for one
