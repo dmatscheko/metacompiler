@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-269** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-273** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -302,28 +302,24 @@ One line in goConvFail; gofmt it.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-233 swift: a Dictionary as a Sequence · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
-`for e in d` with one binder binds the key (swiftc `(key: "a", value: 1)`); `d.map`,
-`d.filter`, `first(where:)`, `min(by:)`, `sorted(by:)` abort ("unknown Dictionary
-method"). All engines.
+### T-269 swift: a top-level observed var does not fire · P1 · SW · OPEN [V]
+`var w = 0 { didSet { print("set", w) } }; w = 3`: swiftc `set 3`; all engines print
+nothing.
 
-### T-234 swift: `hasPrefix` / `contains` on String abort compiled · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
-`"abc".hasPrefix("ab")`, `"abc".contains("b")`: llvm.Run and native "unknown String
-method"; interpreter `true` (= swiftc). Audit the compiled String surface against the
-interpreter's.
+### T-270 swift: generic-argument call syntax · P1 · SW · OPEN [V]
+`Optional<Int>(5)` - the interpreter reads a comparison and prints `false`, the
+compiler "variable not defined" / no parse; `Array<Int>()`, `Dictionary<String,
+Int>()`, `Set<Int>()`. swiftc `5`, `0`.
 
-### T-235 swift: `Optional(2.5)` and `Optional.map` · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
-"unknown name: Optional" in all engines; `first.map { String($0) } ?? "-"`: interpreter
-"method .map on nil", compiler "method call 'map' on a object"; swiftc `h` / `-`. Also
-`flatMap`.
+### T-271 swift: missing String/Array/Dictionary members · P1 · SW · OPEN [V]
+All engines abort: String `split(separator:)`, `firstIndex(of:)`/`firstIndex(where:)`,
+`.utf8`/`.unicodeScalars`/`.lazy` (`.count`), `Character("b")`, `Set(s)`; Array
+`split`, `starts(with:)`, `elementsEqual`, `drop(while:)`; Dictionary `mapValues`;
+`s.description` is nil. `[3,1,2].prefix(while: { $0 > 2 })` gives `[]` in the
+interpreter and llvm.Run (swiftc `[3]`).
 
-### T-236 swift: a bare trailing closure call in expression position, compiler only · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
-`return filter { $0 > 1 }` inside an Array extension: compiler "variable not defined:
-filter"; interpreter `[2, 3]` (= swiftc).
-
-### T-237 swift: extension-only members through a protocol type with no declared receiver · P3 · SW · IN PROGRESS (SW worker, round 3) [V]
-`f().shout` / `a.b.shout` where the static type is a protocol still dispatch to the
-conforming type's own member; swiftc binds the extension. Needs an expression typer.
+### T-272 swift: an untyped closure parameter is not inferred from the return type · P2 · SW · OPEN [V]
+`{ x -> Double in x / 2 }(3)` gives 1.0, swiftc 1.5. All engines.
 
 ---
 
@@ -610,6 +606,11 @@ T-221 python: `\N{...}` outside a 14-entry table silently becomes "" — DONE 90
 T-222 python: complex numbers - abs, infinities, general powers, division — DONE 7f150bf (software FMA in MetaJS; non-integral powers inherit the libm last-digit gap, T-265)
 T-239 go: panic texts name user types without `main.` — DONE 13a26a4
 T-241 go: fmt `%T`, `%p`, `%#v`, `%!(EXTRA ...)`, printability — DONE c907fc9 (pointer/nil-chan/func-signature limits are T-266)
+T-233 swift: a Dictionary as a Sequence — DONE 235b31a
+T-234 swift: `hasPrefix` / `contains` on String abort compiled — DONE 235b31a
+T-235 swift: `Optional(2.5)` and `Optional.map` — DONE bf62c55 (`Optional<Int>(5)` is T-270)
+T-236 swift: a bare trailing closure call in expression position, compiler only — DONE 07442bf
+T-237 swift: extension-only members through a protocol type with no declared receiver — DONE bf62c55 (method-call results stay dynamic)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
