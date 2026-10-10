@@ -7167,6 +7167,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // String#sub / #gsub. With a block the block produces the replacement; with a
     // string it is expanded, and Ruby's \1 spelling is what lib/regex.js expands.
+    // The pattern that matches the text s literally: every metacharacter of
+    // lib/regex.js backslashed. Twins: rbRxQuoteLit in lib/ruby-rt.metajs,
+    // rxQuoteText in abnf/jsrtregex.go.
+    function rxQuoteLit(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            if (rxIsMetaCh(s.charAt(i))) { out += "\\" }
+            out += s.charAt(i)
+        }
+        return out
+    }
     function reSub(rv, s, args, blk, all) {
         if (blk !== null && blk !== undefined) {
             var out = ""
@@ -7540,6 +7551,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return undefined
     }
     // The methods of the boxed numerics (Float, Rational, Complex).
+    // Is a Complex part an infinite Float?
+    function cpxPartInf(v) { return isFlo(v) && v.f === v.f && v.f - v.f !== 0 }
     function numberMethod(t, name, args, blk) {
         if (isCpx(t)) {
             var cv = anytype
@@ -7576,12 +7589,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "zero?") { return toF(t) == 0 }
         if (name == "positive?") { return toF(t) > 0 }
         if (name == "negative?") { return toF(t) < 0 }
-        // Float#nan? / #infinite? / #finite?. #infinite? answers 1, -1 or NIL - not
-        // a boolean.
-        if (name == "nan?") { var xn = toF(t); return xn !== xn }
-        if (name == "finite?") { var xk = toF(t); return xk === xk && xk - xk === 0 }
+        // #nan? / #infinite? / #finite?: only a Float has #nan?, a Rational is
+        // always finite and a Complex is when both parts are. #infinite? answers 1,
+        // -1 or NIL - not a boolean. Twin of rubyFloPredicate in abnf/jsrtruby.go.
+        if (name == "nan?" && isFlo(t)) { var xn = toF(t); return xn !== xn }
+        if (isCpx(t) && (name == "finite?" || name == "infinite?")) {
+            var cinf = cpxPartInf(t.re) || cpxPartInf(t.im)
+            if (name == "finite?") { return !cinf }
+            return cinf ? 1 : null
+        }
+        if (name == "finite?") { var xk = isFlo(t) ? t.f : 0; return xk === xk && xk - xk === 0 }
         if (name == "infinite?") {
-            var xi = toF(t)
+            var xi = isFlo(t) ? t.f : 0
             if (xi !== xi || xi - xi === 0) { return null }
             return xi > 0 ? 1 : 0 - 1
         }
@@ -7669,8 +7688,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "nil?") { return target === null || target === undefined }
         if (name == "frozen?") { return typeof target == "string" || isSym(target) || isNumV(target) }
         if (name == "equal?") { return identicalP(target, args[0]) }
-        if (name == "hash" || name == "object_id") { return 0 }
+        // Object#hash / #object_id: 0 unless a user class defines its own.
+        if ((name == "hash" || name == "object_id") && !(isUserObj(target) && singRespond(target, name))) { return 0 }
         if (name == "tap") { blockCall(blk, [target]); return target }
+        // Kernel#itself, unless a user class defines its own.
+        if (name == "itself" && !(isUserObj(target) && singRespond(target, "itself"))) { return target }
         // Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
         // Float, Rational and String all answer them off one pair of arms - which
         // is why they sit here and not in three method tables. A user class that
@@ -7688,6 +7710,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_sym") { return target }
             if (name == "inspect") { return ":" + target.s }
             if (name == "length" || name == "size") { return charCount(target.s) }
+            // Symbol's case and successor methods are the String ones on its name.
+            if (name == "upcase" || name == "downcase" || name == "swapcase" || name == "capitalize"
+                || name == "succ" || name == "next") { return mkSym(rstr(mcall(target.s, name, args, null))) }
+            if (name == "empty?") { return target.s == "" }
             if (name == "to_proc") { return function(x) { return mcall(x, target.s, [], null) } }
             fail("unknown Symbol method: " + name)
         }
@@ -7751,6 +7777,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "succ" || name == "next") { return numBin("+", target, 1) }
             if (name == "pred") { return numBin("-", target, 1) }
             if (name == "integer?") { return true }
+            // Integer#chr: one byte, so 0..255; anything else is a RangeError.
+            if (name == "chr") {
+                if (target < 0 || target > 255) { raiseErr("RangeError", intStr(target) + " out of char range") }
+                return String.fromCharCode(target)
+            }
+            if (name == "gcd") {
+                if (typeof args[0] != "number" && !isBig(args[0])) { raiseErr("TypeError", "not an integer") }
+                return gcd2(target, toF(args[0]))
+            }
+            // Integer is a real number with denominator 1, always finite.
+            if (name == "numerator" || name == "real") { return target }
+            if (name == "denominator") { return 1 }
+            if (name == "imaginary" || name == "imag") { return 0 }
+            if (name == "magnitude") { return target < 0 ? 0 - target : target }
+            if (name == "finite?") { return true }
+            if (name == "infinite?") { return null }
             if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(target, name, args) }
             if (name == "fdiv") { return mkFlo(intFdiv(target, args[0])) }
             if (name == "pow") { return rbin("**", target, args[0]) }
@@ -7810,11 +7852,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "replace") { return rstr(args[0]) }
             if (name == "each_char") { for (var sc = 0; sc < target.length; sc++) { blockCall(blk, [target.charAt(sc)]) } return target }
             if (name == "include?") { return target.indexOf(rstr(args[0])) >= 0 }
-            // The pattern-taking String methods. match/match? accept a plain string
-            // too (Ruby compiles it to a Regexp), so the argument is normalized here.
+            // The pattern-taking String methods. match/match? compile a plain string
+            // to a Regexp, and sub / gsub / scan match it LITERALLY ("a.c".gsub(".",
+            // "-") is "a-c"), so the argument is normalized here.
             if (name == "match" || name == "match?" || name == "=~" || name == "scan"
                 || name == "sub" || name == "gsub" || name == "sub!" || name == "gsub!") {
-                var rv = isRegex(args[0]) ? args[0] : mkRegex(rstr(args[0]), "")
+                var psrc = isRegex(args[0]) ? "" : rstr(args[0])
+                if (name != "match" && name != "match?" && name != "=~") { psrc = rxQuoteLit(psrc) }
+                var rv = isRegex(args[0]) ? args[0] : mkRegex(psrc, "")
                 if (name == "match") { return reMatch(rv, target, args.length > 1 ? toF(args[1]) : 0) }
                 if (name == "match?") { return rxSearch(rv.prog, target, 0) !== null }
                 if (name == "=~") { return reMatchOp(rv, target) }

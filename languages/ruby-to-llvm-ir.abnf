@@ -7208,7 +7208,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         "String", "Symbol", "Array", "Hash", "Range", "Proc",
         // Method is what `method(:x)' answers to #class, and `m.is_a?(Method)' is
         // the ordinary way to ask.
-        "Method", "NilClass", "TrueClass",
+        "Method", "NilClass", "TrueClass", "Regexp", "MatchData",
         "FalseClass", "Object", "BasicObject", "Kernel", "Comparable", "Enumerable",
         "Enumerator",
         // Class and Module are what a class object and a module object ANSWER to

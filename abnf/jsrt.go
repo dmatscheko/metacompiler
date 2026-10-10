@@ -5759,6 +5759,14 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	}
 	x := rubyToF(t)
 	_, isInt := t.(float64)
+	_, isBig := t.(*jsBigInt)
+	// Integer's own methods, which Float, Rational and Complex do not have.
+	if !isInt && !isBig {
+		switch name {
+		case "even?", "odd?", "succ", "next", "pred", "chr", "times", "upto", "downto", "gcd":
+			return nil, false
+		}
+	}
 	switch name {
 	case "to_s", "inspect":
 		if isInt && len(args) > 0 {
@@ -5842,7 +5850,11 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return rt.rubyNumBin("+", t, float64(1)), true
 	case "pred":
 		return rt.rubyNumBin("-", t, float64(1)), true
+	// Integer#chr: one byte, so 0..255; anything else is a RangeError.
 	case "chr":
+		if x < 0 || x > 255 {
+			rt.rubyRaiseErr("RangeError", rubyIntStr(x)+" out of char range")
+		}
 		return string(rune(int32(x))), true
 	case "integer?":
 		return isInt, true
@@ -5875,7 +5887,13 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "pow", "**":
 		return rt.rubyBin("**", t, argAt(args, 0)), true
 	case "gcd":
-		return rubyGcd(x, rubyToF(argAt(args, 0))), true
+		y := argAt(args, 0)
+		if _, yInt := y.(float64); !yInt {
+			if _, yBig := y.(*jsBigInt); !yBig {
+				rt.rubyRaiseErr("TypeError", "not an integer")
+			}
+		}
+		return rubyGcd(x, rubyToF(y)), true
 	// between? / clamp are not here: they are Comparable's, shared with String,
 	// and must be exact on a big Integer - rubyMethod answers both through
 	// rubySpaceship before this table is reached.
@@ -6038,6 +6056,12 @@ func rubyClassName(v interface{}) string {
 		// the hash-key comparison, and the emitter's own `*r' splat test.
 		if _, isRng := t.props["__rrange"]; isRng {
 			return "Range"
+		}
+		if rxIsRegexObj(t) {
+			return "Regexp"
+		}
+		if rxIsMatchObj(t) {
+			return "MatchData"
 		}
 	}
 	// A Proc / lambda / block closure: `blk.class`, `blk.is_a?(Proc)`.
@@ -9257,6 +9281,14 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if mn == "respond_to?" {
 			return rt.rubyRespond(target, args[1:])
 		}
+		// A Regexp / MatchData method, or a String one taking a pattern, is the
+		// regexp half's (js_rxmcall's dispatch).
+		_, isStr := target.(string)
+		if rxIsRegexObj(target) || rxIsMatchObj(target) || (isStr && rxWantsPattern(mn)) {
+			if v, handled := rt.rxRegexMethod(target, mn, args[1:]); handled {
+				return v
+			}
+		}
 		return rt.rubyMethod(target, mn, args[1:])
 	}
 	// Ruby's universal reflective methods, answered for every kind of value.
@@ -9271,6 +9303,21 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		}
 	case "nil?":
 		return isUndefOrNull(target)
+	// Kernel#itself / #tap, unless a user class defines its own.
+	case "itself", "tap":
+		if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+			if name == "tap" {
+				_, blk := rubyBlockArgs(args)
+				rt.call(blk, jsUndef, []interface{}{target})
+			}
+			return target
+		}
+	// Object#hash / #object_id: 0 unless a user class defines its own, as in the
+	// other two engines.
+	case "hash", "object_id":
+		if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+			return float64(0)
+		}
 	case "to_s", "inspect":
 		// TrueClass / FalseClass, ahead of the shared memberCall.
 		if bv, isBool := target.(bool); isBool {
@@ -9300,14 +9347,12 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	// than by a `raise', and one that was never raised at all, has no site and
 	// answers nil, which is what MRI does for an un-raised exception object.
 	case "backtrace":
-		if o, isObj := target.(*jsObject); isObj {
-			if _, isCls := o.props["__isclass"]; !isCls {
-				if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
-					if where, isStr := o.props["__rwhere"].(string); isStr {
-						return &jsArray{elems: []interface{}{where}}
-					}
-					return jsNull
+		if o, isObj := target.(*jsObject); isObj && rubyExcInst(o) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				if where, isStr := o.props["__rwhere"].(string); isStr {
+					return &jsArray{elems: []interface{}{where}}
 				}
+				return jsNull
 			}
 		}
 	case "message", "full_message":
@@ -9459,10 +9504,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return float64(rubyCharCount(o.s))
 		case "inspect":
 			return ":" + o.s
-		case "upcase":
-			return jsSym{s: strings.ToUpper(o.s)}
-		case "downcase":
-			return jsSym{s: strings.ToLower(o.s)}
+		// Symbol's case and successor methods are the String ones on its name.
+		case "upcase", "downcase", "swapcase", "capitalize", "succ", "next":
+			return jsSym{s: rt.rubyStr(rt.rubyMethod(o.s, name, args))}
+		case "empty?":
+			return o.s == ""
+		case "to_proc":
+			return rt.rubySymProc(o.s)
 		}
 		rt.fail("unknown Symbol method: %s", name)
 	case string:
@@ -9949,6 +9997,19 @@ func rubyRand(v interface{}) interface{} {
 		return jsFlo{f: 0}
 	}
 	return float64(0)
+}
+
+// rubySymProc is Symbol#to_proc (and `&:name`): the proc that calls the method
+// `name` on its first argument with the rest. Twin of js_rsymproc in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubySymProc(name string) *hostFunc {
+	return &hostFunc{name: "&:" + name, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		rest := []interface{}{}
+		if len(args) > 1 {
+			rest = args[1:]
+		}
+		return rt.rubyMethod(argAt(args, 0), name, rest)
+	}}
 }
 
 // rubyBlockArgs splits a Ruby argument list into its positional part and the
@@ -13091,17 +13152,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// ----- Ruby's numeric tower and operators (see the jsFlo/jsRat/jsCpx types) -----
 		// Only ruby-to-llvm-ir.abnf emits these; every other grammar keeps the shared
 		// js_jadd/js_sub/... operators, whose semantics are untouched by them.
-		"js_rflo": func(a []uint64) uint64 { return w(jsFlo{f: rt.toNumber(u(a[0]))}) },
-		"js_rrat": func(a []uint64) uint64 { return w(rubyMkRat(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])))) },
-		"js_rcpx": func(a []uint64) uint64 { return w(jsCpx{re: u(a[0]), im: u(a[1])}) },
-		"js_radd": func(a []uint64) uint64 { return w(rt.rubyBin("+", u(a[0]), u(a[1]))) },
-		"js_rsub": func(a []uint64) uint64 { return w(rt.rubyBin("-", u(a[0]), u(a[1]))) },
-		"js_rmul": func(a []uint64) uint64 { return w(rt.rubyBin("*", u(a[0]), u(a[1]))) },
-		"js_rdiv": func(a []uint64) uint64 { return w(rt.rubyBin("/", u(a[0]), u(a[1]))) },
-		"js_rmod": func(a []uint64) uint64 { return w(rt.rubyBin("%", u(a[0]), u(a[1]))) },
-		"js_rpow": func(a []uint64) uint64 { return w(rt.rubyBin("**", u(a[0]), u(a[1]))) },
+		"js_rflo":  func(a []uint64) uint64 { return w(jsFlo{f: rt.toNumber(u(a[0]))}) },
+		"js_rrat":  func(a []uint64) uint64 { return w(rubyMkRat(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])))) },
+		"js_rcpx":  func(a []uint64) uint64 { return w(jsCpx{re: u(a[0]), im: u(a[1])}) },
+		"js_radd":  func(a []uint64) uint64 { return w(rt.rubyBin("+", u(a[0]), u(a[1]))) },
+		"js_rsub":  func(a []uint64) uint64 { return w(rt.rubyBin("-", u(a[0]), u(a[1]))) },
+		"js_rmul":  func(a []uint64) uint64 { return w(rt.rubyBin("*", u(a[0]), u(a[1]))) },
+		"js_rdiv":  func(a []uint64) uint64 { return w(rt.rubyBin("/", u(a[0]), u(a[1]))) },
+		"js_rmod":  func(a []uint64) uint64 { return w(rt.rubyBin("%", u(a[0]), u(a[1]))) },
+		"js_rpow":  func(a []uint64) uint64 { return w(rt.rubyBin("**", u(a[0]), u(a[1]))) },
 		"js_rband": func(a []uint64) uint64 { return w(rt.rubyLogicBin("&", u(a[0]), u(a[1]))) },
-		"js_rbor": func(a []uint64) uint64 { return w(rt.rubyLogicBin("|", u(a[0]), u(a[1]))) },
+		"js_rbor":  func(a []uint64) uint64 { return w(rt.rubyLogicBin("|", u(a[0]), u(a[1]))) },
 		"js_rbxor": func(a []uint64) uint64 { return w(rt.rubyLogicBin("^", u(a[0]), u(a[1]))) },
 		// << appends to an Array (in place, so `a << b << c` chains), concatenates a
 		// String and shifts an Integer - one operator, three receivers, like Ruby.
@@ -13453,14 +13514,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !isSym {
 				return a[0]
 			}
-			name := sym.s
-			return w(&hostFunc{name: "&:" + name, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				rest := []interface{}{}
-				if len(args) > 1 {
-					rest = args[1:]
-				}
-				return rt.rubyMethod(argAt(args, 0), name, rest)
-			}})
+			return w(rt.rubySymProc(sym.s))
 		},
 		// A BLOCK parameter read: Ruby auto-splats a single Array argument over a
 		// block that declares more than one parameter, so `[[1, [2, 3]]].each { |a,

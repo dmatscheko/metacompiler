@@ -282,6 +282,20 @@ func rxIsMetaCh(ch rune) bool {
 	return strings.ContainsRune("\\^$.|?*+()[]{}-#/ \t\n\r\f\v", ch)
 }
 
+// rxQuoteText is the pattern that matches the text s literally: every
+// metacharacter backslashed. Twins: rxQuoteLit in ruby-interpreter.abnf and
+// rbRxQuoteLit in lib/ruby-rt.metajs.
+func rxQuoteText(s string) string {
+	var b strings.Builder
+	for _, ch := range s {
+		if rxIsMetaCh(ch) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(ch)
+	}
+	return b.String()
+}
+
 // rxExpandQuotes rewrites every \Q...\E region into the equivalent escaped text, as a
 // PRE-PASS over the pattern rather than a parser mode. An unterminated \Q runs to the
 // end of the pattern (Java's rule). Doing it here means a quantifier after \E binds to
@@ -1829,9 +1843,27 @@ func (rt *jsrt) rxScan(reObj interface{}, s string) *jsArray {
 	return out
 }
 
-// rxReplace is String#sub / #gsub with a STRING replacement (the block form is
-// handled on the emitter side, which is where a closure can be called).
+// rxReplace is String#sub / #gsub with a STRING replacement.
 func (rt *jsrt) rxReplace(reObj interface{}, s, repl string, all bool) string {
+	return rt.rxReplaceWith(reObj, s, all, func(re *rxRe, text []rune, m *rxMatch) string {
+		return re.expand(text, m, repl)
+	})
+}
+
+// rxReplaceBlock is Ruby's String#sub / #gsub with a BLOCK: the block is handed
+// each match's text, with $~ set to that match, and answers its replacement.
+// Twins: reSub in ruby-interpreter.abnf, rbRxReplaceBlock in lib/ruby-rt.metajs.
+func (rt *jsrt) rxReplaceBlock(reObj interface{}, s string, blk interface{}, all bool) string {
+	return rt.rxReplaceWith(reObj, s, all, func(re *rxRe, text []rune, m *rxMatch) string {
+		rt.rxSetGlobals(rxNewMatchObj(re.src, re.flags, s, m))
+		g, _ := re.group(text, m, 0)
+		return rt.rubyStr(rt.call(blk, jsUndef, []interface{}{g}))
+	})
+}
+
+// rxReplaceWith walks the matches of a sub / gsub, each one's replacement text
+// coming from with.
+func (rt *jsrt) rxReplaceWith(reObj interface{}, s string, all bool, with func(*rxRe, []rune, *rxMatch) string) string {
 	re := rxObjRe(reObj)
 	text := []rune(s)
 	var out strings.Builder
@@ -1845,7 +1877,7 @@ func (rt *jsrt) rxReplace(reObj interface{}, s, repl string, all bool) string {
 			break
 		}
 		out.WriteString(string(text[last:m.begin]))
-		out.WriteString(re.expand(text, m, repl))
+		out.WriteString(with(re, text, m))
 		if m.end == m.begin {
 			// An empty match must still make progress or this loop never ends.
 			if m.end < len(text) {
@@ -1906,7 +1938,8 @@ func rxWantsPattern(name string) bool {
 }
 
 // rxRegexMethod answers a method call whose RECEIVER is a Regexp or a MatchData,
-// or ok=false when the name is none of theirs.
+// or ok=false when the name is none of theirs - rubyMethod then answers the
+// methods every object has (class, is_a?, send, frozen?, ...).
 func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{}) (interface{}, bool) {
 	if rxIsRegexObj(target) {
 		re := rxObjRe(target)
@@ -1947,10 +1980,8 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 			return "(?-mix:" + re.src + ")", true
 		case "inspect":
 			return "/" + re.src + "/" + re.flags, true
-		case "class":
-			return "Regexp", true
 		}
-		rt.fail("unknown Regexp method: %s", name)
+		return nil, false
 	}
 	if rxIsMatchObj(target) {
 		re, text, m := rxMatchOf(target)
@@ -2007,22 +2038,27 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 		case "inspect":
 			g, _ := re.group(text, m, 0)
 			return "#<MatchData \"" + g + "\">", true
-		case "class":
-			return "MatchData", true
 		}
-		rt.fail("unknown MatchData method: %s", name)
+		return nil, false
 	}
 	// A String receiver whose argument is a pattern: the pattern-taking half of
 	// Ruby's String methods, which the base js_rmcall knows nothing about.
 	if s, isStr := target.(string); isStr && len(args) > 0 {
 		switch name {
 		case "match", "match?", "=~", "scan", "sub", "gsub", "sub!", "gsub!", "split", "index":
-			reObj := args[0]
+			pos, blk := rubyBlockArgs(args)
+			reObj := argAt(pos, 0)
 			if !rxIsRegexObj(reObj) {
 				if name == "split" || name == "index" {
 					return nil, false // a plain-string argument stays the base behaviour
 				}
-				reObj = rxNewRegexObj(rt.rubyStr(args[0]), "m")
+				// #match / #match? compile a String pattern; #sub / #gsub / #scan
+				// match it LITERALLY ("a.c".gsub(".", "-") is "a-c").
+				src := rt.rubyStr(reObj)
+				if name != "match" && name != "match?" && name != "=~" {
+					src = rxQuoteText(src)
+				}
+				reObj = rxNewRegexObj(src, "m")
 			}
 			switch name {
 			case "match":
@@ -2041,10 +2077,12 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 				return rt.rxMatchOp(reObj, s), true
 			case "scan":
 				return rt.rxScan(reObj, s), true
-			case "sub", "sub!":
-				return rt.rxReplace(reObj, s, rt.rubyStr(argAt(args, 1)), false), true
-			case "gsub", "gsub!":
-				return rt.rxReplace(reObj, s, rt.rubyStr(argAt(args, 1)), true), true
+			case "sub", "sub!", "gsub", "gsub!":
+				all := name == "gsub" || name == "gsub!"
+				if blk != nil {
+					return rt.rxReplaceBlock(reObj, s, blk, all), true
+				}
+				return rt.rxReplace(reObj, s, rt.rubyStr(argAt(pos, 1)), all), true
 			case "split":
 				return rt.rxSplit(reObj, s), true
 			case "index":
@@ -2125,12 +2163,10 @@ func (rt *jsrt) addRegexExterns(m map[string]func(args []uint64) uint64) {
 		}
 		target := u(a[0])
 		name := rt.toString(u(a[1]))
-		// A STRING PATTERN reaches the regexp half too: Ruby compiles a String
-		// pattern to a Regexp, so `s.sub("a", "z")` is a regexp operation. That
-		// holds for sub, gsub, sub!, gsub!, match, match? (and =~ / scan, whose
-		// spellings a program rarely writes with a string). rxRegexMethod itself
-		// normalizes a String argument. split and index are NOT in the list: with a
-		// plain-string argument they are ordinary string operations.
+		// A STRING PATTERN reaches the regexp half too: sub, gsub, sub!, gsub!,
+		// match, match?, =~ and scan take one, and rxRegexMethod itself turns it into
+		// a Regexp (a literal one for sub / gsub / scan). split and index are NOT in
+		// the list: with a plain-string argument they are ordinary string operations.
 		_, targetIsStr := target.(string)
 		if rxIsRegexObj(target) || rxIsMatchObj(target) || rxIsRegexObj(argAt(arr.elems, 0)) ||
 			(targetIsStr && rxWantsPattern(name)) {

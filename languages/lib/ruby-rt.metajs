@@ -3480,6 +3480,8 @@ function rbClassName(v) {
     // gates `.class', `is_a?(Range)', `case r when Range', eql? and therefore the
     // hash-key comparison, and the emitter's own `*r' splat test.
     if (rbIsRange(v)) { return "Range" }
+    if (rbRxIsRegex(v)) { return "Regexp" }
+    if (rbRxIsMatch(v)) { return "MatchData" }
     // A Proc / lambda / block closure answers Proc.
     // A Method is a class of its own in MRI and is NOT a Proc, so this test comes
     // first and the Proc arm excludes it.
@@ -4311,6 +4313,48 @@ function rbRxScan(reObj, s) {
     return out
 }
 
+// The pattern that matches the text s literally: every metacharacter of
+// lib/regex.js backslashed. Twins: rxQuoteLit in ruby-interpreter.abnf,
+// rxQuoteText in abnf/jsrtregex.go.
+function rbRxQuoteLit(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        if (rxIsMetaCh(s.charAt(i))) { out = out + "\\" }
+        out = out + s.charAt(i)
+        i = i + 1
+    }
+    return out
+}
+
+// String#sub / #gsub with a BLOCK: the block is handed each match's text, with $~
+// set to that match, and answers its replacement. Twins: reSub in
+// ruby-interpreter.abnf, rxReplaceBlock in abnf/jsrtregex.go.
+function rbRxReplaceBlock(reObj, s, blk, all) {
+    var re = rbRxObjRe(reObj)
+    var out = ""
+    var at = 0
+    var last = 0
+    while (at <= s.length) {
+        var m = rxSearch(re, s, at)
+        if (m === null) { break }
+        rbRxSetGlobals(rbRxNewMatch(re["src"], re["flags"], s, m))
+        var g = rxGroup(re, s, m, 0)
+        out = out + s.substring(last, m["begin"]) + rbStr(rbCall1(blk, g === null ? "" : g))
+        if (m["end"] == m["begin"]) {
+            if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
+            last = m["end"] + 1
+            at = m["end"] + 1
+        } else {
+            last = m["end"]
+            at = m["end"]
+        }
+        if (!all) { break }
+    }
+    if (last <= s.length) { out = out + s.substring(last, s.length) }
+    return out
+}
+
 // The =~ operator: either operand may be the pattern, and the answer is the
 // INDEX of the match (not a boolean) or nil.
 function rbRxMatchOp(l, r) {
@@ -4337,8 +4381,9 @@ function rbRxMatchOp(l, r) {
 
 // rxRegexMethod answers a method call whose RECEIVER is a Regexp or a MatchData
 // (or a String with a pattern argument), and `undefined` when the name is none of
-// theirs - `undefined` is a safe miss sentinel because a Ruby method answers nil,
-// which is null here and never undefined.
+// theirs - rbMethod then answers the methods every object has. `undefined` is a
+// safe miss sentinel because a Ruby method answers nil, which is null here and
+// never undefined.
 function rbRxMethod(target, name, args) {
     if (rbRxIsRegex(target)) {
         var re = rbRxObjRe(target)
@@ -4357,8 +4402,7 @@ function rbRxMethod(target, name, args) {
         if (name == "names") { return rtCopyArr(re["names"]) }
         if (name == "to_s") { return "(?-mix:" + re["src"] + ")" }
         if (name == "inspect") { return "/" + re["src"] + "/" + re["flags"] }
-        if (name == "class") { return "Regexp" }
-        fail("unknown Regexp method: " + name)
+        return undefined
     }
     if (rbRxIsMatch(target)) {
         var mo = rbRxMatchOf(target)
@@ -4401,8 +4445,7 @@ function rbRxMethod(target, name, args) {
             var w2 = rxGroup(mre, text, m, 0)
             return "#<MatchData \"" + (w2 === null ? "" : w2) + "\">"
         }
-        if (name == "class") { return "MatchData" }
-        fail("unknown MatchData method: " + name)
+        return undefined
     }
     // A String receiver whose argument is a pattern: the pattern-taking half of
     // Ruby's String methods, which the base dispatch knows nothing about.
@@ -4421,7 +4464,15 @@ function rbRxMethod(target, name, args) {
         pat = args[0]
         if (!rbRxIsRegex(pat)) {
             if (name == "split" || name == "index") { return undefined }
-            pat = rbRxNewRegex(rbStr(args[0]), "m")
+            // #match / #match? compile a String pattern; #sub / #gsub / #scan match
+            // it LITERALLY ("a.c".gsub(".", "-") is "a-c").
+            var psrc = rbStr(args[0])
+            if (name != "match" && name != "match?" && name != "=~") { psrc = rbRxQuoteLit(psrc) }
+            pat = rbRxNewRegex(psrc, "m")
+        }
+        var sblk = rbBlockOf(args)
+        if (sblk !== null && (name == "sub" || name == "sub!" || name == "gsub" || name == "gsub!")) {
+            return rbRxReplaceBlock(pat, target, sblk, name == "gsub" || name == "gsub!")
         }
         if (name == "match") {
             var smd = rbRxRunMatch(pat, target, 0)
@@ -4680,6 +4731,11 @@ function rbNumMethod(t, name, args) {
     }
     var x = rbToF(t)
     var isInt = typeof t == "number"
+    // Integer's own methods, which Float, Rational and Complex do not have.
+    if (!isInt && !rtTag(t, "__bint")) {
+        if (name == "even?" || name == "odd?" || name == "succ" || name == "next" || name == "pred"
+            || name == "chr" || name == "times" || name == "upto" || name == "downto" || name == "gcd") { return undefined }
+    }
     if (name == "to_s" || name == "inspect") {
         // Past 2^53 rtBaseStr converts through int64 and SATURATES, so the exact
         // expansion does the base conversion instead.
@@ -4734,11 +4790,21 @@ function rbNumMethod(t, name, args) {
     if (name == "zero?") { return x == 0 }
     if (name == "positive?") { return x > 0 }
     if (name == "negative?") { return x < 0 }
-    // Float#nan? / #infinite? / #finite?. #infinite? answers 1, -1 or NIL, not a
-    // boolean.
-    if (name == "nan?") { return x !== x }
-    if (name == "finite?") { return x === x && x - x === 0 }
-    if (name == "infinite?") {
+    // #nan? / #infinite? / #finite?: only a Float has #nan?, and a Complex is
+    // finite when both parts are. #infinite? answers 1, -1 or NIL, not a boolean.
+    // Twin of rubyFloPredicate in abnf/jsrtruby.go.
+    if (name == "nan?") {
+        if (!rbIsFlo(t)) { return undefined }
+        return x !== x
+    }
+    if (name == "finite?" || name == "infinite?") {
+        if (rbIsCpx(t)) {
+            var cinf = rbNumMethod(t["re"], "infinite?", []) !== null || rbNumMethod(t["im"], "infinite?", []) !== null
+            if (name == "finite?") { return !cinf }
+            return cinf ? 1 : null
+        }
+        if (!rbIsFlo(t)) { x = 0 }
+        if (name == "finite?") { return x === x && x - x === 0 }
         if (x !== x || x - x === 0) { return null }
         return x > 0 ? 1 : 0 - 1
     }
@@ -4746,7 +4812,11 @@ function rbNumMethod(t, name, args) {
     if (name == "odd?") { return x - Math.floor(x / 2) * 2 != 0 }
     if (name == "succ" || name == "next") { return rbNumBin("+", t, 1) }
     if (name == "pred") { return rbNumBin("-", t, 1) }
-    if (name == "chr") { return String.fromCharCode(Math.trunc(x)) }
+    // Integer#chr: one byte, so 0..255; anything else is a RangeError.
+    if (name == "chr") {
+        if (x < 0 || x > 255) { rbRaiseErr("RangeError", rbStr(t) + " out of char range") }
+        return String.fromCharCode(Math.trunc(x))
+    }
     if (name == "integer?") { return isInt }
     if (name == "numerator") { return rbAsRat(t)["n"] }
     if (name == "denominator") { return rbAsRat(t)["d"] }
@@ -4784,7 +4854,11 @@ function rbNumMethod(t, name, args) {
     if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return rbNumDivOp(t, name, args) }
     if (name == "fdiv") { return rbMkFlo(rbIntFdiv(t, rbArgAt(args, 0))) }
     if (name == "pow" || name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
-    if (name == "gcd") { return rbGcd(x, rbToF(rbArgAt(args, 0))) }
+    if (name == "gcd") {
+        var gy = rbArgAt(args, 0)
+        if (typeof gy != "number" && !rtTag(gy, "__bint")) { rbRaiseErr("TypeError", "not an integer") }
+        return rbGcd(x, rbToF(gy))
+    }
     // between? / clamp are Comparable's, shared with String, and answered
     // exactly by rbMethod through rbSpaceship before this table is reached.
     if (name == "real") { return rbReOf(t) }
@@ -6379,7 +6453,9 @@ function rbMethod(target, name, args) {
         var si = 1
         while (si < args.length) { rest.push(args[si]); si = si + 1 }
         if (mn == "respond_to?") { return js_rrespond(target, rest) }
-        return rbMethod(target, mn, rest)
+        // js_rxmcall, so a Regexp / MatchData method or a String one taking a
+        // pattern reaches the regexp half.
+        return js_rxmcall(target, mn, rest)
     }
     // Ruby's universal reflective methods, answered for every kind of value.
     if (name == "class") {
@@ -6390,6 +6466,14 @@ function rbMethod(target, name, args) {
         if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
     }
     if (name == "nil?") { return rtIsNil(target) }
+    // Kernel#itself / #tap, unless a user class defines its own.
+    if ((name == "itself" || name == "tap") && rbFindMethod(target, name) === undefined) {
+        if (name == "tap") { rbCall1(rbBlockOf(args), target) }
+        return target
+    }
+    // Object#hash / #object_id: 0 unless a user class defines its own, as in the
+    // other two engines.
+    if ((name == "hash" || name == "object_id") && rbFindMethod(target, name) === undefined) { return 0 }
     // TrueClass / FalseClass, which would otherwise fall through to the shared
     // member call and abort.
     if (name == "to_s" || name == "inspect") {
@@ -6426,7 +6510,7 @@ function rbMethod(target, name, args) {
     // than by a `raise', and one that was never raised at all, has no site and
     // answers nil, which is exactly what MRI does for an un-raised exception object.
     if (name == "backtrace") {
-        if (rbIsObj(target) && target["__isclass"] !== true && rbFindMethod(target, name) === undefined) {
+        if (rbExcInst(target) && rbFindMethod(target, name) === undefined) {
             var bw = target["__rwhere"]
             if (typeof bw == "string") { return [bw] }
             return null
@@ -6526,8 +6610,11 @@ function rbMethod(target, name, args) {
         if (name == "to_sym") { return target }
         if (name == "length" || name == "size") { return rbCharCount(sn) }
         if (name == "inspect") { return ":" + sn }
-        if (name == "upcase") { return rbSym(rbUpper(sn)) }
-        if (name == "downcase") { return rbSym(rbLower(sn)) }
+        // Symbol's case and successor methods are the String ones on its name.
+        if (name == "upcase" || name == "downcase" || name == "swapcase" || name == "capitalize"
+            || name == "succ" || name == "next") { return rbSym(rbStr(rbMethod(sn, name, args))) }
+        if (name == "empty?") { return sn == "" }
+        if (name == "to_proc") { return js_rsymproc(target) }
         fail("unknown Symbol method: " + name)
     }
     if (typeof target == "string") {

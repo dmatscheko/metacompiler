@@ -3468,6 +3468,34 @@ def s75
                  f.instance_variables == [:@code] && f.message == "e:z" && f.dup.message == "e:z")
 end
 
+# ===== SECTION 76: the builtin method surface both halves answer alike =====
+# Kernel#itself / #tap on every value; Integer#chr / #gcd and its Numeric
+# readers; finite? / infinite? on every number but nan? on a Float only; the
+# Integer-only methods (succ, times, gcd, ...) absent from Float, Rational and
+# Complex; Symbol's String-derived methods and #to_proc; sub / gsub / scan taking a
+# String pattern LITERALLY, with a block too; and a Regexp / MatchData answering
+# the methods every object has. Every right-hand side is /usr/bin/ruby 2.6.10's
+# own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s76
+  v = [7, 2.5, 3r, Complex(1, 2), :ab, "a.b.c", /b/, "xbz".match(/b/), nil, 12]
+  check("bm76a", v.map(&:itself) == v && v[0].tap { |q| q } == 7 && v[5].tap { |q| q.length } == "a.b.c" &&
+                 v[0].chr == "\a" && 65.chr == "A" && v[9].gcd(8) == 4 && [v[0].numerator, v[0].denominator] == [7, 1] &&
+                 [v[0].real, v[0].imag, v[0].imaginary, (-v[0]).magnitude] == [7, 0, 0, 7])
+  check("bm76b", [v[0].finite?, v[0].infinite?, v[2].finite?, v[2].infinite?, v[3].finite?, v[3].infinite?] ==
+                 [true, nil, true, nil, true, nil] && Complex(1, Float::INFINITY).infinite? == 1 &&
+                 [v[0], v[2], v[3]].map { |n| n.respond_to?(:nan?) } == [false, false, false] && v[1].respond_to?(:nan?))
+  check("bm76c", [v[1], v[2], v[3]].map { |n| [:succ, :pred, :times, :even?, :gcd, :chr].map { |m| n.respond_to?(m) } }.flatten.uniq == [false] &&
+                 v[0].respond_to?(:gcd) && v[0].respond_to?(:chr))
+  check("bm76d", [v[4].upcase, v[4].swapcase, :abc.capitalize, v[4].succ, :"".empty?, :size.to_proc.call([1, 2])] ==
+                 [:AB, :AB, :Abc, :ac, true, 2] && :upcase.to_proc.call("q") == "Q")
+  check("bm76e", v[5].gsub(".", "-") == "a-b-c" && v[5].sub(".", "-") == "a-b.c" && v[5].scan(".") == [".", "."] &&
+                 "a+b".gsub("+") { "P" } == "aPb" && "abcb".gsub("b") { |m| m.upcase } == "aBcB" &&
+                 "a-b-c".gsub(/-/) { $~[0] * 2 } == "a--b--c" && "a.c".match?(".") && "a(b)".gsub("(b)", "[\\0]") == "a[(b)]")
+  check("bm76f", [v[6].send(:source), v[6].public_send(:source), v[6].is_a?(Regexp), v[6].nil?, v[6].equal?(v[6]),
+                  v[6].class, v[7].send(:[], 0), v[7].is_a?(MatchData), v[7].class, v[7].instance_variables] ==
+                 ["b", "b", true, false, true, Regexp, "b", true, MatchData, []] && v[6].respond_to?(:send))
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3505,5 +3533,6 @@ s72() # SECTION-CALL 72
 s73() # SECTION-CALL 73
 s74() # SECTION-CALL 74
 s75() # SECTION-CALL 75
+s76() # SECTION-CALL 76
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
