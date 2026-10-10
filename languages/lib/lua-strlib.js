@@ -1,6 +1,6 @@
-// lua-strlib.js -- Lua's pattern matching and the byte-level half of its string
-// library: string.find, match, gmatch, gsub, byte and reverse, as lstrlib.c (Lua
-// 5.5) does them. Lua patterns are NOT regular expressions: no alternation, a
+// lua-strlib.js -- Lua's pattern matching and the byte-level string library:
+// string.find, match, gmatch, gsub, byte, reverse, sub, rep, upper and lower, as
+// lstrlib.c (Lua 5.5) does them. Lua patterns are NOT regular expressions: no alternation, a
 // quantifier applies to one character class only, and %b, %f and back-references
 // (%1) exist instead. The names below follow lstrlib.c.
 //
@@ -473,6 +473,42 @@ function lsReverse(s) {
     while (i >= 0) {
         out = out + s.charAt(i)
         i = i - 1
+    }
+    return out
+}
+
+// string.sub(s, i, j), j already defaulted to -1: a negative index counts from the
+// end, the start clamps up to 1 and the end down to #s, and an empty range is "".
+function lsSub(s, i, j) {
+    var l = s.length
+    var a = lsPosI(i, l)
+    var e = lsEndPos(j, l)
+    if (a > e) { return "" }
+    return s.substring(a - 1, e)
+}
+
+// string.rep(s, n, sep): n copies joined by sep, "" when n < 1.
+function lsRep(s, n, sep) {
+    if (n < 1) { return "" }
+    var out = s
+    var k = 1
+    while (k < n) {
+        out = out + sep + s
+        k = k + 1
+    }
+    return out
+}
+
+// string.upper / string.lower: ASCII only. Lua case-maps with the C library in the C
+// locale, which leaves every byte above 127 alone; a host case map would treat the
+// bytes of a multi-byte character as characters of their own.
+function lsCase(s, up) {
+    var out = ""
+    for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i)
+        if (up && c >= 97 && c <= 122) { c = c - 32 }
+        else if (!up && c >= 65 && c <= 90) { c = c + 32 }
+        out = out + String.fromCharCode(c)
     }
     return out
 }

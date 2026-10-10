@@ -843,12 +843,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return f
     }
     function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
-    var luaFnArity = {lua_catstr: 1, lua_strarg: 1, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
+    var luaFnArity = {lua_catstr: 1, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
                       lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
                       lua_tail: 2, lua_shift: 3, lua_strall: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
                       lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1,
-                      lua_sub: 3, lua_subi: 2, lua_subj: 2, lua_subjv: 2, lua_clamplo: 1, lua_clamphi: 2}
+                      lua_argerr: 3, lua_argmsg: 2, lua_needany: 3, lua_needtab: 2}
     // Inside a helper the tested value is already a real boolean, so the plain host test
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
@@ -868,16 +868,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callLua(badB, "lua_raise", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to concatenate a "),
                 callExt(badB, "js_lutname", [ps[0]])]), emitStr(badB, " value")])])
             badB.NewRet(hUndef)
-            return
-        }
-        if (name == "lua_strarg") {
-            // A number where the string library wants a string is converted the
-            // way tostring renders it. Twin of luaStrArg in lua-interpreter.abnf.
-            var numB = curF.NewBlock("")
-            var strB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isnum", [ps[0]])), numB, strB)
-            numB.NewRet(callLua(numB, "lua_str", [ps[0]]))
-            strB.NewRet(ps[0])
             return
         }
         if (name == "lua_where") {
@@ -945,12 +935,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             dfltB.NewRet(emitNum(dfltB, 1))
             var nV = callExt(givenB, "js_lutonum", [ps[0]])
             givenB.NewCondBr(rawTruthy(givenB, callExt(givenB, "js_seq", [nV, hUndef])), notNumB, numB)
-            callLua(notNumB, "lua_raise", [callExt(notNumB, "js_add", [callExt(notNumB, "js_add",
-                [emitStr(notNumB, "bad argument #2 to 'error' (number expected, got "), callExt(notNumB, "js_lutname", [ps[0]])]), emitStr(notNumB, ")")])])
+            callLua(notNumB, "lua_argerr", [emitNum(notNumB, 2), emitStr(notNumB, "error"), callExt(notNumB, "js_add",
+                [emitStr(notNumB, "number expected, got "), callExt(notNumB, "js_lutname", [ps[0]])])])
             notNumB.NewRet(hUndef)
             var dV = callLua(numB, "lua_num", [nV])
             numB.NewCondBr(rawTruthy(numB, callLua(numB, "lua_isint", [dV])), intB, fracB)
-            callLua(fracB, "lua_raise", [emitStr(fracB, "bad argument #2 to 'error' (number has no integer representation)")])
+            callLua(fracB, "lua_argerr", [emitNum(fracB, 2), emitStr(fracB, "error"), emitStr(fracB, "number has no integer representation")])
             fracB.NewRet(hUndef)
             intB.NewRet(dV)
             return
@@ -966,8 +956,80 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "object")])), objB, asIsB)
             var msgV = callExt(objB, "js_get", [ps[0], emitStr(objB, "__luerr")])
             objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_sne", [msgV, hUndef])), markB, asIsB)
-            markB.NewRet(callExt(markB, "js_add", [callLua(markB, "lua_where", [markB.NewLoad(i64, gLuaPos)]), msgV]))
+            markB.NewRet(callExt(markB, "js_add", [callLua(markB, "lua_where", [markB.NewLoad(i64, gLuaPos)]),
+                                                   callLua(markB, "lua_argmsg", [ps[0], msgV])]))
             asIsB.NewRet(ps[0])
+            return
+        }
+        if (name == "lua_argmsg") {
+            // A marker's message. An ARGUMENT error ({__luarg, __lumsg}, luArgErr) is
+            // reworded with the function name the call site spelled (lua.callee),
+            // not counting a method's self; with no such name its message already
+            // carries the function's global name. Twin of luaArgErr in
+            // lua-interpreter.abnf.
+            var argV = callExt(b, "js_get", [ps[0], emitStr(b, "__luarg")])
+            var plainB = curF.NewBlock("")
+            var argB = curF.NewBlock("")
+            var namedB = curF.NewBlock("")
+            var methB = curF.NewBlock("")
+            var selfB = curF.NewBlock("")
+            var fmtB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [argV, hUndef])), plainB, argB)
+            plainB.NewRet(ps[1])
+            var code = argB.NewLoad(i64, gLuaCallee)
+            argB.NewCondBr(argB.NewICmp(llvm.enum.IPredEQ, code, handle(0)), plainB, namedB)
+            var nameV = namedB.NewCall(luaCallNameFn(), [namedB.NewLShr(code, handle(1))])
+            var detail = callExt(namedB, "js_get", [ps[0], emitStr(namedB, "__lumsg")])
+            namedB.NewCondBr(namedB.NewICmp(llvm.enum.IPredNE, namedB.NewAnd(code, handle(1)), handle(0)), methB, fmtB)
+            var selfN = callExt(methB, "js_sub", [argV, emitNum(methB, 1)])
+            methB.NewCondBr(rawTruthy(methB, callExt(methB, "js_seq", [selfN, emitNum(methB, 0)])), selfB, fmtB)
+            selfB.NewRet(callExt(selfB, "js_add", [callExt(selfB, "js_add", [callExt(selfB, "js_add", [callExt(selfB, "js_add",
+                [emitStr(selfB, "calling '"), nameV]), emitStr(selfB, "' on bad self (")]), detail]), emitStr(selfB, ")")]))
+            var nV = fmtB.NewPhi([llvm.ir.NewIncoming(argV, namedB), llvm.ir.NewIncoming(selfN, methB)])
+            var txt = callExt(fmtB, "js_add", [emitStr(fmtB, "bad argument #"), nV])
+            txt = callExt(fmtB, "js_add", [callExt(fmtB, "js_add", [txt, emitStr(fmtB, " to '")]), nameV])
+            txt = callExt(fmtB, "js_add", [callExt(fmtB, "js_add", [txt, emitStr(fmtB, "' (")]), detail])
+            fmtB.NewRet(callExt(fmtB, "js_add", [txt, emitStr(fmtB, ")")]))
+            return
+        }
+        if (name == "lua_needany") {
+            // luaL_checkany: argument n (a number handle) of the argument array must
+            // be present, nil or not.
+            var fewB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [callExt(b, "js_get", [ps[0], emitStr(b, "length")]), ps[1]])), fewB, okB)
+            callLua(fewB, "lua_argerr", [ps[1], ps[2], emitStr(fewB, "value expected")])
+            fewB.NewRet(hUndef)
+            okB.NewRet(hUndef)
+            return
+        }
+        if (name == "lua_needtab") {
+            // luaL_checktype(L, 1, LUA_TTABLE) on an argument array.
+            var tyN = anytype
+            tyN = callExt(b, "js_lutname", [callExt(b, "js_arg", [ps[0], handle(0)])])
+            var noneB = curF.NewBlock("")
+            var someB = curF.NewBlock("")
+            var badB = curF.NewBlock("")
+            var goodB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [callExt(b, "js_get", [ps[0], emitStr(b, "length")]), emitNum(b, 1)])), noneB, someB)
+            callLua(noneB, "lua_argerr", [emitNum(noneB, 1), ps[1], emitStr(noneB, "table expected, got no value")])
+            noneB.NewRet(hUndef)
+            someB.NewCondBr(rawTruthy(someB, callExt(someB, "js_seq", [tyN, emitStr(someB, "table")])), goodB, badB)
+            callLua(badB, "lua_argerr", [emitNum(badB, 1), ps[1], callExt(badB, "js_add", [emitStr(badB, "table expected, got "), tyN])])
+            badB.NewRet(hUndef)
+            goodB.NewRet(hUndef)
+            return
+        }
+        if (name == "lua_argerr") {
+            // Raise an argument error from emitted code, in the marker form luArgErr
+            // throws: argument number, the function's global name, the detail.
+            var full = callExt(b, "js_add", [emitStr(b, "bad argument #"), ps[0]])
+            full = callExt(b, "js_add", [callExt(b, "js_add", [full, emitStr(b, " to '")]), ps[1]])
+            full = callExt(b, "js_add", [callExt(b, "js_add", [full, emitStr(b, "' (")]), ps[2]])
+            var mk = luaMarker(b, callExt(b, "js_add", [full, emitStr(b, ")")]))
+            callExt(b, "js_set", [mk, emitStr(b, "__luarg"), ps[0]])
+            callExt(b, "js_set", [mk, emitStr(b, "__lumsg"), ps[2]])
+            b.NewRet(callExt(b, "js_throw", [mk]))
             return
         }
         if (name == "lua_errtext") {
@@ -1039,69 +1101,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_scope_typeof", [ps[0], ps[1]]), emitStr(b, "undefined")])), misB, hitB)
             misB.NewRet(hUndef)
             hitB.NewRet(callExt(hitB, "js_scope_get", [ps[0], ps[1]]))
-            return
-        }
-        // ----- string.sub's index normalisation, one step per helper -----
-        // lua_clamplo raises a start to 1, lua_clamphi lowers an end to len; lua_subi /
-        // lua_subj turn a possibly negative Lua index into an inclusive 1-based one
-        // (-1 is the LAST character, hence len + i + 1); lua_subjv supplies the default
-        // end (#s) when string.sub was called with two arguments; lua_sub assembles them
-        // and answers "" when the range is empty, as Lua does instead of erroring.
-        if (name == "lua_clamplo") {
-            var cloB = curF.NewBlock("")
-            var choB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [ps[0], emitNum(b, 1)])), cloB, choB)
-            cloB.NewRet(emitNum(cloB, 1))
-            choB.NewRet(ps[0])
-            return
-        }
-        if (name == "lua_clamphi") {
-            var hiB = curF.NewBlock("")
-            var okhB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_gt", [ps[1], ps[0]])), hiB, okhB)
-            hiB.NewRet(ps[0])
-            okhB.NewRet(ps[1])
-            return
-        }
-        if (name == "lua_subi") {
-            var iNegB = curF.NewBlock("")
-            var iPosB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [ps[1], emitNum(b, 0)])), iNegB, iPosB)
-            iNegB.NewRet(callLua(iNegB, "lua_clamplo",
-                [callExt(iNegB, "js_add", [callExt(iNegB, "js_add", [ps[0], ps[1]]), emitNum(iNegB, 1)])]))
-            iPosB.NewRet(callLua(iPosB, "lua_clamplo", [ps[1]]))
-            return
-        }
-        if (name == "lua_subj") {
-            var jNegB = curF.NewBlock("")
-            var jPosB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_lt", [ps[1], emitNum(b, 0)])), jNegB, jPosB)
-            jNegB.NewRet(callLua(jNegB, "lua_clamphi", [ps[0],
-                callExt(jNegB, "js_add", [callExt(jNegB, "js_add", [ps[0], ps[1]]), emitNum(jNegB, 1)])]))
-            jPosB.NewRet(callLua(jPosB, "lua_clamphi", [ps[0], ps[1]]))
-            return
-        }
-        if (name == "lua_subjv") {
-            var jUndB = curF.NewBlock("")
-            var jHaveB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [ps[1], hUndef])), jUndB, jHaveB)
-            jUndB.NewRet(ps[0])
-            jHaveB.NewRet(callLua(jHaveB, "lua_subj", [ps[0], callLua(jHaveB, "lua_num", [ps[1]])]))
-            return
-        }
-        if (name == "lua_sub") {
-            var sv = callLua(b, "lua_strarg", [ps[0]])
-            var slen = callExt(b, "js_get", [sv, emitStr(b, "length")])
-            var sa = callLua(b, "lua_subi", [slen, callLua(b, "lua_num", [ps[1]])])
-            var se = callLua(b, "lua_subjv", [slen, ps[2]])
-            var emptyB = curF.NewBlock("")
-            var cutB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_gt", [sa, se])), emptyB, cutB)
-            emptyB.NewRet(emitStr(emptyB, ""))
-            var sArgs = callExt(cutB, "js_arr_new", [])
-            callExt(cutB, "js_arr_push", [sArgs, callExt(cutB, "js_sub", [sa, emitNum(cutB, 1)])])
-            callExt(cutB, "js_arr_push", [sArgs, se])
-            cutB.NewRet(libStrMethod(cutB, sv, "slice", sArgs))
             return
         }
         if (name == "lua_num") {
@@ -1307,6 +1306,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gLuaCsp = m.NewGlobalDef("lua.csp", handle(0))
     // 1 between a tail call's js_call and the callee's luaEnter.
     var gLuaTail = m.NewGlobalDef("lua.tail", handle(0))
+    // The function name the running call site spelled (luaCalleeNames), which an
+    // argument error reports: 2*k, plus 1 for a method call, with k indexing
+    // luaCallNames from 1; 0 for a call the library makes itself (pcall's).
+    var gLuaCallee = m.NewGlobalDef("lua.callee", handle(0))
+    var luaCallNames = []
+    function luaCalleeCode(nm) {
+        if (nm === null) { return 0 }
+        var k = 0
+        for (var i = 0; i < luaCallNames.length; i++) { if (luaCallNames[i] == nm.n) { k = i + 1 } }
+        if (k == 0) {
+            luaCallNames.push(nm.n)
+            k = luaCallNames.length
+        }
+        return k * 2 + (nm.m ? 1 : 0)
+    }
+    // lua_callname(k): the k-th name as a string. Its body is written once the whole
+    // program is emitted (finishCallNames), when every call site has been seen.
+    var luaCallNameF = null
+    function luaCallNameFn() {
+        if (luaCallNameF === null) { luaCallNameF = m.NewFunc("lua_callname", i64, [llvm.ir.NewParam("k", i64)]) }
+        return luaCallNameF
+    }
+    function finishCallNames() {
+        if (luaCallNameF === null) { return }
+        var savedF = curF
+        curF = luaCallNameF
+        var cur = luaCallNameF.NewBlock("entry")
+        for (var i = 0; i < luaCallNames.length; i++) {
+            var hitB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            cur.NewCondBr(cur.NewICmp(llvm.enum.IPredEQ, luaCallNameF.Params[0], handle(i + 1)), hitB, nextB)
+            hitB.NewRet(emitStr(hitB, luaCallNames[i]))
+            cur = nextB
+        }
+        cur.NewRet(emitStr(cur, "?"))
+        curF = savedF
+    }
     // The chunk names a position's file number indexes (luaO_chunkid of each file).
     var luaFiles = []
     function luaFileNo(name) {
@@ -1422,17 +1458,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // Every float-only member of the math library: there is no extern for them
-    // and none is needed - the host's Math lives in the same runtime, so the
-    // operation is a method call on it. That Math is the SAME object in all three
-    // engines (languages/lib/runtime.c, abnf/jsrt.go and goja alike), which is what
-    // makes math.sqrt / math.sin / ... below cost no extern at all.
-    function emitMathN(b, name, argVs) {
-        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
-        var argsV = callExt(b, "js_arr_new", [])
-        for (var mi = 0; mi < argVs.length; mi++) { callExt(b, "js_arr_push", [argsV, argVs[mi]]) }
-        return callExt(b, "js_mcall", [mathV, emitStr(b, name), argsV])
-    }
     // a ^ b: js_luarith's operator 6, which checks both operands like the other
     // arithmetic and answers Math.pow of them as a float.
     function makePow(items) {
@@ -1600,12 +1625,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // reads. Answers {b, v, call} - `call` is the next step's `pre`.
     // A call step with `tail` set is the call of `return f(...)`: lua.tail tells the
     // callee's luaEnter to take over this frame.
-    function emitLuaStep(b, cur, s, pre, tail) {
+    function emitLuaStep(b, cur, s, pre, tail, cname) {
         var v = cur
         if (pre) { v = callLua(b, "lua_first", [v]) } // Only one value feeds a step.
         if (s.kind == "call") {
             var ea = emitListArr(b, s.args)
             b = ea.b
+            b.NewStore(handle(luaCalleeCode(cname)), gLuaCallee)
             return {b: b, v: luaCallTail(b, tail, v, ea.v), call: true}
         }
         if (s.kind == "method") {
@@ -1619,6 +1645,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ma = emitListArr(b, s.args)
             b = ma.b
             b = emitArrExtend(b, margs, ma.v)
+            b.NewStore(handle(luaCalleeCode(cname)), gLuaCallee)
             return {b: b, v: luaCallTail(b, tail, fn, margs), call: true}
         }
         if (s.kind == "field") {
@@ -1669,6 +1696,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callLua(b, "lua_raise", [callExt(b, "js_add", [callExt(b, "js_add", [emitStr(b, "attempt to index a "),
             callExt(b, "js_lutname", [v])]), emitStr(b, " value")])])
     }
+    // The name lua 5.5 gives the function each call step of a chain calls, which is
+    // the name an argument error reports: a method's own name, the field a call
+    // reads its function from, or the variable the chain starts with (`first`);
+    // null where there is none. Twin of luaCalleeNames in lua-interpreter.abnf.
+    function luaCalleeNames(first, suffixes) {
+        var out = []
+        for (var i = 0; i < suffixes.length; i++) {
+            var st = suffixes[i]
+            var nm = anytype
+            nm = null
+            if (st.kind == "method") { nm = {n: st.name, m: true} }
+            else if (st.kind == "call") {
+                if (i == 0 && first !== null) { nm = {n: first, m: false} }
+                else if (i > 0 && suffixes[i - 1].kind == "field") { nm = {n: suffixes[i - 1].name, m: false} }
+            }
+            out.push(nm)
+        }
+        return out
+    }
+    // The variable a chain's source text starts with, or null when it starts with
+    // anything else (a parenthesis, a literal).
+    function luaLeadName(text) {
+        var c0 = text.length > 0 ? text.charCodeAt(0) : 0
+        if (!((c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122) || c0 === 95)) { return null }
+        var i = 1
+        while (i < text.length) {
+            var c = text.charCodeAt(i)
+            if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95)) { break }
+            i = i + 1
+        }
+        return text.substring(0, i)
+    }
     // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...]. A chain that ends
     // in a call is built twice, the second time as the tail call makeReturn
     // substitutes. Twin of foldCallMember in lua-interpreter.abnf; see there.
@@ -1683,6 +1742,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var q = 0; q < suffixes.length; q++) {
             if (suffixes[q].kind != "call") { libNeed.string = true }
         }
+        var cnames = luaCalleeNames(luaLeadName(text), suffixes)
         var mk = function(tail) {
             return function(b) {
                 var r = primary(b)
@@ -1690,7 +1750,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cur = r.v
                 var afterCall = false
                 for (var i = 0; i < suffixes.length; i++) {
-                    var st = emitLuaStep(b, cur, suffixes[i], afterCall, tail && i === last)
+                    var st = emitLuaStep(b, cur, suffixes[i], afterCall, tail && i === last, cnames[i])
                     b = st.b
                     cur = st.v
                     afterCall = st.call
@@ -1754,8 +1814,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // emitLuaStep, not a bare js_get: the leading steps of a target may be calls
         // (getmetatable(t).__index = f), which is ordinary Lua - see the Target production.
         var afterCall = false
+        var cnames = luaCalleeNames(ref.name, ref.path)
         for (var i = 0; i < ref.path.length - 1; i++) {
-            var st = emitLuaStep(b, o, ref.path[i], afterCall, false)
+            var st = emitLuaStep(b, o, ref.path[i], afterCall, false, cnames[i])
             b = st.b
             o = st.v
             afterCall = st.call
@@ -2102,6 +2163,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var argsV = callExt(headB, "js_arr_new", [])
             callExt(headB, "js_arr_push", [argsV, callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, sName)])])
             callExt(headB, "js_arr_push", [argsV, callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])])
+            headB.NewStore(handle(luaCalleeCode({n: "for iterator", m: false})), gLuaCallee)
             var allV = callLua(headB, "lua_all", [callExt(headB, "js_call", [fV, hUndef, argsV])])
             var firstV = callExt(headB, "js_get", [allV, emitNum(headB, 0)])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_sne", [firstV, hUndef])), bodyB, exitB)
@@ -2178,173 +2240,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return makeLen(function(bb) { return {b: bb, v: tv} })(b)
     }
 
-    // math.*: one extern each (abnf/jsrtlua.go), because every one of them has to know
-    // the integer subtype - floor/ceil ANSWER an integer, abs/max/min KEEP their
-    // argument's subtype, and none of them may reduce a 64 bit integer to a double on
-    // the way through (math.floor(math.maxinteger) would round). math.type,
-    // math.tointeger, math.fmod, math.maxinteger and math.mininteger join them: those
-    // five are how Lua 5.3+ makes the subtype visible to a program at all.
-    function libFloor(bb, argsH) { return {b: bb, v: callExt(bb, "js_lufloor", [libArg(bb, argsH, 0)])} }
-    function libCeil(bb, argsH)  { return {b: bb, v: callExt(bb, "js_luceil",  [libArg(bb, argsH, 0)])} }
-    function libAbs(bb, argsH)   { return {b: bb, v: callExt(bb, "js_luabs",   [libArg(bb, argsH, 0)])} }
-    function libType(bb, argsH)  { return {b: bb, v: callExt(bb, "js_lutype",  [libArg(bb, argsH, 0)])} }
-    function libToInt(bb, argsH) { return {b: bb, v: callExt(bb, "js_lutoint", [libArg(bb, argsH, 0)])} }
-    function libMax(bb, argsH) {
-        return {b: bb, v: callExt(bb, "js_lumax", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
-    }
-    function libMin(bb, argsH) {
-        return {b: bb, v: callExt(bb, "js_lumin", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
-    }
-    function libFmod(bb, argsH) {
-        return {b: bb, v: callExt(bb, "js_lufmod", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
-    }
-
-    // The FLOAT-ONLY half of Lua's math library: sqrt sin cos tan asin acos exp,
-    // and the two angle conversions. Every one of them answers a float whatever
-    // its argument's subtype was (math.sqrt(4) is 2.0), so none of them needs to
-    // know about the integer subtype and none needs an extern - lua_num coerces
-    // the argument the way arithmetic does (a numeric STRING converts), the root
-    // Math does the work, and lua_mkflt puts the float subtype back on. Checked
-    // against lua 5.5.0 in tests/lua-test-full.lua SECTION 21.
-    function libMath1(name) {
-        return function(bb, argsH) {
-            var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
-            return {b: bb, v: callLua(bb, "lua_mkflt", [emitMathN(bb, name, [x])])}
-        }
-    }
-    // math.deg / math.rad are ONE multiplication by a folded constant, which is
-    // what lmathlib.c does (x * (180/PI) and x * (PI/180)) - and it is why
-    // math.deg(math.pi) is exactly 180.0 rather than 180.00000000000003.
-    function libScale(k) {
-        return function(bb, argsH) {
-            var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
-            return {b: bb, v: callLua(bb, "lua_mkflt", [callExt(bb, "js_mul", [x, emitNum(bb, k)])])}
-        }
-    }
-    // math.atan(y [, x]) is atan2 with a default x of 1.0, math.log(x [, base])
-    // takes an optional base, math.modf answers TWO values whose first keeps the
-    // integer subtype, and math.ult compares two integers as UNSIGNED. Those four
-    // are the ones that cannot be a bare Math call - an argument count or the
-    // integer subtype decides the answer - so they are externs, exactly like the
-    // five above them.
-    function libAtan(bb, argsH) {
-        return {b: bb, v: callExt(bb, "js_luatan", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
-    }
-    function libLog(bb, argsH) {
-        return {b: bb, v: callExt(bb, "js_lulog", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
-    }
-    // js_lumodf answers a plain two-element ARRAY; lua_mk turns it into the
-    // multiple-value form the call site unpacks (the same shape libPairs uses).
-    function libModf(bb, argsH) {
-        return {b: bb, v: callLua(bb, "lua_mk", [callExt(bb, "js_lumodf", [libArg(bb, argsH, 0)])])}
-    }
-    function libUlt(bb, argsH) {
-        return {b: bb, v: callExt(bb, "js_luult", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
-    }
-
-    // string.*: len via the host string's .length; upper/lower via the string methods;
-    // sub is 1-based inclusive lowered to JS slice(i-1, j) (a nil j reaches the end);
-    // rep concatenates n copies in a scoped while loop.
-    function libStrLen(bb, argsH) {
-        var s = callLua(bb, "lua_strarg", [libArg(bb, argsH, 0)])
-        return {b: bb, v: callExt(bb, "js_get", [s, emitStr(bb, "length")])}
-    }
-    // The compiled runtime exposes toUpperCase/toLowerCase/slice on strings through the
-    // bound-method path (js_get yields the method, js_call runs it), not js_mcall.
-    function libStrMethod(bb, s, method, argsArr) {
-        return callExt(bb, "js_call", [callExt(bb, "js_get", [s, emitStr(bb, method)]), hUndef, argsArr])
-    }
-    // ASCII only: real Lua case-maps with the C library in the C locale, which leaves
-    // every byte above 127 alone. toUpperCase would have mapped the BYTES of a multi-byte
-    // character (the 0xE6 that starts a CJK character is 'ae' to a host string and
-    // uppercases to 0xC6), corrupting the encoding of the byte string. Written with
-    // indexOf/charAt over two constant alphabets because the emitted runtime has no
-    // String.fromCharCode; lua-interpreter.abnf's asciiCase is the same mapping.
-    var luaLower = "abcdefghijklmnopqrstuvwxyz"
-    var luaUpper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    function libCase(bb, argsH, from, to) {
-        var s = callLua(bb, "lua_strarg", [libArg(bb, argsH, 0)])
-        var lenV = callExt(bb, "js_get", [s, emitStr(bb, "length")])
-        var saved = curScopeV
-        curScopeV = callExt(bb, "js_scope_new", [curScopeV])
-        hidCount++
-        var iName = "$ci" + hidCount
-        var aName = "$ca" + hidCount
-        callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, iName), emitNum(bb, 0)])
-        callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, aName), emitStr(bb, "")])
-        var headB = curF.NewBlock("")
-        var bodyB = curF.NewBlock("")
-        var hitB = curF.NewBlock("")
-        var missB = curF.NewBlock("")
-        var stepB = curF.NewBlock("")
-        var exitB = curF.NewBlock("")
-        bb.NewBr(headB)
-        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-        var chArgs = callExt(bodyB, "js_arr_new", [])
-        callExt(bodyB, "js_arr_push", [chArgs, iV2])
-        var chV = libStrMethod(bodyB, s, "charAt", chArgs)
-        var ixArgs = callExt(bodyB, "js_arr_new", [])
-        callExt(bodyB, "js_arr_push", [ixArgs, chV])
-        var kV = libStrMethod(bodyB, emitStr(bodyB, from), "indexOf", ixArgs)
-        bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_ge", [kV, emitNum(bodyB, 0)])), hitB, missB)
-        var toArgs = callExt(hitB, "js_arr_new", [])
-        callExt(hitB, "js_arr_push", [toArgs, kV])
-        var mapped = libStrMethod(hitB, emitStr(hitB, to), "charAt", toArgs)
-        hitB.NewBr(stepB)
-        missB.NewBr(stepB)
-        var pick = stepB.NewPhi([llvm.ir.NewIncoming(mapped, hitB), llvm.ir.NewIncoming(chV, missB)])
-        var aV = callExt(stepB, "js_scope_get", [curScopeV, emitStr(stepB, aName)])
-        callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, aName), callExt(stepB, "js_add", [aV, pick])])
-        callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, iName), callExt(stepB, "js_add", [iV2, emitNum(stepB, 1)])])
-        stepB.NewBr(headB)
-        var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, aName)])
-        curScopeV = saved
-        return {b: exitB, v: outV}
-    }
-    function libUpper(bb, argsH) { return libCase(bb, argsH, luaLower, luaUpper) }
-    function libLower(bb, argsH) { return libCase(bb, argsH, luaUpper, luaLower) }
-    // string.sub is NOT JS slice(i-1, j): Lua's negative index is INCLUSIVE and 1-based
-    // (-1 is the last character, so it normalises to len+i+1) and both ends clamp into
-    // 1..len instead of being reinterpreted. The whole normalisation lives in the emitted lua_sub helper
-    // so the branching is written once; the interpreter half's luaSubStart / luaSubEnd
-    // are the same three steps.
-    function libSub(bb, argsH) {
-        return {b: bb, v: callLua(bb, "lua_sub", [libArg(bb, argsH, 0), libArg(bb, argsH, 1), libArg(bb, argsH, 2)])}
-    }
-    function libRep(bb, argsH) {
-        var s = callLua(bb, "lua_strarg", [libArg(bb, argsH, 0)])
-        var n = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
-        var saved = curScopeV
-        curScopeV = callExt(bb, "js_scope_new", [curScopeV])
-        hidCount++
-        var iName = "$ri" + hidCount
-        var aName = "$ra" + hidCount
-        callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, iName), emitNum(bb, 0)])
-        callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, aName), emitStr(bb, "")])
-        var headB = curF.NewBlock("")
-        var bodyB = curF.NewBlock("")
-        var exitB = curF.NewBlock("")
-        bb.NewBr(headB)
-        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, n])), bodyB, exitB)
-        var aV = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, aName), callExt(bodyB, "js_add", [aV, s])])
-        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName), callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
-        bodyB.NewBr(headB)
-        var aFin = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, aName)])
-        curScopeV = saved
-        return {b: exitB, v: aFin}
-    }
-
-    // The pattern half of the string library, string.byte/char/reverse and select:
-    // one extern each over the call's whole ARGUMENT ARRAY (abnf/jsrtluastr.go,
-    // over lib/lua-strlib.js in layer 2), which answers the results as one Lua value.
+    // math.* and the string library: one extern each over the call's whole ARGUMENT
+    // ARRAY (abnf/jsrtlua.go and abnf/jsrtluastr.go; layer 2 over lib/lua-strlib.js),
+    // which checks the arguments the way lauxlib does - "got no value" needs the
+    // count - and answers the results as one Lua value. The math members have to
+    // know the integer subtype: floor/ceil ANSWER an integer, abs/max/min KEEP their
+    // argument's, and none may reduce a 64 bit integer to a double on the way
+    // through (math.floor(math.maxinteger) would round). The float-only members share
+    // js_lumathf, whose second argument is the member's index (a raw handle).
     function libArgsExt(ext) {
         return function(bb, argsH) { return {b: bb, v: callExt(bb, ext, [argsH])} }
     }
+    function libMathF(op) {
+        return function(bb, argsH) { return {b: bb, v: callExt(bb, "js_lumathf", [argsH, handle(op)])} }
+    }
+
+    // string.find and string.match share one extern.
     function libFind(find) {
         return function(bb, argsH) { return {b: bb, v: callExt(bb, "js_lufind", [argsH, find ? hTrue : hFalse])} }
     }
@@ -2381,6 +2292,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // k+1; the result is that index while t[index] is non-nil, else nil (the key only,
     // since the subset yields one value per call).
     function libNext(bb, argsH) {
+        callLua(bb, "lua_needtab", [argsH, emitStr(bb, "next")])
         var t = libArg(bb, argsH, 0)
         var k = libArg(bb, argsH, 1)
         var i = bb.NewSelect(truthy(bb, callExt(bb, "js_seq", [k, hUndef])), emitNum(bb, 0), k)
@@ -2411,6 +2323,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: deadBlock(), v: hUndef}
     }
     function libIpairs(bb, argsH) {
+        callLua(bb, "lua_needany", [argsH, emitNum(bb, 1), emitStr(bb, "ipairs")])
         var t = libArg(bb, argsH, 0)
         var arr = callExt(bb, "js_arr_new", [])
         callExt(bb, "js_arr_push", [arr, callExt(bb, "js_closure", [handle(emitLibFunc(libINext)), curScopeV])])
@@ -2447,17 +2360,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         endB.NewRet(hUndef)
         return {b: deadBlock(), v: hUndef}
     }
+    // lua 5.5's pairs answers four values, the last one nil (a closing value).
+    // pairs of a value that is not a table answers next and the value, as lua does,
+    // so the error surfaces where the loop calls the iterator.
     function libPairs(bb, argsH) {
+        callLua(bb, "lua_needany", [argsH, emitNum(bb, 1), emitStr(bb, "pairs")])
         var t = libArg(bb, argsH, 0)
-        var st = callExt(bb, "js_obj_new", [])
-        callExt(bb, "js_set", [st, emitStr(bb, "t"), t])
-        callExt(bb, "js_set", [st, emitStr(bb, "k"), callExt(bb, "js_keys", [t])])
-        callExt(bb, "js_set", [st, emitStr(bb, "i"), emitNum(bb, 0)])
-        var arr = callExt(bb, "js_arr_new", [])
-        callExt(bb, "js_arr_push", [arr, callExt(bb, "js_closure", [handle(emitLibFunc(libPNext)), curScopeV])])
-        callExt(bb, "js_arr_push", [arr, st])
-        callExt(bb, "js_arr_push", [arr, hUndef])
-        return {b: bb, v: callLua(bb, "lua_mk", [arr])}
+        var tabB = curF.NewBlock("")
+        var otherB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_lutname", [t]), emitStr(bb, "table")])), tabB, otherB)
+        var oarr = callExt(otherB, "js_arr_new", [])
+        callExt(otherB, "js_arr_push", [oarr, callExt(otherB, "js_closure", [handle(emitLibFunc(libNext)), curScopeV])])
+        callExt(otherB, "js_arr_push", [oarr, t])
+        callExt(otherB, "js_arr_push", [oarr, hUndef])
+        callExt(otherB, "js_arr_push", [oarr, hUndef])
+        otherB.NewRet(callLua(otherB, "lua_mk", [oarr]))
+        var st = callExt(tabB, "js_obj_new", [])
+        callExt(tabB, "js_set", [st, emitStr(tabB, "t"), t])
+        callExt(tabB, "js_set", [st, emitStr(tabB, "k"), callExt(tabB, "js_keys", [t])])
+        callExt(tabB, "js_set", [st, emitStr(tabB, "i"), emitNum(tabB, 0)])
+        var arr = callExt(tabB, "js_arr_new", [])
+        callExt(tabB, "js_arr_push", [arr, callExt(tabB, "js_closure", [handle(emitLibFunc(libPNext)), curScopeV])])
+        callExt(tabB, "js_arr_push", [arr, st])
+        callExt(tabB, "js_arr_push", [arr, hUndef])
+        callExt(tabB, "js_arr_push", [arr, hUndef])
+        return {b: tabB, v: callLua(tabB, "lua_mk", [arr])}
     }
 
     // error(v [, level]): throw v, a string first prefixed with the position of
@@ -2488,8 +2415,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var okB = curF.NewBlock("")
             var need = withHandler ? 2 : 1
             bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_lt", [nargs, emitNum(bb, need)])), fewB, okB)
-            callLua(fewB, "lua_raise", [emitStr(fewB, withHandler ? "bad argument #2 to 'xpcall' (value expected)"
-                                                                  : "bad argument #1 to 'pcall' (value expected)")])
+            callLua(fewB, "lua_argerr", [emitNum(fewB, need), emitStr(fewB, withHandler ? "xpcall" : "pcall"),
+                                         emitStr(fewB, "value expected")])
             fewB.NewRet(hUndef)
             var b = okB
             var fr = luaEnter(b, false)
@@ -2509,6 +2436,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function libProtectTry(bb, argsH) {
         var envV = curScopeV
+        bb.NewStore(handle(0), gLuaCallee)
         var r = callExt(bb, "js_call", [callExt(bb, "js_scope_get", [envV, emitStr(bb, "f")]), hUndef,
                                         callExt(bb, "js_scope_get", [envV, emitStr(bb, "a")])])
         var arr = callExt(bb, "js_arr_new", [])
@@ -2564,27 +2492,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (libNeed.math) {
             var mt = callExt(b, "js_obj_new", [])
-            b = libSet(b, mt, "floor", emitLibFunc(libFloor))
-            b = libSet(b, mt, "ceil", emitLibFunc(libCeil))
-            b = libSet(b, mt, "abs", emitLibFunc(libAbs))
-            b = libSet(b, mt, "max", emitLibFunc(libMax))
-            b = libSet(b, mt, "min", emitLibFunc(libMin))
-            b = libSet(b, mt, "fmod", emitLibFunc(libFmod))
-            b = libSet(b, mt, "type", emitLibFunc(libType))
-            b = libSet(b, mt, "tointeger", emitLibFunc(libToInt))
-            b = libSet(b, mt, "sqrt", emitLibFunc(libMath1("sqrt")))
-            b = libSet(b, mt, "sin", emitLibFunc(libMath1("sin")))
-            b = libSet(b, mt, "cos", emitLibFunc(libMath1("cos")))
-            b = libSet(b, mt, "tan", emitLibFunc(libMath1("tan")))
-            b = libSet(b, mt, "asin", emitLibFunc(libMath1("asin")))
-            b = libSet(b, mt, "acos", emitLibFunc(libMath1("acos")))
-            b = libSet(b, mt, "exp", emitLibFunc(libMath1("exp")))
-            b = libSet(b, mt, "deg", emitLibFunc(libScale(180 / Math.PI)))
-            b = libSet(b, mt, "rad", emitLibFunc(libScale(Math.PI / 180)))
-            b = libSet(b, mt, "atan", emitLibFunc(libAtan))
-            b = libSet(b, mt, "log", emitLibFunc(libLog))
-            b = libSet(b, mt, "modf", emitLibFunc(libModf))
-            b = libSet(b, mt, "ult", emitLibFunc(libUlt))
+            b = libSet(b, mt, "floor", emitLibFunc(libArgsExt("js_lufloor")))
+            b = libSet(b, mt, "ceil", emitLibFunc(libArgsExt("js_luceil")))
+            b = libSet(b, mt, "abs", emitLibFunc(libArgsExt("js_luabs")))
+            b = libSet(b, mt, "max", emitLibFunc(libArgsExt("js_lumax")))
+            b = libSet(b, mt, "min", emitLibFunc(libArgsExt("js_lumin")))
+            b = libSet(b, mt, "fmod", emitLibFunc(libArgsExt("js_lufmod")))
+            b = libSet(b, mt, "type", emitLibFunc(libArgsExt("js_lutype")))
+            b = libSet(b, mt, "tointeger", emitLibFunc(libArgsExt("js_lutoint")))
+            var fnames = ["sqrt", "sin", "cos", "tan", "asin", "acos", "exp", "deg", "rad"]
+            for (var fi = 0; fi < fnames.length; fi++) { b = libSet(b, mt, fnames[fi], emitLibFunc(libMathF(fi))) }
+            b = libSet(b, mt, "atan", emitLibFunc(libArgsExt("js_luatan")))
+            b = libSet(b, mt, "log", emitLibFunc(libArgsExt("js_lulog")))
+            b = libSet(b, mt, "modf", emitLibFunc(libArgsExt("js_lumodf")))
+            b = libSet(b, mt, "ult", emitLibFunc(libArgsExt("js_luult")))
             // math.pi and math.huge are FLOAT VALUES, not functions. The dialect has
             // no exponent literal, so the infinity is built by division (manual
             // chapter 4); js_luflo boxes a raw double as a Lua float.
@@ -2598,11 +2519,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (libNeed.string) {
             var st = callExt(b, "js_obj_new", [])
-            b = libSet(b, st, "len", emitLibFunc(libStrLen))
-            b = libSet(b, st, "upper", emitLibFunc(libUpper))
-            b = libSet(b, st, "lower", emitLibFunc(libLower))
-            b = libSet(b, st, "sub", emitLibFunc(libSub))
-            b = libSet(b, st, "rep", emitLibFunc(libRep))
+            b = libSet(b, st, "len", emitLibFunc(libArgsExt("js_lulen")))
+            b = libSet(b, st, "upper", emitLibFunc(libArgsExt("js_luupper")))
+            b = libSet(b, st, "lower", emitLibFunc(libArgsExt("js_lulower")))
+            b = libSet(b, st, "sub", emitLibFunc(libArgsExt("js_lusub")))
+            b = libSet(b, st, "rep", emitLibFunc(libArgsExt("js_lurep")))
             b = libSet(b, st, "find", emitLibFunc(libFind(true)))
             b = libSet(b, st, "match", emitLibFunc(libFind(false)))
             b = libSet(b, st, "gmatch", emitLibFunc(libGmatch))
@@ -2667,6 +2588,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(hUndef)
+        finishCallNames()
     }
     function libIndexNil(bb, argsH) {
         return {b: bb, v: luaMarker(bb, emitStr(bb, "attempt to index a nil value"))}

@@ -340,29 +340,6 @@ func luParseDec(s string) (interface{}, bool) {
 
 // luToNum is Lua's automatic coercion in an arithmetic or bitwise context: a
 // number passes, a string that spells a numeral converts, anything else fails.
-// luArgNum / luArgInt are the argument checks the math library shares: Lua
-// coerces a numeric STRING in an arithmetic position and so does every math
-// function, and a value that is no number at all is an error rather than a NaN.
-// luArgInt additionally demands an exact integer, which is what math.ult wants.
-func (rt *jsrt) luArgNum(v interface{}, fn string) float64 {
-	n, ok := luToNum(v)
-	if !ok {
-		rt.luFail("bad argument to '%s' (number expected)", fn)
-	}
-	return luNumOf(n)
-}
-
-func (rt *jsrt) luArgInt(v interface{}, fn string) int64 {
-	n, ok := luToNum(v)
-	if !ok {
-		rt.luFail("bad argument to '%s' (number expected)", fn)
-	}
-	if !luIsInt(n) {
-		rt.luFail("bad argument to '%s' (number has no integer representation)", fn)
-	}
-	return luInt64(n)
-}
-
 func luToNum(v interface{}) (interface{}, bool) {
 	if luIsNum(v) {
 		return v, true
@@ -895,10 +872,21 @@ func init() {
 			}
 			return w(giNorm(iv, 64, false))
 		}
+		// ----- the math library -----
+		// Every member takes the call's ARGUMENT ARRAY (argsOf), which is what lets
+		// an argument check say "got no value"; the checks are jsrtluastr.go's.
+		argsOf := func(h uint64) []interface{} {
+			if arr, ok := u(h).(*jsArray); ok {
+				return arr.elems
+			}
+			return nil
+		}
 		// math.type(x): "integer", "float", or nil for anything that is not a
 		// number (a STRING is not, even one that spells a numeral).
 		m["js_lutype"] = func(a []uint64) uint64 {
-			v := u(a[0])
+			args := argsOf(a[0])
+			rt.luCheckAny("math.type", 1, args)
+			v := args[0]
 			if luIsInt(v) {
 				return rt.wrapStr("integer")
 			}
@@ -909,7 +897,9 @@ func init() {
 		}
 		// math.tointeger(x): the integer x names, or nil when it names none.
 		m["js_lutoint"] = func(a []uint64) uint64 {
-			v, ok := luToNum(u(a[0]))
+			args := argsOf(a[0])
+			rt.luCheckAny("math.tointeger", 1, args)
+			v, ok := luToNum(args[0])
 			if !ok {
 				return w(jsUndef)
 			}
@@ -929,19 +919,14 @@ func init() {
 		// math.floor / math.ceil answer an INTEGER, and an operand that already
 		// is one is handed back untouched - flooring math.maxinteger through a
 		// double would round it.
-		mathRound := func(up bool) func(a []uint64) uint64 {
+		mathRound := func(up bool, qual string) func(a []uint64) uint64 {
 			return func(a []uint64) uint64 {
-				v := u(a[0])
+				args := argsOf(a[0])
+				v := luArgAt(args, 1)
 				if luIsInt(v) {
 					return w(v)
 				}
-				n, ok := luToNum(v)
-				if !ok {
-					if up {
-						rt.luFail("bad argument to 'ceil' (number expected)")
-					}
-					rt.luFail("bad argument to 'floor' (number expected)")
-				}
+				n := rt.luCheckNum(qual, 1, args)
 				if luIsInt(n) {
 					return w(n)
 				}
@@ -954,15 +939,18 @@ func init() {
 				if iv, fits := luI64(f); fits {
 					return w(iv)
 				}
-				return rt.wrapNum(f)
+				return w(luMkFlo(f))
 			}
 		}
-		m["js_lufloor"] = mathRound(false)
-		m["js_luceil"] = mathRound(true)
+		m["js_lufloor"] = mathRound(false, "math.floor")
+		m["js_luceil"] = mathRound(true, "math.ceil")
 		// math.abs keeps the subtype, and an integer WRAPS:
-		// math.abs(math.mininteger) is math.mininteger.
+		// math.abs(math.mininteger) is math.mininteger. abs and fmod ask whether
+		// the ARGUMENT is an integer before any coercion, so a numeric string
+		// takes the float path: math.abs("16") is 16.0.
 		m["js_luabs"] = func(a []uint64) uint64 {
-			v := u(a[0])
+			args := argsOf(a[0])
+			v := luArgAt(args, 1)
 			if luIsInt(v) {
 				n := luInt64(v)
 				if n < 0 {
@@ -970,59 +958,73 @@ func init() {
 				}
 				return w(giNorm(n, 64, false))
 			}
-			return w(luMkFlo(math.Abs(luNumOf(v))))
+			return w(luMkFlo(math.Abs(luNumOf(rt.luCheckNum("math.abs", 1, args)))))
 		}
 		// math.max / math.min keep the WINNING argument, so the subtype survives -
 		// and the tie goes to the FIRST one, which is real Lua's rule (its loop
 		// replaces the running best only on a strict '<'), so math.max(1, 1.0) is
 		// the integer 1.
-		m["js_lumax"] = func(a []uint64) uint64 {
-			if rt.luCmp(0, u(a[0]), u(a[1])) {
-				return a[1]
+		mathPick := func(isMax bool, qual string) func(a []uint64) uint64 {
+			return func(a []uint64) uint64 {
+				args := argsOf(a[0])
+				rt.luCheckAny(qual, 1, args)
+				best := args[0]
+				for _, v := range args[1:] {
+					if (isMax && rt.luCmp(0, best, v)) || (!isMax && rt.luCmp(0, v, best)) {
+						best = v
+					}
+				}
+				return w(best)
 			}
-			return a[0]
 		}
-		m["js_lumin"] = func(a []uint64) uint64 {
-			if rt.luCmp(0, u(a[1]), u(a[0])) {
-				return a[1]
-			}
-			return a[0]
-		}
+		m["js_lumax"] = mathPick(true, "math.max")
+		m["js_lumin"] = mathPick(false, "math.min")
 		// math.fmod keeps C's fmod: the remainder takes the sign of the DIVIDEND,
 		// which is where it differs from the '%' operator.
 		m["js_lufmod"] = func(a []uint64) uint64 {
-			l, lok := luToNum(u(a[0]))
-			r, rok := luToNum(u(a[1]))
-			if !lok || !rok {
-				rt.luFail("bad argument to 'fmod' (number expected)")
-			}
-			if luIsInt(l) && luIsInt(r) {
+			args := argsOf(a[0])
+			if l, r := luArgAt(args, 1), luArgAt(args, 2); luIsInt(l) && luIsInt(r) {
 				b := luInt64(r)
 				if b == 0 {
-					rt.luFail("bad argument #2 to 'fmod' (zero)")
+					rt.luArgErr("math.fmod", 2, "zero")
 				}
 				if b == -1 {
 					return w(float64(0))
 				}
 				return w(giNorm(luInt64(l)%b, 64, false))
 			}
-			return w(luMkFlo(math.Mod(luNumOf(l), luNumOf(r))))
+			l := luNumOf(rt.luCheckNum("math.fmod", 1, args))
+			return w(luMkFlo(math.Mod(l, luNumOf(rt.luCheckNum("math.fmod", 2, args)))))
 		}
-		// ---- the four math members whose answer is not a bare Math call ----
-		// The rest of Lua's math library needs no extern at all: the host Math
-		// carries the same thirty-four members in all three engines, so
-		// lua-to-llvm-ir.abnf routes sqrt/sin/cos/... straight through it. These
-		// four cannot: an argument COUNT or the integer SUBTYPE decides what they
-		// answer. The layer-2 twins are in languages/lib/lua-rt.metajs.
-		//
+		// The float-only members, by the index the emitter passes as a raw handle:
+		// each answers a FLOAT whatever its argument's subtype (math.sqrt(4) is
+		// 2.0). deg and rad are ONE multiplication by a folded constant, which is
+		// what lmathlib.c does - and why math.deg(math.pi) is exactly 180.0.
+		pi := math.Pi // a variable, so the two constants are DOUBLE divisions
+		degK, radK := 180/pi, pi/180
+		mathF := []struct {
+			qual string
+			f    func(float64) float64
+		}{
+			{"math.sqrt", math.Sqrt}, {"math.sin", math.Sin}, {"math.cos", math.Cos},
+			{"math.tan", math.Tan}, {"math.asin", math.Asin}, {"math.acos", math.Acos},
+			{"math.exp", math.Exp},
+			{"math.deg", func(x float64) float64 { return x * degK }},
+			{"math.rad", func(x float64) float64 { return x * radK }},
+		}
+		m["js_lumathf"] = func(a []uint64) uint64 {
+			op := mathF[a[1]]
+			return w(luMkFlo(op.f(luNumOf(rt.luCheckNum(op.qual, 1, argsOf(a[0]))))))
+		}
 		// math.atan(y [, x]) is atan2 with a default x of 1.0 - not "one argument
 		// means Atan": lmathlib.c passes the default through atan2, and the two
 		// disagree on the sign of a zero.
 		m["js_luatan"] = func(a []uint64) uint64 {
-			y := rt.luArgNum(u(a[0]), "atan")
+			args := argsOf(a[0])
+			y := luNumOf(rt.luCheckNum("math.atan", 1, args))
 			x := 1.0
-			if !isUndefOrNull(u(a[1])) {
-				x = rt.luArgNum(u(a[1]), "atan")
+			if !luIsNil(luArgAt(args, 2)) {
+				x = luNumOf(rt.luCheckNum("math.atan", 2, args))
 			}
 			return w(luMkFlo(math.Atan2(y, x)))
 		}
@@ -1031,11 +1033,12 @@ func init() {
 		// math.log(8, 2) is exactly 3.0 through Log2 and 3.0000000000000004 at
 		// some arguments through Log(x)/Log(2).
 		m["js_lulog"] = func(a []uint64) uint64 {
-			x := rt.luArgNum(u(a[0]), "log")
-			if isUndefOrNull(u(a[1])) {
+			args := argsOf(a[0])
+			x := luNumOf(rt.luCheckNum("math.log", 1, args))
+			if luIsNil(luArgAt(args, 2)) {
 				return w(luMkFlo(math.Log(x)))
 			}
-			b := rt.luArgNum(u(a[1]), "log")
+			b := luNumOf(rt.luCheckNum("math.log", 2, args))
 			if b == 2 {
 				return w(luMkFlo(math.Log2(x)))
 			}
@@ -1044,15 +1047,14 @@ func init() {
 			}
 			return w(luMkFlo(math.Log(x) / math.Log(b)))
 		}
-		// math.modf(x) answers TWO values, so the extern hands back a plain array
-		// and the emitter wraps it with lua_mk. The integral part goes through
-		// lmathlib's pushnumint - an INTEGER when it has an exact integer
-		// representation and a float otherwise, so math.modf(3.7) is `3  0.7` and
-		// math.modf(math.huge) is `inf  0.0`. It truncates toward zero, which is
-		// why math.floor cannot stand in for it at a negative argument, and the
-		// fractional part of an infinity is +-0.0 rather than NaN.
+		// math.modf(x): the integral and the fractional part. The integral part
+		// goes through lmathlib's pushnumint - an INTEGER when it has an exact
+		// integer representation and a float otherwise, so math.modf(3.7) is
+		// `3  0.7` and math.modf(math.huge) is `inf  0.0`. It truncates toward
+		// zero, which is why math.floor cannot stand in for it at a negative
+		// argument, and the fractional part of an infinity is +-0.0 rather than NaN.
 		m["js_lumodf"] = func(a []uint64) uint64 {
-			n := rt.luArgNum(u(a[0]), "modf")
+			n := luNumOf(rt.luCheckNum("math.modf", 1, argsOf(a[0])))
 			ip := math.Trunc(n)
 			fp := math.Copysign(0, n)
 			if !math.IsInf(n, 0) {
@@ -1064,14 +1066,17 @@ func init() {
 			} else {
 				first = luMkFlo(ip)
 			}
-			return w(&jsArray{elems: []interface{}{first, luMkFlo(fp)}})
+			return w(luMk([]interface{}{first, luMkFlo(fp)}))
 		}
 		// math.ult(a, b): the two integers compared as UNSIGNED 64 bit values, so
 		// math.ult(-1, 2) is false where -1 < 2 is true.
 		m["js_luult"] = func(a []uint64) uint64 {
-			l := rt.luArgInt(u(a[0]), "ult")
-			r := rt.luArgInt(u(a[1]), "ult")
-			return w(uint64(l) < uint64(r))
+			args := argsOf(a[0])
+			rt.luCheckInt("math.ult", 1, args)
+			rt.luCheckInt("math.ult", 2, args)
+			l, _ := luToNum(args[0])
+			r, _ := luToNum(args[1])
+			return w(uint64(luIntOf(l)) < uint64(luIntOf(r)))
 		}
 		m["js_lumaxint"] = func(a []uint64) uint64 { return w(giNorm(math.MaxInt64, 64, false)) }
 		m["js_luminint"] = func(a []uint64) uint64 { return w(giNorm(math.MinInt64, 64, false)) }

@@ -11,7 +11,9 @@ package abnf
 // works on the UTF-16 units of the host string (every unit is 0..255).
 
 import (
+	"fmt"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -23,9 +25,24 @@ const (
 
 // ----- the lauxlib argument checks -----
 
-// luArgErr raises lua's "bad argument #n to 'fn' (msg)".
+// luArgErr raises lua's "bad argument #n to 'fn' (msg)", fn the function's global
+// name ('math.floor'). The marker also carries n and msg on their own: the
+// emitted lua_argmsg rewords the message with the name the CALL SITE spelled
+// ('floor'), which only the module knows. Twin of luArgErr in
+// languages/lib/lua-rt.metajs.
 func (rt *jsrt) luArgErr(fn string, n int, msg string) {
-	rt.luFail("bad argument #%d to '%s' (%s)", n, fn, msg)
+	o := newJSObject()
+	o.set("__luerr", fmt.Sprintf("bad argument #%d to '%s' (%s)", n, fn, msg))
+	o.set("__luarg", float64(n))
+	o.set("__lumsg", msg)
+	panic(&jsThrown{value: o})
+}
+
+// luCheckAny is luaL_checkany: argument n must be present, nil or not.
+func (rt *jsrt) luCheckAny(fn string, n int, args []interface{}) {
+	if n > len(args) {
+		rt.luArgErr(fn, n, "value expected")
+	}
 }
 
 // luArgTypeErr names what argument n was, "no value" when the call passed fewer
@@ -59,13 +76,20 @@ func (rt *jsrt) luCheckStr(fn string, n int, args []interface{}) string {
 	return ""
 }
 
-// luCheckInt is an integer argument as a double: a float with an integral value
-// and a numeric string convert; anything else is an error.
-func (rt *jsrt) luCheckInt(fn string, n int, args []interface{}) float64 {
+// luCheckNum is a number argument, keeping its subtype; a numeric string
+// converts.
+func (rt *jsrt) luCheckNum(fn string, n int, args []interface{}) interface{} {
 	v, ok := luToNum(luArgAt(args, n))
 	if !ok {
 		rt.luArgTypeErr(fn, n, "number", args)
 	}
+	return v
+}
+
+// luCheckInt is an integer argument as a double: a float with an integral value
+// and a numeric string convert; anything else is an error.
+func (rt *jsrt) luCheckInt(fn string, n int, args []interface{}) float64 {
+	v := rt.luCheckNum(fn, n, args)
 	d := luNumOf(v)
 	if !luIsInt(v) && (d-d != 0 || d != float64(int64(d))) {
 		rt.luArgErr(fn, n, "number has no integer representation")
@@ -78,6 +102,21 @@ func (rt *jsrt) luOptInt(fn string, n int, args []interface{}, dflt float64) flo
 		return dflt
 	}
 	return rt.luCheckInt(fn, n, args)
+}
+
+func (rt *jsrt) luOptStr(fn string, n int, args []interface{}, dflt string) string {
+	if luIsNil(luArgAt(args, n)) {
+		return dflt
+	}
+	return rt.luCheckStr(fn, n, args)
+}
+
+// luIntOf is an integer-valued number as the exact integer (3.0 is 3).
+func luIntOf(v interface{}) int64 {
+	if luIsInt(v) {
+		return luInt64(v)
+	}
+	return int64(luNumOf(v))
 }
 
 // luMk is several results as ONE Lua value: exactly one stays unwrapped, any
@@ -646,9 +685,9 @@ func init() {
 		m["js_lufind"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
 			find := rt.truthy(u(a[1]))
-			fn := "match"
+			fn := "string.match"
 			if find {
-				fn = "find"
+				fn = "string.find"
 			}
 			s := rt.luCheckStr(fn, 1, args)
 			p := rt.luCheckStr(fn, 2, args)
@@ -664,10 +703,10 @@ func init() {
 		// match, or nil.
 		m["js_lugmatch"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
-			s := rt.luCheckStr("gmatch", 1, args)
-			p := rt.luCheckStr("gmatch", 2, args)
+			s := rt.luCheckStr("string.gmatch", 1, args)
+			p := rt.luCheckStr("string.gmatch", 2, args)
 			ls := float64(len(strUnits(s)))
-			init := lsPosI(rt.luOptInt("gmatch", 3, args, 1), ls) - 1
+			init := lsPosI(rt.luOptInt("string.gmatch", 3, args, 1), ls) - 1
 			if init > ls {
 				init = ls + 1
 			}
@@ -694,8 +733,8 @@ func init() {
 		}
 		m["js_lugsub"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
-			src := strUnits(rt.luCheckStr("gsub", 1, args))
-			p := strUnits(rt.luCheckStr("gsub", 2, args))
+			src := strUnits(rt.luCheckStr("string.gsub", 1, args))
+			p := strUnits(rt.luCheckStr("string.gsub", 2, args))
 			replV := luArgAt(args, 3)
 			var repl []uint16
 			isStr := false
@@ -707,12 +746,12 @@ func init() {
 				if luIsNum(rv) {
 					repl, isStr = strUnits(luNumStr(rv)), true
 				} else if _, ok := rv.(*jsObject); !ok {
-					rt.luArgTypeErr("gsub", 3, "string/function/table", args)
+					rt.luArgTypeErr("string.gsub", 3, "string/function/table", args)
 				}
 			}
 			maxN := -1
 			if !luIsNil(luArgAt(args, 4)) {
-				maxN = int(rt.luCheckInt("gsub", 4, args))
+				maxN = int(rt.luCheckInt("string.gsub", 4, args))
 				if maxN < 0 {
 					maxN = 0
 				}
@@ -761,9 +800,9 @@ func init() {
 		}
 		m["js_lubyte"] = func(a []uint64) uint64 {
 			args := argsOf(a[0])
-			s := strUnits(rt.luCheckStr("byte", 1, args))
-			pi := rt.luOptInt("byte", 2, args, 1)
-			pose := lsEndPos(rt.luOptInt("byte", 3, args, pi), float64(len(s)))
+			s := strUnits(rt.luCheckStr("string.byte", 1, args))
+			pi := rt.luOptInt("string.byte", 2, args, 1)
+			pose := lsEndPos(rt.luOptInt("string.byte", 3, args, pi), float64(len(s)))
 			out := []interface{}{}
 			for k := lsPosI(pi, float64(len(s))); k <= pose; k++ {
 				out = append(out, float64(s[int(k)-1]))
@@ -774,16 +813,61 @@ func init() {
 			args := argsOf(a[0])
 			out := make([]uint16, 0, len(args))
 			for k := range args {
-				c := rt.luCheckInt("char", k+1, args)
+				c := rt.luCheckInt("string.char", k+1, args)
 				if c < 0 || c > 255 {
-					rt.luArgErr("char", k+1, "value out of range")
+					rt.luArgErr("string.char", k+1, "value out of range")
 				}
 				out = append(out, uint16(c))
 			}
 			return rt.wrapStr(strFromUnits(out))
 		}
+		m["js_lulen"] = func(a []uint64) uint64 {
+			return w(float64(len(strUnits(rt.luCheckStr("string.len", 1, argsOf(a[0]))))))
+		}
+		lsCase := func(qual string, up bool) func(a []uint64) uint64 {
+			return func(a []uint64) uint64 {
+				s := strUnits(rt.luCheckStr(qual, 1, argsOf(a[0])))
+				for i, c := range s {
+					if up && c >= 'a' && c <= 'z' {
+						s[i] = c - 32
+					} else if !up && c >= 'A' && c <= 'Z' {
+						s[i] = c + 32
+					}
+				}
+				return rt.wrapStr(strFromUnits(s))
+			}
+		}
+		m["js_luupper"] = lsCase("string.upper", true)
+		m["js_lulower"] = lsCase("string.lower", false)
+		m["js_lusub"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			s := strUnits(rt.luCheckStr("string.sub", 1, args))
+			l := float64(len(s))
+			i := lsPosI(rt.luCheckInt("string.sub", 2, args), l)
+			e := lsEndPos(rt.luOptInt("string.sub", 3, args, -1), l)
+			if i > e {
+				return rt.wrapStr("")
+			}
+			return rt.wrapStr(strFromUnits(s[int(i)-1 : int(e)]))
+		}
+		m["js_lurep"] = func(a []uint64) uint64 {
+			args := argsOf(a[0])
+			s := rt.luCheckStr("string.rep", 1, args)
+			n := rt.luCheckInt("string.rep", 2, args)
+			sep := rt.luOptStr("string.rep", 3, args, "")
+			if n < 1 {
+				return rt.wrapStr("")
+			}
+			var b strings.Builder
+			b.WriteString(s)
+			for k := 1.0; k < n; k++ {
+				b.WriteString(sep)
+				b.WriteString(s)
+			}
+			return rt.wrapStr(b.String())
+		}
 		m["js_lureverse"] = func(a []uint64) uint64 {
-			s := strUnits(rt.luCheckStr("reverse", 1, argsOf(a[0])))
+			s := strUnits(rt.luCheckStr("string.reverse", 1, argsOf(a[0])))
 			out := make([]uint16, len(s))
 			for i, c := range s {
 				out[len(s)-1-i] = c

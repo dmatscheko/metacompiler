@@ -961,9 +961,16 @@ function js_lulit(s, radix) {
     return luNorm(p.v)
 }
 
+// ----- the math library -----
+// Every member takes the call's ARGUMENT ARRAY, which is what lets an argument
+// check say "got no value"; the checks (luCheckNum and friends) are with the
+// string library below. The Go twins are in abnf/jsrtlua.go.
+
 // math.type(x): "integer", "float", or nil for anything that is not a number (a
 // STRING is not, even one that spells a numeral).
-function js_lutype(v) {
+function js_lutype(args) {
+    luCheckAny("math.type", 1, args)
+    var v = args[0]
     // luPlain: a sized integer is always math.type "integer", and luIntFast
     // answers about a double.
     if (luPlain(v)) {
@@ -976,8 +983,9 @@ function js_lutype(v) {
 }
 
 // math.tointeger(x): the integer x names, or nil when it names none.
-function js_lutoint(v) {
-    var a = luToNum(v)
+function js_lutoint(args) {
+    luCheckAny("math.tointeger", 1, args)
+    var a = luToNum(args[0])
     if (a === undefined) { return undefined }
     if (luIsInt(a)) { return a }
     var n = luNumOf(a)
@@ -989,109 +997,117 @@ function js_lutoint(v) {
 
 // math.floor / math.ceil answer an INTEGER, and an operand that already is one is
 // handed back untouched - flooring math.maxinteger through a double would round it.
-function luRound(v, up) {
+function luRound(args, up, qual) {
+    var v = luArgAt(args, 1)
     if (luIsInt(v)) { return v }
-    var n = luToNum(v)
-    if (n === undefined) { luFail("bad argument to '" + (up ? "ceil" : "floor") + "' (number expected)") }
+    var n = luCheckNum(qual, 1, args)
     if (luIsInt(n)) { return n }
     var f = luNumOf(n)
     if (up) { f = Math.ceil(f) } else { f = Math.floor(f) }
     var iv = luI64(f)
     if (iv !== undefined) { return iv }
-    return f
+    return luMkFlo(f)
 }
-function js_lufloor(v) { return luRound(v, false) }
-function js_luceil(v)  { return luRound(v, true) }
+function js_lufloor(args) { return luRound(args, false, "math.floor") }
+function js_luceil(args)  { return luRound(args, true, "math.ceil") }
 
-// math.abs keeps the subtype, and an integer WRAPS:
-// math.abs(math.mininteger) is math.mininteger.
-function js_luabs(v) {
+// math.abs keeps the subtype, and an integer WRAPS: math.abs(math.mininteger) is
+// math.mininteger. abs and fmod ask whether the ARGUMENT is an integer before any
+// coercion, so a numeric string takes the float path: math.abs("16") is 16.0.
+function js_luabs(args) {
+    var v = luArgAt(args, 1)
     if (luIsInt(v)) {
         var p = luPair(v)
         if (i64IsNeg(p)) { p = i64Neg(p) }
         return luNorm(p)
     }
-    return luMkFlo(Math.abs(luNumOf(v)))
+    return luMkFlo(Math.abs(luNumOf(luCheckNum("math.abs", 1, args))))
 }
 
 // math.max / math.min keep the WINNING argument, so the subtype survives - and
 // the tie goes to the FIRST one, which is real Lua's rule (its loop replaces the
 // running best only on a strict '<'), so math.max(1, 1.0) is the integer 1.
-function js_lumax(a, b) {
-    if (js_lucmp(0, a, b)) { return b }
-    return a
+function js_lumax(args) {
+    luCheckAny("math.max", 1, args)
+    var best = args[0]
+    for (var i = 1; i < args.length; i++) { if (js_lucmp(0, best, args[i])) { best = args[i] } }
+    return best
 }
-function js_lumin(a, b) {
-    if (js_lucmp(0, b, a)) { return b }
-    return a
+function js_lumin(args) {
+    luCheckAny("math.min", 1, args)
+    var best = args[0]
+    for (var i = 1; i < args.length; i++) { if (js_lucmp(0, args[i], best)) { best = args[i] } }
+    return best
 }
 
 // math.fmod keeps C's fmod: the remainder takes the sign of the DIVIDEND, which
 // is where it differs from the '%' operator.
-function js_lufmod(a, b) {
-    var l = luToNum(a)
-    var r = luToNum(b)
-    if (l === undefined || r === undefined) { luFail("bad argument to 'fmod' (number expected)") }
+function js_lufmod(args) {
+    var l = luArgAt(args, 1)
+    var r = luArgAt(args, 2)
     if (luIsInt(l) && luIsInt(r)) {
         var bp = luPair(r)
-        if (i64IsZero(bp)) { luFail("bad argument #2 to 'fmod' (zero)") }
+        if (i64IsZero(bp)) { luArgErr("math.fmod", 2, "zero") }
         if (i64Eq(bp, i64Make(0xffffffff, 0xffffffff))) { return 0 }
         return luNorm(i64DivModS(luPair(l), bp).r)
     }
     // Go's math.Mod, which is MetaJS's own % - the C floor's js_mod is a port of
     // exactly that function, so this is the same bits and not an approximation.
-    return luMkFlo(luNumOf(l) % luNumOf(r))
+    var lv = luNumOf(luCheckNum("math.fmod", 1, args))
+    return luMkFlo(lv % luNumOf(luCheckNum("math.fmod", 2, args)))
 }
 
-// ---- the four math members whose answer is not a bare Math call ----
-// The rest of Lua's math library needs no extern: the host Math is the same in
-// all three engines, so lua-to-llvm-ir.abnf routes sqrt/sin/cos/... straight
-// through it. These four cannot: an argument COUNT or the integer SUBTYPE decides
-// what they answer. The Go twins are in abnf/jsrtlua.go.
-
-// The shared argument check: Lua coerces a numeric STRING in an arithmetic
-// position and so does every math function.
-function luArgNum(v, fn) {
-    var n = luToNum(v)
-    if (n === undefined) { luFail("bad argument to '" + fn + "' (number expected)") }
-    return luNumOf(n)
-}
-function luArgInt(v, fn) {
-    var n = luToNum(v)
-    if (n === undefined) { luFail("bad argument to '" + fn + "' (number expected)") }
-    if (!luIsInt(n)) { luFail("bad argument to '" + fn + "' (number has no integer representation)") }
-    return luPair(n)
+// The float-only members, by the index the emitter passes as a raw handle: each
+// answers a FLOAT whatever its argument's subtype (math.sqrt(4) is 2.0). deg and
+// rad are ONE multiplication by a folded constant, which is what lmathlib.c does -
+// and why math.deg(math.pi) is exactly 180.0.
+var LU_MATHF = ["math.sqrt", "math.sin", "math.cos", "math.tan", "math.asin", "math.acos", "math.exp",
+                "math.deg", "math.rad"]
+function js_lumathf(args, op_raw) {
+    var op = op_raw
+    var x = luNumOf(luCheckNum(LU_MATHF[op], 1, args))
+    if (op === 0) { return luMkFlo(Math.sqrt(x)) }
+    if (op === 1) { return luMkFlo(Math.sin(x)) }
+    if (op === 2) { return luMkFlo(Math.cos(x)) }
+    if (op === 3) { return luMkFlo(Math.tan(x)) }
+    if (op === 4) { return luMkFlo(Math.asin(x)) }
+    if (op === 5) { return luMkFlo(Math.acos(x)) }
+    if (op === 6) { return luMkFlo(Math.exp(x)) }
+    if (op_raw === 7) { return luMkFlo(x * (180 / Math.PI)) }
+    return luMkFlo(x * (Math.PI / 180))
 }
 
 // math.atan(y [, x]) is atan2 with a default x of 1.0 - not "one argument means
 // Atan": lmathlib.c passes the default through atan2.
-function js_luatan(y, x) {
+function js_luatan(args) {
+    var y = luNumOf(luCheckNum("math.atan", 1, args))
     var xv = 1
-    if (x !== undefined && x !== null) { xv = luArgNum(x, "atan") }
-    return luMkFlo(Math.atan2(luArgNum(y, "atan"), xv))
+    var x = luArgAt(args, 2)
+    if (x !== undefined && x !== null) { xv = luNumOf(luCheckNum("math.atan", 2, args)) }
+    return luMkFlo(Math.atan2(y, xv))
 }
 
 // math.log(x [, base]). lmathlib.c routes base 2 and base 10 to log2/log10
 // rather than dividing, and the difference is visible: math.log(8, 2) is exactly
 // 3.0 that way and 3.0000000000000004 at some arguments the other.
-function js_lulog(x, b) {
-    var xv = luArgNum(x, "log")
+function js_lulog(args) {
+    var xv = luNumOf(luCheckNum("math.log", 1, args))
+    var b = luArgAt(args, 2)
     if (b === undefined || b === null) { return luMkFlo(Math.log(xv)) }
-    var bv = luArgNum(b, "log")
+    var bv = luNumOf(luCheckNum("math.log", 2, args))
     if (bv === 2) { return luMkFlo(Math.log2(xv)) }
     if (bv === 10) { return luMkFlo(Math.log10(xv)) }
     return luMkFlo(Math.log(xv) / Math.log(bv))
 }
 
-// math.modf(x) answers TWO values, so this hands back a plain two-element ARRAY
-// and the emitter wraps it with lua_mk. The integral part goes through
-// lmathlib's pushnumint - an INTEGER when it has an exact integer representation
-// and a float otherwise, so math.modf(3.7) is `3  0.7` and math.modf(math.huge)
-// is `inf  0.0`. It truncates toward ZERO, which is why math.floor cannot stand
-// in for it at a negative argument, and the fractional part of an infinity keeps
-// the argument's sign rather than being NaN.
-function js_lumodf(v) {
-    var n = luArgNum(v, "modf")
+// math.modf(x): the integral and the fractional part. The integral part goes
+// through lmathlib's pushnumint - an INTEGER when it has an exact integer
+// representation and a float otherwise, so math.modf(3.7) is `3  0.7` and
+// math.modf(math.huge) is `inf  0.0`. It truncates toward ZERO, which is why
+// math.floor cannot stand in for it at a negative argument, and the fractional
+// part of an infinity keeps the argument's sign rather than being NaN.
+function js_lumodf(args) {
+    var n = luNumOf(luCheckNum("math.modf", 1, args))
     var ip = Math.trunc(n)
     var fp = 0 / (n < 0 ? 0 - 1 : 1)
     if (n - n === 0) { fp = n - ip }
@@ -1099,13 +1115,20 @@ function js_lumodf(v) {
     if (ip - ip === 0) { iv = luI64(ip) }
     var first = iv
     if (iv === undefined) { first = luMkFlo(ip) }
-    return [first, luMkFlo(fp)]
+    return luMk([first, luMkFlo(fp)])
 }
 
 // math.ult(a, b): the two integers compared as UNSIGNED 64 bit values, so
 // math.ult(-1, 2) is false where -1 < 2 is true.
-function js_luult(a, b) {
-    return i64CmpU(luArgInt(a, "ult"), luArgInt(b, "ult")) < 0
+function js_luult(args) {
+    luCheckInt("math.ult", 1, args)
+    luCheckInt("math.ult", 2, args)
+    return i64CmpU(luIntPair(luToNum(args[0])), luIntPair(luToNum(args[1]))) < 0
+}
+// An integer-valued number as the exact 64 bit pair (3.0 is 3).
+function luIntPair(v) {
+    if (luIsInt(v)) { return luPair(v) }
+    return luPair(luI64(luNumOf(v)))
 }
 
 function js_lumaxint() { return luNorm(luMaxPair()) }
@@ -1208,14 +1231,6 @@ function js_pystr(v) {
     return "" + v
 }
 
-// A method call: (receiver, method name, argument array). The Lua compiler emits
-// exactly one, Math.pow, so the receiver is always a host object here; apply is
-// the general form and costs nothing extra.
-function js_mcall(recv, name, args) {
-    var f = recv[name]
-    return f.apply(recv, args)
-}
-
 // ============================================== the string library, select ===
 // The pattern matcher is lib/lua-strlib.js, shared with the interpreter half; the
 // externs below are its value-model glue, twins of abnf/jsrtluastr.go function
@@ -1224,7 +1239,18 @@ function js_mcall(recv, name, args) {
 import "./lua-strlib.js"
 
 // ----- the lauxlib argument checks -----
-function luArgErr(fn, n, msg) { luFail("bad argument #" + n + " to '" + fn + "' (" + msg + ")") }
+// luArgErr raises lua's "bad argument #n to 'fn' (msg)", fn the function's global
+// name ('math.floor'). The marker also carries n and msg on their own: the emitted
+// lua_argmsg rewords the message with the name the CALL SITE spelled ('floor'),
+// which only the module knows. Twin of rt.luArgErr in abnf/jsrtluastr.go.
+function luArgErr(fn, n, msg) {
+    var o = {}
+    o["__luerr"] = "bad argument #" + n + " to '" + fn + "' (" + msg + ")"
+    o["__luarg"] = n
+    o["__lumsg"] = msg
+    throw o
+}
+function luCheckAny(fn, n, args) { if (n > args.length) { luArgErr(fn, n, "value expected") } }
 function luArgTypeErr(fn, n, want, args) {
     var got = n > args.length ? "no value" : luTypeName(args[n - 1])
     luArgErr(fn, n, want + " expected, got " + got)
@@ -1240,11 +1266,16 @@ function luCheckStr(fn, n, args) {
     luArgTypeErr(fn, n, "string", args)
     return ""
 }
+// A number argument, keeping its subtype; a numeric string converts.
+function luCheckNum(fn, n, args) {
+    var a = luToNum(luArgAt(args, n))
+    if (a === undefined) { luArgTypeErr(fn, n, "number", args) }
+    return a
+}
 // An integer argument as a double: a float with an integral value and a numeric
 // string convert; anything else is an error.
 function luCheckInt(fn, n, args) {
-    var a = luToNum(luArgAt(args, n))
-    if (a === undefined) { luArgTypeErr(fn, n, "number", args) }
+    var a = luCheckNum(fn, n, args)
     var d = luNumOf(a)
     if (!luIsInt(a) && (d - d !== 0 || Math.floor(d) !== d)) { luArgErr(fn, n, "number has no integer representation") }
     return d
@@ -1253,6 +1284,11 @@ function luOptInt(fn, n, args, dflt) {
     var v = luArgAt(args, n)
     if (v === undefined || v === null) { return dflt }
     return luCheckInt(fn, n, args)
+}
+function luOptStr(fn, n, args, dflt) {
+    var v = luArgAt(args, n)
+    if (v === undefined || v === null) { return dflt }
+    return luCheckStr(fn, n, args)
 }
 // Several results as ONE Lua value: exactly one stays unwrapped, any other count
 // becomes the {__mv} box lua_mk builds in the emitted module.
@@ -1273,7 +1309,7 @@ function luFirstOf(v) {
 
 // string.find (find true) and string.match.
 function js_lufind(args, find) {
-    var fn = find ? "find" : "match"
+    var fn = find ? "string.find" : "string.match"
     var s = luCheckStr(fn, 1, args)
     var p = luCheckStr(fn, 2, args)
     var init = luOptInt(fn, 3, args, 1)
@@ -1284,9 +1320,9 @@ function js_lufind(args, find) {
 }
 // gmatch's iteration state, and one step of it.
 function js_lugmatch(args) {
-    var s = luCheckStr("gmatch", 1, args)
-    var p = luCheckStr("gmatch", 2, args)
-    return lsGmatchNew(s, p, luOptInt("gmatch", 3, args, 1))
+    var s = luCheckStr("string.gmatch", 1, args)
+    var p = luCheckStr("string.gmatch", 2, args)
+    return lsGmatchNew(s, p, luOptInt("string.gmatch", 3, args, 1))
 }
 function js_lugmatchnext(gm) {
     var r = lsGmatchNext(gm)
@@ -1305,41 +1341,54 @@ function luReplVal(v) {
 function luGsubTable(t) { return function(caps) { return luReplVal(t[js_lukey(caps[0])]) } }
 function luGsubFunc(f) { return function(caps) { return luReplVal(luFirstOf(f.apply(undefined, caps))) } }
 function js_lugsub(args) {
-    var s = luCheckStr("gsub", 1, args)
-    var p = luCheckStr("gsub", 2, args)
+    var s = luCheckStr("string.gsub", 1, args)
+    var p = luCheckStr("string.gsub", 2, args)
     var repl = luArgAt(args, 3)
     var rs = anytype
     rs = null
     var cb = anytype
     cb = null
-    if (typeof repl == "string" || luIsNum(repl)) { rs = luCheckStr("gsub", 3, args) }
+    if (typeof repl == "string" || luIsNum(repl)) { rs = luCheckStr("string.gsub", 3, args) }
     else if (typeof repl == "function") { cb = luGsubFunc(repl) }
     else if (repl !== undefined && repl !== null && typeof repl == "object") { cb = luGsubTable(repl) }
-    else { luArgTypeErr("gsub", 3, "string/function/table", args) }
+    else { luArgTypeErr("string.gsub", 3, "string/function/table", args) }
     var mx = 0 - 1
     var mv = luArgAt(args, 4)
     if (mv !== undefined && mv !== null) {
-        mx = luCheckInt("gsub", 4, args)
+        mx = luCheckInt("string.gsub", 4, args)
         if (mx < 0) { mx = 0 }
     }
     var r = lsGsub(s, p, rs, cb, mx)
     return luMk([r.r, r.n])
 }
 function js_lubyte(args) {
-    var s = luCheckStr("byte", 1, args)
-    var pi = luOptInt("byte", 2, args, 1)
-    return luMk(lsByte(s, pi, luOptInt("byte", 3, args, pi)))
+    var s = luCheckStr("string.byte", 1, args)
+    var pi = luOptInt("string.byte", 2, args, 1)
+    return luMk(lsByte(s, pi, luOptInt("string.byte", 3, args, pi)))
 }
 function js_luchar(args) {
     var out = ""
     for (var k = 0; k < args.length; k++) {
-        var c = luCheckInt("char", k + 1, args)
-        if (c < 0 || c > 255) { luArgErr("char", k + 1, "value out of range") }
+        var c = luCheckInt("string.char", k + 1, args)
+        if (c < 0 || c > 255) { luArgErr("string.char", k + 1, "value out of range") }
         out = out + String.fromCharCode(c)
     }
     return out
 }
-function js_lureverse(args) { return lsReverse(luCheckStr("reverse", 1, args)) }
+function js_lulen(args) { return luCheckStr("string.len", 1, args).length }
+function js_luupper(args) { return lsCase(luCheckStr("string.upper", 1, args), true) }
+function js_lulower(args) { return lsCase(luCheckStr("string.lower", 1, args), false) }
+function js_lusub(args) {
+    var s = luCheckStr("string.sub", 1, args)
+    var i = luCheckInt("string.sub", 2, args)
+    return lsSub(s, i, luOptInt("string.sub", 3, args, 0 - 1))
+}
+function js_lurep(args) {
+    var s = luCheckStr("string.rep", 1, args)
+    var n = luCheckInt("string.rep", 2, args)
+    return lsRep(s, n, luOptStr("string.rep", 3, args, ""))
+}
+function js_lureverse(args) { return lsReverse(luCheckStr("string.reverse", 1, args)) }
 // select(n, ...): the arguments from the n-th on, a negative n counting from the
 // end, or their count for select('#', ...).
 function js_luselect(args) {

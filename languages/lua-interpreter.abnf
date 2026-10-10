@@ -862,17 +862,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
 
-    function asciiCase(s, up) {
-        var out = ""
-        for (var i = 0; i < s.length; i++) {
-            var c = s.charCodeAt(i)
-            if (up && c >= 97 && c <= 122) { c = c - 32 }
-            else if (!up && c >= 65 && c <= 90) { c = c + 32 }
-            out = out + String.fromCharCode(c)
-        }
-        return out
-    }
-
     // ----- String escapes -----
     // Lua's own set: the single letters a b f n r t v, a decimal byte of up to three
     // digits, xNN, u{...} (a code point), a real line break (which stands for a newline)
@@ -1485,8 +1474,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ONE suffix step of a prefixexp. It is shared by the expression folder below and by
     // assignTarget, which is what makes `f(a).x = 1` walk exactly the chain `f(a).x` reads.
     // A call step with `tail` set is the call of `return f(...)` inside a Lua
-    // function: the callee takes over the caller's frame (see makeClosure).
-    function luaStep(cur, s, tail) {
+    // function: the callee takes over the caller's frame (see makeClosure). `cname`
+    // is the step's entry of luaCalleeNames.
+    function luaStep(cur, s, tail, cname) {
         var out = anytype // A member chain hops between types.
         if (s.kind == "call") {
             var argv = evalList(s.args)
@@ -1494,6 +1484,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fv = luaFirst(cur)
             if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value") }
             if (tail && luaCallPos.length > 0) { luaTail = true }
+            luaCallName = cname
             out = fv.apply(undefined, argv)
             luaTail = false
         } else if (s.kind == "method") {
@@ -1504,6 +1495,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof fn != "function") { fail("attempt to call method '" + s.name + "' (a " + luaType(fn) + " value)") }
             var margv = evalList(s.args)
             if (tail && luaCallPos.length > 0) { luaTail = true }
+            luaCallName = cname
             out = fn.apply(undefined, [recv].concat(margv))
             luaTail = false
         } else if (s.kind == "field") {
@@ -1512,6 +1504,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             out = luaIndex(luaFirst(cur), luaFirst(s.idx()))
         }
         return out
+    }
+    // The name lua 5.5 gives the function each call step of a chain calls, which is
+    // the name an argument error reports: a method's own name, the field a call
+    // reads its function from, or the variable the chain starts with (`first`);
+    // null where there is none. Twin of luaCalleeNames in lua-to-llvm-ir.abnf.
+    function luaCalleeNames(first, suffixes) {
+        var out = []
+        for (var i = 0; i < suffixes.length; i++) {
+            var st = suffixes[i]
+            var nm = anytype
+            nm = null
+            if (st.kind == "method") { nm = {n: st.name, m: true} }
+            else if (st.kind == "call") {
+                if (i == 0 && first !== null) { nm = {n: first, m: false} }
+                else if (i > 0 && suffixes[i - 1].kind == "field") { nm = {n: suffixes[i - 1].name, m: false} }
+            }
+            out.push(nm)
+        }
+        return out
+    }
+    // The variable a chain's source text starts with, or null when it starts with
+    // anything else (a parenthesis, a literal).
+    function luaLeadName(text) {
+        var c0 = text.length > 0 ? text.charCodeAt(0) : 0
+        if (!((c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122) || c0 === 95)) { return null }
+        var i = 1
+        while (i < text.length) {
+            var c = text.charCodeAt(i)
+            if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95)) { break }
+            i = i + 1
+        }
+        return text.substring(0, i)
     }
     // A chain that ends in a call is built twice: as itself, and as the tail call
     // makeReturn substitutes when `return` holds nothing but this chain. The match
@@ -1524,11 +1548,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var primary = items[0]
         var suffixes = items.slice(1)
         var last = suffixes.length - 1
+        var cnames = luaCalleeNames(luaLeadName(text), suffixes)
         var mk = function(tail) {
             return function() {
                 var cur = anytype // A member chain hops between types.
                 cur = primary()
-                for (var i = 0; i < suffixes.length; i++) { cur = luaStep(cur, suffixes[i], tail && i === last) }
+                for (var i = 0; i < suffixes.length; i++) { cur = luaStep(cur, suffixes[i], tail && i === last, cnames[i]) }
                 return cur
             }
         }
@@ -1571,7 +1596,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = anytype // The containers along the path may be of mixed types.
         o = getVar(ref.name)
         // luaStep, not luaIndex: the leading steps of a target may be calls (f(a).x = 1).
-        for (var i = 0; i < ref.path.length - 1; i++) { o = luaStep(o, ref.path[i], false) }
+        var cnames = luaCalleeNames(ref.name, ref.path)
+        for (var i = 0; i < ref.path.length - 1; i++) { o = luaStep(o, ref.path[i], false, cnames[i]) }
         luaSetIndex(luaFirst(o), pathKey(ref.path[ref.path.length - 1]), v)
     }
     // items interleave targets (objects) and value thunks (functions); all right hand
@@ -1834,6 +1860,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // and pairs are ordinary global functions returning such a triple, so a hand-written
     // iterator - stateless or a closure - drives the loop exactly the same way.
     // items = [{gname}..., iterExprThunk..., blockThunk]; the block is always last.
+    // The name lua gives the iterator a generic for calls.
+    var LUA_FOR_ITER = {n: "for iterator", m: false}
     function makeGenFor(items) {
         var names = []
         var exprs = []
@@ -1856,6 +1884,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var res = undefined
             var running = true
             while (running) {
+                luaCallName = LUA_FOR_ITER
                 var all = luaAll(f(st, ctl))
                 var head = anytype // The first returned value: nil ends the loop.
                 head = all.length > 0 ? all[0] : undefined
@@ -1944,9 +1973,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (level === undefined || level === null) { return 1 }
         var n = anytype // The level after Lua's string coercion.
         n = toNumV(level)
-        if (n === undefined) { fail("bad argument #2 to 'error' (number expected, got " + luaType(level) + ")") }
+        if (n === undefined) { luaArgErr("error", 2, "number expected, got " + luaType(level)) }
         var d = numOf(n)
-        if (d - d !== 0 || Math.floor(d) !== d) { fail("bad argument #2 to 'error' (number has no integer representation)") }
+        if (d - d !== 0 || Math.floor(d) !== d) { luaArgErr("error", 2, "number has no integer representation") }
         return d
     }
     globalScope["error"] = function(v, level) {
@@ -1973,6 +2002,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof f != "function") { fail("attempt to call a " + luaType(f) + " value") }
             var vs = []
             vs.push(true)
+            luaCallName = null
             var all = luaAll(f.apply(undefined, args))
             for (var i = 0; i < all.length; i++) { vs.push(all[i]) }
             out = mkMulti(vs)
@@ -1992,13 +2022,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     globalScope["pcall"] = function() {
-        if (arguments.length == 0) { fail("bad argument #1 to 'pcall' (value expected)") }
+        luaCheckAny("pcall", 1, arguments.length)
         var args = []
         for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
         return luaProtect(arguments[0], args, undefined)
     }
     globalScope["xpcall"] = function() {
-        if (arguments.length < 2) { fail("bad argument #2 to 'xpcall' (value expected)") }
+        luaCheckAny("xpcall", 2, arguments.length)
         var args = []
         for (var i = 2; i < arguments.length; i++) { args.push(arguments[i]) }
         return luaProtect(arguments[0], args, arguments[1])
@@ -2031,9 +2061,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // key AND its value, and nil once the table is exhausted - which is exactly what the
     // generic for expects, so pairs(t) is next plus the table.
     function luaNext(t, k) {
-        if (!isTbl(t)) {
-            fail("bad argument to 'next' (table expected, got " + luaType(t) + ")")
-        }
+        if (!isTbl(t)) { luaArgTypeErr("next", 1, "table", t, arguments.length) }
         var keys = hasOwn(t, "__keys") ? t.__keys : []
         var i = 0
         if (k !== undefined && k !== null) {
@@ -2059,7 +2087,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return kk
     }
     globalScope["next"] = luaNext
-    globalScope["pairs"] = function(t) { return mkMulti([luaNext, t, undefined]) }
+    // lua 5.5's pairs answers four values, the last one nil (a closing value).
+    globalScope["pairs"] = function(t) {
+        luaCheckAny("pairs", 1, arguments.length)
+        return mkMulti([luaNext, t, undefined, undefined])
+    }
     // ipairs(t): the 1-based array walk, as the same kind of triple - its iterator counts
     // the control value up and stops at the first nil element.
     function luaINext(t, i) {
@@ -2069,50 +2101,134 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === undefined || v === null) { return undefined }
         return mkMulti([nk, v])
     }
-    globalScope["ipairs"] = function(t) { return mkMulti([luaINext, t, 0]) }
-
-    // math.*: a small numeric library backed by JS Math (floor/abs/max/min, plus ceil
-    // derived from floor so no host Math.ceil is required in frozen mode).
-    // floor/ceil answer an integer (Lua does too); abs/max/min keep their argument's
-    // number subtype, so math.abs(-1.0) stays a float.
-    // math.type / math.tointeger / math.maxinteger / math.mininteger are the four names
-    // through which Lua 5.3+ makes the integer subtype visible to a program, so they
-    // belong with it: math.type(3) is "integer", math.type(3.0) is "float" and
-    // math.type("3") is nil (a string is not a number at all).
-    // The math library's shared argument check: Lua coerces a numeric STRING in an
-    // arithmetic position and every math function does the same, and a value that
-    // is no number at all is an error rather than a silent NaN. The compiler
-    // half's twin is lua_num plus rt.luArgNum in abnf/jsrtlua.go.
-    function mathArg(x, fn) {
-        var a = anytype
-        a = toNumV(x)
-        if (a === undefined) { fail("bad argument to '" + fn + "' (number expected)") }
-        return numOf(a)
+    globalScope["ipairs"] = function(t) {
+        luaCheckAny("ipairs", 1, arguments.length)
+        return mkMulti([luaINext, t, 0])
     }
-    // math.ult wants an exact integer, not a double reading of one.
-    function mathArgInt(x, fn) {
+
+    // ----- library argument checks (lauxlib's luaL_argerror and luaL_check*) -----
+    // An argument error names the function the way the CALL SITE spelled it - 'floor'
+    // for math.floor(x), 'f' for a local f - and lua 5.5 finds that name in the
+    // calling instruction. luaStep records it here before every call ({n, m}, m set
+    // for a method call, whose self is not counted); a call the library makes itself
+    // (pcall's) has none, and then the function's global name is used ('math.floor').
+    // Every check below takes that global name. `nargs` is how many arguments the
+    // call passed, which is what tells "got no value" (an absent argument) from
+    // "got nil". Twin of luArgErr in abnf/jsrtluastr.go and lua_argmsg in
+    // lua-to-llvm-ir.abnf.
+    var luaCallName = anytype
+    luaCallName = null
+    function luaArgErr(qual, n, msg) {
+        var cn = anytype
+        cn = luaCallName
+        if (cn === null) { fail("bad argument #" + n + " to '" + qual + "' (" + msg + ")") }
+        var k = n
+        if (cn.m) {
+            k = k - 1
+            if (k === 0) { fail("calling '" + cn.n + "' on bad self (" + msg + ")") }
+        }
+        fail("bad argument #" + k + " to '" + cn.n + "' (" + msg + ")")
+    }
+    function luaArgTypeErr(qual, n, want, v, nargs) {
+        luaArgErr(qual, n, want + " expected, got " + (n > nargs ? "no value" : luaType(v)))
+    }
+    function luaCheckAny(qual, n, nargs) { if (n > nargs) { luaArgErr(qual, n, "value expected") } }
+    // A number argument, keeping its subtype; a numeric string converts.
+    function luaCheckNum(qual, n, v, nargs) {
         var a = anytype
-        a = toNumV(x)
-        if (a === undefined) { fail("bad argument to '" + fn + "' (number expected)") }
-        if (!isInt(a)) { fail("bad argument to '" + fn + "' (number has no integer representation)") }
+        a = toNumV(v)
+        if (a === undefined) { luaArgTypeErr(qual, n, "number", v, nargs) }
         return a
     }
+    // An integer argument, as a double: a float with an integral value and a
+    // numeric string convert; anything else is an error.
+    function luaCheckInt(qual, n, v, nargs) {
+        var a = anytype
+        a = luaCheckNum(qual, n, v, nargs)
+        var d = numOf(a)
+        if (!isInt(a) && (d - d !== 0 || Math.floor(d) !== d)) { luaArgErr(qual, n, "number has no integer representation") }
+        return d
+    }
+    function luaOptInt(qual, n, v, nargs, dflt) {
+        if (v === undefined || v === null) { return dflt }
+        return luaCheckInt(qual, n, v, nargs)
+    }
+    // A NUMBER where a string goes is converted the way tostring renders it
+    // (luaL_checklstring), so string.len(1/3) counts the 19 characters of
+    // 0.33333333333333331 - the digits come from luaNumStr, never from the host's
+    // own number-to-string.
+    function luaCheckStr(qual, n, v, nargs) {
+        if (typeof v == "string") { return v }
+        if (isNum(v)) { return luaNumStr(v) }
+        luaArgTypeErr(qual, n, "string", v, nargs)
+        return ""
+    }
+    function luaOptStr(qual, n, v, nargs, dflt) {
+        if (v === undefined || v === null) { return dflt }
+        return luaCheckStr(qual, n, v, nargs)
+    }
+    // A FLOAT library result; an integral double past the integer range stays a
+    // float, an integral one inside it becomes the integer floor/ceil answer.
+    function luaIntOrFlt(f) {
+        var iv = anytype
+        iv = luaI64(f)
+        if (iv !== undefined && f - f === 0) { return iv }
+        return mkFlt(f)
+    }
+
+    // math.*: floor/ceil answer an integer when one fits; abs/max/min keep their
+    // argument's number subtype, so math.abs(-1.0) stays a float. math.type /
+    // math.tointeger / math.maxinteger / math.mininteger are the four names through
+    // which Lua 5.3+ makes the integer subtype visible to a program: math.type(3) is
+    // "integer", math.type(3.0) is "float" and math.type("3") is nil (a string is
+    // not a number at all). A numeric STRING argument converts, as in arithmetic.
     // 180/PI and PI/180, folded once exactly as lmathlib.c folds them.
     var LUA_DEG = 180 / Math.PI
     var LUA_RAD = Math.PI / 180
+    function luaMath1(qual, x, nargs) { return numOf(luaCheckNum(qual, 1, x, nargs)) }
 
     globalScope["math"] = {
-        // floor/ceil answer an INTEGER. An operand that already is one is handed back
-        // untouched - Math.floor of math.maxinteger would round it.
-        floor: function(x) { if (isInt(x)) { return x } return Math.floor(mathArg(x, "floor")) },
-        ceil: function(x) { if (isInt(x)) { return x } return 0 - Math.floor(0 - mathArg(x, "ceil")) },
-        abs: function(x) { return numOf(x) < 0 ? luaArith("-", 0, x) : x },
+        // floor/ceil hand an integer operand back untouched - Math.floor of
+        // math.maxinteger would round it.
+        floor: function(x) {
+            if (isInt(x)) { return x }
+            var a = anytype
+            a = luaCheckNum("math.floor", 1, x, arguments.length)
+            if (isInt(a)) { return a }
+            return luaIntOrFlt(Math.floor(numOf(a)))
+        },
+        ceil: function(x) {
+            if (isInt(x)) { return x }
+            var a = anytype
+            a = luaCheckNum("math.ceil", 1, x, arguments.length)
+            if (isInt(a)) { return a }
+            return luaIntOrFlt(0 - Math.floor(0 - numOf(a)))
+        },
+        // abs and fmod ask whether the ARGUMENT is an integer before any coercion,
+        // so a numeric string takes the float path: math.abs("16") is 16.0.
+        abs: function(x) {
+            if (isInt(x)) { return numOf(x) < 0 ? luaArith("-", 0, x) : x }
+            return mkFlt(Math.abs(luaMath1("math.abs", x, arguments.length)))
+        },
         // max/min keep the WINNING argument, so the subtype survives - and the tie
         // goes to the FIRST one, which is real Lua's rule (its loop replaces the
         // running best only on a strict '<'), so math.max(1, 1.0) is the integer 1.
-        max: function(a, b) { return luaCmp("<", a, b) ? b : a },
-        min: function(a, b) { return luaCmp("<", b, a) ? b : a },
+        max: function() {
+            luaCheckAny("math.max", 1, arguments.length)
+            var best = anytype
+            best = arguments[0]
+            for (var i = 1; i < arguments.length; i++) { if (luaCmp("<", best, arguments[i])) { best = arguments[i] } }
+            return best
+        },
+        min: function() {
+            luaCheckAny("math.min", 1, arguments.length)
+            var best = anytype
+            best = arguments[0]
+            for (var i = 1; i < arguments.length; i++) { if (luaCmp("<", arguments[i], best)) { best = arguments[i] } }
+            return best
+        },
         type: function(x) {
+            luaCheckAny("math.type", 1, arguments.length)
             if (isInt(x)) { return "integer" }
             if (isNum(x)) { return "float" }
             return undefined
@@ -2123,6 +2239,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // (math.tointeger("8") is 8, verified against lua 5.5), because it goes through
         // the same coercion the arithmetic operators use.
         tointeger: function(x) {
+            luaCheckAny("math.tointeger", 1, arguments.length)
             var a = anytype // The argument after Lua's string coercion.
             a = toNumV(x)
             if (a === undefined) { return undefined }
@@ -2136,31 +2253,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // (math.sqrt(4) is 2.0), so none of them touches the integer subtype. The
         // compiler half routes the same calls through the same host Math (libMath1
         // in lua-to-llvm-ir.abnf). Checked against lua 5.5.0.
-        sqrt: function(x) { return mkFlt(Math.sqrt(mathArg(x, "sqrt"))) },
-        sin: function(x) { return mkFlt(Math.sin(mathArg(x, "sin"))) },
-        cos: function(x) { return mkFlt(Math.cos(mathArg(x, "cos"))) },
-        tan: function(x) { return mkFlt(Math.tan(mathArg(x, "tan"))) },
-        asin: function(x) { return mkFlt(Math.asin(mathArg(x, "asin"))) },
-        acos: function(x) { return mkFlt(Math.acos(mathArg(x, "acos"))) },
-        exp: function(x) { return mkFlt(Math.exp(mathArg(x, "exp"))) },
+        sqrt: function(x) { return mkFlt(Math.sqrt(luaMath1("math.sqrt", x, arguments.length))) },
+        sin: function(x) { return mkFlt(Math.sin(luaMath1("math.sin", x, arguments.length))) },
+        cos: function(x) { return mkFlt(Math.cos(luaMath1("math.cos", x, arguments.length))) },
+        tan: function(x) { return mkFlt(Math.tan(luaMath1("math.tan", x, arguments.length))) },
+        asin: function(x) { return mkFlt(Math.asin(luaMath1("math.asin", x, arguments.length))) },
+        acos: function(x) { return mkFlt(Math.acos(luaMath1("math.acos", x, arguments.length))) },
+        exp: function(x) { return mkFlt(Math.exp(luaMath1("math.exp", x, arguments.length))) },
         // deg/rad are ONE multiplication by a folded constant, which is what
         // lmathlib.c does - and it is why math.deg(math.pi) is exactly 180.0.
-        deg: function(x) { return mkFlt(mathArg(x, "deg") * LUA_DEG) },
-        rad: function(x) { return mkFlt(mathArg(x, "rad") * LUA_RAD) },
+        deg: function(x) { return mkFlt(luaMath1("math.deg", x, arguments.length) * LUA_DEG) },
+        rad: function(x) { return mkFlt(luaMath1("math.rad", x, arguments.length) * LUA_RAD) },
         // math.atan(y [, x]) is atan2 with a default x of 1.0 - not "one argument
         // means Atan": lmathlib.c passes the default through atan2.
         atan: function(y, x) {
+            var nargs = arguments.length
+            var yv = luaMath1("math.atan", y, nargs)
             var xv = anytype
-            xv = (x === undefined || x === null) ? 1 : mathArg(x, "atan")
-            return mkFlt(Math.atan2(mathArg(y, "atan"), xv))
+            xv = (x === undefined || x === null) ? 1 : numOf(luaCheckNum("math.atan", 2, x, nargs))
+            return mkFlt(Math.atan2(yv, xv))
         },
         // math.log(x [, base]). lmathlib.c routes base 2 and base 10 to log2/log10
         // rather than dividing, and the difference is visible: math.log(8, 2) is
         // exactly 3.0 that way and 3.0000000000000004 at some arguments the other.
         log: function(x, b) {
-            var xv = mathArg(x, "log")
+            var nargs = arguments.length
+            var xv = luaMath1("math.log", x, nargs)
             if (b === undefined || b === null) { return mkFlt(Math.log(xv)) }
-            var bv = mathArg(b, "log")
+            var bv = numOf(luaCheckNum("math.log", 2, b, nargs))
             if (bv === 2) { return mkFlt(Math.log2(xv)) }
             if (bv === 10) { return mkFlt(Math.log10(xv)) }
             return mkFlt(Math.log(xv) / Math.log(bv))
@@ -2172,7 +2292,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // truncates toward ZERO, which is why math.floor cannot stand in for it at
         // a negative argument.
         modf: function(x) {
-            var n = mathArg(x, "modf")
+            var n = luaMath1("math.modf", x, arguments.length)
             var ip = Math.trunc(n)
             var fp = 0 / (n < 0 ? 0 - 1 : 1)
             if (n - n === 0) { fp = n - ip }
@@ -2181,19 +2301,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return mkMulti([iv === undefined ? mkFlt(ip) : iv, mkFlt(fp)])
         },
         // math.ult(a, b): the two integers compared as UNSIGNED 64 bit values, so
-        // math.ult(-1, 2) is false where -1 < 2 is true.
+        // math.ult(-1, 2) is false where -1 < 2 is true. An exact integer, not a
+        // double reading of one.
         ult: function(a, b) {
-            return szCmp(szConv(mathArgInt(a, "ult"), 64, true),
-                         szConv(mathArgInt(b, "ult"), 64, true)) < 0
+            var nargs = arguments.length
+            luaCheckInt("math.ult", 1, a, nargs)
+            luaCheckInt("math.ult", 2, b, nargs)
+            return szCmp(szConv(luaIntOf(toNumV(a)), 64, true), szConv(luaIntOf(toNumV(b)), 64, true)) < 0
         },
         // math.fmod keeps C's fmod: the remainder takes the sign of the DIVIDEND, which
         // is where it differs from the '%' operator.
         fmod: function(a, b) {
+            var nargs = arguments.length
             if (isInt(a) && isInt(b)) {
-                if (szEq(b, 0)) { fail("bad argument #2 to 'fmod' (zero)") }
+                if (szEq(b, 0)) { luaArgErr("math.fmod", 2, "zero") }
                 return szArith("%", a, b)
             }
-            return mkFlt(numOf(a) % numOf(b))
+            var l = luaMath1("math.fmod", a, nargs)
+            return mkFlt(l % numOf(luaCheckNum("math.fmod", 2, b, nargs)))
         },
         maxinteger: luaMaxInt(),
         mininteger: luaMinInt(),
@@ -2202,65 +2327,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pi: mkFlt(Math.PI),
         huge: 1 / 0
     }
-
-    // One end of a Lua string range, normalised to an inclusive 1-based index.
-    // i < 0 counts from the end (-1 = last), i == 0 means "before the first". The
-    // start clamps up to 1 and the end clamps down to len; a start past the end then
-    // yields the empty string, which is what Lua returns rather than an error.
-    function luaSubStart(len, i) {
-        var a = i
-        if (a < 0) { a = len + a + 1 }
-        if (a < 1) { a = 1 }
-        return a
-    }
-    function luaSubEnd(len, j) {
-        var e = j
-        if (e < 0) { e = len + e + 1 }
-        if (e > len) { e = len }
-        return e
-    }
-
-    // string.*: 1-based, matching Lua. rep(s, n) concatenates n copies.
-    //
-    // sub(s, i, j) is NOT JS slice(i-1, j). Lua's negative index counts from the end
-    // INCLUSIVELY and 1-based - -1 is the last character, so it normalises to len+i+1,
-    // not to len+i - and both ends are then clamped into 1..len rather than reinterpreted:
-    // ("hello"):sub(-3) is "llo" and ("hello"):sub(2, -2) is "ell". luaSubStart /
-    // luaSubEnd are the normalisation on its own, so the compiler half's lua_subi /
-    // lua_subj helpers implement exactly the same steps.
-    //
-    // A NUMBER where the string goes is converted the way tostring renders it
-    // (luaL_checklstring), so string.len(1/3) counts the 19 characters of
-    // 0.33333333333333331 - the digits come from luaNumStr, never from the host's
-    // own number-to-string. Twin of lua_strarg in lua-to-llvm-ir.abnf.
-    function luaStrArg(s) { if (isNum(s)) { return luaNumStr(s) } return s }
-
-    // ----- library argument checks (lauxlib's luaL_check*) -----
-    // `nargs` is how many arguments the call passed, which is what tells "got no
-    // value" (an absent argument) from "got nil".
-    function luaArgErr(fn, n, msg) { fail("bad argument #" + n + " to '" + fn + "' (" + msg + ")") }
-    function luaArgTypeErr(fn, n, want, v, nargs) {
-        luaArgErr(fn, n, want + " expected, got " + (n > nargs ? "no value" : luaType(v)))
-    }
-    function luaCheckStr(fn, n, v, nargs) {
-        if (typeof v == "string") { return v }
-        if (isNum(v)) { return luaNumStr(v) }
-        luaArgTypeErr(fn, n, "string", v, nargs)
-        return ""
-    }
-    // An integer argument, as a double: a float with an integral value and a
-    // numeric string convert; anything else is an error.
-    function luaCheckInt(fn, n, v, nargs) {
-        var a = anytype
-        a = toNumV(v)
-        if (a === undefined) { luaArgTypeErr(fn, n, "number", v, nargs) }
-        var d = numOf(a)
-        if (!isInt(a) && (d - d !== 0 || Math.floor(d) !== d)) { luaArgErr(fn, n, "number has no integer representation") }
-        return d
-    }
-    function luaOptInt(fn, n, v, nargs, dflt) {
-        if (v === undefined || v === null) { return dflt }
-        return luaCheckInt(fn, n, v, nargs)
+    // An integer-valued number as the exact integer (a float 3.0 is the integer 3).
+    function luaIntOf(a) {
+        if (isInt(a)) { return a }
+        return luaI64(numOf(a))
     }
 
     // ----- patterns: lib/lua-strlib.js, shared with layer 2 -----
@@ -2268,7 +2338,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     lsFail = function(msg) { fail(msg) }
     // string.find / string.match: the result list, or nil.
     function luaFind(args, find) {
-        var fn = find ? "find" : "match"
+        var fn = find ? "string.find" : "string.match"
         var s = luaCheckStr(fn, 1, args[0], args.length)
         var p = luaCheckStr(fn, 2, args[1], args.length)
         var init = luaOptInt(fn, 3, args[2], args.length, 1)
@@ -2308,29 +2378,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var k = i; k < nargs; k++) { out.push(arguments[k]) }
         return mkMulti(out)
     }
+
+    // string.*: 1-based, matching Lua, over byte strings; the bodies are
+    // lib/lua-strlib.js's, shared with layer 2.
     globalScope["string"] = {
-        len: function(s) { return luaStrArg(s).length },
-        // ASCII only: real Lua case-maps with the C library in the C locale, which leaves
-        // every byte above 127 alone. The host toUpperCase would have mapped the BYTES of
-        // a multi-byte character (the 0xE6 that starts a CJK character is 'ae' to a host
-        // string, and uppercases to 0xC6), corrupting the encoding.
-        upper: function(s) { return asciiCase(luaStrArg(s), true) },
-        lower: function(s) { return asciiCase(luaStrArg(s), false) },
+        len: function(s) { return luaCheckStr("string.len", 1, s, arguments.length).length },
+        upper: function(s) { return lsCase(luaCheckStr("string.upper", 1, s, arguments.length), true) },
+        lower: function(s) { return lsCase(luaCheckStr("string.lower", 1, s, arguments.length), false) },
         sub: function(s, i, j) {
-            var str = luaStrArg(s)
-            var len = str.length
-            var a = luaSubStart(len, numOf(i))
-            var e = luaSubEnd(len, j === undefined ? -1 : numOf(j))
-            if (a > e) { return "" }
-            return str.slice(a - 1, e)
+            var nargs = arguments.length
+            var str = luaCheckStr("string.sub", 1, s, nargs)
+            var a = luaCheckInt("string.sub", 2, i, nargs)
+            return lsSub(str, a, luaOptInt("string.sub", 3, j, nargs, 0 - 1))
         },
-        rep: function(s, n) {
-            var out = ""
-            var k = 0
-            var cnt = numOf(n)
-            var str = luaStrArg(s)
-            while (k < cnt) { out = out + str; k = k + 1 }
-            return out
+        rep: function(s, n, sep) {
+            var nargs = arguments.length
+            var str = luaCheckStr("string.rep", 1, s, nargs)
+            var cnt = luaCheckInt("string.rep", 2, n, nargs)
+            return lsRep(str, cnt, luaOptStr("string.rep", 3, sep, nargs, ""))
         },
         find: function() {
             var args = []
@@ -2344,43 +2409,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         },
         gmatch: function(s, p, init) {
             var nargs = arguments.length
-            var str = luaCheckStr("gmatch", 1, s, nargs)
-            var pat = luaCheckStr("gmatch", 2, p, nargs)
-            return luaGmatchIter(lsGmatchNew(str, pat, luaOptInt("gmatch", 3, init, nargs, 1)))
+            var str = luaCheckStr("string.gmatch", 1, s, nargs)
+            var pat = luaCheckStr("string.gmatch", 2, p, nargs)
+            return luaGmatchIter(lsGmatchNew(str, pat, luaOptInt("string.gmatch", 3, init, nargs, 1)))
         },
         gsub: function(s, p, repl, maxN) {
             var nargs = arguments.length
-            var str = luaCheckStr("gsub", 1, s, nargs)
-            var pat = luaCheckStr("gsub", 2, p, nargs)
+            var str = luaCheckStr("string.gsub", 1, s, nargs)
+            var pat = luaCheckStr("string.gsub", 2, p, nargs)
             var rs = anytype
             rs = null
             var cb = anytype
             cb = null
-            if (typeof repl == "string" || isNum(repl)) { rs = luaStrArg(repl) }
+            if (typeof repl == "string" || isNum(repl)) { rs = luaCheckStr("string.gsub", 3, repl, nargs) }
             else if (typeof repl == "function") { cb = luaGsubFunc(repl) }
             else if (isTbl(repl)) { cb = luaGsubTable(repl) }
-            else { luaArgTypeErr("gsub", 3, "string/function/table", repl, nargs) }
-            var mx = luaOptInt("gsub", 4, maxN, nargs, 0 - 1)
+            else { luaArgTypeErr("string.gsub", 3, "string/function/table", repl, nargs) }
+            var mx = luaOptInt("string.gsub", 4, maxN, nargs, 0 - 1)
             if (maxN !== undefined && maxN !== null && mx < 0) { mx = 0 }
             var r = lsGsub(str, pat, rs, cb, mx)
             return mkMulti([r.r, r.n])
         },
         byte: function(s, i, j) {
             var nargs = arguments.length
-            var str = luaCheckStr("byte", 1, s, nargs)
-            var pi = luaOptInt("byte", 2, i, nargs, 1)
-            return mkMulti(lsByte(str, pi, luaOptInt("byte", 3, j, nargs, pi)))
+            var str = luaCheckStr("string.byte", 1, s, nargs)
+            var pi = luaOptInt("string.byte", 2, i, nargs, 1)
+            return mkMulti(lsByte(str, pi, luaOptInt("string.byte", 3, j, nargs, pi)))
         },
         char: function() {
             var out = ""
             for (var k = 0; k < arguments.length; k++) {
-                var c = luaCheckInt("char", k + 1, arguments[k], arguments.length)
-                if (c < 0 || c > 255) { luaArgErr("char", k + 1, "value out of range") }
+                var c = luaCheckInt("string.char", k + 1, arguments[k], arguments.length)
+                if (c < 0 || c > 255) { luaArgErr("string.char", k + 1, "value out of range") }
                 out = out + String.fromCharCode(c)
             }
             return out
         },
-        reverse: function(s) { return lsReverse(luaCheckStr("reverse", 1, s, arguments.length)) }
+        reverse: function(s) { return lsReverse(luaCheckStr("string.reverse", 1, s, arguments.length)) }
     }
 
     // table.*: insert appends at the sequence border (#t + 1); remove drops and returns

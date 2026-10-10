@@ -1277,11 +1277,43 @@ function s30()
     check("pe5", m5, "bad argument #1 to 'select' (index out of range)")
 end
 
+-- ===== SECTION 31: library argument errors =====
+-- lauxlib's wording: the argument number, the function as the CALL SITE spelled
+-- it (a method's self not counted; the global name when pcall makes the call), and
+-- what was expected against what came - "no value" when nothing did. Every
+-- expected text was printed by lua 5.5.
+function s31()
+    local function msg(f, ...)
+        local ok, m = pcall(f, ...)
+        if ok then return "no error" end
+        return (string.gsub(m, "^.-:%d+: ", ""))
+    end
+    check("ae1", msg(math.floor, "x"), "bad argument #1 to 'math.floor' (number expected, got string)")
+    check("ae2", msg(function() return math.floor("x") end), "bad argument #1 to 'floor' (number expected, got string)")
+    check("ae3", msg(function() local f = math.floor return f({}) end), "bad argument #1 to 'f' (number expected, got table)")
+    check("ae4", msg(function() return math.sqrt("x") end), "bad argument #1 to 'sqrt' (number expected, got string)")
+    check("ae5", msg(function() return math.floor() end), "bad argument #1 to 'floor' (number expected, got no value)")
+    check("ae6", msg(function() local s = "x" return s:rep({}) end), "bad argument #1 to 'rep' (number expected, got table)")
+    check("ae7", msg(function() return string.rep() end), "bad argument #1 to 'rep' (string expected, got no value)")
+    check("ae8", msg(function() return string.sub("abc", 2.5) end), "bad argument #2 to 'sub' (number has no integer representation)")
+    check("ae9", msg(function() return math.max() end), "bad argument #1 to 'max' (value expected)")
+    check("ae10", msg(function() for k in pairs(nil) do end end), "bad argument #1 to 'for iterator' (table expected, got nil)")
+    check("ae11", msg(function() error("m", "x") end), "bad argument #2 to 'error' (number expected, got string)")
+    check("ae12", msg(string.len), "bad argument #1 to 'string.len' (string expected, got no value)")
+    check("ae13", msg(function() return math.fmod(1, 0) end), "bad argument #2 to 'fmod' (zero)")
+    check("ae14", math.type(math.abs("16")), "float")
+    check("ae15", string.rep("ab", 3, ","), "ab,ab,ab")
+    check("ae16", math.max(1, 5, 3) == 5 and math.min(4, 2, 8) == 2, true)
+    check("ae17", math.type(math.floor(2 ^ 70)), "float")
+    check("ae18", select("#", pairs({})), 4)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
 s28() -- SECTION-CALL 28
 s29() -- SECTION-CALL 29
 s30() -- SECTION-CALL 30
+s31() -- SECTION-CALL 31
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
