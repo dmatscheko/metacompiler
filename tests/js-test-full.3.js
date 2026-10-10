@@ -906,6 +906,41 @@ function s52() {
     check("uni13", new UC().me() === 25)
 }
 
+// ===== SECTION 53: an ITERATOR spreads and destructures =====
+// A spread and an array pattern read an iterator (a callable `next`, the same structural
+// test for-of makes - there are no symbols) through next() rather than by index. An array
+// pattern takes only as many values as it has positions and then CLOSES the iterator
+// (its return(), so a generator's finally runs), which is what makes destructuring an
+// endless generator terminate. Values read off node 24.
+function* s53g() { yield 1; yield 2 }
+var s53log = []
+function* s53nat() { try { var i = 0; while (true) { yield i++ } } finally { s53log.push("closed") } }
+function s53add(a, b) { return a + b }
+class S53P { constructor(a, b) { this.s = a + "-" + b } }
+class S53Q extends S53P { constructor() { super(...s53g()) } }
+function s53() {
+    check("its01", [...s53g()].length === 2)
+    check("its02", [0, ...s53g(), 3].join(",") === "0,1,2,3")
+    check("its03", s53add(...s53g()) === 3 && Math.max(...s53g()) === 2)
+    check("its04", new S53P(...s53g()).s === "1-2" && new S53Q().s === "1-2")
+    var gg = s53g()
+    gg.next()
+    check("its05", [...gg].join(",") === "2" && [...gg].length === 0)
+    var [x, y] = s53g()
+    check("its06", x === 1 && y === 2)
+    var [p, ...rest] = s53g()
+    check("its07", p === 1 && rest.length === 1 && rest[0] === 2)
+    var [a, b, c] = s53nat()
+    check("its08", a + b + c === 3 && s53log.join(",") === "closed")
+    var [d = 9, e = 8, h = 7] = s53g()
+    check("its09", d === 1 && e === 2 && h === 7)
+    var z1, z2
+    [z1, z2] = s53g()
+    check("its10", z1 === 1 && z2 === 2)
+    function pr([m, n]) { return m * 10 + n }
+    check("its11", pr(s53g()) === 12)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -918,6 +953,7 @@ function main() {
     s50() // SECTION-CALL 50
     s51() // SECTION-CALL 51
     s52() // SECTION-CALL 52
+    s53() // SECTION-CALL 53
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

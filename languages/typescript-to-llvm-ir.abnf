@@ -2552,7 +2552,9 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitSpreadInto(b, arrV, t) {
         var r = t(b)
-        b = r.b
+        var ia = emitIterArr(r.b, r.v, -1)
+        b = ia.b
+        r = {b: b, v: ia.v}
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [saved])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0sp"), r.v])
@@ -2574,6 +2576,40 @@ NotFuncHead = :script(~~
         bodyB.NewBr(headB)
         curScopeV = saved
         return exitB
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function emitIterArr(b, srcV, n) {
+        var nxV = callExt(b, memGetExt(), [srcV, emitStr(b, "next")])
+        var isIt = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [nxV]), emitStr(b, "function")]))
+        var initB = curF.NewBlock("")
+        var headB = curF.NewBlock("")
+        var stepB = curF.NewBlock("")
+        var pushB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(isIt, initB, joinB)
+        var arrV = callExt(initB, "js_arr_new", [])
+        initB.NewBr(headB)
+        var joinIn = [llvm.ir.NewIncoming(srcV, b), llvm.ir.NewIncoming(arrV, stepB)]
+        if (n >= 0) {
+            var closeB = curF.NewBlock("")
+            var doCloseB = curF.NewBlock("")
+            var lenV = callExt(headB, memGetExt(), [arrV, emitStr(headB, "length")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [lenV, callExt(headB, "js_num_i", [handle(n)])])),
+                            stepB, closeB)
+            var retV = callExt(closeB, memGetExt(), [srcV, emitStr(closeB, "return")])
+            closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
+                                    [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
+                             doCloseB, joinB)
+            callExt(jsThisSet(doCloseB, srcV), "js_call", [retV, srcV, callExt(doCloseB, "js_arr_new", [])])
+            doCloseB.NewBr(joinB)
+            joinIn.push(llvm.ir.NewIncoming(arrV, closeB))
+            joinIn.push(llvm.ir.NewIncoming(arrV, doCloseB))
+        } else { headB.NewBr(stepB) }
+        var stV = callExt(jsThisSet(stepB, srcV), "js_call", [nxV, srcV, callExt(stepB, "js_arr_new", [])])
+        stepB.NewCondBr(truthy(stepB, callExt(stepB, memGetExt(), [stV, emitStr(stepB, "done")])), joinB, pushB)
+        callExt(pushB, "js_arr_push", [arrV, callExt(pushB, memGetExt(), [stV, emitStr(pushB, "value")])])
+        pushB.NewBr(headB)
+        return {b: joinB, v: joinB.NewPhi(joinIn)}
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitObjSpread(b, objV, t) {
@@ -4094,6 +4130,11 @@ NotFuncHead = :script(~~
             return b
         }
         if (pat.dtype == "arr") {
+            var takeN = pat.elems.length
+            for (var q = 0; q < pat.elems.length; q++) { if (pat.elems[q].dtype == "rest") { takeN = -1 } }
+            var ia = emitIterArr(b, valueH, takeN)
+            b = ia.b
+            valueH = ia.v
             for (var i = 0; i < pat.elems.length; i++) {
                 var e = pat.elems[i]
                 if (e.dtype == "rest") { return emitArrRest(b, e.pat, valueH, i, declExt) }

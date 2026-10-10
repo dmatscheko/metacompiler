@@ -3976,9 +3976,10 @@ NotFuncHead = :script(~~
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { out.push(it()); continue }
-            var v = anytype // The spread operand is an array or a string.
+            var v = anytype // The spread operand: an array, a string or an iterator.
             v = it.t()
             if (v == undefined || v == null) fail("spread of " + v)
+            v = iterArr(v, -1)
             if (typeof v == "string") {
                 for (var j = 0; j < v.length; j++) { out.push(v.charAt(j)) }
                 continue
@@ -5355,6 +5356,21 @@ NotFuncHead = :script(~~
         if (typeof rt == "function") { callWithThis(rt, it, []) }
         return undefined
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function iterArr(v, n) {
+        var nx = anytype
+        nx = (v != undefined && v != null && typeof v == "object") ? getMember(v, "next") : undefined
+        if (typeof nx != "function") { return v }
+        var out = []
+        while (n < 0 || out.length < n) {
+            var s = anytype
+            s = callWithThis(nx, v, [])
+            if (jsTruthy(getMember(s, "done"))) { return out }
+            out.push(getMember(s, "value"))
+        }
+        closeIterator(v)
+        return out
+    }
 
     // One step of a for-of: the iterator's next(), AWAITED when the loop is a
     // 'for await'. Out of line because a MetaJS local keeps the type of its first
@@ -5949,6 +5965,7 @@ NotFuncHead = :script(~~
         }
         if (v == undefined || v == null) fail("cannot destructure " + v)
         if (pat.dtype == "arr") {
+            v = iterArr(v, pat.rest != null ? -1 : pat.elems.length)
             for (var i = 0; i < pat.elems.length; i++) { bindPatternMode(pat.elems[i], v[i], decl) }
             if (pat.rest != null) {
                 var r = []

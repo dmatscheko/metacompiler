@@ -2946,6 +2946,26 @@ function s49() {
     check("esc05", new UC().me() === 25);
 }
 
+// ===== SECTION 50: an ITERATOR spreads and destructures =====
+// A spread and an array pattern read an iterator through next(); an array pattern takes
+// only as many values as it has positions and then CLOSES the iterator, so destructuring
+// an endless generator terminates and runs its finally. Values read off node 24.
+function* s50g(): Generator<number, void, void> { yield 1; yield 2; }
+let s50log: string[] = [];
+function* s50nat(): Generator<number, void, void> { try { let i = 0; while (true) { yield i++; } } finally { s50log.push("closed"); } }
+function s50add(a: number, b: number): number { return a + b; }
+function s50() {
+    check("its01", [...s50g()].length === 2);
+    check("its02", [0, ...s50g(), 3].join(",") === "0,1,2,3");
+    check("its03", (s50add as any)(...s50g()) === 3 && Math.max(...s50g()) === 2);
+    const [x, y] = s50g();
+    check("its04", x === 1 && y === 2);
+    const [p, ...rest] = s50g();
+    check("its05", p === 1 && rest.length === 1);
+    const [a, b, c] = s50nat();
+    check("its06", (a as number) + (b as number) + (c as number) === 3 && s50log.join(",") === "closed");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3011,6 +3031,7 @@ function main(): number {
     s47(); // SECTION-CALL 47
     s48(); // SECTION-CALL 48
     s49(); // SECTION-CALL 49
+    s50(); // SECTION-CALL 50
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
