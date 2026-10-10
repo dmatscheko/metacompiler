@@ -198,26 +198,26 @@ decline each with its pair unless a spec-based rule separates them.
 
 # JV — Java
 
-### T-212 java: Character classification beyond U+024F is approximate · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
+### T-212 java: Character classification beyond U+024F is approximate · P2 · JV · OPEN [V]
 Past U+024F a letter is only a cased letter and only 0-9 are digits: a U+0250..U+3000
 probe differs from java on ~4,000 `isLetter` rows (uncased scripts). Needs Unicode
 category tables (java 24's Unicode version) in all three engines; case mapping and
 isWhitespace are already exact there.
 
-### T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
+### T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter · P1 · JV · OPEN [V]
 Interpreter: "unknown name: StrictMath", `new String("ab")` "unknown class: String",
 "unknown class: ArrayList". Probe each in the compiled halves too and match java.
 
-### T-214 java: overload resolution uses the argument's runtime class · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
+### T-214 java: overload resolution uses the argument's runtime class · P1 · JV · OPEN [V]
 `Object o = "s"; f(o)` with `f(Object)` and `f(String)` picks f(String); javac picks
 f(Object) (JLS 15.12.2 is static). Also an enum's or an anonymous class's own
 overloads are not registered (not resolved). Needs the argument's static type
 (java-decltypes.js already records declared types).
 
-### T-215 java: duplicate assertion IDs in tests/java-test-full.java · P3 · JV · IN PROGRESS (JV worker, round 3) [V]
+### T-215 java: duplicate assertion IDs in tests/java-test-full.java · P3 · JV · OPEN [V]
 `int27`, `int28`, `iof5` appear twice; rename so every ID is unique.
 
-### T-216 java: transcendentals other than exp vs java · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
+### T-216 java: transcendentals other than exp vs java · P2 · JV · OPEN [V]
 `Math.exp` differed from java on 78 of 3,276 rows (now fdlibm). Probe `log`, `log10`,
 `log1p`, `expm1`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`,
 `tanh`, `cbrt`, `hypot`, `pow` on boundary values against java (and StrictMath) and port
@@ -272,31 +272,31 @@ throws NumberFormatException. Check toInt/toLong/toFloat/toDoubleOrNull the same
 
 # GO — Go  (oracle: `go run`)
 
-### T-070 go: the built-in `error` interface is not modelled · P1 · GO · OPEN [V]
+### T-070 go: the built-in `error` interface is not modelled · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
 `x.(error)` is false even for a type with `Error() string`; `case error:` in a type
 switch never matches; a recovered runtime panic is a plain string, so `r.(string)`
 succeeds where go fails and `r.(error).Error()` fails where go answers
 `runtime error: ...`. Model `error` structurally (method set {Error() string}) and
 give runtime panics a runtime.Error value whose Error() is the text, in all engines.
 
-### T-071 go: a scalar type assertion does not panic on mismatch · P1 · GO · OPEN [V]
+### T-071 go: a scalar type assertion does not panic on mismatch · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
 `var a interface{} = "s"; _ = a.(int)` does not panic in any engine; go:
 `panic: interface conversion: interface {} is string, not int`. The comma-ok form
 must answer `0 false`.
 
-### T-072 go: an unrecovered native integer divide by zero dies through the C floor · P1 · GO · Shared: runtime.c · OPEN [V]
+### T-072 go: an unrecovered native integer divide by zero dies through the C floor · P1 · GO · Shared: runtime.c · IN PROGRESS (GO worker, round 2) [V]
 Natively, with no `recover()` in the program, `a / b` with b == 0 prints
 `js runtime error: integer divide by zero`, exit 1 (the floor's `si_arith` die), where
 go prints `panic: runtime error: integer divide by zero` + goroutine trace, exit 2.
 The emitter gates the checked divide (`js_gidivz`) on `usesRecover` for speed:
 measure with `tests/bench.sh go` before and after.
 
-### T-073 go: fmt bad-verb notes for composites and wide ints · P1 · GO · OPEN [V]
+### T-073 go: fmt bad-verb notes for composites and wide ints · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
 Composites are not walked per element: go gives `[%!s(int=1) %!s(int=2)]`, we `[1 2]`.
 int64/uint64 print as int/uint in the note because the box does not keep the declared
 name (may need T-081).
 
-### T-074 go: fmt verbs `%f %g %e %x %o %b` (and widths/flags) · P1 · GO · OPEN [V]
+### T-074 go: fmt verbs `%f %g %e %x %o %b` (and widths/flags) · P1 · GO · IN PROGRESS (GO worker, round 2) [V]
 Unimplemented; they currently render as a typed bad-verb note. Implement go's
 semantics including width, precision, `-`, `+`, `0`, `#` flags and `%x` on strings.
 
@@ -512,7 +512,7 @@ labelled syntax errors); php / csharp / java / c long tails. python 92.9% and ru
 python must each come from that language's own toolchain or spec (python3 is Unicode
 16.0, node 24 is 17.0).
 
-### T-182 go: `tests/go-test-widen.go` asserts `a.(int)` on a non-interface `a` · P3 · GO · OPEN [V]
+### T-182 go: `tests/go-test-widen.go` asserts `a.(int)` on a non-interface `a` · P3 · GO · IN PROGRESS (GO worker, round 2) [V]
 Real Go rejects a type assertion on a non-interface value at compile time. Rewrite the
 row with an `interface{}` operand.
 
