@@ -6183,8 +6183,11 @@ NotFuncHead = :script(~~
         }
     }
     // TypeScript PARAMETER PROPERTIES: a constructor parameter carrying an access
-    // modifier also declares and assigns the field of the same name, before the field
-    // initializers run, so both they and the body can read it.
+    // modifier also declares the field of the same name. tsc (useDefineForClassFields,
+    // the default from ES2022) emits it as a field declared BEFORE the class's own
+    // fields and assigned only AFTER their initializers ran, so an initializer reading
+    // it sees undefined and the key order is the parameter properties first.
+    // Twin of emitFieldInits in typescript-to-llvm-ir.abnf.
     function ctorFields(params, fields, fscopes) {
         var saved = scopes
         scopes = fscopes
@@ -6192,7 +6195,7 @@ NotFuncHead = :script(~~
         for (var pi = 0; pi < params.length; pi++) {
             var pp = params[pi]
             if (typeof pp == "string" || pp.prop != true) { continue }
-            scopePut(self, pp.pname, getVar(pp.pname))
+            scopePut(self, pp.pname, undefined)
             trackKey(self, pp.pname)
         }
         for (var k = 0; k < fields.length; k++) {
@@ -6200,6 +6203,11 @@ NotFuncHead = :script(~~
             var fv = (fields[k].init != null) ? fields[k].init() : undefined
             scopePut(self, fk, fv)
             trackKey(self, fk)
+        }
+        for (var pj = 0; pj < params.length; pj++) {
+            var pq = params[pj]
+            if (typeof pq == "string" || pq.prop != true) { continue }
+            scopePut(self, pq.pname, getVar(pq.pname))
         }
         scopes = saved
         return undefined

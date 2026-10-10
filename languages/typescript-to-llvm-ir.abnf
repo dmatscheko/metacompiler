@@ -4493,10 +4493,17 @@ NotFuncHead = :script(~~
         emitStrict = savedStrict
         return idx
     }
-    // The field initializers, then the TypeScript parameter properties ('this.x = x' for
-    // every modifier-carrying constructor parameter), both on the current `this`.
+    // The TypeScript parameter properties declared as undefined, the field initializers,
+    // then the parameter properties assigned ('this.x = x' for every modifier-carrying
+    // constructor parameter), all on the current `this`: tsc's order.
+    // Twin of ctorFields in typescript-interpreter.abnf.
     function emitFieldInits(b, inits) {
         var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        if (inits.props != undefined && inits.props != null) {
+            for (var pd = 0; pd < inits.props.length; pd++) {
+                callExt(b, memSetExt(), [thisV, emitStr(b, inits.props[pd]), hUndef])
+            }
+        }
         if (inits.fields != undefined && inits.fields != null) {
             for (var k = 0; k < inits.fields.length; k++) {
                 var fv = hUndef

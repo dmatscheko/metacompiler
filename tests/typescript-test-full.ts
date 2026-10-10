@@ -203,6 +203,15 @@ function s07() {
     }
     const p = new Pt7(1, 2, 3);
     check("cls4", p.sum() === 6 && p.x === 1 && p.z === 3);
+    // A parameter property is a field declared BEFORE the class's own fields and
+    // assigned AFTER their initializers (tsc's ES2022 emit), after super() in a
+    // derived class.
+    const pA: number[] = [1, 2, 3, 4, 5];
+    class Pf7 { q = (this as any).p; r: number = pA[1]; constructor(public p = pA[0], private z = pA[2]) {} }
+    const pf: any = new Pf7();
+    check("cls5", pf.q === undefined && pf.p === 1 && Object.keys(pf).join(",") === "p,z,q,r");
+    class Pg7 extends Pf7 { e = (this as any).p + pA[3]; constructor(public w = pA[4]) { super(); } }
+    check("cls6", Object.keys(new Pg7()).join(",") === "p,z,q,r,w,e" && (new Pg7() as any).e === 5);
 
     // STATIC MEMBERS ARE INHERITED: `class D extends C {}` then `D.s()` walks the
     // class object's own prototype chain in node. Every value below is
