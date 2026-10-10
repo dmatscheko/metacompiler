@@ -1915,6 +1915,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         while (i < text.length) {
             var c1 = text.charAt(i)
+            // An astral character written as itself is TWO code units; copied one
+            // at a time, each lone surrogate reaches the host as U+FFFD. The pair
+            // goes over in one substring. Twin in python-interpreter.abnf.
+            var u1 = text.charCodeAt(i)
+            if (u1 >= 55296 && u1 <= 56319 && i + 1 < text.length) { out += text.substring(i, i + 2); i += 2; continue }
             if (c1 != "\\") { out += c1; i++; continue }
             var e = text.charAt(i + 1)
             if (e == "n") { out += "\n"; i += 2; continue }

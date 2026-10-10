@@ -3057,6 +3057,17 @@ def s46():
     check("atg3", msgs[4] == "'NoneType' object has no attribute 'k'" + nd and msgs[5] == "'NoneType' object has no attribute 'k'")
     check("atg4", len(msgs) == 6)
 
+# ===== SECTION 47: an astral character written into a string literal =====
+# A character above U+FFFF typed as itself is one character, equal to the one
+# chr() and the \U escape build - in plain, triple-quoted, raw and f-strings.
+def s47():
+    s = "𝐀"
+    check("ast1", len(s) == 1 and s == chr(0x1D400) and ord(s) == 119808)
+    check("ast2", len("a😀b") == 3 and "😀" in "a😀b" and "a😀b".upper() == "A😀B")
+    check("ast3", len("""😀""") == 1 and len(r"😀") == 1 and len('😀x') == 2)
+    check("ast4", f"𝐀{1}" == chr(0x1D400) + "1" and len(f"x{2}😀") == 3)
+    check("ast5", "\U0001D400" == s and repr(s) == "'𝐀'" and ascii(s) == "'\\U0001d400'")
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3105,5 +3116,6 @@ def main():
     s44() # SECTION-CALL 44
     s45() # SECTION-CALL 45
     s46() # SECTION-CALL 46
+    s47() # SECTION-CALL 47
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
