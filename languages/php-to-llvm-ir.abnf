@@ -1619,24 +1619,16 @@ KwInstanceof = "instanceof" KwEnd ;
     // binds the variable's storage CELL. Its parent is the defining scope, which keeps
     // functions, classes, constants and `$this` visible; each call copies the captured
     // names into its own frame (capturePrologue), since a variable is read there only.
-    //
-    // `raw` distinguishes the two by-value snapshots the interpreter takes:
-    //   - `use ($x)` copies the VALUE (its phpCopy(getVar(x)) dereferences first), so a
-    //     variable that some other closure holds by reference is still frozen here;
-    //   - an arrow function's automatic capture copies the scope SLOT as it stands, so
-    //     a slot that already holds a cell stays a cell and a nested `use (&$x)` keeps
-    //     writing where everyone else reads.
-    function emitCapture(b, byVal, byRef, raw) {
+    // A by-value capture - `use ($x)` and an arrow function's automatic one alike -
+    // copies the VALUE, dereferencing a variable that is a reference, so a later write
+    // through the reference is not seen inside.
+    function emitCapture(b, byVal, byRef) {
         if (byVal.length == 0 && byRef.length == 0) { return {b: b, v: curScopeV} }
         var env = callExt(b, "js_scope_new", [curScopeV])
         for (var i = 0; i < byVal.length; i++) {
-            var slot = rawVar(b, byVal[i])
-            if (raw !== true) {
-                var rd = phDeref(b, slot)
-                b = rd.b
-                slot = rd.v
-            }
-            callExt(b, "js_scope_decl", [env, emitStr(b, byVal[i]), callExt(b, "js_phcopy", [slot])])
+            var rd = phDeref(b, rawVar(b, byVal[i]))
+            b = rd.b
+            callExt(b, "js_scope_decl", [env, emitStr(b, byVal[i]), callExt(b, "js_phcopy", [rd.v])])
         }
         for (var k = 0; k < byRef.length; k++) {
             var rc = varCell(b, byRef[k])
@@ -3894,7 +3886,7 @@ KwInstanceof = "instanceof" KwEnd ;
         body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal.concat(byRef), body)))
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
-            var rc = emitCapture(b, byVal, byRef, false)
+            var rc = emitCapture(b, byVal, byRef)
             return {b: rc.b, v: closureV(rc.b, idx, rc.v)}
         }
     }
@@ -3919,7 +3911,7 @@ KwInstanceof = "instanceof" KwEnd ;
         var body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, makeBody([makeReturn([bodyT])]))))
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
-            var rc = emitCapture(b, captured, [], true)
+            var rc = emitCapture(b, captured, [])
             return {b: rc.b, v: callExt(rc.b, "js_closure", [handle(idx), rc.v])}
         }
     }

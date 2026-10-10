@@ -696,6 +696,15 @@ function s25() {
     $f();
     $f();
     check("cap2", $n === 2);
+    // An arrow function captures the VALUE of a variable that is a reference, and a
+    // by-reference use inside it binds the arrow function's own copy.
+    $rv = 1;
+    $rr = &$rv;
+    $af = fn() => $rv;
+    $rv = 2;
+    $an = fn() => function () use (&$rv) { $rv = $rv + 1; return $rv; };
+    $inner = $an();
+    check("cap3", $af() === 1 && $inner() === 3 && $inner() === 4 && $rv === 2);
     // A static local's initializer runs on the FIRST CALL, not where the program
     // starts, and each declaration site has storage of its own.
     check("sta1", s25order() === "" && s25count() === 6 && s25order() === "init;");

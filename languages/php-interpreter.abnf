@@ -3541,8 +3541,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // set - keep resolving live, including ones declared after this point. This
     // holds at GLOBAL scope too: '$m = 10; $t = fn($x) => $x * $m; $m = 0; $t(3)' is 30.
     //
-    // The slot is copied AS IT STANDS, cell and all: a variable some closure holds by
-    // reference has to stay shared, which is what phpCopy of the raw slot preserves.
+    // The capture is of the VALUE even when the variable is a reference: PHP's
+    // by-value binding dereferences, so `$r = &$x; $f = fn() => $x; $x = 2;` still
+    // sees 1. Twin of makeArrowFn in php-to-llvm-ir.abnf.
     function makeArrowFn(items) {
         var d = splitClosure(items)
         var params = d.params
@@ -3558,7 +3559,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() {
             var env = {}
             for (var j = 0; j < captured.length; j++) {
-                scopePut(env, captured[j], phpCopy(rawSlot(captured[j])))
+                scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
             return closureBody(params, body, scopes.slice(0), env)
         }
