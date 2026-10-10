@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -214,8 +215,14 @@ func (rt *jsrt) enableTrace() {
 }
 
 // traceVal renders a value for the stream, capped so events stay one-liners.
+// A pointer that toString has no rendering for (a scope, a generator, a cell)
+// falls to its %v, which prints Go heap addresses that differ run to run, so
+// it is named by its type instead.
 func (rt *jsrt) traceVal(v interface{}) string {
 	s := rt.toString(v)
+	if t := reflect.TypeOf(v); t != nil && t.Kind() == reflect.Pointer && s == fmt.Sprintf("%v", v) {
+		return "[" + t.Elem().Name() + "]"
+	}
 	if len(s) > 100 {
 		s = s[:100] + "..."
 	}
