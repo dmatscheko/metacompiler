@@ -78,6 +78,7 @@
 // identically, parameterised by the rtk* hooks below.
 import "./runtime.metajs"
 import "./fdlibm.js"
+import "./java-chars.js"
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return jvCmp(op, l, r) }
@@ -2419,24 +2420,15 @@ function jvCharLike(v, c) {
     return c
 }
 function jvCharMembers(o) {
-    o["isDigit"] = function(v) {
-        var c = jvCharCode(v)
-        return c >= 48 && c <= 57
-    }
-    o["isLetter"] = function(v) { return jvChLetter(jvCharCode(v)) }
-    o["isAlphabetic"] = function(v) { return jvChLetter(jvCharCode(v)) }
+    o["isDigit"] = function(v) { return jcIsDigit(jvCharCode(v)) }
+    o["isLetter"] = function(v) { return jcIsLetter(jvCharCode(v)) }
+    o["isAlphabetic"] = function(v) { return jcIsAlphabetic(jvCharCode(v)) }
     o["isLetterOrDigit"] = function(v) {
         var c = jvCharCode(v)
-        if (c >= 48 && c <= 57) { return true }
-        return jvChLetter(c)
+        return jcIsLetter(c) || jcIsDigit(c)
     }
-    o["isUpperCase"] = function(v) { return jvChUpper(jvCharCode(v)) }
-    o["isLowerCase"] = function(v) {
-        var c = jvCharCode(v)
-        if (!jvChLetter(c) || jvChUpper(c)) { return false }
-        if (jvChLo(c) != c && jvChUp(c) != c) { return false }
-        return c != 443 && !(c >= 448 && c <= 451)
-    }
+    o["isUpperCase"] = function(v) { return jcIsUpper(jvCharCode(v)) }
+    o["isLowerCase"] = function(v) { return jcIsLower(jvCharCode(v)) }
     o["isWhitespace"] = function(v) {
         var c = jvCharCode(v)
         if ((c >= 9 && c <= 13) || (c >= 28 && c <= 32)) { return true }
@@ -2445,17 +2437,9 @@ function jvCharMembers(o) {
     }
     o["toUpperCase"] = function(v) { return jvCharLike(v, jvChUp(jvCharCode(v))) }
     o["toLowerCase"] = function(v) { return jvCharLike(v, jvChLo(jvCharCode(v))) }
-    o["getNumericValue"] = function(v) {
-        var c = jvCharCode(v)
-        if (c == 178 || c == 179) { return c - 176 }
-        if (c == 185) { return 1 }
-        if (c >= 188 && c <= 190) { return 0 - 2 }
-        var d = jvDigitOf(c)
-        if (d == 99) { return 0 - 1 }
-        return d
-    }
+    o["getNumericValue"] = function(v) { return jcNumericValue(jvCharCode(v)) }
     o["digit"] = function(v, radix) {
-        var d = jvDigitOf(jvCharCode(v))
+        var d = jcDigitVal(jvCharCode(v))
         if (d < rtjNum(radix)) { return d }
         return 0 - 1
     }
@@ -2469,16 +2453,6 @@ function jvChLo(c) {
     var s = String.fromCharCode(c).toLowerCase()
     if (s.length == 1) { return s.charCodeAt(0) }
     return c
-}
-function jvChLetter(c) {
-    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { return true }
-    if (c < 192) { return c == 170 || c == 181 || c == 186 }
-    if (c <= 591) { return c != 215 && c != 247 }
-    return jvChUp(c) != c || jvChLo(c) != c
-}
-function jvChUpper(c) {
-    if (!jvChLetter(c)) { return false }
-    return jvChLo(c) != c && jvChUp(c) == c
 }
 
 // Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0. Twin of

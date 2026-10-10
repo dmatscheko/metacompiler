@@ -976,6 +976,8 @@ go-fmt.js                 <- go-rt.metajs, go interpreter (fmt.Sprintf; Go twin:
                              gopFormat in abnf/jsrtgolang.go)
 fdlibm.js                 <- java-rt.metajs, java interpreter
                              (Go twin: abnf/jsrtfdlibm.go)
+java-chars.js             <- java-rt.metajs, java interpreter
+                             (Go twin: abnf/jsrtjavachars.go)
 ```
 
 Grammar-level includes shared by one language's grammars only: `go-constfold.js`

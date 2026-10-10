@@ -591,15 +591,12 @@ func jvCharMembers(o *jsObject) {
 			return p(code(rt, argAt(args, 0)))
 		}))
 	}
-	isDigit := func(c int) bool { return c >= '0' && c <= '9' }
-	pred("isDigit", isDigit)
-	pred("isLetter", jvChLetter)
-	pred("isAlphabetic", jvChLetter)
-	pred("isLetterOrDigit", func(c int) bool { return isDigit(c) || jvChLetter(c) })
-	pred("isUpperCase", jvChUpper)
-	pred("isLowerCase", func(c int) bool {
-		return jvChLetter(c) && !jvChUpper(c) && !(jvChLo(c) != c && jvChUp(c) != c) && c != 443 && !(c >= 448 && c <= 451)
-	})
+	pred("isDigit", jcIsDigit)
+	pred("isLetter", jcIsLetter)
+	pred("isAlphabetic", jcIsAlphabetic)
+	pred("isLetterOrDigit", func(c int) bool { return jcIsLetter(c) || jcIsDigit(c) })
+	pred("isUpperCase", jcIsUpper)
+	pred("isLowerCase", jcIsLower)
 	pred("isWhitespace", func(c int) bool {
 		return (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 5760 || (c >= 8192 && c <= 8198) ||
 			(c >= 8200 && c <= 8202) || c == 8232 || c == 8233 || c == 8287 || c == 12288
@@ -611,34 +608,14 @@ func jvCharMembers(o *jsObject) {
 		return like(argAt(args, 0), jvChLo(code(rt, argAt(args, 0))))
 	}))
 	o.set("getNumericValue", jsHostFunc("getNumericValue", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		c := code(rt, argAt(args, 0))
-		switch {
-		case c == 178 || c == 179:
-			return float64(c - 176)
-		case c == 185:
-			return float64(1)
-		case c >= 188 && c <= 190:
-			return float64(-2)
-		}
-		if d := jvChDigit(c); d != 99 {
-			return float64(d)
-		}
-		return float64(-1)
+		return float64(jcNumericValue(code(rt, argAt(args, 0))))
 	}))
 	o.set("digit", jsHostFunc("digit", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		if d := jvChDigit(code(rt, argAt(args, 0))); float64(d) < rt.toNumber(argAt(args, 1)) {
+		if d := jcDigitVal(code(rt, argAt(args, 0))); float64(d) < rt.toNumber(argAt(args, 1)) {
 			return float64(d)
 		}
 		return float64(-1)
 	}))
-}
-
-// jvChDigit is jvDigitOf for any code: 99 past ASCII.
-func jvChDigit(c int) int {
-	if c < 0 || c > 127 {
-		return 99
-	}
-	return jvDigitOf(byte(c))
 }
 
 func jvChUp(c int) int {
@@ -654,20 +631,6 @@ func jvChLo(c int) int {
 	}
 	return c
 }
-
-func jvChLetter(c int) bool {
-	switch {
-	case (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
-		return true
-	case c < 192:
-		return c == 170 || c == 181 || c == 186
-	case c <= 591:
-		return c != 215 && c != 247
-	}
-	return jvChUp(c) != c || jvChLo(c) != c
-}
-
-func jvChUpper(c int) bool { return jvChLetter(c) && jvChLo(c) != c && jvChUp(c) == c }
 
 // jvMaxD / jvMinD are Math.max / Math.min on doubles: NaN wins, and -0.0 is
 // below 0.0. Twin of jMaxD / jMinD in java-interpreter.abnf.

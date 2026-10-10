@@ -2132,6 +2132,7 @@ HasStatic   = :script(~~
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
     include("lib/fdlibm.js")
+    include("lib/java-chars.js")
 
     // The host names a program can see. System and Math are built here.
     hostGlobals["System"] = {
@@ -2623,23 +2624,19 @@ HasStatic   = :script(~~
     }
     // java.lang.Character's classification and case mapping. Each takes a char
     // or an int code point, and toUpperCase / toLowerCase answer the argument's
-    // own type. Exact through U+024F (checked against java 24.0.2 for every
-    // code there); beyond it a letter is a CASED one and only 0-9 are digits.
-    // The case mapping is the host's one-character mapping, the Unicode simple
-    // mapping Java's is. Twin of jvCharMembers in abnf/jsrtjava.go and
+    // own type. The classes are java's own table (lib/java-chars.js); the case
+    // mapping is the host's one-character mapping, the Unicode simple mapping
+    // Java's is. Twin of jvCharMembers in abnf/jsrtjava.go and
     // languages/lib/java-rt.metajs.
     function jCharMembers(o) {
         var code = function(v) { return jIsChar(v) ? v.__char : jNum(v) }
         var like = function(v, c) { return jIsChar(v) ? jChar(c) : c }
-        o.isDigit = function(v) { var c = code(v); return c >= 48 && c <= 57 }
-        o.isLetter = function(v) { return jChLetter(code(v)) }
-        o.isAlphabetic = function(v) { return jChLetter(code(v)) }
-        o.isLetterOrDigit = function(v) { var c = code(v); return (c >= 48 && c <= 57) || jChLetter(c) }
-        o.isUpperCase = function(v) { return jChUpper(code(v)) }
-        o.isLowerCase = function(v) {
-            var c = code(v)
-            return jChLetter(c) && !jChUpper(c) && !(jChLo(c) != c && jChUp(c) != c) && c != 443 && !(c >= 448 && c <= 451)
-        }
+        o.isDigit = function(v) { return jcIsDigit(code(v)) }
+        o.isLetter = function(v) { return jcIsLetter(code(v)) }
+        o.isAlphabetic = function(v) { return jcIsAlphabetic(code(v)) }
+        o.isLetterOrDigit = function(v) { var c = code(v); return jcIsLetter(c) || jcIsDigit(c) }
+        o.isUpperCase = function(v) { return jcIsUpper(code(v)) }
+        o.isLowerCase = function(v) { return jcIsLower(code(v)) }
         o.isWhitespace = function(v) {
             var c = code(v)
             return (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c == 5760 || (c >= 8192 && c <= 8198)
@@ -2647,30 +2644,12 @@ HasStatic   = :script(~~
         }
         o.toUpperCase = function(v) { return like(v, jChUp(code(v))) }
         o.toLowerCase = function(v) { return like(v, jChLo(code(v))) }
-        o.getNumericValue = function(v) {
-            var c = code(v)
-            if (c == 178 || c == 179) { return c - 176 }
-            if (c == 185) { return 1 }
-            if (c >= 188 && c <= 190) { return 0 - 2 }
-            var d = jDigitOf(c)
-            return d == 99 ? 0 - 1 : d
-        }
-        o.digit = function(v, radix) { var d = jDigitOf(code(v)); return d < jNum(radix) ? d : 0 - 1 }
+        o.getNumericValue = function(v) { return jcNumericValue(code(v)) }
+        o.digit = function(v, radix) { var d = jcDigitVal(code(v)); return d < jNum(radix) ? d : 0 - 1 }
     }
     jCharMembers(hostGlobals["Character"])
     function jChUp(c) { var s = String.fromCharCode(c).toUpperCase(); return s.length == 1 ? s.charCodeAt(0) : c }
     function jChLo(c) { var s = String.fromCharCode(c).toLowerCase(); return s.length == 1 ? s.charCodeAt(0) : c }
-    // The Latin letters are listed (ª µ º are letters, × ÷ are not); past
-    // U+024F a letter is one with a case mapping.
-    function jChLetter(c) {
-        if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { return true }
-        if (c < 192) { return c == 170 || c == 181 || c == 186 }
-        if (c <= 591) { return c != 215 && c != 247 }
-        return jChUp(c) != c || jChLo(c) != c
-    }
-    // Upper case: a letter that lower-cases and does not upper-case (a
-    // titlecase digraph like U+01C5 does both).
-    function jChUpper(c) { return jChLetter(c) && jChLo(c) != c && jChUp(c) == c }
     // Java's Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0.
     // Double.max / min and Float.max / min are these.
     function jMaxD(a, b) {

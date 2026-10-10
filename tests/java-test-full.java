@@ -94,6 +94,7 @@ class Main {
         S44.run(); // SECTION-CALL 44
         S45.run(); // SECTION-CALL 45
         S46.run(); // SECTION-CALL 46
+        S47.run(); // SECTION-CALL 47
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2647,5 +2648,30 @@ class S46 {
             if (v == 2) { break; }
         }
         Main.check("it1", seen.equals("12") && r.log.equals("n1n2"));
+    }
+}
+
+// ===== SECTION 47: Character classification past Latin (Unicode 16.0) =====
+//
+// A letter of an uncased script is a letter, any script's decimal digits are
+// digits with their values, a letter number is alphabetic and may be upper
+// case without being a letter, a combining mark can be alphabetic and lower
+// case, and getNumericValue reads Unicode's numeric values. Every expected
+// value is java 24.0.2's.
+class S47 {
+    static void run() {
+        int[] cp = { 0x0905, 0x0966, 0x0669, 0x2160, 0x216B, 0x0345, 0x02B0, 0xFF21, 0x1D7CE, 0x4E00, 0x00BD, 0x2468, 0x1C89 };
+        char[] ch = { 'अ', '०', 'Ⅰ', 'ͅ' };
+        Main.check("uc1", Character.isLetter(cp[0]) && Character.isLetter(ch[0]) && !Character.isUpperCase(cp[0])
+            && Character.isLetterOrDigit(cp[0]) && Character.isLetter(cp[9]) && Character.isAlphabetic(cp[9]));
+        Main.check("uc2", Character.isDigit(cp[1]) && Character.isDigit(ch[1]) && Character.digit(cp[2], 10) == 9
+            && Character.getNumericValue(cp[1]) == 0 && Character.isDigit(cp[8]) && Character.digit(cp[8], 10) == 0);
+        Main.check("uc3", !Character.isLetter(cp[3]) && Character.isAlphabetic(ch[2]) && Character.isUpperCase(cp[3])
+            && Character.getNumericValue(cp[3]) == 1 && Character.getNumericValue(cp[4]) == 12);
+        Main.check("uc4", Character.isAlphabetic(cp[5]) && Character.isLowerCase(ch[3]) && !Character.isLetter(cp[5])
+            && Character.isLowerCase(cp[6]) && Character.isLetter(cp[6]));
+        Main.check("uc5", Character.digit(cp[7], 36) == 10 && Character.getNumericValue(cp[9]) == -1
+            && Character.getNumericValue(cp[10]) == -2 && Character.getNumericValue(cp[11]) == 9
+            && Character.isUpperCase(cp[12]) && Character.isLetter(cp[12]));
     }
 }
