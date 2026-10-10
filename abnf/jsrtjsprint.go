@@ -305,7 +305,20 @@ func jsvOwnKeys(v interface{}) []string {
 	// A FUNCTION enumerates the own properties written onto it, which node reports
 	// and this engine keeps in a side table.
 	if p := jsvFnPropsOf(v); p != nil {
-		return jsvOwnKeys(p)
+		ks := jsvOwnKeys(p)
+		// The Array global's `from` and `of` are lib/js-builtins.js's, written onto
+		// it as ordinary properties; node's are not enumerable. Twins: jvOwnKeys in
+		// languages/lib/js-rt.metajs, ownKeys in both *-interpreter.abnf.
+		if hf, isHost := v.(*hostFunc); isHost && hf.name == "Array" {
+			out := []string{}
+			for _, k := range ks {
+				if k != "from" && k != "of" {
+					out = append(out, k)
+				}
+			}
+			return out
+		}
+		return ks
 	}
 	return []string{}
 }

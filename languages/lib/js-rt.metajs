@@ -2031,6 +2031,19 @@ function js_jsprintfn(name) {
 
 // ===================================================== own keys ===========
 
+// The Array global's `from` and `of` are lib/js-builtins.js's, written onto it as
+// ordinary properties; node's are not enumerable. Twin: jsvOwnKeys in
+// abnf/jsrtjsprint.go.
+function jvArrayStaticKeys(ks) {
+    var out = []
+    var i = 0
+    while (i < ks.length) {
+        if (ks[i] != "from" && ks[i] != "of") { out.push(ks[i]) }
+        i = i + 1
+    }
+    return out
+}
+
 // jsvOwnKeys: an object's own enumerable keys in insertion order, WITHOUT the
 // __-prefixed internal slots (keysOf already skips those).
 function jvOwnKeys(v) {
@@ -2044,7 +2057,10 @@ function jvOwnKeys(v) {
     if (jvFnPropsN > 0) {
         var fp = anytype
         fp = jvFnPropsOf(v)
-        if (fp !== undefined) { return keysOf(fp) }
+        if (fp !== undefined) {
+            if (jvArrayFn !== undefined && v === jvArrayFn) { return jvArrayStaticKeys(keysOf(fp)) }
+            return keysOf(fp)
+        }
     }
     if (Array.isArray(v)) {
         var oa = []

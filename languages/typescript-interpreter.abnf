@@ -4066,9 +4066,18 @@ NotFuncHead = :script(~~
         if (fnPropsN > 0) {
             var fp = anytype
             fp = fnPropsOf(v)
-            if (fp !== undefined) { return fp["__keys"].slice() }
+            if (fp !== undefined) {
+                if (v === jsArrayFn) { return jsArrayStaticKeys(fp["__keys"]) }
+                return fp["__keys"].slice()
+            }
         }
         return []
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsArrayStaticKeys(ks) {
+        var out = []
+        for (var i = 0; i < ks.length; i++) { if (ks[i] != "from" && ks[i] != "of") { out.push(ks[i]) } }
+        return out
     }
     // See the twin of this comment in js-interpreter.abnf.
     function evalArgs(items) {

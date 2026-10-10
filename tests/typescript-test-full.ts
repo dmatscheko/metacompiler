@@ -2267,6 +2267,15 @@ function s41() {
     check("nfn37", msg(function () { return (1e21 + 1)() }) === "true|true|1e+21 is not a function"
         && msg(function () { return (2e3 + i)() }) === "true|true|(2000 + i) is not a function"
         && msg(function () { return 0x10.nope() }) === "true|true|16.nope is not a function")
+    // A function, an arrow or a class is "(intermediate value)" once per body statement,
+    // an object literal once per property, an array literal prints its elements.
+    check("nfn44", msg(function () { return ((j: number) => 1, "a" in o)() }) === "true|true|((intermediate value) , (\"a\" in o)) is not a function"
+        && msg(function () { return (function (a: number) { i; o }, 5)() }) === "true|true|((intermediate value)(intermediate value) , 5) is not a function"
+        && msg(function () { return (class {}, (a: number = 1) => a, i)() }) === "true|true|((intermediate value) , (intermediate value)(intermediate value) , i) is not a function")
+    check("nfn45", msg(function () { return ({a: 1, b: 2}, [i + 1, , "s"])() }) === "true|true|({(intermediate value)(intermediate value)} , [(i + 1),(intermediate value),\"s\"]) is not a function"
+        && msg(function () { return ({}).a() }) === "true|true|{}.a is not a function"
+        && msg(function () { return ((x: number) => 1)()() }) === "true|true|(intermediate value)(...) is not a function")
+    check("nfn46", msg(function () { return (`t`, /r/g, `a${i}b${o.a}`)() }) === "true|true|(\"t\" , /r/g , io.a) is not a function")
 }
 
 // ===== SECTION 42: the top-level 'this' is the global object (the Script goal) =====
@@ -3138,6 +3147,7 @@ function s53() {
     for (const v of new S53It(src[3] + src[0]) as any) { if (v == 2) { break; } }
     const [c53] = new S53It(src[0]) as any;
     check("col16", s53log.join() === "ret2,ret1" && c53 === 1);
+    check("col17", Object.keys(Array).length === 0 && typeof Array.from === "function");
 }
 
 // ===== SECTION 54: hasOwnProperty on every kind of receiver =====

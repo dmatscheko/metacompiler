@@ -182,6 +182,15 @@ function s44() {
         && msg(function () { return 0x10.nope() }) === "true|true|16.nope is not a function"
         && msg(function () { return ('x')() }) === "true|true|\"x\" is not a function"
         && msg(function () { return (1e300 * 1e300)() }) === "true|true|Infinity is not a function")
+    // A function, an arrow or a class is "(intermediate value)" once per body statement,
+    // an object literal once per property, an array literal prints its elements.
+    check("nfn44", msg(function () { return (i => 1, "a" in o)() }) === "true|true|((intermediate value) , (\"a\" in o)) is not a function"
+        && msg(function () { return (function (a) { i; o }, 5)() }) === "true|true|((intermediate value)(intermediate value) , 5) is not a function"
+        && msg(function () { return (class {}, (a = 1) => a, i)() }) === "true|true|((intermediate value) , (intermediate value)(intermediate value) , i) is not a function")
+    check("nfn45", msg(function () { return ({a: 1, b: 2}, [i + 1, , "s"])() }) === "true|true|({(intermediate value)(intermediate value)} , [(i + 1),(intermediate value),\"s\"]) is not a function"
+        && msg(function () { return ({}).a() }) === "true|true|{}.a is not a function"
+        && msg(function () { return (x => 1)()() }) === "true|true|(intermediate value)(...) is not a function")
+    check("nfn46", msg(function () { return (`t`, /r/g, `a${i}b${o.a}`)() }) === "true|true|(\"t\" , /r/g , io.a) is not a function")
 }
 
 // ===== SECTION 45: the top-level 'this' is the global object (the Script goal) =====
@@ -1165,6 +1174,7 @@ function s58() {
         && err58(() => Array(-1)) === "RangeError: Invalid array length" && err58(() => Array(1.5)) === "RangeError: Invalid array length")
     var isArr = Array.isArray
     check("col15", typeof isArr === "function" && [[1], [2]].every(Array.isArray) && !isArr("x"))
+    check("col16", Object.keys(Array).length === 0 && typeof Array.from === "function")
 }
 
 // ===== SECTION 59: closing a class-instance iterator =====

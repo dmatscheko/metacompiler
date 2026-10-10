@@ -20,10 +20,19 @@
 //   - an assignment prints its target alone, a conditional "(intermediate value)"
 //     three times, a comma "(a , b)", a call "f(...)", a string-literal index as a
 //     dotted name ('o["a b"]' reads "o.a b")
+//   - an array literal prints its elements, "[x,(...ys)]", and a hole as
+//     "(intermediate value)"; an object literal prints "(intermediate value)" once
+//     per property, "{(intermediate value)}"; a template literal prints its
+//     substitutions only, and one without any as a string; a regular expression
+//     prints as written
+//   - a function, an arrow or a class prints "(intermediate value)" once per
+//     statement of its body (at least once), plus once more when its parameter list
+//     is not simple (a default, a pattern or a rest), V8's parameter-init block
 //
-// cpPrint answers null for anything it does not parse - a function, a class, an
-// object, array or template literal, '=>', '?.', a regular expression - and the
-// grammar keeps its own answer then.
+// cpPrint answers null for anything it does not parse - '?.', 'new', a template or
+// string with an escape, a body statement it cannot count (a nested block or a
+// keyword statement, or a line break with no ';' before it) - and the grammar keeps
+// its own answer then.
 //
 // THE SOURCE AS WRITTEN. up.in arrives with the whitespace between its tokens removed
 // (docs/abnf-dialect-gotchas.md), which glues a word operator to its operand
@@ -33,7 +42,7 @@
 var CP_PUNCT = [">>>=", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "...",
     "=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=",
     "%=", "&=", "|=", "^=", "**", "<<", ">>", "+", "-", "*", "/", "%", "<", ">", "=", "!",
-    "~", "&", "|", "^", "?", ":", ",", ".", "(", ")", "[", "]"]
+    "~", "&", "|", "^", "?", ":", ",", ".", "(", ")", "[", "]", "{", "}", ";"]
 // Binding power of each binary operator; ** is the one right-associative level.
 var CP_BIN_OPS = ["??", "||", "&&", "|", "^", "&", "==", "!=", "===", "!==", "<", ">", "<=", ">=",
     "instanceof", "in", "<<", ">>", ">>>", "+", "-", "*", "/", "%", "**"]
@@ -95,20 +104,22 @@ function cpSrc(txt, end) {
 }
 
 // The text a call-site tag records for a primary or an index suffix: the source as
-// written for a parenthesized primary and a bracketed index (the two forms cpPrint and
-// cpIndex re-print), up.in for everything else.
+// written for a parenthesized primary, an object literal and a bracketed index (the
+// forms cpPrint and cpIndex re-print), up.in for everything else.
 function cpTxt(txt, end) {
     if (txt.length < 2) { return txt }
     var c0 = txt.charCodeAt(0)
-    if (c0 != 40 && c0 != 91 && c0 != 63) { return txt }
+    if (c0 != 40 && c0 != 91 && c0 != 63 && c0 != 123) { return txt }
     var src = cpSrc(txt, end)
     if (src === null) { return txt }
     return src
 }
 
-// Whether txt may hold a word operator: typeof, void, delete, in, instanceof.
+// Whether txt may hold a word operator (typeof, void, delete, in, instanceof) or a
+// function, whose words and line breaks the printing reads.
 function cpGlued(t) {
-    return t.indexOf("in") >= 0 || t.indexOf("typeof") >= 0 || t.indexOf("void") >= 0 || t.indexOf("delete") >= 0
+    return t.indexOf("in") >= 0 || t.indexOf("typeof") >= 0 || t.indexOf("void") >= 0 || t.indexOf("delete") >= 0 ||
+        t.indexOf("=>") >= 0 || t.indexOf("function") >= 0 || t.indexOf("class") >= 0 || t.indexOf("async") >= 0
 }
 
 // The JavaScript text of a number, or null when the host printer cannot be trusted
@@ -137,9 +148,15 @@ function cpDigitVal(c) {
 
 // The text V8 prints for a callee primary that has no parentheses: a lone number
 // literal as its value ("2e3" reads "2000", "0x10" "16"), a lone string literal in
-// double quotes, anything else as it is.
+// double quotes, an object, array, template or regular-expression literal or an arrow
+// re-printed (cpPrint), anything else as it is.
 function cpLiteral(t) {
     var c0 = t.charCodeAt(0)
+    if (c0 == 123 || c0 == 91 || c0 == 96 || c0 == 47 || t.indexOf("=>") >= 0) {
+        var pr = cpPrint(t)
+        if (pr !== null) { return pr }
+        return t
+    }
     if (!cpIsDigit(c0) && c0 != 46 && c0 != 39) { return t }
     var toks = cpLex(t)
     if (toks === null || toks.length != 1) { return t }
@@ -150,15 +167,25 @@ function cpLiteral(t) {
 function cpIsIdStart(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 36 }
 function cpIsDigit(c) { return c >= 48 && c <= 57 }
 
+// The tokens of s, or null. A token that follows a line break carries nl: true, which
+// is what tells a statement boundary without a ';' (cpBodyCount declines it).
 function cpLex(s) {
     var out = []
+    var nlAt = []
     var i = 0
     while (i < s.length) {
         var c = s.charCodeAt(i)
-        if (c == 32 || c == 9 || c == 10 || c == 13) { i = i + 1; continue }
+        if (c == 32 || c == 9 || c == 10 || c == 13) {
+            if (c == 10 || c == 13) { nlAt.push(out.length) }
+            i = i + 1
+            continue
+        }
         if (c == 47 && i + 1 < s.length && s.charCodeAt(i + 1) == 42) {
             i = i + 2
-            while (i + 1 < s.length && !(s.charCodeAt(i) == 42 && s.charCodeAt(i + 1) == 47)) { i = i + 1 }
+            while (i + 1 < s.length && !(s.charCodeAt(i) == 42 && s.charCodeAt(i + 1) == 47)) {
+                if (s.charCodeAt(i) == 10) { nlAt.push(out.length) }
+                i = i + 1
+            }
             if (i + 1 >= s.length) { return null }
             i = i + 2
             continue
@@ -217,6 +244,20 @@ function cpLex(s) {
             i = i + 1
             continue
         }
+        if (c == 96) {
+            var tl = cpLexTemplate(s, i)
+            if (tl === null) { return null }
+            out.push(tl["tok"])
+            i = tl["end"]
+            continue
+        }
+        if (c == 47 && cpRegexMayStart(out)) {
+            var re = cpRegexEnd(s, i)
+            if (re < 0) { return null }
+            out.push({k: "rx", v: s.substring(start, re)})
+            i = re
+            continue
+        }
         var hit = ""
         var j = 0
         while (j < CP_PUNCT.length && hit == "") {
@@ -224,17 +265,111 @@ function cpLex(s) {
             if (s.substring(i, i + pt.length) == pt) { hit = pt }
             j = j + 1
         }
-        if (hit == "" || hit == "=>" || hit == "?." || hit == "...") { return null }
+        if (hit == "" || hit == "?.") { return null }
         out.push({k: "p", v: hit})
         i = i + hit.length
+    }
+    var n = 0
+    while (n < nlAt.length) {
+        if (nlAt[n] < out.length) { out[nlAt[n]]["nl"] = true }
+        n = n + 1
     }
     return out
 }
 
-function cpPeek(p) {
+// A '/' starts a regular expression where an operand is expected: first, or after an
+// operator or an opening bracket.
+function cpRegexMayStart(out) {
+    if (out.length == 0) { return true }
+    var last = out[out.length - 1]
+    if (last["k"] != "p") { return false }
+    var v = last["v"]
+    return v != ")" && v != "]" && v != "}"
+}
+
+// The offset just past the regular expression starting at s[i] (its flags included),
+// or -1. A '/' inside a class or after a backslash does not end it.
+function cpRegexEnd(s, i) {
+    var j = i + 1
+    var inClass = false
+    while (j < s.length) {
+        var c = s.charCodeAt(j)
+        if (c == 10 || c == 13) { return 0 - 1 }
+        if (c == 92) { j = j + 1 }
+        else if (c == 91) { inClass = true }
+        else if (c == 93) { inClass = false }
+        else if (c == 47 && !inClass) { break }
+        j = j + 1
+    }
+    if (j >= s.length) { return 0 - 1 }
+    j = j + 1
+    while (j < s.length && cpIsIdStart(s.charCodeAt(j))) { j = j + 1 }
+    return j
+}
+
+// The template literal starting at s[i] as {tok, end}, or null: a "tpl" token whose
+// parts are the token lists of its substitutions, and whose v is its text when it has
+// none. A backslash declines it, as in a string.
+function cpLexTemplate(s, i) {
+    var j = i + 1
+    var parts = []
+    var text = ""
+    while (j < s.length && s.charCodeAt(j) != 96) {
+        var c = s.charCodeAt(j)
+        if (c == 92) { return null }
+        if (c == 36 && j + 1 < s.length && s.charCodeAt(j + 1) == 123) {
+            var k = j + 2
+            var depth = 1
+            while (k < s.length && depth > 0) {
+                var d = s.charCodeAt(k)
+                if (d == 123) { depth = depth + 1 }
+                else if (d == 125) { depth = depth - 1 }
+                else if (d == 96) {
+                    k = k + 1
+                    while (k < s.length && s.charCodeAt(k) != 96) { k = k + 1 }
+                }
+                k = k + 1
+            }
+            if (depth > 0) { return null }
+            var sub = cpLex(s.substring(j + 2, k - 1))
+            if (sub === null) { return null }
+            parts.push(sub)
+            j = k
+        } else {
+            text = text + s.charAt(j)
+            j = j + 1
+        }
+    }
+    if (j >= s.length) { return null }
+    var r = {}
+    r["tok"] = {k: "tpl", v: text, parts: parts}
+    r["end"] = j + 1
+    return r
+}
+
+function cpPeek(p) { return cpAt(p, 0) }
+function cpAt(p, k) {
     var t = p["t"]
-    if (p["i"] < t.length) { return t[p["i"]] }
+    if (p["i"] + k < t.length) { return t[p["i"] + k] }
     return {k: "end", v: ""}
+}
+// The index of the bracket closing the one at token i, or -1.
+function cpMatch(t, i) {
+    var depth = 0
+    var j = i
+    while (j < t.length) {
+        var tok = t[j]
+        if (tok["k"] == "p") {
+            var v = tok["v"]
+            if (v == "(" || v == "[" || v == "{") { depth = depth + 1 }
+            else if (v == ")" || v == "]" || v == "}") {
+                depth = depth - 1
+                if (depth == 0) { return j }
+            }
+        }
+        j = j + 1
+    }
+    return 0 - 1
 }
 function cpIsP(tok, v) { return (tok["k"] == "p" || tok["k"] == "id") && tok["v"] == v }
 function cpBad(p) {
@@ -419,15 +554,71 @@ function cpPrimary(p) {
     var k = tok["k"]
     if (k == "id") {
         var w = tok["v"]
-        if (w == "function" || w == "class" || w == "new" || w == "async" || w == "await" || w == "yield" || w == "super") {
+        if (w == "function") { return cpFunction(p) }
+        if (w == "class") { return cpClass(p) }
+        if (w == "async") {
+            var an = cpAt(p, 1)
+            if (cpIsP(an, "function") || (an["k"] == "id" && cpIsP(cpAt(p, 2), "=>")) ||
+                (cpIsP(an, "(") && cpArrowAt(p["t"], p["i"] + 1))) {
+                p["i"] = p["i"] + 1
+                if (cpIsP(an, "function")) { return cpFunction(p) }
+                return cpArrow(p)
+            }
+        }
+        if (cpIsP(cpAt(p, 1), "=>")) { return cpArrow(p) }
+        if (w == "new" || w == "await" || w == "yield" || w == "super") {
             return cpBad(p)
         }
         p["i"] = p["i"] + 1
         return {k: "id", v: w}
     }
-    if (k == "num" || k == "str") {
+    if (k == "num" || k == "str" || k == "rx") {
         p["i"] = p["i"] + 1
         return tok
+    }
+    if (k == "tpl") {
+        p["i"] = p["i"] + 1
+        var parts = tok["parts"]
+        if (parts.length == 0) { return {k: "str", v: tok["v"]} }
+        var xs = []
+        var pi = 0
+        while (pi < parts.length) {
+            var q = {}
+            q["t"] = parts[pi]
+            q["i"] = 0
+            q["bad"] = false
+            var x = cpExpr(q)
+            if (q["bad"] || q["i"] != parts[pi].length) { return cpBad(p) }
+            xs.push(x)
+            pi = pi + 1
+        }
+        return {k: "tpl", xs: xs}
+    }
+    if (cpIsP(tok, "(") && cpArrowAt(p["t"], p["i"])) { return cpArrow(p) }
+    if (cpIsP(tok, "[")) { return cpArray(p) }
+    if (cpIsP(tok, "{")) {
+        // An object literal: one "(intermediate value)" per property, so only the
+        // depth-0 commas are counted (a trailing one ends no property).
+        var t = p["t"]
+        var close = cpMatch(t, p["i"])
+        if (close < 0) { return cpBad(p) }
+        var props = 0
+        if (close > p["i"] + 1) {
+            props = 1
+            var depth = 0
+            var j = p["i"] + 1
+            while (j < close) {
+                var v = t[j]["v"]
+                if (t[j]["k"] == "p") {
+                    if (v == "(" || v == "[" || v == "{") { depth = depth + 1 }
+                    else if (v == ")" || v == "]" || v == "}") { depth = depth - 1 }
+                    else if (v == "," && depth == 0 && j + 1 < close) { props = props + 1 }
+                }
+                j = j + 1
+            }
+        }
+        p["i"] = close + 1
+        return {k: "obj", n: props}
     }
     if (cpIsP(tok, "(")) {
         p["i"] = p["i"] + 1
@@ -441,9 +632,172 @@ function cpPrimary(p) {
     return cpBad(p)
 }
 
+// An array literal: its elements, a hole and a spread included.
+function cpArray(p) {
+    p["i"] = p["i"] + 1
+    var xs = []
+    while (!p["bad"] && !cpIsP(cpPeek(p), "]")) {
+        if (cpIsP(cpPeek(p), ",")) {
+            xs.push({k: "iv", n: 1})
+            p["i"] = p["i"] + 1
+        } else {
+            if (cpIsP(cpPeek(p), "...")) {
+                p["i"] = p["i"] + 1
+                xs.push({k: "spread", x: cpAssign(p)})
+            } else {
+                xs.push(cpAssign(p))
+            }
+            if (cpIsP(cpPeek(p), ",")) { p["i"] = p["i"] + 1 }
+            else if (!cpIsP(cpPeek(p), "]")) { return cpBad(p) }
+        }
+    }
+    if (p["bad"]) { return cpBad(p) }
+    p["i"] = p["i"] + 1
+    return {k: "arr", xs: xs}
+}
+
+// Whether the "(" at token i opens an arrow function's parameter list.
+function cpArrowAt(t, i) {
+    var close = cpMatch(t, i)
+    return close >= 0 && close + 1 < t.length && cpIsP(t[close + 1], "=>")
+}
+
+// Whether the parameter list from token i to the closing bracket at token close is
+// NOT simple: a default, a destructuring pattern or a rest parameter.
+function cpParamsComplex(t, i, close) {
+    var j = i + 1
+    while (j < close) {
+        var v = t[j]["v"]
+        if (t[j]["k"] == "p" && (v == "=" || v == "[" || v == "{" || v == "...")) { return true }
+        j = j + 1
+    }
+    return false
+}
+
+// A function's printed count: one per body statement and one for a parameter list
+// that is not simple, never fewer than one.
+function cpFnNode(stmts, complex) {
+    var n = stmts
+    if (complex) { n = n + 1 }
+    if (n == 0) { n = 1 }
+    return {k: "iv", n: n}
+}
+
+// An arrow function, at its parameter (a name or a parenthesized list).
+function cpArrow(p) {
+    var t = p["t"]
+    var complex = false
+    if (cpIsP(cpPeek(p), "(")) {
+        var close = cpMatch(t, p["i"])
+        complex = cpParamsComplex(t, p["i"], close)
+        p["i"] = close + 1
+    } else {
+        p["i"] = p["i"] + 1
+    }
+    p["i"] = p["i"] + 1
+    if (cpIsP(cpPeek(p), "{")) { return cpFnNode(cpBodyCount(p), complex) }
+    cpAssign(p)
+    return cpFnNode(1, complex)
+}
+
+// A function expression, at 'function'.
+function cpFunction(p) {
+    var t = p["t"]
+    p["i"] = p["i"] + 1
+    if (cpIsP(cpPeek(p), "*")) { p["i"] = p["i"] + 1 }
+    if (cpPeek(p)["k"] == "id") { p["i"] = p["i"] + 1 }
+    if (!cpIsP(cpPeek(p), "(")) { return cpBad(p) }
+    var close = cpMatch(t, p["i"])
+    if (close < 0) { return cpBad(p) }
+    var complex = cpParamsComplex(t, p["i"], close)
+    p["i"] = close + 1
+    if (!cpIsP(cpPeek(p), "{")) { return cpBad(p) }
+    return cpFnNode(cpBodyCount(p), complex)
+}
+
+// A class expression, at 'class': one "(intermediate value)" whatever its body.
+function cpClass(p) {
+    var t = p["t"]
+    var j = p["i"] + 1
+    while (j < t.length && !cpIsP(t[j], "{")) {
+        if (cpIsP(t[j], "(") || cpIsP(t[j], "[")) {
+            j = cpMatch(t, j)
+            if (j < 0) { return cpBad(p) }
+        }
+        j = j + 1
+    }
+    var close = cpMatch(t, j)
+    if (close < 0) { return cpBad(p) }
+    p["i"] = close + 1
+    return {k: "iv", n: 1}
+}
+
+// The number of statements in the block body at the "{" here, which it steps past.
+// An empty statement is not one. A statement this cannot delimit by its ';' - a
+// nested block or object at statement level, a keyword statement, or a line break
+// with no ';' before it (ASI) - declines the whole print.
+function cpBodyCount(p) {
+    var t = p["t"]
+    var close = cpMatch(t, p["i"])
+    if (close < 0) {
+        cpBad(p)
+        return 0
+    }
+    var n = 0
+    var open = false
+    var depth = 0
+    var j = p["i"] + 1
+    while (j < close) {
+        var tok = t[j]
+        var v = tok["v"]
+        if (depth == 0) {
+            if (cpIsP(tok, "{") || (tok["k"] == "id" && (v == "if" || v == "for" || v == "while" || v == "do" ||
+                v == "switch" || v == "try" || v == "function" || v == "class" || v == "with")) ||
+                (open && tok["nl"] === true)) {
+                cpBad(p)
+                return 0
+            }
+        }
+        if (tok["k"] == "p" && (v == "(" || v == "[" || v == "{")) { depth = depth + 1 }
+        else if (tok["k"] == "p" && (v == ")" || v == "]" || v == "}")) { depth = depth - 1 }
+        if (depth == 0 && cpIsP(tok, ";")) {
+            if (open) { n = n + 1 }
+            open = false
+        } else {
+            open = true
+        }
+        j = j + 1
+    }
+    if (open) { n = n + 1 }
+    p["i"] = close + 1
+    return n
+}
+
 function cpShow(n) {
     var k = n["k"]
-    if (k == "id" || k == "num") { return n["v"] }
+    if (k == "id" || k == "num" || k == "rx") { return n["v"] }
+    if (k == "iv") {
+        var iv = ""
+        var r = 0
+        while (r < n["n"]) {
+            iv = iv + "(intermediate value)"
+            r = r + 1
+        }
+        return iv
+    }
+    if (k == "obj") { return "{" + cpShow({k: "iv", n: n["n"]}) + "}" }
+    if (k == "spread") { return "(..." + cpShow(n["x"]) + ")" }
+    if (k == "arr" || k == "tpl") {
+        var ao = ""
+        var e = 0
+        while (e < n["xs"].length) {
+            if (k == "arr" && e > 0) { ao = ao + "," }
+            ao = ao + cpShow(n["xs"][e])
+            e = e + 1
+        }
+        if (k == "arr") { return "[" + ao + "]" }
+        return ao
+    }
     if (k == "str") { return "\"" + n["v"] + "\"" }
     if (k == "mem") { return cpShow(n["o"]) + "." + n["v"] }
     if (k == "idx") {
