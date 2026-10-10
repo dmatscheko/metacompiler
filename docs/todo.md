@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-250** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-259** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -177,68 +177,55 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-205 js: `Array.from`, `Set` and iterable constructors · P1 · JS · IN PROGRESS (JS worker, round 2) [V]
-`println(Array.from([1,2]).join(","))`: the js interpreter under goja resolves goja's
-own native Array.from (hostGlobals "Array" is the host's Array) and prints `1,2`;
--frozen and both compiled legs throw TypeError - a live goja-vs-frozen divergence. node
-`1,2`. Implement Array.from (iterables, array-likes, map fn) and `Set` (and check `Map`)
-including construction from an iterable (`new Set(g())`), in all engines; make the
-interpreter stop leaking host Array statics.
+### T-250 ts: no Set, Map, Array.from · P1 · JS · OPEN [V]
+`new Set()` is a ReferenceError in both TS legs. Port js's jsbLoad
+(languages/lib/js-builtins.js), the "@@iterator" iteration probes and the Array
+function to the two TS grammars.
 
-### T-206 js: `for (x in Math)` enumerates 43 host members compiled · P1 · JS · IN PROGRESS (JS worker, round 2) [V]
-`var k=0; for (var x in Math) k++; println(k)`: run and native 43, interpreter and
-node 0 (builtin members are non-enumerable).
+### T-251 js: `Math.hasOwnProperty("abs")` · P3 · JS · OPEN [V]
+"TypeError: Math.hasOwnProperty is not a function" in all legs; node true. (No
+Object.prototype chain; at least the builtin objects should answer it.)
 
-### T-207 ts: a dead second `function main()` in tests/typescript-test-full.ts · P3 · JS · IN PROGRESS (JS worker, round 2) [V]
-Shadowed by the real main, calls s44..s50 and s48 again; delete it.
+### T-252 js: a class-instance iterator's `return()` is not called compiled · P1 · JS · OPEN [V]
+On a for-of `break` or array destructuring the run and native legs skip `return()`;
+the interpreter calls it (= node). The close sites (js-to-llvm-ir ~3697, 4290, 4376,
+5488 and js_jsiterclose) read with memGetExt / rt.getMember, which do not find class
+methods - use js_jsvget as the iteration probes do.
 
-### T-208 ts: parameter properties vs field initializers order differs between halves · P1 · JS · IN PROGRESS (JS worker, round 2) [V]
-`class C { q = (this as any).p; constructor(public p = 1) {} }; new C().q`: interpreter
-1, compiler and node (tsc target ES2022, useDefineForClassFields) undefined - fields
-first. Check tsc's emitted JS with the VS Code tsc for the default target.
+### T-253 ts: `delete (Math as any).sqrt` aborts in the interpreter · P3 · JS · OPEN [V]
+"delete operator not implemented" for delete through a parenthesised cast.
 
-### T-209 js: "is not a function" glues word operators · P3 · JS · IN PROGRESS (JS worker, round 2) [V]
-`typeofo.a is not a function` where node says `(typeof o.a)`; also `in`, `instanceof`,
-`void`, `delete`, and an exponent literal `1e21` is not folded. `up.in` has its
-whitespace stripped: needs the raw source span at the call-site tags.
-
-### T-210 corpus: JS reject side, remainder · P3 · JS · IN PROGRESS (JS worker, round 2) [V]
-Reject 711 / 727, must-parse 2623 / 2653. Decision taken: split the module-only
-SECTION 34 (export) out of js-test-full.js into its own `.mjs` ratchet unit and rename
-js-test-recognize.js, js-test-multifile.js and tests/imports/geomlib.js as needed
-(test.sh, native-full, launch.json), then refuse import/export in a Script (6 files);
-measure both rows. The rest (`1++`, `for(([a]) of 0)`, `for((1+1) in l)`, `typeof () =>
-{}`, `{ *[yield iter]() {} }`) are inseparable from early/ must-parse files by shape -
-decline each with its pair unless a spec-based rule separates them.
+### T-254 js: "is not a function" for a comma/arrow callee · P3 · JS · OPEN [V]
+`(index => 1, "intro" in o)()` prints the raw callee; node
+`((intermediate value) , ("intro" in o))`. cpPrint declines on `=>`, function and
+object literals. Also `Object.keys(Array)` is `["from","of"]` (node `[]`).
 
 ---
 
 # JV — Java
 
-### T-212 java: Character classification beyond U+024F is approximate · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
-Past U+024F a letter is only a cased letter and only 0-9 are digits: a U+0250..U+3000
-probe differs from java on ~4,000 `isLetter` rows (uncased scripts). Needs Unicode
-category tables (java 24's Unicode version) in all three engines; case mapping and
-isWhitespace are already exact there.
+### T-255 java: `instanceof` an interface · P1 · JV · Shared: interp-core.js · OPEN [V]
+`class Impl implements Lst, Gen<String>` (Lst extends Col): java `true true true true`
+for Lst/Col/Gen/Impl; interpreter `false false false true` (rtIsType in interp-core.js
+walks only `__class`/`__super` and treats "List"/"Collection" as JS arrays); compiled
+`true true false true` (a second interface is missed). ArrayList.equals in
+java-util.java therefore cannot accept a user List.
 
-### T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
-Interpreter: "unknown name: StrictMath", `new String("ab")` "unknown class: String",
-"unknown class: ArrayList". Probe each in the compiled halves too and match java.
+### T-256 java: String identity · P2 · JV · OPEN [V]
+`new String("ab") == "ab"` and `==` on a computed concatenation are true; java false.
+A String has no identity in the value model. Cost first; likely DECLINE unless cheap.
 
-### T-214 java: overload resolution uses the argument's runtime class · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
-`Object o = "s"; f(o)` with `f(Object)` and `f(String)` picks f(String); javac picks
-f(Object) (JLS 15.12.2 is static). Also an enum's or an anonymous class's own
-overloads are not registered (not resolved). Needs the argument's static type
-(java-decltypes.js already records declared types).
+### T-257 java: missing String API and core classes · P1 · JV · OPEN [V]
+`String.valueOf`, `String.join`, `String.format` ("unknown name: String" interpreter,
+"unknown method 'valueOf'" compiled); the interpreter's String methods stop at length,
+charAt, equals, toString, substring, indexOf, isEmpty, toCharArray (`trim` fails);
+`getClass()`, `new Object()`, `StringBuilder` unknown. Oracle: java 24. Consider
+java-util.java (compiled with the program) for StringBuilder.
 
-### T-215 java: duplicate assertion IDs in tests/java-test-full.java · P3 · JV · IN PROGRESS (JV worker, round 3) [V]
-`int27`, `int28`, `iof5` appear twice; rename so every ID is unique.
-
-### T-216 java: transcendentals other than exp vs java · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
-`Math.exp` differed from java on 78 of 3,276 rows (now fdlibm). Probe `log`, `log10`,
-`log1p`, `expm1`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`,
-`tanh`, `cbrt`, `hypot`, `pow` on boundary values against java (and StrictMath) and port
-fdlibm where java's answer is fdlibm's.
+### T-258 java: overload residuals · P3 · JV · OPEN [V]
+Where a static type is a type variable, a library type, or an ambiguous method result,
+a call still picks by the runtime value; an anonymous class's forwarding to its super
+constructor picks at runtime.
 
 ---
 
@@ -596,6 +583,17 @@ T-122 php: `empty($undef)` aborts; `$u[0] = 1` does not vivify — DONE 43216af
 T-123 php: top-level `label:`/`goto` or a bare `{ … }` block aborts — DONE 6a92762 (no compile-core change needed)
 T-130 lua: no `error` / `pcall` / `xpcall` — DONE d481647 867a60c 4a6a09d f7bc81a c51b379
 T-131 lua: a subnormal float key read back through `pairs()` compares unequal — DONE 6575958 (every numeric key, not only subnormals)
+T-205 js: `Array.from`, `Set` and iterable constructors — DONE 2cb5e1d (js only; TS is T-250)
+T-206 js: `for (x in Math)` enumerates 43 host members compiled — DONE ffef117
+T-207 ts: a dead second `function main()` in tests/typescript-test-full.ts — DONE 734e775
+T-208 ts: parameter properties vs field initializers order differs between halves — DONE baf5002
+T-209 js: "is not a function" glues word operators — DONE 2de9757
+T-210 corpus: JS reject side, remainder — DONE 85387cd (reject 711→719, must-parse unchanged; `1++`, `for(([a]) of 0)` x4, `for((1+1) in l)`, `\u0000` DECLINED: each is inseparable by shape from an early/ must-parse twin)
+T-212 java: Character classification beyond U+024F is approximate — DONE 637d1d4
+T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter — DONE 1bd1b2b 7c52f99 (String identity is T-256)
+T-214 java: overload resolution uses the argument's runtime class — DONE 1358498 e22bec9
+T-215 java: duplicate assertion IDs in tests/java-test-full.java — DONE 58998c6
+T-216 java: transcendentals other than exp vs java — DONE 7c52f99 04b091c (Math.sin/cos answer StrictMath: HotSpot's aarch64 intrinsic differs from fdlibm in the last place on ~3.5% of arguments and is not reproducible - DECLINED residual)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
