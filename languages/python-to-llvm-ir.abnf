@@ -4209,7 +4209,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pb = pf.NewBlock("entry")
         pb.NewCall(getExtern("js_pyprint", 1), [pf.Params[1]])
         pb.NewRet(hUndef)
-        b = declBind(b, "print", callExt(b, "js_closure", [handle(prIdx), curScopeV]))
+        // The keyword-only sep, end, file and flush, plus *objects and **unknown
+        // (the extended layout js_pyprint reads).
+        var prNames = callExt(b, "js_arr_new", [])
+        var prKw = ["sep", "end", "file", "flush"]
+        for (var pki = 0; pki < prKw.length; pki++) { callExt(b, "js_arr_push", [prNames, emitStr(b, prKw[pki])]) }
+        var prClo = callExt(b, "js_pysig", [callExt(b, "js_closure", [handle(prIdx), curScopeV]), prNames, emitNum(b, 4), hTrue])
+        b = declBind(b, "print", prClo)
         // len(x): strings, lists and dicts via js_pylen.
         funcCount++
         var lenIdx = funcCount

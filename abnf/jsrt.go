@@ -16544,19 +16544,47 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapStr(rt.pyFormat(argAt(args, 0), spec, ""))
 		},
-		"js_pyprint": func(a []uint64) uint64 { // print(...) with Python style rendering.
+		// print(*objects, sep=' ', end='\n', file=None, flush=False). The closure
+		// carries that signature (js_pysig), so the argument array arrives bound as
+		// [sep, end, file, flush, objects, unknown keywords].
+		"js_pyprint": func(a []uint64) uint64 {
 			args, ok := u(a[0]).(*jsArray)
-			if !ok {
-				rt.fail("js_pyprint needs an argument array")
+			if !ok || len(args.elems) != 6 {
+				rt.fail("js_pyprint needs a bound argument array")
 			}
-			out := ""
-			for i, e := range args.elems {
-				if i > 0 {
-					out += " "
+			el := args.elems
+			if keys, _, isDict := dictParts(el[5]); isDict && len(keys.elems) > 0 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"print() got an unexpected keyword argument '"+rt.toString(keys.elems[0])+"'")})
+			}
+			sep := rt.pyPrintText(el[0], "sep", " ")
+			end := rt.pyPrintText(el[1], "end", "\n")
+			objs, _ := el[4].(*jsArray)
+			file := el[2]
+			if file == jsUndef || file == jsNull {
+				var sb strings.Builder
+				for i, e := range objs.elems {
+					if i > 0 {
+						sb.WriteString(sep)
+					}
+					sb.WriteString(rt.pyString(e))
 				}
-				out += rt.pyString(e)
+				sb.WriteString(end)
+				fmt.Fprint(outWriter, wtf8Clean(sb.String()))
+				return 0
 			}
-			fmt.Fprintln(outWriter, wtf8Clean(out))
+			// Any other file is an object with a write method, called once per
+			// piece as CPython does, then flush() when flush is true.
+			for i, e := range objs.elems {
+				if i > 0 {
+					rt.pyMethodCall(file, "write", []interface{}{sep}, jsUndef)
+				}
+				rt.pyMethodCall(file, "write", []interface{}{rt.pyString(e)}, jsUndef)
+			}
+			rt.pyMethodCall(file, "write", []interface{}{end}, jsUndef)
+			if rt.truthy(el[3]) {
+				rt.pyMethodCall(file, "flush", []interface{}{}, jsUndef)
+			}
 			return 0
 		},
 
@@ -20542,6 +20570,20 @@ func (rt *jsrt) pyIsSubclass(c, target interface{}) bool {
 		}
 	}
 	return false
+}
+
+// pyPrintText is print()'s sep or end: None takes the default, a str is used
+// as it is, and anything else is CPython's TypeError. Twin of pyPrintText in
+// languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
+func (rt *jsrt) pyPrintText(v interface{}, name, dflt string) string {
+	if v == jsUndef || v == jsNull {
+		return dflt
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+		name+" must be None or a string, not "+pyTypeName(rt, v))})
 }
 
 // pyAddKind classes an operand of Python's `+`, which is defined only within one

@@ -1121,13 +1121,53 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["RuntimeError"] = pyExcType("RuntimeError")
     hostGlobals["ZeroDivisionError"] = pyExcType("ZeroDivisionError")
 
+    // print(*objects, sep=' ', end='\n', file=None, flush=False). Any file but
+    // None is an object whose write method gets each piece, as in CPython.
+    // Twin of js_pyprint in abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["print"] = function() {
-        var out = ""
-        for (var i = 0; i < arguments.length; i++) {
-            if (i > 0) out += " "
-            out += pstr(arguments[i])
+        var argv = arguments
+        var named = kTakeNamed()
+        var sepV = anytype
+        var endV = anytype
+        var file = anytype
+        var flush = anytype
+        sepV = undefined
+        endV = undefined
+        file = undefined
+        flush = false
+        if (named != null) {
+            for (var k = 0; k < named.keys.length; k++) {
+                var kn = named.keys[k]
+                if (kn == "sep") { sepV = named.vals[k] }
+                else if (kn == "end") { endV = named.vals[k] }
+                else if (kn == "file") { file = named.vals[k] }
+                else if (kn == "flush") { flush = named.vals[k] }
+                else { pyListErr("TypeError", "print() got an unexpected keyword argument '" + kn + "'") }
+            }
         }
-        println(out)
+        var sep = pyPrintText(sepV, "sep", " ")
+        var end = pyPrintText(endV, "end", "\n")
+        if (file === undefined || file === null) {
+            var out = ""
+            for (var i = 0; i < argv.length; i++) {
+                if (i > 0) out += sep
+                out += pstr(argv[i])
+            }
+            print(out + end)
+            return
+        }
+        for (var j = 0; j < argv.length; j++) {
+            if (j > 0) { pyCall(pyattr(file, "write"), [sep], null) }
+            pyCall(pyattr(file, "write"), [pstr(argv[j])], null)
+        }
+        pyCall(pyattr(file, "write"), [end], null)
+        if (pytruthy(flush)) { pyCall(pyattr(file, "flush"), [], null) }
+    }
+    function pyPrintText(v, name, dflt) {
+        if (v === undefined || v === null) { return dflt }
+        if (typeof v == "string") { return v }
+        pyListErr("TypeError", name + " must be None or a string, not " + pyTypeOf(v).__name)
+        return dflt
     }
     hostGlobals["len"] = function(x) {
         if (typeof x == "string") return pyLen(x)

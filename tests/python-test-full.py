@@ -3324,6 +3324,37 @@ def s56():
                                 "sum() can't sum strings [use ''.join(seq) instead]"])
 
 
+# ===== SECTION 57: print() takes sep, end, file and flush =====
+# sep and end are None or a str; a file other than None gets one write() per
+# piece and a flush() when flush is true; an unknown keyword is a TypeError.
+# The keywords also reach print through **kw, an alias and map().
+def s57():
+    class W:
+        def __init__(self):
+            self.parts = []
+        def write(self, s):
+            self.parts.append(s)
+        def flush(self):
+            self.parts.append("<flush>")
+    w = W()
+    print(1, "two", sep="/", end=";", file=w)
+    print({"sep": 1}, file=w, flush=True)
+    out = print
+    out(file=w, **{"end": "", "sep": None})
+    list(map(lambda x: print(x, sep="?", end=".", file=w), [7, 8]))
+    check("prt1", w.parts == ["1", "/", "two", ";", "{'sep': 1}", "\n", "<flush>", "", "7", ".", "8", "."])
+    msgs = []
+    for bad in [{"sep": 5}, {"end": [1]}, {"bogus": 1}]:
+        try:
+            print("a", **bad)
+        except TypeError as e:
+            msgs.append(str(e))
+    check("prt2", msgs == ["sep must be None or a string, not int", "end must be None or a string, not list",
+                           "print() got an unexpected keyword argument 'bogus'"])
+    print("prt3", "a", sep="-", end=" | ")
+    print("b", end="\n", flush=True)
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3381,5 +3412,6 @@ def main():
     s54() # SECTION-CALL 54
     s55() # SECTION-CALL 55
     s56() # SECTION-CALL 56
+    s57() # SECTION-CALL 57
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

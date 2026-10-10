@@ -4022,16 +4022,46 @@ function pyBBFnName(c) {
 // wtf8Clean primitive in layer 2, so that one step is NOT reproduced here; it is
 // only observable for a string built out of an unpaired surrogate.
 function js_pyprint(args) {
-    if (!pyIsArr(args)) { fail("js_pyprint needs an argument array") }
-    var out = ""
-    var i = 0
-    while (i < args.length) {
-        if (i > 0) { out = out + " " }
-        out = out + pyStr(args[i])
-        i = i + 1
+    if (!pyIsArr(args) || args.length != 6) { fail("js_pyprint needs a bound argument array") }
+    var kw = args[5]
+    if (pyIsDict(kw) && kw["keys"].length > 0) {
+        pyRaiseExc("TypeError", "print() got an unexpected keyword argument '" + pyToStr(kw["keys"][0]) + "'")
     }
-    println(out)
+    var sep = pyPrintText(args[0], "sep", " ")
+    var end = pyPrintText(args[1], "end", "\n")
+    var objs = args[4]
+    var file = args[2]
+    if (file === undefined || file === null) {
+        var out = ""
+        var i = 0
+        while (i < objs.length) {
+            if (i > 0) { out = out + sep }
+            out = out + pyStr(objs[i])
+            i = i + 1
+        }
+        print(out + end)
+        return undefined
+    }
+    // Any other file is an object with a write method, called once per piece as
+    // CPython does, then flush() when flush is true.
+    var k = 0
+    while (k < objs.length) {
+        if (k > 0) { pyDMethodCall(file, "write", [sep], undefined) }
+        pyDMethodCall(file, "write", [pyStr(objs[k])], undefined)
+        k = k + 1
+    }
+    pyDMethodCall(file, "write", [end], undefined)
+    if (pyATruthy(args[3])) { pyDMethodCall(file, "flush", [], undefined) }
     return undefined
+}
+
+// print()'s sep or end: None takes the default, a str is used as it is, and
+// anything else is CPython's TypeError. Go: rt.pyPrintText.
+function pyPrintText(v, name, dflt) {
+    if (v === undefined || v === null) { return dflt }
+    if (typeof v == "string") { return v }
+    pyRaiseExc("TypeError", name + " must be None or a string, not " + pyTypeName(v))
+    return dflt
 }
 
 // js_pyrepr: repr(x).
