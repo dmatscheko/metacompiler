@@ -1551,7 +1551,7 @@ function pySeqElems(v) {
     }
     if (pyIsGen(v)) { return pyDrainGen(v) }
     // A CURSOR gives what is LEFT of it, and the read exhausts it - the same rule
-    // js_pylist and js_pyiter follow, so `xs[1:3] = iter([5, 6])` is [9, 5, 6, 9].
+    // js_pylist and js_pyiterof follow, so `xs[1:3] = iter([5, 6])` is [9, 5, 6, 9].
     if (pyIsIter(v)) { return pyIterRest(v) }
     if (typeof v == "string") { return pySChars(v) }
     fail("cannot assign a " + pyTypeName(v) + " to a slice")
@@ -3414,7 +3414,7 @@ function pyIterRest(it) {
     return out
 }
 
-// js_pyiter's element list, as a fresh array: a generator drains, an iterator
+// js_pyiterof's element list, as a fresh array: a generator drains, an iterator
 // gives what is left, a set copies, a dict gives its keys, a string its
 // characters. Go: rt.pyElemsOf.
 function pyElemsOf(v) {
@@ -5009,7 +5009,7 @@ function js_pyset(c, k, v) {
 }
 
 
-// ----- js_pylen ---------------------------------------------------------------
+// ----- js_pylenof -------------------------------------------------------------
 // len() for strings, lists, sets and dicts, with the __len__ dunder arm. The
 // string arm counts CODE POINTS (Go: pyStrLen), so len of
 // a single astral character is 1 and not 2 - this is the ONE place Go measures
@@ -5018,7 +5018,7 @@ function js_pyset(c, k, v) {
 // Go has NO generator arm here: a generator reaches neither the set, the string,
 // the array nor the dict test and lands on the failure. Ported as it stands -
 // `len(g)` is an error in real Python too.
-function js_pylen(v) {
+function js_pylenof(v) {
     var cls = pyInstClassOf(v)
     if (cls !== null && cls !== undefined) {
         if (pyLookupHas(cls, "__len__")) {
@@ -5031,7 +5031,7 @@ function js_pylen(v) {
     if (typeof v == "string") { return pyStrLen(v) }
     if (pyIsArr(v)) { return v.length }
     if (pyIsDict(v)) { return v["keys"].length }
-    fail("len() of a " + typeof v)
+    pyRaiseExc("TypeError", "object of type '" + pyTypeName(v) + "' has no len()")
     return 0
 }
 
@@ -5047,17 +5047,16 @@ function js_pylist(v) {
     if (pyIsArr(v)) { return pyCCopyArr(v) }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
-    fail("list() of a " + typeof v)
-    return []
+    return pyElemsOf(v)
 }
 
 
-// ----- js_pyiter --------------------------------------------------------------
+// ----- js_pyiterof ------------------------------------------------------------
 // The list a for loop runs over: a generator is drained first, a set gives a
 // COPY of its elements, a dict its keys, a string its characters, and a list
 // ITSELF - the Go twin returns the handle it was given, not a copy, so a loop
 // that mutates the list it walks sees the mutation.
-function js_pyiter(v) {
+function js_pyiterof(v) {
     // An ITERATOR object gives what is LEFT of it, and the read exhausts it.
     if (pyIsIter(v)) { return pyIterRest(v) }
     if (pyIsGen(v)) { return pyCDrain(v) }
@@ -5066,8 +5065,15 @@ function js_pyiter(v) {
     if (pyIsArr(v)) { return v }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
-    fail("iteration over a " + typeof v)
+    pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
     return []
+}
+
+// js_pyiterof for an unpacking target, with CPython's own TypeError text.
+function js_pyunpack(v) {
+    if (pyIsArr(v)) { return v }
+    if (!pyIsIterable(v)) { pyRaiseExc("TypeError", "cannot unpack non-iterable " + pyTypeName(v) + " object") }
+    return js_pyiterof(v)
 }
 
 
@@ -6141,6 +6147,7 @@ function js_pycall(callee, pos, kw) {
             }
         }
     }
+    if (typeof callee != "function") { pyNotCallable(callee) }
     var bound = pyBindCall(callee, pos, kw)
     // Go asks rt.pyBindCallR whether binding built a NEW array, and passes the
     // caller's own argument HANDLE through when it did not - an identity
@@ -6211,7 +6218,14 @@ function pyDCallPyValue(v, args, kw) {
             }
         }
     }
+    if (typeof v != "function") { pyNotCallable(v) }
     return pyCall(v, pyBindCall(v, args, kw))
+}
+
+// CPython's TypeError for a call of a value that is not a function ("'C' object
+// is not callable"). Go: rt.pyCheckCallable.
+function pyNotCallable(v) {
+    pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not callable")
 }
 
 // One {value, done} record from a floor generator step, in PYTHON's protocol: the

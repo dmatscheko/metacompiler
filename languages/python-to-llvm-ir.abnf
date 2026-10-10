@@ -138,7 +138,7 @@ own IR closure but NOT a boundary, so what it assigns belongs to the function
 around it. Negative
 indexing and dict entries through js_pyidx/js_pyset, dicts through js_dict_new (two
 parallel key/value arrays keep the insertion order), slices through js_pyslice,
-iteration through js_pyiter, len through js_pylen, floor division and modulo through
+iteration through js_pyiterof, len through js_pylenof, floor division and modulo through
 js_fdiv/js_fmod, truthiness through js_pytruthy, every user visible operator through the
 js_pybin dispatcher (which gives a user class the chance to answer it with a dunder),
 classes through js_pyclass_new/js_pyclass_fill/js_pygetattr/js_pysetattr/js_pymcall/
@@ -2417,7 +2417,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Emit the clause chain of a comprehension RECURSIVELY, so nested `for`s and
     // interleaved `if`s work in any order and to any depth. Each `for` is a counted loop
-    // over the normalized iterable (js_pyiter) whose target goes through the same
+    // over the normalized iterable (js_pyiterof) whose target goes through the same
     // writeTarget an assignment uses - which is what makes a tuple, a starred rest and a
     // subscript target all work. elemT emits ONE element and pushes it into the
     // accumulator named oName; the answer is the block to continue in after the chain.
@@ -2444,7 +2444,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var aName = "$ca" + hidCount
         var r = cc.citer(b)
         var ib = r.b
-        callExt(ib, "js_scope_decl", [curScopeV, emitStr(ib, aName), callExt(ib, "js_pyiter", [r.v])])
+        callExt(ib, "js_scope_decl", [curScopeV, emitStr(ib, aName), callExt(ib, "js_pyiterof", [r.v])])
         callExt(ib, "js_scope_decl", [curScopeV, emitStr(ib, iName), emitNum(ib, 0)])
         declCompNames(ib, cc.cfor)
         var headB = curF.NewBlock("")
@@ -2728,7 +2728,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return makeList(parts)
     }
     // Write one runtime value through a target: a plain reference (emitRefWrite) or
-    // a nested tuple pattern, which unpacks. The value is normalized with js_pyiter
+    // a nested tuple pattern, which unpacks. The value is normalized with js_pyunpack
     // once per level, so a string, a dict or a tuple unpack like a list.
     // The elements are read by INDEX (js_pyidx wraps a negative one), so the targets
     // after a *rest are addressed from the END - which is exactly what makes the
@@ -2736,7 +2736,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function writeTarget(b, t, v) {
         if (t.tuple == undefined) { return emitRefWrite(b, t, v) }
         var items = t.tuple
-        var arr = callExt(b, "js_pyiter", [v])
+        var arr = callExt(b, "js_pyunpack", [v])
         var star = -1
         for (var i = 0; i < items.length; i++) { if (items[i].startgt != undefined) { star = i } }
         if (star < 0) {
@@ -3072,11 +3072,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vName = "$v" + hidCount
             var r = listT(b)
             b = r.b
-            // LAZY ITERATION over a generator. js_pyiter MATERIALIZES its argument,
+            // LAZY ITERATION over a generator. js_pyiterof MATERIALIZES its argument,
             // which never ends for `for x in endless(): ... break`. A GENERATOR is
             // therefore kept raw and STEPPED, one value per iteration, through the
             // js_get(g, "next") / {value, done} protocol the coroutine primitive
-            // already answers; everything else still goes through js_pyiter, which
+            // already answers; everything else still goes through js_pyiterof, which
             // normalizes a dict to its keys and a string to its characters. C# lowers
             // foreach the same way - see csharp-to-llvm-ir.abnf's makeForEach.
             //
@@ -3095,7 +3095,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, isGenV, handle(3)), genB, arrB)
             callExt(genB, "js_scope_decl", [curScopeV, emitStr(genB, aName), r.v])
             genB.NewBr(headB)
-            callExt(arrB, "js_scope_decl", [curScopeV, emitStr(arrB, aName), callExt(arrB, "js_pyiter", [r.v])])
+            callExt(arrB, "js_scope_decl", [curScopeV, emitStr(arrB, aName), callExt(arrB, "js_pyiterof", [r.v])])
             arrB.NewBr(headB)
             var gHeadB = curF.NewBlock("")
             var gSetB = curF.NewBlock("")
@@ -4223,13 +4223,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curScopeV = pyOpenBoundary(b, f.Params[0], true)
         // print(*objects, sep, end, file, flush): the Python renderer.
         b = declKwBuiltin(b, "print", "js_pyprint", ["sep", "end", "file", "flush"])
-        // len(x): strings, lists and dicts via js_pylen.
+        // len(x): strings, lists, sets, dicts and __len__ via js_pylenof.
         funcCount++
         var lenIdx = funcCount
         var lf = m.NewFunc("jsf_" + lenIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var lb = lf.NewBlock("entry")
         var lArg = lb.NewCall(getExtern("js_arg", 2), [lf.Params[1], handle(0)])
-        lb.NewRet(lb.NewCall(getExtern("js_pylen", 1), [lArg]))
+        lb.NewRet(lb.NewCall(getExtern("js_pylenof", 1), [lArg]))
         b = declBind(b, "len", callExt(b, "js_closure", [handle(lenIdx), curScopeV]))
         // list(x): a fresh list from any iterable, via js_pylist.
         funcCount++

@@ -14903,8 +14903,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
 			}
-			rt.fail("list() of a %s", rt.typeOf(u(a[0])))
-			return 0
+			return w(&jsArray{elems: rt.pyElemsOf(u(a[0]))}) // The TypeError for the rest.
 		},
 		"js_pyiter": func(a []uint64) uint64 { // The list a for loop runs over: dicts iterate
 			if pyIterName(rt, u(a[0])) != "" { // An iterator object, exhausted by the read.
@@ -15194,6 +15193,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, rt.pyBindCall(m, self, kw)))
 				}
 			}
+			rt.pyCheckCallable(callee)
 			bound, rebound := rt.pyBindCallR(callee, args.elems, kw)
 			if !rebound {
 				return w(rt.callH(callee, jsUndef, args.elems, a[1]))
@@ -20081,7 +20081,66 @@ func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) i
 			return rt.call(m, jsUndef, rt.pyBindCall(m, self, kw))
 		}
 	}
+	rt.pyCheckCallable(v)
 	return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw))
+}
+
+// pyCheckCallable raises CPython's TypeError for a call of a value that is not a
+// function ("'C' object is not callable"). Twin of pyNotCallable in
+// languages/lib/python-rt.metajs; the interpreter's is in pyCall.
+func (rt *jsrt) pyCheckCallable(v interface{}) {
+	if !isCallable(v) {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"'"+pyTypeName(rt, v)+"' object is not callable")})
+	}
+}
+
+// Python's own names for three shared externs: js_pylenof is len() and
+// js_pyiterof / js_pyunpack are js_pyiter, each raising CPython's TypeError ("object
+// of type 'C' has no len()", "'C' object is not iterable", "cannot unpack
+// non-iterable C object") where the shared extern's failure is not Python's.
+// Twins of the same names in languages/lib/python-rt.metajs.
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		// js_pyiterof / js_pyunpack are js_pyiter for a for loop or a
+		// comprehension and for an unpacking target, raising CPython's TypeError
+		// for a value that is not iterable.
+		m["js_pyiterof"] = func(a []uint64) uint64 {
+			if v := rt.unwrap(a[0]); !rt.pyIsIterable(v) {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"'"+pyTypeName(rt, v)+"' object is not iterable")})
+			}
+			return m["js_pyiter"](a)
+		}
+		m["js_pyunpack"] = func(a []uint64) uint64 {
+			if v := rt.unwrap(a[0]); !rt.pyIsIterable(v) {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"cannot unpack non-iterable "+pyTypeName(rt, v)+" object")})
+			}
+			return m["js_pyiter"](a)
+		}
+		m["js_pylenof"] = func(a []uint64) uint64 {
+			v := rt.unwrap(a[0])
+			sized := false
+			switch v.(type) {
+			case string, *jsArray:
+				sized = true
+			}
+			if _, cls, isInst := pyInstance(v); isInst {
+				lm, found := pyLookup(cls, "__len__")
+				sized = found && isCallable(lm)
+			} else if _, isSet := pySetElems(v); isSet {
+				sized = true
+			} else if _, _, isDict := dictParts(v); isDict {
+				sized = true
+			}
+			if !sized {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"object of type '"+pyTypeName(rt, v)+"' has no len()")})
+			}
+			return m["js_pylen"](a)
+		}
+	})
 }
 
 // pyIsInstance is isinstance(v, C), with a list/tuple of classes accepted.

@@ -1175,8 +1175,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(x)) {
             var f = clsFind(x.__class, "__len__")
             if (f != null) { return f(x) }
+        } else if (Array.isArray(x)) {
+            return x.length
         }
-        return x.length
+        pyListErr("TypeError", "object of type '" + pyTypeOf(x).__name + "' has no len()")
     }
     // list(x): a fresh list from any iterable (lists copy, dicts give their keys).
     hostGlobals["list"] = function(x) { return iterToList(x).slice(0) }
@@ -8192,6 +8194,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function writeTarget(t, v) {
         if (t.tuple == undefined) { assignRef(t, v); return }
         var items = t.tuple
+        if (!(Array.isArray(v) || isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string")) {
+            pyListErr("TypeError", "cannot unpack non-iterable " + pyTypeOf(v).__name + " object")
+        }
         var vals = iterToList(v)
         var star = -1
         for (var i = 0; i < items.length; i++) { if (items[i].startgt != undefined) { star = i } }
@@ -9404,7 +9409,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var c2 = clsFind(f.__class, "__call__")
                 if (c2 != null) { kSetNamed(named); return c2.apply(undefined, concat2impl([f], args)) }
             }
-            fail("TypeError: object is not callable")
+            pyListErr("TypeError", "'" + pyTypeOf(f).__name + "' object is not callable")
         }
         kSetNamed(named)
         return f.apply(undefined, args)

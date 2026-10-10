@@ -3379,6 +3379,37 @@ def s58():
                            "TypeError: dict expected at most 1 argument, got 2"])
 
 
+# ===== SECTION 59: calling, iterating and sizing a value that cannot =====
+# CPython's TypeErrors: "'C' object is not callable", "'C' object is not
+# iterable", "object of type 'C' has no len()" and "cannot unpack non-iterable
+# C object" - catchable, not an abort.
+def s59():
+    class C:
+        pass
+    c = C()
+    five = 5
+    none = None
+    def unpack():
+        a, b = c
+    tests = [lambda: c(), lambda: five(), lambda: none(), lambda: len(c), lambda: len(5), lambda: len(None),
+             lambda: iter(c), lambda: list(c), lambda: [x for x in c], lambda: tuple(c), lambda: sorted(c), unpack]
+    msgs = []
+    for t in tests:
+        try:
+            t()
+        except TypeError as e:
+            msgs.append(str(e))
+    try:
+        for x in 3:
+            pass
+    except TypeError as e:
+        msgs.append(str(e))
+    check("typ1", msgs[:6] == ["'C' object is not callable", "'int' object is not callable", "'NoneType' object is not callable",
+                               "object of type 'C' has no len()", "object of type 'int' has no len()",
+                               "object of type 'NoneType' has no len()"])
+    check("typ2", msgs[6:] == ["'C' object is not iterable"] * 5 + ["cannot unpack non-iterable C object", "'int' object is not iterable"])
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3438,5 +3469,6 @@ def main():
     s56() # SECTION-CALL 56
     s57() # SECTION-CALL 57
     s58() # SECTION-CALL 58
+    s59() # SECTION-CALL 59
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
