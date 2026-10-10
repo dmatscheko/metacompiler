@@ -239,7 +239,7 @@ VarargPar   <~~ push("...") ~~>
 // identifiers to the Id rule, so without it a bare `return` followed by `end` would parse
 // as `return end` - returning a variable named `end` - and the block would eat the NEXT
 // `end`. NotEnders consumes nothing and only fails on those four whole words.
-Return      <~~ push(makeReturn(takeAll())) ~~>
+Return      <~~ push(makeReturn(takeAll(), up.in)) ~~>
             = KwReturn [ NotEnders ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
             = KwBreak ;
@@ -326,7 +326,7 @@ PowExpr     <~~ push(makePow(takeAll())) ~~>
             = SuffixedExpr [ "^" UnaryExpr ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
-SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
+SuffixedExpr <~~ push(foldCallMember(takeAll(), up.in)) ~~>
             = Primary { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ ExprList ] ")" ;
@@ -583,6 +583,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Twin of stmtPos / lua.pos / lua.cs in lua-to-llvm-ir.abnf.
     var luaPos = ""
     var luaCallPos = []
+    // Set by a tail call for the callee's makeClosure frame to take (luaStep).
+    var luaTail = false
     // A label marker is not a thunk and passes through.
     function stmtPos(t) {
         if (typeof t != "function") { return t }
@@ -1447,14 +1449,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // it truncates to the first value, exactly like Lua.
     // ONE suffix step of a prefixexp. It is shared by the expression folder below and by
     // assignTarget, which is what makes `f(a).x = 1` walk exactly the chain `f(a).x` reads.
-    function luaStep(cur, s) {
+    // A call step with `tail` set is the call of `return f(...)` inside a Lua
+    // function: the callee takes over the caller's frame (see makeClosure).
+    function luaStep(cur, s, tail) {
         var out = anytype // A member chain hops between types.
         if (s.kind == "call") {
             var argv = evalList(s.args)
             var fv = anytype // The callee, truncated to one value.
             fv = luaFirst(cur)
             if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value") }
+            if (tail && luaCallPos.length > 0) { luaTail = true }
             out = fv.apply(undefined, argv)
+            luaTail = false
         } else if (s.kind == "method") {
             var fn = anytype // The looked-up method value.
             var recv = anytype // The receiver, truncated to one value.
@@ -1462,7 +1468,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fn = luaIndex(recv, s.name)
             if (typeof fn != "function") { fail("attempt to call method '" + s.name + "' (a " + luaType(fn) + " value)") }
             var margv = evalList(s.args)
+            if (tail && luaCallPos.length > 0) { luaTail = true }
             out = fn.apply(undefined, [recv].concat(margv))
+            luaTail = false
         } else if (s.kind == "field") {
             out = luaIndex(luaFirst(cur), s.name)
         } else {
@@ -1470,16 +1478,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    foldCallMember = function(items) {
+    // A chain that ends in a call is built twice: as itself, and as the tail call
+    // makeReturn substitutes when `return` holds nothing but this chain. The match
+    // is by source text (`text` is the chain's, whitespace stripped), because a
+    // thunk handed through the tag stack is not the same object under every host.
+    // Twin of foldCallMember / makeReturn in lua-to-llvm-ir.abnf.
+    var lastCallFold = null
+    foldCallMember = function(items, text) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
-        return function() {
-            var cur = anytype // A member chain hops between types.
-            cur = primary()
-            for (var i = 0; i < suffixes.length; i++) { cur = luaStep(cur, suffixes[i]) }
-            return cur
+        var last = suffixes.length - 1
+        var mk = function(tail) {
+            return function() {
+                var cur = anytype // A member chain hops between types.
+                cur = primary()
+                for (var i = 0; i < suffixes.length; i++) { cur = luaStep(cur, suffixes[i], tail && i === last) }
+                return cur
+            }
         }
+        var t = mk(false)
+        if (suffixes[last].kind == "call" || suffixes[last].kind == "method") { lastCallFold = {text: text, tail: mk(true)} }
+        return t
     }
 
     // { ... } fields, in source order: positional fields fill 1, 2, 3, ... A multi-value
@@ -1516,7 +1536,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = anytype // The containers along the path may be of mixed types.
         o = getVar(ref.name)
         // luaStep, not luaIndex: the leading steps of a target may be calls (f(a).x = 1).
-        for (var i = 0; i < ref.path.length - 1; i++) { o = luaStep(o, ref.path[i]) }
+        for (var i = 0; i < ref.path.length - 1; i++) { o = luaStep(o, ref.path[i], false) }
         luaSetIndex(luaFirst(o), pathKey(ref.path[ref.path.length - 1]), v)
     }
     // items interleave targets (objects) and value thunks (functions); all right hand
@@ -1582,9 +1602,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 frame["..."] = extra
             }
             scopes.push(frame)
-            luaCallPos.push(luaPos)
+            // A tail call reuses its caller's luaCallPos entry instead of pushing
+            // one, so the frame below it is the caller's caller - lua's level count.
+            var ep = luaPos
+            var sp = luaCallPos.length
+            if (luaTail) { luaTail = false; sp = sp - 1 } else { luaCallPos.push(ep) }
             var r = bodyT()
-            luaPos = luaCallPos.pop()
+            while (luaCallPos.length > sp) { luaCallPos.pop() }
+            luaPos = ep
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
@@ -1824,8 +1849,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // return e1, e2, ...: all the values travel back, the last expression expanding, so
     // 'return f()' propagates everything f returned (Lua's tail-call value rule).
-    function makeReturn(items) {
-        return function() { return {isRet: true, v: mkMulti(evalList(items))} }
+    //
+    // `return f(...)` is a TAIL CALL: f replaces the returning function's frame,
+    // which only error's levels can observe (luaStep).
+    function makeReturn(items, text) {
+        var ts = items
+        if (items.length == 1 && lastCallFold !== null && text == "return" + lastCallFold.text) { ts = [lastCallFold.tail] }
+        return function() { return {isRet: true, v: mkMulti(evalList(ts))} }
     }
 
     // buildChunk runs the whole program (one seq thunk). The test calls exit(fails)
@@ -1900,6 +1930,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var savedChain = scopes.slice()
         var depth = luaCallPos.length
         var savedPos = luaPos
+        luaTail = false
         luaCallPos.push(luaPos)
         luaPos = ""
         var out = anytype // The multi-value pcall answers.
@@ -1922,6 +1953,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         while (luaCallPos.length > depth) { luaCallPos.pop() }
         luaPos = savedPos
+        luaTail = false
         return out
     }
     globalScope["pcall"] = function() {

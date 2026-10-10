@@ -222,7 +222,7 @@ VarargPar   <~~ push("...") ~~>
 
 // The NotEnders guard keeps a bare `return` before `end` from parsing as `return end`.
 // Twin of Return in lua-interpreter.abnf; see there.
-Return      <~~ push(makeReturn(takeAll())) ~~>
+Return      <~~ push(makeReturn(takeAll(), up.in)) ~~>
             = KwReturn [ NotEnders ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
             = KwBreak ;
@@ -305,7 +305,7 @@ PowExpr     <~~ push(makePow(takeAll())) ~~>
             = SuffixedExpr [ "^" UnaryExpr ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
-SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
+SuffixedExpr <~~ push(foldCallMember(takeAll(), up.in)) ~~>
             = Primary { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ ExprList ] ")" ;
@@ -1286,6 +1286,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gLuaPos = m.NewGlobalDef("lua.pos", llvm.constant.NewInt(i64, 0 - 1))
     var gLuaCs = m.NewGlobalDef("lua.cs", llvm.constant.NewZeroInitializer(luaCsTy))
     var gLuaCsp = m.NewGlobalDef("lua.csp", handle(0))
+    // 1 between a tail call's js_call and the callee's luaEnter.
+    var gLuaTail = m.NewGlobalDef("lua.tail", handle(0))
     // The chunk names a position's file number indexes (luaO_chunkid of each file).
     var luaFiles = []
     function luaFileNo(name) {
@@ -1307,11 +1309,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b.NewGetElementPtr(luaCsTy, gLuaCs, handle(0), k)
     }
     // Push the caller's position on entry to a frame; the answer is what luaLeave
-    // needs to put both back on the way out.
-    function luaEnter(b) {
+    // needs to put both back on the way out. A Lua function entered by a tail call
+    // (lua.tail) takes over its caller's entry instead, so the frame below it is
+    // the caller's caller; a C function (pcall) never does.
+    function luaEnter(b, canTail) {
         var ep = b.NewLoad(i64, gLuaPos)
         var sp = b.NewLoad(i64, gLuaCsp)
-        b.NewStore(ep, luaCsSlot(b, sp))
+        if (canTail) {
+            var isTail = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i64, gLuaTail), handle(0))
+            sp = b.NewSelect(isTail, b.NewSub(sp, handle(1)), sp)
+            var slot = luaCsSlot(b, sp)
+            b.NewStore(b.NewSelect(isTail, b.NewLoad(i64, slot), ep), slot)
+        } else {
+            b.NewStore(ep, luaCsSlot(b, sp))
+        }
+        b.NewStore(handle(0), gLuaTail)
         b.NewStore(b.NewAdd(sp, handle(1)), gLuaCsp)
         return {ep: ep, sp: sp}
     }
@@ -1565,13 +1577,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // first. Shared by the expression folder below and by emitTargetWrite, which is what
     // makes `getmetatable(t).__index = f` emit exactly the chain `getmetatable(t).__index`
     // reads. Answers {b, v, call} - `call` is the next step's `pre`.
-    function emitLuaStep(b, cur, s, pre) {
+    // A call step with `tail` set is the call of `return f(...)`: lua.tail tells the
+    // callee's luaEnter to take over this frame.
+    function emitLuaStep(b, cur, s, pre, tail) {
         var v = cur
         if (pre) { v = callLua(b, "lua_first", [v]) } // Only one value feeds a step.
         if (s.kind == "call") {
             var ea = emitListArr(b, s.args)
             b = ea.b
-            return {b: b, v: callExt(b, "js_call", [v, hUndef, ea.v]), call: true}
+            return {b: b, v: luaCallTail(b, tail, v, ea.v), call: true}
         }
         if (s.kind == "method") {
             // obj:m(args): look up m on the receiver, then call it with the
@@ -1584,7 +1598,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ma = emitListArr(b, s.args)
             b = ma.b
             b = emitArrExtend(b, margs, ma.v)
-            return {b: b, v: callExt(b, "js_call", [fn, hUndef, margs]), call: true}
+            return {b: b, v: luaCallTail(b, tail, fn, margs), call: true}
         }
         if (s.kind == "field") {
             var fr = emitMemberGet(b, v, emitStr(b, s.name))
@@ -1594,6 +1608,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = ir.b
         var xr = emitMemberGet(b, v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])]))
         return {b: xr.b, v: xr.v, call: false}
+    }
+    function luaCallTail(b, tail, fn, args) {
+        if (!tail) { return callExt(b, "js_call", [fn, hUndef, args]) }
+        b.NewStore(handle(1), gLuaTail)
+        var r = callExt(b, "js_call", [fn, hUndef, args])
+        b.NewStore(handle(0), gLuaTail)
+        return r
     }
     // Every Lua string shares one metatable whose __index is the string library, so
     // s:sub(2) / s:len() resolve there instead of aborting on "attempt to index a string
@@ -1614,29 +1635,38 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         objB.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(sv, strB), llvm.ir.NewIncoming(ov, objB)])}
     }
-    // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...].
-    foldCallMember = function(items) {
+    // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...]. A chain that ends
+    // in a call is built twice, the second time as the tail call makeReturn
+    // substitutes. Twin of foldCallMember in lua-interpreter.abnf; see there.
+    var lastCallFold = null
+    foldCallMember = function(items, text) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
+        var last = suffixes.length - 1
         // Any member access can land on a string, and then it resolves through the string
         // metatable (emitMemberGet), so the library table has to exist.
         for (var q = 0; q < suffixes.length; q++) {
             if (suffixes[q].kind != "call") { libNeed.string = true }
         }
-        return function(b) {
-            var r = primary(b)
-            b = r.b
-            var cur = r.v
-            var afterCall = false
-            for (var i = 0; i < suffixes.length; i++) {
-                var st = emitLuaStep(b, cur, suffixes[i], afterCall)
-                b = st.b
-                cur = st.v
-                afterCall = st.call
+        var mk = function(tail) {
+            return function(b) {
+                var r = primary(b)
+                b = r.b
+                var cur = r.v
+                var afterCall = false
+                for (var i = 0; i < suffixes.length; i++) {
+                    var st = emitLuaStep(b, cur, suffixes[i], afterCall, tail && i === last)
+                    b = st.b
+                    cur = st.v
+                    afterCall = st.call
+                }
+                return {b: b, v: cur}
             }
-            return {b: b, v: cur}
         }
+        var t = mk(false)
+        if (suffixes[last].kind == "call" || suffixes[last].kind == "method") { lastCallFold = {text: text, tail: mk(true)} }
+        return t
     }
 
     // { ... } fields, in source order: positional fields fill numeric keys 1, 2, 3, ...
@@ -1691,7 +1721,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // (getmetatable(t).__index = f), which is ordinary Lua - see the Target production.
         var afterCall = false
         for (var i = 0; i < ref.path.length - 1; i++) {
-            var st = emitLuaStep(b, o, ref.path[i], afterCall)
+            var st = emitLuaStep(b, o, ref.path[i], afterCall, false)
             b = st.b
             o = st.v
             afterCall = st.call
@@ -1774,7 +1804,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         loopStack = []
         var b = f.NewBlock("entry")
         var savedFrame = luaFrame
-        luaFrame = luaEnter(b)
+        luaFrame = luaEnter(b, true)
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         for (var i = 0; i < params.length; i++) {
             // A trailing '...' marks the function variadic: the arguments beyond the
@@ -2057,9 +2087,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // return e1, e2, ...: all the values travel back as one Lua value (a single one
     // unwrapped, any other count as a multi-value box), the last expression expanding -
     // so 'return f()' propagates everything f returned.
-    function makeReturn(items) {
+    // `return f(...)` inside a Lua function is a TAIL CALL (luaCallTail); in the
+    // main chunk there is no frame to take over.
+    function makeReturn(items, text) {
+        var tailT = null
+        if (items.length == 1 && lastCallFold !== null && text == "return" + lastCallFold.text) { tailT = lastCallFold.tail }
         return function(b) {
-            var ra = emitListArr(b, items)
+            var ts = items
+            if (tailT != null && luaFrame != null) { ts = [tailT] }
+            var ra = emitListArr(b, ts)
             b = ra.b
             var rv = callLua(b, "lua_mk", [ra.v])
             if (luaFrame != null) { luaLeave(b, luaFrame) }
@@ -2395,7 +2431,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                                   : "bad argument #1 to 'pcall' (value expected)")])
             fewB.NewRet(hUndef)
             var b = okB
-            var fr = luaEnter(b)
+            var fr = luaEnter(b, false)
             b.NewStore(handle(0 - 1), gLuaPos)
             var sc = callExt(b, "js_scope_new", [curScopeV])
             callExt(b, "js_scope_decl", [sc, emitStr(b, "f"), libArg(b, argsH, 0)])
@@ -2405,6 +2441,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var catchClo = callExt(b, "js_closure", [handle(emitLibFunc(libProtectCatch(withHandler))), sc])
             var res = callExt(b, "js_try", [tryClo, catchClo, hUndef])
             luaLeave(b, fr)
+            // A throw between a tail call and its callee's luaEnter leaves lua.tail set.
+            b.NewStore(handle(0), gLuaTail)
             return {b: b, v: res}
         }
     }

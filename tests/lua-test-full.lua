@@ -1118,6 +1118,24 @@ function s27()
         ok, e = pcall(function() if i == 2 then error("loop", 0) end return i end)
         if i == 2 then check("err24", e, "loop") else check("err25", e, i) end
     end
+    -- `return f(...)` is a tail call: f takes over the returning function's frame,
+    -- so error's level 2 inside f names the line that called the RETURNING one.
+    local function tailed() return needs(nil) end
+    ok, e = pcall(tailed)
+    check("err26", e, "nil arg")
+    ok, e = pcall(function()
+        tailed()
+    end)
+    check("err27", at(e, "nil arg"), 79)
+    local function three() error("three", 3) end
+    local function viaTail() return three() end
+    ok, e = pcall(function()
+        viaTail()
+    end)
+    check("err28", e, "three")
+    -- Parenthesised, it is an ordinary call and the frame stays.
+    ok, e = pcall(function() return (needs(nil)) end)
+    check("err29", at(e, "nil arg"), 89)
 end
 
 -- ===== SECTION 28: pairs hands a key back as the value that stored it =====
