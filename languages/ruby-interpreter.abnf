@@ -2964,47 +2964,90 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var cc = ch.charCodeAt(0)
         return cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 12 || cc == 11
     }
-    // Answers {ok, v}: MRI's Integer(String[, base]) - surrounding whitespace, an
-    // optional sign, a 0x/0b/0o/0d or bare-0 base prefix, and underscores BETWEEN
-    // digits.
-    function convStrToInt(s0, base0) {
-        var s = convTrim(s0)
+    // Answers {ok, v}: MRI's rb_int_parse_cstr, the one parser behind String#to_i,
+    // #hex, #oct and Kernel#Integer, with v the EXACT value. Twin of rubyStrToInum
+    // in abnf/jsrt.go, which states the rules.
+    function strToInum(s, base0, badcheck) {
+        var n = s.length
+        var i = 0
         var base = base0
+        while (i < n && isConvSpace(s.charAt(i))) { i = i + 1 }
         var neg = false
-        if (s.length > 0 && (s.charAt(0) == "+" || s.charAt(0) == "-")) {
-            neg = s.charAt(0) == "-"
-            s = s.substring(1, s.length)
+        if (i < n && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
+            neg = s.charAt(i) == "-"
+            i = i + 1
         }
-        if (s.length >= 2 && s.charAt(0) == "0") {
-            var p = s.charAt(1).toLowerCase()
-            var nb = 0
-            if (p == "x") { nb = 16 }
-            else if (p == "b") { nb = 2 }
-            else if (p == "o") { nb = 8 }
-            else if (p == "d") { nb = 10 }
-            if (nb != 0 && (base == 0 || base == nb)) { base = nb; s = s.substring(2, s.length) }
-            else if (nb == 0 && base == 0) { base = 8; s = s.substring(1, s.length) }
+        var p = i + 1 < n ? s.charAt(i + 1).toLowerCase() : ""
+        var zero = i < n && s.charAt(i) == "0"
+        if (base <= 0) {
+            if (zero && i + 1 < n) {
+                if (p == "x") { base = 16; i = i + 2 }
+                else if (p == "b") { base = 2; i = i + 2 }
+                else if (p == "o") { base = 8; i = i + 2 }
+                else if (p == "d") { base = 10; i = i + 2 }
+                else { base = 8 }
+            } else if (base < -1) { base = 0 - base } else { base = 10 }
+        } else if (zero && ((base == 2 && p == "b") || (base == 8 && p == "o") || (base == 10 && p == "d") || (base == 16 && p == "x"))) {
+            i = i + 2
         }
-        if (base == 0) { base = 10 }
-        if (s.length == 0) { return {ok: false, v: 0} }
+        if (i >= n) { return {ok: false, v: 0} }
+        if (s.charAt(i) == "0" && i + 1 < n) {
+            var us = 0
+            while (true) {
+                i = i + 1
+                var c = i < n ? s.charAt(i) : ""
+                if (c == "_") {
+                    us = us + 1
+                    if (us >= 2) { break }
+                } else if (c == "0") {
+                    us = 0
+                } else {
+                    if (c == "" || isConvSpace(c)) { i = i - 1 }
+                    break
+                }
+            }
+        }
+        var d0 = i < n ? convDigit(s.charAt(i)) : 0 - 1
+        if (d0 < 0 || d0 >= base) { return {ok: false, v: 0} }
+        // A double while every step stays exact, the limbs of a big after that.
         var acc = 0
-        var digits = 0
-        var prevUnd = true
-        for (var i = 0; i < s.length; i++) {
+        var isBigAcc = false
+        var mag = []
+        var nondigit = false
+        while (i < n) {
             var ch = s.charAt(i)
             if (ch == "_") {
-                if (prevUnd) { return {ok: false, v: 0} }
-                prevUnd = true
+                if (nondigit) {
+                    if (badcheck) { return {ok: false, v: 0} }
+                    break
+                }
+                nondigit = true
+                i = i + 1
                 continue
             }
             var d = convDigit(ch)
-            if (d < 0 || d >= base) { return {ok: false, v: 0} }
-            acc = acc * base + d
-            digits = digits + 1
-            prevUnd = false
+            if (d < 0 || d >= base) { break }
+            if (!isBigAcc && acc < 250000000000000) { acc = acc * base + d }
+            else {
+                if (!isBigAcc) { mag = bigFromNum(acc).limbs; isBigAcc = true }
+                mag = magAdd(magMulSmall(mag, base), [d])
+            }
+            nondigit = false
+            i = i + 1
         }
-        if (digits == 0 || prevUnd) { return {ok: false, v: 0} }
-        return {ok: true, v: neg ? -acc : acc}
+        if (badcheck) {
+            while (i < n && isConvSpace(s.charAt(i))) { i = i + 1 }
+            if (nondigit || i < n) { return {ok: false, v: 0} }
+        }
+        if (isBigAcc) { return {ok: true, v: bigOut(bigOb(neg ? -1 : 1, mag))} }
+        return {ok: true, v: (neg && acc != 0) ? 0 - acc : acc}
+    }
+    // The base argument of String#to_i and Kernel#Integer. Twin of rubyRadixArg in
+    // abnf/jsrt.go.
+    function radixArg(v, negOK) {
+        var b = trunc0(toF(v))
+        if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { raiseErr("ArgumentError", "invalid radix " + b) }
+        return b
     }
     // Answers {ok, v}: MRI's Float(String) - the whole string must be a decimal
     // literal, with underscores allowed between digits.
@@ -3073,10 +3116,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return [v]
         }
         if (name == "Integer") {
+            var base = 0
+            if (argv.length > 1) {
+                if (typeof v != "string") { raiseErr("ArgumentError", "base specified for non string value") }
+                base = radixArg(argv[1], true)
+            }
             if (v === null || v === undefined) { raiseErr("TypeError", "can't convert nil into Integer") }
             if (typeof v == "string") {
-                var base = argv.length > 1 ? toF(argv[1]) : 0
-                var ri = convStrToInt(v, base)
+                var ri = strToInum(v, base, true)
                 if (ri.ok) { return ri.v }
                 raiseErr("ArgumentError", "invalid value for Integer(): " + strInspect(v))
             }
@@ -3362,43 +3409,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return 0 - 1
     }
 
-    // String#hex / #oct: the LEADING numeral, 0 when there is none. Unlike
-    // Kernel#Integer these never raise.
-    function smBasePrefix(s, base) {
-        var i = 0
-        var neg = false
-        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
-            neg = s.charAt(i) == "-"
-            i = i + 1
-        }
-        var b = base
-        if (i + 1 < s.length && s.charAt(i) == "0") {
-            var p = s.charAt(i + 1).toLowerCase()
-            if (p == "x" && (base == 16 || base == 0)) { b = 16; i = i + 2 }
-            else if (p == "b" && (base == 2 || base == 0)) { b = 2; i = i + 2 }
-            else if (p == "o") { b = 8; i = i + 2 }
-            else if (p == "d") { b = 10; i = i + 2 }
-        }
-        if (b == 0) { b = 8 }
-        var acc = 0
-        while (i < s.length) {
-            var ch = s.charAt(i)
-            if (ch == "_") { i = i + 1; continue }
-            var d = smDigitVal(ch)
-            if (d < 0 || d >= b) { break }
-            acc = acc * b + d
-            i = i + 1
-        }
-        return neg ? -acc : acc
-    }
-
-    function smDigitVal(ch) {
-        if (ch >= "0" && ch <= "9") { return ch.charCodeAt(0) - 48 }
-        if (ch >= "a" && ch <= "z") { return ch.charCodeAt(0) - 87 }
-        if (ch >= "A" && ch <= "Z") { return ch.charCodeAt(0) - 55 }
-        return 0 - 1
-    }
-
     // The String methods above, as one dispatcher. `sargs` is the argument list with
     // every element already rendered as a Ruby String and `nargs` the same list as
     // numbers, so this function stays free of any one engine's conversions. Answers
@@ -3495,8 +3505,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             while (ci < sargs.length) { acc2 = acc2 + sargs[ci]; ci = ci + 1 }
             return {ok: true, v: acc2}
         }
-        if (name == "hex") { return {ok: true, v: smBasePrefix(s, 16)} }
-        if (name == "oct") { return {ok: true, v: smBasePrefix(s, 0)} }
+        // #hex and #oct never raise: #to_i(16), and a prefix-detecting #to_i whose
+        // default radix is 8.
+        if (name == "hex") { return {ok: true, v: strToInum(s, 16, false).v} }
+        if (name == "oct") { return {ok: true, v: strToInum(s, 0 - 8, false).v} }
         if (name == "clear") { return {ok: true, v: ""} }
         if (name == "b" || name == "scrub" || name == "unicode_normalize" || name == "force_encoding"
         || name == "encode") {
@@ -5371,7 +5383,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function fmtIntOperand(v) {
         if (fmtIsNumV(v)) { return v }
         if (typeof v == "string") {
-            var ri = convStrToInt(v, 0)
+            var ri = strToInum(v, 0, true)
             if (ri.ok) { return ri.v }
             raiseErr("ArgumentError", "invalid value for Integer(): " + strInspect(v))
         }
@@ -6825,7 +6837,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "length" || name == "size") { return target.length }
             if (name == "to_s" || name == "to_str" || name == "dup" || name == "clone" || name == "freeze") { return target }
             if (name == "to_sym" || name == "intern") { return mkSym(target) }
-            if (name == "to_i") { var pi = parseInt(target); return pi != pi ? 0 : pi }
+            if (name == "to_i") { return strToInum(target, args.length > 0 ? radixArg(args[0], false) : 10, false).v }
             if (name == "to_f") { var pf = parseFloat(target); return mkFlo(pf != pf ? 0 : pf) }
             if (name == "upcase") { return target.toUpperCase() }
             if (name == "downcase") { return target.toLowerCase() }

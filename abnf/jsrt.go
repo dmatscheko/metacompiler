@@ -6703,85 +6703,139 @@ func rubyConvDigit(c byte) int {
 	return -1
 }
 
+func rubyIsSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+}
+
 func rubyTrimSpace(s string) string {
 	i, j := 0, len(s)
-	for i < j && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f' || s[i] == '\v') {
+	for i < j && rubyIsSpace(s[i]) {
 		i++
 	}
-	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\n' || s[j-1] == '\r' || s[j-1] == '\f' || s[j-1] == '\v') {
+	for j > i && rubyIsSpace(s[j-1]) {
 		j--
 	}
 	return s[i:j]
 }
 
-// rubyStrToInt is MRI's Integer(String[, base]): surrounding whitespace, an
-// optional sign, a 0x/0b/0o/0d or bare-0 base prefix, and underscores BETWEEN
-// digits. Answers ok=false for anything the whole string is not.
-func rubyStrToInt(s string, base int) (float64, bool) {
-	s = rubyTrimSpace(s)
+// rubyStrToInum is MRI's rb_int_parse_cstr, the one parser behind String#to_i,
+// #hex, #oct and Kernel#Integer, answering the EXACT value. Leading whitespace,
+// one sign, then a radix prefix: base <= 0 detects 0x/0b/0o/0d or a bare
+// leading 0 (octal; otherwise 10, or -base when base < -1, which is how #oct
+// asks for 8), and an explicit base skips only its OWN prefix. Leading zeros
+// may carry single underscores; between digits one underscore is allowed. With
+// badcheck (Kernel#Integer) a doubled or trailing underscore or anything but
+// trailing whitespace is ok=false; without it parsing stops there, and a string
+// with no digits is 0. The caller has rejected an invalid radix. Twins: strToInum
+// of ruby-interpreter.abnf and rbStrToInum of lib/ruby-rt.metajs.
+func rubyStrToInum(s string, base int, badcheck bool) (*big.Int, bool) {
+	i, n := 0, len(s)
+	at := func(k int) byte {
+		if k < n {
+			return s[k]
+		}
+		return 0
+	}
+	for i < n && rubyIsSpace(s[i]) {
+		i++
+	}
 	neg := false
-	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
-		neg = s[0] == '-'
-		s = s[1:]
+	if at(i) == '+' || at(i) == '-' {
+		neg = s[i] == '-'
+		i++
 	}
-	if len(s) >= 2 && s[0] == '0' {
-		p := s[1] | 0x20
-		nb := 0
-		switch p {
-		case 'x':
-			nb = 16
-		case 'b':
-			nb = 2
-		case 'o':
-			nb = 8
-		case 'd':
-			nb = 10
-		}
-		if nb != 0 && (base == 0 || base == nb) {
-			base = nb
-			s = s[2:]
-		} else if nb == 0 && base == 0 {
-			base = 8
-			s = s[1:]
-		}
-	}
-	if base == 0 {
-		base = 10
-	}
-	if len(s) == 0 {
-		return 0, false
-	}
-	acc := 0.0
-	digits := 0
-	prevUnd := true // a leading underscore is not allowed
-	for i := 0; i < len(s); i++ {
-		if s[i] == '_' {
-			if prevUnd {
-				return 0, false
+	p := at(i+1) | 0x20
+	if base <= 0 {
+		if at(i) == '0' && i+1 < n {
+			switch p {
+			case 'x':
+				base, i = 16, i+2
+			case 'b':
+				base, i = 2, i+2
+			case 'o':
+				base, i = 8, i+2
+			case 'd':
+				base, i = 10, i+2
+			default:
+				base = 8
 			}
-			prevUnd = true
+		} else if base < -1 {
+			base = -base
+		} else {
+			base = 10
+		}
+	} else if at(i) == '0' && ((base == 2 && p == 'b') || (base == 8 && p == 'o') || (base == 10 && p == 'd') || (base == 16 && p == 'x')) {
+		i += 2
+	}
+	if i >= n {
+		return big.NewInt(0), false
+	}
+	// Squeeze the leading zeros, stepping back onto the last one when nothing
+	// but the end or whitespace follows them.
+	if s[i] == '0' && i+1 < n {
+		for us := 0; ; {
+			i++
+			c := at(i)
+			if c == '_' {
+				if us++; us >= 2 {
+					break
+				}
+			} else if c == '0' {
+				us = 0
+			} else {
+				if c == 0 || rubyIsSpace(c) {
+					i--
+				}
+				break
+			}
+		}
+	}
+	if d := rubyConvDigit(at(i)); d < 0 || d >= base {
+		return big.NewInt(0), false
+	}
+	digits := make([]byte, 0, n-i)
+	nondigit := false
+	for ; i < n; i++ {
+		if s[i] == '_' {
+			if nondigit {
+				if badcheck {
+					return big.NewInt(0), false
+				}
+				break
+			}
+			nondigit = true
 			continue
 		}
-		d := rubyConvDigit(s[i])
-		if d < 0 || d >= base {
-			return 0, false
+		if d := rubyConvDigit(s[i]); d < 0 || d >= base {
+			break
 		}
-		// float64() ON THE PRODUCT is load-bearing: Go's arm64 backend CONTRACTS
-		// `a*b + c` into one FMA (manual chapter 4), which would round once per
-		// digit here and twice in the other two engines (visible on
-		// Integer("123456789012345678901")). Assigning the product to a local
-		// does NOT stop the fusion; only the explicit conversion does.
-		acc = float64(acc*float64(base)) + float64(d)
-		digits++
-		prevUnd = false
+		digits = append(digits, s[i])
+		nondigit = false
 	}
-	if digits == 0 || prevUnd {
-		return 0, false
+	if badcheck {
+		for i < n && rubyIsSpace(s[i]) {
+			i++
+		}
+		if nondigit || i < n {
+			return big.NewInt(0), false
+		}
 	}
+	v, _ := new(big.Int).SetString(string(digits), base)
 	if neg {
-		acc = -acc
+		v.Neg(v)
 	}
-	return acc, true
+	return v, true
+}
+
+// rubyRadixArg is the base argument of String#to_i and Kernel#Integer: MRI
+// raises "invalid radix" outside 2..36, where 0 means "detect the prefix" and
+// Kernel#Integer also takes a negative one (see rubyStrToInum).
+func (rt *jsrt) rubyRadixArg(v interface{}, negOK bool) int {
+	base := int(rt.toNumber(v))
+	if base == 1 || base > 36 || base < -36 || (base < 0 && !negOK) {
+		rt.rubyRaiseErr("ArgumentError", "invalid radix "+strconv.Itoa(base))
+	}
+	return base
 }
 
 // rubyStrToFloat is MRI's Float(String): the whole string must be a decimal
@@ -6895,16 +6949,19 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 		}
 		return &jsArray{elems: []interface{}{v}}
 	case "Integer":
+		base := 0
+		if len(args) > 1 {
+			if _, isStr := v.(string); !isStr {
+				rt.rubyRaiseErr("ArgumentError", "base specified for non string value")
+			}
+			base = rt.rubyRadixArg(args[1], true)
+		}
 		if isUndefOrNull(v) {
 			rt.rubyRaiseErr("TypeError", "can't convert nil into Integer")
 		}
 		if s, isStr := v.(string); isStr {
-			base := 0
-			if len(args) > 1 {
-				base = int(rt.toNumber(args[1]))
-			}
-			if n, ok := rubyStrToInt(s, base); ok {
-				return n
+			if n, ok := rubyStrToInum(s, base, true); ok {
+				return rt.rubyBigNarrow(n)
 			}
 			rt.rubyRaiseErr("ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
 		}
@@ -7281,50 +7338,6 @@ func rubySmRstrip(o string) string {
 	return o[:j]
 }
 
-// String#hex / #oct: the LEADING numeral, 0 when there is none. Unlike
-// Kernel#Integer these never raise.
-func rubySmBasePrefix(o string, base int) float64 {
-	i := 0
-	neg := false
-	if i < len(o) && (o[i] == '+' || o[i] == '-') {
-		neg = o[i] == '-'
-		i++
-	}
-	b := base
-	if i+1 < len(o) && o[i] == '0' {
-		p := o[i+1] | 0x20
-		if p == 'x' && (base == 16 || base == 0) {
-			b, i = 16, i+2
-		} else if p == 'b' && (base == 2 || base == 0) {
-			b, i = 2, i+2
-		} else if p == 'o' {
-			b, i = 8, i+2
-		} else if p == 'd' {
-			b, i = 10, i+2
-		}
-	}
-	if b == 0 {
-		b = 8
-	}
-	acc := 0.0
-	for i < len(o) {
-		if o[i] == '_' {
-			i++
-			continue
-		}
-		d := rubyConvDigit(o[i])
-		if d < 0 || d >= b {
-			break
-		}
-		acc = acc*float64(b) + float64(d)
-		i++
-	}
-	if neg {
-		return -acc
-	}
-	return acc
-}
-
 func rubySmNumArr(bs []byte) *jsArray {
 	out := &jsArray{}
 	for _, b := range bs {
@@ -7558,10 +7571,14 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 			acc += a
 		}
 		return acc, true
+	// String#hex / #oct never raise: they are #to_i(16) and a prefix-detecting
+	// #to_i whose default radix is 8.
 	case "hex":
-		return rubySmBasePrefix(o, 16), true
+		n, _ := rubyStrToInum(o, 16, false)
+		return rt.rubyBigNarrow(n), true
 	case "oct":
-		return rubySmBasePrefix(o, 0), true
+		n, _ := rubyStrToInum(o, -8, false)
+		return rt.rubyBigNarrow(n), true
 	case "clear":
 		return "", true
 	case "b", "scrub", "unicode_normalize", "force_encoding", "encode":
@@ -8773,8 +8790,8 @@ func (rt *jsrt) rubyFmtIntOperand(v interface{}) interface{} {
 		return v
 	}
 	if s, isStr := v.(string); isStr {
-		if n, ok := rubyStrToInt(s, 0); ok {
-			return n
+		if n, ok := rubyStrToInum(s, 0, true); ok {
+			return rt.rubyBigNarrow(n)
 		}
 		rt.rubyRaiseErr("ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
 	}
@@ -9326,10 +9343,12 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		// String#to_i / #to_f parse a LEADING number and answer 0 when there is
 		// none.
 		case "to_i":
-			if v := jsParseInt(o, 10); v == v {
-				return v
+			base := 10
+			if len(args) > 0 {
+				base = rt.rubyRadixArg(args[0], false)
 			}
-			return float64(0)
+			n, _ := rubyStrToInum(o, base, false)
+			return rt.rubyBigNarrow(n)
 		case "to_f":
 			if v := jsParseFloat(o); v == v {
 				return jsFlo{f: v}

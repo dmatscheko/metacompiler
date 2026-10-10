@@ -2745,6 +2745,44 @@ def s45t(f, a)
   end
 end
 
+# ===== SECTION 49: String#to_i / #hex / #oct and Kernel#Integer =====
+# One parser behind all four (MRI's rb_int_parse_cstr), answering the EXACT value:
+# #to_i(base) honours the radix and skips only that radix's own prefix, a doubled
+# underscore ends the number, and past 2^53 nothing is rounded. Every right-hand
+# side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s49e
+  begin
+    return yield.to_s
+  rescue ArgumentError => e
+    return "AE:" + e.message
+  end
+end
+def s49
+  xs = ["0xffffffffffffffffff", "0x1f", "1_000", "1__2", "0_1", "017", "  -12abc", "z"]
+  check("ti49a", xs.map { |s| s.to_i } == [0, 0, 1000, 1, 1, 17, -12, 0])
+  check("ti49b", xs[0].to_i(16) == 4722366482869645213695 && xs[1].to_i(16) == 31 &&
+                 xs[1].to_i(36) == 42819 && xs[6].to_i(16) == -76476 && xs[7].to_i(36) == 35)
+  check("ti49c", xs[5].to_i(0) == 15 && "0b101".to_i(0) == 5 && "0b101".to_i(16) == 45313 &&
+                 "0o17".to_i(8) == 15 && "08".to_i(0) == 0)
+  check("ti49d", "123456789012345678901234".to_i == 123456789012345678901234 &&
+                 ("9" * 30).to_i == 999999999999999999999999999999)
+  check("ti49e", s49e { "17".to_i(37) } == "AE:invalid radix 37" &&
+                 s49e { "17".to_i(1) } == "AE:invalid radix 1" &&
+                 s49e { "17".to_i(-8) } == "AE:invalid radix -8")
+  check("ti49f", "0x1A".oct == 26 && "0b11".oct == 3 && "17".oct == 15 && "0b".hex == 11 &&
+                 "ffffffffffffffffff".hex == 4722366482869645213695)
+  # Kernel#Integer is the same parser with every leftover character an error.
+  check("ti49g", Integer("123456789012345678901") == 123456789012345678901 &&
+                 Integer("9007199254740993") + 1 == 9007199254740994 &&
+                 Integer(" 0x1f ") == 31 && Integer("0b", 16) == 11 && Integer("17", -8) == 15)
+  check("ti49h", s49e { Integer("1__2") } == "AE:invalid value for Integer(): \"1__2\"" &&
+                 s49e { Integer("0_") } == "AE:invalid value for Integer(): \"0_\"" &&
+                 s49e { Integer("08") } == "AE:invalid value for Integer(): \"08\"" &&
+                 s49e { Integer("12", 40) } == "AE:invalid radix 40" &&
+                 s49e { Integer(12, 8) } == "AE:base specified for non string value")
+  check("ti49i", "%d" % "9007199254740993" == "9007199254740993" && Integer("0_1") == 1)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2755,5 +2793,6 @@ s45() # SECTION-CALL 45
 s46() # SECTION-CALL 46
 s47() # SECTION-CALL 47
 s48() # SECTION-CALL 48
+s49() # SECTION-CALL 49
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

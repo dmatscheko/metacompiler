@@ -2059,7 +2059,7 @@ function rbFmtIsNumV(v) {
 function rbFmtIntOperand(v) {
     if (rbFmtIsNumV(v)) { return v }
     if (typeof v == "string") {
-        var ri = rbConvStrToInt(v, 0)
+        var ri = rbStrToInum(v, 0, true)
         if (ri["ok"]) { return ri["v"] }
         rbRaiseErr("ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
     }
@@ -6022,8 +6022,9 @@ function rbMethod(target, name, args) {
         // String#to_i / #to_f parse a LEADING number and answer 0 when there is
         // none.
         if (name == "to_i") {
-            var pi = parseInt(target, 10)
-            return pi != pi ? 0 : pi
+            var tb = 10
+            if (args.length > 0) { tb = rbRadixArg(args[0], false) }
+            return rbStrToInum(target, tb, false)["v"]
         }
         if (name == "to_f") {
             var pf = parseFloat(target)
@@ -6827,48 +6828,114 @@ function rbConvTrim(s) {
     return s.substring(i, j)
 }
 
-// Answers {ok, v}: MRI's Integer(String[, base]).
-function rbConvStrToInt(s0, base0) {
-    var s = rbConvTrim(s0)
-    var base = base0
-    var neg = false
-    if (s.length > 0 && (s.charAt(0) == "+" || s.charAt(0) == "-")) {
-        neg = s.charAt(0) == "-"
-        s = s.substring(1, s.length)
-    }
-    if (s.length >= 2 && s.charAt(0) == "0") {
-        var p = s.charAt(1).toLowerCase()
-        var nb = 0
-        if (p == "x") { nb = 16 }
-        else if (p == "b") { nb = 2 }
-        else if (p == "o") { nb = 8 }
-        else if (p == "d") { nb = 10 }
-        if (nb != 0 && (base == 0 || base == nb)) { base = nb; s = s.substring(2, s.length) }
-        else if (nb == 0 && base == 0) { base = 8; s = s.substring(1, s.length) }
-    }
-    if (base == 0) { base = 10 }
-    if (s.length == 0) { return {ok: false, v: 0} }
-    var acc = 0
-    var digits = 0
-    var prevUnd = true
+// Answers {ok, v}: MRI's rb_int_parse_cstr, the one parser behind String#to_i,
+// #hex, #oct and Kernel#Integer, with v the EXACT value. Twin of rubyStrToInum
+// in abnf/jsrt.go, which states the rules.
+function rbStrToInum(s, base0, badcheck) {
+    var n = s.length
     var i = 0
-    while (i < s.length) {
-        var ch = s.charAt(i)
+    var base = base0
+    while (i < n && rbIsConvSpace(s.charAt(i))) { i = i + 1 }
+    var neg = false
+    if (i < n && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
+        neg = s.charAt(i) == "-"
         i = i + 1
+    }
+    var p = ""
+    if (i + 1 < n) { p = s.charAt(i + 1).toLowerCase() }
+    var zero = i < n && s.charAt(i) == "0"
+    if (base <= 0) {
+        if (zero && i + 1 < n) {
+            base = 8
+            if (p == "x") { base = 16 }
+            else if (p == "b") { base = 2 }
+            else if (p == "o") { base = 8 }
+            else if (p == "d") { base = 10 }
+            if (p == "x" || p == "b" || p == "o" || p == "d") { i = i + 2 }
+        } else if (base < -1) {
+            base = 0 - base
+        } else {
+            base = 10
+        }
+    } else if (zero && ((base == 2 && p == "b") || (base == 8 && p == "o") || (base == 10 && p == "d") || (base == 16 && p == "x"))) {
+        i = i + 2
+    }
+    if (i >= n) { return {ok: false, v: 0} }
+    if (s.charAt(i) == "0" && i + 1 < n) {
+        var us = 0
+        var squeezing = true
+        while (squeezing) {
+            i = i + 1
+            var c = ""
+            if (i < n) { c = s.charAt(i) }
+            if (c == "_") {
+                us = us + 1
+                if (us >= 2) { squeezing = false }
+            } else if (c == "0") {
+                us = 0
+            } else {
+                if (c == "" || rbIsConvSpace(c)) { i = i - 1 }
+                squeezing = false
+            }
+        }
+    }
+    var d0 = 0 - 1
+    if (i < n) { d0 = rbConvDigit(s.charAt(i)) }
+    if (d0 < 0 || d0 >= base) { return {ok: false, v: 0} }
+    // A double while every step stays exact, base-10000 limbs after that.
+    var acc = 0
+    var isBigAcc = false
+    var limbs = []
+    var nondigit = false
+    while (i < n) {
+        var ch = s.charAt(i)
         if (ch == "_") {
-            if (prevUnd) { return {ok: false, v: 0} }
-            prevUnd = true
+            if (nondigit) {
+                if (badcheck) { return {ok: false, v: 0} }
+                break
+            }
+            nondigit = true
+            i = i + 1
             continue
         }
         var d = rbConvDigit(ch)
-        if (d < 0 || d >= base) { return {ok: false, v: 0} }
-        acc = acc * base + d
-        digits = digits + 1
-        prevUnd = false
+        if (d < 0 || d >= base) { break }
+        if (!isBigAcc && acc < 250000000000000) {
+            acc = acc * base + d
+        } else {
+            if (!isBigAcc) {
+                limbs = rtBigFromNum(acc)
+                isBigAcc = true
+            }
+            rtBigMulSmall(limbs, base)
+            var k = 0
+            var carry = d
+            while (carry > 0) {
+                if (k == limbs.length) { limbs.push(0) }
+                var t = limbs[k] + carry
+                carry = Math.floor(t / 10000)
+                limbs[k] = t - carry * 10000
+                k = k + 1
+            }
+        }
+        nondigit = false
+        i = i + 1
     }
-    if (digits == 0 || prevUnd) { return {ok: false, v: 0} }
-    if (neg) { return {ok: true, v: -acc} }
+    if (badcheck) {
+        while (i < n && rbIsConvSpace(s.charAt(i))) { i = i + 1 }
+        if (nondigit || i < n) { return {ok: false, v: 0} }
+    }
+    if (isBigAcc) { return {ok: true, v: rtABigNarrow(rtkABigNew(neg, limbs))} }
+    if (neg && acc != 0) { return {ok: true, v: 0 - acc} }
     return {ok: true, v: acc}
+}
+
+// The base argument of String#to_i and Kernel#Integer. Twin of rubyRadixArg in
+// abnf/jsrt.go.
+function rbRadixArg(v, negOK) {
+    var b = Math.trunc(rbToF(v))
+    if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { rbRaiseErr("ArgumentError", "invalid radix " + b) }
+    return b
 }
 
 // Answers {ok, v}: MRI's Float(String).
@@ -6943,11 +7010,14 @@ function js_rkconv(name, args) {
         return [v]
     }
     if (name == "Integer") {
+        var base = 0
+        if (rbIsArr(args) && args.length > 1) {
+            if (typeof v != "string") { rbRaiseErr("ArgumentError", "base specified for non string value") }
+            base = rbRadixArg(args[1], true)
+        }
         if (rtIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Integer") }
         if (typeof v == "string") {
-            var base = 0
-            if (rbIsArr(args) && args.length > 1) { base = rbToF(args[1]) }
-            var ri = rbConvStrToInt(v, base)
+            var ri = rbStrToInum(v, base, true)
             if (ri["ok"]) { return ri["v"] }
             rbRaiseErr("ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
         }
@@ -7234,43 +7304,6 @@ function smRindex(s, sub) {
     return 0 - 1
 }
 
-// String#hex / #oct: the LEADING numeral, 0 when there is none. Unlike
-// Kernel#Integer these never raise.
-function smBasePrefix(s, base) {
-    var i = 0
-    var neg = false
-    if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) {
-        neg = s.charAt(i) == "-"
-        i = i + 1
-    }
-    var b = base
-    if (i + 1 < s.length && s.charAt(i) == "0") {
-        var p = s.charAt(i + 1).toLowerCase()
-        if (p == "x" && (base == 16 || base == 0)) { b = 16; i = i + 2 }
-        else if (p == "b" && (base == 2 || base == 0)) { b = 2; i = i + 2 }
-        else if (p == "o") { b = 8; i = i + 2 }
-        else if (p == "d") { b = 10; i = i + 2 }
-    }
-    if (b == 0) { b = 8 }
-    var acc = 0
-    while (i < s.length) {
-        var ch = s.charAt(i)
-        if (ch == "_") { i = i + 1; continue }
-        var d = smDigitVal(ch)
-        if (d < 0 || d >= b) { break }
-        acc = acc * b + d
-        i = i + 1
-    }
-    return neg ? -acc : acc
-}
-
-function smDigitVal(ch) {
-    if (ch >= "0" && ch <= "9") { return ch.charCodeAt(0) - 48 }
-    if (ch >= "a" && ch <= "z") { return ch.charCodeAt(0) - 87 }
-    if (ch >= "A" && ch <= "Z") { return ch.charCodeAt(0) - 55 }
-    return 0 - 1
-}
-
 // The String methods above, as one dispatcher. `sargs` is the argument list with
 // every element already rendered as a Ruby String and `nargs` the same list as
 // numbers, so this function stays free of any one engine's conversions. Answers
@@ -7367,8 +7400,10 @@ function smMethod(s, name, sargs, nargs) {
         while (ci < sargs.length) { acc2 = acc2 + sargs[ci]; ci = ci + 1 }
         return {ok: true, v: acc2}
     }
-    if (name == "hex") { return {ok: true, v: smBasePrefix(s, 16)} }
-    if (name == "oct") { return {ok: true, v: smBasePrefix(s, 0)} }
+    // #hex and #oct never raise: #to_i(16), and a prefix-detecting #to_i whose
+    // default radix is 8.
+    if (name == "hex") { return {ok: true, v: rbStrToInum(s, 16, false)["v"]} }
+    if (name == "oct") { return {ok: true, v: rbStrToInum(s, 0 - 8, false)["v"]} }
     if (name == "clear") { return {ok: true, v: ""} }
     if (name == "b" || name == "scrub" || name == "unicode_normalize" || name == "force_encoding"
         || name == "encode") {
