@@ -225,7 +225,7 @@ IfBody          = NotDeclHead Statement ;
 // because 'case 1:' would otherwise parse as two expression statements (semicolons
 // are optional).
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
-            = KwSwitch "(" Expression ")" "{" { CaseLabel | DefaultLabel | Statement } "}" ;
+            = KwSwitch "(" Expression ")" "{" { CaseLabel | Statement } [ DefaultLabel { CaseLabel | Statement } ] "}" ;
 CaseLabel   <~~ push({casev: pop()}) ~~>
             = KwCase AssignExpr ":" ;
 DefaultLabel <~~ push({isdflt: true}) ~~>
@@ -438,7 +438,7 @@ YieldOne    <~~ push(makeYield(takeAll())) ~~>
 // least one member suffix, which a bare name never has left over.
 Target      = TargetParen | TargetNamed | TargetBased ;
 TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
-            = NotReserved Id <~~ push(idName(up.in)) ~~> [ TargetTail ] ;
+            = NotReserved NotThisTarget Id <~~ push(idName(up.in)) ~~> [ TargetTail ] ;
 TargetParen <~~ push(retarget(takeAll())) ~~>
             = "(" Target ")" [ TargetTail ] ;
 TargetBased <~~ push(makeTargetBase(takeAll())) ~~>
@@ -629,6 +629,62 @@ NotArrow    = :script(~~
         return (cc === 61 && c.peek(i + 1) === 62) ? abnf.newToken("\x01arrow", 0) : undefined
     })()
 ~~) ;
+// A block-bodied arrow function is a whole AssignmentExpression, never the head of a
+// call, a member access or a tagged template: '() => {}()' is a syntax error. Only a
+// suffix on the SAME line is one - after a line break ASI has ended the statement.
+// Returns the impossible token to FAIL, undefined to succeed.
+NotArrowTail = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc === 40 || cc === 91 || cc === 46 || cc === 96) { return abnf.newToken("\x01arrow-tail", 0) }
+        if (cc === 63 && c.peek(i + 1) === 46) { return abnf.newToken("\x01arrow-tail", 0) }
+        return undefined
+    })()
+~~) ;
+// 'this' is not an assignable place: in a target it can only be the HEAD of a member
+// path ('this.a = 1'), never the whole target ('this = 1', '({a: this} = 0)'). Returns
+// the impossible token to FAIL, undefined to succeed.
+NotThisTarget = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 116 || c.peek(i + 1) !== 104 || c.peek(i + 2) !== 105 || c.peek(i + 3) !== 115) { return undefined }
+        i = i + 4
+        cc = c.peek(i)
+        if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122)) { return undefined }
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc === 46 || cc === 91 || cc === 40) { return undefined }
+        return abnf.newToken("\x01this-target", 0)
+    })()
+~~) ;
+// A generator EXPRESSION's own name is bound inside the generator, where 'yield' is
+// the operator: '(function* yield(){})' is a syntax error. Returns the impossible token
+// to FAIL when the word ahead is 'yield', undefined to succeed.
+NotYieldWord = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 121 || c.peek(i + 1) !== 105 || c.peek(i + 2) !== 101 || c.peek(i + 3) !== 108 || c.peek(i + 4) !== 100) { return undefined }
+        cc = c.peek(i + 5)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || cc === 92 || (cc >= 97 && cc <= 122))
+            ? undefined
+            : abnf.newToken("\x01yield-name", 0)
+    })()
+~~) ;
+
 // A template literal directly behind a callee is a TAGGED template: tag`a${1}b` calls
 // tag(strings, 1) with the string parts in strings (and their unescaped source text in
 // strings.raw). It is a call suffix like '(' so that it chains - String.raw`x`.length.
@@ -724,12 +780,12 @@ AsyncPlainExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
 // The optional name of a function expression, in every one of its three forms. It
 // pushes {fname} rather than nothing: a named function expression keeps ITS OWN name in
 // `f.name`, and never takes the one of the binding it is assigned to.
-FnExprName  <~~ push({fname: up.in}) ~~>
+FnExprName  <~~ push({fname: idName(up.in)}) ~~>
             = NotExprName Id ;
 // 'function* () {}': the body is an ordinary IR function, and js_genfn turns the closure
 // into a generator function, so calling it produces a generator object.
 GenFuncExpr <~~ push(makeGenFuncExpr(takeAll(), up.in)) ~~>
-            = KwFunction "*" [ FnExprName ] ParamList [ UseStrictMark ] Block ;
+            = KwFunction "*" [ NotYieldWord FnExprName ] ParamList [ UseStrictMark ] Block ;
 // A class EXPRESSION - 'var P = class { ... }' - builds the very same descriptor as a
 // class declaration and evaluates TO it. An anonymous one still needs a name, because
 // super() and the method closures resolve their defining class by name; ClassAnonName
@@ -818,8 +874,8 @@ ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
             | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
-ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
-ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = Block NotArrowTail ;
+ArrowExpr   <~~ push({ebody: pop()}) ~~> = !"{" AssignExpr ;
 
 // Template literals: `text ${expr} more`. Each ${...} is evaluated and coerced to
 // string (js_add); the result is always a string. Whitespace is disabled inside the
@@ -849,7 +905,7 @@ TplEscChar  = !@"xu0123456789" ;
 NotDigit    = !"0" !"1" !"2" !"3" !"4" !"5" !"6" !"7" !"8" !"9" ;
 TplPlain    = "\x00"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
 TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
-            = "$" ;
+            = "$" !"{" ;
 
 // for-of over an array or string iterates its elements/characters, for-in over an
 // object's own keys.

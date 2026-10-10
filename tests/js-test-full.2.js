@@ -5,8 +5,8 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-55, the call/class/private-name model, the Unicode
-//                             identifier tables, iterators, derived constructors, JSON
+//   tests/js-test-full.3.js   sections 44-56, the call/class/private-name model, the Unicode
+//                             identifier tables, iterators, derived constructors, JSON, guards
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the three
 // files together run the assertions in order, and ./test.sh --full reports them as the

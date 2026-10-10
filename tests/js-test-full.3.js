@@ -1,12 +1,12 @@
-// Full-syntax test: JavaScript - part 3 of 3, sections 44-55.
+// Full-syntax test: JavaScript - part 3 of 3, sections 44-56.
 //
 // THE JS RATCHET IS THREE FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file).
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-55, the call/class/private-name model, the Unicode
-//                             identifier tables, iterators, derived constructors, JSON
+//   tests/js-test-full.3.js   sections 44-56, the call/class/private-name model, the Unicode
+//                             identifier tables, iterators, derived constructors, JSON, guards
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the three
 // files together run the assertions in order, and ./test.sh --full reports them as the
@@ -904,6 +904,8 @@ function s52() {
     check("uni12", g(1) === 2)
     class \u0055C { m\u0065() { return 25 } }
     check("uni13", new UC().me() === 25)
+    var unf = function \u0062c() { return 0 }
+    check("uni14", unf.name === "bc")
 }
 
 // ===== SECTION 53: an ITERATOR spreads and destructures =====
@@ -1023,6 +1025,34 @@ function s55() {
     check("jsn23", JSON.stringify(rd) === '{"b":2}' && Object.keys(rd).join(",") === "b")
     check("jsn24", typeof JSON === "object" && typeof JSON.stringify === "function" && typeof JSON.parse === "function")
 }
+// ===== SECTION 56: the valid shapes beside the syntax-error guards =====
+// The grammars refuse '() => {}()', a template's '${' that is not a substitution,
+// a second 'default:' in one switch, 'this' as a whole assignment target and a
+// generator expression named 'yield' - parse errors, which only the corpus (test262
+// fail/) can hold. What a ratchet CAN hold is that their valid neighbours still run:
+// an arrow block ending its statement before a line break, a lone '$' in a template,
+// a default clause between cases, 'this' at the head of a member target. Values read
+// off node 24.
+function s56() {
+    var log = []
+    var f = () => { log.push("f") }
+    ;(function () { log.push("iife") })()
+    var g = (() => 5)()
+    var h = [() => 6][0]()
+    check("grd1", log.join(",") === "iife" && g === 5 && h === 6 && typeof f === "function")
+    var d = "$"
+    check("grd2", `a$b` === "a$b" && `$${d}$` === "$$$" && `${d}{x}` === "${x}")
+    function sw(v) {
+        var out = ""
+        switch (v) { case 1: out += "1"; default: out += "d"; case 2: out += "2" }
+        return out
+    }
+    check("grd3", sw(1) === "1d2" && sw(2) === "2" && sw(9) === "d2")
+    var o = { v: 0, set(x) { this.v = x; this["w"] = x + 1; return this } }
+    check("grd4", o.set(4).v === 4 && o.w === 5)
+    var gen = function* yielder() { yield 1 }
+    check("grd5", gen().next().value === 1 && gen.name === "yielder")
+}
 // [isTypeError, isSyntaxError, message] of what f throws.
 function anyErr(f) {
     try { f(); return [false, false, ""] }
@@ -1044,6 +1074,7 @@ function main() {
     s53() // SECTION-CALL 53
     s54() // SECTION-CALL 54
     s55() // SECTION-CALL 55
+    s56() // SECTION-CALL 56
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

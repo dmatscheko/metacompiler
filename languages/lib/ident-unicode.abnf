@@ -123,20 +123,22 @@ IdCpStartOk = :script(~~
         } else {
             // An escape, read backwards: the hex digits first (least significant last in
             // the text, so most significant last here), then the '{' / 'u' / '\\' shape.
-            // Eight digits is the cap, as in the guards this replaced.
+            // There is no digit cap: any number of leading zeros may pad a \u{...} code
+            // point (JsCodePoint keeps its value at most 10FFFF), and a zero digit adds
+            // nothing, so the growing place value never reaches the sum.
             var i = 1
             if (b1 === 125) { i = 2 }
             var v = 0
             var mul = 1
             var n = 0
-            while (n < 8) {
+            while (true) {
                 var hc = c.peek(-i)
                 var hd = -1
                 if (hc >= 48 && hc <= 57) { hd = hc - 48 }
                 else if (hc >= 97 && hc <= 102) { hd = hc - 87 }
                 else if (hc >= 65 && hc <= 70) { hd = hc - 55 }
                 if (hd < 0) { break }
-                v = v + hd * mul
+                if (hd > 0) { v = v + hd * mul }
                 mul = mul * 16
                 n = n + 1
                 i = i + 1
@@ -226,20 +228,22 @@ IdCpPartOk  = :script(~~
         } else {
             // An escape, read backwards: the hex digits first (least significant last in
             // the text, so most significant last here), then the '{' / 'u' / '\\' shape.
-            // Eight digits is the cap, as in the guards this replaced.
+            // There is no digit cap: any number of leading zeros may pad a \u{...} code
+            // point (JsCodePoint keeps its value at most 10FFFF), and a zero digit adds
+            // nothing, so the growing place value never reaches the sum.
             var i = 1
             if (b1 === 125) { i = 2 }
             var v = 0
             var mul = 1
             var n = 0
-            while (n < 8) {
+            while (true) {
                 var hc = c.peek(-i)
                 var hd = -1
                 if (hc >= 48 && hc <= 57) { hd = hc - 48 }
                 else if (hc >= 97 && hc <= 102) { hd = hc - 87 }
                 else if (hc >= 65 && hc <= 70) { hd = hc - 55 }
                 if (hd < 0) { break }
-                v = v + hd * mul
+                if (hd > 0) { v = v + hd * mul }
                 mul = mul * 16
                 n = n + 1
                 i = i + 1
