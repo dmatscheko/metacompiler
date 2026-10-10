@@ -22,7 +22,7 @@ REQUIRED = [
     ("registry globals", "long CORO;           /* long *: the live coroutines' control blocks */"),
     ("gc_trace tag 15", "\tif (t == 15) { gc_try(w[1], 1); gc_try(w[2], 1); "
                         "gc_try(w[4], 1); gc_try(w[6], 1); return; }"),
-    ("gc_trace tag 16", "\tif (t == 16) { gc_try(w[1], 1); return; }"),
+    ("gc_trace tag 16", "\tif (t == 16) { gc_try(w[1], 1); gc_try(w[5], 1); return; }"),
     ("gc_roots coroutine stacks", "\t\t\tgc_scan_range(cb[4], cb[5]);"),
     ("growable registries", "long coro_grow(long arr, long cap, long newcap) {"),
     ("gc_roots resumer stacks", "\t\tgc_scan_range(lo[i], hi[i]);"),

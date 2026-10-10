@@ -126,7 +126,7 @@ if [ "$MODE" = "--break" ]; then
     brk "tag 15 children not traced" \
         's/if \(t == 15\) \{ gc_try\(w\[1\], 1\); gc_try\(w\[2\], 1\); gc_try\(w\[4\], 1\); gc_try\(w\[6\], 1\); return; \}/if (t == 15) { return; }/'
     brk "tag 16 (the wrapped closure) not traced" \
-        's/if \(t == 16\) \{ gc_try\(w\[1\], 1\); return; \}/if (t == 16) { return; }/'
+        's/if \(t == 16\) \{ gc_try\(w\[1\], 1\); gc_try\(w\[5\], 1\); return; \}/if (t == 16) { gc_try(w[5], 1); return; }/'
     brk "GC_STACK_BASE not switched on resume" \
         's/\tGC_STACK_BASE = cb\[5\];\n\tJBP = cb\[9\];\n\tJB_CAP = cb\[12\];\n\tJB_DEPTH = 0;/\tJBP = cb[9];\n\tJB_CAP = cb[12];\n\tJB_DEPTH = 0;/'
     brk "GC_STACK_BASE not switched back on yield" \
