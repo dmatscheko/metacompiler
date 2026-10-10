@@ -3149,6 +3149,8 @@ NotFuncHead = :script(~~
     // JSON.stringify / JSON.parse, shared with layer 2 (abnf/jsrtjson.go is the Go twin);
     // the jsonH* hooks it calls are defined beside jsJsonObj below.
     include("lib/json.js")
+    // The callee text of "X is not a function" (sitePrimaryText / siteIndexText).
+    include("lib/js-callee.js")
 
 
     // ----- JavaScript's own value semantics -----
@@ -8322,10 +8324,11 @@ NotFuncHead = :script(~~
     // name, a dot chain, `this.x`, an index by identifier or by number literal, a
     // string-literal index (node prints o["k"] as o.k, so this does too), a call
     // earlier in the chain (node prints f()() as `f(...)`), and any primary that is
-    // not a name (node's own "(intermediate value)"). NOT matching, because V8
-    // re-prints its AST rather than the source: a foldable constant index (node says
-    // xs[2] for xs[1+1]) and a compound index expression, which V8 parenthesises and
-    // re-spaces (`xs[(i + 1)]` for `xs[i+1]`). Both keep the class and the shape.
+    // not a name (node's own "(intermediate value)"). An operation inside parentheses or an
+    // index is RE-PRINTED the way V8 prints its AST - `(o.a + 1)`, `xs[(i + 1)]`, `xs[2]`
+    // for xs[1+1] - by lib/js-callee.js. NOT matching: a word operator (`typeof`, `in`,
+    // `instanceof`, `void`, `delete`), which reaches the grammar glued to its operand
+    // because the matched text has its whitespace removed, and an exponent literal.
     function siteIdentOk(t) {
         // ident ( "." ident )*, which is also how `this.q` and `undefined` pass.
         if (t.length == 0) { return false }
@@ -8358,6 +8361,9 @@ NotFuncHead = :script(~~
         if (t.indexOf("(") < 0) { return t }
         if (t.charCodeAt(0) == 40 && t.charCodeAt(t.length - 1) == 41) {
             var inner = t.substring(1, t.length - 1)
+            // V8 re-prints the operation inside the parentheses (lib/js-callee.js).
+            var pr = cpPrint(inner)
+            if (pr !== null) { return pr }
             if (inner.indexOf("(") < 0) { return inner }
         }
         return "(intermediate value)"
@@ -8370,6 +8376,8 @@ NotFuncHead = :script(~~
         var open = txt.indexOf("[")
         if (open < 0) { return base + "[?]" }
         var inner = txt.substring(open + 1, txt.length - 1)
+        var ix = cpIndex(inner)
+        if (ix !== null) { return base + ix }
         if (inner.length >= 2) {
             var q = inner.charCodeAt(0)
             if ((q == 34 || q == 39) && inner.charCodeAt(inner.length - 1) == q) {

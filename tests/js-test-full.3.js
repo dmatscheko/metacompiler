@@ -145,6 +145,23 @@ function s44() {
     class SA { }
     class SB extends SA { go() { return super.zz() } }
     check("nfn33", msg(function () { return new SB().go() }) === "true|true|(intermediate value).zz is not a function")
+    // An operation inside the callee's parentheses or an index is RE-PRINTED, as V8
+    // prints its AST: spaced and parenthesized, a same-operator run flat, two number
+    // literals folded, an assignment as its target (lib/js-callee.js).
+    var k = "a"
+    check("nfn34", msg(function () { return (o.a + 1)() }) === "true|true|(o.a + 1) is not a function"
+        && msg(function () { return (o.a*i-3)() }) === "true|true|((o.a * i) - 3) is not a function")
+    check("nfn35", msg(function () { return xs[i+1]() }) === "true|true|xs[(i + 1)] is not a function"
+        && msg(function () { return xs[1 + 1]() }) === "true|true|xs[2] is not a function")
+    check("nfn36", msg(function () { return (i - 2 - 3)() }) === "true|true|(i - 2 - 3) is not a function"
+        && msg(function () { return (1 + 2)() }) === "true|true|3 is not a function")
+    check("nfn37", msg(function () { return (o.a && o.g || i)() }) === "true|true|((o.a && o.g) || i) is not a function"
+        && msg(function () { return (-o.a)() }) === "true|true|(-o.a) is not a function")
+    check("nfn38", msg(function () { return (o.a = 3)() }) === "true|true|o.a is not a function"
+        && msg(function () { return o["a b"]() }) === "true|true|o.a b is not a function"
+        && msg(function () { return (i ? o.a : o.g)() }) === "true|true|(intermediate value)(intermediate value)(intermediate value) is not a function")
+    check("nfn39", msg(function () { return (o.sub.x + o[k])() }) === "true|true|(o.sub.x + o[k]) is not a function"
+        && msg(function () { return (i++)() }) === "true|true|(i++) is not a function")
 }
 
 // ===== SECTION 45: the top-level 'this' is the global object (the Script goal) =====
