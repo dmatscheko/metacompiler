@@ -2428,6 +2428,36 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s35t4", gt4 == "S35Sub");
         }
 
+        // ===== SECTION 36: the string indexer answers a char =====
+        //
+        // ECMA-334 12.8.11.3: a string's indexer is `char this[int]`, and 13.9.5:
+        // foreach over a string iterates its chars. A char is an integral type
+        // (8.3.6), so (int)s[i] is its UTF-16 code, s[i] + 1 and s[i] - '0' are
+        // ints, `+` with a string concatenates its glyph and ++ keeps a char. A
+        // Dictionary<char, V> keys on the char's value.
+        static void S36()
+        {
+            string[] w = { "AB9" };
+            string t = w[0];
+            int a = (int)t[1];
+            long l = (long)t[1];
+            double d = (double)t[0];
+            Program.Check("s36i1", a == 66 && (int)t[0] + 1 == 66 && t[0] + 1 == 66 && t[2] - '0' == 9 && l == 66L && d == 65.0);
+            char c = t[1];
+            c++;
+            Program.Check("s36i2", t[0] + "x" == "Ax" && "x" + t[1] == "xB" && t[0] == 'A' && t[0] < t[1] && c == 'C'
+                && (char)((int)t[1] + 1) == 'C' && t[0].ToString() + t[1] == "AB");
+            var seen = new Dictionary<char, int>();
+            int sum = 0;
+            foreach (char ch in t) { seen[ch] = (int)ch; sum += ch; }
+            object o = t[0];
+            Program.Check("s36i3", seen[t[1]] == 66 && seen.ContainsKey('9') && seen.Count == 3 && sum == 188 && o is char
+                && t[1].Equals('B'));
+            string k = "";
+            switch (t[0]) { case 'A': k = "A"; break; default: k = "?"; break; }
+            Program.Check("s36i4", k == "A");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2465,6 +2495,7 @@ b";                                                   // verbatim keeps the newl
             Program.S33(); // SECTION-CALL 33
             Program.S34(); // SECTION-CALL 34
             Program.S35(); // SECTION-CALL 35
+            Program.S36(); // SECTION-CALL 36
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

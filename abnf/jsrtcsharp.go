@@ -1275,7 +1275,9 @@ func init() {
 				if i < 0 || i >= n {
 					csIdxOob()
 				}
-				return rt.wrapStr(rt.strAt(o, i))
+				// The string indexer answers a CHAR (ECMA-334 12.8.11.3), so
+				// (int)s[i] is its code and s[i] + 1 an int.
+				return w(jsChar{code: int32(rt.strCodeAt(o, i))})
 			}
 			if isUndefOrNull(u(a[0])) {
 				csNullRef()
@@ -1288,6 +1290,20 @@ func init() {
 					"The given key '"+rt.cspStr(u(a[1]))+"' was not present in the dictionary.")
 			}
 			return basePyGet(a)
+		}
+		// foreach over a string iterates its chars (ECMA-334 13.9.5). Twin of
+		// csForSrc in csharp-interpreter.abnf and of languages/lib/csharp-rt.metajs.
+		m["js_csforsrc"] = func(a []uint64) uint64 {
+			s, ok := u(a[0]).(string)
+			if !ok {
+				return a[0]
+			}
+			units := strUnits(s)
+			out := &jsArray{elems: make([]interface{}, len(units))}
+			for i, c := range units {
+				out.elems[i] = jsChar{code: int32(c)}
+			}
+			return w(out)
 		}
 		m["js_csidxset"] = func(a []uint64) uint64 {
 			if arr, isArr := u(a[0]).(*jsArray); isArr {

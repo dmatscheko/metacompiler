@@ -2376,13 +2376,23 @@ KwLet       = "let" KwEnd ;
             if (di < 0) { csThrowExc("KeyNotFoundException", csKeyMsg(i)) }
             return o.vals[di]
         }
+        // The string indexer answers a CHAR (ECMA-334 12.8.11.3), so (int)s[i]
+        // is its code and s[i] + 1 an int. Twin of js_csidx.
         if (typeof o == "string") {
             if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
-            return o.charAt(i)
+            return csChar(o.charCodeAt(i))
         }
         if (o === undefined || o === null) { csThrowExc("NullReferenceException", csNullMsg) }
         if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
         return o[i]
+    }
+    // foreach over a string iterates its chars (ECMA-334 13.9.5: string's
+    // enumerator yields char). Twin of js_csforsrc.
+    function csForSrc(v) {
+        if (typeof v != "string") { return v }
+        var out = []
+        for (var i = 0; i < v.length; i++) { out.push(csChar(v.charCodeAt(i))) }
+        return out
     }
     // ----- the index bounds checks -----
     //
@@ -4321,7 +4331,7 @@ KwLet       = "let" KwEnd ;
     // an endless iterator that the body breaks out of terminates.
     function makeForEach(bodyT, arrT, name) {
         return function() {
-            var arr = arrT()
+            var arr = csForSrc(arrT())
             scopes.push({})
             declVar(name, undefined)
             var res = undefined
@@ -5740,6 +5750,22 @@ KwLet       = "let" KwEnd ;
         return csMethodGroup(o, name)
     }
     core.getIndex = csGetIndex
+    // Dictionary keys: a char, a sized integer and a double are boxes, so two of
+    // equal value are different objects to the shared dictFind's ===. These two
+    // knobs key them by value - a Dictionary<char, V> filled from a string's
+    // chars finds 'B' (the compiled halves compare boxes by value already).
+    core.keyId = function(k) {
+        if (csIsChar(k)) { return "c" + k.__char }
+        if (szIs(k)) { return "n" + szStr(k) }
+        if (csIsFlo(k)) { return "f" + k.__flo }
+        return null
+    }
+    core.keyEq = function(a, b) {
+        if (csIsChar(a) || csIsChar(b)) { return csIsChar(a) && csIsChar(b) && a.__char === b.__char }
+        if (csIsFlo(a) || csIsFlo(b)) { return csIsFlo(a) && csIsFlo(b) && (a.__flo === b.__flo || (a.__flo !== a.__flo && b.__flo !== b.__flo)) }
+        if (szIs(a) || szIs(b)) { return (szIs(a) || typeof a == "number") && (szIs(b) || typeof b == "number") && szEq(a, b) }
+        return false
+    }
 
     // ----- unqualified access to a member of the enclosing type -----
     //

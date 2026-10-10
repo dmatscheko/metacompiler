@@ -4613,7 +4613,8 @@ KwLet       = "let" KwEnd ;
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var r = arrT(b)
             b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
+            // A string is iterated as its chars (js_csforsrc makes the array once).
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_csforsrc", [r.v])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
             var headB = curF.NewBlock("")

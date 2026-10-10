@@ -1969,7 +1969,7 @@ function js_csidx(o, i) {
     if (typeof o == "string") {
         var si = rtjNum(i)
         if (si < 0 || si >= o.length) { csIdxOob() }
-        return o.charAt(si)
+        return csChar(o.charCodeAt(si))
     }
     if (o === undefined || o === null) { csNullRef() }
     if (csIsDict(o)) {
@@ -1995,6 +1995,20 @@ function js_csidxset(o, i, v) {
     // A dictionary write INSERTS (ECMA-334's Dictionary indexer setter), so it is
     // deliberately NOT bounds-checked.
     return js_pyset(o, i, v)
+}
+
+// foreach over a string iterates its chars (ECMA-334 13.9.5), so the source is
+// made a char array once. Twin of csForSrc in csharp-interpreter.abnf and
+// js_csforsrc in abnf/jsrtcsharp.go.
+function js_csforsrc(v) {
+    if (typeof v != "string") { return v }
+    var out = []
+    var i = 0
+    while (i < v.length) {
+        out.push(csChar(v.charCodeAt(i)))
+        i = i + 1
+    }
+    return out
 }
 
 // ECMA-335 III.4.16: newarr throws OverflowException when the element count is
