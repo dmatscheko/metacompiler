@@ -1997,18 +1997,28 @@ KwContinue  = "continue" KwEnd ;
     function swstr(v) { return swRender(v, false, 0) }
     // Swift quotes a String that appears INSIDE a collection, a tuple or a struct,
     // and escapes it the way debugDescription does.
+    // The text between two escapes is copied as a whole substring, never one code
+    // unit at a time: a lone surrogate cannot be encoded, so an astral character
+    // copied by halves would print as two U+FFFD. Twins: swQuote in
+    // abnf/jsrtswift.go and lib/swift-rt.metajs.
     function swQuote(s) {
         var out = "\""
+        var from = 0
         for (var i = 0; i < s.length; i++) {
             var c = s.charAt(i)
-            if (c == "\\") { out += "\\\\" }
-            else if (c == "\"") { out += "\\\"" }
-            else if (c == "\n") { out += "\\n" }
-            else if (c == "\t") { out += "\\t" }
-            else if (c == "\r") { out += "\\r" }
-            else { out += c }
+            var esc = ""
+            if (c == "\\") { esc = "\\\\" }
+            else if (c == "\"") { esc = "\\\"" }
+            else if (c == "\n") { esc = "\\n" }
+            else if (c == "\t") { esc = "\\t" }
+            else if (c == "\r") { esc = "\\r" }
+            else if (s.charCodeAt(i) === 0) { esc = "\\0" }
+            if (esc != "") {
+                out += s.substring(from, i) + esc
+                from = i + 1
+            }
         }
-        return out + "\""
+        return out + s.substring(from, s.length) + "\""
     }
     function swRender(v, nested, depth) {
         if (depth > 32) { return "..." }
@@ -2852,6 +2862,47 @@ KwContinue  = "continue" KwEnd ;
     // isEmpty / first / last are PROPERTIES on every Collection (arrayMethod has
     // only the METHOD forms). On a String they are the first and last CLUSTER,
     // not code unit.
+    // A code point at i of a UTF-16 string (a surrogate pair read as one), and the
+    // number of code units it takes.
+    function swCpAt(s, i) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1)
+            if (d >= 56320 && d <= 57343) { return (c - 55296) * 1024 + (d - 56320) + 65536 }
+        }
+        return c
+    }
+    function swUtf8Of(s) {
+        var out = []
+        var i = 0
+        while (i < s.length) {
+            var cp = swCpAt(s, i)
+            i = i + (cp > 65535 ? 2 : 1)
+            if (cp < 128) { out.push(cp) }
+            else if (cp < 2048) { out.push(192 + Math.floor(cp / 64)); out.push(128 + cp % 64) }
+            else if (cp < 65536) {
+                out.push(224 + Math.floor(cp / 4096))
+                out.push(128 + Math.floor(cp / 64) % 64)
+                out.push(128 + cp % 64)
+            } else {
+                out.push(240 + Math.floor(cp / 262144))
+                out.push(128 + Math.floor(cp / 4096) % 64)
+                out.push(128 + Math.floor(cp / 64) % 64)
+                out.push(128 + cp % 64)
+            }
+        }
+        return out
+    }
+    function swScalarsOf(s) {
+        var out = []
+        var i = 0
+        while (i < s.length) {
+            var w = swCpAt(s, i) > 65535 ? 2 : 1
+            out.push(s.substring(i, i + w))
+            i = i + w
+        }
+        return out
+    }
     function swIsColl(v) {
         if (typeof v == "string") { return true }
         if (v === null || v === undefined) { return false }
@@ -2881,6 +2932,18 @@ KwContinue  = "continue" KwEnd ;
         // prints `0..<3` for [3, 1, 2].indices, which this matches exactly.
         if (name == "indices" && Array.isArray(o)) { return {__range: true, lo: 0, hi: o.length, closed: false} }
         if ((name == "first" || name == "last") && swIsColl(o)) { return swFirstLast(o, name == "last") }
+        // The String views and the lazy view, as plain arrays: `.utf8` is the UTF-8
+        // bytes, `.unicodeScalars` one String per code point and `.lazy` the
+        // collection's own elements (a lazy view computes the same members). Only
+        // printing differs: swiftc prints a view by its type, and a Unicode.Scalar
+        // inside a collection as `"\u{00E9}"`. Twins:
+        // js_swget in abnf/jsrtswift.go and lib/swift-rt.metajs, rtLazy in
+        // swift-to-llvm-ir.abnf.
+        if (typeof o == "string" && name == "utf8") { return swUtf8Of(o) }
+        if (typeof o == "string" && name == "unicodeScalars") { return swScalarsOf(o) }
+        if (name == "lazy" && swIsColl(o)) { return swSeqVal(o) }
+        // `.description` of a built-in value is its String(describing:).
+        if (name == "description" && (typeof o == "string" || typeof o == "boolean" || swIsColl(o))) { return swstr(o) }
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
         // A sized-integer box is an object, so its own members have to be answered
         // before the generic object paths below take it for a struct instance.
@@ -3144,6 +3207,7 @@ KwContinue  = "continue" KwEnd ;
                     return sa.length <= target.length && target.slice(target.length - sa.length, target.length) === sa
                 }
                 if (name == "contains") { return target.indexOf(sa) >= 0 }
+                if (name == "elementsEqual") { return swStrEq(target, sa) }
             }
             // A String IS a Collection of Characters in Swift, so every Sequence
             // member applies to it - `"hello".map { $0 }` is
@@ -3157,6 +3221,10 @@ KwContinue  = "continue" KwEnd ;
             if (swIsSeqMember(name)) {
                 var sres = arrayMethod(swGraphemes(target), name, args)
                 if (swSeqKeepsString(name)) { return swJoinStrs(sres) }
+                // split answers Substrings, each the text of its Characters.
+                if (name == "split") {
+                    for (var sp = 0; sp < sres.length; sp++) { sres[sp] = swJoinStrs(sres[sp]) }
+                }
                 return sres
             }
             fail("unknown String method: " + name)
@@ -3180,6 +3248,19 @@ KwContinue  = "continue" KwEnd ;
             if (name == "count" && args.length == 0) { return target.keys.length }
             if (name == "keys") { return target.keys.slice(0) }
             if (name == "values") { return target.vals.slice(0) }
+            // mapValues / compactMapValues: the same keys, in order, over the new
+            // values (compactMapValues drops a nil). Twins: the Dictionary arms of
+            // js_swmcall in abnf/jsrtswift.go and js_mcall in lib/swift-rt.metajs.
+            if (name == "mapValues" || name == "compactMapValues") {
+                var md = {__dict: true, keys: [], vals: []}
+                for (var mi = 0; mi < target.keys.length; mi++) {
+                    var mv = args[0](target.vals[mi])
+                    if (name == "compactMapValues" && (mv === null || mv === undefined)) { continue }
+                    md.keys.push(target.keys[mi])
+                    md.vals.push(mv)
+                }
+                return md
+            }
             // A Dictionary IS a Sequence of `(key: K, value: V)` pairs, so its
             // Sequence members run over those; `filter` alone answers a Dictionary
             // again (swiftc: `["a": 1].filter { $0.value > 0 }` is ["a": 1]). The
@@ -3405,21 +3486,74 @@ KwContinue  = "continue" KwEnd ;
     }
     // The Sequence members a STRING receiver forwards to the Array table, and the
     // subset whose Swift result type is a String or a Substring (both of which print
-    // as bare text). `firstIndex(of:)` is deliberately NOT in the list: on a String
-    // it answers a String.Index, whose printed form is an opaque `Index(_rawBits:)`
-    // that no value model here can produce. These two lists are duplicated in
-    // rtSeqMeth (swift-to-llvm-ir.abnf) and must stay in step.
+    // as bare text). On a String, firstIndex/lastIndex answer a String.Index, which
+    // swiftc prints as its UTF-8 offset (`2[utf8]`); here it is the Character
+    // offset, an Int, which subscripts and slices the String the same way and
+    // prints as the bare number. These two lists are duplicated in rtSeqMeth
+    // (swift-to-llvm-ir.abnf) and must stay in step.
     function swIsSeqMember(name) {
         return name == "map" || name == "filter" || name == "sorted" || name == "reversed"
             || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
             || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
             || name == "forEach" || name == "shuffled" || name == "first" || name == "last"
-            || name == "count" || name == "contains"
+            || name == "count" || name == "contains" || name == "split" || name == "drop"
+            || name == "firstIndex" || name == "lastIndex" || name == "elementsEqual"
     }
     function swSeqKeepsString(name) {
         return name == "filter" || name == "prefix" || name == "suffix"
-            || name == "dropFirst" || name == "dropLast"
+            || name == "dropFirst" || name == "dropLast" || name == "drop"
+    }
+    // Collection.split, step for step (swiftc's own algorithm): the arguments are
+    // told apart by type, because the labels do not reach here - a closure is
+    // whereSeparator, a Bool omittingEmptySubsequences, a number after the first
+    // argument (or beside a closure) maxSplits, and the first argument otherwise
+    // the separator. A piece is an ArraySlice in Swift, which prints nested as
+    // `ArraySlice([1])`; here it is an Array, the trade reversed() makes. Twins:
+    // swSplitSeq in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swSplitSeq(t, args) {
+        var pred = null
+        var sep = anytype
+        sep = undefined
+        var maxS = -1
+        var omit = true
+        for (var i = 0; i < args.length; i++) {
+            if (typeof args[i] == "function") { pred = args[i] }
+        }
+        for (var j = 0; j < args.length; j++) {
+            var a = args[j]
+            if (typeof a == "function") { continue }
+            if (typeof a == "boolean") { omit = a }
+            else if (j == 0 && pred == null) { sep = a }
+            else { maxS = szNum(a) }
+        }
+        var n = t.length
+        var res = []
+        if (maxS == 0 || n == 0) {
+            if (n > 0 || !omit) { res.push(t.slice(0)) }
+            return res
+        }
+        var start = 0
+        var end = 0
+        while (end < n) {
+            var isSep = pred != null ? core.test(pred(t[end])) : swEq(t[end], sep)
+            if (isSep) {
+                var did = false
+                if (!(start == end && omit)) { res.push(swSubArr(t, start, end)); did = true }
+                end = end + 1
+                start = end
+                if (did && res.length == maxS) { break }
+                continue
+            }
+            end = end + 1
+        }
+        if (start != n || !omit) { res.push(swSubArr(t, start, n)) }
+        return res
+    }
+    function swSubArr(t, a, b) {
+        var out = []
+        for (var i = a; i < b; i++) { out.push(t[i]) }
+        return out
     }
     // A Dictionary's elements: one `(key: K, value: V)` tuple per entry, in order.
     // swPairsDict is the way back, for the members whose result is a Dictionary.
@@ -3543,6 +3677,22 @@ KwContinue  = "continue" KwEnd ;
                 else { if (!less(t[i], best)) { best = t[i] } }
             }
             return best
+        }
+        // prefix(while:) / drop(while:): the leading run the predicate holds for,
+        // and what follows it.
+        if ((name == "prefix" || name == "drop") && typeof args[0] == "function") {
+            var run = 0
+            while (run < n && core.test(args[0](t[run]))) { run = run + 1 }
+            return name == "prefix" ? swSubArr(t, 0, run) : swSubArr(t, run, n)
+        }
+        if (name == "split") { return swSplitSeq(t, args) }
+        // starts(with:) / elementsEqual(_:) compare element by element with ==.
+        if (name == "starts" || name == "elementsEqual") {
+            var other = anytype
+            other = swSeqVal(args[0])
+            if (other.length > n || (name == "elementsEqual" && other.length != n)) { return false }
+            for (i = 0; i < other.length; i++) { if (!swEq(t[i], other[i])) { return false } }
+            return true
         }
         if (name == "prefix") {
             out = []

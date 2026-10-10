@@ -2764,6 +2764,41 @@ func s50() {
     check("50f", u.isEmpty && "\(u)" == "[]")
 }
 
+// ===== SECTION 51: String, Array and Dictionary members =====
+// split (all three forms and both options, Swift's own algorithm), the String
+// views, firstIndex/lastIndex on a String (a Character offset here; swiftc's
+// String.Index prints as a UTF-8 offset, so only its use is asserted),
+// starts/elementsEqual, prefix(while:)/drop(while:), mapValues, Character(_:),
+// Set(String) and .description (swiftc 6.1.2). An astral character inside a
+// collection prints whole.
+func s51() {
+    let s = "a,b,,c"
+    check("51a", s.split(separator: ",") == ["a", "b", "c"]
+                 && s.split(separator: ",", maxSplits: 1) == ["a", "b,,c"]
+                 && s.split(separator: ",", omittingEmptySubsequences: false) == ["a", "b", "", "c"]
+                 && s.split(separator: ",", maxSplits: 2, omittingEmptySubsequences: false) == ["a", "b", ",c"]
+                 && ",,".split(separator: ",").isEmpty && s.split { $0 == "," }.count == 3
+                 && "e\u{301}xe".split(separator: "e").count == 1)
+    let nums = [1, 0, 2, 0, 0, 3, 0]
+    check("51b", nums.split(separator: 0).map { Array($0) } == [[1], [2], [3]]
+                 && nums.split(separator: 0, omittingEmptySubsequences: false).count == 5
+                 && nums.split(separator: 0, maxSplits: 2).map { $0.count } == [1, 1, 3])
+    let ib = s.firstIndex(of: "b")!
+    check("51c", String(s[s.startIndex..<ib]) == "a," && s.firstIndex(where: { $0 == "," }) != nil
+                 && s.lastIndex(of: ",") != nil && s.firstIndex(of: "z") == nil
+                 && "héllo😀".utf8.count == 10 && "héllo😀".unicodeScalars.count == 6 && s.lazy.count == 6
+                 && Array("é".utf8) == [195, 169])
+    check("51d", [1, 2, 3].starts(with: [1, 2]) && ![1, 2, 3].starts(with: [2]) && ![1].starts(with: [1, 2])
+                 && [1, 2].elementsEqual([1, 2]) && ![1, 2].elementsEqual([1, 2, 3]) && "abc".elementsEqual("abc")
+                 && [3, 1, 2].drop(while: { $0 > 2 }) == [1, 2] && [3, 4, 1].prefix(while: { $0 > 2 }) == [3, 4]
+                 && "abcd".drop(while: { $0 < "c" }) == "cd")
+    let mv = ["b": 1, "a": 2].mapValues { $0 * 10 }
+    check("51e", mv["a"]! == 20 && mv["b"]! == 10 && "\(["k": 1].mapValues { String($0) })" == "[\"k\": \"1\"]"
+                 && ["k": 3, "j": 1].compactMapValues { $0 > 2 ? $0 : nil } == ["k": 3])
+    check("51f", Character("b") == "b" && Set("hello").count == 4 && s.description == s
+                 && [1, 2].description == "[1, 2]" && true.description == "true" && "\(["😀"])" == "[\"😀\"]")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2817,6 +2852,7 @@ func main() {
     s48() // SECTION-CALL 48
     s49() // SECTION-CALL 49
     s50() // SECTION-CALL 50
+    s51() // SECTION-CALL 51
     print("full: \(checks) checks, \(fails) failures")
 }
 

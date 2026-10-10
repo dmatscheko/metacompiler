@@ -949,6 +949,30 @@ func init() {
 				// abnf/jsrt.go's shared list table (whose refusal wording
 				// is not Swift's). Every Array receiver lands here,
 				// including the refusal.
+				// mapValues / compactMapValues: the same keys, in order, over the
+				// new values (compactMapValues drops a nil). Twins: the Dictionary
+				// arms of mcall in languages/swift-interpreter.abnf and js_mcall in
+				// languages/lib/swift-rt.metajs.
+				if keys, vals, isDict := dictParts(u(a[0])); isDict {
+					name := rt.toString(u(a[1]))
+					if name == "mapValues" || name == "compactMapValues" {
+						f := rt.swArgList(u(a[2]))[0]
+						nk, nv := []interface{}{}, []interface{}{}
+						for i, k := range keys.elems {
+							v := rt.call(f, jsUndef, []interface{}{vals.elems[i]})
+							if name == "compactMapValues" && isNullish(v) {
+								continue
+							}
+							nk = append(nk, k)
+							nv = append(nv, v)
+						}
+						d := newJSObject()
+						d.set("__dict", true)
+						d.set("keys", &jsArray{elems: nk})
+						d.set("vals", &jsArray{elems: nv})
+						return w(d)
+					}
+				}
 				if arr, isArr := u(a[0]).(*jsArray); isArr {
 					name := rt.toString(u(a[1]))
 					var elems []interface{}
@@ -1123,6 +1147,39 @@ func init() {
 			// swiftc 6.1.2 prints `0..<3` for [3, 1, 2].indices.
 			if arr, ok := u(a[0]).(*jsArray); ok && rt.toString(u(a[1])) == "indices" {
 				return w(swMkRange(0, float64(len(arr.elems)), false))
+			}
+			// A String's views, as arrays: `.utf8` the UTF-8 bytes and
+			// `.unicodeScalars` one String per code point. Twins: swGetField in
+			// languages/swift-interpreter.abnf and js_swget in
+			// languages/lib/swift-rt.metajs.
+			if s, ok := u(a[0]).(string); ok {
+				switch rt.toString(u(a[1])) {
+				case "utf8":
+					bs := []byte(s)
+					out := make([]interface{}, len(bs))
+					for i, c := range bs {
+						out[i] = float64(c)
+					}
+					return w(&jsArray{elems: out})
+				case "unicodeScalars":
+					out := []interface{}{}
+					for _, r := range s {
+						out = append(out, string(r))
+					}
+					return w(&jsArray{elems: out})
+				}
+			}
+			// `.description` of a built-in value is its String(describing:).
+			if rt.toString(u(a[1])) == "description" {
+				v := u(a[0])
+				_, isStr := v.(string)
+				_, isBool := v.(bool)
+				_, isArr := v.(*jsArray)
+				_, _, isDict := dictParts(v)
+				_, isSet := swSetElems(v)
+				if isStr || isBool || isArr || isDict || isSet || swIsRange(v) {
+					return rt.wrapStr(rt.swDesc(v))
+				}
 			}
 			// The same three on a value that stayed a plain number, which is
 			// where every integer inside +/- 2^53 lives.
@@ -2426,7 +2483,22 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 			}
 		}
 		return best, true
-	case "prefix":
+	case "prefix", "drop":
+		// prefix(while:) / drop(while:): the leading run the predicate holds
+		// for, and what follows it.
+		if len(args) > 0 && isCallable(args[0]) {
+			run := 0
+			for run < n && rt.truthy(rt.call(args[0], jsUndef, []interface{}{o.elems[run]})) {
+				run++
+			}
+			if name == "prefix" {
+				return &jsArray{elems: append([]interface{}{}, o.elems[:run]...)}, true
+			}
+			return &jsArray{elems: append([]interface{}{}, o.elems[run:]...)}, true
+		}
+		if name == "drop" {
+			return nil, false
+		}
 		k := swSeqK(rt, args, 1, n)
 		out := make([]interface{}, k)
 		copy(out, o.elems[:k])
@@ -2481,6 +2553,27 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 			}
 		}
 		return jsNull, true
+	case "split":
+		return rt.swSplitSeq(o.elems, args), true
+	case "starts", "elementsEqual":
+		// Element by element with ==.
+		var other []interface{}
+		if len(args) > 0 {
+			if oa, ok := args[0].(*jsArray); ok {
+				other = oa.elems
+			} else if els, ok := swSetElems(args[0]); ok {
+				other = els.elems
+			}
+		}
+		if len(other) > n || (name == "elementsEqual" && len(other) != n) {
+			return false, true
+		}
+		for i := range other {
+			if !rt.swEqual(o.elems[i], other[i]) {
+				return false, true
+			}
+		}
+		return true, true
 	case "allSatisfy":
 		for _, e := range o.elems {
 			if !rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
@@ -2580,6 +2673,69 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 		return acc, true
 	}
 	return nil, false
+}
+
+// swSplitSeq is Collection.split, step for step; the arguments are told apart by
+// type because the labels do not reach here. Twins: swSplitSeq in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func (rt *jsrt) swSplitSeq(t []interface{}, args []interface{}) *jsArray {
+	var pred interface{}
+	var sep interface{} = jsUndef
+	maxS := -1
+	omit := true
+	for _, a := range args {
+		if isCallable(a) {
+			pred = a
+		}
+	}
+	for j, a := range args {
+		if isCallable(a) {
+			continue
+		}
+		if b, ok := a.(bool); ok {
+			omit = b
+		} else if j == 0 && pred == nil {
+			sep = a
+		} else {
+			maxS = int(swNum(rt, a))
+		}
+	}
+	n := len(t)
+	piece := func(a, b int) interface{} { return &jsArray{elems: append([]interface{}{}, t[a:b]...)} }
+	res := []interface{}{}
+	if maxS == 0 || n == 0 {
+		if n > 0 || !omit {
+			res = append(res, piece(0, n))
+		}
+		return &jsArray{elems: res}
+	}
+	start, end := 0, 0
+	for end < n {
+		var isSep bool
+		if pred != nil {
+			isSep = rt.truthy(rt.call(pred, jsUndef, []interface{}{t[end]}))
+		} else {
+			isSep = rt.swEqual(t[end], sep)
+		}
+		if isSep {
+			did := false
+			if !(start == end && omit) {
+				res = append(res, piece(start, end))
+				did = true
+			}
+			end++
+			start = end
+			if did && len(res) == maxS {
+				break
+			}
+			continue
+		}
+		end++
+	}
+	if start != n || !omit {
+		res = append(res, piece(start, n))
+	}
+	return &jsArray{elems: res}
 }
 
 // swStrMethod answers the String members that take a String argument and compare

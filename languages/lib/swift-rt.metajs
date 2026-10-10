@@ -701,21 +701,29 @@ function swFindMember(v, name) {
 
 // swQuote is Swift's debugDescription of a String: double quotes and the four
 // escapes Swift itself emits.
+// The text between two escapes is copied as a whole substring, never one code unit
+// at a time: a lone surrogate cannot be encoded, so an astral character copied by
+// halves would print as two U+FFFD.
 function swQuote(s) {
     var out = "\""
+    var from = 0
     var i = 0
     while (i < s.length) {
         var c = s.charAt(i)
-        if (c == "\\") { out = out + "\\\\" }
-        else if (c == "\"") { out = out + "\\\"" }
-        else if (c == "\n") { out = out + "\\n" }
-        else if (c == "\t") { out = out + "\\t" }
-        else if (c == "\r") { out = out + "\\r" }
-        else if (c.charCodeAt(0) === 0) { out = out + "\\0" }
-        else { out = out + c }
+        var esc = ""
+        if (c == "\\") { esc = "\\\\" }
+        else if (c == "\"") { esc = "\\\"" }
+        else if (c == "\n") { esc = "\\n" }
+        else if (c == "\t") { esc = "\\t" }
+        else if (c == "\r") { esc = "\\r" }
+        else if (c.charCodeAt(0) === 0) { esc = "\\0" }
+        if (esc != "") {
+            out = out + s.substring(from, i) + esc
+            from = i + 1
+        }
         i = i + 1
     }
-    return out + "\""
+    return out + s.substring(from, s.length) + "\""
 }
 
 // swDesc is Swift's String(describing:): the TOP-LEVEL form, in which a String
@@ -1365,6 +1373,23 @@ function js_mcall(recv, name, args) {
     if (rtIsDictObj(recv)) {
         if (name === "keys") { return rtCopyArr(recv["keys"]) }
         if (name === "values") { return rtCopyArr(recv["vals"]) }
+        // mapValues / compactMapValues: the same keys, in order, over the new
+        // values (compactMapValues drops a nil). Twins: the Dictionary arms of mcall
+        // in languages/swift-interpreter.abnf and js_swmcall in abnf/jsrtswift.go.
+        if (name === "mapValues" || name === "compactMapValues") {
+            var mk = []
+            var mv = []
+            var mi = 0
+            while (mi < recv["keys"].length) {
+                var nv = args[0].apply(undefined, [recv["vals"][mi]])
+                if (name === "mapValues" || (nv !== null && nv !== undefined)) {
+                    mk.push(recv["keys"][mi])
+                    mv.push(nv)
+                }
+                mi = mi + 1
+            }
+            return {__dict: true, keys: mk, vals: mv}
+        }
         if (name === "get") {
             var gi = swDictFind(recv["keys"], args[0])
             if (gi >= 0) { return recv["vals"][gi] }
@@ -1577,6 +1602,62 @@ function swSeqK(args, dflt, n) {
     return k
 }
 
+function swSubArr(t, a, b) {
+    var out = []
+    var i = a
+    while (i < b) { out.push(t[i]); i = i + 1 }
+    return out
+}
+// Collection.split, step for step; the arguments are told apart by type because
+// the labels do not reach here. Twins: swSplitSeq in
+// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swSplitSeq(t, args) {
+    var pred = anytype
+    pred = undefined
+    var sep = anytype
+    sep = undefined
+    var maxS = 0 - 1
+    var omit = true
+    var i = 0
+    while (i < args.length) {
+        if (typeof args[i] == "function") { pred = args[i] }
+        i = i + 1
+    }
+    var j = 0
+    while (j < args.length) {
+        var a = args[j]
+        if (typeof a == "boolean") { omit = a }
+        else if (typeof a != "function") {
+            if (j == 0 && pred === undefined) { sep = a } else { maxS = swNum(a) | 0 }
+        }
+        j = j + 1
+    }
+    var n = t.length
+    var res = []
+    if (maxS == 0 || n == 0) {
+        if (n > 0 || !omit) { res.push(swSubArr(t, 0, n)) }
+        return res
+    }
+    var start = 0
+    var end = 0
+    while (end < n) {
+        var isSep = false
+        if (pred !== undefined) { isSep = swTruth(pred.apply(undefined, [t[end]])) }
+        else { isSep = swEqual(t[end], sep, 0) }
+        if (isSep) {
+            var did = false
+            if (!(start == end && omit)) { res.push(swSubArr(t, start, end)); did = true }
+            end = end + 1
+            start = end
+            if (did && res.length == maxS) { break }
+        } else {
+            end = end + 1
+        }
+    }
+    if (start != n || !omit) { res.push(swSubArr(t, start, n)) }
+    return res
+}
+
 function swSeqMethod(o, name, args) {
     var i = 0
     var out = []
@@ -1684,6 +1765,28 @@ function swSeqMethod(o, name, args) {
             i = i + 1
         }
         return best
+    }
+    // prefix(while:) / drop(while:): the leading run the predicate holds for, and
+    // what follows it.
+    if ((name === "prefix" || name === "drop") && args.length > 0 && typeof args[0] == "function") {
+        var run = 0
+        while (run < n && swTruth(args[0].apply(undefined, [o[run]]))) { run = run + 1 }
+        if (name === "prefix") { return swSubArr(o, 0, run) }
+        return swSubArr(o, run, n)
+    }
+    if (name === "split") { return swSplitSeq(o, args) }
+    // starts(with:) / elementsEqual(_:) compare element by element with ==.
+    if (name === "starts" || name === "elementsEqual") {
+        var other = args[0]
+        if (swIsObj(other) && other["__set"] === true) { other = other["elems"] }
+        if (other.length > n) { return false }
+        if (name === "elementsEqual" && other.length !== n) { return false }
+        i = 0
+        while (i < other.length) {
+            if (!swEqual(o[i], other[i], 0)) { return false }
+            i = i + 1
+        }
+        return true
     }
     if (name === "prefix") {
         var pk = swSeqK(args, 1, n)
@@ -2476,6 +2579,48 @@ function js_swge(l, r) {
     return c >= 0
 }
 
+// The code point at i of a UTF-16 string, a surrogate pair read as one.
+function swCpAt(s, i) {
+    var c = s.charCodeAt(i)
+    if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+        var d = s.charCodeAt(i + 1)
+        if (d >= 56320 && d <= 57343) { return (c - 55296) * 1024 + (d - 56320) + 65536 }
+    }
+    return c
+}
+function swUtf8Of(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var cp = swCpAt(s, i)
+        if (cp > 65535) { i = i + 2 } else { i = i + 1 }
+        if (cp < 128) { out.push(cp) }
+        else if (cp < 2048) { out.push(192 + ((cp / 64) | 0)); out.push(128 + cp % 64) }
+        else if (cp < 65536) {
+            out.push(224 + ((cp / 4096) | 0))
+            out.push(128 + ((cp / 64) | 0) % 64)
+            out.push(128 + cp % 64)
+        } else {
+            out.push(240 + ((cp / 262144) | 0))
+            out.push(128 + ((cp / 4096) | 0) % 64)
+            out.push(128 + ((cp / 64) | 0) % 64)
+            out.push(128 + cp % 64)
+        }
+    }
+    return out
+}
+function swScalarsOf(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var w = 1
+        if (swCpAt(s, i) > 65535) { w = 2 }
+        out.push(s.substring(i, i + w))
+        i = i + w
+    }
+    return out
+}
+
 // The members a sized integer or a Double answers for itself. Everything else
 // falls straight through to the plain member read the grammar already emitted, so
 // this is only ever a type switch in front of it.
@@ -2500,6 +2645,18 @@ function js_swget(v, k) {
     // indices is a PROPERTY on every Collection. Only an Array is answered: a String's indices are String.Index values
     // with no printable form here. swiftc 6.1.2 prints `0..<3` for [3, 1, 2].indices.
     if (k === "indices" && rtIsArr(v)) { return swMkRange(0, v.length, false) }
+    // A String's views, as arrays: `.utf8` the UTF-8 bytes and `.unicodeScalars`
+    // one String per code point. Twins: swGetField in
+    // languages/swift-interpreter.abnf and js_swget in abnf/jsrtswift.go.
+    if (typeof v == "string") {
+        if (k === "utf8") { return swUtf8Of(v) }
+        if (k === "unicodeScalars") { return swScalarsOf(v) }
+    }
+    // `.description` of a built-in value is its String(describing:).
+    if (k === "description") {
+        if (typeof v == "string" || typeof v == "boolean" || rtIsArr(v) || rtIsDictObj(v) || swIsRange(v)) { return swDesc(v) }
+        if (swIsObj(v) && v["__set"] === true) { return swDesc(v) }
+    }
     // A Dictionary's values, as a copy. The Go twin answers it in abnf/jsrt.go's js_get.
     if (k === "values" && rtIsDictObj(v)) { return rtCopyArr(v["vals"]) }
     // The same three on a value that stayed a plain number, which is where every

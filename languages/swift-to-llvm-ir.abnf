@@ -3202,6 +3202,37 @@ KwContinue  = "continue" KwEnd ;
             doneB.NewRet(out)
         })
     }
+    // `.lazy`: a String's Characters, a Range's or a Set's elements, and any other
+    // collection itself - a lazy view computes the same members. Twin: swGetField
+    // in swift-interpreter.abnf.
+    function rtLazy() {
+        return rtFunc("sw_lazy", 1, function(b, ps) {
+            var sB = curF.NewBlock("")
+            var oB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
+            sB.NewRet(sB.NewCall(rtGSplit(), [ps[0]]))
+            oB.NewRet(oB.NewCall(rtRangeArr(), [ps[0]]))
+        })
+    }
+    // split on a String answers Substrings: each piece of Characters joined back.
+    function rtJoinEach() {
+        return rtFunc("sw_joineach", 1, function(b, ps) {
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [ps[0]])])), bodyB, doneB)
+            var pV = callExt(bodyB, "js_swidx", [ps[0], iV])
+            callExt(bodyB, "js_pyset", [ps[0], iV, callExt(bodyB, "js_swmcall", [pV, emitStr(bodyB, "joined"),
+                                                                                callExt(bodyB, "js_arr_new", [])])])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(ps[0])
+        })
+    }
     // A String walked as a SEQUENCE is its clusters; everything else passes through.
     // Emitted into a for-in only when the program has a non-ASCII string literal -
     // for an ASCII string the code-unit walk the loop already does IS the cluster
@@ -3324,21 +3355,23 @@ KwContinue  = "continue" KwEnd ;
     // member through the ordinary js_swmcall, and - for the five members whose Swift
     // result is a String or a Substring - join back through the `joined` member.
     //
-    // firstIndex(of:) is deliberately absent: on a String it answers a String.Index,
-    // whose printed form is an opaque `Index(_rawBits:)` no value model here can
-    // produce. The twins are swIsSeqMember / swSeqKeepsString in
-    // swift-interpreter.abnf, and the two lists must stay in step.
+    // On a String, firstIndex/lastIndex answer the Character offset where swiftc
+    // answers a String.Index (see swIsSeqMember in swift-interpreter.abnf); split
+    // joins each piece back (rtJoinEach). The twins are swIsSeqMember /
+    // swSeqKeepsString in swift-interpreter.abnf, and the two lists must stay in
+    // step.
     function swIsSeqMember(name) {
         return name == "map" || name == "filter" || name == "sorted" || name == "reversed"
             || name == "enumerated" || name == "allSatisfy" || name == "compactMap"
             || name == "flatMap" || name == "reduce" || name == "prefix" || name == "suffix"
             || name == "dropFirst" || name == "dropLast" || name == "min" || name == "max"
             || name == "forEach" || name == "shuffled" || name == "first" || name == "last"
-            || name == "count" || name == "contains"
+            || name == "count" || name == "contains" || name == "split" || name == "drop"
+            || name == "firstIndex" || name == "lastIndex" || name == "elementsEqual"
     }
     function swSeqKeepsString(name) {
         return name == "filter" || name == "prefix" || name == "suffix"
-            || name == "dropFirst" || name == "dropLast"
+            || name == "dropFirst" || name == "dropLast" || name == "drop"
     }
     //
     // A Dictionary IS a Sequence of `(key: K, value: V)` pairs (rtArrayOf), and the
@@ -3370,8 +3403,18 @@ KwContinue  = "continue" KwEnd ;
                 sB.NewCondBr(truthy(sB, callExt(sB, "js_is_type", [a0, emitStr(sB, "String")])), plainB, splitB)
                 sB = splitB
             }
+            // Two Strings are elementsEqual exactly when they are ==.
+            if (name == "elementsEqual") {
+                var eqB = curF.NewBlock("")
+                var splitE = curF.NewBlock("")
+                var e0 = callExt(sB, "js_arg", [ps[1], handle(0)])
+                sB.NewCondBr(truthy(sB, callExt(sB, "js_is_type", [e0, emitStr(sB, "String")])), eqB, splitE)
+                eqB.NewRet(eqB.NewCall(rtStrEq(), [ps[0], e0]))
+                sB = splitE
+            }
             var gV = sB.NewCall(rtGSplit(), [ps[0]])
             var rV = callExt(sB, "js_swmcall", [gV, emitStr(sB, name), ps[1]])
+            if (name == "split") { rV = sB.NewCall(rtJoinEach(), [rV]) }
             if (!keep) { sB.NewRet(rV) }
             if (keep) {
                 sB.NewRet(callExt(sB, "js_swmcall", [rV, emitStr(sB, "joined"),
@@ -4375,10 +4418,13 @@ KwContinue  = "continue" KwEnd ;
             // arms hasRanges: a program can hold one with no `...` in its text.
             || name == "indices"
             // A Dictionary's .values: the floor's js_get does not know the name.
-            || name == "values") {
+            || name == "values"
+            // A String's UTF-8 bytes and code points, as arrays.
+            || name == "utf8" || name == "unicodeScalars") {
             if (name == "indices") { hasRanges = true }
             return callExt(b, "js_swget", [cur, emitStr(b, name)])
         }
+        if (name == "lazy") { return b.NewCall(rtLazy(), [cur]) }
         return callExt(b, "js_get", [cur, emitStr(b, name)])
     }
     function emitIndexRead(b, cur, idxV) {
