@@ -4076,6 +4076,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyTypeBuiltin["$dict"] = true
     pyTypeBuiltin["$set"] = true
     pyTypeBuiltin["$tuple"] = true
+    pyTypeBuiltin["$complex"] = true
     // `type` is a class too: `str(type)` is <class 'type'>. Calling it still runs
     // the same js_pytype forwarder, through __conv.
     pyTypeBuiltin["$type"] = true
@@ -4228,6 +4229,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The remaining conversions pyConvert of python-interpreter.abnf offers.
         b = declBuiltin(b, "bool", "js_pybool", 1)
         b = declBuiltin(b, "float", "js_pyfloat", 1)
+        b = declBuiltin(b, "complex", "js_pycomplexnew", 0)
         b = declBuiltin(b, "repr", "js_pyrepr", 1)
         b = declBuiltin(b, "set", "js_pyset_new", 1)
         b = declBuiltin(b, "sum", "js_pysum", 1)
@@ -4284,12 +4286,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "classmethod", "js_pyclassmethod", 1)
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
-        // only reaches the eight that convert; these are the rest, so `class
-        // C(object)`, `type(None) is NoneType` and `str(complex)` see a class
+        // only reaches the ones that convert; these are the rest, so `class
+        // C(object)`, `type(None) is NoneType` and `str(bytes)` see a class
         // object. js_pybuiltincls is name-generic in both compiled engines
         // (rt.pyBuiltinClass in abnf/jsrt.go, pyBuiltinClass in
         // lib/python-rt.metajs), so only the binding is needed.
-        var pyPlainTypes = ["object", "complex", "bytes", "NoneType", "function"]
+        var pyPlainTypes = ["object", "bytes", "NoneType", "function"]
         for (var pt0 = 0; pt0 < pyPlainTypes.length; pt0++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pyPlainTypes[pt0]),
                                          callExt(b, "js_pybuiltincls", [emitStr(b, pyPlainTypes[pt0])])])

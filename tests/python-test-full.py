@@ -3068,6 +3068,38 @@ def s47():
     check("ast4", f"𝐀{1}" == chr(0x1D400) + "1" and len(f"x{2}😀") == 3)
     check("ast5", "\U0001D400" == s and repr(s) == "'𝐀'" and ascii(s) == "'\\U0001d400'")
 
+# ===== SECTION 48: complex values print, construct and format =====
+# repr(complex) leaves out a +0.0 real part, drops each part's ".0", and keeps
+# a zero imaginary part; complex() takes numbers, complexes and strings; the
+# format mini-language formats each part as a float.
+def s48():
+    xs = [3j, 1+2j, 1.5-2j, (1+2j)-2j, 1e16j, -0j, 1e-5j]
+    check("cpx1", [str(x) for x in xs] == ["3j", "(1+2j)", "(1.5-2j)", "(1+0j)", "1e+16j", "(-0-0j)", "1e-05j"])
+    check("cpx2", repr([1-1j]) == "[(1-1j)]" and type((1+2j)-2j).__name__ == "complex" and str((1+2j).real) == "1.0")
+    check("cpx3", str(complex(1, 2)) == "(1+2j)" and str(complex(3)) == "(3+0j)" and str(complex()) == "0j" and str(complex(2, 1j)) == "(1+0j)")
+    check("cpx4", complex(" (1-2.5J) ") == 1-2.5j and complex("-j") == -1j and complex("1+j") == 1+1j and isinstance(complex(1), complex))
+    errs = []
+    for bad in [None, "1+2"]:
+        try:
+            complex(bad)
+        except (TypeError, ValueError) as e:
+            errs.append(str(e))
+    check("cpx5", errs == ["complex() argument must be a string or a number, not NoneType", "complex() arg is a malformed string"])
+    check("cpx6", format(1+2j, ">12") == "      (1+2j)" and format(1+2j, ".2f") == "1.00+2.00j" and "{:10.3f}|".format(1.5-2.25j) == "1.500-2.250j|")
+    check("cpx7", format(2j, "+") == "+2j" and format(1+2j, "#") == "(1.+2.j)" and format(1234567.5+1e16j, ",") == "(1,234,567.5+1e+16j)")
+    check("cpx8", format(-0j, "z.0f") == "0+0j" and f"{1-1j:.3g}" == "1-1j" and format(1+2j, "#.3") == "(1.00+2.00j)" and format(1+2j, "E") == "1.000000E+00+2.000000E+00j")
+    msgs = []
+    for spec in ["=10", "010", "d"]:
+        try:
+            format(1+2j, spec)
+        except ValueError as e:
+            msgs.append(str(e))
+    check("cpx9", msgs == ["'=' alignment flag is not allowed in complex format specifier",
+                           "Zero padding is not allowed in complex format specifier",
+                           "Unknown format code 'd' for object of type 'complex'"])
+    check("cpx10", (1.1+2.3j) ** 4 == complex(-8.957200000000004, -41.289599999999986) and str((1+2j) ** 0) == "(1+0j)")
+    check("cpx11", (1e10-3j) * (1.1+2.3j) == complex(11000000006.9, 22999999996.7) and format(float("-inf"), "z") == "-inf")
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3117,5 +3149,6 @@ def main():
     s45() # SECTION-CALL 45
     s46() # SECTION-CALL 46
     s47() # SECTION-CALL 47
+    s48() # SECTION-CALL 48
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -370,12 +370,130 @@ function pyNewCplx(re, im) { return {__cplx: true, real: re, imag: im} }
 
 function pyCplxRe(v) {
     if (pyIsCplx(v)) { return pyNum(v["real"]) }
+    if (pyIsBig(v)) { return pyBigToF(v) }
     return pyNum(v)
 }
 
 function pyCplxIm(v) {
     if (pyIsCplx(v)) { return pyNum(v["imag"]) }
     return 0
+}
+
+// One part of repr(complex): repr(float) without its forced ".0".
+function pyCplxPart(f) {
+    var t = pyBFloStr(f)
+    if (t.length > 2 && t.substring(t.length - 2) == ".0") { return t.substring(0, t.length - 2) }
+    return t
+}
+
+// repr(complex), which is also str(): the real part is left out when it is
+// +0.0, otherwise the pair is parenthesized. Go: pyCplxRepr.
+function pyCplxRepr(re, im) {
+    var ims = pyCplxPart(im)
+    if (re == 0 && 1 / re > 0) { return ims + "j" }
+    if (ims.charAt(0) != "-") { ims = "+" + ims }
+    return "(" + pyCplxPart(re) + ims + "j)"
+}
+
+// complex(real=0, imag=0): each argument a real number or a complex, the result
+// real.real - imag.imag + (real.imag + imag.real)j as CPython builds it; a lone
+// string is parsed. Go: rt.pyComplexNew.
+function js_pycomplexnew(args) {
+    var r = anytype
+    r = 0
+    var i = anytype
+    i = 0
+    if (args.length > 0) { r = args[0] }
+    if (args.length > 1) { i = args[1] }
+    if (typeof r == "string" && args.length < 2) { return pyCplxFromStr(r) }
+    var what = "complex() argument must be a string or a number, not "
+    if (args.length > 1) { what = "complex() argument 'real' must be a real number, not " }
+    pyCplxArgCheck(r, what)
+    pyCplxArgCheck(i, "complex() argument 'imag' must be a real number, not ")
+    var re = pyCplxRe(r)
+    var im = pyCplxIm(r)
+    if (args.length > 1) {
+        im = pyCplxRe(i)
+        if (pyIsCplx(r)) { im = im + pyCplxIm(r) }
+        if (pyIsCplx(i)) { re = re - pyCplxIm(i) }
+    }
+    return pyNewCplx(re, im)
+}
+
+function pyCplxArgCheck(v, what) {
+    if (pyIsCplx(v) || pyIsBig(v) || pyIsFlo(v)) { return undefined }
+    if (typeof v == "number" || typeof v == "boolean") { return undefined }
+    pyRaiseExc("TypeError", what + pyTypeName(v))
+    return undefined
+}
+
+// complex("1+2j"), CPython's complex_from_string: surrounding spaces and one
+// pair of parentheses, then a real, an imaginary (2j), or a real and a signed
+// imaginary (1-2j); an imaginary with no digits (j, -j, 1+j) is 1.
+// Go: rt.pyCplxFromStr.
+function pyCplxFromStr(s0) {
+    var s = s0.trim()
+    if (s.length > 1 && s.charAt(0) == "(" && s.charAt(s.length - 1) == ")") { s = s.substring(1, s.length - 1).trim() }
+    var e1 = pyFloPrefix(s, 0)
+    var a = 0
+    if (e1 > 0) {
+        a = pyStrToF(pyNoUnderscores(s.substring(0, e1)))
+        if (e1 == s.length) { return pyNewCplx(a, 0) }
+        if (pyIsJAt(s, e1) && e1 + 1 == s.length) { return pyNewCplx(0, a) }
+    }
+    var sg = s.charAt(e1)
+    if (sg == "+" || sg == "-" || e1 == 0) {
+        var e2 = pyFloPrefix(s, e1)
+        var b = 0
+        if (e2 > e1) { b = pyStrToF(pyNoUnderscores(s.substring(e1, e2))) }
+        else {
+            b = 1
+            if (sg == "-") { b = 0 - 1 }
+            if (sg == "+" || sg == "-") { e2 = e1 + 1 }
+        }
+        if (pyIsJAt(s, e2) && e2 + 1 == s.length) { return pyNewCplx(a, b) }
+    }
+    pyRaiseExc("ValueError", "complex() arg is a malformed string")
+    return undefined
+}
+
+function pyIsJAt(s, k) { return s.charAt(k) == "j" || s.charAt(k) == "J" }
+
+function pyNoUnderscores(t) {
+    var o = ""
+    var k = 0
+    while (k < t.length) {
+        if (t.charAt(k) != "_") { o = o + t.charAt(k) }
+        k = k + 1
+    }
+    return o
+}
+
+function pyIsDigitU(ch) { return (ch >= "0" && ch <= "9") || ch == "_" }
+
+// The end of the float literal at i (a sign, digits with an optional point, an
+// exponent; or inf / infinity / nan), or i when there is none. Go: pyFloPrefix.
+function pyFloPrefix(s, i) {
+    var j = i
+    if (s.charAt(j) == "+" || s.charAt(j) == "-") { j = j + 1 }
+    var low = s.substring(j, j + 8).toLowerCase()
+    if (low == "infinity") { return j + 8 }
+    if (low.substring(0, 3) == "inf" || low.substring(0, 3) == "nan") { return j + 3 }
+    var d = 0
+    while (j < s.length && pyIsDigitU(s.charAt(j))) { j = j + 1; d = d + 1 }
+    if (s.charAt(j) == ".") {
+        j = j + 1
+        while (j < s.length && pyIsDigitU(s.charAt(j))) { j = j + 1; d = d + 1 }
+    }
+    if (d == 0) { return i }
+    if (s.charAt(j) == "e" || s.charAt(j) == "E") {
+        var k = j + 1
+        if (s.charAt(k) == "+" || s.charAt(k) == "-") { k = k + 1 }
+        var ed = 0
+        while (k < s.length && pyIsDigitU(s.charAt(k))) { k = k + 1; ed = ed + 1 }
+        if (ed > 0) { j = k }
+    }
+    return j
 }
 
 // ===================================================== conversions ==========
@@ -439,6 +557,7 @@ function pyStr(v) {
         return "False"
     }
     if (pyIsFlo(v)) { return pyBFloStr(v["__flo"]) }
+    if (pyIsCplx(v)) { return pyCplxRepr(pyCplxRe(v), pyCplxIm(v)) }
     // A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
     // reads <class 'float'>. rt.pyClassName in the Go twin.
     var cn = pyClassName(v)
@@ -726,6 +845,7 @@ function pyTypeName(v) {
         if (v["__name"] !== undefined && pyInstClassOf(v) === null) { return "type" }
         if (pySetElemsOf(v) != null) { return "set" }
         if (pyIsDict(v)) { return "dict" }
+        if (pyIsCplx(v)) { return "complex" }
         // A CURSOR names its own type: CPython's list_iterator / str_iterator /
         // dict_keyiterator / map / filter / zip / enumerate / reversed. It is
         // what type(it).__name__ answers (js_pytype hands this name to
@@ -1130,6 +1250,11 @@ function pyGetAttr(obj, name) {
     // CPython does. An OWN property is still answered first, because a value that
     // really holds None must not be mistaken for a missing one (a compiled regex
     // and a match are read so).
+    // A complex's parts are floats.
+    if (pyIsCplx(obj)) {
+        if (name == "real") { return pyMkFlo(pyCplxRe(obj)) }
+        if (name == "imag") { return pyMkFlo(pyCplxIm(obj)) }
+    }
     if (pyIsObj(obj)) {
         if (obj[name] !== undefined) { return obj[name] }
     }
@@ -2185,21 +2310,35 @@ function pyASetBin(op, l, r) {
 // numbers, so < > <= >= answer null and js_pybin falls through to its usual
 // path - which is what produces the error the two engines share.
 function pyAComplexBin(op, l, r) {
-    var lr = 0
-    var li = 0
-    if (pyIsCplx(l)) {
-        lr = pyCplxRe(l)
-        li = pyCplxIm(l)
-    } else {
-        lr = pyNum(l)
-    }
-    var rr = 0
-    var ri = 0
-    if (pyIsCplx(r)) {
-        rr = pyCplxRe(r)
-        ri = pyCplxIm(r)
-    } else {
-        rr = pyNum(r)
+    var lr = pyCplxRe(l)
+    var li = pyCplxIm(l)
+    var rr = pyCplxRe(r)
+    var ri = pyCplxIm(r)
+    if (op == "**") {
+        // An integral power 0..100, by CPython's c_powu square-and-multiply (the
+        // order of the products decides the rounding); an infinite part is
+        // CPython's OverflowError.
+        if (ri != 0 || rr < 0 || rr > 100 || Math.floor(rr) != rr) { return null }
+        var ar = 1
+        var ai = 0
+        var pr = lr
+        var pi = li
+        var n = rr
+        while (n > 0) {
+            if (n % 2 == 1) {
+                var t = ar * pr - ai * pi
+                ai = ar * pi + ai * pr
+                ar = t
+            }
+            var q = pr * pr - pi * pi
+            pi = pr * pi + pi * pr
+            pr = q
+            n = Math.floor(n / 2)
+        }
+        if ((ar == ar && ar - ar != 0) || (ai == ai && ai - ai != 0)) {
+            pyRaiseExc("OverflowError", "complex exponentiation")
+        }
+        return {v: pyNewCplx(ar, ai)}
     }
     if (op == "+") { return {v: pyNewCplx(lr + rr, li + ri)} }
     if (op == "-") { return {v: pyNewCplx(lr - rr, li - ri)} }
@@ -2550,7 +2689,7 @@ function js_pyunary(opv, v) {
         if (bv !== null) { return rtABigNarrow(pyABitNot(bv)) }
         return ~pyNum(v)
     }
-    if (pyIsCplx(v)) { return pyNewCplx(-pyCplxRe(v), -pyCplxIm(v)) }
+    if (pyIsCplx(v)) { return pyNewCplx(pyFloNegate(pyCplxRe(v)), pyFloNegate(pyCplxIm(v))) }
     if (pyIsBig(v)) { return rtABigNeg(v) }
     if (pyIsFlo(v)) { return pyMkFlo(pyFloNegate(v["__flo"])) }
     return -pyNum(v)
@@ -3895,6 +4034,45 @@ function js_pyformatfn(args) {
     return js_pyformat(args[0], spec, "")
 }
 
+// complex.__format__: each part goes through the FLOAT formatter. No type is
+// repr's shape (parenthesized, or the imaginary part alone when the real one is
+// +0.0) - with a precision it is 'g' - and 'n' is 'g'. The imaginary part always
+// shows its sign once a real part precedes it. Go: rt.pyFmtCplx.
+function pyFmtCplx(x, typ, prec, sign, zflag, alt, group) {
+    var re = pyCplxRe(x)
+    var bare = typ == "" && prec < 0
+    var skipRe = typ == "" && re == 0 && 1 / re > 0
+    var ptyp = typ
+    if (typ == "" || typ == "n") { ptyp = "g" }
+    var tail = ""
+    if (zflag) { tail = "z" }
+    if (alt && !bare) { tail = tail + "#" }
+    tail = tail + group
+    if (prec >= 0) { tail = tail + "." + prec }
+    if (!bare) { tail = tail + ptyp }
+    var imSign = "+"
+    if (skipRe) { imSign = sign }
+    var ims = pyFmtCplxPart(pyCplxIm(x), imSign + tail, bare, alt) + "j"
+    if (skipRe) { return ims }
+    var res = pyFmtCplxPart(re, sign + tail, bare, alt)
+    if (typ == "") { return "(" + res + ims + ")" }
+    return res + ims
+}
+
+// One part. With no type and no precision it is repr's text: the float form
+// minus its forced ".0", and '#' puts the point back.
+function pyFmtCplxPart(f, spec, bare, alt) {
+    var t = js_pyformat(pyMkFlo(f), spec, "")
+    if (!bare) { return t }
+    if (t.length > 2 && t.substring(t.length - 2) == ".0") { t = t.substring(0, t.length - 2) }
+    if (alt && t.indexOf(".") < 0 && t.indexOf("n") < 0) {
+        var ep = t.indexOf("e")
+        if (ep < 0) { return t + "." }
+        return t.substring(0, ep) + "." + t.substring(ep, t.length)
+    }
+    return t
+}
+
 // format(v, spec, conv); conv is "", "r", "s" or "a" (the !conversion).
 function js_pyformat(v, specV, convV) {
     var spec = pyToStr(specV)
@@ -3971,9 +4149,11 @@ function js_pyformat(v, specV, convV) {
         return pyFmtPad(fill, align, width, "", sbody)
     }
     if (pyIsCplx(x)) {
-        if (typ != "" || prec >= 0 || sign != "" || alt || zero || group != "") { pyFail("unsupported format spec for complex: '" + spec + "'") }
+        if (typ != "" && "eEfFgGn".indexOf(typ) < 0) { pyFmtErr("ValueError", unknown) }
+        if (fill == "0") { pyFmtErr("ValueError", "Zero padding is not allowed in complex format specifier") }
+        if (align == "=") { pyFmtErr("ValueError", "'=' alignment flag is not allowed in complex format specifier") }
         if (align == "") { align = ">" }
-        return pyFmtPad(fill, align, width, "", pyStr(x))
+        return pyFmtPad(fill, align, width, "", pyFmtCplx(x, typ, prec, sign, zflag, alt, group))
     }
     var isInt = typeof x == "number" || typeof x == "boolean" || pyIsBig(x)
     if (!isInt && !pyIsFlo(x)) {
@@ -4036,7 +4216,7 @@ function js_pyformat(v, specV, convV) {
     }
     if (upper) { body = body.toUpperCase() }
     if (typ == "%") { body = body + "%" }
-    if (zflag && neg && !pyFmtNonZero(body)) { neg = false }
+    if (zflag && neg && a - a == 0 && !pyFmtNonZero(body)) { neg = false }
     var ip = 0
     while (pyFmtDigit(body, ip)) { ip = ip + 1 }
     return pyFmtNum(neg, sign, "", body.slice(0, ip), body.slice(ip), group, 3, fill, align, width, zero)

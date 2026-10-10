@@ -3673,6 +3673,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 	case *jsObject:
 		// A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
 		// reads <class 'float'> rather than the default object rendering.
+		if re, im, ok := pyComplexParts(t); ok {
+			return pyCplxRepr(re, im)
+		}
 		if name, ok := rt.pyClassName(t); ok {
 			// A class a `class` statement made carries its defining module in
 			// an own __module__ (<class '__main__.B'>); a builtin has none.
@@ -15207,6 +15210,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pycomplex": func(a []uint64) uint64 {
 			return w(newPyComplex(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
 		},
+		// complex(...): the argument array.
+		"js_pycomplexnew": func(a []uint64) uint64 {
+			return w(rt.pyComplexNew(rt.argArray(u(a[0]))))
+		},
 		// x: T in a class or module body records the annotation. __annotations__ is
 		// created in THIS scope on first use (js_scope_decl writes the own scope, so a
 		// class body gets its own dict rather than adding to the module's) and the
@@ -17771,17 +17778,26 @@ func isPyComplex(v interface{}) bool {
 	return ok
 }
 
-// pyComplexBin is + - * / == != on complex numbers, with a real operand promoted.
+// pyRealOf is a real operand of complex arithmetic as a double; an arbitrary
+// precision int is its nearest one.
+func (rt *jsrt) pyRealOf(v interface{}) float64 {
+	if bi, ok := v.(*jsBigInt); ok {
+		return rt.pyBigToF(bi.v)
+	}
+	return rt.toNumber(v)
+}
+
+// pyComplexBin is + - * / ** == != on complex numbers, with a real operand promoted.
 // ok is false for an operator complex numbers do not have (Python has no ordering
 // on them either), which lets js_pybin fall through to its usual error.
 func (rt *jsrt) pyComplexBin(op string, l, r interface{}) (interface{}, bool) {
 	lr, li, lok := pyComplexParts(l)
 	if !lok {
-		lr, li = rt.toNumber(l), 0
+		lr, li = rt.pyRealOf(l), 0
 	}
 	rr, ri, rok := pyComplexParts(r)
 	if !rok {
-		rr, ri = rt.toNumber(r), 0
+		rr, ri = rt.pyRealOf(r), 0
 	}
 	switch op {
 	case "+":
@@ -17789,19 +17805,209 @@ func (rt *jsrt) pyComplexBin(op string, l, r interface{}) (interface{}, bool) {
 	case "-":
 		return newPyComplex(lr-rr, li-ri), true
 	case "*":
-		return newPyComplex(lr*rr-li*ri, lr*ri+li*rr), true
+		return newPyComplex(pyCplxMul(lr, li, rr, ri)), true
 	case "/":
-		d := rr*rr + ri*ri
+		d := float64(rr*rr) + float64(ri*ri)
 		if d == 0 {
 			return nil, false
 		}
-		return newPyComplex((lr*rr+li*ri)/d, (li*rr-lr*ri)/d), true
+		return newPyComplex((float64(lr*rr)+float64(li*ri))/d, (float64(li*rr)-float64(lr*ri))/d), true
 	case "==":
 		return lr == rr && li == ri, true
 	case "!=":
 		return lr != rr || li != ri, true
+	case "**":
+		// An integral power 0..100, by CPython's c_powu square-and-multiply (the
+		// order of the products decides the rounding); an infinite part is
+		// CPython's OverflowError. Twin of the "**" arm of cplxOp in
+		// languages/python-interpreter.abnf and pyAComplexBin in
+		// languages/lib/python-rt.metajs.
+		if ri != 0 || rr < 0 || rr > 100 || rr != math.Floor(rr) {
+			return nil, false
+		}
+		ar, ai, pr, pi := 1.0, 0.0, lr, li
+		for n := int(rr); n > 0; n >>= 1 {
+			if n&1 == 1 {
+				ar, ai = pyCplxMul(ar, ai, pr, pi)
+			}
+			pr, pi = pyCplxMul(pr, pi, pr, pi)
+		}
+		if math.IsInf(ar, 0) || math.IsInf(ai, 0) {
+			panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "complex exponentiation")})
+		}
+		return newPyComplex(ar, ai), true
 	}
 	return nil, false
+}
+
+// pyCplxMul is the complex product. The float64 conversions keep Go from fusing
+// a product into an FMA (arm64 does), which CPython's product does not.
+func pyCplxMul(ar, ai, br, bi float64) (float64, float64) {
+	return float64(ar*br) - float64(ai*bi), float64(ar*bi) + float64(ai*br)
+}
+
+// pyCplxPart is one part of repr(complex): repr(float) without its forced ".0".
+func pyCplxPart(f float64) string {
+	return strings.TrimSuffix(pyFloStr(f), ".0")
+}
+
+// pyCplxRepr is repr(complex), which is also str(): the real part is left out
+// when it is +0.0, otherwise the pair is parenthesized. Twin of cplxStr in
+// languages/python-interpreter.abnf and pyCplxRepr in
+// languages/lib/python-rt.metajs.
+func pyCplxRepr(re, im float64) string {
+	ims := pyCplxPart(im)
+	if re == 0 && !math.Signbit(re) {
+		return ims + "j"
+	}
+	if ims[0] != '-' {
+		ims = "+" + ims
+	}
+	return "(" + pyCplxPart(re) + ims + "j)"
+}
+
+// pyComplexNew is complex(real=0, imag=0): each argument a real number or a
+// complex, the result real.real - imag.imag + (real.imag + imag.real)j as CPython
+// builds it; a lone string is parsed. Twin of pyComplexNew in
+// languages/python-interpreter.abnf and js_pycomplexnew in
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyComplexNew(args []interface{}) interface{} {
+	var r, i interface{} = 0.0, 0.0
+	if len(args) > 0 {
+		r = args[0]
+	}
+	if len(args) > 1 {
+		i = args[1]
+	}
+	if s, ok := r.(string); ok && len(args) < 2 {
+		return rt.pyCplxFromStr(s)
+	}
+	part := func(v interface{}, what string) (float64, float64, bool) {
+		if re, im, ok := pyComplexParts(v); ok {
+			return re, im, true
+		}
+		switch t := v.(type) {
+		case float64, bool, *jsPyFlo, *jsBigInt:
+			return rt.pyRealOf(t), 0, false
+		}
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", what+pyTypeName(rt, v))})
+	}
+	what := "complex() argument must be a string or a number, not "
+	if len(args) > 1 {
+		what = "complex() argument 'real' must be a real number, not "
+	}
+	re, im, rc := part(r, what)
+	ire, iim, ic := part(i, "complex() argument 'imag' must be a real number, not ")
+	if len(args) > 1 {
+		im = ire
+		if rc {
+			_, rim, _ := pyComplexParts(r)
+			im += rim
+		}
+		if ic {
+			re -= iim
+		}
+	}
+	return newPyComplex(re, im)
+}
+
+// pyCplxFromStr is complex("1+2j"), CPython's complex_from_string: surrounding
+// spaces and one pair of parentheses, then a real, an imaginary (2j), or a real
+// and a signed imaginary (1-2j); an imaginary with no digits (j, -j, 1+j) is 1.
+func (rt *jsrt) pyCplxFromStr(s0 string) interface{} {
+	s := strings.TrimSpace(s0)
+	if len(s) > 1 && s[0] == '(' && s[len(s)-1] == ')' {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	num := func(t string) float64 { return pyStrToF(strings.ReplaceAll(t, "_", "")) }
+	isJ := func(k int) bool { return k < len(s) && (s[k] == 'j' || s[k] == 'J') }
+	e1 := pyFloPrefix(s, 0)
+	a := 0.0
+	if e1 > 0 {
+		a = num(s[:e1])
+		if e1 == len(s) {
+			return newPyComplex(a, 0)
+		}
+		if isJ(e1) && e1+1 == len(s) {
+			return newPyComplex(0, a)
+		}
+	}
+	var sg byte
+	if e1 < len(s) {
+		sg = s[e1]
+	}
+	if sg == '+' || sg == '-' || e1 == 0 {
+		e2 := pyFloPrefix(s, e1)
+		b := 0.0
+		if e2 > e1 {
+			b = num(s[e1:e2])
+		} else {
+			b = 1
+			if sg == '-' {
+				b = -1
+			}
+			if sg == '+' || sg == '-' {
+				e2 = e1 + 1
+			}
+		}
+		if isJ(e2) && e2+1 == len(s) {
+			return newPyComplex(a, b)
+		}
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("ValueError", "complex() arg is a malformed string")})
+}
+
+// pyFloPrefix answers the end of the float literal at i (a sign, digits with an
+// optional point, an exponent; or inf / infinity / nan), or i when there is none.
+func pyFloPrefix(s string, i int) int {
+	at := func(k int) byte {
+		if k < len(s) {
+			return s[k]
+		}
+		return 0
+	}
+	digit := func(k int) bool { c := at(k); return (c >= '0' && c <= '9') || c == '_' }
+	j := i
+	if at(j) == '+' || at(j) == '-' {
+		j++
+	}
+	end := j + 8
+	if end > len(s) {
+		end = len(s)
+	}
+	low := strings.ToLower(s[j:end])
+	if low == "infinity" {
+		return j + 8
+	}
+	if strings.HasPrefix(low, "inf") || strings.HasPrefix(low, "nan") {
+		return j + 3
+	}
+	d := 0
+	for ; digit(j); j++ {
+		d++
+	}
+	if at(j) == '.' {
+		for j++; digit(j); j++ {
+			d++
+		}
+	}
+	if d == 0 {
+		return i
+	}
+	if at(j) == 'e' || at(j) == 'E' {
+		k := j + 1
+		if at(k) == '+' || at(k) == '-' {
+			k++
+		}
+		ed := 0
+		for ; digit(k); k++ {
+			ed++
+		}
+		if ed > 0 {
+			j = k
+		}
+	}
+	return j
 }
 
 // ----------------------------------------------------------------------------
@@ -18364,6 +18570,13 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	// still answered first, because a value that really holds None must not be
 	// mistaken for a missing one (a compiled regex and a match object are read
 	// this way).
+	// A complex's parts are floats.
+	if re, im, ok := pyComplexParts(obj); ok && (name == "real" || name == "imag") {
+		if name == "real" {
+			return &jsPyFlo{f: re}
+		}
+		return &jsPyFlo{f: im}
+	}
 	if o, ok := obj.(*jsObject); ok {
 		if v, has := o.props[name]; has {
 			return v
@@ -19962,6 +20175,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		if _, _, isDict := dictParts(t); isDict {
 			return "dict"
 		}
+		if isPyComplex(t) {
+			return "complex"
+		}
 		// A CURSOR names its own type - CPython's list_iterator /
 		// str_ascii_iterator / dict_keyiterator / map / filter / zip /
 		// enumerate / reversed. type(it).__name__ reads it (js_pytype hands the
@@ -20819,14 +21035,76 @@ func (rt *jsrt) pyPctValueErr(msg string) {
 	panic(&jsThrown{value: rt.pyExcInstance("ValueError", msg)})
 }
 
+// pyFmtCplx is complex.__format__: each part goes through the FLOAT formatter.
+// No type is repr's shape (parenthesized, or the imaginary part alone when the
+// real one is +0.0) - with a precision it is 'g' - and 'n' is 'g'. The
+// imaginary part always shows its sign once a real part precedes it. Twin of
+// pyFmtCplx in languages/python-interpreter.abnf and
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyFmtCplx(re, im float64, typ string, prec int, sign rune, zflag, alt bool, group string) string {
+	bare := typ == "" && prec < 0
+	skipRe := typ == "" && re == 0 && !math.Signbit(re)
+	ptyp := typ
+	if typ == "" || typ == "n" {
+		ptyp = "g"
+	}
+	tail := ""
+	if zflag {
+		tail += "z"
+	}
+	if alt && !bare {
+		tail += "#"
+	}
+	tail += group
+	if prec >= 0 {
+		tail += "." + strconv.Itoa(prec)
+	}
+	if !bare {
+		tail += ptyp
+	}
+	sg := ""
+	if sign != 0 {
+		sg = string(sign)
+	}
+	// One part. With no type and no precision it is repr's text: the float
+	// form minus its forced ".0", and '#' puts the point back.
+	part := func(f float64, spec string) string {
+		t := rt.pyFormat(&jsPyFlo{f: f}, spec, "")
+		if !bare {
+			return t
+		}
+		t = strings.TrimSuffix(t, ".0")
+		if alt && !strings.ContainsAny(t, ".n") {
+			if ep := strings.IndexByte(t, 'e'); ep >= 0 {
+				t = t[:ep] + "." + t[ep:]
+			} else {
+				t += "."
+			}
+		}
+		return t
+	}
+	imSign := "+"
+	if skipRe {
+		imSign = sg
+	}
+	ims := part(im, imSign+tail) + "j"
+	if skipRe {
+		return ims
+	}
+	res := part(re, sg+tail)
+	if typ == "" {
+		return "(" + res + ims + ")"
+	}
+	return res + ims
+}
+
 // pyFormat is the format mini-language behind format(), str.format and the
 // f-string: [[fill]align][sign][z][#][0][width][grouping][.precision][type], by
 // CPython's rules per type. A str takes s; an int (a bool too) takes b c d o x X
 // n, or a float type after becoming its nearest double; a float takes e E f F g
 // G n % or none - repr() without a precision, and with one a 'g' that keeps a
 // fractional digit and turns exponential one digit sooner. Any other value takes
-// only the empty spec, and a complex only fill, alignment and width (padding its
-// str(); the rest of its own mini-language fails loudly). A number
+// only the empty spec, and a complex e E f F g G n or none (pyFmtCplx). A number
 // right-aligns and a str left-aligns by default; the 0 flag is a '0' fill with
 // '=' alignment for a number, and with a grouping it groups the padding too.
 // Widths count code points. The errors are CPython's, with its text. Twin of
@@ -20930,14 +21208,19 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 		}
 		return rt.pyFmtPad(fill, align, width, "", xs)
 	}
-	if isPyComplex(x) {
-		if typ != "" || prec >= 0 || sign != 0 || alt || zero || group != "" {
-			rt.fail("unsupported format spec for complex: '%s'", spec)
+	if re, im, ok := pyComplexParts(x); ok {
+		switch {
+		case typ != "" && !strings.Contains("eEfFgGn", typ):
+			fail("ValueError", unknown)
+		case fill == "0":
+			fail("ValueError", "Zero padding is not allowed in complex format specifier")
+		case align == '=':
+			fail("ValueError", "'=' alignment flag is not allowed in complex format specifier")
 		}
 		if align == 0 {
 			align = '>'
 		}
-		return rt.pyFmtPad(fill, align, width, "", rt.pyString(x))
+		return rt.pyFmtPad(fill, align, width, "", rt.pyFmtCplx(re, im, typ, prec, sign, zflag, alt, group))
 	}
 	bi, isInt := pyBigOperand(x)
 	if _, _, isInst := pyInstance(x); isInst {
