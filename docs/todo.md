@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-278** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-284** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -231,12 +231,13 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · IN PROGRESS (SH+C+DA+KT worker, round 3) [V]
+### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · BLOCKED - on T-081 [V]
 `arrayOf<Int>().first()` → `Array is empty.`, `asSequence().first()` → `Sequence is
-empty.`, `map.values.first()` → `Collection is empty.` (check each with the jar). An
-Array, a Sequence, a values view and a List are the same host array here, so no
-receiver carries a kind - see T-081. Also absent: `reduceOrNull`/`reduceRightOrNull`.
-
+empty.`, `map.values.first()` → `Collection is empty.`, `Empty array can't be
+reduced.`, `Array has more than one element.` (all read from the 2.2.21 jar). An Array,
+a Sequence, a values view and a List are one host array: needs the nominal kind of
+T-081 (jsArray in abnf/jsrt.go, the floor's array cell). reduceOrNull /
+reduceRightOrNull were added in b38a051.
 ### T-081 boxed values know their KIND but not their declared class · P2 · KT + SW + CORE · OPEN [V]
 Two boxed values of one primitive kind and different declared classes cannot be told
 apart: kotlin's mixed Float/Double set key, swift's `Int` vs `Int64` (`8 as Int64 is
@@ -244,9 +245,9 @@ Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
 
-### T-198 kotlin: `String.toDouble()` accepts a numeric prefix · P1 · KT · IN PROGRESS (SH+C+DA+KT worker, round 3) [V spec-only]
-`"1.5abc".toDouble()` parses (k2ParseNum: layer 2 parseFloat, Go twin Sscanf %g); Kotlin
-throws NumberFormatException. Check toInt/toLong/toFloat/toDoubleOrNull the same way.
+### T-283 kotlin: `toInt` and Unicode digits; hex-float precision · P3 · KT · OPEN [V]
+`"١٢".toInt()` is 12 in the jar, NFE here. A hex-float mantissa in toDouble is exact
+only to 53 bits in the interpreter and layer 2 (the Go twin uses strconv).
 
 ---
 
@@ -300,23 +301,10 @@ interpreter and llvm.Run (swiftc `[3]`).
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-100 dart: an extension on `int` · P1 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [V spec-only]
-`extension IX on int { bool evenq() => isEven; }` fails: `getMember` knows no Dart
-`int` members. Needs a member table in abnf/jsrt.go (or jsrtdart.go) and layer 2. Do
-NOT route through `js_kget` (`"abc".slice(1)` started working when dart tried, which
-real Dart rejects).
-
-### T-101 dart: function-type subtyping · P2 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [V spec-only]
-The features check `tdef-legacy-form` asserts `fDouble is FOldStyle` is true with
-`typedef FOldStyle(bool e)` and `int fDouble(int)`; parameters are contravariant, so
-`int Function(int)` is not a `dynamic Function(bool)` and Dart says false. Implement
-function-type subtyping (parameter contravariance, return covariance) and correct the
-check.
-
-### T-102 dart: chained `x as T is T` · P3 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [U spec-only]
-The spec grammar's relationalExpression allows one `is`/`as` postfix; the features
-checks `typetest-chain-as-then-is` and `typetest-chain-as-as-isnot` may be invalid
-Dart. Decide from the spec; if invalid, rewrite the checks with parentheses.
+### T-282 dart: the String member surface is tiny · P1 · DA · OPEN [V spec-only]
+`"ab".toUpperCase()` aborts in all three engines ("unknown String method:
+toUpperCase"); only substring, indexOf, charAt, isEmpty are curated. Implement the
+dart:core String API (spec-only).
 
 ---
 
@@ -373,15 +361,27 @@ matrix row could now compare all three engines.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-140 bash: unquoted `${a[@]@A}` splits into 3 words · P1 · SH · IN PROGRESS (SH+C+DA+KT worker, round 3) [V]
-bash 5.3: 4 words. Both halves give 3.
+### T-278 bash: an assignment whose value starts with `=` · P1 · SH · OPEN [V]
+`x==y; echo "[$x]"` prints `[=y]` in bash; both engines "command not found: x==y"
+(exit 127): `AsgEq = "=" NotEq` in both grammars. Also `IFS==`.
+
+### T-279 bash: unquoted `$*` / `${a[*]}` under a null IFS · P1 · SH · OPEN [V]
+`IFS=; set -- "a b" c "" d; printf '<%s>' $*` - bash `<a b><c><d>`, ours `<a bcd>`
+(all engines); `${a[*]@A}` likewise (bash 3 fields, ours 1). The [*] producer must
+know it is unquoted. Minor: quoted `"${a[@]@A}"` with a letter in IFS.
+
+### T-280 bash: `tests/probe.sh bash` - llvm.Run leg has an extra trailing blank line · P3 · SH · OPEN [V]
+`mec bash-to-llvm-ir.abnf -qq` prints nothing, `-q` prints a leading newline; the
+probe's run leg shows one extra blank line. Cosmetic, but it makes every bash probe
+read as a disagreement.
 
 ---
 
 # C — C subset
 
-### T-150 c: `(float)x` is a no-op · P1 · C · IN PROGRESS (SH+C+DA+KT worker, round 3) [V]
-The C subset's float cast does not round to binary32. Oracle: cc.
+### T-281 c: `long` → `float` rounds twice · P3 · C · OPEN [V]
+Via double in both engines, so a 64-bit value near a binary32 tie can differ from cc.
+Probe and round once.
 
 ---
 
@@ -492,7 +492,7 @@ labelled syntax errors); php / csharp / java / c long tails. python 92.9% and ru
 python must each come from that language's own toolchain or spec (python3 is Unicode
 16.0, node 24 is 17.0).
 
-### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · IN PROGRESS (SH+C+DA+KT worker, round 3) [U spec-only]
+### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
@@ -596,6 +596,12 @@ T-228 ruby: top-level locals and top-level defs share one namespace — DONE 00b
 T-229 ruby: `Math.atan2` is one ulp from MRI — DECLINED: MRI calls Apple libm, whose atan2 differs from Go math.Atan2 on 26%, from fdlibm on 9.4%, from the correctly rounded value on 1.6% of random pairs - no portable algorithm reproduces it; recorded at rubyMathCall
 T-231 ruby: `NotLocalCmd` reads scopes from indentation — DECLINED: a guard decides the parse before any tag runs and must stay stateless, so a walk-time table cannot inform it; limit and reproduction recorded in both grammars
 T-232 ruby: `defined?` residual gaps — DONE 25e257b
+T-140 bash: unquoted `${a[@]@A}` splits into 3 words — DONE 11663e6 (every unquoted field list is re-split)
+T-150 c: `(float)x` is a no-op — DONE 1209dab
+T-198 kotlin: `String.toDouble()` accepts a numeric prefix — DONE b38a051
+T-100 dart: an extension on `int` — DONE bc2c547 (spec-only)
+T-101 dart: function-type subtyping — DONE bc2c547 (spec-only)
+T-102 dart: chained `x as T is T` — DONE bc2c547 (spec: one typeTest/typeCast per relationalExpression; checks rewritten with parentheses)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
