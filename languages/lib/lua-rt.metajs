@@ -903,6 +903,17 @@ function js_lukey(v) {
     return v
 }
 
+// A table key as pairs hands it to the program: the text js_keys answers turns
+// back into the number that addresses the same slot, and stays a string
+// otherwise. "" + the key is the store's own spelling of it. Twin of
+// js_lukeyback in abnf/jsrtlua.go.
+function js_lukeyback(k) {
+    if (typeof k != "string") { return k }
+    var n = luParseNum(k)
+    if (n !== undefined && ("" + js_lukey(n)) === k) { return n }
+    return k
+}
+
 // A literal the emitter could not put in the module as a double, because emitNum
 // would round 9223372036854775807 to 9223372036854776000 on the way in.
 // (digit text, radix)

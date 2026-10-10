@@ -1114,8 +1114,29 @@ function s27()
     end
 end
 
+-- ===== SECTION 28: pairs hands a key back as the value that stored it =====
+-- The key a generic for over pairs binds is the stored key itself: a number stays
+-- a number of its own subtype and compares equal to the value that was used as
+-- the index - subnormal floats and integers past 2^53 included - and a string that
+-- merely spells a numeral stays a string. Checked against lua 5.5.
+function s28()
+    local keys = {5e-324, 2.225073858507201e-308, 1e-310, -2.5e-320, 0.1, 1 / 3,
+                  1.7385704740834339e+92, 7, 9007199254740993, 2 ^ 63, "1.0", "x"}
+    local types = {"float", "float", "float", "float", "float", "float",
+                   "float", "integer", "integer", "float", "nil", "nil"}
+    for i = 1, #keys do
+        local t = {}
+        t[keys[i]] = i
+        for k, v in pairs(t) do
+            check("pk" .. i, k == keys[i] and v == i, true)
+            check("pt" .. i, math.type(k) or "nil", types[i])
+        end
+    end
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
+s28() -- SECTION-CALL 28
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

@@ -817,6 +817,21 @@ func init() {
 		}
 		m["js_lustr"] = func(a []uint64) uint64 { return rt.wrapStr(luNumStr(u(a[0]))) }
 		m["js_lukey"] = func(a []uint64) uint64 { return w(luKey(u(a[0]))) }
+		// A table key as pairs hands it to the program. The object store
+		// addresses a number by its text, so js_keys answers text: a text that
+		// reads as a numeral and addresses the same slot again (luKey, then the
+		// store's own spelling) was that number, any other text was a string.
+		// Twin of luaKeyBack in lua-interpreter.abnf.
+		m["js_lukeyback"] = func(a []uint64) uint64 {
+			s, ok := u(a[0]).(string)
+			if !ok {
+				return a[0]
+			}
+			if n, isNum := luParseNum(s); isNum && rt.toString(luKey(n)) == s {
+				return w(n)
+			}
+			return a[0]
+		}
 		// A literal the emitter could not put in the module as a double, because
 		// emitNum would already have rounded 9223372036854775807 to
 		// 9223372036854776000 on the way in. (digit text, radix)

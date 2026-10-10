@@ -2285,7 +2285,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ipairs(t) / pairs(t): both answer the iterator triple the generic for consumes.
     // ipairs walks 1, 2, 3, ... and stops at the first nil element; pairs walks the
     // table's own keys in insertion order (js_keys, deterministic across engines) and
-    // skips the ones whose value is nil, binding the key in its stored (string) form.
+    // skips the ones whose value is nil, binding a numeric key as the number it
+    // was stored as (js_lukeyback).
     // ipairs' iterator is stateless (its control value is the index), pairs' is a closure
     // over a cursor cell - the loop feeds the control value back either way.
     function libINext(bb, argsH) {
@@ -2328,11 +2329,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var iV2 = callExt(bodyB, "js_get", [st, emitStr(bodyB, "i")])
         var keyV = callExt(bodyB, "js_get", [kV, iV2])
         var valV = callExt(bodyB, "js_get", [tV, keyV])
+        var progKeyV = callExt(bodyB, "js_lukeyback", [keyV])
         callExt(bodyB, "js_set", [st, emitStr(bodyB, "i"), callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
         bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_sne", [valV, hUndef])), hitB, skipB)
         skipB.NewBr(headB)
         var parr = callExt(hitB, "js_arr_new", [])
-        callExt(hitB, "js_arr_push", [parr, keyV])
+        callExt(hitB, "js_arr_push", [parr, progKeyV])
         callExt(hitB, "js_arr_push", [parr, valV])
         hitB.NewRet(callLua(hitB, "lua_mk", [parr]))
         endB.NewRet(hUndef)
