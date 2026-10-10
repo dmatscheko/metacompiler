@@ -348,7 +348,7 @@ PropBind    <~~ push(makeProp(takeAll())) ~~>
 // hidden name and gets a generated getter/setter, so every property read and
 // write goes through the same accessor lookup.
 ComputedProp <~~ push(makeComputed(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" PropDefault ] PropAccessors ;
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" PropDefault ] PropAccessors ;
 PropDefault <~~ push({pdefault: pop()}) ~~> = Expression ;
 // The accessor list is tried first: `get` and `set` are ordinary identifiers, so a
 // getter-only body would otherwise read `get { ... }` as a trailing-closure call.
@@ -453,9 +453,11 @@ ProtoSubscript <~~ push({}) ~~>
 ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
             = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
-// typealias: types are parsed and ignored, so an alias needs nothing at run time.
-TypeAliasDecl <~~ push(clearDeclIdx()) ~~>
-            = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
+// typealias: an alias needs nothing at run time; its target text is recorded for
+// the write-site adoption test (swTyUnalias).
+TypeAliasDecl <~~ push(swNoteAlias(takeAll())) ~~>
+            = KwTypealias Id <~~ push({alname: up.in}) ~~> [ SkipAngle ] "="
+              Type <~~ push({alty: stripWs(up.in)}) ~~> [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
 // implicitly unwrapped T!, tuples/function types (A, B) -> C, dotted and generic,
@@ -621,7 +623,8 @@ CondExpr    <~~ push({cexpr: pop()}) ~~> = Expression ;
 BindCond    = OptBind | CaseCond ;
 // `if let x = e` and the 5.7 shorthand `if let x` (which rebinds x from itself).
 OptBind     <~~ push(makeOptBind(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd BindPat [ ":" Type ] [ "=" CondInit ] [ PatWhere ] ;
+            = ( "let" | "var" ) KwEnd BindPat [ ":" Type <~~ push({btype: stripWs(up.in)}) ~~> ]
+              [ "=" CondInit <~~ push({ctext: up.in}) ~~> ] [ PatWhere ] ;
 CaseCond    <~~ push(makeCaseCond(takeAll())) ~~>
             = KwCase Pattern "=" CondInit [ PatWhere ] ;
 CondInit    <~~ push({cinit: pop()}) ~~> = Expression ;
@@ -678,7 +681,7 @@ Decl        = DeclTuple | DeclPlain ;
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
+            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] ;
 // The declaration's type annotation. It is DISCARDED everywhere except for the two
 // things this front end can act on without a type checker: the element labels of a
 // tuple type (LabelledTupleType), the WIDTH of an integer type - `var u: UInt8 =
@@ -759,14 +762,18 @@ Repeat      <~~ push(makeRepeat(takeAll())) ~~>
 For         = ForCase | ForRange | ForList ;
 ForCase     <~~ push(makeForCase(takeAll())) ~~>
             = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
-// The bounds are read at Coalesce level, BELOW RangeExpr, so the loop keeps its own
+// The bounds are read at AddExpr level, BELOW RangeExpr, so the loop keeps its own
 // range operator instead of receiving one range value.
+// `for var x in xs` only makes x mutable, which every loop variable here already is.
+// The inline tags hand the loop variable's annotation to the body (swForSeq).
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = [ LoopLabel ] KwFor ForPat KwIn Coalesce RangeOp Coalesce [ ForWhere ] Block ;
+            = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn AddExpr RangeOp
+              AddExpr <~~ swForSeq("") ~~> [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
 ForList     <~~ push(makeForList(takeAll())) ~~>
-            = [ LoopLabel ] KwFor ForPat KwIn Expression [ ForWhere ] Block ;
+            = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn
+              Expression <~~ swForSeq(up.in) ~~> [ ForWhere ] Block ;
 // The loop variable: a name, _ , or a tuple pattern (for (k, v) in aDictionary).
 ForPat      = TupNames | ForName ;
 ForName     <~~ push({fname: up.in}) ~~> = Wildcard | Id ;
@@ -863,7 +870,12 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "===" | "!==" | "==" | "!=" | "~=" ) <~~ push(stripWs(up.in)) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = Cast { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Cast } ;
+            = Coalesce { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Coalesce } ;
+// a ?? b yields a unless it is nil (short circuit; the nil-coalescing operator).
+// Swift's precedence order, tightest first, is range formation, casting, nil
+// coalescing, comparison: `x as? Double ?? -1` is `(x as? Double) ?? -1`.
+Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
+            = Cast <~~ push({at: up.pos}) ~~> { "??" Cast } ;
 // e as T / e as? T / e as! T / e is T. With no cast operator it is a pure
 // pass-through (a single item).
 Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
@@ -874,17 +886,14 @@ Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
 // PEG never re-enters
 // a rule that already succeeded, so `a[0...1]` cannot be recovered by ordering two
 // alternatives: the optional bound has to live in RangeExpr itself, where the
-// greedy Coalesce still takes `1` first and only a genuinely absent bound falls
+// greedy AddExpr still takes `1` first and only a genuinely absent bound falls
 // through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
 // unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = Coalesce [ RangeOp [ Coalesce ] ] ;
+            = AddExpr [ RangeOp [ AddExpr ] ] ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
-// a ?? b yields a unless it is nil (short circuit; the nil-coalescing operator).
-Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
-            = AddExpr { "??" AddExpr } ;
 // The overflow operators (&+ &- &*) are listed before the plain ones, and | and &
 // are spelled with a guard so they cannot start on the first character of || / &&
 // or of an overflow operator. | and ^ carry Swift's AdditionPrecedence, & its
@@ -1010,7 +1019,7 @@ IndexSfx    <~~ push({kind:"index", idx: makeIndexKey(takeAll())}) ~~>
 // A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
 // first - see RangeExpr for why the UP form cannot be an alternative here.
 IndexArg    = PartRangeDn | Expression ;
-PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp Coalesce ;
+PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp AddExpr ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
 // paren has to be ADJACENT: `print(x)` on one line and `(a, b) = (b, a)` on the
@@ -2824,8 +2833,9 @@ KwContinue  = "continue" KwEnd ;
             if (g.length == 0) { return null }
             return wantLast ? g[g.length - 1] : g[0]
         }
+        // A Dictionary's element is its `(key: K, value: V)` pair.
         var arr = anytype
-        arr = isRange(o) ? rangeArray(o) : (isDict(o) ? o.keys : o)
+        arr = isRange(o) ? rangeArray(o) : (isDict(o) ? swArrayOf(o) : o)
         if (!Array.isArray(arr) || arr.length == 0) { return null }
         return wantLast ? arr[arr.length - 1] : arr[0]
     }
@@ -2857,7 +2867,9 @@ KwContinue  = "continue" KwEnd ;
             if (name == "magnitude") { return swReFlo(fv < 0 || (fv == 0 && 1 / fv < 0) ? 0 - fv : fv, isF32(o)) }
             var ft = builtinTable("Double", false)
             if (ft != null && hasOwn(ft, name)) { return ft[name] }
-            return undefined
+            // A computed property an `extension Double` added.
+            var fg = findAccessor(o, "__get_" + name)
+            return fg == null ? undefined : fg(o)
         }
         if (szIs(o)) {
             if (name == "description") { return szStr(o) }
@@ -2865,7 +2877,8 @@ KwContinue  = "continue" KwEnd ;
             if (name == "magnitude") { return szCmp(o, szConv(0, o.w, o.u)) < 0 ? szNeg(o) : o }
             var it = builtinTable("Int", false)
             if (it != null && hasOwn(it, name)) { return it[name] }
-            return undefined
+            var ig = findAccessor(o, "__get_" + name)
+            return ig == null ? undefined : ig(o)
         }
         // The same three members on a value that stayed a plain number, which is
         // where every integer inside +/- 2^53 lives.
@@ -2916,11 +2929,11 @@ KwContinue  = "continue" KwEnd ;
     //     s[i]      Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
     //     d[9]!     m.swift:3: Fatal error: Unexpectedly found nil while unwrapping an Optional value
     //
-    // The dictionary case is the third one because THIS VALUE MODEL HAS NO OPTIONAL
-    // (manual chapter 7.9): `d[k]` here is Swift's `d[k]!`, so the force-unwrap
-    // message is the honest one. A base that is nil gets it for the same reason.
+    // A missing dictionary key is not a failure: `d[k]` is an Optional and answers
+    // nil, and it is the `!` (ForceSfx) that traps with the third message. A base
+    // that is nil gets that message too.
     function swIndexFail(kind) {
-        if (kind == "dict" || kind == "nil") {
+        if (kind == "nil") {
             fail("Fatal error: Unexpectedly found nil while unwrapping an Optional value")
         }
         if (kind == "string") { fail("Fatal error: String index is out of bounds") }
@@ -2963,7 +2976,7 @@ KwContinue  = "continue" KwEnd ;
         if (isRange(i) && (Array.isArray(o) || typeof o == "string")) { return swSlice(o, i) }
         if (isDict(o)) {
             var di = dictFind(o, i)
-            if (di < 0) { swIndexFail("dict") }
+            if (di < 0) { return null }
             return o.vals[di]
         }
         if (typeof o == "string") {
@@ -3669,10 +3682,26 @@ KwContinue  = "continue" KwEnd ;
     function makeCast(items, pos) {
         if (items.length == 1) { return items[0] }
         var t = items[0]
+        var op = ""
+        var ty = ""
         for (var i = 1; i + 1 < items.length; i = i + 2) {
-            t = makeCastOne(t, items[i].cast, items[i + 1].ctype)
+            op = items[i].cast
+            ty = items[i + 1].ctype
+            t = makeCastOne(t, op, ty)
         }
+        if (op == "as?" && swAdoptable(ty)) { swAsqCasts.push({at: pos, ty: ty}) }
         return t
+    }
+    // The `as? T` casts to a numeric T, by END position (a thunk loses its identity
+    // on the tag stack under goja): the right side of a `??` after one is typed T,
+    // so `x as? Double ?? -1` is -1.0 (swiftc 6.1.2). The latest record wins, which
+    // is the current file's. Twin of swAsqTyOf in swift-to-llvm-ir.abnf.
+    var swAsqCasts = []
+    function swAsqTyOf(at) {
+        for (var i = swAsqCasts.length - 1; i >= 0; i--) {
+            if (swAsqCasts[i].at == at) { return swAsqCasts[i].ty }
+        }
+        return ""
     }
 
     // ----- Value semantics: struct, Array, Dictionary and tuple -----
@@ -4062,10 +4091,18 @@ KwContinue  = "continue" KwEnd ;
         var names = items[0].bnames
         var initT = null
         var whereT = null
+        var bty = ""
+        var btxt = names[0]
         for (var i = 1; i < items.length; i++) {
             if (items[i].cinit != undefined) { initT = items[i].cinit }
             else if (items[i].cwhere != undefined) { whereT = items[i].cwhere }
+            else if (items[i].btype != undefined) { bty = items[i].btype }
+            else if (items[i].ctext != undefined) { btxt = items[i].ctext }
         }
+        // The bound name's annotation, for swKeepMode: the explicit type, else that
+        // of the bare local it unwraps. It holds in the block that follows, whose
+        // swAnnOpen takes it from localAnnPending.
+        if (names.length == 1) { localAnnPending.push({n: names[0], t: bty != "" ? bty : swInferAnn(btxt)}) }
         // `if let x` (Swift 5.7) rebinds x from the x already in scope.
         if (initT == null) { initT = makeVarRef(names[0]) }
         return {bindNames: names, init: initT, whereT: whereT}
@@ -4353,12 +4390,18 @@ KwContinue  = "continue" KwEnd ;
         return function() { return core.test(condT()) ? thenT() : elseT() }
     }
 
-    // items = [thunk, thunk, ...]: a ?? b yields a unless it is nil (short circuit).
+    // items = [thunk, {at}, thunk, ...]: a ?? b yields a unless it is nil (short
+    // circuit). {at} is the first operand's end position, for swAsqTyOf.
     function makeCoalesce(items) {
-        if (items.length == 1) { return items[0] }
+        if (items.length == 2) { return items[0] }
+        var aty = swAsqTyOf(items[1].at)
         return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length && (v === null || v === undefined); i++) { v = items[i]() }
+            var v = anytype
+            v = items[0]()
+            for (var i = 2; i < items.length && (v === null || v === undefined); i++) {
+                v = items[i]()
+                if (aty != "") { v = swAdoptTy(v, aty) }
+            }
             return v
         }
     }
@@ -4398,6 +4441,10 @@ KwContinue  = "continue" KwEnd ;
             else if (items[i].ptype != undefined && ptypes.length > 0) { ptypes[ptypes.length - 1] = items[i].ptype }
             else if (items[i].rtype != undefined) { rtype = items[i].rtype }
         }
+        // The parameters' annotations hold for the closure body, which the walk
+        // reaches next; makeClosure closes the mark.
+        localAnnMarks.push(localAnnLog.length)
+        for (var q = 0; q < names.length; q++) { swNoteLocalAnn(names[q], ptypes[q]) }
         return {csig: true, caps: caps, cparams: names, cptypes: ptypes, crtype: rtype}
     }
     // An @autoclosure argument is passed as a zero-argument closure over the caller's
@@ -4430,6 +4477,7 @@ KwContinue  = "continue" KwEnd ;
             rtype = items[0].crtype
             caps = items[0].caps
             start = 1
+            swAnnClose()
         }
         var body = items.slice(start)
         var noSig = params.length == 0
@@ -4774,7 +4822,12 @@ KwContinue  = "continue" KwEnd ;
                     // Optional chaining: a nil here makes the WHOLE chain nil.
                     if (cur === null || cur === undefined) { return null }
                 } else if (s.kind == "force") {
-                    // Force unwrap: the value is already the unwrapped one here.
+                    // An Optional IS its value in this model, so a force unwrap only
+                    // has to trap on nil. Twin of js_swforce. A delegating
+                    // `self.init(...)!` answers the init body's own result, not the
+                    // instance, so it is not tested.
+                    var dlg = i > 0 && suffixes[i - 1].kind == "mcall" && suffixes[i - 1].name == "init"
+                    if (!dlg && (cur === null || cur === undefined)) { swIndexFail("nil") }
                 } else if (s.kind == "mcall") {
                     var ea = evalArgs(s.args)
                     if (i == 0 && eTy0 != "" && ea.argv.length > 0) {
@@ -4840,7 +4893,8 @@ KwContinue  = "continue" KwEnd ;
         var valT = items[2]
         // The declared type of this name, if a numeric annotation declared it
         // earlier in the walk. Only reached when the slot holds nil; see swAdoptLike.
-        var declTy = ref.path.length == 0 ? declTyOf(ref.name) : ""
+        // An Optional IS its value here, so `Double?` adopts as `Double`.
+        var declTy = ref.path.length == 0 ? swTyStripOpt(declTyOf(ref.name)) : ""
         // `d["b"] = 5` on a NEW key of a `[String: Double]` has NOTHING to adopt
         // from: swSafeElem answers undefined and the value 5 carries no floatness.
         // This is the second site where the value model's own record runs out
@@ -4920,8 +4974,7 @@ KwContinue  = "continue" KwEnd ;
     // written last: `var a: Any = 1.5; a = 2` holds the Int 2. So the write site
     // finds the slot's declared type and skips the adoption when it is existential.
     // A generic parameter is not existential: a `T` slot only ever holds a T, so
-    // adopting from the value is right there. Nor is an unknown name (a typealias),
-    // which keeps adopting.
+    // adopting from the value is right there. A typealias is read as its target.
     //
     // localAnnReg: the annotation of the nearest declaration of each local NAME,
     // walk-time ("" when it is unannotated or numeric, "?" when no declaration is in
@@ -4961,6 +5014,26 @@ KwContinue  = "continue" KwEnd ;
             scopePut(localAnnReg, "$" + n, t)
         }
     }
+    // An unannotated binding initialised from a bare local NAME has that local's
+    // type, so it inherits its annotation: in `func h(_ p: Any) { var q = p; q = 4 }`
+    // q is an Any and holds the Int 4. Twin of swInferAnn in swift-to-llvm-ir.abnf.
+    function swInferAnn(txt) {
+        if (txt == undefined || txt == "" || !hasOwn(localAnnReg, "$" + txt)) { return "" }
+        var a = localAnnReg["$" + txt]
+        return a == "?" ? "" : a
+    }
+    // A for-in over a bare local NAME types its loop variable by that local's
+    // ELEMENT type (`for y in ys` with `ys: [Any]` makes y an Any); the note is
+    // pending for the body's swAnnOpen. swForVar carries the variable from the
+    // pattern's tag to the sequence's; a tuple pattern notes nothing. Twins in
+    // swift-to-llvm-ir.abnf.
+    var swForVar = ""
+    function swForPat(txt) { swForVar = txt.length > 0 && txt.charAt(0) != "(" && txt != "_" ? txt : "" }
+    function swForSeq(seqTxt) {
+        if (swForVar == "") { return }
+        var a = seqTxt == "" ? "" : swInferAnn(seqTxt)
+        localAnnPending.push({n: swForVar, t: a == "" ? "" : swTyPeel(a, 1)})
+    }
     var propTyReg = {}
     function notePropTy(name, ty) {
         if (!hasOwn(propTyReg, "$" + name)) { scopePut(propTyReg, "$" + name, []) }
@@ -4969,20 +5042,85 @@ KwContinue  = "continue" KwEnd ;
     var swStdProtos = {"$CustomStringConvertible": 1, "$CustomDebugStringConvertible": 1,
                        "$Error": 1, "$Sendable": 1, "$Codable": 1, "$Encodable": 1, "$Decodable": 1}
     function swTyIsExist(t0) {
-        var t = swTyStripOpt(swTyTrim(t0))
+        var t = swTyUnalias(t0)
         if (t == "Any" || t == "AnyObject" || t == "AnyHashable") { return true }
         if (swTySplit(t, "&").length > 1) { return true }
         if (t.length > 3 && t.substring(0, 3) == "any") {
             var c = t.charCodeAt(3)
             if (c >= 65 && c <= 90) { return true }
         }
-        return protoNames["$" + t] == 1 || swStdProtos["$" + t] == 1
+        return protoNames["$" + t] == 1 || swStdProtos["$" + t] == 1 || swAhead(t).proto
+    }
+    // This half runs each top-level statement as the walk reaches it, so a protocol
+    // or a typealias declared BELOW a top-level write is not registered yet when the
+    // write asks (the compiler half asks after the whole walk). The declarations
+    // ahead are therefore read off the source text, once per file: `protocol N` and
+    // `typealias N = T` (T up to the end of the line). A word inside a string or a
+    // comment can only add a name that no annotation uses.
+    var swAheadCache = {}
+    function swAhead(n) {
+        var f = c.curFile()
+        if (!hasOwn(swAheadCache, "$" + f)) { scopePut(swAheadCache, "$" + f, swScanAhead(f == "" ? "" : c.readFile(f))) }
+        var a = swAheadCache["$" + f]
+        return {proto: hasOwn(a.protos, "$" + n), alias: hasOwn(a.aliases, "$" + n) ? a.aliases["$" + n] : ""}
+    }
+    function swIdCh(k) { return (k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95 }
+    function swScanAhead(src) {
+        var out = {protos: {}, aliases: {}}
+        var i = 0
+        while (i < src.length) {
+            var k = src.charCodeAt(i)
+            if (!swIdCh(k)) { i = i + 1; continue }
+            var s = i
+            while (i < src.length && swIdCh(src.charCodeAt(i))) { i = i + 1 }
+            var w = src.substring(s, i)
+            if (w != "protocol" && w != "typealias") { continue }
+            var j = i
+            while (j < src.length && (src.charCodeAt(j) == 32 || src.charCodeAt(j) == 9)) { j = j + 1 }
+            var ns = j
+            while (j < src.length && swIdCh(src.charCodeAt(j))) { j = j + 1 }
+            if (j == ns) { continue }
+            var nm = src.substring(ns, j)
+            if (w == "protocol") { scopePut(out.protos, "$" + nm, 1); continue }
+            var e = j
+            while (e < src.length && src.charCodeAt(e) != 10 && src.charCodeAt(e) != 61) { e = e + 1 }
+            if (e >= src.length || src.charCodeAt(e) != 61) { continue }
+            var te = e + 1
+            while (te < src.length && src.charCodeAt(te) != 10 && src.charCodeAt(te) != 59
+                   && !(src.charCodeAt(te) == 47 && te + 1 < src.length && src.charCodeAt(te + 1) == 47)) { te = te + 1 }
+            scopePut(out.aliases, "$" + nm, stripWs(src.substring(e + 1, te)))
+        }
+        return out
+    }
+    // `typealias JSON = [String: Any]`: every alias by name, so an annotation that
+    // names one is read as its target. Twin of swTyUnalias in swift-to-llvm-ir.abnf.
+    var swAliasReg = {}
+    function swNoteAlias(items) {
+        var n = ""
+        var t = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].alname != undefined) { n = items[i].alname }
+            if (items[i].alty != undefined) { t = items[i].alty }
+        }
+        if (n != "") { scopePut(swAliasReg, "$" + n, t) }
+        return clearDeclIdx()
+    }
+    function swTyUnalias(t0) {
+        var t = swTyStripOpt(swTyTrim(t0))
+        var guard = 0
+        while (guard < 16) {
+            var to = hasOwn(swAliasReg, "$" + t) ? swAliasReg["$" + t] : swAhead(t).alias
+            if (to == "") { break }
+            t = swTyStripOpt(swTyTrim(to))
+            guard = guard + 1
+        }
+        return t
     }
     // The element type n subscripts below an array/dictionary annotation, or "".
     function swTyPeel(ty0, n) {
         var ty = ty0
         for (var i = 0; i < n; i++) {
-            ty = swTyStripOpt(swTyTrim(ty))
+            ty = swTyUnalias(ty)
             if (ty.length < 3 || ty.charAt(0) != "[" || ty.charAt(ty.length - 1) != "]") { return "" }
             var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
             ty = kv[kv.length - 1]
@@ -5018,8 +5156,15 @@ KwContinue  = "continue" KwEnd ;
     function swExfOf(o, k) {
         if (o == undefined || o === null || typeof o != "object") { return false }
         var c = o.__class
-        if (c == undefined || c === null || typeof c != "object") { return false }
-        return hasOwn(c, "__exf_" + k)
+        var guard = 0
+        // Up the superclass chain: an inherited computed or observed property is
+        // marked on its declaring type only.
+        while (c != undefined && c !== null && typeof c == "object" && guard < 64) {
+            if (hasOwn(c, "__exf_" + k)) { return true }
+            c = c.__super
+            guard = guard + 1
+        }
+        return false
     }
     // The numeric type each name was DECLARED at, filled as the walk passes the
     // declaration. It is the last resort of the write-site adoption and is read only
@@ -5060,6 +5205,7 @@ KwContinue  = "continue" KwEnd ;
         // OTHER annotation can be existential, so a numeric one records "".
         var annTxt = elemTy
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
+        if (k == 1 && items[2] != undefined) { annTxt = swInferAnn(items[2].itext) }
         swNoteLocalAnn(name, annTxt)
         var init = items[k]
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
@@ -5699,12 +5845,16 @@ KwContinue  = "continue" KwEnd ;
         // under __v_p, so without it neither the default of
         // `var p: Double = 0 { didSet {} }` nor a later `o.p = 3` would adopt.
         var pty = ""
+        // Any other annotation, for swKeepMode: a write to an existential one
+        // (`var x: Any { didSet {} }`) does not adopt.
+        var oty = ""
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.pdefault != undefined) { dflt = it.pdefault; continue }
             if (it.itype != undefined) { pty = it.itype; continue }
             if (it.atype != undefined) { pty = it.atype; continue }
+            if (it.otype != undefined) { oty = it.otype; continue }
             if (it.acc == undefined) { continue }
             var a = it.acc
             if (a.kind == "get" || a.kind == "_read") { get = a.body }
@@ -5712,10 +5862,10 @@ KwContinue  = "continue" KwEnd ;
             else if (a.kind == "willSet") { will = a.body; if (a.param != null) { willP = a.param } }
             else if (a.kind == "didSet") { did = a.body; if (a.param != null) { didP = a.param } }
         }
-        notePropTy(name, pty)
+        notePropTy(name, oty != "" ? oty : pty)
         return {cprop: {name: name, get: get, set: set, setP: setP, will: will, willP: willP,
                         did: did, didP: didP, observed: (will != null || did != null),
-                        dflt: dflt, ty: pty}}
+                        dflt: dflt, ty: pty, ann: oty}}
     }
     // The generated getter/setter of an observed stored property: the value lives
     // under __v_<name>, willSet sees the incoming value and didSet the previous one.
@@ -6027,6 +6177,10 @@ KwContinue  = "continue" KwEnd ;
             for (var xf = 0; xf < mem.fields.length; xf++) {
                 var xa = mem.fields[xf].ann
                 if (xa != undefined && swTyIsExist(xa)) { scopePut(cls, "__exf_" + mem.fields[xf].store, true) }
+            }
+            // And an existential computed or observed one, the type's own.
+            for (var xc = 0; xc < mem.comps.length; xc++) {
+                if (swTyIsExist(mem.comps[xc].ann)) { scopePut(cls, "__exf_" + mem.comps[xc].name, true) }
             }
             // __ctor sets the default valued stored properties on a fresh instance,
             // before init runs - the superclass's first. An observed property is
@@ -6935,9 +7089,30 @@ KwContinue  = "continue" KwEnd ;
             if (bt0 != null) {
                 var bm0 = classFind(bt0, name)
                 if (typeof bm0 == "function") { return {v: bindSelf(bm0, self)} }
+                // An unqualified PROPERTY of the builtin itself, `count` inside
+                // `extension String`, is `self.count`.
+                if (swBuiltinProp(name)) { return {v: swGetField(self, name)} }
+                // Any other name that is not a host global is one of the builtin's
+                // own METHODS: `uppercased()` is `self.uppercased()`. Twin of the
+                // swInBuiltinExt arm of makeCall in swift-to-llvm-ir.abnf.
+                if (!hasOwn(hostGlobals, name)) {
+                    return {v: function() {
+                        var margs = []
+                        for (var i = 0; i < arguments.length; i++) { margs.push(arguments[i]) }
+                        return mcall(self, name, margs)
+                    }}
+                }
             }
         }
         return null
+    }
+    // The properties a builtin receiver answers itself (swGetField's own arms),
+    // which an extension body may name without `self.`. Twin of swBuiltinProp in
+    // swift-to-llvm-ir.abnf.
+    function swBuiltinProp(n) {
+        return n == "count" || n == "isEmpty" || n == "first" || n == "last"
+            || n == "description" || n == "indices" || n == "magnitude" || n == "bitWidth"
+            || n == "isNaN" || n == "isInfinite" || n == "isFinite" || n == "isZero"
     }
     core.setMiss = function(name, value) {
         var self = findThis()

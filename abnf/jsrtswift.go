@@ -1139,12 +1139,20 @@ func init() {
 		//	s[i]   Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
 		//	d[9]!  m.swift:3: Fatal error: Unexpectedly found nil while unwrapping an Optional value
 		//
-		// A missing key is the third one because this value model has no Optional
-		// (manual chapter 7.9): `d[k]` here IS Swift's `d[k]!`, and a nil base is the
-		// same force unwrap. They are rt.fail and not a throw on purpose - none of
-		// these is catchable in Swift, where they trap the process.
+		// A missing key answers nil (`d[k]` is an Optional); the third message is
+		// js_swforce's, and a nil base gets it too. They are rt.fail and not a
+		// throw on purpose - none of these is catchable in Swift, where they trap
+		// the process.
 		const swNilUnwrap = "Fatal error: Unexpectedly found nil while unwrapping an Optional value"
 		basePyget := m["js_pyget"]
+		// `x!`: an Optional IS its value in this model, so only nil traps. Twin
+		// of js_swforce in swift-rt.metajs and ForceSfx in swift-interpreter.abnf.
+		m["js_swforce"] = func(a []uint64) uint64 {
+			if v := u(a[0]); v == nil || v == jsNull || v == jsUndef {
+				rt.swAbort("%s", swNilUnwrap)
+			}
+			return a[0]
+		}
 		m["js_swidx"] = func(a []uint64) uint64 {
 			base := u(a[0])
 			// a[1...] / a[0..<2] / s[1...3]: a RANGE subscript answers the
@@ -1167,7 +1175,7 @@ func init() {
 			}
 			if keys, _, ok := dictParts(base); ok {
 				if rt.pyDictFind(keys, u(a[1])) < 0 {
-					rt.swAbort("%s", swNilUnwrap)
+					return w(jsNull)
 				}
 				return basePyget(a)
 			}

@@ -343,7 +343,7 @@ PropBind    <~~ push(makeProp(takeAll())) ~~>
 // the type, which is what a member read/write of x is emitted as; an observed
 // property keeps its storage under the hidden name __v_x.
 ComputedProp <~~ push(makeComputed(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" PropDefault ] PropAccessors ;
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" PropDefault ] PropAccessors ;
 PropDefault <~~ push({pdefault: pop()}) ~~> = Expression ;
 // The accessor list is tried first: `get` and `set` are ordinary identifiers, so a
 // getter-only body would otherwise read `get { ... }` as a trailing-closure call.
@@ -442,9 +442,11 @@ ProtoSubscript <~~ push({}) ~~>
 ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
             = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
-// typealias: types are parsed and ignored, so an alias needs nothing at run time.
-TypeAliasDecl <~~ push(makeTypeAliasStmt()) ~~>
-            = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
+// typealias: an alias needs nothing at run time; its target text is recorded for
+// the write-site adoption test (swTyUnalias).
+TypeAliasDecl <~~ push(makeTypeAliasStmt(takeAll())) ~~>
+            = KwTypealias Id <~~ push({alname: up.in}) ~~> [ SkipAngle ] "="
+              Type <~~ push({alty: stripWs(up.in)}) ~~> [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
 // implicitly unwrapped T!, tuples/function types (A, B) -> C, dotted and generic,
@@ -609,7 +611,8 @@ CondExpr    <~~ push({cexpr: pop()}) ~~> = Expression ;
 BindCond    = OptBind | CaseCond ;
 // `if let x = e` and the 5.7 shorthand `if let x` (which rebinds x from itself).
 OptBind     <~~ push(makeOptBind(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd BindPat [ ":" Type ] [ "=" CondInit ] [ PatWhere ] ;
+            = ( "let" | "var" ) KwEnd BindPat [ ":" Type <~~ push({btype: stripWs(up.in)}) ~~> ]
+              [ "=" CondInit <~~ push({ctext: up.in}) ~~> ] [ PatWhere ] ;
 CaseCond    <~~ push(makeCaseCond(takeAll())) ~~>
             = KwCase Pattern "=" CondInit [ PatWhere ] ;
 CondInit    <~~ push({cinit: pop()}) ~~> = Expression ;
@@ -667,7 +670,7 @@ Decl        = DeclTuple | DeclPlain ;
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
+            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] ;
 // The declaration's type annotation. It is DISCARDED everywhere except for the two
 // things this front end can act on without a type checker: the element labels of a
 // tuple type (LabelledTupleType), and the WIDTH of an integer type - `var u: UInt8 =
@@ -745,14 +748,18 @@ Repeat      <~~ push(makeRepeat(takeAll())) ~~>
 For         = ForCase | ForRange | ForList ;
 ForCase     <~~ push(makeForCase(takeAll())) ~~>
             = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
-// The bounds are read at Coalesce level, BELOW RangeExpr, so the loop keeps its own
+// The bounds are read at AddExpr level, BELOW RangeExpr, so the loop keeps its own
 // range operator instead of receiving one range value.
+// `for var x in xs` only makes x mutable, which every loop variable here already is.
+// The inline tags hand the loop variable's annotation to the body (swForSeq).
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = [ LoopLabel ] KwFor ForPat KwIn Coalesce RangeOp Coalesce [ ForWhere ] Block ;
+            = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn AddExpr RangeOp
+              AddExpr <~~ swForSeq("") ~~> [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
 ForList     <~~ push(makeForList(takeAll())) ~~>
-            = [ LoopLabel ] KwFor ForPat KwIn Expression [ ForWhere ] Block ;
+            = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn
+              Expression <~~ swForSeq(up.in) ~~> [ ForWhere ] Block ;
 // The loop variable: a name, _ , or a tuple pattern (for (k, v) in aDictionary).
 ForPat      = TupNames | ForName ;
 ForName     <~~ push({fname: up.in}) ~~> = Wildcard | Id ;
@@ -844,7 +851,12 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "===" | "!==" | "==" | "!=" | "~=" ) <~~ push(stripWs(up.in)) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = Cast { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Cast } ;
+            = Coalesce { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Coalesce } ;
+// a ?? b yields a unless it is nil (the nil-coalescing operator; b only runs then).
+// Swift's precedence order, tightest first, is range formation, casting, nil
+// coalescing, comparison: `x as? Double ?? -1` is `(x as? Double) ?? -1`.
+Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
+            = Cast <~~ push({at: up.pos}) ~~> { "??" Cast } ;
 // e as T / e as? T / e as! T / e is T. With no cast operator it is a pure
 // pass-through (a single item).
 Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
@@ -855,17 +867,14 @@ Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
 // PEG never re-enters
 // a rule that already succeeded, so `a[0...1]` cannot be recovered by ordering two
 // alternatives: the optional bound has to live in RangeExpr itself, where the
-// greedy Coalesce still takes `1` first and only a genuinely absent bound falls
+// greedy AddExpr still takes `1` first and only a genuinely absent bound falls
 // through. The DOWN form (`a[...1]`) is IndexArg's own alternative, which is safe
 // unordered because no expression can begin with `...` or `..<`.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = Coalesce [ RangeOp [ Coalesce ] ] ;
+            = AddExpr [ RangeOp [ AddExpr ] ] ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
-// a ?? b yields a unless it is nil (the nil-coalescing operator; b only runs then).
-Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
-            = AddExpr { "??" AddExpr } ;
 // The overflow operators (&+ &- &*) are listed before the plain ones, and | and &
 // are spelled with a guard so they cannot start on the first character of || / &&
 // or of an overflow operator. | and ^ carry Swift's AdditionPrecedence, & its
@@ -989,7 +998,7 @@ IndexSfx    <~~ push({kind:"index", idx: makeIndexKey(takeAll())}) ~~>
 // A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
 // first - see RangeExpr for why the UP form cannot be an alternative here.
 IndexArg    = PartRangeDn | Expression ;
-PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp Coalesce ;
+PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp AddExpr ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
 // paren has to be ADJACENT: `print(x)` on one line and `(a, b) = (b, a)` on the
@@ -2478,10 +2487,24 @@ KwContinue  = "continue" KwEnd ;
     function makeCast(items, pos) {
         if (items.length == 1) { return items[0] }
         var t = items[0]
+        var op = ""
+        var ty = ""
         for (var i = 1; i + 1 < items.length; i = i + 2) {
-            t = makeCastOne(t, items[i].cast, items[i + 1].ctype)
+            op = items[i].cast
+            ty = items[i + 1].ctype
+            t = makeCastOne(t, op, ty)
         }
+        if (op == "as?" && swAdoptable(ty)) { swAsqCasts.push({at: pos, ty: ty}) }
         return t
+    }
+    // The `as? T` casts to a numeric T, by END position: the right side of a `??`
+    // after one is typed T. Twin of swAsqTyOf in swift-interpreter.abnf.
+    var swAsqCasts = []
+    function swAsqTyOf(at) {
+        for (var i = swAsqCasts.length - 1; i >= 0; i--) {
+            if (swAsqCasts[i].at == at) { return swAsqCasts[i].ty }
+        }
+        return ""
     }
 
     // ----- Tuples -----
@@ -2824,6 +2847,20 @@ KwContinue  = "continue" KwEnd ;
             return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, useLB), llvm.ir.NewIncoming(qv, qB)])}
         }
         return function(b) {
+            if (swBuiltinProp(name) && swInBuiltinExt()) {
+                // `count` inside `extension String` is `self.count` unless a
+                // binding of that name is in scope.
+                var bt = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+                var bLocB = curF.NewBlock("")
+                var bSelfB = curF.NewBlock("")
+                var bJoinB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [bt, emitStr(b, "undefined")])), bSelfB, bLocB)
+                var blv = plain(bLocB)
+                blv.b.NewBr(bJoinB)
+                var bsv = emitFieldRead(bSelfB, bSelfB.NewCall(rtKGet(), [curScopeV, emitStr(bSelfB, "self")]), name)
+                bSelfB.NewBr(bJoinB)
+                return {b: bJoinB, v: bJoinB.NewPhi([llvm.ir.NewIncoming(blv.v, blv.b), llvm.ir.NewIncoming(bsv, bSelfB)])}
+            }
             if (!isComputedName(name) && !isMemberMethod(name)) { return plain(b) }
             var t = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
             var localB = curF.NewBlock("")
@@ -3232,8 +3269,8 @@ KwContinue  = "continue" KwEnd ;
             var othB = curF.NewBlock("")
             var rdF = rtIsDictStrict(notStrB, seqV)
             rdF.b.NewCondBr(truthy(rdF.b, rdF.v), dictB, chkB)
-            callExt(dictB, "js_scope_set", [sc, emitStr(dictB, "a"),
-                                            callExt(dictB, "js_get", [seqV, emitStr(dictB, "keys")])])
+            // A Dictionary's element is its `(key: K, value: V)` pair.
+            callExt(dictB, "js_scope_set", [sc, emitStr(dictB, "a"), dictB.NewCall(rtArrayOf(), [seqV])])
             dictB.NewBr(joinB)
             chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [seqV, emitStr(chkB, "Array")])), arrB, othB)
             callExt(arrB, "js_scope_set", [sc, emitStr(arrB, "a"), seqV])
@@ -3991,10 +4028,18 @@ KwContinue  = "continue" KwEnd ;
         var names = items[0].bnames
         var initT = null
         var whereT = null
+        var bty = ""
+        var btxt = names[0]
         for (var i = 1; i < items.length; i++) {
             if (items[i].cinit != undefined) { initT = items[i].cinit }
             else if (items[i].cwhere != undefined) { whereT = items[i].cwhere }
+            else if (items[i].btype != undefined) { bty = items[i].btype }
+            else if (items[i].ctext != undefined) { btxt = items[i].ctext }
         }
+        // The bound name's annotation, for swKeepMode: the explicit type, else that
+        // of the bare local it unwraps. It holds in the block that follows, whose
+        // swAnnOpen takes it from localAnnPending.
+        if (names.length == 1) { localAnnPending.push({n: names[0], t: bty != "" ? bty : swInferAnn(btxt)}) }
         // `if let x` (Swift 5.7) rebinds x from the x already in scope.
         if (initT == null) { initT = makeVarRef(names[0]) }
         return {bindNames: names, init: initT, whereT: whereT}
@@ -4154,18 +4199,22 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // a ?? b: the right side runs only in its own block when a is nil (phi merge).
+    // items = [emitter, {at}, emitter, ...]; {at} is the first operand's end
+    // position, for swAsqTyOf.
     function makeCoalesce(items) {
-        if (items.length == 1) { return items[0] }
+        if (items.length == 2) { return items[0] }
+        var aty = swAsqTyOf(items[1].at)
         return function(b) {
             var r = items[0](b)
             b = r.b
             var v = r.v
-            for (var i = 1; i < items.length; i++) {
+            for (var i = 2; i < items.length; i++) {
                 var rightB = curF.NewBlock("")
                 var mergeB = curF.NewBlock("")
                 var isNull = callExt(b, "js_seq", [v, hNull])
                 b.NewCondBr(truthy(b, isNull), rightB, mergeB)
                 var r2 = items[i](rightB)
+                if (aty != "") { r2 = {b: r2.b, v: swEmitAdopt(r2.b, r2.v, aty)} }
                 r2.b.NewBr(mergeB)
                 var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(r2.v, r2.b)])
                 b = mergeB
@@ -4357,7 +4406,12 @@ KwContinue  = "continue" KwEnd ;
                     nilExits.push(nB)
                     b = contB
                 } else if (s.kind == "force") {
-                    // Force unwrap: the value is already the unwrapped one here.
+                    // An Optional IS its value in this model, so a force unwrap
+                    // only has to trap on nil. A delegating `self.init(...)!`
+                    // answers the init body's own result, so it is not tested.
+                    if (!(i > 0 && suffixes[i - 1].kind == "mcall" && suffixes[i - 1].name == "init")) {
+                        cur = callExt(b, "js_swforce", [cur])
+                    }
                 } else if (s.kind == "mcall" && i == 0 && headName == "self"
                            && protoStaticName(s.name) != "") {
                     // `self.m()` inside a protocol extension, m not a requirement:
@@ -4453,6 +4507,10 @@ KwContinue  = "continue" KwEnd ;
             else if (items[i].cptype != undefined && ptypes.length > 0) { ptypes[ptypes.length - 1] = items[i].cptype }
             else if (items[i].crtype != undefined) { rtype = items[i].crtype }
         }
+        // The parameters' annotations hold for the closure body, which the walk
+        // reaches next; makeClosure closes the mark.
+        localAnnMarks.push(localAnnLog.length)
+        for (var q = 0; q < names.length; q++) { swNoteLocalAnn(names[q], ptypes[q]) }
         return {csig: true, caps: caps, cparams: names, cptypes: ptypes, crtype: rtype}
     }
     // An @autoclosure argument becomes a zero-argument closure, so the expression
@@ -4484,6 +4542,7 @@ KwContinue  = "continue" KwEnd ;
             rtype = items[0].crtype
             caps = items[0].caps
             start = 1
+            swAnnClose()
         }
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
         // A parameter with a declared type becomes a parameter RECORD, which is
@@ -4874,6 +4933,23 @@ KwContinue  = "continue" KwEnd ;
                 emitWriteBacks(joinB, ea.boxes)
                 return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])}
             }
+            // `uppercased()` inside `extension String` is `self.uppercased()` when
+            // no binding of that name is in scope. Twin of varMiss in
+            // swift-interpreter.abnf.
+            if (swInBuiltinExt()) {
+                var xtv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+                var xLocB = curF.NewBlock("")
+                var xSelfB = curF.NewBlock("")
+                var xJoinB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [xtv, emitStr(b, "undefined")])), xSelfB, xLocB)
+                var xlv = callExt(xLocB, "js_call", [xLocB.NewCall(rtKGet(), [curScopeV, emitStr(xLocB, name)]), hUndef, ea.v])
+                xLocB.NewBr(xJoinB)
+                var xsv = swEmitMCall(xSelfB, xSelfB.NewCall(rtKGet(), [curScopeV, emitStr(xSelfB, "self")]),
+                                      name, emitStr(xSelfB, name), ea.v)
+                xSelfB.NewBr(xJoinB)
+                emitWriteBacks(xJoinB, ea.boxes)
+                return {b: xJoinB, v: xJoinB.NewPhi([llvm.ir.NewIncoming(xlv, xLocB), llvm.ir.NewIncoming(xsv, xSelfB)])}
+            }
             var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
             var rv = callExt(b, "js_call", [fV, hUndef, ea.v])
             emitWriteBacks(b, ea.boxes)
@@ -4916,7 +4992,8 @@ KwContinue  = "continue" KwEnd ;
         // The declared type of this name, if a numeric annotation declared it
         // earlier in the walk. Only reached when the slot holds nil; see
         // js_swadoptlike.
-        var declTy = ref.path.length == 0 ? declTyOf(ref.name) : ""
+        // An Optional IS its value here, so `Double?` adopts as `Double`.
+        var declTy = ref.path.length == 0 ? swTyStripOptText(declTyOf(ref.name)) : ""
         // `d["b"] = 5` on a NEW key of a `[String: Double]` has NOTHING to adopt
         // from: sw_safeget answers undefined and the value 5 carries no floatness.
         // This is the second site where the value model's own record runs out
@@ -5103,8 +5180,7 @@ KwContinue  = "continue" KwEnd ;
     // written last: `var a: Any = 1.5; a = 2` holds the Int 2. So the write site
     // finds the slot's declared type and skips the adoption when it is existential.
     // A generic parameter is not existential: a `T` slot only ever holds a T, so
-    // adopting from the value is right there. Nor is an unknown name (a typealias),
-    // which keeps adopting.
+    // adopting from the value is right there. A typealias is read as its target.
     //
     // localAnnReg: the annotation of the nearest declaration of each local NAME,
     // walk-time ("" when it is unannotated or numeric, "?" when no declaration is in
@@ -5144,6 +5220,24 @@ KwContinue  = "continue" KwEnd ;
             localAnnReg["$" + n] = t
         }
     }
+    // An unannotated binding initialised from a bare local NAME has that local's
+    // type, so it inherits its annotation. Twin of swInferAnn in
+    // swift-interpreter.abnf.
+    function swInferAnn(txt) {
+        if (txt == undefined || txt == "" || !hasOwn(localAnnReg, "$" + txt)) { return "" }
+        var a = localAnnReg["$" + txt]
+        return a == "?" ? "" : a
+    }
+    // A for-in over a bare local NAME types its loop variable by that local's
+    // ELEMENT type; the note is pending for the body's swAnnOpen. Twins of
+    // swForPat / swForSeq in swift-interpreter.abnf.
+    var swForVar = ""
+    function swForPat(txt) { swForVar = txt.length > 0 && txt.charAt(0) != "(" && txt != "_" ? txt : "" }
+    function swForSeq(seqTxt) {
+        if (swForVar == "") { return }
+        var a = seqTxt == "" ? "" : swInferAnn(seqTxt)
+        localAnnPending.push({n: swForVar, t: a == "" ? "" : swTyPeel(a, 1)})
+    }
     var propTyReg = {}
     function notePropTy(name, ty) {
         if (!hasOwn(propTyReg, "$" + name)) { propTyReg["$" + name] = [] }
@@ -5152,7 +5246,7 @@ KwContinue  = "continue" KwEnd ;
     var swStdProtos = {"$CustomStringConvertible": 1, "$CustomDebugStringConvertible": 1,
                        "$Error": 1, "$Sendable": 1, "$Codable": 1, "$Encodable": 1, "$Decodable": 1}
     function swTyIsExist(t0) {
-        var t = swTyStripOptText(swTyTrim(t0))
+        var t = swTyUnalias(t0)
         if (t == "Any" || t == "AnyObject" || t == "AnyHashable") { return true }
         if (swTySplit(t, "&").length > 1) { return true }
         if (t.length > 3 && t.substring(0, 3) == "any") {
@@ -5161,11 +5255,24 @@ KwContinue  = "continue" KwEnd ;
         }
         return protoNames[t] == 1 || swStdProtos["$" + t] == 1
     }
+    // `typealias JSON = [String: Any]`: every alias by name, so an annotation that
+    // names one is read as its target. Twin of swTyUnalias in
+    // swift-interpreter.abnf.
+    var swAliasReg = {}
+    function swTyUnalias(t0) {
+        var t = swTyStripOptText(swTyTrim(t0))
+        var guard = 0
+        while (hasOwn(swAliasReg, "$" + t) && guard < 16) {
+            t = swTyStripOptText(swTyTrim(swAliasReg["$" + t]))
+            guard = guard + 1
+        }
+        return t
+    }
     // The element type n subscripts below an array/dictionary annotation, or "".
     function swTyPeel(ty0, n) {
         var ty = ty0
         for (var i = 0; i < n; i++) {
-            ty = swTyStripOptText(swTyTrim(ty))
+            ty = swTyUnalias(ty)
             if (ty.length < 3 || ty.charAt(0) != "[" || ty.charAt(ty.length - 1) != "]") { return "" }
             var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
             ty = kv[kv.length - 1]
@@ -5210,6 +5317,10 @@ KwContinue  = "continue" KwEnd ;
             for (var i = 0; i < r.fs.length; i++) {
                 var a = r.fs[i].ann
                 if (a != undefined && swTyIsExist(a)) { out.push(r.fs[i].store) }
+            }
+            // A computed or observed property, by its own name.
+            for (var j = 0; j < r.cs.length; j++) {
+                if (swTyIsExist(r.cs[j].ann)) { out.push(r.cs[j].name) }
             }
             tn = r.sup
             guard = guard + 1
@@ -5261,6 +5372,7 @@ KwContinue  = "continue" KwEnd ;
         // OTHER annotation can be existential, so a numeric one records "".
         var annTxt = elemTy
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
+        if (k == 1 && items[2] != undefined) { annTxt = swInferAnn(items[2].itext) }
         swNoteLocalAnn(name, annTxt)
         var init = items[k]
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
@@ -6045,12 +6157,16 @@ KwContinue  = "continue" KwEnd ;
         // under __v_p, so without it neither the default of
         // `var p: Double = 0 { didSet {} }` nor a later `o.p = 3` would adopt.
         var pty = ""
+        // Any other annotation, for swKeepMode: a write to an existential one
+        // (`var x: Any { didSet {} }`) does not adopt.
+        var oty = ""
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.pdefault != undefined) { dflt = it.pdefault; continue }
             if (it.itype != undefined) { pty = it.itype; continue }
             if (it.atype != undefined) { pty = it.atype; continue }
+            if (it.otype != undefined) { oty = it.otype; continue }
             if (it.acc == undefined) { continue }
             var a = it.acc
             if (a.kind == "get" || a.kind == "_read") { get = a.body }
@@ -6061,9 +6177,9 @@ KwContinue  = "continue" KwEnd ;
         var observed = (will != null || did != null)
         if (get != null || observed) { computedNames["$" + name] = 1 }
         if (set != null || observed) { setterNames["$" + name] = 1 }
-        notePropTy(name, pty)
+        notePropTy(name, oty != "" ? oty : pty)
         return {cprop: {name: name, get: get, set: set, setP: setP, will: will, willP: willP,
-                        did: did, didP: didP, observed: observed, dflt: dflt, ty: pty}}
+                        did: did, didP: didP, observed: observed, dflt: dflt, ty: pty, ann: oty}}
     }
     // items = [{params}, {acc}...] -> the __sub_get / __sub_set method records.
     function makeSubscript(items) {
@@ -6944,7 +7060,7 @@ KwContinue  = "continue" KwEnd ;
             }
         }
         rec.fields = fieldNames
-        typeFieldAnn["$" + name] = {fs: mem.fields, sup: superName}
+        typeFieldAnn["$" + name] = {fs: mem.fields, cs: mem.comps, sup: superName}
         classNames[name] = 1
         noteDeclRec(rec)
         return function(b) {
@@ -7039,6 +7155,20 @@ KwContinue  = "continue" KwEnd ;
         return n == "Int" || n == "Int8" || n == "Int16" || n == "Int32" || n == "Int64"
             || n == "UInt" || n == "Double" || n == "Float" || n == "String" || n == "Character"
             || n == "Bool" || n == "Array" || n == "Dictionary"
+    }
+    // The properties a builtin receiver answers itself (emitFieldRead's own arms),
+    // which an extension body may name without `self.`. Twin of swBuiltinProp in
+    // swift-interpreter.abnf.
+    function swBuiltinProp(n) {
+        return n == "count" || n == "isEmpty" || n == "first" || n == "last"
+            || n == "description" || n == "indices" || n == "magnitude" || n == "bitWidth"
+            || n == "isNaN" || n == "isInfinite" || n == "isFinite" || n == "isZero"
+    }
+    // Is the innermost enclosing type an extension of a builtin (emit time)?
+    function swInBuiltinExt() {
+        if (typeStack.length == 0) { return false }
+        var n = typeStack[typeStack.length - 1].name
+        return isBuiltinTypeName(n) && classNames[n] != 1 && protoNames[n] != 1 && enumNames[n] != 1
     }
     // Adopting P adopts everything P INHERITS first, from the parent's OWN table.
     // The recursion is what makes a later `extension A1 { func a() }` reach a type
@@ -7206,8 +7336,15 @@ KwContinue  = "continue" KwEnd ;
     // A typealias needs nothing at run time, but it must not leave lastDeclRec
     // pointing at the type declared before it - MemberType would then adopt that
     // record as a nested one and re-key it under the wrong parent.
-    function makeTypeAliasStmt() {
+    function makeTypeAliasStmt(items) {
         lastDeclRec = -1
+        var n = ""
+        var t = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].alname != undefined) { n = items[i].alname }
+            if (items[i].alty != undefined) { t = items[i].alty }
+        }
+        if (n != "") { swAliasReg["$" + n] = t }
         return function(b) { return b }
     }
     // extension T { ... } installs its members on the existing descriptor (a struct,

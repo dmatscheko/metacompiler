@@ -2427,6 +2427,101 @@ func s39() {
     check("39r", "\(ams[0].m39)" == "9" && "\(mds[0].m39)" == "9.0")
 }
 
+// ===== SECTION 40: optional subscripts, `as?` before `??`, builtin extensions =====
+// A missing dictionary key is nil (only `!` traps); `x as? T ?? y` is
+// `(x as? T) ?? y` with y typed T; a Dictionary's element is a (key:, value:)
+// pair; inside an extension of a builtin, `count` and `uppercased()` are members of
+// self. Every value below is swiftc 6.1.2's.
+extension String {
+    var lenPlus40: Int { return count + 1 }
+    func shout40() -> String { return uppercased() + "!" }
+}
+extension Double {
+    var bad40: Bool { return isNaN || isInfinite }
+}
+extension Array {
+    var half40: Int { return count / 2 }
+}
+func s40() {
+    let d: [String: String] = ["a": "1"]
+    let ks = ["a", "b"]
+    check("40a", (d[ks[0]] ?? "x") == "1" && (d[ks[1]] ?? "x") == "x")
+    var hit = ""
+    for k in ks {
+        if let v = d[k] { hit += v } else { hit += "-" + k }
+    }
+    check("40b", hit == "1-b")
+    var m = [String: Int]()
+    m["q"] = 5
+    check("40c", m["z"] == nil && m["q"] != nil && (m["z"] ?? -1) == -1 && m["q"]! + 1 == 6)
+    let xs: [Any] = [1.5, "s", 2]
+    var cs = ""
+    for x in xs { cs += "\(x as? Double ?? -1) \(x as? Int ?? 0 + 1);" }
+    check("40d", cs == "1.5 1;-1.0 1;-1.0 2;")
+    let one = ["a": 1]
+    var fs = "none"
+    if let f = one.first { fs = "\(f.key) \(f.value) \(f)" }
+    check("40e", fs == "a 1 (key: \"a\", value: 1)" && [String: Int]().first == nil)
+    check("40f", "abc".lenPlus40 == 4 && "hi".shout40() == "HI!" && [1, 2, 3, 4].half40 == 2)
+    let ds = [1.5, Double.nan]
+    check("40g", !ds[0].bad40 && ds[1].bad40)
+}
+
+// ===== SECTION 41: write adoption - Optional, alias, observer, inferred locals =====
+// A write to a numeric slot adopts its type (`Double?` included); a write to an
+// existential one keeps what it is given - also when the existential is spelled
+// through a typealias, is an observed or computed property, or is inferred from a
+// local, an `if var` / `for var` source or a closure parameter. The top-level write
+// below runs before the protocol it names is declared. Every value is swiftc 6.1.2's.
+var top41: Num41 = 1.5
+top41 = 2
+let top41Txt = "\(top41)"
+protocol Num41 {}
+extension Double: Num41 {}
+extension Int: Num41 {}
+typealias JSON41 = [String: Any]
+typealias Any41 = Any
+class Obs41 {
+    var p: Any = 1.5 { didSet { } }
+    var q: Any { get { return store } set { store = newValue } }
+    var store: Any = 1.5
+}
+class Sub41: Obs41 {}
+class Num41B { var p: Double = 1.5; var q: Double = 0.5 }
+func pass41(_ v: Any) -> String { var u = v; u = 4; return "\(u)" }
+func s41() {
+    var x: Double? = nil
+    x = 3
+    check("41a", "\(x!)" == "3.0")
+    var j: JSON41 = ["a": 1.5]
+    j["a"] = 2
+    var at: Any41 = 1.5
+    at = 2
+    check("41b", "\(j["a"]!)" == "2" && "\(at)" == "2")
+    let o = Obs41()
+    o.p = 2
+    o.q = 3
+    check("41c", "\(o.p) \(o.q)" == "2 3")
+    let anys: [Any] = [1.5]
+    var fv = ""
+    for var e in anys { e = 7; fv += "\(e)" }
+    for e in anys { var z = e; z = 6; fv += " \(z)" }
+    let oa: Any? = 1.5
+    if var w = oa { w = 8; fv += " \(w)" }
+    let od: Double? = 2.5
+    if var w = od { w = 5; fv += " \(w)" }
+    check("41d", fv == "7 6 8 5.0")
+    let cl = { (v: Any) -> String in var u = v; u = 9; return "\(u)" }
+    check("41e", cl(1.5) == "9" && pass41(1.5) == "4")
+    check("41f", top41Txt == "2")
+    let nb = Num41B()
+    nb.p = 2
+    nb.q = 3
+    let sb = Sub41()
+    sb.p = 4
+    check("41g", "\(nb.p) \(nb.q) \(sb.p)" == "2.0 3.0 4")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2469,6 +2564,8 @@ func main() {
     s37() // SECTION-CALL 37
     s38() // SECTION-CALL 38
     s39() // SECTION-CALL 39
+    s40() // SECTION-CALL 40
+    s41() // SECTION-CALL 41
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -945,9 +945,8 @@ function js_kindex(s, i) {
 //     s[i]   Swift/StringCharacterView.swift:158: Fatal error: String index is out of bounds
 //     d[9]!  m.swift:3: Fatal error: Unexpectedly found nil while unwrapping an Optional value
 //
-// A missing dictionary key is the THIRD one because this value model has no
-// Optional (the manual's chapter 7.9): `d[k]` here IS Swift's `d[k]!`. A nil base
-// gets it for the same reason.
+// A missing dictionary key answers nil (`d[k]` is an Optional); the THIRD message
+// is js_swforce's, and a nil base gets it too.
 function swIsRange(v) {
     if (!swIsObj(v)) { return false }
     return v["__range"] === true
@@ -996,7 +995,7 @@ function js_swidx(c, k) {
     if (swIsRange(k) && (rtIsArr(c) || typeof c == "string")) { return swSlice(c, k) }
     if (rtIsDictObj(c)) {
         var i = swDictFind(c["keys"], k)
-        if (i < 0) { swAbort("Fatal error: Unexpectedly found nil while unwrapping an Optional value") }
+        if (i < 0) { return null }
         return c["vals"][i]
     }
     if (c === null || c === undefined) {
@@ -1015,6 +1014,15 @@ function js_swidx(c, k) {
     }
     swAbort("Fatal error: cannot subscript a value of this type")
     return undefined
+}
+
+// `x!`: an Optional IS its value in this model, so only nil traps. Twin of
+// js_swforce in abnf/jsrtswift.go and ForceSfx in swift-interpreter.abnf.
+function js_swforce(v) {
+    if (v === null || v === undefined) {
+        swAbort("Fatal error: Unexpectedly found nil while unwrapping an Optional value")
+    }
+    return v
 }
 
 // THE TOP OF THE PROGRAM: an error nobody caught. swift-to-llvm-ir.abnf wraps the
