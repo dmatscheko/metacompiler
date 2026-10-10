@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-233** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-238** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -215,26 +215,26 @@ decline each with its pair unless a spec-based rule separates them.
 
 # JV — Java
 
-### T-212 java: Character classification beyond U+024F is approximate · P2 · JV · OPEN [V]
+### T-212 java: Character classification beyond U+024F is approximate · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
 Past U+024F a letter is only a cased letter and only 0-9 are digits: a U+0250..U+3000
 probe differs from java on ~4,000 `isLetter` rows (uncased scripts). Needs Unicode
 category tables (java 24's Unicode version) in all three engines; case mapping and
 isWhitespace are already exact there.
 
-### T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter · P1 · JV · OPEN [V]
+### T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
 Interpreter: "unknown name: StrictMath", `new String("ab")` "unknown class: String",
 "unknown class: ArrayList". Probe each in the compiled halves too and match java.
 
-### T-214 java: overload resolution uses the argument's runtime class · P1 · JV · OPEN [V]
+### T-214 java: overload resolution uses the argument's runtime class · P1 · JV · IN PROGRESS (JV worker, round 3) [V]
 `Object o = "s"; f(o)` with `f(Object)` and `f(String)` picks f(String); javac picks
 f(Object) (JLS 15.12.2 is static). Also an enum's or an anonymous class's own
 overloads are not registered (not resolved). Needs the argument's static type
 (java-decltypes.js already records declared types).
 
-### T-215 java: duplicate assertion IDs in tests/java-test-full.java · P3 · JV · OPEN [V]
+### T-215 java: duplicate assertion IDs in tests/java-test-full.java · P3 · JV · IN PROGRESS (JV worker, round 3) [V]
 `int27`, `int28`, `iof5` appear twice; rename so every ID is unique.
 
-### T-216 java: transcendentals other than exp vs java · P2 · JV · OPEN [V]
+### T-216 java: transcendentals other than exp vs java · P2 · JV · IN PROGRESS (JV worker, round 3) [V]
 `Math.exp` differed from java on 78 of 3,276 rows (now fdlibm). Probe `log`, `log10`,
 `log1p`, `expm1`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`,
 `tanh`, `cbrt`, `hypot`, `pow` on boundary values against java (and StrictMath) and port
@@ -321,33 +321,28 @@ semantics including width, precision, `-`, `+`, `0`, `#` flags and `%x` on strin
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-090 swift: optional dictionary lookups trap on a missing key · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-`d[k] ?? "x"` and `if let v = d[k]` on a missing key trap in every engine; swiftc
-gives the default / skips the branch.
+### T-233 swift: a Dictionary as a Sequence · P1 · SW · OPEN [V]
+`for e in d` with one binder binds the key (swiftc `(key: "a", value: 1)`); `d.map`,
+`d.filter`, `first(where:)`, `min(by:)`, `sorted(by:)` abort ("unknown Dictionary
+method"). All engines.
 
-### T-091 swift: `x as? Double ?? -1` does not parse · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
+### T-234 swift: `hasPrefix` / `contains` on String abort compiled · P1 · SW · OPEN [V]
+`"abc".hasPrefix("ab")`, `"abc".contains("b")`: llvm.Run and native "unknown String
+method"; interpreter `true` (= swiftc). Audit the compiled String surface against the
+interpreter's.
 
-### T-092 swift: `Dictionary.first` answers a key, not a `(key, value)` tuple · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
+### T-235 swift: `Optional(2.5)` and `Optional.map` · P1 · SW · OPEN [V]
+"unknown name: Optional" in all engines; `first.map { String($0) } ?? "-"`: interpreter
+"method .map on nil", compiler "method call 'map' on a object"; swiftc `h` / `-`. Also
+`flatMap`.
 
-### T-093 swift: remaining write-adoption cases · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-`var x: Double? = nil; x = 3` prints `3` (swiftc `3.0`). A typealias to `Any`
-(`typealias JSON = [String: Any]`), an observed/computed `Any` property
-(`var x: Any { didSet {...} }`), and `for var` / `if var` / closure-parameter locals
-still adopt the old value's type on a write. In a generic `func gg<T>(_ a: T, _ b:
-T) -> T`, `gg(1.5, 2)` gives `2.0` (swiftc infers T = Any... check). The interpreter
-runs top-level statements as walked, so a protocol declared after a top-level write
-to a slot of that type is unknown there - a halves split for that case.
+### T-236 swift: a bare trailing closure call in expression position, compiler only · P1 · SW · OPEN [V]
+`return filter { $0 > 1 }` inside an Array extension: compiler "variable not defined:
+filter"; interpreter `[2, 3]` (= swiftc).
 
-### T-094 swift: an extension on a builtin receiver · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
-`extension String { var lenPlus: Int { return count + 1 } }` fails in all three
-engines (`unknown name: count`): `getMember` does not know Swift's `count`. Needs the
-interpreter, the twin and layer 2. Do NOT route through `js_kget` (its string surface
-is JavaScript's).
-
-### T-095 swift: an extension-only member through a protocol-typed variable · P3 · SW · IN PROGRESS (SW worker, round 2) [V]
-`let d: Named = D2(); d.shout` binds to the extension in swiftc and to D2's own member
-here. Needs the expression's static type: a propagation pass plus a declared-type
-table touching every member-access site in both grammars. Cost first.
+### T-237 swift: extension-only members through a protocol type with no declared receiver · P3 · SW · OPEN [V]
+`f().shout` / `a.b.shout` where the static type is a protocol still dispatch to the
+conforming type's own member; swiftc binds the extension. Needs an expression typer.
 
 ---
 
@@ -590,6 +585,12 @@ T-188 ruby: `defined?(3 + 3)` — DONE 5e96dc4
 T-189 ruby: a top-level local is visible inside a `def` — DONE 8d6bda9
 T-190 ruby: top-level `@ivar` aborts — DONE 2f25333
 T-191 ruby: Rational/Complex exactness (rest of T-030) — DONE c343864 ca0f20d
+T-090 swift: optional dictionary lookups trap on a missing key — DONE dfe498e
+T-091 swift: `x as? Double ?? -1` does not parse — DONE dfe498e
+T-092 swift: `Dictionary.first` answers a key, not a `(key, value)` tuple — DONE dfe498e
+T-093 swift: remaining write-adoption cases — DONE dfe498e
+T-094 swift: an extension on a builtin receiver — DONE dfe498e
+T-095 swift: an extension-only member through a protocol-typed variable — DONE f459804 (receivers whose declared type the walk knows; call results / property chains stay dynamic, T-237)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
