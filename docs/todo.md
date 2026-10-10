@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-205** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-211** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -141,37 +141,6 @@ big_fdiv). Needs Rational parts that are bigs and typed Complex parts.
 
 # JS — JavaScript and TypeScript
 
-### T-040 js/ts: identifier `\u` escapes are not resolved in the interpreter halves · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`var a = 1; print(a)` prints `1` under the compiler and throws
-`ReferenceError: a is not defined` under the interpreter, in js and typescript. The
-compiler has `idName`; the interpreters have ~30 `up.in` sites each, and `up.in` is
-matched TEXT, so no tag inside `Id` can fix it centrally. `js-test-full.js` SECTION 52
-deliberately asserts no escaped spelling until this is fixed. Oracle: node.
-
-### T-041 js: spreading a generator answers an empty array · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`[...g()]` gives length 0 (node 2), both halves. The spread path
-(`evalArgs`/`spreadInto`) admits arrays and strings only; also check `f(...g())`,
-`new Set(g())`, `Array.from(g())`, destructuring from a generator.
-
-### T-042 js: `Math.pow(±1, NaN/±Infinity)` gives 1 · P1 · JS · Shared: runtime.c, jsrt.go · IN PROGRESS (JS worker, round 1) [V]
-node gives NaN; Go's `math.Pow` and C's `pow` follow C99 and give 1. The `**` operator
-probably has the same gap. Fix in one place for both.
-
-### T-043 js/ts: `JSON.stringify` / `JSON.parse` are missing · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-ReferenceError in every engine. Implement the common surface (objects, arrays,
-strings with escapes, numbers incl. -0/NaN→null, nested, indent argument, `toJSON`);
-then assert `JSON.stringify(new Error("m")) === "{}"`.
-
-### T-044 js: a derived class whose `super()` returns an object does not rebind `this` · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-
-### T-045 js: Error own-property introspection · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
-`e.hasOwnProperty("name")` is true (node false); `Object.getOwnPropertyNames(e)` is
-`[]` (node `[stack, message]` for `new Error("m")`).
-
-### T-046 js: "is not a function" names the callee without node's spacing · P3 · JS · IN PROGRESS (JS worker, round 1) [V]
-We say `o.a+1 is not a function`; node `(o.a + 1) is not a function`. The message is
-rebuilt from whitespace-stripped source text.
-
 ### T-047 js: a generator body's `this` is wrong in the NATIVE build only · P2 · JS · Shared: runtime.c · OPEN [V]
 `function* g(){ yield this }; g().next().value` gives the generator object natively,
 `undefined` in the other legs. `js_this` is one global slot in layer 2 and the emitter
@@ -191,9 +160,39 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-050 js: sloppy-mode primitive `this` is not boxed · P3 · JS · IN PROGRESS (JS worker, round 1) [V]
-`f.call(7)` in a sloppy function: node gives a Number object (`typeof` "object",
-`=== 7` false). The value model has no wrapper objects. Likely DECLINED.
+### T-205 js: `Array.from`, `Set` and iterable constructors · P1 · JS · IN PROGRESS (JS worker, round 2) [V]
+`println(Array.from([1,2]).join(","))`: the js interpreter under goja resolves goja's
+own native Array.from (hostGlobals "Array" is the host's Array) and prints `1,2`;
+-frozen and both compiled legs throw TypeError - a live goja-vs-frozen divergence. node
+`1,2`. Implement Array.from (iterables, array-likes, map fn) and `Set` (and check `Map`)
+including construction from an iterable (`new Set(g())`), in all engines; make the
+interpreter stop leaking host Array statics.
+
+### T-206 js: `for (x in Math)` enumerates 43 host members compiled · P1 · JS · IN PROGRESS (JS worker, round 2) [V]
+`var k=0; for (var x in Math) k++; println(k)`: run and native 43, interpreter and
+node 0 (builtin members are non-enumerable).
+
+### T-207 ts: a dead second `function main()` in tests/typescript-test-full.ts · P3 · JS · IN PROGRESS (JS worker, round 2) [V]
+Shadowed by the real main, calls s44..s50 and s48 again; delete it.
+
+### T-208 ts: parameter properties vs field initializers order differs between halves · P1 · JS · IN PROGRESS (JS worker, round 2) [V]
+`class C { q = (this as any).p; constructor(public p = 1) {} }; new C().q`: interpreter
+1, compiler and node (tsc target ES2022, useDefineForClassFields) undefined - fields
+first. Check tsc's emitted JS with the VS Code tsc for the default target.
+
+### T-209 js: "is not a function" glues word operators · P3 · JS · IN PROGRESS (JS worker, round 2) [V]
+`typeofo.a is not a function` where node says `(typeof o.a)`; also `in`, `instanceof`,
+`void`, `delete`, and an exponent literal `1e21` is not folded. `up.in` has its
+whitespace stripped: needs the raw source span at the call-site tags.
+
+### T-210 corpus: JS reject side, remainder · P3 · JS · IN PROGRESS (JS worker, round 2) [V]
+Reject 711 / 727, must-parse 2623 / 2653. Decision taken: split the module-only
+SECTION 34 (export) out of js-test-full.js into its own `.mjs` ratchet unit and rename
+js-test-recognize.js, js-test-multifile.js and tests/imports/geomlib.js as needed
+(test.sh, native-full, launch.json), then refuse import/export in a Script (6 files);
+measure both rows. The rest (`1++`, `for(([a]) of 0)`, `for((1+1) in l)`, `typeof () =>
+{}`, `{ *[yield iter]() {} }`) are inseparable from early/ must-parse files by shape -
+decline each with its pair unless a spec-based rule separates them.
 
 ---
 
@@ -500,17 +499,6 @@ Today: pthread + condvar, 4.1 µs per `next()` natively vs 0.75 µs under llvm.R
 forever. `swapcontext` is dead (deprecated on darwin; no `#include` in runtime.c).
 The extern surface would stay identical.
 
-### T-180 corpus: JS reject side · P3 · JS · IN PROGRESS (JS worker, round 1) [V]
-Reject 703 / 727, must-parse 2623 / 2653 (tests/reference). Always measure BOTH rows:
-guards have won reject files while costing must-parse files twice. Remaining: (a)
-assignment targets that are not LeftHandSideExpressions (8 files: `() => {}()`,
-`({a:this}=0)`, `switch (c) { default: default: }`); (b) `import`/`export` in a
-Script (6 files) - needs the three ratchet files renamed to `.mjs` in
-.vscode/launch.json and test.sh, not a grammar change; (c) `export default 3 4`
-(2 files) - needs anonymous class/function declaration forms in the
-`ExportDefaultDecl` branch; (d) `\u{0000000061}` (>8 hex digits) is accepted by node
-and rejected here.
-
 ### T-181 corpus: other languages · P3 · per language · OPEN [V]
 batch 0 of 2 wine files parse; swift 80% (an 18-file lexical tail: suppressed
 conformances, `@isolated(any)` in a type, `borrowing` as a bare type name, raw
@@ -549,6 +537,15 @@ T-008 python: native `float(2**80)` is `nan` — DONE b46dc62
 T-009 python: `%d` / `{:d}` on a non-integer operand is a three-way divergence — DONE b46dc62
 T-010 python: an abandoned generator never runs its `finally` — DECLINED: CPython runs the finally at refcount drop (`del g` prints before the next line); that timing needs refcounting, which manual 7.8 rejects (cycles); a run-at-exit hook would print in the wrong place
 T-183 python: native float formatting of huge bignums and `%`-arity — PARTIAL b46dc62 (%-arity/syntax errors catchable, exact %f of a bigint natively); rest is T-203
+T-040 js/ts: identifier `\u` escapes are not resolved in the interpreter halves — DONE c1824e2
+T-041 js: spreading a generator answers an empty array — PARTIAL 1e68549 (spread and array destructuring drain next()); `new Set(g())`/`Array.from(g())` are T-205
+T-042 js: `Math.pow(±1, NaN/±Infinity)` gives 1 — DONE c191cbd
+T-043 js/ts: `JSON.stringify` / `JSON.parse` are missing — DONE 7eb22ee
+T-044 js: a derived class whose `super()` returns an object does not rebind `this` — DONE f0162a4
+T-045 js: Error own-property introspection — DONE e6d1ab8
+T-046 js: "is not a function" names the callee without node's spacing — PARTIAL f23e9e8 (V8 spacing/parens/folding via js-callee.js); word operators are T-209
+T-050 js: sloppy-mode primitive `this` is not boxed — DECLINED: needs Number/String/Boolean wrapper objects (ToPrimitive, ===, typeof, member dispatch) in all four engines; out of proportion for sloppy-mode `this` boxing
+T-180 corpus: JS reject side — PARTIAL 7e7be24 (reject 703→711, must-parse unchanged 2623); rest is T-210
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -596,7 +593,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
