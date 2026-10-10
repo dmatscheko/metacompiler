@@ -1140,12 +1140,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // list(x): a fresh list from any iterable (lists copy, dicts give their keys).
     hostGlobals["list"] = function(x) { return iterToList(x).slice(0) }
-    hostGlobals["range"] = function(a, b) {
+    // range(stop) / range(start, stop[, step]), materialized. Twin of js_pyrange
+    // in abnf/jsrt.go and lib/python-rt.metajs.
+    hostGlobals["range"] = function(a, b, c) {
         var from = 0
-        var to = a
-        if (b !== undefined) { from = a; to = b }
+        var to = pyNumOf(a)
+        var step = 1
+        if (b !== undefined) { from = to; to = pyNumOf(b) }
+        if (c !== undefined) { step = pyNumOf(c) }
+        if (step == 0) { pyListErr("ValueError", "range() arg 3 must not be zero") }
         var out = []
-        for (var i = from; i < to; i++) out.push(i)
+        if (step > 0) {
+            for (var i = from; i < to; i += step) out.push(i)
+        } else {
+            for (var j = from; j > to; j += step) out.push(j)
+        }
         return out
     }
     // The builtin TYPE objects. They are class descriptors like any other, so

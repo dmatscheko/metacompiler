@@ -3127,6 +3127,21 @@ def s49():
         msg = str(e)
     check("itd5", msg == "integer division result too large for a float")
 
+# ===== SECTION 50: range() takes a step =====
+# range(start, stop, step) counts by step in either direction, a zero step is a
+# ValueError, and a float argument is a TypeError.
+def s50():
+    a = [0, 10, 3, -3, 1.5]
+    check("rng1", list(range(a[0], a[1], a[2])) == [0, 3, 6, 9] and list(range(a[1], a[0], a[3])) == [10, 7, 4, 1])
+    check("rng2", list(range(a[2], a[1], a[3])) == [] and [i for i in range(a[1], a[2], -4)] == [10, 6] and len(range(a[0], a[1], a[2])) == 4)
+    msgs = []
+    for args in [[a[0], a[1], a[0]], [a[4]]]:
+        try:
+            range(*args)
+        except (ValueError, TypeError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("rng3", msgs == ["ValueError: range() arg 3 must not be zero", "TypeError: 'float' object cannot be interpreted as an integer"])
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3178,5 +3193,6 @@ def main():
     s47() # SECTION-CALL 47
     s48() # SECTION-CALL 48
     s49() # SECTION-CALL 49
+    s50() # SECTION-CALL 50
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

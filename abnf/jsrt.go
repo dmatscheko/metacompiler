@@ -14964,17 +14964,21 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.fail("no binding for nonlocal %s", name)
 			return 0
 		},
-		"js_pyrange": func(a []uint64) uint64 { // range(a) or range(a, b) as a materialized list.
-			from := int(rt.toNumber(u(a[0])))
-			to := from
-			if _, undef := u(a[1]).(jsUndefT); undef {
-				from = 0
-			} else {
-				to = int(rt.toNumber(u(a[1])))
+		"js_pyrange": func(a []uint64) uint64 { // range(stop) / range(start, stop[, step]), materialized.
+			from, step := 0.0, 1.0
+			to := rt.pyRangeArg(u(a[0]))
+			if _, undef := u(a[1]).(jsUndefT); !undef {
+				from, to = to, rt.pyRangeArg(u(a[1]))
+			}
+			if _, undef := u(a[2]).(jsUndefT); !undef {
+				step = rt.pyRangeArg(u(a[2]))
+			}
+			if step == 0 {
+				panic(&jsThrown{value: rt.pyExcInstance("ValueError", "range() arg 3 must not be zero")})
 			}
 			arr := &jsArray{}
-			for i := from; i < to; i++ {
-				arr.elems = append(arr.elems, float64(i))
+			for i := from; (step > 0 && i < to) || (step < 0 && i > to); i += step {
+				arr.elems = append(arr.elems, i)
 			}
 			return w(arr)
 		},
@@ -20048,6 +20052,22 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		return has
 	}
 	return false
+}
+
+// pyRangeArg is one range() argument: an int (a bool is one), anything else the
+// TypeError CPython raises. Twin of pyListIdx in lib/python-rt.metajs.
+func (rt *jsrt) pyRangeArg(v interface{}) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+		"'"+pyTypeName(rt, v)+"' object cannot be interpreted as an integer")})
 }
 
 // pyRadix is bin/hex/oct: CPython puts the sign OUTSIDE the prefix (bin(-5) is

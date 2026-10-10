@@ -2984,22 +2984,30 @@ function pyAMinMax(argsV, want) {
 function js_pymax(args) { return pyAMinMax(args, 1) }
 function js_pymin(args) { return pyAMinMax(args, -1) }
 
-// Go: js_pyrange. range(a) or range(a, b) as a MATERIALIZED list.
-// Only a genuinely missing second argument means range(0, a): Go tests jsUndefT,
-// so an explicit None still reaches toNumber and answers 0.
-function js_pyrange(a, b) {
-    var from = Math.trunc(pyNum(a))
-    var to = from
-    if (b === undefined) {
-        from = 0
-    } else {
-        to = Math.trunc(pyNum(b))
+// Go: js_pyrange. range(stop) / range(start, stop[, step]) as a MATERIALIZED
+// list. Only a genuinely missing argument takes its default, as Go tests jsUndefT.
+function js_pyrange(a, b, c) {
+    var from = 0
+    var to = pyListIdx(a)
+    var step = 1
+    if (b !== undefined) {
+        from = to
+        to = pyListIdx(b)
     }
+    if (c !== undefined) { step = pyListIdx(c) }
+    if (step == 0) { pyRaiseExc("ValueError", "range() arg 3 must not be zero") }
     var out = []
     var i = from
-    while (i < to) {
-        out.push(i)
-        i = i + 1
+    if (step > 0) {
+        while (i < to) {
+            out.push(i)
+            i = i + step
+        }
+    } else {
+        while (i > to) {
+            out.push(i)
+            i = i + step
+        }
     }
     return out
 }

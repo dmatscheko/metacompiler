@@ -4192,14 +4192,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var tArg = tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])
         tb.NewRet(tb.NewCall(getExtern("js_pylist", 1), [tArg]))
         b = declBind(b, "list", callExt(b, "js_closure", [handle(listIdx), curScopeV]))
-        // range(a[, b])
+        // range(stop) / range(start, stop[, step])
         funcCount++
         var rgIdx = funcCount
         var rf = m.NewFunc("jsf_" + rgIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var rb = rf.NewBlock("entry")
         var rA = rb.NewCall(getExtern("js_arg", 2), [rf.Params[1], handle(0)])
         var rB = rb.NewCall(getExtern("js_arg", 2), [rf.Params[1], handle(1)])
-        rb.NewRet(rb.NewCall(getExtern("js_pyrange", 2), [rA, rB]))
+        var rC = rb.NewCall(getExtern("js_arg", 2), [rf.Params[1], handle(2)])
+        rb.NewRet(rb.NewCall(getExtern("js_pyrange", 3), [rA, rB, rC]))
         b = declBind(b, "range", callExt(b, "js_closure", [handle(rgIdx), curScopeV]))
         // abs(): js_pyabs, not JS Math, which would answer NaN on a boxed float and
         // lose precision on an arbitrary precision int.
