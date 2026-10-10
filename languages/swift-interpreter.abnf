@@ -675,7 +675,13 @@ Decl        = DeclTuple | DeclPlain ;
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] ;
+            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] [ LocalObs ] ;
+// `var w = 0 { didSet { ... } }` on a top-level or local variable: the observers are
+// the same accessors a property's are, and only willSet/didSet are accepted here.
+LocalObs    <~~ push({lobs: takeAll()}) ~~> = "{" ObsAccessor { ObsAccessor } "}" ;
+ObsAccessor <~~ push(makeAccessor(takeAll())) ~~>
+            = ObsKind <~~ push({akind: up.in}) ~~> [ AccParam ] AccBody ;
+ObsKind     = ( "willSet" | "didSet" ) KwEnd ;
 // The declaration's type annotation. It is DISCARDED everywhere except for the two
 // things this front end can act on without a type checker: the element labels of a
 // tuple type (LabelledTupleType), the WIDTH of an integer type - `var u: UInt8 =
@@ -5171,6 +5177,7 @@ KwContinue  = "continue" KwEnd ;
                      ? swElemTyOf(declTyOf(ref.name)) : ""
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
+        var obs = ref.path.length == 0 && hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         var mode = -1
         return function() {
             if (mode < 0) { mode = swKeepMode(ref, hasLocal, localAnn) }
@@ -5190,7 +5197,7 @@ KwContinue  = "continue" KwEnd ;
                     if (oldL != null) { v = swAdoptLike(oldL.v, v, declTy) }
                     else { v = swAdoptLike(swSelfSlot(ref.name), v, declTy) }
                 }
-                setVar(ref.name, v)
+                if (obs != null) { swObsWrite(ref.name, obs, v) } else { setVar(ref.name, v) }
             } else {
                 var p = resolveRef(ref)
                 if (op != "=") { v = applyOp(op, getElemP(p.obj, p.key), v) }
@@ -5245,10 +5252,15 @@ KwContinue  = "continue" KwEnd ;
     var localAnnReg = {}
     var localAnnLog = []
     var localAnnMarks = []
+    // localObsReg: the observers of the nearest declaration of each NAME, null for
+    // an unobserved one; scoped and restored with localAnnReg.
+    var localObsReg = {}
     function swNoteLocalAnn(n, t) {
         var had = hasOwn(localAnnReg, "$" + n)
-        localAnnLog.push({n: n, prev: had ? localAnnReg["$" + n] : "?"})
+        var po = hasOwn(localObsReg, "$" + n) ? localObsReg["$" + n] : null
+        localAnnLog.push({n: n, prev: had ? localAnnReg["$" + n] : "?", po: po})
         scopePut(localAnnReg, "$" + n, t)
+        scopePut(localObsReg, "$" + n, null)
     }
     // A parameter list's names and types, declared into the body that follows it.
     var localAnnPending = []
@@ -5274,6 +5286,7 @@ KwContinue  = "continue" KwEnd ;
             var n = e.n
             var t = e.prev
             scopePut(localAnnReg, "$" + n, t)
+            scopePut(localObsReg, "$" + n, e.po)
         }
     }
     // An unannotated binding initialised from a bare local NAME has that local's
@@ -5433,8 +5446,42 @@ KwContinue  = "continue" KwEnd ;
     // when the slot holds nil - see swAdoptLike.
     var declTyReg = {}
     function declTyOf(n) { return hasOwn(declTyReg, "$" + n) ? declTyReg["$" + n] : "" }
-    // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
+    // An observed variable (`var w = 0 { willSet {} didSet {} }`) is an ordinary
+    // declaration followed by its observers, each a local function `__will_w` /
+    // `__did_w`; a write to w that the walk sees under this declaration calls them
+    // around the store (swObsWrite). Neither fires for the initial value.
+    // Twin of makeDecl in swift-to-llvm-ir.abnf.
     function makeDecl(items) {
+        var last = items[items.length - 1]
+        if (last == undefined || last.lobs == undefined) { return makePlainDecl(items) }
+        var core = []
+        for (var i = 0; i + 1 < items.length; i++) { core.push(items[i]) }
+        var declT = makePlainDecl(core)
+        var name = items[0]
+        var fns = []
+        var obs = {will: false, did: false}
+        for (var j = 0; j < last.lobs.length; j++) {
+            var a = last.lobs[j].acc
+            var isWill = a.kind == "willSet"
+            if (isWill) { obs.will = true } else { obs.did = true }
+            var p = a.param != null ? a.param : (isWill ? "newValue" : "oldValue")
+            fns.push(makeLocalFunStmt({name: (isWill ? "__will_" : "__did_") + name, params: [plainParam(p)],
+                                       body: a.body, rlabels: null, rtype: "", ret: ""}))
+        }
+        scopePut(localObsReg, "$" + name, obs)
+        return function() {
+            declT()
+            for (var k = 0; k < fns.length; k++) { fns[k]() }
+        }
+    }
+    function swObsWrite(name, obs, v) {
+        var old = getVar(name)
+        if (obs.will) { getVar("__will_" + name)(v) }
+        setVar(name, v)
+        if (obs.did) { getVar("__did_" + name)(old) }
+    }
+    // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
+    function makePlainDecl(items) {
         var name = items[0]
         var labels = null
         var k = 1

@@ -2680,6 +2680,28 @@ func s47() {
     check("47b", a.b.shout + a.c.shout + a.ps[0].shout + a.b.greet(3) + a.b.req() == "PSPPg3Sreq" && a.inner() == "PSP")
 }
 
+// ===== SECTION 48: observed variables =====
+// willSet/didSet on a top-level and on a local variable, not only on a property
+// (swiftc 6.1.2): the observers see the incoming and the previous value, a write
+// inside the variable's own didSet does not fire it again, and a local of the same
+// name in another function is not observed.
+var log48 = ""
+var w48 = 0 { didSet { log48 += "d\(oldValue)>\(w48)," } }
+var lim48: Double = 1 {
+    willSet(nv) { log48 += "w\(nv)," }
+    didSet { if lim48 > 10 { lim48 = 10 } }
+}
+func bump48() { w48 += 2 }
+func shadow48() -> Int { var w48 = 5; w48 = 6; return w48 }
+func s48() {
+    w48 = 3
+    bump48()
+    lim48 = 50
+    var loc = 1 { didSet(o) { log48 += "l\(o)>\(loc)" } }
+    loc = 9
+    check("48a", log48 == "d0>3,d3>5,w50.0,l1>9" && lim48 == 10 && shadow48() == 6 && loc == 9)
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2730,6 +2752,7 @@ func main() {
     s45() // SECTION-CALL 45
     s46() // SECTION-CALL 46
     s47() // SECTION-CALL 47
+    s48() // SECTION-CALL 48
     print("full: \(checks) checks, \(fails) failures")
 }
 

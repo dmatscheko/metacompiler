@@ -664,7 +664,13 @@ Decl        = DeclTuple | DeclPlain ;
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] ;
+            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] [ LocalObs ] ;
+// `var w = 0 { didSet { ... } }` on a top-level or local variable: the observers are
+// the same accessors a property's are, and only willSet/didSet are accepted here.
+LocalObs    <~~ push({lobs: takeAll()}) ~~> = "{" ObsAccessor { ObsAccessor } "}" ;
+ObsAccessor <~~ push(makeAccessor(takeAll())) ~~>
+            = ObsKind <~~ push({akind: up.in}) ~~> [ AccParam ] AccBody ;
+ObsKind     = ( "willSet" | "didSet" ) KwEnd ;
 // The declaration's type annotation. It is DISCARDED everywhere except for the two
 // things this front end can act on without a type checker: the element labels of a
 // tuple type (LabelledTupleType), and the WIDTH of an integer type - `var u: UInt8 =
@@ -5282,6 +5288,7 @@ KwContinue  = "continue" KwEnd ;
                      ? swElemTyOf(declTyOf(ref.name)) : ""
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
+        var obs = ref.path.length == 0 && hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         return function(b) {
             // A write to an existential slot keeps what it is given; see swKeepMode.
             // An implicit `self.x` is decided by the enclosing type, statically.
@@ -5348,7 +5355,8 @@ KwContinue  = "continue" KwEnd ;
                     if (oldL == null) { oldL = b.NewCall(rtKGet(), [curScopeV, nameV]) }
                     v = callExt(b, "js_swadoptlike", [oldL, v, emitStr(b, declTy)])
                 }
-                b.NewCall(rtKSet(), [curScopeV, nameV, v])
+                if (obs != null) { emitObsWrite(b, ref.name, nameV, obs, v) }
+                else { b.NewCall(rtKSet(), [curScopeV, nameV, v]) }
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -5463,10 +5471,15 @@ KwContinue  = "continue" KwEnd ;
     var localAnnReg = {}
     var localAnnLog = []
     var localAnnMarks = []
+    // localObsReg: the observers of the nearest declaration of each NAME, null for
+    // an unobserved one; scoped and restored with localAnnReg.
+    var localObsReg = {}
     function swNoteLocalAnn(n, t) {
         var had = hasOwn(localAnnReg, "$" + n)
-        localAnnLog.push({n: n, prev: had ? localAnnReg["$" + n] : "?"})
+        var po = hasOwn(localObsReg, "$" + n) ? localObsReg["$" + n] : null
+        localAnnLog.push({n: n, prev: had ? localAnnReg["$" + n] : "?", po: po})
         localAnnReg["$" + n] = t
+        localObsReg["$" + n] = null
     }
     // A parameter list's names and types, declared into the body that follows it.
     var localAnnPending = []
@@ -5492,6 +5505,7 @@ KwContinue  = "continue" KwEnd ;
             var n = e.n
             var t = e.prev
             localAnnReg["$" + n] = t
+            localObsReg["$" + n] = e.po
         }
     }
     // An unannotated binding initialised from a bare local NAME has that local's
@@ -5613,7 +5627,50 @@ KwContinue  = "continue" KwEnd ;
     var declTyReg = {}
     function declTyOf(n) { return hasOwn(declTyReg, "$" + n) ? declTyReg["$" + n] : "" }
     // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
+    // An observed variable (`var w = 0 { willSet {} didSet {} }`) is an ordinary
+    // declaration followed by its observers, each a closure `__will_w` / `__did_w`
+    // in the same scope; a write to w that the walk sees under this declaration
+    // calls them around the store (emitObsWrite). Neither fires for the initial
+    // value. Twin of makeDecl in swift-interpreter.abnf.
     function makeDecl(items) {
+        var last = items[items.length - 1]
+        if (last == undefined || last.lobs == undefined) { return makePlainDecl(items) }
+        var core = []
+        for (var i = 0; i + 1 < items.length; i++) { core.push(items[i]) }
+        var declT = makePlainDecl(core)
+        var name = items[0]
+        var accs = []
+        var obs = {will: false, did: false}
+        for (var j = 0; j < last.lobs.length; j++) {
+            var a = last.lobs[j].acc
+            var isWill = a.kind == "willSet"
+            if (isWill) { obs.will = true } else { obs.did = true }
+            accs.push({name: (isWill ? "__will_" : "__did_") + name, body: a.body,
+                       p: a.param != null ? a.param : (isWill ? "newValue" : "oldValue")})
+        }
+        localObsReg["$" + name] = obs
+        return function(b) {
+            b = declT(b)
+            for (var k = 0; k < accs.length; k++) {
+                var idx = emitFunc([plainParam(accs[k].p)], accs[k].body, false, false, null, "")
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, accs[k].name),
+                                             callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+            return b
+        }
+    }
+    function emitObsCall(b, fname, argV) {
+        var args = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [args, argV])
+        callExt(b, "js_call", [b.NewCall(rtKGet(), [curScopeV, emitStr(b, fname)]), hUndef, args])
+    }
+    function emitObsWrite(b, name, nameV, obs, v) {
+        var old = b.NewCall(rtKGet(), [curScopeV, nameV])
+        if (obs.will) { emitObsCall(b, "__will_" + name, v) }
+        b.NewCall(rtKSet(), [curScopeV, nameV, v])
+        if (obs.did) { emitObsCall(b, "__did_" + name, old) }
+    }
+    function makePlainDecl(items) {
         var name = items[0]
         var labels = null
         var k = 1
