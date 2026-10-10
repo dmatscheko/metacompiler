@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-217** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-223** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,33 +66,37 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-199 python: compiled complex values print as `[object Object]` · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
-llvm.Run and native: `x = 3j; print(x)`, `print(3j)`, `str(1+2j)`; interpreter and
-CPython `3j`. `complex(1, 2)` is undefined in all engines (interpreter "cannot
-construct complex", compiled "call of a non-function"). A complex format spec beyond
-fill/align/width aborts. Oracle: python3.
+### T-217 python: `range()` ignores its step and prints as a list · P1 · PY · OPEN [V]
+`list(range(0,10,3))` gives `[0..9]` (CPython `[0, 3, 6, 9]`), `range(10,0,-3)` gives
+`[]`, `print(range(3))` gives `[0, 1, 2]` (CPython `range(0, 3)`). The compiler binds
+range with two arguments only. All engines.
 
-### T-200 python: a string literal holding an astral character · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
-`len("𝐀")` is 2 and `"𝐀" == chr(0x1D400)` is False in all engines (CPython 1 / True);
-`chr()`-built strings are right. Compare ruby T-187 (same family).
+### T-218 python: `x = None; x[0] = 1` is not a catchable TypeError · P1 · PY · OPEN [V]
+Interpreter: host "Cannot read property 'length' of undefined"; compiled "item
+assignment on a undefined". CPython: `TypeError: 'NoneType' object does not support item
+assignment` (check the other non-subscriptable types too).
 
-### T-201 python: setting an attribute on a function aborts · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
-`def f(): pass` then `f.k = 4; print(f.k)`: interpreter "AttributeError: 'k'"
-(uncatchable), compiled "cannot set field 'k' on *abnf.jsClosure". CPython prints 4.
+### T-219 python: `f().k += 1` evaluates `f()` twice · P1 · PY · OPEN [V]
+All engines call f twice (the read and the write each walk the path); CPython once.
+Same for `a[g()] += 1`.
 
-### T-202 python: class repr lacks the module prefix · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
-`print(B)` / `B.__mro__` show `<class 'B'>`; CPython `<class '__main__.B'>` (builtins
-stay `<class 'int'>`). All engines.
+### T-220 python: astral characters in indexing, iteration and find · P1 · PY · OPEN [V]
+`[ord(x) for x in chr(0x1D400)]`: interpreter `[65533, 65533]`, compiled abort "ord()
+expected a character, but string of length 3"; CPython `[119808]`. `"a😀b".find("b")`
+3 (CPython 2). len/indexing/slicing/iteration/find must count code points. Manual 7.9
+records the js_pyget inconsistency; decide the representation and cost it.
 
-### T-203 python: int/int true division with a bigint operand rounds twice · P2 · PY · IN PROGRESS (PY worker, round 2) [V]
-`(3**70)/3`-style quotients: we print `2.1222685869696762e+33`, CPython
-`2.122268586969676e+33`. Needs a correctly rounded bignum division in all three
-engines (Go: big.Rat; the two MetaJS engines ~40 lines each). Also `"%d %d" % (1,2,3)`
-and `"%d" % (1,2)` are ambiguous while a tuple is a list (T-170).
+### T-221 python: `\N{...}` outside a 14-entry table silently becomes "" · P2 · PY · OPEN [V]
+CPython decodes every Unicode character name; an unknown name is a SyntaxError. At
+least make an unknown name an error; a full name table is a size question (measure).
 
-### T-204 python: `None.k = 1` does not parse · P3 · PY · IN PROGRESS (PY worker, round 2) [V]
-A literal `None` (or other atom) as an attribute-assignment target is a parse error in
-both grammars; CPython parses it and raises AttributeError at run time.
+### T-222 python: complex numbers - abs, infinities, general powers, division · P1 · PY · OPEN [V]
+`abs(3+4j)`: interpreter aborts "unsupported operand type for <: complex", compiled
+NaN; CPython 5.0. Multiplication lacks C11 Annex G infinity recovery, so
+`(1e10-3j)**100` is `nan+nanj` (CPython OverflowError). Powers above 100, negative or
+non-integer fail loudly. Division uses the textbook formula; CPython 3.14 uses Smith's
+algorithm with FMA (last digit differs in ~80% of random cases) - MetaJS has no fma, so
+that part may need a floor primitive: cost it.
 
 ---
 
@@ -304,15 +308,15 @@ semantics including width, precision, `-`, `+`, `0`, `#` flags and `%x` on strin
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-090 swift: optional dictionary lookups trap on a missing key · P1 · SW · OPEN [V]
+### T-090 swift: optional dictionary lookups trap on a missing key · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
 `d[k] ?? "x"` and `if let v = d[k]` on a missing key trap in every engine; swiftc
 gives the default / skips the branch.
 
-### T-091 swift: `x as? Double ?? -1` does not parse · P1 · SW · OPEN [V]
+### T-091 swift: `x as? Double ?? -1` does not parse · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
 
-### T-092 swift: `Dictionary.first` answers a key, not a `(key, value)` tuple · P1 · SW · OPEN [V]
+### T-092 swift: `Dictionary.first` answers a key, not a `(key, value)` tuple · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
 
-### T-093 swift: remaining write-adoption cases · P1 · SW · OPEN [V]
+### T-093 swift: remaining write-adoption cases · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
 `var x: Double? = nil; x = 3` prints `3` (swiftc `3.0`). A typealias to `Any`
 (`typealias JSON = [String: Any]`), an observed/computed `Any` property
 (`var x: Any { didSet {...} }`), and `for var` / `if var` / closure-parameter locals
@@ -321,13 +325,13 @@ T) -> T`, `gg(1.5, 2)` gives `2.0` (swiftc infers T = Any... check). The interpr
 runs top-level statements as walked, so a protocol declared after a top-level write
 to a slot of that type is unknown there - a halves split for that case.
 
-### T-094 swift: an extension on a builtin receiver · P1 · SW · OPEN [V]
+### T-094 swift: an extension on a builtin receiver · P1 · SW · IN PROGRESS (SW worker, round 2) [V]
 `extension String { var lenPlus: Int { return count + 1 } }` fails in all three
 engines (`unknown name: count`): `getMember` does not know Swift's `count`. Needs the
 interpreter, the twin and layer 2. Do NOT route through `js_kget` (its string surface
 is JavaScript's).
 
-### T-095 swift: an extension-only member through a protocol-typed variable · P3 · SW · OPEN [V]
+### T-095 swift: an extension-only member through a protocol-typed variable · P3 · SW · IN PROGRESS (SW worker, round 2) [V]
 `let d: Named = D2(); d.shout` binds to the extension in swiftc and to D2's own member
 here. Needs the expression's static type: a propagation pass plus a declared-type
 table touching every member-access site in both grammars. Cost first.
@@ -479,7 +483,7 @@ demands a numeric index, so marking an array as a tuple is not representable nat
 and a tuple must become a tag-6 BOX (copy the python FLOAT box, not the tag-14 floor
 box - manual 7.6). Atomic: any subset is a `--cross` divergence. Sites: python
 interpreter 17 `Array.isArray` + 49 tuple refs, python-rt.metajs 42 `pyIsArr`, python
-compiler 54 tuple refs, jsrt.go `*jsArray`. Unblocks T-011, `%`-formatting arity,
+compiler 54 tuple refs, jsrt.go `*jsArray`. Unblocks T-011, `%`-formatting arity (`"%d %d" % (1,2,3)` must say "not all arguments converted during string formatting"; `"%s" % [1, 2]` must stay `[1, 2]`),
 `BaseException.__str__`, hashability as a real rule.
 
 ### T-171 moving floor bodies into layer 2 · P3 · CORE · OPEN [U]
@@ -555,6 +559,12 @@ T-194 java: missing standard-library pieces — PARTIAL 26eedb1 (all members add
 T-195 java: typed functional-interface lambdas do not convert their parameters — DONE 65d2b1a
 T-196 java: `Math.exp(1)` is one ulp off — DONE 1c463b4 (the ticket had the values swapped: java prints 2.7182818284590455)
 T-197 java: `Double.parseDouble` does not read hex significands — DONE 72bb39a
+T-199 python: compiled complex values print as `[object Object]` — DONE 432e5a1
+T-200 python: a string literal holding an astral character — DONE a9aadb7
+T-201 python: setting an attribute on a function aborts — DONE 45198e8
+T-202 python: class repr lacks the module prefix — DONE f6614d4
+T-204 python: `None.k = 1` does not parse — DONE 11fbd8b a9e8807
+T-203 python: int/int true division with a bigint operand rounds twice — PARTIAL fe88574 (the division is rounded once); the %-arity half waits on T-170 (noted there)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
