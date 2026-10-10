@@ -1126,7 +1126,7 @@ InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | ArrayTypeLit | DictLit | ArrayLit
-            | Shorthand | TrailCall | Call | VarRef ;
+            | Shorthand | OptNone | GenCall | GenRef | TrailCall | Call | VarRef ;
 
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
@@ -1255,6 +1255,26 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
 ArrayTypeLit <~~ push(makeEmptyColl(takeAll())) ~~>
             = "[" Type [ TypeLitDict ] "]" NoSpaceParen "(" ")" ;
 TypeLitDict <~~ push({dictty: 1}) ~~> = ":" Type ;
+
+// `Optional<Int>(5)`, `Array<Double>([1, 2])`, `Box<Int>(v: 9)`: a type name with
+// explicit generic arguments, CALLED. The `<` is adjacent to the name and the `>` to
+// the `(`, and that is the reading swiftc gives the text too: the comparison chain
+// `a < b > (c)` does not type-check. GenRef is the same name used as a value
+// (`Optional<Int>.none`); the arguments are dropped there.
+// `Optional.none` / `Optional<Int>.none` is nil: an Optional IS its value here.
+OptNone     <~~ takeAll(); push(makeConst(null)) ~~> = "Optional" [ NoSpace GenArgs ] "." "none" KwEnd ;
+GenCall     <~~ push(swGenCall(takeAll())) ~~>
+            = GenName "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
+GenRef      <~~ push(swVarRef(takeAll()[0])) ~~> = GenName ;
+GenName     = Id <~~ push(up.in) ~~> NoSpace GenArgs GenFollow ;
+GenArgs     = "<" GenArgList ">" ;
+GenArgList  <~~ push({gargs: stripWs(up.in)}) ~~> = Type { "," Type } ;
+GenFollow   = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return (cc === 40 || cc === 46) ? undefined : abnf.newToken("\x01not-a-generic-call", 0)
+    })()
+~~) ;
 
 // f(args): a global function or a struct/class constructor (calls init).
 Call        <~~ push(makeCall(takeAll())) ~~>
@@ -2033,6 +2053,11 @@ KwContinue  = "continue" KwEnd ;
         if (g != null) { return swRender(g(v), false, depth + 1) }
         if (hasOwn(v, "description") && typeof v["description"] != "function") {
             return swRender(v["description"], false, depth + 1)
+        }
+        // A Set prints as its members; nested in a collection it is `Set([...])`.
+        if (v.__set === true) {
+            var sout = swRender(v.elems, true, depth)
+            return nested ? "Set(" + sout + ")" : sout
         }
         if (isDict(v)) {
             if (v.keys.length == 0) { return "[:]" }
@@ -2821,6 +2846,7 @@ KwContinue  = "continue" KwEnd ;
         if (v === null || v === undefined) { fail("count of nil") }
         if (typeof v == "string") { return swGraphemeCount(v) }
         if (v.__range === true) { return rangeLen(v) }
+        if (v.__set === true) { return v.elems.length }
         return v.length
     }
     // isEmpty / first / last are PROPERTIES on every Collection (arrayMethod has
@@ -2831,6 +2857,7 @@ KwContinue  = "continue" KwEnd ;
         if (v === null || v === undefined) { return false }
         if (isDict(v)) { return true }
         if (isRange(v)) { return true }
+        if (swIsSet(v)) { return true }
         return Array.isArray(v)
     }
     function swFirstLast(o, wantLast) {
@@ -2841,7 +2868,7 @@ KwContinue  = "continue" KwEnd ;
         }
         // A Dictionary's element is its `(key: K, value: V)` pair.
         var arr = anytype
-        arr = isRange(o) ? rangeArray(o) : (isDict(o) ? swArrayOf(o) : o)
+        arr = isRange(o) || swIsSet(o) ? swSeqVal(o) : (isDict(o) ? swArrayOf(o) : o)
         if (!Array.isArray(arr) || arr.length == 0) { return null }
         return wantLast ? arr[arr.length - 1] : arr[0]
     }
@@ -3164,6 +3191,7 @@ KwContinue  = "continue" KwEnd ;
             }
             fail("unknown Dictionary method: " + name)
         }
+        if (swIsSet(target)) { return swSetMethod(target, name, args) }
         // Only an Optional can be nil, so map/flatMap on nil is Optional's: nil.
         if ((target === null || target === undefined) && (name == "map" || name == "flatMap")) { return null }
         if (target === null || target === undefined) { fail("method ." + name + " on nil") }
@@ -3829,6 +3857,7 @@ KwContinue  = "continue" KwEnd ;
         if (typeof v != "object") { return v }
         if (v.__dict === true) { return swCopyDict(v) }
         if (v.__tuple != undefined) { return swCopyTup(v) }
+        if (v.__set === true) { return {__set: true, elems: swCopyArr(v.elems)} }
         if (v.__struct !== true) { return v }
         var cls = v.__class
         if (cls == undefined || cls === null) { return v }
@@ -4770,6 +4799,25 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // f(args): a global function or a class/struct constructor (runs __ctor then init).
+    // `Array<Double>([1, 2])`: the call without its generic arguments, whose result
+    // then adopts the type they spell, as a declared `[Double]` would make it.
+    // Twin of swGenCall in swift-to-llvm-ir.abnf.
+    function swGenCall(items) {
+        var rest = [items[0]]
+        for (var i = 2; i < items.length; i++) { rest.push(items[i]) }
+        var call = makeCall(rest)
+        var ann = swGenAnn(items[0], items[1].gargs)
+        if (ann == "") { return call }
+        return function() { return swAdoptAnn(call(), ann) }
+    }
+    // The annotation a builtin generic type's arguments amount to, or "".
+    function swGenAnn(name, g) {
+        if (name == "Array") { return "[" + g + "]" }
+        if (name == "Optional") { return g }
+        var kv = swTySplit(g, ",")
+        if (name == "Dictionary" && kv.length == 2) { return "[" + kv[0] + ":" + kv[1] + "]" }
+        return ""
+    }
     function makeCall(items) {
         var name = items[0]
         var recs = planArgs(name, items.slice(1))
@@ -5014,6 +5062,7 @@ KwContinue  = "continue" KwEnd ;
                 if (depth == 0 && i < txt.length - 1) { return "" }
             }
         }
+        if (h.fn == "Set") { return "Set" }
         return h.fn == "Optional" ? "Optional<_>" : swCallAnn(h.fn)
     }
     // `let d: Named = D2(); d.shout`: a member a protocol EXTENSION adds and the
@@ -5178,6 +5227,8 @@ KwContinue  = "continue" KwEnd ;
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
         var obs = ref.path.length == 0 && hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
+        // `s = [1, 2]` into a local declared `Set<Int>`.
+        var setTy = ref.path.length == 0 && hasLocal && swIsSetTy(localAnn)
         var mode = -1
         return function() {
             if (mode < 0) { mode = swKeepMode(ref, hasLocal, localAnn) }
@@ -5185,6 +5236,7 @@ KwContinue  = "continue" KwEnd ;
             // its first assignment, and the adoption below turns a number into a box.
             var v = anytype
             v = swCopy(valT())
+            if (setTy && op == "=") { v = swSetOf(v) }
             if (ref.path.length == 0) {
                 var oldL = ref.name == "self" ? null : lookupOrNull(ref.name)
                 if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
@@ -5552,6 +5604,7 @@ KwContinue  = "continue" KwEnd ;
         // arrives by a later assignment (Swift's definite-initialization rule is
         // a type-checker job, and this front end does not enforce it).
         if (init == undefined) { return function() { declVar(name, null) } }
+        if (swIsSetTy(annTxt)) { return function() { declVar(name, swSetOf(init())) } }
         if (labels == null) { return function() { declVar(name, swCopy(init())) } }
         return function() { declVar(name, relabelTuple(swCopy(init()), labels)) }
     }
@@ -5637,6 +5690,7 @@ KwContinue  = "continue" KwEnd ;
     // pairs, which a plain name binds whole and `(k, v)` destructures.
     function swSeqVal(v) {
         if (isRange(v)) { return rangeArray(v) }
+        if (swIsSet(v)) { return v.elems }
         if (isTupleVal(v)) { return tupleArray(v) }
         if (typeof v == "string") { return swGraphemes(v) }
         if (isDict(v)) { return swDictPairs(v) }
@@ -6111,6 +6165,10 @@ KwContinue  = "continue" KwEnd ;
         var annTxt = ty
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
         notePropTy(items[0], annTxt)
+        if (items[k] != undefined && swIsSetTy(annTxt)) {
+            var st = items[k]
+            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: function() { return swSetOf(st()) }}
+        }
         if (items[k] != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: items[k]} }
         return {prop: items[0], ty: ty, ann: annTxt, hasInit: false, init: null}
     }
@@ -7064,6 +7122,11 @@ KwContinue  = "continue" KwEnd ;
                 return true
             }
         }
+        // Two Sets are equal when they hold the same members, in any order.
+        if (swIsSet(l) || swIsSet(r)) {
+            if (!swIsSet(l) || !swIsSet(r) || l.elems.length != r.elems.length) { return false }
+            return swSetSel(l.elems, r.elems, false).length == 0
+        }
         if (isCaseVal(l) && isCaseVal(r)) {
             if (l.__ename !== r.__ename) { return false }
             var a = l.__vals
@@ -7307,6 +7370,8 @@ KwContinue  = "continue" KwEnd ;
     // Two positional arguments IS the repeating:count: form; nothing else in Swift
     // spells Array with two.
     function swArrayOf(x, n) {
+        if (x === undefined) { return [] }
+        if (swIsSet(x)) { return x.elems.slice(0) }
         if (n !== undefined) {
             var rep = []
             var k = szNum(n) | 0
@@ -7322,6 +7387,112 @@ KwContinue  = "continue" KwEnd ;
         return []
     }
     hostGlobals["Array"] = {__conv: swArrayOf}
+    // ----- Set -----
+    // A Set is {__set: true, elems: [...]}: its members, kept free of duplicates by
+    // ==, in insertion order. Swift's own iteration order is seeded per process, so
+    // no order is the specification; insertion order is what makes the engines
+    // agree. Twins: the Set arms of abnf/jsrtswift.go and
+    // languages/lib/swift-rt.metajs.
+    function swIsSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
+    // `let s: Set<Int> = [1, 2]` / `var s: Set = []`: the annotation makes the
+    // literal a Set.
+    function swIsSetTy(t) { return t == "Set" || (t.length > 4 && t.substring(0, 4) == "Set<") }
+    function swSetIdx(els, v) {
+        for (var i = 0; i < els.length; i++) { if (swEq(els[i], v)) { return i } }
+        return -1
+    }
+    function swSetAdd(els, v) {
+        if (swSetIdx(els, v) >= 0) { return false }
+        els.push(v)
+        return true
+    }
+    function swSetOf(x) {
+        var s = {__set: true, elems: []}
+        if (x === undefined) { return s }
+        var src = anytype
+        src = swSeqVal(x)
+        if (!Array.isArray(src)) { fail("Set(): not a sequence") }
+        for (var i = 0; i < src.length; i++) { swSetAdd(s.elems, src[i]) }
+        return s
+    }
+    hostGlobals["Set"] = {__conv: swSetOf}
+    function swSetRepl(els, xs) {
+        while (els.length > 0) { els.pop() }
+        for (var i = 0; i < xs.length; i++) { els.push(xs[i]) }
+    }
+    // The members of a, by whether they are in b (keep == true) or not.
+    function swSetSel(a, b, keep) {
+        var out = []
+        for (var i = 0; i < a.length; i++) { if ((swSetIdx(b, a[i]) >= 0) == keep) { out.push(a[i]) } }
+        return out
+    }
+    function swSetMethod(s, name, args) {
+        var els = s.elems
+        if (name == "insert") {
+            var at = swSetIdx(els, args[0])
+            if (at < 0) { els.push(args[0]) }
+            var t = newTupleVal([at < 0, at < 0 ? args[0] : els[at]])
+            scopePut(t, "__tlabels", ["inserted", "memberAfterInsert"])
+            scopePut(t, "inserted", t["0"])
+            scopePut(t, "memberAfterInsert", t["1"])
+            return t
+        }
+        if (name == "contains" && typeof args[0] != "function") { return swSetIdx(els, args[0]) >= 0 }
+        if (name == "remove") {
+            var k = swSetIdx(els, args[0])
+            if (k < 0) { return null }
+            var rv = els[k]
+            for (var j = k; j + 1 < els.length; j++) { els[j] = els[j + 1] }
+            els.pop()
+            return rv
+        }
+        if (name == "removeAll" && args.length == 0) { swSetRepl(els, []); return undefined }
+        if (!swSetAlgebra(name)) {
+            // Every other member is the Sequence one, over a copy of the members;
+            // filter alone answers a Set again.
+            var r = arrayMethod(els.slice(0), name, args)
+            if (name == "filter") { return swSetOf(r) }
+            return r
+        }
+        var o = anytype
+        o = swSetOf(args[0]).elems
+        if (name == "union" || name == "formUnion") {
+            var u = els.slice(0)
+            for (var q = 0; q < o.length; q++) { swSetAdd(u, o[q]) }
+            if (name == "formUnion") { swSetRepl(els, u); return undefined }
+            return {__set: true, elems: u}
+        }
+        if (name == "intersection") { return {__set: true, elems: swSetSel(els, o, true)} }
+        if (name == "formIntersection") { swSetRepl(els, swSetSel(els, o, true)); return undefined }
+        if (name == "subtracting") { return {__set: true, elems: swSetSel(els, o, false)} }
+        if (name == "subtract") { swSetRepl(els, swSetSel(els, o, false)); return undefined }
+        if (name == "symmetricDifference" || name == "formSymmetricDifference") {
+            var sd = swSetSel(els, o, false)
+            var rest = swSetSel(o, els, false)
+            for (var p = 0; p < rest.length; p++) { sd.push(rest[p]) }
+            if (name == "formSymmetricDifference") { swSetRepl(els, sd); return undefined }
+            return {__set: true, elems: sd}
+        }
+        if (name == "isSubset") { return swSetSel(els, o, false).length == 0 }
+        if (name == "isSuperset") { return swSetSel(o, els, false).length == 0 }
+        if (name == "isStrictSubset") { return swSetSel(els, o, false).length == 0 && els.length < o.length }
+        if (name == "isStrictSuperset") { return swSetSel(o, els, false).length == 0 && els.length > o.length }
+        return swSetSel(els, o, true).length == 0
+    }
+    // The members whose argument is another sequence of members.
+    function swSetAlgebra(n) {
+        return n == "union" || n == "formUnion" || n == "intersection" || n == "formIntersection"
+            || n == "subtracting" || n == "subtract" || n == "symmetricDifference"
+            || n == "formSymmetricDifference" || n == "isSubset" || n == "isSuperset"
+            || n == "isStrictSubset" || n == "isStrictSuperset" || n == "isDisjoint"
+    }
+    // Dictionary(): the empty one. Twin: makeCall in swift-to-llvm-ir.abnf.
+    hostGlobals["Dictionary"] = {__conv: function(x) {
+        if (x !== undefined) { fail("Dictionary(...): only the empty initializer is supported") }
+        return {__dict: true, keys: [], vals: []}
+    }}
+    // Character("b"): a Character IS its one-cluster String in this model.
+    hostGlobals["Character"] = {__conv: function(v) { return v }}
     // Optional(v): an Optional IS its value in this model.
     hostGlobals["Optional"] = {__conv: function(v) { return v }}
     hostGlobals["Int"] = swIntType(64, false)

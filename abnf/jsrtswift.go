@@ -651,9 +651,17 @@ func init() {
 				}
 				return out
 			}
+			if els, ok := swSetElems(o); ok {
+				out := make([]interface{}, len(els.elems))
+				for i, e := range els.elems {
+					out[i] = swValCopy(e)
+				}
+				return newSwSet(out)
+			}
 			return v
 		}
 		m["js_swcopy"] = func(a []uint64) uint64 { return w(swValCopy(u(a[0]))) }
+		m["js_swsetof"] = func(a []uint64) uint64 { return w(rt.swSetOf(u(a[0]))) }
 		m["js_swadoptdeep"] = func(a []uint64) uint64 {
 			ty, _ := u(a[1]).(string)
 			var fmap *jsObject
@@ -891,6 +899,12 @@ func init() {
 		m["js_swmcall"] = func(a []uint64) uint64 {
 			f, isFlo := u(a[0]).(jsJFlo)
 			if !isFlo {
+				if els, isSet := swSetElems(u(a[0])); isSet {
+					return w(rt.swSetMethod(els, rt.toString(u(a[1])), rt.swArgList(u(a[2])),
+						func(arr *jsArray) interface{} {
+							return u(m["js_swmcall"]([]uint64{w(arr), a[1], a[2]}))
+						}))
+				}
 				// insert(_:at:). Twins:
 				// js_swmcall in languages/lib/swift-rt.metajs and
 				// arrayMethod in languages/swift-interpreter.abnf.
@@ -1626,11 +1640,169 @@ func (rt *jsrt) swRender(v interface{}, nested bool, depth int) string {
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case *jsObject:
+		// A Set prints as its members; nested in a collection it is `Set([...])`.
+		if els, ok := swSetElems(t); ok {
+			s := rt.swRender(els, true, depth)
+			if nested {
+				return "Set(" + s + ")"
+			}
+			return s
+		}
 		if s, ok := rt.swObjDesc(t, depth); ok {
 			return s
 		}
 	}
 	return rt.toString(v)
+}
+
+// ----- Set -----
+// A Set is {__set: true, elems: [...]}: its members, kept free of duplicates by
+// ==, in insertion order. Swift's own iteration order is seeded per process, so no
+// order is the specification; insertion order is what makes the engines agree.
+// Twins: the Set block of languages/swift-interpreter.abnf and of
+// languages/lib/swift-rt.metajs.
+func swSetElems(v interface{}) (*jsArray, bool) {
+	o, ok := v.(*jsObject)
+	if !ok || o.props["__set"] != true {
+		return nil, false
+	}
+	els, ok := o.props["elems"].(*jsArray)
+	return els, ok
+}
+
+func newSwSet(elems []interface{}) *jsObject {
+	o := newJSObject()
+	o.set("__set", true)
+	o.set("elems", &jsArray{elems: elems})
+	return o
+}
+
+func (rt *jsrt) swSetIdx(els []interface{}, v interface{}) int {
+	for i, e := range els {
+		if rt.swEqual(e, v) {
+			return i
+		}
+	}
+	return -1
+}
+
+// swSetOf builds a Set from an Array or a Set; the grammar has already turned a
+// String into its Characters and a Range into its elements.
+func (rt *jsrt) swSetOf(v interface{}) *jsObject {
+	var src []interface{}
+	if els, ok := swSetElems(v); ok {
+		src = els.elems
+	} else if arr, ok := v.(*jsArray); ok {
+		src = arr.elems
+	} else if !isNullish(v) {
+		rt.fail("Set(): not a sequence")
+	}
+	out := make([]interface{}, 0, len(src))
+	for _, e := range src {
+		if rt.swSetIdx(out, e) < 0 {
+			out = append(out, e)
+		}
+	}
+	return newSwSet(out)
+}
+
+// The members of a, by whether they are in b (keep) or not.
+func (rt *jsrt) swSetSel(a, b []interface{}, keep bool) []interface{} {
+	out := make([]interface{}, 0, len(a))
+	for _, e := range a {
+		if (rt.swSetIdx(b, e) >= 0) == keep {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func swSetAlgebra(n string) bool {
+	switch n {
+	case "union", "formUnion", "intersection", "formIntersection", "subtracting", "subtract",
+		"symmetricDifference", "formSymmetricDifference", "isSubset", "isSuperset",
+		"isStrictSubset", "isStrictSuperset", "isDisjoint":
+		return true
+	}
+	return false
+}
+
+// swSetMethod answers the Set members; seq answers a Sequence member over an Array.
+func (rt *jsrt) swSetMethod(set *jsArray, name string, args []interface{}, seq func(*jsArray) interface{}) interface{} {
+	els := set.elems
+	var a0 interface{} = jsUndef
+	if len(args) > 0 {
+		a0 = args[0]
+	}
+	switch {
+	case name == "insert":
+		at := rt.swSetIdx(els, a0)
+		mem := a0
+		if at < 0 {
+			set.elems = append(els, a0)
+		} else {
+			mem = els[at]
+		}
+		t := newJSObject()
+		t.set("__tuple", float64(2))
+		t.set("__tlabels", &jsArray{elems: []interface{}{"inserted", "memberAfterInsert"}})
+		t.set("0", at < 0)
+		t.set("inserted", at < 0)
+		t.set("1", mem)
+		t.set("memberAfterInsert", mem)
+		return t
+	case name == "contains" && !isCallable(a0):
+		return rt.swSetIdx(els, a0) >= 0
+	case name == "remove":
+		k := rt.swSetIdx(els, a0)
+		if k < 0 {
+			return jsNull
+		}
+		rv := els[k]
+		set.elems = append(els[:k:k], els[k+1:]...)
+		return rv
+	case name == "removeAll" && len(args) == 0:
+		set.elems = []interface{}{}
+		return jsUndef
+	case !swSetAlgebra(name):
+		r := seq(&jsArray{elems: append([]interface{}{}, els...)})
+		if name == "filter" {
+			return rt.swSetOf(r)
+		}
+		return r
+	}
+	o := rt.swSetOf(a0).props["elems"].(*jsArray).elems
+	var res []interface{}
+	switch name {
+	case "union", "formUnion":
+		res = append([]interface{}{}, els...)
+		for _, e := range o {
+			if rt.swSetIdx(res, e) < 0 {
+				res = append(res, e)
+			}
+		}
+	case "intersection", "formIntersection":
+		res = rt.swSetSel(els, o, true)
+	case "subtracting", "subtract":
+		res = rt.swSetSel(els, o, false)
+	case "symmetricDifference", "formSymmetricDifference":
+		res = append(rt.swSetSel(els, o, false), rt.swSetSel(o, els, false)...)
+	case "isSubset":
+		return len(rt.swSetSel(els, o, false)) == 0
+	case "isSuperset":
+		return len(rt.swSetSel(o, els, false)) == 0
+	case "isStrictSubset":
+		return len(rt.swSetSel(els, o, false)) == 0 && len(els) < len(o)
+	case "isStrictSuperset":
+		return len(rt.swSetSel(o, els, false)) == 0 && len(els) > len(o)
+	default:
+		return len(rt.swSetSel(els, o, true)) == 0
+	}
+	if strings.HasPrefix(name, "form") || name == "subtract" {
+		set.elems = res
+		return jsUndef
+	}
+	return newSwSet(res)
 }
 
 // swObjDesc renders the object shapes the two Swift grammars build. It reports
@@ -1723,16 +1895,6 @@ func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
 		return name + "(" + strings.Join(parts, ", ") + ")", true
 	}
 
-	// A Set literal, where the grammars build one.
-	if tag, ok := o.props["__set"]; ok && tag == true {
-		if el, ok := o.props["elems"].(*jsArray); ok {
-			parts := make([]string, len(el.elems))
-			for i, e := range el.elems {
-				parts[i] = rt.swRender(e, true, depth+1)
-			}
-			return "[" + strings.Join(parts, ", ") + "]", true
-		}
-	}
 
 	// The type descriptor itself (`print(P.self)`) is its name.
 	if _, ok := o.props["__isclass"]; ok {
@@ -1963,6 +2125,11 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 				}
 			}
 			return true
+		}
+		// Two Sets are equal when they hold the same members, in any order.
+		if lel, ok := swSetElems(lo); ok {
+			rel, ok := swSetElems(ro)
+			return ok && len(lel.elems) == len(rel.elems) && len(rt.swSetSel(lel.elems, rel.elems, false)) == 0
 		}
 		if tag, ok := lo.props["__ecase"]; ok && tag == true {
 			if tag2, ok := ro.props["__ecase"]; !ok || tag2 != true {

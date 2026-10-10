@@ -2702,6 +2702,68 @@ func s48() {
     check("48a", log48 == "d0>3,d3>5,w50.0,l1>9" && lim48 == 10 && shadow48() == 6 && loc == 9)
 }
 
+// ===== SECTION 49: explicit generic arguments at a call =====
+// `Optional<Int>(5)` is a call, not the comparison chain `Optional < Int > (5)`
+// (swiftc 6.1.2: 5, 0 and [1.0, 2.0]); the arguments of Array/Dictionary/Optional
+// also type the result, and those of a user generic type are only its spelling.
+struct Box49<T> { var v: T }
+func s49() {
+    let o = Optional<Int>(5)
+    var a = Array<Int>()
+    a.append(3)
+    var d = Dictionary<String, Int>()
+    d["k"] = 2
+    let ds = Array<Double>([1, 2])
+    let od = Optional<Double>(3)
+    let none = Optional<Int>.none
+    let x = 3, y = 4
+    let empty: [Int] = Array()
+    let ed: [String: Int] = Dictionary()
+    check("49a", o! == 5 && a == [3] && d.count == 1 && Array<Array<Int>>().count == 0)
+    check("49b", "\(ds) \(od!)" == "[1.0, 2.0] 3.0" && none == nil && Box49<Int>(v: 9).v == 9)
+    check("49c", (x<y) && !(x>y) && empty.isEmpty && ed.isEmpty && Character("q") == "q")
+    check("49d", Array<Int>(repeating: 7, count: 2) == [7, 7] && Set<Int>().isEmpty)
+}
+
+// ===== SECTION 50: Set =====
+// A Set built by Set(), Set(seq) and a `Set` annotation on a literal; its own
+// members, the Sequence ones, ==, value semantics, and the printed form (swiftc
+// 6.1.2; a Set's iteration order is per-process random there, so only one-member
+// sets are printed and everything else is sorted first).
+struct Box50 { var seen: Set<String> = [] }
+func s50() {
+    var s: Set<Int> = [7]
+    let ins = s.insert(7)
+    check("50a", "\(s) \([s])" == "[7] [Set([7])]" && !ins.inserted && ins.memberAfterInsert == 7
+                 && s.insert(8).inserted && s.remove(8)! == 7 + 1 && s.remove(9) == nil)
+    check("50b", Set([1, 2]) == Set([2, 1]) && Set([1]) != Set([1, 3]) && Set("aab").count == 2
+                 && Set(1...4).count == 4 && Set<String>().isEmpty && !s.isEmpty && s.first! == 7)
+    var u = Set<Int>()
+    for i in [5, 3, 5, 1, 3] { u.insert(i) }
+    var walked = 0
+    for x in u { walked += x }
+    check("50c", u.count == 3 && u.sorted() == [1, 3, 5] && walked == 9 && Array(u).count == 3
+                 && u.map { $0 * 2 }.sorted() == [2, 6, 10] && u.filter { $0 > 2 }.sorted() == [3, 5]
+                 && u.contains(3) && !u.contains(4) && u.contains { $0 > 4 } && u.reduce(0, +) == 9)
+    check("50d", u.union([9, 1]).count == 4 && u.intersection([1, 9]).sorted() == [1]
+                 && u.subtracting([1]).sorted() == [3, 5] && u.symmetricDifference([1, 9]).sorted() == [3, 5, 9]
+                 && u.isSubset(of: [1, 3, 5, 7]) && u.isSuperset(of: [1]) && u.isDisjoint(with: [2])
+                 && u.isStrictSubset(of: [1, 3, 5, 7]) && !u.isStrictSuperset(of: [1, 3, 5]))
+    var t = u
+    t.insert(100)
+    u.formUnion([9])
+    u.subtract([3])
+    u.formIntersection([1, 9, 4])
+    var bx = Box50()
+    bx.seen.insert("a"); bx.seen.insert("a"); bx.seen.insert("b")
+    var r = Set(1...4)
+    r = [2, 2, 3]
+    check("50e", t.count == 4 && u.sorted() == [1, 9] && bx.seen.count == 2 && r.count == 2
+                 && Set([[1], [1], [2]]).count == 2 && Set(["x", "y"]).sorted(by: >) == ["y", "x"])
+    u.removeAll()
+    check("50f", u.isEmpty && "\(u)" == "[]")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2753,6 +2815,8 @@ func main() {
     s46() // SECTION-CALL 46
     s47() // SECTION-CALL 47
     s48() // SECTION-CALL 48
+    s49() // SECTION-CALL 49
+    s50() // SECTION-CALL 50
     print("full: \(checks) checks, \(fails) failures")
 }
 

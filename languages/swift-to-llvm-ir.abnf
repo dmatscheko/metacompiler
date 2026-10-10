@@ -1105,7 +1105,7 @@ InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | ArrayTypeLit | DictLit | ArrayLit
-            | Shorthand | TrailCall | Call | VarRef ;
+            | Shorthand | OptNone | GenCall | GenRef | TrailCall | Call | VarRef ;
 
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
@@ -1230,6 +1230,26 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
 ArrayTypeLit <~~ push(makeEmptyColl(takeAll())) ~~>
             = "[" Type [ TypeLitDict ] "]" NoSpaceParen "(" ")" ;
 TypeLitDict <~~ push({dictty: 1}) ~~> = ":" Type ;
+
+// `Optional<Int>(5)`, `Array<Double>([1, 2])`, `Box<Int>(v: 9)`: a type name with
+// explicit generic arguments, CALLED. The `<` is adjacent to the name and the `>` to
+// the `(`, and that is the reading swiftc gives the text too: the comparison chain
+// `a < b > (c)` does not type-check. GenRef is the same name used as a value
+// (`Optional<Int>.none`); the arguments are dropped there.
+// `Optional.none` / `Optional<Int>.none` is nil: an Optional IS its value here.
+OptNone     <~~ takeAll(); push(makeConst(null)) ~~> = "Optional" [ NoSpace GenArgs ] "." "none" KwEnd ;
+GenCall     <~~ push(swGenCall(takeAll())) ~~>
+            = GenName "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
+GenRef      <~~ push(makeVarRef(takeAll()[0])) ~~> = GenName ;
+GenName     = Id <~~ push(up.in) ~~> NoSpace GenArgs GenFollow ;
+GenArgs     = "<" GenArgList ">" ;
+GenArgList  <~~ push({gargs: stripWs(up.in)}) ~~> = Type { "," Type } ;
+GenFollow   = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return (cc === 40 || cc === 46) ? undefined : abnf.newToken("\x01not-a-generic-call", 0)
+    })()
+~~) ;
 
 Call        <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
@@ -3509,8 +3529,9 @@ KwContinue  = "continue" KwEnd ;
             var oB = curF.NewBlock("")
             b.NewCondBr(truthy(b, isR), rB, oB)
             rB.NewRet(callExt(rB, "js_pylen", [rB.NewCall(rtRangeArr(), [ps[0]])]))
-            if (uni) { oB.NewRet(oB.NewCall(rtCount(), [ps[0]])) }
-            if (!uni) { oB.NewRet(callExt(oB, "js_pylen", [ps[0]])) }
+            var oV = hasSets ? oB.NewCall(rtRangeArr(), [ps[0]]) : ps[0]
+            if (uni) { oB.NewRet(oB.NewCall(rtCount(), [oV])) }
+            if (!uni) { oB.NewRet(callExt(oB, "js_pylen", [oV])) }
         })
     }
     function rtCount() {
@@ -4198,7 +4219,7 @@ KwContinue  = "continue" KwEnd ;
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var r = listT(b)
             b = r.b
-            var listV = hasRanges ? b.NewCall(rtRangeArr(), [r.v]) : r.v
+            var listV = hasRanges || hasSets ? b.NewCall(rtRangeArr(), [r.v]) : r.v
             if (hasUniStr) { listV = b.NewCall(rtStrSeq(), [listV]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), listV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
@@ -4535,6 +4556,7 @@ KwContinue  = "continue" KwEnd ;
                 if (depth == 0 && i < txt.length - 1) { return "" }
             }
         }
+        if (h.fn == "Set") { return "Set" }
         return h.fn == "Optional" ? "Optional<_>" : swCallAnn(h.fn)
     }
     // `let d: Named = D2(); d.shout`: a member a protocol EXTENSION adds and the
@@ -5048,6 +5070,27 @@ KwContinue  = "continue" KwEnd ;
         okB.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nilB), llvm.ir.NewIncoming(objV, okB)])}
     }
+    // `Array<Double>([1, 2])`: the call without its generic arguments, whose result
+    // then adopts the type they spell, as a declared `[Double]` would make it.
+    // Twin of swGenCall in swift-interpreter.abnf.
+    function swGenCall(items) {
+        var rest = [items[0]]
+        for (var i = 2; i < items.length; i++) { rest.push(items[i]) }
+        var call = makeCall(rest)
+        var ann = swGenAnn(items[0], items[1].gargs)
+        if (ann == "") { return call }
+        return function(b) {
+            var r = call(b)
+            return {b: r.b, v: swEmitAdopt(r.b, r.v, ann)}
+        }
+    }
+    function swGenAnn(name, g) {
+        if (name == "Array") { return "[" + g + "]" }
+        if (name == "Optional") { return g }
+        var kv = swTySplit(g, ",")
+        if (name == "Dictionary" && kv.length == 2) { return "[" + kv[0] + ":" + kv[1] + "]" }
+        return ""
+    }
     function makeCall(items) {
         var name = items[0]
         var args = planArgs(name, items.slice(1))
@@ -5092,6 +5135,7 @@ KwContinue  = "continue" KwEnd ;
         // Two arguments IS repeating:count: - no other Swift Array initializer takes
         // two. A user type named Array still wins.
         if (name == "Array" && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            if (args.length == 0) { return function(b) { return {b: b, v: callExt(b, "js_arr_new", [])} } }
             return function(b) {
                 var eaa = emitArgRecs(b, args)
                 b = eaa.b
@@ -5103,8 +5147,24 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: b.NewCall(rtArrayOf(), [a0])}
             }
         }
-        // Optional(v): an Optional IS its value in this model.
-        if (name == "Optional" && args.length == 1 && lookupSig(name) == null
+        // Set() / Set(seq). Twin: hostGlobals in swift-interpreter.abnf.
+        if (name == "Set" && args.length < 2 && lookupSig(name) == null
+            && classNames[name] != 1 && enumNames[name] != 1) {
+            hasSets = true
+            return function(b) {
+                if (args.length == 0) { return {b: b, v: emitSetOf(b, hUndef)} }
+                var es = emitArgRecs(b, args)
+                return {b: es.b, v: emitSetOf(es.b, callExt(es.b, "js_swidx", [es.v, emitNum(es.b, 0)]))}
+            }
+        }
+        // Dictionary(): the empty one. Twin: hostGlobals in swift-interpreter.abnf.
+        if (name == "Dictionary" && args.length == 0 && lookupSig(name) == null
+            && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) { return {b: b, v: callExt(b, "js_dict_new", [])} }
+        }
+        // Optional(v): an Optional IS its value in this model, and so is a
+        // Character(c) its one-cluster String.
+        if ((name == "Optional" || name == "Character") && args.length == 1 && lookupSig(name) == null
             && classNames[name] != 1 && enumNames[name] != 1) {
             return function(b) {
                 var eo = emitArgRecs(b, args)
@@ -5289,6 +5349,8 @@ KwContinue  = "continue" KwEnd ;
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
         var obs = ref.path.length == 0 && hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
+        // `s = [1, 2]` into a local declared `Set<Int>`.
+        if (ref.path.length == 0 && op == "=" && hasLocal && swIsSetTy(localAnn)) { valT = swSetInit(valT) }
         return function(b) {
             // A write to an existential slot keeps what it is given; see swKeepMode.
             // An implicit `self.x` is decided by the enclosing type, statically.
@@ -5751,6 +5813,7 @@ KwContinue  = "continue" KwEnd ;
                 return b
             }
         }
+        if (swIsSetTy(annTxt)) { init = swSetInit(init) }
         return function(b) {
             var r = init(b)
             b = r.b
@@ -5899,7 +5962,7 @@ KwContinue  = "continue" KwEnd ;
             var r = {b: r0.b, v: callExt(r0.b, "js_swtuparr", [r0.v])}
             // A RANGE VALUE walked as a sequence: `let r = 0..<3; for i in r` walks
             // 0, 1, 2, not the range object's own KEYS.
-            if (hasRanges) { r = {b: r.b, v: r.b.NewCall(rtRangeArr(), [r.v])} }
+            if (hasRanges || hasSets) { r = {b: r.b, v: r.b.NewCall(rtRangeArr(), [r.v])} }
             // A String is a sequence of CLUSTERS, not of code units - see rtStrSeq.
             if (hasUniStr) { r = {b: r.b, v: r.b.NewCall(rtStrSeq(), [r.v])} }
             b = r.b
@@ -6413,6 +6476,9 @@ KwContinue  = "continue" KwEnd ;
         var annTxt = ty
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
         notePropTy(items[0], annTxt)
+        if (items[k] != undefined && swIsSetTy(annTxt)) {
+            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: swSetInit(items[k])}
+        }
         if (items[k] != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: items[k]} }
         return {prop: items[0], ty: ty, ann: annTxt, hasInit: false, init: null}
     }
@@ -8195,6 +8261,32 @@ KwContinue  = "continue" KwEnd ;
         }
     }
     var hasRanges = false
+    // ----- Set -----
+    // A Set is {__set: true, elems: [...]}, its members in insertion order; the
+    // methods, ==, the copy and the printed form are js_swmcall / js_sweq /
+    // js_swcopy / js_swprint's (abnf/jsrtswift.go, lib/swift-rt.metajs). Here: the
+    // construction, and - once a program builds one (hasSets, set at WALK time) -
+    // rtRangeArr also walks a Set as its members, which is what count, isEmpty,
+    // first, Array(s) and for-in read. Twin: the Set block of
+    // swift-interpreter.abnf.
+    var hasSets = false
+    function swIsSetTy(t) {
+        var is = t == "Set" || (t.length > 4 && t.substring(0, 4) == "Set<")
+        if (is) { hasSets = true }
+        return is
+    }
+    // A String is first split into its Characters and a Range into its elements.
+    function emitSetOf(b, v) {
+        var sv = b.NewCall(rtRangeArr(), [b.NewCall(rtStrSeq(), [v])])
+        return callExt(b, "js_swsetof", [sv])
+    }
+    // `var s: Set<Int> = [1, 2]`: the initializer, made a Set.
+    function swSetInit(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: emitSetOf(r.b, r.v)}
+        }
+    }
     // ~= : containment when the left side is a range, == otherwise.
     function rtRangeHas() {
         return rtFunc("sw_rangehas", 2, function(b, ps) {
@@ -8243,7 +8335,12 @@ KwContinue  = "continue" KwEnd ;
             callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [i2, emitNum(bodyB, 1)])])
             bodyB.NewBr(headB)
             doneB.NewRet(out)
-            asIs.NewRet(ps[0])
+            if (!hasSets) { asIs.NewRet(ps[0]); return }
+            var setB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            asIs.NewCondBr(truthy(asIs, asIs.NewCall(rtProbe("sw_isset", "__set"), [ps[0]])), setB, plainB)
+            setB.NewRet(callExt(setB, "js_get", [ps[0], emitStr(setB, "elems")]))
+            plainB.NewRet(ps[0])
         })
     }
     // An operator a type declares as `static func <op>`: found on the first operand,
