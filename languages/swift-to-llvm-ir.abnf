@@ -1184,7 +1184,7 @@ Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
 ShortIdx    <~~ push(makeVarRef("$" + up.in)) ~~>
             = "0"..."9" { "0"..."9" } ;
 
-Closure     <~~ push(makeClosure(takeAll())) ~~>
+Closure     <~~ push(makeClosure(takeAll(), up.in, up.pos)) ~~>
             = "{" [ ClosureSig ] { PoundIfLam | LamStmt } "}" ;
 // A closure's own signature declares types just as a func does, and they adopt the
 // same way: `{ (x: Double) -> Double in x / 2 }` called with 3 has to divide 3.0.
@@ -4870,7 +4870,89 @@ KwContinue  = "continue" KwEnd ;
     // its value is the last expression. A capture list snapshots its names into a
     // scope of their own; a closure with no parameter names binds its arguments
     // under the shorthand names $0..$3.
-    function makeClosure(items) {
+    // An untyped closure parameter takes the closure's FLOATING return type when its
+    // value flows into the result: in `{ x -> Double in x / 2 }(3)` swiftc's solver
+    // makes x a Double (1.5), while in `{ x -> Double in Double(x / 2) }(3)` x is
+    // only an argument and keeps the literal's Int (1.0). With no solver here, the
+    // closure's source decides: the parameter flows when the body names it outside
+    // every call's and subscript's brackets. Twin of swClFlowTys in swift-interpreter.abnf.
+    function swClFlowTys(params, ptypes, rtype, txt, end) {
+        var rt = rtype
+        while (rt.length > 0 && (rt.charAt(rt.length - 1) == "?" || rt.charAt(rt.length - 1) == "!")) {
+            rt = rt.substring(0, rt.length - 1)
+        }
+        if (rt != "Double" && rt != "Float") { return ptypes }
+        var out = []
+        var src = ""
+        for (var i = 0; i < params.length; i++) {
+            var t = i < ptypes.length ? ptypes[i] : ""
+            if (t == "" && typeof params[i] == "string") {
+                if (src == "") { src = swClSrc(txt, end) }
+                if (swClFlows(src, params[i])) { t = rt }
+            }
+            out.push(t)
+        }
+        return out
+    }
+    function swClIdCh(k) { return (k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95 }
+    // The closure's text as written, read back from its end: up.in drops the
+    // whitespace, which is what separates the words. "" when it does not read back.
+    function swClSrc(txt, end) {
+        var src = c.srcSlice(end - txt.length * 4 - 64, end)
+        var i = src.length - 1
+        var j = txt.length - 1
+        while (j >= 0) {
+            if (i < 0) { return "" }
+            var sc = src.charCodeAt(i)
+            if (sc == txt.charCodeAt(j)) { j = j - 1 }
+            else if (sc != 32 && sc != 9 && sc != 10 && sc != 13) { return "" }
+            i = i - 1
+        }
+        return src.substring(i + 1, src.length)
+    }
+    // Whether the body (the text after the signature's `in`) names `name` outside a
+    // call's `(...)` and every `[...]`; a string literal is skipped whole. abs, min
+    // and max answer their argument's own type, so their parentheses do not hide it.
+    function swClFlows(src, name) {
+        var n = src.length
+        var stack = []
+        var opaque = 0
+        var inBody = false
+        var word = ""
+        var wordEnd = -1
+        var i = 0
+        while (i < n) {
+            var k = src.charCodeAt(i)
+            if (k == 34) {
+                i = i + 1
+                while (i < n && src.charCodeAt(i) != 34) {
+                    if (src.charCodeAt(i) == 92) { i = i + 1 }
+                    i = i + 1
+                }
+                i = i + 1
+            } else if (k == 40 || k == 91) {
+                var p = i > 0 ? src.charCodeAt(i - 1) : 32
+                var op = k == 91 || swClIdCh(p) || p == 41 || p == 93 || p == 62 || p == 63 || p == 33
+                if (k == 40 && wordEnd == i && (word == "abs" || word == "min" || word == "max")) { op = false }
+                stack.push(op)
+                if (op) { opaque = opaque + 1 }
+                i = i + 1
+            } else if (k == 41 || k == 93) {
+                if (stack.length > 0 && stack.pop()) { opaque = opaque - 1 }
+                i = i + 1
+            } else if (swClIdCh(k)) {
+                var s = i
+                while (i < n && swClIdCh(src.charCodeAt(i))) { i = i + 1 }
+                var w = src.substring(s, i)
+                word = w
+                wordEnd = i
+                if (!inBody) { inBody = w == "in" && stack.length == 0 }
+                else if (w == name && opaque == 0 && (s == 0 || src.charCodeAt(s - 1) != 46)) { return true }
+            } else { i = i + 1 }
+        }
+        return false
+    }
+    function makeClosure(items, txt, end) {
         var params = []
         var ptypes = []
         var rtype = ""
@@ -4883,6 +4965,7 @@ KwContinue  = "continue" KwEnd ;
             caps = items[0].caps
             start = 1
             swAnnClose()
+            ptypes = swClFlowTys(params, ptypes, rtype, txt, end)
         }
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
         // A parameter with a declared type becomes a parameter RECORD, which is

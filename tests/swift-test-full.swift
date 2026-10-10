@@ -2799,6 +2799,20 @@ func s51() {
                  && [1, 2].description == "[1, 2]" && true.description == "true" && "\(["😀"])" == "[\"😀\"]")
 }
 
+// ===== SECTION 52: an untyped closure parameter typed by the return type =====
+// `{ x -> Double in x / 2 }(3)` divides a Double (swiftc 6.1.2: 1.5), because x's
+// value flows into the Double result; inside a conversion it keeps the literal's
+// Int (`Double(x / 2)` is 1.0), and an index stays an Int.
+func s52() {
+    let arr = [1.5, 2.5, 4.0]
+    let f = { x -> Double in x / 2 }
+    check("52a", { x -> Double in x / 2 }(3) == 1.5 && f(5) == 2.5 && { x, y -> Double in x / y }(3, 2) == 1.5
+                 && { x -> Double in let h = x / 2; return h }(3) == 1.5 && { x -> Float in x / 3 }(1) == Float(1) / 3)
+    check("52b", { x -> Double in Double(x / 2) }(3) == 1.0 && { x -> Int in x / 2 }(3) == 1
+                 && { i -> Double in arr[i] / 2 }(2) == 2.0 && { x -> Double in abs(x) / 2 }(-3) == 1.5
+                 && "\([3, 4].map { v -> Double in v / 8 })" == "[0.375, 0.5]" && { x -> Double? in x / 2 }(3)! == 1.5)
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2853,6 +2867,7 @@ func main() {
     s49() // SECTION-CALL 49
     s50() // SECTION-CALL 50
     s51() // SECTION-CALL 51
+    s52() // SECTION-CALL 52
     print("full: \(checks) checks, \(fails) failures")
 }
 
