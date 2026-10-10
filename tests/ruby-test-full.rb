@@ -2908,6 +2908,30 @@ def s53
   check("ue53c", "\u{e9 41}".codepoints == [233, 65] && "\u{1F600 41}".codepoints.last == 65)
 end
 
+# ===== SECTION 54: spacing-sensitive call forms and the fractional Rational literal =====
+# A SPACED `(` after a method name opens the first ARGUMENT, not the argument list:
+# `f (2) + 1` is f(3). A paren-less command call may be the one argument of
+# another. 1.5r is (3/2). Every right-hand side is /usr/bin/ruby 2.6.10's own
+# answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s54two(a, b)
+  a + b
+end
+def s54one(a)
+  a
+end
+def s54
+  check("pa54a", 1.5r == Rational(3, 2) && 0.25r == Rational(1, 4) && 1_0.5r == Rational(21, 2) && 2.50r + 1 == Rational(7, 2))
+  x = s54one (2) + 1
+  y = s54one (2.0**55).to_r
+  check("pa54b", x == 3 && y == Rational(36028797018963968, 1))
+  z = [3, 1, 2]
+  w = s54one (z).sort
+  u = [1].push (2) * 3
+  check("pa54c", w == [1, 2, 3] && u == [1, 6])
+  v = s54one s54two 1, 2
+  check("pa54d", v == 3 && (s54two 3, 4) == 7)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2923,5 +2947,6 @@ s50() # SECTION-CALL 50
 s51() # SECTION-CALL 51
 s52() # SECTION-CALL 52
 s53() # SECTION-CALL 53
+s54() # SECTION-CALL 54
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

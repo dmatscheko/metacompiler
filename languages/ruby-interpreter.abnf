@@ -288,8 +288,10 @@ CommandStmt = CommandForm ;
 // `return get_ary 3 do |i| ... end` are both paren-less calls in expression position.
 // CmdArgAhead is what keeps it out of everything else - a bare name followed by a
 // newline, an operator, a comma or a `)` never reaches it.
+// A command call may itself be the ONE argument (`p two 1, 2` is p(two(1, 2)));
+// MRI accepts it nowhere else in the list.
 CommandForm <~~ push(makeCall(takeAll())) ~~>
-            = BareName <~~ push(up.in) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
+            = BareName <~~ push(up.in) ~~> SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ Block ] ;
 // TARGET << V [<< V]: Ruby strings are mutable, so `s << "bc"` has to update the
 // variable itself. The append is therefore a statement form that WRITES BACK to its
 // target - for an array that is the same object it already mutated in place, for a
@@ -343,10 +345,11 @@ MGroup      <~~ push({group: takeAll()}) ~~>
 // optional Expression reaches ACROSS the newline, and a bare `puts' followed by `p x'
 // parses as `puts p'. CommandForm spells the same guard for the same reason. A `(`
 // glued to the name opens the ARGUMENT LIST, so `puts(a, b)' is two arguments, while
-// `puts (a + b) * 2' keeps the spaced parenthesis inside its one argument, as in MRI.
+// `puts (a + b) * 2' keeps the spaced parenthesis inside its one argument, as in MRI,
+// and a command call may be the one argument (`puts two 3, 4`), as in CommandForm.
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
             = KwPuts <~~ push({cmd: up.in}) ~~> ( ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")"
-                                                | [ SameLine Expression { "," Expression } ] ) ;
+                                                | [ SameLine ( CommandForm | Expression { "," Expression } ) ] ) ;
 
 ExprStmt    = Expression [ ";" ] ;
 
@@ -896,8 +899,10 @@ RbIntLit    <~~ push(makeConst(intLitDec(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 Oct0Lit     <~~ push(makeConst(intLitRadix(up.in, 8, 1))) ~~>
             = "0" :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
-RatLit      <~~ push(makeConst(mkRat(parseInt(up.in.split("_").join("")), 1))) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "r" :whitespace(Whitespace) ;
+// A Rational literal may carry a fraction: 1.5r is (3/2). No exponent (1e3r is
+// not Ruby).
+RatLit      <~~ push(makeConst(ratLit(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } [ "." "0"..."9" { "0"..."9" | "_" } ] "r" :whitespace(Whitespace) ;
 ImagLit     <~~ push(makeConst(mkCpx(0, parseInt(up.in.split("_").join(""))))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "i" :whitespace(Whitespace) ;
 FloatLit    <~~ push(makeConst(mkFlo(parseFloat(up.in.split("_").join(""))))) ~~>
@@ -1980,8 +1985,9 @@ CmdArgAhead = :script(~~
         // `{` IS ONE OF THEM, and that is Ruby's rule rather than a convenience: a
         // brace after a method name is always a BLOCK, never a Hash argument - MRI
         // needs parentheses for the argument (`f({})`) and rejects `f {a: 1}`. Without
-        // 123 here, `x = proc { }` would read as `x = proc({})`.
-        if (cc === 40 || cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
+        // 123 here, `x = proc { }` would read as `x = proc({})`. A SPACED `(` is not
+        // one: `p (x).m` is p((x).m) in MRI, the parenthesis opening the argument.
+        if (cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
             || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
             || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
         var nx = c.peek(i + 1)
@@ -2919,6 +2925,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             out += ch
         }
         return out
+    }
+    // The value of a RatLit: the digits without the point over 10 per fraction digit.
+    // Twin of ratLit in ruby-to-llvm-ir.abnf.
+    function ratLit(txt) {
+        var t = txt.split("_").join("")
+        var dot = t.indexOf(".")
+        var den = 1
+        if (dot >= 0) {
+            var k = dot + 1
+            while (k < t.length && t.charAt(k) >= "0" && t.charAt(k) <= "9") { den = den * 10; k = k + 1 }
+        }
+        return mkRat(parseInt(t.split(".").join(""), 10), den)
     }
     function intLitDec(txt) {
         var s = litDigits(txt, 10, 0)

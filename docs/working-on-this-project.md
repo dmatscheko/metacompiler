@@ -775,9 +775,8 @@ is the ENTIRE answer, so that case is byte-exact. What is still absent is the
 exceptions (no inner slot in the value model); **both omissions can only shorten
 the answer, neither makes the produced part disagree.** **Ruby**
 `("a".."e").size` is 5 where MRI says nil — the emitter lowers every bare `.size`
-to `js_pylen`, which is also for-in's trip count (implemented, measured, reverted);
-`p (x).m` parses as `(p(x)).m` here and `p((x).m)` in MRI, which has now bitten two
-people. **Python** `repr(math)` names a machine-specific `.so` path; `import math
+to `js_pylen`, which is also for-in's trip count (implemented, measured, reverted).
+**Python** `repr(math)` names a machine-specific `.so` path; `import math
 as m` inside a function binds nothing. **Swift** static initialisers are eager
 where Swift's are lazy; `x is Inner` cannot tell two same-named nested types apart.
 **Dart** `catch (e, s)` drops the stack-trace binder — real frames are not
