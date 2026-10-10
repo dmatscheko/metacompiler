@@ -3335,6 +3335,25 @@ def s71
   check("df71c", defined?(not x) == "method" && defined?(not zz71).nil?)
 end
 
+# ===== SECTION 72: true, false and nil #& #| #^ =====
+# On true, false and nil the three operators are the non-short-circuit logical
+# ones over the right side's truthiness, nil acting as false; they are methods, so
+# send reaches them and defined? / respond_to? say so. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s72
+  v = [true, false, nil]
+  r = []
+  v.each { |x| v.each { |y| r.push([x & y, x | y, x ^ y]) } }
+  check("bo72a", r == [[true, true, false], [false, true, true], [false, true, true], [false, true, true],
+                       [false, false, false], [false, false, false], [false, true, true], [false, false, false],
+                       [false, false, false]])
+  check("bo72b", (v[0] & 3) == true && (v[1] | "a") == true && (v[2] ^ 0) == true && v[0].send(:&, v[1]) == false &&
+                 v[2].public_send(:|, 5) == true)
+  x = v[0]
+  x &= v[2]
+  check("bo72c", x == false && defined?(true & false) == "method" && v[2].respond_to?(:|) && v[1].respond_to?(:^))
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3368,5 +3387,6 @@ s68() # SECTION-CALL 68
 s69() # SECTION-CALL 69
 s70() # SECTION-CALL 70
 s71() # SECTION-CALL 71
+s72() # SECTION-CALL 72
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

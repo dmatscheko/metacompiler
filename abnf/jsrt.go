@@ -5611,6 +5611,26 @@ func rubyFindMethod(v interface{}, name string) (interface{}, bool) {
 	return nil, false
 }
 
+// rubyLogicBin is rubyBin for the operators js_rband / js_rbor / js_rbxor
+// lower: on true, false or nil, & | ^ are the NON-short-circuit logical operators
+// over the right side's truthiness (nil acts as false). Twin of js_rband in
+// lib/ruby-rt.metajs and rbin in ruby-interpreter.abnf.
+func (rt *jsrt) rubyLogicBin(op string, l, r interface{}) interface{} {
+	if op == "&" || op == "|" || op == "^" {
+		if _, ok := l.(bool); ok || isUndefOrNull(l) {
+			lb, rb := rubyTruthy(l), rubyTruthy(r)
+			switch op {
+			case "&":
+				return lb && rb
+			case "|":
+				return lb || rb
+			}
+			return lb != rb
+		}
+	}
+	return rt.rubyBin(op, l, r)
+}
+
 // rubyBin is the one binary operator step of ruby-to-llvm-ir.abnf (js_radd and
 // friends below), mirroring radd/rbin of ruby-interpreter.abnf: a user object
 // dispatches to its own operator method, strings and arrays get their Ruby
@@ -9195,7 +9215,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 				return jsNull
 			}
-			return rt.rubyBin(mn, target, args[1])
+			return rt.rubyLogicBin(mn, target, args[1])
 		}
 		if mn == "respond_to?" {
 			return rt.rubyRespond(target, args[1:])
@@ -13034,24 +13054,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_rdiv": func(a []uint64) uint64 { return w(rt.rubyBin("/", u(a[0]), u(a[1]))) },
 		"js_rmod": func(a []uint64) uint64 { return w(rt.rubyBin("%", u(a[0]), u(a[1]))) },
 		"js_rpow": func(a []uint64) uint64 { return w(rt.rubyBin("**", u(a[0]), u(a[1]))) },
-		"js_rband": func(a []uint64) uint64 {
-			if lb, ok := u(a[0]).(bool); ok {
-				return boolH(lb && rubyTruthy(u(a[1])))
-			}
-			return w(rt.rubyBin("&", u(a[0]), u(a[1])))
-		},
-		"js_rbor": func(a []uint64) uint64 {
-			if lb, ok := u(a[0]).(bool); ok {
-				return boolH(lb || rubyTruthy(u(a[1])))
-			}
-			return w(rt.rubyBin("|", u(a[0]), u(a[1])))
-		},
-		"js_rbxor": func(a []uint64) uint64 {
-			if lb, ok := u(a[0]).(bool); ok {
-				return boolH(lb != rubyTruthy(u(a[1])))
-			}
-			return w(rt.rubyBin("^", u(a[0]), u(a[1])))
-		},
+		"js_rband": func(a []uint64) uint64 { return w(rt.rubyLogicBin("&", u(a[0]), u(a[1]))) },
+		"js_rbor": func(a []uint64) uint64 { return w(rt.rubyLogicBin("|", u(a[0]), u(a[1]))) },
+		"js_rbxor": func(a []uint64) uint64 { return w(rt.rubyLogicBin("^", u(a[0]), u(a[1]))) },
 		// << appends to an Array (in place, so `a << b << c` chains), concatenates a
 		// String and shifts an Integer - one operator, three receivers, like Ruby.
 		"js_rshl": func(a []uint64) uint64 { return w(rt.rubyBin("<<", u(a[0]), u(a[1]))) },

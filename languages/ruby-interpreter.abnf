@@ -4989,6 +4989,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "&" && Array.isArray(r)) { return arrAnd(l, r) }
             if (op == "|" && Array.isArray(r)) { return arrOr(l, r) }
         }
+        // TrueClass / FalseClass / NilClass #& #| #^ are the NON-short-circuit logical
+        // operators over the right side's truthiness (nil acts as false). Twin of
+        // js_rband / js_rbor / js_rbxor in abnf/jsrt.go and lib/ruby-rt.metajs.
+        if (l === null || l === undefined || typeof l == "boolean") {
+            if (op == "&") { return rtest(l) && rtest(r) }
+            if (op == "|") { return rtest(l) || rtest(r) }
+            if (op == "^") { return rtest(l) != rtest(r) }
+        }
         return numBin(op, l, r)
     }
     function makePow(items) {

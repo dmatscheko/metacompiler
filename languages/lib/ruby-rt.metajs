@@ -6316,6 +6316,9 @@ function rbMethod(target, name, args) {
             if (mn == "<=") { return rbCmp(target, args[1]) <= 0 }
             if (mn == ">=") { return rbCmp(target, args[1]) >= 0 }
             if (mn == "<=>") { return js_rcmp(target, args[1]) }
+            if (mn == "&") { return js_rband(target, args[1]) }
+            if (mn == "|") { return js_rbor(target, args[1]) }
+            if (mn == "^") { return js_rbxor(target, args[1]) }
             return rbBin(mn, target, args[1])
         }
         var rest = []
@@ -6864,26 +6867,27 @@ function js_rdiv(l, r) { return rbBin("/", l, r) }
 function js_rmod(l, r) { return rbBin("%", l, r) }
 function js_rpow(l, r) { return rbBin("**", l, r) }
 
-// & | ^ are the NON-short-circuit boolean operators when the left side is a
-// boolean, and the numeric ones otherwise - one operator, two meanings, like Ruby.
+// & | ^ are the NON-short-circuit boolean operators when the left side is true,
+// false or nil (nil acts as false), and the numeric ones otherwise - one operator,
+// two meanings, like Ruby.
 function js_rband(l, r) {
-    if (typeof l == "boolean") {
-        if (!l) { return false }
+    if (typeof l == "boolean" || rtIsNil(l)) {
+        if (!rbTruthy(l)) { return false }
         return rbTruthy(r)
     }
     return rbBin("&", l, r)
 }
 
 function js_rbor(l, r) {
-    if (typeof l == "boolean") {
-        if (l) { return true }
+    if (typeof l == "boolean" || rtIsNil(l)) {
+        if (rbTruthy(l)) { return true }
         return rbTruthy(r)
     }
     return rbBin("|", l, r)
 }
 
 function js_rbxor(l, r) {
-    if (typeof l == "boolean") { return l !== rbTruthy(r) }
+    if (typeof l == "boolean" || rtIsNil(l)) { return rbTruthy(l) !== rbTruthy(r) }
     return rbBin("^", l, r)
 }
 
