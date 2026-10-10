@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58 and 59.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,9 +6,9 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58, the call/class/private-name model, the
-//                             Unicode identifier tables, iterators, derived constructors,
-//                             JSON, guards, Set and Map
+//   tests/js-test-full.3.js   sections 44-56, 58 and 59, the call/class/private-name
+//                             model, the Unicode identifier tables, iterators, derived
+//                             constructors, JSON, guards, Set and Map, iterator closing
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1166,6 +1166,42 @@ function s58() {
     check("col15", typeof isArr === "function" && [[1], [2]].every(Array.isArray) && !isArr("x"))
 }
 
+// ===== SECTION 59: closing a class-instance iterator =====
+// An iterator whose return() and throw() are CLASS methods (they live on the class,
+// not on the instance) is closed by every site that abandons it: a for-of break, a
+// labelled break out of it, a return out of its body, array destructuring that stops
+// early, and a yield* delegate's return() / throw(). Values read off node 24.
+var log59 = []
+class It59 {
+    constructor(n) { this.i = 0; this.n = n }
+    next() { this.i++; return this.i > this.n ? {done: true, value: undefined} : {done: false, value: this.i} }
+    return() { log59.push("ret" + this.i); return {done: true} }
+    throw(e) { log59.push("thr"); return {done: true} }
+}
+// node iterates only through Symbol.iterator, which this subset does not have; these
+// engines drive any value with a callable next().
+if (typeof Symbol !== "undefined") { It59.prototype[Symbol.iterator] = function () { return this } }
+function* del59(n) { yield* new It59(n) }
+function lab59(n) { outer: for (var x of [1]) { for (var y of new It59(n)) { if (y == 2) { break outer } } } }
+function ret59(n) { for (var y of new It59(n)) { if (y == 3) { return y } } }
+function s59() {
+    var five = [5, 1][0]
+    for (var v of new It59(five)) { if (v == 2) { break } }
+    var [a, b] = new It59(five)
+    var [c] = new It59([5, 1][1])
+    check("itc1", log59.join() === "ret2,ret2,ret1" && a + b + c === 4)
+    lab59(five)
+    ret59(five)
+    check("itc2", log59.join() === "ret2,ret2,ret1,ret2,ret3")
+    var g = del59(five)
+    g.next()
+    var r = g.return(7)
+    var g2 = del59(five)
+    g2.next()
+    var t = g2.throw(new Error("x"))
+    check("itc3", log59.join() === "ret2,ret2,ret1,ret2,ret3,ret1,thr" && r.done && t.done)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1183,6 +1219,7 @@ function main() {
     s55() // SECTION-CALL 55
     s56() // SECTION-CALL 56
     s58() // SECTION-CALL 58
+    s59() // SECTION-CALL 59
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

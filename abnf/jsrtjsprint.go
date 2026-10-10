@@ -1830,7 +1830,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsiterclose"] = func(a []uint64) uint64 {
 		it := u(a[0])
 		if !isUndefOrNull(it) {
-			if r := rt.getMember(it, "return"); isCallable(r) {
+			// js_jsvget, the member VALUE read: a class instance's return() lives on
+			// its __class descriptor, where rt.getMember does not look.
+			if r := u(m["js_jsvget"]([]uint64{a[0], w("return")})); isCallable(r) {
 				rt.call(r, it, nil)
 			}
 		}

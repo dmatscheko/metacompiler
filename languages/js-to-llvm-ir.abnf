@@ -3653,8 +3653,8 @@ NotFuncHead = :script(~~
     // lib/js-builtins.js, since this subset has no Symbol.iterator - and the value
     // itself otherwise. Twin of jsIterOf in js-interpreter.abnf.
     //
-    // This probe and the `next` probes of the iteration sites read with js_jsvget, the
-    // member VALUE read: a class instance's methods live on its __class descriptor, and
+    // This probe and the iteration sites' `next`, `return` and `throw` probes read with
+    // js_jsvget, the member VALUE read: a class instance's methods live on its __class descriptor, and
     // under llvm.Run only js_jsvget finds them there.
     function emitIterOf(b, v) {
         var fV = callExt(b, "js_jsvget", [v, emitStr(b, "@@iterator")])
@@ -3691,7 +3691,7 @@ NotFuncHead = :script(~~
             var lenV = callExt(headB, memGetExt(), [arrV, emitStr(headB, "length")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [lenV, callExt(headB, "js_num_i", [handle(n)])])),
                             stepB, closeB)
-            var retV = callExt(closeB, memGetExt(), [srcV, emitStr(closeB, "return")])
+            var retV = callExt(closeB, "js_jsvget", [srcV, emitStr(closeB, "return")])
             closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                     [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                              doCloseB, joinB)
@@ -4284,7 +4284,7 @@ NotFuncHead = :script(~~
             bb.NewCondBr(truthy(bb, opV), cB, skB)
             callExt(cB, "js_scope_set", [curScopeV, emitStr(cB, "0yopen"), hFalse])
             var srcV = callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, "0ysrc")])
-            var rfV = callExt(cB, memGetExt(), [srcV, emitStr(cB, "return")])
+            var rfV = callExt(cB, "js_jsvget", [srcV, emitStr(cB, "return")])
             cB.NewCondBr(truthy(cB, callExt(cB, "js_seq",
                                  [callExt(cB, "js_typeof", [rfV]), emitStr(cB, "function")])), callB, skB)
             callExt(jsThisSet(callB, srcV), "js_call", [rfV, srcV, callExt(callB, "js_arr_new", [])])
@@ -4358,7 +4358,7 @@ NotFuncHead = :script(~~
                             hchkB, splitB)
             hchkB.NewCondBr(truthy(hchkB, callExt(hchkB, memGetExt(), [hsentV, emitStr(hchkB, "__athrow")])),
                             ythrB, splitB)
-            var ytfV = callExt(ythrB, memGetExt(), [seqV, emitStr(ythrB, "throw")])
+            var ytfV = callExt(ythrB, "js_jsvget", [seqV, emitStr(ythrB, "throw")])
             ythrB.NewCondBr(truthy(ythrB, callExt(ythrB, "js_seq",
                                 [callExt(ythrB, "js_typeof", [ytfV]), emitStr(ythrB, "function")])),
                             ythrCallB, ythrNoB)
@@ -4370,7 +4370,7 @@ NotFuncHead = :script(~~
             ythrCallB.NewBr(joinB)
             // No throw method: close the delegate through return(), then raise the
             // TypeError node raises, spelled as the string its message renders to.
-            var yrfV = callExt(ythrNoB, memGetExt(), [seqV, emitStr(ythrNoB, "return")])
+            var yrfV = callExt(ythrNoB, "js_jsvget", [seqV, emitStr(ythrNoB, "return")])
             ythrNoB.NewCondBr(truthy(ythrNoB, callExt(ythrNoB, "js_seq",
                                   [callExt(ythrNoB, "js_typeof", [yrfV]), emitStr(ythrNoB, "function")])),
                               yretB, ythrowB)
@@ -5482,7 +5482,7 @@ NotFuncHead = :script(~~
                 var closeB = curF.NewBlock("")
                 var doCloseB = curF.NewBlock("")
                 brkB = closeB
-                var retV = callExt(closeB, memGetExt(), [seqV, emitStr(closeB, "return")])
+                var retV = callExt(closeB, "js_jsvget", [seqV, emitStr(closeB, "return")])
                 closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                         [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                                  doCloseB, exitB)

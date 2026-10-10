@@ -5250,7 +5250,7 @@ function js_jsdrain() {
 // *-interpreter.abnf start scripts.
 function js_jsiterclose(it) {
     if (jvUndefOrNull(it)) { return undefined }
-    var r = js_jsmget(it, "return")
+    var r = js_jsvget(it, "return") // finds a class instance's return() too
     if (jvIsCallable(r)) { jvCallT(r, it, []) }
     return undefined
 }
