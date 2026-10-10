@@ -2986,6 +2986,35 @@ def s56
                  !Complex(3, 4).abs.integer? && Complex(3, 0).polar == [3, 0.0])
 end
 
+# ===== SECTION 57: a glued minus belongs to the literal; a local is never a command =====
+# `-7.abs` is (-7).abs, except directly before `**` (-2 ** 2 is -(2 ** 2)); a spaced
+# `- 7.abs` is -(7.abs). After a LOCAL a spaced-then-glued operator (`x -1`, `x *2`,
+# `x [1]`, `x &4`) is the binary operator or the index; after a method name it opens
+# the argument. Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS
+# SECTION RUNS UNDER REAL RUBY.
+def s57m(v = 0)
+  "m#{v}"
+end
+def s57
+  a = [7, 2, 3]
+  check("ng57a", -7.abs == 7 && -7.div(2) == -4 && -7.5.floor == -8 && -0x10.abs == 16 &&
+                 -1.0.to_s == "-1.0" && - 7.abs == -7)
+  check("ng57b", -2 ** 2 == -4 && -2.0 ** 2 == -4.0 && -2.abs ** 2 == 4 && a[1].abs ** 2 == 4)
+  x = 5
+  y = x -1
+  y2 = x *2
+  y3 = a [1]
+  y4 = x &4
+  check("lc57a", y == 4 && y2 == 10 && y3 == 2 && y4 == 4)
+  r1 = s57m -1
+  r2 = s57m *[3]
+  check("lc57b", r1 == "m-1" && r2 == "m3")
+  [10].each { |e| f = e -1; check("lc57c", f == 9) }
+  for fv in [5] do end
+  g = fv -1
+  check("lc57d", g == 4)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3004,5 +3033,6 @@ s53() # SECTION-CALL 53
 s54() # SECTION-CALL 54
 s55() # SECTION-CALL 55
 s56() # SECTION-CALL 56
+s57() # SECTION-CALL 57
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

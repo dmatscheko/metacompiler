@@ -327,7 +327,196 @@ CommandStmt = CommandForm ;
 // A command call may itself be the ONE argument (`p two 1, 2` is p(two(1, 2)));
 // MRI accepts it nowhere else in the list.
 CommandForm <~~ push(makeCall(takeAll())) ~~>
-            = BareName <~~ push(up.in) ~~> SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ Block ] ;
+            = BareName <~~ push(up.in) ~~> NotLocalCmd SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ Block ] ;
+// NotLocalCmd fails the command form when its name is a LOCAL VARIABLE. MRI reads
+// `x -1`, `x *2`, `x &m` and `x [1]` with its local-variable table: for a local they
+// are the binary operator or the index, for a method the argument. A PEG has no such
+// table, so this re-derives it from the source: an assignment, block parameter, `for`
+// variable or method parameter naming it earlier in the same scope. Scopes are read
+// from indentation: a def/class/module line at a smaller indent (or earlier on this
+// line) ends the search, and a body closed by an `end` / `}` is skipped when it
+// belonged to a def/class/module or a block. Only an argument opening with one of
+// those four characters is ambiguous, so nothing else pays for the scan.
+NotLocalCmd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(0)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        if (!(cc === 45 || cc === 42 || cc === 38 || cc === 91)) { return undefined }
+        if (cc === 45 && c.peek(i + 1) === 62) { return undefined }
+        function isId(ch) { return (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 }
+        function isSp(ch) { return ch === 32 || ch === 9 || ch === 13 }
+        var ns = 0
+        while (isId(c.peek(ns - 1))) { ns = ns - 1 }
+        var nlen = 0 - ns
+        var f0 = c.peek(ns)
+        if (nlen === 0 || (f0 >= 48 && f0 <= 90)) { return undefined }
+        var isLocal = abnf.newToken("\x01localvar", 0)
+        function nameAt(p) {
+            if (isId(c.peek(p - 1)) || c.peek(p - 1) === 64 || c.peek(p - 1) === 36 || c.peek(p - 1) === 58) { return false }
+            for (var k = 0; k < nlen; k++) { if (c.peek(p + k) !== c.peek(ns + k)) { return false } }
+            var a = c.peek(p + nlen)
+            return !isId(a) && a !== 63 && a !== 33
+        }
+        function wordAt(p, w) {
+            var pv = c.peek(p - 1)
+            if (isId(pv) || pv === 46 || pv === 58) { return false }
+            for (var k = 0; k < w.length; k++) { if (c.peek(p + k) !== w[k]) { return false } }
+            return !isId(c.peek(p + w.length))
+        }
+        // Chars a multiple-assignment target list is made of: names, `,`, `*`, parens.
+        function isLhs(ch) { return isId(ch) || isSp(ch) || ch === 44 || ch === 42 || ch === 40 || ch === 41 }
+        var blockParams = true
+        function bindsAt(p, ls, le) {
+            var b = p - 1
+            while (b >= ls && isSp(c.peek(b))) { b = b - 1 }
+            if (b >= ls && c.peek(b) === 46) { return false }
+            if (b >= ls + 2 && wordAt(b - 2, [102, 111, 114])) { return true }
+            // A block parameter: `{ |a, x|` / `do |x|`.
+            var j = p - 1
+            while (j >= ls && c.peek(j) !== 124 && c.peek(j) !== 59) { j = j - 1 }
+            if (blockParams && j >= ls && c.peek(j) === 124) {
+                var q = j - 1
+                while (q >= ls && isSp(c.peek(q))) { q = q - 1 }
+                if (q >= ls && (c.peek(q) === 123 || (q >= ls + 1 && wordAt(q - 1, [100, 111])))) { return true }
+            }
+            // An assignment, plain, operator (`x += 1`, `x ||= v`) or multiple (`a, x = v`).
+            var s = p - 1
+            while (s >= ls && c.peek(s) !== 59 && isLhs(c.peek(s))) { s = s - 1 }
+            var lhsOk = !(s >= ls && c.peek(s) !== 59)
+            var a = p + nlen
+            while (a < le && isSp(c.peek(a))) { a = a + 1 }
+            var q0 = c.peek(a)
+            var q1 = c.peek(a + 1)
+            if ((q0 === 43 || q0 === 45 || q0 === 42 || q0 === 47 || q0 === 37 || q0 === 124 || q0 === 38 || q0 === 94) && q1 === 61) { return true }
+            if (((q0 === 42 || q0 === 124 || q0 === 38 || q0 === 60 || q0 === 62) && q1 === q0) && c.peek(a + 2) === 61) { return true }
+            if (!lhsOk) { return false }
+            while (a < le && isLhs(c.peek(a))) { a = a + 1 }
+            if (c.peek(a) !== 61) { return false }
+            var e1 = c.peek(a + 1)
+            return e1 !== 61 && e1 !== 126 && e1 !== 62
+        }
+        function lineBinds(ls, le) {
+            var p = ls
+            while (p < le) {
+                var ch = c.peek(p)
+                if (ch === 35 && c.peek(p + 1) !== 123) { return false }
+                if (nameAt(p) && bindsAt(p, ls, le)) { return true }
+                p = p + 1
+            }
+            return false
+        }
+        // A def's parameters: any mention of the name after the method name and before
+        // the body starts.
+        function defParam(d, le) {
+            var p = d + 3
+            while (p < le && isSp(c.peek(p))) { p = p + 1 }
+            while (p < le && (isId(c.peek(p)) || c.peek(p) === 46)) { p = p + 1 }
+            var depth = 0
+            while (p < le) {
+                var ch = c.peek(p)
+                if (ch === 40) { depth = depth + 1 }
+                if (ch === 41) { depth = depth - 1; if (depth <= 0) { return false } }
+                if (depth === 0 && (ch === 59 || ch === 61 || ch === 35)) { return false }
+                if (nameAt(p)) { return true }
+                p = p + 1
+            }
+            return false
+        }
+        // The offset of the def/class/module keyword on [ls, le), or null. Offsets
+        // behind the guard's position are negative, so -1 cannot mean "none".
+        function scopeKw(ls, le) {
+            var p = ls
+            while (p < le) {
+                if (c.peek(p) === 35) { return null }
+                if (wordAt(p, [100, 101, 102]) || wordAt(p, [99, 108, 97, 115, 115]) || wordAt(p, [109, 111, 100, 117, 108, 101])) { return p }
+                p = p + 1
+            }
+            return null
+        }
+        function hasWord(ls, le, w) {
+            for (var p = ls; p < le; p++) { if (wordAt(p, w)) { return true } }
+            return false
+        }
+        // Does the line end by opening a block (`do`, `do |x|`, `{`, `{ |x|`)?
+        function opensBlock(ls, le) {
+            var p = le - 1
+            while (p >= ls && isSp(c.peek(p))) { p = p - 1 }
+            if (p >= ls && c.peek(p) === 124) {
+                p = p - 1
+                while (p >= ls && c.peek(p) !== 124) { p = p - 1 }
+                p = p - 1
+                while (p >= ls && isSp(c.peek(p))) { p = p - 1 }
+            }
+            if (p < ls) { return false }
+            return c.peek(p) === 123 || (p >= ls + 1 && wordAt(p - 1, [100, 111]))
+        }
+        var ls = ns
+        while (c.peek(ls - 1) >= 0 && c.peek(ls - 1) !== 10) { ls = ls - 1 }
+        var d0 = null
+        for (var p0 = ls; p0 < ns; p0++) {
+            if (c.peek(p0) === 35) { break }
+            if (wordAt(p0, [100, 101, 102]) || wordAt(p0, [99, 108, 97, 115, 115]) || wordAt(p0, [109, 111, 100, 117, 108, 101])) { d0 = p0 }
+        }
+        if (d0 !== null) {
+            if (wordAt(d0, [100, 101, 102]) && defParam(d0, ns)) { return isLocal }
+            if (lineBinds(d0, ns)) { return isLocal }
+            return undefined
+        }
+        if (lineBinds(ls, ns)) { return isLocal }
+        var ind = 0
+        while (isSp(c.peek(ls + ind))) { ind = ind + 1 }
+        var cur = ind
+        var hide = false
+        var hideInd = 0
+        var hideFound = false
+        var steps = 0
+        var le = ls - 1
+        while (c.peek(le) === 10 && steps < 1000000) {
+            steps = steps + 1
+            var s = le
+            while (c.peek(s - 1) >= 0 && c.peek(s - 1) !== 10) { s = s - 1 }
+            var li = 0
+            while (isSp(c.peek(s + li))) { li = li + 1 }
+            var fc = c.peek(s + li)
+            var lineEnd = le
+            le = s - 1
+            if (s + li >= lineEnd || fc === 35) { continue }
+            var closer = wordAt(s + li, [101, 110, 100]) || fc === 125
+            if (hide) {
+                if (li > hideInd || closer || wordAt(s + li, [101, 108, 115, 101]) || wordAt(s + li, [101, 108, 115, 105, 102])
+                    || wordAt(s + li, [119, 104, 101, 110]) || wordAt(s + li, [105, 110]) || wordAt(s + li, [114, 101, 115, 99, 117, 101])
+                    || wordAt(s + li, [101, 110, 115, 117, 114, 101])) {
+                    if (li > hideInd && lineBinds(s, lineEnd)) { hideFound = true }
+                    if (li >= hideInd) { continue }
+                }
+                hide = false
+                if (li === hideInd) {
+                    var kw = scopeKw(s, lineEnd)
+                    if (kw !== null) { continue }
+                    var blk = opensBlock(s, lineEnd)
+                    if (hideFound && !blk) { return isLocal }
+                    blockParams = !blk
+                    var own = lineBinds(s, lineEnd)
+                    blockParams = true
+                    if (own) { return isLocal }
+                    continue
+                }
+                if (hideFound) { return isLocal }
+            }
+            if (closer) { hide = true; hideInd = li; hideFound = false; continue }
+            var d = scopeKw(s, lineEnd)
+            if (d !== null) {
+                if (li >= cur && hasWord(d, lineEnd, [101, 110, 100])) { continue }
+                if (wordAt(d, [100, 101, 102]) && defParam(d, lineEnd)) { return isLocal }
+                return undefined
+            }
+            if (li < cur) { cur = li }
+            if (lineBinds(s, lineEnd)) { return isLocal }
+        }
+        return undefined
+    })()
+~~) ;
 // TARGET << V [<< V]: Ruby strings are mutable, so `s << "bc"` has to update the
 // variable itself. The append is therefore a statement form that WRITES BACK to its
 // target - for an array that is the same object it already mutated in place, for a
@@ -616,9 +805,28 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { LineCont ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Pos | BitNot | PowExpr ;
+// A `-` glued to a numeric literal is the literal's own sign, so `-7.abs` is 7 and
+// `-7.div(2)` is -4 (NegNumLit, a Primary). The one exception is a literal followed
+// directly by `**`: `-2 ** 2` is -(2 ** 2), which NegLitPow keeps.
+UnaryExpr   = NegLitPow | Neg | Pos | BitNot | PowExpr ;
+NegLitPow   <~~ push(makeNeg(makePow(takeAll()))) ~~>
+            = "-" DigitGlued NumLit "**" UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
-            = "-" UnaryExpr ;
+            = "-" NotDigitGlued UnaryExpr ;
+NegNumLit   <~~ push(makeNeg(pop())) ~~>
+            = "-" DigitGlued NumLit ;
+DigitGlued = :script(~~
+    (function() {
+        var d = c.peek(0)
+        if (d < 48 || d > 57) { return abnf.newToken("\x01nodigit", 0) }
+    })()
+~~) ;
+NotDigitGlued = :script(~~
+    (function() {
+        var d = c.peek(0)
+        if (d >= 48 && d <= 57) { return abnf.newToken("\x01digit", 0) }
+    })()
+~~) ;
 // Unary plus. On a number it is the identity; Ruby's real use is `+"str"`, which asks
 // for an unfrozen copy of a string literal - and a copy is what the value already is
 // here, so the operand is simply handed back.
@@ -836,7 +1044,7 @@ Primary     = "(" Expression ")" | ParenBody | LambdaLit | SingletonDecl
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
             | CmdLit | HeredocLit | HeredocRef
             | StrLit | CharLit | PercentLit | RegexLit
-            | RbHexLit | RbBinLit | RbOctLit | Oct0Lit | RatLit | ImagLit | FloatLit | RbIntLit
+            | NumLit | NegNumLit
             | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self | FileLit | LineLit | DirLit
@@ -919,6 +1127,7 @@ YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
 // than lib/numbers.abnf's, whose parseInt ROUNDS past 2^53; the digit productions are
 // still the shared ones, and makeConst gets a {rbig} marker for anything the double
 // cannot count exactly.
+NumLit      = RbHexLit | RbBinLit | RbOctLit | Oct0Lit | RatLit | ImagLit | FloatLit | RbIntLit ;
 RbHexLit    <~~ push(makeConst(intLitRadix(up.in, 16, 2))) ~~>
             = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
 RbBinLit    <~~ push(makeConst(intLitRadix(up.in, 2, 2))) ~~>
@@ -2086,8 +2295,12 @@ CmdArgAhead = :script(~~
             || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
             || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
         var nx = c.peek(i + 1)
-        // - * & ** are arguments only when glued to the value that follows.
+        // - * & ** are arguments only when glued to the value that follows. For `**`
+        // the value follows the SECOND star (`a.b ** 2` is a power, `a.b **h` a splat),
+        // and `&&` never opens an argument.
         if (cc === 45 || cc === 42 || cc === 38) {
+            if (cc === 38 && nx === 38) { return no }
+            if (cc === 42 && nx === 42) { nx = c.peek(i + 2) }
             if (nx === 32 || nx === 9 || nx === 61 || nx < 0) { return no }
             return undefined
         }
