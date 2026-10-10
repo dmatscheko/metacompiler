@@ -41,9 +41,9 @@ references (static, bound, unbound and constructor) that become real values of t
 functional interface they are assigned to, the full operator set including the
 bitwise and shift operators with Java int semantics, and the compound assignments.
 The enhanced for runs over an array or any Iterable. Importing java.util's
-ArrayList, List, Collection or Iterator compiles lib/java-util.java with the
+ArrayList, AbstractList, List, Collection or Iterator compiles lib/java-util.java with the
 program (shared with java-to-llvm-ir.abnf): an ArrayList and List.of in Java's own
-terms. Math's and StrictMath's transcendentals are fdlibm's (lib/fdlibm.js).
+terms, and an AbstractList a user List extends. Math's and StrictMath's transcendentals are fdlibm's (lib/fdlibm.js).
 
 UNQUALIFIED calls work - check(x), not just this.check(x) - and pick their
 receiver by Java's own rule: a method the enclosing class or an ancestor declares

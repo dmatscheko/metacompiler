@@ -31,6 +31,7 @@
 // code), organized after the Java Language Specification (SE 21) with the
 // ANTLR grammars-v4 java grammar as a coverage checklist.
 
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -95,6 +96,7 @@ class Main {
         S45.run(); // SECTION-CALL 45
         S46.run(); // SECTION-CALL 46
         S47.run(); // SECTION-CALL 47
+        S48.run(); // SECTION-CALL 48
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2689,5 +2691,57 @@ class S47 {
         Main.check("uc5", Character.digit(cp[7], 36) == 10 && Character.getNumericValue(cp[9]) == -1
             && Character.getNumericValue(cp[10]) == -2 && Character.getNumericValue(cp[11]) == 9
             && Character.isUpperCase(cp[12]) && Character.isLetter(cp[12]));
+    }
+}
+
+// ===== SECTION 48: instanceof an interface, and a user List =====
+//
+// `instanceof` holds for every interface a class implements, for each one those
+// extend, and through a superclass; a class extending java.util.AbstractList is
+// a List an ArrayList compares equal to. Every expected value is java 24.0.2's.
+interface S48Col { int n(); }
+interface S48Lst extends S48Col { }
+interface S48Gen<T> { T first(); }
+interface S48A { default String a() { return "a"; } }
+interface S48B { default String b() { return "b"; } }
+interface S48AB extends S48A, S48B { }
+class S48Impl implements S48Lst, S48Gen<String> {
+    public int n() { return 1; }
+    public String first() { return "x"; }
+}
+class S48Base { }
+class S48K extends S48Base implements S48AB { }
+class S48Range extends AbstractList<Integer> {
+    int size;
+    S48Range(int size) { this.size = size; }
+    public Integer get(int i) {
+        if (i < 0 || i >= size) { throw new IndexOutOfBoundsException("at " + i); }
+        return i * 10;
+    }
+    public int size() { return size; }
+}
+class S48 {
+    static void run() {
+        Object o = new S48Impl();
+        Main.check("if1", o instanceof S48Lst && o instanceof S48Col && o instanceof S48Gen && o instanceof S48Impl);
+        Object k = new S48K();
+        S48K kk = new S48K();
+        Main.check("if2", k instanceof S48A && k instanceof S48B && k instanceof S48AB && k instanceof S48Base
+            && (kk.a() + kk.b()).equals("ab") && !(o instanceof S48A));
+        S48Range r = new S48Range(3);
+        Object ro = r;
+        ArrayList<Integer> a = new ArrayList<>();
+        a.add(0); a.add(10); a.add(20);
+        Main.check("if3", ro instanceof List && a.equals(r) && r.equals(a) && r.equals(List.of(0, 10, 20))
+            && a.hashCode() == r.hashCode() && ("" + r).equals("[0, 10, 20]") && r.indexOf(20) == 2 && !r.equals("x"));
+        a.add(30);
+        String nse = "";
+        Iterator<Integer> it = r.iterator();
+        it.next(); it.next(); it.next();
+        try { it.next(); } catch (RuntimeException e) { nse = e.getMessage(); }
+        String uoe = "";
+        try { r.add(5); } catch (UnsupportedOperationException e) { uoe = "" + e; }
+        Main.check("if4", !a.equals(r) && !r.equals(a) && nse.equals("java.lang.IndexOutOfBoundsException: at 3")
+            && uoe.equals("java.lang.UnsupportedOperationException"));
     }
 }

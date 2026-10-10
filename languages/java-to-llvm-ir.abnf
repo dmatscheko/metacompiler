@@ -20,7 +20,7 @@ object creation with new, arrays (new int[n], the multi dimensional new int[a][b
 and the partial new int[a][], bare initializers like {1, 2}, C style declarators,
 a.length, indexing), varargs (a trailing array parameter, fed either by the extra
 arguments or by an array), the enhanced for loop
-(for (var x : arr), and over any Iterable), the java.util ArrayList / List of an
+(for (var x : arr), and over any Iterable), the java.util ArrayList / AbstractList / List of an
 import (lib/java-util.java, compiled with the program), new String(...),
 Math's and StrictMath's transcendentals as fdlibm answers them,
 int / boolean / char / String / var / class types (types are
@@ -1233,7 +1233,8 @@ PermitsSkip = "permits" KwEnd Type { "," Type } ;
 LeadMods    = { Annotation | ModKw } ;
 // `implements I, J` is kept: the first named interface becomes the class's
 // __super when it has no superclass (so its default methods and `instanceof`
-// work), and every further one has its default methods copied in.
+// work), and every further one is listed on __ifaces and has its default
+// methods copied in.
 ImplementsSkip <~~ push({impls: takeAll()}) ~~> = KwImplements IType { "," IType } ;
 IType       <~~ push(stripWs(up.in)) ~~> = Type ;
 Throws      = KwThrows Type { "," Type } ;
@@ -4603,6 +4604,15 @@ HasStatic   = :script(~~
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"),
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, chained)])])
             }
+            // Every other implemented interface goes on __ifaces, which js_is_type
+            // walks beside __super, so `instanceof` holds for each of them.
+            var ifacesV = null
+            for (i = 0; i < impls.length; i++) {
+                if (impls[i] == chained) { continue }
+                if (ifacesV == null) { ifacesV = callExt(b, "js_arr_new", []) }
+                callExt(b, "js_arr_push", [ifacesV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, impls[i])])])
+            }
+            if (ifacesV != null) { callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifacesV]) }
             // Nested / inner types first: they are hoisted into this scope AND stored
             // on the descriptor, so the enclosing class's own members can use them.
             for (i = 0; i < members.length; i++) {
@@ -4740,7 +4750,7 @@ HasStatic   = :script(~~
             // the __super chain: copied in, so a class implementing two interfaces
             // answers both their defaults. A method the class declares itself wins.
             for (i = 0; i < impls.length; i++) {
-                if (impls[i] == chained) { continue }
+                if (impls[i] == chained && interfaceNames["$" + name] != true) { continue }
                 var inames = interfaceMethodNames["$" + impls[i]]
                 if (inames == undefined) { continue }
                 var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, impls[i])])
@@ -4968,7 +4978,11 @@ HasStatic   = :script(~~
         }
         interfaceMethodNames["$" + name] = meths
         interfaceAbstracts["$" + name] = abstracts
-        if (supers.length > 0) { members = [{ext: supers[0]}].concat(members) }
+        // The first super-interface takes the __super slot and the others go on
+        // __ifaces; the defaults of ALL of them are copied in (buildClassStmt), so
+        // an interface owns every default it inherits and a class copying from it
+        // with js_get finds them.
+        if (supers.length > 0) { members = [{ext: supers[0]}, {impls: supers}].concat(members) }
         return buildInterfaceStmt(name, members)
     }
     // The descriptor of an interface: like a class, minus the constructor.

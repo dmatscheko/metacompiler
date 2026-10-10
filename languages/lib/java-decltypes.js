@@ -764,7 +764,7 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,AbstractList,".indexOf("," + rest + ",") >= 0
 }
 
 // ----- Static overload selection (JLS 15.12.2 is static) -----

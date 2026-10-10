@@ -187,19 +187,19 @@ class ArrayList<E> implements List<E> {
         return any;
     }
 
-    // Any List is equal to one with equal elements in the same order; the
-    // ArrayList is the only List this file declares.
+    // Any List is equal to one with equal elements in the same order, read
+    // through the other list's iterator().
     public boolean equals(Object o) {
         if (o == this) { return true; }
-        if (!(o instanceof ArrayList)) { return false; }
-        ArrayList<?> other = (ArrayList<?>) o;
-        if (other.size() != count) { return false; }
+        if (!(o instanceof List)) { return false; }
+        Iterator<?> it = ((List<?>) o).iterator();
         for (int i = 0; i < count; i++) {
+            if (!it.hasNext()) { return false; }
             Object a = elems[i];
-            Object b = other.get(i);
+            Object b = it.next();
             if (!(a == null ? b == null : a.equals(b))) { return false; }
         }
-        return true;
+        return !it.hasNext();
     }
     public int hashCode() {
         int h = 1;
@@ -235,5 +235,103 @@ class ArrayListItr<E> implements Iterator<E> {
         if (cursor >= list.count) { throw new NoSuchElementException(); }
         cursor++;
         return (E) list.elems[cursor - 1];
+    }
+}
+
+// A List from get(int) and size() alone; every mutator throws until a subclass
+// overrides it, and add(E) / remove(Object) / clear() go through the indexed ones.
+abstract class AbstractList<E> implements List<E> {
+    public abstract E get(int index);
+    public abstract int size();
+
+    public boolean isEmpty() { return size() == 0; }
+    public boolean contains(Object o) { return indexOf(o) >= 0; }
+    public int indexOf(Object o) {
+        int n = size();
+        for (int i = 0; i < n; i++) {
+            Object e = get(i);
+            if (o == null ? e == null : o.equals(e)) { return i; }
+        }
+        return -1;
+    }
+    public int lastIndexOf(Object o) {
+        for (int i = size() - 1; i >= 0; i--) {
+            Object e = get(i);
+            if (o == null ? e == null : o.equals(e)) { return i; }
+        }
+        return -1;
+    }
+    public E set(int index, E e) { throw new UnsupportedOperationException(); }
+    public void add(int index, E e) { throw new UnsupportedOperationException(); }
+    public E remove(int index) { throw new UnsupportedOperationException(); }
+    public boolean add(E e) {
+        add(size(), e);
+        return true;
+    }
+    public boolean remove(Object o) {
+        int i = indexOf(o);
+        if (i < 0) { return false; }
+        remove(i);
+        return true;
+    }
+    public void clear() {
+        int n = size();
+        for (int i = 0; i < n; i++) { remove(0); }
+    }
+    public Iterator<E> iterator() { return new AbstractListItr<E>(this); }
+
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof List)) { return false; }
+        Iterator<E> mine = iterator();
+        Iterator<?> it = ((List<?>) o).iterator();
+        while (mine.hasNext() && it.hasNext()) {
+            Object a = mine.next();
+            Object b = it.next();
+            if (!(a == null ? b == null : a.equals(b))) { return false; }
+        }
+        return !(mine.hasNext() || it.hasNext());
+    }
+    public int hashCode() {
+        int h = 1;
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            Object e = it.next();
+            h = 31 * h + (e == null ? 0 : e.hashCode());
+        }
+        return h;
+    }
+    public String toString() {
+        String s = "[";
+        Iterator<E> it = iterator();
+        boolean first = true;
+        while (it.hasNext()) {
+            Object e = it.next();
+            if (!first) { s = s + ", "; }
+            first = false;
+            s = s + (e == this ? "(this Collection)" : "" + e);
+        }
+        return s + "]";
+    }
+}
+
+// Reads through get(int), so it sees whatever the subclass answers; running off
+// the end turns the get's IndexOutOfBoundsException into a NoSuchElementException
+// whose message is that exception's toString(), as java's cause constructor does.
+class AbstractListItr<E> implements Iterator<E> {
+    AbstractList<E> list;
+    int cursor;
+
+    AbstractListItr(AbstractList<E> list) { this.list = list; }
+    public boolean hasNext() { return cursor != list.size(); }
+    public E next() {
+        E e;
+        try {
+            e = list.get(cursor);
+        } catch (IndexOutOfBoundsException x) {
+            throw new NoSuchElementException(x.toString());
+        }
+        cursor++;
+        return e;
     }
 }

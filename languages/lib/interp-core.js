@@ -297,7 +297,9 @@ function hasOwn(o, name) { return objHasOwn.call(o, name) }
 // Must match the Go twin exactly (isTypeName in abnf/jsrt.go, extern js_is_type)
 // - the compilers call the extern, the interpreters call this. Generic arguments
 // are ignored (List<Int> tests as List), a trailing ? lets null match, and user
-// classes match on __class.__name (walking __super when present). Integral
+// classes match on __class.__name, walking __super and every descriptor in an
+// __ifaces list (the interfaces a class implements or an interface extends). A
+// List/Collection name matches an array, or a class that implements it. Integral
 // numbers count as Int AND as Double: the value model has one number type.
 function rtIsType(v, tname) {
     var t = tname.split("<")[0]
@@ -310,14 +312,21 @@ function rtIsType(v, tname) {
     if (t == "String" || t == "CharSequence") { return typeof v == "string" }
     if (t == "Boolean") { return typeof v == "boolean" }
     if (t == "List" || t == "MutableList" || t == "Collection" || t == "Array") {
-        return typeof v == "object" && v !== null && typeof v.length == "number"
+        if (typeof v == "object" && v !== null && typeof v.length == "number") { return true }
     }
-    if (typeof v == "object" && v !== null) {
-        var cls = v.__class
-        while (cls != undefined && cls != null) {
-            if (cls.__name == t) { return true }
-            cls = cls.__super
+    if (typeof v == "object" && v !== null) { return rtClassIs(v.__class, t) }
+    return false
+}
+function rtClassIs(cls, t) {
+    while (cls != undefined && cls != null) {
+        if (cls.__name == t) { return true }
+        var ifs = cls.__ifaces
+        if (ifs != undefined && ifs != null) {
+            for (var i = 0; i < ifs.length; i++) {
+                if (rtClassIs(ifs[i], t)) { return true }
+            }
         }
+        cls = cls.__super
     }
     return false
 }

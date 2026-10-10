@@ -145,16 +145,30 @@ function js_is_type(v, t) {
     if (nm == "Double" || nm == "Float" || nm == "Number") { return plain }
     if (nm == "String" || nm == "CharSequence") { return typeof v == "string" }
     if (nm == "Boolean") { return typeof v == "boolean" }
-    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") { return rtkIsArr(v) }
+    if (nm == "List" || nm == "MutableList" || nm == "Collection" || nm == "Array") {
+        if (rtkIsArr(v)) { return true }
+    }
     if (typeof v != "object") { return false }
-    var cls = v["__class"]
-    var guard = 0
+    return rtClassIs(v["__class"], nm, 0)
+}
+
+// Go: classIsNamed. The __super walk, plus every descriptor in each step's
+// __ifaces list; `guard` carries the 64-step cap through the recursion.
+function rtClassIs(cls0, nm, guard0) {
+    var cls = cls0
+    var guard = guard0
     while (guard < 64) {
         guard = guard + 1
         if (cls === undefined) { return false }
         if (cls === null) { return false }
         if (typeof cls != "object") { return false }
         if (cls["__name"] === nm) { return true }
+        var ifs = cls["__ifaces"]
+        if (ifs !== undefined && ifs !== null && typeof ifs == "object") {
+            for (var i = 0; i < ifs.length; i++) {
+                if (rtClassIs(ifs[i], nm, guard)) { return true }
+            }
+        }
         cls = cls["__super"]
     }
     return false

@@ -17207,7 +17207,8 @@ func isInt32Value(f float64) bool {
 // `instanceof` checks (extern js_is_type): a value-model test by type NAME.
 // Generic arguments are ignored (List<Int> tests as List), a trailing ? lets
 // null match, and user classes match on the __class descriptor's __name (the
-// __super chain is walked when present). Integral numbers count as Int AND as
+// __super chain and each __ifaces list are walked; a List/Collection name also
+// matches a class implementing it). Integral numbers count as Int AND as
 // Double - the value model has one number type, so `3.0 is Int` is true here
 // although real Kotlin would say false for a Double-typed 3.0. The interpreter
 // grammars carry a JS twin (rtIsType in lib/interp-core.js) - keep in sync.
@@ -17246,18 +17247,33 @@ func (rt *jsrt) isTypeName(v interface{}, t string) bool {
 		_, ok := v.(bool)
 		return ok
 	case "List", "MutableList", "Collection", "Array":
-		_, ok := v.(*jsArray)
-		return ok
+		if _, ok := v.(*jsArray); ok {
+			return true
+		}
 	}
 	if o, ok := v.(*jsObject); ok {
 		cls, _ := o.props["__class"].(*jsObject)
-		for cls != nil {
-			if n, _ := cls.props["__name"].(string); n == t {
-				return true
-			}
-			sup, _ := cls.props["__super"].(*jsObject)
-			cls = sup
+		return classIsNamed(cls, t)
+	}
+	return false
+}
+
+// classIsNamed walks a class descriptor's __super chain and, at each step, every
+// descriptor in its __ifaces list (the interfaces it implements or extends).
+func classIsNamed(cls *jsObject, t string) bool {
+	for cls != nil {
+		if n, _ := cls.props["__name"].(string); n == t {
+			return true
 		}
+		if ifs, ok := cls.props["__ifaces"].(*jsArray); ok {
+			for _, e := range ifs.elems {
+				if ic, ok := e.(*jsObject); ok && classIsNamed(ic, t) {
+					return true
+				}
+			}
+		}
+		sup, _ := cls.props["__super"].(*jsObject)
+		cls = sup
 	}
 	return false
 }
