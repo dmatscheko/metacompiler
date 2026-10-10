@@ -2713,6 +2713,7 @@ func (e E44) Error() string { return "e44: " + e.m }
 
 type P44 struct{ x int }
 type Q44 struct{ y int }
+type S44 interface{ M44() }
 
 // rec44 runs f and describes what recover() handed back.
 func rec44(f func()) (out string) {
@@ -2786,7 +2787,15 @@ func s44() {
 	var na interface{}
 	check("ta6", rec44(func() { _ = na.(bool) }) == "error interface conversion: interface {} is nil, not bool")
 	var qa interface{} = Q44{1}
-	check("ta7", rec44(func() { _ = qa.(P44) }) != "no panic" && qa.(Q44).y == 1)
+	check("ta7", rec44(func() { _ = qa.(P44) }) == "error interface conversion: interface {} is main.Q44, not main.P44" && qa.(Q44).y == 1)
+	// A declared type is named with its package, and a composite as reflect spells it.
+	check("ta8", rec44(func() { _ = a.(P44) }) == "error interface conversion: interface {} is string, not main.P44")
+	check("ta9", rec44(func() { _ = qa.(S44) }) == "error interface conversion: main.Q44 is not main.S44: missing method M44")
+	check("ta10", rec44(func() { _ = na.(S44) }) == "error interface conversion: interface is nil, not main.S44")
+	var sa interface{} = []string{"x"}
+	var ma interface{} = map[string]P44{}
+	check("ta11", rec44(func() { _ = sa.(int) }) == "error interface conversion: interface {} is []string, not int")
+	check("ta12", rec44(func() { _ = ma.(byte) }) == "error interface conversion: interface {} is map[string]main.P44, not uint8")
 }
 
 // ===== SECTION 45: fmt's verbs, flags, width and precision =====

@@ -1316,12 +1316,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // import, so the body resolves its package's names before the main file's.
     function pkgEnv() { return curPkgScope == null ? null : [globalScope, curPkgScope] }
 
-    // ----- Maps: {__dict, keys, vals, zero} with two parallel arrays. The arrays keep
-    // the insertion order; missing keys read as the zero value of the value type. -----
+    // ----- Maps: {__dict, keys, vals, zero, mty} with two parallel arrays. The arrays
+    // keep the insertion order; missing keys read as the zero value of the value type.
+    // mty is the map's type as written, which only fmt's %T reads. -----
     function isMap(v) {
         return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
     }
-    function newMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero} }
+    function newMap(zero, mty) { return {__dict: true, keys: [], vals: [], zero: zero, mty: mty} }
     // THE ZERO VALUE OF A MAP TYPE IS A MARKED EMPTY MAP, not null.
     //
     // In Go a nil map READS like an empty one - `var m map[string]int; m["k"]` is 0,
@@ -1331,7 +1332,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // builds the same object in emitZeroTy, and the mark is read by goIsNilMap in
     // languages/lib/go-rt.metajs and giIsNilMap in abnf/jsrt.go. `[]T` zeroes to an
     // empty slice HEADER carrying the same mark - see newNilSl.
-    function newNilMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero, __nil: true} }
+    function newNilMap(zero, mty) { return {__dict: true, keys: [], vals: [], zero: zero, mty: mty, __nil: true} }
     function isNilMap(v) { return isMap(v) && v.__nil == true }
     // indexOf compares with ===, like the scan it replaces. A SIZED INTEGER key is
     // a box, and two boxes holding the same value are different objects, so a
@@ -1707,6 +1708,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return gstr(r)
     }
     function gfHStr(v) { return gstr(v) }
+    function gfHStructName(v) {
+        var c = v.__class
+        if (typeof c.__pkg == "string") { return c.__pkg + "." + c.__name }
+        return c.__name == "struct" ? "" : c.__name
+    }
+    function gfHFTypes(v) { return Array.isArray(v.__class.__ftypes) ? v.__class.__ftypes : [] }
+    function gfHElemTy(v) { return (isSl(v) && typeof v.et == "string") ? v.et : "" }
+    function gfHIsArray(v) { return Array.isArray(v) }
+    function gfHMapTy(v) { return typeof v.mty == "string" ? v.mty : "" }
     function gfHShort(a, f32) { return f32 ? coreF32Sig(a) : coreDecDigits(a) }
     function gfHExact(a) { return coreExactDec(a) }
     function gfHRound(ds, n) { return coreRoundHalfEven(ds, n) }
@@ -3272,7 +3282,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // read back out of it. Supporting `var w struct{ a int32 }` needs the
         // grammar to parse that field list the way StructBody does for a named
         // type - a text parse here is unrecoverable, not merely awkward.
-        if (w == "map") { return newNilMap(goZeroTy(mapValText(t))) }
+        if (w == "map") { return newNilMap(goZeroTy(mapValText(t)), t) }
         if (w == "chan" || w == "func" || w == "interface" || w == "struct") { return null }
         // `var x pkga.Item`: goTyWord stops at the '.', so the qualified spelling is
         // resolved here rather than read as the type `pkga`.
@@ -3327,7 +3337,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // nested brace group is built recursively against the element type.
     function buildLit(desc, elems) {
         if (desc.ckind == "map") {
-            var m = newMap(zeroOfType(desc.czero))
+            var m = newMap(zeroOfType(desc.czero), "map[" + desc.ckeyt + "]" + desc.czero)
             for (var i = 0; i < elems.length; i++) {
                 mapSet(m, litKeyOf(elems[i], desc.ckeyt), elemValue(elems[i], desc.czero))
             }
@@ -3479,7 +3489,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var capT = items.length > 2 ? items[2] : null
         if (d.mkind == "map") {
             var zero = zeroOfType(d.czero)
-            return function() { return newMap(zero) }
+            var mty = "map[" + d.mkey + "]" + d.czero
+            return function() { return newMap(zero, mty) }
         }
         if (d.mkind == "chan") {
             var cz = d.czero
@@ -4231,22 +4242,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // x.(I) FOR A DECLARED INTERFACE PANICS when the value does not satisfy it (a
     // concrete target is goAssertType's). Go's own text is
-    // `interface conversion: main.Dog is not main.Sp: missing method Fly`; the
-    // package qualifier has no meaning here, so the names are bare.
+    // `interface conversion: main.Dog is not main.Sp: missing method Fly`.
     function goAssertIface(v, want) {
         if (!hasOwn(ifaceMeths, want)) { return v }
         // A NIL INTERFACE ASSERTED TO ANYTHING PANICS, and it is a DIFFERENT panic
         // from the missing-method one: go says `interface conversion: interface is
         // nil, not main.I`, with no method named because there is no dynamic type to
         // name. It has to be tested before goSatisfies, which answers "" (no method
-        // missing) for a value that is not a struct instance. The package qualifier is
-        // dropped for the same reason the missing-method text drops it.
+        // missing) for a value that is not a struct instance.
         if (v === undefined || v === null) {
-            goConvPanic("interface is nil, not " + want)
+            goConvPanic("interface is nil, not " + gfQualTy(want))
         }
         var miss = goSatisfies(v, ifaceMeths[want])
         if (miss == "") { return v }
-        goConvPanic(goTypeName(v) + " is not " + want + ": missing method " + miss)
+        goConvPanic(goTypeText(v) + " is not " + gfQualTy(want) + ": missing method " + miss)
         return v
     }
     // x.(T) for a T that is not an interface: the value, or go's TypeAssertionError
@@ -4267,8 +4276,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             w = w.substring(1)
             if (structAt(curPkgName, w) == undefined) { return v }
         } else if (!hasOwn(goScalarTys, w) && structAt(curPkgName, w) == undefined) { return v }
-        if (goTypeIs(v, w) == 0) { goConvPanic("interface {} is " + goTypeName(v) + ", not " + want) }
+        if (goTypeIs(v, w) == 0) { goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(want)) }
         return v
+    }
+    // The dynamic type a TypeAssertionError names: fmt's %T, except that nil is
+    // "nil". Twin of goTypeText in abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
+    function goTypeText(v) {
+        if (v === undefined || v === null) { return "nil" }
+        var t = gfTypeName(v)
+        return t != "" ? t : goTypeName(v)
     }
     function makeTypeSwitch(items) {
         var init = null
@@ -4753,7 +4769,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         // An embedded field leaves its name without a following type.
         for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
-        var cls = {__isclass: true, __name: items[0], __fields: fields, __ftypes: ftypes}
+        // __pkg qualifies the name where fmt and a panic spell the type (main.T).
+        var cls = {__isclass: true, __name: items[0], __pkg: curPkgName == null ? "main" : curPkgName,
+                   __fields: fields, __ftypes: ftypes}
         structs[sKeyI(curPkgName, items[0])] = cls
         globalScope[items[0]] = cls
         notePkgType(items[0])

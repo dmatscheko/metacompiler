@@ -1016,6 +1016,28 @@ function gfHMeth(v) {
     return r
 }
 function gfHStr(v) { return gopStr(v) }
+function gfHStructName(v) {
+    var c = goClassOf(v)
+    var nm = goStrOf(c.__name)
+    if (goHas(c, "__pkg")) { return goStrOf(c.__pkg) + "." + nm }
+    if (nm == "struct") { return "" }
+    return nm
+}
+function gfHFTypes(v) {
+    var c = goClassOf(v)
+    if (goHas(c, "__ftypes") && Array.isArray(c.__ftypes)) { return c.__ftypes }
+    return []
+}
+function gfHElemTy(v) {
+    if (Array.isArray(v)) { return "" }
+    if (typeof v.et == "string") { return v.et }
+    return ""
+}
+function gfHIsArray(v) { return Array.isArray(v) }
+function gfHMapTy(v) {
+    if (typeof v.mty == "string") { return v.mty }
+    return ""
+}
 function gfHShort(a, f32) {
     if (f32) { return rtF32Sig(a) }
     return rtDecDigits(a)
@@ -1970,18 +1992,18 @@ function js_goifis(v, csv) {
 
 // The single-result `x.(I)`: the value, or a panic naming the first missing method.
 // Go's own text is `interface conversion: main.Dog is not main.Sp: missing method
-// Fly`; there is no package concept in this value model, so the names are bare.
+// Fly`.
 function js_goifas(v, namev, csv) {
     // A NIL INTERFACE ASSERTED TO ANYTHING PANICS, and with a DIFFERENT text: go says
     // `interface conversion: interface is nil, not main.I`, naming no method because
     // there is no dynamic type. It is tested first because goMissingMethod answers ""
     // for a non-instance.
     if (v === undefined || v === null) {
-        goConvPanic("interface is nil, not " + goStrOf(namev))
+        goConvPanic("interface is nil, not " + gfQualTy(goStrOf(namev)))
     }
     var miss = goMissingMethod(v, csv)
     if (miss == "") { return v }
-    goConvPanic(goTypeText(v) + " is not " + goStrOf(namev) + ": missing method " + miss)
+    goConvPanic(goTypeText(v) + " is not " + gfQualTy(goStrOf(namev)) + ": missing method " + miss)
     return v
 }
 
@@ -2021,12 +2043,13 @@ function goTypeNameOf(v) {
     return "any"
 }
 
-// goTypeNameOf for a panic text, where a slice header reads "slice". Twin of
-// goTypeText in abnf/jsrtgolang.go.
+// The dynamic type a TypeAssertionError names: fmt's %T, except that nil is
+// "nil". Twin of goTypeText in abnf/jsrtgolang.go and languages/go-interpreter.abnf.
 function goTypeText(v) {
-    var t = goTypeNameOf(v)
-    if (t == "$sl") { return "slice" }
-    return t
+    if (v === undefined || v === null) { return "nil" }
+    var t = gfTypeName(v)
+    if (t != "") { return t }
+    return goTypeNameOf(v)
 }
 
 // Does v's dynamic type equal `want`? 1 yes, 0 no, and 2 when the value model
@@ -2055,7 +2078,7 @@ function goTypeIs(v, want) {
 // the text names it. Twin of js_goassert in abnf/jsrtgolang.go.
 function js_goassert(v, want, disp) {
     if (goTypeIs(v, goStrOf(want)) == 0) {
-        goConvPanic("interface {} is " + goTypeText(v) + ", not " + goStrOf(disp))
+        goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(goStrOf(disp)))
     }
     return v
 }

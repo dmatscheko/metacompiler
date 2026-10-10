@@ -2288,8 +2288,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // makeMapLit's, over the elements the sequence builder shaped.
     function emitMapFrom(b, cet, els) {
         var zero = mapValTy(cet)
-        var mV = callExt(b, "js_dict_new", [])
-        callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+        var mV = emitMapNew(b, zero, cet)
         var kty = mapKeyTy(cet)
         for (var i = 0; i < els.length; i++) {
             var e = els[i]
@@ -2370,9 +2369,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var kty = items[0].mkey
         var zero = items[1].mzero
         var entries = items.slice(2)
+        var mty = "map[" + kty + "]" + zero
         return function(b) {
-            var mV = callExt(b, "js_dict_new", [])
-            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+            var mV = emitMapNew(b, zero, mty)
             for (var i = 0; i < entries.length; i++) {
                 var rk = emitMapKey(b, entries[i].mk, kty)
                 b = rk.b
@@ -2396,11 +2395,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function makeMakeMap(items) {
         var zero = items[items.length - 1].mzero
-        return function(b) {
-            var mV = callExt(b, "js_dict_new", [])
-            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
-            return {b: b, v: mV}
-        }
+        var mty = "map[" + items[0].mkey + "]" + zero
+        return function(b) { return {b: b, v: emitMapNew(b, zero, mty)} }
+    }
+    // A fresh map: the zero value of its value type, read by js_map_get, and its type
+    // as written (mty), read by fmt's %T. The twin is newMap in go-interpreter.abnf.
+    function emitMapNew(b, zero, mty) {
+        var mV = callExt(b, "js_dict_new", [])
+        callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+        callExt(b, "js_set", [mV, emitStr(b, "mty"), emitStr(b, mty)])
+        return mV
     }
     function emitZero(b, t) { return emitZeroTy(b, t) }
     // items = [valueName, okName, baseThunk, keyThunk]: v, ok := m[k].
@@ -2528,8 +2532,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function emitDefinedSeq(b, under, args) {
         if (under.indexOf("map[") == 0) {
             var zero = mapValTy(under)
-            var mV = callExt(b, "js_dict_new", [])
-            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+            var mV = emitMapNew(b, zero, under)
             // `type M map[string]int; M{"a": 1}`: the elements arrive in the STRUCT
             // literal's shape, read as PAIRS - a {fkey, fkeyT} marker and then its
             // value - rather than with a carried key variable: an ELIDED key
@@ -3807,8 +3810,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // newNilMap in go-interpreter.abnf, and the comment there has the argument.
         // __nil keeps `m == nil` true (js_goeq) and keeps the store a panic (js_gisetat).
         if (wd == "map") {
-            var mV = callExt(b, "js_dict_new", [])
-            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZeroTy(b, mapValTy(t))])
+            var mV = emitMapNew(b, mapValTy(t), t)
             callExt(b, "js_set", [mV, emitStr(b, "__nil"), hTrue])
             return mV
         }
@@ -4974,10 +4976,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
         structFields[sKey(curPkgName, name)] = fields
         structFTypes[sKey(curPkgName, name)] = ftypes
+        var pkg = curPkgName == null ? "main" : curPkgName
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            // __pkg qualifies the name where fmt and a panic spell the type (main.T).
+            callExt(b, "js_set", [clsV, emitStr(b, "__pkg"), emitStr(b, pkg)])
             emitNameList(b, clsV, "__fields", fields)
             emitNameList(b, clsV, "__ftypes", ftypes)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])

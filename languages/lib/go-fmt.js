@@ -34,6 +34,13 @@
 //   gfHBytesStr(bs)     the string whose UTF-8 bytes are bs
 //   gfHQuote(s, delim)  the body of strconv.Quote / QuoteRune (delim '"' or "'")
 //   gfHRune(cp)         the string of a Unicode scalar value
+//   gfHStructName(v)    a named struct's type as reflect spells it ("main.T"), or
+//                       "" for an anonymous struct
+//   gfHFTypes(v)        a struct's declared field types, as written ("" unknown)
+//   gfHElemTy(v)        a slice's element type as written, or "" when the value
+//                       does not record it
+//   gfHIsArray(v)       whether a list is a fixed-length array
+//   gfHMapTy(v)         a map's type as written ("map[K]V"), or "" when unrecorded
 //
 // Deliberate gaps, shared with the twin: %T and %p are bad verbs, %#v renders as
 // %v, and the %!(EXTRA ...) note for surplus operands is not written. strconv.IsPrint needs Unicode's tables, so %q and %#U
@@ -299,6 +306,101 @@ function gfAllBytes(es) {
         i = i + 1
     }
     return true
+}
+
+// ----- types --------------------------------------------------------------------
+
+// The names a type text leaves unqualified: the predeclared types and the type
+// keywords. Space-delimited so a lookup is one indexOf.
+var GF_PREDECL = " bool string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 error map chan func struct interface "
+
+function gfIdChar(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || (c >= 48 && c <= 57) || c > 127 }
+
+// A type as written in package main, respelled the way reflect prints it: a
+// declared name gets its package ("T" -> "main.T", "[]*T" -> "[]*main.T"), the
+// aliases byte, rune and any are their targets, and interface{} gains its space.
+// A name already qualified ("pkga.T") is kept.
+function gfQualTy(t) {
+    var out = ""
+    var i = 0
+    while (i < t.length) {
+        var c = t.charCodeAt(i)
+        if (!gfIdChar(c) || (c >= 48 && c <= 57)) { out = out + t.charAt(i); i = i + 1; continue }
+        var j = i
+        while (j < t.length && gfIdChar(t.charCodeAt(j))) { j = j + 1 }
+        var id = t.substring(i, j)
+        var dotted = (i > 0 && t.charCodeAt(i - 1) == 46) || (j < t.length && t.charCodeAt(j) == 46)
+        if (id == "byte") { id = "uint8" }
+        else if (id == "rune") { id = "int32" }
+        else if (id == "any" || (id == "interface" && t.substring(j, j + 2) == "{}")) {
+            id = "interface {}"
+            if (t.substring(j, j + 2) == "{}") { j = j + 2 }
+        }
+        else if (!dotted && GF_PREDECL.indexOf(" " + id + " ") < 0) { id = "main." + id }
+        out = out + id
+        i = j
+    }
+    return out
+}
+
+// reflect.Type.String of v's dynamic type, which is fmt's %T. A 64 bit integer
+// reads as int or uint (the value model keeps int64 and uint64 in the same box),
+// and a composite whose element types are not recorded takes the one type all its
+// elements share, else interface {}. "" when the value model cannot tell (a
+// function, a channel, a pointer cell).
+function gfTypeName(v) {
+    var k = gfHKind(v)
+    if (k == "nil") { return "<nil>" }
+    if (k == "bool" || k == "string") { return k }
+    if (k == "int" || k == "float" || k == "complex") { return gfHTy(v) }
+    if (k == "struct") {
+        var nm = gfHStructName(v)
+        if (nm != "") { return nm }
+        return gfAnonTy(v)
+    }
+    if (k == "list") {
+        var es = gfHElems(v)
+        var et = gfHElemTy(v)
+        var ets = et != "" ? gfQualTy(et) : gfCommonTy(es)
+        if (gfHIsArray(v)) { return "[" + gfIntText(es.length) + "]" + ets }
+        return "[]" + ets
+    }
+    if (k == "map") {
+        var mt = gfHMapTy(v)
+        if (mt != "") { return gfQualTy(mt) }
+        var kv = gfHMapKV(v)
+        return "map[" + gfCommonTy(kv[0]) + "]" + gfCommonTy(kv[1])
+    }
+    return ""
+}
+
+function gfCommonTy(es) {
+    if (es.length == 0) { return "interface {}" }
+    var t = gfTypeName(es[0])
+    if (t == "" || t == "<nil>") { return "interface {}" }
+    var i = 1
+    while (i < es.length) {
+        if (gfTypeName(es[i]) != t) { return "interface {}" }
+        i = i + 1
+    }
+    return t
+}
+
+// struct { A int; B string }: a field whose declared type is not recorded takes
+// its value's.
+function gfAnonTy(v) {
+    var fs = gfHFields(v)
+    var tys = gfHFTypes(v)
+    if (fs[0].length == 0) { return "struct {}" }
+    var out = "struct { "
+    var i = 0
+    while (i < fs[0].length) {
+        if (i > 0) { out = out + "; " }
+        var ty = i < tys.length ? tys[i] : ""
+        out = out + fs[0][i] + " " + (ty != "" ? gfQualTy(ty) : gfTypeName(fs[1][i]))
+        i = i + 1
+    }
+    return out + " }"
 }
 
 // ----- strings ------------------------------------------------------------------

@@ -550,6 +550,161 @@ func gopFmtTy(a interface{}) string {
 	return ""
 }
 
+// gopQualTy is gfQualTy in languages/lib/go-fmt.js: a type as written in package
+// main, respelled the way reflect prints it.
+func gopQualTy(t string) string {
+	isID := func(c byte) bool {
+		return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c >= '0' && c <= '9' || c > 127
+	}
+	var b strings.Builder
+	i := 0
+	for i < len(t) {
+		c := t[i]
+		if !isID(c) || c >= '0' && c <= '9' {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		j := i
+		for j < len(t) && isID(t[j]) {
+			j++
+		}
+		id := t[i:j]
+		dotted := i > 0 && t[i-1] == '.' || j < len(t) && t[j] == '.'
+		switch {
+		case id == "byte":
+			id = "uint8"
+		case id == "rune":
+			id = "int32"
+		case id == "any" || id == "interface" && strings.HasPrefix(t[j:], "{}"):
+			id = "interface {}"
+			if strings.HasPrefix(t[j:], "{}") {
+				j += 2
+			}
+		case !dotted && !strings.Contains(gopPredecl, " "+id+" "):
+			id = "main." + id
+		}
+		b.WriteString(id)
+		i = j
+	}
+	return b.String()
+}
+
+const gopPredecl = " bool string int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 error map chan func struct interface "
+
+// gopTypeName is gfTypeName: fmt's %T, "" where the value model cannot tell.
+func (rt *jsrt) gopTypeName(v interface{}) string {
+	switch k := gopKind(v); k {
+	case "nil":
+		return "<nil>"
+	case "bool", "string":
+		return k
+	case "int", "float", "complex":
+		return gopFmtTy(v)
+	case "struct":
+		cls := goClassOf(v)
+		if pkg, ok := cls.props["__pkg"].(string); ok {
+			return pkg + "." + rt.toString(cls.props["__name"])
+		}
+		if name := rt.toString(cls.props["__name"]); name != "struct" {
+			return name
+		}
+		return rt.gopAnonTy(v)
+	case "list":
+		es, et, isArr := rt.gopListParts(v)
+		ets := ""
+		if et != "" {
+			ets = gopQualTy(et)
+		} else {
+			ets = rt.gopCommonTy(es)
+		}
+		if isArr {
+			return "[" + strconv.Itoa(len(es)) + "]" + ets
+		}
+		return "[]" + ets
+	case "map":
+		o := v.(*jsObject)
+		if mt, ok := o.props["mty"].(string); ok {
+			return gopQualTy(mt)
+		}
+		keys, vals, _ := dictParts(v)
+		return "map[" + rt.gopCommonTy(keys.elems) + "]" + rt.gopCommonTy(vals.elems)
+	}
+	return ""
+}
+
+func (rt *jsrt) gopCommonTy(es []interface{}) string {
+	if len(es) == 0 {
+		return "interface {}"
+	}
+	t := rt.gopTypeName(es[0])
+	if t == "" || t == "<nil>" {
+		return "interface {}"
+	}
+	for _, e := range es[1:] {
+		if rt.gopTypeName(e) != t {
+			return "interface {}"
+		}
+	}
+	return t
+}
+
+// gopAnonTy is gfAnonTy: struct { A int; B string }.
+func (rt *jsrt) gopAnonTy(v interface{}) string {
+	o := v.(*jsObject)
+	cls := goClassOf(v)
+	flds, _ := cls.props["__fields"].(*jsArray)
+	if flds == nil || len(flds.elems) == 0 {
+		return "struct {}"
+	}
+	var tys []interface{}
+	if ft, ok := cls.props["__ftypes"].(*jsArray); ok {
+		tys = ft.elems
+	}
+	parts := make([]string, len(flds.elems))
+	for i, f := range flds.elems {
+		name := rt.toString(f)
+		ty := ""
+		if i < len(tys) {
+			ty = rt.toString(tys[i])
+		}
+		if ty != "" {
+			ty = gopQualTy(ty)
+		} else {
+			var fv interface{} = jsUndef
+			if x, ok := o.props[name]; ok {
+				fv = x
+			}
+			ty = rt.gopTypeName(fv)
+		}
+		parts[i] = name + " " + ty
+	}
+	return "struct { " + strings.Join(parts, "; ") + " }"
+}
+
+// gopListParts answers a list's elements, its recorded element type ("" when it
+// has none) and whether it is a fixed-length array rather than a slice header.
+func (rt *jsrt) gopListParts(v interface{}) ([]interface{}, string, bool) {
+	if arr, ok := v.(*jsArray); ok {
+		return arr.elems, "", true
+	}
+	o := v.(*jsObject)
+	var es []interface{}
+	if back, ok := o.props["a"].(*jsArray); ok {
+		off := int(rt.toNumber(o.props["o"]))
+		n := int(rt.toNumber(o.props["n"]))
+		for i := 0; i < n; i++ {
+			var e interface{} = jsUndef
+			if off+i < len(back.elems) {
+				e = back.elems[off+i]
+			}
+			es = append(es, e)
+		}
+	}
+	et, _ := o.props["et"].(string)
+	return es, et, false
+}
+
 // gopKind is gfHKind.
 func gopKind(v interface{}) string {
 	switch ty := gopFmtTy(v); ty {
@@ -1464,7 +1619,7 @@ func init() {
 		m["js_goassert"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if goTypeIs(rt, v, rt.toString(u(a[1]))) == 0 {
-				goConvFail("interface {} is " + goTypeText(rt, v) + ", not " + rt.toString(u(a[2])))
+				goConvFail("interface {} is " + goTypeText(rt, v) + ", not " + gopQualTy(rt.toString(u(a[2]))))
 			}
 			return a[0]
 		}
@@ -1489,16 +1644,15 @@ func init() {
 			// goMissingMethod answers "" for a value that is not an instance, so
 			// nil needs this arm.
 			if v == nil || v == jsNull || v == jsUndef {
-				goConvFail("interface is nil, not " + rt.toString(u(a[1])))
+				goConvFail("interface is nil, not " + gopQualTy(rt.toString(u(a[1]))))
 			}
 			miss := goMissingMethod(rt, v, rt.toString(u(a[2])))
 			if miss == "" {
 				return a[0]
 			}
 			// Go's own text is `interface conversion: main.Dog is not main.Sp:
-			// missing method Fly`; there is no package concept in this value
-			// model, so the names are bare.
-			goConvFail(goTypeText(rt, v) + " is not " + rt.toString(u(a[1])) + ": missing method " + miss)
+			// missing method Fly`.
+			goConvFail(goTypeText(rt, v) + " is not " + gopQualTy(rt.toString(u(a[1]))) + ": missing method " + miss)
 			return a[0]
 		}
 
@@ -1687,14 +1841,17 @@ func goTypeNameOf(rt *jsrt, v interface{}) string {
 	return "any"
 }
 
-// goTypeText is goTypeNameOf for a panic text, where a slice header reads "slice".
-// goTypeNameOf keeps "$sl", because $istype in the emitter unwraps a header and
-// asks "slice" of the backing array only.
+// goTypeText is the dynamic type a TypeAssertionError names: fmt's %T, except
+// that nil is "nil". The twins are goTypeText in languages/go-interpreter.abnf and
+// languages/lib/go-rt.metajs.
 func goTypeText(rt *jsrt, v interface{}) string {
-	if t := goTypeNameOf(rt, v); t != "$sl" {
+	if isUndefOrNull(v) {
+		return "nil"
+	}
+	if t := rt.gopTypeName(v); t != "" {
 		return t
 	}
-	return "slice"
+	return goTypeNameOf(rt, v)
 }
 
 // goTypeIs answers whether v's dynamic type is `want`: 1 yes, 0 no, and 2 when the
