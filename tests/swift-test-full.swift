@@ -2619,6 +2619,67 @@ func s45() {
                  && [3, 1, 2].count(where: { $0 > 1 }) == 2 && [1].first(where: { $0 > 1 }) == nil)
 }
 
+// ===== SECTION 46: Optional(v), Optional.map and Optional.flatMap =====
+// map/flatMap on an Optional hand the wrapped value to the closure and keep nil
+// nil - also when the wrapped value is itself a String or an Array, which the
+// receiver's static type (an annotation, an inferred `.first`, a dictionary
+// subscript, a function's return type) tells apart from the collection's own map.
+// Every value is swiftc 6.1.2's.
+func ret46() -> String? { return "gg" }
+struct N46 { var name: String? = "nm" }
+func s46() {
+    let o = Optional(2.5)
+    let oi = Optional(4)
+    check("46a", o! == 2.5 && oi.map { $0 + 1 }! == 5)
+    let xs = ["h", "e"]
+    let first: String? = xs.first
+    let none: [String] = []
+    let f2 = xs.first
+    check("46b", (first.map { String($0) } ?? "-") == "h" && (none.first.map { String($0) } ?? "-") == "-"
+                 && (f2.map { $0 + "!" } ?? "-") == "h!" && xs.min().map { $0 + "?" }! == "e?")
+    let n: Int? = 3
+    let z: Int? = nil
+    check("46c", n.map { $0 * 2 }! == 6 && n.flatMap { $0 > 2 ? $0 + 1 : nil }! == 4
+                 && (z.map { $0 * 2 } ?? -1) == -1 && (n.flatMap { _ -> Int? in nil } ?? -1) == -1)
+    let words: [String]? = ["a", "b"]
+    let d = ["k": "v"]
+    check("46d", words.map { $0.count }! == 2 && ret46().map { $0.count }! == 2
+                 && d["k"].map { $0 + "w" }! == "vw" && (d["q"].map { $0 + "w" } ?? "none") == "none"
+                 && (N46().name.map { $0.count } ?? -1) == 2)
+}
+
+// ===== SECTION 47: an extension-only member through a call result or a property =====
+// SECTION 42's static binding, for a receiver whose static type is a function's
+// declared return type or a stored property's declared type, an implicit `self`
+// property's included. A concrete return type keeps the type's own member.
+// Every value is swiftc 6.1.2's.
+protocol P47 { func req() -> String }
+extension P47 {
+    var shout: String { return "P" }
+    func greet(_ n: Int) -> String { return "Pg\(n)" }
+    func req() -> String { return "Preq" }
+}
+struct S47: P47 {
+    var shout: String { return "S" }
+    func greet(_ n: Int) -> String { return "Sg\(n)" }
+    func req() -> String { return "Sreq" }
+}
+func f47() -> P47 { return S47() }
+func fs47() -> S47 { return S47() }
+func fo47() -> P47? { return S47() }
+struct A47 {
+    var b: P47 = S47()
+    var c: S47 = S47()
+    var ps: [P47] = [S47()]
+    func inner() -> String { return b.shout + c.shout + self.b.shout }
+}
+func s47() {
+    check("47a", f47().shout + f47().greet(1) + f47().req() == "PPg1Sreq" && fs47().shout + fs47().greet(2) == "SSg2"
+                 && fo47()!.shout + (fo47()?.shout ?? "-") == "PP")
+    let a = A47()
+    check("47b", a.b.shout + a.c.shout + a.ps[0].shout + a.b.greet(3) + a.b.req() == "PSPPg3Sreq" && a.inner() == "PSP")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2667,6 +2728,8 @@ func main() {
     s43() // SECTION-CALL 43
     s44() // SECTION-CALL 44
     s45() // SECTION-CALL 45
+    s46() // SECTION-CALL 46
+    s47() // SECTION-CALL 47
     print("full: \(checks) checks, \(fails) failures")
 }
 

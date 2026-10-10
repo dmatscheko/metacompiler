@@ -250,7 +250,10 @@ ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" FunRetType ] [ GenWhere ] FnBody ;
+// AnnType, except that a type no adoption acts on is captured as TEXT too: the
+// member-chain typer (swChainAnns) reads a function's declared return type.
+FunRetType  = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | OtherAnnType ;
 
 // A function/method/init body. Swift returns the value of a body that is a SINGLE
 // expression without writing `return`, so the one-expression form is tried first;
@@ -1183,7 +1186,7 @@ Closure     <~~ push(makeClosure(takeAll())) ~~>
 // annotation text, walked by js_swadoptdeep, so `(xs: [Double])` adopts too.
 ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
             = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" ClRetTy ] KwIn
-            | [ CaptureList ] ClParam { "," ClParam } KwIn
+            | [ CaptureList ] ClParam { "," ClParam } [ "->" ClRetTy ] KwIn
             | CaptureList KwIn ;
 ClParam     = Id <~~ push(up.in) ~~> [ ":" ClParamTy ] ;
 ClParamTy   <~~ push({cptype: stripWs(up.in)}) ~~> = Type ;
@@ -3323,6 +3326,16 @@ KwContinue  = "continue" KwEnd ;
             var sB = curF.NewBlock("")
             var oB = curF.NewBlock("")
             var plainB = curF.NewBlock("")
+            // Only an Optional can be nil, so map/flatMap on nil is Optional's: nil.
+            if (name == "map" || name == "flatMap") {
+                var nilB = curF.NewBlock("")
+                var nn1 = curF.NewBlock("")
+                var nn2 = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [ps[0], hNull])), nilB, nn1)
+                nn1.NewCondBr(truthy(nn1, callExt(nn1, "js_seq", [ps[0], hUndef])), nilB, nn2)
+                nilB.NewRet(hNull)
+                b = nn2
+            }
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
             plainB.NewRet(callExt(plainB, "js_swmcall", [ps[0], emitStr(plainB, name), ps[1]]))
             if (name == "contains") {
@@ -4365,16 +4378,21 @@ KwContinue  = "continue" KwEnd ;
         if (txt.charAt(i) != ".") { return "" }
         return txt.substring(0, i)
     }
-    // `let d: Named = D2(); d.shout`: a member a protocol EXTENSION adds and the
-    // protocol does not require binds STATICALLY, to the extension's, when the
-    // receiver's declared type is that protocol (swiftc 6.1.2). The receiver this
-    // can see is a bare local NAME, optionally subscripted (`ps[0].shout` with
-    // `ps: [Named]`), typed by the walk-time annotation record swKeepMode reads.
-    // swProtoRecv answers {ann, at} at walk time (at: the suffix the member is, -1
-    // for none); swProtoStaticOn the protocol at emit time, when every protocol and
-    // extension is known, or "". Twins in swift-interpreter.abnf.
-    function swProtoRecv(txt, suffixes) {
-        var none = {ann: "", at: -1}
+    // THE STATIC TYPE OF EACH RECEIVER ALONG A MEMBER CHAIN, as far as the walk
+    // knows it without an expression typer. The head is a local NAME (its
+    // annotation, or - for a name no local declares - an implicit `self` property's)
+    // or a call (a type's initializer: that type; a function: its declared return
+    // type). Each suffix then moves the type on: a subscript peels the element (a
+    // Dictionary's is an Optional), `!` and `?.` unwrap, `.first` / `.last` and the
+    // members swOptMember names answer an Optional of the element, and a property
+    // takes its declared type - the owner's own when the owner's type is known,
+    // else the one every type declaring that name agrees on. "" is unknown, "Optional<_>" an
+    // Optional of an unknown type ("?" is localAnnReg's "no declaration"). swChainHead runs at walk time (local annotations are scoped to
+    // the walk); swChainAnns answers one entry per suffix - the type of the value
+    // that suffix applies to - plus the chain's own type last. Twins in
+    // swift-interpreter.abnf.
+    function swChainHead(txt) {
+        var none = {ann: "", fn: "", prop: ""}
         if (txt == undefined || txt == null) { return none }
         var i = 0
         while (i < txt.length) {
@@ -4382,31 +4400,170 @@ KwContinue  = "continue" KwEnd ;
             if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95)) { break }
             i = i + 1
         }
-        if (i == 0 || i >= txt.length || ".[!?".indexOf(txt.charAt(i)) < 0) { return none }
-        // Subscripts peel the annotation; `!` and `?.` leave it (an Optional IS its
-        // value here).
-        var n = 0
-        var ix = 0
-        while (n < suffixes.length && (suffixes[n].kind == "index" || suffixes[n].kind == "force" || suffixes[n].kind == "opt")) {
-            if (suffixes[n].kind == "index") { ix = ix + 1 }
-            n = n + 1
-        }
-        if (n >= suffixes.length || (suffixes[n].kind != "field" && suffixes[n].kind != "mcall")) { return none }
-        var ann = swInferAnn(txt.substring(0, i))
-        if (ann == "") { return none }
-        return {ann: swTyPeel(ann, ix), at: n}
+        if (i == 0 || i >= txt.length) { return none }
+        var nm = txt.substring(0, i)
+        var isLocal = hasOwn(localAnnReg, "$" + nm) && localAnnReg["$" + nm] != "?"
+        if (txt.charAt(i) == "(") { return isLocal ? none : {ann: "", fn: nm, prop: ""} }
+        if (".[!?".indexOf(txt.charAt(i)) < 0) { return none }
+        if (isLocal) { return {ann: swInferAnn(nm), fn: "", prop: ""} }
+        return {ann: "", fn: "", prop: nm}
     }
-    function swProtoStaticOn(pr, suffixes) {
-        if (pr.at < 0) { return "" }
-        var p = swTyUnalias(pr.ann)
+    function swChainAnns(head, suffixes) {
+        var cur = head.ann
+        if (head.fn != "") { cur = swCallAnn(head.fn) }
+        // `self`, and an implicit `self.x`: the type being emitted, and its property.
+        if (head.prop != "") {
+            var ct = curType()
+            var sa = ct == null ? null : (head.prop == "self" ? ct.name : swFieldAnnOf(ct.name, head.prop))
+            cur = sa == null ? "" : sa
+        }
+        var out = []
+        for (var i = 0; i < suffixes.length; i++) {
+            out.push(cur)
+            cur = swSfxAnn(cur, suffixes[i])
+        }
+        out.push(cur)
+        return out
+    }
+    function swSfxAnn(cur, sx) {
+        if (sx.kind == "force" || sx.kind == "opt") { return swTyUnwrap(cur) }
+        if (sx.kind == "index") {
+            if (swTyIsOpt(cur)) { return "" }
+            var el = swTyPeel(cur, 1)
+            return el != "" && swTyIsDict(cur) ? el + "?" : el
+        }
+        if ((sx.kind == "field" && (sx.name == "first" || sx.name == "last"))
+            || (sx.kind == "mcall" && swOptMember(sx.name))) {
+            var fe = swTyIsOpt(cur) || swTyIsDict(cur) ? "" : swTyPeel(cur, 1)
+            return fe == "" ? "Optional<_>" : fe + "?"
+        }
+        if (sx.kind == "field") {
+            var own = swTyUnalias(cur)
+            var fa = own == "" ? null : swFieldAnnOf(own, sx.name)
+            return fa != null ? fa : swPropTyOf(sx.name)
+        }
+        return ""
+    }
+    // The declared type of property f of the type named tn, its superclasses'
+    // included; null when that type does not declare it.
+    function swFieldAnnOf(tn0, f) {
+        var tn = tn0
+        var guard = 0
+        while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
+            var r = typeFieldAnn["$" + tn]
+            for (var i = 0; i < r.fs.length; i++) {
+                if (r.fs[i].name == f) { return r.fs[i].ann == undefined ? "" : r.fs[i].ann }
+            }
+            for (var j = 0; j < r.cs.length; j++) { if (r.cs[j].name == f) { return r.cs[j].ann } }
+            tn = r.sup
+            guard = guard + 1
+        }
+        return null
+    }
+    function swCallAnn(fn) { return hasOwn(typeFieldAnn, "$" + fn) ? fn : swFnRetOf(fn) }
+    // The Collection members whose result is an Optional of the element.
+    function swOptMember(n) {
+        return n == "first" || n == "last" || n == "min" || n == "max" || n == "popLast"
+            || n == "randomElement"
+    }
+    function swTyIsOpt(t0) {
+        var t = swTyTrim(t0)
+        if (t.length == 0) { return false }
+        var c = t.charAt(t.length - 1)
+        return c == "?" || c == "!" || (t.length > 9 && t.substring(0, 9) == "Optional<")
+    }
+    // The Optional's wrapped type: one `?` / `!` off, or the argument of Optional<T>.
+    function swTyUnwrap(t0) {
+        var t = swTyTrim(t0)
+        if (t.length == 0) { return "" }
+        var c = t.charAt(t.length - 1)
+        if (c == "?" || c == "!") { return t.substring(0, t.length - 1) }
+        if (t.length > 10 && t.substring(0, 9) == "Optional<" && c == ">") {
+            var w = t.substring(9, t.length - 1)
+            return w == "_" ? "" : w
+        }
+        return t
+    }
+    function swTyIsDict(t0) {
+        var t = swTyUnalias(t0)
+        if (t.length < 3 || t.charAt(0) != "[" || t.charAt(t.length - 1) != "]") { return false }
+        return swTySplit(t.substring(1, t.length - 1), ":").length == 2
+    }
+    // A global or local function's declared return type, by name; "" for an
+    // overloaded name whose candidates disagree.
+    var fnRetReg = {}
+    function swNoteFnRet(name, ty) {
+        if (!hasOwn(fnRetReg, "$" + name)) { fnRetReg["$" + name] = ty; return }
+        if (fnRetReg["$" + name] != ty) { fnRetReg["$" + name] = "" }
+    }
+    function swFnRetOf(name) { return hasOwn(fnRetReg, "$" + name) ? fnRetReg["$" + name] : "" }
+    function swPropTyOf(name) {
+        if (!hasOwn(propTyReg, "$" + name)) { return "" }
+        var cands = propTyReg["$" + name]
+        for (var i = 1; i < cands.length; i++) { if (cands[i] != cands[0]) { return "" } }
+        return cands[0]
+    }
+    // The type an unannotated `let x = <expr>` takes: a bare local's, a member
+    // chain's (the one just folded, matched by its text), a dictionary literal's, or
+    // a call's - `Optional(v)` and a function's declared return type. Twin of
+    // swExprAnn in swift-interpreter.abnf.
+    var swLastChain = {txt: "", ann: ""}
+    function swExprAnn(txt) {
+        if (txt == undefined || txt == null || txt == "") { return "" }
+        if (txt == swLastChain.txt) { return swLastChain.ann }
+        if (txt.length > 1 && txt.charAt(0) == "[" && txt.charAt(txt.length - 1) == "]") {
+            // A dictionary literal (a top-level `:` with no `?` that could make it
+            // a ternary) is a Dictionary of unknown types.
+            var inner = txt.substring(1, txt.length - 1)
+            if (inner == ":" || (swTySplit(inner, ":").length > 1 && swTySplit(inner, "?").length == 1)) { return "[_: _]" }
+            return ""
+        }
+        var h = swChainHead(txt)
+        if (h.fn == "" || txt.charAt(txt.length - 1) != ")") { return swInferAnn(txt) }
+        var depth = 0
+        for (var i = h.fn.length; i < txt.length; i++) {
+            var ch = txt.charAt(i)
+            if (ch == "(") { depth = depth + 1 }
+            if (ch == ")") {
+                depth = depth - 1
+                if (depth == 0 && i < txt.length - 1) { return "" }
+            }
+        }
+        return h.fn == "Optional" ? "Optional<_>" : swCallAnn(h.fn)
+    }
+    // `let d: Named = D2(); d.shout`: a member a protocol EXTENSION adds and the
+    // protocol does not require binds STATICALLY, to the extension's, when the
+    // receiver's static type is that protocol (swiftc 6.1.2). Answers the protocol
+    // at emit time, when every protocol and extension is known, or "". Twin of
+    // swProtoStaticFn in swift-interpreter.abnf.
+    function swProtoStaticOn(ann, sx) {
+        if (ann == "" || (sx.kind != "field" && sx.kind != "mcall")) { return "" }
+        var p = swTyUnalias(ann)
         if (protoNames[p] != 1) { return "" }
-        var s = suffixes[pr.at]
-        if (protoHasReq(p, s.name)) { return "" }
-        var key = s.kind == "field" ? "__get_" + s.name : s.name
+        if (protoHasReq(p, sx.name)) { return "" }
+        var key = sx.kind == "field" ? "__get_" + sx.name : sx.name
         var ks = protoMembers["$" + p]
         if (ks == undefined) { return "" }
         for (var j = 0; j < ks.length; j++) { if (ks[j] == key) { return p } }
         return ""
+    }
+    // Optional.map / Optional.flatMap: nil stays nil and a value is handed to the
+    // closure (an Optional IS its value here, so the two are one function). Chosen
+    // at emit time, for a receiver swChainAnns types as an Optional; rtSeqMeth
+    // answers the nil case for the receivers it cannot type. Twin: the `optmap`
+    // arm of foldCallMember in swift-interpreter.abnf.
+    function rtOptMap() {
+        return rtFunc("sw_optmap", 2, function(b, ps) {
+            var nilB = curF.NewBlock("")
+            var c1 = curF.NewBlock("")
+            var callB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [ps[0], hNull])), nilB, c1)
+            c1.NewCondBr(truthy(c1, callExt(c1, "js_seq", [ps[0], hUndef])), nilB, callB)
+            nilB.NewRet(hNull)
+            var av = callExt(callB, "js_arr_new", [])
+            callExt(callB, "js_arr_push", [av, ps[0]])
+            callB.NewRet(callExt(callB, "js_call", [ps[1], hUndef, av]))
+        })
     }
     // The methods that add an ELEMENT to a collection, i.e. the ones whose first
     // argument the receiver's element type adopts.
@@ -4474,9 +4631,11 @@ KwContinue  = "continue" KwEnd ;
         // The bare name the chain starts with, when that name is a TYPE: it seeds the
         // qualified path A.Inner(...) is resolved against.
         var headName = swRecvName(txt)
-        var precv = swProtoRecv(txt, suffixes)
+        var chead = swChainHead(txt)
+        var wAnns = swChainAnns(chead, suffixes)
+        swLastChain = {txt: txt, ann: wAnns[suffixes.length]}
         return function(b) {
-            var psP = swProtoStaticOn(precv, suffixes)
+            var anns = swChainAnns(chead, suffixes)
             var r = primary(b)
             b = r.b
             var cur = r.v
@@ -4503,8 +4662,9 @@ KwContinue  = "continue" KwEnd ;
                     if (!(i > 0 && suffixes[i - 1].kind == "mcall" && suffixes[i - 1].name == "init")) {
                         cur = callExt(b, "js_swforce", [cur])
                     }
-                } else if (i == precv.at && psP != "") {
+                } else if (swProtoStaticOn(anns[i], s) != "") {
                     // A protocol-typed receiver: the extension's member, statically.
+                    var psP = swProtoStaticOn(anns[i], s)
                     var pkey = s.kind == "field" ? "__get_" + s.name : s.name
                     var pdV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(psP))])
                     var pargs = callExt(b, "js_arr_new", [])
@@ -4534,6 +4694,11 @@ KwContinue  = "continue" KwEnd ;
                     var btbl = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + builtinMethOf(s.name))])
                     cur = callExt(b, "js_swextcall", [cur, emitStr(b, s.name), eb, btbl])
                     emitWriteBacks(b, eab.boxes)
+                } else if (s.kind == "mcall" && (s.name == "map" || s.name == "flatMap") && swTyIsOpt(anns[i])) {
+                    var oea = emitArgRecs(b, s.args)
+                    b = oea.b
+                    cur = b.NewCall(rtOptMap(), [cur, callExt(b, "js_swidx", [oea.v, emitNum(b, 0)])])
+                    pathKey = null
                 } else if (s.kind == "mcall" && classNames[s.name] == 1) {
                     // Outer.Inner(...): a NESTED type reached through its enclosing one.
                     // pathKey tracks the qualified type the prefix names so far, so
@@ -4930,6 +5095,14 @@ KwContinue  = "continue" KwEnd ;
                     return {b: b, v: b.NewCall(rtArrayRep(), [a0, a1])}
                 }
                 return {b: b, v: b.NewCall(rtArrayOf(), [a0])}
+            }
+        }
+        // Optional(v): an Optional IS its value in this model.
+        if (name == "Optional" && args.length == 1 && lookupSig(name) == null
+            && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) {
+                var eo = emitArgRecs(b, args)
+                return {b: eo.b, v: callExt(eo.b, "js_swidx", [eo.v, emitNum(eo.b, 0)])}
             }
         }
         if ((name == "Double" || name == "Float" || name == "String")
@@ -5473,7 +5646,7 @@ KwContinue  = "continue" KwEnd ;
         // OTHER annotation can be existential, so a numeric one records "".
         var annTxt = elemTy
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
-        if (k == 1 && items[2] != undefined) { annTxt = swInferAnn(items[2].itext) }
+        if (k == 1 && items[2] != undefined) { annTxt = swExprAnn(items[2].itext) }
         swNoteLocalAnn(name, annTxt)
         var init = items[k]
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
@@ -6005,6 +6178,7 @@ KwContinue  = "continue" KwEnd ;
         var k = 2
         var labels = null
         var rty = ""
+        var ret = ""
         if (items[k] != undefined && items[k].tlabels != undefined) {
             labels = items[k].tlabels
             if (items[k].atype != undefined) { rty = items[k].atype }
@@ -6014,7 +6188,10 @@ KwContinue  = "continue" KwEnd ;
         // A STRUCTURAL return type - `-> [Double]`, `-> (x: Double, y: Int)`,
         // `-> Double?` - adopts its numeric leaves exactly as the scalar name does.
         else if (items[k] != undefined && items[k].atype != undefined) { rty = items[k].atype; k++ }
-        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty}
+        // Any other return type adopts nothing; its text is only for swFnRetOf.
+        else if (items[k] != undefined && items[k].otype != undefined) { ret = items[k].otype; k++ }
+        if (ret == "") { ret = rty }
+        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret}
     }
     // The inout parameters of the function whose body is currently being emitted:
     // their final values are copied back into their caller's boxes before every ret.
@@ -6075,6 +6252,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function makeFunStmt(f) {
         regSig(f.name, f.params)
+        swNoteFnRet(f.name, f.ret)
         var key = "$" + f.name
         var lst = hasOwn(funcOverloads, key) ? funcOverloads[key] : null
         if (lst == null) { lst = []; funcOverloads[key] = lst }
