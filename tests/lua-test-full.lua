@@ -1140,9 +1140,27 @@ function s28()
     end
 end
 
+-- ===== SECTION 29: the string library takes a number as its text =====
+-- A number where string.* wants a string is converted exactly as tostring renders
+-- it, digits included: -0x1.7d087308f48b7p-691 needs 17 significant digits to read
+-- back, which a host's own number-to-string does not always give. Checked against
+-- lua 5.5.
+function s29()
+    local xs = {-0x1.7d087308f48b7p-691, 1 / 3, 1.5, 1e100, 2.0, 9007199254740993, 0.1 + 0.2}
+    check("snum1", string.sub(xs[1], 1), "-1.4487572656910099e-208")
+    check("snum2", string.len(xs[2]), 19)
+    check("snum3", string.rep(xs[3], 2), "1.51.5")
+    check("snum4", string.upper(xs[4]), "1E+100")
+    check("snum5", string.sub(xs[5], 1), "2.0")
+    check("snum6", string.len(xs[6]), 16)
+    check("snum7", string.sub(xs[7], 1, 4), "0.30")
+    check("snum8", string.lower(xs[2]), "0.33333333333333331")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
 s28() -- SECTION-CALL 28
+s29() -- SECTION-CALL 29
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

@@ -2161,16 +2161,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ("hello"):sub(-3) is "llo" and ("hello"):sub(2, -2) is "ell". luaSubStart /
     // luaSubEnd are the normalisation on its own, so the compiler half's lua_subi /
     // lua_subj helpers implement exactly the same steps.
+    //
+    // A NUMBER where the string goes is converted the way tostring renders it
+    // (luaL_checklstring), so string.len(1/3) counts the 19 characters of
+    // 0.33333333333333331 - the digits come from luaNumStr, never from the host's
+    // own number-to-string. Twin of lua_strarg in lua-to-llvm-ir.abnf.
+    function luaStrArg(s) { if (isNum(s)) { return luaNumStr(s) } return s }
     globalScope["string"] = {
-        len: function(s) { return s.length },
+        len: function(s) { return luaStrArg(s).length },
         // ASCII only: real Lua case-maps with the C library in the C locale, which leaves
         // every byte above 127 alone. The host toUpperCase would have mapped the BYTES of
         // a multi-byte character (the 0xE6 that starts a CJK character is 'ae' to a host
         // string, and uppercases to 0xC6), corrupting the encoding.
-        upper: function(s) { return asciiCase(s, true) },
-        lower: function(s) { return asciiCase(s, false) },
+        upper: function(s) { return asciiCase(luaStrArg(s), true) },
+        lower: function(s) { return asciiCase(luaStrArg(s), false) },
         sub: function(s, i, j) {
-            var str = "" + s
+            var str = luaStrArg(s)
             var len = str.length
             var a = luaSubStart(len, numOf(i))
             var e = luaSubEnd(len, j === undefined ? -1 : numOf(j))
@@ -2181,7 +2187,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var out = ""
             var k = 0
             var cnt = numOf(n)
-            while (k < cnt) { out = out + s; k = k + 1 }
+            var str = luaStrArg(s)
+            while (k < cnt) { out = out + str; k = k + 1 }
             return out
         }
     }

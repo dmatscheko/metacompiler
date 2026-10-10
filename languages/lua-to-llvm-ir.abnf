@@ -843,7 +843,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return f
     }
     function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
-    var luaFnArity = {lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
+    var luaFnArity = {lua_strarg: 1, lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
                       lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
                       lua_tail: 2, lua_shift: 3, lua_strall: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
@@ -853,6 +853,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
     function luaFnBody(name, b, ps) {
+        if (name == "lua_strarg") {
+            // A number where the string library wants a string is converted the
+            // way tostring renders it. Twin of luaStrArg in lua-interpreter.abnf.
+            var numB = curF.NewBlock("")
+            var strB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isnum", [ps[0]])), numB, strB)
+            numB.NewRet(callLua(numB, "lua_str", [ps[0]]))
+            strB.NewRet(ps[0])
+            return
+        }
         if (name == "lua_where") {
             // The "chunk:line: " prefix of a raw position, "" for -1.
             var noB = curF.NewBlock("")
@@ -1063,7 +1073,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (name == "lua_sub") {
-            var sv = callExt(b, "js_add", [emitStr(b, ""), ps[0]])
+            var sv = callLua(b, "lua_strarg", [ps[0]])
             var slen = callExt(b, "js_get", [sv, emitStr(b, "length")])
             var sa = callLua(b, "lua_subi", [slen, callLua(b, "lua_num", [ps[1]])])
             var se = callLua(b, "lua_subjv", [slen, ps[2]])
@@ -2158,7 +2168,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // sub is 1-based inclusive lowered to JS slice(i-1, j) (a nil j reaches the end);
     // rep concatenates n copies in a scoped while loop.
     function libStrLen(bb, argsH) {
-        var s = libArg(bb, argsH, 0)
+        var s = callLua(bb, "lua_strarg", [libArg(bb, argsH, 0)])
         return {b: bb, v: callExt(bb, "js_get", [s, emitStr(bb, "length")])}
     }
     // The compiled runtime exposes toUpperCase/toLowerCase/slice on strings through the
@@ -2175,7 +2185,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var luaLower = "abcdefghijklmnopqrstuvwxyz"
     var luaUpper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     function libCase(bb, argsH, from, to) {
-        var s = libArg(bb, argsH, 0)
+        var s = callLua(bb, "lua_strarg", [libArg(bb, argsH, 0)])
         var lenV = callExt(bb, "js_get", [s, emitStr(bb, "length")])
         var saved = curScopeV
         curScopeV = callExt(bb, "js_scope_new", [curScopeV])
@@ -2226,7 +2236,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: bb, v: callLua(bb, "lua_sub", [libArg(bb, argsH, 0), libArg(bb, argsH, 1), libArg(bb, argsH, 2)])}
     }
     function libRep(bb, argsH) {
-        var s = libArg(bb, argsH, 0)
+        var s = callLua(bb, "lua_strarg", [libArg(bb, argsH, 0)])
         var n = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
         var saved = curScopeV
         curScopeV = callExt(bb, "js_scope_new", [curScopeV])
