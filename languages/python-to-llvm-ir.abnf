@@ -1066,13 +1066,13 @@ FSpecSubField <~~ pop() ~~>
 FSpecChunk  <~~ push({chunk: up.in}) ~~>
             = FSpecChar { FSpecChar } ;
 FSpecChar   = "\x20"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
-FChunkD     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharD { FCharD } ;
+FChunkD     <~~ push({chunk: pyUnescape(up.in, false, false)}) ~~> = FCharD { FCharD } ;
 FCharD      = FBrace | FNamedEsc | FStrEsc | FBksl | FPlainD ;
-FChunkS     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharS { FCharS } ;
+FChunkS     <~~ push({chunk: pyUnescape(up.in, false, false)}) ~~> = FCharS { FCharS } ;
 FCharS      = FBrace | FNamedEsc | FStrEsc | FBksl | FPlainS ;
-FChunk3D    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3D { FChar3D } ;
+FChunk3D    <~~ push({chunk: pyUnescape(up.in, false, false)}) ~~> = FChar3D { FChar3D } ;
 FChar3D     = FBrace | FNamedEsc | FStrEsc | FBksl | FPlain3D ;
-FChunk3S    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3S { FChar3S } ;
+FChunk3S    <~~ push({chunk: pyUnescape(up.in, false, false)}) ~~> = FChar3S { FChar3S } ;
 FChar3S     = FBrace | FNamedEsc | FStrEsc | FBksl | FPlain3S ;
 // {{ and }} are the escaped braces.
 FBrace      = "{{" | "}}" ;
@@ -1935,7 +1935,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return n
     }
-    function pyUnescape(text, raw) {
+    // In a bytes literal (isb) \u, \U and \N{...} are not escapes and stay as
+    // written, and only ASCII may appear.
+    function pyUnescape(text, raw, isb) {
+        if (isb) {
+            for (var ai = 0; ai < text.length; ai++) {
+                if (text.charCodeAt(ai) > 127) { fail("SyntaxError: bytes can only contain ASCII literal characters") }
+            }
+        }
         if (raw) { return text }
         var out = ""
         var i = 0
@@ -1960,9 +1967,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e == "'") { out += "'"; i += 2; continue }
             if (e == '"') { out += '"'; i += 2; continue }
             if (e == "x") { out += String.fromCharCode(hexAt(text, i + 2, 2)); i += 4; continue }
-            if (e == "u") { out += String.fromCharCode(hexAt(text, i + 2, 4)); i += 6; continue }
-            if (e == "U") { out += codePoint(hexAt(text, i + 2, 8)); i += 10; continue }
-            if (e == "N" && text.charAt(i + 2) == "{") {
+            if (e == "u" && !isb) { out += String.fromCharCode(hexAt(text, i + 2, 4)); i += 6; continue }
+            if (e == "U" && !isb) { out += codePoint(hexAt(text, i + 2, 8)); i += 10; continue }
+            if (e == "N" && !isb && text.charAt(i + 2) == "{") {
                 // A forward SCAN, not text.indexOf("}", i + 3): the frozen engine
                 // ignores indexOf's from-index (docs/abnf-dialect-gotchas.md), so it
                 // would answer with the FIRST `}` in the whole chunk - which may sit before
@@ -2020,7 +2027,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var head = text.substring(i, i + 3)
         if (head == '"""' || head == "'''") { q = 3 }
         var body = text.substring(i + q, text.length - q)
-        var v = pyUnescape(body, raw)
+        var v = pyUnescape(body, raw, isb)
         if (isb) { return {bytes: v} }
         return {str: v}
     }

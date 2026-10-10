@@ -3410,6 +3410,14 @@ def s59():
     check("typ2", msgs[6:] == ["'C' object is not iterable"] * 5 + ["cannot unpack non-iterable C object", "'int' object is not iterable"])
 
 
+# ===== SECTION 60: a bytes literal has no \u, \U or \N escape =====
+# They stay as written (a backslash and the letter), while \x, \n and the
+# octal escapes still apply.
+def s60():
+    check("byt1", list(b"\N{BULLET}") == [92, 78, 123, 66, 85, 76, 76, 69, 84, 125] and len(b"\u00e9\U0001F600") == 16)
+    check("byt2", list(b"a\x41\n\101\q") == [97, 65, 10, 65, 92, 113] and "\N{BULLET}" == "\u2022")
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3470,5 +3478,6 @@ def main():
     s57() # SECTION-CALL 57
     s58() # SECTION-CALL 58
     s59() # SECTION-CALL 59
+    s60() # SECTION-CALL 60
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
