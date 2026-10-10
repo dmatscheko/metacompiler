@@ -3354,6 +3354,42 @@ def s72
   check("bo72c", x == false && defined?(true & false) == "method" && v[2].respond_to?(:|) && v[1].respond_to?(:^))
 end
 
+# ===== SECTION 73: a class's own #to_s / #inspect =====
+# A class method #to_s (own, inherited, `def C.to_s' or from an extended module) is
+# what puts and interpolation print for the class; p prints #inspect, which stays
+# the class name unless the class defines #inspect itself. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+class S73A
+  def self.to_s
+    "A73"
+  end
+end
+class S73B < S73A
+end
+module S73M
+  def to_s
+    "M73"
+  end
+end
+class S73C
+  extend S73M
+  def self.inspect
+    "C73i"
+  end
+end
+class S73D
+end
+def S73D.to_s
+  "D73"
+end
+def s73
+  c = [S73A, S73B, S73C, S73D]
+  check("cs73a", "#{c[0]}" == "A73" && c[1].to_s == "A73" && "#{c[2]}" == "M73" && c[3].to_s == "D73" &&
+                 c.map(&:to_s) == ["A73", "A73", "M73", "D73"])
+  check("cs73b", c[0].inspect == "S73A" && c.inspect == "[S73A, S73B, C73i, S73D]" && c[0].name == "S73A" &&
+                 {c[2] => 1}.inspect == "{C73i=>1}")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3388,5 +3424,6 @@ s69() # SECTION-CALL 69
 s70() # SECTION-CALL 70
 s71() # SECTION-CALL 71
 s72() # SECTION-CALL 72
+s73() # SECTION-CALL 73
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

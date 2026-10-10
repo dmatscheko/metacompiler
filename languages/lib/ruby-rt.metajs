@@ -1643,10 +1643,11 @@ function rbStr(v) {
     if (rbIsArr(v)) { return rbInspect(v) }
     if (rbIsDict(v)) { return rbInspect(v) }
     if (rbIsObj(v)) {
-        // A CLASS object stringifies as its name (`Foo.to_s` / "#{Foo}" == "Foo").
+        // A CLASS object stringifies as its name (`Foo.to_s` / "#{Foo}" == "Foo")
+        // unless a class method #to_s says otherwise.
         if (v["__isclass"] === true) {
             var nm = v["__name"]
-            if (typeof nm == "string") { return nm }
+            if (typeof nm == "string") { return rbClassText(v, "to_s") }
         }
         var m = rbFindMethod(v, "to_s")
         if (m !== undefined) { return rbStr(m.apply(undefined, [v])) }
@@ -1766,6 +1767,12 @@ function rbInspect(v) {
     // charge. Mirrors rubyExcInspect of abnf/jsrt.go and excInspect of
     // ruby-interpreter.abnf.
     if (rbIsObj(v)) {
+        // Module#inspect is the NAME even when the class defines #to_s, since MRI
+        // binds the alias to the original Module#to_s.
+        if (v["__isclass"] === true) {
+            var cn = v["__name"]
+            if (typeof cn == "string") { return rbClassText(v, "inspect") }
+        }
         if (v["__isclass"] !== true && v["__class"] !== undefined) {
             var im = rbFindMethod(v, "inspect")
             if (im !== undefined) { return rbStr(im.apply(undefined, [v])) }
@@ -1773,6 +1780,22 @@ function rbInspect(v) {
         }
     }
     return rbStr(v)
+}
+
+// A class object's rendering by `name' ("to_s" or "inspect"): a singleton or
+// class method of that name (its own or inherited) answers, else the class name.
+// Twin of rubyClassText in abnf/jsrt.go and classText of ruby-interpreter.abnf.
+function rbClassText(o, name) {
+    var m = anytype
+    m = rbSingFind(o, name)
+    var sc = o
+    while (m === undefined && sc !== undefined && sc !== null && rbIsObj(sc)) {
+        var sm = sc["$s$" + name]
+        if (sm !== undefined && rbIsFn(sm)) { m = sm }
+        sc = sc["__super"]
+    }
+    if (m !== undefined) { return rbStr(m.apply(undefined, [o])) }
+    return o["__name"]
 }
 
 // The __name of an instance's class, "" when it has none.
@@ -6684,9 +6707,8 @@ function rbMethod(target, name, args) {
                 }
                 sc = sc["__super"]
             }
-            // Class#name and Class#inspect are the class NAME, which is what
-            // Class#to_s answers.
-            if (name == "name" || name == "inspect") { return rbStr(target) }
+            // Class#name, #to_s and #inspect are the class NAME.
+            if (name == "name" || name == "to_s" || name == "inspect") { return rbClassText(target, name) }
             // The reflection surface. A user `def self.ancestors' still wins - the
             // $s$ walk above runs first.
             if (name == "ancestors") { return rbAncestors(target) }

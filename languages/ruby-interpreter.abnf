@@ -5397,8 +5397,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // the address and the instance variables are left off rather than invented -
         // the same rule the Proc renderer below follows.
         if (isUserObj(v)) { return "#<" + v.__class.__name + ">" }
-        // A CLASS object stringifies as its name, not as "[object Object]".
-        if (typeof v == "object" && v.__isclass === true) { return v.__name }
+        // A CLASS object stringifies as its name, not as "[object Object]", unless a
+        // class method #to_s (its own or inherited) says otherwise.
+        if (typeof v == "object" && v.__isclass === true) { return classText(v, "to_s") }
         // A PROC. MRI prints `#<Proc:0x0000...@f.rb:4 (lambda)>`; the address is its
         // own and cannot be matched, and neither can the source location, so both are
         // left off rather than invented - the same rule python's <function fn> follows.
@@ -5488,7 +5489,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (isExcObj(v)) { return excInspect(v.__class.__name, rstr(v)) }
         }
+        // Module#inspect is the NAME even when the class defines #to_s, since MRI
+        // binds the alias to the original Module#to_s.
+        if (typeof v == "object" && v.__isclass === true) { return classText(v, "inspect") }
         return rstr(v)
+    }
+    // A class object's rendering by `name' ("to_s" or "inspect"): a class method of
+    // that name answers, else the class name. Twins: rubyClassText of abnf/jsrt.go
+    // and rbClassText of lib/ruby-rt.metajs.
+    function classText(v, name) {
+        if (singRespond(v, name)) { return rstr(mcall(v, name, [], null)) }
+        return v.__name
     }
     // MRI's Exception#inspect: "#<Class: to_s>", or the bare class name when to_s
     // is empty. Mirrors rubyExcInspect of abnf/jsrt.go.
@@ -8072,7 +8083,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 return obj
             }
-            if (name == "name" || name == "to_s" || name == "inspect") { return target.__name }
+            // A class method of the same name (`def self.to_s') answers instead.
+            if ((name == "name" || name == "to_s" || name == "inspect") && !singRespond(target, name)) { return target.__name }
             // Class#superclass: nil for a module, and a ROOT class answers Object
             // the way MRI does rather than the nil the __super slot holds.
             if (name == "superclass") {

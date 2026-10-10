@@ -7956,10 +7956,11 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 			return rt.rubyInspect(v)
 		}
 		// A CLASS object stringifies as its name (`Foo.to_s` / "#{Foo}" == "Foo"),
-		// not through the generic object path, which printed "[object Object]".
+		// not through the generic object path, which printed "[object Object]",
+		// unless a class method #to_s says otherwise.
 		if _, isCls := t.props["__isclass"]; isCls {
-			if n, ok := t.props["__name"].(string); ok {
-				return n
+			if _, ok := t.props["__name"].(string); ok {
+				return rt.rubyClassText(t, "to_s")
 			}
 		}
 		if m, ok := rubyFindMethod(t, "to_s"); ok {
@@ -8224,6 +8225,13 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		if _, isRng := t.props["__rrange"]; isRng {
 			return rt.rubyRangeText(t, true)
 		}
+		// Module#inspect is the NAME even when the class defines #to_s, since MRI
+		// binds the alias to the original Module#to_s.
+		if _, isCls := t.props["__isclass"]; isCls {
+			if _, ok := t.props["__name"].(string); ok {
+				return rt.rubyClassText(t, "inspect")
+			}
+		}
 		if keys, vals, isDict := dictParts(t); isDict {
 			parts := make([]string, len(keys.elems))
 			for i := range keys.elems {
@@ -8245,6 +8253,29 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		}
 	}
 	return rt.rubyStr(v)
+}
+
+// rubyClassText is a class object's rendering by name ("to_s" or "inspect"): a
+// singleton or class method of that name (its own or inherited) answers, else the
+// class name. Twin of rbClassText in lib/ruby-rt.metajs and classText of
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyClassText(o *jsObject, name string) string {
+	m, ok := rubySingFind(o, name)
+	for cls := interface{}(o); !ok && cls != nil; {
+		clsObj, isObj := cls.(*jsObject)
+		if !isObj {
+			break
+		}
+		if sm, has := clsObj.props["$s$"+name]; has && isCallable(sm) {
+			m, ok = sm, true
+		}
+		cls = clsObj.props["__super"]
+	}
+	if ok {
+		return rt.rubyStr(rt.call(m, jsUndef, []interface{}{o}))
+	}
+	n, _ := o.props["__name"].(string)
+	return n
 }
 
 // rubyInstClassName is the __name of an instance's class, "" when it has none.
@@ -9789,10 +9820,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 				cls = clsObj.props["__super"]
 			}
-			// Class#name and Class#inspect are the class NAME, as Class#to_s is.
+			// Class#name, #to_s and #inspect are the class NAME.
 			switch name {
-			case "name", "inspect":
-				return rt.rubyStr(o)
+			case "name", "to_s", "inspect":
+				return rt.rubyClassText(o, name)
 			}
 			// The reflection surface. A user `def self.ancestors' still wins - the
 			// $s$ walk above runs first.
