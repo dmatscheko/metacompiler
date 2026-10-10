@@ -4781,7 +4781,8 @@ NotMemberKw = :script(~~
         if (name == "indexOf") { return {v: sv.indexOf(kStrArg(args[0]))} }
         if (name == "lastIndexOf") { return {v: kLastIndexOfStr(sv, kStrArg(args[0]))} }
         if (name == "contains") { return {v: sv.indexOf(kStrArg(args[0])) >= 0} }
-        if (name == "toInt" || name == "toLong" || name == "toDouble" || name == "toIntOrNull") {
+        if (name == "toInt" || name == "toLong" || name == "toDouble" || name == "toFloat" ||
+            name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
             return {v: kParseNum(sv, name)}
         }
         if (name == "format") { return {v: kFormat(sv, args)} }
@@ -4934,20 +4935,30 @@ NotMemberKw = :script(~~
         }
         return out
     }
-    // toInt() / toLong() / toDouble() on a String. Kotlin THROWS NumberFormatException
-    // for text that is not a number, with java.lang's message - a catchable exception,
-    // not a hard abort: `runCatching { s.toInt() }.getOrElse { -1 }` and an ordinary
-    // try/catch are how real code parses input. The compiled twin is ktParseNum in
-    // abnf/jsrtkotlin.go, which raises the same class through ktRaise.
+    // toInt() / toLong() / toDouble() / toFloat() on a String and their OrNull forms.
+    // Kotlin THROWS NumberFormatException for text that is not a number, with
+    // java.lang's message - a catchable exception, not a hard abort:
+    // `runCatching { s.toInt() }.getOrElse { -1 }` and an ordinary try/catch are how real
+    // code parses input. The OrNull forms answer null instead. The twins are ktParseNum in
+    // abnf/jsrtkotlin.go and k2ParseNum in languages/lib/kotlin-rt.metajs.
+    //
+    // The integer forms are Integer.parseInt / Long.parseLong: no trimming, a sign and
+    // at least one digit, and out of range is an error, not a wrap. The floating forms
+    // are Double.parseDouble (kJavaFloat).
     function kParseNum(sv, name) {
-        var t = kTrimSide(sv, true, true)
-        if (name == "toDouble") {
-            var d = parseFloat(t)
-            if (t.length == 0 || d !== d) { kThrowExc("NumberFormatException", "For input string: \"" + sv + "\"") }
-            return kFlo(d)
+        var orNull = name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull"
+        if (name == "toDouble" || name == "toFloat" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
+            var jf = kJavaFloat(sv)
+            if (!jf.ok) {
+                if (orNull) { return null }
+                kThrowExc("NumberFormatException", jf.empty ? "empty String" : "For input string: \"" + sv + "\"")
+            }
+            if (name == "toFloat" || name == "toFloatOrNull") { return kFlo32(jf.v) }
+            return kFlo(jf.v)
         }
+        var long = name == "toLong" || name == "toLongOrNull"
         var neg = false
-        var body = t
+        var body = sv
         if (body.length > 0 && body.charAt(0) == "-") { neg = true; body = body.substring(1, body.length) }
         else if (body.length > 0 && body.charAt(0) == "+") { body = body.substring(1, body.length) }
         var bad = body.length == 0
@@ -4955,8 +4966,9 @@ NotMemberKw = :script(~~
             var cc = body.charCodeAt(i)
             if (cc < 48 || cc > 57) { bad = true }
         }
+        if (!bad) { bad = !kDigitsFit(body, neg, long) }
         if (bad) {
-            if (name == "toIntOrNull") { return null }
+            if (orNull) { return null }
             kThrowExc("NumberFormatException", "For input string: \"" + sv + "\"")
         }
         // anytype, not a bare initializer: the frozen engine PINS a slot to the type
@@ -4968,8 +4980,96 @@ NotMemberKw = :script(~~
             acc = szArith("+", szArith("*", acc, kSz(10, 64, kNoU)), kSz(body.charCodeAt(j) - 48, 64, kNoU))
         }
         if (neg) { acc = szArith("-", kSz(0, 64, kNoU), acc) }
-        if (name == "toLong") { return kConv(acc, 64, false) }
+        if (long) { return kConv(acc, 64, false) }
         return kConv(acc, 32, false)
+    }
+    // Do these decimal digits fit an Int (or a Long), with the sign already taken off?
+    // Compared as TEXT against the limit, so no arithmetic can wrap first.
+    function kDigitsFit(body, neg, long) {
+        var z = 0
+        while (z < body.length - 1 && body.charAt(z) == "0") { z++ }
+        var d = body.substring(z, body.length)
+        var lim = long ? (neg ? "9223372036854775808" : "9223372036854775807") : (neg ? "2147483648" : "2147483647")
+        if (d.length != lim.length) { return d.length < lim.length }
+        return d <= lim
+    }
+    // java.lang.Double.parseDouble: after String.trim (every char up to ' '), an
+    // optional sign, then NaN, Infinity, a decimal (digits with an optional point, at
+    // least one digit, an optional exponent) or a hexadecimal (0x, hex digits with an
+    // optional point, a REQUIRED binary exponent p), and a decimal or hexadecimal may
+    // end in one of f F d D. Nothing else may follow: "1.5abc" and "Inf" are errors.
+    // Answers {ok, v, empty}; `empty` selects java's "empty String" message. A hex
+    // mantissa is exact while it fits 53 bits.
+    function kJavaFloat(sv) {
+        var a = 0
+        var b = sv.length
+        while (a < b && sv.charCodeAt(a) <= 32) { a++ }
+        while (b > a && sv.charCodeAt(b - 1) <= 32) { b-- }
+        var t = sv.substring(a, b)
+        if (t.length == 0) { return {ok: false, v: 0, empty: true} }
+        var i = 0
+        var neg = false
+        if (t.charAt(0) == "-" || t.charAt(0) == "+") { neg = t.charAt(0) == "-"; i = 1 }
+        var rest = t.substring(i, t.length)
+        var v = 0
+        if (rest == "NaN") { return {ok: true, v: 0 / 0, empty: false} }
+        if (rest == "Infinity") { v = Math.pow(2, 1024) }
+        else {
+            var n = t.length
+            var last = t.charAt(n - 1)
+            if (last == "f" || last == "F" || last == "d" || last == "D") { n = n - 1 }
+            var hex = rest.length > 1 && rest.charAt(0) == "0" && (rest.charAt(1) == "x" || rest.charAt(1) == "X")
+            var nd = 0
+            var j = i
+            if (hex) {
+                j = i + 2
+                var m = 0
+                var fr = 0
+                var dot = false
+                while (j < n) {
+                    var hc = kHexVal(t.charCodeAt(j))
+                    if (hc >= 0) { m = m * 16 + hc; nd++; if (dot) { fr++ } }
+                    else if (t.charAt(j) == "." && !dot) { dot = true }
+                    else { break }
+                    j++
+                }
+                if (nd == 0 || j >= n || (t.charAt(j) != "p" && t.charAt(j) != "P")) { return {ok: false, v: 0, empty: false} }
+                j++
+                var es = 1
+                if (j < n && (t.charAt(j) == "+" || t.charAt(j) == "-")) { if (t.charAt(j) == "-") { es = -1 }; j++ }
+                var ex = 0
+                var ne = 0
+                while (j < n && t.charCodeAt(j) >= 48 && t.charCodeAt(j) <= 57) { ex = ex * 10 + (t.charCodeAt(j) - 48); ne++; j++ }
+                if (ne == 0 || j != n) { return {ok: false, v: 0, empty: false} }
+                v = m * Math.pow(2, es * ex - 4 * fr)
+            } else {
+                var sawDot = false
+                while (j < n) {
+                    var dc = t.charCodeAt(j)
+                    if (dc >= 48 && dc <= 57) { nd++ }
+                    else if (dc == 46 && !sawDot) { sawDot = true }
+                    else { break }
+                    j++
+                }
+                if (nd == 0) { return {ok: false, v: 0, empty: false} }
+                if (j < n && (t.charAt(j) == "e" || t.charAt(j) == "E")) {
+                    j++
+                    if (j < n && (t.charAt(j) == "+" || t.charAt(j) == "-")) { j++ }
+                    var ed = 0
+                    while (j < n && t.charCodeAt(j) >= 48 && t.charCodeAt(j) <= 57) { ed++; j++ }
+                    if (ed == 0) { return {ok: false, v: 0, empty: false} }
+                }
+                if (j != n) { return {ok: false, v: 0, empty: false} }
+                v = parseFloat(t.substring(i, n))
+            }
+        }
+        return {ok: true, v: neg ? -v : v, empty: false}
+    }
+    function kHexVal(c) {
+        if (c >= 48 && c <= 57) { return c - 48 }
+        if (c >= 97 && c <= 102) { return c - 87 }
+        if (c >= 65 && c <= 70) { return c - 55 }
+        return -1
     }
     // The subset of java.util.Formatter a test program writes: %s, %d, %f (with a
     // precision), %x, %c, %b, %% and a width. The Go twin is ktFormat.
@@ -5362,24 +5462,31 @@ NotMemberKw = :script(~~
             for (i = es.length - 1; i >= 0; i--) { accr = args[1](es[i], accr) }
             return {v: accr}
         }
-        if (name == "reduce" || name == "reduceIndexed") {
-            if (es.length == 0) { kRaise("UnsupportedOperationException", "Empty " + kRedWord(kind, false) + " can't be reduced.") }
+        // The OrNull forms answer null for an empty receiver where the others throw.
+        if (name == "reduce" || name == "reduceIndexed" || name == "reduceOrNull" || name == "reduceIndexedOrNull") {
+            if (es.length == 0) {
+                if (name == "reduceOrNull" || name == "reduceIndexedOrNull") { return {v: null} }
+                kRaise("UnsupportedOperationException", "Empty " + kRedWord(kind, false) + " can't be reduced.")
+            }
             var accd = anytype
             accd = es[0]
             for (i = 1; i < es.length; i++) {
-                accd = (name == "reduce") ? f(accd, es[i]) : f(i, accd, es[i])
+                accd = (name == "reduce" || name == "reduceOrNull") ? f(accd, es[i]) : f(i, accd, es[i])
             }
             return {v: accd}
         }
         // reduceRight folds from the END with the accumulator as the SECOND parameter,
         // and it is declared on List (and CharSequence), which is the only place the
         // "Empty list can't be reduced." wording comes from.
-        if (name == "reduceRight" || name == "reduceRightIndexed") {
-            if (es.length == 0) { kRaise("UnsupportedOperationException", "Empty " + kRedWord(kind, true) + " can't be reduced.") }
+        if (name == "reduceRight" || name == "reduceRightIndexed" || name == "reduceRightOrNull" || name == "reduceRightIndexedOrNull") {
+            if (es.length == 0) {
+                if (name == "reduceRightOrNull" || name == "reduceRightIndexedOrNull") { return {v: null} }
+                kRaise("UnsupportedOperationException", "Empty " + kRedWord(kind, true) + " can't be reduced.")
+            }
             var accr2 = anytype
             accr2 = es[es.length - 1]
             for (i = es.length - 2; i >= 0; i--) {
-                accr2 = (name == "reduceRight") ? f(es[i], accr2) : f(i, es[i], accr2)
+                accr2 = (name == "reduceRight" || name == "reduceRightOrNull") ? f(es[i], accr2) : f(i, es[i], accr2)
             }
             return {v: accr2}
         }

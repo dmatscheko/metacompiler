@@ -31,6 +31,7 @@ package abnf
 //     value the engines can agree on without an object-identity counter.
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -2793,7 +2794,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		return float64(strings.LastIndex(s, rt.ktStrArg(argAt(args, 0)))), true
 	case "contains":
 		return rt.strIndexOf(s, rt.ktStrArg(argAt(args, 0))) >= 0, true
-	case "toInt", "toLong", "toDouble", "toIntOrNull":
+	case "toInt", "toLong", "toDouble", "toFloat", "toIntOrNull", "toLongOrNull", "toDoubleOrNull", "toFloatOrNull":
 		return ktParseNum(rt, s, name)
 	case "format":
 		// "%.2f".format(x): the receiver is the format string, as kotlin.text.format
@@ -3025,48 +3026,165 @@ func ktTrimIndent(s string) string {
 	return strings.Join(out, "\n")
 }
 
-// ktParseNum is toInt() / toLong() / toDouble() on a String. Kotlin throws a
-// NumberFormatException for text that is not a number, and java.lang's message is
-// the one both halves report.
+// ktParseNum is toInt() / toLong() / toDouble() / toFloat() on a String and their
+// OrNull forms. Kotlin throws a NumberFormatException for text that is not a number,
+// with java.lang's message; the OrNull forms answer null. The integer forms are
+// Integer.parseInt / Long.parseLong (no trimming, out of range is an error), the
+// floating ones Double.parseDouble (ktJavaFloat). Twin of kParseNum in
+// languages/kotlin-interpreter.abnf and k2ParseNum in languages/lib/kotlin-rt.metajs.
 func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
-	t := strings.TrimSpace(s)
-	if name == "toDouble" {
-		var f float64
-		if _, err := fmt.Sscanf(t, "%g", &f); err != nil || t == "" {
+	orNull := strings.HasSuffix(name, "OrNull")
+	if name == "toDouble" || name == "toFloat" || name == "toDoubleOrNull" || name == "toFloatOrNull" {
+		f, ok, empty := ktJavaFloat(s)
+		if !ok {
+			if orNull {
+				return jsNull, true
+			}
+			if empty {
+				rt.ktRaise("NumberFormatException", "empty String")
+			}
 			rt.ktRaise("NumberFormatException", fmt.Sprintf("For input string: \"%s\"", s))
+		}
+		if name == "toFloat" || name == "toFloatOrNull" {
+			return jsJFlo{f: jvmFround(f), sty: floJavaF}, true
 		}
 		return jsJFlo{f: f}, true
 	}
+	long := name == "toLong" || name == "toLongOrNull"
 	neg := false
-	body := t
+	body := s
 	if strings.HasPrefix(body, "-") {
 		neg, body = true, body[1:]
 	} else if strings.HasPrefix(body, "+") {
 		body = body[1:]
 	}
-	if body == "" {
-		if name == "toIntOrNull" {
+	bad := body == ""
+	for _, r := range body {
+		if r < '0' || r > '9' {
+			bad = true
+		}
+	}
+	if !bad {
+		bad = !ktDigitsFit(body, neg, long)
+	}
+	if bad {
+		if orNull {
 			return jsNull, true
 		}
 		rt.ktRaise("NumberFormatException", fmt.Sprintf("For input string: \"%s\"", s))
 	}
-	var acc int64
+	var acc uint64
 	for _, r := range body {
-		if r < '0' || r > '9' {
-			if name == "toIntOrNull" {
-				return jsNull, true
-			}
-			rt.ktRaise("NumberFormatException", fmt.Sprintf("For input string: \"%s\"", s))
-		}
-		acc = acc*10 + int64(r-'0')
+		acc = acc*10 + uint64(r-'0')
+	}
+	v := int64(acc)
+	if neg {
+		v = -v
+	}
+	if long {
+		return ktNorm(v, 64, false), true
+	}
+	return ktNorm(v, 32, false), true
+}
+
+// ktDigitsFit: do these decimal digits fit an Int (or a Long), with the sign already
+// taken off? Compared as text against the limit. Twin of kDigitsFit.
+func ktDigitsFit(body string, neg, long bool) bool {
+	d := strings.TrimLeft(body, "0")
+	lim := "2147483647"
+	if long {
+		lim = "9223372036854775807"
 	}
 	if neg {
-		acc = -acc
+		lim = lim[:len(lim)-1] + string(lim[len(lim)-1]+1)
 	}
-	if name == "toLong" {
-		return ktNorm(acc, 64, false), true
+	if len(d) != len(lim) {
+		return len(d) < len(lim)
 	}
-	return ktNorm(acc, 32, false), true
+	return d <= lim
+}
+
+// ktJavaFloat is java.lang.Double.parseDouble's grammar: after String.trim (every
+// char up to ' '), an optional sign, then NaN, Infinity, a decimal (digits with an
+// optional point, at least one digit, an optional exponent) or a hexadecimal (0x, hex
+// digits with an optional point, a REQUIRED binary exponent p), and a decimal or
+// hexadecimal may end in one of f F d D. Nothing else may follow. empty selects
+// java's "empty String" message. Twin of kJavaFloat in kotlin-interpreter.abnf.
+func ktJavaFloat(s string) (float64, bool, bool) {
+	t := strings.TrimFunc(s, func(r rune) bool { return r <= ' ' })
+	if t == "" {
+		return 0, false, true
+	}
+	i := 0
+	neg := false
+	if t[0] == '-' || t[0] == '+' {
+		neg, i = t[0] == '-', 1
+	}
+	rest := t[i:]
+	if rest == "NaN" {
+		return math.NaN(), true, false
+	}
+	var v float64
+	if rest == "Infinity" {
+		v = math.Inf(1)
+	} else {
+		n := len(t)
+		if c := t[n-1]; c == 'f' || c == 'F' || c == 'd' || c == 'D' {
+			n--
+		}
+		hex := len(rest) > 1 && rest[0] == '0' && (rest[1] == 'x' || rest[1] == 'X')
+		isDig := func(c byte) bool { return c >= '0' && c <= '9' }
+		isHex := func(c byte) bool { return isDig(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') }
+		j, nd, dot := i, 0, false
+		if hex {
+			j = i + 2
+		}
+		for ; j < n; j++ {
+			if (hex && isHex(t[j])) || (!hex && isDig(t[j])) {
+				nd++
+			} else if t[j] == '.' && !dot {
+				dot = true
+			} else {
+				break
+			}
+		}
+		if nd == 0 {
+			return 0, false, false
+		}
+		if j < n && ((hex && (t[j] == 'p' || t[j] == 'P')) || (!hex && (t[j] == 'e' || t[j] == 'E'))) {
+			j++
+			if j < n && (t[j] == '+' || t[j] == '-') {
+				j++
+			}
+			ed := 0
+			for ; j < n && isDig(t[j]); j++ {
+				ed++
+			}
+			if ed == 0 {
+				return 0, false, false
+			}
+		} else if hex {
+			return 0, false, false
+		}
+		if j != n {
+			return 0, false, false
+		}
+		num := t[i:n]
+		if hex {
+			// Go's own hex floats agree with java's once the grammar is checked: 0x,
+			// digits, an optional point, and the p exponent.
+			num = "0x" + t[i+2:n]
+		}
+		f, err := strconv.ParseFloat(num, 64)
+		if err != nil && !errors.Is(err, strconv.ErrRange) {
+			return 0, false, false
+		}
+		v = f
+	}
+	if neg {
+		v = -v
+	}
+	return v, true, false
 }
 
 // ktFormat implements the subset of java.util.Formatter that a test program
@@ -4205,13 +4323,17 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			acc = rt.ktCall(argAt(args, 1), es[i], acc)
 		}
 		return acc, true
-	case "reduce", "reduceIndexed":
+	// The OrNull forms answer null for an empty receiver where the others throw.
+	case "reduce", "reduceIndexed", "reduceOrNull", "reduceIndexedOrNull":
 		if len(es) == 0 {
+			if strings.HasSuffix(name, "OrNull") {
+				return jsNull, true
+			}
 			rt.ktRaise("UnsupportedOperationException", "Empty "+ktRedWord(kind, false)+" can't be reduced.")
 		}
 		acc := es[0]
 		for i := 1; i < len(es); i++ {
-			if name == "reduce" {
+			if name == "reduce" || name == "reduceOrNull" {
 				acc = rt.ktCall(f, acc, es[i])
 			} else {
 				acc = rt.ktCall(f, float64(i), acc, es[i])
@@ -4221,13 +4343,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	// reduceRight folds from the END with the accumulator as the SECOND parameter,
 	// and it is declared on List (and CharSequence), which is the only place the
 	// "Empty list can't be reduced." wording comes from.
-	case "reduceRight", "reduceRightIndexed":
+	case "reduceRight", "reduceRightIndexed", "reduceRightOrNull", "reduceRightIndexedOrNull":
 		if len(es) == 0 {
+			if strings.HasSuffix(name, "OrNull") {
+				return jsNull, true
+			}
 			rt.ktRaise("UnsupportedOperationException", "Empty "+ktRedWord(kind, true)+" can't be reduced.")
 		}
 		acc := es[len(es)-1]
 		for i := len(es) - 2; i >= 0; i-- {
-			if name == "reduceRight" {
+			if name == "reduceRight" || name == "reduceRightOrNull" {
 				acc = rt.ktCall(f, es[i], acc)
 			} else {
 				acc = rt.ktCall(f, float64(i), es[i], acc)

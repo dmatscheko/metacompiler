@@ -4332,6 +4332,43 @@ fun sec84() {
         eset.firstOrNull() == null && emap.keys.firstOrNull() == null)
 }
 
+// ===== SECTION 85: String to number, and the OrNull reduce family =====
+// toInt/toLong are java's Integer.parseInt/Long.parseLong: no trimming, and a value
+// out of range is an ERROR, not a wrap. toDouble/toFloat are Double.parseDouble: the
+// text is trimmed, may end in f/F/d/D, may be NaN, Infinity or a hex float, and
+// NOTHING else may follow - "1.5abc" is an error, not 1.5. The OrNull forms answer
+// null where those throw. Every row was read from the kotlin-stdlib 2.2.21 jar,
+// called from java. The inputs come out of a list (manual chapter 3).
+fun s85text(f: () -> Any?): String {
+    return try { "" + f() } catch (e: Throwable) { e.toString() }
+}
+
+fun sec85() {
+    val ss = listOf("1.5abc", " 1.5 ", "1.5f", "0x1.8p1", "-0", "Inf", "", " 5", "2147483648",
+        "-2147483648", "9223372036854775807", "9223372036854775808", "1e", ".5", "+Infinity", "1e39")
+    val nfe = "java.lang.NumberFormatException: "
+    check("ax85a", s85text { ss[0].toDouble() } == nfe + "For input string: \"1.5abc\"")
+    check("ax85b", ss[1].toDouble() == 1.5 && ss[2].toDouble() == 1.5 && ss[3].toDouble() == 3.0)
+    check("ax85c", s85text { ss[4].toDouble() } == "-0.0" && ss[13].toDouble() == 0.5)
+    check("ax85d", s85text { ss[5].toDouble() } == nfe + "For input string: \"Inf\"" &&
+        s85text { ss[12].toDouble() } == nfe + "For input string: \"1e\"")
+    check("ax85e", s85text { ss[6].toDouble() } == nfe + "empty String")
+    check("ax85f", ss[14].toDouble() > 1e308 && ss[0].toDoubleOrNull() == null && ss[1].toDoubleOrNull() == 1.5)
+    check("ax85g", s85text { ss[15].toFloat() } == "Infinity" && ss[2].toFloat() == 1.5f &&
+        ss[0].toFloatOrNull() == null && s85text { ss[0].toFloat() } == nfe + "For input string: \"1.5abc\"")
+    check("ax85h", s85text { ss[7].toInt() } == nfe + "For input string: \" 5\"" && ss[7].toIntOrNull() == null)
+    check("ax85i", s85text { ss[8].toInt() } == nfe + "For input string: \"2147483648\"" &&
+        ss[8].toIntOrNull() == null && ss[9].toInt() == Int.MIN_VALUE && ss[8].toLong() == 2147483648L)
+    check("ax85j", ss[10].toLong() == Long.MAX_VALUE && ss[11].toLongOrNull() == null &&
+        s85text { ss[11].toLong() } == nfe + "For input string: \"9223372036854775808\"")
+    check("ax85k", ss[0].toLongOrNull() == null && ss[9].toLongOrNull() == -2147483648L)
+    val emp = mutableListOf<Int>()
+    val many = listOf(1, 2, 3)
+    check("ax85l", emp.reduceOrNull { a, b -> a + b } == null && emp.reduceRightOrNull { a, b -> a + b } == null)
+    check("ax85m", many.reduceOrNull { a, b -> a - b } == -4 && many.reduceRightOrNull { a, b -> a - b } == 2)
+    check("ax85n", many.asSequence().reduceOrNull { a, b -> a * b } == 6 && arrayOf<Int>().reduceOrNull { a, b -> a } == null)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4418,6 +4455,7 @@ fun main() {
     sec82() // SECTION-CALL 82
     sec83() // SECTION-CALL 83
     sec84() // SECTION-CALL 84
+    sec85() // SECTION-CALL 85
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
