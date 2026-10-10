@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-199** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-205** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,52 +63,36 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-001 python: integer division and modulo by zero never raise · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-`1 // 0` prints `Infinity` and `x % 0` prints `NaN` in all three engines (interpreter,
-`llvm.Run`, native); CPython raises `ZeroDivisionError: integer division or modulo by
-zero` (and `division by zero` for `/`, `float division by zero`, `float modulo` for
-floats - check each wording with python3). The exception class exists already.
-Oracle: python3.
-
-### T-002 python: `str.title()` treats `ß` as uncased · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-`"straße".title()` is `StraßE` in all engines; CPython `Straße`. The case-fallback
-length guard makes `ß` end a word. Check `istitle`/`capitalize`/`swapcase` on the same
-inputs while there. Oracle: python3.
-
-### T-003 python: missing dict/set members · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-`dict.fromkeys` (a classmethod on the type); set `issuperset`, `isdisjoint`,
-`intersection`, `difference` (and their operator forms if missing), with `hasattr`
-answering True for them. Oracle: python3.
-
-### T-004 python: `except E as w` does not unbind `w` · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-After the handler, `w` must be unbound (NameError on use). Oracle: python3.
-
-### T-005 python: an uncaught KeyError renders differently in the two halves · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-Interpreter `[1]` vs compiled `1` for the key in the abort line; CPython prints
-`KeyError: 1`. Make all three match CPython's traceback last line.
-
-### T-006 python: `__mro__` lacks `object` · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-
-### T-007 python: `None.k = v` is not catchable · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-Must raise a catchable `AttributeError: 'NoneType' object has no attribute 'k'`
-(check wording with python3) in all engines.
-
-### T-008 python: native `float(2**80)` is `nan` · P1 · PY · Shared: runtime.metajs? · IN PROGRESS (PY worker, round 1) [V]
-Native: `float(2**80)` prints `nan` and `2**80 == float(2**80)` is False; CPython
-`1.2089258196146292e+24` and True. The interpreter / llvm.Run legs: check.
-
-### T-009 python: `%d` / `{:d}` on a non-integer operand is a three-way divergence · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
-`"%d" % 1e300` gives `1e+300` natively, `9223372036854775807` in the Go twin, and
-CPython the exact 301-digit integer. `"%d" % None` gives `NaN` natively, `0` in the
-twin, and CPython a `TypeError`. Same for list/tuple/dict/set/str operands: 192
-differing rows in a probe, both halves wrong and differently wrong. Oracle: python3.
-
-### T-010 python: an abandoned generator never runs its `finally` · P3 · PY · IN PROGRESS (PY worker, round 1) [U]
-CPython finalizes at collection; there is no finalizer hook and the GC deliberately
-has none. Likely DECLINED with that reason unless a cheap hook exists.
-
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
+
+### T-199 python: compiled complex values print as `[object Object]` · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
+llvm.Run and native: `x = 3j; print(x)`, `print(3j)`, `str(1+2j)`; interpreter and
+CPython `3j`. `complex(1, 2)` is undefined in all engines (interpreter "cannot
+construct complex", compiled "call of a non-function"). A complex format spec beyond
+fill/align/width aborts. Oracle: python3.
+
+### T-200 python: a string literal holding an astral character · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
+`len("𝐀")` is 2 and `"𝐀" == chr(0x1D400)` is False in all engines (CPython 1 / True);
+`chr()`-built strings are right. Compare ruby T-187 (same family).
+
+### T-201 python: setting an attribute on a function aborts · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
+`def f(): pass` then `f.k = 4; print(f.k)`: interpreter "AttributeError: 'k'"
+(uncatchable), compiled "cannot set field 'k' on *abnf.jsClosure". CPython prints 4.
+
+### T-202 python: class repr lacks the module prefix · P1 · PY · IN PROGRESS (PY worker, round 2) [V]
+`print(B)` / `B.__mro__` show `<class 'B'>`; CPython `<class '__main__.B'>` (builtins
+stay `<class 'int'>`). All engines.
+
+### T-203 python: int/int true division with a bigint operand rounds twice · P2 · PY · IN PROGRESS (PY worker, round 2) [V]
+`(3**70)/3`-style quotients: we print `2.1222685869696762e+33`, CPython
+`2.122268586969676e+33`. Needs a correctly rounded bignum division in all three
+engines (Go: big.Rat; the two MetaJS engines ~40 lines each). Also `"%d %d" % (1,2,3)`
+and `"%d" % (1,2)` are ambiguous while a tuple is a list (T-170).
+
+### T-204 python: `None.k = 1` does not parse · P3 · PY · IN PROGRESS (PY worker, round 2) [V]
+A literal `None` (or other atom) as an attribute-assignment target is a parse error in
+both grammars; CPython parses it and raises AttributeError at run time.
 
 ---
 
@@ -541,9 +525,6 @@ python must each come from that language's own toolchain or spec (python3 is Uni
 Real Go rejects a type assertion on a non-interface value at compile time. Rewrite the
 row with an `interface{}` operand.
 
-### T-183 python: native float formatting of huge bignums and `%`-arity · P3 · PY · IN PROGRESS (PY worker, round 1) [U]
-Placeholder for whatever T-008 / T-009 / T-170 leave; re-probe and split or close.
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · OPEN [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -557,6 +538,17 @@ believed to be the modern VM's. Leave as is unless a real dart run settles it.
 (The master moves DONE / DECLINED tickets here, one line each:
 `T-NNN <title> — DONE <commit>` or `— DECLINED: <reason>`.)
 
+T-001 python: integer division and modulo by zero never raise — DONE 28abe5b
+T-002 python: `str.title()` treats `ß` as uncased — DONE 28abe5b
+T-003 python: missing dict/set members — DONE 28abe5b
+T-004 python: `except E as w` does not unbind `w` — DONE 28abe5b
+T-005 python: an uncaught KeyError renders differently in the two halves — DONE 28abe5b
+T-006 python: `__mro__` lacks `object` — DONE 28abe5b
+T-007 python: `None.k = v` is not catchable — DONE 28abe5b
+T-008 python: native `float(2**80)` is `nan` — DONE b46dc62
+T-009 python: `%d` / `{:d}` on a non-integer operand is a three-way divergence — DONE b46dc62
+T-010 python: an abandoned generator never runs its `finally` — DECLINED: CPython runs the finally at refcount drop (`del g` prints before the next line); that timing needs refcounting, which manual 7.8 rejects (cycles); a run-at-exit hook would print in the wrong place
+T-183 python: native float formatting of huge bignums and `%`-arity — PARTIAL b46dc62 (%-arity/syntax errors catchable, exact %f of a bigint natively); rest is T-203
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -604,7 +596,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
