@@ -2522,7 +2522,167 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeDefined(items) {
         var txt = ""
         for (var i = 0; i < items.length; i++) { if (items[i].dtext != undefined) { txt = items[i].dtext } }
-        var t = strStrip(txt)
+        return definedOf(strStrip(txt))
+    }
+    // The top-level SHAPE of a defined? argument, read from its source text; only
+    // what stands at bracket depth 0 and outside a string literal counts. MRI answers
+    // a literal, `&&` / `||` / `and` / `or`, `?:` and a range "expression", an
+    // assignment "assignment", and an operator or a method call "method" when its
+    // operands (its receiver) are defined. The answer is {k, parts}: k is one of
+    // lit / expr / asgn / ops (parts: the operands) / un (parts: [operand]) /
+    // call (parts: [receiver]) / fcall (parts: [the called name]) / paren (parts:
+    // [inside]) / name (the plain-name rules). The same functions are in both ruby
+    // grammars.
+    var dfOpList = ["**=", "<=>", "===", "...", "<<=", ">>=", "||=", "&&=", "**", "==", "!=",
+                    "=~", "!~", "<=", ">=", "<<", ">>", "&&", "||", "..", "&.", "::", "+=", "-=",
+                    "*=", "/=", "%=", "|=", "&=", "^=", "=>", "+", "-", "*", "/", "%", "<", ">",
+                    "=", "!", "&", "|", "^", "~", "?", ":", ".", ","]
+    var dfBinOps = ["**", "==", "!=", "=~", "!~", "<=", ">=", "<<", ">>", "<=>", "===", "+", "-",
+                    "*", "/", "%", "<", ">", "&", "|", "^"]
+    function dfTrim(s) {
+        var a = 0
+        var e = s.length
+        while (a < e && (s.charAt(a) == " " || s.charAt(a) == "\t" || s.charAt(a) == "\n" || s.charAt(a) == "\r")) { a = a + 1 }
+        while (e > a && (s.charAt(e - 1) == " " || s.charAt(e - 1) == "\t" || s.charAt(e - 1) == "\n" || s.charAt(e - 1) == "\r")) { e = e - 1 }
+        return s.slice(a, e)
+    }
+    function dfIdCh(c) { return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_" || c == "@" || c == "$" }
+    function dfOpAt(t, i) {
+        for (var k = 0; k < dfOpList.length; k++) {
+            var o = dfOpList[k]
+            if (t.slice(i, i + o.length) == o) { return o }
+        }
+        return ""
+    }
+    // The index just past the string literal opening at i (escapes and #{...} skipped).
+    function dfSkipStr(t, i) {
+        var q = t.charAt(i)
+        var j = i + 1
+        var nest = 0
+        while (j < t.length) {
+            var c = t.charAt(j)
+            if (c == "\\") { j = j + 2; continue }
+            if (q == "\"" && c == "#" && t.charAt(j + 1) == "{") { nest = nest + 1; j = j + 2; continue }
+            if (nest > 0 && c == "}") { nest = nest - 1; j = j + 1; continue }
+            if (nest == 0 && c == q) { return j + 1 }
+            j = j + 1
+        }
+        return j
+    }
+    function dfShape(t) {
+        var n = t.length
+        if (n == 0) { return {k: "name", parts: []} }
+        var c0 = t.charAt(0)
+        if (c0 == "(") {
+            var dd = 0
+            var e = 0
+            while (e < n) {
+                var ce = t.charAt(e)
+                if (ce == "\"" || ce == "'") { e = dfSkipStr(t, e); continue }
+                if (ce == "(" || ce == "[" || ce == "{") { dd = dd + 1 }
+                if (ce == ")" || ce == "]" || ce == "}") { dd = dd - 1; if (dd == 0) { break } }
+                e = e + 1
+            }
+            if (e == n - 1) { return {k: "paren", parts: [dfTrim(t.slice(1, n - 1))]} }
+        }
+        var depth = 0
+        var cuts = []
+        var lastDot = -1
+        var callParen = -1
+        var andOr = false
+        var asgn = false
+        var expr = false
+        var operand = false
+        var i = 0
+        while (i < n) {
+            var c = t.charAt(i)
+            if (c == "\"" || c == "'" || c == "`") { i = dfSkipStr(t, i); operand = true; continue }
+            if (c == "(" || c == "[" || c == "{") {
+                if (depth == 0 && c == "(" && operand && callParen < 0) { callParen = i }
+                depth = depth + 1
+                i = i + 1
+                operand = false
+                continue
+            }
+            if (c == ")" || c == "]" || c == "}") { depth = depth - 1; i = i + 1; operand = true; continue }
+            if (depth > 0 || c == " " || c == "\t" || c == "\n" || c == "\r") { i = i + 1; continue }
+            if (c >= "0" && c <= "9") {
+                while (i < n && (dfIdCh(t.charAt(i)) || (t.charAt(i) == "." && t.charAt(i + 1) >= "0" && t.charAt(i + 1) <= "9"))) { i = i + 1 }
+                operand = true
+                continue
+            }
+            if (dfIdCh(c)) {
+                var j = i
+                while (j < n && dfIdCh(t.charAt(j))) { j = j + 1 }
+                var w = t.slice(i, j)
+                if ((w == "and" || w == "or") && operand) { andOr = true }
+                // A method name may end in ? or !, glued (`x.nil?`, `a.sort!`).
+                if (j < n && (t.charAt(j) == "?" || t.charAt(j) == "!") && t.charAt(j + 1) != "=") { j = j + 1 }
+                i = j
+                operand = !(w == "and" || w == "or" || w == "not")
+                continue
+            }
+            var o = dfOpAt(t, i)
+            if (o == "") { i = i + 1; continue }
+            if (o == "&&" || o == "||" || o == ".." || o == "...") { expr = true; operand = false }
+            else if (o == "?" || (o == ":" && operand)) { expr = true; operand = false }
+            else if (o == ":") {
+                // A :symbol literal.
+                i = i + 1
+                while (i < n && dfIdCh(t.charAt(i))) { i = i + 1 }
+                operand = true
+                continue
+            }
+            else if (o == "::") { operand = false }
+            else if (o == "." || o == "&.") { if (operand) { lastDot = i } operand = false }
+            else if (o == "=" || (o.length >= 2 && o.charAt(o.length - 1) == "=" && dfBinOps.indexOf(o) < 0 && o != "=>")) {
+                if (operand) { asgn = true }
+                operand = false
+            }
+            else if (dfBinOps.indexOf(o) >= 0 && operand) { cuts.push(i); cuts.push(i + o.length); operand = false }
+            else { operand = false }
+            i = i + o.length
+        }
+        if (andOr) { return {k: "expr", parts: []} }
+        if (asgn) { return {k: "asgn", parts: []} }
+        if (expr) { return {k: "expr", parts: []} }
+        if (cuts.length > 0) {
+            var parts = []
+            var from = 0
+            for (var q = 0; q < cuts.length; q = q + 2) { parts.push(dfTrim(t.slice(from, cuts[q]))); from = cuts[q + 1] }
+            parts.push(dfTrim(t.slice(from)))
+            return {k: "ops", parts: parts}
+        }
+        if (c0 == "-" || c0 == "+") {
+            var c1 = t.charAt(1)
+            if (c1 >= "0" && c1 <= "9") { return {k: "lit", parts: []} }
+            return {k: "un", parts: [dfTrim(t.slice(1))]}
+        }
+        if (c0 == "!" || c0 == "~") { return {k: "un", parts: [dfTrim(t.slice(1))]} }
+        if (t.slice(0, 4) == "not " || t.slice(0, 4) == "not(") { return {k: "un", parts: [dfTrim(t.slice(3))]} }
+        if (lastDot >= 0) { return {k: "call", parts: [dfTrim(t.slice(0, lastDot))]} }
+        if (callParen > 0) { return {k: "fcall", parts: [dfTrim(t.slice(0, callParen))]} }
+        if ((c0 >= "0" && c0 <= "9") || c0 == "\"" || c0 == "'" || c0 == "`" || c0 == ":" || c0 == "["
+            || c0 == "{" || c0 == "%" || c0 == "/" || c0 == "?") { return {k: "lit", parts: []} }
+        return {k: "name", parts: []}
+    }
+    function definedOf(t) {
+        var sh = dfShape(t)
+        if (sh.k == "lit" || sh.k == "expr") { return function() { return "expression" } }
+        if (sh.k == "asgn") { return function() { return "assignment" } }
+        if (sh.k == "paren") { return definedOf(sh.parts[0]) }
+        if (sh.k == "fcall") {
+            var ft = definedOf(sh.parts[0])
+            return function() { return ft() == "method" ? "method" : null }
+        }
+        if (sh.k != "name") {
+            var ts = []
+            for (var pi = 0; pi < sh.parts.length; pi++) { ts.push(definedOf(sh.parts[pi])) }
+            return function() {
+                for (var k = 0; k < ts.length; k++) { if (ts[k]() == null) { return null } }
+                return "method"
+            }
+        }
         return function() {
             if (t.length == 0) { return null }
             var c0 = t.charAt(0)

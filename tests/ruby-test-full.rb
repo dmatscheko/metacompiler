@@ -3099,6 +3099,24 @@ def s60
   check("as60c", s.inspect == "\"a\u{1F600}b\"" && [s].inspect == "[\"a\u{1F600}b\"]")
 end
 
+# ===== SECTION 61: defined? of an expression =====
+# An operator or a method call is "method" when its operands (its receiver) are
+# defined, a literal, `&&` / `||`, `?:` and a range are "expression", an assignment
+# is "assignment". Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS
+# SECTION RUNS UNDER REAL RUBY.
+def s61
+  x = 1
+  check("de61a", defined?(3 + 3) == "method" && defined?(x + 1) == "method" && defined?(zz61 + 1).nil? &&
+                 defined?(1 + zz61).nil? && defined?(x * 2 + 1) == "method" && defined?(x == 1) == "method")
+  check("de61b", defined?(3) == "expression" && defined?("s") == "expression" && defined?([1, 2]) == "expression" &&
+                 defined?(:sym) == "expression" && defined?(1..2) == "expression" && defined?(x && zz61) == "expression" &&
+                 defined?(x ? 1 : 2) == "expression" && defined?("a#{x}") == "expression")
+  check("de61c", defined?(!x) == "method" && defined?(-x) == "method" && defined?(x = 2) == "assignment" &&
+                 defined?(x += 2) == "assignment" && defined?((x + 1)) == "method")
+  check("de61d", defined?(x.abs) == "method" && defined?(zz61.abs).nil? && defined?([x].first) == "method" &&
+                 defined?(puts(1)) == "method" && defined?(x.to_s + "b") == "method" && defined?(String.new) == "method")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3121,5 +3139,6 @@ s57() # SECTION-CALL 57
 s58() # SECTION-CALL 58
 s59() # SECTION-CALL 59
 s60() # SECTION-CALL 60
+s61() # SECTION-CALL 61
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
