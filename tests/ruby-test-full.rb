@@ -3212,6 +3212,21 @@ def s65
                           "`@1' is not allowed as an instance variable name"])
 end
 
+# ===== SECTION 66: the top-level self is main =====
+# Outside every class body `self` is MRI's main object: an Object whose #to_s and
+# #inspect are "main", the same object inside a top-level def and a block. Every
+# right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER
+# REAL RUBY.
+S66 = [self, "#{self}", [self].inspect, self.class]
+def s66who
+  self
+end
+def s66
+  check("ma66a", S66[1] == "main" && S66[2] == "[main]" && S66[3] == Object && S66[0].to_s == "main" && S66[0].equal?(s66who))
+  b = [1].map { self }
+  check("ma66b", b[0].equal?(S66[0]) && self.inspect == "main")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3239,5 +3254,6 @@ s62() # SECTION-CALL 62
 s63() # SECTION-CALL 63
 s64() # SECTION-CALL 64
 s65() # SECTION-CALL 65
+s66() # SECTION-CALL 66
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

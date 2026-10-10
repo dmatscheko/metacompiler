@@ -2468,7 +2468,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return null
     }
-    function makeSelf() { return function() { return findSelf() } }
+    function makeSelf() { return function() { return ivarSelf() } }
     function makeScopedConst(text) {
         var name = stripWs(text)
         return function() {
@@ -2715,8 +2715,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     // Outside every method `self` is MRI's `main` object, and an @ivar written there
-    // (or in a top-level def called from there) lives on it. Twin of the $main slot
-    // in ruby-to-llvm-ir.abnf.
+    // (or in a top-level def called from there) lives on it. Twins: the $main slot
+    // in ruby-to-llvm-ir.abnf, js_rmain in the runtimes.
     var mainObj = {}
     function ivarSelf() {
         var s = findSelf()
@@ -11435,6 +11435,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     for (var bci = 0; bci < builtinClassNames.length; bci++) {
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
     }
+    // MRI's `main` is an Object whose singleton #to_s and #inspect answer "main".
+    function mainName(self) { return "main" }
+    mainObj.__class = hostGlobals["Object"]
+    singPut(mainObj, "to_s", mainName)
+    singPut(mainObj, "inspect", mainName)
     // ----- Float's scoped constants -----
     // `Float::INFINITY' - the ordinary way to write an infinity in Ruby, and the
     // only way to write a NaN. The compiled halves fold these thirteen names to a

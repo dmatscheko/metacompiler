@@ -7042,6 +7042,16 @@ function js_rsplitw(v, asSym) {
 
 // Ruby indexing: a Proc calls itself, a user class dispatches `def [](i)`, a Hash
 // answers nil for a missing key and an Array answers nil out of range.
+// MRI's top-level `self`. Twin of mainObj in ruby-interpreter.abnf.
+function rbMainName(self) { return "main" }
+function js_rmain() {
+    var o = {}
+    o["__class"] = rbBuiltinClass("Object")
+    rbSingPut(o, "to_s", rbMainName)
+    rbSingPut(o, "inspect", rbMainName)
+    return o
+}
+
 // Object#instance_variable_get / _set. Twin of ivarAccess in ruby-interpreter.abnf.
 function rbIvarAccess(o, name, args) {
     var n = rbStr(rbArgAt(args, 0))

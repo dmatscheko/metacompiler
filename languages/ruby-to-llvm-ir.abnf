@@ -2753,7 +2753,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // ----- self / @ivars -----
     function makeSelf() {
-        return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])} }
+        return function(b) { return {b: b, v: emitIvarSelf(b)} }
     }
     // The object an @ivar lives on: `self` inside a method or class body, and outside
     // every one MRI's `main` object, which jsmain binds as $main. curHasSelf says
@@ -7050,7 +7050,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The root binding of the implicit-block slot, so `block_given?' at the top
         // level resolves to false instead of failing the scope lookup (see curBlockV).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkSlot), hNull])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$main"), callExt(b, "js_obj_new", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$main"), callExt(b, "js_rmain", [])])
         // The builtin class constants, so `case v when Integer`, `v.is_a?(String)`
         // and `rescue ArgumentError` name a real class object (js_rclass hands out
         // one object per name, so the identity comparisons hold).

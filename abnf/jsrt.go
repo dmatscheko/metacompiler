@@ -13628,6 +13628,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// The builtin class objects (Integer, String, Symbol, Array, ...): one object
 		// per name, so `1.class == Integer` and `when Integer` compare identities.
 		"js_rclass": func(a []uint64) uint64 { return w(rt.rubyBuiltinClass(rt.toString(u(a[0])))) },
+		"js_rmain":  func(a []uint64) uint64 { return w(rt.rubyMainObj()) },
 		// Ruby's to_s, used for string interpolation and puts.
 		"js_rstr": func(a []uint64) uint64 { return rt.wrapStr(rt.rubyStr(u(a[0]))) },
 		// Kernel#puts and Kernel#print with RUBY rendering (not Go's %v: `puts nil`

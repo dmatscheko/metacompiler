@@ -1055,6 +1055,17 @@ func rubyRatIntOpB(n, d *big.Int, mode byte) *big.Int {
 	return new(big.Int).Neg(new(big.Int).Div(new(big.Int).Sub(d, n2), d2))
 }
 
+// rubyMainObj is MRI's top-level `self`: an Object whose singleton #to_s and
+// #inspect answer "main". Twin of mainObj in ruby-interpreter.abnf.
+func (rt *jsrt) rubyMainObj() *jsObject {
+	o := newJSObject()
+	o.set("__class", rt.rubyBuiltinClass("Object"))
+	name := &hostFunc{name: "main", fn: func(rt *jsrt, this uint64, a []interface{}) interface{} { return "main" }}
+	rubySingPut(o, "to_s", name)
+	rubySingPut(o, "inspect", name)
+	return o
+}
+
 // rubyIvarAccess is Object#instance_variable_get / _set on an instance: an @ivar
 // is the slot of its name without the "@". Twin of ivarAccess in
 // ruby-interpreter.abnf.
