@@ -2368,7 +2368,7 @@
             "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-abort-test.lua", "-q"]
         },
         {
-            "name": "Lua abort probe, native binary SHOULD ABORT (native vs llvm.Run only - all three engines say 'tests/lua-abort-test.lua:6: attempt to index a nil value')",
+            "name": "Lua abort probe, index a nil value, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-abort-test.lua", "-q", "-exe", "tests/lua-abort.out"]

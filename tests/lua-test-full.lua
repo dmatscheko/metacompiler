@@ -1308,6 +1308,53 @@ function s31()
     check("ae18", select("#", pairs({})), 4)
 end
 
+-- ===== SECTION 32: no value, a number's fields, an error in the handler =====
+-- A function that runs off its end returns no value at all (not a nil); a float
+-- holding an integer is a number, so indexing it is an error; an error inside
+-- xpcall's message handler is lua's "error in error handling". Checked against
+-- lua 5.5.
+function s32()
+    local function none() end
+    local function maybe(x) if x then return 1 end end
+    check("nv1", select("#", none()), 0)
+    check("nv2", select("#", pcall(function() end)), 1)
+    check("nv3", select("#", maybe(false)) .. select("#", maybe(true)), "01")
+    local ok, m = xpcall(function() error("a") end, function(e) error("b") end)
+    check("eh1", ok == false and m == "error in error handling", true)
+    local ok2, m2 = xpcall(function() error("a", 0) end, function(e) return e .. "!" end)
+    check("eh2", m2, "a!")
+    local x = 2.0
+    local ok3, m3 = pcall(function() return x.y end)
+    check("fx1", ok3 == false and string.find(m3, "attempt to index a number value", 1, true) ~= nil, true)
+    local ok4, m4 = pcall(function() x.y = 1 end)
+    check("fx2", ok4 == false and string.find(m4, "attempt to index a number value", 1, true) ~= nil, true)
+    local ok5 = pcall(function() return (3.5).y end)
+    check("fx3", ok5, false)
+    -- An error is positioned at its OPERATION's line: an arithmetic or a
+    -- concatenation operator's, a call's opening parenthesis', a comparison's
+    -- right operand's - not its statement's. Measured against error()'s own line.
+    local function ln(m) return string.match(m, ":(%d+): ") + 0 end
+    local _, p0 = pcall(function() error("here") end)
+    local _, p1 = pcall(function() local a = 1 +
+        nil end)
+    local _, p2 = pcall(function() local a = "x" ..
+        {} end)
+    local _, p3 = pcall(function() local a = {
+        b = undefinedfn(),
+    } end)
+    local _, p4 = pcall(function() local a = 1 <
+        "x"
+    end)
+    local _, p5 = pcall(function() local t = {} return t
+        .nofn(1)
+    end)
+    check("pos1", ln(p1) - ln(p0), 1)
+    check("pos2", ln(p2) - ln(p0), 3)
+    check("pos3", ln(p3) - ln(p0), 6)
+    check("pos4", ln(p4) - ln(p0), 9)
+    check("pos5", ln(p5) - ln(p0), 12)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1315,5 +1362,6 @@ s28() -- SECTION-CALL 28
 s29() -- SECTION-CALL 29
 s30() -- SECTION-CALL 30
 s31() -- SECTION-CALL 31
+s32() -- SECTION-CALL 32
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

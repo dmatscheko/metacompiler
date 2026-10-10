@@ -282,64 +282,66 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = CmpExpr { KwAnd CmpExpr } ;
 
-CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = BOrExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BOrExpr } ;
+CmpExpr     <~~ push(foldBinary(luaPosCmp(takeAll(), up.pos))) ~~>
+            = BOrExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BOrExpr } ;
 
 // The bitwise operators of Lua 5.3+, each on its own precedence level: | binds loosest,
 // then binary ~ (exclusive or), then &, then the shifts - all below the comparisons and
 // above concatenation. They work on 64-bit two's complement integers (luaBitOp), so a
 // float operand with an integral value converts and everything else is an error. Binary
 // '~' carries a !"=" lookahead so that a '~=' comparison is left to CmpExpr above.
-BOrExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = BXorExpr { "|" <~~ push(up.in) ~~> BXorExpr } ;
-BXorExpr    <~~ push(foldBinary(takeAll())) ~~>
-            = BAndExpr { ( "~" !"=" ) <~~ push(up.in) ~~> BAndExpr } ;
-BAndExpr    <~~ push(foldBinary(takeAll())) ~~>
-            = ShiftExpr { "&" <~~ push(up.in) ~~> ShiftExpr } ;
-ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
-            = ConcatExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> ConcatExpr } ;
+BOrExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
+            = BXorExpr { "|" <~~ push(luaOpTok(up.in, up.pos)) ~~> BXorExpr } ;
+BXorExpr    <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
+            = BAndExpr { ( "~" !"=" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> BAndExpr } ;
+BAndExpr    <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
+            = ShiftExpr { "&" <~~ push(luaOpTok(up.in, up.pos)) ~~> ShiftExpr } ;
+ShiftExpr   <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
+            = ConcatExpr { ( "<<" | ">>" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> ConcatExpr } ;
 
 // Concatenation is right associative, so it recurses on its own right hand side.
-ConcatExpr  <~~ push(makeConcat(takeAll())) ~~>
-            = AddExpr [ ".." ConcatExpr ] ;
+ConcatExpr  <~~ push(makeConcat(luaPosPair(takeAll()))) ~~>
+            = AddExpr [ ".." <~~ push(luaOpPos(up.pos)) ~~> ConcatExpr ] ;
 
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+AddExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> MulExpr } ;
 // The floor division // must be tried before the true division /.
-MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+MulExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
+            = UnaryExpr { ( "*" | "//" | "/" | "%" ) <~~ push(luaOpTok(up.in, up.pos)) ~~> UnaryExpr } ;
 
 UnaryExpr   = NotExpr | LenExpr | NegExpr | BNotExpr | PowExpr ;
 NotExpr     <~~ push(makeNot(pop())) ~~>
             = KwNot UnaryExpr ;
-LenExpr     <~~ push(makeLen(pop())) ~~>
-            = "#" UnaryExpr ;
-NegExpr     <~~ push(makeNeg(pop())) ~~>
-            = "-" UnaryExpr ;
+LenExpr     <~~ var t = pop(); push(makeLen(luaPosArg(t, pop()))) ~~>
+            = "#" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
+NegExpr     <~~ var t = pop(); push(makeNeg(luaPosArg(t, pop()))) ~~>
+            = "-" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
 // Unary bitwise not ~x (Lua 5.3+), guarded against '~=': the 64-bit complement.
-BNotExpr    <~~ push(makeBNot(pop())) ~~>
-            = ( "~" !"=" ) UnaryExpr ;
+BNotExpr    <~~ var t = pop(); push(makeBNot(luaPosArg(t, pop()))) ~~>
+            = ( "~" !"=" ) <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ;
 // Exponentiation a ^ b: right associative (its right operand is a UnaryExpr, which
 // descends into PowExpr again) and binding tighter than the unary operators, so -2^2
 // is -(2^2) and 2^-1 is legal. The result is always a float, like in Lua.
-PowExpr     <~~ push(makePow(takeAll())) ~~>
-            = SuffixedExpr [ "^" UnaryExpr ] ;
+PowExpr     <~~ push(makePow(luaPosPair(takeAll()))) ~~>
+            = SuffixedExpr [ "^" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll(), up.in)) ~~>
             = Primary { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
-CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
-            = "(" [ ExprList ] ")" ;
+// A call runs at the line its arguments open on (lua's funcargs): `at`, the
+// position the empty token ahead of them records (luaOpPos).
+CallSfx     <~~ var it = takeAll(); push({kind:"call", at: it[0], args: it.slice(1)}) ~~>
+            = "" <~~ push(luaOpPos(up.pos)) ~~> "(" [ ExprList ] ")" ;
 // f "s" / f [[s]] / f {t}: a call whose single argument is a string literal or a table
 // constructor may be written without the parentheses.
-StrCallSfx  <~~ push({kind:"call", args: takeAll()}) ~~>
-            = LuaDq | LuaSq | LongString ;
-TblCallSfx  <~~ push({kind:"call", args: takeAll()}) ~~>
-            = TableLit ;
+StrCallSfx  <~~ var it = takeAll(); push({kind:"call", at: it[0], args: it.slice(1)}) ~~>
+            = "" <~~ push(luaOpPos(up.pos)) ~~> ( LuaDq | LuaSq | LongString ) ;
+TblCallSfx  <~~ var it = takeAll(); push({kind:"call", at: it[0], args: it.slice(1)}) ~~>
+            = "" <~~ push(luaOpPos(up.pos)) ~~> TableLit ;
 // obj:m(args): sugar for obj.m(obj, args) - the receiver is passed as the first arg.
 // The same parenthesis-free argument forms apply (obj:m "s", obj:m {t}).
-MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, args: it.slice(1)}) ~~>
-            = ":" MethodName ( "(" [ ExprList ] ")" | LuaDq | LuaSq | LongString | TableLit ) ;
+MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, at: it[1], args: it.slice(2)}) ~~>
+            = ":" MethodName "" <~~ push(luaOpPos(up.pos)) ~~> ( "(" [ ExprList ] ")" | LuaDq | LuaSq | LongString | TableLit ) ;
 MethodName  <~~ push({mname: up.in}) ~~>
             = Id ;
 DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
@@ -596,6 +598,53 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaChunkId(name) {
         if (name.length + 1 <= 60) { return name }
         return "..." + name.substring(name.length - 56)
+    }
+
+    // ----- Operation positions -----
+    // An error is positioned at the line of the OPERATION that raised it, as lua 5.5
+    // does - an operator's line, or for a call the line its arguments open on -
+    // not at the line of its statement. Each operation's position is captured at
+    // parse time (luaOpPos) and set as the running position once its operands
+    // have been evaluated (luaPosArg wraps the last operand). Twin of the same
+    // helpers in lua-to-llvm-ir.abnf.
+    function luaOpPos(pos) { return {here: luaChunkId(c.curFile()) + ":" + c.lineOf(pos) + ": "} }
+    function luaOpTok(op, pos) { return {op: op, here: luaOpPos(pos).here} }
+    function luaPosArg(t, rec) {
+        var here = rec.here
+        return function() {
+            var v = anytype
+            v = t()
+            luaPos = here
+            return v
+        }
+    }
+    // A binary fold's items with each operator record reduced to its operator and
+    // its right operand wrapped; == and ~= cannot raise.
+    function luaPosOps(items) {
+        var out = [items[0]]
+        for (var i = 1; i + 1 < items.length; i += 2) {
+            var op = items[i].op
+            out.push(op)
+            out.push(op == "==" || op == "~=" ? items[i + 1] : luaPosArg(items[i + 1], items[i]))
+        }
+        return out
+    }
+    // A comparison is positioned where its right operand ENDS (lua emits it after
+    // reading that operand and fixes no line), which is where the fold ends.
+    function luaPosCmp(items, pos) {
+        var rec = luaOpPos(pos)
+        var out = [items[0]]
+        for (var i = 1; i + 1 < items.length; i += 2) {
+            var op = items[i].op
+            out.push(op)
+            out.push(op == "==" || op == "~=" ? items[i + 1] : luaPosArg(items[i + 1], rec))
+        }
+        return out
+    }
+    // [l, rec, r] of a right-associative operator (.., ^) as [l, r].
+    function luaPosPair(items) {
+        if (items.length < 3) { return items }
+        return [items[0], luaPosArg(items[2], items[1])]
     }
 
     // A no-op statement thunk for an empty ';' statement.
@@ -1480,6 +1529,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var out = anytype // A member chain hops between types.
         if (s.kind == "call") {
             var argv = evalList(s.args)
+            luaPos = s.at.here
             var fv = anytype // The callee, truncated to one value.
             fv = luaFirst(cur)
             if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value") }
@@ -1491,9 +1541,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var fn = anytype // The looked-up method value.
             var recv = anytype // The receiver, truncated to one value.
             recv = luaFirst(cur)
+            luaPos = s.at.here
             fn = luaIndex(recv, s.name)
             if (typeof fn != "function") { fail("attempt to call method '" + s.name + "' (a " + luaType(fn) + " value)") }
             var margv = evalList(s.args)
+            luaPos = s.at.here
             if (tail && luaCallPos.length > 0) { luaTail = true }
             luaCallName = cname
             out = fn.apply(undefined, [recv].concat(margv))
@@ -1642,6 +1694,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // trailing '...' parameter makes it variadic: the arguments beyond the named ones are
     // kept in the frame under the name '...', where makeVararg reads them.
     var closureCount = 0
+    // A function that runs off its end returns NO value, which select('#', f())
+    // and print(f()) can tell from a nil. Nothing writes into a multi-value's
+    // array, so one empty box serves every such return.
+    var LUA_NONE = mkMulti([])
     function makeClosure(params, bodyT) {
         var env = scopes.slice()
         var nfix = params.length
@@ -1672,7 +1728,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             while (luaCallPos.length > sp) { luaCallPos.pop() }
             luaPos = ep
             scopes = saved
-            return (r != undefined && r.isRet) ? r.v : undefined
+            return (r != undefined && r.isRet) ? r.v : LUA_NONE
         }
     }
     function makeFuncExpr(bodyT, plist) {
@@ -1990,6 +2046,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // with no position, so it pushes its caller's and runs f with luaPos "". The
     // scope chain and the call positions are cut back to their entry state, because
     // a throw skips every frame's own restore on the way out.
+    // xpcall's message handler, which runs where the error was raised: an error
+    // inside it is lua's LUA_ERRERR, whose error object is this fixed text.
+    function luaHandle(handler, ev) {
+        var out = anytype
+        try {
+            out = luaFirst(handler(ev))
+        } catch (e) {
+            if (!excIsUser(e)) { throw e }
+            out = "error in error handling"
+        }
+        return out
+    }
     function luaProtect(f, args, handler) {
         var savedChain = scopes.slice()
         var depth = luaCallPos.length
@@ -2011,7 +2079,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             scopes = savedChain.slice()
             var ev = anytype // The error object, or what the handler made of it.
             ev = e.v
-            if (handler !== undefined) { ev = luaFirst(handler(ev)) }
+            if (handler !== undefined) { ev = luaHandle(handler, ev) }
             // lua 5.5 reports a nil error object as this string.
             if (ev === undefined || ev === null) { ev = "<no error object>" }
             out = mkMulti([false, ev])
