@@ -84,6 +84,7 @@ class Main {
         S38.run(); // SECTION-CALL 38
         S39.run(); // SECTION-CALL 39
         S40.run(); // SECTION-CALL 40
+        S41.run(); // SECTION-CALL 41
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2431,4 +2432,39 @@ class S40 {
         Main.check("ds1", ("" + Double.sum(d[0], d[1])).equals("3.75") && ("" + Double.max(d[0], d[1])).equals("2.25") && ("" + Double.min(d[0], d[1])).equals("1.5"));
         Main.check("ds2", ("" + Double.min(d[2], d[3])).equals("-0.0") && ("" + Double.max(d[2], d[3])).equals("0.0"));
     }
+}
+
+// ===== SECTION 41: a lambda takes its functional interface's primitive types =====
+//
+// A lambda stored as a functional interface sees its parameters as that
+// interface's parameter types and answers its result type (JLS 15.27.3):
+// DoubleUnaryOperator's x -> x + 1 applied to 2 is 3.0, IntToDoubleFunction's
+// i -> i / 2 applied to 3 is 1.0. A declared one-method interface works the
+// same, wherever it is declared, in a local, a field, a parameter or a return.
+// The java.util.function types are spelled qualified: this file imports
+// nothing. Every expected string is java 24.0.2's output.
+class S41 {
+    static S41Fn field;
+    static double use(S41Fn f, int v) { return f.go(v); }
+    static java.util.function.IntToDoubleFunction maker() { return i -> i * 3; }
+    static void run() {
+        int[] k = { 2, 3, 1000000 };
+        java.util.function.DoubleUnaryOperator op = x -> x + 1;
+        java.util.function.DoubleUnaryOperator one = x -> 1;
+        Main.check("sm1", ("" + op.applyAsDouble(k[0])).equals("3.0") && ("" + one.applyAsDouble(k[0])).equals("1.0"));
+        java.util.function.DoubleBinaryOperator div = (a, b) -> a / b;
+        java.util.function.IntToDoubleFunction half = i -> i / 2;
+        Main.check("sm2", ("" + div.applyAsDouble(k[0], k[1])).equals("0.6666666666666666") && ("" + half.applyAsDouble(k[1])).equals("1.0"));
+        java.util.function.LongUnaryOperator sq = x -> x * x;
+        java.util.function.IntUnaryOperator inc = x -> x + 1;
+        Main.check("sm3", sq.applyAsLong(k[2]) == 1000000000000L && ("" + inc.applyAsInt(k[0])).equals("3"));
+        S41Fn f = x -> x / 4;
+        field = x -> x + 0.5;
+        Main.check("sm4", ("" + f.go(k[1])).equals("0.75") && ("" + use(x -> x * 2, k[1])).equals("6.0") && ("" + field.go(k[0])).equals("2.5"));
+        Main.check("sm5", ("" + maker().applyAsDouble(k[0])).equals("6.0") && ("" + f.twice(k[1])).equals("1.5"));
+    }
+}
+interface S41Fn {
+    double go(double x);
+    default double twice(double x) { return go(x) * 2; }
 }

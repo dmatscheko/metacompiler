@@ -362,8 +362,8 @@ CtorBody    <~~ push(makeCtorBody(takeAll())) ~~>
 CompactCtor <~~ push(makeCompactCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> Block ;
 // An abstract (or interface) method: a signature and no body.
-AbstractMethod <~~ jTyPop(); push({kind: "amethod", name: pop()}) ~~>
-            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
+AbstractMethod <~~ jTyPop(); push(makeAbstractM(takeAll())); jRetPop() ~~>
+            = Mods [ SkipAngle ] RetType Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
 
 Method      <~~ jTyPop(); jRetPop(); push(makeMethod(takeAll())) ~~>
             = Mods [ SkipAngle ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
@@ -4296,7 +4296,16 @@ HasStatic   = :script(~~
     // The walk-time record of declared types, shared with java-to-llvm-ir.abnf.
     include("lib/java-decltypes.js")
     // A value on its way into a slot of declared type ty (JLS 5.2).
-    function jConvTo(v, ty) { return jIsPrimTy(ty) ? jTypeAdopt(v, ty) : v }
+    function jConvTo(v, ty) { return jConvKnown(ty) ? jTypeAdopt(v, ty) : v }
+    // jIsConvTy, remembered per type once the walk has declared every interface.
+    var jConvTys = {}
+    function jConvKnown(ty) {
+        var k = jConvTys["$" + ty]
+        if (k !== undefined) { return k }
+        var r = jIsConvTy(ty)
+        if (jWalkDone) { jConvTys["$" + ty] = r }
+        return r
+    }
     // The write of a plain name, deciding local or field the way jSetVar does
     // and converting to that slot's type unless the value's static type vty
     // already is it. Answers the value stored.
@@ -4332,7 +4341,7 @@ HasStatic   = :script(~~
     }
     // Does a parameter list need jCallArgs' conversion at all?
     function jNeedsConv(ptys) {
-        for (var i = 0; i < ptys.length; i++) { if (jIsPrimTy(ptys[i])) { return true } }
+        for (var i = 0; i < ptys.length; i++) { if (jIsConvTy(ptys[i])) { return true } }
         return false
     }
     // A lambda or method reference assigned to a functional-interface variable
@@ -4367,12 +4376,27 @@ HasStatic   = :script(~~
             return v
         }
         if (typeof v != "function") { return v }
+        var sig = jSamSig(ty)
+        if (sig != null) { v = jSamConv(v, sig) }
         var base = ty
         var lt = base.indexOf("<")
         if (lt >= 0) { base = base.substring(0, lt) }
         var t = globalScope[base]
         if (t == undefined || t == null || t.__isiface !== true) { return v }
         return {__class: t, __sam: v}
+    }
+    // A closure that converts its arguments and its result to a jSamSig
+    // signature's primitive types around the call of f. Twin of emitSamConv in
+    // java-to-llvm-ir.abnf.
+    function jSamConv(f, sig) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) {
+                args.push(i < sig.ps.length && sig.ps[i] != "" ? jTypeAdopt(arguments[i], sig.ps[i]) : arguments[i])
+            }
+            var r = f.apply(undefined, args)
+            return sig.ret != "" ? jTypeAdopt(r, sig.ret) : r
+        }
     }
     function makeDo(condT, bodyT) {
         return function() {
@@ -4625,7 +4649,14 @@ HasStatic   = :script(~~
     // parameter types of m (a method or constructor record).
     function jCallArgs(m, args) {
         var np = m.params.length
-        if (!m.conv) { return jFixVarargs(m.vararg, np, args, "") }
+        // Decided at the first call after the walk, when an interface declared
+        // below the method is known too.
+        var conv = m.conv
+        if (conv === undefined) {
+            conv = m.ptys != undefined && jNeedsConv(m.ptys)
+            if (jWalkDone) { m.conv = conv }
+        }
+        if (!conv) { return jFixVarargs(m.vararg, np, args, "") }
         var tys = jMethodBoundTys(m)
         var a = jFixVarargs(m.vararg, np, args, np > 0 ? tys[np - 1] : "")
         var n = m.vararg ? np - 1 : np
@@ -4642,6 +4673,9 @@ HasStatic   = :script(~~
         if (jWalkDone) { m.btys = b }
         return b
     }
+    function makeAbstractM(items) {
+        return {kind: "amethod", name: items[1], ptys: items[2].ptys, ret: jRetTy()}
+    }
     function makeMethod(items) {
         var mods = items[0].mods
         var name = items[1]
@@ -4650,14 +4684,14 @@ HasStatic   = :script(~~
         var isStatic = false
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
         return {kind: "method", name: name, statik: isStatic, params: pl.params, ptys: pl.ptys, vararg: pl.vararg,
-                body: body, conv: jNeedsConv(pl.ptys)}
+                body: body}
     }
     // items = [name, {params}, {cbody}]; the cbody carries the optional explicit
     // this()/super() head separately from the rest of the body.
     function makeCtor(items) {
         var b = items[2]
         return {kind: "ctor", name: items[0], params: items[1].params, ptys: items[1].ptys, vararg: items[1].vararg,
-                body: b.cbody, head: b.head, conv: jNeedsConv(items[1].ptys)}
+                body: b.cbody, head: b.head}
     }
     // A record's compact constructor: no declared parameters - it is handed the
     // record components, and its body may reassign them.
@@ -4713,7 +4747,7 @@ HasStatic   = :script(~~
     // declaration's: `static float f = 16777217;` holds 1.6777216E7.
     function jFieldInit(initT, ty) {
         if (initT == null || initT == undefined) { return initT }
-        if (!jIsPrimTy(ty)) { return jArrTyped(initT, ty) }
+        if (!jIsConvTy(ty)) { return jArrTyped(initT, ty) }
         return function() { return jTypeAdopt(initT(), ty) }
     }
 
@@ -5188,7 +5222,7 @@ HasStatic   = :script(~~
             if (items[i].iext != undefined) { supers.push(items[i].iext) }
             else { members.push(items[i]) }
         }
-        jOvIface(name)
+        jOvIface(name, members)
         var cls = {__isclass: true, __isiface: true, __name: name, __abstract: []}
         globalScope[name] = cls
         var inherited = []

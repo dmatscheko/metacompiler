@@ -59,10 +59,11 @@ function jMethodTyOf(name) {
     return t
 }
 // The type a value written as `text` converts to on its way into a slot of
-// declared type ty, or "" when no conversion is needed: ty is not a
-// primitive, or the value's static type already is ty.
+// declared type ty, or "" when no conversion is needed: ty is neither a
+// primitive nor a functional interface with one (jSamSig), or the value's
+// static type already is ty.
 function jConvTy(ty, text) {
-    if (!jIsPrimTy(ty)) { return "" }
+    if (!jIsConvTy(ty)) { return "" }
     if (jExprTy(text) == ty) { return "" }
     return ty
 }
@@ -427,7 +428,62 @@ function jOvDeclare(name, members) {
     if (jOvCls["$" + name] == undefined) { jOvNames.push(name) }
     jOvCls["$" + name] = {sup: sup, ms: ms}
 }
-function jOvIface(name) { jOvIfaces["$" + name] = true }
+function jOvIface(name, members) {
+    jOvIfaces["$" + name] = true
+    var abs = []
+    for (var i = 0; i < members.length; i++) {
+        if (members[i].kind == "amethod" || members[i].kind == "abstract") { abs.push(members[i]) }
+    }
+    if (abs.length == 1) { jSamUser["$" + name] = abs[0].ptys.join(",") + ">" + abs[0].ret }
+}
+
+// ----- Functional interfaces with primitive positions -----
+//
+// A lambda stored in a slot of a functional interface type takes that
+// interface's parameter and result types: `DoubleUnaryOperator op = x -> x+1`
+// sees op.applyAsDouble(2) as x = 2.0 and answers 3.0, `IntToDoubleFunction
+// h = i -> i / 2` answers h.applyAsDouble(3) as 1.0. jSamSig is the signature
+// as "params>result", one entry per parameter, "" where nothing converts; null
+// when no position is a primitive. A declared interface with ONE abstract
+// method is read from its declaration (jOvIface), the java.util.function
+// primitive specializations from this table.
+var jSamUser = {}
+var jSamLib = {
+    "$DoubleUnaryOperator": "double>double", "$DoubleBinaryOperator": "double,double>double",
+    "$IntUnaryOperator": "int>int", "$IntBinaryOperator": "int,int>int",
+    "$LongUnaryOperator": "long>long", "$LongBinaryOperator": "long,long>long",
+    "$DoublePredicate": "double>", "$IntPredicate": "int>", "$LongPredicate": "long>",
+    "$DoubleFunction": "double>", "$IntFunction": "int>", "$LongFunction": "long>",
+    "$DoubleConsumer": "double>", "$IntConsumer": "int>", "$LongConsumer": "long>",
+    "$DoubleSupplier": ">double", "$IntSupplier": ">int", "$LongSupplier": ">long",
+    "$ToDoubleFunction": ">double", "$ToIntFunction": ">int", "$ToLongFunction": ">long",
+    "$ToDoubleBiFunction": ">double", "$ToIntBiFunction": ">int", "$ToLongBiFunction": ">long",
+    "$IntToDoubleFunction": "int>double", "$IntToLongFunction": "int>long",
+    "$LongToDoubleFunction": "long>double", "$LongToIntFunction": "long>int",
+    "$DoubleToIntFunction": "double>int", "$DoubleToLongFunction": "double>long",
+    "$ObjDoubleConsumer": ",double>", "$ObjIntConsumer": ",int>", "$ObjLongConsumer": ",long>"
+}
+function jSamSig(ty) {
+    if (ty.length > 2 && ty.substring(ty.length - 2) == "[]") { return null }
+    var b = jOvBare(ty)
+    var sig = jSamUser["$" + b]
+    if (sig == undefined) {
+        if (jOvCls["$" + b] != undefined || jOvIfaces["$" + b] == true) { return null }
+        sig = jSamLib["$" + b]
+        if (sig == undefined) { return null }
+    }
+    var parts = sig.split(">")
+    var ps = parts[0] == "" ? [] : parts[0].split(",")
+    var prim = jIsPrimTy(parts[1])
+    for (var i = 0; i < ps.length; i++) {
+        if (!jIsPrimTy(ps[i])) { ps[i] = "" } else { prim = true }
+    }
+    if (!prim) { return null }
+    return {ps: ps, ret: jIsPrimTy(parts[1]) ? parts[1] : ""}
+}
+// A declared type a stored value converts to: a primitive or a functional
+// interface with a primitive position.
+function jIsConvTy(ty) { return jIsPrimTy(ty) || jSamSig(ty) != null }
 // The candidates for `mname` in class cls: its own declarations, then each
 // superclass' that no nearer declaration overrides. null unless that is two or
 // more signatures of one kind (all static or all instance).

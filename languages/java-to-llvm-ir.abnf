@@ -338,8 +338,8 @@ InitBlock   <~~ push({kind: "initblock", body: pop()}) ~~>
 // A bodiless method declaration: `abstract int wheels();` in an abstract class, or a
 // method of an interface. It contributes no code - the overriding subclass supplies
 // it - so the tag drains what the header pushed and the member list never sees it.
-AbstractMethod <~~ jTyPop(); push(makeAbstract(takeAll())) ~~>
-            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
+AbstractMethod <~~ jTyPop(); push(makeAbstract(takeAll())); jRetPop() ~~>
+            = Mods [ SkipAngle ] RetType Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
 
 // A constructor. Its body is CtorBody rather than Block so the optional explicit
 // constructor invocation - super(args) / this(args), which Java only admits as the
@@ -3658,7 +3658,6 @@ HasStatic   = :script(~~
     // interface's DEFAULT methods are callable on it and `instanceof` answers true.
     function makeDecl(name, init, tyName, rawTy) {
         if (init == null) { init = makeConst(0) }
-        var sam = samOf(tyName)
         // A `double`/`float` declaration CONVERTS its initializer (JLS 5.2,
         // assignment conversion): `double d = 1;` holds 1.0, not 1. The RAW type
         // decides, not the base name: `double[] xs = {...}` declares an ARRAY and
@@ -3668,6 +3667,8 @@ HasStatic   = :script(~~
             var r = initT(b)
             b = r.b
             var v = declConvert(b, r.v, rawTy)
+            // Asked at emit time, when an interface declared below is known too.
+            var sam = samOf(tyName)
             if (sam != null) {
                 var sr = emitSam(b, v, tyName, sam)
                 b = sr.b
@@ -3690,7 +3691,41 @@ HasStatic   = :script(~~
         if (declW != undefined) { return callExt(b, "js_jvadopt", [v, emitNum(b, declW)]) }
         // A constant int fits a char too (JLS 5.2): `char c = 65;` holds 'A'.
         if (rawTy == "char") { return callExt(b, "js_jvchar", [v]) }
+        // A closure stored as a functional interface with a primitive position
+        // (jSamSig) converts its arguments and result around every call. A select,
+        // not a branch, because callers keep emitting into b: the wrapper is built
+        // for every value and kept only for a closure.
+        var sig = jSamSig(rawTy)
+        if (sig != null) {
+            var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [v]), emitStr(b, "function")]))
+            var scV = callExt(b, "js_scope_new", [curScopeV])
+            callExt(b, "js_scope_decl", [scV, emitStr(b, "__samf"), v])
+            return b.NewSelect(isFn, callExt(b, "js_closure", [handle(emitSamConv(sig)), scV]), v)
+        }
         return v
+    }
+    // The closure body jSamSig's conversion runs: the captured __samf called
+    // with its primitive arguments converted in place, its result converted on
+    // the way out. One per signature. Twin of jSamConv in java-interpreter.abnf.
+    var samConvs = {}
+    function emitSamConv(sig) {
+        var key = "$" + sig.ps.join(",") + ">" + sig.ret
+        var have = samConvs[key]
+        if (have != undefined) { return have }
+        var body = function(b) {
+            var argsP = curF.Params[1]
+            for (var i = 0; i < sig.ps.length; i++) {
+                if (sig.ps[i] == "") { continue }
+                callExt(b, "js_set", [argsP, emitNum(b, i), declConvert(b, callExt(b, "js_arg", [argsP, handle(i)]), sig.ps[i])])
+            }
+            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__samf")])
+            var rV = callExt(b, "js_call", [fV, hUndef, argsP])
+            b.NewRet(sig.ret == "" ? rV : declConvert(b, rV, sig.ret))
+            return deadBlock()
+        }
+        var idx = emitFunc([], body, false, null)
+        samConvs[key] = idx
+        return idx
     }
     function makeDeclSeq(items) {
         var ty = ""
@@ -4013,7 +4048,7 @@ HasStatic   = :script(~~
     // method. It contributes no code, but its NAME is what makes a one-method
     // interface functional (see samOf), so the marker is kept.
     function makeAbstract(items) {
-        return {kind: "abstract", name: items[1], params: items[2].params}
+        return {kind: "abstract", name: items[1], params: items[2].params, ptys: items[2].ptys, ret: jRetTy()}
     }
     function makeCtor(items) {
         var parts = splitCtorBody(items[2].cbody)
@@ -4829,7 +4864,7 @@ HasStatic   = :script(~~
     function makeInterfaceStmt(items) {
         jExitClass()
         var name = items[0]
-        jOvIface(name)
+        jOvIface(name, items.slice(1))
         var members = []
         var supers = []
         var meths = []
