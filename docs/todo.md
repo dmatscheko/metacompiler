@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-284** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-300** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,38 +66,26 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-259 python: `range` is a materialised list · P2 · PY · IN PROGRESS (PY worker, round 4) [V]
-`print(range(3))` prints `[0, 1, 2]` (CPython `range(0, 3)`); `range(3) == [0,1,2]` is
-True (CPython False); type, slicing to a range. A lazy range touches ~51 pyIsArr sites
-in python-rt.metajs, 28 Array.isArray in the interpreter, 29 js_py* externs and the
-emitter's for-loop: 400-600 lines. Cost against the value; implement or DECLINE.
+### T-290 python: `sorted`/`min`/`max` with `key=` / `reverse=` · P1 · PY · OPEN [V]
+Interpreter ignores the keyword (`sorted([3,1,2], key=lambda x:-x)` gives `[1, 2, 3]`);
+compiled halves abort "sorted(): key= and reverse= are not supported". CPython
+`[3, 2, 1]`; `max([1,2], key=lambda x:-x)` is 1. Also list.sort(key=, reverse=).
 
-### T-260 python: `"a" + 1` concatenates · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
-Gives `'a1'` in all engines (also `y[0] += 1` on a str); CPython `TypeError: can only
-concatenate str (not "int") to str`. Check `1 + "a"` (unsupported operand type(s)).
+### T-291 python: `sum()` of floats, `math.cbrt`, `int(x, base=)` keywords · P1 · PY · OPEN [V]
+`sum([0.1]*10)` is 0.9999999999999999 in all engines; CPython 3.12+ uses Neumaier
+compensated summation: 1.0. `math.cbrt` missing (AttributeError). `int("10", base=2)`
+drops the keyword (and other conversion builtins' keywords).
 
-### T-261 python: `print(..., end=, sep=)` · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
-Compiled halves print the kwargs dict (`{'end': ' | '}`), the interpreter ignores
-`end`. Also `sep`, `file=` (ignore or error), `flush`.
+### T-292 python: unpacking with the wrong count · P1 · PY · OPEN [V]
+`a, b = [1, 2, 3]`: compiled halves do not check; the interpreter aborts
+uncatchably "ValueError: cannot unpack 3 values into 2 targets". CPython catchable
+`too many values to unpack (expected 2, got 3)` / `not enough values to unpack
+(expected 2, got 1)`.
 
-### T-262 python: `dict(enumerate(s))` · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
-Prints `{}` compiled, `<enumerate object>` interpreter; CPython `{0: 'a', ...}`. Check
-`dict(zip(...))`, `list(enumerate(...))`, `dict(generator of pairs)`.
-
-### T-263 python: TypeErrors for objects that are not iterable / callable / sized · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
-`class C: pass`: `iter(C())` aborts the interpreter; `C()()` aborts "call of a non
-function value" in every leg; `len(C())` leaves no output line. CPython: `'C' object is
-not iterable` / `'C' object is not callable` / `object of type 'C' has no len()`.
-
-### T-264 python: `b"\N{BULLET}"` · P3 · PY · IN PROGRESS (PY worker, round 4) [V]
-Prints `[34]` in all engines; CPython `b'\\N{BULLET}'` (`\N` is not a bytes escape).
-
-### T-265 python: math functions and complex powers vs Apple libm last digit · P3 · PY · IN PROGRESS (PY worker, round 4) [V]
-Non-integral complex powers and the `math.*` transcendentals differ from CPython in
-the last digit on ~half of rows (Go/C pow, atan2, exp, log, cos, sin vs Apple's libm);
-native differs from llvm.Run on 14 rows of a power probe. CPython calls the platform
-libm: decide whether matching it is possible (port Apple's algorithms? no source) or
-DECLINE with the measurement.
+### T-294 python: subclasses of builtins; `bytes.decode` · P2 · PY · OPEN [V]
+`class S(str)` / `class L(list)` / `class I(int)`: `len(S("ab"))` aborts, `s.upper()`
+AttributeError. `bytes.decode()` is "unknown list method" (bytes are lists - value
+model, see T-170/T-259).
 
 ---
 
@@ -153,28 +141,24 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-250 ts: no Set, Map, Array.from · P1 · JS · IN PROGRESS (JS worker, round 3) [V]
-`new Set()` is a ReferenceError in both TS legs. Port js's jsbLoad
-(languages/lib/js-builtins.js), the "@@iterator" iteration probes and the Array
-function to the two TS grammars.
+### T-295 js: `yield*` answers the outer `return()` value · P1 · JS · OPEN [V]
+`function* d(){ yield* it }` where `it.return()` answers `{done:true}`: `g.next();
+g.return(7)` - node `{value: undefined, done: true}` (the delegate's return value); all
+four legs `{value: 7, done: true}`.
 
-### T-251 js: `Math.hasOwnProperty("abs")` · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
-"TypeError: Math.hasOwnProperty is not a function" in all legs; node true. (No
-Object.prototype chain; at least the builtin objects should answer it.)
+### T-296 js: Object.prototype methods on objects · P1 · JS · OPEN [V]
+`o.toString()`, `o.valueOf()`, `o.propertyIsEnumerable(k)` on plain objects, Math and
+JSON are "not a function" in all legs; node "[object Object]", "[object Math]".
+`typeof o.hasOwnProperty` is "undefined" (node "function"). `Object.hasOwnProperty
+("keys")` false (node true). `Object.getOwnPropertyNames(Array)` is
+`["length","name"]` (node adds prototype, isArray, from, of, fromAsync).
 
-### T-252 js: a class-instance iterator's `return()` is not called compiled · P1 · JS · IN PROGRESS (JS worker, round 3) [V]
-On a for-of `break` or array destructuring the run and native legs skip `return()`;
-the interpreter calls it (= node). The close sites (js-to-llvm-ir ~3697, 4290, 4376,
-5488 and js_jsiterclose) read with memGetExt / rt.getMember, which do not find class
-methods - use js_jsvget as the iteration probes do.
+### T-297 js: `class A extends Object {}` aborts the interpreter · P1 · JS · OPEN [V]
+"unknown superclass: Object"; the compiled legs accept it (= node).
 
-### T-253 ts: `delete (Math as any).sqrt` aborts in the interpreter · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
-"delete operator not implemented" for delete through a parenthesised cast.
-
-### T-254 js: "is not a function" for a comma/arrow callee · P3 · JS · IN PROGRESS (JS worker, round 3) [V]
-`(index => 1, "intro" in o)()` prints the raw callee; node
-`((intermediate value) , ("intro" in o))`. cpPrint declines on `=>`, function and
-object literals. Also `Object.keys(Array)` is `["from","of"]` (node `[]`).
+### T-298 ts: a stray "END SECTIONS" marker at tests/typescript-test-full.ts ~1065 · P3 · JS · OPEN [V]
+An older marker before the real end; remove it and check the ratchet harness still
+counts every section.
 
 ---
 
@@ -195,7 +179,8 @@ A String has no identity in the value model. Cost first; likely DECLINE unless c
 `String.valueOf`, `String.join`, `String.format` ("unknown name: String" interpreter,
 "unknown method 'valueOf'" compiled); the interpreter's String methods stop at length,
 charAt, equals, toString, substring, indexOf, isEmpty, toCharArray (`trim` fails);
-`getClass()`, `new Object()`, `StringBuilder` unknown. Oracle: java 24. Consider
+`getClass()`, `new Object()`, `StringBuilder` unknown; `s.toUpperCase()` raises "unknown
+String method" in all legs. Oracle: java 24. Consider
 java-util.java (compiled with the program) for StringBuilder.
 
 ### T-258 java: overload residuals · P3 · JV · OPEN [V]
@@ -225,6 +210,11 @@ compiled halves print an empty line.
 digits and its switch to exponent notation may not be the fixed window `csFloStr32`
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
+
+### T-299 csharp: `(int)t[1]` on a string is 0; -frozen aborts · P1 · CS · OPEN [V spec-only]
+`string t="AB"; (int)t[1]` prints 0 in every leg (C# spec: 66). On the same probe the
+-frozen interpreter aborts "MetaJS: variable 'a' has type string and cannot hold a
+number" while goja runs - a live goja-vs-frozen divergence.
 
 ---
 
@@ -302,7 +292,7 @@ interpreter and llvm.Run (swiftc `[3]`).
 # DA — Dart  (no dart here: spec-only)
 
 ### T-282 dart: the String member surface is tiny · P1 · DA · OPEN [V spec-only]
-`"ab".toUpperCase()` aborts in all three engines ("unknown String method:
+`"ab".toUpperCase()` (and `codeUnitAt`) aborts in all three engines ("unknown String method:
 toUpperCase"); only substring, indexOf, charAt, isEmpty are curated. Implement the
 dart:core String API (spec-only).
 
@@ -330,7 +320,7 @@ justifying the cell contradicts the spec).
 
 ### T-245 lua: the string library lacks `find`, `gsub` (and check `match`, `gmatch`, `format`, `byte`, `char`, `reverse`) · P1 · LUA · OPEN [V]
 `print(string.find("abc","b",1,true), string.gsub("aa","a","b"))`: "attempt to call a
-nil value" in all engines; lua `2 2 bb 2`. Lua patterns (not regex) - implement once,
+nil value" in all engines; lua `2 2 bb 2`. Also `string.byte`. Lua patterns (not regex) - implement once,
 shared by the interpreter and layer 2 if possible. Also `select` (and `select('#')`).
 
 ### T-246 lua: errors lack lua 5.5's variable-name suffix · P2 · LUA · OPEN [V]
@@ -387,38 +377,6 @@ Probe and round once.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-211 the C floor's case table is an older Unicode · P1 · CORE · Shared: runtime.c · IN PROGRESS (CORE worker, round 3) [V]
-Native only: `Character.toUpperCase` of U+019B, U+0264, U+1C89, U+1C8A differs from
-llvm.Run and java (U+019B → U+A7DC is Unicode 16). Regenerate the floor's table from
-the Unicode version the oracles use; check every language's upper/lower on the delta.
-
-### T-230 -frozen big-integer arithmetic costs millions of steps · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-The `-frozen` interpreter spends ~2-8M steps per operation on ~300-digit numbers; the
-ruby ratchet needs ~50M of its 1e8 per-call budget. Profile the frozen host's path for
-the shared bignum helpers (interp-core.js / runtime.metajs) and cut it.
-
-### T-238 tests/coro-poc/build.sh fails on main · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-`coro-floor.py: the C floor is missing 1 of the 17 coroutine pieces: gc_trace tag 16`.
-Bring the proof-of-concept's checker in line with the floor, or delete the PoC if it
-no longer earns its keep (it is referenced by T-172/T-173).
-
-### T-151 MetaJS: the lexer reads `"\f"` / `"\v"` as letters · P1 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-`"\f".charCodeAt(0)` is 102 in MetaJS. tools/metajs-lint guards known sites (it found
-two native-only defects this way), but the lexer in metajs-to-llvm-ir.abnf is the
-root. Fix it, refreeze (`./mec -freeze languages/metajs-to-llvm-ir.abnf && go build`,
-then `tests/gates.sh --freeze` must be a fixed point), regenerate every .ll, and
-decide whether the lint rule can go.
-
-### T-152 -frozen: `indexOf(x, from)` ignores `from` · P1 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-`"aXaXa".indexOf("a", 2)`: goja 2, -frozen 0 - a live goja-vs-frozen divergence. Fix
-the frozen host and add a matrix assertion that runs both engines.
-
-### T-153 goja-vs-frozen case mapping is not pinned · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-The ratchet rows that compared the two hosts' case mapping asserted single-character
-answers real languages contradict (`"ß".upper()` is `SS`) and were removed. Re-pin the
-agreement with oracle-correct full-mapping expectations (node: `"ß".toUpperCase()` is
-`"SS"`) in the metajs ratchet or a Go test; fix whichever host is wrong.
-
 ### T-154 replay-based generators repeat side effects in the interpreters · P2 · CORE + JS + PY · OPEN [V]
 js, typescript and python INTERPRETER halves drive generators and async functions by
 replaying the body, so effects before a `yield`/`await` run again: js
@@ -427,20 +385,6 @@ garbage. The compiled halves are correct. Manual 7.14 explains the mechanism. Fi
 real suspension for the interpreter halves that works under goja and -frozen, cost it,
 implement or write the costed design here and DECLINE.
 
-### T-155 -frozen needs ~12 GB for js ratchet part 1 · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-tests/js-test-full.js part 1 under the -frozen interpreter needs 11,907 MB where goja
-needs 99 MB; typescript's larger ratchet needs 2,398 MB, so it is js-path-specific.
-First suspect: `chainItems`, which retains every folded member chain for the whole
-run. This is why the js ratchet was split into three files.
-
-### T-156 `-trace` output is not reproducible run to run · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-Raw Go heap addresses leak into `decl`/`read` `val` fields when a scope object is
-rendered (32 of 170 lines in a python trace; ruby and php too). Fix in
-abnf/trace.go's value rendering.
-
-### T-157 `-callgraph` names a function by the minimum marker in its body · P3 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-`def f` on line 8 reads `L9` in every language. Use the definition's own position.
-
 ### T-158 frame elimination on arithmetic predicates · P3 · CORE + PY + RB · OPEN [V]
 `rtTag`'s −13.9% on python came from removing ONE scope frame from ONE predicate.
 The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
@@ -448,10 +392,44 @@ The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
 a measurement against a dead-code matched control (tests/bench.sh header). Never
 introduce a delegating wrapper on a hot path: that cost python +41% once.
 
-### T-159 `rtIsNil` could serve js, kotlin, php · P3 · CORE · IN PROGRESS (CORE worker, round 3) [V]
-`jvUndefOrNull` (js-rt), `ktIsNullish` (kotlin-rt), `phIsNull` (php-rt) are the same
-four lines. kotlin and php already import runtime.metajs; js imports only regex.js,
-so it would pay a first import plus seven `rtk*` hooks - measure first.
+### T-284 full case mapping (`"ß".upper()` is `SS`) · P2 · CORE · OPEN [V]
+Hosts, Go twins and the floor implement the simple per-rune mapping. Full mapping
+(SpecialCasing + Final_Sigma) natively in C, then per language: python/ruby/swift/
+kotlin/java/js want full, C#/Go want simple. metajs cm03-cm05 and cm08 assert the
+simple answer node contradicts - correct them with the change.
+
+### T-285 -frozen js memory, remainder · P3 · CORE · OPEN [V]
+js-test-full.js part 1 under -frozen still needs 5.3 GB: a released handle-table slot
+is never reused (by design, so a failed analysis fails loudly), and InGen rescans the
+whole prefix per call. Decide slot reuse, or make InGen incremental.
+
+### T-286 -callgraph: a definition's line in the other languages · P3 · CORE · OPEN [V]
+js, ts, metajs, java, kotlin, go, lua and the rest still name a definition by its
+body's line: their markers are `up.pos`, the END of the node. Needs the engine to
+expose a tag's start position (`up.start`, past whitespace) in compiler.go and
+frozen.go; that also changes -trace/-why line attribution.
+
+### T-287 layer 2 `rtABigDivMag` binary-searches each quotient limb · P3 · CORE · OPEN [V]
+The interpreters now estimate the limb (magQuotEst); runtime.metajs's native twin
+still searches. Port the estimate and bench.
+
+### T-288 js-to-llvm-ir under goja turns a lone `\uD800` literal into U+FFFD · P1 · CORE · OPEN [V]
+`u === "\uD800A\uDC00"` is false under goja and natively, true under -frozen: the
+literal is handed to Go as a UTF-8 string. A goja-vs-frozen divergence in the
+emitted module. Carry lone surrogates through the goja bridge (WTF-8).
+
+### T-289 native `d_asin` loses precision near 1 · P1 · CORE · Shared: runtime.c · OPEN [V]
+`1 - x*x` cancels (Go fuses it into an FMA on arm64): native math.asin is off by up to
+907 ulps near 1; run vs native differ on 95/150 rows. `(1-x)*(1+x)` avoids it. Repro:
+python `math.asin(x/(1+x))` for x = 37.9365... gives 1.3436684803445726, CPython
+...729. Check d_acos and the other d_* for the same shape.
+
+### T-293 correctly rounded transcendentals · P3 · CORE · OPEN [V]
+CPython (Apple libm) and MRI are correctly rounded on exp/log/pow and nearly so on
+sin/cos/atan/atan2; our Go-port legs are 1-9 ulps off on many rows (python T-265,
+ruby T-229 declined for this reason). Design: CORE-MATH-style double-double with a
+Ziv rounding test, one MetaJS module (interpreter + layer 2) + Go port + runtime.c
+d_*. Cost it; implement or DECLINE.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -602,6 +580,28 @@ T-198 kotlin: `String.toDouble()` accepts a numeric prefix — DONE b38a051
 T-100 dart: an extension on `int` — DONE bc2c547 (spec-only)
 T-101 dart: function-type subtyping — DONE bc2c547 (spec-only)
 T-102 dart: chained `x as T is T` — DONE bc2c547 (spec: one typeTest/typeCast per relationalExpression; checks rewritten with parentheses)
+T-151 MetaJS: the lexer reads `"\f"` / `"\v"` as letters — DONE 142cd62 (metajs-lint string-escape rule removed)
+T-152 -frozen: `indexOf(x, from)` ignores `from` — DONE eb884bb
+T-153 goja-vs-frozen case mapping is not pinned — PARTIAL 2bd797d (lone surrogates; goja vs -frozen pinned on every BMP code point); full mapping is T-284
+T-155 -frozen needs ~12 GB for js ratchet part 1 — PARTIAL bafe930 (15.5 GB → 5.3 GB); rest is T-285
+T-156 `-trace` output is not reproducible run to run — DONE 162be32
+T-157 `-callgraph` names a function by the minimum marker in its body — PARTIAL ca0ee0e (python, ruby, php); rest is T-286
+T-159 `rtIsNil` could serve js, kotlin, php — DONE 7a63320 (kotlin, php); js DECLINED: importing runtime.metajs costs js-rt.ll +16k lines, binary +12%, bench +0.73% to save four lines
+T-211 the C floor's case table is an older Unicode — DONE a366e01 (Go unicode.CaseRanges, Unicode 17)
+T-230 -frozen big-integer arithmetic costs millions of steps — DONE 997ee54 (interpreters' magDivMod; layer 2 rtABigDivMag is T-287)
+T-238 tests/coro-poc/build.sh fails on main — DONE 1e843dc
+T-260 python: `"a" + 1` concatenates — DONE 414fb7d
+T-261 python: `print(..., end=, sep=)` — DONE 7830d84
+T-262 python: `dict(enumerate(s))` — DONE 1b911f8
+T-263 python: TypeErrors for objects that are not iterable / callable / sized — DONE d64ca37
+T-264 python: `b"\N{BULLET}"` — DONE eb828fd
+T-259 python: `range` is a materialised list — DECLINED: a new value kind through 53 pyIsArr + 32 Array.isArray sites and the shared *jsArray paths, to fix only repr/==/type; unblock with a value-model decision for non-list sequences (tuple, bytes, range together)
+T-265 python: math functions and complex powers vs Apple libm last digit — DECLINED: Apple libm is correctly rounded on 780/780 rows of exp/log/pow (our Go-port legs: pow 44/150) - matching it means correctly-rounded functions (CORE-MATH style), not a port; T-293 tracks that design. Overflow/domain errors fixed in 4f8b86e
+T-250 ts: no Set, Map, Array.from — DONE 107c693
+T-251 js: `Math.hasOwnProperty("abs")` — DONE ab15b93
+T-252 js: a class-instance iterator's `return()` is not called compiled — DONE 02cb79d
+T-253 ts: `delete (Math as any).sqrt` aborts in the interpreter — DONE b1b9f75
+T-254 js: "is not a function" for a comma/arrow callee — DONE 4cfd788 (ASI-separated and keyword-statement bodies declined)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
