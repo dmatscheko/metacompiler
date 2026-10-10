@@ -2454,6 +2454,20 @@ int si_cmp(long a, long b) {
 	return 0;
 }
 
+/* An integer divide by zero dies, except in Go, where it is a run-time PANIC:
+ * deferred calls still run and js_gotop reports it with go's wording and exit
+ * status. go-to-llvm-ir.abnf sets the flag (js_gidivthrow) in a program whose
+ * divisions carry no js_gidivz pre-check, which is exactly a program that never
+ * calls recover() - so nothing can observe that the thrown value is go's text
+ * rather than a runtime.Error. */
+long js_throw(long v);
+long SI_DIVZ_THROWS = 0;
+long js_gidivthrow(void) { SI_DIVZ_THROWS = 1; return H_UNDEF; }
+void si_divzero(void) {
+	if (SI_DIVZ_THROWS) { js_throw(mk_cstr("runtime error: integer divide by zero")); }
+	die("integer divide by zero");
+}
+
 /* giArith: one binary arithmetic or bitwise operator, evaluated at the result
  * type's full width and wrapped to it. `op` is a string handle, because the
  * emitters pass the operator as a compile time constant string - one extern per
@@ -2482,13 +2496,13 @@ long si_apply(long code, long l, long r) {
 	else if (code == 1) { x = a - b; }
 	else if (code == 2) { x = a * b; }
 	else if (code == 3) {
-		if (b == 0) { die("integer divide by zero"); }
+		if (b == 0) { si_divzero(); }
 		if (u) { x = (long)(si_u(a, w) / si_u(b, w)); }
 		else if (a == (0 - 9223372036854775807 - 1) && b == -1) { x = a; }
 		else { x = a / b; }
 	}
 	else if (code == 4) {
-		if (b == 0) { die("integer divide by zero"); }
+		if (b == 0) { si_divzero(); }
 		if (u) { x = (long)(si_u(a, w) % si_u(b, w)); }
 		else if (a == (0 - 9223372036854775807 - 1) && b == -1) { x = 0; }
 		else { x = a % b; }

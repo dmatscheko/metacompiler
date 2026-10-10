@@ -1442,9 +1442,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // divisor is passed over (a float64 divided by zero is an infinity in Go).
     //
     // IT IS GATED ON usesRecover on purpose: js_gidivz is a LAYER-2 call in front of
-    // every division, which is measurably slower on a division-heavy loop. A program
-    // that never writes `recover` dies on an unrecovered divide by zero either way
-    // (natively through the floor's die(), exit 1, rather than js_gotop's exit 2). The
+    // every division, +57% on tests/bench/mod.go. A program that never writes
+    // `recover` cannot tell the panic value apart, so there jsmain calls
+    // js_gidivthrow instead, which makes the floor itself THROW go's text: deferred
+    // calls still run and js_gotop reports it with go's wording and exit status. The
     // gate is the same shape usesF32 and usesComplex use: set while the tags WALK
     // (makeCall), long before any emit thunk runs.
     //
@@ -5144,6 +5145,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // deferred functions are running (nil outside one) and stops the unwinding.
         b = declBuiltin(b, "panic", "js_gopanic", null)
         b = declBuiltin(b, "recover", "js_gorecover", null)
+        // Without recover() no division carries the js_gidivz pre-check (emitDivZ).
+        if (!usesRecover) { callExt(b, "js_gidivthrow", []) }
         b = declBuiltin(b, "close", "js_gochan_close", null)
         // The identifier-spelled conversions - string(r), int(x), byte(x), ... - are
         // ordinary calls, so each gets a one-line function that hands its name and

@@ -2284,6 +2284,12 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-test.go", "-q", "-exe", "tests/go-abort.out"]
         },
         {
+            "name": "Go abort probe, integer divide by zero, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-divz-test.go", "-q", "-exe", "tests/go-abort-divz.out"]
+        },
+        {
             "name": "Java abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
