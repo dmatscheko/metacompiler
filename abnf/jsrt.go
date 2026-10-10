@@ -532,6 +532,9 @@ type jsrt struct {
 	// for every grammar that never compiles Python.
 	pyTypes     map[string]*jsObject
 	pyFuncNames map[interface{}]string
+	// pyFuncAttrTab holds a user function's own attributes (f.k = 4) as the
+	// Python dict f.__dict__ answers, keyed by the closure value.
+	pyFuncAttrTab map[interface{}]*jsObject
 	// pyBuiltinsMod is the ONE `builtins` module object of a run (len.__self__
 	// is it, so it cannot be minted afresh). abnf/jsrtpydesc.go.
 	pyBuiltinsMod *jsObject
@@ -15704,6 +15707,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pydel_attr": func(a []uint64) uint64 {
+			if isCallable(u(a[0])) {
+				name := rt.toString(u(a[1]))
+				d, i := rt.pyFuncAttrIdx(u(a[0]), name)
+				if i < 0 {
+					panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+						"'"+pyTypeName(rt, u(a[0]))+"' object has no attribute '"+name+"'")})
+				}
+				keys, vals, _ := dictParts(d)
+				keys.dropIdx()
+				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+				return 0
+			}
 			if _, _, isInst := pyInstance(u(a[0])); !isInst {
 				rt.pyNoDictAttr(u(a[0]), rt.toString(u(a[1])))
 			}
@@ -18317,6 +18333,16 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			return fn
 		}
 	}
+	// A function's own attributes, and the dict holding them.
+	if isCallable(obj) {
+		if d, i := rt.pyFuncAttrIdx(obj, name); i >= 0 {
+			_, vals, _ := dictParts(d)
+			return vals.elems[i]
+		}
+		if name == "__dict__" && pyTypeName(rt, obj) == "function" {
+			return rt.pyFuncAttrs(obj, true)
+		}
+	}
 	// A BOUND built-in method, so getattr(xs, "count")(1) is
 	// the 1 CPython answers rather than whatever getMember made of the name.
 	if rt.pyBuiltinAttr(obj, name) {
@@ -18386,8 +18412,63 @@ func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
 		cls.set(name, v)
 		return
 	}
+	if isCallable(obj) {
+		rt.pyFuncSetAttr(obj, name, v)
+		return
+	}
 	rt.pyNoDictAttr(obj, name)
 	rt.setMember(obj, name, v)
+}
+
+// pyFuncAttrs answers a user function's attribute dict, made on demand, or nil.
+// Twin of pyFnAttrs in languages/python-interpreter.abnf and
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyFuncAttrs(f interface{}, make bool) *jsObject {
+	if d, ok := rt.pyFuncAttrTab[f]; ok || !make {
+		return d
+	}
+	d := newJSObject()
+	d.set("__dict", true)
+	d.set("keys", &jsArray{})
+	d.set("vals", &jsArray{})
+	if rt.pyFuncAttrTab == nil {
+		rt.pyFuncAttrTab = map[interface{}]*jsObject{}
+	}
+	rt.pyFuncAttrTab[f] = d
+	return d
+}
+
+// pyFuncOwner: a bound method reads its function's attributes (C().m.k is C.m.k).
+func pyFuncOwner(f interface{}) interface{} {
+	if bi := pyBoundOf(f); bi != nil && bi.fn != nil {
+		return bi.fn
+	}
+	return f
+}
+
+// pyFuncAttrIdx answers the slot of a function attribute, or -1.
+func (rt *jsrt) pyFuncAttrIdx(f interface{}, name string) (*jsObject, int) {
+	d := rt.pyFuncAttrs(pyFuncOwner(f), false)
+	if d == nil {
+		return nil, -1
+	}
+	keys, _, _ := dictParts(d)
+	return d, rt.dictFind(keys, name)
+}
+
+// pyFuncSetAttr: only a plain function has a __dict__; a builtin or a bound
+// method refuses a new attribute with CPython's text.
+func (rt *jsrt) pyFuncSetAttr(f interface{}, name string, v interface{}) {
+	if tn := pyTypeName(rt, f); tn != "function" {
+		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+			"'"+tn+"' object has no attribute '"+name+"' and no __dict__ for setting new attributes")})
+	}
+	keys, vals, _ := dictParts(rt.pyFuncAttrs(f, true))
+	if i := rt.dictFind(keys, name); i >= 0 {
+		vals.elems[i] = v
+		return
+	}
+	dictAppend(keys, vals, name, v)
 }
 
 // pyNoDictAttr: a builtin value with no __dict (None, a number, a str, a list, a
@@ -19709,6 +19790,12 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		if _, ok := rt.pyFuncNames[obj]; ok {
 			return true
 		}
+	}
+	if isCallable(obj) {
+		if _, i := rt.pyFuncAttrIdx(obj, name); i >= 0 {
+			return true
+		}
+		return name == "__dict__" && pyTypeName(rt, obj) == "function"
 	}
 	if o, ok := obj.(*jsObject); ok {
 		_, has := o.props[name]

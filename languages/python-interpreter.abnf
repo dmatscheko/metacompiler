@@ -1788,6 +1788,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (typeof o == "function") {
             if (name == "__name__" || name == "__qualname__") { return true }
+            var fha = pyFnAttrs(pyFnOwner(o), false)
+            if (fha != null && dictFind(fha, name) >= 0) { return true }
+            if (name == "__dict__" && pyTypeOf(o).__name == "function") { return true }
             var bmk = pyBMFind(o)
             if (bmk >= 0) {
                 if (name == "__qualname__" || name == "__self__") { return true }
@@ -7428,6 +7431,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < ref.path.length - 1; i++) o = pathStep(o, ref.path[i])
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
+            if (typeof o == "function") { pyFnSetAttr(o, last.name, v); return }
             if (o === null || o === undefined || typeof o != "object") {
                 pyNoDictAttr(o, last.name)
                 fail("AttributeError: '" + last.name + "'")
@@ -7586,6 +7590,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < ref.path.length - 1; i++) { o = pathStep(o, ref.path[i]) }
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
+            if (typeof o == "function") {
+                var fa = pyFnAttrs(o, false)
+                var fi = fa == null ? -1 : dictFind(fa, last.name)
+                if (fi < 0) { pyRaise(pyMakeExc("AttributeError", ["'" + pyTypeOf(o).__name + "' object has no attribute '" + last.name + "'"])) }
+                listRemoveAt(fa.keys, fi)
+                listRemoveAt(fa.vals, fi)
+                fa.__idx = null
+                return
+            }
             pyNoDictAttr(o, last.name)
             scopePut(o, last.name, pyDeleted)
             return
@@ -8227,7 +8240,37 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                  "' and no __dict__ for setting new attributes"]))
         }
     }
+    // A user function's own attributes (f.k = 4) and its __dict__. A function
+    // value carries no properties of its own, so they live in a side table
+    // keyed by identity, as fnNames does. A builtin or a bound method has no
+    // __dict__ and refuses a new attribute, with CPython's text. Twin of
+    // rt.pyFuncAttrs in abnf/jsrt.go and pyFnAttrs in
+    // languages/lib/python-rt.metajs.
+    var pyFnAttrTab = []
+    function pyFnAttrs(f, make) {
+        for (var i = 0; i < pyFnAttrTab.length; i += 2) { if (pyFnAttrTab[i] === f) { return pyFnAttrTab[i + 1] } }
+        if (!make) { return null }
+        var d = newDict()
+        pyFnAttrTab.push(f)
+        pyFnAttrTab.push(d)
+        return d
+    }
+    // A bound method reads its function's attributes (C().m.k is C.m.k).
+    function pyFnOwner(f) {
+        var bm = pyBMFind(f)
+        if (bm >= 0 && pyBMTab[bm + 3] !== null) { return pyBMTab[bm + 3] }
+        return f
+    }
+    function pyFnSetAttr(f, name, v) {
+        var tn = pyTypeOf(f).__name
+        if (tn != "function") {
+            pyRaise(pyMakeExc("AttributeError", ["'" + tn + "' object has no attribute '" + name +
+                                                 "' and no __dict__ for setting new attributes"]))
+        }
+        dictSet(pyFnAttrs(f, true), name, v)
+    }
     function pySetAttr(o, name, v) {
+        if (typeof o == "function") { pyFnSetAttr(o, name, v); return }
         // An instance, the common case, pays no call.
         if (o === null || o === undefined || typeof o != "object" || o.__class == undefined) { pyNoDictAttr(o, name) }
         var cls = o.__class
@@ -8397,6 +8440,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // builtin functions are that module's members.
         if (typeof o == "function" && name == "__self__" && bfnCode(o) !== undefined) {
             return hostGlobals["builtins"]
+        }
+        if (typeof o == "function") {
+            var fa = pyFnAttrs(pyFnOwner(o), false)
+            var fi = fa == null ? -1 : dictFind(fa, name)
+            if (fi >= 0) { return fa.vals[fi] }
+            if (name == "__dict__" && pyTypeOf(o).__name == "function") { return pyFnAttrs(o, true) }
         }
         // CPython names the TYPE as well as the attribute: "'list' object has no
         // attribute 'nope'", not "'nope'". Both compiled halves say the long

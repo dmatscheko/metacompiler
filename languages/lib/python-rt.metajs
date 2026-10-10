@@ -1104,6 +1104,15 @@ function pyGetAttr(obj, name) {
         var fn = rtPairGet(pyBFnObjs, pyBFnNames, obj)
         if (fn !== undefined) { return fn }
     }
+    // A function's own attributes, and the dict holding them.
+    if (typeof obj == "function") {
+        var fad = pyFnAttrs(pyFnOwner(obj), false)
+        if (fad !== undefined) {
+            var fai = pyDictFind(fad["keys"], name)
+            if (fai >= 0) { return fad["vals"][fai] }
+        }
+        if (name == "__dict__" && pyTypeName(obj) == "function") { return pyFnAttrs(obj, true) }
+    }
     // A BOUND built-in method, so getattr(xs, "count")(1) answers as CPython
     // does. Ahead of pyGetMember because a dict literally has a "keys" property
     // holding its key ARRAY, and CPython's d.keys is the method.
@@ -1203,6 +1212,15 @@ function pySetAttr(obj, name, v) {
         obj[name] = v
         return v
     }
+    if (typeof obj == "function") {
+        var ftn = pyTypeName(obj)
+        if (ftn != "function") {
+            pyRaiseExc("AttributeError", "'" + ftn + "' object has no attribute '" + name +
+                       "' and no __dict__ for setting new attributes")
+        }
+        pyDictSet(pyFnAttrs(obj, true), name, v)
+        return v
+    }
     pyNoDictAttr(obj, name)
     if (pyIsObj(obj)) {
         obj[name] = v
@@ -1210,6 +1228,28 @@ function pySetAttr(obj, name, v) {
     }
     fail("cannot set '" + name + "' on a " + pyTypeName(obj))
     return v
+}
+
+// A user function's own attributes (f.k = 4), as the dict f.__dict__ answers,
+// in an identity-keyed side table: a function value carries no properties.
+// Twin of rt.pyFuncAttrs in abnf/jsrt.go and pyFnAttrs in
+// languages/python-interpreter.abnf.
+var pyFnAttrFns = []
+var pyFnAttrDicts = []
+function pyFnAttrs(f, make) {
+    var d = rtPairGet(pyFnAttrFns, pyFnAttrDicts, f)
+    if (d !== undefined || !make) { return d }
+    var nd = pyNewDict()
+    pyFnAttrFns.push(f)
+    pyFnAttrDicts.push(nd)
+    return nd
+}
+
+// A bound method reads its function's attributes (C().m.k is C.m.k).
+function pyFnOwner(f) {
+    var bm = pyBMFind(f)
+    if (bm >= 0 && pyBMTab[bm + 3] !== null) { return pyBMTab[bm + 3] }
+    return f
 }
 
 // A builtin value with no __dict (None, a number, a str, a list, a dict, a set)
@@ -3306,6 +3346,9 @@ function pyDHasAttr(obj, name) {
             if (name == "__name__" || name == "__qualname__" || name == "__self__") { return true }
             if (name == "__func__") { return pyBMTab[bmk + 3] !== null }
         }
+        var had = pyFnAttrs(pyFnOwner(obj), false)
+        if (had !== undefined && pyDictFind(had["keys"], name) >= 0) { return true }
+        return name == "__dict__" && pyTypeName(obj) == "function"
     }
     if (typeof obj != "object") { return false }
     if (Array.isArray(obj)) { return false }
@@ -5250,6 +5293,16 @@ function js_pysetattr(obj, name, v) {
 // 63); it drops the key AND its insertion-order entry, which is what keeps
 // keysOf, and therefore vars()/dir(), right after a delete.
 function js_pydel_attr(obj, name) {
+    if (typeof obj == "function") {
+        var dn = pyToStr(name)
+        var fd = pyFnAttrs(pyFnOwner(obj), false)
+        var fi = 0 - 1
+        if (fd !== undefined) { fi = pyDictFind(fd["keys"], dn) }
+        if (fi < 0) { pyRaiseExc("AttributeError", "'" + pyTypeName(obj) + "' object has no attribute '" + dn + "'") }
+        pyCRemoveAt(fd["keys"], fi)
+        pyCRemoveAt(fd["vals"], fi)
+        return undefined
+    }
     if (pyInstClassOf(obj) === null) { pyNoDictAttr(obj, pyToStr(name)) }
     if (obj === null || obj === undefined || typeof obj != "object") {
         fail("attribute deletion on a " + pyTypeName(obj))

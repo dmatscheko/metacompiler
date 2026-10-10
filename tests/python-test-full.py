@@ -2992,6 +2992,44 @@ def s44():
     check("cmod5", str(type(Mod44B())) == "<class '__main__.Mod44B'>" and str(int) == "<class 'int'>")
     check("cmod6", str(Mod44C) == "<class 'elsewhere.Mod44C'>" and Mod44C.__name__ == "Mod44C")
 
+# ===== SECTION 45: a function carries attributes of its own =====
+# f.k = v stores into the function's __dict__; a bound method reads its
+# function's attributes and, like a builtin, refuses a new one.
+class Fat45:
+    def m(self):
+        return 1
+def s45():
+    def f45():
+        f45.calls += 1
+        return f45.calls
+    f45.calls = 0
+    f45()
+    f45()
+    check("fat1", f45.calls == 2 and hasattr(f45, "calls") and getattr(f45, "calls") == 2)
+    setattr(f45, "tag", "x")
+    check("fat2", f45.tag == "x" and vars(f45) == {"calls": 2, "tag": "x"} and f45.__dict__["tag"] == "x")
+    del f45.tag
+    check("fat3", not hasattr(f45, "tag") and getattr(f45, "tag", "dflt") == "dflt")
+    msg = ""
+    try:
+        del f45.tag
+    except AttributeError as e:
+        msg = str(e)
+    check("fat4", msg == "'function' object has no attribute 'tag'")
+    Fat45.m.k = 5
+    check("fat5", Fat45().m.k == 5 and Fat45.m.k == 5)
+    msgs = []
+    for target in [len, Fat45().m]:
+        try:
+            target.k = 1
+        except AttributeError as e:
+            msgs.append(str(e))
+    check("fat6", msgs == ["'builtin_function_or_method' object has no attribute 'k' and no __dict__ for setting new attributes",
+                           "'method' object has no attribute 'k' and no __dict__ for setting new attributes"])
+    g = lambda: 0
+    g.n = 3
+    check("fat7", g.n == 3 and g() == 0)
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3038,5 +3076,6 @@ def main():
     s42() # SECTION-CALL 42
     s43() # SECTION-CALL 43
     s44() # SECTION-CALL 44
+    s45() # SECTION-CALL 45
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
