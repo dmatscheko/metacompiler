@@ -316,6 +316,9 @@ func jsvOwnKeys(v interface{}) []string {
 // languages/lib/js-rt.metajs and jsGopnKeys in both *-interpreter.abnf.
 func jsvGopnKeys(v interface{}) []string {
 	if !jsvIsFnLike(v) {
+		if o, isObj := v.(*jsObject); isObj {
+			return jsvErrGopn(o, jsvOwnKeys(v))
+		}
 		return jsvOwnKeys(v)
 	}
 	return append([]string{"length", "name"}, jsvOwnKeys(v)...)
@@ -1753,6 +1756,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if !isObj {
 				return false
 			}
+			if own, ok := jsvErrOwn(self, rt.toString(argAt(args, 0))); ok {
+				return own
+			}
 			_, has := self.props[rt.toString(argAt(args, 0))]
 			return has
 		}))
@@ -2319,14 +2325,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if !ok {
 			return jsHUndefined
 		}
-		msg := ""
 		// `new Error()` and `new Error(undefined)` both leave message "": the
 		// spec only assigns it when the argument is not undefined. null is NOT
-		// undefined, so `new Error(null).message` is "null".
+		// undefined, so `new Error(null).message` is "null". Without the
+		// assignment message is not an OWN property either (__errnm).
 		if v := u(a[1]); v != interface{}(jsUndef) {
-			msg = rt.jsvString(v)
+			rt.jsErrInit(self, rt.jsvString(v))
+		} else {
+			rt.jsErrInit(self, "")
+			self.props["__errnm"] = true
 		}
-		rt.jsErrInit(self, msg)
 		return jsHUndefined
 	}
 	m["js_jserrstr"] = func(a []uint64) uint64 {
@@ -2417,6 +2425,40 @@ func jsvErrHide(o *jsObject, ks []string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// jsvErrOwn answers whether k is an OWN property of an Error instance, for the keys
+// jsErrInit hides: node keeps `stack` and (when the constructor was given one)
+// `message` on the instance, and `name` on the prototype until the program writes
+// it. ok is false for any other key or object. Twins: jvErrOwn in
+// languages/lib/js-rt.metajs, jsErrOwn in both *-interpreter.abnf.
+func jsvErrOwn(o *jsObject, k string) (own bool, ok bool) {
+	h, marked := o.props["__errh"]
+	if !marked {
+		return false, false
+	}
+	switch k {
+	case "stack":
+		return true, true
+	case "message":
+		return o.props["__errnm"] != true, true
+	case "name":
+		return h != true, true
+	}
+	return false, false
+}
+
+// jsvErrGopn is Object.getOwnPropertyNames of an Error instance: node's own
+// non-enumerable `stack` and `message` first, then the enumerable own keys.
+func jsvErrGopn(o *jsObject, ks []string) []string {
+	if _, marked := o.props["__errh"]; !marked {
+		return ks
+	}
+	out := []string{"stack"}
+	if o.props["__errnm"] != true {
+		out = append(out, "message")
+	}
+	return append(out, ks...)
 }
 
 // jsvErrNameWrite: the program writes `name` on an Error instance, so from now on it

@@ -1949,6 +1949,16 @@ function s38(): void {
     ew.q = 1
     ew.name = "Q"
     check("err21", Object.keys(ew).join(",") === "q,name" && ("" + ew) === "Q: b" && ("message" in ew))
+
+    // OWN is not enumerable: node keeps `stack` and a given `message` on the instance
+    // and `name` on the prototype until the program writes it.
+    var hop = Object.prototype.hasOwnProperty
+    var eo = new Error(xs[0])
+    check("err22", !hop.call(eo, "name") && hop.call(eo, "message") && hop.call(eo, "stack"))
+    check("err23", Object.getOwnPropertyNames(eo).join(",") === "stack,message"
+        && Object.getOwnPropertyNames(new Error()).join(",") === "stack" && !hop.call(new Error(), "message"))
+    check("err24", Object.getOwnPropertyNames(m2).join(",") === "stack,message,code"
+        && hop.call(ew, "name") && Object.getOwnPropertyNames(ew).join(",") === "stack,message,q,name")
 }
 function* s38deleg(): Generator<number> { yield* [3, 4] }
 

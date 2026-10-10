@@ -2519,6 +2519,9 @@ NotFuncHead = :script(~~
                 if (fp !== undefined) { return fp["__keys"].indexOf("" + k) >= 0 }
             }
             if (typeof self != "object") { return false }
+            var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
+            eo = jsErrOwn(self, "" + k)
+            if (eo !== undefined) { return eo }
             return hasOwn(self, "" + k)
         }
     }
@@ -2534,7 +2537,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsGopnKeys(v) {
-        if (typeof v != "function") { return jsOwnKeys(v) }
+        if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
         var out = ["length", "name"]
         var ks = jsOwnKeys(v)
         for (var i = 0; i < ks.length; i++) { out.push(ks[i]) }
@@ -4912,7 +4915,24 @@ NotFuncHead = :script(~~
         scopePut(self, "message", m)
         scopePut(self, "stack", jsErrText(n, m))
         scopePut(self, "__errh", true)
+        if (msg === undefined) { scopePut(self, "__errnm", true) }
         return undefined
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsErrOwn(o, k) {
+        if (!hasOwn(o, "__errh")) { return undefined }
+        if (k == "stack") { return true }
+        if (k == "message") { return !hasOwn(o, "__errnm") }
+        if (k == "name") { return hasOwn(o, "__keys") && o["__keys"].indexOf("name") >= 0 }
+        return undefined
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsErrGopn(v, ks) {
+        if (v == undefined || v == null || typeof v != "object" || !hasOwn(v, "__errh")) { return ks }
+        var out = ["stack"]
+        if (!hasOwn(v, "__errnm")) { out.push("message") }
+        for (var i = 0; i < ks.length; i++) { out.push(ks[i]) }
+        return out
     }
     // Error.prototype.toString: "TypeError: x", the name alone when there is no
     // message, and the message alone when the name has been emptied.

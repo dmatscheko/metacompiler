@@ -1782,8 +1782,24 @@ function js_jserrinit(self, msg) {
     self["message"] = m
     self["stack"] = jvErrText(n, m)
     self["__errh"] = true
+    if (msg === undefined) { self["__errnm"] = true }
     jvErrN = 1
     return undefined
+}
+
+// Whether k is an OWN property of an Error instance, for the keys js_jserrinit hides:
+// node keeps `stack` and (when the constructor was given one) `message` on the
+// instance, and `name` on the prototype until the program writes it. Answers jvMiss
+// for any other key or object. Twin of jsvErrOwn in abnf/jsrtjsprint.go.
+function jvErrOwn(o, k) {
+    if (jvErrN == 0) { return jvMiss }
+    var h = anytype
+    h = o["__errh"]
+    if (h === undefined) { return jvMiss }
+    if (k == "stack") { return true }
+    if (k == "message") { return o["__errnm"] !== true }
+    if (k == "name") { return h !== true }
+    return jvMiss
 }
 
 // An Error instance's own key list without the non-enumerable three. Gated on
@@ -1881,6 +1897,9 @@ function js_jsobject() {
             if (fp !== undefined) { return fp[jvStr(k)] !== undefined }
         }
         if (!jvIsObj(self)) { return false }
+        var eo = anytype
+        eo = jvErrOwn(self, jvStr(k))
+        if (eo !== jvMiss) { return eo }
         return self[jvStr(k)] !== undefined
     }
     o["prototype"] = proto
@@ -2876,6 +2895,12 @@ function jvObjectGlobalMethod(name, args) {
         if (name == "getOwnPropertyNames" && jvIsCallable(src)) {
             out.push("length")
             out.push("name")
+        }
+        // An Error instance's own non-enumerable `stack` and `message` come first, as
+        // in node (jvErrOwn).
+        if (name == "getOwnPropertyNames" && jvIsObj(src) && jvErrOwn(src, "stack") === true) {
+            out.push("stack")
+            if (jvErrOwn(src, "message") === true) { out.push("message") }
         }
         var ks = jvOwnKeys(src)
         var i = 0
