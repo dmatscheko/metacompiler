@@ -642,7 +642,20 @@ NotPyKw     = :script(~~
         }
     })()
 ~~) ;
-TargetExpr  <~~ push({tb: pop()}) ~~> = EmptyTuple | Grouped | ListLit | StringLit | PyNum ;
+TargetExpr  <~~ push({tb: pop()}) ~~> = EmptyTuple | Grouped | ListLit | StringLit | PyNum | TargetAtom ;
+// `None.k = 1` and `{}.k = 1` parse (CPython raises AttributeError at run time), but
+// only with a suffix after the atom: `None = 1` stays a syntax error, as in CPython.
+TargetAtom  = ( None | True | False | EllipsisLit | DictLit | SetLit ) SfxAhead ;
+// Succeeds empty when the next character (after spaces) opens a suffix: . [ (
+SfxAhead    = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9) { i++ }
+        var ch = c.peek(i)
+        if (ch === 46 || ch === 91 || ch === 40) { return undefined }
+        return abnf.newToken("\x01no-suffix", 0)
+    })()
+~~) ;
 // The write side of a subscript takes the same expression LIST the reading IndexSfx does,
 // so `d[k1, k2] = v` writes the slot `d[(k1, k2)]` reads.
 TIndex      <~~ push({idx: pop()}) ~~>
@@ -2526,7 +2539,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // py_getvar, not js_scope_get: a name that `del` emptied has to raise here
         // too (an augmented assignment READS first), which is what abnf/jsrt.go's
         // scopeGet does for every read.
-        var o = pyGetVar(b, curScopeV, emitStr(b, ref.name))
+        var o = hUndef
+        if (ref.named) { o = pyGetVar(b, curScopeV, emitStr(b, ref.name)) }
+        else {
+            var rb = ref.basef(b)
+            b = rb.b
+            o = rb.v
+        }
         for (var i = 0; i < ref.path.length; i++) {
             var r = emitPathStep(b, o, ref.path[i])
             b = r.b
@@ -3298,7 +3317,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     pyDelVar(b, curScopeV, emitStr(b, ref.name))
                     continue
                 }
-                var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+                var o = hUndef
+                if (ref.named) { o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)]) }
+                else {
+                    var rb0 = ref.basef(b)
+                    b = rb0.b
+                    o = rb0.v
+                }
                 for (var j = 0; j < ref.path.length - 1; j++) {
                     var r = emitPathStep(b, o, ref.path[j])
                     b = r.b

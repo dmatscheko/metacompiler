@@ -3030,6 +3030,33 @@ def s45():
     g.n = 3
     check("fat7", g.n == 3 and g() == 0)
 
+# ===== SECTION 46: an atom as the base of an attribute target =====
+# `None.k = 1` parses and raises AttributeError at run time, as do the other
+# atoms; the read of an augmented target and `del` start from the atom too.
+def s46():
+    msgs = []
+    for k in range(6):
+        try:
+            if k == 0:
+                None.k = 1
+            elif k == 1:
+                True.k = 1
+            elif k == 2:
+                {}.k = 1
+            elif k == 3:
+                {1}.k = 1
+            elif k == 4:
+                del None.k
+            else:
+                None.k += 1
+        except AttributeError as e:
+            msgs.append(str(e))
+    nd = " and no __dict__ for setting new attributes"
+    check("atg1", msgs[0] == "'NoneType' object has no attribute 'k'" + nd and msgs[1] == "'bool' object has no attribute 'k'" + nd)
+    check("atg2", msgs[2] == "'dict' object has no attribute 'k'" + nd and msgs[3] == "'set' object has no attribute 'k'" + nd)
+    check("atg3", msgs[4] == "'NoneType' object has no attribute 'k'" + nd and msgs[5] == "'NoneType' object has no attribute 'k'")
+    check("atg4", len(msgs) == 6)
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3077,5 +3104,6 @@ def main():
     s43() # SECTION-CALL 43
     s44() # SECTION-CALL 44
     s45() # SECTION-CALL 45
+    s46() # SECTION-CALL 46
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

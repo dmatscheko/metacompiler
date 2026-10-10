@@ -523,7 +523,20 @@ NotPyKw     = :script(~~
 ~~) ;
 // A literal may be the seed too: `"a".__class__ = MyStr` and `(1).__class__ = MyInt` are
 // what CPython's suite uses to check that those attributes are read-only.
-TargetExpr  <~~ push({tb: pop()}) ~~> = EmptyTuple | Grouped | ListLit | StringLit | PyNumLit ;
+TargetExpr  <~~ push({tb: pop()}) ~~> = EmptyTuple | Grouped | ListLit | StringLit | PyNumLit | TargetAtom ;
+// `None.k = 1` and `{}.k = 1` parse (CPython raises AttributeError at run time), but
+// only with a suffix after the atom: `None = 1` stays a syntax error, as in CPython.
+TargetAtom  = ( None | True | False | Ellipsis | DictLit | SetLit ) SfxAhead ;
+// Succeeds empty when the next character (after spaces) opens a suffix: . [ (
+SfxAhead    = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9) { i++ }
+        var ch = c.peek(i)
+        if (ch === 46 || ch === 91 || ch === 40) { return undefined }
+        return abnf.newToken("\x01no-suffix", 0)
+    })()
+~~) ;
 // d[1, 1] = v: the subscript is an expression LIST, so a tuple index works.
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
@@ -7473,7 +7486,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function readRef(ref) {
         if (ref.path.length == 0) { return pyReadName(ref.name) }
         var o = anytype // The last step lands on the element itself.
-        o = getVar(ref.name)
+        o = ref.named ? getVar(ref.name) : ref.basef()
         for (var i = 0; i < ref.path.length; i++) o = pathStep(o, ref.path[i])
         return o
     }
@@ -7586,7 +7599,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyRaise(pyMakeExc("NameError", ["name '" + ref.name + "' is not defined"]))
         }
         var o = anytype
-        o = getVar(ref.name)
+        o = ref.named ? getVar(ref.name) : ref.basef()
         for (var i = 0; i < ref.path.length - 1; i++) { o = pathStep(o, ref.path[i]) }
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
