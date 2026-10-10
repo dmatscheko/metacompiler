@@ -301,6 +301,16 @@ CommandForm <~~ push(makeCall(takeAll())) ~~>
 // line) ends the search, and a body closed by an `end` / `}` is skipped when it
 // belonged to a def/class/module or a block. Only an argument opening with one of
 // those four characters is ambiguous, so nothing else pays for the scan.
+//
+// A walk-time local table cannot replace the scan: this guard decides the PARSE
+// (`x -1` is a different tree either way), tags run only after the parse, and a
+// guard may keep no state of its own because a backtracked alternative never
+// undoes it. The limit is the indentation: a def whose body is not indented,
+//     def f
+//     m = 1
+//     end
+// hides from the scan that its `m` is that def's local, so a later top-level
+// `m -1` (m a method) subtracts where MRI calls m(-1).
 NotLocalCmd = :script(~~
     (function() {
         var i = 0
