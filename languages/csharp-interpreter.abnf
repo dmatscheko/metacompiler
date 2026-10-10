@@ -1467,6 +1467,7 @@ KwLet       = "let" KwEnd ;
     // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
     // statement builders); C#-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
+    include("lib/csharp-overload.js")
 
     // The host names a program can see. Console is built here.
     hostGlobals["Console"] = {
@@ -5478,12 +5479,15 @@ KwLet       = "let" KwEnd ;
     // ----- overload resolution: constructors AND methods -----
     // ECMA-334 12.6.4 picks the applicable member whose parameter types best match the
     // argument types. There is no static type here, so the choice is made from the
-    // ARGUMENT VALUES, in two passes and in declaration order:
+    // ARGUMENT VALUES, in two passes:
     //
     //   1. a candidate whose arity matches EXACTLY (no defaults, no `params` tail)
-    //      and every one of whose declared parameter types the argument satisfies as
-    //      `is` does - which is the run-time type test ECMA-334 12.12.12 defines, and
-    //      is precisely what makes `new Ctr(4)` pick Ctr(int) over Ctr(double);
+    //      and each of whose declared parameter types the argument satisfies as `is`
+    //      does (ECMA-334 12.12.12) or reaches by an implicit numeric conversion -
+    //      tried MOST SPECIFIC FIRST (csxSigOrder, lib/csharp-overload.js), so the
+    //      first one that applies is the better function member: `new O("s")`
+    //      picks O(string) over O(object), F(i) with an int picks F(long) over
+    //      F(double);
     //   2. otherwise the first candidate whose arity accepts the count at all.
     //
     // The compiler half lowers exactly this, block for block, over js_csis - the same
@@ -5498,24 +5502,34 @@ KwLet       = "let" KwEnd ;
                 if (pi.dflts == undefined || pi.dflts[k] == null) { req = k + 1 }
             }
             var tys = []
+            var wid = []
             var typed = (pi.variadic < 0 && req == pi.params.length)
             for (k = 0; k < pi.params.length; k++) {
                 var t = (pi.ptypes != undefined && pi.ptypes[k] != undefined) ? pi.ptypes[k] : ""
                 tys.push(t)
+                wid.push(csxWidenOf(t))
                 if (t == "") { typed = false }
             }
-            sigs.push({n: pi.params.length, req: req, va: pi.variadic, tys: tys, typed: typed})
+            sigs.push({n: pi.params.length, req: req, va: pi.variadic, tys: tys, wid: wid, typed: typed})
         }
         return sigs
     }
-    function csPickCtor(sigs, args) {
+    // Does the argument v reach a parameter of type t: as `is` answers, or by an
+    // implicit numeric conversion from its own type (wid, csxWidenOf)?
+    function csArgFits(v, t, wid) {
+        if (csIsType(v, t)) { return true }
+        for (var j = 0; j < wid.length; j++) { if (csIsType(v, wid[j])) { return true } }
+        return false
+    }
+    function csPickCtor(sigs, args, ord) {
         var i
         var k
-        for (i = 0; i < sigs.length; i++) {
+        for (var oi = 0; oi < ord.length; oi++) {
+            i = ord[oi]
             var s = sigs[i]
             if (!s.typed || s.n != args.length) { continue }
             var ok = true
-            for (k = 0; k < s.n; k++) { if (!csIsType(args[k], s.tys[k])) { ok = false } }
+            for (k = 0; k < s.n && ok; k++) { if (!csArgFits(args[k], s.tys[k], s.wid[k])) { ok = false } }
             if (ok) { return i }
         }
         for (i = 0; i < sigs.length; i++) {
@@ -5525,14 +5539,22 @@ KwLet       = "let" KwEnd ;
         }
         return 0
     }
+    // The pass-1 order is taken at the first call, when every class - and so the
+    // whole csSupers hierarchy - has been built.
     function csCtorDispatch(cls) {
+        var ord = []
+        var ordDone = false
         return function() {
             var argv = []
             var args = []
             var i
             for (i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
             for (i = 1; i < argv.length; i++) { args.push(argv[i]) }
-            cls.__ctorFns[csPickCtor(cls.__ctorSigs, args)].apply(undefined, argv)
+            if (!ordDone) {
+                ord = csxSigOrder(cls.__ctorSigs, cls.__ctorSigs.length)
+                ordDone = true
+            }
+            cls.__ctorFns[csPickCtor(cls.__ctorSigs, args, ord)].apply(undefined, argv)
         }
     }
     // ----- METHOD overloads -----
@@ -5550,13 +5572,19 @@ KwLet       = "let" KwEnd ;
     // untouched - the base's member is itself a dispatcher over its own candidates, so
     // it re-resolves and a three-level chain needs nothing extra.
     function csMethodDispatch(fns, sigs, isStatic, baseFn) {
+        var ord = []
+        var ordDone = false
         return function() {
             var argv = []
             var args = []
             var i
             for (i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
             for (i = (isStatic ? 0 : 1); i < argv.length; i++) { args.push(argv[i]) }
-            var pick = csPickCtor(sigs, args)
+            if (!ordDone) {
+                ord = csxSigOrder(sigs, fns.length)
+                ordDone = true
+            }
+            var pick = csPickCtor(sigs, args, ord)
             if (pick >= fns.length) { return baseFn.apply(undefined, argv) }
             return fns[pick].apply(undefined, argv)
         }

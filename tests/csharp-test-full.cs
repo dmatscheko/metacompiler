@@ -2498,6 +2498,59 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s37f2", l == "B(leaf:y1)M(init5)L" && Program.S37Trace == "lagP");
         }
 
+        // ===== SECTION 38: the better function member (ECMA-334 12.6.4) =====
+        //
+        // Among the applicable overloads the one whose parameter types are the
+        // better conversion targets wins (12.6.4.3, 12.6.4.7), whatever the
+        // declaration order: O(string) over O(object) for a string, F(int) over
+        // F(long) over F(double) for an int, G(B) over G(A) over G(object) for a
+        // C : B, and an int argument reaches H(long) by an implicit conversion
+        // (10.2.3) where H(uint) does not apply. The same holds for constructors,
+        // instance methods and operators.
+        class S38A { }
+        class S38B : S38A { }
+        class S38C : S38B { }
+        class S38O
+        {
+            public string Tag;
+            public S38O(object o) { Tag = "object"; }
+            public S38O(string s) { Tag = "string"; }
+        }
+        static string S38F(double d) { return "double"; }
+        static string S38F(long l) { return "long"; }
+        static string S38F(int i) { return "int"; }
+        static string S38E(double d) { return "double"; }
+        static string S38E(long l) { return "long"; }
+        static string S38G(object o) { return "object"; }
+        static string S38G(S38A a) { return "A"; }
+        static string S38G(S38B b) { return "B"; }
+        static string S38H(uint u) { return "uint"; }
+        static string S38H(long l) { return "long"; }
+        static string S38K(object a, string b) { return "os"; }
+        static string S38K(string a, object b) { return "so"; }
+        static string S38K(string a, string b) { return "ss"; }
+        class S38V
+        {
+            public string M(object o) { return "object"; }
+            public string M(int i) { return "int"; }
+            public static string operator +(S38V a, object b) { return "V+object"; }
+            public static string operator +(S38V a, S38V b) { return "V+V"; }
+        }
+        static void S38()
+        {
+            int[] iv = { 3 };
+            long[] lv = { 3L };
+            double[] dv = { 3.5 };
+            string[] sv = { "s" };
+            Program.Check("s38b1", new S38O(sv[0]).Tag == "string" && new S38O(iv[0]).Tag == "object");
+            Program.Check("s38b2", Program.S38F(iv[0]) == "int" && Program.S38F(lv[0]) == "long" && Program.S38F(dv[0]) == "double"
+                && Program.S38E(iv[0]) == "long");
+            Program.Check("s38b3", Program.S38G(new S38C()) == "B" && Program.S38G(new S38A()) == "A" && Program.S38G(sv[0]) == "object");
+            Program.Check("s38b4", Program.S38H(iv[0]) == "long" && Program.S38K(sv[0], sv[0]) == "ss");
+            S38V v = new S38V();
+            Program.Check("s38b5", v.M(iv[0]) == "int" && v.M(sv[0]) == "object" && (v + v) == "V+V" && (v + sv[0]) == "V+object");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2537,6 +2590,7 @@ b";                                                   // verbatim keeps the newl
             Program.S35(); // SECTION-CALL 35
             Program.S36(); // SECTION-CALL 36
             Program.S37(); // SECTION-CALL 37
+            Program.S38(); // SECTION-CALL 38
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

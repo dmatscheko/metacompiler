@@ -1464,6 +1464,7 @@ KwLet       = "let" KwEnd ;
     // Shared emitter machinery (module, handle constants, externs, loopStack protocol,
     // expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
+    include("lib/csharp-overload.js")
 
     var feCount = 0 // Names hidden foreach counters.
 
@@ -5895,12 +5896,12 @@ KwLet       = "let" KwEnd ;
     // ----- constructor overload resolution -----
     // The twin of csCtorSigs / csPickCtor in languages/csharp-interpreter.abnf, and it
     // has to stay the twin: ECMA-334 12.6.4 is resolved from the ARGUMENT VALUES here
-    // (there is no static type model), in two passes and in declaration order -
+    // (there is no static type model), in two passes -
     //
     //   1. a candidate whose arity matches EXACTLY (no defaults, no `params` tail) and
-    //      every one of whose declared parameter types the argument satisfies as `is`
-    //      does (ECMA-334 12.12.12) - which is what makes `new Ctr(4)` pick Ctr(int)
-    //      over Ctr(double);
+    //      each of whose declared parameter types the argument satisfies as `is` does
+    //      (ECMA-334 12.12.12) or reaches by an implicit numeric conversion, tried
+    //      MOST SPECIFIC FIRST (csxSigOrder, lib/csharp-overload.js);
     //   2. otherwise the first candidate whose arity accepts the count at all.
     //
     // js_csis is the SAME extern the `is` operator lowers to, so this owes nothing to
@@ -5915,13 +5916,15 @@ KwLet       = "let" KwEnd ;
                 if (pi.dflts == undefined || pi.dflts[k] == null) { req = k + 1 }
             }
             var tys = []
+            var wid = []
             var typed = (pi.variadic < 0 && req == pi.params.length)
             for (k = 0; k < pi.params.length; k++) {
                 var t = (pi.ptypes != undefined && pi.ptypes[k] != undefined) ? pi.ptypes[k] : ""
                 tys.push(t)
+                wid.push(csxWidenOf(t))
                 if (t == "") { typed = false }
             }
-            sigs.push({n: pi.params.length, req: req, va: pi.variadic, tys: tys, typed: typed})
+            sigs.push({n: pi.params.length, req: req, va: pi.variadic, tys: tys, wid: wid, typed: typed})
         }
         return sigs
     }
@@ -5931,15 +5934,18 @@ KwLet       = "let" KwEnd ;
     // of N reaches this function as a js_pylen of N + off. Each candidate gets a chain
     // of blocks that falls through to the next one the moment a test fails; the last
     // fallback is candidate 0, which is what a call none of the tests accept gets.
-    // callBs[i] must already be terminated by its caller.
-    function csDispatchChain(b, sigs, off, callBs) {
+    // callBs[i] must already be terminated by its caller. The first `own` of sigs are
+    // the class' own candidates, the rest inherited (csxSigOrder).
+    function csDispatchChain(b, sigs, off, callBs, own) {
         var argsP = curF.Params[1]
         var nV = callExt(b, "js_pylen", [argsP])
         var i
         var k
         // Pass 1: an exact arity and every declared parameter type satisfied.
         var cur = b
-        for (i = 0; i < sigs.length; i++) {
+        var ord = csxSigOrder(sigs, own)
+        for (var oi = 0; oi < ord.length; oi++) {
+            i = ord[oi]
             var s = sigs[i]
             if (!s.typed) { continue }
             var nextB = curF.NewBlock("")
@@ -5952,9 +5958,15 @@ KwLet       = "let" KwEnd ;
             var tb = okB
             for (k = 0; k < s.n; k++) {
                 var tnext = curF.NewBlock("")
-                tb.NewCondBr(truthy(tb, callExt(tb, "js_csis", [callExt(tb, "js_arg", [argsP, handle(k + off)]),
-                                                                emitStr(tb, csIrType(s.tys[k]))])),
-                             tnext, nextB)
+                // The declared type, then each numeric type that widens to it.
+                var alts = [csIrType(s.tys[k])]
+                for (var w = 0; w < s.wid[k].length; w++) { alts.push(s.wid[k][w]) }
+                var argV = callExt(tb, "js_arg", [argsP, handle(k + off)])
+                for (var a = 0; a < alts.length; a++) {
+                    var missB = (a == alts.length - 1) ? nextB : curF.NewBlock("")
+                    tb.NewCondBr(truthy(tb, callExt(tb, "js_csis", [argV, emitStr(tb, alts[a])])), tnext, missB)
+                    tb = missB
+                }
                 tb = tnext
             }
             tb.NewBr(callBs[i])
@@ -5990,7 +6002,7 @@ KwLet       = "let" KwEnd ;
                 cb.NewBr(endB)
                 callBs.push(cb)
             }
-            csDispatchChain(b, sigs, 1, callBs)
+            csDispatchChain(b, sigs, 1, callBs, sigs.length)
             return endB
         }
     }
@@ -6026,7 +6038,7 @@ KwLet       = "let" KwEnd ;
                 cb.NewRet(callExt(cb, "js_call", [fV, hUndef, argsP]))
                 callBs.push(cb)
             }
-            csDispatchChain(b, sigs, off, callBs)
+            csDispatchChain(b, sigs, off, callBs, nOwn)
             return deadBlock()
         }
     }
