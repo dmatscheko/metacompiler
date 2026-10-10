@@ -4408,7 +4408,48 @@ function rbFloSimplest(a0, b0) {
     return rbFiniteRat(c * p1 + p0, c * q1 + q0)
 }
 
+// Complex's own surface. Twin of cpxMethod in ruby-interpreter.abnf, which
+// states the rules.
+var rbCpxUndefNames = ["round", "floor", "ceil", "truncate", "positive?", "negative?",
+                       "div", "divmod", "modulo", "remainder"]
+function rbCpxAbs(re, im) {
+    if (re == 0 || im == 0) {
+        var a = im
+        if (im == 0) { a = re }
+        if (a < 0) { a = -a }
+        if (Math.floor(a) == a) { return a }
+        return rbMkFlo(a)
+    }
+    return rbMkFlo(rbHypot(re, im))
+}
+
+function rbCpxMethod(t, name) {
+    var re = t["re"]
+    var im = t["im"]
+    if (name == "conjugate" || name == "conj") { return rbMkCpx(re, -im) }
+    if (name == "rect" || name == "rectangular") { return [re, im] }
+    if (name == "abs" || name == "magnitude") { return rbCpxAbs(re, im) }
+    if (name == "polar") { return [rbCpxAbs(re, im), rbMkFlo(Math.atan2(im, re))] }
+    if (name == "arg" || name == "angle" || name == "phase") { return rbMkFlo(Math.atan2(im, re)) }
+    if (name == "real?") { return false }
+    if (rbCpxUndefNames.indexOf(name) >= 0) {
+        rbRaiseErr("NoMethodError", "undefined method `" + name + "' for " + rbInspect(t) + ":Complex")
+    }
+    if (im != 0) {
+        var into = ""
+        if (name == "to_i" || name == "to_int") { into = "Integer" }
+        if (name == "to_f") { into = "Float" }
+        if (name == "to_r" || name == "rationalize") { into = "Rational" }
+        if (into != "") { rbRaiseErr("RangeError", "can't convert " + rbStr(t) + " into " + into) }
+    }
+    return undefined
+}
+
 function rbNumMethod(t, name, args) {
+    if (rbIsCpx(t)) {
+        var cv = rbCpxMethod(t, name)
+        if (cv !== undefined) { return cv }
+    }
     if (typeof t != "number" && rtTag(t, "__bint")) {
         var bm = rbABigMethod(t, name, args)
         if (bm !== undefined) { return bm }
@@ -4447,14 +4488,12 @@ function rbNumMethod(t, name, args) {
         if (rbIsCpx(t)) { return t }
         return rbMkCpx(x, 0)
     }
-    // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE: MRI says
-    // (2r/3r).abs is (2/3) and (3+4i).abs is 5.0.
+    // Rational#abs stays a RATIONAL (Complex#abs is rbCpxAbs).
     if (name == "abs" || name == "magnitude") {
         if (rbIsRat(t)) {
             if (t["n"] < 0) { return rbMkRat(0 - t["n"], t["d"]) }
             return t
         }
-        if (rbIsCpx(t)) { return rbMkFlo(rbHypot(t["re"], t["im"])) }
         if (rbIsFlo(t)) { return rbMkFlo(Math.abs(x)) }
         return Math.abs(x)
     }

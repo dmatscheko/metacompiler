@@ -884,3 +884,44 @@ func rubyFloSimplest(a, b float64) (jsRat, bool) {
 	}
 	return rubyFiniteRat(float64(c*p1)+p0, float64(c*q1)+q0)
 }
+
+// rubyCpxAbs is MRI's Complex#abs: with one part zero it is the other part's
+// own abs. Twin of cpxAbs in languages/ruby-interpreter.abnf.
+func rubyCpxAbs(t jsCpx) interface{} {
+	if t.re == 0 || t.im == 0 {
+		a := math.Abs(t.re + t.im)
+		if math.Floor(a) == a {
+			return a
+		}
+		return jsFlo{f: a}
+	}
+	return jsFlo{f: rubyHypot(t.re, t.im)}
+}
+
+// rubyCpxMethod is Complex's own surface. Twin of cpxMethod in
+// languages/ruby-interpreter.abnf, which states the rules.
+func (rt *jsrt) rubyCpxMethod(t jsCpx, name string) (interface{}, bool) {
+	switch name {
+	case "conjugate", "conj":
+		return jsCpx{re: t.re, im: -t.im}, true
+	case "rect", "rectangular":
+		return &jsArray{elems: []interface{}{t.re, t.im}}, true
+	case "abs", "magnitude":
+		return rubyCpxAbs(t), true
+	case "polar":
+		return &jsArray{elems: []interface{}{rubyCpxAbs(t), jsFlo{f: math.Atan2(t.im, t.re)}}}, true
+	case "arg", "angle", "phase":
+		return jsFlo{f: math.Atan2(t.im, t.re)}, true
+	case "real?":
+		return false, true
+	case "round", "floor", "ceil", "truncate", "positive?", "negative?", "div", "divmod", "modulo", "remainder":
+		rt.rubyRaiseErr("NoMethodError", "undefined method `"+name+"' for "+rt.rubyInspect(t)+":Complex")
+	}
+	if t.im != 0 {
+		into := map[string]string{"to_i": "Integer", "to_int": "Integer", "to_f": "Float", "to_r": "Rational", "rationalize": "Rational"}[name]
+		if into != "" {
+			rt.rubyRaiseErr("RangeError", "can't convert "+rt.rubyStr(t)+" into "+into)
+		}
+	}
+	return nil, false
+}

@@ -5676,6 +5676,11 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			return out, true
 		}
 	}
+	if c, isCpx := t.(jsCpx); isCpx {
+		if out, ok := rt.rubyCpxMethod(c, name); ok {
+			return out, true
+		}
+	}
 	x := rubyToF(t)
 	_, isInt := t.(float64)
 	switch name {
@@ -5713,17 +5718,13 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 			return c, true
 		}
 		return jsCpx{re: x, im: 0}, true
-	// Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE:
-	// (2r/3r).abs is (2/3) and (3+4i).abs is 5.0.
+	// Rational#abs stays a RATIONAL (Complex#abs is rubyCpxAbs).
 	case "abs", "magnitude":
 		if r, ok := t.(jsRat); ok {
 			if r.n < 0 {
 				return jsRat{n: -r.n, d: r.d}, true
 			}
 			return r, true
-		}
-		if c, ok := t.(jsCpx); ok {
-			return jsFlo{f: rubyHypot(c.re, c.im)}, true
 		}
 		if _, ok := t.(jsFlo); ok {
 			return jsFlo{f: math.Abs(x)}, true

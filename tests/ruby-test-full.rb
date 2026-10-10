@@ -2954,6 +2954,38 @@ def s55
   check("df55d", defined?(p) == "local-variable" && p == 5)
 end
 
+# ===== SECTION 56: Complex is not a real number =====
+# The real-only conversions raise RangeError unless the imaginary part is zero,
+# the ordering methods Complex undefines raise NoMethodError, and conjugate /
+# rect / polar / arg exist. abs with one part zero keeps the other part's type.
+# Every right-hand side is /usr/bin/ruby 2.6.10's own answer (its NoMethodError
+# message is compared up to the did_you_mean suffix). THIS SECTION RUNS UNDER
+# REAL RUBY.
+def s56e
+  begin
+    return yield.inspect
+  rescue RangeError => e
+    return "RE " + e.message
+  rescue NoMethodError => e
+    return "NE " + e.message.split("\n")[0]
+  end
+end
+def s56
+  c = Complex(1, 2)
+  check("cx56a", s56e { c.to_i } == "RE can't convert 1+2i into Integer" &&
+                 s56e { c.to_f } == "RE can't convert 1+2i into Float" &&
+                 s56e { c.to_r } == "RE can't convert 1+2i into Rational" && Complex(3, 0).to_i == 3)
+  check("cx56b", s56e { c.round } == "NE undefined method `round' for (1+2i):Complex" &&
+                 s56e { c.positive? } == "NE undefined method `positive?' for (1+2i):Complex" &&
+                 s56e { c.floor } == "NE undefined method `floor' for (1+2i):Complex")
+  check("cx56c", c.conjugate == Complex(1, -2) && c.conj == Complex(1, -2) && c.rect == [1, 2] &&
+                 c.rectangular == [1, 2] && c.real? == false)
+  check("cx56d", c.polar == [2.23606797749979, 1.1071487177940904] && Complex(3, 4).polar == [5.0, 0.9272952180016122] &&
+                 c.arg == 1.1071487177940904 && Complex(-1, 0).angle == Math::PI)
+  check("cx56e", Complex(0, 5).abs == 5 && Complex(0, 5).abs.integer? && Complex(3, 4).abs == 5.0 &&
+                 !Complex(3, 4).abs.integer? && Complex(3, 0).polar == [3, 0.0])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -2971,5 +3003,6 @@ s52() # SECTION-CALL 52
 s53() # SECTION-CALL 53
 s54() # SECTION-CALL 54
 s55() # SECTION-CALL 55
+s56() # SECTION-CALL 56
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

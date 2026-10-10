@@ -6643,6 +6643,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "odd?") { return !bigIsZero(bigDivMod(t, bigFromNum(2)).r) }
         if (name == "succ" || name == "next") { return numBin("+", t, 1) }
         if (name == "pred") { return numBin("-", t, 1) }
+        if (name == "integer?") { return true }
         if (name == "divmod") {
             var db = bigOf(args[0])
             if (db != null) {
@@ -6798,8 +6799,49 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return finiteRat(c * p1 + p0, c * q1 + q0)
     }
+    // Complex's own surface: what it adds (conjugate, rect, polar, arg), what it
+    // undefines from Numeric (an ordering has no meaning on the plane, so MRI raises
+    // NoMethodError), and the real-only conversions, which raise RangeError unless
+    // the imaginary part is zero. Answers undefined for the rest. Twins:
+    // rubyCpxMethod in abnf/jsrtruby.go and rbCpxMethod in lib/ruby-rt.metajs.
+    var cpxUndefNames = ["round", "floor", "ceil", "truncate", "positive?", "negative?",
+                         "div", "divmod", "modulo", "remainder"]
+    // MRI's Complex#abs: with one part zero it is the other part's own abs, so it
+    // keeps that part's type - an integral part reads as the Integer it prints as.
+    function cpxAbs(t) {
+        if (t.re == 0 || t.im == 0) {
+            var a = t.re == 0 ? t.im : t.re
+            if (a < 0) { a = -a }
+            return Math.floor(a) == a ? a : mkFlo(a)
+        }
+        return mkFlo(hypotOf(t.re, t.im))
+    }
+    function cpxMethod(t, name) {
+        if (name == "conjugate" || name == "conj") { return mkCpx(t.re, -t.im) }
+        if (name == "rect" || name == "rectangular") { return [t.re, t.im] }
+        if (name == "abs" || name == "magnitude") { return cpxAbs(t) }
+        if (name == "polar") { return [cpxAbs(t), mkFlo(Math.atan2(t.im, t.re))] }
+        if (name == "arg" || name == "angle" || name == "phase") { return mkFlo(Math.atan2(t.im, t.re)) }
+        if (name == "real?") { return false }
+        if (cpxUndefNames.indexOf(name) >= 0) {
+            raiseErr("NoMethodError", "undefined method `" + name + "' for " + rinspect(t) + ":Complex")
+        }
+        if (t.im != 0) {
+            var into = ""
+            if (name == "to_i" || name == "to_int") { into = "Integer" }
+            if (name == "to_f") { into = "Float" }
+            if (name == "to_r" || name == "rationalize") { into = "Rational" }
+            if (into != "") { raiseErr("RangeError", "can't convert " + rstr(t) + " into " + into) }
+        }
+        return undefined
+    }
     // The methods of the boxed numerics (Float, Rational, Complex).
     function numberMethod(t, name, args, blk) {
+        if (isCpx(t)) {
+            var cv = anytype
+            cv = cpxMethod(t, name)
+            if (cv !== undefined) { return cv }
+        }
         if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(t, name, args) }
         // #inspect is NOT #to_s for a Rational or a Complex - it parenthesizes.
         if (name == "inspect") { return rinspect(t) }
@@ -6810,11 +6852,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "to_i" || name == "to_int") { var x1 = toF(t); floDomainGuard(x1); return intFromF(x1 < 0 ? Math.ceil(x1) : Math.floor(x1)) }
         if (name == "to_r") { return asRat(t) }
         if (name == "to_c") { return isCpx(t) ? t : mkCpx(toF(t), 0) }
-        // Rational#abs stays a RATIONAL and Complex#abs is the MAGNITUDE:
-        // (2r/3r).abs is (2/3) and (3+4i).abs is 5.0 in MRI.
+        // Rational#abs stays a RATIONAL (Complex#abs is cpxAbs).
         if (name == "abs" || name == "magnitude") {
             if (isRat(t)) { return t.n < 0 ? mkRat(0 - t.n, t.d) : t }
-            if (isCpx(t)) { return mkFlo(hypotOf(t.re, t.im)) }
             var x2 = toF(t)
             return mkFlo(x2 < 0 ? 0 - x2 : x2)
         }
@@ -6842,6 +6882,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "numerator") { return asRat(t).n }
         if (name == "denominator") { return asRat(t).d }
+        if (name == "integer?") { return false }
         if (name == "real") { return reOf(t) }
         if (name == "imaginary" || name == "imag") { return imOf(t) }
         fail("unknown Numeric method: " + name)
@@ -6998,6 +7039,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "odd?") { return imod(target, 2) != 0 }
             if (name == "succ" || name == "next") { return numBin("+", target, 1) }
             if (name == "pred") { return numBin("-", target, 1) }
+            if (name == "integer?") { return true }
             if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(target, name, args) }
             if (name == "fdiv") { return mkFlo(target / toF(args[0])) }
             if (name == "pow") { return rbin("**", target, args[0]) }
