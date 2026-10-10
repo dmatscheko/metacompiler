@@ -4,13 +4,13 @@
 # Native -exe binaries built from tests/bench/mod.*. Re-record with
 # tests/bench.sh --record when you land an intended change, and say in the commit
 # message which rows moved and why.
-# recorded at commit 28c5341, 9 draws, min of 3 runs.
+# recorded at commit 0f25ac9, 5 draws, min of 3 runs.
 bash       52735738         -          -
 batch      33827395         -          -
 c          10778282         -          -
 csharp     19182900487      11558256   2345
 dart       3539334944       11556976   446
-go         753282211        11560816   75
+go         376109677        11581296   44
 java       7887697011       11556976   1054
 js         1155867857       11577456   131
 kotlin     15128556208      11627376   1880
