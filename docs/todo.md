@@ -63,47 +63,47 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-001 python: integer division and modulo by zero never raise · P1 · PY · OPEN [V]
+### T-001 python: integer division and modulo by zero never raise · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `1 // 0` prints `Infinity` and `x % 0` prints `NaN` in all three engines (interpreter,
 `llvm.Run`, native); CPython raises `ZeroDivisionError: integer division or modulo by
 zero` (and `division by zero` for `/`, `float division by zero`, `float modulo` for
 floats - check each wording with python3). The exception class exists already.
 Oracle: python3.
 
-### T-002 python: `str.title()` treats `ß` as uncased · P1 · PY · OPEN [V]
+### T-002 python: `str.title()` treats `ß` as uncased · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `"straße".title()` is `StraßE` in all engines; CPython `Straße`. The case-fallback
 length guard makes `ß` end a word. Check `istitle`/`capitalize`/`swapcase` on the same
 inputs while there. Oracle: python3.
 
-### T-003 python: missing dict/set members · P1 · PY · OPEN [V]
+### T-003 python: missing dict/set members · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `dict.fromkeys` (a classmethod on the type); set `issuperset`, `isdisjoint`,
 `intersection`, `difference` (and their operator forms if missing), with `hasattr`
 answering True for them. Oracle: python3.
 
-### T-004 python: `except E as w` does not unbind `w` · P1 · PY · OPEN [V]
+### T-004 python: `except E as w` does not unbind `w` · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 After the handler, `w` must be unbound (NameError on use). Oracle: python3.
 
-### T-005 python: an uncaught KeyError renders differently in the two halves · P1 · PY · OPEN [V]
+### T-005 python: an uncaught KeyError renders differently in the two halves · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 Interpreter `[1]` vs compiled `1` for the key in the abort line; CPython prints
 `KeyError: 1`. Make all three match CPython's traceback last line.
 
-### T-006 python: `__mro__` lacks `object` · P1 · PY · OPEN [V]
+### T-006 python: `__mro__` lacks `object` · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 
-### T-007 python: `None.k = v` is not catchable · P1 · PY · OPEN [V]
+### T-007 python: `None.k = v` is not catchable · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 Must raise a catchable `AttributeError: 'NoneType' object has no attribute 'k'`
 (check wording with python3) in all engines.
 
-### T-008 python: native `float(2**80)` is `nan` · P1 · PY · Shared: runtime.metajs? · OPEN [V]
+### T-008 python: native `float(2**80)` is `nan` · P1 · PY · Shared: runtime.metajs? · IN PROGRESS (PY worker, round 1) [V]
 Native: `float(2**80)` prints `nan` and `2**80 == float(2**80)` is False; CPython
 `1.2089258196146292e+24` and True. The interpreter / llvm.Run legs: check.
 
-### T-009 python: `%d` / `{:d}` on a non-integer operand is a three-way divergence · P1 · PY · OPEN [V]
+### T-009 python: `%d` / `{:d}` on a non-integer operand is a three-way divergence · P1 · PY · IN PROGRESS (PY worker, round 1) [V]
 `"%d" % 1e300` gives `1e+300` natively, `9223372036854775807` in the Go twin, and
 CPython the exact 301-digit integer. `"%d" % None` gives `NaN` natively, `0` in the
 twin, and CPython a `TypeError`. Same for list/tuple/dict/set/str operands: 192
 differing rows in a probe, both halves wrong and differently wrong. Oracle: python3.
 
-### T-010 python: an abandoned generator never runs its `finally` · P3 · PY · OPEN [U]
+### T-010 python: an abandoned generator never runs its `finally` · P3 · PY · IN PROGRESS (PY worker, round 1) [U]
 CPython finalizes at collection; there is no finalizer hook and the GC deliberately
 has none. Likely DECLINED with that reason unless a cheap hook exists.
 
@@ -114,7 +114,7 @@ Same root cause as T-170 (no tuple type). Close together with T-170.
 
 # RB — Ruby
 
-### T-020 ruby: `String#to_i` is a three-way divergence · P1 · RB · OPEN [V]
+### T-020 ruby: `String#to_i` is a three-way divergence · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 `"0xffffffffffffffffff".to_i` → interpreter `4722366482869645213696`, both compiled
 halves `0`, MRI `0`; `.to_i(16)` → interpreter the big value, compiled halves `0`,
 MRI `4722366482869645213695`. The interpreter honours a `0x` prefix MRI's base-10
@@ -122,12 +122,12 @@ MRI `4722366482869645213695`. The interpreter honours a `0x` prefix MRI's base-1
 also carries an FMA contraction (manual ch. 4) - fixing only that swaps one wrong
 answer for another. Oracle: /usr/bin/ruby (2.6; these semantics are unchanged in 3.x).
 
-### T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises · P1 · RB · OPEN [V]
+### T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 `print "A","B",boom,"C"` prints `AB` in the compiled halves and nothing in the
 interpreter; `puts "D", boom` prints `D` in all legs. MRI evaluates every argument
 first and prints nothing.
 
-### T-022 ruby: `defined?` kind classification residues · P1 · RB · Shared: jsrt.go · OPEN [V]
+### T-022 ruby: `defined?` kind classification residues · P1 · RB · Shared: jsrt.go · IN PROGRESS (RB worker, round 1) [V]
 Kernel names (`p`, `sprintf`, `format`, `lambda`, `proc`, `rand`) answer nil or
 `"local-variable"` where MRI and the interpreter say `"method"`. `defined?(printf)`
 reads `"local-variable"` (the MetaJS host scope carries print/printf/sprintf - see
@@ -136,32 +136,32 @@ reads `"local-variable"` (the MetaJS host scope carries print/printf/sprintf - s
 `globalScope` is `scopes[0]`, which the local walk skips); MRI and the compiled halves
 say `"local-variable"`.
 
-### T-023 ruby: `{}.fetch(:a)`'s KeyError is not catchable · P1 · RB · OPEN [V]
+### T-023 ruby: `{}.fetch(:a)`'s KeyError is not catchable · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 Not caught by `rescue KeyError` or `rescue IndexError` in any engine.
 
-### T-024 ruby: `NotImplementedError` sits under StandardError · P1 · RB · OPEN [V]
+### T-024 ruby: `NotImplementedError` sits under StandardError · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 MRI: NotImplementedError < ScriptError < Exception (so a bare `rescue` does NOT
 catch it). Check every builtin exception's ancestry against MRI while there.
 
-### T-025 ruby: the compiled halves lack `IOError` and `LocalJumpError` · P1 · RB · OPEN [V]
+### T-025 ruby: the compiled halves lack `IOError` and `LocalJumpError` · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 "variable not defined" in llvm.Run and native.
 
-### T-026 ruby: interpreter lacks `Float#div`, `Float#divmod`, `Float#rationalize` · P1 · RB · OPEN [V]
+### T-026 ruby: interpreter lacks `Float#div`, `Float#divmod`, `Float#rationalize` · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 
-### T-027 ruby: `"\u{48 49}"` gives `H 49}` · P1 · RB · OPEN [V]
+### T-027 ruby: `"\u{48 49}"` gives `H 49}` · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 MRI: `HI` (a `\u{}` escape takes several space-separated code points).
 
-### T-028 ruby: parse gaps · P1 · RB · OPEN [V]
+### T-028 ruby: parse gaps · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 `p (2.0**55).to_r` parses as `(p ...).to_r` (MRI: argument with a space before the
 paren); `1.5r` does not parse (`RatLit` takes only an integer mantissa); `p two 1, 2`
 (a nested parenthesis-less call in an argument) does not parse; `puts(Float::MAX,
 Float::MIN)`, `Float::NAN.nan?`, `puts(ni, -ni)` reportedly fail to parse - re-probe.
 
-### T-029 ruby: `Kernel#Integer(str)` is imprecise past 2^53 · P1 · RB · OPEN [V]
+### T-029 ruby: `Kernel#Integer(str)` is imprecise past 2^53 · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
 Agreed across all three legs (so `--cross` is blind). `bigFromDec` / the bignum
 FromStr / `big.Int` exist; layer 2 lacks a radix→decimal helper.
 
-### T-030 ruby: Rational/Complex exactness · P2 · RB · OPEN [V]
+### T-030 ruby: Rational/Complex exactness · P2 · RB · IN PROGRESS (RB worker, round 1) [V]
 `Integer#fdiv` on a bignum, and a big meeting a Rational or Complex, promote through
 the double where MRI is exact. `Complex` answers where MRI raises (`to_i`/`to_f`/
 `to_r` → RangeError; `round`/`floor`/`ceil`/`positive?` → NoMethodError;
@@ -169,7 +169,7 @@ the double where MRI is exact. `Complex` answers where MRI raises (`to_i`/`to_f`
 `Complex(0,5).abs` is `5.0` (MRI `5`) and `5.0.to_c` is `(5+0i)` (MRI `(5.0+0i)`).
 Needs a Rational whose parts are bigs and typed Complex parts - a value-model change.
 
-### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · OPEN [V]
+### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · IN PROGRESS (RB worker, round 1) [V]
 `respond_to?` on non-objects needs a universal-method table (exact fix: a
 `js_rselfcall(scope, name, args)` extern, ~3 engines × 25 lines). `method(:x)` for
 `lambda`, `proc`, `loop`, `raise`, `require`/`exit`/`gets` answers NameError where MRI
@@ -179,34 +179,34 @@ answers a Method - identical in all legs, reasons recorded at the site.
 
 # JS — JavaScript and TypeScript
 
-### T-040 js/ts: identifier `\u` escapes are not resolved in the interpreter halves · P1 · JS · OPEN [V]
+### T-040 js/ts: identifier `\u` escapes are not resolved in the interpreter halves · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `var a = 1; print(a)` prints `1` under the compiler and throws
 `ReferenceError: a is not defined` under the interpreter, in js and typescript. The
 compiler has `idName`; the interpreters have ~30 `up.in` sites each, and `up.in` is
 matched TEXT, so no tag inside `Id` can fix it centrally. `js-test-full.js` SECTION 52
 deliberately asserts no escaped spelling until this is fixed. Oracle: node.
 
-### T-041 js: spreading a generator answers an empty array · P1 · JS · OPEN [V]
+### T-041 js: spreading a generator answers an empty array · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `[...g()]` gives length 0 (node 2), both halves. The spread path
 (`evalArgs`/`spreadInto`) admits arrays and strings only; also check `f(...g())`,
 `new Set(g())`, `Array.from(g())`, destructuring from a generator.
 
-### T-042 js: `Math.pow(±1, NaN/±Infinity)` gives 1 · P1 · JS · Shared: runtime.c, jsrt.go · OPEN [V]
+### T-042 js: `Math.pow(±1, NaN/±Infinity)` gives 1 · P1 · JS · Shared: runtime.c, jsrt.go · IN PROGRESS (JS worker, round 1) [V]
 node gives NaN; Go's `math.Pow` and C's `pow` follow C99 and give 1. The `**` operator
 probably has the same gap. Fix in one place for both.
 
-### T-043 js/ts: `JSON.stringify` / `JSON.parse` are missing · P1 · JS · OPEN [V]
+### T-043 js/ts: `JSON.stringify` / `JSON.parse` are missing · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 ReferenceError in every engine. Implement the common surface (objects, arrays,
 strings with escapes, numbers incl. -0/NaN→null, nested, indent argument, `toJSON`);
 then assert `JSON.stringify(new Error("m")) === "{}"`.
 
-### T-044 js: a derived class whose `super()` returns an object does not rebind `this` · P1 · JS · OPEN [V]
+### T-044 js: a derived class whose `super()` returns an object does not rebind `this` · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 
-### T-045 js: Error own-property introspection · P1 · JS · OPEN [V]
+### T-045 js: Error own-property introspection · P1 · JS · IN PROGRESS (JS worker, round 1) [V]
 `e.hasOwnProperty("name")` is true (node false); `Object.getOwnPropertyNames(e)` is
 `[]` (node `[stack, message]` for `new Error("m")`).
 
-### T-046 js: "is not a function" names the callee without node's spacing · P3 · JS · OPEN [V]
+### T-046 js: "is not a function" names the callee without node's spacing · P3 · JS · IN PROGRESS (JS worker, round 1) [V]
 We say `o.a+1 is not a function`; node `(o.a + 1) is not a function`. The message is
 rebuilt from whitespace-stripped source text.
 
@@ -229,7 +229,7 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-050 js: sloppy-mode primitive `this` is not boxed · P3 · JS · OPEN [V]
+### T-050 js: sloppy-mode primitive `this` is not boxed · P3 · JS · IN PROGRESS (JS worker, round 1) [V]
 `f.call(7)` in a sloppy function: node gives a Number object (`typeof` "object",
 `=== 7` false). The value model has no wrapper objects. Likely DECLINED.
 
@@ -237,7 +237,7 @@ becoming iterable. Cost first; implement or DECLINE with the measurement.
 
 # JV — Java
 
-### T-060 java: assignment conversion only happens at declarations · P1 · JV · OPEN [V]
+### T-060 java: assignment conversion only happens at declarations · P1 · JV · IN PROGRESS (JV worker, round 1) [V]
 A declaration and a field initializer convert (`double d = b` widens a float,
 `static float f = 16777217` rounds) via `declConvert` / `jTypeAdopt` / `jFieldInit`,
 but parameters, returns, plain reassignment, field and array-element stores and array
@@ -248,7 +248,7 @@ Param rule does not push the parameter type and plain assignment has no static t
 type: thread declared types to those sites in both grammars (a value-based guess is
 wrong for `Object` slots). Oracle: java 24 (JLS 5.2).
 
-### T-061 java: field defaults, Double/Float constants, Math.sqrt · P1 · JV · OPEN [V]
+### T-061 java: field defaults, Double/Float constants, Math.sqrt · P1 · JV · IN PROGRESS (JV worker, round 1) [V]
 Uninitialised `double`/`long`/`float`/`byte`/`short`/`char` fields read `null` (java
 `0.0` / `0` / `'\u0000'`); `pushFields` only defaults int and boolean.
 `Double.POSITIVE_INFINITY` / `NEGATIVE_INFINITY` are `null` in the interpreter and
@@ -256,7 +256,7 @@ Uninitialised `double`/`long`/`float`/`byte`/`short`/`char` fields read `null` (
 `Math.sqrt`. Audit the Double/Float/Integer/Long/Math constant and method surface
 against java while there.
 
-### T-062 java: `Integer.parseInt`'s NumberFormatException is not catchable compiled · P1 · JV · OPEN [V]
+### T-062 java: `Integer.parseInt`'s NumberFormatException is not catchable compiled · P1 · JV · IN PROGRESS (JV worker, round 1) [V]
 
 ---
 
@@ -528,7 +528,7 @@ Today: pthread + condvar, 4.1 µs per `next()` natively vs 0.75 µs under llvm.R
 forever. `swapcontext` is dead (deprecated on darwin; no `#include` in runtime.c).
 The extern surface would stay identical.
 
-### T-180 corpus: JS reject side · P3 · JS · OPEN [V]
+### T-180 corpus: JS reject side · P3 · JS · IN PROGRESS (JS worker, round 1) [V]
 Reject 703 / 727, must-parse 2623 / 2653 (tests/reference). Always measure BOTH rows:
 guards have won reject files while costing must-parse files twice. Remaining: (a)
 assignment targets that are not LeftHandSideExpressions (8 files: `() => {}()`,
@@ -553,7 +553,7 @@ python must each come from that language's own toolchain or spec (python3 is Uni
 Real Go rejects a type assertion on a non-interface value at compile time. Rewrite the
 row with an `interface{}` operand.
 
-### T-183 python: native float formatting of huge bignums and `%`-arity · P3 · PY · OPEN [U]
+### T-183 python: native float formatting of huge bignums and `%`-arity · P3 · PY · IN PROGRESS (PY worker, round 1) [U]
 Placeholder for whatever T-008 / T-009 / T-170 leave; re-probe and split or close.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · OPEN [U spec-only]
