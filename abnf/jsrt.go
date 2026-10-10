@@ -15573,6 +15573,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if rt.pyToF(r) == 0 {
 					rt.pyZeroDiv()
 				}
+				// int / int with an arbitrary precision operand is ONE rounding of
+				// the exact quotient, as CPython's long_true_divide.
+				_, lBig := l.(*jsBigInt)
+				_, rBig := r.(*jsBigInt)
+				if lBig || rBig {
+					if a, ok := pyBigOperand(l); ok {
+						if b, ok := pyBigOperand(r); ok {
+							return w(&jsPyFlo{f: rt.pyIntTrueDiv(a, b)})
+						}
+					}
+				}
 				return w(&jsPyFlo{f: rt.pyToF(l) / rt.pyToF(r)})
 			case "//":
 				if rt.toNumber(r) == 0 {
@@ -17171,6 +17182,22 @@ func (rt *jsrt) pyToF(v interface{}) float64 {
 		return f
 	}
 	return rt.toNumber(v)
+}
+
+// pyIntTrueDiv is int / int, the exact quotient rounded once to the nearest
+// double (big.Rat rounds half to even, subnormals included); a quotient past the
+// double range is CPython's OverflowError. b is not zero. Twin of bigTrueDiv in
+// languages/python-interpreter.abnf and pyIntTrueDiv in
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyIntTrueDiv(a, b *big.Int) float64 {
+	f, _ := new(big.Rat).SetFrac(a, b).Float64()
+	if math.IsInf(f, 0) {
+		panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "integer division result too large for a float")})
+	}
+	if f == 0 && (a.Sign() < 0) != (b.Sign() < 0) {
+		return math.Copysign(0, -1)
+	}
+	return f
 }
 
 // pyIntOrFlo is the result type of // and %: an int from two ints (7 // 2 is 3)

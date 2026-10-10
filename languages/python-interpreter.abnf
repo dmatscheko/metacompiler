@@ -5493,6 +5493,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nr = [a[i]]
             for (var t = 0; t < rem.length; t++) { nr.push(rem[t]) }
             rem = magTrim(nr)
+            // A remainder still below the divisor is a zero digit: no search.
+            if (magCmp(rem, b) < 0) { continue }
             var lo = 0
             var hi = bigBase - 1
             while (lo < hi) {
@@ -5503,6 +5505,57 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (lo > 0) { rem = magTrim(magSub(rem, magMulSmall(b, lo))) }
         }
         return {q: magTrim(q), r: rem}
+    }
+    // int / int, the exact quotient rounded ONCE, as CPython's long_true_divide:
+    // the quotient is cut to some 60 bits plus a sticky bit for a non-zero
+    // remainder, rounded half to even at bit 53 (fewer below the normal range)
+    // and scaled by an exact power of two. b is not zero. Twin of
+    // rt.pyIntTrueDiv in abnf/jsrt.go and pyIntTrueDiv in
+    // languages/lib/python-rt.metajs.
+    function bigTrueDiv(a, b) {
+        var neg = (a.sign < 0) != (b.sign < 0)
+        if (bigIsZero(a)) { return neg ? floNegate(0) : 0 }
+        // A decimal digit count is within 3.33 bits of the binary length, so q
+        // below lands between 2^59 and 2^69.
+        var s = 64 - (magLog2Est(a.limbs) - magLog2Est(b.limbs))
+        var n = a.limbs
+        var d = b.limbs
+        if (s > 0) { n = magShl(n, s) } else { d = magShl(d, 0 - s) }
+        var qr = magDivMod(n, d)
+        var q = qr.q
+        var k = 0
+        var p = [1]
+        while (magCmp(p, q) <= 0) { p = magMulSmall(p, 2); k = k + 1 }
+        var e = k - 1 - s
+        if (e > 1023) { pyRaise(pyMakeExc("OverflowError", ["integer division result too large for a float"])) }
+        var shift = k - 53
+        if (e < 0 - 1022) { shift = shift + (0 - 1022 - e) }
+        var hr = magDivMod(q, magShl([1], shift))
+        var hi = bigToNum(bigOb(1, hr.q))
+        var c = magCmp(hr.r, magShl([1], shift - 1))
+        if (c > 0 || (c == 0 && (qr.r.length > 0 || hi % 2 == 1))) { hi = hi + 1 }
+        var f = hi
+        var x = shift - s
+        while (x > 0) { f = f * 2; x = x - 1 }
+        while (x < 0) { f = f / 2; x = x + 1 }
+        if (f - f != 0) { pyRaise(pyMakeExc("OverflowError", ["integer division result too large for a float"])) }
+        return neg ? floNegate(f) : f
+    }
+    // floor(log2) of a magnitude, estimated from its decimal digit count.
+    function magLog2Est(m) {
+        var top = m[m.length - 1]
+        var dg = (m.length - 1) * 7
+        while (top >= 1) { top = Math.floor(top / 10); dg = dg + 1 }
+        return Math.floor(dg * 3.321928)
+    }
+    // m * 2^s, twenty bits at a time.
+    function magShl(m, s) {
+        var out = m
+        var t = s
+        while (t >= 20) { out = magMulSmall(out, 1048576); t = t - 20 }
+        var r = 1
+        while (t > 0) { r = r * 2; t = t - 1 }
+        return magMulSmall(out, r)
     }
     function bigAdd(a, b) {
         if (a.sign == b.sign) { return bigOb(a.sign, magAdd(a.limbs, b.limbs)) }
@@ -5763,8 +5816,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A Python bigint is an arbitrary precision INT, so `/` on it is still
         // true division: 10**30 / 1 is the float 1e+30.
         if (op == "/") {
-            if (bigToNum(r) === 0 || r === false) { pyZeroDiv() }
-            return {v: pyFlo(bigToNum(l) / bigToNum(r))}
+            if (bigIsZero(b)) { pyZeroDiv() }
+            return {v: pyFlo(bigTrueDiv(a, b))}
         }
         if (op == "**") {
             var e = bigToNum(r)

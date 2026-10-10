@@ -2627,6 +2627,13 @@ function js_pybin(opv, l, r) {
     if (op == "/") {
         var fr = pyAToF(r)
         if (fr == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
+        // int / int with an arbitrary precision operand is ONE rounding of the
+        // exact quotient.
+        if (pyIsBig(l) || pyIsBig(r)) {
+            var bl = pyIntBigOf(l)
+            var br = pyIntBigOf(r)
+            if (bl !== null && br !== null) { return pyMkFlo(pyIntTrueDiv(bl, br)) }
+        }
         return pyMkFlo(pyAToF(l) / fr)
     }
     if (op == "//") {
@@ -2706,6 +2713,90 @@ function js_pyint(v) {
 // Go: rt.pyBigToF. An arbitrary precision int as the nearest double: the decimal
 // text read back by the floor's correctly rounded parseFloat. Past the double
 // range CPython raises OverflowError; an infinity is the one value with f - f != 0.
+// An int operand (a big, a plain integral number, a bool) as a big, or null.
+function pyIntBigOf(v) {
+    if (pyIsBig(v)) { return v }
+    if (v === true) { return rtABigFromNum(1) }
+    if (v === false) { return rtABigFromNum(0) }
+    if (typeof v == "number" && !pyIsFlo(v) && Math.floor(v) == v) { return rtABigFromNum(v) }
+    return null
+}
+
+// int / int, the exact quotient rounded ONCE, as CPython's long_true_divide:
+// the quotient is cut to some 60 bits plus a sticky bit for a non-zero
+// remainder, rounded half to even at bit 53 (fewer below the normal range) and
+// scaled by an exact power of two. b is not zero. Go: rt.pyIntTrueDiv.
+function pyIntTrueDiv(a, b) {
+    var neg = a["neg"] != b["neg"]
+    if (rtABigIsZero(a)) {
+        if (neg) { return pyFloNegate(0) }
+        return 0
+    }
+    // A decimal digit count is within 3.33 bits of the binary length, so q below
+    // lands between 2^59 and 2^69.
+    var s = 64 - (pyMagLog2Est(a["limbs"]) - pyMagLog2Est(b["limbs"]))
+    var n = a["limbs"]
+    var d = b["limbs"]
+    if (s > 0) { n = pyMagShl(n, s) } else { d = pyMagShl(d, 0 - s) }
+    var qr = rtABigDivMag(n, d)
+    var q = qr["q"]
+    var k = 0
+    var p = [1]
+    while (rtABigCmpMag(p, q) <= 0) {
+        p = rtABigMulSmall(p, 2)
+        k = k + 1
+    }
+    var e = k - 1 - s
+    if (e > 1023) { pyRaiseExc("OverflowError", "integer division result too large for a float") }
+    var shift = k - 53
+    if (e < 0 - 1022) { shift = shift + (0 - 1022 - e) }
+    var hr = rtABigDivMag(q, pyMagShl([1], shift))
+    var hi = pyNum(rtABigNarrow(rtkABigNew(false, hr["q"])))
+    var c = rtABigCmpMag(hr["r"], pyMagShl([1], shift - 1))
+    var sticky = !(qr["r"].length == 1 && qr["r"][0] == 0)
+    if (c > 0 || (c == 0 && (sticky || hi % 2 == 1))) { hi = hi + 1 }
+    var f = hi
+    var x = shift - s
+    while (x > 0) {
+        f = f * 2
+        x = x - 1
+    }
+    while (x < 0) {
+        f = f / 2
+        x = x + 1
+    }
+    if (f - f != 0) { pyRaiseExc("OverflowError", "integer division result too large for a float") }
+    if (neg) { return pyFloNegate(f) }
+    return f
+}
+
+// floor(log2) of a magnitude, estimated from its decimal digit count.
+function pyMagLog2Est(m) {
+    var top = m[m.length - 1]
+    var dg = (m.length - 1) * 4
+    while (top >= 1) {
+        top = Math.floor(top / 10)
+        dg = dg + 1
+    }
+    return Math.floor(dg * 3.321928)
+}
+
+// m * 2^s, thirteen bits at a time (a limb times 8192 stays below 1e8).
+function pyMagShl(m, s) {
+    var out = m
+    var t = s
+    while (t >= 13) {
+        out = rtABigMulSmall(out, 8192)
+        t = t - 13
+    }
+    var r = 1
+    while (t > 0) {
+        r = r * 2
+        t = t - 1
+    }
+    return rtABigMulSmall(out, r)
+}
+
 function pyBigToF(v) {
     var f = parseFloat(rtABigStr(v))
     if (f - f != 0) { pyRaiseExc("OverflowError", "int too large to convert to float") }

@@ -3100,6 +3100,25 @@ def s48():
     check("cpx10", (1.1+2.3j) ** 4 == complex(-8.957200000000004, -41.289599999999986) and str((1+2j) ** 0) == "(1+0j)")
     check("cpx11", (1e10-3j) * (1.1+2.3j) == complex(11000000006.9, 22999999996.7) and format(float("-inf"), "z") == "-inf")
 
+# ===== SECTION 49: int / int is the exact quotient rounded once =====
+# With an arbitrary precision operand the quotient is not the quotient of the
+# two rounded doubles: it is correctly rounded (half to even, subnormals
+# included), and past the double range it is an OverflowError.
+def s49():
+    big = [3**70, 7, 123456789012345678901234567890, 987654321, 2**64, 3, -(10**25), 7, 10**22, 3**5]
+    got = [repr(big[2 * i] / big[2 * i + 1]) for i in range(len(big) // 2)]
+    check("itd1", got == ["3.575936435704631e+32", "1.249999988734375e+20", "6.148914691236517e+18",
+                          "-1.4285714285714285e+24", "4.1152263374485594e+19"])
+    check("itd2", repr(10**400 / 10**399) == "10.0" and repr(2**1100 / 2**1000) == "1.2676506002282294e+30")
+    check("itd3", repr(1 / 2**1075) == "0.0" and repr(1 / (2**1075 - 1)) == "5e-324" and repr(0 / -(10**30)) == "-0.0")
+    check("itd4", repr(3 / 2**1075) == "1e-323" and repr(-1 / 2**1076) == "-0.0" and repr((2**54 + 3) / 2) == "9007199254740994.0")
+    msg = ""
+    try:
+        print(7 * 10**330 / 10**22)
+    except OverflowError as e:
+        msg = str(e)
+    check("itd5", msg == "integer division result too large for a float")
+
 
 def main():
     s01() # SECTION-CALL 01
@@ -3150,5 +3169,6 @@ def main():
     s46() # SECTION-CALL 46
     s47() # SECTION-CALL 47
     s48() # SECTION-CALL 48
+    s49() # SECTION-CALL 49
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
