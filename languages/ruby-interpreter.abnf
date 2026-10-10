@@ -6827,7 +6827,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- Length / indexing that understand arrays, strings and hashes -----
-    function rlen(v) {
+    // A bare `.length` / `.size`: the container counts directly, anything else
+    // (a Symbol, MatchData, a user object) is the method call. Twin of js_rlen in
+    // abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    function rlen(v, name) {
         if (isDict(v)) { return v.keys.length }
         // An Enumerator's length is its element count. A bare `.size' / `.length'
         // is lowered to this shortcut in BOTH halves rather than to a method call.
@@ -6838,7 +6841,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A String's length is in CHARACTERS (a surrogate pair is one), the way the
         // compiled halves' js_pylen counts it.
         if (typeof v == "string") { return charCount(v) }
-        return v.length
+        if (Array.isArray(v)) { return v.length }
+        return mcall(v, name, [], null)
     }
     // The value a Hash answers for a key it does NOT hold. Hash.new(v) stores v in
     // the hidden __hdef slot and Hash.new { |h, k| } stores the block in __hdefp;
@@ -8898,12 +8902,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 } else if (s.kind == "field") {
                     visCheck(cur, s.name)
                     if (isUserObj(cur)) { cur = mcall(cur, s.name, [], null) }
-                    else if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
+                    else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
                     else if (s.name == "to_s") { cur = rstr(cur) }
                     else { cur = mcall(cur, s.name, [], null) }
                 } else if (s.kind == "sfield") {
                     if (cur === null || cur === undefined) { cur = null }
-                    else if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
+                    else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
                     else if (s.name == "to_s") { cur = rstr(cur) }
                     else { cur = mcall(cur, s.name, []) }
                 } else if (s.idx2 != undefined && s.idx2 != null) {

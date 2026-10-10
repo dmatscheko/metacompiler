@@ -3227,6 +3227,28 @@ def s66
   check("ma66b", b[0].equal?(S66[0]) && self.inspect == "main")
 end
 
+# ===== SECTION 67: a bare .length / .size on what is not a container =====
+# Symbol#length counts the name's characters, and a user class's own #length /
+# #size and MatchData#size are method calls, with or without `&.`. Every
+# right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER
+# REAL RUBY.
+class S67L
+  def length
+    3
+  end
+
+  def size
+    4
+  end
+end
+def s67
+  s = [:abc, :"héllo"]
+  check("le67a", s[0].length == 3 && s[0].size == 3 && s[1].length == 5 && s[1]&.size == 5)
+  o = [S67L.new]
+  m = /(a)(b)/.match("xab")
+  check("le67b", o[0].length == 3 && o[0].size == 4 && o[0]&.length == 3 && m.size == 3 && m.length == 3)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3255,5 +3277,6 @@ s63() # SECTION-CALL 63
 s64() # SECTION-CALL 64
 s65() # SECTION-CALL 65
 s66() # SECTION-CALL 66
+s67() # SECTION-CALL 67
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

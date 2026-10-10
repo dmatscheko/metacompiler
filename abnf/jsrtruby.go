@@ -53,6 +53,27 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return rt.wrapStr(rt.rubyFormat2(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}))
 	}
 
+	// A bare `.length` / `.size`: a String, Array, Hash, Enumerator or Range counts
+	// through js_pylen, anything else (a Symbol, MatchData, a user object) is the
+	// method call. Twin of rlen in ruby-interpreter.abnf.
+	pylen := m["js_pylen"]
+	m["js_rlen"] = func(a []uint64) uint64 {
+		v := u(a[0])
+		counted := false
+		switch v.(type) {
+		case string, *jsArray:
+			counted = true
+		default:
+			_, _, isDict := dictParts(v)
+			_, isRng := rubyIsRange(v)
+			counted = isDict || isRng || rubyIsEnum(v)
+		}
+		if counted {
+			return pylen(a[:1])
+		}
+		return m["js_rxmcall"]([]uint64{a[0], a[1], w(&jsArray{})})
+	}
+
 	// String#% - the same formatter reached through the % operator. Every other
 	// left operand is the base binding's modulo.
 	baseMod := m["js_rmod"]

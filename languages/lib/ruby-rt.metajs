@@ -6802,23 +6802,25 @@ function js_pyget(c, k) {
 // List element (negative wraps) or dict entry assignment.
 // js_pyset is SHARED - lib/runtime.metajs (knobs rtkIsDict and rtkDictFind).
 
-// len() for strings, lists and dicts. Ruby never reaches the Python set arm. A
-// String's length is in CHARACTERS: a surrogate pair is one.
-function js_pylen(v) {
+// len() for strings, lists and dicts (for-in's trip count, a splat), and a bare
+// `.length` / `.size` (js_rlen, which passes the method name). A String's length
+// is in CHARACTERS: a surrogate pair is one. What is not a counted container is
+// the method call for js_rlen (a Symbol, MatchData, a user object) and an error
+// for js_pylen. Twin of rlen in ruby-interpreter.abnf.
+function js_rlen(v, name) {
     if (typeof v == "string") { return rbCharCount(v) }
     if (rbIsArr(v)) { return v.length }
     if (rbIsDict(v)) { return v["keys"].length }
-    // An Enumerator's length is its element count: a bare `.size' / `.length' is
-    // lowered to js_pylen rather than to a method call (ruby-to-llvm-ir.abnf's
-    // smcall / field arms), so it never reaches rbEnumMethod.
+    // An Enumerator's length is its element count.
     if (rbIsEnum(v)) { return v["items"].length }
     // A Range's length is its ELEMENT COUNT, computed arithmetically rather than by
     // materializing, because for-in asks for it once and then indexes. See
     // js_pyget.
     if (rbIsRange(v)) { return rbRangeLen(v) }
-    fail("len() of a " + typeof v)
-    return 0
+    if (name === null) { fail("len() of a " + typeof v) }
+    return js_rxmcall(v, name, [])
 }
+function js_pylen(v) { return js_rlen(v, null) }
 
 // js_supercall is SHARED - lib/runtime.metajs (one knob: rtkCall).
 

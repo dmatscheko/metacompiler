@@ -3187,7 +3187,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         callBk = sea.b
                         snRes = callExt(callBk, "js_rxmcall", [cur, emitStr(callBk, methodKey(s.name)), sea.v])
                     } else if (s.name == "length" || s.name == "size") {
-                        snRes = callExt(callBk, "js_pylen", [cur])
+                        snRes = callExt(callBk, "js_rlen", [cur, emitStr(callBk, methodKey(s.name))])
                     } else if (s.name == "to_s") {
                         snRes = callExt(callBk, "js_rstr", [cur])
                     } else {
@@ -3199,7 +3199,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     b = snEnd
                 } else if (s.kind == "field") {
                     if (s.name == "length" || s.name == "size") {
-                        cur = callExt(b, "js_pylen", [cur])
+                        cur = callExt(b, "js_rlen", [cur, emitStr(b, methodKey(s.name))])
                     } else if (s.name == "to_s") {
                         // js_rstr is Ruby's to_s (nil -> "", a class -> its name, a
                         // Float keeps its point), as the interpreter's rstr() is.
