@@ -208,6 +208,12 @@ func luParseNum(s string) (interface{}, bool) {
 		return v, true
 	}
 	if f, isf := luFloBox(v); isf {
+		// lua reads a decimal integer's sign WITH its digits (l_str2int), so the
+		// one magnitude that fits only when negative is math.mininteger. Twin of
+		// luIs2p63 in languages/lib/lua-rt.metajs.
+		if f == luMinIntF && strings.TrimLeft(s[i:n], "0") == "9223372036854775808" {
+			return giNorm(math.MinInt64, 64, false), true
+		}
 		return luMkFlo(-f), true
 	}
 	if luIsInt(v) {

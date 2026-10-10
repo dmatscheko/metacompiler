@@ -634,6 +634,12 @@ function s22()
     -- Comparison past 2^53 is exact.
     check("i64z4", math.maxinteger > math.maxinteger - 1, true)
     check("i64z5", math.maxinteger == math.maxinteger - 1, false)
+    -- A string's sign is read WITH its digits, so 2^63 fits when it is negative:
+    -- "-9223372036854775808" coerces to math.mininteger, one past it to a float.
+    local ms = {"-9223372036854775808", "-9223372036854775809", "9223372036854775808"}
+    check("i64z6", math.type(ms[1] + 0) .. " " .. (ms[1] + 0 == math.mininteger and "min" or "?"), "integer min")
+    check("i64z7", math.type(ms[2] + 0) .. math.type(ms[3] + 0), "floatfloat")
+    check("i64z8", math.tointeger(ms[1]) == math.mininteger, true)
 end
 
 -- ===== SECTION 23: the float number model, four engines =====
@@ -1121,9 +1127,9 @@ end
 -- merely spells a numeral stays a string. Checked against lua 5.5.
 function s28()
     local keys = {5e-324, 2.225073858507201e-308, 1e-310, -2.5e-320, 0.1, 1 / 3,
-                  1.7385704740834339e+92, 7, 9007199254740993, 2 ^ 63, "1.0", "x"}
+                  1.7385704740834339e+92, 7, 9007199254740993, 2 ^ 63, -(2 ^ 63), "1.0", "x"}
     local types = {"float", "float", "float", "float", "float", "float",
-                   "float", "integer", "integer", "float", "nil", "nil"}
+                   "float", "integer", "integer", "float", "integer", "nil", "nil"}
     for i = 1, #keys do
         local t = {}
         t[keys[i]] = i

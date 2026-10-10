@@ -690,9 +690,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (r === undefined) { return undefined }
         if (!neg) { return r }
+        // The sign is read WITH a decimal integer's digits (l_str2int), so the one
+        // magnitude that fits only when negative, 2^63, is math.mininteger and not a
+        // float when the text says "-9223372036854775808". Twin of luIs2p63 in
+        // languages/lib/lua-rt.metajs.
+        if (isFlt(r) && r.v === LUA_2P63 && luaIs2p63(s.slice(i, n))) { return luaMinInt() }
         if (isFlt(r)) { return mkFlt(0 - r.v) }
         if (isInt(r)) { return szNeg(r) }
         return 0 - r
+    }
+    function luaIs2p63(s) {
+        var z = 0
+        while (z + 1 < s.length && s.charCodeAt(z) === 48) { z = z + 1 }
+        return s.slice(z) == "9223372036854775808"
     }
     // 0x...: an integer, unless the spelling carries a '.' or a binary 'p' exponent - then
     // it is a float whose value is the hex mantissa times two to the exponent.

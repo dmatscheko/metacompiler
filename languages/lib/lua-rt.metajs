@@ -422,6 +422,16 @@ function luParseDec(s) {
     return luNorm(p.v)
 }
 
+// lua reads a decimal integer's sign WITH its digits (l_str2int), so the one
+// magnitude that fits only when negative, 2^63, is math.mininteger and not a
+// float when the text says "-9223372036854775808". luIs2p63 asks whether the
+// digits after the sign spell exactly that magnitude. Twin of luIs2p63 in
+// abnf/jsrtlua.go and luaIs2p63 in lua-interpreter.abnf.
+function luIs2p63(s) {
+    var z = 0
+    while (z + 1 < s.length && s.charAt(z) == "0") { z = z + 1 }
+    return s.substring(z) == "9223372036854775808"
+}
 // luParseNum reads the text of a Lua numeral - the lexer's spelling and the one a
 // string goes through when it coerces in arithmetic. Surrounding blanks and a
 // leading sign are tolerated; anything that is not a complete numeral answers
@@ -446,6 +456,7 @@ function luParseNum(s) {
     if (v === undefined) { return undefined }
     if (!neg) { return v }
     var fb = luFloOf(v)
+    if (fb === 9223372036854775808 && luIs2p63(s.substring(i, n))) { return luNorm(luMinPair()) }
     if (fb !== undefined) { return luMkFlo(0 - fb) }
     if (luIsInt(v)) { return luNorm(i64Neg(luPair(v))) }
     return 0 - luNumOf(v)
