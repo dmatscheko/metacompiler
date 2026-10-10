@@ -2739,6 +2739,10 @@ def s40():
 def s41():
     check("cmp4", ord(chr(0x0131).upper()) == 0x0049 and ord(chr(0x03C2).upper()) == 0x03A3 and
                   ord(chr(0x1E9E).lower()) == 0x00DF)
+    # Pairs added in Unicode 16: the case table must not be older than that.
+    u16 = [0x019B, 0x0264, 0x1C89, 0xA7DC]
+    check("cmp5", chr(u16[0]).upper() == chr(0xA7DC) and chr(u16[1]).upper() == chr(0xA7CB) and
+                  chr(u16[2]).lower() == chr(0x1C8A) and chr(u16[3]).lower() == chr(0x019B))
 
 
 # ===== SECTION 42: an unhashable set member or dict key =====

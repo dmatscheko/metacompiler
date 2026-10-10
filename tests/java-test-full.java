@@ -2432,6 +2432,10 @@ class S40 {
             && Character.getNumericValue(c[4]) == -1 && Character.getNumericValue(c[7]) == 2);
         Main.check("ch5", Character.isWhitespace(c[3]) && !Character.isWhitespace(c[4]) && Character.isUpperCase(c[2]) && Character.isLowerCase(c[6]));
         Main.check("ch6", ("" + Character.toUpperCase(c[1])).equals("A") && Character.toUpperCase(97) == 65);
+        // Pairs added in Unicode 16: the case table must not be older than that.
+        int[] u16 = { 0x019B, 0x0264, 0x1C89, 0x1C8A };
+        Main.check("ch7", Character.toUpperCase((char) u16[0]) == 0xA7DC && Character.toUpperCase((char) u16[1]) == 0xA7CB
+            && Character.toLowerCase((char) u16[2]) == 0x1C8A && Character.toUpperCase((char) u16[3]) == 0x1C89);
         int[] k = { Integer.MAX_VALUE, 1, Integer.MIN_VALUE, 46341 };
         long[] l = { Long.MAX_VALUE, 1L };
         Main.check("ex1", Math.addExact(k[1], k[1]) == 2 && Math.multiplyExact(k[3], k[1]) == 46341 && Math.toIntExact(l[1]) == 1);

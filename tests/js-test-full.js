@@ -799,6 +799,9 @@ function s26() {
     check("sm19", "abc".codePointAt(1) === 98)
     check("sm20", "aXbXc".replace("X", "[$&]") === "a[X]bXc")
     check("sm21", "abc".toUpperCase() === "ABC" && "ABC".toLowerCase() === "abc")
+    // Pairs added in Unicode 16: the case table must not be older than that.
+    var u16 = String.fromCharCode(0x019B, 0x0264, 0x1C89)
+    check("sm21a", u16.toUpperCase() === "\uA7DC\uA7CB\u1C89" && u16.toLowerCase() === "\u019B\u0264\u1C8A")
     check("sm22", "aa".replace("a", function (m, i) { return m + i }) === "a0a")
 }
 

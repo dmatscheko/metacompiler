@@ -233,6 +233,9 @@ function s07() {
     check("str7g", String.fromCharCode(55297, 56360).toUpperCase() ===
                    String.fromCharCode(55297, 56320))
     check("str7h", "\u00b5".toUpperCase() === "\u039c" && "\u0131".toUpperCase() === "I")
+    // Pairs added in Unicode 16: the case table must not be older than that.
+    var u16 = String.fromCharCode(411, 612, 7305)
+    check("str7i", u16.toUpperCase() === "\ua7dc\ua7cb\u1c89" && u16.toLowerCase() === "\u019b\u0264\u1c8a")
     check("str9", "  pad  ".trim() === "pad")
     check("str10", s.replace("world", "there") === "hello there")
     check("str11", "a,b,c".split(",").length === 3)
