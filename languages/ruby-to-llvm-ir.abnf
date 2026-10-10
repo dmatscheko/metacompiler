@@ -1928,8 +1928,12 @@ CvarRef     = "@@" Id <~~ push(makeCvarRef(up.in)) ~~> ;
 // The parenthesis-less form (`defined? foo`, `not defined? qqq`) is the same rule
 // without the brackets; the parenthesised one is tried first (PEG).
 DefinedExpr <~~ push(makeDefined(takeAll())) ~~>
-            = "defined?" :whitespace(Whitespace) "(" DefArgTxt ")"
+            = "defined?" :whitespace(Whitespace) "(" DefNot DefArgTxt ")"
+            | "defined?" :whitespace(Whitespace) "(" DefArgTxt ")"
             | "defined?" :whitespace(Whitespace) DefArgTxt ;
+// `not x` is the method call x.! - and up.in has lost the space that would tell
+// `not x` from a name `notx`, so the keyword is matched on its own.
+DefNot      <~~ push({dnot: true}) ~~> = NotWord ;
 DefArgTxt   <~~ takeAll(); push({dtext: up.in}) ~~>
             = Expression | GvarRef | Id ;
 Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
@@ -5843,10 +5847,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the EXISTENCE test is emitted (js_rdefined / js_rgdefined answer the kind or nil).
     function makeDefined(items) {
         var txt = ""
+        var isNot = false
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].dtext != undefined) { txt = items[i].dtext }
+            if (items[i] != undefined && items[i].dnot === true) { isNot = true }
         }
-        return definedOf(dfTrim(txt))
+        var t = definedOf(dfTrim(txt))
+        if (!isNot) { return t }
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: r.b.NewSelect(r.b.NewICmp(llvm.enum.IPredEQ, r.v, hNull), hNull, emitStr(r.b, "method"))}
+        }
     }
     // The top-level SHAPE of a defined? argument, read from its source text; only
     // what stands at bracket depth 0 and outside a string literal counts. MRI answers
@@ -5893,6 +5904,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return j
     }
+    // The method name a `recv.name(args)` calls: the text up to its argument list.
+    function dfMethName(s) {
+        var e = 0
+        while (e < s.length && (dfIdCh(s.charAt(e)) || ((s.charAt(e) == "?" || s.charAt(e) == "!" || s.charAt(e) == "=") && e > 0))) { e = e + 1 }
+        return s.slice(0, e)
+    }
+    // A defined? receiver simple enough to evaluate from its text, so MRI's respond
+    // check can be made: a literal nil / true / false / Integer / plain String /
+    // Symbol, an @ivar or a local. "" for anything else, whose answer stays "method".
+    function dfRecvKind(t) {
+        if (t == "nil" || t == "true" || t == "false") { return t }
+        if (t.length > 0 && t.length < 16) {
+            var allDig = true
+            for (var i = 0; i < t.length; i++) { if (t.charAt(i) < "0" || t.charAt(i) > "9") { allDig = false } }
+            if (allDig) { return "int" }
+        }
+        if (t.length >= 2 && t.charAt(0) == "\"" && t.charAt(t.length - 1) == "\"") {
+            for (var j = 1; j < t.length - 1; j++) { if (t.charAt(j) == "\"" || t.charAt(j) == "\\" || t.charAt(j) == "#") { return "" } }
+            return "str"
+        }
+        var c0 = t.charAt(0)
+        var from = (c0 == ":" || c0 == "@") ? 1 : 0
+        if (t.length <= from || t.charAt(from) == "@") { return "" }
+        for (var k = from; k < t.length; k++) {
+            var ch = t.charAt(k)
+            var okc = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" || (k > from && ch >= "0" && ch <= "9")
+            if (!okc) { return "" }
+        }
+        if (c0 == ":") { return "sym" }
+        if (c0 == "@") { return "ivar" }
+        if (c0 >= "a" && c0 <= "z" || c0 == "_") { return "local" }
+        return ""
+    }
     function dfShape(t) {
         var n = t.length
         if (n == 0) { return {k: "name", parts: []} }
@@ -5912,6 +5956,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var depth = 0
         var cuts = []
         var lastDot = -1
+        var dotLen = 1
         var callParen = -1
         var andOr = false
         var asgn = false
@@ -5958,7 +6003,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 continue
             }
             else if (o == "::") { operand = false }
-            else if (o == "." || o == "&.") { if (operand) { lastDot = i } operand = false }
+            else if (o == "." || o == "&.") { if (operand) { lastDot = i; dotLen = o.length } operand = false }
             else if (o == "=" || (o.length >= 2 && o.charAt(o.length - 1) == "=" && dfBinOps.indexOf(o) < 0 && o != "=>")) {
                 if (operand) { asgn = true }
                 operand = false
@@ -5975,7 +6020,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var from = 0
             for (var q = 0; q < cuts.length; q = q + 2) { parts.push(dfTrim(t.slice(from, cuts[q]))); from = cuts[q + 1] }
             parts.push(dfTrim(t.slice(from)))
-            return {k: "ops", parts: parts}
+            return {k: "ops", parts: parts, m: t.slice(cuts[0], cuts[1])}
         }
         if (c0 == "-" || c0 == "+") {
             var c1 = t.charAt(1)
@@ -5984,7 +6029,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (c0 == "!" || c0 == "~") { return {k: "un", parts: [dfTrim(t.slice(1))]} }
         if (t.slice(0, 4) == "not " || t.slice(0, 4) == "not(") { return {k: "un", parts: [dfTrim(t.slice(3))]} }
-        if (lastDot >= 0) { return {k: "call", parts: [dfTrim(t.slice(0, lastDot))]} }
+        if (lastDot >= 0) { return {k: "call", parts: [dfTrim(t.slice(0, lastDot))], m: dfMethName(t.slice(lastDot + dotLen))} }
         if (callParen > 0) { return {k: "fcall", parts: [dfTrim(t.slice(0, callParen))]} }
         if ((c0 >= "0" && c0 <= "9") || c0 == "\"" || c0 == "'" || c0 == "`" || c0 == ":" || c0 == "["
             || c0 == "{" || c0 == "%" || c0 == "/" || c0 == "?") { return {k: "lit", parts: []} }
@@ -6001,6 +6046,59 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var r = ft(b)
                 var isM = truthy(r.b, callExt(r.b, "js_seq", [r.v, emitStr(r.b, "method")]))
                 return {b: r.b, v: r.b.NewSelect(isM, emitStr(r.b, "method"), hNull)}
+            }
+        }
+        // A call or a single operator on a receiver simple enough to read: MRI also
+        // asks whether the receiver responds to the method (`defined?(nil + 1)` is
+        // nil). Twin of the same arm in ruby-interpreter.abnf.
+        if ((sh.k == "call" || (sh.k == "ops" && sh.parts.length == 2)) && dfRecvKind(sh.parts[0]) != "") {
+            var rt0 = definedOf(sh.parts[0])
+            var rk = dfRecvKind(sh.parts[0])
+            var rtext = sh.parts[0]
+            var rm = sh.m
+            var argT = sh.k == "ops" ? definedOf(sh.parts[1]) : null
+            var recvT = null
+            if (rk == "ivar") { recvT = makeIvarRef(rtext.slice(1)) }
+            if (rk == "local") { recvT = makeVarRef(rtext) }
+            return function(b) {
+                var kr = rt0(b)
+                b = kr.b
+                var undefOk = b.NewICmp(llvm.enum.IPredEQ, kr.v, hNull)
+                if (argT != null) {
+                    var ar = argT(b)
+                    b = ar.b
+                    undefOk = b.NewOr(undefOk, b.NewICmp(llvm.enum.IPredEQ, ar.v, hNull))
+                }
+                hidCount++
+                var slot = "$dr" + hidCount
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), hNull])
+                var askB = curF.NewBlock("")
+                var endB = curF.NewBlock("")
+                b.NewCondBr(undefOk, endB, askB)
+                var rv = hNull
+                var ab = askB
+                if (rk == "local") {
+                    // A name that is not a local (a method call) keeps its plain answer.
+                    var isLocal = callExt(ab, "js_seq", [kr.v, emitStr(ab, "local-variable")])
+                    var readB = curF.NewBlock("")
+                    var methB = curF.NewBlock("")
+                    ab.NewCondBr(truthy(ab, isLocal), readB, methB)
+                    callExt(methB, "js_scope_set", [curScopeV, emitStr(methB, slot), emitStr(methB, "method")])
+                    methB.NewBr(endB)
+                    ab = readB
+                }
+                if (rk == "true") { rv = hTrue }
+                else if (rk == "false") { rv = hFalse }
+                else if (rk == "int") { rv = emitNum(ab, parseInt(rtext)) }
+                else if (rk == "str") { rv = emitStr(ab, rtext.slice(1, rtext.length - 1)) }
+                else if (rk == "sym") { rv = callExt(ab, "js_sym", [emitStr(ab, rtext.slice(1))]) }
+                else if (recvT != null) { var rr = recvT(ab); ab = rr.b; rv = rr.v }
+                var argsV = callExt(ab, "js_arr_new", [])
+                callExt(ab, "js_arr_push", [argsV, callExt(ab, "js_sym", [emitStr(ab, rm)])])
+                var resp = callExt(ab, "js_rrespond", [rv, argsV])
+                callExt(ab, "js_scope_set", [curScopeV, emitStr(ab, slot), ab.NewSelect(truthy(ab, resp), emitStr(ab, "method"), hNull)])
+                ab.NewBr(endB)
+                return {b: endB, v: callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, slot)])}
             }
         }
         if (sh.k != "name") {
@@ -6039,8 +6137,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, mv, hUndef), hNull, emitStr(b, "instance-variable"))}
             }
         }
-        // A name shape that is not one identifier (`A::B`, `yield`, a command call)
-        // is not classified; nil, as the interpreter half answers.
+        if (isScopedConstName(txt)) { return definedScopedConst(txt) }
+        // A name shape that is not one identifier (`yield`, a command call) is not
+        // classified; nil, as the interpreter half answers.
         if (!isPlainName(txt)) {
             return function(b) { return {b: b, v: hNull} }
         }
@@ -6068,6 +6167,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rdefined", [curScopeV, emitStr(b, txt), emitStr(b, k)])}
             }
             return {b: b, v: rbScopeProbe(b, emitStr(b, txt), emitStr(b, k))}
+        }
+    }
+    // `A::B::C`: plain names joined by `::`, the first a constant.
+    function isScopedConstName(t) {
+        var c0 = t.charAt(0)
+        if (!(c0 >= "A" && c0 <= "Z") || t.indexOf("::") < 0) { return false }
+        var segs = t.split("::")
+        for (var i = 0; i < segs.length; i++) { if (!isPlainName(segs[i])) { return false } }
+        return true
+    }
+    // defined?(A::B): "constant" when the head constant is defined and every `::`
+    // step finds its $c$ slot - the walk makeScopedConst emits, read without its
+    // abort. Float's folded constants are constants too. Twin of lookupConst in
+    // ruby-interpreter.abnf.
+    function definedScopedConst(txt) {
+        var segs = txt.split("::")
+        if (segs.length == 2 && segs[0] == "Float" && rbFloatConst(segs[1]) != "") {
+            return function(b) { return {b: b, v: emitStr(b, "constant")} }
+        }
+        return function(b) {
+            hidCount++
+            var slot = "$dc" + hidCount
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), hNull])
+            var walkB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            var hv = rbScopeProbe(b, emitStr(b, segs[0]), emitStr(b, "constant"))
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, hv, hNull), endB, walkB)
+            var v = callExt(walkB, "js_scope_get", [curScopeV, emitStr(walkB, segs[0])])
+            for (var k = 1; k < segs.length; k++) { v = callExt(walkB, "js_get", [v, emitStr(walkB, "$c$" + segs[k])]) }
+            callExt(walkB, "js_scope_set", [curScopeV, emitStr(walkB, slot),
+                                            walkB.NewSelect(walkB.NewICmp(llvm.enum.IPredEQ, v, hUndef), hNull, emitStr(walkB, "constant"))])
+            walkB.NewBr(endB)
+            return {b: endB, v: callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, slot)])}
         }
     }
     // Whether the text is a single plain identifier (so defined? can classify it).

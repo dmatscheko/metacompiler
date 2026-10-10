@@ -3310,6 +3310,27 @@ def s70
   check("rt70b", S70K.new.q == [true, false, 1])
 end
 
+# ===== SECTION 71: defined? asks the receiver, reads A::B, and knows `not` =====
+# A call or an operator is "method" only when the receiver responds to it, a
+# scoped constant is "constant" when every step resolves, and `not x` is the
+# method call x.!. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
+# THIS SECTION RUNS UNDER REAL RUBY.
+class S71K
+  def hi
+    1
+  end
+end
+def s71
+  x = 3
+  k = S71K.new
+  check("df71a", defined?(nil + 1).nil? && defined?(x.nope).nil? && defined?(x.succ) == "method" &&
+                 defined?("a".zzz).nil? && defined?(k.hi) == "method" && defined?(k.zz).nil? &&
+                 defined?(k.inspect) == "method" && defined?(x + 1) == "method" && defined?(:a.length) == "method")
+  check("df71b", defined?(Math::PI) == "constant" && defined?(Math::NOPE).nil? && defined?(Float::INFINITY) == "constant" &&
+                 defined?(Nope71::X).nil?)
+  check("df71c", defined?(not x) == "method" && defined?(not zz71).nil?)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3342,5 +3363,6 @@ s67() # SECTION-CALL 67
 s68() # SECTION-CALL 68
 s69() # SECTION-CALL 69
 s70() # SECTION-CALL 70
+s71() # SECTION-CALL 71
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

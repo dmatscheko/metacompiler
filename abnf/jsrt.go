@@ -9713,7 +9713,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "singleton_methods":
 				return rt.rubySingNames(o)
 			case "respond_to?":
-				return rubySingRespond(o, rt.rubyStr(argAt(args, 0)))
+				return rubyResponds("", rt.rubyStr(argAt(args, 0))) || rubySingRespond(o, rt.rubyStr(argAt(args, 0)))
 			case "method":
 				// Object#method with an explicit RECEIVER (Kernel#method with none
 				// is js_rmethodval above). It is the one way a singleton method is

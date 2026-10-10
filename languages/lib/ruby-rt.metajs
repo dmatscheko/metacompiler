@@ -6637,7 +6637,7 @@ function rbMethod(target, name, args) {
                 return rbSym(dnm)
             }
             if (name == "singleton_methods") { return rbSingNames(target) }
-            if (name == "respond_to?") { return rbSingRespond(target, rbStr(rbArgAt(args, 0))) }
+            if (name == "respond_to?") { return rbResponds("", rbStr(rbArgAt(args, 0))) || rbSingRespond(target, rbStr(rbArgAt(args, 0))) }
             // Object#method with an explicit RECEIVER (Kernel#method with none is
             // js_rmethodval), the one way a singleton method is reachable as a
             // value. A user class that defines `method' itself still wins - the

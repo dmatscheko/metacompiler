@@ -1894,8 +1894,12 @@ CvarRef     = "@@" Id <~~ push(makeCvarRef(up.in)) ~~> ;
 // The parenthesis-less form (`defined? foo`, `not defined? qqq`) is the same rule
 // without the brackets; the parenthesised one is tried first (PEG).
 DefinedExpr <~~ push(makeDefined(takeAll())) ~~>
-            = "defined?" :whitespace(Whitespace) "(" DefArgTxt ")"
+            = "defined?" :whitespace(Whitespace) "(" DefNot DefArgTxt ")"
+            | "defined?" :whitespace(Whitespace) "(" DefArgTxt ")"
             | "defined?" :whitespace(Whitespace) DefArgTxt ;
+// `not x` is the method call x.! - and up.in has lost the space that would tell
+// `not x` from a name `notx`, so the keyword is matched on its own.
+DefNot      <~~ push({dnot: true}) ~~> = NotWord ;
 DefArgTxt   <~~ takeAll(); push({dtext: up.in}) ~~>
             = Expression | GvarRef | Id ;
 Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
@@ -2523,11 +2527,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var definedKernelNames = ["puts", "print", "p", "printf", "sprintf", "format", "rand",
                               "require", "loop", "raise", "lambda", "proc"]
     // defined?(X): classified from the SOURCE TEXT of the argument, which is what
-    // Ruby's own answer amounts to - the argument is never evaluated.
+    // Ruby's own answer amounts to - the argument is never evaluated (only a simple
+    // receiver is read, for the respond check in definedOf).
     function makeDefined(items) {
         var txt = ""
-        for (var i = 0; i < items.length; i++) { if (items[i].dtext != undefined) { txt = items[i].dtext } }
-        return definedOf(strStrip(txt))
+        var isNot = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].dtext != undefined) { txt = items[i].dtext }
+            if (items[i].dnot === true) { isNot = true }
+        }
+        var t = definedOf(strStrip(txt))
+        if (!isNot) { return t }
+        return function() { return t() == null ? null : "method" }
     }
     // The top-level SHAPE of a defined? argument, read from its source text; only
     // what stands at bracket depth 0 and outside a string literal counts. MRI answers
@@ -2574,6 +2585,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return j
     }
+    // The method name a `recv.name(args)` calls: the text up to its argument list.
+    function dfMethName(s) {
+        var e = 0
+        while (e < s.length && (dfIdCh(s.charAt(e)) || ((s.charAt(e) == "?" || s.charAt(e) == "!" || s.charAt(e) == "=") && e > 0))) { e = e + 1 }
+        return s.slice(0, e)
+    }
+    // A defined? receiver simple enough to evaluate from its text, so MRI's respond
+    // check can be made: a literal nil / true / false / Integer / plain String /
+    // Symbol, an @ivar or a local. "" for anything else, whose answer stays "method".
+    function dfRecvKind(t) {
+        if (t == "nil" || t == "true" || t == "false") { return t }
+        if (t.length > 0 && t.length < 16) {
+            var allDig = true
+            for (var i = 0; i < t.length; i++) { if (t.charAt(i) < "0" || t.charAt(i) > "9") { allDig = false } }
+            if (allDig) { return "int" }
+        }
+        if (t.length >= 2 && t.charAt(0) == "\"" && t.charAt(t.length - 1) == "\"") {
+            for (var j = 1; j < t.length - 1; j++) { if (t.charAt(j) == "\"" || t.charAt(j) == "\\" || t.charAt(j) == "#") { return "" } }
+            return "str"
+        }
+        var c0 = t.charAt(0)
+        var from = (c0 == ":" || c0 == "@") ? 1 : 0
+        if (t.length <= from || t.charAt(from) == "@") { return "" }
+        for (var k = from; k < t.length; k++) {
+            var ch = t.charAt(k)
+            var okc = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" || (k > from && ch >= "0" && ch <= "9")
+            if (!okc) { return "" }
+        }
+        if (c0 == ":") { return "sym" }
+        if (c0 == "@") { return "ivar" }
+        if (c0 >= "a" && c0 <= "z" || c0 == "_") { return "local" }
+        return ""
+    }
     function dfShape(t) {
         var n = t.length
         if (n == 0) { return {k: "name", parts: []} }
@@ -2593,6 +2637,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var depth = 0
         var cuts = []
         var lastDot = -1
+        var dotLen = 1
         var callParen = -1
         var andOr = false
         var asgn = false
@@ -2639,7 +2684,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 continue
             }
             else if (o == "::") { operand = false }
-            else if (o == "." || o == "&.") { if (operand) { lastDot = i } operand = false }
+            else if (o == "." || o == "&.") { if (operand) { lastDot = i; dotLen = o.length } operand = false }
             else if (o == "=" || (o.length >= 2 && o.charAt(o.length - 1) == "=" && dfBinOps.indexOf(o) < 0 && o != "=>")) {
                 if (operand) { asgn = true }
                 operand = false
@@ -2656,7 +2701,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var from = 0
             for (var q = 0; q < cuts.length; q = q + 2) { parts.push(dfTrim(t.slice(from, cuts[q]))); from = cuts[q + 1] }
             parts.push(dfTrim(t.slice(from)))
-            return {k: "ops", parts: parts}
+            return {k: "ops", parts: parts, m: t.slice(cuts[0], cuts[1])}
         }
         if (c0 == "-" || c0 == "+") {
             var c1 = t.charAt(1)
@@ -2665,7 +2710,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (c0 == "!" || c0 == "~") { return {k: "un", parts: [dfTrim(t.slice(1))]} }
         if (t.slice(0, 4) == "not " || t.slice(0, 4) == "not(") { return {k: "un", parts: [dfTrim(t.slice(3))]} }
-        if (lastDot >= 0) { return {k: "call", parts: [dfTrim(t.slice(0, lastDot))]} }
+        if (lastDot >= 0) { return {k: "call", parts: [dfTrim(t.slice(0, lastDot))], m: dfMethName(t.slice(lastDot + dotLen))} }
         if (callParen > 0) { return {k: "fcall", parts: [dfTrim(t.slice(0, callParen))]} }
         if ((c0 >= "0" && c0 <= "9") || c0 == "\"" || c0 == "'" || c0 == "`" || c0 == ":" || c0 == "["
             || c0 == "{" || c0 == "%" || c0 == "/" || c0 == "?") { return {k: "lit", parts: []} }
@@ -2679,6 +2724,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (sh.k == "fcall") {
             var ft = definedOf(sh.parts[0])
             return function() { return ft() == "method" ? "method" : null }
+        }
+        // A call or a single operator on a receiver simple enough to read: MRI also
+        // asks whether the receiver responds to the method (`defined?(nil + 1)` is
+        // nil). Twin of the same arm in ruby-to-llvm-ir.abnf.
+        if ((sh.k == "call" || (sh.k == "ops" && sh.parts.length == 2)) && dfRecvKind(sh.parts[0]) != "") {
+            var rt0 = definedOf(sh.parts[0])
+            var rk = dfRecvKind(sh.parts[0])
+            var rtext = sh.parts[0]
+            var rm = sh.m
+            var argT = sh.k == "ops" ? definedOf(sh.parts[1]) : null
+            return function() {
+                var kd = rt0()
+                if (kd == null || (argT != null && argT() == null)) { return null }
+                if (rk == "local" && kd != "local-variable") { return "method" }
+                var rv = anytype
+                if (rk == "nil") { rv = null }
+                else if (rk == "true") { rv = true }
+                else if (rk == "false") { rv = false }
+                else if (rk == "int") { rv = parseInt(rtext) }
+                else if (rk == "str") { rv = rtext.slice(1, rtext.length - 1) }
+                else if (rk == "sym") { rv = mkSym(rtext.slice(1)) }
+                else if (rk == "ivar") { rv = makeIvarRef(rtext.slice(1))() }
+                else { rv = getVar(rtext) }
+                return rtest(mcall(rv, "respond_to?", [mkSym(rm)], null)) ? "method" : null
+            }
         }
         if (sh.k != "name") {
             var ts = []
@@ -2706,6 +2776,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // carry one of these names - so returning the text needs no further test.
             if (t == "nil" || t == "true" || t == "false") { return t }
             if (c0 >= "A" && c0 <= "Z") {
+                if (t.indexOf("::") >= 0) { return lookupConst(t) !== undefined ? "constant" : null }
                 for (var i2 = scopes.length - 1; i2 >= 0; i2--) { if (hasOwn(scopes[i2], t)) { return "constant" } }
                 return hasOwn(hostGlobals, t) ? "constant" : null
             }
@@ -7883,7 +7954,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return singDefine(target, args, blk)
             }
             if (name == "singleton_methods") { return singNames(target) }
-            if (name == "respond_to?") { return singRespond(target, rstr(args[0])) }
+            if (name == "respond_to?") { return rbResponds("", rstr(args[0])) || singRespond(target, rstr(args[0])) }
             // Object#method with an explicit receiver. Kernel#method (no receiver)
             // Object#method with an explicit receiver: the one way a singleton method
             // is reachable as a value.
@@ -8007,7 +8078,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "define_singleton_method") { return singDefine(target, args, blk) }
             if (name == "singleton_methods") { return singNames(target) }
-            if (name == "respond_to?") { return singRespond(target, rstr(args[0])) }
+            if (name == "respond_to?") { return rbResponds("", rstr(args[0])) || singRespond(target, rstr(args[0])) }
             // A class method is stored under a "$s$" prefix so it cannot collide with
             // an instance method of the same name; `extend M` puts M's methods there.
             var sm = anytype
