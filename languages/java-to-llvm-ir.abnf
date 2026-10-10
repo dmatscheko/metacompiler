@@ -5242,10 +5242,11 @@ HasStatic   = :script(~~
         // natively linked binary has to build the object itself: the emitter asks
         // the scope whether the host global is there and falls back to layer 2's
         // own java.lang descriptor when it is not. Under llvm.Run the hit arm is
-        // always taken; js_jvboxtype("Math") is the miss arm.
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"),
-                                     jvScopeProbe(b, emitStr(b, "__jmath"),
-                                                  callExt(b, "js_jvboxtype", [emitStr(b, "Math")]))])
+        // always taken; js_jvboxtype("Math") is the miss arm. java.lang.StrictMath
+        // is the same object: it has Math's members and answers what they answer.
+        var jvMathV = jvScopeProbe(b, emitStr(b, "__jmath"), callExt(b, "js_jvboxtype", [emitStr(b, "Math")]))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"), jvMathV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "StrictMath"), jvMathV])
         // java.lang's boxed primitive types, for their MIN_VALUE / MAX_VALUE and
         // the few static methods a program reaches for. Long.MAX_VALUE cannot be
         // written as a plain number at all, which is why they arrive as runtime

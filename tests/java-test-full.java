@@ -88,6 +88,7 @@ class Main {
         S42.run(); // SECTION-CALL 42
         S43.run(); // SECTION-CALL 43
         S44.run(); // SECTION-CALL 44
+        S45.run(); // SECTION-CALL 45
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2554,5 +2555,32 @@ class S44 {
         };
         Runnable rn = () -> { };
         Main.check("sov6", (anon.q(o) + anon.q(s) + t(rn) + t(() -> { }) + t("z")).equals("qOqStRtRtO"));
+    }
+}
+
+// ===== SECTION 45: the transcendentals are StrictMath's, fdlibm =====
+//
+// java.lang.StrictMath is fdlibm 5.3, and java.lang.Math answers what it
+// answers for every function here except sin and cos, which a JIT may
+// replace with an intrinsic (so those two are checked through StrictMath).
+// Each value is one where a libm differs from fdlibm in the last place.
+// Every expected string is java 24.0.2's output.
+class S45 {
+    static String s(double d) { return "" + d; }
+    static void run() {
+        double[] x = { 0.5, 2.6902782457437238, 0.1, 0.9999999999999999, 2.0, 0.7, 0.9, 0.6, 0.3, 10.0,
+                       1.0, 1.0E-8, 4.9E-324, 2.8783165136312148, -7.217476819570581, 2.7873122074460528E302,
+                       0.36327291121493643, 0.9886221146689158, 1.5725219022010501, 1.0E300 };
+        Main.check("fd1", s(Math.cbrt(x[0])).equals("0.7937005259840998") && s(Math.log(x[1])).equals("0.989644625343953")
+            && s(Math.log10(x[2])).equals("-1.0") && s(Math.log10(x[12])).equals("-323.3062153431158"));
+        Main.check("fd2", s(Math.expm1(x[3])).equals("1.7182818284590449") && s(Math.log1p(x[3])).equals("0.6931471805599453")
+            && s(Math.sinh(x[11])).equals("1.0000000000000002E-8") && s(Math.cosh(x[10])).equals("1.543080634815244")
+            && s(Math.tanh(x[5])).equals("0.6043677771171636"));
+        Main.check("fd3", s(StrictMath.sin(x[4])).equals("0.9092974268256817") && s(StrictMath.cos(x[5])).equals("0.7648421872844885")
+            && s(Math.tan(x[6])).equals("1.2601582175503392") && s(StrictMath.sin(x[19])).equals("-0.8178819121159085"));
+        Main.check("fd4", s(Math.asin(x[7])).equals("0.6435011087932844") && s(Math.acos(x[8])).equals("1.2661036727794992")
+            && s(Math.atan(x[9])).equals("1.4711276743037347") && s(Math.atan2(x[13], x[14])).equals("2.7621227700656026"));
+        Main.check("fd5", s(Math.pow(x[15], x[16])).equals("7.415544782946163E109") && s(Math.hypot(x[17], x[18])).equals("1.8574710814746076")
+            && s(StrictMath.pow(x[14], x[4])).equals("52.09197164103867") && s(StrictMath.exp(x[10])).equals("2.7182818284590455"));
     }
 }

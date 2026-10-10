@@ -424,12 +424,14 @@ func jvMathMembers(o *jsObject) {
 	dbl := func(f float64) interface{} { return jsJFlo{f: f, sty: floJava} }
 	o.set("PI", dbl(math.Pi))
 	o.set("E", dbl(math.E))
+	// The transcendentals are StrictMath's, fdlibm (jsrtfdlibm.go), which
+	// java.lang.Math answers too - but for sin and cos on a JIT intrinsic.
 	one := map[string]func(float64) float64{
-		"sqrt": math.Sqrt, "cbrt": math.Cbrt, "exp": jvExpJ, "expm1": math.Expm1,
-		"log": math.Log, "log10": math.Log10, "log1p": math.Log1p,
-		"sin": math.Sin, "cos": math.Cos, "tan": math.Tan,
-		"asin": math.Asin, "acos": math.Acos, "atan": math.Atan,
-		"sinh": math.Sinh, "cosh": math.Cosh, "tanh": math.Tanh,
+		"sqrt": math.Sqrt, "cbrt": fdCbrt, "exp": fdExp, "expm1": fdExpm1,
+		"log": fdLog, "log10": fdLog10, "log1p": fdLog1p,
+		"sin": fdSin, "cos": fdCos, "tan": fdTan,
+		"asin": fdAsin, "acos": fdAcos, "atan": fdAtan,
+		"sinh": fdSinh, "cosh": fdCosh, "tanh": fdTanh,
 		"floor": math.Floor, "ceil": math.Ceil, "rint": math.RoundToEven,
 		// One multiplication by java.lang.Math's own constant, which is why
 		// toRadians(180) is exactly Math.PI.
@@ -443,7 +445,7 @@ func jvMathMembers(o *jsObject) {
 		}))
 	}
 	two := map[string]func(float64, float64) float64{
-		"atan2": math.Atan2, "hypot": math.Hypot, "pow": jvPowJ,
+		"atan2": fdAtan2, "hypot": fdHypot, "pow": fdPow,
 	}
 	for name, fn := range two {
 		fn := fn
@@ -695,92 +697,10 @@ func jvMinD(a, b float64) float64 {
 	return b
 }
 
-// jvExpJ is java.lang.Math#exp, which answers as StrictMath#exp: fdlibm's
-// e_exp.c. Twin of jExpJ in java-interpreter.abnf, whose comment has the
-// reading of the C. Every product is wrapped in float64() so that arm64 does
-// not fuse it with the following add into an FMA, which fdlibm never does.
-func jvExpJ(x float64) float64 {
-	const (
-		ln2HI  = 6.93147180369123816490e-01
-		ln2LO  = 1.90821492927058770002e-10
-		invln2 = 1.44269504088896338700e+00
-		p1     = 1.66666666666666019037e-01
-		p2     = -2.77777777770155933842e-03
-		p3     = 6.61375632143793436117e-05
-		p4     = -1.65339022054652515390e-06
-		p5     = 4.13813679705723846039e-08
-	)
-	if x != x {
-		return x + x
-	}
-	neg := x < 0
-	ax := math.Abs(x)
-	if ax >= 709.7822265625 {
-		switch {
-		case math.IsInf(x, 1):
-			return x
-		case math.IsInf(x, -1):
-			return 0
-		case x > 7.09782712893383973096e+02:
-			return math.Inf(1)
-		case x < -7.45133219101941108420e+02:
-			return 0
-		}
-	}
-	var hi, lo float64
-	k := 0
-	if ax >= 0.3465735912322998 {
-		if ax < 1.0397205352783203 {
-			if neg {
-				hi, lo, k = x+ln2HI, -ln2LO, -1
-			} else {
-				hi, lo, k = x-ln2HI, ln2LO, 1
-			}
-		} else {
-			h := 0.5
-			if neg {
-				h = -0.5
-			}
-			k = int(float64(invln2*x) + h)
-			t := float64(k)
-			hi = x - float64(t*ln2HI)
-			lo = float64(t * ln2LO)
-		}
-		x = hi - lo
-	} else if ax < 3.725290298461914e-09 {
-		return 1 + x
-	}
-	t := float64(x * x)
-	q := float64(t * p5)
-	q = float64(t * (p4 + q))
-	q = float64(t * (p3 + q))
-	q = float64(t * (p2 + q))
-	q = float64(t * (p1 + q))
-	c := x - q
-	if k == 0 {
-		return 1 - (float64(x*c)/(c-2) - x)
-	}
-	y := 1 - ((lo - float64(x*c)/(2-c)) - hi)
-	if k >= -1021 {
-		return math.Ldexp(y, k)
-	}
-	return math.Ldexp(y, k+1000) * 0x1p-1000
-}
-
 // jvIsDouble: is v a Java double (and not a float or an integral value)?
 func jvIsDouble(v interface{}) bool {
 	f, ok := v.(jsJFlo)
 	return ok && f.sty != floJavaF
-}
-
-// jvPowJ is java.lang.Math#pow where it parts from Go's math.Pow: a NaN
-// exponent is always NaN, and |x| == 1 to an infinite power is NaN (not 1).
-// Twin of jPowJ in java-interpreter.abnf and jvPowJ in java-rt.metajs.
-func jvPowJ(x, y float64) float64 {
-	if math.IsNaN(y) || ((x == 1 || x == -1) && math.IsInf(y, 0)) {
-		return math.NaN()
-	}
-	return math.Pow(x, y)
 }
 
 // jvRoundHalfUp is the closest integer with ties toward +Infinity. x -
