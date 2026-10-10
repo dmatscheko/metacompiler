@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-242** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-245** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,31 +66,31 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-217 python: `range()` ignores its step and prints as a list · P1 · PY · OPEN [V]
+### T-217 python: `range()` ignores its step and prints as a list · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
 `list(range(0,10,3))` gives `[0..9]` (CPython `[0, 3, 6, 9]`), `range(10,0,-3)` gives
 `[]`, `print(range(3))` gives `[0, 1, 2]` (CPython `range(0, 3)`). The compiler binds
 range with two arguments only. All engines.
 
-### T-218 python: `x = None; x[0] = 1` is not a catchable TypeError · P1 · PY · OPEN [V]
+### T-218 python: `x = None; x[0] = 1` is not a catchable TypeError · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
 Interpreter: host "Cannot read property 'length' of undefined"; compiled "item
 assignment on a undefined". CPython: `TypeError: 'NoneType' object does not support item
 assignment` (check the other non-subscriptable types too).
 
-### T-219 python: `f().k += 1` evaluates `f()` twice · P1 · PY · OPEN [V]
+### T-219 python: `f().k += 1` evaluates `f()` twice · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
 All engines call f twice (the read and the write each walk the path); CPython once.
 Same for `a[g()] += 1`.
 
-### T-220 python: astral characters in indexing, iteration and find · P1 · PY · OPEN [V]
+### T-220 python: astral characters in indexing, iteration and find · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
 `[ord(x) for x in chr(0x1D400)]`: interpreter `[65533, 65533]`, compiled abort "ord()
 expected a character, but string of length 3"; CPython `[119808]`. `"a😀b".find("b")`
 3 (CPython 2). len/indexing/slicing/iteration/find must count code points. Manual 7.9
 records the js_pyget inconsistency; decide the representation and cost it.
 
-### T-221 python: `\N{...}` outside a 14-entry table silently becomes "" · P2 · PY · OPEN [V]
+### T-221 python: `\N{...}` outside a 14-entry table silently becomes "" · P2 · PY · IN PROGRESS (PY worker, round 3) [V]
 CPython decodes every Unicode character name; an unknown name is a SyntaxError. At
 least make an unknown name an error; a full name table is a size question (measure).
 
-### T-222 python: complex numbers - abs, infinities, general powers, division · P1 · PY · OPEN [V]
+### T-222 python: complex numbers - abs, infinities, general powers, division · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
 `abs(3+4j)`: interpreter aborts "unsupported operand type for <: complex", compiled
 NaN; CPython 5.0. Multiplication lacks C11 Annex G infinity recovery, so
 `(1e10-3j)**100` is `nan+nanj` (CPython OverflowError). Powers above 100, negative or
@@ -356,32 +356,19 @@ Dart. Decide from the spec; if invalid, rewrite the checks with parentheses.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-120 php: an undefined `$variable` aborts · P1 · PHP · Shared: runtime.c · IN PROGRESS (PHP worker, round 2) [V spec-only]
-PHP 8 warns and evaluates to null and continues. The floor's miss hook can only
-answer a value to THROW, never one to RETURN. Options: (a) a runtime.c hook (~15
-lines + Go twin + php registration; a floor change must land with its layer-2
-deletions in one commit); (b) a `js_scope_has`-guarded read (doubles the chain walk
-on php's hottest path - measure); (c) emitter pre-declaration of every `$name` a body
-mentions (~30 lines × 2 grammars, isset/compact/global regression risk). Written at
-`js_phmissname`. Must land before T-121.
+### T-242 php: `$GLOBALS` is not modelled · P1 · PHP · OPEN [V spec-only]
+Neither half supports `$GLOBALS['x']` read/write. A parse-time rewrite of
+`$GLOBALS[e]` needs a frame selector on every target reader in both grammars (the
+main frame is reachable through the hidden "\x00globals" name).
 
-### T-121 php: variable scope leaks into every function · P1 · PHP · IN PROGRESS (PHP worker, round 2) [V spec-only]
-`$g=5; function f(){ echo $g; }` prints `5`; a closure sees `$g` without `use`. PHP
-has no lexical variable scope. Needs a variable boundary (`global`/`use`/`$GLOBALS`/
-`static`) in both grammars on the hottest path: ONE `js_scope_has` on ONE frame, never
-a walk. Depends on T-120.
+### T-243 php: a function declared inside a function is not global · P1 · PHP · OPEN [V spec-only]
+`function outer(){ function inner(){} } outer(); inner();` - "Call to undefined
+function inner()" in both halves; PHP: inner is global once outer() has run.
 
-### T-122 php: `empty($undef)` aborts; `$u[0] = 1` does not vivify · P1 · PHP · IN PROGRESS (PHP worker, round 2) [V spec-only]
-`empty($undef)` / `empty($undef[0])` must answer true silently; select the
-non-aborting read at PARSE time (`KwEmpty "(" TgtOnly ")"` before the expression
-alternative) in both grammars. `$u[0] = 1` on an undeclared variable must create the
-array: `emitRefPathV`'s `viv && ref.path.length > 1` guard skips a single-step target.
-
-### T-123 php: top-level `label:`/`goto` or a bare `{ … }` block aborts · P1 · PHP · Shared: compile-core.js · IN PROGRESS (PHP worker, round 2) [V]
-`TypeError: Not a function` from compile-core.js `makeSeq` via `buildMain`: the
-top-level list does not recognise the `{lblstmt}` / `{body}` records (php's own
-`makeBody` does). Works inside a function. compile-core.js feeds the frozen snapshot:
-refreeze.
+### T-244 php: an arrow fn captures a reference variable's cell · P1 · PHP · OPEN [V spec-only]
+`$x=1; $r=&$x; $f=fn()=>$x; $x=2; echo $f();` prints 2 in all engines; PHP captures by
+value at creation: 1. emitCapture / makeArrowFn in both grammars (the comment
+justifying the cell contradicts the spec).
 
 ---
 
@@ -584,6 +571,10 @@ T-072 go: an unrecovered native integer divide by zero dies through the C floor 
 T-073 go: fmt bad-verb notes for composites and wide ints — PARTIAL f09061c (composites walked per element); the uint64=/int64= note names wait on T-081
 T-074 go: fmt verbs `%f %g %e %x %o %b` (and widths/flags) — DONE f09061c
 T-182 go: `tests/go-test-widen.go` asserts `a.(int)` on a non-interface `a` — DONE c887ae4
+T-120 php: an undefined `$variable` aborts — DONE dfacc00 (new floor primitive js_scope_own; no warning text is printed)
+T-121 php: variable scope leaks into every function — PARTIAL dfacc00 (frame-local variables, global, use, closures); `$GLOBALS` is T-242
+T-122 php: `empty($undef)` aborts; `$u[0] = 1` does not vivify — DONE 43216af
+T-123 php: top-level `label:`/`goto` or a bare `{ … }` block aborts — DONE 6a92762 (no compile-core change needed)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
