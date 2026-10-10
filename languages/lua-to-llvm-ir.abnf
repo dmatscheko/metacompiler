@@ -1135,7 +1135,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "lua_arith") {
             // p0 is the operator: 0 +, 1 -, 2 *, 3 / (always a float), 4 // (floor
-            // division), 5 % (floor modulo). js_luarith is the exact twin of
+            // division), 5 % (floor modulo), 6 ^ (always a float), 7 unary minus (a
+            // multiplication by -1 that names itself unm in an error). js_luarith is
+            // the exact twin of
             // lua-interpreter.abnf's luaArith: the integer path is 64 bit and WRAPS,
             // integer division by zero is an error rather than an infinity, and only
             // two integer operands keep the integer subtype.
@@ -1420,18 +1422,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // a ^ b, and every float-only member of the math library: there is no js_pow
-    // external and none is needed - the host's Math lives in the same runtime, so
-    // the operation is a method call on it. That Math is the SAME object in all
-    // three engines (languages/lib/runtime.c, abnf/jsrt.go and goja alike), which
-    // is what makes math.sqrt / math.sin / ... below cost no extern at all.
+    // Every float-only member of the math library: there is no extern for them
+    // and none is needed - the host's Math lives in the same runtime, so the
+    // operation is a method call on it. That Math is the SAME object in all three
+    // engines (languages/lib/runtime.c, abnf/jsrt.go and goja alike), which is what
+    // makes math.sqrt / math.sin / ... below cost no extern at all.
     function emitMathN(b, name, argVs) {
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         var argsV = callExt(b, "js_arr_new", [])
         for (var mi = 0; mi < argVs.length; mi++) { callExt(b, "js_arr_push", [argsV, argVs[mi]]) }
         return callExt(b, "js_mcall", [mathV, emitStr(b, name), argsV])
     }
-    function emitPow(b, l, r) { return emitMathN(b, "pow", [l, r]) }
+    // a ^ b: js_luarith's operator 6, which checks both operands like the other
+    // arithmetic and answers Math.pow of them as a float.
     function makePow(items) {
         if (items.length == 1) { return items[0] }
         var l = items[0]
@@ -1441,7 +1444,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rl.b
             var rr = r(b)
             b = rr.b
-            return {b: b, v: callLua(b, "lua_mkflt", [emitPow(b, callLua(b, "lua_num", [rl.v]), callLua(b, "lua_num", [rr.v]))])}
+            return {b: b, v: callLua(b, "lua_arith", [handle(6), callLua(b, "lua_first", [rl.v]), callLua(b, "lua_first", [rr.v])])}
         }
     }
     // Unary bitwise not: the exact 64 bit complement (not js_bxor, which is
@@ -1479,7 +1482,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    // Unary minus is x * -1, which keeps the operand's number subtype and coerces
+    // Unary minus is x * -1 (js_luarith's operator 7), which keeps the operand's number subtype and coerces
     // a string exactly like the binary operator does - and, unlike `0 - x`, keeps
     // a ZERO's SIGN: `0 - 0.0` is +0.0 in IEEE, while lua prints -0.0 for `-0.0`.
     // On the integer side MUL by -1 is the 64-bit wrapping negation,
@@ -1491,7 +1494,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callLua(r.b, "lua_arith", [handle(2), r.v, emitNum(r.b, 0 - 1)])}
+            return {b: r.b, v: callLua(r.b, "lua_arith", [handle(7), r.v, emitNum(r.b, 0 - 1)])}
         }
     }
     // not v: true exactly when v is falsy.

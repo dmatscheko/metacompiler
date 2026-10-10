@@ -436,16 +436,16 @@ func luIMod(a, b int64) int64 {
 // the others keep the integer subtype exactly when both operands are integers,
 // and the integer path is exact and wrapping at 64 bits.
 func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
-	l, ok := luToNum(lv)
-	if !ok {
-		rt.luFail("attempt to perform arithmetic on a %s value", rt.luTypeName(lv))
-	}
-	r, ok := luToNum(rv)
-	if !ok {
-		rt.luFail("attempt to perform arithmetic on a %s value", rt.luTypeName(rv))
+	l, lok := luToNum(lv)
+	r, rok := luToNum(rv)
+	if !lok || !rok {
+		rt.luArithFail(op, lv, rv, lok)
 	}
 	if op == 3 {
 		return luMkFlo(luNumOf(l) / luNumOf(r))
+	}
+	if op == 6 {
+		return luMkFlo(math.Pow(luNumOf(l), luNumOf(r)))
 	}
 	if luIsInt(l) && luIsInt(r) {
 		a, b := luInt64(l), luInt64(r)
@@ -454,7 +454,7 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 			return giNorm(a+b, 64, false)
 		case 1:
 			return giNorm(a-b, 64, false)
-		case 2:
+		case 2, 7:
 			return giNorm(a*b, 64, false)
 		}
 		if b == 0 {
@@ -476,7 +476,7 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 		return luMkFlo(x + y)
 	case 1:
 		return luMkFlo(x - y)
-	case 2:
+	case 2, 7:
 		return luMkFlo(x * y)
 	case 4:
 		return luMkFlo(math.Floor(x / y))
@@ -496,11 +496,36 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 	return luMkFlo(m)
 }
 
-// luToIntOp is a bitwise operand: an integer, a float whose value is an exact
-// integer inside the 64 bit range, or a string that spells one. Anything else is
-// an error, and Lua distinguishes the two reasons.
+// luArithNames names the operators of luArith by index for the string
+// library's error: 0..5 + - * / // %, 6 ^, 7 unary minus (a multiplication by
+// -1, so a zero keeps its sign).
+var luArithNames = []string{"add", "sub", "mul", "div", "idiv", "mod", "pow", "unm"}
+
+// luArithFail is lua's error for an operand that is no number: with a string
+// among the operands it comes from the string library's metamethod and names the
+// operator and both types; otherwise it names the first operand that is not a
+// number. Twin of luArithFail in languages/lib/lua-rt.metajs and luaArithFail in
+// lua-interpreter.abnf.
+func (rt *jsrt) luArithFail(op int, lv, rv interface{}, lok bool) {
+	_, ls := lv.(string)
+	_, rs := rv.(string)
+	if op == 7 {
+		rv, rs = lv, ls
+	}
+	if ls || rs {
+		rt.luFail("attempt to %s a '%s' with a '%s'", luArithNames[op], rt.luTypeName(lv), rt.luTypeName(rv))
+	}
+	if lok {
+		lv = rv
+	}
+	rt.luFail("attempt to perform arithmetic on a %s value", rt.luTypeName(lv))
+}
+
+// luToIntOp is a bitwise operand: an integer, or a float whose value is an exact
+// integer inside the 64 bit range. A string does not coerce here (lua 5.5).
+// Anything else is an error, and Lua distinguishes the two reasons.
 func (rt *jsrt) luToIntOp(v interface{}) int64 {
-	a, ok := luToNum(v)
+	a, ok := v, luIsNum(v)
 	if !ok {
 		rt.luFail("attempt to perform bitwise operation on a %s value", rt.luTypeName(v))
 	}

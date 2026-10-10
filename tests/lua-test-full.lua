@@ -1164,6 +1164,22 @@ function s27()
     ok, e = pcall(function() return id(1) >= id("x") end)
     check("err41", at(e, "attempt to compare string with number"), 116)
     check("err42", id("a") < id("b"), true)
+    -- An arithmetic operand that is no number: with a string involved the error is
+    -- the string library's and names the operator and both types; ^ is checked like
+    -- the rest; and a string does not coerce in a bitwise operation at all.
+    ok, e = pcall(function() return id("a") + 1 end)
+    check("err43", at(e, "attempt to add a 'string' with a 'number'"), 122)
+    ok, e = pcall(function() return id({}) * id("1") end)
+    check("err44", at(e, "attempt to mul a 'table' with a 'string'"), 124)
+    ok, e = pcall(function() return -id("x") end)
+    check("err45", at(e, "attempt to unm a 'string' with a 'string'"), 126)
+    ok, e = pcall(function() return id("a") ^ 2 end)
+    check("err46", at(e, "attempt to pow a 'string' with a 'number'"), 128)
+    ok, e = pcall(function() return id(true) // 2 end)
+    check("err47", at(e, "attempt to perform arithmetic on a boolean value"), 130)
+    ok, e = pcall(function() return id("3") & 1 end)
+    check("err48", at(e, "attempt to perform bitwise operation on a string value"), 132)
+    check("err49", id("10") + 1 .. " " .. id("2") ^ 2 .. " " .. -id("4"), "11 4.0 -4")
 end
 
 -- ===== SECTION 28: pairs hands a key back as the value that stored it =====
