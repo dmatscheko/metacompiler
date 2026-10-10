@@ -2531,7 +2531,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (c0 == "@") {
                 if (t.charAt(1) == "@") { return cvarHolder(t.slice(2)) != null ? "class variable" : null }
                 var ds = anytype
-                ds = findSelf()
+                ds = ivarSelf()
                 if (ds === null || ds === undefined || typeof ds != "object") { return null }
                 return hasOwn(ds, t.slice(1)) ? "instance-variable" : null
             }
@@ -2554,10 +2554,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return null
         }
     }
+    // Outside every method `self` is MRI's `main` object, and an @ivar written there
+    // (or in a top-level def called from there) lives on it. Twin of the $main slot
+    // in ruby-to-llvm-ir.abnf.
+    var mainObj = {}
+    function ivarSelf() {
+        var s = findSelf()
+        if (s === null || s === undefined) { return mainObj }
+        return s
+    }
     function makeIvarRef(name) {
         return function() {
-            var s = findSelf()
-            if (s === null || s === undefined) { fail("@" + name + " outside of a method") }
+            var s = ivarSelf()
             return hasOwn(s, name) ? s[name] : null
         }
     }
@@ -9020,8 +9028,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ref.gvar != undefined) { return hasOwn(rubyGlobals, ref.gvar) ? rubyGlobals[ref.gvar] : null }
         if (ref.cvar != undefined) { return makeCvarRef(ref.cvar)() }
         if (ref.ivar != undefined) {
-            var s = findSelf()
-            if (s === null || s === undefined) { fail("@" + ref.ivar + " outside of a method") }
+            var s = ivarSelf()
             return hasOwn(s, ref.ivar) ? s[ref.ivar] : null
         }
         return getVar(ref.name)
@@ -9047,9 +9054,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ref.gvar != undefined) { scopePut(rubyGlobals, ref.gvar, v); return }
         if (ref.cvar != undefined) { setCvar(ref.cvar, v); return }
         if (ref.ivar != undefined) {
-            var s = findSelf()
-            if (s === null || s === undefined) { fail("@" + ref.ivar + " outside of a method") }
-            ivarPut(s, ref.ivar, v)
+            ivarPut(ivarSelf(), ref.ivar, v)
             return
         }
         rubySet(ref.name, v)

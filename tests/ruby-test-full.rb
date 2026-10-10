@@ -3015,6 +3015,28 @@ def s57
   check("lc57d", g == 4)
 end
 
+# ===== SECTION 58: an @ivar outside every method lives on `main` =====
+# At the top level `self` is the main object: an @ivar written there is readable
+# there and from a top-level def called from there, and the other way round. Every
+# right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER
+# REAL RUBY.
+@s58a = 1
+@s58a += 2
+S58R = [@s58a, @s58none, defined?(@s58a), defined?(@s58none)]
+def s58set
+  @s58b = 9
+end
+def s58get
+  @s58a
+end
+s58set
+S58B = [@s58b]
+[1].each { @s58c = 4 }
+S58B.push(@s58c)
+def s58
+  check("iv58a", S58R == [3, nil, "instance-variable", nil] && s58get == 3 && S58B == [9, 4])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3034,5 +3056,6 @@ s54() # SECTION-CALL 54
 s55() # SECTION-CALL 55
 s56() # SECTION-CALL 56
 s57() # SECTION-CALL 57
+s58() # SECTION-CALL 58
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

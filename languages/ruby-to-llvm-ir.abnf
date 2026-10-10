@@ -2755,10 +2755,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeSelf() {
         return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])} }
     }
+    // The object an @ivar lives on: `self` inside a method or class body, and outside
+    // every one MRI's `main` object, which jsmain binds as $main. curHasSelf says
+    // whether the function being emitted (or one it is nested in) declared `self`.
+    // Twin of ivarSelf in ruby-interpreter.abnf.
+    var curHasSelf = false
+    function emitIvarSelf(b) {
+        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, curHasSelf ? "self" : "$main")])
+    }
     function makeIvarRef(name) {
         return function(b) {
-            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-            return {b: b, v: callExt(b, "js_get", [selfV, emitStr(b, name)])}
+            return {b: b, v: callExt(b, "js_get", [emitIvarSelf(b), emitStr(b, name)])}
         }
     }
 
@@ -3501,9 +3508,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return b
         }
         if (name.charAt(0) == "$") { callExt(b, "js_rgset", [emitStr(b, name.slice(1)), v]); return b }
-        var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-        if (name.charAt(1) == "@") { callExt(b, "js_rcvset", [selfV, emitStr(b, name.slice(2)), v]); return b }
-        callExt(b, "js_set", [selfV, emitStr(b, name.slice(1)), v])
+        if (name.charAt(1) == "@") {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            callExt(b, "js_rcvset", [selfV, emitStr(b, name.slice(2)), v])
+            return b
+        }
+        callExt(b, "js_set", [emitIvarSelf(b), emitStr(b, name.slice(1)), v])
         return b
     }
     function makeForIn(items) {
@@ -3600,8 +3610,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // ScopedConst primary uses.
         if (ref.sconst != undefined) { return makeScopedConst(ref.sconst)(b) }
         if (ref.ivar != undefined) {
-            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-            return {b: b, v: callExt(b, "js_get", [selfV, emitStr(b, ref.ivar)])}
+            return {b: b, v: callExt(b, "js_get", [emitIvarSelf(b), emitStr(b, ref.ivar)])}
         }
         if (ref.gvar != undefined) {
             return {b: b, v: callExt(b, "js_rgget", [emitStr(b, ref.gvar)])}
@@ -3621,8 +3630,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return b
         }
         if (ref.ivar != undefined) {
-            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-            callExt(b, "js_set", [selfV, emitStr(b, ref.ivar), v])
+            callExt(b, "js_set", [emitIvarSelf(b), emitStr(b, ref.ivar), v])
             return b
         }
         if (ref.gvar != undefined) {
@@ -5047,6 +5055,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedMFrame = curMethodFrame
         var savedBlkNL = curBlkNonlocal
         var savedBlkArg = emitBlkArg
+        var savedHasSelf = curHasSelf
+        if (isMethod) { curHasSelf = true }
         // A def (or a method in a class body) is the frame a block's `return' leaves;
         // a block inherits the method it was written in. emitBlkArg is consumed once
         // here, so a lambda or proc written INSIDE a wrapped block does not inherit
@@ -5098,6 +5108,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curMethodFrame = savedMFrame
         curBlkNonlocal = savedBlkNL
         emitBlkArg = savedBlkArg
+        curHasSelf = savedHasSelf
         return idx
     }
     function makeFun(items) {
@@ -5760,7 +5771,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         if (txt.length > 1 && txt.charAt(0) == "@") {
-            return function(b) { return {b: b, v: callExt(b, "js_rvardefined", [curScopeV, emitStr(b, txt)])} }
+            return function(b) {
+                if (curHasSelf || txt.charAt(1) == "@") {
+                    return {b: b, v: callExt(b, "js_rvardefined", [curScopeV, emitStr(b, txt)])}
+                }
+                // On `main`: defined once assigned, even to nil (an absent slot is undefined).
+                var mv = callExt(b, "js_get", [emitIvarSelf(b), emitStr(b, txt.slice(1))])
+                return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, mv, hUndef), hNull, emitStr(b, "instance-variable"))}
+            }
         }
         if (!isPlainName(txt)) {
             return function(b) { return {b: b, v: emitStr(b, "expression")} }
@@ -6807,6 +6825,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The root binding of the implicit-block slot, so `block_given?' at the top
         // level resolves to false instead of failing the scope lookup (see curBlockV).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkSlot), hNull])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$main"), callExt(b, "js_obj_new", [])])
         // The builtin class constants, so `case v when Integer`, `v.is_a?(String)`
         // and `rescue ArgumentError` name a real class object (js_rclass hands out
         // one object per name, so the identity comparisons hold).
