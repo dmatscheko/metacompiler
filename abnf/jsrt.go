@@ -15386,9 +15386,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pycomplex": func(a []uint64) uint64 {
 			return w(newPyComplex(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
 		},
-		// complex(...): the argument array.
+		// complex(real=0, imag=0), bound as [positionals, keywords].
 		"js_pycomplexnew": func(a []uint64) uint64 {
-			return w(rt.pyComplexNew(rt.argArray(u(a[0]))))
+			el := u(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
+				pos = rt.pyKwPos("complex", pos, el[1], []string{"real", "imag"}, 0)
+				if pos[0] == jsUndef {
+					pos[0] = 0.0
+				}
+			}
+			return w(rt.pyComplexNew(pos))
 		},
 		// x: T in a class or module body records the annotation. __annotations__ is
 		// created in THIS scope on first use (js_scope_decl writes the own scope, so a
@@ -15973,15 +15981,29 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return 0
 		},
-		// int(v): Python's truncation toward zero (a bigint stays exact).
+		// int(x=0, /, base=10), bound by its signature as [positionals, keywords].
 		"js_pyint": func(a []uint64) uint64 {
-			if bi, ok := u(a[0]).(*jsBigInt); ok {
-				return w(bi)
+			el := u(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
+				pos = rt.pyKwPos("int", pos, el[1], []string{"x", "base"}, 1)
 			}
-			if fl, ok := u(a[0]).(*jsPyFlo); ok {
-				return w(rt.pyFloatToInt(fl.f))
+			return w(rt.pyIntNew(pos))
+		},
+		// str(object='', encoding=..., errors=...), bound as [positionals, keywords].
+		"js_pystrnew": func(a []uint64) uint64 {
+			el := u(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
+				if len(pos) == 0 && !rt.pyKwHas(el[1], "object") {
+					pos = []interface{}{""}
+				}
+				pos = rt.pyKwPos("str", pos, el[1], []string{"object", "encoding", "errors"}, 0)
 			}
-			return rt.wrapNum(math.Trunc(rt.toNumber(u(a[0]))))
+			if len(pos) == 0 {
+				return rt.wrapStr("")
+			}
+			return pyExternMaps[rt]["js_pyrxstr"]([]uint64{w(pos[0])})
 		},
 		// Remember the name a `def` bound a closure under and hand the closure back,
 		// so f.__name__ can answer it (a closure carries no name of its own).
@@ -16626,24 +16648,33 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.pySetAttr(argAt(args, 0), rt.toString(argAt(args, 1)), argAt(args, 2))
 			return jsHUndefined
 		},
-		// sum(iterable, start=0) folds with Python's own `+` (js_pybin), so a float,
-		// an arbitrary precision int, a complex or a list start all add as they do
-		// in CPython, and "a" + 1 raises. A str start is refused outright.
+		// sum(iterable, /, start=0), bound by its signature as [positionals,
+		// keywords]. A str start is refused outright.
 		"js_pysum": func(a []uint64) uint64 {
-			total := rt.wrapNum(0)
-			if st := u(a[1]); st != jsUndef {
-				if _, isStr := st.(string); isStr {
-					panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-						"sum() can't sum strings [use ''.join(seq) instead]")})
-				}
-				total = a[1]
+			el := u(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			rt.pyKwOnly(el[1], "sum", "start", "start")
+			start := rt.pyKwArg(el[1], "start")
+			given := len(pos)
+			if rt.pyKwHas(el[1], "start") {
+				given++
 			}
-			add := pyExternMaps[rt]["js_pybin"]
-			plus := rt.wrapStr("+")
-			for _, e := range rt.pyElemsOf(u(a[0])) {
-				total = add([]uint64{plus, total, w(e)})
+			if len(pos) == 0 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"sum() takes at least 1 positional argument (0 given)")})
 			}
-			return total
+			if given > 2 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					fmt.Sprintf("sum() takes at most 2 arguments (%d given)", given))})
+			}
+			if len(pos) == 2 {
+				start = pos[1]
+			}
+			if _, isStr := start.(string); isStr {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"sum() can't sum strings [use ''.join(seq) instead]")})
+			}
+			return w(rt.pySum(pos[0], start))
 		},
 		// format(v, spec, conv): the slice of Python's format mini-language an
 		// f-string replacement field writes - [[fill]align][sign][0][width]
@@ -19664,6 +19695,21 @@ func (rt *jsrt) pyKwOnly(kw interface{}, fname, a, b string) {
 	}
 }
 
+// pyKwHas says whether a keyword argument was passed at all - None included,
+// which the compiled halves represent as undefined.
+func (rt *jsrt) pyKwHas(kw interface{}, name string) bool {
+	keys, _, ok := dictParts(kw)
+	if !ok {
+		return false
+	}
+	for _, k := range keys.elems {
+		if rt.toString(k) == name {
+			return true
+		}
+	}
+	return false
+}
+
 // pyKwArg reads one keyword argument out of the keyword dict a method call
 // carries, or undefined when it was not passed.
 func (rt *jsrt) pyKwArg(kw interface{}, name string) interface{} {
@@ -20190,9 +20236,16 @@ func pyForeignMethod(target interface{}, name string) bool {
 // pyConvArgs is the argument array for a builtin type's conversion closure: one
 // marked __convkw (dict) carries a signature and takes its arguments bound, the
 // others take the positionals as they are.
+// A conversion without one takes no keyword arguments at all, as in CPython
+// (type, whose error differs, is left alone).
 func (rt *jsrt) pyConvArgs(cls *jsObject, conv interface{}, args []interface{}, kw interface{}) []interface{} {
 	if _, bound := cls.props["__convkw"]; bound {
 		return rt.pyBindCall(conv, args, kw)
+	}
+	if keys, _, ok := dictParts(kw); ok && len(keys.elems) > 0 {
+		if name := rt.toString(cls.props["__name"]); name != "type" {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError", name+"() takes no keyword arguments")})
+		}
 	}
 	return args
 }
@@ -21233,15 +21286,7 @@ func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
 	}
 	rt.pyKwOnly(kw, fname, "key", "default")
 	key := rt.pyKwArg(kw, "key")
-	var dflt interface{} = jsUndef
-	hasDflt := false
-	if keys, vals, ok := dictParts(kw); ok {
-		for i, k := range keys.elems {
-			if rt.toString(k) == "default" {
-				dflt, hasDflt = vals.elems[i], true
-			}
-		}
-	}
+	dflt, hasDflt := rt.pyKwArg(kw, "default"), rt.pyKwHas(kw, "default")
 	switch {
 	case len(elems) == 0:
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", fname+" expected at least 1 argument, got 0")})
@@ -21271,6 +21316,216 @@ func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
 		}
 	}
 	return rt.wrap(best)
+}
+
+// pyKwPos is a builtin's arguments as positionals: the keyword arguments of
+// names are moved into their slots (the first nposonly are positional-only),
+// an absent slot stays undefined. CPython's TypeError for an unknown keyword or
+// one given twice. Twin of pyKwPos in python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (rt *jsrt) pyKwPos(fname string, pos []interface{}, kw interface{}, names []string, nposonly int) []interface{} {
+	keys, vals, _ := dictParts(kw)
+	if given := len(pos) + len(keys.elems); given > len(names) {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			fmt.Sprintf("%s() takes at most %d arguments (%d given)", fname, len(names), given))})
+	}
+	out := append([]interface{}{}, pos...)
+	for k, kv := range keys.elems {
+		kn := rt.toString(kv)
+		at := -1
+		for j := nposonly; j < len(names); j++ {
+			if names[j] == kn {
+				at = j
+			}
+		}
+		if at < 0 {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				fname+"() got an unexpected keyword argument '"+kn+"'")})
+		}
+		if at < len(pos) {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				fmt.Sprintf("argument for %s() given by name ('%s') and position (%d)", fname, kn, at+1))})
+		}
+		for len(out) <= at {
+			out = append(out, jsUndef)
+		}
+		out[at] = vals.elems[k]
+	}
+	return out
+}
+
+// pyIntNew is int(x=0, /, base=10). With a base, x must be a str and is parsed
+// in that base; without one, a str is parsed in base 10 and a number TRUNCATES
+// (a bigint stays exact).
+func (rt *jsrt) pyIntNew(args []interface{}) interface{} {
+	if len(args) > 2 {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			fmt.Sprintf("int expected at most 2 arguments, got %d", len(args)))})
+	}
+	var v interface{} = jsUndef
+	if len(args) > 0 {
+		v = args[0]
+	}
+	if len(args) < 2 || args[1] == jsUndef {
+		switch x := v.(type) {
+		case jsUndefT:
+			return 0.0
+		case string:
+			return rt.pyParseInt(x, 10)
+		case *jsBigInt:
+			return x
+		case *jsPyFlo:
+			return rt.pyFloatToInt(x.f)
+		}
+		return math.Trunc(rt.toNumber(v))
+	}
+	if v == jsUndef {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "int() missing string argument")})
+	}
+	var base float64
+	switch b := args[1].(type) {
+	case float64:
+		base = b
+	case bool:
+		if b {
+			base = 1
+		}
+	case *jsBigInt:
+		base = 37
+	default:
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+			"'"+pyTypeName(rt, b)+"' object cannot be interpreted as an integer")})
+	}
+	if (base != 0 && base < 2) || base > 36 {
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", "int() base must be >= 2 and <= 36, or 0")})
+	}
+	s, ok := v.(string)
+	if !ok {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "int() can't convert non-string with explicit base")})
+	}
+	return rt.pyParseInt(s, int(base))
+}
+
+// pyParseInt is CPython's int-from-str: surrounding whitespace, a sign, a
+// 0x/0o/0b prefix (required to match the base, or choosing it under base 0),
+// single underscores between digits or right after the prefix, and under base
+// 0 no leading zero on a non-zero decimal.
+func (rt *jsrt) pyParseInt(s string, base int) interface{} {
+	t := strings.TrimSpace(s)
+	neg := false
+	if t != "" && (t[0] == '+' || t[0] == '-') {
+		neg, t = t[0] == '-', t[1:]
+	}
+	b, prefixed := base, false
+	if len(t) >= 2 && t[0] == '0' {
+		pb := map[byte]int{'x': 16, 'X': 16, 'o': 8, 'O': 8, 'b': 2, 'B': 2}[t[1]]
+		if pb != 0 && (b == 0 || b == pb) {
+			b, prefixed, t = pb, true, t[2:]
+		}
+	}
+	ok := t != ""
+	if b == 0 {
+		b = 10
+		if ok && t[0] == '0' && strings.Trim(t, "0_") != "" {
+			ok = false
+		}
+	}
+	acc := new(big.Int)
+	prevDigit := prefixed
+	for i := 0; i < len(t) && ok; i++ {
+		ch := t[i]
+		if ch == '_' {
+			ok = prevDigit
+			prevDigit = false
+			continue
+		}
+		if ch >= 'A' && ch <= 'Z' {
+			ch += 'a' - 'A'
+		}
+		d := strings.IndexByte("0123456789abcdefghijklmnopqrstuvwxyz", ch)
+		if d < 0 || d >= b {
+			ok = false
+			break
+		}
+		acc.Mul(acc, big.NewInt(int64(b)))
+		acc.Add(acc, big.NewInt(int64(d)))
+		prevDigit = true
+	}
+	if !ok || !prevDigit {
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError",
+			fmt.Sprintf("invalid literal for int() with base %d: %s", base, pyStrRepr(s)))})
+	}
+	if neg {
+		acc.Neg(acc)
+	}
+	return rt.pyBigNarrow(acc)
+}
+
+// pySum folds with Python's own `+` (js_pybin), so a float, an arbitrary
+// precision int, a complex or a list start all add as they do in CPython, and
+// "a" + 1 raises - except over floats: CPython 3.12+ keeps a run of floats (and
+// ints) in a C double with Neumaier's compensated summation, entered from an
+// int start at the first float or from a float start, and left for good at the
+// first item of any other type. sum([0.1] * 10) is 1.0. mode is 0 for the int
+// run, 1 for the float run, 2 for plain `+`.
+func (rt *jsrt) pySum(iter, start interface{}) interface{} {
+	var t interface{} = 0.0
+	if start != jsUndef {
+		t = start
+	}
+	mode := 2
+	var f, c float64
+	switch tv := t.(type) {
+	case float64:
+		mode = 0
+	case *jsPyFlo:
+		mode, f = 1, tv.f
+	}
+	add := pyExternMaps[rt]["js_pybin"]
+	plus := rt.wrapStr("+")
+	for _, e := range rt.pyElemsOf(iter) {
+		_, isNum := e.(float64)
+		_, isBool := e.(bool)
+		isInt := isNum || isBool
+		if mode == 1 {
+			if x, ok := e.(*jsPyFlo); ok {
+				s := f + x.f
+				if math.Abs(f) >= math.Abs(x.f) {
+					c += (f - s) + x.f
+				} else {
+					c += (x.f - s) + f
+				}
+				f = s
+				continue
+			}
+			if isInt {
+				f += rt.toNumber(e)
+				continue
+			}
+			t, mode = &jsPyFlo{f: pySumEnd(f, c)}, 2
+		}
+		t = rt.unwrap(add([]uint64{plus, rt.wrap(t), rt.wrap(e)}))
+		if _, stillInt := t.(float64); mode == 0 && (!isInt || !stillInt) {
+			mode = 2
+			if fl, ok := t.(*jsPyFlo); ok && !isInt {
+				mode, f, c = 1, fl.f, 0
+			}
+		}
+	}
+	if mode == 1 {
+		return &jsPyFlo{f: pySumEnd(f, c)}
+	}
+	return t
+}
+
+// pySumEnd ends sum()'s float run: the compensation is added back unless it is
+// zero (which keeps a -0.0 total) or not finite (which would turn an infinite
+// total into a NaN).
+func pySumEnd(f, c float64) float64 {
+	if c != 0 && !math.IsInf(c, 0) && !math.IsNaN(c) {
+		return f + c
+	}
+	return f
 }
 
 // pyOrder answers Python's `l op r` for an order operator: js_pybin's rules, so

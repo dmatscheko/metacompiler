@@ -3482,6 +3482,59 @@ def s62():
                            "TypeError: sort() got an unexpected keyword argument 'kk'"])
 
 
+# ===== SECTION 63: sum() of floats, math.cbrt, int() with a base, conversion keywords =====
+# sum() adds a run of floats with Neumaier's compensated summation (CPython
+# 3.12+), so sum([0.1] * 10) is exactly 1.0. int(x, base) parses a str in base
+# 2..36 or 0 (the prefix chooses), with underscores between digits, and raises
+# CPython's errors. float/bool/list/tuple/set take no keyword arguments.
+def s63():
+    import math
+    tenth = [0.1] * 10
+    big = [1e16, 1.0, -1e16]
+    check("sum1", sum(tenth) == 1.0 and sum(big) == 1.0 and sum([1e100, 1.0, -1e100]) == 1.0
+          and sum([3, 0.1, 0.1, 0.1]) == 3.3000000000000003)
+    check("sum2", sum(tenth, 0.5) == 1.5 and sum(tenth, start=1) == 2.0 and sum([], start=2.5) == 2.5
+          and sum([1, 2, 3], start=10) == 16 and sum([1e308, 1e308, -1e308]) == float("inf"))
+    check("sum3", repr(sum([-0.0], -0.0)) == "-0.0" and repr(sum([0.1, 0.2, 0.3, 0.4], -1)) == "0.0"
+          and sum(x / 7 for x in range(50)) == 175.0)
+    check("cbrt1", math.cbrt(27) == 3.0 and math.cbrt(-8) == -2.0 and math.cbrt(64) == 4.0
+          and repr(math.cbrt(-0.0)) == "-0.0" and math.cbrt(float("inf")) == float("inf"))
+    check("int1", [int("10", base=2), int("ff", 16), int("Z", base=36), int("0x1f", base=0), int(" +0b1_01 ", 0),
+                   int("0o17", 8), int("1_000"), int("000", 0), int("0x_1F", 16)] == [2, 255, 35, 31, 5, 15, 1000, 0, 31])
+    check("int2", int("ffffffffffffffffffff", 16) == 2 ** 80 - 1 and int("-9007199254740993") == -9007199254740993
+          and int() == 0 and int("\t12\n") == 12)
+    msgs = []
+    for f in [lambda: int("010", 0), lambda: int("1__0"), lambda: int("12a"), lambda: int("0x", 16), lambda: int("3.9"),
+              lambda: int(""), lambda: int("2", base=2), lambda: int(5, base=2), lambda: int("1", base=37),
+              lambda: int("1", base=2.0), lambda: int(base=10), lambda: int(x=3), lambda: int("1", 2, 3),
+              lambda: float(x=1), lambda: list(iterable=[1]), lambda: str(5, foo=1), lambda: sum([1], st=2),
+              lambda: sum([1], 2, start=3), lambda: complex(1, real=2)]:
+        try:
+            f()
+        except (TypeError, ValueError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("int3", msgs[:6] == ["ValueError: invalid literal for int() with base 0: '010'",
+                               "ValueError: invalid literal for int() with base 10: '1__0'",
+                               "ValueError: invalid literal for int() with base 10: '12a'",
+                               "ValueError: invalid literal for int() with base 16: '0x'",
+                               "ValueError: invalid literal for int() with base 10: '3.9'",
+                               "ValueError: invalid literal for int() with base 10: ''"])
+    check("int4", msgs[6:13] == ["ValueError: invalid literal for int() with base 2: '2'",
+                                 "TypeError: int() can't convert non-string with explicit base",
+                                 "ValueError: int() base must be >= 2 and <= 36, or 0",
+                                 "TypeError: 'float' object cannot be interpreted as an integer",
+                                 "TypeError: int() missing string argument",
+                                 "TypeError: int() got an unexpected keyword argument 'x'",
+                                 "TypeError: int expected at most 2 arguments, got 3"])
+    check("int5", msgs[13:] == ["TypeError: float() takes no keyword arguments", "TypeError: list() takes no keyword arguments",
+                                "TypeError: str() got an unexpected keyword argument 'foo'",
+                                "TypeError: sum() got an unexpected keyword argument 'st'",
+                                "TypeError: sum() takes at most 2 arguments (3 given)",
+                                "TypeError: argument for complex() given by name ('real') and position (1)"])
+    check("int6", str(object=5) == "5" and complex(real=1, imag=2) == 1 + 2j and complex(imag=2) == 2j
+          and int("7", base=10) == 7 and str(None) == "None" and str(object=None) == "None" and str(encoding="u") == "")
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3545,5 +3598,6 @@ def main():
     s60() # SECTION-CALL 60
     s61() # SECTION-CALL 61
     s62() # SECTION-CALL 62
+    s63() # SECTION-CALL 63
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

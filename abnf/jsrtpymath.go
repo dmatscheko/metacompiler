@@ -136,7 +136,7 @@ func pyMathGcd(a, b float64) float64 {
 // languages/python-interpreter.abnf.
 func pyMathHas(name string) bool {
 	switch name {
-	case "sqrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
+	case "sqrt", "cbrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
 		"fabs", "fmod", "copysign", "atan2", "hypot",
 		"sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
 		"degrees", "radians", "floor", "ceil", "trunc",
@@ -170,6 +170,8 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 			pyMathDom(rt, "nonneg", x)
 		}
 		return pyMathFlo(math.Sqrt(x))
+	case "cbrt":
+		return pyMathFlo(math.Cbrt(pyMathArg(rt, args, 0)))
 	case "exp":
 		x := pyMathArg(rt, args, 0)
 		return pyMathRange(rt, math.Exp(x), x)

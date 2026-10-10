@@ -1339,9 +1339,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
     // pyCall routes here rather than instantiating a class.
     function pyConvert(name, args, named) {
+        if (named != null && named.keys.length > 0) {
+            if (name == "int") { return pyIntNew(pyKwPos("int", args, named, ["x", "base"], 1)) }
+            if (name == "str") {
+                if (args.length == 0 && dictFind(named, "object") < 0) { args = [""] }
+                args = pyKwPos("str", args, named, ["object", "encoding", "errors"], 0)
+            }
+            else if (name == "complex") {
+                args = pyKwPos("complex", args, named, ["real", "imag"], 0)
+                if (args[0] === undefined) { args[0] = 0 }
+            }
+            else if (name != "dict" && name != "type") { pyListErr("TypeError", name + "() takes no keyword arguments") }
+        }
         var v = args.length > 0 ? args[0] : undefined
         if (name == "str") { return args.length == 0 ? "" : pstr(v) }
-        if (name == "int") { return pyToInt(v) }
+        if (name == "int") { return pyIntNew(args) }
         if (name == "float") {
             if (typeof v == "string") { return pyFlo(pyStrToF(v)) }
             if (bigIsBig(v)) { return pyFlo(bigToFlo(v)) }
@@ -1369,10 +1381,111 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "complex") { return pyComplexNew(args) }
         fail("TypeError: cannot construct " + name)
     }
-    // int(x): a string is parsed, an arbitrary precision integer stays itself and
-    // every other number TRUNCATES towards zero (int(-2.9) is -2).
+    // A builtin's arguments as positionals: the keyword arguments of NAMES are
+    // moved into their slots (the first NPOSONLY are positional-only), an absent
+    // slot stays undefined. CPython's TypeError for an unknown keyword or one
+    // given twice. Twin of rt.pyKwPos in abnf/jsrt.go and pyKwPos in
+    // lib/python-rt.metajs.
+    function pyKwPos(fname, args, named, names, nposonly) {
+        var given = args.length + named.keys.length
+        if (given > names.length) {
+            pyListErr("TypeError", fname + "() takes at most " + names.length + " arguments (" + given + " given)")
+        }
+        var out = args.slice(0)
+        for (var k = 0; k < named.keys.length; k++) {
+            var kn = named.keys[k]
+            var at = 0 - 1
+            for (var j = nposonly; j < names.length; j++) { if (names[j] == kn) { at = j } }
+            if (at < 0) { pyListErr("TypeError", fname + "() got an unexpected keyword argument '" + kn + "'") }
+            if (at < args.length) {
+                pyListErr("TypeError", "argument for " + fname + "() given by name ('" + kn + "') and position (" + (at + 1) + ")")
+            }
+            while (out.length <= at) { out.push(undefined) }
+            out[at] = named.vals[k]
+        }
+        return out
+    }
+    // int(x=0, /, base=10). With a base, x must be a str and is parsed in that
+    // base; without one, a str is parsed in base 10 and a number TRUNCATES.
+    // Twin of rt.pyIntNew in abnf/jsrt.go and js_pyint in lib/python-rt.metajs.
+    function pyIntNew(args) {
+        if (args.length > 2) { pyListErr("TypeError", "int expected at most 2 arguments, got " + args.length) }
+        var v = anytype
+        v = args.length > 0 ? args[0] : undefined
+        if (args.length < 2 || args[1] === undefined) {
+            if (v === undefined) { return 0 }
+            return pyToInt(v)
+        }
+        if (v === undefined) { pyListErr("TypeError", "int() missing string argument") }
+        var ob = anytype
+        ob = args[1]
+        if (isFlo(ob) || (typeof ob != "number" && typeof ob != "boolean" && !bigIsBig(ob))) {
+            pyListErr("TypeError", "'" + pyTypeOf(ob).__name + "' object cannot be interpreted as an integer")
+        }
+        var base = floVal(ob)
+        if ((base != 0 && base < 2) || base > 36) { pyListErr("ValueError", "int() base must be >= 2 and <= 36, or 0") }
+        if (typeof v != "string") { pyListErr("TypeError", "int() can't convert non-string with explicit base") }
+        return pyParseInt(v, base)
+    }
+    // CPython's int-from-str: surrounding whitespace, a sign, a 0x/0o/0b prefix
+    // (required to match the base, or choosing it under base 0), single
+    // underscores between digits or right after the prefix, and under base 0 no
+    // leading zero on a non-zero decimal. Past 2^53 the digits accumulate in
+    // binOp, so the result is exact.
+    function pyParseInt(s, base) {
+        var t = s.trim()
+        var neg = false
+        if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
+            neg = t.charAt(0) == "-"
+            t = t.substring(1)
+        }
+        var b = base
+        var prefixed = false
+        if (t.length >= 2 && t.charAt(0) == "0") {
+            var pc = t.charAt(1).toLowerCase()
+            var pb = 0
+            if (pc == "x") { pb = 16 }
+            if (pc == "o") { pb = 8 }
+            if (pc == "b") { pb = 2 }
+            if (pb != 0 && (b == 0 || b == pb)) {
+                b = pb
+                prefixed = true
+                t = t.substring(2)
+            }
+        }
+        var ok = t.length > 0
+        if (b == 0) {
+            b = 10
+            if (t.charAt(0) == "0") {
+                for (var z = 0; z < t.length; z++) { if (t.charAt(z) != "0" && t.charAt(z) != "_") { ok = false } }
+            }
+        }
+        var acc = anytype
+        acc = 0
+        var prevDigit = prefixed
+        for (var i = 0; i < t.length && ok; i++) {
+            var ch = t.charAt(i)
+            if (ch == "_") {
+                if (!prevDigit) { ok = false }
+                prevDigit = false
+                continue
+            }
+            var d = "0123456789abcdefghijklmnopqrstuvwxyz".indexOf(ch.toLowerCase())
+            if (d < 0 || d >= b) { ok = false }
+            else if (typeof acc == "number" && acc <= (bigMaxNum - d) / b) { acc = acc * b + d }
+            else { acc = binOp("+", binOp("*", acc, b), d) }
+            prevDigit = true
+        }
+        if (!ok || !prevDigit) {
+            pyListErr("ValueError", "invalid literal for int() with base " + base + ": " + pyStrRepr(s))
+        }
+        if (neg) { return binOp("-", 0, acc) }
+        return acc
+    }
+    // int(x) of a number: an arbitrary precision integer stays itself and every
+    // other number TRUNCATES towards zero (int(-2.9) is -2).
     function pyToInt(v) {
-        if (typeof v == "string") { return parseInt(v) }
+        if (typeof v == "string") { return pyParseInt(v, 10) }
         if (bigIsBig(v)) { return v }
         if (isFlo(v)) { return floToInt(v.__flo) }
         var f = floVal(v)
@@ -1426,19 +1539,77 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return clsIsSub(c1, c2)
     }
     hostGlobals["repr"] = function(v) { return prepr(v) }
-    // sum() adds through binOp so a float in the sequence makes the total a
-    // float (sum([1.0, 2]) is 3.0). The accumulator is `anytype` because MetaJS
-    // is TYPED: a local that started as the number 0 could not later hold a box.
-    hostGlobals["sum"] = function(v, start) {
-        var a = iterToList(v)
+    // sum(iterable, /, start=0) adds through binOp, so sum([1.0, 2]) is 3.0 -
+    // except over floats. CPython 3.12+ keeps a run of floats (and ints) in a
+    // C double with Neumaier's compensated summation, entered from an int start
+    // at the first float or from a float start, and left for good at the first
+    // item of any other type: sum([0.1] * 10) is 1.0. mode is 0 for the int run,
+    // 1 for the float run, 2 for plain `+`. The accumulator is `anytype` because
+    // MetaJS is TYPED: a local that started as the number 0 could not later hold
+    // a box. Twin of rt.pySum in abnf/jsrt.go and js_pysum in lib/python-rt.metajs.
+    hostGlobals["sum"] = function() {
+        var kw = kTakeNamed()
+        pyKwOnly(kw, "sum", "start", "start")
         var t = anytype
         t = 0
+        var start = anytype
+        start = pyKwArg(kw, "start")
+        var given = arguments.length
+        if (kw != null && dictFind(kw, "start") >= 0) { given = given + 1 }
+        if (arguments.length == 0) { pyListErr("TypeError", "sum() takes at least 1 positional argument (0 given)") }
+        if (given > 2) { pyListErr("TypeError", "sum() takes at most 2 arguments (" + given + " given)") }
+        if (arguments.length == 2) { start = arguments[1] }
         if (start !== undefined) {
             if (typeof start == "string") { pyListErr("TypeError", "sum() can't sum strings [use ''.join(seq) instead]") }
             t = start
         }
-        for (var i = 0; i < a.length; i++) { t = binOp("+", t, a[i]) }
+        var a = iterToList(arguments[0])
+        var mode = 2
+        if (typeof t == "number") { mode = 0 }
+        var f = 0
+        var c = 0
+        if (isFlo(t)) {
+            mode = 1
+            f = t.__flo
+        }
+        for (var i = 0; i < a.length; i++) {
+            var e = anytype
+            e = a[i]
+            var isInt = typeof e == "number" || typeof e == "boolean"
+            if (mode == 1) {
+                if (isFlo(e)) {
+                    var x = e.__flo
+                    var s = f + x
+                    if (Math.abs(f) >= Math.abs(x)) { c = c + ((f - s) + x) } else { c = c + ((x - s) + f) }
+                    f = s
+                    continue
+                }
+                if (isInt) {
+                    f = f + floVal(e)
+                    continue
+                }
+                t = pyFlo(pySumEnd(f, c))
+                mode = 2
+            }
+            t = binOp("+", t, e)
+            if (mode == 0 && (!isInt || typeof t != "number")) {
+                mode = 2
+                if (!isInt && isFlo(t)) {
+                    mode = 1
+                    f = t.__flo
+                    c = 0
+                }
+            }
+        }
+        if (mode == 1) { return pyFlo(pySumEnd(f, c)) }
         return t
+    }
+    // The end of sum()'s float run: the compensation is added back unless it is
+    // zero (which keeps a -0.0 total) or not finite (which would turn an
+    // infinite total into a NaN).
+    function pySumEnd(f, c) {
+        if (c != 0 && c - c == 0) { return f + c }
+        return f
     }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     // println is the harness\'s own one-value printer, used by the ratchet files.
@@ -3204,7 +3375,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // need it, because pyMathCall's own fall-through raises the AttributeError.
     // Keep in step with pyMHas in languages/lib/python-rt.metajs and pyMathHas
     // in abnf/jsrtpymath.go.
-    var pyMathNames = ["sqrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
+    var pyMathNames = ["sqrt", "cbrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
                        "fabs", "fmod", "copysign", "atan2", "hypot", "sin", "cos", "tan",
                        "asin", "acos", "atan", "sinh", "cosh", "tanh", "degrees", "radians",
                        "floor", "ceil", "trunc", "gcd", "lcm", "factorial",
@@ -3240,6 +3411,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (sq < 0) { pyMDom("nonneg", sq) }
             return pyFlo(Math.sqrt(sq))
         }
+        if (name == "cbrt") { return pyFlo(Math.cbrt(pyMArg(args, 0))) }
         if (name == "exp") {
             var ex = pyMArg(args, 0)
             return pyMRange(Math.exp(ex), ex)
