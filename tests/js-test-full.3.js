@@ -873,14 +873,11 @@ function s51decl(n) { return n < 2 ? 1 : n * s51decl(n - 1) }
 //     'var a<U+00B7>b' and refuses 'var <U+00B7>b', and so do we.
 //   - U+2176 is a roman numeral (Nl) and IS ID_Start; U+1D7CB is a mathematical digit
 //     (Nd) and is ID_Continue only, so it may not lead a name.
-// No ESCAPED spelling is asserted here: a \u escape in a name is judged by the same
-// guard as the raw character, but only the COMPILER halves resolve it back to the name
-// it spells (idName). 'var \u0061 = 1' binds 'a' in js-to-llvm-ir and binds the literal
-// text '\u0061' in js-interpreter, so 'print(a)' prints 1 in one half and throws
-// ReferenceError in the other (fixing it touches every 'up.in' site of the interpreter
-// grammars). The other half of that guard - '\u002a' being an asterisk and no
-// identifier however it is spelled - is a PARSE error and so only the corpus (test262
-// fail/) can hold it.
+// An ESCAPED spelling is the same name as the raw one (uni09..uni13): every engine
+// resolves a \u escape in a name back to the character it spells (idName) before any
+// scope, property, label or class table sees it. The other half of that guard -
+// '\u002a' being an asterisk and no identifier however it is spelled - is a PARSE
+// error and so only the corpus (test262 fail/) can hold it.
 function s52() {
     var ａ = 11
     check("uni01", ａ === 11)
@@ -897,6 +894,16 @@ function s52() {
     var _𝟋 = 18
     check("uni07", _𝟋 === 18)
     check("uni08", typeof ａ === "number")
+    var \u0061bc = 21
+    check("uni09", abc === 21)
+    var x\u{79}z = 22
+    check("uni10", \u0078yz === 22 && typeof xyz === "number")
+    var uo = { \u006b: 23, k\u0032: 24 }
+    check("uni11", uo.k === 23 && uo.\u006b\u0032 === 24)
+    function \u0067(\u0070) { return p + 1 }
+    check("uni12", g(1) === 2)
+    class \u0055C { m\u0065() { return 25 } }
+    check("uni13", new UC().me() === 25)
 }
 
 // ===== END SECTIONS =====

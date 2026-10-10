@@ -177,7 +177,7 @@ Statement   = Block | ClassDecl | ClassDeclWidened | TryStmt | Destructure | Var
 // the plain 'a: function f(){}' it lets through is the Annex B form, which is legal.
 LabeledStmt <~~ push(makeLabeled(takeAll())) ~~>
             = LabelDef ":" NotDeclHead Statement ;
-LabelDef    <~~ push(up.in); pendingLabel = up.in ~~>
+LabelDef    <~~ push(idName(up.in)); pendingLabel = idName(up.in) ~~>
             = NotReserved Id ;
 
 // JavaScript has TWO statement positions. A StatementList (the program, a block, a
@@ -220,7 +220,7 @@ Declarator  = PatternDeclarator | NameDeclarator ;
 PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = DPattern "=" AssignExpr ;
 NameDeclarator <~~ push(makeDecl(takeAll(), up.in)) ~~>
-            = NotBindName Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+            = NotBindName Id <~~ push(idName(up.in)) ~~> [ "=" AssignExpr ] ;
 
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
 If          <~~ push(makeIf(takeAll())) ~~>
@@ -260,7 +260,7 @@ Break       <~~ push(makeBreakStmt(takeAll())) ~~>
 Continue    <~~ push(makeContinueStmt(takeAll())) ~~>
             = KwContinue [ LabelRef ] StmtEnd ;
 
-LabelRef    <~~ push({lblref: up.in}) ~~>
+LabelRef    <~~ push({lblref: idName(up.in)}) ~~>
             = NoLineBreak NotReserved Id ;
 
 // 'throw' is a RESTRICTED PRODUCTION like 'return', except that its expression is not
@@ -273,7 +273,7 @@ Throw       <~~ push(excThrow(pop())) ~~>
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDecl(takeAll())) ~~>
-            = KwFunction NotBindName Id <~~ push(up.in) ~~> ParamList [ UseStrictMark ] Block ;
+            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] Block ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
             = "(" [ ParamSeq ] ")" ;
@@ -286,12 +286,12 @@ RestArg     = RestParam | RestPattern ;
 // the stack; the three richer forms push a descriptor bindParams knows how to read (see
 // there). A default value is an AssignExpr, so it may itself be a call or a ternary.
 Param       = DefaultParam | PatternParam | PlainParam ;
-PlainParam  <~~ push(up.in) ~~>
+PlainParam  <~~ push(idName(up.in)) ~~>
             = NotBindName Id ;
 DefaultParam <~~ push(makeDefaultParam(takeAll())) ~~>
-            = NotBindName Id <~~ push(up.in) ~~> "=" AssignExpr ;
+            = NotBindName Id <~~ push(idName(up.in)) ~~> "=" AssignExpr ;
 RestParam   <~~ push({rest: true, pname: pop()}) ~~>
-            = "..." NotBindName Id <~~ push(up.in) ~~> ;
+            = "..." NotBindName Id <~~ push(idName(up.in)) ~~> ;
 // A destructuring parameter: the pattern binds against the argument, a rest pattern
 // against the array of the arguments left over.
 PatternParam <~~ push(makePatternParam(takeAll())) ~~>
@@ -417,7 +417,7 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // Parentheses around a target are transparent: '(a) = 1', '((a)) = 1' and '(a.b).c = 1'
 // all assign exactly where the unparenthesized form would. The inner reference is passed
 // out whole and whatever suffixes follow the ')' are appended to its path.
-TargetHead  = ParenTarget | NotReserved Id <~~ push(up.in) ~~> ;
+TargetHead  = ParenTarget | NotReserved Id <~~ push(idName(up.in)) ~~> ;
 ParenTarget <~~ push({parenref: pop()}) ~~>
             = "(" Target ")" ;
 
@@ -508,7 +508,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // gets its own production (which never resolves the name through getVar) and is tried
 // before the general form.
 TypeofName  <~~ push(makeTypeofName(pop())) ~~>
-            = KwTypeof NotReserved Id <~~ push(up.in) ~~> NotSuffix ;
+            = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotSuffix ;
 Typeof      <~~ push(makeTypeof(pop())) ~~>
             = KwTypeof UnaryExpr ;
 
@@ -532,7 +532,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
 SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
-            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwSuper [ "." Id <~~ push({mname: idName(up.in)}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
 // A call after a member access is a method call: the object becomes 'this' of the callee
@@ -589,12 +589,12 @@ TaggedTemplate <~~ push({kind: "tagcall", parts: takeAll()}) ~~>
             = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: up.in, key: makeConst(up.in)}) ~~> ;
+DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 // 'this.#secret' / 'this.#bump()': a private member is an ordinary property whose name
 // carries the '#', so the access only has to keep the marker in the key. Tried first,
 // because the plain form's Id cannot start at a '#'.
 PrivateDotSuffix <~~ push(privDotSuffix(pop())) ~~>
-            = "." "#" Id <~~ push(up.in) ~~> ;
+            = "." "#" Id <~~ push(idName(up.in)) ~~> ;
 IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
@@ -604,7 +604,7 @@ OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 OptIndexSuffix <~~ push({kind:"member", opt: true, txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
-OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: up.in, key: makeConst(up.in)}) ~~> ;
+OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 
 // A call/array/new argument. A plain argument pushes its value thunk directly (the
 // common case, and what makes the fast path a plain function call); a SPREAD pushes a
@@ -622,12 +622,12 @@ Primary     = AsyncArrow | ArrowFn | NewTarget | NewExpr | NewWidened | SuperPro
 // reaches a slot no enumeration reports. Tried before VarRef, whose Id cannot start at
 // a '#'.
 PrivateNameRef <~~ push(privRefThunk(pop())) ~~>
-            = "#" Id <~~ push(up.in) ~~> ;
+            = "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew NotReserved Id <~~ push({cls: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwNew NotReserved Id <~~ push({cls: idName(up.in)}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // The general 'new' forms: a member-path or parenthesized callee ('new a.b.C()',
 // 'new (mk())()'), a nested 'new', and 'new C' with no argument list at all. The callee
@@ -656,7 +656,7 @@ SuperProp   <~~ push(makeSuperProp(pop())) ~~>
 // assignment and destructuring-target forms can pick it out of takeAll().
 SuperKey    = SuperKeyDot | SuperKeyIdx ;
 SuperKeyDot <~~ push({skey: pop()}) ~~>
-            = "." Id <~~ push(makeConst(up.in)) ~~> ;
+            = "." Id <~~ push(makeConst(idName(up.in))) ~~> ;
 SuperKeyIdx <~~ push({skey: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -676,7 +676,7 @@ AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
 // in `f.name` and never takes the one of the binding it is assigned to, which is the
 // whole difference between `const g = function named(){}` (node says "named") and
 // `const g = function(){}` (node says "g"). Same shape as ClassExprName below.
-FnExprName  <~~ push({fname: up.in}) ~~>
+FnExprName  <~~ push({fname: idName(up.in)}) ~~>
             = NotExprName Id ;
 GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
             = KwFunction GenMark [ FnExprName ] ParamList [ UseStrictMark ] Block ;
@@ -685,9 +685,9 @@ GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
 // An anonymous class expression still supports super(), because a method finds its own
 // class through the scope the class body pushes, not through its name (see makeClassValue).
 ClassExpr   <~~ push(makeClassValue(takeAll())) ~~>
-            = KwClass [ ClassExprName ] [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> ]
+            = KwClass [ ClassExprName ] [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
-ClassExprName <~~ push({cname: up.in}) ~~>
+ClassExprName <~~ push({cname: idName(up.in)}) ~~>
             = NotExprName Id ;
 // A class expression whose heritage is an EXPRESSION ('class extends mixin(Base) {}').
 // Same builder as ClassExpr: the only difference is that the parent arrives as a value
@@ -712,7 +712,7 @@ PropDef     <~~ push(makeProp(pop(), pop(), up.in)) ~~>
             = PropKey ":" AssignExpr ;
 // A key is a PROPERTY position: reserved words are legal there ('{ class: 1 }'), which
 // is why Id is used unguarded. A numeric key is stringified, like in JavaScript.
-PropKey     = Id <~~ push(up.in) ~~> | StringLit | NumberLit ;
+PropKey     = Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit ;
 SpreadProp  <~~ push({spreadObj: true, t: pop()}) ~~>
             = "..." AssignExpr ;
 // A computed KEY is an AssignExpr, not an Expression: '({[a, b]: 0})' is a syntax
@@ -745,7 +745,7 @@ PropComputedKey = "[" AssignExpr "]" ;
 AsyncMark   <~~ push({isasync: true}) ~~> = "async" KwEnd ;
 GenMark     <~~ push({isgen: true}) ~~> = "*" ;
 // '{val}' is '{val: val}' - the shorthand reads the variable of the same name.
-ShorthandProp <~~ push(makeProp(makeVarRef(up.in), up.in)) ~~>
+ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
             = NotBindName Id ;
 
 // An array literal, with ELISIONS: '[1,,2]' has a hole in the middle and length 3,
@@ -769,7 +769,7 @@ ArrowFn     <~~ push(makeArrow(takeAll(), up.in)) ~~>
             = ArrowParams NoLineBreak "=>" ArrowBody ;
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
-            | NotBindName Id <~~ push(up.in) ~~> ;
+            | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
 ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
@@ -831,8 +831,8 @@ ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
 // 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
 // the same shapes with 'in' are legal uses of an ordinary variable named 'let'.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
-ForOfDecl   = KwVar NotBindName Id <~~ push(up.in) ~~> ;
-ForOfBare   = NotBindName Id <~~ push(up.in) ~~> ;
+ForOfDecl   = KwVar NotBindName Id <~~ push(idName(up.in)) ~~> ;
+ForOfBare   = NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // A MEMBER PATH as the loop target: 'for (a.b of xs)', 'for (a(x)[1] in d)'. There is
@@ -843,7 +843,7 @@ ForOfMember <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfMemberHead Expression ")" NestedStatement ;
 ForOfMemberHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
-            = NotReserved Id <~~ push(up.in) ~~> LhsSuffixes ;
+            = NotReserved Id <~~ push(idName(up.in)) ~~> LhsSuffixes ;
 // The widened loop target: any LeftHandSideExpression, which is what the spec actually
 // puts there - the assign-nowhere shapes 'for (0 of 0)' and 'for ([0] in 0)' that must
 // PARSE and only then fail static semantics. There is no place to write, so the loop is
@@ -919,13 +919,13 @@ DObjRest    <~~ push({dobjrest: pop()}) ~~>
 DKeyedField <~~ push(makeDField(takeAll())) ~~>
             = DKey ":" DElem ;
 DShorthandField <~~ push(makeShorthandField(takeAll())) ~~>
-            = NotBindName Id <~~ push({dkey: up.in}) ~~> [ "=" DExpr ] ;
+            = NotBindName Id <~~ push({dkey: idName(up.in)}) ~~> [ "=" DExpr ] ;
 // A literal key is pushed as a THUNK, a computed one likewise, so both are read the same
 // way at binding time; a bare name is pushed as text, which needs no evaluation at all.
 DKey        = DComputedKey | DNameKey | DLitKey ;
 DComputedKey <~~ push({dkeyT: pop()}) ~~>
             = "[" DExpr "]" ;
-DNameKey    <~~ push({dkey: up.in}) ~~>
+DNameKey    <~~ push({dkey: idName(up.in)}) ~~>
             = Id ;
 DLitKey     <~~ push({dkeyT: pop()}) ~~>
             = StringLit | NumberLit ;
@@ -936,9 +936,9 @@ DElem       = DElemPattern | DElemName ;
 DElemPattern <~~ push(withDefault(takeAll())) ~~>
             = DPattern [ "=" DExpr ] ;
 DElemName   <~~ push(withDefault(takeAll())) ~~>
-            = NotBindName Id <~~ push({dtype: "id", name: up.in}) ~~> [ "=" DExpr ] ;
+            = NotBindName Id <~~ push({dtype: "id", name: idName(up.in)}) ~~> [ "=" DExpr ] ;
 DTarget     = DPattern | DTargetName ;
-DTargetName <~~ push({dtype: "id", name: up.in}) ~~>
+DTargetName <~~ push({dtype: "id", name: idName(up.in)}) ~~>
             = NotBindName Id ;
 
 // ----- The ASSIGNMENT pattern -----
@@ -963,7 +963,7 @@ AObjRest    <~~ push({dobjrest: pop()}) ~~>
 AKeyedField <~~ push(makeDField(takeAll())) ~~>
             = DKey ":" AElem ;
 AShorthandField <~~ push(makeShorthandField(takeAll())) ~~>
-            = NotBindName Id <~~ push({dkey: up.in}) ~~> [ "=" DExpr ] ;
+            = NotBindName Id <~~ push({dkey: idName(up.in)}) ~~> [ "=" DExpr ] ;
 AElem       = AElemPattern | AElemTarget ;
 AElemPattern <~~ push(withDefault(takeAll())) ~~>
             = APattern [ "=" DExpr ] ;
@@ -1003,7 +1003,7 @@ TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause = CatchNamed | CatchDestruct | CatchBare ;
 CatchNamed  <~~ push(excCatch(takeAll())) ~~>
-            = KwCatch "(" NotBindName Id <~~ push(up.in) ~~> ")" Block ;
+            = KwCatch "(" NotBindName Id <~~ push(idName(up.in)) ~~> ")" Block ;
 CatchBare   <~~ push(excCatch(takeAll())) ~~>
             = KwCatch Block ;
 // A destructuring catch binding ('catch ([a, ...b])'). excCatch binds exactly ONE name,
@@ -1023,8 +1023,8 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // mcall (which follows __super for inheritance); super.m() calls the parent's method on
 // 'this'.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass NotBindName Id <~~ push({cname: up.in}) ~~>
-              [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> ]
+            = KwClass NotBindName Id <~~ push({cname: idName(up.in)}) ~~>
+              [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
 
 // The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
@@ -1035,7 +1035,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 // like an ordered choice - 'extends a.b' would match the name 'a' and then die on the
 // '.', never reaching the expression alternative. Tried after ClassDecl.
 ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass NotBindName Id <~~ push({cname: up.in}) ~~>
+            = KwClass NotBindName Id <~~ push({cname: idName(up.in)}) ~~>
               KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExt    <~~ push({extT: pop()}) ~~>
             = ClassHeritage ;
@@ -1084,7 +1084,7 @@ MemberKey   = MemberNameKey | MemberLitKey | MemberComputedKey ;
 // nowhere else - and the '__' prefix additionally keeps it out of every enumeration, as
 // a real private name is. Read back through the matching '.#name' member access (see
 // PrivateDotSuffix). Both compiler halves mangle identically.
-MemberNameKey <~~ push({mk: memberNameKey(stripWs(up.in))}) ~~>
+MemberNameKey <~~ push({mk: memberNameKey(stripWs(idName(up.in)))}) ~~>
             = PrivateName | Id ;
 PrivateName = "#" Id ;
 MemberLitKey <~~ push({mkT: pop()}) ~~>
@@ -1240,14 +1240,14 @@ Debugger    <~~ push(function() {}) ~~>
 // name; the markers decide whether calling it runs the body (async, answering a Promise)
 // or returns a generator object (generator and async generator).
 AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
-            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(up.in) ~~> ParamList [ UseStrictMark ] Block ;
+            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] Block ;
 GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
-            = KwFunction GenMark NotBindName Id <~~ push(up.in) ~~> ParamList [ UseStrictMark ] Block ;
+            = KwFunction GenMark NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] Block ;
 
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
 Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(makeVarRef(idName(up.in))) ~~>
             = NotReserved Id ;
 
 // JavaScript's own string literals, deliberately NOT the shared lib's
@@ -6230,6 +6230,11 @@ NotFuncHead = :script(~~
         }
         return r
     }
+
+    // The real name behind an IdentifierName: its only escapes are \uHHHH and \u{H...},
+    // which jsUnescape decodes, so an escaped and a plain spelling bind one name.
+    // Twin of idName in js-to-llvm-ir.abnf.
+    function idName(src) { return src.indexOf("\\") < 0 ? src : jsUnescape(src) }
 
     // JavaScript's own string unescaping, on top of the shared unescapeJs: that one
     // predates \u{...} and the line continuation, and it is used by a dozen other

@@ -122,11 +122,11 @@ TypeAliasDecl <~~ push(function() {}) ~~>
 // mapping (Color[1] === "Green"), exactly as TypeScript emits it. 'const enum' behaves
 // the same here - the difference upstream is only whether the object survives inlining.
 EnumDecl    <~~ push(makeEnum(takeAll())) ~~>
-            = [ KwConst ] KwEnum Id <~~ push({ename: up.in}) ~~>
+            = [ KwConst ] KwEnum Id <~~ push({ename: idName(up.in)}) ~~>
               "{" [ EnumMember { "," EnumMember } [ "," ] ] "}" [ ";" ] ;
 EnumMember  <~~ push(makeEnumMember(takeAll())) ~~>
             = EnumName [ "=" AssignExpr ] ;
-EnumName    = Id <~~ push({mname: up.in}) ~~> | StringLit <~~ push({mnameT: pop()}) ~~> ;
+EnumName    = Id <~~ push({mname: idName(up.in)}) ~~> | StringLit <~~ push({mnameT: pop()}) ~~> ;
 
 // A NAMESPACE is real too, and its object IS the scope its body runs in: a declaration
 // inside the body lands directly in the namespace object, so the members see each other
@@ -137,7 +137,7 @@ EnumName    = Id <~~ push({mname: up.in}) ~~> | StringLit <~~ push({mnameT: pop(
 NamespaceDecl <~~ push(makeNamespace(takeAll())) ~~>
             = ( KwNamespace | KwModule ) NamespaceName "{" NamespaceBody "}" ;
 NamespaceName <~~ push({nspath: takeAll()}) ~~>
-            = Id <~~ push(up.in) ~~> { "." Id <~~ push(up.in) ~~> } ;
+            = Id <~~ push(idName(up.in)) ~~> { "." Id <~~ push(idName(up.in)) ~~> } ;
 // The body is a bare statement list, NOT a Block: a Block would push a scope of its own
 // and the declarations would never reach the namespace object.
 NamespaceBody <~~ push(makeSeq(takeAll())) ~~>
@@ -182,7 +182,7 @@ SigParamList <~~ takeAll() ~~>
 // See the twin of this comment in js-interpreter.abnf.
 LabeledStmt <~~ push(makeLabeled(takeAll())) ~~>
             = LabelDef ":" Statement ;
-LabelDef    <~~ push(up.in); pendingLabel = up.in ~~>
+LabelDef    <~~ push(idName(up.in)); pendingLabel = idName(up.in) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-interpreter.abnf.
@@ -214,7 +214,7 @@ Declarator  = PatternDeclarator | NameDeclarator ;
 PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = DPattern [ TypeAnnot ] "=" AssignExpr ;
 NameDeclarator <~~ push(makeDecl(takeAll(), up.in)) ~~>
-            = NotBindName Id <~~ push(up.in) ~~> [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
+            = NotBindName Id <~~ push(idName(up.in)) ~~> [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
 If          <~~ push(makeIf(takeAll())) ~~>
@@ -248,7 +248,7 @@ Break       <~~ push(makeBreakStmt(takeAll())) ~~>
 Continue    <~~ push(makeContinueStmt(takeAll())) ~~>
             = KwContinue [ LabelRef ] [ ";" ] ;
 
-LabelRef    <~~ push({lblref: up.in}) ~~>
+LabelRef    <~~ push({lblref: idName(up.in)}) ~~>
             = NoLineBreak NotReserved Id ;
 
 Throw       <~~ push(excThrow(pop())) ~~>
@@ -258,7 +258,7 @@ Throw       <~~ push(excThrow(pop())) ~~>
 // The generic parameter list '<T>' and the return type are type-layer only and push
 // nothing, so the builder sees the same three items it does in plain JavaScript.
 FuncDecl    <~~ push(makeFuncDecl(takeAll())) ~~>
-            = KwFunction NotBindName Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
             = "(" [ ParamSeq ] ")" ;
@@ -290,11 +290,11 @@ Param       = ParamDecorators ( DefaultParam | PatternParam | PlainParam ) ;
 // A PARAMETER decorator ('@Inject() x: number') is parsed and dropped: there is no
 // TC39 semantics for one, and TypeScript's own is a pure reflection side effect.
 ParamDecorators <~~ takeAll() ~~> = { Decorator } ;
-PlainParam  = NotBindName Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] ;
+PlainParam  = NotBindName Id <~~ push(idName(up.in)) ~~> [ "?" ] [ TypeAnnot ] ;
 DefaultParam <~~ push(makeDefaultParam(takeAll())) ~~>
-            = NotBindName Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] "=" AssignExpr ;
+            = NotBindName Id <~~ push(idName(up.in)) ~~> [ "?" ] [ TypeAnnot ] "=" AssignExpr ;
 RestParam   <~~ push({rest: true, pname: pop()}) ~~>
-            = "..." NotBindName Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] ;
+            = "..." NotBindName Id <~~ push(idName(up.in)) ~~> [ "?" ] [ TypeAnnot ] ;
 // A destructuring parameter: the pattern binds against the argument, a rest pattern
 // against the array of the arguments left over.
 PatternParam <~~ push(makePatternParam(takeAll())) ~~>
@@ -387,7 +387,7 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // Parentheses around a target are transparent: '(a) = 1', '((a)) = 1' and '(a.b).c = 1'
 // all assign exactly where the unparenthesized form would. The inner reference is passed
 // out whole and whatever suffixes follow the ')' are appended to its path.
-TargetHead  = ParenTarget | NotReserved Id <~~ push(up.in) ~~> ;
+TargetHead  = ParenTarget | NotReserved Id <~~ push(idName(up.in)) ~~> ;
 ParenTarget <~~ push({parenref: pop()}) ~~>
             = "(" Target ")" ;
 
@@ -494,7 +494,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // gets its own production (which never resolves the name through getVar) and is tried
 // before the general form.
 TypeofName  <~~ push(makeTypeofName(pop())) ~~>
-            = KwTypeof NotReserved Id <~~ push(up.in) ~~> NotSuffix ;
+            = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotSuffix ;
 Typeof      <~~ push(makeTypeof(pop())) ~~>
             = KwTypeof UnaryExpr ;
 
@@ -516,7 +516,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
 SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
-            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwSuper [ "." Id <~~ push({mname: idName(up.in)}) ~~> ] [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
 // A call after a member access is a method call: the object becomes 'this' of the callee
@@ -560,12 +560,12 @@ TaggedTemplate <~~ push({kind: "tagcall", parts: takeAll()}) ~~>
             = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: up.in, key: makeConst(up.in)}) ~~> ;
+DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 // 'this.#secret' / 'this.#bump()': a private member is an ordinary property whose name
 // carries the '#', so the access only has to keep the marker in the key. Tried first,
 // because the plain form's Id cannot start at a '#'.
 PrivateDotSuffix <~~ push(privDotSuffix(pop())) ~~>
-            = "." "#" Id <~~ push(up.in) ~~> ;
+            = "." "#" Id <~~ push(idName(up.in)) ~~> ;
 IndexSuffix <~~ push({kind:"member", txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
@@ -575,12 +575,12 @@ OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 OptIndexSuffix <~~ push({kind:"member", opt: true, txt: up.in, key: pop()}) ~~>
             = "[" Expression "]" ;
-OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: up.in, key: makeConst(up.in)}) ~~> ;
+OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 // 'this?.#foo' - the optional-chaining form of PrivateDotSuffix. A private member is an
 // ordinary property whose name carries the '#', so the access only keeps the marker in
 // the key. Tried before the plain form, whose Id cannot start at a '#'.
 OptPrivateSuffix <~~ push(privDotSuffixOpt(pop())) ~~>
-            = "#" Id <~~ push(up.in) ~~> ;
+            = "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // A call/array/new argument. A plain argument pushes its value thunk directly (the
 // common case, and what makes the fast path a plain function call); a SPREAD pushes a
@@ -607,7 +607,7 @@ ImportMeta  <~~ push(notImplExpr("import.meta", up.pos)) ~~>
 // key as a string and the ordinary 'in' does the rest - propIn has the arm that reaches
 // a slot no enumeration reports.
 PrivateNameRef <~~ push(privRefThunk(pop())) ~~>
-            = "#" Id <~~ push(up.in) ~~> ;
+            = "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // The ANGLE-BRACKET cast '<T>expr' - TypeScript's original assertion syntax, still the
 // only one available outside .tsx files. It is the identity at run time, so the operand's
@@ -618,7 +618,7 @@ TypeAssertion = "<" Type ">" UnaryExpr ;
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew NotReserved Id <~~ push({cls: up.in}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwNew NotReserved Id <~~ push({cls: idName(up.in)}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // See the twin of this comment in js-interpreter.abnf.
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
@@ -636,7 +636,7 @@ SuperProp   <~~ push(makeSuperProp(pop())) ~~>
 // assignment and destructuring-target forms can pick it out of takeAll().
 SuperKey    = SuperKeyDot | SuperKeyIdx ;
 SuperKeyDot <~~ push({skey: pop()}) ~~>
-            = "." Id <~~ push(makeConst(up.in)) ~~> ;
+            = "." Id <~~ push(makeConst(idName(up.in))) ~~> ;
 SuperKeyIdx <~~ push({skey: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -656,17 +656,17 @@ AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
 // `f.name` and never takes the one of the binding it is assigned to, which is the whole
 // difference between `const g = function named(){}` (node says "named") and
 // `const g = function(){}` (node says "g"). Same shape as ClassExprName below.
-FnExprName  <~~ push({fname: up.in}) ~~>
+FnExprName  <~~ push({fname: idName(up.in)}) ~~>
             = NotBindName Id ;
 GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
             = KwFunction GenMark [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 // See the twin of this comment in js-interpreter.abnf.
 ClassExpr   <~~ push(makeClassExprValue(takeAll())) ~~>
             = ClassDecorators [ KwAbstract ] KwClass [ ClassExprName ] [ TypeParams ]
-              [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> [ TypeArgs ] ]
+              [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> [ TypeArgs ] ]
               [ KwImplements TypeList ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
-ClassExprName <~~ push({cname: up.in}) ~~>
+ClassExprName <~~ push({cname: idName(up.in)}) ~~>
             = NotBindName Id ;
 // See the twin of this comment in js-interpreter.abnf.
 ClassExprWidened <~~ push(makeClassValue(takeAll())) ~~>
@@ -685,7 +685,7 @@ PropDef     <~~ push(makeProp(pop(), pop(), up.in)) ~~>
             = PropKey ":" AssignExpr ;
 // A key is a PROPERTY position: reserved words are legal there ('{ class: 1 }'), which
 // is why Id is used unguarded. A numeric key is stringified, like in JavaScript.
-PropKey     = Id <~~ push(up.in) ~~> | StringLit | NumberLit | TemplateLit ;
+PropKey     = Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit | TemplateLit ;
 SpreadProp  <~~ push({spreadObj: true, t: pop()}) ~~>
             = "..." AssignExpr ;
 // A computed KEY is an AssignExpr, not an Expression: '({[a, b]: 0})' is a syntax
@@ -717,7 +717,7 @@ PropComputedKey = "[" AssignExpr "]" ;
 AsyncMark   <~~ push({isasync: true}) ~~> = "async" KwEnd ;
 GenMark     <~~ push({isgen: true}) ~~> = "*" ;
 // '{val}' is '{val: val}' - the shorthand reads the variable of the same name.
-ShorthandProp <~~ push(makeProp(makeVarRef(up.in), up.in)) ~~>
+ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
             = NotBindName Id ;
 
 // See the twin of this comment in js-interpreter.abnf.
@@ -736,7 +736,7 @@ ArrowFn     <~~ push(makeArrow(takeAll(), up.in)) ~~>
 // angle-bracket cast / relational forms get their chance.
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = [ TypeParams ] "(" [ ParamSeq ] ")" [ TypeAnnot ]
-            | NotBindName Id <~~ push(up.in) ~~> ;
+            | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
 ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
@@ -770,8 +770,8 @@ ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
 // See the twin of this comment in js-interpreter.abnf.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
-ForOfDecl   = [ KwAwait ] KwUsing NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ]
-            | KwVar NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
+ForOfDecl   = [ KwAwait ] KwUsing NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ]
+            | KwVar NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
 // The Annex B for-IN initializer: 'for (var a = 1 in X)' is legal sloppy JavaScript. It
 // is parsed and dropped - the loop variable is rebound on every iteration anyway.
 // The spec parses it as AssignmentExpression[~In]: the 'in' that follows belongs to the
@@ -787,7 +787,7 @@ ForOfInit   <~~ pop() ~~> = "=" RelExpr ;
 // ForOfExtra pushes NOTHING: the name carries no tag and ForOfInit pops its own value,
 // so the run is item-neutral and makeForOf still sees exactly four items.
 ForOfExtra  = "," NotBindName Id [ TypeAnnot ] [ ForOfInit ] ;
-ForOfBare   = NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] ;
+ForOfBare   = NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // See the twin of this comment in js-interpreter.abnf.
@@ -795,7 +795,7 @@ ForOfMember <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfMemberHead Expression ")" NestedStatement ;
 ForOfMemberHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
-            = NotReserved Id <~~ push(up.in) ~~> LhsSuffixes ;
+            = NotReserved Id <~~ push(idName(up.in)) ~~> LhsSuffixes ;
 // See the twin of this comment in js-interpreter.abnf.
 ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over an expression target", up.pos)) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfPathHead Expression ")" NestedStatement ;
@@ -834,13 +834,13 @@ DObjRest    <~~ push({dobjrest: pop()}) ~~>
 DKeyedField <~~ push(makeDField(takeAll())) ~~>
             = DKey ":" DElem ;
 DShorthandField <~~ push(makeShorthandField(takeAll())) ~~>
-            = NotBindName Id <~~ push({dkey: up.in}) ~~> [ "=" DExpr ] ;
+            = NotBindName Id <~~ push({dkey: idName(up.in)}) ~~> [ "=" DExpr ] ;
 // A literal key is pushed as a THUNK, a computed one likewise, so both are read the same
 // way at binding time; a bare name is pushed as text, which needs no evaluation at all.
 DKey        = DComputedKey | DNameKey | DLitKey ;
 DComputedKey <~~ push({dkeyT: pop()}) ~~>
             = "[" DExpr "]" ;
-DNameKey    <~~ push({dkey: up.in}) ~~>
+DNameKey    <~~ push({dkey: idName(up.in)}) ~~>
             = Id ;
 DLitKey     <~~ push({dkeyT: pop()}) ~~>
             = StringLit | NumberLit ;
@@ -851,9 +851,9 @@ DElem       = DElemPattern | DElemName ;
 DElemPattern <~~ push(withDefault(takeAll())) ~~>
             = DPattern [ "=" DExpr ] ;
 DElemName   <~~ push(withDefault(takeAll())) ~~>
-            = NotBindName Id <~~ push({dtype: "id", name: up.in}) ~~> [ "=" DExpr ] ;
+            = NotBindName Id <~~ push({dtype: "id", name: idName(up.in)}) ~~> [ "=" DExpr ] ;
 DTarget     = DPattern | DTargetName ;
-DTargetName <~~ push({dtype: "id", name: up.in}) ~~>
+DTargetName <~~ push({dtype: "id", name: idName(up.in)}) ~~>
             = NotBindName Id ;
 
 // ----- The ASSIGNMENT pattern -----
@@ -872,7 +872,7 @@ AObjRest    <~~ push({dobjrest: pop()}) ~~>
 AKeyedField <~~ push(makeDField(takeAll())) ~~>
             = DKey ":" AElem ;
 AShorthandField <~~ push(makeShorthandField(takeAll())) ~~>
-            = NotBindName Id <~~ push({dkey: up.in}) ~~> [ "=" DExpr ] ;
+            = NotBindName Id <~~ push({dkey: idName(up.in)}) ~~> [ "=" DExpr ] ;
 AElem       = AElemPattern | AElemTarget ;
 AElemPattern <~~ push(withDefault(takeAll())) ~~>
             = APattern [ "=" DExpr ] ;
@@ -905,7 +905,7 @@ TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause = CatchNamed | CatchDestruct | CatchBare ;
 CatchNamed  <~~ push(excCatch(takeAll())) ~~>
-            = KwCatch "(" NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] ")" Block ;
+            = KwCatch "(" NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] ")" Block ;
 CatchBare   <~~ push(excCatch(takeAll())) ~~>
             = KwCatch Block ;
 // See the twin of this comment in js-interpreter.abnf.
@@ -926,8 +926,8 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // 'implements' clause (which is pure type information - nothing is inherited from it).
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = ClassDecorators ClassDeclCore ;
-ClassDeclCore = [ KwAbstract ] KwClass [ NotBindName Id <~~ push({cname: up.in}) ~~> ] [ TypeParams ]
-              [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> [ TypeArgs ] ]
+ClassDeclCore = [ KwAbstract ] KwClass [ NotBindName Id <~~ push({cname: idName(up.in)}) ~~> ] [ TypeParams ]
+              [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> [ TypeArgs ] ]
               [ KwImplements TypeList ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
 // The decorators may also stand IN FRONT OF the 'export' ('@dec export default class C
@@ -952,7 +952,7 @@ Decorator   <~~ push(foldCallMember(takeAll())) ~~>
 
 // See the twin of this comment in js-interpreter.abnf.
 ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
-            = ClassDecorators [ KwAbstract ] KwClass NotBindName Id <~~ push({cname: up.in}) ~~>
+            = ClassDecorators [ KwAbstract ] KwClass NotBindName Id <~~ push({cname: idName(up.in)}) ~~>
               [ TypeParams ] KwExtends ClassExt [ TypeArgs ]
               [ KwImplements TypeList ] PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExt    <~~ push({extT: pop()}) ~~>
@@ -1006,7 +1006,7 @@ ClassSpecialMethod <~~ push(makeMethod(takeAll())) ~~>
 // known at run time are read the same way: {mk: "name"} or {mkT: keyThunk}.
 MemberKey   = MemberNameKey | MemberLitKey | MemberComputedKey ;
 // See the twin of this comment in js-interpreter.abnf.
-MemberNameKey <~~ push({mk: memberNameKey(stripWs(up.in))}) ~~>
+MemberNameKey <~~ push({mk: memberNameKey(stripWs(idName(up.in)))}) ~~>
             = PrivateName | Id ;
 PrivateName = "#" Id ;
 MemberLitKey <~~ push({mkT: pop()}) ~~>
@@ -1029,7 +1029,7 @@ CtorParams  <~~ push(takeAll()) ~~>
             = "(" [ ParamSeq ] ")" ;
 PropParam   = ParamDecorators PropMod { PropMod } ( PropParamName | PropParamPattern ) ;
 PropParamName <~~ push(makePropParam(takeAll())) ~~>
-            = NotBindName Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
+            = NotBindName Id <~~ push(idName(up.in)) ~~> [ "?" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 // 'constructor(public [x, y]: string[])' - TypeScript rejects it, but it has to PARSE
 // before it can be rejected. The pattern binds like an ordinary destructuring parameter;
 // there is no single name for the implied field, so none is assigned.
@@ -1270,9 +1270,9 @@ Debugger    <~~ push(function() {}) ~~>
 // name; the markers decide whether calling it runs the body (async, answering a Promise)
 // or returns a generator object (generator and async generator).
 AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
-            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
-            = KwFunction GenMark NotBindName Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction GenMark NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
 
 // ----- TypeScript type expressions: parsed exactly, and fully erased. -----
 // NOT ONE of these productions pushes onto the stack, so every value production that
@@ -1379,7 +1379,7 @@ TypeNumLit  = [ "-" | "+" ] ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } 
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
 Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(makeVarRef(idName(up.in))) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-interpreter.abnf.
@@ -4954,6 +4954,9 @@ NotFuncHead = :script(~~
         }
         return r
     }
+
+    // See the twin of this comment in js-interpreter.abnf.
+    function idName(src) { return src.indexOf("\\") < 0 ? src : jsUnescape(src) }
 
     // See the twin of this comment in js-interpreter.abnf.
     function jsUnescape(s) {

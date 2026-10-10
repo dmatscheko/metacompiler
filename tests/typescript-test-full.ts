@@ -2930,6 +2930,22 @@ function s48() {
 // exactly as it did.
 function s48decl(n) { return n < 2 ? 1 : n * s48decl(n - 1) }
 
+// ===== SECTION 49: an escaped identifier is the name it spells =====
+// '\u0061bc' and 'abc' are two spellings of ONE name, so every scope, property, class and
+// parameter table must see the decoded name. Values read off node 24.
+function s49() {
+    var \u0061bc = 21;
+    check("esc01", abc === 21);
+    var x\u{79}z = 22;
+    check("esc02", \u0078yz === 22 && typeof xyz === "number");
+    var uo = { \u006b: 23, k\u0032: 24 };
+    check("esc03", uo.k === 23 && uo.\u006b\u0032 === 24);
+    function \u0067(\u0070: number): number { return p + 1 }
+    check("esc04", g(1) === 2);
+    class \u0055C { m\u0065(): number { return 25 } }
+    check("esc05", new UC().me() === 25);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2994,6 +3010,7 @@ function main(): number {
     s46(); // SECTION-CALL 46
     s47(); // SECTION-CALL 47
     s48(); // SECTION-CALL 48
+    s49(); // SECTION-CALL 49
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
