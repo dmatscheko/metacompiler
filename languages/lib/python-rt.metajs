@@ -8244,14 +8244,41 @@ function pyMFactorial(n) {
     return rtABigNarrow(acc)
 }
 
+// CPython's math_1 overflow rule for exp, expm1, sinh and cosh: an infinite result
+// from a finite argument is OverflowError("math range error"). `v - v != 0` holds
+// for an infinity and a NaN alike, and `v == v` then excludes the NaN.
+// Go: pyMathRange in abnf/jsrtpymath.go.
+function pyMRange(r, x) {
+    if (r - r != 0 && r == r && x - x == 0) { pyRaiseExc("OverflowError", "math range error") }
+    return pyMkFlo(r)
+}
+
+// math.pow with CPython's errors for two finite operands: a NaN result
+// ((-8) ** (1/3)) and 0 ** negative are ValueError("math domain error"), any other
+// infinite result OverflowError("math range error"). Go: pyMathPow.
+function pyMPow(x, y) {
+    var r = Math.pow(x, y)
+    if (x - x == 0 && y - y == 0 && r - r != 0) {
+        if (r != r || x == 0) { pyRaiseExc("ValueError", "math domain error") }
+        pyRaiseExc("OverflowError", "math range error")
+    }
+    return pyMkFlo(r)
+}
+
 function pyMathCall(name, args) {
     if (name == "sqrt") {
         var sq = pyMArg(args, 0)
         if (sq < 0) { pyMDom("nonneg", sq) }
         return pyMkFlo(Math.sqrt(sq))
     }
-    if (name == "exp") { return pyMkFlo(Math.exp(pyMArg(args, 0))) }
-    if (name == "expm1") { return pyMkFlo(Math.expm1(pyMArg(args, 0))) }
+    if (name == "exp") {
+        var ex = pyMArg(args, 0)
+        return pyMRange(Math.exp(ex), ex)
+    }
+    if (name == "expm1") {
+        var em = pyMArg(args, 0)
+        return pyMRange(Math.expm1(em), em)
+    }
     if (name == "log") {
         var lg = pyMArg(args, 0)
         if (lg <= 0) { pyMDom("pos", lg) }
@@ -8279,7 +8306,7 @@ function pyMathCall(name, args) {
         if (l10 <= 0) { pyMDom("pos", l10) }
         return pyMkFlo(Math.log10(l10))
     }
-    if (name == "pow") { return pyMkFlo(Math.pow(pyMArg(args, 0), pyMArg(args, 1))) }
+    if (name == "pow") { return pyMPow(pyMArg(args, 0), pyMArg(args, 1)) }
     if (name == "fabs") { return pyMkFlo(Math.abs(pyMArg(args, 0))) }
     if (name == "fmod") {
         var fa = pyMArg(args, 0)
@@ -8329,8 +8356,14 @@ function pyMathCall(name, args) {
         return pyMkFlo(Math.acos(ac1))
     }
     if (name == "atan") { return pyMkFlo(Math.atan(pyMArg(args, 0))) }
-    if (name == "sinh") { return pyMkFlo(Math.sinh(pyMArg(args, 0))) }
-    if (name == "cosh") { return pyMkFlo(Math.cosh(pyMArg(args, 0))) }
+    if (name == "sinh") {
+        var sh = pyMArg(args, 0)
+        return pyMRange(Math.sinh(sh), sh)
+    }
+    if (name == "cosh") {
+        var ch = pyMArg(args, 0)
+        return pyMRange(Math.cosh(ch), ch)
+    }
     if (name == "tanh") { return pyMkFlo(Math.tanh(pyMArg(args, 0))) }
     if (name == "degrees") { return pyMkFlo(pyMArg(args, 0) * (180 / 3.141592653589793)) }
     if (name == "radians") { return pyMkFlo(pyMArg(args, 0) * (3.141592653589793 / 180)) }

@@ -3202,14 +3202,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < pyMathNames.length; i++) { if (pyMathNames[i] == name) { return true } }
         return false
     }
+    // CPython's math_1 overflow rule for exp, expm1, sinh and cosh: an infinite result
+    // from a finite argument is OverflowError("math range error"). `v - v != 0` holds
+    // for an infinity and a NaN alike, and `v == v` then excludes the NaN.
+    // Twin of pyMathRange in abnf/jsrtpymath.go.
+    function pyMRange(r, x) {
+        if (r - r != 0 && r == r && x - x == 0) { pyListErr("OverflowError", "math range error") }
+        return pyFlo(r)
+    }
+
+    // math.pow with CPython's errors for two finite operands: a NaN result
+    // ((-8) ** (1/3)) and 0 ** negative are ValueError("math domain error"), any other
+    // infinite result OverflowError("math range error"). Twin of pyMathPow.
+    function pyMPow(x, y) {
+        var r = Math.pow(x, y)
+        if (x - x == 0 && y - y == 0 && r - r != 0) {
+            if (r != r || x == 0) { pyListErr("ValueError", "math domain error") }
+            pyListErr("OverflowError", "math range error")
+        }
+        return pyFlo(r)
+    }
+
     function pyMathCall(name, args) {
         if (name == "sqrt") {
             var sq = pyMArg(args, 0)
             if (sq < 0) { pyMDom("nonneg", sq) }
             return pyFlo(Math.sqrt(sq))
         }
-        if (name == "exp") { return pyFlo(Math.exp(pyMArg(args, 0))) }
-        if (name == "expm1") { return pyFlo(Math.expm1(pyMArg(args, 0))) }
+        if (name == "exp") {
+            var ex = pyMArg(args, 0)
+            return pyMRange(Math.exp(ex), ex)
+        }
+        if (name == "expm1") {
+            var em = pyMArg(args, 0)
+            return pyMRange(Math.expm1(em), em)
+        }
         if (name == "log") {
             var lg = pyMArg(args, 0)
             if (lg <= 0) { pyMDom("pos", lg) }
@@ -3237,7 +3264,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (l10 <= 0) { pyMDom("pos", l10) }
             return pyFlo(Math.log10(l10))
         }
-        if (name == "pow") { return pyFlo(Math.pow(pyMArg(args, 0), pyMArg(args, 1))) }
+        if (name == "pow") { return pyMPow(pyMArg(args, 0), pyMArg(args, 1)) }
         if (name == "fabs") { return pyFlo(Math.abs(pyMArg(args, 0))) }
         if (name == "fmod") {
             var fa = pyMArg(args, 0)
@@ -3287,8 +3314,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pyFlo(Math.acos(ac1))
         }
         if (name == "atan") { return pyFlo(Math.atan(pyMArg(args, 0))) }
-        if (name == "sinh") { return pyFlo(Math.sinh(pyMArg(args, 0))) }
-        if (name == "cosh") { return pyFlo(Math.cosh(pyMArg(args, 0))) }
+        if (name == "sinh") {
+            var sh = pyMArg(args, 0)
+            return pyMRange(Math.sinh(sh), sh)
+        }
+        if (name == "cosh") {
+            var ch = pyMArg(args, 0)
+            return pyMRange(Math.cosh(ch), ch)
+        }
         if (name == "tanh") { return pyFlo(Math.tanh(pyMArg(args, 0))) }
         if (name == "degrees") { return pyFlo(pyMArg(args, 0) * (180 / 3.141592653589793)) }
         if (name == "radians") { return pyFlo(pyMArg(args, 0) * (3.141592653589793 / 180)) }

@@ -3418,6 +3418,25 @@ def s60():
     check("byt2", list(b"a\x41\n\101\q") == [97, 65, 10, 65, 92, 113] and "\N{BULLET}" == "\u2022")
 
 
+# ===== SECTION 61: math overflows raise instead of answering inf =====
+# exp, expm1, sinh and cosh of a finite argument with an infinite result are
+# OverflowError("math range error"); math.pow raises ValueError("math domain
+# error") for 0 ** negative and a NaN result, OverflowError otherwise.
+def s61():
+    import math
+    inf = float("inf")
+    msgs = []
+    for f in [lambda: math.exp(1000), lambda: math.expm1(800), lambda: math.sinh(-1000), lambda: math.cosh(1000),
+              lambda: math.pow(10, 400), lambda: math.pow(0, -1), lambda: math.pow(-8, 0.5)]:
+        try:
+            f()
+        except (OverflowError, ValueError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("mrg1", msgs == ["OverflowError: math range error"] * 5 + ["ValueError: math domain error"] * 2)
+    check("mrg2", math.exp(inf) == inf and math.exp(-1000) == 0.0 and math.cosh(-inf) == inf and math.pow(inf, 2) == inf
+          and math.pow(0.0, -inf) == inf and repr(math.exp(709)) == "8.218407461554972e+307")
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3479,5 +3498,6 @@ def main():
     s58() # SECTION-CALL 58
     s59() # SECTION-CALL 59
     s60() # SECTION-CALL 60
+    s61() # SECTION-CALL 61
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

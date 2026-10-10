@@ -78,6 +78,33 @@ func pyMathInt(rt *jsrt, f float64) interface{} {
 // offending operand as a FLOAT repr ("expected a nonnegative input, got -1.0").
 // Taken from the oracle rather than invented, which is what makes these rows
 // assertable against python3.
+// pyMathRange is CPython's math_1 overflow rule for exp, expm1, sinh and cosh: an
+// infinite result from a finite argument is OverflowError("math range error").
+// Twin of pyMRange in languages/lib/python-rt.metajs and
+// languages/python-interpreter.abnf.
+func pyMathRange(rt *jsrt, r, x float64) interface{} {
+	if math.IsInf(r, 0) && !math.IsInf(x, 0) {
+		panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "math range error")})
+	}
+	return pyMathFlo(r)
+}
+
+// pyMathPow is math.pow with CPython's errors for two finite operands: a NaN
+// result ((-8) ** (1/3)) and 0 ** negative are ValueError("math domain error"),
+// any other infinite result OverflowError("math range error").
+func pyMathPow(rt *jsrt, x, y float64) interface{} {
+	r := math.Pow(x, y)
+	if !math.IsInf(x, 0) && !math.IsNaN(x) && !math.IsInf(y, 0) && !math.IsNaN(y) {
+		if math.IsNaN(r) || (math.IsInf(r, 0) && x == 0) {
+			panic(&jsThrown{value: rt.pyExcInstance("ValueError", "math domain error")})
+		}
+		if math.IsInf(r, 0) {
+			panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "math range error")})
+		}
+	}
+	return pyMathFlo(r)
+}
+
 func pyMathDom(rt *jsrt, kind string, v float64) {
 	got := rt.pyRepr(pyMathFlo(v))
 	switch kind {
@@ -144,9 +171,11 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		}
 		return pyMathFlo(math.Sqrt(x))
 	case "exp":
-		return pyMathFlo(math.Exp(pyMathArg(rt, args, 0)))
+		x := pyMathArg(rt, args, 0)
+		return pyMathRange(rt, math.Exp(x), x)
 	case "expm1":
-		return pyMathFlo(math.Expm1(pyMathArg(rt, args, 0)))
+		x := pyMathArg(rt, args, 0)
+		return pyMathRange(rt, math.Expm1(x), x)
 	case "log":
 		x := pyMathArg(rt, args, 0)
 		if x <= 0 {
@@ -182,7 +211,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		}
 		return pyMathFlo(math.Log10(l10))
 	case "pow":
-		return pyMathFlo(math.Pow(pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)))
+		return pyMathPow(rt, pyMathArg(rt, args, 0), pyMathArg(rt, args, 1))
 	case "fabs":
 		return pyMathFlo(math.Abs(pyMathArg(rt, args, 0)))
 	case "fmod":
@@ -233,9 +262,11 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 	case "atan":
 		return pyMathFlo(math.Atan(pyMathArg(rt, args, 0)))
 	case "sinh":
-		return pyMathFlo(math.Sinh(pyMathArg(rt, args, 0)))
+		x := pyMathArg(rt, args, 0)
+		return pyMathRange(rt, math.Sinh(x), x)
 	case "cosh":
-		return pyMathFlo(math.Cosh(pyMathArg(rt, args, 0)))
+		x := pyMathArg(rt, args, 0)
+		return pyMathRange(rt, math.Cosh(x), x)
 	case "tanh":
 		return pyMathFlo(math.Tanh(pyMathArg(rt, args, 0)))
 	case "degrees":
