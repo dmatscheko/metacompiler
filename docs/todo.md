@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-259** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-266** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,37 +66,38 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-217 python: `range()` ignores its step and prints as a list · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
-`list(range(0,10,3))` gives `[0..9]` (CPython `[0, 3, 6, 9]`), `range(10,0,-3)` gives
-`[]`, `print(range(3))` gives `[0, 1, 2]` (CPython `range(0, 3)`). The compiler binds
-range with two arguments only. All engines.
+### T-259 python: `range` is a materialised list · P2 · PY · OPEN [V]
+`print(range(3))` prints `[0, 1, 2]` (CPython `range(0, 3)`); `range(3) == [0,1,2]` is
+True (CPython False); type, slicing to a range. A lazy range touches ~51 pyIsArr sites
+in python-rt.metajs, 28 Array.isArray in the interpreter, 29 js_py* externs and the
+emitter's for-loop: 400-600 lines. Cost against the value; implement or DECLINE.
 
-### T-218 python: `x = None; x[0] = 1` is not a catchable TypeError · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
-Interpreter: host "Cannot read property 'length' of undefined"; compiled "item
-assignment on a undefined". CPython: `TypeError: 'NoneType' object does not support item
-assignment` (check the other non-subscriptable types too).
+### T-260 python: `"a" + 1` concatenates · P1 · PY · OPEN [V]
+Gives `'a1'` in all engines (also `y[0] += 1` on a str); CPython `TypeError: can only
+concatenate str (not "int") to str`. Check `1 + "a"` (unsupported operand type(s)).
 
-### T-219 python: `f().k += 1` evaluates `f()` twice · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
-All engines call f twice (the read and the write each walk the path); CPython once.
-Same for `a[g()] += 1`.
+### T-261 python: `print(..., end=, sep=)` · P1 · PY · OPEN [V]
+Compiled halves print the kwargs dict (`{'end': ' | '}`), the interpreter ignores
+`end`. Also `sep`, `file=` (ignore or error), `flush`.
 
-### T-220 python: astral characters in indexing, iteration and find · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
-`[ord(x) for x in chr(0x1D400)]`: interpreter `[65533, 65533]`, compiled abort "ord()
-expected a character, but string of length 3"; CPython `[119808]`. `"a😀b".find("b")`
-3 (CPython 2). len/indexing/slicing/iteration/find must count code points. Manual 7.9
-records the js_pyget inconsistency; decide the representation and cost it.
+### T-262 python: `dict(enumerate(s))` · P1 · PY · OPEN [V]
+Prints `{}` compiled, `<enumerate object>` interpreter; CPython `{0: 'a', ...}`. Check
+`dict(zip(...))`, `list(enumerate(...))`, `dict(generator of pairs)`.
 
-### T-221 python: `\N{...}` outside a 14-entry table silently becomes "" · P2 · PY · IN PROGRESS (PY worker, round 3) [V]
-CPython decodes every Unicode character name; an unknown name is a SyntaxError. At
-least make an unknown name an error; a full name table is a size question (measure).
+### T-263 python: TypeErrors for objects that are not iterable / callable / sized · P1 · PY · OPEN [V]
+`class C: pass`: `iter(C())` aborts the interpreter; `C()()` aborts "call of a non
+function value" in every leg; `len(C())` leaves no output line. CPython: `'C' object is
+not iterable` / `'C' object is not callable` / `object of type 'C' has no len()`.
 
-### T-222 python: complex numbers - abs, infinities, general powers, division · P1 · PY · IN PROGRESS (PY worker, round 3) [V]
-`abs(3+4j)`: interpreter aborts "unsupported operand type for <: complex", compiled
-NaN; CPython 5.0. Multiplication lacks C11 Annex G infinity recovery, so
-`(1e10-3j)**100` is `nan+nanj` (CPython OverflowError). Powers above 100, negative or
-non-integer fail loudly. Division uses the textbook formula; CPython 3.14 uses Smith's
-algorithm with FMA (last digit differs in ~80% of random cases) - MetaJS has no fma, so
-that part may need a floor primitive: cost it.
+### T-264 python: `b"\N{BULLET}"` · P3 · PY · OPEN [V]
+Prints `[34]` in all engines; CPython `b'\\N{BULLET}'` (`\N` is not a bytes escape).
+
+### T-265 python: math functions and complex powers vs Apple libm last digit · P3 · PY · OPEN [V]
+Non-integral complex powers and the `math.*` transcendentals differ from CPython in
+the last digit on ~half of rows (Go/C pow, atan2, exp, log, cos, sin vs Apple's libm);
+native differs from llvm.Run on 14 rows of a power probe. CPython calls the platform
+libm: decide whether matching it is possible (port Apple's algorithms? no source) or
+DECLINE with the measurement.
 
 ---
 
@@ -276,7 +277,7 @@ throws NumberFormatException. Check toInt/toLong/toFloat/toDoubleOrNull the same
 
 # GO — Go  (oracle: `go run`)
 
-### T-239 go: panic texts name user types without `main.` · P1 · GO · OPEN [V]
+### T-239 go: panic texts name user types without `main.` · P1 · GO · IN PROGRESS (GO worker, round 3) [V]
 go writes `main.T` (e.g. `interface conversion: interface {} is main.T, not int`); every
 engine writes `T`. Check every panic and `%v`-of-type site.
 
@@ -285,7 +286,7 @@ engine writes `T`. Check every panic and `%v`-of-type site.
 panics. Same family: int vs int64, rune vs int32 in type switches/asserts. Value-model:
 see T-081.
 
-### T-241 go: fmt `%T`, `%p`, `%#v`, `%!(EXTRA ...)`, printability · P1 · GO · OPEN [V]
+### T-241 go: fmt `%T`, `%p`, `%#v`, `%!(EXTRA ...)`, printability · P1 · GO · IN PROGRESS (GO worker, round 3) [V]
 `%T` and `%p` render as bad verbs, `%#v` as `%v`, extra operands get no
 `%!(EXTRA type=value)`; `%q` printability approximates strconv.IsPrint (U+2028 prints
 raw, go escapes it). See the gap list in languages/lib/go-fmt.js. Oracle: go run.
@@ -294,26 +295,26 @@ raw, go escapes it). See the gap list in languages/lib/go-fmt.js. Oracle: go run
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-233 swift: a Dictionary as a Sequence · P1 · SW · OPEN [V]
+### T-233 swift: a Dictionary as a Sequence · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
 `for e in d` with one binder binds the key (swiftc `(key: "a", value: 1)`); `d.map`,
 `d.filter`, `first(where:)`, `min(by:)`, `sorted(by:)` abort ("unknown Dictionary
 method"). All engines.
 
-### T-234 swift: `hasPrefix` / `contains` on String abort compiled · P1 · SW · OPEN [V]
+### T-234 swift: `hasPrefix` / `contains` on String abort compiled · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
 `"abc".hasPrefix("ab")`, `"abc".contains("b")`: llvm.Run and native "unknown String
 method"; interpreter `true` (= swiftc). Audit the compiled String surface against the
 interpreter's.
 
-### T-235 swift: `Optional(2.5)` and `Optional.map` · P1 · SW · OPEN [V]
+### T-235 swift: `Optional(2.5)` and `Optional.map` · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
 "unknown name: Optional" in all engines; `first.map { String($0) } ?? "-"`: interpreter
 "method .map on nil", compiler "method call 'map' on a object"; swiftc `h` / `-`. Also
 `flatMap`.
 
-### T-236 swift: a bare trailing closure call in expression position, compiler only · P1 · SW · OPEN [V]
+### T-236 swift: a bare trailing closure call in expression position, compiler only · P1 · SW · IN PROGRESS (SW worker, round 3) [V]
 `return filter { $0 > 1 }` inside an Array extension: compiler "variable not defined:
 filter"; interpreter `[2, 3]` (= swiftc).
 
-### T-237 swift: extension-only members through a protocol type with no declared receiver · P3 · SW · OPEN [V]
+### T-237 swift: extension-only members through a protocol type with no declared receiver · P3 · SW · IN PROGRESS (SW worker, round 3) [V]
 `f().shout` / `a.b.shout` where the static type is a protocol still dispatch to the
 conforming type's own member; swiftc binds the extension. Needs an expression typer.
 
@@ -408,33 +409,33 @@ The C subset's float cast does not round to binary32. Oracle: cc.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-211 the C floor's case table is an older Unicode · P1 · CORE · Shared: runtime.c · OPEN [V]
+### T-211 the C floor's case table is an older Unicode · P1 · CORE · Shared: runtime.c · IN PROGRESS (CORE worker, round 3) [V]
 Native only: `Character.toUpperCase` of U+019B, U+0264, U+1C89, U+1C8A differs from
 llvm.Run and java (U+019B → U+A7DC is Unicode 16). Regenerate the floor's table from
 the Unicode version the oracles use; check every language's upper/lower on the delta.
 
-### T-230 -frozen big-integer arithmetic costs millions of steps · P2 · CORE · OPEN [V]
+### T-230 -frozen big-integer arithmetic costs millions of steps · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 The `-frozen` interpreter spends ~2-8M steps per operation on ~300-digit numbers; the
 ruby ratchet needs ~50M of its 1e8 per-call budget. Profile the frozen host's path for
 the shared bignum helpers (interp-core.js / runtime.metajs) and cut it.
 
-### T-238 tests/coro-poc/build.sh fails on main · P2 · CORE · OPEN [V]
+### T-238 tests/coro-poc/build.sh fails on main · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 `coro-floor.py: the C floor is missing 1 of the 17 coroutine pieces: gc_trace tag 16`.
 Bring the proof-of-concept's checker in line with the floor, or delete the PoC if it
 no longer earns its keep (it is referenced by T-172/T-173).
 
-### T-151 MetaJS: the lexer reads `"\f"` / `"\v"` as letters · P1 · CORE · OPEN [V]
+### T-151 MetaJS: the lexer reads `"\f"` / `"\v"` as letters · P1 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 `"\f".charCodeAt(0)` is 102 in MetaJS. tools/metajs-lint guards known sites (it found
 two native-only defects this way), but the lexer in metajs-to-llvm-ir.abnf is the
 root. Fix it, refreeze (`./mec -freeze languages/metajs-to-llvm-ir.abnf && go build`,
 then `tests/gates.sh --freeze` must be a fixed point), regenerate every .ll, and
 decide whether the lint rule can go.
 
-### T-152 -frozen: `indexOf(x, from)` ignores `from` · P1 · CORE · OPEN [V]
+### T-152 -frozen: `indexOf(x, from)` ignores `from` · P1 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 `"aXaXa".indexOf("a", 2)`: goja 2, -frozen 0 - a live goja-vs-frozen divergence. Fix
 the frozen host and add a matrix assertion that runs both engines.
 
-### T-153 goja-vs-frozen case mapping is not pinned · P2 · CORE · OPEN [V]
+### T-153 goja-vs-frozen case mapping is not pinned · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 The ratchet rows that compared the two hosts' case mapping asserted single-character
 answers real languages contradict (`"ß".upper()` is `SS`) and were removed. Re-pin the
 agreement with oracle-correct full-mapping expectations (node: `"ß".toUpperCase()` is
@@ -448,18 +449,18 @@ garbage. The compiled halves are correct. Manual 7.14 explains the mechanism. Fi
 real suspension for the interpreter halves that works under goja and -frozen, cost it,
 implement or write the costed design here and DECLINE.
 
-### T-155 -frozen needs ~12 GB for js ratchet part 1 · P2 · CORE · OPEN [V]
+### T-155 -frozen needs ~12 GB for js ratchet part 1 · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 tests/js-test-full.js part 1 under the -frozen interpreter needs 11,907 MB where goja
 needs 99 MB; typescript's larger ratchet needs 2,398 MB, so it is js-path-specific.
 First suspect: `chainItems`, which retains every folded member chain for the whole
 run. This is why the js ratchet was split into three files.
 
-### T-156 `-trace` output is not reproducible run to run · P2 · CORE · OPEN [V]
+### T-156 `-trace` output is not reproducible run to run · P2 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 Raw Go heap addresses leak into `decl`/`read` `val` fields when a scope object is
 rendered (32 of 170 lines in a python trace; ruby and php too). Fix in
 abnf/trace.go's value rendering.
 
-### T-157 `-callgraph` names a function by the minimum marker in its body · P3 · CORE · OPEN [V]
+### T-157 `-callgraph` names a function by the minimum marker in its body · P3 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 `def f` on line 8 reads `L9` in every language. Use the definition's own position.
 
 ### T-158 frame elimination on arithmetic predicates · P3 · CORE + PY + RB · OPEN [V]
@@ -469,7 +470,7 @@ The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
 a measurement against a dead-code matched control (tests/bench.sh header). Never
 introduce a delegating wrapper on a hot path: that cost python +41% once.
 
-### T-159 `rtIsNil` could serve js, kotlin, php · P3 · CORE · OPEN [V]
+### T-159 `rtIsNil` could serve js, kotlin, php · P3 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 `jvUndefOrNull` (js-rt), `ktIsNullish` (kotlin-rt), `phIsNull` (php-rt) are the same
 four lines. kotlin and php already import runtime.metajs; js imports only regex.js,
 so it would pay a first import plus seven `rtk*` hooks - measure first.
@@ -594,6 +595,12 @@ T-213 java: StrictMath, `new String(...)`, ArrayList in the interpreter — DONE
 T-214 java: overload resolution uses the argument's runtime class — DONE 1358498 e22bec9
 T-215 java: duplicate assertion IDs in tests/java-test-full.java — DONE 58998c6
 T-216 java: transcendentals other than exp vs java — DONE 7c52f99 04b091c (Math.sin/cos answer StrictMath: HotSpot's aarch64 intrinsic differs from fdlibm in the last place on ~3.5% of arguments and is not reproducible - DECLINED residual)
+T-217 python: `range()` ignores its step and prints as a list — PARTIAL 8ad904e (step, errors); the range type is T-259
+T-218 python: `x = None; x[0] = 1` is not a catchable TypeError — DONE e2c6c0b
+T-219 python: `f().k += 1` evaluates `f()` twice — DONE eb01ea3
+T-220 python: astral characters in indexing, iteration and find — DONE 9197d07 (UTF-16 kept, positions converted; js_pyidx)
+T-221 python: `\N{...}` outside a 14-entry table silently becomes "" — DONE 901d9ef (unknown name is a SyntaxError; full table DECLINED: 34,137 names, 1.09 MB per grammar)
+T-222 python: complex numbers - abs, infinities, general powers, division — DONE 7f150bf (software FMA in MetaJS; non-integral powers inherit the libm last-digit gap, T-265)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
