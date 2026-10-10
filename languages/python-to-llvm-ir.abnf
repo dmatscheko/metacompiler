@@ -4241,6 +4241,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "setattr", "js_pysetattr3", 0)
         // vars(o) IS o.__dict__ - CPython's own definition.
         b = declBuiltin(b, "vars", "js_pyvars", 1)
+        b = declBuiltin(b, "format", "js_pyformatfn", 0)
         // staticmethod / classmethod. The builtin only WRAPS; the unwrapping
         // happens at the class-member lookup, which is the one place that knows
         // both the receiver and its class - see abnf/jsrtpydesc.go and pyDDescGet

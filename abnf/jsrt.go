@@ -4842,6 +4842,22 @@ func (rt *jsrt) pyBigNarrow(x *big.Int) interface{} {
 // BigInt refuses that mix, which is why bigPair above - shared with js_add,
 // js_sub and the rest of the generic externals - demands two BigInts and this
 // Python-only pair does not.
+// pyBigFloPair recognises an arbitrary precision int and a float box as the two
+// operands: the int, the double, and whether the int is the LEFT one.
+func pyBigFloPair(a, b interface{}) (*big.Int, float64, bool, bool) {
+	if x, ok := a.(*jsBigInt); ok {
+		if y, ok2 := b.(*jsPyFlo); ok2 {
+			return x.v, y.f, true, true
+		}
+	}
+	if y, ok := b.(*jsBigInt); ok {
+		if x, ok2 := a.(*jsPyFlo); ok2 {
+			return y.v, x.f, false, true
+		}
+	}
+	return nil, 0, false, false
+}
+
 func pyBigPair(a, b interface{}) (*big.Int, *big.Int, bool) {
 	_, aBig := a.(*jsBigInt)
 	_, bBig := b.(*jsBigInt)
@@ -15474,6 +15490,36 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return boolH(c != 0)
 				}
 			}
+			// An arbitrary precision int meeting a float: the comparisons are EXACT
+			// and the arithmetic takes the int as its nearest double (OverflowError
+			// past the double range), after which the float arms below apply.
+			if bi, f, bigLeft, ok := pyBigFloPair(l, r); ok {
+				switch op {
+				case "<", ">", "<=", ">=", "==", "!=":
+					c := pyCmpBigFloat(bi, f)
+					if !bigLeft && c != 2 {
+						c = -c
+					}
+					switch op {
+					case "<":
+						return boolH(c == -1)
+					case ">":
+						return boolH(c == 1)
+					case "<=":
+						return boolH(c == -1 || c == 0)
+					case ">=":
+						return boolH(c == 1 || c == 0)
+					case "==":
+						return boolH(c == 0)
+					}
+					return boolH(c != 0)
+				}
+				if bigLeft {
+					l = &jsPyFlo{f: rt.pyBigToF(bi)}
+				} else {
+					r = &jsPyFlo{f: rt.pyBigToF(bi)}
+				}
+			}
 			switch op {
 			case "+":
 				// Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and
@@ -15674,6 +15720,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyint": func(a []uint64) uint64 {
 			if bi, ok := u(a[0]).(*jsBigInt); ok {
 				return w(bi)
+			}
+			if fl, ok := u(a[0]).(*jsPyFlo); ok {
+				return w(rt.pyFloatToInt(fl.f))
 			}
 			return rt.wrapNum(math.Trunc(rt.toNumber(u(a[0]))))
 		},
@@ -15933,6 +15982,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyfloat": func(a []uint64) uint64 {
 			if s, isStr := u(a[0]).(string); isStr {
 				return w(&jsPyFlo{f: pyStrToF(s)})
+			}
+			if bi, ok := u(a[0]).(*jsBigInt); ok {
+				return w(&jsPyFlo{f: rt.pyBigToF(bi.v)})
 			}
 			return w(&jsPyFlo{f: rt.toNumber(u(a[0]))})
 		},
@@ -16350,6 +16402,22 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Only the Python grammars ever emit this extern.
 		"js_pyformat": func(a []uint64) uint64 {
 			return rt.wrapStr(rt.pyFormat(u(a[0]), rt.toString(u(a[1])), rt.toString(u(a[2]))))
+		},
+		// The format(value[, spec]) builtin. Twin of js_pyformatfn in
+		// languages/lib/python-rt.metajs and hostGlobals["format"] in
+		// languages/python-interpreter.abnf.
+		"js_pyformatfn": func(a []uint64) uint64 {
+			args := rt.argArray(u(a[0]))
+			spec := ""
+			if len(args) > 1 {
+				s, ok := args[1].(string)
+				if !ok {
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+						"format() argument 2 must be str, not "+pyTypeName(rt, args[1]))})
+				}
+				spec = s
+			}
+			return rt.wrapStr(rt.pyFormat(argAt(args, 0), spec, ""))
 		},
 		"js_pyprint": func(a []uint64) uint64 { // print(...) with Python style rendering.
 			args, ok := u(a[0]).(*jsArray)
@@ -17260,6 +17328,9 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 	// the same double are equal though they are not the same box. Above the
 	// bigint and complex arms, which read the box through rt.toNumber anyway.
 	if pyIsFlo(x) || pyIsFlo(y) {
+		if bi, f, _, ok := pyBigFloPair(x, y); ok {
+			return pyCmpBigFloat(bi, f) == 0
+		}
 		return rt.pyNumEq(x, y)
 	}
 	// Python compares an int to a float BY VALUE, and an arbitrary precision int
@@ -17305,6 +17376,53 @@ func bigEqFloat(b *big.Int, f float64) bool {
 	}
 	fi, _ := big.NewFloat(f).Int(nil)
 	return b.Cmp(fi) == 0
+}
+
+// pyBigToF is an arbitrary precision int as the nearest double (half to even),
+// which float(n) and every int-meets-float operator use; past the double range
+// CPython raises OverflowError rather than answering an infinity. Twin of
+// pyBigToF in languages/lib/python-rt.metajs and bigToFlo in
+// languages/python-interpreter.abnf.
+func (rt *jsrt) pyBigToF(b *big.Int) float64 {
+	f, _ := new(big.Float).SetInt(b).Float64()
+	if math.IsInf(f, 0) {
+		panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "int too large to convert to float")})
+	}
+	return f
+}
+
+// pyCmpBigFloat compares an int with a double EXACTLY, as CPython does, so
+// 10**23 != float(10**23): -1, 0 or 1, and 2 when the double is a NaN (every
+// relation false).
+func pyCmpBigFloat(b *big.Int, f float64) int {
+	switch {
+	case f != f:
+		return 2
+	case math.IsInf(f, 1):
+		return -1
+	case math.IsInf(f, -1):
+		return 1
+	}
+	return new(big.Float).SetInt(b).Cmp(big.NewFloat(f))
+}
+
+// pyFloatToInt is int(f) for a double: truncated toward zero, and EXACT past
+// 2^53, where the double is already an integer the plain number cannot carry
+// (int(1e23) is 99999999999999991611392). Twin of pyFToInt in
+// languages/lib/python-rt.metajs and floToInt in languages/python-interpreter.abnf.
+func (rt *jsrt) pyFloatToInt(f float64) interface{} {
+	if f != f {
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", "cannot convert float NaN to integer")})
+	}
+	if math.IsInf(f, 0) {
+		panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "cannot convert float infinity to integer")})
+	}
+	t := math.Trunc(f)
+	if math.Abs(t) <= pyMax53 {
+		return t
+	}
+	bi, _ := big.NewFloat(t).Int(nil)
+	return rt.pyBigNarrow(bi)
 }
 
 // pyGenericAlias answers the memoized list[int]-style alias of a type object (a
@@ -20236,17 +20354,18 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	return inst
 }
 
-// ----- Python's format mini-language (js_pyformat) -----
-// [[fill]align][sign][0][width][.precision][type], which is the slice of it an
-// f-string replacement field in practice writes.
+// ----- Python's format mini-language (js_pyformat): see pyFormat -----
 func pyIsAlign(ch byte) bool { return ch == '<' || ch == '>' || ch == '^' || ch == '=' }
 
 // ----- "fmt" % args, CPython's printf-style formatting -----
 //
-// Supported: the conversions s r a d i u x X o b c e E g G f F and %%; the flags
-// - + 0 and space; a width; and a .precision, which TRUNCATES for s/r/a. A
+// Supported: the conversions s r a d i u x X o c e E g G f F and %%; the flags
+// - + 0 and space, and # for x X o; a width; and a .precision, which TRUNCATES
+// for s/r/a and gives the minimum digit count for the int conversions. A
 // %(name)s mapping key reads a dict argument. NOT supported, and a LOUD failure
-// rather than a silent wrong answer: the # alternate form.
+// rather than a silent wrong answer: the # alternate form of the float
+// conversions. Every operand and arity error is CPython's catchable exception
+// with CPython's text.
 //
 // THE ARGUMENT TUPLE. CPython takes one value per conversion from a TUPLE and
 // treats every other object as a single value - but a tuple IS a list in this
@@ -20273,58 +20392,98 @@ func pyPctCount(f string) int {
 	return n
 }
 
-// pyPctNum is a conversion operand as a double, unwrapping the float box and an
-// arbitrary precision int.
-func (rt *jsrt) pyPctNum(v interface{}) float64 {
-	if bi, ok := v.(*jsBigInt); ok {
-		f, _ := new(big.Float).SetInt(bi.v).Float64()
-		return f
-	}
-	return rt.toNumber(v)
+func (rt *jsrt) pyPctTypeErr(msg string) {
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 }
 
-// pyPctDigits is %d: the integer part, and an arbitrary precision int stays exact.
-func (rt *jsrt) pyPctDigits(v interface{}) string {
-	if bi, ok := v.(*jsBigInt); ok {
-		return bi.v.String()
+// pyPctInt is the operand of an int conversion (d i u x X o) as an exact int: any
+// real number for d i u, truncated (exactly past 2^53, raising for an infinity or
+// a NaN), and an int only for x X o. Twin of pyPctInt in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func (rt *jsrt) pyPctInt(v interface{}, typ byte) *big.Int {
+	if fl, ok := v.(*jsPyFlo); ok && (typ == 'd' || typ == 'i' || typ == 'u') {
+		v = rt.pyFloatToInt(fl.f)
 	}
-	return strconv.FormatInt(int64(math.Trunc(rt.pyPctNum(v))), 10)
+	if _, _, isInst := pyInstance(v); !isInst {
+		if b, ok := pyBigOperand(v); ok {
+			return b
+		}
+	}
+	tn := pyTypeName(rt, v)
+	if isPyComplex(v) {
+		tn = "complex"
+	}
+	if typ == 'd' || typ == 'i' || typ == 'u' {
+		rt.pyPctTypeErr("%" + string(typ) + " format: a real number is required, not " + tn)
+	}
+	rt.pyPctTypeErr("%" + string(typ) + " format: an integer is required, not " + tn)
+	return nil
 }
 
-// pyPctRadix is the base-N digits of an integral value: exact for every magnitude
-// a double holds exactly, and the SAME loop in all three halves (pyBaseStr in
-// languages/python-interpreter.abnf, pyBPctRadix in languages/lib/python-rt.metajs
-// - neither of which has an int64 to convert through, and int64() SATURATES on
-// arm64, so a shared loop over the double is the only spelling that agrees).
-func (rt *jsrt) pyPctRadix(v interface{}, base int, upper bool) string {
-	n := math.Trunc(rt.pyPctNum(v))
-	if math.IsNaN(n) {
-		n = 0
+// pyPctReal is the operand of a float conversion (e f g) as a double: a float,
+// or an int converted to its nearest double. Twin of pyPctReal in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func (rt *jsrt) pyPctReal(v interface{}) float64 {
+	switch t := v.(type) {
+	case *jsPyFlo:
+		return t.f
+	case *jsBigInt:
+		return rt.pyBigToF(t.v)
+	case float64:
+		return t
+	case bool:
+		return pyBoolInt(t)
 	}
-	if n == 0 {
-		return "0"
+	tn := pyTypeName(rt, v)
+	if isPyComplex(v) {
+		tn = "complex"
 	}
-	neg := n < 0
-	if neg {
-		n = -n
+	rt.pyPctTypeErr("must be real number, not " + tn)
+	return 0
+}
+
+// pyPctChar is %c: a one-character str, or an int naming a code point.
+func (rt *jsrt) pyPctChar(v interface{}) string {
+	if s, isStr := v.(string); isStr {
+		if n := utf8.RuneCountInString(s); n != 1 {
+			rt.pyPctTypeErr("%c requires an int or a unicode character, not a string of length " + strconv.Itoa(n))
+		}
+		return s
 	}
-	out := ""
-	fb := float64(base)
-	for n > 0 {
-		q := math.Floor(n / fb)
-		out = string("0123456789abcdefghijklmnopqrstuvwxyz"[int(n-q*fb)]) + out
-		n = q
+	if _, _, isInst := pyInstance(v); !isInst {
+		if b, ok := pyBigOperand(v); ok {
+			if b.Sign() < 0 || b.Cmp(big.NewInt(0x110000)) >= 0 {
+				panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "%c arg not in range(0x110000)")})
+			}
+			return string(rune(b.Int64()))
+		}
 	}
+	tn := pyTypeName(rt, v)
+	if isPyComplex(v) {
+		tn = "complex"
+	}
+	rt.pyPctTypeErr("%c requires an int or a unicode character, not " + tn)
+	return ""
+}
+
+// pyPctIntText is an int conversion's text: the sign, then the # prefix, then the
+// digits zero-padded to the precision ("%#.4x" % -255 is -0x00ff).
+func pyPctIntText(b *big.Int, base int, prefix string, prec int, upper bool) string {
+	digits := new(big.Int).Abs(b).Text(base)
+	for len(digits) < prec {
+		digits = "0" + digits
+	}
+	out := prefix + digits
 	if upper {
 		out = strings.ToUpper(out)
 	}
-	if neg {
+	if b.Sign() < 0 {
 		return "-" + out
 	}
 	return out
 }
 
-func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space bool, width, prec int) string {
+func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space, alt bool, width, prec int) string {
 	var body string
 	numeric := false
 	switch typ {
@@ -20341,32 +20500,41 @@ func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space bool, 
 			}
 		}
 	case 'c':
-		if s, isStr := v.(string); isStr {
-			body = s
-		} else {
-			body = string(rune(int(math.Trunc(rt.pyPctNum(v)))))
-		}
+		body = rt.pyPctChar(v)
 	case 'd', 'i', 'u':
 		numeric = true
-		body = rt.pyPctDigits(v)
-	case 'x':
-		numeric, body = true, rt.pyPctRadix(v, 16, false)
-	case 'X':
-		numeric, body = true, rt.pyPctRadix(v, 16, true)
+		body = pyPctIntText(rt.pyPctInt(v, typ), 10, "", prec, false)
+	case 'x', 'X':
+		prefix := ""
+		if alt {
+			prefix = "0x"
+		}
+		numeric, body = true, pyPctIntText(rt.pyPctInt(v, typ), 16, prefix, prec, typ == 'X')
 	case 'o':
-		numeric, body = true, rt.pyPctRadix(v, 8, false)
-	case 'b':
-		numeric, body = true, rt.pyPctRadix(v, 2, false)
+		prefix := ""
+		if alt {
+			prefix = "0o"
+		}
+		numeric, body = true, pyPctIntText(rt.pyPctInt(v, typ), 8, prefix, prec, false)
 	case 'f', 'F':
+		if alt {
+			rt.fail("unsupported format flag '#'")
+		}
 		p := prec
 		if p < 0 {
 			p = 6
 		}
-		numeric, body = true, strconv.FormatFloat(rt.pyPctNum(v), 'f', p, 64)
+		n := rt.pyPctReal(v)
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			numeric, body = true, pyPctExp(n, typ, prec) // inf / nan, the same text.
+		} else {
+			numeric, body = true, strconv.FormatFloat(n, 'f', p, 64)
+		}
 	case 'e', 'E', 'g', 'G':
-		numeric, body = true, pyPctExp(rt.pyPctNum(v), typ, prec)
-	default:
-		rt.fail("unsupported format character '%c'", typ)
+		if alt {
+			rt.fail("unsupported format flag '#'")
+		}
+		numeric, body = true, pyPctExp(rt.pyPctReal(v), typ, prec)
 	}
 	if numeric && !strings.HasPrefix(body, "-") {
 		if plus {
@@ -20391,12 +20559,13 @@ func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space bool, 
 	return strings.Repeat(" ", pad) + body
 }
 
-// pyPctExp is %e / %g. strconv's 'e' and 'g' ARE C's shapes - an exponent that is
-// signed and at least two digits, and 'g' choosing between the two on the exponent
-// that was used - so this half needs no digit machinery of its own; the two script
-// halves build the same text out of floPrec.
+// pyPctExp is %e / %g, and the inf / nan text of %f. strconv's 'e' and 'g' ARE
+// C's shapes - an exponent that is signed and at least two digits, and 'g'
+// choosing between the two on the exponent that was used - so this half needs no
+// digit machinery of its own; the two script halves build the same text out of
+// floPrec.
 func pyPctExp(n float64, typ byte, prec int) string {
-	upper := typ == 'E' || typ == 'G'
+	upper := typ == 'E' || typ == 'G' || typ == 'F'
 	p := prec
 	if p < 0 {
 		p = 6
@@ -20464,7 +20633,7 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 		}
 		i++
 		if i >= len(f) {
-			rt.fail("incomplete format")
+			rt.pyPctValueErr("incomplete format")
 		}
 		if f[i] == '%' {
 			out += "%"
@@ -20482,7 +20651,7 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 			key, hasKey, mapped = f[st:i], true, true
 			i++
 		}
-		left, zero, plus, space := false, false, false, false
+		left, zero, plus, space, alt := false, false, false, false, false
 		scanning := true
 		for scanning && i < len(f) {
 			switch f[i] {
@@ -20499,7 +20668,8 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 				space = true
 				i++
 			case '#':
-				rt.fail("unsupported format flag '#'")
+				alt = true
+				i++
 			default:
 				scanning = false
 			}
@@ -20522,14 +20692,17 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 			i++
 		}
 		if i >= len(f) {
-			rt.fail("incomplete format")
+			rt.pyPctValueErr("incomplete format")
 		}
 		typ := f[i]
+		if !strings.ContainsRune("sraiduxXofFeEgGc", rune(typ)) {
+			rt.pyPctValueErr(fmt.Sprintf("unsupported format character '%c' (0x%x) at index %d", typ, typ, i))
+		}
 		i++
 		var v interface{}
 		if hasKey {
 			if dictK == nil {
-				rt.fail("format requires a mapping")
+				rt.pyPctTypeErr("format requires a mapping")
 			}
 			at := rt.pyDictFind(dictK, key)
 			if at < 0 {
@@ -20538,109 +20711,368 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 			v = dictV.elems[at]
 		} else {
 			if ai >= len(args) {
-				rt.fail("not enough arguments for format string")
+				rt.pyPctTypeErr("not enough arguments for format string")
 			}
 			v = args[ai]
 			ai++
 		}
-		out += rt.pyPctOne(v, typ, left, zero, plus, space, width, prec)
+		out += rt.pyPctOne(v, typ, left, zero, plus, space, alt, width, prec)
 	}
 	if !mapped && ai < len(args) {
-		rt.fail("not all arguments converted during string formatting")
+		rt.pyPctTypeErr("not all arguments converted during string formatting")
 	}
 	return out
 }
 
-func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
-	if spec == "" {
-		if conv == "r" {
-			return rt.pyRepr(v)
-		}
-		return rt.pyString(v)
-	}
-	i := 0
-	fill := " "
-	align := byte(0)
-	if len(spec) > 1 && pyIsAlign(spec[1]) {
-		fill, align, i = spec[0:1], spec[1], 2
-	} else if len(spec) > 0 && pyIsAlign(spec[0]) {
-		align, i = spec[0], 1
-	}
-	sign := byte(0)
-	if i < len(spec) && (spec[i] == '+' || spec[i] == '-' || spec[i] == ' ') {
-		sign, i = spec[i], i+1
-	}
-	if i < len(spec) && spec[i] == '0' && align == 0 {
-		fill, align, i = "0", '=', i+1
-	}
-	width := 0
-	for i < len(spec) && spec[i] >= '0' && spec[i] <= '9' {
-		width, i = width*10+int(spec[i]-'0'), i+1
-	}
-	prec := -1
-	if i < len(spec) && spec[i] == '.' {
-		i++
-		prec = 0
-		for i < len(spec) && spec[i] >= '0' && spec[i] <= '9' {
-			prec, i = prec*10+int(spec[i]-'0'), i+1
-		}
-	}
-	typ := byte(0)
-	if i < len(spec) {
-		typ = spec[i]
-	}
-	body := rt.pyFormatBody(v, typ, prec, sign, conv)
-	pad := width - rt.strLen(body)
-	if pad <= 0 {
-		return body
-	}
-	_, isNum := v.(float64)
-	isNum = isNum || pyIsFlo(v)
-	// A number right-aligns by default, everything else left-aligns.
-	if align == '>' || align == '=' || (align == 0 && isNum) {
-		return strings.Repeat(fill, pad) + body
-	}
-	if align == '^' {
-		left := pad / 2
-		return strings.Repeat(fill, left) + body + strings.Repeat(fill, pad-left)
-	}
-	return body + strings.Repeat(fill, pad)
+func (rt *jsrt) pyPctValueErr(msg string) {
+	panic(&jsThrown{value: rt.pyExcInstance("ValueError", msg)})
 }
 
-func (rt *jsrt) pyFormatBody(v interface{}, typ byte, prec int, sign byte, conv string) string {
-	var body string
-	switch typ {
-	case 'f', 'F':
+// pyFormat is the format mini-language behind format(), str.format and the
+// f-string: [[fill]align][sign][z][#][0][width][grouping][.precision][type], by
+// CPython's rules per type. A str takes s; an int (a bool too) takes b c d o x X
+// n, or a float type after becoming its nearest double; a float takes e E f F g
+// G n % or none - repr() without a precision, and with one a 'g' that keeps a
+// fractional digit and turns exponential one digit sooner. Any other value takes
+// only the empty spec, and a complex only fill, alignment and width (padding its
+// str(); the rest of its own mini-language fails loudly). A number
+// right-aligns and a str left-aligns by default; the 0 flag is a '0' fill with
+// '=' alignment for a number, and with a grouping it groups the padding too.
+// Widths count code points. The errors are CPython's, with its text. Twin of
+// pyFormat in languages/python-interpreter.abnf and js_pyformat in
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
+	x := v
+	switch conv {
+	case "r":
+		x = rt.pyRepr(v)
+	case "s":
+		x = rt.pyString(v)
+	case "a":
+		x = pyAsciiOf(rt.pyRepr(v))
+	}
+	if spec == "" {
+		if xs, ok := x.(string); ok {
+			return xs
+		}
+		return rt.pyString(x)
+	}
+	tn := pyTypeName(rt, x)
+	if isPyComplex(x) {
+		tn = "complex"
+	}
+	fail := func(kind, msg string) {
+		panic(&jsThrown{value: rt.pyExcInstance(kind, msg)})
+	}
+	sp := []rune(spec)
+	isAlign := func(r rune) bool { return r < 128 && pyIsAlign(byte(r)) }
+	isDigit := func(i int) bool { return i < len(sp) && sp[i] >= '0' && sp[i] <= '9' }
+	i := 0
+	fill, fillGiven, align := " ", false, rune(0)
+	if len(sp) > 1 && isAlign(sp[1]) {
+		fill, fillGiven, align, i = string(sp[0]), true, sp[1], 2
+	} else if isAlign(sp[0]) {
+		align, i = sp[0], 1
+	}
+	sign := rune(0)
+	if i < len(sp) && (sp[i] == '+' || sp[i] == '-' || sp[i] == ' ') {
+		sign, i = sp[i], i+1
+	}
+	zflag, alt, zero := false, false, false
+	if i < len(sp) && sp[i] == 'z' {
+		zflag, i = true, i+1
+	}
+	if i < len(sp) && sp[i] == '#' {
+		alt, i = true, i+1
+	}
+	if i < len(sp) && sp[i] == '0' {
+		zero, i = true, i+1
+	}
+	width := 0
+	for isDigit(i) {
+		width, i = width*10+int(sp[i]-'0'), i+1
+	}
+	group := ""
+	if i < len(sp) && (sp[i] == ',' || sp[i] == '_') {
+		group, i = string(sp[i]), i+1
+	}
+	prec := -1
+	if i < len(sp) && sp[i] == '.' {
+		i++
+		if !isDigit(i) {
+			fail("ValueError", "Format specifier missing precision")
+		}
+		prec = 0
+		for isDigit(i) {
+			prec, i = prec*10+int(sp[i]-'0'), i+1
+		}
+	}
+	typ := ""
+	if i < len(sp) {
+		typ, i = string(sp[i]), i+1
+	}
+	if i < len(sp) {
+		fail("ValueError", "Invalid format specifier '"+spec+"' for object of type '"+tn+"'")
+	}
+	if zero && !fillGiven {
+		fill = "0"
+	}
+	unknown := "Unknown format code '" + typ + "' for object of type '" + tn + "'"
+	if xs, ok := x.(string); ok {
+		switch {
+		case typ != "" && typ != "s":
+			fail("ValueError", unknown)
+		case sign != 0:
+			fail("ValueError", "Sign not allowed in string format specifier")
+		case alt:
+			fail("ValueError", "Alternate form (#) not allowed in string format specifier")
+		case align == '=':
+			fail("ValueError", "'=' alignment not allowed in string format specifier")
+		case group != "":
+			fail("ValueError", "Cannot specify '"+group+"' with 's'.")
+		}
+		if rs := []rune(xs); prec >= 0 && len(rs) > prec {
+			xs = string(rs[:prec])
+		}
+		if align == 0 {
+			align = '<'
+		}
+		return rt.pyFmtPad(fill, align, width, "", xs)
+	}
+	if isPyComplex(x) {
+		if typ != "" || prec >= 0 || sign != 0 || alt || zero || group != "" {
+			rt.fail("unsupported format spec for complex: '%s'", spec)
+		}
+		if align == 0 {
+			align = '>'
+		}
+		return rt.pyFmtPad(fill, align, width, "", rt.pyString(x))
+	}
+	bi, isInt := pyBigOperand(x)
+	if _, _, isInst := pyInstance(x); isInst {
+		isInt = false
+	}
+	fl, isFlo := x.(*jsPyFlo)
+	if !isInt && !isFlo {
+		fail("TypeError", "unsupported format string passed to "+tn+".__format__")
+	}
+	if zero && align == 0 {
+		align = '='
+	}
+	if align == 0 {
+		align = '>'
+	}
+	var f float64
+	if isInt {
+		if typ == "" || strings.Contains("bcdoxXn", typ) {
+			if prec >= 0 {
+				fail("ValueError", "Precision not allowed in integer format specifier")
+			}
+			if typ == "c" {
+				switch {
+				case sign != 0:
+					fail("ValueError", "Sign not allowed with integer format specifier 'c'")
+				case alt:
+					fail("ValueError", "Alternate form (#) not allowed with integer format specifier 'c'")
+				case group != "":
+					fail("ValueError", "Cannot specify '"+group+"' with 'c'.")
+				case !bi.IsInt64():
+					fail("OverflowError", "Python int too large to convert to C long")
+				case bi.Sign() < 0 || bi.Int64() >= 0x110000:
+					fail("OverflowError", "%c arg not in range(0x110000)")
+				}
+				return rt.pyFmtPad(fill, align, width, "", string(rune(bi.Int64())))
+			}
+			if group != "" && (typ == "n" || (group == "," && typ != "" && typ != "d")) {
+				fail("ValueError", "Cannot specify '"+group+"' with '"+typ+"'.")
+			}
+			base := 10
+			switch typ {
+			case "b":
+				base = 2
+			case "o":
+				base = 8
+			case "x", "X":
+				base = 16
+			}
+			digits := new(big.Int).Abs(bi).Text(base)
+			if typ == "X" {
+				digits = strings.ToUpper(digits)
+			}
+			prefix := ""
+			if alt && base != 10 {
+				prefix = "0" + typ
+			}
+			n := 3
+			if base != 10 {
+				n = 4
+			}
+			return rt.pyFmtNum(bi.Sign() < 0, sign, prefix, digits, "", group, n, fill, align, width, zero)
+		}
+		if !strings.Contains("eEfFgG%", typ) {
+			fail("ValueError", unknown)
+		}
+		f = rt.pyBigToF(bi)
+	} else {
+		if typ != "" && !strings.Contains("eEfFgGn%", typ) {
+			fail("ValueError", unknown)
+		}
+		f = fl.f
+	}
+	neg := math.Signbit(f) && !math.IsNaN(f)
+	a := math.Abs(f)
+	upper := typ == "E" || typ == "F" || typ == "G"
+	body := ""
+	switch {
+	case math.IsNaN(a):
+		body = "nan"
+	case math.IsInf(a, 0):
+		body = "inf"
+	case typ == "f" || typ == "F" || typ == "%":
 		p := prec
 		if p < 0 {
 			p = 6
 		}
-		body = strconv.FormatFloat(rt.toNumber(v), 'f', p, 64)
-	case 'd':
-		body = strconv.FormatInt(int64(rt.toInt32(v)), 10)
-	case 'x':
-		body = strconv.FormatInt(int64(rt.toInt32(v)), 16)
-	case 'X':
-		body = strings.ToUpper(strconv.FormatInt(int64(rt.toInt32(v)), 16))
-	case 'b':
-		body = strconv.FormatInt(int64(rt.toInt32(v)), 2)
-	case 'o':
-		body = strconv.FormatInt(int64(rt.toInt32(v)), 8)
+		if typ == "%" {
+			a *= 100
+		}
+		body = strconv.FormatFloat(a, 'f', p, 64)
+		if alt && p == 0 {
+			body += "."
+		}
+	case typ == "e" || typ == "E":
+		p := prec
+		if p < 0 {
+			p = 6
+		}
+		body = strconv.FormatFloat(a, 'e', p, 64)
+		if alt && p == 0 {
+			body = body[:1] + "." + body[1:]
+		}
+	case typ == "g" || typ == "G" || typ == "n":
+		p := prec
+		if p < 0 {
+			p = 6
+		}
+		body = pyFmtGeneral(a, p, alt, false)
+	case prec < 0:
+		body = pyFloStr(a)
 	default:
-		if conv == "r" {
-			body = rt.pyRepr(v)
-		} else {
-			body = rt.pyString(v)
+		body = pyFmtGeneral(a, prec, alt, true)
+	}
+	if upper {
+		body = strings.ToUpper(body)
+	}
+	if typ == "%" {
+		body += "%"
+	}
+	if zflag && neg && strings.Trim(body, "0.%eE+-") == "" {
+		neg = false
+	}
+	ip := 0
+	for ip < len(body) && body[ip] >= '0' && body[ip] <= '9' {
+		ip++
+	}
+	return rt.pyFmtNum(neg, sign, "", body[:ip], body[ip:], group, 3, fill, align, width, zero)
+}
+
+// pyFmtGeneral is C's %g choice between the fixed and the exponent shape, on the
+// exponent of the value rounded to p digits. keepOne is the none type's: at
+// least one fractional digit, and the exponent shape from p - 1 on. alt keeps
+// the trailing zeros and the point.
+func pyFmtGeneral(a float64, prec int, alt, keepOne bool) string {
+	p := prec
+	if p == 0 {
+		p = 1
+	}
+	e := strconv.FormatFloat(a, 'e', p-1, 64)
+	ge, _ := strconv.Atoi(e[strings.IndexByte(e, 'e')+1:])
+	limit := p
+	if keepOne {
+		limit = p - 1
+	}
+	if ge < -4 || ge >= limit {
+		at := strings.IndexByte(e, 'e')
+		mant, tail := e[:at], e[at:]
+		if !alt {
+			if strings.Contains(mant, ".") {
+				mant = strings.TrimRight(strings.TrimRight(mant, "0"), ".")
+			}
+		} else if !strings.Contains(mant, ".") {
+			mant += "."
+		}
+		return mant + tail
+	}
+	out := strconv.FormatFloat(a, 'f', p-1-ge, 64)
+	if !alt && strings.Contains(out, ".") {
+		out = strings.TrimRight(strings.TrimRight(out, "0"), ".")
+	}
+	if !strings.Contains(out, ".") {
+		if keepOne {
+			out += ".0"
+		} else if alt {
+			out += "."
 		}
 	}
-	if sign == '+' {
-		if _, isNum := v.(float64); isNum || pyIsFlo(v) {
-			if rt.toNumber(v) >= 0 {
-				body = "+" + body
+	return out
+}
+
+// pyFmtGroup groups digits from the right in runs of n by sep.
+func pyFmtGroup(digits, sep string, n int) string {
+	out := ""
+	c := 0
+	for i := len(digits) - 1; i >= 0; i-- {
+		if c == n {
+			out, c = sep+out, 0
+		}
+		out = digits[i:i+1] + out
+		c++
+	}
+	return out
+}
+
+// pyFmtNum is a number's text: sign, prefix, the grouped integer digits and the
+// rest, padded. With the 0 flag and a grouping the padding zeros are grouped
+// too (format(1234, "010,") is 00,001,234).
+func (rt *jsrt) pyFmtNum(neg bool, sign rune, prefix, digits, rest, group string, n int, fill string, align rune, width int, zero bool) string {
+	sg := ""
+	switch {
+	case neg:
+		sg = "-"
+	case sign == '+':
+		sg = "+"
+	case sign == ' ':
+		sg = " "
+	}
+	g := digits
+	if group != "" {
+		g = pyFmtGroup(digits, group, n)
+		if zero && fill == "0" && align == '=' && digits != "" {
+			for len(sg)+len(prefix)+len(g)+pyStrLen(rt, rest) < width {
+				digits = "0" + digits
+				g = pyFmtGroup(digits, group, n)
 			}
 		}
 	}
-	return body
+	return rt.pyFmtPad(fill, align, width, sg+prefix, g+rest)
+}
+
+// pyFmtPad pads head + body to width code points; '=' pads between the two.
+func (rt *jsrt) pyFmtPad(fill string, align rune, width int, head, body string) string {
+	pad := width - pyStrLen(rt, head+body)
+	if pad <= 0 {
+		return head + body
+	}
+	switch align {
+	case '<':
+		return head + body + strings.Repeat(fill, pad)
+	case '=':
+		return head + strings.Repeat(fill, pad) + body
+	case '^':
+		left := pad / 2
+		return strings.Repeat(fill, left) + head + body + strings.Repeat(fill, pad-left)
+	}
+	return strings.Repeat(fill, pad) + head + body
 }
 
 // pyStrLen counts Unicode CODE POINTS: Python's len() of a string, where a

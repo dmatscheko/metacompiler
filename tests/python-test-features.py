@@ -2410,5 +2410,111 @@ na_c = NaC()
 na_c.k = 1
 check("noattr-instance-still-sets", na_c.k, 1)
 
+
+# ----- SECTION: an arbitrary precision int meeting a float -----
+#
+# float(n) is the nearest double (half to even) and raises OverflowError past
+# the double range; int and float compare EXACTLY; int(f) is exact past 2^53.
+bf_e = [54, 80, 1023]
+bf_big = [2 ** e for e in bf_e]
+check("bigflo-float", [str(float(b)) for b in bf_big],
+      ["1.8014398509481984e+16", "1.2089258196146292e+24", "8.98846567431158e+307"])
+check("bigflo-equal", [b == float(b) for b in bf_big], [True, True, True])
+bf_tie = [2 ** 80 + 2 ** 27, 2 ** 80 + 2 ** 27 + 1, 10 ** 23]
+check("bigflo-half-even", [str(float(bf_tie[0])), str(float(bf_tie[1]))],
+      ["1.2089258196146292e+24", "1.2089258196146294e+24"])
+check("bigflo-exact-compare", [bf_tie[2] == 1e23, bf_tie[2] > 1e23, 1e23 < bf_tie[2], bf_tie[2] != 1e23], [False, True, True, True])
+check("bigflo-arith", [str(bf_big[1] + 0.5), str(bf_big[1] * 1.0), str(bf_big[1] / 2.0), str(0.5 - bf_big[1])],
+      ["1.2089258196146292e+24", "1.2089258196146292e+24", "6.044629098073146e+23", "-1.2089258196146292e+24"])
+bf_over = [2 ** 1024, 10 ** 400]
+
+
+def bf_err(f):
+    try:
+        return "no-raise " + str(f())
+    except OverflowError as e:
+        return "OverflowError: " + str(e)
+
+
+check("bigflo-overflow", [bf_err(lambda: float(bf_over[0])), bf_err(lambda: bf_over[1] + 0.5)],
+      ["OverflowError: int too large to convert to float"] * 2)
+check("bigflo-int-of-float", [str(int(1e23)), str(int(-2.0 ** 60)), str(int(2.5))],
+      ["99999999999999991611392", "-1152921504606846976", "2"])
+
+
+# ----- SECTION: printf-style operands and arity -----
+#
+# %d %i %u take any real number and truncate it exactly; %x %X %o need an int;
+# %e %f %g a real number; %c an int or one character. Everything else, and a
+# wrong argument count, is CPython's catchable error. (A tuple is a list here, so
+# an argument tuple whose length differs from the conversion count is read as
+# ONE value - the case a list really is in CPython.)
+def pc_err(f, a):
+    try:
+        return f % a
+    except (TypeError, ValueError, OverflowError) as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+pc_vals = [1e300, 2.7, None, "s", 10 ** 30, -255]
+check("pct-d-float-exact", pc_err("%d", pc_vals[0]), "1" + "0" * 16 + "52504760255204420248704468581108159154915854115511802457988908195786371375080447864043704443832883878176942523235360430575644792184786706982848387200926575803737830233794788090059368953234970799945081119038967640880074652742780142494579258788820056842838115669472196386865459400540160")
+check("pct-d-truncates", [pc_err("%d", pc_vals[1]), pc_err("%i", -2.7), pc_err("%u", True)], ["2", "-2", "1"])
+check("pct-d-not-real", [pc_err("%d", pc_vals[2]), pc_err("%d", pc_vals[3]), pc_err("%d", {})],
+      ["TypeError: %d format: a real number is required, not NoneType",
+       "TypeError: %d format: a real number is required, not str",
+       "TypeError: %d format: a real number is required, not dict"])
+check("pct-d-inf-nan", [pc_err("%d", float("inf")), pc_err("%d", float("nan"))],
+      ["OverflowError: cannot convert float infinity to integer", "ValueError: cannot convert float NaN to integer"])
+check("pct-x-needs-int", [pc_err("%x", pc_vals[1]), pc_err("%o", pc_vals[3]), pc_err("%x", pc_vals[4]), pc_err("%#X", pc_vals[5]), pc_err("%#.4x", pc_vals[5])],
+      ["TypeError: %x format: an integer is required, not float", "TypeError: %o format: an integer is required, not str",
+       "c9f2c9cd04674edea40000000", "-0XFF", "-0x00ff"])
+check("pct-f-real", [pc_err("%f", pc_vals[3]), pc_err("%.1f", pc_vals[4]), pc_err("%f", float("inf")), pc_err("%e", True)],
+      ["TypeError: must be real number, not str", "1000000000000000019884624838656.0", "inf", "1.000000e+00"])
+check("pct-c", [pc_err("%c", 65), pc_err("%c", pc_vals[1]), pc_err("%c", -7), pc_err("%c", "ab")],
+      ["A", "TypeError: %c requires an int or a unicode character, not float",
+       "OverflowError: %c arg not in range(0x110000)", "TypeError: %c requires an int or a unicode character, not a string of length 2"])
+check("pct-int-precision", [pc_err("%.3d", 7), pc_err("%.3o", 8)], ["007", "010"])
+check("pct-arity", [pc_err("%s %s %s", (1, 2)), pc_err("%(a)d", 5), pc_err("%q", 1), pc_err("abc %", 1)],
+      ["TypeError: not enough arguments for format string", "TypeError: format requires a mapping",
+       "ValueError: unsupported format character 'q' (0x71) at index 1", "ValueError: incomplete format"])
+
+
+# ----- SECTION: the format mini-language -----
+def fm(v, s):
+    try:
+        return format(v, s)
+    except (TypeError, ValueError, OverflowError) as e:
+        return type(e).__name__ + ": " + str(e)
+
+
+fm_vals = [2.7, None, "s", 10 ** 30, 1234567, -255, 1234.5, True]
+check("fmt-d-not-float", [fm(fm_vals[0], "d"), fm(fm_vals[2], "x"), fm(fm_vals[0], "s")],
+      ["ValueError: Unknown format code 'd' for object of type 'float'",
+       "ValueError: Unknown format code 'x' for object of type 'str'",
+       "ValueError: Unknown format code 's' for object of type 'float'"])
+check("fmt-unsupported", [fm(fm_vals[1], "d"), fm([1], ">8"), fm(fm_vals[1], "")],
+      ["TypeError: unsupported format string passed to NoneType.__format__",
+       "TypeError: unsupported format string passed to list.__format__", "None"])
+check("fmt-int-exact", [fm(fm_vals[3], "d"), fm(fm_vals[3], "x"), fm(fm_vals[3], ","), fm(fm_vals[3], "e")],
+      ["1000000000000000000000000000000", "c9f2c9cd04674edea40000000", "1,000,000,000,000,000,000,000,000,000,000", "1.000000e+30"])
+check("fmt-int-forms", [fm(fm_vals[4], "_"), fm(65535, "_b"), fm(fm_vals[5], "#010x"), fm(fm_vals[7], ">8"), fm(fm_vals[7], ""), fm(65, "c")],
+      ["1_234_567", "1111_1111_1111_1111", "-0x00000ff", "       1", "True", "A"])
+check("fmt-int-errors", [fm(5, ".2d"), fm(5, ",x"), fm(5, "+c"), fm(5, "5.2xx")],
+      ["ValueError: Precision not allowed in integer format specifier", "ValueError: Cannot specify ',' with 'x'.",
+       "ValueError: Sign not allowed with integer format specifier 'c'",
+       "ValueError: Invalid format specifier '5.2xx' for object of type 'int'"])
+check("fmt-float-types", [fm(fm_vals[6], ","), fm(fm_vals[6], ",.2f"), fm(2.5, "%"), fm(12345.678, "e"), fm(1e-5, "g"), fm(1.0, "#g"), fm(1.0, "#.0f")],
+      ["1,234.5", "1,234.50", "250.000000%", "1.234568e+04", "1e-05", "1.00000", "1."])
+check("fmt-float-none-precision", [fm(12.5, ".3"), fm(123.0, ".3"), fm(1.0, ".3"), fm(1.5, ".0"), fm(1e16, "")],
+      ["12.5", "1.23e+02", "1.0", "2e+00", "1e+16"])
+check("fmt-padding", [fm(-5, "05"), fm(1234, "010,"), fm(1.5, "=+8"), fm(1.5, "*^9"), fm("x", "0>3"), fm(5, "x<05"), fm(float("inf"), "010")],
+      ["-0005", "00,001,234", "+    1.5", "***1.5***", "00x", "5xxxx", "0000000inf"])
+check("fmt-z", [fm(-0.0, "z.1f"), fm(-0.04, "z.1f"), fm(-0.5, "z.1f")], ["0.0", "0.0", "-0.5"])
+check("fmt-str", [fm("abcdef", ".2"), fm("ab", "^6"), fm("ab", "=5"), fm("ab", "+")],
+      ["ab", "  ab  ", "ValueError: '=' alignment not allowed in string format specifier",
+       "ValueError: Sign not allowed in string format specifier"])
+check("fmt-strformat-fstring", ["{:>6,}".format(fm_vals[4]), f"{fm_vals[0]:08.3f}", "{0!r:>5}".format("a")],
+      ["1,234,567", "0002.700", "  'a'"])
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])
