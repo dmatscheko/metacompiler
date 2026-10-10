@@ -531,8 +531,11 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
-ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
-            = KwFor "(" { Annotation | "final" KwEnd } Type Id <~~ push(up.in); jTyDecl(up.in, "") ~~> [ CDims ] ":" Expression ")" SubStmt ;
+ForEach     <~~ push(makeForEach(pop(), pop(), pop(), pop(), pop())) ~~>
+            = KwFor "(" { Annotation | "final" KwEnd } FeType Id <~~ push(up.in); jTyDecl(up.in, "") ~~> [ CDims ] ":" ConvExpr ")" SubStmt ;
+// The loop variable's declared type: each element converts to it (JLS 14.14.2).
+FeType      <~~ push({fety: stripWs(up.in)}) ~~>
+            = Type ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" SubStmt ;
@@ -4403,7 +4406,8 @@ HasStatic   = :script(~~
         }
     }
     // for (var x : arr) body -- pops reversed: body, expr, name.
-    function makeForEach(bodyT, arrT, name) {
+    function makeForEach(bodyT, etext, arrT, name, fety) {
+        var cty = jIterConvTy(fety.fety, etext.etext)
         return function() {
             var lbl = pendingLabel
             pendingLabel = null
@@ -4412,7 +4416,7 @@ HasStatic   = :script(~~
             declVar(name, undefined)
             var res = undefined
             for (var i = 0; i < arr.length; i++) {
-                setVar(name, arr[i])
+                setVar(name, cty == "" ? arr[i] : jTypeAdopt(arr[i], cty))
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break

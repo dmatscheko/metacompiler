@@ -518,8 +518,11 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
-ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
-            = KwFor "(" [ LeadMods ] Type Id <~~ push(up.in); jTyDecl(up.in, "") ~~> [ CDims ] ":" Expression ")" SubStmt ;
+ForEach     <~~ push(makeForEach(pop(), pop(), pop(), pop(), pop())) ~~>
+            = KwFor "(" [ LeadMods ] FeType Id <~~ push(up.in); jTyDecl(up.in, "") ~~> [ CDims ] ":" ConvExpr ")" SubStmt ;
+// The loop variable's declared type: each element converts to it (JLS 14.14.2).
+FeType      <~~ push({fety: stripWs(up.in)}) ~~>
+            = Type ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" SubStmt ;
@@ -3886,7 +3889,8 @@ HasStatic   = :script(~~
         }
     }
     // for (var x : arr): a hidden index variable in an own scope drives the loop.
-    function makeForEach(bodyT, arrT, name) {
+    function makeForEach(bodyT, etext, arrT, name, fety) {
+        var cty = jIterConvTy(fety.fety, etext.etext)
         return function(b) {
             var lbl = pendingLabel
             pendingLabel = null
@@ -3912,7 +3916,8 @@ HasStatic   = :script(~~
             headB.NewCondBr(truthy(headB, condV), bodyB, exitB)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name),
+                                              declConvert(bodyB, callExt(bodyB, "js_get", [aV2, iV2]), cty)])
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()

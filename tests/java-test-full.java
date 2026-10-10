@@ -2281,5 +2281,10 @@ class S37 {
         long acc = 0;
         for (int i = 0; i < 4; i++) { acc = acc * 1000000 + i; }
         Main.check("ac15", acc == 1000002000003L);
+        String seen = "";
+        for (double x : k) { seen = seen + x + ";"; }
+        long lsum = 0;
+        for (long x : k) { lsum = lsum + x * 1000000 * 1000; }
+        Main.check("ac16", seen.equals("2.0;3.0;1.6777217E7;97.0;") && lsum == 16777319000000000L);
     }
 }

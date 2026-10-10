@@ -200,6 +200,15 @@ function jNumLit(t, i) {
     if (flt) { return {end: j, ty: "double"} }
     return {end: j, ty: "int"}
 }
+// What an enhanced for converts each element to: its variable's declared type
+// fety, unless the iterated array (`xs`, `this.xs`, `a.b`) is declared with
+// that element type already.
+function jIterConvTy(fety, text) {
+    if (!jIsPrimTy(fety)) { return "" }
+    var r = jChainTyRef(text)
+    if (r != null && jElemTy(jPlaceTy(r, jTyOf(r.name))) == fety) { return "" }
+    return fety
+}
 // The declared type of an assignment's place: the base name's local type
 // (lty, from the walk) or field type, then one field type per `.f` and one
 // array level per `[i]`.
