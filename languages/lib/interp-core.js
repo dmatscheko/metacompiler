@@ -32,6 +32,7 @@ var core = {
     framePop: null,     // Called after the body, before locals are dropped (Go: run defers).
     varMiss: null,      // Name not in any scope: return {v: value} or null (Kotlin: this properties).
     setMiss: null,      // Assignment target not in any scope: handle it and return true (Kotlin).
+    catchScope: true,   // A catch clause binds in a scope of its own (PHP: false, no block scope).
     // Map-key identity, for a language whose numbers are BOXED. dictKeyId below can
     // only index a value whose === is string equality, and dictFind confirms a hit
     // with ===, so two boxes holding the same number are two different keys. A
@@ -180,11 +181,11 @@ function excTry(items) {
         } catch (e) {
             scopes = savedChain.slice()
             if (excIsUser(e) && catchT != undefined) {
-                scopes.push({})
+                if (core.catchScope) { scopes.push({}) }
                 if (catchBind != undefined) { catchBind(e.v) }
                 else if (catchName != undefined) { declVar(catchName, e.v) }
                 box.sig = catchT()
-                scopes.pop()
+                if (core.catchScope) { scopes.pop() }
             } else {
                 throw e
             }
@@ -691,10 +692,10 @@ function excTryTyped(items) {
                 }
             }
             if (hit == null) { throw e }
-            scopes.push({})
+            if (core.catchScope) { scopes.push({}) }
             if (hit.catchname != undefined) { declVar(hit.catchname, e.v) }
             box.sig = hit.catchbody()
-            scopes.pop()
+            if (core.catchScope) { scopes.pop() }
         } finally {
             scopes = savedChain.slice()
             if (finallyT != undefined) {

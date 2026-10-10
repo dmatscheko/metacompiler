@@ -1897,9 +1897,8 @@ func init() {
 			rt.phpRaise(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))
 			return 0
 		}
-		// The floor's js_rt_missvar hook, php half. See js_phmissname in
-		// languages/lib/php-rt.metajs for why a `$` name declines and a bareword
-		// does not.
+		// The floor's js_rt_missvar hook, php half. Twin of js_phmissname in
+		// languages/lib/php-rt.metajs.
 		m["js_phmissname"] = func(a []uint64) uint64 {
 			n := rt.phpStr(u(a[0]))
 			if n == "" || n[0] == '$' {

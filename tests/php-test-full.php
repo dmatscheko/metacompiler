@@ -1242,6 +1242,46 @@ function s31() {
     check("is16", count($keep) === 0);
 }
 
+// ===== SECTION 32: variable scope =====
+// PHP has no lexical variable scope: a function sees only its own variables and
+// the ones it declares `global`, a closure only what it `use`s, and a try or catch
+// body shares its function's frame. An undefined variable reads null (PHP 8
+// warns and continues).
+$s32g = 5;
+function s32local() { return isset($s32g) ? "leak" : "local"; }
+function s32shadow() { $s32g = 9; return $s32g; }
+function s32global() { global $s32g; $s32g = $s32g + 1; return $s32g; }
+function s32undef() { return $s32nothing; }
+class S32K {
+    public $v = 3;
+    function m() {
+        $f = function () { return $this->v; };
+        $a = fn() => $this->v + 1;
+        return $f() * 10 + $a();
+    }
+}
+function s32() {
+    global $s32g;
+    check("vs1", s32local() === "local");
+    check("vs2", s32shadow() === 9 && $s32g === 5);
+    check("vs3", s32global() === 6 && $s32g === 6);
+    check("vs4", s32undef() === null);
+    $x = 1;
+    $c = function () { return isset($x) ? "leak" : "none"; };
+    check("vs5", $c() === "none");
+    $d = function () use ($x) { $x = $x * 2; return $x; };
+    check("vs6", $d() === 2 && $d() === 2 && $x === 1);
+    $e = function () use (&$x) { $x = $x + 10; return $x; };
+    check("vs7", $e() === 11 && $x === 11);
+    try { $t = 1; throw new Exception("e"); } catch (Exception $ex) { $k = 2; }
+    check("vs8", $t === 1 && $k === 2 && $ex->getMessage() === "e");
+    $s = $s32undefA . "a";
+    $s32undefB++;
+    $s32undefC .= "c";
+    check("vs9", $s === "a" && $s32undefB === 1 && $s32undefC === "c");
+    check("vs10", (new S32K())->m() === 34);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1279,6 +1319,7 @@ function main() {
     s29dump(); // SECTION-CALL 29
     s30(); // SECTION-CALL 30
     s31(); // SECTION-CALL 31
+    s32(); // SECTION-CALL 32
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

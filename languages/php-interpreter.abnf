@@ -417,9 +417,8 @@ CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
             = KwEcho <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] Semi ;
 
-// global $a, $b; -- in this subset function bodies already resolve names through
-// the enclosing (global) scope chain, so 'global' is accepted as a no-op.
-GlobalStmt  <~~ takeAll(); push(makeConstStmt()) ~~>
+// global $a, $b; -- binds each local name to the GLOBAL variable's storage cell.
+GlobalStmt  <~~ push(makeGlobal(takeAll())) ~~>
             = KwGlobal DollarName { "," DollarName } Semi ;
 
 Empty       <~~ push(makeConstStmt()) ~~>
@@ -1520,10 +1519,30 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     var UNSET = {__unset: true}
     function isRef(v) { return v !== null && v !== undefined && typeof v == "object" && v.__refcell === true }
     function deref(v) { return isRef(v) ? v.v : v }
+    // ----- Variables: local to ONE frame -----------------------------------------
+    // PHP has no lexical variable scope: a `$name` lives in the frame of the function
+    // (or of the main program, globalScope) it is used in and nothing else reaches it
+    // - a function does not see the globals, a closure sees only what it `use`s. The
+    // frame is always the TOP of `scopes`: PHP has no block scope, so nothing pushes
+    // a scope inside a function (core.catchScope is off). The chain walk is left to
+    // the barewords (functions, classes, constants, the hidden frame keys) and to
+    // `$this`, which a closure inherits from the method it is created in. An
+    // undefined variable reads as null: PHP 8 warns and continues. Twin of the
+    // js_scope_own reads in php-to-llvm-ir.abnf.
+    core.catchScope = false
+    function isLocalName(name) { return name.charCodeAt(0) == 36 && name != "$this" }
     // Replaces the shared reader: every variable read passes through a cell.
     getVar = function(name) {
         var sc = scopes
         var ho = objHasOwn
+        if (isLocalName(name)) {
+            var top = sc[sc.length - 1]
+            if (!ho.call(top, name)) { return null }
+            var lv = anytype
+            lv = top[name]
+            if (lv === UNSET) { return null }
+            return isRef(lv) ? lv.v : lv
+        }
         for (var i = sc.length - 1; i >= 0; i--) {
             if (ho.call(sc[i], name)) {
                 var v = anytype
@@ -1535,36 +1554,48 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (hasOwn(hostGlobals, name)) { return hostGlobals[name] }
         // A BAREWORD that resolves nowhere is a function name here (a constant goes
         // through the constant rule below and words itself differently), and PHP 8
-        // raises a CATCHABLE `Error: Call to undefined function zzz()` on one. A
-        // `$name` stays a fatal here although PHP only WARNS and evaluates to null
-        // (see js_phmissname in languages/lib/php-rt.metajs). The compiler reaches
-        // the same two answers through the floor's js_rt_missvar hook.
+        // raises a CATCHABLE `Error: Call to undefined function zzz()` on one. The
+        // compiler reaches the same answer through the floor's js_rt_missvar hook
+        // (js_phmissname in languages/lib/php-rt.metajs). Only `$this` outside an
+        // object is left to reach the fatal.
         if (name.length > 0 && name.charAt(0) != "$") {
             phpRaise("Error", "Call to undefined function " + name + "()")
         }
         fail("unknown name: " + name)
     }
     function varExists(name) {
+        if (isLocalName(name)) {
+            var top = scopes[scopes.length - 1]
+            return hasOwn(top, name) && top[name] !== UNSET
+        }
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], name)) { return scopes[i][name] !== UNSET }
         }
         return false
     }
     // The storage cell of a variable, creating it (and the variable) on demand.
-    function varCell(name) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) {
-                var cur = anytype
-                cur = scopes[i][name]
-                if (isRef(cur)) { return cur }
-                var cell = {__refcell: true, v: cur === UNSET ? null : cur}
-                scopePut(scopes[i], name, cell)
-                return cell
-            }
+    function varCell(name) { return varCellIn(scopes[scopes.length - 1], name) }
+    function varCellIn(fr, name) {
+        if (hasOwn(fr, name)) {
+            var cur = anytype
+            cur = fr[name]
+            if (isRef(cur)) { return cur }
+            var cell = {__refcell: true, v: cur === UNSET ? null : cur}
+            scopePut(fr, name, cell)
+            return cell
         }
         var fresh = {__refcell: true, v: null}
-        scopePut(scopes[scopes.length - 1], name, fresh)
+        scopePut(fr, name, fresh)
         return fresh
+    }
+    // global $a, $b: the local name binds the main frame's storage cell.
+    function makeGlobal(names) {
+        return function() {
+            for (var i = 0; i < names.length; i++) {
+                scopePut(scopes[scopes.length - 1], names[i], varCellIn(globalScope, names[i]))
+            }
+            return null
+        }
     }
     // The storage cell of an array element (foreach by reference, $el = &$a[0]).
     function arrCell(a, k) {
@@ -2434,9 +2465,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var ref = refs[i]
                 var nm = refName(ref)
                 if (ref.path.length == 0) {
-                    for (var j = scopes.length - 1; j >= 0; j--) {
-                        if (hasOwn(scopes[j], nm)) { scopePut(scopes[j], nm, UNSET); break }
-                    }
+                    if (hasOwn(scopes[scopes.length - 1], nm)) { scopePut(scopes[scopes.length - 1], nm, UNSET) }
                     continue
                 }
                 // unset() DIAGNOSES NOTHING, and neither does a path through a name
@@ -3429,19 +3458,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // ----- closures ---------------------------------------------------------
     // function (...) use ($a, &$b) {...}: 'use ($a)' snapshots the VALUE at creation
     // time, 'use (&$b)' shares the caller's storage cell. The enclosing scope chain
-    // is captured too, so the closure can still see the globals and its own class.
-    function closureBody(params, body, captured, isGen) {
+    // is captured too, for the functions, classes and `$this` it resolves; the
+    // captured variables (env) are copied into each call's frame, a fresh copy per
+    // call (phpCopy keeps a cell shared). Twin of capturePrologue in
+    // php-to-llvm-ir.abnf.
+    function closureBody(params, body, captured, env, isGen) {
         return function(argset) {
-            if (isGen === true) { return newGen(runClosureRun(params, body, captured, argset)) }
-            return runClosureRun(params, body, captured, argset)()
+            if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset)) }
+            return runClosureRun(params, body, captured, env, argset)()
         }
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
-    function runClosureRun(params, body, captured, argset) {
+    function runClosureRun(params, body, captured, env, argset) {
         return function() {
             var saved = scopes
             scopes = captured.slice(0)
-            scopes.push({})
+            var fr = {}
+            var ks = ownKeys(env)
+            for (var i = 0; i < ks.length; i++) { scopePut(fr, ks[i], phpCopy(env[ks[i]])) }
+            scopes.push(fr)
             bindParams(params, argset)
             var r = anytype
             r = body()
@@ -3478,8 +3513,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
             for (var j = 0; j < byref.length; j++) { scopePut(env, byref[j], varCell(byref[j])) }
-            captured.push(env)
-            return closureBody(params, body, captured, isGen)
+            return closureBody(params, body, captured, env, isGen)
         }
     }
     // An arrow function's body: its one expression, returned.
@@ -3502,7 +3536,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].vmark != undefined) { mark = items[i].vmark }
         }
-        var names = []
+        // `$this` is not captured: it resolves through the chain, as in every closure.
+        var names = ["$this"]
         for (var k = 0; k < params.length; k++) { names.push(params[k].name) }
         var captured = varsSince(mark, names)
         return function() {
@@ -3510,9 +3545,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(rawSlot(captured[j])))
             }
-            var chain = scopes.slice(0)
-            chain.push(env)
-            return closureBody(params, body, chain)
+            return closureBody(params, body, scopes.slice(0), env)
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
@@ -3531,19 +3564,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return out
     }
-    // The raw scope slot of a variable - the CELL itself when it holds one - or null
-    // when the name is not set anywhere. Unlike getVar it neither dereferences nor
-    // aborts on an unknown name, which is what an arrow function's capture needs.
+    // The raw slot of a variable - the CELL itself when it holds one - or null when
+    // the name is not set. Unlike getVar it does not dereference, which is what an
+    // arrow function's capture needs.
     function rawSlot(name) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) {
-                var v = anytype
-                v = scopes[i][name]
-                if (v === UNSET) { return null }
-                return v
-            }
-        }
-        return null
+        var fr = scopes[scopes.length - 1]
+        if (!hasOwn(fr, name)) { return null }
+        var v = anytype
+        v = fr[name]
+        if (v === UNSET) { return null }
+        return v
     }
     // The frozen engine has no for..in, so scope objects carry their own key list:
     // declVar/scopePut route through scopeKeys, and ownKeys reads it back.
@@ -3629,16 +3659,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // $$name resolves its name on every use, so it cannot be baked in at build time.
     function refName(ref) { return ref.nameT == null ? ref.name : "$" + phpStr(ref.nameT()) }
     function phpSet(name, value) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) {
-                var cur = anytype
-                cur = scopes[i][name]
-                if (isRef(cur)) { cur.v = value; return }
-                scopePut(scopes[i], name, value)
-                return
-            }
+        var fr = scopes[scopes.length - 1]
+        if (hasOwn(fr, name)) {
+            var cur = anytype
+            cur = fr[name]
+            if (isRef(cur)) { cur.v = value; return }
         }
-        scopePut(scopes[scopes.length - 1], name, value)
+        scopePut(fr, name, value)
     }
     // A path step whose property name is an EXPRESSION ($o->$n, $o->{e}) is turned
     // into an ordinary literal-name step here, exactly once per walk, so that every

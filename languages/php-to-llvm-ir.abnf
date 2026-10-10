@@ -37,7 +37,8 @@ globals, so the scope-chain snapshot a try restores covers them; static:: is the
 class of this, or the class a C::m() call named (late static binding).
 
 Locals, functions, methods and closures lower to the MetaJS handle runtime: scopes via
-js_scope_new / js_pyset_var (PHP create-on-assign) / js_scope_get, closures via js_closure
+js_scope_new, a variable read and written in its own frame only via js_scope_own /
+js_scope_decl (PHP has no lexical variable scope), closures via js_closure
 + js_call, objects/properties via js_obj_new / js_get / js_set, method dispatch via
 js_phmcall (instances carry a __class descriptor; new C() runs __construct with the
 instance bound to $this; php's own name, because a method nothing claims must raise
@@ -449,9 +450,8 @@ CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
             = KwEcho <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] Semi ;
 
-// global $a, $b; -- in this subset function bodies already resolve names through
-// the enclosing (global) scope chain, so 'global' is accepted as a no-op.
-GlobalStmt  <~~ takeAll(); push(makeConstStmt()) ~~>
+// global $a, $b; -- binds each local name to the GLOBAL variable's storage cell.
+GlobalStmt  <~~ push(makeGlobal(takeAll())) ~~>
             = KwGlobal DollarName { "," DollarName } Semi ;
 
 Empty       <~~ push(makeConstStmt()) ~~>
@@ -1495,10 +1495,20 @@ KwInstanceof = "instanceof" KwEnd ;
     // A class descriptor by name, or null when nothing of that name is declared
     // yet - an interface list must not abort on a forward reference.
     function phClsLookup(b, nameV) { return scopeProbe(b, nameV, hNull) }
-    // The RAW slot of a variable - the cell itself when there is one - without
-    // aborting on a name that was never assigned.
+    // ----- variables: local to ONE frame ------------------------------------------
+    //
+    // PHP has no lexical variable scope: a `$name` lives in the frame of the function
+    // (or of the main program) it is used in, and nothing else reaches it - a
+    // function does not see the globals, a closure sees only what it `use`s. So a
+    // variable is read and written in curScopeV ALONE (js_scope_own / js_scope_decl),
+    // never by a chain walk; the chain is left to the barewords (functions, classes,
+    // constants) and to `$this`, which a closure inherits from the method it is
+    // created in. A try body and a catch body share their function's frame (emitFunc).
+    // An undefined variable reads as null: PHP 8 warns and continues.
+    //
+    // The RAW slot of a variable - the cell itself when there is one - or undefined.
     function rawVarV(b, nameV) {
-        return phClsLookup(b, nameV)
+        return callExt(b, "js_scope_own", [curScopeV, nameV])
     }
     function rawVar(b, name) { return rawVarV(b, emitStr(b, name)) }
     // The NAME a target denotes, as a handle: a literal for '$x', and the run-time
@@ -1509,15 +1519,20 @@ KwInstanceof = "instanceof" KwEnd ;
         return {b: r.b, v: callExt(r.b, "js_phcat", [emitStr(r.b, "$"), callExt(r.b, "js_phstr", [r.v])])}
     }
     makeVarRef = function(name) {
-        return function(b) {
-            return phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
+        if (name == "$this") {
+            return function(b) { return phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])) }
         }
+        return function(b) { return readVarV(b, emitStr(b, name)) }
+    }
+    function readVarV(b, nameV) {
+        var raw = rawVarV(b, nameV)
+        return phDeref(b, b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, raw, hUndef), hNull, raw))
     }
     // Write a variable, THROUGH its cell when the slot holds one. Returns the block to
     // continue in, since the reference form branches.
     function setVarV(b, nameV, v) {
         if (!usesRefs) {
-            callExt(b, "js_pyset_var", [curScopeV, nameV, v])
+            callExt(b, "js_scope_decl", [curScopeV, nameV, v])
             return b
         }
         var raw = rawVarV(b, nameV)
@@ -1527,21 +1542,23 @@ KwInstanceof = "instanceof" KwEnd ;
         b.NewCondBr(isCellV(b, raw), cellB, plainB)
         callExt(cellB, "js_set", [raw, emitStr(cellB, "v"), v])
         cellB.NewBr(mergeB)
-        callExt(plainB, "js_pyset_var", [curScopeV, nameV, v])
+        callExt(plainB, "js_scope_decl", [curScopeV, nameV, v])
         plainB.NewBr(mergeB)
         return mergeB
     }
     function setVar(b, name, v) { return setVarV(b, emitStr(b, name), v) }
     // The storage cell of a variable, creating it (and the variable) on demand.
-    function varCellV(b, nameV) {
-        var raw = rawVarV(b, nameV)
+    function varCellV(b, nameV) { return varCellIn(b, curScopeV, nameV) }
+    function varCellIn(b, scopeV, nameV) {
+        var raw0 = callExt(b, "js_scope_own", [scopeV, nameV])
+        var raw = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, raw0, hUndef), hNull, raw0)
         var haveB = curF.NewBlock("")
         var makeB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         b.NewCondBr(isCellV(b, raw), haveB, makeB)
         haveB.NewBr(mergeB)
         var cell = newCell(makeB, raw)
-        callExt(makeB, "js_pyset_var", [curScopeV, nameV, cell])
+        callExt(makeB, "js_scope_decl", [scopeV, nameV, cell])
         makeB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
     }
@@ -1579,7 +1596,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var rc = targetCell(b, rhs)
             b = rc.b
             if (lhs.path.length == 0) {
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, lhs.name), rc.v])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, lhs.name), rc.v])
             } else {
                 var p = emitRefPathV(b, lhs, true)
                 b = p.b
@@ -1592,9 +1609,9 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     // A closure's capture scope, built exactly the way php-interpreter.abnf's
     // makeClosure builds its env: a by-VALUE name is snapshotted, a by-REFERENCE one
-    // binds the variable's storage CELL, and every other name keeps resolving through
-    // the parent (the defining scope), which is also what keeps functions, classes and
-    // constants visible.
+    // binds the variable's storage CELL. Its parent is the defining scope, which keeps
+    // functions, classes, constants and `$this` visible; each call copies the captured
+    // names into its own frame (capturePrologue), since a variable is read there only.
     //
     // `raw` distinguishes the two by-value snapshots the interpreter takes:
     //   - `use ($x)` copies the VALUE (its phpCopy(getVar(x)) dereferences first), so a
@@ -1620,6 +1637,36 @@ KwInstanceof = "instanceof" KwEnd ;
             callExt(b, "js_scope_decl", [env, emitStr(b, byRef[k]), rc.v])
         }
         return {b: b, v: env}
+    }
+    // The closure body's entry: every captured name is copied from the capture scope
+    // (the function's env parameter) into the call's frame - a fresh copy per call, so
+    // a by-value capture the body modifies starts out as captured on the next call.
+    // A cell (by-reference capture) is shared, since js_phcopy copies only arrays.
+    function capturePrologue(names, body) {
+        if (names.length == 0) { return body }
+        return function(b) {
+            for (var i = 0; i < names.length; i++) {
+                var nV = emitStr(b, names[i])
+                callExt(b, "js_scope_decl", [curScopeV, nV,
+                        callExt(b, "js_phcopy", [callExt(b, "js_scope_own", [curF.Params[0], nV])])])
+            }
+            return body(b)
+        }
+    }
+    // global $a, $b: the local name binds the main frame's storage CELL for the
+    // variable (created there if needed), so a write through either name is seen by
+    // the other. The main frame is reachable by name from every frame (buildMain).
+    function makeGlobal(names) {
+        noteRef()
+        return function(b) {
+            var gV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "\x00globals")])
+            for (var i = 0; i < names.length; i++) {
+                var rc = varCellIn(b, gV, emitStr(b, names[i]))
+                b = rc.b
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[i]), rc.v])
+            }
+            return b
+        }
     }
 
     // ----- global constants, static locals, magic constants ---------------------
@@ -1752,7 +1799,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var r = t(b)
             b = r.b
             var nameV = callExt(b, "js_phcat", [emitStr(b, "$"), callExt(b, "js_phstr", [r.v])])
-            return phDeref(b, callExt(b, "js_scope_get", [curScopeV, nameV]))
+            return readVarV(b, nameV)
         }
     }
 
@@ -2204,7 +2251,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 var nextB = curF.NewBlock("")
                 b.NewCondBr(truthy(b, callExt(b, "js_phcatch", [caught, tv])), thenB, nextB)
                 if (catches[i].catchname != undefined) {
-                    callExt(thenB, "js_pyset_var", [curScopeV, emitStr(thenB, catches[i].catchname), caught])
+                    callExt(thenB, "js_scope_decl", [curScopeV, emitStr(thenB, catches[i].catchname), caught])
                 }
                 catches[i].catchbody(thenB).NewBr(endB)
                 b = nextB
@@ -2308,12 +2355,12 @@ KwInstanceof = "instanceof" KwEnd ;
     // foreach over indexed arrays (key = index) and ordered maps (key/value),
     // uniformly via js_range_len / js_range_key / js_range_val.
     // Bind one element of the iteration to the slot the header declared. A plain
-    // variable is a single js_pyset_var; anything else is an ordinary assignment
+    // variable is a single js_scope_decl; anything else is an ordinary assignment
     // target and goes through the path walk.
     function emitFeBind(b, ref, v) {
         if (ref == null) { return b }
         if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined && ref.nameT == null) {
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ref.name), v])
             return b
         }
         var p = emitRefPathV(b, ref, true)
@@ -2958,10 +3005,15 @@ KwInstanceof = "instanceof" KwEnd ;
         if (idx != null) {
             var itxt = idx
             return function(b) {
-                var ov = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+                var ro = makeVarRef(name)(b)
+                b = ro.b
+                var ov = ro.v
                 var kv = anytype
-                if (itxt.charAt(0) == "$") { kv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, itxt)]) }
-                else if (isCanonInt(itxt)) { kv = emitNum(b, parseInt(itxt, 10)) }
+                if (itxt.charAt(0) == "$") {
+                    var rk = makeVarRef(itxt)(b)
+                    b = rk.b
+                    kv = rk.v
+                } else if (isCanonInt(itxt)) { kv = emitNum(b, parseInt(itxt, 10)) }
                 else { kv = emitStr(b, itxt) }
                 return {b: b, v: callExt(b, "js_phget", [ov, kv])}
             }
@@ -2969,7 +3021,7 @@ KwInstanceof = "instanceof" KwEnd ;
         if (prop != null) {
             var pn = prop.substring(2)
             return function(b) {
-                var rov = phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
+                var rov = makeVarRef(name)(b)
                 return emitPropGet(rov.b, rov.v, emitStr(rov.b, pn), pn)
             }
         }
@@ -3471,7 +3523,7 @@ KwInstanceof = "instanceof" KwEnd ;
                     if (ref.sbase == undefined) {
                         var rn3 = refNameV(b, ref)
                         b = rn3.b
-                        callExt(b, "js_pyset_var", [curScopeV, rn3.v, hUndef])
+                        callExt(b, "js_scope_decl", [curScopeV, rn3.v, hUndef])
                     }
                 } else {
                     var p = emitRefPath(b, ref)
@@ -3799,7 +3851,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 pendingUseRef = false
             }
         }
-        body = paramDefaults(pl.defs, variadicPrologue(pl, body))
+        body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal.concat(byRef), body)))
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, byVal, byRef, false)
@@ -3821,9 +3873,10 @@ KwInstanceof = "instanceof" KwEnd ;
         // An arrow function captures BY VALUE, automatically: every '$name' the body
         // mentions (varLog since the 'fn' keyword, minus this function's own
         // parameters) is snapshotted where the closure is created, so a later write
-        // to one of them outside is not visible inside.
-        var captured = varsSince(mark, pl.params)
-        var body = paramDefaults(pl.defs, variadicPrologue(pl, makeBody([makeReturn([bodyT])])))
+        // to one of them outside is not visible inside. `$this` is not captured: it
+        // resolves through the defining scope, as in every closure.
+        var captured = varsSince(mark, pl.params.concat(["$this"]))
+        var body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, makeBody([makeReturn([bodyT])]))))
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, captured, [], true)
@@ -3960,14 +4013,9 @@ KwInstanceof = "instanceof" KwEnd ;
     // The value a target's PATH starts from: a plain variable, or a static property
     // (self::$rows[0] = e reads the property, then indexes it).
     //
-    // THE NON-CREATING WALK READS THE ROOT WITH THE PROBE, not with js_scope_get:
-    // isset() and unset() are the two forms PHP guarantees never to diagnose, and
-    // js_scope_get takes the floor's UNCATCHABLE `variable not defined` abort on
-    // `isset($undef[0])` where PHP 8 answers false and runs on.
-    //
-    // The probe answers the RAW slot, so the root is dereferenced here: with
+    // The non-creating walk (isset, unset, empty) dereferences the root: with
     // `$r = &$arr`, `isset($r[0])` must index the array, not the reference CELL. A
-    // write walk keeps js_scope_get: it has setVarV and js_phvivroot for the same job.
+    // write walk keeps the RAW slot: it has setVarV and js_phvivroot for the same job.
     function refRootV(b, ref, viv) {
         if (ref.headT != undefined) { return ref.headT(b) }
         if (ref.sbase != undefined) {
@@ -3977,7 +4025,7 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         var rn = refNameV(b, ref)
         if (!viv) { return phDeref(rn.b, rawVarV(rn.b, rn.v)) }
-        return {b: rn.b, v: callExt(rn.b, "js_scope_get", [curScopeV, rn.v])}
+        return {b: rn.b, v: rawVarV(rn.b, rn.v)}
     }
     // emitRefPath walks a target's path down to the container the LAST step writes
     // into. `viv` says whether the walk may create what is missing: PHP auto-vivifies
@@ -4112,7 +4160,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 b = rn4.b
                 var nameV = rn4.v
                 if (op != "=") {
-                    var rold = phDeref(b, callExt(b, "js_scope_get", [curScopeV, nameV]))
+                    var rold = readVarV(b, nameV)
                     b = rold.b
                     v = emitBin(b, op, rold.v, v)
                 } else {
@@ -4123,7 +4171,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 // $x[i] = e : an array element, or one byte of a string.
                 var rn6 = refNameV(b, ref)
                 b = rn6.b
-                var rcv = phDeref(b, callExt(b, "js_scope_get", [curScopeV, rn6.v]))
+                var rcv = readVarV(b, rn6.v)
                 b = rcv.b
                 var rk6 = ref.path[0].idx(b)
                 b = rk6.b
@@ -4170,7 +4218,7 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         if (ref.path.length == 0) {
             var rn5 = refNameV(b, ref)
-            var rcur = phDeref(rn5.b, callExt(rn5.b, "js_scope_get", [curScopeV, rn5.v]))
+            var rcur = readVarV(rn5.b, rn5.v)
             b = rcur.b
             var oldV = callExt(b, "js_phnum", [rcur.v])
             var newV = callExt(b, ext, [oldV, emitNum(b, 1)])
@@ -4710,7 +4758,9 @@ KwInstanceof = "instanceof" KwEnd ;
         loopStack = []
         if (isCtl) { ctlEnter(idx) }
         var b = f.NewBlock("entry")
-        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // A try/catch/finally body is a closure only to get its own unwinding; PHP has
+        // no block scope, so it runs in the frame it is written in (its env).
+        curScopeV = isCtl ? f.Params[0] : callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
         if (isMethod) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
@@ -5326,6 +5376,8 @@ KwInstanceof = "instanceof" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // The main frame holds the global variables; `global $x` finds it by this name.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "\x00globals"), curScopeV])
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
@@ -5379,11 +5431,11 @@ KwInstanceof = "instanceof" KwEnd ;
         // The floor's RECOVERABLE-NAME hook: on a js_scope_get miss the floor
         // (languages/lib/runtime.c) and abnf/jsrt.go call a per-language closure that
         // ANSWERS the value to throw instead of aborting. php's answer is
-        // js_phmissname's, which declines a `$variable` (PHP 8 WARNS there and
-        // evaluates to null - a value the hook cannot express, see the note at
-        // js_phmissname) and raises PHP's `Error: Call to undefined function zzz()` for
-        // a bareword. The registration has to come AFTER js_phrtinit, because the Error
-        // descriptor the hook builds its object from is the one handed over there.
+        // js_phmissname's: PHP's `Error: Call to undefined function zzz()` for a
+        // bareword. A variable never gets here (it is read with js_scope_own) except
+        // `$this` outside an object, which keeps the abort. The registration has to
+        // come AFTER js_phrtinit, because the Error descriptor the hook builds its
+        // object from is the one handed over there.
         funcCount++
         var mnIdx = funcCount
         var mnf = m.NewFunc("jsf_" + mnIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])

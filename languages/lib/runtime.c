@@ -5937,6 +5937,20 @@ long js_scope_has(long s, long name) {
 	return mk_bool(scope_find(scope_of(s), name) >= 0);
 }
 
+/* The value `name` holds in THIS scope, or undefined when this scope does not
+ * bind it - no chain walk and no abort. It is the read that pairs with
+ * js_scope_has, for a language whose variables are local to one frame (php):
+ * one lookup where js_scope_has plus js_scope_get would be two. The twin is
+ * abnf/jsrt.go's js_scope_own. */
+long js_scope_own(long s, long name) {
+	long cur = scope_of(s);
+	long i = scope_find(cur, name);
+	long *vals;
+	if (i < 0) { return H_UNDEF; }
+	vals = (long *)fb(cur);
+	return vals[i];
+}
+
 long js_scope_typeof(long s, long name) {
 	long cur = scope_of(s);
 	while (cur != 0) {

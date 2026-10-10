@@ -1302,7 +1302,7 @@ var jsReclaimable = map[string]bool{"js_scope_new": true, "js_arr_new": true}
 // never correctness.
 var jsThroughArgs = map[string]uint32{
 	"js_scope_new": 1 << 0, "js_scope_decl": 1 << 0, "js_scope_get": 1 << 0,
-	"js_scope_set": 1 << 0, "js_scope_set_or_create": 1 << 0,
+	"js_scope_set": 1 << 0, "js_scope_set_or_create": 1 << 0, "js_scope_own": 1 << 0,
 	"js_kget": 1 << 0, "js_kset": 1 << 0, "js_tdecl": 1 << 0, "js_tset": 1 << 0,
 	"js_pyset_var": 1 << 0, "js_pyglobal": 1 << 0, "js_pynonlocal": 1 << 0,
 
@@ -12909,6 +12909,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			_, ok := sc.get(name)
 			return boolH(ok)
+		},
+		// The value `name` holds in THIS scope, or undefined when it is not bound
+		// here - no chain walk, no abort. Twin of js_scope_own in
+		// languages/lib/runtime.c.
+		"js_scope_own": func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			sc := rt.scopeOf(a[0])
+			if sc == nil {
+				return w(jsUndef)
+			}
+			v, ok := sc.get(name)
+			if !ok {
+				return w(jsUndef)
+			}
+			if rt.traced {
+				rt.trVar("read", name, v)
+			}
+			return w(v)
 		},
 		// 'v instanceof C': walk the __class/__super chain of the instance and compare
 		// with the class descriptor. Anything that is not an instance answers false.

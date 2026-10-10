@@ -1732,18 +1732,10 @@ function js_phmcall(recv, name, args) {
 // js_rt_missvar by php-to-llvm-ir.abnf's boot block. It answers the value to
 // throw for a name that resolves nowhere, or undefined to keep the abort.
 //
-// TWO ANSWERS, and the split is the whole reason this is a php function rather
-// than a message baked into the emitted closure. php's one flat name space holds
-// both `$variables` and barewords, and PHP 8 treats them completely differently:
-//
-//   zzz()   Error: Call to undefined function zzz()   - CATCHABLE, and this is it
-//   $zzz    Warning: Undefined variable $zzz          - and the expression is NULL,
-//                                                       and the program CONTINUES
-//
-// The second one is declined here rather than approximated: the floor's hook can
-// only answer a value to THROW, never a value to RETURN, so warn-and-continue
-// needs a floor change, and throwing would be a different wrong answer. `$` names
-// therefore keep the `variable not defined` abort.
+// A bareword is a function name here, and PHP 8 raises the CATCHABLE
+// `Error: Call to undefined function zzz()`. A `$variable` never reaches the hook
+// (the emitter reads it in its own frame with js_scope_own, and an undefined one
+// reads null), except `$this` outside an object, which keeps the abort.
 function js_phmissname(name) {
     var s = phStr(name)
     if (s.length == 0) { return undefined }
