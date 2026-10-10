@@ -2,8 +2,8 @@
 //
 // docs/abnf-dialect-gotchas.md lists a dozen ways MetaJS is not JavaScript. Each
 // otherwise shows up as a confusing failure, usually under `-frozen` only,
-// usually behind a green goja run, and in one case (`\f`) in the NATIVE BINARY
-// ONLY, where no other gate in this project can see it at all.
+// usually behind a green goja run, and for an extern called from layer 2 in the
+// NATIVE BINARY ONLY, where no other gate in this project can see it at all.
 //
 // WHY A STANDALONE TOOL AND NOT A `-verify` PASS. `mec <grammar> -verify` takes a
 // GRAMMAR and checks it after loading; abnf/verifier.go's whole surface is rules,
@@ -21,17 +21,11 @@
 //	exponent-literal   `1e308` LEXES AS `1` FOLLOWED BY THE NAME `e308`. The
 //	                   grammar becomes unparseable under -frozen with "cannot
 //	                   parse script", pointing nowhere near the line.
-//	string-escape      MetaJS's string literal has no \f and no \v AND DROPS THE
-//	                   BACKSLASH, so `ch == "\f"` compiles to `ch == "f"` - in
-//	                   layer 2 that is wrong in the native binary only, where
-//	                   the matrix, --full and --cross cannot see it.
 //	asi-return         a value-less `return` followed by an expression on the
 //	                   next line parses as `return (expr)`, silently.
 //	to-precision       no toPrecision.
 //	for-in             no for...in under -frozen.
-//	frozen-builtin     no splice and no lastIndexOf; 2-argument indexOf IGNORES
-//	                   the from-index - it does not raise, it returns the SAME
-//	                   match every time, so a scan loop spins to the IR step cap.
+//	frozen-builtin     no splice and no lastIndexOf.
 //	has-own            `hasOwn` exists in interp-core.js and NOT in
 //	                   compile-core.js: an emitter that uses it works in one half.
 //	keys-of            `keysOf` is not bound for grammar scripts at all - only
@@ -48,11 +42,11 @@
 //	                   `redefinition of global`.
 //	warn-on-stdout     a warning on println lands INSIDE the emitted module.
 //
-// string.split, array.join and `array.length =` WORK in all three hosts (goja,
-// -frozen and layer 2), so they are deliberately NOT rules: a rule that fires on
-// working code is how a linter gets switched off. What IS absent under -frozen:
-// splice, lastIndexOf, toPrecision, for...in - and indexOf's from-index is
-// accepted and ignored, which is the dangerous one because it is silent.
+// string.split, array.join, `array.length =`, indexOf's from-index and the \b \f
+// \v escapes WORK in all three hosts (goja, -frozen and layer 2), so they are
+// deliberately NOT rules: a rule that fires on working code is how a linter gets
+// switched off. What IS absent under -frozen: splice, lastIndexOf, toPrecision,
+// for...in.
 //
 // Each finding prints file:line and the rule name. Nothing here is a heuristic
 // about intent: every rule fires on a construct that is wrong in this dialect.
@@ -270,42 +264,6 @@ func checkExponent(u *unit, fs *[]finding) {
 	}
 }
 
-func checkStringEscapes(u *unit, fs *[]finding) {
-	for _, t := range u.toks {
-		if t.kind != tStr {
-			continue
-		}
-		s := t.text
-		for i := 0; i+1 < len(s); i++ {
-			if s[i] != '\\' {
-				continue
-			}
-			e := s[i+1]
-			if e == 'f' || e == 'v' {
-				// WHERE it is wrong depends on the surface, and saying the wrong
-				// one sends the reader to the wrong gate. A layer-2 file is
-				// compiled by metajs-to-llvm-ir, so the escape is wrong in the
-				// NATIVE BINARY and nowhere else - the matrix, --full and --cross
-				// all run llvm.Run against the Go twin and cannot see it. A
-				// grammar script or shared core is parsed by real JavaScript under
-				// goja and by the frozen MetaJS grammar under -frozen, so it is a
-				// live goja-vs--frozen DIVERGENCE, which ./test.sh would catch if
-				// any entry exercised the line.
-				where := "under -frozen ONLY - goja parses this file as real JavaScript, so the two " +
-					"engines genuinely disagree and ./test.sh sees it only if an entry reaches the line"
-				if u.isLay2 {
-					where = "in the NATIVE BINARY ONLY - the matrix, --full and --cross all run llvm.Run " +
-						"against the Go twin and are structurally blind to it"
-				}
-				u.add(fs, "string-escape", t.line, fmt.Sprintf("\\%c in %s", e, s),
-					fmt.Sprintf("MetaJS's string literal has no \\%c and DROPS THE BACKSLASH, so this "+
-						"compiles to a literal '%c'. Wrong %s. Use the character code.", e, e, where))
-			}
-			i++ // skip the escaped char, so \\\\f is not read as \\f
-		}
-	}
-}
-
 // checkASIReturn: a value-less `return` at end of line, followed by something
 // that is not `}` and not another statement keyword that cannot be an operand.
 // `return` followed by `;`, `}`, or an expression ON THE SAME LINE is fine.
@@ -352,10 +310,6 @@ func checkNamedCalls(u *unit, fs *[]finding, lay2Defined, localFns map[string]bo
 			u.add(fs, "frozen-builtin", t.line, ".splice(", "no array.splice under -frozen. Shift indices and pop().")
 		case member && t.text == "lastIndexOf":
 			u.add(fs, "frozen-builtin", t.line, ".lastIndexOf(", "no string.lastIndexOf under -frozen.")
-		case member && t.text == "indexOf" && call && argCount(ts, i+1) >= 2:
-			u.add(fs, "frozen-builtin", t.line, ".indexOf(x, from)",
-				"indexOf IGNORES its from-index under -frozen - it does not raise, it returns the "+
-					"SAME match every time, so a scan loop spins to the IR step cap. Write a for scan.")
 		case call && t.text == "hasOwn" && u.isCompi && !localFns["hasOwn"]:
 			u.add(fs, "has-own", t.line, "hasOwn(",
 				"hasOwn is defined in lib/interp-core.js and NOT in lib/compile-core.js, so this "+
@@ -379,31 +333,6 @@ func checkNamedCalls(u *unit, fs *[]finding, lay2Defined, localFns map[string]bo
 			}
 		}
 	}
-}
-
-// argCount counts the top-level commas after the '(' at index open, +1.
-func argCount(ts []token, open int) int {
-	depth := 0
-	args := 1
-	for i := open; i < len(ts); i++ {
-		if ts[i].kind != tPunct {
-			continue
-		}
-		switch ts[i].text {
-		case "(", "[", "{":
-			depth++
-		case ")", "]", "}":
-			depth--
-			if depth == 0 {
-				return args
-			}
-		case ",":
-			if depth == 1 {
-				args++
-			}
-		}
-	}
-	return args
 }
 
 func checkForIn(u *unit, fs *[]finding) {
@@ -757,7 +686,6 @@ func main() {
 	for i := range units {
 		u := &units[i]
 		checkExponent(u, &fs)
-		checkStringEscapes(u, &fs)
 		checkASIReturn(u, &fs)
 		checkNamedCalls(u, &fs, lay2, localByFile[u.file])
 		checkForIn(u, &fs)
@@ -825,8 +753,8 @@ func main() {
 	if len(fs) == 0 {
 		fmt.Println("metajs-lint: 0 findings - the corpus is clean against every rule above.")
 		fmt.Println("             That is a RESULT, not an absence of one: these constructs are")
-		fmt.Println("             invisible to every other gate here (the \\f one is invisible to")
-		fmt.Println("             all of them - it is wrong in the native binary only), so the")
+		fmt.Println("             invisible to every other gate here (extern-from-lay2 is invisible")
+		fmt.Println("             to all of them - it is wrong in the native binary only), so the")
 		fmt.Println("             value of this tool is the NEXT one somebody writes.")
 	} else {
 		var rs []string
@@ -887,19 +815,14 @@ const rulesDoc = `metajs-lint rules - each is a documented dialect gap with a re
   exponent-literal   1e308 lexes as the number 1 and the NAME e308. Under -frozen
                      the whole script is "cannot parse script", pointing nowhere
                      near the line. Two agents hit this independently in one day.
-  string-escape      no \f and no \v; the BACKSLASH IS DROPPED, so ch == "\f"
-                     compiles to ch == "f". Wrong in the NATIVE BINARY ONLY - the
-                     matrix, --full and --cross are all structurally blind to it.
   asi-return         a value-less return is not terminated by the newline: the
                      next line becomes its operand and is evaluated. Silently
                      lost every store in one half for an entire agent-round.
   to-precision       no toPrecision.
   for-in             no for...in under -frozen.
-  frozen-builtin     no splice, no lastIndexOf, and 2-argument indexOf IGNORES
-                     the from-index - it does not raise, it returns the same
-                     match every time, so a scan loop spins to the IR step cap.
-                     (split, join and 'length =' all WORK - measured; the doc
-                     that says otherwise is stale and they are not rules here.)
+  frozen-builtin     no splice and no lastIndexOf. (split, join, 'length =' and
+                     indexOf's from-index all WORK - measured; they are not
+                     rules here.)
   has-own            hasOwn is in interp-core.js and NOT compile-core.js: an
                      emitter using it works in one half only.
   keys-of            keysOf is bound for layer-2 MetaJS only, never for grammar
@@ -920,8 +843,8 @@ const rulesDoc = `metajs-lint rules - each is a documented dialect gap with a re
 // The self-test. Each case is (rule, source, mustFire).
 //
 // The NEGATIVE cases are not decoration: they pin constructs that are easy to
-// report wrongly - a grammar that defines its own hasOwn, an escaped backslash
-// before an f, and a value-less `return` whose next token is a closing brace.
+// report wrongly - a grammar that defines its own hasOwn and a value-less
+// `return` whose next token is a closing brace.
 type selfCase struct {
 	rule string
 	kind string // "lay2", "core", "compi-gram", "gram"
@@ -933,11 +856,6 @@ var selfCases = []selfCase{
 	{"exponent-literal", "lay2", `function f() { var x = 1e308 }`, true},
 	{"exponent-literal", "lay2", `function f() { var x = 1000 }`, false},
 	{"exponent-literal", "lay2", `function f() { var x = e308 }`, false},
-
-	{"string-escape", "lay2", `function f() { return c == "\f" }`, true},
-	{"string-escape", "lay2", `function f() { return c == "\v" }`, true},
-	{"string-escape", "lay2", `function f() { return c == "\\f" }`, false},
-	{"string-escape", "lay2", `function f() { return c == "\u000c" }`, false},
 
 	{"asi-return", "lay2", "function f() {\n if (bad) return\n log = 1\n}", true},
 	{"asi-return", "lay2", "function f() {\n if (bad) { return }\n log = 1\n}", false},
@@ -952,7 +870,7 @@ var selfCases = []selfCase{
 
 	{"frozen-builtin", "lay2", `function f() { a.splice(1, 1) }`, true},
 	{"frozen-builtin", "lay2", `function f() { return s.lastIndexOf("x") }`, true},
-	{"frozen-builtin", "lay2", `function f() { return s.indexOf("x", i) }`, true},
+	{"frozen-builtin", "lay2", `function f() { return s.indexOf("x", i) }`, false},
 	{"frozen-builtin", "lay2", `function f() { return s.indexOf("x") }`, false},
 	{"frozen-builtin", "lay2", `function f() { a.length = 0 }`, false},
 	{"frozen-builtin", "lay2", `function f() { return s.split(",").join("-") }`, false},
@@ -1025,7 +943,6 @@ func runSelfTest() int {
 		}
 		var fs []finding
 		checkExponent(&u, &fs)
-		checkStringEscapes(&u, &fs)
 		checkASIReturn(&u, &fs)
 		checkNamedCalls(&u, &fs, lay2, local)
 		checkForIn(&u, &fs)

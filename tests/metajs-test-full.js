@@ -249,6 +249,12 @@ function s07() {
     var esc = "\b\f\v"
     check("str21", esc.length === 3 && esc.charCodeAt(0) === 8 && esc.charCodeAt(1) === 12 &&
                    esc.charCodeAt(2) === 11)
+    // indexOf's position clamps to [0, length] and counts UTF-16 code units.
+    var ax = "aXaXa"
+    check("str22", ax.indexOf("a", 2) === 2 && ax.indexOf("a", 5) === -1 &&
+                   ax.indexOf("X", -3) === 1 && ax.indexOf("", 9) === 5)
+    check("str23", "\u00e9a\u00e9a".indexOf("a", 2) === 3 &&
+                   "\ud83c\udf89a\ud83c\udf89a".indexOf("a", 3) === 5)
 }
 
 // ===== SECTION 08: UTF-16 string semantics =====
@@ -297,6 +303,10 @@ function s09() {
     check("arr14", g.length === 2 && g[1] === undefined)
     check("arr15", [1, [2, 3]][1][0] === 2)
     check("arr16", "" + [1, 2, 3] === "1,2,3")
+    // indexOf's from-index is relative from the end when negative, like slice.
+    var ix = [1, 2, 1, 2, 1]
+    check("arr17", ix.indexOf(1, 1) === 2 && ix.indexOf(1, -1) === 4 &&
+                   ix.indexOf(2, -9) === 1 && ix.indexOf(1, 9) === -1)
 }
 
 // ===== SECTION 10: objects =====

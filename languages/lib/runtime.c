@@ -4058,6 +4058,10 @@ long builtin_method(long recv, long mid, long args) {
 			long i = 0;
 			long n = arr_len(recv);
 			long want = arg_at(args, 0);
+			if (arr_len(args) > 1) {          /* relative from-index, like slice */
+				long b = arg_num(args, 1);
+				i = clamp_index(d_is_nan(b) ? 0 : d_to_long(d_trunc(b)), n);
+			}
 			while (i < n) { if (strict_eq(arr_get(recv, i), want)) { return mk_num(d_from_long(i)); } i = i + 1; }
 			return mk_num(d_from_long(-1));
 		}
@@ -4108,9 +4112,12 @@ long builtin_method(long recv, long mid, long args) {
 			return wtf8_clean(u_slice(recv, i, i + 1));
 		}
 		if (mid == 22) {                                      /* indexOf, in UNITS */
-			long at = str_index_of(recv, arg_str(args, 0));
-			if (at <= 0) { return mk_num(d_from_long(at)); }
-			return mk_num(d_from_long(str_ulen(str_slice(recv, 0, at))));
+			long from = arr_len(args) > 1 ? clamp_sub(arg_num(args, 1), n) : 0;
+			long hay = from > 0 ? u_slice(recv, from, n) : recv;
+			long at = str_index_of(hay, arg_str(args, 0));
+			if (at < 0) { return mk_num(d_from_long(-1)); }
+			if (at > 0) { at = str_ulen(str_slice(hay, 0, at)); }
+			return mk_num(d_from_long(from + at));
 		}
 		if (mid == 23) {                                      /* replace, first only */
 			long pat = arg_str(args, 0);

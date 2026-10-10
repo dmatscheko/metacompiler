@@ -129,18 +129,8 @@ these fail ONLY under `-frozen` — behind an otherwise green goja run.
   `function f(v) { v = v + "" }` fails with "variable 'v' has type number and
   cannot hold a string". Copy the parameter into a fresh `anytype` local before
   mutating it.
-- **No `string.lastIndexOf`, and `indexOf` IGNORES its from-index argument.**
-  The second is the nasty one: it does not raise, it returns the same match every
-  time, so a `while (i < s.length) { i = s.indexOf("\n", i) + 1 }` line walker
-  spins until the IR step cap — under `-frozen` only. Write a small `for` scan
-  instead. (Found while adding the Ruby heredoc lexer.)
-
-  > **Sharper than "ignores", measured 2026-08-10**: the two hosts DISAGREE.
-  > `"aXaXa".indexOf("a", 2)` is **2** under goja and **0** under `-frozen`. So a
-  > grammar that passes a from-index does not merely lose it — it has a **live
-  > goja-vs-`-frozen` divergence**, which is the failure the matrix exists to
-  > catch, and it will surface as a byte-difference rather than as a hang if the
-  > walker happens to terminate.
+- **No `string.lastIndexOf`.** (`indexOf`'s from-index works in every host:
+  `"aXaXa".indexOf("a", 2)` is 2, and an array's negative one counts from the end.)
 
   > **⚠ CORRECTED 2026-08-10 — `string.split`, `array.join` and `array.length =`
   > were listed here as absent and ALL THREE WORK**, in goja and under `-frozen`

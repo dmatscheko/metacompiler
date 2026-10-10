@@ -11606,8 +11606,14 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			}
 			return out
 		case "indexOf":
-			for i, e := range recv.elems {
-				if rt.strictEq(e, argAt(args, 0)) {
+			// The from-index is relative like slice's start. Twin of mid 7 in
+			// languages/lib/runtime.c's builtin_method.
+			from := 0
+			if len(args) > 1 {
+				from = clampIndex(jsToInt(argN(1)), len(recv.elems))
+			}
+			for i := from; i < len(recv.elems); i++ {
+				if rt.strictEq(recv.elems[i], argAt(args, 0)) {
 					return float64(i)
 				}
 			}
@@ -11646,6 +11652,22 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 		case "charAt":
 			return gojaCharAt(rt.strAt(recv, jsToInt(argN(0))))
 		case "indexOf":
+			// The position clamps to [0, length] in code units. Twin of mid 22 in
+			// languages/lib/runtime.c's builtin_method.
+			if len(args) > 1 {
+				n := rt.strLen(recv)
+				from := jsToInt(argN(1))
+				if from > n {
+					from = n
+				}
+				if from > 0 {
+					p := rt.strIndexOf(rt.strRange(recv, from, n), argS(0))
+					if p < 0 {
+						return float64(-1)
+					}
+					return float64(from + p)
+				}
+			}
 			return float64(rt.strIndexOf(recv, argS(0)))
 		case "replace":
 			return strings.Replace(recv, argS(0), argS(1), 1)
