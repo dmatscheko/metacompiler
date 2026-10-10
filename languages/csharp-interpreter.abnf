@@ -5328,7 +5328,7 @@ KwLet       = "let" KwEnd ;
                     ? csAdoptVal(fk.adoptTy, fk.dflt) : fk.dflt
             }
         }
-        function initFields(self) { initBase(self, []); initOwn(self) }
+        function initFields(self) { initOwn(self); initBase(self, []) }
         if (ctorInfos.length > 1) {
             // Overloaded constructors: one dispatcher picks by the argument list.
             var ctorFns = []
@@ -5465,9 +5465,12 @@ KwLet       = "let" KwEnd ;
                 for (i = 0; i < info.cargs.length; i++) { argv.push(info.cargs[i]()) }
                 cls.__ctor.apply(undefined, argv)
             } else {
+                // The field initializers run BEFORE the base constructor and before
+                // its arguments are evaluated (ECMA-334 15.11.3), so a virtual
+                // method the base constructor calls sees them.
+                initOwn(self)
                 for (i = 0; i < info.cargs.length; i++) { argv.push(info.cargs[i]()) }
                 initBase(self, argv)
-                initOwn(self)
             }
             return info.body()
         }

@@ -5791,6 +5791,24 @@ KwLet       = "let" KwEnd ;
             }
             callExt(b, "js_call", [ownCtorV, hUndef, targsV])
         }
+        // This class' field initializers run BEFORE the base constructor and before
+        // its arguments are evaluated (ECMA-334 15.11.3), so a virtual method the
+        // base constructor calls sees them. Twin of csCtorBodyT in
+        // csharp-interpreter.abnf.
+        if (fields != null && !isThisInit) {
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            for (var k = 0; k < fields.length; k++) {
+                var fv
+                if (fields[k].init != null && fields[k].init != undefined) {
+                    var r = fields[k].init(b)
+                    b = r.b
+                    fv = r.v
+                } else {
+                    fv = fieldDefault(b, fields[k])
+                }
+                callExt(b, "js_set", [thisV, emitStr(b, fields[k].name), fv])
+            }
+        }
         if (superName != undefined && superName != null && !isThisInit) {
             var supClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
             var supCtorV = callExt(b, "js_get", [supClsV, emitStr(b, "__ctor")])
@@ -5832,20 +5850,6 @@ KwLet       = "let" KwEnd ;
                 var e1V = callExt(b, "js_csadd", [emitStr(b, "Exception of type '"), enV])
                 var e2V = callExt(b, "js_csadd", [e1V, emitStr(b, "' was thrown.")])
                 callExt(b, "js_set", [thisEV, emitStr(b, "Message"), e2V])
-            }
-        }
-        if (fields != null && !isThisInit) {
-            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
-            for (var k = 0; k < fields.length; k++) {
-                var fv
-                if (fields[k].init != null && fields[k].init != undefined) {
-                    var r = fields[k].init(b)
-                    b = r.b
-                    fv = r.v
-                } else {
-                    fv = fieldDefault(b, fields[k])
-                }
-                callExt(b, "js_set", [thisV, emitStr(b, fields[k].name), fv])
             }
         }
         var savedYield = sawYield

@@ -2458,6 +2458,46 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s36i4", k == "A");
         }
 
+        // ===== SECTION 37: field initializers run before the base constructor =====
+        //
+        // ECMA-334 15.11.3: a constructor without a `this(...)` initializer first
+        // runs its class' variable initializers, THEN evaluates the `base(...)`
+        // arguments and invokes the base constructor, then its own body - so a
+        // virtual method the base constructor calls already sees the derived
+        // class' initialized fields.
+        static string S37Trace = "";
+        static int S37Note(string s) { Program.S37Trace += s; return 1; }
+        class S37Base
+        {
+            public string Log = "";
+            public S37Base(int v) { Log += "B(" + Get() + ")"; Program.S37Note("P"); }
+            public virtual string Get() { return "base"; }
+        }
+        class S37Mid : S37Base
+        {
+            string x = "init";
+            int n = 5;
+            int a = Program.S37Note("a");
+            public S37Mid() : base(Program.S37Note("g")) { Log += "M(" + x + n + ")"; }
+            public override string Get() { return x + n; }
+        }
+        class S37Leaf : S37Mid
+        {
+            string y = "y" + Program.S37Note("l");
+            public S37Leaf() { Log += "L"; }
+            public override string Get() { return "leaf:" + y; }
+        }
+        static void S37()
+        {
+            Program.S37Trace = "";
+            string m = new S37Mid().Log;
+            string t1 = Program.S37Trace;
+            Program.S37Trace = "";
+            string l = new S37Leaf().Log;
+            Program.Check("s37f1", m == "B(init5)M(init5)" && t1 == "agP");
+            Program.Check("s37f2", l == "B(leaf:y1)M(init5)L" && Program.S37Trace == "lagP");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2496,6 +2536,7 @@ b";                                                   // verbatim keeps the newl
             Program.S34(); // SECTION-CALL 34
             Program.S35(); // SECTION-CALL 35
             Program.S36(); // SECTION-CALL 36
+            Program.S37(); // SECTION-CALL 37
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
