@@ -3022,17 +3022,12 @@ HasStatic   = :script(~~
     }
     // new T[d0][d1]...[]: the sized dimensions are built outermost first, each level
     // but the last filled with the next level (an emitted loop, since the sizes are
-    // run-time values). The innermost fill is the element type's default - 0 for the
-    // numeric primitives, false for boolean, null for a reference type and for the
-    // levels a trailing empty dimension leaves unbuilt.
+    // run-time values). The innermost fill is the element type's default (jZeroOf), and
+    // null for the levels a trailing empty dimension leaves unbuilt.
     var naCount = 0
     function arrFillOf(ty, hasEmpty) {
         if (hasEmpty) { return function(b) { return hNull } }
-        if (ty == "boolean") { return function(b) { return hFalse } }
-        if (ty == "int" || ty == "long" || ty == "short" || ty == "byte"
-            || ty == "double" || ty == "float") { return function(b) { return emitNum(b, 0) } }
-        if (ty == "char") { return function(b) { return callExt(b, "js_char", [handle(0)]) } }
-        return function(b) { return hNull }
+        return function(b) { return jZeroOf(b, ty) }
     }
     function emitArrDims(b, dimVs, idx, fillFn) {
         // JLS 15.10.1: EVERY dimension expression is validated BEFORE any array is
@@ -3979,13 +3974,9 @@ HasStatic   = :script(~~
         var isStatic = false
         var i
         for (i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
-        var dflt = 0
-        if (ty == "boolean") dflt = 2 // The handle constants: 2 false, 1 null.
-        if (ty != "int" && ty != "boolean") dflt = 1
-        if (ty.indexOf("[") >= 0) dflt = 1
         for (i = 2; i < items.length; i++) {
             push({kind: "field", name: items[i].fname, statik: isStatic, init: fieldInitOf(items[i].finit, ty),
-                  dfltH: dflt, isInt: ty == "int"})
+                  fty: ty})
         }
     }
     // A field initializer gets the same assignment conversion as a local
@@ -3997,9 +3988,18 @@ HasStatic   = :script(~~
             return {b: r.b, v: declConvert(r.b, r.v, ty)}
         }
     }
-    function fieldDefault(b, f) {
-        if (f.isInt) return emitNum(b, 0)
-        return handle(f.dfltH)
+    function fieldDefault(b, f) { return jZeroOf(b, f.fty) }
+    // The default value of a field or an array element (JLS 4.12.5): the zero
+    // of the type's own kind and width (0.0, 0L, (byte) 0, '\u0000'), false, or
+    // null. Twin of jZeroOf in java-interpreter.abnf.
+    function jZeroOf(b, ty) {
+        if (ty == "int") { return emitNum(b, 0) }
+        if (ty == "boolean") { return hFalse }
+        if (ty == "char") { return callExt(b, "js_char", [handle(0)]) }
+        if (ty == "double" || ty == "float" || jDeclWidth["$" + ty] != undefined) {
+            return declConvert(b, emitNum(b, 0), ty)
+        }
+        return hNull
     }
 
     // A parameter list: the names in order, with a varargs parameter kept as
@@ -4546,11 +4546,12 @@ HasStatic   = :script(~~
     var jUsesIdx = false        // any `a[i]`      -> AIOOBE + NullPointerException
     var jUsesStrIdx = false     // charAt/substring -> StringIndexOutOfBoundsException
     var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
-    var jUsesParse = false      // parseInt/parseLong/valueOf -> NumberFormatException
+    var jUsesParse = false      // parseInt/parseDouble/valueOf ... -> NumberFormatException
     function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
     function jNoteMSfx(sfx) {
         if (sfx.name == "charAt" || sfx.name == "substring") { jUsesStrIdx = true }
-        if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "valueOf") { jUsesParse = true }
+        if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "parseDouble"
+            || sfx.name == "parseFloat" || sfx.name == "valueOf") { jUsesParse = true }
         return sfx
     }
     // These are needed whether or not the program names them, because the
@@ -5019,7 +5020,7 @@ HasStatic   = :script(~~
         // the few static methods a program reaches for. Long.MAX_VALUE cannot be
         // written as a plain number at all, which is why they arrive as runtime
         // objects (js_jvboxtype in abnf/jsrtjava.go) rather than emitted literals.
-        var jvBoxTypes = ["Integer", "Long", "Byte", "Short", "Character", "Double", "Boolean"]
+        var jvBoxTypes = ["Integer", "Long", "Byte", "Short", "Character", "Double", "Float", "Boolean"]
         for (var jb = 0; jb < jvBoxTypes.length; jb++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, jvBoxTypes[jb]),
                                          callExt(b, "js_jvboxtype", [emitStr(b, jvBoxTypes[jb])])])

@@ -79,6 +79,7 @@ class Main {
         S33.run(); // SECTION-CALL 33
         S34.run(); // SECTION-CALL 34
         S35.run(); // SECTION-CALL 35
+        S36.run(); // SECTION-CALL 36
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2136,5 +2137,65 @@ class S35 {
         Main.check("pa18", S35.pr("80000000", 16).equals("For input string: \"80000000\" under radix 16"));
         Main.check("pa19", S35.kind(s[1]).equals("NFE") && S35.kind(s[0]).equals("none"));
         Main.check("pa20", Integer.valueOf(s[0]) + Long.valueOf(s[9]) == -9223372036854775797L);
+    }
+}
+
+// ===== SECTION 36: field and array defaults, Double / Float / Math members =====
+//
+// A field or array element nobody assigned holds its type's zero (JLS 4.12.5):
+// 0.0, 0L, (byte) 0, '\u0000' - of the type's own kind and width, so a long
+// default multiplies at 64 bits and a byte default's compound assignment wraps.
+// The Double / Float constants and the java.lang.Math methods are checked
+// against java 24.0.2's own output; every operand is read out of an array.
+class S36 {
+    static double fd; static long fl; static float ff; static byte fb; static char fc;
+    double id; long il; short is;
+    static String nfe(String s) {
+        try { return "" + Double.parseDouble(s); } catch (NumberFormatException e) { return e.getMessage(); }
+    }
+    static void run() {
+        Main.check("df1", ("" + S36.fd).equals("0.0") && ("" + S36.ff).equals("0.0"));
+        Main.check("df2", ("" + S36.fl).equals("0") && ("" + S36.fb).equals("0") && S36.fc == 0);
+        Main.check("df3", S36.fl * 1000000 * 1000000 * 1000 == 0 && (S36.fl + 1) * 1000000 * 1000000 * 1000 == 1000000000000000L);
+        S36 o = new S36();
+        Main.check("df4", ("" + o.id).equals("0.0") && ("" + o.il).equals("0") && ("" + o.is).equals("0"));
+        o.il += 2;
+        Main.check("df5", o.il * 1000000 * 1000000 * 1000 == 2000000000000000L);
+        double[] da = new double[2];
+        long[] la = new long[1];
+        byte[] ba = new byte[1];
+        char[] ca = new char[1];
+        float[][] fm = new float[1][1];
+        Main.check("df6", ("" + da[1]).equals("0.0") && ("" + fm[0][0]).equals("0.0") && ca[0] == 0);
+        la[0] += 3;
+        ba[0] += 200;
+        Main.check("df7", la[0] * 1000000 * 1000000 * 1000 == 3000000000000000L && ba[0] == -56);
+
+        Main.check("dc1", ("" + Double.POSITIVE_INFINITY).equals("Infinity") && ("" + Double.NEGATIVE_INFINITY).equals("-Infinity"));
+        Main.check("dc2", ("" + Double.MAX_VALUE).equals("1.7976931348623157E308") && ("" + Double.MIN_VALUE).equals("4.9E-324"));
+        Main.check("dc3", ("" + Double.MIN_NORMAL).equals("2.2250738585072014E-308") && Double.MAX_VALUE * 2 == Double.POSITIVE_INFINITY);
+        Main.check("dc4", ("" + Float.MAX_VALUE).equals("3.4028235E38") && ("" + Float.MIN_VALUE).equals("1.4E-45"));
+        Main.check("dc5", ("" + Float.NaN).equals("NaN") && ("" + Float.NEGATIVE_INFINITY).equals("-Infinity") && Float.SIZE == 32);
+        double[] d = { 0.0, -0.0, 2.5, -2.5, 0.49999999999999994, 0.0 / 0, 1.0 / 0, 16.0, -1.5 };
+        Main.check("dc6", Double.isNaN(d[5]) && !Double.isNaN(d[2]) && Double.isInfinite(d[6]) && Double.isFinite(d[2]) && !Double.isFinite(d[6]));
+        Main.check("dc7", Double.compare(d[1], d[0]) == -1 && Double.compare(d[5], d[6]) == 1 && Double.compare(d[5], d[5]) == 0);
+        Main.check("dc8", Double.parseDouble(" 1e3 ") == 1000.0 && ("" + Double.parseDouble("-0")).equals("-0.0") && Float.parseFloat("0.1") == 0.1f);
+        Main.check("dc9", S36.nfe("").equals("empty String") && S36.nfe("1.5.5").equals("multiple points") && S36.nfe("1x").equals("For input string: \"1x\""));
+        Main.check("dc10", ("" + Double.valueOf("2")).equals("2.0") && ("" + Float.valueOf(3)).equals("3.0"));
+
+        Main.check("ma1", ("" + Math.sqrt(d[7])).equals("4.0") && ("" + Math.PI).equals("3.141592653589793"));
+        Main.check("ma2", ("" + Math.rint(d[2])).equals("2.0") && ("" + Math.rint(d[3])).equals("-2.0") && ("" + Math.rint(-0.4)).equals("-0.0"));
+        Main.check("ma3", Math.round(d[2]) == 3L && Math.round(d[3]) == -2L && Math.round(d[4]) == 0L && Math.round(d[5]) == 0L);
+        Main.check("ma4", Math.round(1e20) == Long.MAX_VALUE && Math.round(2.5f) == 3 && Math.round(1e10f) == Integer.MAX_VALUE);
+        Main.check("ma5", ("" + Math.floor(d[8])).equals("-2.0") && ("" + Math.ceil(d[8])).equals("-1.0") && ("" + Math.signum(d[3])).equals("-1.0"));
+        Main.check("ma6", ("" + Math.pow(2, 10)).equals("1024.0") && ("" + Math.pow(1, d[5])).equals("NaN") && ("" + Math.pow(-1, d[6])).equals("NaN"));
+        Main.check("ma7", ("" + Math.toRadians(180)).equals("3.141592653589793") && ("" + Math.toDegrees(1)).equals("57.29577951308232"));
+        Main.check("ma8", Math.floorDiv(-7, 2) == -4 && Math.floorMod(-7, 2) == 1 && Math.floorMod(7, -2) == -1 && Math.floorDiv(-7L, 2L) == -4L);
+        Main.check("ma9", ("" + Math.cbrt(27)).equals("3.0") && ("" + Math.hypot(3, 4)).equals("5.0") && ("" + Math.log10(1000)).equals("3.0"));
+
+        int[] n = { 255, -255, Integer.MIN_VALUE };
+        Main.check("rx1", Integer.toString(n[0], 16).equals("ff") && Integer.toString(n[1], 16).equals("-ff") && Integer.toString(n[0], 99).equals("255"));
+        Main.check("rx2", Integer.toBinaryString(n[1]).equals("11111111111111111111111100000001") && Integer.toOctalString(n[2]).equals("20000000000"));
+        Main.check("rx3", Long.toString(Long.MIN_VALUE, 36).equals("-1y2p0ij32e8e8") && Long.toBinaryString(5L).equals("101"));
     }
 }

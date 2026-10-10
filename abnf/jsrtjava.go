@@ -39,6 +39,7 @@ package abnf
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -358,6 +359,12 @@ func (rt *jsrt) jvParseInt(s string, width uint8, radix int) interface{} {
 	if radix != 10 {
 		bad += " under radix " + strconv.Itoa(radix)
 	}
+	if radix < 2 {
+		rt.jvThrowCls(jvNfeCls, "radix "+strconv.Itoa(radix)+" less than Character.MIN_RADIX")
+	}
+	if radix > 36 {
+		rt.jvThrowCls(jvNfeCls, "radix "+strconv.Itoa(radix)+" greater than Character.MAX_RADIX")
+	}
 	t := s
 	neg := false
 	if strings.HasPrefix(t, "+") || strings.HasPrefix(t, "-") {
@@ -408,6 +415,273 @@ func jvRadixArg(rt *jsrt, args []interface{}) int {
 	return int(giVal(rt, args[1]))
 }
 
+// jvMathMembers adds java.lang.Math beyond abs / max / min to jvmMathObject.
+// The double methods widen the argument (JLS 5.3) and answer a double whatever
+// it was, so Math.sqrt(4) is 2.0. Twin of hostGlobals["Math"] in
+// java-interpreter.abnf and of jvBoxType("Math") in languages/lib/java-rt.metajs.
+func jvMathMembers(o *jsObject) {
+	dbl := func(f float64) interface{} { return jsJFlo{f: f, sty: floJava} }
+	o.set("PI", dbl(math.Pi))
+	o.set("E", dbl(math.E))
+	one := map[string]func(float64) float64{
+		"sqrt": math.Sqrt, "cbrt": math.Cbrt, "exp": math.Exp, "expm1": math.Expm1,
+		"log": math.Log, "log10": math.Log10, "log1p": math.Log1p,
+		"sin": math.Sin, "cos": math.Cos, "tan": math.Tan,
+		"asin": math.Asin, "acos": math.Acos, "atan": math.Atan,
+		"sinh": math.Sinh, "cosh": math.Cosh, "tanh": math.Tanh,
+		"floor": math.Floor, "ceil": math.Ceil, "rint": math.RoundToEven,
+		// One multiplication by java.lang.Math's own constant, which is why
+		// toRadians(180) is exactly Math.PI.
+		"toRadians": func(x float64) float64 { return x * 0.017453292519943295 },
+		"toDegrees": func(x float64) float64 { return x * 57.29577951308232 },
+	}
+	for name, fn := range one {
+		fn := fn
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return dbl(fn(rt.toNumber(argAt(args, 0))))
+		}))
+	}
+	two := map[string]func(float64, float64) float64{
+		"atan2": math.Atan2, "hypot": math.Hypot, "pow": jvPowJ,
+	}
+	for name, fn := range two {
+		fn := fn
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return dbl(fn(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))))
+		}))
+	}
+	o.set("random", jsHostFunc("random", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return dbl(rand.Float64())
+	}))
+	// round(double) is a long and round(float) an int; an integral argument
+	// takes the float overload (int -> float is the more specific widening).
+	// The answer is the closest integer with ties toward +Infinity, saturated
+	// at the width's extremes (NaN -> 0).
+	o.set("round", jsHostFunc("round", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		f := rt.toNumber(v)
+		if jvIsDouble(v) {
+			return jvNarrow(rt, dbl(jvRoundHalfUp(f)), 64)
+		}
+		return jvNarrow(rt, dbl(jvRoundHalfUp(jvmFround(f))), 32)
+	}))
+	// signum keeps a double a double and a float a float; an integral argument
+	// takes the float overload. NaN and both zeros answer themselves.
+	o.set("signum", jsHostFunc("signum", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		f := rt.toNumber(v)
+		if f > 0 {
+			f = 1
+		} else if f < 0 {
+			f = -1
+		}
+		if jvIsDouble(v) {
+			return dbl(f)
+		}
+		return jsJFlo{f: f, sty: floJavaF}
+	}))
+	// floorDiv / floorMod round the quotient toward -Infinity, through the
+	// language's own / and % so the width and the "/ by zero" throw follow.
+	o.set("floorDiv", jsHostFunc("floorDiv", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		a, b := argAt(args, 0), argAt(args, 1)
+		q := rt.jvArith("/", a, b)
+		r := rt.jvArith("%", a, b)
+		if rt.jvCmp("!=", r, float64(0)) && rt.jvCmp("<", r, float64(0)) != rt.jvCmp("<", b, float64(0)) {
+			return rt.jvArith("-", q, float64(1))
+		}
+		return q
+	}))
+	o.set("floorMod", jsHostFunc("floorMod", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		a, b := argAt(args, 0), argAt(args, 1)
+		r := rt.jvArith("%", a, b)
+		if rt.jvCmp("!=", r, float64(0)) && rt.jvCmp("<", r, float64(0)) != rt.jvCmp("<", b, float64(0)) {
+			return rt.jvArith("+", r, b)
+		}
+		return r
+	}))
+}
+
+// jvIsDouble: is v a Java double (and not a float or an integral value)?
+func jvIsDouble(v interface{}) bool {
+	f, ok := v.(jsJFlo)
+	return ok && f.sty != floJavaF
+}
+
+// jvPowJ is java.lang.Math#pow where it parts from Go's math.Pow: a NaN
+// exponent is always NaN, and |x| == 1 to an infinite power is NaN (not 1).
+// Twin of jPowJ in java-interpreter.abnf and jvPowJ in java-rt.metajs.
+func jvPowJ(x, y float64) float64 {
+	if math.IsNaN(y) || ((x == 1 || x == -1) && math.IsInf(y, 0)) {
+		return math.NaN()
+	}
+	return math.Pow(x, y)
+}
+
+// jvRoundHalfUp is the closest integer with ties toward +Infinity. x -
+// floor(x) is exact, so 0.49999999999999994 rounds to 0.
+func jvRoundHalfUp(x float64) float64 {
+	if math.IsNaN(x) || math.Abs(x) >= 4503599627370496 {
+		return x
+	}
+	f := math.Floor(x)
+	if x-f >= 0.5 {
+		return f + 1
+	}
+	return f
+}
+
+// jvDoubleCompare is Double.compare / Float.compare: the numeric order, except
+// that -0.0 is below 0.0 and NaN is above everything and equal to itself.
+func jvDoubleCompare(a, b float64) float64 {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	an, bn := math.IsNaN(a), math.IsNaN(b)
+	if an || bn {
+		if an && bn {
+			return 0
+		}
+		if an {
+			return 1
+		}
+		return -1
+	}
+	if a == 0 && math.Signbit(a) != math.Signbit(b) {
+		if math.Signbit(a) {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// jvParseDbl is Double.parseDouble's text: String.trim, an optional sign, then
+// NaN, Infinity, or decimal digits with an optional point, exponent and
+// f/F/d/D suffix. Anything else throws NumberFormatException with java
+// 24.0.2's message: "empty String", "multiple points", or `For input string:
+// "x"`. Hexadecimal significands are not read. Twin of jParseDbl in
+// java-interpreter.abnf and jvParseDbl in languages/lib/java-rt.metajs.
+func (rt *jsrt) jvParseDbl(s string) float64 {
+	t := strings.TrimFunc(s, func(r rune) bool { return r <= ' ' })
+	if t == "" {
+		rt.jvThrowCls(jvNfeCls, "empty String")
+	}
+	bad := "For input string: \"" + s + "\""
+	i := 0
+	neg := false
+	if t[0] == '+' || t[0] == '-' {
+		neg = t[0] == '-'
+		i = 1
+	}
+	switch t[i:] {
+	case "NaN":
+		return math.NaN()
+	case "Infinity":
+		if neg {
+			return math.Inf(-1)
+		}
+		return math.Inf(1)
+	}
+	isDigit := func(j int) bool { return j < len(t) && t[j] >= '0' && t[j] <= '9' }
+	digits := 0
+	for ; isDigit(i); i++ {
+		digits++
+	}
+	if i < len(t) && t[i] == '.' {
+		for i++; isDigit(i); i++ {
+			digits++
+		}
+		if i < len(t) && t[i] == '.' {
+			rt.jvThrowCls(jvNfeCls, "multiple points")
+		}
+	}
+	if digits == 0 {
+		rt.jvThrowCls(jvNfeCls, bad)
+	}
+	if i < len(t) && (t[i] == 'e' || t[i] == 'E') {
+		i++
+		if i < len(t) && (t[i] == '+' || t[i] == '-') {
+			i++
+		}
+		ed := 0
+		for ; isDigit(i); i++ {
+			ed++
+		}
+		if ed == 0 {
+			rt.jvThrowCls(jvNfeCls, bad)
+		}
+	}
+	end := i
+	if i < len(t) && strings.IndexByte("fFdD", t[i]) >= 0 {
+		i++
+	}
+	if i != len(t) {
+		rt.jvThrowCls(jvNfeCls, bad)
+	}
+	f, _ := strconv.ParseFloat(t[:end], 64)
+	return f
+}
+
+// jvFloType fills the Double (sty floJava) or Float (sty floJavaF) descriptor:
+// the IEEE-754 constants of the width and the static methods over it. Twin
+// of jFloType in java-interpreter.abnf and jvFloType in java-rt.metajs.
+func jvFloType(o *jsObject, sty uint8) {
+	f32 := sty == floJavaF
+	mk := func(f float64) interface{} {
+		if f32 {
+			f = jvmFround(f)
+		}
+		return jsJFlo{f: f, sty: sty}
+	}
+	o.set("NaN", mk(math.NaN()))
+	o.set("POSITIVE_INFINITY", mk(math.Inf(1)))
+	o.set("NEGATIVE_INFINITY", mk(math.Inf(-1)))
+	if f32 {
+		o.set("MAX_VALUE", mk(math.MaxFloat32))
+		o.set("MIN_VALUE", mk(math.SmallestNonzeroFloat32))
+		o.set("MIN_NORMAL", mk(0x1p-126))
+		o.set("SIZE", float64(32))
+		o.set("BYTES", float64(4))
+	} else {
+		o.set("MAX_VALUE", mk(math.MaxFloat64))
+		o.set("MIN_VALUE", mk(math.SmallestNonzeroFloat64))
+		o.set("MIN_NORMAL", mk(0x1p-1022))
+		o.set("SIZE", float64(64))
+		o.set("BYTES", float64(8))
+	}
+	pred := func(name string, p func(float64) bool) {
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return p(rt.toNumber(argAt(args, 0)))
+		}))
+	}
+	pred("isNaN", math.IsNaN)
+	pred("isInfinite", func(f float64) bool { return math.IsInf(f, 0) })
+	pred("isFinite", func(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) })
+	o.set("compare", jsHostFunc("compare", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jvDoubleCompare(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+	}))
+	parse := jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return mk(rt.jvParseDbl(rt.toString(argAt(args, 0))))
+	})
+	if f32 {
+		o.set("parseFloat", parse)
+	} else {
+		o.set("parseDouble", parse)
+	}
+	o.set("valueOf", jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if s, ok := argAt(args, 0).(string); ok {
+			return mk(rt.jvParseDbl(s))
+		}
+		return mk(rt.toNumber(argAt(args, 0)))
+	}))
+	o.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.jvpStr(mk(rt.toNumber(argAt(args, 0))))
+	}))
+}
+
 // jvValueOfHost is Integer.valueOf / Long.valueOf: a String parses exactly as
 // parseInt / parseLong does, anything else narrows.
 func jvValueOfHost(width uint8) *hostFunc {
@@ -419,11 +693,15 @@ func jvValueOfHost(width uint8) *hostFunc {
 	})
 }
 
-// jvHexOf is Integer.toHexString / Long.toHexString: the UNSIGNED
-// hex reading of the value AT THE GIVEN WIDTH, lowercase, no leading zeros - so
-// Integer.toHexString(-1) is "ffffffff". The twin is jvToHex32 / jvToHex64 in
-// languages/lib/java-rt.metajs.
-func jvHexOf(rt *jsrt, v interface{}, w uint8) string {
+// jvRadixOf is Integer / Long .toString(v, radix), toHexString, toOctalString
+// and toBinaryString. toString is the SIGNED reading ("-ff"; a radix outside
+// 2..36 means 10); the other three are the UNSIGNED reading AT THE GIVEN WIDTH,
+// so Integer.toHexString(-1) is "ffffffff". Lowercase, no leading zeros. Twin of
+// jRadixStr in java-interpreter.abnf and jvRadixStr in java-rt.metajs.
+func jvRadixOf(rt *jsrt, v interface{}, w uint8, radix int, uns bool) string {
+	if radix < 2 || radix > 36 {
+		radix = 10
+	}
 	var p int64
 	if f, isFlo := v.(jsJFlo); isFlo {
 		p = jvNarrowFloat(f.f, w)
@@ -431,9 +709,29 @@ func jvHexOf(rt *jsrt, v interface{}, w uint8) string {
 		p = jvToLong(rt, v)
 	}
 	if w == 32 {
-		return strconv.FormatUint(uint64(uint32(p)), 16)
+		if uns {
+			return strconv.FormatUint(uint64(uint32(p)), radix)
+		}
+		return strconv.FormatInt(int64(int32(p)), radix)
 	}
-	return strconv.FormatUint(uint64(p), 16)
+	if uns {
+		return strconv.FormatUint(uint64(p), radix)
+	}
+	return strconv.FormatInt(p, radix)
+}
+
+// jvRadixMembers adds toString(v [, radix]) and the three unsigned renderings
+// to the Integer (w 32) or Long (w 64) descriptor.
+func jvRadixMembers(o *jsObject, w uint8) {
+	o.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jvRadixOf(rt, argAt(args, 0), w, jvRadixArg(rt, args), false)
+	}))
+	for name, radix := range map[string]int{"toHexString": 16, "toOctalString": 8, "toBinaryString": 2} {
+		radix := radix
+		o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jvRadixOf(rt, argAt(args, 0), w, radix, true)
+		}))
+	}
 }
 
 // jvBoolOf is Boolean.valueOf / Boolean.parseBoolean: a STRING argument is true
@@ -495,9 +793,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 32, jvRadixArg(rt, args))
 		}))
 		o.set("valueOf", jvValueOfHost(32))
-		o.set("toHexString", jsHostFunc("toHexString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jvHexOf(rt, argAt(args, 0), 32)
-		}))
+		jvRadixMembers(o, 32)
 	case "Long":
 		o.set("MAX_VALUE", jvBox(math.MaxInt64))
 		o.set("MIN_VALUE", jvBox(math.MinInt64))
@@ -506,9 +802,7 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 			return rt.jvParseInt(rt.toString(argAt(args, 0)), 64, jvRadixArg(rt, args))
 		}))
 		o.set("valueOf", jvValueOfHost(64))
-		o.set("toHexString", jsHostFunc("toHexString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jvHexOf(rt, argAt(args, 0), 64)
-		}))
+		jvRadixMembers(o, 64)
 	case "Byte":
 		o.set("MAX_VALUE", jsGInt{v: 127, w: 8})
 		o.set("MIN_VALUE", jsGInt{v: -128, w: 8})
@@ -522,12 +816,12 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		o.set("MIN_VALUE", jsChar{code: 0})
 		o.set("SIZE", float64(16))
 		o.set("BYTES", float64(2))
-	// Double / Boolean carry only a subset; see the note on the layer-2 twin
-	// in languages/lib/java-rt.metajs.
 	case "Double":
-		o.set("NaN", jsJFlo{f: math.NaN(), sty: floJava})
-		o.set("SIZE", float64(64))
-		o.set("BYTES", float64(8))
+		jvFloType(o, floJava)
+	case "Float":
+		jvFloType(o, floJavaF)
+	// Boolean carries only a subset; see the note on the layer-2 twin in
+	// languages/lib/java-rt.metajs.
 	case "Boolean":
 		o.set("TRUE", true)
 		o.set("FALSE", false)

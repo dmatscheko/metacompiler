@@ -2127,7 +2127,151 @@ HasStatic   = :script(~~
             return v < 0 ? -v | 0 : v | 0
         },
         max: function(a, b) { return jMinMax(a, b, jTakeL(jNumD(a), jNumD(b), true)) },
-        min: function(a, b) { return jMinMax(a, b, jTakeL(jNumD(a), jNumD(b), false)) }
+        min: function(a, b) { return jMinMax(a, b, jTakeL(jNumD(a), jNumD(b), false)) },
+        // The double methods: the argument widens to double (JLS 5.3) and the
+        // answer is a double whatever it was, so Math.sqrt(4) is 2.0.
+        PI: {__flo: 3.141592653589793},
+        E: {__flo: 2.718281828459045},
+        sqrt: function(v) { return jFlo(Math.sqrt(jNumD(v))) },
+        cbrt: function(v) { return jFlo(Math.cbrt(jNumD(v))) },
+        exp: function(v) { return jFlo(Math.exp(jNumD(v))) },
+        expm1: function(v) { return jFlo(Math.expm1(jNumD(v))) },
+        log: function(v) { return jFlo(Math.log(jNumD(v))) },
+        log10: function(v) { return jFlo(Math.log10(jNumD(v))) },
+        log1p: function(v) { return jFlo(Math.log1p(jNumD(v))) },
+        sin: function(v) { return jFlo(Math.sin(jNumD(v))) },
+        cos: function(v) { return jFlo(Math.cos(jNumD(v))) },
+        tan: function(v) { return jFlo(Math.tan(jNumD(v))) },
+        asin: function(v) { return jFlo(Math.asin(jNumD(v))) },
+        acos: function(v) { return jFlo(Math.acos(jNumD(v))) },
+        atan: function(v) { return jFlo(Math.atan(jNumD(v))) },
+        sinh: function(v) { return jFlo(Math.sinh(jNumD(v))) },
+        cosh: function(v) { return jFlo(Math.cosh(jNumD(v))) },
+        tanh: function(v) { return jFlo(Math.tanh(jNumD(v))) },
+        atan2: function(y, x) { return jFlo(Math.atan2(jNumD(y), jNumD(x))) },
+        hypot: function(x, y) { return jFlo(Math.hypot(jNumD(x), jNumD(y))) },
+        pow: function(x, y) { return jFlo(jPowJ(jNumD(x), jNumD(y))) },
+        floor: function(v) { return jFlo(Math.floor(jNumD(v))) },
+        ceil: function(v) { return jFlo(Math.ceil(jNumD(v))) },
+        rint: function(v) { return jFlo(jRint(jNumD(v))) },
+        // Math.toRadians / toDegrees are ONE multiplication by java.lang.Math's
+        // own constant, which is why toRadians(180) is exactly Math.PI.
+        toRadians: function(v) { return jFlo(jNumD(v) * 0.017453292519943295) },
+        toDegrees: function(v) { return jFlo(jNumD(v) * 57.29577951308232) },
+        random: function() { return jFlo(Math.random()) },
+        // round(double) is a long and round(float) an int; an integral argument
+        // takes the float overload (int -> float is the more specific widening).
+        // The answer is the closest integer with ties toward +Infinity, and the
+        // width's extreme past its range (JLS 5.1.3 saturation, NaN -> 0).
+        round: function(v) {
+            var dbl = jIsFlo(v) && !jIsF32(v)
+            var f = dbl ? jNumD(v) : coreF32Round(jNumD(v))
+            return jNarrow(jFlo(jRoundHalfUp(f)), dbl ? 64 : 32)
+        },
+        // signum keeps a double a double and a float a float; an integral
+        // argument takes the float overload. NaN and both zeros answer themselves.
+        signum: function(v) {
+            var f = jNumD(v)
+            var s = f > 0 ? 1 : (f < 0 ? jNegOne : f)
+            return jIsFlo(v) && !jIsF32(v) ? jFlo(s) : jFlo32(s)
+        },
+        // floorDiv / floorMod round the quotient toward -Infinity, through the
+        // language's own / and % so the width and the "/ by zero" throw follow.
+        floorDiv: function(a, b) {
+            var q = jArith("/", a, b)
+            var r = jArith("%", a, b)
+            if (jCmp("!=", r, 0) && jCmp("<", r, 0) != jCmp("<", b, 0)) { return jArith("-", q, 1) }
+            return q
+        },
+        floorMod: function(a, b) {
+            var r = jArith("%", a, b)
+            if (jCmp("!=", r, 0) && jCmp("<", r, 0) != jCmp("<", b, 0)) { return jArith("+", r, b) }
+            return r
+        }
+    }
+    // java.lang.Math#pow where it parts from IEEE-754's pow: a NaN exponent is
+    // always NaN, and |x| == 1 to an infinite power is NaN (not 1). Twin of
+    // jvPowJ in abnf/jsrtjvm.go and languages/lib/java-rt.metajs.
+    function jPowJ(x, y) {
+        if (y !== y) { return y }
+        if ((x == 1 || x == jNegOne) && (y == jInf || y == -jInf)) { return 0 / jZeroF }
+        return Math.pow(x, y)
+    }
+    // Math.rint: the nearest integer, a tie to the EVEN one, the sign of a zero
+    // kept (rint(-0.4) is -0.0). From 2^52 up every double is already integral.
+    function jRint(x) {
+        if (x !== x || x >= 4503599627370496 || x <= -4503599627370496) { return x }
+        var f = Math.floor(x)
+        var d = x - f
+        var r = f
+        if (d > 0.5 || (d == 0.5 && f % 2 != 0)) { r = f + 1 }
+        if (r == 0 && (x < 0 || 1 / x < 0)) { return jNegZeroF() }
+        return r
+    }
+    // Double.compare / Float.compare: the numeric order, except that -0.0 is
+    // below 0.0 and NaN is above everything and equal to itself.
+    function jDblCompare(a, b) {
+        if (a < b) { return jNegOne }
+        if (a > b) { return 1 }
+        var an = a !== a
+        var bn = b !== b
+        if (an || bn) { return an && bn ? 0 : (an ? 1 : jNegOne) }
+        if (a == 0) {
+            var ap = 1 / a > 0
+            var bp = 1 / b > 0
+            if (ap != bp) { return ap ? 1 : jNegOne }
+        }
+        return 0
+    }
+    // Double.parseDouble's text: String.trim, an optional sign, then NaN,
+    // Infinity, or decimal digits with an optional point, exponent and f/F/d/D
+    // suffix. Anything else throws NumberFormatException: "empty String" when
+    // only whitespace was there, "multiple points" for a second '.', and
+    // `For input string: "x"` otherwise (java 24.0.2's three messages).
+    // Hexadecimal significands are not read. Twin of jvParseDbl in abnf/jsrtjava.go and
+    // languages/lib/java-rt.metajs.
+    function jParseDbl(s) {
+        var a = 0
+        var e = s.length
+        while (a < e && s.charCodeAt(a) <= 32) { a++ }
+        while (e > a && s.charCodeAt(e - 1) <= 32) { e-- }
+        if (a == e) { jThrowExc("NumberFormatException", "empty String") }
+        var t = s.substring(a, e)
+        var bad = "For input string: \"" + s + "\""
+        var i = 0
+        var neg = false
+        if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; i = 1 }
+        var rest = t.substring(i)
+        if (rest == "NaN") { return 0 / jZeroF }
+        if (rest == "Infinity") { return neg ? -jInf : jInf }
+        var digits = 0
+        while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) { i++; digits++ }
+        if (i < t.length && t.charAt(i) == ".") {
+            i++
+            while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) { i++; digits++ }
+            if (i < t.length && t.charAt(i) == ".") { jThrowExc("NumberFormatException", "multiple points") }
+        }
+        if (digits == 0) { jThrowExc("NumberFormatException", bad) }
+        if (i < t.length && (t.charAt(i) == "e" || t.charAt(i) == "E")) {
+            i++
+            if (i < t.length && (t.charAt(i) == "+" || t.charAt(i) == "-")) { i++ }
+            var ed = 0
+            while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) { i++; ed++ }
+            if (ed == 0) { jThrowExc("NumberFormatException", bad) }
+        }
+        var end = i
+        if (i < t.length && "fFdD".indexOf(t.charAt(i)) >= 0) { i++ }
+        if (i != t.length) { jThrowExc("NumberFormatException", bad) }
+        var f = parseFloat(t.substring(0, end))
+        if (f == 0 && neg) { return jNegZeroF() }
+        return f
+    }
+    // The closest integer with ties toward +Infinity. x - floor(x) is exact, so
+    // 0.49999999999999994 rounds to 0, where floor(x + 0.5) answers 1.
+    function jRoundHalfUp(x) {
+        if (x !== x || x >= 4503599627370496 || x <= -4503599627370496) { return x }
+        var f = Math.floor(x)
+        return x - f >= 0.5 ? f + 1 : f
     }
     // The boxed-primitive types' constants and the handful of static methods a
     // program reaches for. MIN_VALUE / MAX_VALUE are the whole reason a sized
@@ -2147,6 +2291,8 @@ HasStatic   = :script(~~
         var radix = radixArg === undefined ? 10 : jNum(radixArg)
         var t = "" + s
         var bad = "For input string: \"" + t + "\"" + (radix == 10 ? "" : " under radix " + radix)
+        if (radix < 2) { jThrowExc("NumberFormatException", "radix " + radix + " less than Character.MIN_RADIX") }
+        if (radix > 36) { jThrowExc("NumberFormatException", "radix " + radix + " greater than Character.MAX_RADIX") }
         var neg = false
         var i = 0
         if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; i = 1 }
@@ -2178,31 +2324,40 @@ HasStatic   = :script(~~
         if (c >= 65 && c <= 90) { return c - 55 }
         return 99
     }
-    // Integer.toHexString / Long.toHexString: the UNSIGNED hex
-    // reading AT THE VALUE'S OWN WIDTH, lowercase, no leading zeros, so
-    // Integer.toHexString(-1) is "ffffffff" and not "-1". java 24.0.2 is the
-    // oracle. The twins are jvToHex32 / jvToHex64 in languages/lib/java-rt.metajs
-    // and jvHexOf in abnf/jsrtjava.go.
-    function jHexDigits(n) {
-        if (n == 0) return "0"
-        var out = ""
-        var x = n
-        while (x > 0) {
-            var r = x % 16
-            out = "0123456789abcdef".charAt(r) + out
-            x = (x - r) / 16
-        }
-        return out
-    }
-    function jToHex(v, w) {
-        // i64Make normalises both halves with >>> 0, so p.h and p.l are already
-        // the UNSIGNED 32 bit readings and no sign fixup is needed.
+    // Integer / Long .toString(v, radix), toHexString, toOctalString and
+    // toBinaryString. toString is the SIGNED reading ("-ff"; a radix outside
+    // 2..36 means 10); the other three are the UNSIGNED reading AT THE VALUE'S
+    // OWN WIDTH, so Integer.toHexString(-1) is "ffffffff". Lowercase, no leading
+    // zeros; java 24.0.2 is the oracle. The digits come off the two exact 32 bit
+    // halves by long division in plain doubles (rem * 2^32 + lo < 2^38). Twin of
+    // jvRadixStr in languages/lib/java-rt.metajs and jvRadixOf in abnf/jsrtjava.go.
+    function jRadixStr(v, w, radixArg, uns) {
+        var radix = radixArg === undefined ? 10 : jNum(radixArg)
+        if (radix < 2 || radix > 36) { radix = 10 }
+        // i64Make normalises both halves with >>> 0, so p.h and p.l are the
+        // UNSIGNED 32 bit readings of the 64 bit two's complement value.
         var p = szPair(jNarrow(v, 64))
-        if (w == 32) { return jHexDigits(p.l) }
-        if (p.h == 0) { return jHexDigits(p.l) }
-        var ls = jHexDigits(p.l)
-        while (ls.length < 8) { ls = "0" + ls }
-        return jHexDigits(p.h) + ls
+        var neg = false
+        if (w == 32) {
+            p = i64Make(0, p.l)
+            if (!uns && p.l >= 2147483648) { neg = true; p = i64Make(0, 4294967296 - p.l) }
+        } else if (!uns && p.h >= 2147483648) {
+            neg = true
+            p = i64Neg(p)
+        }
+        var hi = p.h
+        var lo = p.l
+        var out = ""
+        while (hi > 0 || lo > 0) {
+            var rh = hi % radix
+            hi = (hi - rh) / radix
+            var cur = rh * 4294967296 + lo
+            var r = cur % radix
+            lo = (cur - r) / radix
+            out = "0123456789abcdefghijklmnopqrstuvwxyz".charAt(r) + out
+        }
+        if (out == "") { out = "0" }
+        return neg ? "-" + out : out
     }
     // Boolean.valueOf / Boolean.parseBoolean: a STRING argument
     // is true iff it equalsIgnoreCase("true"), anything else is its own truth.
@@ -2213,9 +2368,11 @@ HasStatic   = :script(~~
     hostGlobals["Integer"] = {
         MAX_VALUE: 2147483647, MIN_VALUE: 0 - 2147483648, SIZE: 32, BYTES: 4,
         parseInt: function(s, radix) { return jParseInt(s, 32, radix) },
-        toHexString: function(v) { return jToHex(v, 32) },
+        toHexString: function(v) { return jRadixStr(v, 32, 16, true) },
+        toOctalString: function(v) { return jRadixStr(v, 32, 8, true) },
+        toBinaryString: function(v) { return jRadixStr(v, 32, 2, true) },
         valueOf: function(v, radix) { return typeof v == "string" ? jParseInt(v, 32, radix) : jNarrow(v, 32) },
-        toString: function(v) { return jstr(v) },
+        toString: function(v, radix) { return jRadixStr(v, 32, radix, false) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
         max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 32) : jNarrow(b, 32) },
         min: function(a, b) { return jCmp("<", a, b) ? jNarrow(a, 32) : jNarrow(b, 32) }
@@ -2225,9 +2382,11 @@ HasStatic   = :script(~~
         MIN_VALUE: szMake(i64Make(0x80000000, 0), 64, false),
         SIZE: 64, BYTES: 8,
         parseLong: function(s, radix) { return jParseInt(s, 64, radix) },
-        toHexString: function(v) { return jToHex(v, 64) },
+        toHexString: function(v) { return jRadixStr(v, 64, 16, true) },
+        toOctalString: function(v) { return jRadixStr(v, 64, 8, true) },
+        toBinaryString: function(v) { return jRadixStr(v, 64, 2, true) },
         valueOf: function(v, radix) { return typeof v == "string" ? jParseInt(v, 64, radix) : jNarrow(v, 64) },
-        toString: function(v) { return jstr(v) },
+        toString: function(v, radix) { return jRadixStr(v, 64, radix, false) },
         compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
         max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) },
         min: function(a, b) { return jCmp("<", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) }
@@ -2248,7 +2407,43 @@ HasStatic   = :script(~~
     // this point and only the included lib is textually in scope at script body
     // time, which is the same reason Byte/Short above build their pairs by hand.
     var jZeroDiv = 0
-    hostGlobals["Double"] = {NaN: {__flo: 0 / jZeroDiv}, SIZE: 64, BYTES: 8}
+    // 2^n, exactly: halving and doubling a double is exact down to the smallest
+    // subnormal. MetaJS has no exponent literal, so the IEEE-754 extremes below
+    // are built from it.
+    function jPow2(n) {
+        var x = 1
+        var k = n < 0 ? 0 - n : n
+        while (k > 0) {
+            x = n < 0 ? x / 2 : x * 2
+            k = k - 1
+        }
+        return x
+    }
+    // Double and Float: the IEEE-754 constants of the width and the static
+    // methods over it. Twin of jvFloType in languages/lib/java-rt.metajs and of
+    // the "Double" / "Float" arms of jvBoxType in abnf/jsrtjava.go.
+    function jFloType(f32) {
+        var mk = function(f) { return f32 ? {__flo: f, __f32: true} : {__flo: f} }
+        var inf = 1 / jZeroDiv
+        var o = {SIZE: f32 ? 32 : 64, BYTES: f32 ? 4 : 8}
+        o.NaN = mk(0 / jZeroDiv)
+        o.POSITIVE_INFINITY = mk(inf)
+        o.NEGATIVE_INFINITY = mk(-inf)
+        o.MAX_VALUE = mk(f32 ? (2 - jPow2(-23)) * jPow2(127) : (2 - jPow2(-52)) * jPow2(1023))
+        o.MIN_VALUE = mk(jPow2(f32 ? -149 : -1074))
+        o.MIN_NORMAL = mk(jPow2(f32 ? -126 : -1022))
+        o.isNaN = function(v) { var f = jNumD(v); return f !== f }
+        o.isInfinite = function(v) { var f = jNumD(v); return f == inf || f == -inf }
+        o.isFinite = function(v) { var f = jNumD(v); return f == f && f != inf && f != -inf }
+        o.compare = function(a, b) { return jDblCompare(jNumD(a), jNumD(b)) }
+        var parse = function(s) { return jFloRes(jParseDbl("" + s), f32) }
+        if (f32) { o.parseFloat = parse } else { o.parseDouble = parse }
+        o.valueOf = function(v) { return typeof v == "string" ? parse(v) : jFloRes(jNumD(v), f32) }
+        o.toString = function(v) { return jstr(jFloRes(jNumD(v), f32)) }
+        return o
+    }
+    hostGlobals["Double"] = jFloType(false)
+    hostGlobals["Float"] = jFloType(true)
     hostGlobals["Boolean"] = {TRUE: true, FALSE: false,
                               valueOf: function(v) { return jBoolOf(v) },
                               parseBoolean: function(v) { return jBoolOf(v) }}
@@ -3379,13 +3574,15 @@ HasStatic   = :script(~~
             return a
         }
     }
-    // new T[a][b][] : the sized dimensions are allocated eagerly; an element of
-    // the innermost allocated dimension is the element type's default (0, false
-    // or null) - null whenever an unsized dimension still follows.
-    function jArrDefault(base) {
-        if (base == "boolean") { return false }
-        if (base == "int" || base == "long" || base == "short" || base == "byte"
-            || base == "char" || base == "float" || base == "double") { return 0 }
+    // The default value of a field or an array element (JLS 4.12.5): the zero
+    // of the type's own kind and width (0.0, 0L, (byte) 0, '\u0000'), false, or
+    // null. new T[a][b][] fills the innermost allocated dimension with it - null
+    // whenever an unsized dimension still follows. Twin of jZeroOf in
+    // java-to-llvm-ir.abnf.
+    function jZeroOf(ty) {
+        if (ty == "boolean") { return false }
+        if (ty == "char") { return jChar(0) }
+        if (ty == "double" || ty == "float" || hasOwn(jDeclWidth, ty)) { return jTypeAdopt(0, ty) }
         return null
     }
     function jAllocArr(ns, i, leaf) {
@@ -3414,7 +3611,7 @@ HasStatic   = :script(~~
             if (items[i].adim != undefined) { dims.push(items[i].adim) }
             else { open = open + 1 }
         }
-        var leaf = (open > 0) ? null : jArrDefault(base)
+        var leaf = (open > 0) ? null : jZeroOf(base)
         return function() {
             var ns = []
             for (var k = 0; k < dims.length; k++) { ns.push(dims[k]()) }
@@ -3515,7 +3712,7 @@ HasStatic   = :script(~~
         // is no class descriptor to look up, so these two are the whole set:
         // ::new allocates, ::clone is unbound and copies its first argument.
         if (tgtPath.indexOf("[") >= 0) {
-            var elemDflt = jArrDefault(jStripArr(tgtPath))
+            var elemDflt = jZeroOf(jStripArr(tgtPath))
             if (methodPart == "new") {
                 return function() {
                     return function(n) { return jAllocArr([n], 0, elemDflt) }
@@ -4182,10 +4379,7 @@ HasStatic   = :script(~~
         // `boolean f = true;` with "variable 'dflt' has type number and cannot
         // hold a boolean" - under -frozen only.
         var dflt = anytype
-        dflt = 0
-        if (ty == "boolean") dflt = false
-        if (ty != "int" && ty != "boolean") dflt = null
-        if (ty.indexOf("[") >= 0) dflt = null
+        dflt = jZeroOf(ty)
         for (i = 2; i < items.length; i++) {
             push({kind: "field", name: items[i].fname, statik: isStatic, init: jFieldInit(items[i].finit, ty), dflt: dflt})
         }
@@ -4526,11 +4720,6 @@ HasStatic   = :script(~~
             else { bits = sign + biased * 8388608 + (a - 1) * 8388608 }
         }
         return (bits >= 2147483648) ? bits - 4294967296 : bits
-    }
-    function jPow2(k) {
-        var p = 1
-        for (var i = 0; i < k; i++) { p = p * 2 }
-        return p
     }
     function makeRecordEquals(params) {
         return function() {

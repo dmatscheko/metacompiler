@@ -534,9 +534,9 @@ func jvmNullish(v interface{}) bool {
 
 // jvmMathObject is the `Math` a compiled Java program sees. The handle runtime's
 // own Math is JavaScript's and answers a plain number for everything, which would
-// make Math.abs(-2.0) print "2" where Java prints "2.0". Only the three methods
-// the Java subset documents are provided, which is exactly what
-// java-interpreter.abnf's hostGlobals["Math"] has - the two halves must agree.
+// make Math.abs(-2.0) print "2" where Java prints "2.0". abs / max / min are
+// here; the rest of java.lang.Math is jvMathMembers in jsrtjava.go. The two
+// halves must agree with java-interpreter.abnf's hostGlobals["Math"].
 func jvmMathObject() *jsObject {
 	o := newJSObject()
 	o.set("abs", jsHostFunc("abs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -563,6 +563,7 @@ func jvmMathObject() *jsObject {
 		l, r := argAt(args, 0), argAt(args, 1)
 		return rt.jvmMinMax(l, r, jvmTakeL(rt.toNumber(l), rt.toNumber(r), false))
 	}))
+	jvMathMembers(o)
 	return o
 }
 
