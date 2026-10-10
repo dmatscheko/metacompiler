@@ -5050,6 +5050,13 @@ NotFuncHead = :script(~~
             if (e == 10) { i = i + 2; continue }                                  // \<LF>
             if (e == 13) { i = (s.charCodeAt(i + 2) == 10) ? i + 3 : i + 2; continue } // \<CR> / \<CRLF>
             if (e == 8232 || e == 8233) { i = i + 2; continue }                   // \<LS> / \<PS>
+            // \b \f \v, which the shared unescapeJs does not know (and which a script string
+            // literal cannot spell, hence the codes).
+            if (e == 98 || e == 102 || e == 118) {
+                out = out + String.fromCharCode(e == 98 ? 8 : (e == 102 ? 12 : 11))
+                i = i + 2
+                continue
+            }
             // See the twin of this comment in js-interpreter.abnf.
             if ((e >= 49 && e <= 55) || (e == 48 && isOctDigit(s.charCodeAt(i + 2)))) {
                 var oc = 0

@@ -92,6 +92,7 @@ function s03() {
 b" === "ab")
     check("str5", '\'' === "'" && "\"".length === 1)
     check("str6", "\0".length === 1)
+    check("str7", "\b\f\v".charCodeAt(0) === 8 && "\b\f\v".charCodeAt(1) === 12 && "\b\f\v".charCodeAt(2) === 11 && '\v'.length === 1)
 }
 
 // ===== SECTION 04: template literals =====

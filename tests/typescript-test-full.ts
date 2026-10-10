@@ -57,6 +57,8 @@ function s01() {
     let t: number = 0;
     try { throw "boom"; } catch (e) { t = e === "boom" ? 1 : 2; } finally { t = t + 10; }
     check("bas5", t === 11);
+    // \b \f \v are the code units 8, 12 and 11 (node 24).
+    check("bas6", "\b\f\v".charCodeAt(0) === 8 && "\b\f\v".charCodeAt(1) === 12 && "\b\f\v".charCodeAt(2) === 11);
 }
 
 // ===== SECTION 02: type annotations on primitives =====
