@@ -3044,19 +3044,6 @@ function s52() {
 
 // ===== END SECTIONS =====
 
-function main() {
-    s44() // SECTION-CALL 44;
-    s45() // SECTION-CALL 45;
-    s46() // SECTION-CALL 46;
-    s47() // SECTION-CALL 47;
-    s48() // SECTION-CALL 48;
-    s49() // SECTION-CALL 49;
-    s50() // SECTION-CALL 50;
-    s48() // SECTION-CALL 48;
-    println("full: " + checks + " checks, " + failures + " failures");
-    return failures;
-}
-
 function main(): number {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
