@@ -5840,8 +5840,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (carry > 0) { out.push(carry % bigBase) ; carry = Math.floor(carry / bigBase) }
         return magTrim(out)
     }
-    // Schoolbook long division, one quotient limb at a time; the limb itself is found
-    // by binary search over 0..base-1, which needs only magMulSmall and magCmp.
+    // magQuotEst estimates floor(rem / b) for rem < b * bigBase from the three
+    // leading limbs of rem against the two of b, aligned on b's top limb. The
+    // dropped limbs move the ratio by about one unit, so the caller's two
+    // correction loops run once or twice where a binary search over the limb
+    // took 24 trial products.
+    function magQuotEst(rem, b) {
+        var n = b.length
+        if (rem.length < n) { return 0 }
+        var r = ((n < rem.length) ? rem[n] : 0) * bigBase + rem[n - 1] + ((n >= 2) ? rem[n - 2] / bigBase : 0)
+        var d = b[n - 1] + ((n >= 2) ? b[n - 2] / bigBase : 0)
+        var e = Math.floor(r / d)
+        if (e > bigBase - 1) { return bigBase - 1 }
+        return e
+    }
+    // Schoolbook long division, one quotient limb at a time (see magQuotEst).
     function magDivMod(a, b) {
         var q = []
         var i
@@ -5853,12 +5866,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             rem = magTrim(nr)
             // A remainder still below the divisor is a zero digit: no search.
             if (magCmp(rem, b) < 0) { continue }
-            var lo = 0
-            var hi = bigBase - 1
-            while (lo < hi) {
-                var mid = Math.floor((lo + hi + 1) / 2)
-                if (magCmp(magMulSmall(b, mid), rem) <= 0) { lo = mid } else { hi = mid - 1 }
-            }
+            var lo = magQuotEst(rem, b)
+            while (lo > 0 && magCmp(magMulSmall(b, lo), rem) > 0) { lo = lo - 1 }
+            while (lo < bigBase - 1 && magCmp(magMulSmall(b, lo + 1), rem) <= 0) { lo = lo + 1 }
             q[i] = lo
             if (lo > 0) { rem = magTrim(magSub(rem, magMulSmall(b, lo))) }
         }

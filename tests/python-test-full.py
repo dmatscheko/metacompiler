@@ -1183,6 +1183,10 @@ def s27():
     check("bi7", str(10 ** 30 // 7) == "142857142857142857142857142857" and str(10 ** 30 % 7) == "1")
     check("bi8", str((0 - 10 ** 30) // 7) == "-142857142857142857142857142858" and str((0 - 10 ** 30) % 7) == "6")
     check("bi9", str(10 ** 30 % (0 - 7)) == "-6" and 10 ** 30 > 1 and 1 < 10 ** 30 and not (10 ** 30 <= 1))
+    # Long division by divisors whose leading limb is tiny, huge, or neither.
+    check("bi9a", str(7 ** 60 // (10 ** 14 + 1)) == "5080218607396182851035808014693654659" and
+                  str(7 ** 60 % (10 ** 21 - 1)) == "956125137757221055513" and
+                  str(7 ** 60 // 3 ** 50) == "707651880141060459748108418")
     # An unreached annotation followed by a reached one: the class must still
     # get its __annotations__ dict.
     check("an1", len(S27Ann.__annotations__) == 1 and "am_yes" in S27Ann.__annotations__)
