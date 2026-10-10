@@ -360,6 +360,8 @@ SetVis      = "(" "set" ")" ;
 // Body of a control structure / function: braces around a statement sequence.
 Block       <~~ push({body: makeBody(takeAll())}) ~~>
             = "{" { Statement } "}" ;
+// A bare '{ ... }' statement: the block's body runs in place (PHP has no block scope).
+BlockStmt   <~~ push(pop().body) ~~> = Block ;
 
 // Every statement pushes exactly one thunk: function(block) -> block.
 // A declaration is a statement too: PHP allows `if (...) { class Foo {} }`, and a
@@ -373,7 +375,7 @@ Block       <~~ push({body: makeBody(takeAll())}) ~~>
 // this level is not that position.
 Statement   <~~ push(phStmtPos(takeAll())) ~~>
             = "" <~~ push(up.pos) ~~>
-              ( InlineHtml | ShortEcho | EchoStmt | GlobalStmt | UnsetStmt | StaticVarStmt | Block | If | While | ForEach | For
+              ( InlineHtml | ShortEcho | EchoStmt | GlobalStmt | UnsetStmt | StaticVarStmt | BlockStmt | If | While | ForEach | For
             | Switch | DoWhile | Try | Throw | Declare
             | DefStmt | ClassDecl | EnumDecl | TypeDecl | ConstDecl | NsDecl | UseDecl
             | Return | Break | Continue | Goto | Label | Empty | ExprStmt ) ;
@@ -5508,7 +5510,7 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(mnIdx), curScopeV])])
         b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
-        b = makeSeq(items)(b)
+        b = makeBody(items)(b) // a statement list like any body: labels work here too
         b.NewRet(handle(0))
     }
 

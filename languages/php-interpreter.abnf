@@ -331,6 +331,8 @@ PropMod     <~~ push({mod: stripWs(up.in)}) ~~> = Modifier ;
 // Body of a control structure / function: braces around a statement sequence.
 Block       <~~ push({body: makeBody(takeAll())}) ~~>
             = "{" { Statement } "}" ;
+// A bare '{ ... }' statement: the block's body runs in place (PHP has no block scope).
+BlockStmt   <~~ push(pop().body) ~~> = Block ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
 // A declaration is a statement too: PHP allows `if (...) { class Foo {} }` and a
@@ -338,7 +340,7 @@ Block       <~~ push({body: makeBody(takeAll())}) ~~>
 // common enough in real files to be worth parsing. DefStmt has to wrap Def so the thunk it
 // pushes is the same makeDefStmt record TopItem builds; an ANONYMOUS function still
 // rolls back here (Def demands a Name) and reaches ClosureExpr through ExprStmt.
-Statement   = InlineHtml | ShortEcho | EchoStmt | UnsetStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
+Statement   = InlineHtml | ShortEcho | EchoStmt | UnsetStmt | GlobalStmt | StaticVarStmt | BlockStmt | If | While | ForEach | For
             | Switch | DoWhile | Try | Throw | Declare | Goto
             | Return | Break | Continue
             | DefStmt | ClassDecl | EnumDecl | TypeDecl | ConstDecl
@@ -4118,14 +4120,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // "Can only throw objects" in real PHP, so no valid program reaches it.
         return "" + v
     }
+    // The top level is a statement list like any body, so a label and a `goto` work
+    // there too.
     function runProgram(items) {
+        var main = makeBody(items)
         // A user exception (throw) that escapes the whole program is reported like any
         // other runtime error. The wrap sits here, not around c.compile, because the
         // program runs as a side effect of executing the statement thunks (unlike Java,
         // whose main() is called explicitly), so this is where the throw actually
         // propagates. excIsUser lives in lib/interp-core.js.
         try {
-            for (var i = 0; i < items.length; i++) { if (typeof items[i] == "function") { items[i]() } }
+            main()
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + phpExcText(e.v)) }
             throw e

@@ -1308,6 +1308,22 @@ function s33() {
     check("viv1", $u === [1, 2] && $w === [7]);
 }
 
+// ===== SECTION 34: a bare block, and labels at the top level =====
+$s34n = 0;
+{ $s34n = 10; }
+s34again:
+$s34n++;
+if ($s34n < 13) goto s34again;
+goto s34skip;
+$s34n = -1;
+s34skip:
+function s34() {
+    global $s34n;
+    $i = 0;
+    { $i = 5; }
+    check("gt1", $s34n === 13 && $i === 5);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1347,6 +1363,7 @@ function main() {
     s31(); // SECTION-CALL 31
     s32(); // SECTION-CALL 32
     s33(); // SECTION-CALL 33
+    s34(); // SECTION-CALL 34
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
