@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-223** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-233** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -102,44 +102,57 @@ that part may need a floor primitive: cost it.
 
 # RB — Ruby
 
-### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · IN PROGRESS (RB worker, round 2) [V]
+### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · OPEN [V]
 Round 1 measured it: `respond_to?` on a builtin aborts in every leg ("unknown Integer
 method: respond_to?"). MRI's surface is ~730 names over 13 classes × 3 engines.
-Decision: answer the ENGINE'S IMPLEMENTED surface (true iff the call would dispatch),
-derived from the existing per-class method dispatch tables, not a copied MRI list.
+Decision: answer the ENGINE'S IMPLEMENTED surface (true iff the call would dispatch).
+There are no per-class tables to derive it from (dispatch is if-chains, ~300 names in
+the interpreter alone). Design: ONE shared per-class name table included by the
+interpreter and layer 2 (the regex.js way), a Go copy with a `go test` comparing the
+two, and a probe checking every listed name dispatches in all three engines.
 `respond_to?` on non-objects needs a universal-method table (exact fix: a
 `js_rselfcall(scope, name, args)` extern, ~3 engines × 25 lines). `method(:x)` for
 `lambda`, `proc`, `loop`, `raise`, `require`/`exit`/`gets` answers NameError where MRI
 answers a Method - identical in all legs, reasons recorded at the site.
 
-### T-185 ruby: a negative numeric literal binds the sign before a method call · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
-`p -7.abs` prints `-7` in all four legs; MRI `7` (the `-` belongs to the literal).
-`-7.div(2)` gives `-3`; MRI `-4`. Oracle: /usr/bin/ruby.
+### T-223 ruby: `Integer#[]` (bit reference) answers nil · P1 · RB · OPEN [V]
+`5[0]` and `(-3)[0]` must be 1 (MRI); nil in every leg. Also `5[1..2]` is Ruby 2.7+,
+skip that.
 
-### T-186 ruby: `y = x -1` with a local `x` is read as a command call · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
-`x = 5; y = x -1` - MRI 4. Interpreter aborts "call of a non function: x", compiled
-halves "call of a non function value: 5". CommandForm must not apply to a known local.
+### T-224 ruby: `(m -1)` inside parentheses is a subtraction · P3 · RB · OPEN [V]
+A method `m` (no local `m`): `(m -1)` calls m(-1) in MRI; every leg subtracts. The
+parenthesised Expression path never tries the command form.
 
-### T-187 ruby: `"\u{1F600}".length` is a halves divergence · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
-Interpreter 2, native 2, llvm.Run 1, MRI 1. Astral code points become a surrogate pair
-in two engines (the interpreter's `\u{}` comment says astral text is U+FFFD everywhere).
+### T-225 ruby: top-level `p self` · P1 · RB · OPEN [V]
+Interpreter prints nil, compiler aborts; MRI prints `main` (and `self.to_s` is "main").
 
-### T-188 ruby: `defined?(3 + 3)` · P3 · RB · IN PROGRESS (RB worker, round 2) [V]
-Interpreter nil, compiled halves `"expression"`, MRI `"method"`.
+### T-226 ruby: the interpreter ignores singleton `to_s`/`inspect`; no `instance_variable_set` · P1 · RB · OPEN [V]
+`def o.to_s; "X"; end; puts o` / `p o` with a singleton inspect: the compiled halves
+honour it, the interpreter does not (halves divergence). `instance_variable_set` is
+missing in the interpreter.
 
-### T-189 ruby: a top-level local is visible inside a `def` · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
-`loc=1; def m; loc; end; m` gives 1 in all four legs; MRI raises NameError
-(undefined local variable or method `loc').
+### T-227 ruby: `sym.length` aborts compiled · P1 · RB · OPEN [V]
+`:abc.length` / `.size`: compiled halves "len() of a symbol" (the lowered `js_pylen`
+has no Symbol arm; the Go `js_pylen` is shared - prefer a ruby-specific lowering).
 
-### T-190 ruby: top-level `@ivar` aborts · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
-`@yes = 1; p @yes` - interpreter "outside of a method", compiled halves "variable not
-defined: self". MRI binds it on `main` and prints 1.
+### T-228 ruby: top-level locals and top-level defs share one namespace · P1 · RB · OPEN [V]
+`def w; 10; end; w = 4; p w -1` - compiler calls 4 ("call of a non function value: 4")
+and the def is overwritten; MRI prints 3, and `w()` still calls the method.
 
-### T-191 ruby: Rational/Complex exactness (rest of T-030) · P2 · RB · IN PROGRESS (RB worker, round 2) [V]
-Complex parts are untyped doubles: `Complex(3, 0.0).to_i` answers 3 where MRI raises,
-`5.0.to_c` prints `(5+0i)` (MRI `(5.0+0i)`). A Rational's parts are doubles, so a big
-plus a Rational is approximate. `(10**400).fdiv(10**399)` is NaN (MRI 10.0; MRI's
-big_fdiv). Needs Rational parts that are bigs and typed Complex parts.
+### T-229 ruby: `Math.atan2` is one ulp from MRI · P3 · RB · OPEN [V]
+e.g. `Math.atan2(3, 0.5)`, all three engines agree with each other. Check whether MRI
+uses the platform libm (then compare against C atan2 on this machine) before porting.
+
+### T-231 ruby: `NotLocalCmd` reads scopes from indentation · P3 · RB · OPEN [V]
+The parse guard that keeps `x -1` (local x) a subtraction rebuilds the local table from
+the source by indentation; unusual indentation misleads it. Replace with a walk-time
+local table (the grammar sees assignments before uses) if the PEG allows it; else
+document the limit at the site and close.
+
+### T-232 ruby: `defined?` residual gaps · P3 · RB · OPEN [V]
+`defined?(nil + 1)` and `defined?(x.nope)` give "method" (MRI nil - the receiver's
+respond-check); `defined?(Math::PI)` nil (MRI "constant"); `defined?(not x)` nil (MRI
+"method").
 
 ---
 
@@ -393,13 +406,13 @@ refreeze.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-130 lua: no `error` / `pcall` / `xpcall` · P1 · LUA · OPEN [V]
+### T-130 lua: no `error` / `pcall` / `xpcall` · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
 Without them, "catchable" is vacuous, and the compiled halves' `member 'q' of
 undefined` cannot be brought onto the interpreter's `attempt to index a nil value`.
 Needs a throw/catch surface: 2 grammars + layer 2 + twin. Error values, levels and
 the `file:line:` prefix: match lua.
 
-### T-131 lua: a subnormal float key read back through `pairs()` compares unequal · P1 · LUA · OPEN [V]
+### T-131 lua: a subnormal float key read back through `pairs()` compares unequal · P1 · LUA · IN PROGRESS (LUA worker, round 2) [V]
 Compiled halves only (the interpreter was fixed): the key comes back as a different
 double, so `k == orig` is false.
 
@@ -425,6 +438,11 @@ The C subset's float cast does not round to binary32. Oracle: cc.
 Native only: `Character.toUpperCase` of U+019B, U+0264, U+1C89, U+1C8A differs from
 llvm.Run and java (U+019B → U+A7DC is Unicode 16). Regenerate the floor's table from
 the Unicode version the oracles use; check every language's upper/lower on the delta.
+
+### T-230 -frozen big-integer arithmetic costs millions of steps · P2 · CORE · OPEN [V]
+The `-frozen` interpreter spends ~2-8M steps per operation on ~300-digit numbers; the
+ruby ratchet needs ~50M of its 1e8 per-call budget. Profile the frozen host's path for
+the shared bignum helpers (interp-core.js / runtime.metajs) and cut it.
 
 ### T-151 MetaJS: the lexer reads `"\f"` / `"\v"` as letters · P1 · CORE · OPEN [V]
 `"\f".charCodeAt(0)` is 102 in MetaJS. tools/metajs-lint guards known sites (it found
@@ -565,6 +583,13 @@ T-201 python: setting an attribute on a function aborts — DONE 45198e8
 T-202 python: class repr lacks the module prefix — DONE f6614d4
 T-204 python: `None.k = 1` does not parse — DONE 11fbd8b a9e8807
 T-203 python: int/int true division with a bigint operand rounds twice — PARTIAL fe88574 (the division is rounded once); the %-arity half waits on T-170 (noted there)
+T-185 ruby: a negative numeric literal binds the sign before a method call — DONE 9d2fd6b
+T-186 ruby: `y = x -1` with a local `x` is read as a command call — DONE 9d2fd6b (NotLocalCmd heuristic, see T-231)
+T-187 ruby: `"\u{1F600}".length` is a halves divergence — DONE 34fc538
+T-188 ruby: `defined?(3 + 3)` — DONE 5e96dc4
+T-189 ruby: a top-level local is visible inside a `def` — DONE 8d6bda9
+T-190 ruby: top-level `@ivar` aborts — DONE 2f25333
+T-191 ruby: Rational/Complex exactness (rest of T-030) — DONE c343864 ca0f20d
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
