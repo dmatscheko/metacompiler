@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-192** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-199** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -215,26 +215,32 @@ becoming iterable. Cost first; implement or DECLINE with the measurement.
 
 # JV — Java
 
-### T-060 java: assignment conversion only happens at declarations · P1 · JV · IN PROGRESS (JV worker, round 1) [V]
-A declaration and a field initializer convert (`double d = b` widens a float,
-`static float f = 16777217` rounds) via `declConvert` / `jTypeAdopt` / `jFieldInit`,
-but parameters, returns, plain reassignment, field and array-element stores and array
-initializers do not, in all engines: `q(2)` for `void q(double)` prints `2` (java
-`2.0`); `double r(){return 3;}` prints `3`; `long t; t = 2;
-t*1000000*1000000*1000` wraps at 32 bits; `float[] a = {16777217}`. The interpreter's
-Param rule does not push the parameter type and plain assignment has no static target
-type: thread declared types to those sites in both grammars (a value-based guess is
-wrong for `Object` slots). Oracle: java 24 (JLS 5.2).
+### T-192 java: the interpreter prints some doubles with too many digits · P1 · JV · Shared: interp-core.js? · IN PROGRESS (JV worker, round 2) [V]
+`System.out.println(1.0/16777216)`: interpreter (goja and -frozen) `5.9604644775390625E-8`;
+llvm.Run, native and java `5.960464477539063E-8`. The shortest-digits path (jFloStr /
+coreDecDigits). A halves divergence; probe other powers of two and boundaries.
 
-### T-061 java: field defaults, Double/Float constants, Math.sqrt · P1 · JV · IN PROGRESS (JV worker, round 1) [V]
-Uninitialised `double`/`long`/`float`/`byte`/`short`/`char` fields read `null` (java
-`0.0` / `0` / `'\u0000'`); `pushFields` only defaults int and boolean.
-`Double.POSITIVE_INFINITY` / `NEGATIVE_INFINITY` are `null` in the interpreter and
-`NaN` compiled (a halves divergence). `Float.NaN` is unknown in the interpreter, as is
-`Math.sqrt`. Audit the Double/Float/Integer/Long/Math constant and method surface
-against java while there.
+### T-193 java: overloads are chosen by argument count only · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
+`pick(int,int)` and `pick(double,double)`: `pick(1,2)` prints `2.0` (java `2`); likewise
+`show(long)` vs `show(String)`. All engines. JLS 15.12.2 (most specific method).
 
-### T-062 java: `Integer.parseInt`'s NumberFormatException is not catchable compiled · P1 · JV · IN PROGRESS (JV worker, round 1) [V]
+### T-194 java: missing standard-library pieces · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
+All engines: `String.toCharArray` ("unknown String method"); `Runnable` as a
+supertype ("unknown superclass: Runnable" / "variable not defined: Runnable");
+Character.isDigit/isLetter/toUpperCase/getNumericValue; Math.addExact and relatives
+(ArithmeticException "integer overflow"); Double.sum/max/min. Oracle: java 24.
+
+### T-195 java: typed functional-interface lambdas do not convert their parameters · P1 · JV · IN PROGRESS (JV worker, round 2) [V]
+`DoubleUnaryOperator op = x -> x+1; op.applyAsDouble(2)` prints `3` (java `3.0`). All
+engines.
+
+### T-196 java: `Math.exp(1)` is one ulp off · P3 · JV · IN PROGRESS (JV worker, round 2) [V]
+java `2.718281828459045`, every engine `2.7182818284590455`. Java's Math.exp may use
+an intrinsic but StrictMath.exp is fdlibm; check whether java's Math.exp agrees with
+fdlibm on a boundary-value probe and, if so, port fdlibm's exp (all engines). Else DECLINE.
+
+### T-197 java: `Double.parseDouble` does not read hex significands · P3 · JV · IN PROGRESS (JV worker, round 2) [V]
+`Double.parseDouble("0x1p3")` throws; java `8.0`.
 
 ---
 
@@ -276,6 +282,10 @@ apart: kotlin's mixed Float/Double set key, swift's `Int` vs `Int64` (`8 as Int6
 Int` is true where swiftc says false), kotlin's empty-range `first`, T-080. One
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
+
+### T-198 kotlin: `String.toDouble()` accepts a numeric prefix · P1 · KT · OPEN [V spec-only]
+`"1.5abc".toDouble()` parses (k2ParseNum: layer 2 parseFloat, Go twin Sscanf %g); Kotlin
+throws NumberFormatException. Check toInt/toLong/toFloat/toDoubleOrNull the same way.
 
 ---
 
@@ -558,6 +568,9 @@ T-027 ruby: `"\u{48 49}"` gives `H 49}` — DONE 4f5595d
 T-028 ruby: parse gaps — DONE 0bdde28
 T-029 ruby: `Kernel#Integer(str)` is imprecise past 2^53 — DONE 4102cd8
 T-030 ruby: Rational/Complex exactness — PARTIAL 9c5d75c (Complex raises/conjugate/rect/polar/arg/abs done); rest is T-191
+T-060 java: assignment conversion only happens at declarations — DONE a11485b
+T-061 java: field defaults, Double/Float constants, Math.sqrt — DONE 9723535
+T-062 java: `Integer.parseInt`'s NumberFormatException is not catchable compiled — DONE f2a0034
 
 # Settled — do not re-open
 
