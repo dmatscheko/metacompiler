@@ -280,11 +280,22 @@ function luI64(n) {
     return luNorm(i64FromNum(n))
 }
 
-// A Lua runtime error is the Go twin's rt.fail: the text on stderr behind
-// "js runtime error: ", and exit 1. It is NOT a MetaJS throw - that would add
-// "uncaught exception: " to the line. fail() is a host builtin of the C floor
-// (languages/lib/runtime.c), seeded in the root scope next to println.
-function luFail(msg) { fail(msg) }
+// A Lua runtime error is CATCHABLE (pcall), so it is thrown as a {__luerr}
+// marker; the emitted lua_errval that catches it prefixes the position of the
+// statement that was running, which only the module knows. Twin of rt.luFail in
+// abnf/jsrtlua.go.
+function luFail(msg) {
+    var o = {}
+    o["__luerr"] = msg
+    throw o
+}
+// The end of a program whose error nobody caught: the text arrives rendered by
+// the emitter's lua_errtext. fail() is a host builtin of the C floor
+// (languages/lib/runtime.c): the text behind "js runtime error: ", and exit 1.
+function js_luuncaught(s) {
+    fail(s)
+    return undefined
+}
 
 // ------------------------------------------------ reading a Lua numeral -----
 
@@ -448,8 +459,10 @@ function luToNum(v) {
     if (typeof v == "string") { return luParseNum(v) }
     return undefined
 }
+function js_lutonum(v) { return luToNum(v) }
 
 // luTypeName is Lua's type() for an error message.
+function js_lutname(v) { return luTypeName(v) }
 function luTypeName(v) {
     if (v === undefined) { return "nil" }
     if (v === null) { return "nil" }

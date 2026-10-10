@@ -25,8 +25,13 @@ f 'str' and f {tbl}, tables as arrays and maps ({} , {1, 2, 3} , {x = 1} , t.x ,
 1 based array indexing), the length operator #t (the sequence border of a table), and
 print.
 
+Errors are Lua's: error(v [, level]) with the chunk:line position of its level,
+pcall and xpcall, and every runtime error catchable the same way, positioned at the
+statement that raised it.
+
 Not in the subset: metatables, coroutines, and the standard library beyond print,
-next, ipairs, pairs, exit and the small string/table/math tables built below.
+next, ipairs, pairs, exit, error, pcall, xpcall and the small string/table/math
+tables built below.
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -568,9 +573,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `core` object and by overriding some builders below.
     include("lib/interp-core.js")
 
-    // The compiler wraps each statement with a source-position marker; the interpreter
-    // does not need one, so stmtPos is the identity here (keeps the grammar identical).
-    function stmtPos(t) { return t }
+    // ----- Source positions for error messages -----
+    // A Lua error raised at level 1 is prefixed "chunk:line: " with the line of the
+    // statement running in the function that raised it, so every statement records its
+    // position on the way in. luaPos is "" while a C function (pcall, xpcall) is the
+    // caller, which is when lua adds no position. luaCallPos holds, innermost last,
+    // the luaPos of the caller of every active Lua function and of every pcall/xpcall
+    // frame: error's level n >= 2 reads entry n - 1 from the top.
+    // Twin of stmtPos / lua.pos / lua.cs in lua-to-llvm-ir.abnf.
+    var luaPos = ""
+    var luaCallPos = []
+    // A label marker is not a thunk and passes through.
+    function stmtPos(t) {
+        if (typeof t != "function") { return t }
+        var here = luaChunkId(c.curFile()) + ":" + c.lineOf(up.pos) + ": "
+        return function() { luaPos = here; return t() }
+    }
+    // luaO_chunkid for a file chunk: the name as given, or "..." and its last 56
+    // characters when it does not fit LUA_IDSIZE (60, the '@' and the NUL included).
+    function luaChunkId(name) {
+        if (name.length + 1 <= 60) { return name }
+        return "..." + name.substring(name.length - 56)
+    }
 
     // A no-op statement thunk for an empty ';' statement.
     function makeEmpty() { return function() { return undefined } }
@@ -1548,7 +1572,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 frame["..."] = extra
             }
             scopes.push(frame)
+            luaCallPos.push(luaPos)
             var r = bodyT()
+            luaPos = luaCallPos.pop()
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
@@ -1793,8 +1819,113 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // buildChunk runs the whole program (one seq thunk). The test calls exit(fails)
-    // itself; if it does not, the run falls through to the exit(0) below.
-    function buildChunk(items) { items[0]() }
+    // itself; if it does not, the run falls through to the exit(0) below. A Lua error
+    // nobody caught ends the run with lua's own text for its error object. A required
+    // file runs here too, in the middle of the main file's parse, hence the restore.
+    var luaRunning = false
+    function buildChunk(items) {
+        var was = luaRunning
+        luaRunning = true
+        try {
+            items[0]()
+        } catch (e) {
+            if (!excIsUser(e)) { throw e }
+            println("lua interpreter error: " + luaOut(luaErrText(e.v)))
+            exit(1)
+        }
+        luaRunning = was
+    }
+    // lua.c's msghandler: a string or a number is the message, anything else is
+    // named by its type.
+    function luaErrText(v) {
+        if (typeof v == "string") { return v }
+        if (isNum(v)) { return luaNumStr(v) }
+        return "(error object is a " + luaType(v) + " value)"
+    }
+
+    // ----- Errors: error, pcall, xpcall -----
+    // A Lua error is a host throw of {__exc, v} (lib/interp-core.js), so it unwinds
+    // any depth of evaluation up to the nearest pcall. A runtime error raised by the
+    // interpreter itself becomes one too, positioned at the running statement; before
+    // the program runs, fail keeps its abort.
+    var coreFail = fail
+    fail = function(msg) {
+        if (!luaRunning) { coreFail(msg) }
+        throw {__exc: true, v: luaPos + msg}
+    }
+    // The position error(msg, level) prefixes: level 1 is the function that called
+    // error, level n the one n - 1 calls further out (luaL_where); none below 1.
+    function luaWhere(lv) {
+        if (lv < 1) { return "" }
+        if (lv === 1) { return luaPos }
+        var i = luaCallPos.length - (lv - 1)
+        if (i < 0) { return "" }
+        return luaCallPos[i]
+    }
+    // error's level argument, luaL_optinteger(L, 2, 1): 1 when absent, and an
+    // integer value or a Lua error otherwise. Twin of lua_errlevel in
+    // lua-to-llvm-ir.abnf.
+    function luaErrLevel(level) {
+        if (level === undefined || level === null) { return 1 }
+        var n = anytype // The level after Lua's string coercion.
+        n = toNumV(level)
+        if (n === undefined) { fail("bad argument #2 to 'error' (number expected, got " + luaType(level) + ")") }
+        var d = numOf(n)
+        if (d - d !== 0 || Math.floor(d) !== d) { fail("bad argument #2 to 'error' (number has no integer representation)") }
+        return d
+    }
+    globalScope["error"] = function(v, level) {
+        var lv = luaErrLevel(level)
+        var ev = anytype // The error object: only a string gains a position.
+        ev = v
+        if (typeof v == "string") { ev = luaWhere(lv) + v }
+        throw {__exc: true, v: ev}
+    }
+    // Calls f in protected mode: true and f's results, or false and the error object
+    // (passed through the xpcall handler when there is one). pcall itself is a frame
+    // with no position, so it pushes its caller's and runs f with luaPos "". The
+    // scope chain and the call positions are cut back to their entry state, because
+    // a throw skips every frame's own restore on the way out.
+    function luaProtect(f, args, handler) {
+        var savedChain = scopes.slice()
+        var depth = luaCallPos.length
+        var savedPos = luaPos
+        luaCallPos.push(luaPos)
+        luaPos = ""
+        var out = anytype // The multi-value pcall answers.
+        try {
+            if (typeof f != "function") { fail("attempt to call a " + luaType(f) + " value") }
+            var vs = []
+            vs.push(true)
+            var all = luaAll(f.apply(undefined, args))
+            for (var i = 0; i < all.length; i++) { vs.push(all[i]) }
+            out = mkMulti(vs)
+        } catch (e) {
+            if (!excIsUser(e)) { throw e }
+            scopes = savedChain.slice()
+            var ev = anytype // The error object, or what the handler made of it.
+            ev = e.v
+            if (handler !== undefined) { ev = luaFirst(handler(ev)) }
+            // lua 5.5 reports a nil error object as this string.
+            if (ev === undefined || ev === null) { ev = "<no error object>" }
+            out = mkMulti([false, ev])
+        }
+        while (luaCallPos.length > depth) { luaCallPos.pop() }
+        luaPos = savedPos
+        return out
+    }
+    globalScope["pcall"] = function() {
+        if (arguments.length == 0) { fail("bad argument #1 to 'pcall' (value expected)") }
+        var args = []
+        for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+        return luaProtect(arguments[0], args, undefined)
+    }
+    globalScope["xpcall"] = function() {
+        if (arguments.length < 2) { fail("bad argument #2 to 'xpcall' (value expected)") }
+        var args = []
+        for (var i = 2; i < arguments.length; i++) { args.push(arguments[i]) }
+        return luaProtect(arguments[0], args, arguments[1])
+    }
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "lua"

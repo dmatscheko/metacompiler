@@ -437,6 +437,7 @@ long PIN_N;
 long RT_MISS_VAR;    /* closure(name)      -> the value to throw, or 0 = abort */
 long RT_MISS_MEM;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
 long RT_MISS_SET;    /* closure(key, obj)  -> the value to throw, or 0 = abort */
+long RT_MISS_FN;     /* closure(callee)    -> the value to throw, or 0 = abort */
 long RNG_STATE;      /* Math.random's xorshift64 state, 0 until the first call */
 
 void gc_collect(void);
@@ -3076,6 +3077,21 @@ long rt_miss_set(long key, long obj) {
 	return v;
 }
 
+/* The CALL sibling: a call of a value that is no function (lua's pcall catches
+ * it as "attempt to call a nil value"). */
+long rt_miss_fn(long callee) {
+	long h = RT_MISS_FN;
+	long args;
+	long v;
+	if (h == 0) { return 0; }
+	RT_MISS_FN = 0;
+	args = mk_arr();
+	arr_push(args, callee);
+	v = js_call(h, H_UNDEF, args);
+	RT_MISS_FN = h;
+	return v;
+}
+
 long scope_get(long s, long name) {
 	long cur = s;
 	long exc;
@@ -3531,6 +3547,8 @@ long js_call(long callee, long self, long args) {
 	if (t == 9) { return builtin_method(fa(callee), fb(callee), args); }
 	/* A generator FUNCTION: calling it runs NOTHING and answers a generator. */
 	if (t == 16) { return gen_create(callee, args); }
+	t = rt_miss_fn(callee);
+	if (t != 0) { js_throw(t); }
 	die2("call of a non function value: ", callee);
 	return H_UNDEF;
 }
@@ -5758,6 +5776,7 @@ void gc_roots(void) {
 	gc_try(RT_MISS_VAR, 1);
 	gc_try(RT_MISS_MEM, 1);
 	gc_try(RT_MISS_SET, 1);
+	gc_try(RT_MISS_FN, 1);
 	gc_try(RETSLOT, 1);
 	gc_try(GEN_EXIT, 1);
 	while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; }
@@ -5820,6 +5839,7 @@ long js_gc_pin(long v) {
 long js_rt_missvar(long clo) { RT_MISS_VAR = clo; return 0; }
 long js_rt_missmem(long clo) { RT_MISS_MEM = clo; return 0; }
 long js_rt_missset(long clo) { RT_MISS_SET = clo; return 0; }
+long js_rt_missfn(long clo) { RT_MISS_FN = clo; return 0; }
 
 /* js_str_mem is the string-literal cache; str_intern, next to mk_str above, is
  * the whole of it. */

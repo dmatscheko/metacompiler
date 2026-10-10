@@ -37,6 +37,7 @@ package abnf
 // the Lua compiler grammar emits.
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -340,7 +341,7 @@ func luParseDec(s string) (interface{}, bool) {
 func (rt *jsrt) luArgNum(v interface{}, fn string) float64 {
 	n, ok := luToNum(v)
 	if !ok {
-		rt.fail("bad argument to '%s' (number expected)", fn)
+		rt.luFail("bad argument to '%s' (number expected)", fn)
 	}
 	return luNumOf(n)
 }
@@ -348,10 +349,10 @@ func (rt *jsrt) luArgNum(v interface{}, fn string) float64 {
 func (rt *jsrt) luArgInt(v interface{}, fn string) int64 {
 	n, ok := luToNum(v)
 	if !ok {
-		rt.fail("bad argument to '%s' (number expected)", fn)
+		rt.luFail("bad argument to '%s' (number expected)", fn)
 	}
 	if !luIsInt(n) {
-		rt.fail("bad argument to '%s' (number has no integer representation)", fn)
+		rt.luFail("bad argument to '%s' (number has no integer representation)", fn)
 	}
 	return luInt64(n)
 }
@@ -367,6 +368,16 @@ func luToNum(v interface{}) (interface{}, bool) {
 }
 
 // ----- the operators -----
+
+// luFail raises a Lua runtime error. It is CATCHABLE (pcall), so it is thrown
+// rather than aborting, as a {__luerr: message} marker: the emitted lua_errval
+// that catches it prefixes the position of the statement that was running,
+// which only the module knows. Twin of luFail in languages/lib/lua-rt.metajs.
+func (rt *jsrt) luFail(format string, args ...interface{}) {
+	o := newJSObject()
+	o.set("__luerr", fmt.Sprintf(format, args...))
+	panic(&jsThrown{value: o})
+}
 
 // luTypeName is Lua's type() for an error message.
 func (rt *jsrt) luTypeName(v interface{}) string {
@@ -421,11 +432,11 @@ func luIMod(a, b int64) int64 {
 func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 	l, ok := luToNum(lv)
 	if !ok {
-		rt.fail("attempt to perform arithmetic on a %s value", rt.luTypeName(lv))
+		rt.luFail("attempt to perform arithmetic on a %s value", rt.luTypeName(lv))
 	}
 	r, ok := luToNum(rv)
 	if !ok {
-		rt.fail("attempt to perform arithmetic on a %s value", rt.luTypeName(rv))
+		rt.luFail("attempt to perform arithmetic on a %s value", rt.luTypeName(rv))
 	}
 	if op == 3 {
 		return luMkFlo(luNumOf(l) / luNumOf(r))
@@ -444,9 +455,9 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 			// The two messages are lua 5.5's own, verified against the
 			// installed one.
 			if op == 4 {
-				rt.fail("attempt to divide by zero")
+				rt.luFail("attempt to divide by zero")
 			}
-			rt.fail("attempt to perform 'n%%0'")
+			rt.luFail("attempt to perform 'n%%0'")
 		}
 		if op == 4 {
 			return giNorm(luIDiv(a, b), 64, false)
@@ -485,18 +496,18 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 func (rt *jsrt) luToIntOp(v interface{}) int64 {
 	a, ok := luToNum(v)
 	if !ok {
-		rt.fail("attempt to perform bitwise operation on a %s value", rt.luTypeName(v))
+		rt.luFail("attempt to perform bitwise operation on a %s value", rt.luTypeName(v))
 	}
 	if luIsInt(a) {
 		return luInt64(a)
 	}
 	n := luNumOf(a)
 	if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
-		rt.fail("number has no integer representation")
+		rt.luFail("number has no integer representation")
 	}
 	iv, fits := luI64(n)
 	if !fits {
-		rt.fail("number has no integer representation")
+		rt.luFail("number has no integer representation")
 	}
 	return luInt64(iv)
 }
@@ -756,6 +767,14 @@ func init() {
 			return jsHFalse
 		}
 
+		m["js_lutname"] = func(a []uint64) uint64 { return rt.wrapStr(rt.luTypeName(u(a[0]))) }
+		// The end of a program whose error nobody caught: the text arrives
+		// rendered by the emitter's lua_errtext. Twin of js_luuncaught in
+		// languages/lib/lua-rt.metajs.
+		m["js_luuncaught"] = func(a []uint64) uint64 {
+			rt.fail("%s", rt.toString(u(a[0])))
+			return 0
+		}
 		m["js_luisint"] = func(a []uint64) uint64 { return boolH(luIsInt(u(a[0]))) }
 		m["js_luisnum"] = func(a []uint64) uint64 { return boolH(luIsNum(u(a[0]))) }
 		// The raw double behind a Lua value, with Lua's string coercion. Every
@@ -857,7 +876,7 @@ func init() {
 				}
 				n, ok := luToNum(v)
 				if !ok {
-					rt.fail("bad argument to 'floor' (number expected)")
+					rt.luFail("bad argument to 'floor' (number expected)")
 				}
 				if luIsInt(n) {
 					return w(n)
@@ -911,12 +930,12 @@ func init() {
 			l, lok := luToNum(u(a[0]))
 			r, rok := luToNum(u(a[1]))
 			if !lok || !rok {
-				rt.fail("bad argument to 'fmod' (number expected)")
+				rt.luFail("bad argument to 'fmod' (number expected)")
 			}
 			if luIsInt(l) && luIsInt(r) {
 				b := luInt64(r)
 				if b == 0 {
-					rt.fail("bad argument #2 to 'fmod' (zero)")
+					rt.luFail("bad argument #2 to 'fmod' (zero)")
 				}
 				if b == -1 {
 					return w(float64(0))

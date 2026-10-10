@@ -24,8 +24,9 @@
 -- subtype visible at all - math.type/tointeger/fmod/maxinteger/mininteger,
 -- without which sections 21 and 22 could not be written. That rules out setmetatable - so metatables, the operator
 -- metamethods and the <close> attribute (needs __close) stay untested - and
--- likewise error/pcall, tostring, select (varargs are counted by packing
--- into {...}) and coroutine.* (library calls, not syntax). Lua has no
+-- likewise tostring, select (varargs are counted by packing into {...}) and
+-- coroutine.* (library calls, not syntax). error/pcall/xpcall are in, because
+-- without them no error is observable at all (SECTION 27). Lua has no
 -- chained comparisons (a < b < c is a type error by design), so none appear.
 --
 -- Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
@@ -1026,7 +1027,95 @@ local function s26()
     check("lmath54", math.log(a[1]), -math.huge)
 end
 
+-- ===== SECTION 27: errors - error, pcall, xpcall =====
+-- An error unwinds to the nearest pcall, which answers false and the error object
+-- (true and the results when nothing failed). error(msg) prefixes the message
+-- with "chunk:line: " of the statement that called it (level 1), error(msg, 2)
+-- with the line in that function's caller, and level 0 adds nothing; an error
+-- object that is not a string travels unchanged. A runtime error is the same kind
+-- of error, positioned at the statement that raised it. pcall is itself a frame
+-- without a line, which is why error called by pcall directly has no position.
+-- Lines are asserted RELATIVE to the first statement of s27 (at(e, msg) reads the
+-- line in front of msg), so the section does not depend on where it sits in the
+-- file. Every answer is lua 5.5's.
+function s27()
+    local _, here = pcall(error, "", 2)
+    local function at(e, msg)
+        local head = string.sub(e, 1, #e - #msg - 2)
+        local i = #head
+        while i > 0 and string.sub(head, i, i) ~= ":" do i = i - 1 end
+        if string.sub(e, #head + 1) ~= ": " .. msg or string.sub(head, 1, i) ~= string.sub(here, 1, i) then
+            return "bad: " .. e
+        end
+        return string.sub(head, i + 1) - string.sub(here, i + 1, #here - 2)
+    end
+    local function nilf() return nil end
+    local function id(v) return v end
+    local ok, e = pcall(function() error("boom") end)
+    check("err1", ok, false)
+    check("err2", at(e, "boom"), 12)
+    check("err3", #here > 3, true)
+    ok, e = pcall(function() error("boom", 0) end)
+    check("err4", e, "boom")
+    local function needs(v) if v == nil then error("nil arg", 2) end return v end
+    ok, e = pcall(function()
+        local r = needs(nil)
+        return r
+    end)
+    check("err5", at(e, "nil arg"), 20)
+    local tbl = {}
+    ok, e = pcall(error, tbl)
+    check("err6", ok == false and e == tbl, true)
+    ok, e = pcall(error, 42)
+    check("err7", e, 42)
+    ok, e = pcall(error)
+    check("err8", e, "<no error object>")
+    ok, e = pcall(error, "x")
+    check("err9", e, "x")
+    ok, e = pcall(error, "y", 2)
+    check("err10", at(e, "y"), 33)
+    local a, b, c = pcall(function(x, y) return x + y, x * y end, 3, 4)
+    check("err11", a, true)
+    check("err12", b + c, 19)
+    ok, e = pcall(function() return nilf().x end)
+    check("err13", at(e, "attempt to index a nil value"), 38)
+    ok, e = pcall(function() nilf().x = 1 end)
+    check("err14", at(e, "attempt to index a nil value"), 40)
+    ok, e = pcall(function() return nilf()() end)
+    check("err15", at(e, "attempt to call a nil value"), 42)
+    ok, e = pcall(function() return 1 + nilf() end)
+    check("err16", at(e, "attempt to perform arithmetic on a nil value"), 44)
+    ok, e = pcall(function() return #nilf() end)
+    check("err17", at(e, "attempt to get length of a nil value"), 46)
+    ok, e = pcall(nil)
+    check("err18", e, "attempt to call a nil value")
+    -- After a call returns, its statement goes on at the caller's own line.
+    ok, e = pcall(function() return id(1) + nilf() end)
+    check("err19", at(e, "attempt to perform arithmetic on a nil value"), 51)
+    -- A caught error inside does not move the position of a later one.
+    ok, e = pcall(function()
+        pcall(error, "inner")
+        return nilf().x
+    end)
+    check("err20", at(e, "attempt to index a nil value"), 56)
+    -- The handler sees the positioned message and its answer is the result.
+    ok, e = xpcall(function() error("E") end, function(m) return at(m, "E") end)
+    check("err21", e, 60)
+    a, b = xpcall(function(v) return v * 2 end, print, 21)
+    check("err22", a and b == 42, true)
+    -- A local of the frame that caught the error is untouched, at any depth.
+    local x = 10
+    local function deep(n) local x = n; if n == 0 then error("bottom") end return deep(n - 1) end
+    ok, e = pcall(deep, 5)
+    check("err23", ok == false and x == 10, true)
+    for i = 1, 3 do
+        ok, e = pcall(function() if i == 2 then error("loop", 0) end return i end)
+        if i == 2 then check("err24", e, "loop") else check("err25", e, i) end
+    end
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
+s27() -- SECTION-CALL 27
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

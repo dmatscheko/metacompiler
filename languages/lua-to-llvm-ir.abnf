@@ -843,7 +843,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return f
     }
     function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
-    var luaFnArity = {lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
+    var luaFnArity = {lua_where: 1, lua_whereat: 1, lua_errlevel: 1, lua_errval: 1, lua_errtext: 1, lua_raise: 1,
+                      lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
                       lua_tail: 2, lua_shift: 3, lua_strall: 1,
                       lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
                       lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1,
@@ -852,6 +853,116 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
     function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
     function luaFnBody(name, b, ps) {
+        if (name == "lua_where") {
+            // The "chunk:line: " prefix of a raw position, "" for -1.
+            var noB = curF.NewBlock("")
+            var posB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredSLT, ps[0], handle(0)), noB, posB)
+            noB.NewRet(emitStr(noB, ""))
+            var fileNo = posB.NewLShr(ps[0], handle(24))
+            var lineV = callExt(posB, "js_num_i", [posB.NewAnd(ps[0], handle(16777215))])
+            var cur = posB
+            for (var fi = 0; fi < luaFiles.length; fi++) {
+                var hitB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                cur.NewCondBr(cur.NewICmp(llvm.enum.IPredEQ, fileNo, handle(fi)), hitB, nextB)
+                hitB.NewRet(callExt(hitB, "js_add", [callExt(hitB, "js_add", [emitStr(hitB, luaFiles[fi] + ":"), lineV]), emitStr(hitB, ": ")]))
+                cur = nextB
+            }
+            cur.NewRet(emitStr(cur, ""))
+            return
+        }
+        if (name == "lua_whereat") {
+            // luaL_where(level) for error(msg, level), the level a number handle:
+            // level 1 is the function that called error (lua.pos), level n the
+            // frame n - 1 entries down lua.cs; anything off either end has no
+            // position. Twin of luaWhere in lua-interpreter.abnf.
+            var noneB = curF.NewBlock("")
+            var someB = curF.NewBlock("")
+            var oneB = curF.NewBlock("")
+            var deepB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_gt", [ps[0], emitNum(b, 0)])), someB, noneB)
+            noneB.NewRet(emitStr(noneB, ""))
+            someB.NewCondBr(rawTruthy(someB, callExt(someB, "js_seq", [ps[0], emitNum(someB, 1)])), oneB, deepB)
+            oneB.NewRet(callLua(oneB, "lua_where", [oneB.NewLoad(i64, gLuaPos)]))
+            // Walk down from the top entry while the level is above 2.
+            var iP = deepB.NewAlloca(i64)
+            var kP = deepB.NewAlloca(i64)
+            deepB.NewStore(deepB.NewSub(deepB.NewLoad(i64, gLuaCsp), handle(1)), iP)
+            deepB.NewStore(ps[0], kP)
+            var headB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            var inB = curF.NewBlock("")
+            deepB.NewBr(headB)
+            headB.NewCondBr(rawTruthy(headB, callExt(headB, "js_gt", [headB.NewLoad(i64, kP), emitNum(headB, 2)])), stepB, doneB)
+            stepB.NewStore(callExt(stepB, "js_sub", [stepB.NewLoad(i64, kP), emitNum(stepB, 1)]), kP)
+            stepB.NewStore(stepB.NewSub(stepB.NewLoad(i64, iP), handle(1)), iP)
+            stepB.NewBr(headB)
+            var iV = doneB.NewLoad(i64, iP)
+            doneB.NewCondBr(doneB.NewICmp(llvm.enum.IPredSLT, iV, handle(0)), noneB, inB)
+            inB.NewRet(callLua(inB, "lua_where", [inB.NewLoad(i64, luaCsSlot(inB, iV))]))
+            return
+        }
+        if (name == "lua_errlevel") {
+            // error's level argument, luaL_optinteger(L, 2, 1): 1 when absent, an
+            // integer value as a number handle, a Lua error otherwise. Twin of
+            // luaErrLevel in lua-interpreter.abnf.
+            var dfltB = curF.NewBlock("")
+            var givenB = curF.NewBlock("")
+            var notNumB = curF.NewBlock("")
+            var numB = curF.NewBlock("")
+            var fracB = curF.NewBlock("")
+            var intB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [ps[0], hUndef])), dfltB, givenB)
+            dfltB.NewRet(emitNum(dfltB, 1))
+            var nV = callExt(givenB, "js_lutonum", [ps[0]])
+            givenB.NewCondBr(rawTruthy(givenB, callExt(givenB, "js_seq", [nV, hUndef])), notNumB, numB)
+            callLua(notNumB, "lua_raise", [callExt(notNumB, "js_add", [callExt(notNumB, "js_add",
+                [emitStr(notNumB, "bad argument #2 to 'error' (number expected, got "), callExt(notNumB, "js_lutname", [ps[0]])]), emitStr(notNumB, ")")])])
+            notNumB.NewRet(hUndef)
+            var dV = callLua(numB, "lua_num", [nV])
+            numB.NewCondBr(rawTruthy(numB, callLua(numB, "lua_isint", [dV])), intB, fracB)
+            callLua(fracB, "lua_raise", [emitStr(fracB, "bad argument #2 to 'error' (number has no integer representation)")])
+            fracB.NewRet(hUndef)
+            intB.NewRet(dV)
+            return
+        }
+        if (name == "lua_errval") {
+            // The error object a catch hands the program: a {__luerr} marker - a
+            // runtime error thrown by layer 2, the Go twin or a hook - becomes its
+            // message behind the position of the statement that was running, which
+            // lua.pos still holds because a throw runs no statement on its way out.
+            var objB = curF.NewBlock("")
+            var markB = curF.NewBlock("")
+            var asIsB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "object")])), objB, asIsB)
+            var msgV = callExt(objB, "js_get", [ps[0], emitStr(objB, "__luerr")])
+            objB.NewCondBr(rawTruthy(objB, callExt(objB, "js_sne", [msgV, hUndef])), markB, asIsB)
+            markB.NewRet(callExt(markB, "js_add", [callLua(markB, "lua_where", [markB.NewLoad(i64, gLuaPos)]), msgV]))
+            asIsB.NewRet(ps[0])
+            return
+        }
+        if (name == "lua_errtext") {
+            // lua.c's msghandler: a string or a number is the message, anything
+            // else is named by its type. Twin of luaErrText in lua-interpreter.abnf.
+            var strB = curF.NewBlock("")
+            var notStrB = curF.NewBlock("")
+            var numB = curF.NewBlock("")
+            var otherB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "string")])), strB, notStrB)
+            strB.NewRet(ps[0])
+            notStrB.NewCondBr(rawTruthy(notStrB, callLua(notStrB, "lua_isnum", [ps[0]])), numB, otherB)
+            numB.NewRet(callLua(numB, "lua_str", [ps[0]]))
+            otherB.NewRet(callExt(otherB, "js_add", [callExt(otherB, "js_add", [emitStr(otherB, "(error object is a "), callExt(otherB, "js_lutname", [ps[0]])]), emitStr(otherB, " value)")]))
+            return
+        }
+        if (name == "lua_raise") {
+            // Raise a runtime error from emitted code, in the marker form layer 2
+            // and the Go twin throw (luFail).
+            b.NewRet(callExt(b, "js_throw", [luaMarker(b, ps[0])]))
+            return
+        }
         if (name == "lua_ismv") {
             // A multi-value is an object carrying its value array under __mv; anything
             // else (a number, a string, nil, a table) is a single value.
@@ -1151,11 +1262,66 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             fail("no visible label '" + name + "' for goto")
         }
     }
+    // ----- Source positions for error messages -----
+    // Twin of luaPos / luaCallPos in lua-interpreter.abnf; see there. They are module
+    // globals holding raw integers, so keeping them costs a store per statement and a
+    // few loads and stores per call - no extern. lua.pos is the running statement's
+    // position as (file number << 24) + line, or -1 while a C function (pcall,
+    // xpcall) is the caller; lua.cs[0 .. lua.csp) holds the lua.pos of the caller of
+    // every active Lua function and pcall/xpcall frame. A frame past the array's end
+    // keeps its count but shares the last slot, which only an error of level >= 2
+    // raised that deep can observe.
+    var luaCsN = 65536
+    var luaCsTy = llvm.types.NewArray(luaCsN, i64)
+    var gLuaPos = m.NewGlobalDef("lua.pos", llvm.constant.NewInt(i64, 0 - 1))
+    var gLuaCs = m.NewGlobalDef("lua.cs", llvm.constant.NewZeroInitializer(luaCsTy))
+    var gLuaCsp = m.NewGlobalDef("lua.csp", handle(0))
+    // The chunk names a position's file number indexes (luaO_chunkid of each file).
+    var luaFiles = []
+    function luaFileNo(name) {
+        var id = name
+        if (id.length + 1 > 60) { id = "..." + id.substring(id.length - 56) }
+        for (var i = 0; i < luaFiles.length; i++) { if (luaFiles[i] == id) { return i } }
+        luaFiles.push(id)
+        return luaFiles.length - 1
+    }
+    // A runtime error raised by emitted code: the {__luerr} marker luFail throws.
+    function luaMarker(b, msgV) {
+        var o = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [o, emitStr(b, "__luerr"), msgV])
+        return o
+    }
+    function luaCsSlot(b, i) {
+        var last = handle(luaCsN - 1)
+        var k = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, i, last), i, last)
+        return b.NewGetElementPtr(luaCsTy, gLuaCs, handle(0), k)
+    }
+    // Push the caller's position on entry to a frame; the answer is what luaLeave
+    // needs to put both back on the way out.
+    function luaEnter(b) {
+        var ep = b.NewLoad(i64, gLuaPos)
+        var sp = b.NewLoad(i64, gLuaCsp)
+        b.NewStore(ep, luaCsSlot(b, sp))
+        b.NewStore(b.NewAdd(sp, handle(1)), gLuaCsp)
+        return {ep: ep, sp: sp}
+    }
+    function luaLeave(b, fr) {
+        b.NewStore(fr.ep, gLuaPos)
+        b.NewStore(fr.sp, gLuaCsp)
+    }
+    // The frame of the Lua function being emitted; null in jsmain, which is the main
+    // chunk and has no Lua caller.
+    var luaFrame = null
     // A label marker is not a thunk, so it must not be wrapped with a source position.
     var coreStmtPos = stmtPos
     stmtPos = function(t) {
         if (typeof t != "function") { return t }
-        return coreStmtPos(t)
+        var code = luaFileNo(c.curFile()) * 16777216 + c.lineOf(up.pos)
+        var inner = coreStmtPos(t)
+        return function(b) {
+            b.NewStore(handle(code), gLuaPos)
+            return inner(b)
+        }
     }
     makeSeq = function(items) {
         return function(b) {
@@ -1252,10 +1418,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // into jsmain's scope only when the program actually references them, so a program
     // that uses none of them emits none of them. makeVarRef is the
     // single read path for a bare name, so it is where a reference is noticed.
-    var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false}
+    var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false,
+                   error: false, pcall: false, xpcall: false}
     makeVarRef = function(name) {
         if (name == "math" || name == "string" || name == "table" || name == "next"
-            || name == "ipairs" || name == "pairs") {
+            || name == "ipairs" || name == "pairs" || name == "error" || name == "pcall" || name == "xpcall") {
             libNeed[name] = true
         }
         return function(b) {
@@ -1317,8 +1484,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
-            var isStr = callExt(b, "js_seq", [callExt(b, "js_typeof", [tv]), emitStr(b, "string")])
-            b.NewCondBr(truthy(b, isStr), strB, headB)
+            // Only a string and a table have a length; anything else is a Lua error
+            // ("attempt to get length of a nil value"), as in luaLen.
+            var tyV = callExt(b, "js_typeof", [tv])
+            var notStrB = curF.NewBlock("")
+            var badB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tyV, emitStr(b, "string")])), strB, notStrB)
+            notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_seq", [tyV, emitStr(notStrB, "object")])), headB, badB)
+            callLua(badB, "lua_raise", [callExt(badB, "js_add", [callExt(badB, "js_add", [emitStr(badB, "attempt to get length of a "),
+                callExt(badB, "js_lutname", [tv])]), emitStr(badB, " value")])])
+            badB.NewBr(joinB)
             callExt(strB, "js_scope_set", [curScopeV, emitStr(strB, rName), callExt(strB, "js_get", [tv, emitStr(strB, "length")])])
             strB.NewBr(joinB)
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
@@ -1588,6 +1763,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curF = f
         loopStack = []
         var b = f.NewBlock("entry")
+        var savedFrame = luaFrame
+        luaFrame = luaEnter(b)
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         for (var i = 0; i < params.length; i++) {
             // A trailing '...' marks the function variadic: the arguments beyond the
@@ -1601,7 +1778,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), callExt(b, "js_arg", [f.Params[1], handle(i)])])
         }
         var endB = bodyT(b)
+        luaLeave(endB, luaFrame)
         endB.NewRet(hUndef)
+        luaFrame = savedFrame
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
@@ -1872,7 +2051,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var ra = emitListArr(b, items)
             b = ra.b
-            b.NewRet(callLua(b, "lua_mk", [ra.v]))
+            var rv = callLua(b, "lua_mk", [ra.v])
+            if (luaFrame != null) { luaLeave(b, luaFrame) }
+            b.NewRet(rv)
             return deadBlock()
         }
     }
@@ -1892,9 +2073,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curF = f
         loopStack = []
         var b = f.NewBlock("entry")
+        var savedFrame = luaFrame
+        luaFrame = null
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var r = bodyEmit(b, f.Params[1])
         r.b.NewRet(r.v)
+        luaFrame = savedFrame
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
@@ -2167,6 +2351,77 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: bb, v: callLua(bb, "lua_mk", [arr])}
     }
 
+    // error(v [, level]): throw v, a string first prefixed with the position of
+    // `level` (lua_whereat). Any other value travels unchanged. Twin of
+    // globalScope["error"] in lua-interpreter.abnf.
+    function libError(bb, argsH) {
+        var v = libArg(bb, argsH, 0)
+        var lvH = callLua(bb, "lua_errlevel", [libArg(bb, argsH, 1)])
+        var strB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_seq", [callExt(bb, "js_typeof", [v]), emitStr(bb, "string")])), strB, plainB)
+        callExt(strB, "js_throw", [callExt(strB, "js_add", [callLua(strB, "lua_whereat", [lvH]), v])])
+        strB.NewRet(hUndef)
+        callExt(plainB, "js_throw", [v])
+        return {b: plainB, v: hUndef}
+    }
+    // pcall(f, ...) / xpcall(f, msgh, ...): call f in protected mode - true and its
+    // results, or false and the error object (through msgh first, for xpcall). The
+    // call runs in a js_try whose two clauses are closures over a scope holding f,
+    // its arguments and the handler. pcall is a frame with no position: it pushes
+    // its caller's and runs f with lua.pos -1, and it restores both after the
+    // js_try, because a throw skips every frame's own restore. Twin of luaProtect
+    // in lua-interpreter.abnf.
+    function libProtect(withHandler) {
+        return function(bb, argsH) {
+            var nargs = callExt(bb, "js_get", [argsH, emitStr(bb, "length")])
+            var fewB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            var need = withHandler ? 2 : 1
+            bb.NewCondBr(rawTruthy(bb, callExt(bb, "js_lt", [nargs, emitNum(bb, need)])), fewB, okB)
+            callLua(fewB, "lua_raise", [emitStr(fewB, withHandler ? "bad argument #2 to 'xpcall' (value expected)"
+                                                                  : "bad argument #1 to 'pcall' (value expected)")])
+            fewB.NewRet(hUndef)
+            var b = okB
+            var fr = luaEnter(b)
+            b.NewStore(handle(0 - 1), gLuaPos)
+            var sc = callExt(b, "js_scope_new", [curScopeV])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "f"), libArg(b, argsH, 0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "a"), callLua(b, "lua_tail", [argsH, emitNum(b, need)])])
+            if (withHandler) { callExt(b, "js_scope_decl", [sc, emitStr(b, "h"), libArg(b, argsH, 1)]) }
+            var tryClo = callExt(b, "js_closure", [handle(emitLibFunc(libProtectTry)), sc])
+            var catchClo = callExt(b, "js_closure", [handle(emitLibFunc(libProtectCatch(withHandler))), sc])
+            var res = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            luaLeave(b, fr)
+            return {b: b, v: res}
+        }
+    }
+    function libProtectTry(bb, argsH) {
+        var envV = curScopeV
+        var r = callExt(bb, "js_call", [callExt(bb, "js_scope_get", [envV, emitStr(bb, "f")]), hUndef,
+                                        callExt(bb, "js_scope_get", [envV, emitStr(bb, "a")])])
+        var arr = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [arr, hTrue])
+        callLua(bb, "lua_appendall", [arr, r])
+        return {b: bb, v: callLua(bb, "lua_mk", [arr])}
+    }
+    function libProtectCatch(withHandler) {
+        return function(bb, argsH) {
+            var ev = callLua(bb, "lua_errval", [libArg(bb, argsH, 0)])
+            if (withHandler) {
+                var hargs = callExt(bb, "js_arr_new", [])
+                callExt(bb, "js_arr_push", [hargs, ev])
+                ev = callLua(bb, "lua_first", [callExt(bb, "js_call", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "h")]), hUndef, hargs])])
+            }
+            // lua 5.5 reports a nil error object as this string.
+            ev = bb.NewSelect(rawTruthy(bb, callExt(bb, "js_seq", [ev, hUndef])), emitStr(bb, "<no error object>"), ev)
+            var arr = callExt(bb, "js_arr_new", [])
+            callExt(bb, "js_arr_push", [arr, hFalse])
+            callExt(bb, "js_arr_push", [arr, ev])
+            return {b: bb, v: callLua(bb, "lua_mk", [arr])}
+        }
+    }
+
     // libSet wires one closure into a library table field; libDecl binds a table (or a
     // bare function) into jsmain's scope under its global name.
     function libSet(b, obj, name, idx) {
@@ -2175,6 +2430,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Emit only the referenced libraries; a program that uses none emits nothing here.
     function emitLibs(b) {
+        if (libNeed.error) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "error"), callExt(b, "js_closure", [handle(emitLibFunc(libError)), curScopeV])])
+        }
+        if (libNeed.pcall) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "pcall"), callExt(b, "js_closure", [handle(emitLibFunc(libProtect(false))), curScopeV])])
+        }
+        if (libNeed.xpcall) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "xpcall"), callExt(b, "js_closure", [handle(emitLibFunc(libProtect(true))), curScopeV])])
+        }
         if (libNeed.ipairs) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ipairs"), callExt(b, "js_closure", [handle(emitLibFunc(libIpairs)), curScopeV])])
         }
@@ -2261,9 +2525,39 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
         b = emitLibs(b)
+        // A member read or write on nil and a call of a non-function are Lua errors,
+        // catchable like any other: the floor's three hooks answer the marker to
+        // throw where they would otherwise abort.
+        callExt(b, "js_rt_missmem", [callExt(b, "js_closure", [handle(emitLibFunc(libIndexNil)), curScopeV])])
+        callExt(b, "js_rt_missset", [callExt(b, "js_closure", [handle(emitLibFunc(libIndexNil)), curScopeV])])
+        callExt(b, "js_rt_missfn", [callExt(b, "js_closure", [handle(emitLibFunc(libCallBad)), curScopeV])])
+        // An error nobody caught ends the run with lua's own text for its error
+        // object: the chunk runs as the try body of one js_try whose catch renders
+        // it. The body is a function of its own that reads jsmain's scope straight
+        // from its env, so the chunk gains no scope level.
+        var ucClo = callExt(b, "js_closure", [handle(emitLibFunc(libUncaught)), curScopeV])
+        funcCount++
+        var topIdx = funcCount
+        var topClo = callExt(b, "js_closure", [handle(topIdx), curScopeV])
+        b.NewRet(callExt(b, "js_try", [topClo, ucClo, hUndef]))
+        curF = m.NewFunc("jsf_" + topIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        b = curF.NewBlock("entry")
+        curScopeV = curF.Params[0]
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(hUndef)
+    }
+    function libIndexNil(bb, argsH) {
+        return {b: bb, v: luaMarker(bb, emitStr(bb, "attempt to index a nil value"))}
+    }
+    function libCallBad(bb, argsH) {
+        var msg = callExt(bb, "js_add", [callExt(bb, "js_add", [emitStr(bb, "attempt to call a "), callExt(bb, "js_lutname", [libArg(bb, argsH, 0)])]), emitStr(bb, " value")])
+        return {b: bb, v: luaMarker(bb, msg)}
+    }
+    function libUncaught(bb, argsH) {
+        var text = callLua(bb, "lua_errtext", [callLua(bb, "lua_errval", [libArg(bb, argsH, 0)])])
+        callExt(bb, "js_luuncaught", [callExt(bb, "js_luaout", [text])])
+        return {b: bb, v: hUndef}
     }
     function buildChunk(items) { buildMain(items) }
 
