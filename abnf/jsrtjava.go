@@ -828,9 +828,10 @@ func jvDoubleCompare(a, b float64) float64 {
 // NaN, Infinity, or decimal digits with an optional point, exponent and
 // f/F/d/D suffix. Anything else throws NumberFormatException with java
 // 24.0.2's message: "empty String", "multiple points", or `For input string:
-// "x"`. Hexadecimal significands are not read. Twin of jParseDbl in
+// "x"`. A hexadecimal significand is jvParseHex's, rounded once to the target
+// width (f32 for Float). Twin of jParseDbl in
 // java-interpreter.abnf and jvParseDbl in languages/lib/java-rt.metajs.
-func (rt *jsrt) jvParseDbl(s string) float64 {
+func (rt *jsrt) jvParseDbl(s string, f32 bool) float64 {
 	t := strings.TrimFunc(s, func(r rune) bool { return r <= ' ' })
 	if t == "" {
 		rt.jvThrowCls(jvNfeCls, "empty String")
@@ -850,6 +851,16 @@ func (rt *jsrt) jvParseDbl(s string) float64 {
 			return math.Inf(-1)
 		}
 		return math.Inf(1)
+	}
+	if rest := t[i:]; len(rest) > 1 && rest[0] == '0' && (rest[1] == 'x' || rest[1] == 'X') {
+		hx, ok := jvParseHex(rest[2:], f32)
+		if !ok {
+			rt.jvThrowCls(jvNfeCls, bad)
+		}
+		if neg {
+			return -hx
+		}
+		return hx
 	}
 	isDigit := func(j int) bool { return j < len(t) && t[j] >= '0' && t[j] <= '9' }
 	digits := 0
@@ -889,6 +900,106 @@ func (rt *jsrt) jvParseDbl(s string) float64 {
 	}
 	f, _ := strconv.ParseFloat(t[:end], 64)
 	return f
+}
+
+// jvParseHex is a hexadecimal significand's magnitude, rounded once to a double
+// or (f32) a float. Twin of jParseHex in java-interpreter.abnf, whose comment
+// has the method.
+func jvParseHex(t string, f32 bool) (float64, bool) {
+	hexVal := func(c byte) int {
+		switch {
+		case c >= '0' && c <= '9':
+			return int(c - '0')
+		case c >= 'a' && c <= 'f':
+			return int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			return int(c-'A') + 10
+		}
+		return -1
+	}
+	var ds []byte
+	intDigits := -1
+	i := 0
+	for ; i < len(t); i++ {
+		if t[i] == '.' && intDigits < 0 {
+			intDigits = len(ds)
+		} else if hexVal(t[i]) >= 0 {
+			ds = append(ds, t[i])
+		} else {
+			break
+		}
+	}
+	if intDigits < 0 {
+		intDigits = len(ds)
+	}
+	if len(ds) == 0 || i >= len(t) || (t[i] != 'p' && t[i] != 'P') {
+		return 0, false
+	}
+	i++
+	eneg := false
+	if i < len(t) && (t[i] == '+' || t[i] == '-') {
+		eneg = t[i] == '-'
+		i++
+	}
+	pexp, ed := 0, 0
+	for ; i < len(t) && t[i] >= '0' && t[i] <= '9'; i++ {
+		if pexp < 100000000 {
+			pexp = pexp*10 + int(t[i]-'0')
+		}
+		ed++
+	}
+	if i < len(t) && strings.IndexByte("fFdD", t[i]) >= 0 {
+		i++
+	}
+	if ed == 0 || i != len(t) {
+		return 0, false
+	}
+	if eneg {
+		pexp = -pexp
+	}
+	j := 0
+	for j < len(ds) && hexVal(ds[j]) == 0 {
+		j++
+	}
+	if j == len(ds) {
+		return 0, true
+	}
+	lz := bits.LeadingZeros8(uint8(hexVal(ds[j]))) - 4
+	e := (intDigits-j)*4 - 1 - lz + pexp
+	big, emin, emax := 53, -1022, 1023
+	if f32 {
+		big, emin, emax = 24, -126, 127
+	}
+	if e > emax {
+		return math.Inf(1), true
+	}
+	p := big
+	if e < emin {
+		p = big - (emin - e)
+	}
+	if p < 0 {
+		return 0, true
+	}
+	var m uint64
+	guard, sticky := 0, false
+	for b, n := j*4+lz, 0; b < len(ds)*4 || n < p; b, n = b+1, n+1 {
+		bit := 0
+		if b < len(ds)*4 {
+			bit = (hexVal(ds[b/4]) >> (3 - b%4)) & 1
+		}
+		switch {
+		case n < p:
+			m = m*2 + uint64(bit)
+		case n == p:
+			guard = bit
+		case bit == 1:
+			sticky = true
+		}
+	}
+	if guard == 1 && (sticky || m%2 == 1) {
+		m++
+	}
+	return math.Ldexp(float64(m), e-p+1), true
 }
 
 // jvFloType fills the Double (sty floJava) or Float (sty floJavaF) descriptor:
@@ -938,7 +1049,7 @@ func jvFloType(o *jsObject, sty uint8) {
 		}))
 	}
 	parse := jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		return mk(rt.jvParseDbl(rt.toString(argAt(args, 0))))
+		return mk(rt.jvParseDbl(rt.toString(argAt(args, 0)), f32))
 	})
 	if f32 {
 		o.set("parseFloat", parse)
@@ -947,7 +1058,7 @@ func jvFloType(o *jsObject, sty uint8) {
 	}
 	o.set("valueOf", jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		if s, ok := argAt(args, 0).(string); ok {
-			return mk(rt.jvParseDbl(s))
+			return mk(rt.jvParseDbl(s, f32))
 		}
 		return mk(rt.toNumber(argAt(args, 0)))
 	}))

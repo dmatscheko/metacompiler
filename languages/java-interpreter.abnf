@@ -2338,10 +2338,11 @@ HasStatic   = :script(~~
     // Infinity, or decimal digits with an optional point, exponent and f/F/d/D
     // suffix. Anything else throws NumberFormatException: "empty String" when
     // only whitespace was there, "multiple points" for a second '.', and
-    // `For input string: "x"` otherwise (java 24.0.2's three messages).
-    // Hexadecimal significands are not read. Twin of jvParseDbl in abnf/jsrtjava.go and
-    // languages/lib/java-rt.metajs.
-    function jParseDbl(s) {
+    // `For input string: "x"` otherwise (java 24.0.2's three messages). A
+    // hexadecimal significand (0x1.8p3) is jParseHex's, rounded once to the
+    // target width - Float.parseFloat passes f32. Twin of jvParseDbl in
+    // abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jParseDbl(s, f32) {
         var a = 0
         var e = s.length
         while (a < e && s.charCodeAt(a) <= 32) { a++ }
@@ -2355,6 +2356,11 @@ HasStatic   = :script(~~
         var rest = t.substring(i)
         if (rest == "NaN") { return 0 / jZeroF }
         if (rest == "Infinity") { return neg ? -jInf : jInf }
+        if (rest.length > 1 && rest.charAt(0) == "0" && (rest.charAt(1) == "x" || rest.charAt(1) == "X")) {
+            var hx = jParseHex(rest.substring(2), f32 === true)
+            if (hx !== hx) { jThrowExc("NumberFormatException", bad) }
+            return neg ? jNegF(hx) : hx
+        }
         var digits = 0
         while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) { i++; digits++ }
         if (i < t.length && t.charAt(i) == ".") {
@@ -2376,6 +2382,70 @@ HasStatic   = :script(~~
         var f = parseFloat(t.substring(0, end))
         if (f == 0 && neg) { return jNegZeroF() }
         return f
+    }
+    // The magnitude of a HexSignificand BinaryExponent [suffix] (JLS 3.10.2,
+    // after the "0x"), correctly rounded - half to even - to a double, or to a
+    // float's 24 bits and exponent range when f32; NaN when the text is not
+    // that shape. The bits after the leading 1 are read straight off the hex
+    // digits, so any number of digits rounds exactly once: the first p bits are
+    // the significand (fewer for a subnormal), the next one decides, and any
+    // later one breaks a tie. Twin of jvParseHex in abnf/jsrtjava.go and
+    // languages/lib/java-rt.metajs.
+    function jParseHex(t, f32) {
+        var ds = ""
+        var intDigits = -1
+        var i = 0
+        while (i < t.length) {
+            var c = t.charAt(i)
+            if (c == "." && intDigits < 0) { intDigits = ds.length } else if (jHexVal(c) >= 0) { ds = ds + c } else { break }
+            i++
+        }
+        if (intDigits < 0) { intDigits = ds.length }
+        if (ds == "" || i >= t.length || (t.charAt(i) != "p" && t.charAt(i) != "P")) { return 0 / jZeroF }
+        i++
+        var eneg = false
+        if (i < t.length && (t.charAt(i) == "+" || t.charAt(i) == "-")) { eneg = t.charAt(i) == "-"; i++ }
+        var pexp = 0
+        var ed = 0
+        while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) {
+            if (pexp < 100000000) { pexp = pexp * 10 + (t.charCodeAt(i) - 48) }
+            i++
+            ed++
+        }
+        if (i < t.length && "fFdD".indexOf(t.charAt(i)) >= 0) { i++ }
+        if (ed == 0 || i != t.length) { return 0 / jZeroF }
+        if (eneg) { pexp = 0 - pexp }
+        var j = 0
+        while (j < ds.length && jHexVal(ds.charAt(j)) == 0) { j++ }
+        if (j == ds.length) { return 0 }
+        var lead = jHexVal(ds.charAt(j))
+        var lz = lead >= 8 ? 0 : (lead >= 4 ? 1 : (lead >= 2 ? 2 : 3))
+        var e = (intDigits - j) * 4 - 1 - lz + pexp
+        var big = f32 ? 24 : 53
+        var emin = f32 ? 0 - 126 : 0 - 1022
+        if (e > (f32 ? 127 : 1023)) { return jInf }
+        var p = e >= emin ? big : big - (emin - e)
+        if (p < 0) { return 0 }
+        var m = 0
+        var guard = 0
+        var sticky = false
+        var b = j * 4 + lz
+        var n = 0
+        while (b < ds.length * 4 || n < p) {
+            var bit = b < ds.length * 4 ? Math.floor(jHexVal(ds.charAt(Math.floor(b / 4))) / jPow2(3 - b % 4)) % 2 : 0
+            if (n < p) { m = m * 2 + bit } else if (n == p) { guard = bit } else if (bit == 1) { sticky = true }
+            b++
+            n++
+        }
+        if (guard == 1 && (sticky || m % 2 == 1)) { m = m + 1 }
+        return m * jPow2(e - p + 1)
+    }
+    function jHexVal(c) {
+        var k = c.charCodeAt(0)
+        if (k >= 48 && k <= 57) { return k - 48 }
+        if (k >= 97 && k <= 102) { return k - 87 }
+        if (k >= 65 && k <= 70) { return k - 55 }
+        return 0 - 1
     }
     // The closest integer with ties toward +Infinity. x - floor(x) is exact, so
     // 0.49999999999999994 rounds to 0, where floor(x + 0.5) answers 1.
@@ -2678,7 +2748,7 @@ HasStatic   = :script(~~
         o.sum = function(a, b) { return jFloRes(jNumD(a) + jNumD(b), f32) }
         o.max = function(a, b) { return jFloRes(jMaxD(jNumD(a), jNumD(b)), f32) }
         o.min = function(a, b) { return jFloRes(jMinD(jNumD(a), jNumD(b)), f32) }
-        var parse = function(s) { return jFloRes(jParseDbl("" + s), f32) }
+        var parse = function(s) { return jFloRes(jParseDbl("" + s, f32), f32) }
         if (f32) { o.parseFloat = parse } else { o.parseDouble = parse }
         o.valueOf = function(v) { return typeof v == "string" ? parse(v) : jFloRes(jNumD(v), f32) }
         o.toString = function(v) { return jstr(jFloRes(jNumD(v), f32)) }

@@ -86,6 +86,7 @@ class Main {
         S40.run(); // SECTION-CALL 40
         S41.run(); // SECTION-CALL 41
         S42.run(); // SECTION-CALL 42
+        S43.run(); // SECTION-CALL 43
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2481,5 +2482,24 @@ class S42 {
         Main.check("xp1", ("" + Math.exp(x[0])).equals("2.7182818284590455") && ("" + Math.exp(x[1])).equals("4.9E-324"));
         Main.check("xp2", ("" + Math.exp(x[2])).equals("2.6040720551475586E-15") && ("" + Math.exp(x[3])).equals("1.6487212707001282"));
         Main.check("xp3", ("" + Math.exp(x[4])).equals("8.218407461554972E307") && ("" + Math.exp(x[5])).equals("1.0"));
+    }
+}
+
+// ===== SECTION 43: Double.parseDouble / Float.parseFloat of a hex significand =====
+//
+// The text may be a HexSignificand with a mandatory binary exponent (JLS
+// 3.10.2): rounded ONCE, half to even, to the target width, into the
+// subnormals and up to Infinity. Every expected string is java 24.0.2's output.
+class S43 {
+    static String pd(String s) {
+        try { return "" + Double.parseDouble(s); } catch (NumberFormatException e) { return e.getMessage(); }
+    }
+    static void run() {
+        String[] t = { "0x1p3", "-0x1.8p1", " 0x.8p1d ", "0x1.fffffffffffff8p1023", "0x1.0000000000001p-1075",
+                       "0x1.0000000000000801p0", "0x1.0000010000000001p0", "0x1p", "-0x0p0" };
+        Main.check("hp1", pd(t[0]).equals("8.0") && pd(t[1]).equals("-3.0") && pd(t[2]).equals("1.0") && pd(t[8]).equals("-0.0"));
+        Main.check("hp2", pd(t[3]).equals("Infinity") && pd(t[4]).equals("4.9E-324") && pd(t[5]).equals("1.0000000000000002"));
+        Main.check("hp3", ("" + Float.parseFloat(t[6])).equals("1.0000001") && ("" + Double.valueOf(t[6])).equals("1.0000000596046448"));
+        Main.check("hp4", pd(t[7]).equals("For input string: \"0x1p\""));
     }
 }
