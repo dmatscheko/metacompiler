@@ -91,7 +91,7 @@ model, see T-170/T-259).
 
 # RB — Ruby
 
-### T-273 ruby: dispatch gaps that differ between the legs · P1 · RB · OPEN [V]
+### T-273 ruby: dispatch gaps that differ between the legs · P1 · RB · IN PROGRESS (RB worker, round 4) [V]
 Interpreter only (compiled aborts): Object#between?/clamp/hash/object_id/tap on
 builtins; String#match/match?/scan/sub/gsub with a non-regex argument; Symbol#to_proc.
 Compiled only (interpreter aborts): Integer#chr/gcd/numerator/denominator/finite?/
@@ -102,20 +102,20 @@ Enumerator#backtrace (MRI NoMethodError). Regexp/MatchData #send/public_send/is_
 nil?/frozen?/equal? abort compiled. Converge every row on MRI and widen
 ruby-respond.js accordingly.
 
-### T-274 ruby: Boolean `&`, `|`, `^` in the interpreter · P1 · RB · OPEN [V]
+### T-274 ruby: Boolean `&`, `|`, `^` in the interpreter · P1 · RB · IN PROGRESS (RB worker, round 4) [V]
 `a = [true, false]; p a[0] & a[1]`: interpreter aborts "not a number in '&'"; compiled
 and MRI `false`. Then `defined?(true & false)` becomes "method" again.
 
-### T-275 ruby: a class's singleton `to_s` is ignored by rendering · P1 · RB · OPEN [V]
+### T-275 ruby: a class's singleton `to_s` is ignored by rendering · P1 · RB · IN PROGRESS (RB worker, round 4) [V]
 `class C; def self.to_s; "Cz"; end; end; puts C` prints `C` in all legs; MRI `Cz`.
 
-### T-276 ruby: compiled instances carry an `args` slot; no `instance_variables` · P2 · RB · OPEN [V]
+### T-276 ruby: compiled instances carry an `args` slot; no `instance_variables` · P2 · RB · IN PROGRESS (RB worker, round 4) [V]
 A root class without its own initialize stores a visible "args" slot, so
 `instance_variable_get(:@args)` answers the args array (MRI nil) and
 `#instance_variables` (unimplemented) would list it. Hide the slot, then implement
 `instance_variables`.
 
-### T-277 ruby: `respond_to?(name, true)` ignores include_all · P3 · RB · OPEN [V]
+### T-277 ruby: `respond_to?(name, true)` ignores include_all · P3 · RB · IN PROGRESS (RB worker, round 4) [V]
 `respond_to?(:top, true)` on main for a private top-level def: false, MRI true.
 
 ---
@@ -164,18 +164,18 @@ counts every section.
 
 # JV — Java
 
-### T-255 java: `instanceof` an interface · P1 · JV · Shared: interp-core.js · OPEN [V]
+### T-255 java: `instanceof` an interface · P1 · JV · Shared: interp-core.js · IN PROGRESS (JV+CS worker, round 4) [V]
 `class Impl implements Lst, Gen<String>` (Lst extends Col): java `true true true true`
 for Lst/Col/Gen/Impl; interpreter `false false false true` (rtIsType in interp-core.js
 walks only `__class`/`__super` and treats "List"/"Collection" as JS arrays); compiled
 `true true false true` (a second interface is missed). ArrayList.equals in
 java-util.java therefore cannot accept a user List.
 
-### T-256 java: String identity · P2 · JV · OPEN [V]
+### T-256 java: String identity · P2 · JV · IN PROGRESS (JV+CS worker, round 4) [V]
 `new String("ab") == "ab"` and `==` on a computed concatenation are true; java false.
 A String has no identity in the value model. Cost first; likely DECLINE unless cheap.
 
-### T-257 java: missing String API and core classes · P1 · JV · OPEN [V]
+### T-257 java: missing String API and core classes · P1 · JV · IN PROGRESS (JV+CS worker, round 4) [V]
 `String.valueOf`, `String.join`, `String.format` ("unknown name: String" interpreter,
 "unknown method 'valueOf'" compiled); the interpreter's String methods stop at length,
 charAt, equals, toString, substring, indexOf, isEmpty, toCharArray (`trim` fails);
@@ -183,7 +183,7 @@ charAt, equals, toString, substring, indexOf, isEmpty, toCharArray (`trim` fails
 String method" in all legs. Oracle: java 24. Consider
 java-util.java (compiled with the program) for StringBuilder.
 
-### T-258 java: overload residuals · P3 · JV · OPEN [V]
+### T-258 java: overload residuals · P3 · JV · IN PROGRESS (JV+CS worker, round 4) [V]
 Where a static type is a type variable, a library type, or an ambiguous method result,
 a call still picks by the runtime value; an anonymous class's forwarding to its super
 constructor picks at runtime.
@@ -192,13 +192,13 @@ constructor picks at runtime.
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-110 csharp: overload resolution is not "most specific" · P2 · CS · OPEN [V spec-only]
+### T-110 csharp: overload resolution is not "most specific" · P2 · CS · IN PROGRESS (JV+CS worker, round 4) [V spec-only]
 Constructors, methods and operators pick the first declared candidate whose types pass
 `is`: with `O(object)` declared before `O(string)`, `new O("s")` picks object; C#
 picks string (ECMA-334 12.6.4 better function member). Implement betterness for the
 common cases (identity > numeric widening > reference conversion to base > object).
 
-### T-111 csharp: derived field initializers run after the base constructor · P2 · CS · OPEN [V spec-only]
+### T-111 csharp: derived field initializers run after the base constructor · P2 · CS · IN PROGRESS (JV+CS worker, round 4) [V spec-only]
 C# runs a derived class's field initializers BEFORE calling the base constructor
 (ECMA-334 15.11.3). With a virtual `Get()` called from the base constructor C# prints
 the derived initializer's value; the interpreter aborts "unknown name: x" and the
@@ -211,7 +211,7 @@ digits and its switch to exponent notation may not be the fixed window `csFloStr
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
 
-### T-299 csharp: `(int)t[1]` on a string is 0; -frozen aborts · P1 · CS · OPEN [V spec-only]
+### T-299 csharp: `(int)t[1]` on a string is 0; -frozen aborts · P1 · CS · IN PROGRESS (JV+CS worker, round 4) [V spec-only]
 `string t="AB"; (int)t[1]` prints 0 in every leg (C# spec: 66). On the same probe the
 -frozen interpreter aborts "MetaJS: variable 'a' has type string and cannot hold a
 number" while goja runs - a live goja-vs-frozen divergence.
@@ -268,23 +268,23 @@ One line in goConvFail; gofmt it.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-269 swift: a top-level observed var does not fire · P1 · SW · OPEN [V]
+### T-269 swift: a top-level observed var does not fire · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
 `var w = 0 { didSet { print("set", w) } }; w = 3`: swiftc `set 3`; all engines print
 nothing.
 
-### T-270 swift: generic-argument call syntax · P1 · SW · OPEN [V]
+### T-270 swift: generic-argument call syntax · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
 `Optional<Int>(5)` - the interpreter reads a comparison and prints `false`, the
 compiler "variable not defined" / no parse; `Array<Int>()`, `Dictionary<String,
 Int>()`, `Set<Int>()`. swiftc `5`, `0`.
 
-### T-271 swift: missing String/Array/Dictionary members · P1 · SW · OPEN [V]
+### T-271 swift: missing String/Array/Dictionary members · P1 · SW · IN PROGRESS (SW worker, round 4) [V]
 All engines abort: String `split(separator:)`, `firstIndex(of:)`/`firstIndex(where:)`,
 `.utf8`/`.unicodeScalars`/`.lazy` (`.count`), `Character("b")`, `Set(s)`; Array
 `split`, `starts(with:)`, `elementsEqual`, `drop(while:)`; Dictionary `mapValues`;
 `s.description` is nil. `[3,1,2].prefix(while: { $0 > 2 })` gives `[]` in the
 interpreter and llvm.Run (swiftc `[3]`).
 
-### T-272 swift: an untyped closure parameter is not inferred from the return type · P2 · SW · OPEN [V]
+### T-272 swift: an untyped closure parameter is not inferred from the return type · P2 · SW · IN PROGRESS (SW worker, round 4) [V]
 `{ x -> Double in x / 2 }(3)` gives 1.0, swiftc 1.5. All engines.
 
 ---
@@ -300,16 +300,16 @@ dart:core String API (spec-only).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-242 php: `$GLOBALS` is not modelled · P1 · PHP · OPEN [V spec-only]
+### T-242 php: `$GLOBALS` is not modelled · P1 · PHP · IN PROGRESS (PHP+LUA worker, round 4) [V spec-only]
 Neither half supports `$GLOBALS['x']` read/write. A parse-time rewrite of
 `$GLOBALS[e]` needs a frame selector on every target reader in both grammars (the
 main frame is reachable through the hidden "\x00globals" name).
 
-### T-243 php: a function declared inside a function is not global · P1 · PHP · OPEN [V spec-only]
+### T-243 php: a function declared inside a function is not global · P1 · PHP · IN PROGRESS (PHP+LUA worker, round 4) [V spec-only]
 `function outer(){ function inner(){} } outer(); inner();` - "Call to undefined
 function inner()" in both halves; PHP: inner is global once outer() has run.
 
-### T-244 php: an arrow fn captures a reference variable's cell · P1 · PHP · OPEN [V spec-only]
+### T-244 php: an arrow fn captures a reference variable's cell · P1 · PHP · IN PROGRESS (PHP+LUA worker, round 4) [V spec-only]
 `$x=1; $r=&$x; $f=fn()=>$x; $x=2; echo $f();` prints 2 in all engines; PHP captures by
 value at creation: 1. emitCapture / makeArrowFn in both grammars (the comment
 justifying the cell contradicts the spec).
@@ -318,23 +318,23 @@ justifying the cell contradicts the spec).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-245 lua: the string library lacks `find`, `gsub` (and check `match`, `gmatch`, `format`, `byte`, `char`, `reverse`) · P1 · LUA · OPEN [V]
+### T-245 lua: the string library lacks `find`, `gsub` (and check `match`, `gmatch`, `format`, `byte`, `char`, `reverse`) · P1 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
 `print(string.find("abc","b",1,true), string.gsub("aa","a","b"))`: "attempt to call a
 nil value" in all engines; lua `2 2 bb 2`. Also `string.byte`. Lua patterns (not regex) - implement once,
 shared by the interpreter and layer 2 if possible. Also `select` (and `select('#')`).
 
-### T-246 lua: errors lack lua 5.5's variable-name suffix · P2 · LUA · OPEN [V]
+### T-246 lua: errors lack lua 5.5's variable-name suffix · P2 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
 lua says `attempt to index a nil value (local 't')` / `(global 'x')` / `(upvalue 'u')` /
 `(field 'a')` / `(method 'm')` / `(constant '3')`; no engine does. Needs declared-name
 tracking in the emitter, the failing operand from js_luarith, and a top-level frame in
 the interpreter to tell top-level locals from globals.
 
-### T-247 lua: "bad argument" wording and argument checks · P1 · LUA · OPEN [V]
+### T-247 lua: "bad argument" wording and argument checks · P1 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
 Ours `bad argument to 'floor' (number expected)`; lua `bad argument #1 to 'floor'
 (number expected, got string)` ('math.floor' when pcall calls it directly).
 `math.sqrt("x")` answers nan compiled where the interpreter raises.
 
-### T-248 lua: smaller error-semantics gaps · P2 · LUA · OPEN [V]
+### T-248 lua: smaller error-semantics gaps · P2 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
 (a) a function that runs off its end returns nil instead of no value (`print(f())`
 prints "nil", lua an empty line; `pcall(function() end)` gives "true nil") - assertable
 once `select('#')` exists (T-245); (b) indexing a float holding an integer (`2.0`)
@@ -343,7 +343,7 @@ line, lua uses the failing operation's line; (d) an error inside an xpcall handl
 propagates, lua answers "error in error handling". Also: the Lua native SHOULD ABORT
 matrix row could now compare all three engines.
 
-### T-249 lua: numeric table keys are very slow natively · P2 · LUA · OPEN [V]
+### T-249 lua: numeric table keys are very slow natively · P2 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
 `t[i%100] = i; s = s + t[i%50]` for 3,000,000 passes retires ~422e9 instructions
 (~140k per pass). Profile (`sample`) and fix; add a bench row if it is a common shape.
 
