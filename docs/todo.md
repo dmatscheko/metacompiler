@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-185** · Last verified: `17e73c7` (all [V] tickets were probed
+Next free ID: **T-192** · Last verified: `17e73c7` (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,66 +114,44 @@ Same root cause as T-170 (no tuple type). Close together with T-170.
 
 # RB — Ruby
 
-### T-020 ruby: `String#to_i` is a three-way divergence · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-`"0xffffffffffffffffff".to_i` → interpreter `4722366482869645213696`, both compiled
-halves `0`, MRI `0`; `.to_i(16)` → interpreter the big value, compiled halves `0`,
-MRI `4722366482869645213695`. The interpreter honours a `0x` prefix MRI's base-10
-`to_i` ignores, and the compiled halves ignore an explicit base. `rubySmBasePrefix`
-also carries an FMA contraction (manual ch. 4) - fixing only that swaps one wrong
-answer for another. Oracle: /usr/bin/ruby (2.6; these semantics are unchanged in 3.x).
-
-### T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-`print "A","B",boom,"C"` prints `AB` in the compiled halves and nothing in the
-interpreter; `puts "D", boom` prints `D` in all legs. MRI evaluates every argument
-first and prints nothing.
-
-### T-022 ruby: `defined?` kind classification residues · P1 · RB · Shared: jsrt.go · IN PROGRESS (RB worker, round 1) [V]
-Kernel names (`p`, `sprintf`, `format`, `lambda`, `proc`, `rand`) answer nil or
-`"local-variable"` where MRI and the interpreter say `"method"`. `defined?(printf)`
-reads `"local-variable"` (the MetaJS host scope carries print/printf/sprintf - see
-`js_rmethodval`). `defined?(@nope)` answers `"instance-variable"` where MRI says nil.
-`defined?(loc)` of a top-level local answers `"method"` in the interpreter (its
-`globalScope` is `scopes[0]`, which the local walk skips); MRI and the compiled halves
-say `"local-variable"`.
-
-### T-023 ruby: `{}.fetch(:a)`'s KeyError is not catchable · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-Not caught by `rescue KeyError` or `rescue IndexError` in any engine.
-
-### T-024 ruby: `NotImplementedError` sits under StandardError · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-MRI: NotImplementedError < ScriptError < Exception (so a bare `rescue` does NOT
-catch it). Check every builtin exception's ancestry against MRI while there.
-
-### T-025 ruby: the compiled halves lack `IOError` and `LocalJumpError` · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-"variable not defined" in llvm.Run and native.
-
-### T-026 ruby: interpreter lacks `Float#div`, `Float#divmod`, `Float#rationalize` · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-
-### T-027 ruby: `"\u{48 49}"` gives `H 49}` · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-MRI: `HI` (a `\u{}` escape takes several space-separated code points).
-
-### T-028 ruby: parse gaps · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-`p (2.0**55).to_r` parses as `(p ...).to_r` (MRI: argument with a space before the
-paren); `1.5r` does not parse (`RatLit` takes only an integer mantissa); `p two 1, 2`
-(a nested parenthesis-less call in an argument) does not parse; `puts(Float::MAX,
-Float::MIN)`, `Float::NAN.nan?`, `puts(ni, -ni)` reportedly fail to parse - re-probe.
-
-### T-029 ruby: `Kernel#Integer(str)` is imprecise past 2^53 · P1 · RB · IN PROGRESS (RB worker, round 1) [V]
-Agreed across all three legs (so `--cross` is blind). `bigFromDec` / the bignum
-FromStr / `big.Int` exist; layer 2 lacks a radix→decimal helper.
-
-### T-030 ruby: Rational/Complex exactness · P2 · RB · IN PROGRESS (RB worker, round 1) [V]
-`Integer#fdiv` on a bignum, and a big meeting a Rational or Complex, promote through
-the double where MRI is exact. `Complex` answers where MRI raises (`to_i`/`to_f`/
-`to_r` → RangeError; `round`/`floor`/`ceil`/`positive?` → NoMethodError;
-`conjugate`/`rect`/`polar` absent). Complex's parts are raw doubles, so
-`Complex(0,5).abs` is `5.0` (MRI `5`) and `5.0.to_c` is `(5+0i)` (MRI `(5.0+0i)`).
-Needs a Rational whose parts are bigs and typed Complex parts - a value-model change.
-
-### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · IN PROGRESS (RB worker, round 1) [V]
+### T-031 ruby: `respond_to?` on non-objects, `method(:x)` on block-taking names · P3 · RB · IN PROGRESS (RB worker, round 2) [V]
+Round 1 measured it: `respond_to?` on a builtin aborts in every leg ("unknown Integer
+method: respond_to?"). MRI's surface is ~730 names over 13 classes × 3 engines.
+Decision: answer the ENGINE'S IMPLEMENTED surface (true iff the call would dispatch),
+derived from the existing per-class method dispatch tables, not a copied MRI list.
 `respond_to?` on non-objects needs a universal-method table (exact fix: a
 `js_rselfcall(scope, name, args)` extern, ~3 engines × 25 lines). `method(:x)` for
 `lambda`, `proc`, `loop`, `raise`, `require`/`exit`/`gets` answers NameError where MRI
 answers a Method - identical in all legs, reasons recorded at the site.
+
+### T-185 ruby: a negative numeric literal binds the sign before a method call · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
+`p -7.abs` prints `-7` in all four legs; MRI `7` (the `-` belongs to the literal).
+`-7.div(2)` gives `-3`; MRI `-4`. Oracle: /usr/bin/ruby.
+
+### T-186 ruby: `y = x -1` with a local `x` is read as a command call · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
+`x = 5; y = x -1` - MRI 4. Interpreter aborts "call of a non function: x", compiled
+halves "call of a non function value: 5". CommandForm must not apply to a known local.
+
+### T-187 ruby: `"\u{1F600}".length` is a halves divergence · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
+Interpreter 2, native 2, llvm.Run 1, MRI 1. Astral code points become a surrogate pair
+in two engines (the interpreter's `\u{}` comment says astral text is U+FFFD everywhere).
+
+### T-188 ruby: `defined?(3 + 3)` · P3 · RB · IN PROGRESS (RB worker, round 2) [V]
+Interpreter nil, compiled halves `"expression"`, MRI `"method"`.
+
+### T-189 ruby: a top-level local is visible inside a `def` · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
+`loc=1; def m; loc; end; m` gives 1 in all four legs; MRI raises NameError
+(undefined local variable or method `loc').
+
+### T-190 ruby: top-level `@ivar` aborts · P1 · RB · IN PROGRESS (RB worker, round 2) [V]
+`@yes = 1; p @yes` - interpreter "outside of a method", compiled halves "variable not
+defined: self". MRI binds it on `main` and prints 1.
+
+### T-191 ruby: Rational/Complex exactness (rest of T-030) · P2 · RB · IN PROGRESS (RB worker, round 2) [V]
+Complex parts are untyped doubles: `Complex(3, 0.0).to_i` answers 3 where MRI raises,
+`5.0.to_c` prints `(5+0i)` (MRI `(5.0+0i)`). A Rational's parts are doubles, so a big
+plus a Rational is approximate. `(10**400).fdiv(10**399)` is NaN (MRI 10.0; MRI's
+big_fdiv). Needs Rational parts that are bigs and typed Complex parts.
 
 ---
 
@@ -568,6 +546,18 @@ believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
 (The master moves DONE / DECLINED tickets here, one line each:
 `T-NNN <title> — DONE <commit>` or `— DECLINED: <reason>`.)
+
+T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
+T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
+T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
+T-023 ruby: `{}.fetch(:a)`'s KeyError is not catchable — DONE 4eb2bc8
+T-024 ruby: `NotImplementedError` sits under StandardError — DONE 4eb2bc8
+T-025 ruby: the compiled halves lack `IOError` and `LocalJumpError` — DONE 4eb2bc8
+T-026 ruby: interpreter lacks `Float#div`, `Float#divmod`, `Float#rationalize` — DONE 1a28284
+T-027 ruby: `"\u{48 49}"` gives `H 49}` — DONE 4f5595d
+T-028 ruby: parse gaps — DONE 0bdde28
+T-029 ruby: `Kernel#Integer(str)` is imprecise past 2^53 — DONE 4102cd8
+T-030 ruby: Rational/Complex exactness — PARTIAL 9c5d75c (Complex raises/conjugate/rect/polar/arg/abs done); rest is T-191
 
 # Settled — do not re-open
 
