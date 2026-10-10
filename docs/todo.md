@@ -66,33 +66,33 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-259 python: `range` is a materialised list · P2 · PY · OPEN [V]
+### T-259 python: `range` is a materialised list · P2 · PY · IN PROGRESS (PY worker, round 4) [V]
 `print(range(3))` prints `[0, 1, 2]` (CPython `range(0, 3)`); `range(3) == [0,1,2]` is
 True (CPython False); type, slicing to a range. A lazy range touches ~51 pyIsArr sites
 in python-rt.metajs, 28 Array.isArray in the interpreter, 29 js_py* externs and the
 emitter's for-loop: 400-600 lines. Cost against the value; implement or DECLINE.
 
-### T-260 python: `"a" + 1` concatenates · P1 · PY · OPEN [V]
+### T-260 python: `"a" + 1` concatenates · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
 Gives `'a1'` in all engines (also `y[0] += 1` on a str); CPython `TypeError: can only
 concatenate str (not "int") to str`. Check `1 + "a"` (unsupported operand type(s)).
 
-### T-261 python: `print(..., end=, sep=)` · P1 · PY · OPEN [V]
+### T-261 python: `print(..., end=, sep=)` · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
 Compiled halves print the kwargs dict (`{'end': ' | '}`), the interpreter ignores
 `end`. Also `sep`, `file=` (ignore or error), `flush`.
 
-### T-262 python: `dict(enumerate(s))` · P1 · PY · OPEN [V]
+### T-262 python: `dict(enumerate(s))` · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
 Prints `{}` compiled, `<enumerate object>` interpreter; CPython `{0: 'a', ...}`. Check
 `dict(zip(...))`, `list(enumerate(...))`, `dict(generator of pairs)`.
 
-### T-263 python: TypeErrors for objects that are not iterable / callable / sized · P1 · PY · OPEN [V]
+### T-263 python: TypeErrors for objects that are not iterable / callable / sized · P1 · PY · IN PROGRESS (PY worker, round 4) [V]
 `class C: pass`: `iter(C())` aborts the interpreter; `C()()` aborts "call of a non
 function value" in every leg; `len(C())` leaves no output line. CPython: `'C' object is
 not iterable` / `'C' object is not callable` / `object of type 'C' has no len()`.
 
-### T-264 python: `b"\N{BULLET}"` · P3 · PY · OPEN [V]
+### T-264 python: `b"\N{BULLET}"` · P3 · PY · IN PROGRESS (PY worker, round 4) [V]
 Prints `[34]` in all engines; CPython `b'\\N{BULLET}'` (`\N` is not a bytes escape).
 
-### T-265 python: math functions and complex powers vs Apple libm last digit · P3 · PY · OPEN [V]
+### T-265 python: math functions and complex powers vs Apple libm last digit · P3 · PY · IN PROGRESS (PY worker, round 4) [V]
 Non-integral complex powers and the `math.*` transcendentals differ from CPython in
 the last digit on ~half of rows (Go/C pow, atan2, exp, log, cos, sin vs Apple's libm);
 native differs from llvm.Run on 14 rows of a power probe. CPython calls the platform
