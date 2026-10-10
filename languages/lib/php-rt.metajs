@@ -204,11 +204,6 @@ function phNumOf(v) {
     return 0
 }
 
-function phIsNull(v) {
-    if (v === undefined) { return true }
-    return v === null
-}
-
 function phIsBool(v) { return typeof v == "boolean" }
 function phIsStr(v) { return typeof v == "string" }
 
@@ -299,7 +294,7 @@ function phIsObj(v) {
 // false, 0, 0.0, "", "0", [] and null are falsy; everything else is truthy.
 
 function phTest(v) {
-    if (phIsNull(v)) { return false }
+    if (rtIsNil(v)) { return false }
     if (typeof v == "boolean") { return v }
     if (sintIs(v)) { return true }  // outside the exact range, so never 0
     if (typeof v == "number") { return v != 0 }
@@ -452,7 +447,7 @@ function phFloFormat(n, nd) {
 // ===================================================== string coercion ======
 
 function phStr(v) {
-    if (phIsNull(v)) { return "" }
+    if (rtIsNil(v)) { return "" }
     if (typeof v == "boolean") { return v ? "1" : "" }
     if (typeof v == "string") { return v }
     if (sintIs(v)) { return sintStr(v) }
@@ -634,7 +629,7 @@ function phToNum(v) {
     if (phIsInt(v)) { return v }
     if (phIsFlo(v)) { return v }
     if (typeof v == "boolean") { return v ? 1 : 0 }
-    if (phIsNull(v)) { return 0 }
+    if (rtIsNil(v)) { return 0 }
     if (typeof v == "string") {
         var n = phNumStrVal(v)
         if (n !== undefined) { return n }
@@ -867,9 +862,9 @@ function phIdentical(l, r) {
         }
         return true
     }
-    if (phIsNull(l) || phIsNull(r)) {
-        if (!phIsNull(l)) { return false }
-        return phIsNull(r)
+    if (rtIsNil(l) || rtIsNil(r)) {
+        if (!rtIsNil(l)) { return false }
+        return rtIsNil(r)
     }
     // Two ints compare by VALUE: above 2^53 one of them is a box.
     if (phIsInt(l) || phIsInt(r)) {
@@ -914,8 +909,8 @@ function phLoose(l, r) {
     var lb = phIsBool(l)
     var rb = phIsBool(r)
     if (lb || rb) { return phTest(l) == phTest(r) }
-    var ln = phIsNull(l)
-    var rn = phIsNull(r)
+    var ln = rtIsNil(l)
+    var rn = rtIsNil(r)
     if (ln && rn) { return true }
     if (ln) { return phLooseNull(r) }
     if (rn) { return phLooseNull(l) }
@@ -956,8 +951,8 @@ function phLoose(l, r) {
 
 // phCmp is the spaceship, and the engine behind < > <= >=.
 function phCmp(l, r) {
-    var ln = phIsNull(l)
-    var rn = phIsNull(r)
+    var ln = rtIsNil(l)
+    var rn = rtIsNil(r)
     if (phIsBool(l) || phIsBool(r) || ln || rn) {
         var lt = phTest(l) ? 1 : 0
         var rt2 = phTest(r) ? 1 : 0
@@ -1008,7 +1003,7 @@ function phNormKey(v) {
     var f = phFloOf(v)
     if (f !== undefined) { return phFloToLong(f) }
     if (typeof v == "boolean") { return v ? 1 : 0 }
-    if (phIsNull(v)) { return "" }
+    if (rtIsNil(v)) { return "" }
     if (typeof v == "string") {
         // A canonical decimal folds to an int key only while it FITS: PHP keeps
         // "9223372036854775808" a STRING key.
@@ -1121,7 +1116,7 @@ function phArrGet(av, k) {
         if (j >= av.length) { return "" }
         return av.charAt(j)
     }
-    if (phIsNull(av)) { return null }
+    if (rtIsNil(av)) { return null }
     if (typeof av == "object") {
         var pv = av[phStr(k)]
         if (pv !== undefined) { return pv }
@@ -1135,7 +1130,7 @@ function phArrHas(av, k) {
     if (p !== undefined) {
         var i = phKeyIndex(p.k, k)
         if (i < 0) { return false }
-        return !phIsNull(phDeref(p.v[i]))
+        return !rtIsNil(phDeref(p.v[i]))
     }
     if (typeof av == "string") {
         if (!phNumericKey(k)) { return false }
@@ -1151,11 +1146,11 @@ function phArrHas(av, k) {
     // the floor dies with "member '...' of null". The emitter probes
     // js_phisset(v, "__refcell") on EVERY variable read of a program that writes a
     // '&' anywhere, so this arm sees a null constantly.
-    if (phIsNull(av)) { return false }
+    if (rtIsNil(av)) { return false }
     if (typeof av == "object") {
         var pv = av[phStr(k)]
         if (pv === undefined) { return false }
-        return !phIsNull(pv)
+        return !rtIsNil(pv)
     }
     return false
 }
@@ -1229,7 +1224,7 @@ function phLen(v) {
     var p = phArrParts(v)
     if (p !== undefined) { return p.k.length }
     if (typeof v == "string") { return byteLen(v) }
-    if (phIsNull(v)) { return 0 }
+    if (rtIsNil(v)) { return 0 }
     return 1
 }
 
@@ -1357,7 +1352,7 @@ function phClassName(v) {
 // ===================================================== type names ===========
 
 function phTypeName(v) {
-    if (phIsNull(v)) { return "NULL" }
+    if (rtIsNil(v)) { return "NULL" }
     if (typeof v == "boolean") { return "boolean" }
     if (phIsFlo(v)) { return "double" }
     if (phIsInt(v)) { return "integer" }
@@ -1368,7 +1363,7 @@ function phTypeName(v) {
 }
 
 function phDebugType(v) {
-    if (phIsNull(v)) { return "null" }
+    if (rtIsNil(v)) { return "null" }
     if (typeof v == "boolean") { return "bool" }
     if (phIsFlo(v)) { return "float" }
     if (phIsInt(v)) { return "int" }
@@ -1418,7 +1413,7 @@ function phDumpKey(k, ind) {
 
 function phDump(v, ind) {
     var pad = phSpaces(ind)
-    if (phIsNull(v)) { return pad + "NULL\n" }
+    if (rtIsNil(v)) { return pad + "NULL\n" }
     if (typeof v == "boolean") { return pad + (v ? "bool(true)\n" : "bool(false)\n") }
     var f = phFloOf(v)
     if (f !== undefined) { return pad + "float(" + phFloDump(f) + ")\n" }
@@ -1485,7 +1480,7 @@ function phCast(kind, v) {
     if (kind == "array") {
         if (phIsArr(v)) { return v }
         var out = phNewArr()
-        if (phIsNull(v)) { return out }
+        if (rtIsNil(v)) { return out }
         if (phIsObj(v)) {
             // (array) $obj is the instance's own non-hidden properties, in
             // insertion order - keysOf's exact answer.
@@ -1902,7 +1897,7 @@ function js_phis(kind, v) {
     if (kind == "bool") { return typeof v == "boolean" }
     if (kind == "array") { return phIsArr(v) }
     if (kind == "object") { return phIsObj(v) }
-    if (kind == "null") { return phIsNull(v) }
+    if (kind == "null") { return rtIsNil(v) }
     if (kind == "numeric") {
         if (typeof v == "string") { return phNumStrVal(v) !== undefined }
         return phIsNum(v)
@@ -1987,7 +1982,7 @@ function js_phin(needle, hay) {
 // when the container really is a PHP array.
 function js_phviv(cont, key) {
     var cur = phArrGet(cont, key)
-    if (phIsNull(cur) && phIsDict(cont)) {
+    if (rtIsNil(cur) && phIsDict(cont)) {
         var na = phNewArr()
         phArrSet(cont, key, na)
         return na
@@ -2007,7 +2002,7 @@ function js_phvivpush(cont) {
 
 // The ROOT of the walk: `$e = null; $e["x"]["y"] = 5` makes $e an array.
 function js_phvivroot(cur) {
-    if (!phIsNull(cur)) { return cur }
+    if (!rtIsNil(cur)) { return cur }
     return phNewArr()
 }
 

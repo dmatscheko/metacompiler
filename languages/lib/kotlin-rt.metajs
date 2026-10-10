@@ -131,14 +131,9 @@ function ktIsStr(v) { return typeof v == "string" }
 // isCallable (abnf/jsrt.go 1695).
 function ktIsFn(v) { return typeof v == "function" }
 
-// isUndefOrNull (abnf/jsrt.go). kt* is this file's FILE-WIDE helper prefix;
-// k0*..k6* are the per-section ones, and a body two sections share belongs under kt*.
-function ktIsNullish(v) {
-    if (v === undefined) { return true }
-    return v === null
-}
-
-// argAt(args, i): the i'th argument, or undefined past the end.
+// argAt(args, i): the i'th argument, or undefined past the end. kt* is this
+// file's FILE-WIDE helper prefix; k0*..k6* are the per-section ones, and a body
+// two sections share belongs under kt*.
 function ktArg(args, i) {
     if (i < args.length) { return args[i] }
     return undefined
@@ -538,7 +533,7 @@ function ktIsPair(v) {
     if (v["first"] === undefined) { return false }
     if (v["second"] === undefined) { return false }
     var cls = v["__class"]
-    if (!ktIsNullish(cls)) {
+    if (!rtIsNil(cls)) {
         if (!ktIsObj(cls)) { return false }
         var n = cls["__name"]
         if (n !== "Pair") {
@@ -558,7 +553,7 @@ function ktClsFind(cls, name) {
     c = cls
     var guard = 0
     while (guard < 256) {
-        if (ktIsNullish(c)) { return undefined }
+        if (rtIsNil(c)) { return undefined }
         if (!ktIsObj(c)) { return undefined }
         var v = c[name]
         if (ktIsFn(v)) { return v }
@@ -1069,7 +1064,7 @@ function ktElemHash(v) {
         if (v) { return 1231 }
         return 1237
     }
-    if (ktIsNullish(v)) { return 0 }
+    if (rtIsNil(v)) { return 0 }
     if (floIs(v)) {
         // java.lang.Double.hashCode of a Double and java.lang.Float.hashCode of a
         // Float, not the truncated value - see ktFloHash.
@@ -1524,8 +1519,8 @@ function ktNumMethod(recv, name, args) {
     if (name == "coerceIn") {
         var clo = ktArg(args, 0)
         var chi = ktArg(args, 1)
-        if (!ktIsNullish(clo)) { if (k1NumLess(recv, clo)) { return clo } }
-        if (!ktIsNullish(chi)) { if (k1NumLess(chi, recv)) { return chi } }
+        if (!rtIsNil(clo)) { if (k1NumLess(recv, clo)) { return clo } }
+        if (!rtIsNil(chi)) { if (k1NumLess(chi, recv)) { return chi } }
         return recv
     }
     // isNaN is declared on Double/Float only, so an integral receiver answers
@@ -5388,7 +5383,7 @@ function js_ktthisat(self, want) {
                 if (cls["__name"] === want) { return cur }
             }
             var nxt = cur["__outer"]
-            if (ktIsNullish(nxt)) { i = 99 } else { cur = nxt }
+            if (rtIsNil(nxt)) { i = 99 } else { cur = nxt }
         }
     }
     return self
@@ -5521,7 +5516,7 @@ function ktConstruct(cls, args) {
 
 // ktSimpleName (jsrtkotlin.go:5860) is KClass.simpleName.
 function k4bSimpleName(v) {
-    if (ktIsNullish(v)) { return null }
+    if (rtIsNil(v)) { return null }
     if (ktIsChar(v)) { return "Char" }
     if (typeof v == "number") {
         // The style byte says which of the two a tag-14 box holds, so `1.5f::class`
@@ -5766,7 +5761,7 @@ function k4bMextWalk(start, mangled) {
                 return r1
             }
             var nxt = cur["__outer"]
-            if (ktIsNullish(nxt)) { i = 99 } else { cur = nxt }
+            if (rtIsNil(nxt)) { i = 99 } else { cur = nxt }
         }
     }
     return undefined
@@ -5887,7 +5882,7 @@ function js_ktdset(d, thisRef, name, val) {
         var old = d["v"]
         var bkind = d["__ktdeleg"]
         var cb = d["cb"]
-        var live = !ktIsNullish(cb)
+        var live = !rtIsNil(cb)
         if (bkind == "vetoable" && live) {
             if (!ktCall(cb, [k4bDRef(thisRef, name), old, val])) { return undefined }
         }
@@ -5905,7 +5900,7 @@ function js_ktdset(d, thisRef, name, val) {
 // emitter-lowered, being scope-taking). thisRef is null, as it is in Kotlin for
 // a property with no owner.
 function js_ktdbox(d, name) {
-    if (ktIsNullish(d)) { return null }
+    if (rtIsNil(d)) { return null }
     var box = {}
     box["__pdeleg"] = true
     box["d"] = d
@@ -6334,7 +6329,7 @@ function ktRecvMember(recv, name, iscall) {
             // (kt_fprobe in kotlin-to-llvm-ir.abnf carries the same guard).
             if ((k4RecvProp(name) || !iscall) && !ktIsClassLit(recv) && !ktIsPkg(recv)) {
                 var pv = js_ktfget(recv, name)
-                if (!ktIsNullish(pv)) { return pv }
+                if (!rtIsNil(pv)) { return pv }
             }
         }
         // toString(), hashCode() and equals() are members of kotlin.Any, so an
@@ -6359,7 +6354,7 @@ function ktRecvMember(recv, name, iscall) {
     if (!iscall) {
         var fv = anytype
         fv = js_ktfget(recv, name)
-        if (!ktIsNullish(fv)) { return fv }
+        if (!rtIsNil(fv)) { return fv }
     }
     return k4Bound(recv, name)
 }
@@ -6435,7 +6430,7 @@ function ktPkgMember(pkg, name) {
     var sub = pkg + "." + name
     if (k4IsPkgPath(sub)) { return ktPkg(sub) }
     var v = ktGlobalFn(name)
-    if (!ktIsNullish(v)) { return v }
+    if (!rtIsNil(v)) { return v }
     fail("unknown name: " + sub)
     return undefined
 }
@@ -6546,7 +6541,7 @@ function ktIsResult(v) {
 // {__result, value, exc} box. isSuccess and isFailure are PROPERTIES in Kotlin, so
 // js_ktfget reaches this too.
 function ktResultMethod(r, name, args) {
-    var ok = ktIsNullish(r["exc"])
+    var ok = rtIsNil(r["exc"])
     if (name == "isSuccess") { return ok }
     if (name == "isFailure") { return !ok }
     if (name == "getOrNull") {
@@ -6612,7 +6607,7 @@ function ktLazyValue(o) {
 // isTypeName (abnf/jsrt.go:8432), for a NON-numeric receiver. `t` arrives with its
 // type arguments and its `?` already stripped; `opt` carries whether there was one.
 function k4IsTypeName(v, t, opt) {
-    if (ktIsNullish(v)) { return opt }
+    if (rtIsNil(v)) { return opt }
     // Kotlin's Char is its own type: `c is Char` holds, `c is Int` does not.
     if (ktIsChar(v)) {
         if (t == "Char") { return true }
@@ -6832,7 +6827,7 @@ function k4Contract(name, args) {
     if (name == "TODO") {
         var msg = "An operation is not implemented."
         if (args.length > 0) {
-            if (!ktIsNullish(args[0])) { msg = "An operation is not implemented: " + ktRender(args[0]) }
+            if (!rtIsNil(args[0])) { msg = "An operation is not implemented: " + ktRender(args[0]) }
         }
         ktRaise("NotImplementedError", msg)
     }
@@ -6851,13 +6846,13 @@ function k4Contract(name, args) {
     if (name == "requireNotNull") { notNull = true }
     if (name == "checkNotNull") { notNull = true }
     if (notNull) {
-        ok = !ktIsNullish(k4At(args, 0))
+        ok = !rtIsNil(k4At(args, 0))
         dflt = "Required value was null."
     }
     if (!ok) {
         var text = dflt
         if (args.length > 1) {
-            if (!ktIsNullish(args[1])) {
+            if (!rtIsNil(args[1])) {
                 if (k4Fn(args[1])) { text = ktRender(ktCall(args[1], [])) } else { text = ktRender(args[1]) }
             }
         }
@@ -6954,7 +6949,7 @@ function ktGlobalFn(name) {
     }
     if (name == "StringBuilder") {
         return function (init) {
-            if (ktIsNullish(init)) { return ktMakeSb("") }
+            if (rtIsNil(init)) { return ktMakeSb("") }
             return ktMakeSb(ktRender(init))
         }
     }
@@ -6982,11 +6977,11 @@ function ktGlobalFn(name) {
     }
     if (name == "compareValues") {
         return function (a, b) {
-            if (ktIsNullish(a)) {
-                if (ktIsNullish(b)) { return 0 }
+            if (rtIsNil(a)) {
+                if (rtIsNil(b)) { return 0 }
                 return -1
             }
-            if (ktIsNullish(b)) { return 1 }
+            if (rtIsNil(b)) { return 1 }
             return k4CmpKeys(a, b, false)
         }
     }
@@ -7033,7 +7028,7 @@ function ktGlobalFn(name) {
             var out = []
             var i = 0
             while (i < arguments.length) {
-                if (!ktIsNullish(arguments[i])) { out.push(arguments[i]) }
+                if (!rtIsNil(arguments[i])) { out.push(arguments[i]) }
                 i = i + 1
             }
             return out
@@ -7085,7 +7080,7 @@ function ktGlobalFn(name) {
             var out = ktMakeSet()
             var i = 0
             while (i < arguments.length) {
-                if (!ktIsNullish(arguments[i])) { ktSetAdd(out, arguments[i]) }
+                if (!rtIsNil(arguments[i])) { ktSetAdd(out, arguments[i]) }
                 i = i + 1
             }
             return out
@@ -7176,7 +7171,7 @@ function ktGlobalFn(name) {
             var guard = 0
             var cap = k4SeqCap()
             while (guard < cap) {
-                if (ktIsNullish(v)) { guard = cap } else {
+                if (rtIsNil(v)) { guard = cap } else {
                     out.push(v)
                     if (!k4Fn(next)) { guard = cap } else {
                         v = ktCall1(next, v)
@@ -7437,7 +7432,7 @@ function ktSmcall(recv, name, args) {
 
     // kotlin.hashCode() and kotlin.toString() are extensions on Any?, so a NULL
     // receiver answers them rather than throwing.
-    if (ktIsNullish(rv)) {
+    if (rtIsNil(rv)) {
         if (name == "hashCode") { return 0 }
         if (name == "toString") { return "null" }
     }
@@ -7633,7 +7628,7 @@ function js_ktsmcall(recv, name, args) { return ktSmcall(recv, name, args) }
 // ktLateinitCheck (jsrtkotlin.go:202): a `lateinit var` that is still null has NOT
 // been assigned, and Kotlin throws rather than answering null.
 function k4LateinitCheck(o, name, v) {
-    if (!ktIsNullish(v)) { return v }
+    if (!rtIsNil(v)) { return v }
     if (!ktIsObj(o)) { return v }
     var cls = o["__class"]
     var guard = 0
@@ -7845,7 +7840,7 @@ function k4RndDefault() {
 }
 
 var K4_RANDOM_FN = function (seed) {
-    if (ktIsNullish(seed)) { return k4RndDefault() }
+    if (rtIsNil(seed)) { return k4RndDefault() }
     return k4RndBox(seed)
 }
 
@@ -8129,9 +8124,9 @@ function js_ktfget(o, name) {
     // property; the rewrite happens HERE, only when the receiver has no `size` of
     // its own.
     if (name == "size") {
-        if (ktIsNullish(r)) {
+        if (rtIsNil(r)) {
             var lr = o["length"]
-            if (!ktIsNullish(lr)) { return lr }
+            if (!rtIsNil(lr)) { return lr }
         }
     }
     // KOTLIN'S INDEX PROPERTIES - the *jsArray and string arms of js_ktfget
@@ -8146,7 +8141,7 @@ function js_ktfget(o, name) {
     // BOUNDS, so an empty progression answers all five. `.size` on a progression
     // is not Kotlin (IntRange is an Iterable, not a Collection) but the
     // interpreter half answers the element count, so this one does too.
-    if (ktIsRange(o) && ktIsNullish(r)) {
+    if (ktIsRange(o) && rtIsNil(r)) {
         if (name == "first") { return k4RangeEl(o, o["from"]) }
         // IntProgression.last is the last ELEMENT, not the bound it was built
         // from: (1..10 step 4).last is 9.
@@ -8164,16 +8159,16 @@ function js_ktfget(o, name) {
         if (name == "indices") { return k4Indices(ktRangeList(o).length) }
         if (name == "lastIndex") { return ktRangeList(o).length - 1 }
     }
-    if (ktIsArr(o) && ktIsNullish(r)) {
+    if (ktIsArr(o) && rtIsNil(r)) {
         if (name == "indices") { return k4Indices(o["length"]) }
         if (name == "lastIndex") { return o["length"] - 1 }
     }
-    if (typeof o == "string" && ktIsNullish(r)) {
+    if (typeof o == "string" && rtIsNil(r)) {
         if (name == "indices") { return k4Indices(o.length) }
         if (name == "lastIndex") { return o.length - 1 }
     }
     // A StringBuilder IS a CharSequence, so the same two properties apply to it.
-    if (ktIsSb(o) && ktIsNullish(r)) {
+    if (ktIsSb(o) && rtIsNil(r)) {
         if (name == "indices") { return k4Indices(ktSbText(o).length) }
         if (name == "lastIndex") { return ktSbText(o).length - 1 }
     }
@@ -8462,13 +8457,13 @@ function ktRxIsMatch(v) { return rxIsMatchObj(v) }
 
 function k5IsGroups(v) {
     if (!ktIsObj(v)) { return false }
-    return !ktIsNullish(v["__ktgroups"])
+    return !rtIsNil(v["__ktgroups"])
 }
 
 // k5IsCompanion answers the `Regex` name used as a value (Regex.escape(...)).
 function k5IsCompanion(v) {
     if (!ktIsObj(v)) { return false }
-    return !ktIsNullish(v["__ktrxco"])
+    return !rtIsNil(v["__ktrxco"])
 }
 
 // Shared as rxObjRe (lib/regex.js).
@@ -8514,7 +8509,7 @@ function k5MatchOf(v) { return rxMatchOf(v) }
 // \Q...\E quote regions, which is what Pattern.quote emits.
 function k5Flags(opts) {
     var names = []
-    if (!ktIsNullish(opts)) {
+    if (!rtIsNil(opts)) {
         if (ktIsArr(opts)) {
             var ai = 0
             while (ai < opts.length) {
@@ -8764,7 +8759,7 @@ function k5Arg(args, i) {
 
 function k5ArgInt(args, i, dflt) {
     if (i >= args.length) { return dflt }
-    if (ktIsNullish(args[i])) { return dflt }
+    if (rtIsNil(args[i])) { return dflt }
     return Math.trunc(ktNum(args[i]))
 }
 
@@ -9055,11 +9050,11 @@ function js_ktget(env, name, iscall) {
                 iv = k6InstRead(t, name)
                 if (!ktMiss(iv)) { return iv }
             } else {
-                if (!ktIsNullish(t)) {
+                if (!rtIsNil(t)) {
                     var mv = anytype
                     mv = ktRecvMember(t, name, iscall)
                     if (!ktMiss(mv)) {
-                        if (!ktIsNullish(mv)) { return mv }
+                        if (!rtIsNil(mv)) { return mv }
                     }
                 }
             }
