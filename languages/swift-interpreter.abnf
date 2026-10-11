@@ -1435,6 +1435,8 @@ NoTrailCtx  = :script(~~
             while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
                 w = w + String.fromCharCode(cc); k++; cc = c.peek(k)
             }
+            // A loop LABEL is not the statement's word: `outer: for x in xs {`.
+            if (w !== "" && cc === 58) { k++; continue }
             if (w !== "else") { break }
         }
         if (w === "if" || w === "while" || w === "switch" || w === "for" || w === "guard"
@@ -4126,9 +4128,11 @@ KwContinue  = "continue" KwEnd ;
             if (typeof m != "function" && hasOwn(target, name) && typeof target[name] == "function") {
                 return target[name].apply(undefined, args)
             }
+            if (typeof m != "function" && swIsLazyMember(target, name)) { return swLazyMethod(target, name, args, mcLabels) }
             if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
             return m.apply(undefined, concat2impl([target], args))
         }
+        if (swIsLazyMember(target, name)) { return swLazyMethod(target, name, args, mcLabels) }
         fail("unknown method '" + name + "'")
     }
     // Members a String or an Array tells apart only by their argument LABELS get a
@@ -4740,6 +4744,8 @@ KwContinue  = "continue" KwEnd ;
             }
             return acc
         }
+        // An IndexingIterator over a copy: the array's later edits do not reach it.
+        if (name == "makeIterator") { return {__swit: 3, st: t.slice(0), i: 0, done: false} }
         fail("unknown Array method: " + name)
     }
 
@@ -7490,13 +7496,26 @@ KwContinue  = "continue" KwEnd ;
             // only -frozen enforces that, so goja alone would not catch it
             // (manual chapter 4).
             var arr = anytype
-            arr = swSeqVal(listT())
-            if (ety != "") { arr = swAdoptDeep(arr, ety) }
+            arr = listT()
+            // A lazy sequence is asked for one element per trip, so an endless one
+            // runs until the body breaks out.
+            var it = anytype
+            it = swMkIter(arr)
+            if (it != null) { arr = [] } else { arr = swSeqVal(arr) }
+            if (ety != "" && it == null) { arr = swAdoptDeep(arr, ety) }
             var res = undefined
-            var n = swlen(arr)
-            for (var i = 0; i < n; i++) {
+            var n = it != null ? -1 : swlen(arr)
+            for (var i = 0; i < n || n < 0; i++) {
+                var el = anytype
+                if (it != null) {
+                    el = swIterNext(it)
+                    if (el === null) { break }
+                    if (ety != "") { el = swAdoptDeep([el], ety)[0] }
+                } else {
+                    el = arr[i]
+                }
                 scopes.push({})
-                bindForPat(pat, arr[i])
+                bindForPat(pat, el)
                 var r = undefined
                 if (whereT == null || core.test(whereT())) { r = bodyT() }
                 scopes.pop()
@@ -9624,10 +9643,118 @@ KwContinue  = "continue" KwEnd ;
         if (isTupleVal(x)) { return tupleArray(x) }
         if (isDict(x)) { return swDictPairs(x) }
         if (Array.isArray(x)) { return x.slice(0) }
+        var lz = anytype
+        lz = swSeqArr(x)
+        if (lz !== x) { return lz }
         fail("Array(): not a sequence")
         return []
     }
     hostGlobals["Array"] = {__conv: swArrayOf}
+    // ----- Lazy sequences -----
+    // A sequence that is walked by asking for one element at a time, because it may
+    // never end: sequence(first:next:) and sequence(state:next:) are
+    // {__swseq: 1|2, st, fn}, and a user type is a Sequence by its makeIterator()
+    // or, conforming to IteratorProtocol as well, by being its own iterator (a COPY,
+    // which is what the standard library's default makeIterator returns). The
+    // iterators the runtime itself makes are {__swit: kind, ...}: 1 and 2 unfold
+    // the two sequence() forms, 3 walks an array's copy (Array.makeIterator()) and 4
+    // calls an AnyIterator's closure. nil ends a walk, and a finished iterator stays
+    // finished. Twins: js_swmkiter / js_swnext / js_swseqarr in abnf/jsrtswift.go
+    // and languages/lib/swift-rt.metajs.
+    function swIsLazy(v) {
+        if (v === null || v === undefined || typeof v != "object" || Array.isArray(v)) { return false }
+        if (v.__swseq != undefined || v.__swit != undefined) { return true }
+        if (v.__class == undefined || v.__class === null) { return false }
+        return typeof classFind(v.__class, "makeIterator") == "function" || typeof classFind(v.__class, "next") == "function"
+    }
+    function swMkIter(v) {
+        if (!swIsLazy(v)) { return null }
+        if (v.__swseq != undefined) { return {__swit: v.__swseq, st: swCopy(v.st), fn: v.fn, go: false, done: false} }
+        if (v.__swit != undefined) { return v }
+        if (typeof classFind(v.__class, "makeIterator") == "function") {
+            pendingLabels = null
+            return mcall(v, "makeIterator", [])
+        }
+        return swCopy(v)
+    }
+    function swIterNext(it) {
+        var r = anytype
+        if (it.__swit == undefined) {
+            pendingLabels = null
+            r = mcall(it, "next", [])
+            return r === undefined ? null : r
+        }
+        if (it.done) { return null }
+        var k = it.__swit
+        if (k == 1) {
+            if (it.go) { r = it.fn(it.st) } else { r = it.st }
+            it.go = true
+            it.st = r
+        } else if (k == 2) {
+            var box = {__ref: 1, v: it.st}
+            r = it.fn(box)
+            it.st = box.v
+        } else if (k == 3) {
+            r = it.i < it.st.length ? it.st[it.i] : null
+            it.i = it.i + 1
+        } else {
+            r = it.fn()
+        }
+        if (r === null || r === undefined) { it.done = true; return null }
+        return r
+    }
+    // The elements of a lazy sequence, or v itself when it is not one.
+    function swSeqArr(v) {
+        var it = anytype
+        it = swMkIter(v)
+        if (it == null) { return v }
+        var out = []
+        while (true) {
+            var e = anytype
+            e = swIterNext(it)
+            if (e === null) { break }
+            out.push(e)
+        }
+        return out
+    }
+    // A Sequence member on a lazy sequence. prefix and first(where:) /
+    // contains(where:) stop at the element that decides them, so they answer on an
+    // endless sequence too; every other member runs on the elements.
+    function swLazyMethod(t, name, args, labels) {
+        if (name == "next" && t.__swit != undefined) { return swIterNext(t) }
+        if (name == "makeIterator") { return swMkIter(t) }
+        var fa = args.length == 1 && typeof args[0] == "function"
+        var it = anytype
+        it = swMkIter(t)
+        if (name == "prefix" && args.length == 1) {
+            var out = []
+            var n = fa ? -1 : szNum(args[0])
+            while (n < 0 || out.length < n) {
+                var e = anytype
+                e = swIterNext(it)
+                if (e === null || (fa && !core.test(args[0](e)))) { break }
+                out.push(e)
+            }
+            return out
+        }
+        if ((name == "first" || name == "contains") && fa) {
+            while (true) {
+                var x = anytype
+                x = swIterNext(it)
+                if (x === null) { return name == "first" ? null : false }
+                if (core.test(args[0](x))) { return name == "first" ? x : true }
+            }
+        }
+        return arrayMethod(swSeqArr(t), swLabelName(name, labels), args)
+    }
+    function swIsLazyMember(t, name) {
+        return (name == "makeIterator" || name == "next" || swIsSeqMember(name)) && swIsLazy(t)
+    }
+    hostGlobals["sequence"] = {__convl: function(argv, labels) {
+        var kind = labels.length > 0 && labels[0] == "state" ? 2 : 1
+        return {__swseq: kind, st: argv[0], fn: argv[1]}
+    }}
+    hostGlobals["AnyIterator"] = function(f) { return {__swit: 4, fn: f, done: false} }
     // ----- Set -----
     // A Set is {__set: true, elems: [...]}: its members, kept free of duplicates by
     // ==, in insertion order. Swift's own iteration order is seeded per process, so

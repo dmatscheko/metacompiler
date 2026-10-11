@@ -545,7 +545,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 InheritList = InheritName { "," InheritName } ;
 // A leading ~ is a SUPPRESSED conformance (~Copyable, ~Escapable): it is recorded
 // under its written name, which resolves to nothing, so it contributes nothing.
-InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = [ "~" ] Type ;
+InheritName <~~ push({inherit: swNoteInherit(stripWs(up.in))}) ~~> = [ "~" ] Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
 ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -1414,6 +1414,8 @@ NoTrailCtx  = :script(~~
             while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
                 w = w + String.fromCharCode(cc); k++; cc = c.peek(k)
             }
+            // A loop LABEL is not the statement's word: `outer: for x in xs {`.
+            if (w !== "" && cc === 58) { k++; continue }
             if (w !== "else") { break }
         }
         if (w === "if" || w === "while" || w === "switch" || w === "for" || w === "guard"
@@ -3691,7 +3693,7 @@ KwContinue  = "continue" KwEnd ;
             var notStrB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), strB, notStrB)
             strB.NewRet(strB.NewCall(rtGSplit(), [ps[0]]))
-            var seqV = notStrB.NewCall(rtRangeArr(), [ps[0]])
+            var seqV = notStrB.NewCall(rtRangeArr(), [hasLazySeq ? callExt(notStrB, "js_swseqarr", [ps[0]]) : ps[0]])
             var dictB = curF.NewBlock("")
             var arrB = curF.NewBlock("")
             var rdA = rtIsDictStrict(notStrB, seqV)
@@ -6351,6 +6353,32 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: callExt(b, "js_swstride", [vs[0], vs[1], vs[2], through ? hTrue : hFalse])}
             }
         }
+        // sequence(first:next:) / sequence(state:next:) and AnyIterator(next): the
+        // records js_swmkiter / js_swnext walk. Twin of hostGlobals["sequence"] and
+        // hostGlobals["AnyIterator"] in swift-interpreter.abnf.
+        if ((name == "sequence" && args.length == 2) || (name == "AnyIterator" && args.length == 1)) {
+            hasLazySeq = true
+            var seqKind = name == "AnyIterator" ? 0 : (args[0].lbl == "state" ? 2 : 1)
+            return function(b) {
+                var vs = []
+                for (var i = 0; i < args.length; i++) {
+                    var r = args[i].t(b)
+                    b = r.b
+                    vs.push(r.v)
+                }
+                var o = callExt(b, "js_obj_new", [])
+                if (seqKind == 0) {
+                    callExt(b, "js_set", [o, emitStr(b, "__swit"), emitNum(b, 4)])
+                    callExt(b, "js_set", [o, emitStr(b, "fn"), vs[0]])
+                    callExt(b, "js_set", [o, emitStr(b, "done"), hFalse])
+                    return {b: b, v: o}
+                }
+                callExt(b, "js_set", [o, emitStr(b, "__swseq"), emitNum(b, seqKind)])
+                callExt(b, "js_set", [o, emitStr(b, "st"), vs[0]])
+                callExt(b, "js_set", [o, emitStr(b, "fn"), vs[1]])
+                return {b: b, v: o}
+            }
+        }
         if (name == "repeatElement" && args.length == 2) {
             return function(b) {
                 var rx = args[0].t(b)
@@ -7670,10 +7698,21 @@ KwContinue  = "continue" KwEnd ;
             // `(key:, value:)` pairs for a dictionary (rtArrayOf).
             var rd = emitIsDict(b, r.v)
             b = rd.b
+            // A LAZY sequence (hasLazySeq) is walked by its iterator, one js_swnext
+            // per trip until nil, so an endless one runs until the body breaks out;
+            // js_swmkiter answers nil for everything walked by index. It is an object
+            // and must not reach rtArrayOf, which would walk it to its end.
+            var itName = "$it" + hidCount
+            var isDictV = rd.v
+            if (hasLazySeq) {
+                var itV0 = callExt(b, "js_swmkiter", [r.v])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itName), itV0])
+                isDictV = b.NewSelect(truthy(b, callExt(b, "js_seq", [itV0, hNull])), rd.v, hFalse)
+            }
             var arrB = curF.NewBlock("")
             var dictB = curF.NewBlock("")
             var seqB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, rd.v), dictB, arrB)
+            b.NewCondBr(truthy(b, isDictV), dictB, arrB)
             arrB.NewBr(seqB)
             var pairsV = dictB.NewCall(rtArrayOf(), [r.v])
             dictB.NewBr(seqB)
@@ -7686,13 +7725,29 @@ KwContinue  = "continue" KwEnd ;
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var sV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, sName)])
-            var lenV = callExt(headB, "js_pylen", [sV])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            var sV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
-            var elV = callExt(bodyB, "js_swidx", [sV2, iV2])
+            var idxHeadB = headB
+            var idxBodyB = bodyB
+            if (hasLazySeq) {
+                idxHeadB = curF.NewBlock("")
+                idxBodyB = curF.NewBlock("")
+            }
+            var iV = callExt(idxHeadB, "js_scope_get", [curScopeV, emitStr(idxHeadB, iName)])
+            var sV = callExt(idxHeadB, "js_scope_get", [curScopeV, emitStr(idxHeadB, sName)])
+            var lenV = callExt(idxHeadB, "js_pylen", [sV])
+            idxHeadB.NewCondBr(truthy(idxHeadB, callExt(idxHeadB, "js_lt", [iV, lenV])), idxBodyB, exitB)
+            var iV2 = callExt(idxBodyB, "js_scope_get", [curScopeV, emitStr(idxBodyB, iName)])
+            var sV2 = callExt(idxBodyB, "js_scope_get", [curScopeV, emitStr(idxBodyB, sName)])
+            var elV = callExt(idxBodyB, "js_swidx", [sV2, iV2])
+            if (hasLazySeq) {
+                var itHeadB = curF.NewBlock("")
+                var itV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, itName)])
+                headB.NewCondBr(truthy(headB, callExt(headB, "js_seq", [itV, hNull])), idxHeadB, itHeadB)
+                var nxV = callExt(itHeadB, "js_swnext", [itV])
+                if (ety != "") { nxV = swEmitAdopt(itHeadB, nxV, rest[1].fty) }
+                itHeadB.NewCondBr(truthy(itHeadB, callExt(itHeadB, "js_seq", [nxV, hNull])), exitB, bodyB)
+                idxBodyB.NewBr(bodyB)
+                elV = bodyB.NewPhi([llvm.ir.NewIncoming(elV, idxBodyB), llvm.ir.NewIncoming(nxV, itHeadB)])
+            }
             // A FRESH SCOPE per iteration, and emitBindForPat declares INTO it - see the
             // header above makeForRange. Both names of a tuple pattern are per-iteration
             // bindings, so `for (k, v) in m { fs.append({ k }) }` captures each one.
@@ -10422,6 +10477,15 @@ KwContinue  = "continue" KwEnd ;
     // first, Array(s) and for-in read. Twin: the Set block of
     // swift-interpreter.abnf.
     var hasSets = false
+    // A program that declares a Sequence or IteratorProtocol conformance, or builds a
+    // sequence() / AnyIterator, can hand for-in and Array() a LAZY sequence
+    // (js_swmkiter): set at WALK time, it gives makeForList its iterator path and
+    // rtArrayOf its js_swseqarr. Every other program keeps the index-only loop.
+    var hasLazySeq = false
+    function swNoteInherit(t) {
+        if (t == "Sequence" || t == "IteratorProtocol") { hasLazySeq = true }
+        return t
+    }
     function swIsSetTy(t) {
         var is = t == "Set" || (t.length > 4 && t.substring(0, 4) == "Set<")
         if (is) { hasSets = true }

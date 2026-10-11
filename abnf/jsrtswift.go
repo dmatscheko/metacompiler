@@ -657,6 +657,185 @@ func init() {
 			return v
 		}
 		m["js_swcopy"] = func(a []uint64) uint64 { return w(swValCopy(u(a[0]))) }
+		// The lazy sequences: sequence(first:next:) / sequence(state:next:) are
+		// {__swseq: 1|2, st, fn}, and a user type is a Sequence by its
+		// makeIterator() or, being its own iterator, by a COPY of itself. The
+		// runtime's own iterators are {__swit: kind}: 1 and 2 unfold the two
+		// sequence() forms, 3 walks an array's copy, 4 calls an AnyIterator's
+		// closure. nil ends a walk, and a finished iterator stays finished. Twins:
+		// swMkIter / swIterNext / swSeqArr / swLazyMethod in
+		// languages/swift-interpreter.abnf and languages/lib/swift-rt.metajs.
+		swIsLazy := func(v interface{}) bool {
+			o, ok := v.(*jsObject)
+			if !ok {
+				return false
+			}
+			if _, has := o.props["__swseq"]; has {
+				return true
+			}
+			if _, has := o.props["__swit"]; has {
+				return true
+			}
+			if _, found := swFindMember(o, "makeIterator"); found {
+				return true
+			}
+			_, found := swFindMember(o, "next")
+			return found
+		}
+		noArgs := func() uint64 { return w(&jsArray{}) }
+		swMkIter := func(v interface{}) interface{} {
+			if !swIsLazy(v) {
+				return nil
+			}
+			o := v.(*jsObject)
+			if k, has := o.props["__swseq"]; has {
+				it := newJSObject()
+				it.set("__swit", k)
+				it.set("st", swValCopy(o.props["st"]))
+				it.set("fn", o.props["fn"])
+				it.set("go", false)
+				it.set("done", false)
+				return it
+			}
+			if _, has := o.props["__swit"]; has {
+				return o
+			}
+			if _, found := swFindMember(o, "makeIterator"); found {
+				return u(m["js_swmcall"]([]uint64{w(v), rt.wrapStr("makeIterator"), noArgs()}))
+			}
+			return swValCopy(v)
+		}
+		swIterNext := func(itv interface{}) interface{} {
+			it, _ := itv.(*jsObject)
+			if it == nil || it.props["__swit"] == nil {
+				r := u(m["js_swmcall"]([]uint64{w(itv), rt.wrapStr("next"), noArgs()}))
+				if isUndefOrNull(r) {
+					return jsNull
+				}
+				return r
+			}
+			if it.props["done"] == true {
+				return jsNull
+			}
+			var r interface{}
+			switch swNum(rt, it.props["__swit"]) {
+			case 1:
+				if it.props["go"] == true {
+					r = rt.call(it.props["fn"], jsUndef, []interface{}{it.props["st"]})
+				} else {
+					r = it.props["st"]
+				}
+				it.set("go", true)
+				it.set("st", r)
+			case 2:
+				box := newJSObject()
+				box.set("__ref", float64(1))
+				box.set("v", it.props["st"])
+				r = rt.call(it.props["fn"], jsUndef, []interface{}{box})
+				it.set("st", box.props["v"])
+			case 3:
+				arr := it.props["st"].(*jsArray)
+				i := int(swNum(rt, it.props["i"]))
+				r = jsNull
+				if i < len(arr.elems) {
+					r = arr.elems[i]
+				}
+				it.set("i", float64(i+1))
+			default:
+				r = rt.call(it.props["fn"], jsUndef, nil)
+			}
+			if isUndefOrNull(r) {
+				it.set("done", true)
+				return jsNull
+			}
+			return r
+		}
+		swSeqArr := func(v interface{}) interface{} {
+			it := swMkIter(v)
+			if it == nil {
+				return v
+			}
+			out := &jsArray{}
+			for e := swIterNext(it); e != jsNull; e = swIterNext(it) {
+				out.elems = append(out.elems, e)
+			}
+			return out
+		}
+		// A Sequence member on a lazy sequence that its own type does not declare.
+		// prefix and first(where:) / contains(where:) stop at the element that
+		// decides them, so they answer on an endless sequence too; every other
+		// member runs on the elements.
+		swLazyMethod := func(recv interface{}, name string, argv uint64) (interface{}, bool) {
+			if !swIsLazyName(name) {
+				return nil, false
+			}
+			if arr, isArr := recv.(*jsArray); isArr {
+				if name != "makeIterator" {
+					return nil, false
+				}
+				it := newJSObject()
+				it.set("__swit", float64(3))
+				it.set("st", &jsArray{elems: append([]interface{}{}, arr.elems...)})
+				it.set("i", float64(0))
+				it.set("done", false)
+				return it, true
+			}
+			if _, found := swFindMember(recv, name); found || !swIsLazy(recv) {
+				return nil, false
+			}
+			o := recv.(*jsObject)
+			if name == "next" && o.props["__swit"] != nil {
+				return swIterNext(o), true
+			}
+			if name == "makeIterator" {
+				return swMkIter(o), true
+			}
+			args := rt.swArgList(u(argv))
+			fa := len(args) == 1 && isCallable(args[0])
+			if name == "prefix" && len(args) == 1 {
+				it := swMkIter(o)
+				n := -1
+				if !fa {
+					n = int(swNum(rt, args[0]))
+				}
+				out := &jsArray{}
+				for n < 0 || len(out.elems) < n {
+					e := swIterNext(it)
+					if e == jsNull || (fa && !rt.truthy(rt.call(args[0], jsUndef, []interface{}{e}))) {
+						break
+					}
+					out.elems = append(out.elems, e)
+				}
+				return out, true
+			}
+			if (name == "first" || name == "contains") && fa {
+				it := swMkIter(o)
+				for e := swIterNext(it); e != jsNull; e = swIterNext(it) {
+					if rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
+						if name == "first" {
+							return e, true
+						}
+						return true, true
+					}
+				}
+				if name == "first" {
+					return jsNull, true
+				}
+				return false, true
+			}
+			if name == "next" {
+				return nil, false
+			}
+			return u(m["js_swmcall"]([]uint64{w(swSeqArr(o)), rt.wrapStr(name), argv})), true
+		}
+		m["js_swmkiter"] = func(a []uint64) uint64 {
+			if it := swMkIter(u(a[0])); it != nil {
+				return w(it)
+			}
+			return jsHNull
+		}
+		m["js_swnext"] = func(a []uint64) uint64 { return w(swIterNext(u(a[0]))) }
+		m["js_swseqarr"] = func(a []uint64) uint64 { return w(swSeqArr(u(a[0]))) }
 		m["js_swsetof"] = func(a []uint64) uint64 { return w(rt.swSetOf(u(a[0]))) }
 		m["js_swadoptdeep"] = func(a []uint64) uint64 {
 			ty, _ := u(a[1]).(string)
@@ -1041,6 +1220,9 @@ func init() {
 					if v, ok := swStrMethod(s, rt.toString(u(a[1])), rt.swArgList(u(a[2]))); ok {
 						return w(v)
 					}
+				}
+				if v, ok := swLazyMethod(u(a[0]), rt.toString(u(a[1])), a[2]); ok {
+					return w(v)
 				}
 				if fn := swFieldFn(rt, u(a[0]), rt.toString(u(a[1]))); fn != nil {
 					args, _ := u(a[2]).(*jsArray)
@@ -3401,6 +3583,20 @@ func swStrMethod(s, name string, args []interface{}) (interface{}, bool) {
 // above only ADDS members and takes over the refusal. Keeping the list explicit is
 // what makes "unknown Array method: X" reachable without re-implementing the eleven
 // the shared table already has.
+// swIsLazyName: the members a lazy sequence answers without declaring them - its
+// iterator's and the Sequence members of swIsSeqMember in
+// languages/swift-interpreter.abnf, which is the list to keep this in step with.
+func swIsLazyName(name string) bool {
+	switch name {
+	case "makeIterator", "next", "map", "filter", "sorted", "reversed", "enumerated",
+		"allSatisfy", "compactMap", "flatMap", "reduce", "prefix", "suffix", "dropFirst",
+		"dropLast", "min", "max", "forEach", "shuffled", "first", "last", "count",
+		"contains", "split", "drop", "firstIndex", "lastIndex", "elementsEqual":
+		return true
+	}
+	return false
+}
+
 func swSharedListMethod(name string) bool {
 	switch name {
 	case "add", "append", "pop", "removeLast", "size", "get", "contains", "map",

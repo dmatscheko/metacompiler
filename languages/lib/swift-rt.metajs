@@ -1627,6 +1627,7 @@ function js_mcall(recv, name, args) {
             // languages/swift-interpreter.abnf.
             var fld = recv[name]
             if (typeof fld == "function") { return fld.apply(undefined, args) }
+            if (swIsLazyMember(recv, name)) { return swLazyMethod(recv, name, args) }
             fail("unknown method '" + name + "' on an instance")
         }
         // A type descriptor's static method, declared or inherited, takes the
@@ -1635,6 +1636,7 @@ function js_mcall(recv, name, args) {
         if (typeof sf == "function") { return sf.apply(undefined, rtPrepend(recv, args)) }
         var f = recv[name]
         if (typeof f == "function") { return f.apply(undefined, args) }
+        if (swIsLazyMember(recv, name)) { return swLazyMethod(recv, name, args) }
         fail("unknown method '" + name + "'")
     }
     fail("method call '" + name + "' on a " + typeof recv)
@@ -2187,6 +2189,8 @@ function swSeqMethod(o, name, args) {
         }
         return acc
     }
+    // An IndexingIterator over a copy: the array's later edits do not reach it.
+    if (name === "makeIterator") { return {__swit: 3, st: rtCopyArr(o), i: 0, done: false} }
     fail("unknown Array method: " + name)
     return undefined
 }
@@ -2857,6 +2861,123 @@ function js_swmcall(recv, name, args) {
     if (name === "description") { return swFloDesc(recv) }
     fail("unknown Double method: " + name)
     return undefined
+}
+
+// ===================================================== Lazy sequences =======
+//
+// sequence(first:next:) / sequence(state:next:) are {__swseq: 1|2, st, fn}, and a
+// user type is a Sequence by its makeIterator() or, being its own iterator, by a
+// COPY of itself. The runtime's own iterators are {__swit: kind}: 1 and 2 unfold the
+// two sequence() forms, 3 walks an array's copy, 4 calls an AnyIterator's closure.
+// nil ends a walk, and a finished iterator stays finished. Twins: swMkIter /
+// swIterNext / swSeqArr / swLazyMethod in languages/swift-interpreter.abnf and
+// abnf/jsrtswift.go.
+function swIsLazy(v) {
+    if (!swIsObj(v) || rtIsArr(v)) { return false }
+    if (v["__swseq"] !== undefined || v["__swit"] !== undefined) { return true }
+    var cls = v["__class"]
+    if (cls === undefined || cls === null) { return false }
+    return typeof rtFindMethod(cls, "makeIterator") == "function" || typeof rtFindMethod(cls, "next") == "function"
+}
+function js_swmkiter(v) {
+    if (!swIsLazy(v)) { return null }
+    if (v["__swseq"] !== undefined) {
+        return {__swit: v["__swseq"], st: js_swcopy(v["st"]), fn: v["fn"], go: false, done: false}
+    }
+    if (v["__swit"] !== undefined) { return v }
+    if (typeof rtFindMethod(v["__class"], "makeIterator") == "function") { return js_swmcall(v, "makeIterator", []) }
+    return js_swcopy(v)
+}
+function js_swnext(it) {
+    var r = anytype
+    var k = it["__swit"]
+    if (k === undefined) {
+        r = js_swmcall(it, "next", [])
+        if (r === undefined) { return null }
+        return r
+    }
+    if (it["done"] === true) { return null }
+    if (k == 1) {
+        if (it["go"] === true) { r = it["fn"].apply(undefined, [it["st"]]) } else { r = it["st"] }
+        it["go"] = true
+        it["st"] = r
+    } else if (k == 2) {
+        var box = {__ref: 1, v: it["st"]}
+        r = it["fn"].apply(undefined, [box])
+        it["st"] = box["v"]
+    } else if (k == 3) {
+        var arr = it["st"]
+        var i = swNum(it["i"])
+        r = null
+        if (i < arr.length) { r = arr[i] }
+        it["i"] = i + 1
+    } else {
+        r = it["fn"].apply(undefined, [])
+    }
+    if (r === null || r === undefined) {
+        it["done"] = true
+        return null
+    }
+    return r
+}
+function js_swseqarr(v) {
+    var it = js_swmkiter(v)
+    if (it === null) { return v }
+    var out = []
+    var e = js_swnext(it)
+    while (e !== null) {
+        out.push(e)
+        e = js_swnext(it)
+    }
+    return out
+}
+// The members a lazy sequence answers without declaring them: its iterator's and
+// the Sequence members of swIsSeqMember in languages/swift-interpreter.abnf.
+function swIsLazyMember(v, name) {
+    var known = name === "makeIterator" || name === "next" || name === "map" || name === "filter"
+        || name === "sorted" || name === "reversed" || name === "enumerated" || name === "allSatisfy"
+        || name === "compactMap" || name === "flatMap" || name === "reduce" || name === "prefix"
+        || name === "suffix" || name === "dropFirst" || name === "dropLast" || name === "min"
+        || name === "max" || name === "forEach" || name === "shuffled" || name === "first"
+        || name === "last" || name === "count" || name === "contains" || name === "split"
+        || name === "drop" || name === "firstIndex" || name === "lastIndex" || name === "elementsEqual"
+    return known && swIsLazy(v)
+}
+// prefix and first(where:) / contains(where:) stop at the element that decides
+// them, so they answer on an endless sequence too; every other member runs on the
+// elements.
+function swLazyMethod(t, name, args) {
+    if (name === "next" && t["__swit"] !== undefined) { return js_swnext(t) }
+    if (name === "makeIterator") { return js_swmkiter(t) }
+    var fa = args.length == 1 && typeof args[0] == "function"
+    if (name === "prefix" && args.length == 1) {
+        var it = js_swmkiter(t)
+        var n = -1
+        if (!fa) { n = swNum(args[0]) }
+        var out = []
+        while (n < 0 || out.length < n) {
+            var e = js_swnext(it)
+            if (e === null) { break }
+            if (fa && !swTruth(args[0].apply(undefined, [e]))) { break }
+            out.push(e)
+        }
+        return out
+    }
+    if ((name === "first" || name === "contains") && fa) {
+        var it2 = js_swmkiter(t)
+        var x = js_swnext(it2)
+        while (x !== null) {
+            if (swTruth(args[0].apply(undefined, [x]))) {
+                if (name === "first") { return x }
+                return true
+            }
+            x = js_swnext(it2)
+        }
+        if (name === "first") { return null }
+        return false
+    }
+    if (name === "next") { fail("unknown method 'next'") }
+    return js_swmcall(js_swseqarr(t), name, args)
 }
 
 // Swift's SMART SHIFT: an over-shift answers 0 (or the sign, for a signed >>) and

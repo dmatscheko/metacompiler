@@ -3826,6 +3826,105 @@ func s81() {
     check("81m", log == "x 1\n\"q\\n\" [1.5]" && withExtendedLifetime(5) { $0 * 2 } == 10)
 }
 
+// ===== SECTION 82: lazy sequences - sequence(), Sequence and IteratorProtocol =====
+// A user type is a Sequence by its makeIterator(), or by being its own iterator
+// (walked as a COPY, so a second walk starts over); sequence(first:next:) and
+// sequence(state:next:) unfold one element per step, so an endless one is walked
+// until the body breaks out, and prefix / first(where:) stop early. Every value
+// read off swiftc 6.1.2.
+struct Down82: Sequence, IteratorProtocol {
+    var count: Int
+    mutating func next() -> Int? {
+        if count == 0 { return nil }
+        count -= 1
+        return count + 1
+    }
+}
+final class FibIt82: IteratorProtocol {
+    var a = 0
+    var b = 1
+    let limit: Int
+    init(limit: Int) { self.limit = limit }
+    func next() -> Int? {
+        if a > limit { return nil }
+        let r = a
+        b = r + b
+        a = b - r
+        return r
+    }
+}
+final class Fib82: Sequence {
+    let limit: Int
+    init(limit: Int) { self.limit = limit }
+    func makeIterator() -> FibIt82 { return FibIt82(limit: limit) }
+}
+struct Bag82: Sequence {
+    var items: [String]
+    func makeIterator() -> IndexingIterator<[String]> { return items.makeIterator() }
+}
+struct Three82: Sequence {
+    func makeIterator() -> AnyIterator<Int> {
+        var k = 0
+        return AnyIterator {
+            k += 1
+            return k <= 3 ? k : nil
+        }
+    }
+}
+func s82() {
+    let ns = [3, 20]
+    let d = Down82(count: ns[0])
+    var walked = ""
+    for x in d { walked += "\(x)" }
+    for x in d { walked += "\(x)" }
+    check("82a", walked == "321321" && d.count == 3 && Array(Down82(count: 2)) == [2, 1])
+    check("82b", Array(Fib82(limit: ns[1])) == [0, 1, 1, 2, 3, 5, 8, 13]
+                 && Fib82(limit: 30).map { $0 * 10 } == [0, 10, 10, 20, 30, 50, 80, 130, 210]
+                 && Fib82(limit: 30).filter { $0 % 2 == 0 } == [0, 2, 8] && Fib82(limit: 30).reduce(0, +) == 54)
+    var en = ""
+    for (i, x) in Down82(count: 2).enumerated() { en += "\(i)\(x)" }
+    var bag = ""
+    for s in Bag82(items: ["a", "b"]) { bag += s }
+    check("82c", en == "0211" && bag == "ab" && Array(Three82()) == [1, 2, 3]
+                 && Down82(count: 5).contains(3) && !Down82(count: 5).contains(9))
+    let pows = sequence(first: 1, next: { $0 * 2 })
+    var inf = [Int]()
+    for v in pows {
+        if v > 64 { break }
+        inf.append(v)
+    }
+    check("82d", inf == [1, 2, 4, 8, 16, 32, 64] && pows.first(where: { $0 > 1000 }) == 1024
+                 && pows.prefix(while: { $0 < 50 }) == [1, 2, 4, 8, 16, 32] && Array(pows.prefix(3)) == [1, 2, 4]
+                 && pows.contains(where: { $0 == 64 }))
+    var pq = ""
+    outer: for p in pows {
+        for q in sequence(first: p, next: { $0 + 1 }) {
+            if q > p + 1 { continue outer }
+            if p > 4 { break outer }
+            pq += "\(p)\(q) "
+        }
+    }
+    check("82e", pq == "11 12 22 23 44 45 " && Array(sequence(first: 10, next: { $0 > 0 ? $0 - 4 : nil })) == [10, 6, 2, -2])
+    let fib = sequence(state: (0, 1), next: { (s: inout (Int, Int)) -> Int? in
+        let r = s.0
+        s = (s.1, s.0 + s.1)
+        return r
+    })
+    let sq = sequence(state: 0, next: { (n: inout Int) -> Int? in
+        n += 1
+        return n <= 3 ? n * n : nil
+    })
+    var sqs = 0
+    for v in sq { sqs += v }
+    check("82f", Array(fib.prefix(8)) == [0, 1, 1, 2, 3, 5, 8, 13] && sqs == 14 && Array(sq) == [1, 4, 9])
+    var it = sequence(first: 5, next: { $0 > 1 ? $0 - 2 : nil }).makeIterator()
+    var down = [Int]()
+    while let v = it.next() { down.append(v) }
+    var ai = [7, 8].makeIterator()
+    let a1 = ai.next(), a2 = ai.next(), a3 = ai.next()
+    check("82g", down == [5, 3, 1] && a1 == 7 && a2 == 8 && a3 == nil)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3908,6 +4007,7 @@ func main() {
     s79() // SECTION-CALL 79
     s80() // SECTION-CALL 80
     s81() // SECTION-CALL 81
+    s82() // SECTION-CALL 82
     print("full: \(checks) checks, \(fails) failures")
 }
 
