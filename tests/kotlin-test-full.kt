@@ -3945,17 +3945,20 @@ fun sec80() {
     check("fx16", "%.2f".format(0.0) == "0.00")
 }
 
-// SECTION 81 - uppercase()/lowercase() on characters whose simple and full
-// mappings agree. Real kotlin.text.uppercase() is locale-invariant FULL Unicode
-// case mapping (String.toUpperCase(Locale.ROOT)): "\u00df".uppercase() is "SS",
-// "\u0130".lowercase() is "i" + U+0307. These engines answer the SIMPLE per-rune
-// mapping (full mapping in the C floor is too slow, manual chapter 5), so the
-// characters that grow under the full map are deliberately not asserted; every row
-// here matches java's toUpperCase/toLowerCase(Locale.ROOT).
+// SECTION 81 - uppercase()/lowercase(). kotlin.text.uppercase() is
+// locale-invariant FULL Unicode case mapping (String.toUpperCase(Locale.ROOT)):
+// "\u00df".uppercase() is "SS", "\u0130".lowercase() is "i" + U+0307, and a
+// word-final capital sigma lowercases to U+03C2. A Char's uppercaseChar() stays
+// the simple one-to-one map. Every row is java's toUpperCase/toLowerCase(Locale.ROOT).
 //
 // Every character is a \uXXXX ESCAPE, never a raw literal: manual chapter 4,
 // test specific characters by CODE.
 fun sec81() {
+    check("cm81a", "\u00dfx".uppercase() == "SSX" && "\ufb01".uppercase() == "FI" &&
+                   "\u0130".lowercase() == "i\u0307" && "\u00df"[0].uppercaseChar() == '\u00df')
+    check("cm81c", '\u00df'.uppercase() == "SS" && '\u0130'.lowercase() == "i\u0307" && '\u00df'.uppercaseChar() == '\u00df')
+    check("cm81b", "A\u03a3".lowercase() == "a\u03c2" && "\u03a3A".lowercase() == "\u03c3a" &&
+                   "\u1fb3".uppercase() == "\u0391\u0399" && "\u0390".uppercase().length == 3)
     // Dotless i, final sigma, capital sharp s.
     check("cm81g", "\u0131".uppercase()[0].code == 0x0049 && "\u03c2".uppercase()[0].code == 0x03A3 &&
                    "\u1e9e".lowercase()[0].code == 0x00DF)

@@ -535,6 +535,10 @@ function swCopyStruct(v, cls) {
     }
     return out
 }
+// String.uppercased() / lowercased(): the full mapping without Final_Sigma
+// (unicodeCase modes 3 and 2). Twin of js_swcase in abnf/jsrtswift.go.
+function js_swcase(s, up) { return unicodeCase(s, up ? 3 : 2) }
+
 // The __class test comes BEFORE the array test on purpose: rtIsArr is "an object
 // with a numeric length", and `struct S { var length: Int }` answers it. An
 // instance is identified by its descriptor, an array never has one.

@@ -3792,9 +3792,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a Python method call reaches a different implementation in each
     // (interpreter / llvm.Run's Go twin / the native C floor + layer 2).
     //
-    // Everything below is built out of the seven string primitives the frozen MetaJS
-    // subset has (.length, charAt, charCodeAt, substring, indexOf, toUpperCase,
-    // toLowerCase) plus String.fromCharCode, so that the same source compiles in the
+    // Everything below is built out of the five string primitives the frozen MetaJS
+    // subset has (.length, charAt, charCodeAt, substring, indexOf) plus
+    // String.fromCharCode and unicodeCase, so that the same source compiles in the
     // tag-script host AND through metajs-to-llvm-ir.abnf.
     //
     // INDEXING. CPython counts CODE POINTS and the floor's strings are UTF-16. The
@@ -3803,13 +3803,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // zfill, and the per-character walks of title/swapcase/upper/lower) count code
     // POINTS directly.
     //
-    // CASE MAPPING is done per code point WITH A LENGTH GUARD: goja's toUpperCase is
-    // ECMAScript's FULL mapping ("ss" from "ß") while the frozen engine's is Go's
-    // strings.ToUpper and the C floor's is Go's unicode table, both of which are the
-    // SIMPLE mapping. Rejecting any mapping that changes the unit count makes all
-    // three engines agree; the price is that "ß".upper() is "ß" here and
-    // "SS" in CPython. U+0130 is the one residual: the floor maps it to "i" while the
-    // other two answer a two-unit sequence that the guard rejects.
+    // CASE MAPPING. upper() and lower() are CPython's full mapping with Final_Sigma
+    // (unicodeCase modes 3 and 6, abnf/casemap.go): "ß".upper() is "SS". The per-character
+    // helpers behind classification, title, capitalize, swapcase and casefold use the
+    // SIMPLE mapping (modes 1 and 0), one character for one.
     //
     // CLASSIFICATION (isalpha / isdigit / isspace / isupper / islower) is ASCII-exact.
     // Outside ASCII, "cased" is derived from the case mapping (upper != lower), which
@@ -3871,9 +3868,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (c >= 97 && c <= 122) { return String.fromCharCode(c - 32) }
             return ch
         }
-        var u = ch.toUpperCase()
-        if (u.length != ch.length) { return ch }
-        return u
+        return unicodeCase(ch, 1)
     }
 
     function pySLoCh(ch) {
@@ -3882,9 +3877,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (c >= 65 && c <= 90) { return String.fromCharCode(c + 32) }
             return ch
         }
-        var u = ch.toLowerCase()
-        if (u.length != ch.length) { return ch }
-        return u
+        return unicodeCase(ch, 0)
     }
 
     // CASED CHARACTERS THE SIMPLE MAPPING LEAVES ALONE. CPython's cased / lower /
@@ -3955,15 +3948,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function pySIsCased(ch) { return pySUpCh(ch) != pySLoCh(ch) || pySCaseOnly(ch) != 0 }
-    // The character that opens a title-cased word: the titlecase form of the four
-    // Latin digraphs (U+01C4..U+01CC, U+01F1..U+01F3 - DZ, LJ, NJ, DZ), whose
-    // titlecase differs from their uppercase, else the uppercase.
-    function pySTiCh(ch) {
-        var c = ch.charCodeAt(0)
-        if (c >= 452 && c <= 460) { return String.fromCharCode(c - (c - 452) % 3 + 1) }
-        if (c >= 497 && c <= 499) { return String.fromCharCode(498) }
-        return pySUpCh(ch)
-    }
+    // lower_ucs4 (CPython Objects/unicodeobject.c): a character's full lowercase IN
+    // ITS STRING, where a capital sigma may end a word. low is unicodeCase(s, 6) and at
+    // the unit offset where ch's lowercase starts in it; every character but sigma
+    // lowercases the same alone, and sigma is one unit either way.
+    function pySLowAt(low, at, ch) { return low.substring(at, at + unicodeCase(ch, 2).length) }
     function pySIsUpCh(ch) {
         var k = pySCaseOnly(ch)
         if (k != 0) { return k == 2 }
@@ -4259,13 +4248,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // PREVIOUS one was cased, which is why "they're" titles to "They'Re".
     function pySTitle(s) {
         var cs = pySChars(s)
+        var low = unicodeCase(s, 6)
+        var at = 0
         var out = ""
         var prev = false
         var i = 0
         while (i < cs.length) {
             var ch = cs[i]
-            if (prev) { out = out + pySLoCh(ch) }
-            else { out = out + pySTiCh(ch) }
+            if (prev) { out = out + pySLowAt(low, at, ch) }
+            else { out = out + unicodeCase(ch, 10) }
+            at = at + unicodeCase(ch, 2).length
             prev = pySIsCased(ch)
             i = i + 1
         }
@@ -4296,38 +4288,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function pySCapitalize(s) {
-        var cs = pySChars(s)
-        var out = ""
-        var i = 0
-        while (i < cs.length) {
-            if (i == 0) { out = out + pySTiCh(cs[i]) }
-            else { out = out + pySLoCh(cs[i]) }
-            i = i + 1
-        }
-        return out
+        if (s.length == 0) { return s }
+        var c0 = s.substring(0, pySCPW(s, 0))
+        var low = unicodeCase(s, 6)
+        return unicodeCase(c0, 10) + low.substring(unicodeCase(c0, 2).length, low.length)
     }
 
     function pySSwapCase(s) {
         var cs = pySChars(s)
+        var low = unicodeCase(s, 6)
+        var at = 0
         var out = ""
         var i = 0
         while (i < cs.length) {
             var ch = cs[i]
-            if (pySIsUpCh(ch)) { out = out + pySLoCh(ch) }
-            else if (pySIsLoCh(ch)) { out = out + pySUpCh(ch) }
+            if (pySIsUpCh(ch)) { out = out + pySLowAt(low, at, ch) }
+            else if (pySIsLoCh(ch)) { out = out + unicodeCase(ch, 3) }
             else { out = out + ch }
-            i = i + 1
-        }
-        return out
-    }
-
-    function pySMapCase(s, up) {
-        var cs = pySChars(s)
-        var out = ""
-        var i = 0
-        while (i < cs.length) {
-            if (up) { out = out + pySUpCh(cs[i]) }
-            else { out = out + pySLoCh(cs[i]) }
+            at = at + unicodeCase(ch, 2).length
             i = i + 1
         }
         return out
@@ -4770,8 +4748,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (kw !== null && kw !== undefined && kw.keys.length > 0) { args = pyStrKwArgs(name, args, kw) }
         var n = s.length
         var cn = 0 // The code point count, taken only by the methods that need it.
-        if (name == "upper") { return pySMapCase(s, true) }
-        if (name == "lower" || name == "casefold") { return pySMapCase(s, false) }
+        if (name == "upper") { return unicodeCase(s, 3) }
+        if (name == "lower") { return unicodeCase(s, 6) }
+        if (name == "casefold") { return unicodeCase(s, 18) }
         if (name == "title") { return pySTitle(s) }
         if (name == "capitalize") { return pySCapitalize(s) }
         if (name == "swapcase") { return pySSwapCase(s) }

@@ -2661,9 +2661,9 @@ func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bo
 	// Kotlin 1.5 renamed toUpperCase/toLowerCase to uppercase/lowercase; the old
 	// spellings are deprecated but still resolve, so both halves accept all four.
 	case "uppercase", "toUpperCase":
-		return strings.ToUpper(s), true
+		return caseMapMode(s, caseUpper|caseFull), true
 	case "lowercase", "toLowerCase":
-		return strings.ToLower(s), true
+		return caseMapMode(s, caseFull|caseSigma), true
 	case "contains":
 		return rt.strIndexOf(s, rt.ktStr2(argAt(args, 0))) >= 0, true
 	case "hashCode":
@@ -4062,9 +4062,9 @@ func (rt *jsrt) ktCharMethod(c jsChar, name string, args []interface{}) (interfa
 	case "lowercaseChar":
 		return jsChar{code: int32(ktLower(r))}, true
 	case "uppercase":
-		return string(ktUpper(r)), true
+		return caseMapMode(string(r), caseUpper|caseFull), true
 	case "lowercase":
-		return string(ktLower(r)), true
+		return caseMapMode(string(r), caseFull|caseSigma), true
 	case "digitToInt":
 		if r >= '0' && r <= '9' {
 			return float64(r - '0'), true

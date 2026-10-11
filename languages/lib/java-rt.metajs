@@ -1988,8 +1988,9 @@ function js_jvstrm(s, name, args) {
     if (name == "strip") { return jxStrip(s, true, true) }
     if (name == "stripLeading") { return jxStrip(s, true, false) }
     if (name == "stripTrailing") { return jxStrip(s, false, true) }
-    if (name == "toUpperCase") { return jxUpper(s) }
-    if (name == "toLowerCase") { return jxLower(s) }
+    // The FULL mapping with the final sigma (lib/utf16-strings.js has the rest).
+    if (name == "toUpperCase") { return unicodeCase(s, 3) }
+    if (name == "toLowerCase") { return unicodeCase(s, 6) }
     if (name == "repeat") {
         var cnt = jvI(a0)
         if (cnt < 0) { jvThrowCls(jvIaeCls, "count is negative: " + cnt) }

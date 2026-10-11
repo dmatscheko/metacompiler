@@ -2740,10 +2740,10 @@ def s40():
     check("nm7", r3 == "NameError")
 
 
-# ===== SECTION 41: case mapping of characters whose simple and full maps agree =====
-# CPython does FULL Unicode case mapping ("\u00df".upper() is "SS"); this
-# project answers the simple per-code-point map, so only characters on which the
-# two agree are asserted here: dotless i, final sigma, capital sharp s.
+# ===== SECTION 41: case mapping =====
+# CPython maps case FULLY ("\u00df".upper() is "SS", "\u0130".lower() is "i"
+# plus U+0307) with Final_Sigma in lower(), title(), capitalize() and
+# swapcase(), and casefold() is the full case folding.
 #
 # Every character is built with chr(<code>) rather than written as a literal -
 # manual chapter 4, test specific characters by CODE.
@@ -2754,6 +2754,14 @@ def s41():
     u16 = [0x019B, 0x0264, 0x1C89, 0xA7DC]
     check("cmp5", chr(u16[0]).upper() == chr(0xA7DC) and chr(u16[1]).upper() == chr(0xA7CB) and
                   chr(u16[2]).lower() == chr(0x1C8A) and chr(u16[3]).lower() == chr(0x019B))
+    sz = chr(0xDF)
+    sg = chr(0x3A3)
+    check("cmp6", (sz + "x").upper() == "SSX" and chr(0x130).lower() == "i" + chr(0x307) and
+                  chr(0xFB01).upper() == "FI" and len(chr(0x390).upper()) == 3 and chr(0x1FB3).upper() == chr(0x391) + chr(0x399))
+    check("cmp7", ("A" + sg).lower() == "a" + chr(0x3C2) and (sg + "A").lower() == chr(0x3C3) + "a" and
+                  ("A" + sg + ".").lower() == "a" + chr(0x3C2) + "." and ("1" + sg).lower() == "1" + chr(0x3C3))
+    check("cmp8", (sz + "a").title() == "Ssa" and (sz + "a").capitalize() == "Ssa" and (sz + "A").swapcase() == "SSa" and
+                  ("A" + sg + " " + sg).title() == "A" + chr(0x3C2) + " " + sg and (sz + chr(0x3C2)).casefold() == "ss" + chr(0x3C3))
 
 
 # ===== SECTION 42: an unhashable set member or dict key =====

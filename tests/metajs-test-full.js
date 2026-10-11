@@ -22,15 +22,15 @@
 //     and prints the summary line 'full: <checks> checks, <failures> failures'
 //   - main() returns the failure count (exit 0 == full support, verified)
 //
-// All three engines bind the SAME 50 host globals - the C floor's seed_root list in
+// All three engines bind the SAME 51 host globals - the C floor's seed_root list in
 // languages/lib/runtime.c is the authority. SECTION 31 asserts every one of them on
 // both halves; abnf/hostglobals_test.go parses the three sources and fails
 // `go test ./abnf/` if a future name lands in fewer than three of them.
 //
-// SECTION 32 is string CASE MAPPING: all four engines use the SIMPLE per-rune
-// mapping (Go's strings.ToUpper), so "ss".toUpperCase() keeps one character, and
+// SECTION 32 is string CASE MAPPING: toUpperCase/toLowerCase are ECMAScript's
+// FULL mapping in all four engines (abnf/casemap.go, runtime.c case_str), and
 // installGojaCaseMapping in abnf/commonscript.go routes goja through the same Go
-// function the other three engines call.
+// function the frozen engine calls.
 //
 // Deliberately out of scope, because MetaJS does not have them (they belong to
 // tests/js-test-full.js): classes, arrow functions, template literals,
@@ -1643,7 +1643,7 @@ function s31() {
     // fail() is a runtime ERROR and exits, so only its binding can be checked.
     check("hg04", typeof fail === "function" && typeof exit === "function")
     check("hg05", typeof parseInt === "function" && typeof parseFloat === "function")
-    check("hg06", typeof byteLen === "function" && typeof floPrec === "function")
+    check("hg06", typeof byteLen === "function" && typeof floPrec === "function" && typeof unicodeCase === "function")
     // The eleven sized-integer names.
     check("hg07", typeof sint === "function" && typeof sintRaw === "function")
     check("hg08", typeof sintIs === "function" && typeof sintHi === "function")
@@ -1750,32 +1750,39 @@ function s31() {
     check("hg38", typeof Math.random === "function" && rok === 50)
 }
 
-// ===== SECTION 32: string case mapping is the SIMPLE per-rune mapping =====
-// Real JavaScript uses the FULL Unicode case mapping, in which a few characters
-// change length: "ss".toUpperCase() is "SS" in node, "fi" (the U+FB01 ligature)
-// becomes "FI", and "I" (U+0130) lowercases to "i" plus a combining dot. This
-// project answers the SIMPLE per-rune mapping in all four engines instead - Go's
-// strings.ToUpper / strings.ToLower. Full case mapping in the C floor (`case_map`)
-// was too slow on a real workload (docs/working-on-this-project.md chapter 5); goja
-// calls the same Go function the frozen engine calls (installGojaCaseMapping in
-// abnf/commonscript.go).
+// ===== SECTION 32: string case mapping is ECMAScript's FULL mapping =====
+// toUpperCase / toLowerCase use the full Unicode case mapping, in which a few
+// characters change length - "ss".toUpperCase() is "SS", "fi" (the U+FB01
+// ligature) becomes "FI", "I" (U+0130) lowercases to "i" plus a combining dot -
+// and a final capital sigma lowercases to "s" (U+03C2). Every row is node's.
+// unicodeCase(s, mode) reaches the simple mapping (mode 0/1) the languages that
+// specify it need (abnf/casemap.go).
 function s32() {
     check("cm01", "abc".toUpperCase() === "ABC" && "ABC".toLowerCase() === "abc")
     check("cm02", "é".toUpperCase() === "É" && "É".toLowerCase() === "é")
     // The three characters where the full mapping differs from the simple one.
-    check("cm03", "ß".toUpperCase() === "ß" && "ß".toUpperCase().length === 1)
-    check("cm04", "ﬁ".toUpperCase() === "ﬁ" && "ﬁ".toUpperCase().length === 1)
-    check("cm05", "İ".toLowerCase() === "i" && "İ".toLowerCase().length === 1)
-    // Characters whose simple mapping IS the answer, so both models agree.
+    check("cm03", "ß".toUpperCase() === "SS" && "ß".toUpperCase().length === 2)
+    check("cm04", "ﬁ".toUpperCase() === "FI" && "ﬁ".toUpperCase().length === 2)
+    check("cm05", "İ".toLowerCase() === "i" + String.fromCharCode(775) && "İ".toLowerCase().length === 2)
     check("cm06", "ı".toUpperCase() === "I" && "ǉ".toUpperCase() === "Ǉ")
     check("cm07", "I".toLowerCase() === "i" && "i".toUpperCase() === "I")
-    // Case mapping never changes the code-unit count in the simple model.
-    check("cm08", "ßﬁİ".toUpperCase().length === 3 && "ßﬁİ".toLowerCase().length === 3)
+    check("cm08", "ßﬁİ".toUpperCase().length === 5 && "ßﬁİ".toLowerCase().length === 4)
     // Astral pairs still map (the surrogate pair is one rune to Go): U+10428
     // DESERET SMALL LETTER LONG I upper-cases to U+10400.
     check("cm09", String.fromCharCode(55297, 56360).toUpperCase() ===
                   String.fromCharCode(55297, 56320))
     check("cm10", "".toUpperCase() === "" && " ".toUpperCase() === " ")
+    // Final_Sigma: a cased letter before, none after (case-ignorable skipped).
+    var sg = String.fromCharCode(931)
+    var fs = String.fromCharCode(962)
+    var ss = String.fromCharCode(963)
+    check("cm10a", sg.toLowerCase() === ss && ("a" + sg + ".").toLowerCase() === "a" + fs + "." &&
+                   ("A" + sg + "b").toLowerCase() === "a" + ss + "b" &&
+                   ("A" + String.fromCharCode(769) + sg).toLowerCase() === "a" + String.fromCharCode(769) + fs)
+    check("cm10b", "ᾳ".toUpperCase() === String.fromCharCode(913, 921) && "ΐ".toUpperCase().length === 3)
+    // The simple mapping, through unicodeCase.
+    check("cm10c", unicodeCase("ß", 1) === "ß" && unicodeCase("İ", 0) === "i" && unicodeCase("a" + sg, 0) === "a" + ss &&
+                   unicodeCase("a" + sg, 2) === "a" + ss && unicodeCase("ß", 3) === "SS" && unicodeCase("a" + sg, 6) === "a" + fs)
     // A lone surrogate has no case and passes through (node), in every engine.
     var lone = String.fromCharCode(55296) + "a" + String.fromCharCode(56320)
     var lu = lone.toUpperCase()

@@ -2355,12 +2355,11 @@ function rbFloatWord(x) {
 // languages/lib/runtime.metajs. Ruby's Integer#to_s(base) is what reaches its
 // int64-saturating branches: 1e100.to_i.to_s(16) is "7fffffffffffffff".
 
-// strings.ToUpper / strings.ToLower - the full Unicode SIMPLE mapping. The C
-// floor's own toUpperCase / toLowerCase are exactly that (runtime.c generated its
-// ranges from the Go runtime's own answers), so an ASCII loop here would be a
-// third, worse, copy.
+// String#upcase / #downcase: the full Unicode mapping, without Final_Sigma
+// (unicodeCase, abnf/casemap.go). Twin of the "upcase" / "downcase" arms in
+// abnf/jsrt.go.
 function rbUpper(s) { return s.toUpperCase() }
-function rbLower(s) { return s.toLowerCase() }
+function rbLower(s) { return unicodeCase(s, 2) }
 
 // MRI's sprintf counts CHARACTERS in a width and in a precision, not bytes:
 // "%10s" % "café" is six spaces and four characters, and its result has
@@ -6920,7 +6919,7 @@ function rbMethod(target, name, args) {
         // line.
         if (name == "capitalize") {
             if (target.length == 0) { return target }
-            return rbUpper(target.charAt(0)) + rbLower(target.slice(1))
+            return unicodeCase(target.charAt(0), 10) + rbLower(target.slice(1))
         }
         if (name == "reverse") {
             var rv = ""
@@ -8421,13 +8420,13 @@ function smMethod(s, name, sargs, nargs) {
         return {ok: true, v: s}
     }
     if (name == "casecmp") {
-        var la = s.toLowerCase()
-        var lb = sargs[0].toLowerCase()
+        var la = unicodeCase(s, 0)
+        var lb = unicodeCase(sargs[0], 0)
         if (la < lb) { return {ok: true, v: 0 - 1} }
         if (la > lb) { return {ok: true, v: 1} }
         return {ok: true, v: 0}
     }
-    if (name == "casecmp?") { return {ok: true, v: s.toLowerCase() == sargs[0].toLowerCase()} }
+    if (name == "casecmp?") { return {ok: true, v: unicodeCase(s, 18) == unicodeCase(sargs[0], 18)} }
     if (name == "rindex") {
         var ri = smRindex(s, sargs[0])
         if (ri < 0) { return {ok: true, v: null} }

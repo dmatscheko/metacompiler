@@ -16,21 +16,10 @@ func jxIsWs(c int) bool {
 		(c >= 8200 && c <= 8202) || c == 8232 || c == 8233 || c == 8287 || c == 12288
 }
 
-func jxAscii(s string) bool { return strASCII(s) }
-
-func jxMapUnits(s string, f func(int) int, ascii func(string) string) string {
-	if jxAscii(s) {
-		return ascii(s)
-	}
-	u := strUnits(s)
-	for i, c := range u {
-		u[i] = uint16(f(int(c)))
-	}
-	return strFromUnits(u)
-}
-
-func jxUpper(s string) string { return jxMapUnits(s, jvChUp, strings.ToUpper) }
-func jxLower(s string) string { return jxMapUnits(s, jvChLo, strings.ToLower) }
+// The simple mapping (lib/utf16-strings.js); java's String.toUpperCase /
+// toLowerCase map fully, at their own arms.
+func jxUpper(s string) string { return caseMapMode(s, caseUpper) }
+func jxLower(s string) string { return caseMapMode(s, 0) }
 
 func jxTrim(s string) string {
 	u := strUnits(s)
@@ -468,7 +457,7 @@ func (rt *jsrt) jxConv(conv rune, flags string, width, prec int, v interface{}) 
 		rt.fail("UnknownFormatConversionException: Conversion = '%c'", conv)
 	}
 	if up {
-		body = jxUpper(body)
+		body = caseMapMode(body, caseUpper|caseFull)
 	}
 	return jxPad(body, flags, width)
 }
@@ -503,7 +492,7 @@ func jxNum(neg bool, digits, flags string, width int, up bool) string {
 	}
 	body := digits
 	if up {
-		body = jxUpper(body)
+		body = caseMapMode(body, caseUpper|caseFull)
 	}
 	if strings.Contains(flags, "0") {
 		for len(pre)+len(body)+len(post) < width {
@@ -890,9 +879,9 @@ func init() {
 			case "stripTrailing":
 				r = jxStrip(s, false, true)
 			case "toUpperCase":
-				r = jxUpper(s)
+				r = caseMapMode(s, caseUpper|caseFull)
 			case "toLowerCase":
-				r = jxLower(s)
+				r = caseMapMode(s, caseFull|caseSigma)
 			case "repeat":
 				n := num(0)
 				if n < 0 {

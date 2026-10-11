@@ -618,22 +618,17 @@ func jvCharMembers(o *jsObject) {
 	}))
 }
 
-// A surrogate maps to itself, as it does in the MetaJS hosts.
+// Character.toUpperCase / toLowerCase: the simple mapping of one unit. Twin of
+// jxChUp / jxChLo in languages/lib/java-strings.js.
 func jvChUp(c int) int {
-	if c >= 0xD800 && c <= 0xDFFF {
-		return c
-	}
-	if s := utf16.Encode([]rune(strings.ToUpper(string(rune(c))))); len(s) == 1 {
+	if s := strUnits(caseMapMode(strFromUnits([]uint16{uint16(c)}), caseUpper)); len(s) == 1 {
 		return int(s[0])
 	}
 	return c
 }
 
 func jvChLo(c int) int {
-	if c >= 0xD800 && c <= 0xDFFF {
-		return c
-	}
-	if s := utf16.Encode([]rune(strings.ToLower(string(rune(c))))); len(s) == 1 {
+	if s := strUnits(caseMapMode(strFromUnits([]uint16{uint16(c)}), 0)); len(s) == 1 {
 		return int(s[0])
 	}
 	return c

@@ -1031,6 +1031,8 @@ KwDefault   = "default" KwEnd ;
         "sprint": function() { return sprint.apply(undefined, siPrintArgs(arguments)) },
         // The UTF-8 byte length; .length counts UTF-16 code units. Host id 32.
         "byteLen": byteLen,
+        // Upper or lower case, simple or full. Host id 97.
+        "unicodeCase": unicodeCase,
         "fail": failHost,
         // Infinity and NaN are values, not functions, and the dialect cannot write
         // either as a literal (there is no exponent literal - manual chapter 4).

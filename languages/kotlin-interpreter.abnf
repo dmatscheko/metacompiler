@@ -4617,14 +4617,16 @@ NotMemberKw = :script(~~
         if ((code >= 97 && code <= 122) || (code >= 65 && code <= 90)) { return true }
         if (code <= 127) { return false }
         var g = String.fromCharCode(code)
-        return g.toUpperCase() != g.toLowerCase()
+        return unicodeCase(g, 1) != unicodeCase(g, 0)
     }
+    // A Char's case is the SIMPLE mapping of one unit (unicodeCase modes 1 and 0); a
+    // String's uppercase()/lowercase() is the full one, toUpperCase's.
     function kUpperCode(code) {
-        var u = String.fromCharCode(code).toUpperCase()
+        var u = unicodeCase(String.fromCharCode(code), 1)
         return u.length == 1 ? u.charCodeAt(0) : code
     }
     function kLowerCode(code) {
-        var l = String.fromCharCode(code).toLowerCase()
+        var l = unicodeCase(String.fromCharCode(code), 0)
         return l.length == 1 ? l.charCodeAt(0) : code
     }
     function kCharMethod(cv, name, args) {
@@ -4641,8 +4643,8 @@ NotMemberKw = :script(~~
         if (name == "isLowerCase") { return {v: code >= 97 && code <= 122} }
         if (name == "uppercaseChar") { return {v: kChar(kUpperCode(code))} }
         if (name == "lowercaseChar") { return {v: kChar(kLowerCode(code))} }
-        if (name == "uppercase") { return {v: String.fromCharCode(kUpperCode(code))} }
-        if (name == "lowercase") { return {v: String.fromCharCode(kLowerCode(code))} }
+        if (name == "uppercase") { return {v: unicodeCase(String.fromCharCode(code), 3)} }
+        if (name == "lowercase") { return {v: unicodeCase(String.fromCharCode(code), 6)} }
         if (name == "digitToInt") {
             if (code < 48 || code > 57) { fail("Char \"" + String.fromCharCode(code) + "\" is not a digit") }
             return {v: code - 48}
@@ -4849,7 +4851,7 @@ NotMemberKw = :script(~~
             if (name == "replaceFirstChar" && typeof args[0] == "function") {
                 return {v: kstr2(args[0](kChar(sv.charCodeAt(0)))) + sv.substring(1, sv.length)}
             }
-            head = (name == "decapitalize") ? head.toLowerCase() : head.toUpperCase()
+            head = unicodeCase(head, (name == "decapitalize") ? 0 : 1)
             return {v: head + sv.substring(1, sv.length)}
         }
         if (name == "subSequence") { return {v: sv.substring(kNum(args[0]), kNum(args[1]))} }

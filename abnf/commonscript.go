@@ -503,37 +503,20 @@ func installGojaFnMeta(vm *goja.Runtime) {
 }
 
 // installGojaCaseMapping replaces goja's String.prototype.toUpperCase and
-// toLowerCase with Go's strings.ToUpper / strings.ToLower.
-//
-// WHY. Otherwise those two methods are a goja-vs--frozen divergence in every
-// interpreter half that no gate can reach:
-//
-//	                 goja      -frozen / llvm.Run / native binary
-//	"ss".toUpperCase()   SS        ss          (U+00DF)
-//	"fi".toUpperCase()   FI        fi          (U+FB01, the ligature)
-//	"I".toLowerCase()    i.        i           (U+0130 -> i + U+0307)
-//
-// goja is the one that is RIGHT as JavaScript: ECMA-262 uses the full Unicode
-// case mapping, where those three grow or shrink a character. The other three
-// engines all use the SIMPLE per-rune mapping, because that is what
-// strings.ToUpper is (abnf/jsrt.go's frozen string methods and the Go twin) and
-// what languages/lib/runtime.c's floor implements.
-//
-// The engines converge on the SIMPLE mapping, i.e. goja moves: full case mapping
-// in the C floor is far too slow on real workloads (docs/working-on-this-project.md
-// chapter 5), so three engines of four implement the simple mapping and the fourth
-// cannot afford the other one. goja's answer is literally the function the frozen
-// engine calls, for every input.
+// toLowerCase with caseMapMode (abnf/casemap.go) and binds unicodeCase(s, mode), so
+// the grammar host under goja answers exactly what -frozen, llvm.Run and a native
+// binary answer: goja's own methods use different Unicode tables.
 func installGojaCaseMapping(vm *goja.Runtime) {
-	vm.Set("__goStrUpper", strings.ToUpper)
-	vm.Set("__goStrLower", strings.ToLower)
+	vm.Set("__goCaseMap", caseMapMode)
 	// String.prototype so it reaches a primitive receiver too; `this` is boxed
 	// there, hence the explicit String(this).
 	// A Go string cannot carry a lone surrogate (goja hands one over as U+FFFD),
-	// and a lone surrogate has no case, so the text between them is mapped and
-	// they pass through - caseMapWTF8 in abnf/jsrt.go is the frozen engine's twin.
+	// and a lone surrogate has no case and stops a Final_Sigma context like any
+	// uncased character, so the text between them is mapped on its own and they
+	// pass through.
 	if _, err := vm.RunString(`
-		function __caseMap(s, f) {
+		function unicodeCase(s, mode) {
+			s = String(s);
 			var out = "", start = 0;
 			for (var i = 0; i < s.length; i++) {
 				var c = s.charCodeAt(i);
@@ -542,13 +525,13 @@ func installGojaCaseMapping(vm *goja.Runtime) {
 					var d = s.charCodeAt(i + 1);
 					if (d >= 0xDC00 && d <= 0xDFFF) { i++; continue; }
 				}
-				out += f(s.substring(start, i)) + String.fromCharCode(c);
+				out += __goCaseMap(s.substring(start, i), mode) + String.fromCharCode(c);
 				start = i + 1;
 			}
-			return start === 0 ? f(s) : out + f(s.substring(start));
+			return start === 0 ? __goCaseMap(s, mode) : out + __goCaseMap(s.substring(start), mode);
 		}
-		String.prototype.toUpperCase = function () { return __caseMap(String(this), __goStrUpper) };
-		String.prototype.toLowerCase = function () { return __caseMap(String(this), __goStrLower) };
+		String.prototype.toUpperCase = function () { return unicodeCase(this, 3) };
+		String.prototype.toLowerCase = function () { return unicodeCase(this, 6) };
 	`); err != nil {
 		panic(err)
 	}

@@ -811,6 +811,10 @@ function s26() {
                    lu.charCodeAt(2) === 0xDC00 && lone.toLowerCase() === lone)
     // A lone surrogate LITERAL keeps its unit in an emitted string constant.
     check("sm21c", lone === "\uD800a\uDC00" && "\uD800".charCodeAt(0) === 0xD800 && "x\uDC00".charCodeAt(1) === 0xDC00)
+    // The FULL mapping with the final sigma, as node.
+    check("sm21d", "\u00dfx".toUpperCase() === "SSX" && "\ufb01".toUpperCase() === "FI" &&
+                   "\u0130".toLowerCase() === "i\u0307" && "A\u03a3".toLowerCase() === "a\u03c2" &&
+                   "\u03a3A".toLowerCase() === "\u03c3a" && "\u0390".toUpperCase().length === 3)
     check("sm22", "aa".replace("a", function (m, i) { return m + i }) === "a0a")
 }
 

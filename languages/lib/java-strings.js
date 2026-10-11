@@ -326,7 +326,7 @@ function jxConv(conv, flags, width, prec, v, spec) {
     } else {
         jxkFail("UnknownFormatConversionException: Conversion = '" + conv + "'")
     }
-    if (up) { body = jxUpper(body) }
+    if (up) { body = unicodeCase(body, 3) }
     return jxPad(body, flags, width)
 }
 function jxBadConv(conv, k) {
@@ -362,7 +362,7 @@ function jxNum(neg, digits, flags, width, up) {
         pre = " "
     }
     var body = digits
-    if (up) { body = jxUpper(body) }
+    if (up) { body = unicodeCase(body, 3) }
     if (jxHas(flags, "0")) {
         while (pre.length + body.length + post.length < width) { body = "0" + body }
     }

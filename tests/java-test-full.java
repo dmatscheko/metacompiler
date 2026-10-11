@@ -2769,6 +2769,12 @@ class S49 {
         Main.check("str1", t.trim().equals("Hi There") && t.strip().equals("Hi There") && t.stripLeading().equals("Hi There \t")
             && !t.isBlank() && "\t  ".isBlank() && t.toUpperCase().equals("  HI THERE \t") && ss[2].toLowerCase().equals("äbc")
             && ss[2].toUpperCase().equals("ÄBC"));
+        // String.toUpperCase / toLowerCase are the FULL mapping with the final sigma;
+        // Character.toUpperCase stays one unit (java 24).
+        Main.check("str1b", "\u00dfx".toUpperCase().equals("SSX") && "\ufb01".toUpperCase().equals("FI")
+            && "\u0130".toLowerCase().equals("i\u0307") && Character.toUpperCase('\u00df') == '\u00df'
+            && "A\u03a3".toLowerCase().equals("a\u03c2") && "\u03a3A".toLowerCase().equals("\u03c3a")
+            && "\u0390".toUpperCase().length() == 3);
         Main.check("str2", t.indexOf('e') == 7 && t.indexOf("e", 8) == 9 && t.lastIndexOf("e") == 9 && t.lastIndexOf('e', 8) == 7
             && t.indexOf("", 99) == 12 && t.contains("Th") && t.startsWith("Hi", 2) && t.endsWith("\t") && t.indexOf("zz") == -1);
         Main.check("str3", "abc".compareTo("abd") == -1 && "b".compareTo("abc") == 1 && "abc".compareTo("ab") == 1

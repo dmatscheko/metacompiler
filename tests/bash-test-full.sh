@@ -941,6 +941,11 @@ s25() {
   check pex6 "${x@U}" "A B"
   check pex7 "${x@L}" "a b"
   check pex8 "${x@u}" "A b"
+  # towupper / towlower: one character for one, so the sharp s stays (bash 5.3).
+  # Literal UTF-8: these engines read neither $'\u' nor a byte-wise $'\x' as a
+  # character.
+  local xs="straße Σ"
+  check pex8a "${xs@U}" "STRAßE Σ"
   check pex9 "${x@E}" "a b"
   # @A on a LOCAL prints "declare x=..." in bash 5.3; a global prints the plain
   # assignment, which is the form both halves model

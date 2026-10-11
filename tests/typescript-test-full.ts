@@ -59,6 +59,9 @@ function s01() {
     check("bas5", t === 11);
     // \b \f \v are the code units 8, 12 and 11 (node 24).
     check("bas6", "\b\f\v".charCodeAt(0) === 8 && "\b\f\v".charCodeAt(1) === 12 && "\b\f\v".charCodeAt(2) === 11);
+    // toUpperCase / toLowerCase are the FULL mapping with the final sigma (node).
+    check("bas6a", "\u00dfx".toUpperCase() === "SSX" && "\u0130".toLowerCase() === "i\u0307" &&
+                   "A\u03a3".toLowerCase() === "a\u03c2" && "\u03a3A".toLowerCase() === "\u03c3a");
 }
 
 // ===== SECTION 02: type annotations on primitives =====

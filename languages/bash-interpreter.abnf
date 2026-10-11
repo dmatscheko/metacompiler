@@ -1591,9 +1591,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `isset` is not decoration: ${nosuch@Q} is EMPTY in bash 5.3.15 while ${empty@Q} is
     // `''`; the same distinction makes ${nosuch@A} empty.
     function xformOne(v, xfOp, nm, isset) {
-        if (xfOp == "U") { return v.toUpperCase() }
-        if (xfOp == "L") { return v.toLowerCase() }
-        if (xfOp == "u") { if (v.length == 0) { return v } return v.charAt(0).toUpperCase() + v.slice(1) }
+        // towupper / towlower: the SIMPLE mapping, one character for one (unicodeCase
+        // modes 1 and 0) - "ß" stays.
+        if (xfOp == "U") { return unicodeCase(v, 1) }
+        if (xfOp == "L") { return unicodeCase(v, 0) }
+        if (xfOp == "u") { if (v.length == 0) { return v } return unicodeCase(v.charAt(0), 1) + v.slice(1) }
         if (xfOp == "E") { return ansiC(v) }
         if (xfOp == "P") { return promptExpand(v) }
         if (xfOp == "a") { return varAttrs(nm) }

@@ -202,31 +202,11 @@ function dsCpWidth(s, i) {
     return 1
 }
 
-// toUpperCase / toLowerCase, code point by code point, through the SIMPLE case
-// mapping: a character whose full mapping is several characters ("ß" -> "SS")
-// keeps its own case, and every other one takes the host's single-character
-// mapping - which is Go's unicode.ToUpper / ToLower in the C floor and in the
-// Go twin.
-function dsCase(s, up) {
-    var out = ""
-    var i = 0
-    while (i < s.length) {
-        var w = dsCpWidth(s, i)
-        var ch = s.substring(i, i + w)
-        var c = s.charCodeAt(i)
-        if (c < 128) {
-            if (up && c >= 97 && c <= 122) { ch = String.fromCharCode(c - 32) }
-            if (!up && c >= 65 && c <= 90) { ch = String.fromCharCode(c + 32) }
-        } else {
-            var m = ch
-            if (up) { m = ch.toUpperCase() } else { m = ch.toLowerCase() }
-            if (m.length > 0 && dsCpWidth(m, 0) == m.length) { ch = m }
-        }
-        out = out + ch
-        i = i + w
-    }
-    return out
-}
+// toUpperCase / toLowerCase: the SIMPLE case mapping, code point by code point
+// (unicodeCase modes 1 and 0) - a character whose full mapping is several
+// characters ("ß" -> "SS") keeps its own case. Twin of dartStrCase in
+// abnf/jsrtdart.go (unicode.ToUpper / ToLower).
+function dsCase(s, up) { return unicodeCase(s, up ? 1 : 0) }
 
 // String.codeUnits: the UTF-16 code units, as ints.
 function dsUnits(s) {

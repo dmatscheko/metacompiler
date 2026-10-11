@@ -2061,6 +2061,11 @@ def s40
   # split on the literal separator.
   w = ["Hello World", "  pad  ", "", "abc", "a,b,,c"]
   check("ab27", w[0].capitalize == "Hello world" && w[0].reverse == "dlroW olleH")
+  # MRI maps case FULLY ("\u00df".upcase is "SS", capitalize titlecases) and has no
+  # final sigma; casecmp? compares the full case folding.
+  cz = ["\u00dfa", "\u0130", "A\u03a3", "STRASSE", "stra\u00dfe"]
+  check("ab27a", cz[0].upcase == "SSA" && cz[1].downcase == "i\u0307" && cz[2].downcase == "a\u03c3" &&
+                 cz[0].capitalize == "Ssa" && cz[0].swapcase == "SSA" && cz[4].casecmp?(cz[3]))
   check("ab28", w[1].strip == "pad" && w[2].strip == "" && w[3].chars == ["a", "b", "c"])
   check("ab29", w[4].split(",") == ["a", "b", "", "c"] && w[0].split(" ") == ["Hello", "World"])
   check("ab30", w[0].index("World") == 6 && w[0].index("zz").nil? && w[2].empty? && !w[3].empty?)

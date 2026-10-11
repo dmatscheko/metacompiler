@@ -2189,6 +2189,14 @@ b";                                                   // verbatim keeps the newl
                 "Length cannot be less than zero. (Parameter 'length')");
             Program.Check("s34sb8", S34Sub(t, idx[0], 10) ==
                 "Index and length must refer to a location within the string. (Parameter 'length')");
+
+            // ----- String.ToUpper / ToLower map one character to one -----
+            // .NET's casing is the simple per-character mapping: no string changes
+            // length, so "\u00df" has no upper case (no dotnet here; the rows are
+            // the documented 1:1 rule).
+            string cz = "stra\u00dfe \u00e4";
+            Program.Check("s34cs1", cz.ToUpper() == "STRA\u00dfE \u00c4" && "\u00c4BC".ToLower() == "\u00e4bc"
+                && "\u0130".ToLower().Length == 1);
         }
 
 

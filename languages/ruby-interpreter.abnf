@@ -4019,13 +4019,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {ok: true, v: s}
         }
         if (name == "casecmp") {
-            var la = s.toLowerCase()
-            var lb = sargs[0].toLowerCase()
+            var la = unicodeCase(s, 0)
+            var lb = unicodeCase(sargs[0], 0)
             if (la < lb) { return {ok: true, v: 0 - 1} }
             if (la > lb) { return {ok: true, v: 1} }
             return {ok: true, v: 0}
         }
-        if (name == "casecmp?") { return {ok: true, v: s.toLowerCase() == sargs[0].toLowerCase()} }
+        if (name == "casecmp?") { return {ok: true, v: unicodeCase(s, 18) == unicodeCase(sargs[0], 18)} }
         if (name == "rindex") {
             var ri = smRindex(s, sargs[0])
             if (ri < 0) { return {ok: true, v: null} }
@@ -8122,8 +8122,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_i") { return strToInum(target, args.length > 0 ? radixArg(args[0], false) : 10, false).v }
             if (name == "to_f") { var pf = parseFloat(target); return mkFlo(pf != pf ? 0 : pf) }
             if (name == "upcase") { return target.toUpperCase() }
-            if (name == "downcase") { return target.toLowerCase() }
-            if (name == "capitalize") { return target.length == 0 ? target : target.charAt(0).toUpperCase() + target.slice(1).toLowerCase() }
+            // MRI maps case fully but has no Final_Sigma: unicodeCase mode 2 (abnf/casemap.go).
+            if (name == "downcase") { return unicodeCase(target, 2) }
+            if (name == "capitalize") { return target.length == 0 ? target : unicodeCase(target.charAt(0), 10) + unicodeCase(target.slice(1), 2) }
             if (name == "reverse") { return target.split("").reverse().join("") }
             if (name == "strip") { return strStrip(target) }
             if (name == "chars") { return target.split("") }

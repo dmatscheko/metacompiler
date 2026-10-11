@@ -2193,20 +2193,16 @@ function k2ChStr(code) {
     return String.fromCharCode(code)
 }
 
-// k2Upper / k2Lower are ktUpper (3327) / ktLower (3335): the Unicode SIMPLE
-// case mapping of one code point, and the code point itself when the mapping is
-// one-to-many (Go's strings.ToUpper("ß") is "SS", two runes, so ktUpper leaves
-// it alone). The floor's toUpperCase/toLowerCase is the same table Go's is -
-// generated from the Go runtime's own answers, see runtime.c:1352 - so the
-// mapping is not re-derived here.
+// k2Upper / k2Lower are ktUpper / ktLower (jsrtkotlin.go): the Unicode SIMPLE
+// case mapping of one code point (unicodeCase modes 1 and 0).
 function k2Upper(code) {
-    var s = k2ChStr(code).toUpperCase()
+    var s = unicodeCase(k2ChStr(code), 1)
     if (k2RuneLen(s) == 1) { return k2CodePointAt(s, 0) }
     return code
 }
 
 function k2Lower(code) {
-    var s = k2ChStr(code).toLowerCase()
+    var s = unicodeCase(k2ChStr(code), 0)
     if (k2RuneLen(s) == 1) { return k2CodePointAt(s, 0) }
     return code
 }
@@ -2219,7 +2215,7 @@ function k2IsLetter(code) {
     if (code >= 65 && code <= 90) { return true }
     if (code <= 127) { return false }
     var s = k2ChStr(code)
-    return s.toUpperCase() !== s.toLowerCase()
+    return unicodeCase(s, 1) !== unicodeCase(s, 0)
 }
 
 // The number of CODE POINTS in s (Go's len([]rune(s))), and the code point at a
@@ -3265,8 +3261,8 @@ function ktCharMethod(c, name, args) {
     if (name == "isLowerCase") { return r >= 97 && r <= 122 }
     if (name == "uppercaseChar") { return ktChar(k2Upper(r)) }
     if (name == "lowercaseChar") { return ktChar(k2Lower(r)) }
-    if (name == "uppercase") { return k2ChStr(k2Upper(r)) }
-    if (name == "lowercase") { return k2ChStr(k2Lower(r)) }
+    if (name == "uppercase") { return unicodeCase(k2ChStr(r), 3) }
+    if (name == "lowercase") { return unicodeCase(k2ChStr(r), 6) }
     if (name == "digitToInt") {
         if (r >= 48 && r <= 57) { return r - 48 }
         fail("Char \"" + k2ChStr(r) + "\" is not a digit")

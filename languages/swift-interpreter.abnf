@@ -3252,8 +3252,10 @@ KwContinue  = "continue" KwEnd ;
         }
         if (typeof target == "string") {
             if (name == "count" && args.length == 0) { return swGraphemeCount(target) }
-            if (name == "uppercased") { return target.toUpperCase() }
-            if (name == "lowercased") { return target.toLowerCase() }
+            // Swift maps case fully but has no Final_Sigma: unicodeCase modes 3 and 2.
+            // Twin of js_swcase (abnf/jsrtswift.go, lib/swift-rt.metajs).
+            if (name == "uppercased") { return unicodeCase(target, 3) }
+            if (name == "lowercased") { return unicodeCase(target, 2) }
             // The members that take a String argument compare text, with no
             // Character walk. The compiled halves' twins are swStrMethod in
             // abnf/jsrtswift.go and the String arm of js_mcall in lib/swift-rt.metajs.

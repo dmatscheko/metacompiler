@@ -3285,21 +3285,17 @@ KwContinue  = "continue" KwEnd ;
             oB.NewRet(ps[0])
         })
     }
-    // uppercased() / lowercased(). The mapping is the FLOOR'S - the
-    // string's own toUpperCase/toLowerCase member (runtime.c member ids 27/28, whose
-    // per-code-point table case_map IS; strings.ToUpper in the Go twin's
-    // builtinMethod). Keep case_map in the floor: in layer 2 it is far slower
-    // (manual chapter 5). A receiver that is not a String keeps the extern, so a user type
-    // declaring its own uppercased() still dispatches.
+    // uppercased() / lowercased(): the full Unicode mapping, without Final_Sigma
+    // (js_swcase, the floor's case_str through layer 2). A receiver that is not a
+    // String keeps the extern, so a user type declaring its own uppercased() still
+    // dispatches.
     function rtCased(up) {
-        var host = up ? "toUpperCase" : "toLowerCase"
         var swn = up ? "uppercased" : "lowercased"
-        return rtFunc("sw_" + host, 1, function(b, ps) {
+        return rtFunc("sw_" + swn, 1, function(b, ps) {
             var sB = curF.NewBlock("")
             var oB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "String")])), sB, oB)
-            sB.NewRet(callExt(sB, "js_call", [callExt(sB, "js_get", [ps[0], emitStr(sB, host)]),
-                                              hUndef, callExt(sB, "js_arr_new", [])]))
+            sB.NewRet(callExt(sB, "js_swcase", [ps[0], up ? hTrue : hFalse]))
             oB.NewRet(callExt(oB, "js_swmcall", [ps[0], emitStr(oB, swn),
                                                  callExt(oB, "js_arr_new", [])]))
         })

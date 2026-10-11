@@ -1745,29 +1745,25 @@ protocol S33 { static func make33() -> String }
 struct T33S: S33 { static func make33() -> String { return "m" } }
 func g33<T: A33>(_ x: T) -> String { return "g:" + x.a33() }
 
-// ===== SECTION 34: uppercased()/lowercased() are the SIMPLE per-rune map =====
-// The compiled halves reach the FLOOR's mapping the way kotlin, ruby and python
-// do - the string's own toUpperCase/toLowerCase (runtime.c member ids 27/28, whose
-// per-code-point table `case_map` is; strings.ToUpper in the Go twin).
-//
-// THE ANSWERS ARE NOT SWIFTC'S, and that is the recorded decision, the same one
-// kotlin's SECTION 81 records. Real Swift is FULL Unicode case mapping:
-// "\u{00df}".uppercased() is "SS", "\u{fb01}" is "FI", "\u{0130}".lowercased() is
-// "i" + U+0307 - read off swiftc 6.1.2. This project
-// answers the SIMPLE per-rune mapping in all four engines.
+// ===== SECTION 34: uppercased()/lowercased() are the FULL Unicode mapping =====
+// Read off swiftc 6.1.2: "\u{00df}".uppercased() is "SS", "\u{fb01}" is "FI",
+// "\u{0130}".lowercased() is "i" + U+0307 - and there is no Final_Sigma, so a
+// word-final capital sigma lowercases to U+03C3, not U+03C2.
 //
 // Every character is an ESCAPE, never a raw literal: manual chapter 4, test
 // specific characters by CODE.
 func s34() {
-    // The characters that GROW under the full mapping and are unchanged under the
-    // simple one. `.count` is the cluster count, so an answer of "SS" would be 2.
-    check("34a", "\u{00df}".uppercased() == "\u{00df}" && "\u{00df}".uppercased().count == 1)
-    check("34b", "\u{fb01}".uppercased() == "\u{fb01}" && "\u{fb01}".uppercased().count == 1)
-    check("34c", "\u{fb03}".uppercased() == "\u{fb03}" && "\u{fb03}".uppercased().count == 1)
-    check("34d", "\u{0149}".uppercased() == "\u{0149}" && "\u{0149}".uppercased().count == 1)
-    check("34e", "\u{1f50}".uppercased() == "\u{1f50}" && "\u{1f50}".uppercased().count == 1)
-    // U+0130 grows on the way DOWN under the full map; the simple map answers "i".
-    check("34f", "\u{0130}".lowercased() == "i" && "\u{0130}".lowercased().count == 1)
+    // The characters that GROW under the full mapping. `.count` is the cluster
+    // count.
+    check("34a", "\u{00df}".uppercased() == "SS" && "\u{00df}".uppercased().count == 2)
+    check("34b", "\u{fb01}".uppercased() == "FI" && "\u{fb01}".uppercased().count == 2)
+    check("34c", "\u{fb03}".uppercased() == "FFI" && "\u{fb03}".uppercased().count == 3)
+    check("34d", "\u{0149}".uppercased() == "\u{02bc}N" && "\u{0149}".uppercased().count == 2)
+    check("34e", "\u{1f50}".uppercased() == "\u{03a5}\u{0313}" && "\u{1f50}".uppercased().count == 1)
+    // U+0130 grows on the way DOWN: "i" and a combining dot, one cluster.
+    check("34f", "\u{0130}".lowercased() == "i\u{0307}" && "\u{0130}".lowercased().count == 1)
+    check("34j", "A\u{03a3}".lowercased() == "a\u{03c3}"
+                 && "\u{03a3}\u{0391}\u{03a3}".lowercased() == "\u{03c3}\u{03b1}\u{03c3}")
     // Simple == full here, so these pin the mapping itself rather than the choice:
     // dotless i, final sigma, capital sharp s.
     check("34g", "\u{0131}".uppercased() == "I" && "\u{03c2}".uppercased() == "\u{03a3}"

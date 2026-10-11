@@ -7487,9 +7487,9 @@ func (rt *jsrt) rubySmRepeatTo(pad string, n int) string {
 func (rt *jsrt) rubySmSwapcase(o string) string {
 	out := ""
 	for _, ch := range rt.rubySmChars(o) {
-		up := strings.ToUpper(ch)
+		up := caseMapMode(ch, caseUpper|caseFull)
 		if ch == up {
-			out += strings.ToLower(ch)
+			out += caseMapMode(ch, caseFull)
 		} else {
 			out += up
 		}
@@ -7743,7 +7743,7 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		}
 		return float64(0), true
 	case "casecmp?":
-		return strings.ToLower(o) == strings.ToLower(sarg(0)), true
+		return caseMapMode(o, caseFold|caseFull) == caseMapMode(sarg(0), caseFold|caseFull), true
 	case "rindex":
 		if i := rubySmRindexUnits(rt, o, sarg(0)); i >= 0 {
 			return float64(i), true
@@ -9662,9 +9662,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return jsFlo{f: 0}
 		case "upcase":
-			return strings.ToUpper(o)
+			return caseMapMode(o, caseUpper|caseFull)
 		case "downcase":
-			return strings.ToLower(o)
+			return caseMapMode(o, caseFull)
 		case "include?":
 			return strings.Contains(o, rt.toString(argAt(args, 0)))
 		// String#[] / #slice: one index or a Range (js_rget's own rule), or
@@ -9712,7 +9712,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			if o == "" {
 				return o
 			}
-			return strings.ToUpper(rt.strAt(o, 0)) + strings.ToLower(rt.strRange(o, 1, rt.strLen(o)))
+			return caseMapMode(rt.strAt(o, 0), caseTitle|caseFull) + caseMapMode(rt.strRange(o, 1, rt.strLen(o)), caseFull)
 		case "reverse":
 			n := rt.strLen(o)
 			out := ""
@@ -11928,9 +11928,9 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			}
 			return out
 		case "toUpperCase":
-			return caseMapWTF8(recv, strings.ToUpper)
+			return caseMapMode(recv, caseUpper|caseFull)
 		case "toLowerCase":
-			return caseMapWTF8(recv, strings.ToLower)
+			return caseMapMode(recv, caseFull|caseSigma)
 		case "trim":
 			return strings.TrimSpace(recv)
 		}
@@ -12019,28 +12019,6 @@ func wtf8Surrogate(s string) rune {
 		return 0
 	}
 	return rune(s[0]&0x0F)<<12 | rune(s[1]&0x3F)<<6 | rune(s[2]&0x3F)
-}
-
-// caseMapWTF8 applies a strings.ToUpper / ToLower to a WTF-8 string: a lone
-// surrogate has no case and passes through, as in node, where strings.Map alone
-// would turn each of its three bytes into a U+FFFD. Twin of builtin_method mids
-// 27/28 in languages/lib/runtime.c and of installGojaCaseMapping's.
-func caseMapWTF8(s string, f func(string) string) string {
-	if !strings.Contains(s, "\xED") {
-		return f(s)
-	}
-	var b strings.Builder
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == 0xED && wtf8Surrogate(s[i:]) != 0 {
-			b.WriteString(f(s[start:i]))
-			b.WriteString(s[i : i+3])
-			i += 2
-			start = i + 1
-		}
-	}
-	b.WriteString(f(s[start:]))
-	return b.String()
 }
 
 // strUnits returns s as UTF-16 code units, decoding WTF-8 lone surrogates back
@@ -17183,6 +17161,11 @@ func standardJSBindings() map[string]interface{} {
 		// (lib/compile-core.js emitStr).
 		"byteLen": jsHostFunc("byteLen", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return float64(len(rt.toString(argAt(args, 0))))
+		}),
+		// unicodeCase(s, mode): upper or lower case, simple or full (abnf/casemap.go).
+		// Host id 97 in languages/lib/runtime.c; installGojaCaseMapping for goja.
+		"unicodeCase": jsHostFunc("unicodeCase", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return caseMapMode(rt.toString(argAt(args, 0)), int(rt.toNumber(argAt(args, 1))))
 		}),
 		// rawSet writes an own property; the goja side bypasses the
 		// Object.prototype "__proto__" accessor with it, here a plain

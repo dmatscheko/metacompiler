@@ -49,6 +49,16 @@ func init() {
 			return jsHFalse
 		}
 
+		// String.uppercased() / lowercased() (a[1] true for upper): the full
+		// mapping without Final_Sigma. Twin of js_swcase in lib/swift-rt.metajs.
+		m["js_swcase"] = func(a []uint64) uint64 {
+			mode := caseFull
+			if u(a[1]) == true {
+				mode |= caseUpper
+			}
+			return rt.wrapStr(caseMapMode(rt.toString(u(a[0])), mode))
+		}
+
 		// String(describing:) / "\(v)" / the thing print writes.
 		m["js_swdesc"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
 

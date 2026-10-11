@@ -16,7 +16,8 @@ import (
 // test happens to reach the character, so every BMP code point is compared, plus
 // the lone surrogates, which a Go string cannot carry.
 //
-// The expectations are node's: a lone surrogate has no case and passes through.
+// The expectations are node's: the full mapping with Final_Sigma, and a lone
+// surrogate has no case, passes through and ends a sigma's context.
 func TestCaseMappingAgreesAcrossHosts(t *testing.T) {
 	vm := goja.New()
 	fm := map[string]r.Object{}
@@ -63,6 +64,7 @@ func TestCaseMappingAgreesAcrossHosts(t *testing.T) {
 		{0xD800, 'a'}, {'B', 0xDC00}, {'x', 0xDBFF, 0xDBFF, 'y'}, // lone surrogates
 		{0xD801, 0xDC28}, // a pair: U+10428 maps to U+10400
 		{0x00DF}, {0xFB01}, {0x0130}, {0x0131}, {0x03C2}, {0x01C5},
+		{'A', 0x03A3}, {0x03A3, 'A'}, {'A', 0xD800, 0x03A3}, {'A', 0x03A3, 0xDC00}, {'A', 0x0301, 0x03A3},
 	}
 	for c := 0; c < 0x10000; c++ {
 		if c < 0xD800 || c > 0xDFFF {
@@ -95,6 +97,13 @@ func TestCaseMappingAgreesAcrossHosts(t *testing.T) {
 		{[]uint16{'x', 0xDBFF, 0xDBFF, 'y'}, true, "88,56319,56319,89"},
 		{[]uint16{0xD801, 0xDC28}, true, "55297,56320"},
 		{[]uint16{0x019B}, true, "42972"},
+		{[]uint16{0x00DF}, true, "83,83"},
+		{[]uint16{0x0130}, false, "105,775"},
+		{[]uint16{0x1FB3}, true, "913,921"},
+		{[]uint16{'A', 0x03A3}, false, "97,962"},
+		{[]uint16{0x03A3, 'A'}, false, "963,97"},
+		{[]uint16{'A', 0xD800, 0x03A3}, false, "97,55296,963"},
+		{[]uint16{'A', 0x03A3, 0xDC00}, false, "97,962,56320"},
 	} {
 		if got := frozenMap(w.in, w.up); got != w.want {
 			t.Errorf("%v up=%v: %s, node answers %s", w.in, w.up, got, w.want)

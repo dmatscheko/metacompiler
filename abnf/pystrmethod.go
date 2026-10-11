@@ -27,8 +27,7 @@ package abnf
 // The documented divergences from CPython are listed in the MetaJS chapter's
 // header and are NOT repeated here; the short form is: bytes are a list of byte
 // values (encode() answers one), ASCII-exact classification with a cased-derived fallback outside
-// it, and a case mapping restricted to the mappings that do not change the code
-// unit count (which is what makes goja, this engine and the C floor agree).
+// it, and the case mapping of abnf/casemap.go.
 
 import (
 	"fmt"
@@ -134,9 +133,8 @@ func (e *pyStrEnv) chars(s string) []string {
 	return out
 }
 
-// The LENGTH GUARD: only a case mapping that keeps the code unit count is taken,
-// which is what makes goja's full mapping and this engine's / the floor's simple
-// mapping answer the same string.
+// The SIMPLE per-character mapping (see the CASE MAPPING note in
+// python-interpreter.abnf).
 func (e *pyStrEnv) upCh(ch string) string {
 	c := e.sCode(ch, 0)
 	if c < 128 {
@@ -145,11 +143,7 @@ func (e *pyStrEnv) upCh(ch string) string {
 		}
 		return ch
 	}
-	u := strings.ToUpper(ch)
-	if e.sLen(u) != e.sLen(ch) {
-		return ch
-	}
-	return u
+	return caseMapMode(ch, caseUpper)
 }
 
 func (e *pyStrEnv) loCh(ch string) string {
@@ -160,11 +154,7 @@ func (e *pyStrEnv) loCh(ch string) string {
 		}
 		return ch
 	}
-	u := strings.ToLower(ch)
-	if e.sLen(u) != e.sLen(ch) {
-		return ch
-	}
-	return u
+	return caseMapMode(ch, 0)
 }
 
 // CASED CHARACTERS THE SIMPLE MAPPING LEAVES ALONE. CPython's cased / lower /
@@ -251,18 +241,11 @@ func (e *pyStrEnv) caseOnly(ch string) int {
 
 func (e *pyStrEnv) isCased(ch string) bool { return e.upCh(ch) != e.loCh(ch) || e.caseOnly(ch) != 0 }
 
-// The character that opens a title-cased word: the titlecase form of the four
-// Latin digraphs (U+01C4..U+01CC, U+01F1..U+01F3 - DZ, LJ, NJ, DZ), whose
-// titlecase differs from their uppercase, else the uppercase.
-func (e *pyStrEnv) tiCh(ch string) string {
-	c := e.sCode(ch, 0)
-	if c >= 452 && c <= 460 {
-		return pysFromCode(c - (c-452)%3 + 1)
-	}
-	if c >= 497 && c <= 499 {
-		return pysFromCode(498)
-	}
-	return e.upCh(ch)
+// lower_ucs4: ch's full lowercase in its string, where low is
+// caseMapMode(s, caseFull|caseSigma) and at the byte offset where ch's
+// lowercase starts in it. Twin of pySLowAt in python-interpreter.abnf.
+func pyLowAt(low string, at int, ch string) string {
+	return low[at : at+len(caseMapMode(ch, caseFull))]
 }
 
 func (e *pyStrEnv) isUpCh(ch string) bool {
@@ -606,14 +589,17 @@ func (e *pyStrEnv) replace(s, old, nw string, cnt int) string {
 
 // do_title: a character opens a word unless the PREVIOUS one was cased.
 func (e *pyStrEnv) title(s string) string {
+	low := caseMapMode(s, caseFull|caseSigma)
+	at := 0
 	out := ""
 	prev := false
 	for _, ch := range e.chars(s) {
 		if prev {
-			out += e.loCh(ch)
+			out += pyLowAt(low, at, ch)
 		} else {
-			out += e.tiCh(ch)
+			out += caseMapMode(ch, caseTitle|caseFull)
 		}
+		at += len(caseMapMode(ch, caseFull))
 		prev = e.isCased(ch)
 	}
 	return out
@@ -640,39 +626,26 @@ func (e *pyStrEnv) isTitle(s string) bool {
 }
 
 func (e *pyStrEnv) capitalize(s string) string {
-	out := ""
-	for i, ch := range e.chars(s) {
-		if i == 0 {
-			out += e.tiCh(ch)
-		} else {
-			out += e.loCh(ch)
-		}
+	cs := e.chars(s)
+	if len(cs) == 0 {
+		return s
 	}
-	return out
+	return caseMapMode(cs[0], caseTitle|caseFull) + caseMapMode(s, caseFull|caseSigma)[len(caseMapMode(cs[0], caseFull)):]
 }
 
 func (e *pyStrEnv) swapCase(s string) string {
+	low := caseMapMode(s, caseFull|caseSigma)
+	at := 0
 	out := ""
 	for _, ch := range e.chars(s) {
 		if e.isUpCh(ch) {
-			out += e.loCh(ch)
+			out += pyLowAt(low, at, ch)
 		} else if e.isLoCh(ch) {
-			out += e.upCh(ch)
+			out += caseMapMode(ch, caseUpper|caseFull)
 		} else {
 			out += ch
 		}
-	}
-	return out
-}
-
-func (e *pyStrEnv) mapCase(s string, up bool) string {
-	out := ""
-	for _, ch := range e.chars(s) {
-		if up {
-			out += e.upCh(ch)
-		} else {
-			out += e.loCh(ch)
-		}
+		at += len(caseMapMode(ch, caseFull))
 	}
 	return out
 }
@@ -1183,9 +1156,11 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 	rt := e.rt
 	switch name {
 	case "upper":
-		return e.mapCase(s, true)
-	case "lower", "casefold":
-		return e.mapCase(s, false)
+		return caseMapMode(s, caseUpper|caseFull)
+	case "lower":
+		return caseMapMode(s, caseFull|caseSigma)
+	case "casefold":
+		return caseMapMode(s, caseFold|caseFull)
 	case "title":
 		return e.title(s)
 	case "capitalize":

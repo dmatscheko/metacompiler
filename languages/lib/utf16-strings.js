@@ -5,53 +5,24 @@
 // languages/lib/csharp-rt.metajs import it. The Go twin's port is the
 // functions of the same names in abnf/jsrtjavastr.go. No value-model hook.
 //
-// Case mapping is per UTF-16 unit and Unicode's SIMPLE mapping (one unit to one
-// unit), which is Character.toUpperCase's and .NET's ToUpper/ToLower; java's
-// String.toUpperCase one-to-many mappings ("ß" -> "SS") and the
-// context-sensitive final sigma are not modelled.
+// Case mapping here is Unicode's SIMPLE mapping (unicodeCase modes 1 and 0, one
+// character for one), which is Character.toUpperCase's and .NET's ToUpper /
+// ToLower. java's String.toUpperCase / toLowerCase are the FULL mapping ("ß" ->
+// "SS") with the final sigma, and call unicodeCase themselves.
 
-// A surrogate maps to itself: the hosts disagree on a lone half.
+// A unit whose simple mapping leaves the BMP maps to itself.
 function jxChUp(c) {
-    if (c >= 55296 && c <= 57343) { return c }
-    var s = String.fromCharCode(c).toUpperCase()
+    var s = unicodeCase(String.fromCharCode(c), 1)
     if (s.length == 1) { return s.charCodeAt(0) }
     return c
 }
 function jxChLo(c) {
-    if (c >= 55296 && c <= 57343) { return c }
-    var s = String.fromCharCode(c).toLowerCase()
+    var s = unicodeCase(String.fromCharCode(c), 0)
     if (s.length == 1) { return s.charCodeAt(0) }
     return c
 }
-function jxAscii(s) {
-    var i = 0
-    while (i < s.length) {
-        if (s.charCodeAt(i) > 127) { return false }
-        i = i + 1
-    }
-    return true
-}
-// An ASCII string takes the host's mapping, which is the same in every engine.
-function jxUpper(s) {
-    if (jxAscii(s)) { return s.toUpperCase() }
-    var out = ""
-    var i = 0
-    while (i < s.length) {
-        out = out + String.fromCharCode(jxChUp(s.charCodeAt(i)))
-        i = i + 1
-    }
-    return out
-}
-function jxLower(s) {
-    if (jxAscii(s)) { return s.toLowerCase() }
-    var out = ""
-    var i = 0
-    while (i < s.length) {
-        out = out + String.fromCharCode(jxChLo(s.charCodeAt(i)))
-        i = i + 1
-    }
-    return out
-}
+function jxUpper(s) { return unicodeCase(s, 1) }
+function jxLower(s) { return unicodeCase(s, 0) }
 // Does t occur in s at i?
 function jxAt(s, t, i) {
     if (i < 0 || i + t.length > s.length) { return false }
