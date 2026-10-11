@@ -23,7 +23,7 @@ postfix ++/--, the ternary operator, || && with short circuit, == != < > <= >= a
 Also modelled: char as an integral value that renders as its glyph (with the C# escapes
 and the (char)/(int)/(byte) conversions), the full numeric literal set (leading-dot reals,
 hex, binary, digit groups, u/l/f/d/m suffixes), verbatim and raw string literals,
-interpolation with alignment and the D format specifier, typeof / nameof / sizeof /
+interpolation and String.Format with alignment and the standard numeric formats, typeof / nameof / sizeof /
 default, nullable values with the null-coalescing, null-conditional and null-forgiving
 operators and .HasValue / .Value, nested types, enums (with member initializers over
 earlier members), structs (value copy on a struct-typed declaration, and a zeroed
@@ -4135,12 +4135,12 @@ KwLet       = "let" KwEnd ;
                     // js_csstr + js_csadd, not js_jadd: an interpolation hole is a
                     // string conversion, so a bool renders "True", a null renders
                     // "" (js_jadd would write Java's "null") and a user ToString() wins.
-                    pv = callExt(b, "js_csadd", [emitStr(b, ""), callExt(b, "js_csstr", [r.v])])
+                    // A ':format' is a composite format item's (js_csfmt).
                     var fmt = items[i].fmt
-                    if (fmt != undefined && fmt.length > 1 && (fmt.charAt(0) == "D" || fmt.charAt(0) == "d")) {
-                        var rf = emitPadLoop(b, pv, parseInt(fmt.substring(1)), "0", true)
-                        b = rf.b
-                        pv = rf.v
+                    if (fmt != undefined && fmt != "") {
+                        pv = callExt(b, "js_csfmt", [r.v, emitStr(b, fmt)])
+                    } else {
+                        pv = callExt(b, "js_csadd", [emitStr(b, ""), callExt(b, "js_csstr", [r.v])])
                     }
                     var al = items[i].align
                     if (al != undefined && al != 0) {
@@ -7006,13 +7006,15 @@ KwLet       = "let" KwEnd ;
         var consoleV = callExt(b, "js_csconsole", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
         // The integral type NAMES as expression primaries, so `int.MaxValue` and
-        // `ulong.MaxValue` resolve, and double for double.Parse / TryParse. ulong.MaxValue is 18446744073709551615, which
+        // `ulong.MaxValue` resolve, double for double.Parse / TryParse, and the BCL enums
+        // and comparers a String member takes. ulong.MaxValue is 18446744073709551615, which
         // no double holds, so they arrive as runtime objects (js_cstype in
         // abnf/jsrtcsharp.go) rather than as emitted literals.
         var csTypeIdents = ["sbyte", "SByte", "byte", "Byte", "short", "Int16",
                             "ushort", "UInt16", "int", "Int32", "uint", "UInt32",
                             "long", "Int64", "ulong", "UInt64", "char", "Char", "string", "String",
-                            "double", "Double"]
+                            "double", "Double", "StringComparison", "StringSplitOptions",
+                            "NormalizationForm", "StringComparer"]
         for (var cti = 0; cti < csTypeIdents.length; cti++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, csTypeIdents[cti]),
                                          callExt(b, "js_cstype", [emitStr(b, csTypeIdents[cti])])])

@@ -23,7 +23,7 @@ strings by value) and + - * / % (int arithmetic is 32 bit, / truncates) and unar
 Also modelled: char as an integral value that renders as its glyph (with the C# escapes
 and the (char)/(int)/(byte) conversions), the full numeric literal set (leading-dot reals,
 hex, binary, digit groups, u/l/f/d/m suffixes), verbatim and raw string literals,
-interpolation with alignment and the D format specifier, typeof / nameof / sizeof /
+interpolation and String.Format with alignment and the standard numeric formats, typeof / nameof / sizeof /
 default, nullable values with the null-coalescing, null-conditional and null-forgiving
 operators and .HasValue / .Value, nested types, enums (with member initializers over
 earlier members), structs (value copy on a struct-typed declaration, and a zeroed
@@ -1669,10 +1669,33 @@ KwLet       = "let" KwEnd ;
     include("lib/csharp-collections.js")
 
     // The host names a program can see. Console is built here.
-    hostGlobals["Console"] = {
-        WriteLine: function(x) { println(x === undefined ? "" : csStr(x)) },
-        Write: function(x) { print(x === undefined ? "" : csStr(x)) }
+    // With more than one argument the first is a composite format string
+    // (lib/csharp-strings.js's csxComposite).
+    function csConsoleText(argv) {
+        if (argv.length > 1) {
+            var rest = []
+            for (var i = 1; i < argv.length; i++) { rest.push(argv[i]) }
+            return csxComposite(argv[0], csxParts(rest, 0))
+        }
+        return argv.length == 0 || argv[0] === undefined ? "" : csStr(argv[0])
     }
+    hostGlobals["Console"] = {
+        WriteLine: function() {
+            var argv = []
+            for (var i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
+            println(csConsoleText(argv))
+        },
+        Write: function() {
+            var argv = []
+            for (var i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
+            print(csConsoleText(argv))
+        }
+    }
+    // The BCL enums and comparers a String member takes (lib/csharp-strings.js).
+    hostGlobals["StringComparison"] = csxEnumType("StringComparison")
+    hostGlobals["StringSplitOptions"] = csxEnumType("StringSplitOptions")
+    hostGlobals["NormalizationForm"] = csxEnumType("NormalizationForm")
+    hostGlobals["StringComparer"] = csxStrComparerType()
 
     // The integral type NAMES as expression primaries, so `int.MaxValue` and
     // `ulong.MaxValue` resolve. Each keyword and its System alias name the same
@@ -2535,6 +2558,7 @@ KwLet       = "let" KwEnd ;
         if (typeof v == "object" && v.__sz === true) return szStr(v)
         if (Array.isArray(v)) return csArrayName(v)
         if (csxIsKvp(v)) return "[" + csStrD(v.Key, d + 1) + ", " + csStrD(v.Value, d + 1) + "]"
+        if (csxIsEnumBox(v)) return csxEnumStr(v)
         if (typeof v == "object") {
             var m = csFindToStr(v)
             if (m != undefined) { return csStrD(m(v), d + 1) }
@@ -2666,6 +2690,23 @@ KwLet       = "let" KwEnd ;
     function csxkNum(v) { return csNumD(v) }
     function csxkStr(v) { return csStr(v) }
     function csxkThrow(t, msg) { csThrowExc(t, msg) }
+    function csxkFmtKind(v) {
+        if (typeof v == "number" || szIs(v)) { return "int" }
+        return csIsFlo(v) ? "dbl" : ""
+    }
+    function csxkDbl(v) { return csNumD(v) }
+    // The two's complement at the value's own width: 32 bits for a plain int.
+    function csxkHex(v) {
+        if (!szIs(v)) { return csxHexOf(v >>> 0) }
+        var h = v.p.h
+        var l = v.p.l
+        if (v.w < 64) { h = 0 }
+        if (v.w < 32) { l = l & (v.w == 8 ? 255 : 65535) }
+        if (h == 0) { return csxHexOf(l) }
+        var lo = csxHexOf(l)
+        while (lo.length < 8) { lo = "0" + lo }
+        return csxHexOf(h) + lo
+    }
     // ----- List<T> and Dictionary<TKey,TValue> (lib/csharp-collections.js) -----
     function csxkIsNum(v) { return typeof v == "number" || csIsFlo(v) || szIs(v) || csIsChar(v) }
     function csxkLt(a, b) {
@@ -2925,6 +2966,10 @@ KwLet       = "let" KwEnd ;
         // string conversion; a user override is dispatched normally and wins.
         if (name == "ToString" && args.length == 0 && !csHasMethod(target, "ToString")) {
             return csStr(target)
+        }
+        // A number's ToString(format): the standard numeric format strings.
+        if (name == "ToString" && args.length == 1 && typeof args[0] == "string" && csxkFmtKind(target) != "") {
+            return csxFmtValue(target, args[0])
         }
         // ----- the other three members of the System.Object contract
         //
@@ -4847,34 +4892,18 @@ KwLet       = "let" KwEnd ;
         }
         return {e: items[0], align: al, fmt: fm}
     }
-    // The one format specifier that is modelled: 'D'/'d', the decimal form zero-padded to
-    // the given width. Every other specifier renders the value plainly (the compiler
-    // grammar models exactly the same set, so the two engines never disagree).
-    function csFormat(v, fmt) {
-        if (fmt == "") { return csStr(v) }
-        var kind = fmt.charAt(0)
-        if (kind != "D" && kind != "d") { return csStr(v) }
-        var width = fmt.length > 1 ? parseInt(fmt.substring(1)) : 0
-        var body = csStr(csNumV(v))
-        var neg = body.charAt(0) == "-"
-        if (neg) { body = body.substring(1) }
-        while (body.length < width) { body = "0" + body }
-        return neg ? "-" + body : body
-    }
-    // '{x,4}' pads to width 4 on the left, '{x,-4}' on the right.
-    function csAlign(s, align) {
-        if (align == 0) { return s }
-        var w = align < 0 ? 0 - align : align
-        var out = s
-        while (out.length < w) { out = (align < 0) ? out + " " : " " + out }
-        return out
-    }
+    // A hole's format is a composite format item's (csxFmtValue), and so is its
+    // alignment ('{x,4}' pads on the left, '{x,-4}' on the right).
     function makeTemplate(items) {
         return function() {
             var out = ""
             for (var i = 0; i < items.length; i++) {
                 if (items[i].s != undefined) { out += items[i].s }
-                else { out += csAlign(csFormat(items[i].e(), items[i].fmt), items[i].align) }
+                else {
+                    var hv = items[i].e()
+                    var ht = items[i].fmt == "" || hv === null || hv === undefined ? csStr(hv) : csxFmtValue(hv, items[i].fmt)
+                    out += csxAlign(ht, items[i].align)
+                }
             }
             return out
         }
@@ -6464,7 +6493,11 @@ KwLet       = "let" KwEnd ;
         if (op == "<=") return l <= r
         if (op == ">=") return l >= r
         // & | ^ on two bools are C#'s non-short-circuit boolean operators.
-        if (op == "|")  { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }
+        if (op == "|")  {
+            if (typeof l == "boolean" && typeof r == "boolean") { return l || r }
+            if (csxIsEnumBox(l) && csxIsEnumBox(r)) { return csxEnumOr(l, r) }
+            return l | r
+        }
         if (op == "^")  { if (typeof l == "boolean" && typeof r == "boolean") { return l != r } return l ^ r }
         if (op == "&")  { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
         if (op == "<<") return l << r

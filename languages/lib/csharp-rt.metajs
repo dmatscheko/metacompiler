@@ -137,6 +137,24 @@ function csxkChar(c) { return csChar(c) }
 function csxkNum(v) { return rtjNum(v) }
 function csxkStr(v) { return cpStr(v) }
 function csxkThrow(t, msg) { csThrow(t, msg) }
+function csxkFmtKind(v) {
+    if (floIs(v)) { return "dbl" }
+    if (typeof v == "number" || sintIs(v)) { return "int" }
+    return ""
+}
+function csxkDbl(v) { return rtjNum(v) }
+// The two's complement at the value's own width: 32 bits for a plain int.
+function csxkHex(v) {
+    if (!sintIs(v)) { return csxHexOf(v < 0 ? v + 4294967296 : v) }
+    var w = sintWidth(v)
+    var h = w < 64 ? 0 : sintHi(v)
+    var l = sintLo(v)
+    if (w < 32) { l = l & (w == 8 ? 255 : 65535) }
+    if (h == 0) { return csxHexOf(l) }
+    var lo = csxHexOf(l)
+    while (lo.length < 8) { lo = "0" + lo }
+    return csxHexOf(h) + lo
+}
 
 // ----- List<T> and Dictionary<TKey,TValue> (lib/csharp-collections.js) -------
 function csxkIsNum(v) { return typeof v == "number" || floIs(v) || sintIs(v) || csIsChar(v) }
@@ -743,6 +761,7 @@ function cpPlainObj(o) { return "[object Object]" }
 // cpObjStr renders the object shapes the two C# grammars build, and answers
 // undefined for one it does not know.
 function cpObjStr(o, depth) {
+    if (csxIsEnumBox(o)) { return csxEnumStr(o) }
     // KeyValuePair<TKey,TValue>.ToString(): "[key, value]".
     if (csxIsKvp(o)) { return "[" + cpRender(o["Key"], depth + 1) + ", " + cpRender(o["Value"], depth + 1) + "]" }
     // A user ToString() override wins over every built-in rendering, exactly as the
@@ -1183,6 +1202,10 @@ function csTypeObject(name0) {
         o["TryParse"] = csDoubleTryParse
         return o
     }
+    if (name0 == "StringComparison" || name0 == "StringSplitOptions" || name0 == "NormalizationForm") {
+        return csxEnumType(name0)
+    }
+    if (name0 == "StringComparer") { return csxStrComparerType() }
     var name = csTypeAlias(name0)
     var w = csTypeW(name)
     if (w == 0) { return o }
@@ -1458,6 +1481,10 @@ function js_csmcall(recv, name, args) {
             return csTypeOfVal(recv)
         }
     }
+    // A number's ToString(format): the standard numeric format strings.
+    if (name == "ToString" && args.length == 1 && typeof args[0] == "string" && csxkFmtKind(recv) != "") {
+        return csxFmtValue(recv, args[0])
+    }
     // Int32 / Double / Boolean.CompareTo (a char's is csxCharMethod's).
     if (name == "CompareTo" && args.length == 1) {
         if (typeof recv == "boolean" || (csxkIsNum(recv) && !csIsChar(recv))) { return csxValueCompareTo(recv, args) }
@@ -1670,7 +1697,12 @@ function js_csarith(op, l, r) {
             if (op == "^") { return l !== r }
         }
     }
-    if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) { var rg = rtjArith(op, l, r); if (floStyle(rg) == 5) { return csFloFix(op, rg, l, r) } return rg }
+    if (!rtjIsIntegral(l) || !rtjIsIntegral(r)) {
+        if (op == "|" && csxIsEnumBox(l) && csxIsEnumBox(r)) { return csxEnumOr(l, r) }
+        var rg = rtjArith(op, l, r)
+        if (floStyle(rg) == 5) { return csFloFix(op, rg, l, r) }
+        return rg
+    }
     return csArith(op, l, r)
 }
 
@@ -2068,11 +2100,30 @@ function js_cslen(v) {
 
 // The whole Console object, built here rather than in the grammar so that WriteLine
 // / Write render through cpStr instead of through the shared println host function.
+// With more than one argument the first is a composite format string.
 function js_csconsole() {
     var o = {}
-    o["WriteLine"] = function(v) { println(cpStr(v)) }
-    o["Write"] = function(v) { print(cpStr(v)) }
+    o["WriteLine"] = function() { println(csConsoleText(arguments)) }
+    o["Write"] = function() { print(csConsoleText(arguments)) }
     return o
+}
+function csConsoleText(argv) {
+    if (argv.length > 1) {
+        var rest = []
+        var i = 1
+        while (i < argv.length) {
+            rest.push(argv[i])
+            i = i + 1
+        }
+        return csxComposite(argv[0], csxParts(rest, 0))
+    }
+    if (argv.length == 0) { return "" }
+    return cpStr(argv[0])
+}
+// An interpolation hole's ':format' (lib/csharp-strings.js's csxFmtValue).
+function js_csfmt(v, spec) {
+    if (v === undefined || v === null) { return "" }
+    return csxFmtValue(v, spec)
 }
 
 // ArgumentException.Message's paramName suffix. `new ArgumentNullException(p)` takes

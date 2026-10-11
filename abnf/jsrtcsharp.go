@@ -509,6 +509,12 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 		o.set("__cstype", "string")
 		return o
 	}
+	switch name {
+	case "StringComparison", "StringSplitOptions", "NormalizationForm":
+		return csxEnumType(name)
+	case "StringComparer":
+		return csxStrComparerType()
+	}
 	// double.Parse / double.TryParse: csxParseDouble over the string; TryParse's
 	// out argument is a reference box, written 0 on a failure. Twins: the double
 	// type object in csharp-interpreter.abnf and lib/csharp-rt.metajs.
@@ -633,6 +639,11 @@ func init() {
 				}
 			}
 			if !csIsIntegral(l) || !csIsIntegral(r) {
+				if lb, ok := csxIsEnumBox(l); ok && op == "|" {
+					if rb, ok := csxIsEnumBox(r); ok {
+						return w(csxEnumOr(lb, rb))
+					}
+				}
 				return w(rt.jvmArith(op[0], l, r))
 			}
 			return w(rt.csArith(op, l, r))
@@ -1407,6 +1418,12 @@ func init() {
 			// System.String and System.Char: abnf/jsrtcsstr.go, the twin of
 			// lib/csharp-strings.js. char and string carry their STATIC members by
 			// name (__cstype, see csTypeObject).
+			// A number's ToString(format): the standard numeric format strings.
+			if name == "ToString" && len(elems) == 1 {
+				if f, ok := elems[0].(string); ok && csxFmtKind(u(a[0])) != "" && rt.csUserMethod(u(a[0]), name) == nil {
+					return rt.wrapStr(rt.csxFmtValue(u(a[0]), f))
+				}
+			}
 			switch r := u(a[0]).(type) {
 			case string:
 				if v, ok := rt.csxStrMethod(r, name, elems); ok {
@@ -1450,14 +1467,22 @@ func init() {
 		m["js_csconsole"] = func(a []uint64) uint64 {
 			o := newJSObject()
 			o.set("WriteLine", jsHostFunc("js_csprint", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				fmt.Fprint(outWriter, wtf8Clean(rt.cspStr(argAt(args, 0)))+"\n")
+				fmt.Fprint(outWriter, wtf8Clean(rt.csxConsoleText(args))+"\n")
 				return jsUndef
 			}))
 			o.set("Write", jsHostFunc("js_cswrite", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-				fmt.Fprint(outWriter, wtf8Clean(rt.cspStr(argAt(args, 0))))
+				fmt.Fprint(outWriter, wtf8Clean(rt.csxConsoleText(args)))
 				return jsUndef
 			}))
 			return rt.wrap(o)
+		}
+		// An interpolation hole's ':format': csxFmtValue, lib/csharp-strings.js's.
+		m["js_csfmt"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if isUndefOrNull(v) {
+				return rt.wrapStr("")
+			}
+			return rt.wrapStr(rt.csxFmtValue(v, rt.toString(u(a[1]))))
 		}
 
 		// ArgumentException.Message's paramName suffix - `new
@@ -1543,6 +1568,9 @@ func (rt *jsrt) cspRender(v interface{}, depth int) string {
 // for a shape it does not know, which keeps the generic rendering both halves
 // already agreed on.
 func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
+	if b, ok := csxIsEnumBox(o); ok {
+		return csxEnumStr(b), true
+	}
 	// KeyValuePair<TKey,TValue>.ToString(): "[key, value]".
 	if csxIsKvp(o) {
 		return "[" + rt.cspRender(o.props["Key"], depth+1) + ", " + rt.cspRender(o.props["Value"], depth+1) + "]", true

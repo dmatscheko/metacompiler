@@ -168,6 +168,9 @@ func (rt *jsrt) csxCmpWith(cmp, a, b interface{}) int {
 	if isUndefOrNull(cmp) {
 		return rt.csxCmp(a, b)
 	}
+	if k := csxStrComparerKind(cmp); k >= 0 {
+		return int(csxCmpStr(k, a, b))
+	}
 	if cspIsDeleg(cmp) {
 		return jsToInt(rt.toNumber(rt.csxCall(cmp, []interface{}{a, b})))
 	}

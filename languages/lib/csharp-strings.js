@@ -121,13 +121,26 @@ function csxSplit(s, seps, max) {
 }
 // Split(separator(s) [, count]): a count follows one separator argument (a char,
 // a string or an array of either), which the params char[] form cannot.
+// A trailing StringSplitOptions argument is the options (csxSplitOpts).
 function csxSplitCall(s, args) {
-    if (args.length == 2 && !csxkIsChar(args[1]) && typeof args[1] != "string" && !Array.isArray(args[1])) {
+    var n = args.length
+    var opts = 0
+    if (n > 0 && csxIsEnumBox(args[n - 1])) {
+        opts = args[n - 1]["v"]
+        n = n - 1
+    }
+    var seps = []
+    var i = 0
+    while (i < n) {
+        seps.push(args[i])
+        i = i + 1
+    }
+    if (n == 2 && !csxkIsChar(args[1]) && typeof args[1] != "string" && !Array.isArray(args[1]) && !csxIsNull(args[1])) {
         var max = csxkNum(args[1])
         if (max < 0) { csxkThrow("ArgumentOutOfRangeException", "Count cannot be less than zero. (Parameter 'count')") }
-        return csxSplit(s, csxSeps([args[0]]), max)
+        return csxSplitOpts(s, csxSeps([args[0]]), max, opts)
     }
-    return csxSplit(s, csxSeps(args), 0 - 1)
+    return csxSplitOpts(s, csxSeps(seps), 0 - 1, opts)
 }
 // IndexOfAny(anyOf [, startIndex [, count]]): the first position holding any of
 // the chars.
@@ -175,14 +188,16 @@ function csxLastIndexOfAny(s, args) {
     }
     return 0 - 1
 }
-// The separators of a Split call: chars, strings, or one array of either.
+// The separators of a Split call: chars, strings, or one array of either. A null
+// separator (or array) contributes none, so only null separators split at white
+// space.
 function csxSeps(args) {
     var src = args
     if (args.length == 1 && Array.isArray(args[0])) { src = args[0] }
     var out = []
     var i = 0
     while (i < src.length) {
-        out.push(csxArgStr(src[i]))
+        if (!csxIsNull(src[i])) { out.push(csxArgStr(src[i])) }
         i = i + 1
     }
     return out
@@ -261,6 +276,7 @@ function csxToChars(s, b, n) {
 // A string receiver's method.
 function csxStrMethod(s, name, args) {
     var n = args.length
+    if (csxHasCmpArg(name, args)) { return csxStrCmpMethod(s, name, args) }
     if (name == "Substring") { return csxSubstring(s, args) }
     if (name == "IndexOf") { return csxIndexOf(s, args) }
     if (name == "LastIndexOf") { return csxLastIndexOf(s, args) }
@@ -303,6 +319,11 @@ function csxStrMethod(s, name, args) {
         return s.substring(0, at) + args[1] + s.substring(at, s.length)
     }
     if (name == "Remove") { return csxRemove(s, args) }
+    if (name == "Normalize") {
+        csxNormalized(s, args)
+        return s
+    }
+    if (name == "IsNormalized") { return csxNormalized(s, args) }
     fail("unknown string method: " + name)
     return undefined
 }
@@ -389,7 +410,13 @@ function csxStringStatic(name, args) {
         return csxTrim(args[0], [], true, false).length == 0
     }
     if (name == "Equals" && n == 2) { return args[0] === args[1] }
+    if (name == "Equals" && n == 3) { return csxEqStr(csxCmpKind(args[2]), args[0], args[1]) }
     if (name == "CompareOrdinal" && n == 2) { return csxCompareOrdinal(args[0], args[1]) }
+    if (name == "Compare") {
+        if (n == 3 && csxIsEnumBox(args[2])) { return csxCmpStr(csxCmpKind(args[2]), args[0], args[1]) }
+        fail("String.Compare without an ordinal StringComparison is the culture's collation, which is not modelled")
+    }
+    if (name == "Format" && n >= 1) { return csxComposite(args[0], csxParts(args, 1)) }
     fail("unknown string method: " + name)
     return undefined
 }
@@ -485,3 +512,556 @@ function csxParseDouble(s) {
     return null
 }
 function csxNumWs(c) { return c == 32 || (c >= 9 && c <= 13) }
+
+// ----- the BCL enums a String member takes -----
+//
+// StringComparison, StringSplitOptions and NormalizationForm, with their
+// documented values. A member is a box {__csbcl: type name, v: value, __t: the
+// type object}, interned on the type object, so == compares it by identity and
+// an overload can tell it from an int: Split(',', 2) is a count,
+// Split(',', StringSplitOptions.RemoveEmptyEntries) the options.
+function csxEnumNames(ty) {
+    if (ty == "StringComparison") {
+        return ["CurrentCulture", "CurrentCultureIgnoreCase", "InvariantCulture",
+                "InvariantCultureIgnoreCase", "Ordinal", "OrdinalIgnoreCase"]
+    }
+    if (ty == "StringSplitOptions") { return ["None", "RemoveEmptyEntries", "TrimEntries"] }
+    return ["FormC", "FormD", "FormKC", "FormKD"]
+}
+function csxEnumVals(ty) {
+    if (ty == "StringComparison") { return [0, 1, 2, 3, 4, 5] }
+    if (ty == "StringSplitOptions") { return [0, 1, 2] }
+    return [1, 2, 5, 6]
+}
+function csxEnumMake(t, v) {
+    var b = {}
+    b["__csbcl"] = t["__csbclty"]
+    b["v"] = v
+    b["__t"] = t
+    t["__v" + v] = b
+    return b
+}
+// The type object `StringComparison` etc. names: its members by name.
+function csxEnumType(ty) {
+    var t = {}
+    t["__csbclty"] = ty
+    var ns = csxEnumNames(ty)
+    var vs = csxEnumVals(ty)
+    var i = 0
+    while (i < ns.length) {
+        t[ns[i]] = csxEnumMake(t, vs[i])
+        i = i + 1
+    }
+    return t
+}
+function csxIsEnumBox(v) {
+    if (v === null || v === undefined || typeof v != "object" || Array.isArray(v)) { return false }
+    return typeof v["__csbcl"] == "string"
+}
+// The member of value v of b's type, made (and interned) when no name has it.
+function csxEnumOf(b, v) {
+    var t = b["__t"]
+    var m = t["__v" + v]
+    if (m === undefined) { return csxEnumMake(t, v) }
+    return m
+}
+// `a | b` on two members (ECMA-334 12.13.3: the enum logical operators).
+function csxEnumOr(a, b) { return csxEnumOf(a, a["v"] | b["v"]) }
+// Enum.ToString: the member's name; a [Flags] combination (StringSplitOptions)
+// is its members' names in value order joined by ", "; otherwise the number.
+function csxEnumStr(b) {
+    var ty = b["__csbcl"]
+    var v = b["v"]
+    var ns = csxEnumNames(ty)
+    var vs = csxEnumVals(ty)
+    var i = 0
+    while (i < vs.length) {
+        if (vs[i] == v) { return ns[i] }
+        i = i + 1
+    }
+    if (ty == "StringSplitOptions" && v > 0 && v < 4) {
+        var out = ""
+        i = 1
+        while (i < vs.length) {
+            if ((v & vs[i]) != 0) { out = out + (out == "" ? "" : ", ") + ns[i] }
+            i = i + 1
+        }
+        return out
+    }
+    return "" + v
+}
+function csxEnumVal(v) { return csxIsEnumBox(v) ? v["v"] : csxkNum(v) }
+
+// ----- ordinal comparison under a StringComparison -----
+//
+// Ordinal compares UTF-16 units; OrdinalIgnoreCase compares them after the
+// invariant culture's simple upper-case mapping, unit by unit. The four
+// culture-sensitive comparisons are the culture's collation, which is not
+// modelled, so they fail rather than answer an ordinal result.
+function csxCmpKind(v) {
+    var k = csxEnumVal(v)
+    if (k == 4 || k == 5) { return k }
+    if (k >= 0 && k <= 3) {
+        fail("culture-sensitive string comparison (StringComparison." + csxEnumNames("StringComparison")[k] + ") is not modelled")
+    }
+    csxkThrow("ArgumentException", "The string comparison type passed in is currently not supported. (Parameter 'comparisonType')")
+    return 0
+}
+function csxFoldUp(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        out = out + String.fromCharCode(jxChUp(s.charCodeAt(i)))
+        i = i + 1
+    }
+    return out
+}
+// The string as the comparison kind k sees it.
+function csxCmpForm(k, s) { return k == 5 ? csxFoldUp(s) : s }
+function csxIsNull(v) { return v === null || v === undefined }
+function csxCmpStr(k, a, b) {
+    if (csxIsNull(a) || csxIsNull(b)) { return csxCompareOrdinal(a, b) }
+    return csxCompareOrdinal(csxCmpForm(k, a), csxCmpForm(k, b))
+}
+function csxEqStr(k, a, b) {
+    if (csxIsNull(a) || csxIsNull(b)) { return csxIsNull(a) && csxIsNull(b) }
+    return csxCmpForm(k, a) === csxCmpForm(k, b)
+}
+// StringComparer.Ordinal / StringComparer.OrdinalIgnoreCase: an IComparer<string>
+// and IEqualityComparer<string> (csxCmpWith reads __csstrcmp directly).
+function csxStrComparer(k) {
+    var o = {}
+    o["__csstrcmp"] = k
+    o["Compare"] = function(a, b) { return csxCmpStr(k, a, b) }
+    o["Equals"] = function(a, b) { return csxEqStr(k, a, b) }
+    return o
+}
+function csxStrComparerType() {
+    var t = {}
+    t["Ordinal"] = csxStrComparer(4)
+    t["OrdinalIgnoreCase"] = csxStrComparer(5)
+    return t
+}
+function csxIsStrComparer(v) {
+    if (v === null || v === undefined || typeof v != "object" || Array.isArray(v)) { return false }
+    return v["__csstrcmp"] !== undefined
+}
+// Does a call to member name end in a StringComparison argument?
+function csxHasCmpArg(name, args) {
+    if (args.length < 2 || !csxIsEnumBox(args[args.length - 1])) { return false }
+    if (args[args.length - 1]["__csbcl"] != "StringComparison") { return false }
+    return name == "Equals" || name == "StartsWith" || name == "EndsWith" || name == "Contains"
+        || name == "IndexOf" || name == "LastIndexOf" || name == "Replace"
+}
+// Such a member: the receiver and the arguments are compared in the
+// comparison's form; Replace replaces in the original string.
+function csxStrCmpMethod(s, name, args) {
+    var k = csxCmpKind(args[args.length - 1])
+    var rest = []
+    var i = 0
+    while (i < args.length - 1) {
+        rest.push(args[i])
+        i = i + 1
+    }
+    if (name == "Equals") { return csxEqStr(k, s, rest[0]) }
+    if (csxIsNull(rest[0])) { csxkThrow("ArgumentNullException", "Value cannot be null. (Parameter 'value')") }
+    var fs = csxCmpForm(k, s)
+    var ft = csxCmpForm(k, csxArgStr(rest[0]))
+    if (name == "StartsWith") { return jxAt(fs, ft, 0) }
+    if (name == "EndsWith") { return jxAt(fs, ft, fs.length - ft.length) }
+    if (name == "Contains") { return jxIndexOf(fs, ft, 0) >= 0 }
+    rest[0] = ft
+    if (name == "IndexOf") { return csxIndexOf(fs, rest) }
+    if (name == "LastIndexOf") { return csxLastIndexOf(fs, rest) }
+    if (ft.length == 0) { csxkThrow("ArgumentException", "String cannot be of zero length. (Parameter 'oldValue')") }
+    var r = csxIsNull(rest[1]) ? "" : csxArgStr(rest[1])
+    var out = ""
+    var last = 0
+    var at = jxIndexOf(fs, ft, 0)
+    while (at >= 0) {
+        out = out + s.substring(last, at) + r
+        last = at + ft.length
+        at = jxIndexOf(fs, ft, last)
+    }
+    return out + s.substring(last, s.length)
+}
+
+// ----- String.Normalize / IsNormalized -----
+//
+// Unicode normalization needs the decomposition tables, which are not modelled.
+// What is settled without them: no unit below U+0300 changes under form C (they
+// are all NFC_Quick_Check=Yes and none composes with another), and no ASCII unit
+// changes under any form, so such a string is its own normal form.
+function csxNormalized(s, args) {
+    var form = args.length > 0 ? csxEnumVal(args[0]) : 1
+    var lim = form == 1 ? 768 : 128
+    var i = 0
+    while (i < s.length) {
+        if (s.charCodeAt(i) >= lim) {
+            fail("Unicode normalization of a string holding U+" + csxHex4(s.charCodeAt(i)) + " is not modelled")
+        }
+        i = i + 1
+    }
+    return true
+}
+function csxHex4(c) {
+    var out = csxHexOf(c).toUpperCase()
+    while (out.length < 4) { out = "0" + out }
+    return out
+}
+
+// ----- Split's options -----
+//
+// StringSplitOptions.TrimEntries trims each part (String.Trim), RemoveEmptyEntries
+// drops the empty ones, and both may be combined. With a count, once count - 1
+// parts are kept the rest of the string is the last part; under
+// RemoveEmptyEntries the empty parts at its front are skipped first.
+function csxSplitTrim(part, opts) { return (opts & 2) != 0 ? csxTrim(part, [], true, true) : part }
+function csxSplitOpts(s, seps, max, opts) {
+    if (opts == 0) { return csxSplit(s, seps, max) }
+    if (max == 0) { return [] }
+    var rm = (opts & 1) != 0
+    var all = csxSplit(s, seps, 0 - 1)
+    var out = []
+    var cur = 0
+    var i = 0
+    while (max != 1 && i < all.length - 1) {
+        var part = csxSplitTrim(all[i], opts)
+        if (part.length > 0 || !rm) { out.push(part) }
+        cur = cur + all[i].length + csxSepLenAt(s, seps, cur + all[i].length)
+        i = i + 1
+        if (out.length == max - 1) {
+            while (rm && i < all.length - 1 && csxSplitTrim(all[i], opts).length == 0) {
+                cur = cur + all[i].length + csxSepLenAt(s, seps, cur + all[i].length)
+                i = i + 1
+            }
+            break
+        }
+    }
+    var last = csxSplitTrim(s.substring(cur, s.length), opts)
+    if (last.length > 0 || !rm) { out.push(last) }
+    return out
+}
+// The length of the separator csxSplit matched at position i (0 at the end).
+function csxSepLenAt(s, seps, i) {
+    if (i >= s.length) { return 0 }
+    var j = 0
+    var any = false
+    while (j < seps.length) {
+        if (seps[j].length > 0) {
+            any = true
+            if (jxAt(s, seps[j], i)) { return seps[j].length }
+        }
+        j = j + 1
+    }
+    return any ? 0 : 1
+}
+
+// ----- composite formatting and the standard numeric format strings -----
+//
+// String.Format, Console.WriteLine(format, args), an interpolation hole's
+// ':format' and a number's ToString(format). A format item is
+// {index[,alignment][:format]}, with '{{' and '}}' the literal braces.
+//
+// The standard numeric formats D X F N E P G R are modelled, rendered as under
+// the INVARIANT culture (the culture every other number rendering here assumes:
+// '.' decimal point, ',' group separator in threes, the "-n" and "n %" patterns,
+// "NaN" / "Infinity"). A double is formatted from its EXACT value rounded half to
+// even (the documented rule for .NET Core 2.1 and later) and keeps its sign when
+// it rounds to zero; an integer is formatted from its exact decimal digits.
+// Custom format strings ("0.00", "#,##0") and the currency format are not
+// modelled and fail. A value that is not a number ignores its format, as a type
+// that does not implement IFormattable does.
+//
+// Hooks: csxkFmtKind(v) is "int" for an integral value, "dbl" for a double or a
+// float and "" otherwise; csxkDbl(v) is a double's value; csxkHex(v) an
+// integer's two's complement hex digits at its own width.
+function csxFmtBad() { csxkThrow("FormatException", "Format specifier was invalid.") }
+function csxHexOf(n) {
+    var ds = "0123456789abcdef"
+    if (n == 0) { return "0" }
+    var out = ""
+    var v = n
+    while (v > 0) {
+        var q = Math.floor(v / 16)
+        out = ds.charAt(v - q * 16) + out
+        v = q
+    }
+    return out
+}
+function csxZeros(n) {
+    var out = ""
+    var i = 0
+    while (i < n) {
+        out = out + "0"
+        i = i + 1
+    }
+    return out
+}
+// The digit string ds rounded half to even to keep digits: {d, carry}, carry
+// saying the rounding added a leading digit (999 -> 1000).
+function csxRoundEven(ds, keep) {
+    if (keep >= ds.length) { return {d: ds, carry: false} }
+    var head = ds.substring(0, keep)
+    var c = ds.charCodeAt(keep)
+    var up = c > 53
+    if (c == 53) {
+        var i = keep + 1
+        while (i < ds.length && ds.charAt(i) == "0") { i = i + 1 }
+        if (i < ds.length) { up = true } else if (keep > 0) { up = (head.charCodeAt(keep - 1) - 48) % 2 == 1 }
+    }
+    if (!up) { return {d: head, carry: false} }
+    var out = ""
+    var k = head.length - 1
+    var carry = true
+    while (k >= 0) {
+        var d = head.charCodeAt(k) - 48
+        if (carry) {
+            d = d + 1
+            carry = d == 10
+            if (carry) { d = 0 }
+        }
+        out = String.fromCharCode(48 + d) + out
+        k = k - 1
+    }
+    if (carry) { return {d: "1" + out, carry: true} }
+    return {d: out, carry: false}
+}
+function csxStripZeros(ds) {
+    var e = ds.length
+    while (e > 0 && ds.charAt(e - 1) == "0") { e = e - 1 }
+    return ds.substring(0, e)
+}
+// A number as {neg, isInt, x, ds, e}: x is a double's magnitude, ds the
+// significant digits (no trailing zeros, "" for zero) of the value
+// 0.ds * 10^(e + 1), so e is the exponent of the first digit. A double's ds are
+// its 17-digit rounding, which csxSig refines.
+function csxNumParts(v) {
+    var o = {}
+    o["isInt"] = csxkFmtKind(v) == "int"
+    o["x"] = 0
+    o["ds"] = ""
+    o["e"] = 0
+    if (o["isInt"]) {
+        var s = csxkStr(v)
+        o["neg"] = s.charAt(0) == "-"
+        if (o["neg"]) { s = s.substring(1, s.length) }
+        o["ds"] = csxStripZeros(s)
+        o["e"] = s.length - 1
+        return o
+    }
+    var x = csxkDbl(v)
+    o["neg"] = x < 0 || (x == 0 && 1 / x < 0)
+    o["x"] = o["neg"] ? 0 - x : x
+    if (x != 0) {
+        var t = floPrec(o["x"], 17)
+        var ei = t.indexOf("e")
+        o["ds"] = csxStripZeros(t.substring(0, ei))
+        o["e"] = parseInt(t.substring(ei + 1, t.length), 10)
+    }
+    return o
+}
+// The value rounded half to even to n significant digits, as {ds, e}. Past the
+// seventeenth digit a double's decimal is exact here only for an integer below
+// 10^17, whose seventeen digits are all of it.
+function csxSig(p, n) {
+    var r = {}
+    r["ds"] = ""
+    r["e"] = p["e"]
+    if (p["ds"] == "" || n < 0) { return r }
+    if (n == 0) {
+        // Below one unit of the last place kept: up only past the half.
+        var c = p["ds"].charCodeAt(0)
+        if (c > 53 || (c == 53 && p["ds"].length > 1)) {
+            r["ds"] = "1"
+            r["e"] = p["e"] + 1
+        }
+        return r
+    }
+    if (p["isInt"] || n >= p["ds"].length && n <= 17) {
+        var q = csxRoundEven(p["ds"], n)
+        r["ds"] = csxStripZeros(q["d"])
+        if (q["carry"]) { r["e"] = p["e"] + 1 }
+        return r
+    }
+    if (n > 17) {
+        if (p["x"] != Math.floor(p["x"]) || p["x"] >= 100000000000000000) {
+            fail("a numeric format needing more than 17 significant digits of a double is not modelled")
+        }
+        r["ds"] = p["ds"]
+        return r
+    }
+    var t = floPrec(p["x"], n)
+    var ei = t.indexOf("e")
+    r["ds"] = csxStripZeros(t.substring(0, ei))
+    r["e"] = parseInt(t.substring(ei + 1, t.length), 10)
+    return r
+}
+// Digits ds (the value 0.ds * 10^(e+1)) in fixed point with prec fraction digits.
+function csxPlace(ds, e, prec) {
+    var ip = "0"
+    var fp = ""
+    if (ds != "") {
+        if (e >= 0) {
+            ip = e + 1 <= ds.length ? ds.substring(0, e + 1) : ds + csxZeros(e + 1 - ds.length)
+            fp = e + 1 < ds.length ? ds.substring(e + 1, ds.length) : ""
+        } else {
+            fp = csxZeros(0 - e - 1) + ds
+        }
+    }
+    fp = fp + csxZeros(prec - fp.length)
+    return {i: ip, f: fp}
+}
+function csxGroup(ip) {
+    var out = ""
+    var n = ip.length
+    var i = 0
+    while (i < n) {
+        if (i > 0 && (n - i) % 3 == 0) { out = out + "," }
+        out = out + ip.charAt(i)
+        i = i + 1
+    }
+    return out
+}
+// The sign a formatted number carries: a double keeps it when it rounds to zero.
+function csxSignOf(p, ds) { return p["neg"] && (!p["isInt"] || ds != "") ? "-" : "" }
+// Fixed point (F, N and P): prec fraction digits of the value times 10^shift.
+function csxFixedFmt(p, prec, shift, group) {
+    var r = csxSig(p, p["e"] + shift + 1 + prec)
+    var pl = csxPlace(r["ds"], r["e"] + shift, prec)
+    var body = group ? csxGroup(pl["i"]) : pl["i"]
+    if (prec > 0) { body = body + "." + pl["f"] }
+    return csxSignOf(p, r["ds"]) + body
+}
+function csxExpPart(e, letter, minDigits) {
+    var s = "" + (e < 0 ? 0 - e : e)
+    while (s.length < minDigits) { s = "0" + s }
+    return letter + (e < 0 ? "-" : "+") + s
+}
+// One value under one format string.
+function csxFmtValue(v, spec) {
+    var kind = csxkFmtKind(v)
+    if (spec == "" || kind == "") { return csxkStr(v) }
+    var letter = spec.charAt(0)
+    var lc = letter.toUpperCase()
+    var i = 1
+    while (i < spec.length && spec.charAt(i) >= "0" && spec.charAt(i) <= "9") { i = i + 1 }
+    if (i < spec.length || spec.length > 10 || "DXFNEPGRC".indexOf(lc) < 0) {
+        fail("the custom numeric format string \"" + spec + "\" is not modelled")
+    }
+    var hasPrec = spec.length > 1
+    var prec = hasPrec ? parseInt(spec.substring(1, spec.length), 10) : 0
+    if (lc == "C") { fail("the currency format is culture-specific and is not modelled") }
+    if (lc == "D" || lc == "X") {
+        if (kind != "int") { csxFmtBad() }
+        var s = lc == "D" ? csxkStr(v) : csxkHex(v)
+        var neg = s.charAt(0) == "-"
+        if (neg) { s = s.substring(1, s.length) }
+        if (letter == "X") { s = s.toUpperCase() }
+        if (prec > s.length) { s = csxZeros(prec - s.length) + s }
+        return neg ? "-" + s : s
+    }
+    if (lc == "R") {
+        if (kind != "dbl") { csxFmtBad() }
+        return csxkStr(v)
+    }
+    var x = csxkDbl(v)
+    if (kind == "dbl" && x - x != 0) { return csxkStr(v) }
+    var p = csxNumParts(v)
+    if (lc == "F") { return csxFixedFmt(p, hasPrec ? prec : 2, 0, false) }
+    if (lc == "N") { return csxFixedFmt(p, hasPrec ? prec : 2, 0, true) }
+    if (lc == "P") { return csxFixedFmt(p, hasPrec ? prec : 2, 2, true) + " %" }
+    if (lc == "E") {
+        var ep = hasPrec ? prec : 6
+        var re = csxSig(p, ep + 1)
+        var md = re["ds"] == "" ? "0" : re["ds"]
+        md = md + csxZeros(ep + 1 - md.length)
+        var mant = ep > 0 ? md.charAt(0) + "." + md.substring(1, md.length) : md
+        return csxSignOf(p, re["ds"]) + mant + csxExpPart(re["ds"] == "" ? 0 : re["e"], letter == "E" ? "E" : "e", 3)
+    }
+    // G: fixed point when the exponent is at least -5 and below the precision,
+    // else scientific with a two-digit exponent; G or G0 is the value's own
+    // ToString().
+    if (prec == 0) { return csxkStr(v) }
+    var rg = csxSig(p, prec)
+    var sg = csxSignOf(p, rg["ds"])
+    if (rg["ds"] == "") { return sg + "0" }
+    var ge = rg["e"]
+    var gd = rg["ds"]
+    if (ge > 0 - 5 && ge < prec) {
+        var pg = csxPlace(gd, ge, 0)
+        return sg + pg["i"] + (pg["f"] == "" ? "" : "." + pg["f"])
+    }
+    var gm = gd.length > 1 ? gd.charAt(0) + "." + gd.substring(1, gd.length) : gd
+    return sg + gm + csxExpPart(ge, letter == "G" ? "E" : "e", 2)
+}
+// An alignment: padded on the left to width al, on the right for a negative al.
+function csxAlign(s, al) {
+    var w = al < 0 ? 0 - al : al
+    if (s.length >= w) { return s }
+    return al < 0 ? s + jxRepeat(" ", w - s.length) : jxRepeat(" ", w - s.length) + s
+}
+function csxBadFormat() { csxkThrow("FormatException", "Input string was not in a correct format.") }
+// String.Format(format, args), args being the params object[] array.
+function csxComposite(fmt, args) {
+    if (csxIsNull(fmt)) { csxkThrow("ArgumentNullException", "Value cannot be null. (Parameter 'format')") }
+    var out = ""
+    var i = 0
+    var n = fmt.length
+    while (i < n) {
+        var c = fmt.charAt(i)
+        if (c == "}") {
+            if (i + 1 >= n || fmt.charAt(i + 1) != "}") { csxBadFormat() }
+            out = out + "}"
+            i = i + 2
+        } else if (c != "{") {
+            out = out + c
+            i = i + 1
+        } else if (i + 1 < n && fmt.charAt(i + 1) == "{") {
+            out = out + "{"
+            i = i + 2
+        } else {
+            i = i + 1
+            var idx = 0
+            var nd = 0
+            while (i < n && fmt.charAt(i) >= "0" && fmt.charAt(i) <= "9") {
+                idx = idx * 10 + (fmt.charCodeAt(i) - 48)
+                nd = nd + 1
+                i = i + 1
+            }
+            if (nd == 0) { csxBadFormat() }
+            while (i < n && fmt.charAt(i) == " ") { i = i + 1 }
+            var al = 0
+            if (i < n && fmt.charAt(i) == ",") {
+                i = i + 1
+                while (i < n && fmt.charAt(i) == " ") { i = i + 1 }
+                var aneg = i < n && fmt.charAt(i) == "-"
+                if (aneg) { i = i + 1 }
+                var an = 0
+                while (i < n && fmt.charAt(i) >= "0" && fmt.charAt(i) <= "9") {
+                    al = al * 10 + (fmt.charCodeAt(i) - 48)
+                    an = an + 1
+                    i = i + 1
+                }
+                if (an == 0) { csxBadFormat() }
+                if (aneg) { al = 0 - al }
+                while (i < n && fmt.charAt(i) == " ") { i = i + 1 }
+            }
+            var spec = ""
+            if (i < n && fmt.charAt(i) == ":") {
+                i = i + 1
+                var sb = i
+                while (i < n && fmt.charAt(i) != "}" && fmt.charAt(i) != "{") { i = i + 1 }
+                spec = fmt.substring(sb, i)
+            }
+            if (i >= n || fmt.charAt(i) != "}") { csxBadFormat() }
+            i = i + 1
+            if (idx >= args.length) {
+                csxkThrow("FormatException", "Index (zero based) must be greater than or equal to zero and less than the size of the argument list.")
+            }
+            var av = args[idx]
+            out = out + csxAlign(csxIsNull(av) ? "" : csxFmtValue(av, spec), al)
+        }
+    }
+    return out
+}

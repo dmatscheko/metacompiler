@@ -3044,6 +3044,62 @@ b";                                                   // verbatim keeps the newl
                 && string.CompareOrdinal("B", "a") < 0);
         }
 
+        // ===== SECTION 49: composite formatting, StringComparison, StringSplitOptions =====
+        //
+        // String.Format's format items {index[,alignment][:format]} and '{{' '}}'; the
+        // standard numeric format strings D X F N E P G as the docs define them,
+        // rendered under the invariant culture, a double from its exact value; the
+        // same items in an interpolation hole and in ToString(format). The ordinal
+        // StringComparison members and StringComparer.Ordinal / OrdinalIgnoreCase;
+        // Split's StringSplitOptions and a null separator (white space); Normalize on
+        // a string that is its own normal form. No C# toolchain here: the values
+        // follow from the docs.
+        static string S49J(string[] a) { return a.Length + ":" + string.Join("|", a); }
+        static void S49()
+        {
+            int[] n = { 255, -42, 7, 1234567, 0 };
+            double[] d = { 2.5, 1234567.891, 12345.678, 0.1234, 1.0 / 3, 0.125, -0.001 };
+            Program.Check("s49f1", string.Format("{0}-{1,4}|{2,-3}|{{{3}}}", n[2], "x", "ab", n[4]) == "7-   x|ab |{0}"
+                && string.Format("{0:D5}|{1:X}|{1:x4}|{2:X}", n[1], n[0], n[1]) == "-00042|FF|00ff|FFFFFFD6"
+                && string.Format("{1}{0}{1}", "a", "b") == "bab");
+            Program.Check("s49f2", string.Format("{0:F2}|{1:N2}|{2:E3}|{3:P1}|{2:G3}", d[0], d[1], d[2], d[3])
+                == "2.50|1,234,567.89|1.235E+004|12.3 %|1.23E+04"
+                && string.Format("{0:F0}|{1:F4}|{2:F2}|{3:N0}|{3:F}", d[5] * 5, d[4], d[5] + d[6], n[3]) == "1|0.3333|0.12|1,234,567|1234567.00");
+            Program.Check("s49f3", d[0].ToString("F3") == "2.500" && n[2].ToString("D3") == "007" && n[1].ToString("N1") == "-42.0"
+                && d[6].ToString("E1") == "-1.0E-003" && n[0].ToString("E2") == "2.55E+002" && d[4].ToString("G2") == "0.33");
+            Program.Check("s49f4", $"[{n[2],3:D2}][{d[4]:F4}][{d[4],7:F2}][{n[1]:D3}]" == "[ 07][0.3333][   0.33][-042]");
+            string ex = "";
+            try { string.Format("{1}", n[0]); } catch (FormatException) { ex += "i"; }
+            try { string.Format("{0", n[0]); } catch (FormatException) { ex += "b"; }
+            try { d[0].ToString("D2"); } catch (FormatException) { ex += "d"; }
+            Program.Check("s49f5", ex == "ibd");
+            string[] w = { "Hello", "LL", "he", "aXbxc", "x" };
+            var c = StringComparison.OrdinalIgnoreCase;
+            Program.Check("s49c1", w[0].IndexOf(w[1], c) == 2 && w[0].IndexOf(w[1], StringComparison.Ordinal) == -1
+                && w[0].StartsWith(w[2], c) && !w[0].StartsWith(w[2], StringComparison.Ordinal)
+                && w[0].EndsWith("LO", c) && w[0].Contains("ELL", c) && w[3].Replace(w[4], "-", c) == "a-b-c"
+                && w[3].Replace(w[4], "-", StringComparison.Ordinal) == "aXb-c");
+            Program.Check("s49c2", "abc".Equals("ABC", c) && !"abc".Equals("ABC", StringComparison.Ordinal)
+                && string.Equals(w[4], "X", c) && string.Compare("a", "B", StringComparison.Ordinal) > 0
+                && string.Compare("a", "B", c) < 0 && string.Compare(w[1], "ll", c) == 0
+                && c == StringComparison.OrdinalIgnoreCase && c != StringComparison.Ordinal
+                && "" + c == "OrdinalIgnoreCase");
+            var l = new List<string> { "b", "B", "a", "C" };
+            l.Sort(StringComparer.Ordinal);
+            string ord = string.Join(",", l);
+            l.Sort(StringComparer.OrdinalIgnoreCase);
+            Program.Check("s49c3", ord == "B,C,a,b" && l[0] == "a" && l[3] == "C"
+                && StringComparer.OrdinalIgnoreCase.Equals("ab", "AB") && StringComparer.Ordinal.Compare("a", "b") < 0);
+            var rm = StringSplitOptions.RemoveEmptyEntries;
+            var both = StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries;
+            Program.Check("s49s1", S49J("a,,b, c ,".Split(',', rm)) == "3:a|b| c " && S49J("a,,b, c ,".Split(',', both)) == "3:a|b|c"
+                && S49J(" a  b ".Split((char[])null, rm)) == "2:a|b" && S49J("a b".Split((char[])null)) == "2:a|b"
+                && S49J("a;;b".Split(";", StringSplitOptions.None)) == "3:a||b" && "" + both == "RemoveEmptyEntries, TrimEntries"
+                && S49J("x, ,y".Split(',', StringSplitOptions.TrimEntries)) == "3:x||y");
+            Program.Check("s49n1", "abc".Normalize() == "abc" && "abc".IsNormalized() && "café".Normalize(NormalizationForm.FormC) == "café"
+                && "ab".Normalize(NormalizationForm.FormD) == "ab");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3094,6 +3150,7 @@ b";                                                   // verbatim keeps the newl
             Program.S46(); // SECTION-CALL 46
             Program.S47(); // SECTION-CALL 47
             Program.S48(); // SECTION-CALL 48
+            Program.S49(); // SECTION-CALL 49
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

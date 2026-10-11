@@ -57,7 +57,6 @@ function csxNumCmp(a, b) {
     if (csxkLt(b, a)) { return 1 }
     return 0
 }
-function csxIsNull(v) { return v === null || v === undefined }
 function csxCmp(a, b) {
     if (csxIsNull(a)) { return csxIsNull(b) ? 0 : 0 - 1 }
     if (csxIsNull(b)) { return 1 }
@@ -87,6 +86,7 @@ function csxValueCompareTo(recv, args) { return csxCmp(recv, args[0]) }
 // delegate, or an IComparer<T> object.
 function csxCmpWith(cmp, a, b) {
     if (csxIsNull(cmp)) { return csxCmp(a, b) }
+    if (csxIsStrComparer(cmp)) { return csxCmpStr(cmp["__csstrcmp"], a, b) }
     if (csxkIsDeleg(cmp)) { return csxkNum(csxkCall(cmp, [a, b])) }
     return csxkNum(csxkMcall(cmp, "Compare", [a, b]))
 }
