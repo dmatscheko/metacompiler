@@ -3284,6 +3284,25 @@ function s61() {
     check("sup01", new A61().toString() === "A:[object Object]" && new A61().t() === "function" && new B61().v());
 }
 
+// ===== SECTION 62: g.return(v) resumes the body with a return completion =====
+// A finally that returns overrides v, one that yields keeps the generator going, and
+// a yield* delegate whose return() is not done is yielded from. Values read off
+// node 24.
+function* r62a(): Generator<any, any, any> { try { yield 1; } finally { return 42; } }
+function* r62b(): Generator<any, any, any> { try { yield 1; } finally { yield 99; } }
+function* r62in(): Generator<any, any, any> { try { yield 1; } finally { yield "f"; } }
+function* r62out(): Generator<any, any, any> { const r = yield* r62in(); return "o:" + r; }
+function s62() {
+    const j = (r: any): string => r.value + "/" + r.done;
+    const a = r62a();
+    a.next();
+    const b = r62b();
+    b.next();
+    const o = r62out();
+    check("grc01", j(a.return(7)) === "42/true" && [j(b.return(7)), j(b.next())].join() === "99/false,7/true" &&
+        [j(o.next()), j(o.return(7)), j(o.next())].join() === "1/false,f/false,o:7/true");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3348,6 +3367,7 @@ function main(): number {
     s59(); // SECTION-CALL 59
     s60(); // SECTION-CALL 60
     s61(); // SECTION-CALL 61
+    s62(); // SECTION-CALL 62
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

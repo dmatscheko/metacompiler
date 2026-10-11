@@ -2080,32 +2080,36 @@ function jvProtoTag(v) {
     return "[object Object]"
 }
 
-// g.return(v) at a yield*: the value the close in progress carries, which the
-// delegate's return() may replace. Twin of closeV / genReturn / js_jsdelegclose in
-// abnf/jsrtjsprint.go, which says why. jvCloseN counts the closes in progress, so a
-// delegate closed outside any is handed undefined.
-var jvCloseV = anytype
-var jvCloseN = 0
+// g.return(v): the body is RESUMED with a return completion at the yield it is
+// parked at - a marker raised there through the floor's throw() (gen_throw), which
+// the emitter keeps away from every catch clause of a plain generator body and turns
+// back into `return v` at the body's top, and which a yield* hands to its delegate's
+// return() (js_jsgenretp). So a finally that yields leaves the generator suspended
+// and answers {value, done: false}, and one that returns overrides v. A generator
+// that has not started, or is done, raises the marker straight back: {v, done: true}.
+// Twin of genReturn in abnf/jsrtjsprint.go, which states the rule.
 function jvGenReturn(g) {
     return function () {
-        var saved = anytype
-        saved = jvCloseV
-        var savedN = jvCloseN
-        jvCloseV = jvArg(arguments, 0)
-        jvCloseN = savedN + 1
-        var out = anytype
+        var mk = {}
+        mk["__jsgret"] = true
+        mk["v"] = jvArg(arguments, 0)
         try {
-            jvCallT(g["return"], g, [jvCloseV])
-            out = jvCloseV
-        } finally {
-            jvCloseV = saved
-            jvCloseN = savedN
+            return jvCallT(g["throw"], g, [mk])
+        } catch (e) {
+            if (e !== mk) { throw e }
         }
         var res = {}
-        res["value"] = out
+        res["value"] = mk["v"]
         res["done"] = true
         return res
     }
+}
+// Is this the return-completion marker jvGenReturn raises?
+function js_jsgenretp(e) {
+    if (jvIsObj(e)) {
+        if (e["__jsgret"] === true) { return true }
+    }
+    return false
 }
 // The emitters read a member spelled `.return` through these two instead of
 // js_jsmget / js_jsvget, so that no other member read pays for the test.
@@ -2117,20 +2121,12 @@ function js_jsretvget(o, key) {
     if (isGenerator(o)) { return jvGenReturn(o) }
     return js_jsvget(o, key)
 }
+// IteratorClose on the delegate of a yield* an async generator's close unwinds: its
+// return() runs. Twin of js_jsdelegclose in abnf/jsrtjsprint.go.
 function js_jsdelegclose(src) {
     var rf = anytype
     rf = js_jsretvget(src, "return")
-    if (!jvIsCallable(rf)) { return undefined }
-    var cv = anytype
-    cv = undefined
-    if (jvCloseN > 0) { cv = jvCloseV }
-    var r = anytype
-    r = jvCallT(rf, src, [cv])
-    if (jvIsObj(r)) {
-        if (!js_jsnot(js_jsvget(r, "done"))) {
-            if (jvCloseN > 0) { jvCloseV = js_jsvget(r, "value") }
-        }
-    }
+    if (jvIsCallable(rf)) { jvCallT(rf, src, []) }
     return undefined
 }
 

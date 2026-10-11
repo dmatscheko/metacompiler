@@ -2925,9 +2925,40 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeGenFn(params, bodyT, ownStrict, nm, txt) {
         return fnDef(function(b) {
-            var idx = emitFunction(params, bodyT, false, false, ownStrict)
+            pendingPlainGen = true // Consumed by the emitFunction call below.
+            var idx = emitFunction(params, genRetBody(bodyT), false, false, ownStrict)
             return {b: b, v: callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])}
         }, nm, params, txt)
+    }
+    // See the twin of this block in js-to-llvm-ir.abnf.
+    var inPlainGen = false
+    var pendingPlainGen = false
+    function genRetBody(bodyT) {
+        return function(b) {
+            var tryClo = callExt(b, "js_closure", [handle(emitFunction([], bodyT, true)), curScopeV])
+            var catchClo = callExt(b, "js_closure", [handle(emitFunction(["0gret"], function(cb) {
+                var eV = callExt(cb, "js_scope_get", [curScopeV, emitStr(cb, "0gret")])
+                var retB = curF.NewBlock("")
+                var thrB = curF.NewBlock("")
+                cb.NewCondBr(truthy(cb, callExt(cb, "js_jsgenretp", [eV])), retB, thrB)
+                callExt(thrB, "js_throw", [eV])
+                thrB.NewRet(hUndef) // Never reached: js_throw does not return.
+                return retStmt(retB, callExt(retB, memGetExt(), [eV, emitStr(retB, "v")]))
+            }, true)), curScopeV])
+            return excDispatch(b, callExt(b, "js_try", [tryClo, catchClo, hUndef]))
+        }
+    }
+    // See the twin of this function in js-to-llvm-ir.abnf.
+    function genRetPass(cn, catchT) {
+        return function(b) {
+            var eV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cn)])
+            var passB = curF.NewBlock("")
+            var runB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_jsgenretp", [eV])), passB, runB)
+            callExt(passB, "js_throw", [eV])
+            passB.NewRet(hUndef) // Never reached: js_throw does not return.
+            return catchT(runB)
+        }
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var inAsyncFn = false
@@ -3177,8 +3208,30 @@ NotFuncHead = :script(~~
             headB.NewCondBr(truthy(headB, callExt(headB, "js_seq",
                                 [callExt(headB, "js_typeof", [hsentV]), emitStr(headB, "object")])),
                             hchkB, splitB)
+            var yrmB = curF.NewBlock("")
             hchkB.NewCondBr(truthy(hchkB, callExt(hchkB, memGetExt(), [hsentV, emitStr(hchkB, "__athrow")])),
-                            ythrB, splitB)
+                            yrmB, splitB)
+            // See the twin of this arm in js-to-llvm-ir.abnf.
+            var yrmV = callExt(yrmB, memGetExt(), [hsentV, emitStr(yrmB, "v")])
+            var yrpB = curF.NewBlock("")
+            yrmB.NewCondBr(truthy(yrmB, callExt(yrmB, "js_jsgenretp", [yrmV])), yrpB, ythrB)
+            var yrrfV = callExt(yrpB, "js_jsretvget", [seqV, emitStr(yrpB, "return")])
+            var yrCallB = curF.NewBlock("")
+            var yrNoB = curF.NewBlock("")
+            yrpB.NewCondBr(truthy(yrpB, callExt(yrpB, "js_seq",
+                               [callExt(yrpB, "js_typeof", [yrrfV]), emitStr(yrpB, "function")])),
+                           yrCallB, yrNoB)
+            callExt(yrNoB, "js_throw", [yrmV])
+            yrNoB.NewRet(hUndef) // Never reached: js_throw does not return.
+            var yrArgsV = callExt(yrCallB, "js_arr_new", [])
+            callExt(yrCallB, "js_arr_push", [yrArgsV, callExt(yrCallB, memGetExt(), [yrmV, emitStr(yrCallB, "v")])])
+            var yrrV = emitAwait(yrCallB, callExt(jsThisSet(yrCallB, seqV), "js_call", [yrrfV, seqV, yrArgsV]))
+            var yrDoneB = curF.NewBlock("")
+            yrCallB.NewCondBr(truthy(yrCallB, callExt(yrCallB, memGetExt(), [yrrV, emitStr(yrCallB, "done")])),
+                              yrDoneB, joinB)
+            callExt(yrDoneB, memSetExt(), [yrmV, emitStr(yrDoneB, "v"), callExt(yrDoneB, memGetExt(), [yrrV, emitStr(yrDoneB, "value")])])
+            callExt(yrDoneB, "js_throw", [yrmV])
+            yrDoneB.NewRet(hUndef) // Never reached: js_throw does not return.
             var ytfV = callExt(ythrB, "js_jsvget", [seqV, emitStr(ythrB, "throw")])
             ythrB.NewCondBr(truthy(ythrB, callExt(ythrB, "js_seq",
                                 [callExt(ythrB, "js_typeof", [ytfV]), emitStr(ythrB, "function")])),
@@ -3219,6 +3272,7 @@ NotFuncHead = :script(~~
             // One {value, done} record, from next() or from a forwarded throw().
             var yincs = [llvm.ir.NewIncoming(ystV, ystepB)]
             yincs.push(llvm.ir.NewIncoming(ythrStV, ythrCallB))
+            yincs.push(llvm.ir.NewIncoming(yrrV, yrCallB))
             var yrecV = joinB.NewPhi(yincs)
             var ystepElemV = callExt(joinB, memGetExt(), [yrecV, emitStr(joinB, "value")])
             joinB.NewCondBr(truthy(joinB, callExt(joinB, memGetExt(), [yrecV, emitStr(joinB, "done")])),
@@ -3732,11 +3786,13 @@ NotFuncHead = :script(~~
         // See the twin of this comment in js-to-llvm-ir.abnf.
         var savedAsync = inAsyncFn
         var savedAsyncGen = inAsyncGen
+        var savedPlainGen = inPlainGen
         var savedStrict = emitStrict
         if (ownStrict === true) { emitStrict = true }
-        if (!isCtl) { inAsyncFn = pendingAsyncFn; inAsyncGen = pendingAsyncGen }
+        if (!isCtl) { inAsyncFn = pendingAsyncFn; inAsyncGen = pendingAsyncGen; inPlainGen = pendingPlainGen }
         pendingAsyncFn = false
         pendingAsyncGen = false
+        pendingPlainGen = false
         curF = f
         curFTag = idx
         loopStack = []
@@ -3756,7 +3812,8 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), thisV])
         }
         b = bindParams(b, paramNames, f.Params[1], 0)
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
+        // See the twin of this line in js-to-llvm-ir.abnf.
+        if (!isCtl) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]]) }
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
 
@@ -3768,6 +3825,7 @@ NotFuncHead = :script(~~
         curFTag = savedTag
         inAsyncFn = savedAsync
         inAsyncGen = savedAsyncGen
+        inPlainGen = savedPlainGen
         emitStrict = savedStrict
         return idx
     }
@@ -4305,7 +4363,10 @@ NotFuncHead = :script(~~
             var catchClo = hUndef
             if (catchT != undefined) {
                 var cn = (catchName != undefined) ? catchName : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunction([cn], catchT, true)), curScopeV])
+                var cT = catchT
+                // See the twin of this line in js-to-llvm-ir.abnf.
+                if (inPlainGen) { cT = genRetPass(cn, catchT) }
+                catchClo = callExt(b, "js_closure", [handle(emitFunction([cn], cT, true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
@@ -4485,10 +4546,13 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
         emitStrict = true // A class body is strict code, always.
+        var savedPlainGen = inPlainGen
         inAsyncFn = pendingAsyncFn
         inAsyncGen = pendingAsyncGen
+        inPlainGen = pendingPlainGen
         pendingAsyncFn = false
         pendingAsyncGen = false
+        pendingPlainGen = false
         curF = f
         loopStack = []
         forOfIters = []
@@ -4525,6 +4589,9 @@ NotFuncHead = :script(~~
         curScopeV = savedScope
         loopStack = savedLoops
         forOfIters = savedForOf
+        inAsyncFn = savedAsync
+        inAsyncGen = savedAsyncGen
+        inPlainGen = savedPlainGen
         emitStrict = savedStrict
         return idx
     }
@@ -4662,7 +4729,8 @@ NotFuncHead = :script(~~
             if (mm.gen == true) {
                 // A generator method: the same body, wrapped so that calling it produces a
                 // generator object instead of running it.
-                idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
+                pendingPlainGen = true
+                idx = emitClassFunc(mm.params, genRetBody(mm.body), !mm.statik, null, null)
                 clsRawSet(b, mtgt, mk.v, fnMetaAt(b,
                     callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])]), memberFnName(mm), mm.params))
                 continue

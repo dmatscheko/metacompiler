@@ -5814,12 +5814,10 @@ NotFuncHead = :script(~~
     // jsExcTry keeps it out of the program's own try/catch/finally, so every finally
     // clause fires at the moment node fires it.
     //
-    // .return(v) answers {value: v, done: true} AND runs the body's finally clauses,
-    // at the moment node runs them: genClose replays to the yield the generator is
-    // parked at and raises an exit record there, which is the same place the compiler
-    // half's gen_close (runtime.c) throws its GEN_EXIT sentinel. A for-of that BREAKS
-    // is that same close, so a second loop over the generator answers nothing in all
-    // three engines and the finally prints at the break in all three.
+    // .return(v) resumes the body with a return completion: genClose replays to the
+    // yield the generator is parked at and raises an exit record there, so the finally
+    // clauses run at the moment node runs them. A for-of that BREAKS is that same
+    // close, so a second loop over the generator answers nothing in all three engines.
     var genRuns = []
 
     // See the twin of this comment in js-interpreter.abnf.
@@ -5853,8 +5851,8 @@ NotFuncHead = :script(~~
         if (typeof rf != "function") { return undefined }
         var r = anytype
         r = callWithThis(rf, v, [jpCloseV])
-        if (jpIsObjV(r) && jsTruthy(getMember(r, "done"))) { jpCloseV = getMember(r, "value") }
-        return undefined
+        if (jpIsObjV(r) && jsTruthy(getMember(r, "done"))) { jpCloseV = getMember(r, "value"); return undefined }
+        return r
     }
     function jpNoThrowMethod(v) {
         jpCloseDelegate(v)
@@ -5943,7 +5941,14 @@ NotFuncHead = :script(~~
         try {
             s = doYieldRaw(run, val)
         } catch (e) {
-            if (e != undefined && e != null && e.__genExit == true) { jpReturnDelegate(dv) }
+            if (e != undefined && e != null && e.__genExit == true) {
+                var dr = anytype
+                dr = jpReturnDelegate(dv)
+                // A delegate return() that is not done: a plain generator's yield*
+                // yields its value. (An async generator's answers a promise, which
+                // this half does not await here; its close goes on as before.)
+                if (dr !== undefined && !run.ag) { return {__dret: dr} }
+            }
             throw e
         }
         return s
@@ -5966,7 +5971,9 @@ NotFuncHead = :script(~~
                         // See the twin of this comment in js-interpreter.abnf.
                         var dsent = anytype
                         dsent = jpYieldDeleg(run, dst.value, v)
-                        if (jpIsThrowIn(dsent)) {
+                        if (jpIsObjV(dsent) && dsent["__dret"] !== undefined) {
+                            dst = dsent["__dret"]
+                        } else if (jpIsThrowIn(dsent)) {
                             var dtf = anytype
                             dtf = getMember(v, "throw")
                             if (typeof dtf != "function") { jpNoThrowMethod(v) }
@@ -6081,7 +6088,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function newGenObject(params, bodyT, env, self, args, isAg) {
-        var st = {sent: [], count: 0, done: false, ag: isAg}
+        var st = {sent: [], count: 0, done: false, ag: isAg, closeV: undefined, closing: false}
         var g = {}
         g["__gen"] = true
         g["__keys"] = []
@@ -6094,9 +6101,7 @@ NotFuncHead = :script(~~
         g["return"] = function() {
             var rv = anytype
             rv = (arguments.length > 0) ? arguments[0] : undefined
-            var cv = anytype
-            cv = genClose(st, params, bodyT, env, self, args, rv)
-            return {value: cv, done: true, __keys: ["value", "done"]}
+            return genClose(st, params, bodyT, env, self, args, rv)
         }
         // See the twin of this comment in js-interpreter.abnf.
         g["throw"] = function() {
@@ -6123,29 +6128,16 @@ NotFuncHead = :script(~~
         return r
     }
     // See the twin of this comment in js-interpreter.abnf.
-    // See the twin of this comment in js-interpreter.abnf.
     var jpCloseV = anytype
     jpCloseV = undefined
     function genClose(st, params, bodyT, env, self, args, rv) {
-        if (st.done) { return rv }
-        if (st.count == 0) { st.done = true; return rv }
-        var savedV = anytype
-        savedV = jpCloseV
-        jpCloseV = rv
-        try {
-            genNext(st, params, bodyT, env, self, args, {__genExitIn: true})
-        } catch (e) {
+        if (st.done || st.count == 0) {
             st.done = true
-            if (e == undefined || e == null || e.__genExit != true) {
-                jpCloseV = savedV
-                throw e
-            }
+            return {value: rv, done: true, __keys: ["value", "done"]}
         }
-        st.done = true
-        var out = anytype
-        out = jpCloseV
-        jpCloseV = savedV
-        return out
+        st.closeV = rv
+        st.closing = true
+        return genNext(st, params, bodyT, env, self, args, {__genExitIn: true})
     }
     // One step: replay the body up to yield number st.count, and report what happened.
     function genNext(st, params, bodyT, env, self, args, sendv) {
@@ -6154,6 +6146,9 @@ NotFuncHead = :script(~~
         var run = {target: st.count, k: 0, sent: st.sent, out: undefined, ag: st.ag}
         genRuns.push(run)
         var saved = scopes
+        var savedCloseV = anytype
+        savedCloseV = jpCloseV
+        jpCloseV = st.closeV
         var ret = anytype   // The generator's return value,
         var out = anytype   // or the value it yielded.
         ret = undefined
@@ -6168,10 +6163,18 @@ NotFuncHead = :script(~~
             bindParams(sc, params, args)
             var r = bodyT()
             ret = (r != undefined && r.isRet) ? r.v : undefined
+            // A body a close resumed that ends with no return value of its own answers
+            // the close's: a replay re-steps a delegate the body was HANDED (it is not
+            // re-created), so `yield* it` may run out instead of re-raising the exit.
+            if (st.closing && (r == undefined || !r.isRet)) { ret = jpCloseV }
         } catch (e) {
             if (e != undefined && e.__genYield == true) { yielded = true; out = e.v }
-            else { scopes = saved; genRuns.pop(); throw e }
+            // The exit record a close raised left the body: it completes with the
+            // close's value.
+            else if (e != undefined && e != null && e.__genExit == true) { ret = jpCloseV }
+            else { scopes = saved; genRuns.pop(); jpCloseV = savedCloseV; throw e }
         }
+        jpCloseV = savedCloseV
         scopes = saved
         genRuns.pop()
         if (yielded) {

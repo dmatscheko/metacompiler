@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-67.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-68.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,13 +6,14 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-67, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-68, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
 //                             g.return() at a yield*, builtin methods as values,
 //                             the own names of Math / JSON / Object and `in`,
-//                             super reaching Object.prototype
+//                             super reaching Object.prototype, g.return(v) as a
+//                             return completion
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1428,6 +1429,47 @@ function s67() {
     check("sup2", q.e("z") && !q.e("y") && new A67().t() === "function" && new A67().n() === "undefined")
 }
 
+// ===== SECTION 68: g.return(v) resumes the body with a return completion =====
+// The finally clauses around the parked yield run as the body's own code: one that
+// returns overrides v, one that yields makes return() answer {value, done: false}
+// and the generator goes on from there (a later next() finishes the return, a later
+// return() replaces its value, a throw() can be caught), a catch clause never sees
+// the completion, and at a yield* a delegate whose return() is not done is yielded
+// from and stays delegated to. A generator not yet started runs nothing. Values
+// read off node 24.
+function* r68a() { try { yield 1 } finally { return 42 } }
+function* r68b() { try { yield 1 } finally { yield 99; yield 100 } return 5 }
+function* r68c() { try { yield 1 } catch (e) { yield "caught" } finally { yield "fin" } }
+function* r68d() { try { yield 1 } finally { try { yield 2 } catch (e) { yield "c:" + e } } }
+function* r68in() { try { yield 1; yield 2 } finally { yield "f" } }
+function* r68out() { var r = yield* r68in(); return "o:" + r }
+function* r68arg(a) { try { yield arguments.length; yield a } finally { } }
+function s68() {
+    var j = function (r) { return r.value + "/" + r.done }
+    var a = r68a()
+    a.next()
+    var b = r68b()
+    b.next()
+    var b1 = [j(b.return(7)), j(b.next()), j(b.next()), j(b.next())]
+    check("grc1", j(a.return(7)) === "42/true" && j(a.next()) === "undefined/true" &&
+        b1.join() === "99/false,100/false,7/true,undefined/true")
+    var c = r68c()
+    c.next()
+    var d = r68d()
+    d.next()
+    var f = r68b()
+    f.next()
+    check("grc2", [j(c.return(3)), j(c.next())].join() === "fin/false,3/true" &&
+        [j(d.return(5)), j(d.throw("T")), j(d.next()), j(d.next())].join() === "2/false,c:T/false,5/true,undefined/true" &&
+        [j(f.return(7)), j(f.return(8)), j(f.next())].join() === "99/false,8/true,undefined/true")
+    var o = r68out()
+    var h = r68b()
+    var w = r68arg(4, 5)
+    check("grc3", [j(o.next()), j(o.return(7)), j(o.next()), j(o.next())].join() === "1/false,f/false,o:7/true,undefined/true" &&
+        [j(h.return(3)), j(h.next())].join() === "3/true,undefined/true" &&
+        [j(w.next()), j(w.next()), j(w.return(1))].join() === "2/false,4/false,1/true")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1454,6 +1496,7 @@ function main() {
     s65() // SECTION-CALL 65
     s66() // SECTION-CALL 66
     s67() // SECTION-CALL 67
+    s68() // SECTION-CALL 68
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

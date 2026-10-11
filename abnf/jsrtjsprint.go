@@ -2128,32 +2128,46 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return 0
 	}
 	baseGet := m["js_get"]
-	// ----- g.return(v) at a yield* -----
+	// ----- g.return(v) -----
 	//
-	// node hands the value of g.return(v) to the return() of the delegate a `yield*`
-	// is parked at, and when that answers {done: true, value: x} the generator
-	// returns x, not v. closeV is the value the close in progress carries:
-	// genReturn sets it around the close and answers it afterwards, and the
-	// yield*'s close region calls js_jsdelegclose, which passes it to the delegate
-	// and replaces it with a done answer's value. It is saved and restored, so a
-	// delegate generator closed from inside a close keeps its own. A not-done
-	// answer would make node yield it and stay in the yield*, which a close cannot
-	// do here (closeBody); the close keeps the value it had. Twins: js_jsdelegclose
-	// / jvGenReturn in languages/lib/js-rt.metajs, jpReturnDelegate / genClose in
-	// both *-interpreter.abnf.
-	var closeV interface{} = jsUndef
+	// node RESUMES the body with a return completion at the yield it is parked at, so
+	// the finally clauses around that yield run as the body's own code: one that
+	// yields makes return() answer {value, done: false} and leaves the generator
+	// suspended there, one that returns overrides v, and at a yield* the completion
+	// goes to the delegate's return(). Here the completion is a MARKER raised at the
+	// yield as an ordinary throw (throwInto); the emitter keeps it away from every
+	// catch clause of a plain generator body and turns it back into `return v` at
+	// the body's top, and a yield* hands it to its delegate (js_jsgenretp). A
+	// generator that has not started, or is done, runs nothing and raises the marker
+	// straight back, which is {v, done: true}. Twins: jvGenReturn in
+	// languages/lib/js-rt.metajs, genClose in both *-interpreter.abnf.
 	genReturn := func(g *jsGenerator) *hostFunc {
-		return jsHostFunc("return", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			saved := closeV
-			defer func() { closeV = saved }()
-			closeV = argAt(args, 0)
-			g.closeBody(rt)
-			g.retValue = closeV
-			res := newJSObject()
-			res.set("value", closeV)
-			res.set("done", true)
-			return res
+		return jsHostFunc("return", func(rt *jsrt, this uint64, args []interface{}) (res interface{}) {
+			v := argAt(args, 0)
+			mk := newJSObject()
+			mk.props["__jsgret"] = true
+			mk.props["v"] = v
+			defer func() {
+				if p := recover(); p != nil {
+					if t, isThrow := p.(*jsThrown); !isThrow || t.value != mk {
+						panic(p)
+					}
+					g.retValue = v
+					r := newJSObject()
+					r.set("value", v)
+					r.set("done", true)
+					res = r
+				}
+			}()
+			return g.throwInto(rt, mk)
 		})
+	}
+	// Is this the return-completion marker genReturn raises?
+	m["js_jsgenretp"] = func(a []uint64) uint64 {
+		if o, isObj := u(a[0]).(*jsObject); isObj && o.props["__jsgret"] == true {
+			return w(true)
+		}
+		return w(false)
 	}
 	// The emitters read a member spelled `.return` through these two instead of
 	// js_jsmget / js_jsvget, so that no other member read pays for the test.
@@ -2169,24 +2183,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return m["js_jsvget"](a)
 	}
+	// IteratorClose on the delegate of a yield* an async generator's close unwinds:
+	// its return() runs. Twin of js_jsdelegclose in languages/lib/js-rt.metajs.
 	m["js_jsdelegclose"] = func(a []uint64) uint64 {
-		rf := u(m["js_jsretvget"]([]uint64{a[0], w("return")}))
-		if !isCallable(rf) {
-			return jsHUndefined
-		}
-		if r, ok := rt.call(rf, u(a[0]), []interface{}{closeV}).(*jsObject); ok && rt.truthy(rt.unwrap(m["js_jsvget"]([]uint64{w(r), w("done")}))) {
-			closeV = rt.unwrap(m["js_jsvget"]([]uint64{w(r), w("value")}))
+		if rf := u(m["js_jsretvget"]([]uint64{a[0], w("return")})); isCallable(rf) {
+			rt.call(rf, u(a[0]), nil)
 		}
 		return jsHUndefined
 	}
-	// js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
-	// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site
-	// and which deliberately HIDES the String/Array method names so the call falls into
-	// js_jsmcall. The difference this extern exists for: an instance's methods live on
-	// its __class descriptor, not as own properties, yet node says `typeof p.m` is
-	// "function". The answer is jsvMethodValue: one unbound function per method, which
-	// takes `this` from its call site. The layer-2 twin is js_jsvget in
-	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
 	// A String / Array / Number builtin method READ AS A VALUE: node's prototype
 	// function, one per kind and name whatever the receiver, taking `this` from its
 	// call site (`f.call([9], 3)` pushes onto [9]). Interned per runtime; a call
@@ -2209,6 +2213,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		builtinVals[key] = f
 		return f
 	}
+	// js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
+	// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site
+	// and which deliberately HIDES the String/Array method names so the call falls into
+	// js_jsmcall. The difference this extern exists for: an instance's methods live on
+	// its __class descriptor, not as own properties, yet node says `typeof p.m` is
+	// "function". The answer is jsvMethodValue: one unbound function per method, which
+	// takes `this` from its call site. The layer-2 twin is js_jsvget in
+	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
 	vget := func(a []uint64) uint64 {
 		if fam := jsvBuiltinFam(u(a[0]), rt.toString(u(a[1]))); fam != 0 {
 			return w(builtinValue(fam, rt.toString(u(a[1]))))
