@@ -1526,6 +1526,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // one; makeLocal / makeLocalFunc declare into the innermost.
     var luaDeclNames = [[]]
     var luaDeclFn = [true]
+    // Set by repeat-until for the block it emits next, whose locals its condition
+    // still sees: that block declares into the scope repeat pushed.
+    var luaDeclShared = false
     function luaDeclPush(isFn) {
         luaDeclNames.push([])
         luaDeclFn.push(isFn)
@@ -1685,7 +1688,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     makeSeq = function(items) {
         return function(b) {
-            luaDeclPush(false)
+            var ownDecls = !luaDeclShared
+            luaDeclShared = false
+            if (ownDecls) { luaDeclPush(false) }
             var scope = {}
             var any = false
             for (var i = 0; i < items.length; i++) {
@@ -1708,7 +1713,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = it(b)
             }
             if (any) { labelScopes.pop() }
-            luaDeclPop()
+            if (ownDecls) { luaDeclPop() }
             return b
         }
     }
@@ -2436,9 +2441,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewBr(bodyB)
             curScopeV = callExt(bodyB, "js_scope_new", [saved])
             loopStack.push({cont: contB, brk: exitB})
+            luaDeclPush(false)
+            luaDeclShared = true
             block(bodyB).NewBr(contB)
             loopStack.pop()
             var r = condT(contB)
+            luaDeclPop()
             r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB)
             curScopeV = saved
             return exitB

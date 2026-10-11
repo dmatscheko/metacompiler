@@ -1406,6 +1406,7 @@ function s34()
     check("vn14", msg(function() return (t.a).b end), "attempt to index a nil value (field 'a')")
     check("vn15", msg(function() local x = nil; x.y = 1 end), "attempt to index a nil value (local 'x')")
     check("vn16", msg(function(p) return -p end), "attempt to perform arithmetic on a nil value (local 'p')")
+    check("vn17", msg(function() repeat local z = nil until z.x end), "attempt to index a nil value (local 'z')")
     local function none() end
     local function two() return nil, 5 end
     local function three4() return 3, 4 end
