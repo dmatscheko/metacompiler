@@ -1467,6 +1467,43 @@ void s34() {
       ss[1].splitMapJoin("b", onMatch: (m) => "B") == "aBcaB");
 }
 
+// ===== SECTION 35: RegExp and its Match, List.map / where / toList / first =====
+// THERE IS NO dart TOOLCHAIN ON THIS MACHINE. dart:core's RegExp has JavaScript's
+// syntax and semantics, so the matches and groups below were read off node; split
+// is _StringBase.split (the doc's own "abba" / b* example is the first row), and an
+// empty match moves allMatches one code unit on. replaceAll does not interpret its
+// replacement. map / where answer an Iterable in dart (a List here, see
+// dsListMember); every row below reads it through toList, a length or an element.
+void s35() {
+  var ins = ["xxb", "abba", "x1y22z", "on 2024-05!", "a-b_c"];
+  var re = RegExp(r'(a)|(b)');
+  var m = re.firstMatch(ins[0])!;
+  check("rx1", m.start == 2 && m.end == 3 && m.groupCount == 2 && m.group(0) == "b" && m.group(1) == null && m[2] == "b");
+  var bs = RegExp(r'b*').allMatches(ins[1]).map((m) => '${m.start}-${m.end}').toList();
+  check("rx2", bs.length == 4 && bs[0] == "0-0" && bs[1] == "1-3" && bs[3] == "4-4");
+  var sp = ins[1].split(RegExp(r'b*'));
+  var sp2 = "a1b2".split(RegExp(r'\d'));
+  check("rx3", sp.length == 2 && sp[1] == "a" && "".split(RegExp(r'x*')).isEmpty && sp2.length == 3 && sp2[2] == "");
+  check("rx4", ins[2].replaceAll(RegExp(r'\d+'), r'$1') == r'x$1y$1z' && ins[2].replaceFirst(RegExp(r'\d+'), '#', 2) == "x1y#z");
+  check("rx5", ins[2].replaceAllMapped(RegExp(r'(\d)(\d)?'), (m) => '<${m[1]}${m[2]}>') == "x<1null>y<22>z");
+  check("rx6", ins[4].splitMapJoin(RegExp(r'[-_]'), onMatch: (m) => '+', onNonMatch: (n) => n.toUpperCase()) == "A+B+C");
+  var d = RegExp(r'(?<y>\d{4})-(?<m>\d\d)').firstMatch(ins[3])!;
+  check("rx7", d.namedGroup('y') == "2024" && d.namedGroup('m') == "05" && RegExp(r'x').firstMatch(ins[1]) == null);
+  check("rx8", RegExp(r'HELLO', caseSensitive: false).hasMatch('say hello') && RegExp(r'^b', multiLine: true).allMatches('a\nb\nb').length == 2);
+  check("rx9", 'hello'.startsWith(RegExp(r'l+'), 2) && 'hello'.indexOf(RegExp(r'l+')) == 2 && RegExp(r'\w+').matchAsPrefix('ab cd', 3)!.group(0) == "cd");
+  var bad = false;
+  try { RegExp(r'('); } on FormatException { bad = true; }
+  check("rx10", bad && re.pattern == "(a)|(b)" && re.isCaseSensitive && !re.isMultiLine);
+  var xs = [3, 1, 2, 4];
+  check("li1", xs.map((x) => x * 2).toList()[3] == 8 && xs.where((x) => x.isEven).toList().length == 2);
+  var cp = xs.toList();
+  cp.add(9);
+  check("li2", xs.first == 3 && xs.last == 4 && cp.length == 5 && xs.length == 4);
+  var empty = false;
+  try { print(<int>[].first); } on StateError { empty = true; }
+  check("li3", empty && xs.where((x) => x > 1).map((x) => x * 10).toList()[2] == 40);
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1502,6 +1539,7 @@ int main() {
   s32(); // SECTION-CALL 32
   s33(); // SECTION-CALL 33
   s34(); // SECTION-CALL 34
+  s35(); // SECTION-CALL 35
   print("full: $checks checks, $fails failures");
   return fails;
 }

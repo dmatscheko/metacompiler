@@ -592,6 +592,15 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	// any other value. See dtFnSub in languages/dart-to-llvm-ir.abnf; twin of
 	// js_dartfnsig in languages/lib/dart-rt.metajs.
 	m["js_dartfnsig"] = func(a []uint64) uint64 { return rt.wrapStr(jsvFnMeta(u(a[0])).name) }
+	// RegExp(source, {multiLine, caseSensitive, unicode, dotAll}): the callee's
+	// argument array. Twin of js_dartregexp in languages/lib/dart-rt.metajs.
+	m["js_dartregexp"] = func(a []uint64) uint64 {
+		args, _ := u(a[0]).(*jsArray)
+		if args == nil {
+			args = &jsArray{}
+		}
+		return w(rt.dartRegExp(args.elems))
+	}
 	m["js_dartnm"] = func(a []uint64) uint64 {
 		recv := u(a[0])
 		name := rt.toString(u(a[1]))
@@ -625,6 +634,16 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 				if v, hit := rt.dartMatchMember(o, name, args.elems); hit {
 					return w(v)
 				}
+			}
+			if o.props["__dregexp"] == true {
+				if v, hit := rt.dartReMember(o, name, args.elems); hit {
+					return w(v)
+				}
+			}
+		}
+		if arr, ok := recv.(*jsArray); ok {
+			if v, hit := rt.dartListMember(arr, name, args.elems); hit {
+				return w(v)
 			}
 		}
 		if str, ok := recv.(string); ok {
@@ -1574,6 +1593,9 @@ func (rt *jsrt) dartStrMember(s, name string, args []interface{}) (interface{}, 
 		}
 		return float64(dartStrCompare(u, strUnits(o))), true
 	}
+	if o, ok := argAt(args, 0).(*jsObject); ok && o.props["__dregexp"] == true {
+		return rt.dartReStrMember(s, o, name, args)
+	}
 	ps, ok := argAt(args, 0).(string)
 	if !ok {
 		return nil, false
@@ -1652,41 +1674,48 @@ func (rt *jsrt) dartStrMember(s, name string, args []interface{}) (interface{}, 
 			return jsNull, true
 		}
 		return dartMatch(st, len(u), ps, s), true
-	case "replaceAllMapped":
-		var b strings.Builder
-		i := 0
-		for _, mv := range dartAllMatches(p, u, s, 0) {
-			mo := mv.(*jsObject)
-			b.WriteString(strFromUnits(u[i:jsToInt(rt.dartNumOf(mo.props["start"]))]))
-			b.WriteString(rt.dartStr(rt.call(argAt(args, 1), jsUndef, []interface{}{mo})))
-			i = jsToInt(rt.dartNumOf(mo.props["end"]))
-		}
-		b.WriteString(strFromUnits(u[i:]))
-		return b.String(), true
-	case "splitMapJoin":
-		onM, onN := dartNamedArg(args, "onMatch"), dartNamedArg(args, "onNonMatch")
-		nonMatch := func(t string) string {
-			if onN == nil || isUndefOrNull(onN) {
-				return t
-			}
-			return rt.dartStr(rt.call(onN, jsUndef, []interface{}{t}))
-		}
-		var b strings.Builder
-		i := 0
-		for _, mv := range dartAllMatches(p, u, s, 0) {
-			mo := mv.(*jsObject)
-			b.WriteString(nonMatch(strFromUnits(u[i:jsToInt(rt.dartNumOf(mo.props["start"]))])))
-			if onM == nil || isUndefOrNull(onM) {
-				b.WriteString(ps)
-			} else {
-				b.WriteString(rt.dartStr(rt.call(onM, jsUndef, []interface{}{mo})))
-			}
-			i = jsToInt(rt.dartNumOf(mo.props["end"]))
-		}
-		b.WriteString(nonMatch(strFromUnits(u[i:])))
-		return b.String(), true
+	case "replaceAllMapped", "splitMapJoin":
+		return rt.dartMapJoin(u, dartAllMatches(p, u, s, 0), name, args), true
 	}
 	return nil, false
+}
+
+// dartMapJoin is replaceAllMapped(p, f) and splitMapJoin(p, onMatch:, onNonMatch:)
+// over the matches ms of either kind of Pattern. Twin of dsMapJoin in
+// languages/lib/dart-str.js.
+func (rt *jsrt) dartMapJoin(u []uint16, ms []interface{}, name string, args []interface{}) string {
+	onM, onN := argAt(args, 1), interface{}(nil)
+	if name == "splitMapJoin" {
+		onM, onN = dartNamedArg(args, "onMatch"), dartNamedArg(args, "onNonMatch")
+	}
+	mapped := func(f interface{}, v interface{}) (string, bool) {
+		if f == nil || isUndefOrNull(f) {
+			return "", false
+		}
+		return rt.dartStr(rt.call(f, jsUndef, []interface{}{v})), true
+	}
+	var b strings.Builder
+	at := 0
+	for _, mv := range ms {
+		mo := mv.(*jsObject)
+		gap := strFromUnits(u[at:jsToInt(rt.dartNumOf(mo.props["start"]))])
+		if t, ok := mapped(onN, gap); ok {
+			gap = t
+		}
+		b.WriteString(gap)
+		if t, ok := mapped(onM, mo); ok {
+			b.WriteString(t)
+		} else {
+			b.WriteString(rt.toString(rt.dartMatchGroup(mo, 0.0)))
+		}
+		at = jsToInt(rt.dartNumOf(mo.props["end"]))
+	}
+	tail := strFromUnits(u[at:])
+	if t, ok := mapped(onN, tail); ok {
+		tail = t
+	}
+	b.WriteString(tail)
+	return b.String()
 }
 
 // dartNamedArg is a named argument: a call's named arguments arrive as one trailing
@@ -1743,29 +1772,321 @@ func dartAllMatches(pat, in []uint16, inStr string, start int) []interface{} {
 	return out
 }
 
-// dartMatchMember answers a Match's group(i) / [i] and groups(list): group 0 is the
-// matched text and any other a RangeError. Twin of dsMatchMember in
-// languages/lib/dart-str.js.
+// dartMatchMember answers a Match's group(i) / [i], groups(list) and, for a RegExp
+// match, namedGroup(name). Twin of dsMatchMember in languages/lib/dart-str.js.
 func (rt *jsrt) dartMatchMember(mo *jsObject, name string, args []interface{}) (interface{}, bool) {
-	group := func(g interface{}) interface{} {
-		if jsToInt(rt.dartNumOf(g)) != 0 {
-			panic(&jsThrown{value: rt.dartExcNew("RangeError", "value", []interface{}{g})})
-		}
-		u := strUnits(rt.toString(mo.props["input"]))
-		return strFromUnits(u[jsToInt(rt.dartNumOf(mo.props["start"])):jsToInt(rt.dartNumOf(mo.props["end"]))])
-	}
 	switch name {
 	case "group", "[]":
-		return group(argAt(args, 0)), true
+		return rt.dartMatchGroup(mo, argAt(args, 0)), true
 	case "groups":
 		gs, _ := argAt(args, 0).(*jsArray)
 		out := &jsArray{}
 		if gs != nil {
 			for _, g := range gs.elems {
-				out.elems = append(out.elems, group(g))
+				out.elems = append(out.elems, rt.dartMatchGroup(mo, g))
 			}
 		}
 		return out, true
+	case "namedGroup":
+		if _, has := mo.props["caps"]; !has {
+			return nil, false
+		}
+		gi := rxObjRe(mo.props["pattern"]).indexOfName(rt.dartStr(argAt(args, 0)))
+		if gi < 0 {
+			panic(&jsThrown{value: rt.dartExcNew("ArgumentError", "", []interface{}{argAt(args, 0), "Not a capture group name"})})
+		}
+		return rt.dartMatchGroup(mo, float64(gi)), true
+	}
+	return nil, false
+}
+
+// dartMatchGroup is group g of a Match: 0 the whole match, null for a group that
+// took no part, a RangeError past groupCount (a String pattern's Match has only
+// group 0). Twin of dsMatchGroup in languages/lib/dart-str.js.
+func (rt *jsrt) dartMatchGroup(mo *jsObject, g interface{}) interface{} {
+	gi := jsToInt(rt.dartNumOf(g))
+	u := strUnits(rt.toString(mo.props["input"]))
+	caps, has := mo.props["caps"].(*jsArray)
+	if !has {
+		if gi != 0 {
+			panic(&jsThrown{value: rt.dartExcNew("RangeError", "value", []interface{}{g})})
+		}
+		return strFromUnits(u[jsToInt(rt.dartNumOf(mo.props["start"])):jsToInt(rt.dartNumOf(mo.props["end"]))])
+	}
+	if gi < 0 || gi > jsToInt(rt.dartNumOf(mo.props["groupCount"])) {
+		panic(&jsThrown{value: rt.dartExcNew("RangeError", "value", []interface{}{g})})
+	}
+	from := jsToInt(rt.dartNumOf(caps.elems[2*gi]))
+	if from < 0 {
+		return jsNull
+	}
+	return strFromUnits(u[from:jsToInt(rt.dartNumOf(caps.elems[2*gi+1]))])
+}
+
+// ----- RegExp ------------------------------------------------------------------
+// dart:core's RegExp is ECMAScript's, run on the Go regex engine (abnf/jsrtregex.go)
+// with the flags dsRegExp in languages/lib/dart-str.js chooses. That engine counts
+// RUNES and dart counts UTF-16 code units, so a dartReText carries each rune's code
+// unit offset and every position handed out is in code units.
+
+type dartReText struct {
+	rs  []rune
+	off []int // off[i] is rune i's code unit offset; off[len(rs)] the length
+}
+
+func dartReTextOf(s string) dartReText {
+	rs := []rune(s)
+	off := make([]int, len(rs)+1)
+	for i, r := range rs {
+		off[i+1] = off[i] + 1
+		if r >= 0x10000 {
+			off[i+1]++
+		}
+	}
+	return dartReText{rs: rs, off: off}
+}
+
+// at is the rune index of code unit position cu (the next rune boundary).
+func (t dartReText) at(cu int) int { return sort.SearchInts(t.off, cu) }
+
+// dartRegExp is RegExp(source, {multiLine, caseSensitive, unicode, dotAll}). Twin
+// of dsRegExp in languages/lib/dart-str.js.
+func (rt *jsrt) dartRegExp(args []interface{}) *jsObject {
+	src := rt.dartStr(argAt(args, 0))
+	ml := dartNamedArg(args, "multiLine") == true
+	cs := dartNamedArg(args, "caseSensitive") != false
+	da := dartNamedArg(args, "dotAll") == true
+	fl := "jo"
+	if !cs {
+		fl += "i"
+	}
+	if ml {
+		fl += "m"
+	}
+	if da {
+		fl += "s"
+	}
+	if re := rxGet(src, fl); !re.ok {
+		panic(&jsThrown{value: rt.dartExcNew("FormatException", "", []interface{}{re.err, src})})
+	}
+	o := rxNewRegexObj(src, fl)
+	o.set("__dregexp", true)
+	o.set("pattern", src)
+	o.set("isMultiLine", ml)
+	o.set("isCaseSensitive", cs)
+	o.set("isUnicode", dartNamedArg(args, "unicode") == true)
+	o.set("isDotAll", da)
+	return o
+}
+
+// dartReSearch is the first match of rx in t at or after code unit from (nil for
+// none), and dartReAt the match that must begin at code unit at.
+func (rt *jsrt) dartReSearch(rx *jsObject, t dartReText, from int) *rxMatch {
+	m, ok := rxObjRe(rx).search(t.rs, t.at(from))
+	if !ok {
+		rt.fail("regexp: step limit exceeded")
+	}
+	return m
+}
+
+func (rt *jsrt) dartReAt(rx *jsObject, t dartReText, at int) *rxMatch {
+	m, ok := rxObjRe(rx).matchAt(t.rs, t.at(at))
+	if !ok {
+		rt.fail("regexp: step limit exceeded")
+	}
+	return m
+}
+
+// dartReMatch is the Match of m, positions in code units. Twin of dsReMatch.
+func dartReMatch(rx *jsObject, s string, t dartReText, m *rxMatch) *jsObject {
+	o := newJSObject()
+	o.set("__dmatch", true)
+	o.set("start", float64(t.off[m.begin]))
+	o.set("end", float64(t.off[m.end]))
+	o.set("input", s)
+	o.set("pattern", rx)
+	o.set("groupCount", float64(rxObjRe(rx).ngroups))
+	caps := &jsArray{}
+	for _, c := range m.caps {
+		if c >= 0 {
+			c = t.off[c]
+		}
+		caps.elems = append(caps.elems, float64(c))
+	}
+	o.set("caps", caps)
+	return o
+}
+
+// dartReAll is RegExp.allMatches from code unit start: a search resuming at the end
+// of each match and one code unit past an empty one. Twin of dsReAll.
+func (rt *jsrt) dartReAll(rx *jsObject, s string, t dartReText, start int) []interface{} {
+	var out []interface{}
+	n := t.off[len(t.rs)]
+	for at := start; at <= n; {
+		m := rt.dartReSearch(rx, t, at)
+		if m == nil {
+			break
+		}
+		out = append(out, dartReMatch(rx, s, t, m))
+		at = t.off[m.end]
+		if m.end == m.begin {
+			at++
+		}
+	}
+	return out
+}
+
+// dartReMember is a RegExp's own members. Twin of dsReMember.
+func (rt *jsrt) dartReMember(rx *jsObject, name string, args []interface{}) (interface{}, bool) {
+	s, ok := argAt(args, 0).(string)
+	if !ok {
+		return nil, false
+	}
+	t := dartReTextOf(s)
+	n := t.off[len(t.rs)]
+	switch name {
+	case "hasMatch":
+		return rt.dartReSearch(rx, t, 0) != nil, true
+	case "firstMatch", "stringMatch":
+		m := rt.dartReSearch(rx, t, 0)
+		if m == nil {
+			return jsNull, true
+		}
+		if name == "stringMatch" {
+			return string(t.rs[m.begin:m.end]), true
+		}
+		return dartReMatch(rx, s, t, m), true
+	case "allMatches", "matchAsPrefix":
+		st := 0
+		if len(args) > 1 && !isUndefOrNull(args[1]) {
+			st = jsToInt(rt.dartNumOf(args[1]))
+		}
+		if st < 0 || st > n {
+			rt.dartRangeErr(float64(st), 0, n)
+		}
+		if name == "allMatches" {
+			return &jsArray{elems: rt.dartReAll(rx, s, t, st)}, true
+		}
+		m := rt.dartReAt(rx, t, st)
+		if m == nil {
+			return jsNull, true
+		}
+		return dartReMatch(rx, s, t, m), true
+	}
+	return nil, false
+}
+
+// dartReStrMember is the String members whose Pattern is a RegExp; replaceAll's
+// replacement is not interpreted. Twin of dsReStrMember.
+func (rt *jsrt) dartReStrMember(s string, rx *jsObject, name string, args []interface{}) (interface{}, bool) {
+	t := dartReTextOf(s)
+	u := strUnits(s)
+	n := len(u)
+	opt := func(i, dflt int) int {
+		if i < len(args) && !isUndefOrNull(args[i]) {
+			return jsToInt(rt.dartNumOf(args[i]))
+		}
+		return dflt
+	}
+	switch name {
+	case "contains", "indexOf":
+		m := rt.dartReSearch(rx, t, opt(1, 0))
+		if name == "contains" {
+			return m != nil, true
+		}
+		if m == nil {
+			return float64(-1), true
+		}
+		return float64(t.off[m.begin]), true
+	case "startsWith":
+		at := opt(1, 0)
+		if at < 0 || at > n {
+			rt.dartRangeErr(float64(at), 0, n)
+		}
+		return rt.dartReAt(rx, t, at) != nil, true
+	case "split":
+		return &jsArray{elems: dartReSplit(u, rt.dartReAll(rx, s, t, 0), rt)}, true
+	case "replaceAll", "replaceFirst":
+		from := 0
+		if name == "replaceFirst" {
+			from = opt(2, 0)
+		}
+		ms := rt.dartReAll(rx, s, t, from)
+		if name == "replaceFirst" && len(ms) > 1 {
+			ms = ms[:1]
+		}
+		rep := rt.dartStr(argAt(args, 1))
+		var b strings.Builder
+		pos := 0
+		for _, mv := range ms {
+			mo := mv.(*jsObject)
+			b.WriteString(strFromUnits(u[pos:jsToInt(rt.dartNumOf(mo.props["start"]))]))
+			b.WriteString(rep)
+			pos = jsToInt(rt.dartNumOf(mo.props["end"]))
+		}
+		b.WriteString(strFromUnits(u[pos:]))
+		return b.String(), true
+	case "replaceAllMapped", "splitMapJoin":
+		return rt.dartMapJoin(u, rt.dartReAll(rx, s, t, 0), name, args), true
+	}
+	return nil, false
+}
+
+// dartReSplit is String.split by the matches ms (dart:core's _StringBase.split).
+// Twin of dsReSplit in languages/lib/dart-str.js.
+func dartReSplit(u []uint16, ms []interface{}, rt *jsrt) []interface{} {
+	n := len(u)
+	out := []interface{}{}
+	if n == 0 && len(ms) > 0 {
+		return out
+	}
+	start, prev := 0, 0
+	for i := 0; ; i++ {
+		if start == n || i >= len(ms) {
+			return append(out, strFromUnits(u[prev:]))
+		}
+		mo := ms[i].(*jsObject)
+		ms0 := jsToInt(rt.dartNumOf(mo.props["start"]))
+		if ms0 == n {
+			return append(out, strFromUnits(u[prev:]))
+		}
+		e := jsToInt(rt.dartNumOf(mo.props["end"]))
+		if start == e && e == prev {
+			start++
+			continue
+		}
+		out = append(out, strFromUnits(u[prev:ms0]))
+		start, prev = e, e
+	}
+}
+
+// ----- List ----------------------------------------------------------------------
+// dartListMember is dart:core's map / where (a List here, eagerly, where dart
+// answers an Iterable), toList and the first / last getters. Twin of dsListMember in
+// languages/lib/dart-str.js.
+func (rt *jsrt) dartListMember(o *jsArray, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "map", "where":
+		out := &jsArray{elems: []interface{}{}}
+		for _, e := range append([]interface{}{}, o.elems...) {
+			r := rt.call(argAt(args, 0), jsUndef, []interface{}{e})
+			if name == "map" {
+				out.elems = append(out.elems, r)
+			} else if r == true {
+				out.elems = append(out.elems, e)
+			}
+		}
+		return out, true
+	case "toList":
+		return &jsArray{elems: append([]interface{}{}, o.elems...)}, true
+	case "first", "last":
+		if len(o.elems) == 0 {
+			panic(&jsThrown{value: rt.dartExcNew("StateError", "", []interface{}{"No element"})})
+		}
+		if name == "first" {
+			return o.elems[0], true
+		}
+		return o.elems[len(o.elems)-1], true
 	}
 	return nil, false
 }

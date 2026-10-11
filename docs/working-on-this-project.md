@@ -961,7 +961,7 @@ declaration allows it to become.**
 ```
 runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt lua
                              (lua for the hook-free exact decimal only)
-regex.js                  <- js python ruby kotlin java
+regex.js                  <- js python ruby kotlin java dart
 lua-rt.metajs             <- imports lua-strlib.js and runtime.metajs ONLY
 lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns and
                              string.format; Go twins: abnf/jsrtluastr.go,

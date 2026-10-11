@@ -1329,7 +1329,9 @@ KwDeferred  = "deferred" KwEnd ;
     // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and statement
     // builders); Dart-specific behaviour is configured on `core` and defined below.
     include("lib/interp-core.js")
-    // dart:core's String members, shared with layer 2; the hooks are below dNum.
+    // dart:core's String, RegExp and List members, shared with layer 2; the hooks are
+    // below dNum. A RegExp runs on the shared regex engine.
+    include("lib/regex.js")
     include("lib/dart-str.js")
 
     // takeAll empties the local stack and returns the items in push order.
@@ -1339,6 +1341,13 @@ KwDeferred  = "deferred" KwEnd ;
 
     // print(x) writes x's string form followed by a newline (Dart print).
     hostGlobals["print"] = function(x) { println(dstr(x)) }
+    // RegExp(source, {multiLine, caseSensitive, unicode, dotAll}): dsRegExp in
+    // lib/dart-str.js. Twin: js_dartregexp.
+    hostGlobals["RegExp"] = function() {
+        var a = []
+        for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+        return dsRegExp(a)
+    }
 
     // ----- string rendering: Dart's Object.toString() and its overrides -----
     // This is the twin of js_dartstr / js_dartprint in abnf/jsrtdart.go (the compiler
@@ -1865,6 +1874,7 @@ KwDeferred  = "deferred" KwEnd ;
     function dsHCall(f, argv) { return f.apply(undefined, argv) }
     function dsHStr(v) { return dstr(v) }
     function dsHIndexErr(i, s) { dxRaiseA("IndexError", "", [i, s, "index"]) }
+    function dsHThrow(name, argv) { dxRaiseA(name, "", argv) }
     function dIsInt(v) { return typeof v == "number" || szIs(v) }
     // dInt normalises any numeric operand to an int, truncating a double toward zero -
     // which is what toInt(), truncate() and the operand of a bitwise operator all do.
@@ -3399,6 +3409,7 @@ KwDeferred  = "deferred" KwEnd ;
             if (ng != null) { return ng.v }
         }
         if (typeof cur == "string" && (name == "codeUnits" || name == "runes")) { return dsMember(cur, name, []).v }
+        if (Array.isArray(cur) && (name == "first" || name == "last")) { return dsListMember(cur, name, []).v }
         if (name == "length") { return dlen(cur) }
         if (name == "isEmpty") { return dlen(cur) == 0 }
         if (name == "isNotEmpty") { return dlen(cur) != 0 }
@@ -3511,6 +3522,10 @@ KwDeferred  = "deferred" KwEnd ;
             }
             return dxNew(target.__dexcType, name, args)
         }
+        if (dsIsRegExp(target)) {
+            var rm = dsReMember(target, name, args)
+            if (rm.hit) { return rm.v }
+        }
         if (dsIsMatch(target)) {
             var mt = dsMatchMember(target, name, args)
             if (mt.hit) { return mt.v }
@@ -3541,6 +3556,8 @@ KwDeferred  = "deferred" KwEnd ;
             if (name == "contains") { return target.indexOf(args[0]) >= 0 }
             if (name == "get") { return target[args[0]] }
             if (name == "removeLast") { return target.pop() }
+            var lm = dsListMember(target, name, args)
+            if (lm.hit) { return lm.v }
             return extCall(target, name, args, "List")
         }
         // A call ON a class object: a static method, or a named / factory constructor.

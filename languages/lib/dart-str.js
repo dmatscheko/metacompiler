@@ -1,14 +1,16 @@
-// dart-str.js -- dart:core's String members.
+// dart-str.js -- dart:core's String members, the RegExp Pattern and Match, and the
+// List members that travel with them.
 //
 // Written once for the interpreter half (dart-interpreter.abnf includes it) and for
 // layer 2 (languages/lib/dart-rt.metajs imports it), in the restricted subset both
 // accept - see the head of regex.js. abnf/jsrtdart.go's dartStrMember is the Go twin
 // the compiler half runs under llvm.Run. There is no dart toolchain on this machine:
-// every rule below is dart:core's documentation of String.
+// every rule below is dart:core's documentation of String, RegExp, Match and List.
 //
 // A Dart String is a sequence of UTF-16 code units, and every index, length and
-// position here counts them. A Pattern argument is a String; any other receiver or
-// argument shape answers a miss, and the includer's own dispatch goes on.
+// position here counts them. A Pattern argument is a String or a RegExp; any other
+// receiver or argument shape answers a miss, and the includer's own dispatch goes on.
+// A RegExp runs on lib/regex.js, which the includer brings in too.
 //
 // Hooks the includer defines:
 //   dsHNum(v)          an int argument as a plain number
@@ -17,6 +19,8 @@
 //                      when lo is null (does not return)
 //   dsHCall(f, argv)   call the closure f
 //   dsHStr(v)          v's toString()
+//   dsHThrow(name, argv)  throw dart:core's error `name` built from argv (does not
+//                      return)
 
 // dsMember answers {hit: true, v} for a String member dart:core declares, and
 // {hit: false} for any other name.
@@ -54,6 +58,7 @@ function dsMember(s, name, args) {
         return {hit: true, v: dsCompare(s, args[0])}
     }
     // Everything below takes a Pattern first.
+    if (args.length > 0 && typeof args[0] == "object" && dsIsRegExp(args[0])) { return dsReStrMember(s, name, args) }
     if (args.length == 0 || typeof args[0] != "string") { return miss }
     var p = args[0]
     if (name == "indexOf") { return {hit: true, v: dsFind(s, p, dsOpt(args, 1, 0))} }
@@ -75,37 +80,8 @@ function dsMember(s, name, args) {
         if (!dsAt(p, ms, s)) { return {hit: true, v: null} }
         return {hit: true, v: dsMatch(ms, p, s)}
     }
-    if (name == "replaceAllMapped") {
-        var ms2 = dsAllMatches(p, s, 0)
-        var ro = ""
-        var rp = 0
-        var ri = 0
-        while (ri < ms2.length) {
-            ro = ro + s.substring(rp, ms2[ri]["start"]) + dsHStr(dsHCall(args[1], [ms2[ri]]))
-            rp = ms2[ri]["end"]
-            ri = ri + 1
-        }
-        return {hit: true, v: ro + s.substring(rp, n)}
-    }
-    if (name == "splitMapJoin") {
-        var onM = dsNamed(args, "onMatch")
-        var onN = dsNamed(args, "onNonMatch")
-        var ms3 = dsAllMatches(p, s, 0)
-        var so = ""
-        var sp = 0
-        var si = 0
-        while (si < ms3.length) {
-            var nm = s.substring(sp, ms3[si]["start"])
-            if (onN !== null) { nm = dsHStr(dsHCall(onN, [nm])) }
-            var mm = ms3[si]["pattern"]
-            if (onM !== null) { mm = dsHStr(dsHCall(onM, [ms3[si]])) }
-            so = so + nm + mm
-            sp = ms3[si]["end"]
-            si = si + 1
-        }
-        var tail = s.substring(sp, n)
-        if (onN !== null) { tail = dsHStr(dsHCall(onN, [tail])) }
-        return {hit: true, v: so + tail}
+    if (name == "replaceAllMapped" || name == "splitMapJoin") {
+        return {hit: true, v: dsMapJoin(s, dsAllMatches(p, s, 0), name, args)}
     }
     if (name == "replaceFirst") {
         var fi = dsFind(s, p, dsOpt(args, 2, 0))
@@ -113,6 +89,36 @@ function dsMember(s, name, args) {
         return {hit: true, v: s.substring(0, fi) + args[1] + s.substring(fi + p.length, n)}
     }
     return miss
+}
+
+// replaceAllMapped(p, f) and splitMapJoin(p, onMatch:, onNonMatch:) over the
+// matches ms of either kind of Pattern: the text between matches is kept (or
+// mapped by onNonMatch) and each match replaced by its callback's answer (by its
+// own text when splitMapJoin has no onMatch).
+function dsMapJoin(s, ms, name, args) {
+    var onM = anytype
+    var onN = anytype
+    onM = args[1]
+    onN = null
+    if (name == "splitMapJoin") {
+        onM = dsNamed(args, "onMatch")
+        onN = dsNamed(args, "onNonMatch")
+    }
+    var out = ""
+    var at = 0
+    var i = 0
+    while (i < ms.length) {
+        var gap = s.substring(at, ms[i]["start"])
+        if (onN !== null) { gap = dsHStr(dsHCall(onN, [gap])) }
+        var mt = dsMatchGroup(ms[i], 0)
+        if (onM !== null) { mt = dsHStr(dsHCall(onM, [ms[i]])) }
+        out = out + gap + mt
+        at = ms[i]["end"]
+        i = i + 1
+    }
+    var tail = s.substring(at, s.length)
+    if (onN !== null) { tail = dsHStr(dsHCall(onN, [tail])) }
+    return out + tail
 }
 
 // An optional positional int argument, or its default when absent or null.
@@ -297,11 +303,18 @@ function dsAllMatches(p, s, start) {
     return out
 }
 
-// A Match's members: group(0) / [0] is the matched text and any other group a
-// RangeError; groups(indexes) is the list of those groups. {hit: false} for any
-// other name (start, end, input, pattern and groupCount are fields).
+// A Match's members: group(i) / [i] is the text of group i (0 the whole match, null
+// for a group that took no part) and any group past groupCount a RangeError;
+// groups(indexes) is the list of those groups and namedGroup(name) a named one.
+// {hit: false} for any other name (start, end, input, pattern and groupCount are
+// fields).
 function dsMatchMember(m, name, args) {
     if (name == "group" || name == "[]") { return {hit: true, v: dsMatchGroup(m, args[0])} }
+    if (name == "namedGroup" && m["caps"] !== undefined) {
+        var gi = rxIndexOfName(rxObjRe(m["pattern"]), dsHStr(args[0]))
+        if (gi < 0) { dsHThrow("ArgumentError", [args[0], "Not a capture group name"]) }
+        return {hit: true, v: dsMatchGroup(m, gi)}
+    }
     if (name == "groups") {
         var gs = args[0]
         var out = []
@@ -315,8 +328,197 @@ function dsMatchMember(m, name, args) {
     return {hit: false, v: undefined}
 }
 function dsMatchGroup(m, g) {
-    if (dsHNum(g) != 0) { dsHRangeErr(g, null, null) }
-    return m["input"].substring(m["start"], m["end"])
+    var gi = dsHNum(g)
+    var caps = m["caps"]
+    if (caps === undefined) {
+        if (gi != 0) { dsHRangeErr(g, null, null) }
+        return m["input"].substring(m["start"], m["end"])
+    }
+    if (gi < 0 || gi > m["groupCount"]) { dsHRangeErr(g, null, null) }
+    var from = caps[2 * gi]
+    if (from < 0) { return null }
+    return m["input"].substring(from, caps[2 * gi + 1])
+}
+
+// ----- RegExp ----------------------------------------------------------------
+// dart:core's RegExp has "the same syntax and semantics as JavaScript regular
+// expressions", so lib/regex.js runs it with JavaScript's repeat semantics (j) and
+// Annex B escapes (o); caseSensitive: false, multiLine and dotAll add i, m and s.
+// The object carries regex.js's shared __rxsrc / __rxflags slots beside the
+// getters dart declares. A bad pattern is a FormatException. Twin: dartRegExp in
+// abnf/jsrtdart.go.
+function dsIsRegExp(v) {
+    return typeof v == "object" && v !== null && !Array.isArray(v) && v["__dregexp"] === true
+}
+function dsRegExp(args) {
+    var src = dsHStr(args[0])
+    var ml = dsNamed(args, "multiLine") === true
+    var cs = dsNamed(args, "caseSensitive") !== false
+    var da = dsNamed(args, "dotAll") === true
+    var fl = "jo"
+    if (!cs) { fl = fl + "i" }
+    if (ml) { fl = fl + "m" }
+    if (da) { fl = fl + "s" }
+    var re = rxGet(src, fl)
+    if (!re.ok) { dsHThrow("FormatException", [re.err, src]) }
+    var o = {__dregexp: true, __rxsrc: src, __rxflags: fl, pattern: src}
+    o["isMultiLine"] = ml
+    o["isCaseSensitive"] = cs
+    o["isUnicode"] = dsNamed(args, "unicode") === true
+    o["isDotAll"] = da
+    return o
+}
+// The Match of regex.js's match m of the RegExp rx over s: its captures ride along
+// for group(i).
+function dsReMatch(rx, s, m) {
+    var caps = []
+    var i = 0
+    while (i < m.caps.length) {
+        caps.push(m.caps[i])
+        i = i + 1
+    }
+    return {__dmatch: true, start: m.begin, end: m.end, input: s, pattern: rx,
+            groupCount: rxGroupCount(rxObjRe(rx)), caps: caps}
+}
+// RegExp.allMatches over s from start: left to right, a search resuming at the end
+// of each match and one code unit past an empty one.
+function dsReAll(rx, s, start) {
+    var re = rxObjRe(rx)
+    var out = []
+    var at = start
+    while (at <= s.length) {
+        var m = rxSearch(re, s, at)
+        if (m === null) { return out }
+        out.push(dsReMatch(rx, s, m))
+        at = m.end
+        if (m.end == m.begin) { at = at + 1 }
+    }
+    return out
+}
+// A RegExp's own members; {hit: false} for any other name (pattern, isMultiLine,
+// isCaseSensitive, isUnicode and isDotAll are fields).
+function dsReMember(rx, name, args) {
+    var re = rxObjRe(rx)
+    var miss = {hit: false, v: undefined}
+    if (args.length == 0 || typeof args[0] != "string") { return miss }
+    var s = args[0]
+    if (name == "hasMatch") { return {hit: true, v: rxSearch(re, s, 0) !== null} }
+    if (name == "firstMatch" || name == "stringMatch") {
+        var m = rxSearch(re, s, 0)
+        if (m === null) { return {hit: true, v: null} }
+        if (name == "stringMatch") { return {hit: true, v: s.substring(m.begin, m.end)} }
+        return {hit: true, v: dsReMatch(rx, s, m)}
+    }
+    if (name == "allMatches" || name == "matchAsPrefix") {
+        var st = dsOpt(args, 1, 0)
+        if (st < 0 || st > s.length) { dsHRangeErr(st, 0, s.length) }
+        if (name == "allMatches") { return {hit: true, v: dsReAll(rx, s, st)} }
+        var pm = rxMatchAt(re, s, st)
+        if (pm === null) { return {hit: true, v: null} }
+        return {hit: true, v: dsReMatch(rx, s, pm)}
+    }
+    return miss
+}
+// The String members whose Pattern is a RegExp. replaceAll's replacement is NOT
+// interpreted (dart: "the replace string is not interpreted"; replaceAllMapped is
+// the way to use a group).
+function dsReStrMember(s, name, args) {
+    var rx = args[0]
+    var re = rxObjRe(rx)
+    var n = s.length
+    if (name == "contains" || name == "indexOf") {
+        var sm = rxSearch(re, s, dsOpt(args, 1, 0))
+        if (name == "contains") { return {hit: true, v: sm !== null} }
+        return {hit: true, v: sm === null ? 0 - 1 : sm.begin}
+    }
+    if (name == "startsWith") {
+        var at = dsOpt(args, 1, 0)
+        if (at < 0 || at > n) { dsHRangeErr(at, 0, n) }
+        return {hit: true, v: rxMatchAt(re, s, at) !== null}
+    }
+    if (name == "split") { return {hit: true, v: dsReSplit(s, dsReAll(rx, s, 0))} }
+    if (name == "replaceAll" || name == "replaceFirst") {
+        var ms = dsReAll(rx, s, name == "replaceFirst" ? dsOpt(args, 2, 0) : 0)
+        var rep = dsHStr(args[1])
+        var out = ""
+        var pos = 0
+        var i = 0
+        while (i < ms.length) {
+            out = out + s.substring(pos, ms[i]["start"]) + rep
+            pos = ms[i]["end"]
+            i = i + 1
+            if (name == "replaceFirst") { i = ms.length }
+        }
+        return {hit: true, v: out + s.substring(pos, n)}
+    }
+    if (name == "replaceAllMapped" || name == "splitMapJoin") {
+        return {hit: true, v: dsMapJoin(s, dsReAll(rx, s, 0), name, args)}
+    }
+    return {hit: false, v: undefined}
+}
+// String.split by the matches ms (dart:core's _StringBase.split): the pieces
+// between them, an empty match at the very start or end of a piece cutting
+// nothing, a match at the end of the string ending the split, and an empty string
+// that the pattern matches splitting into no pieces at all.
+function dsReSplit(s, ms) {
+    var n = s.length
+    var out = []
+    if (n == 0 && ms.length > 0) { return out }
+    var start = 0
+    var prev = 0
+    var i = 0
+    while (true) {
+        if (start == n || i >= ms.length) {
+            out.push(s.substring(prev, n))
+            return out
+        }
+        var m = ms[i]
+        i = i + 1
+        if (m["start"] == n) {
+            out.push(s.substring(prev, n))
+            return out
+        }
+        var e = m["end"]
+        if (start == e && e == prev) {
+            start = start + 1
+        } else {
+            out.push(s.substring(prev, m["start"]))
+            start = e
+            prev = e
+        }
+    }
+    return out
+}
+
+// ----- List ------------------------------------------------------------------
+// map / where answer an Iterable in dart:core, printed in parentheses; here they
+// answer a List, eagerly (the same trade runes and allMatches make). toList is a
+// copy, and first / last (getters) are a StateError on an empty List. {hit: false}
+// for any other name. Twin: dartListMember in abnf/jsrtdart.go.
+function dsListMember(o, name, args) {
+    var out = []
+    var i = 0
+    if (name == "map" || name == "where") {
+        while (i < o.length) {
+            var r = anytype
+            r = dsHCall(args[0], [o[i]])
+            if (name == "map") { out.push(r) } else if (r === true) { out.push(o[i]) }
+            i = i + 1
+        }
+        return {hit: true, v: out}
+    }
+    if (name == "toList") {
+        while (i < o.length) {
+            out.push(o[i])
+            i = i + 1
+        }
+        return {hit: true, v: out}
+    }
+    if (name == "first" || name == "last") {
+        if (o.length == 0) { dsHThrow("StateError", ["No element"]) }
+        return {hit: true, v: name == "first" ? o[0] : o[o.length - 1]}
+    }
+    return {hit: false, v: undefined}
 }
 
 // String.runes: the code points, as ints; an unpaired surrogate is one of its own.

@@ -106,7 +106,9 @@
 // file defines further down. Same mechanism ruby uses for `import "./regex.js"`.
 // (rtIsArr and rtJavaStr, used by dart and swift only, live there too.)
 import "./runtime.metajs"
-// dart:core's String members, shared with the interpreter half.
+// dart:core's String, RegExp and List members, shared with the interpreter half;
+// a RegExp runs on the shared regex engine.
+import "./regex.js"
 import "./dart-str.js"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
@@ -1524,7 +1526,8 @@ function dtMember(recv, name, args) {
     return undefined
 }
 
-// The Kotlin/Python list methods of rt.memberCall, in its order.
+// The Kotlin/Python list methods of rt.memberCall, in its order, then dart:core's
+// own List members (lib/dart-str.js).
 function dtListMethod(o, name, args) {
     if (name === "add") {
         o.push(dtArgAt(args, 0))
@@ -1550,15 +1553,6 @@ function dtListMethod(o, name, args) {
             ci = ci + 1
         }
         return false
-    }
-    if (name === "map") {
-        var mo = []
-        var mi = 0
-        while (mi < o.length) {
-            mo.push(args[0].apply(undefined, [o[mi]]))
-            mi = mi + 1
-        }
-        return mo
     }
     if (name === "forEach") {
         var ei = 0
@@ -1586,6 +1580,8 @@ function dtListMethod(o, name, args) {
         }
         return false
     }
+    var lm = dsListMember(o, name, args)
+    if (lm.hit) { return lm.v }
     fail("unknown list method '" + name + "'")
     return undefined
 }
@@ -1661,6 +1657,7 @@ function dsHRangeErr(v, lo, hi) {
 }
 function dsHCall(f, argv) { return f.apply(undefined, argv) }
 function dsHStr(v) { return dtStr(v) }
+function dsHThrow(name, argv) { throw dtExcNew(name, "", argv) }
 function js_dtidx(c, k) {
     if (rtIsArr(c)) {
         var idx = Math.trunc(dtNum(k))
@@ -2028,7 +2025,15 @@ function js_dartnm(recv, name, args) {
             var mt = dsMatchMember(recv, name, args)
             if (mt.hit) { return mt.v }
         }
+        if (dsIsRegExp(recv)) {
+            var rm = dsReMember(recv, name, args)
+            if (rm.hit) { return rm.v }
+        }
     }
     return dtMember(recv, name, args)
 }
+
+// RegExp(source, {multiLine, caseSensitive, unicode, dotAll}): the callee's
+// argument array. Twin of js_dartregexp in abnf/jsrtdart.go.
+function js_dartregexp(args) { return dsRegExp(args) }
 
