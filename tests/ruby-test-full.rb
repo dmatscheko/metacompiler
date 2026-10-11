@@ -3783,6 +3783,28 @@ def s83
   check("nm83f", nm == ["undefined method `s83_foo' for 1..3:Range", :s83_foo, 1..3, :s83_bar, nil])
 end
 
+# ===== SECTION 84: Enumerator#inspect, Symbol#inspect quoting, escaped % delimiters =====
+# A blockless iterator's Enumerator prints its receiver as written, the method and
+# its arguments; a Hash's blockless #each is one too. A Symbol whose name is not an
+# identifier, an operator or a variable name prints quoted. A backslash escapes the
+# delimiter of a raw % literal. Every right-hand side is /usr/bin/ruby 2.6.10's own
+# answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s84
+  a = [1, 2, 3]
+  check("en84a", (1..3).each.inspect == "#<Enumerator: 1..3:each>" && a.map.inspect == "#<Enumerator: [1, 2, 3]:map>" &&
+                 a.each_slice(2).inspect == "#<Enumerator: [1, 2, 3]:each_slice(2)>" &&
+                 a.each.with_index(1).inspect == "#<Enumerator: #<Enumerator: [1, 2, 3]:each>:with_index(1)>")
+  h = {a: 1}
+  check("en84b", h.each.inspect == "#<Enumerator: {:a=>1}:each>" && h.each.to_a == [[:a, 1]] &&
+                 [h.select].inspect == "[#<Enumerator: {:a=>1}:select>]")
+  sy = ["a b", "[q]", "9a", "", "a?=", "@1", "$-", "abc", "c=", "[]=", "<=>", "@iv", "$1", "$~", "Foo?"]
+  check("sy84c", sy.map { |n| n.to_sym.inspect }.join(" ") ==
+                 ":\"a b\" :\"[q]\" :\"9a\" :\"\" :\"a?=\" :\"@1\" :\"$-\" :abc :c= :[]= :<=> :@iv :$1 :$~ :Foo?" &&
+                 [:"x y"].inspect == "[:\"x y\"]")
+  check("pc84d", %w[a\] b] == ["a]", "b"] && %w(x\) y\ z) == ["x)", "y z"] && %i[a\] b] == [:"a]", :b] &&
+                 %q[a\]b\\c\'d] == "a]b\\c\\'d" && %w[a\nb] == ["a\\nb"])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3828,5 +3850,6 @@ s80() # SECTION-CALL 80
 s81() # SECTION-CALL 81
 s82() # SECTION-CALL 82
 s83() # SECTION-CALL 83
+s84() # SECTION-CALL 84
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

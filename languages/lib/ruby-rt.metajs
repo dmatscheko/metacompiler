@@ -1739,10 +1739,45 @@ function rbStrInspect(s) {
     return out + "\""
 }
 
+// Whether a Symbol's name prints BARE after the colon (MRI's symname test): an
+// operator method name, an identifier with one trailing ? ! or =, an @ivar, an
+// @@cvar, or a global ($name, $1, $-w, $~ and the other one-character specials).
+// Anything else prints quoted, as :"a b". Twins: rbSymPlain in ruby-interpreter.abnf, rubySymPlain in abnf/jsrtruby.go.
+var rbSymOps = " + - * / % ** == === != =~ !~ ! ~ +@ -@ [] []= < <= > >= <=> << >> & | ^ ` "
+function rbSymIdCh(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95 || c >= 128 }
+function rbSymPlain(s) {
+    var n = s.length
+    if (n == 0) { return false }
+    if (n <= 3 && s.indexOf(" ") < 0 && rbSymOps.indexOf(" " + s + " ") >= 0) { return true }
+    var i = 0
+    var c = s.charCodeAt(0)
+    if (c == 36) {
+        if (n == 1) { return false }
+        var d = s.charCodeAt(1)
+        if (n == 2 && "~*$?!@/\\;,.=:<>\"&`'+0".indexOf(s.charAt(1)) >= 0) { return true }
+        if (d == 45) { return n == 3 && rbSymIdCh(s.charCodeAt(2)) }
+        if (d >= 48 && d <= 57) {
+            var k = 2
+            while (k < n && s.charCodeAt(k) >= 48 && s.charCodeAt(k) <= 57) { k = k + 1 }
+            return k == n
+        }
+        i = 1
+    }
+    if (c == 64) { i = (n > 1 && s.charCodeAt(1) == 64) ? 2 : 1 }
+    if (i >= n) { return false }
+    var f = s.charCodeAt(i)
+    if (!rbSymIdCh(f) || (f >= 48 && f <= 57)) { return false }
+    while (i < n && rbSymIdCh(s.charCodeAt(i))) { i = i + 1 }
+    if (i == n) { return true }
+    var t = s.charCodeAt(i)
+    return c != 36 && c != 64 && i == n - 1 && (t == 63 || t == 33 || t == 61)
+}
+function rbSymInspect(s) { return rbSymPlain(s) ? ":" + s : ":" + rbStrInspect(s) }
+
 function rbInspect(v) {
     if (rtIsNil(v)) { return "nil" }
     if (typeof v == "string") { return rbStrInspect(v) }
-    if (rbIsSym(v)) { return ":" + v["s"] }
+    if (rbIsSym(v)) { return rbSymInspect(v["s"]) }
     // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
     // `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one place the
     // two differ for a numeric.
@@ -1752,6 +1787,7 @@ function rbInspect(v) {
     // only place the two differ: `("a".."e").inspect' is `"a".."e"' and its #to_s
     // is `a..e'.
     if (rbIsRange(v)) { return rbRangeText(v, true) }
+    if (rbIsEnum(v)) { return rbEnumInspect(v) }
     if (rbIsArr(v)) {
         var out = "["
         var i = 0
@@ -5596,6 +5632,34 @@ function rbPermIdx(n, k) {
 // not the receiver.
 function rbMkEnum(items) { return {__renum: true, items: items, pos: 0, op: "each"} }
 function rbMkEnumOp(items, op) { return {__renum: true, items: items, pos: 0, op: op} }
+// What made an Enumerator, for #inspect: the receiver as the program wrote it (a
+// Range or Hash, not the Array it delegated to), the method and its positional
+// arguments - MRI prints `#<Enumerator: 1..3:each_slice(2)>`. Twins: enumAt in
+// ruby-interpreter.abnf, rubyEnumAt in abnf/jsrt.go.
+function rbEnumAt(e, src, meth, args) {
+    e["src"] = src
+    e["meth"] = meth
+    e["margs"] = rbPosArgs(args)
+    return e
+}
+function rbEnumSrc(t) {
+    if (rbNmDeleg[0] === t) { return rbNmDeleg[1] }
+    return t
+}
+function rbEnumInspect(e) {
+    var meth = anytype
+    meth = e["meth"]
+    if (meth === undefined) { return "#<Enumerator: " + rbInspect(e["items"]) + ">" }
+    var d = "#<Enumerator: " + rbInspect(e["src"]) + ":" + meth
+    var ma = e["margs"]
+    if (ma.length > 0) {
+        var parts = []
+        var i = 0
+        while (i < ma.length) { parts.push(rbInspect(ma[i])); i = i + 1 }
+        d = d + "(" + parts.join(", ") + ")"
+    }
+    return d + ">"
+}
 // What one pass of the pending operation answers, given the block results.
 function rbEnumFinish(t, items, results) {
     var op = t["op"]
@@ -5645,7 +5709,7 @@ function rbEnumMethod(t, name, args) {
     }
     if (name == "rewind") { t["pos"] = 0; return t }
     if (name == "class") { return rbBuiltinClass("Enumerator") }
-    if (name == "inspect" || name == "to_s") { return "#<Enumerator: " + rbInspect(items) + ">" }
+    if (name == "inspect" || name == "to_s") { return rbEnumInspect(t) }
     if (name == "each") {
         if (blk === null) { return t }
         var eres = []
@@ -5660,7 +5724,7 @@ function rbEnumMethod(t, name, args) {
             var pairs = []
             var j = 0
             while (j < items.length) { pairs.push([items[j], j + off]); j = j + 1 }
-            return rbMkEnum(pairs)
+            return rbEnumAt(rbMkEnum(pairs), t, name, args)
         }
         var wres = []
         var k2 = 0
@@ -5808,7 +5872,7 @@ function rbHashMethod(o, keys, vals, name, args) {
         return o
     }
     if (name == "each_pair") {
-        if (blk === null) { return rbMkEnum(rbHashPairs(keys, vals)) }
+        if (blk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), o, name, args) }
         while (i < keys.length) {
             rbCall2(blk, keys[i], vals[i])
             i = i + 1
@@ -5879,7 +5943,7 @@ function rbHashMethod(o, keys, vals, name, args) {
     var hp = rbHashPairs(keys, vals)
     if (name == "select" || name == "filter" || name == "reject" || name == "select!"
         || name == "filter!" || name == "reject!" || name == "keep_if" || name == "delete_if") {
-        if (blk === null) { return rbMkEnumOp(hp, name) }
+        if (blk === null) { return rbEnumAt(rbMkEnumOp(hp, name), o, name, args) }
         var inner = "select"
         if (name == "reject" || name == "reject!" || name == "delete_if") { inner = "reject" }
         var kept = rbArrayMethod(hp, inner, args)
@@ -5904,7 +5968,7 @@ function rbArrWantsBlock(n) {
 }
 function rbArrayMethod(t, name, args) {
     var blk = rbBlockOf(args)
-    if (blk === null && rbArrWantsBlock(name)) { return rbMkEnumOp(rtCopyArr(t), name) }
+    if (blk === null && rbArrWantsBlock(name)) { return rbEnumAt(rbMkEnumOp(rtCopyArr(t), name), rbEnumSrc(t), name, args) }
     // The POSITIONAL COUNT, not a positional ARRAY: rbPosArgs would allocate on
     // every array-method call and push/each/map are hot, so the arms index args
     // directly and stop at nPos.
@@ -6029,7 +6093,7 @@ function rbArrayMethod(t, name, args) {
     if (name == "to_a") { return rtCopyArr(t) }
     // A blockless each / each_with_index is an Enumerator in MRI, not the array.
     if (name == "each") {
-        if (blk === null) { return rbMkEnum(rtCopyArr(t)) }
+        if (blk === null) { return rbEnumAt(rbMkEnum(rtCopyArr(t)), rbEnumSrc(t), name, args) }
         var e = 0
         while (e < t.length) {
             rbCall1(blk, t[e])
@@ -6042,7 +6106,7 @@ function rbArrayMethod(t, name, args) {
             var wpairs = []
             var wp = 0
             while (wp < t.length) { wpairs.push([t[wp], wp]); wp = wp + 1 }
-            return rbMkEnum(wpairs)
+            return rbEnumAt(rbMkEnum(wpairs), rbEnumSrc(t), name, args)
         }
         var w = 0
         while (w < t.length) {
@@ -6125,7 +6189,7 @@ function rbArrayMethod(t, name, args) {
             rvz.push(t[zi])
             zi = zi - 1
         }
-        if (blk === null) { return rbMkEnum(rvz) }
+        if (blk === null) { return rbEnumAt(rbMkEnum(rvz), rbEnumSrc(t), name, args) }
         var qz = 0
         while (qz < rvz.length) {
             rbCall1(blk, rvz[qz])
@@ -6276,7 +6340,7 @@ function rbArrayMethod(t, name, args) {
                 gi = gi + 1
             }
         }
-        if (blk === null) { return rbMkEnum(groups) }
+        if (blk === null) { return rbEnumAt(rbMkEnum(groups), rbEnumSrc(t), name, args) }
         var gk = 0
         while (gk < groups.length) {
             rbCall1(blk, groups[gk])
@@ -6315,7 +6379,7 @@ function rbArrayMethod(t, name, args) {
                 while (cj < t.length) { cyc.push(t[cj]); cj = cj + 1 }
                 ci = ci + 1
             }
-            return rbMkEnum(cyc)
+            return rbEnumAt(rbMkEnum(cyc), rbEnumSrc(t), name, args)
         }
         if (nPos == 0) {
             if (t.length == 0) { return null }
@@ -6347,7 +6411,7 @@ function rbArrayMethod(t, name, args) {
             res.push(row2)
             pi = pi + 1
         }
-        if (blk === null) { return rbMkEnum(res) }
+        if (blk === null) { return rbEnumAt(rbMkEnum(res), rbEnumSrc(t), name, args) }
         var pm = 0
         while (pm < res.length) { rbCall1(blk, res[pm]); pm = pm + 1 }
         return t
@@ -6954,7 +7018,7 @@ function rbMethod(target, name, args) {
         if (name == "to_s" || name == "id2name" || name == "name") { return sn }
         if (name == "to_sym") { return target }
         if (name == "length" || name == "size") { return rbCharCount(sn) }
-        if (name == "inspect") { return ":" + sn }
+        if (name == "inspect") { return rbSymInspect(sn) }
         // Symbol's case and successor methods are the String ones on its name.
         if (name == "upcase" || name == "downcase" || name == "swapcase" || name == "capitalize"
             || name == "succ" || name == "next") { return rbSym(rbStr(rbMethod(sn, name, args))) }
@@ -7064,6 +7128,7 @@ function rbMethod(target, name, args) {
                 // The block, NOT args[0]: the block marker makes the two different
                 // things.
                 var eblk = rbBlockOf(args)
+                if (eblk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), target, name, args) }
                 var e = 0
                 while (e < keys.length) {
                     rbCall2(eblk, keys[e], vals[e])

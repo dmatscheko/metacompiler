@@ -1549,11 +1549,11 @@ PctAnyScan = :script(~~
         return abnf.newToken(out, 0)
     })()
 ~~) ;
-PctQ        <~~ push(makeConst(unescapeSq(pctRawOf(takeAll())))) ~~>
+PctQ        <~~ var pctIt = takeAll(); push(makeConst(pctRawText(pctRawOf(pctIt), pctDelimOf(pctIt)))) ~~>
             = "%q" :whitespace() PctRawBody :whitespace(Whitespace) ;
-PctW        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), false))) ~~>
+PctW        <~~ var pctIt = takeAll(); push(makeConst(pctRawWords(pctRawOf(pctIt), pctDelimOf(pctIt), false))) ~~>
             = "%w" :whitespace() PctRawBody :whitespace(Whitespace) ;
-PctI        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), true))) ~~>
+PctI        <~~ var pctIt = takeAll(); push(makeConst(pctRawWords(pctRawOf(pctIt), pctDelimOf(pctIt), true))) ~~>
             = "%i" :whitespace() PctRawBody :whitespace(Whitespace) ;
 PctBigQ     <~~ push(makeTemplate(takeAll())) ~~>
             = "%Q" :whitespace() PctTplBody :whitespace(Whitespace) ;
@@ -1565,12 +1565,15 @@ PctBigI     <~~ push(makeWordsThunk(makeTemplate(takeAll()), true)) ~~>
             = "%I" :whitespace() PctTplBody :whitespace(Whitespace) ;
 
 PctRawBody  = PctParRaw | PctBrkRaw | PctBrcRaw ;
-PctParRaw   = "(" { PctParCh } <~~ push({raw: up.in}) ~~> ")" ;
-PctBrkRaw   = "[" { PctBrkCh } <~~ push({raw: up.in}) ~~> "]" ;
-PctBrcRaw   = "{" { PctBrcCh } <~~ push({raw: up.in}) ~~> "}" ;
-PctParCh    = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
-PctBrkCh    = "\x00"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
-PctBrcCh    = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+PctParRaw   = "(" { PctParCh } <~~ push({raw: up.in, d: "()"}) ~~> ")" ;
+PctBrkRaw   = "[" { PctBrkCh } <~~ push({raw: up.in, d: "[]"}) ~~> "]" ;
+PctBrcRaw   = "{" { PctBrcCh } <~~ push({raw: up.in, d: "{}"}) ~~> "}" ;
+// A backslash takes the next character with it, so an escaped delimiter (`%w[a\]]`)
+// does not end the body; pctRawEsc decides what the pair stands for.
+PctRawEsc   = "\\" "\x00"..."\U0010ffff" ;
+PctParCh    = PctRawEsc | "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
+PctBrkCh    = PctRawEsc | "\x00"..."\x5a" | "\x5e"..."\U0010ffff" ;
+PctBrcCh    = PctRawEsc | "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 PctTplBody  = "(" { TplExpr | PctParChunk } ")"
             | "[" { TplExpr | PctBrkChunk } "]"
@@ -5507,12 +5510,47 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out + "\""
     }
+    // Whether a Symbol's name prints BARE after the colon (MRI's symname test): an
+    // operator method name, an identifier with one trailing ? ! or =, an @ivar, an
+    // @@cvar, or a global ($name, $1, $-w, $~ and the other one-character specials).
+    // Anything else prints quoted, as :"a b". Twins: rbSymPlain in languages/lib/ruby-rt.metajs, rubySymPlain in abnf/jsrtruby.go.
+    var rbSymOps = " + - * / % ** == === != =~ !~ ! ~ +@ -@ [] []= < <= > >= <=> << >> & | ^ ` "
+    function rbSymIdCh(c) { return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95 || c >= 128 }
+    function rbSymPlain(s) {
+        var n = s.length
+        if (n == 0) { return false }
+        if (n <= 3 && s.indexOf(" ") < 0 && rbSymOps.indexOf(" " + s + " ") >= 0) { return true }
+        var i = 0
+        var c = s.charCodeAt(0)
+        if (c == 36) {
+            if (n == 1) { return false }
+            var d = s.charCodeAt(1)
+            if (n == 2 && "~*$?!@/\\;,.=:<>\"&`'+0".indexOf(s.charAt(1)) >= 0) { return true }
+            if (d == 45) { return n == 3 && rbSymIdCh(s.charCodeAt(2)) }
+            if (d >= 48 && d <= 57) {
+                var k = 2
+                while (k < n && s.charCodeAt(k) >= 48 && s.charCodeAt(k) <= 57) { k = k + 1 }
+                return k == n
+            }
+            i = 1
+        }
+        if (c == 64) { i = (n > 1 && s.charCodeAt(1) == 64) ? 2 : 1 }
+        if (i >= n) { return false }
+        var f = s.charCodeAt(i)
+        if (!rbSymIdCh(f) || (f >= 48 && f <= 57)) { return false }
+        while (i < n && rbSymIdCh(s.charCodeAt(i))) { i = i + 1 }
+        if (i == n) { return true }
+        var t = s.charCodeAt(i)
+        return c != 36 && c != 64 && i == n - 1 && (t == 63 || t == 33 || t == 61)
+    }
+    function symInspect(s) { return rbSymPlain(s) ? ":" + s : ":" + strInspect(s) }
     function rinspect(v) {
         if (v === null || v === undefined) { return "nil" }
         if (isRegex(v)) { return "/" + reDescSrc(v.src) + "/" + reOpts(v.rflags, false) }
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return strInspect(v) }
-        if (isSym(v)) { return ":" + v.s }
+        if (isSym(v)) { return symInspect(v.s) }
+        if (isEnum(v)) { return enumInspect(v) }
         // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is
         // not - `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one
         // place the two differ for a numeric.
@@ -6859,12 +6897,57 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (cur.length > 0) { out.push(cur) }
         return out
     }
-    function pctWords(s, asSym) {
-        var w = splitWords(s)
+    function pctWords(s, asSym) { return pctSymbols(splitWords(s), asSym) }
+    function pctRawWords(s, delims, asSym) { return pctSymbols(pctRawSplit(s, delims), asSym) }
+    function pctSymbols(w, asSym) {
         if (!asSym) { return w }
         var out = []
         for (var i = 0; i < w.length; i++) { out.push(mkSym(w[i])) }
         return out
+    }
+    // The one escape of a RAW % literal (%q %w %i): a backslash before a delimiter or
+    // another backslash - and, in a word list, before whitespace - stands for that
+    // character; any other backslash is kept. `delims` holds the open and close
+    // delimiter. pctRawText reads a %q body, pctRawSplit a %w / %i body into words.
+    function pctRawEsc(s, i, delims, words) {
+        if (s.charCodeAt(i) != 92 || i + 1 >= s.length) { return "" }
+        var nx = s.charAt(i + 1)
+        if (nx == "\\" || delims.indexOf(nx) >= 0) { return nx }
+        if (words && (nx == " " || nx == "\t" || nx == "\n" || nx == "\r")) { return nx }
+        return ""
+    }
+    function pctRawText(s, delims) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var e = pctRawEsc(s, i, delims, false)
+            if (e != "") { out += e; i += 2; continue }
+            out += s.charAt(i)
+            i++
+        }
+        return out
+    }
+    function pctRawSplit(s, delims) {
+        var out = []
+        var cur = ""
+        var i = 0
+        while (i < s.length) {
+            var e = pctRawEsc(s, i, delims, true)
+            if (e != "") { cur += e; i += 2; continue }
+            var ch = s.charAt(i)
+            i++
+            if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r") {
+                if (cur != "") { out.push(cur); cur = "" }
+                continue
+            }
+            cur += ch
+        }
+        if (cur != "") { out.push(cur) }
+        return out
+    }
+    function pctDelimOf(items) {
+        for (var i = 0; i < items.length; i++) { if (items[i].d != undefined) { return items[i].d } }
+        return ""
     }
     // %W / %I: the body interpolates first, so the split has to happen at run time.
     function makeWordsThunk(t, asSym) {
@@ -7175,9 +7258,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (end < 0) { end = text.length }
         var body = text.slice(i + 1, end)
         var flags = text.slice(end + 1)
-        if (kind == "q") { return makeConst(unescapeSq(body)) }
-        if (kind == "w") { return makeConst(pctWords(body, false)) }
-        if (kind == "i") { return makeConst(pctWords(body, true)) }
+        if (kind == "q") { return makeConst(pctRawText(body, open + close)) }
+        if (kind == "w") { return makeConst(pctRawWords(body, open + close, false)) }
+        if (kind == "i") { return makeConst(pctRawWords(body, open + close, true)) }
         if (kind == "s") { return makeConst(mkSym(body)) }
         if (kind == "W") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), false) }
         if (kind == "I") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), true) }
@@ -8125,7 +8208,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isSym(target)) {
             if (name == "to_s" || name == "name" || name == "id2name") { return target.s }
             if (name == "to_sym") { return target }
-            if (name == "inspect") { return ":" + target.s }
+            if (name == "inspect") { return symInspect(target.s) }
             if (name == "length" || name == "size") { return charCount(target.s) }
             // Symbol's case and successor methods are the String ones on its name.
             if (name == "upcase" || name == "downcase" || name == "swapcase" || name == "capitalize"
@@ -8305,6 +8388,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "[]") { return rindex(target, args[0]) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
             if (name == "each") {
+                if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
                 for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [target.keys[di], target.vals[di]]) }
                 return target
             }
@@ -8359,7 +8443,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
             if (name == "each_pair") {
-                if (blk == null) { return mkEnum(hashPairs(target)) }
+                if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
                 for (var ep = 0; ep < target.keys.length; ep++) { blockCall(blk, [target.keys[ep], target.vals[ep]]) }
                 return target
             }
@@ -8411,7 +8495,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (name == "select" || name == "filter" || name == "reject"
                     || name == "select!" || name == "filter!" || name == "reject!"
                     || name == "keep_if" || name == "delete_if") {
-                    if (blk == null) { return mkEnumOp(hp, name) }
+                    if (blk == null) { return enumAt(mkEnumOp(hp, name), target, name, args) }
                     var keep = name == "reject" || name == "reject!" || name == "delete_if"
                         ? arrayMethod(hp, "reject", args, blk) : arrayMethod(hp, "select", args, blk)
                     var hs = pairsToHash(keep, target)
@@ -8858,6 +8942,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // not the receiver.
     function mkEnum(items) { return {__renum: true, items: items, pos: 0, op: "each"} }
     function mkEnumOp(items, op) { return {__renum: true, items: items, pos: 0, op: op} }
+    // What made an Enumerator, for #inspect: the receiver as the program wrote it (a
+    // Range or Hash, not the Array it delegated to), the method and its arguments -
+    // MRI prints `#<Enumerator: 1..3:each_slice(2)>`. Twins: rubyEnumAt in
+    // abnf/jsrt.go, rbEnumAt in lib/ruby-rt.metajs.
+    function enumAt(e, src, meth, margs) {
+        e.src = src
+        e.meth = meth
+        e.margs = margs.slice(0)
+        return e
+    }
+    function enumSrc(t) { return nmDeleg.arr === t ? nmDeleg.recv : t }
+    function enumInspect(e) {
+        if (e.meth == undefined) { return "#<Enumerator: " + rinspect(e.items) + ">" }
+        var d = "#<Enumerator: " + rinspect(e.src) + ":" + e.meth
+        if (e.margs.length > 0) {
+            var ma = []
+            for (var i = 0; i < e.margs.length; i++) { ma.push(rinspect(e.margs[i])) }
+            d = d + "(" + ma.join(", ") + ")"
+        }
+        return d + ">"
+    }
     // What one pass of the pending operation answers, given the block results.
     function enumFinish(t, items, results) {
         var op = t.op
@@ -8898,7 +9003,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "rewind") { t.pos = 0; return t }
         if (name == "class") { return hostGlobals["Enumerator"] }
-        if (name == "inspect" || name == "to_s") { return "#<Enumerator: " + rinspect(items) + ">" }
+        if (name == "inspect" || name == "to_s") { return enumInspect(t) }
         if (name == "each") {
             if (blk == null) { return t }
             var eres = []
@@ -8911,7 +9016,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "with_index" && args.length > 0) { off = Math.trunc(toF(args[0])) }
             var pairs = []
             for (var j = 0; j < items.length; j++) { pairs.push([items[j], j + off]) }
-            if (blk == null) { return mkEnum(pairs) }
+            if (blk == null) { return enumAt(mkEnum(pairs), t, name, args) }
             var wres = []
             for (var k = 0; k < items.length; k++) { wres.push(blockCall(blk, [items[k], k + off])) }
             return enumFinish(t, items, wres)
@@ -8929,7 +9034,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A blockless map / select / sort_by / ... is an ENUMERATOR in MRI, not a
         // call of a null block: `h.map.with_index { }` and `a.each_with_index.map`
         // both go through here. each / each_with_index answer one below on their own.
-        if (blk == null && arrWantsBlock(name)) { return mkEnumOp(t.slice(0), name) }
+        if (blk == null && arrWantsBlock(name)) { return enumAt(mkEnumOp(t.slice(0), name), enumSrc(t), name, args) }
         if (name == "size" || name == "length") { return t.length }
         // Array#[]: one index, a Range, or start+len. (#slice has its own arm below.)
         if (name == "[]") {
@@ -9025,7 +9130,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "to_a") { return t.slice(0) }
         // A blockless each / each_with_index is an Enumerator in MRI, not the array.
         if (name == "each") {
-            if (blk == null) { return mkEnum(t.slice(0)) }
+            if (blk == null) { return enumAt(mkEnum(t.slice(0)), enumSrc(t), name, args) }
             for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) }
             return t
         }
@@ -9033,7 +9138,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (blk == null) {
                 var wpairs = []
                 for (i = 0; i < t.length; i++) { wpairs.push([t[i], i]) }
-                return mkEnum(wpairs)
+                return enumAt(mkEnum(wpairs), enumSrc(t), name, args)
             }
             for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], i]) }
             return t
@@ -9086,7 +9191,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "reverse_each") {
             var rvz = []
             for (i = t.length - 1; i >= 0; i--) { rvz.push(t[i]) }
-            if (blk == null) { return mkEnum(rvz) }
+            if (blk == null) { return enumAt(mkEnum(rvz), enumSrc(t), name, args) }
             for (i = 0; i < rvz.length; i++) { blockCall(blk, [rvz[i]]) }
             return t
         }
@@ -9196,7 +9301,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             } else {
                 for (i = 0; i + gn <= t.length; i++) { groups.push(arrSub(t, i, gn)) }
             }
-            if (blk == null) { return mkEnum(groups) }
+            if (blk == null) { return enumAt(mkEnum(groups), enumSrc(t), name, args) }
             for (i = 0; i < groups.length; i++) { blockCall(blk, [groups[i]]) }
             return t
         }
@@ -9223,7 +9328,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var cyc = []
                 var cn = Math.trunc(toF(args[0]))
                 for (i = 0; i < cn; i++) { for (var cj = 0; cj < t.length; cj++) { cyc.push(t[cj]) } }
-                return mkEnum(cyc)
+                return enumAt(mkEnum(cyc), enumSrc(t), name, args)
             }
             if (args.length == 0) {
                 if (t.length == 0) { return null }
@@ -9245,7 +9350,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var pj = 0; pj < picks[i].length; pj++) { row2.push(t[picks[i][pj]]) }
                 res.push(row2)
             }
-            if (blk == null) { return mkEnum(res) }
+            if (blk == null) { return enumAt(mkEnum(res), enumSrc(t), name, args) }
             for (i = 0; i < res.length; i++) { blockCall(blk, [res[i]]) }
             return t
         }

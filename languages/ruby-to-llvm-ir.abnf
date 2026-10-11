@@ -1292,11 +1292,11 @@ PctAnyScan = :script(~~
         return abnf.newToken(out, 0)
     })()
 ~~) ;
-PctQ        <~~ push(makeConst(unescapeSq(pctRawOf(takeAll())))) ~~>
+PctQ        <~~ var pctIt = takeAll(); push(makeConst(pctRawText(pctRawOf(pctIt), pctDelimOf(pctIt)))) ~~>
             = "%q" :whitespace() PctRawBody :whitespace(Whitespace) ;
-PctW        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), false))) ~~>
+PctW        <~~ var pctIt = takeAll(); push(makeConst(pctRawWords(pctRawOf(pctIt), pctDelimOf(pctIt), false))) ~~>
             = "%w" :whitespace() PctRawBody :whitespace(Whitespace) ;
-PctI        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), true))) ~~>
+PctI        <~~ var pctIt = takeAll(); push(makeConst(pctRawWords(pctRawOf(pctIt), pctDelimOf(pctIt), true))) ~~>
             = "%i" :whitespace() PctRawBody :whitespace(Whitespace) ;
 PctBigQ     <~~ push(makeTemplate(takeAll())) ~~>
             = "%Q" :whitespace() PctTplBody :whitespace(Whitespace) ;
@@ -1308,12 +1308,15 @@ PctBigI     <~~ push(makeWordsThunk(makeTemplate(takeAll()), true)) ~~>
             = "%I" :whitespace() PctTplBody :whitespace(Whitespace) ;
 
 PctRawBody  = PctParRaw | PctBrkRaw | PctBrcRaw ;
-PctParRaw   = "(" { PctParCh } <~~ push({raw: up.in}) ~~> ")" ;
-PctBrkRaw   = "[" { PctBrkCh } <~~ push({raw: up.in}) ~~> "]" ;
-PctBrcRaw   = "{" { PctBrcCh } <~~ push({raw: up.in}) ~~> "}" ;
-PctParCh    = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
-PctBrkCh    = "\x00"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
-PctBrcCh    = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+PctParRaw   = "(" { PctParCh } <~~ push({raw: up.in, d: "()"}) ~~> ")" ;
+PctBrkRaw   = "[" { PctBrkCh } <~~ push({raw: up.in, d: "[]"}) ~~> "]" ;
+PctBrcRaw   = "{" { PctBrcCh } <~~ push({raw: up.in, d: "{}"}) ~~> "}" ;
+// A backslash takes the next character with it, so an escaped delimiter (`%w[a\]]`)
+// does not end the body; pctRawEsc decides what the pair stands for.
+PctRawEsc   = "\\" "\x00"..."\U0010ffff" ;
+PctParCh    = PctRawEsc | "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
+PctBrkCh    = PctRawEsc | "\x00"..."\x5a" | "\x5e"..."\U0010ffff" ;
+PctBrcCh    = PctRawEsc | "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 PctTplBody  = "(" { TplExpr | PctParChunk } ")"
             | "[" { TplExpr | PctBrkChunk } "]"
@@ -5513,9 +5516,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (end < 0) { end = text.length }
         var body = text.slice(i + 1, end)
         var flags = text.slice(end + 1)
-        if (kind == "q") { return makeConst(unescapeSq(body)) }
-        if (kind == "w") { return makeConst(pctWords(body, false)) }
-        if (kind == "i") { return makeConst(pctWords(body, true)) }
+        if (kind == "q") { return makeConst(pctRawText(body, open + close)) }
+        if (kind == "w") { return makeConst(pctRawWords(body, open + close, false)) }
+        if (kind == "i") { return makeConst(pctRawWords(body, open + close, true)) }
         if (kind == "s") { return makeConst(mkSym(body)) }
         if (kind == "W") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), false) }
         if (kind == "I") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), true) }
@@ -5800,11 +5803,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return ""
     }
     // %w[a b] / %i[a b]: the raw body split on whitespace into strings / symbols.
-    function pctSplit(str) {
+    function pctRawWords(str, delims, asSym) {
+        var words = pctRawSplit(str, delims)
+        return {__words: words, __sym: asSym}
+    }
+    // The one escape of a RAW % literal (%q %w %i): a backslash before a delimiter or
+    // another backslash - and, in a word list, before whitespace - stands for that
+    // character; any other backslash is kept. `delims` holds the open and close
+    // delimiter. pctRawText reads a %q body, pctRawSplit a %w / %i body into words.
+    function pctRawEsc(s, i, delims, words) {
+        if (s.charCodeAt(i) != 92 || i + 1 >= s.length) { return "" }
+        var nx = s.charAt(i + 1)
+        if (nx == "\\" || delims.indexOf(nx) >= 0) { return nx }
+        if (words && (nx == " " || nx == "\t" || nx == "\n" || nx == "\r")) { return nx }
+        return ""
+    }
+    function pctRawText(s, delims) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var e = pctRawEsc(s, i, delims, false)
+            if (e != "") { out += e; i += 2; continue }
+            out += s.charAt(i)
+            i++
+        }
+        return out
+    }
+    function pctRawSplit(s, delims) {
         var out = []
         var cur = ""
-        for (var i = 0; i < str.length; i++) {
-            var ch = str.charAt(i)
+        var i = 0
+        while (i < s.length) {
+            var e = pctRawEsc(s, i, delims, true)
+            if (e != "") { cur += e; i += 2; continue }
+            var ch = s.charAt(i)
+            i++
             if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r") {
                 if (cur != "") { out.push(cur); cur = "" }
                 continue
@@ -5814,9 +5847,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (cur != "") { out.push(cur) }
         return out
     }
-    function pctWords(str, asSym) {
-        var words = pctSplit(str)
-        return {__words: words, __sym: asSym}
+    function pctDelimOf(items) {
+        for (var i = 0; i < items.length; i++) { if (items[i].d != undefined) { return items[i].d } }
+        return ""
     }
     // %W / %I interpolate first, so the split has to happen at RUN time: the template
     // thunk yields one string, which js_rsplitw turns into the array of words.

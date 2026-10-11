@@ -8428,7 +8428,7 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 	case string:
 		return rubyStrInspect(t)
 	case jsSym:
-		return ":" + t.s
+		return rubySymInspect(t.s)
 	// Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
 	// `(2/3)` against `2/3`, `(3+4i)` against `3+4i` - and it is the one place the
 	// two differ for a numeric.
@@ -8448,6 +8448,9 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		// #to_s is `a..e'.
 		if _, isRng := t.props["__rrange"]; isRng {
 			return rt.rubyRangeText(t, true)
+		}
+		if _, isEnum := t.props["__renum"]; isEnum {
+			return rt.rubyEnumInspect(t)
 		}
 		// Module#inspect is the NAME even when the class defines #to_s, since MRI
 		// binds the alias to the original Module#to_s.
@@ -9752,7 +9755,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "length", "size":
 			return float64(rubyCharCount(o.s))
 		case "inspect":
-			return ":" + o.s
+			return rubySymInspect(o.s)
 		// Symbol's case and successor methods are the String ones on its name.
 		case "upcase", "downcase", "swapcase", "capitalize", "succ", "next":
 			return jsSym{s: rt.rubyStr(rt.rubyMethod(o.s, name, args))}
@@ -9996,7 +9999,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "include?", "has_key?", "key?":
 				return rt.rubyDictFind(keys, argAt(args, 0)) >= 0
 			case "each":
-				_, eblk := rubyBlockArgs(args)
+				epos, eblk := rubyBlockArgs(args)
+				if eblk == nil {
+					return rubyEnumAt(rubyMkEnum(rubyHashPairs(keys, vals)), o, name, epos)
+				}
 				for i := range keys.elems {
 					rt.call(eblk, jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
 				}
@@ -10815,7 +10821,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		return o, true
 	case "each_pair":
 		if blk == nil {
-			return rubyMkEnum(rubyHashPairs(keys, vals)), true
+			return rubyEnumAt(rubyMkEnum(rubyHashPairs(keys, vals)), o, name, pos), true
 		}
 		for i := range keys.elems {
 			rt.call(blk, jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
@@ -10898,7 +10904,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 	switch name {
 	case "select", "filter", "reject", "select!", "filter!", "reject!", "keep_if", "delete_if":
 		if blk == nil {
-			return rubyMkEnumOp(hp, name), true
+			return rubyEnumAt(rubyMkEnumOp(hp, name), o, name, pos), true
 		}
 		inner := "select"
 		if name == "reject" || name == "reject!" || name == "delete_if" {
@@ -11008,6 +11014,40 @@ func rubyMkEnumOp(items *jsArray, op string) *jsObject {
 	return e
 }
 
+// rubyEnumAt records what made an Enumerator, for #inspect: the receiver as the
+// program wrote it (a Range or Hash, not the Array it delegated to), the method
+// and its arguments - MRI prints `#<Enumerator: 1..3:each_slice(2)>`. Twins:
+// enumAt in ruby-interpreter.abnf, rbEnumAt in lib/ruby-rt.metajs.
+func rubyEnumAt(e *jsObject, src interface{}, meth string, margs []interface{}) *jsObject {
+	e.set("src", src)
+	e.set("meth", meth)
+	e.set("margs", &jsArray{elems: append([]interface{}{}, margs...)})
+	return e
+}
+
+func (rt *jsrt) rubyEnumSrc(t *jsArray) interface{} {
+	if rt.rubyNmArr == t {
+		return rt.rubyNmRecv
+	}
+	return t
+}
+
+func (rt *jsrt) rubyEnumInspect(e *jsObject) string {
+	meth, has := e.props["meth"].(string)
+	if !has {
+		return "#<Enumerator: " + rt.rubyInspect(e.props["items"]) + ">"
+	}
+	d := "#<Enumerator: " + rt.rubyInspect(e.props["src"]) + ":" + meth
+	if ma, _ := e.props["margs"].(*jsArray); ma != nil && len(ma.elems) > 0 {
+		parts := make([]string, len(ma.elems))
+		for i, a := range ma.elems {
+			parts[i] = rt.rubyInspect(a)
+		}
+		d += "(" + strJoin(parts, ", ") + ")"
+	}
+	return d + ">"
+}
+
 // rubyEnumFinish is what one pass of the pending operation answers, given the
 // block results. Mirrors enumFinish of ruby-interpreter.abnf and rbEnumFinish of
 // lib/ruby-rt.metajs.
@@ -11079,7 +11119,7 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	case "class":
 		return rt.rubyBuiltinClass("Enumerator")
 	case "inspect", "to_s":
-		return "#<Enumerator: " + rt.rubyInspect(items) + ">"
+		return rt.rubyEnumInspect(t)
 	case "each":
 		if blk == nil {
 			return t
@@ -11099,7 +11139,7 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 			for i, e := range items.elems {
 				pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{e, float64(i + off)}})
 			}
-			return rubyMkEnum(pairs)
+			return rubyEnumAt(rubyMkEnum(pairs), t, name, pos)
 		}
 		wres := []interface{}{}
 		for i, e := range items.elems {
@@ -11137,7 +11177,7 @@ func rubyArrWantsBlock(n string) bool {
 func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
 	if blk == nil && rubyArrWantsBlock(name) {
-		return rubyMkEnumOp(&jsArray{elems: append([]interface{}{}, t.elems...)}, name)
+		return rubyEnumAt(rubyMkEnumOp(&jsArray{elems: append([]interface{}{}, t.elems...)}, name), rt.rubyEnumSrc(t), name, pos)
 	}
 	switch name {
 	case "size", "length":
@@ -11273,7 +11313,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "each":
 		// A blockless each is an Enumerator in MRI, not the array.
 		if blk == nil {
-			return rubyMkEnum(&jsArray{elems: append([]interface{}{}, t.elems...)})
+			return rubyEnumAt(rubyMkEnum(&jsArray{elems: append([]interface{}{}, t.elems...)}), rt.rubyEnumSrc(t), name, pos)
 		}
 		for _, e := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{e})
@@ -11285,7 +11325,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			for i, e := range t.elems {
 				pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{e, float64(i)}})
 			}
-			return rubyMkEnum(pairs)
+			return rubyEnumAt(rubyMkEnum(pairs), rt.rubyEnumSrc(t), name, pos)
 		}
 		for i, e := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{e, float64(i)})
@@ -11362,7 +11402,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			rev.elems = append(rev.elems, t.elems[i])
 		}
 		if blk == nil {
-			return rubyMkEnum(rev)
+			return rubyEnumAt(rubyMkEnum(rev), rt.rubyEnumSrc(t), name, pos)
 		}
 		for _, v := range rev.elems {
 			rt.call(blk, jsUndef, []interface{}{v})
@@ -11529,7 +11569,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		if blk == nil {
-			return rubyMkEnum(groups)
+			return rubyEnumAt(rubyMkEnum(groups), rt.rubyEnumSrc(t), name, pos)
 		}
 		for _, g := range groups.elems {
 			rt.call(blk, jsUndef, []interface{}{g})
@@ -11573,7 +11613,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			for i := 0; i < n; i++ {
 				cyc.elems = append(cyc.elems, t.elems...)
 			}
-			return rubyMkEnum(cyc)
+			return rubyEnumAt(rubyMkEnum(cyc), rt.rubyEnumSrc(t), name, pos)
 		}
 		if len(pos) == 0 {
 			if len(t.elems) == 0 {
@@ -11606,7 +11646,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		res := rubyPick(t, picks)
 		if blk == nil {
-			return rubyMkEnum(res)
+			return rubyEnumAt(rubyMkEnum(res), rt.rubyEnumSrc(t), name, pos)
 		}
 		for _, r := range res.elems {
 			rt.call(blk, jsUndef, []interface{}{r})

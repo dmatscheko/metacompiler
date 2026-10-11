@@ -2060,3 +2060,70 @@ func rubyCasecmp(a, b string) int {
 	}
 	return strings.Compare(up(a), up(b))
 }
+
+// rubySymInspect is Symbol#inspect: the name bare after the colon when MRI's
+// symname test passes (rubySymPlain), else quoted as :"a b". Twins: symInspect in
+// ruby-interpreter.abnf, rbSymInspect in languages/lib/ruby-rt.metajs.
+func rubySymInspect(s string) string {
+	if rubySymPlain(s) {
+		return ":" + s
+	}
+	return ":" + rubyStrInspect(s)
+}
+
+func rubySymIdCh(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c >= 0x80
+}
+
+// rubySymPlain: an operator method name, an identifier with one trailing ? ! or =,
+// an @ivar, an @@cvar, or a global ($name, $1, $-w, $~ and the other one-character
+// specials). Twins: rbSymPlain in ruby-interpreter.abnf and
+// languages/lib/ruby-rt.metajs.
+func rubySymPlain(s string) bool {
+	n := len(s)
+	if n == 0 {
+		return false
+	}
+	switch s {
+	case "+", "-", "*", "/", "%", "**", "==", "===", "!=", "=~", "!~", "!", "~", "+@", "-@", "[]", "[]=",
+		"<", "<=", ">", ">=", "<=>", "<<", ">>", "&", "|", "^", "`":
+		return true
+	}
+	i := 0
+	switch s[0] {
+	case '$':
+		if n == 1 {
+			return false
+		}
+		if n == 2 && strings.IndexByte("~*$?!@/\\;,.=:<>\"&`'+0", s[1]) >= 0 {
+			return true
+		}
+		if s[1] == '-' {
+			return n == 3 && rubySymIdCh(s[2])
+		}
+		if s[1] >= '0' && s[1] <= '9' {
+			k := 2
+			for k < n && s[k] >= '0' && s[k] <= '9' {
+				k++
+			}
+			return k == n
+		}
+		i = 1
+	case '@':
+		i = 1
+		if n > 1 && s[1] == '@' {
+			i = 2
+		}
+	}
+	if i >= n || !rubySymIdCh(s[i]) || s[i] >= '0' && s[i] <= '9' {
+		return false
+	}
+	for i < n && rubySymIdCh(s[i]) {
+		i++
+	}
+	if i == n {
+		return true
+	}
+	t := s[i]
+	return s[0] != '$' && s[0] != '@' && i == n-1 && (t == '?' || t == '!' || t == '=')
+}
