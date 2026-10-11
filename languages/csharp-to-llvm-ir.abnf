@@ -26,7 +26,7 @@ Also modelled: char as an integral value that renders as its glyph (with the C# 
 and the (char)/(int)/(byte) conversions), the full numeric literal set (leading-dot reals,
 hex, binary, digit groups, u/l/f/d/m suffixes), verbatim and raw string literals,
 interpolation and String.Format with alignment and the standard numeric formats, typeof / nameof / sizeof /
-default, nullable values with the null-coalescing, null-conditional and null-forgiving
+default and the target-typed new(...), nullable values with the null-coalescing, null-conditional and null-forgiving
 operators and .HasValue / .Value, nested types, enums (with member initializers over
 earlier members), structs (value copy on a struct-typed declaration, and a zeroed
 default), interfaces with default members and explicit implementations, abstract members,
@@ -1063,7 +1063,11 @@ IncDec      <~~ push(makeIncDec(takeAll(), false)) ~~>
 
 // new Point(1, 2) | new List<int>() | new Dictionary<K,V>() | new int[]{...} | new int[n]
 // | new Foo{ X = 1 } (object initializer) | new Foo(a){ X = 1 } (ctor + initializer)
-NewExpr     = NewAnon | NewImplArr | NewObjInit | NewArrLit | NewArrSize | NewObject | StackAlloc ;
+NewExpr     = NewAnon | NewTarget | NewImplArr | NewObjInit | NewArrLit | NewArrSize | NewObject | StackAlloc ;
+// `new(...)` (C# 9 target-typed new): the type is the one its context converts it
+// to, through the same cell a bare `default` has (lib/csharp-default.js).
+NewTarget   <~~ push(makeNewTarget(takeAll(), up.pos)) ~~>
+            = KwNew "(" ArgList ")" [ ObjInit ] ;
 // An anonymous type ('new { X = 1, Y = 2 }'): a plain object with those members.
 NewAnon     <~~ push(makeAnon(pop())) ~~>
             = KwNew AnonInit ;
@@ -3744,6 +3748,18 @@ KwLet       = "let" KwEnd ;
     // constructed type argument ('List<int>') needs no extra machinery.
     function csTypeFactory(ts) {
         return makeArrowBody(makeNew([{cname: csSimpleName(ts), targs: csTypeArgs(ts)}]))
+    }
+    // The target-typed `new(...)`: a makeNew of its context's type, built where it is
+    // emitted. Twin of makeNewTarget in csharp-interpreter.abnf.
+    function makeNewTarget(items, end) {
+        var cell = csDfltCell(end)
+        return function(b) { return makeNew(csNewTargetItems(cell, items))(b) }
+    }
+    function csNewTargetItems(cell, items) {
+        if (cell.ty == "") { fail("a target-typed new() whose type its context does not name is not modelled") }
+        var all = [{cname: csSimpleName(cell.ty), targs: csTypeArgs(cell.ty)}]
+        for (var i = 0; i < items.length; i++) { all.push(items[i]) }
+        return all
     }
     function makeNew(items) {
         var clsName = items[0].cname

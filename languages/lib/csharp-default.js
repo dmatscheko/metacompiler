@@ -1,8 +1,9 @@
-// csharp-default.js -- the target type of the bare `default` literal, for both
-// csharp grammars (include).
+// csharp-default.js -- the target type of the bare `default` literal and of the
+// target-typed `new(...)`, for both csharp grammars (include).
 //
 // The literal is TARGET-TYPED (ECMA-334 12.8.21): it is the default value of the
-// type its context converts it to. Each literal owns a cell for that type, keyed
+// type its context converts it to; `new(...)` (C# 9) creates an instance of that
+// type, through the same cell. Each literal owns a cell for that type, keyed
 // by the literal's end offset (csDfltCell); the context fills it during the parse
 // (csDfltTarget) and the literal reads it when it runs, or, in the compiler, when
 // it is emitted. A cell nothing typed is null, a reference type's default. The
@@ -469,12 +470,12 @@ function csDfltParamTy(cls, name, idx, pname, nargs) {
     return ty
 }
 
-// The arguments of a call spanning [start, end) whose text has `default` in it:
-// each one that is a default literal or a lambda waits for its parameter's type.
+// The arguments of a call spanning [start, end): each one that is a default
+// literal, a `new(...)` or a lambda waits for its parameter's type.
 var csDfltLater = []
 function csDfltArgs(cls, name, start, end) {
     var s = c.srcSlice(start, end)
-    if (s.indexOf("default") < 0 && s.indexOf("=>") < 0 && s.indexOf("delegate") < 0) { return }
+    if (s.indexOf("default") < 0 && s.indexOf("=>") < 0 && s.indexOf("delegate") < 0 && s.indexOf("new") < 0) { return }
     var p = csDfltOpenParen(s)
     if (p < 0) { return }
     var ends = []

@@ -3331,6 +3331,48 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s53c1", c3 == 10 && l.Capacity == 20 && l.EnsureCapacity(n[2]) >= 30 && l.Capacity >= 30 && ex == "aoor");
         }
 
+        // ===== SECTION 54: the target-typed new =====
+        //
+        // `new(...)` (C# 9, target-typed object creation) creates an instance of the
+        // type its context converts it to: a declaration, a field or property
+        // initializer, an assignment to a member, a `return`, an argument, a lambda's
+        // return; an object initializer may follow. A typed collection made this way
+        // carries its element type, so default(T) on it is T's.
+        class S54Pt
+        {
+            public int X;
+            public int Y;
+            public S54Pt() { }
+            public S54Pt(int x, int y) { X = x; Y = y; }
+        }
+        class S54Holder
+        {
+            public List<int> Items = new();
+            public Dictionary<string, int> Map { get; set; } = new();
+            public S54Pt P;
+        }
+        static S54Pt S54Make(int x) { return new(x, x + 1); }
+        static int S54Sum(S54Pt p) { return p.X + p.Y; }
+        static void S54()
+        {
+            int[] n = { 1, 2, 5, 6, 10, 20 };
+            List<int> a = new();
+            a.Add(n[2]);
+            Dictionary<string, int> d = new();
+            int v;
+            bool got = d.TryGetValue("k", out v);
+            S54Pt p = new(n[0], n[1]);
+            S54Pt q = new() { X = n[3] };
+            Program.Check("s54n1", a.Count == 1 && a.Find(x => x > 99) == 0 && !got && v == 0 && d.GetValueOrDefault("z") == 0
+                && p.X == 1 && p.Y == 2 && q.X == 6 && q.Y == 0);
+            var h = new S54Holder();
+            h.Items.Add(n[4]);
+            h.P = new(n[2], n[3]);
+            Func<S54Pt> f = () => new(n[4], n[5]);
+            Program.Check("s54n2", h.Items.Count == 1 && h.Map.Count == 0 && h.P.Y == 6 && S54Make(n[1]).Y == 3
+                && S54Sum(new(n[4], n[5])) == 30 && f().X == 10);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3386,6 +3428,7 @@ b";                                                   // verbatim keeps the newl
             Program.S51(); // SECTION-CALL 51
             Program.S52(); // SECTION-CALL 52
             Program.S53(); // SECTION-CALL 53
+            Program.S54(); // SECTION-CALL 54
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
