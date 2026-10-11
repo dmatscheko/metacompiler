@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-346** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-350** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -95,12 +95,6 @@ engines; MRI "HI!". Also an uncaught internal error lacks MRI's "file:line:in
 
 # JS — JavaScript and TypeScript
 
-### T-047 js: a generator body's `this` is wrong in the NATIVE build only · P2 · JS · Shared: runtime.c · IN PROGRESS (CORE worker, round 6) [V]
-`function* g(){ yield this }; g().next().value` gives the generator object natively,
-`undefined` in the other legs. `js_this` is one global slot in layer 2 and the emitter
-arms it with the receiver of `.next()`. Needs a per-coroutine `this` in the floor's
-control block (manual 7.8, high risk). Deliberately unasserted today; assert once fixed.
-
 ### T-048 js: `with` · P3 · JS · Shared: runtime.c · OPEN [V]
 The interpreter can implement it exactly; the compiled engines cannot, because the
 floor's scope is not object-backed - snapshot-in/write-back cannot see a property
@@ -148,19 +142,24 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · BLOCKED - on T-081 [V]
+### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · OPEN [V]
 `arrayOf<Int>().first()` → `Array is empty.`, `asSequence().first()` → `Sequence is
 empty.`, `map.values.first()` → `Collection is empty.`, `Empty array can't be
 reduced.`, `Array has more than one element.` (all read from the 2.2.21 jar). An Array,
 a Sequence, a values view and a List are one host array: needs the nominal kind of
 T-081 (jsArray in abnf/jsrt.go, the floor's array cell). reduceOrNull /
 reduceRightOrNull were added in b38a051.
-### T-081 boxed values know their KIND but not their declared class · P2 · KT + SW + CORE · IN PROGRESS (CORE worker, round 6) [V]
-Two boxed values of one primitive kind and different declared classes cannot be told
-apart: kotlin's mixed Float/Double set key, swift's `Int` vs `Int64` (`8 as Int64 is
-Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's `%!s(uint64=...)` note (T-073) and T-240. One
-mechanism likely closes all: a nominal type on the value. Design, cost, then
-implement or split.
+### T-347 kotlin: Long/Int identity in Any equality, sets and LongRange · P2 · KT · OPEN [V]
+`setOf<Any>(1, 1L).size` is 1 (jar 2); a Float/Double/Int/Long set of 6 has 4;
+`(1 as Any) == (1L as Any)` true (jar false); a LongRange's first/last are not `is
+Long`. The kinds already differ (plain number vs tag-13 Long box, floJavaF vs floJava):
+kind-aware key and Any equality, once integer literals carry their expected type
+(`listOf(1L).contains(1)` is true). LongRange endpoints: keep the Long box.
+
+### T-348 kotlin: `concatToString`, `String(charArray)`, `reversed()` on surrogates · P1 · KT · OPEN [V]
+`cs.concatToString()` "unknown list method" in all engines; `String(charArrayOf(..))`
+"unknown name: String" in the interpreter; `String.reversed()` in the Go twin rebuilds
+per unit with string(rune) (the JVM keeps surrogate pairs whole - probe).
 
 ---
 
@@ -193,6 +192,10 @@ tab `panic: C`); ours prints `panic: A` / tab `panic: B`. Also `panic(fmt.Sprint
 with equal text reads as "[recovered, repanicked]" (values compared by value, not
 identity); go prints `[recovered]` and a second line.
 
+### T-349 go: a method on a defined non-struct type aborts · P1 · GO · OPEN [V]
+`type Celsius float64; func (c Celsius) String() string {...}` aborts all legs
+("method receiver type not found" / "cannot set field 'String' on *abnf.jsClosure").
+
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
@@ -201,6 +204,12 @@ identity); go prints `[recovered]` and a second line.
 `s.insert("x", at: s.startIndex)` aborts "unknown String method: index";
 removeSubrange/replaceSubrange missing; Array `append(contentsOf:)` appends the array
 as one element (`["a","b","c",["d","e"]]`).
+
+### T-346 swift: `Int64 is Int`; `type(of:)` · P1 · SW · OPEN [V]
+`Int64 is Int` and `Int is Int64` are true (swiftc false); `as? Int` succeeds on an
+Int64; UInt ≡ UInt64. Fix locally: a flag on swift's own {__sz} box (Int64 always
+boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
+("unknown name: type").
 
 ---
 
@@ -228,14 +237,6 @@ PHP indexes bytes. A lone byte >=128 is held as U+0080..U+00FF, so `ord(chr(200)
 ---
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
-
-### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA + CORE · IN PROGRESS (CORE worker, round 6) [V]
-Needs ONE raw-byte output primitive in all engines (runtime.c host id, jsrtint.go
-binding, metajs-interpreter hostGlobals, the tag-script host); then js_luaout/luaOut
-become the identity. Emitting libc putchar from the compiler alone would split
-llvm.Run output across two writers.
-lua writes the raw bytes. (math.log/log10/sin/atan last-digit differences vs C libm:
-see T-293.)
 
 ---
 
@@ -280,19 +281,6 @@ sin/cos/atan/atan2; our Go-port legs are 1-9 ulps off on many rows (python T-265
 ruby T-229 declined for this reason). Design: CORE-MATH-style double-double with a
 Ziv rounding test, one MetaJS module (interpreter + layer 2) + Go port + runtime.c
 d_*. Cost it; implement or DECLINE.
-
-### T-324 layer 2 `Array.sort` with a comparator fails · P1 · CORE · IN PROGRESS (CORE worker, round 6) [V]
-In a lib/*-rt.metajs, `xs.sort(function(a, b) {...})` dies natively "call of a non
-function value: undefined". Fix the frozen/layer-2 builtin, assert it in the metajs
-ratchet. Also: `gofmt -l abnf/` lists jsrtswift.go (a doubled blank line) and the
-generated jsagrammar.go - make the generator gofmt-clean or exclude it knowingly.
-
-### T-328 Go twin: a lone-surrogate char renders as U+FFFD · P1 · CORE · IN PROGRESS (CORE worker, round 6) [V]
-llvm.Run only: `"" + c`, `String.valueOf(c)`, `new String(char[])` of surrogate halves,
-StringBuilder.append of chars print 65533 / `��` where java, the interpreter and
-native give 55357 / 😀. jsChar renders with string(rune(code)) in abnf/jsrt.go
-(toString, toGoNatural); use strFromUnits([]uint16{code}) for a surrogate. Affects
-kotlin too.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -540,6 +528,11 @@ T-319 js: value reads of builtin methods on arrays/strings leak goja's host meth
 T-329 python: a str method's argument-type error is uncatchable — DONE c91f375
 T-330 python: `bytes(...)` and `frozenset` — DONE bef6a12
 T-331 php: `array_key_exists`, `implode` and the array function library — DONE 10d75a8 4138925 (spec-only; languages/lib/php-stdlib.php; php bench +1.20% paired, unexplained layout, inside the gate)
+T-328 Go twin: a lone-surrogate char renders as U+FFFD — DONE beefa74
+T-324 layer 2 `Array.sort` with a comparator fails — DONE 75153cf (gofmt-clean too)
+T-315 lua: print writes invalid UTF-8 bytes as code points — DONE cfad758 (writeBytes host global; an uncaught error's text still leaves through the text channels)
+T-047 js: a generator body's `this` is wrong in the NATIVE build only — DONE a39d475 (every generator/async body, in the emitter only)
+T-081 boxed values know their KIND but not their declared class — DECLINED as a shared mechanism: the box id is cheap (go +1.10% inside spread, +128 B) but the cost is static typing - go needs a constant type checker, kotlin needs literals typed by their expected type, swift can flag its own box. Split into T-346..T-348 and T-240
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -587,7 +580,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
