@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-344** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-346** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,17 +66,11 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-329 python: a str method's argument-type error is uncatchable · P1 · PY · IN PROGRESS (PY+PHP worker, round 7) [V]
-`"ab".startswith(1)` aborts "TypeError: a str argument is required" (pySFail /
-e.fail) in all engines; CPython raises a catchable TypeError "startswith first arg
-must be str or a tuple of str, not int". Sweep every str method's argument errors.
-Also: builtin-subclass instances are unwrapped before comparison (`S("b") < 1` says
-'str', CPython 'S'; `1 < S("b")` reports '>' ... 'str' and 'int').
-
-### T-330 python: `bytes(...)` and `frozenset` · P2 · PY · IN PROGRESS (PY+PHP worker, round 7) [V]
-`bytes(...)` is not callable (compiled "'type' object is not callable", interpreter
-"cannot construct bytes"); `frozenset` undefined. bytes is bound as a class object in
-the compiler (keep `isinstance(x, bytes)` working); frozenset needs a hashable set.
+### T-344 python: str.format conversion errors; ord()/chr() errors uncatchable · P1 · PY · IN PROGRESS (PY+PHP worker, round 8) [V]
+`"{0!z}".format(1)` prints 1 (CPython ValueError "Unknown conversion specifier z");
+`"{0:".format(1)` says "Single '{' encountered" (CPython "unmatched '{' in format
+spec"). `ord(1)` aborts "TypeError: ord() expected string of length 1, but int found"
+(CPython catchable); same for chr() domain errors.
 
 ---
 
@@ -222,10 +216,14 @@ Also: the shared interpreter host's `charAt` at a lone-surrogate index answers U
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-331 php: `array_key_exists`, `implode` and the array function library · P1 · PHP · IN PROGRESS (PY+PHP worker, round 7) [V spec-only]
-"Call to undefined function" in both halves. Sweep php's standard array/string
-function list (array_*, implode/explode, str_*, sprintf...) against the manual and add
-what is missing.
+### T-345 php: hoisting, by-ref closure calls, string indexing, math library · P1 · PHP · IN PROGRESS (PY+PHP worker, round 8) [V spec-only]
+Top-level functions are not hoisted (a call above the declaration: "Call to undefined
+function"). Compiler: a dynamic call of a closure passes a VALUE to a by-reference
+parameter (`$f = function(&$x){$x++;}; $f($a)`; the interpreter is right, so
+array_walk by-ref differs between halves). `$s[$i]` on non-ASCII: interpreter and layer
+2 index UTF-16 units, the Go twin bytes ("héllo"[1] "é" vs "Ã") - a halves divergence;
+PHP indexes bytes. A lone byte >=128 is held as U+0080..U+00FF, so `ord(chr(200))` is
+195. The math library (round, floor, ceil, sqrt, pow, intval, abs, ...) is missing.
 
 ---
 
@@ -539,6 +537,9 @@ T-316 js: compiled own-key lists of builtins; Object.getOwnPropertyNames(Math); 
 T-317 js: generator close semantics with finally / a non-done delegate — DONE f890f15 (the replay interpreters still repeat an outside iterator's effects: T-154)
 T-318 js: `super.toString()` without an own toString — DONE 9068454
 T-319 js: value reads of builtin methods on arrays/strings leak goja's host methods — DONE d2ea6d5
+T-329 python: a str method's argument-type error is uncatchable — DONE c91f375
+T-330 python: `bytes(...)` and `frozenset` — DONE bef6a12
+T-331 php: `array_key_exists`, `implode` and the array function library — DONE 10d75a8 4138925 (spec-only; languages/lib/php-stdlib.php; php bench +1.20% paired, unexplained layout, inside the gate)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
