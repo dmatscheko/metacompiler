@@ -2005,12 +2005,22 @@ function pySlotsAllow(cls, name) {
     var i = 0
     while (i < mro.length) {
         var sl = mro[i]["__slots__"]
-        if (sl === undefined) { all = false } else {
+        // object itself has no __dict__: its instances take no attribute.
+        if (sl === undefined) {
+            if (mro[i]["__mro"] !== undefined || mro[i]["__name"] != "object") { all = false }
+        } else {
             if (pySlotAllows(sl, name)) { return true }
         }
         i = i + 1
     }
     return !all
+}
+
+// The AttributeError for a name an instance without a __dict__ cannot hold.
+// Go: rt.pyAttrError.
+function pyAttrError(cls, name) {
+    throw pyExcInstance("AttributeError", "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name +
+                        "' and no __dict__ for setting new attributes")
 }
 
 function pySetAttr(obj, name, v) {
@@ -2024,10 +2034,7 @@ function pySetAttr(obj, name, v) {
                 return v
             }
         }
-        if (!pySlotsAllow(cls, name)) {
-            throw pyExcInstance("AttributeError",
-                                "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
-        }
+        if (!pySlotsAllow(cls, name)) { pyAttrError(cls, name) }
         pyPutAttr(obj, name, v)
         return v
     }
@@ -4703,7 +4710,11 @@ function pyHashW(v0) {
             // `__hash__ = None` makes the class unhashable, as an __eq__ without
             // a __hash__ does.
             if (c["__eq__"] !== undefined || pyNoneBound(c, "__hash__")) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
-            if (c["__mro"] === undefined && c["__name"] !== undefined) { return pyHashW(pyUnwrapBuiltin(v)) }
+            if (c["__mro"] === undefined && c["__name"] !== undefined) {
+                // object's own hash is the identity one.
+                if (c["__name"] == "object") { return pyHashId(v) }
+                return pyHashW(pyUnwrapBuiltin(v))
+            }
             mi = mi + 1
         }
     }
@@ -7687,7 +7698,9 @@ function js_pydel_attr(obj, name) {
         pyCRemoveAt(fd["vals"], fi)
         return undefined
     }
-    if (pyInstClassOf(obj) === null) { pyNoDictAttr(obj, pyToStr(name)) }
+    var dcls = pyInstClassOf(obj)
+    if (dcls === null) { pyNoDictAttr(obj, pyToStr(name)) }
+    else if (dcls["__mro"] === undefined && dcls["__name"] == "object") { pyAttrError(dcls, pyToStr(name)) }
     if (obj === null || obj === undefined || typeof obj != "object") {
         fail("attribute deletion on a " + pyTypeName(obj))
     }
@@ -7923,6 +7936,7 @@ function js_pycall(callee, pos, kw) {
 function pyConvArgs(cls, cv, pos, kw) {
     if (cls["__convkw"] === true) { return pyBindCall(cv, pos, kw) }
     if (pyIsDict(kw) && kw["keys"].length > 0 && cls["__name"] != "type") {
+        if (cls["__name"] == "object") { pyRaiseExc("TypeError", "object() takes no arguments") }
         pyRaiseExc("TypeError", pyToStr(cls["__name"]) + "() takes no keyword arguments")
     }
     return pos
@@ -9139,6 +9153,13 @@ function pyDIsSubclass(c, target) {
 // about a value that is not an instance of a user class. One stable object per
 // name, so `type(x) is type(y)` holds for two values of the same builtin type.
 function js_pybuiltincls(name) { return pyBuiltinClass(pyToStr(name)) }
+
+// object(ARGS): a featureless instance of the builtin object class - identity
+// equality and hash, no __dict__ (pySlotsAllow). Go: js_pyobjnew in abnf/jsrt.go.
+function js_pyobjnew(args) {
+    if (args.length > 0) { pyRaiseExc("TypeError", "object() takes no arguments") }
+    return {__class: pyBuiltinClass("object")}
+}
 
 // ----- exceptions (Go: js_pyexc / js_pyexcmatch / js_pyexcsplit) ------------
 

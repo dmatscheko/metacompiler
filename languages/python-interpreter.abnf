@@ -1406,6 +1406,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             && pyUser(args[0]) && args[0].__val !== undefined) {
             args = [args[0].__val].concat(args.slice(1))
         }
+        // object(): a featureless instance - identity equality and hash, no
+        // __dict__. Twin of js_pyobjnew in abnf/jsrt.go and lib/python-rt.metajs.
+        if (name == "object") {
+            if (args.length > 0 || (named != null && named.keys.length > 0)) {
+                pyListErr("TypeError", "object() takes no arguments")
+            }
+            return {__class: hostGlobals["object"]}
+        }
         if (named != null && named.keys.length > 0) {
             if (name == "int") { return pyIntNew(pyKwPos("int", args, named, ["x", "base"], 1)) }
             if (name == "str") {
@@ -1840,7 +1848,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __hash__ does.
         if (hasOwn(k, "__hash__") && k.__hash__ != null) { return {m: k.__hash__} }
         if (hasOwn(k, "__eq__") || hasOwn(k, "__hash__")) { return {m: null} }
-        if (k.__builtin === true) { return {builtin: true} }
+        if (k.__builtin === true && k !== hostGlobals["object"]) { return {builtin: true} }
         return undefined
     }
     // The identity hash: the order in which hash() or id() first met the value.
@@ -3246,7 +3254,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var mro = clsMRO(cls)
         var all = true
         for (var i = 0; i < mro.length; i++) {
-            if (!hasOwn(mro[i], "__slots__")) { all = false; continue }
+            // object itself has no __dict__: its instances take no attribute.
+            if (!hasOwn(mro[i], "__slots__")) {
+                if (mro[i] !== hostGlobals["object"]) { all = false }
+                continue
+            }
             var sl = iterToList(mro[i].__slots__)
             for (var j = 0; j < sl.length; j++) { if (sl[j] === name) { return true } }
         }
@@ -10579,13 +10591,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // method. Reading off a CLASS gives the raw attribute (so Base.m(self) works).
     // Writing an attribute: a data descriptor's __set__ takes over, and __slots__
     // (when the class declares them) restricts which names an instance may carry.
-    // A builtin value with no __dict (None, a number, a str, a list, a dict, a set)
-    // refuses a new attribute, and its deletion, with a catchable AttributeError.
-    // Twin of pyNoDictAttr in abnf/jsrt.go and languages/lib/python-rt.metajs.
+    // A builtin value with no __dict (None, a number, a str, a list, a dict, a set,
+    // an object()) refuses a new attribute, and its deletion, with a catchable
+    // AttributeError. Twin of pyNoDictAttr in abnf/jsrt.go and
+    // languages/lib/python-rt.metajs.
     function pyNoDictAttr(o, name) {
-        if (pyUser(o)) { return }
+        if (pyUser(o) && o.__class !== hostGlobals["object"]) { return }
         var tn = pyTypeOf(o).__name
-        if (tn == "NoneType" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
+        if (tn == "NoneType" || tn == "object" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
             tn == "list" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex") {
             pyRaise(pyMakeExc("AttributeError", ["'" + tn + "' object has no attribute '" + name +
                                                  "' and no __dict__ for setting new attributes"]))
@@ -10632,7 +10645,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (st != null) { st(d, o, v); return }
             }
             if (!hasOwn(o, name) && !pySlotsAllow(cls, name)) {
-                pyRaise(pyMakeExc("AttributeError", ["'" + cls.__name + "' object has no attribute '" + name + "'"]))
+                pyRaise(pyMakeExc("AttributeError", ["'" + cls.__name + "' object has no attribute '" + name +
+                                                     "' and no __dict__ for setting new attributes"]))
             }
         }
         if (!hasOwn(o, name)) {

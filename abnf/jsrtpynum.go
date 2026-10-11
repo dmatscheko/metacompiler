@@ -524,7 +524,9 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 			if _, hasEq := c.props["__eq__"]; hasEq || hasH {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
 			}
-			if pyBuiltinClsName(c) != "" {
+			if n := pyBuiltinClsName(c); n == "object" {
+				break // object's own hash is the identity one.
+			} else if n != "" {
 				return rt.pyHashW(pyUnwrapBuiltin(v))
 			}
 		}

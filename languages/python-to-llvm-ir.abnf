@@ -4118,6 +4118,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `type` is a class too: `str(type)` is <class 'type'>. Calling it still runs
     // the same js_pytype forwarder, through __conv.
     pyTypeBuiltin["$type"] = true
+    pyTypeBuiltin["$object"] = true
     // The six builtins CPython prints as CLASSES that are NOT in pyTypeBuiltin
     // above: they answer a cursor rather than convert, so binding them to a class
     // object would change what CALLING them does, and only their RENDERING is at
@@ -4264,6 +4265,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "abs", "js_pyabs", 1)
         // type(v), str(v), int(v) and isinstance(v, C).
         b = declBuiltin(b, "type", "js_pytype", 1)
+        // object(): the whole argument array, which must be empty.
+        b = declBuiltin(b, "object", "js_pyobjnew", 0)
         // The `re` module. `import re` binds no module object in this flat import
         // model, so the module is an ordinary global holding the flag constants:
         // js_pygetattr reads re.I / re.DOTALL straight out of it, and js_pyrxmcall
@@ -4360,12 +4363,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "classmethod", "js_pyclassmethod", 1)
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
-        // only reaches the ones that convert; these are the rest, so `class
-        // C(object)`, `type(None) is NoneType` and `str(bytes)` see a class
-        // object. js_pybuiltincls is name-generic in both compiled engines
-        // (rt.pyBuiltinClass in abnf/jsrt.go, pyBuiltinClass in
-        // lib/python-rt.metajs), so only the binding is needed.
-        var pyPlainTypes = ["object", "NoneType", "function"]
+        // only reaches the ones that are callable; these are the rest, so
+        // `type(None) is NoneType` sees a class object. js_pybuiltincls is
+        // name-generic in both compiled engines (rt.pyBuiltinClass in
+        // abnf/jsrt.go, pyBuiltinClass in lib/python-rt.metajs), so only the
+        // binding is needed.
+        var pyPlainTypes = ["NoneType", "function"]
         for (var pt0 = 0; pt0 < pyPlainTypes.length; pt0++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pyPlainTypes[pt0]),
                                          callExt(b, "js_pybuiltincls", [emitStr(b, pyPlainTypes[pt0])])])

@@ -4471,6 +4471,51 @@ def s88():
     zs = [0j, 1j]
     check("dun6", ys == [1, 2, 1, 2] and xs is ys and not zs[0] and bool(zs[1]) and list.__iadd__(ys, (3,)) is xs)
 
+# ===== SECTION 89: object() =====
+# object() is a featureless instance: equal and hashed by identity, an instance
+# of object alone, and without a __dict__, so it takes no attribute - the same
+# refusal, word for word, as a write a class's __slots__ does not allow.
+# Rows from CPython 3.14.
+def s89():
+    o = object()
+    p = object()
+    check("obj1", type(o) is object and o.__class__ is object and type(o).__name__ == "object")
+    check("obj2", o == o and o != p and not (o == p) and o is not p and bool(o))
+    check("obj3", isinstance(o, object) and not isinstance(o, int) and not callable(o) and callable(object))
+    d = {o: 1, p: 2}
+    check("obj4", hash(o) == hash(o) and d[o] == 1 and d[p] == 2 and len({object() for _ in range(3)}) == 3)
+    check("obj5", repr(o).startswith("<object object") and str(o) == repr(o) and [o, p].index(p) == 1)
+    msgs = []
+    try:
+        o.x = 1
+    except AttributeError as e:
+        msgs.append(str(e))
+    try:
+        del o.x
+    except AttributeError as e:
+        msgs.append(str(e))
+    for a in [(1,), ()]:
+        try:
+            object(*a) if a else object(x=1)
+        except TypeError as e:
+            msgs.append(str(e))
+    check("obj6", msgs == ["'object' object has no attribute 'x' and no __dict__ for setting new attributes"] * 2
+          + ["object() takes no arguments"] * 2)
+    check("obj7", not hasattr(o, "x") and getattr(o, "x", 5) == 5)
+
+    class Sl:
+        __slots__ = ("a",)
+    try:
+        Sl().b = 1
+    except AttributeError as e:
+        msgs.append(str(e))
+    check("obj8", msgs[-1] == "'Sl' object has no attribute 'b' and no __dict__ for setting new attributes")
+    sentinel = object()
+
+    def f(a=sentinel):
+        return a is sentinel
+    check("obj9", f() and not f(0))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4560,5 +4605,6 @@ def main():
     s86() # SECTION-CALL 86
     s87() # SECTION-CALL 87
     s88() # SECTION-CALL 88
+    s89() # SECTION-CALL 89
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

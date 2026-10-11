@@ -16520,8 +16520,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
 				return 0
 			}
-			if _, _, isInst := pyInstance(u(a[0])); !isInst {
+			if _, cls, isInst := pyInstance(u(a[0])); !isInst {
 				rt.pyNoDictAttr(u(a[0]), rt.toString(u(a[1])))
+			} else if pyIsObjectCls(cls) {
+				panic(&jsThrown{value: rt.pyAttrError(cls, rt.toString(u(a[1])))})
 			}
 			o, ok := u(a[0]).(*jsObject)
 			if !ok {
@@ -16634,6 +16636,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// isinstance about a value that is not an instance of a user class.
 		"js_pybuiltincls": func(a []uint64) uint64 {
 			return w(rt.pyBuiltinClass(rt.toString(u(a[0]))))
+		},
+		// object(ARGS): a featureless instance of the builtin object class -
+		// identity equality and hash, no __dict__ (pySlotsAllow). Twin of
+		// js_pyobjnew in lib/python-rt.metajs and pyConvert's "object" arm in
+		// languages/python-interpreter.abnf.
+		"js_pyobjnew": func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok && len(arr.elems) > 0 {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "object() takes no arguments")})
+			}
+			inst := newJSObject()
+			inst.set("__class", rt.pyBuiltinClass("object"))
+			return w(inst)
 		},
 		// A sequence pattern matches lists and tuples, never a
 		// string or a dict: (value, count before the *rest, count after it,
@@ -20115,7 +20129,10 @@ func (rt *jsrt) pySlotsAllow(cls *jsObject, name string) bool {
 	for _, k := range pyMRO(cls) {
 		slots, has := k.props["__slots__"]
 		if !has {
-			all = false
+			// object itself has no __dict__: its instances take no attribute.
+			if !pyIsObjectCls(k) {
+				all = false
+			}
 			continue
 		}
 		if pySlotAllows(rt, slots, name) {
@@ -20123,6 +20140,13 @@ func (rt *jsrt) pySlotsAllow(cls *jsObject, name string) bool {
 		}
 	}
 	return !all
+}
+
+// pyIsObjectCls reports whether k is the builtin class object: it carries no MRO,
+// unlike every class a `class` statement makes.
+func pyIsObjectCls(k *jsObject) bool {
+	_, hasMRO := k.props["__mro"]
+	return !hasMRO && k.props["__name"] == "object"
 }
 
 // pySlotAllows answers whether ONE __slots__ declaration (a list, a
@@ -20146,7 +20170,7 @@ func pySlotAllows(rt *jsrt, slots interface{}, name string) bool {
 // raises, in the shape the except clauses match ({__class:{__name}, args}).
 func (rt *jsrt) pyAttrError(cls *jsObject, name string) interface{} {
 	return rt.pyExcInstance("AttributeError",
-		"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"'")
+		"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"' and no __dict__ for setting new attributes")
 }
 
 // pyGenValue is one {value, done} record from a generator step, in PYTHON's
@@ -21176,7 +21200,9 @@ func (rt *jsrt) pyConvArgs(cls *jsObject, conv interface{}, args []interface{}, 
 		return rt.pyBindCall(conv, args, kw)
 	}
 	if keys, _, ok := dictParts(kw); ok && len(keys.elems) > 0 {
-		if name := rt.toString(cls.props["__name"]); name != "type" {
+		if name := rt.toString(cls.props["__name"]); name == "object" {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError", "object() takes no arguments")})
+		} else if name != "type" {
 			panic(&jsThrown{value: rt.pyExcInstance("TypeError", name+"() takes no keyword arguments")})
 		}
 	}
