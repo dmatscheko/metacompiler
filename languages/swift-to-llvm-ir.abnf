@@ -1197,10 +1197,15 @@ NotAmpOp    = :script(~~
 // groups and associativity. Everything at this level binds tighter than * and /,
 // which is where a custom operator declared higherThan: MultiplicationPrecedence
 // belongs; operators of other groups keep their order among THEMSELVES.
+// An operand that is a bare name is noted ({oname}): an inout parameter of the
+// operator function takes it by reference (swOpRecs).
 CustomBin   <~~ push(foldCustomOps(takeAll())) ~~>
-            = UnaryExpr { CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr } ;
+            = UnaryExpr <~~ swOpndName(up.in) ~~>
+              { CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr <~~ swOpndName(up.in) ~~> } ;
 
-UnaryExpr   = Neg | Not | CustomPrefix | BitNot | TryExpr | Await | EachExpr | OwnExpr | CallMember ;
+// CustomPrefix first: Swift lexes an operator by maximal munch, so `---i` is the
+// user operator `---`, never three negations.
+UnaryExpr   = CustomPrefix | Neg | Not | BitNot | TryExpr | Await | EachExpr | OwnExpr | CallMember ;
 // `copy x` / `consume x` (SE-0377 / SE-0366): an explicit copy or end of lifetime,
 // which yields the value itself. Both are CONTEXTUAL keywords - `copy(x)` and
 // `consume.x` stay a call and a member read - so a name has to follow on the same
@@ -1236,7 +1241,7 @@ Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
 // A user-defined prefix operator, tried before ~ so that ~~~x is one operator and
 // not a ~ applied to ~~x.
 CustomPrefix <~~ push(makeCustomPrefix(takeAll())) ~~>
-            = CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr ;
+            = CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr <~~ swOpndName(up.in) ~~> ;
 BitNot      <~~ push(makeBitNot(pop())) ~~> = "~" NotChar61b UnaryExpr ;
 NotChar61b  = :script(~~
     (function() { return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined })()
@@ -1274,7 +1279,33 @@ Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
             = KwAwait UnaryExpr ;
 
 CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
-            = Primary { OptSfx | ForceSfx | MethodSfx | ProjSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
+            = Primary { OptSfx | ForceSfx | MethodSfx | ProjSfx | FieldSfx | TupleSfx | KpIndexSfx | IndexSfx | CallSfx
+                      | PostOpSfx } ;
+// `i++` with a user `postfix operator ++`: an operator run bound on the left and
+// free on the right, which is Swift's lexical rule for a postfix operator (a
+// closing bracket, `,` `;` `:` or a `.` count as free).
+PostOpSfx   <~~ push({kind: "postop", op: up.in}) ~~> = NoSpace PostOp ;
+PostOp      = :script(~~
+    (function() {
+        var i = 0
+        var ch = c.peek(i)
+        var s = ""
+        while (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
+               || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
+               || ch === 94 || ch === 126 || ch === 63) {
+            s = s + String.fromCharCode(ch)
+            i++
+            ch = c.peek(i)
+        }
+        if (s.length === 0 || s.indexOf("//") >= 0 || s.indexOf("/*") >= 0) { return abnf.newToken("\x01no-operator", 0) }
+        var free = ch < 0 || ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 41 || ch === 93
+                   || ch === 125 || ch === 44 || ch === 59 || ch === 58 || ch === 46
+        if (!free) { return abnf.newToken("\x01not-postfix", 0) }
+        var builtin = "|=|==|!=|===|!==|<|>|<=|>=|+|-|*|/|%|&&|null||||??|?|!|&|^|~|<<|>>|&+|&-|&*|~=|->|&=|+=|-=|*=|/=|%=|"
+        if (builtin.indexOf("|" + s + "|") >= 0) { return abnf.newToken("\x01builtin-operator", 0) }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
 // p.$score: the PROJECTED value of a property wrapper. The $ is adjacent to the
 // name, so whitespace is off between them; the member is read under the name "$x",
 // which is where the wrapper's generated accessor lives.
@@ -1414,7 +1445,18 @@ InoutArg    = "&" !"&" Id <~~ push({aref: swBt(up.in)}) ~~> ;
 Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | ArrayTypeLit | DictLit | ArrayLit
-            | Shorthand | OptNone | GenCall | GenRef | TrailCall | Call | VarRef ;
+            | Shorthand | ProjRef | OptNone | KeyPath | GenCall | GenRef | TrailCall | Call | VarRef ;
+// `\T.a.b` / `\.a.b`: a key path, read-only. Its value is the function from a
+// root to that member chain, which is what `.map(\.a)` and `x[keyPath: kp]` apply.
+// `$x` inside a member body: the projected value of the wrapped property x of
+// self, read under "$x" as `self.$x` (ProjSfx) is.
+ProjRef     = "$" :whitespace() Id <~~ push(makeVarRef("$" + swBt(up.in))) ~~> :whitespace(Whitespace) ;
+KeyPath     <~~ push(swKeyPath(takeAll(), up.in, up.pos)) ~~>
+            = "\\" :whitespace() [ Id ] KpField { KpField } :whitespace(Whitespace) ;
+KpField     = "." Id <~~ push({kpf: swBt(up.in)}) ~~> ;
+// x[keyPath: kp]
+KpIndexSfx  <~~ push({kind: "kpath", kp: pop()}) ~~> = "[" "keyPath" ":" Expression "]" ;
+
 
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
@@ -2031,11 +2073,12 @@ KwContinue  = "continue" KwEnd ;
     // items = [thunk, {op}, thunk, {op}, thunk, ...] -> a tree built by precedence
     // climbing. Built on the FIRST evaluation, because the operator declarations are
     // read by the same walk that builds this thunk.
-    function foldCustomOps(items) {
-        if (items.length == 1) { return items[0] }
+    function foldCustomOps(items0) {
+        var items = swOpItems(items0)
+        if (items.length == 1) { return items[0].t }
         var built = null
         return function(b) {
-            if (built == null) { built = climbOps(items, {i: 0}, 0) }
+            if (built == null) { built = climbOps(items, {i: 0}, 0).t }
             return built(b)
         }
     }
@@ -2054,34 +2097,77 @@ KwContinue  = "continue" KwEnd ;
     }
     // The emitted call of a user operator: an ordinary function of that name when the
     // program declares one, otherwise the `static func <op>` of an operand's type.
-    function makeOpCall(op, lt, rt) {
-        return function(b) {
-            var rl = lt(b)
-            b = rl.b
-            var rr = rt(b)
-            b = rr.b
-            return emitOperatorCall(b, op, [rl.v, rr.v])
-        }
-    }
+    function makeOpCall(op, l, r) { return {t: swOpCall(op, [l, r]), n: ""} }
     function makeCustomPrefix(items) {
-        var op = items[0].op
-        var t = items[1]
+        var opnd = swOpItems(items.slice(1))[0]
+        return swOpCall(items[0].op, [opnd])
+    }
+    // A user operator applied to operands [{t, n}]: an operand whose parameter is
+    // inout is passed as a `&n` box and written back. Twin of swOpCall in
+    // swift-interpreter.abnf.
+    function swOpCall(op, opnds) {
         return function(b) {
-            var r = t(b)
-            return emitOperatorCall(r.b, op, [r.v])
+            var ea = emitArgRecs(b, swOpRecs(op, opnds))
+            b = ea.b
+            var r = emitOperatorCall(b, op, ea.v)
+            emitWriteBacks(r.b, ea.boxes)
+            return r
         }
     }
-    function emitOperatorCall(b, op, argv) {
-        var args = callExt(b, "js_arr_new", [])
-        for (var i = 0; i < argv.length; i++) { callExt(b, "js_arr_push", [args, argv[i]]) }
+    // args: the argument array; a type's operator dispatches on its first element.
+    function emitOperatorCall(b, op, args) {
         if (globalOps[op] == 1) {
             var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, op)])
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, args])}
         }
         // Declared inside a type: dispatch on the first operand.
-        var f = b.NewCall(rtFindM(), [argv[0], emitStr(b, op)])
+        var f = b.NewCall(rtFindM(), [callExt(b, "js_get", [args, emitStr(b, "0")]), emitStr(b, op)])
         return {b: b, v: callExt(b, "js_call", [f, hUndef, args])}
     }
+    // The operand records of a user operator call: [{t, n}] -> call-argument records.
+    function swOpRecs(op, opnds) {
+        var params = lookupSig(op)
+        var recs = []
+        for (var k = 0; k < opnds.length; k++) {
+            var io = opnds[k].n != "" && params != null && k < params.length && params[k].inout
+            recs.push(io ? {lbl: null, t: null, ref: opnds[k].n, dflt: null}
+                         : {lbl: null, t: opnds[k].t, ref: null, dflt: null})
+        }
+        return recs
+    }
+    // CustomBin's items [thunk, {oname}?, {op}, thunk, {oname}?, ...] as
+    // [{t, n}, {op}, {t, n}, ...].
+    function swOpItems(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { out.push({t: it, n: ""}) }
+            else if (it.oname != undefined) { out[out.length - 1].n = it.oname }
+            else { out.push(it) }
+        }
+        return out
+    }
+    // Notes an operand that is a bare name (not a keyword literal).
+    function swOpndName(txt) {
+        if (txt.length == 0 || txt == "true" || txt == "false" || txt == "nil" || txt == "self") { return }
+        for (var i = 0; i < txt.length; i++) {
+            var k = txt.charCodeAt(i)
+            var ok = (k >= 97 && k <= 122) || (k >= 65 && k <= 90) || k == 95 || (i > 0 && k >= 48 && k <= 57)
+            if (!ok) { return }
+        }
+        push({oname: txt})
+    }
+    // The name a postfix operator applies to: the chain `name<op>` and nothing more.
+    function swPostName(txt, op) {
+        if (txt.length <= op.length) { return "" }
+        var n = txt.substring(0, txt.length - op.length)
+        for (var i = 0; i < n.length; i++) {
+            var k = n.charCodeAt(i)
+            if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || k == 95 || (i > 0 && k >= 48 && k <= 57))) { return "" }
+        }
+        return n
+    }
+
     // Operator names the program declares as free functions.
     var globalOps = {}
     function isOperatorName(n) {
@@ -5387,6 +5473,20 @@ KwContinue  = "continue" KwEnd ;
                     cur = callExt(b, "js_call", [cur, hUndef, eac.v])
                     emitWriteBacks(b, eac.boxes)
                     pathKey = null
+                } else if (s.kind == "postop") {
+                    var pv = cur
+                    var pn = i == 0 ? swPostName(txt, s.op) : ""
+                    var rpo = swOpCall(s.op, [{t: function(b2) { return {b: b2, v: pv} }, n: pn}])(b)
+                    b = rpo.b
+                    cur = rpo.v
+                    pathKey = null
+                } else if (s.kind == "kpath") {
+                    var rkp = s.kp(b)
+                    b = rkp.b
+                    var kargs = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [kargs, cur])
+                    cur = callExt(b, "js_call", [rkp.v, hUndef, kargs])
+                    pathKey = null
                 } else if (s.kind == "field") {
                     // `A.B.C(...)`: the intermediate `.B` is a plain member read of a
                     // nested descriptor, so the qualified path advances through it.
@@ -5458,6 +5558,15 @@ KwContinue  = "continue" KwEnd ;
             for (var j = 0; j < params.length; j++) { if (params[j] == swWrites[k].n) { out[j] = true } }
         }
         return out
+    }
+    // The key path closure `{ $kp.a.b }`, built as the parser would build it.
+    // Twin of swKeyPath in swift-interpreter.abnf.
+    function swKeyPath(items, txt, end) {
+        var sig = makeClosureSig(["$kp"])
+        var chain = [makeVarRef("$kp")]
+        // `.self` is the identity component.
+        for (var i = 0; i < items.length; i++) { if (items[i].kpf != "self") { chain.push(makeFieldSfx(items[i].kpf)) } }
+        return makeClosure([sig, {expr: foldCallMember(chain, "$kp" + txt.substring(txt.indexOf(".")))}], txt, end)
     }
     function makeClosureSig(items) {
         var caps = []

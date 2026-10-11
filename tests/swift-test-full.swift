@@ -3171,6 +3171,45 @@ func s63() {
     check("ctx4", "\(x)\(y)" == "5.0s")
 }
 
+// ===== SECTION 64: key paths, postfix and inout operators, a projected `$x` =====
+// A key path literal reads its member chain, as a function (`.map(\.n)`) or
+// through `[keyPath:]`. A user operator's inout parameter takes its operand by
+// reference, prefix, infix or postfix alike. `$x` in a member body is self.$x.
+struct KpIn { var z = 9 }
+struct KpP { var name = "a"; var n = 3; var inner = KpIn() }
+postfix operator +++
+postfix func +++ (x: inout Int) -> Int { let o = x; x += 1; return o }
+prefix operator ---
+prefix func --- (x: inout Int) -> Int { x -= 1; return x }
+postfix operator %%%
+postfix func %%% (x: Double) -> Double { return x / 100 }
+infix operator <~~ : AssignmentPrecedence
+func <~~ (l: inout Int, r: Int) { l = r * 2 }
+@propertyWrapper struct Twice64 {
+    var v: Int
+    var wrappedValue: Int { get { v } set { v = newValue } }
+    var projectedValue: Int { v * 2 }
+    init(wrappedValue: Int) { v = wrappedValue }
+}
+struct Proj64 { @Twice64 var w: Int = 4; func both() -> Int { return w + $w } }
+func s64() {
+    let kp = \KpP.n
+    let p = KpP()
+    let ps = [KpP(), KpP(name: "b", n: 5)]
+    check("kp1", p[keyPath: kp] == 3 && p[keyPath: \.inner.z] == 9 && p[keyPath: \KpP.inner.z] == 9)
+    check("kp2", ps.map(\.n) == [3, 5] && ps.map(\KpP.name) == ["a", "b"] && ps.map(\.name.count) == [1, 1])
+    check("kp3", [4, 2].map(\.self) == [4, 2] && [[1], [2, 3]].map(\.count) == [1, 2])
+    var i = 5
+    let j = i+++
+    let k = ---i
+    check("pop1", i == 5 && j == 5 && k == 5)
+    var m = 1
+    m <~~ 4
+    let pct = 25.0%%%
+    check("pop2", m == 8 && "\(pct)" == "0.25" && 50.0%%% + 1 == 1.5)
+    check("prj1", Proj64().both() == 12)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3235,6 +3274,7 @@ func main() {
     s61() // SECTION-CALL 61
     s62() // SECTION-CALL 62
     s63() // SECTION-CALL 63
+    s64() // SECTION-CALL 64
     print("full: \(checks) checks, \(fails) failures")
 }
 
