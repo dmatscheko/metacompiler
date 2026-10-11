@@ -2186,6 +2186,29 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (res == null || res == undefined) { return null }
                 return res.sig
             }
+            // An IteratorAggregate hands over its iterator, and an Iterator is
+            // driven through its methods: rewind, then valid / current / key / body
+            // / next. Twin of js_phfeobj and js_phfestep in abnf/jsrtphp.go and
+            // lib/php-rt.metajs.
+            while (isObj(it) && classIs(it.__class, "IteratorAggregate")) { it = mcall(it, "getIterator", argsOf([])) }
+            if (isObj(it) && classIs(it.__class, "Iterator")) {
+                mcall(it, "rewind", argsOf([]))
+                while (phptest(mcall(it, "valid", argsOf([])))) {
+                    var iv = anytype
+                    iv = mcall(it, "current", argsOf([]))
+                    if (keyRef != null) { writeTargetVal(keyRef, mcall(it, "key", argsOf([]))) }
+                    if (pat != null) { bindPattern(pat, iv) } else { writeTargetVal(valRef, phpCopy(iv)) }
+                    var isg = runLoopBody(body)
+                    if (isg.sig != undefined) { return isg.sig }
+                    if (isg.stop) { return null }
+                    mcall(it, "next", argsOf([]))
+                }
+                return null
+            }
+            // An object is iterated over the properties visible here; `as &$v`
+            // binds the property's own storage.
+            var cells = it
+            if (isObj(it)) { cells = it.p; it = phpObjArr(it, true, ctxSelf()) }
             var n = phpRangeLen(it)
             for (var i = 0; i < n; i++) {
                 var k = anytype
@@ -2194,7 +2217,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 v = phpRangeVal(it, i)
                 if (keyRef != null) { writeTargetVal(keyRef, k) }
                 if (pat != null) { bindPattern(pat, v) }
-                else { feBind(valRef, v, byref, it, k) }
+                else { feBind(valRef, v, byref, cells, k) }
                 var sg = runLoopBody(body)
                 if (sg.sig != undefined) { return sg.sig }
                 if (sg.stop) { return null }
@@ -3932,11 +3955,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeProps(items) {
         var out = []
         var isStatic = false
+        var vis = ""
         var cur = null
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") {
-                cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: []}
+                cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: [], vis: vis}
                 out.push(cur)
             }
             else if (typeof it == "function") { if (cur != null) { cur.init = it } }
@@ -3945,30 +3969,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             else if (it != null && it != undefined && it.mod != undefined) {
                 if (it.mod == "static") { isStatic = true }
+                if (it.mod == "protected" || it.mod == "private") { vis = it.mod }
             }
         }
         return out
-    }
-    // A property declaration inside a class body: the name without its '$' sigil and
-    // the (optional) default-value thunk, re-run for every instance. The items are
-    // the captured modifiers ({mod}), the '$name' string and, optionally, the
-    // initializer thunk - so they are scanned rather than indexed: 'static' moves the
-    // property onto the CLASS instead of the instance.
-    function makeProp(items) {
-        var nm = ""
-        var init = null
-        var isStatic = false
-        var hooks = []
-        for (var i = 0; i < items.length; i++) {
-            var it = items[i]
-            if (typeof it == "string") { nm = it }
-            else if (typeof it == "function") { init = it }
-            else if (it != null && it != undefined && it.hooks != undefined) { hooks = it.hooks }
-            else if (it != null && it != undefined && it.mod != undefined) {
-                if (it.mod == "static") { isStatic = true }
-            }
-        }
-        return {name: nm.substring(1), init: init, isStatic: isStatic, hooks: hooks}
     }
     // The two hook methods of one declared property, as ordinary method records so
     // makeMethodClosure builds them exactly like any other method.
@@ -4192,6 +4196,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var variadic = false
         var def = null
         var promote = false
+        var vis = ""
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") { nm = it }
@@ -4201,9 +4206,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else if (it.pdefault != undefined) { def = it.pdefault }
             // Any visibility modifier on a parameter is constructor property
             // PROMOTION (8.0): the parameter also becomes a property of the object.
-            else if (it.mod != undefined) { promote = true }
+            else if (it.mod != undefined) {
+                promote = true
+                if (it.mod == "protected" || it.mod == "private") { vis = it.mod }
+            }
         }
-        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote}
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -4378,8 +4386,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         initProps(obj, cls.__super)
         var ps = cls.__props
         if (ps == undefined || ps == null) { return }
+        // A default is a constant expression in which self:: names the declaring
+        // class, so it is evaluated once, at the class's first instance.
+        if (cls.__pdefs == undefined) {
+            var ds = []
+            for (var j = 0; j < ps.length; j++) { ds.push(ps[j].init == null ? null : {v: constEval(cls, ps[j])}) }
+            cls.__pdefs = ds
+        }
         for (var i = 0; i < ps.length; i++) {
-            dictSet(obj.p, ps[i].name, ps[i].init == null ? null : phpCopy(ps[i].init()))
+            var d = cls.__pdefs[i]
+            dictSet(obj.p, ps[i].name, d == null ? null : phpCopy(d.v))
         }
     }
     // Collects the constant records out of one ClassConst's items (which also hold the
@@ -4495,9 +4511,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function buildClass(name, p) {
         var tm = traitMembers(p.uses)
+        // PHP's slot order: the class's own properties, those its constructor
+        // promotes (their slots exist before it fills them), then a trait's.
         var props = []
-        for (var tp2 = 0; tp2 < tm.props.length; tp2++) { props.push(tm.props[tp2]) }
         for (var op = 0; op < p.props.length; op++) { props.push(p.props[op]) }
+        for (var pm = 0; pm < p.methods.length; pm++) {
+            if (p.methods[pm].name != "__construct") { continue }
+            var cps = p.methods[pm].params
+            for (var pq = 0; pq < cps.length; pq++) {
+                if (cps[pq].promote === true) {
+                    props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: [], vis: cps[pq].vis})
+                }
+            }
+        }
+        for (var tp2 = 0; tp2 < tm.props.length; tp2++) { props.push(tm.props[tp2]) }
         var consts = []
         for (var tc = 0; tc < tm.consts.length; tc++) { consts.push(tm.consts[tc]) }
         for (var oc = 0; oc < p.consts.length; oc++) { consts.push(p.consts[oc]) }
@@ -4510,17 +4537,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         for (var ts = 0; ts < tm.statics.length; ts++) {
             var tv = anytype
-            tv = tm.statics[ts].init == null ? null : phpCopy(tm.statics[ts].init())
+            tv = phpCopy(constEval(cls, tm.statics[ts]))
             dictSet(cls.__statics, tm.statics[ts].name, {__refcell: true, v: tv})
         }
+        cls.__mlc = phpMethodList(tm.methods) + phpMethodList(p.methods).substring(1)
+        cls.__pvis = phpVisList(name, props)
         for (var tmi = 0; tmi < tm.methods.length; tmi++) {
             cls[tm.methods[tmi].name] = makeMethodClosure(tm.methods[tmi], cls)
         }
         // A static property is created once, here, and lives in a cell so that a
-        // subclass which does not redeclare it shares this very storage.
+        // subclass which does not redeclare it shares this very storage. Its
+        // initializer is a constant expression where self:: names this class.
         for (var s2 = 0; s2 < p.statics.length; s2++) {
             var iv = anytype
-            iv = p.statics[s2].init == null ? null : phpCopy(p.statics[s2].init())
+            iv = phpCopy(constEval(cls, p.statics[s2]))
             dictSet(cls.__statics, p.statics[s2].name, {__refcell: true, v: iv})
         }
         for (var m2 = 0; m2 < p.methods.length; m2++) {
@@ -4796,6 +4826,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // so error_reporting() accepts and reports a level without acting on it.
         "error_reporting": function(v) { return 32767 },
         "get_class": function(v) { return isObj(v) ? v.__class.__name : false },
+        "method_exists": function(v, m) { return phpMethodExists(v, m) },
         "gettype": function(v) { return phpTypeName(v) },
         "get_debug_type": function(v) { return phpDebugType(v) },
         "var_dump": function() {
@@ -4810,6 +4841,83 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (at < 0) { return false }
         return at
+    }
+    // method_exists(): a method the class or a base declares, by PHP's
+    // case-insensitive name and whatever its visibility; a class name that names
+    // no class answers false. A property hook is not a method. Twin of
+    // js_phmexists in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpMethodExists(v, m) {
+        var cls = anytype
+        cls = null
+        if (isObj(v)) { cls = v.__class }
+        else if (typeof v == "string" && varExists(v)) { cls = getVar(v) }
+        if (cls == null || cls == undefined || cls.__isclass !== true) { return false }
+        var key = "," + phsCase(phpStr(m), false) + ","
+        var k = cls
+        while (k != undefined && k != null) {
+            if (typeof k.__mlc == "string" && k.__mlc.indexOf(key) >= 0) { return true }
+            k = k.__super
+        }
+        return false
+    }
+    // A class's __pvis: its non-public instance properties as ",name=*," for
+    // protected and ",name=Class," for private, the class that declares it. PHP
+    // prints, casts and iterates by it.
+    function phpVisList(cname, props) {
+        var out = ","
+        for (var i = 0; i < props.length; i++) { out += phpVisItem(cname, props[i].name, props[i].vis) }
+        return out
+    }
+    function phpVisItem(cname, pname, vis) {
+        if (vis == "protected") { return pname + "=*," }
+        if (vis == "private") { return pname + "=" + cname + "," }
+        return ""
+    }
+    // An object's properties as an array: every one with a non-public name
+    // MANGLED the way (array) does ("\0*\0p", "\0Class\0q"), or, for foreach,
+    // only those visible from the class scope (null outside every class).
+    function phpObjArr(o, iter, scope) {
+        var out = newArr()
+        var ks = o.p.keys
+        for (var i = 0; i < ks.length; i++) {
+            var pn = phpStr(ks[i])
+            var vis = phpVisOf(o.__class, pn)
+            var pv = anytype
+            pv = phpCopy(deref(o.p.vals[i]))
+            if (iter) {
+                if (vis == "" || phpVisible(o, vis, scope)) { arrSet(out, ks[i], pv) }
+            } else if (vis == "") { arrSet(out, ks[i], pv) }
+            else { arrSet(out, "\x00" + vis + "\x00" + pn, pv) }
+        }
+        return out
+    }
+    // Can code in class scope read a property of o whose visibility is vis?
+    function phpVisible(o, vis, scope) {
+        if (scope == null || scope == undefined) { return false }
+        if (vis == "*") { return classIs(o.__class, scope.__name) || classIs(scope, o.__class.__name) }
+        return scope.__name == vis
+    }
+    // A property's visibility on an instance of cls: "" public, "*" protected, or
+    // the declaring class of a private one. Twin of phVisOf in lib/php-rt.metajs
+    // and phpVisOf in abnf/jsrtphp.go.
+    function phpVisOf(cls, pname) {
+        var key = "," + pname + "="
+        var k = cls
+        while (k != undefined && k != null) {
+            var l = k.__pvis
+            if (typeof l == "string") {
+                var at = l.indexOf(key)
+                if (at >= 0) { return l.substring(at + key.length, l.indexOf(",", at + key.length)) }
+            }
+            k = k.__super
+        }
+        return ""
+    }
+    // A class's __mlc: its declared method names, lower-cased, each between commas.
+    function phpMethodList(ms) {
+        var out = ","
+        for (var i = 0; i < ms.length; i++) { out += phsCase(ms[i].name, false) + "," }
+        return out
     }
     // gettype()'s historical spellings; get_debug_type() is the modern one.
     function phpTypeName(v) {
@@ -4865,7 +4973,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // A property name is a string even where the property table folded a
             // decimal one to an int key: ["0"]=>.
             for (var j = 0; j < v.p.keys.length; j++) {
-                o2 += dumpKey(phpStr(v.p.keys[j]), ind + 2)
+                var pn = phpStr(v.p.keys[j])
+                var pv = phpVisOf(v.__class, pn)
+                if (pv == "") { o2 += dumpKey(pn, ind + 2) }
+                else { o2 += dumpInd(ind + 2) + "[\"" + pn + "\":" + (pv == "*" ? "protected" : "\"" + pv + "\":private") + "]=>\n" }
                 o2 += dumpOf(deref(v.p.vals[j]), ind + 2)
             }
             return o2 + pad + "}\n"
@@ -4977,7 +5088,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof l == "boolean" || typeof r == "boolean" || l === null || r === null) {
             return cmpNum(phptest(l) ? 1 : 0, phptest(r) ? 1 : 0)
         }
-        if (isArr(l) && isArr(r)) {
+        var la = isArr(l)
+        var ra = isArr(r)
+        if (la && ra) {
             if (l.keys.length != r.keys.length) { return cmpNum(l.keys.length, r.keys.length) }
             for (var i = 0; i < l.keys.length; i++) {
                 var j = dictFind(r, l.keys[i])
@@ -4988,22 +5101,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return 0
         }
         // An array is greater than any non-array that is not a bool or null.
-        if (isArr(l)) { return 1 }
-        if (isArr(r)) { return -1 }
-        if (typeof l == "string" && typeof r == "string") {
-            var nl = numStrVal(l)
-            var nr = numStrVal(r)
-            if (nl != null && nr != null) { return numCmp(nl, nr) }
-            return cmpStr(l, r)
-        }
+        if (la) { return 1 }
+        if (ra) { return -1 }
         // A NAN against a string is uncomparable: 1 in either order.
-        if ((typeof l == "string" && isNum(r) && numOf(r) !== numOf(r)) || (typeof r == "string" && isNum(l) && numOf(l) !== numOf(l))) { return 1 }
-        if (typeof l == "string" && isNum(r)) {
-            var x = numStrVal(l)
-            if (x == null) { return cmpStr(l, phpStr(r)) }
-            return numCmp(x, r)
+        if (typeof l == "string") {
+            if (typeof r == "string") {
+                var nl = numStrVal(l)
+                var nr = numStrVal(r)
+                if (nl != null && nr != null) { return numCmp(nl, nr) }
+                return cmpStr(l, r)
+            }
+            if (isNum(r)) {
+                if (numOf(r) !== numOf(r)) { return 1 }
+                var x = numStrVal(l)
+                if (x == null) { return cmpStr(l, phpStr(r)) }
+                return numCmp(x, r)
+            }
         }
         if (typeof r == "string" && isNum(l)) {
+            if (numOf(l) !== numOf(l)) { return 1 }
             var y = numStrVal(r)
             if (y == null) { return cmpStr(phpStr(l), r) }
             return numCmp(l, y)
@@ -5169,7 +5285,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (kind == "array") {
             if (isArr(v)) { return v }
             if (v === null || v === undefined) { return newArr() }
-            if (isObj(v)) { return arrCopy(v.p) }
+            if (isObj(v)) { return phpObjArr(v, false, null) }
             var a = newArr()
             arrPush(a, v)
             return a
@@ -5208,6 +5324,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         cls["getMessage"] = function(self, argset) { return phpGetProp(self, "message") }
         cls["getCode"] = function(self, argset) { return phpGetProp(self, "code") }
+        if (sup == null) { cls.__mlc = ",__construct,getmessage,getcode," }
         scopePut(globalScope, name, cls)
     }
     declBuiltinClass("Exception", null)

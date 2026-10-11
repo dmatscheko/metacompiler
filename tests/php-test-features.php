@@ -632,6 +632,79 @@ try { json_decode("{", false, 512, JSON_THROW_ON_ERROR); } catch (JsonException 
 $jcodes[] = json_last_error_msg();
 check("json-decode-errors", $jcodes, [4, 4, 4, 4, 4, 10, 3, 3, 1, "Syntax error", "Maximum stack depth exceeded"]);
 
+// ----- visibility, foreach over an object, method_exists -----
+// A non-public property is mangled by (array) ("\0*\0p", "\0Class\0q"), left out
+// of json_encode, printed with :protected / :"Class":private by var_dump and
+// iterated by foreach only where the class scope can read it; slots are the
+// class's own properties, then its promoted ones, then a trait's. method_exists
+// is case-insensitive and ignores visibility. A property initializer is a
+// constant expression in which self:: names the class (tests/bug66015.phpt).
+trait VisT { private $tp = "t"; }
+class VisA {
+    const K = 2;
+    public $x = 1;
+    protected $p = 3;
+    private $q = 4;
+    public static $st = [self::K => "two"];
+    public $in = [self::K];
+    public function __construct(protected $pr = 5, public $pu = 6) {}
+    function keysHere() { $o = []; foreach ($this as $k => $v) { $o[] = $k; } return implode(",", $o); }
+    private function hidden() {}
+}
+class VisB extends VisA {
+    use VisT;
+    function keysHere() { $o = []; foreach ($this as $k => $v) { $o[] = $k; } return implode(",", $o); }
+}
+$va = new VisA();
+$vb = new VisB();
+check("vis-array-cast", array_keys((array)$va), ["x", "\0*\0p", "\0VisA\0q", "in", "\0*\0pr", "pu"]);
+check("vis-json", json_encode($vb), '{"x":1,"in":[2],"pu":6}');
+$vo = [];
+foreach ($vb as $k => $v) { $vo[] = $k; }
+check("vis-foreach", [implode(",", $vo), $va->keysHere(), $vb->keysHere()], ["x,in,pu", "x,p,q,in,pr,pu", "x,p,in,pr,pu,tp"]);
+var_dump($vb);
+$fo = new stdClass;
+$fo->a = 1;
+$fo->b = 2;
+$fs = 0;
+foreach ($fo as $k => $v) { $fs += $v; }
+foreach ($fo as $k => &$v) { $v = $v * 10; }
+unset($v);
+check("foreach-object", [$fs, $fo->a, $fo->b], [3, 10, 20]);
+check("method-exists", [method_exists($va, "keysHere"), method_exists($va, "KEYSHERE"), method_exists("VisB", "hidden"),
+      method_exists($vb, "__construct"), method_exists($va, "x"), method_exists("NoSuchClass", "f"),
+      method_exists(new stdClass, "__construct"), method_exists(new Exception("e"), "getMessage")],
+      [true, true, true, true, false, false, false, true]);
+check("self-in-initializer", [VisA::$st, $va->in], [[2 => "two"], [2]]);
+
+// foreach over an Iterator calls rewind, then valid / current / key (only when
+// the loop binds one) / body / next; an IteratorAggregate hands its iterator over.
+class FeIt implements Iterator {
+    private $i = 0;
+    public $log = "";
+    public function __construct(private array $a) {}
+    public function rewind(): void { $this->log .= "r"; $this->i = 0; }
+    public function valid(): bool { $this->log .= "v"; return $this->i < count($this->a); }
+    public function current(): mixed { $this->log .= "c"; return $this->a[$this->i]; }
+    public function key(): mixed { $this->log .= "k"; return "k" . $this->i; }
+    public function next(): void { $this->log .= "n"; $this->i++; }
+}
+class FeAgg implements IteratorAggregate {
+    public function getIterator(): Iterator { return new FeIt([7, 8]); }
+}
+class FeGenAgg implements IteratorAggregate {
+    public function getIterator(): Generator { yield "g" => 9; }
+}
+$fi = new FeIt([1, 2, 3]);
+$fr = "";
+foreach ($fi as $k => $v) { $fr .= "$k=$v "; }
+$fl = $fi->log;
+$fi->log = "";
+foreach ($fi as $v) { if ($v == 2) { continue; } $fr .= "$v "; if ($v == 3) { break; } }
+foreach (new FeAgg() as $k => $v) { $fr .= "$k:$v "; }
+foreach (new FeGenAgg() as $k => $v) { $fr .= "$k:$v"; }
+check("foreach-iterator", [$fr, $fl, $fi->log], ["k0=1 k1=2 k2=3 1 3 k0:7 k1:8 g:9", "rvcknvcknvcknv", "rvcnvcnvc"]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

@@ -1428,13 +1428,7 @@ func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 			return out
 		}
 		if o, ok := v.(*jsObject); ok && phpIsObj(v) {
-			for _, k := range o.keys {
-				if phpHiddenProp(k) {
-					continue
-				}
-				rt.phpArrSet(out, k, o.props[k])
-			}
-			return out
+			return rt.phpObjArr(o, false, nil)
 		}
 		rt.phpArrPush(out, v)
 		return out
@@ -1788,13 +1782,73 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 		}
 		out := pad + "object(" + rt.phpClassName(v) + ")#" + strconv.Itoa(rt.phpDumpID(o)) +
 			" (" + strconv.Itoa(len(names)) + ") {\n"
+		cls, _ := o.props["__class"].(*jsObject)
 		for _, k := range names {
-			out += pad + "  [\"" + k + "\"]=>\n"
+			switch vis := rt.phpVisOf(cls, k); vis {
+			case "":
+				out += pad + "  [\"" + k + "\"]=>\n"
+			case "*":
+				out += pad + "  [\"" + k + "\":protected]=>\n"
+			default:
+				out += pad + "  [\"" + k + "\":\"" + vis + "\":private]=>\n"
+			}
 			out += rt.phpDump(phpDeref(o.props[k]), ind+2)
 		}
 		return out + pad + "}\n"
 	}
 	return pad + "NULL\n"
+}
+
+// phpVisOf is a property's visibility on an instance of cls: "" public, "*"
+// protected, or the declaring class of a private one, read off the __pvis lists
+// of the class chain. Twin of phpVisOf in languages/php-interpreter.abnf.
+func (rt *jsrt) phpVisOf(cls *jsObject, name string) string {
+	key := "," + name + "="
+	for cls != nil {
+		if l, ok := cls.props["__pvis"]; ok {
+			s := rt.phpStr(l)
+			if at := strings.Index(s, key); at >= 0 {
+				rest := s[at+len(key):]
+				return rest[:strings.IndexByte(rest, ',')]
+			}
+		}
+		cls, _ = cls.props["__super"].(*jsObject)
+	}
+	return ""
+}
+
+// phpObjArr is an object's properties as an array: a non-public name mangled
+// the way (array) does, or, for foreach (iter), only those visible from class
+// scope (nil outside every class). Twin of phpObjArr in
+// languages/php-interpreter.abnf.
+func (rt *jsrt) phpObjArr(o *jsObject, iter bool, scope *jsObject) *jsObject {
+	out := phpNewArr()
+	cls, _ := o.props["__class"].(*jsObject)
+	for _, k := range o.keys {
+		if phpHiddenProp(k) {
+			continue
+		}
+		vis := rt.phpVisOf(cls, k)
+		switch {
+		case vis == "" || (iter && rt.phpVisible(o, vis, scope)):
+			rt.phpArrSet(out, k, o.props[k])
+		case !iter:
+			rt.phpArrSet(out, "\x00"+vis+"\x00"+k, o.props[k])
+		}
+	}
+	return out
+}
+
+// phpVisible answers whether code in class scope reads a property of o whose
+// visibility is vis.
+func (rt *jsrt) phpVisible(o *jsObject, vis string, scope *jsObject) bool {
+	if scope == nil {
+		return false
+	}
+	if vis == "*" {
+		return rt.phpIsA(o, rt.phpStr(scope.props["__name"])) || rt.phpIsA(scope, rt.phpClassName(o))
+	}
+	return rt.phpStr(scope.props["__name"]) == vis
 }
 
 func (rt *jsrt) phpDumpKey(k interface{}, ind int) string {
@@ -2094,6 +2148,83 @@ func init() {
 				outWriter.Write([]byte(wtf8Clean(s)))
 			}
 			return w(jsUndef)
+		}
+		// js_phmexists(objOrCls, name): method_exists over the __mlc lists of the
+		// class chain. Twin of phpMethodExists in languages/php-interpreter.abnf.
+		m["js_phmexists"] = func(a []uint64) uint64 {
+			o, _ := u(a[0]).(*jsObject)
+			if o != nil && o.props["__isclass"] != true {
+				o, _ = o.props["__class"].(*jsObject)
+			}
+			key := "," + phpCase(rt.phpStr(u(a[1])), false) + ","
+			for o != nil {
+				if l, ok := o.props["__mlc"]; ok && strings.Contains(rt.phpStr(l), key) {
+					return jsHTrue
+				}
+				o, _ = o.props["__super"].(*jsObject)
+			}
+			return jsHFalse
+		}
+		// js_phfestep(it, first, needKey): one step of foreach's generator walk -
+		// a generator's next(), or an Iterator's rewind (first) / next, valid,
+		// current and, when the loop binds one, key, as the same {done, value}
+		// record with the key in a {__genkv, k, v}. Twin of js_phfestep in
+		// lib/php-rt.metajs and of the Iterator loop in php-interpreter.abnf.
+		m["js_phfestep"] = func(a []uint64) uint64 {
+			it := u(a[0])
+			if _, isGen := it.(*jsGenerator); isGen {
+				return w(rt.memberCall(it, "next", nil))
+			}
+			if rt.phpTest(u(a[1])) {
+				rt.memberCall(it, "rewind", nil)
+			} else {
+				rt.memberCall(it, "next", nil)
+			}
+			st := newJSObject()
+			if !rt.phpTest(rt.memberCall(it, "valid", nil)) {
+				st.set("value", jsUndef)
+				st.set("done", true)
+				return w(st)
+			}
+			kv := newJSObject()
+			kv.set("__genkv", true)
+			kv.set("v", rt.memberCall(it, "current", nil))
+			kv.set("k", jsNull)
+			if rt.phpTest(u(a[2])) {
+				kv.set("k", rt.memberCall(it, "key", nil))
+			}
+			st.set("value", kv)
+			st.set("done", false)
+			return w(st)
+		}
+		// js_phfeobj(v, scope, byref): what foreach iterates - an object's properties
+		// visible from the class scope (null outside a class), anything else as is.
+		m["js_phfeobj"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			for phpIsObj(v) && rt.phpIsA(v, "IteratorAggregate") {
+				v = rt.memberCall(v, "getIterator", nil)
+			}
+			o, ok := v.(*jsObject)
+			if !ok || !phpIsObj(o) || rt.phpIsA(o, "Iterator") {
+				return w(v)
+			}
+			scope, _ := u(a[1]).(*jsObject)
+			out := rt.phpObjArr(o, true, scope)
+			// `as &$v` reaches each property through its own storage cell.
+			if rt.phpTest(u(a[2])) {
+				keys, vals, _ := phpArrParts(out)
+				for i, k := range keys.elems {
+					c := phpCellOf(vals.elems[i])
+					if c == nil {
+						c = newJSObject()
+						c.set("__refcell", true)
+						c.set("v", vals.elems[i])
+						o.set(rt.phpStr(k), c)
+					}
+					vals.elems[i] = c
+				}
+			}
+			return w(out)
 		}
 		m["js_phgetclass"] = func(a []uint64) uint64 {
 			if phpIsObj(u(a[0])) {

@@ -1641,9 +1641,23 @@ function __mec_export($v, $level) {
     $std = get_class($v) === "stdClass";
     $out .= $std ? "(object) array(\n" : "\\" . get_class($v) . "::__set_state(array(\n";
     foreach ((array)$v as $k => $e) {
-        $out .= str_repeat(" ", $level + 2) . __mec_exportstr((string)$k) . " => " . __mec_export($e, $level + 2) . ",\n";
+        $out .= str_repeat(" ", $level + 2) . __mec_exportstr(__mec_unmangle((string)$k)) . " => " . __mec_export($e, $level + 2) . ",\n";
     }
     return $out . $close . ($std ? ")" : "))");
+}
+// A property name out of an (array) cast without its visibility mangling:
+// "\0*\0p" and "\0Class\0p" are both p.
+function __mec_unmangle($k) {
+    return $k !== "" && $k[0] === "\0" ? substr($k, strpos($k, "\0", 1) + 1) : $k;
+}
+// An object's public properties, which are what json_encode writes: the mangled
+// names of the others are dropped.
+function __mec_pubprops($v) {
+    $out = [];
+    foreach ((array)$v as $k => $e) {
+        if (!is_string($k) || $k === "" || $k[0] !== "\0") { $out[$k] = $e; }
+    }
+    return $out;
 }
 // A single-quoted literal: backslash and quote escaped, a NUL byte spliced in as "\0".
 function __mec_exportstr($s) {
@@ -1748,9 +1762,9 @@ function __mec_jenc($v, $st, $level) {
     $st->open[] = $v;
     if ($v instanceof JsonSerializable) {
         $r = $v->jsonSerialize();
-        $out = $r === $v ? __mec_jlist((array)$v, false, $st, $level) : __mec_jenc($r, $st, $level);
+        $out = $r === $v ? __mec_jlist(__mec_pubprops($v), false, $st, $level) : __mec_jenc($r, $st, $level);
     } else {
-        $out = __mec_jlist((array)$v, false, $st, $level);
+        $out = __mec_jlist(__mec_pubprops($v), false, $st, $level);
     }
     array_pop($st->open);
     return $out;

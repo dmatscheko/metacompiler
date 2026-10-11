@@ -2518,7 +2518,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return writeRefSlot(p.b, p, v)
     }
     function makeForeach(items) {
-        var iterT = items[0]
+        // An object is iterated over the properties visible from the class scope
+        // the loop is in (js_phfeobj).
+        var srcT = items[0]
+        var refT = false
+        for (var ri = 1; ri < items.length; ri++) { if (items[ri].feref != undefined) { refT = true } }
+        var iterT = function(b) {
+            var r = srcT(b)
+            var scope = scopeProbe(r.b, emitStr(r.b, frameClsName("self")), hNull)
+            return {b: r.b, v: callExt(r.b, "js_phfeobj", [r.v, scope, refT ? hTrue : hFalse])}
+        }
         var keyName = null
         var valName = null
         var slots = []
@@ -2542,7 +2551,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // first generator function in the file would otherwise get the plain index loop.
         var genT = makeForeachGen(iterT, keyName, valName, pat, body, byRef)
         return function(b) {
-            if (usesYield) { return genT(b) }
+            if (usesYield || usesIter) { return genT(b) }
             var ir = iterT(b)
             b = ir.b
             hidCount++
@@ -2591,6 +2600,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // generator at all); sawYield is per function body and tells the emitter of the
     // function currently being built whether to wrap its closure in js_genfn.
     var usesYield = false
+    // A program that implements Iterator or IteratorAggregate drives foreach
+    // through that same two-way walk, the iterator's methods standing in for a
+    // generator's next() (js_phfestep).
+    var usesIter = false
+    function noteIterIface(name) {
+        if (name == "Iterator" || name == "IteratorAggregate") { usesIter = true }
+        return name
+    }
     var sawYield = false
     var genClosure = false
     function makeYieldArg(items) {
@@ -2722,6 +2739,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         gPost.NewBr(headB)
         return exitB
     }
+    // One step of foreach's generator walk: a generator's next(), or, in a program
+    // with iterators, js_phfestep, which also drives an Iterator.
+    function feStep(b, itV, first, needKey) {
+        if (!usesIter) { return genNext(b, itV) }
+        return callExt(b, "js_phfestep", [itV, first, needKey])
+    }
     function makeForeachGen(iterT, keyName, valName, pat, body, byRef) {
         return function(b) {
             var ir = iterT(b)
@@ -2733,6 +2756,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var gnN = "\x00fg" + hidCount
             var lnN = "\x00fl" + hidCount
             var isGen = callExt(b, "js_phisa", [ir.v, emitStr(b, "Generator")])
+            if (usesIter) {
+                isGen = b.NewSelect(truthy(b, isGen), hTrue, callExt(b, "js_phisa", [ir.v, emitStr(b, "Iterator")]))
+            }
+            var needKey = keyName != null ? hTrue : hFalse
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itN), ir.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ixN), emitNum(b, 0)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stN), hUndef])
@@ -2742,7 +2769,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var startA = curF.NewBlock("")
             var headB = curF.NewBlock("")
             b.NewCondBr(truthy(b, isGen), startG, startA)
-            callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), genNext(startG, ir.v)])
+            callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, ir.v, hTrue, needKey)])
             startG.NewBr(headB)
             callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
                                              callExt(startA, "js_range_len", [ir.v])])
@@ -2799,7 +2826,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var gPost = curF.NewBlock("")
             postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
             var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
-            callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), genNext(gPost, itP)])
+            callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, hFalse, needKey)])
             gPost.NewBr(headB)
             return exitB
         }
@@ -3967,7 +3994,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var parents = []
         var consts = []
         for (var i = 1; i < items.length; i++) {
-            if (items[i].impl != undefined) { parents.push(lastSeg(stripWs(items[i].impl))) }
+            if (items[i].impl != undefined) { parents.push(noteIterIface(lastSeg(stripWs(items[i].impl)))) }
             else if (items[i].cconsts != undefined) {
                 var cs = items[i].cconsts
                 for (var q = 0; q < cs.length; q++) { consts.push(cs[q]) }
@@ -3980,12 +4007,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
             b = emitIfaceList(b, clsV, parents)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), clsV])
+            var outerSelf = bindDeclSelf(b, clsV)
             for (var c1 = 0; c1 < consts.length; c1++) {
                 var cv = hNull
                 if (consts[c1].cinit != null) { var rc = consts[c1].cinit(b); b = rc.b; cv = rc.v }
                 callExt(b, "js_set", [clsV, emitStr(b, "k:" + consts[c1].cname), cv])
             }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), outerSelf])
             return b
         }
     }
@@ -3997,7 +4025,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (names.length == 0) { return b }
         var ifV = callExt(b, "js_pharr", [])
         for (var q = 0; q < names.length; q++) {
-            callExt(b, "js_phpush", [ifV, phClsLookup(b, emitStr(b, names[q]))])
+            // PHP's own iteration interfaces have no declaration here: the bare
+            // name is what js_phisa matches.
+            var bi = names[q] == "Iterator" || names[q] == "IteratorAggregate" || names[q] == "Traversable"
+            callExt(b, "js_phpush", [ifV, bi ? emitStr(b, names[q]) : phClsLookup(b, emitStr(b, names[q]))])
         }
         callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifV])
         return b
@@ -4912,6 +4943,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return name == "count" || name == "strlen"
             || name == "array_push" || name == "array_values" || name == "intdiv" || name == "abs"
             || name == "var_dump" || name == "gettype" || name == "get_debug_type" || name == "get_class"
+            || name == "method_exists"
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
     }
@@ -4983,6 +5015,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "gettype") { return {b: b, v: callExt(b, "js_phtype", [vs[0]])} }
         if (name == "get_debug_type") { return {b: b, v: callExt(b, "js_phdtype", [vs[0]])} }
         if (name == "get_class") { return {b: b, v: callExt(b, "js_phgetclass", [vs[0]])} }
+        // method_exists: an object, or a class named by a string (null when it names
+        // none), goes to js_phmexists.
+        if (name == "method_exists") {
+            var strB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            var fromB = b
+            b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), vs[0]])), strB, joinB)
+            var looked = phClsLookup(strB, vs[0])
+            strB.NewBr(joinB)
+            var tgt = joinB.NewPhi([llvm.ir.NewIncoming(vs[0], fromB), llvm.ir.NewIncoming(looked, strB)])
+            return {b: joinB, v: callExt(joinB, "js_phmexists", [tgt, vs[1]])}
+        }
         // define() writes the SAME scope a `const` does, which is what makes a
         // defined constant readable through a bare name.
         if (name == "define") {
@@ -5114,16 +5158,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var params = pl.params
         var defs = pl.defs
         var promoted = []
+        var pvis = []
         var pendingMod = false
+        var pendingVis = ""
         var body = null
         var seen = 0
         for (var i = 1; i < items.length; i++) {
             if (items[i] == undefined) { continue }
             if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].pmod != undefined) { pendingMod = true }
+            else if (items[i].pmod != undefined) {
+                pendingMod = true
+                if (phVisWord(items[i].pmod) != "") { pendingVis = phVisWord(items[i].pmod) }
+            }
             else if (items[i].param != undefined) {
-                if (pendingMod) { promoted.push(items[i].param) }
+                if (pendingMod) {
+                    promoted.push(items[i].param)
+                    pvis.push({name: items[i].param.substring(1), vis: pendingVis})
+                }
                 pendingMod = false
+                pendingVis = ""
                 seen = seen + 1
             }
         }
@@ -5138,7 +5191,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             stmts.push(inner)
             inner = makeBody(stmts)
         }
-        return {name: name, params: params, byref: pl.byref, rest: pl.rest,
+        return {name: name, params: params, byref: pl.byref, rest: pl.rest, pvis: pvis,
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}
     }
     function makePromote(nm) {
@@ -5246,16 +5299,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeProps(items) {
         var out = []
         var isStatic = false
+        var vis = ""
         var cur = null
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (typeof it == "string") {
-                cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: []}
+                cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: [], vis: vis}
                 out.push(cur)
             }
             else if (it.mod != undefined) {
                 if (hasWord(it.mod, "static")) { isStatic = true }
+                if (phVisWord(it.mod) != "") { vis = phVisWord(it.mod) }
             }
             else if (it.hooks != undefined) {
                 if (cur != null) {
@@ -5268,6 +5323,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else { if (cur != null) { cur.init = it } }
         }
         return out
+    }
+    // "protected" or "private" for that modifier, else "" ('private(set)' only
+    // restricts writing).
+    function phVisWord(mod) {
+        var s = stripWs(mod)
+        return (s == "protected" || s == "private") ? s : ""
+    }
+    // A class's __pvis: its non-public instance properties as ",name=*,"
+    // (protected) and ",name=Class," (private, naming the declaring class). Twin
+    // of phpVisList in php-interpreter.abnf.
+    function phVisList(cname, props) {
+        var out = ","
+        for (var i = 0; i < props.length; i++) { out = out + phVisItem(cname, props[i].name, props[i].vis) }
+        return out
+    }
+    function phVisItem(cname, pname, vis) {
+        if (vis == "protected") { return pname + "=*," }
+        if (vis == "private") { return pname + "=" + cname + "," }
+        return ""
     }
     function hasWord(s, w) {
         for (var i = 0; i + w.length <= s.length; i++) {
@@ -5498,7 +5572,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (items[i].method.name == "__construct") { hasCtor = true }
             }
             else if (items[i].ext != undefined) { ext = lastSeg(items[i].ext) }
-            else if (items[i].impl != undefined) { ifaces.push(lastSeg(stripWs(items[i].impl))) }
+            else if (items[i].impl != undefined) { ifaces.push(noteIterIface(lastSeg(stripWs(items[i].impl)))) }
             else if (items[i].cconsts != undefined) {
                 var cs = items[i].cconsts
                 for (var q = 0; q < cs.length; q++) { consts.push(cs[q]) }
@@ -5507,6 +5581,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (items[i].propdecl != undefined && items[i].propdecl != null) {
                 if (items[i].propdecl.isStatic === true) { statics.push(items[i].propdecl) }
                 else { props.push(items[i].propdecl) }
+            }
+        }
+        // A promoted constructor parameter is a property declared after the
+        // class's own (its slot exists before the constructor fills it).
+        for (var pm = 0; pm < methods.length; pm++) {
+            var pvs = methods[pm].name == "__construct" ? methods[pm].pvis : []
+            for (var pq = 0; pq < pvs.length; pq++) {
+                props.push({name: pvs[pq].name, init: null, isStatic: false, hooks: [], vis: pvs[pq].vis})
             }
         }
         // Trait members are copied in where the class does not declare the name
@@ -5540,7 +5622,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = emitIfaceList(b, clsV, ifaces)
             // Bind 'self' for the initializers below: a class constant may read
             // self::OTHER, and they are evaluated here, in declaration order.
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), clsV])
+            var outerSelf = bindDeclSelf(b, clsV)
             for (var c1 = 0; c1 < consts.length; c1++) {
                 var cv = hNull
                 if (consts[c1].cinit != null) { var rc = consts[c1].cinit(b); b = rc.b; cv = rc.v }
@@ -5557,6 +5639,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     b = emitHooks(b, clsV, name, props[hp])
                 }
             }
+            // The declared method names, lower-cased between commas: method_exists.
+            var mlc = ","
+            for (var ml = 0; ml < methods.length; ml++) { mlc = mlc + phsCase(methods[ml].name, false) + "," }
+            callExt(b, "js_set", [clsV, emitStr(b, "__mlc"), emitStr(b, mlc)])
+            var pvl = phVisList(name, props)
+            if (pvl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, pvl)]) }
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), closureV(b, idx, curScopeV)])
@@ -5567,8 +5655,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 callExt(b, "js_set", [clsV, emitStr(b, "__construct"),
                                       callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), outerSelf])
             return b
         }
+    }
+    // A declaration binds 'self' to the class while its initializers run and
+    // hands back the binding it shadowed (null outside every class), which it puts
+    // back afterwards: code after the declaration is not in the class's scope.
+    function bindDeclSelf(b, clsV) {
+        var outer = scopeProbe(b, emitStr(b, frameClsName("self")), hNull)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), clsV])
+        return outer
     }
 
     // ----- program entry & project-file imports -----
@@ -5688,6 +5785,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                   callExt(b, "js_closure", [handle(emitExcGetter("message")), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getCode"),
                                   callExt(b, "js_closure", [handle(emitExcGetter("code")), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "__mlc"), emitStr(b, ",__construct,getmessage,getcode,")])
             // The root of the chain also carries the empty __initprops every `new`
             // calls, so a user class extending Exception reaches one.
             b = emitInitProps(b, clsV, name, "", [])

@@ -1440,15 +1440,113 @@ function phDump(v, ind) {
         var names = keysOf(v)
         var oout = pad + "object(" + phClassName(v) + ")#" + phStr(phDumpID(v)) +
                    " (" + phStr(names.length) + ") {\n"
+        var cls = v["__class"]
         var j = 0
         while (j < names.length) {
-            oout = oout + pad + "  [\"" + names[j] + "\"]=>\n"
+            var vis = phVisOf(cls, names[j])
+            var mark = ""
+            if (vis == "*") { mark = ":protected" }
+            else if (vis != "") { mark = ":\"" + vis + "\":private" }
+            oout = oout + pad + "  [\"" + names[j] + "\"" + mark + "]=>\n"
             oout = oout + phDump(phDeref(v[names[j]]), ind + 2)
             j = j + 1
         }
         return oout + pad + "}\n"
     }
     return pad + "NULL\n"
+}
+
+// A property's visibility on an instance of cls: "" public, "*" protected, or
+// the declaring class of a private one, off the __pvis lists of the class chain.
+// Twin of phpVisOf in languages/php-interpreter.abnf.
+function phVisOf(cls, name) {
+    var key = "," + name + "="
+    var k = cls
+    while (k !== undefined && k !== null) {
+        var l = k["__pvis"]
+        if (typeof l == "string") {
+            var at = l.indexOf(key)
+            if (at >= 0) { return l.substring(at + key.length, l.indexOf(",", at + key.length)) }
+        }
+        k = k["__super"]
+    }
+    return ""
+}
+
+// An object's properties as an array - keysOf's own non-hidden keys in
+// insertion order: a non-public name mangled the way (array) does, or, for
+// foreach (iter), only those visible from class scope (null outside every
+// class). Twin of phpObjArr in languages/php-interpreter.abnf.
+function phObjArr(v, iter, scope) {
+    var out = phNewArr()
+    var cls = v["__class"]
+    var ks = keysOf(v)
+    var i = 0
+    while (i < ks.length) {
+        var vis = phVisOf(cls, ks[i])
+        if (vis == "") { phArrSet(out, ks[i], v[ks[i]]) }
+        else if (iter) {
+            if (phVisible(v, vis, scope)) { phArrSet(out, ks[i], v[ks[i]]) }
+        } else { phArrSet(out, "\x00" + vis + "\x00" + ks[i], v[ks[i]]) }
+        i = i + 1
+    }
+    return out
+}
+
+// Can code in class scope read a property of o whose visibility is vis?
+function phVisible(o, vis, scope) {
+    if (scope === undefined || scope === null) { return false }
+    if (vis == "*") { return phIsA(o, phStr(scope["__name"])) || phIsA(scope, phClassName(o)) }
+    return phStr(scope["__name"]) == vis
+}
+
+// One step of foreach's generator walk: a generator's next(), or an Iterator's
+// rewind (first) / next, valid, current and, when the loop binds one, key, as
+// the same {done, value} record with the key in a {__genkv, k, v}. Twin of
+// m["js_phfestep"] in abnf/jsrtphp.go.
+function js_phfestep(it, first, needKey) {
+    if (phIsGen(it)) { return js_phmcall(it, "next", []) }
+    if (first === true) { js_phmcall(it, "rewind", []) } else { js_phmcall(it, "next", []) }
+    var st = {}
+    if (!phTest(js_phmcall(it, "valid", []))) {
+        st["value"] = undefined
+        st["done"] = true
+        return st
+    }
+    var kv = {}
+    kv["__genkv"] = true
+    kv["v"] = js_phmcall(it, "current", [])
+    kv["k"] = null
+    if (needKey === true) { kv["k"] = js_phmcall(it, "key", []) }
+    st["value"] = kv
+    st["done"] = false
+    return st
+}
+
+// foreach's iterable: an object's properties visible from the class scope,
+// anything else as is; for `as &$v` each one is its property's storage cell.
+// Twin of m["js_phfeobj"] in abnf/jsrtphp.go.
+function js_phfeobj(v, scope, byref) {
+    var o = anytype
+    o = v
+    while (phIsObj(o) && phIsA(o, "IteratorAggregate")) { o = js_phmcall(o, "getIterator", []) }
+    if (!phIsObj(o) || phIsGen(o) || phIsA(o, "Iterator")) { return o }
+    var out = phObjArr(o, true, scope)
+    if (byref !== true) { return out }
+    var p = phArrParts(out)
+    var i = 0
+    while (i < p.k.length) {
+        var c = phCellOf(p.v[i])
+        if (c === undefined) {
+            c = {}
+            c["__refcell"] = true
+            c["v"] = p.v[i]
+            o[phStr(p.k[i])] = c
+        }
+        p.v[i] = c
+        i = i + 1
+    }
+    return out
 }
 
 // phObjPropsEq compares two instances property by property with ==: every own
@@ -1503,17 +1601,7 @@ function phCast(kind, v) {
         if (phIsArr(v)) { return v }
         var out = phNewArr()
         if (rtIsNil(v)) { return out }
-        if (phIsObj(v)) {
-            // (array) $obj is the instance's own non-hidden properties, in
-            // insertion order - keysOf's exact answer.
-            var ks = keysOf(v)
-            var i = 0
-            while (i < ks.length) {
-                phArrSet(out, ks[i], v[ks[i]])
-                i = i + 1
-            }
-            return out
-        }
+        if (phIsObj(v)) { return phObjArr(v, false, null) }
         phArrPush(out, v)
         return out
     }
@@ -1931,6 +2019,20 @@ function js_phtype(v) { return phTypeName(v) }
 function js_phdtype(v) { return phDebugType(v) }
 function js_phdump(v) { return phDump(v, 0) }
 
+// method_exists over the __mlc lists of the class chain; v is an object, a class
+// descriptor or null. Twin of phpMethodExists in languages/php-interpreter.abnf.
+function js_phmexists(v, m) {
+    if (v === undefined || v === null || typeof v != "object") { return false }
+    var k = v
+    if (k["__isclass"] === undefined) { k = v["__class"] }
+    var key = "," + phsCase(phStr(m), false) + ","
+    while (k !== undefined && k !== null) {
+        var l = k["__mlc"]
+        if (typeof l == "string" && l.indexOf(key) >= 0) { return true }
+        k = k["__super"]
+    }
+    return false
+}
 function js_phgetclass(v) {
     if (phIsObj(v)) { return phClassName(v) }
     return false
