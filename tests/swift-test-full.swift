@@ -3658,7 +3658,8 @@ func s77() {
 
 // ===== SECTION 78: a builtin type as a value =====
 // `String.self`, `type(of: "x")` and a generic parameter bound from a String are
-// one type value, which prints as its name and compares equal to itself.
+// one type value, which prints as its name and compares equal to itself; Bool(x)
+// is the failable Bool(String).
 func name78<T>(_ v: T) -> String { return "\(T.self)" }
 func meta78<T>(_ t: T.Type) -> String { return String(describing: t) }
 func s78() {
@@ -3669,6 +3670,9 @@ func s78() {
     let t: Any.Type = String.self
     check("btv3", type(of: "x") == String.self && type(of: 1) == Int.self && type(of: Int8(1)) != Int.self
                   && Int.self != Int64.self && t == String.self && "\(type(of: true))" == "Bool")
+    let bt = "true"
+    check("btv4", Bool(bt) == true && Bool("false") == false && Bool("TRUE") == nil && Bool(" true") == nil
+                  && Bool(false) == false)
 }
 
 func main() {

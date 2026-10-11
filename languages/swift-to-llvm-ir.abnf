@@ -6201,6 +6201,14 @@ KwContinue  = "continue" KwEnd ;
             && classNames[name] != 1 && enumNames[name] != 1) {
             return function(b) { return {b: b, v: callExt(b, "js_dict_new", [])} }
         }
+        // Bool(x). Twin: hostGlobals in swift-interpreter.abnf.
+        if (name == "Bool" && args.length == 1 && lookupSig(name) == null
+            && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) {
+                var eb = emitArgRecs(b, args)
+                return {b: eb.b, v: eb.b.NewCall(rtBoolOf(), [callExt(eb.b, "js_swidx", [eb.v, emitNum(eb.b, 0)])])}
+            }
+        }
         // Optional(v): an Optional IS its value in this model.
         if (name == "Optional" && args.length == 1 && lookupSig(name) == null
             && classNames[name] != 1 && enumNames[name] != 1) {
@@ -10024,6 +10032,26 @@ KwContinue  = "continue" KwEnd ;
             callExt(r.b, "js_set", [r.v, emitStr(r.b, "keys"), r.b.NewCall(rtSetArr(), [keys])])
             return {b: r.b, v: r.v}
         }
+    }
+    // Bool(x): a Bool is itself, and the failable Bool(String) accepts exactly
+    // "true" and "false"; anything else is nil. Twin of hostGlobals["Bool"] in
+    // swift-interpreter.abnf.
+    function rtBoolOf() {
+        return rtFunc("sw_boolof", 1, function(b, ps) {
+            var tB = curF.NewBlock("")
+            var n1 = curF.NewBlock("")
+            var fB = curF.NewBlock("")
+            var n2 = curF.NewBlock("")
+            var n3 = curF.NewBlock("")
+            var nilB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_sweq", [ps[0], emitStr(b, "true")])), tB, n1)
+            tB.NewRet(hTrue)
+            n1.NewCondBr(truthy(n1, callExt(n1, "js_sweq", [ps[0], emitStr(n1, "false")])), fB, n2)
+            fB.NewRet(hFalse)
+            n2.NewCondBr(truthy(n2, callExt(n2, "js_seq", [callExt(n2, "js_typeof", [ps[0]]), emitStr(n2, "boolean")])), n3, nilB)
+            n3.NewRet(ps[0])
+            nilB.NewRet(hNull)
+        })
     }
     function rtSetArr() {
         return rtFunc("sw_setarr", 1, function(b, ps) {

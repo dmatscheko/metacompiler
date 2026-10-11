@@ -9092,7 +9092,14 @@ KwContinue  = "continue" KwEnd ;
         return swstr(x)
     }
     hostGlobals["String"] = {__convl: swStrInit, __tname: "String"}
-    hostGlobals["Bool"] = {__tname: "Bool"}
+    // Bool(x): a Bool is itself, and the failable Bool(String) accepts exactly
+    // "true" and "false" (LosslessStringConvertible). Twin of rtBoolOf in
+    // swift-to-llvm-ir.abnf.
+    hostGlobals["Bool"] = {__tname: "Bool", __conv: function(x) {
+        if (x === true || x === "true") { return true }
+        if (x === false || x === "false") { return false }
+        return null
+    }}
     // Array(seq) and Array(repeating:count:). swiftc 6.1.2:
     //   Array("hi")                  ["h", "i"]     (Characters, i.e. CLUSTERS)
     //   Array([4, 5])                [4, 5]         (a COPY - Array is a value type)
