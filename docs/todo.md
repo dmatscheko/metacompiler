@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-373** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-375** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,15 +66,15 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-360 python: int/float methods off the type; missing int/float methods · P2 · PY · IN PROGRESS (PY+KT worker, round 10) [V]
-`hasattr(int, "conjugate")` False and `int.conjugate(7)` fails (CPython True / 7): no
-"int"/"float" sample in pyTypeSample / pyDescTypeSample (interpreter,
-abnf/jsrtpydesc.go, layer 2). `bit_length`, `is_integer`, `as_integer_ratio`,
-`to_bytes`, `hex`, `fromhex` and the rest of int/float's methods are absent.
-
 ### T-367 python: a lone high surrogate before a non-surrogate is read as a pair · P1 · PY · IN PROGRESS (JS+PY+DA worker, round 9) [V]
 `t = "a\ud83db" + "\ude00"`: len 3 (CPython 4); natively `ord(t[1])` fails "ord()
 expected a character, but string of length 3". Both halves.
+
+### T-374 python: number dunders; unknown methods on numbers abort · P1 · PY · IN PROGRESS (PY+KT worker, round 11) [V]
+`(5).__add__(3)`, `(5).__str__()` abort "method call … on a number" in all engines;
+any unknown method on a number is fatal instead of AttributeError. `repr(int.from_bytes)`
+/ `repr(float.fromhex)` / `repr(dict.fromkeys)` print `<function <lambda>>` (CPython
+`<built-in method … of type object>`). `float.from_number` (3.14) absent.
 
 ---
 
@@ -111,19 +111,16 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-357 kotlin: integer literals do not take their expected type · P2 · KT · IN PROGRESS (PY+KT worker, round 10) [V]
-`val ls: List<Long> = listOf(1,2,3)`, `hashSetOf<Long>(1,2)`, `var y = 5L; y = 7`,
-`mutableMapOf<Long,String>()[1] = ..`, `mutableListOf<Long>().add(3)`,
-`Pair<Long,Int>(1,2)`, `la[0] = 5` into a LongArray: the element is an Int (`is Long`
-false through Any); `listOf<Long>(100000,100000)[0]*[1]` wraps to 1410065408. Empty
-`listOf<Float>().sum()` / `listOf<Long>().sum()` answer Int 0. Once literals adopt their
-expected type (declared generic types, explicit type arguments, Long-slot reassignment,
-elvis operand, writes into a known-kind collection), make Int ≠ Long at equality:
-`setOf<Any>(1, 1L).size` 2, `(1 as Any) == (1L as Any)` false, `1L.equals(1)` false.
-
-### T-358 kotlin: interpreter gaps - `System.currentTimeMillis`, `kotlin.math.*` · P1 · KT · IN PROGRESS (PY+KT worker, round 10) [V]
-Interpreter: "unknown name: System"; after `import kotlin.math.*`, `sqrt(4.0)` "unknown
-name: sqrt" (the compiler answers both).
+### T-373 kotlin: Int ≠ Long at equality · P2 · KT · IN PROGRESS (PY+KT worker, round 11) [V]
+`setOf<Any>(1, 1L).size` 1 (jar 2), `(1 as Any) == (1L as Any)` true, `1L.equals(1)`
+true. Strict equality now would turn every remaining unadopted literal site into a
+wrong `false`: first close lambda return types, generic function returns, non-simple
+receivers, collection arguments to collection-typed parameters, get/containsKey/
+contains arguments; then a literal `==` operand keeps value equality and the rest goes
+through a strict extern; set/map lookup strict in all 3 engines; measure breakage on
+the 64-file Compose app before enabling (~400-600 lines over 5 files). Also: `Math.sqrt
+(9.0)` - interpreter "unknown name: Math", compiler resolves the host JS Math and
+prints 3 (Kotlin 3.0).
 
 ---
 
@@ -203,7 +200,8 @@ introduce a delegating wrapper on a hot path: that cost python +41% once.
 ### T-363 pow is up to 421 ulps off in every leg that uses math.Pow / d_pow · P1 · CORE · IN PROGRESS (CORE worker, round 8) [V]
 600-row probe: 544/600 not correctly rounded (max 421 ulps); node, CPython and Apple
 libm 0/600. `1.9687173381259235 ** 596.2128067674018` gives 2.48822920238156e+175 in
-every leg (node 2.488229202381568e+175). Design: double-double pow with a Ziv test,
+every leg (node 2.488229202381568e+175). Python's float `**` with an integral exponent
+is up to 4 ulps off too: `10.0 ** 300` prints 1.0000000000000006e+300 (CPython 1e+300). Design: double-double pow with a Ziv test,
 ~250 lines per engine (MetaJS module for interpreter + layer 2, Go port, runtime.c
 d_pow), routed for python, ruby, js, lua, php (java stays on fdlibm, go on its Go port).
 
@@ -489,6 +487,9 @@ T-362 bash: a scalar declared without a value — DONE af02bbd
 T-361 go: pointer to a slice; package var init order; interface dispatch on defined types — DONE c1375a5
 T-240 go: a value of a defined non-struct type is the underlying value — PARTIAL c1375a5 (boxed at interface stores whose static type is known); rest is T-370
 T-266 go: pointers, nil typed values and panic values in fmt and panics — PARTIAL c1375a5 (fmt of pointers/chan/func, %T of nil typed values, panic of defined types); pointer boxes at interface stores DECLINED this round as too risky (manual 7.9 model); rest in T-370
+T-358 kotlin: interpreter gaps - `System.currentTimeMillis`, `kotlin.math.*` — DONE 01caa10
+T-360 python: int/float methods off the type; missing int/float methods — DONE 015bfaf
+T-357 kotlin: integer literals do not take their expected type — PARTIAL c89e01c (literals adopt their expected type at every listed site; lib/kotlin-decltypes.js); Int≠Long equality is T-373
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
