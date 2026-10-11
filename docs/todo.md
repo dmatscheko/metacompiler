@@ -116,13 +116,13 @@ crashes. LINQ extension methods unavailable on lists.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-422 swift: lazy Sequence iteration — `sequence(first:next:)`, user `Sequence`/`IteratorProtocol` types · P1 · SW · OPEN [V]
+### T-422 swift: lazy Sequence iteration — `sequence(first:next:)`, user `Sequence`/`IteratorProtocol` types · P1 · SW · IN PROGRESS (SW worker, round 25) [V]
 `Array(Cnt(n: 2))` for a user `Sequence` aborts in all engines ("Array(): not a sequence" /
 "len() of a object"); for-in over it prints nothing in the interpreter. `sequence(first:next:)` and
 `sequence(state:next:)` are unknown. Both need a lazy iterator path in for-in (the compiled for-in is
 index-based via js_pylen/js_swidx); an eager version hangs on the infinite-plus-prefix idiom.
 
-### T-423 swift: `[Double]()` / `Array<Double>()` element type lost on append; `&s.field` inout args · P2 · SW · OPEN [V]
+### T-423 swift: `[Double]()` / `Array<Double>()` element type lost on append; `&s.field` inout args · P2 · SW · IN PROGRESS (SW worker, round 25) [V]
 `var ga = [Double](); ga.append(3); print(ga)` prints `[3]` (swiftc `[3.0]`): append adoption only reads
 explicit annotations. `swap(&s.a, &s.b)` / `f(&p.x)` do not parse (InoutArg takes a bare name only).
 
