@@ -128,6 +128,10 @@ func pyBDelMake(tname, name string) *hostFunc {
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyTruthyOf(v) })
 	case num && name == "__neg__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyunary", "-", v) })
+	case num:
+		if f := pyNumDunder(tname, name); f != nil {
+			return mk(f)
+		}
 	case !num && name == "__len__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pylenof", v) })
 	case !num && name == "__iter__":
@@ -193,6 +197,82 @@ func pyBDelMake(tname, name string) *hostFunc {
 		}
 	}
 	return nil
+}
+
+// pyNumDunder is int's and float's conversion and rounding dunders, each the
+// builtin it serves applied to the value: str(x) of a number is its repr, and
+// floor and ceil step int()'s truncation (which also raises CPython's error for
+// an infinity or a NaN). __index__ and __invert__ are int's alone. Twin of
+// pyNumDunder in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pyNumDunder(tname, name string) func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+	isInt := tname == "int"
+	toInt := func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyIntNew([]interface{}{v}) }
+	switch {
+	case name == "__str__":
+		return func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyRepr(v) }
+	case name == "__int__" || name == "__trunc__" || (isInt && (name == "__index__" || name == "__pos__")):
+		return toInt
+	case name == "__pos__":
+		return func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return v }
+	case name == "__floor__" || name == "__ceil__":
+		op, step := "<", "-"
+		if name == "__ceil__" {
+			op, step = ">", "+"
+		}
+		return func(rt *jsrt, v interface{}, _ []interface{}) interface{} {
+			t := rt.pyIntNew([]interface{}{v})
+			if rt.pyTruthyOf(rt.pyExt("js_pybin", op, v, t)) {
+				return rt.pyExt("js_pybin", step, t, 1.0)
+			}
+			return t
+		}
+	case name == "__float__":
+		return func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyfloat", v) }
+	case name == "__abs__":
+		return func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyabs", v) }
+	case isInt && name == "__invert__":
+		return func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyunary", "~", v) }
+	case name == "__round__":
+		return func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			return rt.pyExt("js_pyround", &jsArray{elems: append([]interface{}{v}, a...)})
+		}
+	case name == "__divmod__":
+		return func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pydivmod", v, argAt(a, 0)) }
+	case name == "__rdivmod__":
+		return func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pydivmod", argAt(a, 0), v) }
+	case name == "__format__":
+		return func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			return rt.pyExt("js_pyformatfn", &jsArray{elems: append([]interface{}{v}, a...)})
+		}
+	}
+	return nil
+}
+
+// pyNumTypeName is the builtin numeric type v is - "int" (a bool included),
+// "float", "complex" - or "".
+func pyNumTypeName(v interface{}) string {
+	switch v.(type) {
+	case float64, bool, *jsBigInt:
+		return "int"
+	case *jsPyFlo:
+		return "float"
+	}
+	if isPyComplex(v) {
+		return "complex"
+	}
+	return ""
+}
+
+// pyNumDunderAttr says whether a NUMBER answers the dunder name through its
+// type's delegate - (5).__add__ - for the receiver sites only: a type object's
+// own dunders stay delegates, which unwrap a subclass instance.
+func pyNumDunderAttr(v interface{}, name string) bool {
+	tn := pyNumTypeName(v)
+	if tn == "" || len(name) <= 4 || !strings.HasPrefix(name, "__") || !strings.HasSuffix(name, "__") {
+		return false
+	}
+	_, ok := pyBuiltinDelegate(tn, name)
+	return ok
 }
 
 // pyNotImplemented is CPython's NotImplemented, answered only by the delegates:

@@ -1135,6 +1135,8 @@ function pyBDelMake(tname, name, meth) {
     if (num) {
         if (name == "__bool__") { return function(self) { return js_pybool(pyUnwrapBuiltin(self)) } }
         if (name == "__neg__") { return function(self) { return js_pyunary("-", pyUnwrapBuiltin(self)) } }
+        var nd = pyNumDunder(tname, name)
+        if (nd !== undefined) { return nd }
     } else {
         if (name == "__len__") { return function(self) { return js_pylenof(pyUnwrapBuiltin(self)) } }
         if (name == "__iter__") { return function(self) { return js_pyiterfn(pyUnwrapBuiltin(self)) } }
@@ -1177,6 +1179,56 @@ function pyBDelMake(tname, name, meth) {
         k = k + 1
     }
     return undefined
+}
+
+// Go: pyNumDunder. int's and float's conversion and rounding dunders, each the
+// builtin it serves applied to the value: str(x) of a number is its repr, and
+// floor and ceil step int()'s truncation (which also raises CPython's error for
+// an infinity or a NaN). __index__ and __invert__ are int's alone.
+function pyNumDunder(tname, name) {
+    var isInt = tname == "int"
+    if (name == "__str__") { return function(self) { return pyRepr(pyUnwrapBuiltin(self)) } }
+    if (name == "__int__" || name == "__trunc__" || (isInt && (name == "__index__" || name == "__pos__"))) {
+        return function(self) { return js_pyint([[pyUnwrapBuiltin(self)], undefined]) }
+    }
+    if (name == "__pos__") { return function(self) { return pyUnwrapBuiltin(self) } }
+    if (name == "__floor__" || name == "__ceil__") {
+        var up = name == "__ceil__"
+        return function(self) {
+            var x = pyUnwrapBuiltin(self)
+            var t = js_pyint([[x], undefined])
+            if (!up && js_pybool(js_pybin("<", x, t))) { return js_pybin("-", t, 1) }
+            if (up && js_pybool(js_pybin(">", x, t))) { return js_pybin("+", t, 1) }
+            return t
+        }
+    }
+    if (name == "__float__") { return function(self) { return js_pyfloat(pyUnwrapBuiltin(self)) } }
+    if (name == "__abs__") { return function(self) { return js_pyabs(pyUnwrapBuiltin(self)) } }
+    if (isInt && name == "__invert__") { return function(self) { return js_pyunary("~", pyUnwrapBuiltin(self)) } }
+    if (name == "__round__") { return function(self, n) { return js_pyround([pyUnwrapBuiltin(self), n]) } }
+    if (name == "__divmod__") { return function(self, o) { return js_pydivmod(pyUnwrapBuiltin(self), o) } }
+    if (name == "__rdivmod__") { return function(self, o) { return js_pydivmod(o, pyUnwrapBuiltin(self)) } }
+    if (name == "__format__") { return function(self, spec) { return js_pyformatfn([pyUnwrapBuiltin(self), spec]) } }
+    return undefined
+}
+
+// Go: pyNumTypeName. The builtin numeric type v is - "int" (a bool included),
+// "float", "complex" - or "".
+function pyNumTName(v) {
+    if (typeof v == "number" || typeof v == "boolean" || pyIsBig(v)) { return "int" }
+    if (pyIsFlo(v)) { return "float" }
+    if (pyIsCplx(v)) { return "complex" }
+    return ""
+}
+
+// Go: pyNumDunderAttr. Does a NUMBER answer the dunder name through its type's
+// delegate - (5).__add__? For the receiver sites only: a type object's own
+// dunders stay delegates, which unwrap a subclass instance.
+function pyNumDunderAttr(v, name) {
+    var tn = pyNumTName(v)
+    if (tn == "" || name.length <= 4) { return false }
+    if (name.substring(0, 2) != "__" || name.substring(name.length - 2, name.length) != "__") { return false }
+    return pyBDelegate(tn, name) !== undefined
 }
 
 // Go: pyNotImplemented. CPython's NotImplemented, answered only by these
@@ -1389,9 +1441,10 @@ function pyGetAttr(obj, name) {
                        "module '" + pyToStr(obj["__pymod"]) + "' has no attribute '" + name + "'")
         }
     }
-    // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
+    // A method the builtin TYPE OBJECT itself carries - dict.fromkeys - is a
+    // built-in method bound to that type.
     var bcm = pyBuiltinClsMethod(obj, name)
-    if (bcm !== undefined) { return bcm }
+    if (bcm !== undefined) { return pyBMSet(bcm, name, obj, null) }
     if (name == "__mro__" || name == "__bases__") {
         if (pyClassName(obj) !== null) { return pyMroAttr(obj, name) }
     }
@@ -1484,7 +1537,7 @@ function pyGetAttr(obj, name) {
     // A BOUND built-in method, so getattr(xs, "count")(1) answers as CPython
     // does. Ahead of pyGetMember because a dict literally has a "keys" property
     // holding its key ARRAY, and CPython's d.keys is the method.
-    if (pyDBuiltinAttr(obj, name)) { return pyDBoundBuiltin(obj, name) }
+    if (pyDBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name)) { return pyDBoundBuiltin(obj, name) }
     // x.__class__ for a value that is not a user instance - the same synthetic
     // class object type(x) hands out, so `[].__class__ is list` holds.
     if (name == "__class__") { return js_pytype(obj) }
@@ -1840,7 +1893,22 @@ function pyBuiltinClsMethod(target, name) {
     if (tn == "float" && name == "fromhex") {
         return function(s) { return pyFloatFromHex(s) }
     }
+    if (tn == "float" && name == "from_number") {
+        return function(x) { return pyFloatFromNumber(x) }
+    }
     return undefined
+}
+
+// Go: rt.pyFloatFromNumber. float.from_number(x): float(x) for a real number
+// only - an int, a float, a subclass of either, or an instance with __float__ or
+// __index__; a string is refused rather than parsed.
+function pyFloatFromNumber(x) {
+    var k = pyNumTName(pyUnwrapBuiltin(x))
+    var real = k == "int" || k == "float"
+    var cls = pyInstClassOf(x)
+    if (!real && cls !== null) { real = pyLookupHas(cls, "__float__") || pyLookupHas(cls, "__index__") }
+    if (!real) { pyRaiseExc("TypeError", "must be real number, not " + pyTypeName(x)) }
+    return js_pyfloat(x)
 }
 
 // dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
@@ -3968,10 +4036,17 @@ function js_pyflo(v) { return pyMkFlo(pyNum(v)) }
 // js_pyabs: abs(). It keeps the type: abs(-2) is the int 2, abs(-1.5) the float
 // 1.5, and abs() of an arbitrary precision int stays exact.
 function js_pyabs(v) {
+    // abs(x) is type(x).__abs__(x): a class's own, or a builtin subclass's
+    // delegate.
+    var cls = pyInstClassOf(v)
+    if (cls !== null && pyLookupHas(cls, "__abs__")) {
+        var m = pyLookupVal(cls, "__abs__")
+        if (pyIsCallable(m)) { return pyCallSelf(m, v, []) }
+    }
     if (pyIsCplx(v)) { return pyCxAbs(v) }
     if (pyIsFlo(v)) {
         var f = v["__flo"]
-        if (f < 0) { return pyMkFlo(pyFloNegate(f)) }
+        if (f < 0 || 1 / f < 0) { return pyMkFlo(pyFloNegate(f)) }
         return pyMkFlo(f)
     }
     if (pyIsBig(v)) {
@@ -4582,6 +4657,11 @@ function js_pydivmod(l, r) {
 // to even by construction (docs/working-on-this-project.md 7.7).
 function js_pyround(args) {
     var v = pyEArgAt(args, 0)
+    // An int with no n, or with n >= 0, is already round: it comes back as the
+    // int it is, exactly.
+    if (pyNumTName(v) == "int") {
+        if (args.length < 2 || args[1] === undefined || args[1] === null || pyNum(args[1]) >= 0) { return js_pyint([[v], undefined]) }
+    }
     var f = pyAToF(v)
     if (args.length < 2 || args[1] === undefined || args[1] === null) {
         return parseFloat(rtFixed(f, 0))
@@ -4714,7 +4794,7 @@ function pyDHasAttr(obj, name) {
     // The BUILT-IN methods of str / list / dict / set, and __class__, which
     // EVERY value has (None.__class__ is NoneType).
     if (name == "__class__") { return true }
-    if (pyDBuiltinAttr(obj, name)) { return true }
+    if (pyDBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name)) { return true }
     if (pyNumAttr(obj, name) !== undefined) { return true }
     // hasattr must answer exactly what the getattr above can answer, or the
     // three-argument getattr - which asks this first - hands back its default for
@@ -7345,6 +7425,16 @@ function pyDMethodCall(target, name, args, kw) {
         if (pyIsCplx(target)) { return pyNewCplx(pyCplxRe(target), -pyCplxIm(target)) }
     }
     if (pyIsNumMethod(target, name)) { return pyNumMethod(target, name, args, kw) }
+    // Any other name on a number: a dunder of its type - (5).__add__(3) - is
+    // that type's delegate with the number as self, and everything else is
+    // CPython's AttributeError.
+    var ntn = pyNumTName(target)
+    if (ntn != "") {
+        var ndel = pyBDelegate(ntn, name)
+        if (ndel !== undefined) { return pyCallSelf(ndel, target, args) }
+        throw pyExcInstance("AttributeError",
+                            "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
+    }
     if (pyDForeign(target, name)) {
         // A REAL, catchable AttributeError and not fail(): CPython's is
         // catchable, and both other engines raise one (pyMethodCall in
@@ -7957,7 +8047,7 @@ function pySetAlgebra(els, name, args) {
 // pyBuiltinAttr in abnf/jsrt.go and in languages/python-interpreter.abnf.
 //
 // A builtin this project does not HAVE stays False on purpose - hasattr(1.0,
-// "from_number") is False here and True in CPython - because the alternative is
+// "fromhex") is False here and True in CPython - because the alternative is
 // hasattr answering True for a call that then aborts.
 function pyDBuiltinAttr(obj, name) {
     if (typeof obj == "string") { return pySIsStrMethod(name) }

@@ -3934,6 +3934,46 @@ def s71():
         r = str(e)
     check("nim9", r == "hexadecimal value too large to represent as a float" and float.fromhex("0x1p-1075") == 0.0 and float.fromhex("0x1.8p-1075") == 5e-324)
 
+# ===== SECTION 72: dunders called on a number =====
+# (5).__add__(3) is int's own __add__ with 5 as self; the conversion and rounding
+# dunders answer what the builtin they serve answers; any other name on a number
+# is a catchable AttributeError. The type object's own methods print as bound
+# built-in methods, and float.from_number takes a real number only. Rows from
+# CPython 3.14.
+def s72():
+    v = [5, 2.5, True, -0.0, 2**70, -7]
+    check("ndu1", v[0].__add__(3) == 8 and v[0].__radd__(1) == 6 and v[1].__mul__(2) == 5.0 and v[2].__add__(1) == 2 and v[5].__floordiv__(2) == -4 and v[5].__rmod__(10) == -4)
+    check("ndu2", [v[0].__str__(), v[1].__repr__(), v[2].__str__(), v[3].__str__(), v[4].__str__()] == ["5", "2.5", "True", "-0.0", "1180591620717411303424"])
+    check("ndu3", [x.__int__() for x in v[:3]] == [5, 2, 1] and repr(v[0].__float__()) == "5.0" and v[2].__index__() == 1 and repr(v[2].__pos__()) == "1" and v[5].__invert__() == 6 and v[4].__invert__() == -(2**70) - 1)
+    check("ndu4", repr(v[3].__neg__()) == "0.0" and repr(v[3].__abs__()) == "0.0" and repr(abs(v[3])) == "0.0" and repr(abs(v[2])) == "1" and v[5].__abs__() == 7 and v[0].__lt__(7) and v[0].__eq__(5) and v[0].__bool__())
+    w = [-2.5, 2.5, 7.0, 2.567]
+    check("ndu5", [x.__floor__() for x in w[:3]] == [-3, 2, 7] and [x.__ceil__() for x in w[:3]] == [-2, 3, 7] and [x.__trunc__() for x in w[:2]] == [-2, 2] and v[0].__floor__() == 5)
+    check("ndu6", w[1].__round__() == 2 and repr(w[3].__round__(2)) == "2.57" and repr(v[0].__round__(1)) == "5" and repr(round(v[2], 1)) == "1" and round(v[4]) == 2**70 and list(v[5].__divmod__(2)) == [-4, 1] and list(v[0].__rdivmod__(17)) == [3, 2] and v[0].__format__("03d") == "005")
+    msgs = []
+    for f in [lambda: v[0].nosuch(), lambda: v[1].__invert__(), lambda: v[2].foo, lambda: v[1].__index__(), lambda: (1 + 2j).foo()]:
+        try:
+            f()
+        except AttributeError as e:
+            msgs.append(str(e))
+    check("ndu7", msgs == ["'int' object has no attribute 'nosuch'", "'float' object has no attribute '__invert__'", "'bool' object has no attribute 'foo'",
+                           "'float' object has no attribute '__index__'", "'complex' object has no attribute 'foo'"])
+    m = getattr(v[0], "__mul__")
+    check("ndu8", m(7) == 35 and hasattr(v[0], "__add__") and hasattr(v[2], "__index__") and not hasattr(v[1], "__invert__") and not hasattr(v[0], "nosuch"))
+    class I(int):
+        pass
+    check("ndu9", I(5).__add__(1) == 6 and I(5).__str__() == "5" and abs(I(-3)) == 3 and I(4).__floor__() == 4)
+    check("ndu10", [repr(float.from_number(x)) for x in [3, 2.5, True, I(4)]] == ["3.0", "2.5", "1.0", "4.0"] and float.from_number(2**70) == 1.1805916207174113e+21)
+    msgs = []
+    for x in ["1.5", None, 1j]:
+        try:
+            float.from_number(x)
+        except TypeError as e:
+            msgs.append(str(e))
+    check("ndu11", msgs == ["must be real number, not str", "must be real number, not NoneType", "must be real number, not complex"])
+    check("ndu12", [repr(f).split(" at ")[0].rstrip(">") for f in [int.from_bytes, float.fromhex, dict.fromkeys, float.from_number]] ==
+          ["<built-in method from_bytes of type object", "<built-in method fromhex of type object", "<built-in method fromkeys of type object", "<built-in method from_number of type object"]
+          and float.from_number.__name__ == "from_number" and int.from_bytes.__self__ is int)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4006,5 +4046,6 @@ def main():
     s69() # SECTION-CALL 69
     s70() # SECTION-CALL 70
     s71() # SECTION-CALL 71
+    s72() # SECTION-CALL 72
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

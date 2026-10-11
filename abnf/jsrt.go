@@ -16562,6 +16562,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// and abs() of an arbitrary precision int stays exact.
 		"js_pyabs": func(a []uint64) uint64 {
 			v := u(a[0])
+			// abs(x) is type(x).__abs__(x): a class's own, or a builtin
+			// subclass's delegate.
+			if _, cls, ok := pyInstance(v); ok {
+				if m, found := pyLookup(cls, "__abs__"); found && isCallable(m) {
+					return w(rt.call(m, jsUndef, []interface{}{v}))
+				}
+			}
 			if re, im, ok := pyComplexParts(v); ok {
 				return w(&jsPyFlo{f: rt.pyCxAbs(re, im)})
 			}
@@ -16854,6 +16861,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyround": func(a []uint64) uint64 {
 			args := rt.argArray(u(a[0]))
 			v := argAt(args, 0)
+			// An int with no n, or with n >= 0, is already round: it comes back
+			// as the int it is, exactly.
+			if pyNumTypeName(v) == "int" && (len(args) < 2 || isUndefOrNull(args[1]) || rt.toNumber(args[1]) >= 0) {
+				return w(rt.pyIntNew([]interface{}{v}))
+			}
 			if len(args) < 2 || isUndefOrNull(args[1]) {
 				return w(pyRoundHalfEven(rt.pyToF(v), 0))
 			}
@@ -19320,8 +19332,10 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"module '"+rt.toString(mod.props["__pymod"])+"' has no attribute '"+name+"'")})
 	}
-	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
+	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys - is a
+	// built-in method bound to that type.
 	if m, ok := rt.pyBuiltinClsMethod(obj, name); ok {
+		m.(*hostFunc).pybm = &pyBoundInfo{name: name, self: obj, fn: nil, typ: "type"}
 		return m
 	}
 	if name == "__mro__" || name == "__bases__" {
@@ -19436,7 +19450,7 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	}
 	// A BOUND built-in method, so getattr(xs, "count")(1) is
 	// the 1 CPython answers rather than whatever getMember made of the name.
-	if rt.pyBuiltinAttr(obj, name) {
+	if rt.pyBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name) {
 		return rt.pyBoundBuiltin(obj, name)
 	}
 	// x.__class__ for a value that is not a user instance - the same synthetic
@@ -19908,6 +19922,15 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if pyIsNumMethod(target, name) {
 		return rt.pyNumMethod(target, name, args, kw)
 	}
+	// Any other name on a number: a dunder of its type - (5).__add__(3) - is
+	// that type's delegate with the number as self, and everything else is
+	// CPython's AttributeError.
+	if tn := pyNumTypeName(target); tn != "" {
+		if f, ok := pyBuiltinDelegate(tn, name); ok {
+			return rt.call(f, jsUndef, append([]interface{}{target}, args...))
+		}
+		rt.pyRaise("AttributeError", "'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")
+	}
 	if pyForeignMethod(target, name) {
 		// A REAL, catchable AttributeError and not rt.fail: CPython's is catchable,
 		// the interpreter half raises one (pyAttrErr in
@@ -20170,8 +20193,29 @@ func (rt *jsrt) pyBuiltinClsMethod(target interface{}, name string) (interface{}
 		return jsHostFunc("float.fromhex", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.pyFloatFromHex(rt.toString(argAt(args, 0)))
 		}), true
+	case "float.from_number":
+		return jsHostFunc("float.from_number", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyFloatFromNumber(argAt(args, 0))
+		}), true
 	}
 	return nil, false
+}
+
+// float.from_number(x): float(x) for a real number only - an int, a float, a
+// subclass of either, or an instance with __float__ or __index__; a string is
+// refused rather than parsed.
+func (rt *jsrt) pyFloatFromNumber(x interface{}) interface{} {
+	k := pyNumTypeName(pyUnwrapBuiltin(x))
+	real := k == "int" || k == "float"
+	if _, cls, ok := pyInstance(x); ok && !real {
+		_, f := pyLookup(cls, "__float__")
+		_, i := pyLookup(cls, "__index__")
+		real = f || i
+	}
+	if !real {
+		rt.pyRaise("TypeError", "must be real number, not "+pyTypeName(rt, x))
+	}
+	return rt.pyExt("js_pyfloat", x)
 }
 
 // dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
@@ -20560,7 +20604,7 @@ func (rt *jsrt) pySetAlgebra(els *jsArray, name string, args []interface{}) *jsA
 // pyBuiltinAttr in languages/python-interpreter.abnf.
 //
 // A builtin that this project does not HAVE stays False on purpose - hasattr(1.0,
-// "from_number") is False here and True in CPython - because the alternative is
+// "fromhex") is False here and True in CPython - because the alternative is
 // hasattr answering True for a call that then aborts.
 func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if _, isStr := target.(string); isStr {
@@ -21055,7 +21099,7 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 	}
 	// The BUILT-IN methods of str / list / dict / set, and
 	// __class__, which EVERY value has (None.__class__ is NoneType).
-	if name == "__class__" || rt.pyBuiltinAttr(obj, name) {
+	if name == "__class__" || rt.pyBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name) {
 		return true
 	}
 	if _, ok := pyNumAttr(obj, name); ok {

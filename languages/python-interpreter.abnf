@@ -85,7 +85,7 @@ Known deviations, all deliberate:
     the dispatcher can run: list has all eleven of its methods, str has the
     library in abnf/pystrmethod.go, dict has keys/values/items/get/pop/clear/
     copy/setdefault/update, and set has add/pop/clear/copy/remove/discard/union/
-    update - so hasattr of a float and from_number is False here and True in CPython, and
+    update - so hasattr of a float and fromhex is False here and True in CPython, and
     a set's intersection/difference/issubset are still only the OPERATORS & - <=.
     A bound method from getattr() does NOT carry keyword arguments:
     getattr(xs, sort)(reverse=True) is not xs.sort(reverse=True), and
@@ -1677,10 +1677,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // println is the harness\'s own one-value printer, used by the ratchet files.
     hostGlobals["println"] = function(x) { println(pstr(x)) }
     // abs() keeps the type: abs(-2) is the int 2, abs(-1.5) the float 1.5.
+    // A bool answers an int, abs(-0.0) is 0.0, and an instance answers its
+    // type's __abs__ (a builtin subclass's is a delegate).
     hostGlobals["abs"] = function(v) {
+        if (pyUser(v)) {
+            var af = clsFind(v.__class, "__abs__")
+            if (af != null) { return af(v) }
+        }
         if (isCplx(v)) { return cplxAbs(v) }
-        if (isFlo(v)) { var f = v.__flo; return pyFlo(f < 0 ? floNegate(f) : f) }
+        if (isFlo(v)) { var f = v.__flo; return pyFlo(f < 0 || 1 / f < 0 ? floNegate(f) : f) }
         if (pyBoxed(v)) { return pytruthy(binOp("<", v, 0)) ? binOp("-", 0, v) : v }
+        if (typeof v == "boolean") { return v ? 1 : 0 }
         return v < 0 ? -v : v
     }
     // max/min over the arguments, or over a single iterable one - the same shape
@@ -1911,7 +1918,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // round(2.5) is 2 - which a Math.floor(x + 0.5) spelling gets wrong on every
     // other integer. pyFixed is this grammar's exact decimal formatter and rounds
     // half to even by construction (docs/working-on-this-project.md 7.7).
+    // An int with no n, or with n >= 0, is already round: it comes back as the
+    // int it is, exactly.
     hostGlobals["round"] = function(x, nd) {
+        if (pyNumTName(x) == "int" && (nd === undefined || nd === null || floVal(nd) >= 0)) { return pyConvert("int", [x], null) }
         var f = floVal(x)
         if (nd === undefined || nd === null) { return parseFloat(pyFixed(f, 0)) }
         var n = Math.trunc(floVal(nd))
@@ -2109,7 +2119,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The BUILT-IN methods of str / list / dict / set, and
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
-        if (pyBuiltinAttr(o, name)) { return true }
+        if (pyBuiltinAttr(o, name) || pyNumDunderAttr(o, name)) { return true }
         if (pyNumAttr(o, name) !== undefined) { return true }
         // A SET's internal keys/vals arrays are not attributes (Go's set object
         // carries them under different names, so hasattr(s, "keys") must be False
@@ -2144,7 +2154,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // in languages/lib/python-rt.metajs.
     //
     // A builtin this project does not HAVE stays False on purpose - hasattr(1.0,
-    // "from_number") is False here and True in CPython - because the alternative
+    // "fromhex") is False here and True in CPython - because the alternative
     // is hasattr answering True for a call that then aborts.
     function pyBuiltinAttr(o, name) {
         if (typeof o == "string") { return pySIsStrMethod(name) }
@@ -2154,6 +2164,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isDict(o)) { return pyIsDictMethod(name) }
         if (name == "conjugate" && isCplx(o)) { return true }
         return pyIsNumMethod(o, name)
+    }
+    // A dunder a NUMBER answers through its type's delegate - (5).__add__ - for
+    // the receiver sites only: a type object's own dunders stay delegates, which
+    // unwrap a subclass instance.
+    function pyNumDunderAttr(o, name) {
+        var ntn = pyNumTName(o)
+        return ntn != "" && pyIsDunder(name) && pyBDelegate(ntn, name) != null
     }
     // What getattr() hands back for one of those names: CPython's `<built-in
     // method count of list object ...>`, spelled here as a closure that re-enters
@@ -2410,9 +2427,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < a.length; i++) { dictSet(d, a[i], dv) }
         return d
     }
-    // The methods a builtin TYPE OBJECT itself carries, as a callable value. Only
-    // dict.fromkeys so far, and it is the reason this exists at all: its receiver
-    // is the type rather than an instance, so it reaches neither the dict
+    // The methods a builtin TYPE OBJECT itself carries, as a callable value -
+    // dict.fromkeys, int.from_bytes, float.fromhex and float.from_number. The
+    // receiver is the type rather than an instance, so it reaches neither the dict
     // dispatcher nor a class MRO, and each of the three engines resolves a class
     // attribute in an arm of its own. Keep in step with pyBuiltinClsMethod in
     // abnf/jsrt.go and in languages/lib/python-rt.metajs.
@@ -2431,6 +2448,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (cls.__name == "float" && name == "fromhex") {
             return function(s) { return pyFloatFromHex(s) }
+        }
+        if (cls.__name == "float" && name == "from_number") {
+            return function(x) { return pyFloatFromNumber(x) }
         }
         return null
     }
@@ -2981,7 +3001,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "__ne__") { return function(self, o) { return !pyEq(pyBDelSelf(self), o) } }
         if (num) {
             if (name == "__bool__") { return function(self) { return pytruthy(pyBDelSelf(self)) } }
-            if (name == "__neg__") { return function(self) { return binOp("-", 0, pyBDelSelf(self)) } }
+            if (name == "__neg__") {
+                return function(self) {
+                    var x = pyBDelSelf(self)
+                    if (isFlo(x)) { return pyFlo(floNegate(x.__flo)) }
+                    return binOp("-", 0, x)
+                }
+            }
+            var nd = pyNumDunder(tname, name)
+            if (nd != null) { return nd }
         } else {
             if (name == "__len__") { return function(self) { return hostGlobals["len"](pyBDelSelf(self)) } }
             if (name == "__iter__") { return function(self) { return hostGlobals["iter"](pyBDelSelf(self)) } }
@@ -3015,6 +3043,52 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (op != "<" && op != ">" && op != "<=" && op != ">=" && name == "__r" + dn.substring(2)) { return pyBDelBin(op, true) }
         }
         return null
+    }
+    // int's and float's conversion and rounding dunders, each the builtin it
+    // serves applied to the value: str(x) of a number is its repr, and floor and
+    // ceil step int()'s truncation (which also raises CPython's error for an
+    // infinity or a NaN). __index__ and __invert__ are int's alone. Twin of
+    // pyNumDunder in abnf/jsrtpysub.go and lib/python-rt.metajs.
+    function pyNumDunder(tname, name) {
+        var isInt = tname == "int"
+        if (name == "__str__") { return function(self) { return prepr(pyBDelSelf(self)) } }
+        if (name == "__int__" || name == "__trunc__" || (isInt && name == "__index__")) {
+            return function(self) { return pyConvert("int", [pyBDelSelf(self)], null) }
+        }
+        if (name == "__pos__") {
+            if (isInt) { return function(self) { return pyConvert("int", [pyBDelSelf(self)], null) } }
+            return function(self) { return pyBDelSelf(self) }
+        }
+        if (name == "__floor__" || name == "__ceil__") {
+            var up = name == "__ceil__"
+            return function(self) {
+                var x = pyBDelSelf(self)
+                var t = anytype
+                t = pyConvert("int", [x], null)
+                if (!up && pytruthy(binOp("<", x, t))) { return binOp("-", t, 1) }
+                if (up && pytruthy(binOp(">", x, t))) { return binOp("+", t, 1) }
+                return t
+            }
+        }
+        if (name == "__float__") { return function(self) { return pyConvert("float", [pyBDelSelf(self)], null) } }
+        if (name == "__abs__") { return function(self) { return hostGlobals["abs"](pyBDelSelf(self)) } }
+        if (isInt && name == "__invert__") { return function(self) { return pyInvert(pyBDelSelf(self)) } }
+        if (name == "__round__") { return function(self, n) { return hostGlobals["round"](pyBDelSelf(self), n) } }
+        if (name == "__divmod__") { return function(self, o) { return hostGlobals["divmod"](pyBDelSelf(self), o) } }
+        if (name == "__rdivmod__") { return function(self, o) { return hostGlobals["divmod"](o, pyBDelSelf(self)) } }
+        if (name == "__format__") { return function(self, spec) { return hostGlobals["format"](pyBDelSelf(self), spec) } }
+        return null
+    }
+    function pyIsDunder(name) {
+        return name.length > 4 && name.substring(0, 2) == "__" && name.substring(name.length - 2) == "__"
+    }
+    // The builtin numeric type a value is - "int" (a bool included), "float",
+    // "complex" - or "".
+    function pyNumTName(v) {
+        if (typeof v == "number" || typeof v == "boolean" || bigIsBig(v)) { return "int" }
+        if (isFlo(v)) { return "float" }
+        if (isCplx(v)) { return "complex" }
+        return ""
     }
     // The builtin value a delegate works on: an instance's __val, or a plain
     // value of the type itself (str.__repr__("x")).
@@ -5134,6 +5208,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // conjugate() of a complex flips the sign of its imaginary part.
         if (name == "conjugate" && isCplx(target)) { return pyCplx(target.real, -target.imag) }
         if (pyIsNumMethod(target, name)) { return pyNumMethod(target, name, args, kw) }
+        // Any other name on a number: a dunder of its type - (5).__add__(3) -
+        // is that type's delegate with the number as self, and everything else
+        // is CPython's AttributeError.
+        var ntn = pyNumTName(target)
+        if (ntn != "") {
+            var ndel = pyBDelegate(ntn, name)
+            if (ndel != null) { return ndel.apply(undefined, [target].concat(args)) }
+            pyAttrErr(target, name)
+        }
         if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
         fail("method call ." + name + "() on " + pstr(target))
     }
@@ -9919,9 +10002,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // C.mro(), type's own method: the resolution order as a fresh list.
             if (name == "mro") { return function() { return pyMroAttr(o, "__mro__") } }
-            // A method the TYPE OBJECT itself carries - dict.fromkeys.
+            // A method the TYPE OBJECT itself carries - dict.fromkeys - is a
+            // built-in method bound to that type.
             var bcm = pyBuiltinClsMethod(o, name)
-            if (bcm != null) { return bcm }
+            if (bcm != null) { return pyBMSet(bcm, name, o, null) }
             // list.count / str.upper / dict.get read off the BUILTIN type object:
             // an unbound method descriptor.
             if (o.__builtin == true) {
@@ -9955,7 +10039,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // literally has a "keys" property holding its key ARRAY, and CPython's
         // d.keys is the method. x.__class__ is the same class object type(x)
         // hands out, so `[].__class__ is list` holds.
-        if (pyBuiltinAttr(o, name)) { return pyBoundBuiltin(o, name) }
+        if (pyBuiltinAttr(o, name) || pyNumDunderAttr(o, name)) { return pyBoundBuiltin(o, name) }
         if (name == "__class__") { return pyTypeOf(o) }
         if (isSet(o)) { pyAttrErr(o, name) }
         if (typeof o == "object" && hasOwn(o, name)) {
@@ -10145,6 +10229,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (r == "invalid") { pyListErr("ValueError", "invalid hexadecimal floating-point string") }
         if (r == "overflow") { pyListErr("OverflowError", "hexadecimal value too large to represent as a float") }
         return pyFlo(r)
+    }
+    // float.from_number(x): float(x) for a real number only - an int, a float, a
+    // subclass of either, or an instance with __float__ or __index__; a string is
+    // refused rather than parsed.
+    function pyFloatFromNumber(x) {
+        var k = pyNumTName(pyBDelSelf(x))
+        var real = k == "int" || k == "float"
+        if (!real && pyUser(x)) { real = clsFind(x.__class, "__float__") != null || clsFind(x.__class, "__index__") != null }
+        if (!real) { pyListErr("TypeError", "must be real number, not " + pyTypeOf(x).__name) }
+        return pyConvert("float", [x], null)
     }
     function pyNumAttr(o, name) {
         if (isFlo(o)) {
