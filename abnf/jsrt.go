@@ -1658,7 +1658,8 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	case float64:
 		return t
 	case string:
-		s := strings.TrimSpace(t)
+		// ASCII white space only, as str_to_num's is_space: " 12" is NaN.
+		s := strings.Trim(t, " \t\n\v\f\r")
 		if s == "" {
 			return 0
 		}

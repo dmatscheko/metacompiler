@@ -1824,6 +1824,9 @@ function s33() {
     var ys = ["0x10", "0b101", "0o17", "0x1p4", "inf"]
     check("sn08", ys[0] - 0 !== ys[0] - 0 && ys[1] * 1 !== ys[1] * 1 && ys[2] / 1 !== ys[2] / 1)
     check("sn09", !(ys[0] == 16) && !(ys[0] < 17) && -ys[3] === -16 && (ys[3] | 0) === 16 && ys[4] > 1)
+    // Only ASCII white space is trimmed: a no-break space is not.
+    var zs = [String.fromCharCode(160) + "12", String.fromCharCode(9, 11, 12, 13) + "12 "]
+    check("sn10", zs[0] * 1 !== zs[0] * 1 && zs[1] * 1 === 12)
 }
 
 function main() {
