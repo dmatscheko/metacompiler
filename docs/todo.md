@@ -180,7 +180,7 @@ Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
 
-### T-322 kotlin: decimal `toFloat` rounds through double · P1 · KT · OPEN [V]
+### T-322 kotlin: decimal `toFloat` rounds through double · P1 · KT · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
 `"1.00000005960464477539062500000001".toFloat()` and `"1.0000000596046448".toFloat()`
 give 1.0 in all engines; Float.parseFloat (the jar) 1.0000001. Round once to binary32.
 
@@ -201,7 +201,7 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-321 go: pointer identity, `f(ys...)` on Println, re-panic suffix, errors.As · P1 · GO · OPEN [V]
+### T-321 go: pointer identity, `f(ys...)` on Println, re-panic suffix, errors.As · P1 · GO · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
 `&T{1} == &T{1}` is true in both engines (go false; struct pointers compare by field),
 so `errors.Is(err, find(0))` is wrong; `fmt.Println(ys...)` dies "TypeError: Not a
 function" in the interpreter (check the compiler); an uncaught re-panic lacks go
@@ -212,7 +212,7 @@ pointer's static type). Related value-model limit: T-266.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-327 swift: `d["k"] = nil`; mutating String methods · P1 · SW · OPEN [V]
+### T-327 swift: `d["k"] = nil`; mutating String methods · P1 · SW · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
 `d["k"] = nil` does not remove the key (swiftc `d.count` 0, ours 1; compiled path is the
 shared js_pyset - use a swift-specific store). `s.append("c")` and the other mutating
 String methods abort "unknown String method: append" (swiftc `abc`).
@@ -221,7 +221,7 @@ String methods abort "unknown String method: append" (swiftc `abc`).
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-323 dart: String remainder; layer 2 indexes strings by code point · P1 · DA · OPEN [V spec-only]
+### T-323 dart: String remainder; layer 2 indexes strings by code point · P1 · DA · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V spec-only]
 dart layer 2 indexes by code point (dtStrAt / dtStrRange) while the twin and the
 interpreter use UTF-16 units: `"a\u{1F600}b".substring(3)` is "b" interpreted and
 under llvm.Run, "" natively - a halves divergence. Left from T-282: `runes` (an
@@ -255,7 +255,7 @@ see T-293.)
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-320 bash: positional-parameter operator forms · P1 · SH · OPEN [V]
+### T-320 bash: positional-parameter operator forms · P1 · SH · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
 Interpreter: `set -- "a b" c "" d; printf '<%s>' "${@:2}"` gives `< bcd>` (bash
 `<c><><d>`); same for "${*:2}", ${*@Q}/${@@Q} (empty), ${*:-x}/${@:-x} (answer x),
 ${*/c/C}, ${*#c}. "${!Z@}" one field (bash <Zq><Zw>); the compiler does not parse
