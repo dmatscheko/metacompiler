@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-332** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-336** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -98,6 +98,10 @@ does not parse. Compiled: reopening a class builds a new class object (earlier c
 @ivars lost); a module body's @ivars land on main. A Range/Enumerator NoMethodError
 names the Array it delegates to (MRI `1..3:Range`); NoMethodError#name missing.
 
+### T-335 ruby: `casecmp` folds Unicode · P1 · RB · OPEN [V]
+`"İstanbul".casecmp("STRASSE")` gives -1; MRI 1 (`casecmp` folds ASCII only and
+compares bytes; `casecmp?` folds Unicode).
+
 ---
 
 # JS — JavaScript and TypeScript
@@ -145,6 +149,15 @@ exercise; `[1].push` read as a value is bound under -frozen/compiled but takes `
 receivers under goja; `const f = "ab".toString; f.call([1])` aborts the goja
 interpreter with a host error (node TypeError). Close the host leak and give every
 leg node's answers.
+
+### T-332 js: a surrogate-pair escape inside one literal in the interpreter · P1 · JS · OPEN [V]
+`"\uD83D\uDE00".charCodeAt(0)` gives 65533 (twice) in the js interpreter under both
+hosts; node 55357. Separate literals joined with + work; both compiler halves are
+right.
+
+### T-333 js: InGen rescans the whole prefix per call · P3 · JS · OPEN [V]
+The remaining -frozen memory/time cost of js-test-full.js part 1 (1.2 GB after slot
+reuse): make InGen incremental in the js grammars.
 
 ---
 
@@ -261,6 +274,10 @@ ${*/c/C}, ${*#c}. "${!Z@}" one field (bash <Zq><Zw>); the compiler does not pars
 ${x:-$*} / ${x:-$@} is flattened with spaces under a null IFS (bash keeps fields).
 (bash 5.3 leaks \x01 into `${a[*]%d}` under a null IFS - a bash bug, not mirrored.)
 
+### T-334 bash: `${x,,}` / `${x@L}` leave Σ and İ unchanged · P1 · SH · OPEN [V]
+bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
+bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
+
 ---
 
 # C — C subset
@@ -283,38 +300,6 @@ The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
 `pyInstClassOf`, `rbUserObj`, `rbIsClassObj`. Each needs its own call-site sizing and
 a measurement against a dead-code matched control (tests/bench.sh header). Never
 introduce a delegating wrapper on a hot path: that cost python +41% once.
-
-### T-284 full case mapping (`"ß".upper()` is `SS`) · P2 · CORE · IN PROGRESS (CORE worker, round 5) [V]
-Hosts, Go twins and the floor implement the simple per-rune mapping. Full mapping
-(SpecialCasing + Final_Sigma) natively in C, then per language: python/ruby/swift/
-kotlin/java/js want full, C#/Go want simple. metajs cm03-cm05 and cm08 assert the
-simple answer node contradicts - correct them with the change.
-
-### T-285 -frozen js memory, remainder · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
-js-test-full.js part 1 under -frozen still needs 5.3 GB: a released handle-table slot
-is never reused (by design, so a failed analysis fails loudly), and InGen rescans the
-whole prefix per call. Decide slot reuse, or make InGen incremental.
-
-### T-286 -callgraph: a definition's line in the other languages · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
-js, ts, metajs, java, kotlin, go, lua and the rest still name a definition by its
-body's line: their markers are `up.pos`, the END of the node. Needs the engine to
-expose a tag's start position (`up.start`, past whitespace) in compiler.go and
-frozen.go; that also changes -trace/-why line attribution.
-
-### T-287 layer 2 `rtABigDivMag` binary-searches each quotient limb · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
-The interpreters now estimate the limb (magQuotEst); runtime.metajs's native twin
-still searches. Port the estimate and bench.
-
-### T-288 js-to-llvm-ir under goja turns a lone `\uD800` literal into U+FFFD · P1 · CORE · IN PROGRESS (CORE worker, round 5) [V]
-`u === "\uD800A\uDC00"` is false under goja and natively, true under -frozen: the
-literal is handed to Go as a UTF-8 string. A goja-vs-frozen divergence in the
-emitted module. Carry lone surrogates through the goja bridge (WTF-8).
-
-### T-289 native `d_asin` loses precision near 1 · P1 · CORE · Shared: runtime.c · IN PROGRESS (CORE worker, round 5) [V]
-`1 - x*x` cancels (Go fuses it into an FMA on arm64): native math.asin is off by up to
-907 ulps near 1; run vs native differ on 95/150 rows. `(1-x)*(1+x)` avoids it. Repro:
-python `math.asin(x/(1+x))` for x = 37.9365... gives 1.3436684803445726, CPython
-...729. Check d_acos and the other d_* for the same shape.
 
 ### T-293 correctly rounded transcendentals · P3 · CORE · OPEN [V]
 CPython (Apple libm) and MRI are correctly rounded on exp/log/pow and nearly so on
@@ -562,6 +547,12 @@ T-311 python: ordering across kinds does not raise — DONE 91496f3
 T-312 python: `str.split(sep=)`, `str.encode()`, no-argument constructors — PARTIAL 2ad3dec (keywords, encode, no-arg constructors, Unicode digits); bytes()/frozenset are T-330; the "Did you mean" suffix DECLINED: CPython adds it only to its own traceback, which no engine here prints
 T-313 php: partial application of a method declared with different arities — DONE bddc9e3 (spec-only)
 T-314 lua: `next()` is a stub compiled; `tostring`/`tonumber`/`type`/`table.concat` missing — DONE 158badc
+T-284 full case mapping (`"ß".upper()` is `SS`) — DONE fb749a8 (one mapper: abnf/casemap.go + runtime.c case_str; full for js/ts/metajs/python/java/kotlin/ruby/swift, simple for C#/dart/bash)
+T-285 -frozen js memory, remainder — PARTIAL 92b173d (handle slots reused after a quarantine: 5.3 GB → 1.2 GB); incremental InGen is T-333
+T-286 -callgraph: a definition's line in the other languages — DONE 235e3e5 e645a3b (up.start; all 13 handle-IR languages)
+T-287 layer 2 `rtABigDivMag` binary-searches each quotient limb — DONE 55bd00d (258e9 → 34e9 instructions on a bigint-division probe)
+T-288 js-to-llvm-ir under goja turns a lone `\uD800` literal into U+FFFD — DONE d1b1a42
+T-289 native `d_asin` loses precision near 1 — DONE 2dd1438
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
