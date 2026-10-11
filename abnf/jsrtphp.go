@@ -418,12 +418,16 @@ func phpClassFind(cls interface{}, name string) interface{} {
 // phpPlaceArgs lays a call's arguments out in the parameter positions of a callee
 // known only at run time. sig is the parameter list the emitter recorded in the
 // function's meta name (withSig in php-to-llvm-ir.abnf): the names without '$',
-// comma separated, the variadic one spelled "...name"; "" when nothing was
-// recorded. args is the runtime list of a plain call, or the PHP array a call with
-// named arguments or a spread collected (positional entries under integer keys,
-// named ones under their names). A parameter takes its position's argument, else
-// the argument named for it, else undefined (its default); the variadic one
-// collects the remaining positions and every named argument no parameter took.
+// comma separated, the variadic one spelled "...name"; ")" for a function with no
+// parameters, "" when nothing was recorded. args is the runtime list of a plain
+// call, or the PHP array a call with named arguments or a spread collected
+// (positional entries under integer keys, named ones under their names). A
+// parameter takes its position's argument, else the argument named for it, else
+// undefined (its default); the variadic one collects the remaining positions and
+// every named argument no parameter took. Against a known list, a named argument
+// that no parameter declares and no variadic collects raises "Unknown named
+// parameter", and one naming a parameter a position already filled raises
+// "overwrites previous argument", both in argument order.
 // Twin of js_phplace in languages/lib/php-rt.metajs.
 func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 	list, isList := args.(*jsArray)
@@ -452,6 +456,29 @@ func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 		return out
 	}
 	params := strings.Split(sig, ",")
+	if sig == ")" {
+		params = nil
+	}
+	for _, k := range keys.elems {
+		name, isName := k.(string)
+		if !isName {
+			continue
+		}
+		at, variadic := -1, false
+		for pi, p := range params {
+			if strings.HasPrefix(p, "...") {
+				variadic = true
+			} else if p == name {
+				at = pi
+			}
+		}
+		if at < 0 && !variadic {
+			rt.phpRaise("Error", "Unknown named parameter $"+name)
+		}
+		if at >= 0 && phpKeyIndex(keys, float64(at)) >= 0 {
+			rt.phpRaise("Error", "Named parameter $"+name+" overwrites previous argument")
+		}
+	}
 	taken := map[string]bool{}
 	for pi, p := range params {
 		if strings.HasPrefix(p, "...") {
@@ -2218,8 +2245,13 @@ func init() {
 			i := int(rt.toNumber(u(a[1])))
 			return boolH((jsvFnMeta(u(a[0])).length>>uint(i))&1 == 1)
 		}
+		// An object called as a function places its arguments for its __invoke.
 		m["js_phplace"] = func(a []uint64) uint64 {
-			return w(rt.phpPlaceArgs(jsvFnMeta(u(a[0])).name, u(a[1])))
+			f := u(a[0])
+			if _, isObj := f.(*jsObject); isObj {
+				f = rt.phpMethodOf(f, "__invoke")
+			}
+			return w(rt.phpPlaceArgs(jsvFnMeta(f).name, u(a[1])))
 		}
 		// (clo, target, name) -> clo, carrying the meta of the method `name` of
 		// target (an object, or a class for a static method): a closure that
@@ -2237,6 +2269,32 @@ func init() {
 		// js_phmplace in languages/lib/php-rt.metajs.
 		m["js_phmplace"] = func(a []uint64) uint64 {
 			return w(rt.phpPlaceArgs(jsvFnMeta(rt.phpMethodOf(u(a[0]), u(a[1]))).name, u(a[2])))
+		}
+		// (name, self, static) -> the class a run-time class name the scope did not
+		// declare denotes: self / static / parent through the frame's classes (null
+		// outside a class), else PHP 8's catchable Error. Twin of resolveClassName in
+		// php-interpreter.abnf and of js_phclassmiss in languages/lib/php-rt.metajs.
+		m["js_phclassmiss"] = func(a []uint64) uint64 {
+			name := rt.phpStr(u(a[0]))
+			if name == "self" || name == "static" || name == "parent" {
+				cls := u(a[1])
+				if name == "static" {
+					cls = u(a[2])
+				}
+				o, ok := cls.(*jsObject)
+				if !ok {
+					rt.phpRaise("Error", "Cannot use \""+name+"\" when no class scope is active")
+				}
+				if name != "parent" {
+					return w(o)
+				}
+				if sup, has := o.props["__super"]; has && sup != nil && sup != jsUndef {
+					return w(sup)
+				}
+				rt.phpRaise("Error", "Cannot use \"parent\" when current class scope has no parent")
+			}
+			rt.phpRaise("Error", "Class \""+name+"\" not found")
+			return 0
 		}
 		// `new C`: the class is initialized before its first instance (phpClassInit).
 		m["js_phsinit"] = func(a []uint64) uint64 {
@@ -2405,6 +2463,14 @@ func init() {
 		}
 		m["js_phtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpTypeName(u(a[0]))) }
 		m["js_phdtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDebugType(u(a[0]))) }
+		// (o, key): writing a property of anything but an object raises PHP 8's
+		// catchable Error. Twin of js_phsetchk in languages/lib/php-rt.metajs.
+		m["js_phsetchk"] = func(a []uint64) uint64 {
+			if o := u(a[0]); !phpIsObj(o) {
+				rt.phpRaise("Error", "Attempt to assign property \""+phpPropName(rt.phpStr(u(a[1])))+"\" on "+rt.phpDebugType(o))
+			}
+			return 0
+		}
 		m["js_phdump"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDump(u(a[0]), 0)) }
 		// echo v: PHP writes the string's BYTES, so a held byte goes out as that
 		// one byte. Twin of phsEcho in languages/lib/php-strings.js.

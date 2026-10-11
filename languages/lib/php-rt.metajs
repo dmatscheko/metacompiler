@@ -2157,6 +2157,14 @@ function js_phis(kind, v) {
 
 function js_phtype(v) { return phTypeName(v) }
 function js_phdtype(v) { return phDebugType(v) }
+// Writing a property of anything but an object raises PHP 8's catchable Error.
+// Twin of js_phsetchk in abnf/jsrtphp.go.
+function js_phsetchk(o, k) {
+    if (!phIsObj(o)) {
+        phRaise("Error", "Attempt to assign property \"" + phPropName(phStr(k)) + "\" on " + phDebugType(o))
+    }
+    return undefined
+}
 function js_phdump(v) { return phDump(v, 0) }
 
 // method_exists over the __mlc lists of the class chain; v is an object, a class
@@ -2227,9 +2235,11 @@ function js_phrefat(f, i) { return Math.floor(fnMeta(f, "length") / Math.pow(2, 
 // run time, from the parameter list recorded in its meta name (withSig in
 // php-to-llvm-ir.abnf). Twin of phpPlaceArgs in abnf/jsrtphp.go, which documents
 // the rule.
+// An object called as a function places its arguments for its __invoke.
 function js_phplace(f, args) {
     var sig = anytype
-    sig = fnMeta(f, "name")
+    if (typeof f == "object" && f !== null) { sig = fnMeta(phMethodOf(f, "__invoke"), "name") }
+    else { sig = fnMeta(f, "name") }
     if (typeof sig != "string") { sig = "" }
     return js_phplacesig(sig, args)
 }
@@ -2276,9 +2286,11 @@ function js_phplacesig(sig, args) {
         }
         return out
     }
+    phCheckNamed(sig, p)
     var taken = {}
     var pi = 0
     var from = 0
+    if (sig == ")") { from = 1 }
     while (from <= sig.length) {
         var to = sig.indexOf(",", from)
         if (to < 0) { to = sig.length }
@@ -2319,6 +2331,34 @@ function js_phplacesig(sig, args) {
         i = i + 1
     }
     return out
+}
+// The named-argument errors of a placement against a known parameter list (")" is
+// the empty one), in argument order. Twin of the check in phpPlaceArgs in
+// abnf/jsrtphp.go.
+function phCheckNamed(sig, p) {
+    var i = 0
+    while (i < p.k.length) {
+        if (typeof p.k[i] == "string") {
+            var at = 0 - 1
+            var variadic = false
+            var pi = 0
+            var from = 0
+            if (sig == ")") { from = 1 }
+            while (from <= sig.length) {
+                var to = sig.indexOf(",", from)
+                if (to < 0) { to = sig.length }
+                var pn = sig.substring(from, to)
+                from = to + 1
+                if (pn.substring(0, 3) == "...") { variadic = true } else if (pn == p.k[i]) { at = pi }
+                pi = pi + 1
+            }
+            if (at < 0 && !variadic) { phRaise("Error", "Unknown named parameter $" + p.k[i]) }
+            if (at >= 0 && phKeyIndex(p.k, at) >= 0) {
+                phRaise("Error", "Named parameter $" + p.k[i] + " overwrites previous argument")
+            }
+        }
+        i = i + 1
+    }
 }
 // A runtime list may carry the CELL of a by-reference argument, which has to arrive
 // as it is; a collected PHP array holds values.
@@ -2534,6 +2574,25 @@ function phClassInit(cls) {
         cls["__sinit"] = null
     }
     cls["__ready"] = true
+}
+// The class a run-time class name the scope did not declare denotes: self / static
+// / parent through the frame's classes (null outside a class), else PHP 8's
+// catchable Error. Twin of js_phclassmiss in abnf/jsrtphp.go.
+function js_phclassmiss(name, self, stat) {
+    var nm = phStr(name)
+    if (nm == "self" || nm == "static" || nm == "parent") {
+        var cls = anytype
+        cls = nm == "static" ? stat : self
+        if (cls === null || typeof cls != "object") {
+            phRaise("Error", "Cannot use \"" + nm + "\" when no class scope is active")
+        }
+        if (nm != "parent") { return cls }
+        var sup = cls["__super"]
+        if (sup !== undefined && sup !== null) { return sup }
+        phRaise("Error", "Cannot use \"parent\" when current class scope has no parent")
+    }
+    phRaise("Error", "Class \"" + nm + "\" not found")
+    return undefined
 }
 // `new C`: the class is initialized before its first instance.
 function js_phsinit(target) {

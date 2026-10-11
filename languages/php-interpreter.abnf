@@ -1626,6 +1626,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (v === APPEND_READ) { phpRaise("Error", "Cannot use [] for reading") }
         return v
     }
+    // Twin of emitArgTmp's check in php-to-llvm-ir.abnf.
+    function namedTwice(nk) { phpRaise("Error", "Named parameter " + nk + " overwrites previous argument") }
     function evalArgs(args) {
         var pos = []
         var named = {}
@@ -1654,7 +1656,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     for (var j = 0; j < sv.keys.length; j++) {
                         if (typeof sv.keys[j] == "number") { pos.push(deref(sv.vals[j])); tgts.push(null) }
                         else {
-                            if (!hasOwn(named, "$" + sv.keys[j])) { nkeys.push("$" + sv.keys[j]) }
+                            if (hasOwn(named, "$" + sv.keys[j])) { namedTwice("$" + sv.keys[j]) }
+                            nkeys.push("$" + sv.keys[j])
                             scopePut(named, "$" + sv.keys[j], deref(sv.vals[j]))
                             hasNamed = true
                         }
@@ -1663,8 +1666,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 continue
             }
             if (a.argname != undefined) {
-                if (!hasOwn(named, "$" + a.argname)) { nkeys.push("$" + a.argname) }
-                scopePut(named, "$" + a.argname, a.argval())
+                var nv = anytype
+                nv = a.argval()
+                if (hasOwn(named, "$" + a.argname)) { namedTwice("$" + a.argname) }
+                nkeys.push("$" + a.argname)
+                scopePut(named, "$" + a.argname, nv)
                 hasNamed = true
                 continue
             }
@@ -1672,6 +1678,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here))
         }
         return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, fcc: fcc, holes: holes}
+    }
+    // A named argument that no parameter declares and no variadic collects raises,
+    // and so does one naming a parameter a positional argument already filled; both
+    // in argument order. Twin of the check in phpPlaceArgs (abnf/jsrtphp.go).
+    function checkNamedArgs(params, argset) {
+        for (var q = 0; q < argset.nkeys.length; q++) {
+            var nk = argset.nkeys[q]
+            var at = -1
+            var variadic = false
+            for (var r = 0; r < params.length; r++) {
+                if (params[r].variadic === true) { variadic = true }
+                else if (params[r].name == nk) { at = r }
+            }
+            if (at < 0 && !variadic) { phpRaise("Error", "Unknown named parameter " + nk) }
+            if (at >= 0 && at < argset.pos.length) { phpRaise("Error", "Named parameter " + nk + " overwrites previous argument") }
+        }
     }
     // A by-reference parameter needs the CALLER's cell, but binding happens after
     // the frame switch - so the maker restores the caller's chain for the lookup.
@@ -1688,6 +1710,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function bindParams(params, argset) {
         var pos = argset.pos
         var named = argset.named
+        if (named != null) { checkNamedArgs(params, argset) }
         for (var i = 0; i < params.length; i++) {
             var p = params[i]
             // The variadic parameter collects the remaining positions, then every
@@ -3463,7 +3486,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof cur == "function") { return cur(argset) }
         if (typeof cur == "string") {
             var sep = cur.indexOf("::")
-            if (sep > 0) {
+            if (sep >= 0) {
                 var cn = cur.substring(0, sep)
                 return staticCall(resolveClassName(cn), cur.substring(sep + 2), argset, cn)
             }
@@ -3538,26 +3561,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function ctxStatic() { return varExists(STATIC_KEY) ? getVar(STATIC_KEY) : null }
 
     // The class descriptor a '::' base names. self / static / parent read the running
-    // call's context; anything else is an ordinary class name.
+    // call's context; anything else is an ordinary class name. A relative name with
+    // no class scope, and a class that does not exist, are PHP 8's catchable Errors.
+    // Twin of php_class_named in php-to-llvm-ir.abnf.
     function resolveClassName(name) {
-        if (name == "self") {
-            var s = ctxSelf()
-            if (s == null) { fail("cannot use 'self' outside a class") }
-            return s
-        }
-        if (name == "static") {
-            var t = ctxStatic()
-            if (t == null) { fail("cannot use 'static' outside a class") }
-            return t
-        }
-        if (name == "parent") {
-            var p = ctxSelf()
-            if (p == null || p.__super == null || p.__super == undefined) { fail("cannot use 'parent' without a parent class") }
-            return p.__super
+        if (name == "self" || name == "static" || name == "parent") {
+            var s = name == "static" ? ctxStatic() : ctxSelf()
+            if (s == null) { phpRaise("Error", "Cannot use \"" + name + "\" when no class scope is active") }
+            if (name != "parent") { return s }
+            if (s.__super == null || s.__super == undefined) {
+                phpRaise("Error", "Cannot use \"parent\" when current class scope has no parent")
+            }
+            return s.__super
         }
         var v = anytype
-        v = getVar(name)
-        if (v == null || v == undefined || v.__isclass !== true) { fail("unknown class " + name) }
+        v = null
+        if (varExists(name) || hasOwn(hostGlobals, name)) { v = getVar(name) }
+        if (v == null || v == undefined || v.__isclass !== true) { phpRaise("Error", "Class \"" + name + "\" not found") }
         return v
     }
     // The class behind a '::' whose base is a VALUE: $obj::CONST, or a class name
@@ -4458,11 +4478,30 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
 
     // ----- calls, defs, classes -----
+    // call_user_func's callback is resolved where it is HANDED over: PHP resolves a
+    // relative callable ('parent::m', ['self', 'm']) in the class scope of the
+    // caller, which the library function's own frame does not have. Twin of
+    // callerCallable in php-to-llvm-ir.abnf.
+    function callerCallable(cur) {
+        var cn = ""
+        var mn = ""
+        if (typeof cur == "string" && cur.indexOf("::") >= 0) {
+            cn = cur.substring(0, cur.indexOf("::"))
+            mn = cur.substring(cur.indexOf("::") + 2)
+        } else if (isArr(cur) && cur.keys.length == 2 && !isObj(arrGet(cur, 0))) {
+            cn = phpStr(arrGet(cur, 0))
+            mn = phpStr(arrGet(cur, 1))
+        } else { return cur }
+        var cls = resolveClassName(cn)
+        return function(a2) { return staticCall(cls, mn, a2, cn) }
+    }
     function makeCall(items) {
         var name = phpLibRef(items[0])
         var args = items.slice(1)
+        var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         return function() {
             var argset = evalArgs(args)
+            if (resolveCb && argset.pos.length > 0) { argset.pos[0] = callerCallable(argset.pos[0]) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
                 var pname = name
@@ -4670,6 +4709,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         initProps(obj, cls)
         var ctor = classFind(cls, "__construct")
         if (ctor != null) { ctor(obj, argset) }
+        else if (argset.named != null) { checkNamedArgs([], argset) }
         return obj
     }
     function initProps(obj, cls) {

@@ -2068,6 +2068,60 @@ function s50() {
     check("gky1", $ks === [0, "k", 1, 10, 11, 3, 12, -5, 13]);
 }
 
+// ===== SECTION 51: named-argument errors, class-relative callables, scalar receivers =====
+// A named argument no parameter declares raises "Unknown named parameter $x", one
+// naming a filled parameter "Named parameter $x overwrites previous argument"
+// (Zend/tests/named_params). A callable naming a missing class raises
+// 'Class "X" not found' (dynamic_call/bug68475), and 'parent::m' / 'self::m' resolve
+// in the class scope of the caller, through call_user_func too. Writing a property
+// of an int, string, float, bool or array is a catchable Error, and a write through
+// a variable bound by reference reaches the object it holds.
+function s51f($a, $b = 2) { return $a + $b; }
+function s51v($a, ...$rest) { return count($rest); }
+class S51T {}
+class S51I { function __invoke($a = "a", $b = "b") { return $a . $b; } }
+class S51A { static function hi() { return "A"; } }
+class S51B extends S51A {
+    static function hi() { return "B"; }
+    static function viaVar() { $f = 'parent::hi'; return $f(); }
+    static function viaArr() { $f = ['self', 'hi']; return $f(); }
+    static function viaCuf() { return call_user_func('parent::hi'); }
+    static function viaCufa() { return call_user_func_array(['self', 'hi'], []); }
+}
+function s51err($f) {
+    try { return $f(); } catch (Error $e) { return $e->getMessage(); }
+}
+function s51() {
+    check("nmd1", s51err(function() { return s51f(1, c: 3); }) === "Unknown named parameter \$c");
+    check("nmd2", s51err(function() { return s51f(b: 5, a: 1); }) === 6);
+    check("nmd3", s51err(function() { return s51f(1, a: 3); }) === "Named parameter \$a overwrites previous argument");
+    check("nmd4", s51err(function() { return s51f(a: 1, a: 3); }) === "Named parameter \$a overwrites previous argument");
+    check("nmd5", s51err(function() { return s51f(...[1, 'b' => 2], b: 3); }) === "Named parameter \$b overwrites previous argument");
+    check("nmd6", s51err(function() { return s51v(1, z: 3); }) === 1);
+    check("nmd7", s51err(function() { return new S51T(x: 1); }) === "Unknown named parameter \$x");
+    $inv = new S51I();
+    check("nmd8", s51err(function() use ($inv) { return $inv(b: "B"); }) === "aB");
+    check("nmd9", s51err(function() use ($inv) { return $inv(c: "C"); }) === "Unknown named parameter \$c");
+    $g = function ($p) { return $p; };
+    check("nmd10", s51err(function() use ($g) { return $g(q: 1); }) === "Unknown named parameter \$q");
+    check("cls1", s51err(function() { $c = 'S51Nope::m'; return $c(); }) === "Class \"S51Nope\" not found");
+    check("cls2", s51err(function() { $c = ['S51Nope', 'm']; return $c(); }) === "Class \"S51Nope\" not found");
+    check("cls3", s51err(function() { $c = 'parent::hi'; return $c(); }) === "Cannot use \"parent\" when no class scope is active");
+    check("cls4", S51B::viaVar() === "A" && S51B::viaArr() === "B");
+    check("cls5", S51B::viaCuf() === "A" && S51B::viaCufa() === "B");
+    $vals = [5, "s", 1.5, true, [1]];
+    $msgs = [];
+    foreach ($vals as $v) { $msgs[] = s51err(function() use ($v) { $v->p = 1; }); }
+    check("prp1", $msgs === ["Attempt to assign property \"p\" on int", "Attempt to assign property \"p\" on string",
+                             "Attempt to assign property \"p\" on float", "Attempt to assign property \"p\" on bool",
+                             "Attempt to assign property \"p\" on array"]);
+    $o = new S51T();
+    $r = &$o;
+    $r->x = 1;
+    $o->y = 2;
+    check("prp2", $o->x === 1 && $r->y === 2);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2124,6 +2178,7 @@ function main() {
     s48(); // SECTION-CALL 48
     s49(); // SECTION-CALL 49
     s50(); // SECTION-CALL 50
+    s51(); // SECTION-CALL 51
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
