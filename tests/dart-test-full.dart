@@ -1573,6 +1573,20 @@ void s36() {
   check("lm15", st.join("|") == "No element|Too many elements|No element");
 }
 
+// ===== SECTION 37: nested block comments, separators in an exponent =====
+// A block comment nests (the Dart specification's comment grammar), so
+// `/* a /* b */ c */` is one comment; digit separators may stand in an exponent
+// too (`1e3_0` is 1e30). No Dart toolchain here: the values follow from the
+// specification.
+/*/* nested */*/
+void s37() {
+  var n = 0;
+  /* outer /* inner */ n = 99; */
+  n = n + 1 /* x /**/ y */ + 2;
+  check("cmt37", n == 3);
+  check("sep37", 1e3_0 == 1e30 && 1_2.3_4e1 == 123.4 && 2e-1_0 == 2e-10);
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1610,6 +1624,7 @@ int main() {
   s34(); // SECTION-CALL 34
   s35(); // SECTION-CALL 35
   s36(); // SECTION-CALL 36
+  s37(); // SECTION-CALL 37
   print("full: $checks checks, $fails failures");
   return fails;
 }

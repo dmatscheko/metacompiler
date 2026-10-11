@@ -30,7 +30,23 @@ dart-interpreter.abnf; the nullable type marker ? is erased.") ;
 // --- main rules
 
 // Shared token productions (languages/lib).
-:include("lib/cstyle-comments.abnf") ;
+// Dart's whitespace is lib/cstyle-comments.abnf's except that a block comment NESTS:
+// `/* a /* b */ c */` is one comment, and `/*/* x */*/` too. So a comment body is a
+// run of nested comments and of characters that neither open nor close one.
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() CmtBody "*/" :whitespace(Whitespace) ;
+CmtBody     = { "/*" CmtBody "*/" | CmtChar } ;
+CmtChar     = "*" NotSlashNext | "/" NotStarNext | CmtPlain ;
+CmtPlain    = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotSlashNext = :script(~~
+    (function() { return c.peek(0) === 47 ? abnf.newToken("\x01comment-close", 0) : undefined })()
+~~) ;
+NotStarNext = :script(~~
+    (function() { return c.peek(0) === 42 ? abnf.newToken("\x01comment-open", 0) : undefined })()
+~~) ;
 :include("lib/ident-dollar.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
@@ -1052,8 +1068,8 @@ PosRecField <~~ push({rname: "", t: pop()}) ~~> = AssignExpr ;
 // or hex digit run emits an int - through js_dartlit past 2^53, because emitNum would
 // already have rounded 9223372036854775807 to 9223372036854776000 on the way into the
 // module. The shared NumHex/NumDec/NumInt of lib/numbers.abnf push plain
-// parseInt/parseFloat constants, so Dart uses its own three; NumHexDig and NumExp are
-// still the shared ones. Mirrors dart-interpreter.abnf's DartHexLit/DartDecLit/DartIntLit.
+// parseInt/parseFloat constants, so Dart uses its own three; NumHexDig is still the
+// shared one. Mirrors dart-interpreter.abnf's DartHexLit/DartDecLit/DartIntLit.
 NumLit      = NumLeadDot | DartHexLit | DartDecLit | DartIntLit ;
 NumLeadDot  <~~ push(makeFloConst(parseFloat("0" + dNoUnd(up.in)))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } :whitespace(Whitespace) ;
@@ -1061,7 +1077,9 @@ DartHexLit  <~~ push(dIntLit(up.in, 16)) ~~>
             = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
 DartDecLit  <~~ push(makeFloConst(parseFloat(dNoUnd(up.in)))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
-              ( "." "0"..."9" { "0"..."9" | "_" } [ NumExp ] | NumExp ) :whitespace(Whitespace) ;
+              ( "." "0"..."9" { "0"..."9" | "_" } [ DartExp ] | DartExp ) :whitespace(Whitespace) ;
+// Digit separators reach into the exponent too: `1e3_0` is 1e30.
+DartExp     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 DartIntLit  <~~ push(dIntLit(up.in, 10)) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
