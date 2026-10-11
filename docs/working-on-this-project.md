@@ -799,6 +799,11 @@ positions with an ASCII fast path (`byteLen(s) == s.length`), so a non-ASCII
 string pays a linear scan per position. `abnf/jsrtphp.go` misreads `"1e400"` as 1 where both our halves answer
 INF (the PHP spec agrees with us) — sole cause of 431 hunks in a 40,948-line
 probe, and permanent, since retiring the Go twin was declined.
+A PHP byte that is not part of a character (chr(200), `"\xC8"`, one byte of
+"é") is held as the lone surrogate U+DC00 + byte, so strlen, offsets, ord and
+concatenation are exact, but `echo` prints it as U+FFFD where PHP writes the raw
+byte: every engine's print turns a lone surrogate into U+FFFD, and a raw-byte
+write would be a change to the shared print path.
 `c-interpreter.abnf` deliberately lacks the varargs `printf` family,
 `exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free`.
 
@@ -985,9 +990,9 @@ utf16-strings.js          <- java-rt.metajs, csharp-rt.metajs, java and csharp
 ruby-respond.js           <- ruby-rt.metajs, ruby interpreter (respond_to? on a
                              builtin; Go twin: rubyRespondNames in
                              abnf/jsrtruby.go, kept equal by a go test)
-php-strings.js            <- php-rt.metajs, php interpreter (substr, strpos and
-                             the other byte-string natives; Go twin:
-                             abnf/jsrtphpstr.go)
+php-strings.js            <- php-rt.metajs, both php grammars (substr, strpos and
+                             the other byte-string natives, and the compiler's
+                             literal check; Go twin: abnf/jsrtphpstr.go)
 ```
 
 Grammar-level includes shared by one language's grammars only: `go-constfold.js`

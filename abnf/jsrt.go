@@ -14148,7 +14148,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_phbool": func(a []uint64) uint64 { return boolH(rt.phpTest(u(a[0]))) },
 		"js_phnot":  func(a []uint64) uint64 { return boolH(!rt.phpTest(u(a[0]))) },
 		"js_phstr":  func(a []uint64) uint64 { return rt.wrapStr(rt.phpStr(u(a[0]))) },
-		"js_phcat":  func(a []uint64) uint64 { return rt.wrapStr(rt.phpStr(u(a[0])) + rt.phpStr(u(a[1]))) },
+		"js_phcat":  func(a []uint64) uint64 { return rt.wrapStr(phpJoin(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))) },
 		"js_pheq":   func(a []uint64) uint64 { return boolH(rt.phpLoose(u(a[0]), u(a[1]))) },
 		"js_phne":   func(a []uint64) uint64 { return boolH(!rt.phpLoose(u(a[0]), u(a[1]))) },
 		"js_phseq":  func(a []uint64) uint64 { return boolH(rt.phpIdentical(u(a[0]), u(a[1]))) },

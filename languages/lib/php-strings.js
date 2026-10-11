@@ -1,5 +1,6 @@
-// php-strings.js -- PHP's byte-string primitives: substr, strpos, strrpos,
-// strcmp, ord, chr, the ASCII case maps and sprintf's float conversions. Everything else in
+// php-strings.js -- PHP's byte-string primitives: strlen, substr, strpos,
+// strrpos, strcmp, ord, chr, string offsets, concatenation, the ASCII case maps,
+// sprintf's float conversions and the math library's double operations. Everything else in
 // PHP's string and array library is written in PHP itself (lib/php-stdlib.php)
 // on top of these.
 //
@@ -9,20 +10,30 @@
 // compiler half runs under llvm.Run.
 //
 // A PHP string is a BYTE string, held here as text: its bytes are the UTF-8
-// encoding of that text, so every offset below is a byte offset. A slice that
-// cuts a character keeps each byte of the cut character as the character
-// U+0000..U+00FF of the same value - what the Go twin's string(s[i]) answers for
-// a single byte, and what `$s[$i]` already answers in the compiler half.
+// encoding of that text, so every offset below is a byte offset. A byte that is
+// not part of a well-formed UTF-8 sequence - a slice through a character, chr(200),
+// "\xC8" - is held as the lone surrogate U+DC00 + byte (U+DC80..U+DCFF), which
+// no well-formed text contains, so it stays ONE byte. Every string is kept in the
+// canonical form phsText produces: a byte run that spells a character is that
+// character, which is why concatenation goes through phsJoin.
 //
 // Value-model free: subjects are host strings, positions plain integers, and
 // argument coercion and the errors PHP raises stay with the includer.
 
-// The UTF-8 bytes of s.
+// Is unit c a byte held as U+DC00 + byte?
+function phsIsByte(c) { return c >= 56448 && c <= 56575 }
+
+// The bytes of s.
 function phsBytes(s) {
     var out = []
     var i = 0
     while (i < s.length) {
         var c = s.charCodeAt(i)
+        if (phsIsByte(c)) {
+            out.push(c - 56320)
+            i = i + 1
+            continue
+        }
         if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
             var t = s.charCodeAt(i + 1)
             if (t >= 56320 && t <= 57343) {
@@ -51,7 +62,7 @@ function phsBytes(s) {
 
 // The text of bytes bs[from, to): a well-formed UTF-8 sequence is its character
 // (Go's utf8.DecodeRune rules: no overlong form, no surrogate, nothing above
-// U+10FFFF), and any other byte stands for itself.
+// U+10FFFF), and any other byte is held as U+DC00 + byte.
 function phsText(bs, from, to) {
     var out = ""
     var i = from
@@ -83,7 +94,7 @@ function phsText(bs, from, to) {
         if (ok && n == 3 && (cp < 2048 || (cp >= 55296 && cp <= 57343))) { ok = false }
         if (ok && n == 4 && (cp < 65536 || cp > 1114111)) { ok = false }
         if (!ok) {
-            out = out + String.fromCharCode(b)
+            out = out + String.fromCharCode(56320 + b)
             i = i + 1
         } else {
             if (cp >= 65536) {
@@ -100,12 +111,83 @@ function phsText(bs, from, to) {
 
 function phsAscii(s) { return byteLen(s) == s.length }
 
+// The text of a BYTE string: one whose every unit is a byte value 0..255, as
+// a string literal's escapes are assembled (the tag stack cannot carry a lone
+// surrogate).
+function phsFromBytes(t) {
+    var bs = []
+    var i = 0
+    while (i < t.length) {
+        bs.push(t.charCodeAt(i))
+        i = i + 1
+    }
+    return phsText(bs, 0, bs.length)
+}
+
+// Does s hold a byte that is not part of a character?
+function phsHasHeld(s) {
+    var i = 0
+    while (i < s.length) {
+        if (phsIsByte(s.charCodeAt(i))) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// strlen: the byte count.
+function phsLen(s) {
+    if (phsAscii(s)) { return s.length }
+    return phsBytes(s).length
+}
+
+// a . b: when a ends in held bytes and b starts with a held continuation byte,
+// the bytes either side of the seam may spell a character, and are re-read. A
+// UTF-8 sequence is at most four bytes, so three units either side suffice.
+function phsJoin(a, b) {
+    if (a.length == 0 || b.length == 0) { return a + b }
+    var x = a.charCodeAt(a.length - 1)
+    var y = b.charCodeAt(0)
+    if (!phsIsByte(x) || y < 56448 || y > 56511) { return a + b }
+    var i = a.length
+    while (i > 0 && a.length - i < 3 && phsIsByte(a.charCodeAt(i - 1))) { i = i - 1 }
+    var j = 0
+    while (j < b.length && j < 3 && phsIsByte(b.charCodeAt(j))) { j = j + 1 }
+    var bs = phsBytes(a.substring(i, a.length) + b.substring(0, j))
+    return a.substring(0, i) + phsText(bs, 0, bs.length) + b.substring(j, b.length)
+}
+
+// $s[$i]: the one-byte string at byte offset i (from the end when negative), ""
+// outside the string.
+function phsOffset(s, i) {
+    if (phsAscii(s)) {
+        var k = i < 0 ? i + s.length : i
+        if (k < 0 || k >= s.length) { return "" }
+        return s.charAt(k)
+    }
+    var bs = phsBytes(s)
+    var j = i < 0 ? i + bs.length : i
+    if (j < 0 || j >= bs.length) { return "" }
+    return phsText(bs, j, j + 1)
+}
+
+// $s[$i] = $c: the byte at offset i replaced by c's first byte, a write past the
+// end padding with spaces. Answers null for an offset before the start.
+function phsSetOffset(s, i, c) {
+    var bs = phsBytes(s)
+    var j = i < 0 ? i + bs.length : i
+    if (j < 0) { return null }
+    while (bs.length < j) { bs.push(32) }
+    var cb = phsBytes(c)
+    if (j == bs.length) { bs.push(cb[0]) } else { bs[j] = cb[0] }
+    return phsText(bs, 0, bs.length)
+}
+
 // substr(s, start, length): PHP 8's rules - a start past the end is "", a
 // negative start or length counts from the end, and hasLen false is a null
 // length (to the end).
 function phsSubstr(s, start, len, hasLen) {
     var ascii = phsAscii(s)
-    var n = ascii ? s.length : byteLen(s)
+    var n = ascii ? s.length : phsLen(s)
     var f = start
     if (f > n) { return "" }
     if (f < 0) {
@@ -139,7 +221,7 @@ function phsAt(hb, nb, p) {
 // when the offset is outside the haystack (PHP's ValueError).
 function phsStrpos(h, needle, off) {
     var ascii = phsAscii(h) && phsAscii(needle)
-    var n = ascii ? h.length : byteLen(h)
+    var n = ascii ? h.length : phsLen(h)
     var o = off
     if (o < 0) { o = o + n }
     if (o < 0 || o > n) { return 0 - 2 }
@@ -210,7 +292,44 @@ function phsOrd(s) {
 function phsChr(n) {
     var b = n % 256
     if (b < 0) { b = b + 256 }
+    if (b >= 128) { return String.fromCharCode(56320 + b) }
     return String.fromCharCode(b)
+}
+
+// The double operations PHP's math library is written on (lib/php-stdlib.php's
+// __mec_math): the C library function of one or two doubles that op names.
+function phsMath(op, a, b) {
+    if (op == "floor") { return Math.floor(a) }
+    if (op == "ceil") { return Math.ceil(a) }
+    if (op == "trunc") { return Math.trunc(a) }
+    if (op == "sqrt") { return Math.sqrt(a) }
+    if (op == "exp") { return Math.exp(a) }
+    if (op == "expm1") { return Math.expm1(a) }
+    if (op == "log") { return Math.log(a) }
+    if (op == "log1p") { return Math.log1p(a) }
+    if (op == "log2") { return Math.log2(a) }
+    if (op == "log10") { return Math.log10(a) }
+    if (op == "sin") { return Math.sin(a) }
+    if (op == "cos") { return Math.cos(a) }
+    if (op == "tan") { return Math.tan(a) }
+    if (op == "asin") { return Math.asin(a) }
+    if (op == "acos") { return Math.acos(a) }
+    if (op == "atan") { return Math.atan(a) }
+    if (op == "sinh") { return Math.sinh(a) }
+    if (op == "cosh") { return Math.cosh(a) }
+    if (op == "tanh") { return Math.tanh(a) }
+    if (op == "asinh") { return Math.asinh(a) }
+    if (op == "acosh") { return Math.acosh(a) }
+    if (op == "atanh") { return Math.atanh(a) }
+    if (op == "atan2") { return Math.atan2(a, b) }
+    if (op == "hypot") { return Math.hypot(a, b) }
+    if (op == "pow") { return Math.pow(a, b) }
+    if (op == "div") { return a / b }
+    if (op == "fmod") { return a % b }
+    // copysign: |a| with the sign of b, a negative zero's included.
+    var m = Math.abs(a)
+    if (b < 0 || (b == 0 && 1 / b < 0)) { return -m }
+    return m
 }
 
 // strtolower / strtoupper: ASCII only, since PHP 8.2 - every other byte stays.

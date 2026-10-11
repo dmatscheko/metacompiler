@@ -1263,14 +1263,7 @@ func (rt *jsrt) phpArrGet(av interface{}, k interface{}) interface{} {
 		return jsNull
 	}
 	if s, ok := av.(string); ok {
-		i := int(rt.phpToLong(k))
-		if i < 0 {
-			i += len(s)
-		}
-		if i < 0 || i >= len(s) {
-			return ""
-		}
-		return string(s[i])
+		return phpOffset(s, int(rt.phpToLong(k)))
 	}
 	if isNullish(av) {
 		return jsNull
@@ -1298,10 +1291,11 @@ func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
 		// isset("abc"[-1]) is true - and phpGet has always ANSWERED "c" for it,
 		// so this arm made isset and the read disagree inside one expression.
 		// Mirrored in languages/lib/php-rt.metajs's phArrHas.
+		n := len(phpRaw(s))
 		if i < 0 {
-			return -i <= len(s)
+			return -i <= n
 		}
-		return i < len(s)
+		return i < n
 	}
 	if o, ok := av.(*jsObject); ok {
 		pv, has := o.props[rt.phpStr(k)]
@@ -1386,7 +1380,7 @@ func (rt *jsrt) phpLen(v interface{}) float64 {
 		return float64(len(keys.elems))
 	}
 	if s, ok := v.(string); ok {
-		return float64(len(s))
+		return float64(len(phpRaw(s)))
 	}
 	if isNullish(v) {
 		return 0
@@ -1740,7 +1734,7 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 	case jsPhpFlo:
 		return pad + "float(" + phpFloDump(t.f) + ")\n"
 	case string:
-		return pad + "string(" + strconv.Itoa(len(t)) + ") \"" + t + "\"\n"
+		return pad + "string(" + strconv.Itoa(len(phpRaw(t))) + ") \"" + t + "\"\n"
 	}
 	if keys, vals, ok := phpArrParts(v); ok {
 		out := pad + "array(" + strconv.Itoa(len(keys.elems)) + ") {\n"
@@ -1888,6 +1882,13 @@ func init() {
 				return w(jsUndef)
 			}
 			return w(o)
+		}
+		// (f, i) -> is f's parameter i by reference: bit i of the mask the emitter
+		// recorded with js_jsfnmeta (withRefMask in php-to-llvm-ir.abnf). Twin of
+		// js_phrefat in languages/lib/php-rt.metajs.
+		m["js_phrefat"] = func(a []uint64) uint64 {
+			i := int(rt.toNumber(u(a[1])))
+			return boolH((jsvFnMeta(u(a[0])).length>>uint(i))&1 == 1)
 		}
 		// The four that REPLACE a jsrt.go entry: each is exact 64 bit where the
 		// shared one is 32 bit or double based.

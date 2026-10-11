@@ -21,7 +21,7 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // namespaces and use-imports (single-file harness), declare(strict_types=1)
 // (it would change the semantics of every section), the standard library
-// beyond the array and string functions (sections 38 and 39), define(),
+// beyond the array, string and math functions (sections 38, 39 and 42), define(),
 // superglobals other than $GLOBALS, include/require/eval, fibers, Generator
 // methods (->send() and friends live on the engine's Generator class), references
 // returned from functions, reflection (attributes are applied, never read
@@ -921,6 +921,8 @@ function s29dump() {
     var_dump(0.1 + 0.2, 1 / 3, 3.0, 1.0E+25);
     var_dump(0b111111010000101010101010101010111111111111111111111111111111111111111111111111111111);
     var_dump(true, null, "ab", [1 => "x"]);
+    // var_dump takes any number of values.
+    var_dump(1, 2, 3, 4, 5, 6, 7, 8, 9, "ten");
 }
 
 // ===== SECTION 30: the widened parse surface =====
@@ -1615,6 +1617,88 @@ function s39() {
         && $e4 === "ArgumentCountError: 3 arguments are required, 2 given");
 }
 
+// ===== SECTION 40: early binding and references through a variable call =====
+// A function declared at the top level of a file is bound before any of the
+// file's statements run, so a call may stand above the declaration. A call
+// through a variable (a closure, a string naming a function, a callback the
+// array library makes) passes a variable BY REFERENCE exactly where the callee's
+// parameter is declared '&', and by value everywhere else.
+$s40_early = s40_twice(21);
+function s40_twice($x) { return $x * 2; }
+function s40_inc(&$n) { $n++; }
+function s40() {
+    global $s40_early;
+    check("bind1", $s40_early === 42);
+    $f = function (&$x) { $x++; };
+    $a = 5;
+    $f($a);
+    $byVal = function ($x) { $x++; return $x; };
+    $b = 5;
+    $r = $byVal($b);
+    check("bind2", $a === 6 && $b === 5 && $r === 6);
+    $g = "s40_inc";
+    $c = 1;
+    $g($c);
+    $arrow = fn(&$x) => $x = $x * 3;
+    $arrow($c);
+    check("bind3", $c === 6);
+    $arr = [1, 2, 3];
+    array_walk($arr, function (&$v, $k) { $v = $v * 10 + $k; });
+    check("bind4", $arr === [10, 21, 32]);
+}
+
+// ===== SECTION 41: a string is a string of BYTES =====
+// strlen, offsets, substr and comparison count bytes; a byte that is not part of
+// a character (chr(200), "\xC8", one byte cut out of "é") stays one byte, and
+// bytes put back next to each other spell the character again.
+function s41() {
+    $s = "h\u{e9}llo \u{20ac}!";
+    check("byte1", strlen($s) === 11 && ord($s[1]) === 195 && ord($s[2]) === 169 && $s[3] === "l"
+        && ord($s[-2]) === 172 && $s[1] . $s[2] === "\u{e9}");
+    $n = [200, 0xe2, 0x82, 0xac];
+    check("byte2", ord(chr($n[0])) === 200 && strlen(chr($n[0])) === 1 && strlen("\xc8") === 1
+        && "\xc8" === chr($n[0]) && strlen("\xc3\xa9") === 2 && "\xc3\xa9" === "\u{e9}");
+    $acc = "";
+    for ($i = 1; $i < 4; $i++) { $acc .= chr($n[$i]); }
+    $b1 = chr($n[1]);
+    $b2 = chr($n[2]);
+    check("byte3", $acc === "\u{20ac}" && "$b1$b2\xac" === "\u{20ac}" && strrev(strrev($s)) === $s
+        && implode("", str_split($s)) === $s && strpos($s, chr($n[2])) === 8);
+    $w = "h\u{e9}";
+    $w[2] = "X";
+    check("byte4", $w === "h" . chr(195) . "X" && strlen($w) === 3 && strcmp(chr($n[0]), "\u{e9}") === 1
+        && isset($s[10]) && !isset($s[11]));
+}
+
+// ===== SECTION 42: the math library =====
+// round() is PHP 8.4's: the scaled value's integral part is corrected before
+// the half-way decision, so round(1.955, 2) is 1.96; ceil, floor and round
+// always answer a float. intval() with a base reads like C's strtol, the
+// bindec family skips what is not a digit, and decbin renders 64 bits unsigned.
+function s42() {
+    $v = [3.7, 5, 2.5, -2.5, 1.955, 1234.5678, -0.4, 1.005, 0.285];
+    check("math1", floor($v[0]) === 3.0 && floor($v[1]) === 5.0 && ceil($v[0]) === 4.0 && ceil(-0.5) === -0.0
+        && round($v[2]) === 3.0 && round($v[3]) === -3.0 && round($v[4], 2) === 1.96 && round($v[5], -2) === 1200.0
+        && round($v[7], 2) === 1.01 && round($v[8], 2) === 0.29 && (string)round($v[6]) === "-0" && round(3, -1) === 0.0);
+    check("math2", round($v[2], 0, PHP_ROUND_HALF_EVEN) === 2.0 && round(3.5, 0, PHP_ROUND_HALF_EVEN) === 4.0
+        && round($v[2], 0, PHP_ROUND_HALF_ODD) === 3.0 && round($v[2], 0, PHP_ROUND_HALF_DOWN) === 2.0);
+    check("math3", sqrt(16) === 4.0 && pow(2, 10) === 1024 && pow(2, -1) === 0.5 && fmod(-10, 3) === -1.0
+        && fdiv(1, 0) === INF && is_nan(fdiv(0, 0)) && log(8, 2) === 3.0 && log10(1000) === 3.0
+        && log(M_E) === 1.0 && hypot(3, 4) === 5.0 && deg2rad(180) === M_PI && is_finite(1.5) && !is_finite(INF));
+    check("math4", intval("42abc") === 42 && intval("0x1A", 16) === 26 && intval("012", 0) === 10
+        && intval("0b11", 0) === 3 && intval("  -42", 8) === -34 && intval("zzzzzzzzzzzzzzz", 36) === PHP_INT_MAX
+        && intval(42.99) === 42);
+    check("math5", bindec("111") === 7 && hexdec("ff") === 255 && octdec("777") === 511 && bindec("1 0 1") === 5
+        && decbin(10) === "1010" && dechex(-1) === "ffffffffffffffff" && base_convert("zz", 36, 10) === "1295"
+        && hexdec("ffffffffffffffff") === 1.8446744073709552E+19);
+    $e1 = "";
+    $e2 = "";
+    try { sqrt("abc"); } catch (TypeError $e) { $e1 = $e->getMessage(); }
+    try { log(1, 0); } catch (ValueError $e) { $e2 = $e->getMessage(); }
+    check("math6", $e1 === "sqrt(): Argument #1 (\$num) must be of type float, string given"
+        && $e2 === "log(): Argument #2 (\$base) must be greater than 0");
+}
+
 function main() {
     global $checks;
     global $failures;
@@ -1658,6 +1742,9 @@ function main() {
     s37(); // SECTION-CALL 37
     s38(); // SECTION-CALL 38
     s39(); // SECTION-CALL 39
+    s40(); // SECTION-CALL 40
+    s41(); // SECTION-CALL 41
+    s42(); // SECTION-CALL 42
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

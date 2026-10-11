@@ -86,7 +86,7 @@ Program     <~~ buildMain(takeAll()) ~~>
 TopItem     = TopDecl | Statement ;
 TopDecl     <~~ push(phStmtPos(takeAll())) ~~>
             = "" <~~ push(up.pos) ~~>
-              ( Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl ) ;
+              ( Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl ) ;
 OpenTag     = "<?php" :whitespace(Whitespace) ;
 // Text before the first open tag. Unlike the '?>' form it keeps a leading newline:
 // only the newline directly after a CLOSE tag is swallowed.
@@ -1199,7 +1199,7 @@ TplDollar   = "$" TplId ;
 TplProp     <~~ push({tprop: up.in}) ~~>
             = "->" TplId ;
 TplId       = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
-TplChunk    <~~ push({s: unescapeDq(up.in)}) ~~>
+TplChunk    <~~ push(dqPiece(up.in)) ~~>
             = TplC { TplC } ;
 TplC        = TplEsc | TplPlain ;
 // '\u{...}' has to be recognized as ONE escape: the brace form is tried before the
@@ -1409,6 +1409,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // lowering is defined below; expression thunks are function(b) -> {b, v},
     // statement thunks are function(b) -> block.
     include("lib/compile-core.js")
+    include("lib/php-strings.js") // dqPiece decides at compile time whether a literal is text
 
     var hidCount = 0
 
@@ -2022,7 +2023,7 @@ KwInstanceof = "instanceof" KwEnd ;
                     j++
                 }
                 if (j < body.length) {
-                    if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                    if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
                     parts.push({e: compileSnippet(body.substring(i + 1, j))})
                     i = j + 1
                     continue
@@ -2048,7 +2049,7 @@ KwInstanceof = "instanceof" KwEnd ;
                     expr = expr + body.substring(k, p2)
                     k = p2
                 }
-                if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
                 parts.push({e: compileSnippet(expr)})
                 i = k
                 continue
@@ -2056,7 +2057,7 @@ KwInstanceof = "instanceof" KwEnd ;
             lit += ch
             i++
         }
-        if (lit != "") { parts.push({s: unescapeDq(lit)}) }
+        if (lit != "") { parts.push(dqPiece(lit)) }
         return parts
     }
     function isNameStart(ch) { return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" }
@@ -2067,15 +2068,27 @@ KwInstanceof = "instanceof" KwEnd ;
     }
 
     // ----- string helpers -----
-    // The double-quoted / heredoc escape set. PHP keeps an UNKNOWN escape as BOTH
-    // characters ("\q" is a backslash and a q, two bytes), which is why there is no
-    // default branch that drops the backslash.
+    // The double-quoted / heredoc escape set, answered as a BYTE string (every unit
+    // one byte, 0..255): "\xC3\xA9" is two bytes that spell one character, and a
+    // character written in the source is its UTF-8 bytes. PHP keeps an UNKNOWN
+    // escape as BOTH characters ("\q" is a backslash and a q, two bytes), which is
+    // why there is no default branch that drops the backslash.
     function unescapeDq(s) {
         var out = ""
         var i = 0
         while (i < s.length) {
             var c = s.charCodeAt(i)
-            if (c != 92 || i + 1 >= s.length) { out += String.fromCharCode(c); i++; continue }
+            if (c != 92 || i + 1 >= s.length) {
+                if (c < 128) { out += String.fromCharCode(c); i++; continue }
+                if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+                    out += dqUtf8((c - 55296) * 1024 + (s.charCodeAt(i + 1) - 56320) + 65536)
+                    i += 2
+                    continue
+                }
+                out += dqUtf8(c)
+                i++
+                continue
+            }
             var e = s.charAt(i + 1)
             if (e == "n") { out += "\n"; i += 2; continue }
             if (e == "t") { out += "\t"; i += 2; continue }
@@ -2112,15 +2125,38 @@ KwInstanceof = "instanceof" KwEnd ;
                 var un = 0
                 while (uj < s.length && isHexCh(s.charAt(uj))) { uv = uv * 16 + hexVal(s.charAt(uj)); uj++; un++ }
                 if (un > 0 && uj < s.length && s.charAt(uj) == "}") {
-                    out += codePointStr(uv)
+                    out += dqUtf8(uv)
                     i = uj + 1
                     continue
                 }
             }
-            out += "\\" + e
-            i += 2
+            out += "\\"
+            i += 1
         }
         return out
+    }
+    // The UTF-8 bytes of code point cp, as a byte string.
+    function dqUtf8(cp) {
+        var tail = ""
+        var v = cp
+        var lead = 0
+        var room = 128
+        while (v >= room) {
+            tail = String.fromCharCode(128 + v % 64) + tail
+            v = Math.floor(v / 64)
+            lead = lead == 0 ? 192 : 128 + lead / 2
+            room = room == 128 ? 32 : room / 2
+        }
+        return String.fromCharCode(lead + v) + tail
+    }
+    // A literal piece of a double-quoted string or heredoc: {s: text}, or {sb:
+    // bytes} when the text would hold a byte that is not part of a character,
+    // which the tag stack cannot carry (js_phfrombytes turns it into text at run time).
+    function dqPiece(raw) {
+        var bytes = unescapeDq(raw)
+        var text = phsFromBytes(bytes)
+        if (phsHasHeld(text)) { return {sb: bytes} }
+        return {s: text}
     }
     function isHexCh(ch) { return (ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f") || (ch >= "A" && ch <= "F") }
     function hexVal(ch) {
@@ -2128,11 +2164,6 @@ KwInstanceof = "instanceof" KwEnd ;
         if (cc >= 48 && cc <= 57) { return cc - 48 }
         if (cc >= 97) { return cc - 87 }
         return cc - 55
-    }
-    function codePointStr(cp) {
-        if (cp < 65536) { return String.fromCharCode(cp) }
-        var off = cp - 65536
-        return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
     }
     function unescapeSq(s) {
         var out = ""
@@ -3074,6 +3105,7 @@ KwInstanceof = "instanceof" KwEnd ;
             for (var i = 0; i < items.length; i++) {
                 var pv
                 if (items[i].s != undefined) { pv = emitStr(b, items[i].s) }
+                else if (items[i].sb != undefined) { pv = callExt(b, "js_phfrombytes", [emitStr(b, items[i].sb)]) }
                 else { var r = items[i].e(b); b = r.b; pv = r.v }
                 v = callExt(b, "js_phcat", [v, pv])
             }
@@ -3235,10 +3267,19 @@ KwInstanceof = "instanceof" KwEnd ;
                         cur = rpv.v
                         continue
                     }
-                    var ea2 = emitPhArgs(b, s.args, null)
-                    b = ea2.b
-                    var rc2 = callableV(ea2.b, cur)
-                    b = rc2.b
+                    var ea2 = anytype
+                    var rc2 = anytype
+                    if (argsArePlain(s.args) && hasVarArg(s.args)) {
+                        // The callee is resolved first, so a variable argument can be
+                        // handed over as a reference where its parameter takes one.
+                        rc2 = callableV(b, cur)
+                        ea2 = emitDynRefArgs(rc2.b, s.args, rc2.v)
+                        b = ea2.b
+                    } else {
+                        ea2 = emitPhArgs(b, s.args, null)
+                        rc2 = callableV(ea2.b, cur)
+                        b = rc2.b
+                    }
                     if (magicInvoke) {
                         // An INSTANCE used as a callable runs its __invoke method.
                         var invB = curF.NewBlock("")
@@ -3992,7 +4033,7 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, byVal, byRef)
-            return {b: rc.b, v: closureV(rc.b, idx, rc.v)}
+            return {b: rc.b, v: withRefMask(rc.b, closureV(rc.b, idx, rc.v), pl.byref)}
         }
     }
 
@@ -4017,7 +4058,7 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, captured, [])
-            return {b: rc.b, v: callExt(rc.b, "js_closure", [handle(idx), rc.v])}
+            return {b: rc.b, v: withRefMask(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl.byref)}
         }
     }
 
@@ -4272,39 +4313,6 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_phpush", [p.obj, v])
         return b
     }
-    // $s[0] = "H" on a STRING replaces one byte. A PHP string is a value, so there is
-    // nothing to write into: the new string is built byte by byte and assigned back to
-    // the variable. Only a single-index target on a plain variable can be one, which is
-    // also the only form PHP accepts.
-    function emitStrSplice(b, sV, kV, chV) {
-        hidCount++
-        var oName = "\x00so" + hidCount
-        var iName = "\x00si" + hidCount
-        var sName = "\x00ss" + hidCount
-        var lenV = callExt(b, "js_bytelen", [sV])
-        var kk = b.NewSelect(truthy(b, callExt(b, "js_phlt", [kV, emitNum(b, 0)])),
-                             callExt(b, "js_phadd", [kV, lenV]), kV)
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), sV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), emitStr(b, "")])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-        var headB = curF.NewBlock("")
-        var bodyB = curF.NewBlock("")
-        var exitB = curF.NewBlock("")
-        b.NewBr(headB)
-        var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lenV])), bodyB, exitB)
-        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-        var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
-        var outB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, oName)])
-        var pieceV = bodyB.NewSelect(truthy(bodyB, callExt(bodyB, "js_phseq", [iB, kk])),
-                                     chV, callExt(bodyB, "js_phget", [srcB, iB]))
-        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, oName),
-                                        callExt(bodyB, "js_phcat", [outB, pieceV])])
-        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
-                                        intWrap(bodyB, callExt(bodyB, "js_jadd", [iB, emitNum(bodyB, 1)]))])
-        bodyB.NewBr(headB)
-        return {b: exitB, v: callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])}
-    }
     function isStrTarget(ref) {
         return ref.sbase == undefined && ref.path.length == 1 && ref.path[0].idx != undefined
     }
@@ -4352,8 +4360,9 @@ KwInstanceof = "instanceof" KwEnd ;
                 var arrB = curF.NewBlock("")
                 var endB6 = curF.NewBlock("")
                 b.NewCondBr(isStr6, strB, arrB)
-                var sp = emitStrSplice(strB, rcv.v, rk6.v, callExt(strB, "js_phstr", [v]))
-                setVarV(sp.b, rn6.v, sp.v).NewBr(endB6)
+                // A PHP string is a value, so the string with the one byte replaced
+                // (js_phsetoffset) is assigned back to the variable.
+                setVarV(strB, rn6.v, callExt(strB, "js_phsetoffset", [rcv.v, rk6.v, v])).NewBr(endB6)
                 callExt(arrB, "js_phset", [rcv.v, rk6.v, callExt(arrB, "js_phcopy", [v])])
                 arrB.NewBr(endB6)
                 b = endB6
@@ -4550,6 +4559,37 @@ KwInstanceof = "instanceof" KwEnd ;
         if (sig == null) { return false }
         for (var k = 0; k < sig.byref.length; k++) { if (sig.byref[k] == i) { return true } }
         return false
+    }
+    function hasVarArg(args) {
+        for (var i = 0; i < args.length; i++) { if (args[i].vtext != null) { return true } }
+        return false
+    }
+    // The argument list of a call whose callee is only known at run time: a variable
+    // argument is passed as its storage CELL exactly where the callee's parameter is
+    // by reference (js_phrefat reads the mask withRefMask recorded on the closure),
+    // and as its value everywhere else.
+    function emitDynRefArgs(b, args, fV) {
+        var argsV = callExt(b, "js_arr_new", [])
+        for (var k = 0; k < args.length; k++) {
+            if (args[k].vtext == null) {
+                var ar = args[k].pos(b)
+                b = ar.b
+                callExt(b, "js_arr_push", [argsV, ar.v])
+                continue
+            }
+            var refB = curF.NewBlock("")
+            var valB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_phrefat", [fV, emitNum(b, k)])), refB, valB)
+            var rc = targetCell(refB, argTarget(args[k].vtext))
+            rc.b.NewBr(joinB)
+            var rv = args[k].pos(valB)
+            rv.b.NewBr(joinB)
+            b = joinB
+            callExt(b, "js_arr_push", [argsV, joinB.NewPhi([llvm.ir.NewIncoming(rc.v, rc.b),
+                                                            llvm.ir.NewIncoming(rv.v, rv.b)])])
+        }
+        return {b: b, v: argsV}
     }
     // The positional argument list a call is made with.
     //
@@ -4859,13 +4899,15 @@ KwInstanceof = "instanceof" KwEnd ;
         if (name == "ord") { return "js_phord" }
         if (name == "chr") { return "js_phchr" }
         if (name == "__mec_fmtfloat") { return "js_phfmtfloat" }
+        if (name == "__mec_math") { return "js_phmath" }
         if (name == "array_key_exists") { return "js_phkeyexists" }
         if (name == "array_key_last") { return "js_phkeylast" }
         if (name == "array_pop") { return "js_phpop" }
         return ""
     }
     function phpNativeArgc(ext) {
-        if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat") { return 3 }
+        if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat" ||
+            ext == "js_phmath") { return 3 }
         if (ext == "js_phkeyexists" || ext == "js_phstrcmp") { return 2 }
         return 1
     }
@@ -4887,7 +4929,7 @@ KwInstanceof = "instanceof" KwEnd ;
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
         // strlen() measures PHP's string form of the argument (true is "1", false
         // and null are ""), not the JavaScript form js_bytelen alone would measure.
-        if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [callExt(b, "js_phstr", [vs[0]])])} }
+        if (name == "strlen") { return {b: b, v: callExt(b, "js_phstrlen", [vs[0]])} }
         if (name == "count") { return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
         if (name == "array_push") {
             for (var pv = 1; pv < vs.length; pv++) { callExt(b, "js_phpush", [vs[0], vs[pv]]) }
@@ -5124,6 +5166,15 @@ KwInstanceof = "instanceof" KwEnd ;
         if (genClosure) { clo = callExt(b, "js_genfn", [clo]) }
         return clo
     }
+    // A function with by-reference parameters carries their positions as a bit
+    // mask in the function value's meta slot (js_jsfnmeta's length), which a call
+    // through a variable reads back with js_phrefat.
+    function withRefMask(b, clo, byref) {
+        if (byref.length == 0) { return clo }
+        var mask = 0
+        for (var i = 0; i < byref.length; i++) { mask = mask + Math.pow(2, byref[i]) }
+        return callExt(b, "js_jsfnmeta", [clo, emitStr(b, ""), emitNum(b, mask)])
+    }
     // A named function is GLOBAL wherever its declaration stands: one written inside
     // a function body is declared in the main frame when control reaches it, and
     // closes over that frame. Twin of makeDefStmt in php-interpreter.abnf.
@@ -5132,9 +5183,18 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
             var gV = globalsFrameV(b)
-            callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), closureV(b, idx, gV)])
+            callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), withRefMask(b, closureV(b, idx, gV), fn.byref)])
             return b
         }
+    }
+    // A function declared at a file's top level is bound before any of the file's
+    // statements run (PHP's early binding), so a call may stand above it: buildMain
+    // emits the declarations first and the declaration itself does nothing where it
+    // stands. Twin of makeTopDef in php-interpreter.abnf.
+    var topDefs = []
+    function makeTopDef(fn) {
+        topDefs.push(makeDefStmt(fn))
+        return function(b) { return b }
     }
     // One property hook, reduced to {kind, param, body}. 'get => e' is a body that
     // RETURNS e; 'set => e' is a body that stores e in the backing property; a bodyless
@@ -5499,7 +5559,10 @@ KwInstanceof = "instanceof" KwEnd ;
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
         importDepth = importDepth + 1
+        var outerDefs = topDefs
+        topDefs = []
         c.compile(asg)
+        topDefs = outerDefs
         importDepth = importDepth - 1
         c.popSource()
         return true
@@ -5523,7 +5586,10 @@ KwInstanceof = "instanceof" KwEnd ;
         var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
         c.pushSource("php-stdlib.php", text)
         importDepth = importDepth + 1
+        var outerDefs = topDefs
+        topDefs = []
         c.compile(asg)
+        topDefs = outerDefs
         importDepth = importDepth - 1
         c.popSource()
         return name
@@ -5625,11 +5691,24 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return notImplStmt("namespace", pos)
     }
+    // ext/standard's math constants: php_math.h's decimal values, each written as
+    // the shortest form that reads back as the same double. Twin of phpMathConsts
+    // in php-interpreter.abnf.
+    var mathConstNames = ["M_PI", "M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI_2", "M_PI_4",
+        "M_1_PI", "M_2_PI", "M_SQRTPI", "M_2_SQRTPI", "M_LNPI", "M_EULER", "M_SQRT2",
+        "M_SQRT1_2", "M_SQRT3"]
+    var mathConstVals = [3.141592653589793, 2.718281828459045, 1.4426950408889634, 0.4342944819032518,
+        0.6931471805599453, 2.302585092994046, 1.5707963267948966, 0.7853981633974483,
+        0.3183098861837907, 0.6366197723675814, 1.772453850905516, 1.1283791670955126,
+        1.1447298858494002, 0.5772156649015329, 1.4142135623730951, 0.7071067811865476,
+        1.7320508075688772]
     function buildMain(items) {
+        var all = topDefs.concat(items)
+        topDefs = []
         // The walk of an imported file ends here too: stash its top-level thunks for the
         // real phpmain instead of emitting a second one.
         if (importDepth > 0) {
-            stashImported(items) // stashed with its file; emitted later (compile-core)
+            stashImported(all) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("phpmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -5660,7 +5739,10 @@ KwInstanceof = "instanceof" KwEnd ;
                                      callExt(b, "js_phflo", [emitNum(b, Math.pow(2, 0 - 1022))])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "INF"), callExt(b, "js_phflo", [emitNum(b, 1 / 0)])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "NAN"), callExt(b, "js_phflo", [emitNum(b, 0 / 0)])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "M_PI"), callExt(b, "js_phflo", [emitNum(b, Math.PI)])])
+        for (var mci = 0; mci < mathConstNames.length; mci++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mathConstNames[mci]),
+                                         callExt(b, "js_phflo", [emitNum(b, mathConstVals[mci])])])
+        }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_ALL"), emitNum(b, 32767)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_ERROR"), emitNum(b, 1)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_WARNING"), emitNum(b, 2)])
@@ -5701,7 +5783,7 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(mnIdx), curScopeV])])
         b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
-        b = makeBody(items)(b) // a statement list like any body: labels work here too
+        b = makeBody(all)(b) // a statement list like any body: labels work here too
         b.NewRet(handle(0))
     }
 

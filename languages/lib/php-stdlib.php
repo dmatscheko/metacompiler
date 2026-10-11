@@ -6,8 +6,9 @@
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
-// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and
-// __mec_fmtfloat, the one intrinsic, for sprintf's float conversions. A native also gets a wrapper
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and two
+// intrinsics: __mec_fmtfloat for sprintf's float conversions and __mec_math for
+// the math library's double operations. A native also gets a wrapper
 // here of the same name, which is what a string callable or f(...) reaches: a
 // direct call never does, since the call is lowered to the native first.
 //
@@ -1268,6 +1269,228 @@ function __mec_udec($v) {
 }
 function is_nan($num) { return $num != $num; }
 function is_infinite($num) { return $num == INF || $num == -INF; }
+
+// ----- math ------------------------------------------------------------------
+// Written on __mec_math, the C library function of one or two doubles. An
+// int|float parameter keeps an int as an int; a float one converts it. Both take
+// a bool, null or a numeric string the way a coercive-mode call does, and refuse
+// anything else with PHP's TypeError.
+function __mec_num($fn, $n, $name, $v, $type) {
+    if (is_int($v) || is_float($v)) { return $type == "float" ? (float)$v : $v; }
+    if (is_bool($v) || $v === null || (is_string($v) && is_numeric($v))) {
+        return $type == "float" ? (float)$v : $v + 0;
+    }
+    throw new TypeError($fn . "(): Argument #" . $n . " (\$" . $name . ") must be of type " . $type . ", " . get_debug_type($v) . " given");
+}
+function __mec_f1($fn, $num) { return __mec_math($fn, __mec_num($fn, 1, "num", $num, "float"), 0.0); }
+function floor($num) { return __mec_math("floor", __mec_num("floor", 1, "num", $num, "int|float"), 0.0); }
+function ceil($num) { return __mec_math("ceil", __mec_num("ceil", 1, "num", $num, "int|float"), 0.0); }
+function sqrt($num) { return __mec_f1("sqrt", $num); }
+function exp($num) { return __mec_f1("exp", $num); }
+function expm1($num) { return __mec_f1("expm1", $num); }
+function log10($num) { return __mec_f1("log10", $num); }
+function log1p($num) { return __mec_f1("log1p", $num); }
+function sin($num) { return __mec_f1("sin", $num); }
+function cos($num) { return __mec_f1("cos", $num); }
+function tan($num) { return __mec_f1("tan", $num); }
+function asin($num) { return __mec_f1("asin", $num); }
+function acos($num) { return __mec_f1("acos", $num); }
+function atan($num) { return __mec_f1("atan", $num); }
+function sinh($num) { return __mec_f1("sinh", $num); }
+function cosh($num) { return __mec_f1("cosh", $num); }
+function tanh($num) { return __mec_f1("tanh", $num); }
+function asinh($num) { return __mec_f1("asinh", $num); }
+function acosh($num) { return __mec_f1("acosh", $num); }
+function atanh($num) { return __mec_f1("atanh", $num); }
+function atan2($y, $x) {
+    return __mec_math("atan2", __mec_num("atan2", 1, "y", $y, "float"), __mec_num("atan2", 2, "x", $x, "float"));
+}
+function hypot($x, $y) {
+    return __mec_math("hypot", __mec_num("hypot", 1, "x", $x, "float"), __mec_num("hypot", 2, "y", $y, "float"));
+}
+function fmod($num1, $num2) {
+    return __mec_math("fmod", __mec_num("fmod", 1, "num1", $num1, "float"), __mec_num("fmod", 2, "num2", $num2, "float"));
+}
+// fdiv is IEEE division: a zero divisor answers INF, -INF or NAN, never throws.
+function fdiv($num1, $num2) {
+    return __mec_math("div", __mec_num("fdiv", 1, "num1", $num1, "float"), __mec_num("fdiv", 2, "num2", $num2, "float"));
+}
+function fpow($num, $exponent) {
+    return __mec_math("pow", __mec_num("fpow", 1, "num", $num, "float"), __mec_num("fpow", 2, "exponent", $exponent, "float"));
+}
+function pow($num, $exponent) { return $num ** $exponent; }
+// log with a base: 2 and 10 are the exact log2 / log10, 1 has no logarithm.
+function log($num, $base = null) {
+    $x = __mec_num("log", 1, "num", $num, "float");
+    if ($base === null) { return __mec_math("log", $x, 0.0); }
+    $b = __mec_num("log", 2, "base", $base, "float");
+    if ($b == 2.0) { return __mec_math("log2", $x, 0.0); }
+    if ($b == 10.0) { return __mec_math("log10", $x, 0.0); }
+    if ($b == 1.0) { return NAN; }
+    if ($b <= 0.0) { throw new ValueError("log(): Argument #2 (\$base) must be greater than 0"); }
+    return __mec_math("log", $x, 0.0) / __mec_math("log", $b, 0.0);
+}
+function pi() { return M_PI; }
+function deg2rad($num) { return (__mec_num("deg2rad", 1, "num", $num, "float") / 180.0) * M_PI; }
+function rad2deg($num) { return (__mec_num("rad2deg", 1, "num", $num, "float") / M_PI) * 180.0; }
+function is_finite($num) { return !is_nan($num) && !is_infinite($num); }
+function intval($value, $base = 10) {
+    if (!is_string($value) || $base == 10) { return (int)$value; }
+    return __mec_strtol($value, $base);
+}
+function floatval($value) { return (float)$value; }
+function doubleval($value) { return (float)$value; }
+function boolval($value) { return (bool)$value; }
+function strval($value) { return (string)$value; }
+
+const PHP_ROUND_HALF_UP = 1;
+const PHP_ROUND_HALF_DOWN = 2;
+const PHP_ROUND_HALF_EVEN = 3;
+const PHP_ROUND_HALF_ODD = 4;
+// round() is PHP's _php_math_round: the value scaled by 10^places, its integral
+// part corrected when the next integer scales back to the value itself, then
+// __mec_roundedge decides the last step against the UNSCALED value. An int with
+// no negative precision only converts.
+function round($num, $precision = 0, $mode = PHP_ROUND_HALF_UP) {
+    $v = __mec_num("round", 1, "num", $num, "int|float");
+    if ($mode < 1 || $mode > 4) {
+        throw new ValueError("round(): Argument #3 (\$mode) must be a valid rounding mode (RoundingMode::*)");
+    }
+    $places = (int)$precision;
+    if (is_int($v) && $places >= 0) { return (float)$v; }
+    $value = (float)$v;
+    if (!is_finite($value) || $value == 0.0) { return $value; }
+    if ($places == 0 && $value == __mec_math("trunc", $value, 0.0)) { return $value; }
+    $ap = $places < 0 ? -$places : $places;
+    $exponent = (float)("1e" . $ap);
+    if ($value >= 0.0) {
+        $tmp = __mec_math("floor", $places > 0 ? $value * $exponent : $value / $exponent, 0.0);
+        $tmp2 = $tmp + 1.0;
+    } else {
+        $tmp = __mec_math("ceil", $places > 0 ? $value * $exponent : $value / $exponent, 0.0);
+        $tmp2 = $tmp - 1.0;
+    }
+    if (($places > 0 ? $tmp2 / $exponent : $tmp2 * $exponent) == $value) { $tmp = $tmp2; }
+    if (abs($tmp) >= 1e16) { return $value; }
+    $tmp = __mec_roundedge($tmp, $value, $exponent, $places, $mode);
+    if ($ap < 23) { return $places > 0 ? $tmp / $exponent : $tmp * $exponent; }
+    $r = (float)(sprintf("%.0F", $tmp) . "e" . -$places);
+    return is_finite($r) ? $r : $value;
+}
+// php_round_helper: whether the integral part steps away from zero, by where
+// the value lies against the half-way point between it and the next one.
+function __mec_roundedge($integral, $value, $exponent, $places, $mode) {
+    $abs = abs($value);
+    $half = $integral + __mec_math("copysign", 0.5, $integral);
+    $edge = abs($places > 0 ? $half / $exponent : $half * $exponent);
+    $away = $integral + __mec_math("copysign", 1.0, $integral);
+    if ($abs > $edge) { return $away; }
+    if ($abs < $edge || $mode == PHP_ROUND_HALF_DOWN) { return $integral; }
+    if ($mode == PHP_ROUND_HALF_UP) { return $away; }
+    $even = __mec_math("fmod", $integral, 2.0) == 0.0;
+    return ($mode == PHP_ROUND_HALF_EVEN) == $even ? $integral : $away;
+}
+
+// C's isspace: space, \t, \n, \v, \f, \r.
+function __mec_cspace($c) {
+    $o = ord($c);
+    return $o == 32 || ($o >= 9 && $o <= 13);
+}
+// A digit's value in any base up to 36; 99 for anything that is not a digit.
+function __mec_digit($c) {
+    $o = $c === "" ? 0 : ord($c);
+    if ($o >= 48 && $o <= 57) { return $o - 48; }
+    if ($o >= 65 && $o <= 90) { return $o - 55; }
+    if ($o >= 97 && $o <= 122) { return $o - 87; }
+    return 99;
+}
+// C's strtol, as intval() with a base other than 10 reads a string: leading
+// space, a sign, the base's own prefix (0x, 0b, or a leading 0 for octal when
+// the base is 0), then the digits up to the first that is not one; a value out
+// of range saturates. It accumulates NEGATIVELY so PHP_INT_MIN is reachable.
+function __mec_strtol($s, $base) {
+    $n = strlen($s);
+    $i = 0;
+    while ($i < $n && __mec_cspace($s[$i])) { $i++; }
+    $neg = false;
+    if ($i < $n && ($s[$i] == "-" || $s[$i] == "+")) { $neg = $s[$i] == "-"; $i++; }
+    $two = strtolower(substr($s, $i, 2));
+    if (($base == 0 || $base == 16) && $two == "0x" && __mec_digit(substr($s, $i + 2, 1)) < 16) { $base = 16; $i += 2; }
+    elseif (($base == 0 || $base == 2) && $two == "0b" && __mec_digit(substr($s, $i + 2, 1)) < 2) { $base = 2; $i += 2; }
+    elseif ($base == 0) { $base = substr($s, $i, 1) === "0" ? 8 : 10; }
+    if ($base < 2 || $base > 36) { return 0; }
+    $lim = $neg ? PHP_INT_MIN : -PHP_INT_MAX;
+    $acc = 0;
+    $over = false;
+    while ($i < $n) {
+        $d = __mec_digit($s[$i]);
+        if ($d >= $base) { break; }
+        if ($acc < intdiv($lim + $d, $base)) { $over = true; }
+        else { $acc = $acc * $base - $d; }
+        $i++;
+    }
+    if ($over) { return $neg ? PHP_INT_MIN : PHP_INT_MAX; }
+    return $neg ? $acc : -$acc;
+}
+// _php_math_basetozval: surrounding space and the base's own prefix are
+// dropped, every other character that is not a digit of the base is skipped,
+// and past PHP_INT_MAX the value continues as a float.
+function __mec_basetonum($str, $base) {
+    $s = (string)$str;
+    $a = 0;
+    $e = strlen($s);
+    while ($a < $e && __mec_cspace($s[$a])) { $a++; }
+    while ($e > $a && __mec_cspace($s[$e - 1])) { $e--; }
+    if ($e - $a >= 2) {
+        $two = strtolower(substr($s, $a, 2));
+        if (($base == 16 && $two == "0x") || ($base == 8 && $two == "0o") || ($base == 2 && $two == "0b")) { $a += 2; }
+    }
+    $num = 0;
+    $isFloat = false;
+    $cutoff = intdiv(PHP_INT_MAX, $base);
+    $cutlim = PHP_INT_MAX % $base;
+    for ($i = $a; $i < $e; $i++) {
+        $d = __mec_digit($s[$i]);
+        if ($d >= $base) { continue; }
+        if (!$isFloat && ($num < $cutoff || ($num == $cutoff && $d <= $cutlim))) { $num = $num * $base + $d; continue; }
+        if (!$isFloat) { $num = (float)$num; $isFloat = true; }
+        $num = $num * $base + $d;
+    }
+    return $num;
+}
+function bindec($binary_string) { return __mec_basetonum($binary_string, 2); }
+function hexdec($hex_string) { return __mec_basetonum($hex_string, 16); }
+function octdec($octal_string) { return __mec_basetonum($octal_string, 8); }
+// decbin / decoct / dechex render the 64 bits UNSIGNED, so a negative int is its
+// two's complement.
+function decbin($num) { return __mec_radix((int)$num, 1, false); }
+function decoct($num) { return __mec_radix((int)$num, 3, false); }
+function dechex($num) { return __mec_radix((int)$num, 4, false); }
+function base_convert($num, $from_base, $to_base) {
+    if ($from_base < 2 || $from_base > 36) {
+        throw new ValueError("base_convert(): Argument #2 (\$from_base) must be between 2 and 36 (inclusive)");
+    }
+    if ($to_base < 2 || $to_base > 36) {
+        throw new ValueError("base_convert(): Argument #3 (\$to_base) must be between 2 and 36 (inclusive)");
+    }
+    $v = __mec_basetonum($num, $from_base);
+    $digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    $out = "";
+    if (is_float($v)) {
+        $f = __mec_math("floor", $v, 0.0);
+        if (is_infinite($f)) { throw new ValueError("An infinite value cannot be converted to base " . $to_base); }
+        do {
+            $out = $digits[(int)__mec_math("fmod", $f, (float)$to_base)] . $out;
+            $f = $f / $to_base;
+        } while (abs($f) >= 1);
+        return $out;
+    }
+    do {
+        $out = $digits[$v % $to_base] . $out;
+        $v = intdiv($v, $to_base);
+    } while ($v != 0);
+    return $out;
+}
 function sprintf($format, ...$values) { return __mec_format((string)$format, $values); }
 function vsprintf($format, $values) { return __mec_format((string)$format, array_values($values)); }
 function printf($format, ...$values) {

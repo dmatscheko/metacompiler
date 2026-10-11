@@ -1111,13 +1111,7 @@ function phArrGet(av, k) {
         if (i >= 0) { return phDeref(p.v[i]) }
         return null
     }
-    if (typeof av == "string") {
-        var j = phNumOf(phToLong(k))
-        if (j < 0) { j = j + av.length }
-        if (j < 0) { return "" }
-        if (j >= av.length) { return "" }
-        return av.charAt(j)
-    }
+    if (typeof av == "string") { return phsOffset(av, phNumOf(phToLong(k))) }
     if (rtIsNil(av)) { return null }
     if (typeof av == "object") {
         var pv = av[phStr(k)]
@@ -1140,8 +1134,8 @@ function phArrHas(av, k) {
         // A NEGATIVE string offset counts from the end (PHP 7.1+), so
         // isset("abc"[-1]) is true, matching what js_phget reads. The valid negative
         // range is -length .. -1.
-        if (j < 0) { return 0 - j <= av.length }
-        return j < av.length
+        if (j < 0) { return 0 - j <= phsLen(av) }
+        return j < phsLen(av)
     }
     // `typeof null` is "object" here as it is in JS, and the Go twin's arm is a
     // *jsObject assertion, which null is not - so the null has to be shed first or
@@ -1225,7 +1219,7 @@ function phArrCopy(v) {
 function phLen(v) {
     var p = phArrParts(v)
     if (p !== undefined) { return p.k.length }
-    if (typeof v == "string") { return byteLen(v) }
+    if (typeof v == "string") { return phsLen(v) }
     if (rtIsNil(v)) { return 0 }
     return 1
 }
@@ -1420,7 +1414,7 @@ function phDump(v, ind) {
     var f = phFloOf(v)
     if (f !== undefined) { return pad + "float(" + phFloDump(f) + ")\n" }
     if (phIsInt(v)) { return pad + "int(" + phStr(v) + ")\n" }
-    if (typeof v == "string") { return pad + "string(" + byteLen(v) + ") \"" + v + "\"\n" }
+    if (typeof v == "string") { return pad + "string(" + phsLen(v) + ") \"" + v + "\"\n" }
     var p = phArrParts(v)
     if (p !== undefined) {
         var out = pad + "array(" + p.k.length + ") {\n"
@@ -1788,7 +1782,16 @@ function js_phtruthy__raw(v) { return phTest(v) }
 function js_phbool(v) { return phTest(v) }
 function js_phnot(v) { return !phTest(v) }
 function js_phstr(v) { return phStr(v) }
-function js_phcat(l, r) { return phStr(l) + phStr(r) }
+// a . b. Only a seam between held bytes needs phsJoin's re-read: a ends in a
+// held byte (U+DC80..U+DCFF) and b starts with a held continuation byte.
+function js_phcat(l, r) {
+    var a = phStr(l)
+    var b = phStr(r)
+    if (a.length == 0 || b.length == 0) { return a + b }
+    var x = a.charCodeAt(a.length - 1)
+    if (x < 56448 || x > 56575) { return a + b }
+    return phsJoin(a, b)
+}
 function js_phflo(n) { return phMkFlo(phNumOf(phToNum(n))) }
 function js_phnum(v) { return phToNum(v) }
 
@@ -1913,6 +1916,10 @@ function js_phset(a, k, v) { return phArrSet(a, k, v) }
 function js_phpush(a, v) { return phArrPush(a, v) }
 function js_phget(a, k) { return phArrGet(a, k) }
 function js_phisset(a, k) { return phArrHas(a, k) }
+// Is parameter i of function f by reference? Bit i of the mask the emitter
+// recorded in the function's meta slot (withRefMask in php-to-llvm-ir.abnf).
+// Twin of js_phrefat in abnf/jsrtphp.go.
+function js_phrefat(f, i) { return Math.floor(fnMeta(f, "length") / Math.pow(2, i)) % 2 == 1 }
 function js_phcell(a, k) { return phElemCell(a, k) }
 function js_phderef(v) { return phDeref(v) }
 function js_phunset(a, k) { return phArrUnset(a, k) }
@@ -1966,6 +1973,17 @@ function js_phstrpos(h, needle, off) { return phPosResult("strpos", phsStrpos(ph
 function js_phstrrpos(h, needle, off) { return phPosResult("strrpos", phsStrrpos(phStr(h), phStr(needle), phInt(off))) }
 function js_phstrcmp(a, b) { return phsStrcmp(phStr(a), phStr(b)) }
 function js_phord(s) { return phsOrd(phStr(s)) }
+function js_phstrlen(s) { return phsLen(phStr(s)) }
+// A string literal assembled from bytes (dqPiece in php-to-llvm-ir.abnf).
+function js_phfrombytes(s) { return phsFromBytes(s) }
+// $s[$k] = $v on a string: the string with the one byte replaced.
+function js_phsetoffset(s, k, v) {
+    var c = phStr(v)
+    if (c.length == 0) { fail("cannot assign an empty string to a string offset") }
+    var r = phsSetOffset(phStr(s), phNumOf(phToLong(k)), c)
+    if (r === null) { fail("cannot write to a negative string offset") }
+    return r
+}
 function js_phchr(n) { return phsChr(phInt(n)) }
 function js_phcase(s, up) { return phsCase(phStr(s), up === true) }
 
@@ -1988,6 +2006,8 @@ function js_phfmtfloat(x, conv, prec) {
     }
     return phsFmtFloat(a, c, p, rtExactDec, rtRoundHalfEven)
 }
+
+function js_phmath(op, x, y) { return phMkFlo(phsMath(phStr(op), phNumOf(phToNum(x)), phNumOf(phToNum(y)))) }
 
 function js_phkeyexists(k, a) {
     var p = phArrParts(a)

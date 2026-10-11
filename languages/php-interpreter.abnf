@@ -86,7 +86,7 @@ Program     <~~ runProgram(takeAll()) ~~>
             = LeadHtml { TopItem } ;
 // One item of a top level: a declaration or a statement. Factored out because a
 // BRACED namespace body holds exactly the same items (see NsDecl).
-TopItem     = Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
+TopItem     = Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
 OpenTag     = "<?php" :whitespace(Whitespace) ;
 // Text before the first open tag. Unlike the '?>' form it keeps a leading newline:
 // only the newline directly after a CLOSE tag is swallowed.
@@ -1129,7 +1129,7 @@ TplDollar   = "$" TplId ;
 TplProp     <~~ push({tprop: up.in}) ~~>
             = "->" TplId ;
 TplId       = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
-TplChunk    <~~ push({s: unescapeDq(up.in)}) ~~>
+TplChunk    <~~ push(dqPiece(up.in)) ~~>
             = TplC { TplC } ;
 TplC        = TplEsc | TplPlain ;
 // '\u{...}' has to be recognized as ONE escape: the brace form is tried before the
@@ -1722,7 +1722,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // int             -> a plain JS number with an integral value
     // float           -> a BOX {__flo, f}, so that 3.0 and 3 stay distinguishable
     //                    (PHP's === and match() separate them: 3.0 === 3 is false)
-    // string          -> a JS string; strlen and offsets are BYTE based (byteLen)
+    // string          -> a JS string; strlen and offsets are BYTE based (php-strings.js)
     // array           -> the ordered map {__dict, keys, vals} plus __next, the next
     //                    auto index. PHP has ONE array type: [1,2,3] is the map
     //                    0=>1, 1=>2, 2=>3, which is why $a === $b compares keys AND
@@ -2500,8 +2500,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         else if (typeof k == "string" && numStrVal(k) != null) { ok = true }
         if (!ok) { return false }
         var n = trunc(numOf(toNumV(k)))
-        if (n < 0) { return 0 - n <= s.length }
-        return n < s.length
+        if (n < 0) { return 0 - n <= phsLen(s) }
+        return n < phsLen(s)
     }
     function makeEmpty(t) { return function() { return !phptest(t()) } }
     function makeEmptyTgt(ref) { return function() { return !phptest(refProbe(ref)) } }
@@ -2798,15 +2798,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return sign + d.substring(0, decpt) + "." + d.substring(decpt)
     }
-    function phpConcat(l, r) { return phpStr(l) + phpStr(r) }
+    // a . b. Only a seam between held bytes needs phsJoin's re-read: a ends in a
+    // held byte (U+DC80..U+DCFF). Twin of js_phcat in languages/lib/php-rt.metajs.
+    function phpConcat(l, r) {
+        var a = phpStr(l)
+        var b = phpStr(r)
+        if (a.length == 0 || b.length == 0) { return a + b }
+        var x = a.charCodeAt(a.length - 1)
+        if (x < 56448 || x > 56575) { return a + b }
+        return phsJoin(a, b)
+    }
 
     function makeTemplate(items) {
         if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s) }
+        for (var k = 0; k < items.length; k++) {
+            if (items[k].sb != undefined) { items[k] = {s: phsFromBytes(items[k].sb)} }
+        }
         return function() {
             var out = ""
             for (var i = 0; i < items.length; i++) {
-                if (items[i].s != undefined) { out += items[i].s }
-                else { out += phpStr(items[i].e()) }
+                if (items[i].s != undefined) { out = phsJoin(out, items[i].s) }
+                else { out = phsJoin(out, phpStr(items[i].e())) }
             }
             return out
         }
@@ -2825,15 +2837,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return out
     }
-    // The double-quoted / heredoc escape set. PHP keeps an UNKNOWN escape as BOTH
-    // characters ("\q" is a backslash and a q, two bytes), which is why there is no
-    // default branch that drops the backslash.
+    // The double-quoted / heredoc escape set, answered as a BYTE string (every unit
+    // one byte, 0..255): "\xC3\xA9" is two bytes that spell one character, and a
+    // character written in the source is its UTF-8 bytes. PHP keeps an UNKNOWN
+    // escape as BOTH characters ("\q" is a backslash and a q, two bytes), which is
+    // why there is no default branch that drops the backslash.
     function unescapeDq(s) {
         var out = ""
         var i = 0
         while (i < s.length) {
             var c = s.charCodeAt(i)
-            if (c != 92 || i + 1 >= s.length) { out += String.fromCharCode(c); i++; continue }
+            if (c != 92 || i + 1 >= s.length) {
+                if (c < 128) { out += String.fromCharCode(c); i++; continue }
+                if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+                    out += dqUtf8((c - 55296) * 1024 + (s.charCodeAt(i + 1) - 56320) + 65536)
+                    i += 2
+                    continue
+                }
+                out += dqUtf8(c)
+                i++
+                continue
+            }
             var e = s.charAt(i + 1)
             if (e == "n") { out += "\n"; i += 2; continue }
             if (e == "t") { out += "\t"; i += 2; continue }
@@ -2870,15 +2894,39 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var un = 0
                 while (uj < s.length && isHexCh(s.charAt(uj))) { uv = uv * 16 + hexVal(s.charAt(uj)); uj++; un++ }
                 if (un > 0 && uj < s.length && s.charAt(uj) == "}") {
-                    out += codePointStr(uv)
+                    out += dqUtf8(uv)
                     i = uj + 1
                     continue
                 }
             }
-            out += "\\" + e
-            i += 2
+            out += "\\"
+            i += 1
         }
         return out
+    }
+    // The UTF-8 bytes of code point cp, as a byte string.
+    function dqUtf8(cp) {
+        var tail = ""
+        var v = cp
+        var lead = 0
+        var room = 128
+        while (v >= room) {
+            tail = String.fromCharCode(128 + v % 64) + tail
+            v = Math.floor(v / 64)
+            lead = lead == 0 ? 192 : 128 + lead / 2
+            room = room == 128 ? 32 : room / 2
+        }
+        return String.fromCharCode(lead + v) + tail
+    }
+    // A literal piece of a double-quoted string or heredoc: {s: text}, or {sb:
+    // bytes} when the text would hold a byte that is not part of a character,
+    // which the tag stack cannot carry (makeTemplate turns it into text, past the
+    // stack).
+    function dqPiece(raw) {
+        var bytes = unescapeDq(raw)
+        var text = phsFromBytes(bytes)
+        if (phsHasHeld(text)) { return {sb: bytes} }
+        return {s: text}
     }
     function isHexCh(ch) { return (ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f") || (ch >= "A" && ch <= "F") }
     function hexVal(ch) {
@@ -2886,11 +2934,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (cc >= 48 && cc <= 57) { return cc - 48 }
         if (cc >= 97) { return cc - 87 }
         return cc - 55
-    }
-    function codePointStr(cp) {
-        if (cp < 65536) { return String.fromCharCode(cp) }
-        var off = cp - 65536
-        return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
     }
 
     // ----- '$name', '$name[key]' and '$name->prop' inside a double-quoted string ---
@@ -2983,7 +3026,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     j++
                 }
                 if (j < body.length) {
-                    if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                    if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
                     parts.push({e: compileSnippet(body.substring(i + 1, j))})
                     i = j + 1
                     continue
@@ -3009,7 +3052,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     expr = expr + body.substring(k, p2)
                     k = p2
                 }
-                if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
                 parts.push({e: compileSnippet(expr)})
                 i = k
                 continue
@@ -3017,7 +3060,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             lit += ch
             i++
         }
-        if (lit != "") { parts.push({s: unescapeDq(lit)}) }
+        if (lit != "") { parts.push(dqPiece(lit)) }
         return parts
     }
     function isNameStart(ch) { return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" }
@@ -3030,12 +3073,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // ----- length / indexing -----
     function phpIndex(o, i) {
         if (isArr(o)) { return arrGet(o, i) }
-        if (typeof o == "string") {
-            var n = trunc(numOf(toNumV(i)))
-            if (n < 0) { n = o.length + n }
-            if (n < 0 || n >= o.length) { return "" }
-            return o.charAt(n)
-        }
+        if (typeof o == "string") { return phsOffset(o, trunc(numOf(toNumV(i)))) }
         if (o === null || o === undefined) { return null }
         if (isObj(o)) { return phpGetProp(o, phpStr(i)) }
         return null
@@ -3442,7 +3480,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (name == "PHP_FLOAT_DIG") { return 15 }
             if (name == "INF") { return mkFlo(PHP_INF) }
             if (name == "NAN") { return mkFlo(0 / 0) }
-            if (name == "M_PI") { return mkFlo(Math.PI) }
+            if (hasOwn(phpMathConsts, name)) { return mkFlo(phpMathConsts[name]) }
             if (name == "E_ALL") { return 32767 }
             if (name == "E_ERROR") { return 1 }
             if (name == "E_WARNING") { return 2 }
@@ -3454,6 +3492,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             phpRaise("Error", "Undefined constant " + String.fromCharCode(34) + name + String.fromCharCode(34))
         }
     }
+    // ext/standard's math constants: php_math.h's decimal values, each written as
+    // the shortest form that reads back as the same double. Twin of mathConstNames
+    // in php-to-llvm-ir.abnf.
+    var phpMathConsts = {}
+    var phpMathNames = ["M_PI", "M_E", "M_LOG2E", "M_LOG10E", "M_LN2", "M_LN10", "M_PI_2", "M_PI_4",
+        "M_1_PI", "M_2_PI", "M_SQRTPI", "M_2_SQRTPI", "M_LNPI", "M_EULER", "M_SQRT2",
+        "M_SQRT1_2", "M_SQRT3"]
+    var phpMathVals = [3.141592653589793, 2.718281828459045, 1.4426950408889634, 0.4342944819032518,
+        0.6931471805599453, 2.302585092994046, 1.5707963267948966, 0.7853981633974483,
+        0.3183098861837907, 0.6366197723675814, 1.772453850905516, 1.1283791670955126,
+        1.1447298858494002, 0.5772156649015329, 1.4142135623730951, 0.7071067811865476,
+        1.7320508075688772]
+    for (var mci = 0; mci < phpMathNames.length; mci++) { phpMathConsts[phpMathNames[mci]] = phpMathVals[mci] }
+
     // static $n = 0; - the cells belong to the STATEMENT, so every call re-binds the
     // same storage into its fresh frame. They are created on first execution rather
     // than at build time because the initializer is an ordinary expression.
@@ -3990,14 +4042,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var base = anytype
         base = readTargetValHead(ref)
         if (typeof base != "string") { return false }
-        var n = trunc(numOf(toNumV(st.idx())))
-        if (n < 0) { n = base.length + n }
-        if (n < 0) { fail("cannot write to a negative string offset") }
-        var s = base
-        while (s.length < n) { s = s + " " }   // PHP pads a write past the end with spaces
         var ch = phpStr(v)
         if (ch.length == 0) { fail("cannot assign an empty string to a string offset") }
-        writeTargetValHead(ref, s.substring(0, n) + ch.charAt(0) + s.substring(n + 1))
+        // A BYTE offset, and a write past the end pads with spaces (phsSetOffset).
+        var s = phsSetOffset(base, trunc(numOf(toNumV(st.idx()))), ch)
+        if (s === null) { fail("cannot write to a negative string offset") }
+        writeTargetValHead(ref, s)
         return true
     }
     // The value / storage of a target's HEAD alone, ignoring its path.
@@ -4203,6 +4253,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // there too.
     function runProgram(items) {
         var main = makeBody(items)
+        var defs = topDefs
+        topDefs = []
+        for (var di = 0; di < defs.length; di++) { scopePut(globalScope, defs[di].name, makeFunClosure(defs[di])) }
         // A user exception (throw) that escapes the whole program is reported like any
         // other runtime error. The wrap sits here, not around c.compile, because the
         // program runs as a side effect of executing the statement thunks (unlike Java,
@@ -4271,6 +4324,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Twin of makeDefStmt in php-to-llvm-ir.abnf.
     function makeDefStmt(fn) {
         return function() { scopePut(globalScope, fn.name, makeFunClosure(fn)); return null }
+    }
+    // A function declared at a file's top level is bound before any of the file's
+    // statements run (PHP's early binding), so a call may stand above it. The
+    // declaration itself then does nothing where it stands. Twin of makeTopDef in
+    // php-to-llvm-ir.abnf.
+    var topDefs = []
+    function makeTopDef(fn) {
+        topDefs.push(fn)
+        return function() { return null }
     }
     // Creating an instance: the declared property defaults are installed first (in
     // declaration order, walking the base classes first so an override wins), then
@@ -4606,7 +4668,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     var phpBuiltins = {
         "count": function(a) { return phpLen(a) },
         // PHP strings are byte strings: strlen("\u{2764}") is 3, not 1.
-        "strlen": function(s) { return byteLen(phpStr(s)) },
+        "strlen": function(s) { return phsLen(phpStr(s)) },
         "array_push": function(a) {
             for (var i = 1; i < arguments.length; i++) { arrPush(a, arguments[i]) }
             return a.keys.length
@@ -4644,6 +4706,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return phsFmtFloat(a, conv, p, coreExactDec, coreRoundHalfEven)
         },
+        "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         "array_key_exists": function(k, a) {
             if (!isArr(a)) {
                 phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpDebugType(a) + " given")
@@ -4699,12 +4762,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "get_class": function(v) { return isObj(v) ? v.__class.__name : false },
         "gettype": function(v) { return phpTypeName(v) },
         "get_debug_type": function(v) { return phpDebugType(v) },
-        "var_dump": function(a, b, c, d, e, f, g, h) {
-            var args = [a, b, c, d, e, f, g, h]
-            for (var i = 0; i < args.length; i++) {
-                if (args[i] === undefined) { return null }
-                print(dumpOf(args[i], 0))
-            }
+        "var_dump": function() {
+            for (var i = 0; i < arguments.length; i++) { print(dumpOf(arguments[i], 0)) }
             return null
         }
     }
@@ -4754,7 +4813,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (v === false) { return pad + "bool(false)\n" }
         if (isInt(v)) { return pad + "int(" + phpStr(v) + ")\n" }
         if (isFlo(v)) { return pad + "float(" + floDump(v.f) + ")\n" }
-        if (typeof v == "string") { return pad + "string(" + byteLen(v) + ") \"" + v + "\"\n" }
+        if (typeof v == "string") { return pad + "string(" + phsLen(v) + ") \"" + v + "\"\n" }
         if (isArr(v)) {
             var out = pad + "array(" + v.keys.length + ") {\n"
             for (var i = 0; i < v.keys.length; i++) {
@@ -4781,7 +4840,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function phpLen(v) {
         if (isArr(v)) { return v.keys.length }
-        if (typeof v == "string") { return byteLen(v) }
+        if (typeof v == "string") { return phsLen(v) }
         if (v === null || v === undefined) { return 0 }
         return 1
     }
@@ -5160,7 +5219,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var text = c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
+        var outerDefs = topDefs
+        topDefs = []
         c.compile(asg)
+        topDefs = outerDefs
         c.popSource()
         return true
     }
@@ -5181,7 +5243,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var text = load("lib/php-stdlib.php")
         var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
         c.pushSource("php-stdlib.php", text)
+        var outerDefs = topDefs
+        topDefs = []
         c.compile(asg)
+        topDefs = outerDefs
         c.popSource()
         return name
     }
