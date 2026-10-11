@@ -5413,9 +5413,21 @@ KwInstanceof = "instanceof" KwEnd ;
             else { classItems.push(items[i]) }
         }
         var clsStmt = makeClassStmt(classItems)
+        var hasImpl = false
+        for (var hi = 1; hi < classItems.length; hi++) {
+            if (classItems[hi] != undefined && classItems[hi].impl != undefined) { hasImpl = true }
+        }
+        var backed = cases.length > 0 && cases[0].ecaseinit != null
         return function(b) {
             b = clsStmt(b)
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            // Every enum is a UnitEnum, a backed one a BackedEnum too: bare names, the
+            // way the built-in exception classes list Throwable. Twin of
+            // makeEnumStmt in php-interpreter.abnf.
+            var ifV = hasImpl ? callExt(b, "js_get", [clsV, emitStr(b, "__ifaces")]) : callExt(b, "js_pharr", [])
+            callExt(b, "js_phpush", [ifV, emitStr(b, "UnitEnum")])
+            if (backed) { callExt(b, "js_phpush", [ifV, emitStr(b, "BackedEnum")]) }
+            if (!hasImpl) { callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifV]) }
             var allV = callExt(b, "js_pharr", [])
             for (var k = 0; k < cases.length; k++) {
                 var inst = callExt(b, "js_obj_new", [])

@@ -580,6 +580,8 @@ class JxS implements JsonSerializable {
     public $q = 3;
     public function jsonSerialize(): mixed { return ["q" => $this->q * 2]; }
 }
+enum JxPure { case A; }
+enum JxBacked: string { case B = "b"; }
 $jo = (object)["x" => 1, "5" => "five"];
 $jn = new stdClass;
 $jn->k = [2];
@@ -594,6 +596,10 @@ check("vexport-array", var_export([3 => "x", "k" => [true, null]], true),
 check("vexport-object", var_export([new JxP()], true),
       "array (\n  0 => \n  \\JxP::__set_state(array(\n     'a' => 1,\n     'b' => \n    array (\n      0 => 1.5,\n      1 => 'x\\'y',\n    ),\n  )),\n)");
 check("vexport-stdclass", var_export($jo, true), "(object) array(\n   'x' => 1,\n   '5' => 'five',\n)");
+// An enum case exports as \E::Case, encodes as its value, and a pure one has none.
+check("enum-json-export", [var_export([JxPure::A], true), json_encode([JxBacked::B]), json_encode(JxPure::A), json_last_error(),
+      JxBacked::B instanceof BackedEnum, JxPure::A instanceof BackedEnum, JxPure::A instanceof UnitEnum],
+      ["array (\n  0 => \n  \\JxPure::A,\n)", "[\"b\"]", false, 11, true, false, true]);
 check("json-encode-scalars", json_encode([null, true, 0, -7, $jv[0], $jv[1], $jv[2], $jv[3], "é/€ 😀\"\x01\t"]),
       "[null,true,0,-7,1,-0,1.0e+100,0.1,\"\\u00e9\\/\\u20ac \\ud83d\\ude00\\\"\\u0001\\t\"]");
 check("json-encode-objects", json_encode(["a" => 1, "b" => [], "c" => new stdClass(), 1 => [1, 2]]) . json_encode(new JxP()) . json_encode(new JxS()),

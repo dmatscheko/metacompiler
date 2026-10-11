@@ -4527,6 +4527,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() {
             var cls = buildClass(name, p)
             cls.__isenum = true
+            // Every enum is a UnitEnum, a backed one a BackedEnum too. Twin of
+            // makeEnumStmt in php-to-llvm-ir.abnf.
+            var ifs = []
+            for (var fi = 0; p.ifaces != null && fi < p.ifaces.length; fi++) { ifs.push(p.ifaces[fi]) }
+            ifs.push("UnitEnum")
+            if (cases.length > 0 && cases[0].init != null) { ifs.push("BackedEnum") }
+            cls.__ifaces = ifs
             declVar(name, cls)
             var all = newArr()
             for (var c = 0; c < cases.length; c++) {

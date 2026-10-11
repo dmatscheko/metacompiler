@@ -1637,6 +1637,7 @@ function __mec_export($v, $level) {
         }
         return $out . $close . ")";
     }
+    if ($v instanceof UnitEnum) { return $out . "\\" . get_class($v) . "::" . $v->name; }
     $std = get_class($v) === "stdClass";
     $out .= $std ? "(object) array(\n" : "\\" . get_class($v) . "::__set_state(array(\n";
     foreach ((array)$v as $k => $e) {
@@ -1740,6 +1741,9 @@ function __mec_jenc($v, $st, $level) {
     }
     if (is_array($v)) { return __mec_jlist($v, !($st->flags & JSON_FORCE_OBJECT) && array_is_list($v), $st, $level); }
     if (!is_object($v)) { return __mec_jfail($st, JSON_ERROR_UNSUPPORTED_TYPE, "null"); }
+    if ($v instanceof UnitEnum && !($v instanceof JsonSerializable)) {
+        return $v instanceof BackedEnum ? __mec_jenc($v->value, $st, $level) : __mec_jfail($st, JSON_ERROR_NON_BACKED_ENUM, "0");
+    }
     if (in_array($v, $st->open, true)) { return __mec_jfail($st, JSON_ERROR_RECURSION, "null"); }
     $st->open[] = $v;
     if ($v instanceof JsonSerializable) {
