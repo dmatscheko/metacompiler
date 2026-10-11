@@ -581,6 +581,10 @@ type jsrt struct {
 	// pyAliases memoizes the list[int]-style generic aliases, so the same written
 	// alias is the same value every time (see pyGenericAlias).
 	pyAliases map[string]*jsObject
+	// pyObjMethods and pyBNews memoize object's own methods and the builtin
+	// types' __new__, one function each (abnf/jsrtpysub.go).
+	pyObjMethods map[string]interface{}
+	pyBNews      map[*jsObject]interface{}
 
 	// curGen is the generator whose body is currently running, so js_yield knows
 	// which one to suspend. Only one goroutine ever runs (the handshake below is
@@ -3911,6 +3915,10 @@ func (rt *jsrt) pyFuncRender(v interface{}) string {
 	if c, ok := rt.pyBuiltinRender[v]; ok {
 		if strings.HasPrefix(c, "*") {
 			return "<class '" + c[1:] + "'>"
+		}
+		// "~": one of object's slot wrappers (pyObjectMethod).
+		if strings.HasPrefix(c, "~") {
+			return "<slot wrapper '" + c[1:] + "' of 'object' objects>"
 		}
 		return "<built-in function " + c + ">"
 	}
@@ -16520,36 +16528,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pydel_attr": func(a []uint64) uint64 {
-			if isCallable(u(a[0])) {
-				name := rt.toString(u(a[1]))
-				d, i := rt.pyFuncAttrIdx(u(a[0]), name)
-				if i < 0 {
-					panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
-						"'"+pyTypeName(rt, u(a[0]))+"' object has no attribute '"+name+"'")})
-				}
-				keys, vals, _ := dictParts(d)
-				keys.dropIdx()
-				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
-				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
-				return 0
-			}
-			if _, cls, isInst := pyInstance(u(a[0])); !isInst {
-				rt.pyNoDictAttr(u(a[0]), rt.toString(u(a[1])))
-			} else if pyIsObjectCls(cls) {
-				panic(&jsThrown{value: rt.pyAttrError(cls, rt.toString(u(a[1])))})
-			}
-			o, ok := u(a[0]).(*jsObject)
-			if !ok {
-				rt.fail("attribute deletion on a %s", rt.typeOf(u(a[0])))
-			}
-			name := rt.toString(u(a[1]))
-			delete(o.props, name)
-			for i, k := range o.keys {
-				if k == name {
-					o.keys = append(o.keys[:i], o.keys[i+1:]...)
-					break
-				}
-			}
+			rt.pyDelAttr(u(a[0]), rt.toString(u(a[1])))
 			return 0
 		},
 		// int(x=0, /, base=10), bound by its signature as [positionals, keywords].
@@ -16876,11 +16855,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// hash(v); pyHashW in abnf/jsrtpynum.go.
 		"js_pyhash": func(a []uint64) uint64 {
-			x := rt.pyHashW(u(a[0]))
-			if int64(x) >= -(1<<53) && int64(x) < 1<<53 {
-				return w(float64(int64(x)))
-			}
-			return w(rt.pyBigNarrow(big.NewInt(int64(x))))
+			return w(rt.pyHashInt(rt.pyHashW(u(a[0]))))
 		},
 		// The float LITERAL builder: constant folding cannot carry a box, so
 		// languages/python-to-llvm-ir.abnf emits this call for 1.0 and 1e3.
@@ -19617,6 +19592,13 @@ func (rt *jsrt) pySuperFind(s *jsObject, name string) (interface{}, bool) {
 		if v, ok := pyClassMember(k, name); ok {
 			return v, true
 		}
+		if bn := pyBuiltinClsName(k); bn != "" && name == "__new__" {
+			return rt.pyClsNew(k), true
+		}
+	}
+	// object ends every resolution order.
+	if m := rt.pyObjectMethod(name); m != nil {
+		return m, true
 	}
 	return nil, false
 }
@@ -19635,7 +19617,8 @@ func (rt *jsrt) pySuperAttr(s *jsObject, name string) interface{} {
 	if pyDescKind(m) != "" {
 		return rt.pyDescGet(m, rt.pySuperOwner(s), name)
 	}
-	if isCallable(m) {
+	// __new__ is a static method: super().__new__(cls) passes cls itself.
+	if isCallable(m) && name != "__new__" {
 		return rt.pyBindMethod(s.props["__sobj"], m, name)
 	}
 	return m
@@ -19661,7 +19644,7 @@ func (rt *jsrt) pySuperMCall(s *jsObject, name string, args []interface{}, kw in
 		d := rt.pyDescGet(m, rt.pySuperOwner(s), name)
 		return rt.call(d, jsUndef, rt.pyBindCall(d, args, kw))
 	}
-	if !isCallable(m) {
+	if !isCallable(m) || name == "__new__" {
 		return rt.callPyValue(m, args, kw)
 	}
 	self := append([]interface{}{s.props["__sobj"]}, args...)
@@ -19776,6 +19759,9 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 				return rt.pyMroAttr(cls, "__mro__")
 			})
 		}
+		if m := rt.pyClassFallback(cls, name); m != nil {
+			return m
+		}
 		// A CATCHABLE AttributeError, as CPython raises, so `try: getattr(C,
 		// "nope") except AttributeError:` works.
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
@@ -19809,6 +19795,12 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 				return rt.pyBindMethod(obj, v, name)
 			}
 			return v
+		}
+		if name == "__new__" {
+			return rt.pyClsNew(cls)
+		}
+		if m := rt.pyObjectMethod(name); m != nil {
+			return rt.pyBindObjectMethod(obj, m, name)
 		}
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"'")})
@@ -19929,7 +19921,7 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		// it - len.__name__ is 'len'. The two tables are keyed by the closure
 		// VALUE, so a user `def len(...)` still answers its own name.
 		if c, ok := rt.pyBuiltinRender[obj]; ok {
-			return strings.TrimPrefix(c, "*")
+			return strings.TrimLeft(c, "*~")
 		}
 		if fn, ok := rt.pyFuncNames[obj]; ok {
 			return fn
@@ -19961,6 +19953,9 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	// CPython names a TYPE OBJECT differently from a value: "type object 'list'
 	// has no attribute 'nope'", not "'type' object has no attribute 'nope'".
 	if tn2, isType2 := rt.pyClassName(obj); isType2 {
+		if m := rt.pyClassFallback(obj.(*jsObject), name); m != nil {
+			return m
+		}
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"type object '"+tn2+"' has no attribute '"+name+"'")})
 	}
@@ -20314,6 +20309,11 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		if f, ok := pyBuiltinDelegate(tn, name); ok {
 			return rt.call(f, jsUndef, args)
 		}
+		if _, user := pyClassObj(target); !user {
+			if m := rt.pyClassFallback(target.(*jsObject), name); m != nil {
+				return rt.callPyValue(m, args, kw)
+			}
+		}
 	}
 	if cls, ok := pyClassObj(target); ok {
 		if m, found := pyLookup(cls, name); found {
@@ -20331,6 +20331,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		}
 		if name == "mro" {
 			return rt.pyMroAttr(cls, "__mro__")
+		}
+		if m := rt.pyClassFallback(cls, name); m != nil {
+			return rt.callPyValue(m, args, kw)
 		}
 		rt.fail("type object '%s' has no method '%s'", rt.toString(cls.props["__name"]), name)
 	}
@@ -20356,6 +20359,12 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 				return rt.call(m, jsUndef, rt.pyBindCall(m, self, kw))
 			}
 			return rt.callPyValue(m, args, kw)
+		}
+		if name == "__new__" {
+			return rt.callPyValue(rt.pyClsNew(cls), args, kw)
+		}
+		if m := rt.pyObjectMethod(name); m != nil {
+			return rt.callPyValue(m, append([]interface{}{target}, args...), kw)
 		}
 		if _, isDict := inst.props["__dict"]; !isDict {
 			rt.fail("'%s' object has no method '%s'", rt.toString(cls.props["__name"]), name)
@@ -21612,17 +21621,17 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 			return true
 		}
 		_, found := pyLookup(cls, name)
-		return found
+		return found || rt.pyClassFallback(cls, name) != nil
 	}
 	if inst, cls, ok := pyInstance(obj); ok {
-		if name == "__class__" || name == "__dict__" {
+		if name == "__class__" || name == "__dict__" || name == "__new__" {
 			return true
 		}
 		if _, found := inst.props[name]; found {
 			return true
 		}
 		_, found := pyLookup(cls, name)
-		return found
+		return found || rt.pyObjectMethod(name) != nil
 	}
 	// A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
 	// has to agree with what `math.sqrt` answers.
@@ -21643,6 +21652,9 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 			return true
 		}
 		if name == "__hash__" && pyBHashNone(tn) {
+			return true
+		}
+		if rt.pyClassFallback(obj.(*jsObject), name) != nil {
 			return true
 		}
 	}
@@ -22055,6 +22067,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		if c, ok := rt.pyBuiltinRender[v]; ok {
 			if strings.HasPrefix(c, "*") {
 				return "type" // range / enumerate / zip / map / filter / reversed.
+			}
+			if strings.HasPrefix(c, "~") {
+				return "wrapper_descriptor"
 			}
 			return "builtin_function_or_method"
 		}

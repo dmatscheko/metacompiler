@@ -1261,6 +1261,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // range / enumerate / zip / map / filter / reversed really ARE
                 // types, and the leading "*" of the code is what says so.
                 if (bfc.charAt(0) == "*") { return hostGlobals["type"] }
+                if (bfc.charAt(0) == "~") { return pyBuiltinTypeObj("wrapper_descriptor") }
                 return pyBuiltinTypeObj("builtin_function_or_method")
             }
             return hostGlobals["function"]
@@ -2348,6 +2349,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var c = bfnCode(f)
         if (c === undefined) { return undefined }
         if (c.charAt(0) == "*") { return "<class '" + c.substring(1, c.length) + "'>" }
+        // "~": one of object's slot wrappers (pyObjectMethod).
+        if (c.charAt(0) == "~") { return "<slot wrapper '" + c.substring(1, c.length) + "' of 'object' objects>" }
         return "<built-in function " + c + ">"
     }
     // The builtin's __name__: CPython answers 'len' for the function form and
@@ -2355,7 +2358,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function bfnName(f) {
         var c = bfnCode(f)
         if (c === undefined) { return undefined }
-        if (c.charAt(0) == "*") { return c.substring(1, c.length) }
+        if (c.charAt(0) == "*" || c.charAt(0) == "~") { return c.substring(1, c.length) }
         return c
     }
     var pyBFuncNames = ["print", "len", "abs", "isinstance", "issubclass", "repr", "sum",
@@ -2385,6 +2388,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "object" && o.__isclass == true) {
             if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro") { return true }
             if (clsFind(o, name) != null || clsHas(o, name)) { return true }
+            if (name == "__new__" || name == "__class__" || pyObjectMethod(name) != null) { return true }
             // What pyattr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
             // unbound methods (list.count).
             if (pyBuiltinClsMethod(o, name) != null) { return true }
@@ -2418,8 +2422,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(o)) { return false }
         if (typeof o == "object" && hasOwn(o, name)) { return o[name] !== pyDeleted }
         if (pyUser(o)) {
-            if (name == "__dict__" || name == "__class__") { return true }
-            return clsFind(o.__class, name) != null || clsHas(o.__class, name)
+            if (name == "__dict__" || name == "__class__" || name == "__new__") { return true }
+            return clsFind(o.__class, name) != null || clsHas(o.__class, name) || pyObjectMethod(name) != null
         }
         if (typeof o == "function") {
             if (name == "__name__" || name == "__qualname__") { return true }
@@ -9905,17 +9909,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < ref.path.length - 1; i++) { o = pathStep(o, ref.path[i]) }
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
-            if (typeof o == "function") {
-                var fa = pyFnAttrs(o, false)
-                var fi = fa == null ? -1 : dictFind(fa, last.name)
-                if (fi < 0) { pyRaise(pyMakeExc("AttributeError", ["'" + pyTypeOf(o).__name + "' object has no attribute '" + last.name + "'"])) }
-                listRemoveAt(fa.keys, fi)
-                listRemoveAt(fa.vals, fi)
-                fa.__idx = null
-                return
-            }
-            pyNoDictAttr(o, last.name)
-            scopePut(o, last.name, pyDeleted)
+            pyDelAttr(o, last.name)
             return
         }
         if (last.kind == "slice") {
@@ -9933,6 +9927,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         pyDelItem(o, last.idx())
+    }
+    // del o.name.
+    function pyDelAttr(o, name) {
+        if (typeof o == "function") {
+            var fa = pyFnAttrs(o, false)
+            var fi = fa == null ? -1 : dictFind(fa, name)
+            if (fi < 0) { pyRaise(pyMakeExc("AttributeError", ["'" + pyTypeOf(o).__name + "' object has no attribute '" + name + "'"])) }
+            listRemoveAt(fa.keys, fi)
+            listRemoveAt(fa.vals, fi)
+            fa.__idx = null
+            return
+        }
+        pyNoDictAttr(o, name)
+        scopePut(o, name, pyDeleted)
     }
     // del o[idx].
     function pyDelItem(o, idx) {
@@ -10663,6 +10671,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Cls(args): a fresh instance whose __init__ runs with it as self.
     function pyNew(cls, args, named) {
+        // A class's own __new__ makes the instance, and __init__ runs only when
+        // what it made is an instance of the class.
+        var nw = clsFind(cls, "__new__")
+        if (nw != null) {
+            if (pyIsStatic(nw)) { nw = pyDescGet(nw, cls, "__new__") }
+            kSetNamed(named)
+            var made = anytype
+            made = nw.apply(undefined, concat2impl([cls], args))
+            if (pyIsInstance(made, cls)) {
+                var minit = clsFind(cls, "__init__")
+                if (minit != null) {
+                    kSetNamed(named)
+                    minit.apply(undefined, concat2impl([made], args))
+                }
+            }
+            return made
+        }
         var obj = {__class: cls}
         // A subclass of a builtin type: str/int/float build their value from the
         // arguments (their __new__), list/dict start empty and are filled by
@@ -10676,6 +10701,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (init != null) {
             kSetNamed(named)
             init.apply(undefined, concat2impl([obj], args))
+        } else if (bt == "" && (args.length > 0 || (named != null && named.keys.length > 0))
+                   && !clsIsSub(cls, hostGlobals["BaseException"])) {
+            // Neither __init__ nor __new__ anywhere but object's.
+            pyListErr("TypeError", cls.__name + "() takes no arguments")
         }
         // Every exception carries its constructor arguments as .args, whether or not
         // the class defines __init__ (a subclass that calls Base.__init__ sets it too).
@@ -10781,6 +10810,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return cv
             }
             if (clsHas(o, name)) { return undefined }
+            // Every class here is an instance of type.
+            if (name == "__class__") { return hostGlobals["type"] }
             // C.mro(), type's own method: the resolution order as a fresh list.
             if (name == "mro") { return function() { return pyMroAttr(o, "__mro__") } }
             // A method the TYPE OBJECT itself carries - dict.fromkeys - is a
@@ -10799,6 +10830,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
             if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
+            if (name == "__new__") { return pyClsNew(o) }
+            var com = pyObjectMethod(name)
+            if (com != null) { return com }
             // A CATCHABLE AttributeError, as CPython raises and as the two
             // compiled halves do.
             pyRaise(pyMakeExc("AttributeError",
@@ -10847,6 +10881,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return m
             }
             if (clsHas(o.__class, name)) { return undefined }
+            if (name == "__new__") { return pyClsNew(o.__class) }
+            var iom = pyObjectMethod(name)
+            if (iom != null) { return pyBindObjectMethod(o, iom, name) }
         }
         // A BOUND METHOD knows its own name, receiver and underlying function.
         // __qualname__ is answered HERE and nowhere else on
@@ -11068,6 +11105,157 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // ----- object's own methods -----
+    //
+    // CPython's object type carries __init__, __new__, __eq__, __ne__, __hash__,
+    // __repr__, __str__, __format__, __setattr__, __getattribute__ and
+    // __delattr__, and every class inherits them: A.__init__ is object.__init__,
+    // super().__init__() works in a class whose only base is object. The class
+    // chains here leave object out, so an attribute READ that finds nothing on
+    // the chain asks pyObjectMethod last; the engine's own dispatch (==, hash(),
+    // str()) keeps its defaults, which these functions agree with. One function
+    // per name, so two reads are the same object. Twin of rt.pyObjectMethod in
+    // abnf/jsrtpysub.go and pyObjectMethod in lib/python-rt.metajs.
+    // They render as CPython's slot wrappers (bfnText's "~" code), __new__ as a
+    // builtin.
+    var pyObjMNames = ["__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
+                       "__format__", "__setattr__", "__getattribute__", "__delattr__"]
+    var pyObjMFns = []
+    function pyObjectMethod(name) {
+        if (pyObjMFns.length == 0) {
+            pyObjMFns = [pyObjInit, pyObjNew, pyObjEq, pyObjNe, pyObjHash, pyObjRepr, pyObjStr,
+                         pyObjFormat, pySetAttrFn, pyObjGetattr, pyObjDelattr]
+            for (var k = 0; k < pyObjMFns.length; k++) {
+                bfnFns.push(pyObjMFns[k])
+                bfnCodes.push(k == 1 ? "__new__" : "~" + pyObjMNames[k])
+            }
+        }
+        for (var i = 0; i < pyObjMNames.length; i++) { if (pyObjMNames[i] == name) { return pyObjMFns[i] } }
+        return null
+    }
+    // Extra arguments are an error once the class defines its own __init__, or
+    // does not define __new__ (CPython's object_init).
+    function pyObjInit(self) {
+        var kw = kTakeNamed()
+        if (arguments.length > 1 || (kw != null && kw.keys.length > 0)) {
+            var c = pyTypeOf(self)
+            if (pyUser(self) && clsFind(c, "__init__") != null) {
+                pyListErr("TypeError", "object.__init__() takes exactly one argument (the instance to initialize)")
+            }
+            if (pyUser(self) && clsFind(c, "__new__") == null) {
+                pyListErr("TypeError", c.__name + ".__init__() takes exactly one argument (the instance to initialize)")
+            }
+        }
+        return undefined
+    }
+    // A bare instance of cls, its __init__ not run. A builtin value type makes its
+    // own instances, and extra arguments follow CPython's object_new.
+    function pyObjNew(cls) {
+        var kw = kTakeNamed()
+        var extra = arguments.length > 1 || (kw != null && kw.keys.length > 0)
+        if (cls === null || cls === undefined || typeof cls != "object" || cls.__isclass !== true) {
+            pyListErr("TypeError", "object.__new__(X): X is not a type object (" + pyTypeOf(cls).__name + ")")
+        }
+        if ((cls.__builtin === true && cls !== hostGlobals["object"]) || pyBuiltinBase(cls) != "") {
+            // CPython names the first class on the base chain whose __new__ is
+            // not one a class body defined.
+            var sb = cls
+            while (sb.__builtin !== true && hasOwn(sb, "__new__") && sb.__bases.length > 0) { sb = sb.__bases[0] }
+            pyListErr("TypeError", "object.__new__(" + cls.__name + ") is not safe, use " + sb.__name + ".__new__()")
+        }
+        var obj = {__class: cls}
+        if (clsIsSub(cls, hostGlobals["BaseException"])) {
+            var rest = []
+            for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+            obj.args = pyTup(rest)
+            return obj
+        }
+        if (extra && clsFind(cls, "__new__") != null) {
+            pyListErr("TypeError", "object.__new__() takes exactly one argument (the type to instantiate)")
+        }
+        if (extra && clsFind(cls, "__init__") == null) { pyListErr("TypeError", cls.__name + "() takes no arguments") }
+        return obj
+    }
+    function pyObjEq(a, b) {
+        var r = anytype
+        r = pyNotImpl
+        if (binOp("is", a, b)) { r = true }
+        return r
+    }
+    // The negation of the receiver type's own __eq__, NotImplemented passed on.
+    function pyObjNe(a, b) {
+        var r = anytype
+        r = pyNotImpl
+        if (!pyUser(a)) { r = pyEq(a, b) }
+        else {
+            var eq = clsFind(a.__class, "__eq__")
+            r = eq != null ? eq(a, b) : pyObjEq(a, b)
+        }
+        if (r === pyNotImpl) { return r }
+        return !pytruthy(r)
+    }
+    function pyObjHash(a) {
+        var s = pynWSigned(pyHashId(a))
+        return pyIntOfBits(s.neg, s.bits)
+    }
+    function pyObjRepr(a) { return "<" + pyTypeOf(a).__name + " object>" }
+    function pyObjStr(a) { return prepr(a) }
+    function pyObjFormat(a, spec) {
+        if (spec !== undefined && spec !== "") {
+            pyListErr("TypeError", "unsupported format string passed to " + pyTypeOf(a).__name + ".__format__")
+        }
+        return pstr(a)
+    }
+    function pySetAttrFn(a, k, v) { pySetAttr(a, k, v); return undefined }
+    function pyObjGetattr(a, k) { return pyattr(a, k) }
+    function pyObjDelattr(a, k) { pyDelAttr(a, k); return undefined }
+    // T.__new__(cls, *args) of a builtin value type: T's conversion for T itself,
+    // and for a subclass a bare instance holding it, __init__ not run (list, dict
+    // and set start empty: their __init__ fills them). One function per type.
+    var pyBNewTypes = []
+    var pyBNewFns = []
+    function pyBuiltinNew(t) {
+        for (var i = 0; i < pyBNewTypes.length; i++) { if (pyBNewTypes[i] === t) { return pyBNewFns[i] } }
+        var f = function(cls) {
+            var kw = kTakeNamed()
+            var rest = []
+            for (var j = 1; j < arguments.length; j++) { rest.push(arguments[j]) }
+            var tn = t.__name
+            if (cls === null || cls === undefined || typeof cls != "object" || cls.__isclass !== true) {
+                pyListErr("TypeError", tn + ".__new__(X): X is not a type object (" + pyTypeOf(cls).__name + ")")
+            }
+            var empty = tn == "list" || tn == "dict" || tn == "set"
+            if (cls === t) { return pyConvert(tn, empty ? [] : rest, empty ? null : kw) }
+            if (cls.__builtin === true || pyBuiltinBase(cls) != tn) {
+                pyListErr("TypeError", tn + ".__new__(" + cls.__name + "): " + cls.__name + " is not a subtype of " + tn)
+            }
+            var obj = {__class: cls}
+            obj.__val = pyConvert(tn, empty ? [] : rest, empty ? null : kw)
+            return obj
+        }
+        pyBNewTypes.push(t)
+        pyBNewFns.push(f)
+        bfnFns.push(f)
+        bfnCodes.push("__new__")
+        return f
+    }
+    // One of object's methods bound to an instance is a builtin bound method (a
+    // method-wrapper for a slot) with no __func__: bindMethod's record, the
+    // function slot cleared.
+    function pyBindObjectMethod(self, f, name) {
+        var b = bindMethod(self, f, name)
+        pyBMTab[pyBMTab.length - 2] = null
+        return b
+    }
+    // The __new__ a class answers: its own, a builtin base's, or object's.
+    function pyClsNew(cls) {
+        var own = clsFind(cls, "__new__")
+        if (own != null) { return own }
+        var bt = cls.__builtin === true ? cls.__name : pyBuiltinBase(cls)
+        if (bt != "" && bt != "object") { return pyBuiltinNew(hostGlobals[bt]) }
+        return pyObjNew
+    }
+
     // ----- super() -----
     //
     // WHAT IS SUPPORTED, and what is not. CPython has two forms and they are two
@@ -11136,6 +11324,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var j = at + 1; j < mro.length; j++) {
             if (hasOwn(mro[j], name)) { return {v: mro[j][name]} }
             if (mro[j].__builtin === true) {
+                if (name == "__new__") { return {v: pyClsNew(mro[j])} }
                 var bd = pyBDelegate(mro[j].__name, name)
                 if (bd != null) { return {v: bd} }
             }
@@ -11145,6 +11334,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "__init__" && mro.length > 0 && clsIsSub(mro[0], hostGlobals["BaseException"])) {
             return {v: pyExcInitFn()}
         }
+        // object ends every resolution order.
+        var om = pyObjectMethod(name)
+        if (om != null) { return {v: om} }
         return null
     }
     function pySuperAttr(s, name) {
@@ -11158,7 +11350,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // C.who() must still pass C - and s.__sobj is exactly that when the
         // frame's first argument was a class.
         if (pyIsStatic(r.v) || pyIsClsM(r.v)) { return pyDescGet(r.v, pySuperOwner(s), name) }
-        if (typeof r.v == "function") { return bindMethod(s.__sobj, r.v, name) }
+        // __new__ is a static method: super().__new__(cls) passes cls itself.
+        if (typeof r.v == "function" && name != "__new__") { return bindMethod(s.__sobj, r.v, name) }
         return r.v
     }
     // The class a classmethod reached through super() binds to.
@@ -11176,7 +11369,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyIsStatic(r.v) || pyIsClsM(r.v)) {
             return pyCall(pyDescGet(r.v, pySuperOwner(s), name), args, kw)
         }
-        if (typeof r.v != "function") { return pyCall(r.v, args, kw) }
+        if (typeof r.v != "function" || name == "__new__") { return pyCall(r.v, args, kw) }
         kSetNamed(kw)
         return r.v.apply(undefined, concat2impl([s.__sobj], args))
     }

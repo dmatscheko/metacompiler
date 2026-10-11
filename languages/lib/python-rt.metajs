@@ -995,6 +995,7 @@ function pyTypeName(v) {
             // range / enumerate / zip / map / filter / reversed really ARE
             // types, and the leading "*" of the code is what says so.
             if (pyToStr(bfk).charAt(0) == "*") { return "type" }
+            if (pyToStr(bfk).charAt(0) == "~") { return "wrapper_descriptor" }
             return "builtin_function_or_method"
         }
         return "function"
@@ -1695,6 +1696,8 @@ function pyGetAttr(obj, name) {
         }
         // C.mro(), type's own method: the resolution order as a fresh list.
         if (name == "mro") { return function() { return pyMroAttr(obj, "__mro__") } }
+        var cfb = pyClassFallback(obj, name)
+        if (cfb !== null) { return cfb }
         // A CATCHABLE AttributeError, as CPython raises: fail() cannot be caught
         // from layer 2.
         pyRaiseExc("AttributeError",
@@ -1720,6 +1723,9 @@ function pyGetAttr(obj, name) {
             if (pyIsCallable(v)) { return pyDBindMethod(obj, v, name) }
             return v
         }
+        if (name == "__new__") { return pyClsNew(cls) }
+        var iom = pyObjectMethod(name)
+        if (iom !== null) { return pyBindObjectMethod(obj, iom, name) }
         pyRaiseExc("AttributeError",
                    "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
     }
@@ -1842,6 +1848,8 @@ function pyGetAttr(obj, name) {
     // has no attribute 'nope'", not "'type' object has no attribute 'nope'".
     var tn2 = pyClassName(obj)
     if (tn2 !== null) {
+        var bfb = pyClassFallback(obj, name)
+        if (bfb !== null) { return bfb }
         pyRaiseExc("AttributeError", "type object '" + tn2 + "' has no attribute '" + name + "'")
     }
     // An attribute a builtin value does NOT have raises AttributeError, as
@@ -2220,6 +2228,182 @@ function pyUnionEq(a, b) {
         i = i + 1
     }
     return true
+}
+
+// ----- object's own methods ------------------------------------------------
+//
+// CPython's object type carries __init__, __new__, __eq__, __ne__, __hash__,
+// __repr__, __str__, __format__, __setattr__, __getattribute__ and __delattr__,
+// and every class inherits them: A.__init__ is object.__init__, and
+// super().__init__() works in a class whose only base is object. The class
+// chains here leave object out, so an attribute READ that finds nothing on the
+// chain asks pyObjectMethod last; the runtime's own dispatch (==, hash(), str())
+// keeps its defaults, which these functions agree with. One function per name,
+// registered with the builtin render table on first use ("~" renders a slot
+// wrapper). Go: rt.pyObjectMethod in abnf/jsrtpysub.go.
+var pyObjMNames = ["__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
+                   "__format__", "__setattr__", "__getattribute__", "__delattr__"]
+var pyObjMFns = []
+function pyObjectMethod(name) {
+    if (pyObjMFns.length == 0) {
+        pyObjMFns = [pyObjInit, pyObjNew, pyObjEq, pyObjNe, pyObjHash, pyObjRepr, pyObjStr,
+                     pyObjFormat, js_pysetattr, js_pygetattr, js_pydel_attr]
+        var k = 0
+        while (k < pyObjMFns.length) {
+            if (k == 1) { js_pybfn(pyObjMFns[k], "__new__") } else { js_pybfn(pyObjMFns[k], "~" + pyObjMNames[k]) }
+            k = k + 1
+        }
+    }
+    var i = 0
+    while (i < pyObjMNames.length) {
+        if (pyObjMNames[i] == name) { return pyObjMFns[i] }
+        i = i + 1
+    }
+    return null
+}
+// Extra arguments are an error once the class defines its own __init__, or does
+// not define __new__ (CPython's object_init).
+function pyObjInit(self) {
+    var c = pyInstClassOf(self)
+    if (arguments.length > 1 && c !== null) {
+        if (pyLookupHas(c, "__init__")) {
+            pyRaiseExc("TypeError", "object.__init__() takes exactly one argument (the instance to initialize)")
+        }
+        if (!pyLookupHas(c, "__new__")) {
+            pyRaiseExc("TypeError", pyToStr(c["__name"]) + ".__init__() takes exactly one argument (the instance to initialize)")
+        }
+    }
+    return undefined
+}
+function pyObjNew(cls) {
+    var rest = []
+    var i = 1
+    while (i < arguments.length) {
+        rest.push(arguments[i])
+        i = i + 1
+    }
+    return pyObjNewOf(cls, rest)
+}
+// A bare instance of c, its __init__ not run. A builtin value type makes its own
+// instances, and extra arguments follow CPython's object_new. Go: rt.pyObjNew.
+function pyObjNewOf(c, rest) {
+    var name = pyClassName(c)
+    if (name === null) { pyRaiseExc("TypeError", "object.__new__(X): X is not a type object (" + pyTypeName(c) + ")") }
+    var user = pyIsClass(c)
+    if ((!user && name != "object") || (user && pyBuiltinBase(c) != "")) {
+        // CPython names the first class on the base chain whose __new__ is not
+        // one a class body defined.
+        var sb = c
+        while (pyIsClass(sb) && sb["__new__"] !== undefined && pyIsObj(sb["__super"])) { sb = sb["__super"] }
+        pyRaiseExc("TypeError", "object.__new__(" + name + ") is not safe, use " + pyToStr(sb["__name"]) + ".__new__()")
+    }
+    var inst = {}
+    inst["__class"] = c
+    if (user && pyIsExcClass(c)) {
+        inst["args"] = pyTup(rest)
+        return inst
+    }
+    if (rest.length > 0) {
+        if (pyLookupHas(c, "__new__")) {
+            pyRaiseExc("TypeError", "object.__new__() takes exactly one argument (the type to instantiate)")
+        }
+        if (!pyLookupHas(c, "__init__")) { pyRaiseExc("TypeError", name + "() takes no arguments") }
+    }
+    return inst
+}
+// Does cls derive from BaseException?
+function pyIsExcClass(cls) {
+    var mro = pyMRO(cls)
+    var i = 0
+    while (i < mro.length) {
+        if (mro[i]["__name"] == "BaseException") { return true }
+        i = i + 1
+    }
+    return false
+}
+// True for the very same object, else NotImplemented.
+function pyObjEq(a, b) {
+    var r = anytype
+    r = pyNotImpl
+    if (pyAStrictEq(a, b)) { r = true }
+    return r
+}
+// The negation of the receiver type's own __eq__, NotImplemented passed on.
+function pyObjNe(a, b) {
+    var r = anytype
+    var c = pyInstClassOf(a)
+    if (c === null) { r = pyEqual(a, b) }
+    else if (pyLookupHas(c, "__eq__")) { r = pyCallSelf(pyLookupVal(c, "__eq__"), a, [b]) }
+    else { r = pyObjEq(a, b) }
+    if (r === pyNotImpl) { return r }
+    return !js_pybool(r)
+}
+function pyObjHash(a) {
+    var s = pynWSigned(pyHashId(a))
+    return pyIntOfBits(s["neg"], s["bits"])
+}
+function pyObjRepr(a) { return "<" + pyBMOwner(a) + " object>" }
+function pyObjStr(a) { return pyRepr(a) }
+function pyObjFormat(a, spec) {
+    if (spec !== undefined && spec !== null && pyToStr(spec) != "") {
+        pyRaiseExc("TypeError", "unsupported format string passed to " + pyBMOwner(a) + ".__format__")
+    }
+    return pyStr(a)
+}
+// T.__new__(cls, *args) of a builtin value type: T's conversion for T itself,
+// and for a subclass a bare instance holding it, __init__ not run. One function
+// per type. Go: rt.pyBuiltinNew.
+var pyBNewTypes = []
+var pyBNewFns = []
+function pyBuiltinNew(t) {
+    var f = rtPairGet(pyBNewTypes, pyBNewFns, t)
+    if (f !== undefined) { return f }
+    var tn = pyToStr(t["__name"])
+    var nf = function(c) {
+        var rest = []
+        var i = 1
+        while (i < arguments.length) {
+            rest.push(arguments[i])
+            i = i + 1
+        }
+        var name = pyClassName(c)
+        if (name === null) { pyRaiseExc("TypeError", tn + ".__new__(X): X is not a type object (" + pyTypeName(c) + ")") }
+        if (c === t) { return pyBuiltinVal(tn, rest, undefined) }
+        if (!pyIsClass(c) || pyBuiltinBase(c) != tn) {
+            pyRaiseExc("TypeError", tn + ".__new__(" + name + "): " + name + " is not a subtype of " + tn)
+        }
+        var inst = {}
+        inst["__class"] = c
+        inst["__val"] = pyBuiltinVal(tn, rest, undefined)
+        return inst
+    }
+    pyBNewTypes.push(t)
+    pyBNewFns.push(nf)
+    js_pybfn(nf, "__new__")
+    return nf
+}
+// The __new__ a class answers: its own, a builtin base's, or object's.
+function pyClsNew(cls) {
+    if (pyIsClass(cls) && pyLookupHas(cls, "__new__")) { return pyLookupVal(cls, "__new__") }
+    var bt = pyBuiltinClsName(cls)
+    if (bt == "") { bt = pyBuiltinBase(cls) }
+    if (bt != "" && bt != "object") { return pyBuiltinNew(pyBuiltinClass(bt)) }
+    return pyObjectMethod("__new__")
+}
+// What a class answers for a name its chain does not hold: its __new__, its type
+// (every class here is an instance of type), or one of object's methods.
+function pyClassFallback(cls, name) {
+    if (name == "__new__") { return pyClsNew(cls) }
+    if (name == "__class__") { return pyBuiltinClass("type") }
+    return pyObjectMethod(name)
+}
+// One of object's methods bound to an instance is a builtin bound method (a
+// method-wrapper for a slot) with no __func__: pyDBindMethod's record, the
+// function slot cleared.
+function pyBindObjectMethod(self, m, name) {
+    var b = pyDBindMethod(self, m, name)
+    pyBMTab[pyBMTab.length - 2] = null
+    return b
 }
 
 function pyBuiltinClass(name) {
@@ -5696,13 +5880,13 @@ function pyDHasAttr(obj, name) {
     }
     if (pyIsClass(obj)) {
         if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro") { return true }
-        return pyLookupHas(obj, name)
+        return pyLookupHas(obj, name) || pyClassFallback(obj, name) !== null
     }
     var cls = pyInstClassOf(obj)
     if (cls !== null && cls !== undefined) {
-        if (name == "__class__" || name == "__dict__") { return true }
+        if (name == "__class__" || name == "__dict__" || name == "__new__") { return true }
         if (obj[name] !== undefined || pyNoneBound(obj, name)) { return true }
-        return pyLookupHas(cls, name)
+        return pyLookupHas(cls, name) || pyObjectMethod(name) !== null
     }
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
     // has to agree with what `math.sqrt` answers.
@@ -5722,6 +5906,7 @@ function pyDHasAttr(obj, name) {
         if (hsamp !== undefined && pyDBuiltinAttr(hsamp, name)) { return true }
         if (pyBDelegate(htn, name) !== undefined) { return true }
         if (name == "__hash__" && pyBHashNone(htn)) { return true }
+        if (pyClassFallback(obj, name) !== null) { return true }
     }
     // The BUILT-IN methods of str / list / dict / set, and __class__, which
     // EVERY value has (None.__class__ is NoneType).
@@ -5861,6 +6046,8 @@ function js_pybfn(fn, code) {
 // really are TYPES (range/enumerate/zip/map/filter/reversed).
 function pyBBFnRender(c) {
     if (c.charAt(0) == "*") { return "<class '" + c.substring(1, c.length) + "'>" }
+    // "~": one of object's slot wrappers (pyObjectMethod).
+    if (c.charAt(0) == "~") { return "<slot wrapper '" + c.substring(1, c.length) + "' of 'object' objects>" }
     return "<built-in function " + c + ">"
 }
 
@@ -5868,7 +6055,7 @@ function pyBBFnRender(c) {
 // answers 'len' for the function form and 'map' for the class form, so the
 // leading "*" is the only difference between the two.
 function pyBBFnName(c) {
-    if (c.charAt(0) == "*") { return c.substring(1, c.length) }
+    if (c.charAt(0) == "*" || c.charAt(0) == "~") { return c.substring(1, c.length) }
     return c
 }
 
@@ -7512,8 +7699,12 @@ function pySuperFind(s, name) {
     while (i < mro.length) {
         var v = pyClassMember(mro[i], name)
         if (v !== undefined) { return v }
+        if (name == "__new__" && pyBuiltinClsName(mro[i]) != "") { return pyClsNew(mro[i]) }
         i = i + 1
     }
+    // object ends every resolution order.
+    var om = pyObjectMethod(name)
+    if (om !== null) { return om }
     return undefined
 }
 function pySuperAttr(s, name) {
@@ -7525,7 +7716,8 @@ function pySuperAttr(s, name) {
     // A staticmethod / classmethod found through super(), same rule as the call
     // path in pySuperMCall.
     if (pyDIsStatic(m) || pyDIsClsM(m)) { return pyDDescGet(m, pyDSuperOwner(s), name) }
-    if (pyIsCallable(m)) { return pyDBindMethod(s["__sobj"], m, name) }
+    // __new__ is a static method: super().__new__(cls) passes cls itself.
+    if (pyIsCallable(m) && name != "__new__") { return pyDBindMethod(s["__sobj"], m, name) }
     return m
 }
 // A method read off an instance (or off a super() proxy) is BOUND to it, which
@@ -7647,7 +7839,7 @@ function pySuperMCall(s, name, args, kw) {
         var sd = pyDDescGet(m, pyDSuperOwner(s), name)
         return pyCall(sd, pyBindCall(sd, args, kw))
     }
-    if (!pyIsCallable(m)) { return pyDCallPyValue(m, args, kw) }
+    if (!pyIsCallable(m) || name == "__new__") { return pyDCallPyValue(m, args, kw) }
     var self = rtPrepend(s["__sobj"], args)
     return pyCall(m, pyBindCall(m, self, kw))
 }
@@ -8080,21 +8272,46 @@ function pyConvArgs(cls, cv, pos, kw) {
 // from the arguments (their __new__), list/dict start empty and are filled by
 // __init__. Go: rt.pyNewInstance.
 function pyDInstantiate(cls, args, kw) {
+    // A class's own __new__ makes the instance, and __init__ runs only when what
+    // it made is an instance of the class.
+    if (pyLookupHas(cls, "__new__")) {
+        var nw = pyLookupVal(cls, "__new__")
+        if (pyDIsStatic(nw) || pyDIsClsM(nw)) { nw = pyDDescGet(nw, cls, "__new__") }
+        var made = anytype
+        made = pyCall(nw, pyBindCall(nw, rtPrepend(cls, args), kw))
+        if (pyDIsInstance(made, cls) && pyLookupHas(cls, "__init__")) {
+            var minit = pyLookupVal(cls, "__init__")
+            pyCall(minit, pyBindCall(minit, rtPrepend(made, args), kw))
+        }
+        return made
+    }
     var inst = {}
     inst["__class"] = cls
     var bt = pyBuiltinBase(cls)
-    if (bt == "list") { inst["__val"] = [] }
-    else if (bt == "dict") { inst["__val"] = pyNewDict() }
-    else if (bt == "set") { inst["__val"] = pyNewSet([]) }
-    else if (bt != "") { inst["__val"] = pyDCallPyValue(pyBuiltinClass(bt), args, kw) }
+    if (bt != "") { inst["__val"] = pyBuiltinVal(bt, args, kw) }
     if (pyLookupHas(cls, "__init__")) {
         var init = pyLookupVal(cls, "__init__")
         if (pyIsCallable(init)) {
             var self = rtPrepend(inst, args)
             pyCall(init, pyBindCall(init, self, kw))
         }
+    } else if (bt == "" && (args.length > 0 || (pyIsDict(kw) && kw["keys"].length > 0)) && !pyIsExcClass(cls)) {
+        // Neither __init__ nor __new__ anywhere but object's.
+        pyRaiseExc("TypeError", pyToStr(cls["__name"]) + "() takes no arguments")
     }
     return inst
+}
+
+// The value a fresh instance of a subclass of builtin type bt holds: the
+// immutable types build it from the arguments (their __new__), list/dict/set
+// start empty and are filled by __init__. Go: rt.pyBuiltinVal.
+function pyBuiltinVal(bt, args, kw) {
+    var v = anytype
+    if (bt == "list") { v = [] }
+    else if (bt == "dict") { v = pyNewDict() }
+    else if (bt == "set") { v = pyNewSet([]) }
+    else { v = pyDCallPyValue(pyBuiltinClass(bt), args, kw) }
+    return v
 }
 
 // The value a `raise` actually raises. `raise SomeClass` names a CLASS, and
@@ -8274,6 +8491,10 @@ function pyDMethodCall(target, name, args, kw) {
         // str.__repr__(self): a dunder called off the type.
         var dbd = pyBDelegate(dtn, name)
         if (dbd !== undefined) { return pyCall(dbd, args) }
+        if (!pyIsClass(target)) {
+            var dfb = pyClassFallback(target, name)
+            if (dfb !== null) { return pyDCallPyValue(dfb, args, kw) }
+        }
     }
     var cls = pyClassOf(target)
     if (cls !== null) {
@@ -8290,6 +8511,8 @@ function pyDMethodCall(target, name, args, kw) {
             return pyDCallPyValue(cm, args, kw)
         }
         if (name == "mro") { return pyMroAttr(cls, "__mro__") }
+        var cfm = pyClassFallback(cls, name)
+        if (cfm !== null) { return pyDCallPyValue(cfm, args, kw) }
         fail("type object '" + pyToStr(cls["__name"]) + "' has no method '" + name + "'")
     }
     var icls = pyInstClassOf(target)
@@ -8326,6 +8549,9 @@ function pyDMethodCall(target, name, args, kw) {
             }
             return pyDCallPyValue(m, args, kw)
         }
+        if (name == "__new__") { return pyDCallPyValue(pyClsNew(icls), args, kw) }
+        var iom = pyObjectMethod(name)
+        if (iom !== null) { return pyDCallPyValue(iom, rtPrepend(target, args), kw) }
         // A dict that also carries a __class falls through to the builtin dict
         // methods instead of aborting.
         if (target["__dict"] === undefined) {

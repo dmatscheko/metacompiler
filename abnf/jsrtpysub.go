@@ -536,25 +536,68 @@ func pyBuiltinBase(cls *jsObject) string {
 // subclass of a builtin type keeps its value in __val: the immutable types build
 // it from the arguments (their __new__), list/dict/set start empty and are
 // filled by __init__ (list.__init__ unless the subclass overrides it).
-func (rt *jsrt) pyNewInstance(cls *jsObject, args []interface{}, kw interface{}) *jsObject {
+func (rt *jsrt) pyNewInstance(cls *jsObject, args []interface{}, kw interface{}) interface{} {
+	// A class's own __new__ makes the instance, and __init__ runs only when
+	// what it made is an instance of the class.
+	if nw, found := pyLookup(cls, "__new__"); found {
+		if pyDescKind(nw) != "" {
+			nw = rt.pyDescGet(nw, cls, "__new__")
+		}
+		made := rt.call(nw, jsUndef, rt.pyBindCall(nw, append([]interface{}{cls}, args...), kw))
+		if rt.pyIsInstance(made, cls) {
+			if init, found := pyLookup(cls, "__init__"); found && isCallable(init) {
+				rt.call(init, jsUndef, rt.pyBindCall(init, append([]interface{}{made}, args...), kw))
+			}
+		}
+		return made
+	}
 	inst := newJSObject()
 	inst.set("__class", cls)
-	switch bt := pyBuiltinBase(cls); bt {
-	case "":
-	case "list":
-		inst.set("__val", &jsArray{})
-	case "dict":
-		inst.set("__val", pyDescTypeSample("dict"))
-	case "set":
-		inst.set("__val", newPySet(&jsArray{}))
-	default:
-		inst.set("__val", rt.callPyValue(rt.pyBuiltinClass(bt), args, kw))
+	bt := pyBuiltinBase(cls)
+	if bt != "" {
+		inst.set("__val", rt.pyBuiltinVal(bt, args, kw))
 	}
 	if init, found := pyLookup(cls, "__init__"); found && isCallable(init) {
 		self := append([]interface{}{inst}, args...)
 		rt.call(init, jsUndef, rt.pyBindCall(init, self, kw))
+	} else if bt == "" && (len(args) > 0 || pyKwCount(kw) > 0) && !pyIsExcClass(cls) {
+		// Neither __init__ nor __new__ anywhere but object's.
+		rt.pyRaise("TypeError", rt.toString(cls.props["__name"])+"() takes no arguments")
 	}
 	return inst
+}
+
+// pyBuiltinVal is the value a fresh instance of a subclass of builtin type bt
+// holds: the immutable types build it from the arguments (their __new__),
+// list/dict/set start empty and are filled by __init__.
+func (rt *jsrt) pyBuiltinVal(bt string, args []interface{}, kw interface{}) interface{} {
+	switch bt {
+	case "list":
+		return &jsArray{}
+	case "dict":
+		return pyDescTypeSample("dict")
+	case "set":
+		return newPySet(&jsArray{})
+	}
+	return rt.callPyValue(rt.pyBuiltinClass(bt), args, kw)
+}
+
+// pyKwCount is how many keyword arguments a call passed.
+func pyKwCount(kw interface{}) int {
+	if keys, _, ok := dictParts(kw); ok {
+		return len(keys.elems)
+	}
+	return 0
+}
+
+// pyIsExcClass reports whether cls derives from BaseException.
+func pyIsExcClass(cls *jsObject) bool {
+	for _, k := range pyMRO(cls) {
+		if k.props["__name"] == "BaseException" {
+			return true
+		}
+	}
+	return false
 }
 
 // pyUnwrapBuiltin is the builtin value of an instance of a builtin subclass;
@@ -907,4 +950,281 @@ func pyUnionEq(a, b *jsArray) bool {
 		}
 	}
 	return true
+}
+
+// pyObjMethodNames are object's own methods. CPython's object type carries
+// them and every class inherits them: A.__init__ is object.__init__, and
+// super().__init__() works in a class whose only base is object. The class
+// chains here leave object out, so an attribute READ that finds nothing on the
+// chain asks pyObjectMethod last; the runtime's own dispatch (==, hash(), str())
+// keeps its defaults, which these functions agree with. They render as slot
+// wrappers ("~" in the builtin render table), __new__ as a builtin. Twin of
+// pyObjectMethod in languages/python-interpreter.abnf and
+// languages/lib/python-rt.metajs.
+var pyObjMethodNames = []string{"__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
+	"__format__", "__setattr__", "__getattribute__", "__delattr__"}
+
+// pyObjectMethod is object's method called name, one function per name, or nil.
+func (rt *jsrt) pyObjectMethod(name string) interface{} {
+	if rt.pyObjMethods == nil {
+		rt.pyObjMethods = map[string]interface{}{}
+		if rt.pyBuiltinRender == nil {
+			rt.pyBuiltinRender = map[interface{}]string{}
+		}
+		for _, n := range pyObjMethodNames {
+			h := jsHostFunc(n, pyObjMethodBody(n))
+			rt.pyObjMethods[n] = h
+			rt.pyBuiltinRender[h] = "~" + n
+		}
+		rt.pyBuiltinRender[rt.pyObjMethods["__new__"]] = "__new__"
+	}
+	return rt.pyObjMethods[name]
+}
+
+func pyObjMethodBody(name string) func(rt *jsrt, this uint64, args []interface{}) interface{} {
+	arg := func(args []interface{}, i int) interface{} {
+		if i < len(args) {
+			return args[i]
+		}
+		return jsUndef
+	}
+	switch name {
+	case "__init__":
+		// Extra arguments are an error once the class defines its own __init__,
+		// or does not define __new__ (CPython's object_init).
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if _, cls, ok := pyInstance(arg(args, 0)); ok && len(args) > 1 {
+				if _, own := pyLookup(cls, "__init__"); own {
+					rt.pyRaise("TypeError", "object.__init__() takes exactly one argument (the instance to initialize)")
+				}
+				if _, nw := pyLookup(cls, "__new__"); !nw {
+					rt.pyRaise("TypeError", rt.toString(cls.props["__name"])+
+						".__init__() takes exactly one argument (the instance to initialize)")
+				}
+			}
+			return jsUndef
+		}
+	case "__new__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyObjNew(arg(args, 0), pyArgsAfterFirst(args))
+		}
+	case "__eq__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return pyObjEq(rt, arg(args, 0), arg(args, 1))
+		}
+	case "__ne__":
+		// The negation of the receiver type's own __eq__, NotImplemented passed on.
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			a, b := arg(args, 0), arg(args, 1)
+			var r interface{}
+			if _, cls, ok := pyInstance(a); !ok {
+				r = rt.pyEqual(a, b)
+			} else if eq, found := pyLookup(cls, "__eq__"); found {
+				r = rt.call(eq, jsUndef, []interface{}{a, b})
+			} else {
+				r = pyObjEq(rt, a, b)
+			}
+			if r == pyNotImplemented {
+				return r
+			}
+			return !rt.pyTruthyOf(r)
+		}
+	case "__hash__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyHashInt(rt.pyHashId(arg(args, 0)))
+		}
+	case "__repr__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return "<" + rt.pyOwnerName(arg(args, 0)) + " object>"
+		}
+	case "__str__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyRepr(arg(args, 0))
+		}
+	case "__format__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if spec := arg(args, 1); !isUndefOrNull(spec) && rt.toString(spec) != "" {
+				rt.pyRaise("TypeError", "unsupported format string passed to "+rt.pyOwnerName(arg(args, 0))+".__format__")
+			}
+			return rt.pyString(arg(args, 0))
+		}
+	case "__setattr__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.pySetAttr(arg(args, 0), rt.toString(arg(args, 1)), arg(args, 2))
+			return jsUndef
+		}
+	case "__getattribute__":
+		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyGetAttr(arg(args, 0), rt.toString(arg(args, 1)))
+		}
+	}
+	return func(rt *jsrt, this uint64, args []interface{}) interface{} { // __delattr__
+		rt.pyDelAttr(arg(args, 0), rt.toString(arg(args, 1)))
+		return jsUndef
+	}
+}
+
+// pyArgsAfterFirst is args without its first element.
+func pyArgsAfterFirst(args []interface{}) []interface{} {
+	if len(args) == 0 {
+		return nil
+	}
+	return args[1:]
+}
+
+// pyObjEq is object.__eq__: True for the very same object, else NotImplemented.
+func pyObjEq(rt *jsrt, a, b interface{}) interface{} {
+	if rt.strictEq(a, b) {
+		return true
+	}
+	return pyNotImplemented
+}
+
+// pyObjNew is object.__new__(cls, *rest): a bare instance of cls, its __init__
+// not run. A builtin value type makes its own instances, and extra arguments
+// follow CPython's object_new.
+func (rt *jsrt) pyObjNew(c interface{}, rest []interface{}) interface{} {
+	name, isCls := rt.pyClassName(c)
+	if !isCls {
+		rt.pyRaise("TypeError", "object.__new__(X): X is not a type object ("+pyTypeName(rt, c)+")")
+	}
+	cls := c.(*jsObject)
+	if _, user := pyClassObj(cls); (!user && name != "object") || (user && pyBuiltinBase(cls) != "") {
+		// CPython names the first class on the base chain whose __new__ is not
+		// one a class body defined.
+		sb := cls
+		for {
+			_, ownNew := sb.props["__new__"]
+			base, hasBase := sb.props["__super"].(*jsObject)
+			if _, user := pyClassObj(sb); !user || !ownNew || !hasBase {
+				break
+			}
+			sb = base
+		}
+		rt.pyRaise("TypeError", "object.__new__("+name+") is not safe, use "+rt.toString(sb.props["__name"])+".__new__()")
+	}
+	inst := newJSObject()
+	inst.set("__class", cls)
+	if _, user := pyClassObj(cls); user && pyIsExcClass(cls) {
+		inst.set("args", pyTup(&jsArray{elems: append([]interface{}{}, rest...)}))
+		return inst
+	}
+	if len(rest) > 0 {
+		if _, own := pyLookup(cls, "__new__"); own {
+			rt.pyRaise("TypeError", "object.__new__() takes exactly one argument (the type to instantiate)")
+		}
+		if _, init := pyLookup(cls, "__init__"); !init {
+			rt.pyRaise("TypeError", name+"() takes no arguments")
+		}
+	}
+	return inst
+}
+
+// pyBuiltinNew is T.__new__(cls, *args) of a builtin value type: T's conversion
+// for T itself, and for a subclass a bare instance holding it, __init__ not run.
+// One function per type.
+func (rt *jsrt) pyBuiltinNew(t *jsObject) interface{} {
+	if f, ok := rt.pyBNews[t]; ok {
+		return f
+	}
+	tn, _ := t.props["__name"].(string)
+	h := jsHostFunc("__new__", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		var c interface{} = jsUndef
+		if len(args) > 0 {
+			c = args[0]
+		}
+		rest := pyArgsAfterFirst(args)
+		name, isCls := rt.pyClassName(c)
+		if !isCls {
+			rt.pyRaise("TypeError", tn+".__new__(X): X is not a type object ("+pyTypeName(rt, c)+")")
+		}
+		if c == t {
+			return rt.pyBuiltinVal(tn, rest, jsUndef)
+		}
+		cls, user := pyClassObj(c)
+		if !user || pyBuiltinBase(cls) != tn {
+			rt.pyRaise("TypeError", tn+".__new__("+name+"): "+name+" is not a subtype of "+tn)
+		}
+		inst := newJSObject()
+		inst.set("__class", cls)
+		inst.set("__val", rt.pyBuiltinVal(tn, rest, jsUndef))
+		return inst
+	})
+	if rt.pyBNews == nil {
+		rt.pyBNews = map[*jsObject]interface{}{}
+	}
+	rt.pyBNews[t] = h
+	if rt.pyBuiltinRender == nil {
+		rt.pyBuiltinRender = map[interface{}]string{}
+	}
+	rt.pyBuiltinRender[h] = "__new__"
+	return h
+}
+
+// pyClsNew is the __new__ a class answers: its own, a builtin base's, or
+// object's.
+func (rt *jsrt) pyClsNew(cls *jsObject) interface{} {
+	if own, found := pyLookup(cls, "__new__"); found {
+		return own
+	}
+	bt := pyBuiltinClsName(cls)
+	if bt == "" {
+		bt = pyBuiltinBase(cls)
+	}
+	if bt != "" && bt != "object" {
+		return rt.pyBuiltinNew(rt.pyBuiltinClass(bt))
+	}
+	return rt.pyObjectMethod("__new__")
+}
+
+// pyClassFallback is what a class answers for a name its chain does not hold:
+// its __new__, its type (every class here is an instance of type), or one of
+// object's methods; nil otherwise.
+func (rt *jsrt) pyClassFallback(cls *jsObject, name string) interface{} {
+	switch name {
+	case "__new__":
+		return rt.pyClsNew(cls)
+	case "__class__":
+		return rt.pyBuiltinClass("type")
+	}
+	return rt.pyObjectMethod(name)
+}
+
+// pyBindObjectMethod binds one of object's methods to an instance: a builtin
+// bound method (a method-wrapper for a slot) with no __func__.
+func (rt *jsrt) pyBindObjectMethod(self, m interface{}, name string) interface{} {
+	b := rt.pyBindMethod(self, m, name)
+	b.(*hostFunc).pybm.fn = nil
+	return b
+}
+
+// pyDelAttr is `del obj.name`.
+func (rt *jsrt) pyDelAttr(obj interface{}, name string) {
+	if isCallable(obj) {
+		d, i := rt.pyFuncAttrIdx(obj, name)
+		if i < 0 {
+			rt.pyRaise("AttributeError", "'"+pyTypeName(rt, obj)+"' object has no attribute '"+name+"'")
+		}
+		keys, vals, _ := dictParts(d)
+		keys.dropIdx()
+		keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+		vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+		return
+	}
+	if _, cls, isInst := pyInstance(obj); !isInst {
+		rt.pyNoDictAttr(obj, name)
+	} else if pyIsObjectCls(cls) {
+		panic(&jsThrown{value: rt.pyAttrError(cls, name)})
+	}
+	o, ok := obj.(*jsObject)
+	if !ok {
+		rt.fail("attribute deletion on a %s", rt.typeOf(obj))
+	}
+	delete(o.props, name)
+	for i, k := range o.keys {
+		if k == name {
+			o.keys = append(o.keys[:i], o.keys[i+1:]...)
+			break
+		}
+	}
 }

@@ -4560,6 +4560,115 @@ def s92():
     check("uni6", msgs == ["unsupported operand type(s) for |: 'type' and 'int'", "unsupported operand type(s) for |: 'int' and 'type'",
                            "unsupported operand type(s) for |: 'type' and 'str'", "unsupported operand type(s) for |: 'NoneType' and 'NoneType'"])
 
+# ===== SECTION 93: object's own methods, and __new__ =====
+# Every class inherits object's __init__, __new__, __eq__, __ne__, __hash__,
+# __repr__, __str__, __format__, __setattr__, __getattribute__ and __delattr__:
+# super().__init__() works in a class whose only base is object, and
+# A.__init__ is object.__init__. A class's own __new__ makes the instance and
+# __init__ runs only on an instance of the class; T.__new__ of a builtin type
+# converts, or makes a bare subclass instance. A class with neither __init__ nor
+# __new__ takes no arguments. Rows from CPython 3.14.
+class S93A:
+    pass
+
+class S93P(int):
+    def __new__(cls, v):
+        return super().__new__(cls, v * 2)
+
+class S93S:
+    inst = None
+    def __new__(cls):
+        if cls.inst is None:
+            cls.inst = super().__new__(cls)
+            cls.inst.n = 0
+        return cls.inst
+    def __init__(self):
+        self.n += 1
+
+class S93W:
+    ran = []
+    def __new__(cls, x):
+        return x
+    def __init__(self, x):
+        S93W.ran.append(x)
+
+class S93Up(str):
+    def __new__(cls, s):
+        o = str.__new__(cls, s.upper())
+        o.tag = 1
+        return o
+
+class S93Base:
+    def __init__(self, a, b=2):
+        super().__init__()
+        self.a = a
+        self.b = b
+
+class S93Kid(S93Base):
+    def __init__(self, a, **kw):
+        super().__init__(a, **kw)
+        self.k = True
+
+class S93Bad:
+    def __init__(self, x):
+        super().__init__(x)
+
+class S93Err(Exception):
+    def __new__(cls, *a):
+        o = super().__new__(cls, *a)
+        o.extra = len(a)
+        return o
+
+def s93():
+    check("new1", int.__new__(int, "12") + 1 == 13 and float.__new__(float, "1.5") == 1.5 and str.__new__(str, 5) == "5"
+          and list.__new__(list, [1]) == [] and tuple.__new__(tuple, [1, 2]) == (1, 2))
+    check("new2", S93P(4) == 8 and type(S93P(4)) is S93P and S93P(4) + 1 == 9 and isinstance(S93P(1), int))
+    a = S93S()
+    b = S93S()
+    check("new3", a is b and b.n == 2 and S93W(5) == 5 and S93W.ran == [])
+    check("new4", S93Up("hi") == "HI" and type(S93Up("x")) is S93Up and S93Up("ab").tag == 1 and S93Up("ab") + "!" == "AB!")
+    check("new5", object.__new__(S93A).__class__ is S93A and S93A.__new__ is object.__new__ and int.__new__ is int.__new__
+          and hasattr(int, "__new__") and hasattr(S93A(), "__new__") and S93P.__new__ is not int.__new__)
+    msgs = []
+    for f in [lambda: object.__new__(S93A, 1), lambda: object.__new__(S93P), lambda: object.__new__(5),
+              lambda: int.__new__(S93A), lambda: S93A(1), lambda: S93A(k=1), lambda: S93Bad(1),
+              lambda: object.__init__(S93A(), 1), lambda: object.__format__(S93A(), "x")]:
+        try:
+            f()
+        except TypeError as e:
+            msgs.append(str(e))
+    check("new6", msgs == ["S93A() takes no arguments", "object.__new__(S93P) is not safe, use int.__new__()",
+                           "object.__new__(X): X is not a type object (int)", "int.__new__(S93A): S93A is not a subtype of int",
+                           "S93A() takes no arguments", "S93A() takes no arguments",
+                           "object.__init__() takes exactly one argument (the instance to initialize)",
+                           "S93A.__init__() takes exactly one argument (the instance to initialize)",
+                           "unsupported format string passed to S93A.__format__"])
+    o = S93A()
+    check("obj1", S93A.__init__ is object.__init__ and object.__init__(o) is None and object.__eq__(1, 1) is True
+          and object.__eq__(o, S93A()) is NotImplemented and object.__ne__(1, 2) is True)
+    check("obj2", o.__eq__(o) is True and o.__ne__(o) is False and o.__eq__(S93A()) is NotImplemented
+          and o.__hash__() == hash(o) == object.__hash__(o) and object.__str__(o) == object.__repr__(o) == repr(o))
+    names = ["__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__", "__format__",
+             "__setattr__", "__getattribute__", "__delattr__", "__class__"]
+    check("obj3", all(hasattr(object, n) and hasattr(o, n) and hasattr(S93A, n) for n in names) and object.__class__ is type)
+    object.__setattr__(o, "q", 3)
+    seen = object.__getattribute__(o, "q")
+    object.__delattr__(o, "q")
+    try:
+        object.__setattr__(object(), "q", 1)
+    except AttributeError as e:
+        msgs.append(str(e))
+    check("obj4", seen == 3 and not hasattr(o, "q") and object.__format__(5, "") == "5"
+          and msgs[-1] == "'object' object has no attribute 'q' and no __dict__ for setting new attributes")
+    k = S93Kid(1, b=5)
+    check("obj5", (k.a, k.b, k.k) == (1, 5, True) and S93Base(7).b == 2)
+    try:
+        raise S93Err("x", "y")
+    except S93Err as e:
+        check("obj6", e.args == ("x", "y") and e.extra == 2)
+    check("obj7", str(object.__init__) == "<slot wrapper '__init__' of 'object' objects>" and type(object.__init__).__name__ == "wrapper_descriptor"
+          and object.__eq__.__name__ == "__eq__" and type(o.__init__).__name__ == "method-wrapper")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4651,5 +4760,6 @@ def main():
     s88() # SECTION-CALL 88
     s89() # SECTION-CALL 89
     s92() # SECTION-CALL 92
+    s93() # SECTION-CALL 93
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

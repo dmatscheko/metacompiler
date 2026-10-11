@@ -578,6 +578,14 @@ func (rt *jsrt) pyHashF(f float64, holder interface{}) uint64 {
 	return pyHashFloat(f)
 }
 
+// pyHashInt is a 64-bit hash as the Python int hash() answers.
+func (rt *jsrt) pyHashInt(x uint64) interface{} {
+	if int64(x) >= -(1<<53) && int64(x) < 1<<53 {
+		return float64(int64(x))
+	}
+	return rt.pyBigNarrow(big.NewInt(int64(x)))
+}
+
 // pyHashId is the identity hash: the order in which hash() first met the value.
 func (rt *jsrt) pyHashId(v interface{}) uint64 {
 	for i, o := range rt.pyHashIds {
