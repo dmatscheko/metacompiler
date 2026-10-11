@@ -97,7 +97,7 @@ Global `isNaN` (and check isFinite, parseInt, parseFloat globals) missing in all
 engines. `{[Symbol.toPrimitive]: 1}` / `{[Symbol.hasInstance]: 5}`: node "TypeError:
 number 1 is not a function"; all engines ignore the member.
 
-### T-387 js: `toExponential` / `toFixed` / `toPrecision` exist only through goja's leak · P1 · JS · OPEN [V]
+### T-387 js: `toExponential` / `toFixed` / `toPrecision` exist only through goja's leak · P1 · JS · IN PROGRESS (JS worker, round 11) [V]
 `xs[0].toExponential()`, `toFixed(2)`, `toPrecision(2)`: the goja interpreter answers
 via goja's own methods; -frozen, llvm.Run and native "is not a function". Implement
 them (node's exact digits) in all engines.
@@ -126,7 +126,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-382 go: arrays of defined types; a package's own defined types inside its code · P2 · GO · OPEN [V]
+### T-382 go: arrays of defined types; a package's own defined types inside its code · P2 · GO · IN PROGRESS (PHP+GO worker, round 14) [V]
 `[2]Kind{2, 4}` prints `[2 4]` (go `[kind2 kind4]`) and `%T` `[2]int` (go
 `[2]main.Kind`): a plain host array records no element type. Inside package pk, its own
 `Kind` is never boxed (goDtForeign): `pk.Show(4)` gives `4 [4]` (go `pk4 [pk4]`) and
@@ -145,7 +145,7 @@ and `case T:` / `x.(T)` qualification inside packages.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-388 php: `var_export`, `json_encode` / `json_decode` · P1 · PHP · OPEN [V spec-only]
+### T-388 php: `var_export`, `json_encode` / `json_decode` · P1 · PHP · IN PROGRESS (PHP+GO worker, round 14) [V spec-only]
 "Call to undefined function" in all engines.
 
 ---
