@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-405** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-406** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,10 +114,13 @@ not change the renderer.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-404 swift: `.init(...)` as an implicit member; ambiguous static names · P2 · SW · IN PROGRESS (SW worker, round 18) [V]
-`let s: S = .init(n: 3)` unsupported; a static member name declared in two types falls
-back to an enum case (Swift picks by the expected type - needs the declared type at
-the use site, which `let s: S` gives).
+### T-405 swift: lazy static lets; implicit members in sub-expressions · P1 · SW · IN PROGRESS (SW worker, round 19) [V]
+`struct S { var n: Int; static let zero = S(n: 0) }; print(S.zero.n)`: swiftc 0;
+interpreter "unknown name: S", compiled "call of a non function value: undefined" -
+static initialisers run eagerly while the type is built (Swift: lazily, on first
+access). Implicit members still use the single-owner heuristic in array/dictionary
+literal elements, call arguments, ternary branches and closures typed only by their
+slot (`let f: () -> T = { .make(8) }`: swiftc t8, ours nil).
 
 ---
 
@@ -468,6 +471,7 @@ T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context —
 T-398 batch: `%~n0` inside `call :label`; native string arena — DONE 73990fef
 T-403 swift: stored-property types keyed by name across types; implicit members to static funcs — DONE 64a8ae13 cd910ffc (and the -qq fix for bash/c/toys 4f397c98)
 T-402 js/ts: function declarations are not hoisted — DONE e4a8fdc3 (with Annex B block functions)
+T-404 swift: `.init(...)` as an implicit member; ambiguous static names — PARTIAL 8ed63e0f (declared-type slots: annotated let/var, property defaults, assignments, returns); sub-expression contexts are T-405
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -515,7 +519,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
