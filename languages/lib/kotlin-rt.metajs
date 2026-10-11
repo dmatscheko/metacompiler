@@ -82,6 +82,9 @@
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
 import "./runtime.metajs"
+// kotlin.math on doubles, over StrictMath's fdlibm.
+import "./fdlibm.js"
+import "./kotlin-math.js"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return k1JStr(v) }
@@ -1506,6 +1509,9 @@ function k1NumLess(l, r) {
 // receiver or the name.
 function ktNumMethod(recv, name, args) {
     if (!k1Numeric(recv)) { return KT_MISS }
+    if (name == "pow" || name == "roundToInt" || name == "roundToLong") {
+        if (floIs(recv)) { return k4MathMethod(recv, name, args) }
+    }
     if (name == "rangeTo" || name == "until" || name == "downTo") {
         if (args.length == 1) { return k4RangeMake(recv, args[0], name) }
     }
@@ -6928,6 +6934,53 @@ function k4Abs(v) {
     return -ktNum(v)
 }
 
+// The rest of kotlin.math over lib/kotlin-math.js: a Float argument answers a
+// Float. Twin of ktMathFn / ktMathMethod / ktMathProp in abnf/jsrtktmath.go and
+// kMathFn in kotlin-interpreter.abnf.
+function k4MathRes(like, f) {
+    if (floIs(like)) {
+        if (floStyle(like) == 3) { return flo(rtF32Round(f), 3) }
+    }
+    return flo(f, 0)
+}
+
+function k4MathFn(name) {
+    if (name == "PI" || name == "E") { return flo(ktmConst(name), 0) }
+    var mn = name
+    if (ktmIsBinary(name)) {
+        return function (x, y) { return k4MathRes(x, ktmMath2(mn, ktNum(x), ktNum(y))) }
+    }
+    return function (x) { return k4MathRes(x, ktmMath1(mn, ktNum(x))) }
+}
+
+// Double.pow, roundToInt and roundToLong. The rounding is Math.round's (half up),
+// saturated at the target range; a NaN receiver throws.
+function k4MathMethod(recv, name, args) {
+    var f = floNum(recv)
+    if (name == "pow") { return k4MathRes(recv, ktmMath2("pow", f, ktNum(ktArg(args, 0)))) }
+    if (f !== f) { ktRaise("IllegalArgumentException", "Cannot round NaN value.") }
+    if (name == "roundToInt") { return k1Conv(flo(ktmRoundHalfUp(f), 0), 32, 0) }
+    return k1Conv(flo(ktmRoundHalfUp(f), 0), 64, 0)
+}
+
+// The absoluteValue and sign properties: abs and signum in the number's own type,
+// except that an integer's sign is an Int.
+function k4MathProp(o, name) {
+    if (name == "absoluteValue") { return k4Abs(o) }
+    if (floIs(o)) { return k4MathRes(o, ktmMath1("sign", floNum(o))) }
+    if (k4KeyLess(o, 0)) { return -1 }
+    if (k4KeyLess(0, o)) { return 1 }
+    return 0
+}
+
+// js_ktclock(kind, us) is System.currentTimeMillis (kind 0) / nanoTime (kind 1)
+// from the microseconds the emitted module read with gettimeofday. Twin of ktClock
+// in abnf/jsrtktmath.go.
+function js_ktclock(kind, us) {
+    if (kind == 0) { return k1Conv(Math.floor(us / 1000), 64, 0) }
+    return k1Arith("*", k1Conv(us, 64, 0), k1Conv(1000, 64, 0))
+}
+
 // ktSeqCap (jsrtkotlin.go:5471) is how far an EAGER generateSequence walks an
 // infinite generator before it gives up.
 function k4SeqCap() { return 100000 }
@@ -7441,6 +7494,7 @@ function ktGlobalFn(name) {
             return arrKindSet(out, 2)
         }
     }
+    if (ktmIsName(name)) { return k4MathFn(name) }
     return undefined
 }
 
@@ -8440,6 +8494,9 @@ function js_ktfget(o, name) {
     if (typeof o == "string" && rtIsNil(r)) {
         if (name == "indices") { return k4Indices(o.length) }
         if (name == "lastIndex") { return o.length - 1 }
+    }
+    if (name == "absoluteValue" || name == "sign") {
+        if (k1Numeric(o)) { return k4MathProp(o, name) }
     }
     // A StringBuilder IS a CharSequence, so the same two properties apply to it.
     if (ktIsSb(o) && rtIsNil(r)) {

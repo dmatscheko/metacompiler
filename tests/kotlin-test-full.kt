@@ -4503,6 +4503,42 @@ fun sec88() {
     check("ax88j", s88any(fs.sum()) is Float && "" + fs.sum() == "1.6777216E7")
 }
 
+// ===== SECTION 89: kotlin.math and System's clocks =====
+// kotlin.math's functions and constants (a Float argument answers a Float), the
+// Double extensions pow / roundToInt / roundToLong, the absoluteValue and sign
+// properties, and System.currentTimeMillis / nanoTime as Longs. Rows read from
+// java.lang.Math and the kotlin-stdlib 2.2.21 jar's MathKt, called from java.
+fun s89any(x: Any): Any = x
+
+fun sec89() {
+    val d = doubleArrayOf(2.0, -2.5, 0.5, 1e-10, -0.0, 100.0, 8.0)
+    check("km89a", "" + sqrt(d[0]) + " " + cbrt(d[6]) + " " + exp(d[2]) + " " + ln(d[5]) ==
+        "1.4142135623730951 2.0 1.6487212707001282 4.605170185988092")
+    check("km89b", "" + log10(d[5]) + " " + log2(d[6]) + " " + log(d[6], d[0]) + " " + log(d[6], 1.0) ==
+        "2.0 3.0 3.0 NaN")
+    check("km89c", "" + cos(d[0]) + " " + tan(d[2]) + " " + atan2(d[1], d[0]) + " " + hypot(d[0], d[1]) ==
+        "-0.4161468365471424 0.5463024898437905 -0.8960553845713439 3.2015621187164243")
+    check("km89d", "" + asinh(d[1]) + " " + acosh(d[0]) + " " + atanh(d[2]) + " " + asinh(d[3]) ==
+        "-1.6472311463710958 1.3169578969248166 0.5493061443340548 1.0E-10")
+    check("km89e", "" + floor(d[1]) + " " + ceil(d[1]) + " " + truncate(d[1]) + " " + round(d[1]) + " " +
+        round(d[2]) + " " + sign(d[1]) + " " + sign(d[4]) == "-3.0 -2.0 -2.0 -2.0 0.0 -1.0 -0.0")
+    check("km89f", "" + d[1].pow(2) + " " + d[0].pow(0.5) + " " + d[1].roundToInt() + " " +
+        d[2].roundToLong() == "6.25 1.4142135623730951 -2 1")
+    check("km89g", s89any(d[2].roundToLong()) is Long && s89any(1e10.roundToInt()) == 2147483647)
+    var nan = ""
+    try { (d[4] / d[4]).roundToInt() } catch (e: IllegalArgumentException) { nan = "" + e.message }
+    check("km89h", nan == "Cannot round NaN value.")
+    check("km89i", "" + PI + " " + E == "3.141592653589793 2.718281828459045")
+    val f = floatArrayOf(2.0f, -2.5f)
+    check("km89j", "" + sqrt(f[0]) + " " + f[1].pow(2) + " " + abs(f[1]) + " " + round(f[1]) ==
+        "1.4142135 6.25 2.5 -2.0" && s89any(sqrt(f[0])) is Float)
+    check("km89k", "" + abs(d[4]) + " " + d[1].absoluteValue + " " + d[1].sign + " " + (-7).sign + " " +
+        (-7L).absoluteValue + " " + f[1].sign == "0.0 2.5 -1.0 -1 7 -1.0")
+    val t0 = System.nanoTime()
+    check("km89l", s89any(t0) is Long && System.nanoTime() >= t0 &&
+        System.currentTimeMillis() > 1600000000000L)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4593,6 +4629,7 @@ fun main() {
     sec86() // SECTION-CALL 86
     sec87() // SECTION-CALL 87
     sec88() // SECTION-CALL 88
+    sec89() // SECTION-CALL 89
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

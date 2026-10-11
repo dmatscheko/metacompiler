@@ -567,6 +567,8 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		return nil, false
 	}
 	switch name {
+	case "pow", "roundToInt", "roundToLong":
+		return rt.ktMathMethod(target, name, args)
 	// rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and
 	// `downTo` are the infix operators the emitter lowers to js_ktrange, but
 	// kotlin.ranges declares each as an ordinary member/extension too
@@ -1766,6 +1768,8 @@ func init() {
 		// js_ktglobal(name) is the VALUE of one global builder; buildMain declares
 		// one per name. See the block above ktRecvStack.
 		m["js_ktglobal"] = func(a []uint64) uint64 { return w(ktGlobalFn(rt, rt.toString(u(a[0])))) }
+		// js_ktclock(kind, us) is System.currentTimeMillis (0) / nanoTime (1); see ktClock.
+		m["js_ktclock"] = func(a []uint64) uint64 { return w(rt.ktClock(int(giFloat(rt, u(a[0]))), u(a[1]))) }
 
 		// js_ktpropset(this, "x", v) stores ONE property initializer. It is not js_set,
 		// because a property a SUBCLASS overrides with accessors has a js_defprop pair
@@ -2364,6 +2368,9 @@ func init() {
 				if v, handled := rt.ktEnumMethod(o, name, nil); handled {
 					return w(v)
 				}
+			}
+			if (name == "absoluteValue" || name == "sign") && giIsNumeric(o) {
+				return w(rt.ktMathProp(o, name))
 			}
 			if mo, isObj := o.(*jsObject); isObj {
 				// A NESTED CLASS read as a member of its owner's descriptor -
@@ -6757,14 +6764,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 	// abs(-3L) a Long (JavaScript's Math.abs would answer a plain number).
 	case "abs":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			v := argAt(args, 0)
-			if f, isFlo := v.(jsJFlo); isFlo {
-				return jsJFlo{f: math.Abs(f.f)}
-			}
-			if rt.ktNumLess(v, float64(0)) {
-				return rt.ktArith("-", ktNorm(0, 32, false), v)
-			}
-			return v
+			return rt.ktAbs(argAt(args, 0))
 		})
 	case "max", "min", "maxOf", "minOf":
 		wantMax := name == "maxOf" || name == "max"
@@ -7023,6 +7023,9 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			}
 			return ktArrTagged(out, ktArrSeq)
 		})
+	}
+	if v := ktMathFn(name); v != nil {
+		return v
 	}
 	return jsUndef
 }

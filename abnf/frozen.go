@@ -364,6 +364,9 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 		time.Sleep(time.Duration(rt.toNumber(argAt(args, 0))) * time.Millisecond)
 		return jsUndef
 	})
+	b["clockMicros"] = jsHostFunc("clockMicros", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(time.Now().UnixMicro())
+	})
 	// floPrec(v, n) - the fixed-precision digit string a %g formatter needs and
 	// the dialect cannot express. commonscript.go binds the identical function
 	// for goja, so the two grammar hosts stay in step; floPrecStr's own comment

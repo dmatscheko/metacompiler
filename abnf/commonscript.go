@@ -219,6 +219,9 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("exit", os.Exit)
 
 	vm.Set("sleep", func(d time.Duration) { time.Sleep(d * time.Millisecond) })
+	// clockMicros() is the wall clock in microseconds since the epoch, exact in a
+	// double; frozen.go binds the same name.
+	vm.Set("clockMicros", func() float64 { return float64(time.Now().UnixMicro()) })
 
 	vm.Set("append", func(t []interface{}, v ...interface{}) interface{} {
 		tmp := append(t, v...)

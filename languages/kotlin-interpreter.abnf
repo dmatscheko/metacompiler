@@ -2498,6 +2498,10 @@ NotMemberKw = :script(~~
     include("lib/regex.js")
     rxFail = function (msg) { fail(msg) }
 
+    // kotlin.math on doubles (lib/kotlin-math.js), over StrictMath's fdlibm.
+    include("lib/fdlibm.js")
+    include("lib/kotlin-math.js")
+
     // ----- Imports (same policy as the compiler grammar) -----
     // Prefixes the runtime already provides as builtins; importing them is a no-op.
     core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences", "kotlinx.coroutines"]
@@ -3592,7 +3596,7 @@ NotMemberKw = :script(~~
     // kotlin.math.abs / max / min keep the operand's TYPE: a Double answers a Double
     // (`abs(-1.5)` is 1.5), a sized integer its own width (`abs(-3L)` is 3L).
     hostGlobals["abs"] = function(v) {
-        if (kIsFlo(v)) { return kFlo(v.__flo < 0 ? kNegF(v.__flo) : v.__flo) }
+        if (kIsFlo(v)) { return kMathRes(v, Math.abs(v.__flo)) }
         if (szIs(v)) {
             if (!kCmpI("<", v, 0)) { return v }
             if (v.w == 64 || v.u) { return kNorm(szPair(szNeg(v)), v.w, v.u) }
@@ -3602,6 +3606,26 @@ NotMemberKw = :script(~~
     }
     hostGlobals["max"] = function(a, b) { return kKeyLess(a, b) ? b : a }
     hostGlobals["min"] = function(a, b) { return kKeyLess(b, a) ? b : a }
+    // The rest of kotlin.math: the functions over lib/kotlin-math.js, a Float argument
+    // answering a Float, and the constants PI and E. Twin of ktMathFn in
+    // abnf/jsrtktmath.go and k4MathFn in languages/lib/kotlin-rt.metajs.
+    function kMathRes(like, f) { return kIsF32(like) ? kFlo32(f) : kFlo(f) }
+    function kMathFn(name) {
+        if (ktmIsBinary(name)) { return function(x, y) { return kMathRes(x, ktmMath2(name, kNumD(x), kNumD(y))) } }
+        return function(x) { return kMathRes(x, ktmMath1(name, kNumD(x))) }
+    }
+    for (var kmi = 0; kmi < ktmNames.length; kmi++) {
+        var kmn = ktmNames[kmi]
+        hostGlobals[kmn] = (kmn == "PI" || kmn == "E") ? kFlo(ktmConst(kmn)) : kMathFn(kmn)
+    }
+    // java.lang.System's two clocks, from the host's microseconds since the epoch:
+    // currentTimeMillis in milliseconds, nanoTime in nanoseconds (an arbitrary origin
+    // in Java; only differences mean anything). Twin of ktClock in
+    // abnf/jsrtktmath.go and js_ktclock in languages/lib/kotlin-rt.metajs.
+    hostGlobals["System"] = {
+        currentTimeMillis: function() { return kConv(Math.floor(clockMicros() / 1000), 64, false) },
+        nanoTime: function() { return kArith("*", kConv(clockMicros(), 64, false), kConv(1000, 64, false)) }
+    }
     // Kotlin's number types as VALUES, for their COMPANION CONSTANTS. Long.MAX_VALUE
     // cannot be written as a plain number at all - which is the whole reason a sized
     // integer had to exist, since Int.MAX_VALUE + 1 also has to wrap to Int.MIN_VALUE
@@ -6548,6 +6572,13 @@ NotMemberKw = :script(~~
             if (name == "coerceAtMost") return tf > kNumD(args[0]) ? args[0] : target
             if (name == "hashCode") return kHash(target)
             if (name == "isNaN") return tf !== tf
+            // kotlin.math's Double / Float extensions. roundToInt / roundToLong round
+            // half up (Math.round) and saturate; a NaN receiver throws.
+            if (name == "pow") return kMathRes(target, ktmMath2("pow", tf, kNumD(args[0])))
+            if (name == "roundToInt" || name == "roundToLong") {
+                if (tf !== tf) { kThrowExc("IllegalArgumentException", "Cannot round NaN value.") }
+                return kConv(kFlo(ktmRoundHalfUp(tf)), name == "roundToInt" ? 32 : 64, false)
+            }
             return mfallback(target, name, args, "Double")
         }
         // A sized-integer receiver: the same surface as an Int, at its own width.
@@ -9913,6 +9944,14 @@ NotMemberKw = :script(~~
             // lastIndex (`for (i in s.indices)`).
             if (name == "indices") { return kRange(0, o.length - 1, false) }
             return extPropGet(o, name)
+        }
+        // kotlin.math's absoluteValue and sign properties: abs and signum in the
+        // number's own type, except that an integer's sign is always an Int.
+        if ((name == "absoluteValue" || name == "sign") && (typeof o == "number" || kIsFlo(o) || szIs(o))) {
+            if (name == "absoluteValue") { return hostGlobals["abs"](o) }
+            if (kIsFlo(o)) { return kMathRes(o, ktmMath1("sign", o.__flo)) }
+            var sgn = kNumD(o)
+            return sgn < 0 ? kNegOne : (sgn > 0 ? 1 : 0)
         }
         if (typeof o == "number" || typeof o == "boolean") { return extPropGet(o, name) }
         // Char.code is a PROPERTY in Kotlin, not a method.

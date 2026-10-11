@@ -6326,7 +6326,11 @@ KwContract  = "contract" KwEnd ;
     }
     // A `field` reference inside an accessor body is the backing field of that property;
     // everywhere else `field` is an ordinary name (it is only a soft keyword in Kotlin).
+    // Every name the program reads as a value, so buildMain declares a builtin only
+    // for a program that uses it.
+    var ktVarSeen = {}
     makeVarRef = function(name) {
+        ktVarSeen["$" + name] = true
         return function(b) {
             // `RegexOption` (its entries are their own names) and `Regex` used as a
             // value, which is only ever its companion - Regex.escape(s) and friends.
@@ -6494,6 +6498,34 @@ KwContract  = "contract" KwEnd ;
     }
     // componentN(): read one property of `this`. A factory, so each emitted function
     // captures its OWN property name (a plain loop variable is shared under `var`).
+    // System.currentTimeMillis (kind 0) / nanoTime (kind 1) as a function value. A
+    // native build reads the wall clock's microseconds with libc's gettimeofday here
+    // (the struct's tv_usec is a 32 bit field on Darwin, so only its low half is
+    // read); llvm.Run cannot call libc, so it passes undefined and the Go twin reads
+    // its own clock. js_ktclock turns the microseconds into the Long.
+    var ktGtod = null
+    function emitClockFunc(kind) {
+        return emitFunc([], function(bb) {
+            var usV = hUndef
+            if (ktNativeBuild) {
+                var tvTy = llvm.types.NewArray(2, i64)
+                if (ktGtod == null) {
+                    ktGtod = m.NewFunc("gettimeofday", llvm.types.I32,
+                                       [llvm.ir.NewParam("", llvm.types.NewPointer(tvTy)),
+                                        llvm.ir.NewParam("", llvm.types.I8Ptr)])
+                }
+                var tv = bb.NewAlloca(tvTy)
+                bb.NewCall(ktGtod, [tv, llvm.constant.NewNull(llvm.types.I8Ptr)])
+                var i32z = llvm.constant.NewInt(llvm.types.I32, 0)
+                var secV = bb.NewLoad(i64, bb.NewGetElementPtr(tvTy, tv, [i32z, i32z]))
+                var usecW = bb.NewLoad(i64, bb.NewGetElementPtr(tvTy, tv, [i32z, llvm.constant.NewInt(llvm.types.I32, 1)]))
+                var usecV = bb.NewSExt(bb.NewTrunc(usecW, llvm.types.I32), i64)
+                usV = callExt(bb, "js_num_i", [bb.NewAdd(bb.NewMul(secV, handle(1000000)), usecV)])
+            }
+            bb.NewRet(callExt(bb, "js_ktclock", [emitNum(bb, kind), usV]))
+            return deadBlock()
+        }, false)
+    }
     function emitComponentFunc(prop) {
         return emitFunc([], function(bb) {
             var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
@@ -7734,6 +7766,17 @@ KwContract  = "contract" KwEnd ;
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
+        // java.lang.System's two clocks, declared only for a program that names System
+        // and does not declare it. Each member is a closure over js_ktclock(kind, us).
+        if (ktVarSeen["$System"] == true && classNames["System"] == undefined) {
+            var sysV = callExt(b, "js_obj_new", [])
+            var clocks = ["currentTimeMillis", "nanoTime"]
+            for (var ck = 0; ck < clocks.length; ck++) {
+                callExt(b, "js_set", [sysV, emitStr(b, clocks[ck]),
+                                      callExt(b, "js_closure", [handle(emitClockFunc(ck)), curScopeV])])
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
+        }
         // println / print: Kotlin's OWN rendering, not the shared println host
         // function (which hands the raw runtime value to Go's %v). js_ktprint /
         // js_ktwrite each RETURN the host function, so ::println and
