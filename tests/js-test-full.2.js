@@ -934,6 +934,8 @@ function s42() {
     check("math02", Math.cos(a[0]) === 0.5403023058681398)
     check("math03", Math.tan(a[0]) === 1.557407724654902)          // GO-vs-V8: node 1.5574077246549023
     check("math04", Math.asin(a[2]) === 0.5235987755982989)
+    var near1 = [0.99999, 0.9999999]
+    check("math04b", Math.asin(near1[0]) === 1.5663241871131188 && Math.asin(near1[1]) === 1.5703491131957876)
     check("math05", Math.acos(a[2]) === 1.0471975511965976)        // GO-vs-V8: node 1.0471975511965979
     check("math06", Math.atan(a[0]) === 0.7853981633974483)
     check("math07", Math.sinh(a[0]) === 1.1752011936438014)

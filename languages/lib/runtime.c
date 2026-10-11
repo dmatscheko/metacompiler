@@ -4540,10 +4540,11 @@ long d_pow(long xb, long yb) {
  * line for line.
  *
  * WHAT THE PORT CANNOT REACH, AND WHY llvm.fma.f64 IS NOT THE ANSWER. A small
- * fraction of arguments still differ from llvm.Run by ONE ULP, in six
+ * fraction of arguments still differ from llvm.Run by ONE ULP, in five
  * expressions: `(x - y*PI4A)` and its two continuations in sin/cos/tan, tan's
- * `z + z*q`, xatan's `x*z + x`, asin's `1 - x*x`, and log2's
- * `Log(frac)*(1/Ln2) + exp`. THE GO COMPILER CONTRACTS `a*b + c` INTO AN FMA ON
+ * `z + z*q`, xatan's `x*z + x`, and log2's `Log(frac)*(1/Ln2) + exp`. (asin's
+ * `1 - x*x` cancels, so its error is not one ulp: d_one_minus_sq computes it
+ * exactly.) THE GO COMPILER CONTRACTS `a*b + c` INTO AN FMA ON
  * arm64 and the C here emits a separate fmul and fadd. Emitting an FMA here to
  * match is declined:
  *
@@ -4819,13 +4820,27 @@ double d_atan(double x) {
 	if (x > 0.0) { return d_satan(x); }
 	return 0.0 - d_satan(0.0 - x);
 }
+/* 1 - x*x rounded ONCE, as Go's fused `1 - x*x` in asin.go is on arm64. The
+ * separate fmul cancels near |x| = 1 (asin off by hundreds of ulps); Dekker's
+ * split gives x*x = p + e exactly and a two-sum gives 1 - p = s + t exactly. */
+double d_one_minus_sq(double x) {
+	double c = 134217729.0 * x;
+	double hi = c - (c - x);
+	double lo = x - hi;
+	double p = x * x;
+	double e = ((hi * hi - p) + 2.0 * (hi * lo)) + lo * lo;
+	double s = 1.0 - p;
+	double bb = s - 1.0;
+	double t = (1.0 - (s - bb)) + ((0.0 - p) - bb);
+	return s + (t - e);
+}
 double d_asin(double x) {
 	double temp;
 	int sign = 0;
 	if (x == 0.0) { return x; }
 	if (x < 0.0) { x = 0.0 - x; sign = 1; }
 	if (x > 1.0) { return d_nan_d(); }
-	temp = d_sqrt_d(1.0 - x * x);
+	temp = d_sqrt_d(d_one_minus_sq(x));
 	if (x > 0.7) { temp = 1.5707963267948966 - d_satan(temp / x); }
 	else { temp = d_satan(x / temp); }
 	if (sign) { temp = 0.0 - temp; }
