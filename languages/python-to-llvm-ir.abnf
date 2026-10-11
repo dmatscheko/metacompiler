@@ -2743,9 +2743,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function writeTarget(b, t, v) {
         if (t.tuple == undefined) { return emitRefWrite(b, t, v) }
         var items = t.tuple
-        var arr = callExt(b, "js_pyunpack", [v])
         var star = -1
         for (var i = 0; i < items.length; i++) { if (items[i].startgt != undefined) { star = i } }
+        // js_pyunpack raises CPython's ValueError for a wrong count.
+        var arr = callExt(b, "js_pyunpack", [v, emitNum(b, star < 0 ? items.length : items.length - 1),
+                                             star < 0 ? hFalse : hTrue])
         if (star < 0) {
             for (var k = 0; k < items.length; k++) {
                 b = writeTarget(b, items[k], callExt(b, "js_pyidx", [arr, emitNum(b, k)]))

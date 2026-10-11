@@ -3535,6 +3535,51 @@ def s63():
           and int("7", base=10) == 7 and str(None) == "None" and str(object=None) == "None" and str(encoding="u") == "")
 
 
+# ===== SECTION 64: unpacking the wrong number of values is a catchable ValueError =====
+# "too many values to unpack (expected N, got M)" - the count only for a list,
+# a tuple or a dict - and "not enough values to unpack (expected [at least] N,
+# got M)", from assignments, for targets, nested and starred patterns alike.
+def s64():
+    def g(n):
+        yield from range(n)
+    def c1():
+        a, b = [1, 2, 3]
+    def c2():
+        a, b = [1]
+    def c3():
+        a, b = "abc"
+    def c4():
+        a, b = g(1)
+    def c5():
+        a, b = {1: 1, 2: 2, 3: 3}
+    def c6():
+        a, *b, c = [1]
+    def c7():
+        for a, b in [[1, 2, 3]]:
+            pass
+    def c8():
+        a, (b, c) = [1, [2]]
+    def c9():
+        a, = []
+    def c10():
+        a, b = {1, 2, 3}
+    msgs = []
+    for f in [c1, c2, c3, c4, c5, c6, c7, c8, c9, c10]:
+        try:
+            f()
+        except ValueError as e:
+            msgs.append(str(e))
+    check("unp1", msgs[:5] == ["too many values to unpack (expected 2, got 3)", "not enough values to unpack (expected 2, got 1)",
+                               "too many values to unpack (expected 2)", "not enough values to unpack (expected 2, got 1)",
+                               "too many values to unpack (expected 2, got 3)"])
+    check("unp2", msgs[5:] == ["not enough values to unpack (expected at least 2, got 1)",
+                               "too many values to unpack (expected 2, got 3)", "not enough values to unpack (expected 2, got 1)",
+                               "not enough values to unpack (expected 1, got 0)", "too many values to unpack (expected 2)"])
+    a, *b, c = [1, 2]
+    d, e = "xy"
+    check("unp3", a == 1 and b == [] and c == 2 and d + e == "xy")
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3599,5 +3644,6 @@ def main():
     s61() # SECTION-CALL 61
     s62() # SECTION-CALL 62
     s63() # SECTION-CALL 63
+    s64() # SECTION-CALL 64
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -8445,18 +8445,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var vals = iterToList(v)
         var star = -1
         for (var i = 0; i < items.length; i++) { if (items[i].startgt != undefined) { star = i } }
+        pyUnpackCheck(v, vals.length, star < 0 ? items.length : items.length - 1, star >= 0)
         if (star < 0) {
-            if (vals.length != items.length) { fail("ValueError: cannot unpack " + vals.length + " values into " + items.length + " targets") }
             for (var k = 0; k < items.length; k++) { writeTarget(items[k], vals[k]) }
             return
         }
         var after = items.length - star - 1
-        if (vals.length < items.length - 1) { fail("ValueError: not enough values to unpack") }
         for (var a = 0; a < star; a++) { writeTarget(items[a], vals[a]) }
         var mid = []
         for (var m = star; m < vals.length - after; m++) { mid.push(vals[m]) }
         writeTarget(items[star].startgt, mid)
         for (var b = 0; b < after; b++) { writeTarget(items[star + 1 + b], vals[vals.length - after + b]) }
+    }
+    // CPython's ValueError for an unpacking of GOT values into N targets (N plain
+    // ones beside a *rest when STAR). A too-many message names the count only for
+    // a list, a tuple or a dict, as CPython does. Twin of rt.pyUnpackCheck in
+    // abnf/jsrt.go and pyUnpackCheck in lib/python-rt.metajs.
+    function pyUnpackCheck(v, got, n, star) {
+        if (star) {
+            if (got < n) { pyListErr("ValueError", "not enough values to unpack (expected at least " + n + ", got " + got + ")") }
+            return
+        }
+        if (got < n) { pyListErr("ValueError", "not enough values to unpack (expected " + n + ", got " + got + ")") }
+        if (got > n) {
+            var tail = ")"
+            if (Array.isArray(v) || (isDict(v) && !isSet(v))) { tail = ", got " + got + ")" }
+            pyListErr("ValueError", "too many values to unpack (expected " + n + tail)
+        }
     }
     // items = [{tlist}..., valueThunk]: every head is written with the same value,
     // left to right (a = b = value).

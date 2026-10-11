@@ -20310,12 +20310,17 @@ func init() {
 			}
 			return m["js_pyiter"](a)
 		}
-		m["js_pyunpack"] = func(a []uint64) uint64 {
-			if v := rt.unwrap(a[0]); !rt.pyIsIterable(v) {
+		m["js_pyunpack"] = func(a []uint64) uint64 { // (value, target count, has a *rest)
+			v := rt.unwrap(a[0])
+			if !rt.pyIsIterable(v) {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 					"cannot unpack non-iterable "+pyTypeName(rt, v)+" object")})
 			}
-			return m["js_pyiter"](a)
+			h := m["js_pyiter"](a[:1])
+			if arr, ok := rt.unwrap(h).(*jsArray); ok {
+				rt.pyUnpackCheck(v, len(arr.elems), int(rt.toNumber(rt.unwrap(a[1]))), rt.truthy(rt.unwrap(a[2])))
+			}
+			return h
 		}
 		m["js_pylenof"] = func(a []uint64) uint64 {
 			v := rt.unwrap(a[0])
@@ -21459,6 +21464,32 @@ func (rt *jsrt) pyParseInt(s string, base int) interface{} {
 		acc.Neg(acc)
 	}
 	return rt.pyBigNarrow(acc)
+}
+
+// pyUnpackCheck raises CPython's ValueError for an unpacking of got values into
+// n targets (n plain ones beside a *rest when star). A too-many message names
+// the count only for a list, a tuple or a dict, as CPython does. Twin of
+// pyUnpackCheck in python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyUnpackCheck(v interface{}, got, n int, star bool) {
+	msg := ""
+	switch {
+	case star && got < n:
+		msg = fmt.Sprintf("not enough values to unpack (expected at least %d, got %d)", n, got)
+	case star:
+	case got < n:
+		msg = fmt.Sprintf("not enough values to unpack (expected %d, got %d)", n, got)
+	case got > n:
+		_, isArr := v.(*jsArray)
+		_, isSet := pySetElems(v)
+		_, _, isDict := dictParts(v)
+		msg = fmt.Sprintf("too many values to unpack (expected %d)", n)
+		if isArr || (isDict && !isSet) {
+			msg = fmt.Sprintf("too many values to unpack (expected %d, got %d)", n, got)
+		}
+	}
+	if msg != "" {
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", msg)})
+	}
 }
 
 // pySum folds with Python's own `+` (js_pybin), so a float, an arbitrary

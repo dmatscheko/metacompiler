@@ -5305,11 +5305,38 @@ function js_pyiterof(v) {
     return []
 }
 
-// js_pyiterof for an unpacking target, with CPython's own TypeError text.
-function js_pyunpack(v) {
-    if (pyIsArr(v)) { return v }
-    if (!pyIsIterable(v)) { pyRaiseExc("TypeError", "cannot unpack non-iterable " + pyTypeName(v) + " object") }
-    return js_pyiterof(v)
+// js_pyiterof for an unpacking target of n plain targets (beside a *rest when
+// star), with CPython's own TypeError and ValueError texts. Go: js_pyunpack.
+function js_pyunpack(v, n, star) {
+    var arr = anytype
+    arr = v
+    if (!pyIsArr(v)) {
+        if (!pyIsIterable(v)) { pyRaiseExc("TypeError", "cannot unpack non-iterable " + pyTypeName(v) + " object") }
+        arr = js_pyiterof(v)
+    }
+    pyUnpackCheck(v, arr.length, n, star)
+    return arr
+}
+
+// Go: rt.pyUnpackCheck. CPython's ValueError for an unpacking of got values
+// into n targets; a too-many message names the count only for a list, a tuple
+// or a dict, as CPython does.
+function pyUnpackCheck(v, got, n, star) {
+    if (star) {
+        if (got < n) {
+            pyRaiseExc("ValueError", "not enough values to unpack (expected at least " + pyIntStr(n) + ", got " + pyIntStr(got) + ")")
+        }
+        return undefined
+    }
+    if (got < n) {
+        pyRaiseExc("ValueError", "not enough values to unpack (expected " + pyIntStr(n) + ", got " + pyIntStr(got) + ")")
+    }
+    if (got > n) {
+        var tail = ")"
+        if (pyIsArr(v) || (pyIsDict(v) && pySetElemsOf(v) === null)) { tail = ", got " + pyIntStr(got) + ")" }
+        pyRaiseExc("ValueError", "too many values to unpack (expected " + pyIntStr(n) + tail)
+    }
+    return undefined
 }
 
 
