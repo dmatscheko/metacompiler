@@ -2597,8 +2597,21 @@ KwSuper     = "super" KwEnd ;
                         // string is passed through: 'abc'.contains('bc') is a SUBSTRING
                         // test, not a membership test over its characters. String's
                         // contains(p, start) has two arguments and goes to js_dartnm.
-                        var isStr = truthy(b, callExt(b, "js_is_type", [cur, emitStr(b, "String")]))
-                        cur = callExt(b, "js_pyin", [ar.v, b.NewSelect(isStr, cur, callExt(b, "js_pyiter", [cur]))])
+                        // A List's contains is Dart's == (a user operator == included),
+                        // which js_pyin does not know, so a List goes to js_dartnm.
+                        var lsB = curF.NewBlock("")
+                        var inB = curF.NewBlock("")
+                        var ctB = curF.NewBlock("")
+                        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [cur, emitStr(b, "List")])), lsB, inB)
+                        var cargs = callExt(lsB, "js_arr_new", [])
+                        callExt(lsB, "js_arr_push", [cargs, ar.v])
+                        var lsV = callExt(lsB, "js_dartnm", [cur, emitStr(lsB, s.name), cargs])
+                        lsB.NewBr(ctB)
+                        var isStr = truthy(inB, callExt(inB, "js_is_type", [cur, emitStr(inB, "String")]))
+                        var inV = callExt(inB, "js_pyin", [ar.v, inB.NewSelect(isStr, cur, callExt(inB, "js_pyiter", [cur]))])
+                        inB.NewBr(ctB)
+                        b = ctB
+                        cur = ctB.NewPhi([llvm.ir.NewIncoming(lsV, lsB), llvm.ir.NewIncoming(inV, inB)])
                     } else if (extNames["$" + s.name] == 1 && methodNames["$" + s.name] == undefined) {
                         var xr = extCall(b, s.name, cur, s.args)
                         b = xr.b
@@ -2622,7 +2635,7 @@ KwSuper     = "super" KwEnd ;
                     else if (dNumGetters["$" + s.name] == 1) { cur = callExt(b, "js_dartnm", [cur, emitStr(b, s.name), callExt(b, "js_arr_new", [])]) }
                     else if (s.name == "values") { var vr2 = emitValuesRead(b, cur); b = vr2.b; cur = vr2.v }
                     else if (s.name == "codeUnits" || s.name == "runes") { var cu = emitCodeUnitsRead(b, cur, s.name, "String"); b = cu.b; cur = cu.v }
-                    else if (s.name == "first" || s.name == "last") { var fl = emitCodeUnitsRead(b, cur, s.name, "List"); b = fl.b; cur = fl.v }
+                    else if (s.name == "first" || s.name == "last" || s.name == "single" || s.name == "reversed") { var fl = emitCodeUnitsRead(b, cur, s.name, "List"); b = fl.b; cur = fl.v }
                     else { var gr = emitGetterRead(b, cur, s.name); b = gr.b; cur = gr.v }
                 } else if (s.kind == "callv") {
                     var cvArgs = callExt(b, "js_arr_new", [])

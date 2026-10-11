@@ -582,12 +582,6 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return a[0]
 	}
-	// A METHOD CALL, in the shape js_mcall has: (receiver, name, args array). It
-	// answers num's own members (toInt, round, isEven, ...) when the receiver is a
-	// number and the name is one of them, and otherwise hands the call straight to
-	// the runtime's ordinary member dispatch - so the Dart compiler can emit this
-	// one extern for every method call and a String's compareTo still reaches the
-	// String. The interpreter half does exactly this in mcall / readField.
 	// The signature a function declaration carries in js_jsfnmeta's name slot, "" for
 	// any other value. See dtFnSub in languages/dart-to-llvm-ir.abnf; twin of
 	// js_dartfnsig in languages/lib/dart-rt.metajs.
@@ -601,58 +595,67 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return w(rt.dartRegExp(args.elems))
 	}
+	// A METHOD CALL, in the shape js_mcall has: (receiver, name, args array).
 	m["js_dartnm"] = func(a []uint64) uint64 {
-		recv := u(a[0])
-		name := rt.toString(u(a[1]))
 		args, ok := u(a[2]).(*jsArray)
 		if !ok {
 			rt.fail("js_dartnm args must be an array")
 		}
-		// x.toString() is Object.toString() unless the class overrides it, and
-		// dartStr answers both - the interpreter's mcall has the same first arm.
-		if name == "toString" && len(args.elems) == 0 {
-			return rt.wrapStr(rt.dartStr(recv))
-		}
-		if dartIsNum(recv) {
-			if v, hit := rt.dartNumMember(recv, name, args.elems); hit {
-				return w(v)
-			}
-		}
-		// A NAMED constructor of one of dart:core's errors, reached through the
-		// postfix chain: ArgumentError.value(7). js_dartexctype put the marker here.
-		// `String` used as a name is the same marker, spent by its statics.
-		if o, ok := recv.(*jsObject); ok {
-			if tn, isMarker := o.props["__dexcType"].(string); isMarker {
-				if tn == "String" {
-					if v, hit := rt.dartStrStatic(name, args.elems); hit {
-						return w(v)
-					}
-				}
-				return w(rt.dartExcNew(tn, name, args.elems))
-			}
-			if o.props["__dmatch"] == true {
-				if v, hit := rt.dartMatchMember(o, name, args.elems); hit {
-					return w(v)
-				}
-			}
-			if o.props["__dregexp"] == true {
-				if v, hit := rt.dartReMember(o, name, args.elems); hit {
-					return w(v)
-				}
-			}
-		}
-		if arr, ok := recv.(*jsArray); ok {
-			if v, hit := rt.dartListMember(arr, name, args.elems); hit {
-				return w(v)
-			}
-		}
-		if str, ok := recv.(string); ok {
-			if v, hit := rt.dartStrMember(str, name, args.elems); hit {
-				return w(v)
-			}
-		}
-		return w(rt.memberCall(recv, name, args.elems))
+		return w(rt.dartMethod(u(a[0]), rt.toString(u(a[1])), args.elems))
 	}
+}
+
+// dartMethod is a method call recv.name(args). It answers num's own members
+// (toInt, round, isEven, ...) when the receiver is a number and the name is one of
+// them, dart:core's String / List / RegExp / Match members, and otherwise hands the
+// call straight to the runtime's ordinary member dispatch - so the Dart compiler can
+// emit this one extern for every method call and a String's compareTo still reaches
+// the String. The interpreter half does exactly this in mcall / readField.
+func (rt *jsrt) dartMethod(recv interface{}, name string, args []interface{}) interface{} {
+	// x.toString() is Object.toString() unless the class overrides it, and
+	// dartStr answers both - the interpreter's mcall has the same first arm.
+	if name == "toString" && len(args) == 0 {
+		return rt.dartStr(recv)
+	}
+	if dartIsNum(recv) {
+		if v, hit := rt.dartNumMember(recv, name, args); hit {
+			return v
+		}
+	}
+	// A NAMED constructor of one of dart:core's errors, reached through the
+	// postfix chain: ArgumentError.value(7). js_dartexctype put the marker here.
+	// `String` used as a name is the same marker, spent by its statics.
+	if o, ok := recv.(*jsObject); ok {
+		if tn, isMarker := o.props["__dexcType"].(string); isMarker {
+			if tn == "String" {
+				if v, hit := rt.dartStrStatic(name, args); hit {
+					return v
+				}
+			}
+			return rt.dartExcNew(tn, name, args)
+		}
+		if o.props["__dmatch"] == true {
+			if v, hit := rt.dartMatchMember(o, name, args); hit {
+				return v
+			}
+		}
+		if o.props["__dregexp"] == true {
+			if v, hit := rt.dartReMember(o, name, args); hit {
+				return v
+			}
+		}
+	}
+	if arr, ok := recv.(*jsArray); ok {
+		if v, hit := rt.dartListMember(arr, name, args); hit {
+			return v
+		}
+	}
+	if str, ok := recv.(string); ok {
+		if v, hit := rt.dartStrMember(str, name, args); hit {
+			return v
+		}
+	}
+	return rt.memberCall(recv, name, args)
 }
 
 // dartIsType is the Go twin of dartIsType in languages/dart-interpreter.abnf. The
@@ -1665,7 +1668,7 @@ func (rt *jsrt) dartStrMember(s, name string, args []interface{}) (interface{}, 
 	case "allMatches", "matchAsPrefix":
 		st := opt(1, 0)
 		if st < 0 || st > len(p) {
-			rt.dartRangeErr(float64(st), 0, len(p))
+			rt.dartRangeErr(float64(st), 0, len(p), "")
 		}
 		if name == "allMatches" {
 			return &jsArray{elems: dartAllMatches(u, p, ps, st)}, true
@@ -1962,7 +1965,7 @@ func (rt *jsrt) dartReMember(rx *jsObject, name string, args []interface{}) (int
 			st = jsToInt(rt.dartNumOf(args[1]))
 		}
 		if st < 0 || st > n {
-			rt.dartRangeErr(float64(st), 0, n)
+			rt.dartRangeErr(float64(st), 0, n, "")
 		}
 		if name == "allMatches" {
 			return &jsArray{elems: rt.dartReAll(rx, s, t, st)}, true
@@ -2001,7 +2004,7 @@ func (rt *jsrt) dartReStrMember(s string, rx *jsObject, name string, args []inte
 	case "startsWith":
 		at := opt(1, 0)
 		if at < 0 || at > n {
-			rt.dartRangeErr(float64(at), 0, n)
+			rt.dartRangeErr(float64(at), 0, n, "")
 		}
 		return rt.dartReAt(rx, t, at) != nil, true
 	case "split":
@@ -2061,34 +2064,388 @@ func dartReSplit(u []uint16, ms []interface{}, rt *jsrt) []interface{} {
 }
 
 // ----- List ----------------------------------------------------------------------
-// dartListMember is dart:core's map / where (a List here, eagerly, where dart
-// answers an Iterable), toList and the first / last getters. Twin of dsListMember in
-// languages/lib/dart-str.js.
+// dartListMember is dart:core's List members and the Iterable members a List
+// inherits. Those that answer an Iterable in dart:core (map, where, reversed, skip,
+// take, expand, ...) answer a List here, eagerly. Element equality is dartEquals.
+// Twin of dsListMember / dsListMutate in languages/lib/dart-str.js.
 func (rt *jsrt) dartListMember(o *jsArray, name string, args []interface{}) (interface{}, bool) {
+	n := len(o.elems)
+	num := func(i int) int { return jsToInt(rt.dartNumOf(argAt(args, i))) }
+	opt := func(i, dflt int) int {
+		if i < len(args) && !isUndefOrNull(args[i]) {
+			return num(i)
+		}
+		return dflt
+	}
+	test := func(e interface{}) bool { return rt.call(argAt(args, 0), jsUndef, []interface{}{e}) == true }
+	stateErr := func(msg string) {
+		panic(&jsThrown{value: rt.dartExcNew("StateError", "", []interface{}{msg})})
+	}
+	indexErr := func() {
+		panic(&jsThrown{value: rt.dartExcNew("IndexError", "", []interface{}{argAt(args, 0), o, "index"})})
+	}
+	// RangeError.checkValidRange(start, end, length); an absent end is the length
+	// when endOpt. Answers start and end.
+	rangeArgs := func(endOpt bool) (int, int) {
+		s := num(0)
+		if s < 0 || s > n {
+			rt.dartRangeErr(float64(s), 0, n, "start")
+		}
+		e := n
+		if !endOpt || (len(args) > 1 && !isUndefOrNull(args[1])) {
+			e = num(1)
+		}
+		if e < s || e > n {
+			rt.dartRangeErr(float64(e), s, n, "end")
+		}
+		return s, e
+	}
+	// lastIndexOf / lastIndexWhere's start: clamped to the last index; a negative
+	// start searches nothing.
+	lastFrom := func() int {
+		s := opt(1, n-1)
+		if s >= n {
+			s = n - 1
+		}
+		if s < 0 {
+			s = -1
+		}
+		return s
+	}
+	elemsOf := func(v interface{}) []interface{} {
+		if a, ok := v.(*jsArray); ok {
+			return append([]interface{}{}, a.elems...)
+		}
+		rt.fail("not a List: %s", rt.dartStr(v))
+		return nil
+	}
+	list := func(es []interface{}) *jsArray { return &jsArray{elems: es} }
+	splice := func(from, to int, ins []interface{}) {
+		o.dropIdx()
+		tail := append([]interface{}{}, o.elems[to:]...)
+		o.elems = append(append(o.elems[:from], ins...), tail...)
+	}
 	switch name {
-	case "map", "where":
-		out := &jsArray{elems: []interface{}{}}
+	case "map", "where", "expand":
+		out := []interface{}{}
 		for _, e := range append([]interface{}{}, o.elems...) {
 			r := rt.call(argAt(args, 0), jsUndef, []interface{}{e})
-			if name == "map" {
-				out.elems = append(out.elems, r)
-			} else if r == true {
-				out.elems = append(out.elems, e)
+			switch {
+			case name == "map":
+				out = append(out, r)
+			case name == "expand":
+				out = append(out, elemsOf(r)...)
+			case r == true:
+				out = append(out, e)
 			}
 		}
-		return out, true
+		return list(out), true
 	case "toList":
-		return &jsArray{elems: append([]interface{}{}, o.elems...)}, true
-	case "first", "last":
-		if len(o.elems) == 0 {
-			panic(&jsThrown{value: rt.dartExcNew("StateError", "", []interface{}{"No element"})})
+		return list(append([]interface{}{}, o.elems...)), true
+	case "reversed":
+		out := make([]interface{}, n)
+		for i, e := range o.elems {
+			out[n-1-i] = e
 		}
-		if name == "first" {
-			return o.elems[0], true
+		return list(out), true
+	case "first", "last", "single":
+		if n == 0 {
+			stateErr("No element")
 		}
-		return o.elems[len(o.elems)-1], true
+		if name == "single" && n > 1 {
+			stateErr("Too many elements")
+		}
+		if name == "last" {
+			return o.elems[n-1], true
+		}
+		return o.elems[0], true
+	case "join":
+		sep, _ := argAt(args, 0).(string)
+		parts := make([]string, n)
+		for i, e := range o.elems {
+			parts[i] = rt.dartStr(e)
+		}
+		return strings.Join(parts, sep), true
+	case "contains":
+		return rt.dartListFind(o, argAt(args, 0), 0) >= 0, true
+	case "indexOf":
+		return float64(rt.dartListFind(o, argAt(args, 0), opt(1, 0))), true
+	case "lastIndexOf":
+		i := lastFrom()
+		for i >= 0 && !rt.dartEquals(o.elems[i], argAt(args, 0)) {
+			i--
+		}
+		return float64(i), true
+	case "indexWhere":
+		i := opt(1, 0)
+		if i < 0 {
+			i = 0
+		}
+		for ; i < n; i++ {
+			if test(o.elems[i]) {
+				return float64(i), true
+			}
+		}
+		return float64(-1), true
+	case "lastIndexWhere":
+		i := lastFrom()
+		for i >= 0 && !test(o.elems[i]) {
+			i--
+		}
+		return float64(i), true
+	case "any", "every":
+		want := name == "any"
+		for i := 0; i < n; i++ {
+			if test(o.elems[i]) == want {
+				return want, true
+			}
+		}
+		return !want, true
+	case "forEach":
+		for i := 0; i < n; i++ {
+			rt.call(argAt(args, 0), jsUndef, []interface{}{o.elems[i]})
+		}
+		return jsNull, true
+	case "fold", "reduce":
+		var acc interface{}
+		i := 0
+		if name == "fold" {
+			acc = argAt(args, 0)
+		} else {
+			if n == 0 {
+				stateErr("No element")
+			}
+			acc, i = o.elems[0], 1
+		}
+		f := args[len(args)-1]
+		for ; i < n; i++ {
+			acc = rt.call(f, jsUndef, []interface{}{acc, o.elems[i]})
+		}
+		return acc, true
+	case "firstWhere", "lastWhere", "singleWhere":
+		var fv interface{} = jsNull
+		found := false
+		for i := 0; i < n; i++ {
+			e := o.elems[i]
+			if name == "lastWhere" {
+				e = o.elems[n-1-i]
+			}
+			if test(e) {
+				if found {
+					stateErr("Too many elements")
+				}
+				fv, found = e, true
+				if name != "singleWhere" {
+					break
+				}
+			}
+		}
+		if found {
+			return fv, true
+		}
+		if orElse := dartNamedArg(args, "orElse"); orElse != nil && !isUndefOrNull(orElse) {
+			return rt.call(orElse, jsUndef, nil), true
+		}
+		stateErr("No element")
+	case "elementAt":
+		i := num(0)
+		if i < 0 || i >= n {
+			indexErr()
+		}
+		return o.elems[i], true
+	case "sublist", "getRange":
+		s, e := rangeArgs(name == "sublist")
+		return list(append([]interface{}{}, o.elems[s:e]...)), true
+	case "skip", "take", "skipWhile", "takeWhile":
+		cut := 0
+		if name == "skip" || name == "take" {
+			cut = num(0)
+			if cut < 0 {
+				rt.dartRangeErr(float64(cut), 0, -1, "count")
+			}
+			if cut > n {
+				cut = n
+			}
+		} else {
+			for cut < n && test(o.elems[cut]) {
+				cut++
+			}
+		}
+		if name == "skip" || name == "skipWhile" {
+			return list(append([]interface{}{}, o.elems[cut:]...)), true
+		}
+		return list(append([]interface{}{}, o.elems[:cut]...)), true
+	case "followedBy":
+		return list(append(append([]interface{}{}, o.elems...), elemsOf(argAt(args, 0))...)), true
+	case "sort":
+		var cmp interface{} = jsNull
+		if len(args) > 0 {
+			cmp = args[0]
+		}
+		rt.dartSort(o, cmp)
+		return jsNull, true
+	case "addAll":
+		ins := elemsOf(argAt(args, 0))
+		o.dropIdx()
+		o.elems = append(o.elems, ins...)
+		return jsNull, true
+	case "insert", "insertAll":
+		at := num(0)
+		if at < 0 || at > n {
+			rt.dartRangeErr(float64(at), 0, n, "index")
+		}
+		ins := []interface{}{argAt(args, 1)}
+		if name == "insertAll" {
+			ins = elemsOf(argAt(args, 1))
+		}
+		splice(at, at, ins)
+		return jsNull, true
+	case "remove":
+		i := rt.dartListFind(o, argAt(args, 0), 0)
+		if i < 0 {
+			return false, true
+		}
+		splice(i, i+1, nil)
+		return true, true
+	case "removeAt":
+		i := num(0)
+		if i < 0 || i >= n {
+			indexErr()
+		}
+		v := o.elems[i]
+		splice(i, i+1, nil)
+		return v, true
+	case "removeWhere", "retainWhere":
+		keep := []interface{}{}
+		for i := 0; i < n; i++ {
+			if test(o.elems[i]) == (name == "retainWhere") {
+				keep = append(keep, o.elems[i])
+			}
+		}
+		splice(0, n, keep)
+		return jsNull, true
+	case "clear":
+		splice(0, n, nil)
+		return jsNull, true
+	case "removeRange", "replaceRange":
+		s, e := rangeArgs(false)
+		var ins []interface{}
+		if name == "replaceRange" {
+			ins = elemsOf(argAt(args, 2))
+		}
+		splice(s, e, ins)
+		return jsNull, true
+	case "fillRange", "setRange":
+		s, e := rangeArgs(false)
+		o.dropIdx()
+		if name == "fillRange" {
+			var fill interface{} = jsNull
+			if len(args) > 2 {
+				fill = args[2]
+			}
+			for i := s; i < e; i++ {
+				o.elems[i] = fill
+			}
+			return jsNull, true
+		}
+		src := elemsOf(argAt(args, 2))
+		skip := opt(3, 0)
+		if skip < 0 {
+			rt.dartRangeErr(float64(skip), 0, -1, "skipCount")
+		}
+		if len(src)-skip < e-s {
+			stateErr("Too few elements")
+		}
+		copy(o.elems[s:e], src[skip:])
+		return jsNull, true
+	case "setAll":
+		at := num(0)
+		vals := elemsOf(argAt(args, 1))
+		if at < 0 || at > n {
+			rt.dartRangeErr(float64(at), 0, n, "index")
+		}
+		if at+len(vals) > n {
+			rt.dartRangeErr(float64(at+len(vals)), at, n, "end")
+		}
+		o.dropIdx()
+		copy(o.elems[at:], vals)
+		return jsNull, true
 	}
 	return nil, false
+}
+
+// dartListFind is the first index at or after from whose element == v, or -1.
+func (rt *jsrt) dartListFind(o *jsArray, v interface{}, from int) int {
+	if from < 0 {
+		from = 0
+	}
+	for i := from; i < len(o.elems); i++ {
+		if rt.dartEquals(o.elems[i], v) {
+			return i
+		}
+	}
+	return -1
+}
+
+// dartSort is List.sort: by cmp, or by the elements' compareTo when cmp is null. A
+// stable merge sort - dart:core promises no stability, but its implementation
+// insertion-sorts up to 32 elements, which is stable. Twin of dsSort in
+// languages/lib/dart-str.js.
+func (rt *jsrt) dartSort(o *jsArray, cmp interface{}) {
+	c := func(a, b interface{}) int {
+		if isUndefOrNull(cmp) {
+			return jsToInt(rt.dartNumOf(rt.dartMethod(a, "compareTo", []interface{}{b})))
+		}
+		return jsToInt(rt.dartNumOf(rt.call(cmp, jsUndef, []interface{}{a, b})))
+	}
+	es := append([]interface{}{}, o.elems...)
+	sort.SliceStable(es, func(i, j int) bool { return c(es[i], es[j]) < 0 })
+	o.dropIdx()
+	copy(o.elems, es)
+}
+
+// dartFindMethod is the method `name` of an instance's class or a superclass, or
+// nil.
+func dartFindMethod(o *jsObject, name string) interface{} {
+	for c := o.props["__class"]; c != nil; {
+		co, ok := c.(*jsObject)
+		if !ok {
+			return nil
+		}
+		if m, ok := co.props[name]; ok && isCallable(m) {
+			return m
+		}
+		c = co.props["__super"]
+	}
+	return nil
+}
+
+func dartIsRecord(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	c, ok := o.props["__class"].(*jsObject)
+	return ok && c.props["__name"] == "Record"
+}
+
+// dartEquals is Dart's == as the runtime sees it: value equality across int and
+// double, a user `operator ==`, structural for records, else identity. Twin of
+// dartEq in languages/dart-interpreter.abnf and dtEquals in
+// languages/lib/dart-rt.metajs.
+func (rt *jsrt) dartEquals(a, b interface{}) bool {
+	if dartIsNum(a) && dartIsNum(b) {
+		return rt.dartNumEq(a, b)
+	}
+	if o, ok := a.(*jsObject); ok {
+		if m := dartFindMethod(o, "=="); m != nil {
+			return rt.call(m, jsUndef, []interface{}{a, b}) == true
+		}
+		if dartIsRecord(a) && dartIsRecord(b) {
+			return rt.pyEqual(o.props["__f"], b.(*jsObject).props["__f"])
+		}
+	}
+	return rt.strictEq(a, b)
 }
 
 // dartStrStatic is String.fromCharCode(c) and String.fromCharCodes(codes, [start,
@@ -2098,7 +2455,7 @@ func (rt *jsrt) dartStrStatic(name string, args []interface{}) (interface{}, boo
 	unit := func(v interface{}) []uint16 {
 		c := jsToInt(rt.dartNumOf(v))
 		if c < 0 || c > 0x10FFFF {
-			rt.dartRangeErr(float64(c), 0, 0x10FFFF)
+			rt.dartRangeErr(float64(c), 0, 0x10FFFF, "")
 		}
 		if c < 0x10000 {
 			return []uint16{uint16(c)}
@@ -2130,9 +2487,17 @@ func (rt *jsrt) dartStrStatic(name string, args []interface{}) (interface{}, boo
 	return nil, false
 }
 
-// dartRangeErr throws RangeError.range(v, lo, hi).
-func (rt *jsrt) dartRangeErr(v float64, lo, hi int) {
-	panic(&jsThrown{value: rt.dartExcNew("RangeError", "range", []interface{}{v, float64(lo), float64(hi)})})
+// dartRangeErr throws RangeError.range(v, lo, hi, name): a negative hi is a null
+// end (no upper bound), an empty name is none.
+func (rt *jsrt) dartRangeErr(v float64, lo, hi int, name string) {
+	argv := []interface{}{v, float64(lo), float64(hi)}
+	if hi < 0 {
+		argv[2] = jsNull
+	}
+	if name != "" {
+		argv = append(argv, name)
+	}
+	panic(&jsThrown{value: rt.dartExcNew("RangeError", "range", argv)})
 }
 
 // dartStrAt: does p occur in u at code unit i?

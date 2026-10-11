@@ -1867,12 +1867,14 @@ KwDeferred  = "deferred" KwEnd ;
     function dIsNum(v) { return typeof v == "number" || dIsFlo(v) || szIs(v) }
     // lib/dart-str.js's hooks. Twins: dsHNum / dsHIndexErr in languages/lib/dart-rt.metajs.
     function dsHNum(v) { return Math.trunc(dNum(v)) }
-    function dsHRangeErr(v, lo, hi) {
-        if (lo === null) { dxRaiseA("RangeError", "value", [v]) }
-        dxRaiseA("RangeError", "range", [v, lo, hi])
+    function dsHRangeErr(v, lo, hi, name) {
+        if (lo === null) { dxRaiseA("RangeError", "value", [v, name]) }
+        dxRaiseA("RangeError", "range", [v, lo, hi, name])
     }
     function dsHCall(f, argv) { return f.apply(undefined, argv) }
     function dsHStr(v) { return dstr(v) }
+    function dsHEq(a, b) { return dartEq(a, b) }
+    function dsHCmp(a, b) { return dsHNum(mcall(a, "compareTo", [b])) }
     function dsHIndexErr(i, s) { dxRaiseA("IndexError", "", [i, s, "index"]) }
     function dsHThrow(name, argv) { dxRaiseA(name, "", argv) }
     function dIsInt(v) { return typeof v == "number" || szIs(v) }
@@ -3409,7 +3411,7 @@ KwDeferred  = "deferred" KwEnd ;
             if (ng != null) { return ng.v }
         }
         if (typeof cur == "string" && (name == "codeUnits" || name == "runes")) { return dsMember(cur, name, []).v }
-        if (Array.isArray(cur) && (name == "first" || name == "last")) { return dsListMember(cur, name, []).v }
+        if (Array.isArray(cur) && (name == "first" || name == "last" || name == "single" || name == "reversed")) { return dsListMember(cur, name, []).v }
         if (name == "length") { return dlen(cur) }
         if (name == "isEmpty") { return dlen(cur) == 0 }
         if (name == "isNotEmpty") { return dlen(cur) != 0 }
@@ -3553,7 +3555,6 @@ KwDeferred  = "deferred" KwEnd ;
         }
         if (Array.isArray(target)) {
             if (name == "add") { target.push(args[0]); return true }
-            if (name == "contains") { return target.indexOf(args[0]) >= 0 }
             if (name == "get") { return target[args[0]] }
             if (name == "removeLast") { return target.pop() }
             var lm = dsListMember(target, name, args)

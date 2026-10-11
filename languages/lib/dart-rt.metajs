@@ -1496,25 +1496,16 @@ function dtMember(recv, name, args) {
     }
     if (rtIsArr(recv)) { return dtListMethod(recv, name, args) }
     if (dtIsObj(recv)) {
-        var cls = recv["__class"]
-        if (cls !== undefined) {
-            var c = cls
-            var guard = 0
-            while (guard < 64) {
-                guard = guard + 1
-                if (!dtIsObj(c)) { guard = 99 } else {
-                    var mm = c[name]
-                    if (typeof mm == "function") {
-                        var av = [recv]
-                        var i = 0
-                        while (i < args.length) {
-                            av.push(args[i])
-                            i = i + 1
-                        }
-                        return mm.apply(undefined, av)
-                    }
-                    c = c["__super"]
+        if (recv["__class"] !== undefined) {
+            var mm = dtFindMethod(recv, name)
+            if (typeof mm == "function") {
+                var av = [recv]
+                var i = 0
+                while (i < args.length) {
+                    av.push(args[i])
+                    i = i + 1
                 }
+                return mm.apply(undefined, av)
             }
             fail("unknown method '" + name + "' on an instance")
         }
@@ -1526,13 +1517,45 @@ function dtMember(recv, name, args) {
     return undefined
 }
 
-// The Kotlin/Python list methods of rt.memberCall, in its order, then dart:core's
-// own List members (lib/dart-str.js).
+// The method `name` of an instance's class or a superclass, or null.
+function dtFindMethod(recv, name) {
+    var c = recv["__class"]
+    var guard = 0
+    while (guard < 64 && dtIsObj(c)) {
+        var mm = c[name]
+        if (typeof mm == "function") { return mm }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return null
+}
+
+// Dart's == as the runtime sees it: value equality across int and double, a user
+// `operator ==`, structural for records, else identity. Twin of dartEq in
+// languages/dart-interpreter.abnf and dartEquals in abnf/jsrtdart.go.
+function dtEquals(a, b) {
+    if (dtIsNum(a) && dtIsNum(b)) { return dtNumEq(a, b) }
+    if (dtIsObj(a) && !rtIsArr(a) && a["__class"] !== undefined) {
+        var eq = dtFindMethod(a, "==")
+        if (typeof eq == "function") { return eq.apply(undefined, [a, b]) === true }
+        if (dtIsRecord(a) && dtIsObj(b) && dtIsRecord(b)) { return dtPyEqual(a["__f"], b["__f"]) }
+    }
+    return a === b
+}
+function dtIsRecord(v) {
+    var c = v["__class"]
+    return dtIsObj(c) && c["__name"] === "Record"
+}
+
+// add first (the hot one), then dart:core's List members (lib/dart-str.js), then
+// the Kotlin/Python list methods of rt.memberCall, in its order.
 function dtListMethod(o, name, args) {
     if (name === "add") {
         o.push(dtArgAt(args, 0))
         return true
     }
+    var lm = dsListMember(o, name, args)
+    if (lm.hit) { return lm.v }
     if (name === "append") {
         o.push(dtArgAt(args, 0))
         return undefined
@@ -1546,22 +1569,6 @@ function dtListMethod(o, name, args) {
         if (gi < 0 || gi >= o.length) { fail("list index out of range") }
         return o[gi]
     }
-    if (name === "contains") {
-        var ci = 0
-        while (ci < o.length) {
-            if (o[ci] === dtArgAt(args, 0)) { return true }
-            ci = ci + 1
-        }
-        return false
-    }
-    if (name === "forEach") {
-        var ei = 0
-        while (ei < o.length) {
-            args[0].apply(undefined, [o[ei]])
-            ei = ei + 1
-        }
-        return undefined
-    }
     if (name === "count") {
         if (args.length == 0) { return o.length }
         var n = 0
@@ -1572,16 +1579,6 @@ function dtListMethod(o, name, args) {
         }
         return n
     }
-    if (name === "any") {
-        var ai = 0
-        while (ai < o.length) {
-            if (args[0].apply(undefined, [o[ai]])) { return true }
-            ai = ai + 1
-        }
-        return false
-    }
-    var lm = dsListMember(o, name, args)
-    if (lm.hit) { return lm.v }
     fail("unknown list method '" + name + "'")
     return undefined
 }
@@ -1651,12 +1648,14 @@ function dtIndexErr(k, c) {
 // lib/dart-str.js's hooks. Twins: dsHNum / dsHIndexErr in languages/dart-interpreter.abnf.
 function dsHNum(v) { return Math.trunc(dtNumOf(v)) }
 function dsHIndexErr(i, s) { dtIndexErr(i, s) }
-function dsHRangeErr(v, lo, hi) {
-    if (lo === null) { throw dtExcNew("RangeError", "value", [v]) }
-    throw dtExcNew("RangeError", "range", [v, lo, hi])
+function dsHRangeErr(v, lo, hi, name) {
+    if (lo === null) { throw dtExcNew("RangeError", "value", [v, name]) }
+    throw dtExcNew("RangeError", "range", [v, lo, hi, name])
 }
 function dsHCall(f, argv) { return f.apply(undefined, argv) }
 function dsHStr(v) { return dtStr(v) }
+function dsHEq(a, b) { return dtEquals(a, b) }
+function dsHCmp(a, b) { return dsHNum(js_dartnm(a, "compareTo", [b])) }
 function dsHThrow(name, argv) { throw dtExcNew(name, "", argv) }
 function js_dtidx(c, k) {
     if (rtIsArr(c)) {

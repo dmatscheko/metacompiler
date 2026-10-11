@@ -1504,6 +1504,75 @@ void s35() {
   check("li3", empty && xs.where((x) => x > 1).map((x) => x * 10).toList()[2] == 40);
 }
 
+// ===== SECTION 36: dart:core's List members =====
+// THERE IS NO dart TOOLCHAIN ON THIS MACHINE: every expected value is dart:core's
+// documentation of List and Iterable. Membership (contains, indexOf, remove) is ==,
+// so 1.0 is found among ints and a user operator == is honoured. A range argument
+// is checked by RangeError.checkValidRange, which names the bad end.
+class LmP {
+  final int v;
+  LmP(this.v);
+  bool operator ==(Object o) => o is LmP && o.v == v;
+}
+void s36() {
+  var l = [3, 1, 2];
+  check("lm1", l.join(" ") == "3 1 2" && l.join() == "312" && [1.0, "a", null, true].join(",") == "1.0,a,null,true");
+  check("lm2", l.indexOf(1) == 1 && l.indexOf(9) == -1 && [1, 2, 1, 2].indexOf(2, 2) == 3 &&
+      [1, 2, 1, 2].lastIndexOf(1) == 2 && [1, 2, 1, 2].lastIndexOf(2, 2) == 1);
+  check("lm3", l.contains(2) && l.contains(1.0) && [LmP(1), LmP(2)].contains(LmP(2)) && [LmP(1), LmP(2)].indexOf(LmP(2)) == 1);
+  check("lm4", l.sublist(1).join() == "12" && l.sublist(0, 2).join() == "31" && l.getRange(1, 3).join() == "12");
+  check("lm5", l.any((x) => x > 2) && l.every((x) => x > 0) && !l.every((x) => x > 1) &&
+      l.fold(0, (a, b) => a + b) == 6 && l.reduce((a, b) => a * b) == 6);
+  var s = [5, 3, 9, 1];
+  s.sort();
+  var t = s.join();
+  s.sort((a, b) => b - a);
+  var w = ["pear", "fig", "apple"];
+  w.sort();
+  var u = w.join(",");
+  w.sort((a, b) => a.length.compareTo(b.length));
+  check("lm6", t == "1359" && s.join() == "9531" && u == "apple,fig,pear" && w.join(",") == "fig,pear,apple");
+  check("lm7", l.reversed.toList().join() == "213" && l.indexWhere((x) => x < 3) == 1 && l.lastIndexWhere((x) => x < 3) == 2);
+  check("lm8", l.firstWhere((x) => x < 3) == 1 && l.lastWhere((x) => x > 1) == 2 &&
+      l.firstWhere((x) => x > 5, orElse: () => -1) == -1 && l.singleWhere((x) => x == 1) == 1);
+  check("lm9", l.skip(1).toList().join() == "12" && l.take(2).toList().join() == "31" &&
+      l.skipWhile((x) => x > 2).toList().join() == "12" && l.takeWhile((x) => x > 2).toList().join() == "3");
+  check("lm10", l.expand((x) => [x, x]).toList().join() == "331122" && l.followedBy([7]).toList().join() == "3127" &&
+      l.elementAt(2) == 2 && [4].single == 4);
+  var m = [1, 2, 3, 4, 5];
+  m.insert(1, 9);
+  m.insertAll(0, [7, 8]);
+  var r1 = m.join();
+  var rm = m.remove(9) && !m.remove(42) && m.removeAt(0) == 7;
+  check("lm11", r1 == "78192345" && rm && m.join() == "812345");
+  m.removeWhere((x) => x.isEven);
+  m.addAll([10, 11, 12]);
+  m.retainWhere((x) => x > 3);
+  m.removeRange(0, 1);
+  check("lm12", m.join(",") == "10,11,12");
+  m.fillRange(0, 2, 0);
+  var r2 = m.join(",");
+  m.setRange(0, 2, [6, 7, 8], 1);
+  m.setAll(1, [5]);
+  var r3 = m.join(",");
+  m.replaceRange(0, 1, [1, 2, 3]);
+  var r4 = m.join(",");
+  m.clear();
+  check("lm13", r2 == "0,0,12" && r3 == "7,5,12" && r4 == "1,2,3,5,12" && m.isEmpty);
+  var errs = <String>[];
+  try { [1, 2, 3].sublist(0, 5); } on RangeError catch (e) { errs.add("$e"); }
+  try { [1, 2].insert(5, 0); } on RangeError catch (e) { errs.add("$e"); }
+  try { [1, 2].skip(-1); } on RangeError catch (e) { errs.add("$e"); }
+  check("lm14", errs.length == 3 && errs[0] == "RangeError (end): Invalid value: Not in inclusive range 0..3: 5" &&
+      errs[1] == "RangeError (index): Invalid value: Not in inclusive range 0..2: 5" &&
+      errs[2] == "RangeError (count): Invalid value: Not greater than or equal to 0: -1");
+  var st = <String>[];
+  try { <int>[].reduce((a, b) => a); } on StateError catch (e) { st.add(e.message); }
+  try { [1, 2].single; } on StateError catch (e) { st.add(e.message); }
+  try { [1, 2].firstWhere((x) => x > 5); } on StateError catch (e) { st.add(e.message); }
+  check("lm15", st.join("|") == "No element|Too many elements|No element");
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1540,6 +1609,7 @@ int main() {
   s33(); // SECTION-CALL 33
   s34(); // SECTION-CALL 34
   s35(); // SECTION-CALL 35
+  s36(); // SECTION-CALL 36
   print("full: $checks checks, $fails failures");
   return fails;
 }
