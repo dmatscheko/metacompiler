@@ -130,7 +130,7 @@ prints `[1]` (swiftc `[1.0]`). Unverified: `print(..., to: &p.s)` with a path in
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-425 php: callable/dispatch error tails · P2 · PHP · OPEN [V]
+### T-425 php: callable/dispatch error tails · P2 · PHP · IN PROGRESS (PHP worker, round 20) [V]
 Spec / php-src corpus answers: (a) `$o()` on a non-invokable object is uncatchable in all engines (PHP: Error
 'Object of type P is not callable'). (b) callable class names are case-sensitive ('testclass::staticmethod',
 dynamic_call/bug68475). (c) compiled `Test::{$x}()` with an unknown class says "Call to undefined function Test()"
