@@ -2834,6 +2834,36 @@ func s53() {
     check("53b", hit == "none-3-if")
 }
 
+// ===== SECTION 54: an in-place mutation of an observed variable =====
+// `a.append(2)`, `a[0] = 5`, `p.x = 3` and a mutating method each write the WHOLE
+// value of an observed variable of value type: willSet sees the mutated value and
+// didSet the previous one. A class instance's members are not the variable's
+// value, so mutating one fires nothing. Every expected value is swiftc 6.1.2's.
+struct P54 { var x = 0; var y = 0; mutating func bump() { x += 1 }; func peek() -> Int { return x } }
+final class C54 { var n = 0 }
+func s54() {
+    var log = ""
+    var a = [1] { willSet { log += "w\(newValue.count)," } didSet { log += "d\(a.count)/\(oldValue.count);" } }
+    a.append(2)
+    a[0] = 5
+    a[1] += 1
+    a.remove(at: 0)
+    a.sort()
+    _ = a.count
+    check("54a", log == "w2,d2/1;w2,d2/2;w2,d2/2;w1,d1/2;w1,d1/1;" && a == [3])
+    var plog = ""
+    var p = P54() { didSet { plog += "\(oldValue.x)>\(p.x)," } }
+    p.x = 3
+    p.bump()
+    p.y += 2
+    _ = p.peek()
+    check("54b", plog == "0>3,3>4,4>4," && p.y == 2)
+    var clog = 0
+    var c = C54() { didSet { clog += 1 } }
+    c.n = 4
+    check("54c", clog == 0 && c.n == 4)
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2890,6 +2920,7 @@ func main() {
     s51() // SECTION-CALL 51
     s52() // SECTION-CALL 52
     s53() // SECTION-CALL 53
+    s54() // SECTION-CALL 54
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -240,9 +240,10 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
 // class puts the member on the type descriptor instead of on instances); the rest
 // are parsed and dropped. A marker arrives ahead of the member's own record, in
 // source order, so splitMembers attaches it to the member that follows.
-MemberModifiers = { MemStatic | MemLazy | MemAttr | Modifier | ClassMod } ;
+MemberModifiers = { MemStatic | MemLazy | MemMut | MemAttr | Modifier | ClassMod } ;
 MemStatic   <~~ push({mstatic: 1}) ~~> = ( "static" | "class" ) KwEnd ;
 MemLazy     <~~ push({mlazy: 1}) ~~> = "lazy" KwEnd ;
+MemMut      <~~ push({mmut: 1}) ~~> = "mutating" KwEnd ;
 // A member attribute keeps its NAME: @Wrapper on a stored property is a property
 // wrapper, and everything else (@objc, @escaping, ...) is parsed and dropped.
 MemAttr     = "@" Id <~~ push({mattr: up.in}) ~~> { "." Id } [ SkipParen ] ;
@@ -4719,7 +4720,8 @@ KwContinue  = "continue" KwEnd ;
         var chead = swChainHead(txt)
         var wAnns = swChainAnns(chead, suffixes)
         swLastChain = {txt: txt, ann: wAnns[suffixes.length]}
-        return function(b) {
+        var obsName = swObsChainName(txt, suffixes)
+        var run = function(b) {
             var anns = swChainAnns(chead, suffixes)
             var r = primary(b)
             b = r.b
@@ -4840,6 +4842,15 @@ KwContinue  = "continue" KwEnd ;
                 inc.push(llvm.ir.NewIncoming(hNull, nilExits[k]))
             }
             return {b: mergeB, v: mergeB.NewPhi(inc)}
+        }
+        if (obsName == "") { return run }
+        var obsRec = localObsReg["$" + obsName]
+        var mname = suffixes[suffixes.length - 1].name
+        return function(b) {
+            if (!swIsMutator(mname)) { return run(b) }
+            var before = emitObsBefore(b, obsName)
+            var r = run(b)
+            return {b: emitObsReplay(r.b, obsName, obsRec, before), v: r.v}
         }
     }
 
@@ -5488,7 +5499,7 @@ KwContinue  = "continue" KwEnd ;
                      ? swElemTyOf(declTyOf(ref.name)) : ""
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
-        var obs = ref.path.length == 0 && hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
+        var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         // `s = [1, 2]` into a local declared `Set<Int>`.
         if (ref.path.length == 0 && op == "=" && hasLocal && swIsSetTy(localAnn)) { valT = swSetInit(valT) }
         return function(b) {
@@ -5560,6 +5571,7 @@ KwContinue  = "continue" KwEnd ;
                 if (obs != null) { emitObsWrite(b, ref.name, nameV, obs, v) }
                 else { b.NewCall(rtKSet(), [curScopeV, nameV, v]) }
             } else {
+                var before = obs == null ? null : emitObsBefore(b, ref.name)
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (p.isField) {
@@ -5592,6 +5604,7 @@ KwContinue  = "continue" KwEnd ;
                     if (!keepTy) { v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)]) }
                     callExt(b, "js_pyset", [p.obj, p.key, v])
                 }
+                if (before != null) { b = emitObsReplay(b, ref.name, obs, before) }
             }
             return {b: b, v: v}
         }
@@ -5872,6 +5885,61 @@ KwContinue  = "continue" KwEnd ;
         b.NewCall(rtKSet(), [curScopeV, nameV, v])
         if (obs.did) { emitObsCall(b, "__did_" + name, old) }
     }
+    // An IN-PLACE mutation of an observed variable of VALUE type is a write of the
+    // whole value (swObsBefore / swObsAfter in swift-interpreter.abnf).
+    // emitObsBefore copies the value ahead of the mutation and answers the copy and
+    // whether it is the same reference (a class instance, whose members are not the
+    // variable's value); emitObsReplay puts the copy back and replays the change as
+    // one observed write, unless it was a reference.
+    function emitObsBefore(b, name) {
+        var cur = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
+        var cp = emitCopy(b, cur)
+        return {old: cp, isRef: truthy(b, callExt(b, "js_seq", [cp, cur]))}
+    }
+    function emitObsReplay(b, name, obs, before) {
+        var fireB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(before.isRef, joinB, fireB)
+        var nameV = emitStr(fireB, name)
+        var nv = fireB.NewCall(rtKGet(), [curScopeV, nameV])
+        fireB.NewCall(rtKSet(), [curScopeV, nameV, before.old])
+        emitObsWrite(fireB, name, nameV, obs, nv)
+        fireB.NewBr(joinB)
+        return joinB
+    }
+    // A mutating method: the builtin collections' by name, and every method a
+    // program type declares `mutating` (recorded by splitMembers).
+    var swMutNames = {}
+    function swIsMutator(n) {
+        if (hasOwn(swMutNames, "$" + n)) { return true }
+        return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
+            || n == "removeAll" || n == "removeSubrange" || n == "popLast" || n == "sort" || n == "reverse"
+            || n == "shuffle" || n == "swapAt" || n == "removeValue" || n == "updateValue" || n == "merge"
+            || n == "formUnion" || n == "formIntersection" || n == "formSymmetricDifference" || n == "subtract"
+            || n == "replaceSubrange"
+    }
+    // The observed variable a member chain mutates in place, or "": the chain
+    // starts at an observed name, reaches through fields and subscripts only, and
+    // ends in a method call (`a.append(2)`, `p.inner.bump()`). Whether that call
+    // mutates is asked at run time, when every type has been declared.
+    function swObsChainName(txt, suffixes) {
+        var n = suffixes.length
+        if (n == 0 || suffixes[n - 1].kind != "mcall") { return "" }
+        for (var i = 0; i + 1 < n; i++) {
+            if (suffixes[i].kind != "field" && suffixes[i].kind != "index") { return "" }
+        }
+        var j = 0
+        while (j < txt.length) {
+            var k = txt.charCodeAt(j)
+            if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95)) { break }
+            j++
+        }
+        if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return "" }
+        var nm = txt.substring(0, j)
+        if (!hasOwn(localObsReg, "$" + nm) || localObsReg["$" + nm] == null) { return "" }
+        return nm
+    }
+
     function makePlainDecl(items) {
         var name = items[0]
         var labels = null
@@ -6759,12 +6827,14 @@ KwContinue  = "continue" KwEnd ;
                    lazies: [], wrapped: [], hasInit: false, reqs: []}
         var isStatic = false
         var isLazy = false
+        var isMut = false
         var attr = null
         for (var i = from; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.mstatic != undefined) { isStatic = true; continue }
             if (it.mlazy != undefined) { isLazy = true; continue }
+            if (it.mmut != undefined) { isMut = true; continue }
             if (it.mattr != undefined) { attr = it.mattr; continue }
             if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedRecs.push(it.nrec); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
@@ -6815,8 +6885,10 @@ KwContinue  = "continue" KwEnd ;
                     if (it.method.name == "init") { mem.hasInit = true }
                 }
             }
+            if (isMut && it.method != undefined) { swMutNames["$" + it.method.name] = true }
             isStatic = false
             isLazy = false
+            isMut = false
             attr = null
         }
         return mem

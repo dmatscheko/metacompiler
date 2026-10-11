@@ -241,9 +241,10 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
 // class puts the member on the type descriptor instead of on instances); the rest
 // are parsed and dropped. A marker arrives ahead of the member's own record, in
 // source order, so splitMembers attaches it to the member that follows.
-MemberModifiers = { MemStatic | MemLazy | MemAttr | Modifier | ClassMod } ;
+MemberModifiers = { MemStatic | MemLazy | MemMut | MemAttr | Modifier | ClassMod } ;
 MemStatic   <~~ push({mstatic: 1}) ~~> = ( "static" | "class" ) KwEnd ;
 MemLazy     <~~ push({mlazy: 1}) ~~> = "lazy" KwEnd ;
+MemMut      <~~ push({mmut: 1}) ~~> = "mutating" KwEnd ;
 // A member attribute keeps its NAME: @Wrapper on a stored property is a property
 // wrapper, and everything else (@objc, @escaping, ...) is parsed and dropped.
 MemAttr     = "@" Id <~~ push({mattr: up.in}) ~~> { "." Id } [ SkipParen ] ;
@@ -5339,7 +5340,8 @@ KwContinue  = "continue" KwEnd ;
         // property and protocol is registered: per suffix, the protocol a
         // statically bound member comes from, and whether map/flatMap is Optional's.
         var chainC = {}
-        return function() {
+        var obsName = swObsChainName(txt, suffixes)
+        var run = function() {
             var cur = anytype
             if (!hasOwn(chainC, "proto")) {
                 var anns = swChainAnns(chead, suffixes)
@@ -5404,6 +5406,17 @@ KwContinue  = "continue" KwEnd ;
             }
             return cur
         }
+        if (obsName == "") { return run }
+        var obsRec = localObsReg["$" + obsName]
+        var mname = suffixes[suffixes.length - 1].name
+        return function() {
+            if (!swIsMutator(mname)) { return run() }
+            var before = swObsBefore(obsName)
+            var r = anytype
+            r = run()
+            if (before != null) { swObsAfter(obsName, obsRec, before) }
+            return r
+        }
     }
 
     // The value an element write is about to overwrite, read WITHOUT the ordinary
@@ -5462,7 +5475,7 @@ KwContinue  = "continue" KwEnd ;
                      ? swElemTyOf(declTyOf(ref.name)) : ""
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
-        var obs = ref.path.length == 0 && hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
+        var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         // `s = [1, 2]` into a local declared `Set<Int>`.
         var setTy = ref.path.length == 0 && hasLocal && swIsSetTy(localAnn)
         var mode = -1
@@ -5487,12 +5500,14 @@ KwContinue  = "continue" KwEnd ;
                 }
                 if (obs != null) { swObsWrite(ref.name, obs, v) } else { setVar(ref.name, v) }
             } else {
+                var before = obs == null ? null : swObsBefore(ref.name)
                 var p = resolveRef(ref)
                 if (op != "=") { v = applyOp(op, getElemP(p.obj, p.key), v) }
                 if (mode == 0 || (mode == 2 && !swExfOf(p.obj, p.key))) {
                     v = swAdoptLike(swSafeElem(p.obj, p.key), v, elemTy)
                 }
                 setElem(p.obj, p.key, v)
+                if (before != null) { swObsAfter(ref.name, obs, before) }
             }
             return v
         }
@@ -5768,6 +5783,60 @@ KwContinue  = "continue" KwEnd ;
         setVar(name, v)
         if (obs.did) { getVar("__did_" + name)(old) }
     }
+    // An IN-PLACE mutation of an observed variable of VALUE type (`a[0] = 5`,
+    // `p.x = 3`, `a.append(2)`, a mutating method) is a write of the whole value:
+    // willSet sees the mutated value and didSet the one before. swObsBefore copies
+    // the value ahead of the mutation - null for a class instance, whose members
+    // are not the variable's value - and swObsAfter puts the copy back and replays
+    // the change as one observed write. Twin of emitObsReplay in
+    // swift-to-llvm-ir.abnf.
+    function swObsBefore(name) {
+        var cur = anytype
+        cur = getVar(name)
+        var cp = anytype
+        cp = swCopy(cur)
+        if (cp === cur) { return null }
+        return {old: cp}
+    }
+    function swObsAfter(name, obs, before) {
+        var nv = anytype
+        nv = getVar(name)
+        setVar(name, before.old)
+        swObsWrite(name, obs, nv)
+    }
+    // A mutating method: the builtin collections' by name, and every method a
+    // program type declares `mutating` (recorded by splitMembers).
+    var swMutNames = {}
+    function swIsMutator(n) {
+        if (hasOwn(swMutNames, "$" + n)) { return true }
+        return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
+            || n == "removeAll" || n == "removeSubrange" || n == "popLast" || n == "sort" || n == "reverse"
+            || n == "shuffle" || n == "swapAt" || n == "removeValue" || n == "updateValue" || n == "merge"
+            || n == "formUnion" || n == "formIntersection" || n == "formSymmetricDifference" || n == "subtract"
+            || n == "replaceSubrange"
+    }
+    // The observed variable a member chain mutates in place, or "": the chain
+    // starts at an observed name, reaches through fields and subscripts only, and
+    // ends in a method call (`a.append(2)`, `p.inner.bump()`). Whether that call
+    // mutates is asked at run time, when every type has been declared.
+    function swObsChainName(txt, suffixes) {
+        var n = suffixes.length
+        if (n == 0 || suffixes[n - 1].kind != "mcall") { return "" }
+        for (var i = 0; i + 1 < n; i++) {
+            if (suffixes[i].kind != "field" && suffixes[i].kind != "index") { return "" }
+        }
+        var j = 0
+        while (j < txt.length) {
+            var k = txt.charCodeAt(j)
+            if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95)) { break }
+            j++
+        }
+        if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return "" }
+        var nm = txt.substring(0, j)
+        if (!hasOwn(localObsReg, "$" + nm) || localObsReg["$" + nm] == null) { return "" }
+        return nm
+    }
+
     // items = [name, {tlabels}? | {itype}? | {atype}?, initThunk]
     function makePlainDecl(items) {
         var name = items[0]
@@ -6549,12 +6618,14 @@ KwContinue  = "continue" KwEnd ;
                    lazies: [], wrapped: [], hasInit: false, reqs: []}
         var isStatic = false
         var isLazy = false
+        var isMut = false
         var attr = null
         for (var i = from; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.mstatic != undefined) { isStatic = true; continue }
             if (it.mlazy != undefined) { isLazy = true; continue }
+            if (it.mmut != undefined) { isMut = true; continue }
             if (it.mattr != undefined) { attr = it.mattr; continue }
             if (it.nested != undefined) { mem.nested.push(it.nested); mem.nestedIdx.push(it.nidx); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
@@ -6595,8 +6666,10 @@ KwContinue  = "continue" KwEnd ;
                     if (it.method.name == "init") { mem.hasInit = true }
                 }
             }
+            if (isMut && it.method != undefined) { swMutNames["$" + it.method.name] = true }
             isStatic = false
             isLazy = false
+            isMut = false
             attr = null
         }
         return mem
