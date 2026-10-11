@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-393** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-394** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -83,11 +83,14 @@ dict dunders (`"s".__add__`, `[].__len__`) unbound.
 
 # JS — JavaScript and TypeScript
 
-### T-391 ts: an exported `let`/`var` in a namespace is a snapshot compiled · P1 · JS · IN PROGRESS (JS worker, round 12) [V]
-`namespace C { export let count = 0; export function inc() { count++ } }; C.inc();
-C.count`: tsc+node 1, TS interpreter 1, llvm.Run/native 0 - makeNamespace copies
-exports once after the body. Rewrite reads/writes of exported names to object members
-(as tsc does).
+### T-393 ts: namespace `this` through an exported variable; uninitialised exports in the interpreter · P2 · JS · IN PROGRESS (JS worker, round 13) [V]
+`namespace N { export const f = function(this:any){ return this === N }; export
+function callF(){ return f() } }`: tsc+node true (tsc emits `N.f()`); all legs false.
+Interpreter only: `export let cache: T | undefined;` with no initializer lists `cache`
+in Object.keys (tsc creates no property until assignment). Also check whether
+tsc 6.0.3's transpileModule crash on the whole tests/typescript-test-full.ts ("Invalid
+cast ... isIdentifier" in emitReturnStatement) is a tsc bug or an invalid construct in
+the file.
 
 ---
 
@@ -460,6 +463,7 @@ T-382 go: arrays of defined types; a package's own defined types inside its code
 T-386 js: static block order; TS namespace privacy; isNaN; non-callable well-known members — DONE 7a8c3362
 T-385 js: compiled arithmetic never converts an object operand — DONE aba557f8 (layer-2 typeof on the slow path; bench js -13%)
 T-387 js: `toExponential` / `toFixed` / `toPrecision` exist only through goja's leak — DONE 216985a9
+T-391 ts: an exported `let`/`var` in a namespace is a snapshot compiled — DONE a25bb14e
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
