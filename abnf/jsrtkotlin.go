@@ -5410,7 +5410,7 @@ func ktIsCollection(v interface{}) bool {
 // ktSumOf is Kotlin's sumOf/sum, at the WIDTH of what it is summing: a Long
 // selector sums to a Long and a Double selector to a Double.
 func ktSumOf(rt *jsrt, es []interface{}, f interface{}) interface{} {
-	isFlo, isLong := false, false
+	isFlo, isLong, allF32 := false, false, len(es) > 0
 	vals := make([]interface{}, len(es))
 	for i, e := range es {
 		v := e
@@ -5418,12 +5418,24 @@ func ktSumOf(rt *jsrt, es []interface{}, f interface{}) interface{} {
 			v = rt.call(f, jsUndef, []interface{}{e})
 		}
 		vals[i] = v
-		if _, ok := v.(jsJFlo); ok {
+		fv, ok := v.(jsJFlo)
+		if ok {
 			isFlo = true
+		}
+		if !ok || !jvmIs32(fv.sty) {
+			allF32 = false
 		}
 		if b, ok := v.(jsGInt); ok && b.w == 64 {
 			isLong = true
 		}
+	}
+	// Iterable<Float>.sum() is a Float, accumulated in float: each step rounds.
+	if allF32 {
+		t := 0.0
+		for _, v := range vals {
+			t = jvmFround(t + v.(jsJFlo).f)
+		}
+		return jsJFlo{f: t, sty: floJavaF}
 	}
 	if isFlo {
 		t := 0.0

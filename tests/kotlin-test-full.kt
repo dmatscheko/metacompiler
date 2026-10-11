@@ -4495,6 +4495,12 @@ fun sec88() {
         listOf<Any>(1.0, 2).indexOf(2.0) == -1 && listOf<Any>(1.0, 2.0).indexOf(2.0) == 1)
     check("ax88h", DoubleArray(2).joinToString() == "0.0, 0.0" &&
         FloatArray(2).joinToString() == "0.0, 0.0" && s88any(DoubleArray(1)[0]) is Double)
+    // A Long sum and abs() stay Longs; a Float sum is a Float, accumulated in float,
+    // so 16777216f + 1f + 1f loses both ones.
+    val ls = listOf(1L, 2L)
+    check("ax88i", s88any(ls.sum()) is Long && s88any(ls.sumOf { it }) is Long && s88any(abs(-ls[0])) is Long)
+    val fs = listOf(16777216f, 1f, 1f)
+    check("ax88j", s88any(fs.sum()) is Float && "" + fs.sum() == "1.6777216E7")
 }
 
 

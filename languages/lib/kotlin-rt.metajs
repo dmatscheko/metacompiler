@@ -3663,16 +3663,6 @@ function k3IVal(v) {
     return sintConv(k3Trunc(ktNum(v)), 64, 0)
 }
 
-// k3Norm is jsrtkotlin.go's ktNorm spelled with the floor's own primitives: a
-// signed 32 bit result is a PLAIN NUMBER, every other width or signedness a box.
-function k3Norm(x, w, u) {
-    var t = sintConv(x, w, u)
-    if (w == 32) {
-        if (u == 0) { return sintNum(t) }
-    }
-    return t
-}
-
 // k3I32 is Go's int32(x) wrap, which the hashCode folds need at every step.
 function k3I32(x) { return sintNum(sintConv(x, 32, 0)) }
 
@@ -3836,14 +3826,21 @@ function ktSumOf(es, f) {
     var hasF = true
     if (f === null) { hasF = false }
     if (f === undefined) { hasF = false }
+    var allF32 = es.length > 0
     for (i = 0; i < es.length; i = i + 1) {
         v = es[i]
         if (hasF) { v = ktCall1(f, es[i]) }
         vals.push(v)
         if (floIs(v)) { isFlo = true }
+        if (!floIs(v) || !ktIsF32(v)) { allF32 = false }
         if (sintIs(v)) {
             if (sintWidth(v) == 64) { isLong = true }
         }
+    }
+    // Iterable<Float>.sum() is a Float, accumulated in float: each step rounds.
+    if (allF32) {
+        for (i = 0; i < vals.length; i = i + 1) { t = rtF32Round(t + floNum(vals[i])) }
+        return flo(t, 3)
     }
     if (isFlo) {
         for (i = 0; i < vals.length; i = i + 1) { t = t + ktNum(vals[i]) }
@@ -3851,8 +3848,8 @@ function ktSumOf(es, f) {
     }
     acc = sintConv(0, 64, 0)
     for (i = 0; i < vals.length; i = i + 1) { acc = sintOp(0, acc, k3IVal(vals[i])) }
-    if (isLong) { return k3Norm(acc, 64, 0) }
-    return k3Norm(acc, 32, 0)
+    if (isLong) { return ktNorm(acc, 64, 0) }
+    return ktNorm(acc, 32, 0)
 }
 
 // ============================================================================
@@ -6944,7 +6941,7 @@ function k4SetFrom(es) {
 function k4Abs(v) {
     if (floIs(v)) { return floAbs(v) }
     if (!k4KeyLess(v, 0)) { return v }
-    if (sintIs(v)) { return sintOp(1, 0, v) }
+    if (sintIs(v)) { return k1Arith("-", 0, v) }
     return -ktNum(v)
 }
 

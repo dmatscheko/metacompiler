@@ -5468,13 +5468,22 @@ NotMemberKw = :script(~~
     function kSumOf(es, f) {
         var isFlo = false
         var isLong = false
+        var allF32 = es.length > 0
         var vals = []
         for (var i = 0; i < es.length; i++) {
             var v = anytype
             v = (f == null) ? es[i] : f(es[i])
             vals.push(v)
             if (kIsFlo(v)) { isFlo = true }
+            if (!kIsFlo(v) || !kIsF32(v)) { allF32 = false }
             if (szIs(v) && v.w == 64) { isLong = true }
+        }
+        // Iterable<Float>.sum() is a Float, accumulated in float: each step rounds.
+        // Twin of ktSumOf in abnf/jsrtkotlin.go.
+        if (allF32) {
+            var ft = 0
+            for (var fj = 0; fj < vals.length; fj++) { ft = coreF32Round(ft + vals[fj].__flo) }
+            return kFlo32(ft)
         }
         if (isFlo) {
             var t = 0
