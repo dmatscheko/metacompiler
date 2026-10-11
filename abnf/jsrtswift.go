@@ -1268,6 +1268,21 @@ func init() {
 		// the process.
 		const swNilUnwrap = "Fatal error: Unexpectedly found nil while unwrapping an Optional value"
 		basePyget := m["js_pyget"]
+		basePyset := m["js_pyset"]
+		// `c[k] = v`: js_pyset, except that `d[k] = nil` REMOVES the key
+		// (Dictionary's subscript setter takes a V?). Twins: js_swdset in
+		// swift-rt.metajs and setElem in swift-interpreter.abnf.
+		m["js_swdset"] = func(a []uint64) uint64 {
+			if keys, vals, ok := dictParts(u(a[0])); ok && isNullish(u(a[2])) {
+				if i := rt.pyDictFind(keys, u(a[1])); i >= 0 {
+					keys.dropIdx()
+					keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+					vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+				}
+				return 0
+			}
+			return basePyset(a)
+		}
 		// `x!`: an Optional IS its value in this model, so only nil traps. Twin
 		// of js_swforce in swift-rt.metajs and ForceSfx in swift-interpreter.abnf.
 		m["js_swforce"] = func(a []uint64) uint64 {

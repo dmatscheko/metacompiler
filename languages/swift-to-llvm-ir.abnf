@@ -46,7 +46,7 @@ Functions, methods, init and closures become IR functions jsf_N(env, args)
 implicit property access resolves through js_kget/js_kset). Classes and structs
 become descriptor objects with a __ctor (default property initializers) and an
 init closure; construction runs __ctor then init. Method calls dispatch through
-js_mcall, subscript through js_swidx/js_pyset, dictionaries through js_dict_new,
+js_mcall, subscript through js_swidx/js_swdset, dictionaries through js_dict_new,
 and ?? compiles to a null test branching around the right side (a phi merges).
 A binding condition compiles to a nil test branching to the clause's failure
 block, and a pattern to a chain of such tests. throw calls js_throw and do/catch
@@ -3535,6 +3535,62 @@ KwContinue  = "continue" KwEnd ;
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
+    // A String is a VALUE, so its mutating methods (`s.append("c")`,
+    // `s.removeFirst()`) compute a new String and assign it back to the receiver,
+    // which must be a name followed by fields, subscripts and `!`. The assignment target
+    // is answered here, or null. Twin of swStrMutRef in swift-interpreter.abnf.
+    function swStrMutName(n) {
+        return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
+            || n == "removeAll" || n == "popLast" || n == "reserveCapacity"
+    }
+    function swStrMutRef(txt, suffixes) {
+        var n = suffixes.length
+        if (suffixes[n - 1].kind != "mcall" || !swStrMutName(suffixes[n - 1].name)) { return null }
+        var j = 0
+        while (j < txt.length) {
+            var k = txt.charCodeAt(j)
+            if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95)) { break }
+            j++
+        }
+        if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return null }
+        var path = []
+        for (var i = 0; i + 1 < n; i++) {
+            if (suffixes[i].kind == "field") { path.push({key: suffixes[i].name}) }
+            else if (suffixes[i].kind == "index") { path.push({idx: suffixes[i].idx}) }
+            else if (suffixes[i].kind != "force") { return null }
+        }
+        return {name: txt.substring(0, j), path: path}
+    }
+    // The String mutator on its Characters, answering [the new String, the call's
+    // own result]: the array member runs on the clusters (rtGSplit), which are
+    // joined back. An appended or inserted argument is TEXT, so `contentsOf:` a
+    // [Character] is joined first. Twin of swStrMutate in swift-interpreter.abnf.
+    function rtStrMut(name) {
+        return rtFunc("sw_smut_" + name, 2, function(b, ps) {
+            var gV = b.NewCall(rtGSplit(), [ps[0]])
+            var aV = ps[1]
+            if (name == "append" || name == "insert") {
+                var a0 = callExt(b, "js_arg", [ps[1], handle(0)])
+                var arrB = curF.NewBlock("")
+                var goB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_is_type", [a0, emitStr(b, "Array")])), arrB, goB)
+                var naV = callExt(arrB, "js_arr_new", [])
+                callExt(arrB, "js_arr_push", [naV, callExt(arrB, "js_swmcall", [a0, emitStr(arrB, "joined"),
+                                                                              callExt(arrB, "js_arr_new", [])])])
+                if (name == "insert") { callExt(arrB, "js_arr_push", [naV, callExt(arrB, "js_arg", [ps[1], handle(1)])]) }
+                arrB.NewBr(goB)
+                aV = goB.NewPhi([llvm.ir.NewIncoming(ps[1], b), llvm.ir.NewIncoming(naV, arrB)])
+                b = goB
+            }
+            var rV = hUndef
+            if (name == "popLast") { rV = b.NewCall(rtPopLast(), [gV]) }
+            else if (name != "reserveCapacity") { rV = callExt(b, "js_swmcall", [gV, emitStr(b, name), aV]) }
+            var pair = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [pair, callExt(b, "js_swmcall", [gV, emitStr(b, "joined"), callExt(b, "js_arr_new", [])])])
+            callExt(b, "js_arr_push", [pair, rV])
+            b.NewRet(pair)
+        })
+    }
     function swEmitMCall(b, recvV, name, nameV, argsV) {
         if (name == "popLast") { return b.NewCall(rtPopLast(), [recvV]) }
         if (name == "uppercased") { return b.NewCall(rtCased(true), [recvV]) }
@@ -3928,7 +3984,7 @@ KwContinue  = "continue" KwEnd ;
     }
     // The [i] read and the [i] = v write, once the program declares a subscript: an
     // object whose type carries __sub_get / __sub_set dispatches there, everything
-    // else keeps the js_swidx / js_pyset path.
+    // else keeps the js_swidx / js_swdset path.
     function rtSubGet() {
         return rtFunc("sw_subget", 2, function(b, ps) {
             var g = b.NewCall(rtSubLookup(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__sub_get"), b.NewCall(rtIdxArity(), [ps[1]])])])
@@ -3953,7 +4009,7 @@ KwContinue  = "continue" KwEnd ;
             callB = emitSpreadIdx(callB, args, ps[1])
             callExt(callB, "js_arr_push", [args, ps[2]])
             callB.NewRet(callExt(callB, "js_call", [g, hUndef, args]))
-            callExt(plainB, "js_pyset", [ps[0], ps[1], ps[2]])
+            callExt(plainB, "js_swdset", [ps[0], ps[1], ps[2]])
             plainB.NewRet(hUndef)
         })
     }
@@ -4758,6 +4814,9 @@ KwContinue  = "continue" KwEnd ;
         var propHead = swPropChainHead(txt, suffixes)
         var propNames = []
         for (var pq = 0; pq + 1 < suffixes.length; pq++) { if (suffixes[pq].kind == "field") { propNames.push(suffixes[pq].name) } }
+        var smRef = swStrMutRef(txt, suffixes)
+        var smVal = null
+        var smAssign = smRef == null ? null : makeAssign([smRef, "=", function(b) { return {b: b, v: smVal} }])
         // While a mutating call through an observed property is emitted, the field
         // reads before it record that property (emitPropBefore), in the chain's
         // own emission. Twin of propOn in swift-interpreter.abnf.
@@ -4851,7 +4910,25 @@ KwContinue  = "continue" KwEnd ;
                     if (s.name == "init" && curType() != null) {
                         mnameV = emitOverloadKey(b, "init", typeRec(curType().key).inits, s.args, ea.v, 0)
                     }
-                    cur = swEmitMCall(b, cur, s.name, mnameV, ea.v)
+                    if (smAssign != null && i + 1 == suffixes.length) {
+                        // A String receiver takes rtStrMut and the write-back;
+                        // anything else (an Array's append) the ordinary call.
+                        var smB = curF.NewBlock("")
+                        var omB = curF.NewBlock("")
+                        var jmB = curF.NewBlock("")
+                        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [cur, emitStr(b, "String")])), smB, omB)
+                        var pairV = smB.NewCall(rtStrMut(s.name), [cur, ea.v])
+                        smVal = callExt(smB, "js_swidx", [pairV, emitNum(smB, 0)])
+                        var sa = smAssign(smB)
+                        var r1 = callExt(sa.b, "js_swidx", [pairV, emitNum(sa.b, 1)])
+                        sa.b.NewBr(jmB)
+                        var r2 = swEmitMCall(omB, cur, s.name, mnameV, ea.v)
+                        omB.NewBr(jmB)
+                        b = jmB
+                        cur = jmB.NewPhi([llvm.ir.NewIncoming(r1, sa.b), llvm.ir.NewIncoming(r2, omB)])
+                    } else {
+                        cur = swEmitMCall(b, cur, s.name, mnameV, ea.v)
+                    }
                     emitWriteBacks(b, ea.boxes)
                     pathKey = null
                 } else if (s.kind == "call") {
@@ -5505,7 +5582,7 @@ KwContinue  = "continue" KwEnd ;
 
     // Assignment: a plain name goes through js_kget/js_kset (locals, then the
     // properties of self); a .field path targets js_get/js_set; an [i] path
-    // targets js_swidx/js_pyset (arrays and dictionaries).
+    // targets js_swidx/js_swdset (arrays and dictionaries).
     // precs, when given, collects the observed properties the path passes
     // through (emitPropBefore).
     function emitRefPath(b, ref, precs) {
@@ -5668,7 +5745,7 @@ KwContinue  = "continue" KwEnd ;
                         v = emitBin(b, op, oldm, v)
                     }
                     if (!keepTy) { v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)]) }
-                    callExt(b, "js_pyset", [p.obj, p.key, v])
+                    callExt(b, "js_swdset", [p.obj, p.key, v])
                 }
                 if (precs.length > 0) { b = emitPropReplay(b, precs) }
                 if (before != null) { b = emitObsReplay(b, ref.name, obs, before) }

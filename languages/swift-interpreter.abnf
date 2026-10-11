@@ -3148,7 +3148,18 @@ KwContinue  = "continue" KwEnd ;
         if (ai < 0 || ai >= o.length) { swIndexFail("array") }
         return o[ai]
     }
+    // `d[k] = nil` REMOVES the key (Dictionary's subscript setter takes a V?).
+    // Twin of js_swdset in lib/swift-rt.metajs and abnf/jsrtswift.go.
     function setElem(o, k, v) {
+        if (isDict(o) && (v === null || v === undefined)) {
+            var di = dictFind(o, k)
+            if (di < 0) { return }
+            for (var q = di; q + 1 < o.keys.length; q++) { o.keys[q] = o.keys[q + 1]; o.vals[q] = o.vals[q + 1] }
+            o.keys.pop()
+            o.vals.pop()
+            o.__idx = null
+            return
+        }
         if (isDict(o)) { dictSet(o, k, v); return }
         if (o === null || o === undefined) { fail("assignment into nil") }
         if (Array.isArray(o)) {
@@ -5412,6 +5423,45 @@ KwContinue  = "continue" KwEnd ;
     // The methods that add an ELEMENT to a collection, i.e. the ones whose first
     // argument the receiver's element type adopts.
     function swAddsElem(n) { return n == "append" || n == "insert" }
+    // A String is a VALUE, so its mutating methods (`s.append("c")`,
+    // `s.removeFirst()`) compute a new String and assign it back to the receiver.
+    // That needs an assignable receiver: a name, then fields, subscripts and `!`. The
+    // assignment target is answered here, or null. Twin of swStrMutRef in
+    // swift-to-llvm-ir.abnf.
+    function swStrMutName(n) {
+        return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
+            || n == "removeAll" || n == "popLast" || n == "reserveCapacity"
+    }
+    function swStrMutRef(txt, suffixes) {
+        var n = suffixes.length
+        if (suffixes[n - 1].kind != "mcall" || !swStrMutName(suffixes[n - 1].name)) { return null }
+        var j = 0
+        while (j < txt.length && swIdCh(txt.charCodeAt(j))) { j++ }
+        if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return null }
+        var path = []
+        for (var i = 0; i + 1 < n; i++) {
+            if (suffixes[i].kind == "field") { path.push({key: suffixes[i].name}) }
+            else if (suffixes[i].kind == "index") { path.push({idx: suffixes[i].idx}) }
+            else if (suffixes[i].kind != "force") { return null }
+        }
+        return {name: txt.substring(0, j), path: path}
+    }
+    // The String mutator on its Characters: the array member runs on the clusters,
+    // which are joined back. An appended or inserted argument is TEXT (a String, a
+    // Character, or `contentsOf:` a [Character]), so the clusters re-form across the
+    // seam. Answers {s: the new String, r: the call's own result}. Twin of
+    // rtStrMut in swift-to-llvm-ir.abnf.
+    function swStrMutate(target, name, args) {
+        var gs = swGraphemes(target)
+        var a = args
+        if ((name == "append" || name == "insert") && args.length > 0 && Array.isArray(args[0])) {
+            a = concat2impl([swJoinStrs(args[0])], args.slice(1))
+        }
+        var r = anytype
+        r = undefined
+        if (name != "reserveCapacity") { r = arrayMethod(gs, name, a) }
+        return {s: swJoinStrs(gs), r: r}
+    }
     foldCallMember = function(items, txt) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
@@ -5427,6 +5477,10 @@ KwContinue  = "continue" KwEnd ;
         // property and protocol is registered: per suffix, the protocol a
         // statically bound member comes from, and whether map/flatMap is Optional's.
         var chainC = {}
+        var smRef = swStrMutRef(txt, suffixes)
+        var smVal = anytype
+        smVal = null
+        var smAssign = smRef == null ? null : makeAssign([smRef, "=", function() { return smVal }])
         var obsName = swObsChainName(txt, suffixes)
         var propHead = swPropChainHead(txt, suffixes)
         var propNames = []
@@ -5485,9 +5539,16 @@ KwContinue  = "continue" KwEnd ;
                     if (i == 0 && eTy0 != "" && ea.argv.length > 0) {
                         ea.argv[0] = swAdoptAnn(ea.argv[0], eTy0)
                     }
-                    pendingLabels = recLabels(s.args)
-                    cur = mcall(cur, s.name, ea.argv)
-                    pendingLabels = null
+                    if (smAssign != null && i + 1 == suffixes.length && typeof cur == "string") {
+                        var sm = swStrMutate(cur, s.name, ea.argv)
+                        smVal = sm.s
+                        smAssign()
+                        cur = sm.r
+                    } else {
+                        pendingLabels = recLabels(s.args)
+                        cur = mcall(cur, s.name, ea.argv)
+                        pendingLabels = null
+                    }
                     writeBacks(ea.boxes)
                 } else if (s.kind == "call") {
                     var eac = evalArgs(s.args)

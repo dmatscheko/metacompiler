@@ -2905,6 +2905,51 @@ func s55() {
                  && Character(sc[0]) == "a")
 }
 
+// ===== SECTION 56: removing a key with nil; the mutating String methods =====
+// `d[k] = nil` removes the key, for an Optional value type too. A String is a value,
+// so `s.append("c")` and the other mutating methods rewrite the variable, field or
+// element they are called on. Every expected value is swiftc 6.1.2's.
+struct Tag56 { var name = "n"; mutating func grow() { name.append("!") } }
+final class Note56 { var t = "c"; func add() { self.t.append("2"); t.append("3") } }
+func s56() {
+    let ks = ["k", "z"]
+    var d: [String: Int] = ["k": 1, "j": 2]
+    d[ks[0]] = nil
+    d[ks[1]] = nil
+    var od: [String: Int?] = ["a": 1]
+    od["a"] = nil
+    check("56a", d.count == 1 && d["k"] == nil && d["j"] == 2 && od.isEmpty)
+    var s = "ab"
+    s.append("c")
+    s.append(contentsOf: "de")
+    s.insert("X", at: s.firstIndex(of: "c")!)
+    let rm = s.remove(at: s.firstIndex(of: "a")!)
+    check("56b", s == "bXcde" && rm == "a")
+    let f = s.removeFirst()
+    let l = s.removeLast()
+    s.removeAll(where: { $0 == "X" })
+    check("56c", f == "b" && l == "e" && s == "cd" && s.popLast() == "d" && s == "c")
+    s.removeAll()
+    var caf = "cafe"
+    caf.append("\u{301}")
+    var w = "hello"
+    w.removeFirst(2)
+    w.removeLast(1)
+    check("56d", s.isEmpty && s.popLast() == nil && caf.count == 4 && w == "ll")
+    var tg = Tag56()
+    tg.name.append("1")
+    tg.grow()
+    let nt = Note56()
+    nt.add()
+    nt.t.append("4")
+    var arr = ["p", "q"]
+    arr[1].append("r")
+    arr.append("s")
+    var dd = ["a": "x"]
+    dd["a"]!.append("y")
+    check("56e", tg.name == "n1!" && nt.t == "c234" && arr == ["p", "qr", "s"] && dd["a"] == "xy")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2963,6 +3008,7 @@ func main() {
     s53() // SECTION-CALL 53
     s54() // SECTION-CALL 54
     s55() // SECTION-CALL 55
+    s56() // SECTION-CALL 56
     print("full: \(checks) checks, \(fails) failures")
 }
 
