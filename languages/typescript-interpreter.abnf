@@ -2612,23 +2612,6 @@ NotFuncHead = :script(~~
             out.push(elems[i])
         }
     }
-    // Number#toFixed. The rounding is the one abnf/jsrtjsprint.go spells (scale by
-    // 10^digits, add a half, floor); on the exact binary value that IS node's answer,
-    // and the two halves have to agree with each other before either agrees with node.
-    function jsToFixed(x, digits) {
-        if (x != x) { return "NaN" }
-        var neg = x < 0
-        var v = neg ? -x : x
-        var scale = Math.pow(10, digits)
-        var n = Math.floor(v * scale + 0.5)
-        var s = "" + n
-        if (digits > 0) {
-            while (s.length <= digits) { s = "0" + s }
-            s = s.substring(0, s.length - digits) + "." + s.substring(s.length - digits, s.length)
-        }
-        if (neg && n != 0) { s = "-" + s }
-        return s
-    }
     // Number#toString(radix).
     function jsRadixStr(x, radix) {
         if (x != x) { return "NaN" }
@@ -3543,7 +3526,17 @@ NotFuncHead = :script(~~
         return null
     }
     function jsNumberMethod(x, name, args) {
-        if (name == "toFixed") { return {v: jsToFixed(x, Math.floor(jsArgNum(args, 0, 0)))} }
+        // lib/js-num.js. A missing digit count is 0 for toFixed, the shortest digits
+        // for toExponential and ToString for toPrecision.
+        var dn = 0 // The digit count, through ToIntegerOrInfinity.
+        if (args.length > 0) { dn = jsnToInt(jsToNum(args[0])) }
+        var dUndef = args.length == 0 || args[0] === undefined
+        if (name == "toFixed") { return {v: jsnToFixed(x, dn)} }
+        if (name == "toExponential") { return {v: jsnToExponential(x, dn, dUndef)} }
+        if (name == "toPrecision") {
+            if (dUndef) { return {v: jsStr(x)} }
+            return {v: jsnToPrecision(x, dn)}
+        }
         if (name == "valueOf") { return {v: x} }
         if (name == "toString") {
             var radix = Math.floor(jsArgNum(args, 0, 10))
@@ -3678,6 +3671,7 @@ NotFuncHead = :script(~~
     function jsonHStr(v) { return jsStr(v) }
     function jsonHParseNum(s) { return parseFloat(s) }
     function jsonHRaise(t) { biRaise(t) }
+    function jsnHRaise(t) { biRaise(t) }
 
     var hostGlobals = {
         // println / print render every argument with JAVASCRIPT's ToString first (the
@@ -4113,7 +4107,7 @@ NotFuncHead = :script(~~
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
                    "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf",
                    "keys", "values", "entries"])
-    bvSeed(bvNum, ["toFixed", "toString", "valueOf"])
+    bvSeed(bvNum, ["toFixed", "toExponential", "toPrecision", "toString", "valueOf"])
     // "s" / "a" / "n" when `k` is a builtin method of the receiver's kind, else "".
     function builtinFam(o, k) {
         if (typeof o == "string") { return hasOwn(bvStr, k) ? "s" : "" }

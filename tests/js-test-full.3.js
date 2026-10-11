@@ -1797,6 +1797,38 @@ function s78() {
         parseFloat({ toString() { return "3.5" } }) === 3.5 && Object.is(parseFloat("-0"), -0))
 }
 
+// ===== SECTION 79: Number#toFixed, toExponential and toPrecision =====
+// Each rounds the EXACT binary value half up (1.005 is 1.00499999999999989...), takes
+// its digit count through ToIntegerOrInfinity and raises a RangeError outside its
+// range; toFixed answers ToString from 1e21 on, toExponential() the shortest digits,
+// toPrecision() ToString, and toPrecision switches to exponent form below 1e-6 or at
+// p digits. Values read off node 24.
+function s79() {
+    const xs = [0, -0, 1.5, 2.5, -2.5, 0.5, 1.25, 1.005, 123.456, 0.000123, 1e21, 5e-324, 1 / 3, -1234.5678, NaN, -Infinity, 1e-7, 999.995, -0.4]
+    const fx = xs.map((x) => x.toFixed() + "/" + x.toFixed(2)).join(" ")
+    check("nf79a", fx === "0/0.00 0/0.00 2/1.50 3/2.50 -3/-2.50 1/0.50 1/1.25 1/1.00 123/123.46 0/0.00 1e+21/1e+21 0/0.00 0/0.33 " +
+        "-1235/-1234.57 NaN/NaN -Infinity/-Infinity 0/0.00 1000/1000.00 -0/-0.40" && xs[7].toFixed(20) === "1.00499999999999989342" &&
+        xs[11].toFixed(100).length === 102)
+    const ex = xs.map((x) => x.toExponential() + "/" + x.toExponential(0) + "/" + x.toExponential(3)).join(" ")
+    check("nf79b", ex === "0e+0/0e+0/0.000e+0 0e+0/0e+0/0.000e+0 1.5e+0/2e+0/1.500e+0 2.5e+0/3e+0/2.500e+0 -2.5e+0/-3e+0/-2.500e+0 " +
+        "5e-1/5e-1/5.000e-1 1.25e+0/1e+0/1.250e+0 1.005e+0/1e+0/1.005e+0 1.23456e+2/1e+2/1.235e+2 1.23e-4/1e-4/1.230e-4 " +
+        "1e+21/1e+21/1.000e+21 5e-324/5e-324/4.941e-324 3.333333333333333e-1/3e-1/3.333e-1 -1.2345678e+3/-1e+3/-1.235e+3 " +
+        "NaN/NaN/NaN -Infinity/-Infinity/-Infinity 1e-7/1e-7/1.000e-7 9.99995e+2/1e+3/1.000e+3 -4e-1/-4e-1/-4.000e-1")
+    const pr = xs.map((x) => x.toPrecision() + "/" + x.toPrecision(1) + "/" + x.toPrecision(4)).join(" ")
+    check("nf79c", pr === "0/0/0.000 0/0/0.000 1.5/2/1.500 2.5/3/2.500 -2.5/-3/-2.500 0.5/0.5/0.5000 1.25/1/1.250 1.005/1/1.005 " +
+        "123.456/1e+2/123.5 0.000123/0.0001/0.0001230 1e+21/1e+21/1.000e+21 5e-324/5e-324/4.941e-324 0.3333333333333333/0.3/0.3333 " +
+        "-1234.5678/-1e+3/-1235 NaN/NaN/NaN -Infinity/-Infinity/-Infinity 1e-7/1e-7/1.000e-7 999.995/1e+3/1000 -0.4/-0.4/-0.4000" &&
+        xs[12].toPrecision(21) === "0.333333333333333314830")
+    const err = (f) => { try { return f() } catch (e) { return e.constructor.name + ": " + e.message } }
+    const y = xs[2]
+    const tp = y.toPrecision
+    check("nf79d", err(() => y.toFixed(101)) === "RangeError: toFixed() digits argument must be between 0 and 100" &&
+        err(() => y.toExponential(-1)) === "RangeError: toExponential() argument must be between 0 and 100" &&
+        err(() => y.toPrecision(0)) === "RangeError: toPrecision() argument must be between 1 and 100" &&
+        err(() => xs[14].toPrecision(0)) === "NaN" && y.toFixed("2") === "1.50" && y.toFixed(2.7) === "1.50" &&
+        y.toExponential(null) === "2e+0" && typeof y.toExponential === "function" && tp.call(xs[3], 2) === "2.5")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1833,6 +1865,7 @@ function main() {
     s76() // SECTION-CALL 76
     s77() // SECTION-CALL 77
     s78() // SECTION-CALL 78
+    s79() // SECTION-CALL 79
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

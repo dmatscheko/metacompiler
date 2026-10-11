@@ -3529,6 +3529,20 @@ function s69() {
         ["Infinity", "  +1.5e3abc", "e5", "0x10"].map((s) => parseFloat(s)).join() === "Infinity,1500,NaN,0");
 }
 
+// ===== SECTION 70: Number#toFixed, toExponential and toPrecision =====
+// Each rounds the EXACT binary value half up and raises a RangeError outside its digit
+// range; toExponential() answers the shortest digits and toPrecision() ToString.
+// Values read off node 24.
+function s70() {
+    const xs: number[] = [2.5, -2.5, 1.005, 0.000123, 1e21, 1 / 3, -0.4, 999.995];
+    check("nf70a", xs.map((x) => x.toFixed(2) + "/" + x.toExponential() + "/" + x.toExponential(1) + "/" + x.toPrecision(3)).join(" ") ===
+        "2.50/2.5e+0/2.5e+0/2.50 -2.50/-2.5e+0/-2.5e+0/-2.50 1.00/1.005e+0/1.0e+0/1.00 0.00/1.23e-4/1.2e-4/0.000123 " +
+        "1e+21/1e+21/1.0e+21/1.00e+21 0.33/3.333333333333333e-1/3.3e-1/0.333 -0.40/-4e-1/-4.0e-1/-0.400 1000.00/9.99995e+2/1.0e+3/1.00e+3");
+    const err = (f: () => any): string => { try { return String(f()); } catch (e: any) { return e.constructor.name + ": " + e.message; } };
+    check("nf70b", err(() => xs[0].toPrecision(101)) === "RangeError: toPrecision() argument must be between 1 and 100" &&
+        xs[0].toPrecision() === "2.5" && xs[2].toFixed(20) === "1.00499999999999989342");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3601,6 +3615,7 @@ function main(): number {
     s67(); // SECTION-CALL 67
     s68(); // SECTION-CALL 68
     s69(); // SECTION-CALL 69
+    s70(); // SECTION-CALL 70
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

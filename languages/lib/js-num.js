@@ -1,9 +1,11 @@
 // js-num.js -- JavaScript's reading of a STRING as a number: StringToNumber (the
-// ToNumber of a string, ES2023 7.1.4.1.1) and the global parseFloat (19.2.4).
+// ToNumber of a string, ES2023 7.1.4.1.1) and the global parseFloat (19.2.4); and
+// the writing of one by Number#toFixed, toExponential and toPrecision.
 //
 // Included by both js and typescript interpreters (include("lib/js-num.js")) and
 // imported by languages/lib/js-rt.metajs, so the interpreters and layer 2 run one
-// implementation; the Go twin is jsStrToNum / jsParseFloatJS in abnf/jsrtjsbig.go.
+// implementation; the Go twins are jsStrToNum / jsParseFloatJS in abnf/jsrtjsbig.go
+// and jsToFixedJS / jsToExponentialJS / jsToPrecisionJS in abnf/jsrtjsprint.go.
 // Written in the restricted subset of regex.js's head comment. Every name is
 // prefixed jsn.
 //
@@ -105,4 +107,207 @@ function jsnParseFloat(s) {
     var n = jsnDecLen(s, at)
     if (n == 0) { return NaN }
     return jsnDecVal(s.substring(i, at + n))
+}
+
+// ----- Number#toFixed / toExponential / toPrecision (ES2023 21.1.3) -----
+//
+// Each rounds the EXACT binary value, and of two equally close candidates takes the
+// larger: round half UP on the exact decimal expansion, which jsnExact writes out.
+// A RangeError goes through the includer's jsnHRaise(message). The digit count has
+// already been through ToIntegerOrInfinity (jsnToInt).
+
+function jsnToInt(n) {
+    if (n !== n) { return 0 }
+    if (n - n !== 0) { return n }
+    if (n < 0) { return -Math.floor(-n) }
+    return Math.floor(n)
+}
+
+// Little-endian base-10000 limbs, multiplied in place by a small factor.
+function jsnMulSmall(limbs, k) {
+    var carry = 0
+    for (var i = 0; i < limbs.length; i++) {
+        var v = limbs[i] * k + carry
+        carry = Math.floor(v / 10000)
+        limbs[i] = v - carry * 10000
+    }
+    while (carry > 0) {
+        var q = Math.floor(carry / 10000)
+        limbs.push(carry - q * 10000)
+        carry = q
+    }
+}
+
+function jsnLimbStr(limbs) {
+    var out = "" + limbs[limbs.length - 1]
+    for (var i = limbs.length - 2; i >= 0; i--) {
+        var part = "" + limbs[i]
+        while (part.length < 4) { part = "0" + part }
+        out = out + part
+    }
+    return out
+}
+
+// The exact decimal of a positive finite double as {i: integer digits ("0" when
+// there are none), f: fraction digits}: a = m * 2^e with m an integer below 2^53,
+// and 2^-n is 5^n / 10^n.
+function jsnExact(a) {
+    var m = a
+    var e = 0
+    while (m != Math.floor(m)) {
+        m = m * 2
+        e = e - 1
+    }
+    while (m > 9007199254740992) {
+        m = m / 2
+        e = e + 1
+    }
+    var limbs = []
+    var x = m
+    while (x > 0) {
+        var q = Math.floor(x / 10000)
+        limbs.push(x - q * 10000)
+        x = q
+    }
+    if (limbs.length == 0) { limbs.push(0) }
+    if (e >= 0) {
+        for (var k = 0; k < e; k++) { jsnMulSmall(limbs, 2) }
+        return {i: jsnLimbStr(limbs), f: ""}
+    }
+    var n = -e
+    for (var j = 0; j < n; j++) { jsnMulSmall(limbs, 5) }
+    var all = jsnLimbStr(limbs)
+    while (all.length <= n) { all = "0" + all }
+    return {i: all.substring(0, all.length - n), f: all.substring(all.length - n)}
+}
+
+// The first `keep` digits of the digit run d, rounded half up; one digit longer when
+// the rounding carried out of the first.
+function jsnRoundUp(d, keep) {
+    var head = d
+    if (keep < d.length) { head = d.substring(0, keep) }
+    while (head.length < keep) { head = head + "0" }
+    if (keep >= d.length || d.charCodeAt(keep) < 53) { return head }
+    var out = ""
+    var i = head.length - 1
+    while (i >= 0 && head.charAt(i) == "9") {
+        out = "0" + out
+        i = i - 1
+    }
+    if (i < 0) { return "1" + out }
+    return head.substring(0, i) + String.fromCharCode(head.charCodeAt(i) + 1) + out
+}
+
+// k significant digits of a positive finite double, rounded half up, and the decimal
+// exponent of the first: {d, e}.
+function jsnSig(a, k) {
+    var x = jsnExact(a)
+    var all = x.i + x.f
+    var z = 0
+    while (all.charAt(z) == "0") { z = z + 1 }
+    var e = x.i.length - z - 1
+    var d = jsnRoundUp(all.substring(z), k)
+    if (d.length > k) {
+        d = d.substring(0, k)
+        e = e + 1
+    }
+    return {d: d, e: e}
+}
+
+// The SHORTEST digits that read back as a, which is what Number::toString prints,
+// with the exponent of the first: {d, e}.
+function jsnShortest(a) {
+    var s = "" + a
+    var ex = 0
+    var at = s.indexOf("e")
+    if (at >= 0) {
+        var es = s.substring(at + 1)
+        if (es.charAt(0) == "+") { es = es.substring(1) }
+        ex = parseInt(es, 10)
+        s = s.substring(0, at)
+    }
+    var p = s.indexOf(".")
+    var ds = s
+    if (p >= 0) { ds = s.substring(0, p) + s.substring(p + 1) } else { p = s.length }
+    var z = 0
+    while (ds.charAt(z) == "0") { z = z + 1 }
+    var d = ds.substring(z)
+    while (d.length > 1 && d.charAt(d.length - 1) == "0") { d = d.substring(0, d.length - 1) }
+    return {d: d, e: ex + p - z - 1}
+}
+
+function jsnZeros(n) {
+    var out = ""
+    while (out.length < n) { out = out + "0" }
+    return out
+}
+
+function jsnExpForm(d, e) {
+    var m = d.charAt(0)
+    if (d.length > 1) { m = m + "." + d.substring(1) }
+    if (e >= 0) { return m + "e+" + e }
+    return m + "e-" + (-e)
+}
+
+function jsnToFixed(x, f) {
+    if (f - f !== 0 || f < 0 || f > 100) { jsnHRaise("RangeError: toFixed() digits argument must be between 0 and 100") }
+    if (x !== x) { return "NaN" }
+    var big = Math.pow(10, 21)
+    if (x >= big || x <= -big) { return "" + x }
+    var sign = ""
+    var a = x
+    if (x < 0) {
+        sign = "-"
+        a = -x
+    }
+    var ip = "0"
+    var fp = jsnZeros(f)
+    if (a != 0) {
+        var ex = jsnExact(a)
+        var r = jsnRoundUp(ex.i + ex.f, ex.i.length + f)
+        ip = r.substring(0, r.length - f)
+        fp = r.substring(r.length - f)
+    }
+    if (f == 0) { return sign + ip }
+    return sign + ip + "." + fp
+}
+
+function jsnToExponential(x, f, fUndef) {
+    if (x !== x || x - x !== 0) { return "" + x }
+    if (f - f !== 0 || f < 0 || f > 100) { jsnHRaise("RangeError: toExponential() argument must be between 0 and 100") }
+    var sign = ""
+    var a = x
+    if (x < 0) {
+        sign = "-"
+        a = -x
+    }
+    if (a == 0) {
+        if (fUndef) { return sign + "0e+0" }
+        return sign + jsnExpForm(jsnZeros(f + 1), 0)
+    }
+    var r = anytype
+    if (fUndef) { r = jsnShortest(a) } else { r = jsnSig(a, f + 1) }
+    return sign + jsnExpForm(r.d, r.e)
+}
+
+function jsnToPrecision(x, p) {
+    if (x !== x || x - x !== 0) { return "" + x }
+    if (p - p !== 0 || p < 1 || p > 100) { jsnHRaise("RangeError: toPrecision() argument must be between 1 and 100") }
+    var sign = ""
+    var a = x
+    if (x < 0) {
+        sign = "-"
+        a = -x
+    }
+    var d = jsnZeros(p)
+    var e = 0
+    if (a != 0) {
+        var r = jsnSig(a, p)
+        d = r.d
+        e = r.e
+    }
+    if (e < -6 || e >= p) { return sign + jsnExpForm(d, e) }
+    if (e == p - 1) { return sign + d }
+    if (e >= 0) { return sign + d.substring(0, e + 1) + "." + d.substring(e + 1) }
+    return sign + "0." + jsnZeros(-(e + 1)) + d
 }

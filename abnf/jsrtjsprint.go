@@ -1027,7 +1027,7 @@ var jsvArrayMethods = map[string]bool{
 }
 
 // jsvNumberMethods are a Number's methods read as a value (jsvBuiltinFam).
-var jsvNumberMethods = map[string]bool{"toFixed": true, "toString": true, "valueOf": true}
+var jsvNumberMethods = map[string]bool{"toFixed": true, "toExponential": true, "toPrecision": true, "toString": true, "valueOf": true}
 
 // jsvBuiltinFam is 's' / 'a' / 'n' when name is a builtin method of a String, an
 // Array or a Number receiver READ AS A VALUE (js_jsvget), else 0: the names
@@ -1125,38 +1125,170 @@ func (rt *jsrt) jsvNumArg(args []interface{}, i int, dflt float64) float64 {
 	if i >= len(args) || isUndefOrNull(args[i]) {
 		return dflt
 	}
-	return rt.toNumber(args[i])
+	return rt.jsvToNum(args[i])
 }
 
-// jsvToFixed is Number#toFixed. The rounding is spelled the same way the
-// interpreter half spells it (scale by 10^digits, add a half, floor), because the
-// two halves must agree with each other before either agrees with node - and on
-// every value tested this IS node's answer: the spec rounds the EXACT binary value
-// half up, and 1.005 * 100 is 100.4999... in binary, so both say "1.00".
-func jsvToFixed(x float64, digits int) string {
-	if math.IsNaN(x) {
-		return "NaN"
+// Number#toFixed / toExponential / toPrecision (ES2023 21.1.3). Each rounds the
+// EXACT binary value half UP (of two equally close candidates the spec takes the
+// larger). The digit count has been through ToIntegerOrInfinity; a RangeError is
+// answered as its message. Twins: jsnToFixed / jsnToExponential / jsnToPrecision in
+// languages/lib/js-num.js.
+func jsToFixedJS(x, f float64) (string, string) {
+	if math.IsInf(f, 0) || f < 0 || f > 100 {
+		return "", "RangeError: toFixed() digits argument must be between 0 and 100"
 	}
-	if math.IsInf(x, 0) || math.Abs(x) >= 1e21 {
-		return jsNumString(x)
+	if math.IsNaN(x) || math.Abs(x) >= 1e21 {
+		return jsNumString(x), ""
 	}
-	sign := ""
+	sign, a := "", x
 	if x < 0 {
-		sign, x = "-", -x
+		sign, a = "-", -x
 	}
-	scale := crPow(10, float64(digits))
-	n := math.Floor(x*scale + 0.5)
-	s := strconv.FormatFloat(n, 'f', 0, 64)
-	if digits > 0 {
-		for len(s) <= digits {
-			s = "0" + s
+	n := int(f)
+	ip, fp := "0", strings.Repeat("0", n)
+	if a != 0 {
+		i, fr := jsExactDec(a)
+		r := jsRoundUpDigits(i+fr, len(i)+n)
+		ip, fp = r[:len(r)-n], r[len(r)-n:]
+	}
+	if n == 0 {
+		return sign + ip, ""
+	}
+	return sign + ip + "." + fp, ""
+}
+
+func jsToExponentialJS(x, f float64, undef bool) (string, string) {
+	if math.IsNaN(x) || math.IsInf(x, 0) {
+		return jsNumString(x), ""
+	}
+	if math.IsInf(f, 0) || f < 0 || f > 100 {
+		return "", "RangeError: toExponential() argument must be between 0 and 100"
+	}
+	sign, a := "", x
+	if x < 0 {
+		sign, a = "-", -x
+	}
+	if a == 0 {
+		if undef {
+			return sign + "0e+0", ""
 		}
-		s = s[:len(s)-digits] + "." + s[len(s)-digits:]
+		return sign + jsExpForm(strings.Repeat("0", int(f)+1), 0), ""
 	}
-	if sign == "-" && n == 0 {
-		return s
+	var d string
+	var e int
+	if undef {
+		d, e = jsShortestDigits(a)
+	} else {
+		d, e = jsSigDigits(a, int(f)+1)
 	}
-	return sign + s
+	return sign + jsExpForm(d, e), ""
+}
+
+func jsToPrecisionJS(x, p float64) (string, string) {
+	if math.IsNaN(x) || math.IsInf(x, 0) {
+		return jsNumString(x), ""
+	}
+	if math.IsInf(p, 0) || p < 1 || p > 100 {
+		return "", "RangeError: toPrecision() argument must be between 1 and 100"
+	}
+	sign, a := "", x
+	if x < 0 {
+		sign, a = "-", -x
+	}
+	n := int(p)
+	d, e := strings.Repeat("0", n), 0
+	if a != 0 {
+		d, e = jsSigDigits(a, n)
+	}
+	switch {
+	case e < -6 || e >= n:
+		return sign + jsExpForm(d, e), ""
+	case e == n-1:
+		return sign + d, ""
+	case e >= 0:
+		return sign + d[:e+1] + "." + d[e+1:], ""
+	}
+	return sign + "0." + strings.Repeat("0", -(e+1)) + d, ""
+}
+
+// jsExactDec is the exact decimal of a positive finite double: integer digits ("0"
+// when there are none) and fraction digits. 1074 fraction digits hold every double
+// exactly, so FormatFloat rounds nothing away; the trailing zeros are dropped.
+func jsExactDec(a float64) (string, string) {
+	s := strings.TrimRight(strconv.FormatFloat(a, 'f', 1074, 64), "0")
+	i, f, _ := strings.Cut(s, ".")
+	return i, f
+}
+
+// jsRoundUpDigits is the first keep digits of d rounded half up, one digit longer
+// when the rounding carried out of the first.
+func jsRoundUpDigits(d string, keep int) string {
+	head := d
+	if keep < len(d) {
+		head = d[:keep]
+	}
+	for len(head) < keep {
+		head += "0"
+	}
+	if keep >= len(d) || d[keep] < '5' {
+		return head
+	}
+	b := []byte(head)
+	i := len(b) - 1
+	for i >= 0 && b[i] == '9' {
+		b[i] = '0'
+		i--
+	}
+	if i < 0 {
+		return "1" + string(b)
+	}
+	b[i]++
+	return string(b)
+}
+
+// jsSigDigits is k significant digits of a, rounded half up, and the decimal
+// exponent of the first.
+func jsSigDigits(a float64, k int) (string, int) {
+	i, f := jsExactDec(a)
+	all := i + f
+	z := 0
+	for all[z] == '0' {
+		z++
+	}
+	e := len(i) - z - 1
+	d := jsRoundUpDigits(all[z:], k)
+	if len(d) > k {
+		d, e = d[:k], e+1
+	}
+	return d, e
+}
+
+// jsShortestDigits is the shortest digit string that reads back as a, and the
+// exponent of its first digit.
+func jsShortestDigits(a float64) (string, int) {
+	s := strconv.FormatFloat(a, 'e', -1, 64)
+	m, ex, _ := strings.Cut(s, "e")
+	e, _ := strconv.Atoi(ex)
+	return strings.Replace(m, ".", "", 1), e
+}
+
+func jsExpForm(d string, e int) string {
+	m := d[:1]
+	if len(d) > 1 {
+		m += "." + d[1:]
+	}
+	if e >= 0 {
+		return m + "e+" + strconv.Itoa(e)
+	}
+	return m + "e-" + strconv.Itoa(-e)
+}
+
+// jsToIntOrInf is ToIntegerOrInfinity over a number. Twin of jsnToInt.
+func jsToIntOrInf(n float64) float64 {
+	if math.IsNaN(n) {
+		return 0
+	}
+	return math.Trunc(n) + 0
 }
 
 // jsvRadixString is Number#toString(radix) for a radix other than 10. The integer
@@ -1961,8 +2093,29 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 
 func (rt *jsrt) jsvNumberMethod(x float64, name string, args []interface{}) (interface{}, bool) {
 	switch name {
-	case "toFixed":
-		return jsvToFixed(x, jsToInt(rt.jsvNumArg(args, 0, 0))), true
+	case "toFixed", "toExponential", "toPrecision":
+		// A missing digit count is 0 for toFixed, the shortest digits for
+		// toExponential and ToString for toPrecision.
+		undef := len(args) == 0 || args[0] == interface{}(jsUndef)
+		n := 0.0
+		if len(args) > 0 {
+			n = jsToIntOrInf(rt.jsvToNum(args[0]))
+		}
+		var out, bad string
+		switch {
+		case name == "toFixed":
+			out, bad = jsToFixedJS(x, n)
+		case name == "toExponential":
+			out, bad = jsToExponentialJS(x, n, undef)
+		case undef:
+			out = jsNumString(x)
+		default:
+			out, bad = jsToPrecisionJS(x, n)
+		}
+		if bad != "" {
+			rt.bigRaise("%s", bad)
+		}
+		return out, true
 	case "toString":
 		radix := jsToInt(rt.jsvNumArg(args, 0, 10))
 		if radix == 10 {

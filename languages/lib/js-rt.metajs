@@ -777,6 +777,7 @@ function jvNumSlow(v) {
     return p - 0
 }
 import "./js-num.js"
+function jsnHRaise(t) { jbRaise(t) }
 
 // jsvToPrimitive: valueOf first, then toString.
 function jvToPrimitive(v, hint) {
@@ -1661,7 +1662,7 @@ function jvBuiltinFam(o, key) {
         return ""
     }
     if (typeof o == "number") {
-        if (key == "toFixed" || key == "toString" || key == "valueOf") { return "n" }
+        if (key == "toFixed" || key == "toExponential" || key == "toPrecision" || key == "toString" || key == "valueOf") { return "n" }
         return ""
     }
     if (Array.isArray(o)) {
@@ -3734,33 +3735,6 @@ function jvArrMethod(a, name, args) {
 
 // ===================================================== Number methods ======
 
-// jsvToFixed. The rounding is spelled the way the interpreter half spells it (scale
-// by 10^digits, add a half, floor), and on every value tested that IS node's answer:
-// the spec rounds the EXACT binary value half up, and 1.005 * 100 is 100.4999... in
-// binary, so both say "1.00".
-function jvToFixed(x, digits) {
-    if (x !== x) { return "NaN" }
-    if (x === Infinity) { return "Infinity" }
-    if (x === -Infinity) { return "-Infinity" }
-    if (Math.abs(x) >= Math.pow(10, 21)) { return x + "" }
-    var sign = ""
-    var v = x
-    if (v < 0) {
-        sign = "-"
-        v = -v
-    }
-    var scale = Math.pow(10, digits)
-    var n = Math.floor(v * scale + 0.5)
-    var s = n + ""
-    if (digits > 0) {
-        while (s.length <= digits) { s = "0" + s }
-        s = s.substring(0, s.length - digits) + "." + s.substring(s.length - digits, s.length)
-    }
-    if (sign == "-") {
-        if (n === 0) { return s }
-    }
-    return sign + s
-}
 
 // jsvRadixString: Number#toString(radix) for a radix other than 10. The integer part
 // is exact; the fraction is emitted to 52 digits and trailing zeros dropped.
@@ -3843,7 +3817,17 @@ function jvBigRadix(dec, radix) {
 }
 
 function jvNumMethod(x, name, args) {
-    if (name == "toFixed") { return jvToFixed(x, jvToInt(jvNumArg(args, 0, 0))) }
+    // lib/js-num.js; see jsNumberMethod in js-interpreter.abnf for the defaults.
+    var dn = 0
+    if (args.length > 0) { dn = jsnToInt(jvToNumber(args[0])) }
+    var dUndef = args.length == 0
+    if (!dUndef) { dUndef = args[0] === undefined }
+    if (name == "toFixed") { return jsnToFixed(x, dn) }
+    if (name == "toExponential") { return jsnToExponential(x, dn, dUndef) }
+    if (name == "toPrecision") {
+        if (dUndef) { return x + "" }
+        return jsnToPrecision(x, dn)
+    }
     if (name == "toString") {
         var radix = jvToInt(jvNumArg(args, 0, 10))
         if (radix === 10) { return x + "" }
