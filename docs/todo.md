@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-411** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-412** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -122,16 +122,16 @@ single-owner guess.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-407 php: method-name case across a parent chain; small library and runtime gaps · P2 · PHP · IN PROGRESS (PHP worker, round 17) [V spec-only]
-A subclass overriding `getName` as `GETNAME`: `$child->getName()` calls the parent's
-(PHP the child's). `get_class` of an anonymous class lacks the "\0path" suffix
-(anon_class_name.phpt). The interpreter builds a new class per evaluation of `new
-class` (PHP: one per declaration site). Promoted constructor properties are listed
-last (PHP: class-body order). Go twin only: `INF == "1e1000"` false under llvm.Run
-(interp/native/corpus true). Interpreter only: print_r(), call_user_func() undefined.
-sprintf `%g` above 15 digits / on subnormals rounds the shortest digits.
-Self-referencing class constants (bug45910) recurse without the "Cannot declare
-self-referencing constant" error. (Handle reuse after free DECLINED: no refcounts.)
+### T-411 php: array / "Class::method" callables; named args to closures compiled; dynamic static calls; numeric prefixes · P1 · PHP · IN PROGRESS (PHP worker, round 18) [V spec-only]
+`$f = ['K','s']; $f(1)`, `$f = [$obj,'m']; $f()`, `$f = 'K::s'; $f()` fail in both
+halves (so call_user_func / array_map work only with closures, names, __invoke).
+Compiled only: named arguments and string-key spreads into a closure/variable callee
+give an empty result (`$f(y: 5, x: 4)`; interpreter right). `$t::s()` with a
+class-name string aborts compiled; `K::$m()` rejected by both. Leading-numeric strings
+ignore an exponent and leading whitespace: `"1.5e3abc"+0` 1.5 (PHP 1500.0), `"12e2x"` 12,
+`" 5e1 z"` 0 (PHP 50.0). A constant cycle entered from a static-property initializer
+names a different link than PHP (P3). Native php costs ~180k instructions and ~25 KB
+per simple loop iteration / call (P3 perf).
 
 ---
 
@@ -484,6 +484,7 @@ T-400 php: array pointer functions, ini_set, object ids, anonymous class names �
 T-392 the C floor's `str_to_num` reads "Inf…" as Infinity — DONE 56400ff3 (floor = strconv.ParseFloat; python float(str) validates the whole string)
 T-394 python: complex from negative ** fractional; augmented-assignment errors; hash; views — DONE 40c43710 060190f5 fe27ddbc
 T-405 swift: lazy static lets; implicit members in sub-expressions — DONE a577592b 51b679b0
+T-407 php: method-name case across a parent chain; small library and runtime gaps — DONE 3ef2eb58 (overrides recorded at declaration; a per-call lower-case lookup measured +15.1%, not taken)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
