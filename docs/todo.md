@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-421** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-422** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -94,11 +94,14 @@ digits and its switch to exponent notation may not be the fixed window `csFloStr
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
 
-### T-417 csharp: target-typed `default` beyond ==; nullable default; List.IndexOf; Keys/Values members · P1 · CS · IN PROGRESS (CS worker, round 20) [V spec-only]
-`return default;` from an int/bool method, `y = default;`, `c ? 5 : default` print an
-empty line (C# 0 / False / 0 / 0, 12.8.21). `int? n = 0; n == default` True (C#
-False: default is null for int?). `new List<int>{1,2}.IndexOf(2)` unknown in both
-halves (BCL 1). A user member named Keys/Values is read as the dictionary call (probe).
+### T-421 csharp: string.Format, StringComparison, remaining `default` contexts, LINQ · P2 · CS · OPEN [V spec-only]
+`string.Format`, `StringComparison`, `StringSplitOptions`, `"a".Normalize()` unknown.
+String.Compare/CompareTo deliberately absent (culture collation), so `List<string>.Sort()`
+fails loudly. `List.Capacity` missing. `default` still untyped as a method argument,
+lambda body, `yield return`, async Task<T> body, field/property assignment; `== default`
+is a null test only for a nullable local. Find/TryGetValue/GetValueOrDefault on an
+empty untyped collection answer null instead of default(T). `Split((char[])null)`
+crashes. LINQ extension methods unavailable on lists.
 
 ---
 
@@ -464,6 +467,7 @@ T-406 the python ratchet's -frozen interpreter run is at ~87M of the 100M brake 
 T-416 swift: Dictionary API gaps; array/dictionary type syntax as values — DONE dc8e3e7e
 T-411 php: array / "Class::method" callables; named args to closures compiled; dynamic static calls; numeric prefixes — DONE 6cb9c923 2bb4e833 79aac241 (spec-only; bench php 7.17G → 0.91G, output identical)
 T-415 php: error cases and precedence from the php-src corpus — PARTIAL 05df225e (4 of 5; goto out of a try is now a compile error); the goto signal is T-420
+T-417 csharp: target-typed `default` beyond ==; nullable default; List.IndexOf; Keys/Values members — DONE 3f3adbeb (spec-only; plus the List/Dictionary/String BCL sweep, lib/csharp-collections.js)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
