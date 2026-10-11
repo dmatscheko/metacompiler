@@ -4261,6 +4261,24 @@ def s80():
                            "OverflowError: (34, 'Result too large')", "OverflowError: (34, 'Result too large')",
                            "OverflowError: int too large to convert to float", "TypeError: unsupported operand type(s) for ** or pow(): 'str' and 'int'"])
 
+# ===== SECTION 81: float(str) takes the whole string or raises =====
+# float_from_string: whitespace stripped (U+001C..U+001F are not stripped), a
+# sign, inf / infinity / nan in any case, or a decimal literal whose underscores
+# stand between digits. Rows from CPython 3.14.
+def s81():
+    v = ["1_000", " 1_0.5_5e1_0\n", "\u00a0-.5\u3000", "5.", "1e400"]
+    check("fls1", [float(x) for x in v] == [1000.0, 105500000000.0, -0.5, 5.0, float("inf")])
+    bad = ["Infinitx", "-Infinitx", "Infinityy", "1.5abc", "", "  ", "1__0", "_1", "1_", "1_.5", "1e_5", "0x10", "1e", ".", "-", "\x1c1", "1 2"]
+    msgs = []
+    for x in bad:
+        try:
+            msgs.append(repr(float(x)))
+        except ValueError as e:
+            msgs.append(str(e))
+    check("fls2", msgs[0] == "could not convert string to float: 'Infinitx'" and msgs[4] == "could not convert string to float: ''")
+    check("fls3", all(m.startswith("could not convert string to float: ") for m in msgs) and len(msgs) == 17)
+    check("fls4", msgs[15] == "could not convert string to float: '\\x1c1'")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4342,5 +4360,6 @@ def main():
     s78() # SECTION-CALL 78
     s79() # SECTION-CALL 79
     s80() # SECTION-CALL 80
+    s81() # SECTION-CALL 81
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

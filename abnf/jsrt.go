@@ -1651,8 +1651,10 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 		if s == "" {
 			return 0
 		}
+		// Out of range is +-Inf with ErrRange, and the value is the answer. Twin of
+		// str_to_num in languages/lib/runtime.c.
 		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
+		if err != nil && err.(*strconv.NumError).Err != strconv.ErrRange {
 			return math.NaN()
 		}
 		return f
@@ -16675,7 +16677,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyfloat": func(a []uint64) uint64 {
 			a = []uint64{w(pyUnwrapBuiltin(u(a[0])))}
 			if s, isStr := u(a[0]).(string); isStr {
-				return w(&jsPyFlo{f: pyStrToF(s)})
+				return w(&jsPyFlo{f: rt.pyStrToF(s)})
 			}
 			if bi, ok := u(a[0]).(*jsBigInt); ok {
 				return w(&jsPyFlo{f: rt.pyBigToF(bi.v)})
@@ -17578,28 +17580,20 @@ func digitValue(c byte) int {
 	}
 }
 
-// pyStrToF is float(str) - CPython's float_from_string, in the one respect where
-// it is not JavaScript's parseFloat: it accepts the three non-finite SPELLINGS
-// "inf", "infinity" and "nan", case-insensitively, with an optional sign, after
-// stripping whitespace (goja's parseFloat would take "Infinity" but not "inf";
-// jsParseFloat takes neither).
-//
-// Everything else still goes to jsParseFloat, so float("1.5abc") is still the
-// prefix parse 1.5 where CPython raises ValueError - a known looseness shared by
-// all three engines. float("-nan") is nan in CPython, so the sign is dropped there.
-//
-// pyStrToF in languages/python-interpreter.abnf and languages/lib/python-rt.metajs
-// are the same body, with the infinity BUILT as Math.pow(2, 1024) because the
-// script dialect has no exponent form in a numeric literal.
-func pyStrToF(s string) float64 {
-	s = pyDecAscii(s)
-	t := strings.TrimSpace(s)
+// pyStrToF is float(str): CPython's float_from_string. Twin of pyStrToF in
+// languages/python-interpreter.abnf, where the reasoning is.
+func (rt *jsrt) pyStrToF(s0 string) float64 {
+	s := pyDecAscii(s0)
+	// The whitespace is str.isspace() less U+001C..U+001F, which CPython tests
+	// with its ASCII-only Py_ISSPACE.
+	t := strings.TrimFunc(s, func(r rune) bool { return (r < 28 || r > 31) && pysIsSpaceCode(int(r)) })
+	i := 0
 	neg := false
 	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
 		neg = t[0] == '-'
-		t = t[1:]
+		i = 1
 	}
-	switch strings.ToLower(t) {
+	switch strings.ToLower(t[i:]) {
 	case "inf", "infinity":
 		if neg {
 			return math.Inf(-1)
@@ -17608,7 +17602,53 @@ func pyStrToF(s string) float64 {
 	case "nan":
 		return math.NaN()
 	}
-	return jsParseFloat(s)
+	clean, ok := pyFloDecimal(t, i)
+	if !ok {
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError",
+			"could not convert string to float: "+pyStrRepr(s0))})
+	}
+	return jsParseFloat(clean)
+}
+
+// pyFloDecimal is t from i when it is a decimal float literal - digits with an
+// optional point, at least one digit, then an optional exponent - with the
+// underscores dropped. An underscore must stand between two digits.
+func pyFloDecimal(t string, i int) (string, bool) {
+	isDec := func(c byte) bool { return c >= '0' && c <= '9' }
+	out := []byte(t[:i])
+	digits, edig, part := 0, 0, 0
+	for j := i; j < len(t); j++ {
+		c := t[j]
+		switch {
+		case isDec(c):
+			out = append(out, c)
+			if part == 2 {
+				edig++
+			} else {
+				digits++
+			}
+		case c == '_':
+			if j == i || j+1 == len(t) || !isDec(t[j-1]) || !isDec(t[j+1]) {
+				return "", false
+			}
+		case c == '.' && part == 0:
+			out = append(out, c)
+			part = 1
+		case (c == 'e' || c == 'E') && part < 2 && digits > 0:
+			out = append(out, c)
+			part = 2
+			if j+1 < len(t) && (t[j+1] == '+' || t[j+1] == '-') {
+				j++
+				out = append(out, t[j])
+			}
+		default:
+			return "", false
+		}
+	}
+	if digits == 0 || (part == 2 && edig == 0) {
+		return "", false
+	}
+	return string(out), true
 }
 
 // jsParseFloat implements the JS parseFloat() prefix parsing.
@@ -18955,7 +18995,7 @@ func (rt *jsrt) pyCplxFromStr(s0 string) interface{} {
 	if len(s) > 1 && s[0] == '(' && s[len(s)-1] == ')' {
 		s = strings.TrimSpace(s[1 : len(s)-1])
 	}
-	num := func(t string) float64 { return pyStrToF(strings.ReplaceAll(t, "_", "")) }
+	num := func(t string) float64 { return rt.pyStrToF(strings.ReplaceAll(t, "_", "")) }
 	isJ := func(k int) bool { return k < len(s) && (s[k] == 'j' || s[k] == 'J') }
 	e1 := pyFloPrefix(s, 0)
 	a := 0.0

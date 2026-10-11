@@ -1803,6 +1803,24 @@ function s32() {
                   lu.charCodeAt(2) === 56320 && lone.toLowerCase() === lone)
 }
 
+// ===== SECTION 33: a string's number is strconv.ParseFloat's =====
+// The whole string or NaN: "inf"/"infinity" in any case, a hexadecimal float with
+// its p exponent, underscores between digits; out of range is +-Infinity.
+function s33() {
+    var xs = ["Infinitx", "-Infinitx", "Infinityy", "inf", "-INFINITY", "1e400", "-1e400",
+              "1_000", "1__0", "1_", "0x1.8p1", "0x1p-1075", "0x1.8p-1075",
+              "0x1.000000000000080000001p0", "0x1.fffffffffffff8p1023", "0x1p", "1_0.5_5e1_0"]
+    var v = []
+    for (var i = 0; i < xs.length; i++) { v.push(xs[i] * 1) }
+    check("sn01", v[0] !== v[0] && v[1] !== v[1] && v[2] !== v[2])
+    check("sn02", v[3] === Infinity && v[4] === -Infinity)
+    check("sn03", v[5] === Infinity && v[6] === -Infinity)
+    check("sn04", v[7] === 1000 && v[8] !== v[8] && v[9] !== v[9])
+    check("sn05", v[10] === 3 && v[11] === 0 && v[12] === Math.pow(2, -1074))
+    check("sn06", v[13] === 1 + Math.pow(2, -52) && v[14] === Infinity && v[15] !== v[15])
+    check("sn07", v[16] === 105500000000)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -1836,6 +1854,7 @@ function main() {
     s30() // SECTION-CALL 30
     s31() // SECTION-CALL 31
     s32() // SECTION-CALL 32
+    s33() // SECTION-CALL 33
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

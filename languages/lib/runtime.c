@@ -2365,9 +2365,116 @@ long dec_to_double(const char *dig, long nd, long e10, long neg) {
 }
 char G_DIG[820];
 
+long digit_value(int c);
+
+/* Does s[i..j) spell the lower-case word w, ignoring ASCII case? */
+int word_ci(const char *s, long i, long j, const char *w) {
+	long k = 0;
+	while (i + k < j && w[k] != 0 && (((int)s[i + k] & 255) | 32) == (int)w[k]) { k = k + 1; }
+	return i + k == j && w[k] == 0;
+}
+
+/* Go's underscoreOK over s[i..j): an underscore only between two digits, where a
+ * base prefix counts as a digit and a hex number's digits include a-f. */
+int under_ok(const char *s, long i, long j) {
+	long saw = 94;
+	long hex = 0;
+	if (i < j && (s[i] == 43 || s[i] == 45)) { i = i + 1; }
+	if (j - i >= 2 && s[i] == 48 && (((int)s[i + 1] & 255) | 32) == 120) { i = i + 2; saw = 48; hex = 1; }
+	while (i < j) {
+		long c = (long)s[i] & 255;
+		if ((c >= 48 && c <= 57) || (hex != 0 && (c | 32) >= 97 && (c | 32) <= 102)) { saw = 48; }
+		else if (c == 95) {
+			if (saw != 48) { return 0; }
+			saw = 95;
+		} else {
+			if (saw == 95) { return 0; }
+			saw = 33;
+		}
+		i = i + 1;
+	}
+	return saw != 95;
+}
+
+/* The double nearest m * 2^e2 (0 <= m < 2^61), where sticky says nonzero bits
+ * were already dropped below m: nearest, ties to even. */
+long bin_to_double(long m, long e2, long sticky, long neg) {
+	long e;
+	long sh;
+	long q;
+	long rem;
+	long half;
+	long sbit = neg ? (0 - 9223372036854775807L - 1L) : 0L;
+	if (m == 0) { return sbit; }
+	while (m < 1152921504606846976L) { m = m * 2; e2 = e2 - 1; }
+	/* m is in [2^60, 2^61), so the leading bit's exponent is e2 + 60. */
+	e = e2 + 60;
+	if (e > 1023) { return neg ? DNINF : DINF; }
+	sh = 8;
+	if (e < -1022) { sh = 8 + (-1022 - e); }
+	if (sh > 61) { return sbit; }
+	q = m >> sh;
+	rem = m & ((1L << sh) - 1);
+	half = 1L << (sh - 1);
+	if (rem > half || (rem == half && (sticky != 0 || (q & 1) != 0))) { q = q + 1; }
+	if (e < -1022) { return q | sbit; }
+	if (q == 9007199254740992L) { q = q / 2; e = e + 1; }
+	if (e > 1023) { return neg ? DNINF : DINF; }
+	return (((e + 1023) << 52) | (q - 4503599627370496L)) | sbit;
+}
+
+/* Go's hexadecimal float, after the "0x": hex digits with an optional point, then
+ * a binary exponent that is NOT optional. Sixty bits of mantissa are kept and the
+ * rest only decide the rounding. */
+long hex_to_num(const char *s, long i, long j, long neg) {
+	long m = 0;
+	long e2 = 0;
+	long sticky = 0;
+	long digits = 0;
+	long dot = 0;
+	long esign = 1;
+	long eval = 0;
+	long edig = 0;
+	long more = 1;
+	while (i < j && more != 0) {
+		long c = (long)s[i] & 255;
+		long d = digit_value((int)c);
+		if (c == 46 && dot == 0) { dot = 1; i = i + 1; }
+		else if (c == 95) { i = i + 1; }
+		else if (d >= 0 && d < 16) {
+			digits = digits + 1;
+			if (m < 72057594037927936L) {
+				m = m * 16 + d;
+				if (dot != 0) { e2 = e2 - 4; }
+			} else {
+				if (d != 0) { sticky = 1; }
+				if (dot == 0) { e2 = e2 + 4; }
+			}
+			i = i + 1;
+		} else { more = 0; }
+	}
+	if (digits == 0 || i == j || (s[i] != 112 && s[i] != 80)) { return DNAN; }
+	i = i + 1;
+	if (i < j && s[i] == 43) { i = i + 1; }
+	else if (i < j && s[i] == 45) { esign = -1; i = i + 1; }
+	while (i < j && ((s[i] >= 48 && s[i] <= 57) || s[i] == 95)) {
+		if (s[i] != 95) {
+			eval = eval * 10 + (s[i] - 48);
+			if (eval > 100000) { eval = 100000; }
+			edig = edig + 1;
+		}
+		i = i + 1;
+	}
+	if (edig == 0 || i != j) { return DNAN; }
+	return bin_to_double(m, e2 + esign * eval, sticky, neg);
+}
+
 /* str_to_num is Go's strconv.ParseFloat on the TRIMMED string: an empty string
- * is 0 and anything that does not parse whole is NaN (so "0x10" is NaN here,
- * exactly as in the Go runtime). */
+ * is 0 and anything that does not parse whole is NaN. That takes in "inf" and
+ * "infinity" in any case and with a sign, "nan" in any case without one, a
+ * hexadecimal float with its p exponent ("0x10" alone is NaN), and underscores
+ * between digits; out of range is +-Inf rather than an error. Twin of
+ * rt.toNumber in abnf/jsrt.go. */
 long str_to_num(long h) {
 	const char *s = str_ptr(h);
 	long n = str_len(h);
@@ -2380,39 +2487,47 @@ long str_to_num(long h) {
 	long exp10 = 0;
 	long esign = 1;
 	long eval = 0;
+	long k;
+	long us = 0;
 	union DB r;
 	union DB p;
 	while (i < j && is_space((int)s[i] & 255)) { i = i + 1; }
 	while (j > i && is_space((int)s[j - 1] & 255)) { j = j - 1; }
 	if (i == j) { return DZERO; }
+	k = i;
 	if (s[i] == 43) { i = i + 1; } else if (s[i] == 45) { neg = 1; i = i + 1; }
-	if (j - i == 3 && s[i] == 78 && s[i+1] == 97 && s[i+2] == 78) { return DNAN; }
-	if (j - i == 8 && s[i] == 73 && s[i+1] == 110 && s[i+2] == 102) {
-		return neg ? DNINF : DINF;
-	}
-	if (j - i == 3 && s[i] == 73 && s[i+1] == 110 && s[i+2] == 102) {
-		return neg ? DNINF : DINF;
+	if (i == k && word_ci(s, i, j, "nan")) { return DNAN; }
+	if (word_ci(s, i, j, "inf") || word_ci(s, i, j, "infinity")) { return neg ? DNINF : DINF; }
+	if (j - i > 2 && s[i] == 48 && (((int)s[i + 1] & 255) | 32) == 120) {
+		if (!under_ok(s, k, j)) { return DNAN; }
+		return hex_to_num(s, i + 2, j, neg);
 	}
 	/* The significant digits are collected WHOLE, most significant first, so the
 	 * conversion below can be exact; exp10 is kept so that the value is exactly
 	 * those digits read as an integer, times 10^exp10. */
-	while (i < j && s[i] >= 48 && s[i] <= 57) {
+	while (i < j && ((s[i] >= 48 && s[i] <= 57) || s[i] == 95)) {
 		long dv = s[i] - 48;
-		if (mdig == 0 && dv == 0) { }               /* a leading zero is nothing */
-		else if (mdig < 800) { G_DIG[mdig] = (char)dv; mdig = mdig + 1; }
-		else { exp10 = exp10 + 1; }
-		if (mdig < 16) { mant = mant * 10 + dv; }
-		digits = digits + 1;
+		if (s[i] == 95) { us = 1; }
+		else {
+			if (mdig == 0 && dv == 0) { }               /* a leading zero is nothing */
+			else if (mdig < 800) { G_DIG[mdig] = (char)dv; mdig = mdig + 1; }
+			else { exp10 = exp10 + 1; }
+			if (mdig < 16) { mant = mant * 10 + dv; }
+			digits = digits + 1;
+		}
 		i = i + 1;
 	}
 	if (i < j && s[i] == 46) {
 		i = i + 1;
-		while (i < j && s[i] >= 48 && s[i] <= 57) {
+		while (i < j && ((s[i] >= 48 && s[i] <= 57) || s[i] == 95)) {
 			long dv = s[i] - 48;
-			if (mdig == 0 && dv == 0) { exp10 = exp10 - 1; }
-			else if (mdig < 800) { G_DIG[mdig] = (char)dv; mdig = mdig + 1; exp10 = exp10 - 1; }
-			if (mdig < 16) { mant = mant * 10 + dv; }
-			digits = digits + 1;
+			if (s[i] == 95) { us = 1; }
+			else {
+				if (mdig == 0 && dv == 0) { exp10 = exp10 - 1; }
+				else if (mdig < 800) { G_DIG[mdig] = (char)dv; mdig = mdig + 1; exp10 = exp10 - 1; }
+				if (mdig < 16) { mant = mant * 10 + dv; }
+				digits = digits + 1;
+			}
 			i = i + 1;
 		}
 	}
@@ -2422,16 +2537,20 @@ long str_to_num(long h) {
 		i = i + 1;
 		if (i < j && s[i] == 43) { i = i + 1; }
 		else if (i < j && s[i] == 45) { esign = -1; i = i + 1; }
-		while (i < j && s[i] >= 48 && s[i] <= 57) {
-			eval = eval * 10 + (s[i] - 48);
-			if (eval > 100000) { eval = 100000; }
-			edig = edig + 1;
+		while (i < j && ((s[i] >= 48 && s[i] <= 57) || s[i] == 95)) {
+			if (s[i] == 95) { us = 1; }
+			else {
+				eval = eval * 10 + (s[i] - 48);
+				if (eval > 100000) { eval = 100000; }
+				edig = edig + 1;
+			}
 			i = i + 1;
 		}
 		if (edig == 0) { return DNAN; }
 		exp10 = exp10 + esign * eval;
 	}
 	if (i != j) { return DNAN; }
+	if (us != 0 && !under_ok(s, k, j)) { return DNAN; }
 	if (mdig == 0) { return neg ? (0 - 9223372036854775807L - 1L) : DZERO; }
 	/* The magnitude is 10^(mdig-1+exp10); only the far extremes are decided here,
 	 * so that the conversion below never has to hold an absurd number of digits. */

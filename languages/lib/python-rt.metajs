@@ -4269,33 +4269,73 @@ function pyFToInt(f) {
     return rtABigFromNum(t)
 }
 
-// float("inf") - CPython's float_from_string accepts "inf", "infinity" and "nan"
-// case-insensitively, with an optional sign, after stripping whitespace;
-// JavaScript's parseFloat accepts "Infinity" and none of the rest. pyStrToF in
-// languages/python-interpreter.abnf is the same body; the whole reasoning,
-// including why the infinity is BUILT with Math.pow(2, 1024) and why only the
-// non-finite spellings are handled, is there.
+// float(str): CPython's float_from_string. Twin of pyStrToF in
+// languages/python-interpreter.abnf, where the reasoning is.
 function pyStrToF(s0) {
     var s = pyDecAscii(s0)
-    var t = s.trim()
+    var a = 0
+    var b = s.length
+    while (a < b && pyFloSpace(s.charCodeAt(a))) { a = a + 1 }
+    while (b > a && pyFloSpace(s.charCodeAt(b - 1))) { b = b - 1 }
+    var t = s.substring(a, b)
+    var i = 0
     var sign = 1
     if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
         if (t.charAt(0) == "-") { sign = 0 - 1 }
-        t = t.slice(1)
+        i = 1
     }
-    var low = t.toLowerCase()
+    var low = t.slice(i).toLowerCase()
     if (low == "inf" || low == "infinity") {
         var inf = Math.pow(2, 1024)
         if (sign < 0) { return inf / (0 - 1) }
         return inf
     }
     if (low == "nan") { return parseFloat("nan") }
-    return parseFloat(s)
+    var clean = pyFloDecimal(t, i)
+    if (clean == "") { pyRaiseExc("ValueError", "could not convert string to float: " + pyStrRepr(s0)) }
+    return parseFloat(clean)
 }
+// t from i when it is a decimal float literal - digits with an optional point,
+// at least one digit, then an optional exponent - with the underscores dropped,
+// or "" when it is not one. An underscore must stand between two digits.
+function pyFloDecimal(t, i) {
+    var out = t.substring(0, i)
+    var n = t.length
+    var digits = 0
+    var edig = 0
+    var part = 0
+    var j = i
+    while (j < n) {
+        var c = t.charAt(j)
+        if (c >= "0" && c <= "9") {
+            out = out + c
+            if (part == 2) { edig = edig + 1 } else { digits = digits + 1 }
+        } else if (c == "_") {
+            if (j == i || j + 1 == n || !pyIsDec(t.charAt(j - 1)) || !pyIsDec(t.charAt(j + 1))) { return "" }
+        } else if (c == "." && part == 0) {
+            out = out + c
+            part = 1
+        } else if ((c == "e" || c == "E") && part < 2 && digits > 0) {
+            out = out + c
+            part = 2
+            if (t.charAt(j + 1) == "+" || t.charAt(j + 1) == "-") {
+                j = j + 1
+                out = out + t.charAt(j)
+            }
+        } else {
+            return ""
+        }
+        j = j + 1
+    }
+    if (digits == 0 || (part == 2 && edig == 0)) { return "" }
+    return out
+}
+function pyIsDec(c) { return c >= "0" && c <= "9" }
+// The whitespace float() strips: str.isspace() less U+001C..U+001F, which
+// CPython tests with its ASCII-only Py_ISSPACE.
+function pyFloSpace(c) { return (c < 28 || c > 31) && pySIsSpaceCh(String.fromCharCode(c)) }
 
-// Go: js_pyfloat. A STRING goes through pyStrToF, which is
-// JavaScript's parseFloat (a PREFIX parse: "1.5abc" is 1.5) plus CPython's three
-// non-finite spellings, not toNumber.
+// Go: js_pyfloat. A STRING goes through pyStrToF, not toNumber.
 function js_pyfloat(v0) {
     var v = anytype
     v = pyUnwrapBuiltin(v0)

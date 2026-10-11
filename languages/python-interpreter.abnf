@@ -1317,37 +1317,78 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyTypeObjVals.push(o)
         return o
     }
-    // float("inf") - CPython's float_from_string accepts the three non-finite
-    // SPELLINGS, case-insensitively and with an optional sign, after stripping
-    // whitespace: "inf", "infinity" and "nan". JavaScript's parseFloat accepts
-    // "Infinity" and nothing else of the set.
-    //
-    // Only the non-finite spellings are handled here; everything else still goes
-    // to parseFloat, so float("1.5abc") is still the prefix parse 1.5 where CPython
-    // raises ValueError - a known looseness.
-    //
-    // Infinity has to be BUILT, not written: the ABNF script dialect has no
-    // exponent form in a numeric literal (1e308 parses as the identifier e308), so
-    // Math.pow(2, 1024) is the spelling. The sign is applied by dividing by -1
-    // rather than by `0 - v`, for the same reason the signed zeros are - see
-    // floNegate. float("-nan") is nan in CPython, so the sign is dropped there.
+    // float(str) - CPython's float_from_string after stripping whitespace: an
+    // optional sign, then "inf", "infinity" or "nan" in any case, or a decimal
+    // literal with underscores between digits; anything else is a ValueError.
+    // The validated text is parseFloat's, which is exact. Infinity has to be
+    // BUILT, not written: the ABNF script dialect has no exponent form in a
+    // numeric literal (1e308 parses as the identifier e308), so Math.pow(2, 1024)
+    // is the spelling, and the sign is applied by dividing by -1 rather than by
+    // `0 - v` (see floNegate). float("-nan") is nan, so the sign is dropped there.
+    // Twin of pyStrToF in abnf/jsrt.go and languages/lib/python-rt.metajs.
     function pyStrToF(s0) {
         var s = pyDecAscii(s0)
-        var t = s.trim()
+        var a = 0
+        var b = s.length
+        while (a < b && pyFloSpace(s.charCodeAt(a))) { a = a + 1 }
+        while (b > a && pyFloSpace(s.charCodeAt(b - 1))) { b = b - 1 }
+        var t = s.substring(a, b)
+        var i = 0
         var sign = 1
         if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
             if (t.charAt(0) == "-") { sign = 0 - 1 }
-            t = t.slice(1)
+            i = 1
         }
-        var low = t.toLowerCase()
+        var low = t.slice(i).toLowerCase()
         if (low == "inf" || low == "infinity") {
             var inf = Math.pow(2, 1024)
             if (sign < 0) { return inf / (0 - 1) }
             return inf
         }
         if (low == "nan") { return parseFloat("nan") }
-        return parseFloat(s)
+        var clean = pyFloDecimal(t, i)
+        if (clean == "") { pyListErr("ValueError", "could not convert string to float: " + pyStrRepr(s0)) }
+        return parseFloat(clean)
     }
+    // t from i when it is a decimal float literal - digits with an optional point,
+    // at least one digit, then an optional exponent - with the underscores dropped,
+    // or "" when it is not one. An underscore must stand between two digits.
+    function pyFloDecimal(t, i) {
+        var out = t.substring(0, i)
+        var n = t.length
+        var digits = 0
+        var edig = 0
+        var part = 0
+        var j = i
+        while (j < n) {
+            var c = t.charAt(j)
+            if (c >= "0" && c <= "9") {
+                out = out + c
+                if (part == 2) { edig = edig + 1 } else { digits = digits + 1 }
+            } else if (c == "_") {
+                if (j == i || j + 1 == n || !pyIsDec(t.charAt(j - 1)) || !pyIsDec(t.charAt(j + 1))) { return "" }
+            } else if (c == "." && part == 0) {
+                out = out + c
+                part = 1
+            } else if ((c == "e" || c == "E") && part < 2 && digits > 0) {
+                out = out + c
+                part = 2
+                if (t.charAt(j + 1) == "+" || t.charAt(j + 1) == "-") {
+                    j = j + 1
+                    out = out + t.charAt(j)
+                }
+            } else {
+                return ""
+            }
+            j = j + 1
+        }
+        if (digits == 0 || (part == 2 && edig == 0)) { return "" }
+        return out
+    }
+    function pyIsDec(c) { return c >= "0" && c <= "9" }
+    // The whitespace float() strips: str.isspace() less U+001C..U+001F, which
+    // CPython tests with its ASCII-only Py_ISSPACE.
+    function pyFloSpace(c) { return (c < 28 || c > 31) && pySIsSpaceCh(String.fromCharCode(c)) }
     // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
     // pyCall routes here rather than instantiating a class.
     function pyConvert(name, args, named) {
