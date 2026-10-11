@@ -216,12 +216,15 @@ LocalFunc   <~~ push(makeLocalFunc(pop(), pop(), pop())) ~~>
             = KwLocal KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
 
 Local       <~~ push(makeLocal(takeAll())) ~~>
-            = KwLocal LocalName [ Attrib ] { "," LocalName [ Attrib ] } [ "=" ExprList ] ;
+            = KwLocal LocalName [ Attrib ] { "," LocalName [ Attrib ] } [ "=" LocalVals ] ;
+// The initializers keep their text: lua folds a <const> local whose initializer is
+// a constant, and an error then names no variable (luaFolded).
+LocalVals   = Expression <~~ push({ltext: up.in}) ~~> { "," Expression <~~ push({ltext: up.in}) ~~> } ;
 LocalName   <~~ push({lname: up.in}) ~~>
             = Id ;
 // Lua 5.4 local attribute: local x <const> = 1 / local h <close> = r. Accepted and
 // ignored (the subset enforces neither const-ness nor to-be-closed semantics).
-Attrib      = "<" Id ">" ;
+Attrib      <~~ push({lattr: up.in}) ~~> = "<" Id ">" ;
 
 // function name(...) end, function tbl.field(...) end, and the method-definition sugar
 // function tbl:method(...) end (which binds an implicit first parameter 'self').
@@ -681,6 +684,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaOpndDesc(text) {
         var n = text.length
         if (n == 0) { return false }
+        // A string literal is lua's "constant" (calling one names it).
+        var q = text.charCodeAt(0)
+        if ((q === 34 || q === 39) && n >= 2 && text.charCodeAt(n - 1) === q) {
+            var body = text.substring(1, n - 1)
+            if (body.indexOf("\\") < 0 && body.indexOf(text.charAt(0)) < 0) { return {k: "constant", n: body} }
+            return false
+        }
         if (luaLeadName(text) === text) { return luaVarDesc(text) }
         if (text.charCodeAt(n - 1) === 93) {
             var open = luaBracketOpen(text)
@@ -795,7 +805,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var luaFnBase = 1
     function luaVarKind(name) {
         for (var i = scopes.length - 1; i >= 1; i--) {
-            if (hasOwn(scopes[i], name)) { return i >= luaFnBase ? "local" : "upvalue" }
+            if (hasOwn(scopes[i], name)) {
+                if (hasOwn(scopes[i], "\x00k" + name)) { return "" }
+                return i >= luaFnBase ? "local" : "upvalue"
+            }
         }
         return "global"
     }
@@ -803,6 +816,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaDescText(d) {
         if (!d) { return "" }
         var k = d.k == "var" ? luaVarKind(d.n) : d.k
+        if (k == "") { return "" }
         return " (" + k + " '" + d.n + "')"
     }
 
@@ -1853,13 +1867,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
     }
+    // A <const> local whose initializer is a constant - a literal nil, boolean,
+    // number or string - is folded away by lua, so an error names no variable for
+    // it. `items` are makeLocal's; the answer is one flag per name.
+    function luaFolded(items) {
+        var flags = []
+        var texts = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { continue }
+            if (it.lname != undefined) { flags.push(false) }
+            else if (it.lattr != undefined) { flags[flags.length - 1] = it.lattr.indexOf("const") >= 0 }
+            else if (it.ltext != undefined) { texts.push(it.ltext) }
+        }
+        for (var k = 0; k < flags.length; k++) { flags[k] = flags[k] && k < texts.length && luaConstText(texts[k]) }
+        return flags
+    }
+    function luaConstText(t) {
+        if (t == "nil" || t == "true" || t == "false") { return true }
+        var c = t.length > 0 ? t.charCodeAt(0) : 0
+        if (c === 34 || c === 39) { return true }
+        var s = c === 45 ? t.substring(1) : t
+        if (s.length == 0) { return false }
+        var c0 = s.charCodeAt(0)
+        if (!(c0 >= 48 && c0 <= 57) && c0 !== 46) { return false }
+        for (var i = 0; i < s.length; i++) { if (!luaIsIdChar(s.charCodeAt(i)) && s.charCodeAt(i) !== 46) { return false } }
+        return true
+    }
     function makeLocal(items) {
         var names = []
         var vals = []
         for (var i = 0; i < items.length; i++) {
             if (typeof items[i] == "function") { vals.push(items[i]) }
-            else { names.push(items[i].lname) }
+            else if (items[i].lname != undefined) { names.push(items[i].lname) }
         }
+        var folded = luaFolded(items)
         return function() {
             var before = closureCount
             var vs = evalList(vals)
@@ -1870,6 +1912,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (closureCount != before) { scopes.push({}) }
             for (var n = 0; n < names.length; n++) {
                 declVar(names[n], n < vs.length ? vs[n] : undefined)
+                if (folded[n]) { rawSet(scopes[scopes.length - 1], "\x00k" + names[n], true) }
             }
         }
     }

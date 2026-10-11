@@ -1407,6 +1407,9 @@ function s34()
     check("vn15", msg(function() local x = nil; x.y = 1 end), "attempt to index a nil value (local 'x')")
     check("vn16", msg(function(p) return -p end), "attempt to perform arithmetic on a nil value (local 'p')")
     check("vn17", msg(function() repeat local z = nil until z.x end), "attempt to index a nil value (local 'z')")
+    check("vn18", msg(function() local c <const> = 5; local d <const> = {}; return c.x end), "attempt to index a number value")
+    check("vn19", msg(function() local function f() end; local d <const> = f(); return d.x end), "attempt to index a nil value (local 'd')")
+    check("vn20", msg(function() return ("abc")() end), "attempt to call a string value (constant 'abc')")
     local function none() end
     local function two() return nil, 5 end
     local function three4() return 3, 4 end
