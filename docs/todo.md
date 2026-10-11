@@ -467,6 +467,7 @@ T-399 ts interpreter: stores to namespace exports before declaration / to export
 T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context — DONE 196e9a27 eee094e4 (the wrong answers, key paths, postfix/inout operators); DECLINED with reasons: macros (compiler plugins), #line/#function/#file (call-site defaults + swiftc module name), `case A<T>()` (always a type error in Swift), `for await` (needs an executor), local property wrappers, debugger-only `$x1`, `@const` (swiftc 6.1.2 rejects it), prefix+postfix of one operator name
 T-398 batch: `%~n0` inside `call :label`; native string arena — DONE 73990fef
 T-403 swift: stored-property types keyed by name across types; implicit members to static funcs — DONE 64a8ae13 cd910ffc (and the -qq fix for bash/c/toys 4f397c98)
+T-402 js/ts: function declarations are not hoisted — DONE e4a8fdc3 (with Annex B block functions)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
