@@ -95,7 +95,7 @@ checking programs end with System.exit(failures).") ;
 
 // Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
-:include("lib/ident-dollar.abnf") ;
+:include("lib/ident-java.abnf") ;
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
@@ -513,8 +513,10 @@ Case        <~~ pushColonCase(takeAll()) ~~>
 // Lambda ("case S -> 1" parses as the lambda "S -> 1" under a full expression),
 // and a name is also the only shape an ENUM constant label has - it names no
 // variable in any scope, so it is compared by its source TEXT instead.
+// Only a PATTERN label takes a `when` guard; `case 0 when b` is javac's
+// compiler.err.guard.not.allowed, a parse error.
 CaseLabel   <~~ push({lab: makeLabel(takeAll())}) ~~>
-            = ( NullLabel | RecPat | TypePat | LitLabel | NameLabel | ExprLabel ) [ WhenGuard ] ;
+            = NullLabel | ( RecPat | TypePat ) [ WhenGuard ] | LitLabel | NameLabel | ExprLabel ;
 NullLabel   <~~ push({lnull: true}) ~~>
             = "null" KwEnd ;
 LitLabel    <~~ push({lval: pop()}) ~~>
@@ -579,9 +581,12 @@ For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" SubStmt ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = DeclCore ;
-ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+// The init and update parts are comma-separated expression lists (JLS 14.14.1):
+// `for (i = 0, j = n; ...; i++, j--)`, run left to right.
+ForExpr     <~~ push(makeSeq(takeAll())) ~~> = ForStmtExpr { "," ForStmtExpr } ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
-ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:makeSeq(takeAll())}) ~~> = ForStmtExpr { "," ForStmtExpr } ;
+ForStmtExpr <~~ push(exprToStmt(pop())) ~~> = Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ ConvExpr ] ";" ;
@@ -1074,7 +1079,38 @@ OuterThis   <~~ push(makeOuterThis(up.in)) ~~>
 // value, whatever the single abstract method is named) invokes it. The body is an
 // expression (its value is the result) or a block (a return supplies the result).
 Lambda      <~~ jRetPop(); push(makeLambdaExpr(takeAll(), up.pos)) ~~>
-            = LamUniform LambdaHead "->" LambdaBody ;
+            = LamUniform LambdaHead "->" NotInGuard LambdaBody ;
+// A case guard's `->` ends the label: in `case Integer j when g -> 0` the `g -> 0` is
+// no lambda, which is how javac reads it. So a lambda whose arrow stands, outside any
+// parentheses, after a `when` of the same case label declines; `when ok((x) -> x)`
+// keeps its lambda, being inside parentheses.
+NotInGuard  = :script(~~
+    (function() {
+        var i = -3
+        var depth = 0
+        var cap = 0
+        while (cap < 4000) {
+            cap++
+            var ch = c.peek(i)
+            if (ch < 0) { return undefined }
+            if (ch === 41 || ch === 93) { depth++ }
+            if (ch === 40 || ch === 91) { depth--; if (depth < 0) { return undefined } }
+            if (depth === 0 && (ch === 59 || ch === 123 || ch === 125)) { return undefined }
+            var isW = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || ch === 36 || (ch >= 48 && ch <= 57)
+            if (depth === 0 && isW) {
+                var e = i
+                while ((c.peek(i - 1) >= 97 && c.peek(i - 1) <= 122) || (c.peek(i - 1) >= 65 && c.peek(i - 1) <= 90)
+                       || c.peek(i - 1) === 95 || c.peek(i - 1) === 36 || (c.peek(i - 1) >= 48 && c.peek(i - 1) <= 57)) { i-- }
+                var w = ""
+                for (var k = i; k <= e; k++) { w = w + String.fromCharCode(c.peek(k)) }
+                if (w === "when") { return abnf.newToken("\x01guard-arrow", 0) }
+                if (w === "case") { return undefined }
+            }
+            i--
+        }
+        return undefined
+    })()
+~~) ;
 // A lambda's body returns its own values, not the enclosing method's type.
 LambdaHead  <~~ jRetPush("") ~~>
             = "(" [ LamParam { "," LamParam } ] ")" | LamId ;

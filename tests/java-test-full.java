@@ -100,6 +100,7 @@ class Main {
         S49.run(); // SECTION-CALL 49
         S50.run(); // SECTION-CALL 50
         S51.run(); // SECTION-CALL 51
+        S52.run(); // SECTION-CALL 52
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2917,5 +2918,36 @@ class S51 {
             && p.objStr().equals(p.toString()) && p.same(p) && !p.same(new S51Plain()) && !p.same(null));
         Main.check("super51b", ("" + new S51Named()).equals("N:true") && ("" + new S51Exc("x")).equals("<S51Exc: x>")
             && ("" + S51Color.RED).equals("red"));
+    }
+}
+
+// ===== SECTION 52: for-update lists, a guard naming a variable, Unicode names =====
+//
+// A for statement's init and update parts are comma lists (JLS 14.14.1); a `when`
+// guard may be a bare name, whose `->` ends the label rather than starting a
+// lambda; and an identifier is any run of Character.isJavaIdentifierStart / Part
+// characters (JLS 3.8), a unicode escape spelling one included. Every expected
+// value is java 24.0.2's.
+class S52 {
+    static int guard(Object o, boolean g) {
+        return switch (o) {
+            case Integer j when g -> 0;
+            case Integer j when (j > 3) -> 1;
+            default -> 2;
+        };
+    }
+    static int ignorable(char zero\u0000zero) { return zero\u0000zero; }
+    static void run() {
+        String trail = "";
+        int i, j, n = 0;
+        for (i = 0, j = 5; i < j; i++, j--, trail += "z") { n = n * 10 + i; }
+        Main.check("for52a", n == 12 && i == 3 && j == 2 && trail.equals("zzz"));
+        Main.check("when52a", guard(5, true) == 0 && guard(5, false) == 1 && guard(2, false) == 2 && guard("x", true) == 2);
+        int café = 2;
+        double π = 3.5;
+        int £x = 4;
+        int 𐐀abc = 1;
+        Main.check("id52a", café + £x == 6 && π == 3.5 && 𐐀abc == 1 && café == 2);
+        Main.check("id52b", ignorable((char) 65) == 65);
     }
 }
