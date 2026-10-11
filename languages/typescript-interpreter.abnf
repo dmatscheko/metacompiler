@@ -2560,6 +2560,17 @@ NotFuncHead = :script(~~
         "getPrototypeOf", "setPrototypeOf", "isExtensible", "isFrozen", "isSealed", "keys", "entries",
         "fromEntries", "values", "groupBy"]
     var jsArrayOwnNames = ["length", "name", "prototype", "isArray", "from", "fromAsync", "of"]
+    // See the twin of this block in js-interpreter.abnf.
+    var jsMathOwnNames = ["abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "ceil",
+        "cbrt", "expm1", "clz32", "cos", "cosh", "exp", "floor", "fround", "hypot", "imul", "log", "log1p",
+        "log2", "log10", "max", "min", "pow", "random", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh",
+        "trunc", "E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2", "f16round"]
+    var jsJsonOwnNames = ["parse", "stringify", "rawJSON", "isRawJSON"]
+    function objProtoHas(k) {
+        return k == "constructor" || k == "__defineGetter__" || k == "__defineSetter__" || k == "hasOwnProperty" ||
+            k == "__lookupGetter__" || k == "__lookupSetter__" || k == "isPrototypeOf" || k == "propertyIsEnumerable" ||
+            k == "toString" || k == "valueOf" || k == "__proto__" || k == "toLocaleString"
+    }
     // See the twin of this comment in js-interpreter.abnf.
     function jsHasOwn(self, k) {
         var kk = "" + k
@@ -2589,6 +2600,12 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     function jsGopnKeys(v) {
         if (v === jsObjectGlobal) { return jsObjectOwnNames.slice() }
+        if (v === jsMathObj || v === jsJsonObj) {
+            var nl = v === jsMathObj ? jsMathOwnNames.slice() : jsJsonOwnNames.slice()
+            var ok = jsOwnKeys(v)
+            for (var oi = 0; oi < ok.length; oi++) { nl.push(ok[oi]) }
+            return nl
+        }
         if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
         var out = ["length", "name"]
         if (v === jsArrayFn) { out = jsArrayOwnNames.slice() }
@@ -5335,6 +5352,12 @@ NotFuncHead = :script(~~
     }
     function propIn(k, o) {
         if (o == undefined || o == null) fail("'in' on " + o)
+        // See the twin of this arm in js-interpreter.abnf.
+        if (typeof k == "string") {
+            if (objProtoHas(k)) { return true }
+            if (Array.isArray(o) && (k == "length" || hasOwn(bvArr, k))) { return true }
+            if ((typeof o == "function" || isClassDesc(o)) && (k == "call" || k == "apply" || k == "bind" || k == "name" || k == "length")) { return true }
+        }
         // A FUNCTION's own properties live in the side table, and a function that has
         // none answers false rather than falling through to the object arms.
         if (typeof o == "function") {

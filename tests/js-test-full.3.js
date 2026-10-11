@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-65.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-66.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,11 +6,12 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-65, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-66, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
-//                             g.return() at a yield*, builtin methods as values
+//                             g.return() at a yield*, builtin methods as values,
+//                             the own names of Math / JSON / Object and `in`
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1381,6 +1382,33 @@ function s65() {
         up() === "HI" && (2.5).toFixed.call(1.25, 1) === "1.3" && ["a", "b"].map("x".concat.bind("p")).join() === "pa0a,b,pb1a,b")
 }
 
+// ===== SECTION 66: the own names of Math, JSON and Object, and `in` through the prototype =====
+// Math's, JSON's and Object's members are own and NOT enumerable: Object.keys and
+// for-in see none of them, getOwnPropertyNames lists them in node's order. `k in o`
+// also finds what o inherits - Object.prototype's names on every object, an Array's
+// methods and length, a function's or a class's call / bind / name / length. Values
+// read off node 24.
+class C66 { constructor() { this.q = 1 } m() { return 1 } static s() { return 2 } }
+function s66() {
+    var fk = []
+    for (var p in JSON) { fk.push(p) }
+    check("own1", Object.keys(JSON).length === 0 && Object.keys(Object).length === 0 && Object.keys(Math).length === 0 &&
+        fk.length === 0 && Object.values(JSON).length === 0)
+    var mn = Object.getOwnPropertyNames(Math)
+    check("own2", mn.length === 44 && mn[0] === "abs" && mn[7] === "atan2" && mn[25] === "pow" && mn[40] === "PI" &&
+        Object.getOwnPropertyNames(JSON).join() === "parse,stringify,rawJSON,isRawJSON")
+    var f = function (a) { return a }
+    var keys = ["toString", "push", "length", "call", "name", "0", "q", "m", "s", "nope", "constructor", "__proto__", "hasOwnProperty"]
+    var objs = [{}, [5], f, new C66(), C66]
+    var rows = []
+    for (var i = 0; i < objs.length; i++) {
+        var row = ""
+        for (var j = 0; j < keys.length; j++) { row = row + (keys[j] in objs[i] ? 1 : 0) }
+        rows.push(row)
+    }
+    check("own3", rows.join() === "1000000000111,1110010000111,1011100000111,1000001100111,1011100010111")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1405,6 +1433,7 @@ function main() {
     s63() // SECTION-CALL 63
     s64() // SECTION-CALL 64
     s65() // SECTION-CALL 65
+    s66() // SECTION-CALL 66
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

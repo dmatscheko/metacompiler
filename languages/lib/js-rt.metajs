@@ -282,6 +282,7 @@ var jvErrN = 0
 // ordinary enumerable property. The Go twin keeps them out of the key order instead.
 var jvMathObj = anytype
 var jvMathHid = anytype
+var jvJsonObj = anytype
 
 // The `String` global js_jsstringfn handed out, kept so that js_jsmcall can
 // recognize the receiver of String.fromCharCode (the Go twin tests hf.name).
@@ -1440,6 +1441,20 @@ function jvValueMiss(o, key) {
 // descriptor rather than as own properties, but `"m" in instance` is true in node.
 // Twin: m["js_jshas"] in abnf/jsrtjsprint.go.
 function js_jshas(o, key) {
+    // Every object inherits Object.prototype's names (`"toString" in {}`), an Array its
+    // methods and length, a function or a class call / apply / bind / name / length. Twin of
+    // js_jshas in abnf/jsrtjsprint.go.
+    if (typeof key == "string") {
+        if (jvIsObj(o) || Array.isArray(o) || jvIsCallable(o)) {
+            if (jvObjProtoHas(key)) { return true }
+        }
+        if (Array.isArray(o)) {
+            if (key == "length" || jvArrM[key] === 1) { return true }
+        }
+        if (jvIsCallable(o) || jvIsClassDesc(o)) {
+            if (key == "call" || key == "apply" || key == "bind" || key == "name" || key == "length") { return true }
+        }
+    }
     if (jvIsObj(o)) {
         var k = jvStr(key)
         // The __-prefixed engine slots are not properties of the program's object.
@@ -1918,6 +1933,17 @@ function jvErrOwn(o, k) {
 // object's without its builtin members (jvMathHid). Gated on jvErrN, so a program
 // that never built an error pays one identity and one integer compare.
 function jvErrHide(o, ks) {
+    // ...and the JSON object's two members and the Object global's prototype, which
+    // are not enumerable in node either.
+    if (o === jvJsonObj || jvIsObjectGlobal(o)) {
+        var jk = []
+        var ji = 0
+        while (ji < ks.length) {
+            if (ks[ji] != "stringify" && ks[ji] != "parse" && ks[ji] != "prototype") { jk.push(ks[ji]) }
+            ji = ji + 1
+        }
+        return jk
+    }
     if (o === jvMathObj) {
         var mk = []
         var mi = 0
@@ -2153,6 +2179,20 @@ function jvInNames(names, k) {
 // The own property names of the Object and Array globals, in node's order. None of
 // them is enumerable. Twins: jsvObjectOwnNames / jsvArrayOwnNames in
 // abnf/jsrtjsprint.go.
+// The own property names of the Math and JSON globals, in node 24's order; none is
+// enumerable. Twins: jsvMathOwnNames / jsvJSONOwnNames in abnf/jsrtjsprint.go.
+var jvMathOwnNames = ["abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "ceil",
+    "cbrt", "expm1", "clz32", "cos", "cosh", "exp", "floor", "fround", "hypot", "imul", "log", "log1p",
+    "log2", "log10", "max", "min", "pow", "random", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh",
+    "trunc", "E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2", "f16round"]
+var jvJsonOwnNames = ["parse", "stringify", "rawJSON", "isRawJSON"]
+// Object.prototype's own names, which `k in o` finds on every object. Twin of
+// jsvObjProtoName in abnf/jsrtjsprint.go.
+function jvObjProtoHas(k) {
+    return k == "constructor" || k == "__defineGetter__" || k == "__defineSetter__" || k == "hasOwnProperty" ||
+        k == "__lookupGetter__" || k == "__lookupSetter__" || k == "isPrototypeOf" || k == "propertyIsEnumerable" ||
+        k == "toString" || k == "valueOf" || k == "__proto__" || k == "toLocaleString"
+}
 var jvObjectOwnNames = ["length", "name", "prototype", "assign", "getOwnPropertyDescriptor",
     "getOwnPropertyDescriptors", "getOwnPropertyNames", "getOwnPropertySymbols", "hasOwn", "is",
     "preventExtensions", "seal", "create", "defineProperties", "defineProperty", "freeze",
@@ -3173,6 +3213,11 @@ function jvObjectGlobalMethod(name, args) {
         // `for (k in f)`. Twins: jsvGopnKeys in abnf/jsrtjsprint.go and jsGopnKeys in
         // both *-interpreter.abnf.
         if (name == "getOwnPropertyNames" && jvIsObjectGlobal(src)) { return jvObjectOwnNames.slice(0) }
+        if (name == "getOwnPropertyNames" && jvIsObj(src)) {
+            var tag = src["__strtag"]
+            if (tag === "Math") { out = jvMathOwnNames.slice(0) }
+            if (tag === "JSON") { out = jvJsonOwnNames.slice(0) }
+        }
         if (name == "getOwnPropertyNames" && jvIsCallable(src)) {
             if (jvArrayFn !== undefined && src === jvArrayFn) {
                 var an = 0
@@ -4383,6 +4428,7 @@ function js_jsjson() {
     o["stringify"] = function (v, r, s) { return jsonStringify(v, r, s) }
     o["parse"] = function (t, r) { return jsonParse(t, r) }
     o["__strtag"] = "JSON" // Object.prototype.toString's tag; see jvProtoTag.
+    jvJsonObj = o
     return o
 }
 function jsonHKeys(o) { return js_jskeys(o) }

@@ -3263,6 +3263,18 @@ function s59() {
         "String.prototype.toString requires that 'this' be a String");
 }
 
+// ===== SECTION 60: the own names of Math, JSON and Object, and `in` through the prototype =====
+// Math's, JSON's and Object's members are own and not enumerable; `k in o` also finds
+// what o inherits. Values read off node 24.
+function s60() {
+    check("own01", Object.keys(JSON).length === 0 && Object.keys(Object).length === 0 &&
+        Object.getOwnPropertyNames(Math).length === 44 && Object.getOwnPropertyNames(JSON).join() === "parse,stringify,rawJSON,isRawJSON");
+    const o: any = {};
+    const a: any = [5];
+    check("own02", "toString" in o && "hasOwnProperty" in o && !("nope" in o) && "push" in a && "length" in a &&
+        "call" in (function () { return 1; }));
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3325,6 +3337,7 @@ function main(): number {
     s57(); // SECTION-CALL 57
     s58(); // SECTION-CALL 58
     s59(); // SECTION-CALL 59
+    s60(); // SECTION-CALL 60
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -12,17 +12,19 @@ import (
 // The program's JSON global, declared by the emitters in the program's own scope.
 func (rt *jsrt) addJSONExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsjson"] = func(a []uint64) uint64 {
+		// The two members are UNLISTED props, so Object.keys and for-in skip them:
+		// node's are not enumerable (js_jsmath's members are kept the same way).
 		o := newJSObject()
-		o.set("stringify", jsHostFunc("stringify", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		o.props["stringify"] = jsHostFunc("stringify", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			s, ok := rt.jsonStringify(argAt(args, 0), argAt(args, 1), argAt(args, 2))
 			if !ok {
 				return jsUndef
 			}
 			return s
-		}))
-		o.set("parse", jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		})
+		o.props["parse"] = jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jsonParse(argAt(args, 0), argAt(args, 1))
-		}))
+		})
 		o.props["__strtag"] = "JSON" // Object.prototype.toString's tag; see jsvProtoTag.
 		return rt.wrap(o)
 	}

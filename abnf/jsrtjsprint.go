@@ -233,6 +233,28 @@ var jsvObjectOwnNames = []string{"length", "name", "prototype", "assign", "getOw
 	"fromEntries", "values", "groupBy"}
 var jsvArrayOwnNames = []string{"length", "name", "prototype", "isArray", "from", "fromAsync", "of"}
 
+// The own property names of the Math and JSON globals, in node 24's order. None of
+// them is enumerable. Twins: jsMathOwnNames / jsJsonOwnNames in both
+// *-interpreter.abnf, jvMathOwnNames / jvJsonOwnNames in languages/lib/js-rt.metajs.
+var jsvMathOwnNames = []string{"abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "ceil",
+	"cbrt", "expm1", "clz32", "cos", "cosh", "exp", "floor", "fround", "hypot", "imul", "log", "log1p",
+	"log2", "log10", "max", "min", "pow", "random", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh",
+	"trunc", "E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2", "f16round"}
+var jsvJSONOwnNames = []string{"parse", "stringify", "rawJSON", "isRawJSON"}
+
+// jsvObjProtoName: Object.prototype's own names, which `k in o` finds on every
+// object. Twins: objProtoHas in both *-interpreter.abnf, jvObjProtoHas in
+// languages/lib/js-rt.metajs.
+func jsvObjProtoName(k string) bool {
+	switch k {
+	case "constructor", "__defineGetter__", "__defineSetter__", "hasOwnProperty", "__lookupGetter__",
+		"__lookupSetter__", "isPrototypeOf", "propertyIsEnumerable", "toString", "valueOf", "__proto__",
+		"toLocaleString":
+		return true
+	}
+	return false
+}
+
 func jsvInNames(names []string, k string) bool {
 	for _, x := range names {
 		if x == k {
@@ -408,6 +430,14 @@ func jsvOwnKeys(v interface{}) []string {
 func jsvGopnKeys(v interface{}) []string {
 	if jsvIsObjectGlobal(v) {
 		return append([]string{}, jsvObjectOwnNames...)
+	}
+	if o, isObj := v.(*jsObject); isObj {
+		switch o.props["__strtag"] {
+		case "Math":
+			return append(append([]string{}, jsvMathOwnNames...), jsvOwnKeys(v)...)
+		case "JSON":
+			return append(append([]string{}, jsvJSONOwnNames...), jsvOwnKeys(v)...)
+		}
 	}
 	if !jsvIsFnLike(v) {
 		if o, isObj := v.(*jsObject); isObj {
@@ -1995,7 +2025,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		proto.set("propertyIsEnumerable", jsHostFunc("propertyIsEnumerable", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsvPropEnum(u(this), rt.toString(argAt(args, 0)))
 		}))
-		o.set("prototype", proto)
+		// Unlisted, so Object.keys(Object) is [] as in node (jsvGopnKeys lists it).
+		o.props["prototype"] = proto
 		return w(o)
 	}
 
@@ -2259,6 +2290,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jshas"] = func(a []uint64) uint64 {
 		recv, isObj := u(a[0]).(*jsObject)
 		name := rt.toString(u(a[1]))
+		// Every object inherits Object.prototype's names (`"toString" in {}`), an
+		// Array its methods and length, a function or a class call / apply / bind /
+		// name / length.
+		if isObj || jsvIsFnLike(u(a[0])) {
+			if jsvObjProtoName(name) {
+				return w(true)
+			}
+		}
+		if _, isArr := u(a[0]).(*jsArray); isArr && (name == "length" || jsvArrayMethods[name] || jsvObjProtoName(name)) {
+			return w(true)
+		}
+		if (jsvIsFnLike(u(a[0])) || (isObj && isClassDesc(recv))) &&
+			(name == "call" || name == "apply" || name == "bind" || name == "name" || name == "length") {
+			return w(true)
+		}
 		// The __-prefixed engine slots are not properties of the program's object.
 		// ...but a mangled PRIVATE name IS one of the program's own, and `#x in o` -
 		// the ergonomic brand check - asks for exactly that slot, so it falls through
