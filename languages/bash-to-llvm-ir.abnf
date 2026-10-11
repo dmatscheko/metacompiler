@@ -4254,7 +4254,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     println(m)
     var res = llvm.Run(m, "main", "", rts)
-    print(res.Out)
+    llvm.WriteOut(res)
     println("bash-to-llvm-ir: exit status " + res.Ret)
     exit(res.Ret)
 

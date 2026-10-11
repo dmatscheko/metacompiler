@@ -123,11 +123,10 @@ COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
 #                     on a side channel. So -qq drops the module and keeps
 #                     exactly the program - with no parsing at all.
 #
-# ...AND THAT LAST SENTENCE IS FALSE FOR MOST SELF-CONTAINED-IR LANGUAGES. bash,
-# c and the four toys emit IR that calls libc directly; there is no js_* side
-# channel, llvm.Run collects the program's output and the grammar prints it as
-# its default output, so `-qq` on those compiler halves prints NOTHING AT ALL
-# (batch hands it to llvm.WriteOut, which -qq keeps).
+# Self-contained-IR languages (bash, batch, c and the toys) emit IR that calls libc
+# directly; there is no js_* side channel, llvm.Run collects the program's output and
+# the grammar writes it with llvm.WriteOut, which -qq keeps. The module itself is
+# still the grammar's default output, so the probe below takes -q and cuts it off.
 #
 # So the flavour decides the flag:
 #

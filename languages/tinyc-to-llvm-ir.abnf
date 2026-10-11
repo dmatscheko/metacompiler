@@ -497,7 +497,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // Run the entry point with the built-in IR interpreter. The exit code of this
     // metacompiler run is what it returned, so test programs are self checking.
     var res = llvm.Run(m, entry)
-    print(res.Out)
+    llvm.WriteOut(res)
     println("tinyc: " + entry + "() returned " + res.Ret)
     exit(res.Ret)
 

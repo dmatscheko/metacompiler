@@ -180,6 +180,6 @@ Whitespace = { !@+"><+-.,?[]" } ;
     // And run it with the built-in IR interpreter to show that it works.
     var res = llvm.Run(m, "main")
     println("--- Executed with the built-in IR interpreter, output:")
-    print(res.Out)
+    llvm.WriteOut(res)
 
 ~~) ;

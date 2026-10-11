@@ -4460,7 +4460,7 @@ KwDefault   = "default" KwEnd ;
     println(m)
 
     var res = llvm.Run(m, entry)
-    print(res.Out)
+    llvm.WriteOut(res)
     println("c compiler: " + entry + "() returned " + res.Ret)
     exit(res.Ret)
 
