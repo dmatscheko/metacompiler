@@ -2129,7 +2129,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pyBuiltinClsMethod(o, name) != null) { return true }
             if (o.__builtin == true) {
                 var samp = pyTypeSample(o.__name)
-                return samp !== undefined && pyBuiltinAttr(samp, name)
+                if (samp !== undefined && pyBuiltinAttr(samp, name)) { return true }
+                return pyBDelegate(o.__name, name) != null
             }
             return false
         }
@@ -2144,7 +2145,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The BUILT-IN methods of str / list / dict / set, and
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
-        if (pyBuiltinAttr(o, name) || pyNumDunderAttr(o, name)) { return true }
+        if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return true }
         if (pyNumAttr(o, name) !== undefined) { return true }
         // A SET's internal keys/vals arrays are not attributes (Go's set object
         // carries them under different names, so hasattr(s, "keys") must be False
@@ -2190,12 +2191,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "conjugate" && isCplx(o)) { return true }
         return pyIsNumMethod(o, name)
     }
-    // A dunder a NUMBER answers through its type's delegate - (5).__add__ - for
-    // the receiver sites only: a type object's own dunders stay delegates, which
-    // unwrap a subclass instance.
-    function pyNumDunderAttr(o, name) {
-        var ntn = pyNumTName(o)
-        return ntn != "" && pyIsDunder(name) && pyBDelegate(ntn, name) != null
+    // A dunder a builtin VALUE answers through its type's delegate - (5).__add__,
+    // "s".__add__, [].__len__ - for the receiver sites only: a type object's own
+    // dunders stay delegates, which unwrap a subclass instance. null when the
+    // value's type has no such dunder.
+    function pyValDunder(o, name) {
+        var vtn = pyValTName(o)
+        if (vtn == "" || !pyIsDunder(name)) { return null }
+        return pyBDelegate(vtn, name)
+    }
+    // The builtin type a delegate serves for a plain value, or "".
+    function pyValTName(v) {
+        if (typeof v == "string") { return "str" }
+        if (Array.isArray(v)) { return "list" }
+        if (isDict(v)) { return isSet(v) ? "" : "dict" }
+        return pyNumTName(v)
     }
     // What getattr() hands back for one of those names: CPython's `<built-in
     // method count of list object ...>`, spelled here as a closure that re-enters
@@ -5266,6 +5276,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // THE WHOLE LIST METHOD SURFACE. The twins are pyListMethod in
             // abnf/jsrt.go and pyListMethod in languages/lib/python-rt.metajs.
             if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
+            var ldel = pyValDunder(target, name)
+            if (ldel != null) { return ldel.apply(undefined, [target].concat(args)) }
             if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown list method: " + name)
         }
@@ -5287,6 +5299,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 fail("unknown dict method: " + name)
             }
             if (pyIsDictMethod(name)) { return pyDictMethod(target, name, args, kw) }
+            var ddel = pyValDunder(target, name)
+            if (ddel != null) { return ddel.apply(undefined, [target].concat(args)) }
             if (pyIsSetOnly(name)) { pyAttrErr(target, name) }
             if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown dict method: " + name)
@@ -5314,6 +5328,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (ndel != null) { return ndel.apply(undefined, [target].concat(args)) }
             pyAttrErr(target, name)
         }
+        var sdel = pyValDunder(target, name)
+        if (sdel != null) { return sdel.apply(undefined, [target].concat(args)) }
         if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
         fail("method call ." + name + "() on " + pstr(target))
     }
@@ -7355,6 +7371,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             pyOrdCheck(op, l, r)
         }
+        // A pair that is not two plain numbers: CPython's TypeError for a pair the
+        // operator does not serve (4 - "s", 2.5 << 1), once no user class can
+        // answer it, and sequence repetition, whose count is any int.
+        if ((typeof l != "number" || typeof r != "number") && hasOwn(pyTypedOps, op) && !pyUser(l) && !pyUser(r)) {
+            var terr = pyBinTypeErr(op, l, r, l, r)
+            if (terr != "") { pyListErr("TypeError", terr) }
+            if (op == "*") {
+                if (typeof l == "string" || Array.isArray(l)) { return pyRepeat(l, r) }
+                if (typeof r == "string" || Array.isArray(r)) { return pyRepeat(r, l) }
+            }
+        }
         // Both overload gates - boxed numbers and user classes - sit behind ONE
         // typeof test, because pyBoxed and pyUser can only ever be true for an
         // object. An ordinary number therefore pays two comparisons and no call at
@@ -7413,10 +7440,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return ssub
         }
         if (op == "*") {
-            if (Array.isArray(l) && typeof r == "number") return listRepeat(l, r)
-            if (Array.isArray(r) && typeof l == "number") return listRepeat(r, l)
-            if (typeof l == "string" && typeof r == "number") return strRepeat(l, r)
-            if (typeof r == "string" && typeof l == "number") return strRepeat(r, l)
             var smul = l * r
             if (pyOver53(smul)) { return boxOp("*", l, r).v }
             return smul
@@ -7482,6 +7505,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the fallback for a pair that is not two ints.
         if (op == "|" || op == "&" || op == "^" || op == "<<" || op == ">>") {
             if (isSet(l) && (op == "|" || op == "&" || op == "^")) { return setOp(op, l, r) }
+            // dict | dict is a merged copy, the right operand's values winning.
+            if (op == "|" && isDict(l)) {
+                var merged = mcall(l, "copy", [], undefined)
+                mcall(merged, "update", [r], undefined)
+                return merged
+            }
             var bo = pyBitOp(op, l, r)
             if (bo != null) { return bo.v }
             if (op == "|") return l | r
@@ -7521,20 +7550,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // CPython's TypeError text for binary operator op on operands whose builtin
     // values are a and b (a subclass instance unwrapped), named by l and r's own
     // types; "" when op serves that pair. Twin of rt.pyBinTypeErr in
-    // abnf/jsrtpysub.go and pyABinTypeErr in lib/python-rt.metajs.
+    // abnf/pyarith.go and pyABinTypeErr in lib/python-rt.metajs.
     function pyBinTypeErr(op, l, r, a, b) {
-        var ln = pyTypeOf(l).__name
-        var rn = pyTypeOf(r).__name
         if (op == "<" || op == ">" || op == "<=" || op == ">=") {
             var ok = pyOrdKind(a)
             if (ok != "" && ok == pyOrdKind(b)) { return "" }
-            return "'" + op + "' not supported between instances of '" + ln + "' and '" + rn + "'"
+            return "'" + op + "' not supported between instances of '" + pyTypeOf(l).__name + "' and '" + pyTypeOf(r).__name + "'"
         }
         if (op == "+") {
             var kl = pyAddKind(a)
             if (kl != "" && kl == pyAddKind(b)) { return "" }
-            if (kl == "s") { return "can only concatenate str (not \"" + rn + "\") to str" }
-            if (kl == "l") { return "can only concatenate list (not \"" + rn + "\") to list" }
+            if (kl == "s") { return "can only concatenate str (not \"" + pyTypeOf(r).__name + "\") to str" }
+            if (kl == "l") { return "can only concatenate list (not \"" + pyTypeOf(r).__name + "\") to list" }
         }
         var na = pyNumTName(a)
         var nb = pyNumTName(b)
@@ -7552,11 +7579,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sa = typeof a == "string" || Array.isArray(a)
             var sb = typeof b == "string" || Array.isArray(b)
             if ((sa && nb == "int") || (sb && na == "int")) { return "" }
-            if (sa) { return "can't multiply sequence by non-int of type '" + rn + "'" }
-            if (sb) { return "can't multiply sequence by non-int of type '" + ln + "'" }
+            if (sa) { return "can't multiply sequence by non-int of type '" + pyTypeOf(r).__name + "'" }
+            if (sb) { return "can't multiply sequence by non-int of type '" + pyTypeOf(l).__name + "'" }
         }
         var shown = op == "**" ? "** or pow()" : op
-        return "unsupported operand type(s) for " + shown + ": '" + ln + "' and '" + rn + "'"
+        return "unsupported operand type(s) for " + shown + ": '" + pyTypeOf(l).__name + "' and '" + pyTypeOf(r).__name + "'"
     }
     function pyAddCheck(l, r) {
         var kl = pyAddKind(l)
@@ -7565,6 +7592,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (kl == "s") { pyListErr("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
         if (kl == "l") { pyListErr("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
         pyListErr("TypeError", "unsupported operand type(s) for +: '" + pyTypeOf(l).__name + "' and '" + rn + "'")
+    }
+    // The operators pyBinTypeErr rules on in binOp: `+` has pyAddCheck, `%` of a
+    // str is formatting, and the comparisons have pyOrdCheck.
+    var pyTypedOps = {}
+    pyTypedOps["-"] = true
+    pyTypedOps["*"] = true
+    pyTypedOps["/"] = true
+    pyTypedOps["//"] = true
+    pyTypedOps["%"] = true
+    pyTypedOps["**"] = true
+    pyTypedOps["<<"] = true
+    pyTypedOps[">>"] = true
+    pyTypedOps["&"] = true
+    pyTypedOps["|"] = true
+    pyTypedOps["^"] = true
+    var pyIdxMax = bigFromDec("9223372036854775807")
+    var pyIdxMin = bigFromDec("-9223372036854775808")
+    // seq * n, CPython's sequence repetition with an int count. A count outside a
+    // C ssize_t is OverflowError and a negative one is empty; a result past 2^48
+    // items, more than a 48-bit address space holds, is MemoryError, or for a str
+    // longer than ssize_t itself the OverflowError CPython checks first. Twin of pySeqRepeat in
+    // abnf/jsrt.go and pyASeqRepeat in lib/python-rt.metajs.
+    function pyRepeat(seq, n) {
+        var k = anytype
+        k = n === true ? 1 : (n === false ? 0 : n)
+        var isStr = typeof seq == "string"
+        if (bigIsBig(k)) {
+            if (pytruthy(binOp(">", k, pyIdxMax)) || pytruthy(binOp("<", k, pyIdxMin))) {
+                pyListErr("OverflowError", "cannot fit 'int' into an index-sized integer")
+            }
+        }
+        if (seq.length == 0 || pytruthy(binOp("<=", k, 0))) { return isStr ? "" : [] }
+        var len = isStr ? pyLen(seq) : seq.length
+        if (bigIsBig(k) || len * k > 281474976710656) {
+            if (isStr && pytruthy(binOp(">", binOp("*", len, k), pyIdxMax))) { pyListErr("OverflowError", "repeated string is too long") }
+            pyListErr("MemoryError", "")
+        }
+        return isStr ? strRepeat(seq, k) : listRepeat(seq, k)
     }
     function listRepeat(a, n) {
         var out = []
@@ -9446,12 +9511,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // `xs += it` is list.extend IN PLACE (every alias of xs sees it, and any
-    // iterable is accepted); every other augmented operator is the binary one.
-    // Twin of the "+=" arm of js_pybin in abnf/jsrt.go and lib/python-rt.metajs.
+    // iterable is accepted), `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=)
+    // updates a set in place when t is a set; every other augmented operator is
+    // the binary one. Twin of the "+=" arm of js_pybin and of js_pyinplace in
+    // abnf/jsrt.go and lib/python-rt.metajs.
     function pyAugOp(bop, a, b) {
         if (bop == "+" && Array.isArray(a)) {
             var src = pyIterOrTypeErr(b).slice(0)
             for (var i = 0; i < src.length; i++) { a.push(src[i]) }
+            return a
+        }
+        if (isSet(a) && isSet(b) && a.__frozen !== true && (bop == "|" || bop == "&" || bop == "-" || bop == "^")) {
+            var res = setOp(bop, a, b)
+            a.keys = res.keys
+            a.vals = res.vals
+            a.__idx = null
+            return a
+        }
+        if (bop == "|" && isDict(a) && !isSet(a)) {
+            mcall(a, "update", [b], undefined)
             return a
         }
         return binOp(bop, a, b)
@@ -9712,7 +9790,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                      "UnicodeEncodeError", "GeneratorExit"]
+                      "UnicodeEncodeError", "GeneratorExit", "MemoryError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -9738,6 +9816,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["UnicodeDecodeError"] = "UnicodeError"
     pyExcParent["UnicodeEncodeError"] = "UnicodeError"
     pyExcParent["GeneratorExit"] = "BaseException"
+    pyExcParent["MemoryError"] = "Exception"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]
@@ -10205,7 +10284,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // literally has a "keys" property holding its key ARRAY, and CPython's
         // d.keys is the method. x.__class__ is the same class object type(x)
         // hands out, so `[].__class__ is list` holds.
-        if (pyBuiltinAttr(o, name) || pyNumDunderAttr(o, name)) { return pyBoundBuiltin(o, name) }
+        if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return pyBoundBuiltin(o, name) }
         if (name == "__class__") { return pyTypeOf(o) }
         if (isSet(o)) { pyAttrErr(o, name) }
         if (typeof o == "object" && hasOwn(o, name)) {

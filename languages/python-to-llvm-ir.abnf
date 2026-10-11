@@ -2787,15 +2787,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sbTarget(ref)
         var op = items[1].op
         var valT = items[2]
-        // js_pybin's "+=" is list.extend in place on a list and `+` otherwise.
+        // js_pybin's "+=" is list.extend in place on a list and `+` otherwise;
+        // js_pyinplace updates a set or a dict in place for |= &= -= ^= and is
+        // the binary operator otherwise.
         var aop = op == "+=" ? op : op.substring(0, op.length - 1)
+        var inPlace = op == "|=" || op == "&=" || op == "-=" || op == "^="
+        var augExt = inPlace ? "js_pyinplace" : "js_pybin"
         // CPython walks the target once: `f().k += 1` calls f a single time, and
         // the subscript of `a[g()] += 1` is evaluated before the right side.
         return function(b) {
             if (ref.path.length == 0) {
                 var cur = pyGetVar(b, curScopeV, emitStr(b, ref.name))
                 var rv0 = valT(b)
-                return emitRefWrite(rv0.b, ref, emitPyBin(rv0.b, aop, cur, rv0.v))
+                return emitRefWrite(rv0.b, ref, callExt(rv0.b, augExt, [emitStr(rv0.b, aop), cur, rv0.v]))
             }
             var h = emitRefHolder(b, ref, true)
             var last = ref.path[ref.path.length - 1]
@@ -2804,7 +2808,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var old = emitRefLoad(b, h.v, last, key)
             var rv = valT(b)
             b = rv.b
-            emitRefStore(b, h.v, last, key, emitPyBin(b, aop, old, rv.v))
+            emitRefStore(b, h.v, last, key, callExt(b, augExt, [emitStr(b, aop), old, rv.v]))
             return b
         }
     }
@@ -4392,7 +4396,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
                         "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                        "UnicodeEncodeError", "GeneratorExit"]
+                        "UnicodeEncodeError", "GeneratorExit", "MemoryError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"

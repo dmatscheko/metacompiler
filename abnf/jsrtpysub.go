@@ -273,9 +273,13 @@ func pyNumDunder(tname, name string) func(rt *jsrt, v interface{}, a []interface
 			return rt.pyExt("js_pyround", &jsArray{elems: append([]interface{}{v}, a...)})
 		}
 	case name == "__divmod__":
-		return func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pydivmod", v, argAt(a, 0)) }
+		return func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			return rt.pyExt("js_pydivmod", v, argAt(a, 0))
+		}
 	case name == "__rdivmod__":
-		return func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pydivmod", argAt(a, 0), v) }
+		return func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			return rt.pyExt("js_pydivmod", argAt(a, 0), v)
+		}
 	case name == "__format__":
 		return func(rt *jsrt, v interface{}, a []interface{}) interface{} {
 			return rt.pyExt("js_pyformatfn", &jsArray{elems: append([]interface{}{v}, a...)})
@@ -299,15 +303,29 @@ func pyNumTypeName(v interface{}) string {
 	return ""
 }
 
-// pyNumDunderAttr says whether a NUMBER answers the dunder name through its
-// type's delegate - (5).__add__ - for the receiver sites only: a type object's
-// own dunders stay delegates, which unwrap a subclass instance.
-func pyNumDunderAttr(v interface{}, name string) bool {
+// pyValDunder is the delegate through which a builtin VALUE answers the dunder
+// name - (5).__add__, "s".__add__, [].__len__ - for the receiver sites only: a
+// type object's own dunders stay delegates, which unwrap a subclass instance.
+// Twin of pyValDunder in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pyValDunder(v interface{}, name string) (*hostFunc, bool) {
 	tn := pyNumTypeName(v)
-	if tn == "" || len(name) <= 4 || !strings.HasPrefix(name, "__") || !strings.HasSuffix(name, "__") {
-		return false
+	switch v.(type) {
+	case string:
+		tn = "str"
+	case *jsArray:
+		tn = "list"
 	}
-	_, ok := pyBuiltinDelegate(tn, name)
+	if _, _, isDict := dictParts(v); isDict {
+		tn = "dict"
+	}
+	if tn == "" || len(name) <= 4 || !strings.HasPrefix(name, "__") || !strings.HasSuffix(name, "__") {
+		return nil, false
+	}
+	return pyBuiltinDelegate(tn, name)
+}
+
+func pyValDunderAttr(v interface{}, name string) bool {
+	_, ok := pyValDunder(v, name)
 	return ok
 }
 

@@ -1261,15 +1261,26 @@ function pyNumTName(v) {
     return ""
 }
 
-// Go: pyNumDunderAttr. Does a NUMBER answer the dunder name through its type's
-// delegate - (5).__add__? For the receiver sites only: a type object's own
-// dunders stay delegates, which unwrap a subclass instance.
-function pyNumDunderAttr(v, name) {
-    var tn = pyNumTName(v)
-    if (tn == "" || name.length <= 4) { return false }
-    if (name.substring(0, 2) != "__" || name.substring(name.length - 2, name.length) != "__") { return false }
-    return pyBDelegate(tn, name) !== undefined
+// Go: pyValDunder. The delegate through which a builtin VALUE answers the dunder
+// name - (5).__add__, "s".__add__, [].__len__ - or undefined. For the receiver
+// sites only: a type object's own dunders stay delegates, which unwrap a
+// subclass instance.
+function pyValDunder(v, name) {
+    var tn = ""
+    if (typeof v == "string") {
+        tn = "str"
+    } else {
+        if (pyIsArr(v)) {
+            tn = "list"
+        } else {
+            if (pyIsDict(v)) { tn = "dict" } else { tn = pyNumTName(v) }
+        }
+    }
+    if (tn == "" || name.length <= 4) { return undefined }
+    if (name.substring(0, 2) != "__" || name.substring(name.length - 2, name.length) != "__") { return undefined }
+    return pyBDelegate(tn, name)
 }
+function pyValDunderAttr(v, name) { return pyValDunder(v, name) !== undefined }
 
 // Go: pyNotImplemented. CPython's NotImplemented singleton, the builtin name
 // NotImplemented. A binary dunder answers it to decline an operand, and
@@ -1577,7 +1588,7 @@ function pyGetAttr(obj, name) {
     // A BOUND built-in method, so getattr(xs, "count")(1) answers as CPython
     // does. Ahead of pyGetMember because a dict literally has a "keys" property
     // holding its key ARRAY, and CPython's d.keys is the method.
-    if (pyDBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name)) { return pyDBoundBuiltin(obj, name) }
+    if (pyDBuiltinAttr(obj, name) || pyValDunderAttr(obj, name)) { return pyDBoundBuiltin(obj, name) }
     // x.__class__ for a value that is not a user instance - the same synthetic
     // class object type(x) hands out, so `[].__class__ is list` holds.
     if (name == "__class__") { return js_pytype(obj) }
@@ -2701,32 +2712,70 @@ function pyAArith(op, l, r) {
     var big = pyABigArith(op, l, r)
     if (big !== null) { return big }
     if (pyIsFlo(l) || pyIsFlo(r)) {
-        if (op == "-") { return pyMkFlo(pyNum(l) - pyNum(r)) }
-        if (op == "*") { return pyMkFlo(pyNum(l) * pyNum(r)) }
-        return pyMkFlo(pyNum(l) / pyNum(r))
+        if (op == "-") { return pyMkFlo(pyAOperand(l, op, l, r) - pyAOperand(r, op, l, r)) }
+        if (op == "*") { return pyMkFlo(pyAOperand(l, op, l, r) * pyAOperand(r, op, l, r)) }
+        return pyMkFlo(pyAOperand(l, op, l, r) / pyAOperand(r, op, l, r))
     }
-    if (op == "-") { return pyNum(l) - pyNum(r) }
-    if (op == "*") { return pyNum(l) * pyNum(r) }
-    return pyNum(l) / pyNum(r)
+    if (op == "-") { return pyAOperand(l, op, l, r) - pyAOperand(r, op, l, r) }
+    if (op == "*") { return pyAOperand(l, op, l, r) * pyAOperand(r, op, l, r) }
+    return pyAOperand(l, op, l, r) / pyAOperand(r, op, l, r)
+}
+
+// An operand of js_pybin's arithmetic arms as a double: an int, a bool, a
+// float box or a bigint, and CPython's TypeError for op on l and r for anything
+// else (4 - "s", "s" * 2.5). The arms before these have taken sets, sequences,
+// complex numbers and user instances. The int test is first: it is the hot path.
+function pyAOperand(v, op, l, r) {
+    if (typeof v == "number") { return v }
+    if (pyIsFlo(v)) { return v["__flo"] }
+    if (typeof v == "boolean") { return v ? 1 : 0 }
+    if (pyIsBig(v)) { return pyAToF(v) }
+    pyAOperandCheck(op, l, r)
+    return pyNum(v)
 }
 
 // ============================================================================
 // Go: pySeqRepeat
 // ============================================================================
-// Answers {v: ...} or null, because Go's second result is a separate ok.
+// Answers {v: ...} or null, because Go's second result is a separate ok. A
+// count outside a C ssize_t is OverflowError; a result past 2^48 items, more
+// than a 48-bit address space holds, is MemoryError, or for a str longer than
+// ssize_t the OverflowError CPython checks first.
+var PY_IDX_MAX = rtABigSub(rtABigFromNum(Math.pow(2, 63)), rtABigFromNum(1))
+var PY_IDX_MIN = rtABigNeg(rtABigFromNum(Math.pow(2, 63)))
 function pyASeqRepeat(seq, n) {
+    if (typeof seq != "string" && !Array.isArray(seq)) { return null }
     var cnt = 0
+    var exact = anytype
+    exact = null
     if (pyIsNum(n)) {
         cnt = n
     } else {
         if (typeof n == "boolean") { // True * "ab" is "ab" in Python.
             cnt = n ? 1 : 0
         } else {
-            return null
+            if (!pyIsBig(n)) { return null }
+            if (rtABigCmp(n, PY_IDX_MAX) > 0 || rtABigCmp(n, PY_IDX_MIN) < 0) {
+                pyRaiseExc("OverflowError", "cannot fit 'int' into an index-sized integer")
+            }
+            exact = n
+            cnt = pyBigToF(n)
         }
     }
+    var ln = -1
+    if (typeof seq == "string") { ln = pyStrLen(seq) }
+    if (pyIsArr(seq)) { ln = seq.length }
+    if (ln > 0 && cnt > 0 && ln * cnt > 281474976710656) {
+        if (typeof seq == "string") {
+            if (exact === null) { exact = rtABigFromNum(cnt) }
+            if (rtABigCmp(rtABigMul(rtABigFromNum(ln), exact), PY_IDX_MAX) > 0) {
+                pyRaiseExc("OverflowError", "repeated string is too long")
+            }
+        }
+        pyRaiseExc("MemoryError", "")
+    }
     var k = Math.trunc(cnt)
-    if (k < 0) { k = 0 }
+    if (k < 0 || ln == 0) { k = 0 }
     if (typeof seq == "string") {
         var s = ""
         var i = 0
@@ -2736,20 +2785,17 @@ function pyASeqRepeat(seq, n) {
         }
         return {v: s}
     }
-    if (pyIsArr(seq)) {
-        var out = []
-        var a = 0
-        while (a < k) {
-            var b = 0
-            while (b < seq.length) {
-                out.push(seq[b])
-                b = b + 1
-            }
-            a = a + 1
+    var out = []
+    var a = 0
+    while (a < k) {
+        var b = 0
+        while (b < seq.length) {
+            out.push(seq[b])
+            b = b + 1
         }
-        return {v: out}
+        a = a + 1
     }
-    return null
+    return {v: out}
 }
 
 // ============================================================================
@@ -3247,22 +3293,30 @@ function pyADunderBin(op, l, r) {
     return {v: js_pybin(op, a, b)}
 }
 
+// js_pybin's operand check: CPython's TypeError for op on l and r when neither
+// is a user instance (pyADunderBin answers for those) and op does not serve
+// the pair.
+function pyAOperandCheck(op, l, r) {
+    if (pyInstClassOf(l) !== null || pyInstClassOf(r) !== null) { return undefined }
+    var msg = pyABinTypeErr(op, l, r, l, r)
+    if (msg != "") { pyRaiseExc("TypeError", msg) }
+    return undefined
+}
+
 // Go: rt.pyBinTypeErr. CPython's TypeError text for binary operator op on
 // operands whose builtin values are a and b (a subclass instance unwrapped),
 // named by l and r's own types; "" when op serves that pair.
 function pyABinTypeErr(op, l, r, a, b) {
-    var ln = pyTypeName(l)
-    var rn = pyTypeName(r)
     if (op == "<" || op == ">" || op == "<=" || op == ">=") {
         var ok = pyAOrdKind(a)
         if (ok != "" && ok == pyAOrdKind(b)) { return "" }
-        return "'" + op + "' not supported between instances of '" + ln + "' and '" + rn + "'"
+        return "'" + op + "' not supported between instances of '" + pyTypeName(l) + "' and '" + pyTypeName(r) + "'"
     }
     if (op == "+") {
         var kl = pyAAddKind(a)
         if (kl != "" && kl == pyAAddKind(b)) { return "" }
-        if (kl == "s") { return "can only concatenate str (not \"" + rn + "\") to str" }
-        if (kl == "l") { return "can only concatenate list (not \"" + rn + "\") to list" }
+        if (kl == "s") { return "can only concatenate str (not \"" + pyTypeName(r) + "\") to str" }
+        if (kl == "l") { return "can only concatenate list (not \"" + pyTypeName(r) + "\") to list" }
     }
     var na = pyNumTName(a)
     var nb = pyNumTName(b)
@@ -3282,12 +3336,12 @@ function pyABinTypeErr(op, l, r, a, b) {
         var sa = typeof a == "string" || pyIsArr(a)
         var sb = typeof b == "string" || pyIsArr(b)
         if ((sa && nb == "int") || (sb && na == "int")) { return "" }
-        if (sa) { return "can't multiply sequence by non-int of type '" + rn + "'" }
-        if (sb) { return "can't multiply sequence by non-int of type '" + ln + "'" }
+        if (sa) { return "can't multiply sequence by non-int of type '" + pyTypeName(r) + "'" }
+        if (sb) { return "can't multiply sequence by non-int of type '" + pyTypeName(l) + "'" }
     }
     var shown = op
     if (op == "**") { shown = "** or pow()" }
-    return "unsupported operand type(s) for " + shown + ": '" + ln + "' and '" + rn + "'"
+    return "unsupported operand type(s) for " + shown + ": '" + pyTypeName(l) + "' and '" + pyTypeName(r) + "'"
 }
 
 // ============================================================================
@@ -3369,6 +3423,26 @@ function pyAAddCheck(l, r) {
     if (kl == "s") { pyRaiseExc("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
     if (kl == "l") { pyRaiseExc("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
     pyRaiseExc("TypeError", "unsupported operand type(s) for +: '" + pyTypeName(l) + "' and '" + rn + "'")
+}
+
+// Go: js_pyinplace. `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=) updates
+// a set in place when t is a set, so every alias sees it; anything else is the
+// binary operator.
+function js_pyinplace(opv, l, r) {
+    var op = pyToStr(opv)
+    if (pySetElemsOf(l) !== null) {
+        var sb = pyASetBin(op, l, r)
+        if (sb !== null && !pySetFrozen(l)) {
+            l["elems"] = pySetElemsOf(sb["v"])
+            return l
+        }
+    } else {
+        if (op == "|" && pyIsDict(l)) {
+            pyDictUpdateFrom(l, r)
+            return l
+        }
+    }
+    return js_pybin(opv, l, r)
 }
 
 // Go: js_pybin. Every user visible binary operator of the Python
@@ -3464,6 +3538,14 @@ function js_pybin(opv, l, r) {
         // anything else keeps the ToInt32 answer.
         var bd = pyADunderBin(op, l, r)
         if (bd !== null) { return bd["v"] }
+        var bmsg = pyABinTypeErr(op, l, r, l, r)
+        if (bmsg != "") { pyRaiseExc("TypeError", bmsg) }
+        // dict | dict is a merged copy, the right operand's values winning.
+        if (op == "|" && pyIsDict(l)) {
+            var merged = pyDictMethod(l, "copy", [], undefined)
+            pyDictUpdateFrom(merged, r)
+            return merged
+        }
         if (op == "|") { return pyNum(l) | pyNum(r) }
         if (op == "&") { return pyNum(l) & pyNum(r) }
         if (op == "^") { return pyNum(l) ^ pyNum(r) }
@@ -3558,7 +3640,7 @@ function js_pybin(opv, l, r) {
     // 4 / 2 is 2.0 and 10**30 / 1 is 1e+30.
     // A numeric zero divisor raises ZeroDivisionError. Go: rt.pyZeroDiv in abnf/jsrt.go.
     if (op == "/") {
-        var fr = pyAToF(r)
+        var fr = pyAOperand(r, op, l, r)
         if (fr == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
         // int / int with an arbitrary precision operand is ONE rounding of the
         // exact quotient.
@@ -3567,29 +3649,29 @@ function js_pybin(opv, l, r) {
             var br = pyIntBigOf(r)
             if (bl !== null && br !== null) { return pyMkFlo(pyIntTrueDiv(bl, br)) }
         }
-        return pyMkFlo(pyAToF(l) / fr)
+        return pyMkFlo(pyAOperand(l, op, l, r) / fr)
     }
     if (op == "//") {
-        var qr = pyNum(r)
+        var qr = pyAOperand(r, op, l, r)
         if (qr == 0) { pyRaiseExc("ZeroDivisionError", "division by zero") }
-        return pyIntOrFlo(Math.floor(pyNum(l) / qr), l, r)
+        return pyIntOrFlo(Math.floor(pyAOperand(l, op, l, r) / qr), l, r)
     }
     // "fmt" % args is printf-style FORMATTING, not a remainder.
     if (op == "%" && typeof l == "string") { return pyBPct(l, r) }
-    if (op == "%") { return pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r) }
+    if (op == "%") { return pyIntOrFlo(pyAFloorMod(pyAOperand(l, op, l, r), pyAOperand(r, op, l, r)), l, r) }
     // Python's exponentiation. Only js_pybin ever passes this operator, and a
     // user class already had its __pow__ / __rpow__ chance above. int ** NEGATIVE
     // int is a float (2 ** -1 is 0.5); every other pair of ints stays an int,
     // at arbitrary precision (10**30 is exact). rtABigNarrow hands back a plain
     // number whenever it still fits, so nothing below 2^53 changes shape.
     if (op == "**") {
-        var ex = pyNum(r)
-        if (ex < 0) { return pyMkFlo(Math.pow(pyNum(l), ex)) }
+        var ex = pyAOperand(r, op, l, r)
+        if (ex < 0) { return pyMkFlo(Math.pow(pyAOperand(l, op, l, r), ex)) }
         if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
             var bl = pyABigOperand(l)
             if (bl !== null) { return rtABigNarrow(rtABigPow(bl, ex)) }
         }
-        return pyIntOrFlo(Math.pow(pyNum(l), ex), l, r)
+        return pyIntOrFlo(Math.pow(pyAOperand(l, op, l, r), ex), l, r)
     }
     if (op == "==") { return pyAEqual(l, r) }
     if (op == "!=") { return !pyAEqual(l, r) }
@@ -4975,11 +5057,12 @@ function pyDHasAttr(obj, name) {
     if (htn !== null) {
         var hsamp = pyDTypeSample(htn)
         if (hsamp !== undefined && pyDBuiltinAttr(hsamp, name)) { return true }
+        if (pyBDelegate(htn, name) !== undefined) { return true }
     }
     // The BUILT-IN methods of str / list / dict / set, and __class__, which
     // EVERY value has (None.__class__ is NoneType).
     if (name == "__class__") { return true }
-    if (pyDBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name)) { return true }
+    if (pyDBuiltinAttr(obj, name) || pyValDunderAttr(obj, name)) { return true }
     if (pyNumAttr(obj, name) !== undefined) { return true }
     // hasattr must answer exactly what the getattr above can answer, or the
     // three-argument getattr - which asks this first - hands back its default for
@@ -7613,13 +7696,12 @@ function pyDMethodCall(target, name, args, kw) {
         if (pyIsCplx(target)) { return pyNewCplx(pyCplxRe(target), -pyCplxIm(target)) }
     }
     if (pyIsNumMethod(target, name)) { return pyNumMethod(target, name, args, kw) }
-    // Any other name on a number: a dunder of its type - (5).__add__(3) - is
-    // that type's delegate with the number as self, and everything else is
-    // CPython's AttributeError.
-    var ntn = pyNumTName(target)
-    if (ntn != "") {
-        var ndel = pyBDelegate(ntn, name)
-        if (ndel !== undefined) { return pyCallSelf(ndel, target, args) }
+    // Any other dunder on a str, list, dict or number - "s".__add__("t"),
+    // (5).__add__(3) - is its type's delegate with the value as self; any other
+    // name on a number is CPython's AttributeError.
+    var vdel = pyValDunder(target, name)
+    if (vdel !== undefined) { return pyCallSelf(vdel, target, args) }
+    if (pyNumTName(target) != "") {
         throw pyExcInstance("AttributeError",
                             "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
     }

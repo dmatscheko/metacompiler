@@ -15895,6 +15895,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			sub.set("exceptions", &jsArray{elems: matched})
 			return w(sub)
 		},
+		// `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=) updates a set in
+		// place when t is a set, so every alias sees it; anything else is the
+		// binary operator. Twin of pyAugOp in languages/python-interpreter.abnf.
+		"js_pyinplace": func(a []uint64) uint64 { // (operator without "=", left, right)
+			op := rt.toString(u(a[0]))
+			l, r := u(a[1]), u(a[2])
+			if le, ok := pySetElems(l); ok {
+				if v, ok := rt.pySetBin(op, l, r); ok && !pySetFrozen(l) {
+					ve, _ := pySetElems(v)
+					le.elems = ve.elems
+					return a[1]
+				}
+			} else if keys, vals, ok := dictParts(l); ok && op == "|" {
+				rt.pyDictUpdateFrom(keys, vals, r)
+				return a[1]
+			}
+			return w(rt.pyExt("js_pybin", op, l, r))
+		},
 		// Every user visible binary operator of the Python compiler goes through
 		// here so an instance of a user class can answer it with a dunder
 		// (__add__, __lt__, __eq__, __contains__, ...). Everything that is not
@@ -15958,6 +15976,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if v, ok := rt.pyDunderBin(op, l, r); ok {
 					return w(v)
 				}
+				if msg := rt.pyBinTypeErr(op, l, r, l, r); msg != "" {
+					panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
+				}
+				// dict | dict is a merged copy, the right operand's values winning.
+				if keys, vals, ok := dictParts(l); ok && op == "|" {
+					mk := &jsArray{elems: append([]interface{}{}, keys.elems...)}
+					mv := &jsArray{elems: append([]interface{}{}, vals.elems...)}
+					rt.pyDictUpdateFrom(mk, mv, r)
+					return w(&jsObject{props: map[string]interface{}{"__dict": true, "keys": mk, "vals": mv}})
+				}
 				switch op {
 				case "|":
 					return rt.wrapNum(float64(rt.toInt32(l) | rt.toInt32(r)))
@@ -15969,6 +15997,22 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return rt.wrapNum(float64(rt.toInt32(l) << (uint32(rt.toInt32(r)) & 31)))
 				}
 				return rt.wrapNum(float64(rt.toInt32(l) >> (uint32(rt.toInt32(r)) & 31)))
+			}
+			// CPython's TypeError for a pair the operator does not serve (4 - "s",
+			// "s" * 2.5), once no user class can answer it.
+			switch op {
+			case "-", "*", "/", "//", "%", "**":
+				_, lf := l.(float64)
+				_, rf := r.(float64)
+				if !lf || !rf {
+					_, _, li := pyInstance(l)
+					_, _, ri := pyInstance(r)
+					if !li && !ri {
+						if msg := rt.pyBinTypeErr(op, l, r, l, r); msg != "" {
+							panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
+						}
+					}
+				}
 			}
 			if isPyComplex(l) || isPyComplex(r) {
 				// The complex arithmetic reads any operand as a number, so a mixed
@@ -16063,10 +16107,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case "*":
 				// Python's SEQUENCE REPETITION: "ab" * 3 and [0] * 3 (either way
 				// round) - the ordinary way to build a fixed-size list.
-				if v, ok := pySeqRepeat(l, r); ok {
+				if v, ok := rt.pySeqRepeat(l, r); ok {
 					return w(v)
 				}
-				if v, ok := pySeqRepeat(r, l); ok {
+				if v, ok := rt.pySeqRepeat(r, l); ok {
 					return w(v)
 				}
 				if pyIsFlo(l) || pyIsFlo(r) {
@@ -19489,7 +19533,7 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	}
 	// A BOUND built-in method, so getattr(xs, "count")(1) is
 	// the 1 CPython answers rather than whatever getMember made of the name.
-	if rt.pyBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name) {
+	if rt.pyBuiltinAttr(obj, name) || pyValDunderAttr(obj, name) {
 		return rt.pyBoundBuiltin(obj, name)
 	}
 	// x.__class__ for a value that is not a user instance - the same synthetic
@@ -19958,13 +20002,13 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if pyIsNumMethod(target, name) {
 		return rt.pyNumMethod(target, name, args, kw)
 	}
-	// Any other name on a number: a dunder of its type - (5).__add__(3) - is
-	// that type's delegate with the number as self, and everything else is
-	// CPython's AttributeError.
-	if tn := pyNumTypeName(target); tn != "" {
-		if f, ok := pyBuiltinDelegate(tn, name); ok {
-			return rt.call(f, jsUndef, append([]interface{}{target}, args...))
-		}
+	// Any other dunder on a str, list, dict or number - "s".__add__("t"),
+	// (5).__add__(3) - is its type's delegate with the value as self; any other
+	// name on a number is CPython's AttributeError.
+	if f, ok := pyValDunder(target, name); ok {
+		return rt.call(f, jsUndef, append([]interface{}{target}, args...))
+	}
+	if pyNumTypeName(target) != "" {
 		rt.pyRaise("AttributeError", "'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")
 	}
 	if pyForeignMethod(target, name) {
@@ -21142,10 +21186,13 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		if samp := pyDescTypeSample(tn); samp != nil && rt.pyBuiltinAttr(samp, name) {
 			return true
 		}
+		if _, ok := pyBuiltinDelegate(tn, name); ok {
+			return true
+		}
 	}
 	// The BUILT-IN methods of str / list / dict / set, and
 	// __class__, which EVERY value has (None.__class__ is NoneType).
-	if name == "__class__" || rt.pyBuiltinAttr(obj, name) || pyNumDunderAttr(obj, name) {
+	if name == "__class__" || rt.pyBuiltinAttr(obj, name) || pyValDunderAttr(obj, name) {
 		return true
 	}
 	if _, ok := pyNumAttr(obj, name); ok {
@@ -23181,24 +23228,54 @@ func pyModuleScope(s *jsScope) *jsScope {
 }
 
 // pySeqRepeat is Python's sequence repetition: seq * n for a string or a list
-// (a tuple is a list here). n is truncated to an integer and a non-positive n
-// yields an empty sequence, exactly as MRI... as CPython does. ok is false when
-// seq is not a sequence or n is not a number, so the caller falls back to
+// (a tuple is a list here) and an int n: a non-positive n yields an empty
+// sequence, and one outside a C ssize_t is CPython's OverflowError. ok is false
+// when seq is not a sequence or n is not an int, so the caller falls back to
 // numeric multiplication.
-func pySeqRepeat(seq, n interface{}) (interface{}, bool) {
-	cnt, isNum := n.(float64)
-	if !isNum {
-		if b, isBool := n.(bool); isBool { // True * "ab" is "ab" in Python.
-			cnt = 0
-			if b {
-				cnt = 1
-			}
-		} else {
-			return nil, false
+func (rt *jsrt) pySeqRepeat(seq, n interface{}) (interface{}, bool) {
+	var cnt float64
+	var exact *big.Int
+	switch c := n.(type) {
+	case float64:
+		cnt = c
+	case bool: // True * "ab" is "ab" in Python.
+		if c {
+			cnt = 1
 		}
+	case *jsBigInt:
+		if !c.v.IsInt64() {
+			rt.pyRaise("OverflowError", "cannot fit 'int' into an index-sized integer")
+		}
+		cnt, exact = float64(c.v.Int64()), c.v
+	default:
+		return nil, false
+	}
+	// A result past 2^48 items, more than a 48-bit address space holds, is
+	// CPython's MemoryError, or for a str longer than a C ssize_t the
+	// OverflowError CPython checks first. Twin of pyRepeat in
+	// languages/python-interpreter.abnf and pyASeqRepeat in lib/python-rt.metajs.
+	ln := 0
+	switch s := seq.(type) {
+	case string:
+		ln = pyStrLen(rt, s)
+	case *jsArray:
+		ln = len(s.elems)
+	default:
+		return nil, false
+	}
+	if ln > 0 && cnt > 0 && float64(ln)*cnt > 1<<48 {
+		if _, isStr := seq.(string); isStr {
+			if exact == nil {
+				exact = big.NewInt(int64(cnt))
+			}
+			if !new(big.Int).Mul(big.NewInt(int64(ln)), exact).IsInt64() {
+				rt.pyRaise("OverflowError", "repeated string is too long")
+			}
+		}
+		rt.pyRaise("MemoryError", "")
 	}
 	k := int(math.Trunc(cnt))
-	if k < 0 {
+	if k < 0 || ln == 0 {
 		k = 0
 	}
 	switch s := seq.(type) {

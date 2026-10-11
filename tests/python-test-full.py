@@ -4147,6 +4147,50 @@ def s77():
     t = [True, 5, -5]
     check("rt4", [repr(+t[0]), repr(-t[0]), repr(+t[1])] == ["1", "-1", "5"] and t[1] >> 10**20 == 0 and t[2] >> 10**20 == -1 and 0 << 10**20 == 0)
 
+# ===== SECTION 78: operand types, repetition counts, builtin dunders =====
+# An arithmetic or bit operator on a pair its builtin types do not serve is a
+# TypeError naming both types; a repetition count is any int, outside a C
+# ssize_t an OverflowError and past what memory can hold a MemoryError. dict |
+# dict merges, and |= updates a dict or a set in place. The builtin types' own
+# dunders read off a value and off the type. Rows from CPython 3.14.
+def s78():
+    v = [4, 2.5, "s", [1], None, {1: 2}, {1}, True, 3]
+    msgs = []
+    for f in [lambda: v[0] - v[2], lambda: v[1] * v[2], lambda: v[1] << v[7], lambda: v[0] - v[3], lambda: v[4] // v[0],
+              lambda: v[5] - v[6], lambda: v[2] ** v[0], lambda: v[3] % v[0], lambda: v[5] | v[0], lambda: v[3] * v[1]]:
+        try:
+            f()
+        except TypeError as e:
+            msgs.append(str(e))
+    check("opty1", msgs == ["unsupported operand type(s) for -: 'int' and 'str'", "can't multiply sequence by non-int of type 'float'",
+                            "unsupported operand type(s) for <<: 'float' and 'bool'", "unsupported operand type(s) for -: 'int' and 'list'",
+                            "unsupported operand type(s) for //: 'NoneType' and 'int'", "unsupported operand type(s) for -: 'dict' and 'set'",
+                            "unsupported operand type(s) for ** or pow(): 'str' and 'int'", "unsupported operand type(s) for %: 'list' and 'int'",
+                            "unsupported operand type(s) for |: 'dict' and 'int'", "can't multiply sequence by non-int of type 'float'"])
+    big = [10**20, 2**63 - 1, 2**60, -2**63]
+    msgs = []
+    for f in [lambda: v[2] * big[0], lambda: big[0] * v[3], lambda: "ab" * big[1], lambda: v[2] * big[2], lambda: v[3] * big[1], lambda: -big[0] * ""]:
+        try:
+            f()
+        except (OverflowError, MemoryError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("opty2", msgs == ["OverflowError: cannot fit 'int' into an index-sized integer", "OverflowError: cannot fit 'int' into an index-sized integer",
+                            "OverflowError: repeated string is too long", "MemoryError: ", "MemoryError: ", "OverflowError: cannot fit 'int' into an index-sized integer"])
+    check("opty3", "" * big[1] == "" and [] * big[2] == [] and v[2] * big[3] == "" and v[2] * v[7] == "s" and v[8] * v[2] == "sss")
+    d = {1: 2}
+    e = d
+    d |= [(5, 6)]
+    s = {1, 2}
+    t = s
+    s |= {3}
+    s -= {1}
+    s &= {2, 3, 9}
+    s ^= {7}
+    check("opty4", v[5] | {3: 4, 1: 5} == {1: 5, 3: 4} and list(v[5] | {3: 4}) == [1, 3] and e is d and e == {1: 2, 5: 6} and t is s and sorted(t) == [2, 3, 7])
+    check("opty5", hasattr(int, "__add__") and hasattr(str, "__add__") and hasattr(list, "__len__") and hasattr(dict, "__getitem__") and not hasattr(str, "__sub__") and not hasattr(int, "__nope__"))
+    check("opty6", v[2].__add__("t") == "st" and v[3].__len__() == 1 and v[5].__len__() == 1 and "ab".__mul__(2) == "abab" and [1].__add__([2]) == [1, 2]
+          and v[5].__getitem__(1) == 2 and "abc".__contains__("b") and getattr("x", "__add__")("y") == "xy" and hasattr(v[3], "__len__") and not hasattr(v[2], "__sub__"))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4225,5 +4269,6 @@ def main():
     s75() # SECTION-CALL 75
     s76() # SECTION-CALL 76
     s77() # SECTION-CALL 77
+    s78() # SECTION-CALL 78
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
