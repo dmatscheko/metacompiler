@@ -1009,9 +1009,10 @@ js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ON
 helpers that happen to be duplicated (7.12 still holds for those).
 
 `lib/js-builtins.js` is different in kind: it is JAVASCRIPT, not MetaJS - Set, Map,
-Array.from and Array.of written in the language and compiled INTO a program by the
-two js grammars (`jsbLoad`, via `load()`) when the program names Set, Map or Array.
-One source compiled by the program's own grammar is what makes all four legs agree.
+Array.from, Array.of and Boolean written in the language and compiled INTO a program
+by the two js grammars (`jsbLoad`, via `load()`) when the program names Set, Map,
+Array or Boolean. One source compiled by the program's own grammar is what makes all
+four legs agree.
 
 There is one shared layer-2 module. A layer-2 call is a scope lookup by NAME, so a
 body in `runtime.metajs` that a language never calls costs that language nothing at

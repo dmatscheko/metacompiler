@@ -4255,8 +4255,18 @@ NotFuncHead = :script(~~
             return {v: o}
         }
         if (name == "freeze" || name == "seal") { return {v: src} }
-        if (name == "is") { return {v: args[0] === args[1]} }
+        if (name == "is") { return {v: sameValue(args[0], args[1])} }
         return null
+    }
+    // Object.is: SameValue, which is === except that NaN is itself and +0 is not -0.
+    // Twins: the "is" arms of abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function sameValue(a, b) {
+        if (typeof a == "number" && typeof b == "number") {
+            if (a !== a) { return b !== b }
+            if (a === 0 && b === 0) { return 1 / a === 1 / b }
+        }
+        if (isBigInt(a) || isBigInt(b)) { return isBigInt(a) && isBigInt(b) && biCmp(a, b) == 0 }
+        return a === b
     }
     function jsStringMethod(s, name, args) {
         // A pattern argument belongs to the regular-expression surface, which
@@ -4580,13 +4590,6 @@ NotFuncHead = :script(~~
         }
         for (var j = 0; j < arguments.length; j++) { out.push(arguments[j]) }
         return out
-    }
-    // Array.isArray READ AS A VALUE (getMember), built on first use; a call is
-    // answered by jsBuiltin.
-    var jsIsArrayV = anytype
-    function jsIsArrayValue() {
-        if (jsIsArrayV === undefined) { jsIsArrayV = fnMetaPut(function (v) { return Array.isArray(v) }, "isArray", 1) }
-        return jsIsArrayV
     }
     // A BigInt operation's TypeError / SyntaxError / RangeError is a JAVASCRIPT
     // exception, not an engine abort: node catches every one of them. The raised record
@@ -5103,19 +5106,22 @@ NotFuncHead = :script(~~
             var bf = builtinFam(o, k)
             if (bf != "") { return builtinValue(bf, k) }
         }
-        if (k === "prototype" && typeof o == "function") {
-            var bp = anytype // The prototype object, or undefined for any other function.
-            bp = builtinProto(o)
+        if (k === "prototype") {
+            var bp = anytype // The prototype object, or undefined for a non-callable.
+            bp = protoOf(o)
             if (bp !== undefined) { return bp }
         }
         var v = anytype // A member is of any type.
         v = getMemberRaw(o, k)
         if (v != undefined) { return v }
-        if (o === jsArrayFn && k === "isArray") { return jsIsArrayValue() }
+        var sv = anytype // A static method of a builtin global, or undefined.
+        sv = staticValue(o, k)
+        if (sv !== undefined) { return sv }
         if (typeof o == "object" && o !== null && hasOwn(o, "__bvof")) {
             var pf = builtinFam(o.__bvof, k)
             if (pf != "") { return builtinValue(pf, k) }
         }
+        if (typeof o == "object" && o !== null && hasOwn(o, "__protoof")) { return protoRead(o.__protoof, "" + k) }
         // isPrivateKey: a private METHOD lives on the class descriptor under '__#m', so
         // the __-name skip would hide it from the walk.
         if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" &&
@@ -5129,6 +5135,37 @@ NotFuncHead = :script(~~
     }
     // The __class/__super walk for a callable member. The `guard` cap is the same 64
     // the rest of this project puts on a descriptor walk.
+    // A STATIC METHOD of a builtin global read as a value - `typeof Object.keys`,
+    // `const k = Object.keys` - one interned function per global and name, which
+    // re-enters jsBuiltin on the global. The names are the ones jsBuiltin answers; the
+    // length is node's. Twins: staticValue in abnf/jsrtjsprint.go, jvStaticValue in
+    // languages/lib/js-rt.metajs.
+    var stVals = {}
+    var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "is", "keys",
+                              "seal", "values"],
+                   "String": ["fromCharCode"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
+                   "Array": ["isArray"]}
+    function staticValue(g, k) {
+        var gn = ""
+        if (g === jsObjectGlobal) { gn = "Object" }
+        if (g === jsStringFn) { gn = "String" }
+        if (g === jsPromiseFn) { gn = "Promise" }
+        if (g === jsArrayFn) { gn = "Array" }
+        if (gn == "" || typeof k != "string" || stNames[gn].indexOf(k) < 0) { return undefined }
+        var key = "$" + gn + "." + k
+        if (hasOwn(stVals, key)) { return stVals[key] }
+        var f = fnMetaPut(staticValueFn(g, k), k, (k == "assign" || k == "is") ? 2 : 1)
+        stVals[key] = f
+        return f
+    }
+    function staticValueFn(g, k) {
+        return function() {
+            pendingThis = undefined
+            var argv = []
+            for (var i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
+            return jsBuiltin(g, k, argv).v
+        }
+    }
     function findClassMethod(o, k) {
         var guard = 0
         for (var cl = o.__class; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
@@ -5170,17 +5207,77 @@ NotFuncHead = :script(~~
         if (Array.isArray(o)) { return hasOwn(bvArr, k) ? "a" : "" }
         return ""
     }
-    // Array.prototype, String.prototype and Number.prototype: an object whose members are
-    // the builtin method values above, so `Array.prototype.slice.call(x)` is `[].slice`
-    // applied to x. It carries a receiver of its kind in __bvof, which builtinFam asks.
-    // Twins: builtinProto in abnf/jsrtjsprint.go, jvBuiltinProto in
-    // languages/lib/js-rt.metajs.
+    // Array.prototype is an empty array (Array.isArray answers true, as in node), and
+    // String.prototype and Number.prototype an object carrying a receiver of its kind in
+    // __bvof, which builtinFam asks; either way its members are the builtin method values
+    // above, so `Array.prototype.slice.call(x)` is `[].slice` applied to x. RegExp,
+    // Promise and BigInt answer a bare object. Twins: builtinProto in
+    // abnf/jsrtjsprint.go, jvBuiltinProto in languages/lib/js-rt.metajs.
     var bvProtos = []
     function builtinProto(f) {
         var at = f === jsArrayFn ? 0 : (f === jsStringFn ? 1 : (f === jsNumberFn ? 2 : -1))
+        if (f === hostGlobals["RegExp"]) { at = 3 }
+        if (f === jsPromiseFn) { at = 4 }
+        if (f === jsBigIntFn) { at = 5 }
         if (at < 0) { return undefined }
-        if (bvProtos.length == 0) { bvProtos = [{"__bvof": []}, {"__bvof": ""}, {"__bvof": 0}] }
+        if (bvProtos.length == 0) { bvProtos = [[], {"__bvof": ""}, {"__bvof": 0}, {}, {}, {}] }
         return bvProtos[at]
+    }
+    // `X.prototype`: a builtin's, or the VIEW of a class's (or a constructor function's)
+    // descriptor. A function's own `prototype` written by the program wins, and is read
+    // from the side table by getMemberRaw.
+    function protoOf(o) {
+        if (isClassDesc(o)) { return protoView(o) }
+        if (typeof o != "function") { return undefined }
+        var bp = anytype
+        bp = builtinProto(o)
+        if (bp !== undefined) { return bp }
+        if (fnOwn(o, "prototype")) { return undefined }
+        return protoView(ctorDescriptor(fnNameOf(o), o))
+    }
+    // THE PROTOTYPE of a class or a constructor function: one VIEW object per class
+    // descriptor, {__protoof: descriptor}, kept on the descriptor as __pview. The
+    // descriptor already holds the instance methods, so the view only answers for it: a
+    // read that misses its own slots is the descriptor chain's method (or, on the Error
+    // classes, the name), and a FUNCTION written onto it is installed on the descriptor
+    // too, wrapped to take the receiver prepended as a class method does. Every callable
+    // that is not a builtin global answers one, arrows and methods included (node: no
+    // prototype), as every callable is also accepted by `new` here. Twins: protoView in
+    // abnf/jsrtjsprint.go, jvProtoView in languages/lib/js-rt.metajs.
+    function protoView(d) {
+        if (hasOwn(d, "__pview")) { return d.__pview }
+        var v = {}
+        v["__protoof"] = d
+        v["__keys"] = []
+        d["__pview"] = v
+        return v
+    }
+    function protoRead(d, k) {
+        if (k == "constructor") {
+            if (hasOwn(d, "__ctorfn")) { return d.__ctorfn }
+            return d
+        }
+        var guard = 0
+        for (var cl = d; cl != undefined && cl != null && guard < 64; cl = cl.__super) {
+            if (hasOwn(cl, k) && typeof cl[k] == "function") { return methodValueShim(cl[k], k) }
+            guard = guard + 1
+        }
+        if (k == "name" || k == "message") {
+            guard = 0
+            for (var ec = d; ec != undefined && ec != null && guard < 64; ec = ec.__super) {
+                if (hasOwn(ec, "__errname")) { return (k == "message") ? "" : ec.__errname }
+                guard = guard + 1
+            }
+        }
+        return undefined
+    }
+    function protoWrite(d, k, v) {
+        if (typeof v != "function" || isInternalKey(k)) { return }
+        d[k] = function() {
+            var rest = []
+            for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+            return callWithThis(v, arguments[0], rest)
+        }
     }
     function builtinValue(fam, k) {
         var key = "$" + fam + k
@@ -5480,6 +5577,7 @@ NotFuncHead = :script(~~
         // A write over a builtin Math member keeps it non-enumerable. A deleted one
         // reads undefined here, so writing it again lists it, as in node.
         if (o === jsMathObj && hasOwn(o, k) && o[k] !== undefined) { scopePut(o, k, v); return }
+        if (o != undefined && o != null && typeof o == "object" && hasOwn(o, "__protoof")) { protoWrite(o.__protoof, "" + k, v) }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
     }
@@ -9447,14 +9545,14 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of) is JavaScript, compiled into a
-    // program that names Set, Map or Array (jsbRef, at the VarRef and typeof-name tags)
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean) is JavaScript, compiled into a
+    // program that names Set, Map, Array or Boolean (jsbRef, at the VarRef and typeof-name tags)
     // and run before anything that could use it: before an imported file's top level and
     // before the program's. Twin of jsbLoad in js-to-llvm-ir.abnf.
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean") { jsbWant = true }
         return name
     }
     function jsbLoad() {

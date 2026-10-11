@@ -78,8 +78,13 @@ func (rt *jsrt) jsvCallMethod(o *jsObject, name string) (interface{}, bool) {
 // 64 the rest of this project puts on a descriptor walk - a cyclic __super hangs the
 // oracle too, and no program here can express a 65-deep hierarchy.
 func jsvFindClassMethod(o *jsObject, name string) (interface{}, bool) {
+	return jsvFindMethodFrom(o.props["__class"], name)
+}
+
+// jsvFindMethodFrom walks the __super chain from the descriptor cls.
+func jsvFindMethodFrom(cls interface{}, name string) (interface{}, bool) {
 	guard := 0
-	for cls := o.props["__class"]; cls != nil && guard < 64; guard++ {
+	for ; cls != nil && guard < 64; guard++ {
 		clsObj, ok := cls.(*jsObject)
 		if !ok {
 			break
@@ -253,6 +258,16 @@ func jsvObjProtoName(k string) bool {
 		return true
 	}
 	return false
+}
+
+// jsvStaticNames: the static methods of each builtin global that js_jsmcall answers.
+// Twins: stNames in both *-interpreter.abnf, jvStaticHas in
+// languages/lib/js-rt.metajs.
+var jsvStaticNames = map[string][]string{
+	"Object":  {"assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "is", "keys", "seal", "values"},
+	"String":  {"fromCharCode"},
+	"Promise": {"resolve", "reject", "all", "allSettled", "race", "any"},
+	"Array":   {"isArray"},
 }
 
 func jsvInNames(names []string, k string) bool {
@@ -1134,6 +1149,19 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 		case "freeze", "seal":
 			return argAt(args, 0), true
 		case "is":
+			// SameValue: === except that NaN is itself and +0 is not -0. Twins:
+			// jvSameValue in languages/lib/js-rt.metajs, sameValue in both
+			// *-interpreter.abnf.
+			x, xNum := argAt(args, 0).(float64)
+			y, yNum := argAt(args, 1).(float64)
+			if xNum && yNum {
+				if x != x {
+					return y != y, true
+				}
+				if x == 0 && y == 0 {
+					return math.Signbit(x) == math.Signbit(y), true
+				}
+			}
 			return rt.strictEq(argAt(args, 0), argAt(args, 1)), true
 		}
 		return nil, false
@@ -1876,11 +1904,6 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// and new Array(n) are n empty slots (read as undefined), any other argument list
 	// is the array of the arguments. Twins: js_jsarrayfn in languages/lib/js-rt.metajs
 	// and jsArrayFn in js-interpreter.abnf.
-	// Array.isArray READ AS A VALUE (js_jsvget); a call is answered by jsvMethod.
-	isArrayFn := jsHostFunc("isArray", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		_, isArr := argAt(args, 0).(*jsArray)
-		return isArr
-	})
 	m["js_jsarrayfn"] = func(a []uint64) uint64 {
 		return w(jsHostFunc("Array", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 1 {
@@ -1929,6 +1952,92 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return d
 	}
 	m["js_jsctordesc"] = func(a []uint64) uint64 { return w(descOf(u(a[0]))) }
+	// THE PROTOTYPE of a class or a constructor function: one VIEW object per class
+	// descriptor, {__protoof: descriptor}, kept on the descriptor as __pview. The
+	// descriptor already holds the instance methods, so the view only answers for it:
+	// a read that misses its own slots is the descriptor chain's method (or, on the
+	// Error classes, the name), and a FUNCTION written onto it is installed on the
+	// descriptor too, wrapped to take the receiver prepended as a class method does -
+	// which is what makes `F.prototype.m = function () {...}` a method of every
+	// instance, and an override of a class method of that name. Every callable that
+	// is not a builtin global answers one, arrows and methods included (node: no
+	// prototype), as every callable is also accepted by `new` here. Twins: protoView
+	// in both *-interpreter.abnf, jvProtoView in languages/lib/js-rt.metajs.
+	// A STATIC METHOD of a builtin global read as a value - `typeof Object.keys`,
+	// `const k = Object.keys` - one interned function per global and name, which
+	// re-enters js_jsmcall on the global. The names are the ones js_jsmcall answers;
+	// the length is node's. Twins: staticValue in both *-interpreter.abnf,
+	// jvStaticValue in languages/lib/js-rt.metajs.
+	staticVals := map[string]*hostFunc{}
+	staticValue := func(g interface{}, name string) *hostFunc {
+		gname := ""
+		if jsvIsObjectGlobal(g) {
+			gname = "Object"
+		} else if hf, ok := g.(*hostFunc); ok {
+			gname = hf.name
+		}
+		if !jsvInNames(jsvStaticNames[gname], name) {
+			return nil
+		}
+		key := gname + "." + name
+		if f, found := staticVals[key]; found {
+			return f
+		}
+		f := jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return u(m["js_jsmcall"]([]uint64{w(g), w(name), w(&jsArray{elems: append([]interface{}{}, args...)})}))
+		})
+		length := 1
+		if name == "assign" || name == "is" {
+			length = 2
+		}
+		jsvFnMetaSet(f, name, length)
+		staticVals[key] = f
+		return f
+	}
+	protoView := func(d *jsObject) *jsObject {
+		if v, ok := d.props["__pview"].(*jsObject); ok {
+			return v
+		}
+		v := newJSObject()
+		v.set("__protoof", d)
+		d.set("__pview", v)
+		return v
+	}
+	protoRead := func(d *jsObject, name string) interface{} {
+		if name == "constructor" {
+			if fn, has := d.props["__ctorfn"]; has {
+				return fn
+			}
+			return d
+		}
+		if fn, found := jsvFindMethodFrom(d, name); found {
+			return jsvMethodValue(name, fn)
+		}
+		if name == "name" || name == "message" {
+			guard := 0
+			for c, _ := interface{}(d).(*jsObject); c != nil && guard < 64; guard++ {
+				if en, has := c.props["__errname"]; has {
+					if name == "message" {
+						return ""
+					}
+					return en
+				}
+				c, _ = c.props["__super"].(*jsObject)
+			}
+		}
+		return nil
+	}
+	protoWrite := func(d *jsObject, name string, v interface{}) {
+		if !isCallable(v) || jsvInternalKey(name) {
+			return
+		}
+		d.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if len(args) == 0 {
+				return rt.call(v, jsUndef, nil)
+			}
+			return rt.call(v, args[0], args[1:])
+		}))
+	}
 	// [[Construct]]: an object the constructor RETURNS wins over the fresh receiver.
 	m["js_jsnewres"] = func(a []uint64) uint64 {
 		r := u(a[0])
@@ -2216,11 +2325,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		builtinVals[key] = f
 		return f
 	}
-	// Array.prototype, String.prototype and Number.prototype: an object whose members
-	// are the builtin method values, carrying a receiver of its kind in __bvof, which
-	// jsvBuiltinFam asks. Twins: builtinProto in both *-interpreter.abnf,
-	// jvBuiltinProto in languages/lib/js-rt.metajs.
-	builtinProtos := map[string]*jsObject{}
+	// Array.prototype is an empty array (Array.isArray answers true, as in node), and
+	// String.prototype and Number.prototype an object carrying a receiver of its kind
+	// in __bvof, which jsvBuiltinFam asks; either way its members are the builtin
+	// method values. RegExp, Promise and BigInt answer a bare object. Twins:
+	// builtinProto in both *-interpreter.abnf, jvBuiltinProto in
+	// languages/lib/js-rt.metajs.
+	builtinProtos := map[string]interface{}{}
 	builtinProto := func(fn interface{}) interface{} {
 		hf, isHost := fn.(*hostFunc)
 		if !isHost {
@@ -2234,14 +2345,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			of = ""
 		case "Number":
 			of = float64(0)
+		case "RegExp", "Promise", "BigInt":
 		default:
 			return nil
 		}
 		if p, found := builtinProtos[hf.name]; found {
 			return p
 		}
-		p := newJSObject()
-		p.set("__bvof", of)
+		var p interface{} = of
+		if hf.name != "Array" {
+			o := newJSObject()
+			if of != nil {
+				o.set("__bvof", of)
+			}
+			p = o
+		}
 		builtinProtos[hf.name] = p
 		return p
 	}
@@ -2257,11 +2375,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if fam := jsvBuiltinFam(u(a[0]), rt.toString(u(a[1]))); fam != 0 {
 			return w(builtinValue(fam, rt.toString(u(a[1]))))
 		}
-		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else.
-		// Ordered in front of baseGet because the descriptor's own property map is
-		// where its INSTANCE methods live, and answering one of those for `C.m` would
-		// be wrong.
+		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else,
+		// its prototype aside. Ordered in front of baseGet because the descriptor's own
+		// property map is where its INSTANCE methods live, and answering one of those
+		// for `C.m` would be wrong.
 		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
+			if rt.toString(u(a[1])) == "prototype" {
+				return w(protoView(cls))
+			}
 			return rt.jsvStaticSideRead(cls, rt.toString(u(a[1])))
 		}
 		// The FAST PATH must not re-wrap: the handle baseGet answered is returned
@@ -2292,12 +2413,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if m := rt.jsvFnMethod(u(a[0]), rt.toString(u(a[1]))); m != nil {
 				return w(m)
 			}
-			if hf, isFn := u(a[0]).(*hostFunc); isFn && hf.name == "Array" && rt.toString(u(a[1])) == "isArray" {
-				return w(isArrayFn)
+			if f := staticValue(u(a[0]), rt.toString(u(a[1]))); f != nil {
+				return w(f)
 			}
 			if rt.toString(u(a[1])) == "prototype" {
 				if p := builtinProto(u(a[0])); p != nil {
 					return w(p)
+				}
+				if isCallable(u(a[0])) {
+					return w(protoView(descOf(u(a[0]))))
 				}
 			}
 			return r
@@ -2310,6 +2434,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if fam := jsvBuiltinFam(of, name); fam != 0 {
 				return w(builtinValue(fam, name))
 			}
+		}
+		if d, isView := recv.props["__protoof"].(*jsObject); isView {
+			if v := protoRead(d, name); v != nil {
+				return w(v)
+			}
+			return r
+		}
+		if f := staticValue(recv, name); f != nil {
+			return w(f)
 		}
 		// `e.constructor` is the CLASS an instance was built from (and, for
 		// `new F()`, the function F itself).
@@ -2648,6 +2781,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if o, isObj := u(a[0]).(*jsObject); isObj {
 			if rt.toString(u(a[1])) == "name" {
 				jsvErrNameWrite(o)
+			}
+			if d, isView := o.props["__protoof"].(*jsObject); isView {
+				protoWrite(d, rt.toString(u(a[1])), u(a[2]))
 			}
 		}
 		return baseSet(a)

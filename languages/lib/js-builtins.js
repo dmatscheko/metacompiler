@@ -1,12 +1,12 @@
-// js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes and Array.from /
-// Array.of, written in the language itself and compiled INTO a program by the js
-// grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf). A
-// program that names Set, Map or Array gets this file in front of it; one that does
-// not pays nothing. Being one JavaScript source compiled by the same grammars is what
+// js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
+// Array.of and Boolean, written in the language itself and compiled INTO a program by
+// the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
+// A program that names Set, Map, Array or Boolean gets this file in front of it; one
+// that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
 // makes the interpreter, llvm.Run and a native binary agree on every answer here.
 //
 // It is a Script ('.js'), runs before the program's own top level, and a program that
-// declares a Set, a Map or an Array.from of its own replaces these.
+// declares a Set, a Map, an Array.from or a Boolean of its own replaces these.
 //
 // ITERATION. This subset has no Symbol, so there is no [Symbol.iterator]: for-of, a
 // spread, array destructuring and yield* drive any value with a callable `next` member
@@ -225,3 +225,7 @@ Array.from = function from(items, mapFn, self) {
 }
 
 Array.of = function of(...items) { return items }
+
+// Boolean(v): ToBoolean, so `[0, 1, ""].filter(Boolean)` keeps the truthy ones. There
+// are no wrapper objects here: `new Boolean(v)` builds a plain object.
+function Boolean(v) { return !!v }

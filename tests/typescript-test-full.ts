@@ -3328,6 +3328,32 @@ function s62() {
         [j(o.next()), j(o.return(7)), j(o.next())].join() === "1/false,f/false,o:7/true");
 }
 
+// ===== SECTION 63: prototypes, static methods as values, Boolean, Object.is =====
+// A class's and a constructor function's prototype is an object: a function written
+// onto it is a method of every instance (and replaces a class method of that name),
+// its methods read as values, and `constructor` is the class. The builtin globals'
+// prototypes are objects (Array's an array), a static method reads as a function,
+// Boolean is ToBoolean and Object.is is SameValue. Values read off node 24.
+function F63(this: any, x: number) { this.x = x; }
+class C63 { v: number; m(): string { return "m" + this.v; } constructor() { this.v = 1; } }
+class D63 extends C63 {}
+function s63() {
+    const fp: any = (F63 as any).prototype;
+    fp.get = function (this: any) { return this.x; };
+    const f: any = new (F63 as any)(7);
+    check("pr63a", typeof fp === "object" && f.get() === 7 && fp.constructor === F63 && Object.keys(fp).join() === "get");
+    const cp: any = C63.prototype;
+    cp.n = function (this: any) { return "n" + this.v; };
+    const c: any = new C63();
+    cp.m = function (this: any) { return "p" + this.v; };
+    check("pr63b", c.n() === "n1" && c.m() === "p1" && cp.constructor === C63 && (new D63() as any).n() === "n1" &&
+        (Error.prototype as any).name === "Error" && Array.isArray(Array.prototype) && typeof RegExp.prototype === "object");
+    const k = Object.keys;
+    check("st63c", typeof Object.keys === "function" && k({x: 1, y: 2}).join() === "x,y" && Object.keys === Object.keys &&
+        [[1], 2].filter(Array.isArray).length === 1 && typeof Boolean === "function" &&
+        [0, 1, "", "a"].filter(Boolean).length === 2 && Object.is(NaN, 0 / 0) && !Object.is(0, -0));
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3393,6 +3419,7 @@ function main(): number {
     s60(); // SECTION-CALL 60
     s61(); // SECTION-CALL 61
     s62(); // SECTION-CALL 62
+    s63(); // SECTION-CALL 63
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

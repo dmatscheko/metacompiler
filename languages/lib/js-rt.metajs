@@ -291,13 +291,18 @@ var jvJsonObj = anytype
 // recognize the receiver of String.fromCharCode (the Go twin tests hf.name).
 var jvStringFn = anytype
 
-// The `Array` global js_jsarrayfn handed out, for Array.isArray and instanceof, and
-// Array.isArray read as a value (jvValueMiss).
+// The `Array` global js_jsarrayfn handed out, for Array.isArray and instanceof.
 var jvArrayFn = anytype
-var jvIsArrayV = anytype
 
 // The `Number` global js_jsnumberfn handed out, for Number.prototype.
 var jvNumberFn = anytype
+
+// The `BigInt` global js_jsbigintfn handed out, for BigInt.prototype.
+var jvBigIntFn = anytype
+
+// The count of prototype views (jvProtoView): while it is 0 no member write can
+// meet one, and js_jsmset skips the test.
+var jvPvN = 0
 
 // ===================================================== function properties ==
 //
@@ -1357,9 +1362,12 @@ function js_jsvget(o, key) {
                 return jvApplyShim(o)
             }
         }
-        // The static namespace, exactly as in js_jsmget.
+        // The static namespace, exactly as in js_jsmget, its prototype aside.
         if (jvClsN > 0) {
-            if (jvIsStaticSide(o, key)) { return jvStaticSideRead(o, key) }
+            if (jvIsStaticSide(o, key)) {
+                if (key == "prototype") { return jvProtoView(o) }
+                return jvStaticSideRead(o, key)
+            }
         }
         if (jvAccN > 0) {
             if (jvIsObj(o)) {
@@ -1428,6 +1436,12 @@ function jvValueMiss(o, key) {
             var pf = jvBuiltinFam(bof, key)
             if (pf != "") { return jvBuiltinValue(pf, key) }
         }
+        if (jvPvN > 0) {
+            var pd = anytype
+            pd = o["__protoof"]
+            if (pd !== undefined) { return jvProtoRead(pd, key) }
+        }
+        if (jvIsObjectGlobal(o)) { return jvStaticValue(o, key) }
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
             if (fn !== undefined) { return jvMethodValue(fn, key) }
@@ -1442,35 +1456,151 @@ function jvValueMiss(o, key) {
             return undefined
         }
     }
-    if (key == "isArray" && jvArrayFn !== undefined && o === jvArrayFn) {
-        if (jvIsArrayV === undefined) { jvIsArrayV = function (v) { return Array.isArray(v) } }
-        return jvIsArrayV
-    }
     if (key == "prototype") { return jvBuiltinProto(o) }
-    return undefined
+    return jvStaticValue(o, key)
 }
 
-// Array.prototype, String.prototype and Number.prototype: an object whose members are
-// the builtin method values, carrying a receiver of its kind in __bvof, which
-// jvBuiltinFam asks. Twins: builtinProto in abnf/jsrtjsprint.go and in
-// both *-interpreter.abnf.
+// A STATIC METHOD of a builtin global read as a value - `typeof Object.keys`,
+// `const k = Object.keys` - one interned function per global and name, which
+// re-enters js_jsmcall on the global. The names are the ones js_jsmcall answers;
+// the length is node's. Twins: staticValue in abnf/jsrtjsprint.go and in both
+// *-interpreter.abnf.
+var jvStaticVals = {}
+function jvStaticHas(g, key) {
+    if (g == "Object") {
+        return key == "assign" || key == "entries" || key == "freeze" || key == "fromEntries" ||
+            key == "getOwnPropertyNames" || key == "is" || key == "keys" || key == "seal" || key == "values"
+    }
+    if (g == "String") { return key == "fromCharCode" }
+    if (g == "Promise") {
+        return key == "resolve" || key == "reject" || key == "all" || key == "allSettled" || key == "race" || key == "any"
+    }
+    if (g == "Array") { return key == "isArray" }
+    return false
+}
+function jvStaticValue(g, key) {
+    var gn = ""
+    if (jvIsObjectGlobal(g)) { gn = "Object" }
+    if (jvStringFn !== undefined && g === jvStringFn) { gn = "String" }
+    if (jpFn !== undefined && g === jpFn) { gn = "Promise" }
+    if (jvArrayFn !== undefined && g === jvArrayFn) { gn = "Array" }
+    if (!jvStaticHas(gn, key)) { return undefined }
+    var k = "$" + gn + "." + key
+    var got = anytype
+    got = jvStaticVals[k]
+    if (got !== undefined) { return got }
+    var len = 1
+    if (key == "assign" || key == "is") { len = 2 }
+    var f = anytype
+    f = fnMetaSet(jvStaticValueFn(g, key), key, len)
+    jvStaticVals[k] = f
+    return f
+}
+function jvStaticValueFn(g, key) {
+    return function () {
+        var a = []
+        var i = 0
+        while (i < arguments.length) {
+            a.push(arguments[i])
+            i = i + 1
+        }
+        return js_jsmcall(g, key, a)
+    }
+}
+
+// Array.prototype is an empty array (Array.isArray answers true, as in node), and
+// String.prototype and Number.prototype an object carrying a receiver of its kind in
+// __bvof, which jvBuiltinFam asks; either way its members are the builtin method
+// values. RegExp, Promise and BigInt answer a bare object, and any other callable its
+// constructor descriptor's view (jvProtoView). Twins: builtinProto in
+// abnf/jsrtjsprint.go and in both *-interpreter.abnf.
 var jvBuiltinProtos = []
 function jvBuiltinProto(f) {
     var at = -1
     if (jvArrayFn !== undefined && f === jvArrayFn) { at = 0 }
     if (jvStringFn !== undefined && f === jvStringFn) { at = 1 }
     if (jvNumberFn !== undefined && f === jvNumberFn) { at = 2 }
-    if (at < 0) { return undefined }
+    if (f === jxRegExpFn) { at = 3 }
+    if (jpFn !== undefined && f === jpFn) { at = 4 }
+    if (jvBigIntFn !== undefined && f === jvBigIntFn) { at = 5 }
+    if (at < 0) {
+        if (jvIsCallable(f)) { return jvProtoView(js_jsctordesc(f)) }
+        return undefined
+    }
     if (jvBuiltinProtos.length == 0) {
-        var pa = {}
-        pa["__bvof"] = []
         var ps = {}
         ps["__bvof"] = ""
         var pn = {}
         pn["__bvof"] = 0
-        jvBuiltinProtos = [pa, ps, pn]
+        jvBuiltinProtos = [[], ps, pn, {}, {}, {}]
     }
     return jvBuiltinProtos[at]
+}
+
+// THE PROTOTYPE of a class or a constructor function: one VIEW object per class
+// descriptor, {__protoof: descriptor}, kept on the descriptor as __pview. The
+// descriptor already holds the instance methods, so the view only answers for it: a
+// read that misses its own slots is the descriptor chain's method (or, on the Error
+// classes, the name), and a FUNCTION written onto it is installed on the descriptor
+// too, wrapped to take the receiver prepended as a class method does. Twins: protoView
+// in abnf/jsrtjsprint.go and in both *-interpreter.abnf.
+function jvProtoView(d) {
+    var v = anytype
+    v = d["__pview"]
+    if (v !== undefined) { return v }
+    v = {}
+    v["__protoof"] = d
+    d["__pview"] = v
+    jvPvN = jvPvN + 1
+    return v
+}
+function jvProtoRead(d, key) {
+    if (key == "constructor") {
+        var cf = anytype
+        cf = d["__ctorfn"]
+        if (cf !== undefined) { return cf }
+        return d
+    }
+    var cls = anytype
+    cls = d
+    var guard = 0
+    while (jvIsObj(cls) && guard < 64) {
+        var m = anytype
+        m = cls[key]
+        if (jvIsCallable(m)) { return jvMethodValue(m, key) }
+        cls = cls["__super"]
+        guard = guard + 1
+    }
+    if (key == "name" || key == "message") {
+        cls = d
+        guard = 0
+        while (jvIsObj(cls) && guard < 64) {
+            var en = anytype
+            en = cls["__errname"]
+            if (en !== undefined) {
+                if (key == "message") { return "" }
+                return en
+            }
+            cls = cls["__super"]
+            guard = guard + 1
+        }
+    }
+    return undefined
+}
+function jvProtoWrite(d, key, v) {
+    if (!jvIsCallable(v)) { return undefined }
+    var k = jvStr(key)
+    if (k.length >= 2) { if (k.substring(0, 2) == "__") { return undefined } }
+    d[k] = function () {
+        var a = []
+        var i = 1
+        while (i < arguments.length) {
+            a.push(arguments[i])
+            i = i + 1
+        }
+        return jvCallT(v, arguments[0], a)
+    }
+    return undefined
 }
 
 // js_has plus the __class methods: an instance keeps its methods on its class
@@ -1583,6 +1713,13 @@ function js_jsmset(o, key, v) {
     }
     if (jvErrN > 0) {
         if (key === "name") { jvErrNameWrite(o) }
+    }
+    if (jvPvN > 0) {
+        if (jvIsObj(o)) {
+            var pd = anytype
+            pd = o["__protoof"]
+            if (pd !== undefined) { jvProtoWrite(pd, key, v) }
+        }
     }
     o[key] = v
     return undefined
@@ -3349,8 +3486,18 @@ function jvObjectGlobalMethod(name, args) {
         return fo
     }
     if (name == "freeze" || name == "seal") { return src }
-    if (name == "is") { return jvArg(args, 0) === jvArg(args, 1) }
+    if (name == "is") { return jvSameValue(jvArg(args, 0), jvArg(args, 1)) }
     return jvMiss
+}
+
+// Object.is: SameValue, which is === except that NaN is itself and +0 is not -0.
+// Twins: the "is" arm of abnf/jsrtjsprint.go, sameValue in both *-interpreter.abnf.
+function jvSameValue(a, b) {
+    if (typeof a == "number" && typeof b == "number") {
+        if (a !== a) { return b !== b }
+        if (a === 0 && b === 0) { return 1 / a === 1 / b }
+    }
+    return a === b
 }
 
 // ===================================================== the method call =====
@@ -4302,11 +4449,12 @@ function js_jsbigint(src) {
 // The BigInt(v) global, declared into the program scope by the grammar the way
 // String / Object / println already are.
 function js_jsbigintfn() {
-    return function(v) {
+    jvBigIntFn = function(v) {
         if (v === undefined) { jbRaise("TypeError: Cannot convert undefined to a BigInt") }
         jbStrict = true
         return jbOf(v)
     }
+    return jvBigIntFn
 }
 
 // Number(v): the only way back OUT of a BigInt, since unary '+' refuses it.

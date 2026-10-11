@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-68.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-70.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,14 +6,15 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-68, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-70, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
 //                             g.return() at a yield*, builtin methods as values,
 //                             the own names of Math / JSON / Object and `in`,
 //                             super reaching Object.prototype, g.return(v) as a
-//                             return completion
+//                             return completion, where yield and return stand,
+//                             prototypes, static methods as values, Boolean
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1498,6 +1499,49 @@ function s69() {
     check("ig69a", vals.join() === "1,2,7" && yield === 3 && after() === 6)
 }
 
+// ===== SECTION 70: prototypes, static methods as values, Boolean, Object.is =====
+// A class's and a constructor function's prototype is an object: a function written
+// onto it is a method of every instance (and replaces a class method of that name),
+// its methods read as values, and `constructor` is the class. The builtin globals'
+// prototypes are objects (Array's an array), a static method reads as a function,
+// Boolean is ToBoolean and Object.is is SameValue. Values read off node 24.
+function F70(x) { this.x = x }
+class C70 { m() { return "m" + this.v } constructor() { this.v = 1 } }
+class D70 extends C70 {}
+class E70 extends Error {}
+function s70() {
+    F70.prototype.get = function () { return this.x }
+    const f = new F70(7)
+    check("pr70a", typeof F70.prototype === "object" && F70.prototype === F70.prototype && f.get() === 7 &&
+        typeof f.get === "function" && ("get" in f) && F70.prototype.constructor === F70 &&
+        Object.keys(F70.prototype).join() === "get")
+    C70.prototype.n = function () { return "n" + this.v }
+    const c = new C70()
+    const before = c.m()
+    C70.prototype.m = function () { return "p" + this.v }
+    check("pr70b", c.n() === "n1" && before === "m1" && c.m() === "p1" && C70.prototype.constructor === C70 &&
+        C70.prototype.n.call({v: 6}) === "n6" && new D70().n() === "n1" && typeof D70.prototype.n === "function" &&
+        D70.prototype.constructor === D70)
+    const p = F70.prototype
+    p.twice = function () { return this.x * 2 }
+    check("pr70c", new F70(4).twice() === 8 && Error.prototype.name === "Error" && TypeError.prototype.name === "TypeError" &&
+        Error.prototype.message === "" && typeof Error.prototype.toString === "function" && E70.prototype.name === "Error" &&
+        typeof RangeError.prototype === "object" && typeof Map.prototype.get === "function" && typeof Set.prototype === "object")
+    check("pr70d", typeof RegExp.prototype === "object" && typeof Promise.prototype === "object" &&
+        typeof BigInt.prototype === "object" && Array.isArray(Array.prototype) && Array.prototype.length === 0 &&
+        typeof String.prototype === "object")
+    const k = Object.keys
+    check("st70e", typeof Object.keys === "function" && typeof Object.assign === "function" && typeof Object.fromEntries === "function" &&
+        k({x: 1, y: 2}).join() === "x,y" && Object.keys.name === "keys" && Object.assign.length === 2 && Object.keys === Object.keys &&
+        String.fromCharCode === String.fromCharCode && typeof Promise.resolve === "function" &&
+        JSON.stringify([{a: 1}, {b: 2}].map(Object.keys)) === '[["a"],["b"]]' && [[1], 2].filter(Array.isArray).length === 1)
+    check("bo70f", typeof Boolean === "function" && Boolean.name === "Boolean" && Boolean.length === 1 &&
+        [0, 1, "", "a", null, NaN, [], 0n, 5n, -0].map(Boolean).join() === "false,true,false,true,false,false,true,false,true,false" &&
+        Boolean() === false)
+    check("is70g", Object.is(NaN, 0 / 0) && !Object.is(0, -0) && Object.is(-0, -1 / Infinity) && !Object.is(NaN, "NaN") &&
+        Object.is(10n, 10n) && !Object.is({}, {}) && Object.is("a", "a"))
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1526,6 +1570,7 @@ function main() {
     s67() // SECTION-CALL 67
     s68() // SECTION-CALL 68
     s69() // SECTION-CALL 69
+    s70() // SECTION-CALL 70
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

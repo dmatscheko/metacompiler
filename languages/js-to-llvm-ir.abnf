@@ -3639,14 +3639,14 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of) is JavaScript, compiled into a
-    // program that names Set, Map or Array (jsbRef, at the VarRef and typeof-name tags),
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean) is JavaScript, compiled into a
+    // program that names Set, Map, Array or Boolean (jsbRef, at the VarRef and typeof-name tags),
     // like an imported file but emitted FIRST, before every imported file's top level,
     // since any of them may use it. Twin of jsbLoad in js-interpreter.abnf.
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean") { jsbWant = true }
         return name
     }
     function jsbLoad() {
@@ -4998,7 +4998,8 @@ NotFuncHead = :script(~~
                 curThis = cur
                 var kr = s.key(b)
                 b = kr.b
-                cur = callExt(b, memGetExt(), [cur, kr.v])
+                // `F.prototype.m = ...`: a prototype is answered by the value read only.
+                cur = callExt(b, (s.name === "prototype") ? "js_jsvget" : memGetExt(), [cur, kr.v])
             } else {
                 var argsV = callExt(b, "js_arr_new", [])
                 b = pushArgs(b, argsV, s.args)
