@@ -1013,7 +1013,9 @@ DeepTyCore  = "[" Type [ ":" Type ] "]"
 NotTypeSuffix = !"?" !"!" !"." !"&" ;
 // let (a, _, c) = someTuple - a tuple-pattern declaration; _ discards its element.
 DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
+            = ( "let" | "var" ) KwEnd TupNames [ ":" DeclTupTy ] "=" Expression [ ";" ] ;
+// `let (a, b): (Double, Int) = (1, 2)`: the annotation types the literal, so a is 1.0.
+DeclTupTy   <~~ push({dtty: stripWs(up.in)}) ~~> = Type ;
 TupNames    <~~ push({tnames: takeAll()}) ~~>
             = "(" TupName { "," TupName } ")" ;
 TupName     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
@@ -1136,10 +1138,16 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // without the "no = next" test `a != b` would read as the target `a!` followed by
 // `= b` and silently become an assignment. A `!` here is otherwise a no-op - an
 // Optional IS its value in this model - so it pushes nothing.
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(swBt(up.in)) ~~>
-              { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } ;
+Target      <~~ push(swNoteWrite(makeTargetRef(takeAll()))) ~~>
+            = ( Id <~~ push(swBt(up.in)) ~~> | "$" :whitespace() TShort :whitespace(Whitespace) )
+              { TOpt | "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } ;
+// `a?.b = c` / `a?[i] = c`: an optional-chain target. The segment after the `?`
+// carries `opt`: a nil there skips the whole assignment, right-hand side included.
+TOpt        = NoSpace "?" NotChar63 ( "." Id <~~ push({key: swBt(up.in), opt: true}) ~~> | TOptIdx ) ;
+TOptIdx     <~~ push({idx: makeIndexKey(takeAll()), opt: true}) ~~>
+            = "[" IndexArg { "," IndexArg } "]" ;
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
+TShort      <~~ push("$" + up.in) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
 TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
@@ -1519,8 +1527,9 @@ ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
             = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" ClRetTy ] KwIn
             | [ CaptureList ] ClParam { "," ClParam } [ "->" ClRetTy ] KwIn
             | CaptureList KwIn ;
-ClParam     = Id <~~ push(swBt(up.in)) ~~> [ ":" ClParamTy ] ;
+ClParam     = Id <~~ push(swBt(up.in)) ~~> [ ":" [ ClInout ] ClParamTy ] ;
 ClParamTy   <~~ push({ptype: stripWs(up.in)}) ~~> = Type ;
+ClInout     <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
 ClRetTy     <~~ push({rtype: stripWs(up.in)}) ~~> = Type ;
 // { [x, weak y] in ... }: a capture list snapshots the named variables at the
 // moment the closure is created.
@@ -4446,9 +4455,11 @@ KwContinue  = "continue" KwEnd ;
         // `(3 as Int8) is Int8` is true (swiftc 6.1.2).
         // A name that is not Double/Float/a sized integer adopts NOTHING, so `x as
         // Any`, `as String` and every upcast are untouched, and `as Int64` stays the
-        // plain number Int already is.
-        if (!swAdoptable(tname)) { return t }
-        return function() { return swAdoptTy(t(), tname) }
+        // plain number Int already is. A STRUCTURAL type with such a leaf types its
+        // literal the same way: `[1, 2] as [Double]` is [1.0, 2.0].
+        if (swAdoptable(tname)) { return function() { return swAdoptTy(t(), tname) } }
+        if (swAdoptNeeded(tname)) { return function() { return swAdoptAnn(t(), tname) } }
+        return t
     }
     function makeCast(items, pos, txt) {
         if (items.length == 1) { return items[0] }
@@ -4679,9 +4690,13 @@ KwContinue  = "continue" KwEnd ;
     // let (a, _, c) = t  /  (x, y) = (y, x): bind or assign element by element.
     function makeDeclTuple(items) {
         var names = items[0].tnames
-        var init = items[1]
+        var ty = items[1].dtty != undefined ? items[1].dtty : ""
+        var init = items[items.length - 1]
+        if (!swAdoptNeeded(ty)) { ty = "" }
         return function() {
-            var v = init()
+            var v = anytype
+            v = init()
+            if (ty != "") { v = swAdoptAnn(v, ty) }
             for (var i = 0; i < names.length; i++) {
                 if (names[i] != "_") { declVar(names[i], swCopy(tupleAt(v, i))) }
             }
@@ -5230,14 +5245,36 @@ KwContinue  = "continue" KwEnd ;
     // The signature's declared types ride alongside its names: ptypes[i] is the
     // annotation of names[i] (or "" when it has none) and rtype is the closure's
     // return type. Both adopt at call time - see makeClosure.
+    // The names the walk has seen written - an assignment target's head, a
+    // mutating call's receiver - with their source offsets. A closure parameter its
+    // body writes is inout even unannotated (`ap { x in x += 2 }`, `{ $0 += 1 }`):
+    // Swift rejects a write to a plain parameter, so the context type declared it.
+    // A wrong guess is harmless, because an inout closure parameter only opens an
+    // argument that IS a `&x` box. Twin of the same pair in the other swift grammar.
+    var swWrites = []
+    function swNoteWrite(ref) {
+        swWrites.push({n: ref.name, at: up.start})
+        return ref
+    }
+    function swClInouts(params, inouts, from, to) {
+        var out = []
+        for (var i = 0; i < params.length; i++) { out.push(i < inouts.length && inouts[i]) }
+        for (var k = swWrites.length - 1; k >= 0 && swWrites[k].at >= from; k--) {
+            if (swWrites[k].at >= to) { continue }
+            for (var j = 0; j < params.length; j++) { if (params[j] == swWrites[k].n) { out[j] = true } }
+        }
+        return out
+    }
     function makeClosureSig(items) {
         var caps = []
         var names = []
         var ptypes = []
+        var inouts = []
         var rtype = ""
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "string") { names.push(items[i]); ptypes.push("") }
+            if (typeof items[i] == "string") { names.push(items[i]); ptypes.push(""); inouts.push(false) }
             else if (items[i].caps != undefined) { caps = items[i].caps }
+            else if (items[i].pinout != undefined && inouts.length > 0) { inouts[inouts.length - 1] = true }
             else if (items[i].ptype != undefined && ptypes.length > 0) { ptypes[ptypes.length - 1] = items[i].ptype }
             else if (items[i].rtype != undefined) { rtype = items[i].rtype }
         }
@@ -5245,7 +5282,7 @@ KwContinue  = "continue" KwEnd ;
         // reaches next; makeClosure closes the mark.
         localAnnMarks.push(localAnnLog.length)
         for (var q = 0; q < names.length; q++) { swNoteLocalAnn(names[q], ptypes[q]) }
-        return {csig: true, caps: caps, cparams: names, cptypes: ptypes, crtype: rtype}
+        return {csig: true, caps: caps, cparams: names, cptypes: ptypes, cinouts: inouts, crtype: rtype}
     }
     // An @autoclosure argument is passed as a zero-argument closure over the caller's
     // scope, so the expression only runs if the callee actually calls it.
@@ -5352,18 +5389,22 @@ KwContinue  = "continue" KwEnd ;
         var ptypes = []
         var rtype = ""
         var caps = []
+        var inouts = []
         var start = 0
         if (items.length > 0 && items[0] != undefined && items[0].csig != undefined) {
             params = items[0].cparams
             ptypes = items[0].cptypes
+            inouts = items[0].cinouts
             rtype = items[0].crtype
             caps = items[0].caps
             start = 1
             swAnnClose()
             ptypes = swClFlowTys(params, ptypes, rtype, txt, end)
         }
+        // With no parameter names the arguments bind as the shorthand $0..$3.
+        if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
+        inouts = swClInouts(params, inouts, up.start, end)
         var body = items.slice(start)
-        var noSig = params.length == 0
         return function() {
             var captured = scopes.slice(0)
             if (caps.length > 0) {
@@ -5376,12 +5417,23 @@ KwContinue  = "continue" KwEnd ;
                 var saved = scopes
                 scopes = captured.slice(0)
                 scopes.push({})
+                // An `inout` parameter opens the caller's `&x` box and writes the
+                // final value back into it on the way out (swBindArgs for a func).
+                // A builtin such as `reduce(into:)` hands it a plain value instead,
+                // which is bound as it is: adopting could copy the very accumulator
+                // the builtin reads back. Twin of emitInoutBacks in swift-to-llvm-ir.abnf.
+                var boxes = []
                 for (var i = 0; i < params.length; i++) {
-                    var av = i < args.length ? args[i] : undefined
-                    declVar(params[i], swAdoptAnn(av, i < ptypes.length ? ptypes[i] : ""))
-                }
-                if (noSig) {
-                    for (var sh = 0; sh < 4; sh++) { declVar("$" + sh, sh < args.length ? args[sh] : undefined) }
+                    var av = anytype
+                    av = i < args.length ? args[i] : undefined
+                    if (inouts[i]) {
+                        if (av !== null && typeof av == "object" && av.__ref != undefined) {
+                            boxes.push({name: params[i], box: av})
+                            declVar(params[i], swAdoptAnn(av.v, i < ptypes.length ? ptypes[i] : ""))
+                        } else { declVar(params[i], av) }
+                        continue
+                    }
+                    declVar(params[i], i < ptypes.length ? swAdoptAnn(av, ptypes[i]) : av)
                 }
                 var last = anytype // A block's value hops types across items.
                 last = undefined
@@ -5398,6 +5450,7 @@ KwContinue  = "continue" KwEnd ;
                         }
                     }
                 }
+                for (var bk = 0; bk < boxes.length; bk++) { boxes[bk].box.v = getVar(boxes[bk].name) }
                 scopes = saved
                 // The declared RETURN type adopts, exactly as a func's does:
                 // `{ (x: Int) -> Double in 3 }` answers 3.0, not 3.
@@ -5925,6 +5978,7 @@ KwContinue  = "continue" KwEnd ;
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
+        if (suffixes[0].kind == "mcall" && swIsMutator(suffixes[0].name)) { swNoteWrite({name: swRecvName(txt)}) }
         var recvETy = ""
         if (suffixes[0].kind == "mcall" && swAddsElem(suffixes[0].name)) {
             recvETy = swElemTyOf(declTyOf(swRecvName(txt)))
@@ -6119,8 +6173,19 @@ KwContinue  = "continue" KwEnd ;
         var pathNames = []
         for (var pn = 0; pn + 1 < ref.path.length; pn++) { if (ref.path[pn].key != undefined) { pathNames.push(ref.path[pn].key) } }
         var propTrack = -1
+        var optChain = false
+        for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
         return function() {
             if (mode < 0) { mode = swKeepMode(ref, hasLocal, localAnn) }
+            // An optional-chain target is resolved BEFORE the right-hand side, which
+            // a nil along the chain skips.
+            var pre = anytype
+            pre = null
+            if (optChain) {
+                if (propTrack < 0) { propTrack = swPropChainHit(ref.name, pathNames) ? 1 : 0 }
+                pre = swResolvePath(ref, propTrack == 1)
+                if (pre === null) { return null }
+            }
             // `var v = anytype` first: MetaJS is typed, a local keeps the type of
             // its first assignment, and the adoption below turns a number into a box.
             var v = anytype
@@ -6142,7 +6207,7 @@ KwContinue  = "continue" KwEnd ;
             } else {
                 var before = obs == null ? null : swObsBefore(ref.name)
                 if (propTrack < 0) { propTrack = swPropChainHit(ref.name, pathNames) ? 1 : 0 }
-                var p = swResolvePath(ref, propTrack == 1)
+                var p = pre !== null ? pre : swResolvePath(ref, propTrack == 1)
                 if (op != "=") { v = applyOp(op, getElemP(p.obj, p.key), v) }
                 if (mode == 0 || (mode == 2 && !swExfOf(p.obj, p.key))) {
                     v = swAdoptLike(swSafeElem(p.obj, p.key), v, elemTy)
@@ -6509,16 +6574,18 @@ KwContinue  = "continue" KwEnd ;
         o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
+            if (s.opt == true && (o === undefined || o === null)) { return null }
             if (s.key != undefined) {
                 if (track) { recs = swPropBefore(o, s.key, recs) }
                 o = swFieldOf(o, s.key)
             } else { o = core.getIndex(o, s.idx()) }
-            if (o === undefined || o === null) {
+            if ((o === undefined || o === null) && ref.path[i + 1].opt != true) {
                 if (core.nilPath != null) { core.nilPath(ref.name) }
                 fail(core.nullWord + " in assignment path of " + ref.name)
             }
         }
         var last = ref.path[ref.path.length - 1]
+        if (last.opt == true && (o === undefined || o === null)) { return null }
         return {obj: o, key: (last.key != undefined) ? last.key : last.idx(), recs: recs}
     }
 

@@ -1000,7 +1000,9 @@ DeepTyCore  = "[" Type [ ":" Type ] "]"
 NotTypeSuffix = !"?" !"!" !"." !"&" ;
 // let (a, _, c) = someTuple - a tuple-pattern declaration; _ discards its element.
 DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
+            = ( "let" | "var" ) KwEnd TupNames [ ":" DeclTupTy ] "=" Expression [ ";" ] ;
+// `let (a, b): (Double, Int) = (1, 2)`: the annotation types the literal, so a is 1.0.
+DeclTupTy   <~~ push({dtty: stripWs(up.in)}) ~~> = Type ;
 TupNames    <~~ push({tnames: takeAll()}) ~~>
             = "(" TupName { "," TupName } ")" ;
 TupName     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
@@ -1119,10 +1121,16 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // without the "no = next" test `a != b` would read as the target `a!` followed by
 // `= b` and silently become an assignment. A `!` here is otherwise a no-op - an
 // Optional IS its value in this model - so it pushes nothing.
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(swBt(up.in)) ~~>
-              { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } ;
+Target      <~~ push(swNoteWrite(makeTargetRef(takeAll()))) ~~>
+            = ( Id <~~ push(swBt(up.in)) ~~> | "$" :whitespace() TShort :whitespace(Whitespace) )
+              { TOpt | "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } ;
+// `a?.b = c` / `a?[i] = c`: an optional-chain target. The segment after the `?`
+// carries `opt`: a nil there skips the whole assignment, right-hand side included.
+TOpt        = NoSpace "?" NotChar63 ( "." Id <~~ push({key: swBt(up.in), opt: true}) ~~> | TOptIdx ) ;
+TOptIdx     <~~ push({idx: makeIndexKey(takeAll()), opt: true}) ~~>
+            = "[" IndexArg { "," IndexArg } "]" ;
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
+TShort      <~~ push("$" + up.in) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
 TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
@@ -1495,8 +1503,9 @@ ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
             = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" ClRetTy ] KwIn
             | [ CaptureList ] ClParam { "," ClParam } [ "->" ClRetTy ] KwIn
             | CaptureList KwIn ;
-ClParam     = Id <~~ push(swBt(up.in)) ~~> [ ":" ClParamTy ] ;
+ClParam     = Id <~~ push(swBt(up.in)) ~~> [ ":" [ ClInout ] ClParamTy ] ;
 ClParamTy   <~~ push({cptype: stripWs(up.in)}) ~~> = Type ;
+ClInout     <~~ push({cinout: 1}) ~~> = "inout" KwEnd ;
 ClRetTy     <~~ push({crtype: stripWs(up.in)}) ~~> = Type ;
 // { [x, weak y] in ... }: a capture list snapshots the named variables at the
 // moment the closure is created.
@@ -2859,7 +2868,8 @@ KwContinue  = "continue" KwEnd ;
                     return {b: ro.b, v: swEmitOptOpen(ro.b, ro.v)}
                 }
             }
-            if (!swAdoptable(tname)) { return t }
+            // A structural type adopts its leaves too: `[1, 2] as [Double]`.
+            if (!swAdoptable(tname) && !(op == "as" && swAdoptNeeded(tname))) { return t }
             var opens = op == "as!"
             return function(b) {
                 var ra = t(b)
@@ -3055,10 +3065,13 @@ KwContinue  = "continue" KwEnd ;
     // let (a, _, c) = t  /  (x, y) = (y, x): bind or assign element by element.
     function makeDeclTuple(items) {
         var names = items[0].tnames
-        var init = items[1]
+        var ty = items[1].dtty != undefined ? items[1].dtty : ""
+        var init = items[items.length - 1]
+        if (!swAdoptNeeded(ty)) { ty = "" }
         return function(b) {
             var r = init(b)
             b = r.b
+            r = {b: b, v: swEmitAdopt(b, r.v, ty)}
             for (var i = 0; i < names.length; i++) {
                 if (names[i] == "_") { continue }
                 var ev = emitCopy(b, callExt(b, "js_get", [r.v, emitStr(b, "" + i)]))
@@ -3087,8 +3100,7 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             var r = t(b)
             var v = retLabelled(r.b, r.v)
-            emitInoutBacks(r.b)
-            return retStmt(r.b, v)
+            return retStmt(emitInoutBacks(r.b), v)
         }
     }
 
@@ -5188,6 +5200,7 @@ KwContinue  = "continue" KwEnd ;
         }
         var primary = items[0]
         var suffixes = items.slice(1)
+        if (suffixes[0].kind == "mcall" && swIsMutator(suffixes[0].name)) { swNoteWrite({name: swRecvName(txt)}) }
         // `super.m(args)` / `super.p`: resolved statically against the superclass of
         // the type whose member is being emitted, with the same receiver.
         if (typeof primary != "function" && primary.superref != undefined) {
@@ -5426,14 +5439,36 @@ KwContinue  = "continue" KwEnd ;
     // The signature's declared types ride alongside its names: ptypes[i] is the
     // annotation of names[i] (or "" when it has none) and rtype is the closure's
     // return type. Both adopt at call time - see makeClosure.
+    // The names the walk has seen written - an assignment target's head, a
+    // mutating call's receiver - with their source offsets. A closure parameter its
+    // body writes is inout even unannotated (`ap { x in x += 2 }`, `{ $0 += 1 }`):
+    // Swift rejects a write to a plain parameter, so the context type declared it.
+    // A wrong guess is harmless, because an inout closure parameter only opens an
+    // argument that IS a `&x` box. Twin of the same pair in the other swift grammar.
+    var swWrites = []
+    function swNoteWrite(ref) {
+        swWrites.push({n: ref.name, at: up.start})
+        return ref
+    }
+    function swClInouts(params, inouts, from, to) {
+        var out = []
+        for (var i = 0; i < params.length; i++) { out.push(i < inouts.length && inouts[i]) }
+        for (var k = swWrites.length - 1; k >= 0 && swWrites[k].at >= from; k--) {
+            if (swWrites[k].at >= to) { continue }
+            for (var j = 0; j < params.length; j++) { if (params[j] == swWrites[k].n) { out[j] = true } }
+        }
+        return out
+    }
     function makeClosureSig(items) {
         var caps = []
         var names = []
         var ptypes = []
+        var inouts = []
         var rtype = ""
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "string") { names.push(items[i]); ptypes.push("") }
+            if (typeof items[i] == "string") { names.push(items[i]); ptypes.push(""); inouts.push(false) }
             else if (items[i].caps != undefined) { caps = items[i].caps }
+            else if (items[i].cinout != undefined && inouts.length > 0) { inouts[inouts.length - 1] = true }
             else if (items[i].cptype != undefined && ptypes.length > 0) { ptypes[ptypes.length - 1] = items[i].cptype }
             else if (items[i].crtype != undefined) { rtype = items[i].crtype }
         }
@@ -5441,7 +5476,7 @@ KwContinue  = "continue" KwEnd ;
         // reaches next; makeClosure closes the mark.
         localAnnMarks.push(localAnnLog.length)
         for (var q = 0; q < names.length; q++) { swNoteLocalAnn(names[q], ptypes[q]) }
-        return {csig: true, caps: caps, cparams: names, cptypes: ptypes, crtype: rtype}
+        return {csig: true, caps: caps, cparams: names, cptypes: ptypes, cinouts: inouts, crtype: rtype}
     }
     // An @autoclosure argument becomes a zero-argument closure, so the expression
     // only runs if the callee actually calls it.
@@ -5547,10 +5582,12 @@ KwContinue  = "continue" KwEnd ;
         var ptypes = []
         var rtype = ""
         var caps = []
+        var inouts = []
         var start = 0
         if (items.length > 0 && items[0] != undefined && items[0].csig != undefined) {
             params = items[0].cparams
             ptypes = items[0].cptypes
+            inouts = items[0].cinouts
             rtype = items[0].crtype
             caps = items[0].caps
             start = 1
@@ -5558,18 +5595,18 @@ KwContinue  = "continue" KwEnd ;
             ptypes = swClFlowTys(params, ptypes, rtype, txt, end)
         }
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
-        // A parameter with a declared type becomes a parameter RECORD, which is
-        // what emitFunc's prologue adopts through (`adopt`); a bare name stays a
-        // bare name and emits exactly the IR it did.
-        else {
-            var withTy = []
-            for (var pi = 0; pi < params.length; pi++) {
-                var pty = pi < ptypes.length ? ptypes[pi] : ""
-                if (pty == "") { withTy.push(params[pi]) }
-                else { withTy.push({name: params[pi], adopt: pty}) }
-            }
-            params = withTy
+        inouts = swClInouts(params, inouts, up.start, end)
+        // A parameter with a declared type, or an inout one, becomes a parameter
+        // RECORD, which is what emitFunc's prologue adopts through (`adopt`); a bare
+        // name stays a bare name and emits exactly the IR it did.
+        var withTy = []
+        for (var pi = 0; pi < params.length; pi++) {
+            var pty = pi < ptypes.length ? ptypes[pi] : ""
+            if (inouts[pi]) { withTy.push({name: params[pi], adopt: pty, inout: true, cl: true}) }
+            else if (pty == "") { withTy.push(params[pi]) }
+            else { withTy.push({name: params[pi], adopt: pty}) }
         }
+        params = withTy
         var body = items.slice(start)
         var bodyStmt = function(b) {
             var v = hUndef
@@ -5583,6 +5620,7 @@ KwContinue  = "continue" KwEnd ;
                     v = hUndef
                 }
             }
+            b = emitInoutBacks(b)
             b.NewRet(retLabelled(b, v))
             return deadBlock()
         }
@@ -5971,8 +6009,9 @@ KwContinue  = "continue" KwEnd ;
                                       [ppB.NewCall(rtKGet(), [curScopeV, emitStr(ppB, "this")]),
                                        callExt(ppB, "js_get", [ppV, emitStr(ppB, name)]), ea.v])
                 ppB.NewBr(pjB)
+                var pjv = pjB.NewPhi([llvm.ir.NewIncoming(plv, plB), llvm.ir.NewIncoming(ppv, ppB)])
                 emitWriteBacks(pjB, ea.boxes)
-                return {b: pjB, v: pjB.NewPhi([llvm.ir.NewIncoming(plv, plB), llvm.ir.NewIncoming(ppv, ppB)])}
+                return {b: pjB, v: pjv}
             }
             // An unqualified call inside a member body may name a METHOD of the
             // enclosing type, which lives on the type descriptor rather than in the
@@ -5999,8 +6038,10 @@ KwContinue  = "continue" KwEnd ;
                     sv = callExt(selfB, "js_mcall", [selfRV, emitStr(selfB, name), ea.v])
                 }
                 selfB.NewBr(joinB)
+                // The phi first: a block's phis must lead it, and the write-backs emit calls.
+                var jv = joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])
                 emitWriteBacks(joinB, ea.boxes)
-                return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])}
+                return {b: joinB, v: jv}
             }
             // `uppercased()` inside `extension String` is `self.uppercased()` when
             // no binding of that name is in scope. Twin of varMiss in
@@ -6016,8 +6057,9 @@ KwContinue  = "continue" KwEnd ;
                 var xsv = swEmitMCall(xSelfB, xSelfB.NewCall(rtKGet(), [curScopeV, emitStr(xSelfB, "self")]),
                                       name, emitStr(xSelfB, name), ea.v)
                 xSelfB.NewBr(xJoinB)
+                var xjv = xJoinB.NewPhi([llvm.ir.NewIncoming(xlv, xLocB), llvm.ir.NewIncoming(xsv, xSelfB)])
                 emitWriteBacks(xJoinB, ea.boxes)
-                return {b: xJoinB, v: xJoinB.NewPhi([llvm.ir.NewIncoming(xlv, xLocB), llvm.ir.NewIncoming(xsv, xSelfB)])}
+                return {b: xJoinB, v: xjv}
             }
             var fV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, name)])
             var rv = callExt(b, "js_call", [fV, hUndef, ea.v])
@@ -6031,12 +6073,24 @@ KwContinue  = "continue" KwEnd ;
     // targets js_swidx/js_swdset (arrays and dictionaries).
     // precs, when given, collects the observed properties the path passes
     // through (emitPropBefore).
-    function emitRefPath(b, ref, precs) {
+    // nilExits, when given, collects a block per `?` of an optional-chain target
+    // that the path leaves when the value before it is nil.
+    function emitRefPath(b, ref, precs, nilExits) {
         var hr = emitPathHead(b, ref.name)
         b = hr.b
         var o = hr.v
-        for (var i = 0; i < ref.path.length - 1; i++) {
+        for (var i = 0; i < ref.path.length; i++) {
             var s = ref.path[i]
+            if (s.opt == true) {
+                var nB = curF.NewBlock("")
+                var c1B = curF.NewBlock("")
+                var contB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [o, hNull])), nB, c1B)
+                c1B.NewCondBr(truthy(c1B, callExt(c1B, "js_seq", [o, hUndef])), nB, contB)
+                nilExits.push(nB)
+                b = contB
+            }
+            if (i == ref.path.length - 1) { break }
             if (s.key != undefined) {
                 if (precs != undefined && hasOwn(swObsProps, "$" + s.key)) { precs.push(emitPropBefore(b, o, s.key)) }
                 o = emitFieldRead(b, o, s.key)
@@ -6089,6 +6143,8 @@ KwContinue  = "continue" KwEnd ;
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         // `s = [1, 2]` into a local declared `Set<Int>`.
         if (ref.path.length == 0 && op == "=" && hasLocal && swIsSetTy(localAnn)) { valT = swSetInit(valT) }
+        var optChain = false
+        for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
         return function(b) {
             // A write to an existential slot keeps what it is given; see swKeepMode.
             // An implicit `self.x` is decided by the enclosing type, statically.
@@ -6097,6 +6153,19 @@ KwContinue  = "continue" KwEnd ;
                 mode = curType() != null && swSelfExist(curType().name, ref.name) ? 1 : 0
             }
             var keepTy = mode == 1
+            // An optional-chain target is resolved BEFORE the right-hand side, which
+            // a nil along the chain skips; the assignment's value is then nil.
+            // Twin of swResolvePath in swift-interpreter.abnf.
+            var pre = null
+            var nilExits = []
+            var preRecs = []
+            var preBefore = null
+            if (optChain) {
+                preBefore = obs == null ? null : emitObsBefore(b, ref.name)
+                if (swPropChainHit(ref.name, pathNames)) { b = emitPropHead(b, ref.name, preRecs) }
+                pre = emitRefPath(b, ref, preRecs, nilExits)
+                b = pre.b
+            }
             var r = valT(b)
             b = r.b
             var v = emitCopy(b, r.v)
@@ -6158,11 +6227,15 @@ KwContinue  = "continue" KwEnd ;
                 if (obs != null) { emitObsWrite(b, ref.name, nameV, obs, v) }
                 else { b.NewCall(rtKSet(), [curScopeV, nameV, v]) }
             } else {
-                var before = obs == null ? null : emitObsBefore(b, ref.name)
-                var precs = []
-                if (swPropChainHit(ref.name, pathNames)) { b = emitPropHead(b, ref.name, precs) }
-                var p = emitRefPath(b, ref, precs)
-                b = p.b
+                var before = preBefore
+                var precs = preRecs
+                var p = pre
+                if (p == null) {
+                    before = obs == null ? null : emitObsBefore(b, ref.name)
+                    if (swPropChainHit(ref.name, pathNames)) { b = emitPropHead(b, ref.name, precs) }
+                    p = emitRefPath(b, ref, precs, nilExits)
+                    b = p.b
+                }
                 if (p.isField) {
                     if (op != "=" || !keepTy) {
                         var oldf = emitFieldRead(b, p.obj, p.keyName)
@@ -6195,6 +6268,16 @@ KwContinue  = "continue" KwEnd ;
                 }
                 if (precs.length > 0) { b = emitPropReplay(b, precs) }
                 if (before != null) { b = emitObsReplay(b, ref.name, obs, before) }
+            }
+            if (nilExits.length > 0) {
+                var joinB = curF.NewBlock("")
+                b.NewBr(joinB)
+                var inc = [llvm.ir.NewIncoming(v, b)]
+                for (var ne = 0; ne < nilExits.length; ne++) {
+                    nilExits[ne].NewBr(joinB)
+                    inc.push(llvm.ir.NewIncoming(hNull, nilExits[ne]))
+                }
+                return {b: joinB, v: joinB.NewPhi(inc)}
             }
             return {b: b, v: v}
         }
@@ -6927,7 +7010,7 @@ KwContinue  = "continue" KwEnd ;
                 b = r.b
                 v = retLabelled(b, r.v)
             }
-            emitInoutBacks(b)
+            b = emitInoutBacks(b)
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
     }
@@ -7129,8 +7212,16 @@ KwContinue  = "continue" KwEnd ;
             }
             if (prm.inout) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$box$" + prm.name), av])
+                inouts.push({name: prm.name, cl: prm.cl == true})
+                if (prm.cl == true) {
+                    // A plain value (see emitInoutBacks) is bound as it is: adopting
+                    // could copy the very accumulator the builtin reads back.
+                    var notBox = truthy(b, callExt(b, "js_seq", [b.NewCall(rtSafeGet(), [av, emitStr(b, "__ref")]), hUndef]))
+                    var opened = swEmitAdopt(b, b.NewCall(rtSafeGet(), [av, emitStr(b, "v")]), prm.adopt)
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), b.NewSelect(notBox, av, opened)])
+                    continue
+                }
                 av = callExt(b, "js_get", [av, emitStr(b, "v")])
-                inouts.push(prm.name)
             }
             // The declared parameter type adopts the argument: `func g(_ x: Double)`
             // called g(3) binds 3.0, so `x / 2` is 1.5, not an Int division's 1.
@@ -7140,7 +7231,7 @@ KwContinue  = "continue" KwEnd ;
         }
         inoutStack.push(inouts)
         var endB = body(b)
-        emitInoutBacks(endB)
+        endB = emitInoutBacks(endB)
         endB.NewRet(hUndef)
         inoutStack.pop()
         retLabelStack.pop()
@@ -7217,13 +7308,25 @@ KwContinue  = "continue" KwEnd ;
     // The inout parameters of the function whose body is currently being emitted:
     // their final values are copied back into their caller's boxes before every ret.
     var inoutStack = []
+    // A closure's inout parameter (`cl`) may also be handed a plain value - a
+    // builtin such as `reduce(into:)` calls it without a box - so it is opened, and
+    // written back, only when its argument is one. Answers the block to continue in.
     function emitInoutBacks(b) {
-        if (inoutStack.length == 0) { return }
-        var names = inoutStack[inoutStack.length - 1]
-        for (var i = 0; i < names.length; i++) {
-            callExt(b, "js_set", [b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$box$" + names[i])]),
-                                  emitStr(b, "v"), b.NewCall(rtKGet(), [curScopeV, emitStr(b, names[i])])])
+        if (inoutStack.length == 0) { return b }
+        var ios = inoutStack[inoutStack.length - 1]
+        for (var i = 0; i < ios.length; i++) {
+            var boxV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$box$" + ios[i].name)])
+            var setB = b
+            var nextB = null
+            if (ios[i].cl) {
+                setB = curF.NewBlock("")
+                nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [b.NewCall(rtSafeGet(), [boxV, emitStr(b, "__ref")]), hUndef])), nextB, setB)
+            }
+            callExt(setB, "js_set", [boxV, emitStr(setB, "v"), setB.NewCall(rtKGet(), [curScopeV, emitStr(setB, ios[i].name)])])
+            if (nextB != null) { setB.NewBr(nextB); b = nextB }
         }
+        return b
     }
     // The tuple-return labels of the function whose body is currently being emitted,
     // and its declared NUMERIC return type: `func r() -> Double { return 3 }` answers

@@ -3104,6 +3104,73 @@ func s60() {
     check("ver1", got == "adf")
 }
 
+// ===== SECTION 61: optional-chain assignment =====
+// `a?.b = c` writes only when a is not nil, and a nil skips the right-hand side
+// too. The assignment's value is `()?`: nil when it was skipped.
+class OcNode { var ocv = 0; var ocxs = [1, 2]; var ocd: Double = 0; var next: OcNode? = nil }
+struct OcPt { var ocx = 1; var ocy = 2 }
+var ocCalls = 0
+func ocVal(_ x: Int) -> Int { ocCalls += 1; return x }
+func s61() {
+    let n: OcNode? = OcNode()
+    let none: OcNode? = nil
+    n?.ocv = ocVal(5)
+    none?.ocv = ocVal(6)
+    check("oca1", n!.ocv == 5 && ocCalls == 1)
+    n?.ocv += 3
+    none?.ocv += ocVal(1)
+    check("oca2", n!.ocv == 8 && ocCalls == 1)
+    n?.ocxs[1] = 20
+    n?.ocd = 2
+    check("oca3", n!.ocxs == [1, 20] && "\(n!.ocd)" == "2.0")
+    n?.next?.ocv = ocVal(7)
+    n!.next = OcNode()
+    n?.next?.ocv = 9
+    check("oca4", n!.next!.ocv == 9 && ocCalls == 1)
+    var arr: [Int]? = [1, 2]
+    arr?[0] = 10
+    var dict: [String: Int]? = ["a": 1]
+    dict?["b"] = 2
+    var p: OcPt? = OcPt()
+    p?.ocx = 7
+    check("oca5", arr! == [10, 2] && dict!["b"] == 2 && p!.ocx == 7 && p!.ocy == 2)
+    check("oca6", (none?.ocv = 3) == nil && (n?.ocv = 3) != nil && n!.ocv == 3)
+}
+
+// ===== SECTION 62: inout closure parameters =====
+// A closure's inout parameter writes back through the caller's `&x`, annotated
+// or not; `reduce(into:)` hands its closure the accumulator itself.
+func icApply(_ f: (inout Int) -> ()) -> Int { var v = 4; f(&v); return v }
+func icApplyA(_ f: (inout [Int]) -> Void) -> [Int] { var a = [7]; f(&a); return a }
+func s62() {
+    check("icl1", icApply { (x: inout Int) in x += 2 } == 6)
+    check("icl2", icApply { (x: inout Int) -> () in if x > 0 { x = 100; return }; x = 1 } == 100)
+    check("icl3", icApply { x in x += 3 } == 7 && icApply { $0 *= 5 } == 20)
+    check("icl4", icApplyA { xs in xs.append(8) } == [7, 8] && icApplyA { $0.append(9) } == [7, 9])
+    var cnt = 0
+    let bump = { (c: inout Int, by: Int) in c += by }
+    bump(&cnt, 3)
+    bump(&cnt, 4)
+    var d = 1.5
+    let scale = { (a: inout Double, n: Int) in a *= Double(n) }
+    scale(&d, 3)
+    check("icl5", cnt == 7 && "\(d)" == "4.5")
+    check("icl6", [1, 2, 3].reduce(into: 0) { (acc: inout Int, x: Int) in acc += x } == 6
+        && [1, 2].reduce(into: [Int]()) { (acc: inout [Int], x: Int) in acc.append(x * 10) } == [10, 20])
+}
+
+// ===== SECTION 63: a literal typed by `as` or by a tuple pattern's annotation =====
+func s63() {
+    check("ctx1", "\([1, 2] as [Double])" == "[1.0, 2.0]" && "\(["a": 1] as [String: Double])" == "[\"a\": 1.0]")
+    check("ctx2", "\((1, 2) as (Double, Int))" == "(1.0, 2)" && "\([[1], [2]] as [[Double]])" == "[[1.0], [2.0]]")
+    let (a, b): (Double, Int) = (1, 2)
+    var (c, d): (Int, Double) = (3, 4)
+    d += 1
+    check("ctx3", "\(a) \(b)" == "1.0 2" && "\(c) \(d)" == "3 5.0" && d / 2 == 2.5)
+    let (x, y): (x: Float, y: String) = (x: 5, y: "s")
+    check("ctx4", "\(x)\(y)" == "5.0s")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3165,6 +3232,9 @@ func main() {
     s58() // SECTION-CALL 58
     s59() // SECTION-CALL 59
     s60() // SECTION-CALL 60
+    s61() // SECTION-CALL 61
+    s62() // SECTION-CALL 62
+    s63() // SECTION-CALL 63
     print("full: \(checks) checks, \(fails) failures")
 }
 
