@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-385** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-387** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -83,19 +83,19 @@ dict dunders (`"s".__add__`, `[].__len__`) unbound.
 
 # JS — JavaScript and TypeScript
 
-### T-379 ts: port var hoisting and symbol conversions to TypeScript · P1 · JS · IN PROGRESS (JS worker, round 10) [V]
-A live TS halves divergence: TS shares the Go twin and js-rt.ll, so TS compiled throws
-on `"" + sym` while the TS interpreter prints "Symbol(k)" (no test exercises it, so
---cross stays 0). `function f(){ if(true){var w=3} return w }` throws in both TS halves
-(node 3). Port the js interpreter changes (DeclKw/var hoisting, for-in/of outer
-assignment, symbol ToString/ToNumber refusals, spread/assign of symbol keys) to both
-typescript grammars and assert them in typescript-test-full.ts.
+### T-385 js: compiled arithmetic never converts an object operand · P1 · JS + CORE · IN PROGRESS (JS worker, round 11) [V]
+`const o=[{valueOf(){return 5}}][0]; +o, o*2, Number(o), Math.max(o,1)`: llvm.Run and
+native NaN on all (node 5, 10, 5, 5); same for [Symbol.toPrimitive]. js_jssub/mul/div/
+mod and the unary externs hand objects to the floor: an object test on layer 2's
+arithmetic hot path (bench!) or a floor hook. Under -frozen the interpreter answers NaN
+for `Number(o)` / `Math.max(o, 1)` where goja answers 5 (goja-vs-frozen split).
 
-### T-380 js: string iteration by code point; Array values()/entries(); generator @@iterator · P1 · JS · IN PROGRESS (JS worker, round 10) [V]
-`[..."a\u{1F600}b"].length` is 4 (node 3) - for-of, spread, Array.from over a string
-iterate UTF-16 units in all engines. `[1,2].values()` / `.entries()` are not iterators
-("v.next is not a function"); a generator object has no [Symbol.iterator].
-Symbol.toPrimitive/hasInstance/toStringTag exist but are not consulted.
+### T-386 js: static block order; TS namespace privacy; isNaN; non-callable well-known members · P1 · JS · IN PROGRESS (JS worker, round 11) [V]
+`class K { static { K.st = 2 } static st = 0 }`: node 0, compiled 2 (interpreters 0).
+`namespace N { const hidden = 1 }; N.hidden`: TS interpreter 1 (tsc+node undefined).
+Global `isNaN` (and check isFinite, parseInt, parseFloat globals) missing in all
+engines. `{[Symbol.toPrimitive]: 1}` / `{[Symbol.hasInstance]: 5}`: node "TypeError:
+number 1 is not a function"; all engines ignore the member.
 
 ---
 
@@ -455,6 +455,8 @@ T-158 frame elimination on arithmetic predicates — DONE c545f6c8 (pyIsFlo + py
 T-364 coroutines: a stackful context switch in the floor — DONE d9d59b6a (lib/coro-switch.S: 83k → 52k instructions per next(), pthread/dlopen gone; native-full on arm64 and x86-64)
 T-377 python: NotImplemented; dunder fallbacks; round/shift edge cases — DONE 3ca7accf
 T-378 kotlin: literal adoption remainder; HashMap; Char.toInt in the interpreter — DONE b6ef1660
+T-379 ts: port var hoisting and symbol conversions to TypeScript — DONE 5d7ec9cc
+T-380 js: string iteration by code point; Array values()/entries(); generator @@iterator — DONE 39d20f9b (compiled object→number conversion is T-385)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
