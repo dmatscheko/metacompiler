@@ -685,11 +685,36 @@ function swDsConcatTy(from, to, n) {
     }
     cuts.push(src.length)
     if (cuts.length != 2 * n) { return "" }
+    var floLit = false
     for (var i = 0; i < cuts.length; i += 2) {
-        var ty = swExprAnn(stripWs(src.substring(cuts[i], cuts[i + 1])))
+        var part = stripWs(src.substring(cuts[i], cuts[i + 1]))
+        var ty = swExprAnn(part)
         if (ty.charAt(0) == "[" && swElemTyOf(ty) != "" && swDsSplit(ty, 1, ty.length - 1, ":").length == 2) { return ty }
+        if (swDsHasFloElem(part)) { floLit = true }
     }
-    return ""
+    // With no operand typed, an Array literal holding a float literal makes the
+    // chain [Double]: `[2.5] + [3]` is [2.5, 3.0].
+    return floLit ? "[Double]" : ""
+}
+// Is s an Array literal with a float literal (`2.5`, `-1e3`) among its elements?
+function swDsHasFloElem(s) {
+    if (s.length < 3 || s.charAt(0) != "[" || swDsGroupEnd(s, 0) != s.length - 1) { return false }
+    var cuts = swDsSplit(s, 1, s.length - 1, ",")
+    for (var i = 0; i < cuts.length; i += 2) {
+        var e = s.substring(cuts[i], cuts[i + 1])
+        var j = e.charAt(0) == "-" ? 1 : 0
+        var digits = 0
+        var flo = false
+        while (j < e.length) {
+            var ch = e.charAt(j)
+            if (ch >= "0" && ch <= "9") { digits++ }
+            else if (ch == "." || ch == "e" || ch == "E") { flo = true }
+            else if (ch != "_" && ch != "-" && ch != "+") { break }
+            j++
+        }
+        if (j == e.length && digits > 0 && flo) { return true }
+    }
+    return false
 }
 // An additive chain [operand, op, operand, ...] spanning [from, to): an Array
 // concatenation wraps every operand in the grammar's swAdoptThunk.

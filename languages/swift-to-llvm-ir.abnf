@@ -3284,7 +3284,7 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             var r = t(b)
             var v = retLabelled(r.b, r.v)
-            return retStmt(emitInoutBacks(r.b), v)
+            return retStmt(r.b, v)
         }
     }
 
@@ -7901,10 +7901,16 @@ KwContinue  = "continue" KwEnd ;
                 b = r.b
                 v = retLabelled(b, r.v)
             }
-            b = emitInoutBacks(b)
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
     }
+    // Every `ret` of a function value writes its inout parameters back first. A
+    // return inside a try or defer body leaves that body as a control signal, and
+    // excDispatch re-issues it through retStmt in the function that owns the
+    // parameters - after the defer body ran, so the write-back sees its writes.
+    // Overridden by ASSIGNMENT (see the include-override trap in the gotchas doc).
+    var coreRetStmt = retStmt
+    retStmt = function(b, v) { return coreRetStmt(emitInoutBacks(b), v) }
 
     // guard COND else BLOCK: a true condition jumps to the continuation, a false one
     // into the else block; the else normally diverges (its trailing branch is dead).

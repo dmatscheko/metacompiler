@@ -3981,6 +3981,11 @@ final class G84 {
 struct H84 { var lvl84 = 7; func next() -> Int { lvl84 + 1 } }
 struct Log84 { var text = "" }
 struct Rec84 { var log = Log84() }
+enum Err84: Error { case no }
+func later84(_ x: inout Int) -> Int { defer { x += 10 }; return x }
+func tried84(_ x: inout Int, _ t: Bool) -> Int {
+    do { if t { throw Err84.no }; x = 7; return x } catch { x = 9; return -1 }
+}
 func s84() {
     let g = G84()
     g.bump()
@@ -4004,6 +4009,20 @@ func s84() {
     var parts = ["", "z"]
     print("e", terminator: "", to: &parts[1])
     check("84e", rec.log.text == "a 1\n" && parts == ["", "ze"])
+    let fib = sequence(state: (0, 1), next: { st in defer { st = (st.1, st.0 + st.1) }; return st.0 })
+    let fibT = sequence(state: (0, 1), next: { (st: inout (Int, Int)) -> Int? in
+        defer { st = (st.1, st.0 + st.1) }
+        return st.0
+    })
+    check("84f", Array(fib.prefix(6)) == [0, 1, 1, 2, 3, 5] && Array(fibT.prefix(4)) == [0, 1, 1, 2])
+    var w = 1
+    let r1 = later84(&w)
+    let w1 = w
+    let r2 = tried84(&w, false)
+    let w2 = w
+    let r3 = tried84(&w, true)
+    check("84g", r1 == 1 && w1 == 11 && r2 == 7 && w2 == 7 && r3 == -1 && w == 9)
+    check("84h", "\([2.5] + [3])" == "[2.5, 3.0]" && "\([1] + [2.5])" == "[1.0, 2.5]" && "\([Float]() + [2.5])" == "[2.5]")
 }
 
 func main() {
