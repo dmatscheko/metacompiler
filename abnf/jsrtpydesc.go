@@ -99,6 +99,10 @@ func pyDescTypeSample(tname string) interface{} {
 		d.set("keys", &jsArray{})
 		d.set("vals", &jsArray{})
 		return d
+	case "int":
+		return 0.0
+	case "float":
+		return &jsPyFlo{}
 	}
 	return nil
 }

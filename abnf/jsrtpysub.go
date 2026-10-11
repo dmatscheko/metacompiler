@@ -85,6 +85,8 @@ func pyBuiltinHasMethod(tname, name string) bool {
 		return pyIsListMethod(name)
 	case "dict":
 		return pyIsDictMethod(name)
+	case "int", "float":
+		return pyIsNumMethod(pyDescTypeSample(tname), name)
 	}
 	return false
 }

@@ -19815,7 +19815,7 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	}
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
 	if m, ok := rt.pyBuiltinClsMethod(target, name); ok {
-		return rt.call(m, jsUndef, args)
+		return rt.call(m, jsUndef, rt.pyBindCall(m, args, kw))
 	}
 	// list.count(xs, 2) - the UNBOUND descriptor CALLED straight off the type
 	// object rather than read as a value. The emitter routes a method call
@@ -19939,15 +19939,14 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	// flat name switch would break both. The same table is pyDForeign in
 	// languages/lib/python-rt.metajs, which is what keeps llvm.Run and the
 	// native binary agreeing.
-	// conjugate() of a number: a real one is its own .real, a complex flips the
-	// sign of its imaginary part.
+	// conjugate() of a complex flips the sign of its imaginary part.
 	if name == "conjugate" {
 		if re, im, ok := pyComplexParts(target); ok {
 			return newPyComplex(re, -im)
 		}
-		if v, ok := pyNumAttr(target, "real"); ok {
-			return v
-		}
+	}
+	if pyIsNumMethod(target, name) {
+		return rt.pyNumMethod(target, name, args, kw)
 	}
 	if pyForeignMethod(target, name) {
 		// A REAL, catchable AttributeError and not rt.fail: CPython's is catchable,
@@ -20198,12 +20197,21 @@ func pyBuiltinClsName(v interface{}) string {
 // step with pyBuiltinClsMethod in languages/lib/python-rt.metajs and in
 // languages/python-interpreter.abnf.
 func (rt *jsrt) pyBuiltinClsMethod(target interface{}, name string) (interface{}, bool) {
-	if pyBuiltinClsName(target) != "dict" || name != "fromkeys" {
-		return nil, false
+	switch pyBuiltinClsName(target) + "." + name {
+	case "dict.fromkeys":
+		return jsHostFunc("dict.fromkeys", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyDictFromKeys(argAt(args, 0), argAt(args, 1))
+		}), true
+	case "int.from_bytes":
+		return jsHostFunc("int.from_bytes", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyIntFromBytes(args, jsUndef)
+		}), true
+	case "float.fromhex":
+		return jsHostFunc("float.fromhex", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.pyFloatFromHex(rt.toString(argAt(args, 0)))
+		}), true
 	}
-	return jsHostFunc("dict.fromkeys", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		return rt.pyDictFromKeys(argAt(args, 0), argAt(args, 1))
-	}), true
+	return nil, false
 }
 
 // dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
@@ -20591,8 +20599,8 @@ func (rt *jsrt) pySetAlgebra(els *jsArray, name string, args []interface{}) *jsA
 // step with pyDBuiltinAttr in languages/lib/python-rt.metajs and
 // pyBuiltinAttr in languages/python-interpreter.abnf.
 //
-// A builtin that this project does not HAVE stays False on purpose - hasattr(3,
-// "bit_length") is False here and True in CPython - because the alternative is
+// A builtin that this project does not HAVE stays False on purpose - hasattr(1.0,
+// "from_number") is False here and True in CPython - because the alternative is
 // hasattr answering True for a call that then aborts.
 func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if _, isStr := target.(string); isStr {
@@ -20609,12 +20617,10 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if _, _, isDict := dictParts(target); isDict {
 		return pyIsDictMethod(name)
 	}
-	// Every number's one method.
-	if name == "conjugate" {
-		_, isNum := pyNumAttr(target, "real")
-		return isNum || isPyComplex(target)
+	if name == "conjugate" && isPyComplex(target) {
+		return true
 	}
-	return false
+	return pyIsNumMethod(target, name)
 }
 
 // pyBoundBuiltin is what getattr() hands back for one of those names: CPython's

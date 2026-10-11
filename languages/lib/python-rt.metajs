@@ -93,6 +93,9 @@ import "./regex.js"
 // parameterised by the rtk* hooks below.
 import "./runtime.metajs"
 
+// int's and float's own methods at the bit and double level (pyNumMethod).
+import "./python-num.js"
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return pyAJavaStr(v) }
 function rtkNum(v) { return pyNum(v) }
@@ -1107,6 +1110,7 @@ function pyBuiltinHasMethod(tname, name) {
     if (tname == "str") { return pySIsStrMethod(name) }
     if (tname == "list") { return pyIsListMethod(name) }
     if (tname == "dict") { return pyIsDictMethod(name) }
+    if (tname == "int" || tname == "float") { return pyIsNumMethod(pyDTypeSample(tname), name) }
     return false
 }
 
@@ -1536,6 +1540,115 @@ function pyNumAttr(o, name) {
     return undefined
 }
 
+// ----- int's and float's own methods ----------------------------------------
+// The NAME SET first, so hasattr()/getattr() ask what the dispatcher answers. A
+// bool is an int. Twin of pyIsNumMethod / pyNumMethod in abnf/jsrtpynum.go and
+// languages/python-interpreter.abnf; the algorithms are lib/python-num.js.
+function pyIsNumMethod(o, name) {
+    var isInt = typeof o == "number" || typeof o == "boolean" || pyIsBig(o)
+    if (name == "conjugate" || name == "is_integer" || name == "as_integer_ratio") {
+        return isInt || pyIsFlo(o)
+    }
+    if (name == "hex") { return pyIsFlo(o) }
+    if (name == "bit_length" || name == "bit_count" || name == "to_bytes") { return isInt }
+    return false
+}
+
+// An int as its magnitude bits, and back.
+function pyIntBits(v) {
+    if (pyIsBig(v)) { return pyABitsFromLimbs(v["limbs"]) }
+    return pynNumBits(pyNum(v))
+}
+function pyIntNeg(v) {
+    if (pyIsBig(v)) { return v["neg"] === true }
+    return pyNum(v) < 0
+}
+function pyIntOfBits(neg, bits) { return rtABigNarrow(pyABitsToBig(neg, bits)) }
+
+function pyNumMethod(o, name, args, kw) {
+    if (pyIsFlo(o)) {
+        var f = o["__flo"]
+        if (name == "conjugate") { return o }
+        if (name == "is_integer") { return f - f == 0 && Math.floor(f) == f }
+        if (name == "hex") { return pynFloatHex(f) }
+        var r = anytype
+        r = pynRatio(f)
+        if (r == "nan") { pyRaiseExc("ValueError", "cannot convert NaN to integer ratio") }
+        if (r == "inf") { pyRaiseExc("OverflowError", "cannot convert Infinity to integer ratio") }
+        return [pyIntOfBits(r["neg"], r["bits"]), pyIntOfBits(false, pynPow2Bits(r["dexp"]))]
+    }
+    if (name == "conjugate") { return pyNumAttr(o, "real") }
+    if (name == "is_integer") { return true }
+    if (name == "as_integer_ratio") { return [pyNumAttr(o, "real"), 1] }
+    var bits = pyIntBits(o)
+    if (name == "bit_length") { return bits.length }
+    if (name == "bit_count") { return pynBitCount(bits) }
+    // to_bytes(length=1, byteorder="big", *, signed=False)
+    var len = anytype
+    len = args.length > 0 ? args[0] : pyKwArg(kw, "length")
+    var order = anytype
+    order = args.length > 1 ? args[1] : pyKwArg(kw, "byteorder")
+    var n = 1
+    if (len !== undefined) { n = pyNum(len) }
+    if (n < 0) { pyRaiseExc("ValueError", "length argument must be non-negative") }
+    var little = pyByteOrder(order)
+    var out = anytype
+    out = pynToBytes(pyIntNeg(o), bits, n, little, pyDTruthy(pyKwArg(kw, "signed")))
+    if (out == "neg") { pyRaiseExc("OverflowError", "can't convert negative int to unsigned") }
+    if (out == "big") { pyRaiseExc("OverflowError", "int too big to convert") }
+    return out
+}
+
+// A byteorder argument: true for "little", false for "big" or absent.
+function pyByteOrder(order) {
+    if (order === undefined) { return false }
+    if (order == "big") { return false }
+    if (order == "little") { return true }
+    pyRaiseExc("ValueError", "byteorder must be either 'little' or 'big'")
+    return false
+}
+
+// int.from_bytes(bytes, byteorder="big", *, signed=False). A builtin receives its
+// keyword dict as a trailing positional (pyBindCall); byteorder is a str, so a
+// trailing dict is the dict.
+function pyIntFromBytes(args) {
+    var pos = args
+    var kw = anytype
+    kw = undefined
+    if (args.length >= 2) {
+        if (pyIsDict(args[args.length - 1])) {
+            kw = args[args.length - 1]
+            pos = args.slice(0, args.length - 1)
+        }
+    }
+    var bs = anytype
+    bs = pos.length > 0 ? pos[0] : pyKwArg(kw, "bytes")
+    var order = anytype
+    order = pos.length > 1 ? pos[1] : pyKwArg(kw, "byteorder")
+    var little = pyByteOrder(order)
+    if (typeof bs == "string") { pyRaiseExc("TypeError", "cannot convert 'str' object to bytes") }
+    var src = pyElemsOf(bs)
+    var vals = []
+    var i = 0
+    while (i < src.length) {
+        var b = pyNum(src[i])
+        if (b < 0 || b > 255) { pyRaiseExc("ValueError", "bytes must be in range(0, 256)") }
+        vals.push(b)
+        i = i + 1
+    }
+    var r = pynFromBytes(vals, little, pyDTruthy(pyKwArg(kw, "signed")))
+    return pyIntOfBits(r["neg"], r["bits"])
+}
+
+// float.fromhex(s)
+function pyFloatFromHex(s) {
+    var r = anytype
+    r = pynFromHex(pyToStr(s))
+    if (r == "invalid") { pyRaiseExc("ValueError", "invalid hexadecimal floating-point string") }
+    if (r == "overflow") { pyRaiseExc("OverflowError", "hexadecimal value too large to represent as a float") }
+    return pyMkFlo(r)
+}
+
 // rt.getMember for the shapes this value model builds. A dict answers its own
 // members, an array its length, a string its length, and anything else the plain
 // property.
@@ -1709,9 +1822,25 @@ function pyBuiltinClsName(v) {
 // other. Keep in step with pyBuiltinClsMethod in abnf/jsrt.go and in
 // languages/python-interpreter.abnf.
 function pyBuiltinClsMethod(target, name) {
-    if (pyBuiltinClsName(target) != "dict") { return undefined }
-    if (name != "fromkeys") { return undefined }
-    return function(ks, dv) { return pyDictFromKeys(ks, dv) }
+    var tn = pyBuiltinClsName(target)
+    if (tn == "dict" && name == "fromkeys") {
+        return function(ks, dv) { return pyDictFromKeys(ks, dv) }
+    }
+    if (tn == "int" && name == "from_bytes") {
+        return function() {
+            var args = []
+            var i = 0
+            while (i < arguments.length) {
+                args.push(arguments[i])
+                i = i + 1
+            }
+            return pyIntFromBytes(args)
+        }
+    }
+    if (tn == "float" && name == "fromhex") {
+        return function(s) { return pyFloatFromHex(s) }
+    }
+    return undefined
 }
 
 // dict.fromkeys(iterable[, value]): a fresh dict mapping every element of the
@@ -7097,7 +7226,7 @@ function pyDMethodCall(target, name, args, kw) {
     }
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
     var bcm = pyBuiltinClsMethod(target, name)
-    if (bcm !== undefined) { return bcm.apply(undefined, args) }
+    if (bcm !== undefined) { return bcm.apply(undefined, pyBindCall(bcm, args, kw)) }
     // list.count(xs, 2) - the UNBOUND descriptor CALLED straight off the type
     // object rather than read as a value. The emitter routes a method call
     // through js_pyrxmcall and never through pyGetAttr, so the arm has to exist
@@ -7211,13 +7340,11 @@ function pyDMethodCall(target, name, args, kw) {
     if (pyIsArr(target)) {
         if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
     }
-    // conjugate() of a number: a real one is its own .real, a complex flips the
-    // sign of its imaginary part.
+    // conjugate() of a complex flips the sign of its imaginary part.
     if (name == "conjugate") {
         if (pyIsCplx(target)) { return pyNewCplx(pyCplxRe(target), -pyCplxIm(target)) }
-        var cj = pyNumAttr(target, "real")
-        if (cj !== undefined) { return cj }
     }
+    if (pyIsNumMethod(target, name)) { return pyNumMethod(target, name, args, kw) }
     if (pyDForeign(target, name)) {
         // A REAL, catchable AttributeError and not fail(): CPython's is
         // catchable, and both other engines raise one (pyMethodCall in
@@ -7829,8 +7956,8 @@ function pySetAlgebra(els, name, args) {
 // (pyIsListMethod), and the dict/set arms of pyDMethodCall. Keep in step with
 // pyBuiltinAttr in abnf/jsrt.go and in languages/python-interpreter.abnf.
 //
-// A builtin this project does not HAVE stays False on purpose - hasattr(3,
-// "bit_length") is False here and True in CPython - because the alternative is
+// A builtin this project does not HAVE stays False on purpose - hasattr(1.0,
+// "from_number") is False here and True in CPython - because the alternative is
 // hasattr answering True for a call that then aborts.
 function pyDBuiltinAttr(obj, name) {
     if (typeof obj == "string") { return pySIsStrMethod(name) }
@@ -7839,9 +7966,10 @@ function pyDBuiltinAttr(obj, name) {
     var els = pySetElemsOf(obj)
     if (els !== null && els !== undefined) { return pyIsSetMethod(name) && !(pySetFrozen(obj) && pySetMutator(name)) }
     if (pyIsDict(obj)) { return pyIsDictMethod(name) }
-    // Every number's one method.
-    if (name == "conjugate") { return pyIsCplx(obj) || pyNumAttr(obj, "real") !== undefined }
-    return false
+    if (name == "conjugate") {
+        if (pyIsCplx(obj)) { return true }
+    }
+    return pyIsNumMethod(obj, name)
 }
 
 // What getattr() hands back for one of those names: CPython's `<built-in method
@@ -7908,6 +8036,8 @@ function pyDTypeSample(tname) {
     if (tname == "str") { return "" }
     if (tname == "set") { return pyNewSet([]) }
     if (tname == "dict") { return pyNewDict() }
+    if (tname == "int") { return 0 }
+    if (tname == "float") { return pyMkFlo(0) }
     return undefined
 }
 

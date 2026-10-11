@@ -3904,6 +3904,36 @@ def s70():
         msg = str(e)
     check("nat6", msg == "'float' object has no attribute 'numerator'")
 
+# ===== SECTION 71: int's and float's own methods =====
+# bit_length / bit_count / to_bytes / from_bytes on an int (a bool and a big int
+# too), hex / fromhex / is_integer / as_integer_ratio on a float, and the same
+# methods read off the TYPE (int.conjugate(7), float.hex(2.0)). Rows from CPython
+# 3.14.
+def s71():
+    v = [7, -5, True, 10**30, 255]
+    check("nim1", [x.bit_length() for x in v] == [3, 3, 1, 100, 8] and [x.bit_count() for x in v] == [3, 2, 1, 37, 8])
+    check("nim2", list(v[4].to_bytes(2, "little")) == [255, 0] and list(v[1].to_bytes(2, "big", signed=True)) == [255, 251] and list(v[0].to_bytes()) == [7])
+    check("nim3", int.from_bytes([255, 251], "big", signed=True) == -5 and int.from_bytes([1, 2]) == 258 and int.from_bytes((-v[3]).to_bytes(13, "big", signed=True), "big", signed=True) == -v[3])
+    msgs = []
+    for f in [lambda: v[4].to_bytes(1, signed=True), lambda: v[1].to_bytes(1), lambda: v[0].to_bytes(1, "middle")]:
+        try:
+            f()
+        except (OverflowError, ValueError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("nim4", msgs == ["OverflowError: int too big to convert", "OverflowError: can't convert negative int to unsigned",
+                           "ValueError: byteorder must be either 'little' or 'big'"])
+    w = [1.5, -0.25, 3.0, 0.1, 5e-324, -0.0]
+    check("nim5", [x.hex() for x in w] == ["0x1.8000000000000p+0", "-0x1.0000000000000p-2", "0x1.8000000000000p+1",
+                                           "0x1.999999999999ap-4", "0x0.0000000000001p-1022", "-0x0.0p+0"])
+    check("nim6", [float.fromhex(x.hex()) == x for x in w] == [True] * 6 and float.fromhex(" -0x1.8p1 ") == -3.0 and float.fromhex("0x1.00000000000018p0") == 1.0000000000000004)
+    check("nim7", list(w[3].as_integer_ratio()) == [3602879701896397, 36028797018963968] and list(w[1].as_integer_ratio()) == [-1, 4] and [x.is_integer() for x in w[:3]] == [False, False, True])
+    check("nim8", hasattr(int, "conjugate") and int.conjugate(7) == 7 and float.hex(2.0) == "0x1.0000000000000p+1" and int.bit_length(255) == 8 and hasattr(3, "bit_length") and not hasattr(2.5, "bit_length"))
+    try:
+        r = float.fromhex("0x1p1024")
+    except OverflowError as e:
+        r = str(e)
+    check("nim9", r == "hexadecimal value too large to represent as a float" and float.fromhex("0x1p-1075") == 0.0 and float.fromhex("0x1.8p-1075") == 5e-324)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3975,5 +4005,6 @@ def main():
     s68() # SECTION-CALL 68
     s69() # SECTION-CALL 69
     s70() # SECTION-CALL 70
+    s71() # SECTION-CALL 71
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

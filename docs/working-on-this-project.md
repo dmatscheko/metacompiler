@@ -980,6 +980,9 @@ fdlibm.js                 <- java-rt.metajs, java interpreter, kotlin-rt.metajs,
                              kotlin interpreter (Go twin: abnf/jsrtfdlibm.go)
 kotlin-math.js            <- kotlin-rt.metajs, kotlin interpreter (kotlin.math
                              on doubles; Go twin: abnf/jsrtktmath.go)
+python-num.js             <- python-rt.metajs, python interpreter (int's and
+                             float's own methods at the bit and double level;
+                             Go twin: abnf/jsrtpynum.go)
 java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
                              csharp interpreter (Go twin: abnf/jsrtjavachars.go)
 java-strings.js           <- java-rt.metajs, java interpreter (String's methods
