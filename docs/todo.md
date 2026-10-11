@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-394** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-395** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,17 +63,12 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-011 python: `d.items()` renders pairs as lists · P2 · PY · IN PROGRESS (PY worker, round 13) [V]
-Same root cause as T-170 (no tuple type). Close together with T-170.
-
-### T-384 python: binary operators on mismatched builtin types; huge repeats; int ** float · P1 · PY · IN PROGRESS (PY worker, round 13) [V]
-`4 - "s"` gives NaN, `2.5 * "s"` `'sss'`, `2.5 << 1` 32, `4 - [1]` 3 or NaN in all
-engines; CPython "unsupported operand type(s) …" / "can't multiply sequence by
-non-int of type 'float'" (pyBinTypeErr has the rules; hook it into the builtin paths
-without slowing layer 2's float path - bench). `"s" * 10**20` loops forever (CPython
-OverflowError). `3 ** 2.5` gives 15.588457268119894 (CPython ...896: an int base must
-take the correctly rounded pow path too). `hasattr(int, "__add__")` False; str/list/
-dict dunders (`"s".__add__`, `[].__len__`) unbound.
+### T-394 python: complex from negative ** fractional; augmented-assignment errors; hash; views · P1 · PY · IN PROGRESS (PY+CORE worker, round 14) [V]
+`(-3) ** 0.5` gives nan in all engines (CPython the complex
+(1.0605752387249068e-16+1.7320508075688772j): needs c_pow on a correctly rounded cos).
+`x = 4; x -= "s"` says "for -:" (CPython "for -=:"). `hash` builtin undefined.
+`print(d.items())` gives [('a', 1)] (CPython dict_items([('a', 1)]): keys/values/items
+are lists, not views). `tuple(t) is t` False; `hasattr(tuple, "__add__")` False.
 
 ---
 
@@ -159,20 +154,11 @@ hidden slots compiled.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-392 the C floor's `str_to_num` reads "Inf…" as Infinity · P1 · CORE · OPEN [V]
+### T-392 the C floor's `str_to_num` reads "Inf…" as Infinity · P1 · CORE · IN PROGRESS (PY+CORE worker, round 14) [V]
 runtime.c ~2390: `"Inf"`, `"-Inf"` and any 8-character string starting with "Inf"
 ("Infinitx") read as ±Infinity; JavaScript says NaN (js no longer goes through it).
 Probe every language that converts strings through it (python float(), ruby to_f,
 php, lua tonumber, kotlin toDouble...) against its oracle and fix the floor.
-
-### T-170 a real tuple type for Python · P3 · PY + CORE · IN PROGRESS (PY worker, round 13) [V]
-`set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
-demands a numeric index, so marking an array as a tuple is not representable natively
-and a tuple must become a tag-6 BOX (copy the python FLOAT box, not the tag-14 floor
-box - manual 7.6). Atomic: any subset is a `--cross` divergence. Sites: python
-interpreter 17 `Array.isArray` + 49 tuple refs, python-rt.metajs 42 `pyIsArr`, python
-compiler 54 tuple refs, jsrt.go `*jsArray`. Unblocks T-011, `%`-formatting arity (`"%d %d" % (1,2,3)` must say "not all arguments converted during string formatting"; `"%s" % [1, 2]` must stay `[1, 2]`),
-`BaseException.__str__`, hashability as a real rule.
 
 ### T-181 corpus: other languages · P3 · per language · IN PROGRESS (CORPUS worker, round 13) [V]
 batch 0 of 2 wine files parse; swift 80% (an 18-file lexical tail: suppressed
@@ -464,6 +450,9 @@ T-386 js: static block order; TS namespace privacy; isNaN; non-callable well-kno
 T-385 js: compiled arithmetic never converts an object operand — DONE aba557f8 (layer-2 typeof on the slow path; bench js -13%)
 T-387 js: `toExponential` / `toFixed` / `toPrecision` exist only through goja's leak — DONE 216985a9
 T-391 ts: an exported `let`/`var` in a namespace is a snapshot compiled — DONE a25bb14e
+T-384 python: binary operators on mismatched builtin types; huge repeats; int ** float — DONE 65621bbd e76fcfa5
+T-170 a real tuple type for Python — DONE 93334360 (a tuple is an array of kind 16; no runtime.c change)
+T-011 python: `d.items()` renders pairs as lists — DONE 93334360
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
