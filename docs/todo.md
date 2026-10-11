@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-425** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-426** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,15 +130,16 @@ prints `[1]` (swiftc `[1.0]`). Unverified: `print(..., to: &p.s)` with a path in
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-420 php: goto out of a try (compiled); named-arg / callable errors; scalar property writes · P2 · PHP + CORE · IN PROGRESS (PHP+CORE worker, round 19) [V spec-only]
-Compiled goto out of a try/finally is refused at compile time: carrying it needs a goto
-kind (4) in the js_ctl_* protocol (runtime.c js_ctl_goto, a jsCtl kind in jsrt.go,
-excDispatch in compile-core.js + refreeze). An unknown named argument raises nothing
-(PHP Error "Unknown named parameter $x"). A callable naming an unknown class, and
-'parent::m' / 'self::m' callable strings compiled, hit an uncatchable ":: on null"
-(PHP Error 'Class "X" not found'). Compiled: writing a property of an int/string aborts
-(PHP Error). Perf: jsdispatch is a linear if-chain over every jsf_ function; php array
-key lookup (phpKeyIndex / phKeyIndex) is linear.
+### T-425 php: callable/dispatch error tails · P2 · PHP · OPEN [V]
+Spec / php-src corpus answers: (a) `$o()` on a non-invokable object is uncatchable in all engines (PHP: Error
+'Object of type P is not callable'). (b) callable class names are case-sensitive ('testclass::staticmethod',
+dynamic_call/bug68475). (c) compiled `Test::{$x}()` with an unknown class says "Call to undefined function Test()"
+(interpreter/PHP: 'Class "Test" not found'). (d) compiled `array_filter($a, 'is_int')` — string callable naming a
+builtin raises "Call to undefined function is_int()". (e) goto out of a finally body should be a compile error
+("jump out of a finally block is disallowed"). (f) compiled 'parent::m' via a callable binds static:: to the parent,
+PHP forwards the caller's class. (g) invalid callbacks to internal functions should raise TypeError
+"call_user_func(): Argument #1 ($callback) must be a valid callback, ...". (h) numeric_strings/neg_num_string:
+interpolated "$a[0x0]", "$a[9223372036854775808]" wrong; "$a[-9223372036854775808]" differs interp vs compiled.
 
 ---
 
@@ -471,6 +472,7 @@ T-417 csharp: target-typed `default` beyond ==; nullable default; List.IndexOf; 
 T-418 swift: zip, type(of:) of empty collections, NaN spellings parse (sign/payload DECLINED: needs double-bit host builtins + payload-carrying soft-float in the shared C floor, ~300-400 lines over 10 files) — DONE 74e50eb0
 T-422 swift: lazy Sequence iteration (sequence(), user Sequence/IteratorProtocol, AnyIterator) — DONE dd4e2a5a
 T-423 swift: [Double]() element typing on append; inout through field/element — DONE 103a47c1
+T-420 php: named-argument errors, class-relative callables, scalar property writes, compiled goto out of try/catch (js_ctl_goto), hashed key index for long arrays (n=4000: 643G→3.4G) — DONE 47a950f6
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
