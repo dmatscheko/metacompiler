@@ -1443,11 +1443,12 @@ function phDump(v, ind) {
         var cls = v["__class"]
         var j = 0
         while (j < names.length) {
-            var vis = phVisOf(cls, names[j])
+            var pname = phPropName(names[j])
+            var vis = phVisOf(cls, pname)
             var mark = ""
             if (vis == "*") { mark = ":protected" }
             else if (vis != "") { mark = ":\"" + vis + "\":private" }
-            oout = oout + pad + "  [\"" + names[j] + "\"" + mark + "]=>\n"
+            oout = oout + pad + "  [\"" + pname + "\"" + mark + "]=>\n"
             oout = oout + phDump(phDeref(v[names[j]]), ind + 2)
             j = j + 1
         }
@@ -1455,6 +1456,21 @@ function phDump(v, ind) {
     }
     return pad + "NULL\n"
 }
+
+// The key a property name is stored under on an object: one starting "__"
+// behind a \x01, apart from the runtime's own __ slots, which keysOf hides.
+// phPropName takes it back off. Twin of phpPropKey / phpPropName in
+// abnf/jsrtphp.go.
+function phPropKey(name) {
+    if (name.length > 1 && name.charAt(0) == "_" && name.charAt(1) == "_") { return "\x01" + name }
+    return name
+}
+function phPropName(key) {
+    if (key.length > 2 && key.charCodeAt(0) == 1 && key.charAt(1) == "_" && key.charAt(2) == "_") { return key.substring(1) }
+    return key
+}
+function js_phpkey(v) { return phPropKey(phStr(v)) }
+function js_phpname(k) { return phPropName(phStr(k)) }
 
 // A property's visibility on an instance of cls: "" public, "*" protected, or
 // the declaring class of a private one, off the __pvis lists of the class chain.
@@ -1483,11 +1499,12 @@ function phObjArr(v, iter, scope) {
     var ks = keysOf(v)
     var i = 0
     while (i < ks.length) {
-        var vis = phVisOf(cls, ks[i])
-        if (vis == "") { phArrSet(out, ks[i], v[ks[i]]) }
+        var name = phPropName(ks[i])
+        var vis = phVisOf(cls, name)
+        if (vis == "") { phArrSet(out, name, v[ks[i]]) }
         else if (iter) {
-            if (phVisible(v, vis, scope)) { phArrSet(out, ks[i], v[ks[i]]) }
-        } else { phArrSet(out, "\x00" + vis + "\x00" + ks[i], v[ks[i]]) }
+            if (phVisible(v, vis, scope)) { phArrSet(out, name, v[ks[i]]) }
+        } else { phArrSet(out, "\x00" + vis + "\x00" + name, v[ks[i]]) }
         i = i + 1
     }
     return out
@@ -1559,7 +1576,7 @@ function js_phfeobj(v, scope, byref) {
             c = {}
             c["__refcell"] = true
             c["v"] = p.v[i]
-            o[phStr(p.k[i])] = c
+            o[phPropKey(phStr(p.k[i]))] = c
         }
         p.v[i] = c
         i = i + 1
@@ -1601,7 +1618,7 @@ function phObjCast(v) {
     if (p !== undefined) {
         var i = 0
         while (i < p.k.length) {
-            o[phStr(p.k[i])] = phArrCopy(phDeref(p.v[i]))
+            o[phPropKey(phStr(p.k[i]))] = phArrCopy(phDeref(p.v[i]))
             i = i + 1
         }
         return o

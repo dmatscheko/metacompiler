@@ -1445,7 +1445,7 @@ func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 		}
 		if keys, vals, ok := phpArrParts(v); ok {
 			for i := range keys.elems {
-				o.set(rt.phpStr(keys.elems[i]), rt.phpArrCopy(phpDeref(vals.elems[i])))
+				o.set(phpPropKey(rt.phpStr(keys.elems[i])), rt.phpArrCopy(phpDeref(vals.elems[i])))
 			}
 		} else if !isNullish(v) {
 			o.set("scalar", v)
@@ -1784,19 +1784,38 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 			" (" + strconv.Itoa(len(names)) + ") {\n"
 		cls, _ := o.props["__class"].(*jsObject)
 		for _, k := range names {
-			switch vis := rt.phpVisOf(cls, k); vis {
+			name := phpPropName(k)
+			switch vis := rt.phpVisOf(cls, name); vis {
 			case "":
-				out += pad + "  [\"" + k + "\"]=>\n"
+				out += pad + "  [\"" + name + "\"]=>\n"
 			case "*":
-				out += pad + "  [\"" + k + "\":protected]=>\n"
+				out += pad + "  [\"" + name + "\":protected]=>\n"
 			default:
-				out += pad + "  [\"" + k + "\":\"" + vis + "\":private]=>\n"
+				out += pad + "  [\"" + name + "\":\"" + vis + "\":private]=>\n"
 			}
 			out += rt.phpDump(phpDeref(o.props[k]), ind+2)
 		}
 		return out + pad + "}\n"
 	}
 	return pad + "NULL\n"
+}
+
+// phpPropKey is the key property name is stored under on an object: one
+// starting "__" behind a \x01, apart from the runtime's own __ slots, which a
+// listing hides. phpPropName takes it back off. Twins: propKey in
+// php-to-llvm-ir.abnf, phPropKey / phPropName in lib/php-rt.metajs.
+func phpPropKey(name string) string {
+	if strings.HasPrefix(name, "__") {
+		return "\x01" + name
+	}
+	return name
+}
+
+func phpPropName(key string) string {
+	if strings.HasPrefix(key, "\x01__") {
+		return key[1:]
+	}
+	return key
 }
 
 // phpVisOf is a property's visibility on an instance of cls: "" public, "*"
@@ -1828,12 +1847,13 @@ func (rt *jsrt) phpObjArr(o *jsObject, iter bool, scope *jsObject) *jsObject {
 		if phpHiddenProp(k) {
 			continue
 		}
-		vis := rt.phpVisOf(cls, k)
+		name := phpPropName(k)
+		vis := rt.phpVisOf(cls, name)
 		switch {
 		case vis == "" || (iter && rt.phpVisible(o, vis, scope)):
-			rt.phpArrSet(out, k, o.props[k])
+			rt.phpArrSet(out, name, o.props[k])
 		case !iter:
-			rt.phpArrSet(out, "\x00"+vis+"\x00"+k, o.props[k])
+			rt.phpArrSet(out, "\x00"+vis+"\x00"+name, o.props[k])
 		}
 	}
 	return out
@@ -2230,13 +2250,15 @@ func init() {
 						c = newJSObject()
 						c.set("__refcell", true)
 						c.set("v", vals.elems[i])
-						o.set(rt.phpStr(k), c)
+						o.set(phpPropKey(rt.phpStr(k)), c)
 					}
 					vals.elems[i] = c
 				}
 			}
 			return w(out)
 		}
+		m["js_phpkey"] = func(a []uint64) uint64 { return rt.wrapStr(phpPropKey(rt.phpStr(u(a[0])))) }
+		m["js_phpname"] = func(a []uint64) uint64 { return rt.wrapStr(phpPropName(rt.phpStr(u(a[0])))) }
 		m["js_phgetclass"] = func(a []uint64) uint64 {
 			if phpIsObj(u(a[0])) {
 				return rt.wrapStr(rt.phpClassName(u(a[0])))

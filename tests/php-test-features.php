@@ -715,6 +715,25 @@ $fsn = "";
 foreach ($fsb as $v) { $fsb[] = $v; $fsb[1] = 9; $fsn .= $v; }
 check("foreach-snapshot", [$fsa, $fsn, count($fsb)], [[1 => 1, 2 => 2], "12", 4]);
 
+// A property whose name starts "__" is an ordinary property: json_decode's
+// "__class" does not replace the object's class, and unset() removes one.
+$jdu = json_decode('{"__class":"C","__refcell":2,"a":1}');
+$jdu->__x = 5;
+$jdk = "__dict";
+$jdu->$jdk = true;
+unset($jdu->a);
+check("dunder-props", [get_class($jdu), $jdu->__class, $jdu->__refcell + $jdu->__x, array_keys((array)$jdu), json_encode($jdu)],
+      ["stdClass", "C", 7, ["__class", "__refcell", "__x", "__dict"], '{"__class":"C","__refcell":2,"__x":5,"__dict":true}']);
+
+// An enum case's value may read self:: (Zend/tests/enum/gh7821.phpt).
+interface EnSelfI { public const A = "a"; }
+enum EnSelf: string implements EnSelfI {
+    const B = "b";
+    case C = self::B;
+    case D = EnSelfI::A;
+}
+check("enum-case-self", [EnSelf::C->value, EnSelf::D->value], ["b", "a"]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

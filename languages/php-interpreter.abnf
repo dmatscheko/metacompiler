@@ -4611,7 +4611,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var c = 0; c < cases.length; c++) {
                 var obj = newObj(cls)
                 dictSet(obj.p, "name", cases[c].name)
-                if (cases[c].init != null) { dictSet(obj.p, "value", cases[c].init()) }
+                if (cases[c].init != null) { dictSet(obj.p, "value", constEval(cls, cases[c])) }
                 dictSet(cls.__constV, cases[c].name, obj)
                 arrPush(all, obj)
             }

@@ -3202,7 +3202,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var pn = prop.substring(2)
             return function(b) {
                 var rov = makeVarRef(name)(b)
-                return emitPropGet(rov.b, rov.v, emitStr(rov.b, pn), pn)
+                return emitPropGet(rov.b, rov.v, propKey(rov.b, pn), pn)
             }
         }
         return makeVarRef(name)
@@ -3293,7 +3293,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 } else if (s.kind == "dynfield") {
                     var rf = s.nameT(b)
                     b = rf.b
-                    var rdf = emitPropGet(b, cur, callExt(b, "js_phstr", [rf.v]), null)
+                    var rdf = emitPropGet(b, cur, callExt(b, "js_phpkey", [rf.v]), null)
                     b = rdf.b
                     cur = rdf.v
                 } else if (s.kind == "mcall") {
@@ -3311,7 +3311,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     b = rm.b
                     cur = rm.v
                 } else if (s.kind == "field") {
-                    var rg = emitPropGet(b, cur, emitStr(b, s.name), s.name)
+                    var rg = emitPropGet(b, cur, propKey(b, s.name), s.name)
                     b = rg.b
                     cur = rg.v
                 } else if (s.kind == "call") {
@@ -3431,7 +3431,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var r = valT(b)
             b = r.b
-            callExt(b, "js_set", [phThis(b), emitStr(b, name), r.v])
+            callExt(b, "js_set", [phThis(b), propKey(b, name), r.v])
             return b
         }
     }
@@ -3506,6 +3506,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nullB),
                                            llvm.ir.NewIncoming(r.v, r.b)])}
     }
+    // A property's KEY on an object: a name starting "__" is stored behind a \x01,
+    // because the runtime keeps its own slots (__class, __dict, __refcell ...)
+    // under such names and hides every __ key from a listing. js_phpkey does the
+    // same at run time and js_phpname takes it back off (abnf/jsrtphp.go,
+    // lib/php-rt.metajs). The interpreter keeps properties apart from its slots.
+    function propKey(b, name) {
+        return emitStr(b, (name.length > 1 && name.substring(0, 2) == "__") ? "\x01" + name : name)
+    }
     function emitPropGetPlain(b, objV, keyV) {
         if (!magicGet) { return phDeref(b, callExt(b, "js_get", [objV, keyV])) }
         var haveB = curF.NewBlock("")
@@ -3519,7 +3527,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        var magV = callExt(magB, "js_phmcall", [objV, emitStr(magB, "__get"), argList(magB, [keyV])])
+        var magV = callExt(magB, "js_phmcall", [objV, emitStr(magB, "__get"), argList(magB, [callExt(magB, "js_phpname", [keyV])])])
         magB.NewBr(mergeB)
         var rr = phDeref(rawB, callExt(rawB, "js_get", [objV, keyV]))
         rr.b.NewBr(mergeB)
@@ -3585,7 +3593,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        callExt(magB, "js_phmcall", [objV, emitStr(magB, "__set"), argList(magB, [keyV, valV])])
+        callExt(magB, "js_phmcall", [objV, emitStr(magB, "__set"), argList(magB, [callExt(magB, "js_phpname", [keyV]), valV])])
         magB.NewBr(mergeB)
         emitPropStore(rawB, objV, keyV, valV).NewBr(mergeB)
         return mergeB
@@ -3607,7 +3615,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var magB = curF.NewBlock("")
         var rawB = curF.NewBlock("")
         hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        var magV = callExt(magB, "js_phbool", [callExt(magB, "js_phmcall", [objV, emitStr(magB, "__isset"), argList(magB, [keyV])])])
+        var magV = callExt(magB, "js_phbool", [callExt(magB, "js_phmcall", [objV, emitStr(magB, "__isset"), argList(magB, [callExt(magB, "js_phpname", [keyV])])])])
         magB.NewBr(mergeB)
         rawB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plain, b),
@@ -3768,10 +3776,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         // `unset($undef->p)` is a no-op in PHP 8 - unset() diagnoses
                         // nothing, exactly like isset(). js_phunset already answers
                         // quietly for a non-container, so only the field arm needs it.
+                        // The property goes away, key and all (js_del).
                         var liveB = curF.NewBlock("")
                         var skipB = curF.NewBlock("")
                         b.NewCondBr(isNullishHandle(b, p.obj), skipB, liveB)
-                        callExt(liveB, "js_set", [p.obj, p.key, hUndef])
+                        callExt(liveB, "js_del", [p.obj, p.key])
                         liveB.NewBr(skipB)
                         b = skipB
                     }
@@ -3976,7 +3985,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var wV = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, wName)])
             var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            var keyV = callExt(bodyB, "js_phstr", [callExt(bodyB, "js_range_key", [wV, iB])])
+            var keyV = callExt(bodyB, "js_phpkey", [callExt(bodyB, "js_range_key", [wV, iB])])
             var rv = phDeref(bodyB, callExt(bodyB, "js_range_val", [wV, iB]))
             bodyB = rv.b
             bodyB = emitPropSet(bodyB, copyV, keyV, callExt(bodyB, "js_phcopy", [rv.v]), null)
@@ -4325,8 +4334,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             // legal in a READ position at all, so the non-creating walk answers null.
             if (s.append === true) { o = viv ? callExt(b, "js_phvivpush", [o]) : hNull }
             else if (s.key != undefined) {
-                var rs = viv ? emitPropGet(b, o, emitStr(b, s.key), s.key)
-                             : emitPropGetSafe(b, o, emitStr(b, s.key), s.key)
+                var rs = viv ? emitPropGet(b, o, propKey(b, s.key), s.key)
+                             : emitPropGetSafe(b, o, propKey(b, s.key), s.key)
                 b = rs.b
                 o = rs.v
             }
@@ -4337,8 +4346,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (s.keyT != undefined) {
                 var rt = s.keyT(b)
                 b = rt.b
-                var rs2 = viv ? emitPropGet(b, o, callExt(b, "js_phstr", [rt.v]), null)
-                              : emitPropGetSafe(b, o, callExt(b, "js_phstr", [rt.v]), null)
+                var rs2 = viv ? emitPropGet(b, o, callExt(b, "js_phpkey", [rt.v]), null)
+                              : emitPropGetSafe(b, o, callExt(b, "js_phpkey", [rt.v]), null)
                 b = rs2.b
                 o = rs2.v
             }
@@ -4350,10 +4359,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         var last = ref.path[ref.path.length - 1]
         if (last.append === true) { return {b: b, obj: o, kind: "append"} }
-        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), keyName: last.key, kind: "field"} }
+        if (last.key != undefined) { return {b: b, obj: o, key: propKey(b, last.key), keyName: last.key, kind: "field"} }
         if (last.keyT != undefined) {
             var rl = last.keyT(b)
-            return {b: rl.b, obj: o, key: callExt(rl.b, "js_phstr", [rl.v]), keyName: null, kind: "field"}
+            return {b: rl.b, obj: o, key: callExt(rl.b, "js_phpkey", [rl.v]), keyName: null, kind: "field"}
         }
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v, kind: "index"}
@@ -5198,7 +5207,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var pn = nm.substring(1)
         return function(b) {
             var thisV = phThis(b)
-            callExt(b, "js_set", [thisV, emitStr(b, pn),
+            callExt(b, "js_set", [thisV, propKey(b, pn),
                                   callExt(b, "js_scope_get", [curScopeV, emitStr(b, nm)])])
             return b
         }
@@ -5370,7 +5379,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     bb = r.b
                     pv = callExt(bb, "js_phcopy", [r.v])
                 }
-                callExt(bb, "js_set", [thisV, emitStr(bb, props[k].name), pv])
+                callExt(bb, "js_set", [thisV, propKey(bb, props[k].name), pv])
             }
             return bb
         }, true, false, name)
@@ -5531,6 +5540,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (backed) { callExt(b, "js_phpush", [ifV, emitStr(b, "BackedEnum")]) }
             if (!hasImpl) { callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifV]) }
             var allV = callExt(b, "js_pharr", [])
+            // A case's value may read self::.
+            var outerSelf = bindDeclSelf(b, clsV)
             for (var k = 0; k < cases.length; k++) {
                 var inst = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [inst, emitStr(b, "__class"), clsV])
@@ -5543,6 +5554,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 callExt(b, "js_set", [clsV, emitStr(b, "k:" + cases[k].ecasename), inst])
                 callExt(b, "js_phpush", [allV, inst])
             }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), outerSelf])
             callExt(b, "js_set", [clsV, emitStr(b, "__cases"), allV])
             // E::cases(): the declaration-order list, as a fresh array each call.
             var idx = emitFunc([], function(bb) {
