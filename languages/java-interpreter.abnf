@@ -6230,7 +6230,8 @@ HasStatic   = :script(~~
     function jGetVar(name) {
         var v = anytype // Any value a variable can hold.
         v = getVar(name)
-        if (jIsClassVal(v)) {
+        // jIsClassVal, inlined: this is every variable read.
+        if (v !== undefined && v !== null && typeof v == "object" && v.__isclass === true) {
             var o = jSelfWith(name)
             if (o != null) { return o[name] }
         }

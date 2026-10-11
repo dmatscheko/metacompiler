@@ -7499,9 +7499,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return {q: q, r: r}
     }
+    // a ** n by repeated squaring, the exponent's bits from the bottom: about
+    // log2(n) products instead of n products of a growing result.
     function bigPow(a, n) {
         var acc = bigOb(1, [1])
-        for (var i = 0; i < n; i++) { acc = bigOb(acc.sign * a.sign, magMul(acc.limbs, a.limbs)) }
+        var sq = a
+        var e = n
+        while (e > 0) {
+            if (e % 2 == 1) { acc = bigOb(acc.sign * sq.sign, magMul(acc.limbs, sq.limbs)) }
+            e = Math.floor(e / 2)
+            if (e > 0) { sq = bigOb(1, magMul(sq.limbs, sq.limbs)) }
+        }
         return acc
     }
     // The one dispatch binOp needs. It answers a wrapper so a caller can tell a real

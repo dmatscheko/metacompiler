@@ -319,12 +319,12 @@ MulExpr     <~~ push(foldBinary(luaPosOps(takeAll()))) ~~>
 UnaryExpr   = NotExpr | LenExpr | NegExpr | BNotExpr | PowExpr ;
 NotExpr     <~~ var o = pop(); push(makeNot(luaTrunc(pop(), o))) ~~>
             = KwNot UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
-LenExpr     <~~ var o = pop(); var t = pop(); push(makeLen(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+LenExpr     <~~ var o = pop(); var t = pop(); push(makeLen(luaPosArg(luaTrunc(t, o), pop(), [luaOpndDesc(o.t), false]))) ~~>
             = "#" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
-NegExpr     <~~ var o = pop(); var t = pop(); push(makeNeg(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+NegExpr     <~~ var o = pop(); var t = pop(); push(makeNeg(luaPosArg(luaTrunc(t, o), pop(), [luaOpndDesc(o.t), false]))) ~~>
             = "-" <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
 // Unary bitwise not ~x (Lua 5.3+), guarded against '~=': the 64-bit complement.
-BNotExpr    <~~ var o = pop(); var t = pop(); push(makeBNot(luaPosArg(luaTrunc(t, o), pop(), [o.d, false]))) ~~>
+BNotExpr    <~~ var o = pop(); var t = pop(); push(makeBNot(luaPosArg(luaTrunc(t, o), pop(), [luaOpndDesc(o.t), false]))) ~~>
             = ( "~" !"=" ) <~~ push(luaOpPos(up.pos)) ~~> UnaryExpr <~~ push(luaOpnd(up.in)) ~~> ;
 // Exponentiation a ^ b: right associative (its right operand is a UnaryExpr, which
 // descends into PowExpr again) and binding tighter than the unary operators, so -2^2
@@ -625,7 +625,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // variable or a field: "attempt to index a nil value (local 't')". A descriptor
     // is false (no name: it travels the tag stack, where a null would end takeAll),
     // {k: "var", n} - local, upvalue or global, decided where the operation runs
-    // (luaVarKind) - or {k: "field" | "method", n}. luaOpnd reads one from an
+    // (luaVarKind) - or {k: "field" | "method", n}. luaOpndDesc reads one from an
     // operand's source text, luaPrefixDescs from a suffix chain. Twin of the same
     // helpers in lua-to-llvm-ir.abnf.
     function luaIsIdStart(c) { return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 }
@@ -668,18 +668,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name === null || name == "nil" || name == "true" || name == "false") { return false }
         return {k: "var", n: name}
     }
-    // What an operator needs to know of an operand, from its source text: its
-    // descriptor `d`, and `mv` - whether it may be a call, i.e. several values, of
-    // which an operator reads the first (luaTrunc).
-    function luaOpnd(text) { return {d: luaOpndDesc(text), mv: luaMayMulti(text)} }
-    function luaMayMulti(text) {
-        var n = text.length
-        if (text == "...") { return true }
-        if (n == 0) { return false }
-        var c = text.charCodeAt(n - 1)
-        if (c === 41 || c === 34 || c === 39 || c === 125) { return true }
-        return c === 93 && n > 1 && (text.charCodeAt(n - 2) === 93 || text.charCodeAt(n - 2) === 61)
-    }
+    // An operand as an operator's fold receives it: its source text, from which
+    // luaOpndDesc reads the descriptor only when an operator follows - every
+    // precedence level pushes one, for every operand. (The compiler half also
+    // asks whether it may be several values; this half's operators read the
+    // first value themselves, see luaTrunc.)
+    function luaOpnd(text) { return {t: text} }
     // The descriptor of an operand: the variable it is, or the field its last
     // step reads.
     function luaOpndDesc(text) {
@@ -743,7 +737,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // reads (luaOpSfx); a statement clears them.
     var luaOpDesc = anytype
     luaOpDesc = null
-    // `descs` are the operands' descriptors (luaOpnd's d), or null.
+    // `descs` are the operands' descriptors (luaOpndDesc's), or null.
     function luaPosArg(t, rec, descs) {
         var here = rec.here
         return function() {
@@ -775,11 +769,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var op = items[i].op
             out.push(op)
             var dl = anytype
-            dl = i == 2 ? items[1].d : false
+            dl = i == 2 ? luaOpndDesc(items[1].t) : false
             var r = items[i + 1]
             if (op == "==" || op == "~=") { out.push(r) }
             else if (rec !== null) { out.push(luaPosArg(r, rec, null)) }
-            else { out.push(luaPosArg(r, items[i], [dl, items[i + 2].d])) }
+            else { out.push(luaPosArg(r, items[i], [dl, luaOpndDesc(items[i + 2].t)])) }
         }
         return out
     }
@@ -790,7 +784,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // [l, ol, rec, r, or] of a right-associative operator (.., ^) as [l, r].
     function luaPosPair(items) {
         if (items.length < 5) { return [items[0]] }
-        return [items[0], luaPosArg(items[3], items[2], [items[1].d, items[4].d])]
+        return [items[0], luaPosArg(items[3], items[2], [luaOpndDesc(items[1].t), luaOpndDesc(items[4].t)])]
     }
     // and / or over [t0, o0, t1, o1, ...].
     function luaOrAnd(items, isOr) {
