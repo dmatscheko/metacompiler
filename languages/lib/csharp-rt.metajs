@@ -100,6 +100,7 @@ import "./runtime.metajs"
 import "./java-chars.js"
 import "./utf16-strings.js"
 import "./csharp-strings.js"
+import "./csharp-collections.js"
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return csCmp(op, l, r) }
@@ -136,6 +137,38 @@ function csxkChar(c) { return csChar(c) }
 function csxkNum(v) { return rtjNum(v) }
 function csxkStr(v) { return cpStr(v) }
 function csxkThrow(t, msg) { csThrow(t, msg) }
+
+// ----- List<T> and Dictionary<TKey,TValue> (lib/csharp-collections.js) -------
+function csxkIsNum(v) { return typeof v == "number" || floIs(v) || sintIs(v) || csIsChar(v) }
+function csxkLt(a, b) {
+    if (floIs(a) || floIs(b)) { return csxkCode(a) < csxkCode(b) }
+    return csCmp("<", a, b)
+}
+function csxkMcall(o, n, a) { return js_csmcall(o, n, a) }
+function csxkHasMethod(o, n) { return csUserMethod(o, n) !== undefined }
+function csxkIsDeleg(v) { return csIsDelegVal(v) }
+// A multicast delegate is the array of its closures, invoked in order; the last
+// result is the call's.
+function csxkCall(f, args) {
+    if (!Array.isArray(f)) { return f.apply(undefined, args) }
+    var r = anytype
+    r = undefined
+    var i = 0
+    while (i < f.length) {
+        var g = f[i]
+        r = g.apply(undefined, args)
+        i = i + 1
+    }
+    return r
+}
+function csxkElems(v) { return js_csforsrc(v) }
+function csxkDictFind(d, k) { return csDictFind(d["keys"], k) }
+function csxkRefSet(box, v) {
+    if (!csIsRefBox(box)) { return undefined }
+    var f = box["wb"]
+    f(v)
+    return undefined
+}
 
 // ===================================================== value readings =======
 
@@ -710,6 +743,8 @@ function cpPlainObj(o) { return "[object Object]" }
 // cpObjStr renders the object shapes the two C# grammars build, and answers
 // undefined for one it does not know.
 function cpObjStr(o, depth) {
+    // KeyValuePair<TKey,TValue>.ToString(): "[key, value]".
+    if (csxIsKvp(o)) { return "[" + cpRender(o["Key"], depth + 1) + ", " + cpRender(o["Value"], depth + 1) + "]" }
     // A user ToString() override wins over every built-in rendering, exactly as the
     // virtual System.Object.ToString() does in C#.
     // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs.
@@ -1423,6 +1458,10 @@ function js_csmcall(recv, name, args) {
             return csTypeOfVal(recv)
         }
     }
+    // Int32 / Double / Boolean.CompareTo (a char's is csxCharMethod's).
+    if (name == "CompareTo" && args.length == 1) {
+        if (typeof recv == "boolean" || (csxkIsNum(recv) && !csIsChar(recv))) { return csxValueCompareTo(recv, args) }
+    }
     return js_mcall(recv, name, args)
 }
 
@@ -1441,8 +1480,8 @@ function js_mcall(recv, name, args) {
         fail("method call '" + name + "' on a " + typeof recv)
         return undefined
     }
-    if (Array.isArray(recv)) { return csListMethod(recv, name, args) }
-    if (csIsDict(recv)) { return csDictMethod(recv, name, args) }
+    if (Array.isArray(recv)) { return csxListMethod(recv, name, args) }
+    if (csIsDict(recv)) { return csxDictMethod(recv, name, args) }
     if (csIsChar(recv)) { return csxCharMethod(recv, name, args) }
     // char and string carry their STATIC members by name (csTypeObject).
     var cst = recv["__cstype"]
@@ -1464,54 +1503,6 @@ function js_mcall(recv, name, args) {
     return undefined
 }
 
-function csListMethod(recv, name, args) {
-    if (name == "length" || name == "size" || name == "count") { return recv.length }
-    if (name == "add" || name == "push" || name == "append") {
-        recv.push(args[0])
-        return true
-    }
-    if (name == "get") {
-        var gi = rtjNum(args[0])
-        if (gi < 0 || gi >= recv.length) {
-            fail("list index " + gi + " out of range")
-            return undefined
-        }
-        return recv[gi]
-    }
-    if (name == "contains") {
-        var k = 0
-        while (k < recv.length) {
-            if (csValueEq(recv[k], args[0])) { return true }
-            k = k + 1
-        }
-        return false
-    }
-    if (name == "indexOf") {
-        var j = 0
-        while (j < recv.length) {
-            if (csValueEq(recv[j], args[0])) { return j }
-            j = j + 1
-        }
-        return 0 - 1
-    }
-    fail("unknown list method '" + name + "'")
-    return undefined
-}
-
-// A Dictionary's keys / values / contains, which csharp-to-llvm-ir emits for
-// '.Keys', '.Values' and '.ContainsKey'.
-function csDictMethod(recv, name, args) {
-    if (name == "keys") { return rtCopyArr(recv["keys"]) }
-    if (name == "values") { return rtCopyArr(recv["vals"]) }
-    if (name == "length" || name == "size" || name == "count") { return recv["keys"].length }
-    if (name == "contains") { return csDictFind(recv["keys"], args[0]) >= 0 }
-    if (name == "add") {
-        js_pyset(recv, args[0], args[1])
-        return undefined
-    }
-    fail("unknown dictionary method '" + name + "'")
-    return undefined
-}
 // csCopyArr is SHARED as rtCopyArr - lib/runtime.metajs. It was one of SEVEN
 // byte-identical copies in six languages; see the difference list there.
 
@@ -2035,10 +2026,11 @@ function js_csidxset(o, i, v) {
     return js_pyset(o, i, v)
 }
 
-// foreach over a string iterates its chars (ECMA-334 13.9.5), so the source is
-// made a char array once. Twin of csForSrc in csharp-interpreter.abnf and
+// foreach over a dictionary visits its KeyValuePairs, and over a string its chars
+// (ECMA-334 13.9.5), so the source is made an array once. Twin of csForSrc in csharp-interpreter.abnf and
 // js_csforsrc in abnf/jsrtcsharp.go.
 function js_csforsrc(v) {
+    if (csIsDict(v)) { return csxDictPairs(v) }
     if (typeof v != "string") { return v }
     var out = []
     var i = 0

@@ -995,6 +995,8 @@ java-strings.js           <- java-rt.metajs, java interpreter (String's methods
                              and String.format; Go twin: abnf/jsrtjavastr.go)
 csharp-strings.js         <- csharp-rt.metajs, csharp interpreter (System.String
                              and System.Char; Go twin: abnf/jsrtcsstr.go)
+csharp-collections.js     <- csharp-rt.metajs, csharp interpreter (List<T> and
+                             Dictionary<TKey,TValue>; Go twin: abnf/jsrtcscoll.go)
 utf16-strings.js          <- java-rt.metajs, csharp-rt.metajs, java and csharp
                              interpreters (case mapping and literal search over
                              UTF-16 units; Go twin: abnf/jsrtjavastr.go)

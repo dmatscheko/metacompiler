@@ -2822,6 +2822,228 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s44a4", bad == "fxfxfx");
         }
 
+        // ===== SECTION 45: the default literal is target-typed =====
+        //
+        // ECMA-334 12.8.21: a bare `default` converts to whatever type its context
+        // gives it - a return's declared type, the variable an assignment or a
+        // declaration writes, the field or property it initializes, the other branch
+        // of a conditional (12.18) - and is that type's default value: 0, False, the
+        // null char, null for a reference or nullable type (9.3), a zeroed struct.
+        // A user member named Keys / Values is that member, not a dictionary's
+        // (12.8.7 member lookup). No C# toolchain here: the values follow from the
+        // spec.
+        struct S45P { public int X; public int Y; }
+        class S45Hold
+        {
+            public int F = default;
+            public bool G = default;
+            public int Prop { get; set; } = default;
+            public int Arrow => default;
+            public double Getter { get { return default; } }
+            public string S = default;
+            public int Keys = 4;
+            public string Values() { return "v"; }
+        }
+        static int S45Int() { return default; }
+        static bool S45Bool() { return default; }
+        static char S45Char() { return default; }
+        static long S45Long() => default;
+        static int? S45NInt() { return default; }
+        static S45P S45Struct() { return default; }
+        static int S45Outer(bool b)
+        {
+            int Inner() { return default; }
+            Func<string> f = () => { return default; };
+            if (b) { return Inner() + 1; }
+            return f() == null ? 7 : 8;
+        }
+        static void S45()
+        {
+            bool[] bs = { false, true };
+            Program.Check("s45r1", "" + S45Int() == "0" && S45Int() == 0 && "" + S45Bool() == "False"
+                && (int)S45Char() == 0 && "" + S45Long() == "0" && S45NInt() == null);
+            S45P p = S45Struct();
+            Program.Check("s45r2", p.X + p.Y == 0 && S45Outer(bs[1]) == 1 && S45Outer(bs[0]) == 7);
+            int y = 7;
+            y = default;
+            var v = 5;
+            v = default;
+            bool t = bs[1];
+            t = default;
+            Program.Check("s45a1", "" + y == "0" && "" + v == "0" && "" + t == "False");
+            int z = bs[1] ? default : 5;
+            Program.Check("s45c1", "" + (bs[0] ? 5 : default) == "0" && "" + (bs[0] ? true : default) == "False"
+                && (bs[0] ? "s" : default) == null && "" + z == "0" && "" + (bs[1] ? default : 9) == "0");
+            var h = new S45Hold();
+            Program.Check("s45f1", "" + h.F == "0" && "" + h.G == "False" && "" + h.Prop == "0"
+                && "" + h.Arrow == "0" && "" + h.Getter == "0" && h.S == null);
+            int?[] ns = { 0, null, 5 };
+            int? n0 = ns[0];
+            int? n1 = ns[1];
+            int? n2 = ns[2];
+            Program.Check("s45n1", !(n0 == default) && n0 != default && n1 == default && default == n1
+                && n2 != default && !(default == n2));
+            Program.Check("s45k1", h.Keys == 4 && h.Values() == "v");
+        }
+
+        // ===== SECTION 46: List<T>'s members =====
+        //
+        // The System.Collections.Generic.List<T> members as the BCL documents them:
+        // searches use EqualityComparer<T>.Default (a user Equals override), Sort()
+        // and BinarySearch use Comparer<T>.Default (a user CompareTo), BinarySearch
+        // answers the complement of the insertion point on a miss, Find answers
+        // default(T) on a miss, and the range checks throw ArgumentOutOfRangeException
+        // / ArgumentException. No C# toolchain here: the values follow from the docs.
+        class S46Pt : IComparable<S46Pt>
+        {
+            public int X;
+            public S46Pt(int x) { X = x; }
+            public int CompareTo(S46Pt o) { return X - o.X; }
+            public override bool Equals(object o) { return o is S46Pt p && p.X == X; }
+            public override int GetHashCode() { return X; }
+        }
+        class S46ByLen : IComparer<string>
+        {
+            public int Compare(string a, string b) { return a.Length - b.Length; }
+        }
+        static string S46Show(List<int> l)
+        {
+            string s = "";
+            foreach (var x in l) { s += x + ","; }
+            return s;
+        }
+        static void S46()
+        {
+            int[] n = { 5, 3, 8, 3, 1, 7, 9 };
+            var l = new List<int> { n[0], n[1], n[2], n[3], n[4] };
+            Program.Check("s46i1", l.IndexOf(n[1]) == 1 && l.IndexOf(n[1], 2) == 3 && l.IndexOf(n[1], 2, 1) == -1
+                && l.LastIndexOf(n[1]) == 3 && l.LastIndexOf(n[1], 2) == 1 && l.LastIndexOf(n[6]) == -1);
+            l.Insert(1, n[5]);
+            bool r1 = l.Remove(n[1]);
+            bool r2 = l.Remove(42);
+            Program.Check("s46m1", S46Show(l) == "5,7,8,3,1," && r1 && !r2);
+            l.RemoveAt(0);
+            l.AddRange(new int[] { n[6], n[6] });
+            Program.Check("s46m2", S46Show(l) == "7,8,3,1,9,9," && l.RemoveAll(x => x == n[6]) == 2
+                && S46Show(l) == "7,8,3,1,");
+            l.Sort();
+            string up = S46Show(l);
+            l.Sort((a, b) => b.CompareTo(a));
+            string down = S46Show(l);
+            l.Reverse();
+            Program.Check("s46s1", up == "1,3,7,8," && down == "8,7,3,1," && S46Show(l) == "1,3,7,8,"
+                && l.BinarySearch(n[5]) == 2 && l.BinarySearch(4) == -3);
+            Program.Check("s46f1", l.Find(x => x > 3) == 7 && l.Find(x => x > 100) == 0 && l.FindLast(x => x > 3) == 8
+                && l.FindIndex(x => x > 3) == 2 && l.FindLastIndex(x => x < 5) == 1 && l.Exists(x => x == n[2])
+                && l.TrueForAll(x => x > 0) && S46Show(l.FindAll(x => x % 2 == 1)) == "1,3,7,");
+            int sum = 0;
+            l.ForEach(x => sum += x);
+            Program.Check("s46f2", S46Show(l.GetRange(1, 2)) == "3,7," && S46Show(l.ConvertAll(x => x * x)) == "1,9,49,64,"
+                && sum == 19 && l.ToArray().Length == 4);
+            l.RemoveRange(0, 2);
+            var copy = new List<int>(l);
+            copy.Add(100);
+            Program.Check("s46c1", S46Show(l) == "7,8," && l.Count == 2 && copy.Count == 3);
+            l.Clear();
+            string ex = "";
+            try { l.RemoveAt(0); } catch (ArgumentOutOfRangeException) { ex += "a"; }
+            try { l.Insert(5, 1); } catch (ArgumentOutOfRangeException) { ex += "b"; }
+            try { copy.GetRange(1, 10); } catch (ArgumentException) { ex += "c"; }
+            Program.Check("s46e1", l.Count == 0 && ex == "abc");
+            var ps = new List<S46Pt> { new S46Pt(n[1]), new S46Pt(n[4]), new S46Pt(n[0]) };
+            ps.Sort();
+            Program.Check("s46u1", ps[0].X == 1 && ps[1].X == 3 && ps[2].X == 5 && ps.Contains(new S46Pt(n[0]))
+                && ps.IndexOf(new S46Pt(n[1])) == 1);
+            var ws = new List<string> { "ccc", "a", "bb" };
+            ws.Sort(new S46ByLen());
+            string byLen = ws[0] + ws[1] + ws[2];
+            ws.Sort((a, b) => string.CompareOrdinal(b, a));
+            Program.Check("s46u2", byLen == "abbccc" && ws[0] + ws[1] + ws[2] == "cccbba" && ws.Contains("bb"));
+            var ds = new List<double> { 1.5, 2 };
+            int[] cmp = { n[1].CompareTo(n[0]), n[0].CompareTo(5), n[2].CompareTo(n[1]) };
+            Program.Check("s46v1", ds.Contains(2) && cmp[0] == -1 && cmp[1] == 0 && cmp[2] == 1
+                && S46B(true).CompareTo(false) == 1);
+            var cs = new List<char>("hey");
+            Program.Check("s46v2", cs.Count == 3 && cs[1] == 'e' && cs.IndexOf('y') == 2);
+        }
+        static bool S46B(bool b) { return b; }
+
+        // ===== SECTION 47: Dictionary<TKey,TValue>'s members =====
+        //
+        // The documented Dictionary<TKey,TValue> members: Add throws ArgumentException
+        // on a duplicate key, the indexer KeyNotFoundException on a missing one;
+        // TryGetValue and Remove(key, out value) write default(TValue) on a miss;
+        // TryAdd, ContainsValue, GetValueOrDefault (CollectionExtensions), Clear, and
+        // the copy constructor. foreach visits KeyValuePair<TKey,TValue>s, whose
+        // ToString() is "[key, value]" and which deconstruct into (key, value) - also
+        // as the iteration variable, `foreach (var (k, v) in d)` (ECMA-334 13.9.5). No
+        // C# toolchain here: the values follow from the docs.
+        static void S47()
+        {
+            string[] k = { "a", "b", "c", "z" };
+            int[] n = { 1, 2, 3, 9 };
+            var d = new Dictionary<string, int>();
+            d[k[0]] = n[0];
+            d.Add(k[1], n[1]);
+            string seen = "";
+            foreach (var kv in d) { seen += kv.Key + "=" + kv.Value + ";" + kv + ";"; }
+            foreach (var kv in d) { var (kk, vv) = kv; seen += kk + vv; }
+            foreach (var (kk, vv) in d) { seen += vv + kk; }
+            Program.Check("s47e1", d.Count == 2 && seen == "a=1;[a, 1];b=2;[b, 2];a1b21a2b");
+            var ts = new List<(int, string)> { (n[0], k[2]), (n[1], k[3]) };
+            string tseen = "";
+            foreach ((int tn, string tk) in ts) { tseen += tk + tn; }
+            Program.Check("s47e2", tseen == "c1z2");
+            int v;
+            bool hit = d.TryGetValue(k[0], out v);
+            int hv = v;
+            bool miss = d.TryGetValue(k[3], out v);
+            Program.Check("s47t1", hit && hv == 1 && !miss && "" + v == "0");
+            string ex = "";
+            try { var x = d[k[3]]; } catch (KeyNotFoundException) { ex += "k"; }
+            try { d.Add(k[1], n[3]); } catch (ArgumentException e) { ex += e.Message; }
+            Program.Check("s47x1", ex == "kAn item with the same key has already been added. Key: b");
+            Program.Check("s47m1", d.ContainsValue(n[1]) && !d.ContainsValue(n[3]) && d.TryAdd(k[2], n[2])
+                && !d.TryAdd(k[2], n[3]) && d[k[2]] == 3 && d.GetValueOrDefault(k[3], n[3]) == 9
+                && "" + d.GetValueOrDefault(k[3]) == "0");
+            var copy = new Dictionary<string, int>(d);
+            int got;
+            bool rem = d.Remove(k[0], out got);
+            Program.Check("s47r1", rem && got == 1 && !d.ContainsKey(k[0]) && d.Count == 2 && !d.Remove(k[0])
+                && copy.Count == 3 && copy.ContainsKey(k[0]));
+            d.Clear();
+            d[k[3]] = n[3];
+            Program.Check("s47r2", d.Count == 1 && d[k[3]] == 9 && d.Keys.Count == 1 && d.Values.Count == 1);
+        }
+
+        // ===== SECTION 48: String's IndexOfAny, LastIndexOfAny, Split with a count, CompareOrdinal =====
+        //
+        // System.String as documented: IndexOfAny / LastIndexOfAny search for any of
+        // a char set, from a start index over a count of chars; Split(separator,
+        // count) answers at most count parts, the last holding the rest unsplit (0
+        // parts for a count of 0, a negative one throws); CompareOrdinal compares
+        // UTF-16 units and orders null first. No C# toolchain here: the values
+        // follow from the docs.
+        static string S48J(string[] a) { return a.Length + ":" + string.Join("|", a); }
+        static void S48()
+        {
+            string s = "Hello, World";
+            char[] any = { 'o', 'W' };
+            int[] n = { 5, 2, 7, 0, 1 };
+            Program.Check("s48a1", s.IndexOfAny(any) == 4 && s.IndexOfAny(any, n[0]) == 7
+                && s.IndexOfAny(any, n[0], n[1]) == -1 && s.LastIndexOfAny(any) == 8
+                && s.LastIndexOfAny(any, n[2]) == 7 && s.LastIndexOfAny(any, n[2], n[1]) == 7
+                && "".LastIndexOfAny(any) == -1);
+            Program.Check("s48s1", S48J("a,b,c".Split(',', n[1])) == "2:a|b,c" && S48J("a,b,c".Split(',', n[4])) == "1:a,b,c"
+                && S48J("a,b,c".Split(',', n[3])) == "0:" && S48J("a::b::c".Split("::", n[1])) == "2:a|b::c");
+            string ex = "";
+            try { "a".Split(',', n[3] - 1); } catch (ArgumentOutOfRangeException) { ex = "aoor"; }
+            Program.Check("s48s2", ex == "aoor");
+            Program.Check("s48o1", string.CompareOrdinal("abc", "abd") < 0 && string.CompareOrdinal("b", "a") > 0
+                && string.CompareOrdinal("ab", "ab") == 0 && string.CompareOrdinal(null, "a") < 0
+                && string.CompareOrdinal("B", "a") < 0);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2868,6 +3090,10 @@ b";                                                   // verbatim keeps the newl
             Program.S42(); // SECTION-CALL 42
             Program.S43(); // SECTION-CALL 43
             Program.S44(); // SECTION-CALL 44
+            Program.S45(); // SECTION-CALL 45
+            Program.S46(); // SECTION-CALL 46
+            Program.S47(); // SECTION-CALL 47
+            Program.S48(); // SECTION-CALL 48
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

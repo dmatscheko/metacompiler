@@ -93,8 +93,11 @@ func csxTrim(u []uint16, set []int, lead, trail bool) []uint16 {
 	return u[b:e]
 }
 
-func csxSplit(s []uint16, seps [][]uint16) *jsArray {
+func csxSplit(s []uint16, seps [][]uint16, max int) *jsArray {
 	out := &jsArray{}
+	if max == 0 {
+		return out
+	}
 	any := false
 	for _, sp := range seps {
 		if len(sp) > 0 {
@@ -102,7 +105,7 @@ func csxSplit(s []uint16, seps [][]uint16) *jsArray {
 		}
 	}
 	last := 0
-	for i := 0; i < len(s); {
+	for i := 0; i < len(s) && len(out.elems)+1 != max; {
 		hit := 0
 		if !any {
 			if csxIsWs(int(s[i])) {
@@ -126,6 +129,75 @@ func csxSplit(s []uint16, seps [][]uint16) *jsArray {
 	}
 	out.elems = append(out.elems, strFromUnits(s[last:]))
 	return out
+}
+
+// csxSplitCall: Split(separator(s) [, count]), lib/csharp-strings.js's.
+func (rt *jsrt) csxSplitCall(u []uint16, args []interface{}) *jsArray {
+	if len(args) == 2 {
+		switch args[1].(type) {
+		case jsChar, string, *jsArray:
+		default:
+			max := rt.csxNum(args[1])
+			if max < 0 {
+				rt.csThrow("ArgumentOutOfRangeException", "Count cannot be less than zero. (Parameter 'count')")
+			}
+			return csxSplit(u, rt.csxSeps(args[:1]), max)
+		}
+	}
+	return csxSplit(u, rt.csxSeps(args), -1)
+}
+
+// csxIndexOfAny / csxLastIndexOfAny: lib/csharp-strings.js's.
+func (rt *jsrt) csxIndexOfAny(u []uint16, args []interface{}) int {
+	set := rt.csxCharSet(args[:1], 0)
+	from := 0
+	if len(args) > 1 {
+		from = rt.csxNum(args[1])
+	}
+	if from < 0 || from > len(u) {
+		rt.csThrow("ArgumentOutOfRangeException", "Index was out of range. Must be non-negative and less than or equal to the size of the collection. (Parameter 'startIndex')")
+	}
+	end := len(u)
+	if len(args) > 2 {
+		cnt := rt.csxNum(args[2])
+		if cnt < 0 || from+cnt > len(u) {
+			rt.csThrow("ArgumentOutOfRangeException", "Count must be positive and count must refer to a location within the string/array/collection. (Parameter 'count')")
+		}
+		end = from + cnt
+	}
+	for i := from; i < end; i++ {
+		if csxInSet(set, int(u[i])) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (rt *jsrt) csxLastIndexOfAny(u []uint16, args []interface{}) int {
+	set := rt.csxCharSet(args[:1], 0)
+	if len(u) == 0 {
+		return -1
+	}
+	from := len(u) - 1
+	if len(args) > 1 {
+		from = rt.csxNum(args[1])
+	}
+	if from < 0 || from >= len(u) {
+		rt.csThrow("ArgumentOutOfRangeException", "Index was out of range. Must be non-negative and less than the size of the collection. (Parameter 'startIndex')")
+	}
+	cnt := from + 1
+	if len(args) > 2 {
+		cnt = rt.csxNum(args[2])
+		if cnt < 0 || from-cnt+1 < 0 {
+			rt.csThrow("ArgumentOutOfRangeException", "Count must be positive and count must refer to a location within the string/array/collection. (Parameter 'count')")
+		}
+	}
+	for i := from; i > from-cnt; i-- {
+		if csxInSet(set, int(u[i])) {
+			return i
+		}
+	}
+	return -1
 }
 
 func (rt *jsrt) csxSeps(args []interface{}) [][]uint16 {
@@ -264,12 +336,6 @@ func csxToChars(u []uint16) *jsArray {
 // csxStrMethod is a string receiver's method; ok is false for a name it does not
 // know, which the shared js_mcall then answers or rejects.
 func (rt *jsrt) csxStrMethod(s, name string, args []interface{}) (interface{}, bool) {
-	switch name {
-	case "indexOf":
-		name = "IndexOf"
-	case "contains":
-		name = "Contains"
-	}
 	u := strUnits(s)
 	n := len(args)
 	switch {
@@ -307,7 +373,11 @@ func (rt *jsrt) csxStrMethod(s, name string, args []interface{}) (interface{}, b
 		}
 		return jxReplace(s, strFromUnits(o), strFromUnits(r)), true
 	case name == "Split":
-		return csxSplit(u, rt.csxSeps(args)), true
+		return rt.csxSplitCall(u, args), true
+	case name == "IndexOfAny":
+		return float64(rt.csxIndexOfAny(u, args)), true
+	case name == "LastIndexOfAny":
+		return float64(rt.csxLastIndexOfAny(u, args)), true
 	case name == "ToCharArray":
 		if n == 0 {
 			return csxToChars(u), true
@@ -429,9 +499,34 @@ func (rt *jsrt) csxStringStatic(name string, args []interface{}) interface{} {
 			return a == b
 		}
 		return isUndefOrNull(args[0]) && isUndefOrNull(args[1])
+	case name == "CompareOrdinal" && n == 2:
+		return csxCompareOrdinal(args[0], args[1])
 	}
 	rt.fail("unknown string method: " + name)
 	return nil
+}
+
+// csxCompareOrdinal is lib/csharp-strings.js's: UTF-16 unit by unit, the
+// difference of the first pair that differs, else of the lengths; null first.
+func csxCompareOrdinal(a, b interface{}) float64 {
+	as, aok := a.(string)
+	bs, bok := b.(string)
+	if !aok || !bok {
+		switch {
+		case !aok && !bok:
+			return 0
+		case !aok:
+			return -1
+		}
+		return 1
+	}
+	u, v := strUnits(as), strUnits(bs)
+	for i := 0; i < len(u) && i < len(v); i++ {
+		if u[i] != v[i] {
+			return float64(int(u[i]) - int(v[i]))
+		}
+	}
+	return float64(len(u) - len(v))
 }
 
 func (rt *jsrt) csxNewString(args []interface{}) string {

@@ -9,8 +9,8 @@ methods (block bodied and expression bodied '=> e;'), constructors (with an opti
 ('class B : A' inherits fields and methods, overrides with dynamic dispatch, runs the
 implicit base constructor, and 'base.M()' calls; a base class must appear before its
 subclasses), object creation with 'new', arrays (new int[n], new int[]{...}, a.Length,
-indexing), List<T> (new List<T>(), .Add, [i], .Count, .Contains, foreach), Dictionary<K,V>
-(new Dictionary<K,V>(), d[k] get/set, .Count, .ContainsKey, .Keys, .Values), the 'foreach
+indexing), List<T> and Dictionary<K,V> with their documented members (lib/csharp-
+collections.js; a foreach over a dictionary visits KeyValuePairs), the 'foreach
 (var x in coll)' loop, 'var' and typed locals/params/returns (types are parsed; the
 semantics are dynamic), string concatenation with +, '$\"...{expr}...\"' interpolation,
 the String members .Length, .Substring, .IndexOf and .Equals, Console.WriteLine /
@@ -225,12 +225,12 @@ Finalizer   = [ LeadMods ] "~" Id ParamList ( Block | "=>" DiscardExpr ";" | ";"
 // static members of the declaring type; they become '__op1_<sym>' / '__op2_<sym>' and
 // '__conv_<T>' members, which binOp / makeNeg / makeCast / a typed declaration consult.
 OperatorDecl = ConvDecl | BinOpDecl ;
-ConvDecl    <~~ push(makeConvOp(takeAll())) ~~>
+ConvDecl    <~~ push(makeConvOp(csRetDrain(up.start, takeAll()))) ~~>
             = Mods ConvKind KwOperator CType ParamList MethodBody ;
 ConvKind    = ( "implicit" | "explicit" ) KwEnd ;
 CType       <~~ push({cty: stripWs(up.in)}) ~~>
             = Type ;
-BinOpDecl   <~~ push(makeOperatorDecl(takeAll())) ~~>
+BinOpDecl   <~~ push(makeOperatorDecl(csRetDrain(up.start, takeAll()))) ~~>
             = Mods FType KwOperator OpSym ParamList MethodBody ;
 // Longer symbols first, so '++' is never read as '+'.
 OpSym       <~~ push({opsym: stripWs(up.in)}) ~~>
@@ -246,7 +246,7 @@ KwOperator  = "operator" KwEnd ;
 // ('int IFoo<T>.this[int i] { get { ... } }'); there is one indexer per class here,
 // so the interface name is parsed and dropped. The body may be a block of accessors
 // or an expression, which is a get-only accessor - the same pair Property allows.
-IndexerDecl <~~ push(makeIndexer(takeAll())) ~~>
+IndexerDecl <~~ push(makeIndexer(csRetDrain(up.start, takeAll()))) ~~>
             = Mods FType [ IfaceQual ] KwThis IdxParams ( PropAccs | PropArrow ) ;
 // Each segment carries its OWN trailing dot. Written as `... { "." Id } "."` the
 // repetition is greedy and swallows the `.this`, and then the final "." has nothing
@@ -286,7 +286,7 @@ CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 // its plain name (the interface view is not modelled separately).
 // FType (not a bare Type) so the RETURN TYPE reaches makeMethod: `double R()
 // { return 3; }` must answer 3.0, not the int 3 that then integer-divides.
-Method      <~~ push(makeMethod(takeAll())) ~~>
+Method      <~~ push(makeMethod(csRetDrain(up.start, takeAll()))) ~~>
             = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
 // csSimpleName drops the type arguments of both the interface and the method itself
 // ('IEnumerable<Foo>.GetEnumerator', 'Echo<T>') and keeps the last segment.
@@ -298,7 +298,7 @@ MethodBody  = Block | ArrowBody ;
 // the dispatch finds.
 AbstractMethod <~~ push(makeAbstract(takeAll())) ~~>
             = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } ";" ;
-ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
+ArrowBody   <~~ csRetDflt(up.pos); push(makeArrowBody(pop())) ~~>
             = "=>" Expression ";" ;
 
 // A property. An automatically implemented accessor pair ('{ get; set; }', 'init' and
@@ -306,7 +306,7 @@ ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
 // initializer, a read and a write all work unchanged. An accessor with a body instead
 // becomes a '__get_<name>' / '__set_<name>' member, which the field read (core.getField)
 // and the assignment path consult when the object carries no member of that name.
-Property    <~~ push(makeProperty(takeAll())) ~~>
+Property    <~~ push(makeProperty(csRetDrain(up.start, takeAll()))) ~~>
             = Mods FType PropName ( PropAccs [ PropInit ] | PropArrow ) ;
 // The name may be qualified with the interface it explicitly implements
 // ('int I.P { get { ... } }'); only the last segment is kept.
@@ -328,7 +328,7 @@ AddAcc      <~~ push(makeAccessor("add", takeAll())) ~~>
 RemoveAcc   <~~ push(makeAccessor("remove", takeAll())) ~~>
             = LeadMods "remove" KwEnd AccBody ;
 AccBody     = ";" | Block | ArrowBody ;
-PropInit    <~~ push({pinit: pop()}) ~~>
+PropInit    <~~ push({pinit: pop(), pend: up.pos}) ~~>
             = "=" InitVal ";" ;
 PropArrow   <~~ push({parrow: pop()}) ~~>
             = ArrowBody ;
@@ -342,7 +342,7 @@ Field       <~~ push(makeFieldGroup(takeAll())) ~~>
 // it is skipped rather than parsed, and the field is an ordinary one. The grammar
 // does not insist on the 'fixed' modifier: modifiers are collected generically, and
 // refusing the declarator without it would buy nothing this front end can use.
-FieldDecl   <~~ push({fdecl: takeAll()}) ~~>
+FieldDecl   <~~ push({fdecl: takeAll(), fend: up.pos}) ~~>
             = Id <~~ push(up.in) ~~> [ FixedDim ] [ "=" InitVal ] ;
 FixedDim    = "[" { FixedDimCh } "]" ;
 FixedDimCh  = "\x00"..."\x5c" | "\x5e"..."\U0010ffff" ;
@@ -425,7 +425,8 @@ PrimType    = ( "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "byte" 
 UserType    = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
+Statement   = Block | If | While | Do | ForEachDecon | ForEach | For
+            | Switch | Return | Break | Continue
             | Goto | Try | Throw | UsingStmt | Lock | Checked | FixedStmt | LocalFunc
             | YieldStmt | Decon | Decl | Empty | ExprStmt ;
 
@@ -452,7 +453,7 @@ LabelName   <~~ push(up.in) ~~>
 
 // A local function: a named closure over the enclosing locals, declared like a method.
 // It is bound before its body can run, so it may call itself.
-LocalFunc   <~~ push(makeLocalFunc(takeAll())) ~~>
+LocalFunc   <~~ push(makeLocalFunc(csRetDrain(up.start, takeAll()))) ~~>
             = Mods FType Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
 
 // 'checked { ... }' / 'unchecked { ... }': the block runs (overflow checking is not
@@ -569,6 +570,12 @@ NotSecKw    = :script(~~
 // foreach (var x in coll) body.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
             = KwForeach "(" Type Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+// `foreach (var (k, v) in d)` / `foreach ((int a, string b) in xs)`: each element is
+// taken apart into the names exactly as `var (k, v) = element;` at the top of the body
+// would (ECMA-334 13.9.5, the deconstruction form of the iteration variable).
+ForEachDecon <~~ push(makeForEachDecon(takeAll())) ~~>
+            = KwForeach "(" [ DeconVar ] "(" DeconTgt "," DeconTgt { "," DeconTgt } ")" KwIn
+              Expression ")" Statement ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
@@ -578,7 +585,7 @@ ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 
-Return      <~~ push(makeReturn(takeAll())) ~~>
+Return      <~~ csRetDflt(up.pos); push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
 
 // An iterator block. A method whose body contains a 'yield' is an ITERATOR: calling it
@@ -687,7 +694,7 @@ DeclEndAhead = :script(~~
         return (a === 59 || a === 44 || a === 41) ? undefined : abnf.newToken("\x01decl-continues", 0)
     })()
 ~~) ;
-DeclExpr    <~~ push({dinit: pop()}) ~~>
+DeclExpr    <~~ push({dinit: pop(), dend: up.pos, dsrc: c.srcSlice(up.start, up.pos)}) ~~>
             = "=" InitVal ;
 
 Empty       <~~ push(function() {}) ~~>
@@ -824,8 +831,10 @@ PlainTarget <~~ push(makeTargetRef(takeAll())) ~~>
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression { "," DiscardExpr } "]" ;
 
-CondExpr    <~~ push(makeCond(takeAll())) ~~>
-            = NullCoal [ "?" Expression ":" Expression ] ;
+// Each branch also leaves its source range, for a default literal branch (csCondDflt).
+CondExpr    <~~ push(makeCond(csCondDflt(takeAll()))) ~~>
+            = NullCoal [ "?" Expression <~~ push({at: up.start, e: up.pos}) ~~>
+                         ":" Expression <~~ push({at: up.start, e: up.pos}) ~~> ] ;
 
 // Null-coalescing 'a ?? b': the first operand that is not null wins.
 NullCoal    <~~ push(makeNullCoal(takeAll(), up.pos)) ~~>
@@ -1354,7 +1363,7 @@ SizeofExpr  <~~ push(makeSizeof(pop())) ~~>
 DefaultExpr = DefaultOf | DefaultBare ;
 DefaultOf   <~~ push(makeDefaultOf(pop())) ~~>
             = "default" KwEnd "(" TypeArg ")" ;
-DefaultBare <~~ push(makeDefaultOf("")) ~~>
+DefaultBare <~~ push(makeDefaultBare(up.pos)) ~~>
             = "default" KwEnd ;
 TypeArg     <~~ push(stripWs(up.in)) ~~>
             = Type ;
@@ -1416,7 +1425,7 @@ CsRSfx      = "f" | "F" | "d" | "D" | "m" | "M" ;
 
 // A lambda ('x => e', '(a, b) => { ... }') is a real closure value (a Func / Action
 // delegate): it captures the current scope chain and is invoked at a call site (CallSfx).
-Lambda      <~~ push(makeLambda(takeAll())) ~~>
+Lambda      <~~ csRetDrainTo(up.start, ""); push(makeLambda(takeAll())) ~~>
             = [ LambdaMod ] LambdaHead "=>" LambdaBody ;
 // 'static x => ...' / 'async x => ...': parsed and dropped (capture is not restricted).
 LambdaMod   = ( "static" | "async" ) KwEnd ;
@@ -1435,13 +1444,13 @@ LamBareParam <~~ push(up.in) ~~>
 // The parameter list may be omitted entirely ('delegate { ... }'), which in C# means
 // 'whatever this delegate type takes, ignored' - here an empty parameter list.
 AnonMethod  = AnonParams | AnonBare ;
-AnonParams  <~~ push(makeLambda(takeAll())) ~~>
+AnonParams  <~~ csRetDrainTo(up.start, ""); push(makeLambda(takeAll())) ~~>
             = [ LambdaMod ] KwDelegate ParamList LamBlock ;
-AnonBare    <~~ push(makeBareAnon(takeAll())) ~~>
+AnonBare    <~~ csRetDrainTo(up.start, ""); push(makeBareAnon(takeAll())) ~~>
             = [ LambdaMod ] KwDelegate LamBlock ;
 LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({body: pop()}) ~~> = Block ;
-LamExpr     <~~ push({ebody: pop()}) ~~> = Expression ;
+LamExpr     <~~ csDfltSet(csDfltAt(up.pos, ""), ""); push({ebody: pop()}) ~~> = Expression ;
 // A LINQ query expression: accepted, reported as not implemented.
 // The whole query-expression syntax (C# 7.16) is RECOGNIZED - from/let/where/
 // join/orderby/group/select and the `into` continuation - and every
@@ -1657,6 +1666,7 @@ KwLet       = "let" KwEnd ;
     include("lib/java-chars.js")
     include("lib/utf16-strings.js")
     include("lib/csharp-strings.js")
+    include("lib/csharp-collections.js")
 
     // The host names a program can see. Console is built here.
     hostGlobals["Console"] = {
@@ -2524,6 +2534,7 @@ KwLet       = "let" KwEnd ;
         // "" + v would print [object Object] and szNum would round above 2^53.
         if (typeof v == "object" && v.__sz === true) return szStr(v)
         if (Array.isArray(v)) return csArrayName(v)
+        if (csxIsKvp(v)) return "[" + csStrD(v.Key, d + 1) + ", " + csStrD(v.Value, d + 1) + "]"
         if (typeof v == "object") {
             var m = csFindToStr(v)
             if (m != undefined) { return csStrD(m(v), d + 1) }
@@ -2616,9 +2627,10 @@ KwLet       = "let" KwEnd ;
         if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
         return o[i]
     }
-    // foreach over a string iterates its chars (ECMA-334 13.9.5: string's
-    // enumerator yields char). Twin of js_csforsrc.
+    // foreach over a dictionary visits its KeyValuePairs; over a string, its chars
+    // (ECMA-334 13.9.5: string's enumerator yields char). Twin of js_csforsrc.
     function csForSrc(v) {
+        if (isDict(v)) { return csxDictPairs(v) }
         if (typeof v != "string") { return v }
         var out = []
         for (var i = 0; i < v.length; i++) { out.push(csChar(v.charCodeAt(i))) }
@@ -2654,6 +2666,19 @@ KwLet       = "let" KwEnd ;
     function csxkNum(v) { return csNumD(v) }
     function csxkStr(v) { return csStr(v) }
     function csxkThrow(t, msg) { csThrowExc(t, msg) }
+    // ----- List<T> and Dictionary<TKey,TValue> (lib/csharp-collections.js) -----
+    function csxkIsNum(v) { return typeof v == "number" || csIsFlo(v) || szIs(v) || csIsChar(v) }
+    function csxkLt(a, b) {
+        if (csIsFlo(a) || csIsFlo(b)) { return csxkCode(a) < csxkCode(b) }
+        return csCmp("<", a, b)
+    }
+    function csxkMcall(o, n, a) { return mcall(o, n, a) }
+    function csxkHasMethod(o, n) { return csIsUserObj(o) && csHasMethod(o, n) }
+    function csxkIsDeleg(v) { return csIsDelegVal(v) }
+    function csxkCall(f, args) { return csDelegInvoke(f, args) }
+    function csxkElems(v) { return csForSrc(v) }
+    function csxkDictFind(d, k) { return dictFind(d, k) }
+    function csxkRefSet(box, v) { if (csIsRefBox(box)) { box.wb(v) } }
 
     // ----- iterators ('yield return'), driven by REPLAY -----
     // A method whose body contains a yield is an ITERATOR: calling it runs NOTHING and
@@ -2927,13 +2952,7 @@ KwLet       = "let" KwEnd ;
         if (target !== null && typeof target == "object" && target.__cstype !== undefined) {
             return target.__cstype == "char" ? csxCharStatic(name, args) : csxStringStatic(name, args)
         }
-        if (isDict(target)) {
-            if (name == "ContainsKey") return dictFind(target, args[0]) >= 0
-            if (name == "keys") return target.keys.slice(0)
-            if (name == "values") return target.vals.slice(0)
-            if (name == "Count") return target.keys.length
-            fail("unknown Dictionary method: " + name)
-        }
+        if (isDict(target)) { return csxDictMethod(target, name, args) }
         if (csIsEnum(target)) {
             if (name == "MoveNext") {
                 if (!csGenStep(target.g)) { return false }
@@ -2949,10 +2968,11 @@ KwLet       = "let" KwEnd ;
         }
         if (Array.isArray(target)) {
             if (name == "GetEnumerator") { return csNewEnum(csArrayGen(target)) }
-            if (name == "Add") { target.push(args[0]); return true }
-            if (name == "Contains") return target.indexOf(args[0]) >= 0
-            if (name == "Count") return target.length
-            fail("unknown List method: " + name)
+            return csxListMethod(target, name, args)
+        }
+        // Int32 / Double / Boolean.CompareTo (a char's is csxCharMethod's, above).
+        if (name == "CompareTo" && args.length == 1 && (typeof target == "boolean" || csxkIsNum(target))) {
+            return csxValueCompareTo(target, args)
         }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
@@ -3141,6 +3161,7 @@ KwLet       = "let" KwEnd ;
         var elty = ""
         if (ref.path.length == 0 && ref.name != undefined && hasOwn(csLocalTypes, ref.name)) {
             lty = csLocalWriteTy(csLocalTypes[ref.name])
+            if (op == "=") { csDfltTarget(pos, "", csLocalDfltTy[ref.name]) }
         } else if (ref.ety != undefined) {
             elty = ref.ety
         }
@@ -3326,14 +3347,19 @@ KwLet       = "let" KwEnd ;
                 return csxNewString(sargs)
             }
             if (clsName == "List") {
-                for (var i = 0; i < args.length; i++) { args[i]() }
-                var la = []
+                var lav = []
+                for (var i = 0; i < args.length; i++) { lav.push(args[i]()) }
+                var la = csxListCtor([], lav)
                 if (minits != null) { csApplyInits(la, minits) }
                 return la
             }
             if (clsName == "Dictionary") {
-                for (var j = 0; j < args.length; j++) { args[j]() }
+                var dav = []
+                for (var j = 0; j < args.length; j++) { dav.push(args[j]()) }
                 var dd = {__dict: true, keys: [], vals: []}
+                // The value type, for the default(TValue) TryGetValue hands out.
+                if (targs.length == 2) { dd.__vty = stripWs(targs[1]) }
+                csxDictCtor(dd, dav)
                 if (minits != null) { csApplyInits(dd, minits) }
                 return dd
             }
@@ -3614,11 +3640,13 @@ KwLet       = "let" KwEnd ;
         var ts = []
         var objs = []
         var dfls = []
+        var nuls = []
         var k
         for (k = 0; k < items.length; k += 2) {
             ts.push(items[k].eqt)
             objs.push(csIsObjCastOperand(items[k].eqin))
             dfls.push(items[k].eqin == "default")
+            nuls.push(csNullableLocal(items[k].eqin))
         }
         if (items.length == 1) { return ts[0] }
         var f = binOp
@@ -3629,9 +3657,15 @@ KwLet       = "let" KwEnd ;
                 var rv = ts[(i + 1) / 2]()
                 // A bare `default` operand takes the OTHER operand's type (the default
                 // literal, ECMA-334 12.8.21), so `x == default` asks whether
-                // x is the default value of its own type. Twin of js_csisdflt.
+                // x is the default value of its own type. A NULLABLE local's
+                // default is null, so `n == default` is a null test. Twin of
+                // js_csisdflt.
                 if ((i == 1 && dfls[0]) || dfls[(i + 1) / 2]) {
-                    var isd = csIsDefaultVal(dfls[(i + 1) / 2] ? v : rv)
+                    var onRight = dfls[(i + 1) / 2]
+                    var other = anytype
+                    other = onRight ? v : rv
+                    var isd = ((onRight && i == 1 && nuls[0]) || (!onRight && nuls[1]))
+                        ? (other === null || other === undefined) : csIsDefaultVal(other)
                     v = (items[i] == "==") ? isd : !isd
                     continue
                 }
@@ -4437,35 +4471,136 @@ KwLet       = "let" KwEnd ;
         return 8
     }
     function makeSizeof(name) { return makeConst(csSizeof(name)) }
-    // The default value of a type. Resolved at RUN time so a struct - which defaults to a
-    // zeroed instance - can be looked up after its declaration has been built.
-    function csDefaultRT(ty) {
-        var t = ty
-        if (t == "" || t.length == 0) { return null }
-        if (t.charAt(t.length - 1) == "?") { return null }
-        if (t.indexOf("[") >= 0) { return null }
-        if (t == "bool") { return false }
-        if (t == "char") { return csChar(0) }
-        if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short"
-            || t == "ushort" || t == "byte" || t == "sbyte" || t == "double"
-            || t == "float" || t == "decimal") { return 0 }
-        return null
-    }
-    // A struct's default is a zeroed instance of it; everything else is decided by type
-    // name at run time.
+    // The default value of a type, resolved at RUN time so a struct - which defaults to
+    // a zeroed instance - can be looked up after its declaration has been built. Every
+    // other type's is lib/csharp-collections.js's csxDefaultOf.
     function makeDefaultOf(ty) {
         if (hasOwn(csStructs, ty)) { return function() { return getVar(ty).__zero() } }
-        return function() { return csDefaultRT(ty) }
+        return function() { return csxDefaultOf(ty) }
     }
+    // The bare `default` literal is TARGET-TYPED (ECMA-334 12.8.21): it is the default
+    // value of the type its context converts it to - a return's declared type, the
+    // variable an assignment or declaration writes, the other branch of a conditional.
+    // Each literal owns a cell for that type, keyed by the literal's end offset; the
+    // context fills it at parse time (csDfltTarget) and the literal reads it when it
+    // runs. A cell nothing typed is null, a reference type's default. The first
+    // context to type a cell wins, so `object o = c ? 5 : default` keeps the int the
+    // conditional gave it. Twin of makeDefaultBare in csharp-to-llvm-ir.abnf.
+    var csDfltCells = {}
+    function makeDefaultBare(end) {
+        var cell = {ty: "", set: false}
+        csDfltCells["$" + end] = cell
+        return function() {
+            if (hasOwn(csStructs, cell.ty)) { return getVar(cell.ty).__zero() }
+            return csxDefaultOf(cell.ty)
+        }
+    }
+    // The cell of the default literal that ENDS the source before offset `to`, trailing
+    // blanks and one optional `closer` (`;`) skipped; null when the source there is not
+    // a default literal.
+    function csDfltAt(to, closer) {
+        var e = to
+        while (e > 0 && c.srcSlice(e - 1, e).trim() == "") { e-- }
+        if (closer != "" && c.srcSlice(e - 1, e) == closer) {
+            e--
+            while (e > 0 && c.srcSlice(e - 1, e).trim() == "") { e-- }
+        }
+        var k = "$" + e
+        return hasOwn(csDfltCells, k) ? csDfltCells[k] : null
+    }
+    function csDfltSet(cell, ty) {
+        if (cell == null || cell.set) { return }
+        cell.ty = stripWs(ty)
+        cell.set = true
+    }
+    function csDfltTarget(to, closer, ty) { csDfltSet(csDfltAt(to, closer), ty) }
+    // A `return default;` (or `=> default;`) is typed by the enclosing function
+    // member, whose tag runs after its body's: the cells wait here with their offsets,
+    // and the member (csRetDrain) takes the ones inside it. A lambda drains its own
+    // untyped, so a method's type never reaches a lambda's return.
+    var csRetDflts = []
+    function csRetDflt(to) {
+        var cell = csDfltAt(to, ";")
+        if (cell != null) { csRetDflts.push({at: to, cell: cell}) }
+    }
+    function csRetDrain(start, items) {
+        var ty = ""
+        for (var i = 0; i < items.length && ty == ""; i++) {
+            var it = items[i]
+            if (it != null && typeof it == "object" && it.ty != undefined) { ty = it.ty }
+            if (it != null && typeof it == "object" && it.cty != undefined) { ty = it.cty }
+        }
+        csRetDrainTo(start, ty)
+        return items
+    }
+    function csRetDrainTo(start, ty) {
+        while (csRetDflts.length > 0 && csRetDflts[csRetDflts.length - 1].at >= start) {
+            csDfltSet(csRetDflts.pop().cell, ty)
+        }
+    }
+    // The type of a literal's source text, or "" when it is not a literal: what the
+    // other branch of `c ? 5 : default` gives the default.
+    function csLitTypeName(t) {
+        if (t == "true" || t == "false") { return "bool" }
+        if (t.length == 0) { return "" }
+        var c0 = t.charAt(0)
+        if (c0 == "'") { return "char" }
+        if (c0 == "\"" || c0 == "$" || c0 == "@") { return "string" }
+        var s = (c0 == "-" || c0 == "+") ? t.substring(1, t.length) : t
+        if (s.length == 0) { return "" }
+        var d0 = s.charAt(0)
+        if (!(d0 >= "0" && d0 <= "9") && d0 != ".") { return "" }
+        if (s.length > 1 && (s.charAt(1) == "x" || s.charAt(1) == "X" || s.charAt(1) == "b" || s.charAt(1) == "B")) { return "int" }
+        var last = s.charAt(s.length - 1)
+        if (last == "f" || last == "F") { return "float" }
+        if (last == "m" || last == "M") { return "decimal" }
+        if (last == "d" || last == "D" || s.indexOf(".") >= 0 || s.indexOf("e") >= 0 || s.indexOf("E") >= 0) { return "double" }
+        return "int"
+    }
+    // The static type of an operand's source text as far as a parse can tell: a
+    // literal's, or a local's declared type.
+    function csOperandType(t) {
+        var lt = csLitTypeName(t)
+        if (lt != "") { return lt }
+        return hasOwn(csLocalDfltTy, t) ? csLocalDfltTy[t] : ""
+    }
+    // `c ? x : default`: the conditional's type is the other branch's (ECMA-334
+    // 12.18), so a default branch takes it when a parse can tell it. Otherwise the
+    // cell stays open for the context outside. Answers [cond, then, else].
+    function csCondDflt(items) {
+        if (items.length == 1) { return items }
+        var p1 = items[2]
+        var p2 = items[4]
+        var s1 = stripWs(c.srcSlice(p1.at, p1.e))
+        var s2 = stripWs(c.srcSlice(p2.at, p2.e))
+        var ty = ""
+        if (s1 == "default") {
+            ty = csOperandType(s2)
+            if (ty != "") { csDfltSet(csDfltAt(p1.e, ""), ty) }
+        } else if (s2 == "default") {
+            ty = csOperandType(s1)
+            if (ty != "") { csDfltSet(csDfltAt(p2.e, ""), ty) }
+        }
+        return [items[0], items[1], items[3]]
+    }
+    // Is the operand text a local declared with a nullable value type (`int? n`)?
+    function csNullableLocal(t) {
+        if (!hasOwn(csLocalDfltTy, t)) { return false }
+        var ty = csLocalDfltTy[t]
+        return ty.length > 1 && ty.charAt(ty.length - 1) == "?"
+    }
+    // Every local's declared type as written (`int?` kept), for the default literal.
+    // `var` records the initializer's type when it is a literal.
+    var csLocalDfltTy = {}
 
     // ----- local declarations -----
     // One declarator: its name, and either an initializer thunk or the bare '= default'
     // marker (which needs the declared type, so it is resolved in makeDeclSeq).
     function makeDeclInfo(items) {
-        var info = {dname: items[0], dinit: null, bare: false}
+        var info = {dname: items[0], dinit: null, bare: false, dend: -1, dsrc: ""}
         if (items.length > 1) {
             if (items[1].bareDefault == true) { info.bare = true }
-            else { info.dinit = items[1].dinit }
+            else { info.dinit = items[1].dinit; info.dend = items[1].dend; info.dsrc = items[1].dsrc }
         }
         return info
     }
@@ -4480,6 +4615,8 @@ KwLet       = "let" KwEnd ;
             thunks.push(makeDecl(items[i], ty))
             names.push(items[i].dname)
             csLocalTypes[items[i].dname] = csSimpleName(ty)
+            csLocalDfltTy[items[i].dname] = csDeclDfltTy(ty, items[i])
+            if (items[i].dend >= 0) { csDfltTarget(items[i].dend, "", ty) }
         }
         lastDeclNames = names
         return makeSeq(thunks)
@@ -4496,6 +4633,14 @@ KwLet       = "let" KwEnd ;
         var el = csElemAdoptTy(ty)
         if (el != "") { return function() { declVar(name, csAdoptArr(el, init())) } }
         return function() { declVar(name, csImplicitConv(ty, init())) }
+    }
+    // A local's declared type for the default literal; `var x = 5` takes the
+    // initializer's when it is a literal (the "=" is the slice's first character).
+    function csDeclDfltTy(ty, info) {
+        var t = stripWs(ty)
+        if (t != "var") { return t }
+        var src = stripWs(info.dsrc)
+        return csLitTypeName(src.substring(1, src.length))
     }
     // An expression bodied method '=> e;' behaves like { return e; }.
     function makeArrowBody(t) {
@@ -4621,6 +4766,17 @@ KwLet       = "let" KwEnd ;
     // foreach (var x : coll) body -- pops reversed: body, coll, name.
     // foreach (var x in coll) body. An iterator source is stepped ONE value at a time, so
     // an endless iterator that the body breaks out of terminates.
+    // The element travels in a hidden iteration variable, and the body starts with the
+    // deconstruction of it (makeDecon's last item is the value it takes apart).
+    var csFeDecon = 0
+    function makeForEachDecon(items) {
+        var bodyT = items.pop()
+        var collT = items.pop()
+        csFeDecon++
+        var hidden = "$fd" + csFeDecon
+        items.push(makeVarRef(hidden))
+        return makeForEach(makeSeq([makeDecon(items), bodyT]), collT, hidden)
+    }
     function makeForEach(bodyT, arrT, name) {
         return function() {
             var arr = csForSrc(arrT())
@@ -5268,6 +5424,7 @@ KwLet       = "let" KwEnd ;
         var out = []
         for (var i = 2; i < items.length; i++) {
             var d = items[i].fdecl
+            csDfltTarget(items[i].fend, "", ty.ty)
             var one = []
             one.push(mods)
             one.push(ty)
@@ -5446,7 +5603,7 @@ KwLet       = "let" KwEnd ;
         for (var i = 2; i < items.length; i++) {
             var it = items[i]
             if (it.pname != undefined) { name = it.pname; continue }
-            if (it.pinit != undefined) { init = it.pinit; continue }
+            if (it.pinit != undefined) { init = it.pinit; csDfltTarget(it.pend, ";", ty); continue }
             if (it.parrow != undefined) { getT = it.parrow; auto = false; continue }   // '=> e' body
             if (it.accs != undefined) {
                 var accs = it.accs
@@ -6114,12 +6271,13 @@ KwLet       = "let" KwEnd ;
     core.add = csAdd
     core.getField = function(o, name) {
         if (name == "Current" && csIsEnum(o)) { return o.cur }
-        // .Count / .Length of a container; on an instance or a class it is a user
-        // member of that name (`static int Count`). Twin of emitCsLen in
-        // csharp-to-llvm-ir.abnf.
-        if ((name == "Count" || name == "Length") && !csIsUserObj(o)) return csLen(o)
-        if (name == "Keys") return mcall(o, "keys", [])
-        if (name == "Values") return mcall(o, "values", [])
+        // .Count / .Length of a container and a dictionary's .Keys / .Values; on an
+        // instance or a class it is a user member of that name (`static int Count`).
+        // Twin of emitCsLen in csharp-to-llvm-ir.abnf.
+        if (!csIsUserObj(o)) {
+            if (name == "Count" || name == "Length") return csLen(o)
+            if ((name == "Keys" || name == "Values") && isDict(o)) return csxDictMethod(o, name, [])
+        }
         if (hasOwn(o, name)) { return o[name] }
         // A static FIELD / CONST reached through a derived type name: it lives on the
         // descriptor of the class that declares it (ECMA-334 15.3.1 / 15.5.1).

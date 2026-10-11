@@ -1342,20 +1342,10 @@ func init() {
 			}
 			return basePyGet(a)
 		}
-		// foreach over a string iterates its chars (ECMA-334 13.9.5). Twin of
-		// csForSrc in csharp-interpreter.abnf and of languages/lib/csharp-rt.metajs.
-		m["js_csforsrc"] = func(a []uint64) uint64 {
-			s, ok := u(a[0]).(string)
-			if !ok {
-				return a[0]
-			}
-			units := strUnits(s)
-			out := &jsArray{elems: make([]interface{}, len(units))}
-			for i, c := range units {
-				out.elems[i] = jsChar{code: int32(c)}
-			}
-			return w(out)
-		}
+		// foreach over a dictionary visits its KeyValuePairs, and over a string
+		// its chars (ECMA-334 13.9.5). Twin of csForSrc in csharp-interpreter.abnf
+		// and of languages/lib/csharp-rt.metajs.
+		m["js_csforsrc"] = func(a []uint64) uint64 { return w(rt.csxForSrc(u(a[0]))) }
 		m["js_csidxset"] = func(a []uint64) uint64 {
 			if arr, isArr := u(a[0]).(*jsArray); isArr {
 				i := jsToInt(rt.toNumber(u(a[1])))
@@ -1424,12 +1414,22 @@ func init() {
 				}
 			case jsChar:
 				return w(rt.csxCharMethod(r, name, elems))
+			case *jsArray:
+				return w(rt.csxListMethod(r, name, elems))
+			case float64, jsGInt, jsJFlo, bool:
+				// Int32 / Double / Boolean.CompareTo.
+				if name == "CompareTo" && len(elems) == 1 {
+					return w(float64(rt.csxCmp(r, elems[0])))
+				}
 			case *jsObject:
 				switch r.props["__cstype"] {
 				case "char":
 					return w(rt.csxCharStatic(name, elems))
 				case "string":
 					return w(rt.csxStringStatic(name, elems))
+				}
+				if _, _, isDict := dictParts(r); isDict {
+					return w(rt.csxDictMethod(r, name, elems))
 				}
 			}
 			return baseCsMcall(a)
@@ -1543,6 +1543,10 @@ func (rt *jsrt) cspRender(v interface{}, depth int) string {
 // for a shape it does not know, which keeps the generic rendering both halves
 // already agreed on.
 func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
+	// KeyValuePair<TKey,TValue>.ToString(): "[key, value]".
+	if csxIsKvp(o) {
+		return "[" + rt.cspRender(o.props["Key"], depth+1) + ", " + rt.cspRender(o.props["Value"], depth+1) + "]", true
+	}
 	// A user ToString() override wins over every built-in rendering, exactly as
 	// the virtual System.Object.ToString() does in C#.
 	if mth, ok := cspFindToString(o); ok {

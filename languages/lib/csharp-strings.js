@@ -85,8 +85,9 @@ function csxTrim(s, set, lead, trail) {
 }
 // Split: at every occurrence of any separator, the first one listed winning at
 // a position; empty entries are kept. No separator (or only empty ones) splits
-// at whitespace.
-function csxSplit(s, seps) {
+// at whitespace. At most max parts (-1: no limit), the last one holding the rest.
+function csxSplit(s, seps, max) {
+    if (max == 0) { return [] }
     var out = []
     var any = false
     var k = 0
@@ -96,7 +97,7 @@ function csxSplit(s, seps) {
     }
     var last = 0
     var i = 0
-    while (i < s.length) {
+    while (i < s.length && out.length + 1 != max) {
         var hit = 0
         if (!any) {
             if (csxIsWs(s.charCodeAt(i))) { hit = 1 }
@@ -117,6 +118,62 @@ function csxSplit(s, seps) {
     }
     out.push(s.substring(last, s.length))
     return out
+}
+// Split(separator(s) [, count]): a count follows one separator argument (a char,
+// a string or an array of either), which the params char[] form cannot.
+function csxSplitCall(s, args) {
+    if (args.length == 2 && !csxkIsChar(args[1]) && typeof args[1] != "string" && !Array.isArray(args[1])) {
+        var max = csxkNum(args[1])
+        if (max < 0) { csxkThrow("ArgumentOutOfRangeException", "Count cannot be less than zero. (Parameter 'count')") }
+        return csxSplit(s, csxSeps([args[0]]), max)
+    }
+    return csxSplit(s, csxSeps(args), 0 - 1)
+}
+// IndexOfAny(anyOf [, startIndex [, count]]): the first position holding any of
+// the chars.
+function csxIndexOfAny(s, args) {
+    var set = csxCharSet([args[0]], 0)
+    var from = args.length > 1 ? csxkNum(args[1]) : 0
+    if (from < 0 || from > s.length) {
+        csxkThrow("ArgumentOutOfRangeException", "Index was out of range. Must be non-negative and less than or equal to the size of the collection. (Parameter 'startIndex')")
+    }
+    var end = s.length
+    if (args.length > 2) {
+        var cnt = csxkNum(args[2])
+        if (cnt < 0 || from + cnt > s.length) {
+            csxkThrow("ArgumentOutOfRangeException", "Count must be positive and count must refer to a location within the string/array/collection. (Parameter 'count')")
+        }
+        end = from + cnt
+    }
+    var i = from
+    while (i < end) {
+        if (csxInSet(set, s.charCodeAt(i))) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+// LastIndexOfAny(anyOf [, startIndex [, count]]): searching backward from
+// startIndex (the last char by default) over count chars.
+function csxLastIndexOfAny(s, args) {
+    var set = csxCharSet([args[0]], 0)
+    if (s.length == 0) { return 0 - 1 }
+    var from = args.length > 1 ? csxkNum(args[1]) : s.length - 1
+    if (from < 0 || from >= s.length) {
+        csxkThrow("ArgumentOutOfRangeException", "Index was out of range. Must be non-negative and less than the size of the collection. (Parameter 'startIndex')")
+    }
+    var cnt = from + 1
+    if (args.length > 2) {
+        cnt = csxkNum(args[2])
+        if (cnt < 0 || from - cnt + 1 < 0) {
+            csxkThrow("ArgumentOutOfRangeException", "Count must be positive and count must refer to a location within the string/array/collection. (Parameter 'count')")
+        }
+    }
+    var i = from
+    while (i > from - cnt) {
+        if (csxInSet(set, s.charCodeAt(i))) { return i }
+        i = i - 1
+    }
+    return 0 - 1
 }
 // The separators of a Split call: chars, strings, or one array of either.
 function csxSeps(args) {
@@ -201,13 +258,8 @@ function csxToChars(s, b, n) {
     return out
 }
 
-// A string receiver's method. The compiler half lowers IndexOf and Contains to
-// the shared runtime's indexOf / contains (a List has both), so those spellings
-// arrive too.
-function csxStrMethod(s, name0, args) {
-    var name = name0
-    if (name == "indexOf") { name = "IndexOf" }
-    if (name == "contains") { name = "Contains" }
+// A string receiver's method.
+function csxStrMethod(s, name, args) {
     var n = args.length
     if (name == "Substring") { return csxSubstring(s, args) }
     if (name == "IndexOf") { return csxIndexOf(s, args) }
@@ -229,7 +281,9 @@ function csxStrMethod(s, name0, args) {
         var r = args[1] === null || args[1] === undefined ? "" : csxArgStr(args[1])
         return jxReplace(s, o, r)
     }
-    if (name == "Split") { return csxSplit(s, csxSeps(args)) }
+    if (name == "Split") { return csxSplitCall(s, args) }
+    if (name == "IndexOfAny") { return csxIndexOfAny(s, args) }
+    if (name == "LastIndexOfAny") { return csxLastIndexOfAny(s, args) }
     if (name == "ToCharArray") {
         if (n == 0) { return csxToChars(s, 0, s.length) }
         var b = csxkNum(args[0])
@@ -249,7 +303,7 @@ function csxStrMethod(s, name0, args) {
         return s.substring(0, at) + args[1] + s.substring(at, s.length)
     }
     if (name == "Remove") { return csxRemove(s, args) }
-    fail("unknown string method: " + name0)
+    fail("unknown string method: " + name)
     return undefined
 }
 
@@ -312,6 +366,18 @@ function csxJoinParts(sep, parts) {
     }
     return out
 }
+// String.CompareOrdinal(a, b): UTF-16 unit by unit; the difference of the first
+// pair that differs, else of the lengths. null orders before every string.
+function csxCompareOrdinal(a, b) {
+    if (a === null || a === undefined) { return (b === null || b === undefined) ? 0 : 0 - 1 }
+    if (b === null || b === undefined) { return 1 }
+    var i = 0
+    while (i < a.length && i < b.length) {
+        if (a.charCodeAt(i) != b.charCodeAt(i)) { return a.charCodeAt(i) - b.charCodeAt(i) }
+        i = i + 1
+    }
+    return a.length - b.length
+}
 // System.String's static members.
 function csxStringStatic(name, args) {
     var n = args.length
@@ -323,6 +389,7 @@ function csxStringStatic(name, args) {
         return csxTrim(args[0], [], true, false).length == 0
     }
     if (name == "Equals" && n == 2) { return args[0] === args[1] }
+    if (name == "CompareOrdinal" && n == 2) { return csxCompareOrdinal(args[0], args[1]) }
     fail("unknown string method: " + name)
     return undefined
 }
