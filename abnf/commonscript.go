@@ -14,6 +14,7 @@ import (
 
 	"14.gy/mec/abnf/r"
 	"github.com/dop251/goja"
+	"github.com/llir/llvm/ir/constant"
 )
 
 // ----------------------------------------------------------------------------
@@ -230,10 +231,11 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 
 	installGojaFnMeta(vm)
 
-	// The UTF-8 byte length of a string. JS .length counts UTF-16 code units,
+	// The WTF-8 byte length of a string. JS .length counts UTF-16 code units,
 	// but the emitters need the byte count of the char arrays they emit
-	// (lib/compile-core.js emitStr). goja exports the string as UTF-8.
-	vm.Set("byteLen", func(s string) int { return len(s) })
+	// (lib/compile-core.js emitStr).
+	wtf8 := gojaWTF8(vm)
+	vm.Set("byteLen", func(v goja.Value) int { return len(wtf8(v)) })
 
 	// sprint: fmt.Sprint's text, the rendering println gives returned rather than
 	// printed. Twin of the frozen host's binding (standardJSBindings, jsrt.go);
@@ -387,12 +389,70 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// (per tag / per :script()), so it is the only one read through every time.
 	vm.Set("c", newHostAPIObject(vm, compilerFuncMap, "localAsg"))
 	vm.Set("abnf", newHostAPIObject(vm, r.AbnfFuncMap))
-	vm.Set("llvm", newHostAPIObject(vm, llvmFuncMap))
+	vm.Set("llvm", newHostAPIObject(vm, gojaLLVMMap(wtf8)))
 
 	installGojaCaseMapping(vm)
 	installGojaMathSurface(vm)
 
 	return &common
+}
+
+// gojaWTF8 converts a goja string to the Go string the frozen engine holds for
+// it: WTF-8, so a lone surrogate keeps its own three bytes (see strUnits in
+// abnf/jsrt.go). goja's own conversion replaces one by U+FFFD, so only a string
+// containing U+FFFD after that conversion is re-read unit by unit.
+func gojaWTF8(vm *goja.Runtime) func(goja.Value) string {
+	v, err := vm.RunString(`(function (s) {
+		var u = [], lone = false;
+		for (var i = 0; i < s.length; i++) {
+			var c = s.charCodeAt(i);
+			if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length) {
+				var d = s.charCodeAt(i + 1);
+				if (d >= 0xDC00 && d <= 0xDFFF) { u.push(c, d); i++; continue; }
+			}
+			if (c >= 0xD800 && c <= 0xDFFF) lone = true;
+			u.push(c);
+		}
+		return lone ? u : null;
+	})`)
+	if err != nil {
+		panic(err)
+	}
+	units, _ := goja.AssertFunction(v)
+	return func(s goja.Value) string {
+		text := s.String()
+		if !strings.ContainsRune(text, utf8.RuneError) {
+			return text
+		}
+		r, err := units(goja.Undefined(), s)
+		if err != nil || goja.IsNull(r) {
+			return text
+		}
+		codes := r.Export().([]interface{})
+		u := make([]uint16, len(codes))
+		for i, c := range codes {
+			u[i] = uint16(c.(int64))
+		}
+		return strFromUnits(u)
+	}
+}
+
+// gojaLLVMMap is llvmFuncMap with the string constant taking its bytes through
+// gojaWTF8, so goja emits the same char array as the frozen engine.
+func gojaLLVMMap(wtf8 func(goja.Value) string) map[string]r.Object {
+	m := make(map[string]r.Object, len(llvmFuncMap))
+	for k, v := range llvmFuncMap {
+		m[k] = v
+	}
+	cm := map[string]r.Object{}
+	for k, v := range llvmFuncMap["constant"].(map[string]r.Object) {
+		cm[k] = v
+	}
+	cm["NewCharArrayFromString"] = func(s goja.Value) *constant.CharArray {
+		return constant.NewCharArrayFromString(wtf8(s))
+	}
+	m["constant"] = cm
+	return m
 }
 
 // installGojaFnMeta binds fnMeta(f, key) and fnMetaSet(f, name, length), the goja

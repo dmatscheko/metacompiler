@@ -11954,10 +11954,9 @@ func derefSliceValue(v reflect.Value) reflect.Value {
 // substitutes U+FFFD for whatever lone surrogates are left (wtf8Clean), which is
 // what goja writes for them too. Everything below therefore matches goja exactly
 // for BMP and astral text alike (see the utf16-astral checks in
-// tests/metajs-test-features.js). What is left is a string that deliberately
-// keeps a lone half around: the two engines print it the same, but goja will
-// have replaced it by U+FFFD as it crossed into a Go string, so byteLen and any
-// bytes emitted from it (a string global of a compiled module) still differ.
+// tests/metajs-test-features.js). goja replaces a lone half by U+FFFD as it
+// crosses into a Go string, so byteLen and the char array of an emitted string
+// constant take it through gojaWTF8 (abnf/commonscript.go) instead.
 
 func strASCII(s string) bool {
 	for i := 0; i < len(s); i++ {

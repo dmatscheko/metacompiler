@@ -809,6 +809,8 @@ function s26() {
     var lu = lone.toUpperCase()
     check("sm21b", lu.length === 3 && lu.charCodeAt(0) === 0xD800 && lu.charCodeAt(1) === 65 &&
                    lu.charCodeAt(2) === 0xDC00 && lone.toLowerCase() === lone)
+    // A lone surrogate LITERAL keeps its unit in an emitted string constant.
+    check("sm21c", lone === "\uD800a\uDC00" && "\uD800".charCodeAt(0) === 0xD800 && "x\uDC00".charCodeAt(1) === 0xDC00)
     check("sm22", "aa".replace("a", function (m, i) { return m + i }) === "a0a")
 }
 
