@@ -5913,6 +5913,7 @@ NotFuncHead = :script(~~
             var v = anytype // A number or a BigInt.
             v = t()
             if (isBigInt(v)) { return biNeg(v) }
+            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
             return -v
         }
     }
@@ -9579,6 +9580,7 @@ NotFuncHead = :script(~~
     // the +1 / -1 that ++ and -- perform, in whichever of the two types it got.
     function jsToNumeric(v) {
         if (isBigInt(v)) { return v }
+        if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
         return v - 0
     }
     function jsStep(v, delta) {

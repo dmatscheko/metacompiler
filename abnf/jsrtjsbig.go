@@ -446,7 +446,15 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 				return a[0]
 			}
 		}
+		rt.jsvSymOperand(u(a[0]), nil)
 		return baseToNum(a)
+	}
+	// Unary '-': the shared js_neg, which knows a BigInt, after the symbol test.
+	// Twin of js_jsneg in languages/lib/js-rt.metajs.
+	baseNeg := m["js_neg"]
+	m["js_jsneg"] = func(a []uint64) uint64 {
+		rt.jsvSymOperand(u(a[0]), nil)
+		return baseNeg(a)
 	}
 	m["js_jsstep"] = func(a []uint64) uint64 {
 		if strict {

@@ -181,6 +181,7 @@ function js_jssne(a, b) { return !js_jsseq(a, b) }
 
 function js_jsneg(v) {
     if (jbIsBig(v)) { return jbNeg(v) }
+    if (jvSymOn) { jvSymOperand(v, undefined) }
     return -v   // NEVER `0 - v`: the signed-zero trap of part 3.
 }
 
@@ -4860,7 +4861,10 @@ function js_jstonumber(v) {
 // value ++ reports (the OLD one, for the postfix form) and js_jsstep applies
 // the delta to it.
 function js_jstonumeric(v) {
-    if (jbStrict && jbIsBig(v)) { return v }
+    if (jbStrict) {
+        if (jbIsBig(v)) { return v }
+        if (jvSymOn) { jvSymOperand(v, undefined) }
+    }
     return v - 0
 }
 

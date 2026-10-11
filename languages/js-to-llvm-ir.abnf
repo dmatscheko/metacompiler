@@ -541,7 +541,8 @@ Await       <~~ push(makeAwait(pop())) ~~>
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
-Neg         <~~ push(makeUnary(pop(), negExt())) ~~>
+// Unary minus is js_jsneg in both engines: a BigInt negates, a symbol throws.
+Neg         <~~ push(makeUnary(pop(), "js_jsneg")) ~~>
             = "-" UnaryExpr ;
 // Unary plus is ToNumber, not a no-op: '+"3"' is the number 3. It is tried after
 // PreIncDec so that '++x' stays an increment instead of '+(+x)'.
@@ -3413,9 +3414,10 @@ NotFuncHead = :script(~~
     // including a tag-16 generator function.
 
     // The FLOOR externs a BigInt has to be taken away from, under -exe only. In
-    // abnf/jsrt.go a BigInt is a Go TYPE, so `truthy`, `strictEq`, `js_neg`, `js_not`
-    // and `typeof` all carry an arm for it; in layer 2 it is an object box and the C
-    // floor's own versions would answer "truthy", "identity", "NaN" and "object".
+    // abnf/jsrt.go a BigInt is a Go TYPE, so `truthy`, `strictEq`, `js_not` and
+    // `typeof` all carry an arm for it; in layer 2 it is an object box and the C
+    // floor's own versions would answer "truthy", "identity" and "object". (Unary
+    // minus is js_jsneg in BOTH engines, see Neg.)
     // Each is therefore routed to a layer-2 twin for a native build - the same move
     // as memGetExt/memSetExt above, and for the same reason it is safe: the module
     // llvm.Run executes is untouched.
@@ -3432,10 +3434,6 @@ NotFuncHead = :script(~~
     function sneExt() {
         if (nativeBuild) { return "js_jssne" }
         return "js_sne"
-    }
-    function negExt() {
-        if (nativeBuild) { return "js_jsneg" }
-        return "js_neg"
     }
     function notExt() {
         if (nativeBuild) { return "js_jsnot" }

@@ -1693,6 +1693,9 @@ function s75() {
     check("sy75d", typeof [1][Symbol.iterator] === "function" && a1 === 7 && a2 === 8 && it.next().done === true &&
         it[Symbol.iterator]() === it && si.next().value === "a" && si.next().value.length === 2 &&
         [...[3, 4][Symbol.iterator]()].join() === "3,4")
+    const num = "TypeError: Cannot convert a Symbol value to a number"
+    check("sy75e", err(() => -v[0]) === num && err(() => { let q = v[0]; q++; return q }) === num &&
+        err(() => ~v[0]) === num && -v[1] === -1 && Object.is(-(-0), 0))
 }
 
 // ===== END SECTIONS =====
