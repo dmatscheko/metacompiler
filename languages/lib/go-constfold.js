@@ -875,6 +875,17 @@ function stAt(pos) {
     if (t == undefined) { return "" }
     return t
 }
+// What a store binds the expression ending at pos as: its static type, else the
+// DEFAULT type of an untyped constant (`n := 5` is an int, so &n is a *int).
+function stStoreAt(pos) {
+    var t = stAt(pos)
+    if (t != "") { return t }
+    var c = constAt(pos)
+    if (c == null) { return "" }
+    if (cIsCx(c)) { return "complex128" }
+    if (c.f) { return "float64" }
+    return c.rn === true ? "int32" : "int"
+}
 function cTyLookup(name) {
     var s = cScopes.length - 1
     while (s >= 0) {
@@ -1114,6 +1125,16 @@ function goNoteMeth(rt, name, byPtr, rtys) {
 }
 var goFnRty = {}      // "$f" -> top-level function f's single result type ("" otherwise)
 var goFnPTys = {}     // "$f" -> top-level function f's parameter types (goPreParams)
+var goMethPTys = {}   // "$T.M" -> method M of T's parameter types (goPreParams)
+// The parameter types of method name on a receiver whose static type rc gives (a
+// declared type's own method or an interface's method spec), or null.
+function goMethPTysOf(rc, name) {
+    var t = stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
+    var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
+    if (bt == "") { return null }
+    var own = goMethPTys["$" + bt + "." + name]
+    return own !== undefined ? own : null
+}
 
 // ----- A VALUE OF A DEFINED NON-STRUCT TYPE IN AN INTERFACE -----
 // A Celsius IS its float64 in this value model, so in an interface it would lose its
@@ -1197,7 +1218,7 @@ function goFmtBoxTy(sty, name) {
     // A channel or func type only where its text, blanks taken out, still reads
     // as reflect spells it (gfQualTy restores the blank of "chanint").
     if (b.indexOf("chan") == 0 && b.length > 4 && stHeadLen(b) == b.length) { return b }
-    if (b.indexOf("func(") == 0 && b.charAt(b.length - 1) == ")" && b.indexOf(",") < 0) { return b }
+    if (b.indexOf("func(") == 0) { return goFuncTyText(b) }
     return ""
 }
 // An fmt operand of STRUCT type T whose Error or String has a pointer receiver: a
@@ -1222,6 +1243,15 @@ function goBoxArgsC(items) {
                     else { s.args[j] = goDtBoxThunk(s.args[j], s.rc.text == "fmt" ? goFmtBoxTy(s.atys[j], s.name) : goDtBoxTy(s.atys[j])) }
                 }
                 j = j + 1
+            }
+        } else if (s != null && typeof s == "object" && s.kind == "mcall" && s.rc != null) {
+            // A method's interface-typed parameter boxes its argument, as goCallBoxC
+            // does for a function's.
+            var mp = goMethPTysOf(s.rc, s.name)
+            var k = 0
+            while (mp != null && k < s.args.length) {
+                if (!(s.spread && k == s.args.length - 1)) { s.args[k] = goDtBoxThunk(s.args[k], goDtBoxTo(s.atys[k], goParamTyAt(mp, k))) }
+                k = k + 1
             }
         }
         i = i + 1
@@ -1271,6 +1301,55 @@ function goCallBoxC(items) {
     }
     if (sp.spread) { out.push({spread: true}) }
     return out
+}
+// items = [chanThunk, valueThunk] of `ch <- v` (text, whitespace out, ends at pos):
+// the value boxed when the channel's element type is an interface.
+function goChanSendBoxC(items, text, pos) {
+    var d = 0
+    var i = 0
+    while (i + 1 < text.length) {
+        var ch = text.charAt(i)
+        if (ch == "(" || ch == "[" || ch == "{") { d = d + 1 }
+        if (ch == ")" || ch == "]" || ch == "}") { d = d - 1 }
+        if (d == 0 && ch == "<" && text.charAt(i + 1) == "-") { break }
+        i = i + 1
+    }
+    var ct = stBare(stChainTy(text.substring(0, i)))
+    if (ct.indexOf("chan<-") == 0) { ct = ct.substring(6) }
+    else if (ct.indexOf("chan") == 0) { ct = ct.substring(4) }
+    else { return items }
+    items[1] = goDtBoxThunk(items[1], goDtBoxTo(stAt(pos), ct))
+    return items
+}
+// The static type of an assignment target {name, path, stars} (makeTargetRef): a
+// name's binding type, through its field and index suffixes; "" behind a star.
+function goRefTy(ref) {
+    if (ref.stars > 0) { return "" }
+    var ht = cTyLookup(ref.name)
+    if (ref.path.length == 0) { return ht }
+    var t = ref.name
+    var i = 0
+    while (i < ref.path.length) {
+        var p = ref.path[i]
+        t = t + ((p != null && typeof p == "object" && p.key !== undefined) ? "." + p.key : "[0]")
+        i = i + 1
+    }
+    return stChainFrom(ref.name, ht, cIsLocal(ref.name), t)
+}
+// The type a make call (text, whitespace out) makes: its first argument.
+function goMakeTy(text) {
+    var s = text.indexOf("(")
+    if (s < 0) { return "" }
+    var d = 0
+    var i = s + 1
+    while (i < text.length) {
+        var ch = text.charAt(i)
+        if (ch == "(" || ch == "[" || ch == "{") { d = d + 1 }
+        if (ch == ")" || ch == "]" || ch == "}") { if (d == 0) { break } d = d - 1 }
+        if (d == 0 && ch == ",") { break }
+        i = i + 1
+    }
+    return text.substring(s + 1, i)
 }
 // Is name bound inside a function (a frame below the package one)?
 function cIsLocal(name) {
@@ -1353,7 +1432,11 @@ function goPreFunc(text, i) {
     var ps = i
     i = stClose(text, i)
     if (i < 0) { return }
-    if (recv == "" && goFnPTys["$" + name] === undefined) { goFnPTys["$" + name] = goPreParams(text.substring(ps + 1, i)) }
+    if (recv != "") { goMethPTys["$" + recv + "." + name] = goPreParams(text.substring(ps + 1, i)) }
+    if (recv == "" && goFnPTys["$" + name] === undefined) {
+        goFnPTys["$" + name] = goPreParams(text.substring(ps + 1, i))
+        goFnSig["$" + name] = goSigAt(text, ps)
+    }
     i = stSkipWs(text, i + 1)
     var rty = ""
     var nres = 0
@@ -1406,9 +1489,81 @@ function goPreType(text, i) {
         goPreFields(name, text.substring(ob + 1, cb))
         return
     }
-    if (rest.substring(0, 9) == "interface") { goIfaceTys["$" + name] = true; return }
+    if (rest.substring(0, 9) == "interface") {
+        goIfaceTys["$" + name] = true
+        var iob = text.indexOf("{", i)
+        var icb = iob < 0 ? -1 : stClose(text, iob)
+        if (icb > 0) { goPreIfaceMeths(name, text.substring(iob + 1, icb)) }
+        return
+    }
     if (rest.substring(0, 1) == "=") { return }
     goNoteDefTy(name)
+}
+// A top-level function's type text, whitespace taken out ("func(int)int"): what a
+// bare reference to it reports as its static type (goNameC).
+var goFnSig = {}
+// The type text of the signature whose parameter list opens at text[ps], whitespace
+// taken out, or "" when it does not parse.
+function goSigAt(text, ps) {
+    var pe = stClose(text, ps)
+    if (pe < 0) { return "" }
+    var sig = "func(" + goJoinTys(goPreParams(text.substring(ps + 1, pe))) + ")"
+    var i = stSkipWs(text, pe + 1)
+    if (text.charAt(i) == "(") {
+        var e = stClose(text, i)
+        if (e < 0) { return "" }
+        var rs = goPreParams(text.substring(i + 1, e))
+        return rs.length == 1 ? sig + rs[0] : sig + "(" + goJoinTys(rs) + ")"
+    }
+    var j = i
+    while (j < text.length && text.charAt(j) != "{" && text.charAt(j) != "\n") {
+        if (text.charAt(j) == "[" || text.charAt(j) == "(") { j = stClose(text, j); if (j < 0) { return "" } }
+        j = j + 1
+    }
+    return sig + stNoWs(text.substring(i, j))
+}
+function goJoinTys(ts) {
+    var o = ""
+    var i = 0
+    while (i < ts.length) { o = o + (i > 0 ? "," : "") + ts[i]; i = i + 1 }
+    return o
+}
+// A function literal's static type, from its source text ("func(x int) bool {...}").
+function goFuncLitTy(src) { return goSigAt(src, stSkipWs(src, 4)) }
+// A func type text, whitespace taken out, as reflect spells it: "func(int,string)(int,error)"
+// is "func(int, string) (int, error)".
+function goFuncTyText(t) {
+    var pe = stClose(t, 4)
+    if (pe < 0) { return t }
+    var out = "func(" + goCommaSp(t.substring(5, pe)) + ")"
+    var r = t.substring(pe + 1)
+    if (r == "") { return out }
+    if (r.charAt(0) == "(") { return out + " (" + goCommaSp(r.substring(1, r.length - 1)) + ")" }
+    return out + " " + r
+}
+function goCommaSp(t) {
+    var o = ""
+    var i = 0
+    while (i < t.length) { o = o + (t.charAt(i) == "," ? ", " : t.charAt(i)); i = i + 1 }
+    return o
+}
+// An interface body's method specs `M(params) results`, one per line or ';': each
+// records its parameter types, as goPreFunc does for a method.
+function goPreIfaceMeths(iname, body) {
+    var i = 0
+    while (i < body.length) {
+        i = stSkipWs(body, i)
+        var ns = i
+        while (i < body.length && cIsIdCh(body.charCodeAt(i))) { i = i + 1 }
+        if (i > ns && body.charAt(i) == "(") {
+            var e = stClose(body, i)
+            if (e < 0) { return }
+            goMethPTys["$" + iname + "." + body.substring(ns, i)] = goPreParams(body.substring(i + 1, e))
+            i = e + 1
+        }
+        while (i < body.length && body.charAt(i) != "\n" && body.charAt(i) != ";") { i = i + 1 }
+        i = i + 1
+    }
 }
 // A parameter list's text: one type text per parameter, whitespace taken out
 // ("...T" for a variadic one). `a, b int` gives both names the type after them.
@@ -1767,7 +1922,9 @@ function goNameC(name, pos) {
         return makeVarRef(name)
     }
     regConst(pos, cLookup(name))
-    regSt(pos, cTyLookup(name))
+    var ty = cTyLookup(name)
+    if (ty == "" && goFnSig["$" + name] !== undefined && !cIsLocal(name)) { ty = goFnSig["$" + name] }
+    regSt(pos, ty)
     return makeVarRef(name)
 }
 // A const spec binds its names and hands the item list on with the position markers
@@ -1843,7 +2000,9 @@ function cBindSpec(items) {
 // registered here at the literal's own end position, which makes 'z' - 'a' and
 // 1 << ('c' - 'a') fold like any other pair.
 function goRuneLitC(v, pos) {
-    regConst(pos, cInt(1, cbFromSmall(v)))
+    var c = cInt(1, cbFromSmall(v))
+    c.rn = true
+    regConst(pos, c)
     return makeConst(v)
 }
 

@@ -477,7 +477,7 @@ SimpleStmt  = ( AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | Ch
 RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
-ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
+ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
             = PostfixExpr "<-" Expression ;
 
 // Every two-name comma-ok form ends here: NOTHING may follow but the end of the
@@ -559,7 +559,7 @@ TIndex      <~~ push({idx: pop()}) ~~>
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stAt(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -843,9 +843,14 @@ Spread      <~~ push({spread: true}) ~~> = "..." ;
 TypeAssertSfx = "." "(" AssertSfxTy ")" ;
 AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 
+// A string or bool literal reports its type, so a store binds it typed (`s := "a"`
+// makes &s a *string); the shared literal rules know nothing of static types.
+StrLitT     <~~ regSt(up.pos, "string") ~~> = DqString | RawString ;
+BoolLitT    <~~ regSt(up.pos, "bool") ~~> = True | False ;
+
 Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
-            | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
-            | GoDecLit | True | False | Nil | FuncLit | MakeCall | NewCall | ConvExpr
+            | BinLit | LegOctLit | DecULit | StrLitT | RuneLit
+            | GoDecLit | BoolLitT | Nil | FuncLit | MakeCall | NewCall | ConvExpr
             | CompositeLit | PanicCall | Call | Iota | VarRef ;
 
 // panic(v). Go reports a panic raised again with the value it aborted only once
@@ -887,7 +892,7 @@ CompElemT   <~~ push({cet: firstType(up.in)}) ~~>
 // An anonymous struct type carries its own field list.
 CompStructT <~~ push({ckind: "anon", cfields: takeAll()}) ~~>
             = "struct" KwEnd "{" { AnonField } "}" ;
-AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } Type [ FieldTag ] [ ";" ] ;
+AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } FType [ FieldTag ] [ ";" ] ;
 
 CompBody    <~~ push({celems: takeAll()}) ~~>
             = "{" [ CompElem { "," CompElem } [ "," ] ] "}" ;
@@ -906,7 +911,7 @@ CompNested  <~~ push({cnested: pop()}) ~~>
             = CompBody ;
 
 // make(T) / make(T, n) / make(T, n, cap): a map, a slice or a channel.
-MakeCall    <~~ push(makeMakeCall(takeAll())) ~~>
+MakeCall    <~~ push(makeMakeCall(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
             = "make" KwEnd "(" MakeType [ "," Expression ] [ "," Expression ] ")" ;
 MakeType    = MakeMapT | MakeSliceT | MakeChanT ;
 MakeMapT    <~~ push({mkind: "map", czero: pop().mzero, mkey: pop().mkey}) ~~> = MapTypeZ ;
@@ -1034,7 +1039,7 @@ RuneLit     <~~ push(goRuneLitC(pop(), up.pos)) ~~>
             = "'" :whitespace() { StrEsc | SqPlain } <~~ push(runeVal(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
-FuncLit     <~~ push(makeFuncLit(takeAll())) ~~>
+FuncLit     <~~ push(makeFuncLit(takeAll())); regSt(up.pos, goFuncLitTy(c.srcSlice(up.start, up.pos))) ~~>
             = "func" KwEnd ParamList [ RetTypes ] Block ;
 
 MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
@@ -3743,7 +3748,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var e = 0; e < elems.length; e++) {
             var name = elems[e].ektext
             if (name == null) { name = fs[pos]; pos++ }
-            scopePut(obj, name, elemValue(goNoEsty(elems[e]), fieldTypeOf(cls, name)))
+            scopePut(obj, name, elemValue(elems[e], fieldTypeOf(cls, name)))
         }
         return obj
     }
@@ -3756,8 +3761,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The value of one element: either its expression, or a nested brace group built
     // against the element type text (\[\]P{{1, 2}} -> a P, \[\]\[\]int{{1}} -> a slice).
-    // A literal of a NAMED type's elements, and a struct's fields, are not boxed:
-    // go-to-llvm-ir.abnf's StructLit carries no element types.
+    // The elements of a literal of a NAMED composite type are not boxed: go-to-llvm-ir.abnf's
+    // emitDefinedSeq reads no element types.
     function goNoEsty(e) {
         if (e.esty == undefined || e.esty == "") { return e }
         return {ekey: e.ekey, ekeyn: e.ekeyn, ektext: e.ektext, eval: e.eval, esty: ""}
@@ -3836,11 +3841,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return {ckind: "struct", cname: t}
     }
     // Anonymous struct types get one descriptor per literal site, cached on the desc.
+    // cfields = [name..., {fty}, name..., {fty}, ...]: a group of names shares the
+    // type that follows it, as in makeAnonStructLit in go-to-llvm-ir.abnf.
     function anonClass(desc) {
         if (desc.cls == undefined) {
+            var fs = []
             var ft = []
-            for (var i = 0; i < desc.cfields.length; i++) { ft.push("") }
-            desc.cls = {__isclass: true, __name: "struct", __fields: desc.cfields, __ftypes: ft}
+            var pend = 0
+            for (var i = 0; i < desc.cfields.length; i++) {
+                var it = desc.cfields[i]
+                if (typeof it == "string") { fs.push(it); pend = pend + 1; continue }
+                for (var k = 0; k < pend; k++) { ft.push(it.fty) }
+                pend = 0
+            }
+            desc.cls = {__isclass: true, __name: "struct", __fields: fs, __ftypes: ft}
         }
         return desc.cls
     }
@@ -4116,7 +4130,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var cty = goStCopyTy(sp.tys[ai])
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
-                if (lref.path.length == 0 && lref.stars == 0) { exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], cTyLookup(lref.name))) }
+                exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
             }
         }
         return function() {

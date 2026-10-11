@@ -494,7 +494,7 @@ SimpleStmt  = ( MapOk | TypeOk | RecvOk | ShortDecl | IncDecStmt | Assign | Chan
 RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
-ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
+ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
             = PostfixExpr "<-" Expression ;
 
 // Every two-name comma-ok form ends here: NOTHING may follow but the end of the
@@ -574,7 +574,7 @@ TIndex      <~~ push({idx: pop()}) ~~>
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stAt(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -866,9 +866,14 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 TypeAssertSfx = "." "(" AssertSfxTy ")" ;
 AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 
+// A string or bool literal reports its type, so a store binds it typed (`s := "a"`
+// makes &s a *string); the shared literal rules know nothing of static types.
+StrLitT     <~~ regSt(up.pos, "string") ~~> = DqString | RawString ;
+BoolLitT    <~~ regSt(up.pos, "bool") ~~> = True | False ;
+
 Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
-            | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
-            | GoDecLit | True | False | Nil | FuncLit | SliceLit
+            | BinLit | LegOctLit | DecULit | StrLitT | RuneLit
+            | GoDecLit | BoolLitT | Nil | FuncLit | SliceLit
             | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit
             | QualStructLit | StructLit
             | ArrayLit | ConvExpr | CompLitNI | PanicCall | Call | VarRef ;
@@ -1011,7 +1016,7 @@ CompHead    = [ "[" [ "..." | Expression <~~ pop() ~~> ] "]" ] [ "*" ]
 CompName    = "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id { "." Id } ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
-FuncLit     <~~ push(makeFuncLit(takeAll())) ~~>
+FuncLit     <~~ push(makeFuncLit(takeAll())); regSt(up.pos, goFuncLitTy(c.srcSlice(up.start, up.pos))) ~~>
             = "func" KwEnd ParamList [ RetTypes ] Block ;
 
 // []int{1, 2, 3} and [][]int{{1}, {2, 3}} - a slice literal, whose elements may be
@@ -1080,7 +1085,7 @@ KeyAhead = :script(~~
 ~~) ;
 
 // make([]T, n) / make([]T, n, cap): a slice of n zero values with room for cap.
-MakeSlice   <~~ push(makeMakeSlice(takeAll())) ~~>
+MakeSlice   <~~ push(makeMakeSlice(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
             = "make" KwEnd "(" "[" "]" ElemT "," Expression [ "," Expression ] ")" ;
 
 // map[string]int{"a": 1} and make(map[string]int). The value type decides the
@@ -1097,7 +1102,7 @@ MapKey      = SeqNest | Expression ;
 // map[string][]int{"a": {1, 2}}.
 MapVal      = SeqNest | MapValE ;
 MapValE     <~~ push({mvt: pop(), esty: stAt(up.pos)}) ~~> = Expression ;
-MakeMap     <~~ push(makeMakeMap(takeAll())) ~~>
+MakeMap     <~~ push(makeMakeMap(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
             = "make" KwEnd "(" MapTypeZ ")" ;
 
 // new(T): a zero value of T - a POINTER to it for a scalar type (a fresh one slot
@@ -1110,7 +1115,7 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 // make(chan T) / make(chan T, n): the buffer size is parsed and discarded (a send
 // never blocks in this model); the ELEMENT type decides what a receive from a closed
 // channel yields.
-MakeChan    <~~ push(makeMakeChan(takeAll())) ~~>
+MakeChan    <~~ push(makeMakeChan(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
             = "make" KwEnd "(" ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) ChanElemT
               [ "," Expression <~~ pop() ~~> ] ")" ;
 ChanElemT   <~~ push({cet: firstType(up.in)}) ~~> = Type ;
@@ -1151,7 +1156,7 @@ AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } FType [ Fiel
 // `type G [][]int; G{{1, 2}}`, and `Config{{1, 2}}` for a struct whose first field is
 // a composite. It cannot be confused with the other two: no Go expression starts
 // with '{', so this only takes work away from CompLitNI.
-LitElem     = KeyedElem | SeqNest | Expression ;
+LitElem     = KeyedElem | SeqNest | LitExpr ;
 // A KEYED element's key is an EXPRESSION, not just an Id - which is what a literal of
 // a DEFINED MAP TYPE needs: `type M map[string]int; M{"a": 1}` goes through StructLit
 // (the type is a bare name). Both readings are kept on the record: `fkey` is the
@@ -1166,7 +1171,10 @@ KeyedElem   = KeyAhead LitKey ":" LitVal ;
 // bare name.) No Go expression starts with '{', so the group is disjoint from
 // Expression and the ordered choice cannot strand a later alternative.
 LitKey      <~~ push({fkey: firstWord(up.in), fkeyT: pop()}) ~~> = SeqNest | Expression ;
-LitVal      = SeqNest | Expression ;
+LitVal      = SeqNest | LitExpr ;
+// An element expression reports its static type in a {lesty} marker after it, which
+// a field of interface type boxes it by (litSplit, emitStructVal).
+LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos)}) ~~> = Expression ;
 
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
@@ -2588,23 +2596,49 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeQualStructLit(items) {
         var qpkg = items[0]
         var qnm = items[1]
-        var qargs = items.slice(2)
+        var qls = litSplit(items.slice(2))
+        var qargs = qls.args
         return function(b) {
             var key = sKey(qpkg, qnm)
             var und = resolveDefined(key)
             if (und != key && isCompositeText(und)) { return emitDefinedSeq(b, und, qargs) }
             var flds = structFields[key]
             if (flds == undefined) { fail("composite literal of unsupported type " + qpkg + "." + qnm) }
-            return emitStructVal(b, emitPkgMember(b, qpkg, qnm), flds, structFTypes[key], qargs)
+            return emitStructVal(b, emitPkgMember(b, qpkg, qnm), flds, structFTypes[key], qargs, qls.estys)
         }
     }
     // Point{a, b}: the field names are known at compile time.
     // items = [name, ({fkey}? valueThunk)...]: a positional or keyed struct literal.
     // Every field the literal leaves out is ZERO-filled from its declared type, the way
     // Go does - so Point{} and Point{x: 0} are the same value and compare equal.
+    // A struct literal's elements: the args in the shape the builders read, and each
+    // arg's static type from its {lesty} marker ("" for none).
+    function litSplit(raw) {
+        var args = []
+        var estys = []
+        for (var i = 0; i < raw.length; i++) {
+            var it = raw[i]
+            if (typeof it != "function" && it != null && it.lesty !== undefined) {
+                if (estys.length > 0) { estys[estys.length - 1] = it.lesty }
+                continue
+            }
+            args.push(it)
+            estys.push("")
+        }
+        return {args: args, estys: estys}
+    }
+    // An element's static type; a type a box is made for is declared up front
+    // (declDtClasses runs before the program's code is emitted).
+    function goLitEsty(pos) {
+        var t = stAt(pos)
+        if (goDtBoxTy(t) != "") { goDtNote(goDtBoxTy(t)) }
+        return t
+    }
     function makeStructLit(items) {
         var tyName = items[0]
-        var args = items.slice(1)
+        var ls = litSplit(items.slice(1))
+        var args = ls.args
+        var estys = ls.estys
         return function(b) {
             // A DEFINED type: `type L []int; L{1, 2, 3}` is the []int literal and
             // `type Q Point; Q{1, 2}` is the Point literal. Resolved HERE, at emit
@@ -2615,7 +2649,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var flds = sFields(name)
             if (flds == undefined) { fail("composite literal of unsupported type " + tyName) }
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
-            return emitStructVal(b, clsV, flds, sFTypes(name), args)
+            return emitStructVal(b, clsV, flds, sFTypes(name), args, estys)
         }
     }
     // The literal of a defined SLICE, ARRAY or MAP type, whose elements arrived in the
@@ -2691,6 +2725,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             inBody = true
             args.push(it)
         }
+        var als = litSplit(args)
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
@@ -2698,12 +2733,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             emitNameList(b, clsV, "__fields", fields)
             emitNameList(b, clsV, "__ftypes", ftypes)
             emitFCopy(b, clsV, ftypes)
-            return emitStructVal(b, clsV, fields, ftypes, args)
+            return emitStructVal(b, clsV, fields, ftypes, als.args, als.estys)
         }
     }
     // The shared body of both literal forms: zero-fill, then apply the elements in
     // order (a keyed one names its field, a positional one takes the next field).
-    function emitStructVal(b, clsV, fields, ftypes, args) {
+    function emitStructVal(b, clsV, fields, ftypes, args, estys) {
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
         for (var z = 0; z < fields.length; z++) {
@@ -2727,7 +2762,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else if (key == null) { pos++ }
             key = null
             var fty = ftypeOfName(fields, ftypes, name)
-            callExt(b, "js_set", [objV, emitStr(b, name), emitStoreCopy(b, emitAdoptTy(b, fty, r.v), fty)])
+            var bt = (estys == undefined || estys == null || typeof args[i] != "function") ? "" : goDtBoxTo(estys[i], fty)
+            var fv = bt != "" ? emitDtBox(b, r.v, bt) : emitStoreCopy(b, emitAdoptTy(b, fty, r.v), fty)
+            callExt(b, "js_set", [objV, emitStr(b, name), fv])
         }
         return {b: b, v: objV}
     }
@@ -3728,7 +3765,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var cty = goStCopyTy(sp.tys[ai])
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
-                if (lref.path.length == 0 && lref.stars == 0) { exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], cTyLookup(lref.name))) }
+                exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], goRefTy(lref)))
             }
         }
         return function(b) {

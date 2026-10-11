@@ -3478,6 +3478,44 @@ func s55() {
 	check("rg4", i2 == 1 && v2 == 4 && sum == 6)
 }
 
+// ===== SECTION 56: static types reaching fmt and interfaces =====
+type col56 int
+
+func (c col56) String() string { return fmt.Sprintf("c%d", int(c)) }
+
+type box56 struct {
+	v any
+	s fmt.Stringer
+}
+
+type wrap56 struct{ in box56 }
+
+type get56 interface{ get(x any) string }
+type imp56 struct{}
+
+func (imp56) get(x any) string { return fmt.Sprintf("%v %T", x, x) }
+
+func sig56(a, b string) (int, error) { return 0, nil }
+
+func s56() {
+	check("ty1", fmt.Sprintf("%T|%T|%T", sig56, s56, func(x int) bool { return x > 0 }) == "func(string, string) (int, error)|func()|func(int) bool")
+	n := 5
+	f := 2.5
+	s := "a"
+	r := 'x'
+	b := true
+	check("ty2", fmt.Sprintf("%T %T %T %T %T", &n, &f, &s, &r, &b) == "*int *float64 *string *int32 *bool")
+	bx := box56{col56(1), col56(2)}
+	var w wrap56
+	w.in.v = col56(3)
+	an := struct{ x any }{col56(4)}
+	check("if1", fmt.Sprint(bx.v, bx.s, w.in.v, an.x) == "c1 c2 c3 c4" && fmt.Sprintf("%T", bx.v) == "main.col56")
+	ch := make(chan any, 1)
+	ch <- col56(5)
+	var g get56 = imp56{}
+	check("if2", fmt.Sprint(<-ch) == "c5" && g.get(col56(6)) == "c6 main.col56")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3534,6 +3572,7 @@ func main() {
 	s53() // SECTION-CALL 53
 	s54() // SECTION-CALL 54
 	s55() // SECTION-CALL 55
+	s56() // SECTION-CALL 56
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
