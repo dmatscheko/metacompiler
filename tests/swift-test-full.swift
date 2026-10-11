@@ -3688,6 +3688,74 @@ func s78() {
                   && Bool(false) == false)
 }
 
+// ===== SECTION 79: the Dictionary API =====
+// The defaulting subscript (a read leaves the dictionary alone; `+=` and a mutating
+// method store the default, typed as the value type), removeValue/updateValue
+// (answering the old value as an Optional), removeAll, merge/merging, the three
+// initializers from a sequence, debugDescription, and `[K: V]` / `[T]` written as a
+// type: called, and as a value. Every value is swiftc 6.1.2's.
+func s79() {
+    let ws = ["apple", "avocado", "banana", "blue", "cherry"]
+    var c = [Character: Int]()
+    for w in ws { c[w.first!, default: 0] += 1 }
+    var g = [String: [Int]]()
+    g["x", default: []].append(3)
+    g["x", default: []].append(4)
+    var ss: [Int: Set<Int>] = [:]
+    ss[1, default: []].insert(5)
+    ss[1, default: []].insert(5)
+    var dd: [String: Double] = ["a": 1.5]
+    dd["c", default: 0] += 2
+    var nest = [String: [String: Int]]()
+    nest["a", default: [:]]["y", default: 0] += 5
+    check("79a", c["a"]! == 2 && c["c"]! == 1 && c["z", default: 7] == 7 && c.count == 3 && g["x"]! == [3, 4]
+                 && ss[1]!.count == 1 && "\(dd["c"]!) \(dd["q", default: 7])" == "2.0 7.0" && nest["a"]!["y"]! == 5)
+    var d = ["a": 1, "b": 2]
+    let r = d.removeValue(forKey: "a")
+    let u = d.updateValue(9, forKey: "b")
+    let u2 = d.updateValue(7, forKey: "c")
+    check("79b", "\(r as Any) \(u as Any) \(u2 as Any)" == "Optional(1) Optional(2) nil" && d.count == 2
+                 && d.removeValue(forKey: "q") == nil && d["b"]! == 9 && d.removeValue(forKey: "c")! == 7)
+    let o = dd.updateValue(9, forKey: "b")
+    dd.merge(["e": 3]) { a, _ in a }
+    check("79c", o == nil && "\(dd["b"]!) \(dd["e"]!)" == "9.0 3.0")
+    var m = ["a": 1, "b": 2]
+    m.merge(["b": 10, "c": 3]) { old, new in old + new }
+    let mg = m.merging([("a", 100), ("z", 0)], uniquingKeysWith: { $1 })
+    var e = m
+    e.removeAll()
+    e.reserveCapacity(4)
+    check("79d", m["b"]! == 12 && m["c"]! == 3 && mg["a"]! == 100 && mg.count == 4 && m["a"]! == 1
+                 && e.isEmpty && m.count == 3 && "\(e)" == "[:]")
+    let gr = Dictionary(grouping: ws, by: { $0.first! })
+    let g2 = Dictionary(grouping: 1...6) { $0 % 3 }
+    let uq = Dictionary(uniqueKeysWithValues: [("a", 1), ("b", 2)])
+    let uk = Dictionary([("a", 1), ("a", 5), ("b", 2)], uniquingKeysWith: +)
+    let sg = [String: Int](uniqueKeysWithValues: [("z", 26)])
+    check("79e", gr["a"]! == ["apple", "avocado"] && gr["c"]! == ["cherry"] && gr.count == 3 && g2[0]! == [3, 6]
+                 && uq["b"]! == 2 && uq.count == 2 && uk["a"]! == 6 && uk["b"]! == 2 && "\(sg)" == "[\"z\": 26]"
+                 && [Int](repeating: 0, count: 2) == [0, 0])
+    check("79f", "\([Int].self) \([String: Int].self)" == "Array<Int> Dictionary<String, Int>"
+                 && "\([[Int]].self) \([Int?].self)" == "Array<Array<Int>> Array<Optional<Int>>"
+                 && type(of: [1]) == [Int].self && ["k": 1].debugDescription == "[\"k\": 1]"
+                 && "s".debugDescription == "\"s\"" && Set([7]).debugDescription == "Set([7])")
+}
+
+// ===== SECTION 80: reduce(into:) =====
+// The body mutates its inout accumulator and answers Void: an assignment as the
+// closure's last statement is Void too, never the assigned value. swiftc 6.1.2.
+func s80() {
+    let xs = [3, 1, 2]
+    let a = xs.reduce(into: 0) { $0 += $1 }
+    let b = xs.reduce(into: 0) { acc, x in acc += x; _ = acc }
+    let s = xs.reduce(into: "") { s, x in s += String(x) }
+    let d = xs.reduce(into: [String: Int]()) { m, x in m["k\(x)"] = x }
+    let h = xs.reduce(into: 10) { acc, x in if x > 1 { acc -= x } }
+    let byLen = ["aa", "b", "cc"].reduce(into: [Int: [String]]()) { $0[$1.count, default: []].append($1) }
+    check("80a", a == 6 && b == 6 && s == "312" && d.count == 3 && d["k3"]! == 3 && h == 5
+                 && byLen[2]! == ["aa", "cc"] && xs.reduce(0, +) == 6)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3767,6 +3835,8 @@ func main() {
     s76() // SECTION-CALL 76
     s77() // SECTION-CALL 77
     s78() // SECTION-CALL 78
+    s79() // SECTION-CALL 79
+    s80() // SECTION-CALL 80
     print("full: \(checks) checks, \(fails) failures")
 }
 

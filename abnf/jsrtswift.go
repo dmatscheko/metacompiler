@@ -1007,6 +1007,15 @@ func init() {
 						d.set("vals", &jsArray{elems: nv})
 						return w(d)
 					}
+					if name == "merging" {
+						c := swValCopy(u(a[0]))
+						ck, cv, _ := dictParts(c)
+						rt.swDictMut(ck, cv, "merge", rt.swArgList(u(a[2])))
+						return w(c)
+					}
+					if v, ok := rt.swDictMut(keys, vals, name, rt.swArgList(u(a[2]))); ok {
+						return w(v)
+					}
 				}
 				if arr, isArr := u(a[0]).(*jsArray); isArr {
 					name := rt.toString(u(a[1]))
@@ -1242,6 +1251,20 @@ func init() {
 				_, isSet := swSetElems(v)
 				if isStr || isBool || isArr || isDict || isSet || swIsRange(v) {
 					return rt.wrapStr(rt.swDesc(v))
+				}
+			}
+			// `.debugDescription` of a String, Array, Dictionary or Set is the
+			// form it prints in INSIDE a collection. Twins: swGetField in
+			// languages/swift-interpreter.abnf and js_swget in
+			// lib/swift-rt.metajs.
+			if rt.toString(u(a[1])) == "debugDescription" {
+				v := u(a[0])
+				_, isStr := v.(string)
+				_, isArr := v.(*jsArray)
+				_, _, isDict := dictParts(v)
+				_, isSet := swSetElems(v)
+				if isStr || isArr || isDict || isSet {
+					return rt.wrapStr(rt.swRender(v, true, 0))
 				}
 			}
 			// The same three on a value that stayed a plain number, which is
@@ -1947,6 +1970,90 @@ func (rt *jsrt) swRender(v interface{}, nested bool, depth int) string {
 		}
 	}
 	return rt.toString(v)
+}
+
+// swDictMut answers the Dictionary members that change it in place. The two
+// initializers that are not a merge into an empty dictionary arrive under names
+// Swift source cannot spell as a member call, with their sequence already turned
+// into an array by the emitter; a merge without a closure is
+// uniqueKeysWithValues. Twins: swDictMut in languages/swift-interpreter.abnf and
+// lib/swift-rt.metajs.
+func (rt *jsrt) swDictMut(keys, vals *jsArray, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "removeValue", "updateValue":
+		k := argAt(args, 0)
+		if name == "updateValue" {
+			k = argAt(args, 1)
+		}
+		var old interface{} = jsNull
+		i := rt.pyDictFind(keys, k)
+		if i >= 0 {
+			old = vals.elems[i]
+		}
+		switch {
+		case name == "updateValue" && i >= 0:
+			vals.elems[i] = args[0]
+		case name == "updateValue":
+			dictAppend(keys, vals, k, args[0])
+		case i >= 0:
+			keys.dropIdx()
+			keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+			vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+		}
+		return old, true
+	case "removeAll":
+		keys.dropIdx()
+		keys.elems, vals.elems = nil, nil
+		return jsUndef, true
+	case "reserveCapacity":
+		return jsUndef, true
+	case "merge", "init(uniqueKeysWithValues:)":
+		var comb interface{}
+		if len(args) > 1 {
+			comb = args[1]
+		}
+		add := func(k, v interface{}) {
+			i := rt.pyDictFind(keys, k)
+			switch {
+			case i < 0:
+				dictAppend(keys, vals, k, v)
+			case comb == nil:
+				rt.swAbort("Fatal error: Duplicate values for key: '%s'", rt.swDesc(k))
+			default:
+				vals.elems[i] = rt.call(comb, jsUndef, []interface{}{vals.elems[i], v})
+			}
+		}
+		if sk, sv, isDict := dictParts(argAt(args, 0)); isDict {
+			for i := range sk.elems {
+				add(sk.elems[i], sv.elems[i])
+			}
+		} else if ps, ok := argAt(args, 0).(*jsArray); ok {
+			for _, p := range ps.elems {
+				t, _ := p.(*jsObject)
+				if t == nil {
+					rt.fail("Dictionary: an element is not a (key, value) pair")
+				}
+				add(t.props["0"], t.props["1"])
+			}
+		}
+		return jsUndef, true
+	case "init(grouping:by:)":
+		es, _ := argAt(args, 0).(*jsArray)
+		if es == nil {
+			return nil, false
+		}
+		for _, e := range es.elems {
+			k := rt.call(argAt(args, 1), jsUndef, []interface{}{e})
+			if i := rt.pyDictFind(keys, k); i >= 0 {
+				g := vals.elems[i].(*jsArray)
+				g.elems = append(g.elems, e)
+			} else {
+				dictAppend(keys, vals, k, &jsArray{elems: []interface{}{e}})
+			}
+		}
+		return jsUndef, true
+	}
+	return nil, false
 }
 
 // ----- Set -----

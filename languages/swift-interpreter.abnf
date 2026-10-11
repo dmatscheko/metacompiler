@@ -1146,12 +1146,12 @@ Target      <~~ push(swNoteWrite(makeTargetRef(takeAll()))) ~~>
 // `a?.b = c` / `a?[i] = c`: an optional-chain target. The segment after the `?`
 // carries `opt`: a nil there skips the whole assignment, right-hand side included.
 TOpt        = NoSpace "?" NotChar63 ( "." Id <~~ push({key: swBt(up.in), opt: true}) ~~> | TOptIdx ) ;
-TOptIdx     <~~ push({idx: makeIndexKey(takeAll()), opt: true}) ~~>
+TOptIdx     <~~ var ia = takeAll(); push({idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia), opt: true}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 TShort      <~~ push("$" + up.in) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
-TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
+TIndex      <~~ var ia = takeAll(); push({idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 
 // cond ? a : b (right associative). The ? cannot be confused with ?? (consumed
@@ -1356,11 +1356,14 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: swBt(up.in)}) ~~> ;
 TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
-IndexSfx    <~~ push({kind:"index", idx: makeIndexKey(takeAll())}) ~~>
+IndexSfx    <~~ var ia = takeAll(); push({kind:"index", idx: makeIndexKey(swIdxKeys(ia)), dflt: swIdxDfltOf(ia)}) ~~>
             = "[" IndexArg { "," IndexArg } "]" ;
 // A subscript index, with the one-sided DOWN range (`a[...1]`, `a[..<2]`) tried
 // first - see RangeExpr for why the UP form cannot be an alternative here.
-IndexArg    = PartRangeDn | Expression ;
+IndexArg    = PartRangeDn | IdxDflt | Expression ;
+// `d[k, default: v]`: Dictionary's defaulting subscript. The default travels
+// BESIDE the key (swIdxDfltOf), as an autoclosure: it runs only on a miss.
+IdxDflt     <~~ push({dfltArg: pop()}) ~~> = KwDefault ":" Expression ;
 PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp AddExpr ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
@@ -1467,7 +1470,7 @@ InoutArg    = "&" !"&" Id <~~ push({aref: swBt(up.in)}) ~~> ;
 
 Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
-            | PoundExpr | SuperRef | DotMember | Closure | ArrayTypeLit | DictLit | ArrayLit
+            | PoundExpr | SuperRef | DotMember | Closure | SugarSelf | SugarCall | ArrayTypeLit | DictLit | ArrayLit
             | Shorthand | ProjRef | OptNone | KeyPath | GenCall | GenRef | TrailCall | Call | VarRef ;
 // `\T.a.b` / `\.a.b`: a key path, read-only. Its value is the function from a
 // root to that member chain, which is what `.map(\.a)` and `x[keyPath: kp]` apply.
@@ -1599,7 +1602,11 @@ LamStmt     = LamCtrl StmtSep | LamExpr StmtSep ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = AttrDecl | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
-            | Continue | Fallthrough | Do | Defer | Empty | TupleAssign ;
+            | Continue | Fallthrough | Do | Defer | Empty | TupleAssign | LamAssign ;
+// An assignment is a STATEMENT here: its type is Void, so a closure ending in one
+// answers Void, never the assigned value - which is how reduce(into:) tells its
+// accumulating body from a combining one (`{ acc, v in acc[v] = 1 }`).
+LamAssign   <~~ push(exprToStmt(pop())) ~~> = Assignment ;
 LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 
@@ -1610,13 +1617,24 @@ DictEntry   <~~ var v = pop(); push({dk: pop(), dv: v}) ~~>
             = Expression ":" Expression ;
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
+// `[Int].self` / `[String: Int].self`: a collection type written with the sugar,
+// as a VALUE - its canonical name, which is what type(of:) answers for a value
+// of that type (swiftc 6.1.2 prints `Array<Int>`).
+SugarSelf   <~~ push(makeConst(swTyCanon(up.in.substring(0, up.in.length - 5)))) ~~>
+            = "[" Type [ ":" Type ] "]" { NoSpace "?" } "." "self" KwEnd ;
+// `[Int](repeating: 0, count: 3)`, `[String: Int](uniqueKeysWithValues: ps)`: the
+// sugared type CALLED with arguments is `Array<T>(...)` / `Dictionary<K, V>(...)`.
+SugarCall   <~~ push(swSugarCall(takeAll())) ~~>
+            = "[" SugarTy [ ":" SugarTy ] "]" NoSpaceParen "(" CallArg { "," CallArg } ")"
+              [ NoTrailCtx TrailArg { LabTrail } ] ;
+SugarTy     <~~ push({sty: up.in}) ~~> = Type ;
 // `[Int]()`, `[String: Int]()`, `[() async -> ()]()` - a collection TYPE written as
 // a literal and immediately constructed EMPTY. It is ordered BEFORE ArrayLit and
 // DictLit: those two would match `[Int]` and `[String: Int]` as a one-element array /
 // a one-entry dictionary and then hand the `()` to CallSfx ("call of a non-function
 // value"). The empty argument list
 // is part of the rule, so nothing that is genuinely an array literal (`[a][0]`,
-// `[f](x)`) can be taken for a type. `[Int](repeating: 0, count: 3)` is NOT covered.
+// `[f](x)`) can be taken for a type. SugarCall is the same type called WITH arguments.
 ArrayTypeLit <~~ push(makeEmptyColl(takeAll())) ~~>
             = "[" Type [ TypeLitDict ] "]" NoSpaceParen "(" ")" ;
 TypeLitDict <~~ push({dictty: 1}) ~~> = ":" Type ;
@@ -3535,6 +3553,12 @@ KwContinue  = "continue" KwEnd ;
         if (name == "lazy" && swIsColl(o)) { return swSeqVal(o) }
         // `.description` of a built-in value is its String(describing:).
         if (name == "description" && (typeof o == "string" || typeof o == "boolean" || swIsColl(o))) { return swstr(o) }
+        // `.debugDescription` of a String, Array, Dictionary or Set is the form it
+        // prints in INSIDE a collection: `"s"`, `Set([7])`. Twins: js_swget in
+        // abnf/jsrtswift.go and lib/swift-rt.metajs.
+        if (name == "debugDescription" && (typeof o == "string" || Array.isArray(o) || isDict(o) || swIsSet(o))) {
+            return swRender(o, true, 0)
+        }
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
         // A sized-integer box is an object, so its own members have to be answered
         // before the generic object paths below take it for a struct instance.
@@ -3899,6 +3923,8 @@ KwContinue  = "continue" KwEnd ;
                 }
                 return md
             }
+            var dm = swDictMut(target, name, args)
+            if (dm.ok) { return dm.v }
             // A Dictionary IS a Sequence of `(key: K, value: V)` pairs, so its
             // Sequence members run over those; `filter` alone answers a Dictionary
             // again (swiftc: `["a": 1].filter { $0.value > 0 }` is ["a": 1]). The
@@ -4263,6 +4289,66 @@ KwContinue  = "continue" KwEnd ;
             pairs.push(pt)
         }
         return pairs
+    }
+    // The Dictionary members that change it (and merging, which merges into a
+    // copy), as {ok, v}. `init(grouping:by:)` and `init(uniqueKeysWithValues:)` are
+    // the two initializers that are not a merge into an empty dictionary; their
+    // names cannot be written as a member call in Swift source. A merge without a
+    // closure is uniqueKeysWithValues, which traps on a repeated key (swiftc 6.1.2:
+    // "Fatal error: Duplicate values for key: 'a'"). Twins: swDictMut in
+    // abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swDictMut(d, name, args) {
+        if (name == "removeValue" || name == "updateValue") {
+            var k = name == "removeValue" ? args[0] : args[1]
+            var i = dictFind(d, k)
+            var old = anytype
+            old = i < 0 ? null : d.vals[i]
+            setElem(d, k, name == "removeValue" ? null : args[0])
+            return {ok: true, v: old}
+        }
+        if (name == "removeAll") {
+            while (d.keys.length > 0) { d.keys.pop(); d.vals.pop() }
+            d.__idx = null
+            return {ok: true, v: undefined}
+        }
+        if (name == "reserveCapacity") { return {ok: true, v: undefined} }
+        if (name == "merging") {
+            var c = swCopy(d)
+            swDictMerge(c, args[0], args.length > 1 ? args[1] : null)
+            return {ok: true, v: c}
+        }
+        if (name == "merge" || name == "init(uniqueKeysWithValues:)") {
+            swDictMerge(d, args[0], args.length > 1 ? args[1] : null)
+            return {ok: true, v: undefined}
+        }
+        if (name == "init(grouping:by:)") {
+            var es = swArrayOf(args[0])
+            for (var g = 0; g < es.length; g++) {
+                var gk = args[1](es[g])
+                var gi = dictFind(d, gk)
+                if (gi < 0) { setElem(d, gk, [es[g]]) } else { d.vals[gi].push(es[g]) }
+            }
+            return {ok: true, v: undefined}
+        }
+        return {ok: false, v: undefined}
+    }
+    // The swDictMut member a Dictionary initializer is, by its first label:
+    // `Dictionary(s, uniquingKeysWith: f)` is a merge into the empty dictionary.
+    // Twin in swift-to-llvm-ir.abnf.
+    function swDictInitName(l0) {
+        if (l0 == "grouping") { return "init(grouping:by:)" }
+        if (l0 == "uniqueKeysWithValues") { return "init(uniqueKeysWithValues:)" }
+        return "merge"
+    }
+    function swDictMerge(d, src, comb) {
+        var ps = swArrayOf(src)
+        for (var i = 0; i < ps.length; i++) {
+            var k = ps[i]["0"]
+            var j = dictFind(d, k)
+            if (j < 0) { setElem(d, k, ps[i]["1"]) }
+            else if (comb === null) { fail("Fatal error: Duplicate values for key: '" + swstr(k) + "'") }
+            else { d.vals[j] = comb(d.vals[j], ps[i]["1"]) }
+        }
     }
     function swPairsDict(ps) {
         var out = {__dict: true, keys: [], vals: []}
@@ -5585,8 +5671,12 @@ KwContinue  = "continue" KwEnd ;
                 // final value back into it on the way out (swBindArgs for a func).
                 // A builtin such as `reduce(into:)` hands it a plain value instead,
                 // which is bound as it is: adopting could copy the very accumulator
-                // the builtin reads back. Twin of emitInoutBacks in swift-to-llvm-ir.abnf.
+                // the builtin reads back. Its final value is the builtin's write-back:
+                // a body that runs off its end with no value (Void) answers it, so
+                // `reduce(into: 0) { $0 += $1 }` accumulates. Twins: emitInoutBacks
+                // and makeClosure in swift-to-llvm-ir.abnf.
                 var boxes = []
+                var plainIo = ""
                 for (var i = 0; i < params.length; i++) {
                     var av = anytype
                     av = i < args.length ? args[i] : undefined
@@ -5594,13 +5684,17 @@ KwContinue  = "continue" KwEnd ;
                         if (av !== null && typeof av == "object" && av.__ref != undefined) {
                             boxes.push({name: params[i], box: av})
                             declVar(params[i], swAdoptAnn(av.v, i < ptypes.length ? ptypes[i] : ""))
-                        } else { declVar(params[i], av) }
+                        } else {
+                            declVar(params[i], av)
+                            if (plainIo == "") { plainIo = params[i] }
+                        }
                         continue
                     }
                     declVar(params[i], i < ptypes.length ? swAdoptAnn(av, ptypes[i]) : av)
                 }
                 var last = anytype // A block's value hops types across items.
                 last = undefined
+                var ranOff = true
                 for (var k = 0; k < body.length; k++) {
                     if (body[k].expr != undefined) {
                         last = body[k].expr()
@@ -5610,10 +5704,12 @@ KwContinue  = "continue" KwEnd ;
                         if (r != undefined) {
                             // An explicit `return` inside the closure body carries the value.
                             last = (r.isRet != undefined) ? r.v : r
+                            ranOff = false
                             break
                         }
                     }
                 }
+                if (ranOff && last === undefined && plainIo != "") { last = getVar(plainIo) }
                 for (var bk = 0; bk < boxes.length; bk++) { boxes[bk].box.v = getVar(boxes[bk].name) }
                 scopes = saved
                 // The declared RETURN type adopts, exactly as a func's does:
@@ -5825,6 +5921,65 @@ KwContinue  = "continue" KwEnd ;
         if (ann == "") { return call }
         return function() { return swAdoptAnn(call(), ann) }
     }
+    // The type of `[T](...)` / `[K: V](...)` from its text: the bracketed part,
+    // when one parenthesised argument list follows it and nothing else does.
+    // Twin in swift-to-llvm-ir.abnf.
+    function swSugarCallTy(txt) {
+        if (txt.charAt(0) != "[" || txt.charAt(txt.length - 1) != ")") { return "" }
+        var depth = 0
+        var j = 0
+        while (j < txt.length) {
+            var ch = txt.charAt(j)
+            if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
+            if (ch == "]" || ch == ")" || ch == ">") { depth = depth - 1 }
+            if (depth == 0) { break }
+            j = j + 1
+        }
+        if (j + 1 >= txt.length || txt.charAt(j) != "]" || txt.charAt(j + 1) != "(") { return "" }
+        var k = j + 1
+        while (k < txt.length) {
+            var c2 = txt.charAt(k)
+            if (c2 == "[" || c2 == "(" || c2 == "<") { depth = depth + 1 }
+            if (c2 == "]" || c2 == ")" || c2 == ">") { depth = depth - 1 }
+            if (depth == 0) { break }
+            k = k + 1
+        }
+        return k == txt.length - 1 ? txt.substring(0, j + 1) : ""
+    }
+    // [T](...) / [K: V](...) as the explicit generic call it abbreviates. Twin in
+    // swift-to-llvm-ir.abnf.
+    function swSugarCall(items) {
+        var tys = []
+        var k = 0
+        while (k < items.length && typeof items[k] == "object" && items[k] !== null && items[k].sty != undefined) {
+            tys.push(items[k].sty)
+            k = k + 1
+        }
+        var g = tys.length == 2 ? {gargs: tys[0] + "," + tys[1]} : {gargs: tys[0]}
+        var gi = [tys.length == 2 ? "Dictionary" : "Array", g]
+        for (var i = k; i < items.length; i++) { gi.push(items[i]) }
+        return swGenCall(gi)
+    }
+    // The canonical spelling of a type written with the sugar, as type(of:) and
+    // print name it: [T] is Array<T>, [K: V] Dictionary<K, V> and T? Optional<T>,
+    // all the way down. The text has no whitespace. Twin in swift-to-llvm-ir.abnf.
+    function swTyCanon(t) {
+        var n = t.length
+        if (n > 1 && t.charAt(n - 1) == "?") { return "Optional<" + swTyCanon(t.substring(0, n - 1)) + ">" }
+        if (n > 1 && t.charAt(0) == "[" && t.charAt(n - 1) == "]") {
+            var kv = swTySplit(t.substring(1, n - 1), ":")
+            if (kv.length == 2) { return "Dictionary<" + swTyCanon(kv[0]) + ", " + swTyCanon(kv[1]) + ">" }
+            return "Array<" + swTyCanon(t.substring(1, n - 1)) + ">"
+        }
+        var lt = t.indexOf("<")
+        if (lt > 0 && t.charAt(n - 1) == ">") {
+            var targs = swTySplit(t.substring(lt + 1, n - 1), ",")
+            var out = t.substring(0, lt + 1)
+            for (var i = 0; i < targs.length; i++) { out = out + (i > 0 ? ", " : "") + swTyCanon(targs[i]) }
+            return out + ">"
+        }
+        return t
+    }
     // The annotation a builtin generic type's arguments amount to, or "".
     function swGenAnn(name, g) {
         if (name == "Array") { return "[" + g + "]" }
@@ -5976,7 +6131,8 @@ KwContinue  = "continue" KwEnd ;
         if (sx.kind == "index") {
             if (swTyIsOpt(cur)) { return "" }
             var el = swTyPeel(cur, 1)
-            return el != "" && swTyIsDict(cur) ? el + "?" : el
+            // A Dictionary's subscript is an Optional, except with a `default:`.
+            return el != "" && swTyIsDict(cur) && sx.dflt == null ? el + "?" : el
         }
         if ((sx.kind == "field" && (sx.name == "first" || sx.name == "last"))
             || (sx.kind == "mcall" && swOptMember(sx.name))) {
@@ -6007,10 +6163,11 @@ KwContinue  = "continue" KwEnd ;
         return null
     }
     function swCallAnn(fn) { return hasOwn(typeFieldAnn, "$" + fn) ? fn : swFnRetOf(fn) }
-    // The Collection members whose result is an Optional of the element.
+    // The Collection members whose result is an Optional of the element (of the
+    // value, for the two Dictionary ones).
     function swOptMember(n) {
         return n == "first" || n == "last" || n == "min" || n == "max" || n == "popLast"
-            || n == "randomElement"
+            || n == "randomElement" || n == "removeValue" || n == "updateValue"
     }
     function swTyIsOpt(t0) {
         var t = swTyTrim(t0)
@@ -6067,6 +6224,9 @@ KwContinue  = "continue" KwEnd ;
             if (inner == ":" || (swTySplit(inner, ":").length > 1 && swTySplit(inner, "?").length == 1)) { return "[_: _]" }
             return ""
         }
+        // `[Int: Set<Int>]()`, `[Int](repeating: 0, count: 3)`: the sugared type, called.
+        var sty = swSugarCallTy(txt)
+        if (sty != "") { return sty }
         var h = swChainHead(txt)
         if (h.fn == "" || txt.charAt(txt.length - 1) != ")") { return swInferAnn(txt) }
         var depth = 0
@@ -6101,9 +6261,15 @@ KwContinue  = "continue" KwEnd ;
         var f = tbl[key]
         return typeof f == "function" ? f : null
     }
-    // The methods that add an ELEMENT to a collection, i.e. the ones whose first
-    // argument the receiver's element type adopts.
-    function swAddsElem(n) { return n == "append" || n == "insert" }
+    // The type the first argument of a collection member adopts, given the
+    // receiver's declared type: the element type for the members that add an
+    // ELEMENT (a Dictionary's value, for updateValue), the receiver's own type for
+    // merge/merging, which take a whole dictionary. "" for every other member.
+    function swArgAnn(n, dty) {
+        if (n == "append" || n == "insert" || n == "updateValue") { return swElemTyOf(dty) }
+        if ((n == "merge" || n == "merging") && swElemTyOf(dty) != "") { return dty }
+        return ""
+    }
     // A String is a VALUE, so its mutating methods (`s.append("c")`,
     // `s.removeFirst()`) compute a new String and assign it back to the receiver.
     // That needs an assignable receiver: a name, then fields, subscripts and `!`. The
@@ -6150,9 +6316,7 @@ KwContinue  = "continue" KwEnd ;
         var suffixes = items.slice(1)
         if (suffixes[0].kind == "mcall" && swIsMutator(suffixes[0].name)) { swNoteWrite({name: swRecvName(txt)}) }
         var recvETy = ""
-        if (suffixes[0].kind == "mcall" && swAddsElem(suffixes[0].name)) {
-            recvETy = swElemTyOf(declTyOf(swRecvName(txt)))
-        }
+        if (suffixes[0].kind == "mcall") { recvETy = swArgAnn(suffixes[0].name, declTyOf(swRecvName(txt))) }
         var eTy0 = recvETy
         var chead = swChainHead(txt)
         var wAnns = swChainAnns(chead, suffixes)
@@ -6185,13 +6349,19 @@ KwContinue  = "continue" KwEnd ;
                 var anns = swChainAnns(chead, suffixes)
                 var pr = []
                 var om = []
+                var de = []
+                var ae = []
                 for (var q = 0; q < suffixes.length; q++) {
+                    de.push(suffixes[q].dflt != null ? swTyPeel(anns[q], 1) : "")
+                    ae.push(suffixes[q].kind == "mcall" ? swArgAnn(suffixes[q].name, anns[q]) : "")
                     pr.push(swProtoOf(anns[q], suffixes[q]))
                     om.push(suffixes[q].kind == "mcall" && (suffixes[q].name == "map" || suffixes[q].name == "flatMap")
                             && swTyIsOpt(anns[q]))
                 }
                 scopePut(chainC, "proto", pr)
                 scopePut(chainC, "optmap", om)
+                scopePut(chainC, "dety", de)
+                scopePut(chainC, "aety", ae)
             }
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
@@ -6223,8 +6393,9 @@ KwContinue  = "continue" KwEnd ;
                     if (cur === null || cur === undefined) { cur = null } else { cur = oea.argv[0](cur) }
                 } else if (s.kind == "mcall") {
                     var ea = evalArgs(s.args)
-                    if (i == 0 && eTy0 != "" && ea.argv.length > 0) {
-                        ea.argv[0] = swAdoptAnn(ea.argv[0], eTy0)
+                    var aTy = i == 0 ? eTy0 : chainC.aety[i]
+                    if (aTy != "" && ea.argv.length > 0) {
+                        ea.argv[0] = swAdoptAnn(ea.argv[0], aTy)
                     }
                     if (smAssign != null && i + 1 == suffixes.length && typeof cur == "string") {
                         var sm = swStrMutate(cur, s.name, ea.argv)
@@ -6258,6 +6429,8 @@ KwContinue  = "continue" KwEnd ;
                     if (cur === undefined || cur === null) { fail("field ." + s.name + " of nil") }
                     if (propOn && i + 1 < suffixes.length) { propRecs = swPropBefore(cur, s.name, propRecs) }
                     cur = core.getField(cur, s.name)
+                } else if (s.dflt != null) {
+                    cur = swIdxDflt(cur, s.idx(), s.dflt, swDfltStores(suffixes, i), chainC.dety[i])
                 } else {
                     cur = core.getIndex(cur, s.idx())
                 }
@@ -6403,7 +6576,13 @@ KwContinue  = "continue" KwEnd ;
                 // A FIELD target is read and written as a field: getElemP and setElem
                 // try a user subscript first, which `m.x += 1` on a type that has
                 // one must not reach.
-                if (op != "=") { v = applyOp(op, lastField ? swFieldOf(p.obj, p.key) : getElemP(p.obj, p.key), v) }
+                if (op != "=") {
+                    var oldE = anytype
+                    if (lastField) { oldE = swFieldOf(p.obj, p.key) }
+                    else if (p.dflt != null) { oldE = swIdxDflt(p.obj, p.key, p.dflt, false, "") }
+                    else { oldE = getElemP(p.obj, p.key) }
+                    v = applyOp(op, oldE, v)
+                }
                 if (mode == 0 || (mode == 2 && !swExfOf(exr.lk < 0 ? findThis() : p.own, exr.key))) {
                     v = swAdoptLike(swSafeElem(p.obj, p.key), v, elemTy)
                 }
@@ -6801,7 +6980,8 @@ KwContinue  = "continue" KwEnd ;
                 own = o
                 if (track) { recs = swPropBefore(o, s.key, recs) }
                 o = swFieldOf(o, s.key)
-            } else { o = core.getIndex(o, s.idx()) }
+            } else if (s.dflt != null) { o = swIdxDflt(o, s.idx(), s.dflt, true, "") }
+            else { o = core.getIndex(o, s.idx()) }
             if ((o === undefined || o === null) && ref.path[i + 1].opt != true) {
                 if (core.nilPath != null) { core.nilPath(ref.name) }
                 fail(core.nullWord + " in assignment path of " + ref.name)
@@ -6810,7 +6990,8 @@ KwContinue  = "continue" KwEnd ;
         var last = ref.path[ref.path.length - 1]
         if (last.opt == true && (o === undefined || o === null)) { return null }
         if (last.key != undefined) { own = o }
-        return {obj: o, key: (last.key != undefined) ? last.key : last.idx(), recs: recs, own: own}
+        var dfl = last.key != undefined || last.dflt == undefined ? null : last.dflt
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx(), recs: recs, own: own, dflt: dfl}
     }
 
     // The OBSERVED stored property names the program declares (splitMembers), and
@@ -6842,6 +7023,11 @@ KwContinue  = "continue" KwEnd ;
     }
     // A mutating method: the builtin collections' by name, and every method a
     // program type declares `mutating` (recorded by splitMembers).
+    // Does a `default:` subscript at suffixes[i] store its default: a mutating
+    // method is called on it. Twin in swift-to-llvm-ir.abnf.
+    function swDfltStores(suffixes, i) {
+        return i + 1 < suffixes.length && suffixes[i + 1].kind == "mcall" && swIsMutator(suffixes[i + 1].name)
+    }
     var swMutNames = {}
     function swIsMutator(n) {
         if (hasOwn(swMutNames, "$" + n)) { return true }
@@ -7584,6 +7770,38 @@ KwContinue  = "continue" KwEnd ;
 
     // A multi-parameter subscript index (`g[r, c]`) travels as one {__idxs} value, so
     // every existing single-key path (arrays, dictionaries, strings) is untouched.
+    // A subscript's argument list without its `default:` argument, and that
+    // argument's thunk (null when there is none). Twins in swift-to-llvm-ir.abnf.
+    function swIdxKeys(items) {
+        var ks = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "object" && items[i] !== null && items[i].dfltArg != undefined) { continue }
+            ks.push(items[i])
+        }
+        return ks
+    }
+    function swIdxDfltOf(items) {
+        var l = items[items.length - 1]
+        if (typeof l == "object" && l !== null && l.dfltArg != undefined) { return l.dfltArg }
+        return null
+    }
+    // `d[k, default: v]`: the value under k, or the default on a miss. A MUTATING
+    // access (a mutating method on it, a write through it) stores the default
+    // first, so the mutation lands in the dictionary - Swift's `_modify` accessor
+    // inserts it even when the mutation then changes nothing. Twin of
+    // swEmitIdxDflt in swift-to-llvm-ir.abnf.
+    // The default is written at the dictionary's value type (ety, "" when the walk
+    // does not know it), as a literal there is: `[]` for a `Set<Int>` value is a Set.
+    function swIdxDflt(o, k, dflt, store, ety) {
+        if (isDict(o) && dictFind(o, k) < 0) {
+            var dv = anytype
+            dv = dflt()
+            dv = swIsSetTy(ety) ? swSetOf(dv) : swAdoptAnn(dv, ety)
+            if (!store) { return dv }
+            setElem(o, k, dv)
+        }
+        return swIndex(o, k)
+    }
     function makeIndexKey(items) {
         if (items.length == 1) { return items[0] }
         return function() {
@@ -9281,10 +9499,13 @@ KwContinue  = "continue" KwEnd ;
             || n == "formSymmetricDifference" || n == "isSubset" || n == "isSuperset"
             || n == "isStrictSubset" || n == "isStrictSuperset" || n == "isDisjoint"
     }
-    // Dictionary(): the empty one. Twin: makeCall in swift-to-llvm-ir.abnf.
-    hostGlobals["Dictionary"] = {__conv: function(x) {
-        if (x !== undefined) { fail("Dictionary(...): only the empty initializer is supported") }
-        return {__dict: true, keys: [], vals: []}
+    // Dictionary(), and the initializers from a sequence: each one runs on a new
+    // empty dictionary (swDictInitName). Twin: makeCall in swift-to-llvm-ir.abnf.
+    hostGlobals["Dictionary"] = {__convl: function(argv, lbls) {
+        var d = {__dict: true, keys: [], vals: []}
+        if (argv.length == 0) { return d }
+        swDictMut(d, swDictInitName(lbls[0]), argv)
+        return d
     }}
     // Character("b"): a Character IS its one-cluster String in this model.
     hostGlobals["Character"] = {__conv: function(v) { var t = swScalarText(v); return t === null ? v : t }, __tname: "Character"}

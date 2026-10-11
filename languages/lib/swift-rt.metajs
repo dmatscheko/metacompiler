@@ -1454,6 +1454,76 @@ function js_swextcall(recv, name, args, tbl) {
 
 
 
+// The Dictionary members that change it in place. The two initializers that are
+// not a merge into an empty dictionary arrive under names Swift source cannot
+// spell as a member call, with their sequence already turned into an array by
+// the emitter; a merge without a closure is uniqueKeysWithValues. Twins:
+// swDictMut in languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swDictMutName(name) {
+    return name === "removeValue" || name === "updateValue" || name === "removeAll"
+        || name === "reserveCapacity" || name === "merge" || name === "init(uniqueKeysWithValues:)"
+        || name === "init(grouping:by:)"
+}
+function swDictMut(d, name, args) {
+    var keys = d["keys"]
+    var vals = d["vals"]
+    if (name === "removeValue" || name === "updateValue") {
+        var k = anytype
+        k = args[0]
+        if (name === "updateValue") { k = args[1] }
+        var i = rtkDictFind(keys, k)
+        var old = anytype
+        old = null
+        if (i >= 0) { old = vals[i] }
+        if (name === "removeValue") { js_swdset(d, k, null) } else { js_pyset(d, k, args[0]) }
+        return old
+    }
+    if (name === "removeAll") {
+        while (keys.length > 0) {
+            keys.pop()
+            vals.pop()
+        }
+        return undefined
+    }
+    if (name === "init(grouping:by:)") {
+        var es = args[0]
+        var g = 0
+        while (g < es.length) {
+            var gk = anytype
+            gk = args[1].apply(undefined, [es[g]])
+            var gi = rtkDictFind(keys, gk)
+            if (gi < 0) { js_pyset(d, gk, [es[g]]) } else { vals[gi].push(es[g]) }
+            g = g + 1
+        }
+        return undefined
+    }
+    if (name === "reserveCapacity") { return undefined }
+    var src = args[0]
+    var sk = src
+    var sv = src
+    if (rtIsDictObj(src)) {
+        sk = src["keys"]
+        sv = src["vals"]
+    }
+    var j = 0
+    while (j < sk.length) {
+        var mk = anytype
+        var mv = anytype
+        mk = sk[j]
+        mv = sv[j]
+        if (!rtIsDictObj(src)) {
+            mk = sk[j]["0"]
+            mv = sk[j]["1"]
+        }
+        var at = rtkDictFind(keys, mk)
+        if (at < 0) { js_pyset(d, mk, mv) }
+        else if (args.length < 2) { swAbort("Fatal error: Duplicate values for key: '" + swDesc(mk) + "'") }
+        else { vals[at] = args[1].apply(undefined, [vals[at], mv]) }
+        j = j + 1
+    }
+    return undefined
+}
+
 // (target, method name, args array). The Go twin (rt.memberCall in abnf/jsrt.go)
 // is a LANGUAGE-NEUTRAL dispatcher over strings, dicts, lists, generators and
 // instances. Every arm swift-to-llvm-ir.abnf can reach is here; the GENERATOR arm
@@ -1516,6 +1586,12 @@ function js_mcall(recv, name, args) {
             }
             return {__dict: true, keys: mk, vals: mv}
         }
+        if (name === "merging") {
+            var mc = js_swcopy(recv)
+            swDictMut(mc, "merge", args)
+            return mc
+        }
+        if (swDictMutName(name)) { return swDictMut(recv, name, args) }
         if (name === "get") {
             var gi = rtkDictFind(recv["keys"], args[0])
             if (gi >= 0) { return recv["vals"][gi] }
@@ -2920,6 +2996,12 @@ function js_swget(v, k) {
     if (k === "description") {
         if (typeof v == "string" || typeof v == "boolean" || rtIsArr(v) || rtIsDictObj(v) || swIsRange(v)) { return swDesc(v) }
         if (swIsObj(v) && v["__set"] === true) { return swDesc(v) }
+    }
+    // `.debugDescription` of a String, Array, Dictionary or Set is the form it
+    // prints in INSIDE a collection. Twins: swGetField in
+    // languages/swift-interpreter.abnf and js_swget in abnf/jsrtswift.go.
+    if (k === "debugDescription") {
+        if (typeof v == "string" || rtIsArr(v) || rtIsDictObj(v) || (swIsObj(v) && v["__set"] === true)) { return swRender(v, true, 0) }
     }
     // A Dictionary's values, as a copy. The Go twin answers it in abnf/jsrt.go's js_get.
     if (k === "values" && rtIsDictObj(v)) { return rtCopyArr(v["vals"]) }
