@@ -1474,6 +1474,9 @@ KwSuper     = "super" KwEnd ;
     var baseEmitBin = emitBin
     emitBin = function(b, op, l, r) {
         var base = dArithOp[op]
+        // `*` has an extern of its own because a String operand repeats; keeping that
+        // test out of js_dartarith keeps it off every other operator.
+        if (base == "*") { return callExt(b, "js_dartmul", [l, r]) }
         if (typeof base == "string") { return callExt(b, "js_dartarith", [emitStr(b, base), l, r]) }
         var rl = dRelExt[op]
         if (typeof rl == "string") { return callExt(b, rl, [l, r]) }
@@ -2585,14 +2588,15 @@ KwSuper     = "super" KwEnd ;
                     // wins there), and it is the same rendering print uses.
                     if (s.name == "toString" && s.args.length == 0) {
                         cur = callExt(b, "js_dartstr", [cur])
-                    } else if (s.name == "containsKey" || s.name == "contains") {
+                    } else if ((s.name == "containsKey" || s.name == "contains") && s.args.length == 1) {
                         var ar = s.args[0](b)
                         b = ar.b
                         // js_pyin knows lists, strings and dict keys but not SETS, so a
                         // non-string receiver is normalized with js_pyiter first (which
                         // yields a set's elements, a dict's keys and a list itself). A
                         // string is passed through: 'abc'.contains('bc') is a SUBSTRING
-                        // test, not a membership test over its characters.
+                        // test, not a membership test over its characters. String's
+                        // contains(p, start) has two arguments and goes to js_dartnm.
                         var isStr = truthy(b, callExt(b, "js_is_type", [cur, emitStr(b, "String")]))
                         cur = callExt(b, "js_pyin", [ar.v, b.NewSelect(isStr, cur, callExt(b, "js_pyiter", [cur]))])
                     } else if (extNames["$" + s.name] == 1 && methodNames["$" + s.name] == undefined) {
@@ -2617,6 +2621,7 @@ KwSuper     = "super" KwEnd ;
                     // js_dartnm answers them and hands anything else to memberCall.
                     else if (dNumGetters["$" + s.name] == 1) { cur = callExt(b, "js_dartnm", [cur, emitStr(b, s.name), callExt(b, "js_arr_new", [])]) }
                     else if (s.name == "values") { var vr2 = emitValuesRead(b, cur); b = vr2.b; cur = vr2.v }
+                    else if (s.name == "codeUnits") { var cu = emitCodeUnitsRead(b, cur); b = cu.b; cur = cu.v }
                     else { var gr = emitGetterRead(b, cur, s.name); b = gr.b; cur = gr.v }
                 } else if (s.kind == "callv") {
                     var cvArgs = callExt(b, "js_arr_new", [])
@@ -3226,6 +3231,20 @@ KwSuper     = "super" KwEnd ;
         var pv = callExt(plainB, "js_get", [recv, emitStr(plainB, name)])
         plainB.NewBr(mrgB)
         return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(gv, callB), llvm.ir.NewIncoming(pv, plainB)])}
+    }
+    // String.codeUnits is a GETTER of a non-object receiver, so it is answered by
+    // js_dartnm's String members (as the interpreter's readField does); any other
+    // receiver reads a field or getter of that name as usual.
+    function emitCodeUnitsRead(b, recv) {
+        var sB = curF.NewBlock("")
+        var oB = curF.NewBlock("")
+        var mB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [recv, emitStr(b, "String")])), sB, oB)
+        var sv = callExt(sB, "js_dartnm", [recv, emitStr(sB, "codeUnits"), callExt(sB, "js_arr_new", [])])
+        sB.NewBr(mB)
+        var or = emitGetterRead(oB, recv, "codeUnits")
+        or.b.NewBr(mB)
+        return {b: mB, v: mB.NewPhi([llvm.ir.NewIncoming(sv, sB), llvm.ir.NewIncoming(or.v, or.b)])}
     }
     function emitSetterWrite(b, recv, name, val) {
         var classes = setterNames["$" + name]

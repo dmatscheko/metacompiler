@@ -18,7 +18,8 @@
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // import/export/library/part directives (single-file harness, so dart:core API
-// stays at what the feature matrix already uses, plus Object/Function/identical),
+// stays at what the feature matrix already uses, plus Object/Function/identical
+// and the String members of SECTION 33),
 // isolates, FFI, metadata annotations (including @override), doc comments.
 // Async and generator SYNTAX is covered: sync* generators actually run, async
 // bodies are only defined and type-checked, never awaited (no event loop).
@@ -1407,6 +1408,38 @@ void s32() {
 }
 class NmIdx { int operator [](int i) => i; }
 
+// ===== SECTION 33: dart:core's String members =====
+// A String is a sequence of UTF-16 code units, and every index, length and position
+// counts them. THERE IS NO dart TOOLCHAIN ON THIS MACHINE: every expected value is
+// dart:core's documentation of String (sdk/lib/core/string.dart), not a VM run. The
+// operands come out of a list, so nothing folds at compile time.
+void s33() {
+  var ss = ["ab", "  hi \t", "Hello World", "", "a,b,,c", "xéy", " ﻿z　", ",a,"];
+  var s = ss[0];
+  var w = ss[2];
+  check("st1", s.codeUnitAt(1) == 98 && s.codeUnits.length == 2 && ss[5].codeUnits[1] == 233);
+  check("st2", s.toUpperCase() == "AB" && w.toLowerCase() == "hello world" && ss[5].toUpperCase() == "XÉY");
+  check("st3", ss[1].trim() == "hi" && ss[1].trimLeft() == "hi \t" && ss[1].trimRight() == "  hi");
+  check("st4", ss[6].trim() == "z"); // NBSP, BOM and the ideographic space are white space
+  check("st5", w.contains("World") && !w.contains("o", 8) && w.startsWith("Hell") && w.startsWith("World", 6) && w.endsWith("rld"));
+  check("st6", w.indexOf("o") == 4 && w.lastIndexOf("o") == 7 && w.indexOf("o", 5) == 7 && w.lastIndexOf("o", 6) == 4 && w.indexOf("zz") == -1);
+  check("st7", s.padLeft(5, "*") == "***ab" && s.padRight(4) == "ab  " && s.padLeft(1, "*") == "ab" && s.padLeft(4, "xy") == "xyxyab");
+  var f1 = ss[4].split(",");
+  var f2 = ss[7].split(",");
+  check("st8", f1.length == 4 && f1[2] == "" && f2.length == 3 && f2[0] == "" && f2[2] == "");
+  check("st9", s.split("").length == 2 && ss[3].split("").length == 0 && ss[3].split(",").length == 1);
+  check("st10", w.replaceAll("o", "0") == "Hell0 W0rld" && s.replaceAll("", "-") == "-a-b-");
+  check("st11", w.replaceFirst("o", "0") == "Hell0 World" && w.replaceFirst("o", "0", 5) == "Hello W0rld");
+  check("st12", w.replaceRange(0, 5, "Bye") == "Bye World" && w.replaceRange(5, null, "!") == "Hello!");
+  var t = "ha";
+  t *= 2;
+  check("st13", s * 3 == "ababab" && s * 0 == "" && t == "haha");
+  check("st14", s.compareTo("ac") < 0 && s.compareTo("ab") == 0 && s.compareTo("a") > 0 && "B".compareTo("a") < 0);
+  var e = "none";
+  try { s.codeUnitAt(5); } on RangeError catch (x) { e = "range"; }
+  check("st15", e == "range");
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1440,6 +1473,7 @@ int main() {
   s30(); // SECTION-CALL 30
   s31(); // SECTION-CALL 31
   s32(); // SECTION-CALL 32
+  s33(); // SECTION-CALL 33
   print("full: $checks checks, $fails failures");
   return fails;
 }

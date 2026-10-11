@@ -106,6 +106,8 @@
 // file defines further down. Same mechanism ruby uses for `import "./regex.js"`.
 // (rtIsArr and rtJavaStr, used by dart and swift only, live there too.)
 import "./runtime.metajs"
+// dart:core's String members, shared with the interpreter half.
+import "./dart-str.js"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rtJavaStr(v) }
@@ -1469,6 +1471,8 @@ function dtIdentical(a, b) {
 // language can reach it.
 function dtMember(recv, name, args) {
     if (typeof recv == "string") {
+        var sm = dsMember(recv, name, args)
+        if (sm.hit) { return sm.v }
         if (name === "length") { return dtStrLen(recv) }
         if (name === "charAt") {
             var ci = Math.trunc(dtNum(dtArgAt(args, 0)))
@@ -1488,7 +1492,6 @@ function dtMember(recv, name, args) {
             if (bg > en) { return "" }
             return dtStrRange(recv, bg, en)
         }
-        if (name === "indexOf") { return recv.indexOf(dtToStr(dtArgAt(args, 0))) }
         if (name === "isEmpty") { return recv.length == 0 }
         fail("unknown String method: " + name)
     }
@@ -1663,6 +1666,9 @@ function js_pyget(c, k) {
 function dtIndexErr(k, c) {
     throw dtExcNew("IndexError", "", [k, c, "index"])
 }
+// lib/dart-str.js's hooks. Twins: dsHNum / dsHIndexErr in languages/dart-interpreter.abnf.
+function dsHNum(v) { return Math.trunc(dtNumOf(v)) }
+function dsHIndexErr(i, s) { dtIndexErr(i, s) }
 function js_dtidx(c, k) {
     if (rtIsArr(c)) {
         var idx = Math.trunc(dtNum(k))
@@ -1899,6 +1905,13 @@ function js_dartarith(op, l, r) {
         if (!dtIsNum(l) || !dtIsNum(r)) { return dtJsAdd(l, r) }
     }
     return dtArith(op, l, r)
+}
+
+// `*`: String.operator * repeats the string (none for a count of zero or less),
+// any other operand is arithmetic. Twin of js_dartmul in abnf/jsrtdart.go.
+function js_dartmul(l, r) {
+    if (typeof l == "string" && dtIsNum(r)) { return dsRepeat(l, dsHNum(r)) }
+    return dtArith("*", l, r)
 }
 
 // dart:core, List.operator +: "Returns the concatenation of this list and

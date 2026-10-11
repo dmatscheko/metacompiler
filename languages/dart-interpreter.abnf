@@ -1329,6 +1329,8 @@ KwDeferred  = "deferred" KwEnd ;
     // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and statement
     // builders); Dart-specific behaviour is configured on `core` and defined below.
     include("lib/interp-core.js")
+    // dart:core's String members, shared with layer 2; the hooks are below dNum.
+    include("lib/dart-str.js")
 
     // takeAll empties the local stack and returns the items in push order.
     // unescapeJs resolves the JS/Dart string escapes.
@@ -1854,6 +1856,9 @@ KwDeferred  = "deferred" KwEnd ;
         return v
     }
     function dIsNum(v) { return typeof v == "number" || dIsFlo(v) || szIs(v) }
+    // lib/dart-str.js's hooks. Twins: dsHNum / dsHIndexErr in languages/lib/dart-rt.metajs.
+    function dsHNum(v) { return Math.trunc(dNum(v)) }
+    function dsHIndexErr(i, s) { dxRaiseA("IndexError", "", [i, s, "index"]) }
     function dIsInt(v) { return typeof v == "number" || szIs(v) }
     // dInt normalises any numeric operand to an int, truncating a double toward zero -
     // which is what toInt(), truncate() and the operand of a bitwise operator all do.
@@ -2135,6 +2140,9 @@ KwDeferred  = "deferred" KwEnd ;
             if (op == ">=") { var c2 = dCmp(l, r); return c2 === 1 || c2 === 0 }
         }
         if (op == "+") { return core.add(l, r) }
+        // String.operator *: the string repeated; none for a count of zero or less.
+        // Twin of js_dartmul (abnf/jsrtdart.go, languages/lib/dart-rt.metajs).
+        if (op == "*" && typeof l == "string" && dIsNum(r)) { return dsRepeat(l, dsHNum(r)) }
         return baseBinOp(op, l, r)
     }
     var baseApplyOp = applyOp
@@ -2146,6 +2154,7 @@ KwDeferred  = "deferred" KwEnd ;
         var base = op.substring(0, op.length - 1)
         if (dArithOps[base] == 1 && dIsNum(a) && dIsNum(b)) { return dArith(base, a, b) }
         if (base == "+") { return core.add(a, b) }
+        if (base == "*" && typeof a == "string" && dIsNum(b)) { return dsRepeat(a, dsHNum(b)) }
         return baseApplyOp(op, a, b)
     }
     // -x keeps doubles (the shared makeNeg wraps to 32 bits).
@@ -3380,6 +3389,7 @@ KwDeferred  = "deferred" KwEnd ;
             var ng = dNumMethod(cur, name, [])
             if (ng != null) { return ng.v }
         }
+        if (typeof cur == "string" && name == "codeUnits") { return dsMember(cur, name, []).v }
         if (name == "length") { return dlen(cur) }
         if (name == "isEmpty") { return dlen(cur) == 0 }
         if (name == "isNotEmpty") { return dlen(cur) != 0 }
@@ -3492,8 +3502,9 @@ KwDeferred  = "deferred" KwEnd ;
             if (nm != null) { return nm.v }
         }
         if (typeof target == "string") {
+            var sm = dsMember(target, name, args)
+            if (sm.hit) { return sm.v }
             if (name == "substring") { return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0]) }
-            if (name == "indexOf") { return target.indexOf(args[0]) }
             if (name == "charAt") { return target.charAt(args[0]) }
             if (name == "isEmpty") { return target.length == 0 }
             return extCall(target, name, args, "String")

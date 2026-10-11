@@ -48,6 +48,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf16"
 )
 
@@ -508,6 +509,19 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return w(rt.dartArith(op, l, r))
 	}
+	// `*`: String.operator * repeats the string (none for a count of zero or less),
+	// any other operand is arithmetic. Twin of js_dartmul in languages/lib/dart-rt.metajs.
+	m["js_dartmul"] = func(a []uint64) uint64 {
+		l, r := u(a[0]), u(a[1])
+		if ls, ok := l.(string); ok && dartIsNum(r) {
+			times := jsToInt(rt.dartNumOf(r))
+			if times < 0 {
+				times = 0
+			}
+			return rt.wrapStr(strings.Repeat(ls, times))
+		}
+		return w(rt.dartArith("*", l, r))
+	}
 	rel := func(name string, want func(int) bool) {
 		m[name] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
@@ -595,6 +609,11 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		if o, ok := recv.(*jsObject); ok {
 			if tn, isMarker := o.props["__dexcType"].(string); isMarker {
 				return w(rt.dartExcNew(tn, name, args.elems))
+			}
+		}
+		if str, ok := recv.(string); ok {
+			if v, hit := rt.dartStrMember(str, name, args.elems); hit {
+				return w(v)
 			}
 		}
 		return w(rt.memberCall(recv, name, args.elems))
@@ -1460,4 +1479,216 @@ func dartRadixStr(rt *jsrt, v interface{}, radix int) string {
 		return strconv.FormatInt(n, radix)
 	}
 	return strconv.FormatUint(uint64(n), radix)
+}
+
+// ----- dart:core's String members --------------------------------------------
+
+// dartStrMember answers a String member dart:core declares, over UTF-16 code units
+// (every index, length and position counts them). A Pattern argument is a String;
+// any other name or argument shape reports false and the ordinary member dispatch
+// goes on. Twin of dsMember in languages/lib/dart-str.js, which the interpreter
+// half and layer 2 share.
+func (rt *jsrt) dartStrMember(s, name string, args []interface{}) (interface{}, bool) {
+	u := strUnits(s)
+	n := len(u)
+	num := func(i int) int { return jsToInt(rt.dartNumOf(argAt(args, i))) }
+	opt := func(i, dflt int) int {
+		if i < len(args) && !isUndefOrNull(args[i]) {
+			return num(i)
+		}
+		return dflt
+	}
+	switch name {
+	case "codeUnitAt":
+		i := num(0)
+		if i < 0 || i >= n {
+			panic(&jsThrown{value: rt.dartExcNew("IndexError", "", []interface{}{argAt(args, 0), s, "index"})})
+		}
+		return float64(u[i]), true
+	case "codeUnits":
+		out := make([]interface{}, n)
+		for i, c := range u {
+			out[i] = float64(c)
+		}
+		return &jsArray{elems: out}, true
+	case "toUpperCase":
+		return dartStrCase(u, unicode.ToUpper), true
+	case "toLowerCase":
+		return dartStrCase(u, unicode.ToLower), true
+	case "trim", "trimLeft", "trimRight":
+		a, b := 0, n
+		for name != "trimRight" && a < b && dartIsWs(u[a]) {
+			a++
+		}
+		for name != "trimLeft" && b > a && dartIsWs(u[b-1]) {
+			b--
+		}
+		return strFromUnits(u[a:b]), true
+	case "padLeft", "padRight":
+		pad := " "
+		if p, ok := argAt(args, 1).(string); ok {
+			pad = p
+		}
+		delta := num(0) - n
+		if delta <= 0 {
+			return s, true
+		}
+		if name == "padLeft" {
+			return strings.Repeat(pad, delta) + s, true
+		}
+		return s + strings.Repeat(pad, delta), true
+	case "replaceRange":
+		rs, re := num(0), opt(1, n)
+		return strFromUnits(u[:rs]) + rt.toString(argAt(args, 2)) + strFromUnits(u[re:]), true
+	case "compareTo":
+		o, ok := argAt(args, 0).(string)
+		if !ok {
+			return nil, false
+		}
+		return float64(dartStrCompare(u, strUnits(o))), true
+	}
+	ps, ok := argAt(args, 0).(string)
+	if !ok {
+		return nil, false
+	}
+	p := strUnits(ps)
+	switch name {
+	case "indexOf":
+		return float64(dartStrFind(u, p, opt(1, 0))), true
+	case "lastIndexOf":
+		i := opt(1, n)
+		if i > n-len(p) {
+			i = n - len(p)
+		}
+		for ; i >= 0; i-- {
+			if dartStrAt(u, i, p) {
+				return float64(i), true
+			}
+		}
+		return float64(-1), true
+	case "contains":
+		return dartStrFind(u, p, opt(1, 0)) >= 0, true
+	case "startsWith":
+		return dartStrAt(u, opt(1, 0), p), true
+	case "endsWith":
+		return dartStrAt(u, n-len(p), p), true
+	case "split":
+		out := &jsArray{}
+		if len(p) == 0 {
+			for i := range u {
+				out.elems = append(out.elems, strFromUnits(u[i:i+1]))
+			}
+			return out, true
+		}
+		i := 0
+		for at := dartStrFind(u, p, 0); at >= 0; at = dartStrFind(u, p, i) {
+			out.elems = append(out.elems, strFromUnits(u[i:at]))
+			i = at + len(p)
+		}
+		out.elems = append(out.elems, strFromUnits(u[i:]))
+		return out, true
+	case "replaceAll":
+		rep := rt.toString(argAt(args, 1))
+		var b strings.Builder
+		if len(p) == 0 {
+			b.WriteString(rep)
+			for i := range u {
+				b.WriteString(strFromUnits(u[i : i+1]))
+				b.WriteString(rep)
+			}
+			return b.String(), true
+		}
+		i := 0
+		for at := dartStrFind(u, p, 0); at >= 0; at = dartStrFind(u, p, i) {
+			b.WriteString(strFromUnits(u[i:at]))
+			b.WriteString(rep)
+			i = at + len(p)
+		}
+		b.WriteString(strFromUnits(u[i:]))
+		return b.String(), true
+	case "replaceFirst":
+		at := dartStrFind(u, p, opt(2, 0))
+		if at < 0 {
+			return s, true
+		}
+		return strFromUnits(u[:at]) + rt.toString(argAt(args, 1)) + strFromUnits(u[at+len(p):]), true
+	}
+	return nil, false
+}
+
+// dartStrAt: does p occur in u at code unit i?
+func dartStrAt(u []uint16, i int, p []uint16) bool {
+	if i < 0 || i+len(p) > len(u) {
+		return false
+	}
+	for k, c := range p {
+		if u[i+k] != c {
+			return false
+		}
+	}
+	return true
+}
+
+// dartStrFind is the first match of p at or after from, or -1.
+func dartStrFind(u, p []uint16, from int) int {
+	if from < 0 {
+		from = 0
+	}
+	for i := from; i+len(p) <= len(u); i++ {
+		if dartStrAt(u, i, p) {
+			return i
+		}
+	}
+	return -1
+}
+
+// dartStrCompare is String.compareTo: code unit by code unit, then the shorter
+// first; -1, 0 or 1.
+func dartStrCompare(a, b []uint16) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			if a[i] < b[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case len(a) < len(b):
+		return -1
+	case len(a) > len(b):
+		return 1
+	}
+	return 0
+}
+
+// dartIsWs is String.trim's white space: Unicode White_Space and the BOM.
+func dartIsWs(c uint16) bool {
+	switch {
+	case c == 32 || (c >= 9 && c <= 13), c == 0x85, c == 0xA0, c == 0x1680:
+		return true
+	case c >= 0x2000 && c <= 0x200A:
+		return true
+	}
+	return c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000 || c == 0xFEFF
+}
+
+// dartStrCase maps code point by code point through the SIMPLE case mapping
+// (unicode.ToUpper / ToLower); a lone surrogate stays itself.
+func dartStrCase(u []uint16, mapf func(rune) rune) string {
+	out := make([]uint16, 0, len(u))
+	for i := 0; i < len(u); i++ {
+		c := rune(u[i])
+		if isHighSurr(c) && i+1 < len(u) && isLowSurr(rune(u[i+1])) {
+			out = utf16.AppendRune(out, mapf(surrPair(c, rune(u[i+1]))))
+			i++
+			continue
+		}
+		if isSurrogate(c) {
+			out = append(out, u[i])
+			continue
+		}
+		out = utf16.AppendRune(out, mapf(c))
+	}
+	return strFromUnits(out)
 }
