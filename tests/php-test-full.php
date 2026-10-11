@@ -2185,6 +2185,35 @@ function s52() {
     check("gto5", s52e() === "a0b0n0a1b1a2b2n2");
 }
 
+// ===== SECTION 53: keyed lookup in long arrays =====
+// An array of more than a handful of keys is looked up through a hashed index;
+// these walk the paths that must keep it right: removal, pop then append, a sort,
+// a copy, and keys whose spellings collide only before folding ("01", "-0", "1").
+function s53() {
+    $a = [];
+    for ($i = 0; $i < 40; $i++) { $a["k" . $i] = $i; $a[$i * 3] = "n" . $i; }
+    unset($a["k5"], $a[9]);
+    check("lix1", count($a) === 78 && $a["k6"] === 6 && $a[12] === "n4" && !isset($a["k5"]) && !array_key_exists(9, $a));
+    $a["k5"] = "back";
+    check("lix2", $a["k5"] === "back" && array_key_last($a) === "k5");
+    ksort($a);
+    arsort($a);
+    check("lix3", $a["k8"] === 8 && $a[33] === "n11" && $a["k5"] === "back");
+    $b = $a;
+    $b["k10"] = "copy";
+    check("lix4", $a["k10"] === 10 && $b["k10"] === "copy");
+    $st = [];
+    for ($i = 0; $i < 100; $i++) { $st[] = $i; }
+    for ($i = 0; $i < 50; $i++) { array_pop($st); $st[] = -$i; }
+    check("lix5", count($st) === 100 && $st[99] === -49 && $st[48] === 48);
+    $m = ["1" => "a", "01" => "d", "-0" => "e", 0 => "f"];
+    for ($i = 0; $i < 20; $i++) { $m["x" . $i] = $i; }
+    check("lix6", $m[1] === "a" && $m["01"] === "d" && $m["-0"] === "e" && $m["0"] === "f" && count($m) === 24);
+    $neg = [];
+    for ($i = -20; $i < 20; $i++) { $neg[$i] = $i * 2; }
+    check("lix7", $neg[-7] === -14 && $neg["-7"] === -14 && $neg[19] === 38);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2243,6 +2272,7 @@ function main() {
     s50(); // SECTION-CALL 50
     s51(); // SECTION-CALL 51
     s52(); // SECTION-CALL 52
+    s53(); // SECTION-CALL 53
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

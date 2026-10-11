@@ -3416,12 +3416,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return makeVarRef(name)
     }
     // A canonical decimal integer: no leading zero, an optional '-'. PHP's array keys
-    // only fold a string to an int in that exact form ("01" stays a string key).
+    // only fold a string to an int in that exact form ("01" stays a string key, and
+    // so does "-0": a leading zero is canonical only as the whole string "0").
     function isCanonInt(s) {
         if (s.length == 0) { return false }
         var i = 0
         if (s.charAt(0) == "-") { if (s.length == 1) { return false }; i = 1 }
-        if (s.charAt(i) == "0" && s.length > i + 1) { return false }
+        if (s.charAt(i) == "0" && s.length > 1) { return false }
         for (var j = i; j < s.length; j++) {
             var ch = s.charAt(j)
             if (ch < "0" || ch > "9") { return false }

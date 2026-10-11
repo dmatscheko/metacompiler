@@ -899,16 +899,54 @@ function phStrNumLoose(s, n) {
     return s == phStr(n)
 }
 
-// phKeyIndex is a linear lookup by normalized key. It stays linear on purpose:
-// PHP's 5 / "5" folding makes an identity-keyed index answer for the wrong key.
-function phKeyIndex(keys, k) {
-    var nk = phNormKey(k)
+// phKeyIndex finds key k in a key run by its normalized form. Keys are stored
+// normalized (phNormKey), and between two normalized keys PHP's key equality is the
+// floor's strict_eq - an int by value, a string by content - so the scan is `===`.
+function phKeyIndex(keys, k) { return phKeyScan(keys, phNormKey(k)) }
+function phKeyScan(keys, nk) {
     var i = 0
     while (i < keys.length) {
-        if (phKeyEq(keys[i], nk)) { return i }
+        if (keys[i] === nk) { return i }
         i = i + 1
     }
     return 0 - 1
+}
+// The position of the normalized key nk in the parts p of the PHP array av.
+function phFind(av, p, nk) {
+    if (p.d) { return phDictFind(av, nk) }
+    return phKeyScan(p.k, nk)
+}
+// The position of the normalized key nk in the PHP array av, or -1. A short key run
+// is scanned; a longer one is looked up through a hashed index kept in av.__ix: a
+// scope (the floor hashes a scope's names) from each key's spelling to its
+// position. An int key spells its decimal, which no string key can, since a
+// canonical decimal string folds to an int key. The index belongs to the keys array
+// it was built for and covers its first __ix.n keys: an append is indexed at the
+// next lookup, a removal replaces the array or shortens it (a fresh index), and a
+// position that no longer holds its key (a reorder in place) rebuilds it. Twin of
+// phpKeyIndex in abnf/jsrtphp.go.
+function phDictFind(av, nk) {
+    var keys = av["keys"]
+    if (keys.length < 16) { return phKeyScan(keys, nk) }
+    var ix = av["__ix"]
+    if (ix === undefined || ix["keys"] !== keys || ix["n"] > keys.length) {
+        ix = {keys: keys, n: 0, map: scopeNew(undefined)}
+        av["__ix"] = ix
+    }
+    var map = ix["map"]
+    var n = ix["n"]
+    while (n < keys.length) {
+        var kn = "" + keys[n]
+        if (!scopeHas(map, kn)) { scopeDecl(map, kn, n) }
+        n = n + 1
+    }
+    ix["n"] = n
+    var nm = "" + nk
+    if (!scopeHas(map, nm)) { return 0 - 1 }
+    var at = scopeGet(map, nm)
+    if (keys[at] === nk) { return at }
+    av["__ix"] = undefined
+    return phDictFind(av, nk)
 }
 
 // phLoose is PHP 8's ==: a bool on either side compares truthiness, null compares
@@ -1038,7 +1076,9 @@ function phIsCanonInt(s) {
         if (s.length == 1) { return false }
         i = 1
     }
-    if (s.charAt(i) == "0" && s.length > i + 1) { return false }
+    // A leading zero is canonical only as the whole string "0": "-0" stays a
+    // string key.
+    if (s.charAt(i) == "0" && s.length > 1) { return false }
     var j = i
     while (j < s.length) {
         if (!phIsDigit(s.charCodeAt(j))) { return false }
@@ -1095,7 +1135,7 @@ function phArrSet(av, k, v) {
     var keys = av["keys"]
     var vals = av["vals"]
     var nk = phNormKey(k)
-    var at = phKeyIndex(keys, nk)
+    var at = phDictFind(av, nk)
     if (at >= 0) {
         var c = phCellOf(vals[at])
         if (c !== undefined && phCellOf(v) === undefined) { c["v"] = v } else { vals[at] = v }
@@ -1128,7 +1168,7 @@ function phArrPush(av, v) {
 function phArrGet(av, k) {
     var p = phArrParts(av)
     if (p !== undefined) {
-        var i = phKeyIndex(p.k, k)
+        var i = phFind(av, p, phNormKey(k))
         if (i >= 0) { return phDeref(p.v[i]) }
         return null
     }
@@ -1145,7 +1185,7 @@ function phArrGet(av, k) {
 function phArrHas(av, k) {
     var p = phArrParts(av)
     if (p !== undefined) {
-        var i = phKeyIndex(p.k, k)
+        var i = phFind(av, p, phNormKey(k))
         if (i < 0) { return false }
         return !rtIsNil(phDeref(p.v[i]))
     }
@@ -1178,7 +1218,7 @@ function phArrUnset(av, k) {
     if (!phIsDict(av)) { return undefined }
     var keys = av["keys"]
     var vals = av["vals"]
-    var at = phKeyIndex(keys, k)
+    var at = phDictFind(av, phNormKey(k))
     if (at < 0) { return undefined }
     var nk = []
     var nv = []
@@ -1204,12 +1244,12 @@ function phElemCell(av, k) {
     var p = phArrParts(av)
     if (p === undefined) { return null }
     var nk = phNormKey(k)
-    var i = phKeyIndex(p.k, nk)
+    var i = phFind(av, p, nk)
     if (i < 0) {
         phArrSet(av, nk, null)
         p = phArrParts(av)
         if (p === undefined) { return null }
-        i = phKeyIndex(p.k, nk)
+        i = phFind(av, p, nk)
         if (i < 0) { return null }
     }
     var c = phCellOf(p.v[i])
@@ -2472,7 +2512,7 @@ function js_phkeyexists(k, a) {
     if (p === undefined) {
         phRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phDebugType(a) + " given")
     }
-    return phKeyIndex(p.k, k) >= 0
+    return phFind(a, p, phNormKey(k)) >= 0
 }
 
 function js_phkeylast(a) {

@@ -379,7 +379,7 @@ func init() {
 				rt.phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, "+
 					rt.phpDebugType(u(a[1]))+" given")
 			}
-			return w(phpKeyIndex(keys, u(a[0])) >= 0)
+			return w(rt.phpKeyIndex(keys, u(a[0])) >= 0)
 		}
 		m["js_phkeylast"] = func(a []uint64) uint64 {
 			keys, _, ok := phpArrParts(u(a[0]))

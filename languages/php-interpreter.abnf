@@ -2811,7 +2811,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (s.length == 0) { return false }
         var i = 0
         if (s.charAt(0) == "-") { if (s.length == 1) { return false }; i = 1 }
-        if (s.charAt(i) == "0" && s.length > i + 1) { return false }
+        // A leading zero is canonical only as the whole string "0": "-0" stays a
+        // string key. Twin of isCanonInt in php-to-llvm-ir.abnf.
+        if (s.charAt(i) == "0" && s.length > 1) { return false }
         for (var j = i; j < s.length; j++) {
             var ch = s.charAt(j)
             if (ch < "0" || ch > "9") { return false }

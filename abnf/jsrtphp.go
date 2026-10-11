@@ -475,7 +475,7 @@ func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 		if at < 0 && !variadic {
 			rt.phpRaise("Error", "Unknown named parameter $"+name)
 		}
-		if at >= 0 && phpKeyIndex(keys, float64(at)) >= 0 {
+		if at >= 0 && rt.phpKeyIndex(keys, float64(at)) >= 0 {
 			rt.phpRaise("Error", "Named parameter $"+name+" overwrites previous argument")
 		}
 	}
@@ -497,9 +497,9 @@ func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
 			return out
 		}
 		var v interface{} = jsUndef
-		if i := phpKeyIndex(keys, float64(pi)); i >= 0 {
+		if i := rt.phpKeyIndex(keys, float64(pi)); i >= 0 {
 			v = at(i)
-		} else if i := phpKeyIndex(keys, p); i >= 0 {
+		} else if i := rt.phpKeyIndex(keys, p); i >= 0 {
 			v = at(i)
 			taken[p] = true
 		}
@@ -1048,7 +1048,7 @@ func (rt *jsrt) phpLoose(l, r interface{}) bool {
 			return false
 		}
 		for i := range lk.elems {
-			j := phpKeyIndex(rk, lk.elems[i])
+			j := rt.phpKeyIndex(rk, lk.elems[i])
 			if j < 0 {
 				return false
 			}
@@ -1217,7 +1217,7 @@ func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 			return phpCmpNum(float64(len(lk.elems)), float64(len(rk.elems)))
 		}
 		for i := range lk.elems {
-			j := phpKeyIndex(rk, lk.elems[i])
+			j := rt.phpKeyIndex(rk, lk.elems[i])
 			if j < 0 {
 				return 1
 			}
@@ -1318,7 +1318,9 @@ func phpIsCanonInt(s string) bool {
 		}
 		i = 1
 	}
-	if s[i] == '0' && len(s) > i+1 {
+	// A leading zero is canonical only as the whole string "0": "-0" stays a
+	// string key.
+	if s[i] == '0' && len(s) > 1 {
 		return false
 	}
 	for j := i; j < len(s); j++ {
@@ -1329,11 +1331,16 @@ func phpIsCanonInt(s string) bool {
 	return true
 }
 
-// phpKeyIndex is a linear lookup by normalized key. It stays linear on purpose:
-// the shared dictFind index keys on the raw Go value, and PHP's 5 / "5" folding
-// would make a hit there answer for the wrong key.
-func phpKeyIndex(keys *jsArray, k interface{}) int {
+// phpKeyIndex finds key k in a key run by its normalized form. Keys are stored
+// normalized (phpNormKey), and between two normalized keys PHP's key equality is
+// strictEq - an int by value, a string by content - so a longer run goes through
+// the shared hashed index (dictFind) and only a short one is scanned. Twin of
+// phDictFind in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpKeyIndex(keys *jsArray, k interface{}) int {
 	nk := phpNormKey(k)
+	if len(keys.elems) >= 16 {
+		return rt.dictFind(keys, nk)
+	}
 	for i := range keys.elems {
 		if phpKeyEq(keys.elems[i], nk) {
 			return i
@@ -1399,17 +1406,14 @@ func (rt *jsrt) phpArrSet(av interface{}, k, v interface{}) {
 	keys, _ := o.props["keys"].(*jsArray)
 	vals, _ := o.props["vals"].(*jsArray)
 	nk := phpNormKey(k)
-	if i := phpKeyIndex(keys, nk); i >= 0 {
+	if i := rt.phpKeyIndex(keys, nk); i >= 0 {
 		if c := phpCellOf(vals.elems[i]); c != nil && phpCellOf(v) == nil {
 			c.set("v", v)
 		} else {
 			vals.elems[i] = v
 		}
 	} else {
-		keys.dropIdx()
-		vals.dropIdx()
-		keys.elems = append(keys.elems, nk)
-		vals.elems = append(vals.elems, v)
+		dictAppend(keys, vals, nk, v)
 	}
 	if f, isN := nk.(float64); isN && f >= phpArrNext(o) {
 		o.set("__next", f+1)
@@ -1433,7 +1437,7 @@ func (rt *jsrt) phpArrPush(av interface{}, v interface{}) {
 // interpreter answers null too), a string indexes its BYTES.
 func (rt *jsrt) phpArrGet(av interface{}, k interface{}) interface{} {
 	if keys, vals, ok := phpArrParts(av); ok {
-		if i := phpKeyIndex(keys, k); i >= 0 {
+		if i := rt.phpKeyIndex(keys, k); i >= 0 {
 			return phpDeref(vals.elems[i])
 		}
 		return jsNull
@@ -1455,7 +1459,7 @@ func (rt *jsrt) phpArrGet(av interface{}, k interface{}) interface{} {
 
 func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
 	if keys, vals, ok := phpArrParts(av); ok {
-		i := phpKeyIndex(keys, k)
+		i := rt.phpKeyIndex(keys, k)
 		return i >= 0 && !isNullish(vals.elems[i])
 	}
 	if s, ok := av.(string); ok {
@@ -1487,7 +1491,7 @@ func (rt *jsrt) phpArrUnset(av interface{}, k interface{}) {
 	}
 	keys, _ := o.props["keys"].(*jsArray)
 	vals, _ := o.props["vals"].(*jsArray)
-	i := phpKeyIndex(keys, k)
+	i := rt.phpKeyIndex(keys, k)
 	if i < 0 {
 		return
 	}
@@ -1510,14 +1514,14 @@ func (rt *jsrt) phpElemCell(av interface{}, k interface{}) interface{} {
 		return jsNull
 	}
 	nk := phpNormKey(k)
-	i := phpKeyIndex(keys, nk)
+	i := rt.phpKeyIndex(keys, nk)
 	if i < 0 {
 		rt.phpArrSet(av, nk, jsNull)
 		keys, vals, ok = phpArrParts(av)
 		if !ok {
 			return jsNull
 		}
-		i = phpKeyIndex(keys, nk)
+		i = rt.phpKeyIndex(keys, nk)
 		if i < 0 {
 			return jsNull
 		}
