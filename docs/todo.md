@@ -142,21 +142,21 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · OPEN [V]
+### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · IN PROGRESS (KT worker, round 8) [V]
 `arrayOf<Int>().first()` → `Array is empty.`, `asSequence().first()` → `Sequence is
 empty.`, `map.values.first()` → `Collection is empty.`, `Empty array can't be
 reduced.`, `Array has more than one element.` (all read from the 2.2.21 jar). An Array,
 a Sequence, a values view and a List are one host array: needs the nominal kind of
 T-081 (jsArray in abnf/jsrt.go, the floor's array cell). reduceOrNull /
 reduceRightOrNull were added in b38a051.
-### T-347 kotlin: Long/Int identity in Any equality, sets and LongRange · P2 · KT · OPEN [V]
+### T-347 kotlin: Long/Int identity in Any equality, sets and LongRange · P2 · KT · IN PROGRESS (KT worker, round 8) [V]
 `setOf<Any>(1, 1L).size` is 1 (jar 2); a Float/Double/Int/Long set of 6 has 4;
 `(1 as Any) == (1L as Any)` true (jar false); a LongRange's first/last are not `is
 Long`. The kinds already differ (plain number vs tag-13 Long box, floJavaF vs floJava):
 kind-aware key and Any equality, once integer literals carry their expected type
 (`listOf(1L).contains(1)` is true). LongRange endpoints: keep the Long box.
 
-### T-348 kotlin: `concatToString`, `String(charArray)`, `reversed()` on surrogates · P1 · KT · OPEN [V]
+### T-348 kotlin: `concatToString`, `String(charArray)`, `reversed()` on surrogates · P1 · KT · IN PROGRESS (KT worker, round 8) [V]
 `cs.concatToString()` "unknown list method" in all engines; `String(charArrayOf(..))`
 "unknown name: String" in the interpreter; `String.reversed()` in the Go twin rebuilds
 per unit with string(rune) (the JVM keeps surrogate pairs whole - probe).
