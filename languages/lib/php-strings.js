@@ -364,6 +364,33 @@ function phsCase(s, up) {
     return out
 }
 
+// The significant digits of a positive finite double a correctly rounded to nd
+// (half to even on the exact decimal, as zend_dtoa's mode 2 rounds), trailing
+// zeros dropped, and the decimal point's position: a ~= 0.<d> * 10^<e>. A value
+// with fewer exact digits than nd keeps them all, however large nd is. exact and
+// round are as for phsFmtFloat below. Twin of phpFloSplit's precision branch in
+// abnf/jsrtphp.go.
+function phsExactDigits(a, nd, exact, round) {
+    var dec = exact(a)
+    var ip = dec["i"]
+    var all = ip + dec["f"]
+    var lead = 0
+    while (lead < all.length && all.charAt(lead) == "0") { lead = lead + 1 }
+    var e = ip.length - lead
+    var d = all.substring(lead, all.length)
+    if (d.length > nd) {
+        var r = round(d, nd)
+        if (r.length > nd) {
+            r = r.substring(0, nd)
+            e = e + 1
+        }
+        d = r
+    }
+    var m = d.length
+    while (m > 1 && d.charAt(m - 1) == "0") { m = m - 1 }
+    return {d: d.substring(0, m), e: e}
+}
+
 // sprintf's %f and %e of a non-negative finite double a, from its exact decimal
 // (exact(a) answers {i: <integer digits>, f: <fraction digits>}) rounded half to
 // even by round(digits, keep): prec fraction digits for "f"; for "e" one digit,

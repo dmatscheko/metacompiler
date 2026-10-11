@@ -14363,6 +14363,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			name := rt.toString(u(a[1]))
 			owner := phpOwner(cls, name)
 			if owner == nil {
+				// Method names are case-insensitive (see js_phmcall in jsrtphp.go).
+				if lc := phpCase(name, false); lc != name {
+					if owner = phpOwner(cls, lc); owner != nil {
+						name = lc
+					}
+				}
+			}
+			if owner == nil {
 				// __callStatic($name, $args) is PHP's fallback for a missing
 				// static method, exactly as __call is for an instance method.
 				if cs := phpOwner(cls, "__callStatic"); cs != nil {

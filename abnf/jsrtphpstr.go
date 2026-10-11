@@ -342,9 +342,31 @@ func init() {
 			conv := rt.phpStr(u(a[1]))
 			prec := num(u(a[2]))
 			if conv == "g" {
-				return w(strings.Replace(phpFloFormat(x, prec), "E", "e", 1))
+				return w(strings.Replace(phpFloFormat(x, prec, false), "E", "e", 1))
 			}
 			return w(phpFmtFloat(x, conv, prec))
+		}
+		// A new object (or closure) takes the next handle; see phpHandles.
+		m["js_phoid"] = func(a []uint64) uint64 {
+			o, _ := u(a[0]).(*jsObject)
+			rt.phpStamp(o)
+			return a[0]
+		}
+		// An object's handle; a Closure keeps none and answers 0. Twin of __mec_oid
+		// in php-interpreter.abnf.
+		m["js_phoidof"] = func(a []uint64) uint64 {
+			if o, ok := u(a[0]).(*jsObject); ok && phpIsObj(o) {
+				return rt.wrapNum(float64(rt.phpDumpID(o)))
+			}
+			return rt.wrapNum(0)
+		}
+		// The precision setting. Twin of __mec_precision in php-interpreter.abnf.
+		m["js_phprecision"] = func(a []uint64) uint64 {
+			old := phpPrecision
+			if !isNullish(u(a[0])) {
+				phpPrecision = int(num(u(a[0])))
+			}
+			return rt.wrapNum(float64(old))
 		}
 		m["js_phmath"] = func(a []uint64) uint64 {
 			x := phpNumOf(rt.phpToNum(u(a[1])))
@@ -366,6 +388,55 @@ func init() {
 			}
 			return w(keys.elems[len(keys.elems)-1])
 		}
+		// The internal array pointer. Twin of __mec_aptr in php-interpreter.abnf,
+		// which explains the model.
+		m["js_phaptr"] = func(a []uint64) uint64 {
+			op := rt.phpStr(u(a[1]))
+			keys, vals, ok := phpArrParts(u(a[0]))
+			if !ok {
+				if op == "key" {
+					return w(jsNull)
+				}
+				return w(false)
+			}
+			n := float64(len(keys.elems))
+			o, isDict := phpAsArr(u(a[0]))
+			p := float64(0)
+			if isDict {
+				p = phpArrPos(o)
+			}
+			switch op {
+			case "reset":
+				p = 0
+			case "end":
+				p = math.Max(n-1, 0)
+			case "next":
+				if p < n {
+					p++
+				}
+			case "prev":
+				if p < n {
+					if p > 0 {
+						p--
+					} else {
+						p = n
+					}
+				}
+			}
+			if isDict {
+				o.set("__pos", p)
+			}
+			if op == "key" {
+				if p < n {
+					return w(keys.elems[int(p)])
+				}
+				return w(jsNull)
+			}
+			if p < n {
+				return w(phpDeref(vals.elems[int(p)]))
+			}
+			return w(false)
+		}
 		// array_pop: the last value, and PHP's next free key steps back when the
 		// popped key was the last one handed out.
 		m["js_phpop"] = func(a []uint64) uint64 {
@@ -386,6 +457,9 @@ func init() {
 			vals.elems = vals.elems[:n-1]
 			if f, isN := k.(float64); isN && f == phpArrNext(o)-1 {
 				o.set("__next", f)
+			}
+			if _, has := o.props["__pos"]; has {
+				o.set("__pos", float64(0))
 			}
 			return w(v)
 		}

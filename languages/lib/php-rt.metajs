@@ -324,8 +324,16 @@ function phTest(v) {
 // phpFloStr / phpFloDump in abnf/jsrtphp.go and of floStr / floDump in
 // languages/php-interpreter.abnf, which is where the spelling comes from.
 
-function phFloStr(n) { return phFloFormat(n, 14) }
-function phFloDump(n) { return phFloFormat(n, 17) }
+// echo's ndigit is the precision ini setting, phPrecision, and rounded selects
+// dtoa's mode 2 (twin of floStr's, which explains both).
+var phPrecision = 14
+function phFloStr(n) {
+    var p = phPrecision
+    if (p < 0) { return phFloFormat(n, 17, false) }
+    if (p == 0) { p = 1 }
+    return phFloFormat(n, p, true)
+}
+function phFloDump(n) { return phFloFormat(n, 17, false) }
 
 // The shortest decimal digits of a positive finite double, with the position of
 // the decimal point: value == 0.<d> * 10^<e>. The digits come from the floor's
@@ -413,7 +421,7 @@ function phFloRound(d, decpt, nd) {
 }
 // Zero padding is rtZeros, from lib/runtime.metajs.
 
-function phFloFormat(n, nd) {
+function phFloFormat(n, nd, rounded) {
     if (n !== n) { return "NAN" }
     if (n === phInf()) { return "INF" }
     if (n === 0 - phInf()) { return "-INF" }
@@ -424,8 +432,12 @@ function phFloFormat(n, nd) {
         a = 0 - n
     } else if (n === 0 && 1 / n < 0) { sign = "-" }
     if (a === 0) { return sign + "0" }
-    var sp = phFloSplit(a)
-    var r = phFloRound(sp.d, sp.e, nd)
+    var r = {d: "", e: 0}
+    if (rounded && (nd > 15 || a < Math.pow(2, 0 - 1022))) { r = phsExactDigits(a, nd, rtExactDec, rtRoundHalfEven) }
+    else {
+        var sp = phFloSplit(a)
+        r = phFloRound(sp.d, sp.e, nd)
+    }
     var d = r.d
     var decpt = r.e
     var expo = decpt > nd
@@ -678,6 +690,7 @@ function phMkErr(clsName, msg) {
     o["__class"] = cls
     o["message"] = msg
     o["code"] = 0
+    phStamp(o)
     return o
 }
 
@@ -1062,6 +1075,14 @@ function phNewArr() {
     return o
 }
 
+// phArrPos is the array's internal pointer, 0 until one of current() and its
+// family moves it (see js_phaptr).
+function phArrPos(o) {
+    var n = o["__pos"]
+    if (typeof n == "number") { return n }
+    return 0
+}
+
 function phArrNext(o) {
     var n = o["__next"]
     if (typeof n == "number") { return n }
@@ -1178,6 +1199,8 @@ function phArrUnset(av, k) {
     }
     av["keys"] = nk
     av["vals"] = nv
+    var p = phArrPos(av)
+    if (p > at) { av["__pos"] = p - 1 }
     return undefined
 }
 
@@ -1219,7 +1242,11 @@ function phArrCopy(v) {
         ov.push(phArrCopy(phDeref(p.v[i])))
         i = i + 1
     }
-    if (p.d) { out["__next"] = phArrNext(v) } else { out["__next"] = p.k.length }
+    if (p.d) {
+        out["__next"] = phArrNext(v)
+        var pos = phArrPos(v)
+        if (pos != 0) { out["__pos"] = pos }
+    } else { out["__next"] = p.k.length }
     return out
 }
 
@@ -1265,6 +1292,22 @@ function phOwner(cls, key) {
     return undefined
 }
 
+// The constant stored under key on its declaring class o, computed on first read
+// from its {__lazyconst: closure} box. Twin of the box arm of phpConstIn in
+// abnf/jsrtphp.go.
+function phConstVal(o, key) {
+    var v = anytype
+    v = o[key]
+    if (typeof v == "object" && !rtIsNil(v) && !phIsList(v)) {
+        var f = v["__lazyconst"]
+        if (f !== undefined) {
+            v = f.apply(undefined, [null])
+            o[key] = v
+        }
+    }
+    return v
+}
+
 // phConstIn walks a class's own chain and then its interfaces: PHP inherits a
 // constant from a base class AND from every implemented interface.
 function phConstIn(cls, name, depth) {
@@ -1272,7 +1315,7 @@ function phConstIn(cls, name, depth) {
     if (cls === null) { return undefined }
     if (depth > 16) { return undefined }
     var o = phOwner(cls, "k:" + name)
-    if (o !== undefined) { return {v: o["k:" + name]} }
+    if (o !== undefined) { return {v: phConstVal(o, "k:" + name)} }
     var k = cls
     var guard = 0
     while (guard < 64) {
@@ -1392,21 +1435,35 @@ function phSpaces(n) {
     return s
 }
 
-// var_dump's object handles (#1, #2, ...) are handed out on first sight, which is
-// enough for a single run's transcript to be stable. Object IDENTITY is the key,
-// and the frozen subset has no Map, so the seen objects are kept in one list and
-// looked up by ===. A dump-heavy program is O(n^2) in the objects it has dumped;
-// no test in tests/ dumps more than a handful.
-var phDumpSeen = []
+// The object handles a run has handed out: every object takes the next one when it
+// is made (js_phoid), in its hidden __oid slot, and that is var_dump's #id. Twin
+// of phpHandles in abnf/jsrtphp.go, which says what the model leaves out.
+var phHandles = 0
 
+// phStamp gives o the next handle; anything that is not an object only counts one.
+function phStamp(o) {
+    phHandles = phHandles + 1
+    if (phIsObj(o)) { o["__oid"] = phHandles }
+}
+
+function js_phoid(v) {
+    phStamp(v)
+    return v
+}
+
+// An object's handle; a Closure keeps none and answers 0. Twin of __mec_oid in
+// php-interpreter.abnf.
+function js_phoidof(v) {
+    if (phIsObj(v)) { return phDumpID(v) }
+    return 0
+}
+
+// o's handle; an object made where nothing stamped it takes the next one now.
 function phDumpID(o) {
-    var i = 0
-    while (i < phDumpSeen.length) {
-        if (phDumpSeen[i] === o) { return i + 1 }
-        i = i + 1
-    }
-    phDumpSeen.push(o)
-    return phDumpSeen.length
+    var n = o["__oid"]
+    if (typeof n == "number") { return n }
+    phStamp(o)
+    return phHandles
 }
 
 function phDumpKey(k, ind) {
@@ -1614,6 +1671,7 @@ function phObjCast(v) {
     if (phIsObj(v)) { return v }
     var o = {}
     if (phRtClasses !== undefined) { o["__class"] = phRtClasses["stdClass"] }
+    phStamp(o)
     var p = phArrParts(v)
     if (p !== undefined) {
         var i = 0
@@ -1853,6 +1911,10 @@ function js_phmcall(recv, name, args) {
             // The __class/__super walk and the receiver prepend are SHARED -
             // rtFindMethod / rtPrepend, lib/runtime.metajs.
             var mm = rtFindMethod(cls, name)
+            // Method names are case-insensitive: a class also holds each method under
+            // its lower-cased name (emitMethodSet in php-to-llvm-ir.abnf), which a miss
+            // retries.
+            if (typeof mm != "function") { mm = rtFindMethod(cls, phsCase(phStr(name), false)) }
             if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
             // PHP 8: `Error: Call to undefined method Foo::nope()`, and it is an
             // Error rather than a fatal - `catch (Error $e)` recovers.
@@ -2159,7 +2221,7 @@ function js_phfmtfloat(x, conv, prec) {
     var c = phStr(conv)
     var p = phInt(prec)
     if (c == "g") {
-        var g = phFloFormat(a, p)
+        var g = phFloFormat(a, p, false)
         var out = ""
         var i = 0
         while (i < g.length) {
@@ -2169,6 +2231,13 @@ function js_phfmtfloat(x, conv, prec) {
         return out
     }
     return phsFmtFloat(a, c, p, rtExactDec, rtRoundHalfEven)
+}
+
+// The precision setting. Twin of __mec_precision in php-interpreter.abnf.
+function js_phprecision(p) {
+    var old = phPrecision
+    if (!rtIsNil(p)) { phPrecision = phInt(p) }
+    return old
 }
 
 function js_phmath(op, x, y) { return phMkFlo(phsMath(phStr(op), phNumOf(phToNum(x)), phNumOf(phToNum(y)))) }
@@ -2200,7 +2269,29 @@ function js_phpop(a) {
     if (typeof k == "number" && !sintIs(k)) {
         if (k == phArrNext(a) - 1) { a["__next"] = k }
     }
+    if (phArrPos(a) != 0) { a["__pos"] = 0 }
     return v
+}
+
+// The internal array pointer. Twin of __mec_aptr in php-interpreter.abnf, which
+// explains the model.
+function js_phaptr(a, op) {
+    var o = phStr(op)
+    var parts = phArrParts(a)
+    if (parts === undefined) {
+        if (o == "key") { return null }
+        return false
+    }
+    var n = parts.k.length
+    var p = 0
+    if (parts.d) { p = phArrPos(a) }
+    if (o == "reset") { p = 0 }
+    else if (o == "end") { p = n > 0 ? n - 1 : 0 }
+    else if (o == "next") { if (p < n) { p = p + 1 } }
+    else if (o == "prev") { if (p < n) { p = p > 0 ? p - 1 : n } }
+    if (parts.d) { a["__pos"] = p }
+    if (o == "key") { return p < n ? parts.k[p] : null }
+    return p < n ? phDeref(parts.v[p]) : false
 }
 
 // AUTO-VIVIFICATION. `$a[0]["k"] = 1` creates the intermediate array. These three
@@ -2308,6 +2399,7 @@ function js_phclone(v) {
     var cls = v["__class"]
     if (cls !== undefined) {
         out["__class"] = cls
+        phStamp(out)
         var owner = phOwner(cls, "__clone")
         if (owner !== undefined) {
             var m = owner["__clone"]
@@ -2337,6 +2429,14 @@ function js_phlsb(self, fallback) {
 function js_phscall(target, name, self, args) {
     var cls = phClassOf(target)
     var owner = phOwner(cls, name)
+    var key = anytype
+    key = name
+    if (owner === undefined) {
+        // Method names are case-insensitive (see js_phmcall).
+        var lc = phsCase(phStr(name), false)
+        owner = phOwner(cls, lc)
+        if (owner !== undefined) { key = lc }
+    }
     var saved = phLsb
     phLsb = cls
     var out = anytype
@@ -2375,7 +2475,7 @@ function js_phscall(target, name, self, args) {
         }
     }
     try {
-        out = owner[name].apply(undefined, av)
+        out = owner[key].apply(undefined, av)
     } finally {
         phLsb = saved
     }

@@ -3651,7 +3651,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // so a class without one comes through here too, and its miss must be reported
         // with the ORIGINAL name (`Call to undefined method D::f()`), as PHP 8 and the
         // interpreter do.
-        var hc = emitHasMethod(magB, objV, emitStr(magB, "__call"))
+        // Method names are case-insensitive: the lower-cased name is the class's own
+        // alias (emitMethodSet) and is tried before the fallback.
+        var lcV = callExt(magB, "js_phcase", [nameV, hFalse])
+        var hl = emitHasMethod(magB, objV, lcV)
+        var lcB = curF.NewBlock("")
+        var callChkB = curF.NewBlock("")
+        hl.b.NewCondBr(truthy(hl.b, hl.v), lcB, callChkB)
+        var lv = callExt(lcB, "js_phmcall", [objV, lcV, argsV])
+        lcB.NewBr(mergeB)
+        var hc = emitHasMethod(callChkB, objV, emitStr(callChkB, "__call"))
         var haveCallB = curF.NewBlock("")
         var noCallB = curF.NewBlock("")
         hc.b.NewCondBr(truthy(hc.b, hc.v), haveCallB, noCallB)
@@ -3663,6 +3672,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var ov = callExt(otherB, "js_phmcall", [objV, nameV, argsV])
         otherB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dv, directB),
+                                             llvm.ir.NewIncoming(lv, lcB),
                                              llvm.ir.NewIncoming(mv, haveCallB),
                                              llvm.ir.NewIncoming(ncv, noCallB),
                                              llvm.ir.NewIncoming(ov, otherB)])}
@@ -4023,11 +4033,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = emitIfaceList(b, clsV, parents)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             var outerSelf = bindDeclSelf(b, clsV)
-            for (var c1 = 0; c1 < consts.length; c1++) {
-                var cv = hNull
-                if (consts[c1].cinit != null) { var rc = consts[c1].cinit(b); b = rc.b; cv = rc.v }
-                callExt(b, "js_set", [clsV, emitStr(b, "k:" + consts[c1].cname), cv])
-            }
+            for (var c1 = 0; c1 < consts.length; c1++) { emitConstDecl(b, clsV, name, consts[c1]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), outerSelf])
             return b
         }
@@ -4108,7 +4114,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, byVal, byRef)
-            return {b: rc.b, v: withRefMask(rc.b, closureV(rc.b, idx, rc.v), pl.byref)}
+            // A Closure is an object to PHP and takes a handle (js_phoid).
+            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withRefMask(rc.b, closureV(rc.b, idx, rc.v), pl.byref)])}
         }
     }
 
@@ -4133,7 +4140,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, captured, [])
-            return {b: rc.b, v: withRefMask(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl.byref)}
+            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withRefMask(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl.byref)])}
         }
     }
 
@@ -4167,11 +4174,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return it.pos != undefined || it.aname != undefined || it.aspread != undefined
             || it.fcc != undefined || it.aplace != undefined
     }
+    // An anonymous class is declared under a key no program can spell, and shows
+    // the name anonClassName gives it.
     var anonCount = 0
     function makeNewAnon(items) {
         anonCount++
         var name = "class@anonymous" + anonCount
-        var classItems = [name]
+        var classItems = [name, {anonShown: true}]
         var args = []
         for (var i = 0; i < items.length; i++) {
             if (isArgRec(items[i])) { args.push(items[i]) }
@@ -4195,6 +4204,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var clsV = rc.v
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            callExt(b, "js_phoid", [objV])
             callExt(b, "js_phscall", [clsV, emitStr(b, "__initprops"), objV, callExt(b, "js_pharr", [])])
             var ean = emitPhArgs(b, args, ctorSig(target.cls))
             b = ean.b
@@ -4974,6 +4984,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "chr") { return "js_phchr" }
         if (name == "__mec_fmtfloat") { return "js_phfmtfloat" }
         if (name == "__mec_math") { return "js_phmath" }
+        if (name == "__mec_aptr") { return "js_phaptr" }
+        if (name == "__mec_precision") { return "js_phprecision" }
+        if (name == "__mec_oid") { return "js_phoidof" }
         if (name == "array_key_exists") { return "js_phkeyexists" }
         if (name == "array_key_last") { return "js_phkeylast" }
         if (name == "array_pop") { return "js_phpop" }
@@ -4982,7 +4995,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function phpNativeArgc(ext) {
         if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat" ||
             ext == "js_phmath") { return 3 }
-        if (ext == "js_phkeyexists" || ext == "js_phstrcmp") { return 2 }
+        if (ext == "js_phkeyexists" || ext == "js_phstrcmp" || ext == "js_phaptr") { return 2 }
         return 1
     }
     // The is_* family, mapped onto the ONE js_phis extern.
@@ -5551,6 +5564,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             for (var k = 0; k < cases.length; k++) {
                 var inst = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [inst, emitStr(b, "__class"), clsV])
+                callExt(b, "js_phoid", [inst])
                 callExt(b, "js_set", [inst, emitStr(b, "name"), emitStr(b, cases[k].ecasename)])
                 if (cases[k].ecaseinit != null) {
                     var rv = cases[k].ecaseinit(b)
@@ -5572,8 +5586,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return b
         }
     }
+    // The name an anonymous class shows: its parent's, else its first interface's,
+    // else "class", then "@anonymous" (PHP's full name goes on after a NUL byte that
+    // every display stops at). Twin of anonClassName in php-interpreter.abnf.
+    function anonClassName(ext, ifaces) {
+        var base = ext != null ? ext : (ifaces.length > 0 ? ifaces[0] : "class")
+        if (base.charCodeAt(0) == 92) { base = base.substring(1) }
+        return base + "@anonymous"
+    }
     function makeClassStmt(items) {
         var name = items[0]
+        var anon = false
+        var extRaw = null
+        var ifacesRaw = []
         var methods = []
         var props = []
         var statics = []
@@ -5589,8 +5614,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 noteMagic(items[i].method.name)
                 if (items[i].method.name == "__construct") { hasCtor = true }
             }
-            else if (items[i].ext != undefined) { ext = lastSeg(items[i].ext) }
-            else if (items[i].impl != undefined) { ifaces.push(noteIterIface(lastSeg(stripWs(items[i].impl)))) }
+            else if (items[i].ext != undefined) {
+                ext = lastSeg(items[i].ext)
+                extRaw = stripWs(items[i].ext)
+            }
+            else if (items[i].impl != undefined) {
+                ifaces.push(noteIterIface(lastSeg(stripWs(items[i].impl))))
+                ifacesRaw.push(stripWs(items[i].impl))
+            }
+            else if (items[i].anonShown != undefined) { anon = true }
             else if (items[i].cconsts != undefined) {
                 var cs = items[i].cconsts
                 for (var q = 0; q < cs.length; q++) { consts.push(cs[q]) }
@@ -5624,10 +5656,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         for (var mi = 0; mi < methods.length; mi++) {
             if (methods[mi].name == "__construct") { ctorSigs["$" + name] = {params: methods[mi].params, byref: methods[mi].byref, rest: methods[mi].rest} }
         }
+        var shown = anon ? anonClassName(extRaw, ifacesRaw) : name
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, shown)])
             // Single inheritance: the __super chain is what the runtime's method
             // dispatch (js_phmcall / memberCall) walks, so `extends E` is one property.
             if (ext != "") {
@@ -5641,11 +5674,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             // Bind 'self' for the initializers below: a class constant may read
             // self::OTHER, and they are evaluated here, in declaration order.
             var outerSelf = bindDeclSelf(b, clsV)
-            for (var c1 = 0; c1 < consts.length; c1++) {
-                var cv = hNull
-                if (consts[c1].cinit != null) { var rc = consts[c1].cinit(b); b = rc.b; cv = rc.v }
-                callExt(b, "js_set", [clsV, emitStr(b, "k:" + consts[c1].cname), cv])
-            }
+            for (var c1 = 0; c1 < consts.length; c1++) { emitConstDecl(b, clsV, name, consts[c1]) }
             for (var s1 = 0; s1 < statics.length; s1++) {
                 var sv = hNull
                 if (statics[s1].init != null) { var rs2 = statics[s1].init(b); b = rs2.b; sv = rs2.v }
@@ -5661,11 +5690,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var mlc = ","
             for (var ml = 0; ml < methods.length; ml++) { mlc = mlc + phsCase(methods[ml].name, false) + "," }
             callExt(b, "js_set", [clsV, emitStr(b, "__mlc"), emitStr(b, mlc)])
-            var pvl = phVisList(name, props)
+            var pvl = phVisList(shown, props)
             if (pvl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, pvl)]) }
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), closureV(b, idx, curScopeV)])
+                emitMethodSet(b, clsV, methods[k].name, closureV(b, idx, curScopeV))
             }
             if (!hasCtor && ext == "") {
                 var emptyBody = function(bb) { return bb }
@@ -5680,6 +5709,32 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // A declaration binds 'self' to the class while its initializers run and
     // hands back the binding it shadowed (null outside every class), which it puts
     // back afterwards: code after the declaration is not in the class's scope.
+    // PHP method names are case-insensitive, so a method is stored under its declared
+    // name and, when that differs, under its lower-cased name too: a call names it as
+    // written and retries lower-cased on a miss (js_phmcall / js_phscall). A class
+    // that declares two spellings of one name along its parent chain keeps the
+    // exact spelling's. Twin of setMethod in php-interpreter.abnf.
+    function emitMethodSet(b, clsV, mname, clo) {
+        callExt(b, "js_set", [clsV, emitStr(b, mname), clo])
+        var lc = phsCase(mname, false)
+        if (lc != mname) { callExt(b, "js_set", [clsV, emitStr(b, lc), clo]) }
+    }
+    // A class constant is evaluated on first use, not where the class is declared:
+    // `const A = self::B; const B = 1;` reads B, and a constant inherited from a parent
+    // still reads `self::` as the parent. Its initializer becomes a method of the
+    // declaring class (so self and parent bind there), stored under "k:" + name in a
+    // {__lazyconst: closure} box that phpConstIn (abnf/jsrtphp.go) and phConstIn
+    // (lib/php-rt.metajs) call once and replace with the value. Twin of constFind in
+    // php-interpreter.abnf.
+    function emitConstDecl(b, clsV, clsName, rec) {
+        var cv = hNull
+        if (rec.cinit != null) {
+            var idx = emitFunc([], makeBody([makeReturn([rec.cinit])]), true, false, clsName)
+            cv = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [cv, emitStr(b, "__lazyconst"), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, "k:" + rec.cname), cv])
+    }
     function bindDeclSelf(b, clsV) {
         var outer = scopeProbe(b, emitStr(b, frameClsName("self")), hNull)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), clsV])

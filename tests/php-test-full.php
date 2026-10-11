@@ -1527,6 +1527,32 @@ function s38() {
     // A by-reference parameter followed by a variadic one (array_push's shape).
     $rv = [1, 2];
     check("arr28", s38refvar($rv, 3, 4) === 4 && $rv === [1, 2, 3, 4] && s38refvar($rv) === 4);
+    // The internal pointer: next() past the end leaves it invalid (prev() cannot
+    // come back), a copy carries it, foreach never moves it, unset() of the current
+    // element moves it to the successor, array_pop() resets it, and an element
+    // appended at an invalid pointer becomes current.
+    $p = ["x" => 1, "y" => 2, 5 => 3];
+    check("ptr1", current($p) === 1 && key($p) === "x" && next($p) === 2 && key($p) === "y"
+        && next($p) === 3 && key($p) === 5 && next($p) === false && key($p) === null
+        && prev($p) === false && current($p) === false);
+    check("ptr2", end($p) === 3 && prev($p) === 2 && reset($p) === 1 && pos($p) === 1);
+    next($p);
+    $q = $p;
+    foreach ($p as $v) { }
+    check("ptr3", next($q) === 3 && key($p) === "y" && $p == $q && $p === $q);
+    unset($p["x"]);
+    $k1 = key($p);
+    unset($p["y"]);
+    check("ptr4", $k1 === "y" && key($p) === 5 && current($p) === 3);
+    $e = [];
+    check("ptr5", current($e) === false && key($e) === null && end($e) === false && next($e) === false);
+    $c = [1, 2, 3];
+    end($c);
+    array_pop($c);
+    $k2 = key($c);
+    next($c); next($c);
+    $c[] = 9;
+    check("ptr6", $k2 === 0 && key($c) === 2 && current($c) === 9);
 }
 function s38refvar(array &$a, ...$xs) { foreach ($xs as $x) { $a[] = $x; } return count($a); }
 function call_twice($f, $v) { return $f($v) + $f($v); }
@@ -1742,6 +1768,61 @@ function s44() {
         && [1] > "a" && (1.75 <=> "1.75abc") === -1 && INF == "INF");
 }
 
+// ===== SECTION 45: runtime settings, handles, and the names a class answers to =====
+// The precision ini setting is the ndigit of zend_gcvt for echo, (string) and
+// interpolation: the exact binary value correctly rounded (dtoa mode 2), 0 counting
+// as 1 and -1 meaning the shortest digits. A subnormal shows that the exact value is
+// what is rounded: 1.7e-319 is 1.6999810742105611E-319, and lang/bug24640.phpt
+// echoes it as 1.69998107421E-319 at precision 12. bug68797.phpt pins precision=17;
+// string_to_number_comparison.phpt pins precision=0's "2".
+//
+// A constant expression is evaluated on first use with self:: bound to the
+// declaring class (constants/bug69676_3.phpt), so it may name a constant declared
+// below it, or a class declared later. Method names are case-insensitive. An
+// anonymous class is named after its parent, else its first interface, else
+// "class", plus "@anonymous" - all an error message shows of it (anon/012.phpt,
+// anon_class_name.phpt). spl_object_id is the handle var_dump prints as #id.
+class S45A { const SELFN = self::N; const N = 'A'; }
+class S45B extends S45A { const N = 'B'; const IND = self::SELFN; }
+class S45C { const X = S45D::Y * 2; }
+class S45D { const Y = 5; }
+class S45P {}
+interface S45I {}
+class S45M {
+    function getName() { return "n"; }
+    static function Make() { return "m"; }
+}
+function s45miss($o) {
+    try { $o->nope(); } catch (Error $e) { return $e->getMessage(); }
+    return "";
+}
+function s45() {
+    check("prc1", ini_get("precision") === "14" && (string) 1.7e-319 === "1.6999810742106E-319"
+        && (string) (1 / 3) === "0.33333333333333");
+    check("prc2", ini_set("precision", "17") === "14" && (string) 0.1 === "0.10000000000000001"
+        && "" . (1 / 3) === "0.33333333333333331" && (string) 2.2250738585072012e-308 === "2.2250738585072014E-308");
+    check("prc3", ini_set("precision", 20) === "17" && (string) 0.1 === "0.10000000000000000555");
+    check("prc4", ini_set("precision", 0) === "20" && (string) 1.75 === "2" && "" . 1.7e300 === "2.0E+300"
+        && (1.75 <=> "1.75abc") === 1);
+    check("prc5", ini_set("precision", -1) === "0" && (string) 0.1 === "0.1" && (string) (1 / 3) === "0.3333333333333333");
+    check("prc6", ini_set("precision", -2) === false && ini_get("precision") === "-1"
+        && ini_set("precision", 14) === "-1" && (string) 0.1 === "0.1"
+        && ini_get("no.such.option") === false && ini_set("no.such.option", "1") === false);
+    check("lzc1", S45A::SELFN === "A" && S45B::SELFN === "A" && S45B::IND === "A" && S45C::X === 10);
+    $o = new S45M();
+    check("mcs1", $o->GETNAME() === "n" && $o->getname() === "n" && S45M::make() === "m"
+        && S45M::MAKE() === "m" && ($o->GetName(...))() === "n");
+    check("anc1", s45miss(new class {}) === "Call to undefined method class@anonymous::nope()"
+        && s45miss(new class extends S45P {}) === "Call to undefined method S45P@anonymous::nope()"
+        && s45miss(new class implements S45I {}) === "Call to undefined method S45I@anonymous::nope()");
+    $a = new S45M();
+    $b = new S45M();
+    $c = clone $a;
+    check("oid1", is_int(spl_object_id($a)) && spl_object_id($a) === spl_object_id($a)
+        && spl_object_id($a) !== spl_object_id($b) && spl_object_id($c) !== spl_object_id($a)
+        && spl_object_id($c) !== spl_object_id($b));
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1792,6 +1873,7 @@ function main() {
     s42(); // SECTION-CALL 42
     s43(); // SECTION-CALL 43
     s44(); // SECTION-CALL 44
+    s45(); // SECTION-CALL 45
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

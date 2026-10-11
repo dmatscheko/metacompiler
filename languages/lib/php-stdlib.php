@@ -6,11 +6,14 @@
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
-// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and two
-// intrinsics: __mec_fmtfloat for sprintf's float conversions and __mec_math for
-// the math library's double operations. A native also gets a wrapper
-// here of the same name, which is what a string callable or f(...) reaches: a
-// direct call never does, since the call is lowered to the native first.
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and five
+// intrinsics: __mec_fmtfloat for sprintf's float conversions, __mec_math for
+// the math library's double operations, __mec_aptr for the internal array
+// pointer, __mec_precision for the precision setting and __mec_oid for an
+// object's handle. A native also gets a
+// wrapper here of the same name, which is what a string callable or f(...)
+// reaches: a direct call never does, since the call is lowered to the native
+// first.
 //
 // A string is walked by BYTE offsets, but rebuilt from substr() RUNS between the
 // ASCII bytes a function acts on: a one-byte piece of a multi-byte character is
@@ -18,9 +21,8 @@
 //
 // Parameter names are the manual's, so named arguments bind. Errors are PHP 8's
 // own ValueError / TypeError / ArgumentCountError texts. Deliberately absent:
-// the internal array pointer (current/next/prev/key; reset and end answer their
-// values without one), anything random (shuffle, array_rand), and the functions
-// that reach the caller's variable scope (compact, extract).
+// anything random (shuffle, array_rand), and the functions that reach the
+// caller's variable scope (compact, extract).
 
 const COUNT_NORMAL = 0;
 const COUNT_RECURSIVE = 1;
@@ -232,14 +234,15 @@ function array_all($array, $callback) {
     foreach ($array as $k => $v) { if (!$callback($v, $k)) { return false; } }
     return true;
 }
-function reset(&$array) {
-    foreach ($array as $v) { return $v; }
-    return false;
-}
-function end(&$array) {
-    $k = array_key_last($array);
-    return $k === null ? false : $array[$k];
-}
+// The internal pointer. current() and key() take the array by value, and a copy
+// carries the pointer along, so they read the caller's position.
+function current($array) { return __mec_aptr($array, "current"); }
+function pos($array) { return __mec_aptr($array, "current"); }
+function key($array) { return __mec_aptr($array, "key"); }
+function next(&$array) { return __mec_aptr($array, "next"); }
+function prev(&$array) { return __mec_aptr($array, "prev"); }
+function reset(&$array) { return __mec_aptr($array, "reset"); }
+function end(&$array) { return __mec_aptr($array, "end"); }
 
 // ----- building and reshaping ------------------------------------------------
 function array_fill($start_index, $count, $value) {
@@ -2062,4 +2065,30 @@ function __mec_jhex4($s, $i, $n) {
         $v = $v * 16 + $d;
     }
     return $v;
+}
+
+// ----- objects ---------------------------------------------------------------
+// An object's handle, var_dump's #id. A Closure takes a handle but does not keep
+// it here, and answers 0.
+function spl_object_id($object) {
+    if (!is_object($object)) {
+        throw new TypeError("spl_object_id(): Argument #1 (\$object) must be of type object, " . get_debug_type($object) . " given");
+    }
+    return __mec_oid($object);
+}
+
+// ----- runtime configuration -------------------------------------------------
+// Of the ini settings only precision is modelled: the digits echo, (string) and
+// interpolation give a float. Any other option reads as one that does not exist.
+// The value is read the way the setting's handler reads it, as an integer, and
+// one below -1 is refused.
+function ini_set($option, $value) {
+    if ($option !== "precision") { return false; }
+    $p = (int) $value;
+    if ($p < -1) { return false; }
+    return (string) __mec_precision($p);
+}
+function ini_get($option) {
+    if ($option !== "precision") { return false; }
+    return (string) __mec_precision(null);
 }

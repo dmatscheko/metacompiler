@@ -126,13 +126,40 @@ func phpTrunc(n float64) float64 {
 // that always keeps one digit after the point ("1.0E+25"), and an exponent that
 // is never zero padded. This is the byte-for-byte twin of floStr / floDump in
 // php-interpreter.abnf.
-func phpFloStr(n float64) string  { return phpFloFormat(n, 14) }
-func phpFloDump(n float64) string { return phpFloFormat(n, 17) }
+//
+// echo's ndigit is the precision ini setting, phpPrecision, and rounded selects
+// dtoa's mode 2 (twin of floStr's, which explains both).
+func phpFloStr(n float64) string {
+	p := phpPrecision
+	if p < 0 {
+		return phpFloFormat(n, 17, false)
+	}
+	if p == 0 {
+		p = 1
+	}
+	return phpFloFormat(n, p, true)
+}
+func phpFloDump(n float64) string { return phpFloFormat(n, 17, false) }
 
-// phpFloSplit answers the shortest decimal digits of a positive finite double
-// and the position of the decimal point: value == 0.<digits> * 10^<decpt>.
-func phpFloSplit(a float64) (string, int) {
-	s := strconv.FormatFloat(a, 'e', -1, 64) // "d.dddde±dd"
+// phpPrecision is the running program's precision ini setting (js_phprecision).
+// One process runs one PHP program, so it is process state.
+var phpPrecision = 14
+
+// phpFloSplit answers the decimal digits of a positive finite double and the
+// position of the decimal point: value == 0.<digits> * 10^<decpt>. With
+// exact false they are the shortest round-tripping digits; with exact true the
+// exact decimal correctly rounded to nd digits (strconv rounds half to even, as
+// zend_dtoa's mode 2 does). No double has more than 767 significant digits, so
+// a larger nd is cut to that many before strconv sees it.
+func phpFloSplit(a float64, nd int, exact bool) (string, int) {
+	prec := -1
+	if exact {
+		prec = nd - 1
+		if nd > 800 {
+			prec = 799
+		}
+	}
+	s := strconv.FormatFloat(a, 'e', prec, 64) // "d.dddde±dd"
 	mant, exps := s, "0"
 	if i := strings.IndexByte(s, 'e'); i >= 0 {
 		mant, exps = s[:i], s[i+1:]
@@ -185,7 +212,7 @@ func phpFloRound(d string, decpt, nd int) (string, int) {
 	return d, decpt
 }
 
-func phpFloFormat(n float64, nd int) string {
+func phpFloFormat(n float64, nd int, rounded bool) string {
 	if math.IsNaN(n) {
 		return "NAN"
 	}
@@ -202,7 +229,7 @@ func phpFloFormat(n float64, nd int) string {
 	if a == 0 {
 		return sign + "0"
 	}
-	d, decpt := phpFloSplit(a)
+	d, decpt := phpFloSplit(a, nd, rounded && (nd > 15 || a < 0x1p-1022))
 	d, decpt = phpFloRound(d, decpt, nd)
 	exponential := decpt > nd
 	if decpt < 0 {
@@ -756,6 +783,7 @@ func (rt *jsrt) phpMkErr(clsName, msg string) *jsObject {
 	o.set("__class", cls)
 	o.set("message", msg)
 	o.set("code", float64(0))
+	rt.phpStamp(o)
 	return o
 }
 
@@ -1216,6 +1244,15 @@ func phpAsArr(v interface{}) (*jsObject, bool) {
 	return nil, false
 }
 
+// phpArrPos is the array's internal pointer, 0 until one of current() and its
+// family moves it (see js_phaptr).
+func phpArrPos(o *jsObject) float64 {
+	if n, ok := o.props["__pos"].(float64); ok {
+		return n
+	}
+	return 0
+}
+
 func phpArrNext(o *jsObject) float64 {
 	if n, ok := o.props["__next"].(float64); ok {
 		return n
@@ -1336,6 +1373,9 @@ func (rt *jsrt) phpArrUnset(av interface{}, k interface{}) {
 	vals.dropIdx()
 	keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
 	vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+	if p := phpArrPos(o); p > float64(i) {
+		o.set("__pos", p-1)
+	}
 }
 
 // phpElemCell is the storage CELL of an array element, created on demand - the twin
@@ -1386,6 +1426,9 @@ func (rt *jsrt) phpArrCopy(v interface{}) interface{} {
 	}
 	if o, isO := phpAsArr(v); isO {
 		out.set("__next", phpArrNext(o))
+		if _, has := o.props["__pos"]; has {
+			out.set("__pos", phpArrPos(o))
+		}
 	} else {
 		out.set("__next", float64(len(keys.elems)))
 	}
@@ -1443,6 +1486,7 @@ func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 		if cls := rt.phpRtClass("stdClass"); cls != nil {
 			o.set("__class", cls)
 		}
+		rt.phpStamp(o)
 		if keys, vals, ok := phpArrParts(v); ok {
 			for i := range keys.elems {
 				o.set(phpPropKey(rt.phpStr(keys.elems[i])), rt.phpArrCopy(phpDeref(vals.elems[i])))
@@ -1521,7 +1565,7 @@ func phpOwner(cls *jsObject, key string) *jsObject {
 
 func (rt *jsrt) phpConst(target interface{}, name string) interface{} {
 	cls := rt.phpClassOf(target)
-	if v, ok := phpConstIn(cls, name, 0); ok {
+	if v, ok := rt.phpConstIn(cls, name, 0); ok {
 		return v
 	}
 	rt.fail("undefined constant %s::%s", rt.phpStr(cls.props["__name"]), name)
@@ -1530,19 +1574,31 @@ func (rt *jsrt) phpConst(target interface{}, name string) interface{} {
 
 // phpConstIn walks a class's own chain and then its interfaces: PHP inherits a
 // constant from a base class AND from every implemented interface.
-func phpConstIn(cls *jsObject, name string, depth int) (interface{}, bool) {
+//
+// A declared constant is a {__lazyconst: closure} box until its first read (see
+// emitConstDecl in php-to-llvm-ir.abnf): the closure computes it, called with a
+// null $this, and the value replaces the box on the declaring class.
+func (rt *jsrt) phpConstIn(cls *jsObject, name string, depth int) (interface{}, bool) {
 	if cls == nil || depth > 16 {
 		return nil, false
 	}
-	if o := phpOwner(cls, phpConstPfx+name); o != nil {
-		return o.props[phpConstPfx+name], true
+	key := phpConstPfx + name
+	if o := phpOwner(cls, key); o != nil {
+		v := o.props[key]
+		if box, isO := v.(*jsObject); isO {
+			if f, lazy := box.props["__lazyconst"]; lazy {
+				v = rt.call(f, jsUndef, []interface{}{jsNull})
+				o.set(key, v)
+			}
+		}
+		return v, true
 	}
 	for k := cls; k != nil; {
 		if ifs, has := k.props["__ifaces"]; has {
 			if _, vals, ok := phpArrParts(ifs); ok {
 				for _, iv := range vals.elems {
 					if io, isO := iv.(*jsObject); isO {
-						if v, found := phpConstIn(io, name, depth+1); found {
+						if v, found := rt.phpConstIn(io, name, depth+1); found {
 							return v, true
 						}
 					}
@@ -1636,6 +1692,7 @@ func (rt *jsrt) phpClone(v interface{}) interface{} {
 	for _, k := range o.keys {
 		out.set(k, rt.phpArrCopy(o.props[k]))
 	}
+	rt.phpStamp(out)
 	if cls, has := o.props["__class"]; has {
 		if m := phpClassFind(cls, "__clone"); m != nil {
 			rt.call(m, jsUndef, []interface{}{out})
@@ -1669,22 +1726,30 @@ func phpIsHole(v interface{}) bool {
 	return has && t == true
 }
 
-// phpDumpIds hands out var_dump's object handles (#1, #2, ...) on first sight,
-// which is enough for a single run's transcript to be stable.
-var phpDumpIds = map[*jsrt]map[*jsObject]int{}
+// phpHandles counts the object handles a run has handed out: every object takes
+// the next one when it is made (js_phoid), stored in its hidden __oid slot, and
+// that is var_dump's #id. A closure takes one too, uncounted on any object. PHP
+// also hands a freed handle to the next object, which this model, without
+// refcounts, cannot see. Twin of objHandles in php-interpreter.abnf.
+var phpHandles = map[*jsrt]int{}
 
+// phpStamp gives o the next handle; a nil o only counts one.
+func (rt *jsrt) phpStamp(o *jsObject) {
+	n := phpHandles[rt] + 1
+	phpHandles[rt] = n
+	if o != nil {
+		o.set("__oid", float64(n))
+	}
+}
+
+// phpDumpID is o's handle; an object made where nothing stamped it takes the
+// next one now.
 func (rt *jsrt) phpDumpID(o *jsObject) int {
-	m, has := phpDumpIds[rt]
-	if !has {
-		m = map[*jsObject]int{}
-		phpDumpIds[rt] = m
+	if n, ok := o.props["__oid"].(float64); ok {
+		return int(n)
 	}
-	if id, seen := m[o]; seen {
-		return id
-	}
-	id := len(m) + 1
-	m[o] = id
-	return id
+	rt.phpStamp(o)
+	return phpHandles[rt]
 }
 
 // phpTypeName is gettype()'s historical spelling; phpDebugType is
@@ -1959,6 +2024,12 @@ func init() {
 			if o, isObj := recv.(*jsObject); isObj {
 				if cls, has := o.props["__class"]; has && !isNullish(cls) {
 					if rt.phpFindMethod(cls, name) == nil {
+						// Method names are case-insensitive: a class also holds each
+						// method under its lower-cased name (emitMethodSet in
+						// php-to-llvm-ir.abnf), which a miss retries.
+						if lc := phpCase(name, false); lc != name && rt.phpFindMethod(cls, lc) != nil {
+							return w(rt.memberCall(recv, lc, args.elems))
+						}
 						// PHP 8, and CATCHABLE: `catch (Error $e)` recovers.
 						rt.phpRaise("Error", "Call to undefined method "+rt.phpClassName(recv)+"::"+name+"()")
 					}

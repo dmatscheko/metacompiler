@@ -2693,6 +2693,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         a.keys = ks
         a.vals = vs
         a.__idx = null
+        // The internal pointer keeps its element: one removed before it shifts it down,
+        // and the removed element's own position now names its successor.
+        if (hasOwn(a, "__pos") && a.__pos > i) { a.__pos = a.__pos - 1 }
     }
     // A shallow copy that is only ever read: its keys and slots as they are now.
     function arrSnap(a) {
@@ -2708,6 +2711,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var out = newArr()
         for (var i = 0; i < a.keys.length; i++) { arrSet(out, a.keys[i], phpCopy(deref(a.vals[i]))) }
         out.__next = a.__next
+        if (hasOwn(a, "__pos")) { out.__pos = a.__pos }
         return out
     }
     // PHP assigns arrays BY VALUE and objects by handle, so every assignment /
@@ -2761,12 +2765,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Both are zend_gcvt(value, ndigit, '.', 'E'): exponential notation exactly
     // when `decpt < 0 ? decpt < -3 : decpt > ndigit`, a mantissa that always keeps
     // one digit after the point ("1.0E+25"), and an exponent that is never zero
-    // padded. The digits come from the JS shortest representation, which is the
-    // same digit string zend_d2s_short_buf produces for serialize_precision=-1;
-    // precision=14 rounds that string, which can differ from rounding the exact
-    // binary value only when digits 15..17 sit exactly on a tie.
-    function floStr(n) { return floFormat(n, 14) }
-    function floDump(n) { return floFormat(n, 17) }
+    // padded. serialize_precision=-1 is dtoa's mode 0, the shortest digits: the JS
+    // shortest representation. A precision is mode 2, the exact binary value
+    // correctly rounded to ndigit digits (rounded=true). For a NORMAL double and
+    // ndigit <= 15 that is the shortest digits rounded (they lie within half an ulp,
+    // finer than a 15-digit step) unless digits 15..17 sit exactly on a tie; a
+    // subnormal's shortest digits are too few (1.7E-319 is 1.6999810742106E-319
+    // to echo), and more digits need the exact decimal (phsExactDigits).
+    //
+    // echo's ndigit is the precision ini setting (ini_set, __mec_precision): 0
+    // counts as 1, and -1 means mode 0 at ndigit 17, as for var_dump.
+    var phpPrecision = 14
+    var PHP_MIN_NORMAL = Math.pow(2, 0 - 1022)
+    function floStr(n) {
+        var p = phpPrecision
+        if (p < 0) { return floFormat(n, 17, false) }
+        if (p == 0) { p = 1 }
+        return floFormat(n, p, true)
+    }
+    function floDump(n) { return floFormat(n, 17, false) }
     // The shortest decimal digits of a positive finite double, with the position of
     // the decimal point: value == 0.<d> * 10^<e>.
     function floSplit(a) {
@@ -2831,7 +2848,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (keep == "0") { pt = 1 }
         return {d: keep, e: pt}
     }
-    function floFormat(n, nd) {
+    function floFormat(n, nd, rounded) {
         if (n !== n) { return "NAN" }
         if (n === PHP_INF) { return "INF" }
         if (n === 0 - PHP_INF) { return "-INF" }
@@ -2840,8 +2857,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (n < 0) { sign = "-"; a = 0 - n }
         else if (n === 0 && 1 / n < 0) { sign = "-" }
         if (a === 0) { return sign + "0" }
-        var sp = floSplit(a)
-        var r = floRound(sp.d, sp.e, nd)
+        var r = {d: "", e: 0}
+        if (rounded && (nd > 15 || a < PHP_MIN_NORMAL)) { r = phsExactDigits(a, nd, coreExactDec, coreRoundHalfEven) }
+        else {
+            var sp = floSplit(a)
+            r = floRound(sp.d, sp.e, nd)
+        }
         var d = r.d
         var decpt = r.e
         if (decpt < 0 ? decpt < 0 - 3 : decpt > nd) {
@@ -3151,7 +3172,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // the frozen engine does not have. Methods live on the class descriptor and are
     // looked up along __super.
     function isObj(v) { return v !== null && v !== undefined && typeof v == "object" && v.__obj === true }
-    function newObj(cls) { return {__obj: true, __class: cls, p: newArr()} }
+    // Every object takes the next handle when it is made: var_dump's #id. PHP also
+    // hands a freed handle to the next object, which a program without refcounts
+    // cannot know, so the numbers agree until an object dies.
+    var objHandles = 0
+    function newObj(cls) {
+        objHandles = objHandles + 1
+        return {__obj: true, __class: cls, p: newArr(), __vdid: objHandles}
+    }
     function classFind(cls, name) {
         var k = cls
         while (k != undefined && k != null) {
@@ -3228,11 +3256,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return makePartial(function(a2) { return mcall(pt, pn, a2) }, args)
         }
         if (isObj(target)) {
-            if (args.fcc === true) {
-                var fm = classFind(target.__class, name)
-                if (fm != null) { return function(a2) { return fm(target, a2) } }
-            }
             var m = classFind(target.__class, name)
+            if (m == null) { m = classFind(target.__class, phsCase(name, false)) }
+            if (args.fcc === true && m != null) {
+                var fm = m
+                return function(a2) { return fm(target, a2) }
+            }
             if (m != null) { return m(target, args) }
             // A closure stored in a property is callable through ->name() only via
             // __call in real PHP; the magic method is the documented door.
@@ -3449,6 +3478,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var argset = evalArgs(args)
         var m = classFind(cls, name)
+        if (m == null) { m = classFind(cls, phsCase(name, false)) }
         if (m == null && cls.__isenum === true) {
             var er = enumStatic(cls, name, argset)
             if (er != null) { return er.v }
@@ -3634,7 +3664,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // captured variables (env) are copied into each call's frame, a fresh copy per
     // call (phpCopy keeps a cell shared). Twin of capturePrologue in
     // php-to-llvm-ir.abnf.
+    // A Closure is an object to PHP and takes a handle (objHandles).
     function closureBody(params, body, captured, env, isGen) {
+        objHandles = objHandles + 1
         return function(argset) {
             if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset)) }
             return runClosureRun(params, body, captured, env, argset)()
@@ -4563,7 +4595,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cls.__mlc = phpMethodList(tm.methods) + phpMethodList(p.methods).substring(1)
         cls.__pvis = phpVisList(name, props)
         for (var tmi = 0; tmi < tm.methods.length; tmi++) {
-            cls[tm.methods[tmi].name] = makeMethodClosure(tm.methods[tmi], cls)
+            setMethod(cls, tm.methods[tmi].name, makeMethodClosure(tm.methods[tmi], cls))
         }
         // A static property is created once, here, and lives in a cell so that a
         // subclass which does not redeclare it shares this very storage. Its
@@ -4574,7 +4606,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             dictSet(cls.__statics, p.statics[s2].name, {__refcell: true, v: iv})
         }
         for (var m2 = 0; m2 < p.methods.length; m2++) {
-            cls[p.methods[m2].name] = makeMethodClosure(p.methods[m2], cls)
+            setMethod(cls, p.methods[m2].name, makeMethodClosure(p.methods[m2], cls))
         }
         // Property hooks are methods too, named after the property they belong to.
         for (var hp = 0; hp < props.length; hp++) {
@@ -4584,6 +4616,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         return cls
+    }
+    // PHP method names are case-insensitive, so a method is stored under its declared
+    // name and, when that differs, under its lower-cased name too: a call names it as
+    // written and retries lower-cased on a miss (mcall, the static call). A class
+    // that declares two spellings of one name along its parent chain keeps the
+    // exact spelling's. Twin of emitMethodSet in php-to-llvm-ir.abnf.
+    function setMethod(cls, mname, fn) {
+        cls[mname] = fn
+        var lc = phsCase(mname, false)
+        if (lc != mname) { cls[lc] = fn }
     }
     function makeClassStmt(items) {
         var name = items[0]
@@ -4667,7 +4709,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else { rest.push(items[i]) }
         }
         var p = classParts(rest, 0)
-        return function() { return instantiate(buildClass("class@anonymous", p), evalArgs(args)) }
+        var shown = anonClassName(p.ext, p.ifaces)
+        return function() { return instantiate(buildClass(shown, p), evalArgs(args)) }
+    }
+    // The name an anonymous class shows: its parent's, else its first interface's,
+    // else "class", then "@anonymous" (PHP's full name goes on after a NUL byte that
+    // every display stops at). Twin of anonClassName in php-to-llvm-ir.abnf.
+    function anonClassName(ext, ifaces) {
+        var base = ext != null ? ext : (ifaces.length > 0 ? ifaces[0] : "class")
+        if (base.charCodeAt(0) == 92) { base = base.substring(1) }
+        return base + "@anonymous"
     }
     // An interface: a class descriptor with no bodies, so instanceof and the
     // implements list can resolve it. Extended interfaces land in __ifaces too.
@@ -4785,12 +4836,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (a < 0) { a = 0 - a }
             var p = phpInt(prec)
             if (conv == "g") {
-                var g = floFormat(a, p)
+                var g = floFormat(a, p, false)
                 var out = ""
                 for (var i = 0; i < g.length; i++) { out = out + (g.charAt(i) == "E" ? "e" : g.charAt(i)) }
                 return out
             }
             return phsFmtFloat(a, conv, p, coreExactDec, coreRoundHalfEven)
+        },
+        // An object's handle (newObj); a Closure keeps none and answers 0.
+        "__mec_oid": function(o) { return isObj(o) ? o.__vdid : 0 },
+        // The precision setting: answers the old value, and sets a new one unless p
+        // is null (ini_get).
+        "__mec_precision": function(p) {
+            var old = phpPrecision
+            if (p !== null && p !== undefined) { phpPrecision = phpInt(p) }
+            return old
         },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         "array_key_exists": function(k, a) {
@@ -4798,6 +4858,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpDebugType(a) + " given")
             }
             return arrHas(a, k)
+        },
+        // The internal array pointer behind current/key/next/prev/reset/end: a
+        // position in the array's order, kept in a hidden __pos (absent = 0), where a
+        // position at or past the end is PHP's invalid pointer. op moves it, then
+        // answers the element there - its key for "key" (null when invalid), else its
+        // value (false when invalid). Twin of js_phaptr in abnf/jsrtphpstr.go and
+        // lib/php-rt.metajs.
+        "__mec_aptr": function(a, op) {
+            var o = phpStr(op)
+            if (!isArr(a)) { return o == "key" ? null : false }
+            var n = a.keys.length
+            var p = hasOwn(a, "__pos") ? a.__pos : 0
+            if (o == "reset") { p = 0 }
+            else if (o == "end") { p = n > 0 ? n - 1 : 0 }
+            else if (o == "next") { if (p < n) { p = p + 1 } }
+            else if (o == "prev") { if (p < n) { p = p > 0 ? p - 1 : n } }
+            a.__pos = p
+            if (o == "key") { return p < n ? a.keys[p] : null }
+            return p < n ? deref(a.vals[p]) : false
         },
         "array_key_last": function(a) { return isArr(a) && a.keys.length > 0 ? a.keys[a.keys.length - 1] : null },
         // array_pop: the last value, and PHP's next free key steps back when the
@@ -4807,6 +4886,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var k = a.keys.pop()
             var v = deref(a.vals.pop())
             a.__idx = null
+            if (hasOwn(a, "__pos")) { a.__pos = 0 }
             if (typeof k == "number" && k == a.__next - 1) { a.__next = k }
             return v
         },
@@ -4962,9 +5042,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // var_dump's rendering. A float goes through floDump (serialize_precision=-1),
     // NOT through the precision=14 renderer echo uses - that is the trap the two
-    // renderers exist to keep apart. An object's #id is handed out on first dump,
-    // which is enough for a single-run transcript to be stable.
-    var dumpIds = 0
+    // renderers exist to keep apart. An object's #id is its handle (newObj).
     function dumpInd(n) {
         var s = ""
         for (var i = 0; i < n; i++) { s += " " }
@@ -4987,7 +5065,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return out + pad + "}\n"
         }
         if (isObj(v)) {
-            if (v.__vdid == undefined) { dumpIds = dumpIds + 1; v.__vdid = dumpIds }
             var name = v.__class == null ? "stdClass" : v.__class.__name
             var o2 = pad + "object(" + name + ")#" + v.__vdid + " (" + v.p.keys.length + ") {\n"
             // A property name is a string even where the property table folded a
