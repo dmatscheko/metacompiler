@@ -507,6 +507,14 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 		}
 		return pyHashFrozen(lanes)
 	}
+	// A union hashes as the frozenset of its types.
+	if u, ok := pyUnionOf(v); ok {
+		lanes := make([]uint64, len(u.elems))
+		for i, e := range u.elems {
+			lanes[i] = rt.pyHashW(e)
+		}
+		return pyHashFrozen(lanes)
+	}
 	_, isArr := v.(*jsArray)
 	_, isSet := pySetElems(v)
 	_, _, isDict := dictParts(v)

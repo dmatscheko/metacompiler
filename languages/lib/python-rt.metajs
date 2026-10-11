@@ -273,8 +273,9 @@ function pyKeyEq(a, b) {
     // string and number keys that are almost every key.
     if (typeof a == "object") {
         if (Array.isArray(a) && Array.isArray(b)) { return pyEqual(a, b) }
-        // A frozenset key, by its members.
+        // A frozenset key, by its members; a union key likewise.
         if (pySetElemsOf(a) !== null && pySetElemsOf(b) !== null) { return pyEqual(a, b) }
+        if (pyUnionOf(a) !== null && pyUnionOf(b) !== null) { return pyUnionEq(pyUnionOf(a), pyUnionOf(b)) }
     }
     return false
 }
@@ -731,6 +732,7 @@ function pyStr(v) {
     // the built-in spelling. Without this a module printed [object Object].
     if (pyIsObj(v)) {
         if (v["__pymod"] !== undefined) { return "<module '" + pyToStr(v["__pymod"]) + "' (built-in)>" }
+        if (v["__pyunion"] !== undefined) { return pyUnionStr(v["__pyunion"]) }
     }
     // A GENERATOR, on the same rule. CPython says <generator object gen at
     // 0x...>; neither the address nor the generating function's name is
@@ -1027,6 +1029,7 @@ function pyTypeName(v) {
         if (v["__pysm"] !== undefined) { return "staticmethod" }
         if (v["__pycm"] !== undefined) { return "classmethod" }
         if (v["__pymod"] !== undefined) { return "module" }
+        if (v["__pyunion"] !== undefined) { return "typing.Union" }
         // An instance of a user class is a "'C' object" in every message.
         var ic = pyInstClassOf(v)
         if (ic !== null && ic["__name"] !== undefined) { return pyToStr(ic["__name"]) }
@@ -1105,6 +1108,10 @@ function pyEqual(x, y) {
             if (!pyEqual(x["vals"][k], y["vals"][p])) { return false }
         }
         return true
+    }
+    if (typeof x == "object" && x !== null && x["__pyunion"] !== undefined) {
+        var uy = pyUnionOf(y)
+        return uy !== null && pyUnionEq(x["__pyunion"], uy)
     }
     // A Python bool IS an int - `class bool(int)` - so True == 1, True == 1.0,
     // False == 0 and False == -0.0 all hold, and so does every container equality
@@ -1693,6 +1700,7 @@ function pyGetAttr(obj, name) {
         pyRaiseExc("AttributeError",
                    "type object '" + pyToStr(obj["__name"]) + "' has no attribute '" + name + "'")
     }
+    if (name == "__args__" && pyUnionOf(obj) !== null) { return pyTup(pyUnionOf(obj).slice(0)) }
     var cls = pyInstClassOf(obj)
     if (cls != null) {
         if (name == "__class__") { return cls }
@@ -2142,6 +2150,76 @@ function pyClassName(v) {
     if (v["__mro"] !== undefined) { return nm }
     if (pyTypeTable["$" + nm] === v) { return nm }
     return null
+}
+
+// X | Y over type objects and None is CPython's typing.Union, {__pyunion: args}:
+// the arguments flattened and deduplicated in order, None standing as NoneType,
+// and a single argument is that type itself. null when an operand is not a type,
+// None or a union, or both are None. Go: rt.pyUnion in abnf/jsrtpysub.go.
+function pyUnionOf(v) {
+    if (!pyIsObj(v)) { return null }
+    var a = v["__pyunion"]
+    if (a === undefined) { return null }
+    return a
+}
+function pyUnionArgs(v) {
+    if (v === null || v === undefined) { return [pyBuiltinClass("NoneType")] }
+    var u = pyUnionOf(v)
+    if (u !== null) { return u }
+    if (pyClassName(v) !== null) { return [v] }
+    return null
+}
+function pyUnion(l, r) {
+    var res = anytype
+    res = null
+    if ((l === null || l === undefined) && (r === null || r === undefined)) { return res }
+    var a = pyUnionArgs(l)
+    var b = pyUnionArgs(r)
+    if (a === null || b === null) { return res }
+    var out = []
+    var i = 0
+    while (i < a.length + b.length) {
+        var t = i < a.length ? a[i] : b[i - a.length]
+        if (!pyIdIn(out, t)) { out.push(t) }
+        i = i + 1
+    }
+    res = out[0]
+    if (out.length > 1) { res = {__pyunion: out} }
+    return res
+}
+// int | None: each argument by its class name, NoneType as None.
+function pyUnionStr(u) {
+    var s = ""
+    var i = 0
+    while (i < u.length) {
+        if (i > 0) { s = s + " | " }
+        var c = u[i]
+        if (c === pyBuiltinClass("NoneType")) { s = s + "None" } else {
+            var cmod = c["__module__"]
+            if (typeof cmod == "string") { s = s + cmod + "." }
+            s = s + pyClassName(c)
+        }
+        i = i + 1
+    }
+    return s
+}
+function pyIdIn(xs, v) {
+    var i = 0
+    while (i < xs.length) {
+        if (xs[i] === v) { return true }
+        i = i + 1
+    }
+    return false
+}
+// Two unions are equal when they hold the same types, in any order.
+function pyUnionEq(a, b) {
+    if (a.length != b.length) { return false }
+    var i = 0
+    while (i < a.length) {
+        if (!pyIdIn(b, a[i])) { return false }
+        i = i + 1
+    }
+    return true
 }
 
 function pyBuiltinClass(name) {
@@ -3927,7 +4005,13 @@ function js_pybin(opv, l, r) {
         var bd = pyADunderBin(op, l, r)
         if (bd !== null) { return bd["v"] }
         var bmsg = pyABinTypeErr(op, l, r, l, r)
-        if (bmsg != "") { pyRaiseExc("TypeError", bmsg) }
+        if (bmsg != "") {
+            if (op == "|") {
+                var un = pyUnion(l, r)
+                if (un !== null) { return un }
+            }
+            pyRaiseExc("TypeError", bmsg)
+        }
         // dict | dict is a merged copy, the right operand's values winning.
         if (op == "|" && pyIsDict(l)) {
             var merged = pyDictMethod(l, "copy", [], undefined)
@@ -4735,6 +4819,17 @@ function pyHashW(v0) {
         return pynHashFrozen(fl)
     }
     if (pyIsArr(v) || pySetElemsOf(v) !== null || pyIsDict(v) || pyIsDView(v)) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
+    // A union hashes as the frozenset of its types.
+    var un = pyUnionOf(v)
+    if (un !== null) {
+        var ul = []
+        var ui = 0
+        while (ui < un.length) {
+            ul.push(pyHashW(un[ui]))
+            ui = ui + 1
+        }
+        return pynHashFrozen(ul)
+    }
     var cls = pyInstClassOf(v)
     if (cls !== null) {
         var mro = pyMRO(cls)
@@ -9081,6 +9176,7 @@ function js_pytype(v) {
 // Go: rt.pyIsInstance.
 function pyDIsInstance(v, target) {
     var i = 0
+    if (pyUnionOf(target) !== null) { return pyDIsInstance(v, pyUnionOf(target)) }
     if (pyIsArr(target)) {
         while (i < target.length) {
             if (pyDIsInstance(v, target[i])) { return true }
@@ -9148,6 +9244,7 @@ function js_pyissubclass(c, target) { return pyDIsSubclass(c, target) }
 
 function pyDIsSubclass(c, target) {
     var i = 0
+    if (pyUnionOf(target) !== null) { return pyDIsSubclass(c, pyUnionOf(target)) }
     if (pyIsArr(target)) {
         while (i < target.length) {
             if (pyDIsSubclass(c, target[i])) { return true }

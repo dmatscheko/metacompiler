@@ -1,17 +1,16 @@
 # Full-syntax test: Python (3.12 core grammar) - part 2 of 2, sections 90-91.
 #
 # THE PYTHON RATCHET IS TWO FILES, so that neither -frozen interpreter leg comes
-# near the IR interpreter's step brake (-max-steps, 100M per call):
+# near the IR interpreter's step brake (-max-steps, 100M per call). Sections 90-91
+# build ints of thousands of digits, which the interpreter's arbitrary precision
+# arithmetic makes the costliest rows of all, so they have a file of their own:
 #
-#   tests/python-test-full.py     sections 01-89, the Python 3.12 syntax walk and
-#                                 the builtins' semantics
-#   tests/python-test-full.2.py   sections 90-91, arbitrary precision ints at the
-#                                 sizes where CPython's own limits apply
+#   tests/python-test-full.py     every other section
+#   tests/python-test-full.2.py   sections 90-91
 #
-# The section NUMBERS are global, the two files together run the assertions in
-# order, and ./test.sh --full reports them as the units python and python2. Add a
-# new section to whichever file it belongs in, and keep the numbers globally
-# unique across the two.
+# The section NUMBERS are global, the two files together run the assertions, and
+# ./test.sh --full reports them as the units python and python2. Add a new section
+# to tests/python-test-full.py, and keep the numbers globally unique across the two.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 # of the default matrix. The goal of the metacompiler is to support the full

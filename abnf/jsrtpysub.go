@@ -821,3 +821,90 @@ func init() {
 		}
 	})
 }
+
+// pyUnionArgs is what an operand of X | Y contributes to a union: None stands
+// as NoneType, a union its own arguments, a type object itself; nil for
+// anything else.
+func (rt *jsrt) pyUnionArgs(v interface{}) []interface{} {
+	if isUndefOrNull(v) {
+		return []interface{}{rt.pyBuiltinClass("NoneType")}
+	}
+	if u, ok := pyUnionOf(v); ok {
+		return u.elems
+	}
+	if _, isCls := rt.pyClassName(v); isCls {
+		return []interface{}{v}
+	}
+	return nil
+}
+
+// pyUnion is X | Y over type objects and None, CPython's typing.Union: an
+// object whose __pyunion holds the arguments flattened and deduplicated in
+// order; a single argument is that type itself. nil when an operand is not a
+// type, None or a union, or both are None. Twin of pyUnion in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func (rt *jsrt) pyUnion(l, r interface{}) interface{} {
+	if isUndefOrNull(l) && isUndefOrNull(r) {
+		return nil
+	}
+	a, b := rt.pyUnionArgs(l), rt.pyUnionArgs(r)
+	if a == nil || b == nil {
+		return nil
+	}
+	var out []interface{}
+	for _, t := range append(append([]interface{}{}, a...), b...) {
+		seen := false
+		for _, s := range out {
+			seen = seen || s == t
+		}
+		if !seen {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 1 {
+		return out[0]
+	}
+	u := newJSObject()
+	u.set("__pyunion", &jsArray{elems: out})
+	return u
+}
+
+// pyUnionOf reports whether v is a union, and its arguments.
+func pyUnionOf(v interface{}) (*jsArray, bool) {
+	if o, ok := v.(*jsObject); ok {
+		a, isU := o.props["__pyunion"].(*jsArray)
+		return a, isU
+	}
+	return nil, false
+}
+
+// pyUnionStr renders a union as CPython does: int | None.
+func (rt *jsrt) pyUnionStr(u *jsArray) string {
+	parts := make([]string, len(u.elems))
+	for i, c := range u.elems {
+		if c == rt.pyBuiltinClass("NoneType") {
+			parts[i] = "None"
+			continue
+		}
+		s := rt.pyString(c)
+		parts[i] = s[len("<class '") : len(s)-2]
+	}
+	return strings.Join(parts, " | ")
+}
+
+// pyUnionEq: two unions are equal when they hold the same types, in any order.
+func pyUnionEq(a, b *jsArray) bool {
+	if len(a.elems) != len(b.elems) {
+		return false
+	}
+	for _, x := range a.elems {
+		found := false
+		for _, y := range b.elems {
+			found = found || x == y
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}

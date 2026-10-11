@@ -1,17 +1,16 @@
-# Full-syntax test: Python (3.12 core grammar) - part 1 of 2, sections 01-89.
+# Full-syntax test: Python (3.12 core grammar) - part 1 of 2.
 #
 # THE PYTHON RATCHET IS TWO FILES, so that neither -frozen interpreter leg comes
-# near the IR interpreter's step brake (-max-steps, 100M per call):
+# near the IR interpreter's step brake (-max-steps, 100M per call). Sections 90-91
+# build ints of thousands of digits, which the interpreter's arbitrary precision
+# arithmetic makes the costliest rows of all, so they have a file of their own:
 #
-#   tests/python-test-full.py     sections 01-89, the Python 3.12 syntax walk and
-#                                 the builtins' semantics
-#   tests/python-test-full.2.py   sections 90-91, arbitrary precision ints at the
-#                                 sizes where CPython's own limits apply
+#   tests/python-test-full.py     every other section
+#   tests/python-test-full.2.py   sections 90-91
 #
-# The section NUMBERS are global, the two files together run the assertions in
-# order, and ./test.sh --full reports them as the units python and python2. Add a
-# new section to whichever file it belongs in, and keep the numbers globally
-# unique across the two.
+# The section NUMBERS are global, the two files together run the assertions, and
+# ./test.sh --full reports them as the units python and python2. Add a new section
+# to tests/python-test-full.py, and keep the numbers globally unique across the two.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 # of the default matrix. The goal of the metacompiler is to support the full
@@ -4529,6 +4528,38 @@ def s89():
         return a is sentinel
     check("obj9", f() and not f(0))
 
+# ===== SECTION 92: X | Y over types =====
+# type's __or__ makes a typing.Union: the arguments flattened and deduplicated
+# in order (int | int is int itself), None standing as NoneType and printed as
+# None, equal and hashed regardless of order, and accepted by isinstance and
+# issubclass. A non-type operand is still a TypeError. Rows from CPython 3.14.
+class S92A:
+    pass
+
+class S92B(S92A):
+    pass
+
+def s92():
+    ts = [int, str, None, S92A, S92B, float, type(None), bool]
+    u = ts[0] | ts[1]
+    check("uni1", repr(u) == "int | str" and str(ts[1] | ts[2]) == "str | None" and repr(type(u)) == "<class 'typing.Union'>"
+          and type(u).__name__ == "Union" and str(ts[3] | ts[2]) == "__main__.S92A | None" and str(ts[2] | ts[0]) == "None | int")
+    check("uni2", (ts[0] | ts[0]) is int and str((u | ts[5]) | ts[2]) == "int | str | float | None" and str(ts[0] | (ts[1] | ts[0])) == "int | str"
+          and str(ts[6] | ts[0]) == "None | int" and (ts[6] | ts[2]) is type(None))
+    check("uni3", u == (ts[1] | ts[0]) and u != ts[0] and not (u != (ts[1] | ts[0])) and hash(u) == hash(ts[1] | ts[0])
+          and {u: 1}[ts[1] | ts[0]] == 1 and type(u) is type(ts[3] | ts[2]) and not isinstance(u, type))
+    check("uni4", u.__args__ == (int, str) and (ts[2] | ts[0]).__args__ == (type(None), int) and [u] == [ts[1] | ts[0]])
+    check("uni5", isinstance(None, ts[0] | ts[2]) and isinstance(S92B(), ts[3] | ts[2]) and not isinstance(2.5, u)
+          and isinstance(3, (ts[1] | ts[2], ts[0])) and issubclass(ts[7], ts[0] | ts[1]) and not issubclass(ts[0], ts[1] | ts[2]))
+    msgs = []
+    for x, y in [(ts[0], 3), (3, ts[0]), (ts[0], "s"), (None, None)]:
+        try:
+            x | y
+        except TypeError as e:
+            msgs.append(str(e))
+    check("uni6", msgs == ["unsupported operand type(s) for |: 'type' and 'int'", "unsupported operand type(s) for |: 'int' and 'type'",
+                           "unsupported operand type(s) for |: 'type' and 'str'", "unsupported operand type(s) for |: 'NoneType' and 'NoneType'"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4619,5 +4650,6 @@ def main():
     s87() # SECTION-CALL 87
     s88() # SECTION-CALL 88
     s89() # SECTION-CALL 89
+    s92() # SECTION-CALL 92
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

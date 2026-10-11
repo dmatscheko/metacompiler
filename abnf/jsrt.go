@@ -3437,10 +3437,15 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 				return rt.pyEqual(aa, bb)
 			}
 		}
-		// A frozenset key, by its members.
+		// A frozenset key, by its members; a union key likewise.
 		if _, isA := pySetElems(a); isA {
 			if _, isB := pySetElems(b); isB {
 				return rt.pyEqual(a, b)
+			}
+		}
+		if ua, isA := pyUnionOf(a); isA {
+			if ub, isB := pyUnionOf(b); isB {
+				return pyUnionEq(ua, ub)
 			}
 		}
 	}
@@ -3774,6 +3779,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 		// reads <class 'float'> rather than the default object rendering.
 		if re, im, ok := pyComplexParts(t); ok {
 			return pyCplxRepr(re, im)
+		}
+		if u, ok := pyUnionOf(t); ok {
+			return rt.pyUnionStr(u)
 		}
 		if name, ok := rt.pyClassName(t); ok {
 			// A class a `class` statement made carries its defining module in
@@ -16172,6 +16180,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(v)
 				}
 				if msg := rt.pyBinTypeErr(op, l, r, l, r); msg != "" {
+					if u := rt.pyUnion(l, r); op == "|" && u != nil {
+						return w(u)
+					}
 					panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 				}
 				// dict | dict is a merged copy, the right operand's values winning.
@@ -18435,6 +18446,10 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 		}
 		return true
 	}
+	if ux, ok := pyUnionOf(x); ok {
+		uy, ok2 := pyUnionOf(y)
+		return ok2 && pyUnionEq(ux, uy)
+	}
 	// A Python bool IS an int - `class bool(int)` - so True == 1, True == 1.0,
 	// False == 0 and False == -0.0 all hold, and so does every container equality
 	// built on them ([True] == [1], {True: 1} == {1: 1}). Reading the bool as its
@@ -19765,6 +19780,9 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		// "nope") except AttributeError:` works.
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"type object '"+rt.toString(cls.props["__name"])+"' has no attribute '"+name+"'")})
+	}
+	if u, ok := pyUnionOf(obj); ok && name == "__args__" {
+		return pyTup(&jsArray{elems: append([]interface{}{}, u.elems...)})
 	}
 	if inst, cls, ok := pyInstance(obj); ok {
 		switch name {
@@ -21305,6 +21323,9 @@ func init() {
 
 // pyIsInstance is isinstance(v, C), with a list/tuple of classes accepted.
 func (rt *jsrt) pyIsInstance(v interface{}, target interface{}) bool {
+	if u, ok := pyUnionOf(target); ok {
+		target = u
+	}
 	if arr, ok := target.(*jsArray); ok {
 		for _, e := range arr.elems {
 			if rt.pyIsInstance(v, e) {
@@ -21807,6 +21828,9 @@ func pyBuiltinSub(child, base string) bool {
 // languages/lib/python-rt.metajs and clsIsSub in
 // languages/python-interpreter.abnf.
 func (rt *jsrt) pyIsSubclass(c, target interface{}) bool {
+	if u, ok := pyUnionOf(target); ok {
+		target = u
+	}
 	if arr, ok := target.(*jsArray); ok {
 		for _, e := range arr.elems {
 			if rt.pyIsSubclass(c, e) {
@@ -21991,6 +22015,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		}
 		if _, isMod := t.props["__pymod"]; isMod {
 			return "module"
+		}
+		if _, isU := pyUnionOf(t); isU {
+			return "typing.Union"
 		}
 		// An instance of a user class is a "'C' object" in every message.
 		if _, cls, isInst := pyInstance(t); isInst {

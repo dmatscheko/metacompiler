@@ -1287,8 +1287,59 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (hasOwn(v, "__pysm")) { return pyBuiltinTypeObj("staticmethod") }
         if (hasOwn(v, "__pycm")) { return pyBuiltinTypeObj("classmethod") }
         if (v.__pymod != undefined) { return pyBuiltinTypeObj("module") }
+        if (v.__pyunion !== undefined) { return pyBuiltinTypeObj("typing.Union") }
         if (v.__pyconst !== undefined) { return pyBuiltinTypeObj(v.__pyconst == "Ellipsis" ? "ellipsis" : v.__pyconst + "Type") }
         return hostGlobals["object"]
+    }
+    // X | Y over type objects and None is CPython's typing.Union, here
+    // {__pyunion: args}: the arguments flattened and deduplicated in order, None
+    // standing as NoneType, and a single argument is that type itself. null when
+    // an operand is not a type, None or a union, or both are None. Twin of
+    // rt.pyUnion in abnf/jsrtpysub.go and pyUnion in lib/python-rt.metajs.
+    function pyUnionArgs(v) {
+        if (v === null || v === undefined) { return [hostGlobals["NoneType"]] }
+        if (typeof v != "object") { return null }
+        if (v.__pyunion !== undefined) { return v.__pyunion }
+        if (v.__isclass === true) { return [v] }
+        return null
+    }
+    function pyUnion(l, r) {
+        if ((l === null || l === undefined) && (r === null || r === undefined)) { return null }
+        var a = pyUnionArgs(l)
+        var b = pyUnionArgs(r)
+        if (a === null || b === null) { return null }
+        var out = []
+        var all = a.concat(b)
+        for (var i = 0; i < all.length; i++) {
+            var seen = false
+            for (var j = 0; j < out.length; j++) { if (out[j] === all[i]) { seen = true } }
+            if (!seen) { out.push(all[i]) }
+        }
+        var res = anytype
+        res = out[0]
+        if (out.length > 1) { res = {__pyunion: out} }
+        return res
+    }
+    function pyIsUnion(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyunion !== undefined }
+    // int | None renders as such: each argument by its class name, NoneType as None.
+    function pyUnionStr(u) {
+        var s = ""
+        for (var i = 0; i < u.__pyunion.length; i++) {
+            var c = u.__pyunion[i]
+            if (i > 0) { s += " | " }
+            s += c === hostGlobals["NoneType"] ? "None" : pyClsQualName(c)
+        }
+        return s
+    }
+    // Two unions are equal when they hold the same types, in any order.
+    function pyUnionEq(a, b) {
+        if (a.length != b.length) { return false }
+        for (var i = 0; i < a.length; i++) {
+            var found = false
+            for (var j = 0; j < b.length; j++) { if (a[i] === b[j]) { found = true } }
+            if (!found) { return false }
+        }
+        return true
     }
     // A class's name as its repr shows it: a class a `class` statement made
     // carries its defining module in an own __module__ (CPython's
@@ -1682,6 +1733,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // second argument may (issubclass(bool, (str, int)) is True). A tuple is a
     // list in this value model; see docs/working-on-this-project.md 7.9.
     hostGlobals["issubclass"] = function(c1, c2) {
+        if (pyIsUnion(c2)) { return hostGlobals["issubclass"](c1, c2.__pyunion) }
         if (Array.isArray(c2)) {
             for (var i = 0; i < c2.length; i++) { if (clsIsSub(c1, c2[i])) { return true } }
             return false
@@ -1804,6 +1856,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return pynHashFrozen(fl)
         }
         if (Array.isArray(v) || isSet(v) || isDict(v) || isView(v)) { pyListErr("TypeError", "unhashable type: '" + pyTypeOf(v).__name + "'") }
+        // A union hashes as the frozenset of its types.
+        if (pyIsUnion(v)) {
+            var ul = []
+            for (var ui = 0; ui < v.__pyunion.length; ui++) { ul.push(pyHashW(v.__pyunion[ui])) }
+            return pynHashFrozen(ul)
+        }
         if (pyUser(v) && v.__isclass !== true) {
             var own = pyHashOwner(v.__class)
             if (own !== undefined) {
@@ -2826,6 +2884,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(a) && Array.isArray(b)) { return pyEq(a, b) }
         // A frozenset key, by its members.
         if (isSet(a) && isSet(b)) { return pyEq(a, b) }
+        if (pyIsUnion(a) && pyIsUnion(b)) { return pyUnionEq(a.__pyunion, b.__pyunion) }
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
         return floVal(a) == floVal(b)
     }
@@ -2874,6 +2933,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             && a.__genalias === true && b.__genalias === true) {
             return a.origin === b.origin && pyEq(a.targs, b.targs)
         }
+        if (pyIsUnion(a) && pyIsUnion(b)) { return pyUnionEq(a.__pyunion, b.__pyunion) }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
         if (isView(a)) { return pyViewEq(a, b) }
         if (isView(b)) { return pyViewEq(b, a) }
@@ -3064,6 +3124,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v !== null && v !== undefined && typeof v == "object" && v.__isclass == true) {
             return "<class '" + pyClsQualName(v) + "'>"
         }
+        if (pyIsUnion(v)) { return pyUnionStr(v) }
         // A compiled pattern and a match render the way CPython's repr does.
         if (isPyRe(v)) { return "re.compile(" + prepr(v.pattern) + ")" }
         if (isPyMatch(v)) {
@@ -7793,7 +7854,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // answer it, and sequence repetition, whose count is any int.
         if ((typeof l != "number" || typeof r != "number") && hasOwn(pyTypedOps, op) && !pyUser(l) && !pyUser(r)) {
             var terr = pyBinTypeErr(op, l, r, l, r)
-            if (terr != "") { pyListErr("TypeError", terr) }
+            if (terr != "") {
+                if (op == "|") {
+                    var un = pyUnion(l, r)
+                    if (un !== null) { return un }
+                }
+                pyListErr("TypeError", terr)
+            }
             if (op == "*") {
                 if (typeof l == "string" || Array.isArray(l)) { return pyRepeat(l, r) }
                 if (typeof r == "string" || Array.isArray(r)) { return pyRepeat(r, l) }
@@ -10754,6 +10821,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // literally has a "keys" property holding its key ARRAY, and CPython's
         // d.keys is the method. x.__class__ is the same class object type(x)
         // hands out, so `[].__class__ is list` holds.
+        if (pyIsUnion(o) && name == "__args__") { return pyTup(o.__pyunion.slice(0)) }
         if (name == "__hash__" && pyValHashNone(o)) { return undefined }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return pyBoundBuiltin(o, name) }
         if (name == "__class__") { return pyTypeOf(o) }
@@ -11390,6 +11458,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // isinstance, including the builtin type objects.
     function pyIsInstance(v, cls) {
         if (cls == null || cls == undefined) { return false }
+        if (pyIsUnion(cls)) { return pyIsInstance(v, cls.__pyunion) }
         if (Array.isArray(cls)) {
             for (var i = 0; i < cls.length; i++) { if (pyIsInstance(v, cls[i])) { return true } }
             return false
