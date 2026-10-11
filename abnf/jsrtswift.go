@@ -106,12 +106,7 @@ func init() {
 			if !ok {
 				rt.fail("js_swtuple needs an array")
 			}
-			o := newJSObject()
-			o.set("__tuple", float64(len(arr.elems)))
-			for i, e := range arr.elems {
-				o.set(itoa(i), e)
-			}
-			return rt.wrap(o)
+			return rt.wrap(swTupleOf(arr.elems...))
 		}
 		m["js_swtuparr"] = func(a []uint64) uint64 {
 			o, ok := u(a[0]).(*jsObject)
@@ -924,6 +919,95 @@ func init() {
 		}
 		m["js_swmax"] = swPick(true, func(c int) bool { return c > 0 })
 		m["js_swmin"] = swPick(false, func(c int) bool { return c < 0 })
+		// zip(a, b): the pairs of a's and b's elements, as many as the shorter
+		// side has. Each side arrives as an array, or as a PartialRangeFrom
+		// (sw_zipside in swift-to-llvm-ir.abnf), which the other side bounds. Twin
+		// of hostGlobals["zip"] in swift-interpreter.abnf.
+		m["js_swzip"] = func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			xs, xok := l.(*jsArray)
+			ys, yok := r.(*jsArray)
+			var n int
+			switch {
+			case !xok && !yok:
+				rt.fail("zip of two unbounded ranges")
+			case !xok:
+				n = len(ys.elems)
+			case !yok:
+				n = len(xs.elems)
+			default:
+				n = len(xs.elems)
+				if len(ys.elems) < n {
+					n = len(ys.elems)
+				}
+			}
+			side := func(v interface{}, arr *jsArray, i int) interface{} {
+				if arr != nil {
+					return arr.elems[i]
+				}
+				return swNum(rt, v.(*jsObject).props["lo"]) + float64(i)
+			}
+			out := &jsArray{elems: make([]interface{}, 0, n)}
+			for i := 0; i < n; i++ {
+				out.elems = append(out.elems, swTupleOf(side(l, xs, i), side(r, ys, i)))
+			}
+			return w(out)
+		}
+		// stride(from:to:by:) / stride(from:through:by:) as an array: an Int stride
+		// adds the step, a floating-point one computes element i as start + i*step
+		// in ONE rounding (the standard library's addingProduct). Twin of swStride
+		// in swift-interpreter.abnf.
+		plusH := rt.wrapStr("+")
+		m["js_swstride"] = func(a []uint64) uint64 {
+			from, end, by := u(a[0]), u(a[1]), u(a[2])
+			closed := a[3] == jsHTrue
+			step := swNum(rt, by)
+			if step == 0 {
+				rt.swAbort("Fatal error: Stride size must not be zero")
+			}
+			e := swNum(rt, end)
+			past := func(v float64) bool {
+				if step > 0 {
+					return v > e || (!closed && v == e)
+				}
+				return v < e || (!closed && v == e)
+			}
+			out := &jsArray{}
+			if !swIsFlo(from) && !swIsFlo(end) && !swIsFlo(by) {
+				for cur := a[0]; !past(swNum(rt, u(cur))); cur = m["js_swarith"]([]uint64{plusH, cur, a[2]}) {
+					out.elems = append(out.elems, u(cur))
+				}
+				return w(out)
+			}
+			// A Float stride reads all three operands at Float width: an
+			// untyped literal among them is a Float too.
+			f32 := swIsF32(from) || swIsF32(end) || swIsF32(by)
+			s := swNum(rt, from)
+			if f32 {
+				s, e, step = jvmFround(s), jvmFround(e), jvmFround(step)
+			}
+			for i, v := 1, s; !past(v); i++ {
+				out.elems = append(out.elems, swReFlo(v, f32))
+				v = math.FMA(float64(i), step, s)
+				if f32 {
+					v = jvmFround(v)
+				}
+			}
+			return w(out)
+		}
+		// fatalError / precondition / assert and the rest: kind is swiftc's words
+		// ("Fatal error", "Precondition failed", "Assertion failed"), the message
+		// optional. Twin of swTrap in swift-interpreter.abnf.
+		m["js_swtrap"] = func(a []uint64) uint64 {
+			kind := rt.toString(u(a[0]))
+			if v := u(a[1]); !isNullish(v) {
+				if msg := rt.swDesc(v); msg != "" {
+					rt.swAbort("%s: %s", kind, msg)
+				}
+			}
+			rt.swAbort("%s", kind)
+			return 0
+		}
 		// The Double methods this subset carries, in front of the runtime's own
 		// js_mcall (a float box is not a shape memberCall knows). Verified
 		// against swift 6.1.2: 2.0.rounded() is 2.0, 2.5.squareRoot() is
@@ -1471,6 +1555,16 @@ func swAdoptWidth(ty string) (uint8, bool, bool) {
 	return 0, false, false
 }
 
+// swTupleOf builds the {__tuple: n, "0": ..., "1": ...} object a Swift tuple is.
+func swTupleOf(vals ...interface{}) *jsObject {
+	o := newJSObject()
+	o.set("__tuple", float64(len(vals)))
+	for i, e := range vals {
+		o.set(itoa(i), e)
+	}
+	return o
+}
+
 func swMkFlo(f float64) jsJFlo { return jsJFlo{f: f} }
 
 func swIsFlo(v interface{}) bool { _, ok := v.(jsJFlo); return ok }
@@ -1660,7 +1754,8 @@ func swFloParse(s string) (float64, bool) {
 			return math.Inf(-1), true
 		}
 		return math.Inf(1), true
-	case "nan":
+	}
+	if swIsNanText(strings.ToLower(b)) {
 		return math.NaN(), true
 	}
 	if len(b) > 1 && b[0] == '0' && (b[1] == 'x' || b[1] == 'X') {
@@ -1679,6 +1774,20 @@ func swFloParse(s string) (float64, bool) {
 		return 0, false
 	}
 	return f, true
+}
+
+// swIsNanText reports whether w (lower-cased, unsigned) is one of strtod's NaN
+// spellings: "nan", "snan", or "nan(...)" with anything but a parenthesis
+// inside. The value model has ONE NaN, so the sign and payload they spell are not
+// kept. Twin of swIsNanText in swift-interpreter.abnf and lib/swift-rt.metajs.
+func swIsNanText(w string) bool {
+	if w == "nan" || w == "snan" {
+		return true
+	}
+	if len(w) < 5 || !strings.HasPrefix(w, "nan(") || !strings.HasSuffix(w, ")") {
+		return false
+	}
+	return !strings.ContainsAny(w[4:len(w)-1], "()")
 }
 
 // swHexText reports whether s is hex digits with at most one point, at least one

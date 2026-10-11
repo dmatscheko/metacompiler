@@ -19,10 +19,10 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and Foundation - stdlib usage strictly mirrors the features file
 // (Int/String/Bool/Array/Dictionary basics, print/exit/abs/min/max and
-// map/filter/forEach) - so no CaseIterable/Comparable/Codable conformances, and
+// map/filter/forEach) plus SECTION 81's free functions - so no CaseIterable/Comparable/Codable conformances, and
 // Equatable only where a section tests the synthesized == (own protocols carry
-// the generic constraints), no key paths
-// (\.p is the stdlib KeyPath type) and no stride. Concurrency at RUNTIME:
+// the generic constraints), and no key paths
+// (\.p is the stdlib KeyPath type). Concurrency at RUNTIME:
 // async functions and one actor are defined and type-checked, never awaited.
 // Also out: macros (#... / @attached), result builders (@resultBuilder),
 // ARC observation (deinit is declared, its timing never asserted), unsafe
@@ -2157,10 +2157,8 @@ func s37() {
 // whole of that iteration, so a mutating closure and its neighbours see each other
 // (38m). Both were checked against swiftc 6.1.2.
 //
-// NOT asserted, because it is absent from this subset rather than wrong:
-// `stride(from:to:by:)`, named as out of scope in this file's header. Its for-in
-// would be makeForList over a materialized sequence, which is exactly what 38c/38d
-// cover.
+// A for-in over `stride(from:to:by:)` is makeForList over its materialized
+// elements, which is exactly what 38c/38d cover.
 func s38() {
     // --- the range loop, half-open and closed ---
     var a: [() -> Int] = []
@@ -3756,6 +3754,68 @@ func s80() {
                  && byLen[2]! == ["aa", "cc"] && xs.reduce(0, +) == 6)
 }
 
+// ===== SECTION 81: the standard library's free functions =====
+// zip, stride, repeatElement, swap, min/max of three or more, abs at a sized
+// width, the trapping functions on their passing path, a closure taking an
+// n-tuple apart, nested tuple patterns, type(of:) of an empty collection, and
+// strtod's NaN spellings. Every value read off swiftc 6.1.2.
+func s81() {
+    let a = [3, 1, 4, 1, 5]
+    let b = ["x", "y", "z"]
+    // zip stops at the shorter side; a PartialRangeFrom is bounded by the other.
+    let ab = Array(zip(a, b))
+    check("81a", ab.count == 3 && ab[1].0 == 1 && ab[1].1 == "y" && "\(ab[2])" == "(4, \"z\")")
+    let byKey = Dictionary(uniqueKeysWithValues: zip(b, 1...))
+    var walked = ""
+    for (i, c) in zip(0..., "hey") { walked += "\(i)\(c)" }
+    check("81b", byKey["y"]! == 2 && byKey.count == 3 && walked == "0h1e2y"
+                 && Array(zip([1], [Int]())).isEmpty && Array(zip(Set([7]), [8]))[0].1 == 8)
+    // A closure of n parameters takes an n-tuple argument apart.
+    let joined = zip(a, b).map { "\($0)\($1)" }.joined(separator: ",")
+    let sums = [(1, 2), (3, 4)].map { $0 + $1 }
+    let named = [(1, 2), (3, 4)].map { x, y in x * y }
+    let kv = ["k": 1].map { k, v in k + String(v) }
+    check("81c", joined == "3x,1y,4z" && sums == [3, 7] && named == [2, 12] && kv == ["k1"]
+                 && zip([1, 2], [3, 4]).map(+) == [4, 6] && a.enumerated().map { $0 * $1 } == [0, 1, 8, 3, 20])
+    // Nested tuple patterns, in a for-in, a declaration and an assignment.
+    var nest = ""
+    for (i, (x, y)) in zip(a, b).enumerated() { nest += "\(i)\(x)\(y)" }
+    let (p, (q, r)) = (1, (2, "s"))
+    var (m, (n, _)) = (1, (2, 3))
+    (m, (n, _)) = (n, (m, 9))
+    check("81d", nest == "03x11y24z" && p == 1 && q == 2 && r == "s" && m == 2 && n == 1)
+    // stride: an Int one adds the step; a floating-point one computes each element
+    // as start + i*step in one rounding, so 0.6000000000000001 where rounding the
+    // product first gives 0.6, and a Float one rounds at Float width (1.4000001).
+    check("81e", Array(stride(from: 0, to: 10, by: 3)) == [0, 3, 6, 9]
+                 && Array(stride(from: 10, through: 0, by: -5)) == [10, 5, 0]
+                 && Array(stride(from: 3, to: 3, by: 1)).isEmpty && Array(stride(from: 1, through: 1, by: -1)) == [1])
+    check("81f", "\(Array(stride(from: 0.1, to: 0.75, by: 0.1)))" == "[0.1, 0.2, 0.30000000000000004, 0.4, 0.5, 0.6000000000000001, 0.7000000000000001]"
+                 && "\(Array(stride(from: 0.5, through: -0.1, by: -0.2)))" == "[0.5, 0.3, 0.09999999999999998]"
+                 && "\(Array(stride(from: Float(0.5), to: 2, by: 0.3)))" == "[0.5, 0.8, 1.1, 1.4000001, 1.7]")
+    // min/max of three or more fold the two-operand rule; abs keeps the width.
+    let i8: Int8 = -3
+    check("81g", min(4, 2, 9) == 2 && max(4, 2, 9, 1) == 9 && min(1.5, 0.5, 2.5) == 0.5
+                 && abs(i8) == 3 && "\(type(of: abs(i8)))" == "Int8" && abs(-3000000000) == 3000000000)
+    var s1 = "a", s2 = "b"
+    swap(&s1, &s2)
+    precondition(s1 == "b", "swapped")
+    assert(s2 == "a")
+    check("81h", s1 + s2 == "ba" && Array(repeatElement("ab", count: 3)) == ["ab", "ab", "ab"])
+    // type(of:) of an empty collection names its static type.
+    let es: Set<Int> = []
+    let ed: [Int: Bool] = [:]
+    var ev = Set<String>()
+    check("81i", "\(type(of: Set<Int>()))" == "Set<Int>" && "\(type(of: [Int]()))" == "Array<Int>"
+                 && "\(type(of: [String: Int]()))" == "Dictionary<String, Int>" && "\(type(of: es))" == "Set<Int>"
+                 && "\(type(of: ed))" == "Dictionary<Int, Bool>" && "\(type(of: ev))" == "Set<String>")
+    ev = ["q", "q"]
+    check("81j", ev.count == 1)
+    // strtod's NaN spellings parse (their sign and payload are not kept here).
+    check("81k", Double("nan(0x1)")!.isNaN && Double("-snan")!.isNaN && Double("nan(a b)")!.isNaN
+                 && Double("snan()") == nil && Double("nan(())") == nil && Float("nan(1)")!.isNaN)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3837,6 +3897,7 @@ func main() {
     s78() // SECTION-CALL 78
     s79() // SECTION-CALL 79
     s80() // SECTION-CALL 80
+    s81() // SECTION-CALL 81
     print("full: \(checks) checks, \(fails) failures")
 }
 

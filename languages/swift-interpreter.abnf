@@ -1017,9 +1017,11 @@ DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd TupNames [ ":" DeclTupTy ] "=" Expression [ ";" ] ;
 // `let (a, b): (Double, Int) = (1, 2)`: the annotation types the literal, so a is 1.0.
 DeclTupTy   <~~ push({dtty: stripWs(up.in)}) ~~> = Type ;
+// An element is a name, _ or a nested tuple pattern: `for (i, (x, y)) in`.
 TupNames    <~~ push({tnames: takeAll()}) ~~>
             = "(" TupName { "," TupName } ")" ;
-TupName     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
+TupName     = TupNames | TupLeaf ;
+TupLeaf     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 // (x, y) = (y, x) - assignment through a tuple pattern (a swap, typically).
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
@@ -1452,7 +1454,7 @@ LabTrail    <~~ push(makeLabTrail(takeAll())) ~~>
 // An argument carries its label (matched against the parameter labels of the
 // callee, so a call may leave defaulted parameters out) and, for &x, the name it
 // passes by reference.
-CallArg     <~~ push(makeCallArg(takeAll())) ~~>
+CallArg     <~~ push(makeCallArg(takeAll(), up.in)) ~~>
             = [ ArgLabel ] ( InoutArg | Expression | OpRefArg ) ;
 // `(1..<3).reduce(0, +)`: an operator used as a VALUE. It is the LAST alternative
 // on purpose - `f(-1)` is an expression, and only a run of operator characters that
@@ -1569,7 +1571,7 @@ TupleLabel  = Id <~~ push({tlabel: swBt(up.in)}) ~~> ":" ;
 // Closure shorthand arguments ($0, $1, ...): a closure without a signature binds
 // its arguments under exactly these names, so the shorthand is an ordinary read.
 Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
-ShortIdx    <~~ push(makeVarRef("$" + up.in)) ~~>
+ShortIdx    <~~ swNoteShort(up.in, up.start); push(makeVarRef("$" + up.in)) ~~>
             = "0"..."9" { "0"..."9" } ;
 
 // A closure: { x in x * 2 } or { (a: Int, b: Int) -> Int in a + b } or, with no
@@ -3810,21 +3812,157 @@ KwContinue  = "continue" KwEnd ;
         // `< 0` is FALSE for -0.0, yet abs(-0.0) is 0.0 (swift 6.1.2, and the
         // compiled halves through Math.abs). The sign of a zero only shows through 1/v.
         if (isFlo(v)) { var f = v.__flo; return swReFlo(f < 0 || (f == 0 && 1 / f < 0) ? 0 - f : f, isF32(v)) }
-        return v < 0 ? -v | 0 : v | 0
+        // A sized integer keeps its width: abs(Int8(-3)) is the Int8 3.
+        if (szIs(v)) { return szNum(v) < 0 ? szNeg(v) : v }
+        return v < 0 ? -v : v
     }
     // Swift's own min/max are `y < x ? y : x` and `y >= x ? y : x`, so a TIE
     // keeps the LEFT operand for min and takes the right for max, and a NaN
     // operand keeps the left one because every comparison against it is false:
     // min(-0.0, 0.0) is -0.0 and min(nan, 1.0) is nan. Do not write it the other
-    // way round (`a < b ? a : b`).
-    hostGlobals["max"] = function(a, b) {
+    // way round (`a < b ? a : b`). The variadic min(x, y, z, rest...) folds the
+    // same two-operand rule left to right, which is how the standard library
+    // writes it.
+    function swMax2(a, b) {
         if (isFlo(a) || isFlo(b)) { return swD(b) >= swD(a) ? b : a }
         return a > b ? a : b
     }
-    hostGlobals["min"] = function(a, b) {
+    function swMin2(a, b) {
         if (isFlo(a) || isFlo(b)) { return swD(b) < swD(a) ? b : a }
         return a < b ? a : b
     }
+    hostGlobals["max"] = function() {
+        var r = anytype
+        r = arguments[0]
+        for (var i = 1; i < arguments.length; i++) { r = swMax2(r, arguments[i]) }
+        return r
+    }
+    hostGlobals["min"] = function() {
+        var r = anytype
+        r = arguments[0]
+        for (var i = 1; i < arguments.length; i++) { r = swMin2(r, arguments[i]) }
+        return r
+    }
+    // zip(a, b): the pairs of a's and b's elements, as many as the SHORTER one has.
+    // Swift's Zip2Sequence is lazy; an array of 2-tuples walks, counts, maps and
+    // prints its elements the same, and the one unbounded sequence here, a
+    // PartialRangeFrom (`zip(ks, 1...)`), is bounded by the other side. Twin of
+    // js_swzip in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swIsOpenRange(v) { return isRange(v) && v.lo !== null && (v.hi === null || v.hi === undefined) }
+    hostGlobals["zip"] = function(a, b) {
+        var oa = swIsOpenRange(a)
+        var ob = swIsOpenRange(b)
+        if (oa && ob) { fail("zip of two unbounded ranges") }
+        var xs = oa ? [] : swArrayOf(a)
+        var ys = ob ? [] : swArrayOf(b)
+        var n = oa ? ys.length : (ob || xs.length < ys.length ? xs.length : ys.length)
+        var out = []
+        for (var i = 0; i < n; i++) {
+            out.push(newTupleVal([oa ? a.lo + i : xs[i], ob ? b.lo + i : ys[i]]))
+        }
+        return out
+    }
+    // stride(from:to:by:) / stride(from:through:by:), as an array of its elements.
+    // An Int stride adds the step; a floating-point one computes element i as
+    // start + i * step in ONE rounding (the standard library's addingProduct):
+    // stride(from: 0.1, to: 3, by: 0.1) has 0.6000000000000001 where rounding the
+    // product first gives 0.6. A Float operand makes it a Float stride. Twin of
+    // js_swstride in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swStride(from, end, by, closed) {
+        var step = swD(by)
+        if (step == 0) { fail("Fatal error: Stride size must not be zero") }
+        var e = swD(end)
+        var out = []
+        if (!isFlo(from) && !isFlo(end) && !isFlo(by)) {
+            var cur = anytype
+            cur = from
+            while (!swStridePast(swD(cur), e, step, closed)) {
+                out.push(cur)
+                cur = szArith("+", cur, by)
+            }
+            return out
+        }
+        // A Float stride reads all three operands at Float width: an untyped
+        // literal among them is a Float too.
+        var f32 = isF32(from) || isF32(end) || isF32(by)
+        var s = swD(from)
+        if (f32) { s = coreF32Round(s); e = coreF32Round(e); step = coreF32Round(step) }
+        var v = s
+        var i = 0
+        while (!swStridePast(v, e, step, closed)) {
+            out.push(swReFlo(v, f32))
+            i = i + 1
+            v = swFma(i, step, s)
+            if (f32) { v = coreF32Round(v) }
+        }
+        return out
+    }
+    function swStridePast(v, e, step, closed) {
+        if (step > 0) { return closed ? v > e : v >= e }
+        return closed ? v < e : v <= e
+    }
+    // a*b + c rounded ONCE. Dekker's exact product and Knuth's exact sum carry the
+    // value as s + v + w; s + v rounded is the answer unless that sum is exactly
+    // halfway between two doubles, where w decides. Outside the range where
+    // Veltkamp's split is exact (an operand beyond 2^995, a product below 2^-960) it
+    // rounds twice. Twin of swFma in lib/swift-rt.metajs; abnf/jsrtswift.go has
+    // math.FMA.
+    var swFmaK = []
+    function swFma(a, b, c) {
+        var p = a * b
+        if (p == 0 || p !== p || p - p !== 0 || c !== c || c - c !== 0) { return p + c }
+        if (swFmaK.length == 0) {
+            var q = 1
+            for (var k = 0; k < 995; k++) { q = q * 2 }
+            swFmaK.push(q)
+            q = 1
+            for (var k2 = 0; k2 < 960; k2++) { q = q * 2 }
+            swFmaK.push(q)
+        }
+        if (Math.abs(a) > swFmaK[0] || Math.abs(b) > swFmaK[0] || Math.abs(p) * swFmaK[1] < 1) { return p + c }
+        var t1 = 134217729 * a
+        var ah = t1 - (t1 - a)
+        var al = a - ah
+        var t2 = 134217729 * b
+        var bh = t2 - (t2 - b)
+        var bl = b - bh
+        var err0 = al * bl - (((p - ah * bh) - al * bh) - ah * bl)
+        var s = p + c
+        var z = s - p
+        var t = (p - (s - z)) + (c - z)
+        var v = t + err0
+        var z2 = v - t
+        var w = (t - (v - z2)) + (err0 - z2)
+        var r = s + v
+        var z3 = r - s
+        var err = (s - (r - z3)) + (v - z3)
+        if (err != 0 && w != 0 && (err > 0) == (w > 0)) {
+            var h = err + err
+            if ((r + h) - r == h) { return r + h }
+        }
+        return r
+    }
+    // repeatElement(x, count: n): Swift's Repeated, as the array it walks as.
+    hostGlobals["repeatElement"] = function(x, n) { return swArrayOf(x, n) }
+    // swap(&a, &b): the two inout boxes trade values; the call's write-back stores them.
+    hostGlobals["swap"] = function(a, b) {
+        var t = a.v
+        a.v = b.v
+        b.v = t
+    }
+    // The trapping functions, in swiftc's wording without its `file:line: ` prefix
+    // (see "How a Swift program DIES"). The message is optional; an empty one adds
+    // no colon. assert fires too: swiftc's default build is -Onone.
+    function swTrap(kind, msg) {
+        var m = msg === undefined || msg === null ? "" : swstr(msg)
+        eprintln(m == "" ? kind : kind + ": " + m)
+        exit(1)
+    }
+    hostGlobals["fatalError"] = function(msg) { swTrap("Fatal error", msg) }
+    hostGlobals["preconditionFailure"] = function(msg) { swTrap("Fatal error", msg) }
+    hostGlobals["assertionFailure"] = function(msg) { swTrap("Fatal error", msg) }
+    hostGlobals["precondition"] = function(c, msg) { if (!core.test(c)) { swTrap("Precondition failed", msg) } }
+    hostGlobals["assert"] = function(c, msg) { if (!core.test(c)) { swTrap("Assertion failed", msg) } }
 
     // ----- Method dispatch (the js_mcall equivalent) -----
     function mcall(target, name, args) {
@@ -4195,12 +4333,14 @@ KwContinue  = "continue" KwEnd ;
     // The twin is makeOpRef in swift-to-llvm-ir.abnf.
     function makeOpRef(sym, pos) {
         return function() {
-            return function(l, r) {
+            return function() {
                 if (typeof binOps[sym] != "function") {
                     notImpl("the operator '" + sym + "' used as a value", pos)
                     return undefined
                 }
-                return binOp(sym, l, r)
+                var lr = anytype
+                lr = swSplat(arguments, 2)
+                return binOp(sym, lr[0], lr[1])
             }
         }
     }
@@ -4936,21 +5076,26 @@ KwContinue  = "continue" KwEnd ;
             var v = anytype
             v = init()
             if (ty != "") { v = swAdoptAnn(v, ty) }
-            for (var i = 0; i < names.length; i++) {
-                if (names[i] != "_") { declVar(names[i], swCopy(tupleAt(v, i))) }
-            }
+            swTupBind(names, v, swTupDecl)
         }
     }
     function makeTupleAssign(items) {
         var names = items[0].tnames
         var init = items[1]
-        return function() {
-            var v = init()
-            for (var i = 0; i < names.length; i++) {
-                if (names[i] != "_") { setVar(names[i], swCopy(tupleAt(v, i))) }
-            }
+        return function() { swTupBind(names, init(), swTupSet) }
+    }
+    // A tuple pattern's names bound to v's elements, through a nested pattern's own
+    // (`(i, (x, y))`); _ binds nothing. Twin of emitTupBind in swift-to-llvm-ir.abnf.
+    function swTupBind(names, v, bind) {
+        for (var i = 0; i < names.length; i++) {
+            var nm = anytype
+            nm = names[i]
+            if (typeof nm == "object") { swTupBind(nm.tnames, tupleAt(v, i), bind) }
+            else if (nm != "_") { bind(nm, tupleAt(v, i)) }
         }
     }
+    function swTupDecl(n, x) { declVar(n, swCopy(x)) }
+    function swTupSet(n, x) { setVar(n, swCopy(x)) }
 
     // A body that is a single expression returns that expression's value.
     function makeExprBody(t) {
@@ -4989,9 +5134,7 @@ KwContinue  = "continue" KwEnd ;
     // Binds one iteration value to the loop pattern (a name, _ or a tuple pattern).
     function bindForPat(pat, v) {
         if (pat.tnames != undefined) {
-            for (var i = 0; i < pat.tnames.length; i++) {
-                if (pat.tnames[i] != "_") { declVar(pat.tnames[i], tupleAt(v, i)) }
-            }
+            swTupBind(pat.tnames, v, declVar)
             return
         }
         if (pat.fname != "_") { declVar(pat.fname, v) }
@@ -5632,6 +5775,35 @@ KwContinue  = "continue" KwEnd ;
         }
         return false
     }
+    // The $n shorthand arguments as the walk reads them, by index and position.
+    // makeClosure takes the ones inside its own braces - a nested closure, built
+    // first, has already taken its own - and the highest index used is the
+    // closure's arity. Twin in swift-to-llvm-ir.abnf.
+    var swShortSeen = []
+    function swNoteShort(n, pos) { swShortSeen.push({n: parseInt(n, 10), p: pos}) }
+    function swShortArity(start, end) {
+        var a = 0
+        var keep = []
+        for (var i = 0; i < swShortSeen.length; i++) {
+            var e = swShortSeen[i]
+            if (e.p >= start && e.p < end) {
+                if (e.n + 1 > a) { a = e.n + 1 }
+            } else {
+                keep.push(e)
+            }
+        }
+        swShortSeen = keep
+        return a
+    }
+    // A closure of n >= 2 parameters called with ONE argument that is an n-tuple
+    // takes the tuple's elements as its arguments - Swift's closure tuple
+    // destructuring: `zip(a, b).map { $0 + $1 }`, `d.map { k, v in ... }`. A call
+    // with any other shape cannot type-check with n parameters, so the test is
+    // safe at run time. Twin of rtSplat in swift-to-llvm-ir.abnf.
+    function swSplat(args, n) {
+        if (n > 1 && args.length == 1 && isTupleVal(args[0]) && args[0].__tuple == n) { return tupleArray(args[0]) }
+        return args
+    }
     function makeClosure(items, txt, end) {
         var params = []
         var ptypes = []
@@ -5649,6 +5821,8 @@ KwContinue  = "continue" KwEnd ;
             swAnnClose()
             ptypes = swClFlowTys(params, ptypes, rtype, txt, end)
         }
+        var arity = swShortArity(up.start, end)
+        if (params.length > 0) { arity = params.length }
         // With no parameter names the arguments bind as the shorthand $0..$3.
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
         inouts = swClInouts(params, inouts, up.start, end)
@@ -5663,7 +5837,8 @@ KwContinue  = "continue" KwEnd ;
                 captured.push(snap)
             }
             return function() {
-                var args = arguments
+                var args = anytype
+                args = swSplat(arguments, arity)
                 var saved = scopes
                 scopes = captured.slice(0)
                 scopes.push({})
@@ -5790,7 +5965,7 @@ KwContinue  = "continue" KwEnd ;
     }
     // An argument: {lbl, t} for a value, {lbl, ref} for &x, {lbl, dflt} for a
     // default the call site filled in.
-    function makeCallArg(items) {
+    function makeCallArg(items, txt) {
         var lbl = null
         var t = null
         var ref = null
@@ -5800,7 +5975,9 @@ KwContinue  = "continue" KwEnd ;
             else if (it.alabel != undefined) { lbl = it.alabel }
             else if (it.aref != undefined) { ref = it.aref }
         }
-        return {lbl: lbl, t: t, ref: ref, dflt: null}
+        // txt is the argument's text without its label, for the static type
+        // type(of:) reads (swStaticCollTy).
+        return {lbl: lbl, t: t, ref: ref, dflt: null, txt: lbl == null ? txt : txt.substring(txt.indexOf(":") + 1)}
     }
     function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null} }
     function makeLabTrail(items) { return {lbl: items[0].alabel, t: items[1], ref: null, dflt: null} }
@@ -5926,25 +6103,53 @@ KwContinue  = "continue" KwEnd ;
     // Twin in swift-to-llvm-ir.abnf.
     function swSugarCallTy(txt) {
         if (txt.charAt(0) != "[" || txt.charAt(txt.length - 1) != ")") { return "" }
+        var j = swCloseAt(txt, 0)
+        if (j < 0 || j + 1 >= txt.length || txt.charAt(j) != "]" || txt.charAt(j + 1) != "(") { return "" }
+        return swCloseAt(txt, j + 1) == txt.length - 1 ? txt.substring(0, j + 1) : ""
+    }
+    // The type of `Set<T>(...)` / `Array<T>(...)` / `Dictionary<K, V>(...)` from its
+    // text, spelled as an annotation (`Set<T>`, `[T]`, `[K:V]`), when one
+    // parenthesised argument list follows the generic arguments and nothing else
+    // does. Twin in swift-to-llvm-ir.abnf.
+    function swGenCtorTy(txt) {
+        var lt = txt.indexOf("<")
+        if (lt < 0 || txt.charAt(txt.length - 1) != ")") { return "" }
+        var nm = txt.substring(0, lt)
+        if (nm != "Array" && nm != "Set" && nm != "Dictionary") { return "" }
+        var j = swCloseAt(txt, lt)
+        if (j < 0 || j + 1 >= txt.length || txt.charAt(j) != ">" || txt.charAt(j + 1) != "(") { return "" }
+        if (swCloseAt(txt, j + 1) != txt.length - 1) { return "" }
+        var g = txt.substring(lt + 1, j)
+        return nm == "Set" ? "Set<" + g + ">" : swGenAnn(nm, g)
+    }
+    // The index of the bracket closing the one at j0 (any of [ ( < against ] ) >),
+    // or -1.
+    function swCloseAt(txt, j0) {
         var depth = 0
-        var j = 0
-        while (j < txt.length) {
+        for (var j = j0; j < txt.length; j++) {
             var ch = txt.charAt(j)
             if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
             if (ch == "]" || ch == ")" || ch == ">") { depth = depth - 1 }
-            if (depth == 0) { break }
-            j = j + 1
+            if (depth == 0) { return j }
         }
-        if (j + 1 >= txt.length || txt.charAt(j) != "]" || txt.charAt(j + 1) != "(") { return "" }
-        var k = j + 1
-        while (k < txt.length) {
-            var c2 = txt.charAt(k)
-            if (c2 == "[" || c2 == "(" || c2 == "<") { depth = depth + 1 }
-            if (c2 == "]" || c2 == ")" || c2 == ">") { depth = depth - 1 }
-            if (depth == 0) { break }
-            k = k + 1
-        }
-        return k == txt.length - 1 ? txt.substring(0, j + 1) : ""
+        return -1
+    }
+    // type(of:) of an EMPTY collection has no element to name its type by, so the
+    // walk reads the static type off the operand's text: a local's annotation, or
+    // the initializer it calls (`Set<Int>()`, `[Int]()`). The canonical spelling
+    // when that is a builtin collection type with every argument known, else "".
+    // swEmptyCollTy is what the value alone answers for an empty one of that kind.
+    function swStaticCollTy(txt) {
+        if (txt == undefined || txt == null) { return "" }
+        var t = swTyCanon(swExprAnn(txt))
+        if (t.indexOf("<_") >= 0 || t.indexOf(" _") >= 0) { return "" }
+        if (t.indexOf("Array<") == 0 || t.indexOf("Set<") == 0 || t.indexOf("Dictionary<") == 0) { return t }
+        return ""
+    }
+    function swEmptyCollTy(t) {
+        if (t.charAt(0) == "A") { return "Array<Any>" }
+        if (t.charAt(0) == "S") { return "Set<Any>" }
+        return "Dictionary<Any, Any>"
     }
     // [T](...) / [K: V](...) as the explicit generic call it abbreviates. Twin in
     // swift-to-llvm-ir.abnf.
@@ -6008,6 +6213,26 @@ KwContinue  = "continue" KwEnd ;
                     swPrintSep(ea.argv, sepT == null ? undefined : sepT(), termT == null ? undefined : termT())
                     writeBacks(ea.boxes)
                     return undefined
+                }
+            }
+        }
+        // stride(from:to:by:) and stride(from:through:by:) differ by a label only.
+        if (name == "stride" && lookupSig(name) == null && recs.length == 3) {
+            var strideThrough = recs[1].lbl == "through"
+            return function() {
+                var sa = evalArgs(recs)
+                return swStride(sa.argv[0], sa.argv[1], sa.argv[2], strideThrough)
+            }
+        }
+        if (name == "type" && lookupSig(name) == null && recs.length == 1 && recs[0].lbl == "of") {
+            var stTy = swStaticCollTy(recs[0].txt)
+            if (stTy != "") {
+                var emptyTy = swEmptyCollTy(stTy)
+                var ofT = recs[0].t
+                return function() {
+                    var tv = anytype
+                    tv = hostGlobals["type"](ofT())
+                    return tv === emptyTy ? stTy : tv
                 }
             }
         }
@@ -6227,6 +6452,8 @@ KwContinue  = "continue" KwEnd ;
         // `[Int: Set<Int>]()`, `[Int](repeating: 0, count: 3)`: the sugared type, called.
         var sty = swSugarCallTy(txt)
         if (sty != "") { return sty }
+        var gty = swGenCtorTy(txt)
+        if (gty != "") { return gty }
         var h = swChainHead(txt)
         if (h.fn == "" || txt.charAt(txt.length - 1) != ")") { return swInferAnn(txt) }
         var depth = 0
@@ -9205,7 +9432,7 @@ KwContinue  = "continue" KwEnd ;
         }
         var w = b.toLowerCase()
         if (w == "inf" || w == "infinity") { return neg ? -1 / 0 : 1 / 0 }
-        if (w == "nan") { return 0 / 0 }
+        if (swIsNanText(w)) { return 0 / 0 }
         if (w.length > 1 && w.charAt(0) == "0" && w.charAt(1) == "x") {
             var r = anytype
             r = hexFloatScan(b, 2)
@@ -9215,6 +9442,17 @@ KwContinue  = "continue" KwEnd ;
         }
         if (!swFloText(s)) { return null }
         return parseFloat(s)
+    }
+    // strtod's NaN spellings, lower-cased and unsigned: "nan", "snan", and
+    // "nan(...)" with anything but a parenthesis inside. The value model has ONE
+    // NaN, so the sign and payload they spell are not kept: swiftc prints
+    // Double("-nan(0x1)") as -nan(0x1), here it is nan. Twin of swIsNanText in
+    // lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swIsNanText(w) {
+        if (w == "nan" || w == "snan") { return true }
+        if (w.length < 5 || w.substring(0, 4) != "nan(" || w.charAt(w.length - 1) != ")") { return false }
+        var inner = w.substring(4, w.length - 1)
+        return inner.indexOf("(") < 0 && inner.indexOf(")") < 0
     }
     // [+-]? digits [. digits] [(e|E) [+-] digits], at least one digit.
     function swFloText(s) {

@@ -404,7 +404,7 @@ function swFloParse(s) {
     }
     var w = b.toLowerCase()
     if (w == "inf" || w == "infinity") { return neg ? -1 / 0 : 1 / 0 }
-    if (w == "nan") { return 0 / 0 }
+    if (swIsNanText(w)) { return 0 / 0 }
     if (w.length > 1 && w.charAt(0) == "0" && w.charAt(1) == "x") {
         var r = anytype
         r = hexFloatScan(b, 2)
@@ -414,6 +414,17 @@ function swFloParse(s) {
     }
     if (!swFloText(s)) { return null }
     return parseFloat(s)
+}
+
+// strtod's NaN spellings, lower-cased and unsigned: "nan", "snan", and "nan(...)"
+// with anything but a parenthesis inside. The value model has ONE NaN, so the
+// sign and payload they spell are not kept. Twin of swIsNanText in
+// swift-interpreter.abnf and abnf/jsrtswift.go.
+function swIsNanText(w) {
+    if (w == "nan" || w == "snan") { return true }
+    if (w.length < 5 || w.substring(0, 4) != "nan(" || w.charAt(w.length - 1) != ")") { return false }
+    var inner = w.substring(4, w.length - 1)
+    return inner.indexOf("(") < 0 && inner.indexOf(")") < 0
 }
 
 // [+-]? digits [. digits] [(e|E) [+-] digits], at least one digit.
@@ -2685,6 +2696,121 @@ function swPick(l, r, wantGt) {
 
 function js_swmax(l, r) { return swPick(l, r, true) }
 function js_swmin(l, r) { return swPick(l, r, false) }
+
+// zip(a, b): the pairs of a's and b's elements, as many as the shorter side has.
+// Each side arrives as an array, or as a PartialRangeFrom (sw_zipside in
+// swift-to-llvm-ir.abnf), which the other side bounds. Twin of js_swzip in
+// abnf/jsrtswift.go.
+function js_swzip(xs, ys) {
+    var xa = rtIsArr(xs)
+    var ya = rtIsArr(ys)
+    if (!xa && !ya) { fail("zip of two unbounded ranges") }
+    var n = 0
+    if (!xa) { n = ys.length } else if (!ya) { n = xs.length } else { n = xs.length < ys.length ? xs.length : ys.length }
+    var out = []
+    var i = 0
+    while (i < n) {
+        out.push(js_swtuple([swZipAt(xs, xa, i), swZipAt(ys, ya, i)]))
+        i = i + 1
+    }
+    return out
+}
+function swZipAt(v, isArr, i) {
+    if (isArr) { return v[i] }
+    return swNum(v["lo"]) + i
+}
+
+// stride(from:to:by:) / stride(from:through:by:) as an array: an Int stride adds
+// the step, a floating-point one computes element i as start + i*step in ONE
+// rounding (the standard library's addingProduct). Twin of js_swstride in
+// abnf/jsrtswift.go.
+function js_swstride(from, end, by, closed) {
+    var step = swNum(by)
+    if (step == 0) { swAbort("Fatal error: Stride size must not be zero") }
+    var e = swNum(end)
+    var out = []
+    if (!floIs(from) && !floIs(end) && !floIs(by)) {
+        var cur = anytype
+        cur = from
+        while (!swStridePast(swNum(cur), e, step, closed)) {
+            out.push(cur)
+            cur = js_swarith("+", cur, by)
+        }
+        return out
+    }
+    // A Float stride reads all three operands at Float width: an untyped literal
+    // among them is a Float too.
+    var f32 = swIsF32(from) || swIsF32(end) || swIsF32(by)
+    var s = swNum(from)
+    if (f32) { s = rtF32Round(s); e = rtF32Round(e); step = rtF32Round(step) }
+    var v = s
+    var i = 0
+    while (!swStridePast(v, e, step, closed)) {
+        out.push(swReFlo(v, f32))
+        i = i + 1
+        v = swFma(i, step, s)
+        if (f32) { v = rtF32Round(v) }
+    }
+    return out
+}
+function swStridePast(v, e, step, closed) {
+    if (step > 0) { return closed ? v > e : v >= e }
+    return closed ? v < e : v <= e
+}
+
+// a*b + c rounded ONCE. Dekker's exact product and Knuth's exact sum carry the
+// value as s + v + w; s + v rounded is the answer unless that sum is exactly
+// halfway between two doubles, where w decides. Outside the range where
+// Veltkamp's split is exact (an operand beyond 2^995, a product below 2^-960) it
+// rounds twice. Twin of swFma in swift-interpreter.abnf; abnf/jsrtswift.go has
+// math.FMA.
+var SW_FMA_K = []
+function swFma(a, b, c) {
+    var p = a * b
+    if (p == 0 || p !== p || p - p !== 0 || c !== c || c - c !== 0) { return p + c }
+    if (SW_FMA_K.length == 0) {
+        var q = 1
+        var k = 0
+        while (k < 995) { q = q * 2; k = k + 1 }
+        SW_FMA_K.push(q)
+        q = 1
+        k = 0
+        while (k < 960) { q = q * 2; k = k + 1 }
+        SW_FMA_K.push(q)
+    }
+    if (Math.abs(a) > SW_FMA_K[0] || Math.abs(b) > SW_FMA_K[0] || Math.abs(p) * SW_FMA_K[1] < 1) { return p + c }
+    var t1 = 134217729 * a
+    var ah = t1 - (t1 - a)
+    var al = a - ah
+    var t2 = 134217729 * b
+    var bh = t2 - (t2 - b)
+    var bl = b - bh
+    var err0 = al * bl - (((p - ah * bh) - al * bh) - ah * bl)
+    var s = p + c
+    var z = s - p
+    var t = (p - (s - z)) + (c - z)
+    var v = t + err0
+    var z2 = v - t
+    var w = (t - (v - z2)) + (err0 - z2)
+    var r = s + v
+    var z3 = r - s
+    var err = (s - (r - z3)) + (v - z3)
+    if (err != 0 && w != 0 && (err > 0) == (w > 0)) {
+        var h = err + err
+        if ((r + h) - r == h) { return r + h }
+    }
+    return r
+}
+
+// fatalError / precondition / assert and the rest: kind is swiftc's words
+// ("Fatal error", "Precondition failed", "Assertion failed"), the message
+// optional. Twin of js_swtrap in abnf/jsrtswift.go.
+function js_swtrap(kind, msg) {
+    var m = ""
+    if (msg !== undefined && msg !== null) { m = swDesc(msg) }
+    if (m == "") { return swAbort(kind) }
+    return swAbort(kind + ": " + m)
+}
 
 // The Double methods this subset carries, in front of the runtime's own js_mcall
 // (a float box is not a shape memberCall knows). Verified against swift 6.1.2:

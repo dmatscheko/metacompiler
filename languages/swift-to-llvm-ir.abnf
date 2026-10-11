@@ -1004,9 +1004,11 @@ DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd TupNames [ ":" DeclTupTy ] "=" Expression [ ";" ] ;
 // `let (a, b): (Double, Int) = (1, 2)`: the annotation types the literal, so a is 1.0.
 DeclTupTy   <~~ push({dtty: stripWs(up.in)}) ~~> = Type ;
+// An element is a name, _ or a nested tuple pattern: `for (i, (x, y)) in`.
 TupNames    <~~ push({tnames: takeAll()}) ~~>
             = "(" TupName { "," TupName } ")" ;
-TupName     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
+TupName     = TupNames | TupLeaf ;
+TupLeaf     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 // (x, y) = (y, x) - assignment through a tuple pattern (a swap, typically).
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
@@ -1430,7 +1432,7 @@ LabTrail    <~~ push(makeLabTrail(takeAll())) ~~>
 // An argument carries its label (matched against the parameter labels of the
 // callee, so a call may leave defaulted parameters out) and, for &x, the name it
 // passes by reference.
-CallArg     <~~ push(makeCallArg(takeAll())) ~~>
+CallArg     <~~ push(makeCallArg(takeAll(), up.in)) ~~>
             = [ ArgLabel ] ( InoutArg | Expression | OpRefArg ) ;
 // `(1..<3).reduce(0, +)`: an operator used as a VALUE. It is the LAST alternative
 // on purpose - `f(-1)` is an expression, and only a run of operator characters that
@@ -1535,7 +1537,7 @@ TupleLabel  = Id <~~ push({tlabel: swBt(up.in)}) ~~> ":" ;
 // Closure shorthand arguments ($0, $1, ...): a closure without a signature binds
 // its arguments under exactly these names, so the shorthand is an ordinary read.
 Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
-ShortIdx    <~~ push(makeVarRef("$" + up.in)) ~~>
+ShortIdx    <~~ swNoteShort(up.in, up.start); push(makeVarRef("$" + up.in)) ~~>
             = "0"..."9" { "0"..."9" } ;
 
 Closure     <~~ push(makeClosure(takeAll(), up.in, up.pos)) ~~>
@@ -3211,12 +3213,9 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             var r = init(b)
             b = r.b
-            r = {b: b, v: swEmitAdopt(b, r.v, ty)}
-            for (var i = 0; i < names.length; i++) {
-                if (names[i] == "_") { continue }
-                var ev = emitCopy(b, callExt(b, "js_get", [r.v, emitStr(b, "" + i)]))
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[i]), ev])
-            }
+            emitTupBind(b, names, swEmitAdopt(b, r.v, ty), function(nm, ev) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nm), emitCopy(b, ev)])
+            })
             return b
         }
     }
@@ -3226,13 +3225,31 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             var r = init(b)
             b = r.b
-            for (var i = 0; i < names.length; i++) {
-                if (names[i] == "_") { continue }
-                var ev = emitCopy(b, callExt(b, "js_get", [r.v, emitStr(b, "" + i)]))
-                b.NewCall(rtKSet(), [curScopeV, emitStr(b, names[i]), ev])
-            }
+            emitTupBind(b, names, r.v, function(nm, ev) {
+                b.NewCall(rtKSet(), [curScopeV, emitStr(b, nm), emitCopy(b, ev)])
+            })
             return b
         }
+    }
+    // A tuple pattern's names bound to v's elements, through a nested pattern's own
+    // (`(i, (x, y))`); _ binds nothing and reads nothing. Twin of swTupBind in
+    // swift-interpreter.abnf.
+    function emitTupBind(b, names, v, bind) {
+        for (var i = 0; i < names.length; i++) {
+            var nm = anytype
+            nm = names[i]
+            if (typeof nm == "object") {
+                emitTupBind(b, nm.tnames, callExt(b, "js_get", [v, emitStr(b, "" + i)]), bind)
+            } else if (nm != "_") {
+                bind(nm, callExt(b, "js_get", [v, emitStr(b, "" + i)]))
+            }
+        }
+    }
+    function tupBinds(names) {
+        for (var j = 0; j < names.length; j++) {
+            if (typeof names[j] == "object" ? tupBinds(names[j].tnames) : names[j] != "_") { return true }
+        }
+        return false
     }
 
     // A body that is a single expression returns that expression's value.
@@ -3295,11 +3312,9 @@ KwContinue  = "continue" KwEnd ;
     // Binds one iteration value to the loop pattern (a name, _ or a tuple pattern).
     function emitBindForPat(b, pat, v) {
         if (pat.tnames != undefined) {
-            for (var i = 0; i < pat.tnames.length; i++) {
-                if (pat.tnames[i] == "_") { continue }
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.tnames[i]),
-                                             callExt(b, "js_get", [v, emitStr(b, "" + i)])])
-            }
+            emitTupBind(b, pat.tnames, v, function(nm, ev) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nm), ev])
+            })
             return
         }
         if (pat.fname != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.fname), v]) }
@@ -3308,12 +3323,7 @@ KwContinue  = "continue" KwEnd ;
     // bind nothing, so those loops need no per-iteration scope (see the header
     // above makeForRange).
     function forPatBinds(pat) {
-        if (pat.tnames != undefined) {
-            for (var j = 0; j < pat.tnames.length; j++) {
-                if (pat.tnames[j] != "_") { return true }
-            }
-            return false
-        }
+        if (pat.tnames != undefined) { return tupBinds(pat.tnames) }
         return pat.fname != undefined && pat.fname != "_"
     }
 
@@ -4040,8 +4050,9 @@ KwContinue  = "continue" KwEnd ;
             curF = f
             var fb = f.NewBlock("entry")
             curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
-            var a0 = callExt(fb, "js_arg", [f.Params[1], handle(0)])
-            var a1 = callExt(fb, "js_arg", [f.Params[1], handle(1)])
+            var lr = fb.NewCall(rtSplat(), [f.Params[1], emitNum(fb, 2)])
+            var a0 = callExt(fb, "js_arg", [lr, handle(0)])
+            var a1 = callExt(fb, "js_arg", [lr, handle(1)])
             var argv = [a0, a1]
             if (ext == "js_swarith" || ext == "js_swshift") { argv = [emitStr(fb, opText), a0, a1] }
             fb.NewRet(callExt(fb, ext, argv))
@@ -5397,6 +5408,8 @@ KwContinue  = "continue" KwEnd ;
         // `[Int: Set<Int>]()`, `[Int](repeating: 0, count: 3)`: the sugared type, called.
         var sty = swSugarCallTy(txt)
         if (sty != "") { return sty }
+        var gty = swGenCtorTy(txt)
+        if (gty != "") { return gty }
         var h = swChainHead(txt)
         if (h.fn == "" || txt.charAt(txt.length - 1) != ")") { return swInferAnn(txt) }
         var depth = 0
@@ -5880,6 +5893,46 @@ KwContinue  = "continue" KwEnd ;
         }
         return false
     }
+    // The $n shorthand arguments as the walk reads them, by index and position.
+    // makeClosure takes the ones inside its own braces - a nested closure, built
+    // first, has already taken its own - and the highest index used is the
+    // closure's arity. Twin in swift-interpreter.abnf.
+    var swShortSeen = []
+    function swNoteShort(n, pos) { swShortSeen.push({n: parseInt(n, 10), p: pos}) }
+    function swShortArity(start, end) {
+        var a = 0
+        var keep = []
+        for (var i = 0; i < swShortSeen.length; i++) {
+            var e = swShortSeen[i]
+            if (e.p >= start && e.p < end) {
+                if (e.n + 1 > a) { a = e.n + 1 }
+            } else {
+                keep.push(e)
+            }
+        }
+        swShortSeen = keep
+        return a
+    }
+    // A closure of n >= 2 parameters called with ONE argument that is an n-tuple
+    // takes the tuple's elements as its arguments - Swift's closure tuple
+    // destructuring: `zip(a, b).map { $0 + $1 }`, `d.map { k, v in ... }`. A call
+    // with any other shape cannot type-check with n parameters, so the test is
+    // safe at run time. emitFunc's prologue reads the arguments through it when
+    // swSplatNext is set. Twin of swSplat in swift-interpreter.abnf.
+    var swSplatNext = 0
+    function rtSplat() {
+        return rtFunc("sw_splat", 2, function(b, ps) {
+            var oneB = curF.NewBlock("")
+            var tupB = curF.NewBlock("")
+            var asIs = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_pylen", [ps[0]]), emitNum(b, 1)])), oneB, asIs)
+            var a0 = callExt(oneB, "js_arg", [ps[0], handle(0)])
+            var n = oneB.NewCall(rtProbe("sw_tuplen", "__tuple"), [a0])
+            oneB.NewCondBr(truthy(oneB, callExt(oneB, "js_seq", [n, ps[1]])), tupB, asIs)
+            tupB.NewRet(callExt(tupB, "js_swtuparr", [a0]))
+            asIs.NewRet(ps[0])
+        })
+    }
     function makeClosure(items, txt, end) {
         var params = []
         var ptypes = []
@@ -5897,6 +5950,8 @@ KwContinue  = "continue" KwEnd ;
             swAnnClose()
             ptypes = swClFlowTys(params, ptypes, rtype, txt, end)
         }
+        var arity = swShortArity(up.start, end)
+        if (params.length > 0) { arity = params.length }
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
         inouts = swClInouts(params, inouts, up.start, end)
         if (rtype == "") { swDsParkRets(up.start, end) }
@@ -5964,6 +6019,7 @@ KwContinue  = "continue" KwEnd ;
             // `{ (x: Int) -> Double in 3 }` answers 3.0, not 3. emitFunc's rtype
             // argument is the same retTypeStack every `return` reads, so an
             // explicit return adopts too.
+            swSplatNext = arity
             var idx = emitFunc(params, bodyStmt, false, undefined, undefined, rtype)
             curScopeV = savedEnv
             return {b: b, v: callExt(b, "js_closure", [handle(idx), env])}
@@ -6044,7 +6100,7 @@ KwContinue  = "continue" KwEnd ;
                 isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?"}
     }
     function pName(p) { return (typeof p == "string") ? p : p.name }
-    function makeCallArg(items) {
+    function makeCallArg(items, txt) {
         var lbl = null
         var t = null
         var ref = null
@@ -6054,7 +6110,9 @@ KwContinue  = "continue" KwEnd ;
             else if (it.alabel != undefined) { lbl = it.alabel }
             else if (it.aref != undefined) { ref = it.aref }
         }
-        return {lbl: lbl, t: t, ref: ref, dflt: null}
+        // txt is the argument's text without its label, for the static type
+        // type(of:) reads (swStaticCollTy).
+        return {lbl: lbl, t: t, ref: ref, dflt: null, txt: lbl == null ? txt : txt.substring(txt.indexOf(":") + 1)}
     }
     function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null} }
     function makeLabTrail(items) { return {lbl: items[0].alabel, t: items[1], ref: null, dflt: null} }
@@ -6176,25 +6234,53 @@ KwContinue  = "continue" KwEnd ;
     // Twin in swift-interpreter.abnf.
     function swSugarCallTy(txt) {
         if (txt.charAt(0) != "[" || txt.charAt(txt.length - 1) != ")") { return "" }
+        var j = swCloseAt(txt, 0)
+        if (j < 0 || j + 1 >= txt.length || txt.charAt(j) != "]" || txt.charAt(j + 1) != "(") { return "" }
+        return swCloseAt(txt, j + 1) == txt.length - 1 ? txt.substring(0, j + 1) : ""
+    }
+    // The type of `Set<T>(...)` / `Array<T>(...)` / `Dictionary<K, V>(...)` from its
+    // text, spelled as an annotation (`Set<T>`, `[T]`, `[K:V]`), when one
+    // parenthesised argument list follows the generic arguments and nothing else
+    // does. Twin in the other swift grammar.
+    function swGenCtorTy(txt) {
+        var lt = txt.indexOf("<")
+        if (lt < 0 || txt.charAt(txt.length - 1) != ")") { return "" }
+        var nm = txt.substring(0, lt)
+        if (nm != "Array" && nm != "Set" && nm != "Dictionary") { return "" }
+        var j = swCloseAt(txt, lt)
+        if (j < 0 || j + 1 >= txt.length || txt.charAt(j) != ">" || txt.charAt(j + 1) != "(") { return "" }
+        if (swCloseAt(txt, j + 1) != txt.length - 1) { return "" }
+        var g = txt.substring(lt + 1, j)
+        return nm == "Set" ? "Set<" + g + ">" : swGenAnn(nm, g)
+    }
+    // The index of the bracket closing the one at j0 (any of [ ( < against ] ) >),
+    // or -1.
+    function swCloseAt(txt, j0) {
         var depth = 0
-        var j = 0
-        while (j < txt.length) {
+        for (var j = j0; j < txt.length; j++) {
             var ch = txt.charAt(j)
             if (ch == "[" || ch == "(" || ch == "<") { depth = depth + 1 }
             if (ch == "]" || ch == ")" || ch == ">") { depth = depth - 1 }
-            if (depth == 0) { break }
-            j = j + 1
+            if (depth == 0) { return j }
         }
-        if (j + 1 >= txt.length || txt.charAt(j) != "]" || txt.charAt(j + 1) != "(") { return "" }
-        var k = j + 1
-        while (k < txt.length) {
-            var c2 = txt.charAt(k)
-            if (c2 == "[" || c2 == "(" || c2 == "<") { depth = depth + 1 }
-            if (c2 == "]" || c2 == ")" || c2 == ">") { depth = depth - 1 }
-            if (depth == 0) { break }
-            k = k + 1
-        }
-        return k == txt.length - 1 ? txt.substring(0, j + 1) : ""
+        return -1
+    }
+    // type(of:) of an EMPTY collection has no element to name its type by, so the
+    // walk reads the static type off the operand's text: a local's annotation, or
+    // the initializer it calls (`Set<Int>()`, `[Int]()`). The canonical spelling
+    // when that is a builtin collection type with every argument known, else "".
+    // swEmptyCollTy is what the value alone answers for an empty one of that kind.
+    function swStaticCollTy(txt) {
+        if (txt == undefined || txt == null) { return "" }
+        var t = swTyCanon(swExprAnn(txt))
+        if (t.indexOf("<_") >= 0 || t.indexOf(" _") >= 0) { return "" }
+        if (t.indexOf("Array<") == 0 || t.indexOf("Set<") == 0 || t.indexOf("Dictionary<") == 0) { return t }
+        return ""
+    }
+    function swEmptyCollTy(t) {
+        if (t.charAt(0) == "A") { return "Array<Any>" }
+        if (t.charAt(0) == "S") { return "Set<Any>" }
+        return "Dictionary<Any, Any>"
     }
     // [T](...) / [K: V](...) as the explicit generic call it abbreviates. Twin in
     // swift-interpreter.abnf.
@@ -6237,6 +6323,107 @@ KwContinue  = "continue" KwEnd ;
         if (name == "Dictionary" && kv.length == 2) { return "[" + kv[0] + ":" + kv[1] + "]" }
         return ""
     }
+    // zip, stride, repeatElement, swap, min/max of three or more, and the
+    // trapping functions; null for any other call.
+    function swFreeFn(name, args) {
+        // zip(a, b): each side as an array (rtZipSide), except a PartialRangeFrom,
+        // which js_swzip bounds by the other side.
+        if (name == "zip" && args.length == 2) {
+            return function(b) {
+                var za = args[0].t(b)
+                var zb = args[1].t(za.b)
+                b = zb.b
+                var xs = b.NewCall(rtZipSide(), [za.v])
+                var ys = b.NewCall(rtZipSide(), [zb.v])
+                return {b: b, v: callExt(b, "js_swzip", [xs, ys])}
+            }
+        }
+        // stride(from:to:by:) and stride(from:through:by:) differ by a label only.
+        if (name == "stride" && args.length == 3) {
+            var through = args[1].lbl == "through"
+            return function(b) {
+                var vs = []
+                for (var i = 0; i < 3; i++) {
+                    var r = args[i].t(b)
+                    b = r.b
+                    vs.push(r.v)
+                }
+                return {b: b, v: callExt(b, "js_swstride", [vs[0], vs[1], vs[2], through ? hTrue : hFalse])}
+            }
+        }
+        if (name == "repeatElement" && args.length == 2) {
+            return function(b) {
+                var rx = args[0].t(b)
+                var rn = args[1].t(rx.b)
+                return {b: rn.b, v: rn.b.NewCall(rtArrayRep(), [rx.v, rn.v])}
+            }
+        }
+        // swap(&a, &b): the two names trade values.
+        if (name == "swap" && args.length == 2 && args[0].ref != null && args[1].ref != null) {
+            return function(b) {
+                var x = b.NewCall(rtKGet(), [curScopeV, emitStr(b, args[0].ref)])
+                var y = b.NewCall(rtKGet(), [curScopeV, emitStr(b, args[1].ref)])
+                b.NewCall(rtKSet(), [curScopeV, emitStr(b, args[0].ref), y])
+                b.NewCall(rtKSet(), [curScopeV, emitStr(b, args[1].ref), x])
+                return {b: b, v: hUndef}
+            }
+        }
+        // The variadic min(x, y, z, rest...) folds the two-operand rule left to right.
+        if ((name == "min" || name == "max") && args.length > 2) {
+            return function(b) {
+                var r0 = args[0].t(b)
+                b = r0.b
+                var acc = r0.v
+                for (var i = 1; i < args.length; i++) {
+                    var r = args[i].t(b)
+                    b = r.b
+                    acc = callExt(b, name == "min" ? "js_swmin" : "js_swmax", [acc, r.v])
+                }
+                return {b: b, v: acc}
+            }
+        }
+        // fatalError / preconditionFailure / assertionFailure trap with their
+        // optional message; precondition / assert only when the condition is false.
+        var kind = ""
+        if (name == "fatalError" || name == "preconditionFailure" || name == "assertionFailure") { kind = "Fatal error" }
+        if (name == "precondition") { kind = "Precondition failed" }
+        if (name == "assert") { kind = "Assertion failed" }
+        if (kind == "") { return null }
+        var conded = name == "precondition" || name == "assert"
+        var emitTrap = function(b, mi) {
+            var msgV = hUndef
+            if (args.length > mi) {
+                var rm = args[mi].t(b)
+                b = rm.b
+                msgV = rm.v
+            }
+            callExt(b, "js_swtrap", [emitStr(b, kind), msgV])
+            return b
+        }
+        if (!conded) { return function(b) { return {b: emitTrap(b, 0), v: hUndef} } }
+        return function(b) {
+            var rc = args[0].t(b)
+            var trapB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            rc.b.NewCondBr(truthy(rc.b, rc.v), okB, trapB)
+            emitTrap(trapB, 1).NewBr(okB)
+            return {b: okB, v: hUndef}
+        }
+    }
+    // One side of a zip: a PartialRangeFrom as it is, anything else as the array it
+    // walks as (rtArrayOf). Twin of hostGlobals["zip"] in swift-interpreter.abnf.
+    function rtZipSide() {
+        return rtFunc("sw_zipside", 1, function(b, ps) {
+            var rB = curF.NewBlock("")
+            var openB = curF.NewBlock("")
+            var arrB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtProbe("sw_isrange", "__range"), [ps[0]])), rB, arrB)
+            var hi = callExt(rB, "js_get", [ps[0], emitStr(rB, "hi")])
+            rB.NewCondBr(truthy(rB, callExt(rB, "js_seq", [hi, hNull])), openB, arrB)
+            openB.NewRet(ps[0])
+            arrB.NewRet(arrB.NewCall(rtArrayOf(), [ps[0]]))
+        })
+    }
     function makeCall(items) {
         var name = items[0]
         var args = planArgs(name, items.slice(1))
@@ -6266,12 +6453,24 @@ KwContinue  = "continue" KwEnd ;
         }
         // type(of: v): the runtime's js_swtypeof, resolved here so the global scope
         // every program starts with stays as it was.
+        // An empty collection answers its static type (swStaticCollTy).
         if (name == "type" && args.length == 1 && args[0].lbl == "of" && lookupSig(name) == null) {
             var tyT = args[0].t
+            var stTy = swStaticCollTy(args[0].txt)
             return function(b) {
                 var rt3 = tyT(b)
-                return {b: rt3.b, v: rt3.b.NewCall(rtTypeValue(), [curScopeV, rt3.v])}
+                var tv = rt3.b.NewCall(rtTypeValue(), [curScopeV, rt3.v])
+                if (stTy == "") { return {b: rt3.b, v: tv} }
+                var isEmptyTy = truthy(rt3.b, callExt(rt3.b, "js_seq", [tv, emitStr(rt3.b, swEmptyCollTy(stTy))]))
+                return {b: rt3.b, v: rt3.b.NewSelect(isEmptyTy, emitStr(rt3.b, stTy), tv)}
             }
+        }
+        // The free functions below are resolved here at walk time, as type(of:) is,
+        // and a program's own function of the same name still wins. Twins: their
+        // hostGlobals in swift-interpreter.abnf.
+        if (lookupSig(name) == null) {
+            var ff = swFreeFn(name, args)
+            if (ff != null) { return ff }
         }
         // Int(x) / Int8(x) / UInt64(x): the integer types are descriptors, not
         // functions (so Int.max stays an ordinary property read), and the call form
@@ -7669,12 +7868,15 @@ KwContinue  = "continue" KwEnd ;
         // value or be inout (its argument is a one-slot box written back on the way
         // out - see emitInoutBacks, emitted before every ret).
         var inouts = []
-        var nargsV = callExt(b, "js_pylen", [f.Params[1]])
+        var argsP = f.Params[1]
+        if (swSplatNext > 1) { argsP = b.NewCall(rtSplat(), [argsP, emitNum(b, swSplatNext)]) }
+        swSplatNext = 0
+        var nargsV = callExt(b, "js_pylen", [argsP])
         for (var i = 0; i < params.length; i++) {
             var prm = params[i]
             if (typeof prm == "string") {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm),
-                                             callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+                                             callExt(b, "js_arg", [argsP, handle(i + off)])])
                 continue
             }
             if (prm.variadic) {
@@ -7689,7 +7891,7 @@ KwContinue  = "continue" KwEnd ;
                 var vi = callExt(vHead, "js_scope_get", [curScopeV, emitStr(vHead, vName)])
                 vHead.NewCondBr(truthy(vHead, callExt(vHead, "js_lt", [vi, nargsV])), vBody, vExit)
                 var vi2 = callExt(vBody, "js_scope_get", [curScopeV, emitStr(vBody, vName)])
-                callExt(vBody, "js_arr_push", [vArr, callExt(vBody, "js_kindex", [f.Params[1], vi2])])
+                callExt(vBody, "js_arr_push", [vArr, callExt(vBody, "js_kindex", [argsP, vi2])])
                 callExt(vBody, "js_scope_set", [curScopeV, emitStr(vBody, vName),
                                                 callExt(vBody, "js_jadd", [vi2, emitNum(vBody, 1)])])
                 vBody.NewBr(vHead)
@@ -7697,7 +7899,7 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), vArr])
                 continue
             }
-            var av = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
+            var av = callExt(b, "js_arg", [argsP, handle(i + off)])
             if (prm.hasDefault) {
                 // The argument may be missing: fall back to the default expression.
                 var dB = curF.NewBlock("")
