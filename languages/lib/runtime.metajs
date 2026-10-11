@@ -871,15 +871,16 @@ function rtABigNarrow(x) {
     return v
 }
 
-// Go: big.Int.Exp with a nil modulus, and the interpreter grammars' bigPow. The
-// exponent is capped by the caller, so the linear loop is what the other engines
-// use too.
+// Go: big.Int.Exp with a nil modulus, and the interpreter grammars' bigPow: by
+// repeated squaring, the exponent's bits from the bottom.
 function rtABigPow(x, n) {
     var acc = rtABigFromNum(1)
-    var i = 0
-    while (i < n) {
-        acc = rtABigMul(acc, x)
-        i = i + 1
+    var sq = x
+    var e = n
+    while (e > 0) {
+        if (e % 2 == 1) { acc = rtABigMul(acc, sq) }
+        e = Math.floor(e / 2)
+        if (e > 0) { sq = rtABigMul(sq, sq) }
     }
     return acc
 }
