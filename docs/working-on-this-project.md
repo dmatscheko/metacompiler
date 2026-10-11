@@ -773,8 +773,8 @@ the answer, neither makes the produced part disagree.** **Ruby**
 `("a".."e").size` is 5 where MRI says nil — the emitter lowers every bare `.size`
 to `js_pylen`, which is also for-in's trip count (implemented, measured, reverted).
 **Python** `repr(math)` names a machine-specific `.so` path; `import math
-as m` inside a function binds nothing. **Swift** static initialisers are eager
-where Swift's are lazy; `x is Inner` cannot tell two same-named nested types apart.
+as m` inside a function binds nothing. **Swift** `x is Inner` cannot tell two
+same-named nested types apart.
 **Dart** `catch (e, s)` drops the stack-trace binder — real frames are not
 reproducible here and `StackTrace.empty` would be a divergence of a different
 shape; an uncaught `__dexc` in the compiler half prints `bad` rather than
@@ -1021,7 +1021,9 @@ the integer types),
 `go-strings.go` (both go grammars: the strings package WRITTEN IN GO, compiled with
 a program that imports "strings"; goLibFile in `go-constfold.js` names it),
 `csharp-overload.js` (both csharp grammars: the better function member among
-applicable overloads), `js-callee.js` (all four
+applicable overloads), `swift-dotwant.js` (both swift grammars: the expected
+type of an implicit member inside an array, ternary, closure or call argument),
+`js-callee.js` (all four
 js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ONE implementation of a feature, not a home for
 helpers that happen to be duplicated (7.12 still holds for those).
 

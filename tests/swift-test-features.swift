@@ -507,7 +507,7 @@ struct NSKind {
 // A nested type constructed by a stored property's DEFAULT, by a memberwise default
 // and by a static initialiser: none of those runs in the enclosing type's own frame -
 // planArgs materialises a callee's defaults as argument records at the CALL SITE, and
-// a static initialiser runs eagerly while the type is being built.
+// a static initialiser runs at the first access, wherever that is.
 struct NSDef { var q = 7 }
 struct NSHost {
     struct NSDef { var q = 1 }

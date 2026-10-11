@@ -524,7 +524,7 @@ ParamInout  <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
 ParamLead   = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 ParamType   <~~ push({ptype: up.in}) ~~> = Type ;
 ParamVariadic <~~ push({pvar: 1}) ~~> = "..." ;
-ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
+ParamDflt   <~~ push({pdflt: pop(), dat: up.start + ":" + up.pos}) ~~> = Expression ;
 // Parameter/type attributes (@escaping, @autoclosure) take no argument list, so
 // the ( ... ) that follows belongs to a function type. The few type attributes
 // that DO take one (`@isolated(any)`, `@convention(c)`) are named, which is how
@@ -1326,7 +1326,7 @@ NotChar61   = :script(~~
 NotChar63   = :script(~~
     (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
 ~~) ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); push({kind:"mcall", name: mn, args: takeAll()}) ~~>
             = "." Id <~~ push({mname: swBt(up.in)}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push(makeFieldSfx(swBt(up.in))) ~~> ;
 // t.0 / t.1: a tuple element read. A tuple is an object whose elements live under
@@ -1502,7 +1502,7 @@ SuperRef    <~~ push(makeSuperRef()) ~~> = KwSuper ;
 
 // An implicit member expression: `.tails`, `.circle(r: 5)`, `.make { 1 }`. Twin of
 // DotMember in swift-interpreter.abnf, which explains the resolution.
-DotMember   <~~ push(makeDotMember(takeAll(), up.start + ":" + up.pos)) ~~>
+DotMember   <~~ push(makeDotMember(takeAll(), up.start + ":" + up.pos, up.start)) ~~>
             = "." Id <~~ push({dname: swBt(up.in)}) ~~> [ DotArgs ] ;
 DotArgs     <~~ push({dargs: takeAll()}) ~~>
             = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
@@ -1603,12 +1603,12 @@ GenFollow   = :script(~~
     })()
 ~~) ;
 
-Call        <~~ push(makeCall(takeAll())) ~~>
+Call        <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
             = Id <~~ push(swBt(up.in)) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with only trailing closures, in any
 // expression position (`return filter { $0 > 1 }`). NoTrailCtx is what keeps
 // `if cond { ... }` from reading as a call of cond.
-TrailCall   <~~ push(makeCall(takeAll())) ~~>
+TrailCall   <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
             = Id <~~ push(swBt(up.in)) ~~> NoTrailCtx TrailArg { LabTrail } ;
 
 // String interpolation: "sum = \(a + b)".
@@ -4306,10 +4306,23 @@ KwContinue  = "continue" KwEnd ;
         })
     }
     // Finds a member on a value's type, walking the superclass chain, or undefined.
-    function rtFindM() {
-        return rtFunc("sw_findm", 2, function(b, ps) {
+    function rtFindM() { return rtFindChain("sw_findm", false) }
+    // The same walk starting at the value ITSELF: a class's static member lives on
+    // its descriptor, and a subclass descriptor reaches it through __super.
+    function rtFindStat() { return rtFindChain("sw_findstat", true) }
+    function rtFindChain(fname, fromSelf) {
+        return rtFunc(fname, 2, function(b, ps) {
+            var start = hUndef
+            if (fromSelf) {
+                var objB = curF.NewBlock("")
+                var noB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "object")])), objB, noB)
+                noB.NewRet(hUndef)
+                b = objB
+                start = ps[0]
+            } else { start = b.NewCall(rtClassOf(), [ps[0]]) }
             var sc = callExt(b, "js_scope_new", [handle(0)])
-            callExt(b, "js_scope_decl", [sc, emitStr(b, "c"), b.NewCall(rtClassOf(), [ps[0]])])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "c"), start])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var missB = curF.NewBlock("")
@@ -4334,13 +4347,13 @@ KwContinue  = "continue" KwEnd ;
         return rtFunc("sw_getprop", 2, function(b, ps) {
             var key = callExt(b, "js_jadd", [emitStr(b, "__get_"), ps[1]])
             var g0 = b.NewCall(rtFindM(), [ps[0], key])
-            // A STATIC computed property lives on the type descriptor itself, which
-            // has no __class for the walk above to start from.
+            // A STATIC property lives on the type descriptor itself, which has no
+            // __class for the walk above to start from.
             var ownB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
             var fromB = b
             b.NewCondBr(truthy(b, g0), joinB, ownB)
-            var g1 = ownB.NewCall(rtSafeGet(), [ps[0], key])
+            var g1 = ownB.NewCall(rtFindStat(), [ps[0], key])
             ownB.NewBr(joinB)
             var g = joinB.NewPhi([llvm.ir.NewIncoming(g0, fromB), llvm.ir.NewIncoming(g1, ownB)])
             b = joinB
@@ -4364,7 +4377,7 @@ KwContinue  = "continue" KwEnd ;
             var joinB2 = curF.NewBlock("")
             var fromB2 = b
             b.NewCondBr(truthy(b, s0), joinB2, ownB2)
-            var s1 = ownB2.NewCall(rtSafeGet(), [ps[0], skey])
+            var s1 = ownB2.NewCall(rtFindStat(), [ps[0], skey])
             ownB2.NewBr(joinB2)
             var g = joinB2.NewPhi([llvm.ir.NewIncoming(s0, fromB2), llvm.ir.NewIncoming(s1, ownB2)])
             b = joinB2
@@ -5705,6 +5718,7 @@ KwContinue  = "continue" KwEnd ;
         }
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
         inouts = swClInouts(params, inouts, up.start, end)
+        if (rtype == "") { swDsParkRets(up.start, end) }
         swDotClaim(up.start, end, rtype)
         // A parameter with a declared type, or an inout one, becomes a parameter
         // RECORD, which is what emitFunc's prologue adopts through (`adopt`); a bare
@@ -5775,6 +5789,7 @@ KwContinue  = "continue" KwEnd ;
     // The interpreter's regTypeSig is the twin and unregisters on the same condition.
     var sigOwner = {}
     function regTypeSig(key, name, params) {
+        swDsNoteSig(name, params)
         if (hasOwn(sigOwner, "$" + name) && sigOwner["$" + name] != key) {
             sigReg["$" + name] = null
             return
@@ -5799,7 +5814,7 @@ KwContinue  = "continue" KwEnd ;
             else if (it.ptype != undefined) { type = stripWs(it.ptype) }
             else if (it.pvar != undefined) { isVar = true }
             else if (it.pinout != undefined) { isInout = true }
-            else if (it.pdflt != undefined) { hasDflt = true; dflt = it.pdflt }
+            else if (it.pdflt != undefined) { hasDflt = true; dflt = it.pdflt; swDsWantSpan(it.dat, type) }
             else if (it.pattr != undefined && it.pattr == "autoclosure") { isAuto = true }
         }
         // `arg: repeat each T` is a VALUE PACK: it binds every remaining argument,
@@ -6292,7 +6307,13 @@ KwContinue  = "continue" KwEnd ;
                 // adoption below wants the same one.
                 var oldL = null
                 if (op != "=") {
-                    oldL = b.NewCall(rtKGet(), [curScopeV, nameV])
+                    // A name behind a setter is read through its getter, as a plain
+                    // read of it is.
+                    if (isSetterName(ref.name)) {
+                        var rd = makeVarRef(ref.name)(b)
+                        b = rd.b
+                        oldL = rd.v
+                    } else { oldL = b.NewCall(rtKGet(), [curScopeV, nameV]) }
                     v = emitBin(b, op, oldL, v)
                 }
                 // An unqualified write inside a member body may target a computed,
@@ -7442,6 +7463,7 @@ KwContinue  = "continue" KwEnd ;
         var rtxt = ""
         if (items[k] != undefined && items[k].rtxt != undefined) { rtxt = items[k].rtxt; k++ }
         swDotClaim(from, to, rtxt)
+        swDsNoteSig(items[0], items[1].params)
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start}
     }
     // The inout parameters of the function whose body is currently being emitted:
@@ -7898,7 +7920,12 @@ KwContinue  = "continue" KwEnd ;
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
                 var f = {name: it.prop, store: it.prop, ty: it.ty, ann: it.ann, hasInit: it.hasInit, init: it.init}
-                if (isStatic) { mem.statProps.push(f) }
+                if (isStatic) {
+                    // Read and written through the accessor pair emitStatic installs.
+                    mem.statProps.push(f)
+                    computedNames["$" + it.prop] = 1
+                    setterNames["$" + it.prop] = 1
+                }
                 else if (isLazy) {
                     mem.lazies.push({name: it.prop, init: it.init})
                     computedNames["$" + it.prop] = 1
@@ -7969,7 +7996,7 @@ KwContinue  = "continue" KwEnd ;
         for (var s = 0; s < fields.length; s++) {
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
                           adopt: fields[s].ty, variadic: false, auto: false, inout: false,
-                          hasDefault: fields[s].hasInit, dflt: fields[s].init})
+                          hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann})
         }
         return mparams
     }
@@ -8490,22 +8517,22 @@ KwContinue  = "continue" KwEnd ;
             noteOverload(statNames, statCands, skey, sn, st.params, tname, true)
         }
         b = emitOverloadSlots(b, statV, statNames, statCands, 0, tname, true)
+        // A static accessor reads the type's other statics unqualified, as a static
+        // method does; sw_setprop passes the receiver first, so a setter is emitted
+        // as an instance function whose `this` is the descriptor.
         for (var sc = 0; sc < mem.statComps.length; sc++) {
             var sp = mem.statComps[sc]
             if (sp.get != null) {
                 callExt(b, "js_set", [statV, emitStr(b, "__get_" + sp.name),
-                                      callExt(b, "js_closure", [handle(emitFunc([], sp.get, false)), curScopeV])])
+                                      callExt(b, "js_closure", [handle(emitFunc([], sp.get, false, false, undefined, undefined, statSelfName(tname))), curScopeV])])
             }
             if (sp.set != null) {
                 callExt(b, "js_set", [statV, emitStr(b, "__set_" + sp.name),
-                                      callExt(b, "js_closure", [handle(emitFunc([plainParam(sp.setP)], sp.set, false)), curScopeV])])
+                                      callExt(b, "js_closure", [handle(emitFunc([plainParam(sp.setP)], sp.set, true)), curScopeV])])
             }
         }
         // A nested type is installed on the enclosing descriptor, and read back under
         // its QUALIFIED key - it has no bare binding in the surrounding scope.
-        // BEFORE the static property initialisers, which may CONSTRUCT one: a static
-        // initialiser runs eagerly here (Swift's is lazy), so `static let s = Inner()`
-        // needs the nested descriptor already emitted.
         for (var nt = 0; nt < mem.nested.length; nt++) {
             lastTypeName = null
             lastTypeKey = null
@@ -8515,16 +8542,50 @@ KwContinue  = "continue" KwEnd ;
                                       b.NewCall(rtKGet(), [curScopeV, emitStr(b, lastTypeKey)])])
             }
         }
-        for (var q = 0; q < mem.statProps.length; q++) {
-            var v = hNull
-            if (mem.statProps[q].init != null) {
-                var rv = mem.statProps[q].init(b)
-                b = rv.b
-                v = rv.v
-            }
-            callExt(b, "js_set", [statV, emitStr(b, mem.statProps[q].name), v])
-        }
+        for (var q = 0; q < mem.statProps.length; q++) { emitStatic(b, statV, mem.statProps[q], tname) }
         return b
+    }
+    // `static let/var x = e`: Swift runs e LAZILY, once, at the first access - a
+    // write included, which runs e and then overwrites its value. The value lives in
+    // a hidden variable of the declaring scope (undefined until then), which the
+    // accessor pair on the descriptor shares, so a subclass reaching x through
+    // inheritance reaches the same one. e sees self as the declaring type, as a
+    // static method does. Twin of installStatic in swift-interpreter.abnf.
+    var swStaticSeq = 0
+    function emitStatic(b, statV, sp, tname) {
+        swStaticSeq = swStaticSeq + 1
+        var cell = "$st" + swStaticSeq
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cell), hUndef])
+        var init = sp.init
+        var getBody = function(bb) {
+            var have = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, cell)])
+            var buildB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            bb.NewCondBr(truthy(bb, callExt(bb, "js_seq", [have, hUndef])), buildB, doneB)
+            var vb = buildB
+            var v = hNull
+            if (init != null) {
+                var r = init(buildB)
+                vb = r.b
+                v = r.v
+            }
+            callExt(vb, "js_scope_set", [curScopeV, emitStr(vb, cell), v])
+            vb.NewBr(doneB)
+            doneB.NewRet(callExt(doneB, "js_scope_get", [curScopeV, emitStr(doneB, cell)]))
+            return deadBlock()
+        }
+        var getV = callExt(b, "js_closure", [handle(emitFunc([], getBody, false, false, undefined, undefined, statSelfName(tname))), curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cell + "g"), getV])
+        var setBody = function(bb) {
+            callExt(bb, "js_call", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, cell + "g")]), hUndef, callExt(bb, "js_arr_new", [])])
+            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, cell),
+                                         bb.NewCall(rtKGet(), [curScopeV, emitStr(bb, "$new")])])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }
+        callExt(b, "js_set", [statV, emitStr(b, "__get_" + sp.name), getV])
+        callExt(b, "js_set", [statV, emitStr(b, "__set_" + sp.name),
+                              callExt(b, "js_closure", [handle(emitFunc([plainParam("$new")], setBody, true)), curScopeV])])
     }
     // The generated accessor pair. An observed property's storage is __v_x and its
     // observers are ordinary methods, so neither fires for the value __ctor lays down.
@@ -9174,12 +9235,15 @@ KwContinue  = "continue" KwEnd ;
             if (!seen) { ts.push(tn) }
         }
     }
-    // The type an implicit `.name` reads from, or "": the expected type when the walk
-    // knows one and it declares the name (a static member or an enum case), else the
-    // one type whose static member it must be - no enum case, and a static member of
-    // exactly one type. Asked at emit time, when every type is registered. Twin of
+    // The type an implicit `.name` reads from, or "": the expected type in cell.want
+    // when the walk knows one and it declares the name (a static member or an enum
+    // case), else the one type whose static member it must be - no enum case, and a
+    // static member of exactly one type. Asked at emit time, when every type is
+    // registered and the pending call arguments can be typed (swDsFlush). Twin of
     // swDotOwner in swift-interpreter.abnf.
-    function swDotOwner(dname, want) {
+    function swDotOwner(dname, cell) {
+        swDsFlush()
+        var want = cell.want
         if (want != "" && typeAt(typeKeyOf(want)) != null
             && (swHasStatic(dname, want) || swEnumCaseReg["$" + want + "." + dname] === true)) { return want }
         return swDotStatic(dname)
@@ -9340,7 +9404,7 @@ KwContinue  = "continue" KwEnd ;
     // the expected type a declaration hands down through cell.want. An unqualified
     // case's __eqkey is what makes it compare equal to the qualified case of the
     // same name.
-    function makeDotMember(items, at) {
+    function makeDotMember(items, at, start) {
         var dname = ""
         var args = null
         for (var i = 0; i < items.length; i++) {
@@ -9352,8 +9416,17 @@ KwContinue  = "continue" KwEnd ;
         hasRichEnum = true
         var cell = {want: ""}
         swLastDot = {at: at, dname: dname, args: args, cell: cell}
+        if (dname == "init" && args != null) {
+            var h = {t: makeDotThunk(dname, args, cell), done: false}
+            swDsNoteDot(start, {dot: swLastDot, h: h})
+            return function(b) { swDsFlush(); var f = h.t; return f(b) }
+        }
+        swDsNoteDot(start, {dot: swLastDot, h: null})
+        return makeDotThunk(dname, args, cell)
+    }
+    function makeDotThunk(dname, args, cell) {
         return function(b) {
-            var stTn = swDotOwner(dname, cell.want)
+            var stTn = swDotOwner(dname, cell)
             if (stTn != "") {
                 var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(stTn))])
                 if (args == null) { return {b: b, v: emitFieldRead(b, clsV, dname)} }
@@ -9383,9 +9456,19 @@ KwContinue  = "continue" KwEnd ;
     }
     // The leading-dot member the walk built last, and its source span.
     var swLastDot = {at: "", dname: "", args: null, cell: null}
-    // Twin of swDotWant / swDotPend / swDotClaim in swift-interpreter.abnf, which
-    // explains them.
+    include("lib/swift-dotwant.js")
+    // Twin of swDsApply / swDotWant / swDotPend / swDotClaim in
+    // swift-interpreter.abnf, which explains them.
+    function swDsApply(d, ty) {
+        if (d.h == null) {
+            if (d.dot.cell.want == "") { swDotRetarget(null, d.dot, ty) }
+        } else if (d.h.done !== true) {
+            d.h.t = swDotRetarget(d.h.t, d.dot, ty)
+            d.h.done = true
+        }
+    }
     function swDotWant(init, rec, ann) {
+        if (rec != undefined && rec.iat != undefined) { swDsWantSpan(rec.iat, ann) }
         if (!swIsDotInit(init, rec)) { return init }
         return swDotRetarget(init, swLastDot, ann)
     }
@@ -9419,12 +9502,14 @@ KwContinue  = "continue" KwEnd ;
     }
     var swDotRets = []
     function swDotPend(t, rec, pos) {
+        swDsNoteRet(rec, pos)
         if (!swIsDotInit(t, rec)) { return t }
         var h = {t: t}
         swDotRets.push({pos: pos, dot: swLastDot, h: h})
         return function(b) { var f = h.t; return f(b) }
     }
     function swDotClaim(from, to, ann) {
+        swDsClaimRets(from, to, ann)
         if (swDotRets.length == 0) { return }
         var keep = []
         for (var i = 0; i < swDotRets.length; i++) {

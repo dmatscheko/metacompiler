@@ -526,7 +526,7 @@ ParamInout  <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
 ParamLead   = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 ParamType   <~~ push({ptype: up.in}) ~~> = Type ;
 ParamVariadic <~~ push({pvar: 1}) ~~> = "..." ;
-ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
+ParamDflt   <~~ push({pdflt: pop(), dat: up.start + ":" + up.pos}) ~~> = Expression ;
 // Parameter/type attributes (@escaping, @autoclosure) take no argument list, so
 // the ( ... ) that follows belongs to a function type. The few type attributes
 // that DO take one (`@isolated(any)`, `@convention(c)`) are named, which is how
@@ -1347,7 +1347,7 @@ NotChar61   = :script(~~
 NotChar63   = :script(~~
     (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
 ~~) ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); push({kind:"mcall", name: mn, args: takeAll()}) ~~>
             = "." Id <~~ push({mname: swBt(up.in)}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: swBt(up.in)}) ~~> ;
 // t.0 / t.1: a tuple element read. A tuple is an object whose elements live under
@@ -1525,15 +1525,18 @@ SuperRef    <~~ push(makeSuperRef()) ~~> = KwSuper ;
 // resolves the leading dot against the expected TYPE; this front end has no type
 // checker, so the type is known only where the walk sees the declared type of the
 // slot the member fills: an annotated let/var or stored property (`let s: S =
-// .init(n: 3)`), an assignment to an annotated name (swDotWant), and the value a
+// .init(n: 3)`), an assignment to an annotated name (swDotWant), the value a
 // func, method, closure or computed property with a declared type returns
-// (swDotPend). Without one, a name that is a static member of exactly one type and
-// no enum case is that type's member (swDotStatic), and anything else builds an
+// (swDotPend), a call argument, and a member nested inside any of those - an
+// array element, a ternary branch, a closure's result (lib/swift-dotwant.js,
+// which finds the member by the offset of its dot). Without one, a name that is
+// a static member of exactly one type and no enum case is that type's member
+// (swDotStatic), and anything else builds an
 // unqualified enum case value carrying only the case name and, if given, its
 // associated values. Matching and == compare enum cases by NAME, so an unqualified
 // `.tails` and a qualified `Coin06.tails` are the same value. The span is how a
 // declaration recognizes a value that IS this member.
-DotMember   <~~ push(makeDotMember(takeAll(), up.start + ":" + up.pos)) ~~>
+DotMember   <~~ push(makeDotMember(takeAll(), up.start + ":" + up.pos, up.start)) ~~>
             = "." Id <~~ push({dname: swBt(up.in)}) ~~> [ DotArgs ] ;
 DotArgs     <~~ push({dargs: takeAll()}) ~~>
             = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
@@ -1639,12 +1642,12 @@ GenFollow   = :script(~~
 ~~) ;
 
 // f(args): a global function or a struct/class constructor (calls init).
-Call        <~~ push(makeCall(takeAll())) ~~>
+Call        <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
             = Id <~~ push(swBt(up.in)) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with only trailing closures, in any
 // expression position (`return filter { $0 > 1 }`). NoTrailCtx is what keeps
 // `if cond { ... }` from reading as a call of cond.
-TrailCall   <~~ push(makeCall(takeAll())) ~~>
+TrailCall   <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
             = Id <~~ push(swBt(up.in)) ~~> NoTrailCtx TrailArg { LabTrail } ;
 
 // String interpolation: "sum = \(a + b)".
@@ -5521,6 +5524,7 @@ KwContinue  = "continue" KwEnd ;
         // With no parameter names the arguments bind as the shorthand $0..$3.
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
         inouts = swClInouts(params, inouts, up.start, end)
+        if (rtype == "") { swDsParkRets(up.start, end) }
         swDotClaim(up.start, end, rtype)
         var body = items.slice(start)
         return function() {
@@ -5597,6 +5601,7 @@ KwContinue  = "continue" KwEnd ;
     // callee prologue fills the trailing defaults, which is the documented fallback.
     var sigOwner = {}
     function regTypeSig(key, name, params) {
+        swDsNoteSig(name, params)
         if (hasOwn(sigOwner, "$" + name) && sigOwner["$" + name] != key) {
             scopePut(sigReg, "$" + name, null)
             return
@@ -5620,7 +5625,7 @@ KwContinue  = "continue" KwEnd ;
             else if (it.ptype != undefined) { type = stripWs(it.ptype) }
             else if (it.pvar != undefined) { isVar = true }
             else if (it.pinout != undefined) { isInout = true }
-            else if (it.pdflt != undefined) { hasDflt = true; dflt = it.pdflt }
+            else if (it.pdflt != undefined) { hasDflt = true; dflt = it.pdflt; swDsWantSpan(it.dat, type) }
             else if (it.pattr != undefined && it.pattr == "autoclosure") { isAuto = true }
         }
         // `arg: repeat each T` is a VALUE PACK: it binds every remaining argument,
@@ -7128,6 +7133,7 @@ KwContinue  = "continue" KwEnd ;
         var rtxt = ""
         if (items[k] != undefined && items[k].rtxt != undefined) { rtxt = items[k].rtxt; k++ }
         swDotClaim(from, to, rtxt)
+        swDsNoteSig(items[0], items[1].params)
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret}
     }
     function makeInit(items) {
@@ -7793,7 +7799,7 @@ KwContinue  = "continue" KwEnd ;
         for (var s = 0; s < fields.length; s++) {
             mparams.push({name: fields[s].store, label: fields[s].name, type: "",
                           adopt: fields[s].ty, variadic: false, auto: false, inout: false,
-                          hasDefault: fields[s].hasInit, dflt: fields[s].init})
+                          hasDefault: fields[s].hasInit, dflt: fields[s].init, ann: fields[s].ann})
         }
         return mparams
     }
@@ -7846,18 +7852,29 @@ KwContinue  = "continue" KwEnd ;
         // it is not in the surrounding scope (see declType). __outer records who
         // installed it, which is how a bare name inside a member body resolves
         // outward, and cls is pushed as the owner so the nested declaration's OWN
-        // inheritance clause and static initialisers can already see its siblings.
-        // BEFORE the static property initialisers, which may CONSTRUCT one: a static
-        // initialiser runs eagerly here (Swift's is lazy), so `static let s = Inner()`
-        // needs the nested descriptor already installed.
+        // inheritance clause can already see its siblings.
         for (var nt = 0; nt < mem.nested.length; nt++) {
             lastType = null
             mem.nested[nt]()
             if (lastType != null) { tput(cls, lastType.name, lastType.v); setOuter(lastType.v, cls) }
         }
-        for (var st = 0; st < mem.statProps.length; st++) {
-            tput(cls, mem.statProps[st].name, mem.statProps[st].init == null ? null : mem.statProps[st].init())
+        for (var st = 0; st < mem.statProps.length; st++) { installStatic(mem.statProps[st], cls) }
+    }
+    // `static let/var x = e`: Swift runs e LAZILY, once, at the first access - a
+    // write included, which runs e and then overwrites its value - so e may name the
+    // type being declared and its later members. The value lives in a cell this
+    // accessor pair shares, which a subclass reaching x through inheritance reaches
+    // too. Twin of emitStatic in swift-to-llvm-ir.abnf.
+    function installStatic(sp, cls) {
+        var cell = {}
+        var build = sp.init == null ? null
+            : makeMethodClosure({name: "__stinit_" + sp.name, params: [], body: makeExprBody(sp.init)}, cls)
+        var get = function(self) {
+            if (!hasOwn(cell, "v")) { scopePut(cell, "v", build == null ? null : build(cls)) }
+            return cell.v
         }
+        tput(cls, "__get_" + sp.name, get)
+        tput(cls, "__set_" + sp.name, function(self, v) { get(self); scopePut(cell, "v", v) })
     }
 
     // items = [name, {inherit}..., ({prop}|{cprop}|{method}|{mstatic})...] -> a
@@ -8386,11 +8403,15 @@ KwContinue  = "continue" KwEnd ;
             if (!seen) { ts.push(tn) }
         }
     }
-    // The type an implicit `.name` reads from, or "": the expected type when the walk
-    // knows one and it declares the name (a static member or an enum case), else the
-    // one type whose static member it must be - no enum case, and a static member of
-    // exactly one type. Twin of swDotOwner in swift-to-llvm-ir.abnf.
-    function swDotOwner(dname, want) {
+    // The type an implicit `.name` reads from, or "": the expected type in cell.want
+    // when the walk knows one and it declares the name (a static member or an enum
+    // case), else the one type whose static member it must be - no enum case, and a
+    // static member of exactly one type. Asked at the first run, once the pending
+    // call arguments are typed (swDsFlush). Twin of swDotOwner in
+    // swift-to-llvm-ir.abnf.
+    function swDotOwner(dname, cell) {
+        swDsFlush()
+        var want = cell.want
         if (want != "") {
             var th = swResolve(want)
             if (th != null && isTypeVal(th.v) && (swHasStatic(dname, want) || (th.v.__isenum === true && hasOwn(th.v, dname)))) { return want }
@@ -8491,7 +8512,7 @@ KwContinue  = "continue" KwEnd ;
     }
     // `.tails` / `.circle(r: 5)`: a static member or an enum case, resolved against
     // the expected type a declaration hands down through cell.want.
-    function makeDotMember(items, at) {
+    function makeDotMember(items, at, start) {
         var dname = ""
         var args = null
         for (var i = 0; i < items.length; i++) {
@@ -8502,13 +8523,25 @@ KwContinue  = "continue" KwEnd ;
         }
         var cell = {want: ""}
         swLastDot = {at: at, dname: dname, args: args, cell: cell}
+        // `.init(args)` is retargeted by replacing its thunk, so it runs through a
+        // holder, read after the pending call arguments are typed; every other
+        // member through its cell.
+        if (dname == "init" && args != null) {
+            var h = {t: makeDotThunk(dname, args, cell), done: false}
+            swDsNoteDot(start, {dot: swLastDot, h: h})
+            return function() { swDsFlush(); var f = h.t; return f() }
+        }
+        swDsNoteDot(start, {dot: swLastDot, h: null})
+        return makeDotThunk(dname, args, cell)
+    }
+    function makeDotThunk(dname, args, cell) {
         // The owning type of a static member, decided at the first run, when every
         // type is registered: "" for none.
         var stTn = anytype
         stTn = null
         if (args == null) {
             return function() {
-                if (stTn === null) { stTn = swDotOwner(dname, cell.want) }
+                if (stTn === null) { stTn = swDotOwner(dname, cell) }
                 if (stTn != "") { return core.getField(swResolve(stTn).v, dname) }
                 if (swDotOptional(dname, -1) == "none") { return null }
                 return newCaseVal(null, dname, undefined, null, null, undefined)
@@ -8516,7 +8549,7 @@ KwContinue  = "continue" KwEnd ;
         }
         var recs = args
         return function() {
-            if (stTn === null) { stTn = swDotOwner(dname, cell.want) }
+            if (stTn === null) { stTn = swDotOwner(dname, cell) }
             var ea = evalArgs(recs)
             if (stTn != "") {
                 pendingLabels = recLabels(recs)
@@ -8531,12 +8564,26 @@ KwContinue  = "continue" KwEnd ;
     }
     // The leading-dot member the walk built last, and its source span.
     var swLastDot = {at: "", dname: "", args: null, cell: null}
+    // An implicit member inside a typed slot's value (an array element, a ternary
+    // branch, a closure's result, a call argument).
+    include("lib/swift-dotwant.js")
+    // Retargets one member swDsScan reached for the type ty; a member already
+    // typed by an enclosing declaration keeps its type.
+    function swDsApply(d, ty) {
+        if (d.h == null) {
+            if (d.dot.cell.want == "") { swDotRetarget(null, d.dot, ty) }
+        } else if (d.h.done !== true) {
+            d.h.t = swDotRetarget(d.h.t, d.dot, ty)
+            d.h.done = true
+        }
+    }
     // A declared slot's initializer when it IS a leading-dot member (its text opens
     // with the dot and its span is the member's own): `.init(args)` becomes the call
     // T(args), and any other member resolves against T first. T is the annotation's
     // nominal type, through Optional and generic arguments. Twin of swDotWant in
     // swift-to-llvm-ir.abnf.
     function swDotWant(init, rec, ann) {
+        if (rec != undefined && rec.iat != undefined) { swDsWantSpan(rec.iat, ann) }
         if (!swIsDotInit(init, rec)) { return init }
         return swDotRetarget(init, swLastDot, ann)
     }
@@ -8560,6 +8607,7 @@ KwContinue  = "continue" KwEnd ;
     // statement calls h.t, so retargeting it replaces the thunk.
     var swDotRets = []
     function swDotPend(t, rec, pos) {
+        swDsNoteRet(rec, pos)
         if (!swIsDotInit(t, rec)) { return t }
         var h = {t: t}
         swDotRets.push({pos: pos, dot: swLastDot, h: h})
@@ -8569,6 +8617,7 @@ KwContinue  = "continue" KwEnd ;
     // ann is its result type, "" for one whose result is not the member's type (a
     // closure without a declared one, an init, a subscript).
     function swDotClaim(from, to, ann) {
+        swDsClaimRets(from, to, ann)
         if (swDotRets.length == 0) { return }
         var keep = []
         for (var i = 0; i < swDotRets.length; i++) {

@@ -3310,6 +3310,88 @@ func s66() {
     check("dty4", q66(true).t == "qz" && q66(false).t == "q2" && g().n == 8)
 }
 
+// ===== SECTION 67: lazy static stored properties =====
+// A static initialiser runs once, at the first access - a write included - so it
+// may construct the type it is declared in and read its later members. A subclass
+// reaches the one storage of an inherited static, and a static method or computed
+// static reads and updates it unqualified.
+var log67 = [String]()
+func note67(_ s: String, _ v: Int) -> Int { log67.append(s); return v }
+struct V67 {
+    var n: Int
+    static let zero = V67(n: note67("zero", 0))
+    static let one = V67(n: zero.n + 1)
+    static var hits = note67("hits", 10)
+    static var unused = note67("unused", 0)
+    static var half: Int { return hits / 2 }
+    static func bump() { hits += 4 }
+}
+enum C67 {
+    case r, g
+    static let all: [C67] = [.r, .g]
+    static var pick = C67.all[1]
+}
+class B67 { static var tag = note67("tag", 3) }
+class D67: B67 {}
+func s67() {
+    check("lzs1", log67.isEmpty)
+    check("lzs2", V67.one.n == 1 && log67 == ["zero"])
+    V67.hits = 4
+    V67.bump()
+    check("lzs3", V67.hits == 8 && V67.half == 4 && log67 == ["zero", "hits"])
+    check("lzs4", C67.all.count == 2 && C67.pick == .g)
+    check("lzs5", D67.tag == 3 && B67.tag == 3 && log67 == ["zero", "hits", "tag"])
+    D67.tag = 8
+    check("lzs6", B67.tag == 8)
+}
+
+// ===== SECTION 68: implicit members inside a typed value =====
+// The expected type reaches a leading-dot member through an array or dictionary
+// literal, a tuple, a ternary or ?? branch, a closure's result, a parameter's
+// default and a call argument (trailing closures included). Both types declare
+// every member, so no single-owner guess can pick one.
+struct T68 {
+    var n: Int
+    init(n: Int) { self.n = n * 2 }
+    static let one = T68(n: 1)
+    static func make(_ k: Int) -> T68 { return T68(n: k) }
+}
+struct U68 {
+    var s: String
+    static let one = U68(s: "u1")
+    static func make(_ k: Int) -> U68 { return U68(s: "u\(k)") }
+}
+struct W68 { var t: T68; var u: U68 }
+func take68(_ t: T68, or d: T68 = .one) -> Int { return t.n * 100 + d.n }
+func via68(_ f: () -> U68) -> String { return f().s }
+func rows68() -> [T68] { return [.make(3), .init(n: 4)] }
+func s68() {
+    let ts: [T68] = [.one, .make(2), .init(n: 3)]
+    let ud: [String: [U68]] = ["k": [.make(5), .one]]
+    check("dsub1", ts.map { $0.n } == [2, 4, 6] && ud["k"]!.map { $0.s } == ["u5", "u1"])
+    let flag = false
+    let u: U68 = flag ? .one : .make(7)
+    let none: T68? = nil
+    let t: T68 = none ?? .make(8)
+    let pr: (T68, U68) = (.one, .make(9))
+    check("dsub2", u.s == "u7" && t.n == 16 && pr.0.n == 2 && pr.1.s == "u9")
+    let f: () -> T68 = { .make(8) }
+    let g: (Int) -> U68 = { k in .make(k + 1) }
+    check("dsub3", f().n == 16 && g(1).s == "u2" && rows68().map { $0.n } == [6, 8])
+    let w = W68(t: .make(1), u: .one)
+    check("dsub4", take68(.make(3)) == 602 && take68(.one, or: .init(n: 5)) == 210
+                   && via68 { .make(4) } == "u4" && w.t.n == 2 && w.u.s == "u1")
+    let sw: U68 = {
+        if flag { return .one }
+        return .make(6)
+    }()
+    let pick: (Bool) -> T68 = { b in
+        if b { return .one }
+        return .make(5)
+    }
+    check("dsub5", sw.s == "u6" && pick(true).n == 2 && pick(false).n == 10)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3377,6 +3459,8 @@ func main() {
     s64() // SECTION-CALL 64
     s65() // SECTION-CALL 65
     s66() // SECTION-CALL 66
+    s67() // SECTION-CALL 67
+    s68() // SECTION-CALL 68
     print("full: \(checks) checks, \(fails) failures")
 }
 
