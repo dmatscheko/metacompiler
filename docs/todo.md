@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-357** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-360** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,24 +130,19 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` · P2 · KT · IN PROGRESS (KT worker, round 8) [V]
-`arrayOf<Int>().first()` → `Array is empty.`, `asSequence().first()` → `Sequence is
-empty.`, `map.values.first()` → `Collection is empty.`, `Empty array can't be
-reduced.`, `Array has more than one element.` (all read from the 2.2.21 jar). An Array,
-a Sequence, a values view and a List are one host array: needs the nominal kind of
-T-081 (jsArray in abnf/jsrt.go, the floor's array cell). reduceOrNull /
-reduceRightOrNull were added in b38a051.
-### T-347 kotlin: Long/Int identity in Any equality, sets and LongRange · P2 · KT · IN PROGRESS (KT worker, round 8) [V]
-`setOf<Any>(1, 1L).size` is 1 (jar 2); a Float/Double/Int/Long set of 6 has 4;
-`(1 as Any) == (1L as Any)` true (jar false); a LongRange's first/last are not `is
-Long`. The kinds already differ (plain number vs tag-13 Long box, floJavaF vs floJava):
-kind-aware key and Any equality, once integer literals carry their expected type
-(`listOf(1L).contains(1)` is true). LongRange endpoints: keep the Long box.
+### T-357 kotlin: integer literals do not take their expected type · P2 · KT · OPEN [V]
+`val ls: List<Long> = listOf(1,2,3)`, `hashSetOf<Long>(1,2)`, `var y = 5L; y = 7`,
+`mutableMapOf<Long,String>()[1] = ..`, `mutableListOf<Long>().add(3)`,
+`Pair<Long,Int>(1,2)`, `la[0] = 5` into a LongArray: the element is an Int (`is Long`
+false through Any); `listOf<Long>(100000,100000)[0]*[1]` wraps to 1410065408. Empty
+`listOf<Float>().sum()` / `listOf<Long>().sum()` answer Int 0. Once literals adopt their
+expected type (declared generic types, explicit type arguments, Long-slot reassignment,
+elvis operand, writes into a known-kind collection), make Int ≠ Long at equality:
+`setOf<Any>(1, 1L).size` 2, `(1 as Any) == (1L as Any)` false, `1L.equals(1)` false.
 
-### T-348 kotlin: `concatToString`, `String(charArray)`, `reversed()` on surrogates · P1 · KT · IN PROGRESS (KT worker, round 8) [V]
-`cs.concatToString()` "unknown list method" in all engines; `String(charArrayOf(..))`
-"unknown name: String" in the interpreter; `String.reversed()` in the Go twin rebuilds
-per unit with string(rune) (the JVM keeps surrogate pairs whole - probe).
+### T-358 kotlin: interpreter gaps - `System.currentTimeMillis`, `kotlin.math.*` · P1 · KT · OPEN [V]
+Interpreter: "unknown name: System"; after `import kotlin.math.*`, `sqrt(4.0)` "unknown
+name: sqrt" (the compiler answers both).
 
 ---
 
@@ -254,6 +249,12 @@ d_*. Cost it; implement or DECLINE.
 goja and -frozen: `s.charAt(i)` where s[i] is a lone surrogate gives U+FFFD, while
 substring keeps the unit (dart's dxQuote uses charAt). Make charAt keep the unit in both
 hosts.
+
+### T-359 goja: a lone surrogate in a kotlin string literal becomes U+FFFD · P1 · CORE · OPEN [V]
+`val s = "\uDE00\uD83D"; println(s.map { it.code }.joinToString(" "))`: goja interp
+and goja-built llvm.Run/native "65533 65533"; -frozen "56832 55357" (= JVM). A
+goja-vs-frozen divergence in both kotlin halves: the literal crosses a goja→Go string
+conversion (cf. the js fix gojaWTF8). Find every such crossing, not only kotlin's.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -519,6 +520,9 @@ T-335 ruby: `casecmp` folds Unicode — DONE 63cd2c4
 T-341 ruby: Enumerator printing, `{}.each` without a block, Symbol#inspect quoting — DONE 35389da c449a89
 T-342 ruby: reopening a builtin class does not add methods — PARTIAL 2763dd9 (builtin reopen); the uncaught-error prefix is T-356
 T-343 js: `Array.prototype`, `typeof Object` — PARTIAL ea31394 (typeof Object; Array/String/Number.prototype); rest is T-355
+T-348 kotlin: `concatToString`, `String(charArray)`, `reversed()` on surrogates — DONE 645704a
+T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` — DONE a4ef472 (a kind field on the host array: jsArray.kind, the floor cell's field d, host ids 99/100)
+T-347 kotlin: Long/Int identity in Any equality, sets and LongRange — PARTIAL a2b2800 5eecfc1 d57a423 (LongRange/LongArray Longs, float≠int through Any, Long sum); Int vs Long equality is T-357
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
