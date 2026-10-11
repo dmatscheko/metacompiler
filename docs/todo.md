@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-382** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-383** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -126,11 +126,12 @@ method 'toInt'" (compiled 97).
 
 # GO — Go  (oracle: `go run`)
 
-### T-381 go: a slice of a defined type prints its elements raw · P1 · GO · IN PROGRESS (GO worker, round 13) [V]
-`ks := []Kind{1, 3}; fmt.Println(ks)` prints `[1 3]`; go `[kind1 kind3]` (String() per
-element). Also: AssertBase/TSSubject/DeferChain/PanicOperand chains never call
-goRecvsC, so `switch m[MyInt(1)].(type)` on a map[any] does not box the key (probe);
-a package type sharing a name with a main-file type shares the flat prescan tables.
+### T-382 go: arrays of defined types; a package's own defined types inside its code · P2 · GO · OPEN [V]
+`[2]Kind{2, 4}` prints `[2 4]` (go `[kind2 kind4]`) and `%T` `[2]int` (go
+`[2]main.Kind`): a plain host array records no element type. Inside package pk, its own
+`Kind` is never boxed (goDtForeign): `pk.Show(4)` gives `4 [4]` (go `pk4 [pk4]`) and
+`%T` of `pk.Kinds()` is `[]main.Kind` (go `[]pk.Kind`). Needs qualified et/mty/__ftypes
+and `case T:` / `x.(T)` qualification inside packages.
 
 ---
 
@@ -472,6 +473,7 @@ T-367 python: a lone high surrogate before a non-surrogate is read as a pair —
 T-369 js: `var` is block-scoped; for-of/in reuse an outer variable; symbol limits — DONE b5390929 b4ec7662 d6a71e8a (js only; the TS port is T-379)
 T-376 go: `len`/`cap`/index/append pay ~19k instructions in `js_is_type` — DONE 44b773a3 (bench go 384M → 100M instructions, output checked against go run)
 T-375 go: `map[any]` keys of defined types; imported packages' defined types — DONE b44a5741
+T-381 go: a slice of a defined type prints its elements raw — DONE f29be2a6
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
