@@ -1902,6 +1902,9 @@ KwContinue  = "continue" KwEnd ;
     // statement builders); Swift-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
+    // Double("0x1p4")'s numeral (swFloParse).
+    include("lib/hex-float.js")
+
     // ----- Operators -----
     // precedencegroup / operator declarations. Only the RELATIVE order of the custom
     // operators matters: they all sit at one level of the expression grammar (tighter
@@ -8969,9 +8972,33 @@ KwContinue  = "continue" KwEnd ;
     // Double(x) / Float(x): the conversion that BOXES, and the type's own statics.
     // Double(3) is 3.0 and Double(3) / 2 is 1.5 - that is the whole point of the
     // box. A String source is failable, like Int("x").
-    // Double("3.5") is FAILABLE: swift answers nil unless the WHOLE string is a
-    // number, where parseFloat would stop at the first bad character and answer 3.5
-    // for "3.5x". [+-]? digits [. digits] [(e|E) [+-] digits], at least one digit.
+    // Double("3.5") is FAILABLE: swift reads the string with strtod and answers
+    // nil unless the WHOLE string is a numeral, where parseFloat would stop at the
+    // first bad character and answer 3.5 for "3.5x". A sign, then a decimal
+    // numeral, a hexadecimal one (0x, an optional p exponent), inf, infinity or
+    // nan in any case; out of range is inf or zero. null for anything else. Twin
+    // of swFloParse in abnf/jsrtswift.go and languages/lib/swift-rt.metajs.
+    function swFloParse(s) {
+        var b = s
+        var neg = false
+        if (b.length > 0 && (b.charAt(0) == "+" || b.charAt(0) == "-")) {
+            neg = b.charAt(0) == "-"
+            b = b.substring(1)
+        }
+        var w = b.toLowerCase()
+        if (w == "inf" || w == "infinity") { return neg ? -1 / 0 : 1 / 0 }
+        if (w == "nan") { return 0 / 0 }
+        if (w.length > 1 && w.charAt(0) == "0" && w.charAt(1) == "x") {
+            var r = anytype
+            r = hexFloatScan(b, 2)
+            if (r === null || r.end != b.length) { return null }
+            if (r.v == 0) { return neg ? 0 / (0 - 1) : 0 }
+            return neg ? -r.v : r.v
+        }
+        if (!swFloText(s)) { return null }
+        return parseFloat(s)
+    }
+    // [+-]? digits [. digits] [(e|E) [+-] digits], at least one digit.
     function swFloText(s) {
         var i = 0
         if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
@@ -9003,8 +9030,10 @@ KwContinue  = "continue" KwEnd ;
         if (isF32(x)) { return swFlo(x.__flo) }
         if (isFlo(x)) { return x }
         if (typeof x == "string") {
-            if (!swFloText(x)) { return null }
-            return swFlo(parseFloat(x))
+            var df = anytype
+            df = swFloParse(x)
+            if (df === null) { return null }
+            return swFlo(df)
         }
         if (x === true) { return swFlo(1) }
         if (x === false) { return swFlo(0) }
@@ -9022,8 +9051,10 @@ KwContinue  = "continue" KwEnd ;
         if (isF32(x)) { return x }
         if (isFlo(x)) { return swF32(x.__flo) }
         if (typeof x == "string") {
-            if (!swFloText(x)) { return null }
-            return swF32(parseFloat(x))
+            var ff = anytype
+            ff = swFloParse(x)
+            if (ff === null) { return null }
+            return swF32(ff)
         }
         if (x === true) { return swF32(1) }
         if (x === false) { return swF32(0) }

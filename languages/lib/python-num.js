@@ -218,17 +218,11 @@ function pynFloatHex(x) {
     return (x < 0 ? "-0x" : "0x") + s + "p" + ex
 }
 
-// The value of one hex digit, or -1.
-function pynHexVal(c) {
-    var i = pynHexDigits.indexOf(c.toLowerCase())
-    return i
-}
-
 function pynIsSpace(c) { return c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\f" || c == "\v" }
 
 // float.fromhex: the double nearest the hexadecimal string (ties to even), or
-// "invalid" / "overflow" for CPython's ValueError / OverflowError. The digits'
-// bits are rounded to the 53 (fewer for a subnormal) the result can hold.
+// "invalid" / "overflow" for CPython's ValueError / OverflowError. The numeral
+// itself is lib/hex-float.js's.
 function pynFromHex(src) {
     var s = src
     var a = 0
@@ -246,85 +240,12 @@ function pynFromHex(src) {
     if (word == "inf" || word == "infinity") { return neg ? -1 / 0 : 1 / 0 }
     if (word == "nan") { return 0 / 0 }
     if (word.length >= 2 && word.charAt(0) == "0" && word.charAt(1) == "x") { p = p + 2 }
-    // The digits, most significant first, and how many follow the point.
-    var digs = []
-    var frac = 0
-    var seenPoint = false
-    while (p < s.length) {
-        var c = s.charAt(p)
-        if (c == "." && !seenPoint) {
-            seenPoint = true
-        } else {
-            var hv = pynHexVal(c)
-            if (hv < 0) { break }
-            digs.push(hv)
-            if (seenPoint) { frac = frac + 1 }
-        }
-        p = p + 1
-    }
-    if (digs.length == 0) { return "invalid" }
-    var pexp = 0
-    if (p < s.length && (s.charAt(p) == "p" || s.charAt(p) == "P")) {
-        p = p + 1
-        var eneg = false
-        if (p < s.length && (s.charAt(p) == "-" || s.charAt(p) == "+")) {
-            eneg = s.charAt(p) == "-"
-            p = p + 1
-        }
-        var nd = 0
-        while (p < s.length && s.charAt(p) >= "0" && s.charAt(p) <= "9") {
-            // Past any double's range the exact value no longer matters.
-            if (pexp < 100000000) { pexp = pexp * 10 + (s.charCodeAt(p) - 48) }
-            nd = nd + 1
-            p = p + 1
-        }
-        if (nd == 0) { return "invalid" }
-        if (eneg) { pexp = -pexp }
-    }
-    if (p != s.length) { return "invalid" }
-    // The value's bits, most significant first, without leading zeros.
-    var bits = []
-    var i = 0
-    while (i < digs.length) {
-        var pw = 8
-        while (pw >= 1) {
-            var bit = Math.floor(digs[i] / pw) % 2
-            if (bits.length > 0 || bit == 1) { bits.push(bit) }
-            pw = pw / 2
-        }
-        i = i + 1
-    }
-    var zero = neg ? 0 / (0 - 1) : 0
-    if (bits.length == 0) { return zero }
-    // The leading bit's binary exponent, and how many bits the result keeps.
-    var lead = bits.length - 1 + pexp - 4 * frac
-    if (lead > 1024) { return "overflow" }
-    // Below half the smallest subnormal everything rounds to zero.
-    if (lead < -1075) { return zero }
-    var keep = 53
-    if (lead < -1022) { keep = lead + 1075 }
-    var q = 0
-    i = 0
-    while (i < keep && i < bits.length) {
-        q = q * 2 + bits[i]
-        i = i + 1
-    }
-    while (i < keep) {
-        q = q * 2
-        i = i + 1
-    }
-    // Round to nearest, ties to even, on the bits past the kept ones.
-    if (keep < bits.length && bits[keep] == 1) {
-        var sticky = false
-        var r = keep + 1
-        while (r < bits.length) {
-            if (bits[r] == 1) { sticky = true }
-            r = r + 1
-        }
-        if (sticky || q % 2 == 1) { q = q + 1 }
-    }
-    var v = pynScale2(q, lead - keep + 1)
+    var r = anytype
+    r = hexFloatScan(s, p)
+    if (r === null || r["end"] != s.length) { return "invalid" }
+    var v = r["v"]
     if (v - v != 0) { return "overflow" }
+    if (v == 0) { return neg ? 0 / (0 - 1) : 0 }
     return neg ? -v : v
 }
 

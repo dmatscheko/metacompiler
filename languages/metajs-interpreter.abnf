@@ -290,6 +290,8 @@ KwDefault   = "default" KwEnd ;
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
+    // strNum's hexadecimal numeral.
+    include("lib/hex-float.js")
 
     // The 'anytype' declaration marker of the interpreted programs: a unique
     // object a program can only obtain through the anytype global below.
@@ -1188,7 +1190,14 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Expression thunks: function() -> value -----
 
-    makeNeg = function(t) { return function() { return -t() } }
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (typeof v == "string") { return -strNum(v) }
+            return -v
+        }
+    }
     function makeBitNot(t) { return function() { return ~t() } }
     function makeTypeof(t) { return function() { return siTypeof(t()) } }
 
@@ -1223,10 +1232,15 @@ KwDefault   = "default" KwEnd ;
         // A sized integer is a NUMBER (typeof says so in both halves), so every
         // operator has to read it as one - siBinOp is runtime.c's arms. The
         // guard is two typeof tests, so the ordinary path costs no call: only an
-        // object operand can possibly be a box.
-        if (typeof l == "object" || typeof r == "object") {
-            if (szIs(l) || szIs(r)) return siBinOp(op, l, r)
-            if (flIs(l) || flIs(r)) return flBinOp(op, l, r)
+        // object or a string operand needs a look.
+        if (typeof l != "number" || typeof r != "number") {
+            if (typeof l == "object" || typeof r == "object") {
+                if (szIs(l) || szIs(r)) return siBinOp(op, l, r)
+                if (flIs(l) || flIs(r)) return flBinOp(op, l, r)
+            }
+            if ((typeof l == "string" || typeof r == "string") && strConverts(op, l, r)) {
+                return binOp(op, strOperand(l), strOperand(r))
+            }
         }
         if (op == "+") return l + r
         if (op == "-") return l - r
@@ -1262,6 +1276,108 @@ KwDefault   = "default" KwEnd ;
         if (op == ">>") return l >> r
         if (op == ">>>") return l >>> r
     }
+    // ToNumber of a string operand is the C floor's str_to_num - Go's
+    // strconv.ParseFloat on the string trimmed of ASCII space - which the frozen
+    // host and the compiled half answer, where goja's own is ECMAScript's ("0x10"
+    // is 16 there, "1_000" NaN). Every operator converts but + and the strict
+    // equalities; two strings compare and test equal as strings, and == converts
+    // a string only against a number or a boolean.
+    function strConverts(op, l, r) {
+        if (op == "+" || op == "===" || op == "!==") return false
+        var rel = op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">="
+        if (rel && typeof l == "string" && typeof r == "string") return false
+        if (op == "==" || op == "!=") {
+            var o = anytype
+            o = typeof l == "string" ? r : l
+            return typeof o == "number" || typeof o == "boolean"
+        }
+        return true
+    }
+    function strOperand(v) {
+        if (typeof v == "string") return strNum(v)
+        return v
+    }
+    function strSpace(c) {
+        var cc = c.charCodeAt(0)
+        return cc == 32 || (cc >= 9 && cc <= 13)
+    }
+    // Go's underscoreOK over s: an underscore only between two digits, where a
+    // 0x prefix counts as a digit and a hex number's digits include a-f.
+    function strUnderOK(s) {
+        var i = 0
+        var saw = "^"
+        var hex = false
+        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) i = i + 1
+        if (s.length - i >= 2 && s.charAt(i) == "0" && (s.charAt(i + 1) == "x" || s.charAt(i + 1) == "X")) {
+            i = i + 2
+            saw = "0"
+            hex = true
+        }
+        while (i < s.length) {
+            var c = s.charAt(i).toLowerCase()
+            if ((c >= "0" && c <= "9") || (hex && c >= "a" && c <= "f")) {
+                saw = "0"
+            } else if (c == "_") {
+                if (saw != "0") return false
+                saw = "_"
+            } else {
+                if (saw == "_") return false
+                saw = "!"
+            }
+            i = i + 1
+        }
+        return saw != "_"
+    }
+    // Twin of str_to_num in languages/lib/runtime.c and rt.toNumber in
+    // abnf/jsrt.go: empty is 0, "nan" (unsigned) and "inf" / "infinity" (signed)
+    // in any case, a hexadecimal float whose p exponent is required, and
+    // underscores between digits; anything else NaN.
+    function strNum(src) {
+        var i = 0
+        var j = src.length
+        while (i < j && strSpace(src.charAt(i))) i = i + 1
+        while (j > i && strSpace(src.charAt(j - 1))) j = j - 1
+        var s = src.substring(i, j)
+        if (s == "") return 0
+        var k = 0
+        var neg = false
+        if (s.charAt(0) == "+" || s.charAt(0) == "-") {
+            neg = s.charAt(0) == "-"
+            k = 1
+        }
+        var w = s.substring(k, s.length).toLowerCase()
+        if (k == 0 && w == "nan") return NaN
+        if (w == "inf" || w == "infinity") return neg ? -Infinity : Infinity
+        if (s.indexOf("_") >= 0 && !strUnderOK(s)) return NaN
+        var t = ""
+        for (var q = k; q < s.length; q++) { if (s.charAt(q) != "_") t = t + s.charAt(q) }
+        if (t.length > 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) {
+            var h = anytype
+            h = hexFloatScan(t, 2)
+            if (h === null || h.end != t.length || (t.indexOf("p") < 0 && t.indexOf("P") < 0)) return NaN
+            if (h.v == 0) return neg ? 0 / (0 - 1) : 0
+            return neg ? -h.v : h.v
+        }
+        var p = 0
+        var nd = 0
+        while (p < t.length && t.charAt(p) >= "0" && t.charAt(p) <= "9") { p = p + 1; nd = nd + 1 }
+        if (p < t.length && t.charAt(p) == ".") {
+            p = p + 1
+            while (p < t.length && t.charAt(p) >= "0" && t.charAt(p) <= "9") { p = p + 1; nd = nd + 1 }
+        }
+        if (nd == 0) return NaN
+        if (p < t.length && (t.charAt(p) == "e" || t.charAt(p) == "E")) {
+            p = p + 1
+            if (p < t.length && (t.charAt(p) == "+" || t.charAt(p) == "-")) p = p + 1
+            var e0 = p
+            while (p < t.length && t.charAt(p) >= "0" && t.charAt(p) <= "9") p = p + 1
+            if (p == e0) return NaN
+        }
+        if (p != t.length) return NaN
+        var v = parseFloat(t)
+        return neg ? -v : v
+    }
+
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
     // || and && evaluate lazily and return the deciding operand, like in JS.
     function makeOr(items) {

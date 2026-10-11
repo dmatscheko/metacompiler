@@ -1583,6 +1583,17 @@ function s37()
     check("pow4", xs[5] ^ ys[5], 11920928955078124.0)
 end
 
+-- ===== SECTION 38: a numeral past the double range =====
+-- A decimal numeral too large for a double converts to inf, as C's strtod
+-- rounds it, both through tonumber and through string arithmetic; one too
+-- small is a zero. Values printed by lua 5.5.
+function s38()
+    local ns = {"1e400", "-1e400", "1e-400", "1.8e308"}
+    check("rng1", tostring(tonumber(ns[1])) .. " " .. tostring(tonumber(ns[2])) .. " " .. tostring(tonumber(ns[3])), "inf -inf 0.0")
+    check("rng2", ns[4] + 1, 1 / 0)
+    check("rng3", math.type(tonumber(ns[1])), "float")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1596,5 +1607,6 @@ s34() -- SECTION-CALL 34
 s35() -- SECTION-CALL 35
 s36() -- SECTION-CALL 36
 s37() -- SECTION-CALL 37
+s38() -- SECTION-CALL 38
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

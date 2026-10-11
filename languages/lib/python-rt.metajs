@@ -93,7 +93,9 @@ import "./regex.js"
 // parameterised by the rtk* hooks below.
 import "./runtime.metajs"
 
-// int's and float's own methods at the bit and double level (pyNumMethod).
+// int's and float's own methods at the bit and double level (pyNumMethod),
+// and float.fromhex's numeral (hex-float.js).
+import "./hex-float.js"
 import "./python-num.js"
 
 // sin, cos, tan and atan2 (math and the complex power), as the interpreter's.

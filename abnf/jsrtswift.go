@@ -207,11 +207,8 @@ func init() {
 		m["js_swflo"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if s, ok := v.(string); ok {
-				if !swFloText(s) {
-					return jsHNull
-				}
-				f, err := strconv.ParseFloat(s, 64)
-				if err != nil {
+				f, ok := swFloParse(s)
+				if !ok {
 					return jsHNull
 				}
 				return w(swMkFlo(f))
@@ -235,17 +232,14 @@ func init() {
 		m["js_swflo32"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if s, ok := v.(string); ok {
-				if !swFloText(s) {
-					return jsHNull
-				}
 				// Read at 64 and rounded to 32, where swiftc rounds once. A
 				// decimal that lands exactly on a float midpoint AFTER a double
 				// rounding would differ; no value in the corpus or the probe
 				// does. It is spelled this way because layer 2 and the
 				// interpreter have only a double parser, and the three engines
 				// must answer the same string.
-				f, err := strconv.ParseFloat(s, 64)
-				if err != nil {
+				f, ok := swFloParse(s)
+				if !ok {
 					return jsHNull
 				}
 				return w(swMkF32(f))
@@ -1626,9 +1620,80 @@ func swFloDigitsW(a float64, f32 bool) string {
 	return digits[:pt] + "." + digits[pt:]
 }
 
-// swFloText reports whether the WHOLE string is a decimal float, for the failable
-// Double("3.5"): swift answers nil for "3.5x", where a lenient parse stops at the
-// first bad character and answers 3.5.
+// swFloParse is the failable Double("3.5"), read as swift reads it with strtod:
+// the WHOLE string is a sign, then a decimal numeral, a hexadecimal one (0x, an
+// optional p exponent), inf, infinity or nan in any case; out of range is inf or
+// zero. false for anything else - "3.5x" too, where a lenient parse would answer
+// 3.5. Twin of swFloParse in swift-interpreter.abnf and lib/swift-rt.metajs.
+func swFloParse(s string) (float64, bool) {
+	b := s
+	if b != "" && (b[0] == '+' || b[0] == '-') {
+		b = b[1:]
+	}
+	neg := len(b) < len(s) && s[0] == '-'
+	switch strings.ToLower(b) {
+	case "inf", "infinity":
+		if neg {
+			return math.Inf(-1), true
+		}
+		return math.Inf(1), true
+	case "nan":
+		return math.NaN(), true
+	}
+	if len(b) > 1 && b[0] == '0' && (b[1] == 'x' || b[1] == 'X') {
+		if !swHexText(b[2:]) {
+			return 0, false
+		}
+		// strconv reads a hexadecimal numeral only with its p exponent.
+		if !strings.ContainsAny(b, "pP") {
+			s += "p0"
+		}
+	} else if !swFloText(s) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil && err.(*strconv.NumError).Err != strconv.ErrRange {
+		return 0, false
+	}
+	return f, true
+}
+
+// swHexText reports whether s is hex digits with at most one point, at least one
+// digit, then an optional p[+-]digits.
+func swHexText(s string) bool {
+	i, digits := 0, 0
+	point := false
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c == '.' && !point {
+			point = true
+		} else if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			digits++
+		} else {
+			break
+		}
+	}
+	if digits == 0 {
+		return false
+	}
+	if i < len(s) && (s[i] == 'p' || s[i] == 'P') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		d := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == d {
+			return false
+		}
+	}
+	return i == len(s)
+}
+
+// swFloText reports whether the WHOLE string is a decimal float:
+// [+-]? digits [. digits] [(e|E) [+-] digits], at least one digit.
 func swFloText(s string) bool {
 	i := 0
 	if i < len(s) && (s[i] == '+' || s[i] == '-') {

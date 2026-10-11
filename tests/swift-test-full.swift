@@ -976,6 +976,19 @@ func s25() {
     check("flo12", Double(3) == 3.0 && "\(Double(3))" == "3.0" && Double(3) / 2 == 1.5)
     check("flo13", Int(3.7) == 3 && Int(-3.7) == -3)
     check("flo14", Double("3.5") == 3.5 && Double("x") == nil && Double("3.5x") == nil)
+    // Double(String) reads as strtod does: inf, infinity and nan in any case, a
+    // hexadecimal numeral, and a decimal one past the range as inf or zero.
+    let fs = ["Inf", "-infinity", "NaN", "0x1p4", "0X1.8p1", "1e400", "1e-400", "infin", "0x1p", "+-1"]
+    var fd: [String] = []
+    for t in fs {
+        if let v = Double(t) {
+            fd.append("\(v)")
+        } else {
+            fd.append("nil")
+        }
+    }
+    check("dps1", fd.joined(separator: ",") == "inf,-inf,nan,16.0,3.0,inf,0.0,nil,nil,nil")
+    check("dps2", Float(fs[0])! == Float.infinity && Float(fs[3])! == 16)
     check("flo15", String(3.5) == "3.5" && String(3) == "3" && String(describing: 1.0) == "1.0")
     // An untyped integer literal takes the Double type of the other operand.
     check("flo16", 1 + 2.0 == 3.0 && 2.0 * 3 == 6.0 && 1.0 == 1)

@@ -92,6 +92,9 @@
 // language implements identically, parameterised by the rtk* hooks below.
 import "./runtime.metajs"
 
+// Double("0x1p4")'s numeral (swFloParse).
+import "./hex-float.js"
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rtJavaStr(v) }
 function rtkNum(v) { return swNum(v) }
@@ -387,9 +390,33 @@ function swFloDesc(v) {
     return swFloStr(floNum(v))
 }
 
-// swFloText reports whether the WHOLE string is a decimal float, for the failable
-// Double("3.5"): swift answers nil for "3.5x", where a lenient parse would stop
-// at the first bad character and answer 3.5.
+// The failable Double("3.5"), read as swift reads it with strtod: the WHOLE
+// string is a sign, then a decimal numeral, a hexadecimal one (0x, an optional p
+// exponent), inf, infinity or nan in any case; out of range is inf or zero. null
+// for anything else - "3.5x" too, where a lenient parse would answer 3.5. Twin of
+// swFloParse in swift-interpreter.abnf and abnf/jsrtswift.go.
+function swFloParse(s) {
+    var b = s
+    var neg = false
+    if (b.length > 0 && (b.charAt(0) == "+" || b.charAt(0) == "-")) {
+        neg = b.charAt(0) == "-"
+        b = b.substring(1, b.length)
+    }
+    var w = b.toLowerCase()
+    if (w == "inf" || w == "infinity") { return neg ? -1 / 0 : 1 / 0 }
+    if (w == "nan") { return 0 / 0 }
+    if (w.length > 1 && w.charAt(0) == "0" && w.charAt(1) == "x") {
+        var r = anytype
+        r = hexFloatScan(b, 2)
+        if (r === null || r["end"] != b.length) { return null }
+        if (r["v"] == 0) { return neg ? 0 / (0 - 1) : 0 }
+        return neg ? -r["v"] : r["v"]
+    }
+    if (!swFloText(s)) { return null }
+    return parseFloat(s)
+}
+
+// [+-]? digits [. digits] [(e|E) [+-] digits], at least one digit.
 function swFloText(s) {
     var i = 0
     if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i = i + 1 }
@@ -2239,9 +2266,9 @@ function js_swarith(op, l, r) {
 // String source is FAILABLE, like Int("x").
 function js_swflo(v) {
     if (typeof v == "string") {
-        if (!swFloText(v)) { return null }
-        var f = parseFloat(v)
-        if (f !== f && v.indexOf("nan") < 0 && v.indexOf("NaN") < 0) { return null }
+        var f = anytype
+        f = swFloParse(v)
+        if (f === null) { return null }
         return swMkFlo(f)
     }
     if (v === undefined || v === null) { fail("Double conversion of nil") }
@@ -2260,9 +2287,9 @@ function js_swflo(v) {
 // differ; no value in the corpus or the probe does.)
 function js_swflo32(v) {
     if (typeof v == "string") {
-        if (!swFloText(v)) { return null }
-        var f = parseFloat(v)
-        if (f !== f && v.indexOf("nan") < 0 && v.indexOf("NaN") < 0) { return null }
+        var f = anytype
+        f = swFloParse(v)
+        if (f === null) { return null }
         return swMkF32(f)
     }
     if (v === undefined || v === null) { fail("Float conversion of nil") }

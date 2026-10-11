@@ -322,8 +322,10 @@ func luParseDec(s string) (interface{}, bool) {
 	if i < n {
 		return nil, false
 	}
+	// Out of range is +-Inf (or a zero) with ErrRange, and that value is Lua's
+	// answer: tonumber("1e400") is inf.
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	if err != nil && err.(*strconv.NumError).Err != strconv.ErrRange {
 		return nil, false
 	}
 	if isFloat {

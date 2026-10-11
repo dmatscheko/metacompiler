@@ -7090,17 +7090,6 @@ func rubyIsSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
 }
 
-func rubyTrimSpace(s string) string {
-	i, j := 0, len(s)
-	for i < j && rubyIsSpace(s[i]) {
-		i++
-	}
-	for j > i && rubyIsSpace(s[j-1]) {
-		j--
-	}
-	return s[i:j]
-}
-
 // rubyStrToInum is MRI's rb_int_parse_cstr, the one parser behind String#to_i,
 // #hex, #oct and Kernel#Integer, answering the EXACT value. Leading whitespace,
 // one sign, then a radix prefix: base <= 0 detects 0x/0b/0o/0d or a bare
@@ -7221,65 +7210,223 @@ func (rt *jsrt) rubyRadixArg(v interface{}, negOK bool) int {
 	return base
 }
 
-// rubyStrToFloat is MRI's Float(String): the whole string must be a decimal
-// literal, with underscores allowed between digits.
-func rubyStrToFloat(s string) (float64, bool) {
-	s = rubyTrimSpace(s)
-	clean := ""
-	for i := 0; i < len(s); i++ {
-		if s[i] == '_' {
-			if i == 0 || i+1 >= len(s) || rubyConvDigit(s[i-1]) < 0 || rubyConvDigit(s[i+1]) < 0 {
-				return 0, false
+// rubyStrtod is MRI's ruby_strtod on s from p0: the value and the index after
+// the numeral, end == p0 when nothing converts. A sign, then either "0x", hex
+// digits, an optional point and hex digits and a binary exponent p[+-]digits that
+// is required after a point; or digits with an optional point that needs a digit
+// after it, and an optional e[+-]digits. No inf or nan. Out of range is an
+// infinity or a zero. Twin of rbnStrtod in languages/lib/ruby-num.js.
+func rubyStrtod(s string, p0 int) (float64, int) {
+	isDig := func(i int) bool { return i < len(s) && s[i] >= '0' && s[i] <= '9' }
+	isHex := func(i int) bool {
+		return isDig(i) || (i < len(s) && ((s[i] >= 'a' && s[i] <= 'f') || (s[i] >= 'A' && s[i] <= 'F')))
+	}
+	p := p0
+	if p < len(s) && (s[p] == '+' || s[p] == '-') {
+		p++
+	}
+	q := p
+	if p+1 < len(s) && s[p] == '0' && (s[p+1] == 'x' || s[p+1] == 'X') {
+		q = p + 2
+		if !isHex(q) {
+			return 0, p0
+		}
+		for isHex(q) {
+			q++
+		}
+		point := q < len(s) && s[q] == '.'
+		if point {
+			q++
+			if !isHex(q) {
+				return 0, p0
+			}
+			for isHex(q) {
+				q++
+			}
+		}
+		text := s[p0:q]
+		if q < len(s) && (s[q] == 'p' || s[q] == 'P') {
+			q++
+			if q < len(s) && (s[q] == '+' || s[q] == '-') {
+				q++
+			}
+			e0 := q
+			for isDig(q) {
+				q++
+			}
+			if q == e0 {
+				return 0, p0
+			}
+			text = s[p0:q]
+		} else if point {
+			return 0, p0
+		} else {
+			// strconv reads a hexadecimal numeral only with its p exponent.
+			text += "p0"
+		}
+		f, _ := strconv.ParseFloat(text, 64) // out of range is +-Inf with ErrRange
+		return f, q
+	}
+	nd := 0
+	for isDig(q) {
+		q++
+		nd++
+	}
+	if q < len(s) && s[q] == '.' && isDig(q+1) {
+		q++
+		for isDig(q) {
+			q++
+			nd++
+		}
+	}
+	if nd == 0 {
+		return 0, p0
+	}
+	if q < len(s) && (s[q] == 'e' || s[q] == 'E') {
+		k := q + 1
+		if k < len(s) && (s[k] == '+' || s[k] == '-') {
+			k++
+		}
+		k0 := k
+		for isDig(k) {
+			k++
+		}
+		if k > k0 {
+			q = k
+		}
+	}
+	f, _ := strconv.ParseFloat(s[p0:q], 64) // out of range is +-Inf or 0 with ErrRange
+	return f, q
+}
+
+// rubyStrToDbl is MRI's rb_cstr_to_dbl: String#to_f when badcheck is false (the
+// leading numeral, 0.0 when there is none) and Float(String) when it is true
+// (the whole string, or false). Where ruby_strtod stops early, MRI copies the
+// string into a 70-byte buffer dropping each underscore that stands between two
+// digits, keeping at most 60 characters ahead of an exponent letter and skipping
+// leading zeros, and reads the copy again. A string that starts "0x" is 0.0 to
+// to_f: only Float() reads it as hexadecimal. Twin of rbnStrToDbl in
+// languages/lib/ruby-num.js.
+func rubyStrToDbl(s string, badcheck bool) (float64, bool) {
+	isDig := func(c byte) bool { return c >= '0' && c <= '9' }
+	at := func(i int) byte {
+		if i < len(s) {
+			return s[i]
+		}
+		return 0
+	}
+	hexStart := func(t string, i int) bool { return i+1 < len(t) && t[i] == '0' && (t[i+1] == 'x' || t[i+1] == 'X') }
+	p := 0
+	for p < len(s) && rubyIsSpace(s[p]) {
+		p++
+	}
+	if !badcheck && hexStart(s, p) {
+		return 0, true
+	}
+	v, end := rubyStrtod(s, p)
+	if end == p {
+		return v, !badcheck
+	}
+	if end == len(s) {
+		return v, true
+	}
+	buf := []byte{}
+	limit := 60
+	var prev byte
+	if at(p) == '+' || at(p) == '-' {
+		prev = s[p]
+		buf = append(buf, prev)
+		p++
+	}
+	if at(p) == '0' {
+		prev = '0'
+		buf = append(buf, '0')
+		p++
+		for at(p) == '0' {
+			p++
+		}
+	}
+	for p < end && len(buf) < limit {
+		prev = s[p]
+		buf = append(buf, prev)
+		p++
+	}
+	dots := 0
+	for p < len(s) {
+		if s[p] == '_' {
+			if len(buf) == 0 || !isDig(prev) || !isDig(at(p+1)) {
+				if badcheck {
+					return 0, false
+				}
+				break
+			}
+			p++
+		}
+		prev = s[p]
+		p++
+		if limit == 60 && (prev == 'e' || prev == 'E' || prev == 'p' || prev == 'P') {
+			limit = 69
+			buf = append(buf, prev)
+			if at(p) == '+' || at(p) == '-' {
+				prev = s[p]
+				buf = append(buf, prev)
+				p++
+			}
+			if at(p) == '0' {
+				prev = '0'
+				buf = append(buf, '0')
+				p++
+				for at(p) == '0' {
+					p++
+				}
 			}
 			continue
 		}
-		clean += string(s[i])
-	}
-	i := 0
-	if i < len(clean) && (clean[i] == '+' || clean[i] == '-') {
-		i++
-	}
-	intDigits := 0
-	for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
-		i++
-		intDigits++
-	}
-	if intDigits == 0 {
-		return 0, false
-	}
-	if i < len(clean) && clean[i] == '.' {
-		i++
-		fd := 0
-		for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
-			i++
-			fd++
+		if rubyIsSpace(prev) {
+			for p < len(s) && rubyIsSpace(s[p]) {
+				p++
+			}
+			if p < len(s) {
+				if badcheck {
+					return 0, false
+				}
+				break
+			}
+		} else if prev == '.' {
+			dots++
+			if dots > 1 {
+				if badcheck {
+					return 0, false
+				}
+				break
+			}
+		} else if !isDig(prev) {
+			if badcheck {
+				return 0, false
+			}
+			break
 		}
-		if fd == 0 {
+		if len(buf) < limit {
+			buf = append(buf, prev)
+		}
+	}
+	t := string(buf)
+	if !badcheck && hexStart(t, 0) {
+		return 0, true
+	}
+	v, end = rubyStrtod(t, 0)
+	if badcheck {
+		if end == 0 {
+			return 0, false
+		}
+		for end < len(t) && rubyIsSpace(t[end]) {
+			end++
+		}
+		if end < len(t) {
 			return 0, false
 		}
 	}
-	if i < len(clean) && (clean[i] == 'e' || clean[i] == 'E') {
-		i++
-		if i < len(clean) && (clean[i] == '+' || clean[i] == '-') {
-			i++
-		}
-		ed := 0
-		for i < len(clean) && clean[i] >= '0' && clean[i] <= '9' {
-			i++
-			ed++
-		}
-		if ed == 0 {
-			return 0, false
-		}
-	}
-	if i != len(clean) {
-		return 0, false
-	}
-	f, err := strconv.ParseFloat(clean, 64)
-	if err != nil {
-		return 0, false
-	}
-	return f, true
+	return v, true
 }
 
 func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
@@ -7359,7 +7506,7 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 			rt.rubyRaiseErr("TypeError", "can't convert nil into Float")
 		}
 		if s, isStr := v.(string); isStr {
-			if f, ok := rubyStrToFloat(s); ok {
+			if f, ok := rubyStrToDbl(s, true); ok {
 				return jsFlo{f: f}
 			}
 			rt.rubyRaiseErr("ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
@@ -9256,7 +9403,7 @@ func (rt *jsrt) rubyFmtFloOperand(v interface{}) float64 {
 		return rubyToF(v)
 	}
 	if s, isStr := v.(string); isStr {
-		if f, ok := rubyStrToFloat(s); ok {
+		if f, ok := rubyStrToDbl(s, true); ok {
 			return f
 		}
 		rt.rubyRaiseErr("ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
@@ -9882,10 +10029,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			n, _ := rubyStrToInum(o, base, false)
 			return rt.rubyBigNarrow(n)
 		case "to_f":
-			if v := jsParseFloat(o); v == v {
-				return jsFlo{f: v}
-			}
-			return jsFlo{f: 0}
+			f, _ := rubyStrToDbl(o, false)
+			return jsFlo{f: f}
 		case "upcase":
 			return caseMapMode(o, caseUpper|caseFull)
 		case "downcase":

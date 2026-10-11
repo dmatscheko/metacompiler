@@ -3885,6 +3885,18 @@ def s87
   check("pow87c", (xs[4] ** ys[4]).to_s == "1.1920928955078124e+16")
 end
 
+# ===== SECTION 88: String#to_f and Float(String) =====
+# MRI's rb_cstr_to_dbl: no inf or nan words; Float() reads a hexadecimal numeral
+# that to_f answers 0.0 for (unless a sign comes first); underscores between
+# digits are dropped; out of range is Infinity. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s88
+  ss = ["Infinity", "0x1p4", "-0x10", ".5", "1_000", "1e1_0", "5.", "1e400", "0X1.8p1", "0x1.8", "1__0"]
+  fl = ss.map { |s| begin; Float(s); rescue ArgumentError; :bad; end }
+  check("stf88a", ss.map { |s| s.to_f } == [0.0, 0.0, -16.0, 0.5, 1000.0, 10000000000.0, 5.0, Float::INFINITY, 0.0, 0.0, 1.0])
+  check("stf88b", fl == [:bad, 16.0, -16.0, 0.5, 1000.0, 10000000000.0, :bad, Float::INFINITY, 3.0, :bad, :bad])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3934,5 +3946,6 @@ s84() # SECTION-CALL 84
 s85() # SECTION-CALL 85
 s86() # SECTION-CALL 86
 s87() # SECTION-CALL 87
+s88() # SECTION-CALL 88
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

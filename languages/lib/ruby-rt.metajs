@@ -113,6 +113,10 @@ import "./regex.js"
 // Object#respond_to? for a builtin value (rbResponds).
 import "./ruby-respond.js"
 
+// String#to_f and Float(String), MRI's rb_cstr_to_dbl (rbnStrToDbl).
+import "./hex-float.js"
+import "./ruby-num.js"
+
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
 import "./runtime.metajs"
@@ -2348,8 +2352,9 @@ function rbFmtIntOperand(v) {
 function rbFmtFloOperand(v) {
     if (rbFmtIsNumV(v)) { return rbToF(v) }
     if (typeof v == "string") {
-        var rf = rbConvStrToFloat(v)
-        if (rf["ok"]) { return rf["v"] }
+        var rf = anytype
+        rf = rbnStrToDbl(v, true)
+        if (rf !== null) { return rf }
         rbRaiseErr("ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
     }
     var uf = rbFmtUserConv(v, "to_f", "")
@@ -7075,10 +7080,7 @@ function rbMethod(target, name, args) {
             if (args.length > 0) { tb = rbRadixArg(args[0], false) }
             return rbStrToInum(target, tb, false)["v"]
         }
-        if (name == "to_f") {
-            var pf = parseFloat(target)
-            return rbMkFlo(pf != pf ? 0 : pf)
-        }
+        if (name == "to_f") { return rbMkFlo(rbnStrToDbl(target, false)) }
         if (name == "upcase") { return rbUpper(target) }
         if (name == "downcase") { return rbLower(target) }
         if (name == "include?") { return target.indexOf(rbStr(rbArgAt(args, 0))) >= 0 }
@@ -8077,14 +8079,6 @@ function rbIsConvSpace(ch) {
     return cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 12 || cc == 11
 }
 
-function rbConvTrim(s) {
-    var i = 0
-    var j = s.length
-    while (i < j && rbIsConvSpace(s.charAt(i))) { i = i + 1 }
-    while (j > i && rbIsConvSpace(s.charAt(j - 1))) { j = j - 1 }
-    return s.substring(i, j)
-}
-
 // Answers {ok, v}: MRI's rb_int_parse_cstr, the one parser behind String#to_i,
 // #hex, #oct and Kernel#Integer, with v the EXACT value. Twin of rubyStrToInum
 // in abnf/jsrt.go, which states the rules.
@@ -8195,45 +8189,6 @@ function rbRadixArg(v, negOK) {
     return b
 }
 
-// Answers {ok, v}: MRI's Float(String).
-function rbConvStrToFloat(s0) {
-    var s = rbConvTrim(s0)
-    var clean = ""
-    var i = 0
-    while (i < s.length) {
-        if (s.charAt(i) == "_") {
-            if (i == 0 || i + 1 >= s.length
-                || rbConvDigit(s.charAt(i - 1)) < 0 || rbConvDigit(s.charAt(i + 1)) < 0) {
-                return {ok: false, v: 0}
-            }
-            i = i + 1
-            continue
-        }
-        clean = clean + s.charAt(i)
-        i = i + 1
-    }
-    var k = 0
-    if (k < clean.length && (clean.charAt(k) == "+" || clean.charAt(k) == "-")) { k = k + 1 }
-    var nd = 0
-    while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; nd = nd + 1 }
-    if (nd == 0) { return {ok: false, v: 0} }
-    if (k < clean.length && clean.charAt(k) == ".") {
-        k = k + 1
-        var fd = 0
-        while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; fd = fd + 1 }
-        if (fd == 0) { return {ok: false, v: 0} }
-    }
-    if (k < clean.length && (clean.charAt(k) == "e" || clean.charAt(k) == "E")) {
-        k = k + 1
-        if (k < clean.length && (clean.charAt(k) == "+" || clean.charAt(k) == "-")) { k = k + 1 }
-        var ed = 0
-        while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; ed = ed + 1 }
-        if (ed == 0) { return {ok: false, v: 0} }
-    }
-    if (k != clean.length) { return {ok: false, v: 0} }
-    return {ok: true, v: parseFloat(clean)}
-}
-
 function js_rkconv(name, args) {
     var v = null
     if (rbIsArr(args) && args.length > 0) { v = args[0] }
@@ -8289,8 +8244,9 @@ function js_rkconv(name, args) {
     if (name == "Float") {
         if (rtIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Float") }
         if (typeof v == "string") {
-            var rf = rbConvStrToFloat(v)
-            if (rf["ok"]) { return rbMkFlo(rf["v"]) }
+            var rf = anytype
+            rf = rbnStrToDbl(v, true)
+            if (rf !== null) { return rbMkFlo(rf) }
             rbRaiseErr("ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
         }
         return rbMkFlo(rbToF(v))

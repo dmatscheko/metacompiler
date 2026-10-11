@@ -2387,6 +2387,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     include("lib/ruby-respond.js")
     rxFail = function (msg) { fail(msg) }
 
+    // String#to_f and Float(String), MRI's rb_cstr_to_dbl (rbnStrToDbl).
+    include("lib/hex-float.js")
+    include("lib/ruby-num.js")
+
     // ----- Control signals: everything is an expression, so a body threads the
     // value of its last statement (Ruby's implicit return). break / next / return
     // travel as marker objects that a body or loop intercepts. -----
@@ -3507,13 +3511,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ch >= "A" && ch <= "Z") { return ch.charCodeAt(0) - 55 }
         return 0 - 1
     }
-    function convTrim(s) {
-        var i = 0
-        var j = s.length
-        while (i < j && isConvSpace(s.charAt(i))) { i = i + 1 }
-        while (j > i && isConvSpace(s.charAt(j - 1))) { j = j - 1 }
-        return s.substring(i, j)
-    }
     // BY CHARACTER CODE, not by comparing against "\f" / "\v": the frozen MetaJS
     // string literal has no \f and no \v escape and drops the backslash, so
     // `ch == "\f"' is `ch == "f"'. Mirrors rbIsConvSpace of lib/ruby-rt.metajs.
@@ -3606,42 +3603,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { raiseErr("ArgumentError", "invalid radix " + b) }
         return b
     }
-    // Answers {ok, v}: MRI's Float(String) - the whole string must be a decimal
-    // literal, with underscores allowed between digits.
-    function convStrToFloat(s0) {
-        var s = convTrim(s0)
-        var clean = ""
-        for (var i = 0; i < s.length; i++) {
-            if (s.charAt(i) == "_") {
-                if (i == 0 || i + 1 >= s.length
-                    || convDigit(s.charAt(i - 1)) < 0 || convDigit(s.charAt(i + 1)) < 0) {
-                    return {ok: false, v: 0}
-                }
-                continue
-            }
-            clean += s.charAt(i)
-        }
-        var k = 0
-        if (k < clean.length && (clean.charAt(k) == "+" || clean.charAt(k) == "-")) { k = k + 1 }
-        var nd = 0
-        while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; nd = nd + 1 }
-        if (nd == 0) { return {ok: false, v: 0} }
-        if (k < clean.length && clean.charAt(k) == ".") {
-            k = k + 1
-            var fd = 0
-            while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; fd = fd + 1 }
-            if (fd == 0) { return {ok: false, v: 0} }
-        }
-        if (k < clean.length && (clean.charAt(k) == "e" || clean.charAt(k) == "E")) {
-            k = k + 1
-            if (k < clean.length && (clean.charAt(k) == "+" || clean.charAt(k) == "-")) { k = k + 1 }
-            var ed = 0
-            while (k < clean.length && clean.charAt(k) >= "0" && clean.charAt(k) <= "9") { k = k + 1; ed = ed + 1 }
-            if (ed == 0) { return {ok: false, v: 0} }
-        }
-        if (k != clean.length) { return {ok: false, v: 0} }
-        return {ok: true, v: parseFloat(clean)}
-    }
     function kernelConv(name, argv) {
         var v = argv.length > 0 ? argv[0] : null
         if (name == "String") { return rstr(v) }
@@ -3691,8 +3652,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "Float") {
             if (v === null || v === undefined) { raiseErr("TypeError", "can't convert nil into Float") }
             if (typeof v == "string") {
-                var rf = convStrToFloat(v)
-                if (rf.ok) { return mkFlo(rf.v) }
+                var rf = anytype
+                rf = rbnStrToDbl(v, true)
+                if (rf !== null) { return mkFlo(rf) }
                 raiseErr("ArgumentError", "invalid value for Float(): " + strInspect(v))
             }
             return mkFlo(toF(v))
@@ -6214,8 +6176,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function fmtFloOperand(v) {
         if (fmtIsNumV(v)) { return toF(v) }
         if (typeof v == "string") {
-            var rf = convStrToFloat(v)
-            if (rf.ok) { return rf.v }
+            var rf = anytype
+            rf = rbnStrToDbl(v, true)
+            if (rf !== null) { return rf }
             raiseErr("ArgumentError", "invalid value for Float(): " + strInspect(v))
         }
         var uf = fmtUserConv(v, "to_f", "")
@@ -8363,7 +8326,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_s" || name == "to_str" || name == "dup" || name == "clone" || name == "freeze") { return target }
             if (name == "to_sym" || name == "intern") { return mkSym(target) }
             if (name == "to_i") { return strToInum(target, args.length > 0 ? radixArg(args[0], false) : 10, false).v }
-            if (name == "to_f") { var pf = parseFloat(target); return mkFlo(pf != pf ? 0 : pf) }
+            if (name == "to_f") { return mkFlo(rbnStrToDbl(target, false)) }
             if (name == "upcase") { return target.toUpperCase() }
             // MRI maps case fully but has no Final_Sigma: unicodeCase mode 2 (abnf/casemap.go).
             if (name == "downcase") { return unicodeCase(target, 2) }

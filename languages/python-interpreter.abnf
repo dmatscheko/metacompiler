@@ -1097,7 +1097,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/regex.js")
     rxFail = function (msg) { fail(msg) }
 
-    // int's and float's own methods at the bit and double level (pyNumMethod).
+    // int's and float's own methods at the bit and double level (pyNumMethod),
+    // and float.fromhex's numeral (lib/hex-float.js).
+    include("lib/hex-float.js")
     include("lib/python-num.js")
 
     // sin, cos, tan and atan2 are fdlibm's (lib/fdlibm.js), which agree with the
