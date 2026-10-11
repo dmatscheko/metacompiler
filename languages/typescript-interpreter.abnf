@@ -6843,9 +6843,8 @@ NotFuncHead = :script(~~
     function superClass() {
         var cls = getVar("__class__")
         if (cls == undefined || cls == null) fail("super outside a class")
-        var sup = cls.__super
-        if (sup == undefined) fail("super property with no superclass")
-        return sup
+        // See the twin of this line in js-interpreter.abnf.
+        return cls.__super
     }
     function superGet(k) {
         var self = getVar("this")
@@ -6873,6 +6872,8 @@ NotFuncHead = :script(~~
                 return sv
             }
         }
+        // See the twin of this arm in js-interpreter.abnf.
+        if (typeof self == "object" && !isClassDesc(self) && jsIsProtoName(k)) { return jsProtoShim(self, k) }
         // Nothing on the class chain is UNDEFINED, and deliberately not a read of the
         // receiver: node prints NaN for 'super.zz += 4' after 'super.zz = 3' (the store
         // lands on the receiver, the read does not see it).
@@ -7040,6 +7041,8 @@ NotFuncHead = :script(~~
             for (var cl = sup; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) { m = cl[name] } }
             // node's wording: it has no source text for a super receiver either,
               // and prints "(intermediate value).<name>".
+            // See the twin of this arm in js-interpreter.abnf.
+            if (typeof m != "function" && !isClassDesc(self) && jsIsProtoName(name)) { return jsProtoApply(self, name, evalArgs(argThunks)) }
             if (typeof m != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
             var argv = concat2impl([self], evalArgs(argThunks))
             return m.apply(undefined, argv)

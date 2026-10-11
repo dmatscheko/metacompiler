@@ -4809,6 +4809,14 @@ NotFuncHead = :script(~~
             var scOkB = curF.NewBlock("")
             var scBadB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, scV, b.NewLoad(i64, mcallMissGlob())), scBadB, scOkB)
+            // See the twin of this arm in js-to-llvm-ir.abnf.
+            if (name == "toString" || name == "valueOf" || name == "hasOwnProperty" || name == "propertyIsEnumerable") {
+                var pV = callExt(scBadB, "js_jssupproto", [thisV, emitStr(scBadB, name), argsV])
+                var scEndB = curF.NewBlock("")
+                scBadB.NewBr(scEndB)
+                scOkB.NewBr(scEndB)
+                return {b: scEndB, v: scEndB.NewPhi([llvm.ir.NewIncoming(scV, scOkB), llvm.ir.NewIncoming(pV, scBadB)])}
+            }
             emitSiteThrow(scBadB, "(intermediate value)." + name + " is not a function")
             return {b: scOkB, v: scV}
         }

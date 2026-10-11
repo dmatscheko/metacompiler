@@ -2453,7 +2453,26 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			cls = clsObj.props["__super"]
 		}
+		// The chain ends at Object.prototype, so its methods answer last:
+		// `typeof super.toString` is "function" in a class with no toString above
+		// it. Twins: js_jssupget in languages/lib/js-rt.metajs, superGet in both
+		// *-interpreter.abnf.
+		if o, isObj := self.(*jsObject); isObj && !isClassDesc(o) && jsvIsProtoName(name) {
+			return w(jsvProtoShim(o, name))
+		}
 		return jsHUndefined
+	}
+	// super.m(args) for one of Object.prototype's methods that nothing on the
+	// __super chain defines (js_supercall answered its miss sentinel): the method
+	// itself, on the receiver - `super.toString()` is "[object Object]". The emitter
+	// calls it only for those names. Twins: js_jssupproto in
+	// languages/lib/js-rt.metajs, makeSuperCall in both *-interpreter.abnf.
+	m["js_jssupproto"] = func(a []uint64) uint64 { // (this, method name, args array)
+		args, _ := u(a[2]).(*jsArray)
+		if args == nil {
+			args = &jsArray{}
+		}
+		return w(rt.jsvProtoApply(u(a[0]), rt.toString(u(a[1])), args.elems))
 	}
 
 	// js_jskeys is js_keys plus the class-descriptor arm. The floor's js_keys is

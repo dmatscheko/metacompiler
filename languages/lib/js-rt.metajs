@@ -1696,7 +1696,25 @@ function js_supget(sup, self, key) {
 // split exists for the GO TWIN, where js_supget is abnf/jsrt.go's and shared with
 // eight other languages, so the receiver-overridable shim needed a name of its own.
 // See m["js_jssupget"] in abnf/jsrtjsprint.go.
-function js_jssupget(sup, self, key) { return js_supget(sup, self, key) }
+// The chain ends at Object.prototype, so its methods answer last: `typeof
+// super.toString` is "function" in a class with no toString above it. Twin of
+// m["js_jssupget"] in abnf/jsrtjsprint.go.
+function js_jssupget(sup, self, key) {
+    var v = anytype
+    v = js_supget(sup, self, key)
+    if (v === undefined) {
+        if (jvIsObj(self)) {
+            if (!jvIsClassDesc(self)) {
+                if (jvIsProtoName(jvStr(key))) { return jvProtoShim(self, jvStr(key)) }
+            }
+        }
+    }
+    return v
+}
+
+// super.m(args) for one of Object.prototype's methods that nothing on the __super
+// chain defines. Twin of m["js_jssupproto"] in abnf/jsrtjsprint.go.
+function js_jssupproto(self, name, args) { return jvProtoApply(self, jvStr(name), args) }
 
 // 'super.x = v'. A setter on the chain wins; otherwise this is an ordinary [[Set]]
 // whose RECEIVER is `this`, so the own property lands there.

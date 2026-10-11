@@ -6303,6 +6303,16 @@ NotFuncHead = :script(~~
             var scOkB = curF.NewBlock("")
             var scBadB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, scV, b.NewLoad(i64, mcallMissGlob())), scBadB, scOkB)
+            // The chain ends at Object.prototype, so one of its four methods that no
+            // class above defines is still there: `super.toString()` runs it on the
+            // receiver (js_jssupproto).
+            if (name == "toString" || name == "valueOf" || name == "hasOwnProperty" || name == "propertyIsEnumerable") {
+                var pV = callExt(scBadB, "js_jssupproto", [thisV, emitStr(scBadB, name), argsV])
+                var scEndB = curF.NewBlock("")
+                scBadB.NewBr(scEndB)
+                scOkB.NewBr(scEndB)
+                return {b: scEndB, v: scEndB.NewPhi([llvm.ir.NewIncoming(scV, scOkB), llvm.ir.NewIncoming(pV, scBadB)])}
+            }
             emitSiteThrow(scBadB, "(intermediate value)." + name + " is not a function")
             return {b: scOkB, v: scV}
         }

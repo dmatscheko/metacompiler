@@ -3275,6 +3275,15 @@ function s60() {
         "call" in (function () { return 1; }));
 }
 
+// ===== SECTION 61: super reaches Object.prototype =====
+// A class's super chain ends at Object.prototype, so `super.toString()` in a class
+// that overrides toString is "[object Object]". Values read off node 24.
+class A61 { toString(): string { return "A:" + super.toString(); } t(): string { return typeof super.toString; } }
+class B61 extends Object { v(): boolean { return super.valueOf() === this; } }
+function s61() {
+    check("sup01", new A61().toString() === "A:[object Object]" && new A61().t() === "function" && new B61().v());
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3338,6 +3347,7 @@ function main(): number {
     s58(); // SECTION-CALL 58
     s59(); // SECTION-CALL 59
     s60(); // SECTION-CALL 60
+    s61(); // SECTION-CALL 61
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

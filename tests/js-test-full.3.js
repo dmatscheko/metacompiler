@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-66.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-67.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,12 +6,13 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-66, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-67, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
 //                             g.return() at a yield*, builtin methods as values,
-//                             the own names of Math / JSON / Object and `in`
+//                             the own names of Math / JSON / Object and `in`,
+//                             super reaching Object.prototype
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1409,6 +1410,24 @@ function s66() {
     check("own3", rows.join() === "1000000000111,1110010000111,1011100000111,1000001100111,1011100010111")
 }
 
+// ===== SECTION 67: super reaches Object.prototype =====
+// A class's super chain ends at Object.prototype - with or without `extends Object` -
+// so `super.toString()` in a class that overrides toString is "[object Object]",
+// super.valueOf / hasOwnProperty / propertyIsEnumerable run on the receiver, and a
+// name no level defines is still undefined. Values read off node 24.
+class A67 { toString() { return "A:" + super.toString() } t() { return typeof super.toString } n() { return typeof super.nope } }
+class B67 extends Object { toString() { return "B:" + super.toString() } v() { return super.valueOf() === this } }
+class P67 { }
+class Q67 extends P67 { e(k) { return super.propertyIsEnumerable(k) && super.hasOwnProperty(k) } }
+function s67() {
+    var b = new B67()
+    var q = new Q67()
+    q.z = 2
+    check("sup1", new A67().toString() === "A:[object Object]" && b.toString() === "B:[object Object]" && b.v() &&
+        `${b}` === "B:[object Object]")
+    check("sup2", q.e("z") && !q.e("y") && new A67().t() === "function" && new A67().n() === "undefined")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1434,6 +1453,7 @@ function main() {
     s64() // SECTION-CALL 64
     s65() // SECTION-CALL 65
     s66() // SECTION-CALL 66
+    s67() // SECTION-CALL 67
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
