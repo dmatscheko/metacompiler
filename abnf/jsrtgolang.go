@@ -2201,7 +2201,9 @@ func goRTFail(msg string) { panic(goRTErr("runtime.errorString", "runtime error:
 func goBoundsFail(msg string) { panic(goRTErr("runtime.boundsError", "runtime error: "+msg)) }
 
 // goConvFail is a failed type assertion, a *runtime.TypeAssertionError.
-func goConvFail(msg string) { panic(goRTErr("*runtime.TypeAssertionError", "interface conversion: "+msg)) }
+func goConvFail(msg string) {
+	panic(goRTErr("*runtime.TypeAssertionError", "interface conversion: "+msg))
+}
 
 // goIdxFail is go's index-out-of-range panic (runtime/error.go, boundsErrorFmt).
 func goIdxFail(i, n int) {
