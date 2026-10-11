@@ -240,13 +240,40 @@ UniPre      = :script(~~
                     var hc = hex.charCodeAt(h)
                     if (!((hc >= 48 && hc <= 57) || (hc >= 97 && hc <= 102) || (hc >= 65 && hc <= 70))) { ok = false }
                 }
+                var cv = ok ? parseInt(hex, 16) : 0
+                var end = k + 4
+                var text = String.fromCharCode(cv)
+                // A surrogate is translated only as half of a PAIR spelled as two
+                // consecutive escapes: the source is handed back to the host as
+                // UTF-8, where a lone surrogate becomes U+FFFD. A lone one stays an
+                // escape, which only a char or string literal can hold, and
+                // jUnescape decodes it there. Twin in java-interpreter.abnf.
+                if (ok && cv >= 55296 && cv <= 57343) {
+                    ok = false
+                    if (cv <= 56319 && src.charAt(end) === "\\" && src.charAt(end + 1) === "u") {
+                        var q = end + 1
+                        while (q < n && src.charAt(q) === "u") { q++ }
+                        var lhex = src.substring(q, q + 4)
+                        var lok = lhex.length === 4
+                        for (var h2 = 0; h2 < lhex.length; h2++) {
+                            var lc = lhex.charCodeAt(h2)
+                            if (!((lc >= 48 && lc <= 57) || (lc >= 97 && lc <= 102) || (lc >= 65 && lc <= 70))) { lok = false }
+                        }
+                        var lv = lok ? parseInt(lhex, 16) : 0
+                        if (lv >= 56320 && lv <= 57343) {
+                            ok = true
+                            text = text + String.fromCharCode(lv)
+                            end = q + 4
+                        }
+                    }
+                }
                 if (ok) {
                     // Everything before the eligible backslash is copied as it
                     // stands - that includes the (j - i - 1) literal ones.
                     out += src.substring(last, j - 1)
-                    out += String.fromCharCode(parseInt(hex, 16))
-                    last = k + 4
-                    i = k + 4
+                    out += text
+                    last = end
+                    i = end
                     changed = true
                     continue
                 }
@@ -871,7 +898,7 @@ RefType     = { Annotation } ( "String" KwEnd | Id [ SkipAngle ] { "." { Annotat
 
 // NewExpr is a Primary, not an alternative here, so `new Foo().bar()` and
 // `new int[]{1, 2}[0]` take the ordinary suffix chain.
-PostfixExpr = IncDec | QSuperCall | SuperCall | CallMember ;
+PostfixExpr = IncDec | QSuperCall | CallMember ;
 // `o.new Inner(args)`: creates an INNER instance whose __outer is o, which is what
 // `Outer.this` inside the inner class reads.
 
@@ -975,7 +1002,7 @@ ArrLit      <~~ push(makeArray(takeAll())) ~~>
 
 Primary     = ArrClassLit | PrimClassLit | ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
             | JNum | True | False | Null
-            | OuterThis | BareCall | VarRef ;
+            | OuterThis | SuperCall | BareCall | VarRef ;
 // Every numeric literal in the language goes through NumOk first, so a literal
 // javac's scanner refuses never reaches the parser.
 JNum        = NumOk ( HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit ) ;
@@ -2597,6 +2624,11 @@ HasStatic   = :script(~~
         var i = 0
         while (i < s2.length) {
             var c = s2.charAt(i)
+            // An astral character is two code units; appending them one at a time
+            // hands the host a lone surrogate, which comes back as U+FFFD. Copy
+            // the pair in one substring. Twin in java-interpreter.abnf.
+            var cu = s2.charCodeAt(i)
+            if (cu >= 55296 && cu <= 56319 && i + 1 < s2.length) { out += s2.substring(i, i + 2); i += 2; continue }
             if (c != "\\") { out += c; i++; continue }
             var e = s2.charAt(i + 1)
             if (e == "n") { out += "\n"; i += 2; continue }
@@ -2731,8 +2763,9 @@ HasStatic   = :script(~~
         }
     }
     // new C(args): set __class, then run the constructor with [obj, args...].
-    // super.m(args): resolved through js_supercall, starting at the superclass of the
-    // class the call appears in (captured at build time).
+    // super.m(args): resolved through js_jvsuper, starting at the superclass of the
+    // class the call appears in (captured at build time); past the last user class
+    // it reaches java.lang.Object's toString, equals and hashCode.
     function makeSuperCall(name, argThunks) {
         var defName = curClassName
         return function(b) {
@@ -2745,7 +2778,7 @@ HasStatic   = :script(~~
                 b = r.b
                 callExt(b, "js_arr_push", [argsV, r.v])
             }
-            return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
+            return {b: b, v: callExt(b, "js_jvsuper", [supV, thisV, emitStr(b, name), argsV])}
         }
     }
 
@@ -3046,14 +3079,19 @@ HasStatic   = :script(~~
     }
     function makeNew(items, text) {
         var clsName = ""
+        var qual = ""
         var args = []
         for (var q = 0; q < items.length; q++) {
             // A qualified name (new Outer.Nested()) pushes each segment; the LAST one
             // names the hoisted descriptor.
-            if (typeof items[q] == "string") { clsName = items[q] } else { args.push(items[q]) }
+            if (typeof items[q] == "string") {
+                clsName = items[q]
+                qual = (qual == "") ? clsName : qual + "." + clsName
+            } else { args.push(items[q]) }
         }
         noteTypeUse(clsName)
         if (jLangWants(clsName)) { jLangWant = true }
+        if (jUtilWants(qual)) { jUtilWant = true }
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
         if (clsName == "String") { jUsesStrIdx = true }
@@ -4312,8 +4350,11 @@ HasStatic   = :script(~~
     // name's prefix (jPkgPrefix), as getName and an uncaught exception spell it.
     // lib/java-lang.java is compiled the same way when the program creates one
     // of its types (jLangWants): at the end of the walk, by buildMain, so its
-    // classes are stashed with the imported ones.
+    // classes are stashed with the imported ones. lib/java-util.java is loaded
+    // the same way when a FULLY QUALIFIED `new java.util.ArrayList<>()` names
+    // one of its types without an import (JLS 6.5.5.2).
     var jUtilLoaded = false
+    var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
     function jLoadLib(file, prefix) {
@@ -5344,6 +5385,10 @@ HasStatic   = :script(~~
         if (importDepth > 0) {
             stashImported(items) // stashed with its file; emitted later (compile-core)
             return
+        }
+        if (jUtilWant && !jUtilLoaded) {
+            jUtilLoaded = true
+            jLoadLib("lib/java-util.java", "java.util.")
         }
         if (jLangWant) {
             jLangWant = false

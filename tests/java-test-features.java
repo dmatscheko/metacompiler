@@ -906,6 +906,12 @@ public class Main {
         // real java has.
         Main.check("thr-tostring-override", ("" + new OwnStr("q")).equals("own:q"));
 
+        // A fully qualified java.util type needs no import (JLS 6.5.5.2).
+        java.util.List<Integer> qual = new java.util.ArrayList<>();
+        qual.add(4);
+        qual.add(5);
+        Main.check("qualified-util-new", qual.size() == 2 && ("" + qual).equals("[4, 5]"));
+
         // ----- everything combined -----
         Main.check("combined-pipeline", Main.transform(new int[]{1, 2, -3}).equals("o1e2x"));
 

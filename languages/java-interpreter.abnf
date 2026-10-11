@@ -251,13 +251,40 @@ UniPre      = :script(~~
                     var hc = hex.charCodeAt(h)
                     if (!((hc >= 48 && hc <= 57) || (hc >= 97 && hc <= 102) || (hc >= 65 && hc <= 70))) { ok = false }
                 }
+                var cv = ok ? parseInt(hex, 16) : 0
+                var end = k + 4
+                var text = String.fromCharCode(cv)
+                // A surrogate is translated only as half of a PAIR spelled as two
+                // consecutive escapes: the source is handed back to the host as
+                // UTF-8, where a lone surrogate becomes U+FFFD. A lone one stays an
+                // escape, which only a char or string literal can hold, and
+                // jUnescape decodes it there. Twin in java-to-llvm-ir.abnf.
+                if (ok && cv >= 55296 && cv <= 57343) {
+                    ok = false
+                    if (cv <= 56319 && src.charAt(end) === "\\" && src.charAt(end + 1) === "u") {
+                        var q = end + 1
+                        while (q < n && src.charAt(q) === "u") { q++ }
+                        var lhex = src.substring(q, q + 4)
+                        var lok = lhex.length === 4
+                        for (var h2 = 0; h2 < lhex.length; h2++) {
+                            var lc = lhex.charCodeAt(h2)
+                            if (!((lc >= 48 && lc <= 57) || (lc >= 97 && lc <= 102) || (lc >= 65 && lc <= 70))) { lok = false }
+                        }
+                        var lv = lok ? parseInt(lhex, 16) : 0
+                        if (lv >= 56320 && lv <= 57343) {
+                            ok = true
+                            text = text + String.fromCharCode(lv)
+                            end = q + 4
+                        }
+                    }
+                }
                 if (ok) {
                     // Everything before the eligible backslash is copied as it
                     // stands - that includes the (j - i - 1) literal ones.
                     out += src.substring(last, j - 1)
-                    out += String.fromCharCode(parseInt(hex, 16))
-                    last = k + 4
-                    i = k + 4
+                    out += text
+                    last = end
+                    i = end
                     changed = true
                     continue
                 }
@@ -896,7 +923,7 @@ RefType     = { Annotation } ( "String" KwEnd | Id [ SkipAngle ] { "." { Annotat
 
 // NewExpr is a Primary, not an alternative here, so `new Foo().bar()` and
 // `new int[]{1, 2}[0]` take the ordinary suffix chain.
-PostfixExpr = IncDec | SuperCall | IfaceSuper | CallMember ;
+PostfixExpr = IncDec | IfaceSuper | CallMember ;
 // Greet.super.hello() - the default method of a NAMED interface, which is how a
 // class that inherits two defaults picks one.
 IfaceSuper  <~~ push(makeIfaceSuper(takeAll())); jNoteCall(up.in) ~~>
@@ -1004,7 +1031,7 @@ ArmStmts    <~~ push({sstmts: takeAll()}) ~~>
 
 Primary     = ArrClassLit | PrimClassLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
             | JNum | True | False | Null
-            | OuterThis | BareCall | VarRef ;
+            | OuterThis | SuperCall | BareCall | VarRef ;
 
 // An UNQUALIFIED method call - `check(x)` rather than `this.check(x)` or
 // `Main.check(x)`. Java's own rule picks the receiver: a method the enclosing
@@ -3110,6 +3137,11 @@ HasStatic   = :script(~~
         var i = 0
         while (i < s2.length) {
             var c = s2.charAt(i)
+            // An astral character is two code units; appending them one at a time
+            // hands the host a lone surrogate, which comes back as U+FFFD. Copy
+            // the pair in one substring. Twin in java-to-llvm-ir.abnf.
+            var cu = s2.charCodeAt(i)
+            if (cu >= 55296 && cu <= 56319 && i + 1 < s2.length) { out += s2.substring(i, i + 2); i += 2; continue }
             if (c != "\\") { out += c; i++; continue }
             var e = s2.charAt(i + 1)
             if (e == "n") { out += "\n"; i += 2; continue }
@@ -3287,32 +3319,38 @@ HasStatic   = :script(~~
                 // A user toString() wins over every built-in rendering, as in Java.
                 var ts = jFindMember(v.__class, "toString")
                 if (typeof ts == "function") { return jstrD(ts.apply(undefined, [v]), depth + 1) }
-                // java.lang.Throwable#toString: the BINARY class name and, only
-                // when getMessage() is non-null, ": " and the message -
-                // `System.out.println(new RuntimeException("x"))` is
-                // "java.lang.RuntimeException: x" (java 24.0.2). It is the SAME
-                // text the launcher's uncaught line prints, which is why
-                // jExcTopLine is one call to jThrowableStr. Throwable's toString
-                // carries NO stack trace (printStackTrace() is the method that does).
-                if (jIsThrowable(v)) { return jThrowableStr(v) }
-                // An enum constant prints its name (java.lang.Enum#toString) and a
-                // record its canonical form P[x=1, y=2] (java.lang.Record) - with
-                // the SIMPLE name, which is what the generated toString uses.
-                if (v.__ename !== undefined) { return v.__ename }
-                var comps = v.__class.__record
-                if (comps != undefined && comps != null) {
-                    var out = ""
-                    for (var k = 0; k < comps.length; k++) {
-                        if (k > 0) { out = out + ", " }
-                        out = out + comps[k] + "=" + jstrD(v[comps[k]], depth + 1)
-                    }
-                    return v.__class.__name + "[" + out + "]"
-                }
-                return jClassBin(v.__class) + "@" + jIdHash(v)
+                return jInheritedStr(v, depth)
             }
             return "" + v
         }
         return "" + v
+    }
+    // The toString an instance inherits from the library when no class on its
+    // chain declares one: Throwable's, Enum's, Record's or Object's. It is also
+    // what `super.toString()` reaches past the last user class.
+    function jInheritedStr(v, depth) {
+        // java.lang.Throwable#toString: the BINARY class name and, only
+        // when getMessage() is non-null, ": " and the message -
+        // `System.out.println(new RuntimeException("x"))` is
+        // "java.lang.RuntimeException: x" (java 24.0.2). It is the SAME
+        // text the launcher's uncaught line prints, which is why
+        // jExcTopLine is one call to jThrowableStr. Throwable's toString
+        // carries NO stack trace (printStackTrace() is the method that does).
+        if (jIsThrowable(v)) { return jThrowableStr(v) }
+        // An enum constant prints its name (java.lang.Enum#toString) and a
+        // record its canonical form P[x=1, y=2] (java.lang.Record) - with
+        // the SIMPLE name, which is what the generated toString uses.
+        if (v.__ename !== undefined) { return v.__ename }
+        var comps = v.__class.__record
+        if (comps != undefined && comps != null) {
+            var out = ""
+            for (var k = 0; k < comps.length; k++) {
+                if (k > 0) { out = out + ", " }
+                out = out + comps[k] + "=" + jstrD(v[comps[k]], depth + 1)
+            }
+            return v.__class.__name + "[" + out + "]"
+        }
+        return jClassBin(v.__class) + "@" + jIdHash(v)
     }
 
     // ----- Object#getClass -----
@@ -4002,11 +4040,23 @@ HasStatic   = :script(~~
             var self = getVar("this")
             var m = undefined
             for (var c = getVar(defName).__super; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
-            if (typeof m != "function") fail("unknown super method '" + name + "'")
             var argv = [self]
             for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
+            if (typeof m != "function") { return jSuperObject(self, name, argv) }
             return m.apply(undefined, argv)
         }
+    }
+
+    // A super call no user class answers reaches the library: java.lang.Object's
+    // toString, equals (identity) and hashCode (the identity hash), or the
+    // toString Throwable, Enum and Record put in their place. argv[0] is the
+    // receiver. Twin of js_jvsuper in abnf/jsrtjava.go and lib/java-rt.metajs.
+    function jSuperObject(self, name, argv) {
+        if (name == "toString" && argv.length == 1) { return jInheritedStr(self, 0) }
+        if (name == "equals" && argv.length == 2) { return self === argv[1] }
+        if (name == "hashCode" && argv.length == 1) { return jIdNum(self) }
+        fail("unknown super method '" + name + "'")
+        return undefined
     }
 
     // new C(args): the constructor closure always exists and does the field inits.
@@ -4052,6 +4102,7 @@ HasStatic   = :script(~~
     function makeNew(items, text) {
         var clsName = items[0]
         if (jLangWants(clsName)) { jLangWant = true }
+        if (jUtilWants(clsName)) { jUtilWant = true }
         var args = items.slice(1)
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         var sig = anytype // the static constructor signature, resolved at the first run
@@ -5784,8 +5835,11 @@ HasStatic   = :script(~~
     // before. Its types are the java.util package's, which is their binary
     // name's prefix (jPkgPrefix), as getName and an uncaught exception spell it.
     // lib/java-lang.java is compiled the same way, after the program's walk,
-    // when the program creates one of its types (jLangWants).
+    // when the program creates one of its types (jLangWants), and so is
+    // lib/java-util.java when a FULLY QUALIFIED `new java.util.ArrayList<>()`
+    // names one of its types without an import (JLS 6.5.5.2).
     var jUtilLoaded = false
+    var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
     function jLoadLib(file, prefix) {
@@ -6194,6 +6248,10 @@ HasStatic   = :script(~~
     }
 
     c.compile(c.asg)
+    if (jUtilWant && !jUtilLoaded) {
+        jUtilLoaded = true
+        jLoadLib("lib/java-util.java", "java.util.")
+    }
     if (jLangWant) { jLoadLib("lib/java-lang.java", "java.lang.") }
     jWalkDone = true
 

@@ -357,7 +357,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 						}
 					}
 					calls = append(calls, cgCall{from, to, file})
-				case callee == "js_supercall":
+				case callee == "js_supercall" || callee == "js_jvsuper":
 					to := "(dynamic)"
 					if len(call.Args) >= 3 {
 						if s, ok := strOf[call.Args[2]]; ok {

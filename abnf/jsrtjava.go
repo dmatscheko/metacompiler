@@ -1741,6 +1741,40 @@ func init() {
 		}
 		// String.valueOf(x) and the string form used by `+`.
 		m["js_jvstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jvpStr(u(a[0]))) }
+		// super.m(args) - (super class, this, name, args). A call no user class
+		// answers reaches java.lang.Object: toString (or the one Throwable, Enum
+		// or Record put in its place), equals (identity) and hashCode (the
+		// identity hash). Twin of jSuperObject in languages/java-interpreter.abnf
+		// and js_jvsuper in languages/lib/java-rt.metajs.
+		baseSuper := m["js_supercall"]
+		m["js_jvsuper"] = func(a []uint64) uint64 {
+			self, isObj := u(a[1]).(*jsObject)
+			args, isArr := u(a[3]).(*jsArray)
+			if !isObj || !isArr || isClassDesc(self) {
+				return baseSuper(a)
+			}
+			name := rt.toString(u(a[2]))
+			for cls, g := u(a[0]), 0; g < 64; g++ {
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if f, ok := clsObj.props[name]; ok && isCallable(f) {
+					return baseSuper(a)
+				}
+				cls = clsObj.props["__super"]
+			}
+			switch n := len(args.elems); {
+			case name == "toString" && n == 0:
+				return rt.wrapStr(rt.jvpInherited(self, 0))
+			case name == "equals" && n == 1:
+				other, same := args.elems[0].(*jsObject)
+				return w(same && other == self)
+			case name == "hashCode" && n == 0:
+				return w(jvpIdentNum(self))
+			}
+			return baseSuper(a)
+		}
 		// Java's `+`. Identical to js_jadd (string concat / 32 bit int add / float
 		// add) except that the string case renders through jvpStr, so `"" + arr`
 		// and `"" + obj` agree with println instead of falling through to
@@ -2053,6 +2087,13 @@ func (rt *jsrt) jvpObj(o *jsObject, depth int) string {
 	if f, ok := jvpFindMember(o, "toString"); ok {
 		return rt.jvpRender(rt.call(f, o, []interface{}{o}), depth+1)
 	}
+	return rt.jvpInherited(o, depth)
+}
+
+// jvpInherited is the toString an object inherits from the library when no
+// class on its chain declares one: Throwable's, Enum's, Record's or Object's.
+// It is also what `super.toString()` reaches past the last user class.
+func (rt *jsrt) jvpInherited(o *jsObject, depth int) string {
 	// java.lang.Throwable#toString: the BINARY class name and, only when
 	// getMessage() is non-null, ": " and the message - println(new
 	// RuntimeException("x")) is "java.lang.RuntimeException: x" (java 24.0.2).

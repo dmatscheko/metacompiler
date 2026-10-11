@@ -545,6 +545,13 @@ function jpObj(o, depth) {
     // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs.
     var f = rtFindMethod(o["__class"], "toString")
     if (f !== undefined) { return jpRender(f.apply(undefined, [o]), depth + 1) }
+    return jpInherited(o, depth)
+}
+
+// The toString an object inherits from the library when no class on its chain
+// declares one: Throwable's, Enum's, Record's or Object's. It is also what
+// `super.toString()` reaches past the last user class.
+function jpInherited(o, depth) {
     // java.lang.Throwable#toString: the BINARY class name and, only when
     // getMessage() is non-null, ": " and the message - println(new
     // RuntimeException("x")) is "java.lang.RuntimeException: x" (java 24.0.2).
@@ -2590,6 +2597,21 @@ function jpFirst(args) {
 
 // String.valueOf(x) and the string form used by `+`.
 function js_jvstr(v) { return jpStr(v) }
+
+// super.m(args). A call no user class answers reaches java.lang.Object: toString
+// (or the one Throwable, Enum or Record put in its place), equals (identity) and
+// hashCode (the identity hash). Twin of jSuperObject in
+// languages/java-interpreter.abnf and js_jvsuper in abnf/jsrtjava.go.
+function js_jvsuper(sup, self, name, args) {
+    var m = rtFindMethod(sup, name)
+    if (typeof m == "function") { return rtkCall(m, self, rtPrepend(self, args)) }
+    if (typeof self == "object" && self !== null && !Array.isArray(self) && self["__isclass"] !== true) {
+        if (name == "toString" && args.length == 0) { return jpInherited(self, 0) }
+        if (name == "equals" && args.length == 1) { return self === args[0] }
+        if (name == "hashCode" && args.length == 0) { return jpIdNum(self) }
+    }
+    return js_supercall(sup, self, name, args)
+}
 
 // Java's `+`. Identical to js_jadd except that the string case renders through
 // the Java printer, so `"" + arr` and `"" + obj` agree with println instead of

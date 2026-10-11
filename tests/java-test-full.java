@@ -99,6 +99,7 @@ class Main {
         S48.run(); // SECTION-CALL 48
         S49.run(); // SECTION-CALL 49
         S50.run(); // SECTION-CALL 50
+        S51.run(); // SECTION-CALL 51
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2867,5 +2868,44 @@ class S50 {
         var w = "t";
         Main.check("ov50c", f(v).equals("O") && f(w).equals("S") && new S50Base(o) { }.tag.equals("O")
             && new S50Base("s") { }.tag.equals("S"));
+    }
+}
+
+// ===== SECTION 51: astral characters in literals, super past the last user class =====
+//
+// A String is UTF-16 (JLS 3.1): an astral character, written as itself or as
+// two unicode escapes (JLS 3.3), is a surrogate PAIR, and a lone surrogate escape is
+// one char. `super.m()` past the last user class reaches java.lang.Object (or
+// the toString Throwable and Enum put in its place). Every expected value is
+// java 24.0.2's.
+class S51Plain {
+    String objStr() { return super.toString(); }
+    boolean same(Object o) { return super.equals(o); }
+    int idHash() { return super.hashCode(); }
+}
+class S51Named extends S51Plain {
+    public String toString() { return "N:" + super.toString().startsWith("S51Named@"); }
+}
+class S51Exc extends RuntimeException {
+    S51Exc(String m) { super(m); }
+    public String toString() { return "<" + super.toString() + ">"; }
+}
+enum S51Color {
+    RED;
+    public String toString() { return super.toString().toLowerCase(); }
+}
+class S51 {
+    static void run() {
+        String[] lit = {"😀", "\uD83D\uDE00", "a😀b"};
+        Main.check("astral51a", (int) lit[0].charAt(0) == 55357 && (int) lit[0].charAt(1) == 56832
+            && lit[0].length() == 2 && lit[0].equals(lit[1]) && lit[0].codePointAt(0) == 128512);
+        Main.check("astral51b", lit[2].indexOf("b") == 3 && lit[2].substring(1, 3).equals(lit[0]));
+        char[] lone = {'\uD83D', '\uDE00'};
+        Main.check("astral51c", (int) lone[0] == 55357 && (int) lone[1] == 56832);
+        S51Plain p = new S51Plain();
+        Main.check("super51a", p.objStr().equals("S51Plain@" + Integer.toHexString(p.idHash()))
+            && p.objStr().equals(p.toString()) && p.same(p) && !p.same(new S51Plain()) && !p.same(null));
+        Main.check("super51b", ("" + new S51Named()).equals("N:true") && ("" + new S51Exc("x")).equals("<S51Exc: x>")
+            && ("" + S51Color.RED).equals("red"));
     }
 }
