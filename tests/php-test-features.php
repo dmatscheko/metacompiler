@@ -321,13 +321,17 @@ function finOverridesReturn() {
 }
 check("return-in-finally-overrides", finOverridesReturn(), "fin");
 
+// A break that would leave a finally body is a compile error in PHP ("jump out of
+// a finally block is disallowed", Zend/tests/try/try_finally_008); one that leaves
+// a loop inside the finally body is an ordinary jump.
 function finBreaksLoop() {
     $r = "";
-    for ($i = 0; $i < 3; $i++) {
-        try {
-            $r = $r . "a";
-        } finally {
+    try {
+        $r = $r . "a";
+    } finally {
+        for ($i = 0; $i < 3; $i++) {
             if ($i == 1) { break; }
+            $r = $r . "a";
         }
     }
     return $r;

@@ -86,7 +86,8 @@ Program     <~~ runProgram(takeAll()) ~~>
             = LeadHtml { TopItem } ;
 // One item of a top level: a declaration or a statement. Factored out because a
 // BRACED namespace body holds exactly the same items (see NsDecl).
-TopItem     = HaltTail | Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
+TopItem     = HaltTail | Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl <~~ push(makeTopClass(pop())) ~~> | EnumDecl
+            | ConstDecl | TypeDecl <~~ push(makeTopClass(pop())) ~~> | NsDecl | UseDecl | Statement ;
 // __halt_compiler(); ends the program TEXT: whatever follows it is data (read back
 // through __COMPILER_HALT_OFFSET__), never parsed. Nothing is pushed, so the
 // program simply ends there.
@@ -188,7 +189,7 @@ CloseAhead  = :script(~~
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(up.in); genPush() ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(up.in); genPush(); fnEnter() ~~> ParamList [ ReturnType ] Block ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
@@ -223,7 +224,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: modifiers and a reference-return '&' are accepted and ignored; an
 // abstract/interface method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = [ AttrGrp ] { PropMod } KwFunction [ "&" ] MethodName <~~ push(up.in); genPush() ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { PropMod } KwFunction [ "&" ] MethodName <~~ push(up.in); genPush(); fnEnter() ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: const A = 1, B = 2; with an optional TYPE before the first name
 // (the typed class constants of PHP 8.3). The typed form has to be its own
 // alternative and be tried FIRST - writing it as an optional [ TypeHint ] would let
@@ -367,8 +368,8 @@ StaticVarStmt <~~ push(makeStaticVars(takeAll())) ~~>
 // when no case matched. The clause bodies are plain statement runs, which is why they
 // are collected as lists rather than as Blocks - a Block would give each its own
 // scope and would stop the fallthrough.
-Switch      <~~ push(makeSwitch(takeAll())) ~~>
-            = KwSwitch "(" Expression ")" ( SwitchAlt | SwitchBlock ) ;
+Switch      <~~ loopLeave(); push(makeSwitch(takeAll())) ~~>
+            = KwSwitch <~~ loopEnter() ~~> "(" Expression ")" ( SwitchAlt | SwitchBlock ) ;
 SwitchBlock = "{" [ ";" ] { SwitchClause } "}" ;
 SwitchAlt   = ":" [ ";" ] { SwitchClause } KwEndswitch Semi ;
 SwitchClause = CaseClause | DefaultClause ;
@@ -377,8 +378,8 @@ CaseClause  <~~ push({scase: takeAll()}) ~~>
 DefaultClause <~~ push({sdefault: takeAll()}) ~~>
             = KwDefault CaseSep { Statement } ;
 CaseSep     = ":" !":" | ";" ;
-DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
-            = KwDo Body KwWhile "(" Expression ")" Semi ;
+DoWhile     <~~ loopLeave(); push(makeDoWhile(takeAll())) ~~>
+            = KwDo <~~ loopEnter() ~~> Body KwWhile "(" Expression ")" Semi ;
 // goto L; / L: - a jump within one statement sequence (which is all PHP allows: it
 // cannot enter a loop or leave a function). The jump travels as a control signal and
 // is caught by the statement list that owns the label; see makeBody.
@@ -483,14 +484,14 @@ AltElseIf   <~~ var b2 = pop(); push({elifCond: pop(), elifBody: b2.body}) ~~>
 AltBody     <~~ push({body: makeBody(takeAll())}) ~~>
             = { Statement } ;
 
-While       <~~ push(makeWhile(pop().body, pop())) ~~>
-            = KwWhile "(" Expression ")" ( AltWhileBody | Body ) ;
+While       <~~ loopLeave(); push(makeWhile(pop().body, pop())) ~~>
+            = KwWhile <~~ loopEnter() ~~> "(" Expression ")" ( AltWhileBody | Body ) ;
 AltWhileBody = ":" AltBody KwEndwhile Semi ;
 
 // for (init; cond; post) { body }. The three clauses are optional and wrapped
 // with a kind marker so the builder can tell them apart on the stack.
-For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Body ) ;
+For         <~~ loopLeave(); push(makeFor(takeAll())) ~~>
+            = KwFor <~~ loopEnter() ~~> "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Body ) ;
 AltForBody  = ":" AltBody KwEndfor Semi ;
 // Each part is a comma LIST, evaluated left to right; the condition is the value
 // of its last expression ('for ($i = 0, $j = 9; $i < $j; $i++, $j--)').
@@ -499,8 +500,8 @@ ForCond     <~~ push({k: "cond", t: seqExprs(takeAll())}) ~~> = Expression { ","
 ForPost     <~~ push({k: "post", t: exprToStmt(seqExprs(takeAll()))}) ~~> = Expression { "," Expression } ;
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
-ForEach     <~~ push(makeForeach(takeAll())) ~~>
-            = KwForeach "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
+ForEach     <~~ loopLeave(); push(makeForeach(takeAll())) ~~>
+            = KwForeach <~~ loopEnter() ~~> "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
 AltForeachBody = ":" AltBody KwEndforeach Semi ;
 ForeachVars = DestructPat | ForeachKV ;
 ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
@@ -520,9 +521,13 @@ FeRef       <~~ push({byref: true}) ~~> = "&" ;
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] Semi ;
 Break       <~~ push(makeBreak(takeAll())) ~~>
-            = KwBreak [ Expression ] Semi ;
+            = KwBreak [ JumpLevel ] Semi ;
 Continue    <~~ push(makeContinue(takeAll())) ~~>
-            = KwContinue [ Expression ] Semi ;
+            = KwContinue [ JumpLevel ] Semi ;
+// PHP takes a jump level only as a positive integer literal. Twin of JumpLevel in
+// php-to-llvm-ir.abnf.
+JumpLevel   <~~ push({lvl: phpSmallInt(up.in)}) ~~>
+            = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 // Every expression pushes exactly one thunk: function() -> value.
 // The word operators 'or' and 'and' are the LOOSEST of all, below assignment,
@@ -1150,7 +1155,7 @@ QName       = [ "\\" ] [ KwNamespace "\\" ] Name { "\\" MethodName } ;
 // late static binding). 'static' is a reserved word, so it cannot come through Name.
 StaticExpr  <~~ push(makeStaticExpr(takeAll(), up.pos)) ~~>
             = StaticBase "::" StaticMember [ StaticArgs ] ;
-StaticBase  <~~ push({sbase: lastSeg(stripWs(up.in))}) ~~>
+StaticBase  <~~ push({sbase: lastSeg(stripWs(up.in)), sraw: stripWs(up.in)}) ~~>
             = ( "static" KwEnd | QName ) ;
 // A '::' member may be COMPUTED: 'Foo::{$name}()' names the method (or constant) at
 // run time, and 'Foo::$$v' / 'Foo::${expr}' the static PROPERTY (tests/bug55247,
@@ -1171,7 +1176,7 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
-            = [ AttrGrp ] [ "static" KwEnd ] KwFunction <~~ genPush() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+            = [ AttrGrp ] [ "static" KwEnd ] KwFunction <~~ genPush(); fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
 UseClause   = KwUse "(" [ UseVar { "," UseVar } [ "," ] ] ")" ;
 // use ($v) captures the VALUE at creation; use (&$v) shares the variable itself.
 UseVar      = UseRef | UseVal ;
@@ -1897,31 +1902,104 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return t !== null && t !== undefined && typeof t == "object" && t.__lbl != undefined
     }
     function makeLabel(name) {
-        walkLabels.push(name)
+        jumpLabel(name)
         return {__lbl: name}
     }
     function makeGoto(name) {
-        walkGotos.push(name)
+        jumpGoto(name)
         return function() { return {goto: name} }
     }
-    // A goto may not leave a finally body: PHP rejects it at compile time ("jump out
-    // of a finally block is disallowed"). Every goto and label is logged as the tree
-    // is walked, and a finally body checks the gotos logged since it began against
-    // the labels logged since then. Twin of finTags in php-to-llvm-ir.abnf.
-    var walkGotos = []
-    var walkLabels = []
-    var finMarks = []
-    function finEnter() { finMarks.push({g: walkGotos.length, l: walkLabels.length}) }
+    // ----- jumps PHP checks at compile time -----
+    // A break/continue with no loop or switch around it, one naming more levels
+    // than there are, one that would leave a finally body, and a goto that leaves
+    // or enters a finally body are compile errors. The walk keeps, per file: every
+    // goto and label with the ids of the finally bodies around it, and a frame per
+    // function and per finally body counting the loops open in it. Twin of jw in
+    // php-to-llvm-ir.abnf.
+    function jumpWalkNew() {
+        return {gotos: [], labels: [], gfins: [], lfins: [], fins: [], finId: 0,
+                frames: [{fin: false, loops: 0, g: 0, l: 0}]}
+    }
+    var jw = jumpWalkNew()
+    function jumpFrame(fin) {
+        jw.frames.push({fin: fin, loops: 0, g: jw.gotos.length, l: jw.labels.length})
+    }
+    function loopEnter() {
+        var fr = jw.frames[jw.frames.length - 1]
+        fr.loops = fr.loops + 1
+    }
+    function loopLeave() {
+        var fr = jw.frames[jw.frames.length - 1]
+        fr.loops = fr.loops - 1
+    }
+    function fnEnter() { jumpFrame(false) }
+    function fnLeave() { jumpResolve(jw.frames.pop()) }
+    function finEnter() {
+        jw.finId = jw.finId + 1
+        jw.fins.push(jw.finId)
+        jumpFrame(true)
+    }
+    // Every goto inside the finally body must find its label inside it too.
     function finLeave(body) {
-        var mk = finMarks.pop()
-        for (var gi = mk.g; gi < walkGotos.length; gi++) {
-            var found = false
-            for (var li = mk.l; li < walkLabels.length; li++) {
-                if (walkLabels[li] == walkGotos[gi]) { found = true }
-            }
-            if (!found) { fail("jump out of a finally block is disallowed") }
+        var f = jw.frames.pop()
+        jw.fins.pop()
+        for (var gi = f.g; gi < jw.gotos.length; gi++) {
+            if (jumpLabelAt(jw.gotos[gi], f.l) < 0) { fail("jump out of a finally block is disallowed") }
         }
         return body
+    }
+    function jumpLabelAt(name, from) {
+        for (var li = from; li < jw.labels.length; li++) {
+            if (jw.labels[li] == name) { return li }
+        }
+        return 0 - 1
+    }
+    function jumpGoto(name) {
+        jw.gotos.push(name)
+        jw.gfins.push(jw.fins.slice(0))
+    }
+    function jumpLabel(name) {
+        jw.labels.push(name)
+        jw.lfins.push(jw.fins.slice(0))
+    }
+    // The end of a function (or of a file's top level): each goto resolves among
+    // its labels, and one whose label stands in a finally body the goto is not in
+    // is refused. The function's log is dropped after.
+    function jumpResolve(f) {
+        for (var gi = f.g; gi < jw.gotos.length; gi++) {
+            var li = jumpLabelAt(jw.gotos[gi], f.l)
+            if (li < 0) { continue }
+            var lf = jw.lfins[li]
+            for (var k = 0; k < lf.length; k++) {
+                if (jw.gfins[gi].indexOf(lf[k]) < 0) { fail("jump into a finally block is disallowed") }
+            }
+        }
+        while (jw.gotos.length > f.g) { jw.gotos.pop(); jw.gfins.pop() }
+        while (jw.labels.length > f.l) { jw.labels.pop(); jw.lfins.pop() }
+    }
+    // break N / continue N, kw naming which: the loops open up to the enclosing
+    // function must number at least n, and the n-th must not lie outside a finally
+    // body the jump stands in.
+    function jumpCheck(kw, n) {
+        var total = 0
+        var left = n
+        var outOfFin = false
+        for (var i = jw.frames.length - 1; i >= 0; i--) {
+            var fr = jw.frames[i]
+            total = total + fr.loops
+            if (left > 0 && left > fr.loops && fr.fin) { outOfFin = true }
+            left = left - fr.loops
+            if (!fr.fin) { break }
+        }
+        if (total == 0) { fail("'" + kw + "' not in the 'loop' or 'switch' context") }
+        if (n > total) { fail("Cannot '" + kw + "' " + n + " level" + (n == 1 ? "" : "s")) }
+        if (outOfFin) { fail("jump out of a finally block is disallowed") }
+    }
+    function jumpLevel(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].lvl != undefined) { return items[i].lvl }
+        }
+        return 1
     }
     function makeConstStmt() { return function() { return null } }
     function makeReturn(items) {
@@ -1932,12 +2010,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // along on the signal and every level that intercepts one decrements it, so a
     // 'break 2' passes straight through the innermost loop.
     makeBreak = function(items) {
-        var t = items.length > 0 ? items[0] : null
-        return function() { return {brk: true, n: t == null ? 1 : trunc(numOf(toNumV(t())))} }
+        var n = jumpLevel(items)
+        jumpCheck("break", n)
+        return function() { return {brk: true, n: n} }
     }
     makeContinue = function(items) {
-        var t2 = items.length > 0 ? items[0] : null
-        return function() { return {cont: true, n: t2 == null ? 1 : trunc(numOf(toNumV(t2())))} }
+        var n = jumpLevel(items)
+        jumpCheck("continue", n)
+        return function() { return {cont: true, n: n} }
     }
     // The finally body's completion passes straight through: a normal completion
     // yields null, which excTry (lib/interp-core.js) ignores, while a return/break/
@@ -3613,14 +3693,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return s.__super
         }
-        var v = anytype
-        v = null
-        if (varExists(name) || hasOwn(hostGlobals, name)) { v = getVar(name) }
-        if (v == null || v == undefined || v.__isclass !== true) {
-            var lk = classKey(name)
-            if (varExists(lk)) { v = getVar(lk) }
-        }
-        if (v == null || v == undefined || v.__isclass !== true) {
+        var v = findClass(name)
+        if (v == null) {
             if (where != undefined) { cbFail(where, "class \"" + name + "\" not found") }
             phpRaise("Error", "Class \"" + name + "\" not found")
         }
@@ -3631,7 +3705,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // "<where>, <reason>", where names the argument ("array_map(): Argument #1
     // ($callback) must be a valid callback or null"). Answers cur. Twin of
     // php_cbcheck in php-to-llvm-ir.abnf.
-    function cbFail(where, reason) { phpRaise("TypeError", where + ", " + reason) }
+    // A where ending in a colon (Closure::fromCallable's "Failed to create closure
+    // from callable:") takes the reason after a space instead.
+    function cbFail(where, reason) {
+        if (where.charAt(where.length - 1) == ":") { phpRaise("TypeError", where + " " + reason) }
+        phpRaise("TypeError", where + ", " + reason)
+    }
     function cbMethod(where, cls, mname) {
         if (classFind(cls, mname) != null || classFind(cls, phsCase(mname, false)) != null) { return null }
         if (classFind(cls, "__callStatic") != null) { return null }
@@ -3673,6 +3752,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // lower-cased key, which a run-time name that misses exactly falls back to.
     // Twin of declClassAlias in php-to-llvm-ir.abnf.
     function classKey(name) { return "\x00c" + phsCase(name, false) }
+    // The class, interface or trait descriptor a name denotes, in any letter case, or
+    // null.
+    function findClass(name) {
+        var v = anytype
+        v = null
+        if (varExists(name) || hasOwn(hostGlobals, name)) { v = getVar(name) }
+        if (v == null || v == undefined || v.__isclass !== true) {
+            var lk = classKey(name)
+            if (varExists(lk)) { v = getVar(lk) }
+        }
+        if (v == null || v == undefined || v.__isclass !== true) { return null }
+        return v
+    }
+    // Two class names denote the same class when they agree ignoring ASCII case.
+    function sameClassName(a, b) {
+        return a == b || (a.length == b.length && phsCase(a, false) == phsCase(b, false))
+    }
     function declClass(name, cls) {
         declVar(name, cls)
         declVar(classKey(name), cls)
@@ -3856,10 +3952,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // parse one: a primary (Class::x), a member-chain suffix ($obj::x) and an
     // assignment head (self::$x = ...).
     function splitStatic(items) {
-        var r = {base: null, name: null, prop: null, args: null, nameT: null, propT: null}
+        var r = {base: null, raw: null, name: null, prop: null, args: null, nameT: null, propT: null}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.sbase != undefined) { r.base = it.sbase }
+            if (it.sbase != undefined) { r.base = it.sbase; r.raw = it.sraw }
             else if (it.sname != undefined) { r.name = it.sname }
             else if (it.sprop != undefined) { r.prop = it.sprop.substring(1) }
             else if (it.snameT != undefined) { r.nameT = it.snameT }
@@ -3966,12 +4062,34 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
 
+    // 'Name::class' is resolved at COMPILE time to the name as written, fully
+    // qualified - no class is looked up, so it names an undeclared class as well.
+    // Only self::, static:: and parent:: wait for the run time. null when the
+    // access is not such a literal. Twin of classLiteralName in php-to-llvm-ir.abnf.
+    function classLiteralName(raw, name, args) {
+        if (name != "class" || args != null) { return null }
+        var n = phsCase(raw, false)
+        if (n == "self" || n == "static" || n == "parent") { return null }
+        return raw.charAt(0) == "\\" ? raw.substring(1) : raw
+    }
     // The member NAME of a '::' access, resolved now: the literal spelling if there
     // was one, else the computed thunk's value as a string.
     function stName(p) { return p.nameT == null ? p.name : phpStr(p.nameT()) }
     function stProp(p) { return p.propT == null ? p.prop : phpStr(p.propT()) }
     function makeStaticExpr(items, pos) {
         var p = splitStatic(items)
+        var lit = classLiteralName(p.raw, p.name, p.args)
+        if (lit != null) { return function() { return lit } }
+        // Closure::fromCallable($c): $c checked as a callback, then as a closure -
+        // what $c(...) yields. Twin of the same arm in php-to-llvm-ir.abnf.
+        if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "fromcallable") {
+            var fa = p.args
+            return function() {
+                var cb = anytype
+                cb = evalArgs(fa).pos[0]
+                return asCallable(phpCheckCallback(cb, "Failed to create closure from callable:"))
+            }
+        }
         return function() { return staticAccess(resolveClassName(p.base), stName(p), stProp(p), p.args, p.base) }
     }
     function makeStaticSfx(items) {
@@ -4049,6 +4167,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function makeClosure(items) {
         var isGen = genPop()
+        fnLeave()
         var d = splitClosure(items)
         var params = d.params
         var body = d.body
@@ -4586,6 +4705,48 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // relative callable ('parent::m', ['self', 'm']) in the class scope of the
     // caller, which the library function's own frame does not have. Twin of
     // callerCallable in php-to-llvm-ir.abnf.
+    // The callback argument of the library functions that take one, by position.
+    var libCbArg = {"$array_map": 0, "$array_filter": 1, "$array_reduce": 1, "$array_walk": 1,
+                    "$usort": 1, "$uasort": 1, "$uksort": 1}
+    // A library function's callback named RELATIVE to the class scope ('self::m',
+    // ['parent', 'm'], 'static::m') is resolved in the caller's frame too: a method
+    // the class answers becomes a closure bound like callerCallable's, anything else
+    // the absolute 'C::m' the library's own check reports on. With no class scope
+    // the callback is left to that check. Twin of js_phrelcb in abnf/jsrtphp.go and
+    // lib/php-rt.metajs.
+    function libCallable(cur) {
+        var cn = anytype
+        var mn = anytype
+        cn = null
+        mn = null
+        if (typeof cur == "string" && cur.indexOf("::") >= 0) {
+            cn = cur.substring(0, cur.indexOf("::"))
+            mn = cur.substring(cur.indexOf("::") + 2)
+        } else if (isArr(cur) && cur.keys.length == 2) {
+            cn = arrGet(cur, 0)
+            mn = arrGet(cur, 1)
+        }
+        if (typeof cn != "string" || typeof mn != "string") { return cur }
+        if (cn != "self" && cn != "static" && cn != "parent") { return cur }
+        var s = ctxSelf()
+        if (s == null || (cn == "parent" && (s.__super == null || s.__super == undefined))) { return cur }
+        var cls = resolveClassName(cn)
+        if (classFind(cls, mn) == null && classFind(cls, phsCase(mn, false)) == null && classFind(cls, "__callStatic") == null) {
+            return cls.__name + "::" + mn
+        }
+        return boundStatic(cls, mn, cn)
+    }
+    // The closure a static callable becomes. A relative name forwards the CALLER's
+    // late-static-binding class and $this, which the library function's frame no
+    // longer has.
+    function boundStatic(cls, mn, cn) {
+        var bound = anytype
+        bound = undefined
+        if (cn == "self" || cn == "static" || cn == "parent") {
+            bound = {self: varExists("$this") ? getVar("$this") : null, bind: ctxStatic()}
+        }
+        return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
+    }
     function callerCallable(cur, fname) {
         phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback")
         var cn = ""
@@ -4597,23 +4758,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cn = phpStr(arrGet(cur, 0))
             mn = phpStr(arrGet(cur, 1))
         } else { return cur }
-        var cls = resolveClassName(cn)
-        // A relative name forwards the CALLER's late-static-binding class and $this,
-        // which the library function's frame no longer has.
-        var bound = anytype
-        bound = undefined
-        if (cn == "self" || cn == "static" || cn == "parent") {
-            bound = {self: varExists("$this") ? getVar("$this") : null, bind: ctxStatic()}
-        }
-        return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
+        return boundStatic(resolveClassName(cn), mn, cn)
     }
     function makeCall(items) {
         var name = phpLibRef(items[0])
         var args = items.slice(1)
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
+        var cbAt = hasOwn(libCbArg, "$" + name) ? libCbArg["$" + name] : -1
         return function() {
             var argset = evalArgs(args)
             if (resolveCb && argset.pos.length > 0) { argset.pos[0] = callerCallable(argset.pos[0], name) }
+            if (cbAt >= 0 && argset.pos.length > cbAt) { argset.pos[cbAt] = libCallable(argset.pos[cbAt]) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
                 var pname = name
@@ -4658,6 +4813,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // of it, so the string is looked for rather than indexed. 'static' is remembered
     // because a static method must run with no $this.
     function makeFun(items) {
+        fnLeave()
         var isGen = genPop()
         var name = ""
         var params = []
@@ -4730,10 +4886,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // The top level is a statement list like any body, so a label and a `goto` work
     // there too.
     function runProgram(items) {
+        jumpResolve(jw.frames[0])
         var main = makeBody(items)
         var defs = topDefs
         topDefs = []
+        var early = topClasses
+        topClasses = []
+        hoisted = {}
         for (var di = 0; di < defs.length; di++) { scopePut(globalScope, defs[di].name, makeFunClosure(defs[di])) }
+        for (var ci = 0; ci < early.length; ci++) { early[ci]() }
         // A user exception (throw) that escapes the whole program is reported like any
         // other runtime error. The wrap sits here, not around c.compile, because the
         // program runs as a side effect of executing the statement thunks (unlike Java,
@@ -4810,6 +4971,26 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     var topDefs = []
     function makeTopDef(fn) {
         topDefs.push(fn)
+        return function() { return null }
+    }
+    // A class, interface or trait declared at a file's top level is bound before the
+    // file's statements run too, when PHP can link it at compile time
+    // (zend_compile_class_decl): it implements no interface and uses no trait, and
+    // its parent, if any, is an engine class or one bound this way earlier in the
+    // file. Any other declaration, and every enum, binds where it stands.
+    // lastClassDecl describes the declaration whose thunk makeTopClass receives;
+    // hoisted holds the classKey of each class bound early in this file. Twin of
+    // makeTopClass in php-to-llvm-ir.abnf.
+    var topClasses = []
+    var hoisted = {}
+    var lastClassDecl = null
+    var engineClasses = {}
+    function makeTopClass(t) {
+        var d = lastClassDecl
+        if (!d.plain) { return t }
+        if (d.ext != null && engineClasses[classKey(d.ext)] !== true && hoisted[classKey(d.ext)] !== true) { return t }
+        hoisted[classKey(d.name)] = true
+        topClasses.push(t)
         return function() { return null }
     }
     // Creating an instance: the declared property defaults are installed first (in
@@ -4983,7 +5164,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var cls = {__isclass: true, __name: name, __super: null, __props: props, __ifaces: p.ifaces,
                    __constT: consts, __constV: newArr(), __statics: newArr()}
         if (p.ext != null) {
-            var base = getVar(p.ext)
+            var base = findClass(p.ext)
             if (base == undefined || base == null || base.__isclass !== true) { fail("unknown base class " + p.ext) }
             cls.__super = base
         }
@@ -5051,6 +5232,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeClassStmt(items) {
         var name = items[0]
         var p = classParts(items, 1)
+        lastClassDecl = {name: name, ext: p.ext, plain: p.ifaces.length == 0 && p.uses.length == 0}
         return function() { declClass(name, buildClass(name, p)); return null }
     }
     // An enum: the class is built exactly like any other, then one instance per case
@@ -5113,6 +5295,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeTraitStmt(items) {
         var name = items[0]
         var p = classParts(items, 1)
+        lastClassDecl = {name: name, ext: null, plain: true}
         return function() {
             declClass(name, {__isclass: true, __istrait: true, __name: name, __parts: p, __super: null,
                            __props: [], __ifaces: [], __constT: [], __constV: newArr(), __statics: newArr()})
@@ -5177,6 +5360,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (items[i].impl != undefined) { parents.push(stripWs(items[i].impl)) }
             else if (items[i].cconsts != undefined) { collectConsts(items[i].cconsts, consts) }
         }
+        lastClassDecl = {name: name, ext: null, plain: parents.length == 0}
         return function() {
             declClass(name, {__isclass: true, __isiface: true, __name: name, __super: null,
                            __props: [], __ifaces: parents,
@@ -5190,13 +5374,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function classIs(cls, name) {
         var k = cls
         while (k != undefined && k != null) {
-            if (k.__name == name) { return true }
+            if (sameClassName(k.__name, name)) { return true }
             var ifs = k.__ifaces
             if (ifs != undefined && ifs != null) {
                 for (var i = 0; i < ifs.length; i++) {
-                    if (ifs[i] == name) { return true }
-                    var iv = varExists(ifs[i]) ? getVar(ifs[i]) : null
-                    if (iv != null && iv.__isclass === true && classIs(iv, name)) { return true }
+                    if (sameClassName(ifs[i], name)) { return true }
+                    var iv = findClass(ifs[i])
+                    if (iv != null && classIs(iv, name)) { return true }
                 }
             }
             k = k.__super
@@ -5204,6 +5388,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return false
     }
     function phpIsA(v, name) {
+        // A closure is an instance of PHP's final class Closure, and of nothing else.
+        if (typeof v == "function") { return sameClassName(name, "Closure") }
         if (!isObj(v)) { return false }
         return classIs(v.__class, name)
     }
@@ -5250,15 +5436,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return a
     }
     var phpBuiltins = {
-        "count": function(a) { return phpLen(a) },
+        "count": function(a) { return phpCount(a) },
         // PHP strings are byte strings: strlen("\u{2764}") is 3, not 1.
         "strlen": function(s) { return phsLen(phpStr(s)) },
         "array_push": function(a) {
             for (var i = 1; i < arguments.length; i++) { arrPush(a, arguments[i]) }
             return a.keys.length
         },
-        "array_values": function(d) { return arrOf(derefAll(d.vals)) },
+        "array_values": function(d) {
+            if (!isArr(d)) { phpRaise("TypeError", "array_values(): Argument #1 ($array) must be of type array, " + phpDebugType(d) + " given") }
+            return arrOf(derefAll(d.vals))
+        },
+        // A scalar coerces as arithmetic does; an array, an object or a string with
+        // no numeric prefix is a TypeError. Twin of js_phabs in abnf/jsrtphp.go and
+        // lib/php-rt.metajs.
         "abs": function(n) {
+            var bad = isArr(n) || isObj(n) || typeof n == "function" || (typeof n == "string" && numScan(n) == null)
+            if (bad) { phpRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, " + phpDebugType(n) + " given") }
             var v = toNumV(n)
             if (isFlo(v)) { return v.f < 0 ? mkFlo(-v.f) : v }
             return i64IsNeg(iPairOf(v)) ? phpNeg(v) : v
@@ -5376,6 +5570,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "error_reporting": function(v) { return 32767 },
         "get_class": function(v) { return isObj(v) ? fullName(v.__class) : false },
         "method_exists": function(v, m) { return phpMethodExists(v, m) },
+        "class_exists": function(n) { return phpClassExists(n, false) },
+        "interface_exists": function(n) { return phpClassExists(n, true) },
         "gettype": function(v) { return phpTypeName(v) },
         "get_debug_type": function(v) { return phpDebugType(v) },
         "var_dump": function() {
@@ -5391,6 +5587,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (at < 0) { return false }
         return at
     }
+    // class_exists() / interface_exists(): the name denotes, in any letter case, a
+    // class (not an interface or a trait) / an interface. Twin of js_phclsexists in
+    // abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpClassExists(n, iface) {
+        var c = findClass(phpStr(n))
+        if (c == null) { return false }
+        if (iface) { return c.__isiface === true }
+        return c.__isiface !== true && c.__istrait !== true
+    }
     // method_exists(): a method the class or a base declares, by PHP's
     // case-insensitive name and whatever its visibility; a class name that names
     // no class answers false. A property hook is not a method. Twin of
@@ -5399,7 +5604,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var cls = anytype
         cls = null
         if (isObj(v)) { cls = v.__class }
-        else if (typeof v == "string" && varExists(v)) { cls = getVar(v) }
+        else if (typeof v == "string") { cls = findClass(v) }
         if (cls == null || cls == undefined || cls.__isclass !== true) { return false }
         var key = "," + phsCase(phpStr(m), false) + ","
         var k = cls
@@ -5533,11 +5738,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof k == "string") { return dumpInd(ind) + "[\"" + k + "\"]=>\n" }
         return dumpInd(ind) + "[" + phpStr(k) + "]=>\n"
     }
-    function phpLen(v) {
+    // count(): an array's element count, a Countable's count(); anything else is a
+    // TypeError. Twin of js_phcount in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpCount(v) {
         if (isArr(v)) { return v.keys.length }
-        if (typeof v == "string") { return phsLen(v) }
-        if (v === null || v === undefined) { return 0 }
-        return 1
+        if (isObj(v) && phpIsA(v, "Countable")) { return mcall(v, "count", argsOf([])) }
+        phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phpDebugType(v) + " given")
     }
 
     phpBuiltins["exit"] = function(code) { exit(code === undefined ? 0 : trunc(numOf(toNumV(code)))) }
@@ -5675,6 +5881,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 
     // ----- arithmetic: int stays int, and any float operand makes the result float --
     function phpArith(op, l, r) {
+        if (isArr(l) || isArr(r)) { return phpArrArith(op, l, r) }
         var a = toNumV(l)
         var b = toNumV(r)
         // '%' is the one arithmetic operator that is INTEGER only: PHP casts both
@@ -5688,6 +5895,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (isFlo(a) || isFlo(b)) { return phpFloArith(op, numOf(a), numOf(b)) }
         return phpIntArith(op, iPairOf(a), iPairOf(b))
+    }
+    // An array operand: '+' of two arrays is the UNION (the left array, then each
+    // key of the right one it lacks), and every other combination is a TypeError
+    // naming both operand types. Twin of phArrArith in lib/php-rt.metajs and
+    // phpArrArith in abnf/jsrtphp.go.
+    function phpArrArith(op, l, r) {
+        if (op == "+" && isArr(l) && isArr(r)) {
+            var out = arrCopy(l)
+            for (var i = 0; i < r.keys.length; i++) {
+                if (!arrHas(out, r.keys[i])) { arrSet(out, r.keys[i], phpCopy(deref(r.vals[i]))) }
+            }
+            return out
+        }
+        phpRaise("TypeError", "Unsupported operand types: " + phpDebugType(l) + " " + op + " " + phpDebugType(r))
     }
     function phpFloArith(op, x, y) {
         if (op == "+") { return mkFlo(x + y) }
@@ -5854,7 +6075,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // types; \Throwable / \Exception also catch the built-in base below.
     core.excMatches = function(v, types) {
         for (var i = 0; i < types.length; i++) {
-            if (types[i] == "Throwable") { return true }
+            if (sameClassName(types[i], "Throwable")) { return true }
             if (phpIsA(v, types[i])) { return true }
         }
         return false
@@ -5873,6 +6094,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (sup == null) { cls.__mlc = ",__construct,getmessage,getcode," }
         scopePut(globalScope, name, cls)
         scopePut(globalScope, classKey(name), cls)
+        engineClasses[classKey(name)] = true
     }
     declBuiltinClass("Exception", null)
     declBuiltinClass("Error", null)
@@ -5888,6 +6110,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     scopePut(globalScope, "stdClass", {__isclass: true, __name: "stdClass", __super: null, __props: [], __ifaces: [],
                                        __constT: [], __constV: newArr(), __statics: newArr()})
     scopePut(globalScope, classKey("stdClass"), getVar("stdClass"))
+    engineClasses[classKey("stdClass")] = true
     // A method call on something that is not an object. PHP 8 words it
     // `Call to a member function nope() on string`, with phpDebugType's names, as a
     // catchable Error. Twin of js_phmcall (languages/lib/php-rt.metajs and
@@ -5946,9 +6169,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
         var outerDefs = topDefs
+        var outerClasses = topClasses
+        var outerHoisted = hoisted
+        var outerJumps = jw
         topDefs = []
+        topClasses = []
+        hoisted = {}
+        jw = jumpWalkNew()
         c.compile(asg)
         topDefs = outerDefs
+        topClasses = outerClasses
+        hoisted = outerHoisted
+        jw = outerJumps
         c.popSource()
         return true
     }
@@ -5973,9 +6205,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
         c.pushSource("php-stdlib.php", text)
         var outerDefs = topDefs
+        var outerClasses = topClasses
+        var outerHoisted = hoisted
+        var outerJumps = jw
         topDefs = []
+        topClasses = []
+        hoisted = {}
+        jw = jumpWalkNew()
         c.compile(asg)
         topDefs = outerDefs
+        topClasses = outerClasses
+        hoisted = outerHoisted
+        jw = outerJumps
         c.popSource()
         return name
     }

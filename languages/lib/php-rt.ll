@@ -502,460 +502,481 @@
 @str.1000475 = global [7 x i8] c"phRaise"
 @str.1000476 = global [7 x i8] c"message"
 @str.1000477 = global [7 x i8] c"phStamp"
-@str.1000478 = global [19 x i8] c"DivisionByZeroError"
-@str.1000479 = global [14 x i8] c"Modulo by zero"
-@str.1000480 = global [10 x i8] c"phFloArith"
-@str.1000481 = global [10 x i8] c"phIntArith"
-@str.1000482 = global [7 x i8] c"phArith"
-@str.1000483 = global [16 x i8] c"Division by zero"
-@str.1000484 = global [2 x i8] c"**"
-@str.1000485 = global [28 x i8] c"unknown arithmetic operator "
-@str.1000486 = global [1 x i8] c"&"
-@str.1000487 = global [1 x i8] c"|"
-@str.1000488 = global [1 x i8] c"^"
-@str.1000489 = global [2 x i8] c"<<"
-@str.1000490 = global [2 x i8] c">>"
-@str.1000491 = global [15 x i8] c"ArithmeticError"
-@str.1000492 = global [28 x i8] c"Bit shift by negative number"
-@str.1000493 = global [21 x i8] c"unknown bit operator "
-@str.1000494 = global [5 x i8] c"phBit"
-@str.1000495 = global [5 x i8] c"phNeg"
-@str.1000496 = global [7 x i8] c"phNumEq"
-@str.1000497 = global [8 x i8] c"phCmpNum"
-@str.1000498 = global [8 x i8] c"phNumCmp"
-@str.1000499 = global [8 x i8] c"phCmpStr"
-@str.1000500 = global [2 x i8] c"ai"
-@str.1000501 = global [2 x i8] c"bi"
-@str.1000502 = global [7 x i8] c"phKeyEq"
-@str.1000503 = global [2 x i8] c"lp"
-@str.1000504 = global [2 x i8] c"rp"
-@str.1000505 = global [11 x i8] c"phIdentical"
-@str.1000506 = global [11 x i8] c"phLooseNull"
-@str.1000507 = global [2 x i8] c"ns"
-@str.1000508 = global [13 x i8] c"phStrNumLoose"
-@str.1000509 = global [9 x i8] c"phKeyScan"
-@str.1000510 = global [9 x i8] c"phNormKey"
-@str.1000511 = global [10 x i8] c"phKeyIndex"
-@str.1000512 = global [2 x i8] c"nk"
-@str.1000513 = global [10 x i8] c"phDictFind"
-@str.1000514 = global [6 x i8] c"phFind"
-@str.1000515 = global [4 x i8] c"__ix"
-@str.1000516 = global [2 x i8] c"ix"
-@str.1000517 = global [3 x i8] c"map"
-@str.1000518 = global [8 x i8] c"scopeNew"
-@str.1000519 = global [2 x i8] c"kn"
-@str.1000520 = global [8 x i8] c"scopeHas"
-@str.1000521 = global [9 x i8] c"scopeDecl"
-@str.1000522 = global [8 x i8] c"scopeGet"
-@str.1000523 = global [2 x i8] c"lb"
-@str.1000524 = global [2 x i8] c"rb"
-@str.1000525 = global [7 x i8] c"phLoose"
-@str.1000526 = global [12 x i8] c"phObjPropsEq"
-@str.1000527 = global [2 x i8] c"rs"
-@str.1000528 = global [2 x i8] c"nl"
-@str.1000529 = global [2 x i8] c"nr"
-@str.1000530 = global [3 x i8] c"rt2"
-@str.1000531 = global [5 x i8] c"phCmp"
-@str.1000532 = global [2 x i8] c"cv"
-@str.1000533 = global [12 x i8] c"phIsCanonInt"
-@str.1000534 = global [12 x i8] c"phNumericKey"
-@str.1000535 = global [6 x i8] c"__next"
-@str.1000536 = global [8 x i8] c"phNewArr"
-@str.1000537 = global [5 x i8] c"__pos"
-@str.1000538 = global [8 x i8] c"phArrPos"
-@str.1000539 = global [9 x i8] c"phArrNext"
-@str.1000540 = global [33 x i8] c"cannot use this value as an array"
-@str.1000541 = global [8 x i8] c"phArrSet"
-@str.1000542 = global [27 x i8] c"cannot append to this value"
-@str.1000543 = global [9 x i8] c"phArrPush"
-@str.1000544 = global [2 x i8] c"pv"
-@str.1000545 = global [8 x i8] c"phArrGet"
-@str.1000546 = global [8 x i8] c"phArrHas"
-@str.1000547 = global [2 x i8] c"nv"
-@str.1000548 = global [10 x i8] c"phArrUnset"
-@str.1000549 = global [4 x i8] c"cell"
-@str.1000550 = global [10 x i8] c"phElemCell"
-@str.1000551 = global [3 x i8] c"ok2"
-@str.1000552 = global [2 x i8] c"ov"
-@str.1000553 = global [9 x i8] c"phArrCopy"
-@str.1000554 = global [3 x i8] c"pos"
-@str.1000555 = global [5 x i8] c"phLen"
-@str.1000556 = global [15 x i8] c":: on undefined"
-@str.1000557 = global [10 x i8] c":: on null"
-@str.1000558 = global [18 x i8] c":: on a non-object"
-@str.1000559 = global [46 x i8] c":: on a value that is not an object or a class"
-@str.1000560 = global [9 x i8] c"phClassOf"
-@str.1000561 = global [3 x i8] c"key"
-@str.1000562 = global [7 x i8] c"phOwner"
-@str.1000563 = global [12 x i8] c"phConstDepth"
-@str.1000564 = global [5 x i8] c"shown"
-@str.1000565 = global [7 x i8] c"anytype"
-@str.1000566 = global [3 x i8] c"box"
-@str.1000567 = global [11 x i8] c"__lazyconst"
-@str.1000568 = global [10 x i8] c"__visiting"
-@str.1000569 = global [5 x i8] c"Error"
-@str.1000570 = global [41 x i8] c"Cannot declare self-referencing constant "
-@str.1000571 = global [10 x i8] c"phConstVal"
-@str.1000572 = global [5 x i8] c"depth"
-@str.1000573 = global [2 x i8] c"k:"
-@str.1000574 = global [2 x i8] c"iv"
-@str.1000575 = global [9 x i8] c"phConstIn"
-@str.1000576 = global [9 x i8] c"Generator"
-@str.1000577 = global [11 x i8] c"Traversable"
-@str.1000578 = global [8 x i8] c"Iterator"
-@str.1000579 = global [5 x i8] c"phIsA"
-@str.1000580 = global [8 x i8] c"stdClass"
-@str.1000581 = global [11 x i8] c"phClassName"
-@str.1000582 = global [4 x i8] c"NULL"
-@str.1000583 = global [6 x i8] c"double"
-@str.1000584 = global [7 x i8] c"integer"
-@str.1000585 = global [5 x i8] c"array"
-@str.1000586 = global [12 x i8] c"unknown type"
-@str.1000587 = global [10 x i8] c"phTypeName"
-@str.1000588 = global [4 x i8] c"bool"
-@str.1000589 = global [5 x i8] c"float"
-@str.1000590 = global [3 x i8] c"int"
-@str.1000591 = global [7 x i8] c"unknown"
-@str.1000592 = global [11 x i8] c"phDebugType"
-@str.1000593 = global [1 x i8] c" "
-@str.1000594 = global [8 x i8] c"phSpaces"
-@str.1000595 = global [9 x i8] c"phHandles"
-@str.1000596 = global [5 x i8] c"__oid"
-@str.1000597 = global [8 x i8] c"js_phoid"
-@str.1000598 = global [8 x i8] c"phDumpID"
-@str.1000599 = global [10 x i8] c"js_phoidof"
-@str.1000600 = global [3 x i8] c"ind"
-@str.1000601 = global [2 x i8] c"[\22"
-@str.1000602 = global [5 x i8] c"\22]=>\0A"
-@str.1000603 = global [1 x i8] c"["
-@str.1000604 = global [4 x i8] c"]=>\0A"
-@str.1000605 = global [9 x i8] c"phDumpKey"
-@str.1000606 = global [3 x i8] c"pad"
-@str.1000607 = global [5 x i8] c"NULL\0A"
-@str.1000608 = global [11 x i8] c"bool(true)\0A"
-@str.1000609 = global [12 x i8] c"bool(false)\0A"
-@str.1000610 = global [6 x i8] c"float("
-@str.1000611 = global [2 x i8] c")\0A"
-@str.1000612 = global [4 x i8] c"int("
-@str.1000613 = global [7 x i8] c"string("
-@str.1000614 = global [3 x i8] c") \22"
-@str.1000615 = global [2 x i8] c"\22\0A"
-@str.1000616 = global [6 x i8] c"array("
-@str.1000617 = global [4 x i8] c") {\0A"
-@str.1000618 = global [6 x i8] c"phDump"
-@str.1000619 = global [2 x i8] c"}\0A"
-@str.1000620 = global [6 x i8] c"keysOf"
-@str.1000621 = global [5 x i8] c"names"
-@str.1000622 = global [7 x i8] c"object("
-@str.1000623 = global [2 x i8] c")#"
-@str.1000624 = global [2 x i8] c" ("
-@str.1000625 = global [4 x i8] c"oout"
-@str.1000626 = global [10 x i8] c"phPropName"
-@str.1000627 = global [5 x i8] c"pname"
-@str.1000628 = global [7 x i8] c"phVisOf"
-@str.1000629 = global [3 x i8] c"vis"
-@str.1000630 = global [4 x i8] c"mark"
-@str.1000631 = global [10 x i8] c":protected"
-@str.1000632 = global [2 x i8] c":\22"
-@str.1000633 = global [9 x i8] c"\22:private"
-@str.1000634 = global [4 x i8] c"  [\22"
-@str.1000635 = global [1 x i8] c"\22"
-@str.1000636 = global [1 x i8] c"_"
-@str.1000637 = global [1 x i8] c"\01"
-@str.1000638 = global [9 x i8] c"phPropKey"
-@str.1000639 = global [9 x i8] c"js_phpkey"
-@str.1000640 = global [10 x i8] c"js_phpname"
-@str.1000641 = global [1 x i8] c","
-@str.1000642 = global [1 x i8] c"="
-@str.1000643 = global [6 x i8] c"__pvis"
-@str.1000644 = global [4 x i8] c"iter"
-@str.1000645 = global [5 x i8] c"scope"
-@str.1000646 = global [9 x i8] c"phVisible"
-@str.1000647 = global [1 x i8] c"\00"
-@str.1000648 = global [8 x i8] c"phObjArr"
-@str.1000649 = global [2 x i8] c"it"
-@str.1000650 = global [5 x i8] c"first"
-@str.1000651 = global [7 x i8] c"needKey"
-@str.1000652 = global [10 x i8] c"js_phmcall"
-@str.1000653 = global [4 x i8] c"next"
-@str.1000654 = global [6 x i8] c"rewind"
-@str.1000655 = global [2 x i8] c"st"
-@str.1000656 = global [5 x i8] c"valid"
-@str.1000657 = global [5 x i8] c"value"
-@str.1000658 = global [4 x i8] c"done"
-@str.1000659 = global [2 x i8] c"kv"
-@str.1000660 = global [7 x i8] c"__genkv"
-@str.1000661 = global [7 x i8] c"current"
-@str.1000662 = global [11 x i8] c"js_phfestep"
-@str.1000663 = global [5 x i8] c"byref"
-@str.1000664 = global [17 x i8] c"IteratorAggregate"
-@str.1000665 = global [11 x i8] c"getIterator"
-@str.1000666 = global [2 x i8] c"ap"
-@str.1000667 = global [4 x i8] c"snap"
-@str.1000668 = global [2 x i8] c"sk"
-@str.1000669 = global [2 x i8] c"sv"
-@str.1000670 = global [10 x i8] c"js_phfeobj"
-@str.1000671 = global [2 x i8] c"ka"
-@str.1000672 = global [2 x i8] c"kb"
-@str.1000673 = global [6 x i8] c"scalar"
-@str.1000674 = global [9 x i8] c"phObjCast"
-@str.1000675 = global [4 x i8] c"real"
-@str.1000676 = global [6 x i8] c"binary"
-@str.1000677 = global [5 x i8] c"unset"
-@str.1000678 = global [6 x i8] c"phCast"
-@str.1000679 = global [9 x i8] c"phGenCell"
-@str.1000680 = global [7 x i8] c"phGenSt"
-@str.1000681 = global [1 x i8] c"g"
-@str.1000682 = global [7 x i8] c"started"
-@str.1000683 = global [3 x i8] c"ret"
-@str.1000684 = global [4 x i8] c"auto"
-@str.1000685 = global [10 x i8] c"phGenState"
-@str.1000686 = global [4 x i8] c"sent"
-@str.1000687 = global [3 x i8] c"raw"
-@str.1000688 = global [2 x i8] c"ky"
-@str.1000689 = global [9 x i8] c"phGenStep"
-@str.1000690 = global [10 x i8] c"phGenPrime"
-@str.1000691 = global [2 x i8] c"a0"
-@str.1000692 = global [4 x i8] c"send"
-@str.1000693 = global [3 x i8] c"sst"
-@str.1000694 = global [6 x i8] c"return"
-@str.1000695 = global [3 x i8] c"fst"
-@str.1000696 = global [3 x i8] c"fin"
-@str.1000697 = global [9 x i8] c"getReturn"
-@str.1000698 = global [36 x i8] c"Call to undefined method Generator::"
-@str.1000699 = global [2 x i8] c"()"
-@str.1000700 = global [9 x i8] c"phGenCall"
-@str.1000701 = global [4 x i8] c"recv"
-@str.1000702 = global [25 x i8] c"Call to undefined method "
-@str.1000703 = global [2 x i8] c"::"
-@str.1000704 = global [26 x i8] c"Call to a member function "
-@str.1000705 = global [6 x i8] c"() on "
-@str.1000706 = global [1 x i8] c"$"
-@str.1000707 = global [27 x i8] c"Call to undefined function "
-@str.1000708 = global [13 x i8] c"js_phmissname"
-@str.1000709 = global [10 x i8] c"js_phraise"
-@str.1000710 = global [13 x i8] c"range over a "
-@str.1000711 = global [12 x i8] c"js_range_len"
-@str.1000712 = global [12 x i8] c"js_range_key"
-@str.1000713 = global [12 x i8] c"js_range_val"
-@str.1000714 = global [16 x i8] c"js_phtruthy__raw"
-@str.1000715 = global [9 x i8] c"js_phbool"
-@str.1000716 = global [8 x i8] c"js_phnot"
-@str.1000717 = global [8 x i8] c"js_phstr"
-@str.1000718 = global [9 x i8] c"js_phecho"
-@str.1000719 = global [8 x i8] c"js_phcat"
-@str.1000720 = global [8 x i8] c"js_phflo"
-@str.1000721 = global [8 x i8] c"js_phnum"
-@str.1000722 = global [7 x i8] c"js_pheq"
-@str.1000723 = global [7 x i8] c"js_phne"
-@str.1000724 = global [8 x i8] c"js_phseq"
-@str.1000725 = global [8 x i8] c"js_phsne"
-@str.1000726 = global [8 x i8] c"js_phcmp"
+@str.1000478 = global [10 x i8] c"phArrArith"
+@str.1000479 = global [1 x i8] c"u"
+@str.1000480 = global [19 x i8] c"DivisionByZeroError"
+@str.1000481 = global [14 x i8] c"Modulo by zero"
+@str.1000482 = global [10 x i8] c"phFloArith"
+@str.1000483 = global [10 x i8] c"phIntArith"
+@str.1000484 = global [7 x i8] c"phArith"
+@str.1000485 = global [2 x i8] c"lp"
+@str.1000486 = global [2 x i8] c"rp"
+@str.1000487 = global [9 x i8] c"phArrCopy"
+@str.1000488 = global [10 x i8] c"phDictFind"
+@str.1000489 = global [8 x i8] c"phArrSet"
+@str.1000490 = global [9 x i8] c"TypeError"
+@str.1000491 = global [27 x i8] c"Unsupported operand types: "
+@str.1000492 = global [11 x i8] c"phDebugType"
+@str.1000493 = global [1 x i8] c" "
+@str.1000494 = global [16 x i8] c"Division by zero"
+@str.1000495 = global [2 x i8] c"**"
+@str.1000496 = global [28 x i8] c"unknown arithmetic operator "
+@str.1000497 = global [1 x i8] c"&"
+@str.1000498 = global [1 x i8] c"|"
+@str.1000499 = global [1 x i8] c"^"
+@str.1000500 = global [2 x i8] c"<<"
+@str.1000501 = global [2 x i8] c">>"
+@str.1000502 = global [15 x i8] c"ArithmeticError"
+@str.1000503 = global [28 x i8] c"Bit shift by negative number"
+@str.1000504 = global [21 x i8] c"unknown bit operator "
+@str.1000505 = global [5 x i8] c"phBit"
+@str.1000506 = global [5 x i8] c"phNeg"
+@str.1000507 = global [7 x i8] c"phNumEq"
+@str.1000508 = global [8 x i8] c"phCmpNum"
+@str.1000509 = global [8 x i8] c"phNumCmp"
+@str.1000510 = global [8 x i8] c"phCmpStr"
+@str.1000511 = global [2 x i8] c"ai"
+@str.1000512 = global [2 x i8] c"bi"
+@str.1000513 = global [7 x i8] c"phKeyEq"
+@str.1000514 = global [11 x i8] c"phIdentical"
+@str.1000515 = global [11 x i8] c"phLooseNull"
+@str.1000516 = global [2 x i8] c"ns"
+@str.1000517 = global [13 x i8] c"phStrNumLoose"
+@str.1000518 = global [9 x i8] c"phKeyScan"
+@str.1000519 = global [9 x i8] c"phNormKey"
+@str.1000520 = global [10 x i8] c"phKeyIndex"
+@str.1000521 = global [2 x i8] c"nk"
+@str.1000522 = global [6 x i8] c"phFind"
+@str.1000523 = global [4 x i8] c"__ix"
+@str.1000524 = global [2 x i8] c"ix"
+@str.1000525 = global [3 x i8] c"map"
+@str.1000526 = global [8 x i8] c"scopeNew"
+@str.1000527 = global [2 x i8] c"kn"
+@str.1000528 = global [8 x i8] c"scopeHas"
+@str.1000529 = global [9 x i8] c"scopeDecl"
+@str.1000530 = global [8 x i8] c"scopeGet"
+@str.1000531 = global [2 x i8] c"lb"
+@str.1000532 = global [2 x i8] c"rb"
+@str.1000533 = global [7 x i8] c"phLoose"
+@str.1000534 = global [12 x i8] c"phObjPropsEq"
+@str.1000535 = global [2 x i8] c"rs"
+@str.1000536 = global [2 x i8] c"nl"
+@str.1000537 = global [2 x i8] c"nr"
+@str.1000538 = global [3 x i8] c"rt2"
+@str.1000539 = global [5 x i8] c"phCmp"
+@str.1000540 = global [2 x i8] c"cv"
+@str.1000541 = global [12 x i8] c"phIsCanonInt"
+@str.1000542 = global [12 x i8] c"phNumericKey"
+@str.1000543 = global [6 x i8] c"__next"
+@str.1000544 = global [8 x i8] c"phNewArr"
+@str.1000545 = global [5 x i8] c"__pos"
+@str.1000546 = global [8 x i8] c"phArrPos"
+@str.1000547 = global [9 x i8] c"phArrNext"
+@str.1000548 = global [33 x i8] c"cannot use this value as an array"
+@str.1000549 = global [27 x i8] c"cannot append to this value"
+@str.1000550 = global [9 x i8] c"phArrPush"
+@str.1000551 = global [2 x i8] c"pv"
+@str.1000552 = global [8 x i8] c"phArrGet"
+@str.1000553 = global [8 x i8] c"phArrHas"
+@str.1000554 = global [2 x i8] c"nv"
+@str.1000555 = global [10 x i8] c"phArrUnset"
+@str.1000556 = global [4 x i8] c"cell"
+@str.1000557 = global [10 x i8] c"phElemCell"
+@str.1000558 = global [3 x i8] c"ok2"
+@str.1000559 = global [2 x i8] c"ov"
+@str.1000560 = global [3 x i8] c"pos"
+@str.1000561 = global [5 x i8] c"phLen"
+@str.1000562 = global [15 x i8] c":: on undefined"
+@str.1000563 = global [10 x i8] c":: on null"
+@str.1000564 = global [18 x i8] c":: on a non-object"
+@str.1000565 = global [46 x i8] c":: on a value that is not an object or a class"
+@str.1000566 = global [9 x i8] c"phClassOf"
+@str.1000567 = global [3 x i8] c"key"
+@str.1000568 = global [7 x i8] c"phOwner"
+@str.1000569 = global [12 x i8] c"phConstDepth"
+@str.1000570 = global [5 x i8] c"shown"
+@str.1000571 = global [7 x i8] c"anytype"
+@str.1000572 = global [3 x i8] c"box"
+@str.1000573 = global [11 x i8] c"__lazyconst"
+@str.1000574 = global [10 x i8] c"__visiting"
+@str.1000575 = global [5 x i8] c"Error"
+@str.1000576 = global [41 x i8] c"Cannot declare self-referencing constant "
+@str.1000577 = global [10 x i8] c"phConstVal"
+@str.1000578 = global [5 x i8] c"depth"
+@str.1000579 = global [2 x i8] c"k:"
+@str.1000580 = global [2 x i8] c"iv"
+@str.1000581 = global [9 x i8] c"phConstIn"
+@str.1000582 = global [2 x i8] c"gn"
+@str.1000583 = global [9 x i8] c"generator"
+@str.1000584 = global [11 x i8] c"traversable"
+@str.1000585 = global [8 x i8] c"iterator"
+@str.1000586 = global [7 x i8] c"closure"
+@str.1000587 = global [2 x i8] c"cn"
+@str.1000588 = global [5 x i8] c"phIsA"
+@str.1000589 = global [3 x i8] c"inm"
+@str.1000590 = global [8 x i8] c"stdClass"
+@str.1000591 = global [11 x i8] c"phClassName"
+@str.1000592 = global [4 x i8] c"NULL"
+@str.1000593 = global [6 x i8] c"double"
+@str.1000594 = global [7 x i8] c"integer"
+@str.1000595 = global [5 x i8] c"array"
+@str.1000596 = global [12 x i8] c"unknown type"
+@str.1000597 = global [10 x i8] c"phTypeName"
+@str.1000598 = global [4 x i8] c"bool"
+@str.1000599 = global [5 x i8] c"float"
+@str.1000600 = global [3 x i8] c"int"
+@str.1000601 = global [7 x i8] c"unknown"
+@str.1000602 = global [8 x i8] c"phSpaces"
+@str.1000603 = global [9 x i8] c"phHandles"
+@str.1000604 = global [5 x i8] c"__oid"
+@str.1000605 = global [8 x i8] c"js_phoid"
+@str.1000606 = global [8 x i8] c"phDumpID"
+@str.1000607 = global [10 x i8] c"js_phoidof"
+@str.1000608 = global [3 x i8] c"ind"
+@str.1000609 = global [2 x i8] c"[\22"
+@str.1000610 = global [5 x i8] c"\22]=>\0A"
+@str.1000611 = global [1 x i8] c"["
+@str.1000612 = global [4 x i8] c"]=>\0A"
+@str.1000613 = global [9 x i8] c"phDumpKey"
+@str.1000614 = global [3 x i8] c"pad"
+@str.1000615 = global [5 x i8] c"NULL\0A"
+@str.1000616 = global [11 x i8] c"bool(true)\0A"
+@str.1000617 = global [12 x i8] c"bool(false)\0A"
+@str.1000618 = global [6 x i8] c"float("
+@str.1000619 = global [2 x i8] c")\0A"
+@str.1000620 = global [4 x i8] c"int("
+@str.1000621 = global [7 x i8] c"string("
+@str.1000622 = global [3 x i8] c") \22"
+@str.1000623 = global [2 x i8] c"\22\0A"
+@str.1000624 = global [6 x i8] c"array("
+@str.1000625 = global [4 x i8] c") {\0A"
+@str.1000626 = global [6 x i8] c"phDump"
+@str.1000627 = global [2 x i8] c"}\0A"
+@str.1000628 = global [6 x i8] c"keysOf"
+@str.1000629 = global [5 x i8] c"names"
+@str.1000630 = global [7 x i8] c"object("
+@str.1000631 = global [2 x i8] c")#"
+@str.1000632 = global [2 x i8] c" ("
+@str.1000633 = global [4 x i8] c"oout"
+@str.1000634 = global [10 x i8] c"phPropName"
+@str.1000635 = global [5 x i8] c"pname"
+@str.1000636 = global [7 x i8] c"phVisOf"
+@str.1000637 = global [3 x i8] c"vis"
+@str.1000638 = global [4 x i8] c"mark"
+@str.1000639 = global [10 x i8] c":protected"
+@str.1000640 = global [2 x i8] c":\22"
+@str.1000641 = global [9 x i8] c"\22:private"
+@str.1000642 = global [4 x i8] c"  [\22"
+@str.1000643 = global [1 x i8] c"\22"
+@str.1000644 = global [1 x i8] c"_"
+@str.1000645 = global [1 x i8] c"\01"
+@str.1000646 = global [9 x i8] c"phPropKey"
+@str.1000647 = global [9 x i8] c"js_phpkey"
+@str.1000648 = global [10 x i8] c"js_phpname"
+@str.1000649 = global [1 x i8] c","
+@str.1000650 = global [1 x i8] c"="
+@str.1000651 = global [6 x i8] c"__pvis"
+@str.1000652 = global [4 x i8] c"iter"
+@str.1000653 = global [5 x i8] c"scope"
+@str.1000654 = global [9 x i8] c"phVisible"
+@str.1000655 = global [1 x i8] c"\00"
+@str.1000656 = global [8 x i8] c"phObjArr"
+@str.1000657 = global [2 x i8] c"it"
+@str.1000658 = global [5 x i8] c"first"
+@str.1000659 = global [7 x i8] c"needKey"
+@str.1000660 = global [10 x i8] c"js_phmcall"
+@str.1000661 = global [4 x i8] c"next"
+@str.1000662 = global [6 x i8] c"rewind"
+@str.1000663 = global [2 x i8] c"st"
+@str.1000664 = global [5 x i8] c"valid"
+@str.1000665 = global [5 x i8] c"value"
+@str.1000666 = global [4 x i8] c"done"
+@str.1000667 = global [2 x i8] c"kv"
+@str.1000668 = global [7 x i8] c"__genkv"
+@str.1000669 = global [7 x i8] c"current"
+@str.1000670 = global [11 x i8] c"js_phfestep"
+@str.1000671 = global [5 x i8] c"byref"
+@str.1000672 = global [17 x i8] c"IteratorAggregate"
+@str.1000673 = global [11 x i8] c"getIterator"
+@str.1000674 = global [2 x i8] c"ap"
+@str.1000675 = global [4 x i8] c"snap"
+@str.1000676 = global [2 x i8] c"sk"
+@str.1000677 = global [2 x i8] c"sv"
+@str.1000678 = global [8 x i8] c"Iterator"
+@str.1000679 = global [10 x i8] c"js_phfeobj"
+@str.1000680 = global [2 x i8] c"ka"
+@str.1000681 = global [2 x i8] c"kb"
+@str.1000682 = global [6 x i8] c"scalar"
+@str.1000683 = global [9 x i8] c"phObjCast"
+@str.1000684 = global [4 x i8] c"real"
+@str.1000685 = global [6 x i8] c"binary"
+@str.1000686 = global [5 x i8] c"unset"
+@str.1000687 = global [6 x i8] c"phCast"
+@str.1000688 = global [9 x i8] c"phGenCell"
+@str.1000689 = global [7 x i8] c"phGenSt"
+@str.1000690 = global [1 x i8] c"g"
+@str.1000691 = global [7 x i8] c"started"
+@str.1000692 = global [3 x i8] c"ret"
+@str.1000693 = global [4 x i8] c"auto"
+@str.1000694 = global [10 x i8] c"phGenState"
+@str.1000695 = global [4 x i8] c"sent"
+@str.1000696 = global [3 x i8] c"raw"
+@str.1000697 = global [2 x i8] c"ky"
+@str.1000698 = global [9 x i8] c"phGenStep"
+@str.1000699 = global [10 x i8] c"phGenPrime"
+@str.1000700 = global [2 x i8] c"a0"
+@str.1000701 = global [4 x i8] c"send"
+@str.1000702 = global [3 x i8] c"sst"
+@str.1000703 = global [6 x i8] c"return"
+@str.1000704 = global [3 x i8] c"fst"
+@str.1000705 = global [3 x i8] c"fin"
+@str.1000706 = global [9 x i8] c"getReturn"
+@str.1000707 = global [36 x i8] c"Call to undefined method Generator::"
+@str.1000708 = global [2 x i8] c"()"
+@str.1000709 = global [9 x i8] c"phGenCall"
+@str.1000710 = global [4 x i8] c"recv"
+@str.1000711 = global [25 x i8] c"Call to undefined method "
+@str.1000712 = global [2 x i8] c"::"
+@str.1000713 = global [26 x i8] c"Call to a member function "
+@str.1000714 = global [6 x i8] c"() on "
+@str.1000715 = global [1 x i8] c"$"
+@str.1000716 = global [27 x i8] c"Call to undefined function "
+@str.1000717 = global [13 x i8] c"js_phmissname"
+@str.1000718 = global [10 x i8] c"js_phraise"
+@str.1000719 = global [13 x i8] c"range over a "
+@str.1000720 = global [12 x i8] c"js_range_len"
+@str.1000721 = global [12 x i8] c"js_range_key"
+@str.1000722 = global [12 x i8] c"js_range_val"
+@str.1000723 = global [16 x i8] c"js_phtruthy__raw"
+@str.1000724 = global [9 x i8] c"js_phbool"
+@str.1000725 = global [8 x i8] c"js_phnot"
+@str.1000726 = global [8 x i8] c"js_phstr"
+@str.1000727 = global [9 x i8] c"js_phecho"
+@str.1000728 = global [8 x i8] c"js_phcat"
+@str.1000729 = global [8 x i8] c"js_phflo"
+@str.1000730 = global [8 x i8] c"js_phnum"
+@str.1000731 = global [7 x i8] c"js_pheq"
+@str.1000732 = global [7 x i8] c"js_phne"
+@str.1000733 = global [8 x i8] c"js_phseq"
+@str.1000734 = global [8 x i8] c"js_phsne"
+@str.1000735 = global [8 x i8] c"js_phcmp"
 @jsnumg.1000028 = global i64 0
-@str.1000727 = global [7 x i8] c"js_phlt"
-@str.1000728 = global [7 x i8] c"js_phgt"
-@str.1000729 = global [7 x i8] c"js_phle"
-@str.1000730 = global [7 x i8] c"js_phge"
-@str.1000731 = global [8 x i8] c"js_phadd"
-@str.1000732 = global [8 x i8] c"js_phsub"
-@str.1000733 = global [8 x i8] c"js_phmul"
-@str.1000734 = global [8 x i8] c"js_phdiv"
-@str.1000735 = global [8 x i8] c"js_phmod"
-@str.1000736 = global [8 x i8] c"js_phpow"
-@str.1000737 = global [8 x i8] c"js_phneg"
-@str.1000738 = global [9 x i8] c"js_phband"
-@str.1000739 = global [8 x i8] c"js_phbor"
-@str.1000740 = global [9 x i8] c"js_phbxor"
-@str.1000741 = global [8 x i8] c"js_phshl"
-@str.1000742 = global [8 x i8] c"js_phshr"
-@str.1000743 = global [9 x i8] c"js_phbnot"
-@str.1000744 = global [47 x i8] c"Division of PHP_INT_MIN by -1 is not an integer"
-@str.1000745 = global [11 x i8] c"js_phintdiv"
-@str.1000746 = global [8 x i8] c"js_phabs"
-@str.1000747 = global [9 x i8] c"js_phcast"
-@str.1000748 = global [4 x i8] c"text"
-@str.1000749 = global [5 x i8] c"radix"
-@str.1000750 = global [4 x i8] c"over"
-@str.1000751 = global [10 x i8] c"phHexDigit"
-@str.1000752 = global [2 x i8] c"d2"
-@str.1000753 = global [9 x i8] c"js_philit"
-@str.1000754 = global [7 x i8] c"numeric"
-@str.1000755 = global [7 x i8] c"js_phis"
-@str.1000756 = global [9 x i8] c"js_phtype"
-@str.1000757 = global [10 x i8] c"js_phdtype"
-@str.1000758 = global [28 x i8] c"Attempt to assign property \22"
-@str.1000759 = global [5 x i8] c"\22 on "
-@str.1000760 = global [11 x i8] c"js_phsetchk"
-@str.1000761 = global [9 x i8] c"js_phdump"
-@str.1000762 = global [5 x i8] c"__mlc"
-@str.1000763 = global [12 x i8] c"js_phmexists"
-@str.1000764 = global [10 x i8] c"phFullName"
-@str.1000765 = global [13 x i8] c"js_phgetclass"
-@str.1000766 = global [6 x i8] c"__anon"
-@str.1000767 = global [3 x i8] c"sfx"
-@str.1000768 = global [2 x i8] c"fn"
-@str.1000769 = global [5 x i8] c"mname"
-@str.1000770 = global [2 x i8] c"lc"
-@str.1000771 = global [5 x i8] c"__ms:"
-@str.1000772 = global [6 x i8] c"spells"
-@str.1000773 = global [9 x i8] c"js_phmset"
-@str.1000774 = global [8 x i8] c"js_pharr"
-@str.1000775 = global [8 x i8] c"js_phset"
-@str.1000776 = global [9 x i8] c"js_phpush"
-@str.1000777 = global [8 x i8] c"js_phget"
-@str.1000778 = global [10 x i8] c"js_phisset"
-@str.1000779 = global [6 x i8] c"fnMeta"
-@str.1000780 = global [10 x i8] c"js_phrefat"
-@str.1000781 = global [10 x i8] c"phMethodOf"
-@str.1000782 = global [8 x i8] c"__invoke"
-@str.1000783 = global [13 x i8] c"js_phplacesig"
-@str.1000784 = global [10 x i8] c"js_phplace"
-@str.1000785 = global [5 x i8] c"where"
-@str.1000786 = global [45 x i8] c"Array callback must have exactly two elements"
-@str.1000787 = global [8 x i8] c"phCbFail"
-@str.1000788 = global [35 x i8] c"array must have exactly two members"
-@str.1000789 = global [5 x i8] c"isCls"
-@str.1000790 = global [54 x i8] c"first array member is not a valid class name or object"
-@str.1000791 = global [2 x i8] c"mn"
-@str.1000792 = global [41 x i8] c"second array member is not a valid method"
-@str.1000793 = global [11 x i8] c"js_phcbmeth"
-@str.1000794 = global [24 x i8] c"no array or string given"
-@str.1000795 = global [15 x i8] c"Object of type "
-@str.1000796 = global [16 x i8] c" is not callable"
-@str.1000797 = global [14 x i8] c"Value of type "
-@str.1000798 = global [10 x i8] c"js_phcbarr"
-@str.1000799 = global [3 x i8] c"clo"
-@str.1000800 = global [6 x i8] c"target"
-@str.1000801 = global [9 x i8] c"fnMetaSet"
-@str.1000802 = global [12 x i8] c"js_phbindsig"
-@str.1000803 = global [11 x i8] c"js_phmplace"
-@str.1000804 = global [6 x i8] c"isList"
-@str.1000805 = global [3 x i8] c"..."
-@str.1000806 = global [9 x i8] c"phPlaceAt"
-@str.1000807 = global [12 x i8] c"phCheckNamed"
-@str.1000808 = global [5 x i8] c"taken"
-@str.1000809 = global [2 x i8] c"pi"
-@str.1000810 = global [1 x i8] c")"
-@str.1000811 = global [2 x i8] c"pn"
-@str.1000812 = global [8 x i8] c"variadic"
-@str.1000813 = global [25 x i8] c"Unknown named parameter $"
-@str.1000814 = global [17 x i8] c"Named parameter $"
-@str.1000815 = global [29 x i8] c" overwrites previous argument"
-@str.1000816 = global [9 x i8] c"js_phcell"
-@str.1000817 = global [10 x i8] c"js_phderef"
-@str.1000818 = global [10 x i8] c"js_phunset"
-@str.1000819 = global [9 x i8] c"js_phcopy"
-@str.1000820 = global [8 x i8] c"js_phlen"
-@str.1000821 = global [3 x i8] c"dst"
-@str.1000822 = global [3 x i8] c"src"
-@str.1000823 = global [10 x i8] c"js_phmerge"
-@str.1000824 = global [9 x i8] c"js_phvals"
-@str.1000825 = global [5 x i8] c"phInt"
-@str.1000826 = global [11 x i8] c"js_phsubstr"
-@str.1000827 = global [10 x i8] c"ValueError"
-@str.1000828 = global [70 x i8] c"(): Argument #3 ($offset) must be contained in argument #1 ($haystack)"
-@str.1000829 = global [11 x i8] c"phPosResult"
-@str.1000830 = global [6 x i8] c"strpos"
-@str.1000831 = global [11 x i8] c"js_phstrpos"
-@str.1000832 = global [7 x i8] c"strrpos"
-@str.1000833 = global [12 x i8] c"js_phstrrpos"
-@str.1000834 = global [11 x i8] c"js_phstrcmp"
-@str.1000835 = global [8 x i8] c"js_phord"
-@str.1000836 = global [11 x i8] c"js_phstrlen"
-@str.1000837 = global [14 x i8] c"js_phfrombytes"
-@str.1000838 = global [48 x i8] c"cannot assign an empty string to a string offset"
-@str.1000839 = global [40 x i8] c"cannot write to a negative string offset"
-@str.1000840 = global [14 x i8] c"js_phsetoffset"
-@str.1000841 = global [8 x i8] c"js_phchr"
-@str.1000842 = global [9 x i8] c"js_phcase"
-@str.1000843 = global [13 x i8] c"js_phfmtfloat"
-@str.1000844 = global [3 x i8] c"old"
-@str.1000845 = global [14 x i8] c"js_phprecision"
-@str.1000846 = global [9 x i8] c"js_phmath"
-@str.1000847 = global [9 x i8] c"TypeError"
-@str.1000848 = global [64 x i8] c"array_key_exists(): Argument #2 ($array) must be of type array, "
-@str.1000849 = global [6 x i8] c" given"
-@str.1000850 = global [14 x i8] c"js_phkeyexists"
-@str.1000851 = global [12 x i8] c"js_phkeylast"
-@str.1000852 = global [8 x i8] c"js_phpop"
-@str.1000853 = global [5 x i8] c"parts"
-@str.1000854 = global [5 x i8] c"reset"
-@str.1000855 = global [4 x i8] c"prev"
-@str.1000856 = global [9 x i8] c"js_phaptr"
-@str.1000857 = global [4 x i8] c"cont"
-@str.1000858 = global [2 x i8] c"na"
-@str.1000859 = global [8 x i8] c"js_phviv"
-@str.1000860 = global [12 x i8] c"js_phvivpush"
-@str.1000861 = global [12 x i8] c"js_phvivroot"
-@str.1000862 = global [19 x i8] c"undefined constant "
-@str.1000863 = global [10 x i8] c"js_phconst"
-@str.1000864 = global [7 x i8] c"__ready"
-@str.1000865 = global [11 x i8] c"phClassInit"
-@str.1000866 = global [7 x i8] c"__sinit"
-@str.1000867 = global [4 x i8] c"stat"
-@str.1000868 = global [6 x i8] c"static"
-@str.1000869 = global [6 x i8] c"parent"
-@str.1000870 = global [15 x i8] c"cannot access \22"
-@str.1000871 = global [31 x i8] c"\22 when no class scope is active"
-@str.1000872 = global [12 x i8] c"Cannot use \22"
-@str.1000873 = global [61 x i8] c"cannot access \22parent\22 when current class scope has no parent"
-@str.1000874 = global [58 x i8] c"Cannot use \22parent\22 when current class scope has no parent"
-@str.1000875 = global [7 x i8] c"class \22"
-@str.1000876 = global [11 x i8] c"\22 not found"
-@str.1000877 = global [7 x i8] c"Class \22"
-@str.1000878 = global [14 x i8] c"js_phclassmiss"
-@str.1000879 = global [6 x i8] c"reason"
-@str.1000880 = global [2 x i8] c", "
-@str.1000881 = global [12 x i8] c"__callStatic"
-@str.1000882 = global [5 x i8] c"magic"
-@str.1000883 = global [6 x i8] c"__call"
-@str.1000884 = global [6 x i8] c"class "
-@str.1000885 = global [25 x i8] c" does not have a method \22"
-@str.1000886 = global [10 x i8] c"js_phsinit"
-@str.1000887 = global [2 x i8] c"s:"
-@str.1000888 = global [9 x i8] c"js_phsget"
-@str.1000889 = global [9 x i8] c"js_phsset"
-@str.1000890 = global [10 x i8] c"js_phcname"
-@str.1000891 = global [8 x i8] c"js_phisa"
-@str.1000892 = global [5 x i8] c"types"
-@str.1000893 = global [9 x i8] c"Throwable"
-@str.1000894 = global [10 x i8] c"js_phcatch"
-@str.1000895 = global [7 x i8] c"__clone"
-@str.1000896 = global [5 x i8] c"owner"
-@str.1000897 = global [10 x i8] c"js_phclone"
-@str.1000898 = global [5 x i8] c"phLsb"
-@str.1000899 = global [8 x i8] c"fallback"
-@str.1000900 = global [8 x i8] c"js_phlsb"
-@str.1000901 = global [2 x i8] c"cn"
-@str.1000902 = global [8 x i8] c"js_phfwd"
-@str.1000903 = global [3 x i8] c"lsb"
-@str.1000904 = global [5 x i8] c"saved"
-@str.1000905 = global [4 x i8] c"bind"
-@str.1000906 = global [2 x i8] c"cs"
-@str.1000907 = global [2 x i8] c"ar"
-@str.1000908 = global [2 x i8] c"p0"
-@str.1000909 = global [2 x i8] c"i0"
-@str.1000910 = global [10 x i8] c"js_phscall"
-@str.1000911 = global [3 x i8] c"env"
-@str.1000912 = global [164 x i8] c"php layer 2: js_phclslookup walks a SCOPE, which layer 2 cannot open - php-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/php-rt.metajs, WALL 3"
-@str.1000913 = global [14 x i8] c"js_phclslookup"
-@str.1000914 = global [159 x i8] c"php layer 2: js_phthis walks a SCOPE, which layer 2 cannot open - php-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/php-rt.metajs, WALL 3"
-@str.1000915 = global [9 x i8] c"js_phthis"
-@str.1000916 = global [3 x i8] c"reg"
-@str.1000917 = global [11 x i8] c"js_phrtinit"
-@str.1000918 = global [7 x i8] c"phHoleV"
-@str.1000919 = global [9 x i8] c"__pfahole"
-@str.1000920 = global [9 x i8] c"js_phhole"
-@str.1000921 = global [8 x i8] c"phIsHole"
-@str.1000922 = global [5 x i8] c"bound"
-@str.1000923 = global [8 x i8] c"supplied"
-@str.1000924 = global [7 x i8] c"forward"
-@str.1000925 = global [2 x i8] c"bp"
-@str.1000926 = global [7 x i8] c"supKeys"
-@str.1000927 = global [7 x i8] c"supVals"
-@str.1000928 = global [2 x i8] c"si"
-@str.1000929 = global [8 x i8] c"js_phpfa"
-@str.1000930 = global [4 x i8] c"main"
+@str.1000736 = global [7 x i8] c"js_phlt"
+@str.1000737 = global [7 x i8] c"js_phgt"
+@str.1000738 = global [7 x i8] c"js_phle"
+@str.1000739 = global [7 x i8] c"js_phge"
+@str.1000740 = global [8 x i8] c"js_phadd"
+@str.1000741 = global [8 x i8] c"js_phsub"
+@str.1000742 = global [8 x i8] c"js_phmul"
+@str.1000743 = global [8 x i8] c"js_phdiv"
+@str.1000744 = global [8 x i8] c"js_phmod"
+@str.1000745 = global [8 x i8] c"js_phpow"
+@str.1000746 = global [8 x i8] c"js_phneg"
+@str.1000747 = global [9 x i8] c"js_phband"
+@str.1000748 = global [8 x i8] c"js_phbor"
+@str.1000749 = global [9 x i8] c"js_phbxor"
+@str.1000750 = global [8 x i8] c"js_phshl"
+@str.1000751 = global [8 x i8] c"js_phshr"
+@str.1000752 = global [9 x i8] c"js_phbnot"
+@str.1000753 = global [47 x i8] c"Division of PHP_INT_MIN by -1 is not an integer"
+@str.1000754 = global [11 x i8] c"js_phintdiv"
+@str.1000755 = global [3 x i8] c"bad"
+@str.1000756 = global [53 x i8] c"abs(): Argument #1 ($num) must be of type int|float, "
+@str.1000757 = global [6 x i8] c" given"
+@str.1000758 = global [8 x i8] c"js_phabs"
+@str.1000759 = global [9 x i8] c"js_phcast"
+@str.1000760 = global [4 x i8] c"text"
+@str.1000761 = global [5 x i8] c"radix"
+@str.1000762 = global [4 x i8] c"over"
+@str.1000763 = global [10 x i8] c"phHexDigit"
+@str.1000764 = global [2 x i8] c"d2"
+@str.1000765 = global [9 x i8] c"js_philit"
+@str.1000766 = global [7 x i8] c"numeric"
+@str.1000767 = global [7 x i8] c"js_phis"
+@str.1000768 = global [9 x i8] c"js_phtype"
+@str.1000769 = global [10 x i8] c"js_phdtype"
+@str.1000770 = global [28 x i8] c"Attempt to assign property \22"
+@str.1000771 = global [5 x i8] c"\22 on "
+@str.1000772 = global [11 x i8] c"js_phsetchk"
+@str.1000773 = global [9 x i8] c"js_phdump"
+@str.1000774 = global [5 x i8] c"iface"
+@str.1000775 = global [9 x i8] c"__isiface"
+@str.1000776 = global [9 x i8] c"__istrait"
+@str.1000777 = global [14 x i8] c"js_phclsexists"
+@str.1000778 = global [5 x i8] c"__mlc"
+@str.1000779 = global [12 x i8] c"js_phmexists"
+@str.1000780 = global [10 x i8] c"phFullName"
+@str.1000781 = global [13 x i8] c"js_phgetclass"
+@str.1000782 = global [6 x i8] c"__anon"
+@str.1000783 = global [3 x i8] c"sfx"
+@str.1000784 = global [2 x i8] c"fn"
+@str.1000785 = global [5 x i8] c"mname"
+@str.1000786 = global [2 x i8] c"lc"
+@str.1000787 = global [5 x i8] c"__ms:"
+@str.1000788 = global [6 x i8] c"spells"
+@str.1000789 = global [9 x i8] c"js_phmset"
+@str.1000790 = global [8 x i8] c"js_pharr"
+@str.1000791 = global [8 x i8] c"js_phset"
+@str.1000792 = global [9 x i8] c"js_phpush"
+@str.1000793 = global [8 x i8] c"js_phget"
+@str.1000794 = global [10 x i8] c"js_phisset"
+@str.1000795 = global [6 x i8] c"fnMeta"
+@str.1000796 = global [10 x i8] c"js_phrefat"
+@str.1000797 = global [10 x i8] c"phMethodOf"
+@str.1000798 = global [8 x i8] c"__invoke"
+@str.1000799 = global [13 x i8] c"js_phplacesig"
+@str.1000800 = global [10 x i8] c"js_phplace"
+@str.1000801 = global [5 x i8] c"where"
+@str.1000802 = global [45 x i8] c"Array callback must have exactly two elements"
+@str.1000803 = global [8 x i8] c"phCbFail"
+@str.1000804 = global [35 x i8] c"array must have exactly two members"
+@str.1000805 = global [5 x i8] c"isCls"
+@str.1000806 = global [54 x i8] c"first array member is not a valid class name or object"
+@str.1000807 = global [2 x i8] c"mn"
+@str.1000808 = global [41 x i8] c"second array member is not a valid method"
+@str.1000809 = global [11 x i8] c"js_phcbmeth"
+@str.1000810 = global [24 x i8] c"no array or string given"
+@str.1000811 = global [15 x i8] c"Object of type "
+@str.1000812 = global [16 x i8] c" is not callable"
+@str.1000813 = global [14 x i8] c"Value of type "
+@str.1000814 = global [10 x i8] c"js_phcbarr"
+@str.1000815 = global [3 x i8] c"clo"
+@str.1000816 = global [6 x i8] c"target"
+@str.1000817 = global [9 x i8] c"fnMetaSet"
+@str.1000818 = global [12 x i8] c"js_phbindsig"
+@str.1000819 = global [11 x i8] c"js_phmplace"
+@str.1000820 = global [6 x i8] c"isList"
+@str.1000821 = global [3 x i8] c"..."
+@str.1000822 = global [9 x i8] c"phPlaceAt"
+@str.1000823 = global [12 x i8] c"phCheckNamed"
+@str.1000824 = global [5 x i8] c"taken"
+@str.1000825 = global [2 x i8] c"pi"
+@str.1000826 = global [1 x i8] c")"
+@str.1000827 = global [2 x i8] c"pn"
+@str.1000828 = global [8 x i8] c"variadic"
+@str.1000829 = global [25 x i8] c"Unknown named parameter $"
+@str.1000830 = global [17 x i8] c"Named parameter $"
+@str.1000831 = global [29 x i8] c" overwrites previous argument"
+@str.1000832 = global [9 x i8] c"js_phcell"
+@str.1000833 = global [10 x i8] c"js_phderef"
+@str.1000834 = global [10 x i8] c"js_phunset"
+@str.1000835 = global [9 x i8] c"js_phcopy"
+@str.1000836 = global [8 x i8] c"js_phlen"
+@str.1000837 = global [9 x i8] c"Countable"
+@str.1000838 = global [5 x i8] c"count"
+@str.1000839 = global [63 x i8] c"count(): Argument #1 ($value) must be of type Countable|array, "
+@str.1000840 = global [10 x i8] c"js_phcount"
+@str.1000841 = global [3 x i8] c"dst"
+@str.1000842 = global [3 x i8] c"src"
+@str.1000843 = global [10 x i8] c"js_phmerge"
+@str.1000844 = global [9 x i8] c"js_phvals"
+@str.1000845 = global [5 x i8] c"phInt"
+@str.1000846 = global [11 x i8] c"js_phsubstr"
+@str.1000847 = global [10 x i8] c"ValueError"
+@str.1000848 = global [70 x i8] c"(): Argument #3 ($offset) must be contained in argument #1 ($haystack)"
+@str.1000849 = global [11 x i8] c"phPosResult"
+@str.1000850 = global [6 x i8] c"strpos"
+@str.1000851 = global [11 x i8] c"js_phstrpos"
+@str.1000852 = global [7 x i8] c"strrpos"
+@str.1000853 = global [12 x i8] c"js_phstrrpos"
+@str.1000854 = global [11 x i8] c"js_phstrcmp"
+@str.1000855 = global [8 x i8] c"js_phord"
+@str.1000856 = global [11 x i8] c"js_phstrlen"
+@str.1000857 = global [14 x i8] c"js_phfrombytes"
+@str.1000858 = global [48 x i8] c"cannot assign an empty string to a string offset"
+@str.1000859 = global [40 x i8] c"cannot write to a negative string offset"
+@str.1000860 = global [14 x i8] c"js_phsetoffset"
+@str.1000861 = global [8 x i8] c"js_phchr"
+@str.1000862 = global [9 x i8] c"js_phcase"
+@str.1000863 = global [13 x i8] c"js_phfmtfloat"
+@str.1000864 = global [3 x i8] c"old"
+@str.1000865 = global [14 x i8] c"js_phprecision"
+@str.1000866 = global [9 x i8] c"js_phmath"
+@str.1000867 = global [64 x i8] c"array_key_exists(): Argument #2 ($array) must be of type array, "
+@str.1000868 = global [14 x i8] c"js_phkeyexists"
+@str.1000869 = global [12 x i8] c"js_phkeylast"
+@str.1000870 = global [8 x i8] c"js_phpop"
+@str.1000871 = global [5 x i8] c"parts"
+@str.1000872 = global [5 x i8] c"reset"
+@str.1000873 = global [4 x i8] c"prev"
+@str.1000874 = global [9 x i8] c"js_phaptr"
+@str.1000875 = global [4 x i8] c"cont"
+@str.1000876 = global [2 x i8] c"na"
+@str.1000877 = global [8 x i8] c"js_phviv"
+@str.1000878 = global [12 x i8] c"js_phvivpush"
+@str.1000879 = global [12 x i8] c"js_phvivroot"
+@str.1000880 = global [19 x i8] c"undefined constant "
+@str.1000881 = global [10 x i8] c"js_phconst"
+@str.1000882 = global [7 x i8] c"__ready"
+@str.1000883 = global [11 x i8] c"phClassInit"
+@str.1000884 = global [7 x i8] c"__sinit"
+@str.1000885 = global [4 x i8] c"stat"
+@str.1000886 = global [6 x i8] c"static"
+@str.1000887 = global [6 x i8] c"parent"
+@str.1000888 = global [15 x i8] c"cannot access \22"
+@str.1000889 = global [31 x i8] c"\22 when no class scope is active"
+@str.1000890 = global [12 x i8] c"Cannot use \22"
+@str.1000891 = global [61 x i8] c"cannot access \22parent\22 when current class scope has no parent"
+@str.1000892 = global [58 x i8] c"Cannot use \22parent\22 when current class scope has no parent"
+@str.1000893 = global [7 x i8] c"class \22"
+@str.1000894 = global [11 x i8] c"\22 not found"
+@str.1000895 = global [7 x i8] c"Class \22"
+@str.1000896 = global [14 x i8] c"js_phclassmiss"
+@str.1000897 = global [6 x i8] c"reason"
+@str.1000898 = global [1 x i8] c"w"
+@str.1000899 = global [1 x i8] c":"
+@str.1000900 = global [2 x i8] c", "
+@str.1000901 = global [11 x i8] c"js_phcbfail"
+@str.1000902 = global [12 x i8] c"__callStatic"
+@str.1000903 = global [10 x i8] c"js_phrelcb"
+@str.1000904 = global [5 x i8] c"magic"
+@str.1000905 = global [6 x i8] c"__call"
+@str.1000906 = global [6 x i8] c"class "
+@str.1000907 = global [25 x i8] c" does not have a method \22"
+@str.1000908 = global [10 x i8] c"js_phsinit"
+@str.1000909 = global [2 x i8] c"s:"
+@str.1000910 = global [9 x i8] c"js_phsget"
+@str.1000911 = global [9 x i8] c"js_phsset"
+@str.1000912 = global [10 x i8] c"js_phcname"
+@str.1000913 = global [8 x i8] c"js_phisa"
+@str.1000914 = global [5 x i8] c"types"
+@str.1000915 = global [9 x i8] c"Throwable"
+@str.1000916 = global [10 x i8] c"js_phcatch"
+@str.1000917 = global [7 x i8] c"__clone"
+@str.1000918 = global [5 x i8] c"owner"
+@str.1000919 = global [10 x i8] c"js_phclone"
+@str.1000920 = global [5 x i8] c"phLsb"
+@str.1000921 = global [8 x i8] c"fallback"
+@str.1000922 = global [8 x i8] c"js_phlsb"
+@str.1000923 = global [8 x i8] c"js_phfwd"
+@str.1000924 = global [3 x i8] c"lsb"
+@str.1000925 = global [5 x i8] c"saved"
+@str.1000926 = global [4 x i8] c"bind"
+@str.1000927 = global [2 x i8] c"cs"
+@str.1000928 = global [2 x i8] c"ar"
+@str.1000929 = global [2 x i8] c"p0"
+@str.1000930 = global [2 x i8] c"i0"
+@str.1000931 = global [10 x i8] c"js_phscall"
+@str.1000932 = global [3 x i8] c"env"
+@str.1000933 = global [164 x i8] c"php layer 2: js_phclslookup walks a SCOPE, which layer 2 cannot open - php-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/php-rt.metajs, WALL 3"
+@str.1000934 = global [14 x i8] c"js_phclslookup"
+@str.1000935 = global [159 x i8] c"php layer 2: js_phthis walks a SCOPE, which layer 2 cannot open - php-to-llvm-ir.abnf lowers it in the emitter instead. See languages/lib/php-rt.metajs, WALL 3"
+@str.1000936 = global [9 x i8] c"js_phthis"
+@str.1000937 = global [3 x i8] c"reg"
+@str.1000938 = global [11 x i8] c"js_phrtinit"
+@str.1000939 = global [7 x i8] c"phHoleV"
+@str.1000940 = global [9 x i8] c"__pfahole"
+@str.1000941 = global [9 x i8] c"js_phhole"
+@str.1000942 = global [8 x i8] c"phIsHole"
+@str.1000943 = global [5 x i8] c"bound"
+@str.1000944 = global [8 x i8] c"supplied"
+@str.1000945 = global [7 x i8] c"forward"
+@str.1000946 = global [2 x i8] c"bp"
+@str.1000947 = global [7 x i8] c"supKeys"
+@str.1000948 = global [7 x i8] c"supVals"
+@str.1000949 = global [2 x i8] c"si"
+@str.1000950 = global [8 x i8] c"js_phpfa"
+@str.1000951 = global [4 x i8] c"main"
 @jsrtlib_env = global i64 0
 @jsrtlib_f_js_phoid = global i64 0
 @jsrtlib_f_js_phoidof = global i64 0
@@ -1008,6 +1029,7 @@
 @jsrtlib_f_js_phdtype = global i64 0
 @jsrtlib_f_js_phsetchk = global i64 0
 @jsrtlib_f_js_phdump = global i64 0
+@jsrtlib_f_js_phclsexists = global i64 0
 @jsrtlib_f_js_phmexists = global i64 0
 @jsrtlib_f_js_phgetclass = global i64 0
 @jsrtlib_f_js_phmset = global i64 0
@@ -1027,6 +1049,7 @@
 @jsrtlib_f_js_phunset = global i64 0
 @jsrtlib_f_js_phcopy = global i64 0
 @jsrtlib_f_js_phlen = global i64 0
+@jsrtlib_f_js_phcount = global i64 0
 @jsrtlib_f_js_phmerge = global i64 0
 @jsrtlib_f_js_phvals = global i64 0
 @jsrtlib_f_js_phsubstr = global i64 0
@@ -1051,6 +1074,8 @@
 @jsrtlib_f_js_phvivroot = global i64 0
 @jsrtlib_f_js_phconst = global i64 0
 @jsrtlib_f_js_phclassmiss = global i64 0
+@jsrtlib_f_js_phcbfail = global i64 0
+@jsrtlib_f_js_phrelcb = global i64 0
 @jsrtlib_f_js_phcbmeth = global i64 0
 @jsrtlib_f_js_phsinit = global i64 0
 @jsrtlib_f_js_phsget = global i64 0
@@ -1571,563 +1596,578 @@ entry:
 	%490 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000474, i64 0, i64 0), i64 7)
 	%491 = call i64 @js_tdecl(i64 %scope, i64 %490, i64 %489)
 	%492 = call i64 @js_closure(i64 1000158, i64 %scope)
-	%493 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000482, i64 0, i64 0), i64 7)
+	%493 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000484, i64 0, i64 0), i64 7)
 	%494 = call i64 @js_tdecl(i64 %scope, i64 %493, i64 %492)
 	%495 = call i64 @js_closure(i64 1000159, i64 %scope)
-	%496 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000480, i64 0, i64 0), i64 10)
+	%496 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000478, i64 0, i64 0), i64 10)
 	%497 = call i64 @js_tdecl(i64 %scope, i64 %496, i64 %495)
 	%498 = call i64 @js_closure(i64 1000160, i64 %scope)
-	%499 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000481, i64 0, i64 0), i64 10)
+	%499 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000482, i64 0, i64 0), i64 10)
 	%500 = call i64 @js_tdecl(i64 %scope, i64 %499, i64 %498)
 	%501 = call i64 @js_closure(i64 1000161, i64 %scope)
-	%502 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000494, i64 0, i64 0), i64 5)
+	%502 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000483, i64 0, i64 0), i64 10)
 	%503 = call i64 @js_tdecl(i64 %scope, i64 %502, i64 %501)
 	%504 = call i64 @js_closure(i64 1000162, i64 %scope)
-	%505 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000495, i64 0, i64 0), i64 5)
+	%505 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000505, i64 0, i64 0), i64 5)
 	%506 = call i64 @js_tdecl(i64 %scope, i64 %505, i64 %504)
 	%507 = call i64 @js_closure(i64 1000163, i64 %scope)
-	%508 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000496, i64 0, i64 0), i64 7)
+	%508 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000506, i64 0, i64 0), i64 5)
 	%509 = call i64 @js_tdecl(i64 %scope, i64 %508, i64 %507)
 	%510 = call i64 @js_closure(i64 1000164, i64 %scope)
-	%511 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000497, i64 0, i64 0), i64 8)
+	%511 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000507, i64 0, i64 0), i64 7)
 	%512 = call i64 @js_tdecl(i64 %scope, i64 %511, i64 %510)
 	%513 = call i64 @js_closure(i64 1000165, i64 %scope)
-	%514 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000498, i64 0, i64 0), i64 8)
+	%514 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000508, i64 0, i64 0), i64 8)
 	%515 = call i64 @js_tdecl(i64 %scope, i64 %514, i64 %513)
 	%516 = call i64 @js_closure(i64 1000166, i64 %scope)
-	%517 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000499, i64 0, i64 0), i64 8)
+	%517 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000509, i64 0, i64 0), i64 8)
 	%518 = call i64 @js_tdecl(i64 %scope, i64 %517, i64 %516)
 	%519 = call i64 @js_closure(i64 1000167, i64 %scope)
-	%520 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000502, i64 0, i64 0), i64 7)
+	%520 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000510, i64 0, i64 0), i64 8)
 	%521 = call i64 @js_tdecl(i64 %scope, i64 %520, i64 %519)
 	%522 = call i64 @js_closure(i64 1000168, i64 %scope)
-	%523 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000505, i64 0, i64 0), i64 11)
+	%523 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000513, i64 0, i64 0), i64 7)
 	%524 = call i64 @js_tdecl(i64 %scope, i64 %523, i64 %522)
 	%525 = call i64 @js_closure(i64 1000169, i64 %scope)
-	%526 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000506, i64 0, i64 0), i64 11)
+	%526 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000514, i64 0, i64 0), i64 11)
 	%527 = call i64 @js_tdecl(i64 %scope, i64 %526, i64 %525)
 	%528 = call i64 @js_closure(i64 1000170, i64 %scope)
-	%529 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000508, i64 0, i64 0), i64 13)
+	%529 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000515, i64 0, i64 0), i64 11)
 	%530 = call i64 @js_tdecl(i64 %scope, i64 %529, i64 %528)
 	%531 = call i64 @js_closure(i64 1000171, i64 %scope)
-	%532 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000511, i64 0, i64 0), i64 10)
+	%532 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000517, i64 0, i64 0), i64 13)
 	%533 = call i64 @js_tdecl(i64 %scope, i64 %532, i64 %531)
 	%534 = call i64 @js_closure(i64 1000172, i64 %scope)
-	%535 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000509, i64 0, i64 0), i64 9)
+	%535 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000520, i64 0, i64 0), i64 10)
 	%536 = call i64 @js_tdecl(i64 %scope, i64 %535, i64 %534)
 	%537 = call i64 @js_closure(i64 1000173, i64 %scope)
-	%538 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000514, i64 0, i64 0), i64 6)
+	%538 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000518, i64 0, i64 0), i64 9)
 	%539 = call i64 @js_tdecl(i64 %scope, i64 %538, i64 %537)
 	%540 = call i64 @js_closure(i64 1000174, i64 %scope)
-	%541 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000513, i64 0, i64 0), i64 10)
+	%541 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000522, i64 0, i64 0), i64 6)
 	%542 = call i64 @js_tdecl(i64 %scope, i64 %541, i64 %540)
 	%543 = call i64 @js_closure(i64 1000175, i64 %scope)
-	%544 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000525, i64 0, i64 0), i64 7)
+	%544 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000488, i64 0, i64 0), i64 10)
 	%545 = call i64 @js_tdecl(i64 %scope, i64 %544, i64 %543)
 	%546 = call i64 @js_closure(i64 1000176, i64 %scope)
-	%547 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000531, i64 0, i64 0), i64 5)
+	%547 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000533, i64 0, i64 0), i64 7)
 	%548 = call i64 @js_tdecl(i64 %scope, i64 %547, i64 %546)
 	%549 = call i64 @js_closure(i64 1000177, i64 %scope)
-	%550 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%550 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000539, i64 0, i64 0), i64 5)
 	%551 = call i64 @js_tdecl(i64 %scope, i64 %550, i64 %549)
 	%552 = call i64 @js_closure(i64 1000178, i64 %scope)
-	%553 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000533, i64 0, i64 0), i64 12)
+	%553 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%554 = call i64 @js_tdecl(i64 %scope, i64 %553, i64 %552)
 	%555 = call i64 @js_closure(i64 1000179, i64 %scope)
-	%556 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000534, i64 0, i64 0), i64 12)
+	%556 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000541, i64 0, i64 0), i64 12)
 	%557 = call i64 @js_tdecl(i64 %scope, i64 %556, i64 %555)
 	%558 = call i64 @js_closure(i64 1000180, i64 %scope)
-	%559 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%559 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000542, i64 0, i64 0), i64 12)
 	%560 = call i64 @js_tdecl(i64 %scope, i64 %559, i64 %558)
 	%561 = call i64 @js_closure(i64 1000181, i64 %scope)
-	%562 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000538, i64 0, i64 0), i64 8)
+	%562 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%563 = call i64 @js_tdecl(i64 %scope, i64 %562, i64 %561)
 	%564 = call i64 @js_closure(i64 1000182, i64 %scope)
-	%565 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000539, i64 0, i64 0), i64 9)
+	%565 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000546, i64 0, i64 0), i64 8)
 	%566 = call i64 @js_tdecl(i64 %scope, i64 %565, i64 %564)
 	%567 = call i64 @js_closure(i64 1000183, i64 %scope)
-	%568 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%568 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000547, i64 0, i64 0), i64 9)
 	%569 = call i64 @js_tdecl(i64 %scope, i64 %568, i64 %567)
 	%570 = call i64 @js_closure(i64 1000184, i64 %scope)
-	%571 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%571 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%572 = call i64 @js_tdecl(i64 %scope, i64 %571, i64 %570)
 	%573 = call i64 @js_closure(i64 1000185, i64 %scope)
-	%574 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000545, i64 0, i64 0), i64 8)
+	%574 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%575 = call i64 @js_tdecl(i64 %scope, i64 %574, i64 %573)
 	%576 = call i64 @js_closure(i64 1000186, i64 %scope)
-	%577 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000546, i64 0, i64 0), i64 8)
+	%577 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000552, i64 0, i64 0), i64 8)
 	%578 = call i64 @js_tdecl(i64 %scope, i64 %577, i64 %576)
 	%579 = call i64 @js_closure(i64 1000187, i64 %scope)
-	%580 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000548, i64 0, i64 0), i64 10)
+	%580 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000553, i64 0, i64 0), i64 8)
 	%581 = call i64 @js_tdecl(i64 %scope, i64 %580, i64 %579)
 	%582 = call i64 @js_closure(i64 1000188, i64 %scope)
-	%583 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000550, i64 0, i64 0), i64 10)
+	%583 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000555, i64 0, i64 0), i64 10)
 	%584 = call i64 @js_tdecl(i64 %scope, i64 %583, i64 %582)
 	%585 = call i64 @js_closure(i64 1000189, i64 %scope)
-	%586 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000553, i64 0, i64 0), i64 9)
+	%586 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000557, i64 0, i64 0), i64 10)
 	%587 = call i64 @js_tdecl(i64 %scope, i64 %586, i64 %585)
 	%588 = call i64 @js_closure(i64 1000190, i64 %scope)
-	%589 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000555, i64 0, i64 0), i64 5)
+	%589 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000487, i64 0, i64 0), i64 9)
 	%590 = call i64 @js_tdecl(i64 %scope, i64 %589, i64 %588)
 	%591 = call i64 @js_closure(i64 1000191, i64 %scope)
-	%592 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%592 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000561, i64 0, i64 0), i64 5)
 	%593 = call i64 @js_tdecl(i64 %scope, i64 %592, i64 %591)
 	%594 = call i64 @js_closure(i64 1000192, i64 %scope)
-	%595 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%595 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%596 = call i64 @js_tdecl(i64 %scope, i64 %595, i64 %594)
-	%597 = call i64 @js_num_i(i64 0)
-	%598 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000563, i64 0, i64 0), i64 12)
+	%597 = call i64 @js_closure(i64 1000193, i64 %scope)
+	%598 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%599 = call i64 @js_tdecl(i64 %scope, i64 %598, i64 %597)
-	%600 = call i64 @js_closure(i64 1000193, i64 %scope)
-	%601 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000571, i64 0, i64 0), i64 10)
+	%600 = call i64 @js_num_i(i64 0)
+	%601 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000569, i64 0, i64 0), i64 12)
 	%602 = call i64 @js_tdecl(i64 %scope, i64 %601, i64 %600)
-	%603 = call i64 @js_closure(i64 1000196, i64 %scope)
-	%604 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000575, i64 0, i64 0), i64 9)
+	%603 = call i64 @js_closure(i64 1000194, i64 %scope)
+	%604 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000577, i64 0, i64 0), i64 10)
 	%605 = call i64 @js_tdecl(i64 %scope, i64 %604, i64 %603)
 	%606 = call i64 @js_closure(i64 1000197, i64 %scope)
-	%607 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
+	%607 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000581, i64 0, i64 0), i64 9)
 	%608 = call i64 @js_tdecl(i64 %scope, i64 %607, i64 %606)
 	%609 = call i64 @js_closure(i64 1000198, i64 %scope)
-	%610 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000581, i64 0, i64 0), i64 11)
+	%610 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
 	%611 = call i64 @js_tdecl(i64 %scope, i64 %610, i64 %609)
 	%612 = call i64 @js_closure(i64 1000199, i64 %scope)
-	%613 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000587, i64 0, i64 0), i64 10)
+	%613 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000591, i64 0, i64 0), i64 11)
 	%614 = call i64 @js_tdecl(i64 %scope, i64 %613, i64 %612)
 	%615 = call i64 @js_closure(i64 1000200, i64 %scope)
-	%616 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%616 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000597, i64 0, i64 0), i64 10)
 	%617 = call i64 @js_tdecl(i64 %scope, i64 %616, i64 %615)
 	%618 = call i64 @js_closure(i64 1000201, i64 %scope)
-	%619 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000594, i64 0, i64 0), i64 8)
+	%619 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
 	%620 = call i64 @js_tdecl(i64 %scope, i64 %619, i64 %618)
-	%621 = call i64 @js_num_i(i64 0)
-	%622 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000595, i64 0, i64 0), i64 9)
+	%621 = call i64 @js_closure(i64 1000202, i64 %scope)
+	%622 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000602, i64 0, i64 0), i64 8)
 	%623 = call i64 @js_tdecl(i64 %scope, i64 %622, i64 %621)
-	%624 = call i64 @js_closure(i64 1000202, i64 %scope)
-	%625 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000477, i64 0, i64 0), i64 7)
+	%624 = call i64 @js_num_i(i64 0)
+	%625 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000603, i64 0, i64 0), i64 9)
 	%626 = call i64 @js_tdecl(i64 %scope, i64 %625, i64 %624)
 	%627 = call i64 @js_closure(i64 1000203, i64 %scope)
-	%628 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000597, i64 0, i64 0), i64 8)
+	%628 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000477, i64 0, i64 0), i64 7)
 	%629 = call i64 @js_tdecl(i64 %scope, i64 %628, i64 %627)
 	%630 = call i64 @js_closure(i64 1000204, i64 %scope)
-	%631 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000599, i64 0, i64 0), i64 10)
+	%631 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000605, i64 0, i64 0), i64 8)
 	%632 = call i64 @js_tdecl(i64 %scope, i64 %631, i64 %630)
 	%633 = call i64 @js_closure(i64 1000205, i64 %scope)
-	%634 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000598, i64 0, i64 0), i64 8)
+	%634 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000607, i64 0, i64 0), i64 10)
 	%635 = call i64 @js_tdecl(i64 %scope, i64 %634, i64 %633)
 	%636 = call i64 @js_closure(i64 1000206, i64 %scope)
-	%637 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000605, i64 0, i64 0), i64 9)
+	%637 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000606, i64 0, i64 0), i64 8)
 	%638 = call i64 @js_tdecl(i64 %scope, i64 %637, i64 %636)
 	%639 = call i64 @js_closure(i64 1000207, i64 %scope)
-	%640 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000618, i64 0, i64 0), i64 6)
+	%640 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000613, i64 0, i64 0), i64 9)
 	%641 = call i64 @js_tdecl(i64 %scope, i64 %640, i64 %639)
 	%642 = call i64 @js_closure(i64 1000208, i64 %scope)
-	%643 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000638, i64 0, i64 0), i64 9)
+	%643 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000626, i64 0, i64 0), i64 6)
 	%644 = call i64 @js_tdecl(i64 %scope, i64 %643, i64 %642)
 	%645 = call i64 @js_closure(i64 1000209, i64 %scope)
-	%646 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000626, i64 0, i64 0), i64 10)
+	%646 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000646, i64 0, i64 0), i64 9)
 	%647 = call i64 @js_tdecl(i64 %scope, i64 %646, i64 %645)
 	%648 = call i64 @js_closure(i64 1000210, i64 %scope)
-	%649 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000639, i64 0, i64 0), i64 9)
+	%649 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000634, i64 0, i64 0), i64 10)
 	%650 = call i64 @js_tdecl(i64 %scope, i64 %649, i64 %648)
 	%651 = call i64 @js_closure(i64 1000211, i64 %scope)
-	%652 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000640, i64 0, i64 0), i64 10)
+	%652 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000647, i64 0, i64 0), i64 9)
 	%653 = call i64 @js_tdecl(i64 %scope, i64 %652, i64 %651)
 	%654 = call i64 @js_closure(i64 1000212, i64 %scope)
-	%655 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000628, i64 0, i64 0), i64 7)
+	%655 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000648, i64 0, i64 0), i64 10)
 	%656 = call i64 @js_tdecl(i64 %scope, i64 %655, i64 %654)
 	%657 = call i64 @js_closure(i64 1000213, i64 %scope)
-	%658 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000648, i64 0, i64 0), i64 8)
+	%658 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000636, i64 0, i64 0), i64 7)
 	%659 = call i64 @js_tdecl(i64 %scope, i64 %658, i64 %657)
 	%660 = call i64 @js_closure(i64 1000214, i64 %scope)
-	%661 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000646, i64 0, i64 0), i64 9)
+	%661 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000656, i64 0, i64 0), i64 8)
 	%662 = call i64 @js_tdecl(i64 %scope, i64 %661, i64 %660)
 	%663 = call i64 @js_closure(i64 1000215, i64 %scope)
-	%664 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000662, i64 0, i64 0), i64 11)
+	%664 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000654, i64 0, i64 0), i64 9)
 	%665 = call i64 @js_tdecl(i64 %scope, i64 %664, i64 %663)
 	%666 = call i64 @js_closure(i64 1000216, i64 %scope)
-	%667 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000670, i64 0, i64 0), i64 10)
+	%667 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000670, i64 0, i64 0), i64 11)
 	%668 = call i64 @js_tdecl(i64 %scope, i64 %667, i64 %666)
 	%669 = call i64 @js_closure(i64 1000217, i64 %scope)
-	%670 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000526, i64 0, i64 0), i64 12)
+	%670 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000679, i64 0, i64 0), i64 10)
 	%671 = call i64 @js_tdecl(i64 %scope, i64 %670, i64 %669)
 	%672 = call i64 @js_closure(i64 1000218, i64 %scope)
-	%673 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000674, i64 0, i64 0), i64 9)
+	%673 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000534, i64 0, i64 0), i64 12)
 	%674 = call i64 @js_tdecl(i64 %scope, i64 %673, i64 %672)
 	%675 = call i64 @js_closure(i64 1000219, i64 %scope)
-	%676 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000678, i64 0, i64 0), i64 6)
+	%676 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000683, i64 0, i64 0), i64 9)
 	%677 = call i64 @js_tdecl(i64 %scope, i64 %676, i64 %675)
 	%678 = call i64 @js_closure(i64 1000220, i64 %scope)
-	%679 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000426, i64 0, i64 0), i64 7)
+	%679 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000687, i64 0, i64 0), i64 6)
 	%680 = call i64 @js_tdecl(i64 %scope, i64 %679, i64 %678)
-	%681 = call i64 @js_arr_new()
-	%682 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000679, i64 0, i64 0), i64 9)
+	%681 = call i64 @js_closure(i64 1000221, i64 %scope)
+	%682 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000426, i64 0, i64 0), i64 7)
 	%683 = call i64 @js_tdecl(i64 %scope, i64 %682, i64 %681)
 	%684 = call i64 @js_arr_new()
-	%685 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000680, i64 0, i64 0), i64 7)
+	%685 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000688, i64 0, i64 0), i64 9)
 	%686 = call i64 @js_tdecl(i64 %scope, i64 %685, i64 %684)
-	%687 = call i64 @js_closure(i64 1000221, i64 %scope)
-	%688 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000685, i64 0, i64 0), i64 10)
+	%687 = call i64 @js_arr_new()
+	%688 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000689, i64 0, i64 0), i64 7)
 	%689 = call i64 @js_tdecl(i64 %scope, i64 %688, i64 %687)
 	%690 = call i64 @js_closure(i64 1000222, i64 %scope)
-	%691 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000689, i64 0, i64 0), i64 9)
+	%691 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000694, i64 0, i64 0), i64 10)
 	%692 = call i64 @js_tdecl(i64 %scope, i64 %691, i64 %690)
 	%693 = call i64 @js_closure(i64 1000223, i64 %scope)
-	%694 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000690, i64 0, i64 0), i64 10)
+	%694 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000698, i64 0, i64 0), i64 9)
 	%695 = call i64 @js_tdecl(i64 %scope, i64 %694, i64 %693)
 	%696 = call i64 @js_closure(i64 1000224, i64 %scope)
-	%697 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000700, i64 0, i64 0), i64 9)
+	%697 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000699, i64 0, i64 0), i64 10)
 	%698 = call i64 @js_tdecl(i64 %scope, i64 %697, i64 %696)
 	%699 = call i64 @js_closure(i64 1000225, i64 %scope)
-	%700 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000387, i64 0, i64 0), i64 9)
+	%700 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000709, i64 0, i64 0), i64 9)
 	%701 = call i64 @js_tdecl(i64 %scope, i64 %700, i64 %699)
 	%702 = call i64 @js_closure(i64 1000226, i64 %scope)
-	%703 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%703 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000387, i64 0, i64 0), i64 9)
 	%704 = call i64 @js_tdecl(i64 %scope, i64 %703, i64 %702)
 	%705 = call i64 @js_closure(i64 1000227, i64 %scope)
-	%706 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000708, i64 0, i64 0), i64 13)
+	%706 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%707 = call i64 @js_tdecl(i64 %scope, i64 %706, i64 %705)
 	%708 = call i64 @js_closure(i64 1000228, i64 %scope)
-	%709 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000709, i64 0, i64 0), i64 10)
+	%709 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000717, i64 0, i64 0), i64 13)
 	%710 = call i64 @js_tdecl(i64 %scope, i64 %709, i64 %708)
 	%711 = call i64 @js_closure(i64 1000229, i64 %scope)
-	%712 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000711, i64 0, i64 0), i64 12)
+	%712 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000718, i64 0, i64 0), i64 10)
 	%713 = call i64 @js_tdecl(i64 %scope, i64 %712, i64 %711)
 	%714 = call i64 @js_closure(i64 1000230, i64 %scope)
-	%715 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000712, i64 0, i64 0), i64 12)
+	%715 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000720, i64 0, i64 0), i64 12)
 	%716 = call i64 @js_tdecl(i64 %scope, i64 %715, i64 %714)
 	%717 = call i64 @js_closure(i64 1000231, i64 %scope)
-	%718 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000713, i64 0, i64 0), i64 12)
+	%718 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000721, i64 0, i64 0), i64 12)
 	%719 = call i64 @js_tdecl(i64 %scope, i64 %718, i64 %717)
 	%720 = call i64 @js_closure(i64 1000232, i64 %scope)
-	%721 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000714, i64 0, i64 0), i64 16)
+	%721 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000722, i64 0, i64 0), i64 12)
 	%722 = call i64 @js_tdecl(i64 %scope, i64 %721, i64 %720)
 	%723 = call i64 @js_closure(i64 1000233, i64 %scope)
-	%724 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000715, i64 0, i64 0), i64 9)
+	%724 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000723, i64 0, i64 0), i64 16)
 	%725 = call i64 @js_tdecl(i64 %scope, i64 %724, i64 %723)
 	%726 = call i64 @js_closure(i64 1000234, i64 %scope)
-	%727 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000716, i64 0, i64 0), i64 8)
+	%727 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000724, i64 0, i64 0), i64 9)
 	%728 = call i64 @js_tdecl(i64 %scope, i64 %727, i64 %726)
 	%729 = call i64 @js_closure(i64 1000235, i64 %scope)
-	%730 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000717, i64 0, i64 0), i64 8)
+	%730 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000725, i64 0, i64 0), i64 8)
 	%731 = call i64 @js_tdecl(i64 %scope, i64 %730, i64 %729)
 	%732 = call i64 @js_closure(i64 1000236, i64 %scope)
-	%733 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000718, i64 0, i64 0), i64 9)
+	%733 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000726, i64 0, i64 0), i64 8)
 	%734 = call i64 @js_tdecl(i64 %scope, i64 %733, i64 %732)
 	%735 = call i64 @js_closure(i64 1000237, i64 %scope)
-	%736 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000719, i64 0, i64 0), i64 8)
+	%736 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000727, i64 0, i64 0), i64 9)
 	%737 = call i64 @js_tdecl(i64 %scope, i64 %736, i64 %735)
 	%738 = call i64 @js_closure(i64 1000238, i64 %scope)
-	%739 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000720, i64 0, i64 0), i64 8)
+	%739 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000728, i64 0, i64 0), i64 8)
 	%740 = call i64 @js_tdecl(i64 %scope, i64 %739, i64 %738)
 	%741 = call i64 @js_closure(i64 1000239, i64 %scope)
-	%742 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000721, i64 0, i64 0), i64 8)
+	%742 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000729, i64 0, i64 0), i64 8)
 	%743 = call i64 @js_tdecl(i64 %scope, i64 %742, i64 %741)
 	%744 = call i64 @js_closure(i64 1000240, i64 %scope)
-	%745 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000722, i64 0, i64 0), i64 7)
+	%745 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000730, i64 0, i64 0), i64 8)
 	%746 = call i64 @js_tdecl(i64 %scope, i64 %745, i64 %744)
 	%747 = call i64 @js_closure(i64 1000241, i64 %scope)
-	%748 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000723, i64 0, i64 0), i64 7)
+	%748 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000731, i64 0, i64 0), i64 7)
 	%749 = call i64 @js_tdecl(i64 %scope, i64 %748, i64 %747)
 	%750 = call i64 @js_closure(i64 1000242, i64 %scope)
-	%751 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000724, i64 0, i64 0), i64 8)
+	%751 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000732, i64 0, i64 0), i64 7)
 	%752 = call i64 @js_tdecl(i64 %scope, i64 %751, i64 %750)
 	%753 = call i64 @js_closure(i64 1000243, i64 %scope)
-	%754 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000725, i64 0, i64 0), i64 8)
+	%754 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000733, i64 0, i64 0), i64 8)
 	%755 = call i64 @js_tdecl(i64 %scope, i64 %754, i64 %753)
 	%756 = call i64 @js_closure(i64 1000244, i64 %scope)
-	%757 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000726, i64 0, i64 0), i64 8)
+	%757 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000734, i64 0, i64 0), i64 8)
 	%758 = call i64 @js_tdecl(i64 %scope, i64 %757, i64 %756)
 	%759 = call i64 @js_closure(i64 1000245, i64 %scope)
-	%760 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000727, i64 0, i64 0), i64 7)
+	%760 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000735, i64 0, i64 0), i64 8)
 	%761 = call i64 @js_tdecl(i64 %scope, i64 %760, i64 %759)
 	%762 = call i64 @js_closure(i64 1000246, i64 %scope)
-	%763 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000728, i64 0, i64 0), i64 7)
+	%763 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000736, i64 0, i64 0), i64 7)
 	%764 = call i64 @js_tdecl(i64 %scope, i64 %763, i64 %762)
 	%765 = call i64 @js_closure(i64 1000247, i64 %scope)
-	%766 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000729, i64 0, i64 0), i64 7)
+	%766 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000737, i64 0, i64 0), i64 7)
 	%767 = call i64 @js_tdecl(i64 %scope, i64 %766, i64 %765)
 	%768 = call i64 @js_closure(i64 1000248, i64 %scope)
-	%769 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000730, i64 0, i64 0), i64 7)
+	%769 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000738, i64 0, i64 0), i64 7)
 	%770 = call i64 @js_tdecl(i64 %scope, i64 %769, i64 %768)
 	%771 = call i64 @js_closure(i64 1000249, i64 %scope)
-	%772 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000731, i64 0, i64 0), i64 8)
+	%772 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000739, i64 0, i64 0), i64 7)
 	%773 = call i64 @js_tdecl(i64 %scope, i64 %772, i64 %771)
 	%774 = call i64 @js_closure(i64 1000250, i64 %scope)
-	%775 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000732, i64 0, i64 0), i64 8)
+	%775 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000740, i64 0, i64 0), i64 8)
 	%776 = call i64 @js_tdecl(i64 %scope, i64 %775, i64 %774)
 	%777 = call i64 @js_closure(i64 1000251, i64 %scope)
-	%778 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000733, i64 0, i64 0), i64 8)
+	%778 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000741, i64 0, i64 0), i64 8)
 	%779 = call i64 @js_tdecl(i64 %scope, i64 %778, i64 %777)
 	%780 = call i64 @js_closure(i64 1000252, i64 %scope)
-	%781 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000734, i64 0, i64 0), i64 8)
+	%781 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000742, i64 0, i64 0), i64 8)
 	%782 = call i64 @js_tdecl(i64 %scope, i64 %781, i64 %780)
 	%783 = call i64 @js_closure(i64 1000253, i64 %scope)
-	%784 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000735, i64 0, i64 0), i64 8)
+	%784 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000743, i64 0, i64 0), i64 8)
 	%785 = call i64 @js_tdecl(i64 %scope, i64 %784, i64 %783)
 	%786 = call i64 @js_closure(i64 1000254, i64 %scope)
-	%787 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000736, i64 0, i64 0), i64 8)
+	%787 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000744, i64 0, i64 0), i64 8)
 	%788 = call i64 @js_tdecl(i64 %scope, i64 %787, i64 %786)
 	%789 = call i64 @js_closure(i64 1000255, i64 %scope)
-	%790 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000737, i64 0, i64 0), i64 8)
+	%790 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000745, i64 0, i64 0), i64 8)
 	%791 = call i64 @js_tdecl(i64 %scope, i64 %790, i64 %789)
 	%792 = call i64 @js_closure(i64 1000256, i64 %scope)
-	%793 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000738, i64 0, i64 0), i64 9)
+	%793 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000746, i64 0, i64 0), i64 8)
 	%794 = call i64 @js_tdecl(i64 %scope, i64 %793, i64 %792)
 	%795 = call i64 @js_closure(i64 1000257, i64 %scope)
-	%796 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000739, i64 0, i64 0), i64 8)
+	%796 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000747, i64 0, i64 0), i64 9)
 	%797 = call i64 @js_tdecl(i64 %scope, i64 %796, i64 %795)
 	%798 = call i64 @js_closure(i64 1000258, i64 %scope)
-	%799 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000740, i64 0, i64 0), i64 9)
+	%799 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000748, i64 0, i64 0), i64 8)
 	%800 = call i64 @js_tdecl(i64 %scope, i64 %799, i64 %798)
 	%801 = call i64 @js_closure(i64 1000259, i64 %scope)
-	%802 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000741, i64 0, i64 0), i64 8)
+	%802 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000749, i64 0, i64 0), i64 9)
 	%803 = call i64 @js_tdecl(i64 %scope, i64 %802, i64 %801)
 	%804 = call i64 @js_closure(i64 1000260, i64 %scope)
-	%805 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000742, i64 0, i64 0), i64 8)
+	%805 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000750, i64 0, i64 0), i64 8)
 	%806 = call i64 @js_tdecl(i64 %scope, i64 %805, i64 %804)
 	%807 = call i64 @js_closure(i64 1000261, i64 %scope)
-	%808 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000743, i64 0, i64 0), i64 9)
+	%808 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000751, i64 0, i64 0), i64 8)
 	%809 = call i64 @js_tdecl(i64 %scope, i64 %808, i64 %807)
 	%810 = call i64 @js_closure(i64 1000262, i64 %scope)
-	%811 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000745, i64 0, i64 0), i64 11)
+	%811 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000752, i64 0, i64 0), i64 9)
 	%812 = call i64 @js_tdecl(i64 %scope, i64 %811, i64 %810)
 	%813 = call i64 @js_closure(i64 1000263, i64 %scope)
-	%814 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000746, i64 0, i64 0), i64 8)
+	%814 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000754, i64 0, i64 0), i64 11)
 	%815 = call i64 @js_tdecl(i64 %scope, i64 %814, i64 %813)
 	%816 = call i64 @js_closure(i64 1000264, i64 %scope)
-	%817 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000747, i64 0, i64 0), i64 9)
+	%817 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000758, i64 0, i64 0), i64 8)
 	%818 = call i64 @js_tdecl(i64 %scope, i64 %817, i64 %816)
 	%819 = call i64 @js_closure(i64 1000265, i64 %scope)
-	%820 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000753, i64 0, i64 0), i64 9)
+	%820 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000759, i64 0, i64 0), i64 9)
 	%821 = call i64 @js_tdecl(i64 %scope, i64 %820, i64 %819)
 	%822 = call i64 @js_closure(i64 1000266, i64 %scope)
-	%823 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000751, i64 0, i64 0), i64 10)
+	%823 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000765, i64 0, i64 0), i64 9)
 	%824 = call i64 @js_tdecl(i64 %scope, i64 %823, i64 %822)
 	%825 = call i64 @js_closure(i64 1000267, i64 %scope)
-	%826 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000755, i64 0, i64 0), i64 7)
+	%826 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000763, i64 0, i64 0), i64 10)
 	%827 = call i64 @js_tdecl(i64 %scope, i64 %826, i64 %825)
 	%828 = call i64 @js_closure(i64 1000268, i64 %scope)
-	%829 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000756, i64 0, i64 0), i64 9)
+	%829 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000767, i64 0, i64 0), i64 7)
 	%830 = call i64 @js_tdecl(i64 %scope, i64 %829, i64 %828)
 	%831 = call i64 @js_closure(i64 1000269, i64 %scope)
-	%832 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000757, i64 0, i64 0), i64 10)
+	%832 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000768, i64 0, i64 0), i64 9)
 	%833 = call i64 @js_tdecl(i64 %scope, i64 %832, i64 %831)
 	%834 = call i64 @js_closure(i64 1000270, i64 %scope)
-	%835 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000760, i64 0, i64 0), i64 11)
+	%835 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000769, i64 0, i64 0), i64 10)
 	%836 = call i64 @js_tdecl(i64 %scope, i64 %835, i64 %834)
 	%837 = call i64 @js_closure(i64 1000271, i64 %scope)
-	%838 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000761, i64 0, i64 0), i64 9)
+	%838 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000772, i64 0, i64 0), i64 11)
 	%839 = call i64 @js_tdecl(i64 %scope, i64 %838, i64 %837)
 	%840 = call i64 @js_closure(i64 1000272, i64 %scope)
-	%841 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000763, i64 0, i64 0), i64 12)
+	%841 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000773, i64 0, i64 0), i64 9)
 	%842 = call i64 @js_tdecl(i64 %scope, i64 %841, i64 %840)
 	%843 = call i64 @js_closure(i64 1000273, i64 %scope)
-	%844 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000765, i64 0, i64 0), i64 13)
+	%844 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000777, i64 0, i64 0), i64 14)
 	%845 = call i64 @js_tdecl(i64 %scope, i64 %844, i64 %843)
 	%846 = call i64 @js_closure(i64 1000274, i64 %scope)
-	%847 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000764, i64 0, i64 0), i64 10)
+	%847 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000779, i64 0, i64 0), i64 12)
 	%848 = call i64 @js_tdecl(i64 %scope, i64 %847, i64 %846)
 	%849 = call i64 @js_closure(i64 1000275, i64 %scope)
-	%850 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000773, i64 0, i64 0), i64 9)
+	%850 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000781, i64 0, i64 0), i64 13)
 	%851 = call i64 @js_tdecl(i64 %scope, i64 %850, i64 %849)
 	%852 = call i64 @js_closure(i64 1000276, i64 %scope)
-	%853 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000774, i64 0, i64 0), i64 8)
+	%853 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000780, i64 0, i64 0), i64 10)
 	%854 = call i64 @js_tdecl(i64 %scope, i64 %853, i64 %852)
 	%855 = call i64 @js_closure(i64 1000277, i64 %scope)
-	%856 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000775, i64 0, i64 0), i64 8)
+	%856 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000789, i64 0, i64 0), i64 9)
 	%857 = call i64 @js_tdecl(i64 %scope, i64 %856, i64 %855)
 	%858 = call i64 @js_closure(i64 1000278, i64 %scope)
-	%859 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000776, i64 0, i64 0), i64 9)
+	%859 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000790, i64 0, i64 0), i64 8)
 	%860 = call i64 @js_tdecl(i64 %scope, i64 %859, i64 %858)
 	%861 = call i64 @js_closure(i64 1000279, i64 %scope)
-	%862 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000777, i64 0, i64 0), i64 8)
+	%862 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000791, i64 0, i64 0), i64 8)
 	%863 = call i64 @js_tdecl(i64 %scope, i64 %862, i64 %861)
 	%864 = call i64 @js_closure(i64 1000280, i64 %scope)
-	%865 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000778, i64 0, i64 0), i64 10)
+	%865 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000792, i64 0, i64 0), i64 9)
 	%866 = call i64 @js_tdecl(i64 %scope, i64 %865, i64 %864)
 	%867 = call i64 @js_closure(i64 1000281, i64 %scope)
-	%868 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000780, i64 0, i64 0), i64 10)
+	%868 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000793, i64 0, i64 0), i64 8)
 	%869 = call i64 @js_tdecl(i64 %scope, i64 %868, i64 %867)
 	%870 = call i64 @js_closure(i64 1000282, i64 %scope)
-	%871 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000784, i64 0, i64 0), i64 10)
+	%871 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000794, i64 0, i64 0), i64 10)
 	%872 = call i64 @js_tdecl(i64 %scope, i64 %871, i64 %870)
 	%873 = call i64 @js_closure(i64 1000283, i64 %scope)
-	%874 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000798, i64 0, i64 0), i64 10)
+	%874 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000796, i64 0, i64 0), i64 10)
 	%875 = call i64 @js_tdecl(i64 %scope, i64 %874, i64 %873)
 	%876 = call i64 @js_closure(i64 1000284, i64 %scope)
-	%877 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000802, i64 0, i64 0), i64 12)
+	%877 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000800, i64 0, i64 0), i64 10)
 	%878 = call i64 @js_tdecl(i64 %scope, i64 %877, i64 %876)
 	%879 = call i64 @js_closure(i64 1000285, i64 %scope)
-	%880 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000803, i64 0, i64 0), i64 11)
+	%880 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000814, i64 0, i64 0), i64 10)
 	%881 = call i64 @js_tdecl(i64 %scope, i64 %880, i64 %879)
 	%882 = call i64 @js_closure(i64 1000286, i64 %scope)
-	%883 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000781, i64 0, i64 0), i64 10)
+	%883 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000818, i64 0, i64 0), i64 12)
 	%884 = call i64 @js_tdecl(i64 %scope, i64 %883, i64 %882)
 	%885 = call i64 @js_closure(i64 1000287, i64 %scope)
-	%886 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000783, i64 0, i64 0), i64 13)
+	%886 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000819, i64 0, i64 0), i64 11)
 	%887 = call i64 @js_tdecl(i64 %scope, i64 %886, i64 %885)
 	%888 = call i64 @js_closure(i64 1000288, i64 %scope)
-	%889 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000807, i64 0, i64 0), i64 12)
+	%889 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
 	%890 = call i64 @js_tdecl(i64 %scope, i64 %889, i64 %888)
 	%891 = call i64 @js_closure(i64 1000289, i64 %scope)
-	%892 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000806, i64 0, i64 0), i64 9)
+	%892 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000799, i64 0, i64 0), i64 13)
 	%893 = call i64 @js_tdecl(i64 %scope, i64 %892, i64 %891)
 	%894 = call i64 @js_closure(i64 1000290, i64 %scope)
-	%895 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000816, i64 0, i64 0), i64 9)
+	%895 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000823, i64 0, i64 0), i64 12)
 	%896 = call i64 @js_tdecl(i64 %scope, i64 %895, i64 %894)
 	%897 = call i64 @js_closure(i64 1000291, i64 %scope)
-	%898 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000817, i64 0, i64 0), i64 10)
+	%898 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000822, i64 0, i64 0), i64 9)
 	%899 = call i64 @js_tdecl(i64 %scope, i64 %898, i64 %897)
 	%900 = call i64 @js_closure(i64 1000292, i64 %scope)
-	%901 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000818, i64 0, i64 0), i64 10)
+	%901 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000832, i64 0, i64 0), i64 9)
 	%902 = call i64 @js_tdecl(i64 %scope, i64 %901, i64 %900)
 	%903 = call i64 @js_closure(i64 1000293, i64 %scope)
-	%904 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000819, i64 0, i64 0), i64 9)
+	%904 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000833, i64 0, i64 0), i64 10)
 	%905 = call i64 @js_tdecl(i64 %scope, i64 %904, i64 %903)
 	%906 = call i64 @js_closure(i64 1000294, i64 %scope)
-	%907 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000820, i64 0, i64 0), i64 8)
+	%907 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000834, i64 0, i64 0), i64 10)
 	%908 = call i64 @js_tdecl(i64 %scope, i64 %907, i64 %906)
 	%909 = call i64 @js_closure(i64 1000295, i64 %scope)
-	%910 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000823, i64 0, i64 0), i64 10)
+	%910 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000835, i64 0, i64 0), i64 9)
 	%911 = call i64 @js_tdecl(i64 %scope, i64 %910, i64 %909)
 	%912 = call i64 @js_closure(i64 1000296, i64 %scope)
-	%913 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000824, i64 0, i64 0), i64 9)
+	%913 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000836, i64 0, i64 0), i64 8)
 	%914 = call i64 @js_tdecl(i64 %scope, i64 %913, i64 %912)
 	%915 = call i64 @js_closure(i64 1000297, i64 %scope)
-	%916 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%916 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000840, i64 0, i64 0), i64 10)
 	%917 = call i64 @js_tdecl(i64 %scope, i64 %916, i64 %915)
 	%918 = call i64 @js_closure(i64 1000298, i64 %scope)
-	%919 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000826, i64 0, i64 0), i64 11)
+	%919 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000843, i64 0, i64 0), i64 10)
 	%920 = call i64 @js_tdecl(i64 %scope, i64 %919, i64 %918)
 	%921 = call i64 @js_closure(i64 1000299, i64 %scope)
-	%922 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000829, i64 0, i64 0), i64 11)
+	%922 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000844, i64 0, i64 0), i64 9)
 	%923 = call i64 @js_tdecl(i64 %scope, i64 %922, i64 %921)
 	%924 = call i64 @js_closure(i64 1000300, i64 %scope)
-	%925 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000831, i64 0, i64 0), i64 11)
+	%925 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%926 = call i64 @js_tdecl(i64 %scope, i64 %925, i64 %924)
 	%927 = call i64 @js_closure(i64 1000301, i64 %scope)
-	%928 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000833, i64 0, i64 0), i64 12)
+	%928 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000846, i64 0, i64 0), i64 11)
 	%929 = call i64 @js_tdecl(i64 %scope, i64 %928, i64 %927)
 	%930 = call i64 @js_closure(i64 1000302, i64 %scope)
-	%931 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000834, i64 0, i64 0), i64 11)
+	%931 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000849, i64 0, i64 0), i64 11)
 	%932 = call i64 @js_tdecl(i64 %scope, i64 %931, i64 %930)
 	%933 = call i64 @js_closure(i64 1000303, i64 %scope)
-	%934 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000835, i64 0, i64 0), i64 8)
+	%934 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000851, i64 0, i64 0), i64 11)
 	%935 = call i64 @js_tdecl(i64 %scope, i64 %934, i64 %933)
 	%936 = call i64 @js_closure(i64 1000304, i64 %scope)
-	%937 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000836, i64 0, i64 0), i64 11)
+	%937 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000853, i64 0, i64 0), i64 12)
 	%938 = call i64 @js_tdecl(i64 %scope, i64 %937, i64 %936)
 	%939 = call i64 @js_closure(i64 1000305, i64 %scope)
-	%940 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000837, i64 0, i64 0), i64 14)
+	%940 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000854, i64 0, i64 0), i64 11)
 	%941 = call i64 @js_tdecl(i64 %scope, i64 %940, i64 %939)
 	%942 = call i64 @js_closure(i64 1000306, i64 %scope)
-	%943 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000840, i64 0, i64 0), i64 14)
+	%943 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000855, i64 0, i64 0), i64 8)
 	%944 = call i64 @js_tdecl(i64 %scope, i64 %943, i64 %942)
 	%945 = call i64 @js_closure(i64 1000307, i64 %scope)
-	%946 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000841, i64 0, i64 0), i64 8)
+	%946 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000856, i64 0, i64 0), i64 11)
 	%947 = call i64 @js_tdecl(i64 %scope, i64 %946, i64 %945)
 	%948 = call i64 @js_closure(i64 1000308, i64 %scope)
-	%949 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000842, i64 0, i64 0), i64 9)
+	%949 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000857, i64 0, i64 0), i64 14)
 	%950 = call i64 @js_tdecl(i64 %scope, i64 %949, i64 %948)
 	%951 = call i64 @js_closure(i64 1000309, i64 %scope)
-	%952 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000843, i64 0, i64 0), i64 13)
+	%952 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000860, i64 0, i64 0), i64 14)
 	%953 = call i64 @js_tdecl(i64 %scope, i64 %952, i64 %951)
 	%954 = call i64 @js_closure(i64 1000310, i64 %scope)
-	%955 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000845, i64 0, i64 0), i64 14)
+	%955 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000861, i64 0, i64 0), i64 8)
 	%956 = call i64 @js_tdecl(i64 %scope, i64 %955, i64 %954)
 	%957 = call i64 @js_closure(i64 1000311, i64 %scope)
-	%958 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000846, i64 0, i64 0), i64 9)
+	%958 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000862, i64 0, i64 0), i64 9)
 	%959 = call i64 @js_tdecl(i64 %scope, i64 %958, i64 %957)
 	%960 = call i64 @js_closure(i64 1000312, i64 %scope)
-	%961 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000850, i64 0, i64 0), i64 14)
+	%961 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000863, i64 0, i64 0), i64 13)
 	%962 = call i64 @js_tdecl(i64 %scope, i64 %961, i64 %960)
 	%963 = call i64 @js_closure(i64 1000313, i64 %scope)
-	%964 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000851, i64 0, i64 0), i64 12)
+	%964 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000865, i64 0, i64 0), i64 14)
 	%965 = call i64 @js_tdecl(i64 %scope, i64 %964, i64 %963)
 	%966 = call i64 @js_closure(i64 1000314, i64 %scope)
-	%967 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000852, i64 0, i64 0), i64 8)
+	%967 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000866, i64 0, i64 0), i64 9)
 	%968 = call i64 @js_tdecl(i64 %scope, i64 %967, i64 %966)
 	%969 = call i64 @js_closure(i64 1000315, i64 %scope)
-	%970 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000856, i64 0, i64 0), i64 9)
+	%970 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000868, i64 0, i64 0), i64 14)
 	%971 = call i64 @js_tdecl(i64 %scope, i64 %970, i64 %969)
 	%972 = call i64 @js_closure(i64 1000316, i64 %scope)
-	%973 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000859, i64 0, i64 0), i64 8)
+	%973 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000869, i64 0, i64 0), i64 12)
 	%974 = call i64 @js_tdecl(i64 %scope, i64 %973, i64 %972)
 	%975 = call i64 @js_closure(i64 1000317, i64 %scope)
-	%976 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000860, i64 0, i64 0), i64 12)
+	%976 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000870, i64 0, i64 0), i64 8)
 	%977 = call i64 @js_tdecl(i64 %scope, i64 %976, i64 %975)
 	%978 = call i64 @js_closure(i64 1000318, i64 %scope)
-	%979 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000861, i64 0, i64 0), i64 12)
+	%979 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000874, i64 0, i64 0), i64 9)
 	%980 = call i64 @js_tdecl(i64 %scope, i64 %979, i64 %978)
 	%981 = call i64 @js_closure(i64 1000319, i64 %scope)
-	%982 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000863, i64 0, i64 0), i64 10)
+	%982 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000877, i64 0, i64 0), i64 8)
 	%983 = call i64 @js_tdecl(i64 %scope, i64 %982, i64 %981)
 	%984 = call i64 @js_closure(i64 1000320, i64 %scope)
-	%985 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000865, i64 0, i64 0), i64 11)
+	%985 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000878, i64 0, i64 0), i64 12)
 	%986 = call i64 @js_tdecl(i64 %scope, i64 %985, i64 %984)
 	%987 = call i64 @js_closure(i64 1000321, i64 %scope)
-	%988 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000878, i64 0, i64 0), i64 14)
+	%988 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000879, i64 0, i64 0), i64 12)
 	%989 = call i64 @js_tdecl(i64 %scope, i64 %988, i64 %987)
 	%990 = call i64 @js_closure(i64 1000322, i64 %scope)
-	%991 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%991 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000881, i64 0, i64 0), i64 10)
 	%992 = call i64 @js_tdecl(i64 %scope, i64 %991, i64 %990)
 	%993 = call i64 @js_closure(i64 1000323, i64 %scope)
-	%994 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000793, i64 0, i64 0), i64 11)
+	%994 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000883, i64 0, i64 0), i64 11)
 	%995 = call i64 @js_tdecl(i64 %scope, i64 %994, i64 %993)
 	%996 = call i64 @js_closure(i64 1000324, i64 %scope)
-	%997 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000886, i64 0, i64 0), i64 10)
+	%997 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000896, i64 0, i64 0), i64 14)
 	%998 = call i64 @js_tdecl(i64 %scope, i64 %997, i64 %996)
 	%999 = call i64 @js_closure(i64 1000325, i64 %scope)
-	%1000 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000888, i64 0, i64 0), i64 9)
+	%1000 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%1001 = call i64 @js_tdecl(i64 %scope, i64 %1000, i64 %999)
 	%1002 = call i64 @js_closure(i64 1000326, i64 %scope)
-	%1003 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000889, i64 0, i64 0), i64 9)
+	%1003 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000901, i64 0, i64 0), i64 11)
 	%1004 = call i64 @js_tdecl(i64 %scope, i64 %1003, i64 %1002)
 	%1005 = call i64 @js_closure(i64 1000327, i64 %scope)
-	%1006 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000890, i64 0, i64 0), i64 10)
+	%1006 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000903, i64 0, i64 0), i64 10)
 	%1007 = call i64 @js_tdecl(i64 %scope, i64 %1006, i64 %1005)
 	%1008 = call i64 @js_closure(i64 1000328, i64 %scope)
-	%1009 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000891, i64 0, i64 0), i64 8)
+	%1009 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000809, i64 0, i64 0), i64 11)
 	%1010 = call i64 @js_tdecl(i64 %scope, i64 %1009, i64 %1008)
 	%1011 = call i64 @js_closure(i64 1000329, i64 %scope)
-	%1012 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000894, i64 0, i64 0), i64 10)
+	%1012 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000908, i64 0, i64 0), i64 10)
 	%1013 = call i64 @js_tdecl(i64 %scope, i64 %1012, i64 %1011)
 	%1014 = call i64 @js_closure(i64 1000330, i64 %scope)
-	%1015 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000897, i64 0, i64 0), i64 10)
+	%1015 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000910, i64 0, i64 0), i64 9)
 	%1016 = call i64 @js_tdecl(i64 %scope, i64 %1015, i64 %1014)
-	%1017 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
-	%1018 = call i64 @js_tdecl(i64 %scope, i64 %1017, i64 0)
-	%1019 = call i64 @js_closure(i64 1000331, i64 %scope)
-	%1020 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000900, i64 0, i64 0), i64 8)
-	%1021 = call i64 @js_tdecl(i64 %scope, i64 %1020, i64 %1019)
-	%1022 = call i64 @js_closure(i64 1000332, i64 %scope)
-	%1023 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000902, i64 0, i64 0), i64 8)
-	%1024 = call i64 @js_tdecl(i64 %scope, i64 %1023, i64 %1022)
-	%1025 = call i64 @js_closure(i64 1000333, i64 %scope)
-	%1026 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000910, i64 0, i64 0), i64 10)
-	%1027 = call i64 @js_tdecl(i64 %scope, i64 %1026, i64 %1025)
-	%1028 = call i64 @js_closure(i64 1000338, i64 %scope)
-	%1029 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000913, i64 0, i64 0), i64 14)
-	%1030 = call i64 @js_tdecl(i64 %scope, i64 %1029, i64 %1028)
-	%1031 = call i64 @js_closure(i64 1000339, i64 %scope)
-	%1032 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000915, i64 0, i64 0), i64 9)
-	%1033 = call i64 @js_tdecl(i64 %scope, i64 %1032, i64 %1031)
-	%1034 = call i64 @js_closure(i64 1000340, i64 %scope)
-	%1035 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000917, i64 0, i64 0), i64 11)
+	%1017 = call i64 @js_closure(i64 1000331, i64 %scope)
+	%1018 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000911, i64 0, i64 0), i64 9)
+	%1019 = call i64 @js_tdecl(i64 %scope, i64 %1018, i64 %1017)
+	%1020 = call i64 @js_closure(i64 1000332, i64 %scope)
+	%1021 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000912, i64 0, i64 0), i64 10)
+	%1022 = call i64 @js_tdecl(i64 %scope, i64 %1021, i64 %1020)
+	%1023 = call i64 @js_closure(i64 1000333, i64 %scope)
+	%1024 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000913, i64 0, i64 0), i64 8)
+	%1025 = call i64 @js_tdecl(i64 %scope, i64 %1024, i64 %1023)
+	%1026 = call i64 @js_closure(i64 1000334, i64 %scope)
+	%1027 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000916, i64 0, i64 0), i64 10)
+	%1028 = call i64 @js_tdecl(i64 %scope, i64 %1027, i64 %1026)
+	%1029 = call i64 @js_closure(i64 1000335, i64 %scope)
+	%1030 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000919, i64 0, i64 0), i64 10)
+	%1031 = call i64 @js_tdecl(i64 %scope, i64 %1030, i64 %1029)
+	%1032 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
+	%1033 = call i64 @js_tdecl(i64 %scope, i64 %1032, i64 0)
+	%1034 = call i64 @js_closure(i64 1000336, i64 %scope)
+	%1035 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000922, i64 0, i64 0), i64 8)
 	%1036 = call i64 @js_tdecl(i64 %scope, i64 %1035, i64 %1034)
-	%1037 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000918, i64 0, i64 0), i64 7)
-	%1038 = call i64 @js_tdecl(i64 %scope, i64 %1037, i64 0)
-	%1039 = call i64 @js_closure(i64 1000341, i64 %scope)
-	%1040 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000920, i64 0, i64 0), i64 9)
-	%1041 = call i64 @js_tdecl(i64 %scope, i64 %1040, i64 %1039)
-	%1042 = call i64 @js_closure(i64 1000342, i64 %scope)
-	%1043 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000921, i64 0, i64 0), i64 8)
-	%1044 = call i64 @js_tdecl(i64 %scope, i64 %1043, i64 %1042)
-	%1045 = call i64 @js_closure(i64 1000343, i64 %scope)
-	%1046 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000929, i64 0, i64 0), i64 8)
-	%1047 = call i64 @js_tdecl(i64 %scope, i64 %1046, i64 %1045)
-	%1048 = call i64 @js_getret()
-	ret i64 %1048
+	%1037 = call i64 @js_closure(i64 1000337, i64 %scope)
+	%1038 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000923, i64 0, i64 0), i64 8)
+	%1039 = call i64 @js_tdecl(i64 %scope, i64 %1038, i64 %1037)
+	%1040 = call i64 @js_closure(i64 1000338, i64 %scope)
+	%1041 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000931, i64 0, i64 0), i64 10)
+	%1042 = call i64 @js_tdecl(i64 %scope, i64 %1041, i64 %1040)
+	%1043 = call i64 @js_closure(i64 1000343, i64 %scope)
+	%1044 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000934, i64 0, i64 0), i64 14)
+	%1045 = call i64 @js_tdecl(i64 %scope, i64 %1044, i64 %1043)
+	%1046 = call i64 @js_closure(i64 1000344, i64 %scope)
+	%1047 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000936, i64 0, i64 0), i64 9)
+	%1048 = call i64 @js_tdecl(i64 %scope, i64 %1047, i64 %1046)
+	%1049 = call i64 @js_closure(i64 1000345, i64 %scope)
+	%1050 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000938, i64 0, i64 0), i64 11)
+	%1051 = call i64 @js_tdecl(i64 %scope, i64 %1050, i64 %1049)
+	%1052 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000939, i64 0, i64 0), i64 7)
+	%1053 = call i64 @js_tdecl(i64 %scope, i64 %1052, i64 0)
+	%1054 = call i64 @js_closure(i64 1000346, i64 %scope)
+	%1055 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000941, i64 0, i64 0), i64 9)
+	%1056 = call i64 @js_tdecl(i64 %scope, i64 %1055, i64 %1054)
+	%1057 = call i64 @js_closure(i64 1000347, i64 %scope)
+	%1058 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000942, i64 0, i64 0), i64 8)
+	%1059 = call i64 @js_tdecl(i64 %scope, i64 %1058, i64 %1057)
+	%1060 = call i64 @js_closure(i64 1000348, i64 %scope)
+	%1061 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000950, i64 0, i64 0), i64 8)
+	%1062 = call i64 @js_tdecl(i64 %scope, i64 %1061, i64 %1060)
+	%1063 = call i64 @js_getret()
+	ret i64 %1063
 }
 
 declare i64 @js_setret(i64 %0)
@@ -30714,220 +30754,565 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
+	%18 = call i64 @js_typeof(i64 %17)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%20 = call i64 @js_eq(i64 %18, i64 %19)
+	%21 = call i64 @js_truthy(i64 %20)
+	%22 = icmp ne i64 %21, 0
+	br i1 %22, label %29, label %23
+
+23:
+	%24 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%25 = call i64 @js_scope_get(i64 %15, i64 %24)
+	%26 = call i64 @js_typeof(i64 %25)
+	%27 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%28 = call i64 @js_eq(i64 %26, i64 %27)
+	br label %29
+
+29:
+	%30 = phi i64 [ %20, %14 ], [ %28, %23 ]
+	%31 = call i64 @js_truthy(i64 %30)
+	%32 = icmp ne i64 %31, 0
+	br i1 %32, label %33, label %34
+
+33:
+	br label %59
+
+34:
+	%35 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
+	%36 = call i64 @js_scope_get(i64 %15, i64 %35)
+	%37 = call i64 @js_arr_new()
+	%38 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%39 = call i64 @js_scope_get(i64 %15, i64 %38)
+	%40 = call i64 @js_arr_push(i64 %37, i64 %39)
+	%41 = call i64 @js_call(i64 %36, i64 0, i64 %37)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%43 = call i64 @js_tdecl(i64 %15, i64 %42, i64 %41)
+	%44 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
+	%45 = call i64 @js_scope_get(i64 %15, i64 %44)
+	%46 = call i64 @js_arr_new()
+	%47 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%48 = call i64 @js_scope_get(i64 %15, i64 %47)
+	%49 = call i64 @js_arr_push(i64 %46, i64 %48)
+	%50 = call i64 @js_call(i64 %45, i64 0, i64 %46)
+	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
+	%52 = call i64 @js_tdecl(i64 %15, i64 %51, i64 %50)
+	%53 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%54 = call i64 @js_scope_get(i64 %15, i64 %53)
+	%55 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000273, i64 0, i64 0), i64 1)
+	%56 = call i64 @js_eq(i64 %54, i64 %55)
+	%57 = call i64 @js_truthy(i64 %56)
+	%58 = icmp ne i64 %57, 0
+	br i1 %58, label %90, label %91
+
+59:
+	%60 = call i64 @js_scope_new(i64 %15)
+	br label %61
+
+61:
+	%62 = phi i64 [ %60, %59 ]
+	%63 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000478, i64 0, i64 0), i64 10)
+	%64 = call i64 @js_scope_get(i64 %62, i64 %63)
+	%65 = call i64 @js_arr_new()
+	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%67 = call i64 @js_scope_get(i64 %62, i64 %66)
+	%68 = call i64 @js_arr_push(i64 %65, i64 %67)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%70 = call i64 @js_scope_get(i64 %62, i64 %69)
+	%71 = call i64 @js_arr_push(i64 %65, i64 %70)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%73 = call i64 @js_scope_get(i64 %62, i64 %72)
+	%74 = call i64 @js_arr_push(i64 %65, i64 %73)
+	%75 = call i64 @js_call(i64 %64, i64 0, i64 %65)
+	%76 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000479, i64 0, i64 0), i64 1)
+	%77 = call i64 @js_tdecl(i64 %62, i64 %76, i64 %75)
+	%78 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000479, i64 0, i64 0), i64 1)
+	%79 = call i64 @js_scope_get(i64 %62, i64 %78)
+	%80 = call i64 @js_sne(i64 %79, i64 0)
+	%81 = call i64 @js_truthy(i64 %80)
+	%82 = icmp ne i64 %81, 0
+	br i1 %82, label %83, label %84
+
+83:
+	br label %85
+
+84:
+	br label %34
+
+85:
+	br label %86
+
+86:
+	%87 = phi i64 [ %62, %85 ]
+	%88 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000479, i64 0, i64 0), i64 1)
+	%89 = call i64 @js_scope_get(i64 %87, i64 %88)
+	ret i64 %89
+
+dead452:
+	br label %84
+
+90:
+	br label %101
+
+91:
+	%92 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000411, i64 0, i64 0), i64 7)
+	%93 = call i64 @js_scope_get(i64 %15, i64 %92)
+	%94 = call i64 @js_arr_new()
+	%95 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%96 = call i64 @js_scope_get(i64 %15, i64 %95)
+	%97 = call i64 @js_arr_push(i64 %94, i64 %96)
+	%98 = call i64 @js_call(i64 %93, i64 0, i64 %94)
+	%99 = call i64 @js_truthy(i64 %98)
+	%100 = icmp ne i64 %99, 0
+	br i1 %100, label %183, label %175
+
+101:
+	%102 = call i64 @js_scope_new(i64 %15)
+	br label %103
+
+103:
+	%104 = phi i64 [ %102, %101 ]
+	%105 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000470, i64 0, i64 0), i64 8)
+	%106 = call i64 @js_scope_get(i64 %104, i64 %105)
+	%107 = call i64 @js_arr_new()
+	%108 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
+	%109 = call i64 @js_scope_get(i64 %104, i64 %108)
+	%110 = call i64 @js_arr_push(i64 %107, i64 %109)
+	%111 = call i64 @js_call(i64 %106, i64 0, i64 %107)
+	%112 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
+	%113 = call i64 @js_tdecl(i64 %104, i64 %112, i64 %111)
+	%114 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000400, i64 0, i64 0), i64 8)
+	%115 = call i64 @js_scope_get(i64 %104, i64 %114)
+	%116 = call i64 @js_arr_new()
+	%117 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
+	%118 = call i64 @js_scope_get(i64 %104, i64 %117)
+	%119 = call i64 @js_arr_push(i64 %116, i64 %118)
+	%120 = call i64 @js_call(i64 %115, i64 0, i64 %116)
+	%121 = call i64 @js_truthy(i64 %120)
+	%122 = icmp ne i64 %121, 0
+	br i1 %122, label %123, label %124
+
+123:
+	br label %140
+
+124:
+	%125 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000225, i64 0, i64 0), i64 7)
+	%126 = call i64 @js_scope_get(i64 %104, i64 %125)
+	%127 = call i64 @js_arr_new()
+	%128 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
+	%129 = call i64 @js_scope_get(i64 %104, i64 %128)
+	%130 = call i64 @js_arr_push(i64 %127, i64 %129)
+	%131 = call i64 @js_num_i(i64 0)
+	%132 = call i64 @js_num_i(i64 1)
+	%133 = call i64 @js_sub(i64 %131, i64 %132)
+	%134 = call i64 @js_arr_push(i64 %127, i64 %133)
+	%135 = call i64 @js_call(i64 %126, i64 0, i64 %127)
+	%136 = call i64 @js_num_i(i64 0)
+	%137 = call i64 @js_eq(i64 %135, i64 %136)
+	%138 = call i64 @js_truthy(i64 %137)
+	%139 = icmp ne i64 %138, 0
+	br i1 %139, label %152, label %153
+
+140:
+	br label %141
+
+141:
+	%142 = phi i64 [ %104, %140 ]
+	%143 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
+	%144 = call i64 @js_scope_get(i64 %142, i64 %143)
+	%145 = call i64 @js_arr_new()
+	%146 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000480, i64 0, i64 0), i64 19)
+	%147 = call i64 @js_arr_push(i64 %145, i64 %146)
+	%148 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000481, i64 0, i64 0), i64 14)
+	%149 = call i64 @js_arr_push(i64 %145, i64 %148)
+	%150 = call i64 @js_call(i64 %144, i64 0, i64 %145)
+	%151 = call i64 @js_setret(i64 %150)
+	br label %124
+
+152:
+	br label %171
+
+153:
+	%154 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000227, i64 0, i64 0), i64 6)
+	%155 = call i64 @js_scope_get(i64 %104, i64 %154)
+	%156 = call i64 @js_arr_new()
+	%157 = call i64 @js_num_i(i64 4)
+	%158 = call i64 @js_arr_push(i64 %156, i64 %157)
+	%159 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000470, i64 0, i64 0), i64 8)
+	%160 = call i64 @js_scope_get(i64 %104, i64 %159)
+	%161 = call i64 @js_arr_new()
+	%162 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%163 = call i64 @js_scope_get(i64 %104, i64 %162)
+	%164 = call i64 @js_arr_push(i64 %161, i64 %163)
+	%165 = call i64 @js_call(i64 %160, i64 0, i64 %161)
+	%166 = call i64 @js_arr_push(i64 %156, i64 %165)
+	%167 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
+	%168 = call i64 @js_scope_get(i64 %104, i64 %167)
+	%169 = call i64 @js_arr_push(i64 %156, i64 %168)
+	%170 = call i64 @js_call(i64 %155, i64 0, i64 %156)
+	ret i64 %170
+
+171:
+	br label %172
+
+172:
+	%173 = phi i64 [ %104, %171 ]
+	%174 = call i64 @js_num_i(i64 0)
+	ret i64 %174
+
+dead453:
+	br label %153
+
+dead454:
+	br label %91
+
+175:
+	%176 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000411, i64 0, i64 0), i64 7)
+	%177 = call i64 @js_scope_get(i64 %15, i64 %176)
+	%178 = call i64 @js_arr_new()
+	%179 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
+	%180 = call i64 @js_scope_get(i64 %15, i64 %179)
+	%181 = call i64 @js_arr_push(i64 %178, i64 %180)
+	%182 = call i64 @js_call(i64 %177, i64 0, i64 %178)
+	br label %183
+
+183:
+	%184 = phi i64 [ %98, %91 ], [ %182, %175 ]
+	%185 = call i64 @js_truthy(i64 %184)
+	%186 = icmp ne i64 %185, 0
+	br i1 %186, label %187, label %188
+
+187:
+	br label %202
+
+188:
+	%189 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000483, i64 0, i64 0), i64 10)
+	%190 = call i64 @js_scope_get(i64 %15, i64 %189)
+	%191 = call i64 @js_arr_new()
+	%192 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%193 = call i64 @js_scope_get(i64 %15, i64 %192)
+	%194 = call i64 @js_arr_push(i64 %191, i64 %193)
+	%195 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%196 = call i64 @js_scope_get(i64 %15, i64 %195)
+	%197 = call i64 @js_arr_push(i64 %191, i64 %196)
+	%198 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
+	%199 = call i64 @js_scope_get(i64 %15, i64 %198)
+	%200 = call i64 @js_arr_push(i64 %191, i64 %199)
+	%201 = call i64 @js_call(i64 %190, i64 0, i64 %191)
+	ret i64 %201
+
+202:
+	br label %203
+
+203:
+	%204 = phi i64 [ %15, %202 ]
+	%205 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000482, i64 0, i64 0), i64 10)
+	%206 = call i64 @js_scope_get(i64 %204, i64 %205)
+	%207 = call i64 @js_arr_new()
+	%208 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%209 = call i64 @js_scope_get(i64 %204, i64 %208)
+	%210 = call i64 @js_arr_push(i64 %207, i64 %209)
+	%211 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000388, i64 0, i64 0), i64 7)
+	%212 = call i64 @js_scope_get(i64 %204, i64 %211)
+	%213 = call i64 @js_arr_new()
+	%214 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%215 = call i64 @js_scope_get(i64 %204, i64 %214)
+	%216 = call i64 @js_arr_push(i64 %213, i64 %215)
+	%217 = call i64 @js_call(i64 %212, i64 0, i64 %213)
+	%218 = call i64 @js_arr_push(i64 %207, i64 %217)
+	%219 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000388, i64 0, i64 0), i64 7)
+	%220 = call i64 @js_scope_get(i64 %204, i64 %219)
+	%221 = call i64 @js_arr_new()
+	%222 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
+	%223 = call i64 @js_scope_get(i64 %204, i64 %222)
+	%224 = call i64 @js_arr_push(i64 %221, i64 %223)
+	%225 = call i64 @js_call(i64 %220, i64 0, i64 %221)
+	%226 = call i64 @js_arr_push(i64 %207, i64 %225)
+	%227 = call i64 @js_call(i64 %206, i64 0, i64 %207)
+	ret i64 %227
+
+dead455:
+	br label %188
+
+dead456:
+	ret i64 0
+}
+
+define i64 @jsf_1000159(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%8 = call i64 @js_arg(i64 %args, i64 2)
+	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%11 = call i64 @js_tdecl(i64 %0, i64 %10, i64 %args)
+	br label %12
+
+12:
+	%13 = call i64 @js_scope_new(i64 %0)
+	br label %14
+
+14:
+	%15 = phi i64 [ %13, %12 ]
+	%16 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
 	%19 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_call(i64 %17, i64 0, i64 %18)
-	%23 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%23 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%24 = call i64 @js_tdecl(i64 %15, i64 %23, i64 %22)
-	%25 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
+	%25 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%26 = call i64 @js_scope_get(i64 %15, i64 %25)
 	%27 = call i64 @js_arr_new()
 	%28 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%29 = call i64 @js_scope_get(i64 %15, i64 %28)
 	%30 = call i64 @js_arr_push(i64 %27, i64 %29)
 	%31 = call i64 @js_call(i64 %26, i64 0, i64 %27)
-	%32 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
+	%32 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%33 = call i64 @js_tdecl(i64 %15, i64 %32, i64 %31)
-	%34 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%35 = call i64 @js_scope_get(i64 %15, i64 %34)
-	%36 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000273, i64 0, i64 0), i64 1)
-	%37 = call i64 @js_eq(i64 %35, i64 %36)
-	%38 = call i64 @js_truthy(i64 %37)
-	%39 = icmp ne i64 %38, 0
-	br i1 %39, label %40, label %41
+	%36 = call i64 @js_seq(i64 %35, i64 0)
+	%37 = call i64 @js_truthy(i64 %36)
+	%38 = icmp ne i64 %37, 0
+	br i1 %38, label %39, label %43
 
-40:
-	br label %51
+39:
+	%40 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
+	%41 = call i64 @js_scope_get(i64 %15, i64 %40)
+	%42 = call i64 @js_seq(i64 %41, i64 0)
+	br label %43
 
-41:
-	%42 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000411, i64 0, i64 0), i64 7)
-	%43 = call i64 @js_scope_get(i64 %15, i64 %42)
-	%44 = call i64 @js_arr_new()
-	%45 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%46 = call i64 @js_scope_get(i64 %15, i64 %45)
-	%47 = call i64 @js_arr_push(i64 %44, i64 %46)
-	%48 = call i64 @js_call(i64 %43, i64 0, i64 %44)
-	%49 = call i64 @js_truthy(i64 %48)
-	%50 = icmp ne i64 %49, 0
-	br i1 %50, label %133, label %125
+43:
+	%44 = phi i64 [ %36, %14 ], [ %42, %39 ]
+	%45 = call i64 @js_truthy(i64 %44)
+	%46 = icmp ne i64 %45, 0
+	br i1 %46, label %47, label %48
 
-51:
-	%52 = call i64 @js_scope_new(i64 %15)
-	br label %53
+47:
+	br label %55
 
-53:
-	%54 = phi i64 [ %52, %51 ]
-	%55 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000470, i64 0, i64 0), i64 8)
-	%56 = call i64 @js_scope_get(i64 %54, i64 %55)
-	%57 = call i64 @js_arr_new()
-	%58 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
-	%59 = call i64 @js_scope_get(i64 %54, i64 %58)
-	%60 = call i64 @js_arr_push(i64 %57, i64 %59)
-	%61 = call i64 @js_call(i64 %56, i64 0, i64 %57)
-	%62 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
-	%63 = call i64 @js_tdecl(i64 %54, i64 %62, i64 %61)
-	%64 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000400, i64 0, i64 0), i64 8)
-	%65 = call i64 @js_scope_get(i64 %54, i64 %64)
-	%66 = call i64 @js_arr_new()
-	%67 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
-	%68 = call i64 @js_scope_get(i64 %54, i64 %67)
-	%69 = call i64 @js_arr_push(i64 %66, i64 %68)
-	%70 = call i64 @js_call(i64 %65, i64 0, i64 %66)
-	%71 = call i64 @js_truthy(i64 %70)
-	%72 = icmp ne i64 %71, 0
-	br i1 %72, label %73, label %74
+48:
+	%49 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%50 = call i64 @js_scope_get(i64 %15, i64 %49)
+	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000234, i64 0, i64 0), i64 1)
+	%52 = call i64 @js_eq(i64 %50, i64 %51)
+	%53 = call i64 @js_truthy(i64 %52)
+	%54 = icmp ne i64 %53, 0
+	br i1 %54, label %58, label %62
 
-73:
-	br label %90
+55:
+	br label %56
+
+56:
+	%57 = phi i64 [ %15, %55 ]
+	ret i64 0
+
+dead457:
+	br label %48
+
+58:
+	%59 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
+	%60 = call i64 @js_scope_get(i64 %15, i64 %59)
+	%61 = call i64 @js_sne(i64 %60, i64 0)
+	br label %62
+
+62:
+	%63 = phi i64 [ %52, %48 ], [ %61, %58 ]
+	%64 = call i64 @js_truthy(i64 %63)
+	%65 = icmp ne i64 %64, 0
+	br i1 %65, label %66, label %70
+
+66:
+	%67 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
+	%68 = call i64 @js_scope_get(i64 %15, i64 %67)
+	%69 = call i64 @js_sne(i64 %68, i64 0)
+	br label %70
+
+70:
+	%71 = phi i64 [ %63, %62 ], [ %69, %66 ]
+	%72 = call i64 @js_truthy(i64 %71)
+	%73 = icmp ne i64 %72, 0
+	br i1 %73, label %74, label %75
 
 74:
-	%75 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000225, i64 0, i64 0), i64 7)
-	%76 = call i64 @js_scope_get(i64 %54, i64 %75)
-	%77 = call i64 @js_arr_new()
-	%78 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
-	%79 = call i64 @js_scope_get(i64 %54, i64 %78)
-	%80 = call i64 @js_arr_push(i64 %77, i64 %79)
-	%81 = call i64 @js_num_i(i64 0)
-	%82 = call i64 @js_num_i(i64 1)
-	%83 = call i64 @js_sub(i64 %81, i64 %82)
-	%84 = call i64 @js_arr_push(i64 %77, i64 %83)
-	%85 = call i64 @js_call(i64 %76, i64 0, i64 %77)
-	%86 = call i64 @js_num_i(i64 0)
-	%87 = call i64 @js_eq(i64 %85, i64 %86)
-	%88 = call i64 @js_truthy(i64 %87)
-	%89 = icmp ne i64 %88, 0
-	br i1 %89, label %102, label %103
+	br label %108
 
-90:
-	br label %91
+75:
+	%76 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
+	%77 = call i64 @js_scope_get(i64 %15, i64 %76)
+	%78 = call i64 @js_arr_new()
+	%79 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000490, i64 0, i64 0), i64 9)
+	%80 = call i64 @js_arr_push(i64 %78, i64 %79)
+	%81 = call i64 @js_str_mem(i8* getelementptr ([27 x i8], [27 x i8]* @str.1000491, i64 0, i64 0), i64 27)
+	%82 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
+	%83 = call i64 @js_scope_get(i64 %15, i64 %82)
+	%84 = call i64 @js_arr_new()
+	%85 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%86 = call i64 @js_scope_get(i64 %15, i64 %85)
+	%87 = call i64 @js_arr_push(i64 %84, i64 %86)
+	%88 = call i64 @js_call(i64 %83, i64 0, i64 %84)
+	%89 = call i64 @js_add(i64 %81, i64 %88)
+	%90 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000493, i64 0, i64 0), i64 1)
+	%91 = call i64 @js_add(i64 %89, i64 %90)
+	%92 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
+	%93 = call i64 @js_scope_get(i64 %15, i64 %92)
+	%94 = call i64 @js_add(i64 %91, i64 %93)
+	%95 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000493, i64 0, i64 0), i64 1)
+	%96 = call i64 @js_add(i64 %94, i64 %95)
+	%97 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
+	%98 = call i64 @js_scope_get(i64 %15, i64 %97)
+	%99 = call i64 @js_arr_new()
+	%100 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%101 = call i64 @js_scope_get(i64 %15, i64 %100)
+	%102 = call i64 @js_arr_push(i64 %99, i64 %101)
+	%103 = call i64 @js_call(i64 %98, i64 0, i64 %99)
+	%104 = call i64 @js_add(i64 %96, i64 %103)
+	%105 = call i64 @js_arr_push(i64 %78, i64 %104)
+	%106 = call i64 @js_call(i64 %77, i64 0, i64 %78)
+	%107 = call i64 @js_setret(i64 %106)
+	ret i64 0
 
-91:
-	%92 = phi i64 [ %54, %90 ]
-	%93 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
-	%94 = call i64 @js_scope_get(i64 %92, i64 %93)
-	%95 = call i64 @js_arr_new()
-	%96 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000478, i64 0, i64 0), i64 19)
-	%97 = call i64 @js_arr_push(i64 %95, i64 %96)
-	%98 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000479, i64 0, i64 0), i64 14)
-	%99 = call i64 @js_arr_push(i64 %95, i64 %98)
-	%100 = call i64 @js_call(i64 %94, i64 0, i64 %95)
-	%101 = call i64 @js_setret(i64 %100)
-	br label %74
+108:
+	%109 = call i64 @js_scope_new(i64 %15)
+	br label %110
 
-102:
-	br label %121
+110:
+	%111 = phi i64 [ %109, %108 ]
+	%112 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000487, i64 0, i64 0), i64 9)
+	%113 = call i64 @js_scope_get(i64 %111, i64 %112)
+	%114 = call i64 @js_arr_new()
+	%115 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%116 = call i64 @js_scope_get(i64 %111, i64 %115)
+	%117 = call i64 @js_arr_push(i64 %114, i64 %116)
+	%118 = call i64 @js_call(i64 %113, i64 0, i64 %114)
+	%119 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
+	%120 = call i64 @js_tdecl(i64 %111, i64 %119, i64 %118)
+	%121 = call i64 @js_num_i(i64 0)
+	%122 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%123 = call i64 @js_tdecl(i64 %111, i64 %122, i64 %121)
+	br label %124
 
-103:
-	%104 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000227, i64 0, i64 0), i64 6)
-	%105 = call i64 @js_scope_get(i64 %54, i64 %104)
-	%106 = call i64 @js_arr_new()
-	%107 = call i64 @js_num_i(i64 4)
-	%108 = call i64 @js_arr_push(i64 %106, i64 %107)
-	%109 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000470, i64 0, i64 0), i64 8)
-	%110 = call i64 @js_scope_get(i64 %54, i64 %109)
-	%111 = call i64 @js_arr_new()
-	%112 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%113 = call i64 @js_scope_get(i64 %54, i64 %112)
-	%114 = call i64 @js_arr_push(i64 %111, i64 %113)
-	%115 = call i64 @js_call(i64 %110, i64 0, i64 %111)
-	%116 = call i64 @js_arr_push(i64 %106, i64 %115)
-	%117 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000149, i64 0, i64 0), i64 1)
-	%118 = call i64 @js_scope_get(i64 %54, i64 %117)
-	%119 = call i64 @js_arr_push(i64 %106, i64 %118)
-	%120 = call i64 @js_call(i64 %105, i64 0, i64 %106)
-	ret i64 %120
+124:
+	%125 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%126 = call i64 @js_scope_get(i64 %111, i64 %125)
+	%127 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
+	%128 = call i64 @js_scope_get(i64 %111, i64 %127)
+	%129 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%130 = call i64 @js_get(i64 %128, i64 %129)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%132 = call i64 @js_get(i64 %130, i64 %131)
+	%133 = call i64 @js_lt(i64 %126, i64 %132)
+	%134 = call i64 @js_truthy(i64 %133)
+	%135 = icmp ne i64 %134, 0
+	br i1 %135, label %136, label %137
 
-121:
-	br label %122
-
-122:
-	%123 = phi i64 [ %54, %121 ]
-	%124 = call i64 @js_num_i(i64 0)
-	ret i64 %124
-
-dead452:
-	br label %103
-
-dead453:
-	br label %41
-
-125:
-	%126 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000411, i64 0, i64 0), i64 7)
-	%127 = call i64 @js_scope_get(i64 %15, i64 %126)
-	%128 = call i64 @js_arr_new()
-	%129 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
-	%130 = call i64 @js_scope_get(i64 %15, i64 %129)
-	%131 = call i64 @js_arr_push(i64 %128, i64 %130)
-	%132 = call i64 @js_call(i64 %127, i64 0, i64 %128)
-	br label %133
-
-133:
-	%134 = phi i64 [ %48, %41 ], [ %132, %125 ]
-	%135 = call i64 @js_truthy(i64 %134)
-	%136 = icmp ne i64 %135, 0
-	br i1 %136, label %137, label %138
+136:
+	br label %140
 
 137:
-	br label %152
+	%138 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
+	%139 = call i64 @js_scope_get(i64 %111, i64 %138)
+	ret i64 %139
 
-138:
-	%139 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000481, i64 0, i64 0), i64 10)
-	%140 = call i64 @js_scope_get(i64 %15, i64 %139)
-	%141 = call i64 @js_arr_new()
-	%142 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
-	%143 = call i64 @js_scope_get(i64 %15, i64 %142)
-	%144 = call i64 @js_arr_push(i64 %141, i64 %143)
-	%145 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%146 = call i64 @js_scope_get(i64 %15, i64 %145)
-	%147 = call i64 @js_arr_push(i64 %141, i64 %146)
-	%148 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
-	%149 = call i64 @js_scope_get(i64 %15, i64 %148)
-	%150 = call i64 @js_arr_push(i64 %141, i64 %149)
-	%151 = call i64 @js_call(i64 %140, i64 0, i64 %141)
-	ret i64 %151
+140:
+	br label %141
 
-152:
-	br label %153
+141:
+	%142 = phi i64 [ %111, %140 ]
+	%143 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000488, i64 0, i64 0), i64 10)
+	%144 = call i64 @js_scope_get(i64 %142, i64 %143)
+	%145 = call i64 @js_arr_new()
+	%146 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
+	%147 = call i64 @js_scope_get(i64 %142, i64 %146)
+	%148 = call i64 @js_arr_push(i64 %145, i64 %147)
+	%149 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
+	%150 = call i64 @js_scope_get(i64 %142, i64 %149)
+	%151 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%152 = call i64 @js_get(i64 %150, i64 %151)
+	%153 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%154 = call i64 @js_scope_get(i64 %142, i64 %153)
+	%155 = call i64 @js_get(i64 %152, i64 %154)
+	%156 = call i64 @js_arr_push(i64 %145, i64 %155)
+	%157 = call i64 @js_call(i64 %144, i64 0, i64 %145)
+	%158 = call i64 @js_num_i(i64 0)
+	%159 = call i64 @js_lt(i64 %157, i64 %158)
+	%160 = call i64 @js_truthy(i64 %159)
+	%161 = icmp ne i64 %160, 0
+	br i1 %161, label %162, label %163
 
-153:
-	%154 = phi i64 [ %15, %152 ]
-	%155 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000480, i64 0, i64 0), i64 10)
-	%156 = call i64 @js_scope_get(i64 %154, i64 %155)
-	%157 = call i64 @js_arr_new()
-	%158 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
-	%159 = call i64 @js_scope_get(i64 %154, i64 %158)
-	%160 = call i64 @js_arr_push(i64 %157, i64 %159)
-	%161 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000388, i64 0, i64 0), i64 7)
-	%162 = call i64 @js_scope_get(i64 %154, i64 %161)
-	%163 = call i64 @js_arr_new()
-	%164 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%165 = call i64 @js_scope_get(i64 %154, i64 %164)
-	%166 = call i64 @js_arr_push(i64 %163, i64 %165)
-	%167 = call i64 @js_call(i64 %162, i64 0, i64 %163)
-	%168 = call i64 @js_arr_push(i64 %157, i64 %167)
-	%169 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000388, i64 0, i64 0), i64 7)
-	%170 = call i64 @js_scope_get(i64 %154, i64 %169)
-	%171 = call i64 @js_arr_new()
-	%172 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
-	%173 = call i64 @js_scope_get(i64 %154, i64 %172)
-	%174 = call i64 @js_arr_push(i64 %171, i64 %173)
-	%175 = call i64 @js_call(i64 %170, i64 0, i64 %171)
-	%176 = call i64 @js_arr_push(i64 %157, i64 %175)
-	%177 = call i64 @js_call(i64 %156, i64 0, i64 %157)
-	ret i64 %177
+162:
+	br label %171
 
-dead454:
-	br label %138
+163:
+	%164 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%165 = call i64 @js_scope_get(i64 %142, i64 %164)
+	%166 = call i64 @js_num_i(i64 1)
+	%167 = call i64 @js_add(i64 %165, i64 %166)
+	%168 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%169 = call i64 @js_tset(i64 %142, i64 %168, i64 %167)
+	%170 = call i64 @js_setret(i64 %167)
+	br label %124
 
-dead455:
+171:
+	br label %172
+
+172:
+	%173 = phi i64 [ %142, %171 ]
+	%174 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
+	%175 = call i64 @js_scope_get(i64 %173, i64 %174)
+	%176 = call i64 @js_arr_new()
+	%177 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
+	%178 = call i64 @js_scope_get(i64 %173, i64 %177)
+	%179 = call i64 @js_arr_push(i64 %176, i64 %178)
+	%180 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
+	%181 = call i64 @js_scope_get(i64 %173, i64 %180)
+	%182 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%183 = call i64 @js_get(i64 %181, i64 %182)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%185 = call i64 @js_scope_get(i64 %173, i64 %184)
+	%186 = call i64 @js_get(i64 %183, i64 %185)
+	%187 = call i64 @js_arr_push(i64 %176, i64 %186)
+	%188 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000487, i64 0, i64 0), i64 9)
+	%189 = call i64 @js_scope_get(i64 %173, i64 %188)
+	%190 = call i64 @js_arr_new()
+	%191 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
+	%192 = call i64 @js_scope_get(i64 %173, i64 %191)
+	%193 = call i64 @js_arr_new()
+	%194 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
+	%195 = call i64 @js_scope_get(i64 %173, i64 %194)
+	%196 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%197 = call i64 @js_get(i64 %195, i64 %196)
+	%198 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%199 = call i64 @js_scope_get(i64 %173, i64 %198)
+	%200 = call i64 @js_get(i64 %197, i64 %199)
+	%201 = call i64 @js_arr_push(i64 %193, i64 %200)
+	%202 = call i64 @js_call(i64 %192, i64 0, i64 %193)
+	%203 = call i64 @js_arr_push(i64 %190, i64 %202)
+	%204 = call i64 @js_call(i64 %189, i64 0, i64 %190)
+	%205 = call i64 @js_arr_push(i64 %176, i64 %204)
+	%206 = call i64 @js_call(i64 %175, i64 0, i64 %176)
+	%207 = call i64 @js_setret(i64 %206)
+	br label %163
+
+dead458:
+	br label %75
+
+dead459:
 	ret i64 0
 }
 
-define i64 @jsf_1000159(i64 %env, i64 %args) {
+define i64 @jsf_1000160(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
@@ -30985,7 +31370,7 @@ entry:
 	%41 = call i64 @js_call(i64 %33, i64 0, i64 %34)
 	ret i64 %41
 
-dead456:
+dead460:
 	br label %22
 
 42:
@@ -31017,7 +31402,7 @@ dead456:
 	%62 = call i64 @js_call(i64 %54, i64 0, i64 %55)
 	ret i64 %62
 
-dead457:
+dead461:
 	br label %43
 
 63:
@@ -31049,7 +31434,7 @@ dead457:
 	%83 = call i64 @js_call(i64 %75, i64 0, i64 %76)
 	ret i64 %83
 
-dead458:
+dead462:
 	br label %64
 
 84:
@@ -31058,7 +31443,7 @@ dead458:
 85:
 	%86 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%87 = call i64 @js_scope_get(i64 %14, i64 %86)
-	%88 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000484, i64 0, i64 0), i64 2)
+	%88 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000495, i64 0, i64 0), i64 2)
 	%89 = call i64 @js_eq(i64 %87, i64 %88)
 	%90 = call i64 @js_truthy(i64 %89)
 	%91 = icmp ne i64 %90, 0
@@ -31101,15 +31486,15 @@ dead458:
 	%116 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%117 = call i64 @js_scope_get(i64 %115, i64 %116)
 	%118 = call i64 @js_arr_new()
-	%119 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000478, i64 0, i64 0), i64 19)
+	%119 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000480, i64 0, i64 0), i64 19)
 	%120 = call i64 @js_arr_push(i64 %118, i64 %119)
-	%121 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000483, i64 0, i64 0), i64 16)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000494, i64 0, i64 0), i64 16)
 	%122 = call i64 @js_arr_push(i64 %118, i64 %121)
 	%123 = call i64 @js_call(i64 %117, i64 0, i64 %118)
 	%124 = call i64 @js_setret(i64 %123)
 	br label %102
 
-dead459:
+dead463:
 	br label %85
 
 125:
@@ -31119,7 +31504,7 @@ dead459:
 	%127 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%128 = call i64 @js_scope_get(i64 %14, i64 %127)
 	%129 = call i64 @js_arr_new()
-	%130 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000485, i64 0, i64 0), i64 28)
+	%130 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000496, i64 0, i64 0), i64 28)
 	%131 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%132 = call i64 @js_scope_get(i64 %14, i64 %131)
 	%133 = call i64 @js_add(i64 %130, i64 %132)
@@ -31153,14 +31538,14 @@ dead459:
 	%157 = call i64 @js_call(i64 %142, i64 0, i64 %143)
 	ret i64 %157
 
-dead460:
+dead464:
 	br label %126
 
-dead461:
+dead465:
 	ret i64 0
 }
 
-define i64 @jsf_1000160(i64 %env, i64 %args) {
+define i64 @jsf_1000161(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
@@ -31265,10 +31650,10 @@ entry:
 	%80 = call i64 @js_get(i64 %78, i64 %79)
 	ret i64 %80
 
-dead462:
+dead466:
 	br label %53
 
-dead463:
+dead467:
 	br label %22
 
 81:
@@ -31347,10 +31732,10 @@ dead463:
 	%140 = call i64 @js_get(i64 %138, i64 %139)
 	ret i64 %140
 
-dead464:
+dead468:
 	br label %113
 
-dead465:
+dead469:
 	br label %82
 
 141:
@@ -31429,10 +31814,10 @@ dead465:
 	%200 = call i64 @js_get(i64 %198, i64 %199)
 	ret i64 %200
 
-dead466:
+dead470:
 	br label %173
 
-dead467:
+dead471:
 	br label %142
 
 201:
@@ -31441,7 +31826,7 @@ dead467:
 202:
 	%203 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%204 = call i64 @js_scope_get(i64 %14, i64 %203)
-	%205 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000484, i64 0, i64 0), i64 2)
+	%205 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000495, i64 0, i64 0), i64 2)
 	%206 = call i64 @js_eq(i64 %204, i64 %205)
 	%207 = call i64 @js_truthy(i64 %206)
 	%208 = icmp ne i64 %207, 0
@@ -31492,9 +31877,9 @@ dead467:
 	%241 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%242 = call i64 @js_scope_get(i64 %240, i64 %241)
 	%243 = call i64 @js_arr_new()
-	%244 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000478, i64 0, i64 0), i64 19)
+	%244 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000480, i64 0, i64 0), i64 19)
 	%245 = call i64 @js_arr_push(i64 %243, i64 %244)
-	%246 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000483, i64 0, i64 0), i64 16)
+	%246 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000494, i64 0, i64 0), i64 16)
 	%247 = call i64 @js_arr_push(i64 %243, i64 %246)
 	%248 = call i64 @js_call(i64 %242, i64 0, i64 %243)
 	%249 = call i64 @js_setret(i64 %248)
@@ -31571,7 +31956,7 @@ dead467:
 	%308 = call i64 @js_call(i64 %294, i64 0, i64 %295)
 	ret i64 %308
 
-dead468:
+dead472:
 	br label %270
 
 309:
@@ -31619,10 +32004,10 @@ dead468:
 	%345 = call i64 @js_call(i64 %335, i64 0, i64 %336)
 	ret i64 %345
 
-dead469:
+dead473:
 	br label %310
 
-dead470:
+dead474:
 	br label %202
 
 346:
@@ -31632,7 +32017,7 @@ dead470:
 	%348 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%349 = call i64 @js_scope_get(i64 %14, i64 %348)
 	%350 = call i64 @js_arr_new()
-	%351 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000485, i64 0, i64 0), i64 28)
+	%351 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000496, i64 0, i64 0), i64 28)
 	%352 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%353 = call i64 @js_scope_get(i64 %14, i64 %352)
 	%354 = call i64 @js_add(i64 %351, i64 %353)
@@ -31710,7 +32095,7 @@ dead470:
 	%414 = call i64 @js_call(i64 %389, i64 0, i64 %390)
 	ret i64 %414
 
-dead471:
+dead475:
 	br label %373
 
 415:
@@ -31869,7 +32254,7 @@ dead471:
 	%544 = call i64 @js_call(i64 %519, i64 0, i64 %520)
 	ret i64 %544
 
-dead472:
+dead476:
 	br label %507
 
 545:
@@ -31951,17 +32336,17 @@ dead472:
 	%607 = call i64 @js_call(i64 %582, i64 0, i64 %583)
 	ret i64 %607
 
-dead473:
+dead477:
 	br label %570
 
-dead474:
+dead478:
 	br label %347
 
-dead475:
+dead479:
 	ret i64 0
 }
 
-define i64 @jsf_1000161(i64 %env, i64 %args) {
+define i64 @jsf_1000162(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
@@ -31994,7 +32379,7 @@ entry:
 	%24 = call i64 @js_tdecl(i64 %15, i64 %23, i64 %22)
 	%25 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%26 = call i64 @js_scope_get(i64 %15, i64 %25)
-	%27 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000486, i64 0, i64 0), i64 1)
+	%27 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000497, i64 0, i64 0), i64 1)
 	%28 = call i64 @js_eq(i64 %26, i64 %27)
 	%29 = call i64 @js_truthy(i64 %28)
 	%30 = icmp ne i64 %29, 0
@@ -32006,7 +32391,7 @@ entry:
 32:
 	%33 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%34 = call i64 @js_scope_get(i64 %15, i64 %33)
-	%35 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000487, i64 0, i64 0), i64 1)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000498, i64 0, i64 0), i64 1)
 	%36 = call i64 @js_eq(i64 %34, i64 %35)
 	%37 = call i64 @js_truthy(i64 %36)
 	%38 = icmp ne i64 %37, 0
@@ -32036,7 +32421,7 @@ entry:
 	%58 = call i64 @js_call(i64 %43, i64 0, i64 %44)
 	ret i64 %58
 
-dead476:
+dead480:
 	br label %32
 
 59:
@@ -32045,7 +32430,7 @@ dead476:
 60:
 	%61 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%62 = call i64 @js_scope_get(i64 %15, i64 %61)
-	%63 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000488, i64 0, i64 0), i64 1)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000499, i64 0, i64 0), i64 1)
 	%64 = call i64 @js_eq(i64 %62, i64 %63)
 	%65 = call i64 @js_truthy(i64 %64)
 	%66 = icmp ne i64 %65, 0
@@ -32075,7 +32460,7 @@ dead476:
 	%86 = call i64 @js_call(i64 %71, i64 0, i64 %72)
 	ret i64 %86
 
-dead477:
+dead481:
 	br label %60
 
 87:
@@ -32084,7 +32469,7 @@ dead477:
 88:
 	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%90 = call i64 @js_scope_get(i64 %15, i64 %89)
-	%91 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000489, i64 0, i64 0), i64 2)
+	%91 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000500, i64 0, i64 0), i64 2)
 	%92 = call i64 @js_eq(i64 %90, i64 %91)
 	%93 = call i64 @js_truthy(i64 %92)
 	%94 = icmp ne i64 %93, 0
@@ -32114,13 +32499,13 @@ dead477:
 	%114 = call i64 @js_call(i64 %99, i64 0, i64 %100)
 	ret i64 %114
 
-dead478:
+dead482:
 	br label %88
 
 115:
 	%116 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%117 = call i64 @js_scope_get(i64 %15, i64 %116)
-	%118 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000490, i64 0, i64 0), i64 2)
+	%118 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000501, i64 0, i64 0), i64 2)
 	%119 = call i64 @js_eq(i64 %117, i64 %118)
 	br label %120
 
@@ -32137,7 +32522,7 @@ dead478:
 	%126 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%127 = call i64 @js_scope_get(i64 %15, i64 %126)
 	%128 = call i64 @js_arr_new()
-	%129 = call i64 @js_str_mem(i8* getelementptr ([21 x i8], [21 x i8]* @str.1000493, i64 0, i64 0), i64 21)
+	%129 = call i64 @js_str_mem(i8* getelementptr ([21 x i8], [21 x i8]* @str.1000504, i64 0, i64 0), i64 21)
 	%130 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%131 = call i64 @js_scope_get(i64 %15, i64 %130)
 	%132 = call i64 @js_add(i64 %129, i64 %131)
@@ -32200,9 +32585,9 @@ dead478:
 	%177 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%178 = call i64 @js_scope_get(i64 %176, i64 %177)
 	%179 = call i64 @js_arr_new()
-	%180 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000491, i64 0, i64 0), i64 15)
+	%180 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000502, i64 0, i64 0), i64 15)
 	%181 = call i64 @js_arr_push(i64 %179, i64 %180)
-	%182 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000492, i64 0, i64 0), i64 28)
+	%182 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000503, i64 0, i64 0), i64 28)
 	%183 = call i64 @js_arr_push(i64 %179, i64 %182)
 	%184 = call i64 @js_call(i64 %178, i64 0, i64 %179)
 	%185 = call i64 @js_setret(i64 %184)
@@ -32214,7 +32599,7 @@ dead478:
 187:
 	%188 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%189 = call i64 @js_scope_get(i64 %140, i64 %188)
-	%190 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000489, i64 0, i64 0), i64 2)
+	%190 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000500, i64 0, i64 0), i64 2)
 	%191 = call i64 @js_eq(i64 %189, i64 %190)
 	%192 = call i64 @js_truthy(i64 %191)
 	%193 = icmp ne i64 %192, 0
@@ -32227,7 +32612,7 @@ dead478:
 	%196 = phi i64 [ %140, %194 ]
 	%197 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
 	%198 = call i64 @js_scope_get(i64 %196, i64 %197)
-	%199 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000489, i64 0, i64 0), i64 2)
+	%199 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000500, i64 0, i64 0), i64 2)
 	%200 = call i64 @js_eq(i64 %198, i64 %199)
 	%201 = call i64 @js_truthy(i64 %200)
 	%202 = icmp ne i64 %201, 0
@@ -32257,7 +32642,7 @@ dead478:
 	%218 = call i64 @js_num_i(i64 0)
 	ret i64 %218
 
-dead479:
+dead483:
 	br label %204
 
 219:
@@ -32277,10 +32662,10 @@ dead479:
 	%227 = call i64 @js_num_i(i64 0)
 	ret i64 %227
 
-dead480:
+dead484:
 	br label %220
 
-dead481:
+dead485:
 	br label %187
 
 228:
@@ -32320,17 +32705,17 @@ dead481:
 	%256 = call i64 @js_call(i64 %246, i64 0, i64 %247)
 	ret i64 %256
 
-dead482:
+dead486:
 	br label %229
 
-dead483:
+dead487:
 	br label %125
 
-dead484:
+dead488:
 	ret i64 0
 }
 
-define i64 @jsf_1000162(i64 %env, i64 %args) {
+define i64 @jsf_1000163(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -32411,7 +32796,7 @@ entry:
 	%64 = call i64 @js_call(i64 %55, i64 0, i64 %56)
 	ret i64 %64
 
-dead485:
+dead489:
 	br label %34
 
 65:
@@ -32454,14 +32839,14 @@ dead485:
 	%96 = call i64 @js_call(i64 %82, i64 0, i64 %83)
 	ret i64 %96
 
-dead486:
+dead490:
 	br label %66
 
-dead487:
+dead491:
 	ret i64 0
 }
 
-define i64 @jsf_1000163(i64 %env, i64 %args) {
+define i64 @jsf_1000164(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -32546,14 +32931,14 @@ entry:
 	%64 = call i64 @js_eq(i64 %62, i64 %63)
 	ret i64 %64
 
-dead488:
+dead492:
 	br label %34
 
-dead489:
+dead493:
 	ret i64 0
 }
 
-define i64 @jsf_1000164(i64 %env, i64 %args) {
+define i64 @jsf_1000165(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -32603,7 +32988,7 @@ entry:
 	%33 = call i64 @js_sub(i64 %31, i64 %32)
 	ret i64 %33
 
-dead490:
+dead494:
 	br label %20
 
 34:
@@ -32621,14 +33006,14 @@ dead490:
 	%40 = call i64 @js_num_i(i64 0)
 	ret i64 %40
 
-dead491:
+dead495:
 	br label %35
 
-dead492:
+dead496:
 	ret i64 0
 }
 
-define i64 @jsf_1000165(i64 %env, i64 %args) {
+define i64 @jsf_1000166(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -32677,7 +33062,7 @@ entry:
 	br label %55
 
 34:
-	%35 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000497, i64 0, i64 0), i64 8)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000508, i64 0, i64 0), i64 8)
 	%36 = call i64 @js_scope_get(i64 %11, i64 %35)
 	%37 = call i64 @js_arr_new()
 	%38 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000388, i64 0, i64 0), i64 7)
@@ -32716,14 +33101,14 @@ entry:
 	%67 = call i64 @js_call(i64 %59, i64 0, i64 %60)
 	ret i64 %67
 
-dead493:
+dead497:
 	br label %34
 
-dead494:
+dead498:
 	ret i64 0
 }
 
-define i64 @jsf_1000166(i64 %env, i64 %args) {
+define i64 @jsf_1000167(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -32773,7 +33158,7 @@ entry:
 	%33 = call i64 @js_sub(i64 %31, i64 %32)
 	ret i64 %33
 
-dead495:
+dead499:
 	br label %20
 
 34:
@@ -32791,14 +33176,14 @@ dead495:
 	%40 = call i64 @js_num_i(i64 1)
 	ret i64 %40
 
-dead496:
+dead500:
 	br label %35
 
-dead497:
+dead501:
 	ret i64 0
 }
 
-define i64 @jsf_1000167(i64 %env, i64 %args) {
+define i64 @jsf_1000168(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -32824,7 +33209,7 @@ entry:
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000500, i64 0, i64 0), i64 2)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000511, i64 0, i64 0), i64 2)
 	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000412, i64 0, i64 0), i64 7)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
@@ -32833,16 +33218,16 @@ entry:
 	%26 = call i64 @js_scope_get(i64 %12, i64 %25)
 	%27 = call i64 @js_arr_push(i64 %24, i64 %26)
 	%28 = call i64 @js_call(i64 %23, i64 0, i64 %24)
-	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000501, i64 0, i64 0), i64 2)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
 	%30 = call i64 @js_tdecl(i64 %12, i64 %29, i64 %28)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000500, i64 0, i64 0), i64 2)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000511, i64 0, i64 0), i64 2)
 	%32 = call i64 @js_scope_get(i64 %12, i64 %31)
 	%33 = call i64 @js_truthy(i64 %32)
 	%34 = icmp ne i64 %33, 0
 	br i1 %34, label %38, label %35
 
 35:
-	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000501, i64 0, i64 0), i64 2)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
 	%37 = call i64 @js_scope_get(i64 %12, i64 %36)
 	br label %38
 
@@ -32870,7 +33255,7 @@ entry:
 
 52:
 	%53 = phi i64 [ %12, %51 ]
-	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000500, i64 0, i64 0), i64 2)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000511, i64 0, i64 0), i64 2)
 	%55 = call i64 @js_scope_get(i64 %53, i64 %54)
 	%56 = call i64 @js_not(i64 %55)
 	%57 = call i64 @js_truthy(i64 %56)
@@ -32881,7 +33266,7 @@ entry:
 	br label %66
 
 60:
-	%61 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000501, i64 0, i64 0), i64 2)
+	%61 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
 	%62 = call i64 @js_scope_get(i64 %53, i64 %61)
 	%63 = call i64 @js_not(i64 %62)
 	%64 = call i64 @js_truthy(i64 %63)
@@ -32895,7 +33280,7 @@ entry:
 	%68 = phi i64 [ %53, %66 ]
 	ret i64 2
 
-dead498:
+dead502:
 	br label %60
 
 69:
@@ -32923,10 +33308,10 @@ dead498:
 	%85 = phi i64 [ %53, %83 ]
 	ret i64 2
 
-dead499:
+dead503:
 	br label %70
 
-dead500:
+dead504:
 	br label %43
 
 86:
@@ -32966,14 +33351,14 @@ dead500:
 	%110 = call i64 @js_eq(i64 %107, i64 %109)
 	ret i64 %110
 
-dead501:
+dead505:
 	br label %97
 
-dead502:
+dead506:
 	ret i64 0
 }
 
-define i64 @jsf_1000168(i64 %env, i64 %args) {
+define i64 @jsf_1000169(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -33030,7 +33415,7 @@ entry:
 	%40 = call i64 @js_scope_get(i64 %12, i64 %39)
 	%41 = call i64 @js_arr_push(i64 %38, i64 %40)
 	%42 = call i64 @js_call(i64 %37, i64 0, i64 %38)
-	%43 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%44 = call i64 @js_tdecl(i64 %12, i64 %43, i64 %42)
 	%45 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%46 = call i64 @js_scope_get(i64 %12, i64 %45)
@@ -33039,9 +33424,9 @@ entry:
 	%49 = call i64 @js_scope_get(i64 %12, i64 %48)
 	%50 = call i64 @js_arr_push(i64 %47, i64 %49)
 	%51 = call i64 @js_call(i64 %46, i64 0, i64 %47)
-	%52 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%52 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%53 = call i64 @js_tdecl(i64 %12, i64 %52, i64 %51)
-	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%55 = call i64 @js_scope_get(i64 %12, i64 %54)
 	%56 = call i64 @js_sne(i64 %55, i64 0)
 	%57 = call i64 @js_truthy(i64 %56)
@@ -33088,7 +33473,7 @@ entry:
 	%86 = phi i64 [ %61, %84 ]
 	ret i64 2
 
-dead503:
+dead507:
 	br label %73
 
 87:
@@ -33119,14 +33504,14 @@ dead503:
 	%106 = phi i64 [ %61, %104 ]
 	ret i64 2
 
-dead504:
+dead508:
 	br label %88
 
-dead505:
+dead509:
 	br label %35
 
 107:
-	%108 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%108 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%109 = call i64 @js_scope_get(i64 %12, i64 %108)
 	%110 = call i64 @js_sne(i64 %109, i64 0)
 	br label %111
@@ -33158,7 +33543,7 @@ dead505:
 
 128:
 	%129 = phi i64 [ %127, %126 ]
-	%130 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%130 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%131 = call i64 @js_scope_get(i64 %129, i64 %130)
 	%132 = call i64 @js_seq(i64 %131, i64 0)
 	%133 = call i64 @js_truthy(i64 %132)
@@ -33169,7 +33554,7 @@ dead505:
 	br label %142
 
 136:
-	%137 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%137 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%138 = call i64 @js_scope_get(i64 %129, i64 %137)
 	%139 = call i64 @js_seq(i64 %138, i64 0)
 	%140 = call i64 @js_truthy(i64 %139)
@@ -33183,20 +33568,20 @@ dead505:
 	%144 = phi i64 [ %129, %142 ]
 	ret i64 2
 
-dead506:
+dead510:
 	br label %136
 
 145:
 	br label %162
 
 146:
-	%147 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%147 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%148 = call i64 @js_scope_get(i64 %129, i64 %147)
 	%149 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%150 = call i64 @js_get(i64 %148, i64 %149)
 	%151 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%152 = call i64 @js_get(i64 %150, i64 %151)
-	%153 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%153 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%154 = call i64 @js_scope_get(i64 %129, i64 %153)
 	%155 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%156 = call i64 @js_get(i64 %154, i64 %155)
@@ -33214,7 +33599,7 @@ dead506:
 	%164 = phi i64 [ %129, %162 ]
 	ret i64 2
 
-dead507:
+dead511:
 	br label %146
 
 165:
@@ -33233,13 +33618,13 @@ dead507:
 	%172 = phi i64 [ %129, %170 ]
 	ret i64 2
 
-dead508:
+dead512:
 	br label %166
 
 173:
 	%174 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%175 = call i64 @js_scope_get(i64 %129, i64 %174)
-	%176 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%176 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%177 = call i64 @js_scope_get(i64 %129, i64 %176)
 	%178 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%179 = call i64 @js_get(i64 %177, i64 %178)
@@ -33261,10 +33646,10 @@ dead508:
 
 188:
 	%189 = phi i64 [ %129, %187 ]
-	%190 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000502, i64 0, i64 0), i64 7)
+	%190 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000513, i64 0, i64 0), i64 7)
 	%191 = call i64 @js_scope_get(i64 %189, i64 %190)
 	%192 = call i64 @js_arr_new()
-	%193 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%193 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%194 = call i64 @js_scope_get(i64 %189, i64 %193)
 	%195 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%196 = call i64 @js_get(i64 %194, i64 %195)
@@ -33272,7 +33657,7 @@ dead508:
 	%198 = call i64 @js_scope_get(i64 %189, i64 %197)
 	%199 = call i64 @js_get(i64 %196, i64 %198)
 	%200 = call i64 @js_arr_push(i64 %192, i64 %199)
-	%201 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%201 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%202 = call i64 @js_scope_get(i64 %189, i64 %201)
 	%203 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%204 = call i64 @js_get(i64 %202, i64 %203)
@@ -33290,13 +33675,13 @@ dead508:
 	br label %248
 
 214:
-	%215 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000505, i64 0, i64 0), i64 11)
+	%215 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000514, i64 0, i64 0), i64 11)
 	%216 = call i64 @js_scope_get(i64 %189, i64 %215)
 	%217 = call i64 @js_arr_new()
 	%218 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
 	%219 = call i64 @js_scope_get(i64 %189, i64 %218)
 	%220 = call i64 @js_arr_new()
-	%221 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%221 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%222 = call i64 @js_scope_get(i64 %189, i64 %221)
 	%223 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%224 = call i64 @js_get(i64 %222, i64 %223)
@@ -33309,7 +33694,7 @@ dead508:
 	%231 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
 	%232 = call i64 @js_scope_get(i64 %189, i64 %231)
 	%233 = call i64 @js_arr_new()
-	%234 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%234 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%235 = call i64 @js_scope_get(i64 %189, i64 %234)
 	%236 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%237 = call i64 @js_get(i64 %235, i64 %236)
@@ -33332,7 +33717,7 @@ dead508:
 	%250 = phi i64 [ %189, %248 ]
 	ret i64 2
 
-dead509:
+dead513:
 	br label %214
 
 251:
@@ -33355,10 +33740,10 @@ dead509:
 	%262 = phi i64 [ %189, %260 ]
 	ret i64 2
 
-dead510:
+dead514:
 	br label %252
 
-dead511:
+dead515:
 	br label %116
 
 263:
@@ -33429,10 +33814,10 @@ dead511:
 	%310 = phi i64 [ %288, %308 ]
 	ret i64 2
 
-dead512:
+dead516:
 	br label %300
 
-dead513:
+dead517:
 	br label %276
 
 311:
@@ -33502,7 +33887,7 @@ dead513:
 	%357 = phi i64 [ %332, %355 ]
 	ret i64 2
 
-dead514:
+dead518:
 	br label %344
 
 358:
@@ -33530,17 +33915,17 @@ dead514:
 	%374 = phi i64 [ %332, %372 ]
 	ret i64 2
 
-dead515:
+dead519:
 	br label %359
 
-dead516:
+dead520:
 	br label %324
 
-dead517:
+dead521:
 	ret i64 0
 }
 
-define i64 @jsf_1000169(i64 %env, i64 %args) {
+define i64 @jsf_1000170(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -33596,7 +33981,7 @@ entry:
 	%39 = call i64 @js_eq(i64 %37, i64 %38)
 	ret i64 %39
 
-dead518:
+dead522:
 	br label %18
 
 40:
@@ -33629,7 +34014,7 @@ dead518:
 	%61 = call i64 @js_eq(i64 %59, i64 %60)
 	ret i64 %61
 
-dead519:
+dead523:
 	br label %41
 
 62:
@@ -33654,14 +34039,14 @@ dead519:
 	%75 = call i64 @js_eq(i64 %73, i64 %74)
 	ret i64 %75
 
-dead520:
+dead524:
 	br label %63
 
-dead521:
+dead525:
 	ret i64 0
 }
 
-define i64 @jsf_1000170(i64 %env, i64 %args) {
+define i64 @jsf_1000171(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -33710,9 +34095,9 @@ entry:
 	%36 = call i64 @js_scope_get(i64 %12, i64 %35)
 	%37 = call i64 @js_arr_push(i64 %34, i64 %36)
 	%38 = call i64 @js_call(i64 %33, i64 0, i64 %34)
-	%39 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000507, i64 0, i64 0), i64 2)
+	%39 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
 	%40 = call i64 @js_tdecl(i64 %12, i64 %39, i64 %38)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000507, i64 0, i64 0), i64 2)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
 	%42 = call i64 @js_scope_get(i64 %12, i64 %41)
 	%43 = call i64 @js_sne(i64 %42, i64 0)
 	%44 = call i64 @js_truthy(i64 %43)
@@ -33726,7 +34111,7 @@ entry:
 	%48 = phi i64 [ %12, %46 ]
 	ret i64 2
 
-dead522:
+dead526:
 	br label %31
 
 49:
@@ -33750,10 +34135,10 @@ dead522:
 
 62:
 	%63 = phi i64 [ %12, %61 ]
-	%64 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000496, i64 0, i64 0), i64 7)
+	%64 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000507, i64 0, i64 0), i64 7)
 	%65 = call i64 @js_scope_get(i64 %63, i64 %64)
 	%66 = call i64 @js_arr_new()
-	%67 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000507, i64 0, i64 0), i64 2)
+	%67 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
 	%68 = call i64 @js_scope_get(i64 %63, i64 %67)
 	%69 = call i64 @js_arr_push(i64 %66, i64 %68)
 	%70 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
@@ -33762,14 +34147,14 @@ dead522:
 	%73 = call i64 @js_call(i64 %65, i64 0, i64 %66)
 	ret i64 %73
 
-dead523:
+dead527:
 	br label %50
 
-dead524:
+dead528:
 	ret i64 0
 }
 
-define i64 @jsf_1000171(i64 %env, i64 %args) {
+define i64 @jsf_1000172(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
@@ -33787,13 +34172,13 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000509, i64 0, i64 0), i64 9)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000518, i64 0, i64 0), i64 9)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
 	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
 	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
-	%18 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
 	%20 = call i64 @js_arr_new()
 	%21 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -33804,17 +34189,17 @@ entry:
 	%26 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %26
 
-dead525:
+dead529:
 	ret i64 0
 }
 
-define i64 @jsf_1000172(i64 %env, i64 %args) {
+define i64 @jsf_1000173(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -33863,7 +34248,7 @@ entry:
 	%36 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%37 = call i64 @js_scope_get(i64 %33, i64 %36)
 	%38 = call i64 @js_get(i64 %35, i64 %37)
-	%39 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%39 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%40 = call i64 @js_scope_get(i64 %33, i64 %39)
 	%41 = call i64 @js_seq(i64 %38, i64 %40)
 	%42 = call i64 @js_truthy(i64 %41)
@@ -33892,14 +34277,14 @@ entry:
 	%57 = call i64 @js_scope_get(i64 %55, i64 %56)
 	ret i64 %57
 
-dead526:
+dead530:
 	br label %45
 
-dead527:
+dead531:
 	ret i64 0
 }
 
-define i64 @jsf_1000173(i64 %env, i64 %args) {
+define i64 @jsf_1000174(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -33908,7 +34293,7 @@ entry:
 	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -33932,7 +34317,7 @@ entry:
 	br label %35
 
 22:
-	%23 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000509, i64 0, i64 0), i64 9)
+	%23 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000518, i64 0, i64 0), i64 9)
 	%24 = call i64 @js_scope_get(i64 %14, i64 %23)
 	%25 = call i64 @js_arr_new()
 	%26 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -33940,7 +34325,7 @@ entry:
 	%28 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%29 = call i64 @js_get(i64 %27, i64 %28)
 	%30 = call i64 @js_arr_push(i64 %25, i64 %29)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%32 = call i64 @js_scope_get(i64 %14, i64 %31)
 	%33 = call i64 @js_arr_push(i64 %25, i64 %32)
 	%34 = call i64 @js_call(i64 %24, i64 0, i64 %25)
@@ -33951,32 +34336,32 @@ entry:
 
 36:
 	%37 = phi i64 [ %14, %35 ]
-	%38 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000513, i64 0, i64 0), i64 10)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000488, i64 0, i64 0), i64 10)
 	%39 = call i64 @js_scope_get(i64 %37, i64 %38)
 	%40 = call i64 @js_arr_new()
 	%41 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%42 = call i64 @js_scope_get(i64 %37, i64 %41)
 	%43 = call i64 @js_arr_push(i64 %40, i64 %42)
-	%44 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%44 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%45 = call i64 @js_scope_get(i64 %37, i64 %44)
 	%46 = call i64 @js_arr_push(i64 %40, i64 %45)
 	%47 = call i64 @js_call(i64 %39, i64 0, i64 %40)
 	ret i64 %47
 
-dead528:
+dead532:
 	br label %22
 
-dead529:
+dead533:
 	ret i64 0
 }
 
-define i64 @jsf_1000174(i64 %env, i64 %args) {
+define i64 @jsf_1000175(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -34011,11 +34396,11 @@ entry:
 28:
 	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%30 = call i64 @js_scope_get(i64 %12, i64 %29)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000515, i64 0, i64 0), i64 4)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000523, i64 0, i64 0), i64 4)
 	%32 = call i64 @js_get(i64 %30, i64 %31)
-	%33 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%34 = call i64 @js_tdecl(i64 %12, i64 %33, i64 %32)
-	%35 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%36 = call i64 @js_scope_get(i64 %12, i64 %35)
 	%37 = call i64 @js_seq(i64 %36, i64 0)
 	%38 = call i64 @js_truthy(i64 %37)
@@ -34027,23 +34412,23 @@ entry:
 
 41:
 	%42 = phi i64 [ %12, %40 ]
-	%43 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000509, i64 0, i64 0), i64 9)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000518, i64 0, i64 0), i64 9)
 	%44 = call i64 @js_scope_get(i64 %42, i64 %43)
 	%45 = call i64 @js_arr_new()
 	%46 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
 	%47 = call i64 @js_scope_get(i64 %42, i64 %46)
 	%48 = call i64 @js_arr_push(i64 %45, i64 %47)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%50 = call i64 @js_scope_get(i64 %42, i64 %49)
 	%51 = call i64 @js_arr_push(i64 %45, i64 %50)
 	%52 = call i64 @js_call(i64 %44, i64 0, i64 %45)
 	ret i64 %52
 
-dead530:
+dead534:
 	br label %28
 
 53:
-	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%55 = call i64 @js_scope_get(i64 %12, i64 %54)
 	%56 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
 	%57 = call i64 @js_get(i64 %55, i64 %56)
@@ -34059,7 +34444,7 @@ dead530:
 	br i1 %64, label %75, label %65
 
 65:
-	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%67 = call i64 @js_scope_get(i64 %12, i64 %66)
 	%68 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%69 = call i64 @js_get(i64 %67, i64 %68)
@@ -34080,13 +34465,13 @@ dead530:
 	br label %93
 
 80:
-	%81 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%81 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%82 = call i64 @js_scope_get(i64 %12, i64 %81)
-	%83 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000517, i64 0, i64 0), i64 3)
+	%83 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000525, i64 0, i64 0), i64 3)
 	%84 = call i64 @js_get(i64 %82, i64 %83)
-	%85 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000517, i64 0, i64 0), i64 3)
+	%85 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000525, i64 0, i64 0), i64 3)
 	%86 = call i64 @js_tdecl(i64 %12, i64 %85, i64 %84)
-	%87 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%87 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%88 = call i64 @js_scope_get(i64 %12, i64 %87)
 	%89 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%90 = call i64 @js_get(i64 %88, i64 %89)
@@ -34107,21 +34492,21 @@ dead530:
 	%101 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%102 = call i64 @js_num_i(i64 0)
 	%103 = call i64 @js_set(i64 %96, i64 %101, i64 %102)
-	%104 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000517, i64 0, i64 0), i64 3)
-	%105 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000518, i64 0, i64 0), i64 8)
+	%104 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000525, i64 0, i64 0), i64 3)
+	%105 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000526, i64 0, i64 0), i64 8)
 	%106 = call i64 @js_scope_get(i64 %95, i64 %105)
 	%107 = call i64 @js_arr_new()
 	%108 = call i64 @js_arr_push(i64 %107, i64 0)
 	%109 = call i64 @js_call(i64 %106, i64 0, i64 %107)
 	%110 = call i64 @js_set(i64 %96, i64 %104, i64 %109)
-	%111 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%111 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%112 = call i64 @js_tset(i64 %95, i64 %111, i64 %96)
 	%113 = call i64 @js_setret(i64 %96)
-	%114 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%114 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%115 = call i64 @js_scope_get(i64 %95, i64 %114)
 	%116 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%117 = call i64 @js_scope_get(i64 %95, i64 %116)
-	%118 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000515, i64 0, i64 0), i64 4)
+	%118 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000523, i64 0, i64 0), i64 4)
 	%119 = call i64 @js_set(i64 %117, i64 %118, i64 %115)
 	%120 = call i64 @js_setret(i64 %115)
 	br label %80
@@ -34144,21 +34529,21 @@ dead530:
 132:
 	%133 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%134 = call i64 @js_scope_get(i64 %12, i64 %133)
-	%135 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000516, i64 0, i64 0), i64 2)
+	%135 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
 	%136 = call i64 @js_scope_get(i64 %12, i64 %135)
 	%137 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%138 = call i64 @js_set(i64 %136, i64 %137, i64 %134)
 	%139 = call i64 @js_setret(i64 %134)
 	%140 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000125, i64 0, i64 0), i64 0)
-	%141 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%141 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%142 = call i64 @js_scope_get(i64 %12, i64 %141)
 	%143 = call i64 @js_add(i64 %140, i64 %142)
 	%144 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%145 = call i64 @js_tdecl(i64 %12, i64 %144, i64 %143)
-	%146 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000520, i64 0, i64 0), i64 8)
+	%146 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000528, i64 0, i64 0), i64 8)
 	%147 = call i64 @js_scope_get(i64 %12, i64 %146)
 	%148 = call i64 @js_arr_new()
-	%149 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000517, i64 0, i64 0), i64 3)
+	%149 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000525, i64 0, i64 0), i64 3)
 	%150 = call i64 @js_scope_get(i64 %12, i64 %149)
 	%151 = call i64 @js_arr_push(i64 %148, i64 %150)
 	%152 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
@@ -34183,15 +34568,15 @@ dead530:
 	%167 = call i64 @js_scope_get(i64 %162, i64 %166)
 	%168 = call i64 @js_get(i64 %165, i64 %167)
 	%169 = call i64 @js_add(i64 %163, i64 %168)
-	%170 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000519, i64 0, i64 0), i64 2)
+	%170 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
 	%171 = call i64 @js_tdecl(i64 %162, i64 %170, i64 %169)
-	%172 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000520, i64 0, i64 0), i64 8)
+	%172 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000528, i64 0, i64 0), i64 8)
 	%173 = call i64 @js_scope_get(i64 %162, i64 %172)
 	%174 = call i64 @js_arr_new()
-	%175 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000517, i64 0, i64 0), i64 3)
+	%175 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000525, i64 0, i64 0), i64 3)
 	%176 = call i64 @js_scope_get(i64 %162, i64 %175)
 	%177 = call i64 @js_arr_push(i64 %174, i64 %176)
-	%178 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000519, i64 0, i64 0), i64 2)
+	%178 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
 	%179 = call i64 @js_scope_get(i64 %162, i64 %178)
 	%180 = call i64 @js_arr_push(i64 %174, i64 %179)
 	%181 = call i64 @js_call(i64 %173, i64 0, i64 %174)
@@ -34218,13 +34603,13 @@ dead530:
 
 195:
 	%196 = phi i64 [ %162, %194 ]
-	%197 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000521, i64 0, i64 0), i64 9)
+	%197 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000529, i64 0, i64 0), i64 9)
 	%198 = call i64 @js_scope_get(i64 %196, i64 %197)
 	%199 = call i64 @js_arr_new()
-	%200 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000517, i64 0, i64 0), i64 3)
+	%200 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000525, i64 0, i64 0), i64 3)
 	%201 = call i64 @js_scope_get(i64 %196, i64 %200)
 	%202 = call i64 @js_arr_push(i64 %199, i64 %201)
-	%203 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000519, i64 0, i64 0), i64 2)
+	%203 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
 	%204 = call i64 @js_scope_get(i64 %196, i64 %203)
 	%205 = call i64 @js_arr_push(i64 %199, i64 %204)
 	%206 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
@@ -34238,10 +34623,10 @@ dead530:
 	br label %235
 
 212:
-	%213 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000522, i64 0, i64 0), i64 8)
+	%213 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000530, i64 0, i64 0), i64 8)
 	%214 = call i64 @js_scope_get(i64 %12, i64 %213)
 	%215 = call i64 @js_arr_new()
-	%216 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000517, i64 0, i64 0), i64 3)
+	%216 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000525, i64 0, i64 0), i64 3)
 	%217 = call i64 @js_scope_get(i64 %12, i64 %216)
 	%218 = call i64 @js_arr_push(i64 %215, i64 %217)
 	%219 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
@@ -34255,7 +34640,7 @@ dead530:
 	%227 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
 	%228 = call i64 @js_scope_get(i64 %12, i64 %227)
 	%229 = call i64 @js_get(i64 %226, i64 %228)
-	%230 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%230 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%231 = call i64 @js_scope_get(i64 %12, i64 %230)
 	%232 = call i64 @js_seq(i64 %229, i64 %231)
 	%233 = call i64 @js_truthy(i64 %232)
@@ -34272,7 +34657,7 @@ dead530:
 	%240 = call i64 @js_sub(i64 %238, i64 %239)
 	ret i64 %240
 
-dead531:
+dead535:
 	br label %212
 
 241:
@@ -34281,16 +34666,16 @@ dead531:
 242:
 	%243 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%244 = call i64 @js_scope_get(i64 %12, i64 %243)
-	%245 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000515, i64 0, i64 0), i64 4)
+	%245 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000523, i64 0, i64 0), i64 4)
 	%246 = call i64 @js_set(i64 %244, i64 %245, i64 0)
 	%247 = call i64 @js_setret(i64 0)
-	%248 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000513, i64 0, i64 0), i64 10)
+	%248 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000488, i64 0, i64 0), i64 10)
 	%249 = call i64 @js_scope_get(i64 %12, i64 %248)
 	%250 = call i64 @js_arr_new()
 	%251 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%252 = call i64 @js_scope_get(i64 %12, i64 %251)
 	%253 = call i64 @js_arr_push(i64 %250, i64 %252)
-	%254 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%254 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%255 = call i64 @js_scope_get(i64 %12, i64 %254)
 	%256 = call i64 @js_arr_push(i64 %250, i64 %255)
 	%257 = call i64 @js_call(i64 %249, i64 0, i64 %250)
@@ -34305,14 +34690,14 @@ dead531:
 	%262 = call i64 @js_scope_get(i64 %260, i64 %261)
 	ret i64 %262
 
-dead532:
+dead536:
 	br label %242
 
-dead533:
+dead537:
 	ret i64 0
 }
 
-define i64 @jsf_1000175(i64 %env, i64 %args) {
+define i64 @jsf_1000176(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -34338,7 +34723,7 @@ entry:
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000523, i64 0, i64 0), i64 2)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000531, i64 0, i64 0), i64 2)
 	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000414, i64 0, i64 0), i64 8)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
@@ -34347,16 +34732,16 @@ entry:
 	%26 = call i64 @js_scope_get(i64 %12, i64 %25)
 	%27 = call i64 @js_arr_push(i64 %24, i64 %26)
 	%28 = call i64 @js_call(i64 %23, i64 0, i64 %24)
-	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000532, i64 0, i64 0), i64 2)
 	%30 = call i64 @js_tdecl(i64 %12, i64 %29, i64 %28)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000523, i64 0, i64 0), i64 2)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000531, i64 0, i64 0), i64 2)
 	%32 = call i64 @js_scope_get(i64 %12, i64 %31)
 	%33 = call i64 @js_truthy(i64 %32)
 	%34 = icmp ne i64 %33, 0
 	br i1 %34, label %38, label %35
 
 35:
-	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000524, i64 0, i64 0), i64 2)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000532, i64 0, i64 0), i64 2)
 	%37 = call i64 @js_scope_get(i64 %12, i64 %36)
 	br label %38
 
@@ -34416,7 +34801,7 @@ entry:
 	%83 = call i64 @js_eq(i64 %75, i64 %82)
 	ret i64 %83
 
-dead534:
+dead538:
 	br label %43
 
 84:
@@ -34447,7 +34832,7 @@ dead534:
 	%99 = phi i64 [ %12, %97 ]
 	ret i64 3
 
-dead535:
+dead539:
 	br label %92
 
 100:
@@ -34465,7 +34850,7 @@ dead535:
 
 107:
 	%108 = phi i64 [ %12, %106 ]
-	%109 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000506, i64 0, i64 0), i64 11)
+	%109 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000515, i64 0, i64 0), i64 11)
 	%110 = call i64 @js_scope_get(i64 %108, i64 %109)
 	%111 = call i64 @js_arr_new()
 	%112 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
@@ -34474,7 +34859,7 @@ dead535:
 	%115 = call i64 @js_call(i64 %110, i64 0, i64 %111)
 	ret i64 %115
 
-dead536:
+dead540:
 	br label %101
 
 116:
@@ -34488,7 +34873,7 @@ dead536:
 	%122 = call i64 @js_scope_get(i64 %12, i64 %121)
 	%123 = call i64 @js_arr_push(i64 %120, i64 %122)
 	%124 = call i64 @js_call(i64 %119, i64 0, i64 %120)
-	%125 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%125 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%126 = call i64 @js_tdecl(i64 %12, i64 %125, i64 %124)
 	%127 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%128 = call i64 @js_scope_get(i64 %12, i64 %127)
@@ -34497,9 +34882,9 @@ dead536:
 	%131 = call i64 @js_scope_get(i64 %12, i64 %130)
 	%132 = call i64 @js_arr_push(i64 %129, i64 %131)
 	%133 = call i64 @js_call(i64 %128, i64 0, i64 %129)
-	%134 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%134 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%135 = call i64 @js_tdecl(i64 %12, i64 %134, i64 %133)
-	%136 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%136 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%137 = call i64 @js_scope_get(i64 %12, i64 %136)
 	%138 = call i64 @js_sne(i64 %137, i64 0)
 	%139 = call i64 @js_truthy(i64 %138)
@@ -34511,7 +34896,7 @@ dead536:
 
 142:
 	%143 = phi i64 [ %12, %141 ]
-	%144 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000506, i64 0, i64 0), i64 11)
+	%144 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000515, i64 0, i64 0), i64 11)
 	%145 = call i64 @js_scope_get(i64 %143, i64 %144)
 	%146 = call i64 @js_arr_new()
 	%147 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -34520,11 +34905,11 @@ dead536:
 	%150 = call i64 @js_call(i64 %145, i64 0, i64 %146)
 	ret i64 %150
 
-dead537:
+dead541:
 	br label %117
 
 151:
-	%152 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%152 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%153 = call i64 @js_scope_get(i64 %12, i64 %152)
 	%154 = call i64 @js_sne(i64 %153, i64 0)
 	br label %155
@@ -34556,7 +34941,7 @@ dead537:
 
 172:
 	%173 = phi i64 [ %171, %170 ]
-	%174 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%174 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%175 = call i64 @js_scope_get(i64 %173, i64 %174)
 	%176 = call i64 @js_seq(i64 %175, i64 0)
 	%177 = call i64 @js_truthy(i64 %176)
@@ -34567,7 +34952,7 @@ dead537:
 	br label %186
 
 180:
-	%181 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%181 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%182 = call i64 @js_scope_get(i64 %173, i64 %181)
 	%183 = call i64 @js_seq(i64 %182, i64 0)
 	%184 = call i64 @js_truthy(i64 %183)
@@ -34581,20 +34966,20 @@ dead537:
 	%188 = phi i64 [ %173, %186 ]
 	ret i64 2
 
-dead538:
+dead542:
 	br label %180
 
 189:
 	br label %206
 
 190:
-	%191 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%191 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%192 = call i64 @js_scope_get(i64 %173, i64 %191)
 	%193 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%194 = call i64 @js_get(i64 %192, i64 %193)
 	%195 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%196 = call i64 @js_get(i64 %194, i64 %195)
-	%197 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%197 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%198 = call i64 @js_scope_get(i64 %173, i64 %197)
 	%199 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%200 = call i64 @js_get(i64 %198, i64 %199)
@@ -34612,7 +34997,7 @@ dead538:
 	%208 = phi i64 [ %173, %206 ]
 	ret i64 2
 
-dead539:
+dead543:
 	br label %190
 
 209:
@@ -34631,13 +35016,13 @@ dead539:
 	%216 = phi i64 [ %173, %214 ]
 	ret i64 2
 
-dead540:
+dead544:
 	br label %210
 
 217:
 	%218 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%219 = call i64 @js_scope_get(i64 %173, i64 %218)
-	%220 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%220 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%221 = call i64 @js_scope_get(i64 %173, i64 %220)
 	%222 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%223 = call i64 @js_get(i64 %221, i64 %222)
@@ -34660,15 +35045,15 @@ dead540:
 
 233:
 	%234 = phi i64 [ %232, %231 ]
-	%235 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000511, i64 0, i64 0), i64 10)
+	%235 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000520, i64 0, i64 0), i64 10)
 	%236 = call i64 @js_scope_get(i64 %234, i64 %235)
 	%237 = call i64 @js_arr_new()
-	%238 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%238 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%239 = call i64 @js_scope_get(i64 %234, i64 %238)
 	%240 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%241 = call i64 @js_get(i64 %239, i64 %240)
 	%242 = call i64 @js_arr_push(i64 %237, i64 %241)
-	%243 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%243 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%244 = call i64 @js_scope_get(i64 %234, i64 %243)
 	%245 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%246 = call i64 @js_get(i64 %244, i64 %245)
@@ -34691,13 +35076,13 @@ dead540:
 	br label %295
 
 261:
-	%262 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000525, i64 0, i64 0), i64 7)
+	%262 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000533, i64 0, i64 0), i64 7)
 	%263 = call i64 @js_scope_get(i64 %234, i64 %262)
 	%264 = call i64 @js_arr_new()
 	%265 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
 	%266 = call i64 @js_scope_get(i64 %234, i64 %265)
 	%267 = call i64 @js_arr_new()
-	%268 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%268 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%269 = call i64 @js_scope_get(i64 %234, i64 %268)
 	%270 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%271 = call i64 @js_get(i64 %269, i64 %270)
@@ -34710,7 +35095,7 @@ dead540:
 	%278 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
 	%279 = call i64 @js_scope_get(i64 %234, i64 %278)
 	%280 = call i64 @js_arr_new()
-	%281 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%281 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%282 = call i64 @js_scope_get(i64 %234, i64 %281)
 	%283 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%284 = call i64 @js_get(i64 %282, i64 %283)
@@ -34733,7 +35118,7 @@ dead540:
 	%297 = phi i64 [ %234, %295 ]
 	ret i64 2
 
-dead541:
+dead545:
 	br label %261
 
 298:
@@ -34756,10 +35141,10 @@ dead541:
 	%309 = phi i64 [ %234, %307 ]
 	ret i64 2
 
-dead542:
+dead546:
 	br label %299
 
-dead543:
+dead547:
 	br label %160
 
 310:
@@ -34798,7 +35183,7 @@ dead543:
 	%337 = call i64 @js_scope_get(i64 %12, i64 %336)
 	%338 = call i64 @js_arr_push(i64 %335, i64 %337)
 	%339 = call i64 @js_call(i64 %334, i64 0, i64 %335)
-	%340 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
+	%340 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000535, i64 0, i64 0), i64 2)
 	%341 = call i64 @js_tdecl(i64 %12, i64 %340, i64 %339)
 	%342 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000146, i64 0, i64 0), i64 2)
 	%343 = call i64 @js_scope_get(i64 %12, i64 %342)
@@ -34846,7 +35231,7 @@ dead543:
 	%373 = phi i64 [ %348, %371 ]
 	ret i64 2
 
-dead544:
+dead548:
 	br label %360
 
 374:
@@ -34869,7 +35254,7 @@ dead544:
 	%385 = phi i64 [ %348, %383 ]
 	ret i64 2
 
-dead545:
+dead549:
 	br label %375
 
 386:
@@ -34896,14 +35281,14 @@ dead545:
 	%401 = phi i64 [ %348, %399 ]
 	ret i64 3
 
-dead546:
+dead550:
 	br label %387
 
 402:
 	br label %414
 
 403:
-	%404 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000526, i64 0, i64 0), i64 12)
+	%404 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000534, i64 0, i64 0), i64 12)
 	%405 = call i64 @js_scope_get(i64 %348, i64 %404)
 	%406 = call i64 @js_arr_new()
 	%407 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -34922,14 +35307,14 @@ dead546:
 	%416 = phi i64 [ %348, %414 ]
 	ret i64 2
 
-dead547:
+dead551:
 	br label %403
 
-dead548:
+dead552:
 	br label %323
 
 417:
-	%418 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
+	%418 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000535, i64 0, i64 0), i64 2)
 	%419 = call i64 @js_scope_get(i64 %12, i64 %418)
 	br label %420
 
@@ -34962,7 +35347,7 @@ dead548:
 	%438 = call i64 @js_scope_get(i64 %433, i64 %437)
 	%439 = call i64 @js_arr_push(i64 %436, i64 %438)
 	%440 = call i64 @js_call(i64 %435, i64 0, i64 %436)
-	%441 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000528, i64 0, i64 0), i64 2)
+	%441 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000536, i64 0, i64 0), i64 2)
 	%442 = call i64 @js_tdecl(i64 %433, i64 %441, i64 %440)
 	%443 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000463, i64 0, i64 0), i64 11)
 	%444 = call i64 @js_scope_get(i64 %433, i64 %443)
@@ -34971,9 +35356,9 @@ dead548:
 	%447 = call i64 @js_scope_get(i64 %433, i64 %446)
 	%448 = call i64 @js_arr_push(i64 %445, i64 %447)
 	%449 = call i64 @js_call(i64 %444, i64 0, i64 %445)
-	%450 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000529, i64 0, i64 0), i64 2)
+	%450 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000537, i64 0, i64 0), i64 2)
 	%451 = call i64 @js_tdecl(i64 %433, i64 %450, i64 %449)
-	%452 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000528, i64 0, i64 0), i64 2)
+	%452 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000536, i64 0, i64 0), i64 2)
 	%453 = call i64 @js_scope_get(i64 %433, i64 %452)
 	%454 = call i64 @js_sne(i64 %453, i64 0)
 	%455 = call i64 @js_truthy(i64 %454)
@@ -34981,7 +35366,7 @@ dead548:
 	br i1 %456, label %457, label %461
 
 457:
-	%458 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000529, i64 0, i64 0), i64 2)
+	%458 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000537, i64 0, i64 0), i64 2)
 	%459 = call i64 @js_scope_get(i64 %433, i64 %458)
 	%460 = call i64 @js_sne(i64 %459, i64 0)
 	br label %461
@@ -35008,22 +35393,22 @@ dead548:
 
 473:
 	%474 = phi i64 [ %433, %472 ]
-	%475 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000496, i64 0, i64 0), i64 7)
+	%475 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000507, i64 0, i64 0), i64 7)
 	%476 = call i64 @js_scope_get(i64 %474, i64 %475)
 	%477 = call i64 @js_arr_new()
-	%478 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000528, i64 0, i64 0), i64 2)
+	%478 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000536, i64 0, i64 0), i64 2)
 	%479 = call i64 @js_scope_get(i64 %474, i64 %478)
 	%480 = call i64 @js_arr_push(i64 %477, i64 %479)
-	%481 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000529, i64 0, i64 0), i64 2)
+	%481 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000537, i64 0, i64 0), i64 2)
 	%482 = call i64 @js_scope_get(i64 %474, i64 %481)
 	%483 = call i64 @js_arr_push(i64 %477, i64 %482)
 	%484 = call i64 @js_call(i64 %476, i64 0, i64 %477)
 	ret i64 %484
 
-dead549:
+dead553:
 	br label %466
 
-dead550:
+dead554:
 	br label %425
 
 485:
@@ -35046,7 +35431,7 @@ dead550:
 	br label %503
 
 498:
-	%499 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
+	%499 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000535, i64 0, i64 0), i64 2)
 	%500 = call i64 @js_scope_get(i64 %12, i64 %499)
 	%501 = call i64 @js_truthy(i64 %500)
 	%502 = icmp ne i64 %501, 0
@@ -35057,7 +35442,7 @@ dead550:
 
 504:
 	%505 = phi i64 [ %12, %503 ]
-	%506 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000508, i64 0, i64 0), i64 13)
+	%506 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000517, i64 0, i64 0), i64 13)
 	%507 = call i64 @js_scope_get(i64 %505, i64 %506)
 	%508 = call i64 @js_arr_new()
 	%509 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -35069,7 +35454,7 @@ dead550:
 	%515 = call i64 @js_call(i64 %507, i64 0, i64 %508)
 	ret i64 %515
 
-dead551:
+dead555:
 	br label %498
 
 516:
@@ -35092,7 +35477,7 @@ dead551:
 	br label %550
 
 529:
-	%530 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000496, i64 0, i64 0), i64 7)
+	%530 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000507, i64 0, i64 0), i64 7)
 	%531 = call i64 @js_scope_get(i64 %12, i64 %530)
 	%532 = call i64 @js_arr_new()
 	%533 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
@@ -35119,7 +35504,7 @@ dead551:
 
 551:
 	%552 = phi i64 [ %12, %550 ]
-	%553 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000508, i64 0, i64 0), i64 13)
+	%553 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000517, i64 0, i64 0), i64 13)
 	%554 = call i64 @js_scope_get(i64 %552, i64 %553)
 	%555 = call i64 @js_arr_new()
 	%556 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
@@ -35131,14 +35516,14 @@ dead551:
 	%562 = call i64 @js_call(i64 %554, i64 0, i64 %555)
 	ret i64 %562
 
-dead552:
+dead556:
 	br label %529
 
-dead553:
+dead557:
 	ret i64 0
 }
 
-define i64 @jsf_1000176(i64 %env, i64 %args) {
+define i64 @jsf_1000177(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -35235,7 +35620,7 @@ entry:
 	%72 = call i64 @js_scope_get(i64 %12, i64 %71)
 	%73 = call i64 @js_arr_push(i64 %70, i64 %72)
 	%74 = call i64 @js_call(i64 %69, i64 0, i64 %70)
-	%75 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%76 = call i64 @js_tdecl(i64 %12, i64 %75, i64 %74)
 	%77 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%78 = call i64 @js_scope_get(i64 %12, i64 %77)
@@ -35244,9 +35629,9 @@ entry:
 	%81 = call i64 @js_scope_get(i64 %12, i64 %80)
 	%82 = call i64 @js_arr_push(i64 %79, i64 %81)
 	%83 = call i64 @js_call(i64 %78, i64 0, i64 %79)
-	%84 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%84 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%85 = call i64 @js_tdecl(i64 %12, i64 %84, i64 %83)
-	%86 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%86 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%87 = call i64 @js_scope_get(i64 %12, i64 %86)
 	%88 = call i64 @js_sne(i64 %87, i64 0)
 	%89 = call i64 @js_truthy(i64 %88)
@@ -35303,25 +35688,25 @@ entry:
 
 125:
 	%126 = phi i64 [ %122, %121 ], [ %124, %123 ]
-	%127 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000530, i64 0, i64 0), i64 3)
+	%127 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000538, i64 0, i64 0), i64 3)
 	%128 = call i64 @js_tdecl(i64 %94, i64 %127, i64 %126)
-	%129 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000497, i64 0, i64 0), i64 8)
+	%129 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000508, i64 0, i64 0), i64 8)
 	%130 = call i64 @js_scope_get(i64 %94, i64 %129)
 	%131 = call i64 @js_arr_new()
 	%132 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000027, i64 0, i64 0), i64 2)
 	%133 = call i64 @js_scope_get(i64 %94, i64 %132)
 	%134 = call i64 @js_arr_push(i64 %131, i64 %133)
-	%135 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000530, i64 0, i64 0), i64 3)
+	%135 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000538, i64 0, i64 0), i64 3)
 	%136 = call i64 @js_scope_get(i64 %94, i64 %135)
 	%137 = call i64 @js_arr_push(i64 %131, i64 %136)
 	%138 = call i64 @js_call(i64 %130, i64 0, i64 %131)
 	ret i64 %138
 
-dead554:
+dead558:
 	br label %67
 
 139:
-	%140 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%140 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%141 = call i64 @js_scope_get(i64 %12, i64 %140)
 	%142 = call i64 @js_sne(i64 %141, i64 0)
 	br label %143
@@ -35336,7 +35721,7 @@ dead554:
 	br label %154
 
 148:
-	%149 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%149 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%150 = call i64 @js_scope_get(i64 %12, i64 %149)
 	%151 = call i64 @js_sne(i64 %150, i64 0)
 	%152 = call i64 @js_truthy(i64 %151)
@@ -35349,13 +35734,13 @@ dead554:
 
 156:
 	%157 = phi i64 [ %155, %154 ]
-	%158 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%158 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%159 = call i64 @js_scope_get(i64 %157, i64 %158)
 	%160 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%161 = call i64 @js_get(i64 %159, i64 %160)
 	%162 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%163 = call i64 @js_get(i64 %161, i64 %162)
-	%164 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%164 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%165 = call i64 @js_scope_get(i64 %157, i64 %164)
 	%166 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%167 = call i64 @js_get(i64 %165, i64 %166)
@@ -35380,17 +35765,17 @@ dead554:
 
 179:
 	%180 = phi i64 [ %157, %178 ]
-	%181 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000497, i64 0, i64 0), i64 8)
+	%181 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000508, i64 0, i64 0), i64 8)
 	%182 = call i64 @js_scope_get(i64 %180, i64 %181)
 	%183 = call i64 @js_arr_new()
-	%184 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%185 = call i64 @js_scope_get(i64 %180, i64 %184)
 	%186 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%187 = call i64 @js_get(i64 %185, i64 %186)
 	%188 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%189 = call i64 @js_get(i64 %187, i64 %188)
 	%190 = call i64 @js_arr_push(i64 %183, i64 %189)
-	%191 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%191 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%192 = call i64 @js_scope_get(i64 %180, i64 %191)
 	%193 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%194 = call i64 @js_get(i64 %192, i64 %193)
@@ -35400,13 +35785,13 @@ dead554:
 	%198 = call i64 @js_call(i64 %182, i64 0, i64 %183)
 	ret i64 %198
 
-dead555:
+dead559:
 	br label %174
 
 199:
 	%200 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%201 = call i64 @js_scope_get(i64 %157, i64 %200)
-	%202 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%202 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%203 = call i64 @js_scope_get(i64 %157, i64 %202)
 	%204 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%205 = call i64 @js_get(i64 %203, i64 %204)
@@ -35430,15 +35815,15 @@ dead555:
 
 216:
 	%217 = phi i64 [ %215, %214 ]
-	%218 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000511, i64 0, i64 0), i64 10)
+	%218 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000520, i64 0, i64 0), i64 10)
 	%219 = call i64 @js_scope_get(i64 %217, i64 %218)
 	%220 = call i64 @js_arr_new()
-	%221 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%221 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%222 = call i64 @js_scope_get(i64 %217, i64 %221)
 	%223 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%224 = call i64 @js_get(i64 %222, i64 %223)
 	%225 = call i64 @js_arr_push(i64 %220, i64 %224)
-	%226 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%226 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%227 = call i64 @js_scope_get(i64 %217, i64 %226)
 	%228 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%229 = call i64 @js_get(i64 %227, i64 %228)
@@ -35461,13 +35846,13 @@ dead555:
 	br label %283
 
 244:
-	%245 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000531, i64 0, i64 0), i64 5)
+	%245 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000539, i64 0, i64 0), i64 5)
 	%246 = call i64 @js_scope_get(i64 %217, i64 %245)
 	%247 = call i64 @js_arr_new()
 	%248 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
 	%249 = call i64 @js_scope_get(i64 %217, i64 %248)
 	%250 = call i64 @js_arr_new()
-	%251 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000503, i64 0, i64 0), i64 2)
+	%251 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000485, i64 0, i64 0), i64 2)
 	%252 = call i64 @js_scope_get(i64 %217, i64 %251)
 	%253 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%254 = call i64 @js_get(i64 %252, i64 %253)
@@ -35480,7 +35865,7 @@ dead555:
 	%261 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
 	%262 = call i64 @js_scope_get(i64 %217, i64 %261)
 	%263 = call i64 @js_arr_new()
-	%264 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%264 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%265 = call i64 @js_scope_get(i64 %217, i64 %264)
 	%266 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%267 = call i64 @js_get(i64 %265, i64 %266)
@@ -35491,9 +35876,9 @@ dead555:
 	%272 = call i64 @js_call(i64 %262, i64 0, i64 %263)
 	%273 = call i64 @js_arr_push(i64 %247, i64 %272)
 	%274 = call i64 @js_call(i64 %246, i64 0, i64 %247)
-	%275 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000532, i64 0, i64 0), i64 2)
+	%275 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000540, i64 0, i64 0), i64 2)
 	%276 = call i64 @js_tdecl(i64 %217, i64 %275, i64 %274)
-	%277 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000532, i64 0, i64 0), i64 2)
+	%277 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000540, i64 0, i64 0), i64 2)
 	%278 = call i64 @js_scope_get(i64 %217, i64 %277)
 	%279 = call i64 @js_num_i(i64 0)
 	%280 = call i64 @js_ne(i64 %278, i64 %279)
@@ -35509,7 +35894,7 @@ dead555:
 	%286 = call i64 @js_num_i(i64 1)
 	ret i64 %286
 
-dead556:
+dead560:
 	br label %244
 
 287:
@@ -35530,21 +35915,21 @@ dead556:
 
 297:
 	%298 = phi i64 [ %217, %296 ]
-	%299 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000532, i64 0, i64 0), i64 2)
+	%299 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000540, i64 0, i64 0), i64 2)
 	%300 = call i64 @js_scope_get(i64 %298, i64 %299)
 	ret i64 %300
 
-dead557:
+dead561:
 	br label %288
 
-dead558:
+dead562:
 	br label %148
 
 301:
 	br label %308
 
 302:
-	%303 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000504, i64 0, i64 0), i64 2)
+	%303 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000486, i64 0, i64 0), i64 2)
 	%304 = call i64 @js_scope_get(i64 %12, i64 %303)
 	%305 = call i64 @js_sne(i64 %304, i64 0)
 	%306 = call i64 @js_truthy(i64 %305)
@@ -35559,7 +35944,7 @@ dead558:
 	%311 = call i64 @js_num_i(i64 1)
 	ret i64 %311
 
-dead559:
+dead563:
 	br label %302
 
 312:
@@ -35582,7 +35967,7 @@ dead559:
 	%327 = call i64 @js_scope_get(i64 %12, i64 %326)
 	%328 = call i64 @js_arr_push(i64 %325, i64 %327)
 	%329 = call i64 @js_call(i64 %324, i64 0, i64 %325)
-	%330 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
+	%330 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000535, i64 0, i64 0), i64 2)
 	%331 = call i64 @js_tdecl(i64 %12, i64 %330, i64 %329)
 	%332 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000146, i64 0, i64 0), i64 2)
 	%333 = call i64 @js_scope_get(i64 %12, i64 %332)
@@ -35600,11 +35985,11 @@ dead559:
 	%341 = call i64 @js_sub(i64 %339, i64 %340)
 	ret i64 %341
 
-dead560:
+dead564:
 	br label %313
 
 342:
-	%343 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
+	%343 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000535, i64 0, i64 0), i64 2)
 	%344 = call i64 @js_scope_get(i64 %12, i64 %343)
 	br label %345
 
@@ -35637,7 +36022,7 @@ dead560:
 	%363 = call i64 @js_scope_get(i64 %358, i64 %362)
 	%364 = call i64 @js_arr_push(i64 %361, i64 %363)
 	%365 = call i64 @js_call(i64 %360, i64 0, i64 %361)
-	%366 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000528, i64 0, i64 0), i64 2)
+	%366 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000536, i64 0, i64 0), i64 2)
 	%367 = call i64 @js_tdecl(i64 %358, i64 %366, i64 %365)
 	%368 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000463, i64 0, i64 0), i64 11)
 	%369 = call i64 @js_scope_get(i64 %358, i64 %368)
@@ -35646,9 +36031,9 @@ dead560:
 	%372 = call i64 @js_scope_get(i64 %358, i64 %371)
 	%373 = call i64 @js_arr_push(i64 %370, i64 %372)
 	%374 = call i64 @js_call(i64 %369, i64 0, i64 %370)
-	%375 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000529, i64 0, i64 0), i64 2)
+	%375 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000537, i64 0, i64 0), i64 2)
 	%376 = call i64 @js_tdecl(i64 %358, i64 %375, i64 %374)
-	%377 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000528, i64 0, i64 0), i64 2)
+	%377 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000536, i64 0, i64 0), i64 2)
 	%378 = call i64 @js_scope_get(i64 %358, i64 %377)
 	%379 = call i64 @js_sne(i64 %378, i64 0)
 	%380 = call i64 @js_truthy(i64 %379)
@@ -35656,7 +36041,7 @@ dead560:
 	br i1 %381, label %382, label %386
 
 382:
-	%383 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000529, i64 0, i64 0), i64 2)
+	%383 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000537, i64 0, i64 0), i64 2)
 	%384 = call i64 @js_scope_get(i64 %358, i64 %383)
 	%385 = call i64 @js_sne(i64 %384, i64 0)
 	br label %386
@@ -35671,7 +36056,7 @@ dead560:
 	br label %402
 
 391:
-	%392 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000499, i64 0, i64 0), i64 8)
+	%392 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000510, i64 0, i64 0), i64 8)
 	%393 = call i64 @js_scope_get(i64 %358, i64 %392)
 	%394 = call i64 @js_arr_new()
 	%395 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -35688,22 +36073,22 @@ dead560:
 
 403:
 	%404 = phi i64 [ %358, %402 ]
-	%405 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000498, i64 0, i64 0), i64 8)
+	%405 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000509, i64 0, i64 0), i64 8)
 	%406 = call i64 @js_scope_get(i64 %404, i64 %405)
 	%407 = call i64 @js_arr_new()
-	%408 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000528, i64 0, i64 0), i64 2)
+	%408 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000536, i64 0, i64 0), i64 2)
 	%409 = call i64 @js_scope_get(i64 %404, i64 %408)
 	%410 = call i64 @js_arr_push(i64 %407, i64 %409)
-	%411 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000529, i64 0, i64 0), i64 2)
+	%411 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000537, i64 0, i64 0), i64 2)
 	%412 = call i64 @js_scope_get(i64 %404, i64 %411)
 	%413 = call i64 @js_arr_push(i64 %407, i64 %412)
 	%414 = call i64 @js_call(i64 %406, i64 0, i64 %407)
 	ret i64 %414
 
-dead561:
+dead565:
 	br label %391
 
-dead562:
+dead566:
 	br label %350
 
 415:
@@ -35750,7 +36135,7 @@ dead562:
 	br label %453
 
 448:
-	%449 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
+	%449 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000535, i64 0, i64 0), i64 2)
 	%450 = call i64 @js_scope_get(i64 %12, i64 %449)
 	%451 = call i64 @js_truthy(i64 %450)
 	%452 = icmp ne i64 %451, 0
@@ -35764,7 +36149,7 @@ dead562:
 	%456 = call i64 @js_num_i(i64 1)
 	ret i64 %456
 
-dead563:
+dead567:
 	br label %448
 
 457:
@@ -35825,7 +36210,7 @@ dead563:
 	%498 = call i64 @js_num_i(i64 1)
 	ret i64 %498
 
-dead564:
+dead568:
 	br label %490
 
 499:
@@ -35848,7 +36233,7 @@ dead564:
 	br label %517
 
 512:
-	%513 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000527, i64 0, i64 0), i64 2)
+	%513 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000535, i64 0, i64 0), i64 2)
 	%514 = call i64 @js_scope_get(i64 %12, i64 %513)
 	%515 = call i64 @js_truthy(i64 %514)
 	%516 = icmp ne i64 %515, 0
@@ -35880,7 +36265,7 @@ dead564:
 	br label %547
 
 536:
-	%537 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000498, i64 0, i64 0), i64 8)
+	%537 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000509, i64 0, i64 0), i64 8)
 	%538 = call i64 @js_scope_get(i64 %520, i64 %537)
 	%539 = call i64 @js_arr_new()
 	%540 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000006, i64 0, i64 0), i64 1)
@@ -35897,7 +36282,7 @@ dead564:
 
 548:
 	%549 = phi i64 [ %520, %547 ]
-	%550 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000499, i64 0, i64 0), i64 8)
+	%550 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000510, i64 0, i64 0), i64 8)
 	%551 = call i64 @js_scope_get(i64 %549, i64 %550)
 	%552 = call i64 @js_arr_new()
 	%553 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -35914,10 +36299,10 @@ dead564:
 	%564 = call i64 @js_call(i64 %551, i64 0, i64 %552)
 	ret i64 %564
 
-dead565:
+dead569:
 	br label %536
 
-dead566:
+dead570:
 	br label %512
 
 565:
@@ -35940,7 +36325,7 @@ dead566:
 	br label %599
 
 578:
-	%579 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000498, i64 0, i64 0), i64 8)
+	%579 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000509, i64 0, i64 0), i64 8)
 	%580 = call i64 @js_scope_get(i64 %12, i64 %579)
 	%581 = call i64 @js_arr_new()
 	%582 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
@@ -35988,7 +36373,7 @@ dead566:
 	br label %629
 
 618:
-	%619 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000498, i64 0, i64 0), i64 8)
+	%619 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000509, i64 0, i64 0), i64 8)
 	%620 = call i64 @js_scope_get(i64 %602, i64 %619)
 	%621 = call i64 @js_arr_new()
 	%622 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -36005,7 +36390,7 @@ dead566:
 
 630:
 	%631 = phi i64 [ %602, %629 ]
-	%632 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000499, i64 0, i64 0), i64 8)
+	%632 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000510, i64 0, i64 0), i64 8)
 	%633 = call i64 @js_scope_get(i64 %631, i64 %632)
 	%634 = call i64 @js_arr_new()
 	%635 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
@@ -36022,17 +36407,17 @@ dead566:
 	%646 = call i64 @js_call(i64 %633, i64 0, i64 %634)
 	ret i64 %646
 
-dead567:
+dead571:
 	br label %618
 
-dead568:
+dead572:
 	br label %578
 
-dead569:
+dead573:
 	ret i64 0
 }
 
-define i64 @jsf_1000177(i64 %env, i64 %args) {
+define i64 @jsf_1000178(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -36088,7 +36473,7 @@ entry:
 	%39 = call i64 @js_scope_get(i64 %37, i64 %38)
 	ret i64 %39
 
-dead570:
+dead574:
 	br label %20
 
 40:
@@ -36118,7 +36503,7 @@ dead570:
 	%58 = call i64 @js_call(i64 %53, i64 0, i64 %54)
 	ret i64 %58
 
-dead571:
+dead575:
 	br label %41
 
 59:
@@ -36159,7 +36544,7 @@ dead571:
 	%82 = phi i64 [ %78, %77 ], [ %80, %79 ]
 	ret i64 %82
 
-dead572:
+dead576:
 	br label %60
 
 83:
@@ -36183,7 +36568,7 @@ dead572:
 	%95 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000125, i64 0, i64 0), i64 0)
 	ret i64 %95
 
-dead573:
+dead577:
 	br label %84
 
 96:
@@ -36199,7 +36584,7 @@ dead573:
 
 101:
 	%102 = phi i64 [ %9, %100 ]
-	%103 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000533, i64 0, i64 0), i64 12)
+	%103 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000541, i64 0, i64 0), i64 12)
 	%104 = call i64 @js_scope_get(i64 %102, i64 %103)
 	%105 = call i64 @js_arr_new()
 	%106 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -36259,17 +36644,17 @@ dead573:
 	%144 = call i64 @js_scope_get(i64 %142, i64 %143)
 	ret i64 %144
 
-dead574:
+dead578:
 	br label %139
 
-dead575:
+dead579:
 	br label %97
 
-dead576:
+dead580:
 	ret i64 0
 }
 
-define i64 @jsf_1000178(i64 %env, i64 %args) {
+define i64 @jsf_1000179(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -36321,7 +36706,7 @@ entry:
 	%35 = phi i64 [ %9, %33 ]
 	ret i64 2
 
-dead577:
+dead581:
 	br label %17
 
 36:
@@ -36375,7 +36760,7 @@ dead577:
 	%70 = phi i64 [ %53, %68 ]
 	ret i64 2
 
-dead578:
+dead582:
 	br label %63
 
 71:
@@ -36410,7 +36795,7 @@ dead578:
 	%90 = phi i64 [ %9, %88 ]
 	ret i64 2
 
-dead579:
+dead583:
 	br label %83
 
 91:
@@ -36475,14 +36860,14 @@ dead579:
 	%134 = phi i64 [ %105, %132 ]
 	ret i64 2
 
-dead580:
+dead584:
 	br label %124
 
-dead581:
+dead585:
 	ret i64 0
 }
 
-define i64 @jsf_1000179(i64 %env, i64 %args) {
+define i64 @jsf_1000180(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -36530,7 +36915,7 @@ entry:
 	%31 = phi i64 [ %8, %29 ]
 	ret i64 3
 
-dead582:
+dead586:
 	br label %19
 
 32:
@@ -36553,7 +36938,7 @@ dead582:
 	%43 = phi i64 [ %8, %41 ]
 	ret i64 3
 
-dead583:
+dead587:
 	br label %33
 
 44:
@@ -36576,7 +36961,7 @@ dead583:
 	%55 = phi i64 [ %8, %53 ]
 	ret i64 3
 
-dead584:
+dead588:
 	br label %45
 
 56:
@@ -36600,14 +36985,14 @@ dead584:
 	%68 = call i64 @js_sne(i64 %67, i64 0)
 	ret i64 %68
 
-dead585:
+dead589:
 	br label %57
 
-dead586:
+dead590:
 	ret i64 0
 }
 
-define i64 @jsf_1000180(i64 %env, i64 %args) {
+define i64 @jsf_1000181(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -36643,68 +37028,14 @@ entry:
 	%27 = call i64 @js_num_i(i64 0)
 	%28 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%29 = call i64 @js_scope_get(i64 %6, i64 %28)
-	%30 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000535, i64 0, i64 0), i64 6)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000543, i64 0, i64 0), i64 6)
 	%31 = call i64 @js_set(i64 %29, i64 %30, i64 %27)
 	%32 = call i64 @js_setret(i64 %27)
 	%33 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%34 = call i64 @js_scope_get(i64 %6, i64 %33)
 	ret i64 %34
 
-dead587:
-	ret i64 0
-}
-
-define i64 @jsf_1000181(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
-	br label %6
-
-6:
-	%7 = call i64 @js_scope_new(i64 %0)
-	br label %8
-
-8:
-	%9 = phi i64 [ %7, %6 ]
-	%10 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
-	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000537, i64 0, i64 0), i64 5)
-	%13 = call i64 @js_get(i64 %11, i64 %12)
-	%14 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%15 = call i64 @js_tdecl(i64 %9, i64 %14, i64 %13)
-	%16 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%17 = call i64 @js_scope_get(i64 %9, i64 %16)
-	%18 = call i64 @js_typeof(i64 %17)
-	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
-	%20 = call i64 @js_eq(i64 %18, i64 %19)
-	%21 = call i64 @js_truthy(i64 %20)
-	%22 = icmp ne i64 %21, 0
-	br i1 %22, label %23, label %24
-
-23:
-	br label %26
-
-24:
-	%25 = call i64 @js_num_i(i64 0)
-	ret i64 %25
-
-26:
-	br label %27
-
-27:
-	%28 = phi i64 [ %9, %26 ]
-	%29 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%30 = call i64 @js_scope_get(i64 %28, i64 %29)
-	ret i64 %30
-
-dead588:
-	br label %24
-
-dead589:
+dead591:
 	ret i64 0
 }
 
@@ -36726,7 +37057,7 @@ entry:
 	%9 = phi i64 [ %7, %6 ]
 	%10 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
-	%12 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000535, i64 0, i64 0), i64 6)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000545, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_get(i64 %11, i64 %12)
 	%14 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%15 = call i64 @js_tdecl(i64 %9, i64 %14, i64 %13)
@@ -36755,14 +37086,68 @@ entry:
 	%30 = call i64 @js_scope_get(i64 %28, i64 %29)
 	ret i64 %30
 
-dead590:
+dead592:
 	br label %24
 
-dead591:
+dead593:
 	ret i64 0
 }
 
 define i64 @jsf_1000183(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
+	br label %6
+
+6:
+	%7 = call i64 @js_scope_new(i64 %0)
+	br label %8
+
+8:
+	%9 = phi i64 [ %7, %6 ]
+	%10 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
+	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000543, i64 0, i64 0), i64 6)
+	%13 = call i64 @js_get(i64 %11, i64 %12)
+	%14 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%15 = call i64 @js_tdecl(i64 %9, i64 %14, i64 %13)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%17 = call i64 @js_scope_get(i64 %9, i64 %16)
+	%18 = call i64 @js_typeof(i64 %17)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
+	%20 = call i64 @js_eq(i64 %18, i64 %19)
+	%21 = call i64 @js_truthy(i64 %20)
+	%22 = icmp ne i64 %21, 0
+	br i1 %22, label %23, label %24
+
+23:
+	br label %26
+
+24:
+	%25 = call i64 @js_num_i(i64 0)
+	ret i64 %25
+
+26:
+	br label %27
+
+27:
+	%28 = phi i64 [ %9, %26 ]
+	%29 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%30 = call i64 @js_scope_get(i64 %28, i64 %29)
+	ret i64 %30
+
+dead594:
+	br label %24
+
+dead595:
+	ret i64 0
+}
+
+define i64 @jsf_1000184(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -36812,22 +37197,22 @@ entry:
 	%37 = call i64 @js_get(i64 %35, i64 %36)
 	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000075, i64 0, i64 0), i64 4)
 	%39 = call i64 @js_tdecl(i64 %15, i64 %38, i64 %37)
-	%40 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%41 = call i64 @js_scope_get(i64 %15, i64 %40)
 	%42 = call i64 @js_arr_new()
 	%43 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%44 = call i64 @js_scope_get(i64 %15, i64 %43)
 	%45 = call i64 @js_arr_push(i64 %42, i64 %44)
 	%46 = call i64 @js_call(i64 %41, i64 0, i64 %42)
-	%47 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%47 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%48 = call i64 @js_tdecl(i64 %15, i64 %47, i64 %46)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000513, i64 0, i64 0), i64 10)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000488, i64 0, i64 0), i64 10)
 	%50 = call i64 @js_scope_get(i64 %15, i64 %49)
 	%51 = call i64 @js_arr_new()
 	%52 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%53 = call i64 @js_scope_get(i64 %15, i64 %52)
 	%54 = call i64 @js_arr_push(i64 %51, i64 %53)
-	%55 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%55 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%56 = call i64 @js_scope_get(i64 %15, i64 %55)
 	%57 = call i64 @js_arr_push(i64 %51, i64 %56)
 	%58 = call i64 @js_call(i64 %50, i64 0, i64 %51)
@@ -36864,7 +37249,7 @@ entry:
 	%81 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%82 = call i64 @js_scope_get(i64 %69, i64 %81)
 	%83 = call i64 @js_arr_new()
-	%84 = call i64 @js_str_mem(i8* getelementptr ([33 x i8], [33 x i8]* @str.1000540, i64 0, i64 0), i64 33)
+	%84 = call i64 @js_str_mem(i8* getelementptr ([33 x i8], [33 x i8]* @str.1000548, i64 0, i64 0), i64 33)
 	%85 = call i64 @js_arr_push(i64 %83, i64 %84)
 	%86 = call i64 @js_call(i64 %82, i64 0, i64 %83)
 	%87 = call i64 @js_setret(i64 %86)
@@ -36933,14 +37318,14 @@ entry:
 	%136 = call i64 @js_setret(i64 %135)
 	br label %106
 
-dead592:
+dead596:
 	br label %80
 
 137:
 	br label %147
 
 138:
-	%139 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%139 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%140 = call i64 @js_scope_get(i64 %15, i64 %139)
 	%141 = call i64 @js_typeof(i64 %140)
 	%142 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
@@ -37042,7 +37427,7 @@ dead592:
 	%210 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%211 = call i64 @js_get(i64 %209, i64 %210)
 	%212 = call i64 @js_arr_new()
-	%213 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%213 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%214 = call i64 @js_scope_get(i64 %207, i64 %213)
 	%215 = call i64 @js_arr_push(i64 %212, i64 %214)
 	%216 = call i64 @js_call(i64 %211, i64 %209, i64 %212)
@@ -37063,7 +37448,7 @@ dead592:
 	%229 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000072, i64 0, i64 0), i64 6)
 	%230 = call i64 @js_scope_get(i64 %15, i64 %229)
 	%231 = call i64 @js_arr_new()
-	%232 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%232 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%233 = call i64 @js_scope_get(i64 %15, i64 %232)
 	%234 = call i64 @js_arr_push(i64 %231, i64 %233)
 	%235 = call i64 @js_call(i64 %230, i64 0, i64 %231)
@@ -37087,9 +37472,9 @@ dead592:
 
 244:
 	%245 = phi i64 [ %15, %243 ]
-	%246 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%246 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%247 = call i64 @js_scope_get(i64 %245, i64 %246)
-	%248 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000539, i64 0, i64 0), i64 9)
+	%248 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000547, i64 0, i64 0), i64 9)
 	%249 = call i64 @js_scope_get(i64 %245, i64 %248)
 	%250 = call i64 @js_arr_new()
 	%251 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37112,22 +37497,22 @@ dead592:
 
 261:
 	%262 = phi i64 [ %245, %260 ]
-	%263 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%263 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%264 = call i64 @js_scope_get(i64 %262, i64 %263)
 	%265 = call i64 @js_num_i(i64 1)
 	%266 = call i64 @js_add(i64 %264, i64 %265)
 	%267 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%268 = call i64 @js_scope_get(i64 %262, i64 %267)
-	%269 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000535, i64 0, i64 0), i64 6)
+	%269 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000543, i64 0, i64 0), i64 6)
 	%270 = call i64 @js_set(i64 %268, i64 %269, i64 %266)
 	%271 = call i64 @js_setret(i64 %266)
 	br label %259
 
-dead593:
+dead597:
 	ret i64 0
 }
 
-define i64 @jsf_1000184(i64 %env, i64 %args) {
+define i64 @jsf_1000185(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37176,13 +37561,13 @@ entry:
 
 33:
 	%34 = phi i64 [ %11, %32 ]
-	%35 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%36 = call i64 @js_scope_get(i64 %34, i64 %35)
 	%37 = call i64 @js_arr_new()
 	%38 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%39 = call i64 @js_scope_get(i64 %34, i64 %38)
 	%40 = call i64 @js_arr_push(i64 %37, i64 %39)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000539, i64 0, i64 0), i64 9)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000547, i64 0, i64 0), i64 9)
 	%42 = call i64 @js_scope_get(i64 %34, i64 %41)
 	%43 = call i64 @js_arr_new()
 	%44 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37197,7 +37582,7 @@ entry:
 	%53 = call i64 @js_setret(i64 %52)
 	ret i64 0
 
-dead594:
+dead598:
 	br label %22
 
 54:
@@ -37207,7 +37592,7 @@ dead594:
 	%56 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%57 = call i64 @js_scope_get(i64 %11, i64 %56)
 	%58 = call i64 @js_arr_new()
-	%59 = call i64 @js_str_mem(i8* getelementptr ([27 x i8], [27 x i8]* @str.1000542, i64 0, i64 0), i64 27)
+	%59 = call i64 @js_str_mem(i8* getelementptr ([27 x i8], [27 x i8]* @str.1000549, i64 0, i64 0), i64 27)
 	%60 = call i64 @js_arr_push(i64 %58, i64 %59)
 	%61 = call i64 @js_call(i64 %57, i64 0, i64 %58)
 	%62 = call i64 @js_setret(i64 %61)
@@ -37230,14 +37615,14 @@ dead594:
 	%75 = call i64 @js_setret(i64 %74)
 	ret i64 0
 
-dead595:
+dead599:
 	br label %55
 
-dead596:
+dead600:
 	ret i64 0
 }
 
-define i64 @jsf_1000185(i64 %env, i64 %args) {
+define i64 @jsf_1000186(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37291,7 +37676,7 @@ entry:
 
 38:
 	%39 = phi i64 [ %37, %36 ]
-	%40 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000514, i64 0, i64 0), i64 6)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000522, i64 0, i64 0), i64 6)
 	%41 = call i64 @js_scope_get(i64 %39, i64 %40)
 	%42 = call i64 @js_arr_new()
 	%43 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37300,7 +37685,7 @@ entry:
 	%46 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%47 = call i64 @js_scope_get(i64 %39, i64 %46)
 	%48 = call i64 @js_arr_push(i64 %42, i64 %47)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%50 = call i64 @js_scope_get(i64 %39, i64 %49)
 	%51 = call i64 @js_arr_new()
 	%52 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -37344,10 +37729,10 @@ entry:
 	%82 = call i64 @js_call(i64 %72, i64 0, i64 %73)
 	ret i64 %82
 
-dead597:
+dead601:
 	br label %67
 
-dead598:
+dead602:
 	br label %28
 
 83:
@@ -37392,7 +37777,7 @@ dead598:
 	%116 = call i64 @js_call(i64 %98, i64 0, i64 %99)
 	ret i64 %116
 
-dead599:
+dead603:
 	br label %84
 
 117:
@@ -37415,7 +37800,7 @@ dead599:
 	%128 = phi i64 [ %12, %126 ]
 	ret i64 1
 
-dead600:
+dead604:
 	br label %118
 
 129:
@@ -37440,9 +37825,9 @@ dead600:
 	%142 = call i64 @js_arr_push(i64 %139, i64 %141)
 	%143 = call i64 @js_call(i64 %138, i64 0, i64 %139)
 	%144 = call i64 @js_get(i64 %136, i64 %143)
-	%145 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000544, i64 0, i64 0), i64 2)
+	%145 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000551, i64 0, i64 0), i64 2)
 	%146 = call i64 @js_tdecl(i64 %134, i64 %145, i64 %144)
-	%147 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000544, i64 0, i64 0), i64 2)
+	%147 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000551, i64 0, i64 0), i64 2)
 	%148 = call i64 @js_scope_get(i64 %134, i64 %147)
 	%149 = call i64 @js_sne(i64 %148, i64 0)
 	%150 = call i64 @js_truthy(i64 %149)
@@ -37460,21 +37845,21 @@ dead600:
 
 155:
 	%156 = phi i64 [ %134, %154 ]
-	%157 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000544, i64 0, i64 0), i64 2)
+	%157 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000551, i64 0, i64 0), i64 2)
 	%158 = call i64 @js_scope_get(i64 %156, i64 %157)
 	ret i64 %158
 
-dead601:
+dead605:
 	br label %153
 
-dead602:
+dead606:
 	br label %130
 
-dead603:
+dead607:
 	ret i64 0
 }
 
-define i64 @jsf_1000186(i64 %env, i64 %args) {
+define i64 @jsf_1000187(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37528,7 +37913,7 @@ entry:
 
 38:
 	%39 = phi i64 [ %37, %36 ]
-	%40 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000514, i64 0, i64 0), i64 6)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000522, i64 0, i64 0), i64 6)
 	%41 = call i64 @js_scope_get(i64 %39, i64 %40)
 	%42 = call i64 @js_arr_new()
 	%43 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37537,7 +37922,7 @@ entry:
 	%46 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%47 = call i64 @js_scope_get(i64 %39, i64 %46)
 	%48 = call i64 @js_arr_push(i64 %42, i64 %47)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%50 = call i64 @js_scope_get(i64 %39, i64 %49)
 	%51 = call i64 @js_arr_new()
 	%52 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -37587,10 +37972,10 @@ entry:
 	%88 = phi i64 [ %39, %86 ]
 	ret i64 2
 
-dead604:
+dead608:
 	br label %67
 
-dead605:
+dead609:
 	br label %28
 
 89:
@@ -37614,7 +37999,7 @@ dead605:
 
 102:
 	%103 = phi i64 [ %101, %100 ]
-	%104 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000534, i64 0, i64 0), i64 12)
+	%104 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000542, i64 0, i64 0), i64 12)
 	%105 = call i64 @js_scope_get(i64 %103, i64 %104)
 	%106 = call i64 @js_arr_new()
 	%107 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -37659,7 +38044,7 @@ dead605:
 	%138 = phi i64 [ %103, %136 ]
 	ret i64 2
 
-dead606:
+dead610:
 	br label %115
 
 139:
@@ -37697,10 +38082,10 @@ dead606:
 	%165 = call i64 @js_le(i64 %157, i64 %164)
 	ret i64 %165
 
-dead607:
+dead611:
 	br label %140
 
-dead608:
+dead612:
 	br label %90
 
 166:
@@ -37723,7 +38108,7 @@ dead608:
 	%177 = phi i64 [ %12, %175 ]
 	ret i64 2
 
-dead609:
+dead613:
 	br label %167
 
 178:
@@ -37748,9 +38133,9 @@ dead609:
 	%191 = call i64 @js_arr_push(i64 %188, i64 %190)
 	%192 = call i64 @js_call(i64 %187, i64 0, i64 %188)
 	%193 = call i64 @js_get(i64 %185, i64 %192)
-	%194 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000544, i64 0, i64 0), i64 2)
+	%194 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000551, i64 0, i64 0), i64 2)
 	%195 = call i64 @js_tdecl(i64 %183, i64 %194, i64 %193)
-	%196 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000544, i64 0, i64 0), i64 2)
+	%196 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000551, i64 0, i64 0), i64 2)
 	%197 = call i64 @js_scope_get(i64 %183, i64 %196)
 	%198 = call i64 @js_seq(i64 %197, i64 0)
 	%199 = call i64 @js_truthy(i64 %198)
@@ -37764,7 +38149,7 @@ dead609:
 	%203 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000129, i64 0, i64 0), i64 7)
 	%204 = call i64 @js_scope_get(i64 %183, i64 %203)
 	%205 = call i64 @js_arr_new()
-	%206 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000544, i64 0, i64 0), i64 2)
+	%206 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000551, i64 0, i64 0), i64 2)
 	%207 = call i64 @js_scope_get(i64 %183, i64 %206)
 	%208 = call i64 @js_arr_push(i64 %205, i64 %207)
 	%209 = call i64 @js_call(i64 %204, i64 0, i64 %205)
@@ -37778,17 +38163,17 @@ dead609:
 	%213 = phi i64 [ %183, %211 ]
 	ret i64 2
 
-dead610:
+dead614:
 	br label %202
 
-dead611:
+dead615:
 	br label %179
 
-dead612:
+dead616:
 	ret i64 0
 }
 
-define i64 @jsf_1000187(i64 %env, i64 %args) {
+define i64 @jsf_1000188(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37835,13 +38220,13 @@ entry:
 	%34 = call i64 @js_get(i64 %32, i64 %33)
 	%35 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000075, i64 0, i64 0), i64 4)
 	%36 = call i64 @js_tdecl(i64 %12, i64 %35, i64 %34)
-	%37 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000513, i64 0, i64 0), i64 10)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000488, i64 0, i64 0), i64 10)
 	%38 = call i64 @js_scope_get(i64 %12, i64 %37)
 	%39 = call i64 @js_arr_new()
 	%40 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%41 = call i64 @js_scope_get(i64 %12, i64 %40)
 	%42 = call i64 @js_arr_push(i64 %39, i64 %41)
-	%43 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%44 = call i64 @js_scope_get(i64 %12, i64 %43)
 	%45 = call i64 @js_arr_new()
 	%46 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -37867,7 +38252,7 @@ entry:
 	%62 = phi i64 [ %12, %60 ]
 	ret i64 0
 
-dead613:
+dead617:
 	br label %24
 
 63:
@@ -37875,10 +38260,10 @@ dead613:
 
 64:
 	%65 = call i64 @js_arr_new()
-	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%67 = call i64 @js_tdecl(i64 %12, i64 %66, i64 %65)
 	%68 = call i64 @js_arr_new()
-	%69 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000547, i64 0, i64 0), i64 2)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000554, i64 0, i64 0), i64 2)
 	%70 = call i64 @js_tdecl(i64 %12, i64 %69, i64 %68)
 	%71 = call i64 @js_num_i(i64 0)
 	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
@@ -37892,7 +38277,7 @@ dead613:
 	%76 = phi i64 [ %12, %74 ]
 	ret i64 0
 
-dead614:
+dead618:
 	br label %64
 
 77:
@@ -37911,21 +38296,21 @@ dead614:
 	br label %119
 
 88:
-	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%90 = call i64 @js_scope_get(i64 %12, i64 %89)
 	%91 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%92 = call i64 @js_scope_get(i64 %12, i64 %91)
 	%93 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
 	%94 = call i64 @js_set(i64 %92, i64 %93, i64 %90)
 	%95 = call i64 @js_setret(i64 %90)
-	%96 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000547, i64 0, i64 0), i64 2)
+	%96 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000554, i64 0, i64 0), i64 2)
 	%97 = call i64 @js_scope_get(i64 %12, i64 %96)
 	%98 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%99 = call i64 @js_scope_get(i64 %12, i64 %98)
 	%100 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000075, i64 0, i64 0), i64 4)
 	%101 = call i64 @js_set(i64 %99, i64 %100, i64 %97)
 	%102 = call i64 @js_setret(i64 %97)
-	%103 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000538, i64 0, i64 0), i64 8)
+	%103 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000546, i64 0, i64 0), i64 8)
 	%104 = call i64 @js_scope_get(i64 %12, i64 %103)
 	%105 = call i64 @js_arr_new()
 	%106 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -37975,7 +38360,7 @@ dead614:
 
 139:
 	%140 = phi i64 [ %121, %138 ]
-	%141 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%141 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%142 = call i64 @js_scope_get(i64 %140, i64 %141)
 	%143 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%144 = call i64 @js_get(i64 %142, i64 %143)
@@ -37988,7 +38373,7 @@ dead614:
 	%151 = call i64 @js_arr_push(i64 %145, i64 %150)
 	%152 = call i64 @js_call(i64 %144, i64 %142, i64 %145)
 	%153 = call i64 @js_setret(i64 %152)
-	%154 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000547, i64 0, i64 0), i64 2)
+	%154 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000554, i64 0, i64 0), i64 2)
 	%155 = call i64 @js_scope_get(i64 %140, i64 %154)
 	%156 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%157 = call i64 @js_get(i64 %155, i64 %156)
@@ -38020,16 +38405,16 @@ dead614:
 	%175 = call i64 @js_sub(i64 %173, i64 %174)
 	%176 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%177 = call i64 @js_scope_get(i64 %171, i64 %176)
-	%178 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000537, i64 0, i64 0), i64 5)
+	%178 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000545, i64 0, i64 0), i64 5)
 	%179 = call i64 @js_set(i64 %177, i64 %178, i64 %175)
 	%180 = call i64 @js_setret(i64 %175)
 	br label %168
 
-dead615:
+dead619:
 	ret i64 0
 }
 
-define i64 @jsf_1000188(i64 %env, i64 %args) {
+define i64 @jsf_1000189(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -38068,16 +38453,16 @@ entry:
 	br label %59
 
 28:
-	%29 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%30 = call i64 @js_scope_get(i64 %12, i64 %29)
 	%31 = call i64 @js_arr_new()
 	%32 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%33 = call i64 @js_scope_get(i64 %12, i64 %32)
 	%34 = call i64 @js_arr_push(i64 %31, i64 %33)
 	%35 = call i64 @js_call(i64 %30, i64 0, i64 %31)
-	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%37 = call i64 @js_tdecl(i64 %12, i64 %36, i64 %35)
-	%38 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000514, i64 0, i64 0), i64 6)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000522, i64 0, i64 0), i64 6)
 	%39 = call i64 @js_scope_get(i64 %12, i64 %38)
 	%40 = call i64 @js_arr_new()
 	%41 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -38086,7 +38471,7 @@ entry:
 	%44 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%45 = call i64 @js_scope_get(i64 %12, i64 %44)
 	%46 = call i64 @js_arr_push(i64 %40, i64 %45)
-	%47 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%47 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%48 = call i64 @js_scope_get(i64 %12, i64 %47)
 	%49 = call i64 @js_arr_push(i64 %40, i64 %48)
 	%50 = call i64 @js_call(i64 %39, i64 0, i64 %40)
@@ -38107,7 +38492,7 @@ entry:
 	%61 = phi i64 [ %12, %59 ]
 	ret i64 1
 
-dead616:
+dead620:
 	br label %28
 
 62:
@@ -38140,13 +38525,13 @@ dead616:
 
 84:
 	%85 = phi i64 [ %12, %83 ]
-	%86 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%86 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%87 = call i64 @js_scope_get(i64 %85, i64 %86)
 	%88 = call i64 @js_arr_new()
 	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
 	%90 = call i64 @js_scope_get(i64 %85, i64 %89)
 	%91 = call i64 @js_arr_push(i64 %88, i64 %90)
-	%92 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%92 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%93 = call i64 @js_scope_get(i64 %85, i64 %92)
 	%94 = call i64 @js_arr_push(i64 %88, i64 %93)
 	%95 = call i64 @js_arr_push(i64 %88, i64 1)
@@ -38173,7 +38558,7 @@ dead616:
 	br label %137
 
 114:
-	%115 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000514, i64 0, i64 0), i64 6)
+	%115 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000522, i64 0, i64 0), i64 6)
 	%116 = call i64 @js_scope_get(i64 %85, i64 %115)
 	%117 = call i64 @js_arr_new()
 	%118 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000152, i64 0, i64 0), i64 2)
@@ -38182,7 +38567,7 @@ dead616:
 	%121 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%122 = call i64 @js_scope_get(i64 %85, i64 %121)
 	%123 = call i64 @js_arr_push(i64 %117, i64 %122)
-	%124 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000512, i64 0, i64 0), i64 2)
+	%124 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000521, i64 0, i64 0), i64 2)
 	%125 = call i64 @js_scope_get(i64 %85, i64 %124)
 	%126 = call i64 @js_arr_push(i64 %117, i64 %125)
 	%127 = call i64 @js_call(i64 %116, i64 0, i64 %117)
@@ -38204,7 +38589,7 @@ dead616:
 	%139 = phi i64 [ %85, %137 ]
 	ret i64 1
 
-dead617:
+dead621:
 	br label %114
 
 140:
@@ -38220,7 +38605,7 @@ dead617:
 	%144 = phi i64 [ %85, %142 ]
 	ret i64 1
 
-dead618:
+dead622:
 	br label %141
 
 145:
@@ -38228,9 +38613,9 @@ dead618:
 
 146:
 	%147 = call i64 @js_obj_new()
-	%148 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000549, i64 0, i64 0), i64 4)
+	%148 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000556, i64 0, i64 0), i64 4)
 	%149 = call i64 @js_tdecl(i64 %12, i64 %148, i64 %147)
-	%150 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000549, i64 0, i64 0), i64 4)
+	%150 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000556, i64 0, i64 0), i64 4)
 	%151 = call i64 @js_scope_get(i64 %12, i64 %150)
 	%152 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000421, i64 0, i64 0), i64 9)
 	%153 = call i64 @js_set(i64 %151, i64 %152, i64 3)
@@ -38242,12 +38627,12 @@ dead618:
 	%159 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%160 = call i64 @js_scope_get(i64 %12, i64 %159)
 	%161 = call i64 @js_get(i64 %158, i64 %160)
-	%162 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000549, i64 0, i64 0), i64 4)
+	%162 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000556, i64 0, i64 0), i64 4)
 	%163 = call i64 @js_scope_get(i64 %12, i64 %162)
 	%164 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%165 = call i64 @js_set(i64 %163, i64 %164, i64 %161)
 	%166 = call i64 @js_setret(i64 %161)
-	%167 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000549, i64 0, i64 0), i64 4)
+	%167 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000556, i64 0, i64 0), i64 4)
 	%168 = call i64 @js_scope_get(i64 %12, i64 %167)
 	%169 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%170 = call i64 @js_scope_get(i64 %12, i64 %169)
@@ -38257,7 +38642,7 @@ dead618:
 	%174 = call i64 @js_scope_get(i64 %12, i64 %173)
 	%175 = call i64 @js_set(i64 %172, i64 %174, i64 %168)
 	%176 = call i64 @js_setret(i64 %168)
-	%177 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000549, i64 0, i64 0), i64 4)
+	%177 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000556, i64 0, i64 0), i64 4)
 	%178 = call i64 @js_scope_get(i64 %12, i64 %177)
 	ret i64 %178
 
@@ -38270,14 +38655,14 @@ dead618:
 	%183 = call i64 @js_scope_get(i64 %181, i64 %182)
 	ret i64 %183
 
-dead619:
+dead623:
 	br label %146
 
-dead620:
+dead624:
 	ret i64 0
 }
 
-define i64 @jsf_1000189(i64 %env, i64 %args) {
+define i64 @jsf_1000190(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -38313,7 +38698,7 @@ entry:
 	br label %47
 
 25:
-	%26 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%26 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%27 = call i64 @js_scope_get(i64 %9, i64 %26)
 	%28 = call i64 @js_arr_new()
 	%29 = call i64 @js_call(i64 %27, i64 0, i64 %28)
@@ -38323,13 +38708,13 @@ entry:
 	%33 = call i64 @js_scope_get(i64 %9, i64 %32)
 	%34 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
 	%35 = call i64 @js_get(i64 %33, i64 %34)
-	%36 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000551, i64 0, i64 0), i64 3)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000558, i64 0, i64 0), i64 3)
 	%37 = call i64 @js_tdecl(i64 %9, i64 %36, i64 %35)
 	%38 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%39 = call i64 @js_scope_get(i64 %9, i64 %38)
 	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000075, i64 0, i64 0), i64 4)
 	%41 = call i64 @js_get(i64 %39, i64 %40)
-	%42 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000552, i64 0, i64 0), i64 2)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000559, i64 0, i64 0), i64 2)
 	%43 = call i64 @js_tdecl(i64 %9, i64 %42, i64 %41)
 	%44 = call i64 @js_num_i(i64 0)
 	%45 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
@@ -38345,7 +38730,7 @@ entry:
 	%51 = call i64 @js_scope_get(i64 %49, i64 %50)
 	ret i64 %51
 
-dead621:
+dead625:
 	br label %25
 
 52:
@@ -38379,7 +38764,7 @@ dead621:
 
 73:
 	%74 = phi i64 [ %9, %72 ]
-	%75 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000551, i64 0, i64 0), i64 3)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000558, i64 0, i64 0), i64 3)
 	%76 = call i64 @js_scope_get(i64 %74, i64 %75)
 	%77 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%78 = call i64 @js_get(i64 %76, i64 %77)
@@ -38394,12 +38779,12 @@ dead621:
 	%87 = call i64 @js_arr_push(i64 %79, i64 %86)
 	%88 = call i64 @js_call(i64 %78, i64 %76, i64 %79)
 	%89 = call i64 @js_setret(i64 %88)
-	%90 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000552, i64 0, i64 0), i64 2)
+	%90 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000559, i64 0, i64 0), i64 2)
 	%91 = call i64 @js_scope_get(i64 %74, i64 %90)
 	%92 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%93 = call i64 @js_get(i64 %91, i64 %92)
 	%94 = call i64 @js_arr_new()
-	%95 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000553, i64 0, i64 0), i64 9)
+	%95 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000487, i64 0, i64 0), i64 9)
 	%96 = call i64 @js_scope_get(i64 %74, i64 %95)
 	%97 = call i64 @js_arr_new()
 	%98 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
@@ -38445,7 +38830,7 @@ dead621:
 
 129:
 	%130 = phi i64 [ %128, %127 ]
-	%131 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000539, i64 0, i64 0), i64 9)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000547, i64 0, i64 0), i64 9)
 	%132 = call i64 @js_scope_get(i64 %130, i64 %131)
 	%133 = call i64 @js_arr_new()
 	%134 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -38454,19 +38839,19 @@ dead621:
 	%137 = call i64 @js_call(i64 %132, i64 0, i64 %133)
 	%138 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%139 = call i64 @js_scope_get(i64 %130, i64 %138)
-	%140 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000535, i64 0, i64 0), i64 6)
+	%140 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000543, i64 0, i64 0), i64 6)
 	%141 = call i64 @js_set(i64 %139, i64 %140, i64 %137)
 	%142 = call i64 @js_setret(i64 %137)
-	%143 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000538, i64 0, i64 0), i64 8)
+	%143 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000546, i64 0, i64 0), i64 8)
 	%144 = call i64 @js_scope_get(i64 %130, i64 %143)
 	%145 = call i64 @js_arr_new()
 	%146 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%147 = call i64 @js_scope_get(i64 %130, i64 %146)
 	%148 = call i64 @js_arr_push(i64 %145, i64 %147)
 	%149 = call i64 @js_call(i64 %144, i64 0, i64 %145)
-	%150 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000554, i64 0, i64 0), i64 3)
+	%150 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000560, i64 0, i64 0), i64 3)
 	%151 = call i64 @js_tdecl(i64 %130, i64 %150, i64 %149)
-	%152 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000554, i64 0, i64 0), i64 3)
+	%152 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000560, i64 0, i64 0), i64 3)
 	%153 = call i64 @js_scope_get(i64 %130, i64 %152)
 	%154 = call i64 @js_num_i(i64 0)
 	%155 = call i64 @js_ne(i64 %153, i64 %154)
@@ -38485,11 +38870,11 @@ dead621:
 
 161:
 	%162 = phi i64 [ %130, %160 ]
-	%163 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000554, i64 0, i64 0), i64 3)
+	%163 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000560, i64 0, i64 0), i64 3)
 	%164 = call i64 @js_scope_get(i64 %162, i64 %163)
 	%165 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%166 = call i64 @js_scope_get(i64 %162, i64 %165)
-	%167 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000537, i64 0, i64 0), i64 5)
+	%167 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000545, i64 0, i64 0), i64 5)
 	%168 = call i64 @js_set(i64 %166, i64 %167, i64 %164)
 	%169 = call i64 @js_setret(i64 %164)
 	br label %159
@@ -38507,16 +38892,16 @@ dead621:
 	%178 = call i64 @js_get(i64 %176, i64 %177)
 	%179 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%180 = call i64 @js_scope_get(i64 %172, i64 %179)
-	%181 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000535, i64 0, i64 0), i64 6)
+	%181 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000543, i64 0, i64 0), i64 6)
 	%182 = call i64 @js_set(i64 %180, i64 %181, i64 %178)
 	%183 = call i64 @js_setret(i64 %178)
 	br label %123
 
-dead622:
+dead626:
 	ret i64 0
 }
 
-define i64 @jsf_1000190(i64 %env, i64 %args) {
+define i64 @jsf_1000191(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -38574,7 +38959,7 @@ entry:
 	%41 = call i64 @js_get(i64 %39, i64 %40)
 	ret i64 %41
 
-dead623:
+dead627:
 	br label %25
 
 42:
@@ -38606,7 +38991,7 @@ dead623:
 	%62 = call i64 @js_call(i64 %57, i64 0, i64 %58)
 	ret i64 %62
 
-dead624:
+dead628:
 	br label %43
 
 63:
@@ -38624,14 +39009,14 @@ dead624:
 	%69 = call i64 @js_num_i(i64 0)
 	ret i64 %69
 
-dead625:
+dead629:
 	br label %64
 
-dead626:
+dead630:
 	ret i64 0
 }
 
-define i64 @jsf_1000191(i64 %env, i64 %args) {
+define i64 @jsf_1000192(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -38673,7 +39058,7 @@ entry:
 	%25 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%26 = call i64 @js_scope_get(i64 %24, i64 %25)
 	%27 = call i64 @js_arr_new()
-	%28 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000556, i64 0, i64 0), i64 15)
+	%28 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000562, i64 0, i64 0), i64 15)
 	%29 = call i64 @js_arr_push(i64 %27, i64 %28)
 	%30 = call i64 @js_call(i64 %26, i64 0, i64 %27)
 	%31 = call i64 @js_setret(i64 %30)
@@ -38700,7 +39085,7 @@ entry:
 	%44 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%45 = call i64 @js_scope_get(i64 %43, i64 %44)
 	%46 = call i64 @js_arr_new()
-	%47 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000557, i64 0, i64 0), i64 10)
+	%47 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000563, i64 0, i64 0), i64 10)
 	%48 = call i64 @js_arr_push(i64 %46, i64 %47)
 	%49 = call i64 @js_call(i64 %45, i64 0, i64 %46)
 	%50 = call i64 @js_setret(i64 %49)
@@ -38727,7 +39112,7 @@ entry:
 	%63 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%64 = call i64 @js_scope_get(i64 %62, i64 %63)
 	%65 = call i64 @js_arr_new()
-	%66 = call i64 @js_str_mem(i8* getelementptr ([18 x i8], [18 x i8]* @str.1000558, i64 0, i64 0), i64 18)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([18 x i8], [18 x i8]* @str.1000564, i64 0, i64 0), i64 18)
 	%67 = call i64 @js_arr_push(i64 %65, i64 %66)
 	%68 = call i64 @js_call(i64 %64, i64 0, i64 %65)
 	%69 = call i64 @js_setret(i64 %68)
@@ -38759,7 +39144,7 @@ entry:
 	%87 = call i64 @js_scope_get(i64 %85, i64 %86)
 	ret i64 %87
 
-dead627:
+dead631:
 	br label %71
 
 88:
@@ -38769,7 +39154,7 @@ dead627:
 	%90 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%91 = call i64 @js_scope_get(i64 %9, i64 %90)
 	%92 = call i64 @js_arr_new()
-	%93 = call i64 @js_str_mem(i8* getelementptr ([46 x i8], [46 x i8]* @str.1000559, i64 0, i64 0), i64 46)
+	%93 = call i64 @js_str_mem(i8* getelementptr ([46 x i8], [46 x i8]* @str.1000565, i64 0, i64 0), i64 46)
 	%94 = call i64 @js_arr_push(i64 %92, i64 %93)
 	%95 = call i64 @js_call(i64 %91, i64 0, i64 %92)
 	%96 = call i64 @js_setret(i64 %95)
@@ -38784,20 +39169,20 @@ dead627:
 	%101 = call i64 @js_scope_get(i64 %99, i64 %100)
 	ret i64 %101
 
-dead628:
+dead632:
 	br label %89
 
-dead629:
+dead633:
 	ret i64 0
 }
 
-define i64 @jsf_1000192(i64 %env, i64 %args) {
+define i64 @jsf_1000193(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -38871,7 +39256,7 @@ entry:
 	%53 = phi i64 [ %31, %51 ]
 	ret i64 0
 
-dead630:
+dead634:
 	br label %45
 
 54:
@@ -38894,7 +39279,7 @@ dead630:
 	%65 = phi i64 [ %31, %63 ]
 	ret i64 0
 
-dead631:
+dead635:
 	br label %55
 
 66:
@@ -38903,7 +39288,7 @@ dead631:
 67:
 	%68 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000100, i64 0, i64 0), i64 1)
 	%69 = call i64 @js_scope_get(i64 %31, i64 %68)
-	%70 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%70 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%71 = call i64 @js_scope_get(i64 %31, i64 %70)
 	%72 = call i64 @js_get(i64 %69, i64 %71)
 	%73 = call i64 @js_sne(i64 %72, i64 0)
@@ -38918,7 +39303,7 @@ dead631:
 	%78 = phi i64 [ %31, %76 ]
 	ret i64 0
 
-dead632:
+dead636:
 	br label %67
 
 79:
@@ -38948,7 +39333,7 @@ dead632:
 	%97 = call i64 @js_scope_get(i64 %95, i64 %96)
 	ret i64 %97
 
-dead633:
+dead637:
 	br label %80
 
 98:
@@ -38964,23 +39349,23 @@ dead633:
 	%102 = phi i64 [ %31, %100 ]
 	ret i64 0
 
-dead634:
+dead638:
 	br label %99
 
-dead635:
+dead639:
 	ret i64 0
 }
 
-define i64 @jsf_1000193(i64 %env, i64 %args) {
+define i64 @jsf_1000194(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000564, i64 0, i64 0), i64 5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000570, i64 0, i64 0), i64 5)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -38993,13 +39378,13 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%19 = call i64 @js_tdecl(i64 %15, i64 %18, i64 %17)
 	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%21 = call i64 @js_scope_get(i64 %15, i64 %20)
-	%22 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%23 = call i64 @js_scope_get(i64 %15, i64 %22)
 	%24 = call i64 @js_get(i64 %21, i64 %23)
 	%25 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -39064,11 +39449,11 @@ entry:
 	%68 = phi i64 [ %66, %65 ]
 	%69 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%70 = call i64 @js_scope_get(i64 %68, i64 %69)
-	%71 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000566, i64 0, i64 0), i64 3)
+	%71 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000572, i64 0, i64 0), i64 3)
 	%72 = call i64 @js_tdecl(i64 %68, i64 %71, i64 %70)
-	%73 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000566, i64 0, i64 0), i64 3)
+	%73 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000572, i64 0, i64 0), i64 3)
 	%74 = call i64 @js_scope_get(i64 %68, i64 %73)
-	%75 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000567, i64 0, i64 0), i64 11)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000573, i64 0, i64 0), i64 11)
 	%76 = call i64 @js_get(i64 %74, i64 %75)
 	%77 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
 	%78 = call i64 @js_tdecl(i64 %68, i64 %77, i64 %76)
@@ -39090,9 +39475,9 @@ entry:
 
 87:
 	%88 = phi i64 [ %68, %86 ]
-	%89 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000566, i64 0, i64 0), i64 3)
+	%89 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000572, i64 0, i64 0), i64 3)
 	%90 = call i64 @js_scope_get(i64 %88, i64 %89)
-	%91 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000568, i64 0, i64 0), i64 10)
+	%91 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000574, i64 0, i64 0), i64 10)
 	%92 = call i64 @js_get(i64 %90, i64 %91)
 	%93 = call i64 @js_seq(i64 %92, i64 3)
 	%94 = call i64 @js_truthy(i64 %93)
@@ -39103,7 +39488,7 @@ entry:
 	br label %104
 
 97:
-	%98 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000563, i64 0, i64 0), i64 12)
+	%98 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000569, i64 0, i64 0), i64 12)
 	%99 = call i64 @js_scope_get(i64 %88, i64 %98)
 	%100 = call i64 @js_num_i(i64 0)
 	%101 = call i64 @js_gt(i64 %99, i64 %100)
@@ -39119,10 +39504,10 @@ entry:
 	%107 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%108 = call i64 @js_scope_get(i64 %106, i64 %107)
 	%109 = call i64 @js_arr_new()
-	%110 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%110 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%111 = call i64 @js_arr_push(i64 %109, i64 %110)
-	%112 = call i64 @js_str_mem(i8* getelementptr ([41 x i8], [41 x i8]* @str.1000570, i64 0, i64 0), i64 41)
-	%113 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000564, i64 0, i64 0), i64 5)
+	%112 = call i64 @js_str_mem(i8* getelementptr ([41 x i8], [41 x i8]* @str.1000576, i64 0, i64 0), i64 41)
+	%113 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000570, i64 0, i64 0), i64 5)
 	%114 = call i64 @js_scope_get(i64 %106, i64 %113)
 	%115 = call i64 @js_add(i64 %112, i64 %114)
 	%116 = call i64 @js_arr_push(i64 %109, i64 %115)
@@ -39134,15 +39519,15 @@ entry:
 	br label %133
 
 120:
-	%121 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000563, i64 0, i64 0), i64 12)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000569, i64 0, i64 0), i64 12)
 	%122 = call i64 @js_scope_get(i64 %88, i64 %121)
 	%123 = call i64 @js_num_i(i64 1)
 	%124 = call i64 @js_add(i64 %122, i64 %123)
-	%125 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000563, i64 0, i64 0), i64 12)
+	%125 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000569, i64 0, i64 0), i64 12)
 	%126 = call i64 @js_tset(i64 %88, i64 %125, i64 %124)
 	%127 = call i64 @js_setret(i64 %124)
-	%128 = call i64 @js_closure(i64 1000194, i64 %88)
-	%129 = call i64 @js_closure(i64 1000195, i64 %88)
+	%128 = call i64 @js_closure(i64 1000195, i64 %88)
+	%129 = call i64 @js_closure(i64 1000196, i64 %88)
 	%130 = call i64 @js_try(i64 %128, i64 0, i64 %129)
 	%131 = call i64 @js_ctl_kind(i64 %130)
 	%132 = icmp eq i64 %131, 1
@@ -39153,9 +39538,9 @@ entry:
 
 134:
 	%135 = phi i64 [ %88, %133 ]
-	%136 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000566, i64 0, i64 0), i64 3)
+	%136 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000572, i64 0, i64 0), i64 3)
 	%137 = call i64 @js_scope_get(i64 %135, i64 %136)
-	%138 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000568, i64 0, i64 0), i64 10)
+	%138 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000574, i64 0, i64 0), i64 10)
 	%139 = call i64 @js_set(i64 %137, i64 %138, i64 3)
 	%140 = call i64 @js_setret(i64 3)
 	br label %120
@@ -39165,7 +39550,7 @@ entry:
 	%143 = call i64 @js_scope_get(i64 %88, i64 %142)
 	%144 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%145 = call i64 @js_scope_get(i64 %88, i64 %144)
-	%146 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%146 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%147 = call i64 @js_scope_get(i64 %88, i64 %146)
 	%148 = call i64 @js_set(i64 %145, i64 %147, i64 %143)
 	%149 = call i64 @js_setret(i64 %143)
@@ -39178,14 +39563,14 @@ entry:
 152:
 	br label %141
 
-dead636:
+dead640:
 	ret i64 0
 
-dead637:
+dead641:
 	ret i64 0
 }
 
-define i64 @jsf_1000194(i64 %env, i64 %args) {
+define i64 @jsf_1000195(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -39213,7 +39598,7 @@ entry:
 	ret i64 0
 }
 
-define i64 @jsf_1000195(i64 %env, i64 %args) {
+define i64 @jsf_1000196(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -39225,16 +39610,16 @@ entry:
 
 4:
 	%5 = phi i64 [ %0, %3 ]
-	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000563, i64 0, i64 0), i64 12)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000569, i64 0, i64 0), i64 12)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_num_i(i64 1)
 	%9 = call i64 @js_sub(i64 %7, i64 %8)
-	%10 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000563, i64 0, i64 0), i64 12)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000569, i64 0, i64 0), i64 12)
 	%11 = call i64 @js_tset(i64 %5, i64 %10, i64 %9)
 	%12 = call i64 @js_setret(i64 %9)
-	%13 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000566, i64 0, i64 0), i64 3)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000572, i64 0, i64 0), i64 3)
 	%14 = call i64 @js_scope_get(i64 %5, i64 %13)
-	%15 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000568, i64 0, i64 0), i64 10)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000574, i64 0, i64 0), i64 10)
 	%16 = call i64 @js_set(i64 %14, i64 %15, i64 2)
 	%17 = call i64 @js_setret(i64 2)
 	ret i64 0
@@ -39246,7 +39631,7 @@ declare i64 @js_ctl_kind(i64 %0)
 
 declare i64 @js_ctl_value(i64 %0)
 
-define i64 @jsf_1000196(i64 %env, i64 %args) {
+define i64 @jsf_1000197(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -39255,10 +39640,10 @@ entry:
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000564, i64 0, i64 0), i64 5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000570, i64 0, i64 0), i64 5)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
-	%10 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000572, i64 0, i64 0), i64 5)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000578, i64 0, i64 0), i64 5)
 	%11 = call i64 @js_arg(i64 %args, i64 3)
 	%12 = call i64 @js_tdecl(i64 %0, i64 %10, i64 %11)
 	%13 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -39296,14 +39681,14 @@ entry:
 	%33 = phi i64 [ %18, %31 ]
 	ret i64 0
 
-dead638:
+dead642:
 	br label %25
 
 34:
 	br label %42
 
 35:
-	%36 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000572, i64 0, i64 0), i64 5)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000578, i64 0, i64 0), i64 5)
 	%37 = call i64 @js_scope_get(i64 %18, i64 %36)
 	%38 = call i64 @js_num_i(i64 16)
 	%39 = call i64 @js_gt(i64 %37, i64 %38)
@@ -39318,20 +39703,20 @@ dead638:
 	%44 = phi i64 [ %18, %42 ]
 	ret i64 0
 
-dead639:
+dead643:
 	br label %35
 
 45:
 	br label %66
 
 46:
-	%47 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%47 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%48 = call i64 @js_scope_get(i64 %18, i64 %47)
 	%49 = call i64 @js_arr_new()
 	%50 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%51 = call i64 @js_scope_get(i64 %18, i64 %50)
 	%52 = call i64 @js_arr_push(i64 %49, i64 %51)
-	%53 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000573, i64 0, i64 0), i64 2)
+	%53 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000579, i64 0, i64 0), i64 2)
 	%54 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%55 = call i64 @js_scope_get(i64 %18, i64 %54)
 	%56 = call i64 @js_add(i64 %53, i64 %55)
@@ -39353,7 +39738,7 @@ dead639:
 	%68 = phi i64 [ %18, %66 ]
 	ret i64 0
 
-dead640:
+dead644:
 	br label %46
 
 69:
@@ -39376,25 +39761,25 @@ dead640:
 	%80 = phi i64 [ %18, %78 ]
 	%81 = call i64 @js_obj_new()
 	%82 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%83 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000571, i64 0, i64 0), i64 10)
+	%83 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000577, i64 0, i64 0), i64 10)
 	%84 = call i64 @js_scope_get(i64 %80, i64 %83)
 	%85 = call i64 @js_arr_new()
 	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%87 = call i64 @js_scope_get(i64 %80, i64 %86)
 	%88 = call i64 @js_arr_push(i64 %85, i64 %87)
-	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000573, i64 0, i64 0), i64 2)
+	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000579, i64 0, i64 0), i64 2)
 	%90 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%91 = call i64 @js_scope_get(i64 %80, i64 %90)
 	%92 = call i64 @js_add(i64 %89, i64 %91)
 	%93 = call i64 @js_arr_push(i64 %85, i64 %92)
-	%94 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000564, i64 0, i64 0), i64 5)
+	%94 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000570, i64 0, i64 0), i64 5)
 	%95 = call i64 @js_scope_get(i64 %80, i64 %94)
 	%96 = call i64 @js_arr_push(i64 %85, i64 %95)
 	%97 = call i64 @js_call(i64 %84, i64 0, i64 %85)
 	%98 = call i64 @js_set(i64 %81, i64 %82, i64 %97)
 	ret i64 %81
 
-dead641:
+dead645:
 	br label %70
 
 99:
@@ -39450,7 +39835,7 @@ dead641:
 	%133 = phi i64 [ %111, %131 ]
 	ret i64 0
 
-dead642:
+dead646:
 	br label %125
 
 134:
@@ -39473,7 +39858,7 @@ dead642:
 	%145 = phi i64 [ %111, %143 ]
 	ret i64 0
 
-dead643:
+dead647:
 	br label %135
 
 146:
@@ -39500,7 +39885,7 @@ dead643:
 	%161 = phi i64 [ %111, %159 ]
 	ret i64 0
 
-dead644:
+dead648:
 	br label %147
 
 162:
@@ -39593,9 +39978,9 @@ dead644:
 	%225 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%226 = call i64 @js_scope_get(i64 %220, i64 %225)
 	%227 = call i64 @js_get(i64 %224, i64 %226)
-	%228 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
+	%228 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
 	%229 = call i64 @js_tdecl(i64 %220, i64 %228, i64 %227)
-	%230 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
+	%230 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
 	%231 = call i64 @js_scope_get(i64 %220, i64 %230)
 	%232 = call i64 @js_sne(i64 %231, i64 0)
 	%233 = call i64 @js_truthy(i64 %232)
@@ -39603,7 +39988,7 @@ dead644:
 	br i1 %234, label %235, label %239
 
 235:
-	%236 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
+	%236 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
 	%237 = call i64 @js_scope_get(i64 %220, i64 %236)
 	%238 = call i64 @js_sne(i64 %237, i64 1)
 	br label %239
@@ -39615,7 +40000,7 @@ dead644:
 	br i1 %242, label %243, label %249
 
 243:
-	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
+	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
 	%245 = call i64 @js_scope_get(i64 %220, i64 %244)
 	%246 = call i64 @js_typeof(i64 %245)
 	%247 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
@@ -39647,19 +40032,19 @@ dead644:
 
 264:
 	%265 = phi i64 [ %263, %262 ]
-	%266 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000575, i64 0, i64 0), i64 9)
+	%266 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000581, i64 0, i64 0), i64 9)
 	%267 = call i64 @js_scope_get(i64 %265, i64 %266)
 	%268 = call i64 @js_arr_new()
-	%269 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
+	%269 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
 	%270 = call i64 @js_scope_get(i64 %265, i64 %269)
 	%271 = call i64 @js_arr_push(i64 %268, i64 %270)
 	%272 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%273 = call i64 @js_scope_get(i64 %265, i64 %272)
 	%274 = call i64 @js_arr_push(i64 %268, i64 %273)
-	%275 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000564, i64 0, i64 0), i64 5)
+	%275 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000570, i64 0, i64 0), i64 5)
 	%276 = call i64 @js_scope_get(i64 %265, i64 %275)
 	%277 = call i64 @js_arr_push(i64 %268, i64 %276)
-	%278 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000572, i64 0, i64 0), i64 5)
+	%278 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000578, i64 0, i64 0), i64 5)
 	%279 = call i64 @js_scope_get(i64 %265, i64 %278)
 	%280 = call i64 @js_num_i(i64 1)
 	%281 = call i64 @js_add(i64 %279, i64 %280)
@@ -39689,7 +40074,7 @@ dead644:
 	%297 = call i64 @js_scope_get(i64 %295, i64 %296)
 	ret i64 %297
 
-dead645:
+dead649:
 	br label %292
 
 298:
@@ -39705,14 +40090,14 @@ dead645:
 	%302 = phi i64 [ %111, %300 ]
 	ret i64 0
 
-dead646:
+dead650:
 	br label %299
 
-dead647:
+dead651:
 	ret i64 0
 }
 
-define i64 @jsf_1000197(i64 %env, i64 %args) {
+define i64 @jsf_1000198(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -39751,536 +40136,681 @@ entry:
 	%26 = call i64 @js_seq(i64 %25, i64 0)
 	%27 = call i64 @js_truthy(i64 %26)
 	%28 = icmp ne i64 %27, 0
-	br i1 %28, label %58, label %59
+	br i1 %28, label %65, label %66
 
 29:
-	br label %30
+	%30 = call i64 @js_scope_new(i64 %12)
+	br label %31
 
-30:
-	%31 = phi i64 [ %12, %29 ]
-	%32 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
-	%33 = call i64 @js_scope_get(i64 %31, i64 %32)
-	%34 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000576, i64 0, i64 0), i64 9)
-	%35 = call i64 @js_eq(i64 %33, i64 %34)
-	%36 = call i64 @js_truthy(i64 %35)
-	%37 = icmp ne i64 %36, 0
-	br i1 %37, label %38, label %39
-
-38:
-	br label %46
-
-39:
-	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
-	%41 = call i64 @js_scope_get(i64 %31, i64 %40)
-	%42 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000577, i64 0, i64 0), i64 11)
-	%43 = call i64 @js_eq(i64 %41, i64 %42)
-	%44 = call i64 @js_truthy(i64 %43)
-	%45 = icmp ne i64 %44, 0
-	br i1 %45, label %49, label %50
-
-46:
-	br label %47
-
-47:
-	%48 = phi i64 [ %31, %46 ]
-	ret i64 3
-
-dead648:
-	br label %39
+31:
+	%32 = phi i64 [ %30, %29 ]
+	%33 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
+	%34 = call i64 @js_scope_get(i64 %32, i64 %33)
+	%35 = call i64 @js_arr_new()
+	%36 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%37 = call i64 @js_scope_get(i64 %32, i64 %36)
+	%38 = call i64 @js_arr_push(i64 %35, i64 %37)
+	%39 = call i64 @js_arr_push(i64 %35, i64 2)
+	%40 = call i64 @js_call(i64 %34, i64 0, i64 %35)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000582, i64 0, i64 0), i64 2)
+	%42 = call i64 @js_tdecl(i64 %32, i64 %41, i64 %40)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000582, i64 0, i64 0), i64 2)
+	%44 = call i64 @js_scope_get(i64 %32, i64 %43)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000583, i64 0, i64 0), i64 9)
+	%46 = call i64 @js_eq(i64 %44, i64 %45)
+	%47 = call i64 @js_truthy(i64 %46)
+	%48 = icmp ne i64 %47, 0
+	br i1 %48, label %54, label %49
 
 49:
-	br label %55
+	%50 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000582, i64 0, i64 0), i64 2)
+	%51 = call i64 @js_scope_get(i64 %32, i64 %50)
+	%52 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000584, i64 0, i64 0), i64 11)
+	%53 = call i64 @js_eq(i64 %51, i64 %52)
+	br label %54
 
-50:
-	%51 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
-	%52 = call i64 @js_scope_get(i64 %31, i64 %51)
-	%53 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000578, i64 0, i64 0), i64 8)
-	%54 = call i64 @js_eq(i64 %52, i64 %53)
-	ret i64 %54
-
-55:
-	br label %56
-
-56:
-	%57 = phi i64 [ %31, %55 ]
-	ret i64 3
-
-dead649:
-	br label %50
-
-dead650:
-	br label %23
+54:
+	%55 = phi i64 [ %46, %31 ], [ %53, %49 ]
+	%56 = call i64 @js_truthy(i64 %55)
+	%57 = icmp ne i64 %56, 0
+	br i1 %57, label %63, label %58
 
 58:
-	br label %65
+	%59 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000582, i64 0, i64 0), i64 2)
+	%60 = call i64 @js_scope_get(i64 %32, i64 %59)
+	%61 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000585, i64 0, i64 0), i64 8)
+	%62 = call i64 @js_eq(i64 %60, i64 %61)
+	br label %63
 
-59:
-	%60 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%61 = call i64 @js_scope_get(i64 %12, i64 %60)
-	%62 = call i64 @js_seq(i64 %61, i64 1)
-	%63 = call i64 @js_truthy(i64 %62)
-	%64 = icmp ne i64 %63, 0
-	br i1 %64, label %68, label %69
-
-65:
-	br label %66
-
-66:
-	%67 = phi i64 [ %12, %65 ]
-	ret i64 2
-
-dead651:
-	br label %59
-
-68:
-	br label %77
-
-69:
-	%70 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%71 = call i64 @js_scope_get(i64 %12, i64 %70)
-	%72 = call i64 @js_typeof(i64 %71)
-	%73 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
-	%74 = call i64 @js_ne(i64 %72, i64 %73)
-	%75 = call i64 @js_truthy(i64 %74)
-	%76 = icmp ne i64 %75, 0
-	br i1 %76, label %80, label %81
-
-77:
-	br label %78
-
-78:
-	%79 = phi i64 [ %12, %77 ]
-	ret i64 2
+63:
+	%64 = phi i64 [ %55, %54 ], [ %62, %58 ]
+	ret i64 %64
 
 dead652:
-	br label %69
+	br label %23
 
-80:
-	br label %93
+65:
+	br label %72
 
-81:
-	%82 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
-	%83 = call i64 @js_scope_get(i64 %12, i64 %82)
-	%84 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%85 = call i64 @js_tdecl(i64 %12, i64 %84, i64 %83)
-	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%87 = call i64 @js_scope_get(i64 %12, i64 %86)
-	%88 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000425, i64 0, i64 0), i64 9)
-	%89 = call i64 @js_get(i64 %87, i64 %88)
-	%90 = call i64 @js_sne(i64 %89, i64 0)
-	%91 = call i64 @js_truthy(i64 %90)
-	%92 = icmp ne i64 %91, 0
-	br i1 %92, label %96, label %101
+66:
+	%67 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%68 = call i64 @js_scope_get(i64 %12, i64 %67)
+	%69 = call i64 @js_seq(i64 %68, i64 1)
+	%70 = call i64 @js_truthy(i64 %69)
+	%71 = icmp ne i64 %70, 0
+	br i1 %71, label %75, label %76
 
-93:
-	br label %94
+72:
+	br label %73
 
-94:
-	%95 = phi i64 [ %12, %93 ]
+73:
+	%74 = phi i64 [ %12, %72 ]
 	ret i64 2
 
 dead653:
-	br label %81
+	br label %66
 
-96:
-	br label %102
+75:
+	br label %84
 
-97:
-	%98 = call i64 @js_num_i(i64 0)
-	%99 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
-	%100 = call i64 @js_tdecl(i64 %12, i64 %99, i64 %98)
-	br label %120
+76:
+	%77 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%78 = call i64 @js_scope_get(i64 %12, i64 %77)
+	%79 = call i64 @js_typeof(i64 %78)
+	%80 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000094, i64 0, i64 0), i64 8)
+	%81 = call i64 @js_eq(i64 %79, i64 %80)
+	%82 = call i64 @js_truthy(i64 %81)
+	%83 = icmp ne i64 %82, 0
+	br i1 %83, label %87, label %88
 
-101:
-	br label %110
+84:
+	br label %85
 
-102:
-	br label %103
-
-103:
-	%104 = phi i64 [ %12, %102 ]
-	%105 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%106 = call i64 @js_scope_get(i64 %104, i64 %105)
-	%107 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%108 = call i64 @js_tset(i64 %104, i64 %107, i64 %106)
-	%109 = call i64 @js_setret(i64 %106)
-	br label %97
-
-110:
-	br label %111
-
-111:
-	%112 = phi i64 [ %12, %110 ]
-	%113 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%114 = call i64 @js_scope_get(i64 %112, i64 %113)
-	%115 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000060, i64 0, i64 0), i64 7)
-	%116 = call i64 @js_get(i64 %114, i64 %115)
-	%117 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%118 = call i64 @js_tset(i64 %112, i64 %117, i64 %116)
-	%119 = call i64 @js_setret(i64 %116)
-	br label %97
-
-120:
-	%121 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
-	%122 = call i64 @js_scope_get(i64 %12, i64 %121)
-	%123 = call i64 @js_num_i(i64 64)
-	%124 = call i64 @js_lt(i64 %122, i64 %123)
-	%125 = call i64 @js_truthy(i64 %124)
-	%126 = icmp ne i64 %125, 0
-	br i1 %126, label %127, label %128
-
-127:
-	br label %129
-
-128:
-	ret i64 2
-
-129:
-	%130 = call i64 @js_scope_new(i64 %12)
-	br label %131
-
-131:
-	%132 = phi i64 [ %130, %129 ]
-	%133 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
-	%134 = call i64 @js_scope_get(i64 %132, i64 %133)
-	%135 = call i64 @js_num_i(i64 1)
-	%136 = call i64 @js_add(i64 %134, i64 %135)
-	%137 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
-	%138 = call i64 @js_tset(i64 %132, i64 %137, i64 %136)
-	%139 = call i64 @js_setret(i64 %136)
-	%140 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%141 = call i64 @js_scope_get(i64 %132, i64 %140)
-	%142 = call i64 @js_seq(i64 %141, i64 0)
-	%143 = call i64 @js_truthy(i64 %142)
-	%144 = icmp ne i64 %143, 0
-	br i1 %144, label %145, label %146
-
-145:
-	br label %152
-
-146:
-	%147 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%148 = call i64 @js_scope_get(i64 %132, i64 %147)
-	%149 = call i64 @js_seq(i64 %148, i64 1)
-	%150 = call i64 @js_truthy(i64 %149)
-	%151 = icmp ne i64 %150, 0
-	br i1 %151, label %155, label %156
-
-152:
-	br label %153
-
-153:
-	%154 = phi i64 [ %132, %152 ]
+85:
+	%86 = phi i64 [ %12, %84 ]
 	ret i64 2
 
 dead654:
-	br label %146
+	br label %76
 
-155:
-	br label %164
+87:
+	br label %96
 
-156:
-	%157 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%158 = call i64 @js_scope_get(i64 %132, i64 %157)
-	%159 = call i64 @js_typeof(i64 %158)
-	%160 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
-	%161 = call i64 @js_ne(i64 %159, i64 %160)
-	%162 = call i64 @js_truthy(i64 %161)
-	%163 = icmp ne i64 %162, 0
-	br i1 %163, label %167, label %168
+88:
+	%89 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%90 = call i64 @js_scope_get(i64 %12, i64 %89)
+	%91 = call i64 @js_typeof(i64 %90)
+	%92 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%93 = call i64 @js_ne(i64 %91, i64 %92)
+	%94 = call i64 @js_truthy(i64 %93)
+	%95 = icmp ne i64 %94, 0
+	br i1 %95, label %120, label %121
 
-164:
-	br label %165
+96:
+	br label %97
 
-165:
-	%166 = phi i64 [ %132, %164 ]
-	ret i64 2
+97:
+	%98 = phi i64 [ %12, %96 ]
+	%99 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%100 = call i64 @js_scope_get(i64 %98, i64 %99)
+	%101 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%102 = call i64 @js_get(i64 %100, i64 %101)
+	%103 = call i64 @js_num_i(i64 7)
+	%104 = call i64 @js_eq(i64 %102, i64 %103)
+	%105 = call i64 @js_truthy(i64 %104)
+	%106 = icmp ne i64 %105, 0
+	br i1 %106, label %107, label %118
+
+107:
+	%108 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
+	%109 = call i64 @js_scope_get(i64 %98, i64 %108)
+	%110 = call i64 @js_arr_new()
+	%111 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%112 = call i64 @js_scope_get(i64 %98, i64 %111)
+	%113 = call i64 @js_arr_push(i64 %110, i64 %112)
+	%114 = call i64 @js_arr_push(i64 %110, i64 2)
+	%115 = call i64 @js_call(i64 %109, i64 0, i64 %110)
+	%116 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000586, i64 0, i64 0), i64 7)
+	%117 = call i64 @js_eq(i64 %115, i64 %116)
+	br label %118
+
+118:
+	%119 = phi i64 [ %104, %97 ], [ %117, %107 ]
+	ret i64 %119
 
 dead655:
-	br label %156
+	br label %88
 
-167:
-	br label %183
+120:
+	br label %133
 
-168:
-	%169 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
-	%170 = call i64 @js_scope_get(i64 %132, i64 %169)
-	%171 = call i64 @js_arr_new()
-	%172 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%173 = call i64 @js_scope_get(i64 %132, i64 %172)
-	%174 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000066, i64 0, i64 0), i64 6)
-	%175 = call i64 @js_get(i64 %173, i64 %174)
-	%176 = call i64 @js_arr_push(i64 %171, i64 %175)
-	%177 = call i64 @js_call(i64 %170, i64 0, i64 %171)
-	%178 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
-	%179 = call i64 @js_scope_get(i64 %132, i64 %178)
-	%180 = call i64 @js_eq(i64 %177, i64 %179)
-	%181 = call i64 @js_truthy(i64 %180)
-	%182 = icmp ne i64 %181, 0
-	br i1 %182, label %186, label %187
+121:
+	%122 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
+	%123 = call i64 @js_scope_get(i64 %12, i64 %122)
+	%124 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%125 = call i64 @js_tdecl(i64 %12, i64 %124, i64 %123)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%127 = call i64 @js_scope_get(i64 %12, i64 %126)
+	%128 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000425, i64 0, i64 0), i64 9)
+	%129 = call i64 @js_get(i64 %127, i64 %128)
+	%130 = call i64 @js_sne(i64 %129, i64 0)
+	%131 = call i64 @js_truthy(i64 %130)
+	%132 = icmp ne i64 %131, 0
+	br i1 %132, label %136, label %141
 
-183:
-	br label %184
+133:
+	br label %134
 
-184:
-	%185 = phi i64 [ %132, %183 ]
+134:
+	%135 = phi i64 [ %12, %133 ]
 	ret i64 2
 
 dead656:
-	br label %168
+	br label %121
+
+136:
+	br label %142
+
+137:
+	%138 = call i64 @js_num_i(i64 0)
+	%139 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
+	%140 = call i64 @js_tdecl(i64 %12, i64 %139, i64 %138)
+	br label %160
+
+141:
+	br label %150
+
+142:
+	br label %143
+
+143:
+	%144 = phi i64 [ %12, %142 ]
+	%145 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%146 = call i64 @js_scope_get(i64 %144, i64 %145)
+	%147 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%148 = call i64 @js_tset(i64 %144, i64 %147, i64 %146)
+	%149 = call i64 @js_setret(i64 %146)
+	br label %137
+
+150:
+	br label %151
+
+151:
+	%152 = phi i64 [ %12, %150 ]
+	%153 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%154 = call i64 @js_scope_get(i64 %152, i64 %153)
+	%155 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000060, i64 0, i64 0), i64 7)
+	%156 = call i64 @js_get(i64 %154, i64 %155)
+	%157 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%158 = call i64 @js_tset(i64 %152, i64 %157, i64 %156)
+	%159 = call i64 @js_setret(i64 %156)
+	br label %137
+
+160:
+	%161 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
+	%162 = call i64 @js_scope_get(i64 %12, i64 %161)
+	%163 = call i64 @js_num_i(i64 64)
+	%164 = call i64 @js_lt(i64 %162, i64 %163)
+	%165 = call i64 @js_truthy(i64 %164)
+	%166 = icmp ne i64 %165, 0
+	br i1 %166, label %167, label %168
+
+167:
+	br label %169
+
+168:
+	ret i64 2
+
+169:
+	%170 = call i64 @js_scope_new(i64 %12)
+	br label %171
+
+171:
+	%172 = phi i64 [ %170, %169 ]
+	%173 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
+	%174 = call i64 @js_scope_get(i64 %172, i64 %173)
+	%175 = call i64 @js_num_i(i64 1)
+	%176 = call i64 @js_add(i64 %174, i64 %175)
+	%177 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000065, i64 0, i64 0), i64 5)
+	%178 = call i64 @js_tset(i64 %172, i64 %177, i64 %176)
+	%179 = call i64 @js_setret(i64 %176)
+	%180 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%181 = call i64 @js_scope_get(i64 %172, i64 %180)
+	%182 = call i64 @js_seq(i64 %181, i64 0)
+	%183 = call i64 @js_truthy(i64 %182)
+	%184 = icmp ne i64 %183, 0
+	br i1 %184, label %185, label %186
+
+185:
+	br label %192
 
 186:
-	br label %199
+	%187 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%188 = call i64 @js_scope_get(i64 %172, i64 %187)
+	%189 = call i64 @js_seq(i64 %188, i64 1)
+	%190 = call i64 @js_truthy(i64 %189)
+	%191 = icmp ne i64 %190, 0
+	br i1 %191, label %195, label %196
 
-187:
-	%188 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%189 = call i64 @js_scope_get(i64 %132, i64 %188)
-	%190 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000067, i64 0, i64 0), i64 8)
-	%191 = call i64 @js_get(i64 %189, i64 %190)
-	%192 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000068, i64 0, i64 0), i64 3)
-	%193 = call i64 @js_tdecl(i64 %132, i64 %192, i64 %191)
-	%194 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000068, i64 0, i64 0), i64 3)
-	%195 = call i64 @js_scope_get(i64 %132, i64 %194)
-	%196 = call i64 @js_sne(i64 %195, i64 0)
-	%197 = call i64 @js_truthy(i64 %196)
-	%198 = icmp ne i64 %197, 0
-	br i1 %198, label %202, label %203
+192:
+	br label %193
 
-199:
-	br label %200
-
-200:
-	%201 = phi i64 [ %132, %199 ]
-	ret i64 3
+193:
+	%194 = phi i64 [ %172, %192 ]
+	ret i64 2
 
 dead657:
-	br label %187
+	br label %186
 
-202:
-	br label %216
+195:
+	br label %204
 
-203:
-	%204 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%205 = call i64 @js_scope_get(i64 %132, i64 %204)
-	%206 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000070, i64 0, i64 0), i64 7)
-	%207 = call i64 @js_get(i64 %205, i64 %206)
-	%208 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%209 = call i64 @js_tset(i64 %132, i64 %208, i64 %207)
-	%210 = call i64 @js_setret(i64 %207)
-	%211 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
-	%212 = call i64 @js_scope_get(i64 %132, i64 %211)
-	%213 = call i64 @js_seq(i64 %212, i64 0)
-	%214 = call i64 @js_truthy(i64 %213)
-	%215 = icmp ne i64 %214, 0
-	br i1 %215, label %340, label %341
+196:
+	%197 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%198 = call i64 @js_scope_get(i64 %172, i64 %197)
+	%199 = call i64 @js_typeof(i64 %198)
+	%200 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%201 = call i64 @js_ne(i64 %199, i64 %200)
+	%202 = call i64 @js_truthy(i64 %201)
+	%203 = icmp ne i64 %202, 0
+	br i1 %203, label %207, label %208
 
-216:
-	%217 = call i64 @js_scope_new(i64 %132)
-	br label %218
+204:
+	br label %205
 
-218:
-	%219 = phi i64 [ %217, %216 ]
-	%220 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
-	%221 = call i64 @js_scope_get(i64 %219, i64 %220)
-	%222 = call i64 @js_arr_new()
-	%223 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000068, i64 0, i64 0), i64 3)
-	%224 = call i64 @js_scope_get(i64 %219, i64 %223)
-	%225 = call i64 @js_arr_push(i64 %222, i64 %224)
-	%226 = call i64 @js_call(i64 %221, i64 0, i64 %222)
-	%227 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
-	%228 = call i64 @js_tdecl(i64 %219, i64 %227, i64 %226)
-	%229 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
-	%230 = call i64 @js_scope_get(i64 %219, i64 %229)
-	%231 = call i64 @js_sne(i64 %230, i64 0)
-	%232 = call i64 @js_truthy(i64 %231)
-	%233 = icmp ne i64 %232, 0
-	br i1 %233, label %234, label %235
-
-234:
-	br label %236
-
-235:
-	br label %203
-
-236:
-	%237 = call i64 @js_scope_new(i64 %219)
-	br label %238
-
-238:
-	%239 = phi i64 [ %237, %236 ]
-	%240 = call i64 @js_num_i(i64 0)
-	%241 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
-	%242 = call i64 @js_tdecl(i64 %239, i64 %241, i64 %240)
-	br label %243
-
-243:
-	%244 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
-	%245 = call i64 @js_scope_get(i64 %239, i64 %244)
-	%246 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
-	%247 = call i64 @js_scope_get(i64 %239, i64 %246)
-	%248 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%249 = call i64 @js_get(i64 %247, i64 %248)
-	%250 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
-	%251 = call i64 @js_get(i64 %249, i64 %250)
-	%252 = call i64 @js_lt(i64 %245, i64 %251)
-	%253 = call i64 @js_truthy(i64 %252)
-	%254 = icmp ne i64 %253, 0
-	br i1 %254, label %255, label %256
-
-255:
-	br label %257
-
-256:
-	br label %235
-
-257:
-	%258 = call i64 @js_scope_new(i64 %239)
-	br label %259
-
-259:
-	%260 = phi i64 [ %258, %257 ]
-	%261 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
-	%262 = call i64 @js_scope_get(i64 %260, i64 %261)
-	%263 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%264 = call i64 @js_get(i64 %262, i64 %263)
-	%265 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
-	%266 = call i64 @js_scope_get(i64 %260, i64 %265)
-	%267 = call i64 @js_get(i64 %264, i64 %266)
-	%268 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
-	%269 = call i64 @js_tdecl(i64 %260, i64 %268, i64 %267)
-	%270 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
-	%271 = call i64 @js_scope_get(i64 %260, i64 %270)
-	%272 = call i64 @js_sne(i64 %271, i64 0)
-	%273 = call i64 @js_truthy(i64 %272)
-	%274 = icmp ne i64 %273, 0
-	br i1 %274, label %275, label %279
-
-275:
-	%276 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
-	%277 = call i64 @js_scope_get(i64 %260, i64 %276)
-	%278 = call i64 @js_sne(i64 %277, i64 1)
-	br label %279
-
-279:
-	%280 = phi i64 [ %272, %259 ], [ %278, %275 ]
-	%281 = call i64 @js_truthy(i64 %280)
-	%282 = icmp ne i64 %281, 0
-	br i1 %282, label %283, label %289
-
-283:
-	%284 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
-	%285 = call i64 @js_scope_get(i64 %260, i64 %284)
-	%286 = call i64 @js_typeof(i64 %285)
-	%287 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
-	%288 = call i64 @js_eq(i64 %286, i64 %287)
-	br label %289
-
-289:
-	%290 = phi i64 [ %280, %279 ], [ %288, %283 ]
-	%291 = call i64 @js_truthy(i64 %290)
-	%292 = icmp ne i64 %291, 0
-	br i1 %292, label %293, label %302
-
-293:
-	br label %315
-
-294:
-	%295 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
-	%296 = call i64 @js_scope_get(i64 %260, i64 %295)
-	%297 = call i64 @js_num_i(i64 1)
-	%298 = call i64 @js_add(i64 %296, i64 %297)
-	%299 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
-	%300 = call i64 @js_tset(i64 %260, i64 %299, i64 %298)
-	%301 = call i64 @js_setret(i64 %298)
-	br label %243
-
-302:
-	%303 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
-	%304 = call i64 @js_scope_get(i64 %260, i64 %303)
-	%305 = call i64 @js_arr_new()
-	%306 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
-	%307 = call i64 @js_scope_get(i64 %260, i64 %306)
-	%308 = call i64 @js_arr_push(i64 %305, i64 %307)
-	%309 = call i64 @js_call(i64 %304, i64 0, i64 %305)
-	%310 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
-	%311 = call i64 @js_scope_get(i64 %260, i64 %310)
-	%312 = call i64 @js_eq(i64 %309, i64 %311)
-	%313 = call i64 @js_truthy(i64 %312)
-	%314 = icmp ne i64 %313, 0
-	br i1 %314, label %335, label %336
-
-315:
-	br label %316
-
-316:
-	%317 = phi i64 [ %260, %315 ]
-	%318 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
-	%319 = call i64 @js_scope_get(i64 %317, i64 %318)
-	%320 = call i64 @js_arr_new()
-	%321 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000574, i64 0, i64 0), i64 2)
-	%322 = call i64 @js_scope_get(i64 %317, i64 %321)
-	%323 = call i64 @js_arr_push(i64 %320, i64 %322)
-	%324 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
-	%325 = call i64 @js_scope_get(i64 %317, i64 %324)
-	%326 = call i64 @js_arr_push(i64 %320, i64 %325)
-	%327 = call i64 @js_call(i64 %319, i64 0, i64 %320)
-	%328 = call i64 @js_truthy(i64 %327)
-	%329 = icmp ne i64 %328, 0
-	br i1 %329, label %330, label %331
-
-330:
-	br label %332
-
-331:
-	br label %294
-
-332:
-	br label %333
-
-333:
-	%334 = phi i64 [ %317, %332 ]
-	ret i64 3
+205:
+	%206 = phi i64 [ %172, %204 ]
+	ret i64 2
 
 dead658:
-	br label %331
+	br label %196
+
+207:
+	br label %227
+
+208:
+	%209 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
+	%210 = call i64 @js_scope_get(i64 %172, i64 %209)
+	%211 = call i64 @js_arr_new()
+	%212 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%213 = call i64 @js_scope_get(i64 %172, i64 %212)
+	%214 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000066, i64 0, i64 0), i64 6)
+	%215 = call i64 @js_get(i64 %213, i64 %214)
+	%216 = call i64 @js_arr_push(i64 %211, i64 %215)
+	%217 = call i64 @js_call(i64 %210, i64 0, i64 %211)
+	%218 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%219 = call i64 @js_tdecl(i64 %172, i64 %218, i64 %217)
+	%220 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%221 = call i64 @js_scope_get(i64 %172, i64 %220)
+	%222 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%223 = call i64 @js_scope_get(i64 %172, i64 %222)
+	%224 = call i64 @js_eq(i64 %221, i64 %223)
+	%225 = call i64 @js_truthy(i64 %224)
+	%226 = icmp ne i64 %225, 0
+	br i1 %226, label %242, label %230
+
+227:
+	br label %228
+
+228:
+	%229 = phi i64 [ %172, %227 ]
+	ret i64 2
+
+dead659:
+	br label %208
+
+230:
+	%231 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%232 = call i64 @js_scope_get(i64 %172, i64 %231)
+	%233 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%234 = call i64 @js_get(i64 %232, i64 %233)
+	%235 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%236 = call i64 @js_scope_get(i64 %172, i64 %235)
+	%237 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%238 = call i64 @js_get(i64 %236, i64 %237)
+	%239 = call i64 @js_eq(i64 %234, i64 %238)
+	%240 = call i64 @js_truthy(i64 %239)
+	%241 = icmp ne i64 %240, 0
+	br i1 %241, label %246, label %264
+
+242:
+	%243 = phi i64 [ %224, %208 ], [ %265, %264 ]
+	%244 = call i64 @js_truthy(i64 %243)
+	%245 = icmp ne i64 %244, 0
+	br i1 %245, label %266, label %267
+
+246:
+	%247 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
+	%248 = call i64 @js_scope_get(i64 %172, i64 %247)
+	%249 = call i64 @js_arr_new()
+	%250 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%251 = call i64 @js_scope_get(i64 %172, i64 %250)
+	%252 = call i64 @js_arr_push(i64 %249, i64 %251)
+	%253 = call i64 @js_arr_push(i64 %249, i64 2)
+	%254 = call i64 @js_call(i64 %248, i64 0, i64 %249)
+	%255 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
+	%256 = call i64 @js_scope_get(i64 %172, i64 %255)
+	%257 = call i64 @js_arr_new()
+	%258 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%259 = call i64 @js_scope_get(i64 %172, i64 %258)
+	%260 = call i64 @js_arr_push(i64 %257, i64 %259)
+	%261 = call i64 @js_arr_push(i64 %257, i64 2)
+	%262 = call i64 @js_call(i64 %256, i64 0, i64 %257)
+	%263 = call i64 @js_eq(i64 %254, i64 %262)
+	br label %264
+
+264:
+	%265 = phi i64 [ %239, %230 ], [ %263, %246 ]
+	br label %242
+
+266:
+	br label %279
+
+267:
+	%268 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%269 = call i64 @js_scope_get(i64 %172, i64 %268)
+	%270 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000067, i64 0, i64 0), i64 8)
+	%271 = call i64 @js_get(i64 %269, i64 %270)
+	%272 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000068, i64 0, i64 0), i64 3)
+	%273 = call i64 @js_tdecl(i64 %172, i64 %272, i64 %271)
+	%274 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000068, i64 0, i64 0), i64 3)
+	%275 = call i64 @js_scope_get(i64 %172, i64 %274)
+	%276 = call i64 @js_sne(i64 %275, i64 0)
+	%277 = call i64 @js_truthy(i64 %276)
+	%278 = icmp ne i64 %277, 0
+	br i1 %278, label %282, label %283
+
+279:
+	br label %280
+
+280:
+	%281 = phi i64 [ %172, %279 ]
+	ret i64 3
+
+dead660:
+	br label %267
+
+282:
+	br label %296
+
+283:
+	%284 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%285 = call i64 @js_scope_get(i64 %172, i64 %284)
+	%286 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000070, i64 0, i64 0), i64 7)
+	%287 = call i64 @js_get(i64 %285, i64 %286)
+	%288 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%289 = call i64 @js_tset(i64 %172, i64 %288, i64 %287)
+	%290 = call i64 @js_setret(i64 %287)
+	%291 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%292 = call i64 @js_scope_get(i64 %172, i64 %291)
+	%293 = call i64 @js_seq(i64 %292, i64 0)
+	%294 = call i64 @js_truthy(i64 %293)
+	%295 = icmp ne i64 %294, 0
+	br i1 %295, label %464, label %465
+
+296:
+	%297 = call i64 @js_scope_new(i64 %172)
+	br label %298
+
+298:
+	%299 = phi i64 [ %297, %296 ]
+	%300 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
+	%301 = call i64 @js_scope_get(i64 %299, i64 %300)
+	%302 = call i64 @js_arr_new()
+	%303 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000068, i64 0, i64 0), i64 3)
+	%304 = call i64 @js_scope_get(i64 %299, i64 %303)
+	%305 = call i64 @js_arr_push(i64 %302, i64 %304)
+	%306 = call i64 @js_call(i64 %301, i64 0, i64 %302)
+	%307 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%308 = call i64 @js_tdecl(i64 %299, i64 %307, i64 %306)
+	%309 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%310 = call i64 @js_scope_get(i64 %299, i64 %309)
+	%311 = call i64 @js_sne(i64 %310, i64 0)
+	%312 = call i64 @js_truthy(i64 %311)
+	%313 = icmp ne i64 %312, 0
+	br i1 %313, label %314, label %315
+
+314:
+	br label %316
+
+315:
+	br label %283
+
+316:
+	%317 = call i64 @js_scope_new(i64 %299)
+	br label %318
+
+318:
+	%319 = phi i64 [ %317, %316 ]
+	%320 = call i64 @js_num_i(i64 0)
+	%321 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%322 = call i64 @js_tdecl(i64 %319, i64 %321, i64 %320)
+	br label %323
+
+323:
+	%324 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%325 = call i64 @js_scope_get(i64 %319, i64 %324)
+	%326 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%327 = call i64 @js_scope_get(i64 %319, i64 %326)
+	%328 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%329 = call i64 @js_get(i64 %327, i64 %328)
+	%330 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%331 = call i64 @js_get(i64 %329, i64 %330)
+	%332 = call i64 @js_lt(i64 %325, i64 %331)
+	%333 = call i64 @js_truthy(i64 %332)
+	%334 = icmp ne i64 %333, 0
+	br i1 %334, label %335, label %336
 
 335:
 	br label %337
 
 336:
-	br label %294
+	br label %315
 
 337:
-	br label %338
+	%338 = call i64 @js_scope_new(i64 %319)
+	br label %339
 
-338:
-	%339 = phi i64 [ %260, %337 ]
+339:
+	%340 = phi i64 [ %338, %337 ]
+	%341 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%342 = call i64 @js_scope_get(i64 %340, i64 %341)
+	%343 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%344 = call i64 @js_get(i64 %342, i64 %343)
+	%345 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%346 = call i64 @js_scope_get(i64 %340, i64 %345)
+	%347 = call i64 @js_get(i64 %344, i64 %346)
+	%348 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
+	%349 = call i64 @js_tdecl(i64 %340, i64 %348, i64 %347)
+	%350 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
+	%351 = call i64 @js_scope_get(i64 %340, i64 %350)
+	%352 = call i64 @js_sne(i64 %351, i64 0)
+	%353 = call i64 @js_truthy(i64 %352)
+	%354 = icmp ne i64 %353, 0
+	br i1 %354, label %355, label %359
+
+355:
+	%356 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
+	%357 = call i64 @js_scope_get(i64 %340, i64 %356)
+	%358 = call i64 @js_sne(i64 %357, i64 1)
+	br label %359
+
+359:
+	%360 = phi i64 [ %352, %339 ], [ %358, %355 ]
+	%361 = call i64 @js_truthy(i64 %360)
+	%362 = icmp ne i64 %361, 0
+	br i1 %362, label %363, label %369
+
+363:
+	%364 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
+	%365 = call i64 @js_scope_get(i64 %340, i64 %364)
+	%366 = call i64 @js_typeof(i64 %365)
+	%367 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%368 = call i64 @js_eq(i64 %366, i64 %367)
+	br label %369
+
+369:
+	%370 = phi i64 [ %360, %359 ], [ %368, %363 ]
+	%371 = call i64 @js_truthy(i64 %370)
+	%372 = icmp ne i64 %371, 0
+	br i1 %372, label %373, label %382
+
+373:
+	br label %383
+
+374:
+	%375 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%376 = call i64 @js_scope_get(i64 %340, i64 %375)
+	%377 = call i64 @js_num_i(i64 1)
+	%378 = call i64 @js_add(i64 %376, i64 %377)
+	%379 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
+	%380 = call i64 @js_tset(i64 %340, i64 %379, i64 %378)
+	%381 = call i64 @js_setret(i64 %378)
+	br label %323
+
+382:
+	br label %403
+
+383:
+	br label %384
+
+384:
+	%385 = phi i64 [ %340, %383 ]
+	%386 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
+	%387 = call i64 @js_scope_get(i64 %385, i64 %386)
+	%388 = call i64 @js_arr_new()
+	%389 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
+	%390 = call i64 @js_scope_get(i64 %385, i64 %389)
+	%391 = call i64 @js_arr_push(i64 %388, i64 %390)
+	%392 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%393 = call i64 @js_scope_get(i64 %385, i64 %392)
+	%394 = call i64 @js_arr_push(i64 %388, i64 %393)
+	%395 = call i64 @js_call(i64 %387, i64 0, i64 %388)
+	%396 = call i64 @js_truthy(i64 %395)
+	%397 = icmp ne i64 %396, 0
+	br i1 %397, label %398, label %399
+
+398:
+	br label %400
+
+399:
+	br label %374
+
+400:
+	br label %401
+
+401:
+	%402 = phi i64 [ %385, %400 ]
 	ret i64 3
 
-dead659:
-	br label %336
+dead661:
+	br label %399
 
-340:
-	br label %342
+403:
+	%404 = call i64 @js_scope_new(i64 %340)
+	br label %405
 
-341:
-	br label %120
+405:
+	%406 = phi i64 [ %404, %403 ]
+	%407 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
+	%408 = call i64 @js_scope_get(i64 %406, i64 %407)
+	%409 = call i64 @js_arr_new()
+	%410 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000580, i64 0, i64 0), i64 2)
+	%411 = call i64 @js_scope_get(i64 %406, i64 %410)
+	%412 = call i64 @js_arr_push(i64 %409, i64 %411)
+	%413 = call i64 @js_call(i64 %408, i64 0, i64 %409)
+	%414 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000589, i64 0, i64 0), i64 3)
+	%415 = call i64 @js_tdecl(i64 %406, i64 %414, i64 %413)
+	%416 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000589, i64 0, i64 0), i64 3)
+	%417 = call i64 @js_scope_get(i64 %406, i64 %416)
+	%418 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%419 = call i64 @js_scope_get(i64 %406, i64 %418)
+	%420 = call i64 @js_eq(i64 %417, i64 %419)
+	%421 = call i64 @js_truthy(i64 %420)
+	%422 = icmp ne i64 %421, 0
+	br i1 %422, label %435, label %423
 
-342:
-	br label %343
+423:
+	%424 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000589, i64 0, i64 0), i64 3)
+	%425 = call i64 @js_scope_get(i64 %406, i64 %424)
+	%426 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%427 = call i64 @js_get(i64 %425, i64 %426)
+	%428 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%429 = call i64 @js_scope_get(i64 %406, i64 %428)
+	%430 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%431 = call i64 @js_get(i64 %429, i64 %430)
+	%432 = call i64 @js_eq(i64 %427, i64 %431)
+	%433 = call i64 @js_truthy(i64 %432)
+	%434 = icmp ne i64 %433, 0
+	br i1 %434, label %439, label %457
 
-343:
-	%344 = phi i64 [ %132, %342 ]
+435:
+	%436 = phi i64 [ %420, %405 ], [ %458, %457 ]
+	%437 = call i64 @js_truthy(i64 %436)
+	%438 = icmp ne i64 %437, 0
+	br i1 %438, label %459, label %460
+
+439:
+	%440 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
+	%441 = call i64 @js_scope_get(i64 %406, i64 %440)
+	%442 = call i64 @js_arr_new()
+	%443 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000589, i64 0, i64 0), i64 3)
+	%444 = call i64 @js_scope_get(i64 %406, i64 %443)
+	%445 = call i64 @js_arr_push(i64 %442, i64 %444)
+	%446 = call i64 @js_arr_push(i64 %442, i64 2)
+	%447 = call i64 @js_call(i64 %441, i64 0, i64 %442)
+	%448 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
+	%449 = call i64 @js_scope_get(i64 %406, i64 %448)
+	%450 = call i64 @js_arr_new()
+	%451 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
+	%452 = call i64 @js_scope_get(i64 %406, i64 %451)
+	%453 = call i64 @js_arr_push(i64 %450, i64 %452)
+	%454 = call i64 @js_arr_push(i64 %450, i64 2)
+	%455 = call i64 @js_call(i64 %449, i64 0, i64 %450)
+	%456 = call i64 @js_eq(i64 %447, i64 %455)
+	br label %457
+
+457:
+	%458 = phi i64 [ %432, %423 ], [ %456, %439 ]
+	br label %435
+
+459:
+	br label %461
+
+460:
+	br label %374
+
+461:
+	br label %462
+
+462:
+	%463 = phi i64 [ %406, %461 ]
+	ret i64 3
+
+dead662:
+	br label %460
+
+464:
+	br label %466
+
+465:
+	br label %160
+
+466:
+	br label %467
+
+467:
+	%468 = phi i64 [ %172, %466 ]
 	ret i64 2
 
-dead660:
-	br label %341
+dead663:
+	br label %465
 
-dead661:
+dead664:
 	ret i64 0
 }
 
-define i64 @jsf_1000198(i64 %env, i64 %args) {
+define i64 @jsf_1000199(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -40332,7 +40862,7 @@ entry:
 	br label %35
 
 33:
-	%34 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000580, i64 0, i64 0), i64 8)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000590, i64 0, i64 0), i64 8)
 	ret i64 %34
 
 35:
@@ -40402,210 +40932,10 @@ entry:
 	%81 = call i64 @js_call(i64 %74, i64 0, i64 %75)
 	ret i64 %81
 
-dead662:
+dead665:
 	br label %69
 
-dead663:
-	ret i64 0
-}
-
-define i64 @jsf_1000199(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
-	br label %6
-
-6:
-	br label %7
-
-7:
-	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000129, i64 0, i64 0), i64 7)
-	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
-	%11 = call i64 @js_arr_new()
-	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
-	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
-	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
-	%16 = call i64 @js_truthy(i64 %15)
-	%17 = icmp ne i64 %16, 0
-	br i1 %17, label %18, label %19
-
-18:
-	br label %27
-
-19:
-	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%21 = call i64 @js_scope_get(i64 %8, i64 %20)
-	%22 = call i64 @js_typeof(i64 %21)
-	%23 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000052, i64 0, i64 0), i64 7)
-	%24 = call i64 @js_eq(i64 %22, i64 %23)
-	%25 = call i64 @js_truthy(i64 %24)
-	%26 = icmp ne i64 %25, 0
-	br i1 %26, label %31, label %32
-
-27:
-	br label %28
-
-28:
-	%29 = phi i64 [ %8, %27 ]
-	%30 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000582, i64 0, i64 0), i64 4)
-	ret i64 %30
-
-dead664:
-	br label %19
-
-31:
-	br label %42
-
-32:
-	%33 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000411, i64 0, i64 0), i64 7)
-	%34 = call i64 @js_scope_get(i64 %8, i64 %33)
-	%35 = call i64 @js_arr_new()
-	%36 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%37 = call i64 @js_scope_get(i64 %8, i64 %36)
-	%38 = call i64 @js_arr_push(i64 %35, i64 %37)
-	%39 = call i64 @js_call(i64 %34, i64 0, i64 %35)
-	%40 = call i64 @js_truthy(i64 %39)
-	%41 = icmp ne i64 %40, 0
-	br i1 %41, label %46, label %47
-
-42:
-	br label %43
-
-43:
-	%44 = phi i64 [ %8, %42 ]
-	%45 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000052, i64 0, i64 0), i64 7)
-	ret i64 %45
-
-dead665:
-	br label %32
-
-46:
-	br label %57
-
-47:
-	%48 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000412, i64 0, i64 0), i64 7)
-	%49 = call i64 @js_scope_get(i64 %8, i64 %48)
-	%50 = call i64 @js_arr_new()
-	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%52 = call i64 @js_scope_get(i64 %8, i64 %51)
-	%53 = call i64 @js_arr_push(i64 %50, i64 %52)
-	%54 = call i64 @js_call(i64 %49, i64 0, i64 %50)
-	%55 = call i64 @js_truthy(i64 %54)
-	%56 = icmp ne i64 %55, 0
-	br i1 %56, label %61, label %62
-
-57:
-	br label %58
-
-58:
-	%59 = phi i64 [ %8, %57 ]
-	%60 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000583, i64 0, i64 0), i64 6)
-	ret i64 %60
-
 dead666:
-	br label %47
-
-61:
-	br label %70
-
-62:
-	%63 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%64 = call i64 @js_scope_get(i64 %8, i64 %63)
-	%65 = call i64 @js_typeof(i64 %64)
-	%66 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
-	%67 = call i64 @js_eq(i64 %65, i64 %66)
-	%68 = call i64 @js_truthy(i64 %67)
-	%69 = icmp ne i64 %68, 0
-	br i1 %69, label %74, label %75
-
-70:
-	br label %71
-
-71:
-	%72 = phi i64 [ %8, %70 ]
-	%73 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000584, i64 0, i64 0), i64 7)
-	ret i64 %73
-
-dead667:
-	br label %62
-
-74:
-	br label %85
-
-75:
-	%76 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000422, i64 0, i64 0), i64 7)
-	%77 = call i64 @js_scope_get(i64 %8, i64 %76)
-	%78 = call i64 @js_arr_new()
-	%79 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%80 = call i64 @js_scope_get(i64 %8, i64 %79)
-	%81 = call i64 @js_arr_push(i64 %78, i64 %80)
-	%82 = call i64 @js_call(i64 %77, i64 0, i64 %78)
-	%83 = call i64 @js_truthy(i64 %82)
-	%84 = icmp ne i64 %83, 0
-	br i1 %84, label %89, label %90
-
-85:
-	br label %86
-
-86:
-	%87 = phi i64 [ %8, %85 ]
-	%88 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
-	ret i64 %88
-
-dead668:
-	br label %75
-
-89:
-	br label %100
-
-90:
-	%91 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000427, i64 0, i64 0), i64 7)
-	%92 = call i64 @js_scope_get(i64 %8, i64 %91)
-	%93 = call i64 @js_arr_new()
-	%94 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%95 = call i64 @js_scope_get(i64 %8, i64 %94)
-	%96 = call i64 @js_arr_push(i64 %93, i64 %95)
-	%97 = call i64 @js_call(i64 %92, i64 0, i64 %93)
-	%98 = call i64 @js_truthy(i64 %97)
-	%99 = icmp ne i64 %98, 0
-	br i1 %99, label %104, label %105
-
-100:
-	br label %101
-
-101:
-	%102 = phi i64 [ %8, %100 ]
-	%103 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000585, i64 0, i64 0), i64 5)
-	ret i64 %103
-
-dead669:
-	br label %90
-
-104:
-	br label %107
-
-105:
-	%106 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000586, i64 0, i64 0), i64 12)
-	ret i64 %106
-
-107:
-	br label %108
-
-108:
-	%109 = phi i64 [ %8, %107 ]
-	%110 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
-	ret i64 %110
-
-dead670:
-	br label %105
-
-dead671:
 	ret i64 0
 }
 
@@ -40653,10 +40983,10 @@ entry:
 
 28:
 	%29 = phi i64 [ %8, %27 ]
-	%30 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000278, i64 0, i64 0), i64 4)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000592, i64 0, i64 0), i64 4)
 	ret i64 %30
 
-dead672:
+dead667:
 	br label %19
 
 31:
@@ -40679,10 +41009,10 @@ dead672:
 
 43:
 	%44 = phi i64 [ %8, %42 ]
-	%45 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000588, i64 0, i64 0), i64 4)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000052, i64 0, i64 0), i64 7)
 	ret i64 %45
 
-dead673:
+dead668:
 	br label %32
 
 46:
@@ -40705,10 +41035,10 @@ dead673:
 
 58:
 	%59 = phi i64 [ %8, %57 ]
-	%60 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000589, i64 0, i64 0), i64 5)
+	%60 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000593, i64 0, i64 0), i64 6)
 	ret i64 %60
 
-dead674:
+dead669:
 	br label %47
 
 61:
@@ -40729,10 +41059,10 @@ dead674:
 
 71:
 	%72 = phi i64 [ %8, %70 ]
-	%73 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000590, i64 0, i64 0), i64 3)
+	%73 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000594, i64 0, i64 0), i64 7)
 	ret i64 %73
 
-dead675:
+dead670:
 	br label %62
 
 74:
@@ -40758,7 +41088,7 @@ dead675:
 	%88 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
 	ret i64 %88
 
-dead676:
+dead671:
 	br label %75
 
 89:
@@ -40781,17 +41111,17 @@ dead676:
 
 101:
 	%102 = phi i64 [ %8, %100 ]
-	%103 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000585, i64 0, i64 0), i64 5)
+	%103 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000595, i64 0, i64 0), i64 5)
 	ret i64 %103
 
-dead677:
+dead672:
 	br label %90
 
 104:
 	br label %107
 
 105:
-	%106 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000591, i64 0, i64 0), i64 7)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000596, i64 0, i64 0), i64 12)
 	ret i64 %106
 
 107:
@@ -40799,7 +41129,207 @@ dead677:
 
 108:
 	%109 = phi i64 [ %8, %107 ]
-	%110 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000581, i64 0, i64 0), i64 11)
+	%110 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	ret i64 %110
+
+dead673:
+	br label %105
+
+dead674:
+	ret i64 0
+}
+
+define i64 @jsf_1000201(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
+	br label %6
+
+6:
+	br label %7
+
+7:
+	%8 = phi i64 [ %0, %6 ]
+	%9 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000129, i64 0, i64 0), i64 7)
+	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
+	%11 = call i64 @js_arr_new()
+	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
+	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
+	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
+	%16 = call i64 @js_truthy(i64 %15)
+	%17 = icmp ne i64 %16, 0
+	br i1 %17, label %18, label %19
+
+18:
+	br label %27
+
+19:
+	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%21 = call i64 @js_scope_get(i64 %8, i64 %20)
+	%22 = call i64 @js_typeof(i64 %21)
+	%23 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000052, i64 0, i64 0), i64 7)
+	%24 = call i64 @js_eq(i64 %22, i64 %23)
+	%25 = call i64 @js_truthy(i64 %24)
+	%26 = icmp ne i64 %25, 0
+	br i1 %26, label %31, label %32
+
+27:
+	br label %28
+
+28:
+	%29 = phi i64 [ %8, %27 ]
+	%30 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000278, i64 0, i64 0), i64 4)
+	ret i64 %30
+
+dead675:
+	br label %19
+
+31:
+	br label %42
+
+32:
+	%33 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000411, i64 0, i64 0), i64 7)
+	%34 = call i64 @js_scope_get(i64 %8, i64 %33)
+	%35 = call i64 @js_arr_new()
+	%36 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%37 = call i64 @js_scope_get(i64 %8, i64 %36)
+	%38 = call i64 @js_arr_push(i64 %35, i64 %37)
+	%39 = call i64 @js_call(i64 %34, i64 0, i64 %35)
+	%40 = call i64 @js_truthy(i64 %39)
+	%41 = icmp ne i64 %40, 0
+	br i1 %41, label %46, label %47
+
+42:
+	br label %43
+
+43:
+	%44 = phi i64 [ %8, %42 ]
+	%45 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000598, i64 0, i64 0), i64 4)
+	ret i64 %45
+
+dead676:
+	br label %32
+
+46:
+	br label %57
+
+47:
+	%48 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000412, i64 0, i64 0), i64 7)
+	%49 = call i64 @js_scope_get(i64 %8, i64 %48)
+	%50 = call i64 @js_arr_new()
+	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%52 = call i64 @js_scope_get(i64 %8, i64 %51)
+	%53 = call i64 @js_arr_push(i64 %50, i64 %52)
+	%54 = call i64 @js_call(i64 %49, i64 0, i64 %50)
+	%55 = call i64 @js_truthy(i64 %54)
+	%56 = icmp ne i64 %55, 0
+	br i1 %56, label %61, label %62
+
+57:
+	br label %58
+
+58:
+	%59 = phi i64 [ %8, %57 ]
+	%60 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000599, i64 0, i64 0), i64 5)
+	ret i64 %60
+
+dead677:
+	br label %47
+
+61:
+	br label %70
+
+62:
+	%63 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%64 = call i64 @js_scope_get(i64 %8, i64 %63)
+	%65 = call i64 @js_typeof(i64 %64)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
+	%67 = call i64 @js_eq(i64 %65, i64 %66)
+	%68 = call i64 @js_truthy(i64 %67)
+	%69 = icmp ne i64 %68, 0
+	br i1 %69, label %74, label %75
+
+70:
+	br label %71
+
+71:
+	%72 = phi i64 [ %8, %70 ]
+	%73 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	ret i64 %73
+
+dead678:
+	br label %62
+
+74:
+	br label %85
+
+75:
+	%76 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000422, i64 0, i64 0), i64 7)
+	%77 = call i64 @js_scope_get(i64 %8, i64 %76)
+	%78 = call i64 @js_arr_new()
+	%79 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%80 = call i64 @js_scope_get(i64 %8, i64 %79)
+	%81 = call i64 @js_arr_push(i64 %78, i64 %80)
+	%82 = call i64 @js_call(i64 %77, i64 0, i64 %78)
+	%83 = call i64 @js_truthy(i64 %82)
+	%84 = icmp ne i64 %83, 0
+	br i1 %84, label %89, label %90
+
+85:
+	br label %86
+
+86:
+	%87 = phi i64 [ %8, %85 ]
+	%88 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
+	ret i64 %88
+
+dead679:
+	br label %75
+
+89:
+	br label %100
+
+90:
+	%91 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000427, i64 0, i64 0), i64 7)
+	%92 = call i64 @js_scope_get(i64 %8, i64 %91)
+	%93 = call i64 @js_arr_new()
+	%94 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%95 = call i64 @js_scope_get(i64 %8, i64 %94)
+	%96 = call i64 @js_arr_push(i64 %93, i64 %95)
+	%97 = call i64 @js_call(i64 %92, i64 0, i64 %93)
+	%98 = call i64 @js_truthy(i64 %97)
+	%99 = icmp ne i64 %98, 0
+	br i1 %99, label %104, label %105
+
+100:
+	br label %101
+
+101:
+	%102 = phi i64 [ %8, %100 ]
+	%103 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000595, i64 0, i64 0), i64 5)
+	ret i64 %103
+
+dead680:
+	br label %90
+
+104:
+	br label %107
+
+105:
+	%106 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000601, i64 0, i64 0), i64 7)
+	ret i64 %106
+
+107:
+	br label %108
+
+108:
+	%109 = phi i64 [ %8, %107 ]
+	%110 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000591, i64 0, i64 0), i64 11)
 	%111 = call i64 @js_scope_get(i64 %109, i64 %110)
 	%112 = call i64 @js_arr_new()
 	%113 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -40808,14 +41338,14 @@ dead677:
 	%116 = call i64 @js_call(i64 %111, i64 0, i64 %112)
 	ret i64 %116
 
-dead678:
+dead681:
 	br label %105
 
-dead679:
+dead682:
 	ret i64 0
 }
 
-define i64 @jsf_1000201(i64 %env, i64 %args) {
+define i64 @jsf_1000202(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
@@ -40864,7 +41394,7 @@ entry:
 	%30 = phi i64 [ %9, %28 ]
 	%31 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
 	%32 = call i64 @js_scope_get(i64 %30, i64 %31)
-	%33 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000593, i64 0, i64 0), i64 1)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000493, i64 0, i64 0), i64 1)
 	%34 = call i64 @js_add(i64 %32, i64 %33)
 	%35 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
 	%36 = call i64 @js_tset(i64 %30, i64 %35, i64 %34)
@@ -40878,11 +41408,11 @@ entry:
 	%44 = call i64 @js_setret(i64 %41)
 	br label %16
 
-dead680:
+dead683:
 	ret i64 0
 }
 
-define i64 @jsf_1000202(i64 %env, i64 %args) {
+define i64 @jsf_1000203(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
@@ -40897,11 +41427,11 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000595, i64 0, i64 0), i64 9)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000603, i64 0, i64 0), i64 9)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_num_i(i64 1)
 	%12 = call i64 @js_add(i64 %10, i64 %11)
-	%13 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000595, i64 0, i64 0), i64 9)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000603, i64 0, i64 0), i64 9)
 	%14 = call i64 @js_tset(i64 %8, i64 %13, i64 %12)
 	%15 = call i64 @js_setret(i64 %12)
 	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000427, i64 0, i64 0), i64 7)
@@ -40926,17 +41456,17 @@ entry:
 
 28:
 	%29 = phi i64 [ %8, %27 ]
-	%30 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000595, i64 0, i64 0), i64 9)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000603, i64 0, i64 0), i64 9)
 	%31 = call i64 @js_scope_get(i64 %29, i64 %30)
 	%32 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%33 = call i64 @js_scope_get(i64 %29, i64 %32)
-	%34 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000596, i64 0, i64 0), i64 5)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000604, i64 0, i64 0), i64 5)
 	%35 = call i64 @js_set(i64 %33, i64 %34, i64 %31)
 	%36 = call i64 @js_setret(i64 %31)
 	br label %26
 }
 
-define i64 @jsf_1000203(i64 %env, i64 %args) {
+define i64 @jsf_1000204(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -40963,11 +41493,11 @@ entry:
 	%18 = call i64 @js_scope_get(i64 %8, i64 %17)
 	ret i64 %18
 
-dead681:
+dead684:
 	ret i64 0
 }
 
-define i64 @jsf_1000204(i64 %env, i64 %args) {
+define i64 @jsf_1000205(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -41005,7 +41535,7 @@ entry:
 
 22:
 	%23 = phi i64 [ %8, %21 ]
-	%24 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000598, i64 0, i64 0), i64 8)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000606, i64 0, i64 0), i64 8)
 	%25 = call i64 @js_scope_get(i64 %23, i64 %24)
 	%26 = call i64 @js_arr_new()
 	%27 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -41014,14 +41544,14 @@ entry:
 	%30 = call i64 @js_call(i64 %25, i64 0, i64 %26)
 	ret i64 %30
 
-dead682:
+dead685:
 	br label %19
 
-dead683:
+dead686:
 	ret i64 0
 }
 
-define i64 @jsf_1000205(i64 %env, i64 %args) {
+define i64 @jsf_1000206(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
@@ -41039,7 +41569,7 @@ entry:
 	%9 = phi i64 [ %7, %6 ]
 	%10 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000596, i64 0, i64 0), i64 5)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000604, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_get(i64 %11, i64 %12)
 	%14 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%15 = call i64 @js_tdecl(i64 %9, i64 %14, i64 %13)
@@ -41064,7 +41594,7 @@ entry:
 	%30 = call i64 @js_arr_push(i64 %27, i64 %29)
 	%31 = call i64 @js_call(i64 %26, i64 0, i64 %27)
 	%32 = call i64 @js_setret(i64 %31)
-	%33 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000595, i64 0, i64 0), i64 9)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000603, i64 0, i64 0), i64 9)
 	%34 = call i64 @js_scope_get(i64 %9, i64 %33)
 	ret i64 %34
 
@@ -41077,20 +41607,20 @@ entry:
 	%39 = call i64 @js_scope_get(i64 %37, i64 %38)
 	ret i64 %39
 
-dead684:
+dead687:
 	br label %24
 
-dead685:
+dead688:
 	ret i64 0
 }
 
-define i64 @jsf_1000206(i64 %env, i64 %args) {
+define i64 @jsf_1000207(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -41115,14 +41645,14 @@ entry:
 	br label %40
 
 20:
-	%21 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000594, i64 0, i64 0), i64 8)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000602, i64 0, i64 0), i64 8)
 	%22 = call i64 @js_scope_get(i64 %11, i64 %21)
 	%23 = call i64 @js_arr_new()
-	%24 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%25 = call i64 @js_scope_get(i64 %11, i64 %24)
 	%26 = call i64 @js_arr_push(i64 %23, i64 %25)
 	%27 = call i64 @js_call(i64 %22, i64 0, i64 %23)
-	%28 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000603, i64 0, i64 0), i64 1)
+	%28 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000611, i64 0, i64 0), i64 1)
 	%29 = call i64 @js_add(i64 %27, i64 %28)
 	%30 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%31 = call i64 @js_scope_get(i64 %11, i64 %30)
@@ -41132,7 +41662,7 @@ entry:
 	%35 = call i64 @js_arr_push(i64 %32, i64 %34)
 	%36 = call i64 @js_call(i64 %31, i64 0, i64 %32)
 	%37 = call i64 @js_add(i64 %29, i64 %36)
-	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000604, i64 0, i64 0), i64 4)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000612, i64 0, i64 0), i64 4)
 	%39 = call i64 @js_add(i64 %37, i64 %38)
 	ret i64 %39
 
@@ -41141,36 +41671,36 @@ entry:
 
 41:
 	%42 = phi i64 [ %11, %40 ]
-	%43 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000594, i64 0, i64 0), i64 8)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000602, i64 0, i64 0), i64 8)
 	%44 = call i64 @js_scope_get(i64 %42, i64 %43)
 	%45 = call i64 @js_arr_new()
-	%46 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%46 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%47 = call i64 @js_scope_get(i64 %42, i64 %46)
 	%48 = call i64 @js_arr_push(i64 %45, i64 %47)
 	%49 = call i64 @js_call(i64 %44, i64 0, i64 %45)
-	%50 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000601, i64 0, i64 0), i64 2)
+	%50 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000609, i64 0, i64 0), i64 2)
 	%51 = call i64 @js_add(i64 %49, i64 %50)
 	%52 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%53 = call i64 @js_scope_get(i64 %42, i64 %52)
 	%54 = call i64 @js_add(i64 %51, i64 %53)
-	%55 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000602, i64 0, i64 0), i64 5)
+	%55 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000610, i64 0, i64 0), i64 5)
 	%56 = call i64 @js_add(i64 %54, i64 %55)
 	ret i64 %56
 
-dead686:
+dead689:
 	br label %20
 
-dead687:
+dead690:
 	ret i64 0
 }
 
-define i64 @jsf_1000207(i64 %env, i64 %args) {
+define i64 @jsf_1000208(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -41183,14 +41713,14 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000594, i64 0, i64 0), i64 8)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000602, i64 0, i64 0), i64 8)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_arr_new()
-	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000129, i64 0, i64 0), i64 7)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
@@ -41221,13 +41751,13 @@ entry:
 
 41:
 	%42 = phi i64 [ %12, %40 ]
-	%43 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%44 = call i64 @js_scope_get(i64 %42, i64 %43)
-	%45 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000607, i64 0, i64 0), i64 5)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000615, i64 0, i64 0), i64 5)
 	%46 = call i64 @js_add(i64 %44, i64 %45)
 	ret i64 %46
 
-dead688:
+dead691:
 	br label %32
 
 47:
@@ -41255,7 +41785,7 @@ dead688:
 
 64:
 	%65 = phi i64 [ %12, %63 ]
-	%66 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%67 = call i64 @js_scope_get(i64 %65, i64 %66)
 	%68 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%69 = call i64 @js_scope_get(i64 %65, i64 %68)
@@ -41264,11 +41794,11 @@ dead688:
 	br i1 %71, label %72, label %74
 
 72:
-	%73 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000608, i64 0, i64 0), i64 11)
+	%73 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000616, i64 0, i64 0), i64 11)
 	br label %76
 
 74:
-	%75 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000609, i64 0, i64 0), i64 12)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000617, i64 0, i64 0), i64 12)
 	br label %76
 
 76:
@@ -41276,7 +41806,7 @@ dead688:
 	%78 = call i64 @js_add(i64 %67, i64 %77)
 	ret i64 %78
 
-dead689:
+dead692:
 	br label %48
 
 79:
@@ -41299,9 +41829,9 @@ dead689:
 
 91:
 	%92 = phi i64 [ %12, %90 ]
-	%93 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%93 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%94 = call i64 @js_scope_get(i64 %92, i64 %93)
-	%95 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000610, i64 0, i64 0), i64 6)
+	%95 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000618, i64 0, i64 0), i64 6)
 	%96 = call i64 @js_add(i64 %94, i64 %95)
 	%97 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000432, i64 0, i64 0), i64 9)
 	%98 = call i64 @js_scope_get(i64 %92, i64 %97)
@@ -41311,11 +41841,11 @@ dead689:
 	%102 = call i64 @js_arr_push(i64 %99, i64 %101)
 	%103 = call i64 @js_call(i64 %98, i64 0, i64 %99)
 	%104 = call i64 @js_add(i64 %96, i64 %103)
-	%105 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000611, i64 0, i64 0), i64 2)
+	%105 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000619, i64 0, i64 0), i64 2)
 	%106 = call i64 @js_add(i64 %104, i64 %105)
 	ret i64 %106
 
-dead690:
+dead693:
 	br label %80
 
 107:
@@ -41336,9 +41866,9 @@ dead690:
 
 117:
 	%118 = phi i64 [ %12, %116 ]
-	%119 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%119 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%120 = call i64 @js_scope_get(i64 %118, i64 %119)
-	%121 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000612, i64 0, i64 0), i64 4)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000620, i64 0, i64 0), i64 4)
 	%122 = call i64 @js_add(i64 %120, i64 %121)
 	%123 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%124 = call i64 @js_scope_get(i64 %118, i64 %123)
@@ -41348,11 +41878,11 @@ dead690:
 	%128 = call i64 @js_arr_push(i64 %125, i64 %127)
 	%129 = call i64 @js_call(i64 %124, i64 0, i64 %125)
 	%130 = call i64 @js_add(i64 %122, i64 %129)
-	%131 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000611, i64 0, i64 0), i64 2)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000619, i64 0, i64 0), i64 2)
 	%132 = call i64 @js_add(i64 %130, i64 %131)
 	ret i64 %132
 
-dead691:
+dead694:
 	br label %108
 
 133:
@@ -41380,9 +41910,9 @@ dead691:
 
 150:
 	%151 = phi i64 [ %12, %149 ]
-	%152 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%152 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%153 = call i64 @js_scope_get(i64 %151, i64 %152)
-	%154 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000613, i64 0, i64 0), i64 7)
+	%154 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000621, i64 0, i64 0), i64 7)
 	%155 = call i64 @js_add(i64 %153, i64 %154)
 	%156 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000328, i64 0, i64 0), i64 6)
 	%157 = call i64 @js_scope_get(i64 %151, i64 %156)
@@ -41392,16 +41922,16 @@ dead691:
 	%161 = call i64 @js_arr_push(i64 %158, i64 %160)
 	%162 = call i64 @js_call(i64 %157, i64 0, i64 %158)
 	%163 = call i64 @js_add(i64 %155, i64 %162)
-	%164 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
+	%164 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000622, i64 0, i64 0), i64 3)
 	%165 = call i64 @js_add(i64 %163, i64 %164)
 	%166 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%167 = call i64 @js_scope_get(i64 %151, i64 %166)
 	%168 = call i64 @js_add(i64 %165, i64 %167)
-	%169 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000615, i64 0, i64 0), i64 2)
+	%169 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000623, i64 0, i64 0), i64 2)
 	%170 = call i64 @js_add(i64 %168, i64 %169)
 	ret i64 %170
 
-dead692:
+dead695:
 	br label %134
 
 171:
@@ -41425,9 +41955,9 @@ dead692:
 
 184:
 	%185 = phi i64 [ %183, %182 ]
-	%186 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%186 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%187 = call i64 @js_scope_get(i64 %185, i64 %186)
-	%188 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000616, i64 0, i64 0), i64 6)
+	%188 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000624, i64 0, i64 0), i64 6)
 	%189 = call i64 @js_add(i64 %187, i64 %188)
 	%190 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%191 = call i64 @js_scope_get(i64 %185, i64 %190)
@@ -41436,7 +41966,7 @@ dead692:
 	%194 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%195 = call i64 @js_get(i64 %193, i64 %194)
 	%196 = call i64 @js_add(i64 %189, i64 %195)
-	%197 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000617, i64 0, i64 0), i64 4)
+	%197 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
 	%198 = call i64 @js_add(i64 %196, i64 %197)
 	%199 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%200 = call i64 @js_tdecl(i64 %185, i64 %199, i64 %198)
@@ -41465,10 +41995,10 @@ dead692:
 217:
 	%218 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%219 = call i64 @js_scope_get(i64 %185, i64 %218)
-	%220 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%220 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%221 = call i64 @js_scope_get(i64 %185, i64 %220)
 	%222 = call i64 @js_add(i64 %219, i64 %221)
-	%223 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000619, i64 0, i64 0), i64 2)
+	%223 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000627, i64 0, i64 0), i64 2)
 	%224 = call i64 @js_add(i64 %222, i64 %223)
 	ret i64 %224
 
@@ -41479,7 +42009,7 @@ dead692:
 	%227 = phi i64 [ %185, %225 ]
 	%228 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%229 = call i64 @js_scope_get(i64 %227, i64 %228)
-	%230 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000605, i64 0, i64 0), i64 9)
+	%230 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000613, i64 0, i64 0), i64 9)
 	%231 = call i64 @js_scope_get(i64 %227, i64 %230)
 	%232 = call i64 @js_arr_new()
 	%233 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -41490,7 +42020,7 @@ dead692:
 	%238 = call i64 @js_scope_get(i64 %227, i64 %237)
 	%239 = call i64 @js_get(i64 %236, i64 %238)
 	%240 = call i64 @js_arr_push(i64 %232, i64 %239)
-	%241 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%241 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%242 = call i64 @js_scope_get(i64 %227, i64 %241)
 	%243 = call i64 @js_num_i(i64 2)
 	%244 = call i64 @js_add(i64 %242, i64 %243)
@@ -41502,7 +42032,7 @@ dead692:
 	%250 = call i64 @js_setret(i64 %247)
 	%251 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%252 = call i64 @js_scope_get(i64 %227, i64 %251)
-	%253 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000618, i64 0, i64 0), i64 6)
+	%253 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000626, i64 0, i64 0), i64 6)
 	%254 = call i64 @js_scope_get(i64 %227, i64 %253)
 	%255 = call i64 @js_arr_new()
 	%256 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
@@ -41518,7 +42048,7 @@ dead692:
 	%266 = call i64 @js_arr_push(i64 %258, i64 %265)
 	%267 = call i64 @js_call(i64 %257, i64 0, i64 %258)
 	%268 = call i64 @js_arr_push(i64 %255, i64 %267)
-	%269 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%269 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%270 = call i64 @js_scope_get(i64 %227, i64 %269)
 	%271 = call i64 @js_num_i(i64 2)
 	%272 = call i64 @js_add(i64 %270, i64 %271)
@@ -41537,16 +42067,16 @@ dead692:
 	%285 = call i64 @js_setret(i64 %282)
 	br label %204
 
-dead693:
+dead696:
 	br label %172
 
 286:
 	br label %292
 
 287:
-	%288 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%288 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%289 = call i64 @js_scope_get(i64 %12, i64 %288)
-	%290 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000607, i64 0, i64 0), i64 5)
+	%290 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000615, i64 0, i64 0), i64 5)
 	%291 = call i64 @js_add(i64 %289, i64 %290)
 	ret i64 %291
 
@@ -41556,20 +42086,20 @@ dead693:
 
 294:
 	%295 = phi i64 [ %293, %292 ]
-	%296 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000620, i64 0, i64 0), i64 6)
+	%296 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000628, i64 0, i64 0), i64 6)
 	%297 = call i64 @js_scope_get(i64 %295, i64 %296)
 	%298 = call i64 @js_arr_new()
 	%299 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%300 = call i64 @js_scope_get(i64 %295, i64 %299)
 	%301 = call i64 @js_arr_push(i64 %298, i64 %300)
 	%302 = call i64 @js_call(i64 %297, i64 0, i64 %298)
-	%303 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000621, i64 0, i64 0), i64 5)
+	%303 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000629, i64 0, i64 0), i64 5)
 	%304 = call i64 @js_tdecl(i64 %295, i64 %303, i64 %302)
-	%305 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%305 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%306 = call i64 @js_scope_get(i64 %295, i64 %305)
-	%307 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000622, i64 0, i64 0), i64 7)
+	%307 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000630, i64 0, i64 0), i64 7)
 	%308 = call i64 @js_add(i64 %306, i64 %307)
-	%309 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000581, i64 0, i64 0), i64 11)
+	%309 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000591, i64 0, i64 0), i64 11)
 	%310 = call i64 @js_scope_get(i64 %295, i64 %309)
 	%311 = call i64 @js_arr_new()
 	%312 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -41577,12 +42107,12 @@ dead693:
 	%314 = call i64 @js_arr_push(i64 %311, i64 %313)
 	%315 = call i64 @js_call(i64 %310, i64 0, i64 %311)
 	%316 = call i64 @js_add(i64 %308, i64 %315)
-	%317 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000623, i64 0, i64 0), i64 2)
+	%317 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000631, i64 0, i64 0), i64 2)
 	%318 = call i64 @js_add(i64 %316, i64 %317)
 	%319 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%320 = call i64 @js_scope_get(i64 %295, i64 %319)
 	%321 = call i64 @js_arr_new()
-	%322 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000598, i64 0, i64 0), i64 8)
+	%322 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000606, i64 0, i64 0), i64 8)
 	%323 = call i64 @js_scope_get(i64 %295, i64 %322)
 	%324 = call i64 @js_arr_new()
 	%325 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -41592,21 +42122,21 @@ dead693:
 	%329 = call i64 @js_arr_push(i64 %321, i64 %328)
 	%330 = call i64 @js_call(i64 %320, i64 0, i64 %321)
 	%331 = call i64 @js_add(i64 %318, i64 %330)
-	%332 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000624, i64 0, i64 0), i64 2)
+	%332 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000632, i64 0, i64 0), i64 2)
 	%333 = call i64 @js_add(i64 %331, i64 %332)
 	%334 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%335 = call i64 @js_scope_get(i64 %295, i64 %334)
 	%336 = call i64 @js_arr_new()
-	%337 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000621, i64 0, i64 0), i64 5)
+	%337 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000629, i64 0, i64 0), i64 5)
 	%338 = call i64 @js_scope_get(i64 %295, i64 %337)
 	%339 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%340 = call i64 @js_get(i64 %338, i64 %339)
 	%341 = call i64 @js_arr_push(i64 %336, i64 %340)
 	%342 = call i64 @js_call(i64 %335, i64 0, i64 %336)
 	%343 = call i64 @js_add(i64 %333, i64 %342)
-	%344 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000617, i64 0, i64 0), i64 4)
+	%344 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
 	%345 = call i64 @js_add(i64 %343, i64 %344)
-	%346 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
+	%346 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000633, i64 0, i64 0), i64 4)
 	%347 = call i64 @js_tdecl(i64 %295, i64 %346, i64 %345)
 	%348 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%349 = call i64 @js_scope_get(i64 %295, i64 %348)
@@ -41622,7 +42152,7 @@ dead693:
 357:
 	%358 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%359 = call i64 @js_scope_get(i64 %295, i64 %358)
-	%360 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000621, i64 0, i64 0), i64 5)
+	%360 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000629, i64 0, i64 0), i64 5)
 	%361 = call i64 @js_scope_get(i64 %295, i64 %360)
 	%362 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%363 = call i64 @js_get(i64 %361, i64 %362)
@@ -41635,12 +42165,12 @@ dead693:
 	br label %376
 
 368:
-	%369 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
+	%369 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000633, i64 0, i64 0), i64 4)
 	%370 = call i64 @js_scope_get(i64 %295, i64 %369)
-	%371 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%371 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%372 = call i64 @js_scope_get(i64 %295, i64 %371)
 	%373 = call i64 @js_add(i64 %370, i64 %372)
-	%374 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000619, i64 0, i64 0), i64 2)
+	%374 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000627, i64 0, i64 0), i64 2)
 	%375 = call i64 @js_add(i64 %373, i64 %374)
 	ret i64 %375
 
@@ -41650,34 +42180,34 @@ dead693:
 
 378:
 	%379 = phi i64 [ %377, %376 ]
-	%380 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000626, i64 0, i64 0), i64 10)
+	%380 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000634, i64 0, i64 0), i64 10)
 	%381 = call i64 @js_scope_get(i64 %379, i64 %380)
 	%382 = call i64 @js_arr_new()
-	%383 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000621, i64 0, i64 0), i64 5)
+	%383 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000629, i64 0, i64 0), i64 5)
 	%384 = call i64 @js_scope_get(i64 %379, i64 %383)
 	%385 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%386 = call i64 @js_scope_get(i64 %379, i64 %385)
 	%387 = call i64 @js_get(i64 %384, i64 %386)
 	%388 = call i64 @js_arr_push(i64 %382, i64 %387)
 	%389 = call i64 @js_call(i64 %381, i64 0, i64 %382)
-	%390 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000627, i64 0, i64 0), i64 5)
+	%390 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000635, i64 0, i64 0), i64 5)
 	%391 = call i64 @js_tdecl(i64 %379, i64 %390, i64 %389)
-	%392 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000628, i64 0, i64 0), i64 7)
+	%392 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000636, i64 0, i64 0), i64 7)
 	%393 = call i64 @js_scope_get(i64 %379, i64 %392)
 	%394 = call i64 @js_arr_new()
 	%395 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%396 = call i64 @js_scope_get(i64 %379, i64 %395)
 	%397 = call i64 @js_arr_push(i64 %394, i64 %396)
-	%398 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000627, i64 0, i64 0), i64 5)
+	%398 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000635, i64 0, i64 0), i64 5)
 	%399 = call i64 @js_scope_get(i64 %379, i64 %398)
 	%400 = call i64 @js_arr_push(i64 %394, i64 %399)
 	%401 = call i64 @js_call(i64 %393, i64 0, i64 %394)
-	%402 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%402 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%403 = call i64 @js_tdecl(i64 %379, i64 %402, i64 %401)
 	%404 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000125, i64 0, i64 0), i64 0)
-	%405 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000630, i64 0, i64 0), i64 4)
+	%405 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000638, i64 0, i64 0), i64 4)
 	%406 = call i64 @js_tdecl(i64 %379, i64 %405, i64 %404)
-	%407 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%407 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%408 = call i64 @js_scope_get(i64 %379, i64 %407)
 	%409 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000271, i64 0, i64 0), i64 1)
 	%410 = call i64 @js_eq(i64 %408, i64 %409)
@@ -41689,29 +42219,29 @@ dead693:
 	br label %478
 
 414:
-	%415 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
+	%415 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000633, i64 0, i64 0), i64 4)
 	%416 = call i64 @js_scope_get(i64 %379, i64 %415)
-	%417 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000606, i64 0, i64 0), i64 3)
+	%417 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000614, i64 0, i64 0), i64 3)
 	%418 = call i64 @js_scope_get(i64 %379, i64 %417)
 	%419 = call i64 @js_add(i64 %416, i64 %418)
-	%420 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000634, i64 0, i64 0), i64 4)
+	%420 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000642, i64 0, i64 0), i64 4)
 	%421 = call i64 @js_add(i64 %419, i64 %420)
-	%422 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000627, i64 0, i64 0), i64 5)
+	%422 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000635, i64 0, i64 0), i64 5)
 	%423 = call i64 @js_scope_get(i64 %379, i64 %422)
 	%424 = call i64 @js_add(i64 %421, i64 %423)
-	%425 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000635, i64 0, i64 0), i64 1)
+	%425 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000643, i64 0, i64 0), i64 1)
 	%426 = call i64 @js_add(i64 %424, i64 %425)
-	%427 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000630, i64 0, i64 0), i64 4)
+	%427 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000638, i64 0, i64 0), i64 4)
 	%428 = call i64 @js_scope_get(i64 %379, i64 %427)
 	%429 = call i64 @js_add(i64 %426, i64 %428)
-	%430 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000604, i64 0, i64 0), i64 4)
+	%430 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000612, i64 0, i64 0), i64 4)
 	%431 = call i64 @js_add(i64 %429, i64 %430)
-	%432 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
+	%432 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000633, i64 0, i64 0), i64 4)
 	%433 = call i64 @js_tset(i64 %379, i64 %432, i64 %431)
 	%434 = call i64 @js_setret(i64 %431)
-	%435 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
+	%435 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000633, i64 0, i64 0), i64 4)
 	%436 = call i64 @js_scope_get(i64 %379, i64 %435)
-	%437 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000618, i64 0, i64 0), i64 6)
+	%437 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000626, i64 0, i64 0), i64 6)
 	%438 = call i64 @js_scope_get(i64 %379, i64 %437)
 	%439 = call i64 @js_arr_new()
 	%440 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
@@ -41719,7 +42249,7 @@ dead693:
 	%442 = call i64 @js_arr_new()
 	%443 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%444 = call i64 @js_scope_get(i64 %379, i64 %443)
-	%445 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000621, i64 0, i64 0), i64 5)
+	%445 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000629, i64 0, i64 0), i64 5)
 	%446 = call i64 @js_scope_get(i64 %379, i64 %445)
 	%447 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%448 = call i64 @js_scope_get(i64 %379, i64 %447)
@@ -41728,14 +42258,14 @@ dead693:
 	%451 = call i64 @js_arr_push(i64 %442, i64 %450)
 	%452 = call i64 @js_call(i64 %441, i64 0, i64 %442)
 	%453 = call i64 @js_arr_push(i64 %439, i64 %452)
-	%454 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
+	%454 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000608, i64 0, i64 0), i64 3)
 	%455 = call i64 @js_scope_get(i64 %379, i64 %454)
 	%456 = call i64 @js_num_i(i64 2)
 	%457 = call i64 @js_add(i64 %455, i64 %456)
 	%458 = call i64 @js_arr_push(i64 %439, i64 %457)
 	%459 = call i64 @js_call(i64 %438, i64 0, i64 %439)
 	%460 = call i64 @js_add(i64 %436, i64 %459)
-	%461 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000625, i64 0, i64 0), i64 4)
+	%461 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000633, i64 0, i64 0), i64 4)
 	%462 = call i64 @js_tset(i64 %379, i64 %461, i64 %460)
 	%463 = call i64 @js_setret(i64 %460)
 	%464 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
@@ -41748,7 +42278,7 @@ dead693:
 	br label %357
 
 471:
-	%472 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%472 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%473 = call i64 @js_scope_get(i64 %379, i64 %472)
 	%474 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000125, i64 0, i64 0), i64 0)
 	%475 = call i64 @js_ne(i64 %473, i64 %474)
@@ -41761,8 +42291,8 @@ dead693:
 
 479:
 	%480 = phi i64 [ %379, %478 ]
-	%481 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000631, i64 0, i64 0), i64 10)
-	%482 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000630, i64 0, i64 0), i64 4)
+	%481 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000639, i64 0, i64 0), i64 10)
+	%482 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000638, i64 0, i64 0), i64 4)
 	%483 = call i64 @js_tset(i64 %480, i64 %482, i64 %481)
 	%484 = call i64 @js_setret(i64 %481)
 	br label %414
@@ -41778,25 +42308,25 @@ dead693:
 
 488:
 	%489 = phi i64 [ %379, %487 ]
-	%490 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000632, i64 0, i64 0), i64 2)
-	%491 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%490 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000640, i64 0, i64 0), i64 2)
+	%491 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%492 = call i64 @js_scope_get(i64 %489, i64 %491)
 	%493 = call i64 @js_add(i64 %490, i64 %492)
-	%494 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000633, i64 0, i64 0), i64 9)
+	%494 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000641, i64 0, i64 0), i64 9)
 	%495 = call i64 @js_add(i64 %493, i64 %494)
-	%496 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000630, i64 0, i64 0), i64 4)
+	%496 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000638, i64 0, i64 0), i64 4)
 	%497 = call i64 @js_tset(i64 %489, i64 %496, i64 %495)
 	%498 = call i64 @js_setret(i64 %495)
 	br label %486
 
-dead694:
+dead697:
 	br label %287
 
-dead695:
+dead698:
 	ret i64 0
 }
 
-define i64 @jsf_1000208(i64 %env, i64 %args) {
+define i64 @jsf_1000209(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -41830,7 +42360,7 @@ entry:
 	%23 = call i64 @js_num_i(i64 0)
 	%24 = call i64 @js_arr_push(i64 %22, i64 %23)
 	%25 = call i64 @js_call(i64 %21, i64 %19, i64 %22)
-	%26 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000636, i64 0, i64 0), i64 1)
+	%26 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000644, i64 0, i64 0), i64 1)
 	%27 = call i64 @js_eq(i64 %25, i64 %26)
 	br label %28
 
@@ -41849,7 +42379,7 @@ entry:
 	%38 = call i64 @js_num_i(i64 1)
 	%39 = call i64 @js_arr_push(i64 %37, i64 %38)
 	%40 = call i64 @js_call(i64 %36, i64 %34, i64 %37)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000636, i64 0, i64 0), i64 1)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000644, i64 0, i64 0), i64 1)
 	%42 = call i64 @js_eq(i64 %40, i64 %41)
 	br label %43
 
@@ -41872,23 +42402,23 @@ entry:
 
 52:
 	%53 = phi i64 [ %8, %51 ]
-	%54 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000637, i64 0, i64 0), i64 1)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000645, i64 0, i64 0), i64 1)
 	%55 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%56 = call i64 @js_scope_get(i64 %53, i64 %55)
 	%57 = call i64 @js_add(i64 %54, i64 %56)
 	ret i64 %57
 
-dead696:
+dead699:
 	br label %48
 
-dead697:
+dead700:
 	ret i64 0
 }
 
-define i64 @jsf_1000209(i64 %env, i64 %args) {
+define i64 @jsf_1000210(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -41900,7 +42430,7 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%12 = call i64 @js_get(i64 %10, i64 %11)
@@ -41911,7 +42441,7 @@ entry:
 	br i1 %16, label %17, label %28
 
 17:
-	%18 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%19 = call i64 @js_scope_get(i64 %8, i64 %18)
 	%20 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000122, i64 0, i64 0), i64 10)
 	%21 = call i64 @js_get(i64 %19, i64 %20)
@@ -41930,7 +42460,7 @@ entry:
 	br i1 %31, label %32, label %43
 
 32:
-	%33 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%34 = call i64 @js_scope_get(i64 %8, i64 %33)
 	%35 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000031, i64 0, i64 0), i64 6)
 	%36 = call i64 @js_get(i64 %34, i64 %35)
@@ -41938,7 +42468,7 @@ entry:
 	%38 = call i64 @js_num_i(i64 1)
 	%39 = call i64 @js_arr_push(i64 %37, i64 %38)
 	%40 = call i64 @js_call(i64 %36, i64 %34, i64 %37)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000636, i64 0, i64 0), i64 1)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000644, i64 0, i64 0), i64 1)
 	%42 = call i64 @js_eq(i64 %40, i64 %41)
 	br label %43
 
@@ -41949,7 +42479,7 @@ entry:
 	br i1 %46, label %47, label %58
 
 47:
-	%48 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%49 = call i64 @js_scope_get(i64 %8, i64 %48)
 	%50 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000031, i64 0, i64 0), i64 6)
 	%51 = call i64 @js_get(i64 %49, i64 %50)
@@ -41957,7 +42487,7 @@ entry:
 	%53 = call i64 @js_num_i(i64 2)
 	%54 = call i64 @js_arr_push(i64 %52, i64 %53)
 	%55 = call i64 @js_call(i64 %51, i64 %49, i64 %52)
-	%56 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000636, i64 0, i64 0), i64 1)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000644, i64 0, i64 0), i64 1)
 	%57 = call i64 @js_eq(i64 %55, i64 %56)
 	br label %58
 
@@ -41971,7 +42501,7 @@ entry:
 	br label %66
 
 63:
-	%64 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%64 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%65 = call i64 @js_scope_get(i64 %8, i64 %64)
 	ret i64 %65
 
@@ -41980,7 +42510,7 @@ entry:
 
 67:
 	%68 = phi i64 [ %8, %66 ]
-	%69 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%70 = call i64 @js_scope_get(i64 %68, i64 %69)
 	%71 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000028, i64 0, i64 0), i64 9)
 	%72 = call i64 @js_get(i64 %70, i64 %71)
@@ -41990,14 +42520,14 @@ entry:
 	%76 = call i64 @js_call(i64 %72, i64 %70, i64 %73)
 	ret i64 %76
 
-dead698:
+dead701:
 	br label %63
 
-dead699:
+dead702:
 	ret i64 0
 }
 
-define i64 @jsf_1000210(i64 %env, i64 %args) {
+define i64 @jsf_1000211(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -42012,7 +42542,7 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000638, i64 0, i64 0), i64 9)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000646, i64 0, i64 0), i64 9)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
@@ -42026,11 +42556,11 @@ entry:
 	%20 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %20
 
-dead700:
+dead703:
 	ret i64 0
 }
 
-define i64 @jsf_1000211(i64 %env, i64 %args) {
+define i64 @jsf_1000212(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -42045,7 +42575,7 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000626, i64 0, i64 0), i64 10)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000634, i64 0, i64 0), i64 10)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
@@ -42059,11 +42589,11 @@ entry:
 	%20 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %20
 
-dead701:
+dead704:
 	ret i64 0
 }
 
-define i64 @jsf_1000212(i64 %env, i64 %args) {
+define i64 @jsf_1000213(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -42082,13 +42612,13 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%14 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%15 = call i64 @js_scope_get(i64 %12, i64 %14)
 	%16 = call i64 @js_add(i64 %13, i64 %15)
-	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000642, i64 0, i64 0), i64 1)
+	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000650, i64 0, i64 0), i64 1)
 	%18 = call i64 @js_add(i64 %16, i64 %17)
-	%19 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%20 = call i64 @js_tdecl(i64 %12, i64 %19, i64 %18)
 	%21 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%22 = call i64 @js_scope_get(i64 %12, i64 %21)
@@ -42131,7 +42661,7 @@ entry:
 	%45 = phi i64 [ %43, %42 ]
 	%46 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%47 = call i64 @js_scope_get(i64 %45, i64 %46)
-	%48 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000643, i64 0, i64 0), i64 6)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000651, i64 0, i64 0), i64 6)
 	%49 = call i64 @js_get(i64 %47, i64 %48)
 	%50 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%51 = call i64 @js_tdecl(i64 %45, i64 %50, i64 %49)
@@ -42168,7 +42698,7 @@ entry:
 	%74 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
 	%75 = call i64 @js_get(i64 %73, i64 %74)
 	%76 = call i64 @js_arr_new()
-	%77 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%77 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%78 = call i64 @js_scope_get(i64 %71, i64 %77)
 	%79 = call i64 @js_arr_push(i64 %76, i64 %78)
 	%80 = call i64 @js_call(i64 %75, i64 %73, i64 %76)
@@ -42200,7 +42730,7 @@ entry:
 	%98 = call i64 @js_arr_new()
 	%99 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
 	%100 = call i64 @js_scope_get(i64 %93, i64 %99)
-	%101 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%101 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%102 = call i64 @js_scope_get(i64 %93, i64 %101)
 	%103 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%104 = call i64 @js_get(i64 %102, i64 %103)
@@ -42211,11 +42741,11 @@ entry:
 	%109 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
 	%110 = call i64 @js_get(i64 %108, i64 %109)
 	%111 = call i64 @js_arr_new()
-	%112 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%112 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%113 = call i64 @js_arr_push(i64 %111, i64 %112)
 	%114 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
 	%115 = call i64 @js_scope_get(i64 %93, i64 %114)
-	%116 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%116 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%117 = call i64 @js_scope_get(i64 %93, i64 %116)
 	%118 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%119 = call i64 @js_get(i64 %117, i64 %118)
@@ -42226,23 +42756,23 @@ entry:
 	%124 = call i64 @js_call(i64 %97, i64 %95, i64 %98)
 	ret i64 %124
 
-dead702:
+dead705:
 	br label %90
 
-dead703:
+dead706:
 	ret i64 0
 }
 
-define i64 @jsf_1000213(i64 %env, i64 %args) {
+define i64 @jsf_1000214(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000644, i64 0, i64 0), i64 4)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000652, i64 0, i64 0), i64 4)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -42255,7 +42785,7 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
 	%19 = call i64 @js_call(i64 %17, i64 0, i64 %18)
@@ -42267,7 +42797,7 @@ entry:
 	%25 = call i64 @js_get(i64 %23, i64 %24)
 	%26 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%27 = call i64 @js_tdecl(i64 %15, i64 %26, i64 %25)
-	%28 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000620, i64 0, i64 0), i64 6)
+	%28 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000628, i64 0, i64 0), i64 6)
 	%29 = call i64 @js_scope_get(i64 %15, i64 %28)
 	%30 = call i64 @js_arr_new()
 	%31 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -42307,7 +42837,7 @@ entry:
 
 56:
 	%57 = phi i64 [ %55, %54 ]
-	%58 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000626, i64 0, i64 0), i64 10)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000634, i64 0, i64 0), i64 10)
 	%59 = call i64 @js_scope_get(i64 %57, i64 %58)
 	%60 = call i64 @js_arr_new()
 	%61 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000419, i64 0, i64 0), i64 2)
@@ -42319,7 +42849,7 @@ entry:
 	%67 = call i64 @js_call(i64 %59, i64 0, i64 %60)
 	%68 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%69 = call i64 @js_tdecl(i64 %57, i64 %68, i64 %67)
-	%70 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000628, i64 0, i64 0), i64 7)
+	%70 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000636, i64 0, i64 0), i64 7)
 	%71 = call i64 @js_scope_get(i64 %57, i64 %70)
 	%72 = call i64 @js_arr_new()
 	%73 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -42329,9 +42859,9 @@ entry:
 	%77 = call i64 @js_scope_get(i64 %57, i64 %76)
 	%78 = call i64 @js_arr_push(i64 %72, i64 %77)
 	%79 = call i64 @js_call(i64 %71, i64 0, i64 %72)
-	%80 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%80 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%81 = call i64 @js_tdecl(i64 %57, i64 %80, i64 %79)
-	%82 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%82 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%83 = call i64 @js_scope_get(i64 %57, i64 %82)
 	%84 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000125, i64 0, i64 0), i64 0)
 	%85 = call i64 @js_eq(i64 %83, i64 %84)
@@ -42353,7 +42883,7 @@ entry:
 	br label %40
 
 97:
-	%98 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000644, i64 0, i64 0), i64 4)
+	%98 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000652, i64 0, i64 0), i64 4)
 	%99 = call i64 @js_scope_get(i64 %57, i64 %98)
 	%100 = call i64 @js_truthy(i64 %99)
 	%101 = icmp ne i64 %100, 0
@@ -42364,7 +42894,7 @@ entry:
 
 103:
 	%104 = phi i64 [ %57, %102 ]
-	%105 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%105 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%106 = call i64 @js_scope_get(i64 %104, i64 %105)
 	%107 = call i64 @js_arr_new()
 	%108 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
@@ -42400,16 +42930,16 @@ entry:
 
 129:
 	%130 = phi i64 [ %57, %128 ]
-	%131 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000646, i64 0, i64 0), i64 9)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000654, i64 0, i64 0), i64 9)
 	%132 = call i64 @js_scope_get(i64 %130, i64 %131)
 	%133 = call i64 @js_arr_new()
 	%134 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%135 = call i64 @js_scope_get(i64 %130, i64 %134)
 	%136 = call i64 @js_arr_push(i64 %133, i64 %135)
-	%137 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%137 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%138 = call i64 @js_scope_get(i64 %130, i64 %137)
 	%139 = call i64 @js_arr_push(i64 %133, i64 %138)
-	%140 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%140 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%141 = call i64 @js_scope_get(i64 %130, i64 %140)
 	%142 = call i64 @js_arr_push(i64 %133, i64 %141)
 	%143 = call i64 @js_call(i64 %132, i64 0, i64 %133)
@@ -42428,7 +42958,7 @@ entry:
 
 149:
 	%150 = phi i64 [ %130, %148 ]
-	%151 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%151 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%152 = call i64 @js_scope_get(i64 %150, i64 %151)
 	%153 = call i64 @js_arr_new()
 	%154 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
@@ -42455,17 +42985,17 @@ entry:
 
 172:
 	%173 = phi i64 [ %57, %171 ]
-	%174 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%174 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%175 = call i64 @js_scope_get(i64 %173, i64 %174)
 	%176 = call i64 @js_arr_new()
 	%177 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%178 = call i64 @js_scope_get(i64 %173, i64 %177)
 	%179 = call i64 @js_arr_push(i64 %176, i64 %178)
-	%180 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000647, i64 0, i64 0), i64 1)
-	%181 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%180 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000655, i64 0, i64 0), i64 1)
+	%181 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%182 = call i64 @js_scope_get(i64 %173, i64 %181)
 	%183 = call i64 @js_add(i64 %180, i64 %182)
-	%184 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000647, i64 0, i64 0), i64 1)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000655, i64 0, i64 0), i64 1)
 	%185 = call i64 @js_add(i64 %183, i64 %184)
 	%186 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%187 = call i64 @js_scope_get(i64 %173, i64 %186)
@@ -42484,20 +43014,20 @@ entry:
 	%200 = call i64 @js_setret(i64 %199)
 	br label %126
 
-dead704:
+dead707:
 	ret i64 0
 }
 
-define i64 @jsf_1000214(i64 %env, i64 %args) {
+define i64 @jsf_1000215(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -42509,7 +43039,7 @@ entry:
 
 13:
 	%14 = phi i64 [ %0, %12 ]
-	%15 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%16 = call i64 @js_scope_get(i64 %14, i64 %15)
 	%17 = call i64 @js_seq(i64 %16, i64 0)
 	%18 = call i64 @js_truthy(i64 %17)
@@ -42517,7 +43047,7 @@ entry:
 	br i1 %19, label %24, label %20
 
 20:
-	%21 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%22 = call i64 @js_scope_get(i64 %14, i64 %21)
 	%23 = call i64 @js_seq(i64 %22, i64 1)
 	br label %24
@@ -42532,7 +43062,7 @@ entry:
 	br label %36
 
 29:
-	%30 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%31 = call i64 @js_scope_get(i64 %14, i64 %30)
 	%32 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000271, i64 0, i64 0), i64 1)
 	%33 = call i64 @js_eq(i64 %31, i64 %32)
@@ -42547,7 +43077,7 @@ entry:
 	%38 = phi i64 [ %14, %36 ]
 	ret i64 2
 
-dead705:
+dead708:
 	br label %29
 
 39:
@@ -42557,13 +43087,13 @@ dead705:
 	%41 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%42 = call i64 @js_scope_get(i64 %14, i64 %41)
 	%43 = call i64 @js_arr_new()
-	%44 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%44 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%45 = call i64 @js_scope_get(i64 %14, i64 %44)
 	%46 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000066, i64 0, i64 0), i64 6)
 	%47 = call i64 @js_get(i64 %45, i64 %46)
 	%48 = call i64 @js_arr_push(i64 %43, i64 %47)
 	%49 = call i64 @js_call(i64 %42, i64 0, i64 %43)
-	%50 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000629, i64 0, i64 0), i64 3)
+	%50 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000637, i64 0, i64 0), i64 3)
 	%51 = call i64 @js_scope_get(i64 %14, i64 %50)
 	%52 = call i64 @js_eq(i64 %49, i64 %51)
 	ret i64 %52
@@ -42573,7 +43103,7 @@ dead705:
 
 54:
 	%55 = phi i64 [ %14, %53 ]
-	%56 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
 	%57 = call i64 @js_scope_get(i64 %55, i64 %56)
 	%58 = call i64 @js_arr_new()
 	%59 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
@@ -42582,7 +43112,7 @@ dead705:
 	%62 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%63 = call i64 @js_scope_get(i64 %55, i64 %62)
 	%64 = call i64 @js_arr_new()
-	%65 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%66 = call i64 @js_scope_get(i64 %55, i64 %65)
 	%67 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000066, i64 0, i64 0), i64 6)
 	%68 = call i64 @js_get(i64 %66, i64 %67)
@@ -42595,13 +43125,13 @@ dead705:
 	br i1 %74, label %91, label %75
 
 75:
-	%76 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
+	%76 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
 	%77 = call i64 @js_scope_get(i64 %55, i64 %76)
 	%78 = call i64 @js_arr_new()
-	%79 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%79 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%80 = call i64 @js_scope_get(i64 %55, i64 %79)
 	%81 = call i64 @js_arr_push(i64 %78, i64 %80)
-	%82 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000581, i64 0, i64 0), i64 11)
+	%82 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000591, i64 0, i64 0), i64 11)
 	%83 = call i64 @js_scope_get(i64 %55, i64 %82)
 	%84 = call i64 @js_arr_new()
 	%85 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
@@ -42616,23 +43146,23 @@ dead705:
 	%92 = phi i64 [ %72, %54 ], [ %90, %75 ]
 	ret i64 %92
 
-dead706:
+dead709:
 	br label %40
 
-dead707:
+dead710:
 	ret i64 0
 }
 
-define i64 @jsf_1000215(i64 %env, i64 %args) {
+define i64 @jsf_1000216(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000650, i64 0, i64 0), i64 5)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000658, i64 0, i64 0), i64 5)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000651, i64 0, i64 0), i64 7)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000659, i64 0, i64 0), i64 7)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -42648,7 +43178,7 @@ entry:
 	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000426, i64 0, i64 0), i64 7)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
-	%19 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_call(i64 %17, i64 0, i64 %18)
@@ -42660,7 +43190,7 @@ entry:
 	br label %32
 
 26:
-	%27 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000650, i64 0, i64 0), i64 5)
+	%27 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000658, i64 0, i64 0), i64 5)
 	%28 = call i64 @js_scope_get(i64 %15, i64 %27)
 	%29 = call i64 @js_seq(i64 %28, i64 3)
 	%30 = call i64 @js_truthy(i64 %29)
@@ -42672,20 +43202,20 @@ entry:
 
 33:
 	%34 = phi i64 [ %15, %32 ]
-	%35 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%36 = call i64 @js_scope_get(i64 %34, i64 %35)
 	%37 = call i64 @js_arr_new()
-	%38 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%39 = call i64 @js_scope_get(i64 %34, i64 %38)
 	%40 = call i64 @js_arr_push(i64 %37, i64 %39)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000653, i64 0, i64 0), i64 4)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000661, i64 0, i64 0), i64 4)
 	%42 = call i64 @js_arr_push(i64 %37, i64 %41)
 	%43 = call i64 @js_arr_new()
 	%44 = call i64 @js_arr_push(i64 %37, i64 %43)
 	%45 = call i64 @js_call(i64 %36, i64 0, i64 %37)
 	ret i64 %45
 
-dead708:
+dead711:
 	br label %26
 
 46:
@@ -42693,18 +43223,18 @@ dead708:
 
 47:
 	%48 = call i64 @js_obj_new()
-	%49 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%50 = call i64 @js_tdecl(i64 %15, i64 %49, i64 %48)
 	%51 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000428, i64 0, i64 0), i64 6)
 	%52 = call i64 @js_scope_get(i64 %15, i64 %51)
 	%53 = call i64 @js_arr_new()
-	%54 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%55 = call i64 @js_scope_get(i64 %15, i64 %54)
 	%56 = call i64 @js_arr_new()
-	%57 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%57 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%58 = call i64 @js_scope_get(i64 %15, i64 %57)
 	%59 = call i64 @js_arr_push(i64 %56, i64 %58)
-	%60 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000656, i64 0, i64 0), i64 5)
+	%60 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000664, i64 0, i64 0), i64 5)
 	%61 = call i64 @js_arr_push(i64 %56, i64 %60)
 	%62 = call i64 @js_arr_new()
 	%63 = call i64 @js_arr_push(i64 %56, i64 %62)
@@ -42724,13 +43254,13 @@ dead708:
 
 72:
 	%73 = phi i64 [ %15, %71 ]
-	%74 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%75 = call i64 @js_scope_get(i64 %73, i64 %74)
 	%76 = call i64 @js_arr_new()
-	%77 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%77 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%78 = call i64 @js_scope_get(i64 %73, i64 %77)
 	%79 = call i64 @js_arr_push(i64 %76, i64 %78)
-	%80 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000654, i64 0, i64 0), i64 6)
+	%80 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000662, i64 0, i64 0), i64 6)
 	%81 = call i64 @js_arr_push(i64 %76, i64 %80)
 	%82 = call i64 @js_arr_new()
 	%83 = call i64 @js_arr_push(i64 %76, i64 %82)
@@ -42743,13 +43273,13 @@ dead708:
 
 87:
 	%88 = phi i64 [ %15, %86 ]
-	%89 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%89 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%90 = call i64 @js_scope_get(i64 %88, i64 %89)
 	%91 = call i64 @js_arr_new()
-	%92 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%92 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%93 = call i64 @js_scope_get(i64 %88, i64 %92)
 	%94 = call i64 @js_arr_push(i64 %91, i64 %93)
-	%95 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000653, i64 0, i64 0), i64 4)
+	%95 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000661, i64 0, i64 0), i64 4)
 	%96 = call i64 @js_arr_push(i64 %91, i64 %95)
 	%97 = call i64 @js_arr_new()
 	%98 = call i64 @js_arr_push(i64 %91, i64 %97)
@@ -42762,35 +43292,35 @@ dead708:
 
 102:
 	%103 = call i64 @js_obj_new()
-	%104 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%104 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%105 = call i64 @js_tdecl(i64 %15, i64 %104, i64 %103)
-	%106 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%107 = call i64 @js_scope_get(i64 %15, i64 %106)
-	%108 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000660, i64 0, i64 0), i64 7)
+	%108 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000668, i64 0, i64 0), i64 7)
 	%109 = call i64 @js_set(i64 %107, i64 %108, i64 3)
 	%110 = call i64 @js_setret(i64 3)
-	%111 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%111 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%112 = call i64 @js_scope_get(i64 %15, i64 %111)
 	%113 = call i64 @js_arr_new()
-	%114 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%114 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%115 = call i64 @js_scope_get(i64 %15, i64 %114)
 	%116 = call i64 @js_arr_push(i64 %113, i64 %115)
-	%117 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000661, i64 0, i64 0), i64 7)
+	%117 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000669, i64 0, i64 0), i64 7)
 	%118 = call i64 @js_arr_push(i64 %113, i64 %117)
 	%119 = call i64 @js_arr_new()
 	%120 = call i64 @js_arr_push(i64 %113, i64 %119)
 	%121 = call i64 @js_call(i64 %112, i64 0, i64 %113)
-	%122 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%122 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%123 = call i64 @js_scope_get(i64 %15, i64 %122)
 	%124 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%125 = call i64 @js_set(i64 %123, i64 %124, i64 %121)
 	%126 = call i64 @js_setret(i64 %121)
-	%127 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%127 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%128 = call i64 @js_scope_get(i64 %15, i64 %127)
 	%129 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%130 = call i64 @js_set(i64 %128, i64 %129, i64 1)
 	%131 = call i64 @js_setret(i64 1)
-	%132 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000651, i64 0, i64 0), i64 7)
+	%132 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000659, i64 0, i64 0), i64 7)
 	%133 = call i64 @js_scope_get(i64 %15, i64 %132)
 	%134 = call i64 @js_seq(i64 %133, i64 3)
 	%135 = call i64 @js_truthy(i64 %134)
@@ -42802,40 +43332,40 @@ dead708:
 
 138:
 	%139 = phi i64 [ %15, %137 ]
-	%140 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%140 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%141 = call i64 @js_scope_get(i64 %139, i64 %140)
-	%142 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000657, i64 0, i64 0), i64 5)
+	%142 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000665, i64 0, i64 0), i64 5)
 	%143 = call i64 @js_set(i64 %141, i64 %142, i64 0)
 	%144 = call i64 @js_setret(i64 0)
-	%145 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%145 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%146 = call i64 @js_scope_get(i64 %139, i64 %145)
-	%147 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%147 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%148 = call i64 @js_set(i64 %146, i64 %147, i64 3)
 	%149 = call i64 @js_setret(i64 3)
-	%150 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%150 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%151 = call i64 @js_scope_get(i64 %139, i64 %150)
 	ret i64 %151
 
-dead709:
+dead712:
 	br label %102
 
 152:
 	br label %168
 
 153:
-	%154 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%154 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%155 = call i64 @js_scope_get(i64 %15, i64 %154)
-	%156 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%156 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%157 = call i64 @js_scope_get(i64 %15, i64 %156)
-	%158 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000657, i64 0, i64 0), i64 5)
+	%158 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000665, i64 0, i64 0), i64 5)
 	%159 = call i64 @js_set(i64 %157, i64 %158, i64 %155)
 	%160 = call i64 @js_setret(i64 %155)
-	%161 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%161 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%162 = call i64 @js_scope_get(i64 %15, i64 %161)
-	%163 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%163 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%164 = call i64 @js_set(i64 %162, i64 %163, i64 2)
 	%165 = call i64 @js_setret(i64 2)
-	%166 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%166 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%167 = call i64 @js_scope_get(i64 %15, i64 %166)
 	ret i64 %167
 
@@ -42844,38 +43374,38 @@ dead709:
 
 169:
 	%170 = phi i64 [ %15, %168 ]
-	%171 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%171 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%172 = call i64 @js_scope_get(i64 %170, i64 %171)
 	%173 = call i64 @js_arr_new()
-	%174 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000649, i64 0, i64 0), i64 2)
+	%174 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000657, i64 0, i64 0), i64 2)
 	%175 = call i64 @js_scope_get(i64 %170, i64 %174)
 	%176 = call i64 @js_arr_push(i64 %173, i64 %175)
-	%177 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%177 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%178 = call i64 @js_arr_push(i64 %173, i64 %177)
 	%179 = call i64 @js_arr_new()
 	%180 = call i64 @js_arr_push(i64 %173, i64 %179)
 	%181 = call i64 @js_call(i64 %172, i64 0, i64 %173)
-	%182 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%182 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%183 = call i64 @js_scope_get(i64 %170, i64 %182)
 	%184 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%185 = call i64 @js_set(i64 %183, i64 %184, i64 %181)
 	%186 = call i64 @js_setret(i64 %181)
 	br label %153
 
-dead710:
+dead713:
 	ret i64 0
 }
 
-define i64 @jsf_1000216(i64 %env, i64 %args) {
+define i64 @jsf_1000217(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000663, i64 0, i64 0), i64 5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000671, i64 0, i64 0), i64 5)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -42888,7 +43418,7 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%19 = call i64 @js_tdecl(i64 %15, i64 %18, i64 %17)
@@ -42915,7 +43445,7 @@ entry:
 	br label %56
 
 36:
-	%37 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000663, i64 0, i64 0), i64 5)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000671, i64 0, i64 0), i64 5)
 	%38 = call i64 @js_scope_get(i64 %15, i64 %37)
 	%39 = call i64 @js_sne(i64 %38, i64 3)
 	%40 = call i64 @js_truthy(i64 %39)
@@ -42923,13 +43453,13 @@ entry:
 	br i1 %41, label %73, label %74
 
 42:
-	%43 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
 	%44 = call i64 @js_scope_get(i64 %15, i64 %43)
 	%45 = call i64 @js_arr_new()
 	%46 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%47 = call i64 @js_scope_get(i64 %15, i64 %46)
 	%48 = call i64 @js_arr_push(i64 %45, i64 %47)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([17 x i8], [17 x i8]* @str.1000664, i64 0, i64 0), i64 17)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([17 x i8], [17 x i8]* @str.1000672, i64 0, i64 0), i64 17)
 	%50 = call i64 @js_arr_push(i64 %45, i64 %49)
 	%51 = call i64 @js_call(i64 %44, i64 0, i64 %45)
 	br label %52
@@ -42945,13 +43475,13 @@ entry:
 
 57:
 	%58 = phi i64 [ %15, %56 ]
-	%59 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%59 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%60 = call i64 @js_scope_get(i64 %58, i64 %59)
 	%61 = call i64 @js_arr_new()
 	%62 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%63 = call i64 @js_scope_get(i64 %58, i64 %62)
 	%64 = call i64 @js_arr_push(i64 %61, i64 %63)
-	%65 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000665, i64 0, i64 0), i64 11)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000673, i64 0, i64 0), i64 11)
 	%66 = call i64 @js_arr_push(i64 %61, i64 %65)
 	%67 = call i64 @js_arr_new()
 	%68 = call i64 @js_arr_push(i64 %61, i64 %67)
@@ -42990,9 +43520,9 @@ entry:
 	%93 = call i64 @js_scope_get(i64 %88, i64 %92)
 	%94 = call i64 @js_arr_push(i64 %91, i64 %93)
 	%95 = call i64 @js_call(i64 %90, i64 0, i64 %91)
-	%96 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000666, i64 0, i64 0), i64 2)
+	%96 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000674, i64 0, i64 0), i64 2)
 	%97 = call i64 @js_tdecl(i64 %88, i64 %96, i64 %95)
-	%98 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000666, i64 0, i64 0), i64 2)
+	%98 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000674, i64 0, i64 0), i64 2)
 	%99 = call i64 @js_scope_get(i64 %88, i64 %98)
 	%100 = call i64 @js_sne(i64 %99, i64 0)
 	%101 = call i64 @js_truthy(i64 %100)
@@ -43011,23 +43541,23 @@ entry:
 
 107:
 	%108 = phi i64 [ %106, %105 ]
-	%109 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%109 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%110 = call i64 @js_scope_get(i64 %108, i64 %109)
 	%111 = call i64 @js_arr_new()
 	%112 = call i64 @js_call(i64 %110, i64 0, i64 %111)
-	%113 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000667, i64 0, i64 0), i64 4)
+	%113 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000675, i64 0, i64 0), i64 4)
 	%114 = call i64 @js_tdecl(i64 %108, i64 %113, i64 %112)
-	%115 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000667, i64 0, i64 0), i64 4)
+	%115 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000675, i64 0, i64 0), i64 4)
 	%116 = call i64 @js_scope_get(i64 %108, i64 %115)
 	%117 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
 	%118 = call i64 @js_get(i64 %116, i64 %117)
-	%119 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000668, i64 0, i64 0), i64 2)
+	%119 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000676, i64 0, i64 0), i64 2)
 	%120 = call i64 @js_tdecl(i64 %108, i64 %119, i64 %118)
-	%121 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000667, i64 0, i64 0), i64 4)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000675, i64 0, i64 0), i64 4)
 	%122 = call i64 @js_scope_get(i64 %108, i64 %121)
 	%123 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000075, i64 0, i64 0), i64 4)
 	%124 = call i64 @js_get(i64 %122, i64 %123)
-	%125 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000669, i64 0, i64 0), i64 2)
+	%125 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000677, i64 0, i64 0), i64 2)
 	%126 = call i64 @js_tdecl(i64 %108, i64 %125, i64 %124)
 	%127 = call i64 @js_num_i(i64 0)
 	%128 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
@@ -43037,7 +43567,7 @@ entry:
 130:
 	%131 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%132 = call i64 @js_scope_get(i64 %108, i64 %131)
-	%133 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000666, i64 0, i64 0), i64 2)
+	%133 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000674, i64 0, i64 0), i64 2)
 	%134 = call i64 @js_scope_get(i64 %108, i64 %133)
 	%135 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%136 = call i64 @js_get(i64 %134, i64 %135)
@@ -43052,7 +43582,7 @@ entry:
 	br label %146
 
 143:
-	%144 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000667, i64 0, i64 0), i64 4)
+	%144 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000675, i64 0, i64 0), i64 4)
 	%145 = call i64 @js_scope_get(i64 %108, i64 %144)
 	ret i64 %145
 
@@ -43061,12 +43591,12 @@ entry:
 
 147:
 	%148 = phi i64 [ %108, %146 ]
-	%149 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000668, i64 0, i64 0), i64 2)
+	%149 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000676, i64 0, i64 0), i64 2)
 	%150 = call i64 @js_scope_get(i64 %148, i64 %149)
 	%151 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%152 = call i64 @js_get(i64 %150, i64 %151)
 	%153 = call i64 @js_arr_new()
-	%154 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000666, i64 0, i64 0), i64 2)
+	%154 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000674, i64 0, i64 0), i64 2)
 	%155 = call i64 @js_scope_get(i64 %148, i64 %154)
 	%156 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%157 = call i64 @js_get(i64 %155, i64 %156)
@@ -43076,12 +43606,12 @@ entry:
 	%161 = call i64 @js_arr_push(i64 %153, i64 %160)
 	%162 = call i64 @js_call(i64 %152, i64 %150, i64 %153)
 	%163 = call i64 @js_setret(i64 %162)
-	%164 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000669, i64 0, i64 0), i64 2)
+	%164 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000677, i64 0, i64 0), i64 2)
 	%165 = call i64 @js_scope_get(i64 %148, i64 %164)
 	%166 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%167 = call i64 @js_get(i64 %165, i64 %166)
 	%168 = call i64 @js_arr_new()
-	%169 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000666, i64 0, i64 0), i64 2)
+	%169 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000674, i64 0, i64 0), i64 2)
 	%170 = call i64 @js_scope_get(i64 %148, i64 %169)
 	%171 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%172 = call i64 @js_get(i64 %170, i64 %171)
@@ -43100,7 +43630,7 @@ entry:
 	%185 = call i64 @js_setret(i64 %182)
 	br label %130
 
-dead711:
+dead714:
 	br label %104
 
 186:
@@ -43120,13 +43650,13 @@ dead711:
 	br i1 %197, label %208, label %198
 
 198:
-	%199 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
+	%199 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
 	%200 = call i64 @js_scope_get(i64 %15, i64 %199)
 	%201 = call i64 @js_arr_new()
 	%202 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%203 = call i64 @js_scope_get(i64 %15, i64 %202)
 	%204 = call i64 @js_arr_push(i64 %201, i64 %203)
-	%205 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000578, i64 0, i64 0), i64 8)
+	%205 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000678, i64 0, i64 0), i64 8)
 	%206 = call i64 @js_arr_push(i64 %201, i64 %205)
 	%207 = call i64 @js_call(i64 %200, i64 0, i64 %201)
 	br label %208
@@ -43141,20 +43671,20 @@ dead711:
 	br label %232
 
 213:
-	%214 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000648, i64 0, i64 0), i64 8)
+	%214 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000656, i64 0, i64 0), i64 8)
 	%215 = call i64 @js_scope_get(i64 %15, i64 %214)
 	%216 = call i64 @js_arr_new()
 	%217 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%218 = call i64 @js_scope_get(i64 %15, i64 %217)
 	%219 = call i64 @js_arr_push(i64 %216, i64 %218)
 	%220 = call i64 @js_arr_push(i64 %216, i64 3)
-	%221 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000645, i64 0, i64 0), i64 5)
+	%221 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000653, i64 0, i64 0), i64 5)
 	%222 = call i64 @js_scope_get(i64 %15, i64 %221)
 	%223 = call i64 @js_arr_push(i64 %216, i64 %222)
 	%224 = call i64 @js_call(i64 %215, i64 0, i64 %216)
 	%225 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%226 = call i64 @js_tdecl(i64 %15, i64 %225, i64 %224)
-	%227 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000663, i64 0, i64 0), i64 5)
+	%227 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000671, i64 0, i64 0), i64 5)
 	%228 = call i64 @js_scope_get(i64 %15, i64 %227)
 	%229 = call i64 @js_sne(i64 %228, i64 3)
 	%230 = call i64 @js_truthy(i64 %229)
@@ -43170,7 +43700,7 @@ dead711:
 	%236 = call i64 @js_scope_get(i64 %234, i64 %235)
 	ret i64 %236
 
-dead712:
+dead715:
 	br label %213
 
 237:
@@ -43200,7 +43730,7 @@ dead712:
 	%255 = call i64 @js_scope_get(i64 %253, i64 %254)
 	ret i64 %255
 
-dead713:
+dead716:
 	br label %238
 
 256:
@@ -43305,7 +43835,7 @@ dead713:
 	%339 = call i64 @js_scope_get(i64 %316, i64 %338)
 	%340 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%341 = call i64 @js_scope_get(i64 %316, i64 %340)
-	%342 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000638, i64 0, i64 0), i64 9)
+	%342 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000646, i64 0, i64 0), i64 9)
 	%343 = call i64 @js_scope_get(i64 %316, i64 %342)
 	%344 = call i64 @js_arr_new()
 	%345 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
@@ -43326,11 +43856,11 @@ dead713:
 	%360 = call i64 @js_setret(i64 %339)
 	br label %296
 
-dead714:
+dead717:
 	ret i64 0
 }
 
-define i64 @jsf_1000217(i64 %env, i64 %args) {
+define i64 @jsf_1000218(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -43349,29 +43879,29 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000620, i64 0, i64 0), i64 6)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000628, i64 0, i64 0), i64 6)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_arr_new()
 	%16 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000671, i64 0, i64 0), i64 2)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000680, i64 0, i64 0), i64 2)
 	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
-	%22 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000620, i64 0, i64 0), i64 6)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000628, i64 0, i64 0), i64 6)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
 	%24 = call i64 @js_arr_new()
 	%25 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000111, i64 0, i64 0), i64 1)
 	%26 = call i64 @js_scope_get(i64 %12, i64 %25)
 	%27 = call i64 @js_arr_push(i64 %24, i64 %26)
 	%28 = call i64 @js_call(i64 %23, i64 0, i64 %24)
-	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000672, i64 0, i64 0), i64 2)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000681, i64 0, i64 0), i64 2)
 	%30 = call i64 @js_tdecl(i64 %12, i64 %29, i64 %28)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000671, i64 0, i64 0), i64 2)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000680, i64 0, i64 0), i64 2)
 	%32 = call i64 @js_scope_get(i64 %12, i64 %31)
 	%33 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%34 = call i64 @js_get(i64 %32, i64 %33)
-	%35 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000672, i64 0, i64 0), i64 2)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000681, i64 0, i64 0), i64 2)
 	%36 = call i64 @js_scope_get(i64 %12, i64 %35)
 	%37 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%38 = call i64 @js_get(i64 %36, i64 %37)
@@ -43396,13 +43926,13 @@ entry:
 	%49 = phi i64 [ %12, %47 ]
 	ret i64 2
 
-dead715:
+dead718:
 	br label %43
 
 50:
 	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%52 = call i64 @js_scope_get(i64 %12, i64 %51)
-	%53 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000671, i64 0, i64 0), i64 2)
+	%53 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000680, i64 0, i64 0), i64 2)
 	%54 = call i64 @js_scope_get(i64 %12, i64 %53)
 	%55 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%56 = call i64 @js_get(i64 %54, i64 %55)
@@ -43423,7 +43953,7 @@ dead715:
 
 64:
 	%65 = phi i64 [ %63, %62 ]
-	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000671, i64 0, i64 0), i64 2)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000680, i64 0, i64 0), i64 2)
 	%67 = call i64 @js_scope_get(i64 %65, i64 %66)
 	%68 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%69 = call i64 @js_scope_get(i64 %65, i64 %68)
@@ -43433,7 +43963,7 @@ dead715:
 	%73 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000119, i64 0, i64 0), i64 5)
 	%74 = call i64 @js_scope_get(i64 %65, i64 %73)
 	%75 = call i64 @js_arr_new()
-	%76 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000672, i64 0, i64 0), i64 2)
+	%76 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000681, i64 0, i64 0), i64 2)
 	%77 = call i64 @js_scope_get(i64 %65, i64 %76)
 	%78 = call i64 @js_arr_push(i64 %75, i64 %77)
 	%79 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -43449,7 +43979,7 @@ dead715:
 	br label %107
 
 87:
-	%88 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000525, i64 0, i64 0), i64 7)
+	%88 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000533, i64 0, i64 0), i64 7)
 	%89 = call i64 @js_scope_get(i64 %65, i64 %88)
 	%90 = call i64 @js_arr_new()
 	%91 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -43477,7 +44007,7 @@ dead715:
 	%109 = phi i64 [ %65, %107 ]
 	ret i64 2
 
-dead716:
+dead719:
 	br label %87
 
 110:
@@ -43500,14 +44030,14 @@ dead716:
 	%121 = phi i64 [ %65, %119 ]
 	ret i64 2
 
-dead717:
+dead720:
 	br label %111
 
-dead718:
+dead721:
 	ret i64 0
 }
 
-define i64 @jsf_1000218(i64 %env, i64 %args) {
+define i64 @jsf_1000219(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -43557,7 +44087,7 @@ entry:
 	%33 = call i64 @js_scope_get(i64 %31, i64 %32)
 	ret i64 %33
 
-dead719:
+dead722:
 	br label %20
 
 34:
@@ -43595,7 +44125,7 @@ dead719:
 	%60 = phi i64 [ %9, %58 ]
 	%61 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000471, i64 0, i64 0), i64 11)
 	%62 = call i64 @js_scope_get(i64 %60, i64 %61)
-	%63 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000580, i64 0, i64 0), i64 8)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000590, i64 0, i64 0), i64 8)
 	%64 = call i64 @js_get(i64 %62, i64 %63)
 	%65 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%66 = call i64 @js_scope_get(i64 %60, i64 %65)
@@ -43658,7 +44188,7 @@ dead719:
 
 106:
 	%107 = phi i64 [ %85, %105 ]
-	%108 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000553, i64 0, i64 0), i64 9)
+	%108 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000487, i64 0, i64 0), i64 9)
 	%109 = call i64 @js_scope_get(i64 %107, i64 %108)
 	%110 = call i64 @js_arr_new()
 	%111 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
@@ -43677,7 +44207,7 @@ dead719:
 	%124 = call i64 @js_call(i64 %109, i64 0, i64 %110)
 	%125 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%126 = call i64 @js_scope_get(i64 %107, i64 %125)
-	%127 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000638, i64 0, i64 0), i64 9)
+	%127 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000646, i64 0, i64 0), i64 9)
 	%128 = call i64 @js_scope_get(i64 %107, i64 %127)
 	%129 = call i64 @js_arr_new()
 	%130 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
@@ -43705,7 +44235,7 @@ dead719:
 	%152 = call i64 @js_setret(i64 %149)
 	br label %89
 
-dead720:
+dead723:
 	br label %71
 
 153:
@@ -43725,16 +44255,16 @@ dead720:
 	%161 = call i64 @js_scope_get(i64 %159, i64 %160)
 	%162 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%163 = call i64 @js_scope_get(i64 %159, i64 %162)
-	%164 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000673, i64 0, i64 0), i64 6)
+	%164 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000682, i64 0, i64 0), i64 6)
 	%165 = call i64 @js_set(i64 %163, i64 %164, i64 %161)
 	%166 = call i64 @js_setret(i64 %161)
 	br label %154
 
-dead721:
+dead724:
 	ret i64 0
 }
 
-define i64 @jsf_1000219(i64 %env, i64 %args) {
+define i64 @jsf_1000220(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
@@ -43754,7 +44284,7 @@ entry:
 	%11 = phi i64 [ %0, %9 ]
 	%12 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000590, i64 0, i64 0), i64 3)
+	%14 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
 	%15 = call i64 @js_eq(i64 %13, i64 %14)
 	%16 = call i64 @js_truthy(i64 %15)
 	%17 = icmp ne i64 %16, 0
@@ -43763,7 +44293,7 @@ entry:
 18:
 	%19 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%20 = call i64 @js_scope_get(i64 %11, i64 %19)
-	%21 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000584, i64 0, i64 0), i64 7)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000594, i64 0, i64 0), i64 7)
 	%22 = call i64 @js_eq(i64 %20, i64 %21)
 	br label %23
 
@@ -43779,7 +44309,7 @@ entry:
 28:
 	%29 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%30 = call i64 @js_scope_get(i64 %11, i64 %29)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000589, i64 0, i64 0), i64 5)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000599, i64 0, i64 0), i64 5)
 	%32 = call i64 @js_eq(i64 %30, i64 %31)
 	%33 = call i64 @js_truthy(i64 %32)
 	%34 = icmp ne i64 %33, 0
@@ -43799,13 +44329,13 @@ entry:
 	%44 = call i64 @js_call(i64 %39, i64 0, i64 %40)
 	ret i64 %44
 
-dead722:
+dead725:
 	br label %28
 
 45:
 	%46 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%47 = call i64 @js_scope_get(i64 %11, i64 %46)
-	%48 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000583, i64 0, i64 0), i64 6)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000593, i64 0, i64 0), i64 6)
 	%49 = call i64 @js_eq(i64 %47, i64 %48)
 	br label %50
 
@@ -43818,7 +44348,7 @@ dead722:
 54:
 	%55 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%56 = call i64 @js_scope_get(i64 %11, i64 %55)
-	%57 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000675, i64 0, i64 0), i64 4)
+	%57 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000684, i64 0, i64 0), i64 4)
 	%58 = call i64 @js_eq(i64 %56, i64 %57)
 	br label %59
 
@@ -43864,13 +44394,13 @@ dead722:
 	%90 = call i64 @js_call(i64 %75, i64 0, i64 %76)
 	ret i64 %90
 
-dead723:
+dead726:
 	br label %64
 
 91:
 	%92 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%93 = call i64 @js_scope_get(i64 %11, i64 %92)
-	%94 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000676, i64 0, i64 0), i64 6)
+	%94 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000685, i64 0, i64 0), i64 6)
 	%95 = call i64 @js_eq(i64 %93, i64 %94)
 	br label %96
 
@@ -43886,7 +44416,7 @@ dead723:
 101:
 	%102 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%103 = call i64 @js_scope_get(i64 %11, i64 %102)
-	%104 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000588, i64 0, i64 0), i64 4)
+	%104 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000598, i64 0, i64 0), i64 4)
 	%105 = call i64 @js_eq(i64 %103, i64 %104)
 	%106 = call i64 @js_truthy(i64 %105)
 	%107 = icmp ne i64 %106, 0
@@ -43906,7 +44436,7 @@ dead723:
 	%117 = call i64 @js_call(i64 %112, i64 0, i64 %113)
 	ret i64 %117
 
-dead724:
+dead727:
 	br label %101
 
 118:
@@ -43928,7 +44458,7 @@ dead724:
 128:
 	%129 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%130 = call i64 @js_scope_get(i64 %11, i64 %129)
-	%131 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000585, i64 0, i64 0), i64 5)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000595, i64 0, i64 0), i64 5)
 	%132 = call i64 @js_eq(i64 %130, i64 %131)
 	%133 = call i64 @js_truthy(i64 %132)
 	%134 = icmp ne i64 %133, 0
@@ -43948,7 +44478,7 @@ dead724:
 	%144 = call i64 @js_call(i64 %139, i64 0, i64 %140)
 	ret i64 %144
 
-dead725:
+dead728:
 	br label %128
 
 145:
@@ -43984,7 +44514,7 @@ dead725:
 	br label %183
 
 167:
-	%168 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%168 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%169 = call i64 @js_scope_get(i64 %156, i64 %168)
 	%170 = call i64 @js_arr_new()
 	%171 = call i64 @js_call(i64 %169, i64 0, i64 %170)
@@ -44010,7 +44540,7 @@ dead725:
 	%187 = call i64 @js_scope_get(i64 %185, i64 %186)
 	ret i64 %187
 
-dead726:
+dead729:
 	br label %167
 
 188:
@@ -44037,14 +44567,14 @@ dead726:
 	%203 = call i64 @js_scope_get(i64 %201, i64 %202)
 	ret i64 %203
 
-dead727:
+dead730:
 	br label %189
 
 204:
 	br label %219
 
 205:
-	%206 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%206 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%207 = call i64 @js_scope_get(i64 %156, i64 %206)
 	%208 = call i64 @js_arr_new()
 	%209 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
@@ -44064,7 +44594,7 @@ dead727:
 
 220:
 	%221 = phi i64 [ %156, %219 ]
-	%222 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000648, i64 0, i64 0), i64 8)
+	%222 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000656, i64 0, i64 0), i64 8)
 	%223 = call i64 @js_scope_get(i64 %221, i64 %222)
 	%224 = call i64 @js_arr_new()
 	%225 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -44075,10 +44605,10 @@ dead727:
 	%230 = call i64 @js_call(i64 %223, i64 0, i64 %224)
 	ret i64 %230
 
-dead728:
+dead731:
 	br label %205
 
-dead729:
+dead732:
 	br label %146
 
 231:
@@ -44087,7 +44617,7 @@ dead729:
 232:
 	%233 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%234 = call i64 @js_scope_get(i64 %11, i64 %233)
-	%235 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000677, i64 0, i64 0), i64 5)
+	%235 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000686, i64 0, i64 0), i64 5)
 	%236 = call i64 @js_eq(i64 %234, i64 %235)
 	%237 = call i64 @js_truthy(i64 %236)
 	%238 = icmp ne i64 %237, 0
@@ -44098,7 +44628,7 @@ dead729:
 
 240:
 	%241 = phi i64 [ %11, %239 ]
-	%242 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000674, i64 0, i64 0), i64 9)
+	%242 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000683, i64 0, i64 0), i64 9)
 	%243 = call i64 @js_scope_get(i64 %241, i64 %242)
 	%244 = call i64 @js_arr_new()
 	%245 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -44107,7 +44637,7 @@ dead729:
 	%248 = call i64 @js_call(i64 %243, i64 0, i64 %244)
 	ret i64 %248
 
-dead730:
+dead733:
 	br label %232
 
 249:
@@ -44125,14 +44655,14 @@ dead730:
 	%255 = phi i64 [ %11, %253 ]
 	ret i64 1
 
-dead731:
+dead734:
 	br label %250
 
-dead732:
+dead735:
 	ret i64 0
 }
 
-define i64 @jsf_1000220(i64 %env, i64 %args) {
+define i64 @jsf_1000221(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -44172,7 +44702,7 @@ entry:
 	%23 = phi i64 [ %8, %21 ]
 	ret i64 2
 
-dead733:
+dead736:
 	br label %15
 
 24:
@@ -44195,7 +44725,7 @@ dead733:
 	%35 = phi i64 [ %8, %33 ]
 	ret i64 2
 
-dead734:
+dead737:
 	br label %25
 
 36:
@@ -44218,7 +44748,7 @@ dead734:
 	%47 = phi i64 [ %8, %45 ]
 	ret i64 2
 
-dead735:
+dead738:
 	br label %37
 
 48:
@@ -44241,7 +44771,7 @@ dead735:
 	%59 = phi i64 [ %8, %57 ]
 	ret i64 2
 
-dead736:
+dead739:
 	br label %49
 
 60:
@@ -44264,7 +44794,7 @@ dead736:
 	%71 = phi i64 [ %8, %69 ]
 	ret i64 2
 
-dead737:
+dead740:
 	br label %61
 
 72:
@@ -44287,7 +44817,7 @@ dead737:
 	%83 = phi i64 [ %8, %81 ]
 	ret i64 2
 
-dead738:
+dead741:
 	br label %73
 
 84:
@@ -44312,7 +44842,7 @@ dead738:
 	%97 = phi i64 [ %8, %95 ]
 	ret i64 2
 
-dead739:
+dead742:
 	br label %85
 
 98:
@@ -44321,7 +44851,7 @@ dead739:
 99:
 	%100 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%101 = call i64 @js_scope_get(i64 %8, i64 %100)
-	%102 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000653, i64 0, i64 0), i64 4)
+	%102 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000661, i64 0, i64 0), i64 4)
 	%103 = call i64 @js_get(i64 %101, i64 %102)
 	%104 = call i64 @js_typeof(i64 %103)
 	%105 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000094, i64 0, i64 0), i64 8)
@@ -44335,17 +44865,17 @@ dead739:
 	%109 = phi i64 [ %8, %107 ]
 	ret i64 2
 
-dead740:
+dead743:
 	br label %99
 
-dead741:
+dead744:
 	ret i64 0
 }
 
-define i64 @jsf_1000221(i64 %env, i64 %args) {
+define i64 @jsf_1000222(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -44366,7 +44896,7 @@ entry:
 13:
 	%14 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%15 = call i64 @js_scope_get(i64 %9, i64 %14)
-	%16 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000679, i64 0, i64 0), i64 9)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000688, i64 0, i64 0), i64 9)
 	%17 = call i64 @js_scope_get(i64 %9, i64 %16)
 	%18 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%19 = call i64 @js_get(i64 %17, i64 %18)
@@ -44380,60 +44910,60 @@ entry:
 
 24:
 	%25 = call i64 @js_obj_new()
-	%26 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%26 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%27 = call i64 @js_tdecl(i64 %9, i64 %26, i64 %25)
-	%28 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%28 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%29 = call i64 @js_scope_get(i64 %9, i64 %28)
-	%30 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000682, i64 0, i64 0), i64 7)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000691, i64 0, i64 0), i64 7)
 	%31 = call i64 @js_set(i64 %29, i64 %30, i64 2)
 	%32 = call i64 @js_setret(i64 2)
-	%33 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%34 = call i64 @js_scope_get(i64 %9, i64 %33)
-	%35 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%36 = call i64 @js_set(i64 %34, i64 %35, i64 2)
 	%37 = call i64 @js_setret(i64 2)
-	%38 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%39 = call i64 @js_scope_get(i64 %9, i64 %38)
 	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000195, i64 0, i64 0), i64 4)
 	%41 = call i64 @js_set(i64 %39, i64 %40, i64 1)
 	%42 = call i64 @js_setret(i64 1)
-	%43 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%44 = call i64 @js_scope_get(i64 %9, i64 %43)
-	%45 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%46 = call i64 @js_set(i64 %44, i64 %45, i64 1)
 	%47 = call i64 @js_setret(i64 1)
-	%48 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%49 = call i64 @js_scope_get(i64 %9, i64 %48)
-	%50 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000683, i64 0, i64 0), i64 3)
+	%50 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000692, i64 0, i64 0), i64 3)
 	%51 = call i64 @js_set(i64 %49, i64 %50, i64 1)
 	%52 = call i64 @js_setret(i64 1)
 	%53 = call i64 @js_num_i(i64 0)
-	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%55 = call i64 @js_scope_get(i64 %9, i64 %54)
-	%56 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000684, i64 0, i64 0), i64 4)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000693, i64 0, i64 0), i64 4)
 	%57 = call i64 @js_set(i64 %55, i64 %56, i64 %53)
 	%58 = call i64 @js_setret(i64 %53)
-	%59 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000679, i64 0, i64 0), i64 9)
+	%59 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000688, i64 0, i64 0), i64 9)
 	%60 = call i64 @js_scope_get(i64 %9, i64 %59)
 	%61 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%62 = call i64 @js_get(i64 %60, i64 %61)
 	%63 = call i64 @js_arr_new()
-	%64 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%64 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%65 = call i64 @js_scope_get(i64 %9, i64 %64)
 	%66 = call i64 @js_arr_push(i64 %63, i64 %65)
 	%67 = call i64 @js_call(i64 %62, i64 %60, i64 %63)
 	%68 = call i64 @js_setret(i64 %67)
-	%69 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000680, i64 0, i64 0), i64 7)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000689, i64 0, i64 0), i64 7)
 	%70 = call i64 @js_scope_get(i64 %9, i64 %69)
 	%71 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%72 = call i64 @js_get(i64 %70, i64 %71)
 	%73 = call i64 @js_arr_new()
-	%74 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%75 = call i64 @js_scope_get(i64 %9, i64 %74)
 	%76 = call i64 @js_arr_push(i64 %73, i64 %75)
 	%77 = call i64 @js_call(i64 %72, i64 %70, i64 %73)
 	%78 = call i64 @js_setret(i64 %77)
-	%79 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%79 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%80 = call i64 @js_scope_get(i64 %9, i64 %79)
 	ret i64 %80
 
@@ -44442,12 +44972,12 @@ entry:
 
 82:
 	%83 = phi i64 [ %9, %81 ]
-	%84 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000679, i64 0, i64 0), i64 9)
+	%84 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000688, i64 0, i64 0), i64 9)
 	%85 = call i64 @js_scope_get(i64 %83, i64 %84)
 	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%87 = call i64 @js_scope_get(i64 %83, i64 %86)
 	%88 = call i64 @js_get(i64 %85, i64 %87)
-	%89 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%89 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%90 = call i64 @js_scope_get(i64 %83, i64 %89)
 	%91 = call i64 @js_seq(i64 %88, i64 %90)
 	%92 = call i64 @js_truthy(i64 %91)
@@ -44472,27 +45002,27 @@ entry:
 
 104:
 	%105 = phi i64 [ %83, %103 ]
-	%106 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000680, i64 0, i64 0), i64 7)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000689, i64 0, i64 0), i64 7)
 	%107 = call i64 @js_scope_get(i64 %105, i64 %106)
 	%108 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%109 = call i64 @js_scope_get(i64 %105, i64 %108)
 	%110 = call i64 @js_get(i64 %107, i64 %109)
 	ret i64 %110
 
-dead742:
+dead745:
 	br label %95
 
-dead743:
+dead746:
 	ret i64 0
 }
 
-define i64 @jsf_1000222(i64 %env, i64 %args) {
+define i64 @jsf_1000223(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000686, i64 0, i64 0), i64 4)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000695, i64 0, i64 0), i64 4)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -44505,18 +45035,18 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000685, i64 0, i64 0), i64 10)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000694, i64 0, i64 0), i64 10)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_arr_new()
-	%16 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
-	%22 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
-	%24 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%25 = call i64 @js_get(i64 %23, i64 %24)
 	%26 = call i64 @js_truthy(i64 %25)
 	%27 = icmp ne i64 %26, 0
@@ -44526,17 +45056,17 @@ entry:
 	br label %57
 
 29:
-	%30 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%31 = call i64 @js_scope_get(i64 %12, i64 %30)
-	%32 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000682, i64 0, i64 0), i64 7)
+	%32 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000691, i64 0, i64 0), i64 7)
 	%33 = call i64 @js_set(i64 %31, i64 %32, i64 3)
 	%34 = call i64 @js_setret(i64 3)
-	%35 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%36 = call i64 @js_scope_get(i64 %12, i64 %35)
-	%37 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000653, i64 0, i64 0), i64 4)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000661, i64 0, i64 0), i64 4)
 	%38 = call i64 @js_get(i64 %36, i64 %37)
 	%39 = call i64 @js_arr_new()
-	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000686, i64 0, i64 0), i64 4)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000695, i64 0, i64 0), i64 4)
 	%41 = call i64 @js_scope_get(i64 %12, i64 %40)
 	%42 = call i64 @js_arr_push(i64 %39, i64 %41)
 	%43 = call i64 @js_call(i64 %38, i64 %36, i64 %39)
@@ -44547,7 +45077,7 @@ entry:
 	%48 = call i64 @js_arr_new()
 	%49 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%50 = call i64 @js_scope_get(i64 %12, i64 %49)
-	%51 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%51 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%52 = call i64 @js_get(i64 %50, i64 %51)
 	%53 = call i64 @js_arr_push(i64 %48, i64 %52)
 	%54 = call i64 @js_call(i64 %47, i64 0, i64 %48)
@@ -44566,39 +45096,39 @@ entry:
 	%63 = call i64 @js_tdecl(i64 %60, i64 %62, i64 %61)
 	%64 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000116, i64 0, i64 0), i64 3)
 	%65 = call i64 @js_scope_get(i64 %60, i64 %64)
-	%66 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000657, i64 0, i64 0), i64 5)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000665, i64 0, i64 0), i64 5)
 	%67 = call i64 @js_set(i64 %65, i64 %66, i64 0)
 	%68 = call i64 @js_setret(i64 0)
 	%69 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000116, i64 0, i64 0), i64 3)
 	%70 = call i64 @js_scope_get(i64 %60, i64 %69)
-	%71 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%71 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%72 = call i64 @js_set(i64 %70, i64 %71, i64 3)
 	%73 = call i64 @js_setret(i64 3)
 	%74 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000116, i64 0, i64 0), i64 3)
 	%75 = call i64 @js_scope_get(i64 %60, i64 %74)
 	ret i64 %75
 
-dead744:
+dead747:
 	br label %29
 
 76:
 	br label %96
 
 77:
-	%78 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%78 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%79 = call i64 @js_scope_get(i64 %12, i64 %78)
-	%80 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%80 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%81 = call i64 @js_tdecl(i64 %12, i64 %80, i64 %79)
 	%82 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%83 = call i64 @js_scope_get(i64 %12, i64 %82)
-	%84 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000657, i64 0, i64 0), i64 5)
+	%84 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000665, i64 0, i64 0), i64 5)
 	%85 = call i64 @js_get(i64 %83, i64 %84)
-	%86 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%86 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%87 = call i64 @js_tset(i64 %12, i64 %86, i64 %85)
 	%88 = call i64 @js_setret(i64 %85)
-	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%89 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%90 = call i64 @js_tdecl(i64 %12, i64 %89, i64 2)
-	%91 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%91 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%92 = call i64 @js_scope_get(i64 %12, i64 %91)
 	%93 = call i64 @js_sne(i64 %92, i64 0)
 	%94 = call i64 @js_truthy(i64 %93)
@@ -44610,39 +45140,39 @@ dead744:
 
 97:
 	%98 = phi i64 [ %12, %96 ]
-	%99 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%99 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%100 = call i64 @js_scope_get(i64 %98, i64 %99)
-	%101 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%101 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%102 = call i64 @js_set(i64 %100, i64 %101, i64 3)
 	%103 = call i64 @js_setret(i64 3)
 	%104 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%105 = call i64 @js_scope_get(i64 %98, i64 %104)
-	%106 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000657, i64 0, i64 0), i64 5)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000665, i64 0, i64 0), i64 5)
 	%107 = call i64 @js_get(i64 %105, i64 %106)
-	%108 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%108 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%109 = call i64 @js_scope_get(i64 %98, i64 %108)
-	%110 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000683, i64 0, i64 0), i64 3)
+	%110 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000692, i64 0, i64 0), i64 3)
 	%111 = call i64 @js_set(i64 %109, i64 %110, i64 %107)
 	%112 = call i64 @js_setret(i64 %107)
-	%113 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%113 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%114 = call i64 @js_scope_get(i64 %98, i64 %113)
 	%115 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000195, i64 0, i64 0), i64 4)
 	%116 = call i64 @js_set(i64 %114, i64 %115, i64 1)
 	%117 = call i64 @js_setret(i64 1)
-	%118 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%118 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%119 = call i64 @js_scope_get(i64 %98, i64 %118)
-	%120 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%120 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%121 = call i64 @js_set(i64 %119, i64 %120, i64 1)
 	%122 = call i64 @js_setret(i64 1)
 	%123 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%124 = call i64 @js_scope_get(i64 %98, i64 %123)
 	ret i64 %124
 
-dead745:
+dead748:
 	br label %77
 
 125:
-	%126 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%127 = call i64 @js_scope_get(i64 %12, i64 %126)
 	%128 = call i64 @js_sne(i64 %127, i64 1)
 	br label %129
@@ -44654,7 +45184,7 @@ dead745:
 	br i1 %132, label %133, label %139
 
 133:
-	%134 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%134 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%135 = call i64 @js_scope_get(i64 %12, i64 %134)
 	%136 = call i64 @js_typeof(i64 %135)
 	%137 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
@@ -44671,7 +45201,7 @@ dead745:
 	br label %149
 
 144:
-	%145 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%145 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%146 = call i64 @js_scope_get(i64 %12, i64 %145)
 	%147 = call i64 @js_truthy(i64 %146)
 	%148 = icmp ne i64 %147, 0
@@ -44682,12 +45212,12 @@ dead745:
 
 150:
 	%151 = phi i64 [ %12, %149 ]
-	%152 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%152 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%153 = call i64 @js_scope_get(i64 %151, i64 %152)
-	%154 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000660, i64 0, i64 0), i64 7)
+	%154 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000668, i64 0, i64 0), i64 7)
 	%155 = call i64 @js_get(i64 %153, i64 %154)
 	%156 = call i64 @js_seq(i64 %155, i64 3)
-	%157 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000659, i64 0, i64 0), i64 2)
+	%157 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000667, i64 0, i64 0), i64 2)
 	%158 = call i64 @js_tset(i64 %151, i64 %157, i64 %156)
 	%159 = call i64 @js_setret(i64 %156)
 	br label %144
@@ -44696,18 +45226,18 @@ dead745:
 	br label %181
 
 161:
-	%162 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%162 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%163 = call i64 @js_scope_get(i64 %12, i64 %162)
-	%164 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000688, i64 0, i64 0), i64 2)
+	%164 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000697, i64 0, i64 0), i64 2)
 	%165 = call i64 @js_tdecl(i64 %12, i64 %164, i64 %163)
-	%166 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%166 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%167 = call i64 @js_scope_get(i64 %12, i64 %166)
-	%168 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%168 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%169 = call i64 @js_get(i64 %167, i64 %168)
-	%170 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000688, i64 0, i64 0), i64 2)
+	%170 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000697, i64 0, i64 0), i64 2)
 	%171 = call i64 @js_tset(i64 %12, i64 %170, i64 %169)
 	%172 = call i64 @js_setret(i64 %169)
-	%173 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000688, i64 0, i64 0), i64 2)
+	%173 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000697, i64 0, i64 0), i64 2)
 	%174 = call i64 @js_scope_get(i64 %12, i64 %173)
 	%175 = call i64 @js_typeof(i64 %174)
 	%176 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
@@ -44724,20 +45254,20 @@ dead745:
 
 182:
 	%183 = phi i64 [ %12, %181 ]
-	%184 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%185 = call i64 @js_scope_get(i64 %183, i64 %184)
 	%186 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%187 = call i64 @js_get(i64 %185, i64 %186)
-	%188 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%188 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%189 = call i64 @js_scope_get(i64 %183, i64 %188)
-	%190 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%190 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%191 = call i64 @js_set(i64 %189, i64 %190, i64 %187)
 	%192 = call i64 @js_setret(i64 %187)
-	%193 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%193 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%194 = call i64 @js_scope_get(i64 %183, i64 %193)
 	%195 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%196 = call i64 @js_get(i64 %194, i64 %195)
-	%197 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%197 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%198 = call i64 @js_scope_get(i64 %183, i64 %197)
 	%199 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000195, i64 0, i64 0), i64 4)
 	%200 = call i64 @js_set(i64 %198, i64 %199, i64 %196)
@@ -44749,18 +45279,18 @@ dead745:
 
 203:
 	%204 = phi i64 [ %12, %202 ]
-	%205 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%205 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%206 = call i64 @js_scope_get(i64 %204, i64 %205)
-	%207 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000684, i64 0, i64 0), i64 4)
+	%207 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000693, i64 0, i64 0), i64 4)
 	%208 = call i64 @js_get(i64 %206, i64 %207)
-	%209 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%209 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%210 = call i64 @js_scope_get(i64 %204, i64 %209)
-	%211 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%211 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%212 = call i64 @js_set(i64 %210, i64 %211, i64 %208)
 	%213 = call i64 @js_setret(i64 %208)
-	%214 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000687, i64 0, i64 0), i64 3)
+	%214 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
 	%215 = call i64 @js_scope_get(i64 %204, i64 %214)
-	%216 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%216 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%217 = call i64 @js_scope_get(i64 %204, i64 %216)
 	%218 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000195, i64 0, i64 0), i64 4)
 	%219 = call i64 @js_set(i64 %217, i64 %218, i64 %215)
@@ -44768,11 +45298,11 @@ dead745:
 	br label %161
 
 221:
-	%222 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000688, i64 0, i64 0), i64 2)
+	%222 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000697, i64 0, i64 0), i64 2)
 	%223 = call i64 @js_scope_get(i64 %12, i64 %222)
-	%224 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%224 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%225 = call i64 @js_scope_get(i64 %12, i64 %224)
-	%226 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000684, i64 0, i64 0), i64 4)
+	%226 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000693, i64 0, i64 0), i64 4)
 	%227 = call i64 @js_get(i64 %225, i64 %226)
 	%228 = call i64 @js_ge(i64 %223, i64 %227)
 	br label %229
@@ -44796,25 +45326,25 @@ dead745:
 
 238:
 	%239 = phi i64 [ %12, %237 ]
-	%240 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000688, i64 0, i64 0), i64 2)
+	%240 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000697, i64 0, i64 0), i64 2)
 	%241 = call i64 @js_scope_get(i64 %239, i64 %240)
 	%242 = call i64 @js_num_i(i64 1)
 	%243 = call i64 @js_add(i64 %241, i64 %242)
-	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%245 = call i64 @js_scope_get(i64 %239, i64 %244)
-	%246 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000684, i64 0, i64 0), i64 4)
+	%246 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000693, i64 0, i64 0), i64 4)
 	%247 = call i64 @js_set(i64 %245, i64 %246, i64 %243)
 	%248 = call i64 @js_setret(i64 %243)
 	br label %234
 
-dead746:
+dead749:
 	ret i64 0
 }
 
-define i64 @jsf_1000223(i64 %env, i64 %args) {
+define i64 @jsf_1000224(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -44827,18 +45357,18 @@ entry:
 
 8:
 	%9 = phi i64 [ %7, %6 ]
-	%10 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000685, i64 0, i64 0), i64 10)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000694, i64 0, i64 0), i64 10)
 	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
 	%12 = call i64 @js_arr_new()
-	%13 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%14 = call i64 @js_scope_get(i64 %9, i64 %13)
 	%15 = call i64 @js_arr_push(i64 %12, i64 %14)
 	%16 = call i64 @js_call(i64 %11, i64 0, i64 %12)
-	%17 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%17 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%18 = call i64 @js_tdecl(i64 %9, i64 %17, i64 %16)
-	%19 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%20 = call i64 @js_scope_get(i64 %9, i64 %19)
-	%21 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000682, i64 0, i64 0), i64 7)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000691, i64 0, i64 0), i64 7)
 	%22 = call i64 @js_get(i64 %20, i64 %21)
 	%23 = call i64 @js_not(i64 %22)
 	%24 = call i64 @js_truthy(i64 %23)
@@ -44856,9 +45386,9 @@ entry:
 
 29:
 	%30 = phi i64 [ %9, %28 ]
-	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%32 = call i64 @js_scope_get(i64 %30, i64 %31)
-	%33 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%34 = call i64 @js_get(i64 %32, i64 %33)
 	%35 = call i64 @js_not(i64 %34)
 	%36 = call i64 @js_truthy(i64 %35)
@@ -44876,10 +45406,10 @@ entry:
 
 41:
 	%42 = phi i64 [ %30, %40 ]
-	%43 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000689, i64 0, i64 0), i64 9)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000698, i64 0, i64 0), i64 9)
 	%44 = call i64 @js_scope_get(i64 %42, i64 %43)
 	%45 = call i64 @js_arr_new()
-	%46 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%46 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%47 = call i64 @js_scope_get(i64 %42, i64 %46)
 	%48 = call i64 @js_arr_push(i64 %45, i64 %47)
 	%49 = call i64 @js_arr_push(i64 %45, i64 0)
@@ -44888,10 +45418,10 @@ entry:
 	br label %39
 }
 
-define i64 @jsf_1000224(i64 %env, i64 %args) {
+define i64 @jsf_1000225(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -44910,11 +45440,11 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
-	%18 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000691, i64 0, i64 0), i64 2)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000700, i64 0, i64 0), i64 2)
 	%19 = call i64 @js_tdecl(i64 %15, i64 %18, i64 %17)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000691, i64 0, i64 0), i64 2)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000700, i64 0, i64 0), i64 2)
 	%21 = call i64 @js_tset(i64 %15, i64 %20, i64 0)
 	%22 = call i64 @js_setret(i64 0)
 	%23 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000078, i64 0, i64 0), i64 4)
@@ -44942,7 +45472,7 @@ entry:
 37:
 	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%39 = call i64 @js_scope_get(i64 %15, i64 %38)
-	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000653, i64 0, i64 0), i64 4)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000661, i64 0, i64 0), i64 4)
 	%41 = call i64 @js_eq(i64 %39, i64 %40)
 	%42 = call i64 @js_truthy(i64 %41)
 	%43 = icmp ne i64 %42, 0
@@ -44978,7 +45508,7 @@ entry:
 	%61 = call i64 @js_scope_get(i64 %59, i64 %60)
 	%62 = call i64 @js_num_i(i64 0)
 	%63 = call i64 @js_get(i64 %61, i64 %62)
-	%64 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000691, i64 0, i64 0), i64 2)
+	%64 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000700, i64 0, i64 0), i64 2)
 	%65 = call i64 @js_tset(i64 %59, i64 %64, i64 %63)
 	%66 = call i64 @js_setret(i64 %63)
 	br label %56
@@ -44989,7 +45519,7 @@ entry:
 68:
 	%69 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%70 = call i64 @js_scope_get(i64 %15, i64 %69)
-	%71 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000692, i64 0, i64 0), i64 4)
+	%71 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
 	%72 = call i64 @js_eq(i64 %70, i64 %71)
 	%73 = call i64 @js_truthy(i64 %72)
 	%74 = icmp ne i64 %73, 0
@@ -45000,19 +45530,19 @@ entry:
 
 76:
 	%77 = phi i64 [ %15, %75 ]
-	%78 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000689, i64 0, i64 0), i64 9)
+	%78 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000698, i64 0, i64 0), i64 9)
 	%79 = call i64 @js_scope_get(i64 %77, i64 %78)
 	%80 = call i64 @js_arr_new()
-	%81 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%81 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%82 = call i64 @js_scope_get(i64 %77, i64 %81)
 	%83 = call i64 @js_arr_push(i64 %80, i64 %82)
-	%84 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000691, i64 0, i64 0), i64 2)
+	%84 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000700, i64 0, i64 0), i64 2)
 	%85 = call i64 @js_scope_get(i64 %77, i64 %84)
 	%86 = call i64 @js_arr_push(i64 %80, i64 %85)
 	%87 = call i64 @js_call(i64 %79, i64 0, i64 %80)
 	ret i64 %87
 
-dead747:
+dead750:
 	br label %68
 
 88:
@@ -45021,7 +45551,7 @@ dead747:
 89:
 	%90 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%91 = call i64 @js_scope_get(i64 %15, i64 %90)
-	%92 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000694, i64 0, i64 0), i64 6)
+	%92 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000703, i64 0, i64 0), i64 6)
 	%93 = call i64 @js_eq(i64 %91, i64 %92)
 	%94 = call i64 @js_truthy(i64 %93)
 	%95 = icmp ne i64 %94, 0
@@ -45033,18 +45563,18 @@ dead747:
 
 98:
 	%99 = phi i64 [ %97, %96 ]
-	%100 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000685, i64 0, i64 0), i64 10)
+	%100 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000694, i64 0, i64 0), i64 10)
 	%101 = call i64 @js_scope_get(i64 %99, i64 %100)
 	%102 = call i64 @js_arr_new()
-	%103 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%103 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%104 = call i64 @js_scope_get(i64 %99, i64 %103)
 	%105 = call i64 @js_arr_push(i64 %102, i64 %104)
 	%106 = call i64 @js_call(i64 %101, i64 0, i64 %102)
-	%107 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000693, i64 0, i64 0), i64 3)
+	%107 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000702, i64 0, i64 0), i64 3)
 	%108 = call i64 @js_tdecl(i64 %99, i64 %107, i64 %106)
-	%109 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000693, i64 0, i64 0), i64 3)
+	%109 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000702, i64 0, i64 0), i64 3)
 	%110 = call i64 @js_scope_get(i64 %99, i64 %109)
-	%111 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000682, i64 0, i64 0), i64 7)
+	%111 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000691, i64 0, i64 0), i64 7)
 	%112 = call i64 @js_get(i64 %110, i64 %111)
 	%113 = call i64 @js_not(i64 %112)
 	%114 = call i64 @js_truthy(i64 %113)
@@ -45055,20 +45585,20 @@ dead747:
 	br label %135
 
 117:
-	%118 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000689, i64 0, i64 0), i64 9)
+	%118 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000698, i64 0, i64 0), i64 9)
 	%119 = call i64 @js_scope_get(i64 %99, i64 %118)
 	%120 = call i64 @js_arr_new()
-	%121 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%122 = call i64 @js_scope_get(i64 %99, i64 %121)
 	%123 = call i64 @js_arr_push(i64 %120, i64 %122)
-	%124 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000691, i64 0, i64 0), i64 2)
+	%124 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000700, i64 0, i64 0), i64 2)
 	%125 = call i64 @js_scope_get(i64 %99, i64 %124)
 	%126 = call i64 @js_arr_push(i64 %120, i64 %125)
 	%127 = call i64 @js_call(i64 %119, i64 0, i64 %120)
 	%128 = call i64 @js_setret(i64 %127)
-	%129 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000693, i64 0, i64 0), i64 3)
+	%129 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000702, i64 0, i64 0), i64 3)
 	%130 = call i64 @js_scope_get(i64 %99, i64 %129)
-	%131 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%132 = call i64 @js_get(i64 %130, i64 %131)
 	%133 = call i64 @js_truthy(i64 %132)
 	%134 = icmp ne i64 %133, 0
@@ -45079,10 +45609,10 @@ dead747:
 
 136:
 	%137 = phi i64 [ %99, %135 ]
-	%138 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000689, i64 0, i64 0), i64 9)
+	%138 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000698, i64 0, i64 0), i64 9)
 	%139 = call i64 @js_scope_get(i64 %137, i64 %138)
 	%140 = call i64 @js_arr_new()
-	%141 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%141 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%142 = call i64 @js_scope_get(i64 %137, i64 %141)
 	%143 = call i64 @js_arr_push(i64 %140, i64 %142)
 	%144 = call i64 @js_arr_push(i64 %140, i64 0)
@@ -45094,7 +45624,7 @@ dead747:
 	br label %153
 
 148:
-	%149 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000693, i64 0, i64 0), i64 3)
+	%149 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000702, i64 0, i64 0), i64 3)
 	%150 = call i64 @js_scope_get(i64 %99, i64 %149)
 	%151 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000195, i64 0, i64 0), i64 4)
 	%152 = call i64 @js_get(i64 %150, i64 %151)
@@ -45107,36 +45637,36 @@ dead747:
 	%155 = phi i64 [ %99, %153 ]
 	ret i64 1
 
-dead748:
+dead751:
 	br label %148
 
-dead749:
+dead752:
 	br label %89
 
 156:
 	br label %181
 
 157:
-	%158 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000690, i64 0, i64 0), i64 10)
+	%158 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000699, i64 0, i64 0), i64 10)
 	%159 = call i64 @js_scope_get(i64 %15, i64 %158)
 	%160 = call i64 @js_arr_new()
-	%161 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%161 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%162 = call i64 @js_scope_get(i64 %15, i64 %161)
 	%163 = call i64 @js_arr_push(i64 %160, i64 %162)
 	%164 = call i64 @js_call(i64 %159, i64 0, i64 %160)
 	%165 = call i64 @js_setret(i64 %164)
-	%166 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000685, i64 0, i64 0), i64 10)
+	%166 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000694, i64 0, i64 0), i64 10)
 	%167 = call i64 @js_scope_get(i64 %15, i64 %166)
 	%168 = call i64 @js_arr_new()
-	%169 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%169 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%170 = call i64 @js_scope_get(i64 %15, i64 %169)
 	%171 = call i64 @js_arr_push(i64 %168, i64 %170)
 	%172 = call i64 @js_call(i64 %167, i64 0, i64 %168)
-	%173 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%173 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%174 = call i64 @js_tdecl(i64 %15, i64 %173, i64 %172)
 	%175 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%176 = call i64 @js_scope_get(i64 %15, i64 %175)
-	%177 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000661, i64 0, i64 0), i64 7)
+	%177 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000669, i64 0, i64 0), i64 7)
 	%178 = call i64 @js_eq(i64 %176, i64 %177)
 	%179 = call i64 @js_truthy(i64 %178)
 	%180 = icmp ne i64 %179, 0
@@ -45148,57 +45678,57 @@ dead749:
 
 183:
 	%184 = phi i64 [ %182, %181 ]
-	%185 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000685, i64 0, i64 0), i64 10)
+	%185 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000694, i64 0, i64 0), i64 10)
 	%186 = call i64 @js_scope_get(i64 %184, i64 %185)
 	%187 = call i64 @js_arr_new()
-	%188 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%188 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%189 = call i64 @js_scope_get(i64 %184, i64 %188)
 	%190 = call i64 @js_arr_push(i64 %187, i64 %189)
 	%191 = call i64 @js_call(i64 %186, i64 0, i64 %187)
-	%192 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000695, i64 0, i64 0), i64 3)
+	%192 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000704, i64 0, i64 0), i64 3)
 	%193 = call i64 @js_tdecl(i64 %184, i64 %192, i64 %191)
-	%194 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000695, i64 0, i64 0), i64 3)
+	%194 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000704, i64 0, i64 0), i64 3)
 	%195 = call i64 @js_scope_get(i64 %184, i64 %194)
-	%196 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%196 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%197 = call i64 @js_set(i64 %195, i64 %196, i64 3)
 	%198 = call i64 @js_setret(i64 3)
-	%199 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000691, i64 0, i64 0), i64 2)
+	%199 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000700, i64 0, i64 0), i64 2)
 	%200 = call i64 @js_scope_get(i64 %184, i64 %199)
-	%201 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000695, i64 0, i64 0), i64 3)
+	%201 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000704, i64 0, i64 0), i64 3)
 	%202 = call i64 @js_scope_get(i64 %184, i64 %201)
-	%203 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000683, i64 0, i64 0), i64 3)
+	%203 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000692, i64 0, i64 0), i64 3)
 	%204 = call i64 @js_set(i64 %202, i64 %203, i64 %200)
 	%205 = call i64 @js_setret(i64 %200)
-	%206 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000695, i64 0, i64 0), i64 3)
+	%206 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000704, i64 0, i64 0), i64 3)
 	%207 = call i64 @js_scope_get(i64 %184, i64 %206)
 	%208 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000195, i64 0, i64 0), i64 4)
 	%209 = call i64 @js_set(i64 %207, i64 %208, i64 1)
 	%210 = call i64 @js_setret(i64 1)
-	%211 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000695, i64 0, i64 0), i64 3)
+	%211 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000704, i64 0, i64 0), i64 3)
 	%212 = call i64 @js_scope_get(i64 %184, i64 %211)
-	%213 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%213 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%214 = call i64 @js_set(i64 %212, i64 %213, i64 1)
 	%215 = call i64 @js_setret(i64 1)
 	%216 = call i64 @js_obj_new()
-	%217 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
+	%217 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000705, i64 0, i64 0), i64 3)
 	%218 = call i64 @js_tdecl(i64 %184, i64 %217, i64 %216)
-	%219 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000691, i64 0, i64 0), i64 2)
+	%219 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000700, i64 0, i64 0), i64 2)
 	%220 = call i64 @js_scope_get(i64 %184, i64 %219)
-	%221 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
+	%221 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000705, i64 0, i64 0), i64 3)
 	%222 = call i64 @js_scope_get(i64 %184, i64 %221)
-	%223 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000657, i64 0, i64 0), i64 5)
+	%223 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000665, i64 0, i64 0), i64 5)
 	%224 = call i64 @js_set(i64 %222, i64 %223, i64 %220)
 	%225 = call i64 @js_setret(i64 %220)
-	%226 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
+	%226 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000705, i64 0, i64 0), i64 3)
 	%227 = call i64 @js_scope_get(i64 %184, i64 %226)
-	%228 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%228 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%229 = call i64 @js_set(i64 %227, i64 %228, i64 3)
 	%230 = call i64 @js_setret(i64 3)
-	%231 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000696, i64 0, i64 0), i64 3)
+	%231 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000705, i64 0, i64 0), i64 3)
 	%232 = call i64 @js_scope_get(i64 %184, i64 %231)
 	ret i64 %232
 
-dead750:
+dead753:
 	br label %157
 
 233:
@@ -45207,7 +45737,7 @@ dead750:
 234:
 	%235 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%236 = call i64 @js_scope_get(i64 %15, i64 %235)
-	%237 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%237 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%238 = call i64 @js_eq(i64 %236, i64 %237)
 	%239 = call i64 @js_truthy(i64 %238)
 	%240 = icmp ne i64 %239, 0
@@ -45218,9 +45748,9 @@ dead750:
 
 242:
 	%243 = phi i64 [ %15, %241 ]
-	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%245 = call i64 @js_scope_get(i64 %243, i64 %244)
-	%246 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%246 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%247 = call i64 @js_get(i64 %245, i64 %246)
 	%248 = call i64 @js_truthy(i64 %247)
 	%249 = icmp ne i64 %248, 0
@@ -45230,7 +45760,7 @@ dead750:
 	br label %256
 
 251:
-	%252 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%252 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%253 = call i64 @js_scope_get(i64 %243, i64 %252)
 	%254 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000195, i64 0, i64 0), i64 4)
 	%255 = call i64 @js_get(i64 %253, i64 %254)
@@ -45243,10 +45773,10 @@ dead750:
 	%258 = phi i64 [ %243, %256 ]
 	ret i64 1
 
-dead751:
+dead754:
 	br label %251
 
-dead752:
+dead755:
 	br label %234
 
 259:
@@ -45255,7 +45785,7 @@ dead752:
 260:
 	%261 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%262 = call i64 @js_scope_get(i64 %15, i64 %261)
-	%263 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000656, i64 0, i64 0), i64 5)
+	%263 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000664, i64 0, i64 0), i64 5)
 	%264 = call i64 @js_eq(i64 %262, i64 %263)
 	%265 = call i64 @js_truthy(i64 %264)
 	%266 = icmp ne i64 %265, 0
@@ -45266,9 +45796,9 @@ dead752:
 
 268:
 	%269 = phi i64 [ %15, %267 ]
-	%270 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%270 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%271 = call i64 @js_scope_get(i64 %269, i64 %270)
-	%272 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%272 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%273 = call i64 @js_get(i64 %271, i64 %272)
 	%274 = call i64 @js_truthy(i64 %273)
 	%275 = icmp ne i64 %274, 0
@@ -45278,9 +45808,9 @@ dead752:
 	br label %282
 
 277:
-	%278 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%278 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%279 = call i64 @js_scope_get(i64 %269, i64 %278)
-	%280 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%280 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%281 = call i64 @js_get(i64 %279, i64 %280)
 	ret i64 %281
 
@@ -45291,10 +45821,10 @@ dead752:
 	%284 = phi i64 [ %269, %282 ]
 	ret i64 1
 
-dead753:
+dead756:
 	br label %277
 
-dead754:
+dead757:
 	br label %260
 
 285:
@@ -45303,7 +45833,7 @@ dead754:
 286:
 	%287 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%288 = call i64 @js_scope_get(i64 %15, i64 %287)
-	%289 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000654, i64 0, i64 0), i64 6)
+	%289 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000662, i64 0, i64 0), i64 6)
 	%290 = call i64 @js_eq(i64 %288, i64 %289)
 	%291 = call i64 @js_truthy(i64 %290)
 	%292 = icmp ne i64 %291, 0
@@ -45314,14 +45844,14 @@ dead754:
 
 294:
 	%295 = phi i64 [ %15, %293 ]
-	%296 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%296 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%297 = call i64 @js_scope_get(i64 %295, i64 %296)
-	%298 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000658, i64 0, i64 0), i64 4)
+	%298 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000666, i64 0, i64 0), i64 4)
 	%299 = call i64 @js_get(i64 %297, i64 %298)
 	%300 = call i64 @js_not(i64 %299)
 	ret i64 %300
 
-dead755:
+dead758:
 	br label %286
 
 301:
@@ -45330,7 +45860,7 @@ dead755:
 302:
 	%303 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%304 = call i64 @js_scope_get(i64 %15, i64 %303)
-	%305 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000697, i64 0, i64 0), i64 9)
+	%305 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000706, i64 0, i64 0), i64 9)
 	%306 = call i64 @js_eq(i64 %304, i64 %305)
 	%307 = call i64 @js_truthy(i64 %306)
 	%308 = icmp ne i64 %307, 0
@@ -45343,7 +45873,7 @@ dead755:
 	%311 = phi i64 [ %15, %309 ]
 	ret i64 1
 
-dead756:
+dead759:
 	br label %302
 
 312:
@@ -45353,13 +45883,13 @@ dead756:
 	%314 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%315 = call i64 @js_scope_get(i64 %15, i64 %314)
 	%316 = call i64 @js_arr_new()
-	%317 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%317 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%318 = call i64 @js_arr_push(i64 %316, i64 %317)
-	%319 = call i64 @js_str_mem(i8* getelementptr ([36 x i8], [36 x i8]* @str.1000698, i64 0, i64 0), i64 36)
+	%319 = call i64 @js_str_mem(i8* getelementptr ([36 x i8], [36 x i8]* @str.1000707, i64 0, i64 0), i64 36)
 	%320 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%321 = call i64 @js_scope_get(i64 %15, i64 %320)
 	%322 = call i64 @js_add(i64 %319, i64 %321)
-	%323 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000699, i64 0, i64 0), i64 2)
+	%323 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000708, i64 0, i64 0), i64 2)
 	%324 = call i64 @js_add(i64 %322, i64 %323)
 	%325 = call i64 @js_arr_push(i64 %316, i64 %324)
 	%326 = call i64 @js_call(i64 %315, i64 0, i64 %316)
@@ -45371,20 +45901,20 @@ dead756:
 
 329:
 	%330 = phi i64 [ %15, %328 ]
-	%331 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000655, i64 0, i64 0), i64 2)
+	%331 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000663, i64 0, i64 0), i64 2)
 	%332 = call i64 @js_scope_get(i64 %330, i64 %331)
-	%333 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000683, i64 0, i64 0), i64 3)
+	%333 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000692, i64 0, i64 0), i64 3)
 	%334 = call i64 @js_get(i64 %332, i64 %333)
 	ret i64 %334
 
-dead757:
+dead760:
 	br label %313
 
-dead758:
+dead761:
 	ret i64 0
 }
 
-define i64 @jsf_1000225(i64 %env, i64 %args) {
+define i64 @jsf_1000226(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -45428,7 +45958,7 @@ entry:
 	%27 = call i64 @js_scope_get(i64 %25, i64 %26)
 	ret i64 %27
 
-dead759:
+dead762:
 	br label %17
 
 28:
@@ -45450,7 +45980,7 @@ dead759:
 	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000278, i64 0, i64 0), i64 4)
 	ret i64 %38
 
-dead760:
+dead763:
 	br label %29
 
 39:
@@ -45474,7 +46004,7 @@ dead760:
 	%51 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000278, i64 0, i64 0), i64 4)
 	ret i64 %51
 
-dead761:
+dead764:
 	br label %40
 
 52:
@@ -45510,17 +46040,17 @@ dead761:
 	%70 = phi i64 [ %66, %65 ], [ %68, %67 ]
 	ret i64 %70
 
-dead762:
+dead765:
 	br label %53
 
-dead763:
+dead766:
 	ret i64 0
 }
 
-define i64 @jsf_1000226(i64 %env, i64 %args) {
+define i64 @jsf_1000227(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -45541,7 +46071,7 @@ entry:
 	%15 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000426, i64 0, i64 0), i64 7)
 	%16 = call i64 @js_scope_get(i64 %14, i64 %15)
 	%17 = call i64 @js_arr_new()
-	%18 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%19 = call i64 @js_scope_get(i64 %14, i64 %18)
 	%20 = call i64 @js_arr_push(i64 %17, i64 %19)
 	%21 = call i64 @js_call(i64 %16, i64 0, i64 %17)
@@ -45553,7 +46083,7 @@ entry:
 	br label %31
 
 25:
-	%26 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%26 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%27 = call i64 @js_scope_get(i64 %14, i64 %26)
 	%28 = call i64 @js_sne(i64 %27, i64 0)
 	%29 = call i64 @js_truthy(i64 %28)
@@ -45565,10 +46095,10 @@ entry:
 
 32:
 	%33 = phi i64 [ %14, %31 ]
-	%34 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000700, i64 0, i64 0), i64 9)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000709, i64 0, i64 0), i64 9)
 	%35 = call i64 @js_scope_get(i64 %33, i64 %34)
 	%36 = call i64 @js_arr_new()
-	%37 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%38 = call i64 @js_scope_get(i64 %33, i64 %37)
 	%39 = call i64 @js_arr_push(i64 %36, i64 %38)
 	%40 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -45580,11 +46110,11 @@ entry:
 	%46 = call i64 @js_call(i64 %35, i64 0, i64 %36)
 	ret i64 %46
 
-dead764:
+dead767:
 	br label %25
 
 47:
-	%48 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%49 = call i64 @js_scope_get(i64 %14, i64 %48)
 	%50 = call i64 @js_sne(i64 %49, i64 1)
 	br label %51
@@ -45596,7 +46126,7 @@ dead764:
 	br i1 %54, label %55, label %61
 
 55:
-	%56 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%57 = call i64 @js_scope_get(i64 %14, i64 %56)
 	%58 = call i64 @js_typeof(i64 %57)
 	%59 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
@@ -45616,18 +46146,18 @@ dead764:
 	%67 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%68 = call i64 @js_scope_get(i64 %14, i64 %67)
 	%69 = call i64 @js_arr_new()
-	%70 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%70 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%71 = call i64 @js_arr_push(i64 %69, i64 %70)
-	%72 = call i64 @js_str_mem(i8* getelementptr ([26 x i8], [26 x i8]* @str.1000704, i64 0, i64 0), i64 26)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([26 x i8], [26 x i8]* @str.1000713, i64 0, i64 0), i64 26)
 	%73 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%74 = call i64 @js_scope_get(i64 %14, i64 %73)
 	%75 = call i64 @js_add(i64 %72, i64 %74)
-	%76 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000705, i64 0, i64 0), i64 6)
+	%76 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000714, i64 0, i64 0), i64 6)
 	%77 = call i64 @js_add(i64 %75, i64 %76)
-	%78 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%78 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
 	%79 = call i64 @js_scope_get(i64 %14, i64 %78)
 	%80 = call i64 @js_arr_new()
-	%81 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%81 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%82 = call i64 @js_scope_get(i64 %14, i64 %81)
 	%83 = call i64 @js_arr_push(i64 %80, i64 %82)
 	%84 = call i64 @js_call(i64 %79, i64 0, i64 %80)
@@ -45643,7 +46173,7 @@ dead764:
 
 91:
 	%92 = phi i64 [ %90, %89 ]
-	%93 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%93 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%94 = call i64 @js_scope_get(i64 %92, i64 %93)
 	%95 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000060, i64 0, i64 0), i64 7)
 	%96 = call i64 @js_get(i64 %94, i64 %95)
@@ -45660,7 +46190,7 @@ dead764:
 	br label %120
 
 105:
-	%106 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%107 = call i64 @js_scope_get(i64 %92, i64 %106)
 	%108 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%109 = call i64 @js_scope_get(i64 %92, i64 %108)
@@ -45754,23 +46284,23 @@ dead764:
 	%181 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%182 = call i64 @js_scope_get(i64 %123, i64 %181)
 	%183 = call i64 @js_arr_new()
-	%184 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%185 = call i64 @js_arr_push(i64 %183, i64 %184)
-	%186 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000702, i64 0, i64 0), i64 25)
-	%187 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000581, i64 0, i64 0), i64 11)
+	%186 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000711, i64 0, i64 0), i64 25)
+	%187 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000591, i64 0, i64 0), i64 11)
 	%188 = call i64 @js_scope_get(i64 %123, i64 %187)
 	%189 = call i64 @js_arr_new()
-	%190 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%190 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%191 = call i64 @js_scope_get(i64 %123, i64 %190)
 	%192 = call i64 @js_arr_push(i64 %189, i64 %191)
 	%193 = call i64 @js_call(i64 %188, i64 0, i64 %189)
 	%194 = call i64 @js_add(i64 %186, i64 %193)
-	%195 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000703, i64 0, i64 0), i64 2)
+	%195 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000712, i64 0, i64 0), i64 2)
 	%196 = call i64 @js_add(i64 %194, i64 %195)
 	%197 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%198 = call i64 @js_scope_get(i64 %123, i64 %197)
 	%199 = call i64 @js_add(i64 %196, i64 %198)
-	%200 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000699, i64 0, i64 0), i64 2)
+	%200 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000708, i64 0, i64 0), i64 2)
 	%201 = call i64 @js_add(i64 %199, i64 %200)
 	%202 = call i64 @js_arr_push(i64 %183, i64 %201)
 	%203 = call i64 @js_call(i64 %182, i64 0, i64 %183)
@@ -45791,7 +46321,7 @@ dead764:
 	%214 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000081, i64 0, i64 0), i64 9)
 	%215 = call i64 @js_scope_get(i64 %207, i64 %214)
 	%216 = call i64 @js_arr_new()
-	%217 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%217 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%218 = call i64 @js_scope_get(i64 %207, i64 %217)
 	%219 = call i64 @js_arr_push(i64 %216, i64 %218)
 	%220 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000078, i64 0, i64 0), i64 4)
@@ -45802,7 +46332,7 @@ dead764:
 	%225 = call i64 @js_call(i64 %211, i64 %209, i64 %212)
 	ret i64 %225
 
-dead765:
+dead768:
 	br label %180
 
 226:
@@ -45821,7 +46351,7 @@ dead765:
 	%233 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000391, i64 0, i64 0), i64 5)
 	%234 = call i64 @js_get(i64 %232, i64 %233)
 	%235 = call i64 @js_arr_new()
-	%236 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%236 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%237 = call i64 @js_scope_get(i64 %230, i64 %236)
 	%238 = call i64 @js_arr_push(i64 %235, i64 %237)
 	%239 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000078, i64 0, i64 0), i64 4)
@@ -45830,14 +46360,14 @@ dead765:
 	%242 = call i64 @js_call(i64 %234, i64 %232, i64 %235)
 	ret i64 %242
 
-dead766:
+dead769:
 	br label %227
 
-dead767:
+dead770:
 	ret i64 0
 }
 
-define i64 @jsf_1000227(i64 %env, i64 %args) {
+define i64 @jsf_1000228(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -45884,7 +46414,7 @@ entry:
 	%34 = call i64 @js_num_i(i64 0)
 	%35 = call i64 @js_arr_push(i64 %33, i64 %34)
 	%36 = call i64 @js_call(i64 %32, i64 %30, i64 %33)
-	%37 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000706, i64 0, i64 0), i64 1)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000715, i64 0, i64 0), i64 1)
 	%38 = call i64 @js_eq(i64 %36, i64 %37)
 	%39 = call i64 @js_truthy(i64 %38)
 	%40 = icmp ne i64 %39, 0
@@ -45897,7 +46427,7 @@ entry:
 	%43 = phi i64 [ %9, %41 ]
 	ret i64 0
 
-dead768:
+dead771:
 	br label %28
 
 44:
@@ -45907,13 +46437,13 @@ dead768:
 	%46 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000474, i64 0, i64 0), i64 7)
 	%47 = call i64 @js_scope_get(i64 %9, i64 %46)
 	%48 = call i64 @js_arr_new()
-	%49 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%50 = call i64 @js_arr_push(i64 %48, i64 %49)
-	%51 = call i64 @js_str_mem(i8* getelementptr ([27 x i8], [27 x i8]* @str.1000707, i64 0, i64 0), i64 27)
+	%51 = call i64 @js_str_mem(i8* getelementptr ([27 x i8], [27 x i8]* @str.1000716, i64 0, i64 0), i64 27)
 	%52 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
 	%53 = call i64 @js_scope_get(i64 %9, i64 %52)
 	%54 = call i64 @js_add(i64 %51, i64 %53)
-	%55 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000699, i64 0, i64 0), i64 2)
+	%55 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000708, i64 0, i64 0), i64 2)
 	%56 = call i64 @js_add(i64 %54, i64 %55)
 	%57 = call i64 @js_arr_push(i64 %48, i64 %56)
 	%58 = call i64 @js_call(i64 %47, i64 0, i64 %48)
@@ -45926,14 +46456,14 @@ dead768:
 	%61 = phi i64 [ %9, %59 ]
 	ret i64 0
 
-dead769:
+dead772:
 	br label %45
 
-dead770:
+dead773:
 	ret i64 0
 }
 
-define i64 @jsf_1000228(i64 %env, i64 %args) {
+define i64 @jsf_1000229(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -45974,11 +46504,11 @@ entry:
 	%32 = call i64 @js_setret(i64 %31)
 	ret i64 0
 
-dead771:
+dead774:
 	ret i64 0
 }
 
-define i64 @jsf_1000229(i64 %env, i64 %args) {
+define i64 @jsf_1000230(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46042,7 +46572,7 @@ entry:
 	%43 = call i64 @js_scope_get(i64 %41, i64 %42)
 	ret i64 %43
 
-dead772:
+dead775:
 	br label %31
 
 44:
@@ -46076,7 +46606,7 @@ dead772:
 	%66 = call i64 @js_get(i64 %64, i64 %65)
 	ret i64 %66
 
-dead773:
+dead776:
 	br label %45
 
 67:
@@ -46086,8 +46616,8 @@ dead773:
 	%69 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%70 = call i64 @js_scope_get(i64 %9, i64 %69)
 	%71 = call i64 @js_arr_new()
-	%72 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000710, i64 0, i64 0), i64 13)
-	%73 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000719, i64 0, i64 0), i64 13)
+	%73 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
 	%74 = call i64 @js_scope_get(i64 %9, i64 %73)
 	%75 = call i64 @js_arr_new()
 	%76 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46114,14 +46644,14 @@ dead773:
 	%93 = call i64 @js_get(i64 %91, i64 %92)
 	ret i64 %93
 
-dead774:
+dead777:
 	br label %68
 
-dead775:
+dead778:
 	ret i64 0
 }
 
-define i64 @jsf_1000230(i64 %env, i64 %args) {
+define i64 @jsf_1000231(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46172,14 +46702,14 @@ entry:
 	%34 = call i64 @js_get(i64 %31, i64 %33)
 	ret i64 %34
 
-dead776:
+dead779:
 	br label %22
 
-dead777:
+dead780:
 	ret i64 0
 }
 
-define i64 @jsf_1000231(i64 %env, i64 %args) {
+define i64 @jsf_1000232(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46237,7 +46767,7 @@ entry:
 	%41 = call i64 @js_get(i64 %38, i64 %40)
 	ret i64 %41
 
-dead778:
+dead781:
 	br label %22
 
 42:
@@ -46293,17 +46823,17 @@ dead778:
 	%74 = call i64 @js_get(i64 %71, i64 %73)
 	ret i64 %74
 
-dead779:
+dead782:
 	br label %66
 
-dead780:
+dead783:
 	br label %43
 
-dead781:
+dead784:
 	ret i64 0
 }
 
-define i64 @jsf_1000232(i64 %env, i64 %args) {
+define i64 @jsf_1000233(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46349,38 +46879,10 @@ entry:
 	%29 = call i64 @js_scope_get(i64 %27, i64 %28)
 	ret i64 %29
 
-dead782:
+dead785:
 	br label %17
 
-dead783:
-	ret i64 0
-}
-
-define i64 @jsf_1000233(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
-	br label %6
-
-6:
-	br label %7
-
-7:
-	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000428, i64 0, i64 0), i64 6)
-	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
-	%11 = call i64 @js_arr_new()
-	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
-	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
-	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
-	ret i64 %15
-
-dead784:
+dead786:
 	ret i64 0
 }
 
@@ -46406,14 +46908,42 @@ entry:
 	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
 	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
-	%16 = call i64 @js_not(i64 %15)
-	ret i64 %16
+	ret i64 %15
 
-dead785:
+dead787:
 	ret i64 0
 }
 
 define i64 @jsf_1000235(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
+	br label %6
+
+6:
+	br label %7
+
+7:
+	%8 = phi i64 [ %0, %6 ]
+	%9 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000428, i64 0, i64 0), i64 6)
+	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
+	%11 = call i64 @js_arr_new()
+	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
+	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
+	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
+	%16 = call i64 @js_not(i64 %15)
+	ret i64 %16
+
+dead788:
+	ret i64 0
+}
+
+define i64 @jsf_1000236(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46437,11 +46967,11 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead786:
+dead789:
 	ret i64 0
 }
 
-define i64 @jsf_1000236(i64 %env, i64 %args) {
+define i64 @jsf_1000237(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46472,7 +47002,7 @@ entry:
 	ret i64 0
 }
 
-define i64 @jsf_1000237(i64 %env, i64 %args) {
+define i64 @jsf_1000238(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -46573,7 +47103,7 @@ entry:
 	%80 = call i64 @js_add(i64 %77, i64 %79)
 	ret i64 %80
 
-dead787:
+dead790:
 	br label %51
 
 81:
@@ -46617,14 +47147,14 @@ dead787:
 	%109 = call i64 @js_add(i64 %106, i64 %108)
 	ret i64 %109
 
-dead788:
+dead791:
 	br label %91
 
-dead789:
+dead792:
 	ret i64 0
 }
 
-define i64 @jsf_1000238(i64 %env, i64 %args) {
+define i64 @jsf_1000239(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
@@ -46658,11 +47188,11 @@ entry:
 	%25 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %25
 
-dead790:
+dead793:
 	ret i64 0
 }
 
-define i64 @jsf_1000239(i64 %env, i64 %args) {
+define i64 @jsf_1000240(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -46686,41 +47216,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead791:
-	ret i64 0
-}
-
-define i64 @jsf_1000240(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%5 = call i64 @js_arg(i64 %args, i64 1)
-	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
-	br label %9
-
-9:
-	br label %10
-
-10:
-	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000525, i64 0, i64 0), i64 7)
-	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
-	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
-	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
-	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
-	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	ret i64 %21
-
-dead792:
+dead794:
 	ret i64 0
 }
 
@@ -46742,7 +47238,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000525, i64 0, i64 0), i64 7)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000533, i64 0, i64 0), i64 7)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -46752,10 +47248,9 @@ entry:
 	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
 	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	%22 = call i64 @js_not(i64 %21)
-	ret i64 %22
+	ret i64 %21
 
-dead793:
+dead795:
 	ret i64 0
 }
 
@@ -46777,7 +47272,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000505, i64 0, i64 0), i64 11)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000533, i64 0, i64 0), i64 7)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -46787,9 +47282,10 @@ entry:
 	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
 	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	ret i64 %21
+	%22 = call i64 @js_not(i64 %21)
+	ret i64 %22
 
-dead794:
+dead796:
 	ret i64 0
 }
 
@@ -46811,7 +47307,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000505, i64 0, i64 0), i64 11)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000514, i64 0, i64 0), i64 11)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -46821,10 +47317,9 @@ entry:
 	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
 	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	%22 = call i64 @js_not(i64 %21)
-	ret i64 %22
+	ret i64 %21
 
-dead795:
+dead797:
 	ret i64 0
 }
 
@@ -46846,7 +47341,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000531, i64 0, i64 0), i64 5)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000514, i64 0, i64 0), i64 11)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -46856,9 +47351,10 @@ entry:
 	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
 	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	ret i64 %21
+	%22 = call i64 @js_not(i64 %21)
+	ret i64 %22
 
-dead796:
+dead798:
 	ret i64 0
 }
 
@@ -46880,135 +47376,20 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000539, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_typeof(i64 %13)
-	%15 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
-	%16 = call i64 @js_eq(i64 %14, i64 %15)
-	%17 = call i64 @js_truthy(i64 %16)
-	%18 = icmp ne i64 %17, 0
-	br i1 %18, label %19, label %25
+	%14 = call i64 @js_arr_new()
+	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
+	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
+	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
+	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
+	ret i64 %21
 
-19:
-	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
-	%22 = call i64 @js_typeof(i64 %21)
-	%23 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
-	%24 = call i64 @js_eq(i64 %22, i64 %23)
-	br label %25
-
-25:
-	%26 = phi i64 [ %16, %10 ], [ %24, %19 ]
-	%27 = call i64 @js_truthy(i64 %26)
-	%28 = icmp ne i64 %27, 0
-	br i1 %28, label %29, label %35
-
-29:
-	%30 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%31 = call i64 @js_scope_get(i64 %11, i64 %30)
-	%32 = call i64 @jsnum.1000028()
-	%33 = call i64 @js_neg(i64 %32)
-	%34 = call i64 @js_gt(i64 %31, i64 %33)
-	br label %35
-
-35:
-	%36 = phi i64 [ %26, %25 ], [ %34, %29 ]
-	%37 = call i64 @js_truthy(i64 %36)
-	%38 = icmp ne i64 %37, 0
-	br i1 %38, label %39, label %44
-
-39:
-	%40 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%41 = call i64 @js_scope_get(i64 %11, i64 %40)
-	%42 = call i64 @jsnum.1000002()
-	%43 = call i64 @js_lt(i64 %41, i64 %42)
-	br label %44
-
-44:
-	%45 = phi i64 [ %36, %35 ], [ %43, %39 ]
-	%46 = call i64 @js_truthy(i64 %45)
-	%47 = icmp ne i64 %46, 0
-	br i1 %47, label %48, label %54
-
-48:
-	%49 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%50 = call i64 @js_scope_get(i64 %11, i64 %49)
-	%51 = call i64 @jsnum.1000028()
-	%52 = call i64 @js_neg(i64 %51)
-	%53 = call i64 @js_gt(i64 %50, i64 %52)
-	br label %54
-
-54:
-	%55 = phi i64 [ %45, %44 ], [ %53, %48 ]
-	%56 = call i64 @js_truthy(i64 %55)
-	%57 = icmp ne i64 %56, 0
-	br i1 %57, label %58, label %63
-
-58:
-	%59 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%60 = call i64 @js_scope_get(i64 %11, i64 %59)
-	%61 = call i64 @jsnum.1000002()
-	%62 = call i64 @js_lt(i64 %60, i64 %61)
-	br label %63
-
-63:
-	%64 = phi i64 [ %55, %54 ], [ %62, %58 ]
-	%65 = call i64 @js_truthy(i64 %64)
-	%66 = icmp ne i64 %65, 0
-	br i1 %66, label %67, label %68
-
-67:
-	br label %81
-
-68:
-	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000531, i64 0, i64 0), i64 5)
-	%70 = call i64 @js_scope_get(i64 %11, i64 %69)
-	%71 = call i64 @js_arr_new()
-	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%73 = call i64 @js_scope_get(i64 %11, i64 %72)
-	%74 = call i64 @js_arr_push(i64 %71, i64 %73)
-	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%76 = call i64 @js_scope_get(i64 %11, i64 %75)
-	%77 = call i64 @js_arr_push(i64 %71, i64 %76)
-	%78 = call i64 @js_call(i64 %70, i64 0, i64 %71)
-	%79 = call i64 @js_num_i(i64 0)
-	%80 = call i64 @js_lt(i64 %78, i64 %79)
-	ret i64 %80
-
-81:
-	br label %82
-
-82:
-	%83 = phi i64 [ %11, %81 ]
-	%84 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%85 = call i64 @js_scope_get(i64 %83, i64 %84)
-	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%87 = call i64 @js_scope_get(i64 %83, i64 %86)
-	%88 = call i64 @js_lt(i64 %85, i64 %87)
-	ret i64 %88
-
-dead797:
-	br label %68
-
-dead798:
+dead799:
 	ret i64 0
-}
-
-define i64 @jsnum.1000028() {
-entry:
-	%0 = load i64, i64* @jsnumg.1000028
-	%1 = icmp eq i64 %0, 0
-	br i1 %1, label %make, label %done
-
-make:
-	%2 = call i64 @js_num_i(i64 u0x80000001)
-	%3 = call i64 @js_gc_pin(i64 %2)
-	store i64 %3, i64* @jsnumg.1000028
-	br label %done
-
-done:
-	%4 = phi i64 [ %0, %entry ], [ %3, %make ]
-	ret i64 %4
 }
 
 define i64 @jsf_1000246(i64 %env, i64 %args) {
@@ -47110,13 +47491,13 @@ entry:
 	br label %81
 
 68:
-	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000531, i64 0, i64 0), i64 5)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000539, i64 0, i64 0), i64 5)
 	%70 = call i64 @js_scope_get(i64 %11, i64 %69)
 	%71 = call i64 @js_arr_new()
-	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%73 = call i64 @js_scope_get(i64 %11, i64 %72)
 	%74 = call i64 @js_arr_push(i64 %71, i64 %73)
-	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%76 = call i64 @js_scope_get(i64 %11, i64 %75)
 	%77 = call i64 @js_arr_push(i64 %71, i64 %76)
 	%78 = call i64 @js_call(i64 %70, i64 0, i64 %71)
@@ -47133,14 +47514,31 @@ entry:
 	%85 = call i64 @js_scope_get(i64 %83, i64 %84)
 	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%87 = call i64 @js_scope_get(i64 %83, i64 %86)
-	%88 = call i64 @js_gt(i64 %85, i64 %87)
+	%88 = call i64 @js_lt(i64 %85, i64 %87)
 	ret i64 %88
 
-dead799:
+dead800:
 	br label %68
 
-dead800:
+dead801:
 	ret i64 0
+}
+
+define i64 @jsnum.1000028() {
+entry:
+	%0 = load i64, i64* @jsnumg.1000028
+	%1 = icmp eq i64 %0, 0
+	br i1 %1, label %make, label %done
+
+make:
+	%2 = call i64 @js_num_i(i64 u0x80000001)
+	%3 = call i64 @js_gc_pin(i64 %2)
+	store i64 %3, i64* @jsnumg.1000028
+	br label %done
+
+done:
+	%4 = phi i64 [ %0, %entry ], [ %3, %make ]
+	ret i64 %4
 }
 
 define i64 @jsf_1000247(i64 %env, i64 %args) {
@@ -47242,18 +47640,18 @@ entry:
 	br label %81
 
 68:
-	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000531, i64 0, i64 0), i64 5)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000539, i64 0, i64 0), i64 5)
 	%70 = call i64 @js_scope_get(i64 %11, i64 %69)
 	%71 = call i64 @js_arr_new()
-	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%73 = call i64 @js_scope_get(i64 %11, i64 %72)
 	%74 = call i64 @js_arr_push(i64 %71, i64 %73)
-	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%76 = call i64 @js_scope_get(i64 %11, i64 %75)
 	%77 = call i64 @js_arr_push(i64 %71, i64 %76)
 	%78 = call i64 @js_call(i64 %70, i64 0, i64 %71)
 	%79 = call i64 @js_num_i(i64 0)
-	%80 = call i64 @js_le(i64 %78, i64 %79)
+	%80 = call i64 @js_lt(i64 %78, i64 %79)
 	ret i64 %80
 
 81:
@@ -47265,13 +47663,13 @@ entry:
 	%85 = call i64 @js_scope_get(i64 %83, i64 %84)
 	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%87 = call i64 @js_scope_get(i64 %83, i64 %86)
-	%88 = call i64 @js_le(i64 %85, i64 %87)
+	%88 = call i64 @js_gt(i64 %85, i64 %87)
 	ret i64 %88
 
-dead801:
+dead802:
 	br label %68
 
-dead802:
+dead803:
 	ret i64 0
 }
 
@@ -47374,13 +47772,13 @@ entry:
 	br label %81
 
 68:
-	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000531, i64 0, i64 0), i64 5)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000539, i64 0, i64 0), i64 5)
 	%70 = call i64 @js_scope_get(i64 %11, i64 %69)
 	%71 = call i64 @js_arr_new()
-	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%73 = call i64 @js_scope_get(i64 %11, i64 %72)
 	%74 = call i64 @js_arr_push(i64 %71, i64 %73)
-	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%76 = call i64 @js_scope_get(i64 %11, i64 %75)
 	%77 = call i64 @js_arr_push(i64 %71, i64 %76)
 	%78 = call i64 @js_call(i64 %70, i64 0, i64 %71)
@@ -47397,13 +47795,13 @@ entry:
 	%85 = call i64 @js_scope_get(i64 %83, i64 %84)
 	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%87 = call i64 @js_scope_get(i64 %83, i64 %86)
-	%88 = call i64 @js_ge(i64 %85, i64 %87)
+	%88 = call i64 @js_le(i64 %85, i64 %87)
 	ret i64 %88
 
-dead803:
+dead804:
 	br label %68
 
-dead804:
+dead805:
 	ret i64 0
 }
 
@@ -47506,18 +47904,18 @@ entry:
 	br label %81
 
 68:
-	%69 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000482, i64 0, i64 0), i64 7)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000539, i64 0, i64 0), i64 5)
 	%70 = call i64 @js_scope_get(i64 %11, i64 %69)
 	%71 = call i64 @js_arr_new()
-	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000234, i64 0, i64 0), i64 1)
-	%73 = call i64 @js_arr_push(i64 %71, i64 %72)
-	%74 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%75 = call i64 @js_scope_get(i64 %11, i64 %74)
-	%76 = call i64 @js_arr_push(i64 %71, i64 %75)
-	%77 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%78 = call i64 @js_scope_get(i64 %11, i64 %77)
-	%79 = call i64 @js_arr_push(i64 %71, i64 %78)
-	%80 = call i64 @js_call(i64 %70, i64 0, i64 %71)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%73 = call i64 @js_scope_get(i64 %11, i64 %72)
+	%74 = call i64 @js_arr_push(i64 %71, i64 %73)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%76 = call i64 @js_scope_get(i64 %11, i64 %75)
+	%77 = call i64 @js_arr_push(i64 %71, i64 %76)
+	%78 = call i64 @js_call(i64 %70, i64 0, i64 %71)
+	%79 = call i64 @js_num_i(i64 0)
+	%80 = call i64 @js_le(i64 %78, i64 %79)
 	ret i64 %80
 
 81:
@@ -47529,13 +47927,13 @@ entry:
 	%85 = call i64 @js_scope_get(i64 %83, i64 %84)
 	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
 	%87 = call i64 @js_scope_get(i64 %83, i64 %86)
-	%88 = call i64 @js_add(i64 %85, i64 %87)
+	%88 = call i64 @js_ge(i64 %85, i64 %87)
 	ret i64 %88
 
-dead805:
+dead806:
 	br label %68
 
-dead806:
+dead807:
 	ret i64 0
 }
 
@@ -47638,7 +48036,139 @@ entry:
 	br label %81
 
 68:
-	%69 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000482, i64 0, i64 0), i64 7)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000484, i64 0, i64 0), i64 7)
+	%70 = call i64 @js_scope_get(i64 %11, i64 %69)
+	%71 = call i64 @js_arr_new()
+	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000234, i64 0, i64 0), i64 1)
+	%73 = call i64 @js_arr_push(i64 %71, i64 %72)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%75 = call i64 @js_scope_get(i64 %11, i64 %74)
+	%76 = call i64 @js_arr_push(i64 %71, i64 %75)
+	%77 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%78 = call i64 @js_scope_get(i64 %11, i64 %77)
+	%79 = call i64 @js_arr_push(i64 %71, i64 %78)
+	%80 = call i64 @js_call(i64 %70, i64 0, i64 %71)
+	ret i64 %80
+
+81:
+	br label %82
+
+82:
+	%83 = phi i64 [ %11, %81 ]
+	%84 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%85 = call i64 @js_scope_get(i64 %83, i64 %84)
+	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%87 = call i64 @js_scope_get(i64 %83, i64 %86)
+	%88 = call i64 @js_add(i64 %85, i64 %87)
+	ret i64 %88
+
+dead808:
+	br label %68
+
+dead809:
+	ret i64 0
+}
+
+define i64 @jsf_1000251(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
+	br label %9
+
+9:
+	br label %10
+
+10:
+	%11 = phi i64 [ %0, %9 ]
+	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
+	%14 = call i64 @js_typeof(i64 %13)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
+	%16 = call i64 @js_eq(i64 %14, i64 %15)
+	%17 = call i64 @js_truthy(i64 %16)
+	%18 = icmp ne i64 %17, 0
+	br i1 %18, label %19, label %25
+
+19:
+	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
+	%22 = call i64 @js_typeof(i64 %21)
+	%23 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000071, i64 0, i64 0), i64 6)
+	%24 = call i64 @js_eq(i64 %22, i64 %23)
+	br label %25
+
+25:
+	%26 = phi i64 [ %16, %10 ], [ %24, %19 ]
+	%27 = call i64 @js_truthy(i64 %26)
+	%28 = icmp ne i64 %27, 0
+	br i1 %28, label %29, label %35
+
+29:
+	%30 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%31 = call i64 @js_scope_get(i64 %11, i64 %30)
+	%32 = call i64 @jsnum.1000028()
+	%33 = call i64 @js_neg(i64 %32)
+	%34 = call i64 @js_gt(i64 %31, i64 %33)
+	br label %35
+
+35:
+	%36 = phi i64 [ %26, %25 ], [ %34, %29 ]
+	%37 = call i64 @js_truthy(i64 %36)
+	%38 = icmp ne i64 %37, 0
+	br i1 %38, label %39, label %44
+
+39:
+	%40 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%41 = call i64 @js_scope_get(i64 %11, i64 %40)
+	%42 = call i64 @jsnum.1000002()
+	%43 = call i64 @js_lt(i64 %41, i64 %42)
+	br label %44
+
+44:
+	%45 = phi i64 [ %36, %35 ], [ %43, %39 ]
+	%46 = call i64 @js_truthy(i64 %45)
+	%47 = icmp ne i64 %46, 0
+	br i1 %47, label %48, label %54
+
+48:
+	%49 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%50 = call i64 @js_scope_get(i64 %11, i64 %49)
+	%51 = call i64 @jsnum.1000028()
+	%52 = call i64 @js_neg(i64 %51)
+	%53 = call i64 @js_gt(i64 %50, i64 %52)
+	br label %54
+
+54:
+	%55 = phi i64 [ %45, %44 ], [ %53, %48 ]
+	%56 = call i64 @js_truthy(i64 %55)
+	%57 = icmp ne i64 %56, 0
+	br i1 %57, label %58, label %63
+
+58:
+	%59 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%60 = call i64 @js_scope_get(i64 %11, i64 %59)
+	%61 = call i64 @jsnum.1000002()
+	%62 = call i64 @js_lt(i64 %60, i64 %61)
+	br label %63
+
+63:
+	%64 = phi i64 [ %55, %54 ], [ %62, %58 ]
+	%65 = call i64 @js_truthy(i64 %64)
+	%66 = icmp ne i64 %65, 0
+	br i1 %66, label %67, label %68
+
+67:
+	br label %81
+
+68:
+	%69 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000484, i64 0, i64 0), i64 7)
 	%70 = call i64 @js_scope_get(i64 %11, i64 %69)
 	%71 = call i64 @js_arr_new()
 	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000179, i64 0, i64 0), i64 1)
@@ -47664,46 +48194,10 @@ entry:
 	%88 = call i64 @js_sub(i64 %85, i64 %87)
 	ret i64 %88
 
-dead807:
+dead810:
 	br label %68
 
-dead808:
-	ret i64 0
-}
-
-define i64 @jsf_1000251(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%5 = call i64 @js_arg(i64 %args, i64 1)
-	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
-	br label %9
-
-9:
-	br label %10
-
-10:
-	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000482, i64 0, i64 0), i64 7)
-	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000271, i64 0, i64 0), i64 1)
-	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
-	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
-	%19 = call i64 @js_arr_push(i64 %14, i64 %18)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
-	%22 = call i64 @js_arr_push(i64 %14, i64 %21)
-	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	ret i64 %23
-
-dead809:
+dead811:
 	ret i64 0
 }
 
@@ -47725,7 +48219,43 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000482, i64 0, i64 0), i64 7)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000484, i64 0, i64 0), i64 7)
+	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
+	%14 = call i64 @js_arr_new()
+	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000271, i64 0, i64 0), i64 1)
+	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
+	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
+	%19 = call i64 @js_arr_push(i64 %14, i64 %18)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
+	%22 = call i64 @js_arr_push(i64 %14, i64 %21)
+	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
+	ret i64 %23
+
+dead812:
+	ret i64 0
+}
+
+define i64 @jsf_1000253(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
+	br label %9
+
+9:
+	br label %10
+
+10:
+	%11 = phi i64 [ %0, %9 ]
+	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000484, i64 0, i64 0), i64 7)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000272, i64 0, i64 0), i64 1)
@@ -47739,11 +48269,11 @@ entry:
 	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %23
 
-dead810:
+dead813:
 	ret i64 0
 }
 
-define i64 @jsf_1000253(i64 %env, i64 %args) {
+define i64 @jsf_1000254(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -47855,7 +48385,7 @@ entry:
 	br label %90
 
 77:
-	%78 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000482, i64 0, i64 0), i64 7)
+	%78 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000484, i64 0, i64 0), i64 7)
 	%79 = call i64 @js_scope_get(i64 %11, i64 %78)
 	%80 = call i64 @js_arr_new()
 	%81 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000273, i64 0, i64 0), i64 1)
@@ -47888,14 +48418,14 @@ entry:
 	%104 = call i64 @js_call(i64 %94, i64 0, i64 %95)
 	ret i64 %104
 
-dead811:
+dead814:
 	br label %77
 
-dead812:
+dead815:
 	ret i64 0
 }
 
-define i64 @jsf_1000254(i64 %env, i64 %args) {
+define i64 @jsf_1000255(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -47913,10 +48443,10 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000482, i64 0, i64 0), i64 7)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000484, i64 0, i64 0), i64 7)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000484, i64 0, i64 0), i64 2)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000495, i64 0, i64 0), i64 2)
 	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
 	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
@@ -47927,11 +48457,11 @@ entry:
 	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %23
 
-dead813:
+dead816:
 	ret i64 0
 }
 
-define i64 @jsf_1000255(i64 %env, i64 %args) {
+define i64 @jsf_1000256(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -47946,7 +48476,7 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000495, i64 0, i64 0), i64 5)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000506, i64 0, i64 0), i64 5)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -47955,43 +48485,7 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead814:
-	ret i64 0
-}
-
-define i64 @jsf_1000256(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%5 = call i64 @js_arg(i64 %args, i64 1)
-	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
-	br label %9
-
-9:
-	br label %10
-
-10:
-	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000494, i64 0, i64 0), i64 5)
-	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000486, i64 0, i64 0), i64 1)
-	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
-	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
-	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
-	%19 = call i64 @js_arr_push(i64 %14, i64 %18)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
-	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
-	%22 = call i64 @js_arr_push(i64 %14, i64 %21)
-	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	ret i64 %23
-
-dead815:
+dead817:
 	ret i64 0
 }
 
@@ -48013,10 +48507,10 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000494, i64 0, i64 0), i64 5)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000505, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000487, i64 0, i64 0), i64 1)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000497, i64 0, i64 0), i64 1)
 	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
 	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
@@ -48027,7 +48521,7 @@ entry:
 	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %23
 
-dead816:
+dead818:
 	ret i64 0
 }
 
@@ -48049,10 +48543,10 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000494, i64 0, i64 0), i64 5)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000505, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000488, i64 0, i64 0), i64 1)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000498, i64 0, i64 0), i64 1)
 	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
 	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
@@ -48063,7 +48557,7 @@ entry:
 	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %23
 
-dead817:
+dead819:
 	ret i64 0
 }
 
@@ -48085,10 +48579,10 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000494, i64 0, i64 0), i64 5)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000505, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000489, i64 0, i64 0), i64 2)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000499, i64 0, i64 0), i64 1)
 	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
 	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
@@ -48099,7 +48593,7 @@ entry:
 	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %23
 
-dead818:
+dead820:
 	ret i64 0
 }
 
@@ -48121,10 +48615,10 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000494, i64 0, i64 0), i64 5)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000505, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000490, i64 0, i64 0), i64 2)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000500, i64 0, i64 0), i64 2)
 	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
 	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
@@ -48135,11 +48629,47 @@ entry:
 	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %23
 
-dead819:
+dead821:
 	ret i64 0
 }
 
 define i64 @jsf_1000261(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
+	br label %9
+
+9:
+	br label %10
+
+10:
+	%11 = phi i64 [ %0, %9 ]
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000505, i64 0, i64 0), i64 5)
+	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
+	%14 = call i64 @js_arr_new()
+	%15 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000501, i64 0, i64 0), i64 2)
+	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
+	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
+	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
+	%19 = call i64 @js_arr_push(i64 %14, i64 %18)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000012, i64 0, i64 0), i64 1)
+	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
+	%22 = call i64 @js_arr_push(i64 %14, i64 %21)
+	%23 = call i64 @js_call(i64 %13, i64 0, i64 %14)
+	ret i64 %23
+
+dead822:
+	ret i64 0
+}
+
+define i64 @jsf_1000262(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -48174,11 +48704,11 @@ entry:
 	%26 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %26
 
-dead820:
+dead823:
 	ret i64 0
 }
 
-define i64 @jsf_1000262(i64 %env, i64 %args) {
+define i64 @jsf_1000263(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
@@ -48255,9 +48785,9 @@ entry:
 	%60 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%61 = call i64 @js_scope_get(i64 %59, i64 %60)
 	%62 = call i64 @js_arr_new()
-	%63 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000478, i64 0, i64 0), i64 19)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000480, i64 0, i64 0), i64 19)
 	%64 = call i64 @js_arr_push(i64 %62, i64 %63)
-	%65 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000483, i64 0, i64 0), i64 16)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000494, i64 0, i64 0), i64 16)
 	%66 = call i64 @js_arr_push(i64 %62, i64 %65)
 	%67 = call i64 @js_call(i64 %61, i64 0, i64 %62)
 	%68 = call i64 @js_setret(i64 %67)
@@ -48312,19 +48842,19 @@ entry:
 	%105 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%106 = call i64 @js_scope_get(i64 %104, i64 %105)
 	%107 = call i64 @js_arr_new()
-	%108 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000491, i64 0, i64 0), i64 15)
+	%108 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000502, i64 0, i64 0), i64 15)
 	%109 = call i64 @js_arr_push(i64 %107, i64 %108)
-	%110 = call i64 @js_str_mem(i8* getelementptr ([47 x i8], [47 x i8]* @str.1000744, i64 0, i64 0), i64 47)
+	%110 = call i64 @js_str_mem(i8* getelementptr ([47 x i8], [47 x i8]* @str.1000753, i64 0, i64 0), i64 47)
 	%111 = call i64 @js_arr_push(i64 %107, i64 %110)
 	%112 = call i64 @js_call(i64 %106, i64 0, i64 %107)
 	%113 = call i64 @js_setret(i64 %112)
 	br label %89
 
-dead821:
+dead824:
 	ret i64 0
 }
 
-define i64 @jsf_1000263(i64 %env, i64 %args) {
+define i64 @jsf_1000264(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -48340,119 +48870,287 @@ entry:
 
 8:
 	%9 = phi i64 [ %7, %6 ]
-	%10 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
-	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
-	%12 = call i64 @js_arr_new()
-	%13 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%14 = call i64 @js_scope_get(i64 %9, i64 %13)
-	%15 = call i64 @js_arr_push(i64 %12, i64 %14)
-	%16 = call i64 @js_call(i64 %11, i64 0, i64 %12)
-	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%18 = call i64 @js_tdecl(i64 %9, i64 %17, i64 %16)
-	%19 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000409, i64 0, i64 0), i64 7)
-	%20 = call i64 @js_scope_get(i64 %9, i64 %19)
-	%21 = call i64 @js_arr_new()
-	%22 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%23 = call i64 @js_scope_get(i64 %9, i64 %22)
-	%24 = call i64 @js_arr_push(i64 %21, i64 %23)
-	%25 = call i64 @js_call(i64 %20, i64 0, i64 %21)
-	%26 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
-	%27 = call i64 @js_tdecl(i64 %9, i64 %26, i64 %25)
-	%28 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
-	%29 = call i64 @js_scope_get(i64 %9, i64 %28)
-	%30 = call i64 @js_sne(i64 %29, i64 0)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000755, i64 0, i64 0), i64 3)
+	%11 = call i64 @js_tdecl(i64 %9, i64 %10, i64 2)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_scope_get(i64 %9, i64 %12)
+	%14 = call i64 @js_typeof(i64 %13)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
+	%16 = call i64 @js_eq(i64 %14, i64 %15)
+	%17 = call i64 @js_truthy(i64 %16)
+	%18 = icmp ne i64 %17, 0
+	br i1 %18, label %19, label %25
+
+19:
+	br label %33
+
+20:
+	%21 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000755, i64 0, i64 0), i64 3)
+	%22 = call i64 @js_scope_get(i64 %9, i64 %21)
+	%23 = call i64 @js_truthy(i64 %22)
+	%24 = icmp ne i64 %23, 0
+	br i1 %24, label %106, label %107
+
+25:
+	%26 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%27 = call i64 @js_scope_get(i64 %9, i64 %26)
+	%28 = call i64 @js_typeof(i64 %27)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000094, i64 0, i64 0), i64 8)
+	%30 = call i64 @js_eq(i64 %28, i64 %29)
 	%31 = call i64 @js_truthy(i64 %30)
 	%32 = icmp ne i64 %31, 0
-	br i1 %32, label %33, label %34
+	br i1 %32, label %48, label %50
 
 33:
-	br label %44
-
-34:
-	%35 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000399, i64 0, i64 0), i64 9)
-	%36 = call i64 @js_scope_get(i64 %9, i64 %35)
-	%37 = call i64 @js_arr_new()
-	%38 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%39 = call i64 @js_scope_get(i64 %9, i64 %38)
-	%40 = call i64 @js_arr_push(i64 %37, i64 %39)
-	%41 = call i64 @js_call(i64 %36, i64 0, i64 %37)
-	%42 = call i64 @js_truthy(i64 %41)
-	%43 = icmp ne i64 %42, 0
-	br i1 %43, label %69, label %70
-
-44:
-	br label %45
-
-45:
-	%46 = phi i64 [ %9, %44 ]
-	%47 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
-	%48 = call i64 @js_scope_get(i64 %46, i64 %47)
-	%49 = call i64 @js_num_i(i64 0)
-	%50 = call i64 @js_lt(i64 %48, i64 %49)
-	%51 = call i64 @js_truthy(i64 %50)
-	%52 = icmp ne i64 %51, 0
-	br i1 %52, label %53, label %54
-
-53:
-	br label %57
-
-54:
-	%55 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%56 = call i64 @js_scope_get(i64 %46, i64 %55)
-	ret i64 %56
-
-57:
-	br label %58
-
-58:
-	%59 = phi i64 [ %46, %57 ]
-	%60 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000410, i64 0, i64 0), i64 7)
-	%61 = call i64 @js_scope_get(i64 %59, i64 %60)
-	%62 = call i64 @js_arr_new()
-	%63 = call i64 @js_num_i(i64 0)
-	%64 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
-	%65 = call i64 @js_scope_get(i64 %59, i64 %64)
-	%66 = call i64 @js_sub(i64 %63, i64 %65)
-	%67 = call i64 @js_arr_push(i64 %62, i64 %66)
-	%68 = call i64 @js_call(i64 %61, i64 0, i64 %62)
-	ret i64 %68
-
-dead822:
-	br label %54
-
-dead823:
 	br label %34
 
-69:
-	br label %73
+34:
+	%35 = phi i64 [ %9, %33 ]
+	%36 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000458, i64 0, i64 0), i64 9)
+	%37 = call i64 @js_scope_get(i64 %35, i64 %36)
+	%38 = call i64 @js_arr_new()
+	%39 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%40 = call i64 @js_scope_get(i64 %35, i64 %39)
+	%41 = call i64 @js_arr_push(i64 %38, i64 %40)
+	%42 = call i64 @js_call(i64 %37, i64 0, i64 %38)
+	%43 = call i64 @js_num_i(i64 0)
+	%44 = call i64 @js_lt(i64 %42, i64 %43)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000755, i64 0, i64 0), i64 3)
+	%46 = call i64 @js_tset(i64 %35, i64 %45, i64 %44)
+	%47 = call i64 @js_setret(i64 %44)
+	br label %20
 
-70:
-	%71 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%72 = call i64 @js_scope_get(i64 %9, i64 %71)
-	ret i64 %72
+48:
+	br label %58
 
-73:
-	br label %74
+49:
+	br label %20
 
-74:
-	%75 = phi i64 [ %9, %73 ]
-	%76 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000495, i64 0, i64 0), i64 5)
-	%77 = call i64 @js_scope_get(i64 %75, i64 %76)
-	%78 = call i64 @js_arr_new()
-	%79 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
-	%80 = call i64 @js_scope_get(i64 %75, i64 %79)
-	%81 = call i64 @js_arr_push(i64 %78, i64 %80)
-	%82 = call i64 @js_call(i64 %77, i64 0, i64 %78)
-	ret i64 %82
+50:
+	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%52 = call i64 @js_scope_get(i64 %9, i64 %51)
+	%53 = call i64 @js_typeof(i64 %52)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%55 = call i64 @js_eq(i64 %53, i64 %54)
+	%56 = call i64 @js_truthy(i64 %55)
+	%57 = icmp ne i64 %56, 0
+	br i1 %57, label %64, label %68
 
-dead824:
-	br label %70
+58:
+	br label %59
+
+59:
+	%60 = phi i64 [ %9, %58 ]
+	%61 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000755, i64 0, i64 0), i64 3)
+	%62 = call i64 @js_tset(i64 %60, i64 %61, i64 3)
+	%63 = call i64 @js_setret(i64 3)
+	br label %49
+
+64:
+	%65 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%66 = call i64 @js_scope_get(i64 %9, i64 %65)
+	%67 = call i64 @js_sne(i64 %66, i64 1)
+	br label %68
+
+68:
+	%69 = phi i64 [ %55, %50 ], [ %67, %64 ]
+	%70 = call i64 @js_truthy(i64 %69)
+	%71 = icmp ne i64 %70, 0
+	br i1 %71, label %72, label %81
+
+72:
+	%73 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000411, i64 0, i64 0), i64 7)
+	%74 = call i64 @js_scope_get(i64 %9, i64 %73)
+	%75 = call i64 @js_arr_new()
+	%76 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%77 = call i64 @js_scope_get(i64 %9, i64 %76)
+	%78 = call i64 @js_arr_push(i64 %75, i64 %77)
+	%79 = call i64 @js_call(i64 %74, i64 0, i64 %75)
+	%80 = call i64 @js_not(i64 %79)
+	br label %81
+
+81:
+	%82 = phi i64 [ %69, %68 ], [ %80, %72 ]
+	%83 = call i64 @js_truthy(i64 %82)
+	%84 = icmp ne i64 %83, 0
+	br i1 %84, label %85, label %94
+
+85:
+	%86 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000072, i64 0, i64 0), i64 6)
+	%87 = call i64 @js_scope_get(i64 %9, i64 %86)
+	%88 = call i64 @js_arr_new()
+	%89 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%90 = call i64 @js_scope_get(i64 %9, i64 %89)
+	%91 = call i64 @js_arr_push(i64 %88, i64 %90)
+	%92 = call i64 @js_call(i64 %87, i64 0, i64 %88)
+	%93 = call i64 @js_not(i64 %92)
+	br label %94
+
+94:
+	%95 = phi i64 [ %82, %81 ], [ %93, %85 ]
+	%96 = call i64 @js_truthy(i64 %95)
+	%97 = icmp ne i64 %96, 0
+	br i1 %97, label %98, label %99
+
+98:
+	br label %100
+
+99:
+	br label %49
+
+100:
+	br label %101
+
+101:
+	%102 = phi i64 [ %9, %100 ]
+	%103 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000755, i64 0, i64 0), i64 3)
+	%104 = call i64 @js_tset(i64 %102, i64 %103, i64 3)
+	%105 = call i64 @js_setret(i64 3)
+	br label %99
+
+106:
+	br label %131
+
+107:
+	%108 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000389, i64 0, i64 0), i64 7)
+	%109 = call i64 @js_scope_get(i64 %9, i64 %108)
+	%110 = call i64 @js_arr_new()
+	%111 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%112 = call i64 @js_scope_get(i64 %9, i64 %111)
+	%113 = call i64 @js_arr_push(i64 %110, i64 %112)
+	%114 = call i64 @js_call(i64 %109, i64 0, i64 %110)
+	%115 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%116 = call i64 @js_tdecl(i64 %9, i64 %115, i64 %114)
+	%117 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000409, i64 0, i64 0), i64 7)
+	%118 = call i64 @js_scope_get(i64 %9, i64 %117)
+	%119 = call i64 @js_arr_new()
+	%120 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%121 = call i64 @js_scope_get(i64 %9, i64 %120)
+	%122 = call i64 @js_arr_push(i64 %119, i64 %121)
+	%123 = call i64 @js_call(i64 %118, i64 0, i64 %119)
+	%124 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
+	%125 = call i64 @js_tdecl(i64 %9, i64 %124, i64 %123)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
+	%127 = call i64 @js_scope_get(i64 %9, i64 %126)
+	%128 = call i64 @js_sne(i64 %127, i64 0)
+	%129 = call i64 @js_truthy(i64 %128)
+	%130 = icmp ne i64 %129, 0
+	br i1 %130, label %153, label %154
+
+131:
+	br label %132
+
+132:
+	%133 = phi i64 [ %9, %131 ]
+	%134 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
+	%135 = call i64 @js_scope_get(i64 %133, i64 %134)
+	%136 = call i64 @js_arr_new()
+	%137 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000490, i64 0, i64 0), i64 9)
+	%138 = call i64 @js_arr_push(i64 %136, i64 %137)
+	%139 = call i64 @js_str_mem(i8* getelementptr ([53 x i8], [53 x i8]* @str.1000756, i64 0, i64 0), i64 53)
+	%140 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
+	%141 = call i64 @js_scope_get(i64 %133, i64 %140)
+	%142 = call i64 @js_arr_new()
+	%143 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%144 = call i64 @js_scope_get(i64 %133, i64 %143)
+	%145 = call i64 @js_arr_push(i64 %142, i64 %144)
+	%146 = call i64 @js_call(i64 %141, i64 0, i64 %142)
+	%147 = call i64 @js_add(i64 %139, i64 %146)
+	%148 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000757, i64 0, i64 0), i64 6)
+	%149 = call i64 @js_add(i64 %147, i64 %148)
+	%150 = call i64 @js_arr_push(i64 %136, i64 %149)
+	%151 = call i64 @js_call(i64 %135, i64 0, i64 %136)
+	%152 = call i64 @js_setret(i64 %151)
+	br label %107
+
+153:
+	br label %164
+
+154:
+	%155 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000399, i64 0, i64 0), i64 9)
+	%156 = call i64 @js_scope_get(i64 %9, i64 %155)
+	%157 = call i64 @js_arr_new()
+	%158 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%159 = call i64 @js_scope_get(i64 %9, i64 %158)
+	%160 = call i64 @js_arr_push(i64 %157, i64 %159)
+	%161 = call i64 @js_call(i64 %156, i64 0, i64 %157)
+	%162 = call i64 @js_truthy(i64 %161)
+	%163 = icmp ne i64 %162, 0
+	br i1 %163, label %189, label %190
+
+164:
+	br label %165
+
+165:
+	%166 = phi i64 [ %9, %164 ]
+	%167 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
+	%168 = call i64 @js_scope_get(i64 %166, i64 %167)
+	%169 = call i64 @js_num_i(i64 0)
+	%170 = call i64 @js_lt(i64 %168, i64 %169)
+	%171 = call i64 @js_truthy(i64 %170)
+	%172 = icmp ne i64 %171, 0
+	br i1 %172, label %173, label %174
+
+173:
+	br label %177
+
+174:
+	%175 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%176 = call i64 @js_scope_get(i64 %166, i64 %175)
+	ret i64 %176
+
+177:
+	br label %178
+
+178:
+	%179 = phi i64 [ %166, %177 ]
+	%180 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000410, i64 0, i64 0), i64 7)
+	%181 = call i64 @js_scope_get(i64 %179, i64 %180)
+	%182 = call i64 @js_arr_new()
+	%183 = call i64 @js_num_i(i64 0)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
+	%185 = call i64 @js_scope_get(i64 %179, i64 %184)
+	%186 = call i64 @js_sub(i64 %183, i64 %185)
+	%187 = call i64 @js_arr_push(i64 %182, i64 %186)
+	%188 = call i64 @js_call(i64 %181, i64 0, i64 %182)
+	ret i64 %188
 
 dead825:
+	br label %174
+
+dead826:
+	br label %154
+
+189:
+	br label %193
+
+190:
+	%191 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%192 = call i64 @js_scope_get(i64 %9, i64 %191)
+	ret i64 %192
+
+193:
+	br label %194
+
+194:
+	%195 = phi i64 [ %9, %193 ]
+	%196 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000506, i64 0, i64 0), i64 5)
+	%197 = call i64 @js_scope_get(i64 %195, i64 %196)
+	%198 = call i64 @js_arr_new()
+	%199 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
+	%200 = call i64 @js_scope_get(i64 %195, i64 %199)
+	%201 = call i64 @js_arr_push(i64 %198, i64 %200)
+	%202 = call i64 @js_call(i64 %197, i64 0, i64 %198)
+	ret i64 %202
+
+dead827:
+	br label %190
+
+dead828:
 	ret i64 0
 }
 
-define i64 @jsf_1000264(i64 %env, i64 %args) {
+define i64 @jsf_1000265(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
@@ -48470,7 +49168,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000678, i64 0, i64 0), i64 6)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000687, i64 0, i64 0), i64 6)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
@@ -48482,17 +49180,17 @@ entry:
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %21
 
-dead826:
+dead829:
 	ret i64 0
 }
 
-define i64 @jsf_1000265(i64 %env, i64 %args) {
+define i64 @jsf_1000266(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000748, i64 0, i64 0), i64 4)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000760, i64 0, i64 0), i64 4)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000749, i64 0, i64 0), i64 5)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000761, i64 0, i64 0), i64 5)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -48505,7 +49203,7 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000749, i64 0, i64 0), i64 5)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000761, i64 0, i64 0), i64 5)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_num_i(i64 10)
 	%16 = call i64 @js_eq(i64 %14, i64 %15)
@@ -48523,7 +49221,7 @@ entry:
 	%24 = call i64 @js_num_i(i64 0)
 	%25 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%26 = call i64 @js_tdecl(i64 %12, i64 %25, i64 %24)
-	%27 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000750, i64 0, i64 0), i64 4)
+	%27 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000762, i64 0, i64 0), i64 4)
 	%28 = call i64 @js_tdecl(i64 %12, i64 %27, i64 2)
 	br label %39
 
@@ -48535,19 +49233,19 @@ entry:
 	%32 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000461, i64 0, i64 0), i64 11)
 	%33 = call i64 @js_scope_get(i64 %31, i64 %32)
 	%34 = call i64 @js_arr_new()
-	%35 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000748, i64 0, i64 0), i64 4)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000760, i64 0, i64 0), i64 4)
 	%36 = call i64 @js_scope_get(i64 %31, i64 %35)
 	%37 = call i64 @js_arr_push(i64 %34, i64 %36)
 	%38 = call i64 @js_call(i64 %33, i64 0, i64 %34)
 	ret i64 %38
 
-dead827:
+dead830:
 	br label %20
 
 39:
 	%40 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%41 = call i64 @js_scope_get(i64 %12, i64 %40)
-	%42 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000748, i64 0, i64 0), i64 4)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000760, i64 0, i64 0), i64 4)
 	%43 = call i64 @js_scope_get(i64 %12, i64 %42)
 	%44 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%45 = call i64 @js_get(i64 %43, i64 %44)
@@ -48560,7 +49258,7 @@ dead827:
 	br label %56
 
 50:
-	%51 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000750, i64 0, i64 0), i64 4)
+	%51 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000762, i64 0, i64 0), i64 4)
 	%52 = call i64 @js_scope_get(i64 %12, i64 %51)
 	%53 = call i64 @js_not(i64 %52)
 	%54 = call i64 @js_truthy(i64 %53)
@@ -48573,10 +49271,10 @@ dead827:
 
 58:
 	%59 = phi i64 [ %57, %56 ]
-	%60 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000751, i64 0, i64 0), i64 10)
+	%60 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000763, i64 0, i64 0), i64 10)
 	%61 = call i64 @js_scope_get(i64 %59, i64 %60)
 	%62 = call i64 @js_arr_new()
-	%63 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000748, i64 0, i64 0), i64 4)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000760, i64 0, i64 0), i64 4)
 	%64 = call i64 @js_scope_get(i64 %59, i64 %63)
 	%65 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000122, i64 0, i64 0), i64 10)
 	%66 = call i64 @js_get(i64 %64, i64 %65)
@@ -48622,7 +49320,7 @@ dead827:
 	%98 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000177, i64 0, i64 0), i64 3)
 	%99 = call i64 @js_scope_get(i64 %94, i64 %98)
 	%100 = call i64 @js_arr_push(i64 %97, i64 %99)
-	%101 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000749, i64 0, i64 0), i64 5)
+	%101 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000761, i64 0, i64 0), i64 5)
 	%102 = call i64 @js_scope_get(i64 %94, i64 %101)
 	%103 = call i64 @js_arr_push(i64 %97, i64 %102)
 	%104 = call i64 @js_call(i64 %96, i64 0, i64 %97)
@@ -48667,7 +49365,7 @@ dead827:
 
 136:
 	%137 = phi i64 [ %94, %135 ]
-	%138 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000750, i64 0, i64 0), i64 4)
+	%138 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000762, i64 0, i64 0), i64 4)
 	%139 = call i64 @js_tset(i64 %137, i64 %138, i64 3)
 	%140 = call i64 @js_setret(i64 3)
 	br label %114
@@ -48690,7 +49388,7 @@ dead827:
 
 151:
 	%152 = phi i64 [ %94, %150 ]
-	%153 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000750, i64 0, i64 0), i64 4)
+	%153 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000762, i64 0, i64 0), i64 4)
 	%154 = call i64 @js_tset(i64 %152, i64 %153, i64 3)
 	%155 = call i64 @js_setret(i64 3)
 	br label %142
@@ -48733,13 +49431,13 @@ dead827:
 	%181 = call i64 @js_scope_get(i64 %179, i64 %180)
 	ret i64 %181
 
-dead828:
+dead831:
 	br label %170
 
 182:
 	%183 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%184 = call i64 @js_scope_get(i64 %12, i64 %183)
-	%185 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000748, i64 0, i64 0), i64 4)
+	%185 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000760, i64 0, i64 0), i64 4)
 	%186 = call i64 @js_scope_get(i64 %12, i64 %185)
 	%187 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%188 = call i64 @js_get(i64 %186, i64 %187)
@@ -48767,10 +49465,10 @@ dead828:
 
 203:
 	%204 = phi i64 [ %202, %201 ]
-	%205 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000751, i64 0, i64 0), i64 10)
+	%205 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000763, i64 0, i64 0), i64 10)
 	%206 = call i64 @js_scope_get(i64 %204, i64 %205)
 	%207 = call i64 @js_arr_new()
-	%208 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000748, i64 0, i64 0), i64 4)
+	%208 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000760, i64 0, i64 0), i64 4)
 	%209 = call i64 @js_scope_get(i64 %204, i64 %208)
 	%210 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000122, i64 0, i64 0), i64 10)
 	%211 = call i64 @js_get(i64 %209, i64 %210)
@@ -48781,9 +49479,9 @@ dead828:
 	%216 = call i64 @js_call(i64 %211, i64 %209, i64 %212)
 	%217 = call i64 @js_arr_push(i64 %207, i64 %216)
 	%218 = call i64 @js_call(i64 %206, i64 0, i64 %207)
-	%219 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000752, i64 0, i64 0), i64 2)
+	%219 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000764, i64 0, i64 0), i64 2)
 	%220 = call i64 @js_tdecl(i64 %204, i64 %219, i64 %218)
-	%221 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000752, i64 0, i64 0), i64 2)
+	%221 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000764, i64 0, i64 0), i64 2)
 	%222 = call i64 @js_scope_get(i64 %204, i64 %221)
 	%223 = call i64 @js_num_i(i64 0)
 	%224 = call i64 @js_ge(i64 %222, i64 %223)
@@ -48811,10 +49509,10 @@ dead828:
 	%238 = phi i64 [ %204, %236 ]
 	%239 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%240 = call i64 @js_scope_get(i64 %238, i64 %239)
-	%241 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000749, i64 0, i64 0), i64 5)
+	%241 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000761, i64 0, i64 0), i64 5)
 	%242 = call i64 @js_scope_get(i64 %238, i64 %241)
 	%243 = call i64 @js_mul(i64 %240, i64 %242)
-	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000752, i64 0, i64 0), i64 2)
+	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000764, i64 0, i64 0), i64 2)
 	%245 = call i64 @js_scope_get(i64 %238, i64 %244)
 	%246 = call i64 @js_add(i64 %243, i64 %245)
 	%247 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -48822,11 +49520,11 @@ dead828:
 	%249 = call i64 @js_setret(i64 %246)
 	br label %228
 
-dead829:
+dead832:
 	ret i64 0
 }
 
-define i64 @jsf_1000266(i64 %env, i64 %args) {
+define i64 @jsf_1000267(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000100, i64 0, i64 0), i64 1)
@@ -48885,7 +49583,7 @@ entry:
 	%38 = call i64 @js_sub(i64 %36, i64 %37)
 	ret i64 %38
 
-dead830:
+dead833:
 	br label %25
 
 39:
@@ -48926,7 +49624,7 @@ dead830:
 	%64 = call i64 @js_add(i64 %62, i64 %63)
 	ret i64 %64
 
-dead831:
+dead834:
 	br label %49
 
 65:
@@ -48964,14 +49662,14 @@ dead831:
 	%87 = call i64 @js_add(i64 %85, i64 %86)
 	ret i64 %87
 
-dead832:
+dead835:
 	br label %75
 
-dead833:
+dead836:
 	ret i64 0
 }
 
-define i64 @jsf_1000267(i64 %env, i64 %args) {
+define i64 @jsf_1000268(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
@@ -48991,7 +49689,7 @@ entry:
 	%11 = phi i64 [ %0, %9 ]
 	%12 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000590, i64 0, i64 0), i64 3)
+	%14 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000600, i64 0, i64 0), i64 3)
 	%15 = call i64 @js_eq(i64 %13, i64 %14)
 	%16 = call i64 @js_truthy(i64 %15)
 	%17 = icmp ne i64 %16, 0
@@ -49003,7 +49701,7 @@ entry:
 19:
 	%20 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
-	%22 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000589, i64 0, i64 0), i64 5)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000599, i64 0, i64 0), i64 5)
 	%23 = call i64 @js_eq(i64 %21, i64 %22)
 	%24 = call i64 @js_truthy(i64 %23)
 	%25 = icmp ne i64 %24, 0
@@ -49023,7 +49721,7 @@ entry:
 	%35 = call i64 @js_call(i64 %30, i64 0, i64 %31)
 	ret i64 %35
 
-dead834:
+dead837:
 	br label %19
 
 36:
@@ -49052,7 +49750,7 @@ dead834:
 	%53 = call i64 @js_call(i64 %48, i64 0, i64 %49)
 	ret i64 %53
 
-dead835:
+dead838:
 	br label %37
 
 54:
@@ -49061,7 +49759,7 @@ dead835:
 55:
 	%56 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%57 = call i64 @js_scope_get(i64 %11, i64 %56)
-	%58 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000588, i64 0, i64 0), i64 4)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000598, i64 0, i64 0), i64 4)
 	%59 = call i64 @js_eq(i64 %57, i64 %58)
 	%60 = call i64 @js_truthy(i64 %59)
 	%61 = icmp ne i64 %60, 0
@@ -49079,7 +49777,7 @@ dead835:
 	%69 = call i64 @js_eq(i64 %67, i64 %68)
 	ret i64 %69
 
-dead836:
+dead839:
 	br label %55
 
 70:
@@ -49088,7 +49786,7 @@ dead836:
 71:
 	%72 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%73 = call i64 @js_scope_get(i64 %11, i64 %72)
-	%74 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000585, i64 0, i64 0), i64 5)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000595, i64 0, i64 0), i64 5)
 	%75 = call i64 @js_eq(i64 %73, i64 %74)
 	%76 = call i64 @js_truthy(i64 %75)
 	%77 = icmp ne i64 %76, 0
@@ -49106,7 +49804,7 @@ dead836:
 	%85 = call i64 @js_eq(i64 %83, i64 %84)
 	ret i64 %85
 
-dead837:
+dead840:
 	br label %71
 
 86:
@@ -49135,7 +49833,7 @@ dead837:
 	%103 = call i64 @js_call(i64 %98, i64 0, i64 %99)
 	ret i64 %103
 
-dead838:
+dead841:
 	br label %87
 
 104:
@@ -49164,7 +49862,7 @@ dead838:
 	%121 = call i64 @js_call(i64 %116, i64 0, i64 %117)
 	ret i64 %121
 
-dead839:
+dead842:
 	br label %105
 
 122:
@@ -49173,7 +49871,7 @@ dead839:
 123:
 	%124 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000183, i64 0, i64 0), i64 4)
 	%125 = call i64 @js_scope_get(i64 %11, i64 %124)
-	%126 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000754, i64 0, i64 0), i64 7)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000766, i64 0, i64 0), i64 7)
 	%127 = call i64 @js_eq(i64 %125, i64 %126)
 	%128 = call i64 @js_truthy(i64 %127)
 	%129 = icmp ne i64 %128, 0
@@ -49193,7 +49891,7 @@ dead839:
 	%139 = call i64 @js_call(i64 %134, i64 0, i64 %135)
 	ret i64 %139
 
-dead840:
+dead843:
 	br label %123
 
 140:
@@ -49244,41 +49942,13 @@ dead840:
 	%171 = call i64 @js_sne(i64 %170, i64 0)
 	ret i64 %171
 
-dead841:
+dead844:
 	br label %153
 
-dead842:
+dead845:
 	br label %141
 
-dead843:
-	ret i64 0
-}
-
-define i64 @jsf_1000268(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
-	br label %6
-
-6:
-	br label %7
-
-7:
-	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000587, i64 0, i64 0), i64 10)
-	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
-	%11 = call i64 @js_arr_new()
-	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
-	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
-	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
-	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
-	ret i64 %15
-
-dead844:
+dead846:
 	ret i64 0
 }
 
@@ -49297,7 +49967,7 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000597, i64 0, i64 0), i64 10)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -49306,11 +49976,39 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead845:
+dead847:
 	ret i64 0
 }
 
 define i64 @jsf_1000270(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
+	br label %6
+
+6:
+	br label %7
+
+7:
+	%8 = phi i64 [ %0, %6 ]
+	%9 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
+	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
+	%11 = call i64 @js_arr_new()
+	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
+	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
+	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
+	ret i64 %15
+
+dead848:
+	ret i64 0
+}
+
+define i64 @jsf_1000271(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
@@ -49354,10 +50052,10 @@ entry:
 	%27 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%28 = call i64 @js_scope_get(i64 %26, i64 %27)
 	%29 = call i64 @js_arr_new()
-	%30 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%31 = call i64 @js_arr_push(i64 %29, i64 %30)
-	%32 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000758, i64 0, i64 0), i64 28)
-	%33 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000626, i64 0, i64 0), i64 10)
+	%32 = call i64 @js_str_mem(i8* getelementptr ([28 x i8], [28 x i8]* @str.1000770, i64 0, i64 0), i64 28)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000634, i64 0, i64 0), i64 10)
 	%34 = call i64 @js_scope_get(i64 %26, i64 %33)
 	%35 = call i64 @js_arr_new()
 	%36 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
@@ -49370,9 +50068,9 @@ entry:
 	%43 = call i64 @js_arr_push(i64 %35, i64 %42)
 	%44 = call i64 @js_call(i64 %34, i64 0, i64 %35)
 	%45 = call i64 @js_add(i64 %32, i64 %44)
-	%46 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000759, i64 0, i64 0), i64 5)
+	%46 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000771, i64 0, i64 0), i64 5)
 	%47 = call i64 @js_add(i64 %45, i64 %46)
-	%48 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
 	%49 = call i64 @js_scope_get(i64 %26, i64 %48)
 	%50 = call i64 @js_arr_new()
 	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
@@ -49385,11 +50083,11 @@ entry:
 	%58 = call i64 @js_setret(i64 %57)
 	br label %23
 
-dead846:
+dead849:
 	ret i64 0
 }
 
-define i64 @jsf_1000271(i64 %env, i64 %args) {
+define i64 @jsf_1000272(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -49404,7 +50102,7 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000618, i64 0, i64 0), i64 6)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000626, i64 0, i64 0), i64 6)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -49415,11 +50113,154 @@ entry:
 	%17 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %17
 
-dead847:
+dead850:
 	ret i64 0
 }
 
-define i64 @jsf_1000272(i64 %env, i64 %args) {
+define i64 @jsf_1000273(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000774, i64 0, i64 0), i64 5)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
+	br label %9
+
+9:
+	br label %10
+
+10:
+	%11 = phi i64 [ %0, %9 ]
+	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
+	%14 = call i64 @js_seq(i64 %13, i64 0)
+	%15 = call i64 @js_truthy(i64 %14)
+	%16 = icmp ne i64 %15, 0
+	br i1 %16, label %21, label %17
+
+17:
+	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
+	%20 = call i64 @js_seq(i64 %19, i64 1)
+	br label %21
+
+21:
+	%22 = phi i64 [ %14, %10 ], [ %20, %17 ]
+	%23 = call i64 @js_truthy(i64 %22)
+	%24 = icmp ne i64 %23, 0
+	br i1 %24, label %31, label %25
+
+25:
+	%26 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%27 = call i64 @js_scope_get(i64 %11, i64 %26)
+	%28 = call i64 @js_typeof(i64 %27)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%30 = call i64 @js_ne(i64 %28, i64 %29)
+	br label %31
+
+31:
+	%32 = phi i64 [ %22, %21 ], [ %30, %25 ]
+	%33 = call i64 @js_truthy(i64 %32)
+	%34 = icmp ne i64 %33, 0
+	br i1 %34, label %35, label %36
+
+35:
+	br label %44
+
+36:
+	%37 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%38 = call i64 @js_scope_get(i64 %11, i64 %37)
+	%39 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000425, i64 0, i64 0), i64 9)
+	%40 = call i64 @js_get(i64 %38, i64 %39)
+	%41 = call i64 @js_sne(i64 %40, i64 3)
+	%42 = call i64 @js_truthy(i64 %41)
+	%43 = icmp ne i64 %42, 0
+	br i1 %43, label %47, label %48
+
+44:
+	br label %45
+
+45:
+	%46 = phi i64 [ %11, %44 ]
+	ret i64 2
+
+dead851:
+	br label %36
+
+47:
+	br label %58
+
+48:
+	%49 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000428, i64 0, i64 0), i64 6)
+	%50 = call i64 @js_scope_get(i64 %11, i64 %49)
+	%51 = call i64 @js_arr_new()
+	%52 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000774, i64 0, i64 0), i64 5)
+	%53 = call i64 @js_scope_get(i64 %11, i64 %52)
+	%54 = call i64 @js_arr_push(i64 %51, i64 %53)
+	%55 = call i64 @js_call(i64 %50, i64 0, i64 %51)
+	%56 = call i64 @js_truthy(i64 %55)
+	%57 = icmp ne i64 %56, 0
+	br i1 %57, label %61, label %62
+
+58:
+	br label %59
+
+59:
+	%60 = phi i64 [ %11, %58 ]
+	ret i64 2
+
+dead852:
+	br label %48
+
+61:
+	br label %70
+
+62:
+	%63 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%64 = call i64 @js_scope_get(i64 %11, i64 %63)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000775, i64 0, i64 0), i64 9)
+	%66 = call i64 @js_get(i64 %64, i64 %65)
+	%67 = call i64 @js_sne(i64 %66, i64 3)
+	%68 = call i64 @js_truthy(i64 %67)
+	%69 = icmp ne i64 %68, 0
+	br i1 %69, label %78, label %84
+
+70:
+	br label %71
+
+71:
+	%72 = phi i64 [ %11, %70 ]
+	%73 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%74 = call i64 @js_scope_get(i64 %72, i64 %73)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000775, i64 0, i64 0), i64 9)
+	%76 = call i64 @js_get(i64 %74, i64 %75)
+	%77 = call i64 @js_seq(i64 %76, i64 3)
+	ret i64 %77
+
+dead853:
+	br label %62
+
+78:
+	%79 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%80 = call i64 @js_scope_get(i64 %11, i64 %79)
+	%81 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000776, i64 0, i64 0), i64 9)
+	%82 = call i64 @js_get(i64 %80, i64 %81)
+	%83 = call i64 @js_sne(i64 %82, i64 3)
+	br label %84
+
+84:
+	%85 = phi i64 [ %67, %62 ], [ %83, %78 ]
+	ret i64 %85
+
+dead854:
+	ret i64 0
+}
+
+define i64 @jsf_1000274(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -49495,14 +50336,14 @@ entry:
 	%51 = phi i64 [ %12, %49 ]
 	ret i64 2
 
-dead848:
+dead855:
 	br label %37
 
 52:
 	br label %73
 
 53:
-	%54 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%55 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
 	%56 = call i64 @js_scope_get(i64 %12, i64 %55)
 	%57 = call i64 @js_arr_new()
@@ -49517,9 +50358,9 @@ dead848:
 	%66 = call i64 @js_arr_push(i64 %57, i64 2)
 	%67 = call i64 @js_call(i64 %56, i64 0, i64 %57)
 	%68 = call i64 @js_add(i64 %54, i64 %67)
-	%69 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%70 = call i64 @js_add(i64 %68, i64 %69)
-	%71 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%71 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%72 = call i64 @js_tdecl(i64 %12, i64 %71, i64 %70)
 	br label %83
 
@@ -49571,7 +50412,7 @@ dead848:
 	%102 = phi i64 [ %100, %99 ]
 	%103 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%104 = call i64 @js_scope_get(i64 %102, i64 %103)
-	%105 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000762, i64 0, i64 0), i64 5)
+	%105 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000778, i64 0, i64 0), i64 5)
 	%106 = call i64 @js_get(i64 %104, i64 %105)
 	%107 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000011, i64 0, i64 0), i64 1)
 	%108 = call i64 @js_tdecl(i64 %102, i64 %107, i64 %106)
@@ -49590,7 +50431,7 @@ dead848:
 	%119 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
 	%120 = call i64 @js_get(i64 %118, i64 %119)
 	%121 = call i64 @js_arr_new()
-	%122 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%122 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%123 = call i64 @js_scope_get(i64 %102, i64 %122)
 	%124 = call i64 @js_arr_push(i64 %121, i64 %123)
 	%125 = call i64 @js_call(i64 %120, i64 %118, i64 %121)
@@ -49624,14 +50465,14 @@ dead848:
 	%143 = phi i64 [ %102, %141 ]
 	ret i64 3
 
-dead849:
+dead856:
 	br label %133
 
-dead850:
+dead857:
 	ret i64 0
 }
 
-define i64 @jsf_1000273(i64 %env, i64 %args) {
+define i64 @jsf_1000275(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -49686,7 +50527,7 @@ entry:
 	br label %44
 
 36:
-	%37 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000581, i64 0, i64 0), i64 11)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000591, i64 0, i64 0), i64 11)
 	%38 = call i64 @js_scope_get(i64 %23, i64 %37)
 	%39 = call i64 @js_arr_new()
 	%40 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -49700,7 +50541,7 @@ entry:
 
 45:
 	%46 = phi i64 [ %23, %44 ]
-	%47 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000764, i64 0, i64 0), i64 10)
+	%47 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000780, i64 0, i64 0), i64 10)
 	%48 = call i64 @js_scope_get(i64 %46, i64 %47)
 	%49 = call i64 @js_arr_new()
 	%50 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -49709,17 +50550,17 @@ entry:
 	%53 = call i64 @js_call(i64 %48, i64 0, i64 %49)
 	ret i64 %53
 
-dead851:
+dead858:
 	br label %36
 
-dead852:
+dead859:
 	br label %19
 
-dead853:
+dead860:
 	ret i64 0
 }
 
-define i64 @jsf_1000274(i64 %env, i64 %args) {
+define i64 @jsf_1000276(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -49737,11 +50578,11 @@ entry:
 	%9 = phi i64 [ %7, %6 ]
 	%10 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
-	%12 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000766, i64 0, i64 0), i64 6)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000782, i64 0, i64 0), i64 6)
 	%13 = call i64 @js_get(i64 %11, i64 %12)
-	%14 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000767, i64 0, i64 0), i64 3)
+	%14 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000783, i64 0, i64 0), i64 3)
 	%15 = call i64 @js_tdecl(i64 %9, i64 %14, i64 %13)
-	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000767, i64 0, i64 0), i64 3)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000783, i64 0, i64 0), i64 3)
 	%17 = call i64 @js_scope_get(i64 %9, i64 %16)
 	%18 = call i64 @js_typeof(i64 %17)
 	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
@@ -49779,19 +50620,19 @@ entry:
 	%43 = call i64 @js_get(i64 %41, i64 %42)
 	%44 = call i64 @js_arr_push(i64 %39, i64 %43)
 	%45 = call i64 @js_call(i64 %38, i64 0, i64 %39)
-	%46 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000767, i64 0, i64 0), i64 3)
+	%46 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000783, i64 0, i64 0), i64 3)
 	%47 = call i64 @js_scope_get(i64 %36, i64 %46)
 	%48 = call i64 @js_add(i64 %45, i64 %47)
 	ret i64 %48
 
-dead854:
+dead861:
 	br label %24
 
-dead855:
+dead862:
 	ret i64 0
 }
 
-define i64 @jsf_1000275(i64 %env, i64 %args) {
+define i64 @jsf_1000277(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -49800,7 +50641,7 @@ entry:
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000768, i64 0, i64 0), i64 2)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000784, i64 0, i64 0), i64 2)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -49820,26 +50661,26 @@ entry:
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_call(i64 %17, i64 0, i64 %18)
-	%23 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000769, i64 0, i64 0), i64 5)
+	%23 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
 	%24 = call i64 @js_tdecl(i64 %15, i64 %23, i64 %22)
 	%25 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000378, i64 0, i64 0), i64 7)
 	%26 = call i64 @js_scope_get(i64 %15, i64 %25)
 	%27 = call i64 @js_arr_new()
-	%28 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000769, i64 0, i64 0), i64 5)
+	%28 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
 	%29 = call i64 @js_scope_get(i64 %15, i64 %28)
 	%30 = call i64 @js_arr_push(i64 %27, i64 %29)
 	%31 = call i64 @js_arr_push(i64 %27, i64 2)
 	%32 = call i64 @js_call(i64 %26, i64 0, i64 %27)
-	%33 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000770, i64 0, i64 0), i64 2)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000786, i64 0, i64 0), i64 2)
 	%34 = call i64 @js_tdecl(i64 %15, i64 %33, i64 %32)
-	%35 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000771, i64 0, i64 0), i64 5)
-	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000770, i64 0, i64 0), i64 2)
+	%35 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000787, i64 0, i64 0), i64 5)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000786, i64 0, i64 0), i64 2)
 	%37 = call i64 @js_scope_get(i64 %15, i64 %36)
 	%38 = call i64 @js_add(i64 %35, i64 %37)
-	%39 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%39 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%40 = call i64 @js_tdecl(i64 %15, i64 %39, i64 %38)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
-	%42 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000772, i64 0, i64 0), i64 6)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000788, i64 0, i64 0), i64 6)
 	%43 = call i64 @js_tdecl(i64 %15, i64 %42, i64 %41)
 	%44 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%45 = call i64 @js_scope_get(i64 %15, i64 %44)
@@ -49884,7 +50725,7 @@ entry:
 	%70 = phi i64 [ %68, %67 ]
 	%71 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%72 = call i64 @js_scope_get(i64 %70, i64 %71)
-	%73 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%73 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%74 = call i64 @js_scope_get(i64 %70, i64 %73)
 	%75 = call i64 @js_get(i64 %72, i64 %74)
 	%76 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000442, i64 0, i64 0), i64 2)
@@ -49918,18 +50759,18 @@ entry:
 	%96 = phi i64 [ %70, %94 ]
 	%97 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000442, i64 0, i64 0), i64 2)
 	%98 = call i64 @js_scope_get(i64 %96, i64 %97)
-	%99 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000772, i64 0, i64 0), i64 6)
+	%99 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000788, i64 0, i64 0), i64 6)
 	%100 = call i64 @js_tset(i64 %96, i64 %99, i64 %98)
 	%101 = call i64 @js_setret(i64 %98)
 	br label %55
 
-dead856:
+dead863:
 	br label %86
 
 102:
 	%103 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%104 = call i64 @js_scope_get(i64 %15, i64 %103)
-	%105 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000772, i64 0, i64 0), i64 6)
+	%105 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000788, i64 0, i64 0), i64 6)
 	%106 = call i64 @js_scope_get(i64 %15, i64 %105)
 	%107 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%108 = call i64 @js_get(i64 %106, i64 %107)
@@ -49942,32 +50783,32 @@ dead856:
 	br label %143
 
 113:
-	%114 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000768, i64 0, i64 0), i64 2)
+	%114 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000784, i64 0, i64 0), i64 2)
 	%115 = call i64 @js_scope_get(i64 %15, i64 %114)
 	%116 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%117 = call i64 @js_scope_get(i64 %15, i64 %116)
-	%118 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000769, i64 0, i64 0), i64 5)
+	%118 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
 	%119 = call i64 @js_scope_get(i64 %15, i64 %118)
 	%120 = call i64 @js_set(i64 %117, i64 %119, i64 %115)
 	%121 = call i64 @js_setret(i64 %115)
-	%122 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000768, i64 0, i64 0), i64 2)
+	%122 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000784, i64 0, i64 0), i64 2)
 	%123 = call i64 @js_scope_get(i64 %15, i64 %122)
 	%124 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%125 = call i64 @js_scope_get(i64 %15, i64 %124)
-	%126 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000770, i64 0, i64 0), i64 2)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000786, i64 0, i64 0), i64 2)
 	%127 = call i64 @js_scope_get(i64 %15, i64 %126)
 	%128 = call i64 @js_set(i64 %125, i64 %127, i64 %123)
 	%129 = call i64 @js_setret(i64 %123)
-	%130 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000772, i64 0, i64 0), i64 6)
+	%130 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000788, i64 0, i64 0), i64 6)
 	%131 = call i64 @js_scope_get(i64 %15, i64 %130)
-	%132 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000769, i64 0, i64 0), i64 5)
+	%132 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
 	%133 = call i64 @js_scope_get(i64 %15, i64 %132)
 	%134 = call i64 @js_add(i64 %131, i64 %133)
-	%135 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%135 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%136 = call i64 @js_add(i64 %134, i64 %135)
 	%137 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%138 = call i64 @js_scope_get(i64 %15, i64 %137)
-	%139 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%139 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%140 = call i64 @js_scope_get(i64 %15, i64 %139)
 	%141 = call i64 @js_set(i64 %138, i64 %140, i64 %136)
 	%142 = call i64 @js_setret(i64 %136)
@@ -49979,12 +50820,12 @@ dead856:
 
 145:
 	%146 = phi i64 [ %144, %143 ]
-	%147 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000772, i64 0, i64 0), i64 6)
+	%147 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000788, i64 0, i64 0), i64 6)
 	%148 = call i64 @js_scope_get(i64 %146, i64 %147)
 	%149 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
 	%150 = call i64 @js_get(i64 %148, i64 %149)
 	%151 = call i64 @js_arr_new()
-	%152 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%152 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%153 = call i64 @js_arr_push(i64 %151, i64 %152)
 	%154 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%155 = call i64 @js_scope_get(i64 %146, i64 %154)
@@ -49992,11 +50833,11 @@ dead856:
 	%157 = call i64 @js_call(i64 %150, i64 %148, i64 %151)
 	%158 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000315, i64 0, i64 0), i64 2)
 	%159 = call i64 @js_tdecl(i64 %146, i64 %158, i64 %157)
-	%160 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000768, i64 0, i64 0), i64 2)
+	%160 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000784, i64 0, i64 0), i64 2)
 	%161 = call i64 @js_scope_get(i64 %146, i64 %160)
 	%162 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%163 = call i64 @js_scope_get(i64 %146, i64 %162)
-	%164 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000772, i64 0, i64 0), i64 6)
+	%164 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000788, i64 0, i64 0), i64 6)
 	%165 = call i64 @js_scope_get(i64 %146, i64 %164)
 	%166 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000028, i64 0, i64 0), i64 9)
 	%167 = call i64 @js_get(i64 %165, i64 %166)
@@ -50019,11 +50860,11 @@ dead856:
 	%184 = call i64 @js_setret(i64 %181)
 	br label %102
 
-dead857:
+dead864:
 	ret i64 0
 }
 
-define i64 @jsf_1000276(i64 %env, i64 %args) {
+define i64 @jsf_1000278(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -50035,17 +50876,17 @@ entry:
 
 4:
 	%5 = phi i64 [ %0, %3 ]
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_arr_new()
 	%9 = call i64 @js_call(i64 %7, i64 0, i64 %8)
 	ret i64 %9
 
-dead858:
+dead865:
 	ret i64 0
 }
 
-define i64 @jsf_1000277(i64 %env, i64 %args) {
+define i64 @jsf_1000279(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -50066,7 +50907,7 @@ entry:
 
 13:
 	%14 = phi i64 [ %0, %12 ]
-	%15 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%16 = call i64 @js_scope_get(i64 %14, i64 %15)
 	%17 = call i64 @js_arr_new()
 	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -50081,11 +50922,11 @@ entry:
 	%27 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %27
 
-dead859:
+dead866:
 	ret i64 0
 }
 
-define i64 @jsf_1000278(i64 %env, i64 %args) {
+define i64 @jsf_1000280(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -50103,7 +50944,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -50115,79 +50956,79 @@ entry:
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %21
 
-dead860:
-	ret i64 0
-}
-
-define i64 @jsf_1000279(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
-	%5 = call i64 @js_arg(i64 %args, i64 1)
-	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
-	br label %9
-
-9:
-	br label %10
-
-10:
-	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000545, i64 0, i64 0), i64 8)
-	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
-	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
-	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
-	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
-	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
-	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	ret i64 %21
-
-dead861:
-	ret i64 0
-}
-
-define i64 @jsf_1000280(i64 %env, i64 %args) {
-entry:
-	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%2 = call i64 @js_arg(i64 %args, i64 0)
-	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
-	%5 = call i64 @js_arg(i64 %args, i64 1)
-	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
-	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
-	br label %9
-
-9:
-	br label %10
-
-10:
-	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000546, i64 0, i64 0), i64 8)
-	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
-	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
-	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
-	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
-	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
-	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
-	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
-	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	ret i64 %21
-
-dead862:
+dead867:
 	ret i64 0
 }
 
 define i64 @jsf_1000281(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
+	br label %9
+
+9:
+	br label %10
+
+10:
+	%11 = phi i64 [ %0, %9 ]
+	%12 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000552, i64 0, i64 0), i64 8)
+	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
+	%14 = call i64 @js_arr_new()
+	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
+	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
+	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
+	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
+	ret i64 %21
+
+dead868:
+	ret i64 0
+}
+
+define i64 @jsf_1000282(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
+	br label %9
+
+9:
+	br label %10
+
+10:
+	%11 = phi i64 [ %0, %9 ]
+	%12 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000553, i64 0, i64 0), i64 8)
+	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
+	%14 = call i64 @js_arr_new()
+	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
+	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
+	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
+	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
+	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
+	ret i64 %21
+
+dead869:
+	ret i64 0
+}
+
+define i64 @jsf_1000283(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
@@ -50210,7 +51051,7 @@ entry:
 	%14 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000008, i64 0, i64 0), i64 5)
 	%15 = call i64 @js_get(i64 %13, i64 %14)
 	%16 = call i64 @js_arr_new()
-	%17 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000779, i64 0, i64 0), i64 6)
+	%17 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000795, i64 0, i64 0), i64 6)
 	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
 	%19 = call i64 @js_arr_new()
 	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
@@ -50239,11 +51080,11 @@ entry:
 	%43 = call i64 @js_eq(i64 %41, i64 %42)
 	ret i64 %43
 
-dead863:
+dead870:
 	ret i64 0
 }
 
-define i64 @jsf_1000282(i64 %env, i64 %args) {
+define i64 @jsf_1000284(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
@@ -50262,7 +51103,7 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000304, i64 0, i64 0), i64 3)
 	%16 = call i64 @js_tdecl(i64 %12, i64 %15, i64 %14)
@@ -50308,16 +51149,16 @@ entry:
 
 43:
 	%44 = phi i64 [ %12, %42 ]
-	%45 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000779, i64 0, i64 0), i64 6)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000795, i64 0, i64 0), i64 6)
 	%46 = call i64 @js_scope_get(i64 %44, i64 %45)
 	%47 = call i64 @js_arr_new()
-	%48 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000781, i64 0, i64 0), i64 10)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
 	%49 = call i64 @js_scope_get(i64 %44, i64 %48)
 	%50 = call i64 @js_arr_new()
 	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
 	%52 = call i64 @js_scope_get(i64 %44, i64 %51)
 	%53 = call i64 @js_arr_push(i64 %50, i64 %52)
-	%54 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000782, i64 0, i64 0), i64 8)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000798, i64 0, i64 0), i64 8)
 	%55 = call i64 @js_arr_push(i64 %50, i64 %54)
 	%56 = call i64 @js_call(i64 %49, i64 0, i64 %50)
 	%57 = call i64 @js_arr_push(i64 %47, i64 %56)
@@ -50334,7 +51175,7 @@ entry:
 
 65:
 	%66 = phi i64 [ %12, %64 ]
-	%67 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000779, i64 0, i64 0), i64 6)
+	%67 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000795, i64 0, i64 0), i64 6)
 	%68 = call i64 @js_scope_get(i64 %66, i64 %67)
 	%69 = call i64 @js_arr_new()
 	%70 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
@@ -50352,7 +51193,7 @@ entry:
 	br label %91
 
 80:
-	%81 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000783, i64 0, i64 0), i64 13)
+	%81 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000799, i64 0, i64 0), i64 13)
 	%82 = call i64 @js_scope_get(i64 %12, i64 %81)
 	%83 = call i64 @js_arr_new()
 	%84 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000304, i64 0, i64 0), i64 3)
@@ -50375,17 +51216,17 @@ entry:
 	%97 = call i64 @js_setret(i64 %94)
 	br label %80
 
-dead864:
+dead871:
 	ret i64 0
 }
 
-define i64 @jsf_1000283(i64 %env, i64 %args) {
+define i64 @jsf_1000285(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -50429,7 +51270,7 @@ entry:
 	%33 = phi i64 [ %12, %31 ]
 	ret i64 2
 
-dead865:
+dead872:
 	br label %21
 
 34:
@@ -50453,7 +51294,7 @@ dead865:
 
 47:
 	%48 = phi i64 [ %46, %45 ]
-	%49 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%50 = call i64 @js_scope_get(i64 %48, i64 %49)
 	%51 = call i64 @js_seq(i64 %50, i64 0)
 	%52 = call i64 @js_truthy(i64 %51)
@@ -50464,7 +51305,7 @@ dead865:
 	br label %67
 
 55:
-	%56 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000555, i64 0, i64 0), i64 5)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000561, i64 0, i64 0), i64 5)
 	%57 = call i64 @js_scope_get(i64 %48, i64 %56)
 	%58 = call i64 @js_arr_new()
 	%59 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -50482,7 +51323,7 @@ dead865:
 
 68:
 	%69 = phi i64 [ %48, %67 ]
-	%70 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000555, i64 0, i64 0), i64 5)
+	%70 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000561, i64 0, i64 0), i64 5)
 	%71 = call i64 @js_scope_get(i64 %69, i64 %70)
 	%72 = call i64 @js_arr_new()
 	%73 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -50509,22 +51350,22 @@ dead865:
 	%86 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%87 = call i64 @js_scope_get(i64 %85, i64 %86)
 	%88 = call i64 @js_arr_new()
-	%89 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%89 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%90 = call i64 @js_arr_push(i64 %88, i64 %89)
-	%91 = call i64 @js_str_mem(i8* getelementptr ([45 x i8], [45 x i8]* @str.1000786, i64 0, i64 0), i64 45)
+	%91 = call i64 @js_str_mem(i8* getelementptr ([45 x i8], [45 x i8]* @str.1000802, i64 0, i64 0), i64 45)
 	%92 = call i64 @js_arr_push(i64 %88, i64 %91)
 	%93 = call i64 @js_call(i64 %87, i64 0, i64 %88)
 	%94 = call i64 @js_setret(i64 %93)
 	br label %82
 
-dead866:
+dead873:
 	br label %55
 
 95:
 	br label %120
 
 96:
-	%97 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000545, i64 0, i64 0), i64 8)
+	%97 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000552, i64 0, i64 0), i64 8)
 	%98 = call i64 @js_scope_get(i64 %48, i64 %97)
 	%99 = call i64 @js_arr_new()
 	%100 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -50533,16 +51374,16 @@ dead866:
 	%103 = call i64 @js_num_i(i64 0)
 	%104 = call i64 @js_arr_push(i64 %99, i64 %103)
 	%105 = call i64 @js_call(i64 %98, i64 0, i64 %99)
-	%106 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%107 = call i64 @js_tdecl(i64 %48, i64 %106, i64 %105)
-	%108 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%108 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%109 = call i64 @js_scope_get(i64 %48, i64 %108)
 	%110 = call i64 @js_typeof(i64 %109)
 	%111 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
 	%112 = call i64 @js_eq(i64 %110, i64 %111)
-	%113 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000789, i64 0, i64 0), i64 5)
+	%113 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000805, i64 0, i64 0), i64 5)
 	%114 = call i64 @js_tdecl(i64 %48, i64 %113, i64 %112)
-	%115 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000789, i64 0, i64 0), i64 5)
+	%115 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000805, i64 0, i64 0), i64 5)
 	%116 = call i64 @js_scope_get(i64 %48, i64 %115)
 	%117 = call i64 @js_not(i64 %116)
 	%118 = call i64 @js_truthy(i64 %117)
@@ -50554,13 +51395,13 @@ dead866:
 
 121:
 	%122 = phi i64 [ %48, %120 ]
-	%123 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%123 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%124 = call i64 @js_scope_get(i64 %122, i64 %123)
 	%125 = call i64 @js_arr_new()
-	%126 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%127 = call i64 @js_scope_get(i64 %122, i64 %126)
 	%128 = call i64 @js_arr_push(i64 %125, i64 %127)
-	%129 = call i64 @js_str_mem(i8* getelementptr ([35 x i8], [35 x i8]* @str.1000788, i64 0, i64 0), i64 35)
+	%129 = call i64 @js_str_mem(i8* getelementptr ([35 x i8], [35 x i8]* @str.1000804, i64 0, i64 0), i64 35)
 	%130 = call i64 @js_arr_push(i64 %125, i64 %129)
 	%131 = call i64 @js_call(i64 %124, i64 0, i64 %125)
 	%132 = call i64 @js_setret(i64 %131)
@@ -50570,7 +51411,7 @@ dead866:
 	%134 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000427, i64 0, i64 0), i64 7)
 	%135 = call i64 @js_scope_get(i64 %48, i64 %134)
 	%136 = call i64 @js_arr_new()
-	%137 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%137 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%138 = call i64 @js_scope_get(i64 %48, i64 %137)
 	%139 = call i64 @js_arr_push(i64 %136, i64 %138)
 	%140 = call i64 @js_call(i64 %135, i64 0, i64 %136)
@@ -50587,7 +51428,7 @@ dead866:
 	br label %166
 
 147:
-	%148 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000545, i64 0, i64 0), i64 8)
+	%148 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000552, i64 0, i64 0), i64 8)
 	%149 = call i64 @js_scope_get(i64 %48, i64 %148)
 	%150 = call i64 @js_arr_new()
 	%151 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -50596,9 +51437,9 @@ dead866:
 	%154 = call i64 @js_num_i(i64 1)
 	%155 = call i64 @js_arr_push(i64 %150, i64 %154)
 	%156 = call i64 @js_call(i64 %149, i64 0, i64 %150)
-	%157 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000791, i64 0, i64 0), i64 2)
+	%157 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
 	%158 = call i64 @js_tdecl(i64 %48, i64 %157, i64 %156)
-	%159 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000791, i64 0, i64 0), i64 2)
+	%159 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
 	%160 = call i64 @js_scope_get(i64 %48, i64 %159)
 	%161 = call i64 @js_typeof(i64 %160)
 	%162 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
@@ -50612,13 +51453,13 @@ dead866:
 
 167:
 	%168 = phi i64 [ %48, %166 ]
-	%169 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%169 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%170 = call i64 @js_scope_get(i64 %168, i64 %169)
 	%171 = call i64 @js_arr_new()
-	%172 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%172 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%173 = call i64 @js_scope_get(i64 %168, i64 %172)
 	%174 = call i64 @js_arr_push(i64 %171, i64 %173)
-	%175 = call i64 @js_str_mem(i8* getelementptr ([54 x i8], [54 x i8]* @str.1000790, i64 0, i64 0), i64 54)
+	%175 = call i64 @js_str_mem(i8* getelementptr ([54 x i8], [54 x i8]* @str.1000806, i64 0, i64 0), i64 54)
 	%176 = call i64 @js_arr_push(i64 %171, i64 %175)
 	%177 = call i64 @js_call(i64 %170, i64 0, i64 %171)
 	%178 = call i64 @js_setret(i64 %177)
@@ -50628,7 +51469,7 @@ dead866:
 	br label %185
 
 180:
-	%181 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000789, i64 0, i64 0), i64 5)
+	%181 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000805, i64 0, i64 0), i64 5)
 	%182 = call i64 @js_scope_get(i64 %48, i64 %181)
 	%183 = call i64 @js_truthy(i64 %182)
 	%184 = icmp ne i64 %183, 0
@@ -50639,13 +51480,13 @@ dead866:
 
 186:
 	%187 = phi i64 [ %48, %185 ]
-	%188 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%188 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%189 = call i64 @js_scope_get(i64 %187, i64 %188)
 	%190 = call i64 @js_arr_new()
-	%191 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%191 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%192 = call i64 @js_scope_get(i64 %187, i64 %191)
 	%193 = call i64 @js_arr_push(i64 %190, i64 %192)
-	%194 = call i64 @js_str_mem(i8* getelementptr ([41 x i8], [41 x i8]* @str.1000792, i64 0, i64 0), i64 41)
+	%194 = call i64 @js_str_mem(i8* getelementptr ([41 x i8], [41 x i8]* @str.1000808, i64 0, i64 0), i64 41)
 	%195 = call i64 @js_arr_push(i64 %190, i64 %194)
 	%196 = call i64 @js_call(i64 %189, i64 0, i64 %190)
 	%197 = call i64 @js_setret(i64 %196)
@@ -50655,16 +51496,16 @@ dead866:
 	br label %214
 
 199:
-	%200 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000793, i64 0, i64 0), i64 11)
+	%200 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000809, i64 0, i64 0), i64 11)
 	%201 = call i64 @js_scope_get(i64 %48, i64 %200)
 	%202 = call i64 @js_arr_new()
-	%203 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%203 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%204 = call i64 @js_scope_get(i64 %48, i64 %203)
 	%205 = call i64 @js_arr_push(i64 %202, i64 %204)
-	%206 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000701, i64 0, i64 0), i64 4)
+	%206 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000710, i64 0, i64 0), i64 4)
 	%207 = call i64 @js_scope_get(i64 %48, i64 %206)
 	%208 = call i64 @js_arr_push(i64 %202, i64 %207)
-	%209 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000791, i64 0, i64 0), i64 2)
+	%209 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
 	%210 = call i64 @js_scope_get(i64 %48, i64 %209)
 	%211 = call i64 @js_arr_push(i64 %202, i64 %210)
 	%212 = call i64 @js_call(i64 %201, i64 0, i64 %202)
@@ -50678,17 +51519,17 @@ dead866:
 	%216 = phi i64 [ %48, %214 ]
 	ret i64 3
 
-dead867:
+dead874:
 	br label %199
 
-dead868:
+dead875:
 	br label %35
 
 217:
 	br label %234
 
 218:
-	%219 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%219 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
 	%220 = call i64 @js_scope_get(i64 %12, i64 %219)
 	%221 = call i64 @js_arr_new()
 	%222 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -50699,7 +51540,7 @@ dead868:
 	%227 = call i64 @js_tdecl(i64 %12, i64 %226, i64 %225)
 	%228 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000023, i64 0, i64 0), i64 1)
 	%229 = call i64 @js_scope_get(i64 %12, i64 %228)
-	%230 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000591, i64 0, i64 0), i64 7)
+	%230 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000601, i64 0, i64 0), i64 7)
 	%231 = call i64 @js_ne(i64 %229, i64 %230)
 	%232 = call i64 @js_truthy(i64 %231)
 	%233 = icmp ne i64 %232, 0
@@ -50710,13 +51551,13 @@ dead868:
 
 235:
 	%236 = phi i64 [ %12, %234 ]
-	%237 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000781, i64 0, i64 0), i64 10)
+	%237 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
 	%238 = call i64 @js_scope_get(i64 %236, i64 %237)
 	%239 = call i64 @js_arr_new()
 	%240 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%241 = call i64 @js_scope_get(i64 %236, i64 %240)
 	%242 = call i64 @js_arr_push(i64 %239, i64 %241)
-	%243 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000782, i64 0, i64 0), i64 8)
+	%243 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000798, i64 0, i64 0), i64 8)
 	%244 = call i64 @js_arr_push(i64 %239, i64 %243)
 	%245 = call i64 @js_call(i64 %238, i64 0, i64 %239)
 	%246 = call i64 @js_typeof(i64 %245)
@@ -50737,7 +51578,7 @@ dead868:
 
 254:
 	%255 = phi i64 [ %236, %253 ]
-	%256 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%256 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%257 = call i64 @js_scope_get(i64 %255, i64 %256)
 	%258 = call i64 @js_sne(i64 %257, i64 0)
 	%259 = call i64 @js_truthy(i64 %258)
@@ -50751,10 +51592,10 @@ dead868:
 	%263 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%264 = call i64 @js_scope_get(i64 %255, i64 %263)
 	%265 = call i64 @js_arr_new()
-	%266 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%266 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%267 = call i64 @js_arr_push(i64 %265, i64 %266)
-	%268 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000795, i64 0, i64 0), i64 15)
-	%269 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%268 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000811, i64 0, i64 0), i64 15)
+	%269 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
 	%270 = call i64 @js_scope_get(i64 %255, i64 %269)
 	%271 = call i64 @js_arr_new()
 	%272 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -50762,7 +51603,7 @@ dead868:
 	%274 = call i64 @js_arr_push(i64 %271, i64 %273)
 	%275 = call i64 @js_call(i64 %270, i64 0, i64 %271)
 	%276 = call i64 @js_add(i64 %268, i64 %275)
-	%277 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000796, i64 0, i64 0), i64 16)
+	%277 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000812, i64 0, i64 0), i64 16)
 	%278 = call i64 @js_add(i64 %276, i64 %277)
 	%279 = call i64 @js_arr_push(i64 %265, i64 %278)
 	%280 = call i64 @js_call(i64 %264, i64 0, i64 %265)
@@ -50774,19 +51615,19 @@ dead868:
 
 283:
 	%284 = phi i64 [ %255, %282 ]
-	%285 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%285 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%286 = call i64 @js_scope_get(i64 %284, i64 %285)
 	%287 = call i64 @js_arr_new()
-	%288 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%288 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%289 = call i64 @js_scope_get(i64 %284, i64 %288)
 	%290 = call i64 @js_arr_push(i64 %287, i64 %289)
-	%291 = call i64 @js_str_mem(i8* getelementptr ([24 x i8], [24 x i8]* @str.1000794, i64 0, i64 0), i64 24)
+	%291 = call i64 @js_str_mem(i8* getelementptr ([24 x i8], [24 x i8]* @str.1000810, i64 0, i64 0), i64 24)
 	%292 = call i64 @js_arr_push(i64 %287, i64 %291)
 	%293 = call i64 @js_call(i64 %286, i64 0, i64 %287)
 	%294 = call i64 @js_setret(i64 %293)
 	br label %262
 
-dead869:
+dead876:
 	br label %218
 
 295:
@@ -50800,7 +51641,7 @@ dead869:
 
 298:
 	%299 = phi i64 [ %12, %297 ]
-	%300 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%300 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%301 = call i64 @js_scope_get(i64 %299, i64 %300)
 	%302 = call i64 @js_sne(i64 %301, i64 0)
 	%303 = call i64 @js_truthy(i64 %302)
@@ -50814,13 +51655,13 @@ dead869:
 	%307 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%308 = call i64 @js_scope_get(i64 %299, i64 %307)
 	%309 = call i64 @js_arr_new()
-	%310 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%310 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%311 = call i64 @js_arr_push(i64 %309, i64 %310)
-	%312 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000797, i64 0, i64 0), i64 14)
+	%312 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000813, i64 0, i64 0), i64 14)
 	%313 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000023, i64 0, i64 0), i64 1)
 	%314 = call i64 @js_scope_get(i64 %299, i64 %313)
 	%315 = call i64 @js_add(i64 %312, i64 %314)
-	%316 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000796, i64 0, i64 0), i64 16)
+	%316 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000812, i64 0, i64 0), i64 16)
 	%317 = call i64 @js_add(i64 %315, i64 %316)
 	%318 = call i64 @js_arr_push(i64 %309, i64 %317)
 	%319 = call i64 @js_call(i64 %308, i64 0, i64 %309)
@@ -50832,29 +51673,29 @@ dead869:
 
 322:
 	%323 = phi i64 [ %299, %321 ]
-	%324 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%324 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%325 = call i64 @js_scope_get(i64 %323, i64 %324)
 	%326 = call i64 @js_arr_new()
-	%327 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%327 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%328 = call i64 @js_scope_get(i64 %323, i64 %327)
 	%329 = call i64 @js_arr_push(i64 %326, i64 %328)
-	%330 = call i64 @js_str_mem(i8* getelementptr ([24 x i8], [24 x i8]* @str.1000794, i64 0, i64 0), i64 24)
+	%330 = call i64 @js_str_mem(i8* getelementptr ([24 x i8], [24 x i8]* @str.1000810, i64 0, i64 0), i64 24)
 	%331 = call i64 @js_arr_push(i64 %326, i64 %330)
 	%332 = call i64 @js_call(i64 %325, i64 0, i64 %326)
 	%333 = call i64 @js_setret(i64 %332)
 	br label %306
 
-dead870:
+dead877:
 	ret i64 0
 }
 
-define i64 @jsf_1000284(i64 %env, i64 %args) {
+define i64 @jsf_1000286(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000799, i64 0, i64 0), i64 3)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000815, i64 0, i64 0), i64 3)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -50870,10 +51711,10 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000781, i64 0, i64 0), i64 10)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
-	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -50895,7 +51736,7 @@ entry:
 	br label %39
 
 36:
-	%37 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000799, i64 0, i64 0), i64 3)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000815, i64 0, i64 0), i64 3)
 	%38 = call i64 @js_scope_get(i64 %15, i64 %37)
 	ret i64 %38
 
@@ -50904,13 +51745,13 @@ entry:
 
 40:
 	%41 = phi i64 [ %15, %39 ]
-	%42 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000801, i64 0, i64 0), i64 9)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000817, i64 0, i64 0), i64 9)
 	%43 = call i64 @js_scope_get(i64 %41, i64 %42)
 	%44 = call i64 @js_arr_new()
-	%45 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000799, i64 0, i64 0), i64 3)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000815, i64 0, i64 0), i64 3)
 	%46 = call i64 @js_scope_get(i64 %41, i64 %45)
 	%47 = call i64 @js_arr_push(i64 %44, i64 %46)
-	%48 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000779, i64 0, i64 0), i64 6)
+	%48 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000795, i64 0, i64 0), i64 6)
 	%49 = call i64 @js_scope_get(i64 %41, i64 %48)
 	%50 = call i64 @js_arr_new()
 	%51 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000448, i64 0, i64 0), i64 2)
@@ -50920,7 +51761,7 @@ entry:
 	%55 = call i64 @js_arr_push(i64 %50, i64 %54)
 	%56 = call i64 @js_call(i64 %49, i64 0, i64 %50)
 	%57 = call i64 @js_arr_push(i64 %44, i64 %56)
-	%58 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000779, i64 0, i64 0), i64 6)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000795, i64 0, i64 0), i64 6)
 	%59 = call i64 @js_scope_get(i64 %41, i64 %58)
 	%60 = call i64 @js_arr_new()
 	%61 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000448, i64 0, i64 0), i64 2)
@@ -50934,14 +51775,14 @@ entry:
 	%69 = call i64 @js_setret(i64 %68)
 	br label %36
 
-dead871:
+dead878:
 	ret i64 0
 }
 
-define i64 @jsf_1000285(i64 %env, i64 %args) {
+define i64 @jsf_1000287(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -50960,10 +51801,10 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000781, i64 0, i64 0), i64 10)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
-	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -50985,7 +51826,7 @@ entry:
 	br label %47
 
 36:
-	%37 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000784, i64 0, i64 0), i64 10)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000800, i64 0, i64 0), i64 10)
 	%38 = call i64 @js_scope_get(i64 %15, i64 %37)
 	%39 = call i64 @js_arr_new()
 	%40 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000448, i64 0, i64 0), i64 2)
@@ -51002,7 +51843,7 @@ entry:
 
 48:
 	%49 = phi i64 [ %15, %47 ]
-	%50 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000783, i64 0, i64 0), i64 13)
+	%50 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000799, i64 0, i64 0), i64 13)
 	%51 = call i64 @js_scope_get(i64 %49, i64 %50)
 	%52 = call i64 @js_arr_new()
 	%53 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000125, i64 0, i64 0), i64 0)
@@ -51013,17 +51854,17 @@ entry:
 	%58 = call i64 @js_call(i64 %51, i64 0, i64 %52)
 	ret i64 %58
 
-dead872:
+dead879:
 	br label %36
 
-dead873:
+dead880:
 	ret i64 0
 }
 
-define i64 @jsf_1000286(i64 %env, i64 %args) {
+define i64 @jsf_1000288(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -51039,16 +51880,16 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%16 = call i64 @js_tdecl(i64 %12, i64 %15, i64 %14)
-	%17 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%17 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%18 = call i64 @js_scope_get(i64 %12, i64 %17)
 	%19 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%20 = call i64 @js_tset(i64 %12, i64 %19, i64 %18)
 	%21 = call i64 @js_setret(i64 %18)
-	%22 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
 	%24 = call i64 @js_sne(i64 %23, i64 0)
 	%25 = call i64 @js_truthy(i64 %24)
@@ -51056,7 +51897,7 @@ entry:
 	br i1 %26, label %27, label %31
 
 27:
-	%28 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%28 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%29 = call i64 @js_scope_get(i64 %12, i64 %28)
 	%30 = call i64 @js_sne(i64 %29, i64 1)
 	br label %31
@@ -51068,7 +51909,7 @@ entry:
 	br i1 %34, label %35, label %41
 
 35:
-	%36 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%37 = call i64 @js_scope_get(i64 %12, i64 %36)
 	%38 = call i64 @js_typeof(i64 %37)
 	%39 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
@@ -51082,7 +51923,7 @@ entry:
 	br i1 %44, label %45, label %51
 
 45:
-	%46 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%46 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%47 = call i64 @js_scope_get(i64 %12, i64 %46)
 	%48 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000425, i64 0, i64 0), i64 9)
 	%49 = call i64 @js_get(i64 %47, i64 %48)
@@ -51111,7 +51952,7 @@ entry:
 
 63:
 	%64 = phi i64 [ %12, %62 ]
-	%65 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%66 = call i64 @js_scope_get(i64 %64, i64 %65)
 	%67 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000060, i64 0, i64 0), i64 7)
 	%68 = call i64 @js_get(i64 %66, i64 %67)
@@ -51164,7 +52005,7 @@ entry:
 	%103 = phi i64 [ %12, %101 ]
 	ret i64 0
 
-dead874:
+dead881:
 	br label %81
 
 104:
@@ -51206,11 +52047,11 @@ dead874:
 	%134 = call i64 @js_setret(i64 %131)
 	br label %105
 
-dead875:
+dead882:
 	ret i64 0
 }
 
-define i64 @jsf_1000287(i64 %env, i64 %args) {
+define i64 @jsf_1000289(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000304, i64 0, i64 0), i64 3)
@@ -51236,9 +52077,9 @@ entry:
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
-	%20 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
-	%22 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
 	%24 = call i64 @js_truthy(i64 %23)
 	%25 = icmp ne i64 %24, 0
@@ -51250,7 +52091,7 @@ entry:
 	%29 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
 	%30 = call i64 @js_get(i64 %28, i64 %29)
 	%31 = call i64 @js_arr_new()
-	%32 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000805, i64 0, i64 0), i64 3)
+	%32 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000821, i64 0, i64 0), i64 3)
 	%33 = call i64 @js_arr_push(i64 %31, i64 %32)
 	%34 = call i64 @js_call(i64 %30, i64 %28, i64 %31)
 	%35 = call i64 @js_num_i(i64 0)
@@ -51295,7 +52136,7 @@ entry:
 	%64 = call i64 @js_scope_get(i64 %62, i64 %63)
 	ret i64 %64
 
-dead876:
+dead883:
 	br label %42
 
 65:
@@ -51322,14 +52163,14 @@ dead876:
 	%80 = call i64 @js_scope_get(i64 %78, i64 %79)
 	ret i64 %80
 
-dead877:
+dead884:
 	br label %66
 
 81:
 	br label %109
 
 82:
-	%83 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000807, i64 0, i64 0), i64 12)
+	%83 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000823, i64 0, i64 0), i64 12)
 	%84 = call i64 @js_scope_get(i64 %12, i64 %83)
 	%85 = call i64 @js_arr_new()
 	%86 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000304, i64 0, i64 0), i64 3)
@@ -51341,17 +52182,17 @@ dead877:
 	%92 = call i64 @js_call(i64 %84, i64 0, i64 %85)
 	%93 = call i64 @js_setret(i64 %92)
 	%94 = call i64 @js_obj_new()
-	%95 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000808, i64 0, i64 0), i64 5)
+	%95 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000824, i64 0, i64 0), i64 5)
 	%96 = call i64 @js_tdecl(i64 %12, i64 %95, i64 %94)
 	%97 = call i64 @js_num_i(i64 0)
-	%98 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%98 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%99 = call i64 @js_tdecl(i64 %12, i64 %98, i64 %97)
 	%100 = call i64 @js_num_i(i64 0)
 	%101 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%102 = call i64 @js_tdecl(i64 %12, i64 %101, i64 %100)
 	%103 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000304, i64 0, i64 0), i64 3)
 	%104 = call i64 @js_scope_get(i64 %12, i64 %103)
-	%105 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000810, i64 0, i64 0), i64 1)
+	%105 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000826, i64 0, i64 0), i64 1)
 	%106 = call i64 @js_eq(i64 %104, i64 %105)
 	%107 = call i64 @js_truthy(i64 %106)
 	%108 = icmp ne i64 %107, 0
@@ -51428,7 +52269,7 @@ dead877:
 	%157 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%158 = call i64 @js_get(i64 %156, i64 %157)
 	%159 = call i64 @js_arr_new()
-	%160 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000806, i64 0, i64 0), i64 9)
+	%160 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000822, i64 0, i64 0), i64 9)
 	%161 = call i64 @js_scope_get(i64 %154, i64 %160)
 	%162 = call i64 @js_arr_new()
 	%163 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -51437,7 +52278,7 @@ dead877:
 	%166 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%167 = call i64 @js_scope_get(i64 %154, i64 %166)
 	%168 = call i64 @js_arr_push(i64 %162, i64 %167)
-	%169 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%169 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%170 = call i64 @js_scope_get(i64 %154, i64 %169)
 	%171 = call i64 @js_arr_push(i64 %162, i64 %170)
 	%172 = call i64 @js_call(i64 %161, i64 0, i64 %162)
@@ -51446,7 +52287,7 @@ dead877:
 	%175 = call i64 @js_setret(i64 %174)
 	br label %144
 
-dead878:
+dead885:
 	br label %82
 
 176:
@@ -51499,7 +52340,7 @@ dead878:
 	%207 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
 	%208 = call i64 @js_get(i64 %206, i64 %207)
 	%209 = call i64 @js_arr_new()
-	%210 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%210 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%211 = call i64 @js_arr_push(i64 %209, i64 %210)
 	%212 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%213 = call i64 @js_scope_get(i64 %204, i64 %212)
@@ -51531,7 +52372,7 @@ dead878:
 	%235 = call i64 @js_scope_get(i64 %204, i64 %234)
 	%236 = call i64 @js_arr_push(i64 %230, i64 %235)
 	%237 = call i64 @js_call(i64 %229, i64 %227, i64 %230)
-	%238 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000811, i64 0, i64 0), i64 2)
+	%238 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000827, i64 0, i64 0), i64 2)
 	%239 = call i64 @js_tdecl(i64 %204, i64 %238, i64 %237)
 	%240 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000315, i64 0, i64 0), i64 2)
 	%241 = call i64 @js_scope_get(i64 %204, i64 %240)
@@ -51540,7 +52381,7 @@ dead878:
 	%244 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%245 = call i64 @js_tset(i64 %204, i64 %244, i64 %243)
 	%246 = call i64 @js_setret(i64 %243)
-	%247 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000811, i64 0, i64 0), i64 2)
+	%247 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000827, i64 0, i64 0), i64 2)
 	%248 = call i64 @js_scope_get(i64 %204, i64 %247)
 	%249 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000028, i64 0, i64 0), i64 9)
 	%250 = call i64 @js_get(i64 %248, i64 %249)
@@ -51550,7 +52391,7 @@ dead878:
 	%254 = call i64 @js_num_i(i64 3)
 	%255 = call i64 @js_arr_push(i64 %251, i64 %254)
 	%256 = call i64 @js_call(i64 %250, i64 %248, i64 %251)
-	%257 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000805, i64 0, i64 0), i64 3)
+	%257 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000821, i64 0, i64 0), i64 3)
 	%258 = call i64 @js_eq(i64 %256, i64 %257)
 	%259 = call i64 @js_truthy(i64 %258)
 	%260 = icmp ne i64 %259, 0
@@ -51574,14 +52415,14 @@ dead878:
 	br label %300
 
 272:
-	%273 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%273 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%274 = call i64 @js_scope_get(i64 %204, i64 %273)
 	%275 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%276 = call i64 @js_tdecl(i64 %204, i64 %275, i64 %274)
 	%277 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%278 = call i64 @js_tset(i64 %204, i64 %277, i64 0)
 	%279 = call i64 @js_setret(i64 0)
-	%280 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000511, i64 0, i64 0), i64 10)
+	%280 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000520, i64 0, i64 0), i64 10)
 	%281 = call i64 @js_scope_get(i64 %204, i64 %280)
 	%282 = call i64 @js_arr_new()
 	%283 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -51589,7 +52430,7 @@ dead878:
 	%285 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%286 = call i64 @js_get(i64 %284, i64 %285)
 	%287 = call i64 @js_arr_push(i64 %282, i64 %286)
-	%288 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%288 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%289 = call i64 @js_scope_get(i64 %204, i64 %288)
 	%290 = call i64 @js_arr_push(i64 %282, i64 %289)
 	%291 = call i64 @js_call(i64 %281, i64 0, i64 %282)
@@ -51609,7 +52450,7 @@ dead878:
 
 302:
 	%303 = phi i64 [ %301, %300 ]
-	%304 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%304 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%305 = call i64 @js_scope_get(i64 %303, i64 %304)
 	%306 = call i64 @js_arr_new()
 	%307 = call i64 @js_call(i64 %305, i64 0, i64 %306)
@@ -51672,7 +52513,7 @@ dead878:
 	%352 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%353 = call i64 @js_scope_get(i64 %334, i64 %352)
 	%354 = call i64 @js_get(i64 %351, i64 %353)
-	%355 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%355 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%356 = call i64 @js_scope_get(i64 %334, i64 %355)
 	%357 = call i64 @js_ge(i64 %354, i64 %356)
 	br label %358
@@ -51701,13 +52542,13 @@ dead878:
 
 372:
 	%373 = phi i64 [ %334, %371 ]
-	%374 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%374 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%375 = call i64 @js_scope_get(i64 %373, i64 %374)
 	%376 = call i64 @js_arr_new()
 	%377 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000194, i64 0, i64 0), i64 4)
 	%378 = call i64 @js_scope_get(i64 %373, i64 %377)
 	%379 = call i64 @js_arr_push(i64 %376, i64 %378)
-	%380 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000806, i64 0, i64 0), i64 9)
+	%380 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000822, i64 0, i64 0), i64 9)
 	%381 = call i64 @js_scope_get(i64 %373, i64 %380)
 	%382 = call i64 @js_arr_new()
 	%383 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -51716,7 +52557,7 @@ dead878:
 	%386 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%387 = call i64 @js_scope_get(i64 %373, i64 %386)
 	%388 = call i64 @js_arr_push(i64 %382, i64 %387)
-	%389 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%389 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%390 = call i64 @js_scope_get(i64 %373, i64 %389)
 	%391 = call i64 @js_arr_push(i64 %382, i64 %390)
 	%392 = call i64 @js_call(i64 %381, i64 0, i64 %382)
@@ -51777,9 +52618,9 @@ dead878:
 	br i1 %436, label %437, label %451
 
 437:
-	%438 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000808, i64 0, i64 0), i64 5)
+	%438 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000824, i64 0, i64 0), i64 5)
 	%439 = call i64 @js_scope_get(i64 %424, i64 %438)
-	%440 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000706, i64 0, i64 0), i64 1)
+	%440 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000715, i64 0, i64 0), i64 1)
 	%441 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%442 = call i64 @js_scope_get(i64 %424, i64 %441)
 	%443 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -51816,7 +52657,7 @@ dead878:
 
 465:
 	%466 = phi i64 [ %424, %464 ]
-	%467 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%467 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%468 = call i64 @js_scope_get(i64 %466, i64 %467)
 	%469 = call i64 @js_arr_new()
 	%470 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000194, i64 0, i64 0), i64 4)
@@ -51830,7 +52671,7 @@ dead878:
 	%478 = call i64 @js_scope_get(i64 %466, i64 %477)
 	%479 = call i64 @js_get(i64 %476, i64 %478)
 	%480 = call i64 @js_arr_push(i64 %469, i64 %479)
-	%481 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000806, i64 0, i64 0), i64 9)
+	%481 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000822, i64 0, i64 0), i64 9)
 	%482 = call i64 @js_scope_get(i64 %466, i64 %481)
 	%483 = call i64 @js_arr_new()
 	%484 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -51839,7 +52680,7 @@ dead878:
 	%487 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%488 = call i64 @js_scope_get(i64 %466, i64 %487)
 	%489 = call i64 @js_arr_push(i64 %483, i64 %488)
-	%490 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%490 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%491 = call i64 @js_scope_get(i64 %466, i64 %490)
 	%492 = call i64 @js_arr_push(i64 %483, i64 %491)
 	%493 = call i64 @js_call(i64 %482, i64 0, i64 %483)
@@ -51848,7 +52689,7 @@ dead878:
 	%496 = call i64 @js_setret(i64 %495)
 	br label %456
 
-dead879:
+dead886:
 	br label %272
 
 497:
@@ -51865,11 +52706,11 @@ dead879:
 	%506 = call i64 @js_arr_push(i64 %503, i64 %505)
 	%507 = call i64 @js_call(i64 %502, i64 %500, i64 %503)
 	%508 = call i64 @js_setret(i64 %507)
-	%509 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%509 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%510 = call i64 @js_scope_get(i64 %204, i64 %509)
 	%511 = call i64 @js_num_i(i64 1)
 	%512 = call i64 @js_add(i64 %510, i64 %511)
-	%513 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%513 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%514 = call i64 @js_tset(i64 %204, i64 %513, i64 %512)
 	%515 = call i64 @js_setret(i64 %512)
 	br label %185
@@ -51882,7 +52723,7 @@ dead879:
 
 518:
 	%519 = phi i64 [ %204, %517 ]
-	%520 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000806, i64 0, i64 0), i64 9)
+	%520 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000822, i64 0, i64 0), i64 9)
 	%521 = call i64 @js_scope_get(i64 %519, i64 %520)
 	%522 = call i64 @js_arr_new()
 	%523 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -51891,7 +52732,7 @@ dead879:
 	%526 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
 	%527 = call i64 @js_scope_get(i64 %519, i64 %526)
 	%528 = call i64 @js_arr_push(i64 %522, i64 %527)
-	%529 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%529 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%530 = call i64 @js_scope_get(i64 %519, i64 %529)
 	%531 = call i64 @js_arr_push(i64 %522, i64 %530)
 	%532 = call i64 @js_call(i64 %521, i64 0, i64 %522)
@@ -51905,7 +52746,7 @@ dead879:
 
 537:
 	%538 = phi i64 [ %204, %536 ]
-	%539 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000511, i64 0, i64 0), i64 10)
+	%539 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000520, i64 0, i64 0), i64 10)
 	%540 = call i64 @js_scope_get(i64 %538, i64 %539)
 	%541 = call i64 @js_arr_new()
 	%542 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -51913,7 +52754,7 @@ dead879:
 	%544 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%545 = call i64 @js_get(i64 %543, i64 %544)
 	%546 = call i64 @js_arr_push(i64 %541, i64 %545)
-	%547 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000811, i64 0, i64 0), i64 2)
+	%547 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000827, i64 0, i64 0), i64 2)
 	%548 = call i64 @js_scope_get(i64 %538, i64 %547)
 	%549 = call i64 @js_arr_push(i64 %541, i64 %548)
 	%550 = call i64 @js_call(i64 %540, i64 0, i64 %541)
@@ -51939,7 +52780,7 @@ dead879:
 
 563:
 	%564 = phi i64 [ %538, %562 ]
-	%565 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000806, i64 0, i64 0), i64 9)
+	%565 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000822, i64 0, i64 0), i64 9)
 	%566 = call i64 @js_scope_get(i64 %564, i64 %565)
 	%567 = call i64 @js_arr_new()
 	%568 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -51948,17 +52789,17 @@ dead879:
 	%571 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
 	%572 = call i64 @js_scope_get(i64 %564, i64 %571)
 	%573 = call i64 @js_arr_push(i64 %567, i64 %572)
-	%574 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%574 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%575 = call i64 @js_scope_get(i64 %564, i64 %574)
 	%576 = call i64 @js_arr_push(i64 %567, i64 %575)
 	%577 = call i64 @js_call(i64 %566, i64 0, i64 %567)
 	%578 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%579 = call i64 @js_tset(i64 %564, i64 %578, i64 %577)
 	%580 = call i64 @js_setret(i64 %577)
-	%581 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000808, i64 0, i64 0), i64 5)
+	%581 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000824, i64 0, i64 0), i64 5)
 	%582 = call i64 @js_scope_get(i64 %564, i64 %581)
-	%583 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000706, i64 0, i64 0), i64 1)
-	%584 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000811, i64 0, i64 0), i64 2)
+	%583 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000715, i64 0, i64 0), i64 1)
+	%584 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000827, i64 0, i64 0), i64 2)
 	%585 = call i64 @js_scope_get(i64 %564, i64 %584)
 	%586 = call i64 @js_add(i64 %583, i64 %585)
 	%587 = call i64 @js_set(i64 %582, i64 %586, i64 3)
@@ -52014,7 +52855,7 @@ dead879:
 	%625 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%626 = call i64 @js_scope_get(i64 %607, i64 %625)
 	%627 = call i64 @js_get(i64 %624, i64 %626)
-	%628 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%628 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%629 = call i64 @js_scope_get(i64 %607, i64 %628)
 	%630 = call i64 @js_ge(i64 %627, i64 %629)
 	br label %631
@@ -52048,7 +52889,7 @@ dead879:
 	%649 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%650 = call i64 @js_get(i64 %648, i64 %649)
 	%651 = call i64 @js_arr_new()
-	%652 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000806, i64 0, i64 0), i64 9)
+	%652 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000822, i64 0, i64 0), i64 9)
 	%653 = call i64 @js_scope_get(i64 %646, i64 %652)
 	%654 = call i64 @js_arr_new()
 	%655 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -52057,7 +52898,7 @@ dead879:
 	%658 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%659 = call i64 @js_scope_get(i64 %646, i64 %658)
 	%660 = call i64 @js_arr_push(i64 %654, i64 %659)
-	%661 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%661 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%662 = call i64 @js_scope_get(i64 %646, i64 %661)
 	%663 = call i64 @js_arr_push(i64 %654, i64 %662)
 	%664 = call i64 @js_call(i64 %653, i64 0, i64 %654)
@@ -52066,11 +52907,11 @@ dead879:
 	%667 = call i64 @js_setret(i64 %666)
 	br label %636
 
-dead880:
+dead887:
 	ret i64 0
 }
 
-define i64 @jsf_1000288(i64 %env, i64 %args) {
+define i64 @jsf_1000290(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000304, i64 0, i64 0), i64 3)
@@ -52157,17 +52998,17 @@ entry:
 	%60 = call i64 @js_sub(i64 %58, i64 %59)
 	%61 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
 	%62 = call i64 @js_tdecl(i64 %57, i64 %61, i64 %60)
-	%63 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000812, i64 0, i64 0), i64 8)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000828, i64 0, i64 0), i64 8)
 	%64 = call i64 @js_tdecl(i64 %57, i64 %63, i64 2)
 	%65 = call i64 @js_num_i(i64 0)
-	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%67 = call i64 @js_tdecl(i64 %57, i64 %66, i64 %65)
 	%68 = call i64 @js_num_i(i64 0)
 	%69 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%70 = call i64 @js_tdecl(i64 %57, i64 %69, i64 %68)
 	%71 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000304, i64 0, i64 0), i64 3)
 	%72 = call i64 @js_scope_get(i64 %57, i64 %71)
-	%73 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000810, i64 0, i64 0), i64 1)
+	%73 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000826, i64 0, i64 0), i64 1)
 	%74 = call i64 @js_eq(i64 %72, i64 %73)
 	%75 = call i64 @js_truthy(i64 %74)
 	%76 = icmp ne i64 %75, 0
@@ -52225,7 +53066,7 @@ entry:
 	%110 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
 	%111 = call i64 @js_get(i64 %109, i64 %110)
 	%112 = call i64 @js_arr_new()
-	%113 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000641, i64 0, i64 0), i64 1)
+	%113 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000649, i64 0, i64 0), i64 1)
 	%114 = call i64 @js_arr_push(i64 %112, i64 %113)
 	%115 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%116 = call i64 @js_scope_get(i64 %107, i64 %115)
@@ -52257,7 +53098,7 @@ entry:
 	%138 = call i64 @js_scope_get(i64 %107, i64 %137)
 	%139 = call i64 @js_arr_push(i64 %133, i64 %138)
 	%140 = call i64 @js_call(i64 %132, i64 %130, i64 %133)
-	%141 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000811, i64 0, i64 0), i64 2)
+	%141 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000827, i64 0, i64 0), i64 2)
 	%142 = call i64 @js_tdecl(i64 %107, i64 %141, i64 %140)
 	%143 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000315, i64 0, i64 0), i64 2)
 	%144 = call i64 @js_scope_get(i64 %107, i64 %143)
@@ -52266,7 +53107,7 @@ entry:
 	%147 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000314, i64 0, i64 0), i64 4)
 	%148 = call i64 @js_tset(i64 %107, i64 %147, i64 %146)
 	%149 = call i64 @js_setret(i64 %146)
-	%150 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000811, i64 0, i64 0), i64 2)
+	%150 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000827, i64 0, i64 0), i64 2)
 	%151 = call i64 @js_scope_get(i64 %107, i64 %150)
 	%152 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000028, i64 0, i64 0), i64 9)
 	%153 = call i64 @js_get(i64 %151, i64 %152)
@@ -52276,7 +53117,7 @@ entry:
 	%157 = call i64 @js_num_i(i64 3)
 	%158 = call i64 @js_arr_push(i64 %154, i64 %157)
 	%159 = call i64 @js_call(i64 %153, i64 %151, i64 %154)
-	%160 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000805, i64 0, i64 0), i64 3)
+	%160 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000821, i64 0, i64 0), i64 3)
 	%161 = call i64 @js_eq(i64 %159, i64 %160)
 	%162 = call i64 @js_truthy(i64 %161)
 	%163 = icmp ne i64 %162, 0
@@ -52300,17 +53141,17 @@ entry:
 	br label %196
 
 175:
-	%176 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%176 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%177 = call i64 @js_scope_get(i64 %107, i64 %176)
 	%178 = call i64 @js_num_i(i64 1)
 	%179 = call i64 @js_add(i64 %177, i64 %178)
-	%180 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%180 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%181 = call i64 @js_tset(i64 %107, i64 %180, i64 %179)
 	%182 = call i64 @js_setret(i64 %179)
 	br label %86
 
 183:
-	%184 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000811, i64 0, i64 0), i64 2)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000827, i64 0, i64 0), i64 2)
 	%185 = call i64 @js_scope_get(i64 %107, i64 %184)
 	%186 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%187 = call i64 @js_scope_get(i64 %107, i64 %186)
@@ -52329,7 +53170,7 @@ entry:
 
 197:
 	%198 = phi i64 [ %107, %196 ]
-	%199 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000812, i64 0, i64 0), i64 8)
+	%199 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000828, i64 0, i64 0), i64 8)
 	%200 = call i64 @js_tset(i64 %198, i64 %199, i64 3)
 	%201 = call i64 @js_setret(i64 3)
 	br label %175
@@ -52345,7 +53186,7 @@ entry:
 
 205:
 	%206 = phi i64 [ %107, %204 ]
-	%207 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000809, i64 0, i64 0), i64 2)
+	%207 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000825, i64 0, i64 0), i64 2)
 	%208 = call i64 @js_scope_get(i64 %206, i64 %207)
 	%209 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
 	%210 = call i64 @js_tset(i64 %206, i64 %209, i64 %208)
@@ -52353,7 +53194,7 @@ entry:
 	br label %203
 
 212:
-	%213 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000812, i64 0, i64 0), i64 8)
+	%213 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000828, i64 0, i64 0), i64 8)
 	%214 = call i64 @js_scope_get(i64 %57, i64 %213)
 	%215 = call i64 @js_not(i64 %214)
 	br label %216
@@ -52384,9 +53225,9 @@ entry:
 	%231 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%232 = call i64 @js_scope_get(i64 %230, i64 %231)
 	%233 = call i64 @js_arr_new()
-	%234 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%234 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%235 = call i64 @js_arr_push(i64 %233, i64 %234)
-	%236 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000813, i64 0, i64 0), i64 25)
+	%236 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000829, i64 0, i64 0), i64 25)
 	%237 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%238 = call i64 @js_scope_get(i64 %230, i64 %237)
 	%239 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -52401,7 +53242,7 @@ entry:
 	br label %221
 
 248:
-	%249 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000511, i64 0, i64 0), i64 10)
+	%249 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000520, i64 0, i64 0), i64 10)
 	%250 = call i64 @js_scope_get(i64 %57, i64 %249)
 	%251 = call i64 @js_arr_new()
 	%252 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -52437,9 +53278,9 @@ entry:
 	%272 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%273 = call i64 @js_scope_get(i64 %271, i64 %272)
 	%274 = call i64 @js_arr_new()
-	%275 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%275 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%276 = call i64 @js_arr_push(i64 %274, i64 %275)
-	%277 = call i64 @js_str_mem(i8* getelementptr ([17 x i8], [17 x i8]* @str.1000814, i64 0, i64 0), i64 17)
+	%277 = call i64 @js_str_mem(i8* getelementptr ([17 x i8], [17 x i8]* @str.1000830, i64 0, i64 0), i64 17)
 	%278 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%279 = call i64 @js_scope_get(i64 %271, i64 %278)
 	%280 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -52448,7 +53289,7 @@ entry:
 	%283 = call i64 @js_scope_get(i64 %271, i64 %282)
 	%284 = call i64 @js_get(i64 %281, i64 %283)
 	%285 = call i64 @js_add(i64 %277, i64 %284)
-	%286 = call i64 @js_str_mem(i8* getelementptr ([29 x i8], [29 x i8]* @str.1000815, i64 0, i64 0), i64 29)
+	%286 = call i64 @js_str_mem(i8* getelementptr ([29 x i8], [29 x i8]* @str.1000831, i64 0, i64 0), i64 29)
 	%287 = call i64 @js_add(i64 %285, i64 %286)
 	%288 = call i64 @js_arr_push(i64 %274, i64 %287)
 	%289 = call i64 @js_call(i64 %273, i64 0, i64 %274)
@@ -52456,7 +53297,7 @@ entry:
 	br label %268
 }
 
-define i64 @jsf_1000289(i64 %env, i64 %args) {
+define i64 @jsf_1000291(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -52465,7 +53306,7 @@ entry:
 	%4 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -52477,7 +53318,7 @@ entry:
 
 13:
 	%14 = phi i64 [ %0, %12 ]
-	%15 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000804, i64 0, i64 0), i64 6)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000820, i64 0, i64 0), i64 6)
 	%16 = call i64 @js_scope_get(i64 %14, i64 %15)
 	%17 = call i64 @js_truthy(i64 %16)
 	%18 = icmp ne i64 %17, 0
@@ -52515,14 +53356,14 @@ entry:
 	%42 = call i64 @js_get(i64 %39, i64 %41)
 	ret i64 %42
 
-dead881:
+dead888:
 	br label %20
 
-dead882:
+dead889:
 	ret i64 0
 }
 
-define i64 @jsf_1000290(i64 %env, i64 %args) {
+define i64 @jsf_1000292(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -52540,7 +53381,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000550, i64 0, i64 0), i64 10)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000557, i64 0, i64 0), i64 10)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -52552,11 +53393,11 @@ entry:
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %21
 
-dead883:
+dead890:
 	ret i64 0
 }
 
-define i64 @jsf_1000291(i64 %env, i64 %args) {
+define i64 @jsf_1000293(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -52580,11 +53421,11 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead884:
+dead891:
 	ret i64 0
 }
 
-define i64 @jsf_1000292(i64 %env, i64 %args) {
+define i64 @jsf_1000294(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -52602,7 +53443,7 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000548, i64 0, i64 0), i64 10)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000555, i64 0, i64 0), i64 10)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -52614,11 +53455,11 @@ entry:
 	%21 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %21
 
-dead885:
+dead892:
 	ret i64 0
 }
 
-define i64 @jsf_1000293(i64 %env, i64 %args) {
+define i64 @jsf_1000295(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -52646,7 +53487,7 @@ entry:
 	br label %25
 
 17:
-	%18 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000553, i64 0, i64 0), i64 9)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000487, i64 0, i64 0), i64 9)
 	%19 = call i64 @js_scope_get(i64 %8, i64 %18)
 	%20 = call i64 @js_arr_new()
 	%21 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -52664,14 +53505,14 @@ entry:
 	%29 = call i64 @js_scope_get(i64 %27, i64 %28)
 	ret i64 %29
 
-dead886:
+dead893:
 	br label %17
 
-dead887:
+dead894:
 	ret i64 0
 }
 
-define i64 @jsf_1000294(i64 %env, i64 %args) {
+define i64 @jsf_1000296(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -52686,7 +53527,7 @@ entry:
 
 7:
 	%8 = phi i64 [ %0, %6 ]
-	%9 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000555, i64 0, i64 0), i64 5)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000561, i64 0, i64 0), i64 5)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
 	%12 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -52695,17 +53536,148 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead888:
+dead895:
 	ret i64 0
 }
 
-define i64 @jsf_1000295(i64 %env, i64 %args) {
+define i64 @jsf_1000297(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000821, i64 0, i64 0), i64 3)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000822, i64 0, i64 0), i64 3)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %args)
+	br label %6
+
+6:
+	%7 = call i64 @js_scope_new(i64 %0)
+	br label %8
+
+8:
+	%9 = phi i64 [ %7, %6 ]
+	%10 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
+	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
+	%12 = call i64 @js_arr_new()
+	%13 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%14 = call i64 @js_scope_get(i64 %9, i64 %13)
+	%15 = call i64 @js_arr_push(i64 %12, i64 %14)
+	%16 = call i64 @js_call(i64 %11, i64 0, i64 %12)
+	%17 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%18 = call i64 @js_tdecl(i64 %9, i64 %17, i64 %16)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%20 = call i64 @js_scope_get(i64 %9, i64 %19)
+	%21 = call i64 @js_sne(i64 %20, i64 0)
+	%22 = call i64 @js_truthy(i64 %21)
+	%23 = icmp ne i64 %22, 0
+	br i1 %23, label %24, label %25
+
+24:
+	br label %35
+
+25:
+	%26 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000427, i64 0, i64 0), i64 7)
+	%27 = call i64 @js_scope_get(i64 %9, i64 %26)
+	%28 = call i64 @js_arr_new()
+	%29 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%30 = call i64 @js_scope_get(i64 %9, i64 %29)
+	%31 = call i64 @js_arr_push(i64 %28, i64 %30)
+	%32 = call i64 @js_call(i64 %27, i64 0, i64 %28)
+	%33 = call i64 @js_truthy(i64 %32)
+	%34 = icmp ne i64 %33, 0
+	br i1 %34, label %44, label %54
+
+35:
+	br label %36
+
+36:
+	%37 = phi i64 [ %9, %35 ]
+	%38 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%39 = call i64 @js_scope_get(i64 %37, i64 %38)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
+	%41 = call i64 @js_get(i64 %39, i64 %40)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%43 = call i64 @js_get(i64 %41, i64 %42)
+	ret i64 %43
+
+dead896:
+	br label %25
+
+44:
+	%45 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
+	%46 = call i64 @js_scope_get(i64 %9, i64 %45)
+	%47 = call i64 @js_arr_new()
+	%48 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%49 = call i64 @js_scope_get(i64 %9, i64 %48)
+	%50 = call i64 @js_arr_push(i64 %47, i64 %49)
+	%51 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000837, i64 0, i64 0), i64 9)
+	%52 = call i64 @js_arr_push(i64 %47, i64 %51)
+	%53 = call i64 @js_call(i64 %46, i64 0, i64 %47)
+	br label %54
+
+54:
+	%55 = phi i64 [ %32, %25 ], [ %53, %44 ]
+	%56 = call i64 @js_truthy(i64 %55)
+	%57 = icmp ne i64 %56, 0
+	br i1 %57, label %58, label %59
+
+58:
+	br label %79
+
+59:
+	%60 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
+	%61 = call i64 @js_scope_get(i64 %9, i64 %60)
+	%62 = call i64 @js_arr_new()
+	%63 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000490, i64 0, i64 0), i64 9)
+	%64 = call i64 @js_arr_push(i64 %62, i64 %63)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([63 x i8], [63 x i8]* @str.1000839, i64 0, i64 0), i64 63)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
+	%67 = call i64 @js_scope_get(i64 %9, i64 %66)
+	%68 = call i64 @js_arr_new()
+	%69 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%70 = call i64 @js_scope_get(i64 %9, i64 %69)
+	%71 = call i64 @js_arr_push(i64 %68, i64 %70)
+	%72 = call i64 @js_call(i64 %67, i64 0, i64 %68)
+	%73 = call i64 @js_add(i64 %65, i64 %72)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000757, i64 0, i64 0), i64 6)
+	%75 = call i64 @js_add(i64 %73, i64 %74)
+	%76 = call i64 @js_arr_push(i64 %62, i64 %75)
+	%77 = call i64 @js_call(i64 %61, i64 0, i64 %62)
+	%78 = call i64 @js_setret(i64 %77)
+	ret i64 0
+
+79:
+	br label %80
+
+80:
+	%81 = phi i64 [ %9, %79 ]
+	%82 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
+	%83 = call i64 @js_scope_get(i64 %81, i64 %82)
+	%84 = call i64 @js_arr_new()
+	%85 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%86 = call i64 @js_scope_get(i64 %81, i64 %85)
+	%87 = call i64 @js_arr_push(i64 %84, i64 %86)
+	%88 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000838, i64 0, i64 0), i64 5)
+	%89 = call i64 @js_arr_push(i64 %84, i64 %88)
+	%90 = call i64 @js_arr_new()
+	%91 = call i64 @js_arr_push(i64 %84, i64 %90)
+	%92 = call i64 @js_call(i64 %83, i64 0, i64 %84)
+	ret i64 %92
+
+dead897:
+	br label %59
+
+dead898:
+	ret i64 0
+}
+
+define i64 @jsf_1000298(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000841, i64 0, i64 0), i64 3)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000842, i64 0, i64 0), i64 3)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -52721,7 +53693,7 @@ entry:
 	%13 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_arr_new()
-	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000822, i64 0, i64 0), i64 3)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000842, i64 0, i64 0), i64 3)
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
@@ -52750,7 +53722,7 @@ entry:
 	%34 = phi i64 [ %12, %32 ]
 	ret i64 0
 
-dead889:
+dead899:
 	br label %28
 
 35:
@@ -52813,10 +53785,10 @@ dead889:
 
 75:
 	%76 = phi i64 [ %51, %74 ]
-	%77 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%77 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%78 = call i64 @js_scope_get(i64 %76, i64 %77)
 	%79 = call i64 @js_arr_new()
-	%80 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000821, i64 0, i64 0), i64 3)
+	%80 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000841, i64 0, i64 0), i64 3)
 	%81 = call i64 @js_scope_get(i64 %76, i64 %80)
 	%82 = call i64 @js_arr_push(i64 %79, i64 %81)
 	%83 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -52836,10 +53808,10 @@ dead889:
 
 94:
 	%95 = phi i64 [ %51, %93 ]
-	%96 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%96 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%97 = call i64 @js_scope_get(i64 %95, i64 %96)
 	%98 = call i64 @js_arr_new()
-	%99 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000821, i64 0, i64 0), i64 3)
+	%99 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000841, i64 0, i64 0), i64 3)
 	%100 = call i64 @js_scope_get(i64 %95, i64 %99)
 	%101 = call i64 @js_arr_push(i64 %98, i64 %100)
 	%102 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -52862,11 +53834,11 @@ dead889:
 	%119 = call i64 @js_setret(i64 %118)
 	br label %65
 
-dead890:
+dead900:
 	ret i64 0
 }
 
-define i64 @jsf_1000296(i64 %env, i64 %args) {
+define i64 @jsf_1000299(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -52882,7 +53854,7 @@ entry:
 
 8:
 	%9 = phi i64 [ %7, %6 ]
-	%10 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
 	%12 = call i64 @js_arr_new()
 	%13 = call i64 @js_call(i64 %11, i64 0, i64 %12)
@@ -52948,7 +53920,7 @@ entry:
 
 56:
 	%57 = phi i64 [ %37, %55 ]
-	%58 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%59 = call i64 @js_scope_get(i64 %57, i64 %58)
 	%60 = call i64 @js_arr_new()
 	%61 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
@@ -52978,11 +53950,11 @@ entry:
 	%85 = call i64 @js_setret(i64 %82)
 	br label %41
 
-dead891:
+dead901:
 	ret i64 0
 }
 
-define i64 @jsf_1000297(i64 %env, i64 %args) {
+define i64 @jsf_1000300(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -53011,11 +53983,11 @@ entry:
 	%20 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %20
 
-dead892:
+dead902:
 	ret i64 0
 }
 
-define i64 @jsf_1000298(i64 %env, i64 %args) {
+define i64 @jsf_1000301(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -53047,7 +54019,7 @@ entry:
 	%23 = call i64 @js_arr_push(i64 %20, i64 %22)
 	%24 = call i64 @js_call(i64 %19, i64 0, i64 %20)
 	%25 = call i64 @js_arr_push(i64 %17, i64 %24)
-	%26 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%26 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%27 = call i64 @js_scope_get(i64 %14, i64 %26)
 	%28 = call i64 @js_arr_new()
 	%29 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000332, i64 0, i64 0), i64 5)
@@ -53055,7 +54027,7 @@ entry:
 	%31 = call i64 @js_arr_push(i64 %28, i64 %30)
 	%32 = call i64 @js_call(i64 %27, i64 0, i64 %28)
 	%33 = call i64 @js_arr_push(i64 %17, i64 %32)
-	%34 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%35 = call i64 @js_scope_get(i64 %14, i64 %34)
 	%36 = call i64 @js_arr_new()
 	%37 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000333, i64 0, i64 0), i64 3)
@@ -53075,11 +54047,11 @@ entry:
 	%51 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %51
 
-dead893:
+dead903:
 	ret i64 0
 }
 
-define i64 @jsf_1000299(i64 %env, i64 %args) {
+define i64 @jsf_1000302(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -53127,11 +54099,11 @@ entry:
 	%31 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%32 = call i64 @js_scope_get(i64 %30, i64 %31)
 	%33 = call i64 @js_arr_new()
-	%34 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000827, i64 0, i64 0), i64 10)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000847, i64 0, i64 0), i64 10)
 	%35 = call i64 @js_arr_push(i64 %33, i64 %34)
 	%36 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%37 = call i64 @js_scope_get(i64 %30, i64 %36)
-	%38 = call i64 @js_str_mem(i8* getelementptr ([70 x i8], [70 x i8]* @str.1000828, i64 0, i64 0), i64 70)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([70 x i8], [70 x i8]* @str.1000848, i64 0, i64 0), i64 70)
 	%39 = call i64 @js_add(i64 %37, i64 %38)
 	%40 = call i64 @js_arr_push(i64 %33, i64 %39)
 	%41 = call i64 @js_call(i64 %32, i64 0, i64 %33)
@@ -53153,14 +54125,14 @@ entry:
 	%49 = phi i64 [ %11, %47 ]
 	ret i64 2
 
-dead894:
+dead904:
 	br label %44
 
-dead895:
+dead905:
 	ret i64 0
 }
 
-define i64 @jsf_1000300(i64 %env, i64 %args) {
+define i64 @jsf_1000303(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000341, i64 0, i64 0), i64 1)
@@ -53181,10 +54153,10 @@ entry:
 
 13:
 	%14 = phi i64 [ %0, %12 ]
-	%15 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000829, i64 0, i64 0), i64 11)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000849, i64 0, i64 0), i64 11)
 	%16 = call i64 @js_scope_get(i64 %14, i64 %15)
 	%17 = call i64 @js_arr_new()
-	%18 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000830, i64 0, i64 0), i64 6)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000850, i64 0, i64 0), i64 6)
 	%19 = call i64 @js_arr_push(i64 %17, i64 %18)
 	%20 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000344, i64 0, i64 0), i64 9)
 	%21 = call i64 @js_scope_get(i64 %14, i64 %20)
@@ -53205,7 +54177,7 @@ entry:
 	%36 = call i64 @js_arr_push(i64 %33, i64 %35)
 	%37 = call i64 @js_call(i64 %32, i64 0, i64 %33)
 	%38 = call i64 @js_arr_push(i64 %22, i64 %37)
-	%39 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%39 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%40 = call i64 @js_scope_get(i64 %14, i64 %39)
 	%41 = call i64 @js_arr_new()
 	%42 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000343, i64 0, i64 0), i64 3)
@@ -53218,11 +54190,11 @@ entry:
 	%49 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %49
 
-dead896:
+dead906:
 	ret i64 0
 }
 
-define i64 @jsf_1000301(i64 %env, i64 %args) {
+define i64 @jsf_1000304(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000341, i64 0, i64 0), i64 1)
@@ -53243,10 +54215,10 @@ entry:
 
 13:
 	%14 = phi i64 [ %0, %12 ]
-	%15 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000829, i64 0, i64 0), i64 11)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000849, i64 0, i64 0), i64 11)
 	%16 = call i64 @js_scope_get(i64 %14, i64 %15)
 	%17 = call i64 @js_arr_new()
-	%18 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000832, i64 0, i64 0), i64 7)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000852, i64 0, i64 0), i64 7)
 	%19 = call i64 @js_arr_push(i64 %17, i64 %18)
 	%20 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000347, i64 0, i64 0), i64 10)
 	%21 = call i64 @js_scope_get(i64 %14, i64 %20)
@@ -53267,7 +54239,7 @@ entry:
 	%36 = call i64 @js_arr_push(i64 %33, i64 %35)
 	%37 = call i64 @js_call(i64 %32, i64 0, i64 %33)
 	%38 = call i64 @js_arr_push(i64 %22, i64 %37)
-	%39 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%39 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%40 = call i64 @js_scope_get(i64 %14, i64 %39)
 	%41 = call i64 @js_arr_new()
 	%42 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000343, i64 0, i64 0), i64 3)
@@ -53280,11 +54252,11 @@ entry:
 	%49 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %49
 
-dead897:
+dead907:
 	ret i64 0
 }
 
-define i64 @jsf_1000302(i64 %env, i64 %args) {
+define i64 @jsf_1000305(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -53324,11 +54296,11 @@ entry:
 	%31 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %31
 
-dead898:
+dead908:
 	ret i64 0
 }
 
-define i64 @jsf_1000303(i64 %env, i64 %args) {
+define i64 @jsf_1000306(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -53357,11 +54329,11 @@ entry:
 	%20 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %20
 
-dead899:
+dead909:
 	ret i64 0
 }
 
-define i64 @jsf_1000304(i64 %env, i64 %args) {
+define i64 @jsf_1000307(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -53390,11 +54362,11 @@ entry:
 	%20 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %20
 
-dead900:
+dead910:
 	ret i64 0
 }
 
-define i64 @jsf_1000305(i64 %env, i64 %args) {
+define i64 @jsf_1000308(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -53418,11 +54390,11 @@ entry:
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %15
 
-dead901:
+dead911:
 	ret i64 0
 }
 
-define i64 @jsf_1000306(i64 %env, i64 %args) {
+define i64 @jsf_1000309(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -53512,7 +54484,7 @@ entry:
 	%73 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%74 = call i64 @js_scope_get(i64 %72, i64 %73)
 	%75 = call i64 @js_arr_new()
-	%76 = call i64 @js_str_mem(i8* getelementptr ([48 x i8], [48 x i8]* @str.1000838, i64 0, i64 0), i64 48)
+	%76 = call i64 @js_str_mem(i8* getelementptr ([48 x i8], [48 x i8]* @str.1000858, i64 0, i64 0), i64 48)
 	%77 = call i64 @js_arr_push(i64 %75, i64 %76)
 	%78 = call i64 @js_call(i64 %74, i64 0, i64 %75)
 	%79 = call i64 @js_setret(i64 %78)
@@ -53534,17 +54506,17 @@ entry:
 	%87 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%88 = call i64 @js_scope_get(i64 %86, i64 %87)
 	%89 = call i64 @js_arr_new()
-	%90 = call i64 @js_str_mem(i8* getelementptr ([40 x i8], [40 x i8]* @str.1000839, i64 0, i64 0), i64 40)
+	%90 = call i64 @js_str_mem(i8* getelementptr ([40 x i8], [40 x i8]* @str.1000859, i64 0, i64 0), i64 40)
 	%91 = call i64 @js_arr_push(i64 %89, i64 %90)
 	%92 = call i64 @js_call(i64 %88, i64 0, i64 %89)
 	%93 = call i64 @js_setret(i64 %92)
 	br label %81
 
-dead902:
+dead912:
 	ret i64 0
 }
 
-define i64 @jsf_1000307(i64 %env, i64 %args) {
+define i64 @jsf_1000310(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
@@ -53562,7 +54534,7 @@ entry:
 	%9 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000352, i64 0, i64 0), i64 6)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
-	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
 	%14 = call i64 @js_arr_new()
 	%15 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
@@ -53573,11 +54545,11 @@ entry:
 	%20 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	ret i64 %20
 
-dead903:
+dead913:
 	ret i64 0
 }
 
-define i64 @jsf_1000308(i64 %env, i64 %args) {
+define i64 @jsf_1000311(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000113, i64 0, i64 0), i64 1)
@@ -53613,11 +54585,11 @@ entry:
 	%27 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	ret i64 %27
 
-dead904:
+dead914:
 	ret i64 0
 }
 
-define i64 @jsf_1000309(i64 %env, i64 %args) {
+define i64 @jsf_1000312(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000006, i64 0, i64 0), i64 1)
@@ -53674,7 +54646,7 @@ entry:
 	%44 = call i64 @js_call(i64 %39, i64 0, i64 %40)
 	%45 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000100, i64 0, i64 0), i64 1)
 	%46 = call i64 @js_tdecl(i64 %15, i64 %45, i64 %44)
-	%47 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%47 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%48 = call i64 @js_scope_get(i64 %15, i64 %47)
 	%49 = call i64 @js_arr_new()
 	%50 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000201, i64 0, i64 0), i64 4)
@@ -53685,7 +54657,7 @@ entry:
 	%55 = call i64 @js_tdecl(i64 %15, i64 %54, i64 %53)
 	%56 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000100, i64 0, i64 0), i64 1)
 	%57 = call i64 @js_scope_get(i64 %15, i64 %56)
-	%58 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%59 = call i64 @js_eq(i64 %57, i64 %58)
 	%60 = call i64 @js_truthy(i64 %59)
 	%61 = icmp ne i64 %60, 0
@@ -53760,11 +54732,11 @@ entry:
 	%114 = call i64 @js_arr_push(i64 %108, i64 %113)
 	%115 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000100, i64 0, i64 0), i64 1)
 	%116 = call i64 @js_scope_get(i64 %105, i64 %115)
-	%117 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%117 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%118 = call i64 @js_eq(i64 %116, i64 %117)
 	%119 = call i64 @js_arr_push(i64 %108, i64 %118)
 	%120 = call i64 @js_call(i64 %107, i64 0, i64 %108)
-	%121 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%122 = call i64 @js_tdecl(i64 %105, i64 %121, i64 %120)
 	%123 = call i64 @js_str_mem(i8* getelementptr ([0 x i8], [0 x i8]* @str.1000125, i64 0, i64 0), i64 0)
 	%124 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
@@ -53777,7 +54749,7 @@ entry:
 129:
 	%130 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%131 = call i64 @js_scope_get(i64 %105, i64 %130)
-	%132 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%132 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%133 = call i64 @js_scope_get(i64 %105, i64 %132)
 	%134 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%135 = call i64 @js_get(i64 %133, i64 %134)
@@ -53801,7 +54773,7 @@ entry:
 	%145 = phi i64 [ %105, %143 ]
 	%146 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%147 = call i64 @js_scope_get(i64 %145, i64 %146)
-	%148 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%148 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%149 = call i64 @js_scope_get(i64 %145, i64 %148)
 	%150 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000031, i64 0, i64 0), i64 6)
 	%151 = call i64 @js_get(i64 %149, i64 %150)
@@ -53821,7 +54793,7 @@ entry:
 	br label %173
 
 163:
-	%164 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000681, i64 0, i64 0), i64 1)
+	%164 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000690, i64 0, i64 0), i64 1)
 	%165 = call i64 @js_scope_get(i64 %145, i64 %164)
 	%166 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000031, i64 0, i64 0), i64 6)
 	%167 = call i64 @js_get(i64 %165, i64 %166)
@@ -53847,14 +54819,14 @@ entry:
 	%185 = call i64 @js_setret(i64 %182)
 	br label %129
 
-dead905:
+dead915:
 	br label %82
 
-dead906:
+dead916:
 	ret i64 0
 }
 
-define i64 @jsf_1000310(i64 %env, i64 %args) {
+define i64 @jsf_1000313(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -53872,7 +54844,7 @@ entry:
 	%9 = phi i64 [ %7, %6 ]
 	%10 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000429, i64 0, i64 0), i64 11)
 	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
-	%12 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000844, i64 0, i64 0), i64 3)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000864, i64 0, i64 0), i64 3)
 	%13 = call i64 @js_tdecl(i64 %9, i64 %12, i64 %11)
 	%14 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000129, i64 0, i64 0), i64 7)
 	%15 = call i64 @js_scope_get(i64 %9, i64 %14)
@@ -53890,7 +54862,7 @@ entry:
 	br label %28
 
 25:
-	%26 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000844, i64 0, i64 0), i64 3)
+	%26 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000864, i64 0, i64 0), i64 3)
 	%27 = call i64 @js_scope_get(i64 %9, i64 %26)
 	ret i64 %27
 
@@ -53899,7 +54871,7 @@ entry:
 
 29:
 	%30 = phi i64 [ %9, %28 ]
-	%31 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000825, i64 0, i64 0), i64 5)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000845, i64 0, i64 0), i64 5)
 	%32 = call i64 @js_scope_get(i64 %30, i64 %31)
 	%33 = call i64 @js_arr_new()
 	%34 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
@@ -53911,11 +54883,11 @@ entry:
 	%40 = call i64 @js_setret(i64 %37)
 	br label %25
 
-dead907:
+dead917:
 	ret i64 0
 }
 
-define i64 @jsf_1000311(i64 %env, i64 %args) {
+define i64 @jsf_1000314(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000267, i64 0, i64 0), i64 2)
@@ -53981,11 +54953,11 @@ entry:
 	%57 = call i64 @js_call(i64 %16, i64 0, i64 %17)
 	ret i64 %57
 
-dead908:
+dead918:
 	ret i64 0
 }
 
-define i64 @jsf_1000312(i64 %env, i64 %args) {
+define i64 @jsf_1000315(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -54024,7 +54996,7 @@ entry:
 	br label %49
 
 28:
-	%29 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000514, i64 0, i64 0), i64 6)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000522, i64 0, i64 0), i64 6)
 	%30 = call i64 @js_scope_get(i64 %12, i64 %29)
 	%31 = call i64 @js_arr_new()
 	%32 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54033,7 +55005,7 @@ entry:
 	%35 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%36 = call i64 @js_scope_get(i64 %12, i64 %35)
 	%37 = call i64 @js_arr_push(i64 %31, i64 %36)
-	%38 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000510, i64 0, i64 0), i64 9)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000519, i64 0, i64 0), i64 9)
 	%39 = call i64 @js_scope_get(i64 %12, i64 %38)
 	%40 = call i64 @js_arr_new()
 	%41 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
@@ -54054,10 +55026,10 @@ entry:
 	%52 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%53 = call i64 @js_scope_get(i64 %51, i64 %52)
 	%54 = call i64 @js_arr_new()
-	%55 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000847, i64 0, i64 0), i64 9)
+	%55 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000490, i64 0, i64 0), i64 9)
 	%56 = call i64 @js_arr_push(i64 %54, i64 %55)
-	%57 = call i64 @js_str_mem(i8* getelementptr ([64 x i8], [64 x i8]* @str.1000848, i64 0, i64 0), i64 64)
-	%58 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000592, i64 0, i64 0), i64 11)
+	%57 = call i64 @js_str_mem(i8* getelementptr ([64 x i8], [64 x i8]* @str.1000867, i64 0, i64 0), i64 64)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000492, i64 0, i64 0), i64 11)
 	%59 = call i64 @js_scope_get(i64 %51, i64 %58)
 	%60 = call i64 @js_arr_new()
 	%61 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54065,18 +55037,18 @@ entry:
 	%63 = call i64 @js_arr_push(i64 %60, i64 %62)
 	%64 = call i64 @js_call(i64 %59, i64 0, i64 %60)
 	%65 = call i64 @js_add(i64 %57, i64 %64)
-	%66 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000849, i64 0, i64 0), i64 6)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000757, i64 0, i64 0), i64 6)
 	%67 = call i64 @js_add(i64 %65, i64 %66)
 	%68 = call i64 @js_arr_push(i64 %54, i64 %67)
 	%69 = call i64 @js_call(i64 %53, i64 0, i64 %54)
 	%70 = call i64 @js_setret(i64 %69)
 	br label %28
 
-dead909:
+dead919:
 	ret i64 0
 }
 
-define i64 @jsf_1000313(i64 %env, i64 %args) {
+define i64 @jsf_1000316(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54131,7 +55103,7 @@ entry:
 	%38 = phi i64 [ %9, %36 ]
 	ret i64 1
 
-dead910:
+dead920:
 	br label %25
 
 39:
@@ -54160,14 +55132,14 @@ dead910:
 	%56 = phi i64 [ %9, %54 ]
 	ret i64 1
 
-dead911:
+dead921:
 	br label %40
 
-dead912:
+dead922:
 	ret i64 0
 }
 
-define i64 @jsf_1000314(i64 %env, i64 %args) {
+define i64 @jsf_1000317(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54228,7 +55200,7 @@ entry:
 	%44 = phi i64 [ %9, %42 ]
 	ret i64 1
 
-dead913:
+dead923:
 	br label %21
 
 45:
@@ -54272,7 +55244,7 @@ dead913:
 	%77 = phi i64 [ %9, %75 ]
 	ret i64 1
 
-dead914:
+dead924:
 	br label %46
 
 78:
@@ -54296,7 +55268,7 @@ dead914:
 	br label %104
 
 92:
-	%93 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000538, i64 0, i64 0), i64 8)
+	%93 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000546, i64 0, i64 0), i64 8)
 	%94 = call i64 @js_scope_get(i64 %9, i64 %93)
 	%95 = call i64 @js_arr_new()
 	%96 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54316,7 +55288,7 @@ dead914:
 	%106 = phi i64 [ %9, %104 ]
 	%107 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%108 = call i64 @js_scope_get(i64 %106, i64 %107)
-	%109 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000539, i64 0, i64 0), i64 9)
+	%109 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000547, i64 0, i64 0), i64 9)
 	%110 = call i64 @js_scope_get(i64 %106, i64 %109)
 	%111 = call i64 @js_arr_new()
 	%112 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54345,7 +55317,7 @@ dead914:
 	%127 = call i64 @js_scope_get(i64 %125, i64 %126)
 	%128 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
 	%129 = call i64 @js_scope_get(i64 %125, i64 %128)
-	%130 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000535, i64 0, i64 0), i64 6)
+	%130 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000543, i64 0, i64 0), i64 6)
 	%131 = call i64 @js_set(i64 %129, i64 %130, i64 %127)
 	%132 = call i64 @js_setret(i64 %127)
 	br label %122
@@ -54366,16 +55338,16 @@ dead914:
 	%140 = call i64 @js_num_i(i64 0)
 	%141 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
 	%142 = call i64 @js_scope_get(i64 %139, i64 %141)
-	%143 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000537, i64 0, i64 0), i64 5)
+	%143 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000545, i64 0, i64 0), i64 5)
 	%144 = call i64 @js_set(i64 %142, i64 %143, i64 %140)
 	%145 = call i64 @js_setret(i64 %140)
 	br label %134
 
-dead915:
+dead925:
 	ret i64 0
 }
 
-define i64 @jsf_1000315(i64 %env, i64 %args) {
+define i64 @jsf_1000318(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54410,9 +55382,9 @@ entry:
 	%26 = call i64 @js_scope_get(i64 %12, i64 %25)
 	%27 = call i64 @js_arr_push(i64 %24, i64 %26)
 	%28 = call i64 @js_call(i64 %23, i64 0, i64 %24)
-	%29 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000853, i64 0, i64 0), i64 5)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000871, i64 0, i64 0), i64 5)
 	%30 = call i64 @js_tdecl(i64 %12, i64 %29, i64 %28)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000853, i64 0, i64 0), i64 5)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000871, i64 0, i64 0), i64 5)
 	%32 = call i64 @js_scope_get(i64 %12, i64 %31)
 	%33 = call i64 @js_seq(i64 %32, i64 0)
 	%34 = call i64 @js_truthy(i64 %33)
@@ -54423,7 +55395,7 @@ entry:
 	br label %55
 
 37:
-	%38 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000853, i64 0, i64 0), i64 5)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000871, i64 0, i64 0), i64 5)
 	%39 = call i64 @js_scope_get(i64 %12, i64 %38)
 	%40 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%41 = call i64 @js_get(i64 %39, i64 %40)
@@ -54434,7 +55406,7 @@ entry:
 	%46 = call i64 @js_num_i(i64 0)
 	%47 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
 	%48 = call i64 @js_tdecl(i64 %12, i64 %47, i64 %46)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000853, i64 0, i64 0), i64 5)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000871, i64 0, i64 0), i64 5)
 	%50 = call i64 @js_scope_get(i64 %12, i64 %49)
 	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000123, i64 0, i64 0), i64 1)
 	%52 = call i64 @js_get(i64 %50, i64 %51)
@@ -54449,7 +55421,7 @@ entry:
 	%57 = phi i64 [ %12, %55 ]
 	%58 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%59 = call i64 @js_scope_get(i64 %57, i64 %58)
-	%60 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%60 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%61 = call i64 @js_eq(i64 %59, i64 %60)
 	%62 = call i64 @js_truthy(i64 %61)
 	%63 = icmp ne i64 %62, 0
@@ -54468,10 +55440,10 @@ entry:
 	%68 = phi i64 [ %57, %66 ]
 	ret i64 1
 
-dead916:
+dead926:
 	br label %65
 
-dead917:
+dead927:
 	br label %37
 
 69:
@@ -54480,7 +55452,7 @@ dead917:
 70:
 	%71 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%72 = call i64 @js_scope_get(i64 %12, i64 %71)
-	%73 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000854, i64 0, i64 0), i64 5)
+	%73 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000872, i64 0, i64 0), i64 5)
 	%74 = call i64 @js_eq(i64 %72, i64 %73)
 	%75 = call i64 @js_truthy(i64 %74)
 	%76 = icmp ne i64 %75, 0
@@ -54491,7 +55463,7 @@ dead917:
 
 78:
 	%79 = phi i64 [ %12, %77 ]
-	%80 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000538, i64 0, i64 0), i64 8)
+	%80 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000546, i64 0, i64 0), i64 8)
 	%81 = call i64 @js_scope_get(i64 %79, i64 %80)
 	%82 = call i64 @js_arr_new()
 	%83 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
@@ -54507,7 +55479,7 @@ dead917:
 	br label %105
 
 91:
-	%92 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000853, i64 0, i64 0), i64 5)
+	%92 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000871, i64 0, i64 0), i64 5)
 	%93 = call i64 @js_scope_get(i64 %12, i64 %92)
 	%94 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000123, i64 0, i64 0), i64 1)
 	%95 = call i64 @js_get(i64 %93, i64 %94)
@@ -54544,7 +55516,7 @@ dead917:
 114:
 	%115 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%116 = call i64 @js_scope_get(i64 %12, i64 %115)
-	%117 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000653, i64 0, i64 0), i64 4)
+	%117 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000661, i64 0, i64 0), i64 4)
 	%118 = call i64 @js_eq(i64 %116, i64 %117)
 	%119 = call i64 @js_truthy(i64 %118)
 	%120 = icmp ne i64 %119, 0
@@ -54590,7 +55562,7 @@ dead917:
 144:
 	%145 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%146 = call i64 @js_scope_get(i64 %12, i64 %145)
-	%147 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000855, i64 0, i64 0), i64 4)
+	%147 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000873, i64 0, i64 0), i64 4)
 	%148 = call i64 @js_eq(i64 %146, i64 %147)
 	%149 = call i64 @js_truthy(i64 %148)
 	%150 = icmp ne i64 %149, 0
@@ -54694,7 +55666,7 @@ dead917:
 210:
 	%211 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%212 = call i64 @js_scope_get(i64 %12, i64 %211)
-	%213 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%213 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%214 = call i64 @js_eq(i64 %212, i64 %213)
 	%215 = call i64 @js_truthy(i64 %214)
 	%216 = icmp ne i64 %215, 0
@@ -54709,7 +55681,7 @@ dead917:
 	%221 = call i64 @js_scope_get(i64 %219, i64 %220)
 	%222 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000110, i64 0, i64 0), i64 1)
 	%223 = call i64 @js_scope_get(i64 %219, i64 %222)
-	%224 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000537, i64 0, i64 0), i64 5)
+	%224 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000545, i64 0, i64 0), i64 5)
 	%225 = call i64 @js_set(i64 %223, i64 %224, i64 %221)
 	%226 = call i64 @js_setret(i64 %221)
 	br label %210
@@ -54742,7 +55714,7 @@ dead917:
 	br i1 %245, label %246, label %254
 
 246:
-	%247 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000853, i64 0, i64 0), i64 5)
+	%247 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000871, i64 0, i64 0), i64 5)
 	%248 = call i64 @js_scope_get(i64 %238, i64 %247)
 	%249 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%250 = call i64 @js_get(i64 %248, i64 %249)
@@ -54758,14 +55730,14 @@ dead917:
 	%256 = phi i64 [ %253, %246 ], [ 1, %254 ]
 	ret i64 %256
 
-dead918:
+dead928:
 	br label %228
 
 257:
 	%258 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
 	%259 = call i64 @js_scope_get(i64 %12, i64 %258)
 	%260 = call i64 @js_arr_new()
-	%261 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000853, i64 0, i64 0), i64 5)
+	%261 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000871, i64 0, i64 0), i64 5)
 	%262 = call i64 @js_scope_get(i64 %12, i64 %261)
 	%263 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%264 = call i64 @js_get(i64 %262, i64 %263)
@@ -54783,17 +55755,17 @@ dead918:
 	%272 = phi i64 [ %269, %257 ], [ 2, %270 ]
 	ret i64 %272
 
-dead919:
+dead929:
 	ret i64 0
 }
 
-define i64 @jsf_1000316(i64 %env, i64 %args) {
+define i64 @jsf_1000319(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000857, i64 0, i64 0), i64 4)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000875, i64 0, i64 0), i64 4)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -54806,13 +55778,13 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000545, i64 0, i64 0), i64 8)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000552, i64 0, i64 0), i64 8)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_arr_new()
-	%16 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000857, i64 0, i64 0), i64 4)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000875, i64 0, i64 0), i64 4)
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
-	%19 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%20 = call i64 @js_scope_get(i64 %12, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %15, i64 %20)
 	%22 = call i64 @js_call(i64 %14, i64 0, i64 %15)
@@ -54833,7 +55805,7 @@ entry:
 	%35 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000417, i64 0, i64 0), i64 8)
 	%36 = call i64 @js_scope_get(i64 %12, i64 %35)
 	%37 = call i64 @js_arr_new()
-	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000857, i64 0, i64 0), i64 4)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000875, i64 0, i64 0), i64 4)
 	%39 = call i64 @js_scope_get(i64 %12, i64 %38)
 	%40 = call i64 @js_arr_push(i64 %37, i64 %39)
 	%41 = call i64 @js_call(i64 %36, i64 0, i64 %37)
@@ -54859,41 +55831,41 @@ entry:
 
 52:
 	%53 = phi i64 [ %51, %50 ]
-	%54 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%55 = call i64 @js_scope_get(i64 %53, i64 %54)
 	%56 = call i64 @js_arr_new()
 	%57 = call i64 @js_call(i64 %55, i64 0, i64 %56)
-	%58 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000858, i64 0, i64 0), i64 2)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000876, i64 0, i64 0), i64 2)
 	%59 = call i64 @js_tdecl(i64 %53, i64 %58, i64 %57)
-	%60 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%60 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%61 = call i64 @js_scope_get(i64 %53, i64 %60)
 	%62 = call i64 @js_arr_new()
-	%63 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000857, i64 0, i64 0), i64 4)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000875, i64 0, i64 0), i64 4)
 	%64 = call i64 @js_scope_get(i64 %53, i64 %63)
 	%65 = call i64 @js_arr_push(i64 %62, i64 %64)
-	%66 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%67 = call i64 @js_scope_get(i64 %53, i64 %66)
 	%68 = call i64 @js_arr_push(i64 %62, i64 %67)
-	%69 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000858, i64 0, i64 0), i64 2)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000876, i64 0, i64 0), i64 2)
 	%70 = call i64 @js_scope_get(i64 %53, i64 %69)
 	%71 = call i64 @js_arr_push(i64 %62, i64 %70)
 	%72 = call i64 @js_call(i64 %61, i64 0, i64 %62)
 	%73 = call i64 @js_setret(i64 %72)
-	%74 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000858, i64 0, i64 0), i64 2)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000876, i64 0, i64 0), i64 2)
 	%75 = call i64 @js_scope_get(i64 %53, i64 %74)
 	ret i64 %75
 
-dead920:
+dead930:
 	br label %47
 
-dead921:
+dead931:
 	ret i64 0
 }
 
-define i64 @jsf_1000317(i64 %env, i64 %args) {
+define i64 @jsf_1000320(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000857, i64 0, i64 0), i64 4)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000875, i64 0, i64 0), i64 4)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -54908,7 +55880,7 @@ entry:
 	%9 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000417, i64 0, i64 0), i64 8)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
-	%12 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000857, i64 0, i64 0), i64 4)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000875, i64 0, i64 0), i64 4)
 	%13 = call i64 @js_scope_get(i64 %8, i64 %12)
 	%14 = call i64 @js_arr_push(i64 %11, i64 %13)
 	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
@@ -54928,35 +55900,35 @@ entry:
 
 22:
 	%23 = phi i64 [ %21, %20 ]
-	%24 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%25 = call i64 @js_scope_get(i64 %23, i64 %24)
 	%26 = call i64 @js_arr_new()
 	%27 = call i64 @js_call(i64 %25, i64 0, i64 %26)
-	%28 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000858, i64 0, i64 0), i64 2)
+	%28 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000876, i64 0, i64 0), i64 2)
 	%29 = call i64 @js_tdecl(i64 %23, i64 %28, i64 %27)
-	%30 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%31 = call i64 @js_scope_get(i64 %23, i64 %30)
 	%32 = call i64 @js_arr_new()
-	%33 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000857, i64 0, i64 0), i64 4)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000875, i64 0, i64 0), i64 4)
 	%34 = call i64 @js_scope_get(i64 %23, i64 %33)
 	%35 = call i64 @js_arr_push(i64 %32, i64 %34)
-	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000858, i64 0, i64 0), i64 2)
+	%36 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000876, i64 0, i64 0), i64 2)
 	%37 = call i64 @js_scope_get(i64 %23, i64 %36)
 	%38 = call i64 @js_arr_push(i64 %32, i64 %37)
 	%39 = call i64 @js_call(i64 %31, i64 0, i64 %32)
 	%40 = call i64 @js_setret(i64 %39)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000858, i64 0, i64 0), i64 2)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000876, i64 0, i64 0), i64 2)
 	%42 = call i64 @js_scope_get(i64 %23, i64 %41)
 	ret i64 %42
 
-dead922:
+dead932:
 	br label %19
 
-dead923:
+dead933:
 	ret i64 0
 }
 
-define i64 @jsf_1000318(i64 %env, i64 %args) {
+define i64 @jsf_1000321(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000164, i64 0, i64 0), i64 3)
@@ -54987,7 +55959,7 @@ entry:
 	br label %25
 
 20:
-	%21 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%22 = call i64 @js_scope_get(i64 %8, i64 %21)
 	%23 = call i64 @js_arr_new()
 	%24 = call i64 @js_call(i64 %22, i64 0, i64 %23)
@@ -55002,17 +55974,17 @@ entry:
 	%29 = call i64 @js_scope_get(i64 %27, i64 %28)
 	ret i64 %29
 
-dead924:
+dead934:
 	br label %20
 
-dead925:
+dead935:
 	ret i64 0
 }
 
-define i64 @jsf_1000319(i64 %env, i64 %args) {
+define i64 @jsf_1000322(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -55031,10 +56003,10 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
-	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_call(i64 %17, i64 0, i64 %18)
@@ -55075,9 +56047,9 @@ entry:
 
 52:
 	%53 = phi i64 [ %43, %34 ], [ %51, %44 ]
-	%54 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000564, i64 0, i64 0), i64 5)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000570, i64 0, i64 0), i64 5)
 	%55 = call i64 @js_tdecl(i64 %15, i64 %54, i64 %53)
-	%56 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000575, i64 0, i64 0), i64 9)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000581, i64 0, i64 0), i64 9)
 	%57 = call i64 @js_scope_get(i64 %15, i64 %56)
 	%58 = call i64 @js_arr_new()
 	%59 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -55086,9 +56058,9 @@ entry:
 	%62 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%63 = call i64 @js_scope_get(i64 %15, i64 %62)
 	%64 = call i64 @js_arr_push(i64 %58, i64 %63)
-	%65 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000564, i64 0, i64 0), i64 5)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000570, i64 0, i64 0), i64 5)
 	%66 = call i64 @js_scope_get(i64 %15, i64 %65)
-	%67 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000703, i64 0, i64 0), i64 2)
+	%67 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000712, i64 0, i64 0), i64 2)
 	%68 = call i64 @js_add(i64 %66, i64 %67)
 	%69 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%70 = call i64 @js_scope_get(i64 %15, i64 %69)
@@ -55113,7 +56085,7 @@ entry:
 	%85 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%86 = call i64 @js_scope_get(i64 %15, i64 %85)
 	%87 = call i64 @js_arr_new()
-	%88 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000862, i64 0, i64 0), i64 19)
+	%88 = call i64 @js_str_mem(i8* getelementptr ([19 x i8], [19 x i8]* @str.1000880, i64 0, i64 0), i64 19)
 	%89 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%90 = call i64 @js_scope_get(i64 %15, i64 %89)
 	%91 = call i64 @js_arr_new()
@@ -55124,7 +56096,7 @@ entry:
 	%96 = call i64 @js_arr_push(i64 %91, i64 %95)
 	%97 = call i64 @js_call(i64 %90, i64 0, i64 %91)
 	%98 = call i64 @js_add(i64 %88, i64 %97)
-	%99 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000703, i64 0, i64 0), i64 2)
+	%99 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000712, i64 0, i64 0), i64 2)
 	%100 = call i64 @js_add(i64 %98, i64 %99)
 	%101 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%102 = call i64 @js_scope_get(i64 %15, i64 %101)
@@ -55145,14 +56117,14 @@ entry:
 	%113 = call i64 @js_get(i64 %111, i64 %112)
 	ret i64 %113
 
-dead926:
+dead936:
 	br label %84
 
-dead927:
+dead937:
 	ret i64 0
 }
 
-define i64 @jsf_1000320(i64 %env, i64 %args) {
+define i64 @jsf_1000323(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -55210,7 +56182,7 @@ entry:
 39:
 	%40 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000090, i64 0, i64 0), i64 3)
 	%41 = call i64 @js_scope_get(i64 %9, i64 %40)
-	%42 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000864, i64 0, i64 0), i64 7)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000882, i64 0, i64 0), i64 7)
 	%43 = call i64 @js_get(i64 %41, i64 %42)
 	%44 = call i64 @js_sne(i64 %43, i64 3)
 	br label %45
@@ -55227,7 +56199,7 @@ entry:
 50:
 	%51 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%52 = call i64 @js_scope_get(i64 %9, i64 %51)
-	%53 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000866, i64 0, i64 0), i64 7)
+	%53 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000884, i64 0, i64 0), i64 7)
 	%54 = call i64 @js_get(i64 %52, i64 %53)
 	%55 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000187, i64 0, i64 0), i64 1)
 	%56 = call i64 @js_tdecl(i64 %9, i64 %55, i64 %54)
@@ -55243,7 +56215,7 @@ entry:
 
 63:
 	%64 = phi i64 [ %9, %62 ]
-	%65 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000865, i64 0, i64 0), i64 11)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000883, i64 0, i64 0), i64 11)
 	%66 = call i64 @js_scope_get(i64 %64, i64 %65)
 	%67 = call i64 @js_arr_new()
 	%68 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000090, i64 0, i64 0), i64 3)
@@ -55271,7 +56243,7 @@ entry:
 82:
 	%83 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%84 = call i64 @js_scope_get(i64 %9, i64 %83)
-	%85 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000864, i64 0, i64 0), i64 7)
+	%85 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000882, i64 0, i64 0), i64 7)
 	%86 = call i64 @js_set(i64 %84, i64 %85, i64 3)
 	%87 = call i64 @js_setret(i64 3)
 	ret i64 0
@@ -55294,13 +56266,13 @@ entry:
 	%101 = call i64 @js_setret(i64 %100)
 	%102 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%103 = call i64 @js_scope_get(i64 %90, i64 %102)
-	%104 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000866, i64 0, i64 0), i64 7)
+	%104 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000884, i64 0, i64 0), i64 7)
 	%105 = call i64 @js_set(i64 %103, i64 %104, i64 1)
 	%106 = call i64 @js_setret(i64 1)
 	br label %82
 }
 
-define i64 @jsf_1000321(i64 %env, i64 %args) {
+define i64 @jsf_1000324(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -55309,10 +56281,10 @@ entry:
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000867, i64 0, i64 0), i64 4)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000885, i64 0, i64 0), i64 4)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
-	%10 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%11 = call i64 @js_arg(i64 %args, i64 3)
 	%12 = call i64 @js_tdecl(i64 %0, i64 %10, i64 %11)
 	%13 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -55345,7 +56317,7 @@ entry:
 34:
 	%35 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%36 = call i64 @js_scope_get(i64 %18, i64 %35)
-	%37 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000868, i64 0, i64 0), i64 6)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000886, i64 0, i64 0), i64 6)
 	%38 = call i64 @js_eq(i64 %36, i64 %37)
 	br label %39
 
@@ -55358,7 +56330,7 @@ entry:
 43:
 	%44 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%45 = call i64 @js_scope_get(i64 %18, i64 %44)
-	%46 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000869, i64 0, i64 0), i64 6)
+	%46 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000887, i64 0, i64 0), i64 6)
 	%47 = call i64 @js_eq(i64 %45, i64 %46)
 	br label %48
 
@@ -55372,7 +56344,7 @@ entry:
 	br label %59
 
 53:
-	%54 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%54 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%55 = call i64 @js_scope_get(i64 %18, i64 %54)
 	%56 = call i64 @js_sne(i64 %55, i64 0)
 	%57 = call i64 @js_truthy(i64 %56)
@@ -55385,20 +56357,20 @@ entry:
 
 61:
 	%62 = phi i64 [ %60, %59 ]
-	%63 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%64 = call i64 @js_scope_get(i64 %62, i64 %63)
 	%65 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%66 = call i64 @js_tdecl(i64 %62, i64 %65, i64 %64)
 	%67 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%68 = call i64 @js_scope_get(i64 %62, i64 %67)
-	%69 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000868, i64 0, i64 0), i64 6)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000886, i64 0, i64 0), i64 6)
 	%70 = call i64 @js_eq(i64 %68, i64 %69)
 	%71 = call i64 @js_truthy(i64 %70)
 	%72 = icmp ne i64 %71, 0
 	br i1 %72, label %73, label %76
 
 73:
-	%74 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000867, i64 0, i64 0), i64 4)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000885, i64 0, i64 0), i64 4)
 	%75 = call i64 @js_scope_get(i64 %62, i64 %74)
 	br label %79
 
@@ -55439,7 +56411,7 @@ entry:
 100:
 	%101 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%102 = call i64 @js_scope_get(i64 %62, i64 %101)
-	%103 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000869, i64 0, i64 0), i64 6)
+	%103 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000887, i64 0, i64 0), i64 6)
 	%104 = call i64 @js_ne(i64 %102, i64 %103)
 	%105 = call i64 @js_truthy(i64 %104)
 	%106 = icmp ne i64 %105, 0
@@ -55450,7 +56422,7 @@ entry:
 
 108:
 	%109 = phi i64 [ %62, %107 ]
-	%110 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%110 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%111 = call i64 @js_scope_get(i64 %109, i64 %110)
 	%112 = call i64 @js_sne(i64 %111, i64 0)
 	%113 = call i64 @js_truthy(i64 %112)
@@ -55464,13 +56436,13 @@ entry:
 	%117 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%118 = call i64 @js_scope_get(i64 %109, i64 %117)
 	%119 = call i64 @js_arr_new()
-	%120 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%120 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%121 = call i64 @js_arr_push(i64 %119, i64 %120)
-	%122 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000872, i64 0, i64 0), i64 12)
+	%122 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000890, i64 0, i64 0), i64 12)
 	%123 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%124 = call i64 @js_scope_get(i64 %109, i64 %123)
 	%125 = call i64 @js_add(i64 %122, i64 %124)
-	%126 = call i64 @js_str_mem(i8* getelementptr ([31 x i8], [31 x i8]* @str.1000871, i64 0, i64 0), i64 31)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([31 x i8], [31 x i8]* @str.1000889, i64 0, i64 0), i64 31)
 	%127 = call i64 @js_add(i64 %125, i64 %126)
 	%128 = call i64 @js_arr_push(i64 %119, i64 %127)
 	%129 = call i64 @js_call(i64 %118, i64 0, i64 %119)
@@ -55482,17 +56454,17 @@ entry:
 
 132:
 	%133 = phi i64 [ %109, %131 ]
-	%134 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%134 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%135 = call i64 @js_scope_get(i64 %133, i64 %134)
 	%136 = call i64 @js_arr_new()
-	%137 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%137 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%138 = call i64 @js_scope_get(i64 %133, i64 %137)
 	%139 = call i64 @js_arr_push(i64 %136, i64 %138)
-	%140 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000870, i64 0, i64 0), i64 15)
+	%140 = call i64 @js_str_mem(i8* getelementptr ([15 x i8], [15 x i8]* @str.1000888, i64 0, i64 0), i64 15)
 	%141 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%142 = call i64 @js_scope_get(i64 %133, i64 %141)
 	%143 = call i64 @js_add(i64 %140, i64 %142)
-	%144 = call i64 @js_str_mem(i8* getelementptr ([31 x i8], [31 x i8]* @str.1000871, i64 0, i64 0), i64 31)
+	%144 = call i64 @js_str_mem(i8* getelementptr ([31 x i8], [31 x i8]* @str.1000889, i64 0, i64 0), i64 31)
 	%145 = call i64 @js_add(i64 %143, i64 %144)
 	%146 = call i64 @js_arr_push(i64 %136, i64 %145)
 	%147 = call i64 @js_call(i64 %135, i64 0, i64 %136)
@@ -55525,7 +56497,7 @@ entry:
 	%166 = call i64 @js_scope_get(i64 %164, i64 %165)
 	ret i64 %166
 
-dead928:
+dead938:
 	br label %150
 
 167:
@@ -55544,7 +56516,7 @@ dead928:
 	br label %182
 
 176:
-	%177 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%177 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%178 = call i64 @js_scope_get(i64 %62, i64 %177)
 	%179 = call i64 @js_sne(i64 %178, i64 0)
 	%180 = call i64 @js_truthy(i64 %179)
@@ -55560,7 +56532,7 @@ dead928:
 	%186 = call i64 @js_scope_get(i64 %184, i64 %185)
 	ret i64 %186
 
-dead929:
+dead939:
 	br label %176
 
 187:
@@ -55570,9 +56542,9 @@ dead929:
 	%189 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%190 = call i64 @js_scope_get(i64 %62, i64 %189)
 	%191 = call i64 @js_arr_new()
-	%192 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%192 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%193 = call i64 @js_arr_push(i64 %191, i64 %192)
-	%194 = call i64 @js_str_mem(i8* getelementptr ([58 x i8], [58 x i8]* @str.1000874, i64 0, i64 0), i64 58)
+	%194 = call i64 @js_str_mem(i8* getelementptr ([58 x i8], [58 x i8]* @str.1000892, i64 0, i64 0), i64 58)
 	%195 = call i64 @js_arr_push(i64 %191, i64 %194)
 	%196 = call i64 @js_call(i64 %190, i64 0, i64 %191)
 	%197 = call i64 @js_setret(i64 %196)
@@ -55583,13 +56555,13 @@ dead929:
 
 199:
 	%200 = phi i64 [ %62, %198 ]
-	%201 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%201 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%202 = call i64 @js_scope_get(i64 %200, i64 %201)
 	%203 = call i64 @js_arr_new()
-	%204 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%204 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%205 = call i64 @js_scope_get(i64 %200, i64 %204)
 	%206 = call i64 @js_arr_push(i64 %203, i64 %205)
-	%207 = call i64 @js_str_mem(i8* getelementptr ([61 x i8], [61 x i8]* @str.1000873, i64 0, i64 0), i64 61)
+	%207 = call i64 @js_str_mem(i8* getelementptr ([61 x i8], [61 x i8]* @str.1000891, i64 0, i64 0), i64 61)
 	%208 = call i64 @js_arr_push(i64 %203, i64 %207)
 	%209 = call i64 @js_call(i64 %202, i64 0, i64 %203)
 	%210 = call i64 @js_setret(i64 %209)
@@ -55602,13 +56574,13 @@ dead929:
 	%213 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%214 = call i64 @js_scope_get(i64 %18, i64 %213)
 	%215 = call i64 @js_arr_new()
-	%216 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%216 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%217 = call i64 @js_arr_push(i64 %215, i64 %216)
-	%218 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000877, i64 0, i64 0), i64 7)
+	%218 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000895, i64 0, i64 0), i64 7)
 	%219 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%220 = call i64 @js_scope_get(i64 %18, i64 %219)
 	%221 = call i64 @js_add(i64 %218, i64 %220)
-	%222 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000876, i64 0, i64 0), i64 11)
+	%222 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000894, i64 0, i64 0), i64 11)
 	%223 = call i64 @js_add(i64 %221, i64 %222)
 	%224 = call i64 @js_arr_push(i64 %215, i64 %223)
 	%225 = call i64 @js_call(i64 %214, i64 0, i64 %215)
@@ -55620,34 +56592,140 @@ dead929:
 
 228:
 	%229 = phi i64 [ %18, %227 ]
-	%230 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%230 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%231 = call i64 @js_scope_get(i64 %229, i64 %230)
 	%232 = call i64 @js_arr_new()
-	%233 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%233 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%234 = call i64 @js_scope_get(i64 %229, i64 %233)
 	%235 = call i64 @js_arr_push(i64 %232, i64 %234)
-	%236 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000875, i64 0, i64 0), i64 7)
+	%236 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000893, i64 0, i64 0), i64 7)
 	%237 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000024, i64 0, i64 0), i64 2)
 	%238 = call i64 @js_scope_get(i64 %229, i64 %237)
 	%239 = call i64 @js_add(i64 %236, i64 %238)
-	%240 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000876, i64 0, i64 0), i64 11)
+	%240 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000894, i64 0, i64 0), i64 11)
 	%241 = call i64 @js_add(i64 %239, i64 %240)
 	%242 = call i64 @js_arr_push(i64 %232, i64 %241)
 	%243 = call i64 @js_call(i64 %231, i64 0, i64 %232)
 	%244 = call i64 @js_setret(i64 %243)
 	br label %212
 
-dead930:
+dead940:
 	ret i64 0
 }
 
-define i64 @jsf_1000322(i64 %env, i64 %args) {
+define i64 @jsf_1000325(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000879, i64 0, i64 0), i64 6)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000897, i64 0, i64 0), i64 6)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%8 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %args)
+	br label %9
+
+9:
+	%10 = call i64 @js_scope_new(i64 %0)
+	br label %11
+
+11:
+	%12 = phi i64 [ %10, %9 ]
+	%13 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
+	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
+	%15 = call i64 @js_arr_new()
+	%16 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
+	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
+	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
+	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000898, i64 0, i64 0), i64 1)
+	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000898, i64 0, i64 0), i64 1)
+	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%25 = call i64 @js_get(i64 %23, i64 %24)
+	%26 = call i64 @js_num_i(i64 0)
+	%27 = call i64 @js_gt(i64 %25, i64 %26)
+	%28 = call i64 @js_truthy(i64 %27)
+	%29 = icmp ne i64 %28, 0
+	br i1 %29, label %30, label %46
+
+30:
+	%31 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000898, i64 0, i64 0), i64 1)
+	%32 = call i64 @js_scope_get(i64 %12, i64 %31)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000031, i64 0, i64 0), i64 6)
+	%34 = call i64 @js_get(i64 %32, i64 %33)
+	%35 = call i64 @js_arr_new()
+	%36 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000898, i64 0, i64 0), i64 1)
+	%37 = call i64 @js_scope_get(i64 %12, i64 %36)
+	%38 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%39 = call i64 @js_get(i64 %37, i64 %38)
+	%40 = call i64 @js_num_i(i64 1)
+	%41 = call i64 @js_sub(i64 %39, i64 %40)
+	%42 = call i64 @js_arr_push(i64 %35, i64 %41)
+	%43 = call i64 @js_call(i64 %34, i64 %32, i64 %35)
+	%44 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000899, i64 0, i64 0), i64 1)
+	%45 = call i64 @js_eq(i64 %43, i64 %44)
+	br label %46
+
+46:
+	%47 = phi i64 [ %27, %11 ], [ %45, %30 ]
+	%48 = call i64 @js_truthy(i64 %47)
+	%49 = icmp ne i64 %48, 0
+	br i1 %49, label %50, label %51
+
+50:
+	br label %67
+
+51:
+	%52 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
+	%53 = call i64 @js_scope_get(i64 %12, i64 %52)
+	%54 = call i64 @js_arr_new()
+	%55 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000490, i64 0, i64 0), i64 9)
+	%56 = call i64 @js_arr_push(i64 %54, i64 %55)
+	%57 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000898, i64 0, i64 0), i64 1)
+	%58 = call i64 @js_scope_get(i64 %12, i64 %57)
+	%59 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000900, i64 0, i64 0), i64 2)
+	%60 = call i64 @js_add(i64 %58, i64 %59)
+	%61 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000897, i64 0, i64 0), i64 6)
+	%62 = call i64 @js_scope_get(i64 %12, i64 %61)
+	%63 = call i64 @js_add(i64 %60, i64 %62)
+	%64 = call i64 @js_arr_push(i64 %54, i64 %63)
+	%65 = call i64 @js_call(i64 %53, i64 0, i64 %54)
+	%66 = call i64 @js_setret(i64 %65)
+	ret i64 0
+
+67:
+	br label %68
+
+68:
+	%69 = phi i64 [ %12, %67 ]
+	%70 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
+	%71 = call i64 @js_scope_get(i64 %69, i64 %70)
+	%72 = call i64 @js_arr_new()
+	%73 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000490, i64 0, i64 0), i64 9)
+	%74 = call i64 @js_arr_push(i64 %72, i64 %73)
+	%75 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000898, i64 0, i64 0), i64 1)
+	%76 = call i64 @js_scope_get(i64 %69, i64 %75)
+	%77 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000493, i64 0, i64 0), i64 1)
+	%78 = call i64 @js_add(i64 %76, i64 %77)
+	%79 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000897, i64 0, i64 0), i64 6)
+	%80 = call i64 @js_scope_get(i64 %69, i64 %79)
+	%81 = call i64 @js_add(i64 %78, i64 %80)
+	%82 = call i64 @js_arr_push(i64 %72, i64 %81)
+	%83 = call i64 @js_call(i64 %71, i64 0, i64 %72)
+	%84 = call i64 @js_setret(i64 %83)
+	br label %51
+}
+
+define i64 @jsf_1000326(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000897, i64 0, i64 0), i64 6)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -55659,36 +56737,582 @@ entry:
 
 10:
 	%11 = phi i64 [ %0, %9 ]
-	%12 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000847, i64 0, i64 0), i64 9)
-	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
-	%17 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
-	%18 = call i64 @js_scope_get(i64 %11, i64 %17)
-	%19 = call i64 @js_arr_new()
-	%20 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
-	%21 = call i64 @js_scope_get(i64 %11, i64 %20)
-	%22 = call i64 @js_arr_push(i64 %19, i64 %21)
-	%23 = call i64 @js_call(i64 %18, i64 0, i64 %19)
-	%24 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000880, i64 0, i64 0), i64 2)
-	%25 = call i64 @js_add(i64 %23, i64 %24)
-	%26 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000879, i64 0, i64 0), i64 6)
-	%27 = call i64 @js_scope_get(i64 %11, i64 %26)
-	%28 = call i64 @js_add(i64 %25, i64 %27)
-	%29 = call i64 @js_arr_push(i64 %14, i64 %28)
-	%30 = call i64 @js_call(i64 %13, i64 0, i64 %14)
-	%31 = call i64 @js_setret(i64 %30)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
+	%16 = call i64 @js_scope_get(i64 %11, i64 %15)
+	%17 = call i64 @js_arr_push(i64 %14, i64 %16)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
+	%19 = call i64 @js_scope_get(i64 %11, i64 %18)
+	%20 = call i64 @js_arr_new()
+	%21 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000897, i64 0, i64 0), i64 6)
+	%22 = call i64 @js_scope_get(i64 %11, i64 %21)
+	%23 = call i64 @js_arr_push(i64 %20, i64 %22)
+	%24 = call i64 @js_call(i64 %19, i64 0, i64 %20)
+	%25 = call i64 @js_arr_push(i64 %14, i64 %24)
+	%26 = call i64 @js_call(i64 %13, i64 0, i64 %14)
+	ret i64 %26
+
+dead941:
 	ret i64 0
 }
 
-define i64 @jsf_1000323(i64 %env, i64 %args) {
+define i64 @jsf_1000327(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
+	%5 = call i64 @js_arg(i64 %args, i64 1)
+	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000885, i64 0, i64 0), i64 4)
+	%8 = call i64 @js_arg(i64 %args, i64 2)
+	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
+	%11 = call i64 @js_tdecl(i64 %0, i64 %10, i64 %args)
+	br label %12
+
+12:
+	%13 = call i64 @js_scope_new(i64 %0)
+	br label %14
+
+14:
+	%15 = phi i64 [ %13, %12 ]
+	%16 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
+	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%19 = call i64 @js_tdecl(i64 %15, i64 %18, i64 %17)
+	%20 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
+	%21 = call i64 @js_scope_get(i64 %15, i64 %20)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
+	%23 = call i64 @js_tdecl(i64 %15, i64 %22, i64 %21)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%25 = call i64 @js_tset(i64 %15, i64 %24, i64 0)
+	%26 = call i64 @js_setret(i64 0)
+	%27 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
+	%28 = call i64 @js_tset(i64 %15, i64 %27, i64 0)
+	%29 = call i64 @js_setret(i64 0)
+	%30 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%31 = call i64 @js_scope_get(i64 %15, i64 %30)
+	%32 = call i64 @js_typeof(i64 %31)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
+	%34 = call i64 @js_eq(i64 %32, i64 %33)
+	%35 = call i64 @js_truthy(i64 %34)
+	%36 = icmp ne i64 %35, 0
+	br i1 %36, label %37, label %46
+
+37:
+	br label %47
+
+38:
+	%39 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%40 = call i64 @js_scope_get(i64 %15, i64 %39)
+	%41 = call i64 @js_typeof(i64 %40)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
+	%43 = call i64 @js_ne(i64 %41, i64 %42)
+	%44 = call i64 @js_truthy(i64 %43)
+	%45 = icmp ne i64 %44, 0
+	br i1 %45, label %170, label %164
+
+46:
+	br label %100
+
+47:
+	%48 = call i64 @js_scope_new(i64 %15)
+	br label %49
+
+49:
+	%50 = phi i64 [ %48, %47 ]
+	%51 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%52 = call i64 @js_scope_get(i64 %50, i64 %51)
+	%53 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000025, i64 0, i64 0), i64 7)
+	%54 = call i64 @js_get(i64 %52, i64 %53)
+	%55 = call i64 @js_arr_new()
+	%56 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000712, i64 0, i64 0), i64 2)
+	%57 = call i64 @js_arr_push(i64 %55, i64 %56)
+	%58 = call i64 @js_call(i64 %54, i64 %52, i64 %55)
+	%59 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
+	%60 = call i64 @js_tdecl(i64 %50, i64 %59, i64 %58)
+	%61 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
+	%62 = call i64 @js_scope_get(i64 %50, i64 %61)
+	%63 = call i64 @js_num_i(i64 0)
+	%64 = call i64 @js_ge(i64 %62, i64 %63)
+	%65 = call i64 @js_truthy(i64 %64)
+	%66 = icmp ne i64 %65, 0
+	br i1 %66, label %67, label %68
+
+67:
+	br label %69
+
+68:
+	br label %38
+
+69:
+	br label %70
+
+70:
+	%71 = phi i64 [ %50, %69 ]
+	%72 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%73 = call i64 @js_scope_get(i64 %71, i64 %72)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000028, i64 0, i64 0), i64 9)
+	%75 = call i64 @js_get(i64 %73, i64 %74)
+	%76 = call i64 @js_arr_new()
+	%77 = call i64 @js_num_i(i64 0)
+	%78 = call i64 @js_arr_push(i64 %76, i64 %77)
+	%79 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
+	%80 = call i64 @js_scope_get(i64 %71, i64 %79)
+	%81 = call i64 @js_arr_push(i64 %76, i64 %80)
+	%82 = call i64 @js_call(i64 %75, i64 %73, i64 %76)
+	%83 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%84 = call i64 @js_tset(i64 %71, i64 %83, i64 %82)
+	%85 = call i64 @js_setret(i64 %82)
+	%86 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%87 = call i64 @js_scope_get(i64 %71, i64 %86)
+	%88 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000028, i64 0, i64 0), i64 9)
+	%89 = call i64 @js_get(i64 %87, i64 %88)
+	%90 = call i64 @js_arr_new()
+	%91 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000197, i64 0, i64 0), i64 2)
+	%92 = call i64 @js_scope_get(i64 %71, i64 %91)
+	%93 = call i64 @js_num_i(i64 2)
+	%94 = call i64 @js_add(i64 %92, i64 %93)
+	%95 = call i64 @js_arr_push(i64 %90, i64 %94)
+	%96 = call i64 @js_call(i64 %89, i64 %87, i64 %90)
+	%97 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
+	%98 = call i64 @js_tset(i64 %71, i64 %97, i64 %96)
+	%99 = call i64 @js_setret(i64 %96)
+	br label %68
+
+100:
+	%101 = call i64 @js_scope_new(i64 %15)
+	br label %102
+
+102:
+	%103 = phi i64 [ %101, %100 ]
+	%104 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
+	%105 = call i64 @js_scope_get(i64 %103, i64 %104)
+	%106 = call i64 @js_arr_new()
+	%107 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%108 = call i64 @js_scope_get(i64 %103, i64 %107)
+	%109 = call i64 @js_arr_push(i64 %106, i64 %108)
+	%110 = call i64 @js_call(i64 %105, i64 0, i64 %106)
+	%111 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%112 = call i64 @js_tdecl(i64 %103, i64 %111, i64 %110)
+	%113 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%114 = call i64 @js_scope_get(i64 %103, i64 %113)
+	%115 = call i64 @js_sne(i64 %114, i64 0)
+	%116 = call i64 @js_truthy(i64 %115)
+	%117 = icmp ne i64 %116, 0
+	br i1 %117, label %118, label %127
+
+118:
+	%119 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%120 = call i64 @js_scope_get(i64 %103, i64 %119)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%122 = call i64 @js_get(i64 %120, i64 %121)
+	%123 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
+	%124 = call i64 @js_get(i64 %122, i64 %123)
+	%125 = call i64 @js_num_i(i64 2)
+	%126 = call i64 @js_eq(i64 %124, i64 %125)
+	br label %127
+
+127:
+	%128 = phi i64 [ %115, %102 ], [ %126, %118 ]
+	%129 = call i64 @js_truthy(i64 %128)
+	%130 = icmp ne i64 %129, 0
+	br i1 %130, label %131, label %132
+
+131:
+	br label %133
+
+132:
+	br label %38
+
+133:
+	br label %134
+
+134:
+	%135 = phi i64 [ %103, %133 ]
+	%136 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
+	%137 = call i64 @js_scope_get(i64 %135, i64 %136)
+	%138 = call i64 @js_arr_new()
+	%139 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%140 = call i64 @js_scope_get(i64 %135, i64 %139)
+	%141 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%142 = call i64 @js_get(i64 %140, i64 %141)
+	%143 = call i64 @js_num_i(i64 0)
+	%144 = call i64 @js_get(i64 %142, i64 %143)
+	%145 = call i64 @js_arr_push(i64 %138, i64 %144)
+	%146 = call i64 @js_call(i64 %137, i64 0, i64 %138)
+	%147 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%148 = call i64 @js_tset(i64 %135, i64 %147, i64 %146)
+	%149 = call i64 @js_setret(i64 %146)
+	%150 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000424, i64 0, i64 0), i64 7)
+	%151 = call i64 @js_scope_get(i64 %135, i64 %150)
+	%152 = call i64 @js_arr_new()
+	%153 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000339, i64 0, i64 0), i64 1)
+	%154 = call i64 @js_scope_get(i64 %135, i64 %153)
+	%155 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%156 = call i64 @js_get(i64 %154, i64 %155)
+	%157 = call i64 @js_num_i(i64 1)
+	%158 = call i64 @js_get(i64 %156, i64 %157)
+	%159 = call i64 @js_arr_push(i64 %152, i64 %158)
+	%160 = call i64 @js_call(i64 %151, i64 0, i64 %152)
+	%161 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
+	%162 = call i64 @js_tset(i64 %135, i64 %161, i64 %160)
+	%163 = call i64 @js_setret(i64 %160)
+	br label %132
+
+164:
+	%165 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
+	%166 = call i64 @js_scope_get(i64 %15, i64 %165)
+	%167 = call i64 @js_typeof(i64 %166)
+	%168 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000013, i64 0, i64 0), i64 6)
+	%169 = call i64 @js_ne(i64 %167, i64 %168)
+	br label %170
+
+170:
+	%171 = phi i64 [ %43, %38 ], [ %169, %164 ]
+	%172 = call i64 @js_truthy(i64 %171)
+	%173 = icmp ne i64 %172, 0
+	br i1 %173, label %174, label %175
+
+174:
+	br label %181
+
+175:
+	%176 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
+	%177 = call i64 @js_scope_get(i64 %15, i64 %176)
+	%178 = call i64 @js_seq(i64 %177, i64 0)
+	%179 = call i64 @js_truthy(i64 %178)
+	%180 = icmp ne i64 %179, 0
+	br i1 %180, label %190, label %186
+
+181:
+	br label %182
+
+182:
+	%183 = phi i64 [ %15, %181 ]
+	%184 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%185 = call i64 @js_scope_get(i64 %183, i64 %184)
+	ret i64 %185
+
+dead942:
+	br label %175
+
+186:
+	%187 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
+	%188 = call i64 @js_scope_get(i64 %15, i64 %187)
+	%189 = call i64 @js_seq(i64 %188, i64 1)
+	br label %190
+
+190:
+	%191 = phi i64 [ %178, %175 ], [ %189, %186 ]
+	%192 = call i64 @js_truthy(i64 %191)
+	%193 = icmp ne i64 %192, 0
+	br i1 %193, label %200, label %194
+
+194:
+	%195 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
+	%196 = call i64 @js_scope_get(i64 %15, i64 %195)
+	%197 = call i64 @js_typeof(i64 %196)
+	%198 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%199 = call i64 @js_ne(i64 %197, i64 %198)
+	br label %200
+
+200:
+	%201 = phi i64 [ %191, %190 ], [ %199, %194 ]
+	%202 = call i64 @js_truthy(i64 %201)
+	%203 = icmp ne i64 %202, 0
+	br i1 %203, label %204, label %205
+
+204:
+	br label %221
+
+205:
+	%206 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
+	%207 = call i64 @js_scope_get(i64 %15, i64 %206)
+	%208 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%209 = call i64 @js_tdecl(i64 %15, i64 %208, i64 %207)
+	%210 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
+	%211 = call i64 @js_scope_get(i64 %15, i64 %210)
+	%212 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%213 = call i64 @js_tset(i64 %15, i64 %212, i64 %211)
+	%214 = call i64 @js_setret(i64 %211)
+	%215 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%216 = call i64 @js_scope_get(i64 %15, i64 %215)
+	%217 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000886, i64 0, i64 0), i64 6)
+	%218 = call i64 @js_eq(i64 %216, i64 %217)
+	%219 = call i64 @js_truthy(i64 %218)
+	%220 = icmp ne i64 %219, 0
+	br i1 %220, label %226, label %243
+
+221:
+	br label %222
+
+222:
+	%223 = phi i64 [ %15, %221 ]
+	%224 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%225 = call i64 @js_scope_get(i64 %223, i64 %224)
+	ret i64 %225
+
+dead943:
+	br label %205
+
+226:
+	br label %250
+
+227:
+	%228 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
+	%229 = call i64 @js_scope_get(i64 %15, i64 %228)
+	%230 = call i64 @js_arr_new()
+	%231 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%232 = call i64 @js_scope_get(i64 %15, i64 %231)
+	%233 = call i64 @js_arr_push(i64 %230, i64 %232)
+	%234 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
+	%235 = call i64 @js_scope_get(i64 %15, i64 %234)
+	%236 = call i64 @js_arr_push(i64 %230, i64 %235)
+	%237 = call i64 @js_call(i64 %229, i64 0, i64 %230)
+	%238 = call i64 @js_typeof(i64 %237)
+	%239 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000094, i64 0, i64 0), i64 8)
+	%240 = call i64 @js_eq(i64 %238, i64 %239)
+	%241 = call i64 @js_truthy(i64 %240)
+	%242 = icmp ne i64 %241, 0
+	br i1 %242, label %342, label %343
+
+243:
+	%244 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%245 = call i64 @js_scope_get(i64 %15, i64 %244)
+	%246 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000887, i64 0, i64 0), i64 6)
+	%247 = call i64 @js_eq(i64 %245, i64 %246)
+	%248 = call i64 @js_truthy(i64 %247)
+	%249 = icmp ne i64 %248, 0
+	br i1 %249, label %286, label %288
+
+250:
+	br label %251
+
+251:
+	%252 = phi i64 [ %15, %250 ]
+	%253 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000885, i64 0, i64 0), i64 4)
+	%254 = call i64 @js_scope_get(i64 %252, i64 %253)
+	%255 = call i64 @js_sne(i64 %254, i64 0)
+	%256 = call i64 @js_truthy(i64 %255)
+	%257 = icmp ne i64 %256, 0
+	br i1 %257, label %258, label %262
+
+258:
+	%259 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000885, i64 0, i64 0), i64 4)
+	%260 = call i64 @js_scope_get(i64 %252, i64 %259)
+	%261 = call i64 @js_sne(i64 %260, i64 1)
+	br label %262
+
+262:
+	%263 = phi i64 [ %255, %251 ], [ %261, %258 ]
+	%264 = call i64 @js_truthy(i64 %263)
+	%265 = icmp ne i64 %264, 0
+	br i1 %265, label %266, label %272
+
+266:
+	%267 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000885, i64 0, i64 0), i64 4)
+	%268 = call i64 @js_scope_get(i64 %252, i64 %267)
+	%269 = call i64 @js_typeof(i64 %268)
+	%270 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%271 = call i64 @js_eq(i64 %269, i64 %270)
+	br label %272
+
+272:
+	%273 = phi i64 [ %263, %262 ], [ %271, %266 ]
+	%274 = call i64 @js_truthy(i64 %273)
+	%275 = icmp ne i64 %274, 0
+	br i1 %275, label %276, label %277
+
+276:
+	br label %278
+
+277:
+	br label %227
+
+278:
+	br label %279
+
+279:
+	%280 = phi i64 [ %252, %278 ]
+	%281 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000885, i64 0, i64 0), i64 4)
+	%282 = call i64 @js_scope_get(i64 %280, i64 %281)
+	%283 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%284 = call i64 @js_tset(i64 %280, i64 %283, i64 %282)
+	%285 = call i64 @js_setret(i64 %282)
+	br label %277
+
+286:
+	br label %295
+
+287:
+	br label %227
+
+288:
+	%289 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
+	%290 = call i64 @js_scope_get(i64 %15, i64 %289)
+	%291 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
+	%292 = call i64 @js_ne(i64 %290, i64 %291)
+	%293 = call i64 @js_truthy(i64 %292)
+	%294 = icmp ne i64 %293, 0
+	br i1 %294, label %335, label %336
+
+295:
+	br label %296
+
+296:
+	%297 = phi i64 [ %15, %295 ]
+	%298 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
+	%299 = call i64 @js_scope_get(i64 %297, i64 %298)
+	%300 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000070, i64 0, i64 0), i64 7)
+	%301 = call i64 @js_get(i64 %299, i64 %300)
+	%302 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%303 = call i64 @js_tset(i64 %297, i64 %302, i64 %301)
+	%304 = call i64 @js_setret(i64 %301)
+	%305 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%306 = call i64 @js_scope_get(i64 %297, i64 %305)
+	%307 = call i64 @js_seq(i64 %306, i64 0)
+	%308 = call i64 @js_truthy(i64 %307)
+	%309 = icmp ne i64 %308, 0
+	br i1 %309, label %314, label %310
+
+310:
+	%311 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%312 = call i64 @js_scope_get(i64 %297, i64 %311)
+	%313 = call i64 @js_seq(i64 %312, i64 1)
+	br label %314
+
+314:
+	%315 = phi i64 [ %307, %296 ], [ %313, %310 ]
+	%316 = call i64 @js_truthy(i64 %315)
+	%317 = icmp ne i64 %316, 0
+	br i1 %317, label %324, label %318
+
+318:
+	%319 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%320 = call i64 @js_scope_get(i64 %297, i64 %319)
+	%321 = call i64 @js_typeof(i64 %320)
+	%322 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000058, i64 0, i64 0), i64 6)
+	%323 = call i64 @js_ne(i64 %321, i64 %322)
+	br label %324
+
+324:
+	%325 = phi i64 [ %315, %314 ], [ %323, %318 ]
+	%326 = call i64 @js_truthy(i64 %325)
+	%327 = icmp ne i64 %326, 0
+	br i1 %327, label %328, label %329
+
+328:
+	br label %330
+
+329:
+	br label %287
+
+330:
+	br label %331
+
+331:
+	%332 = phi i64 [ %297, %330 ]
+	%333 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%334 = call i64 @js_scope_get(i64 %332, i64 %333)
+	ret i64 %334
+
+dead944:
+	br label %329
+
+335:
+	br label %337
+
+336:
+	br label %287
+
+337:
+	br label %338
+
+338:
+	%339 = phi i64 [ %15, %337 ]
+	%340 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
+	%341 = call i64 @js_scope_get(i64 %339, i64 %340)
+	ret i64 %341
+
+dead945:
+	br label %336
+
+342:
+	br label %358
+
+343:
+	%344 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
+	%345 = call i64 @js_scope_get(i64 %15, i64 %344)
+	%346 = call i64 @js_arr_new()
+	%347 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%348 = call i64 @js_scope_get(i64 %15, i64 %347)
+	%349 = call i64 @js_arr_push(i64 %346, i64 %348)
+	%350 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000902, i64 0, i64 0), i64 12)
+	%351 = call i64 @js_arr_push(i64 %346, i64 %350)
+	%352 = call i64 @js_call(i64 %345, i64 0, i64 %346)
+	%353 = call i64 @js_typeof(i64 %352)
+	%354 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000094, i64 0, i64 0), i64 8)
+	%355 = call i64 @js_eq(i64 %353, i64 %354)
+	%356 = call i64 @js_truthy(i64 %355)
+	%357 = icmp ne i64 %356, 0
+	br i1 %357, label %361, label %362
+
+358:
+	br label %359
+
+359:
+	%360 = phi i64 [ %15, %358 ]
+	ret i64 0
+
+dead946:
+	br label %343
+
+361:
+	br label %377
+
+362:
+	%363 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
+	%364 = call i64 @js_scope_get(i64 %15, i64 %363)
+	%365 = call i64 @js_arr_new()
+	%366 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
+	%367 = call i64 @js_scope_get(i64 %15, i64 %366)
+	%368 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000066, i64 0, i64 0), i64 6)
+	%369 = call i64 @js_get(i64 %367, i64 %368)
+	%370 = call i64 @js_arr_push(i64 %365, i64 %369)
+	%371 = call i64 @js_call(i64 %364, i64 0, i64 %365)
+	%372 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000712, i64 0, i64 0), i64 2)
+	%373 = call i64 @js_add(i64 %371, i64 %372)
+	%374 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000807, i64 0, i64 0), i64 2)
+	%375 = call i64 @js_scope_get(i64 %15, i64 %374)
+	%376 = call i64 @js_add(i64 %373, i64 %375)
+	ret i64 %376
+
+377:
+	br label %378
+
+378:
+	%379 = phi i64 [ %15, %377 ]
+	ret i64 0
+
+dead947:
+	br label %362
+
+dead948:
+	ret i64 0
+}
+
+define i64 @jsf_1000328(i64 %env, i64 %args) {
+entry:
+	%0 = call i64 @js_scope_new(i64 %env)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
+	%2 = call i64 @js_arg(i64 %args, i64 0)
+	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -55704,10 +57328,10 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000781, i64 0, i64 0), i64 10)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
-	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -55725,13 +57349,13 @@ entry:
 	br label %45
 
 32:
-	%33 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000881, i64 0, i64 0), i64 12)
-	%34 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000882, i64 0, i64 0), i64 5)
+	%33 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000902, i64 0, i64 0), i64 12)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000904, i64 0, i64 0), i64 5)
 	%35 = call i64 @js_tdecl(i64 %15, i64 %34, i64 %33)
 	%36 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000427, i64 0, i64 0), i64 7)
 	%37 = call i64 @js_scope_get(i64 %15, i64 %36)
 	%38 = call i64 @js_arr_new()
-	%39 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%39 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%40 = call i64 @js_scope_get(i64 %15, i64 %39)
 	%41 = call i64 @js_arr_push(i64 %38, i64 %40)
 	%42 = call i64 @js_call(i64 %37, i64 0, i64 %38)
@@ -55746,20 +57370,20 @@ entry:
 	%47 = phi i64 [ %15, %45 ]
 	ret i64 0
 
-dead931:
+dead949:
 	br label %32
 
 48:
 	br label %65
 
 49:
-	%50 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000781, i64 0, i64 0), i64 10)
+	%50 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000797, i64 0, i64 0), i64 10)
 	%51 = call i64 @js_scope_get(i64 %15, i64 %50)
 	%52 = call i64 @js_arr_new()
-	%53 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%53 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%54 = call i64 @js_scope_get(i64 %15, i64 %53)
 	%55 = call i64 @js_arr_push(i64 %52, i64 %54)
-	%56 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000882, i64 0, i64 0), i64 5)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000904, i64 0, i64 0), i64 5)
 	%57 = call i64 @js_scope_get(i64 %15, i64 %56)
 	%58 = call i64 @js_arr_push(i64 %52, i64 %57)
 	%59 = call i64 @js_call(i64 %51, i64 0, i64 %52)
@@ -55775,8 +57399,8 @@ dead931:
 
 66:
 	%67 = phi i64 [ %15, %65 ]
-	%68 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000883, i64 0, i64 0), i64 6)
-	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000882, i64 0, i64 0), i64 5)
+	%68 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000905, i64 0, i64 0), i64 6)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000904, i64 0, i64 0), i64 5)
 	%70 = call i64 @js_tset(i64 %67, i64 %69, i64 %68)
 	%71 = call i64 @js_setret(i64 %68)
 	br label %49
@@ -55785,20 +57409,20 @@ dead931:
 	br label %111
 
 73:
-	%74 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000787, i64 0, i64 0), i64 8)
+	%74 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000803, i64 0, i64 0), i64 8)
 	%75 = call i64 @js_scope_get(i64 %15, i64 %74)
 	%76 = call i64 @js_arr_new()
-	%77 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000785, i64 0, i64 0), i64 5)
+	%77 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000801, i64 0, i64 0), i64 5)
 	%78 = call i64 @js_scope_get(i64 %15, i64 %77)
 	%79 = call i64 @js_arr_push(i64 %76, i64 %78)
-	%80 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000884, i64 0, i64 0), i64 6)
+	%80 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000906, i64 0, i64 0), i64 6)
 	%81 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%82 = call i64 @js_scope_get(i64 %15, i64 %81)
 	%83 = call i64 @js_arr_new()
-	%84 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%84 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%85 = call i64 @js_scope_get(i64 %15, i64 %84)
 	%86 = call i64 @js_arr_new()
-	%87 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%87 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%88 = call i64 @js_scope_get(i64 %15, i64 %87)
 	%89 = call i64 @js_arr_push(i64 %86, i64 %88)
 	%90 = call i64 @js_call(i64 %85, i64 0, i64 %86)
@@ -55807,7 +57431,7 @@ dead931:
 	%93 = call i64 @js_arr_push(i64 %83, i64 %92)
 	%94 = call i64 @js_call(i64 %82, i64 0, i64 %83)
 	%95 = call i64 @js_add(i64 %80, i64 %94)
-	%96 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000885, i64 0, i64 0), i64 25)
+	%96 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000907, i64 0, i64 0), i64 25)
 	%97 = call i64 @js_add(i64 %95, i64 %96)
 	%98 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%99 = call i64 @js_scope_get(i64 %15, i64 %98)
@@ -55817,7 +57441,7 @@ dead931:
 	%103 = call i64 @js_arr_push(i64 %100, i64 %102)
 	%104 = call i64 @js_call(i64 %99, i64 0, i64 %100)
 	%105 = call i64 @js_add(i64 %97, i64 %104)
-	%106 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000635, i64 0, i64 0), i64 1)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000643, i64 0, i64 0), i64 1)
 	%107 = call i64 @js_add(i64 %105, i64 %106)
 	%108 = call i64 @js_arr_push(i64 %76, i64 %107)
 	%109 = call i64 @js_call(i64 %75, i64 0, i64 %76)
@@ -55831,17 +57455,17 @@ dead931:
 	%113 = phi i64 [ %15, %111 ]
 	ret i64 0
 
-dead932:
+dead950:
 	br label %73
 
-dead933:
+dead951:
 	ret i64 0
 }
 
-define i64 @jsf_1000324(i64 %env, i64 %args) {
+define i64 @jsf_1000329(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -55854,10 +57478,10 @@ entry:
 
 8:
 	%9 = phi i64 [ %7, %6 ]
-	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%11 = call i64 @js_scope_get(i64 %9, i64 %10)
 	%12 = call i64 @js_arr_new()
-	%13 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%14 = call i64 @js_scope_get(i64 %9, i64 %13)
 	%15 = call i64 @js_arr_push(i64 %12, i64 %14)
 	%16 = call i64 @js_call(i64 %11, i64 0, i64 %12)
@@ -55865,7 +57489,7 @@ entry:
 	%18 = call i64 @js_tdecl(i64 %9, i64 %17, i64 %16)
 	%19 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%20 = call i64 @js_scope_get(i64 %9, i64 %19)
-	%21 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000864, i64 0, i64 0), i64 7)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000882, i64 0, i64 0), i64 7)
 	%22 = call i64 @js_get(i64 %20, i64 %21)
 	%23 = call i64 @js_sne(i64 %22, i64 3)
 	%24 = call i64 @js_truthy(i64 %23)
@@ -55883,7 +57507,7 @@ entry:
 
 29:
 	%30 = phi i64 [ %9, %28 ]
-	%31 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000865, i64 0, i64 0), i64 11)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000883, i64 0, i64 0), i64 11)
 	%32 = call i64 @js_scope_get(i64 %30, i64 %31)
 	%33 = call i64 @js_arr_new()
 	%34 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -55893,14 +57517,14 @@ entry:
 	%38 = call i64 @js_setret(i64 %37)
 	br label %27
 
-dead934:
+dead952:
 	ret i64 0
 }
 
-define i64 @jsf_1000325(i64 %env, i64 %args) {
+define i64 @jsf_1000330(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -55916,10 +57540,10 @@ entry:
 
 11:
 	%12 = phi i64 [ %10, %9 ]
-	%13 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_arr_new()
-	%16 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
@@ -55927,7 +57551,7 @@ entry:
 	%21 = call i64 @js_tdecl(i64 %12, i64 %20, i64 %19)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%23 = call i64 @js_scope_get(i64 %12, i64 %22)
-	%24 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000864, i64 0, i64 0), i64 7)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000882, i64 0, i64 0), i64 7)
 	%25 = call i64 @js_get(i64 %23, i64 %24)
 	%26 = call i64 @js_sne(i64 %25, i64 3)
 	%27 = call i64 @js_truthy(i64 %26)
@@ -55938,13 +57562,13 @@ entry:
 	br label %50
 
 30:
-	%31 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%32 = call i64 @js_scope_get(i64 %12, i64 %31)
 	%33 = call i64 @js_arr_new()
 	%34 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%35 = call i64 @js_scope_get(i64 %12, i64 %34)
 	%36 = call i64 @js_arr_push(i64 %33, i64 %35)
-	%37 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000887, i64 0, i64 0), i64 2)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
 	%38 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%39 = call i64 @js_scope_get(i64 %12, i64 %38)
 	%40 = call i64 @js_add(i64 %37, i64 %39)
@@ -55964,7 +57588,7 @@ entry:
 
 51:
 	%52 = phi i64 [ %12, %50 ]
-	%53 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000865, i64 0, i64 0), i64 11)
+	%53 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000883, i64 0, i64 0), i64 11)
 	%54 = call i64 @js_scope_get(i64 %52, i64 %53)
 	%55 = call i64 @js_arr_new()
 	%56 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -55987,24 +57611,24 @@ entry:
 	%65 = phi i64 [ %12, %63 ]
 	%66 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%67 = call i64 @js_scope_get(i64 %65, i64 %66)
-	%68 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000887, i64 0, i64 0), i64 2)
+	%68 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
 	%69 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%70 = call i64 @js_scope_get(i64 %65, i64 %69)
 	%71 = call i64 @js_add(i64 %68, i64 %70)
 	%72 = call i64 @js_get(i64 %67, i64 %71)
 	ret i64 %72
 
-dead935:
+dead953:
 	br label %62
 
-dead936:
+dead954:
 	ret i64 0
 }
 
-define i64 @jsf_1000326(i64 %env, i64 %args) {
+define i64 @jsf_1000331(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -56023,10 +57647,10 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
-	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%19 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_push(i64 %18, i64 %20)
 	%22 = call i64 @js_call(i64 %17, i64 0, i64 %18)
@@ -56034,7 +57658,7 @@ entry:
 	%24 = call i64 @js_tdecl(i64 %15, i64 %23, i64 %22)
 	%25 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%26 = call i64 @js_scope_get(i64 %15, i64 %25)
-	%27 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000864, i64 0, i64 0), i64 7)
+	%27 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000882, i64 0, i64 0), i64 7)
 	%28 = call i64 @js_get(i64 %26, i64 %27)
 	%29 = call i64 @js_sne(i64 %28, i64 3)
 	%30 = call i64 @js_truthy(i64 %29)
@@ -56045,13 +57669,13 @@ entry:
 	br label %53
 
 33:
-	%34 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%34 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%35 = call i64 @js_scope_get(i64 %15, i64 %34)
 	%36 = call i64 @js_arr_new()
 	%37 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%38 = call i64 @js_scope_get(i64 %15, i64 %37)
 	%39 = call i64 @js_arr_push(i64 %36, i64 %38)
-	%40 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000887, i64 0, i64 0), i64 2)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
 	%41 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%42 = call i64 @js_scope_get(i64 %15, i64 %41)
 	%43 = call i64 @js_add(i64 %40, i64 %42)
@@ -56071,7 +57695,7 @@ entry:
 
 54:
 	%55 = phi i64 [ %15, %53 ]
-	%56 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000865, i64 0, i64 0), i64 11)
+	%56 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000883, i64 0, i64 0), i64 11)
 	%57 = call i64 @js_scope_get(i64 %55, i64 %56)
 	%58 = call i64 @js_arr_new()
 	%59 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -56089,7 +57713,7 @@ entry:
 	%67 = call i64 @js_scope_get(i64 %15, i64 %66)
 	%68 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%69 = call i64 @js_scope_get(i64 %15, i64 %68)
-	%70 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000887, i64 0, i64 0), i64 2)
+	%70 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
 	%71 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%72 = call i64 @js_scope_get(i64 %15, i64 %71)
 	%73 = call i64 @js_add(i64 %70, i64 %72)
@@ -56109,11 +57733,11 @@ entry:
 	%83 = call i64 @js_setret(i64 %80)
 	br label %65
 
-dead937:
+dead955:
 	ret i64 0
 }
 
-define i64 @jsf_1000327(i64 %env, i64 %args) {
+define i64 @jsf_1000332(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56141,10 +57765,10 @@ entry:
 	br label %30
 
 17:
-	%18 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000764, i64 0, i64 0), i64 10)
+	%18 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000780, i64 0, i64 0), i64 10)
 	%19 = call i64 @js_scope_get(i64 %8, i64 %18)
 	%20 = call i64 @js_arr_new()
-	%21 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%22 = call i64 @js_scope_get(i64 %8, i64 %21)
 	%23 = call i64 @js_arr_new()
 	%24 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56164,14 +57788,14 @@ entry:
 	%34 = call i64 @js_scope_get(i64 %32, i64 %33)
 	ret i64 %34
 
-dead938:
+dead956:
 	br label %17
 
-dead939:
+dead957:
 	ret i64 0
 }
 
-define i64 @jsf_1000328(i64 %env, i64 %args) {
+define i64 @jsf_1000333(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56230,7 +57854,7 @@ entry:
 	br label %52
 
 40:
-	%41 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
 	%42 = call i64 @js_scope_get(i64 %12, i64 %41)
 	%43 = call i64 @js_arr_new()
 	%44 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56253,7 +57877,7 @@ entry:
 	%55 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%56 = call i64 @js_scope_get(i64 %54, i64 %55)
 	%57 = call i64 @js_arr_new()
-	%58 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%58 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%59 = call i64 @js_scope_get(i64 %54, i64 %58)
 	%60 = call i64 @js_arr_new()
 	%61 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000023, i64 0, i64 0), i64 1)
@@ -56286,17 +57910,17 @@ entry:
 	%84 = call i64 @js_setret(i64 %81)
 	br label %40
 
-dead940:
+dead958:
 	ret i64 0
 }
 
-define i64 @jsf_1000329(i64 %env, i64 %args) {
+define i64 @jsf_1000334(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000892, i64 0, i64 0), i64 5)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000914, i64 0, i64 0), i64 5)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -56312,7 +57936,7 @@ entry:
 	%13 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%14 = call i64 @js_scope_get(i64 %12, i64 %13)
 	%15 = call i64 @js_arr_new()
-	%16 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000892, i64 0, i64 0), i64 5)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000914, i64 0, i64 0), i64 5)
 	%17 = call i64 @js_scope_get(i64 %12, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
@@ -56384,7 +58008,7 @@ entry:
 	%67 = call i64 @js_tdecl(i64 %53, i64 %66, i64 %65)
 	%68 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%69 = call i64 @js_scope_get(i64 %53, i64 %68)
-	%70 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000893, i64 0, i64 0), i64 9)
+	%70 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000915, i64 0, i64 0), i64 9)
 	%71 = call i64 @js_eq(i64 %69, i64 %70)
 	%72 = call i64 @js_truthy(i64 %71)
 	%73 = icmp ne i64 %72, 0
@@ -56394,7 +58018,7 @@ entry:
 	br label %88
 
 75:
-	%76 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000579, i64 0, i64 0), i64 5)
+	%76 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000588, i64 0, i64 0), i64 5)
 	%77 = call i64 @js_scope_get(i64 %53, i64 %76)
 	%78 = call i64 @js_arr_new()
 	%79 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56415,7 +58039,7 @@ entry:
 	%90 = phi i64 [ %53, %88 ]
 	ret i64 3
 
-dead941:
+dead959:
 	br label %75
 
 91:
@@ -56438,14 +58062,14 @@ dead941:
 	%102 = phi i64 [ %53, %100 ]
 	ret i64 3
 
-dead942:
+dead960:
 	br label %92
 
-dead943:
+dead961:
 	ret i64 0
 }
 
-define i64 @jsf_1000330(i64 %env, i64 %args) {
+define i64 @jsf_1000335(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56480,7 +58104,7 @@ entry:
 	%22 = call i64 @js_obj_new()
 	%23 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%24 = call i64 @js_tdecl(i64 %9, i64 %23, i64 %22)
-	%25 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000620, i64 0, i64 0), i64 6)
+	%25 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000628, i64 0, i64 0), i64 6)
 	%26 = call i64 @js_scope_get(i64 %9, i64 %25)
 	%27 = call i64 @js_arr_new()
 	%28 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56503,7 +58127,7 @@ entry:
 	%41 = call i64 @js_scope_get(i64 %39, i64 %40)
 	ret i64 %41
 
-dead944:
+dead962:
 	br label %21
 
 42:
@@ -56540,7 +58164,7 @@ dead944:
 
 66:
 	%67 = phi i64 [ %9, %65 ]
-	%68 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000553, i64 0, i64 0), i64 9)
+	%68 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000487, i64 0, i64 0), i64 9)
 	%69 = call i64 @js_scope_get(i64 %67, i64 %68)
 	%70 = call i64 @js_arr_new()
 	%71 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -56600,18 +58224,18 @@ dead944:
 	%117 = call i64 @js_arr_push(i64 %114, i64 %116)
 	%118 = call i64 @js_call(i64 %113, i64 0, i64 %114)
 	%119 = call i64 @js_setret(i64 %118)
-	%120 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%120 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%121 = call i64 @js_scope_get(i64 %104, i64 %120)
 	%122 = call i64 @js_arr_new()
 	%123 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%124 = call i64 @js_scope_get(i64 %104, i64 %123)
 	%125 = call i64 @js_arr_push(i64 %122, i64 %124)
-	%126 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000895, i64 0, i64 0), i64 7)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000917, i64 0, i64 0), i64 7)
 	%127 = call i64 @js_arr_push(i64 %122, i64 %126)
 	%128 = call i64 @js_call(i64 %121, i64 0, i64 %122)
-	%129 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%129 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%130 = call i64 @js_tdecl(i64 %104, i64 %129, i64 %128)
-	%131 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%132 = call i64 @js_scope_get(i64 %104, i64 %131)
 	%133 = call i64 @js_sne(i64 %132, i64 0)
 	%134 = call i64 @js_truthy(i64 %133)
@@ -56630,9 +58254,9 @@ dead944:
 
 140:
 	%141 = phi i64 [ %139, %138 ]
-	%142 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%142 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%143 = call i64 @js_scope_get(i64 %141, i64 %142)
-	%144 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000895, i64 0, i64 0), i64 7)
+	%144 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000917, i64 0, i64 0), i64 7)
 	%145 = call i64 @js_get(i64 %143, i64 %144)
 	%146 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000009, i64 0, i64 0), i64 1)
 	%147 = call i64 @js_tdecl(i64 %141, i64 %146, i64 %145)
@@ -56671,17 +58295,17 @@ dead944:
 	%172 = call i64 @js_setret(i64 %171)
 	br label %156
 
-dead945:
+dead963:
 	ret i64 0
 }
 
-define i64 @jsf_1000331(i64 %env, i64 %args) {
+define i64 @jsf_1000336(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000899, i64 0, i64 0), i64 8)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000921, i64 0, i64 0), i64 8)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -56730,7 +58354,7 @@ entry:
 	br label %42
 
 36:
-	%37 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
+	%37 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
 	%38 = call i64 @js_scope_get(i64 %11, i64 %37)
 	%39 = call i64 @js_sne(i64 %38, i64 0)
 	%40 = call i64 @js_truthy(i64 %39)
@@ -56771,14 +58395,14 @@ entry:
 	%63 = call i64 @js_scope_get(i64 %61, i64 %62)
 	ret i64 %63
 
-dead946:
+dead964:
 	br label %58
 
 64:
 	br label %68
 
 65:
-	%66 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000899, i64 0, i64 0), i64 8)
+	%66 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000921, i64 0, i64 0), i64 8)
 	%67 = call i64 @js_scope_get(i64 %11, i64 %66)
 	ret i64 %67
 
@@ -56787,27 +58411,27 @@ dead946:
 
 69:
 	%70 = phi i64 [ %11, %68 ]
-	%71 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
+	%71 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
 	%72 = call i64 @js_scope_get(i64 %70, i64 %71)
 	ret i64 %72
 
-dead947:
+dead965:
 	br label %65
 
-dead948:
+dead966:
 	ret i64 0
 }
 
-define i64 @jsf_1000332(i64 %env, i64 %args) {
+define i64 @jsf_1000337(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000901, i64 0, i64 0), i64 2)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000899, i64 0, i64 0), i64 8)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000921, i64 0, i64 0), i64 8)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -56826,7 +58450,7 @@ entry:
 	%19 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%20 = call i64 @js_scope_get(i64 %15, i64 %19)
 	%21 = call i64 @js_arr_new()
-	%22 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000901, i64 0, i64 0), i64 2)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000587, i64 0, i64 0), i64 2)
 	%23 = call i64 @js_scope_get(i64 %15, i64 %22)
 	%24 = call i64 @js_arr_push(i64 %21, i64 %23)
 	%25 = call i64 @js_call(i64 %20, i64 0, i64 %21)
@@ -56846,7 +58470,7 @@ entry:
 37:
 	%38 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%39 = call i64 @js_scope_get(i64 %15, i64 %38)
-	%40 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000869, i64 0, i64 0), i64 6)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000887, i64 0, i64 0), i64 6)
 	%41 = call i64 @js_ne(i64 %39, i64 %40)
 	br label %42
 
@@ -56859,7 +58483,7 @@ entry:
 46:
 	%47 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000001, i64 0, i64 0), i64 1)
 	%48 = call i64 @js_scope_get(i64 %15, i64 %47)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000868, i64 0, i64 0), i64 6)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000886, i64 0, i64 0), i64 6)
 	%50 = call i64 @js_ne(i64 %48, i64 %49)
 	br label %51
 
@@ -56873,13 +58497,13 @@ entry:
 	br label %67
 
 56:
-	%57 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000900, i64 0, i64 0), i64 8)
+	%57 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000922, i64 0, i64 0), i64 8)
 	%58 = call i64 @js_scope_get(i64 %15, i64 %57)
 	%59 = call i64 @js_arr_new()
 	%60 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
 	%61 = call i64 @js_scope_get(i64 %15, i64 %60)
 	%62 = call i64 @js_arr_push(i64 %59, i64 %61)
-	%63 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000899, i64 0, i64 0), i64 8)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000921, i64 0, i64 0), i64 8)
 	%64 = call i64 @js_scope_get(i64 %15, i64 %63)
 	%65 = call i64 @js_arr_push(i64 %59, i64 %64)
 	%66 = call i64 @js_call(i64 %58, i64 0, i64 %59)
@@ -56892,17 +58516,17 @@ entry:
 	%69 = phi i64 [ %15, %67 ]
 	ret i64 0
 
-dead949:
+dead967:
 	br label %56
 
-dead950:
+dead968:
 	ret i64 0
 }
 
-define i64 @jsf_1000333(i64 %env, i64 %args) {
+define i64 @jsf_1000338(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -56914,7 +58538,7 @@ entry:
 	%10 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000078, i64 0, i64 0), i64 4)
 	%11 = call i64 @js_arg(i64 %args, i64 3)
 	%12 = call i64 @js_tdecl(i64 %0, i64 %10, i64 %11)
-	%13 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000903, i64 0, i64 0), i64 3)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000924, i64 0, i64 0), i64 3)
 	%14 = call i64 @js_arg(i64 %args, i64 4)
 	%15 = call i64 @js_tdecl(i64 %0, i64 %13, i64 %14)
 	%16 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -56927,16 +58551,16 @@ entry:
 
 20:
 	%21 = phi i64 [ %19, %18 ]
-	%22 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000560, i64 0, i64 0), i64 9)
+	%22 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000566, i64 0, i64 0), i64 9)
 	%23 = call i64 @js_scope_get(i64 %21, i64 %22)
 	%24 = call i64 @js_arr_new()
-	%25 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000800, i64 0, i64 0), i64 6)
+	%25 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000816, i64 0, i64 0), i64 6)
 	%26 = call i64 @js_scope_get(i64 %21, i64 %25)
 	%27 = call i64 @js_arr_push(i64 %24, i64 %26)
 	%28 = call i64 @js_call(i64 %23, i64 0, i64 %24)
 	%29 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%30 = call i64 @js_tdecl(i64 %21, i64 %29, i64 %28)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%32 = call i64 @js_scope_get(i64 %21, i64 %31)
 	%33 = call i64 @js_arr_new()
 	%34 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
@@ -56946,18 +58570,18 @@ entry:
 	%38 = call i64 @js_scope_get(i64 %21, i64 %37)
 	%39 = call i64 @js_arr_push(i64 %33, i64 %38)
 	%40 = call i64 @js_call(i64 %32, i64 0, i64 %33)
-	%41 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%41 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%42 = call i64 @js_tdecl(i64 %21, i64 %41, i64 %40)
-	%43 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%43 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%44 = call i64 @js_scope_get(i64 %21, i64 %43)
-	%45 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%46 = call i64 @js_tdecl(i64 %21, i64 %45, i64 %44)
 	%47 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%48 = call i64 @js_scope_get(i64 %21, i64 %47)
-	%49 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%49 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%50 = call i64 @js_tset(i64 %21, i64 %49, i64 %48)
 	%51 = call i64 @js_setret(i64 %48)
-	%52 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%52 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%53 = call i64 @js_scope_get(i64 %21, i64 %52)
 	%54 = call i64 @js_seq(i64 %53, i64 0)
 	%55 = call i64 @js_truthy(i64 %54)
@@ -56968,20 +58592,20 @@ entry:
 	br label %77
 
 58:
-	%59 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
+	%59 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
 	%60 = call i64 @js_scope_get(i64 %21, i64 %59)
-	%61 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000904, i64 0, i64 0), i64 5)
+	%61 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000925, i64 0, i64 0), i64 5)
 	%62 = call i64 @js_tdecl(i64 %21, i64 %61, i64 %60)
-	%63 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%63 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%64 = call i64 @js_scope_get(i64 %21, i64 %63)
-	%65 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000905, i64 0, i64 0), i64 4)
+	%65 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000926, i64 0, i64 0), i64 4)
 	%66 = call i64 @js_tdecl(i64 %21, i64 %65, i64 %64)
 	%67 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%68 = call i64 @js_scope_get(i64 %21, i64 %67)
-	%69 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000905, i64 0, i64 0), i64 4)
+	%69 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000926, i64 0, i64 0), i64 4)
 	%70 = call i64 @js_tset(i64 %21, i64 %69, i64 %68)
 	%71 = call i64 @js_setret(i64 %68)
-	%72 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000903, i64 0, i64 0), i64 3)
+	%72 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000924, i64 0, i64 0), i64 3)
 	%73 = call i64 @js_scope_get(i64 %21, i64 %72)
 	%74 = call i64 @js_seq(i64 %73, i64 3)
 	%75 = call i64 @js_truthy(i64 %74)
@@ -57007,22 +58631,22 @@ entry:
 	%91 = call i64 @js_arr_push(i64 %83, i64 %90)
 	%92 = call i64 @js_arr_push(i64 %83, i64 2)
 	%93 = call i64 @js_call(i64 %82, i64 0, i64 %83)
-	%94 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000770, i64 0, i64 0), i64 2)
+	%94 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000786, i64 0, i64 0), i64 2)
 	%95 = call i64 @js_tdecl(i64 %80, i64 %94, i64 %93)
-	%96 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%96 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%97 = call i64 @js_scope_get(i64 %80, i64 %96)
 	%98 = call i64 @js_arr_new()
 	%99 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%100 = call i64 @js_scope_get(i64 %80, i64 %99)
 	%101 = call i64 @js_arr_push(i64 %98, i64 %100)
-	%102 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000770, i64 0, i64 0), i64 2)
+	%102 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000786, i64 0, i64 0), i64 2)
 	%103 = call i64 @js_scope_get(i64 %80, i64 %102)
 	%104 = call i64 @js_arr_push(i64 %98, i64 %103)
 	%105 = call i64 @js_call(i64 %97, i64 0, i64 %98)
-	%106 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%106 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%107 = call i64 @js_tset(i64 %80, i64 %106, i64 %105)
 	%108 = call i64 @js_setret(i64 %105)
-	%109 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%109 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%110 = call i64 @js_scope_get(i64 %80, i64 %109)
 	%111 = call i64 @js_sne(i64 %110, i64 0)
 	%112 = call i64 @js_truthy(i64 %111)
@@ -57040,9 +58664,9 @@ entry:
 
 117:
 	%118 = phi i64 [ %80, %116 ]
-	%119 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000770, i64 0, i64 0), i64 2)
+	%119 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000786, i64 0, i64 0), i64 2)
 	%120 = call i64 @js_scope_get(i64 %118, i64 %119)
-	%121 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%121 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%122 = call i64 @js_tset(i64 %118, i64 %121, i64 %120)
 	%123 = call i64 @js_setret(i64 %120)
 	br label %115
@@ -57051,16 +58675,16 @@ entry:
 	br label %146
 
 125:
-	%126 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000905, i64 0, i64 0), i64 4)
+	%126 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000926, i64 0, i64 0), i64 4)
 	%127 = call i64 @js_scope_get(i64 %21, i64 %126)
-	%128 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
+	%128 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
 	%129 = call i64 @js_tset(i64 %21, i64 %128, i64 %127)
 	%130 = call i64 @js_setret(i64 %127)
-	%131 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%131 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%132 = call i64 @js_scope_get(i64 %21, i64 %131)
 	%133 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%134 = call i64 @js_tdecl(i64 %21, i64 %133, i64 %132)
-	%135 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%135 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%136 = call i64 @js_scope_get(i64 %21, i64 %135)
 	%137 = call i64 @js_seq(i64 %136, i64 0)
 	%138 = call i64 @js_truthy(i64 %137)
@@ -57068,7 +58692,7 @@ entry:
 	br i1 %139, label %172, label %173
 
 140:
-	%141 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000903, i64 0, i64 0), i64 3)
+	%141 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000924, i64 0, i64 0), i64 3)
 	%142 = call i64 @js_scope_get(i64 %21, i64 %141)
 	%143 = call i64 @js_sne(i64 %142, i64 0)
 	%144 = call i64 @js_truthy(i64 %143)
@@ -57080,7 +58704,7 @@ entry:
 
 147:
 	%148 = phi i64 [ %21, %146 ]
-	%149 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000900, i64 0, i64 0), i64 8)
+	%149 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000922, i64 0, i64 0), i64 8)
 	%150 = call i64 @js_scope_get(i64 %148, i64 %149)
 	%151 = call i64 @js_arr_new()
 	%152 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000091, i64 0, i64 0), i64 4)
@@ -57090,7 +58714,7 @@ entry:
 	%156 = call i64 @js_scope_get(i64 %148, i64 %155)
 	%157 = call i64 @js_arr_push(i64 %151, i64 %156)
 	%158 = call i64 @js_call(i64 %150, i64 0, i64 %151)
-	%159 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000905, i64 0, i64 0), i64 4)
+	%159 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000926, i64 0, i64 0), i64 4)
 	%160 = call i64 @js_tset(i64 %148, i64 %159, i64 %158)
 	%161 = call i64 @js_setret(i64 %158)
 	br label %125
@@ -57106,9 +58730,9 @@ entry:
 
 165:
 	%166 = phi i64 [ %21, %164 ]
-	%167 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000903, i64 0, i64 0), i64 3)
+	%167 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000924, i64 0, i64 0), i64 3)
 	%168 = call i64 @js_scope_get(i64 %166, i64 %167)
-	%169 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000905, i64 0, i64 0), i64 4)
+	%169 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000926, i64 0, i64 0), i64 4)
 	%170 = call i64 @js_tset(i64 %166, i64 %169, i64 %168)
 	%171 = call i64 @js_setret(i64 %168)
 	br label %163
@@ -57145,18 +58769,18 @@ entry:
 
 196:
 	%197 = phi i64 [ %195, %194 ]
-	%198 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000562, i64 0, i64 0), i64 7)
+	%198 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000568, i64 0, i64 0), i64 7)
 	%199 = call i64 @js_scope_get(i64 %197, i64 %198)
 	%200 = call i64 @js_arr_new()
 	%201 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000064, i64 0, i64 0), i64 3)
 	%202 = call i64 @js_scope_get(i64 %197, i64 %201)
 	%203 = call i64 @js_arr_push(i64 %200, i64 %202)
-	%204 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000881, i64 0, i64 0), i64 12)
+	%204 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000902, i64 0, i64 0), i64 12)
 	%205 = call i64 @js_arr_push(i64 %200, i64 %204)
 	%206 = call i64 @js_call(i64 %199, i64 0, i64 %200)
-	%207 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000906, i64 0, i64 0), i64 2)
+	%207 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000927, i64 0, i64 0), i64 2)
 	%208 = call i64 @js_tdecl(i64 %197, i64 %207, i64 %206)
-	%209 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000906, i64 0, i64 0), i64 2)
+	%209 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000927, i64 0, i64 0), i64 2)
 	%210 = call i64 @js_scope_get(i64 %197, i64 %209)
 	%211 = call i64 @js_seq(i64 %210, i64 0)
 	%212 = call i64 @js_truthy(i64 %211)
@@ -57168,7 +58792,7 @@ entry:
 
 215:
 	%216 = call i64 @js_arr_new()
-	%217 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000907, i64 0, i64 0), i64 2)
+	%217 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
 	%218 = call i64 @js_tdecl(i64 %197, i64 %217, i64 %216)
 	%219 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%220 = call i64 @js_scope_get(i64 %197, i64 %219)
@@ -57177,9 +58801,9 @@ entry:
 	%223 = call i64 @js_scope_get(i64 %197, i64 %222)
 	%224 = call i64 @js_arr_push(i64 %221, i64 %223)
 	%225 = call i64 @js_call(i64 %220, i64 0, i64 %221)
-	%226 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000908, i64 0, i64 0), i64 2)
+	%226 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000929, i64 0, i64 0), i64 2)
 	%227 = call i64 @js_tdecl(i64 %197, i64 %226, i64 %225)
-	%228 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000908, i64 0, i64 0), i64 2)
+	%228 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000929, i64 0, i64 0), i64 2)
 	%229 = call i64 @js_scope_get(i64 %197, i64 %228)
 	%230 = call i64 @js_sne(i64 %229, i64 0)
 	%231 = call i64 @js_truthy(i64 %230)
@@ -57191,17 +58815,17 @@ entry:
 
 234:
 	%235 = phi i64 [ %197, %233 ]
-	%236 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000904, i64 0, i64 0), i64 5)
+	%236 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000925, i64 0, i64 0), i64 5)
 	%237 = call i64 @js_scope_get(i64 %235, i64 %236)
-	%238 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
+	%238 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
 	%239 = call i64 @js_tset(i64 %235, i64 %238, i64 %237)
 	%240 = call i64 @js_setret(i64 %237)
 	%241 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000475, i64 0, i64 0), i64 7)
 	%242 = call i64 @js_scope_get(i64 %235, i64 %241)
 	%243 = call i64 @js_arr_new()
-	%244 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000569, i64 0, i64 0), i64 5)
+	%244 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000575, i64 0, i64 0), i64 5)
 	%245 = call i64 @js_arr_push(i64 %243, i64 %244)
-	%246 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000702, i64 0, i64 0), i64 25)
+	%246 = call i64 @js_str_mem(i8* getelementptr ([25 x i8], [25 x i8]* @str.1000711, i64 0, i64 0), i64 25)
 	%247 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%248 = call i64 @js_scope_get(i64 %235, i64 %247)
 	%249 = call i64 @js_arr_new()
@@ -57212,7 +58836,7 @@ entry:
 	%254 = call i64 @js_arr_push(i64 %249, i64 %253)
 	%255 = call i64 @js_call(i64 %248, i64 0, i64 %249)
 	%256 = call i64 @js_add(i64 %246, i64 %255)
-	%257 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000703, i64 0, i64 0), i64 2)
+	%257 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000712, i64 0, i64 0), i64 2)
 	%258 = call i64 @js_add(i64 %256, i64 %257)
 	%259 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000449, i64 0, i64 0), i64 5)
 	%260 = call i64 @js_scope_get(i64 %235, i64 %259)
@@ -57222,22 +58846,22 @@ entry:
 	%264 = call i64 @js_arr_push(i64 %261, i64 %263)
 	%265 = call i64 @js_call(i64 %260, i64 0, i64 %261)
 	%266 = call i64 @js_add(i64 %258, i64 %265)
-	%267 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000699, i64 0, i64 0), i64 2)
+	%267 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000708, i64 0, i64 0), i64 2)
 	%268 = call i64 @js_add(i64 %266, i64 %267)
 	%269 = call i64 @js_arr_push(i64 %243, i64 %268)
 	%270 = call i64 @js_call(i64 %242, i64 0, i64 %243)
 	%271 = call i64 @js_setret(i64 %270)
 	ret i64 1
 
-dead951:
+dead969:
 	br label %215
 
 272:
 	br label %279
 
 273:
-	%274 = call i64 @js_closure(i64 1000334, i64 %197)
-	%275 = call i64 @js_closure(i64 1000335, i64 %197)
+	%274 = call i64 @js_closure(i64 1000339, i64 %197)
+	%275 = call i64 @js_closure(i64 1000340, i64 %197)
 	%276 = call i64 @js_try(i64 %274, i64 0, i64 %275)
 	%277 = call i64 @js_ctl_kind(i64 %276)
 	%278 = icmp eq i64 %277, 1
@@ -57250,14 +58874,14 @@ dead951:
 281:
 	%282 = phi i64 [ %280, %279 ]
 	%283 = call i64 @js_num_i(i64 0)
-	%284 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
+	%284 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000930, i64 0, i64 0), i64 2)
 	%285 = call i64 @js_tdecl(i64 %282, i64 %284, i64 %283)
 	br label %286
 
 286:
-	%287 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
+	%287 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000930, i64 0, i64 0), i64 2)
 	%288 = call i64 @js_scope_get(i64 %282, i64 %287)
-	%289 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000908, i64 0, i64 0), i64 2)
+	%289 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000929, i64 0, i64 0), i64 2)
 	%290 = call i64 @js_scope_get(i64 %282, i64 %289)
 	%291 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%292 = call i64 @js_get(i64 %290, i64 %291)
@@ -57279,26 +58903,26 @@ dead951:
 
 301:
 	%302 = phi i64 [ %282, %300 ]
-	%303 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000907, i64 0, i64 0), i64 2)
+	%303 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
 	%304 = call i64 @js_scope_get(i64 %302, i64 %303)
 	%305 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%306 = call i64 @js_get(i64 %304, i64 %305)
 	%307 = call i64 @js_arr_new()
-	%308 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000908, i64 0, i64 0), i64 2)
+	%308 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000929, i64 0, i64 0), i64 2)
 	%309 = call i64 @js_scope_get(i64 %302, i64 %308)
 	%310 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%311 = call i64 @js_get(i64 %309, i64 %310)
-	%312 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
+	%312 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000930, i64 0, i64 0), i64 2)
 	%313 = call i64 @js_scope_get(i64 %302, i64 %312)
 	%314 = call i64 @js_get(i64 %311, i64 %313)
 	%315 = call i64 @js_arr_push(i64 %307, i64 %314)
 	%316 = call i64 @js_call(i64 %306, i64 %304, i64 %307)
 	%317 = call i64 @js_setret(i64 %316)
-	%318 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
+	%318 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000930, i64 0, i64 0), i64 2)
 	%319 = call i64 @js_scope_get(i64 %302, i64 %318)
 	%320 = call i64 @js_num_i(i64 1)
 	%321 = call i64 @js_add(i64 %319, i64 %320)
-	%322 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000909, i64 0, i64 0), i64 2)
+	%322 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000930, i64 0, i64 0), i64 2)
 	%323 = call i64 @js_tset(i64 %302, i64 %322, i64 %321)
 	%324 = call i64 @js_setret(i64 %321)
 	br label %286
@@ -57315,18 +58939,18 @@ dead951:
 330:
 	br label %325
 
-dead952:
+dead970:
 	ret i64 0
 
-dead953:
+dead971:
 	br label %173
 
 331:
 	br label %338
 
 332:
-	%333 = call i64 @js_closure(i64 1000336, i64 %21)
-	%334 = call i64 @js_closure(i64 1000337, i64 %21)
+	%333 = call i64 @js_closure(i64 1000341, i64 %21)
+	%334 = call i64 @js_closure(i64 1000342, i64 %21)
 	%335 = call i64 @js_try(i64 %333, i64 0, i64 %334)
 	%336 = call i64 @js_ctl_kind(i64 %335)
 	%337 = icmp eq i64 %336, 1
@@ -57404,14 +59028,14 @@ dead953:
 389:
 	br label %384
 
-dead954:
+dead972:
 	ret i64 0
 
-dead955:
+dead973:
 	ret i64 0
 }
 
-define i64 @jsf_1000334(i64 %env, i64 %args) {
+define i64 @jsf_1000339(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57423,9 +59047,9 @@ entry:
 
 4:
 	%5 = phi i64 [ %0, %3 ]
-	%6 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000906, i64 0, i64 0), i64 2)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000927, i64 0, i64 0), i64 2)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
-	%8 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000881, i64 0, i64 0), i64 12)
+	%8 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000902, i64 0, i64 0), i64 12)
 	%9 = call i64 @js_get(i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000391, i64 0, i64 0), i64 5)
 	%11 = call i64 @js_get(i64 %9, i64 %10)
@@ -57438,7 +59062,7 @@ entry:
 	%18 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
 	%19 = call i64 @js_scope_get(i64 %5, i64 %18)
 	%20 = call i64 @js_arr_push(i64 %14, i64 %19)
-	%21 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000907, i64 0, i64 0), i64 2)
+	%21 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
 	%22 = call i64 @js_scope_get(i64 %5, i64 %21)
 	%23 = call i64 @js_arr_push(i64 %14, i64 %22)
 	%24 = call i64 @js_arr_push(i64 %12, i64 %14)
@@ -57449,7 +59073,7 @@ entry:
 	ret i64 0
 }
 
-define i64 @jsf_1000335(i64 %env, i64 %args) {
+define i64 @jsf_1000340(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57461,15 +59085,15 @@ entry:
 
 4:
 	%5 = phi i64 [ %0, %3 ]
-	%6 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000904, i64 0, i64 0), i64 5)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000925, i64 0, i64 0), i64 5)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
-	%8 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
+	%8 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
 	%9 = call i64 @js_tset(i64 %5, i64 %8, i64 %7)
 	%10 = call i64 @js_setret(i64 %7)
 	ret i64 0
 }
 
-define i64 @jsf_1000336(i64 %env, i64 %args) {
+define i64 @jsf_1000341(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57481,9 +59105,9 @@ entry:
 
 4:
 	%5 = phi i64 [ %0, %3 ]
-	%6 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000896, i64 0, i64 0), i64 5)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000918, i64 0, i64 0), i64 5)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
-	%8 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000561, i64 0, i64 0), i64 3)
+	%8 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000567, i64 0, i64 0), i64 3)
 	%9 = call i64 @js_scope_get(i64 %5, i64 %8)
 	%10 = call i64 @js_get(i64 %7, i64 %9)
 	%11 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000391, i64 0, i64 0), i64 5)
@@ -57500,7 +59124,7 @@ entry:
 	ret i64 0
 }
 
-define i64 @jsf_1000337(i64 %env, i64 %args) {
+define i64 @jsf_1000342(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57512,18 +59136,18 @@ entry:
 
 4:
 	%5 = phi i64 [ %0, %3 ]
-	%6 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000904, i64 0, i64 0), i64 5)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000925, i64 0, i64 0), i64 5)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
-	%8 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000898, i64 0, i64 0), i64 5)
+	%8 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000920, i64 0, i64 0), i64 5)
 	%9 = call i64 @js_tset(i64 %5, i64 %8, i64 %7)
 	%10 = call i64 @js_setret(i64 %7)
 	ret i64 0
 }
 
-define i64 @jsf_1000338(i64 %env, i64 %args) {
+define i64 @jsf_1000343(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000911, i64 0, i64 0), i64 3)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000932, i64 0, i64 0), i64 3)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000092, i64 0, i64 0), i64 4)
@@ -57541,20 +59165,20 @@ entry:
 	%12 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%13 = call i64 @js_scope_get(i64 %11, i64 %12)
 	%14 = call i64 @js_arr_new()
-	%15 = call i64 @js_str_mem(i8* getelementptr ([164 x i8], [164 x i8]* @str.1000912, i64 0, i64 0), i64 164)
+	%15 = call i64 @js_str_mem(i8* getelementptr ([164 x i8], [164 x i8]* @str.1000933, i64 0, i64 0), i64 164)
 	%16 = call i64 @js_arr_push(i64 %14, i64 %15)
 	%17 = call i64 @js_call(i64 %13, i64 0, i64 %14)
 	%18 = call i64 @js_setret(i64 %17)
 	ret i64 1
 
-dead956:
+dead974:
 	ret i64 0
 }
 
-define i64 @jsf_1000339(i64 %env, i64 %args) {
+define i64 @jsf_1000344(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000911, i64 0, i64 0), i64 3)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000932, i64 0, i64 0), i64 3)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57569,20 +59193,20 @@ entry:
 	%9 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000096, i64 0, i64 0), i64 4)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_arr_new()
-	%12 = call i64 @js_str_mem(i8* getelementptr ([159 x i8], [159 x i8]* @str.1000914, i64 0, i64 0), i64 159)
+	%12 = call i64 @js_str_mem(i8* getelementptr ([159 x i8], [159 x i8]* @str.1000935, i64 0, i64 0), i64 159)
 	%13 = call i64 @js_arr_push(i64 %11, i64 %12)
 	%14 = call i64 @js_call(i64 %10, i64 0, i64 %11)
 	%15 = call i64 @js_setret(i64 %14)
 	ret i64 0
 
-dead957:
+dead975:
 	ret i64 0
 }
 
-define i64 @jsf_1000340(i64 %env, i64 %args) {
+define i64 @jsf_1000345(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000916, i64 0, i64 0), i64 3)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000937, i64 0, i64 0), i64 3)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
 	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57601,7 +59225,7 @@ entry:
 	%13 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%14 = call i64 @js_scope_get(i64 %9, i64 %13)
 	%15 = call i64 @js_arr_new()
-	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000916, i64 0, i64 0), i64 3)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000937, i64 0, i64 0), i64 3)
 	%17 = call i64 @js_scope_get(i64 %9, i64 %16)
 	%18 = call i64 @js_arr_push(i64 %15, i64 %17)
 	%19 = call i64 @js_call(i64 %14, i64 0, i64 %15)
@@ -57693,11 +59317,11 @@ entry:
 	%87 = call i64 @js_setret(i64 %84)
 	br label %41
 
-dead958:
+dead976:
 	ret i64 0
 }
 
-define i64 @jsf_1000341(i64 %env, i64 %args) {
+define i64 @jsf_1000346(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57709,7 +59333,7 @@ entry:
 
 4:
 	%5 = phi i64 [ %0, %3 ]
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000918, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000939, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_seq(i64 %7, i64 0)
 	%9 = call i64 @js_truthy(i64 %8)
@@ -57720,7 +59344,7 @@ entry:
 	br label %15
 
 12:
-	%13 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000918, i64 0, i64 0), i64 7)
+	%13 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000939, i64 0, i64 0), i64 7)
 	%14 = call i64 @js_scope_get(i64 %5, i64 %13)
 	ret i64 %14
 
@@ -57735,21 +59359,21 @@ entry:
 	%21 = call i64 @js_tdecl(i64 %18, i64 %20, i64 %19)
 	%22 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%23 = call i64 @js_scope_get(i64 %18, i64 %22)
-	%24 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000919, i64 0, i64 0), i64 9)
+	%24 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000940, i64 0, i64 0), i64 9)
 	%25 = call i64 @js_set(i64 %23, i64 %24, i64 3)
 	%26 = call i64 @js_setret(i64 3)
 	%27 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000083, i64 0, i64 0), i64 1)
 	%28 = call i64 @js_scope_get(i64 %18, i64 %27)
-	%29 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000918, i64 0, i64 0), i64 7)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000939, i64 0, i64 0), i64 7)
 	%30 = call i64 @js_tset(i64 %18, i64 %29, i64 %28)
 	%31 = call i64 @js_setret(i64 %28)
 	br label %12
 
-dead959:
+dead977:
 	ret i64 0
 }
 
-define i64 @jsf_1000342(i64 %env, i64 %args) {
+define i64 @jsf_1000347(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -57789,7 +59413,7 @@ entry:
 	%23 = phi i64 [ %8, %21 ]
 	ret i64 2
 
-dead960:
+dead978:
 	br label %15
 
 24:
@@ -57812,7 +59436,7 @@ dead960:
 	%35 = phi i64 [ %8, %33 ]
 	ret i64 2
 
-dead961:
+dead979:
 	br label %25
 
 36:
@@ -57821,7 +59445,7 @@ dead961:
 37:
 	%38 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%39 = call i64 @js_scope_get(i64 %8, i64 %38)
-	%40 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000919, i64 0, i64 0), i64 9)
+	%40 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000940, i64 0, i64 0), i64 9)
 	%41 = call i64 @js_get(i64 %39, i64 %40)
 	%42 = call i64 @js_seq(i64 %41, i64 3)
 	ret i64 %42
@@ -57833,23 +59457,23 @@ dead961:
 	%45 = phi i64 [ %8, %43 ]
 	ret i64 2
 
-dead962:
+dead980:
 	br label %37
 
-dead963:
+dead981:
 	ret i64 0
 }
 
-define i64 @jsf_1000343(i64 %env, i64 %args) {
+define i64 @jsf_1000348(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
-	%1 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000922, i64 0, i64 0), i64 5)
+	%1 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000943, i64 0, i64 0), i64 5)
 	%2 = call i64 @js_arg(i64 %args, i64 0)
 	%3 = call i64 @js_tdecl(i64 %0, i64 %1, i64 %2)
-	%4 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000923, i64 0, i64 0), i64 8)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000944, i64 0, i64 0), i64 8)
 	%5 = call i64 @js_arg(i64 %args, i64 1)
 	%6 = call i64 @js_tdecl(i64 %0, i64 %4, i64 %5)
-	%7 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000924, i64 0, i64 0), i64 7)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000945, i64 0, i64 0), i64 7)
 	%8 = call i64 @js_arg(i64 %args, i64 2)
 	%9 = call i64 @js_tdecl(i64 %0, i64 %7, i64 %8)
 	%10 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000002, i64 0, i64 0), i64 9)
@@ -57862,7 +59486,7 @@ entry:
 
 14:
 	%15 = phi i64 [ %13, %12 ]
-	%16 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000536, i64 0, i64 0), i64 8)
+	%16 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000544, i64 0, i64 0), i64 8)
 	%17 = call i64 @js_scope_get(i64 %15, i64 %16)
 	%18 = call i64 @js_arr_new()
 	%19 = call i64 @js_call(i64 %17, i64 0, i64 %18)
@@ -57871,13 +59495,13 @@ entry:
 	%22 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%23 = call i64 @js_scope_get(i64 %15, i64 %22)
 	%24 = call i64 @js_arr_new()
-	%25 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000922, i64 0, i64 0), i64 5)
+	%25 = call i64 @js_str_mem(i8* getelementptr ([5 x i8], [5 x i8]* @str.1000943, i64 0, i64 0), i64 5)
 	%26 = call i64 @js_scope_get(i64 %15, i64 %25)
 	%27 = call i64 @js_arr_push(i64 %24, i64 %26)
 	%28 = call i64 @js_call(i64 %23, i64 0, i64 %24)
-	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000925, i64 0, i64 0), i64 2)
+	%29 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000946, i64 0, i64 0), i64 2)
 	%30 = call i64 @js_tdecl(i64 %15, i64 %29, i64 %28)
-	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000925, i64 0, i64 0), i64 2)
+	%31 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000946, i64 0, i64 0), i64 2)
 	%32 = call i64 @js_scope_get(i64 %15, i64 %31)
 	%33 = call i64 @js_seq(i64 %32, i64 0)
 	%34 = call i64 @js_truthy(i64 %33)
@@ -57892,15 +59516,15 @@ entry:
 	%39 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000090, i64 0, i64 0), i64 3)
 	%40 = call i64 @js_tdecl(i64 %15, i64 %39, i64 %38)
 	%41 = call i64 @js_arr_new()
-	%42 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000926, i64 0, i64 0), i64 7)
+	%42 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000947, i64 0, i64 0), i64 7)
 	%43 = call i64 @js_tdecl(i64 %15, i64 %42, i64 %41)
 	%44 = call i64 @js_arr_new()
-	%45 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000927, i64 0, i64 0), i64 7)
+	%45 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000948, i64 0, i64 0), i64 7)
 	%46 = call i64 @js_tdecl(i64 %15, i64 %45, i64 %44)
 	%47 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000420, i64 0, i64 0), i64 10)
 	%48 = call i64 @js_scope_get(i64 %15, i64 %47)
 	%49 = call i64 @js_arr_new()
-	%50 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000923, i64 0, i64 0), i64 8)
+	%50 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000944, i64 0, i64 0), i64 8)
 	%51 = call i64 @js_scope_get(i64 %15, i64 %50)
 	%52 = call i64 @js_arr_push(i64 %49, i64 %51)
 	%53 = call i64 @js_call(i64 %48, i64 0, i64 %49)
@@ -57922,7 +59546,7 @@ entry:
 	%65 = call i64 @js_scope_get(i64 %63, i64 %64)
 	ret i64 %65
 
-dead964:
+dead982:
 	br label %37
 
 66:
@@ -57944,12 +59568,12 @@ dead964:
 76:
 	%77 = phi i64 [ %75, %74 ]
 	%78 = call i64 @js_num_i(i64 0)
-	%79 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%79 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%80 = call i64 @js_tdecl(i64 %77, i64 %79, i64 %78)
 	br label %81
 
 81:
-	%82 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%82 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%83 = call i64 @js_scope_get(i64 %77, i64 %82)
 	%84 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000442, i64 0, i64 0), i64 2)
 	%85 = call i64 @js_scope_get(i64 %77, i64 %84)
@@ -57977,7 +59601,7 @@ dead964:
 	%99 = call i64 @js_scope_get(i64 %97, i64 %98)
 	%100 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%101 = call i64 @js_get(i64 %99, i64 %100)
-	%102 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%102 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%103 = call i64 @js_scope_get(i64 %97, i64 %102)
 	%104 = call i64 @js_get(i64 %101, i64 %103)
 	%105 = call i64 @js_typeof(i64 %104)
@@ -57991,11 +59615,11 @@ dead964:
 	br label %120
 
 111:
-	%112 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%112 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%113 = call i64 @js_scope_get(i64 %97, i64 %112)
 	%114 = call i64 @js_num_i(i64 1)
 	%115 = call i64 @js_add(i64 %113, i64 %114)
-	%116 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%116 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%117 = call i64 @js_tset(i64 %97, i64 %116, i64 %115)
 	%118 = call i64 @js_setret(i64 %115)
 	br label %81
@@ -58020,7 +59644,7 @@ dead964:
 	%132 = call i64 @js_scope_get(i64 %122, i64 %131)
 	%133 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%134 = call i64 @js_get(i64 %132, i64 %133)
-	%135 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%135 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%136 = call i64 @js_scope_get(i64 %122, i64 %135)
 	%137 = call i64 @js_get(i64 %134, i64 %136)
 	%138 = call i64 @js_arr_push(i64 %130, i64 %137)
@@ -58035,7 +59659,7 @@ dead964:
 
 144:
 	%145 = phi i64 [ %97, %143 ]
-	%146 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000926, i64 0, i64 0), i64 7)
+	%146 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000947, i64 0, i64 0), i64 7)
 	%147 = call i64 @js_scope_get(i64 %145, i64 %146)
 	%148 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%149 = call i64 @js_get(i64 %147, i64 %148)
@@ -58044,13 +59668,13 @@ dead964:
 	%152 = call i64 @js_scope_get(i64 %145, i64 %151)
 	%153 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%154 = call i64 @js_get(i64 %152, i64 %153)
-	%155 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%155 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%156 = call i64 @js_scope_get(i64 %145, i64 %155)
 	%157 = call i64 @js_get(i64 %154, i64 %156)
 	%158 = call i64 @js_arr_push(i64 %150, i64 %157)
 	%159 = call i64 @js_call(i64 %149, i64 %147, i64 %150)
 	%160 = call i64 @js_setret(i64 %159)
-	%161 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000927, i64 0, i64 0), i64 7)
+	%161 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000948, i64 0, i64 0), i64 7)
 	%162 = call i64 @js_scope_get(i64 %145, i64 %161)
 	%163 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000080, i64 0, i64 0), i64 4)
 	%164 = call i64 @js_get(i64 %162, i64 %163)
@@ -58062,7 +59686,7 @@ dead964:
 	%170 = call i64 @js_scope_get(i64 %145, i64 %169)
 	%171 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%172 = call i64 @js_get(i64 %170, i64 %171)
-	%173 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000928, i64 0, i64 0), i64 2)
+	%173 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000949, i64 0, i64 0), i64 2)
 	%174 = call i64 @js_scope_get(i64 %145, i64 %173)
 	%175 = call i64 @js_get(i64 %172, i64 %174)
 	%176 = call i64 @js_arr_push(i64 %168, i64 %175)
@@ -58075,7 +59699,7 @@ dead964:
 181:
 	%182 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000069, i64 0, i64 0), i64 1)
 	%183 = call i64 @js_scope_get(i64 %15, i64 %182)
-	%184 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000925, i64 0, i64 0), i64 2)
+	%184 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000946, i64 0, i64 0), i64 2)
 	%185 = call i64 @js_scope_get(i64 %15, i64 %184)
 	%186 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%187 = call i64 @js_get(i64 %185, i64 %186)
@@ -58093,7 +59717,7 @@ dead964:
 	%195 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000428, i64 0, i64 0), i64 6)
 	%196 = call i64 @js_scope_get(i64 %15, i64 %195)
 	%197 = call i64 @js_arr_new()
-	%198 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000924, i64 0, i64 0), i64 7)
+	%198 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000945, i64 0, i64 0), i64 7)
 	%199 = call i64 @js_scope_get(i64 %15, i64 %198)
 	%200 = call i64 @js_arr_push(i64 %197, i64 %199)
 	%201 = call i64 @js_call(i64 %196, i64 0, i64 %197)
@@ -58107,11 +59731,11 @@ dead964:
 
 206:
 	%207 = phi i64 [ %205, %204 ]
-	%208 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000565, i64 0, i64 0), i64 7)
+	%208 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000571, i64 0, i64 0), i64 7)
 	%209 = call i64 @js_scope_get(i64 %207, i64 %208)
 	%210 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%211 = call i64 @js_tdecl(i64 %207, i64 %210, i64 %209)
-	%212 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000925, i64 0, i64 0), i64 2)
+	%212 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000946, i64 0, i64 0), i64 2)
 	%213 = call i64 @js_scope_get(i64 %207, i64 %212)
 	%214 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%215 = call i64 @js_get(i64 %213, i64 %214)
@@ -58121,7 +59745,7 @@ dead964:
 	%219 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
 	%220 = call i64 @js_tset(i64 %207, i64 %219, i64 %218)
 	%221 = call i64 @js_setret(i64 %218)
-	%222 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000921, i64 0, i64 0), i64 8)
+	%222 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000942, i64 0, i64 0), i64 8)
 	%223 = call i64 @js_scope_get(i64 %207, i64 %222)
 	%224 = call i64 @js_arr_new()
 	%225 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000022, i64 0, i64 0), i64 1)
@@ -58136,7 +59760,7 @@ dead964:
 	br label %245
 
 232:
-	%233 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000925, i64 0, i64 0), i64 2)
+	%233 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000946, i64 0, i64 0), i64 2)
 	%234 = call i64 @js_scope_get(i64 %207, i64 %233)
 	%235 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%236 = call i64 @js_get(i64 %234, i64 %235)
@@ -58218,7 +59842,7 @@ dead964:
 
 291:
 	%292 = phi i64 [ %207, %290 ]
-	%293 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%293 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%294 = call i64 @js_scope_get(i64 %292, i64 %293)
 	%295 = call i64 @js_arr_new()
 	%296 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
@@ -58236,13 +59860,13 @@ dead964:
 
 305:
 	%306 = phi i64 [ %207, %304 ]
-	%307 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%307 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%308 = call i64 @js_scope_get(i64 %306, i64 %307)
 	%309 = call i64 @js_arr_new()
 	%310 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%311 = call i64 @js_scope_get(i64 %306, i64 %310)
 	%312 = call i64 @js_arr_push(i64 %309, i64 %311)
-	%313 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000925, i64 0, i64 0), i64 2)
+	%313 = call i64 @js_str_mem(i8* getelementptr ([2 x i8], [2 x i8]* @str.1000946, i64 0, i64 0), i64 2)
 	%314 = call i64 @js_scope_get(i64 %306, i64 %313)
 	%315 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000102, i64 0, i64 0), i64 1)
 	%316 = call i64 @js_get(i64 %314, i64 %315)
@@ -58296,7 +59920,7 @@ dead964:
 
 347:
 	%348 = phi i64 [ %333, %346 ]
-	%349 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000543, i64 0, i64 0), i64 9)
+	%349 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000550, i64 0, i64 0), i64 9)
 	%350 = call i64 @js_scope_get(i64 %348, i64 %349)
 	%351 = call i64 @js_arr_new()
 	%352 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
@@ -58322,7 +59946,7 @@ dead964:
 370:
 	%371 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%372 = call i64 @js_scope_get(i64 %15, i64 %371)
-	%373 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000926, i64 0, i64 0), i64 7)
+	%373 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000947, i64 0, i64 0), i64 7)
 	%374 = call i64 @js_scope_get(i64 %15, i64 %373)
 	%375 = call i64 @js_str_mem(i8* getelementptr ([6 x i8], [6 x i8]* @str.1000030, i64 0, i64 0), i64 6)
 	%376 = call i64 @js_get(i64 %374, i64 %375)
@@ -58344,19 +59968,19 @@ dead964:
 
 385:
 	%386 = phi i64 [ %15, %384 ]
-	%387 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000541, i64 0, i64 0), i64 8)
+	%387 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000489, i64 0, i64 0), i64 8)
 	%388 = call i64 @js_scope_get(i64 %386, i64 %387)
 	%389 = call i64 @js_arr_new()
 	%390 = call i64 @js_str_mem(i8* getelementptr ([3 x i8], [3 x i8]* @str.1000079, i64 0, i64 0), i64 3)
 	%391 = call i64 @js_scope_get(i64 %386, i64 %390)
 	%392 = call i64 @js_arr_push(i64 %389, i64 %391)
-	%393 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000926, i64 0, i64 0), i64 7)
+	%393 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000947, i64 0, i64 0), i64 7)
 	%394 = call i64 @js_scope_get(i64 %386, i64 %393)
 	%395 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%396 = call i64 @js_scope_get(i64 %386, i64 %395)
 	%397 = call i64 @js_get(i64 %394, i64 %396)
 	%398 = call i64 @js_arr_push(i64 %389, i64 %397)
-	%399 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000927, i64 0, i64 0), i64 7)
+	%399 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000948, i64 0, i64 0), i64 7)
 	%400 = call i64 @js_scope_get(i64 %386, i64 %399)
 	%401 = call i64 @js_str_mem(i8* getelementptr ([1 x i8], [1 x i8]* @str.1000163, i64 0, i64 0), i64 1)
 	%402 = call i64 @js_scope_get(i64 %386, i64 %401)
@@ -58373,7 +59997,7 @@ dead964:
 	%413 = call i64 @js_setret(i64 %410)
 	br label %370
 
-dead965:
+dead983:
 	ret i64 0
 }
 
@@ -58383,7 +60007,7 @@ define i64 @jsrtlib_unused_main(i64 %env, i64 %args) {
 entry:
 	%0 = call i64 @js_scope_new(i64 %env)
 	%1 = call i64 @jsrtlib_run(i64 %0, i64 %args)
-	%2 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000930, i64 0, i64 0), i64 4)
+	%2 = call i64 @js_str_mem(i8* getelementptr ([4 x i8], [4 x i8]* @str.1000951, i64 0, i64 0), i64 4)
 	%3 = call i64 @js_scope_get(i64 %0, i64 %2)
 	%4 = call i64 @js_arr_new()
 	%5 = call i64 @js_call(i64 %3, i64 0, i64 %4)
@@ -58417,7 +60041,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000597, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000605, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phoid
@@ -58440,7 +60064,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000599, i64 0, i64 0), i64 10)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000607, i64 0, i64 0), i64 10)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phoidof
@@ -58463,7 +60087,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000639, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000647, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phpkey
@@ -58486,7 +60110,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000640, i64 0, i64 0), i64 10)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000648, i64 0, i64 0), i64 10)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phpname
@@ -58509,7 +60133,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000662, i64 0, i64 0), i64 11)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000670, i64 0, i64 0), i64 11)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phfestep
@@ -58534,7 +60158,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000670, i64 0, i64 0), i64 10)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000679, i64 0, i64 0), i64 10)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phfeobj
@@ -58559,7 +60183,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000652, i64 0, i64 0), i64 10)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000660, i64 0, i64 0), i64 10)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phmcall
@@ -58584,7 +60208,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000708, i64 0, i64 0), i64 13)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000717, i64 0, i64 0), i64 13)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phmissname
@@ -58607,7 +60231,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000709, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000718, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phraise
@@ -58631,7 +60255,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000711, i64 0, i64 0), i64 12)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000720, i64 0, i64 0), i64 12)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_range_len
@@ -58654,7 +60278,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000712, i64 0, i64 0), i64 12)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000721, i64 0, i64 0), i64 12)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_range_key
@@ -58678,7 +60302,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000713, i64 0, i64 0), i64 12)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000722, i64 0, i64 0), i64 12)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_range_val
@@ -58702,7 +60326,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000714, i64 0, i64 0), i64 16)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([16 x i8], [16 x i8]* @str.1000723, i64 0, i64 0), i64 16)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phtruthy
@@ -58726,7 +60350,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000715, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000724, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phbool
@@ -58749,7 +60373,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000716, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000725, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phnot
@@ -58772,7 +60396,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000717, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000726, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phstr
@@ -58795,7 +60419,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000718, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000727, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phecho
@@ -58818,7 +60442,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000719, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000728, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phcat
@@ -58842,7 +60466,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000720, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000729, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phflo
@@ -58865,7 +60489,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000721, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000730, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phnum
@@ -58888,7 +60512,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000722, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000731, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_pheq
@@ -58912,7 +60536,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000723, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000732, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phne
@@ -58936,7 +60560,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000724, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000733, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phseq
@@ -58960,7 +60584,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000725, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000734, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phsne
@@ -58984,7 +60608,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000726, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000735, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phcmp
@@ -59008,7 +60632,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000727, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000736, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phlt
@@ -59032,7 +60656,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000728, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000737, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phgt
@@ -59056,7 +60680,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000729, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000738, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phle
@@ -59080,7 +60704,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000730, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000739, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phge
@@ -59104,7 +60728,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000731, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000740, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phadd
@@ -59128,7 +60752,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000732, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000741, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phsub
@@ -59152,7 +60776,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000733, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000742, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phmul
@@ -59176,7 +60800,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000734, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000743, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phdiv
@@ -59200,7 +60824,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000735, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000744, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phmod
@@ -59224,7 +60848,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000736, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000745, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phpow
@@ -59248,7 +60872,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000737, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000746, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phneg
@@ -59271,7 +60895,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000738, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000747, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phband
@@ -59295,7 +60919,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000739, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000748, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phbor
@@ -59319,7 +60943,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000740, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000749, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phbxor
@@ -59343,7 +60967,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000741, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000750, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phshl
@@ -59367,7 +60991,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000742, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000751, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phshr
@@ -59391,7 +61015,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000743, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000752, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phbnot
@@ -59414,7 +61038,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000745, i64 0, i64 0), i64 11)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000754, i64 0, i64 0), i64 11)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phintdiv
@@ -59438,7 +61062,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000746, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000758, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phabs
@@ -59461,7 +61085,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000747, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000759, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phcast
@@ -59485,7 +61109,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000753, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000765, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_philit
@@ -59509,7 +61133,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000755, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([7 x i8], [7 x i8]* @str.1000767, i64 0, i64 0), i64 7)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phis
@@ -59533,7 +61157,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000756, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000768, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phtype
@@ -59556,7 +61180,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000757, i64 0, i64 0), i64 10)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000769, i64 0, i64 0), i64 10)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phdtype
@@ -59579,7 +61203,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000760, i64 0, i64 0), i64 11)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000772, i64 0, i64 0), i64 11)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phsetchk
@@ -59603,7 +61227,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000761, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000773, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phdump
@@ -59617,6 +61241,30 @@ go:
 	ret i64 %11
 }
 
+define i64 @js_phclsexists(i64 %0, i64 %1) {
+entry:
+	%2 = load i64, i64* @jsrtlib_f_js_phclsexists
+	%3 = icmp eq i64 %2, 0
+	br i1 %3, label %lookup, label %go
+
+lookup:
+	%4 = call i64 @jsrtlib_boot()
+	%5 = load i64, i64* @jsrtlib_env
+	%6 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000777, i64 0, i64 0), i64 14)
+	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
+	%8 = call i64 @js_gc_pin(i64 %7)
+	store i64 %8, i64* @jsrtlib_f_js_phclsexists
+	br label %go
+
+go:
+	%9 = load i64, i64* @jsrtlib_f_js_phclsexists
+	%10 = call i64 @js_arr_new()
+	%11 = call i64 @js_arr_push(i64 %10, i64 %0)
+	%12 = call i64 @js_arr_push(i64 %10, i64 %1)
+	%13 = call i64 @js_call(i64 %9, i64 0, i64 %10)
+	ret i64 %13
+}
+
 define i64 @js_phmexists(i64 %0, i64 %1) {
 entry:
 	%2 = load i64, i64* @jsrtlib_f_js_phmexists
@@ -59626,7 +61274,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000763, i64 0, i64 0), i64 12)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000779, i64 0, i64 0), i64 12)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phmexists
@@ -59650,7 +61298,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000765, i64 0, i64 0), i64 13)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000781, i64 0, i64 0), i64 13)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phgetclass
@@ -59673,7 +61321,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000773, i64 0, i64 0), i64 9)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000789, i64 0, i64 0), i64 9)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phmset
@@ -59698,7 +61346,7 @@ entry:
 lookup:
 	%2 = call i64 @jsrtlib_boot()
 	%3 = load i64, i64* @jsrtlib_env
-	%4 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000774, i64 0, i64 0), i64 8)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000790, i64 0, i64 0), i64 8)
 	%5 = call i64 @js_scope_get(i64 %3, i64 %4)
 	%6 = call i64 @js_gc_pin(i64 %5)
 	store i64 %6, i64* @jsrtlib_f_js_pharr
@@ -59720,7 +61368,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000775, i64 0, i64 0), i64 8)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000791, i64 0, i64 0), i64 8)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phset
@@ -59745,7 +61393,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000776, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000792, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phpush
@@ -59769,7 +61417,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000777, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000793, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phget
@@ -59793,7 +61441,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000778, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000794, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phisset
@@ -59817,7 +61465,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000780, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000796, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phrefat
@@ -59841,7 +61489,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000784, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000800, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phplace
@@ -59865,7 +61513,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000798, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000814, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phcbarr
@@ -59889,7 +61537,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000802, i64 0, i64 0), i64 12)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000818, i64 0, i64 0), i64 12)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phbindsig
@@ -59914,7 +61562,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000803, i64 0, i64 0), i64 11)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000819, i64 0, i64 0), i64 11)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phmplace
@@ -59939,7 +61587,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000783, i64 0, i64 0), i64 13)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000799, i64 0, i64 0), i64 13)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phplacesig
@@ -59963,7 +61611,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000816, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000832, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phcell
@@ -59987,7 +61635,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000817, i64 0, i64 0), i64 10)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000833, i64 0, i64 0), i64 10)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phderef
@@ -60010,7 +61658,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000818, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000834, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phunset
@@ -60034,7 +61682,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000819, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000835, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phcopy
@@ -60057,7 +61705,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000820, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000836, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phlen
@@ -60065,6 +61713,29 @@ lookup:
 
 go:
 	%8 = load i64, i64* @jsrtlib_f_js_phlen
+	%9 = call i64 @js_arr_new()
+	%10 = call i64 @js_arr_push(i64 %9, i64 %0)
+	%11 = call i64 @js_call(i64 %8, i64 0, i64 %9)
+	ret i64 %11
+}
+
+define i64 @js_phcount(i64 %0) {
+entry:
+	%1 = load i64, i64* @jsrtlib_f_js_phcount
+	%2 = icmp eq i64 %1, 0
+	br i1 %2, label %lookup, label %go
+
+lookup:
+	%3 = call i64 @jsrtlib_boot()
+	%4 = load i64, i64* @jsrtlib_env
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000840, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
+	%7 = call i64 @js_gc_pin(i64 %6)
+	store i64 %7, i64* @jsrtlib_f_js_phcount
+	br label %go
+
+go:
+	%8 = load i64, i64* @jsrtlib_f_js_phcount
 	%9 = call i64 @js_arr_new()
 	%10 = call i64 @js_arr_push(i64 %9, i64 %0)
 	%11 = call i64 @js_call(i64 %8, i64 0, i64 %9)
@@ -60080,7 +61751,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000823, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000843, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phmerge
@@ -60104,7 +61775,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000824, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000844, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phvals
@@ -60127,7 +61798,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000826, i64 0, i64 0), i64 11)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000846, i64 0, i64 0), i64 11)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phsubstr
@@ -60152,7 +61823,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000831, i64 0, i64 0), i64 11)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000851, i64 0, i64 0), i64 11)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phstrpos
@@ -60177,7 +61848,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000833, i64 0, i64 0), i64 12)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000853, i64 0, i64 0), i64 12)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phstrrpos
@@ -60202,7 +61873,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000834, i64 0, i64 0), i64 11)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000854, i64 0, i64 0), i64 11)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phstrcmp
@@ -60226,7 +61897,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000835, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000855, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phord
@@ -60249,7 +61920,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000836, i64 0, i64 0), i64 11)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000856, i64 0, i64 0), i64 11)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phstrlen
@@ -60272,7 +61943,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000837, i64 0, i64 0), i64 14)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000857, i64 0, i64 0), i64 14)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phfrombytes
@@ -60295,7 +61966,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000840, i64 0, i64 0), i64 14)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000860, i64 0, i64 0), i64 14)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phsetoffset
@@ -60320,7 +61991,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000841, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000861, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phchr
@@ -60343,7 +62014,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000842, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000862, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phcase
@@ -60367,7 +62038,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000843, i64 0, i64 0), i64 13)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([13 x i8], [13 x i8]* @str.1000863, i64 0, i64 0), i64 13)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phfmtfloat
@@ -60392,7 +62063,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000845, i64 0, i64 0), i64 14)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000865, i64 0, i64 0), i64 14)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phprecision
@@ -60415,7 +62086,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000846, i64 0, i64 0), i64 9)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000866, i64 0, i64 0), i64 9)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phmath
@@ -60440,7 +62111,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000850, i64 0, i64 0), i64 14)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000868, i64 0, i64 0), i64 14)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phkeyexists
@@ -60464,7 +62135,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000851, i64 0, i64 0), i64 12)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000869, i64 0, i64 0), i64 12)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phkeylast
@@ -60487,7 +62158,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000852, i64 0, i64 0), i64 8)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000870, i64 0, i64 0), i64 8)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phpop
@@ -60510,7 +62181,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000856, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000874, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phaptr
@@ -60534,7 +62205,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000859, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000877, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phviv
@@ -60558,7 +62229,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000860, i64 0, i64 0), i64 12)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000878, i64 0, i64 0), i64 12)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phvivpush
@@ -60581,7 +62252,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000861, i64 0, i64 0), i64 12)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([12 x i8], [12 x i8]* @str.1000879, i64 0, i64 0), i64 12)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phvivroot
@@ -60604,7 +62275,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000863, i64 0, i64 0), i64 10)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000881, i64 0, i64 0), i64 10)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phconst
@@ -60629,7 +62300,7 @@ entry:
 lookup:
 	%6 = call i64 @jsrtlib_boot()
 	%7 = load i64, i64* @jsrtlib_env
-	%8 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000878, i64 0, i64 0), i64 14)
+	%8 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000896, i64 0, i64 0), i64 14)
 	%9 = call i64 @js_scope_get(i64 %7, i64 %8)
 	%10 = call i64 @js_gc_pin(i64 %9)
 	store i64 %10, i64* @jsrtlib_f_js_phclassmiss
@@ -60646,6 +62317,55 @@ go:
 	ret i64 %17
 }
 
+define i64 @js_phcbfail(i64 %0, i64 %1) {
+entry:
+	%2 = load i64, i64* @jsrtlib_f_js_phcbfail
+	%3 = icmp eq i64 %2, 0
+	br i1 %3, label %lookup, label %go
+
+lookup:
+	%4 = call i64 @jsrtlib_boot()
+	%5 = load i64, i64* @jsrtlib_env
+	%6 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000901, i64 0, i64 0), i64 11)
+	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
+	%8 = call i64 @js_gc_pin(i64 %7)
+	store i64 %8, i64* @jsrtlib_f_js_phcbfail
+	br label %go
+
+go:
+	%9 = load i64, i64* @jsrtlib_f_js_phcbfail
+	%10 = call i64 @js_arr_new()
+	%11 = call i64 @js_arr_push(i64 %10, i64 %0)
+	%12 = call i64 @js_arr_push(i64 %10, i64 %1)
+	%13 = call i64 @js_call(i64 %9, i64 0, i64 %10)
+	ret i64 %13
+}
+
+define i64 @js_phrelcb(i64 %0, i64 %1, i64 %2) {
+entry:
+	%3 = load i64, i64* @jsrtlib_f_js_phrelcb
+	%4 = icmp eq i64 %3, 0
+	br i1 %4, label %lookup, label %go
+
+lookup:
+	%5 = call i64 @jsrtlib_boot()
+	%6 = load i64, i64* @jsrtlib_env
+	%7 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000903, i64 0, i64 0), i64 10)
+	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
+	%9 = call i64 @js_gc_pin(i64 %8)
+	store i64 %9, i64* @jsrtlib_f_js_phrelcb
+	br label %go
+
+go:
+	%10 = load i64, i64* @jsrtlib_f_js_phrelcb
+	%11 = call i64 @js_arr_new()
+	%12 = call i64 @js_arr_push(i64 %11, i64 %0)
+	%13 = call i64 @js_arr_push(i64 %11, i64 %1)
+	%14 = call i64 @js_arr_push(i64 %11, i64 %2)
+	%15 = call i64 @js_call(i64 %10, i64 0, i64 %11)
+	ret i64 %15
+}
+
 define i64 @js_phcbmeth(i64 %0, i64 %1, i64 %2) {
 entry:
 	%3 = load i64, i64* @jsrtlib_f_js_phcbmeth
@@ -60655,7 +62375,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000793, i64 0, i64 0), i64 11)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000809, i64 0, i64 0), i64 11)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phcbmeth
@@ -60680,7 +62400,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000886, i64 0, i64 0), i64 10)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000908, i64 0, i64 0), i64 10)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phsinit
@@ -60703,7 +62423,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000888, i64 0, i64 0), i64 9)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000910, i64 0, i64 0), i64 9)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phsget
@@ -60727,7 +62447,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000889, i64 0, i64 0), i64 9)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000911, i64 0, i64 0), i64 9)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phsset
@@ -60752,7 +62472,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000890, i64 0, i64 0), i64 10)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000912, i64 0, i64 0), i64 10)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phcname
@@ -60775,7 +62495,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000891, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000913, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phisa
@@ -60799,7 +62519,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000894, i64 0, i64 0), i64 10)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000916, i64 0, i64 0), i64 10)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phcatch
@@ -60823,7 +62543,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000897, i64 0, i64 0), i64 10)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000919, i64 0, i64 0), i64 10)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phclone
@@ -60846,7 +62566,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000900, i64 0, i64 0), i64 8)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000922, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phlsb
@@ -60870,7 +62590,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000902, i64 0, i64 0), i64 8)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000923, i64 0, i64 0), i64 8)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phfwd
@@ -60895,7 +62615,7 @@ entry:
 lookup:
 	%7 = call i64 @jsrtlib_boot()
 	%8 = load i64, i64* @jsrtlib_env
-	%9 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000910, i64 0, i64 0), i64 10)
+	%9 = call i64 @js_str_mem(i8* getelementptr ([10 x i8], [10 x i8]* @str.1000931, i64 0, i64 0), i64 10)
 	%10 = call i64 @js_scope_get(i64 %8, i64 %9)
 	%11 = call i64 @js_gc_pin(i64 %10)
 	store i64 %11, i64* @jsrtlib_f_js_phscall
@@ -60922,7 +62642,7 @@ entry:
 lookup:
 	%4 = call i64 @jsrtlib_boot()
 	%5 = load i64, i64* @jsrtlib_env
-	%6 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000913, i64 0, i64 0), i64 14)
+	%6 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000934, i64 0, i64 0), i64 14)
 	%7 = call i64 @js_scope_get(i64 %5, i64 %6)
 	%8 = call i64 @js_gc_pin(i64 %7)
 	store i64 %8, i64* @jsrtlib_f_js_phclslookup
@@ -60946,7 +62666,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000915, i64 0, i64 0), i64 9)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000936, i64 0, i64 0), i64 9)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phthis
@@ -60969,7 +62689,7 @@ entry:
 lookup:
 	%3 = call i64 @jsrtlib_boot()
 	%4 = load i64, i64* @jsrtlib_env
-	%5 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000917, i64 0, i64 0), i64 11)
+	%5 = call i64 @js_str_mem(i8* getelementptr ([11 x i8], [11 x i8]* @str.1000938, i64 0, i64 0), i64 11)
 	%6 = call i64 @js_scope_get(i64 %4, i64 %5)
 	%7 = call i64 @js_gc_pin(i64 %6)
 	store i64 %7, i64* @jsrtlib_f_js_phrtinit
@@ -60992,7 +62712,7 @@ entry:
 lookup:
 	%2 = call i64 @jsrtlib_boot()
 	%3 = load i64, i64* @jsrtlib_env
-	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000920, i64 0, i64 0), i64 9)
+	%4 = call i64 @js_str_mem(i8* getelementptr ([9 x i8], [9 x i8]* @str.1000941, i64 0, i64 0), i64 9)
 	%5 = call i64 @js_scope_get(i64 %3, i64 %4)
 	%6 = call i64 @js_gc_pin(i64 %5)
 	store i64 %6, i64* @jsrtlib_f_js_phhole
@@ -61014,7 +62734,7 @@ entry:
 lookup:
 	%5 = call i64 @jsrtlib_boot()
 	%6 = load i64, i64* @jsrtlib_env
-	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000929, i64 0, i64 0), i64 8)
+	%7 = call i64 @js_str_mem(i8* getelementptr ([8 x i8], [8 x i8]* @str.1000950, i64 0, i64 0), i64 8)
 	%8 = call i64 @js_scope_get(i64 %6, i64 %7)
 	%9 = call i64 @js_gc_pin(i64 %8)
 	store i64 %9, i64* @jsrtlib_f_js_phpfa
@@ -63968,6 +65688,46 @@ hit1000343:
 	ret i64 %685
 
 miss1000343:
+	%686 = icmp eq i64 %idx, 1000344
+	br i1 %686, label %hit1000344, label %miss1000344
+
+hit1000344:
+	%687 = call i64 @jsf_1000344(i64 %env, i64 %args)
+	ret i64 %687
+
+miss1000344:
+	%688 = icmp eq i64 %idx, 1000345
+	br i1 %688, label %hit1000345, label %miss1000345
+
+hit1000345:
+	%689 = call i64 @jsf_1000345(i64 %env, i64 %args)
+	ret i64 %689
+
+miss1000345:
+	%690 = icmp eq i64 %idx, 1000346
+	br i1 %690, label %hit1000346, label %miss1000346
+
+hit1000346:
+	%691 = call i64 @jsf_1000346(i64 %env, i64 %args)
+	ret i64 %691
+
+miss1000346:
+	%692 = icmp eq i64 %idx, 1000347
+	br i1 %692, label %hit1000347, label %miss1000347
+
+hit1000347:
+	%693 = call i64 @jsf_1000347(i64 %env, i64 %args)
+	ret i64 %693
+
+miss1000347:
+	%694 = icmp eq i64 %idx, 1000348
+	br i1 %694, label %hit1000348, label %miss1000348
+
+hit1000348:
+	%695 = call i64 @jsf_1000348(i64 %env, i64 %args)
+	ret i64 %695
+
+miss1000348:
 	ret i64 0
 }
 

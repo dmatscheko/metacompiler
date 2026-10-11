@@ -2277,6 +2277,79 @@ function s54() {
     check("cbl7", "$a[0x0]|$a[-0x0]|$a[9223372036854775808]|$a[-9223372036854775808]|$a[00]|$a[-1]" === "5|6|9|10|7|4");
 }
 
+// ===== SECTION 55: array union, class names in any case, early binding, argument types =====
+// '+' of two arrays is the union - the left array, then each key of the right one it
+// lacks - and an array beside a non-array is a TypeError naming both types
+// (Zend/tests/add_002). A class name is case-insensitive in catch, instanceof,
+// method_exists, class_exists and an implements list; 'Name::class' is resolved at
+// compile time, so it names an undeclared class too. A top-level class with no
+// interface and no trait, whose parent is known, is bound before the file runs
+// (early binding); an interface-implementing class and an enum are not.
+// Closure::fromCallable checks its argument as a callback (closures/closure_from_callable_*).
+// count(), abs() and array_values() refuse an argument of the wrong type with a
+// TypeError, and count() asks a Countable. A 'self::' / 'static::' callback handed to
+// array_map & co resolves in the caller's class scope.
+$s55early = new S55Early();
+$s55late = interface_exists('S55Iface') . "|" . class_exists('S55Impl') . "|" . class_exists('S55Enum') . "|"
+    . class_exists('S55Kid');
+class S55Early { function hi() { return "early"; } }
+class S55Kid extends s55early {}
+interface S55Iface {}
+class S55Impl implements S55Iface {}
+enum S55Enum { case A; }
+class S55Cnt implements countable { function count(): int { return 7; } }
+class S55Cb {
+    static function inc($x) { return $x + 1; }
+    static function even($x) { return $x % 2 == 0; }
+    static function tag($x) { return static::class . $x; }
+    static function run() {
+        return implode(",", array_map('self::inc', [1, 2])) . "|" . implode(",", array_map('static::tag', [1]))
+            . "|" . implode(",", array_filter([1, 2, 3, 4], ['self', 'even']));
+    }
+    static function bad() { return array_map('self::nope', [1]); }
+    function priv() { return Closure::fromCallable([$this, 'hidden']); }
+    private function hidden() { return "hid"; }
+}
+class S55Cb2 extends S55Cb {}
+function s55dbl($x) { return $x * 2; }
+function s55err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s55() {
+    global $s55early, $s55late;
+    $ops = [[1, 2, 'x' => 'a'], [5, 6, 7, 'x' => 'b', 'y' => 'c'], 1, "s"];
+    $c = [5 => 'p'];
+    $c += [5 => 'q', 9 => 'r'];
+    $c[] = 's';
+    check("aun1", $ops[0] + $ops[1] === [0 => 1, 1 => 2, 'x' => 'a', 2 => 7, 'y' => 'c']
+        && $c === [5 => 'p', 9 => 'r', 10 => 's']);
+    check("aun2", s55err(fn() => $ops[0] + $ops[2]) === "TypeError: Unsupported operand types: array + int"
+        && s55err(fn() => $ops[3] - $ops[0]) === "TypeError: Unsupported operand types: string - array");
+    $caught = "";
+    try { throw new InvalidArgumentException("x"); } catch (logicexception $e) { $caught = "caught"; }
+    check("cic1", $caught === "caught" && (new S55Kid) instanceof S55EARLY && (new S55Cnt) instanceof Countable);
+    check("cic2", method_exists('s55early', 'HI') && class_exists('S55KID') && !class_exists('s55iface')
+        && interface_exists('s55IFACE') && !class_exists('S55Nope'));
+    check("ccl1", S55Nope::class === "S55Nope" && s55kid::class === "s55kid" && \S55A\B::class === "S55A\\B");
+    check("ebd1", $s55early->hi() === "early" && $s55late === "1|||1");
+    $f = Closure::fromCallable('s55dbl');
+    $g = Closure::fromCallable('S55Cb::inc');
+    $h = (new S55Cb)->priv();
+    check("fcb1", $f(4) === 8 && $f instanceof Closure && $g(1) === 2 && $h() === "hid"
+        && s55err(fn() => Closure::fromCallable('s55_nope'))
+            === "TypeError: Failed to create closure from callable: function \"s55_nope\" not found or invalid function name");
+    $vals = [" Ab", null, "-5"];
+    check("bta1", s55err(fn() => count($vals[0])) === "TypeError: count(): Argument #1 (\$value) must be of type Countable|array, string given"
+        && s55err(fn() => count($vals[1])) === "TypeError: count(): Argument #1 (\$value) must be of type Countable|array, null given"
+        && count(new S55Cnt) === 7);
+    check("bta2", s55err(fn() => abs($vals[0])) === "TypeError: abs(): Argument #1 (\$num) must be of type int|float, string given"
+        && abs($vals[2]) === 5
+        && s55err(fn() => array_values($vals[0])) === "TypeError: array_values(): Argument #1 (\$array) must be of type array, string given");
+    check("rcb1", S55Cb::run() === "2,3|S55Cb1|2,4" && S55Cb2::run() === "2,3|S55Cb21|2,4"
+        && s55err(fn() => S55Cb::bad())
+            === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, class S55Cb does not have a method \"nope\"");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2337,6 +2410,7 @@ function main() {
     s52(); // SECTION-CALL 52
     s53(); // SECTION-CALL 53
     s54(); // SECTION-CALL 54
+    s55(); // SECTION-CALL 55
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

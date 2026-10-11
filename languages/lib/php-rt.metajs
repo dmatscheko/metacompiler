@@ -690,6 +690,12 @@ function phMkErr(clsName, msg) {
 // phArith: an int stays an int unless the exact 64 bit answer does not FIT, and
 // any float operand makes the result a float.
 function phArith(op, l, r) {
+    // An int or a string is never an array; only an object-typed operand pays the
+    // array probe.
+    if (typeof l == "object" || typeof r == "object") {
+        var u = phArrArith(op, l, r)
+        if (u !== undefined) { return u }
+    }
     var a = phToNum(l)
     var b = phToNum(r)
     // '%' is the one arithmetic operator that is INTEGER only: PHP casts both
@@ -703,6 +709,26 @@ function phArith(op, l, r) {
     }
     if (phIsFlo(a) || phIsFlo(b)) { return phFloArith(op, phNumOf(a), phNumOf(b)) }
     return phIntArith(op, a, b)
+}
+
+// phArrArith: '+' of two arrays is the UNION (the left array, then each key of
+// the right one it lacks); any other array operand is a TypeError. undefined when
+// neither operand is an array. Twin of phpArrArith in php-interpreter.abnf.
+function phArrArith(op, l, r) {
+    var lp = phArrParts(l)
+    var rp = phArrParts(r)
+    if (lp === undefined && rp === undefined) { return undefined }
+    if (op == "+" && lp !== undefined && rp !== undefined) {
+        var out = phArrCopy(l)
+        var i = 0
+        while (i < rp.k.length) {
+            if (phDictFind(out, rp.k[i]) < 0) { phArrSet(out, rp.k[i], phArrCopy(phDeref(rp.v[i]))) }
+            i = i + 1
+        }
+        return out
+    }
+    phRaise("TypeError", "Unsupported operand types: " + phDebugType(l) + " " + op + " " + phDebugType(r))
+    return undefined
 }
 
 function phFloArith(op, x, y) {
@@ -1391,12 +1417,13 @@ function phConstIn(cls, name, shown, depth) {
 // matches the class itself, any base class, and any implemented interface.
 function phIsA(v, name) {
     if (phIsGen(v)) {
-        if (name == "Generator") { return true }
-        if (name == "Traversable") { return true }
-        return name == "Iterator"
+        var gn = phsCase(name, false)
+        return gn == "generator" || gn == "traversable" || gn == "iterator"
     }
     if (v === undefined) { return false }
     if (v === null) { return false }
+    // A closure is an instance of PHP's final class Closure, and of nothing else.
+    if (typeof v == "function") { return name.length == 7 && phsCase(name, false) == "closure" }
     if (typeof v != "object") { return false }
     var cls = anytype
     if (v["__isclass"] !== undefined) { cls = v } else { cls = v["__class"] }
@@ -1406,7 +1433,8 @@ function phIsA(v, name) {
         if (cls === undefined) { return false }
         if (cls === null) { return false }
         if (typeof cls != "object") { return false }
-        if (phStr(cls["__name"]) == name) { return true }
+        var cn = phStr(cls["__name"])
+        if (cn == name || (cn.length == name.length && phsCase(cn, false) == phsCase(name, false))) { return true }
         var ifs = cls["__ifaces"]
         if (ifs !== undefined) {
             var p = phArrParts(ifs)
@@ -1419,7 +1447,10 @@ function phIsA(v, name) {
                     // classes, a bare name.
                     if (iv !== undefined && iv !== null && typeof iv == "object") {
                         if (phIsA(iv, name)) { return true }
-                    } else if (phStr(iv) == name) { return true }
+                    } else {
+                        var inm = phStr(iv)
+                        if (inm == name || (inm.length == name.length && phsCase(inm, false) == phsCase(name, false))) { return true }
+                    }
                     i = i + 1
                 }
             }
@@ -2125,7 +2156,14 @@ function js_phintdiv(l, r) {
     return sintOp(3, x, y)
 }
 
+// abs($num): a scalar coerces as arithmetic does; an array, an object or a string
+// with no numeric prefix is a TypeError. Twin of m["js_phabs"] in abnf/jsrtphp.go.
 function js_phabs(v) {
+    var bad = false
+    if (typeof v == "string") { bad = phNumScan(v) < 0 }
+    else if (typeof v == "function") { bad = true }
+    else if (typeof v == "object" && v !== null && !phIsFlo(v) && !sintIs(v)) { bad = true }
+    if (bad) { phRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, " + phDebugType(v) + " given") }
     var n = phToNum(v)
     var f = phFloOf(n)
     if (f !== undefined) {
@@ -2209,6 +2247,14 @@ function js_phdump(v) { return phDump(v, 0) }
 
 // method_exists over the __mlc lists of the class chain; v is an object, a class
 // descriptor or null. Twin of phpMethodExists in languages/php-interpreter.abnf.
+// class_exists / interface_exists over the descriptor a name was looked up to
+// (null when none). Twin of phpClassExists in languages/php-interpreter.abnf.
+function js_phclsexists(v, iface) {
+    if (v === undefined || v === null || typeof v != "object") { return false }
+    if (v["__isclass"] !== true) { return false }
+    if (phTest(iface)) { return v["__isiface"] === true }
+    return v["__isiface"] !== true && v["__istrait"] !== true
+}
 function js_phmexists(v, m) {
     if (v === undefined || v === null || typeof v != "object") { return false }
     var k = v
@@ -2452,6 +2498,15 @@ function js_phcopy(v) {
     return phArrCopy(v)
 }
 function js_phlen(v) { return phLen(v) }
+// count($value): an array's element count, a Countable's count(); anything else is
+// a TypeError. Twin of m["js_phcount"] in abnf/jsrtphp.go.
+function js_phcount(v) {
+    var p = phArrParts(v)
+    if (p !== undefined) { return p.k.length }
+    if (phIsObj(v) && phIsA(v, "Countable")) { return js_phmcall(v, "count", []) }
+    phRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phDebugType(v) + " given")
+    return undefined
+}
 
 // [...$a]: integer keys renumber, string keys stay.
 function js_phmerge(dst, src) {
@@ -2675,7 +2730,52 @@ function js_phclassmiss(name, self, stat, where) {
     return undefined
 }
 // A callback check's failure: PHP's TypeError "<where>, <reason>".
-function phCbFail(where, reason) { phRaise("TypeError", phStr(where) + ", " + reason) }
+// A where ending in a colon (Closure::fromCallable's "Failed to create closure
+// from callable:") takes the reason after a space instead.
+function phCbFail(where, reason) {
+    var w = phStr(where)
+    if (w.length > 0 && w.charAt(w.length - 1) == ":") { phRaise("TypeError", w + " " + reason) }
+    phRaise("TypeError", w + ", " + reason)
+}
+function js_phcbfail(where, reason) { return phCbFail(where, phStr(reason)) }
+// A library function's callback named RELATIVE to the class scope ('self::m',
+// ['parent', 'm'], 'static::m'), resolved against the caller's frame classes:
+// undefined when the class answers the method (the caller binds it), the absolute
+// "C::m" when it does not (the library's own check reports on that), v itself
+// when it is no relative callable or the caller has no class scope. Twin of
+// m["js_phrelcb"] in abnf/jsrtphp.go.
+function js_phrelcb(v, self, stat) {
+    var cn = anytype
+    var mn = anytype
+    cn = undefined
+    mn = undefined
+    if (typeof v == "string") {
+        var at = v.indexOf("::")
+        if (at >= 0) {
+            cn = v.substring(0, at)
+            mn = v.substring(at + 2)
+        }
+    } else {
+        var p = phArrParts(v)
+        if (p !== undefined && p.v.length == 2) {
+            cn = phDeref(p.v[0])
+            mn = phDeref(p.v[1])
+        }
+    }
+    if (typeof cn != "string" || typeof mn != "string") { return v }
+    if (self === undefined || self === null || typeof self != "object") { return v }
+    var cls = anytype
+    cls = self
+    if (cn == "static") {
+        if (stat !== undefined && stat !== null && typeof stat == "object") { cls = stat }
+    } else if (cn == "parent") {
+        cls = self["__super"]
+        if (cls === undefined || cls === null || typeof cls != "object") { return v }
+    } else if (cn != "self") { return v }
+    if (typeof phMethodOf(cls, mn) == "function") { return undefined }
+    if (typeof phMethodOf(cls, "__callStatic") == "function") { return undefined }
+    return phStr(cls["__name"]) + "::" + mn
+}
 // The method half of a callback check: target (an object, or a class for a static
 // callable) has the method, or the magic method that stands in for a missing one.
 // Twin of js_phcbmeth in abnf/jsrtphp.go.

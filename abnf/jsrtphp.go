@@ -672,6 +672,25 @@ func (rt *jsrt) phpToNum(v interface{}) interface{} {
 	return float64(0)
 }
 
+// phpArrArith: '+' of two arrays is the UNION (the left array, then each key of
+// the right one it lacks); any other array operand is a TypeError. Twin of
+// phpArrArith in php-interpreter.abnf.
+func (rt *jsrt) phpArrArith(op string, l, r interface{}) interface{} {
+	rk, rv, rok := phpArrParts(r)
+	if op == "+" && phpIsArr(l) && rok {
+		out := rt.phpArrCopy(l)
+		ok, _, _ := phpArrParts(out)
+		for i, k := range rk.elems {
+			if rt.phpKeyIndex(ok, k) < 0 {
+				rt.phpArrSet(out, k, rt.phpArrCopy(phpDeref(rv.elems[i])))
+			}
+		}
+		return out
+	}
+	rt.phpRaise("TypeError", "Unsupported operand types: "+rt.phpDebugType(l)+" "+op+" "+rt.phpDebugType(r))
+	return nil
+}
+
 // phpToLong is the (int) reading of ANY value.
 func (rt *jsrt) phpToLong(v interface{}) int64 {
 	n := rt.phpToNum(v)
@@ -684,6 +703,9 @@ func (rt *jsrt) phpToLong(v interface{}) int64 {
 // phpArith: an int stays an int unless the exact 64 bit answer does not FIT, and
 // any float operand makes the result a float.
 func (rt *jsrt) phpArith(op string, l, r interface{}) interface{} {
+	if phpIsArr(l) || phpIsArr(r) {
+		return rt.phpArrArith(op, l, r)
+	}
 	a := rt.phpToNum(l)
 	b := rt.phpToNum(r)
 	// '%' is the one arithmetic operator that is INTEGER only: PHP casts both
@@ -951,9 +973,14 @@ func (rt *jsrt) phpCalledScope(this, fallback interface{}) interface{} {
 	return fallback
 }
 
-// phpCbFail raises a callback check's failure: PHP's TypeError "<where>, <reason>".
-// Twin of phCbFail in languages/lib/php-rt.metajs.
+// phpCbFail raises a callback check's failure: PHP's TypeError "<where>, <reason>",
+// or "<where> <reason>" for a where ending in a colon (Closure::fromCallable's
+// "Failed to create closure from callable:"). Twin of phCbFail in
+// languages/lib/php-rt.metajs.
 func (rt *jsrt) phpCbFail(where, reason string) {
+	if strings.HasSuffix(where, ":") {
+		rt.phpRaise("TypeError", where+" "+reason)
+	}
 	rt.phpRaise("TypeError", where+", "+reason)
 }
 
@@ -1841,12 +1868,22 @@ func (rt *jsrt) phpStaticSet(target interface{}, name string, v interface{}) {
 // phpIsA is the runtime type test behind instanceof and a typed catch: a name
 // matches the class itself, any base class, and any implemented interface (which
 // may itself extend others).
+// phpSameName: two class names denote the same class when they agree ignoring
+// ASCII case. Twin of sameClassName in php-interpreter.abnf.
+func phpSameName(a, b string) bool {
+	return a == b || (len(a) == len(b) && phpCase(a, false) == phpCase(b, false))
+}
+
 func (rt *jsrt) phpIsA(v interface{}, name string) bool {
 	// A generator IS an instance of PHP's Generator class. It is not a *jsObject, so
 	// it carries no descriptor to walk - the name is answered directly, which also
 	// gives the compiler a safe "is this a generator" probe for foreach.
 	if _, isGen := v.(*jsGenerator); isGen {
-		return name == "Generator" || name == "Traversable" || name == "Iterator"
+		return phpSameName(name, "Generator") || phpSameName(name, "Traversable") || phpSameName(name, "Iterator")
+	}
+	// A closure is an instance of PHP's final class Closure, and of nothing else.
+	if isCallable(v) {
+		return phpSameName(name, "Closure")
 	}
 	o, ok := v.(*jsObject)
 	if !ok {
@@ -1859,7 +1896,7 @@ func (rt *jsrt) phpIsA(v interface{}, name string) bool {
 		cls, _ = c.(*jsObject)
 	}
 	for guard := 0; cls != nil && guard < 64; guard++ {
-		if rt.phpStr(cls.props["__name"]) == name {
+		if phpSameName(rt.phpStr(cls.props["__name"]), name) {
 			return true
 		}
 		if ifs, has := cls.props["__ifaces"]; has {
@@ -1872,7 +1909,7 @@ func (rt *jsrt) phpIsA(v interface{}, name string) bool {
 						if rt.phpIsA(io, name) {
 							return true
 						}
-					} else if rt.phpStr(iv) == name {
+					} else if phpSameName(rt.phpStr(iv), name) {
 						return true
 					}
 				}
@@ -2352,6 +2389,67 @@ func init() {
 		}
 		// The method half of a callback check. Twin of js_phcbmeth in
 		// languages/lib/php-rt.metajs.
+		// count($value): an array's element count, a Countable's count(); anything
+		// else is a TypeError. Twin of js_phcount in languages/lib/php-rt.metajs and
+		// phpCount in php-interpreter.abnf.
+		m["js_phcount"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if keys, _, ok := phpArrParts(v); ok {
+				return rt.wrapNum(float64(len(keys.elems)))
+			}
+			if phpIsObj(v) && rt.phpIsA(v, "Countable") {
+				return w(rt.memberCall(v, "count", nil))
+			}
+			rt.phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, "+rt.phpDebugType(v)+" given")
+			return jsHUndefined
+		}
+		// js_phrelcb(v, self, static): a library function's callback named RELATIVE
+		// to the class scope ('self::m', ['parent', 'm'], 'static::m'), resolved
+		// against the caller's frame classes. undefined when the class answers the
+		// method (the caller binds it), the absolute "C::m" when it does not (the
+		// library's own check reports on that), v itself when it is no relative
+		// callable or the caller has no class scope. Twin of js_phrelcb in
+		// languages/lib/php-rt.metajs and libCallable in php-interpreter.abnf.
+		m["js_phrelcb"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			var cn, mn interface{}
+			if s, ok := v.(string); ok && strings.Contains(s, "::") {
+				i := strings.Index(s, "::")
+				cn, mn = s[:i], s[i+2:]
+			} else if phpIsArr(v) && rt.phpLen(v) == 2 {
+				cn, mn = rt.phpArrGet(v, float64(0)), rt.phpArrGet(v, float64(1))
+			}
+			c, ok1 := cn.(string)
+			mname, ok2 := mn.(string)
+			self, ok3 := u(a[1]).(*jsObject)
+			if !ok1 || !ok2 || !ok3 {
+				return a[0]
+			}
+			cls := self
+			switch c {
+			case "self":
+			case "static":
+				if st, ok := u(a[2]).(*jsObject); ok {
+					cls = st
+				}
+			case "parent":
+				sup, ok := self.props["__super"].(*jsObject)
+				if !ok {
+					return a[0]
+				}
+				cls = sup
+			default:
+				return a[0]
+			}
+			if rt.phpMethodOf(cls, mname) != nil || rt.phpMethodOf(cls, "__callStatic") != nil {
+				return jsHUndefined
+			}
+			return rt.wrapStr(rt.phpStr(cls.props["__name"]) + "::" + mname)
+		}
+		m["js_phcbfail"] = func(a []uint64) uint64 {
+			rt.phpCbFail(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))
+			return jsHUndefined
+		}
 		m["js_phcbmeth"] = func(a []uint64) uint64 {
 			rt.phpCbMeth(rt.phpStr(u(a[0])), u(a[1]), u(a[2]))
 			return jsHUndefined
@@ -2442,7 +2540,22 @@ func init() {
 			}
 			return w(phpMkInt(x / y))
 		}
+		// abs($num): a scalar coerces as arithmetic does; an array, an object or a
+		// string with no numeric prefix is a TypeError. Twin of js_phabs in
+		// languages/lib/php-rt.metajs and phpBuiltins.abs in php-interpreter.abnf.
 		m["js_phabs"] = func(a []uint64) uint64 {
+			bad := false
+			switch t := u(a[0]).(type) {
+			case float64, jsGInt, jsPhpFlo, bool, jsUndefT, jsNullT:
+			case string:
+				_, _, _, ok := phpNumScan(t)
+				bad = !ok
+			default:
+				bad = true
+			}
+			if bad {
+				rt.phpRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, "+rt.phpDebugType(u(a[0]))+" given")
+			}
 			n := rt.phpToNum(u(a[0]))
 			if f, isF := n.(jsPhpFlo); isF {
 				if f.f < 0 {
@@ -2605,6 +2718,19 @@ func init() {
 				outWriter.Write([]byte(wtf8Clean(s)))
 			}
 			return w(jsUndef)
+		}
+		// js_phclsexists(found, iface): class_exists / interface_exists over the
+		// descriptor a name was looked up to (null when none). Twin of
+		// phpClassExists in languages/php-interpreter.abnf.
+		m["js_phclsexists"] = func(a []uint64) uint64 {
+			o, _ := u(a[0]).(*jsObject)
+			if o == nil || o.props["__isclass"] != true {
+				return jsHFalse
+			}
+			if rt.phpTest(u(a[1])) {
+				return boolH(o.props["__isiface"] == true)
+			}
+			return boolH(o.props["__isiface"] != true && o.props["__istrait"] != true)
 		}
 		// js_phmexists(objOrCls, name): method_exists over the __mlc lists of the
 		// class chain. Twin of phpMethodExists in languages/php-interpreter.abnf.

@@ -1811,6 +1811,30 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallygoto.php", "-q"]
         },
         {
+            "name": "PHP break out of finally SHOULD FAIL (interpreted)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-finallybreak.php", "-q"]
+        },
+        {
+            "name": "PHP break out of finally SHOULD FAIL (compiled)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallybreak.php", "-q"]
+        },
+        {
+            "name": "PHP goto into finally SHOULD FAIL (interpreted)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-finallyinto.php", "-q"]
+        },
+        {
+            "name": "PHP goto into finally SHOULD FAIL (compiled)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallyinto.php", "-q"]
+        },
+        {
             "name": "PHP recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
