@@ -375,9 +375,9 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 				}
 			}
 		}
-		// A marker is the position where its statement's node ENDS in most
-		// grammars and where it begins in a few (python, ruby, php), so the
-		// definition's line is used only when it does not follow the body's.
+		// A marker is where its statement begins (up.start, or the first token
+		// in python, ruby and php), so the defining statement's line precedes
+		// the body's; it is used only when it does not follow the body's.
 		if site, ok := closureSite[f.Name()]; ok {
 			_, siteStarts := srcOf(site.in)
 			if l := lineOfPosIn(site.pos, siteStarts); l > 0 && (line == 0 || l <= line) {

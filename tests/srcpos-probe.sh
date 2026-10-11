@@ -20,12 +20,15 @@
 #   1. each of those three lines is reported by a statement marker, and
 #   2. NO marker points past the end of the file.
 #
-# Extra markers are allowed and only listed under -v. That is deliberate: a tag's
-# up.pos is the position AFTER its node matched, so kotlin, java, go, dart and
-# the rest attribute a COMPOUND statement (and a top-level declaration) to the
-# line where its body ENDS, while python, ruby and php - which capture the
-# statement's FIRST token - attribute it to its header. Both are defensible,
-# they differ per language today, and this probe is not the place to settle it.
+# Extra markers are allowed and only listed under -v: a compound statement or a
+# declaration is attributed to its header line (core stmtPos reads up.start;
+# python, ruby and php capture the first token themselves), and which headers
+# carry a marker differs per language.
+#
+# 3. -callgraph names each definition by its HEADER line, not by its body's
+#    first statement (DEF_CASES). kotlin, java, csharp, swift and go are not
+#    listed: their function declarations are not statements, so no marker
+#    precedes the closure and the graph still falls back to the body's line.
 #
 # A language in the list below that emits NO markers at all is a FAILURE: the
 # list is exactly the handle-IR compilers, all of which are supposed to have
@@ -41,7 +44,7 @@ WANT=()
 for a in "$@"; do
     case "$a" in
         -v|--verbose) VERBOSE=1 ;;
-        -h|--help) sed -n "2,34p" "$0"; exit 0 ;;
+        -h|--help) sed -n "2,37p" "$0"; exit 0 ;;
         *) WANT+=("$a") ;;
     esac
 done
@@ -129,6 +132,52 @@ for c in "${CASES[@]}"; do
         [ $VERBOSE = 1 ] && echo "ok    $lang: statements on [$want], reported [$got]"
     else
         echo "FAIL  $lang: statements are on [$want], reported [$got]:$bad"
+        fail=$((fail+1))
+    fi
+done
+
+# LANG:EXT:the header lines of the definitions in def_src_for().
+DEF_CASES=(
+    "python:py:1"
+    "ruby:rb:1"
+    "php:php:2"
+    "js:js:1 5"
+    "typescript:ts:1 5"
+    "metajs:metajs:1 5"
+    "lua:lua:1"
+    "dart:dart:1 5"
+)
+def_src_for() {
+    case "$1" in
+    python) printf 'def f(a):\n    b = a\n    return b\nf(1)\n' ;;
+    ruby)   printf 'def f(a)\n  b = a\n  b\nend\nf(1)\n' ;;
+    php)    printf '<?php\nfunction f($a) {\n  $b = $a;\n  return $b;\n}\nf(1);\n' ;;
+    js|typescript) printf 'function f(a) {\n    let b = a\n    return b\n}\nfunction main() {\n    f(1)\n}\n' ;;
+    metajs) printf 'function f(a) {\n    var b = a\n    return b\n}\nfunction main() {\n    f(1)\n}\n' ;;
+    lua)    printf 'local function f(a)\n  local b = a\n  return b\nend\nf(1)\n' ;;
+    dart)   printf 'int f(int a) {\n  var b = a;\n  return b;\n}\nvoid main() {\n  f(1);\n}\n' ;;
+    esac
+}
+for c in "${DEF_CASES[@]}"; do
+    lang=${c%%:*}; rest=${c#*:}; ext=${rest%%:*}; want=${rest#*:}
+    if [ ${#WANT[@]} -gt 0 ]; then
+        keep=0
+        for w in "${WANT[@]}"; do [ "$w" = "$lang" ] && keep=1; done
+        [ $keep = 1 ] || continue
+    fi
+    src="$WORK/d.$ext"
+    def_src_for "$lang" > "$src"
+    cg="$WORK/$lang.cg.jsonl"
+    if ! ./mec "languages/$lang-to-llvm-ir.abnf" "$src" -qq -callgraph "$cg" >/dev/null 2>&1; then
+        echo "FAIL  $lang: the definition probe did not compile/run"
+        fail=$((fail+1)); continue
+    fi
+    got=$(grep '"ev":"sdef"' "$cg" | grep -o '"line":[0-9]*' | sed 's/"line"://' | sort -n -u | paste -sd' ' -)
+    if [ "$got" = "$want" ]; then
+        pass=$((pass+1))
+        [ $VERBOSE = 1 ] && echo "ok    $lang: definitions on [$want], -callgraph says [$got]"
+    else
+        echo "FAIL  $lang: definitions are on [$want], -callgraph says [$got]"
         fail=$((fail+1))
     fi
 done

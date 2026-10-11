@@ -51,6 +51,12 @@ type parser struct {
 	rangeCache      [256]*r.Rule // Reusable single-char Token rules, see the comment in case r.CharOf of apply().
 	referencesCache *references  // Resolves production names and assigns the tag code UIDs.
 
+	// Where the first terminal TRIED since the innermost open Tag began starts its
+	// match, plus 1 (0 = none yet): that Tag's start past its leading whitespace,
+	// see case r.Tag. A terminal that then fails counts too, because every
+	// alternative tried first skips the same whitespace from the same position.
+	firstTok int
+
 	wsCache   map[*r.Rule]*wsMemo // The memoized whitespace skips, per whitespace rule. See skipSpaces().
 	pureCache map[*r.Rule]bool    // Memoizes isPure() per rule, see there.
 }
@@ -225,6 +231,27 @@ func (pa *parser) skipSpaces(ws *r.Rule, depth int) {
 	}
 	pa.apply(ws, ws, true, depth+1) // Skip spaces.
 	memo.ends[start] = int32(pa.Sdx)
+}
+
+// matchStart is where a rule that began at from starts its text: past the
+// whitespace its first terminal skipped, never past the end of the match. A
+// whitespace rule that may not be memoized (it runs :script() code) is not run
+// again for this; its start stays from.
+func (pa *parser) matchStart(from int, ws *r.Rule, skippingSpaces bool, depth int) int {
+	end := pa.Sdx
+	start := from
+	if !skippingSpaces && ws != nil {
+		if memo := pa.wsCache[ws]; memo != nil && memo.memoize {
+			pa.Sdx = from
+			pa.skipSpaces(ws, depth)
+			start = pa.Sdx
+			pa.Sdx = end
+		}
+	}
+	if start > end {
+		return end
+	}
+	return start
 }
 
 // isPure reports whether applying rule can be reduced to a pure function of
@@ -598,6 +625,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
 		}
+		if !skippingSpaces && pa.firstTok == 0 {
+			pa.firstTok = pa.Sdx + 1
+		}
 		size := len(rule.String)
 		if pa.Sdx+size > len(pa.Src) || rule.String != pa.Src[pa.Sdx:pa.Sdx+size] {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
@@ -613,6 +643,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
+		}
+		if !skippingSpaces && pa.firstTok == 0 {
+			pa.firstTok = pa.Sdx + 1
 		}
 		if pa.Sdx+1 > len(pa.Src) {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
@@ -672,6 +705,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
 		}
+		if !skippingSpaces && pa.firstTok == 0 {
+			pa.firstTok = pa.Sdx + 1
+		}
 		length := len(pa.Src)
 		startPos := pa.Sdx
 		// Int holds the charType flags, see case r.CharOf.
@@ -723,6 +759,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
+		}
+		if !skippingSpaces && pa.firstTok == 0 {
+			pa.firstTok = pa.Sdx + 1
 		}
 		if pa.Sdx >= len(pa.Src) {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
@@ -894,18 +933,28 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 	case r.Tag:
+		outerTok := pa.firstTok
+		pa.firstTok = 0
 		newProductions := pa.applyAsSequence(rule, rule.Childs, skipSpaceRule, skippingSpaces, depth+1)
 		if newProductions == nil {
+			pa.firstTok = outerTok
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
+		}
+		start := pa.firstTok - 1
+		if outerTok != 0 {
+			pa.firstTok = outerTok
+		}
+		if start < wasSdx || start > pa.Sdx {
+			start = pa.matchStart(wasSdx, skipSpaceRule, skippingSpaces, depth)
 		}
 		// Resolve name parameters into their code text. This changes the grammar rule itself,
 		// but the resolution is idempotent, so all later applications just reuse the result.
 		pa.resolveParameterToToken(rule.CodeChilds)
 		// The matched childs get wrapped into a new Tag rule for the ASG. This is the only
 		// grouping that the ASG keeps. Int contains the UID of the script for later caching.
-		localProductions = appendProd(localProductions, &r.Rule{Operator: r.Tag, Int: rule.Int, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx})
+		localProductions = appendProd(localProductions, &r.Rule{Operator: r.Tag, Int: rule.Int, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx, Start: start})
 	case r.Command:
 		switch rule.String {
 		case "whitespace":

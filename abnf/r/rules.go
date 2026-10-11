@@ -44,6 +44,7 @@ type Rule struct {
 	String     string // The text of Token, the name of Identifier | Production | Command, or the char set of CharOf | CharsOf. If a String is set anywhere else (e.g. in a Sequence), it can be handled like a comment and discarded.
 	Int        int    // The value of Number, the production position of Identifier | Production, the range type of Range, or the code UID of Tag | Command :script().
 	Pos        int    // The position in the source text where this Rule was defined (in a grammar) or where it has matched (in an ASG).
+	Start      int    // ASG Tag only: where its match begins, past leading whitespace (Pos is where it ends).
 	Childs     *Rules // The child rules. Used by most Operators.
 	CodeChilds *Rules // The parameters or the code. Only used when Operator == Tag | Command | Range | Times.
 

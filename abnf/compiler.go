@@ -302,9 +302,11 @@ func (co *compiler) compileRule(rule *r.Rule, localASG *r.Rules, slot int, depth
 	case r.Tag:
 		// First collect all the data.
 		upStream := co.compile(rule.Childs, slot, depth+1) // Evaluate the child productions of the TAG to collect their values.
-		// The tag sees the source position of its node as up.pos (the builders
-		// capture it for traces and diagrams); it does not propagate upwards.
+		// The tag sees the source position where its node ends as up.pos and
+		// where it begins (past leading whitespace) as up.start; neither
+		// propagates upwards.
 		upStream["pos"] = rule.Pos
+		upStream["start"] = rule.Start
 		if localASG == nil {
 			localASG = &r.Rules{rule}
 		}
@@ -314,6 +316,7 @@ func (co *compiler) compileRule(rule *r.Rule, localASG *r.Rules, slot int, depth
 		// still names the input node for error messages.
 		co.eng.RunTagCode(rule, nodeScript(co.moduleName, ":tag:pos:", rule.Pos), upStream, localASG, slot, depth)
 		delete(upStream, "pos")
+		delete(upStream, "start")
 		return upStream
 	default:
 		// Not all rules have childs. E.g. a Number (from :number()) is a leaf like a Token, but without text.

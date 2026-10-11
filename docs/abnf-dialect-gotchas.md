@@ -594,7 +594,7 @@ divide as a float — goja kept printing `2` and `-241` while `-frozen` already
 printed `2.5` and `15`, which reads like a frozen bug and is the opposite.
 
 Key such a table by the END SOURCE POSITION of the node instead. `up.pos` is a
-node's end offset (not its start), so a rule that wants to recognize "this
+node's end offset (its start, past leading whitespace, is `up.start`), so a rule that wants to recognize "this
 operand IS a conversion" tags every operand with its own `up.pos` and matches
 the conversion's recorded position exactly:
 
@@ -695,7 +695,8 @@ or, if the tokens must stay separate, give the sub-rule its own tag and collect
 them: `BaseElem = TypeTok <~~ push(up.in) ~~> | Attr ;` — a single token's
 `up.in` IS its own text. When the source as written is what matters, a tag can
 read it back: `c.srcSlice(from, to)` answers the current source's bytes, and
-`up.pos` is the node's end (`cpSrc` in `lib/js-callee.js` walks back from it). The same trap applies to any `raw`-text test over a
+`up.pos` is the node's end (`cpSrc` in `lib/js-callee.js` walks back from it),
+`up.start` its first token's offset. The same trap applies to any `raw`-text test over a
 multi-token run; `isUnsignedTy(raw)` survives only because `indexOf("unsigned")`
 does not care about the missing space.
 
