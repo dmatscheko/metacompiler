@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-360** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-361** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,10 +66,11 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-354 python: `int.real` compiled · P1 · PY · IN PROGRESS (PY+PHP worker, round 9) [V]
-`x = 7; x.real` and `"{0.real}".format(7)`: llvm.Run and native "AttributeError: 'int'
-object has no attribute 'real'"; interpreter and CPython 7. Check imag, numerator,
-denominator, conjugate() on int/float/bool too.
+### T-360 python: int/float methods off the type; missing int/float methods · P2 · PY · OPEN [V]
+`hasattr(int, "conjugate")` False and `int.conjugate(7)` fails (CPython True / 7): no
+"int"/"float" sample in pyTypeSample / pyDescTypeSample (interpreter,
+abnf/jsrtpydesc.go, layer 2). `bit_length`, `is_integer`, `as_integer_ratio`,
+`to_bytes`, `hex`, `fromhex` and the rest of int/float's methods are absent.
 
 ---
 
@@ -191,13 +192,6 @@ boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
 ---
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
-
-### T-353 php: echo of a lone byte prints U+FFFD · P1 · PHP · IN PROGRESS (PY+PHP worker, round 9) [V spec-only]
-`echo chr(200)` prints EF BF BD in all engines (PHP writes 0xC8): lone bytes are held
-as U+DC80..U+DCFF and every print path cleans them. Use the `writeBytes` host global
-(added for lua) for php's echo/print of such strings. Also: a program naming any stdlib
-function compiles ~0.25 s slower (php-stdlib.php compiled whole) - consider compiling
-only the functions reached.
 
 ---
 
@@ -523,6 +517,8 @@ T-343 js: `Array.prototype`, `typeof Object` — PARTIAL ea31394 (typeof Object;
 T-348 kotlin: `concatToString`, `String(charArray)`, `reversed()` on surrogates — DONE 645704a
 T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` — DONE a4ef472 (a kind field on the host array: jsArray.kind, the floor cell's field d, host ids 99/100)
 T-347 kotlin: Long/Int identity in Any equality, sets and LongRange — PARTIAL a2b2800 5eecfc1 d57a423 (LongRange/LongArray Longs, float≠int through Any, Long sum); Int vs Long equality is T-357
+T-353 php: echo of a lone byte prints U+FFFD — DONE 01cb044 d123350 (spec-only; raw bytes via writeBytes; only reached library functions are compiled, 1.02 s → 0.12 s)
+T-354 python: `int.real` compiled — DONE 1fd5daa
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
