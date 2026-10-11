@@ -672,9 +672,20 @@ func (rt *jsrt) phpToNum(v interface{}) interface{} {
 	return float64(0)
 }
 
-// phpArrArith: '+' of two arrays is the UNION (the left array, then each key of
-// the right one it lacks); any other array operand is a TypeError. Twin of
-// phpArrArith in php-interpreter.abnf.
+// phpNoNum: a value with no number reading - an array, an object, a closure or a
+// generator. Twin of noNum in php-interpreter.abnf and phNoNum in
+// lib/php-rt.metajs.
+func phpNoNum(v interface{}) bool {
+	switch v.(type) {
+	case float64, jsGInt, jsPhpFlo, bool, jsUndefT, jsNullT, string:
+		return false
+	}
+	return true
+}
+
+// phpArrArith: an operand with no number reading. '+' of two arrays is the UNION
+// (the left array, then each key of the right one it lacks); anything else is a
+// TypeError. Twin of phpArrArith in php-interpreter.abnf.
 func (rt *jsrt) phpArrArith(op string, l, r interface{}) interface{} {
 	rk, rv, rok := phpArrParts(r)
 	if op == "+" && phpIsArr(l) && rok {
@@ -687,8 +698,14 @@ func (rt *jsrt) phpArrArith(op string, l, r interface{}) interface{} {
 		}
 		return out
 	}
-	rt.phpRaise("TypeError", "Unsupported operand types: "+rt.phpDebugType(l)+" "+op+" "+rt.phpDebugType(r))
+	rt.phpBinopErr(op, l, r)
 	return nil
+}
+
+// phpBinopErr is zend_binop_error: PHP 8's TypeError for an operand an operator
+// cannot use.
+func (rt *jsrt) phpBinopErr(op string, l, r interface{}) {
+	rt.phpRaise("TypeError", "Unsupported operand types: "+rt.phpDebugType(l)+" "+op+" "+rt.phpDebugType(r))
 }
 
 // phpToLong is the (int) reading of ANY value.
@@ -703,7 +720,7 @@ func (rt *jsrt) phpToLong(v interface{}) int64 {
 // phpArith: an int stays an int unless the exact 64 bit answer does not FIT, and
 // any float operand makes the result a float.
 func (rt *jsrt) phpArith(op string, l, r interface{}) interface{} {
-	if phpIsArr(l) || phpIsArr(r) {
+	if phpNoNum(l) || phpNoNum(r) {
 		return rt.phpArrArith(op, l, r)
 	}
 	a := rt.phpToNum(l)
@@ -836,6 +853,9 @@ func (rt *jsrt) phpIntArith(op string, x, y int64) interface{} {
 // (lang/operators/bitwiseShiftLeft_basiclong_64bit.phpt) - and a negative shift
 // count is an ArithmeticError rather than a shift the other way.
 func (rt *jsrt) phpBit(op string, l, r interface{}) interface{} {
+	if phpNoNum(l) || phpNoNum(r) {
+		rt.phpBinopErr(op, l, r)
+	}
 	x := rt.phpToLong(l)
 	switch op {
 	case "&":
@@ -867,6 +887,11 @@ func (rt *jsrt) phpBit(op string, l, r interface{}) interface{} {
 // phpNeg is unary minus. It keeps the operand's TYPE (so -0.0 stays -0), and the
 // one int that cannot be negated, PHP_INT_MIN, promotes like any other overflow.
 func (rt *jsrt) phpNeg(v interface{}) interface{} {
+	// PHP compiles -$x as $x * -1, so an operand with no number reading fails as
+	// that multiplication.
+	if phpNoNum(v) {
+		rt.phpBinopErr("*", v, float64(-1))
+	}
 	a := rt.phpToNum(v)
 	if f, ok := a.(jsPhpFlo); ok {
 		return phpMkFlo(-f.f)
@@ -2014,10 +2039,19 @@ func (rt *jsrt) phpTypeName(v interface{}) string {
 	if phpIsArr(v) {
 		return "array"
 	}
-	if phpIsObj(v) {
+	if phpIsObj(v) || phpIsGenOrClosure(v) {
 		return "object"
 	}
 	return "unknown type"
+}
+
+// phpIsGenOrClosure: an instance of PHP's final class Generator or Closure, which
+// carries no class descriptor here.
+func phpIsGenOrClosure(v interface{}) bool {
+	if _, isGen := v.(*jsGenerator); isGen {
+		return true
+	}
+	return isCallable(v)
 }
 
 func (rt *jsrt) phpDebugType(v interface{}) string {
@@ -2038,6 +2072,12 @@ func (rt *jsrt) phpDebugType(v interface{}) string {
 	}
 	if phpIsObj(v) {
 		return rt.phpClassName(v)
+	}
+	if _, isGen := v.(*jsGenerator); isGen {
+		return "Generator"
+	}
+	if isCallable(v) {
+		return "Closure"
 	}
 	return "unknown"
 }
@@ -2426,7 +2466,7 @@ func init() {
 				return a[0]
 			}
 			cls := self
-			switch c {
+			switch phpCase(c, false) {
 			case "self":
 			case "static":
 				if st, ok := u(a[2]).(*jsObject); ok {
@@ -2488,7 +2528,9 @@ func init() {
 		m["js_phclassmiss"] = func(a []uint64) uint64 {
 			name := rt.phpStr(u(a[0]))
 			where, check := u(a[3]).(string)
-			if name == "self" || name == "static" || name == "parent" {
+			// The three relative names are case-insensitive like every class name.
+			if lc := phpCase(name, false); lc == "self" || lc == "static" || lc == "parent" {
+				name = lc
 				cls := u(a[1])
 				if name == "static" {
 					cls = u(a[2])
@@ -2731,6 +2773,56 @@ func init() {
 				return boolH(o.props["__isiface"] == true)
 			}
 			return boolH(o.props["__isiface"] != true && o.props["__istrait"] != true)
+		}
+		// js_phisaof(v, found, cls, allow, onlySub): is_a / is_subclass_of, where
+		// found is the descriptor a string v names (null when none). Twin of
+		// phpIsAOf in languages/php-interpreter.abnf.
+		m["js_phisaof"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			name := strings.TrimPrefix(rt.phpStr(u(a[2])), "\\")
+			own := rt.phpDebugType(v)
+			if _, isStr := v.(string); isStr {
+				cls, ok := u(a[1]).(*jsObject)
+				if !rt.phpTest(u(a[3])) || !ok {
+					return jsHFalse
+				}
+				v, own = cls, rt.phpStr(cls.props["__name"])
+			}
+			if rt.phpTest(u(a[4])) && phpSameName(own, name) {
+				return jsHFalse
+			}
+			return boolH(rt.phpIsA(v, name))
+		}
+		// js_phparent(v, found): get_parent_class of an object, of the class
+		// descriptor v, or of the class a string v names (found, null when none).
+		// Twin of phpParentClass in languages/php-interpreter.abnf.
+		m["js_phparent"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			var cls *jsObject
+			if _, isStr := v.(string); isStr {
+				cls, _ = u(a[1]).(*jsObject)
+			} else if o, isO := v.(*jsObject); isO && o.props["__isclass"] == true {
+				cls = o
+			} else if phpIsObj(v) || phpIsGenOrClosure(v) {
+				cls, _ = v.(*jsObject)
+				if cls != nil {
+					cls, _ = cls.props["__class"].(*jsObject)
+				}
+				if cls == nil {
+					return jsHFalse
+				}
+			}
+			if cls == nil {
+				given := rt.phpDebugType(v)
+				if b, isB := v.(bool); isB {
+					given = strconv.FormatBool(b)
+				}
+				rt.phpRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, "+given+" given")
+			}
+			if sup, ok := cls.props["__super"].(*jsObject); ok {
+				return rt.wrapStr(rt.phpStr(sup.props["__name"]))
+			}
+			return jsHFalse
 		}
 		// js_phmexists(objOrCls, name): method_exists over the __mlc lists of the
 		// class chain. Twin of phpMethodExists in languages/php-interpreter.abnf.

@@ -1155,7 +1155,7 @@ QName       = [ "\\" ] [ KwNamespace "\\" ] Name { "\\" MethodName } ;
 // late static binding). 'static' is a reserved word, so it cannot come through Name.
 StaticExpr  <~~ push(makeStaticExpr(takeAll(), up.pos)) ~~>
             = StaticBase "::" StaticMember [ StaticArgs ] ;
-StaticBase  <~~ push({sbase: lastSeg(stripWs(up.in)), sraw: stripWs(up.in)}) ~~>
+StaticBase  <~~ push({sbase: relName(lastSeg(stripWs(up.in))), sraw: stripWs(up.in)}) ~~>
             = ( "static" KwEnd | QName ) ;
 // A '::' member may be COMPUTED: 'Foo::{$name}()' names the method (or constant) at
 // run time, and 'Foo::$$v' / 'Foo::${expr}' the static PROPERTY (tests/bug55247,
@@ -3598,7 +3598,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof cur == "string") {
             var sep = cur.indexOf("::")
             if (sep >= 0) {
-                var cn = cur.substring(0, sep)
+                var cn = relName(cur.substring(0, sep))
                 return staticCall(resolveClassName(cn), cur.substring(sep + 2), argset, cn)
             }
             return callNamed(cur, argset)
@@ -3609,7 +3609,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             recv = arrGet(cur, 0)
             var mname = phpStr(arrGet(cur, 1))
             if (isObj(recv)) { return mcall(recv, mname, argset) }
-            var rn = phpStr(recv)
+            var rn = relName(phpStr(recv))
             return staticCall(resolveClassName(rn), mname, argset, rn)
         }
         if (isObj(cur)) {
@@ -3670,6 +3670,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // reached through classFind and called from eight places with two arguments.
     var pendingStatic = null
 
+    // self, static and parent are case-insensitive like every class name: a name
+    // that spells one in any case answers it in lower case, any other is unchanged.
+    // Twin of js_phclassmiss and js_phrelcb in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function relName(n) {
+        if (n.length != 4 && n.length != 6) { return n }
+        var lc = phsCase(n, false)
+        return (lc == "self" || lc == "static" || lc == "parent") ? lc : n
+    }
     function ctxSelf() { return varExists(SELF_KEY) ? getVar(SELF_KEY) : null }
     function ctxStatic() { return varExists(STATIC_KEY) ? getVar(STATIC_KEY) : null }
 
@@ -3679,7 +3687,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Twin of php_class_named in php-to-llvm-ir.abnf.
     // where is undefined, or the callback argument a name is checked for
     // (phpCheckCallback), which words a miss as that argument's TypeError.
-    function resolveClassName(name, where) {
+    function resolveClassName(cn, where) {
+        var name = relName(cn)
         if (name == "self" || name == "static" || name == "parent") {
             var s = name == "static" ? ctxStatic() : ctxSelf()
             if (s == null) {
@@ -3752,14 +3761,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // lower-cased key, which a run-time name that misses exactly falls back to.
     // Twin of declClassAlias in php-to-llvm-ir.abnf.
     function classKey(name) { return "\x00c" + phsCase(name, false) }
-    // The class, interface or trait descriptor a name denotes, in any letter case, or
-    // null.
+    // The class, interface or trait descriptor a name denotes, in any letter case and
+    // with one leading "\" of a fully qualified name dropped (zend_lookup_class), or
+    // null. Twin of php_class_find in php-to-llvm-ir.abnf.
     function findClass(name) {
         var v = anytype
         v = null
         if (varExists(name) || hasOwn(hostGlobals, name)) { v = getVar(name) }
         if (v == null || v == undefined || v.__isclass !== true) {
-            var lk = classKey(name)
+            var lk = classKey(name.charCodeAt(0) == 92 ? name.substring(1) : name)
             if (varExists(lk)) { v = getVar(lk) }
         }
         if (v == null || v == undefined || v.__isclass !== true) { return null }
@@ -4727,6 +4737,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             mn = arrGet(cur, 1)
         }
         if (typeof cn != "string" || typeof mn != "string") { return cur }
+        cn = relName(cn)
         if (cn != "self" && cn != "static" && cn != "parent") { return cur }
         var s = ctxSelf()
         if (s == null || (cn == "parent" && (s.__super == null || s.__super == undefined))) { return cur }
@@ -4758,6 +4769,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cn = phpStr(arrGet(cur, 0))
             mn = phpStr(arrGet(cur, 1))
         } else { return cur }
+        cn = relName(cn)
         return boundStatic(resolveClassName(cn), mn, cn)
     }
     function makeCall(items) {
@@ -5388,8 +5400,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return false
     }
     function phpIsA(v, name) {
-        // A closure is an instance of PHP's final class Closure, and of nothing else.
+        // A closure is an instance of PHP's final class Closure, and of nothing else;
+        // a generator of Generator, which is an Iterator and so a Traversable.
         if (typeof v == "function") { return sameClassName(name, "Closure") }
+        if (isGen(v)) {
+            return sameClassName(name, "Generator") || sameClassName(name, "Iterator") || sameClassName(name, "Traversable")
+        }
         if (!isObj(v)) { return false }
         return classIs(v.__class, name)
     }
@@ -5570,6 +5586,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "error_reporting": function(v) { return 32767 },
         "get_class": function(v) { return isObj(v) ? fullName(v.__class) : false },
         "method_exists": function(v, m) { return phpMethodExists(v, m) },
+        "is_a": function(v, cls, allow) { return phpIsAOf(v, cls, phptest(allow), false) },
+        "is_subclass_of": function(v, cls, allow) { return phpIsAOf(v, cls, allow === undefined || phptest(allow), true) },
+        // With no argument, the class scope of the caller (deprecated since 8.3).
+        "get_parent_class": function(v) { return arguments.length == 0 ? phpParentOf(ctxSelf()) : phpParentClass(v) },
         "class_exists": function(n) { return phpClassExists(n, false) },
         "interface_exists": function(n) { return phpClassExists(n, true) },
         "gettype": function(v) { return phpTypeName(v) },
@@ -5595,6 +5615,46 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (c == null) { return false }
         if (iface) { return c.__isiface === true }
         return c.__isiface !== true && c.__istrait !== true
+    }
+    // is_a() / is_subclass_of(), zend's is_a_impl: v is an object or, when allowStr,
+    // a class name, tested as instanceof against the class cls names (any letter
+    // case, a leading "\" dropped); a name that denotes no class answers false, and
+    // is_subclass_of leaves the class itself out. Twin of js_phisaof in
+    // abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpIsAOf(v, cls, allowStr, onlySub) {
+        var name = phpStr(cls)
+        if (name.charCodeAt(0) == 92) { name = name.substring(1) }
+        if (typeof v == "string") {
+            if (!allowStr) { return false }
+            var k = findClass(v)
+            if (k == null) { return false }
+            if (onlySub && sameClassName(k.__name, name)) { return false }
+            return classIs(k, name)
+        }
+        if (onlySub && sameClassName(phpDebugType(v), name)) { return false }
+        return phpIsA(v, name)
+    }
+    // get_parent_class(): the parent of v's class, or of the class the string v
+    // names; anything else is a TypeError naming the value as zend_zval_value_name
+    // does ("true", not "bool"). Twin of js_phparent in abnf/jsrtphp.go and
+    // lib/php-rt.metajs.
+    function phpParentClass(v) {
+        if (isObj(v)) { return phpParentOf(v.__class) }
+        if (typeof v == "function" || isGen(v)) { return false }
+        var k = anytype
+        k = null
+        if (typeof v == "string") { k = findClass(v) }
+        if (k == null) {
+            var given = v === true ? "true" : (v === false ? "false" : phpDebugType(v))
+            phpRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, "
+                + given + " given")
+        }
+        return phpParentOf(k)
+    }
+    // The declared name of a class's parent, false for none (or no class).
+    function phpParentOf(k) {
+        if (k == null || k == undefined || k.__super == null || k.__super == undefined) { return false }
+        return k.__super.__name
     }
     // method_exists(): a method the class or a base declares, by PHP's
     // case-insensitive name and whatever its visibility; a class name that names
@@ -5681,7 +5741,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isFlo(v)) { return "double" }
         if (typeof v == "string") { return "string" }
         if (isArr(v)) { return "array" }
-        if (isObj(v)) { return "object" }
+        if (isObj(v) || typeof v == "function" || isGen(v)) { return "object" }
         return "unknown type"
     }
     function phpDebugType(v) {
@@ -5692,6 +5752,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof v == "string") { return "string" }
         if (isArr(v)) { return "array" }
         if (isObj(v)) { return v.__class == null ? "object" : v.__class.__name }
+        // A closure and a generator are instances of PHP's final classes Closure and
+        // Generator.
+        if (typeof v == "function") { return "Closure" }
+        if (isGen(v)) { return "Generator" }
         return "unknown"
     }
     // var_dump's rendering. A float goes through floDump (serialize_precision=-1),
@@ -5881,7 +5945,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 
     // ----- arithmetic: int stays int, and any float operand makes the result float --
     function phpArith(op, l, r) {
-        if (isArr(l) || isArr(r)) { return phpArrArith(op, l, r) }
+        if (noNum(l) || noNum(r)) { return phpArrArith(op, l, r) }
         var a = toNumV(l)
         var b = toNumV(r)
         // '%' is the one arithmetic operator that is INTEGER only: PHP casts both
@@ -5896,10 +5960,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isFlo(a) || isFlo(b)) { return phpFloArith(op, numOf(a), numOf(b)) }
         return phpIntArith(op, iPairOf(a), iPairOf(b))
     }
-    // An array operand: '+' of two arrays is the UNION (the left array, then each
-    // key of the right one it lacks), and every other combination is a TypeError
-    // naming both operand types. Twin of phArrArith in lib/php-rt.metajs and
-    // phpArrArith in abnf/jsrtphp.go.
+    // A value with no number reading: an array, an object, a closure or a
+    // generator. Twin of phNoNum in lib/php-rt.metajs and phpNoNum in
+    // abnf/jsrtphp.go.
+    function noNum(v) {
+        if (typeof v == "function") { return true }
+        if (v === null || v === undefined || typeof v != "object") { return false }
+        return !isFlo(v) && !szIs(v)
+    }
+    // An operand with no number reading: '+' of two arrays is the UNION (the left
+    // array, then each key of the right one it lacks), and every other combination
+    // is a TypeError naming both operand types. Twin of phArrArith in
+    // lib/php-rt.metajs and phpArrArith in abnf/jsrtphp.go.
     function phpArrArith(op, l, r) {
         if (op == "+" && isArr(l) && isArr(r)) {
             var out = arrCopy(l)
@@ -5908,6 +5980,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return out
         }
+        phpBinopErr(op, l, r)
+    }
+    // zend_binop_error: PHP 8's TypeError for an operand an operator cannot use.
+    function phpBinopErr(op, l, r) {
         phpRaise("TypeError", "Unsupported operand types: " + phpDebugType(l) + " " + op + " " + phpDebugType(r))
     }
     function phpFloArith(op, x, y) {
@@ -5966,6 +6042,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (lang/operators/bitwiseShiftLeft_basiclong_64bit.phpt) - and a negative shift
     // count is an error rather than a shift the other way.
     function phpBit(op, l, r) {
+        if (noNum(l) || noNum(r)) { phpBinopErr(op, l, r) }
         var x = toLongP(l)
         if (op == "&") { return mkInt(i64And(x, toLongP(r))) }
         if (op == "|") { return mkInt(i64Or(x, toLongP(r))) }
@@ -5987,7 +6064,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // stays -0), and an int negates at 64 bits - where the one value that cannot
     // be negated, PHP_INT_MIN, promotes to a float like any other overflow.
     makeNeg = function(t) { return function() { return phpNeg(t()) } }
+    // PHP compiles -$x as $x * -1, so an operand with no number reading fails as
+    // that multiplication.
     function phpNeg(v) {
+        if (noNum(v)) { phpBinopErr("*", v, -1) }
         var a = toNumV(v)
         if (isFlo(a)) { return mkFlo(-a.f) }
         var p = iPairOf(a)

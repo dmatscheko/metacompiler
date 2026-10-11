@@ -698,6 +698,9 @@ function phArith(op, l, r) {
     }
     var a = phToNum(l)
     var b = phToNum(r)
+    // Only a value with no number reading leaves phToNum as 0 without being 0,
+    // null, false or a string, so the probe costs the numbers one compare each.
+    if ((a === 0 && phNoNum(l)) || (b === 0 && phNoNum(r))) { phBinopErr(op, l, r) }
     // '%' is the one arithmetic operator that is INTEGER only: PHP casts both
     // operands to int first, so 7.5 % 2 is 1 and not 1.5.
     if (op == "%") {
@@ -727,8 +730,24 @@ function phArrArith(op, l, r) {
         }
         return out
     }
-    phRaise("TypeError", "Unsupported operand types: " + phDebugType(l) + " " + op + " " + phDebugType(r))
+    phBinopErr(op, l, r)
     return undefined
+}
+
+// phNoNum: a value with no number reading - an array, an object, a closure or a
+// generator. Twin of noNum in php-interpreter.abnf and phpNoNum in
+// abnf/jsrtphp.go.
+function phNoNum(v) {
+    if (rtIsNil(v)) { return false }
+    var t = typeof v
+    if (t == "function") { return true }
+    if (t != "object") { return false }
+    return v["__pf"] === undefined
+}
+
+// zend_binop_error: PHP 8's TypeError for an operand an operator cannot use.
+function phBinopErr(op, l, r) {
+    phRaise("TypeError", "Unsupported operand types: " + phDebugType(l) + " " + op + " " + phDebugType(r))
 }
 
 function phFloArith(op, x, y) {
@@ -803,6 +822,7 @@ function phIntArith(op, x, y) {
 // the arithmetic ones they WRAP - PHP_INT_MAX << 1 is int(-2), not a float - and
 // a negative shift count is an ArithmeticError rather than a shift the other way.
 function phBit(op, l, r) {
+    if (phNoNum(l) || phNoNum(r)) { phBinopErr(op, l, r) }
     var x = phToLong(l)
     if (op == "&") { return sintOp(5, x, phToLong(r)) }
     if (op == "|") { return sintOp(6, x, phToLong(r)) }
@@ -825,6 +845,9 @@ function phBit(op, l, r) {
 // phNeg is unary minus. It keeps the operand's TYPE (so -0.0 stays -0), and the
 // one int that cannot be negated, PHP_INT_MIN, promotes like any other overflow.
 function phNeg(v) {
+    // PHP compiles -$x as $x * -1, so an operand with no number reading fails as
+    // that multiplication.
+    if (phNoNum(v)) { phBinopErr("*", v, 0 - 1) }
     var a = phToNum(v)
     var f = phFloOf(a)
     // `f * -1` and NOT `0 - f`: they differ on ZERO, and PHP keeps the sign, so
@@ -1479,6 +1502,7 @@ function phTypeName(v) {
     if (typeof v == "string") { return "string" }
     if (phIsArr(v)) { return "array" }
     if (phIsObj(v)) { return "object" }
+    if (typeof v == "function" || phIsGen(v)) { return "object" }
     return "unknown type"
 }
 
@@ -1490,6 +1514,10 @@ function phDebugType(v) {
     if (typeof v == "string") { return "string" }
     if (phIsArr(v)) { return "array" }
     if (phIsObj(v)) { return phClassName(v) }
+    // A closure and a generator are instances of PHP's final classes Closure and
+    // Generator.
+    if (typeof v == "function") { return "Closure" }
+    if (phIsGen(v)) { return "Generator" }
     return "unknown"
 }
 
@@ -2267,6 +2295,45 @@ function js_phmexists(v, m) {
     }
     return false
 }
+// is_a / is_subclass_of; found is the descriptor a string v names (null when
+// none). Twin of phpIsAOf in languages/php-interpreter.abnf.
+function js_phisaof(v, found, cls, allow, onlySub) {
+    var name = phStr(cls)
+    if (name.charCodeAt(0) == 92) { name = name.substring(1) }
+    var inst = anytype
+    inst = v
+    var own = ""
+    if (typeof v == "string") {
+        if (!phTest(allow)) { return false }
+        if (found === undefined || found === null || typeof found != "object") { return false }
+        inst = found
+        own = phStr(found["__name"])
+    } else { own = phDebugType(v) }
+    if (phTest(onlySub) && own.length == name.length && phsCase(own, false) == phsCase(name, false)) { return false }
+    return phIsA(inst, name)
+}
+// get_parent_class of an object, of the class descriptor v, or of the class a
+// string v names (found, null when none). Twin of phpParentClass in
+// languages/php-interpreter.abnf.
+function js_phparent(v, found) {
+    var cls = anytype
+    cls = undefined
+    if (typeof v == "string") { cls = found }
+    else if (v !== undefined && v !== null && typeof v == "object" && v["__isclass"] !== undefined) { cls = v }
+    else if (phIsObj(v)) {
+        cls = v["__class"]
+        if (cls === undefined || cls === null) { return false }
+    } else if (typeof v == "function" || phIsGen(v)) { return false }
+    if (cls === undefined || cls === null || typeof cls != "object") {
+        var given = phDebugType(v)
+        if (v === true) { given = "true" }
+        if (v === false) { given = "false" }
+        phRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, " + given + " given")
+    }
+    var sup = cls["__super"]
+    if (sup === undefined || sup === null || typeof sup != "object") { return false }
+    return phStr(sup["__name"])
+}
 function js_phgetclass(v) {
     if (phIsObj(v)) {
         var cls = v["__class"]
@@ -2712,7 +2779,10 @@ function phClassInit(cls) {
 // catchable Error. Twin of js_phclassmiss in abnf/jsrtphp.go.
 function js_phclassmiss(name, self, stat, where) {
     var nm = phStr(name)
-    if (nm == "self" || nm == "static" || nm == "parent") {
+    // The three relative names are case-insensitive like every class name.
+    var lc = phsCase(nm, false)
+    if (lc == "self" || lc == "static" || lc == "parent") {
+        nm = lc
         var cls = anytype
         cls = nm == "static" ? stat : self
         if (cls === null || typeof cls != "object") {
@@ -2764,6 +2834,7 @@ function js_phrelcb(v, self, stat) {
     }
     if (typeof cn != "string" || typeof mn != "string") { return v }
     if (self === undefined || self === null || typeof self != "object") { return v }
+    cn = phsCase(cn, false)
     var cls = anytype
     cls = self
     if (cn == "static") {

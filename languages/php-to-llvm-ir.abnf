@@ -1219,7 +1219,7 @@ KwDefault   = CiD :whitespace() CiE CiF CiA CiU CiL CiT :whitespace(Whitespace) 
 // exception can never leave them pointing at the wrong class.
 StaticExpr  <~~ push(makeStaticExpr(takeAll())) ~~>
             = StaticBaseRef "::" StaticMember [ StaticArgs ] ;
-StaticBaseRef <~~ push({sbase: stripWs(up.in)}) ~~>
+StaticBaseRef <~~ push({sbase: relName(stripWs(up.in))}) ~~>
             = ( "static" KwEnd | QName ) ;
 // A '::' member may be COMPUTED: 'Foo::{$name}()' names the method (or constant) at
 // run time, and 'Foo::$$v' / 'Foo::${expr}' the static PROPERTY (tests/bug55247,
@@ -1756,8 +1756,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return classNamedF
     }
     // What a run-time NAME denotes in scope env, in any letter case: the binding of
-    // the name itself, else the class declared under its lower-cased alias, else
-    // null. Twin of findClass in php-interpreter.abnf.
+    // the name itself, else the class declared under the lower-cased alias of the
+    // name less one leading "\" (zend_lookup_class), else null. Twin of findClass
+    // in php-interpreter.abnf.
     var classFindF = undefined
     function classFindFn() {
         if (classFindF == undefined) {
@@ -1770,12 +1771,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var cls = eb.NewCall(scopeProbeFn(), [env, nm, hNull])
             eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, cls, hNull), missB, hitB)
             hitB.NewRet(cls)
-            var aliasV = callExt(missB, "js_phcat", [emitStr(missB, "\x00c"), callExt(missB, "js_phcase", [nm, hFalse])])
+            var bsV = callExt(missB, "js_seq", [callExt(missB, "js_phord", [nm]), emitNum(missB, 92)])
+            var bareV = missB.NewSelect(truthy(missB, bsV), callExt(missB, "js_phsubstr", [nm, emitNum(missB, 1), hNull]), nm)
+            var aliasV = callExt(missB, "js_phcat", [emitStr(missB, "\x00c"), callExt(missB, "js_phcase", [bareV, hFalse])])
             missB.NewRet(missB.NewCall(scopeProbeFn(), [env, aliasV, hNull]))
         }
         return classFindF
     }
     function phClsFind(b, nameV) { return b.NewCall(classFindFn(), [curScopeV, nameV]) }
+    // A class-or-object argument: a string becomes the descriptor it names (null
+    // when none), anything else passes as it is.
+    function phClsArg(b, v) {
+        var strB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), v])), strB, joinB)
+        var looked = phClsFind(strB, v)
+        strB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(looked, strB)])}
+    }
     // PHP class names are case-insensitive: a class is also declared under a hidden
     // lower-cased key, which php_class_named falls back to when a run-time name
     // misses exactly. Twin of declClass in php-interpreter.abnf.
@@ -5565,6 +5578,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             || name == "array_push" || name == "array_values" || name == "intdiv" || name == "abs"
             || name == "var_dump" || name == "gettype" || name == "get_debug_type" || name == "get_class"
             || name == "method_exists" || name == "class_exists" || name == "interface_exists"
+            || name == "is_a" || name == "is_subclass_of" || name == "get_parent_class"
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
             || name == "__mec_callable"
@@ -5654,14 +5668,30 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // method_exists: an object, or a class named by a string (null when it names
         // none), goes to js_phmexists.
         if (name == "method_exists") {
-            var strB = curF.NewBlock("")
-            var joinB = curF.NewBlock("")
-            var fromB = b
-            b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), vs[0]])), strB, joinB)
-            var looked = phClsFind(strB, vs[0])
-            strB.NewBr(joinB)
-            var tgt = joinB.NewPhi([llvm.ir.NewIncoming(vs[0], fromB), llvm.ir.NewIncoming(looked, strB)])
-            return {b: joinB, v: callExt(joinB, "js_phmexists", [tgt, vs[1]])}
+            var tgt = phClsArg(b, vs[0])
+            return {b: tgt.b, v: callExt(tgt.b, "js_phmexists", [tgt.v, vs[1]])}
+        }
+        // is_a / is_subclass_of: allow_string defaults to false for is_a and to true
+        // for is_subclass_of.
+        if (name == "is_a" || name == "is_subclass_of") {
+            var sub = name == "is_subclass_of" ? hTrue : hFalse
+            var inst = phClsArg(b, vs[0])
+            var allowV = vs.length > 2 ? vs[2] : sub
+            return {b: inst.b, v: callExt(inst.b, "js_phisaof", [vs[0], inst.v, vs[1], allowV, sub])}
+        }
+        if (name == "get_parent_class") {
+            if (vs.length > 0) {
+                var pa = phClsArg(b, vs[0])
+                return {b: pa.b, v: callExt(pa.b, "js_phparent", [vs[0], pa.v])}
+            }
+            // With no argument, the class scope of the caller (deprecated since 8.3).
+            var selfV = scopeProbe(b, emitStr(b, frameClsName("self")), hNull)
+            var inB = curF.NewBlock("")
+            var outB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, selfV, hNull), outB, inB)
+            var parV = callExt(inB, "js_phparent", [selfV, hNull])
+            inB.NewBr(outB)
+            return {b: outB, v: outB.NewPhi([llvm.ir.NewIncoming(hFalse, b), llvm.ir.NewIncoming(parV, inB)])}
         }
         // class_exists / interface_exists: the descriptor the name denotes, in any
         // letter case, is a class (not an interface or a trait) / an interface.
@@ -6563,6 +6593,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         return out
     }
+    // self, static and parent are case-insensitive like every class name: a name
+    // that spells one in any case answers it in lower case. Twin of relName in
+    // php-interpreter.abnf.
+    function relName(n) {
+        if (n.length != 4 && n.length != 6) { return n }
+        var lc = phsCase(n, false)
+        return (lc == "self" || lc == "static" || lc == "parent") ? lc : n
+    }
     // php-interpreter.abnf declares this same set with declBuiltinClass, and the two must
     // agree: real PHP 8 refuses to throw an object that does not implement Throwable, so a
     // program that throws anything at all needs `new Exception(...)` to resolve. Only the
@@ -6617,6 +6655,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_set", [clsV, emitStr(b, "getCode"),
                                   callExt(b, "js_closure", [handle(emitExcGetter("code")), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "__mlc"), emitStr(b, ",__construct,getmessage,getcode,")])
+            // Both roots implement Throwable, listed as the bare name js_phisa matches.
+            var ifV = callExt(b, "js_pharr", [])
+            callExt(b, "js_phpush", [ifV, emitStr(b, "Throwable")])
+            callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifV])
             // The root of the chain also carries the empty __initprops every `new`
             // calls, so a user class extending Exception reaches one.
             b = emitInitProps(b, clsV, name, "", [])

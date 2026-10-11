@@ -2350,6 +2350,65 @@ function s55() {
             === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, class S55Cb does not have a method \"nope\"");
 }
 
+// ===== SECTION 56: class relations, operands with no number, relative names in any case =====
+// is_a() and is_subclass_of() test an object, or with allow_string a class name, as
+// instanceof against a class named in any case with one leading "\" dropped;
+// is_subclass_of leaves the class itself out and takes a string by default
+// (inheritance/bug53727, class_alias/class_alias_018); Exception and Error implement
+// Throwable. get_parent_class() answers the
+// parent as declared, false for none, and refuses a name that denotes no class with a
+// TypeError (lang/bug21961). An object, a closure or an array in an arithmetic or
+// bitwise operator is a TypeError naming both operand types, and -$x fails as
+// $x * -1 (operator_unsupported_types). A closure's debug type is Closure. self,
+// parent and static are case-insensitive, in the source and in a callable.
+interface S56I {}
+class S56A implements S56I {
+    static function m() { return "A"; }
+    static function viaCuf($c) { return call_user_func($c); }
+}
+class S56B extends S56A {
+    static function m() { return "B"; }
+    static function rel() { return SELF::m() . Parent::m() . STATIC::m(); }
+    static function cufs() { return call_user_func('PARENT::m') . call_user_func(['Self', 'm']) . call_user_func('sTaTiC::m'); }
+}
+class S56C extends S56B { static function m() { return "C"; } }
+function s56err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s56() {
+    $vals = [new S56C, 'S56C', 'Nope', 5, function() {}];
+    check("isa1", is_a($vals[0], 'S56A') && is_a($vals[0], 's56i') && is_a($vals[0], '\S56C') && !is_a($vals[0], 'Nope')
+        && !is_a($vals[1], 'S56A') && is_a($vals[1], 'S56A', true) && !is_a($vals[2], 'S56A', true) && !is_a($vals[3], 'S56A')
+        && is_a($vals[4], 'Closure'));
+    check("isa2", is_subclass_of($vals[0], 'S56B') && !is_subclass_of($vals[0], 'S56C') && is_subclass_of($vals[1], 'S56I')
+        && !is_subclass_of($vals[1], 's56c') && !is_subclass_of($vals[1], 'S56A', false) && !is_subclass_of($vals[4], 'Closure'));
+    $errs = [new TypeError("x"), 'Exception'];
+    check("isa3", is_a($errs[0], 'Throwable') && $errs[0] instanceof Throwable && is_subclass_of('TypeError', 'Error')
+        && is_a($errs[1], 'Throwable', true));
+    check("gpc1", get_parent_class($vals[0]) === "S56B" && get_parent_class($vals[1]) === "S56B" && get_parent_class('s56b') === "S56A"
+        && get_parent_class(new S56A) === false && get_parent_class($vals[4]) === false);
+    check("gpc2", s56err(fn() => get_parent_class($vals[2]))
+            === "TypeError: get_parent_class(): Argument #1 (\$object_or_class) must be an object or a valid class name, string given"
+        && s56err(fn() => get_parent_class($vals[3]))
+            === "TypeError: get_parent_class(): Argument #1 (\$object_or_class) must be an object or a valid class name, int given");
+    $ops = [new stdClass, 1, 2.5, function() {}, [1]];
+    check("ona1", s56err(fn() => $ops[0] + $ops[1]) === "TypeError: Unsupported operand types: stdClass + int"
+        && s56err(fn() => $ops[2] * $ops[0]) === "TypeError: Unsupported operand types: float * stdClass"
+        && s56err(fn() => $ops[0] % $ops[1]) === "TypeError: Unsupported operand types: stdClass % int"
+        && s56err(fn() => $ops[3] - $ops[1]) === "TypeError: Unsupported operand types: Closure - int"
+        && s56err(fn() => $ops[1] / $ops[0]) === "TypeError: Unsupported operand types: int / stdClass"
+        && s56err(fn() => $ops[0] ** $ops[2]) === "TypeError: Unsupported operand types: stdClass ** float");
+    check("ona2", s56err(fn() => $ops[0] | $ops[1]) === "TypeError: Unsupported operand types: stdClass | int"
+        && s56err(fn() => $ops[1] << $ops[4]) === "TypeError: Unsupported operand types: int << array"
+        && s56err(fn() => -$ops[0]) === "TypeError: Unsupported operand types: stdClass * int"
+        && s56err(fn() => -$ops[4]) === "TypeError: Unsupported operand types: array * int"
+        && s56err(function() use ($ops) { $x = $ops[0]; $x += 1; return $x; }) === "TypeError: Unsupported operand types: stdClass + int");
+    check("dbt1", get_debug_type($ops[3]) === "Closure" && gettype($ops[3]) === "object");
+    check("cxl1", class_exists('\S56A') && interface_exists('\S56I') && !class_exists('\S56I') && method_exists('\S56B', 'rel'));
+    check("rel1", S56B::rel() === "BAB" && S56C::rel() === "BAC" && S56B::cufs() === "ABB" && S56C::cufs() === "ABC"
+        && S56A::viaCuf('SELF::m') === "A" && S56A::viaCuf(['Self', 'm']) === "A");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2411,6 +2470,7 @@ function main() {
     s53(); // SECTION-CALL 53
     s54(); // SECTION-CALL 54
     s55(); // SECTION-CALL 55
+    s56(); // SECTION-CALL 56
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
