@@ -836,6 +836,21 @@ func init() {
 		// shared probe unchanged, so a user class, a string, a char, an array and
 		// `object` behave as js_is_type says.
 		baseIs := m["js_is_type"]
+		// `x == default`: the default literal takes x's type (ECMA-334 12.8.21), so
+		// the question is whether x is the default value of its run-time type -
+		// null, false, a zero number or the null char. Twin of js_csisdflt in
+		// lib/csharp-rt.metajs and csIsDefaultVal in csharp-interpreter.abnf.
+		m["js_csisdflt"] = func(a []uint64) uint64 {
+			switch v := u(a[0]).(type) {
+			case nil, jsUndefT, jsNullT:
+				return jsHTrue
+			case bool:
+				return boolH(!v)
+			case float64, jsGInt, jsJFlo, jsChar:
+				return boolH(rt.toNumber(v) == 0)
+			}
+			return jsHFalse
+		}
 		m["js_csis"] = func(a []uint64) uint64 {
 			t := rt.toString(u(a[1]))
 			if i := strings.IndexByte(t, '<'); i >= 0 {

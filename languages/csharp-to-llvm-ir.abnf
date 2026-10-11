@@ -1776,10 +1776,12 @@ KwLet       = "let" KwEnd ;
     function csFoldEq(items) {
         var ts = []
         var objs = []
+        var dfls = []
         var k
         for (k = 0; k < items.length; k += 2) {
             ts.push(items[k].eqt)
             objs.push(csIsObjCastOperand(items[k].eqin))
+            dfls.push(items[k].eqin == "default")
         }
         if (items.length == 1) { return ts[0] }
         return function(b) {
@@ -1789,7 +1791,12 @@ KwLet       = "let" KwEnd ;
             for (var i = 1; i < items.length; i += 2) {
                 var rr = ts[(i + 1) / 2](b)
                 b = rr.b
-                if ((i == 1 && objs[0]) || objs[(i + 1) / 2]) {
+                // A bare `default` operand takes the other operand's type: twin of
+                // csFoldEq's arm in csharp-interpreter.abnf.
+                if ((i == 1 && dfls[0]) || dfls[(i + 1) / 2]) {
+                    var isd = callExt(b, "js_csisdflt", [dfls[(i + 1) / 2] ? v : rr.v])
+                    v = (items[i] == "==") ? isd : callExt(b, "js_not", [isd])
+                } else if ((i == 1 && objs[0]) || objs[(i + 1) / 2]) {
                     v = emitBin(b, items[i], v, rr.v)
                 } else {
                     var d = emitBinDyn(b, items[i], v, rr.v)
@@ -2015,7 +2022,7 @@ KwLet       = "let" KwEnd ;
     function csPropFn(name, sub, v) {
         return function(b) {
             var fv = anytype
-            if (name == "Count" || name == "Length") { fv = callExt(b, "js_cslen", [v]) }
+            if (name == "Count" || name == "Length") { var lnr = emitCsLen(b, v, name); b = lnr.b; fv = lnr.v }
             else if (csPropAcc[name] != undefined) { var pgr = emitPropGet(b, v, name); b = pgr.b; fv = pgr.v }
             else { fv = callExt(b, "js_get", [v, emitStr(b, name)]) }
             return emitPat(b, sub, fv)
@@ -4383,7 +4390,9 @@ KwLet       = "let" KwEnd ;
                         b = rcu.b
                         cur = rcu.v
                     } else if (s.name == "Count" || s.name == "Length") {
-                        cur = callExt(b, "js_cslen", [cur])
+                        var clr = emitCsLen(b, cur, s.name)
+                        b = clr.b
+                        cur = clr.v
                     } else if (s.name == "Keys") {
                         cur = callExt(b, "js_csmcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
                     } else if (s.name == "Values") {
@@ -5653,6 +5662,26 @@ KwLet       = "let" KwEnd ;
     // static one is a plain call of the member on the class descriptor.
     // Answers {b, v}: an ambiguous name (one that some OTHER class declares as a plain
     // field) splits the block into a run-time probe, so this may not end where it began.
+    // `.Count` / `.Length`: a container's length, unless some class declares a member
+    // of that name - then a receiver that is an instance or a class descriptor reads
+    // that member (`static int Count`). Twin of core.getField's arm in
+    // csharp-interpreter.abnf.
+    function emitCsLen(b, cur, name) {
+        if (csDataNames[name] !== true) { return {b: b, v: callExt(b, "js_cslen", [cur])} }
+        var userB = curF.NewBlock("")
+        var clsB = curF.NewBlock("")
+        var stdB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_has", [cur, emitStr(b, "__class")])), userB, clsB)
+        clsB.NewCondBr(truthy(clsB, callExt(clsB, "js_has", [cur, emitStr(clsB, "__isclass")])), userB, stdB)
+        var ur = {b: userB, v: hUndef}
+        if (csPropAcc[name] != undefined) { ur = emitPropGet(userB, cur, name) }
+        else { ur.v = callExt(userB, "js_get", [cur, emitStr(userB, name)]) }
+        ur.b.NewBr(mergeB)
+        var sv = callExt(stdB, "js_cslen", [cur])
+        stdB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ur.v, ur.b), llvm.ir.NewIncoming(sv, stdB)])}
+    }
     function emitPropGet(b, cur, name) {
         if (!csAccAmbig(name)) { return {b: b, v: emitPropGet1(b, cur, name)} }
         return csAccSplit(b, cur, name,

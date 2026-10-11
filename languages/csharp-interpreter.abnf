@@ -2552,6 +2552,22 @@ KwLet       = "let" KwEnd ;
     // handle and are shared - see lib/interp-core.js.
     // .Count / .Length and indexing understand strings, arrays and dictionaries. Defined
     // before their core.* hookup below (the frozen engine does not hoist declarations).
+    // An instance of a user class or a class descriptor (as opposed to a built-in
+    // container, string or value).
+    function csIsUserObj(o) {
+        if (o === null || o === undefined || typeof o != "object") { return false }
+        return o.__class !== undefined || o.__isclass === true
+    }
+    // Whether v is the default value of its run-time type: null, false, a zero number
+    // or the null char. Twin of js_csisdflt in abnf/jsrtcsharp.go.
+    function csIsDefaultVal(v) {
+        if (v === null || v === undefined || v === false) { return true }
+        if (typeof v == "number") { return v == 0 }
+        if (csIsChar(v)) { return v.__char == 0 }
+        if (csIsFlo(v)) { return v.__flo == 0 }
+        if (szIs(v)) { return szNum(v) == 0 }
+        return false
+    }
     function csLen(o) {
         if (isDict(o)) return o.keys.length
         if (o === undefined || o === null) fail("Length/Count of null")
@@ -3575,10 +3591,12 @@ KwLet       = "let" KwEnd ;
     function csFoldEq(items) {
         var ts = []
         var objs = []
+        var dfls = []
         var k
         for (k = 0; k < items.length; k += 2) {
             ts.push(items[k].eqt)
             objs.push(csIsObjCastOperand(items[k].eqin))
+            dfls.push(items[k].eqin == "default")
         }
         if (items.length == 1) { return ts[0] }
         var f = binOp
@@ -3587,6 +3605,14 @@ KwLet       = "let" KwEnd ;
             v = ts[0]()
             for (var i = 1; i < items.length; i += 2) {
                 var rv = ts[(i + 1) / 2]()
+                // A bare `default` operand takes the OTHER operand's type (the default
+                // literal, ECMA-334 12.8.21), so `x == default` asks whether
+                // x is the default value of its own type. Twin of js_csisdflt.
+                if ((i == 1 && dfls[0]) || dfls[(i + 1) / 2]) {
+                    var isd = csIsDefaultVal(dfls[(i + 1) / 2] ? v : rv)
+                    v = (items[i] == "==") ? isd : !isd
+                    continue
+                }
                 if ((i == 1 && objs[0]) || objs[(i + 1) / 2]) { csNoUserOp = true }
                 v = f(items[i], v, rv)
             }
@@ -6004,7 +6030,10 @@ KwLet       = "let" KwEnd ;
     core.add = csAdd
     core.getField = function(o, name) {
         if (name == "Current" && csIsEnum(o)) { return o.cur }
-        if (name == "Count" || name == "Length") return csLen(o)
+        // .Count / .Length of a container; on an instance or a class it is a user
+        // member of that name (`static int Count`). Twin of emitCsLen in
+        // csharp-to-llvm-ir.abnf.
+        if ((name == "Count" || name == "Length") && !csIsUserObj(o)) return csLen(o)
         if (name == "Keys") return mcall(o, "keys", [])
         if (name == "Values") return mcall(o, "values", [])
         if (hasOwn(o, name)) { return o[name] }

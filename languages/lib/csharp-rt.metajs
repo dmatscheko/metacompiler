@@ -1285,6 +1285,14 @@ function csIsTyAlias(t) {
 // the `double` arm, because a decimal IS a style-2 double box here. Every
 // non-numeric name falls through to the shared probe unchanged. The twins are
 // js_csis in abnf/jsrtcsharp.go and csIsType in languages/csharp-interpreter.abnf.
+// `x == default`: whether x is the default value of its run-time type. Twin of
+// js_csisdflt in abnf/jsrtcsharp.go.
+function js_csisdflt(v) {
+    if (v === null || v === undefined || v === false) { return true }
+    if (typeof v == "number" || rtIsCharBox(v)) { return rtjNum(v) == 0 }
+    return false
+}
+
 function js_csis(v, tname) {
     var t = csIsTyAlias(csStripAngleTy(tname))
     var opt = false

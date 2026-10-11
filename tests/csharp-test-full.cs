@@ -2712,6 +2712,35 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s41q1", (os[0] is S41Gen<int> ? "y" : "n") == "y" && (os[1] is string ? 1 : 2) == 2);
         }
 
+        // ===== SECTION 42: members named Count / Length, the default literal in == =====
+        //
+        // ECMA-334 12.8.7: `X.Count` is member lookup on X, so a class's own field,
+        // static field or property named Count / Length is what it reads - only a
+        // container answers its element count. 12.8.21: a bare `default` operand of
+        // == / != takes the other operand's type, so `0 == default` is true and
+        // `"" == default` (null) is false. No C# toolchain here: the values follow
+        // from the spec.
+        class S42Cnt { public static int Count; public static string Length = "L"; }
+        class S42Rec { public int Count; public int Length => Count * 10; }
+        static void S42()
+        {
+            int[] n = { 3, 0, 5 };
+            S42Cnt.Count = n[0];
+            S42Cnt.Count += n[2];
+            S42Cnt.Count++;
+            var r = new S42Rec { Count = n[2] };
+            var l = new List<int> { n[0], n[1] };
+            Program.Check("s42c1", S42Cnt.Count == 9 && S42Cnt.Length == "L" && r.Count == 5
+                && r.Length == 50 && l.Count == 2 && "abc".Length == 3 && n.Length == 3);
+            Program.Check("s42c2", r is { Count: 5 } && l is { Count: 2 });
+            long[] ls = { 0L, 7L };
+            string[] ss = { null, "" };
+            Program.Check("s42d1", n[1] == default && !(n[0] == default) && n[0] != default
+                && default == ls[0] && ls[1] != default && 0.0 == default && '\0' == default);
+            Program.Check("s42d2", ss[0] == default && ss[1] != default && false == default
+                && !(true == default) && r != default);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2755,6 +2784,7 @@ b";                                                   // verbatim keeps the newl
             Program.S39(); // SECTION-CALL 39
             Program.S40(); // SECTION-CALL 40
             Program.S41(); // SECTION-CALL 41
+            Program.S42(); // SECTION-CALL 42
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
