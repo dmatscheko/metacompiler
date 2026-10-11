@@ -182,7 +182,7 @@ function js_jssne(a, b) { return !js_jsseq(a, b) }
 function js_jsneg(v) {
     if (jbIsBig(v)) { return jbNeg(v) }
     if (jvSymOn) { jvSymOperand(v, undefined) }
-    return -v   // NEVER `0 - v`: the signed-zero trap of part 3.
+    return -jvToNumber(v)   // NEVER `0 - v`: the signed-zero trap of part 3.
 }
 
 function js_jsnot(v) {
@@ -760,9 +760,23 @@ function jvStr(v) {
 
 // ============================ ToPrimitive, == and the relational operators ==
 
+// JavaScript's ToNumber: an object through ToPrimitive with hint number, a string
+// through StringToNumber (lib/js-num.js) - the floor's own conversion reads both
+// differently - and a boolean, null or undefined through the floor. Twin of jsvToNum
+// in abnf/jsrtjsbig.go.
 function jvToNumber(v) {
-    return v * 1
+    if (typeof v == "number") { return v }
+    return jvNumSlow(v)
 }
+function jvNumSlow(v) {
+    if (typeof v == "string") { return jsnStrToNum(v) }
+    if (jvSymOn) { jvSymOperand(v, undefined) }
+    var p = anytype
+    p = jvPrim(v, "number")
+    if (typeof p == "string") { return jsnStrToNum(p) }
+    return p - 0
+}
+import "./js-num.js"
 
 // jsvToPrimitive: valueOf first, then toString.
 function jvToPrimitive(v, hint) {
@@ -821,7 +835,7 @@ function jvPrim(v, hint) {
 // jsvLooseEq: the abstract equality comparison.
 function jvLooseEq(a, b) {
     if (typeof a != "object") {
-        if (typeof b != "object") { return a == b }   // see js_jsadd's fast path
+        if (typeof b != "object") { return jvLooseEqPrim(a, b) }   // see js_jsadd's fast path
     }
     if (jbIsBig(a) || jbIsBig(b)) { return jbEq(jvPrim(a, "default"), jvPrim(b, "default")) }
     if (jvUndefOrNull(a) || jvUndefOrNull(b)) {
@@ -844,9 +858,28 @@ function jvLooseEq(a, b) {
     return a == b
 }
 
+// == over two primitives. A string against a number or a boolean compares as
+// numbers by StringToNumber, which the floor's == does not know ("0x10" == 16).
+function jvLooseEqPrim(a, b) {
+    var sa = typeof a == "string"
+    if (sa == (typeof b == "string")) { return a == b }
+    var o = anytype
+    o = sa ? b : a
+    if (typeof o != "number" && typeof o != "boolean") { return a == b }
+    return jvToNumber(a) === jvToNumber(b)
+}
+
 // jsCompare over two PRIMITIVES: -1 / 0 / 1, and 2 when a NaN was involved (every
 // relation is then false).
 function jvCmpPrim(a, b) {
+    if (typeof a == "number") {
+        if (typeof b == "number") {
+            if (a < b) { return -1 }
+            if (a > b) { return 1 }
+            if (a === b) { return 0 }
+            return 2
+        }
+    }
     if (typeof a == "string") {
         if (typeof b == "string") {
             if (a < b) { return -1 }
@@ -4937,6 +4970,12 @@ function js_jsnumberfn() {
     return jvNumberFn
 }
 
+// The parseFloat global: JavaScript's (lib/js-num.js), declared into the program
+// scope like Number. Twin in abnf/jsrtjsbig.go.
+function js_jsparsefloatfn() {
+    return function (v) { return jsnParseFloat(jvStr(v)) }
+}
+
 // Unary '+' is the ONE operator a BigInt refuses outright: there is no number
 // to coerce it to without losing precision.
 function js_jstonumber(v) {
@@ -4944,7 +4983,7 @@ function js_jstonumber(v) {
         if (jbIsBig(v)) { jbRaise("TypeError: Cannot convert a BigInt value to a number") }
         if (jvSymOn) { jvSymOperand(v, undefined) }
     }
-    return v - 0
+    return jvToNumber(v)
 }
 
 // ++ and -- are ToNumeric-then-step: a BigInt stays a BigInt and steps by 1n,
@@ -4956,7 +4995,7 @@ function js_jstonumeric(v) {
         if (jbIsBig(v)) { return v }
         if (jvSymOn) { jvSymOperand(v, undefined) }
     }
-    return v - 0
+    return jvToNumber(v)
 }
 
 function js_jsstep(v, d) {
@@ -4971,13 +5010,14 @@ function js_jsbnot(a) {
         if (jbIsBig(a)) { return jbNotB(a) }
         if (jvSymOn) { jvSymOperand(a, undefined) }
     }
-    return ~a
+    return ~jvToNumber(a)
 }
 
 // The binary arithmetic and bitwise operators. The NON-BigInt arm of each is
 // the plain MetaJS operator, which compiles to the C floor's own extern -
-// `return a * b` IS js_mul - so a program with no BigInt in it gets exactly the
-// plain operator's answer.
+// `a * b` IS js_mul. An operand that is not a number goes through jvToNumber
+// first, left side first, since the floor converts objects and strings
+// differently from JavaScript.
 
 function js_jssub(a, b) {
     if (jbStrict) {
@@ -4985,7 +5025,10 @@ function js_jssub(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a - b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a - b }
+    }
+    return jvToNumber(a) - jvToNumber(b)
 }
 
 function js_jsmul(a, b) {
@@ -4994,7 +5037,10 @@ function js_jsmul(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a * b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a * b }
+    }
+    return jvToNumber(a) * jvToNumber(b)
 }
 
 function js_jsdiv(a, b) {
@@ -5003,7 +5049,10 @@ function js_jsdiv(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a / b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a / b }
+    }
+    return jvToNumber(a) / jvToNumber(b)
 }
 
 function js_jsmod(a, b) {
@@ -5012,7 +5061,10 @@ function js_jsmod(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a % b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a % b }
+    }
+    return jvToNumber(a) % jvToNumber(b)
 }
 
 function js_jsband(a, b) {
@@ -5021,7 +5073,10 @@ function js_jsband(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a & b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a & b }
+    }
+    return jvToNumber(a) & jvToNumber(b)
 }
 
 function js_jsbor(a, b) {
@@ -5030,7 +5085,10 @@ function js_jsbor(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a | b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a | b }
+    }
+    return jvToNumber(a) | jvToNumber(b)
 }
 
 function js_jsbxor(a, b) {
@@ -5039,7 +5097,10 @@ function js_jsbxor(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a ^ b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a ^ b }
+    }
+    return jvToNumber(a) ^ jvToNumber(b)
 }
 
 function js_jsshl(a, b) {
@@ -5048,7 +5109,10 @@ function js_jsshl(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a << b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a << b }
+    }
+    return jvToNumber(a) << jvToNumber(b)
 }
 
 function js_jsshr(a, b) {
@@ -5057,7 +5121,10 @@ function js_jsshr(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a >> b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a >> b }
+    }
+    return jvToNumber(a) >> jvToNumber(b)
 }
 
 function js_jsushr(a, b) {
@@ -5066,7 +5133,10 @@ function js_jsushr(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return a >>> b
+    if (typeof a == "number") {
+        if (typeof b == "number") { return a >>> b }
+    }
+    return jvToNumber(a) >>> jvToNumber(b)
 }
 
 // '**' has no shared external. Its double arm is JavaScript's Math.pow over ToNumber.
@@ -5076,7 +5146,7 @@ function js_jspow(a, b) {
         if (r !== jbMiss) { return r }
         if (jvSymOn) { jvSymOperand(a, b) }
     }
-    return jvPow(a - 0, b - 0)
+    return jvPow(jvToNumber(a), jvToNumber(b))
 }
 // ECMAScript's Number::exponentiate over the floor's C99 pow: a NaN exponent is NaN
 // even for base 1, and (+-1) ** (+-Infinity) is NaN. y - y is NaN exactly for an
@@ -5088,15 +5158,34 @@ function jvPow(x, y) {
 }
 // The program's Math global: the shared Math object's members with pow replaced by
 // jvPow. Twin of js_jsmath in abnf/jsrtjsbig.go.
+// A Math member over the floor's, with every argument converted by ToNumber first:
+// the floor's own conversion reads an object as NaN, and its ToInt32 makes that 0.
+function jvMathArgs(f) {
+    return function () {
+        var args = []
+        var i = 0
+        while (i < arguments.length) {
+            var x = anytype
+            x = arguments[i]
+            args.push(jvToNumber(x))
+            i = i + 1
+        }
+        return f.apply(undefined, args)
+    }
+}
+
 function js_jsmath(src) {
     var o = {}
     var h = {}
     var ks = keysOf(src)
     for (var i = 0; i < ks.length; i++) {
-        o[ks[i]] = src[ks[i]]
+        var mv = anytype
+        mv = src[ks[i]]
+        if (jvIsCallable(mv)) { mv = jvMathArgs(mv) }
+        o[ks[i]] = mv
         h[ks[i]] = true
     }
-    o["pow"] = function (x, y) { return jvPow(x - 0, y - 0) }
+    o["pow"] = function (x, y) { return jvPow(jvToNumber(x), jvToNumber(y)) }
     o["__strtag"] = "Math"
     h["pow"] = true
     jvMathObj = o

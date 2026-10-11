@@ -2219,6 +2219,7 @@ NotFuncHead = :script(~~
     // JSON.stringify / JSON.parse, shared with layer 2 (abnf/jsrtjson.go is the Go twin);
     // the jsonH* hooks it calls are defined beside jsJsonObj below.
     include("lib/json.js")
+    include("lib/js-num.js")
     // The callee text of "X is not a function" (sitePrimaryText / siteIndexText).
     include("lib/js-callee.js")
 
@@ -2451,6 +2452,8 @@ NotFuncHead = :script(~~
             }
             return false
         }
+        // A string against a number or a boolean compares as numbers.
+        if ((typeof a == "string") != (typeof b == "string")) { return jsToNum(a) === jsToNum(b) }
         return a == b
     }
     // ToBoolean. Only a BigInt needs help: it is a record, so the host engine calls
@@ -3598,15 +3601,21 @@ NotFuncHead = :script(~~
     function jsNumberFn(v) {
         if (arguments.length == 0) { return 0 }
         if (isBigInt(v)) { return biToNum(v) }
-        if (typeof v == "string") { return v === "" ? 0 : parseFloat(v) }
-        if (typeof v == "boolean") { return v ? 1 : 0 }
-        if (v === null) { return 0 }
-        return v - 0
+        return jsToNum(v)
     }
 
     // See the twin of this comment in js-interpreter.abnf.
     var jsGlobalObj = {"__keys": []}
 
+    // A Math member over the host's, with every argument converted by ToNumber
+    // first. Declared before the table below: -frozen hoists no function declaration.
+    function jsMathArgs(f) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(jsToNum(arguments[i])) }
+            return f.apply(undefined, args)
+        }
+    }
     // See the twin of this comment in js-interpreter.abnf.
     function jsPow(x, y) {
         if (y != y) { return y }
@@ -3622,9 +3631,12 @@ NotFuncHead = :script(~~
         "log1p", "log10", "log2", "max", "min", "random", "round", "sign", "sin", "sinh", "sqrt",
         "tan", "tanh", "trunc", "E", "LN10", "LN2", "LOG10E", "LOG2E", "PI", "SQRT1_2", "SQRT2"]
     for (var jmi = 0; jmi < jsMathNames.length; jmi++) {
-        if (Math[jsMathNames[jmi]] !== undefined) { jsMathObj[jsMathNames[jmi]] = Math[jsMathNames[jmi]] }
+        var jmv = anytype // A Math member: a function, or a constant.
+        jmv = Math[jsMathNames[jmi]]
+        if (typeof jmv == "function") { jmv = jsMathArgs(jmv) }
+        if (jmv !== undefined) { jsMathObj[jsMathNames[jmi]] = jmv }
     }
-    jsMathObj["pow"] = jsPow
+    jsMathObj["pow"] = function(x, y) { return jsPow(jsToNum(x), jsToNum(y)) }
 
     // See the twin of this comment in js-interpreter.abnf.
     var jsJsonObj = {
@@ -3671,7 +3683,7 @@ NotFuncHead = :script(~~
         // println / print render every argument with JAVASCRIPT's ToString first (the
         // shared host functions print Go's %v). js_jsprintfn is the compiler twin.
         "println": jsPrintln, "print": jsPrint, "printf": printf, "sprintf": sprintf,
-        "parseInt": parseInt, "parseFloat": parseFloat, "Math": jsMathObj, "String": jsStringFn,
+        "parseInt": parseInt, "parseFloat": function(v) { return jsnParseFloat(jsStr(v)) }, "Math": jsMathObj, "String": jsStringFn,
         // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
         // back out of a BigInt, since unary '+' refuses it.
         "BigInt": jsBigIntFn, "Number": jsNumberFn,
@@ -4547,8 +4559,7 @@ NotFuncHead = :script(~~
             var v = anytype // A number or a BigInt.
             v = t()
             if (isBigInt(v)) { return biNeg(v) }
-            if (typeof v == "object") { v = jsNumPrim(v) }
-            return -v
+            return -jsToNum(v)
         }
     }
     // See the twin of this comment in js-interpreter.abnf.
@@ -4557,8 +4568,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { biRaise("TypeError: Cannot convert a BigInt value to a number") }
-            if (typeof v == "object") { v = jsNumPrim(v) }
-            return v - 0
+            return jsToNum(v)
         }
     }
     function makeBitNot(t) {
@@ -4566,8 +4576,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { return biNot(v) }
-            if (typeof v == "object") { v = jsNumPrim(v) }
-            return ~v
+            return ~jsToNum(v)
         }
     }
     // 'void x' evaluates its operand for the side effects and yields undefined.
@@ -5626,7 +5635,7 @@ NotFuncHead = :script(~~
                 var l = anytype
                 l = items[i]()
                 if (isBigInt(l) || isBigInt(v)) { v = biBinOp("**", l, v).v }
-                else { v = jsPow(l, v) }
+                else { v = jsPow(jsToNum(l), jsToNum(v)) }
             }
             return v
         }
@@ -7581,6 +7590,13 @@ NotFuncHead = :script(~~
         // The arithmetic arms sit BELOW the BigInt dispatch: a BigInt is a record to the
         // host engine, so a '+' fast path in front of it would spell 1n + 1 "[object Object]1".
         if (op == "+") return l + r
+        // A string operand of an arithmetic, bitwise or relational operator (unless
+        // both sides of a relation are strings) is read by StringToNumber.
+        if (typeof l == "string" || typeof r == "string") {
+            if (op != "===" && op != "!==" && !(typeof l == "string" && typeof r == "string")) {
+                return binOp(op, jsToNum(l), jsToNum(r))
+            }
+        }
         if (op == "-") return l - r
         if (op == "*") return l * r
         if (op == "/") return l / r
@@ -7945,11 +7961,12 @@ NotFuncHead = :script(~~
             if (br != null) { return br.v }
         }
         if (op == "+=") return a + b
+        if (typeof a == "string" || typeof b == "string") { return applyOp(op, jsToNum(a), jsToNum(b)) }
         if (op == "-=") return a - b
         if (op == "*=") return a * b
         if (op == "/=") return a / b
         if (op == "%=") return a % b
-        if (op == "**=") return jsPow(a, b)
+        if (op == "**=") return jsPow(jsToNum(a), jsToNum(b))
         if (op == "<<=") return a << b
         if (op == ">>=") return a >> b
         if (op == ">>>=") return a >>> b
@@ -8070,14 +8087,21 @@ NotFuncHead = :script(~~
     // the +1 / -1 that ++ and -- perform, in whichever of the two types it got.
     function jsToNumeric(v) {
         if (isBigInt(v)) { return v }
-        if (typeof v == "object") { return jsNumPrim(v) - 0 }
-        return v - 0
+        return jsToNum(v)
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsNumPrim(v) {
         if (jsIsSym(v)) { jsSymConvErr(false) }
         if (jsIsObjLike(v)) { return jsToPrim(v, "number") }
         return v
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsToNum(v) {
+        if (typeof v == "number") { return v }
+        if (typeof v == "string") { return jsnStrToNum(v) }
+        if (isBigInt(v)) { return 0 / 0 }
+        if (typeof v == "object" && v !== null) { return jsToNum(jsNumPrim(v)) }
+        return v - 0
     }
     function jsStep(v, delta) {
         if (isBigInt(v)) { return biAdd(v, biFromNum(delta)) }

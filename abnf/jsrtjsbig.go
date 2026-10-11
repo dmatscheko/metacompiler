@@ -31,6 +31,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 )
 
 // bigOf answers v as a *big.Int when it is a BigInt.
@@ -331,16 +332,24 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 
 	// binary(name, base, op) registers `name` as `op` with the BigInt rules in front
 	// of the extern `base`. A symbol operand is ToNumber's TypeError.
+	// An operand that is not a number goes through ToNumber first (rt.jsvToNum): the
+	// shared operator's own conversion knows neither ToPrimitive nor StringToNumber.
 	binary := func(name, baseName, op string) {
 		base := m[baseName]
 		m[name] = func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
 			if strict {
-				if r, ok := rt.bigBinary(op, u(a[0]), u(a[1])); ok {
-					return w(r)
+				if res, ok := rt.bigBinary(op, l, r); ok {
+					return w(res)
 				}
 			}
-			rt.jsvSymOperand(u(a[0]), u(a[1]))
-			return base(a)
+			_, lf := l.(float64)
+			_, rf := r.(float64)
+			if lf && rf {
+				return base(a)
+			}
+			rt.jsvSymOperand(l, r)
+			return base([]uint64{rt.wrapNum(rt.jsvToNum(l)), rt.wrapNum(rt.jsvToNum(r))})
 		}
 	}
 	binary("js_jssub", "js_sub", "-")
@@ -385,7 +394,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		rt.jsvSymOperand(u(a[0]), u(a[1]))
-		return rt.wrapNum(jsPowD(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
+		return rt.wrapNum(jsPowD(rt.jsvToNum(u(a[0])), rt.jsvToNum(u(a[1]))))
 	}
 	// The program's Math global: the shared Math object's members, copied in order,
 	// with pow replaced by the ECMAScript one. The shared object stays C99's pow for the
@@ -404,8 +413,14 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		o.props["__strtag"] = "Math"
+		// Every member converts its arguments with JavaScript's ToNumber first.
+		for k, v := range o.props {
+			if f, ok := v.(*hostFunc); ok {
+				o.props[k] = rt.jsvNumArgs(f)
+			}
+		}
 		o.props["pow"] = jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jsPowD(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+			return jsPowD(rt.jsvToNum(argAt(args, 0)), rt.jsvToNum(argAt(args, 1)))
 		})
 		return w(o)
 	}
@@ -420,12 +435,11 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		rt.jsvSymOperand(u(a[0]), nil)
-		return baseBxor([]uint64{a[0], rt.wrapNum(-1)})
+		return baseBxor([]uint64{rt.wrapNum(rt.jsvToNum(u(a[0]))), rt.wrapNum(-1)})
 	}
 
 	// Unary '+' is the ONE operator a BigInt refuses outright: there is no number to
 	// coerce it to without losing precision.
-	baseToNum := m["js_tonum"]
 	m["js_jstonumber"] = func(a []uint64) uint64 {
 		if strict {
 			if _, ok := bigOf(u(a[0])); ok {
@@ -433,7 +447,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		rt.jsvSymOperand(u(a[0]), nil)
-		return baseToNum(a)
+		return rt.wrapNum(rt.jsvToNum(u(a[0])))
 	}
 
 	// ++ and -- are ToNumeric-then-step: a BigInt stays a BigInt and steps by 1n,
@@ -447,14 +461,21 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		rt.jsvSymOperand(u(a[0]), nil)
-		return baseToNum(a)
+		return rt.wrapNum(rt.jsvToNum(u(a[0])))
 	}
 	// Unary '-': the shared js_neg, which knows a BigInt, after the symbol test.
 	// Twin of js_jsneg in languages/lib/js-rt.metajs.
 	baseNeg := m["js_neg"]
 	m["js_jsneg"] = func(a []uint64) uint64 {
-		rt.jsvSymOperand(u(a[0]), nil)
-		return baseNeg(a)
+		v := u(a[0])
+		rt.jsvSymOperand(v, nil)
+		if _, ok := v.(float64); ok {
+			return baseNeg(a)
+		}
+		if _, ok := bigOf(v); ok {
+			return baseNeg(a)
+		}
+		return baseNeg([]uint64{rt.wrapNum(rt.jsvToNum(v))})
 	}
 	m["js_jsstep"] = func(a []uint64) uint64 {
 		if strict {
@@ -520,7 +541,13 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			if x, ok := bigOf(args[0]); ok {
 				return bigToFloat(x)
 			}
-			return rt.toNumber(args[0])
+			return rt.jsvToNum(args[0])
+		}))
+	}
+	// The parseFloat global: JavaScript's, not the shared host function's.
+	m["js_jsparsefloatfn"] = func(a []uint64) uint64 {
+		return w(jsHostFunc("parseFloat", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsParseFloatJS(rt.jsvString(argAt(args, 0)))
 		}))
 	}
 }
@@ -555,4 +582,181 @@ func jsPowD(x, y float64) float64 {
 		return math.NaN()
 	}
 	return crPow(x, y)
+}
+
+// jsvToNum is JavaScript's ToNumber: an object through ToPrimitive with hint number,
+// a string through StringToNumber, everything else through the shared conversion.
+// A BigInt reached here (a valueOf answering one) reads NaN, as the shared conversion
+// does; the operators settle a BigInt operand before they ask.
+func (rt *jsrt) jsvToNum(v interface{}) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case string:
+		return jsStrToNum(t)
+	case *jsObject, *jsArray:
+		if _, ok := bigOf(v); ok {
+			return math.NaN()
+		}
+		rt.jsvSymOperand(v, nil)
+		return rt.jsvToNum(rt.jsvToPrimitive(v, "number"))
+	}
+	return rt.toNumber(v)
+}
+
+// jsvNumArgs wraps a Math member so that its arguments reach it as numbers.
+func (rt *jsrt) jsvNumArgs(f *hostFunc) *hostFunc {
+	return jsHostFunc(f.name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		conv := make([]interface{}, len(args))
+		for i, x := range args {
+			conv[i] = rt.jsvToNum(x)
+		}
+		return f.fn(rt, this, conv)
+	})
+}
+
+// jsIsWsJS is WhiteSpace or LineTerminator (ES2023 12.2, 12.3). Twin of jsnIsWs in
+// languages/lib/js-num.js.
+func jsIsWsJS(c uint16) bool {
+	switch {
+	case c == 32 || (c >= 9 && c <= 13) || c == 160 || c == 5760 || c == 8232 || c == 8233:
+		return true
+	case c >= 8192 && c <= 8202:
+		return true
+	}
+	return c == 8239 || c == 8287 || c == 12288 || c == 65279
+}
+
+func jsDigitValJS(c uint16) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'z':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'Z':
+		return int(c-'A') + 10
+	}
+	return 99
+}
+
+// jsDecLenJS is the length of the longest StrUnsignedDecimalLiteral at u[i:]. Twin of
+// jsnDecLen in languages/lib/js-num.js.
+func jsDecLenJS(u []uint16, i int) int {
+	if i+8 <= len(u) && string(utf16.Decode(u[i:i+8])) == "Infinity" {
+		return 8
+	}
+	j, nd := i, 0
+	for j < len(u) && jsDigitValJS(u[j]) < 10 {
+		j++
+		nd++
+	}
+	if j < len(u) && u[j] == '.' {
+		k := j + 1
+		for k < len(u) && jsDigitValJS(u[k]) < 10 {
+			k++
+			nd++
+		}
+		if nd == 0 {
+			return 0
+		}
+		j = k
+	}
+	if nd == 0 {
+		return 0
+	}
+	if j < len(u) && (u[j] == 'e' || u[j] == 'E') {
+		e := j + 1
+		if e < len(u) && (u[e] == '+' || u[e] == '-') {
+			e++
+		}
+		ed := e
+		for ed < len(u) && jsDigitValJS(u[ed]) < 10 {
+			ed++
+		}
+		if ed > e {
+			j = ed
+		}
+	}
+	return j - i
+}
+
+// jsDecValJS is the value of a validated, possibly signed decimal literal.
+func jsDecValJS(t string) float64 {
+	neg := strings.HasPrefix(t, "-")
+	body := strings.TrimLeft(t, "+-")
+	v := math.Inf(1)
+	if body != "Infinity" {
+		v, _ = strconv.ParseFloat(body, 64) // "1e400" is +Inf with ErrRange: the value is right
+	}
+	if neg {
+		return -v
+	}
+	return v
+}
+
+// jsStrToNum is StringToNumber (ES2023 7.1.4.1.1). Twin of jsnStrToNum in
+// languages/lib/js-num.js.
+func jsStrToNum(s string) float64 {
+	u := utf16.Encode([]rune(s))
+	i, j := 0, len(u)
+	for i < j && jsIsWsJS(u[i]) {
+		i++
+	}
+	for j > i && jsIsWsJS(u[j-1]) {
+		j--
+	}
+	if i == j {
+		return 0
+	}
+	t := u[i:j]
+	if len(t) > 2 && t[0] == '0' {
+		radix := 0
+		switch t[1] {
+		case 'x', 'X':
+			radix = 16
+		case 'o', 'O':
+			radix = 8
+		case 'b', 'B':
+			radix = 2
+		}
+		if radix > 0 {
+			v := 0.0
+			for _, c := range t[2:] {
+				d := jsDigitValJS(c)
+				if d >= radix {
+					return math.NaN()
+				}
+				v = v*float64(radix) + float64(d)
+			}
+			return v
+		}
+	}
+	at := 0
+	if t[0] == '+' || t[0] == '-' {
+		at = 1
+	}
+	n := jsDecLenJS(t, at)
+	if n == 0 || at+n != len(t) {
+		return math.NaN()
+	}
+	return jsDecValJS(string(utf16.Decode(t)))
+}
+
+// jsParseFloatJS is the global parseFloat (ES2023 19.2.4). Twin of jsnParseFloat in
+// languages/lib/js-num.js.
+func jsParseFloatJS(s string) float64 {
+	u := utf16.Encode([]rune(s))
+	i := 0
+	for i < len(u) && jsIsWsJS(u[i]) {
+		i++
+	}
+	at := i
+	if at < len(u) && (u[at] == '+' || u[at] == '-') {
+		at++
+	}
+	n := jsDecLenJS(u, at)
+	if n == 0 {
+		return math.NaN()
+	}
+	return jsDecValJS(string(utf16.Decode(u[i : at+n])))
 }

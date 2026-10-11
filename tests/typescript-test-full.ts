@@ -3510,6 +3510,25 @@ function s68() {
         err(() => ({}) instanceof ({ [Symbol.hasInstance]: bad[0] } as any)) === "TypeError: number 1 is not a function");
 }
 
+// ===== SECTION 69: ToNumber of an object and of a string =====
+// The numeric operators, Number(), the Math members and isNaN convert an object with
+// ToPrimitive (hint number) and a string with StringToNumber (white space trimmed,
+// 0x / 0o / 0b, a decimal literal or Infinity, else NaN); == and < read a string
+// against a number the same way, and parseFloat takes the longest decimal prefix.
+// Values read off node 24.
+class TP69 { [Symbol.toPrimitive](h: string): any { return h === "number" ? 7 : "TP"; } }
+function s69() {
+    const ov: any[] = [{ valueOf() { return 5; } }, new TP69(), [5], ["0x10"]];
+    const conv = (o: any): string => { let p = o; p++; return [+o, -o, o * 2, o - 1, o % 3, o ** 2, o | 0, ~o, p, Number(o), Math.max(o, 1), isNaN(o)].join(" "); };
+    check("tn69a", ov.map(conv).join("|") ===
+        "5 -5 10 4 2 25 5 -6 6 5 5 false|7 -7 14 6 1 49 7 -8 8 7 7 false|5 -5 10 4 2 25 5 -6 6 5 5 false|16 -16 32 15 1 256 16 -17 17 16 16 false");
+    const sv: any[] = ["0x10", " 0b11 ", "1_0", "inf", "Infinity", "1e400", " 12﻿", "0x", "", "12px"];
+    const e: any[] = [sv[0], true, "1", 16];
+    check("tn69b", sv.map((s) => Number(s)).join() === "16,3,NaN,NaN,Infinity,Infinity,12,NaN,0,NaN" &&
+        sv.map((s) => s - 0).join() === sv.map((s) => Number(s)).join() && e[0] == e[3] && e[1] == e[2] && e[0] > 15 &&
+        ["Infinity", "  +1.5e3abc", "e5", "0x10"].map((s) => parseFloat(s)).join() === "Infinity,1500,NaN,0");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3581,6 +3600,7 @@ function main(): number {
     s66(); // SECTION-CALL 66
     s67(); // SECTION-CALL 67
     s68(); // SECTION-CALL 68
+    s69(); // SECTION-CALL 69
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -971,9 +971,12 @@ lua-rt.metajs             <- imports lua-strlib.js and runtime.metajs ONLY
 lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns and
                              string.format; Go twins: abnf/jsrtluastr.go,
                              abnf/jsrtluafmt.go)
-js-rt.metajs              <- imports regex.js and json.js ONLY
+js-rt.metajs              <- imports regex.js, json.js and js-num.js ONLY
 json.js                   <- js-rt.metajs, js and typescript interpreters
                              (Go twin: abnf/jsrtjson.go)
+js-num.js                 <- js-rt.metajs, js and typescript interpreters
+                             (StringToNumber and parseFloat; Go twin:
+                             jsStrToNum / jsParseFloatJS in abnf/jsrtjsbig.go)
 go-fmt.js                 <- go-rt.metajs, go interpreter (fmt.Sprintf; Go twin:
                              gopFormat in abnf/jsrtgolang.go)
 fdlibm.js                 <- java-rt.metajs, java interpreter, kotlin-rt.metajs,

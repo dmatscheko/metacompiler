@@ -523,6 +523,17 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 	if bo {
 		return rt.jsvLooseEq(a, rt.jsvToPrimitive(b, "default"))
 	}
+	// A string against a number or a boolean compares as numbers, by StringToNumber.
+	_, as := a.(string)
+	_, bs := b.(string)
+	if as != bs {
+		if _, ok := bigOf(a); !ok {
+			if _, ok := bigOf(b); !ok {
+				x, y := rt.jsvToNum(a), rt.jsvToNum(b)
+				return x == y
+			}
+		}
+	}
 	return rt.looseEq(a, b)
 }
 
@@ -530,7 +541,18 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 // the shared numeric/string ordering (2 means "NaN was involved", every relation false).
 func (rt *jsrt) jsvCompare(a, b interface{}) int {
 	rt.jsvSymOperand(a, b)
-	return rt.jsCompare(rt.jsvToPrimitive(a, "number"), rt.jsvToPrimitive(b, "number"))
+	pa, pb := rt.jsvToPrimitive(a, "number"), rt.jsvToPrimitive(b, "number")
+	// Unless both sides are strings, a string side is read by StringToNumber.
+	sa, as := pa.(string)
+	sb, bs := pb.(string)
+	if as != bs {
+		if as {
+			pa = jsStrToNum(sa)
+		} else {
+			pb = jsStrToNum(sb)
+		}
+	}
+	return rt.jsCompare(pa, pb)
 }
 
 // ============================================================================

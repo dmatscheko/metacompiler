@@ -1770,6 +1770,33 @@ function s77() {
         "" + { [Symbol.toPrimitive]: undefined } === "[object Object]")
 }
 
+// ===== SECTION 78: ToNumber of an object and of a string =====
+// Every numeric operator, Number(), the Math members, isNaN and ++ convert an object
+// with ToPrimitive (hint number: [Symbol.toPrimitive], else valueOf, else toString)
+// and a string with StringToNumber: white space trimmed, "" is 0, an unsigned
+// 0x / 0o / 0b integer, a signed decimal literal or Infinity, anything else NaN.
+// == and the relational operators read a string against a number the same way;
+// parseFloat takes the longest decimal prefix. Values read off node 24.
+function s78() {
+    class TP { [Symbol.toPrimitive](h) { return h === "number" ? 7 : "TP" } }
+    const ov = [{ valueOf() { return 5 } }, new TP(), [5], [], {}, ["0x10"]]
+    const conv = (o) => { let p = o; p++; let q = o; q -= 1; return [+o, -o, o * 2, o - 1, o / 2, o % 3, o ** 2, o | 0, o << 1, ~o, o >>> 0, p, q, Number(o), Math.max(o, 1), Math.floor(o), isNaN(o), o < 6].join(" ") }
+    check("tn78a", ov.map(conv).join("|") ===
+        "5 -5 10 4 2.5 2 25 5 10 -6 5 6 4 5 5 5 false true|7 -7 14 6 3.5 1 49 7 14 -8 7 8 6 7 7 7 false false|" +
+        "5 -5 10 4 2.5 2 25 5 10 -6 5 6 4 5 5 5 false true|0 0 0 -1 0 0 0 0 0 -1 0 1 -1 0 1 0 false true|" +
+        "NaN NaN NaN NaN NaN NaN NaN 0 0 -1 0 NaN NaN NaN NaN NaN true false|16 -16 32 15 8 1 256 16 32 -17 16 17 15 16 16 16 false false")
+    const sv = ["0x10", " 0b11 ", "0o17", "0X1f", "-0x10", "1_0", "inf", "Infinity", "-Infinity", "1e400", " 12﻿", "0x", "1e", ".", "+.5e1", "", " ", "12px", "5."]
+    check("tn78b", sv.map((s) => Number(s)).join() === "16,3,15,31,NaN,NaN,NaN,Infinity,-Infinity,Infinity,12,NaN,NaN,NaN,5,0,0,NaN,5" &&
+        sv.map((s) => s * 1).join() === sv.map((s) => +s).join() && sv.map((s) => s | 0).join() === "16,3,15,31,0,0,0,0,0,0,12,0,0,0,5,0,0,0,5" &&
+        sv.map(isNaN).join() === sv.map((s) => Number(s) !== Number(s)).join())
+    const e = [sv[0], true, "1", "0x0", 16]
+    check("tn78c", e[0] == 16 && 16 == e[0] && e[1] == e[2] && !(e[1] == e[3]) && "10" < "9" && !("10" < 9) && e[0] > 15 && e[0] <= e[4] &&
+        Math.min(e[0], ov[0]) === 5 && Math.imul(ov[0], 2) === 10 && Math.clz32(ov[0]) === 29 && Math.hypot(ov[0], "12") === 13)
+    const pf = ["Infinity", "-Infinityx", "  +1.5e3abc", "-.5", "e5", "1e400", "  7", "1e", "0x10", ".e1"]
+    check("pf78d", pf.map((s) => parseFloat(s)).join() === "Infinity,-Infinity,1500,-0.5,NaN,Infinity,7,1,0,NaN" &&
+        parseFloat({ toString() { return "3.5" } }) === 3.5 && Object.is(parseFloat("-0"), -0))
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1805,6 +1832,7 @@ function main() {
     s75() // SECTION-CALL 75
     s76() // SECTION-CALL 76
     s77() // SECTION-CALL 77
+    s78() // SECTION-CALL 78
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
