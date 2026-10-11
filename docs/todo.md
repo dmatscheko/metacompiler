@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-414** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-416** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -94,6 +94,14 @@ digits and its switch to exponent notation may not be the fixed window `csFloStr
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
 
+### T-414 csharp/dart: static field named Count; generic statics; target-typed default; function-typed fields · P1 · CS + DA · IN PROGRESS (CS+DA worker, round 19) [V spec-only]
+C#: `class G { public static int Count; } G.Count = 3;` - interpreter prints empty,
+compiler "Length/Count of a object" (C# 3). Gen<int>.N and Gen<long>.N share one
+variable (types erased; C# keeps them separate per closed type). `0 == default` is
+False (C# True: target-typed default). Dart: `class K { final int Function() cb; … }
+K(() => 3).cb()` "unknown method 'cb'" in both engines (Dart 3; common in Flutter:
+`widget.onTap()`).
+
 ---
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
@@ -134,6 +142,16 @@ ignore an exponent and leading whitespace: `"1.5e3abc"+0` 1.5 (PHP 1500.0), `"12
 names a different link than PHP (P3). Native php costs ~180k instructions and ~25 KB
 per simple loop iteration / call (P3 perf).
 
+### T-415 php: error cases and precedence from the php-src corpus · P2 · PHP · OPEN [V spec-only]
+A null method result written through `->` must throw Error "Attempt to assign property
+"a" on null" (bug52614; engines stop with an engine error). Reading `$x[]` in a by-value
+argument must raise "Cannot use [] for reading" (both recurse forever). Passing
+`$GLOBALS` by reference must raise "could not be passed by reference". `or`/`and` bind
+like `||` so `yield "a" or die` yields true (must yield "a"). Compiled: goto out of
+a try/finally loops forever (try bodies are separate IR closures; needs a goto control
+signal in the compile-core protocol). By-reference returns degrade to by-value
+(documented design).
+
 ---
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
@@ -172,19 +190,6 @@ commit (fdlibm import? hash code?) and recover it. Also: a class attribute bound
 None is lost (`class N: __hash__ = None; N.__hash__` AttributeError) so `__hash__ =
 None` is not honoured; `id()` missing; hasattr on type objects misses `__hash__`,
 `__lt__`, frozenset/bool/complex/set dunders; `hasattr(list, "__imul__")` False.
-
-### T-396 corpus long tails: csharp, php, dart, java · P3 · per language · IN PROGRESS (CORPUS worker, round 18) [V]
-Measured after round 13. csharp 78 fails (unsafe pointers 10, generic names as values 7,
-async/await 6, ref/out 6, switch-section labels 5, patterns 5, identifier escapes 5,
-array casts 5, interpolation spacing 4, initializers 3, tuples 2, ~17 singles). php 60
-+ 2 timeouts (`${expr}`/`global $$k` 4, call result as assignment target ~8, `=&` to
-calls 4, `(void)` 3, print/yield as expressions 6, enum edges 4, `__halt_compiler` 2,
-`b"` heredocs 2); the php compiler half also fails 4 files the interpreter parses and
-hangs on 3 try/finally files. dart 110 + 4 timeouts (54 multitests, patterns ~18,
-primary constructors 6, generic tear-offs 4, optional function-typed params 4, metadata
-4, dot shorthands 2). java: 6 javac-accepted files (type annotations in method refs,
-semantic-only errors, 2 timeouts); `case null, default:` in a colon switch does not
-parse in the compiler half.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -488,6 +493,7 @@ T-405 swift: lazy static lets; implicit members in sub-expressions — DONE a577
 T-407 php: method-name case across a parent chain; small library and runtime gaps — DONE 3ef2eb58 (overrides recorded at declaration; a per-call lower-case lookup measured +15.1%, not taken)
 T-410 swift: `Self` as a value; expected types through `==`, generics and receivers — DONE 9f3db72d (plus synthesized struct == and Array.contains)
 T-412 swift: inherited static/class methods compiled; a type parameter as a value; Set by context — DONE 08310e01 d75d7754
+T-396 corpus long tails: csharp, php, dart, java — DONE c1b3ed36..a629d763 (csharp 2674→2709, php 2692→2736, dart 3339→3371, java compiler 4329→4331; no must-parse lost). Remainder DECLINED by measured cluster: java 10 files javac itself rejects + 4 attribution-only; php reserved words as names, PHP 8.5 forms, constructs PHP rejects; csharp unsafe pointers (no pointer model), Mono prototype syntax, #if, identifier escapes; dart 53 unsplit multitests, unreleased primary constructors
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
