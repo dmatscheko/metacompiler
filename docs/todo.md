@@ -204,7 +204,7 @@ Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
 
-### T-283 kotlin: `toInt` and Unicode digits; hex-float precision · P3 · KT · OPEN [V]
+### T-283 kotlin: `toInt` and Unicode digits; hex-float precision · P3 · KT · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
 `"١٢".toInt()` is 12 in the jar, NFE here. A hex-float mantissa in toDouble is exact
 only to 53 bits in the interpreter and layer 2 (the Go twin uses strconv).
 
@@ -225,12 +225,12 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-267 go: `panic(any(nil))`, `any`, `fmt.Errorf` · P1 · GO · OPEN [V]
+### T-267 go: `panic(any(nil))`, `any`, `fmt.Errorf` · P1 · GO · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
 "unknown name: any", "unknown method 'Errorf'" in both halves. go prints `panic: nil`
 (go 1.21+ `panic called with nil argument`; check go run) and supports Errorf (with
 `%w`, errors.Is/As/Unwrap if cheap).
 
-### T-268 go: `gofmt -l abnf/` lists abnf/jsrtgolang.go · P3 · GO · OPEN [V]
+### T-268 go: `gofmt -l abnf/` lists abnf/jsrtgolang.go · P3 · GO · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
 One line in goConvFail; gofmt it.
 
 ---
@@ -253,7 +253,7 @@ limit); a Unicode.Scalar in a collection prints `"é"` (swiftc `"\u{00E9}"`).
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-282 dart: the String member surface is tiny · P1 · DA · OPEN [V spec-only]
+### T-282 dart: the String member surface is tiny · P1 · DA · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V spec-only]
 `"ab".toUpperCase()` (and `codeUnitAt`) aborts in all three engines ("unknown String method:
 toUpperCase"); only substring, indexOf, charAt, isEmpty are curated. Implement the
 dart:core String API (spec-only).
@@ -313,16 +313,16 @@ matrix row could now compare all three engines.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-278 bash: an assignment whose value starts with `=` · P1 · SH · OPEN [V]
+### T-278 bash: an assignment whose value starts with `=` · P1 · SH · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
 `x==y; echo "[$x]"` prints `[=y]` in bash; both engines "command not found: x==y"
 (exit 127): `AsgEq = "=" NotEq` in both grammars. Also `IFS==`.
 
-### T-279 bash: unquoted `$*` / `${a[*]}` under a null IFS · P1 · SH · OPEN [V]
+### T-279 bash: unquoted `$*` / `${a[*]}` under a null IFS · P1 · SH · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
 `IFS=; set -- "a b" c "" d; printf '<%s>' $*` - bash `<a b><c><d>`, ours `<a bcd>`
 (all engines); `${a[*]@A}` likewise (bash 3 fields, ours 1). The [*] producer must
 know it is unquoted. Minor: quoted `"${a[@]@A}"` with a letter in IFS.
 
-### T-280 bash: `tests/probe.sh bash` - llvm.Run leg has an extra trailing blank line · P3 · SH · OPEN [V]
+### T-280 bash: `tests/probe.sh bash` - llvm.Run leg has an extra trailing blank line · P3 · SH · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
 `mec bash-to-llvm-ir.abnf -qq` prints nothing, `-q` prints a leading newline; the
 probe's run leg shows one extra blank line. Cosmetic, but it makes every bash probe
 read as a disagreement.
@@ -331,7 +331,7 @@ read as a disagreement.
 
 # C — C subset
 
-### T-281 c: `long` → `float` rounds twice · P3 · C · OPEN [V]
+### T-281 c: `long` → `float` rounds twice · P3 · C · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
 Via double in both engines, so a 64-bit value near a binary32 tie can differ from cc.
 Probe and round once.
 
