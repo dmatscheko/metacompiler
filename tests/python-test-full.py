@@ -3974,6 +3974,19 @@ def s72():
           ["<built-in method from_bytes of type object", "<built-in method fromhex of type object", "<built-in method fromkeys of type object", "<built-in method from_number of type object"]
           and float.from_number.__name__ == "from_number" and int.from_bytes.__self__ is int)
 
+# ===== SECTION 73: a lone surrogate is one code point =====
+# A high surrogate pairs only with a low one after it; before anything else it
+# is a character of its own, for len, indexing, ord, %c and a precision or
+# width. (A lone high and a lone low that end up ADJACENT are one pair in this
+# UTF-16 value model where CPython keeps two, so no row builds that.)
+def s73():
+    v = ["a\ud83db", "\ude00", "\ud83d\ud83d!", "\U0001F600x"]
+    t = v[0] + v[1]
+    check("lsur1", len(t) == 4 and ord(t[1]) == 55357 and ord(t[2]) == 98 and t[-1] == "\ude00" and len(v[2]) == 3)
+    check("lsur2", [ord(c) for c in t[1:3]] == [55357, 98] and t.find("b") == 2 and len(v[3]) == 2)
+    check("lsur3", [ord(c) for c in "%3s|%.1s|%c" % (v[2][0], v[0][1:], v[2][1])] == [32, 32, 55357, 124, 55357, 124, 55357])
+    check("lsur4", [ord(c) for c in "{:>3}|{:.1}|{:.1}".format(v[2][0], v[2], v[3])] == [32, 32, 55357, 124, 55357, 124, 128512])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4047,5 +4060,6 @@ def main():
     s70() # SECTION-CALL 70
     s71() # SECTION-CALL 71
     s72() # SECTION-CALL 72
+    s73() # SECTION-CALL 73
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

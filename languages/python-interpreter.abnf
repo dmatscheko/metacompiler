@@ -7512,7 +7512,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var numeric = false
         if (typ == "s" || typ == "r" || typ == "a") {
             body = (typ == "s") ? pstr(v) : prepr(v)
-            if (prec >= 0 && pyLen(body) > prec) { body = body.slice(0, prec) }
+            if (prec >= 0 && pyLen(body) > prec) { body = body.substring(0, pySCpUnit(body, prec)) }
         } else if (typ == "c") {
             body = pyPctChar(v)
         } else if (typ == "d" || typ == "i" || typ == "u") {
@@ -7846,11 +7846,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var v = n - 65536
         return String.fromCharCode(55296 + (v >> 10)) + String.fromCharCode(56320 + (v & 1023))
     }
+    // A high surrogate is one code point with the low surrogate after it, and a lone
+    // one (before any other unit) is a code point of its own, as CPython's lone
+    // surrogates are. Twin of pyStrLen in lib/python-rt.metajs and abnf/jsrt.go.
     function pyLen(s2) {
         var n = 0
         for (var i = 0; i < s2.length; i++) {
             var c1 = s2.charCodeAt(i)
-            if (c1 >= 55296 && c1 <= 56319 && i + 1 < s2.length) { i++ }
+            if (c1 >= 55296 && c1 <= 56319 && i + 1 < s2.length) {
+                var c2 = s2.charCodeAt(i + 1)
+                if (c2 >= 56320 && c2 <= 57343) { i++ }
+            }
             n++
         }
         return n

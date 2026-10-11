@@ -16596,11 +16596,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !isStr {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "ord() expected string of length 1, but "+pyTypeName(rt, v)+" found")})
 			}
-			if n := utf8.RuneCountInString(s); n != 1 {
+			// Counted and decoded on the UTF-16 units: a lone surrogate is one
+			// character, which the UTF-8 rune count would make three bytes.
+			if n := pyStrLen(rt, s); n != 1 {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "ord() expected a character, but string of length "+strconv.Itoa(n)+" found")})
 			}
-			r, _ := utf8.DecodeRuneInString(s)
-			return rt.wrapNum(float64(r))
+			c := rt.strCodeAt(s, 0)
+			if rt.strLen(s) == 2 {
+				c = 0x10000 + (c-0xD800)*1024 + (rt.strCodeAt(s, 1) - 0xDC00)
+			}
+			return rt.wrapNum(float64(c))
 		},
 		"js_pychr": func(a []uint64) uint64 {
 			v := u(a[0])
@@ -22302,7 +22307,7 @@ func (rt *jsrt) pyPctReal(v interface{}) float64 {
 // pyPctChar is %c: a one-character str, or an int naming a code point.
 func (rt *jsrt) pyPctChar(v interface{}) string {
 	if s, isStr := v.(string); isStr {
-		if n := utf8.RuneCountInString(s); n != 1 {
+		if n := pyStrLen(rt, s); n != 1 {
 			rt.pyPctTypeErr("%c requires an int or a unicode character, not a string of length " + strconv.Itoa(n))
 		}
 		return s
@@ -22351,10 +22356,7 @@ func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space, alt b
 			body = rt.pyRepr(v)
 		}
 		if prec >= 0 {
-			rs := []rune(body)
-			if len(rs) > prec {
-				body = string(rs[:prec])
-			}
+			body = pyStrHead(rt, body, prec)
 		}
 	case 'c':
 		body = rt.pyPctChar(v)
@@ -22400,7 +22402,7 @@ func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space, alt b
 			body = " " + body
 		}
 	}
-	pad := width - len([]rune(body))
+	pad := width - pyStrLen(rt, body)
 	if pad <= 0 {
 		return body
 	}
@@ -22750,8 +22752,8 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 		case group != "":
 			fail("ValueError", "Cannot specify '"+group+"' with 's'.")
 		}
-		if rs := []rune(xs); prec >= 0 && len(rs) > prec {
-			xs = string(rs[:prec])
+		if prec >= 0 {
+			xs = pyStrHead(rt, xs, prec)
 		}
 		if align == 0 {
 			align = '<'
@@ -22999,8 +23001,21 @@ func (rt *jsrt) pyFmtPad(fill string, align rune, width int, head, body string) 
 	return strings.Repeat(fill, pad) + head + body
 }
 
-// pyStrLen counts Unicode CODE POINTS: Python's len() of a string, where a
-// surrogate pair is one character. Only the Python grammars ask for this.
+// pyStrHead is the first n code points of s, all of s when it is not longer: a
+// precision's truncation. Counted on the UTF-16 units, where a []rune of a lone
+// surrogate's three bytes would count three.
+func pyStrHead(rt *jsrt, s string, n int) string {
+	cs := pyStrChars(rt, s)
+	if len(cs) <= n {
+		return s
+	}
+	var b strings.Builder
+	for _, c := range cs[:n] {
+		b.WriteString(c.(string))
+	}
+	return b.String()
+}
+
 // pyStrChars is a str as Python iterates it: one string per CODE POINT, so an
 // astral character is one element where the UTF-16 units make it two. Twin of
 // pySChars in lib/python-rt.metajs and python-interpreter.abnf.
@@ -23025,12 +23040,17 @@ func pyStrChars(rt *jsrt, s string) []interface{} {
 	return out
 }
 
+// pyStrLen counts Unicode CODE POINTS: Python's len() of a string, where a
+// surrogate pair is one character and a lone surrogate is one too. Only the
+// Python grammars ask for this. Twin of pyStrLen in lib/python-rt.metajs.
 func pyStrLen(rt *jsrt, s string) int {
 	n, unitN := 0, rt.strLen(s)
 	for i := 0; i < unitN; i++ {
 		c := rt.strCodeAt(s, i)
 		if c >= 0xD800 && c <= 0xDBFF && i+1 < unitN {
-			i++
+			if t := rt.strCodeAt(s, i+1); t >= 0xDC00 && t <= 0xDFFF {
+				i++
+			}
 		}
 		n++
 	}

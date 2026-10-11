@@ -552,16 +552,14 @@ function pyToStr(v) {
 }
 
 // pyStrLen counts CODE POINTS, as Python's len() does: an astral character is
-// one, where the UTF-16 units count two. byteLen equal to the unit count means
-// ASCII, where the two coincide without a scan.
+// one, where the UTF-16 units count two, and a lone surrogate is one. byteLen
+// equal to the unit count means ASCII, where the two coincide without a scan.
 function pyStrLen(s) {
     if (byteLen(s) == s.length) { return s.length }
     var n = 0
     var i = 0
     while (i < s.length) {
-        var c = s.charCodeAt(i)
-        if (c >= 55296 && c <= 56319 && i + 1 < s.length) { i = i + 1 }
-        i = i + 1
+        i = i + pySCPW(s, i)
         n = n + 1
     }
     return n
@@ -5270,9 +5268,7 @@ function pyStrSlice(s, n) {
     var k = 0
     var c = 0
     while (k < s.length && c < n) {
-        var ch = s.charCodeAt(k)
-        var w = 1
-        if (ch >= 55296 && ch <= 56319 && k + 1 < s.length) { w = 2 }
+        var w = pySCPW(s, k)
         out = out + s.substring(k, k + w)
         k = k + w
         c = c + 1
