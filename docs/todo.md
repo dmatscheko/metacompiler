@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-379** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-381** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,10 +66,6 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-367 python: a lone high surrogate before a non-surrogate is read as a pair · P1 · PY · IN PROGRESS (JS+PY+DA worker, round 9) [V]
-`t = "a\ud83db" + "\ude00"`: len 3 (CPython 4); natively `ord(t[1])` fails "ord()
-expected a character, but string of length 3". Both halves.
-
 ### T-377 python: NotImplemented; dunder fallbacks; round/shift edge cases · P1 · PY · IN PROGRESS (PY+KT worker, round 12) [V]
 `NotImplemented` is undefined (NameError). `int.__add__(5, 2.5)` / `int.__eq__(5, 5.0)`
 / `int.__lt__(5, 7.5)` answer values (CPython NotImplemented). `round(1e300)` prints
@@ -86,12 +82,19 @@ object at ...>`).
 
 # JS — JavaScript and TypeScript
 
-### T-369 js: `var` is block-scoped; for-of/in reuse an outer variable; symbol limits · P1 · JS · IN PROGRESS (JS+PY+DA worker, round 9) [V]
-`function t(){ if (true) { var w = 3 } return w }` raises ReferenceError (node 3); same
-for `{ var z }`, a for body, try. `var k=0; for (k of [5,6]){}; k` gives 0 (node 6);
-for-in likewise. Symbol limits: `"" + sym` gives "Symbol(k)" (node TypeError); object
-spread / Object.assign drop symbol keys; only iterator/asyncIterator are well-known;
-`[1][Symbol.iterator]` undefined.
+### T-379 ts: port var hoisting and symbol conversions to TypeScript · P1 · JS · IN PROGRESS (JS worker, round 10) [V]
+A live TS halves divergence: TS shares the Go twin and js-rt.ll, so TS compiled throws
+on `"" + sym` while the TS interpreter prints "Symbol(k)" (no test exercises it, so
+--cross stays 0). `function f(){ if(true){var w=3} return w }` throws in both TS halves
+(node 3). Port the js interpreter changes (DeclKw/var hoisting, for-in/of outer
+assignment, symbol ToString/ToNumber refusals, spread/assign of symbol keys) to both
+typescript grammars and assert them in typescript-test-full.ts.
+
+### T-380 js: string iteration by code point; Array values()/entries(); generator @@iterator · P1 · JS · IN PROGRESS (JS worker, round 10) [V]
+`[..."a\u{1F600}b"].length` is 4 (node 3) - for-of, spread, Array.from over a string
+iterate UTF-16 units in all engines. `[1,2].values()` / `.entries()` are not iterators
+("v.next is not a function"); a generator object has no [Symbol.iterator].
+Symbol.toPrimitive/hasInstance/toStringTag exist but are not consulted.
 
 ---
 
@@ -142,11 +145,6 @@ static types go-constfold.js now has to skip both where the type is known.
 ---
 
 # DA — Dart  (no dart here: spec-only)
-
-### T-368 dart: `List.join` · P1 · DA · IN PROGRESS (JS+PY+DA worker, round 9) [V spec-only]
-`[1,2].join(" ")`: "unknown List method: join" (interpreter) / "unknown list method
-'join'" (compiled). Sweep dart:core List's documented members (join, indexOf,
-contains, sublist, any/every, fold/reduce, sort, reversed, ...).
 
 ---
 
@@ -475,6 +473,9 @@ T-366 go: variadic calls build the slice object expensively — DONE cfe340c (5.
 T-370 go: runtime types where the static type is not tracked — PARTIAL ff7a8a2 (func %T, untyped &n, struct fields/channels/method params); (b)+(d) are T-375; (a) generic type parameters at run time (~300 lines, boxing T breaks generic arithmetic) and (e) pointer boxes at every interface store (~200 lines, high regression risk against the "&P{1} is P{1}" model) DECLINED
 T-374 python: number dunders; unknown methods on numbers abort — DONE 042fc703
 T-373 kotlin: Int ≠ Long at equality — DONE 9c4bdfd4 0cd6a242 (strict Int/Long equality after closing the literal sites: 0 assertions broke; remainder in T-378)
+T-368 dart: `List.join` — DONE 072de00a (spec-only)
+T-367 python: a lone high surrogate before a non-surrogate is read as a pair — DONE fa9fdcd8
+T-369 js: `var` is block-scoped; for-of/in reuse an outer variable; symbol limits — DONE b5390929 b4ec7662 d6a71e8a (js only; the TS port is T-379)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
