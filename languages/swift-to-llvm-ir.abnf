@@ -4202,6 +4202,29 @@ KwContinue  = "continue" KwEnd ;
             if (!uni) { oB.NewRet(callExt(oB, "js_pylen", [oV])) }
         })
     }
+    // The Collection property name (count, isEmpty, startIndex, endIndex, first,
+    // last) read off cur.
+    function emitCollProp(b, cur, name) {
+        if (name == "count") { return b.NewCall(rtSwCount(hasUniStr), [cur]) }
+        if (name == "isEmpty") { return b.NewCall(rtIsEmpty(), [cur]) }
+        if (name == "startIndex" || name == "endIndex") { return b.NewCall(rtBoundIdx(name == "endIndex"), [cur]) }
+        return b.NewCall(rtFirstLast(name == "last"), [cur])
+    }
+    // The same read in a program that declares a property of that name: a value
+    // of a program type (an instance, or a descriptor for a static) reads its own,
+    // anything else is a collection. Twin of the count/isEmpty/first/last arms of
+    // swGetField in swift-interpreter.abnf.
+    function rtUserProp(name) {
+        return rtFunc("sw_uprop_" + name, 1, function(b, ps) {
+            var ownB = curF.NewBlock("")
+            var c2 = curF.NewBlock("")
+            var collB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtClassOf(), [ps[0]])), ownB, c2)
+            c2.NewCondBr(truthy(c2, c2.NewCall(rtIsTypeVal(), [ps[0]])), ownB, collB)
+            ownB.NewRet(ownB.NewCall(rtGetProp(), [ps[0], emitStr(ownB, name)]))
+            collB.NewRet(emitCollProp(collB, ps[0], name))
+        })
+    }
     function rtCount() {
         return rtFunc("sw_count", 1, function(b, ps) {
             var isStr = callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "string")])
@@ -5042,10 +5065,10 @@ KwContinue  = "continue" KwEnd ;
     // through the generated __get_x method, everything else is a plain js_get. The
     // decision is by NAME, over the set of names some type in this program computes.
     function emitFieldRead(b, cur, name) {
-        if (name == "count") { return b.NewCall(rtSwCount(hasUniStr), [cur]) }
-        if (name == "isEmpty") { return b.NewCall(rtIsEmpty(), [cur]) }
-        if (name == "startIndex" || name == "endIndex") { return b.NewCall(rtBoundIdx(name == "endIndex"), [cur]) }
-        if (name == "first" || name == "last") { return b.NewCall(rtFirstLast(name == "last"), [cur]) }
+        if (name == "count" || name == "isEmpty" || name == "startIndex" || name == "endIndex" || name == "first" || name == "last") {
+            if (hasOwn(propTyReg, "$" + name)) { return b.NewCall(rtUserProp(name), [cur]) }
+            return emitCollProp(b, cur, name)
+        }
         if (name == "rawValue") { return callExt(b, "js_get", [cur, emitStr(b, "__raw")]) }
         var bt = builtinCompOf(name)
         if (bt != null) {

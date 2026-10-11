@@ -3392,6 +3392,28 @@ func s68() {
     check("dsub5", sw.s == "u6" && pick(true).n == 2 && pick(false).n == 10)
 }
 
+// ===== SECTION 69: a program property named like a Collection member =====
+// A type may declare its own count / first / last / isEmpty, stored, computed or
+// static; a value of that type reads its own, and a collection still answers.
+struct Bag69 {
+    var count = 2
+    var first = "f"
+    var isEmpty: Bool { return count == 0 }
+    mutating func add() { count += 1 }
+}
+class Box69 { static var count = 0; var last = 9; init() { Box69.count += 1 } }
+enum E69 { case a, b; var count: Int { return self == .a ? 1 : 2 } }
+func s69() {
+    var b = Bag69()
+    b.add()
+    check("cnt1", b.count == 3 && b.first == "f" && !b.isEmpty)
+    let x = Box69()
+    _ = Box69()
+    check("cnt2", Box69.count == 2 && x.last == 9 && E69.b.count == 2)
+    let xs = [Bag69(), Bag69()]
+    check("cnt3", xs.count == 2 && xs.map { $0.count } == [2, 2] && "héllo".count == 5 && [4, 5].last! == 5)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3461,6 +3483,7 @@ func main() {
     s66() // SECTION-CALL 66
     s67() // SECTION-CALL 67
     s68() // SECTION-CALL 68
+    s69() // SECTION-CALL 69
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -3500,7 +3500,10 @@ KwContinue  = "continue" KwEnd ;
         return wantLast ? arr[arr.length - 1] : arr[0]
     }
     function swGetField(o, name) {
-        if (name == "count") { return swlen(o) }
+        // A value of a program type (an instance, or a descriptor for a static)
+        // reads its own `count`; anything else is a collection. Twin of
+        // sw_uprop_count in swift-to-llvm-ir.abnf.
+        if (name == "count" && !(typeof o == "object" && o !== null && (o.__class != undefined || isTypeVal(o)))) { return swlen(o) }
         if (name == "isEmpty" && swIsColl(o)) { return swlen(o) == 0 }
         // indices is a PROPERTY on every Collection. Only an
         // Array is answered: a String's indices are String.Index values with no
