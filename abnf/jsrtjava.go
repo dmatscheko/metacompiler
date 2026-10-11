@@ -1965,8 +1965,14 @@ func jvOvAccepts(t string, v interface{}, phase int) bool {
 	if k == "String" {
 		return t == "String"
 	}
+	// A class token, or "#" + a declared interface's name; classIsNamed walks
+	// the interfaces too.
 	o, ok := v.(*jsObject)
-	return ok && jvClassIs(o.props["__class"], t)
+	if !ok {
+		return false
+	}
+	cls, _ := o.props["__class"].(*jsObject)
+	return classIsNamed(cls, strings.TrimPrefix(t, "#"))
 }
 
 // jvStaticOwner finds the class descriptor in cls' __super chain that carries

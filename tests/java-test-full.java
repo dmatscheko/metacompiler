@@ -98,6 +98,7 @@ class Main {
         S47.run(); // SECTION-CALL 47
         S48.run(); // SECTION-CALL 48
         S49.run(); // SECTION-CALL 49
+        S50.run(); // SECTION-CALL 50
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2820,5 +2821,51 @@ class S49 {
         for (int i = 0; i < 3000; i++) { big.append(i % 10); }
         Main.check("sb2", r.toString().equals("ABeh") && r.substring(1, 3).equals("Be") && sio.equals("Index 9 out of bounds for length 4")
             && big.length() == 3000 && big.charAt(1234) == '4' && big.toString().endsWith("789"));
+    }
+}
+
+// ===== SECTION 50: static overload choice through interfaces, type variables, var =====
+//
+// javac chooses an overload from the arguments' STATIC types (JLS 15.12.2): an
+// interface parameter is more specific than Object and a sub-interface than
+// its super-interface; a type variable's static type is its erasure (JLS 4.6),
+// a generic call's result is the receiver's type argument, `var` takes its
+// initializer's type (JLS 14.4.1), and an anonymous class passes its
+// arguments to the super constructor javac picks for them. Every expected
+// value is java 24.0.2's.
+interface S50Shape { }
+interface S50Round extends S50Shape { }
+class S50Circle implements S50Round { }
+class S50Base {
+    String tag;
+    S50Base(Object o) { tag = "O"; }
+    S50Base(String s) { tag = "S"; }
+}
+class S50Box<T> {
+    T v;
+    S50Box(T v) { this.v = v; }
+    T get() { return v; }
+    String show() { return S50.f(v); }
+}
+class S50 {
+    static String f(Object o) { return "O"; }
+    static String f(String s) { return "S"; }
+    static String g(S50Shape s) { return "Shape"; }
+    static String g(S50Round r) { return "Round"; }
+    static String g(Object o) { return "Object"; }
+    static <T> String gen(T t) { return f(t); }
+    static void run() {
+        S50Circle c = new S50Circle();
+        S50Shape sh = c;
+        Main.check("ov50a", g(c).equals("Round") && g(sh).equals("Shape") && g((Object) c).equals("Object"));
+        S50Box<String> b = new S50Box<>("z");
+        java.util.List<Object> lo = new java.util.ArrayList<>();
+        lo.add("q");
+        Main.check("ov50b", gen("x").equals("O") && b.show().equals("O") && f(b.get()).equals("S") && f(lo.get(0)).equals("O"));
+        Object o = "s";
+        var v = o;
+        var w = "t";
+        Main.check("ov50c", f(v).equals("O") && f(w).equals("S") && new S50Base(o) { }.tag.equals("O")
+            && new S50Base("s") { }.tag.equals("S"));
     }
 }

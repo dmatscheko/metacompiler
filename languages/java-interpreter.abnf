@@ -316,7 +316,7 @@ Import      <~~ jImport(pop(), up.pos) ~~>
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
-            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
+            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends ExtRef ]
               [ ImplementsSkip ] [ Permits ] "{" { Member } "}" ;
 // A supertype may be qualified and generic (`extends Outer.Super`, `extends
@@ -327,7 +327,7 @@ ExtRef      <~~ push({ext: jJoinDots(takeAll())}) ~~>
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ buildRecord(takeAll()) ~~>
-            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ] RParams
+            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ] RParams
               [ ImplementsSkip ] [ Permits ] "{" { RMember } "}" ;
 // A record body is restricted (JLS 8.10.4): no INSTANCE initializer
 // (instance.initializer.not.allowed.in.records) and no instance FIELD
@@ -372,10 +372,10 @@ CompactCtor <~~ push(makeCompactCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> Block ;
 // An abstract (or interface) method: a signature and no body.
 AbstractMethod <~~ jTyPop(); push(makeAbstractM(takeAll())); jRetPop() ~~>
-            = Mods [ SkipAngle ] RetType Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
+            = Mods [ MTyParams ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
 
 Method      <~~ jTyPop(); jRetPop(); push(makeMethod(takeAll())) ~~>
-            = Mods [ SkipAngle ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
+            = Mods [ MTyParams ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
 // The declared result type, which every value the method returns converts to:
 // the walk reaches this tag before the body (jRetPush; the Method tag pops).
 RetType     <~~ jRetPush(stripWs(up.in)) ~~>
@@ -655,7 +655,7 @@ VarDeclType <~~ push({dty: stripWs(up.in)}) ~~>
             = "var" KwEnd NoBracket ;
 DeclType    <~~ push({dty: stripWs(up.in)}) ~~>
             = Type ;
-Declarator  <~~ push(makeDeclSpec(takeAll())) ~~>
+Declarator  <~~ push(makeDeclSpec(takeAll(), up.in)) ~~>
             = NotResvKw UsBrkt Id <~~ push(up.in) ~~> [ DeclDims ] [ "=" VarInit ] ;
 // `int a[] = {1}` declares an int[]: the brackets after the NAME join the type.
 DeclDims    <~~ push({cdims: jDimsOf(stripWs(up.in))}) ~~>
@@ -918,7 +918,7 @@ NewName     <~~ push(jJoinDots(takeAll())) ~~>
               { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 // new Type(args) { members } - an anonymous subclass (of a class OR an interface),
 // built once on first evaluation and instantiated like any other class.
-NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
+NewAnon     <~~ push(makeNewAnon(takeAll(), up.in)) ~~>
             = KwNew [ SkipAngle ] NewName [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" AnonBody ;
 AnonBody    <~~ push({anonmembers: takeAll()}) ~~>
             = "{" { Member } "}" ;
@@ -1206,6 +1206,17 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x
 
 // A balanced < ... > run (generic parameters / arguments), parsed and ignored.
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+
+// A type parameter list, of a class or of a method: each name is a type
+// variable, which a static type reads as its erasure (jNoteTyVar in
+// lib/java-decltypes.js); a list of another shape is skipped whole.
+ClsTyParams = "<" ClsTyParam { "," ClsTyParam } ">" | SkipAngle ;
+ClsTyParam  = { Annotation } ClsTyVar [ KwExtends TyBound { "&" Type } ] ;
+ClsTyVar    <~~ jNoteTyVar(up.in, true) ~~> = Id ;
+MTyParams   = "<" MTyParam { "," MTyParam } ">" | SkipAngle ;
+MTyParam    = { Annotation } MTyVar [ KwExtends TyBound { "&" Type } ] ;
+MTyVar      <~~ jNoteTyVar(up.in, false) ~~> = Id ;
+TyBound     <~~ jNoteTyBound(stripWs(up.in)) ~~> = Type ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
 // A balanced ( ... ) run (annotation arguments), parsed and ignored.
@@ -1259,7 +1270,7 @@ IfaceExt    <~~ push({iext: jJoinDots(takeAll())}) ~~>
 // time - so the declaration is parsed and dropped, like the annotations themselves.
 AnnotationDecl = LeadMods "@" KwInterface Id [ SkipAngle ] [ KwExtends Type { "," Type } ] SkipBlock ;
 Interface   <~~ buildInterface(takeAll()) ~~>
-            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
+            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends IfaceExt { "," IfaceExt } ] [ Permits ] "{" { IMember } "}" ;
 // enum E { A(1), B { ... }; members }: a class whose constants are singleton
 // instances built once, in order. A constant with a body becomes an anonymous
@@ -4129,7 +4140,7 @@ HasStatic   = :script(~~
     // first evaluation (its supertype must already exist) and then reused, so a
     // lambda-like anonymous class inside a loop does not rebuild per iteration.
     var jAnonSeq = 0
-    function makeNewAnon(items) {
+    function makeNewAnon(items, text) {
         var superName = items[0]
         var args = []
         var members = []
@@ -4138,6 +4149,7 @@ HasStatic   = :script(~~
             if (typeof it == "object" && it != null && it.anonmembers != undefined) { members = it.anonmembers }
             else { args.push(it) }
         }
+        var atys = jCallArgTys(text, args.length)
         var built = null
         return function() {
             if (built == null) {
@@ -4149,6 +4161,9 @@ HasStatic   = :script(~~
                 jOvDeclare("$anon" + jAnonSeq + "$" + superName, ms)
                 built = buildClassFrom("$anon" + jAnonSeq + "$" + superName, ms, undefined)
                 built.__name = superName
+                // The super constructor javac picks from the arguments' static
+                // types; makeCtorDispatch forwards to it.
+                built.__supsig = jOvCtorSig(superName, atys)
             }
             // An anonymous class body names the enclosing instance's fields
             // unqualified and reads `Outer.this`, so the instance records it -
@@ -4553,18 +4568,18 @@ HasStatic   = :script(~~
     // A declarator keeps its name and initializer apart, because the declared TYPE
     // (which the enclosing DeclCore knows) decides whether a lambda initializer has
     // to adopt a functional interface.
-    function makeDeclSpec(items) {
+    function makeDeclSpec(items, text) {
         var dims = ""
         var rest = items.slice(1)
         if (rest.length > 0 && rest[0].cdims != undefined) { dims = rest[0].cdims; rest = rest.slice(1) }
-        return {dname: items[0], dinit: rest.length > 0 ? rest[0] : makeConst(0), ddims: dims}
+        return {dname: items[0], dinit: rest.length > 0 ? rest[0] : makeConst(0), ddims: dims, dtext: text}
     }
     function makeDeclList(items) {
         var ty = items[0].dty
         var specs = items.slice(1)
         var thunks = []
         for (var i = 0; i < specs.length; i++) {
-            jTyDecl(specs[i].dname, ty + specs[i].ddims)
+            jTyDecl(specs[i].dname, ty == "var" ? jVarTy(specs[i].dtext) : ty + specs[i].ddims)
             thunks.push(makeDeclOne(specs[i], ty + specs[i].ddims))
         }
         return makeSeq(thunks)
@@ -5185,7 +5200,7 @@ HasStatic   = :script(~~
                 // No constructor of this class fits. That is what an anonymous
                 // subclass (and an enum constant with a body) looks like: it
                 // declares none of its own, so the arguments belong to super.
-                if (refs.sup != null) { jCallCtor(refs.sup, self, args) }
+                if (refs.sup != null) { jCallCtorSig(refs.sup, self, args, hasOwn(refs.self, "__supsig") ? refs.self.__supsig : "") }
                 ownInit(self)
                 return undefined
             }
@@ -5517,12 +5532,7 @@ HasStatic   = :script(~~
     }
     // Is v an instance of the declared class cn? The __class / __super walk,
     // as instanceof answers it.
-    function jOvIsA(v, cn) {
-        for (var c = v.__class; c != undefined && c != null; c = c.__super) {
-            if (c.__name == cn) { return true }
-        }
-        return false
-    }
+    function jOvIsA(v, cn) { return rtClassIs(v.__class, cn) }
     function makeInstanceClosure(m) {
         return function() {
             var self = arguments[0]
@@ -5556,6 +5566,7 @@ HasStatic   = :script(~~
             else { members.push(items[i]) }
         }
         jOvIface(name, members)
+        jOvIfaceSupers(name, supers)
         var cls = {__isclass: true, __isiface: true, __name: name, __abstract: []}
         globalScope[name] = cls
         var inherited = []

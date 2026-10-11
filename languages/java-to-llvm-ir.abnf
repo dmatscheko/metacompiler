@@ -295,7 +295,7 @@ Import      <~~ jImport(pop(), up.pos) ~~>
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
+            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends ExtRef ]
               [ ImplementsSkip ] [ PermitsSkip ] "{" { Member } "}" ;
 // A supertype may be qualified and generic (`extends Outer.Super`, `extends
@@ -306,7 +306,7 @@ ExtRef      <~~ push({ext: jLastSeg(takeAll())}) ~~>
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
-            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ] RParams
+            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ] RParams
               [ ImplementsSkip ] [ PermitsSkip ] "{" { RMember } "}" ;
 // A record body is restricted (JLS 8.10.4): no INSTANCE initializer
 // (instance.initializer.not.allowed.in.records) and no instance FIELD
@@ -345,7 +345,7 @@ InitBlock   <~~ push({kind: "initblock", body: pop()}) ~~>
 // method of an interface. It contributes no code - the overriding subclass supplies
 // it - so the tag drains what the header pushed and the member list never sees it.
 AbstractMethod <~~ jTyPop(); push(makeAbstract(takeAll())); jRetPop() ~~>
-            = Mods [ SkipAngle ] RetType Id <~~ push(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
+            = Mods [ MTyParams ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] ";" ;
 
 // A constructor. Its body is CtorBody rather than Block so the optional explicit
 // constructor invocation - super(args) / this(args), which Java only admits as the
@@ -366,7 +366,7 @@ CtorDelegate <~~ push(makeCtorDelegate(takeAll(), up.in)) ~~>
               "(" [ Expression { "," Expression } ] ")" ";" ;
 
 Method      <~~ jTyPop(); jRetPop(); push(makeMethod(takeAll())) ~~>
-            = Mods [ SkipAngle ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
+            = Mods [ MTyParams ] RetType Id <~~ push(up.in); jNoteMethodTy(up.in) ~~> ParamList [ CDims ] [ Throws ] Block ;
 // The declared result type, which every value the method returns converts to:
 // the walk reaches this tag before the body (jRetPush; the Method tag pops).
 RetType     <~~ jRetPush(stripWs(up.in)) ~~>
@@ -654,7 +654,7 @@ DType       <~~ push({dty: stripWs(up.in)}) ~~> = Type ;
 // The C-style declarator `int cstyle[] = {5, 6}` puts the array brackets after the
 // NAME (and `int[] mixed[]` splits them across both places); DeclDims adds them to
 // the declared type.
-Declarator  <~~ push({dname: takeAll()}) ~~>
+Declarator  <~~ push({dname: takeAll(), dtext: up.in}) ~~>
             = NotResvKw UsBrkt Id <~~ push(up.in) ~~> [ DeclDims ] [ "=" Expression ] ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
@@ -895,7 +895,7 @@ NewObject   <~~ push(makeNew(takeAll(), up.in)) ~~>
 // descriptor emitted at the expression site, so it captures the enclosing scope.
 // Its constructor forwards its arguments to the base constructor; a base that is an
 // interface has none, so nothing is chained.
-NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
+NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos, up.in)) ~~>
             = KwNew [ SkipAngle ] { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ]
               { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] }
               "(" [ Expression { "," Expression } ] ")"
@@ -1194,6 +1194,17 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x
 
 // A balanced < ... > run (generic parameters / arguments), parsed and ignored.
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+
+// A type parameter list, of a class or of a method: each name is a type
+// variable, which a static type reads as its erasure (jNoteTyVar in
+// lib/java-decltypes.js); a list of another shape is skipped whole.
+ClsTyParams = "<" ClsTyParam { "," ClsTyParam } ">" | SkipAngle ;
+ClsTyParam  = { Annotation } ClsTyVar [ KwExtends TyBound { "&" Type } ] ;
+ClsTyVar    <~~ jNoteTyVar(up.in, true) ~~> = Id ;
+MTyParams   = "<" MTyParam { "," MTyParam } ">" | SkipAngle ;
+MTyParam    = { Annotation } MTyVar [ KwExtends TyBound { "&" Type } ] ;
+MTyVar      <~~ jNoteTyVar(up.in, false) ~~> = Id ;
+TyBound     <~~ jNoteTyBound(stripWs(up.in)) ~~> = Type ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
 // A balanced ( ... ) run (annotation arguments), parsed and ignored.
@@ -1260,7 +1271,7 @@ AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
 // javac's parser refuses, and the two halves agree file for file without it.
 Interface   = InterfaceReal ;
 InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
-            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
+            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends IType { "," IType } ] [ PermitsSkip ] "{" { IMember } "}" ;
 // An enum lowers to a class descriptor plus one instance per constant, stored on the
 // descriptor under the constant's name. The constants are built in textual order, so
@@ -3379,7 +3390,8 @@ HasStatic   = :script(~~
     function jEmitMcall(b, recv, s, argsV) {
         var sig = jSfxSig(s)
         if (sig != "") { return callExt(b, "js_jvsigcall", [recv, emitStr(b, s.name), emitStr(b, sig), argsV]) }
-        if (jStrMethods["$" + s.name] == true && (s.rty == undefined || s.rty == "" || jOvBare(s.rty) == "String")) {
+        if (jStrMethods["$" + s.name] == true && (s.rty == undefined || s.rty == "" || jOvBare(s.rty) == "String"
+                                                  || s.rty.substring(0, 8) == "static?:")) {
             return callExt(b, "js_jvstrm", [recv, emitStr(b, s.name), argsV])
         }
         return callExt(b, "js_mcall", [recv, emitStr(b, s.name), argsV])
@@ -3801,7 +3813,7 @@ HasStatic   = :script(~~
             var dims = ""
             var rest = d.slice(1)
             if (rest.length > 0 && rest[0].cdims != undefined) { dims = rest[0].cdims; rest = rest.slice(1) }
-            jTyDecl(d[0], rawTy + dims)
+            jTyDecl(d[0], rawTy == "var" ? jVarTy(items[i].dtext) : rawTy + dims)
             thunks.push(makeDecl(d[0], rest.length > 0 ? rest[0] : null, ty, rawTy + dims))
         }
         return makeSeq(thunks)
@@ -5016,6 +5028,7 @@ HasStatic   = :script(~~
         }
         interfaceNames["$" + name] = true
         classNames["$" + name] = true
+        jOvIfaceSupers(name, supers)
         // Inherited defaults count as this interface's own for an implementor.
         for (var s = 0; s < supers.length; s++) {
             var inh = interfaceMethodNames["$" + supers[s]]
@@ -5262,7 +5275,7 @@ HasStatic   = :script(~~
 
     // ----- Anonymous classes -----
     var anonCount = 0
-    function makeNewAnon(items, pos) {
+    function makeNewAnon(items, pos, text) {
         // A qualified base (new java.beans.Listener() {...}) pushes each segment;
         // the LAST one names the descriptor, as in makeNew.
         var baseName = ""
@@ -5281,7 +5294,9 @@ HasStatic   = :script(~~
         var mem = [{ext: baseName, lib: true}]
         if (args.length > 0) {
             // Forward the arguments to the base constructor: the anonymous class's own
-            // constructor takes them positionally and delegates with super(...).
+            // constructor takes them positionally and delegates with super(...),
+            // to the constructor javac picks from the arguments' static types
+            // (atys, emitDelegCall).
             var ps = []
             var dargs = []
             for (var k = 0; k < args.length; k++) {
@@ -5289,7 +5304,7 @@ HasStatic   = :script(~~
                 dargs.push(makeVarRef("$a" + k))
             }
             mem.push({kind: "ctor", name: aname, params: ps, body: null,
-                      deleg: {deleg: "super", dargs: dargs}})
+                      deleg: {deleg: "super", dargs: dargs, atys: jCallArgTys(text, args.length)}})
         }
         for (var j = 0; j < members.length; j++) { mem.push(members[j]) }
         jOvDeclare(aname, mem)

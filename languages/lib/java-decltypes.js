@@ -20,13 +20,30 @@ function jTyPush() { jTyScopes.push({}) }
 function jTyPop() { if (jTyScopes.length > 1) { jTyScopes.pop() } }
 function jTyDecl(name, ty) { jTyScopes[jTyScopes.length - 1]["$" + name] = ty }
 function jTyOf(name) { return jTyScopes[jTyScopes.length - 1]["$" + name] }
+// `var x = e`: the local's static type is e's (JLS 14.4.1); "var" while e's
+// type cannot be read. dtext is the declarator's whitespace-free text.
+function jVarTy(dtext) {
+    var e = dtext.indexOf("=")
+    if (e < 0) { return "var" }
+    var t = jStaticTy(dtext.substring(e + 1, dtext.length))
+    if (t == "" || t == "null" || t == "fn") { return "var" }
+    return t
+}
 // A field's type, by NAME across the whole program: "?" once two
 // declarations of the name disagree, and then no conversion is made. The
 // grammars read it once the walk has seen every field.
 var jFieldTys = {}
+// The same per declaring class ("Cls.name"), which a bare name in that class'
+// own body reads first (jOwnFieldTy).
+var jFieldTysC = {}
 function jNoteFieldTy(name, ty) {
     var have = jFieldTys["$" + name]
     jFieldTys["$" + name] = (have == undefined || have == ty) ? ty : "?"
+    jFieldTysC["$" + curClassName + "." + name] = ty
+}
+function jOwnFieldTy(name) {
+    var t = jFieldTysC["$" + curClassName + "." + name]
+    return t == undefined ? jFieldTyOf(name) : t
 }
 function jFieldTyOf(name) {
     var t = jFieldTys["$" + name]
@@ -414,6 +431,60 @@ var jArrCtx = ""
 var jOvCls = {}
 var jOvNames = []
 var jOvIfaces = {}
+// Each declared type's direct supertypes - its superclass and the interfaces
+// it implements, or an interface's super-interfaces - as bare names.
+var jOvSupers = {}
+function jOvAddSuper(name, sup) {
+    if (jOvSupers["$" + name] == undefined) { jOvSupers["$" + name] = [] }
+    jOvSupers["$" + name].push(jOvBare(sup))
+}
+function jOvIfaceSupers(name, supers) {
+    for (var i = 0; i < supers.length; i++) { jOvAddSuper(name, supers[i]) }
+}
+// The type variables a class or method declares, each mapped to its erasure
+// (JLS 4.6: its first bound, else Object), and each generic class' type
+// parameters in order. A static type that is a type variable reads as its
+// erasure; a call's result typed by a class' type parameter reads as the
+// receiver's type argument (List<String>.get is a String).
+var jTyVars = {}
+var jClsTyParams = {}
+var jLastTyVar = ""
+function jNoteTyVar(name, ofClass) {
+    jTyVars["$" + name] = "Object"
+    jLastTyVar = name
+    if (ofClass) {
+        if (jClsTyParams["$" + curClassName] == undefined) { jClsTyParams["$" + curClassName] = [] }
+        jClsTyParams["$" + curClassName].push(name)
+    }
+}
+function jNoteTyBound(b) {
+    if (jLastTyVar != "") { jTyVars["$" + jLastTyVar] = jOvBare(b) }
+    jLastTyVar = ""
+}
+// A declared type name that is a type variable (and no class or interface).
+function jTyVarErasure(b) {
+    if (jOvCls["$" + b] != undefined || jOvIfaces["$" + b] == true) { return "" }
+    var e = jTyVars["$" + b]
+    return e == undefined ? "" : e
+}
+// The type arguments of a parameterized type's text: "Map<String,List<Integer>>"
+// -> ["String", "List<Integer>"]; [] when it has none.
+function jTyArgs(ty) {
+    var lt = ty.indexOf("<")
+    if (lt < 0 || ty.charAt(ty.length - 1) != ">") { return [] }
+    var out = []
+    var depth = 0
+    var from = lt + 1
+    for (var i = lt + 1; i < ty.length - 1; i++) {
+        var c = ty.charAt(i)
+        if (c == "<") { depth++ } else if (c == ">") { depth-- } else if (c == "," && depth == 0) {
+            out.push(ty.substring(from, i))
+            from = i + 1
+        }
+    }
+    out.push(ty.substring(from, ty.length - 1))
+    return out
+}
 // A declared type with its type arguments dropped and its qualifier cut to the
 // last segment: "java.util.List<String>[]" -> "List[]".
 function jOvBare(ty) {
@@ -447,7 +518,12 @@ function jOvDeclare(name, members) {
     var ctors = []
     for (var i = 0; i < members.length; i++) {
         var m = members[i]
-        if (m.ext != undefined) { sup = jOvBare(m.ext) }
+        if (m.ext != undefined) {
+            sup = jOvBare(m.ext)
+            jOvAddSuper(name, sup)
+        }
+        if (m.impl != undefined) { jOvAddSuper(name, m.impl) }
+        if (m.impls != undefined) { jOvIfaceSupers(name, m.impls) }
         if (m.kind == "method") {
             var v = jOvIsVar(m)
             ms.push({name: m.name, raw: jOvRawOf(m.ptys, v), ptys: m.ptys, isVar: v, statik: m.statik})
@@ -581,12 +657,16 @@ var jOvCore = ",String,Object,Integer,Long,Double,Float,Short,Byte,Character,Boo
 function jOvIsPrim(t) { return jOvPrims.indexOf("," + t + ",") >= 0 }
 // The token a parameter type is matched with: a primitive or a java.lang name
 // as itself, an array as its element's token plus "[]", a declared class by
-// name, and everything else (an interface, a type variable, a library type) as
+// name, a declared interface that is not functional as "#" + its name, and
+// everything else (a functional interface, a type variable, a library type) as
 // "*", which takes any reference and any lambda.
 function jOvTok(raw) {
     if (raw.length > 2 && raw.substring(raw.length - 2) == "[]") { return jOvTok(raw.substring(0, raw.length - 2)) + "[]" }
     if (jOvIsPrim(raw) || jOvCore.indexOf("," + raw + ",") >= 0) { return raw }
-    if (jOvCls["$" + raw] != undefined && jOvIfaces["$" + raw] != true) { return raw }
+    if (jOvIfaces["$" + raw] == true) { return jSamUser["$" + raw] == undefined ? "#" + raw : "*" }
+    if (jOvCls["$" + raw] != undefined) { return raw }
+    var er = jTyVarErasure(raw)
+    if (er != "") { return jOvTok(er) }
     return "*"
 }
 // Widening primitive conversion (JLS 5.1.2), identity included.
@@ -611,14 +691,16 @@ function jOvSub(s, t) {
     if (sp || tp) { return false }
     if (t == "*" || t == "Object") { return true }
     if (t == "Number") { return ",Integer,Long,Double,Float,Short,Byte,".indexOf("," + s + ",") >= 0 }
-    var c = s
-    var guard = 0
-    while (guard < 64) {
-        guard++
-        var rec = jOvCls["$" + c]
-        if (rec == undefined || rec.sup == "") { return false }
-        c = rec.sup
-        if (c == t) { return true }
+    return jOvExtends(jOvUntag(s), jOvUntag(t), 0)
+}
+// A declared interface's token without its "#".
+function jOvUntag(t) { return t.charAt(0) == "#" ? t.substring(1) : t }
+// Does declared type s extend or implement t, directly or through its supertypes?
+function jOvExtends(s, t, depth) {
+    var sups = jOvSupers["$" + s]
+    if (sups == undefined || depth > 64) { return false }
+    for (var i = 0; i < sups.length; i++) {
+        if (sups[i] == t || jOvExtends(sups[i], t, depth + 1)) { return true }
     }
     return false
 }
@@ -739,7 +821,7 @@ function jOvAccepts(t, v, phase, kindOf, isA) {
     if (k == "fn") { return false }
     if (t == "Object") { return true }
     if (k == "String") { return t == k }
-    return k == "obj" && isA(v, t)
+    return k == "obj" && isA(v, jOvUntag(t))
 }
 function jOvBox(k) {
     if (k == "int") { return "Integer" }
@@ -899,7 +981,7 @@ function jChainTy(t) {
     } else {
         var lt = jTyOf(nm)
         if (lt != undefined) { ty = lt }
-        else if (jFieldTys["$" + nm] != undefined) { ty = jFieldTyOf(nm) }
+        else if (jFieldTys["$" + nm] != undefined) { ty = jOwnFieldTy(nm) }
         else if (jIsClassName(nm)) { ty = nm; isCls = true }
     }
     while (i < t.length && ty != "") {
@@ -937,7 +1019,17 @@ function jMemberRetTy(ty, mn) {
     var b = jOvBare(ty)
     var lib = jLibRetTys["$" + b + "." + mn]
     if (lib != undefined) { return lib }
-    if (jOvCls["$" + b] != undefined || jOvIfaces["$" + b] == true) { return jClsMethodTyOf(b, mn) }
+    if (jOvCls["$" + b] != undefined || jOvIfaces["$" + b] == true) {
+        var rt = jClsMethodTyOf(b, mn)
+        var tps = jClsTyParams["$" + b]
+        if (tps != undefined) {
+            var targs = jTyArgs(ty)
+            for (var i = 0; i < tps.length && i < targs.length; i++) {
+                if (tps[i] == rt) { return targs[i] }
+            }
+        }
+        return rt
+    }
     return ""
 }
 // A type name a static access can start with: a declared type, or a
@@ -1068,6 +1160,8 @@ function jOvSTok(ty) {
     if (jOvIsPrim(b) || jOvCore.indexOf("," + b + ",") >= 0) { return b }
     if (jOvIfaces["$" + b] == true) { return "#" + b }
     if (jOvCls["$" + b] != undefined) { return b }
+    var er = jTyVarErasure(b)
+    if (er != "") { return jOvSTok(er) }
     return ""
 }
 // The primitive a box unboxes to (JLS 5.1.8), "" for anything else.
@@ -1130,8 +1224,6 @@ function jOvSAccepts(t, s, phase, raw) {
     }
     if (t == "*") { return jOvLibAccepts(raw, s) }
     if (t == "Object" || t == s) { return true }
-    if (t == "Number") { return ",Integer,Long,Double,Float,Short,Byte,".indexOf("," + s + ",") >= 0 }
-    if (s.charAt(0) == "#") { return false }
     return jOvSub(s, t)
 }
 // jOvPick's three phases over static tokens; "" when no entry applies.
@@ -1178,6 +1270,16 @@ function jOvStaticSig(rty, mname, atys, wantStatic) {
     if (cands == null) { cands = jOvIfaceCands(b, mname) }
     if (cands == null) { return "" }
     if (wantStatic != null && cands[0].statik != wantStatic) { return "" }
+    // A candidate declared over a type variable (List<E>.add(int, E)) is
+    // overridden under its SUBSTITUTED signature (add(int, String)), which no
+    // "name#sig" slot connects to it, so such a call keeps the runtime pick.
+    for (var c = 0; c < cands.length; c++) {
+        for (var p = 0; p < cands[c].ptys.length; p++) {
+            var pb = jOvBare(cands[c].ptys[p])
+            while (jOvIsArr(pb)) { pb = pb.substring(0, pb.length - 2) }
+            if (jTyVarErasure(pb) != "") { return "" }
+        }
+    }
     var stoks = []
     for (var i = 0; i < atys.length; i++) {
         var s = jOvSTok(atys[i])
@@ -1188,10 +1290,14 @@ function jOvStaticSig(rty, mname, atys, wantStatic) {
 }
 // The receiver of a member call, from the text before its `.name(`: a class
 // name is a static access ("static:" + name), anything else jStaticTy's type.
+// A bare name that is no local is kept as "static?:" + name: a class declared
+// further down is not yet known when the walk passes the call, so jSfxSig
+// decides once the walk is complete.
 function jRecvTy(t) {
     var e = jIdentEnd(t, 0)
-    if (e == t.length && e > 0 && jTyOf(t) == undefined && jFieldTys["$" + t] == undefined && jIsClassName(t)) {
-        return "static:" + t
+    if (e == t.length && e > 0 && jTyOf(t) == undefined && jFieldTys["$" + t] == undefined) {
+        if (jIsClassName(t)) { return "static:" + t }
+        return "static?:" + t
     }
     return jStaticTy(t)
 }
@@ -1223,7 +1329,12 @@ function jChainRecvTys(sfxs, text) {
 // complete and cached on the record; "" keeps the runtime pick.
 function jSfxSig(s) {
     if (s.sig == undefined) {
-        s.sig = (s.rty == undefined || s.rty == "") ? "" : jOvMemberSig(s.rty, s.name, s.atys)
+        var rty = s.rty
+        if (rty != undefined && rty.length > 8 && rty.substring(0, 8) == "static?:") {
+            var nm = rty.substring(8)
+            rty = (jFieldTys["$" + nm] == undefined && jIsClassName(nm)) ? "static:" + nm : ""
+        }
+        s.sig = (rty == undefined || rty == "") ? "" : jOvMemberSig(rty, s.name, s.atys)
     }
     return s.sig
 }

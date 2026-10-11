@@ -2216,16 +2216,10 @@ function jvOvAccepts(t, v, phase) {
     if (t == "Object") { return true }
     if (k == "[]") { return false }
     if (k == "String") { return t == k }
-    var c = v["__class"]
-    var guard = 0
-    while (guard < 64) {
-        guard = guard + 1
-        if (c === undefined || c === null) { return false }
-        if (typeof c != "object") { return false }
-        if (c["__name"] === t) { return true }
-        c = c["__super"]
-    }
-    return false
+    // A class token, or "#" + a declared interface's name; rtClassIs walks the
+    // interfaces too.
+    if (t.charAt(0) == "#") { return rtClassIs(v["__class"], t.substring(1, t.length), 0) }
+    return rtClassIs(v["__class"], t, 0)
 }
 
 // Double.compare(x, y) == 0, i.e. doubleToLongBits equality: one NaN, and the
