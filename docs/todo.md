@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-360 python: int/float methods off the type; missing int/float methods · P2 · PY · OPEN [V]
+### T-360 python: int/float methods off the type; missing int/float methods · P2 · PY · IN PROGRESS (PY+KT worker, round 10) [V]
 `hasattr(int, "conjugate")` False and `int.conjugate(7)` fails (CPython True / 7): no
 "int"/"float" sample in pyTypeSample / pyDescTypeSample (interpreter,
 abnf/jsrtpydesc.go, layer 2). `bit_length`, `is_integer`, `as_integer_ratio`,
@@ -131,7 +131,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-357 kotlin: integer literals do not take their expected type · P2 · KT · OPEN [V]
+### T-357 kotlin: integer literals do not take their expected type · P2 · KT · IN PROGRESS (PY+KT worker, round 10) [V]
 `val ls: List<Long> = listOf(1,2,3)`, `hashSetOf<Long>(1,2)`, `var y = 5L; y = 7`,
 `mutableMapOf<Long,String>()[1] = ..`, `mutableListOf<Long>().add(3)`,
 `Pair<Long,Int>(1,2)`, `la[0] = 5` into a LongArray: the element is an Int (`is Long`
@@ -141,7 +141,7 @@ expected type (declared generic types, explicit type arguments, Long-slot reassi
 elvis operand, writes into a known-kind collection), make Int ≠ Long at equality:
 `setOf<Any>(1, 1L).size` 2, `(1 as Any) == (1L as Any)` false, `1L.equals(1)` false.
 
-### T-358 kotlin: interpreter gaps - `System.currentTimeMillis`, `kotlin.math.*` · P1 · KT · OPEN [V]
+### T-358 kotlin: interpreter gaps - `System.currentTimeMillis`, `kotlin.math.*` · P1 · KT · IN PROGRESS (PY+KT worker, round 10) [V]
 Interpreter: "unknown name: System"; after `import kotlin.math.*`, `sqrt(4.0)` "unknown
 name: sqrt" (the compiler answers both).
 
