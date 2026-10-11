@@ -395,7 +395,13 @@ ParamsMod   <~~ push({paramsParam: true}) ~~>
 // them may match, which is why they are two alternatives rather than two optionals:
 // with both optional, `o is Program? ? 1 : 2` ate the ternary's '?' as a second
 // nullable suffix and the conditional behind it no longer parsed.
-Type        = TypeName ( "?" ArrSfxs | ArrSfxs [ "?" ] ) ;
+Type        = TypeName ( NullQ ArrSfxs | ArrSfxs [ NullQ ] ) ;
+// The nullable '?' is never the first half of '??': the lexer reads '??' as one
+// token, so `o as string ?? ""` is `(o as string) ?? ""`.
+NullQ       = "?" NotQNext ;
+NotQNext    = :script(~~
+    (function() { return c.peek(0) === 63 ? abnf.newToken("\x01coalesce-operator", 0) : undefined })()
+~~) ;
 ArrSfxs     = { "*" | "[" { "," } "]" } ;
 TypeName    = TupleType | PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "void" KwEnd
             | "var" KwEnd | "dynamic" KwEnd | UserType ;

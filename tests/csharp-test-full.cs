@@ -2600,6 +2600,20 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s39e1", msg == "range");
         }
 
+        // ===== SECTION 40: 'as T' before the null-coalescing operator =====
+        //
+        // '??' is one token (ECMA-334 6.4.6), so the '?' of 'string ??' is no
+        // nullable suffix: 'o as string ?? d' is '(o as string) ?? d', and 'as' yields
+        // null for an object of another type. No C# toolchain here: the values follow
+        // from the specification.
+        static void S40()
+        {
+            object[] o = { "x", 3 };
+            string a = o[0] as string ?? "";
+            string b = o[1] as string ?? "d";
+            Program.Check("s40a1", a == "x" && b == "d" && (o[1] as string ?? "e").Length == 1);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2641,6 +2655,7 @@ b";                                                   // verbatim keeps the newl
             Program.S37(); // SECTION-CALL 37
             Program.S38(); // SECTION-CALL 38
             Program.S39(); // SECTION-CALL 39
+            Program.S40(); // SECTION-CALL 40
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
