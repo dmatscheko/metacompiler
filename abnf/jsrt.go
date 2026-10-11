@@ -1688,7 +1688,7 @@ func jsNumString(f float64) string {
 func (rt *jsrt) toString(v interface{}) string {
 	switch t := v.(type) {
 	case jsChar: // Kotlin's Char renders as its glyph, not as its code.
-		return string(rune(t.code))
+		return t.text()
 	case jsSym: // Ruby's Symbol renders as its bare name.
 		return t.s
 	case jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
@@ -1749,7 +1749,7 @@ func (rt *jsrt) toString(v interface{}) string {
 func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 	switch t := v.(type) {
 	case jsChar: // print/println show the glyph.
-		return string(rune(t.code))
+		return t.text()
 	case jsSym: // print/println show the symbol's name.
 		return t.s
 	case jsFlo, jsRat, jsCpx: // print/println show Ruby's rendering (1000.0, 1/2, 0+2i).
@@ -3911,6 +3911,16 @@ type jsBigInt struct {
 // Go, Python and the rest: their behaviour is untouched.
 type jsChar struct {
 	code int32
+}
+
+// text renders the char as its glyph. A lone surrogate keeps its WTF-8 form, so
+// a later concatenation with its other half rejoins the pair (string(rune) would
+// make it U+FFFD). Twin of k2ChStr in languages/lib/kotlin-rt.metajs.
+func (c jsChar) text() string {
+	if r := rune(c.code); isSurrogate(r) {
+		return string(appendWTF8(nil, r))
+	}
+	return string(rune(c.code))
 }
 
 // jsSym is Ruby's Symbol: it RENDERS as its name (in an interpolation, in puts, in
@@ -14361,7 +14371,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_cslen": func(a []uint64) uint64 {
 			switch o := u(a[0]).(type) {
 			case string:
-				return rt.wrapNum(float64(len(utf16.Encode([]rune(o)))))
+				return rt.wrapNum(float64(len(strUnits(o))))
 			case *jsArray:
 				return rt.wrapNum(float64(len(o.elems)))
 			}
@@ -14434,7 +14444,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			if str, isStr := u(a[0]).(string); isStr {
 				i := jsToInt(rt.toNumber(argAt(args.elems, 0)))
-				units := utf16.Encode([]rune(str))
+				units := strUnits(str)
 				if i < 0 || i >= len(units) {
 					rt.fail("string index %d out of range for %q", i, str)
 				}

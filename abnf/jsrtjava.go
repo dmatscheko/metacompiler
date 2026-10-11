@@ -1282,7 +1282,7 @@ func init() {
 				args, ok := u(a[1]).(*jsArray)
 				if ok {
 					i := jsToInt(rt.toNumber(argAt(args.elems, 0)))
-					units := utf16.Encode([]rune(str))
+					units := strUnits(str)
 					if i < 0 || i >= len(units) {
 						rt.jvThrowSioobe(i, len(units))
 					}
@@ -1342,7 +1342,7 @@ func init() {
 		// ordinary call of a method by that name.
 		m["js_jvchars"] = func(a []uint64) uint64 {
 			if s, ok := u(a[0]).(string); ok {
-				units := utf16.Encode([]rune(s))
+				units := strUnits(s)
 				out := make([]interface{}, len(units))
 				for i, c := range units {
 					out[i] = jsChar{code: int32(c)}
@@ -1382,12 +1382,12 @@ func init() {
 					units = utf16.AppendRune(units, rune(jsToInt(rt.toNumber(e))))
 				}
 			}
-			return rt.wrapStr(string(utf16.Decode(units)))
+			return rt.wrapStr(strFromUnits(units))
 		}
 		m["js_jvsub"] = func(a []uint64) uint64 {
 			if str, isStr := u(a[0]).(string); isStr {
 				if args, ok := u(a[1]).(*jsArray); ok {
-					units := utf16.Encode([]rune(str))
+					units := strUnits(str)
 					bi := jsToInt(rt.toNumber(argAt(args.elems, 0)))
 					ei := len(units)
 					if len(args.elems) > 1 {
@@ -1779,7 +1779,7 @@ func init() {
 			_, ls := l.(string)
 			_, rs := r.(string)
 			if ls || rs {
-				return rt.wrapStr(rt.jvpStr(l) + rt.jvpStr(r))
+				return rt.wrapStr(strConcat(rt.jvpStr(l), rt.jvpStr(r)))
 			}
 			if jvmIsFlo(l) || jvmIsFlo(r) {
 				// jvmArith, not a hand-rolled add: the float WIDTH needs both

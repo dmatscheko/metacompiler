@@ -2167,24 +2167,17 @@ function k2Line(a) {
 
 // ---------------------------------------------------------------- Char glyphs
 
-// The one-character string a Char code renders as. The Go twin is
-// string(rune(code)), so:
-//   * a LONE SURROGATE is not a scalar value and Go writes U+FFFD for it. An
-//     astral character held as a surrogate PAIR therefore renders as two U+FFFD
-//     (js_kindex in languages/lib/swift-rt.metajs carries the same rule).
-//     Reproduced, not fixed.
+// The one-character string a Char code renders as. Twin of jsChar.text in
+// abnf/jsrt.go:
+//   * a LONE SURROGATE stays itself, so a later concatenation with its other half
+//     spells the astral character again ("" + s[0] + s[1] == s).
 //   * an astral CODE POINT in one Char box (a `js_char` literal above 0xFFFF)
-//     is a scalar value and renders as itself, which in a UTF-16 string is the
-//     surrogate pair.
-// Because no lone surrogate can ever enter a string built here, the wtf8Clean
-// pass js_ktprint applies on the way out (jsrtkotlin.go:1088) is a no-op and is
-// not repeated at the print site.
+//     renders as itself, which in a UTF-16 string is the surrogate pair.
 function k2ChStr(code) {
     // A NEGATIVE code reaches here from `s.get(i)` out of range, which the Go
     // twin does not guard either: strCodeAt answers -1 and string(rune(-1)) is
     // U+FFFD.
     if (code < 0) { return String.fromCharCode(65533) }
-    if (code >= 55296 && code <= 57343) { return String.fromCharCode(65533) }
     if (code > 1114111) { return String.fromCharCode(65533) }
     if (code > 65535) {
         var v = code - 65536
@@ -3452,9 +3445,8 @@ function ktSbMethod(o, name, args) {
         return o
     }
     if (name == "toString") { return ktSbText(o) }
-    // java.lang.StringBuilder#length counts CODE POINTS in the Go twin
-    // (len([]rune(...))), not UTF-16 units.
-    if (name == "length") { return k2RuneLen(ktSbText(o)) }
+    // CharSequence.length counts UTF-16 units, as String's does.
+    if (name == "length") { return ktSbText(o).length }
     if (name == "isEmpty") { return ktSbText(o).length == 0 }
     if (name == "isNotEmpty") { return ktSbText(o).length > 0 }
     if (name == "clear") {
@@ -3504,23 +3496,16 @@ function js_char_like(model, v) {
 
 // js_kindex (abnf/jsrt.go): Kotlin's indexed read s[i]. A String yields the
 // Char at that CODE UNIT index (Kotlin's CharSequence.get), everything else
-// reads the member like js_get - a separate extern because plain js_get must
-// keep yielding a one-character STRING for JS, Python and the other languages
-// that index strings.
-//
-// The Go twin builds the Char from []rune(strAt(s, i))[0], so a LONE SURROGATE
-// - half of an astral pair - becomes U+FFFD. That mapping is reproduced here
-// rather than left to the engine, which would hand back the surrogate itself.
-// It is the same rule js_kindex carries in languages/lib/swift-rt.metajs.
+// reads the member like js_get. Half of a surrogate pair is answered as itself;
+// the Go twin reaches the same answer through js_ktiter, which hands a `for`
+// over a String its Chars, because the shared Go js_kindex answers U+FFFD there.
 function js_kindex(s, i) {
     if (typeof s != "string") { return s[i] }
     var idx = k2Int(i)
     if (idx < 0 || idx >= s.length) {
         fail("string index " + idx + " out of range for \"" + s + "\"")
     }
-    var c = s.charCodeAt(idx)
-    if (c >= 55296 && c <= 57343) { return ktChar(65533) }
-    return ktChar(c)
+    return ktChar(s.charCodeAt(idx))
 }
 
 // js_ktprint / js_ktwrite (jsrtkotlin.go): Kotlin's println / print as a VALUE.

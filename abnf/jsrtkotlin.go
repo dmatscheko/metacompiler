@@ -2189,6 +2189,16 @@ func init() {
 					return w(keys)
 				}
 			}
+			// A String iterates its UTF-16 code units as Chars. The loop's shared
+			// js_kindex would answer U+FFFD for each half of a surrogate pair.
+			if s, isStr := v.(string); isStr {
+				units := strUnits(s)
+				cs := make([]interface{}, len(units))
+				for i, c := range units {
+					cs[i] = jsChar{code: int32(c)}
+				}
+				return w(&jsArray{elems: cs})
+			}
 			return a[0]
 		}
 
@@ -2560,6 +2570,9 @@ func init() {
 				if n := rt.strLen(s); i < 0 || i >= n {
 					rt.ktIndexOob("StringIndexOutOfBoundsException", i, n)
 				}
+				// The code UNIT, so half of a surrogate pair stays itself (the
+				// shared js_kindex answers U+FFFD for it, which swift relies on).
+				return w(jsChar{code: int32(rt.strCodeAt(s, i))})
 			}
 			if arr, isArr := u(a[0]).(*jsArray); isArr {
 				i := jsToInt(rt.toNumber(u(a[1])))
@@ -2982,7 +2995,7 @@ func ktCharsStr(v interface{}) string {
 	out := ""
 	for _, e := range a.elems {
 		if c, isCh := e.(jsChar); isCh {
-			out += string(rune(c.code))
+			out = strConcat(out, c.text())
 		}
 	}
 	return out
@@ -3279,7 +3292,7 @@ func ktFormat(rt *jsrt, f string, args []interface{}) string {
 			out += fmt.Sprintf(spec+string(verb), giVal(rt, a))
 		case 'c':
 			if c, ok := a.(jsChar); ok {
-				out += string(rune(c.code))
+				out = strConcat(out, c.text())
 			} else {
 				out += rt.ktpRender(a, 0)
 			}
@@ -3336,7 +3349,7 @@ func (rt *jsrt) ktpRender(v interface{}, depth int) string {
 	case jsNullT:
 		return "null"
 	case jsChar:
-		return string(rune(t.code))
+		return t.text()
 	case jsGInt:
 		// A sized integer prints its exact digits, and an UNSIGNED one prints its
 		// unsigned reading: ULong.MAX_VALUE is 18446744073709551615, not -1.
@@ -4139,7 +4152,7 @@ func (rt *jsrt) ktChars(s string) []interface{} {
 // is its glyph, so `s.indexOf('B')` and `s.indexOf("B")` agree.
 func (rt *jsrt) ktStrArg(v interface{}) string {
 	if c, ok := v.(jsChar); ok {
-		return string(rune(c.code))
+		return c.text()
 	}
 	return rt.ktStr2(v)
 }
@@ -6320,21 +6333,21 @@ func (rt *jsrt) ktSbMethod(o *jsObject, name string, args []interface{}) (interf
 	case "append":
 		s := ktSbText(o)
 		for _, a := range args {
-			s += rt.ktStr2(a)
+			s = strConcat(s, rt.ktStr2(a))
 		}
 		o.set("s", s)
 		return o, true
 	case "appendLine":
 		s := ktSbText(o)
 		for _, a := range args {
-			s += rt.ktStr2(a)
+			s = strConcat(s, rt.ktStr2(a))
 		}
 		o.set("s", s+"\n")
 		return o, true
 	case "toString":
 		return ktSbText(o), true
 	case "length":
-		return float64(len([]rune(ktSbText(o)))), true
+		return float64(rt.strLen(ktSbText(o))), true
 	case "isEmpty":
 		return len(ktSbText(o)) == 0, true
 	case "isNotEmpty":

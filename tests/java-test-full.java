@@ -2908,6 +2908,10 @@ class S51 {
         Main.check("astral51b", lit[2].indexOf("b") == 3 && lit[2].substring(1, 3).equals(lit[0]));
         char[] lone = {'\uD83D', '\uDE00'};
         Main.check("astral51c", (int) lone[0] == 55357 && (int) lone[1] == 56832);
+        StringBuilder sb51 = new StringBuilder();
+        sb51.append(lone[0]).append(lone[1]);
+        Main.check("astral51d", (int) ("" + lone[0]).charAt(0) == 55357 && (int) String.valueOf(lone[1]).charAt(0) == 56832
+            && ("" + lone[0] + lone[1]).equals(lit[0]) && new String(lone).equals(lit[0]) && sb51.toString().equals(lit[0]));
         S51Plain p = new S51Plain();
         Main.check("super51a", p.objStr().equals("S51Plain@" + Integer.toHexString(p.idHash()))
             && p.objStr().equals(p.toString()) && p.same(p) && !p.same(new S51Plain()) && !p.same(null));

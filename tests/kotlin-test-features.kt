@@ -1159,6 +1159,18 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     // identity hash and "IxOuter$IxPlain@1" would be no closer to the JVM's answer.
     check("nest-plain-render", IxOuter.IxPlain(1).toString() == "IxPlain@1")
 
+    // ----- half of a surrogate pair is a Char of its own -----
+    // A String is UTF-16: s[i], a `for` over it and toString of one half answer the
+    // code UNIT (55357 / 56832), and the halves concatenate back into the pair.
+    val astral = listOf("a\uD83D\uDE00")[0]
+    val halves = mutableListOf<Int>()
+    for (c in astral) halves.add(c.code)
+    val sbAstral = StringBuilder("x")
+    sbAstral.append(astral[1]).append(astral[2])
+    check("char-surrogate-half", ("" + astral[1])[0].code == 55357 && astral[2].toString()[0].code == 56832 &&
+        "${astral[1]}${astral[2]}" == astral.substring(1) && halves == listOf(97, 55357, 56832))
+    check("char-surrogate-sb", sbAstral.toString() == "x" + astral.substring(1) && sbAstral.length == 3)
+
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 
