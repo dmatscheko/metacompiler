@@ -6784,12 +6784,12 @@ function rbMethod(target, name, args) {
         }
     }
     if (name == "instance_variable_get" || name == "instance_variable_set") {
-        if (rbUserObj(target) && rbFindMethod(target, name) === undefined) {
+        if ((rbUserObj(target) || rbClassObj(target)) && rbFindMethod(target, name) === undefined) {
             return rbIvarAccess(target, name, args)
         }
     }
     if (name == "instance_variables") {
-        if (rbUserObj(target)) {
+        if (rbUserObj(target) || rbClassObj(target)) {
             if (rbFindMethod(target, name) === undefined) { return rbIvarNames(target) }
         } else if (rbRespondClass(target) != "") {
             // A builtin value carries no instance variables.
@@ -7491,6 +7491,23 @@ function js_rmain() {
     return o
 }
 
+function rbClassObj(v) { return rbIsObj(v) && v["__isclass"] === true }
+
+// An @ivar write where self is a class object: its instance methods are plain
+// keys of the same object, so the @ivar names are recorded in __civn, in
+// assignment order. Twin of rubyCivSet in abnf/jsrtruby.go.
+function js_rcivset(o, k, v) {
+    if (!rbIsObj(o)) { return null }
+    var l = o["__civn"]
+    if (l === undefined) {
+        l = []
+        o["__civn"] = l
+    }
+    if (l.indexOf(k) < 0) { l.push(k) }
+    o[k] = v
+    return null
+}
+
 // Object#instance_variable_get / _set. Twin of ivarAccess in ruby-interpreter.abnf.
 function rbIvarAccess(o, name, args) {
     var n = rbStr(rbArgAt(args, 0))
@@ -7498,7 +7515,11 @@ function rbIvarAccess(o, name, args) {
     var k = n.substring(1)
     if (name == "instance_variable_set") {
         var v = rbArgAt(args, 1)
-        o[k] = v
+        if (rbClassObj(o)) {
+            js_rcivset(o, k, v)
+        } else {
+            o[k] = v
+        }
         return v
     }
     var got = o[k]
@@ -7511,6 +7532,10 @@ function rbIvarAccess(o, name, args) {
 // abnf/jsrtruby.go.
 function rbIvarNames(o) {
     var ks = keysOf(o)
+    if (rbClassObj(o)) {
+        ks = o["__civn"]
+        if (ks === undefined) { return [] }
+    }
     var out = []
     var i = 0
     while (i < ks.length) {

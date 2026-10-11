@@ -144,6 +144,14 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("NameError"),
 			[]interface{}{"undefined local variable or method '" + name + "'"})})
 	}
+	// An @ivar write where self is a class object. Twin of js_rcivset in
+	// languages/lib/ruby-rt.metajs.
+	m["js_rcivset"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok {
+			rubyCivSet(o, rt.toString(u(a[1])), u(a[2]))
+		}
+		return 0
+	}
 	m["js_rlset"] = func(a []uint64) uint64 {
 		name := rt.toString(u(a[1]))
 		for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
@@ -1343,7 +1351,11 @@ func (rt *jsrt) rubyIvarAccess(o *jsObject, name string, args []interface{}) int
 	}
 	if name == "instance_variable_set" {
 		v := argAt(pos, 1)
-		o.set(n[1:], v)
+		if rubyClassObj(o) {
+			rubyCivSet(o, n[1:], v)
+		} else {
+			o.set(n[1:], v)
+		}
 		return v
 	}
 	if v, has := o.props[n[1:]]; has {
@@ -1357,6 +1369,15 @@ func (rt *jsrt) rubyIvarAccess(o *jsObject, name string, args []interface{}) int
 // ruby-interpreter.abnf and rbIvarNames in lib/ruby-rt.metajs.
 func rubyIvarNames(o *jsObject) *jsArray {
 	out := &jsArray{}
+	if rubyClassObj(o) {
+		if l, ok := o.props["__civn"].(*jsArray); ok {
+			for _, k := range l.elems {
+				name, _ := k.(string)
+				out.elems = append(out.elems, jsSym{s: "@" + name})
+			}
+		}
+		return out
+	}
 	for _, k := range o.keys {
 		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
 			continue
@@ -1960,4 +1981,32 @@ func (rt *jsrt) rubyEqlDeep(a, b interface{}) bool {
 		}
 	}
 	return true
+}
+
+// rubyClassObj: a class or module object.
+func rubyClassObj(o *jsObject) bool {
+	_, isCls := o.props["__isclass"]
+	return isCls
+}
+
+// rubyCivSet writes a class object's @ivar. Its instance methods are plain keys
+// of the same object, so the @ivar names are recorded in __civn, in assignment
+// order, for #instance_variables. Twin of js_rcivset in lib/ruby-rt.metajs.
+func rubyCivSet(o *jsObject, k string, v interface{}) {
+	l, ok := o.props["__civn"].(*jsArray)
+	if !ok {
+		l = &jsArray{}
+		o.set("__civn", l)
+	}
+	found := false
+	for _, e := range l.elems {
+		if e == interface{}(k) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		l.elems = append(l.elems, k)
+	}
+	o.set(k, v)
 }

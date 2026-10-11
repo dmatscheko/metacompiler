@@ -9462,13 +9462,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 		}
 	case "instance_variable_get", "instance_variable_set":
-		if o, isObj := target.(*jsObject); isObj && rubyUserObj(o) {
+		if o, isObj := target.(*jsObject); isObj && (rubyUserObj(o) || rubyClassObj(o)) {
 			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
 				return rt.rubyIvarAccess(o, name, args)
 			}
 		}
 	case "instance_variables":
-		if o, isObj := target.(*jsObject); isObj && rubyUserObj(o) {
+		if o, isObj := target.(*jsObject); isObj && (rubyUserObj(o) || rubyClassObj(o)) {
 			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
 				return rubyIvarNames(o)
 			}

@@ -3610,6 +3610,35 @@ def s80
                  r[0].to_s == "(?i-mx:x)" && [r[2]].inspect == "[/x/]")
 end
 
+# ===== SECTION 81: a class object's own instance variables =====
+# A class body's @ivars and a `def self.m' writing one belong to the class object:
+# C.instance_variables lists them in assignment order, without the class's
+# methods or constants, and a subclass does not inherit them. Every right-hand
+# side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+class S81C
+  @a = 1
+  [2].each { |v| @b = v }
+  K = 3
+  def self.setz
+    @z = 9
+  end
+  def inst
+    @i = 4
+  end
+  attr_accessor :q
+end
+class S81D < S81C
+end
+def s81
+  check("ci81a", S81C.instance_variables == [:@a, :@b] && S81C.instance_variable_get(:@a) == 1 &&
+                 S81D.instance_variables == [])
+  S81C.setz
+  S81C.instance_variable_set(:@w, 5)
+  S81C.new.inst
+  check("ci81b", S81C.instance_variables == [:@a, :@b, :@z, :@w] && S81C.instance_variable_get(:@w) == 5 &&
+                 S81C.new.instance_variables == [])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3652,5 +3681,6 @@ s77() # SECTION-CALL 77
 s78() # SECTION-CALL 78
 s79() # SECTION-CALL 79
 s80() # SECTION-CALL 80
+s81() # SECTION-CALL 81
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

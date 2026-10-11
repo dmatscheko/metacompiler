@@ -2795,6 +2795,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // whether the function being emitted (or one it is nested in) declared `self`.
     // Twin of ivarSelf in ruby-interpreter.abnf.
     var curHasSelf = false
+    // curSelfIsCls says that `self` is a CLASS object here (a class body, a
+    // `def self.m'), whose @ivar writes go through js_rcivset so #instance_variables
+    // can tell them from the class's methods - both are plain keys of the class
+    // object. nextSelfIsCls hands the answer to the next method body emitFunc opens.
+    var curSelfIsCls = false
+    var nextSelfIsCls = false
     function emitIvarSelf(b) {
         return callExt(b, "js_scope_get", [curScopeV, emitStr(b, curHasSelf ? "self" : "$main")])
     }
@@ -3720,7 +3726,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return b
         }
         if (ref.ivar != undefined) {
-            callExt(b, "js_set", [emitIvarSelf(b), emitStr(b, ref.ivar), v])
+            callExt(b, curSelfIsCls ? "js_rcivset" : "js_set", [emitIvarSelf(b), emitStr(b, ref.ivar), v])
             return b
         }
         if (ref.gvar != undefined) {
@@ -5162,6 +5168,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedBlkArg = emitBlkArg
         var savedHasSelf = curHasSelf
         if (isMethod) { curHasSelf = true }
+        var savedSelfIsCls = curSelfIsCls
+        if (isMethod) { curSelfIsCls = nextSelfIsCls }
+        nextSelfIsCls = false
         // A def starts a fresh local set; a block or lambda sees its enclosing one
         // but keeps what it binds itself; a begin/rescue/ensure closure IS its
         // enclosing scope as far as Ruby is concerned.
@@ -5239,6 +5248,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curBlkNonlocal = savedBlkNL
         emitBlkArg = savedBlkArg
         curHasSelf = savedHasSelf
+        curSelfIsCls = savedSelfIsCls
         curDefLocals = savedDefLocals
         curTopLocals = savedTopLocals
         curDefFn = savedDefFn
@@ -6687,6 +6697,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rk != "" && prefix == "") { key = "$q$" + m.name }
             curMethName = m.name
             curMethParams = paramNames(m.params)
+            nextSelfIsCls = prefix == "$s$"
             var idx = emitFunc(m.params, m.body, true, false, false, true)
             // A method closure enters the arity registry the way a block and a lambda
             // already did, so `method(:inst).arity` answers the parameter count rather
@@ -6902,6 +6913,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var lastV = hNull
             if (bodyTs.length > 0) {
+                nextSelfIsCls = true
                 var cbIdx = emitFunc([], makeBody(bodyTs), true)
                 var cbArgs = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [cbArgs, clsV])

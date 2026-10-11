@@ -8484,6 +8484,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 && (name == "format" || name == "sprintf" || name == "rand" || name == "srand")) {
                 return hostGlobals[name].apply(undefined, args)
             }
+            // A class object's own @ivars, recorded in __ivn like an instance's.
+            if (name == "instance_variables") { return ivarNames(target) }
+            if (name == "instance_variable_get" || name == "instance_variable_set") {
+                return ivarAccess(target, name == "instance_variable_set", args)
+            }
             noMethod(target, name)
         }
         noMethod(target, name)
