@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-355** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-357** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -75,20 +75,14 @@ denominator, conjugate() on int/float/bool too.
 
 # RB — Ruby
 
-### T-335 ruby: `casecmp` folds Unicode · P1 · RB · IN PROGRESS (JS+RB worker, round 7) [V]
-`"İstanbul".casecmp("STRASSE")` gives -1; MRI 1 (`casecmp` folds ASCII only and
-compares bytes; `casecmp?` folds Unicode).
-
-### T-341 ruby: Enumerator printing, `{}.each` without a block, Symbol#inspect quoting · P1 · RB · IN PROGRESS (JS+RB worker, round 7) [V]
-`p (1..3).each` prints "[object Object]" (MRI `#<Enumerator: 1..3:each>`); `p({a:
-1}.each)` aborts every leg (goja host TypeError, run "call of a non function value",
-native "member 'apply' of null"; MRI `#<Enumerator: {:a=>1}:each>`). `:"a b"`,
-`:"[q]"` print unquoted. `%w[a\] b]` does not parse (MRI `["a]", "b"]`).
-
-### T-342 ruby: reopening a builtin class does not add methods · P1 · RB · IN PROGRESS (JS+RB worker, round 7) [V]
-`class String; def shout; upcase + "!"; end; end; "hi".shout` - NoMethodError in all
-engines; MRI "HI!". Also an uncaught internal error lacks MRI's "file:line:in
-`<main>': " prefix.
+### T-356 ruby: uncaught-error prefix and stream; Exception methods compiled; small gaps · P2 · RB · OPEN [V]
+MRI 2.6 prints `p.rb:2:in `X': msg (Class)` on stderr, X the builtin method raising
+or the enclosing method/block (`block in <main>`); ours has no prefix and writes to
+stdout - needs per-call-site/operator positions in three engines (cost on the hot call
+path: measure). Compiled only: a bare `message` inside a user exception subclass's
+method raises NameError (no static table of Exception's methods). `%W[a b\ c]` loses
+the escaped space (MRI `["a", "b c"]`); `"#{enum}"` prints [object Object]; each_char
+iterates UTF-16 units (astral characters split).
 
 ---
 
@@ -107,19 +101,14 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-332 js: a surrogate-pair escape inside one literal in the interpreter · P1 · JS · IN PROGRESS (JS+RB worker, round 7) [V]
-`"\uD83D\uDE00".charCodeAt(0)` gives 65533 (twice) in the js interpreter under both
-hosts; node 55357. Separate literals joined with + work; both compiler halves are
-right.
-
-### T-333 js: InGen rescans the whole prefix per call · P3 · JS · IN PROGRESS (JS+RB worker, round 7) [V]
-The remaining -frozen memory/time cost of js-test-full.js part 1 (1.2 GB after slot
-reuse): make InGen incremental in the js grammars.
-
-### T-343 js: `Array.prototype`, `typeof Object` · P1 · JS · IN PROGRESS (JS+RB worker, round 7) [V]
-`Array.prototype` is undefined, so `Array.prototype.slice.call(x)` raises TypeError
-(node: the slice); `typeof Object` is "object" (node "function"). Check the other
-builtin constructors' `prototype` and typeof.
+### T-355 js: missing builtin globals and `.prototype` objects · P2 · JS · OPEN [V]
+Boolean, Function, Date, Symbol are undefined in every leg (node "function").
+`.prototype` is undefined for Error/TypeError/RangeError/SyntaxError/Map/Set (all legs)
+and for RegExp/Promise/BigInt compiled (the interpreter answers the host's - a halves
+divergence); `class C{}; C.prototype` undefined; `Array.isArray(Array.prototype)` false;
+`String(Object)` "[object Function]" (node "function Object() { [native code] }");
+`typeof Object.keys` (a static method read as a value) "undefined". Needs a prototype
+object per class descriptor and builtin - a value-model change: cost it.
 
 ---
 
@@ -524,6 +513,12 @@ T-338 bash: `@A/@a/@K/@k` on `$@`/`$*`; `${x:-"$@"}` under a null IFS; `${!e*}` 
 T-336 go: struct values alias; pointer identity — PARTIAL 46dd880 e5648d0 0458aa4 (struct value semantics and pointer ==); rest is T-350
 T-344 python: str.format conversion errors; ord()/chr() errors uncatchable — DONE 5b40343 1da292b
 T-345 php: hoisting, by-ref closure calls, string indexing, math library — DONE 5d85943 (spec-only; raw-byte echo is T-353)
+T-332 js: a surrogate-pair escape inside one literal in the interpreter — DONE 96d3115
+T-333 js: InGen rescans the whole prefix per call — DONE 3456e3a (77.4 s → 19.6 s, 1.21 GB → 770 MB under -frozen)
+T-335 ruby: `casecmp` folds Unicode — DONE 63cd2c4
+T-341 ruby: Enumerator printing, `{}.each` without a block, Symbol#inspect quoting — DONE 35389da c449a89
+T-342 ruby: reopening a builtin class does not add methods — PARTIAL 2763dd9 (builtin reopen); the uncaught-error prefix is T-356
+T-343 js: `Array.prototype`, `typeof Object` — PARTIAL ea31394 (typeof Object; Array/String/Number.prototype); rest is T-355
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
