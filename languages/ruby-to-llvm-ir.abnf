@@ -1302,9 +1302,9 @@ PctBigQ     <~~ push(makeTemplate(takeAll())) ~~>
             = "%Q" :whitespace() PctTplBody :whitespace(Whitespace) ;
 PctBare     <~~ push(makeTemplate(takeAll())) ~~>
             = "%" :whitespace() PctTplBody :whitespace(Whitespace) ;
-PctBigW     <~~ push(makeWordsThunk(makeTemplate(takeAll()), false)) ~~>
+PctBigW     <~~ push(makeWordsList(pctTplWords(takeAll()), false)) ~~>
             = "%W" :whitespace() PctTplBody :whitespace(Whitespace) ;
-PctBigI     <~~ push(makeWordsThunk(makeTemplate(takeAll()), true)) ~~>
+PctBigI     <~~ push(makeWordsList(pctTplWords(takeAll()), true)) ~~>
             = "%I" :whitespace() PctTplBody :whitespace(Whitespace) ;
 
 PctRawBody  = PctParRaw | PctBrkRaw | PctBrcRaw ;
@@ -1326,23 +1326,23 @@ PctTplBody  = "(" { TplExpr | PctParChunk } ")"
             | "|" { TplExpr | PctPipChunk } "|" ;
 // Ruby lets ANY non-alphanumeric character delimit a % literal; the bracket pairs
 // above and these two are the ones that turn up in practice.
-PctBngChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBngTC { PctBngTC } ;
+PctBngChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctBngTC { PctBngTC } ;
 PctBngTC    = TplEsc | HashChar | PctBngPlain ;
 PctBngPlain = "\x00"..."\x20" | "\x22" | "\x24"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctPipChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctPipTC { PctPipTC } ;
+PctPipChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctPipTC { PctPipTC } ;
 PctPipTC    = TplEsc | HashChar | PctPipPlain ;
 PctPipPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // The angle-bracket delimiter (%<a #{b}>), the fourth of Ruby's bracket pairs.
-PctAngChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctAngTC { PctAngTC } ;
+PctAngChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctAngTC { PctAngTC } ;
 PctAngTC    = TplEsc | HashChar | PctAngPlain ;
 PctAngPlain = "\x00"..."\x22" | "\x24"..."\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctParChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctParTC { PctParTC } ;
+PctParChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctParTC { PctParTC } ;
 PctParTC    = TplEsc | HashChar | PctParPlain ;
 PctParPlain = "\x00"..."\x22" | "\x24"..."\x27" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctBrkChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBrkTC { PctBrkTC } ;
+PctBrkChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctBrkTC { PctBrkTC } ;
 PctBrkTC    = TplEsc | HashChar | PctBrkPlain ;
 PctBrkPlain = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
-PctBrcChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
+PctBrcChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctBrcTC { PctBrcTC } ;
 PctBrcTC    = TplEsc | HashChar | PctBrcPlain ;
 PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
@@ -5523,8 +5523,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (kind == "w") { return makeConst(pctRawWords(body, open + close, false)) }
         if (kind == "i") { return makeConst(pctRawWords(body, open + close, true)) }
         if (kind == "s") { return makeConst(mkSym(body)) }
-        if (kind == "W") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), false) }
-        if (kind == "I") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), true) }
+        if (kind == "W") { return makeWordsList(pctTplWords(pctWordParts(body)), false) }
+        if (kind == "I") { return makeWordsList(pctTplWords(pctWordParts(body)), true) }
         if (kind == "x") { return makeCommand(makeTemplate(heredocPartsOf(body, false)), pos) }
         if (kind == "r") {
             var parts = heredocPartsOf(body, true)
@@ -5854,13 +5854,54 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < items.length; i++) { if (items[i].d != undefined) { return items[i].d } }
         return ""
     }
-    // %W / %I interpolate first, so the split has to happen at RUN time: the template
-    // thunk yields one string, which js_rsplitw turns into the array of words.
-    function makeWordsThunk(t, asSym) {
+    // %W / %I split at PARSE time, on the whitespace the source spells unescaped: an
+    // escaped space and whatever an interpolation yields stay inside their word, so
+    // %W[#{"a b"} c] is ["a b", "c"] and %W[#{""}] is [""]. items are a template's: a
+    // literal chunk carries its source text as wraw, anything else (an interpolation)
+    // is word content. The answer is one item list per word.
+    function pctTplWords(items) {
+        var words = []
+        var cur = []
+        var open = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.wraw == undefined) { cur.push(it); open = true; continue }
+            var raw = it.wraw
+            var seg = ""
+            var j = 0
+            while (j < raw.length) {
+                var cc = raw.charCodeAt(j)
+                if (cc == 92 && j + 1 < raw.length) { seg += raw.substring(j, j + 2); j = j + 2; continue }
+                if (cc == 32 || (cc >= 9 && cc <= 13)) {
+                    if (seg != "") { cur.push({s: unescapeRb(seg)}); seg = ""; open = true }
+                    if (open) { words.push(cur); cur = []; open = false }
+                } else { seg += raw.charAt(j) }
+                j = j + 1
+            }
+            if (seg != "") { cur.push({s: unescapeRb(seg)}); open = true }
+        }
+        if (open) { words.push(cur) }
+        return words
+    }
+    // A scanned %W / %I body as template items, its literal chunks kept as source.
+    function pctWordParts(body) {
+        var parts = heredocPartsOf(body, true)
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i].s != undefined && parts[i].s != "") { parts[i] = {wraw: parts[i].s} }
+        }
+        return parts
+    }
+    function makeWordsList(words, asSym) {
+        var ts = []
+        for (var i = 0; i < words.length; i++) { ts.push(makeTemplate(words[i])) }
         return function(b) {
-            var r = t(b)
-            b = r.b
-            return {b: b, v: callExt(b, "js_rsplitw", [r.v, asSym ? hTrue : hFalse])}
+            var arrV = callExt(b, "js_arr_new", [])
+            for (var k = 0; k < ts.length; k++) {
+                var r = ts[k](b)
+                b = r.b
+                callExt(b, "js_arr_push", [arrV, asSym ? callExt(b, "js_sym", [r.v]) : r.v])
+            }
+            return {b: b, v: arrV}
         }
     }
     function makeBitNot(t) {
@@ -6431,7 +6472,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             // Inside a method body a bare name that is a method of the SAME class (or
             // of one above it) is a call on the implicit self - `def intro; speak; end'.
-            if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name) || builtinSelfMethod(curClsName, name)) {
+            if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name) || builtinSelfMethod(curClsName, name) ||
+                excSelfMethod(curClsName, name)) {
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])}
             }
@@ -7423,6 +7465,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function builtinSelfMethod(cls, name) {
         if (reopenedBuiltins["$" + cls] == undefined || curDefLocals == null || knownLocal(name)) { return false }
         return rbResponds(cls, name) || nameIn(reopenedBuiltins["$" + cls], name)
+    }
+    // Exception's own methods by a bare name inside a method of a user exception
+    // class (`"my: " + message`): the class's chain ends at a builtin exception class,
+    // whose methods no class registry here records. Twin of excBase in
+    // ruby-interpreter.abnf, where they are ordinary inherited methods.
+    function excSelfMethod(cls, name) {
+        if (curDefLocals == null || knownLocal(name)) { return false }
+        if (name != "message" && name != "full_message" && name != "backtrace") { return false }
+        var c = cls
+        var hops = 0
+        while (c != undefined && c != "" && hops < 64) {
+            if (rubyBuiltinClasses.indexOf(c) >= rubyBuiltinClasses.indexOf("Exception")) { return true }
+            c = classSupers["$" + c]
+            hops = hops + 1
+        }
+        return false
     }
     function reopenableBuiltin(n) {
         return nameIn(rubyBuiltinClasses, n) && n != "Object" && n != "BasicObject" && n != "Class" &&

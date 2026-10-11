@@ -1559,9 +1559,9 @@ PctBigQ     <~~ push(makeTemplate(takeAll())) ~~>
             = "%Q" :whitespace() PctTplBody :whitespace(Whitespace) ;
 PctBare     <~~ push(makeTemplate(takeAll())) ~~>
             = "%" :whitespace() PctTplBody :whitespace(Whitespace) ;
-PctBigW     <~~ push(makeWordsThunk(makeTemplate(takeAll()), false)) ~~>
+PctBigW     <~~ push(makeWordsList(pctTplWords(takeAll()), false)) ~~>
             = "%W" :whitespace() PctTplBody :whitespace(Whitespace) ;
-PctBigI     <~~ push(makeWordsThunk(makeTemplate(takeAll()), true)) ~~>
+PctBigI     <~~ push(makeWordsList(pctTplWords(takeAll()), true)) ~~>
             = "%I" :whitespace() PctTplBody :whitespace(Whitespace) ;
 
 PctRawBody  = PctParRaw | PctBrkRaw | PctBrcRaw ;
@@ -1583,23 +1583,23 @@ PctTplBody  = "(" { TplExpr | PctParChunk } ")"
             | "|" { TplExpr | PctPipChunk } "|" ;
 // Ruby lets ANY non-alphanumeric character delimit a % literal; the bracket pairs
 // above and these two are the ones that turn up in practice.
-PctBngChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBngTC { PctBngTC } ;
+PctBngChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctBngTC { PctBngTC } ;
 PctBngTC    = TplEsc | HashChar | PctBngPlain ;
 PctBngPlain = "\x00"..."\x20" | "\x22" | "\x24"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctPipChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctPipTC { PctPipTC } ;
+PctPipChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctPipTC { PctPipTC } ;
 PctPipTC    = TplEsc | HashChar | PctPipPlain ;
 PctPipPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // The angle-bracket delimiter (%<a #{b}>), the fourth of Ruby's bracket pairs.
-PctAngChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctAngTC { PctAngTC } ;
+PctAngChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctAngTC { PctAngTC } ;
 PctAngTC    = TplEsc | HashChar | PctAngPlain ;
 PctAngPlain = "\x00"..."\x22" | "\x24"..."\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctParChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctParTC { PctParTC } ;
+PctParChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctParTC { PctParTC } ;
 PctParTC    = TplEsc | HashChar | PctParPlain ;
 PctParPlain = "\x00"..."\x22" | "\x24"..."\x27" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
-PctBrkChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBrkTC { PctBrkTC } ;
+PctBrkChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctBrkTC { PctBrkTC } ;
 PctBrkTC    = TplEsc | HashChar | PctBrkPlain ;
 PctBrkPlain = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
-PctBrcChunk <~~ push({s: unescapeRb(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
+PctBrcChunk <~~ push({s: unescapeRb(up.in), wraw: up.in}) ~~> = PctBrcTC { PctBrcTC } ;
 PctBrcTC    = TplEsc | HashChar | PctBrcPlain ;
 PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
@@ -5451,6 +5451,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // the address and the instance variables are left off rather than invented -
         // the same rule the Proc renderer below follows.
         if (isUserObj(v)) { return "#<" + v.__class.__name + ">" }
+        // Enumerator#to_s is Object#to_s, the address left off the same way.
+        if (isEnum(v)) { return "#<Enumerator>" }
         // A CLASS object stringifies as its name, not as "[object Object]", unless a
         // class method #to_s (its own or inherited) says otherwise.
         if (typeof v == "object" && v.__isclass === true) { return classText(v, "to_s") }
@@ -6875,22 +6877,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < items.length; i++) { if (items[i].raw != undefined) { return items[i].raw } }
         return ""
     }
-    // %w / %i: split the body on whitespace into strings (or symbols).
-    function splitWords(s) {
-        var out = []
-        var cur = ""
-        for (var i = 0; i < s.length; i++) {
-            var cc = s.charCodeAt(i)
-            if (cc == 32 || cc == 9 || cc == 10 || cc == 13) {
-                if (cur.length > 0) { out.push(cur); cur = "" }
-                continue
-            }
-            cur += s.charAt(i)
-        }
-        if (cur.length > 0) { out.push(cur) }
-        return out
-    }
-    function pctWords(s, asSym) { return pctSymbols(splitWords(s), asSym) }
     function pctRawWords(s, delims, asSym) { return pctSymbols(pctRawSplit(s, delims), asSym) }
     function pctSymbols(w, asSym) {
         if (!asSym) { return w }
@@ -6942,9 +6928,51 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < items.length; i++) { if (items[i].d != undefined) { return items[i].d } }
         return ""
     }
-    // %W / %I: the body interpolates first, so the split has to happen at run time.
-    function makeWordsThunk(t, asSym) {
-        return function() { return pctWords(rstr(t()), asSym) }
+    // %W / %I split at PARSE time, on the whitespace the source spells unescaped: an
+    // escaped space and whatever an interpolation yields stay inside their word, so
+    // %W[#{"a b"} c] is ["a b", "c"] and %W[#{""}] is [""]. items are a template's: a
+    // literal chunk carries its source text as wraw, anything else (an interpolation)
+    // is word content. The answer is one item list per word.
+    function pctTplWords(items) {
+        var words = []
+        var cur = []
+        var open = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.wraw == undefined) { cur.push(it); open = true; continue }
+            var raw = it.wraw
+            var seg = ""
+            var j = 0
+            while (j < raw.length) {
+                var cc = raw.charCodeAt(j)
+                if (cc == 92 && j + 1 < raw.length) { seg += raw.substring(j, j + 2); j = j + 2; continue }
+                if (cc == 32 || (cc >= 9 && cc <= 13)) {
+                    if (seg != "") { cur.push({s: unescapeRb(seg)}); seg = ""; open = true }
+                    if (open) { words.push(cur); cur = []; open = false }
+                } else { seg += raw.charAt(j) }
+                j = j + 1
+            }
+            if (seg != "") { cur.push({s: unescapeRb(seg)}); open = true }
+        }
+        if (open) { words.push(cur) }
+        return words
+    }
+    // A scanned %W / %I body as template items, its literal chunks kept as source.
+    function pctWordParts(body) {
+        var parts = heredocPartsOf(body, true)
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i].s != undefined && parts[i].s != "") { parts[i] = {wraw: parts[i].s} }
+        }
+        return parts
+    }
+    function makeWordsList(words, asSym) {
+        var ts = []
+        for (var i = 0; i < words.length; i++) { ts.push(makeTemplate(words[i])) }
+        return function() {
+            var out = []
+            for (var k = 0; k < ts.length; k++) { out.push(ts[k]()) }
+            return pctSymbols(out, asSym)
+        }
     }
     // `arity' is the only method whose answer needs a closure's PARAMETER SHAPE, and
     // that shape can only be kept in a registry keyed by function identity - which
@@ -7258,8 +7286,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (kind == "w") { return makeConst(pctRawWords(body, open + close, false)) }
         if (kind == "i") { return makeConst(pctRawWords(body, open + close, true)) }
         if (kind == "s") { return makeConst(mkSym(body)) }
-        if (kind == "W") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), false) }
-        if (kind == "I") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), true) }
+        if (kind == "W") { return makeWordsList(pctTplWords(pctWordParts(body)), false) }
+        if (kind == "I") { return makeWordsList(pctTplWords(pctWordParts(body)), true) }
         if (kind == "x") { return makeCommand(makeTemplate(heredocPartsOf(body, false)), pos) }
         if (kind == "r") {
             var parts = heredocPartsOf(body, true)
@@ -8361,9 +8389,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "ord") { return target.length == 0 ? 0 : target.charCodeAt(0) }
             if (name == "succ" || name == "next") { return strSucc(target) }
             if (name == "replace") { return rstr(args[0]) }
+            // One CHARACTER at a time, a surrogate pair whole, as chars splits.
             if (name == "each_char") {
-                if (blk == null) { return enumAt(mkEnum(target.split("")), target, name, args) }
-                for (var sc = 0; sc < target.length; sc++) { blockCall(blk, [target.charAt(sc)]) }
+                var ecs = target.split("")
+                if (blk == null) { return enumAt(mkEnum(ecs), target, name, args) }
+                for (var sc = 0; sc < ecs.length; sc++) { blockCall(blk, [ecs[sc]]) }
                 return target
             }
             if (name == "include?") { return target.indexOf(rstr(args[0])) >= 0 }
@@ -10444,7 +10474,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         } catch (e) {
             if (excIsUser(e)) {
-                println(excTopLine(e.v))
+                eprintln(excTopLine(e.v))
                 exit(1)
             }
             throw e

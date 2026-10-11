@@ -3848,6 +3848,31 @@ def s85
                  !5.respond_to?(:s85_shout) && "x".class == String && "x".is_a?(String))
 end
 
+# ===== SECTION 86: Exception's methods by bare name, %W escapes, Enumerator#to_s, each_char =====
+# Inside a method of an exception subclass, `message` is the inherited method. %W
+# splits only on whitespace the source spells unescaped; an interpolation is never
+# split. An Enumerator's #to_s is Object#to_s (MRI adds an address, which no engine
+# here invents). each_char yields CHARACTERS, an astral one whole. Every right-hand
+# side is /usr/bin/ruby 2.6.10's own answer, the address left off. THIS SECTION
+# RUNS UNDER REAL RUBY.
+class S86Err < StandardError
+  def describe
+    "my: " + message
+  end
+end
+def s86
+  e = S86Err.new("x")
+  r = begin; raise S86Err, "boom"; rescue S86Err => ex; ex.describe; end
+  check("ex86a", e.describe == "my: x" && r == "my: boom")
+  v = "a b"
+  check("pw86b", %W[a b\ c d] == ["a", "b c", "d"] && %W[#{v} c] == ["a b", "c"] && %W[#{""}] == [""] &&
+                 %I[x\ y z] == [:"x y", :z] && %W(p\nq) == ["p\nq"])
+  check("en86c", "#{3.times}".start_with?("#<Enumerator") && [1].each.to_s.start_with?("#<Enumerator"))
+  cs = []
+  "a\u{1F600}b".each_char { |c| cs << c }
+  check("ec86d", cs == ["a", "\u{1F600}", "b"] && "a\u{1F600}b".each_char.to_a.length == 3)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3895,5 +3920,6 @@ s82() # SECTION-CALL 82
 s83() # SECTION-CALL 83
 s84() # SECTION-CALL 84
 s85() # SECTION-CALL 85
+s86() # SECTION-CALL 86
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

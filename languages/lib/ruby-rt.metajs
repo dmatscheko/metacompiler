@@ -1677,6 +1677,7 @@ function rbStr(v) {
         var cn = rbInstClassName(v)
         if (cn != "") { return "#<" + cn + ">" }
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "to_s", [])) }
+        if (rbIsEnum(v)) { return "#<Enumerator>" }
     }
     if (typeof v == "function") { return rbFuncRender(v) }
     return "" + v
@@ -7116,13 +7117,10 @@ function rbMethod(target, name, args) {
         if (name == "replace") { return rbStr(rbArgAt(args, 0)) }
         if (name == "each_char") {
             var ecb = rbBlockOf(args)
+            var ecl = rbStrChars(target)
+            if (ecb === null) { return rbEnumAt(rbMkEnum(ecl), target, name, args) }
             var ec = 0
-            if (ecb === null) {
-                var ecl = []
-                while (ec < target.length) { ecl.push(target.charAt(ec)); ec = ec + 1 }
-                return rbEnumAt(rbMkEnum(ecl), target, name, args)
-            }
-            while (ec < target.length) { rbCall1(ecb, target.charAt(ec)); ec = ec + 1 }
+            while (ec < ecl.length) { rbCall1(ecb, ecl[ec]); ec = ec + 1 }
             return target
         }
         if (name == "dup" || name == "clone" || name == "freeze") { return target }
@@ -7658,32 +7656,6 @@ function js_rformat(args) {
 function js_rrand(args) {
     if (!rbIsArr(args) || args.length == 0) { return rbRand(null) }
     return rbRand(args[0])
-}
-
-// %W[..] / %I[..]: split an interpolated body on whitespace into an array of
-// strings (or of symbols when the flag is set). strings.Fields drops empties.
-function js_rsplitw(v, asSym) {
-    var s = rbStr(v)
-    var sym = rbTruthy(asSym)
-    var out = []
-    var cur = ""
-    var i = 0
-    while (i < s.length) {
-        var c = s.charCodeAt(i)
-        var isSp = false
-        if (c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12) { isSp = true }
-        if (isSp) {
-            if (cur != "") {
-                out.push(sym ? rbSym(cur) : cur)
-                cur = ""
-            }
-        } else {
-            cur = cur + s.charAt(i)
-        }
-        i = i + 1
-    }
-    if (cur != "") { out.push(sym ? rbSym(cur) : cur) }
-    return out
 }
 
 // Ruby indexing: a Proc calls itself, a user class dispatches `def [](i)`, a Hash
@@ -8893,11 +8865,11 @@ function js_rraiseat(v, msg, where) {
 
 // THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the floor's
 // uncaught-throw handler would render it with the generic object toString
-// ("[object Object]"). This is MRI's own first line, and rbExcTopLine is shared
-// with the interpreter half's runProgram so all three engines print the SAME
-// text.
+// ("[object Object]"). This is MRI's own first line, on stderr as MRI writes it,
+// and rbExcTopLine is shared with the interpreter half's runProgram so all three
+// engines print the SAME text.
 function js_rtop(exc) {
-    println(rbExcTopLine(exc))
+    eprintln(rbExcTopLine(exc))
     exit(1)
     return undefined
 }

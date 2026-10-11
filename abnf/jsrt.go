@@ -8226,6 +8226,10 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 				return rt.toString(s)
 			}
 		}
+		// Enumerator#to_s is Object#to_s, the address left off the same way.
+		if rubyIsEnum(t) {
+			return "#<Enumerator>"
+		}
 	}
 	if isCallable(v) {
 		return rt.rubyFuncRender(v)
@@ -9917,16 +9921,17 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "replace":
 			return rt.toString(argAt(args, 0))
 		case "each_char":
+			// One CHARACTER at a time, as chars splits.
 			cpos, blk := rubyBlockArgs(args)
 			if blk == nil {
 				chars := &jsArray{}
-				for i := 0; i < rt.strLen(o); i++ {
-					chars.elems = append(chars.elems, rt.strAt(o, i))
+				for _, r := range o {
+					chars.elems = append(chars.elems, string(r))
 				}
 				return rubyEnumAt(rubyMkEnum(chars), o, name, cpos)
 			}
-			for i := 0; i < rt.strLen(o); i++ {
-				rt.call(blk, jsUndef, []interface{}{rt.strAt(o, i)})
+			for _, r := range o {
+				rt.call(blk, jsUndef, []interface{}{string(r)})
 			}
 			return o
 		case "dup", "clone", "freeze", "to_str", "+@", "-@", "itself":
@@ -13216,9 +13221,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			panic(&jsThrown{value: e})
 		},
 		// THE TOP OF THE PROGRAM: an exception nobody rescued, printed with its
-		// message and class rather than by the generic uncaught-throw handler.
+		// message and class rather than by the generic uncaught-throw handler,
+		// on stderr as MRI writes it.
 		"js_rtop": func(a []uint64) uint64 {
-			fmt.Fprintln(outWriter, wtf8Clean(rt.rubyExcTopLine(u(a[0]))))
+			fmt.Fprintln(warnWriter, wtf8Clean(rt.rubyExcTopLine(u(a[0]))))
 			os.Exit(1)
 			return 0
 		},
@@ -14165,20 +14171,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				arr = &jsArray{}
 			}
 			return w(rt.rubyKernelConv(rt.toString(u(a[0])), arr.elems))
-		},
-		// %W[..] / %I[..]: split an interpolated body on whitespace into an array of
-		// strings (or of symbols when the flag is set).
-		"js_rsplitw": func(a []uint64) uint64 {
-			out := &jsArray{}
-			asSym := rubyTruthy(u(a[1]))
-			for _, word := range strings.Fields(rt.rubyStr(u(a[0]))) {
-				if asSym {
-					out.elems = append(out.elems, jsSym{s: word})
-				} else {
-					out.elems = append(out.elems, word)
-				}
-			}
-			return w(out)
 		},
 		// ----- PHP's value model (see jsrtphp.go) -----
 		// Only php-to-llvm-ir.abnf emits these. They give the compiler the value
