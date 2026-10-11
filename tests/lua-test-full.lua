@@ -23,10 +23,11 @@
 -- max/min) plus the five names through which Lua 5.3+ makes the integer
 -- subtype visible at all - math.type/tointeger/fmod/maxinteger/mininteger,
 -- without which sections 21 and 22 could not be written - and the pattern
--- half of the string library with select (SECTION 30) and string.format
--- (SECTION 35). That rules out setmetatable - so metatables, the operator
--- metamethods and the <close> attribute (needs __close) stay untested - and
--- likewise tostring and coroutine.* (library calls, not syntax). error/pcall/xpcall are in, because
+-- half of the string library with select (SECTION 30), string.format
+-- (SECTION 35) and the base and table library (SECTION 36). That rules out
+-- setmetatable - so metatables, the operator metamethods and the <close>
+-- attribute (needs __close) stay untested - and likewise coroutine.* (library
+-- calls, not syntax). error/pcall/xpcall are in, because
 -- without them no error is observable at all (SECTION 27). Lua has no
 -- chained comparisons (a < b < c is a type error by design), so none appear.
 --
@@ -1454,6 +1455,122 @@ function s35()
     check("sf18", msg(function() return ("%d"):format("x") end), "bad argument #1 to 'format' (number expected, got string)")
 end
 
+-- ===== SECTION 36: the base and table library =====
+-- next with its value, tostring/tonumber/type, assert and the raw* family, and the
+-- whole table library. Every expected value was printed by lua 5.5; a sort's
+-- comparator log follows ltablib.c's auxsort call for call.
+function s36()
+    local function msg(f, ...)
+        local ok, m = pcall(f, ...)
+        if ok then return "no error" end
+        return (string.gsub(m, "^.-:%d+: ", ""))
+    end
+    local function pack(...) return {n = select("#", ...), ...} end
+    local function join(...)
+        local p = pack(...)
+        local out = ""
+        for i = 1, p.n do out = out .. (i > 1 and "," or "") .. tostring(p[i]) end
+        return p.n .. ":" .. out
+    end
+    local t1 = {a = 1}
+    local t2 = {10, 20}
+    check("bt1", join(next(t1)), "2:a,1")
+    check("bt2", join(next(t2)), "2:1,10")
+    check("bt3", join(next(t2, 1)), "2:2,20")
+    check("bt4", join(next(t2, 2)), "1:nil")
+    check("bt5", join(next({})), "1:nil")
+    check("bt6", msg(next, 5), "bad argument #1 to 'next' (table expected, got number)")
+    check("bt7", msg(next, {}, "zz"), "invalid key to 'next'")
+    local seen = ""
+    for k, v in next, {7, 8} do seen = seen .. k .. "=" .. v .. ";" end
+    check("bt8", seen, "1=7;2=8;")
+    check("bt9", join(tostring(12), tostring(1.5), tostring(nil), tostring(true), tostring(2^63), tostring(-0.0)),
+          "6:12,1.5,nil,true,9.2233720368547758e+18,-0.0")
+    check("bt10", msg(tostring), "bad argument #1 to 'tostring' (value expected)")
+    local ns = {"12", "0x1f", "z", " 3.5 ", "1e2", " -0x10 ", "5 5", ".5", "0x"}
+    check("bt11", join(tonumber(ns[1]), tonumber(ns[2]), tonumber(ns[3]), tonumber(ns[4]), tonumber(ns[5]),
+                       tonumber(ns[6]), tonumber(ns[7]), tonumber(ns[8]), tonumber(ns[9])),
+          "9:12,31,nil,3.5,100.0,-16,nil,0.5,nil")
+    check("bt12", join(tonumber(7), tonumber(1.5), tonumber(nil), tonumber({})), "4:7,1.5,nil,nil")
+    local bs = {"10", "ff", "zz", "-ff", " 11 ", "12", "", "7fffffffffffffff", "ffffffffffffffff", "+7"}
+    check("bt13", join(tonumber(bs[1], 2), tonumber(bs[2], 16), tonumber(bs[3], 36), tonumber(bs[4], 16),
+                       tonumber(bs[5], 2), tonumber(bs[6], 2), tonumber(bs[7], 10), tonumber(bs[8], 16),
+                       tonumber(bs[9], 16), tonumber(bs[10], 8)),
+          "10:2,255,1295,-255,3,nil,nil,9223372036854775807,-1,7")
+    check("bt14", math.type(tonumber(bs[1], 10)), "integer")
+    check("bt15", msg(tonumber), "bad argument #1 to 'tonumber' (value expected)")
+    check("bt16", msg(tonumber, 10, 16), "bad argument #1 to 'tonumber' (string expected, got number)")
+    check("bt17", msg(tonumber, "10", 37), "bad argument #2 to 'tonumber' (base out of range)")
+    check("bt18", msg(tonumber, "10", 2.5), "bad argument #2 to 'tonumber' (number has no integer representation)")
+    check("bt19", join(type(1), type("a"), type({}), type(print), type(nil), type(true), type(1.5)),
+          "7:number,string,table,function,nil,boolean,number")
+    check("bt20", msg(type), "bad argument #1 to 'type' (value expected)")
+    check("bt21", join(assert(1, "m")), "2:1,m")
+    check("bt22", join(assert(true, 2, 3)), "3:true,2,3")
+    check("bt23", msg(assert, false), "assertion failed!")
+    check("bt24", msg(assert, nil, "boom"), "boom")
+    check("bt25", msg(assert), "bad argument #1 to 'assert' (value expected)")
+    local ok, m = pcall(function() assert(false) end)
+    check("bt26", string.find(m, ":%d+: assertion failed!$") ~= nil, true)
+    check("bt27", join(rawequal(1, 1.0), rawequal("a", "a"), rawequal({}, {}), rawequal(t1, t1), rawequal(0, -0)),
+          "5:true,true,false,true,true")
+    local t = {5, x = 7}
+    check("bt28", join(rawget(t, 1), rawget(t, "x"), rawget(t, "nope")), "3:5,7,nil")
+    check("bt29", rawset(t, "y", 9) == t and t.y, 9)
+    check("bt30", join(rawlen(t), rawlen("abc"), rawlen({1, 2, 3})), "3:1,3,3")
+    check("bt31", msg(rawlen, 5), "bad argument #1 to 'rawlen' (table or string expected, got number)")
+    check("bt32", msg(rawget, 5, 1), "bad argument #1 to 'rawget' (table expected, got number)")
+    check("bt33", _VERSION, "Lua 5.5")
+    check("bt34", join(table.concat({1, 2, 3}, ","), table.concat({"a", "b"}), table.concat({1, 2, 3}, "-", 2, 3),
+                       table.concat({}, "x"), table.concat({1.5, 2}, " "), table.concat({1, 2, 3}, ", ", 3, 2)),
+          "6:1,2,3,ab,2-3,,1.5 2,")
+    check("bt35", msg(table.concat, {1, {}, 3}), "invalid value (table) at index 2 in table for 'concat'")
+    check("bt36", msg(table.concat, {1, 2}, ",", 1, 3), "invalid value (nil) at index 3 in table for 'concat'")
+    check("bt37", msg(table.concat), "bad argument #1 to 'table.concat' (table expected, got no value)")
+    local s = {1, 2, 3}
+    table.insert(s, 1, 0)
+    table.insert(s, 3, 9)
+    check("bt38", table.concat(s, " "), "0 1 9 2 3")
+    check("bt39", msg(table.insert, s, 9, 1), "bad argument #2 to 'table.insert' (position out of bounds)")
+    check("bt40", msg(table.insert, s, 1, 2, 3), "wrong number of arguments to 'insert'")
+    check("bt41", table.remove(s, 1) .. "|" .. table.concat(s, " "), "0|1 9 2 3")
+    check("bt42", table.remove(s) .. "|" .. table.concat(s, " "), "3|1 9 2")
+    check("bt43", join(table.remove({}), table.remove({}, 0)), "2:nil,nil")
+    check("bt44", msg(table.remove, s, 7), "bad argument #2 to 'table.remove' (position out of bounds)")
+    check("bt45", join(table.unpack({1, 2, 3})), "3:1,2,3")
+    check("bt46", join(table.unpack({1, 2, 3}, 2)), "2:2,3")
+    check("bt47", join(table.unpack({1, 2, 3}, 2, 5)), "4:2,3,nil,nil")
+    check("bt48", select("#", table.unpack({})), 0)
+    check("bt49", msg(table.unpack, {}, 1, 2000000), "too many results to unpack")
+    local p = table.pack(1, nil, 3)
+    check("bt50", join(p.n, p[1], p[2], p[3]), "4:3,1,nil,3")
+    local q = {5, 2, 8, 1, 9, 3}
+    table.sort(q)
+    check("bt51", table.concat(q, " "), "1 2 3 5 8 9")
+    table.sort(q, function(a, b) return a > b end)
+    check("bt52", table.concat(q, " "), "9 8 5 3 2 1")
+    local w = {"pear", "apple", "fig"}
+    table.sort(w)
+    check("bt53", table.concat(w, " "), "apple fig pear")
+    check("bt54", msg(table.sort, {1, "a", 2}), "attempt to compare string with number")
+    check("bt55", msg(table.sort, {1, 2, 3}, 5), "bad argument #2 to 'table.sort' (function expected, got number)")
+    local calls = {}
+    local d = {4, 7, 1, 9, 3, 8, 2, 6, 5, 10, 0}
+    table.sort(d, function(a, b) calls[#calls + 1] = a .. "<" .. b return a < b end)
+    check("bt56", #calls .. " " .. table.concat(calls, " "),
+          "31 0<4 8<0 4<8 7<4 4<5 4<6 4<2 1<4 9<4 4<10 4<3 9<4 4<3 3<0 2<0 3<2 1<2 2<2 2<1 1<0 8<10 6<8 7<8 9<8 8<5 9<8 8<5 10<9 5<6 7<5 6<7")
+    check("bt57", table.concat(d, " "), "0 1 2 3 4 5 6 7 8 9 10")
+    local big = {}
+    for i = 1, 300 do big[i] = (i * 7919) % 1000 end
+    table.sort(big)
+    local sorted = true
+    for i = 2, 300 do if big[i - 1] > big[i] then sorted = false end end
+    check("bt58", join(sorted, big[1], big[300]), "3:true,3,996")
+    check("bt59", table.concat(table.move({1, 2, 3}, 1, 3, 2), " "), "1 1 2 3")
+    check("bt60", table.concat(table.move({1, 2, 3}, 1, 2, 1, {}), " "), "1 2")
+    check("bt61", msg(table.move, {1}, 1, 1), "bad argument #4 to 'table.move' (number expected, got no value)")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1465,5 +1582,6 @@ s32() -- SECTION-CALL 32
 s33() -- SECTION-CALL 33
 s34() -- SECTION-CALL 34
 s35() -- SECTION-CALL 35
+s36() -- SECTION-CALL 36
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

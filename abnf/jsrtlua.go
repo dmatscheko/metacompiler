@@ -773,6 +773,15 @@ func luExpFix(s string) string {
 	return mant + "e" + sign + exp
 }
 
+// luKeyBack is a stored key text as the key the program wrote: a text that
+// reads as a numeral and addresses the same slot again was that number.
+func (rt *jsrt) luKeyBack(s string) interface{} {
+	if n, isNum := luParseNum(s); isNum && rt.toString(luKey(n)) == s {
+		return n
+	}
+	return s
+}
+
 // luKey normalises a table key. Numbers and strings address the map the way the
 // runtime's own js_get does; a float with an exact integer value normalises to
 // that INTEGER key, which is Lua's own rule (t[2.0] is t[2]). An integer past
@@ -867,10 +876,7 @@ func init() {
 			if !ok {
 				return a[0]
 			}
-			if n, isNum := luParseNum(s); isNum && rt.toString(luKey(n)) == s {
-				return w(n)
-			}
-			return a[0]
+			return w(rt.luKeyBack(s))
 		}
 		// A literal the emitter could not put in the module as a double, because
 		// emitNum would already have rounded 9223372036854775807 to

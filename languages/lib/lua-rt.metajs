@@ -1461,3 +1461,288 @@ function js_luselect(args) {
     for (var k = i; k < n; k++) { out.push(args[k]) }
     return luMk(out)
 }
+
+// ============================================== the base and table library ===
+// Twins of abnf/jsrtlutab.go, function for function; each takes the call's
+// ARGUMENT ARRAY.
+function luIsTable(v) { return luTypeName(v) == "table" }
+// luaL_checktype(L, n, LUA_TTABLE).
+function luCheckTab(fn, n, args) {
+    var v = luArgAt(args, n)
+    if (!luIsTable(v)) { luArgTypeErr(fn, n, "table", args) }
+    return v
+}
+// #t of a table: the first n with t[n + 1] nil.
+function luBorder(t) {
+    var n = 0
+    while (t[n + 1] !== undefined) { n = n + 1 }
+    return n
+}
+
+// next(t [, k]): the key after k in the table's insertion order, skipping keys
+// whose value is nil, and its value; nil past the last one.
+function js_lunext(args) {
+    var t = luCheckTab("next", 1, args)
+    var keys = keysOf(t)
+    var i = 0
+    var k = luArgAt(args, 2)
+    if (k !== undefined && k !== null) {
+        var kk = "" + js_lukey(k)
+        while (i < keys.length && keys[i] !== kk) { i = i + 1 }
+        // A runtime error raised inside a C function: lua gives it no position,
+        // so it travels as the bare string.
+        if (i === keys.length) { throw "invalid key to 'next'" }
+        i = i + 1
+    }
+    while (i < keys.length) {
+        var v = t[keys[i]]
+        if (v !== undefined && v !== null) { return luMk([js_lukeyback(keys[i]), v]) }
+        i = i + 1
+    }
+    return undefined
+}
+
+// lbaselib's b_str2int: the whole string, blanks around it allowed, as an
+// integer in base `base`, wrapping at 64 bits; undefined when it is not one.
+function luIsBlank(c) { return c === 32 || (c >= 9 && c <= 13) }
+function luAlnumVal(c) {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    var l = c | 32
+    if (l >= 97 && l <= 122) { return l - 97 + 10 }
+    return 0 - 1
+}
+function luStr2Int(s, base) {
+    var i = 0
+    var n = s.length
+    while (i < n && luIsBlank(s.charCodeAt(i))) { i = i + 1 }
+    var neg = false
+    if (i < n && (s.charAt(i) == "-" || s.charAt(i) == "+")) {
+        neg = s.charAt(i) == "-"
+        i = i + 1
+    }
+    if (i >= n || luAlnumVal(s.charCodeAt(i)) < 0) { return undefined }
+    var acc = i64Make(0, 0)
+    var bp = i64Make(0, base)
+    while (i < n && luAlnumVal(s.charCodeAt(i)) >= 0) {
+        var d = luAlnumVal(s.charCodeAt(i))
+        if (d >= base) { return undefined }
+        acc = i64Add(i64Mul(acc, bp), i64Make(0, d))
+        i = i + 1
+    }
+    while (i < n && luIsBlank(s.charCodeAt(i))) { i = i + 1 }
+    if (i !== n) { return undefined }
+    if (neg) { acc = i64Neg(acc) }
+    return luNorm(acc)
+}
+// tonumber(v [, base]).
+function js_lutonumber(args) {
+    var bv = luArgAt(args, 2)
+    if (bv === undefined || bv === null) {
+        var r = luToNum(luArgAt(args, 1))
+        if (r !== undefined) { return r }
+        luCheckAny("tonumber", 1, args)
+        return undefined
+    }
+    var base = luCheckInt("tonumber", 2, args)
+    var s = luArgAt(args, 1)
+    if (typeof s != "string") { luArgTypeErr("tonumber", 1, "string", args) }
+    if (base < 2 || base > 36) { luArgErr("tonumber", 2, "base out of range") }
+    return luStr2Int(s, base)
+}
+// assert(v [, msg, ...]): every argument back when v is truthy, else error(msg) -
+// a string gains the caller's position - with "assertion failed!" for a missing
+// msg.
+function js_luassert(args) {
+    var v = luArgAt(args, 1)
+    if (v !== undefined && v !== null && v !== false) {
+        var all = []
+        for (var i = 0; i < args.length; i++) { all.push(args[i]) }
+        return luMk(all)
+    }
+    luCheckAny("assert", 1, args)
+    var msg = anytype
+    msg = "assertion failed!"
+    if (args.length > 1) { msg = args[1] }
+    if (typeof msg == "string") { luFail(msg) }
+    throw msg
+}
+function js_lurawequal(args) {
+    luCheckAny("rawequal", 1, args)
+    luCheckAny("rawequal", 2, args)
+    return js_lueq(args[0], args[1])
+}
+function js_lurawget(args) {
+    var t = luCheckTab("rawget", 1, args)
+    luCheckAny("rawget", 2, args)
+    return t[js_lukey(args[1])]
+}
+function js_lurawset(args) {
+    var t = luCheckTab("rawset", 1, args)
+    luCheckAny("rawset", 2, args)
+    luCheckAny("rawset", 3, args)
+    t[js_lukey(args[1])] = args[2]
+    return t
+}
+function js_lurawlen(args) {
+    var v = luArgAt(args, 1)
+    if (typeof v == "string") { return v.length }
+    if (!luIsTable(v)) { luArgTypeErr("rawlen", 1, "table or string", args) }
+    return luBorder(v)
+}
+
+// ----- the table library -----
+function js_luconcat(args) {
+    var t = luCheckTab("table.concat", 1, args)
+    var sep = luOptStr("table.concat", 2, args, "")
+    var i = luOptInt("table.concat", 3, args, 1)
+    var last = 0
+    var lv = luArgAt(args, 4)
+    if (lv === undefined || lv === null) { last = luBorder(t) } else { last = luCheckInt("table.concat", 4, args) }
+    var out = ""
+    while (i <= last) {
+        var v = t[i]
+        if (typeof v == "string") { out = out + v }
+        else if (luIsNum(v)) { out = out + js_lustr(v) }
+        else { luFail("invalid value (" + luTypeName(v) + ") at index " + js_lustr(i) + " in table for 'concat'") }
+        if (i < last) { out = out + sep }
+        i = i + 1
+    }
+    return out
+}
+function js_luinsert(args) {
+    var t = luCheckTab("table.insert", 1, args)
+    var e = luBorder(t) + 1
+    if (args.length === 2) {
+        t[e] = args[1]
+    } else if (args.length === 3) {
+        var pos = luCheckInt("table.insert", 2, args)
+        if (pos < 1 || pos > e) { luArgErr("table.insert", 2, "position out of bounds") }
+        var i = e
+        while (i > pos) {
+            t[i] = t[i - 1]
+            i = i - 1
+        }
+        t[pos] = args[2]
+    } else {
+        luFail("wrong number of arguments to 'insert'")
+    }
+    return undefined
+}
+function js_luremove(args) {
+    var t = luCheckTab("table.remove", 1, args)
+    var size = luBorder(t)
+    var pos = luOptInt("table.remove", 2, args, size)
+    if (pos !== size && (pos < 1 || pos > size + 1)) { luArgErr("table.remove", 2, "position out of bounds") }
+    var v = t[pos]
+    while (pos < size) {
+        t[pos] = t[pos + 1]
+        pos = pos + 1
+    }
+    t[pos] = undefined
+    return v
+}
+function js_luunpack(args) {
+    var t = luCheckTab("table.unpack", 1, args)
+    var i = luOptInt("table.unpack", 2, args, 1)
+    var e = 0
+    var ev = luArgAt(args, 3)
+    if (ev === undefined || ev === null) { e = luBorder(t) } else { e = luCheckInt("table.unpack", 3, args) }
+    var out = []
+    if (i > e) { return luMk(out) }
+    // lua's stack limit (LUAI_MAXSTACK) is what refuses a huge range.
+    if (e - i >= 1000000) { luFail("too many results to unpack") }
+    while (i <= e) {
+        out.push(t[i])
+        i = i + 1
+    }
+    return luMk(out)
+}
+function js_lupack(args) {
+    var t = {}
+    for (var i = 0; i < args.length; i++) { t[i + 1] = args[i] }
+    t["n"] = args.length
+    return t
+}
+// sort_comp: the comparator's first result, or a < b.
+function luSortLess(cmp, a, b) {
+    if (cmp === undefined || cmp === null) { return js_lucmp(0, a, b) }
+    var r = luFirstOf(cmp.apply(undefined, [a, b]))
+    return r !== undefined && r !== null && r !== false
+}
+function luSwap(t, i, j) {
+    var a = t[i]
+    t[i] = t[j]
+    t[j] = a
+}
+// ltablib.c's auxsort with the middle element as the pivot (lua randomizes the
+// pivot only for a badly unbalanced partition of more than 100 elements), so a
+// comparator sees the same calls in the same order.
+function luAuxSort(t, cmp, lo0, up0) {
+    var lo = lo0
+    var up = up0
+    while (lo < up) {
+        if (luSortLess(cmp, t[up], t[lo])) { luSwap(t, lo, up) }
+        if (up - lo === 1) { return undefined }
+        var p = lo + Math.floor((up - lo) / 2)
+        if (luSortLess(cmp, t[p], t[lo])) { luSwap(t, p, lo) }
+        else if (luSortLess(cmp, t[up], t[p])) { luSwap(t, p, up) }
+        if (up - lo === 2) { return undefined }
+        var pv = t[p]
+        luSwap(t, p, up - 1)
+        var i = lo
+        var j = up - 1
+        var going = true
+        while (going) {
+            i = i + 1
+            while (luSortLess(cmp, t[i], pv)) {
+                if (i === up - 1) { luFail("invalid order function for sorting") }
+                i = i + 1
+            }
+            j = j - 1
+            while (luSortLess(cmp, pv, t[j])) {
+                if (j < i) { luFail("invalid order function for sorting") }
+                j = j - 1
+            }
+            if (j < i) { going = false } else { luSwap(t, i, j) }
+        }
+        luSwap(t, up - 1, i)
+        if (i - lo < up - i) {
+            luAuxSort(t, cmp, lo, i - 1)
+            lo = i + 1
+        } else {
+            luAuxSort(t, cmp, i + 1, up)
+            up = i - 1
+        }
+    }
+    return undefined
+}
+function js_lusort(args) {
+    var t = luCheckTab("table.sort", 1, args)
+    var n = luBorder(t)
+    if (n > 1) {
+        if (n >= 2147483647) { luArgErr("table.sort", 1, "array too big") }
+        var cmp = luArgAt(args, 2)
+        if (cmp !== undefined && cmp !== null && luTypeName(cmp) != "function") { luArgTypeErr("table.sort", 2, "function", args) }
+        luAuxSort(t, cmp, 1, n)
+    }
+    return undefined
+}
+function js_lumove(args) {
+    var f = luCheckInt("table.move", 2, args)
+    var e = luCheckInt("table.move", 3, args)
+    var d = luCheckInt("table.move", 4, args)
+    var tt = 1
+    var dv = luArgAt(args, 5)
+    if (dv !== undefined && dv !== null) { tt = 5 }
+    var src = luCheckTab("table.move", 1, args)
+    var dst = luCheckTab("table.move", tt, args)
+    if (e >= f) {
+        var n = e - f + 1
+        if (d > e || d <= f || (tt !== 1 && src !== dst)) {
+            for (var i = 0; i < n; i++) { dst[d + i] = src[f + i] }
+        } else {
+            for (var k = n - 1; k >= 0; k--) { dst[d + k] = src[f + k] }
+        }
+    }
+    return dst
+}
