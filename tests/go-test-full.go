@@ -3183,6 +3183,96 @@ func s50() {
 	check("dtm10", late50(3).twice() == 6)
 }
 
+// ===== SECTION 51: map keys, receiver copies, and copies of call results =====
+// Expected values read off `go run` (go 1.27). A pointer map key is the pointer, a
+// struct key is its value. A value receiver is a SHALLOW copy: a write through its
+// pointer field or into its slice reaches the caller. A struct reached through a
+// call's result is still copied by a store, and an array ranged with its value
+// bound is ranged over a copy. The helpers are declared BELOW their use.
+type k51 struct{ a int }
+type in51 struct{ a int }
+type u51 struct {
+	p  *in51
+	v  in51
+	xs []int
+	ar [2]int
+}
+
+func (u u51) touch() {
+	u.p.a = 5
+	u.v.a = 6
+	u.xs[0] = 7
+	u.ar[0] = 8
+}
+
+func s51() {
+	m := map[*k51]int{}
+	k1 := &k51{1}
+	k2 := &k51{1}
+	m[k1] = 1
+	m[k2] = 2
+	check("mk1", len(m) == 2 && m[k1] == 1 && m[k2] == 2)
+	lit := map[*k51]int{k1: 3, k2: 4}
+	check("mk2", len(lit) == 2 && lit[k1] == 3)
+	v := map[k51]int{}
+	v[k51{1}] = 1
+	v[k51{1}] = 2
+	check("mk3", len(v) == 1 && v[k51{1}] == 2)
+	u := u51{p: &in51{1}, v: in51{1}, xs: []int{1}, ar: [2]int{1, 1}}
+	u.touch()
+	check("rc1", u.p.a == 5 && u.v.a == 1 && u.xs[0] == 7 && u.ar[0] == 1)
+	w := mkw51()
+	x := w.v
+	x.a = 9
+	check("cr1", w.v.a == 1)
+	y := get51().v
+	y.a = 7
+	n := 0
+	for _, e := range get51().vs {
+		e.a = 97
+		n += e.a
+	}
+	check("cr2", g51.v.a == 1 && g51.vs[0].a == 1 && n == 194)
+	arr := mkw51().vs
+	b := arr
+	b[0].a = 5
+	check("cr3", arr[0].a == 1)
+	var i interface{} = w.v
+	w.v.a = 3
+	check("cr4", i.(in51).a == 1)
+	ar2 := [2]in51{{1}, {2}}
+	got := 0
+	for j, e := range ar2 {
+		ar2[1].a = 60
+		if j == 1 {
+			got = e.a
+		}
+	}
+	nums := [3]int{1, 2, 3}
+	sum := 0
+	for _, e := range nums {
+		nums[2] = 100
+		sum += e
+	}
+	pn := &nums
+	live := 0
+	for _, e := range pn {
+		pn[2] = 7
+		live += e
+	}
+	check("cr5", got == 2 && sum == 6 && live == 1+2+7)
+}
+
+type w51 struct {
+	v  in51
+	vs [2]in51
+}
+
+func mkw51() w51  { return w51{v: in51{1}, vs: [2]in51{{1}, {2}}} }
+func get51() *w51 { return &g51 }
+
+var g51 = mkw51()
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3234,6 +3324,7 @@ func main() {
 	s48() // SECTION-CALL 48
 	s49() // SECTION-CALL 49
 	s50() // SECTION-CALL 50
+	s51() // SECTION-CALL 51
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

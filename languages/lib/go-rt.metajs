@@ -219,15 +219,17 @@ function goClassOf(v) {
     return c
 }
 
-// rt.dictFind: the index of a key, or -1. Keys compare with Go's == (goValueEq),
-// which is what dictFind's strictEq plus the runtime's number identity does for
-// every key type a Go map may have.
-// SHARED as rtDictFind - lib/runtime.metajs. goKeyEq is goStrictEq, which is a
-// hand respelling of the floor's strict_eq for numbers and therefore `===`.
-function goDictFind(keys, k) {
+// rt.dictFind over map m: the index of a key, or -1. Keys compare with Go's ==
+// (goValueEq), which is what dictFind's strictEq plus the runtime's number
+// identity does for every key type a Go map may have - except that a POINTER key
+// (`map[*T]V`, read off the map's type text) is identity, where the struct it
+// points at would compare by value. Twins: goMapKeyIdx in abnf/jsrt.go, mapFind in
+// go-interpreter.abnf.
+function goMapFind(m, k) {
+    var keys = m.keys
     // The typeof gate is the fast path: a string or number key - which is nearly every
     // Go map - leaves here without a call.
-    if (typeof k == "object" && k !== null && goKeyIsVal(k)) {
+    if (typeof k == "object" && k !== null && goKeyIsVal(k) && !goPtrKeyed(m)) {
         var i = 0
         while (i < keys.length) {
             if (goValueEq(keys[i], k)) { return i }
@@ -236,6 +238,10 @@ function goDictFind(keys, k) {
         return 0 - 1
     }
     return rtDictFind(keys, k)
+}
+function goPtrKeyed(m) {
+    var t = m.mty
+    return typeof t == "string" && t.length > 4 && t.charAt(4) == "*"
 }
 
 // A Go map key that is a VALUE TYPE - a struct or an array. Go's == on those is
@@ -366,37 +372,6 @@ function goStrOf(v) {
     return gopStr(v)
 }
 
-// rt.goCopyVal: a Go VALUE receiver is a copy. An array copies its elements and
-// a struct instance copies its own properties, recursively; everything else is a
-// reference already.
-function goCopyVal(v) {
-    if (Array.isArray(v)) {
-        var out = []
-        var i = 0
-        while (i < v.length) { out.push(v[i]); i = i + 1 }
-        return out
-    }
-    var cls = goClassOf(v)
-    if (cls === undefined) { return v }
-    var o = {}
-    // THE HIDDEN SLOTS HAVE TO BE CARRIED OVER BY HAND - the manual's keysOf trap
-    // (chapter 7.9): keysOf answers only the own keys whose names do NOT start with
-    // "__", while the Go twin's goCopyVal walks the object's raw key list and
-    // therefore keeps __class. A VALUE receiver's copy without a descriptor breaks
-    // every method and builtin on it. __nil goes with it: the zero value of a slice
-    // or map type is a MARKED empty container, and a copy that dropped the mark
-    // would stop comparing equal to nil.
-    o.__class = cls
-    if (v.__nil === true) { o.__nil = true }
-    var ks = keysOf(v)
-    var j = 0
-    while (j < ks.length) {
-        o[ks[j]] = goCopyVal(v[ks[j]])
-        j = j + 1
-    }
-    return o
-}
-
 // js_gocopy(v, code): the copy a store of a struct VALUE makes, by the code
 // goCopyCodeC in languages/go-to-llvm-ir.abnf chose - "S" a struct (its fields by
 // the descriptor's __fcopy codes), "A" + code an array of such elements, "?" a value
@@ -424,7 +399,10 @@ function goCopyCoded(v, code) {
     var fs = cls.__fields
     var fc = cls.__fcopy
     var o = {}
-    // The hidden slots by hand (keysOf skips them): see goCopyVal.
+    // THE HIDDEN SLOTS BY HAND: keysOf answers only the own keys whose names do
+    // NOT start with "__" (manual 7.9), and a copy without its descriptor breaks
+    // every method and builtin on it. __nil goes with it: the zero value of a
+    // slice or map type is a MARKED empty container.
     o.__class = cls
     if (v.__nil === true) { o.__nil = true }
     var ks = keysOf(v)
@@ -1321,7 +1299,7 @@ function js_pyin(x, c) {
         return false
     }
     if (typeof c == "string") { return c.indexOf(goStrOf(x)) >= 0 }
-    if (goIsDict(c)) { return goDictFind(c.keys, x) >= 0 }
+    if (goIsDict(c)) { return goMapFind(c, x) >= 0 }
     fail("'in' needs a list, a string or a dict on the right side")
     return false
 }
@@ -1694,7 +1672,7 @@ function goNilDeref() { goRTPanic("invalid memory address or nil pointer derefer
 // identity (generics are ERASED in the Go grammars).
 function js_map_get(c, k) {
     if (goIsDict(c)) {
-        var i = goDictFind(c.keys, k)
+        var i = goMapFind(c, k)
         if (i >= 0) { return c.vals[i] }
         return c.zero
     }
@@ -1744,7 +1722,7 @@ function goBytes(s) {
 // delete(m, k); missing keys are a no-op.
 function js_map_del(m, k) {
     if (!goIsDict(m)) { fail("delete() needs a map") }
-    var i = goDictFind(m.keys, k)
+    var i = goMapFind(m, k)
     if (i >= 0) {
         var nk = []
         var nv = []
@@ -2037,7 +2015,7 @@ function goMethod(v, name) {
     var fn = cls[name]
     if (goIsFn(fn)) {
         var recv = v
-        if (cls["__ptr$" + name] !== true) { recv = goCopyVal(v) }
+        if (cls["__ptr$" + name] !== true) { recv = goCopyCoded(v, "S") }
         return {fn: fn, recv: recv}
     }
     var fs = cls.__fields
@@ -2958,6 +2936,20 @@ function js_gisetat(c, k, v) {
         var ai = goIdx(k)
         if (ai < 0 || ai >= c.length) { goIdxPanic(ai, c.length) }
     }
+    // A map entry is found by Go's key rule (goMapFind), which the shared
+    // js_pyset's key scan cannot see.
+    if (goIsDict(c)) {
+        var mi = goMapFind(c, k)
+        var old = anytype
+        old = mi >= 0 ? c.vals[mi] : c.zero
+        var nv = anytype
+        nv = old === undefined ? v : goAdoptLike(old, v)
+        if (mi >= 0) { c.vals[mi] = nv } else {
+            c.keys.push(k)
+            c.vals.push(nv)
+        }
+        return undefined
+    }
     var cur = goSlotOf(c, k)
     if (cur === undefined) { return js_pyset(c, k, v) }
     return js_pyset(c, k, goAdoptLike(cur, v))
@@ -2969,7 +2961,7 @@ function js_gisetat(c, k, v) {
 // a non-container simply has no width to offer.
 function goSlotOf(x, k) {
     if (goIsDict(x)) {
-        var i = goDictFind(x.keys, k)
+        var i = goMapFind(x, k)
         if (i >= 0) { return x.vals[i] }
         return x.zero
     }

@@ -1888,7 +1888,7 @@ func giFieldTy(o interface{}, name string) string {
 // non-container simply has no width to offer.
 func (rt *jsrt) giSlotOf(x, k interface{}) interface{} {
 	if keys, vals, ok := dictParts(x); ok {
-		if i := rt.dictFind(keys, k); i >= 0 {
+		if i := rt.goMapKeyIdx(x, keys, k, false); i >= 0 {
 			return vals.elems[i]
 		}
 		if obj, ok := x.(*jsObject); ok {

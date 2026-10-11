@@ -2114,26 +2114,6 @@ func goClassOf(v interface{}) *jsObject {
 	return nil
 }
 
-// goCopyVal is Go's copy of a value type: a struct is copied field by field (a
-// nested struct with it), an array element by element. Everything else - a slice, a
-// map, a function, a scalar - is a reference or immutable and passes through.
-func (rt *jsrt) goCopyVal(v interface{}) interface{} {
-	if arr, ok := v.(*jsArray); ok {
-		out := &jsArray{elems: make([]interface{}, len(arr.elems))}
-		copy(out.elems, arr.elems)
-		return out
-	}
-	o, ok := v.(*jsObject)
-	if !ok || goClassOf(v) == nil {
-		return v
-	}
-	out := newJSObject()
-	for _, k := range o.keys {
-		out.set(k, rt.goCopyVal(o.props[k]))
-	}
-	return out
-}
-
 // goPromField finds the field `key` PROMOTED from an embedded struct of o, BREADTH
 // FIRST, which is Go's own rule: the shallowest depth wins and only a tie at that
 // depth is ambiguous. The depth cap is the one the __class walks use (manual
@@ -2219,7 +2199,7 @@ func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, 
 	if fn, has := cls.props[name]; has && isCallable(fn) {
 		recv := v
 		if cls.props["__ptr$"+name] != true {
-			recv = rt.goCopyVal(v)
+			recv = rt.goCopyCoded(v, "S")
 		}
 		return fn, recv, true
 	}
@@ -3453,6 +3433,27 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 		return rt.goValueEq(a, b)
 	}
 	return rt.strictEq(a, b)
+}
+
+// goMapKeyIdx is the key lookup of dict m: pyDictFind (py) or dictFind, except
+// that a GO map whose key type is a pointer (mty "map[*T]V") compares keys by
+// identity, where dictKeyEq's goLang arm compares the struct it points at by
+// value. Twins: goMapFind in lib/go-rt.metajs, mapFind in go-interpreter.abnf.
+func (rt *jsrt) goMapKeyIdx(m interface{}, keys *jsArray, k interface{}, py bool) int {
+	if rt.goLang {
+		if t, _ := m.(*jsObject).props["mty"].(string); strings.HasPrefix(t, "map[*") {
+			for i, e := range keys.elems {
+				if e == k {
+					return i
+				}
+			}
+			return -1
+		}
+	}
+	if py {
+		return rt.pyDictFind(keys, k)
+	}
+	return rt.dictFind(keys, k)
 }
 
 // goIsValueKey: a Go map key whose == is VALUE equality - an array, or a struct
@@ -14719,7 +14720,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
-				if i := rt.pyDictFind(keys, u(a[1])); i >= 0 {
+				if i := rt.goMapKeyIdx(u(a[0]), keys, u(a[1]), true); i >= 0 {
 					vals.elems[i] = u(a[2])
 				} else {
 					dictAppend(keys, vals, u(a[1]), u(a[2]))
@@ -14748,7 +14749,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_map_get": func(a []uint64) uint64 { // Go indexing: maps read their zero value for
 			if keys, vals, ok := dictParts(u(a[0])); ok { // missing keys, slices their element.
-				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+				if i := rt.goMapKeyIdx(u(a[0]), keys, u(a[1]), false); i >= 0 {
 					return w(vals.elems[i])
 				}
 				if z, has := u(a[0]).(*jsObject).props["zero"]; has {
@@ -14783,7 +14784,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !ok {
 				rt.fail("delete() needs a map")
 			}
-			if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+			if i := rt.goMapKeyIdx(u(a[0]), keys, u(a[1]), false); i >= 0 {
 				keys.dropIdx()
 				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
 				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
@@ -15514,7 +15515,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return boolH(strings.Contains(c, rt.toString(u(a[0]))))
 			}
 			if keys, _, ok := dictParts(u(a[1])); ok {
-				return boolH(rt.pyDictFind(keys, u(a[0])) >= 0)
+				return boolH(rt.goMapKeyIdx(u(a[1]), keys, u(a[0]), true) >= 0)
 			}
 			rt.fail("'in' needs a list, a string or a dict on the right side")
 			return boolH(false)

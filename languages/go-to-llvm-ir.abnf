@@ -2355,7 +2355,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             b = rk.b
             var rv = emitElemVal(b, e, zero)
             b = rv.b
-            callExt(b, "js_pyset", [mV, rk.v, rv.v])
+            callExt(b, "js_gisetat", [mV, rk.v, rv.v])
         }
         return {b: b, v: mV}
     }
@@ -2438,7 +2438,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = rv.b
                 // The map's VALUE TYPE is declared here, so the entry adopts its
                 // width: map[string]uint8{"k": 255} holds a uint8.
-                callExt(b, "js_pyset", [mV, rk.v, emitAdoptTy(b, zero, rv.v)])
+                callExt(b, "js_gisetat", [mV, rk.v, emitAdoptTy(b, zero, rv.v)])
             }
             return {b: b, v: mV}
         }
@@ -2607,7 +2607,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                                          eval: (typeof ma == "function") ? ma : null,
                                          enest: (typeof ma == "function") ? null : ma.enest}, zero)
                 b = rv.b
-                callExt(b, "js_pyset", [mV, rk.v, rv.v])
+                callExt(b, "js_gisetat", [mV, rk.v, rv.v])
                 mi = mi + 2
             }
             return {b: b, v: mV}
@@ -4380,7 +4380,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // js_gorange normalizes a STRING subject into a byte-offset / code-point
             // pair of arrays (Go ranges a string by rune); everything else passes
             // through, so one emitted loop still covers ints, slices and maps.
-            var subjV = callExt(b, "js_gorange", [emitHelper(b, "$sels", [r.v])])
+            // An ARRAY is ranged over a COPY when the value is bound; a pointer to one
+            // ranges live. Twin of makeForRange in go-interpreter.abnf.
+            var subj0 = r.v
+            if (vName != null && vName != "_") {
+                var acode = "A" + goCopyCodeC(rcopy)
+                var sel = emitSelect(b, callExt(b, "js_is_type", [subj0, emitStr(b, "Array")]),
+                                     function(tb) { return {b: tb, v: callExt(tb, "js_gocopy", [subj0, emitStr(tb, acode)])} },
+                                     function(eb) { return {b: eb, v: subj0} })
+                b = sel.b
+                subj0 = sel.v
+            }
+            var subjV = callExt(b, "js_gorange", [emitHelper(b, "$sels", [subj0])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), subjV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), emitNum(b, 0)])
             if (!rset && iName != null && iName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), hUndef])
@@ -5511,6 +5522,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var text = c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
+        goPrescan(text)
         importDepth = importDepth + 1
         // constByPos and convByPos are keyed by a source OFFSET, and an imported file is
         // parsed with its own offsets starting at zero, so each file gets its own tables
@@ -5547,6 +5559,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return true
     }
 
+    goPrescan(c.srcSlice(0, 1073741824))
     c.compile(c.asg)
 
     // ----- the native build -----

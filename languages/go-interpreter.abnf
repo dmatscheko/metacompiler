@@ -1359,9 +1359,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // A STRUCT OR ARRAY KEY COMPARES BY VALUE. Go's == on a value type is
         // element-by-element (goEq), so a lookup with a different object holding the
         // same fields has to hit, which indexOf's === would miss. A slice is not a
-        // legal map key and stays on identity. The twins are goKeyIsVal/goDictFind in
+        // legal map key and stays on identity. The twins are goKeyIsVal/goMapFind in
         // languages/lib/go-rt.metajs and the goLang arm of dictKeyEq in abnf/jsrt.go.
-        if (goKeyIsVal(k)) {
+        // A POINTER key (`map[*T]V`) is identity: two &T{1} are two keys.
+        if (goKeyIsVal(k) && !goPtrKeyed(m)) {
             for (var vi = 0; vi < m.keys.length; vi++) {
                 if (goEq(m.keys[vi], k)) { return vi }
             }
@@ -1377,6 +1378,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if ((szIs(kk) || szIs(k)) && (szIs(kk) || typeof kk == "number") && szEq(kk, k)) { return j }
         }
         return 0 - 1
+    }
+    function goPtrKeyed(m) {
+        var t = m.mty
+        return typeof t == "string" && t.length > 4 && t.charAt(4) == "*"
     }
     function goKeyIsVal(k) {
         if (k === undefined || k === null) { return false }
@@ -1963,7 +1968,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // reach the bound method - exactly like Go.
             if (hasOwn(o.__class, name)) {
                 var byPtr = o.__class["__ptr$" + name] == true
-                return bindMethod(byPtr ? o : goCopy(o), o.__class[name])
+                return bindMethod(byPtr ? o : goCopyBy(o, "S"), o.__class[name])
             }
         }
         return core.getField(o, name)
@@ -2509,7 +2514,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var icls = inner.__class
             if (icls == undefined || icls == null) { continue }
             if (hasOwn(icls, name) && typeof icls[name] == "function") {
-                return {fn: icls[name], recv: (icls["__ptr$" + name] == true) ? inner : goCopy(inner)}
+                return {fn: icls[name], recv: (icls["__ptr$" + name] == true) ? inner : goCopyBy(inner, "S")}
             }
             var deeper = goPromoted(inner, name)
             if (deeper != null) { return deeper }
@@ -2532,7 +2537,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         r = recv
         if (p.ptr) {
             if (!p.isPtr && !p.dyn && !isPtr(recv) && s.rc != null && s.rc.head != "" && s.rc.text == s.rc.head) { r = varCell(s.rc.head) }
-        } else if (isPtr(recv)) { r = ptrGet(recv) }
+        } else { r = goStoreTy(isPtr(recv) ? ptrGet(recv) : recv, p.ty) }
         return goDtFns["$" + p.fn].apply(undefined, concat2impl([r], args))
     }
     function mcall(target, name, args) {
@@ -4368,6 +4373,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 scopes.pop()
                 return cres
             }
+            // An ARRAY is ranged over a COPY when the value is bound (Go evaluates the
+            // range expression once, and an array value is a copy): a write to the
+            // array inside the body is not seen. A pointer to an array ranges live.
+            // Twin of makeForRange in go-to-llvm-ir.abnf.
+            if (vName != null && Array.isArray(arr)) {
+                arr = goCopyBy(arr, "A" + (rcopy == "?" ? "?" : goCopyCode(rcopy)))
+            }
             var keys = null
             var vals = null
             if (isMap(arr)) { keys = arr.keys.slice(0); vals = arr.vals.slice(0) }
@@ -5170,18 +5182,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return invokeBodyG(params, body, undefined, "", args, rets, rtys, env, variadic, ptypes)
         }
     }
-    // A shallow copy of a struct value, for a value receiver and for array/struct
-    // assignment (Go copies both).
-    function goCopy(v) {
-        if (v == undefined || v == null || typeof v != "object") { return v }
-        if (Array.isArray(v)) { return goVal(v) }
-        if (isSl(v)) { return v }
-        if (v.__class == undefined) { return v }
-        var out = {__class: v.__class}
-        var fs = v.__class.__fields
-        for (var i = 0; i < fs.length; i++) { scopePut(out, fs[i], goCopy(v[fs[i]])) }
-        return out
-    }
     // A STRUCT IS A VALUE: storing one where its type is declared - a parameter, a
     // result, a composite-literal element, a typed `var` - copies it, and so does an
     // ARRAY of them. A struct and a pointer to it are one object in this value model,
@@ -5236,7 +5236,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function makeMethodClosure(mm) {
         return function() {
-            var self = mm.byPtr ? arguments[0] : goCopy(arguments[0])
+            var self = mm.byPtr ? arguments[0] : goCopyBy(arguments[0], "S")
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
             return invokeBodyG(mm.params, mm.body, self, mm.recvName, args, mm.rets, mm.rtys, mm.env, mm.variadic, mm.ptypes)
@@ -5510,6 +5510,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedPkg = curPkgName
         curPkgName = pname
         c.pushSource(file, text)
+        goPrescan(text)
         // constByPos and convByPos are keyed by a source OFFSET, and an imported file is
         // parsed with its own offsets starting at zero - so a literal in the import would
         // otherwise be read back as the constant (or conversion) of whatever the MAIN
@@ -5578,6 +5579,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return true
     }
 
+    goPrescan(c.srcSlice(0, 1073741824))
     c.compile(c.asg)
 
     // Attach the collected methods to their struct descriptors. The receiver type is

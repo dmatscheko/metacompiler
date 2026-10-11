@@ -998,23 +998,28 @@ function goChainC(t, text, pos) {
 function stChainTy(text) {
     var i = stHeadLen(text)
     if (i == 0) { return "" }
-    return stChainFrom(text.substring(0, i), cTyLookup(text.substring(0, i)), text)
+    var h = text.substring(0, i)
+    return stChainFrom(h, cTyLookup(h), cIsLocal(h), text)
 }
 function stHeadLen(text) {
     var i = 0
     while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
     return i
 }
-// The chain's type from its head NAME and that name's binding type hty: a name
-// with no binding type that is applied like a call converts to a defined type.
-function stChainFrom(head, hty, text) {
+// The chain's type from its head NAME, that name's binding type hty and whether a
+// binding inside a function holds it (loc): a name with no binding type that is
+// applied like a call converts to a defined type, or calls a top-level function.
+function stChainFrom(head, hty, loc, text) {
     var i = head.length
     var ty = stBare(hty)
-    if (ty == "" && i < text.length && text.charAt(i) == "(" && goIsDefTy(head)) {
-        i = stClose(text, i)
-        if (i < 0) { return "" }
-        ty = head
-        i = i + 1
+    if (ty == "" && i < text.length && text.charAt(i) == "(") {
+        if (goIsDefTy(head)) { ty = head }
+        else if (!loc && goFnRty["$" + head] !== undefined) { ty = goFnRty["$" + head] }
+        if (ty != "") {
+            i = stClose(text, i)
+            if (i < 0) { return "" }
+            i = i + 1
+        }
     }
     while (i < text.length && ty != "") {
         var ch = text.charAt(i)
@@ -1029,7 +1034,10 @@ function stChainFrom(head, hty, text) {
                 j = stClose(text, j)
                 if (j < 0) { return "" }
                 j = j + 1
-            } else { ty = goFieldTyHook(sn, nm) }
+            } else {
+                ty = goFieldTyHook(sn, nm)
+                if (ty == "" && goPreFld["$" + sn + "." + nm] !== undefined) { ty = goPreFld["$" + sn + "." + nm] }
+            }
             i = j
         } else if (ch == "[") {
             var k = stClose(text, i)
@@ -1090,10 +1098,190 @@ function goNoteDefTy(name) { goDefTys["$" + name] = true }
 function goIsDefTy(t) { return goDefTys["$" + t] === true }
 function goNoteMeth(rt, name, byPtr, rtys) {
     var k = "$" + rt + "." + name
+    var seen = goMethRty[k] !== undefined
     goMethRty[k] = rtys.length == 1 ? rtys[0] : ""
     goMethPtr[k] = byPtr
+    if (seen) { return }
     if (goMethRecv["$" + name] === undefined) { goMethRecv["$" + name] = [] }
     goMethRecv["$" + name].push(rt)
+}
+var goFnRty = {}      // "$f" -> top-level function f's single result type ("" otherwise)
+// Is name bound inside a function (a frame below the package one)?
+function cIsLocal(name) {
+    var s = cScopes.length - 1
+    while (s >= 1) {
+        var f = cScopes[s]
+        var i = f.n.length - 1
+        while (i >= 0) {
+            if (f.n[i] === name) { return true }
+            i = i - 1
+        }
+        s = s - 1
+    }
+    return false
+}
+
+// ----- A PRE-SCAN OF THE FILE'S TOP-LEVEL DECLARATIONS -----
+// The walk runs in source order, so a function, method or defined type declared
+// below its first use would be unknown to the static types above it. Before the
+// walk, every line that starts with `func ` or `type ` is read for what they need:
+// a function's or method's single result type, a defined type's name and a struct's
+// field types, with the whitespace taken out as up.in takes it out of a type the
+// walk captures.
+var goPreFld = {}     // "$S.f" -> the type of field f of struct S
+function goPrescan(text) {
+    var i = 0
+    while (i < text.length) {
+        if (text.substring(i, i + 5) == "func " || text.substring(i, i + 5) == "func(") { goPreFunc(text, i + 4) }
+        else if (text.substring(i, i + 5) == "type ") { goPreType(text, i + 5) }
+        var nl = text.indexOf("\n", i)
+        if (nl < 0) { return }
+        i = nl + 1
+    }
+}
+function stSkipWs(text, i) {
+    while (i < text.length && (text.charAt(i) == " " || text.charAt(i) == "\t")) { i = i + 1 }
+    return i
+}
+function stNoWs(t) {
+    var o = ""
+    var i = 0
+    while (i < t.length) {
+        var ch = t.charAt(i)
+        if (ch != " " && ch != "\t" && ch != "\n" && ch != "\r") { o = o + ch }
+        i = i + 1
+    }
+    return o
+}
+function goPreFunc(text, i) {
+    i = stSkipWs(text, i)
+    var recv = ""
+    var ptr = false
+    if (text.charAt(i) == "(") {
+        var rc = stClose(text, i)
+        if (rc < 0) { return }
+        var r = text.substring(i + 1, rc)
+        var sp = r.length
+        while (sp > 0 && r.charAt(sp - 1) != " " && r.charAt(sp - 1) != "\t") { sp = sp - 1 }
+        recv = stNoWs(r.substring(sp))
+        if (recv.length > 0 && recv.charAt(0) == "*") { ptr = true; recv = recv.substring(1) }
+        var br = recv.indexOf("[")
+        if (br > 0) { recv = recv.substring(0, br) }
+        i = stSkipWs(text, rc + 1)
+    }
+    var ns = i
+    while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
+    if (i == ns) { return }
+    var name = text.substring(ns, i)
+    if (text.charAt(i) == "[") { i = stClose(text, i); if (i < 0) { return } i = i + 1 }
+    if (text.charAt(i) != "(") { return }
+    i = stClose(text, i)
+    if (i < 0) { return }
+    i = stSkipWs(text, i + 1)
+    var rty = ""
+    var nres = 0
+    if (text.charAt(i) == "(") {
+        var e = stClose(text, i)
+        if (e < 0) { return }
+        var inner = text.substring(i + 1, e)
+        nres = 2
+        if (inner.indexOf(",") < 0) {
+            var t2 = inner
+            var s2 = stSkipWs(t2, 0)
+            var w2 = s2
+            while (w2 < t2.length && cIsIdCh(t2.charCodeAt(w2))) { w2 = w2 + 1 }
+            if (stSkipWs(t2, w2) < t2.length && w2 > s2 && stSkipWs(t2, w2) > w2) { t2 = t2.substring(w2) }
+            rty = stNoWs(t2)
+            nres = 1
+        }
+    } else if (text.charAt(i) != "{" && text.charAt(i) != "\n" && text.charAt(i) != "\r") {
+        var j = i
+        while (j < text.length && text.charAt(j) != "{" && text.charAt(j) != "\n") {
+            if (text.charAt(j) == "[" || text.charAt(j) == "(") { j = stClose(text, j); if (j < 0) { return } }
+            j = j + 1
+        }
+        rty = stNoWs(text.substring(i, j))
+        nres = 1
+    }
+    var rtys = []
+    if (nres == 1) { rtys.push(rty) }
+    if (nres == 2) { rtys.push(""); rtys.push("") }
+    if (recv != "") { goNoteMeth(recv, name, ptr, rtys) }
+    else if (goFnRty["$" + name] === undefined) { goFnRty["$" + name] = nres == 1 ? rty : "" }
+}
+function goPreType(text, i) {
+    i = stSkipWs(text, i)
+    var ns = i
+    while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
+    if (i == ns) { return }
+    var name = text.substring(ns, i)
+    if (text.charAt(i) == "[") { return }
+    i = stSkipWs(text, i)
+    var rest = text.substring(i, i + 10)
+    if (rest.substring(0, 6) == "struct") {
+        var ob = text.indexOf("{", i)
+        if (ob < 0) { return }
+        var cb = stClose(text, ob)
+        if (cb < 0) { return }
+        goPreFields(name, text.substring(ob + 1, cb))
+        return
+    }
+    if (rest.substring(0, 1) == "=" || rest.substring(0, 9) == "interface") { return }
+    goNoteDefTy(name)
+}
+// One struct body: fields separated by ';' or a line break, each `a, b T` or an
+// embedded `T` / `*T` / `pkg.T` (named for its last identifier), a tag dropped.
+function goPreFields(sname, body) {
+    var s = 0
+    var i = 0
+    var d = 0
+    while (i <= body.length) {
+        var ch = i < body.length ? body.charAt(i) : ";"
+        if (ch == "{" || ch == "(" || ch == "[") { d = d + 1 }
+        if (ch == "}" || ch == ")" || ch == "]") { d = d - 1 }
+        if (d == 0 && (ch == ";" || ch == "\n")) {
+            goPreField(sname, body.substring(s, i))
+            s = i + 1
+        }
+        i = i + 1
+    }
+}
+function goPreField(sname, f) {
+    var a = stSkipWs(f, 0)
+    var e = f.length
+    var cm = f.indexOf("//")
+    if (cm >= 0) { e = cm }
+    var q = f.indexOf("`")
+    if (q >= 0 && q < e) { e = q }
+    var q2 = f.indexOf("\"")
+    if (q2 >= 0 && q2 < e) { e = q2 }
+    var t = f.substring(a, e)
+    while (t.length > 0 && (t.charAt(t.length - 1) == " " || t.charAt(t.length - 1) == "\t" || t.charAt(t.length - 1) == "\r")) {
+        t = t.substring(0, t.length - 1)
+    }
+    if (t == "") { return }
+    var names = []
+    var i = 0
+    while (true) {
+        var ns = i
+        while (i < t.length && cIsIdCh(t.charCodeAt(i))) { i = i + 1 }
+        if (i == ns) { break }
+        names.push(t.substring(ns, i))
+        var j = stSkipWs(t, i)
+        if (j < t.length && t.charAt(j) == ",") { i = stSkipWs(t, j + 1); continue }
+        if (j > i && j < t.length) {
+            var ty = stNoWs(t.substring(j))
+            var k = 0
+            while (k < names.length) { goPreFld["$" + sname + "." + names[k]] = ty; k = k + 1 }
+        }
+        return
+    }
+    // embedded
+    var et = stNoWs(t)
+    var last = et.length
+    var st = last
+    while (st > 0 && cIsIdCh(et.charCodeAt(st - 1))) { st = st - 1 }
+    if (st < last) { goPreFld["$" + sname + "." + et.substring(st, last)] = et }
 }
 // Every .m(args) suffix of a chain that starts at source offset start gets its
 // receiver record (goRecvC); items are the chain's primary and suffixes.
@@ -1118,7 +1306,7 @@ function goRecvC(start, at) {
         i = i + 1
     }
     var h = t.substring(0, stHeadLen(t))
-    return {head: h, hty: h == "" ? "" : cTyLookup(h), text: t}
+    return {head: h, hty: h == "" ? "" : cTyLookup(h), loc: h != "" && cIsLocal(h), text: t}
 }
 // How rc.M() is called: null for an ordinary method call, else {fn: "T.M" (or ""
 // when several defined types declare M), ty: T, ptr, dyn}. dyn = the static type
@@ -1130,7 +1318,7 @@ function goDtPlan(rc, name) {
     var i = 0
     while (i < rs.length) { if (goIsDefTy(rs[i])) { cands.push(rs[i]) } i = i + 1 }
     if (cands.length == 0) { return null }
-    var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.text)
+    var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
     var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
     if (bt != "" && goMethRty["$" + bt + "." + name] !== undefined) {
         if (!goIsDefTy(bt)) { return null }
