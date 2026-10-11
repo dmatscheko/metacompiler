@@ -14152,9 +14152,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_phcopy": func(a []uint64) uint64 { return w(rt.phpArrCopy(u(a[0]))) },
 		"js_phlen":  func(a []uint64) uint64 { return rt.wrapNum(rt.phpLen(u(a[0]))) },
-		"js_phkeys": func(a []uint64) uint64 { return w(rt.phpKeysOf(u(a[0]))) },
 		"js_phvals": func(a []uint64) uint64 { return w(rt.phpValsOf(u(a[0]))) },
-		"js_phin":   func(a []uint64) uint64 { return boolH(rt.phpInArray(u(a[0]), u(a[1]))) },
 		// ----- classes: '::' constants, static properties and static dispatch -----
 		"js_phconst": func(a []uint64) uint64 { return w(rt.phpConst(u(a[0]), rt.toString(u(a[1])))) },
 		"js_phsget":  func(a []uint64) uint64 { return w(rt.phpStaticGet(u(a[0]), rt.toString(u(a[1])))) },
@@ -14276,18 +14274,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(rt.phpArith("-", float64(0), n))
 			}
 			return w(n)
-		},
-		"js_phmax": func(a []uint64) uint64 {
-			if rt.phpCmp(u(a[0]), u(a[1])) > 0 {
-				return a[0]
-			}
-			return a[1]
-		},
-		"js_phmin": func(a []uint64) uint64 {
-			if rt.phpCmp(u(a[0]), u(a[1])) < 0 {
-				return a[0]
-			}
-			return a[1]
 		},
 		// ----- Kotlin's Char (see the jsChar type) -----
 		// A Char from its code. The Kotlin grammars' char literals compile to this.

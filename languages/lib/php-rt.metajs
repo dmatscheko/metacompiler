@@ -80,6 +80,8 @@
 // the externs every language implements identically, parameterised by the rtk*
 // hooks below. Same mechanism ruby uses for `import "./regex.js"`.
 import "./runtime.metajs"
+// PHP's byte-string primitives, shared with php-interpreter.abnf.
+import "./php-strings.js"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return phJavaStr(v) }
@@ -1836,16 +1838,6 @@ function js_phabs(v) {
     return n
 }
 
-function js_phmax(a, b) {
-    if (phCmp(a, b) > 0) { return a }
-    return b
-}
-
-function js_phmin(a, b) {
-    if (phCmp(a, b) < 0) { return a }
-    return b
-}
-
 function js_phcast(kind, v) { return phCast(kind, v) }
 
 // A literal the grammar's own JS numbers cannot carry: (digits, radix). A literal
@@ -1939,19 +1931,6 @@ function js_phmerge(dst, src) {
     return undefined
 }
 
-function js_phkeys(v) {
-    var out = phNewArr()
-    var p = phArrParts(v)
-    if (p !== undefined) {
-        var i = 0
-        while (i < p.k.length) {
-            phArrPush(out, p.k[i])
-            i = i + 1
-        }
-    }
-    return out
-}
-
 function js_phvals(v) {
     var out = phNewArr()
     var p = phArrParts(v)
@@ -1965,16 +1944,78 @@ function js_phvals(v) {
     return out
 }
 
-function js_phin(needle, hay) {
-    var p = phArrParts(hay)
-    if (p !== undefined) {
+// ----- the natives lib/php-stdlib.php is written on ----------------------------
+// The byte-string primitives are lib/php-strings.js, shared with the interpreter
+// half; the Go twins are in abnf/jsrtphpstr.go.
+
+function phInt(v) { return phNumOf(phToLong(v)) }
+
+function js_phsubstr(s, start, len) {
+    return phsSubstr(phStr(s), phInt(start), phInt(len), !rtIsNil(len))
+}
+
+function phPosResult(name, at) {
+    if (at == 0 - 2) {
+        phRaise("ValueError", name + "(): Argument #3 ($offset) must be contained in argument #1 ($haystack)")
+    }
+    if (at < 0) { return false }
+    return at
+}
+
+function js_phstrpos(h, needle, off) { return phPosResult("strpos", phsStrpos(phStr(h), phStr(needle), phInt(off))) }
+function js_phstrrpos(h, needle, off) { return phPosResult("strrpos", phsStrrpos(phStr(h), phStr(needle), phInt(off))) }
+function js_phord(s) { return phsOrd(phStr(s)) }
+function js_phchr(n) { return phsChr(phInt(n)) }
+function js_phcase(s, up) { return phsCase(phStr(s), up === true) }
+
+// sprintf's float conversions of |x|: "f" and "e" exact (php-strings.js), "g"
+// the zend_gcvt renderer echo uses, at the requested precision.
+function js_phfmtfloat(x, conv, prec) {
+    var a = phNumOf(phToNum(x))
+    if (a < 0) { a = 0 - a }
+    var c = phStr(conv)
+    var p = phInt(prec)
+    if (c == "g") {
+        var g = phFloFormat(a, p)
+        var out = ""
         var i = 0
-        while (i < p.v.length) {
-            if (phLoose(phDeref(p.v[i]), needle)) { return true }
+        while (i < g.length) {
+            out = out + (g.charAt(i) == "E" ? "e" : g.charAt(i))
             i = i + 1
         }
+        return out
     }
-    return false
+    return phsFmtFloat(a, c, p, rtExactDec, rtRoundHalfEven)
+}
+
+function js_phkeyexists(k, a) {
+    var p = phArrParts(a)
+    if (p === undefined) {
+        phRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phDebugType(a) + " given")
+    }
+    return phKeyIndex(p.k, k) >= 0
+}
+
+function js_phkeylast(a) {
+    var p = phArrParts(a)
+    if (p === undefined) { return null }
+    if (p.k.length == 0) { return null }
+    return p.k[p.k.length - 1]
+}
+
+// array_pop: the last value, and PHP's next free key steps back when the popped
+// key was the last one handed out.
+function js_phpop(a) {
+    if (!phIsDict(a)) { return null }
+    var keys = a["keys"]
+    var vals = a["vals"]
+    if (keys.length == 0) { return null }
+    var k = keys.pop()
+    var v = phDeref(vals.pop())
+    if (typeof k == "number" && !sintIs(k)) {
+        if (k == phArrNext(a) - 1) { a["__next"] = k }
+    }
+    return v
 }
 
 // AUTO-VIVIFICATION. `$a[0]["k"] = 1` creates the intermediate array. These three

@@ -985,6 +985,9 @@ utf16-strings.js          <- java-rt.metajs, csharp-rt.metajs, java and csharp
 ruby-respond.js           <- ruby-rt.metajs, ruby interpreter (respond_to? on a
                              builtin; Go twin: rubyRespondNames in
                              abnf/jsrtruby.go, kept equal by a go test)
+php-strings.js            <- php-rt.metajs, php interpreter (substr, strpos and
+                             the other byte-string natives; Go twin:
+                             abnf/jsrtphpstr.go)
 ```
 
 Grammar-level includes shared by one language's grammars only: `go-constfold.js`
@@ -993,6 +996,8 @@ conversion and static overload selection), `java-util.java` (both java grammars:
 java.util's list types WRITTEN IN JAVA and compiled with a program that imports
 them, so one implementation serves all three engines), `java-lang.java` (the
 same for java.lang's StringBuilder, compiled when a program creates one),
+`php-stdlib.php` (both php grammars: PHP's array and string library WRITTEN IN
+PHP, compiled with a program that names one of its functions),
 `csharp-overload.js` (both csharp grammars: the better function member among
 applicable overloads), `js-callee.js` (all four
 js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ONE implementation of a feature, not a home for

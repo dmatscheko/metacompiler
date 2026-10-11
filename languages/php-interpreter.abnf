@@ -17,7 +17,8 @@ match expressions, closures with 'use' by value and by reference, arrow function
 named arguments, variadics, first-class callable syntax, default parameter values,
 by-reference parameters, foreach by value, by key and by reference, if/elseif/else,
 while, do-while, for, foreach, try/catch/finally, throw as a statement and as an
-expression, functions and classes with methods and properties, and echo/print.
+expression, functions and classes with methods and properties, PHP's array and string
+library (lib/php-stdlib.php, written in PHP on a handful of natives), and echo/print.
 
 The value model is PHP's own: int and float are distinct (3.0 === 3 is false), a PHP
 array is ONE ordered key/value map (so === compares key order and == does not),
@@ -1146,7 +1147,7 @@ TplSpecial  <~~ push({s: up.in}) ~~>
 // In a single-quoted string only \' and \\ are escapes; every OTHER backslash is a
 // literal backslash ('a\nb' is four bytes), which is what SqBack accepts - after
 // SqEsc, so the two real escapes still win.
-SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(phpLibRef(unescapeSq(up.in)))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
 SqBack      = "\\" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
@@ -1386,6 +1387,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // setVar, foldBinary/makeConst/makeNeg/makeNot). PHP specific behavior is
     // defined below and configured on `core`.
     include("lib/interp-core.js")
+    // PHP's byte-string primitives, shared with layer 2 (lib/php-rt.metajs).
+    include("lib/php-strings.js")
 
     // ----- Arguments and the calling convention -------------------------------
     // Every PHP callable is ONE host function taking a single "argset":
@@ -2798,6 +2801,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function phpConcat(l, r) { return phpStr(l) + phpStr(r) }
 
     function makeTemplate(items) {
+        if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s) }
         return function() {
             var out = ""
             for (var i = 0; i < items.length; i++) {
@@ -4082,7 +4086,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 
     // ----- calls, defs, classes -----
     function makeCall(items) {
-        var name = items[0]
+        var name = phpLibRef(items[0])
         var args = items.slice(1)
         return function() {
             var argset = evalArgs(args)
@@ -4603,20 +4607,59 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "count": function(a) { return phpLen(a) },
         // PHP strings are byte strings: strlen("\u{2764}") is 3, not 1.
         "strlen": function(s) { return byteLen(phpStr(s)) },
-        "in_array": function(n, a) {
-            for (var i = 0; i < a.keys.length; i++) { if (phpLoose(a.vals[i], n)) { return true } }
-            return false
+        "array_push": function(a) {
+            for (var i = 1; i < arguments.length; i++) { arrPush(a, arguments[i]) }
+            return a.keys.length
         },
-        "array_push": function(a, v) { arrPush(a, v); return a.keys.length },
-        "array_keys": function(d) { return arrOf(d.keys) },
         "array_values": function(d) { return arrOf(derefAll(d.vals)) },
         "abs": function(n) {
             var v = toNumV(n)
             if (isFlo(v)) { return v.f < 0 ? mkFlo(-v.f) : v }
             return i64IsNeg(iPairOf(v)) ? phpNeg(v) : v
         },
-        "max": function(a, b) { return phpCmp(a, b) > 0 ? a : b },
-        "min": function(a, b) { return phpCmp(a, b) < 0 ? a : b },
+        // The natives lib/php-stdlib.php is written on. The byte-string ones are
+        // lib/php-strings.js, shared with layer 2; the Go twins are in
+        // abnf/jsrtphpstr.go.
+        "substr": function(s, start, len) {
+            return phsSubstr(phpStr(s), phpInt(start), phpInt(len), len !== null && len !== undefined)
+        },
+        "strpos": function(h, n, off) { return phpPosResult("strpos", phsStrpos(phpStr(h), phpStr(n), phpInt(off))) },
+        "strrpos": function(h, n, off) { return phpPosResult("strrpos", phsStrrpos(phpStr(h), phpStr(n), phpInt(off))) },
+        "ord": function(s) { return phsOrd(phpStr(s)) },
+        "chr": function(n) { return phsChr(phpInt(n)) },
+        "strtolower": function(s) { return phsCase(phpStr(s), false) },
+        "strtoupper": function(s) { return phsCase(phpStr(s), true) },
+        // sprintf's float conversions of |x|: "f" and "e" exact, "g" the zend_gcvt
+        // renderer echo uses, at the requested precision.
+        "__mec_fmtfloat": function(x, conv, prec) {
+            var a = numOf(toNumV(x))
+            if (a < 0) { a = 0 - a }
+            var p = phpInt(prec)
+            if (conv == "g") {
+                var g = floFormat(a, p)
+                var out = ""
+                for (var i = 0; i < g.length; i++) { out = out + (g.charAt(i) == "E" ? "e" : g.charAt(i)) }
+                return out
+            }
+            return phsFmtFloat(a, conv, p, coreExactDec, coreRoundHalfEven)
+        },
+        "array_key_exists": function(k, a) {
+            if (!isArr(a)) {
+                phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpDebugType(a) + " given")
+            }
+            return arrHas(a, k)
+        },
+        "array_key_last": function(a) { return isArr(a) && a.keys.length > 0 ? a.keys[a.keys.length - 1] : null },
+        // array_pop: the last value, and PHP's next free key steps back when the
+        // popped key was the last one handed out.
+        "array_pop": function(a) {
+            if (!isArr(a) || a.keys.length == 0) { return null }
+            var k = a.keys.pop()
+            var v = deref(a.vals.pop())
+            a.__idx = null
+            if (typeof k == "number" && k == a.__next - 1) { a.__next = k }
+            return v
+        },
         // intdiv() is the TRUNCATING division '/' is not: intdiv(7, 2) is int(3)
         // where 7 / 2 is float(3.5). It is also the one place a 64 bit quotient can
         // fail to exist, since PHP_INT_MIN / -1 has no int result.
@@ -4663,6 +4706,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return null
         }
+    }
+    function phpInt(v) { return trunc(numOf(toNumV(v))) }
+    function phpPosResult(name, at) {
+        if (at == 0 - 2) {
+            phpRaise("ValueError", name + "(): Argument #3 ($offset) must be contained in argument #1 ($haystack)")
+        }
+        if (at < 0) { return false }
+        return at
     }
     // gettype()'s historical spellings; get_debug_type() is the modern one.
     function phpTypeName(v) {
@@ -5111,6 +5162,42 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         c.compile(asg)
         c.popSource()
         return true
+    }
+
+    // lib/php-stdlib.php: PHP's array and string library, written in PHP on the
+    // natives above. It is compiled into a program that NAMES one of its functions -
+    // calls it, or spells it in a string literal (a callback) - at the first such
+    // mention, the way `require` compiles a file, so its functions are global before
+    // the program runs. An engine native is reached directly here, so naming one
+    // does not load it. Twin of phpLibRef in php-to-llvm-ir.abnf.
+    var phpLibNames = null
+    var phpLibDone = false
+    function phpLibRef(name) {
+        if (phpLibDone || hasOwn(phpBuiltins, name)) { return name }
+        if (phpLibNames == null) { phpLibNames = phpLibScan(load("lib/php-stdlib.php")) }
+        if (phpLibNames["$" + name] !== true) { return name }
+        phpLibDone = true
+        var text = load("lib/php-stdlib.php")
+        var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
+        c.pushSource("php-stdlib.php", text)
+        c.compile(asg)
+        c.popSource()
+        return name
+    }
+    // The names of the library's functions: every line that starts "function ".
+    function phpLibScan(text) {
+        var names = {}
+        var i = 0
+        while (i < text.length) {
+            if (text.substring(i, i + 9) == "function ") {
+                var j = i + 9
+                while (j < text.length && text.charAt(j) != "(") { j = j + 1 }
+                names["$" + text.substring(i + 9, j)] = true
+            }
+            while (i < text.length && text.charAt(i) != "\n") { i = i + 1 }
+            i = i + 1
+        }
+        return names
     }
 
     c.compile(c.asg)

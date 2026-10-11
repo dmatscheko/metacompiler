@@ -21,9 +21,9 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // namespaces and use-imports (single-file harness), declare(strict_types=1)
 // (it would change the semantics of every section), the standard library
-// beyond what the feature-matrix file already uses (strlen, count, ...),
-// define(), superglobals other than $GLOBALS, include/require/eval, fibers, Generator methods
-// (->send() and friends live on the engine's Generator class), references
+// beyond the array and string functions (sections 38 and 39), define(),
+// superglobals other than $GLOBALS, include/require/eval, fibers, Generator
+// methods (->send() and friends live on the engine's Generator class), references
 // returned from functions, reflection (attributes are applied, never read
 // back), and the "${var}" interpolation form (deprecated since PHP 8.2).
 // Expected values follow real PHP 8.3 (e.g. 7 / 2 === 3.5 and strlen counts
@@ -1408,6 +1408,189 @@ function s37() {
     check("pfa2", (new S37B())->m() . (new S37C())->m() === "bc");
 }
 
+// ===== SECTION 38: the array function library =====
+// array_key_exists, implode and the array_* family as the PHP 8.3 manual specifies
+// them: key preservation and renumbering, the sort family (stable, flags), the
+// callback functions, and the ValueError / TypeError texts. A library function is
+// also a callable value ('strtoupper', strlen(...)).
+function s38() {
+    $a = [3, 1, 2];
+    $m = ["b" => 2, "a" => 3, "c" => 1];
+    check("arr1", array_key_exists(1, $a) && array_key_exists("1", $a) && !array_key_exists(5, $a)
+        && array_key_exists("x", ["x" => null]) && key_exists("b", $m));
+    check("arr2", implode(",", $a) === "3,1,2" && implode($a) === "312" && join("-", [1, 2]) === "1-2"
+        && implode(", ", ["a", 1, 2.5, true, null]) === "a, 1, 2.5, 1, ");
+    $s = $a;
+    sort($s);
+    $r = $a;
+    rsort($r);
+    check("arr3", $s === [1, 2, 3] && $r === [3, 2, 1]);
+    $as = $m; asort($as);
+    $ar = $m; arsort($ar);
+    $ks = $m; ksort($ks);
+    $kr = $m; krsort($kr);
+    check("arr4", $as === ["c" => 1, "b" => 2, "a" => 3] && $ar === ["a" => 3, "b" => 2, "c" => 1]
+        && $ks === ["a" => 3, "b" => 2, "c" => 1] && $kr === ["c" => 1, "b" => 2, "a" => 3]);
+    $u = [5, 3, 9];
+    usort($u, fn($x, $y) => $x <=> $y);
+    $st = [[1, "b"], [0, "a"], [1, "a"], [0, "b"]];
+    usort($st, fn($x, $y) => $x[0] <=> $y[0]);
+    $ss = ["b", "B", "a", "10", "9"];
+    sort($ss, SORT_STRING);
+    check("arr5", $u === [3, 5, 9] && $st === [[0, "a"], [0, "b"], [1, "b"], [1, "a"]]
+        && $ss === ["10", "9", "B", "a", "b"]);
+    check("arr6", array_map(fn($x) => $x * 2, $a) === [6, 2, 4]
+        && array_map(null, [1, 2], ["a", "b"]) === [[1, "a"], [2, "b"]]
+        && array_map(fn($x) => $x, ["k" => 1]) === ["k" => 1]
+        && array_map('strtoupper', ["a", "b"]) === ["A", "B"] && array_map('strlen', ["ab", "c"]) === [2, 1]);
+    check("arr7", array_filter([1, 0, 2, null, 3]) === [0 => 1, 2 => 2, 4 => 3]
+        && array_filter(["a" => 1, "b" => 2], fn($k) => $k == "b", ARRAY_FILTER_USE_KEY) === ["b" => 2]
+        && array_filter([1, 2, 3], fn($v, $k) => $v + $k > 2, ARRAY_FILTER_USE_BOTH) === [1 => 2, 2 => 3]);
+    check("arr8", array_reduce([1, 2, 3], fn($c, $x) => $c + $x, 10) === 16 && array_sum([1, 2, 3.5]) === 6.5
+        && array_product([2, 3]) === 6 && array_sum([]) === 0 && array_product([]) === 1);
+    check("arr9", array_merge([1, 2], ["a" => 1], [3]) === [1, 2, "a" => 1, 3]
+        && array_merge(["a" => 1], ["a" => 2]) === ["a" => 2]
+        && array_merge_recursive(["a" => [1], "b" => 2], ["a" => [3], "b" => 4]) === ["a" => [1, 3], "b" => [2, 4]]
+        && array_replace([1, 2, 3], [1 => "b"], [3 => "d"]) === [1, "b", 3, "d"]);
+    check("arr10", array_slice([1, 2, 3, 4], 1, 2) === [2, 3] && array_slice([1, 2, 3], -2) === [2, 3]
+        && array_slice(["a" => 1, 5 => 2, 3], 1, 2, true) === [5 => 2, 6 => 3]
+        && array_slice(["x" => 1, 2], 0) === ["x" => 1, 2]);
+    $sp = [1, 2, 3, 4, 5];
+    $rm = array_splice($sp, 1, 2, ["x", "y", "z"]);
+    $sp2 = [1, 2, 3];
+    array_splice($sp2, -1, 1);
+    check("arr11", $rm === [2, 3] && $sp === [1, "x", "y", "z", 4, 5] && $sp2 === [1, 2]);
+    check("arr12", array_reverse([1, 2, 3]) === [3, 2, 1] && array_reverse(["x" => 1, 2], true) === [0 => 2, "x" => 1]
+        && array_reverse([5 => "a", 6 => "b"]) === ["b", "a"]);
+    check("arr13", array_unique([1, "1", 2, 2.0, "a", "a"]) === [0 => 1, 2 => 2, 4 => "a"]
+        && array_count_values(["a", "b", "a", 1, "1"]) === ["a" => 2, "b" => 1, 1 => 2]);
+    check("arr14", array_fill(5, 3, "v") === [5 => "v", 6 => "v", 7 => "v"] && array_fill_keys(["a", "b"], 0) === ["a" => 0, "b" => 0]
+        && array_combine(["a", "b"], [1, 2]) === ["a" => 1, "b" => 2] && array_flip(["a" => 1, "b" => 2]) === [1 => "a", 2 => "b"]);
+    check("arr15", array_search(2, [1, 2, 3]) === 1 && array_search("2", [1, 2, 3], true) === false
+        && in_array("1e1", ["10"]) && !in_array(0, ["a"]) && !in_array("1", [1], true)
+        && array_keys(["a" => 1, "b" => 2, "c" => 1], 1) === ["a", "c"] && array_keys([5 => 0, 7 => 0]) === [5, 7]);
+    check("arr16", array_key_first(["x" => 1, "y" => 2]) === "x" && array_key_last(["x" => 1, "y" => 2]) === "y"
+        && array_key_first([]) === null && array_key_last([]) === null);
+    $stk = [1, 2, 3];
+    $top = array_pop($stk);
+    $stk[] = 9;
+    $sh = [5 => "a", "k" => "b", 9 => "c"];
+    $first = array_shift($sh);
+    check("arr17", $top === 3 && $stk === [1, 2, 9] && $first === "a" && $sh === ["k" => "b", 0 => "c"]);
+    $us = [1, 2];
+    $n1 = array_unshift($us, "x", "y");
+    $pu = [1];
+    $n2 = array_push($pu, 2, 3);
+    check("arr18", $n1 === 4 && $us === ["x", "y", 1, 2] && $n2 === 3 && $pu === [1, 2, 3]);
+    check("arr19", array_chunk([1, 2, 3, 4, 5], 2) === [[1, 2], [3, 4], [5]]
+        && array_chunk(["a" => 1, "b" => 2, "c" => 3], 2, true) === [["a" => 1, "b" => 2], ["c" => 3]]
+        && array_pad([1, 2], 4, 0) === [1, 2, 0, 0] && array_pad([1, 2], -4, 0) === [0, 0, 1, 2]);
+    check("arr20", array_column([["id" => 1, "n" => "a"], ["id" => 2, "n" => "b"]], "n", "id") === [1 => "a", 2 => "b"]
+        && array_column([["n" => "a"], ["m" => 1], ["n" => "c"]], "n") === ["a", "c"]);
+    check("arr21", array_diff([1, 2, 3, 4], [2, 4]) === [0 => 1, 2 => 3]
+        && array_intersect_key(["a" => 1, "b" => 2, "c" => 3], ["a" => 0, "c" => 0]) === ["a" => 1, "c" => 3]
+        && array_diff_assoc(["a" => 1, "b" => 2], ["a" => 1, "b" => 3]) === ["b" => 2]
+        && array_intersect([1, 2, 3], [2, 3, 4], [3, 2]) === [1 => 2, 2 => 3]
+        && array_udiff([1, 5, 3], [3], fn($x, $y) => $x <=> $y) === [0 => 1, 1 => 5]);
+    check("arr22", array_is_list([1, 2]) && !array_is_list([1 => 1]) && array_is_list([])
+        && range(1, 5) === [1, 2, 3, 4, 5] && range(5, 1, 2) === [5, 3, 1] && range("a", "e") === ["a", "b", "c", "d", "e"]
+        && range(0, 1, 0.25) === [0.0, 0.25, 0.5, 0.75, 1.0]);
+    check("arr23", max(1, 5, 3) === 5 && max([1, 9, 3]) === 9 && min(4, 2, 8) === 2 && max("apple", "banana") === "banana"
+        && max(1, "1") === 1 && min([0, -0.5]) === -0.5);
+    check("arr24", array_change_key_case(["A" => 1, "b" => 2], CASE_UPPER) === ["A" => 1, "B" => 2]
+        && reset($a) === 3 && end($a) === 2 && count($a) === 3 && sizeof($a) === 3);
+    check("arr25", array_find([1, 2, 3, 4], fn($v) => $v > 2) === 3 && array_find_key(["a" => 1, "b" => 5], fn($v) => $v > 2) === "b"
+        && array_any([1, 2], fn($v) => $v > 1) && !array_all([1, 2], fn($v) => $v > 1));
+    $len = strlen(...);
+    $ak = 'array_key_exists';
+    check("arr26", $len("abc") === 3 && $ak("a", ["a" => 1]) && call_twice('count', [1, 2]) === 4);
+    $e1 = "";
+    try { array_combine([1], [1, 2]); } catch (ValueError $e) { $e1 = $e->getMessage(); }
+    $e2 = "";
+    try { array_key_exists(1, "x"); } catch (TypeError $e) { $e2 = $e->getMessage(); }
+    $e3 = "";
+    try { max([]); } catch (ValueError $e) { $e3 = $e->getMessage(); }
+    $e4 = "";
+    try { array_chunk([1], 0); } catch (ValueError $e) { $e4 = $e->getMessage(); }
+    check("arr27", $e1 === "array_combine(): Argument #1 (\$keys) and argument #2 (\$values) must have the same number of elements"
+        && $e2 === "array_key_exists(): Argument #2 (\$array) must be of type array, string given"
+        && $e3 === "max(): Argument #1 (\$value) must contain at least one element"
+        && $e4 === "array_chunk(): Argument #2 (\$length) must be greater than 0");
+    // A by-reference parameter followed by a variadic one (array_push's shape).
+    $rv = [1, 2];
+    check("arr28", s38refvar($rv, 3, 4) === 4 && $rv === [1, 2, 3, 4] && s38refvar($rv) === 4);
+}
+function s38refvar(array &$a, ...$xs) { foreach ($xs as $x) { $a[] = $x; } return count($a); }
+function call_twice($f, $v) { return $f($v) + $f($v); }
+
+// ===== SECTION 39: the string function library and sprintf =====
+// substr / strpos and the str_* family over BYTE offsets, the trim character
+// lists, str_replace with arrays and its count, the comparison functions' -1/0/1,
+// sprintf's flags, widths, precisions and conversions, and number_format.
+function s39() {
+    $s = "Hello World";
+    check("str1", substr($s, 0, 5) === "Hello" && substr($s, -5) === "World" && substr($s, 3, -3) === "lo Wo"
+        && substr($s, 20) === "" && substr($s, -20, 3) === "Hel" && substr("abc", 1, null) === "bc" && substr("héllo", 3) === "llo");
+    check("str2", strpos($s, "o") === 4 && strpos($s, "o", 5) === 7 && strpos($s, "z") === false && strpos($s, "o", -3) === false
+        && strrpos($s, "o") === 7 && strrpos($s, "o", -5) === 4 && stripos($s, "WORLD") === 6 && strpos("héllo", "l") === 3);
+    check("str3", str_contains($s, "lo W") && str_starts_with($s, "Hell") && str_ends_with($s, "rld") && str_ends_with($s, "")
+        && !str_contains($s, "x"));
+    check("str4", strtoupper("abc-é") === "ABC-é" && strtolower("ABC") === "abc" && ucfirst("hello") === "Hello"
+        && lcfirst("Hello") === "hello" && ucwords("hello big-world foo_bar") === "Hello Big-world Foo_bar"
+        && ucwords("hello big-world", "-") === "Hello big-World");
+    check("str5", trim("  x y \n") === "x y" && trim("xxhixx", "x") === "hi" && rtrim("1.5000", "0") === "1.5"
+        && ltrim("0012", "0") === "12" && trim("abcHIcba", "a..c") === "HI" && chop("ab  ") === "ab");
+    check("str6", str_repeat("ab", 3) === "ababab" && str_repeat("x", 0) === "" && str_pad("5", 3, "0", STR_PAD_LEFT) === "005"
+        && str_pad("ab", 7, "-=", STR_PAD_BOTH) === "-=ab-=-" && str_pad("ab", 6, "xy") === "abxyxy" && str_pad("abc", 2) === "abc");
+    $cnt = 0;
+    $rep = str_replace("l", "L", $s, $cnt);
+    check("str7", str_replace("o", "0", $s) === "Hell0 W0rld" && str_replace(["a", "b"], ["b", "c"], "ab") === "cc"
+        && str_replace(["a", "b"], "x", "abc") === "xxc" && $rep === "HeLLo WorLd" && $cnt === 3
+        && str_ireplace("WORLD", "There", $s) === "Hello There" && str_replace("a", "b", ["k" => "a", "c"]) === ["k" => "b", "c"]);
+    check("str8", str_split("abcde", 2) === ["ab", "cd", "e"] && strrev("abc") === "cba"
+        && explode(",", "a,b,,c") === ["a", "b", "", "c"] && explode(",", "a,b,c", 2) === ["a", "b,c"]
+        && explode(",", "a,b,c", -1) === ["a", "b"] && explode(",", "abc", -1) === []);
+    check("str9", strcmp("a", "b") === -1 && strcmp("b", "a") === 1 && strcmp("a", "a") === 0 && strcmp("abc", "ab") === 1
+        && strcasecmp("HELLO", "hello") === 0 && strncmp("abcd", "abef", 2) === 0 && strncasecmp("ABx", "aby", 3) === -1);
+    check("str10", strstr("user@example.com", "@") === "@example.com" && strstr("user@example.com", "@", true) === "user"
+        && strrchr("a/b/c", "/") === "/c" && stristr("HayStack", "st") === "Stack" && strstr("abc", "z") === false);
+    check("str11", substr_count("hello hello", "ll") === 2 && substr_count("aaa", "aa") === 1
+        && substr_replace("Hello", "J", 0, 1) === "Jello" && substr_replace("abc", "X", -1) === "abX");
+    check("str12", strtr("Hi all", "ai", "eo") === "Ho ell" && strtr("Hi all", ["Hi" => "Hello", "all" => "world", "a" => "A"]) === "Hello world"
+        && nl2br("a\nb\r\nc") === "a<br />\nb<br />\r\nc"
+        && htmlspecialchars("<a href='x'>T&C</a>") === "&lt;a href=&#039;x&#039;&gt;T&amp;C&lt;/a&gt;"
+        && addslashes("O'Re\"il") === "O\\'Re\\\"il" && stripslashes("O\\'Re") === "O'Re");
+    check("str13", str_word_count("Hello fri3nd, you're looking good today!") === 7
+        && str_word_count("Hello World again", 1) === ["Hello", "World", "again"]
+        && wordwrap("The quick brown fox", 10, "\n", true) === "The quick\nbrown fox"
+        && wordwrap("A very long woooooooooooord.", 8, "\n", true) === "A very\nlong\nwooooooo\nooooord."
+        && chunk_split("abcd", 2, "|") === "ab|cd|");
+    check("str14", ord("A") === 65 && ord("") === 0 && chr(97) === "a" && chr(321) === "A");
+    check("fmt1", sprintf("%d items", 5) === "5 items" && sprintf("%05.2f", 3.14159) === "03.14" && sprintf("%-6s|", "ab") === "ab    |"
+        && sprintf("%6s|", "ab") === "    ab|" && sprintf("%'*8s", "ab") === "******ab" && sprintf("%.3s", "abcdef") === "abc");
+    check("fmt2", sprintf("%x %X %o %b", 255, 255, 8, 5) === "ff FF 10 101" && sprintf("%+d %+d", 5, -5) === "+5 -5"
+        && sprintf("%05d", -42) === "-0042" && sprintf("%x", -1) === "ffffffffffffffff" && sprintf("%u", -1) === "18446744073709551615");
+    check("fmt3", sprintf("%e", 1234.5) === "1.234500e+3" && sprintf("%.2e", 0.000123) === "1.23e-4" && sprintf("%f", 1.5) === "1.500000"
+        && sprintf("%.1f", 0.26) === "0.3" && sprintf("%g", 0.00001234) === "1.234e-5" && sprintf("%G", 123456789.0) === "1.23457E+8");
+    check("fmt4", sprintf("%2\$s %1\$s", "a", "b") === "b a" && sprintf("%c", 65) === "A" && sprintf("%%") === "%"
+        && sprintf("%s", true) === "1" && vsprintf("%s-%s", ["a", "b"]) === "a-b" && sprintf("%5.1f", -2.26) === " -2.3");
+    check("fmt5", number_format(1234567.891) === "1,234,568" && number_format(1234567.891, 2) === "1,234,567.89"
+        && number_format(1234567.891, 2, ",", ".") === "1.234.567,89" && number_format(0.5) === "1"
+        && number_format(-1234.567, 1) === "-1,234.6" && number_format(-0.4) === "0" && number_format(2.675, 2) === "2.68");
+    $e1 = "";
+    try { explode("", "x"); } catch (ValueError $e) { $e1 = $e->getMessage(); }
+    $e2 = "";
+    try { str_repeat("x", -1); } catch (ValueError $e) { $e2 = $e->getMessage(); }
+    $e3 = "";
+    try { strpos("abc", "a", 9); } catch (ValueError $e) { $e3 = $e->getMessage(); }
+    $e4 = "";
+    try { sprintf("%d %d", 1); } catch (ArgumentCountError $e) { $e4 = get_class($e) . ": " . $e->getMessage(); }
+    check("str15", $e1 === "explode(): Argument #1 (\$separator) cannot be empty"
+        && $e2 === "str_repeat(): Argument #2 (\$times) must be greater than or equal to 0"
+        && $e3 === "strpos(): Argument #3 (\$offset) must be contained in argument #1 (\$haystack)"
+        && $e4 === "ArgumentCountError: 3 arguments are required, 2 given");
+}
+
 function main() {
     global $checks;
     global $failures;
@@ -1449,6 +1632,8 @@ function main() {
     s35(); // SECTION-CALL 35
     s36(); // SECTION-CALL 36
     s37(); // SECTION-CALL 37
+    s38(); // SECTION-CALL 38
+    s39(); // SECTION-CALL 39
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

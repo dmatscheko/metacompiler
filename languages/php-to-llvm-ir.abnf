@@ -15,8 +15,8 @@ with return and DEFAULT parameter values, arrow functions fn($x) => e, array
 destructuring (nested, keyed and with holes, in an assignment and in foreach),
 closures function($x) use ($y) {...}, class C { public function m() {...} }
 with $this->prop / ->method() / new C(...), indexed and associative arrays ([...] and
-array(...)), $a[] append, the builtins count/strlen/in_array/array_keys/array_values/
-array_push/abs/max/min, and echo/print.
+array(...)), $a[] append, PHP's array and string library (lib/php-stdlib.php, written in
+PHP on a handful of natives), and echo/print.
 
 PHP's VALUE MODEL is the one php-interpreter.abnf documents, and the two must agree:
 an int is 64 bit two's complement (a plain number while it stays exact, a box beyond
@@ -27,7 +27,8 @@ byte based, and an array is ONE ordered key/value map
 with a next-automatic-index, so === compares the keys and their order while == does not.
 Truthiness is PHP's (false, 0, 0.0, the empty string, the string zero, the empty array
 and null are falsy), == is PHP 8 loose equality and the whole operator ladder, the casts
-and count/strlen/in_array/abs/max/min go through the js_ph* externals (abnf/jsrtphp.go),
+and the library natives (count, strlen, substr, strpos, ...) go through the js_ph* externals
+(abnf/jsrtphp.go, abnf/jsrtphpstr.go),
 each the twin of the like-named function in the interpreter.
 
 Classes carry class CONSTANTS and STATIC properties in two prefixed key spaces on the
@@ -1216,7 +1217,7 @@ TplSpecial  <~~ push({s: up.in}) ~~>
 // In a single-quoted string only \' and \\ are escapes; every OTHER backslash is a
 // literal backslash ('a\nb' is four bytes), which is what SqBack accepts - after
 // SqEsc, so the two real escapes still win.
-SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(phpLibRef(unescapeSq(up.in), false))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
 SqBack      = "\\" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
@@ -3067,6 +3068,7 @@ KwInstanceof = "instanceof" KwEnd ;
     }
 
     function makeTemplate(items) {
+        if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s, false) }
         return function(b) {
             var v = emitStr(b, "")
             for (var i = 0; i < items.length; i++) {
@@ -4576,7 +4578,15 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         if (plain && needsRef) {
             var av2 = callExt(b, "js_arr_new", [])
-            for (var k2 = 0; k2 < args.length; k2++) {
+            // A variadic tail after a by-reference parameter: the fixed positions
+            // first (padded with undefined when absent), then the rest gathered into
+            // the one PHP array the callee's '...$rest' reads.
+            var nFixed = variadic ? sig.rest : args.length
+            for (var k2 = 0; k2 < nFixed; k2++) {
+                if (k2 >= args.length) {
+                    callExt(b, "js_arr_push", [av2, hUndef])
+                    continue
+                }
                 var vv = anytype
                 if (byrefAt(sig, k2) && args[k2].vtext != null) {
                     var rc = targetCell(b, argTarget(args[k2].vtext))
@@ -4588,6 +4598,15 @@ KwInstanceof = "instanceof" KwEnd ;
                     vv = ar2.v
                 }
                 callExt(b, "js_arr_push", [av2, vv])
+            }
+            if (variadic) {
+                var restV2 = callExt(b, "js_pharr", [])
+                for (var k3 = nFixed; k3 < args.length; k3++) {
+                    var ar3 = args[k3].pos(b)
+                    b = ar3.b
+                    callExt(b, "js_phpush", [restV2, ar3.v])
+                }
+                callExt(b, "js_arr_push", [av2, restV2])
             }
             return {b: b, v: av2}
         }
@@ -4823,12 +4842,31 @@ KwInstanceof = "instanceof" KwEnd ;
 
     // ----- calls, defs, classes -----
     function hasBuiltin(name) {
-        return name == "count" || name == "strlen" || name == "in_array"
-            || name == "array_push" || name == "array_keys" || name == "array_values" || name == "intdiv"
-            || name == "abs" || name == "max" || name == "min"
+        return name == "count" || name == "strlen"
+            || name == "array_push" || name == "array_values" || name == "intdiv" || name == "abs"
             || name == "var_dump" || name == "gettype" || name == "get_debug_type" || name == "get_class"
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
-            || phpIsKind(name) != ""
+            || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
+    }
+    // The natives lib/php-stdlib.php is written on, each ONE extern taking its
+    // arguments in order, an absent optional one as null (abnf/jsrtphpstr.go,
+    // lib/php-strings.js and lib/php-rt.metajs).
+    function phpNativeExt(name) {
+        if (name == "substr") { return "js_phsubstr" }
+        if (name == "strpos") { return "js_phstrpos" }
+        if (name == "strrpos") { return "js_phstrrpos" }
+        if (name == "ord") { return "js_phord" }
+        if (name == "chr") { return "js_phchr" }
+        if (name == "__mec_fmtfloat") { return "js_phfmtfloat" }
+        if (name == "array_key_exists") { return "js_phkeyexists" }
+        if (name == "array_key_last") { return "js_phkeylast" }
+        if (name == "array_pop") { return "js_phpop" }
+        return ""
+    }
+    function phpNativeArgc(ext) {
+        if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat") { return 3 }
+        if (ext == "js_phkeyexists") { return 2 }
+        return 1
     }
     // The is_* family, mapped onto the ONE js_phis extern.
     function phpIsKind(name) {
@@ -4850,15 +4888,22 @@ KwInstanceof = "instanceof" KwEnd ;
         // and null are ""), not the JavaScript form js_bytelen alone would measure.
         if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [callExt(b, "js_phstr", [vs[0]])])} }
         if (name == "count") { return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
-        if (name == "in_array") { return {b: b, v: callExt(b, "js_phin", [vs[0], vs[1]])} }
-        if (name == "array_push") { callExt(b, "js_phpush", [vs[0], vs[1]]); return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
-        if (name == "array_keys") { return {b: b, v: callExt(b, "js_phkeys", [vs[0]])} }
+        if (name == "array_push") {
+            for (var pv = 1; pv < vs.length; pv++) { callExt(b, "js_phpush", [vs[0], vs[pv]]) }
+            return {b: b, v: callExt(b, "js_phlen", [vs[0]])}
+        }
         if (name == "array_values") { return {b: b, v: callExt(b, "js_phvals", [vs[0]])} }
-        // abs/max/min go through PHP's own coercion so a float argument stays a float
-        // and max("10", 9) uses PHP's comparison, not JavaScript's.
+        // abs goes through PHP's own coercion so a float argument stays a float.
         if (name == "abs") { return {b: b, v: callExt(b, "js_phabs", [vs[0]])} }
-        if (name == "max") { return {b: b, v: callExt(b, "js_phmax", [vs[0], vs[1]])} }
-        if (name == "min") { return {b: b, v: callExt(b, "js_phmin", [vs[0], vs[1]])} }
+        var nat = phpNativeExt(name)
+        if (nat != "") {
+            var na = []
+            for (var ni = 0; ni < phpNativeArgc(nat); ni++) { na.push(ni < vs.length ? vs[ni] : hNull) }
+            return {b: b, v: callExt(b, nat, na)}
+        }
+        if (name == "strtolower" || name == "strtoupper") {
+            return {b: b, v: callExt(b, "js_phcase", [vs[0], name == "strtoupper" ? hTrue : hFalse])}
+        }
         // var_dump renders through js_phdump and prints the result: a float there
         // uses serialize_precision=-1, not the precision=14 echo uses.
         if (name == "var_dump") {
@@ -4892,8 +4937,8 @@ KwInstanceof = "instanceof" KwEnd ;
         return {b: b, v: callExt(b, "js_phintdiv", [vs[0], vs[1]])}
     }
     function makeCall(items) {
-        var name = items[0]
         var args = items.slice(1)
+        var name = phpLibRef(items[0], !hasFcc(args) && !hasPlace(args))
         return function(b) {
             // strlen(...): PHP 8.1's first-class callable syntax. The value of the
             // expression IS the function, so there is nothing to call here.
@@ -5458,6 +5503,45 @@ KwInstanceof = "instanceof" KwEnd ;
         c.popSource()
         return true
     }
+    // lib/php-stdlib.php: PHP's array and string library, written in PHP on the
+    // natives emitBuiltin lowers. It is compiled into a program that NAMES one of
+    // its functions - calls it, or spells it in a string literal (a callback) - at
+    // the first such mention, through importFile's door, so its functions run
+    // before the program's code. A direct call of a native is lowered inline and
+    // does not load it; a native taken as a VALUE (a string callable, f(...)) is
+    // the library's wrapper function of the same name. Twin of phpLibRef in
+    // php-interpreter.abnf.
+    var phpLibNames = null
+    var phpLibDone = false
+    function phpLibRef(name, viaCall) {
+        if (phpLibDone || (viaCall && hasBuiltin(name))) { return name }
+        if (phpLibNames == null) { phpLibNames = phpLibScan(load("lib/php-stdlib.php")) }
+        if (phpLibNames["$" + name] !== true) { return name }
+        phpLibDone = true
+        var text = load("lib/php-stdlib.php")
+        var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
+        c.pushSource("php-stdlib.php", text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        return name
+    }
+    // The names of the library's functions: every line that starts "function ".
+    function phpLibScan(text) {
+        var names = {}
+        var i = 0
+        while (i < text.length) {
+            if (text.substring(i, i + 9) == "function ") {
+                var j = i + 9
+                while (j < text.length && text.charAt(j) != "(") { j = j + 1 }
+                names["$" + text.substring(i + 9, j)] = true
+            }
+            while (i < text.length && text.charAt(i) != "\n") { i = i + 1 }
+            i = i + 1
+        }
+        return names
+    }
     // ----- the built-in exception hierarchy -----
     // A namespace-qualified name (\RuntimeException, App\Boom) resolves on its last
     // segment, which is how the flat, global name model here can see \Exception at all.
@@ -5553,10 +5637,6 @@ KwInstanceof = "instanceof" KwEnd ;
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         // The main frame holds the global variables; `global $x` finds it by this name.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "\x00globals"), curScopeV])
-        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
         // The bareword spellings of the three literals (PHP's true/false/null are
         // case insensitive) plus the handful of constants a program may read.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "TRUE"), hTrue])
@@ -5597,7 +5677,7 @@ KwInstanceof = "instanceof" KwEnd ;
         // "Error" is here for the METHOD and NAME misses (js_phmcall / js_phmissname
         // in languages/lib/php-rt.metajs and abnf/jsrtphp.go), which PHP 8 raises as a
         // catchable Error.
-        var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error"]
+        var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error", "ValueError", "TypeError"]
         for (var rc = 0; rc < rtCls.length; rc++) {
             callExt(b, "js_phset", [regV, emitStr(b, rtCls[rc]),
                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, rtCls[rc])])])

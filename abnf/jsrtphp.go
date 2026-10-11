@@ -1435,17 +1435,7 @@ func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 	return v
 }
 
-// phpJoinKeys / phpJoinVals back array_keys() and array_values().
-func (rt *jsrt) phpKeysOf(v interface{}) interface{} {
-	out := phpNewArr()
-	if keys, _, ok := phpArrParts(v); ok {
-		for _, k := range keys.elems {
-			rt.phpArrPush(out, k)
-		}
-	}
-	return out
-}
-
+// phpValsOf backs array_values().
 func (rt *jsrt) phpValsOf(v interface{}) interface{} {
 	out := phpNewArr()
 	if _, vals, ok := phpArrParts(v); ok {
@@ -1454,17 +1444,6 @@ func (rt *jsrt) phpValsOf(v interface{}) interface{} {
 		}
 	}
 	return out
-}
-
-func (rt *jsrt) phpInArray(needle, hay interface{}) bool {
-	if _, vals, ok := phpArrParts(hay); ok {
-		for _, e := range vals.elems {
-			if rt.phpLoose(phpDeref(e), needle) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // phpImplode is the string form a template / echo needs for an array-free path;
