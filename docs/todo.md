@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-311** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-313** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,49 +66,40 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-290 python: `sorted`/`min`/`max` with `key=` / `reverse=` · P1 · PY · IN PROGRESS (PY worker, round 5) [V]
-Interpreter ignores the keyword (`sorted([3,1,2], key=lambda x:-x)` gives `[1, 2, 3]`);
-compiled halves abort "sorted(): key= and reverse= are not supported". CPython
-`[3, 2, 1]`; `max([1,2], key=lambda x:-x)` is 1. Also list.sort(key=, reverse=).
+### T-311 python: ordering across kinds does not raise · P1 · PY · OPEN [V]
+`sorted([1, "a"])`, `[1] < ["a"]`, `1 < "a"`: CPython TypeError "'<' not supported
+between instances of 'str' and 'int'"; all engines answer.
 
-### T-291 python: `sum()` of floats, `math.cbrt`, `int(x, base=)` keywords · P1 · PY · IN PROGRESS (PY worker, round 5) [V]
-`sum([0.1]*10)` is 0.9999999999999999 in all engines; CPython 3.12+ uses Neumaier
-compensated summation: 1.0. `math.cbrt` missing (AttributeError). `int("10", base=2)`
-drops the keyword (and other conversion builtins' keywords).
-
-### T-292 python: unpacking with the wrong count · P1 · PY · IN PROGRESS (PY worker, round 5) [V]
-`a, b = [1, 2, 3]`: compiled halves do not check; the interpreter aborts
-uncatchably "ValueError: cannot unpack 3 values into 2 targets". CPython catchable
-`too many values to unpack (expected 2, got 3)` / `not enough values to unpack
-(expected 2, got 1)`.
-
-### T-294 python: subclasses of builtins; `bytes.decode` · P2 · PY · IN PROGRESS (PY worker, round 5) [V]
-`class S(str)` / `class L(list)` / `class I(int)`: `len(S("ab"))` aborts, `s.upper()`
-AttributeError. `bytes.decode()` is "unknown list method" (bytes are lists - value
-model, see T-170/T-259).
+### T-312 python: `str.split(sep=)`, `str.encode()`, no-argument constructors · P1 · PY · OPEN [V]
+`"bob".split(sep="o")` ignores the keyword (CPython `['b', 'b']`; check every str
+method's keywords). `str.encode()` returns the str (`len("é".encode())` 1, CPython 2;
+`.encode().decode()` fails). `float()` prints `[object Object]` (interpreter) / `nan`
+(compiled), CPython 0.0; `list()` / `tuple()` abort compiled ("'NoneType' object is
+not iterable": None and a missing argument are both undefined there). Also `int()` of
+non-ASCII digits, and 3.14's "Did you mean" suffix (P3).
 
 ---
 
 # RB — Ruby
 
-### T-303 ruby: `#hash` / `#object_id` are constant 0 · P2 · RB · OPEN [V]
+### T-303 ruby: `#hash` / `#object_id` are constant 0 · P2 · RB · IN PROGRESS (RB worker, round 5) [V]
 All four legs answer 0, so `a.hash == b.hash` holds for unequal values; MRI gives
 value-based hashes (`1.hash != 2.hash`, `"a".hash == "a".hash`) and distinct ids.
 Make hash value-based; object_id distinct per object where the model allows.
 
-### T-304 ruby: `Integer#lcm`, `#abs2`, `#conj`, `#real?` · P1 · RB · OPEN [V]
+### T-304 ruby: `Integer#lcm`, `#abs2`, `#conj`, `#real?` · P1 · RB · IN PROGRESS (RB worker, round 5) [V]
 Abort in every leg; MRI `4.lcm(6)` 12, `7.abs2` 49, `7.conj` 7, `7.real?` true. Sweep
 Numeric's remaining public methods against MRI 2.6 while there.
 
-### T-305 ruby: an unknown method aborts instead of raising NoMethodError · P1 · RB · OPEN [V]
+### T-305 ruby: an unknown method aborts instead of raising NoMethodError · P1 · RB · IN PROGRESS (RB worker, round 5) [V]
 Every leg aborts, so `begin; 5.nope; rescue NoMethodError => e; p e.message; end`
 cannot rescue it; MRI prints "undefined method `nope' for 5:Integer". Make it a
 catchable NoMethodError in all three engines (message as MRI 2.6).
 
-### T-306 ruby: `p %w[a b].map(...)` and `p /x/.class` do not parse · P1 · RB · OPEN [V]
+### T-306 ruby: `p %w[a b].map(...)` and `p /x/.class` do not parse · P1 · RB · IN PROGRESS (RB worker, round 5) [V]
 Both grammars; MRI accepts both (the second with an ambiguity warning).
 
-### T-307 ruby: `C.instance_variables` on a class object · P3 · RB · OPEN [V]
+### T-307 ruby: `C.instance_variables` on a class object · P3 · RB · IN PROGRESS (RB worker, round 5) [V]
 Compiled class objects store class-level ivars and methods as the same plain keys;
 needs a recorded name list (like `__ivn`).
 
@@ -580,6 +571,10 @@ T-256 java: String identity — DECLINED: needs a reference-string box in the JV
 T-299 csharp: `(int)t[1]` on a string is 0; -frozen aborts — DONE c254d07 (spec-only)
 T-111 csharp: derived field initializers run after the base constructor — DONE 6d84bf8 (spec-only)
 T-110 csharp: overload resolution is not "most specific" — DONE d88e042 (spec-only)
+T-290 python: `sorted`/`min`/`max` with `key=` / `reverse=` — DONE 0a262d6 (lists order element-wise in every engine)
+T-291 python: `sum()` of floats, `math.cbrt`, `int(x, base=)` keywords — DONE c178603 (math.cbrt within 1 ulp: macOS libm cbrt is not correctly rounded; see T-293)
+T-292 python: unpacking with the wrong count — DONE 9e9b395
+T-294 python: subclasses of builtins; `bytes.decode` — DONE 26691f0
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
