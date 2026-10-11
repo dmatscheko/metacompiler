@@ -779,6 +779,70 @@ var jsvArrayMethods = map[string]bool{
 	"fill": true, "at": true, "toString": true,
 }
 
+// jsvNumberMethods are a Number's methods read as a value (jsvBuiltinFam).
+var jsvNumberMethods = map[string]bool{"toFixed": true, "toString": true, "valueOf": true}
+
+// jsvBuiltinFam is 's' / 'a' / 'n' when name is a builtin method of a String, an
+// Array or a Number receiver READ AS A VALUE (js_jsvget), else 0: the names
+// js_jsmcall answers, plus an Array's valueOf. Twins: builtinFam in both
+// *-interpreter.abnf, jvBuiltinFam in languages/lib/js-rt.metajs.
+func jsvBuiltinFam(target interface{}, name string) byte {
+	switch target.(type) {
+	case string:
+		if jsvStringMethods[name] {
+			return 's'
+		}
+	case float64:
+		if jsvNumberMethods[name] {
+			return 'n'
+		}
+	case *jsArray:
+		if jsvArrayMethods[name] || name == "valueOf" {
+			return 'a'
+		}
+	}
+	return 0
+}
+
+// jsvBuiltinRecv is the receiver a builtin method value runs on, with node's
+// TypeErrors: a Number method and String's toString/valueOf demand their own kind,
+// every other method refuses only null and undefined, and a String method coerces
+// what it is given. Twins: builtinRecv in both *-interpreter.abnf, jvBuiltinRecv in
+// languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvBuiltinRecv(fam byte, name string, recv interface{}) interface{} {
+	raise := func(msg string) { panic(&jsThrown{value: rt.jsErrFromText("TypeError: " + msg)}) }
+	if fam == 'n' {
+		if _, isNum := recv.(float64); !isNum {
+			raise("Number.prototype." + name + " requires that 'this' be a Number")
+		}
+		return recv
+	}
+	if isUndefOrNull(recv) {
+		if fam == 's' {
+			switch name {
+			case "trimStart":
+				name = "trimLeft"
+			case "trimEnd":
+				name = "trimRight"
+			}
+			raise("String.prototype." + name + " called on null or undefined")
+		}
+		switch name {
+		case "indexOf", "concat", "map", "filter", "forEach", "reduce", "reduceRight", "some", "every",
+			"find", "findIndex", "findLast", "findLastIndex":
+			raise("Array.prototype." + name + " called on null or undefined")
+		}
+		raise("Cannot convert undefined or null to object")
+	}
+	if _, isStr := recv.(string); fam == 's' && !isStr {
+		if name == "toString" || name == "valueOf" {
+			raise("String.prototype." + name + " requires that 'this' be a String")
+		}
+		return rt.jsvString(recv)
+	}
+	return recv
+}
+
 func jsvHidesMember(target interface{}, name string) bool {
 	switch target.(type) {
 	case string:
@@ -2092,7 +2156,32 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// "function". The answer is jsvMethodValue: one unbound function per method, which
 	// takes `this` from its call site. The layer-2 twin is js_jsvget in
 	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
+	// A String / Array / Number builtin method READ AS A VALUE: node's prototype
+	// function, one per kind and name whatever the receiver, taking `this` from its
+	// call site (`f.call([9], 3)` pushes onto [9]). Interned per runtime; a call
+	// re-enters js_jsmcall on the call-site receiver. Twins: builtinValue in both
+	// *-interpreter.abnf, jvBuiltinValue in languages/lib/js-rt.metajs.
+	builtinVals := map[string]*hostFunc{}
+	builtinValue := func(fam byte, name string) *hostFunc {
+		key := string(fam) + name
+		if f, found := builtinVals[key]; found {
+			return f
+		}
+		f := jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			recv := rt.jsvBuiltinRecv(fam, name, rt.unwrap(this))
+			// An Array's valueOf (Object.prototype's): the receiver itself.
+			if fam == 'a' && name == "valueOf" {
+				return recv
+			}
+			return u(m["js_jsmcall"]([]uint64{w(recv), w(name), w(&jsArray{elems: append([]interface{}{}, args...)})}))
+		})
+		builtinVals[key] = f
+		return f
+	}
 	vget := func(a []uint64) uint64 {
+		if fam := jsvBuiltinFam(u(a[0]), rt.toString(u(a[1]))); fam != 0 {
+			return w(builtinValue(fam, rt.toString(u(a[1]))))
+		}
 		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else.
 		// Ordered in front of baseGet because the descriptor's own property map is
 		// where its INSTANCE methods live, and answering one of those for `C.m` would
@@ -2525,8 +2614,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// (jsvProtoApply). A RegExp is left to js_jsxmcall below, which answers its
 		// toString. Twins: jvFallbackCall in languages/lib/js-rt.metajs, mcall in both
 		// *-interpreter.abnf.
+		// (An Array's valueOf reads as a builtin value - jsvBuiltinFam - and is still
+		// Object.prototype's here.)
 		if name := rt.toString(u(a[1])); jsvIsProtoName(name) && !isUndefOrNull(u(a[0])) && !rxIsRegexObj(u(a[0])) &&
-			isUndefOrNull(u(vget([]uint64{a[0], a[1]}))) {
+			(jsvBuiltinFam(u(a[0]), name) != 0 || isUndefOrNull(u(vget([]uint64{a[0], a[1]})))) {
 			return w(rt.jsvProtoApply(u(a[0]), name, arr.elems))
 		}
 		if next := m["js_jsxmcall"]; next != nil {

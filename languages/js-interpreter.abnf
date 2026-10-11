@@ -4980,6 +4980,12 @@ NotFuncHead = :script(~~
     // allocating a closure it would throw away. Twins: js_jsvget in
     // abnf/jsrtjsprint.go and in languages/lib/js-rt.metajs.
     function getMember(o, k) {
+        // A String / Array / Number builtin method as a value (see builtinValue).
+        // `length` is the one hot read on those kinds, so it skips the table.
+        if (typeof k == "string" && k !== "length" && (typeof o == "string" || typeof o == "number" || Array.isArray(o))) {
+            var bf = builtinFam(o, k)
+            if (bf != "") { return builtinValue(bf, k) }
+        }
         var v = anytype // A member is of any type.
         v = getMemberRaw(o, k)
         if (v != undefined) { return v }
@@ -5004,6 +5010,92 @@ NotFuncHead = :script(~~
             guard = guard + 1
         }
         return undefined
+    }
+    // ----- A builtin method READ AS A VALUE -----
+    // `const f = [].push`, `typeof "s".charAt`: node answers the prototype's own
+    // function, one per kind and name whatever the receiver, and it takes `this` from
+    // its CALL SITE - `f.call([9], 3)` pushes onto [9], a bare `f(3)` is node's
+    // TypeError. So the value is an interned shim that re-enters the ordinary method
+    // dispatch on the call-site receiver (pendingThis, drained as methodValueFn
+    // drains it). The names are the ones jsBuiltin answers, plus an Array's valueOf.
+    // Twins: jsvBuiltinValue in abnf/jsrtjsprint.go, jvBuiltinValue in
+    // languages/lib/js-rt.metajs.
+    var bvStr = {}
+    var bvArr = {}
+    var bvNum = {}
+    var bvFns = {}
+    function bvSeed(t, names) {
+        for (var i = 0; i < names.length; i++) { t[names[i]] = 1 }
+        return t
+    }
+    bvSeed(bvStr, ["charAt", "charCodeAt", "codePointAt", "at", "indexOf", "lastIndexOf", "includes",
+                   "startsWith", "endsWith", "slice", "substring", "substr", "split", "toUpperCase",
+                   "toLowerCase", "trim", "trimStart", "trimEnd", "padStart", "padEnd", "repeat",
+                   "concat", "replace", "replaceAll", "toString", "valueOf", "localeCompare"])
+    bvSeed(bvArr, ["push", "pop", "shift", "unshift", "slice", "splice", "indexOf", "lastIndexOf",
+                   "includes", "join", "concat", "reverse", "sort", "map", "filter", "forEach",
+                   "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
+                   "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf"])
+    bvSeed(bvNum, ["toFixed", "toString", "valueOf"])
+    // "s" / "a" / "n" when `k` is a builtin method of the receiver's kind, else "".
+    function builtinFam(o, k) {
+        if (typeof o == "string") { return hasOwn(bvStr, k) ? "s" : "" }
+        if (typeof o == "number") { return hasOwn(bvNum, k) ? "n" : "" }
+        if (Array.isArray(o)) { return hasOwn(bvArr, k) ? "a" : "" }
+        return ""
+    }
+    function builtinValue(fam, k) {
+        var key = "$" + fam + k
+        if (hasOwn(bvFns, key)) { return bvFns[key] }
+        var f = builtinValueFn(fam, k)
+        bvFns[key] = f
+        return f
+    }
+    function builtinValueFn(fam, k) {
+        return function() {
+            var recv = anytype
+            recv = pendingThis
+            pendingThis = undefined
+            var argv = []
+            for (var i = 0; i < arguments.length; i++) { argv.push(arguments[i]) }
+            recv = builtinRecv(fam, k, recv)
+            var rx = rxDispatch(recv, k, argv)
+            if (rx != null) { return rx.v }
+            var bh = anytype
+            bh = jsBuiltin(recv, k, argv)
+            if (bh != null) { return bh.v }
+            // An Array's valueOf (Object.prototype's): the receiver itself.
+            return recv
+        }
+    }
+    // The receiver a builtin method value runs on, with node's TypeErrors: a Number
+    // method and String's toString/valueOf demand their own kind, every other method
+    // refuses only null and undefined, and a String method coerces what it is given.
+    function builtinRecv(fam, k, recv) {
+        if (fam == "n") {
+            if (typeof recv != "number") { biRaise("TypeError: Number.prototype." + k + " requires that 'this' be a Number") }
+            return recv
+        }
+        if (recv === undefined || recv === null) {
+            if (fam == "s") {
+                var sk = k == "trimStart" ? "trimLeft" : (k == "trimEnd" ? "trimRight" : k)
+                biRaise("TypeError: String.prototype." + sk + " called on null or undefined")
+            }
+            if (bvArrNamesNull(k)) { biRaise("TypeError: Array.prototype." + k + " called on null or undefined") }
+            biRaise("TypeError: Cannot convert undefined or null to object")
+        }
+        if (fam == "s" && typeof recv != "string") {
+            if (k == "toString" || k == "valueOf") { biRaise("TypeError: String.prototype." + k + " requires that 'this' be a String") }
+            return jsStr(recv)
+        }
+        return recv
+    }
+    // The Array methods whose null-receiver TypeError names the method (V8's
+    // iteration builtins and concat / indexOf); the rest say "Cannot convert".
+    function bvArrNamesNull(k) {
+        return k == "indexOf" || k == "concat" || k == "map" || k == "filter" || k == "forEach" ||
+               k == "reduce" || k == "reduceRight" || k == "some" || k == "every" || k == "find" ||
+               k == "findIndex" || k == "findLast" || k == "findLastIndex"
     }
     // A __class method READ AS A VALUE: one function per method closure, so that
     // `p.m === p.m` holds as in node. Nothing is bound - the receiver is the call

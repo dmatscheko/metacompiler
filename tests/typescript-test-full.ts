@@ -3245,6 +3245,24 @@ function s58() {
     check("ysr02", h.return(7).value === 9 && h.next().done === true);
 }
 
+// ===== SECTION 59: a builtin method read as a value =====
+// `[].push` and `"s".charAt` read without a call are the prototype's own function,
+// shared by every receiver and taking `this` from the call site; a bare call has
+// none, which is node's TypeError. Values read off node 24.
+function s59() {
+    const a: any = [1, 2];
+    const types: string[] = [typeof a.push, typeof a.valueOf, typeof "s".toString, typeof (5).toFixed, typeof a.nope];
+    check("bmv01", types.join() === "function,function,function,function,undefined");
+    const push: any = a.push;
+    const into: number[] = [9];
+    check("bmv02", push.call(into, 3) === 2 && into.join() === "9,3" && a.push === [].push && "x".slice === "y".slice);
+    const errs: string[] = [];
+    try { push(1); } catch (e: any) { errs.push(e.message); }
+    try { "a".toString.call([1]); } catch (e: any) { errs.push(e.message); }
+    check("bmv03", errs.join("|") === "Cannot convert undefined or null to object|" +
+        "String.prototype.toString requires that 'this' be a String");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3306,6 +3324,7 @@ function main(): number {
     s56(); // SECTION-CALL 56
     s57(); // SECTION-CALL 57
     s58(); // SECTION-CALL 58
+    s59(); // SECTION-CALL 59
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

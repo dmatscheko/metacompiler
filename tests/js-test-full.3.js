@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-64.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-65.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,11 +6,11 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-64, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-65, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
-//                             g.return() at a yield*
+//                             g.return() at a yield*, builtin methods as values
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1339,6 +1339,48 @@ function s64() {
     check("ysr3", e.value === 5 && e.done === true && log64.slice(4).join() === "in,fin")
 }
 
+// ===== SECTION 65: a builtin method read as a value =====
+// `[].push`, `"s".charAt` and `(5).toFixed` read without a call are the prototype's
+// own function: one per kind and name, shared by every receiver, and taking `this`
+// from the call site - `.call` / `.apply` / `.bind` choose it and a bare call has none,
+// which is node's TypeError. String's toString/valueOf and a Number method refuse a
+// receiver of another kind. Values read off node 24.
+function s65() {
+    var vals = [[1, 2], "abc", 5]
+    var names = ["push", "valueOf", "toString", "charAt", "map", "toFixed", "nope"]
+    var types = []
+    for (var i = 0; i < vals.length; i++) {
+        for (var j = 0; j < names.length; j++) { types.push(typeof vals[i][names[j]]) }
+    }
+    check("bmv1", types.join() === "function,function,function,undefined,function,undefined,undefined," +
+        "undefined,function,function,function,undefined,undefined,undefined," +
+        "undefined,function,function,undefined,undefined,function,undefined")
+    var a = vals[0]
+    var push = a.push
+    var into = [9]
+    check("bmv2", push.call(into, 3) === 2 && into.join() === "9,3" && a.length === 2 && a.push === [].push &&
+        a.valueOf.call(a) === a && "x".slice === "y".slice && a.slice !== "".slice)
+    var errs = []
+    var bad = [
+        function () { var f = [].push; return f(1) },
+        function () { return "a".toString.call([1]) },
+        function () { return (1).toFixed.call("x") },
+        function () { return [].map.call(undefined, function (x) { return x }) },
+        function () { return "".trimEnd.call(null) },
+    ]
+    for (var k = 0; k < bad.length; k++) {
+        try { bad[k](); errs.push("none") } catch (e) { errs.push(e.constructor.name + ": " + e.message) }
+    }
+    check("bmv3", errs.join("|") === "TypeError: Cannot convert undefined or null to object|" +
+        "TypeError: String.prototype.toString requires that 'this' be a String|" +
+        "TypeError: Number.prototype.toFixed requires that 'this' be a Number|" +
+        "TypeError: Array.prototype.map called on null or undefined|" +
+        "TypeError: String.prototype.trimRight called on null or undefined")
+    var up = "q".toUpperCase.bind("hi")
+    check("bmv4", "ab".charAt.call(12345, 1) === "2" && [1, 2, 3].slice.apply([4, 5, 6], [1]).join() === "5,6" &&
+        up() === "HI" && (2.5).toFixed.call(1.25, 1) === "1.3" && ["a", "b"].map("x".concat.bind("p")).join() === "pa0a,b,pb1a,b")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1362,6 +1404,7 @@ function main() {
     s62() // SECTION-CALL 62
     s63() // SECTION-CALL 63
     s64() // SECTION-CALL 64
+    s65() // SECTION-CALL 65
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

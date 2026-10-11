@@ -1244,27 +1244,80 @@ function jvMethodValueFn(fn) {
     }
 }
 
-// A String/Array builtin, bound to its receiver: `const p = xs.push` then `p(1)`.
-// js_jsmcall is the whole method surface, so the shim just re-enters it.
-function jvBoundBuiltin(recv, name) {
-    return function () {
+// A String / Array / Number builtin method READ AS A VALUE: node's prototype
+// function, one per kind and name whatever the receiver, taking `this` from its
+// call site (jvThis, read at entry) - `f.call([9], 3)` pushes onto [9]. Interned;
+// a call re-enters js_jsmcall on the call-site receiver. The names are the ones
+// js_jsmcall answers, plus an Array's valueOf. Twins: jsvBuiltinValue in
+// abnf/jsrtjsprint.go, builtinValue in both *-interpreter.abnf.
+var jvBuiltinVals = {}
+function jvBuiltinFam(o, key) {
+    if (typeof o == "string") {
+        if (jvStrM[key] === 1) { return "s" }
+        return ""
+    }
+    if (typeof o == "number") {
+        if (key == "toFixed" || key == "toString" || key == "valueOf") { return "n" }
+        return ""
+    }
+    if (Array.isArray(o)) {
+        if (jvArrM[key] === 1 || key == "valueOf") { return "a" }
+    }
+    return ""
+}
+function jvBuiltinValue(fam, name) {
+    var k = "$" + fam + name
+    var got = jvBuiltinVals[k]
+    if (got !== undefined) { return got }
+    var f = function () {
+        var recv = anytype
+        recv = jvThis
         var a = []
         var i = 0
         while (i < arguments.length) {
             a.push(arguments[i])
             i = i + 1
         }
-        // The shim re-enters the WHOLE method surface, so it can meet the miss
-        // sentinel js_jsmcall answers - and here that is an engine bug, not a
-        // program one: js_jsvget only builds this shim for a name it already found.
-        // Turning it back into the abort keeps the sentinel from ever reaching user
-        // code through this door.
-        var br = js_jsmcall(recv, name, a)
-        if (jvMissCallSet) {
-            if (br === jvMissCall) { fail("unknown method '" + name + "' on " + typeof recv) }
+        recv = jvBuiltinRecv(fam, name, recv)
+        // An Array's valueOf (Object.prototype's): the receiver itself.
+        if (fam == "a") {
+            if (name == "valueOf") { return recv }
         }
-        return br
+        return js_jsmcall(recv, name, a)
     }
+    jvBuiltinVals[k] = f
+    return f
+}
+// The receiver a builtin method value runs on, with node's TypeErrors. Twin of
+// jsvBuiltinRecv in abnf/jsrtjsprint.go, which states the rule.
+function jvBuiltinRecv(fam, name, recv) {
+    if (fam == "n") {
+        if (typeof recv != "number") { throw jvErrFromText("TypeError: Number.prototype." + name + " requires that 'this' be a Number") }
+        return recv
+    }
+    if (recv === undefined || recv === null) {
+        if (fam == "s") {
+            var sn = name
+            if (name == "trimStart") { sn = "trimLeft" }
+            if (name == "trimEnd") { sn = "trimRight" }
+            throw jvErrFromText("TypeError: String.prototype." + sn + " called on null or undefined")
+        }
+        if (name == "indexOf" || name == "concat" || name == "map" || name == "filter" || name == "forEach" ||
+            name == "reduce" || name == "reduceRight" || name == "some" || name == "every" || name == "find" ||
+            name == "findIndex" || name == "findLast" || name == "findLastIndex") {
+            throw jvErrFromText("TypeError: Array.prototype." + name + " called on null or undefined")
+        }
+        throw jvErrFromText("TypeError: Cannot convert undefined or null to object")
+    }
+    if (fam == "s") {
+        if (typeof recv != "string") {
+            if (name == "toString" || name == "valueOf") {
+                throw jvErrFromText("TypeError: String.prototype." + name + " requires that 'this' be a String")
+            }
+            return jvStr(recv)
+        }
+    }
+    return recv
 }
 
 // js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
@@ -1313,7 +1366,8 @@ function js_jsvget(o, key) {
                 return cur
             }
         }
-        if (jvHides(o, key)) { return jvBoundBuiltin(o, key) }
+        var bfam = jvBuiltinFam(o, key)
+        if (bfam != "") { return jvBuiltinValue(bfam, key) }
         // `f.name` and `f.length` - two inline comparisons, no call (see the comment
         // beside jvFnNameOf). Before the own-property side table, because both are
         // non-writable in node and js_jsmset drops a write to either.
