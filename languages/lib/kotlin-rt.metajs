@@ -2263,6 +2263,37 @@ function ktChars(s) {
     return out
 }
 
+// Char elements es[b..e) joined into a String by code unit, so the two halves of
+// a surrogate pair rejoin. Twin of ktCharsText in abnf/jsrtkotlin.go.
+function ktCharsText(es, b, e) {
+    var out = ""
+    var i = b
+    while (i < e) {
+        if (ktIsChar(es[i])) { out = out + k2ChStr(ktCharCode(es[i])) }
+        else { out = out + k3Str2(es[i]) }
+        i = i + 1
+    }
+    return out
+}
+
+// StringBuilder.reverse(): the code units in reverse order with every surrogate
+// pair kept whole. Twin of ktRevText in abnf/jsrtkotlin.go.
+function ktRevText(t) {
+    var out = ""
+    var i = t.length - 1
+    while (i >= 0) {
+        var c = t.charCodeAt(i)
+        if (i > 0 && c >= 56320 && c <= 57343 && t.charCodeAt(i - 1) >= 55296 && t.charCodeAt(i - 1) <= 56319) {
+            out = out + t.substring(i - 1, i + 1)
+            i = i - 2
+        } else {
+            out = out + t.substring(i, i + 1)
+            i = i - 1
+        }
+    }
+    return out
+}
+
 // k2StrHash is ktStrHash (jsrtkotlin.go:2588): java.lang.String.hashCode over
 // UTF-16 CODE UNITS, wrapping in int32 exactly as the Go twin's int32 does.
 function k2StrHash(s) {
@@ -2480,16 +2511,7 @@ function k2StrMethod2(s, name, args) {
         }
         return po
     }
-    if (name == "reversed") {
-        var cs = ktChars(s)
-        var vo = ""
-        var vi = cs.length - 1
-        while (vi >= 0) {
-            vo = vo + k2ChStr(ktCharCode(cs[vi]))
-            vi = vi - 1
-        }
-        return vo
-    }
+    if (name == "reversed") { return ktRevText(s) }
     if (name == "lines") {
         var lp = k2Split(s, "\n")
         var lo = []
@@ -3454,18 +3476,7 @@ function ktSbMethod(o, name, args) {
         return o
     }
     if (name == "reverse") {
-        // Over CODE POINTS, as the Go twin's []rune reversal is - a surrogate
-        // pair is not split.
-        var t = ktSbText(o)
-        var out = ""
-        var j = 0
-        while (j < t.length) {
-            var cp = k2CodePointAt(t, j)
-            var w = k2ChStr(cp)
-            out = w + out
-            j = j + w.length
-        }
-        o["s"] = out
+        o["s"] = ktRevText(ktSbText(o))
         return o
     }
     return ktStrMethod(ktSbText(o), name, args)
@@ -4297,6 +4308,19 @@ function ktSeqMethodK(arr, name, args, kind) {
             n = k3I32(31 * n + k3I32(ktElemHash(es[i])))
         }
         return n
+    }
+    if (name == "concatToString") {
+        // CharArray.concatToString(startIndex, endIndex), with AbstractList's
+        // bounds messages.
+        j = 0
+        k = es.length
+        if (args.length > 0) { j = k4Int(args[0]) }
+        if (args.length > 1) { k = k4Int(args[1]) }
+        if (j < 0 || k > es.length) {
+            ktRaise("IndexOutOfBoundsException", "startIndex: " + j + ", endIndex: " + k + ", size: " + es.length)
+        }
+        if (j > k) { ktRaise("IllegalArgumentException", "startIndex: " + j + " > endIndex: " + k) }
+        return ktCharsText(es, j, k)
     }
 
     // ----- more of kotlin.collections -----------------------------------------
@@ -7113,6 +7137,20 @@ function ktGlobalFn(name) {
         return function (init) {
             if (rtIsNil(init)) { return ktMakeSb("") }
             return ktMakeSb(ktRender(init))
+        }
+    }
+    // String(chars) and String(chars, offset, length): java.lang.String's CharArray
+    // constructors, with its range message.
+    if (name == "String") {
+        return function (cs, off, n) {
+            if (!ktIsArr(cs)) { fail("String(...) needs a CharArray") }
+            if (n === undefined) { return ktCharsText(cs, 0, cs.length) }
+            var so = k4Int(off)
+            var sn = k4Int(n)
+            if (so < 0 || sn < 0 || so + sn > cs.length) {
+                ktRaise("StringIndexOutOfBoundsException", "Range [" + so + ", " + so + " + " + sn + ") out of bounds for length " + cs.length)
+            }
+            return ktCharsText(cs, so, so + sn)
         }
     }
     // kotlin.random.Random(seed) - the SEEDED generator. `Random` with no argument

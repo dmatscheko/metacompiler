@@ -2758,12 +2758,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		}
 		return out, true
 	case "reversed":
-		cs := chars()
-		out := ""
-		for i := len(cs) - 1; i >= 0; i-- {
-			out += string(rune(cs[i].(jsChar).code))
-		}
-		return out, true
+		return ktRevText(s), true
 	case "lines":
 		parts := strings.Split(s, "\n")
 		out := &jsArray{}
@@ -4138,6 +4133,38 @@ func ktLower(r rune) rune {
 	return r
 }
 
+// ktCharsText joins Char elements into a String by code unit, so the two halves of
+// a surrogate pair rejoin. Twin of kCharsText in kotlin-interpreter.abnf and
+// ktCharsText in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktCharsText(es []interface{}) string {
+	u := []uint16{}
+	for _, e := range es {
+		if c, ok := e.(jsChar); ok {
+			u = append(u, strUnits(c.text())...)
+			continue
+		}
+		u = append(u, strUnits(rt.ktStr2(e))...)
+	}
+	return strFromUnits(u)
+}
+
+// ktRevText is StringBuilder.reverse(): the code units in reverse order with every
+// surrogate pair kept whole, which is java's reverse-then-re-pair. Twin of kRevText
+// in kotlin-interpreter.abnf and ktRevText in languages/lib/kotlin-rt.metajs.
+func ktRevText(s string) string {
+	u := strUnits(s)
+	out := make([]uint16, 0, len(u))
+	for i := len(u) - 1; i >= 0; i-- {
+		if i > 0 && isLowSurr(rune(u[i])) && isHighSurr(rune(u[i-1])) {
+			out = append(out, u[i-1], u[i])
+			i--
+			continue
+		}
+		out = append(out, u[i])
+	}
+	return strFromUnits(out)
+}
+
 // ktChars explodes a string into its Char elements.
 func (rt *jsrt) ktChars(s string) []interface{} {
 	n := rt.strLen(s)
@@ -4741,6 +4768,23 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			h = 31*h + int32(ktElemHash(rt, e))
 		}
 		return float64(h), true
+	// CharArray.concatToString(startIndex, endIndex), with AbstractList's bounds
+	// messages.
+	case "concatToString":
+		b, e := 0, len(es)
+		if len(args) > 0 {
+			b = int(rt.toNumber(args[0]))
+		}
+		if len(args) > 1 {
+			e = int(rt.toNumber(args[1]))
+		}
+		if b < 0 || e > len(es) {
+			rt.ktRaise("IndexOutOfBoundsException", fmt.Sprintf("startIndex: %d, endIndex: %d, size: %d", b, e, len(es)))
+		}
+		if b > e {
+			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("startIndex: %d > endIndex: %d", b, e))
+		}
+		return rt.ktCharsText(es[b:e]), true
 
 	// ----- More of kotlin.collections. The twin is kSeqMethod in
 	// kotlin-interpreter.abnf; the two tables are kept in step name for name.
@@ -6356,11 +6400,7 @@ func (rt *jsrt) ktSbMethod(o *jsObject, name string, args []interface{}) (interf
 		o.set("s", "")
 		return o, true
 	case "reverse":
-		r := []rune(ktSbText(o))
-		for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
-			r[i], r[j] = r[j], r[i]
-		}
-		o.set("s", string(r))
+		o.set("s", ktRevText(ktSbText(o)))
 		return o, true
 	}
 	return rt.ktStrMethod(ktSbText(o), name, args)
@@ -6598,6 +6638,24 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 				return ktMakeSb("")
 			}
 			return ktMakeSb(rt.ktStr2(init))
+		})
+	// String(chars) and String(chars, offset, length): java.lang.String's CharArray
+	// constructors, with its range message.
+	case "String":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			lst, ok := argAt(args, 0).(*jsArray)
+			if !ok {
+				rt.fail("String(...) needs a CharArray")
+			}
+			es := lst.elems
+			if len(args) > 2 {
+				off, n := int(rt.toNumber(args[1])), int(rt.toNumber(args[2]))
+				if off < 0 || n < 0 || off+n > len(es) {
+					rt.ktRaise("StringIndexOutOfBoundsException", fmt.Sprintf("Range [%d, %d + %d) out of bounds for length %d", off, off, n, len(es)))
+				}
+				es = es[off : off+n]
+			}
+			return rt.ktCharsText(es)
 		})
 	// kotlin.random.Random(seed) - the SEEDED generator. `Random` with no argument
 	// is not a Kotlin spelling (Random.Default is), so a missing seed answers the

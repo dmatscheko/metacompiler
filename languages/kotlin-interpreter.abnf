@@ -2689,6 +2689,30 @@ NotMemberKw = :script(~~
     // Float.toString is interp-core.js's coreJvmF32Str; its twins are rtJvmF32Str
     // in languages/lib/runtime.metajs and jvmFloStr32 in abnf/jsrtjvm.go.
     function kChStr(v) { return String.fromCharCode(v.__char) }
+    // Char elements es[b..e) joined into a String by code unit, so the two halves of
+    // a surrogate pair rejoin. Twin of ktCharsText in abnf/jsrtkotlin.go.
+    function kCharsText(es, b, e) {
+        var out = ""
+        for (var i = b; i < e; i++) { out += kIsChar(es[i]) ? kChStr(es[i]) : kstr2(es[i]) }
+        return out
+    }
+    // StringBuilder.reverse(): the code units in reverse order with every surrogate
+    // pair kept whole. Twin of ktRevText in abnf/jsrtkotlin.go.
+    function kRevText(t) {
+        var out = ""
+        var i = t.length - 1
+        while (i >= 0) {
+            var c = t.charCodeAt(i)
+            if (i > 0 && c >= 0xDC00 && c <= 0xDFFF && t.charCodeAt(i - 1) >= 0xD800 && t.charCodeAt(i - 1) <= 0xDBFF) {
+                out += t.substring(i - 1, i + 1)
+                i -= 2
+            } else {
+                out += t.substring(i, i + 1)
+                i -= 1
+            }
+        }
+        return out
+    }
 
     // ----- Int / Long / Byte / Short and the four UNSIGNED types -----
     // Kotlin's integral types have fixed widths and WRAP silently on overflow (unlike
@@ -3740,6 +3764,18 @@ NotMemberKw = :script(~~
     hostGlobals["StringBuilder"] = function(init) {
         return {__sb: true, s: (init === undefined || init === null) ? "" : kstr2(init)}
     }
+    // String(chars) and String(chars, offset, length): java.lang.String's CharArray
+    // constructors, with its range message.
+    hostGlobals["String"] = function(cs, off, n) {
+        if (!Array.isArray(cs)) { fail("String(...) needs a CharArray") }
+        if (n === undefined) { return kCharsText(cs, 0, cs.length) }
+        var so = kNum(off)
+        var sn = kNum(n)
+        if (so < 0 || sn < 0 || so + sn > cs.length) {
+            kRaise("StringIndexOutOfBoundsException", "Range [" + so + ", " + so + " + " + sn + ") out of bounds for length " + cs.length)
+        }
+        return kCharsText(cs, so, so + sn)
+    }
     // kotlin.random.Random(seed) - the SEEDED generator. `Random` with no argument is
     // not a Kotlin spelling (Random.Default is), so a missing seed takes the default
     // stream. See kRndBox for why the stream is deterministic in all three engines.
@@ -4752,11 +4788,7 @@ NotMemberKw = :script(~~
             }
             return {v: outp}
         }
-        if (name == "reversed") {
-            var rv = ""
-            for (var ri = n - 1; ri >= 0; ri--) { rv += sv.charAt(ri) }
-            return {v: rv}
-        }
+        if (name == "reversed") { return {v: kRevText(sv)} }
         if (name == "lines") {
             var ls = kSplitStr(sv, "\n")
             for (var li = 0; li < ls.length; li++) {
@@ -5836,6 +5868,17 @@ NotMemberKw = :script(~~
             return {v: pre + js + post}
         }
         if (name == "hashCode") { return {v: kHash(es)} }
+        // CharArray.concatToString(startIndex, endIndex), with AbstractList's bounds
+        // messages.
+        if (name == "concatToString") {
+            var cb = args.length > 0 ? kNum(args[0]) : 0
+            var ce = args.length > 1 ? kNum(args[1]) : es.length
+            if (cb < 0 || ce > es.length) {
+                kRaise("IndexOutOfBoundsException", "startIndex: " + cb + ", endIndex: " + ce + ", size: " + es.length)
+            }
+            if (cb > ce) { kRaise("IllegalArgumentException", "startIndex: " + cb + " > endIndex: " + ce) }
+            return {v: kCharsText(es, cb, ce)}
+        }
         // ----- More of kotlin.collections. The compiled twin is ktSeqMethod in
         // abnf/jsrtkotlin.go; the two tables are kept in step name for name.
         // filterIsInstance<T>(): the elements that ARE a T. MTypeArgs captures the
@@ -6618,9 +6661,7 @@ NotMemberKw = :script(~~
             if (name == "isEmpty") { return target.s.length == 0 }
             if (name == "clear") { target.s = ""; return target }
             if (name == "reverse") {
-                var rv2 = ""
-                for (var sbk = target.s.length - 1; sbk >= 0; sbk--) { rv2 += target.s.charAt(sbk) }
-                target.s = rv2
+                target.s = kRevText(target.s)
                 return target
             }
             return mcall(target.s, name, args, spec)

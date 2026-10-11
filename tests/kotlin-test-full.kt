@@ -4393,6 +4393,33 @@ fun sec85() {
         s85text { ms[4].toFloatOrNull() } == "1.4E-45")
 }
 
+// ===== SECTION 86: CharArray to String, and reversal over surrogate pairs =====
+// concatToString and the String(CharArray) constructors join the chars; their range
+// errors are AbstractList's and java.lang.String's. String.reversed() and
+// StringBuilder.reverse() keep a surrogate pair whole. Rows read from the
+// kotlin-stdlib 2.2.21 jar, called from java.
+fun s86text(f: () -> Any?): String {
+    return try { "" + f() } catch (e: Throwable) { e.toString() }
+}
+
+fun s86units(s: String): String = s.map { it.code }.joinToString(" ")
+
+fun sec86() {
+    val cs = charArrayOf('a', 'b', 'c', 'd')
+    check("ax86a", cs.concatToString() == "abcd" && cs.concatToString(1, 3) == "bc")
+    check("ax86b", String(cs) == "abcd" && String(cs, 1, 2) == "bc")
+    check("ax86c", s86text { cs.concatToString(1, 9) } ==
+        "java.lang.IndexOutOfBoundsException: startIndex: 1, endIndex: 9, size: 4" &&
+        s86text { cs.concatToString(3, 1) } == "java.lang.IllegalArgumentException: startIndex: 3 > endIndex: 1")
+    check("ax86d", s86text { String(cs, 1, 9) } ==
+        "java.lang.StringIndexOutOfBoundsException: Range [1, 1 + 9) out of bounds for length 4")
+    val ins = listOf("x😀y", "😀😁", "abc")
+    check("ax86e", s86units(ins[0].reversed()) == "121 55357 56832 120" &&
+        s86units(ins[1].reversed()) == "55357 56833 55357 56832" && ins[2].reversed() == "cba")
+    check("ax86f", s86units(StringBuilder(ins[0]).reverse().toString()) == "121 55357 56832 120" &&
+        s86units(StringBuilder(ins[1]).reverse().toString()) == "55357 56833 55357 56832")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4480,6 +4507,7 @@ fun main() {
     sec83() // SECTION-CALL 83
     sec84() // SECTION-CALL 84
     sec85() // SECTION-CALL 85
+    sec86() // SECTION-CALL 86
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

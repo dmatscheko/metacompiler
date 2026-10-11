@@ -7698,7 +7698,7 @@ KwContract  = "contract" KwEnd ;
         // the declaration is the entire port.
         var ktBuilders = ["mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
                           "emptyMap", "buildMap", "buildList", "buildString", "Pair", "Triple",
-                          "with", "run", "repeat", "StringBuilder", "generateSequence",
+                          "with", "run", "repeat", "StringBuilder", "String", "generateSequence",
                           // stdlib top-level functions; their twins are the hostGlobals
                           // block in kotlin-interpreter.abnf. listOfNotNull is here rather
                           // than on the listOf alias above because it must DROP the nulls.
