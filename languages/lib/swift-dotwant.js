@@ -20,7 +20,13 @@
 // A call's arguments take their parameter types (swDsNoteCall): the candidates
 // are every function, method and initializer of that name the program declares
 // (swDsNoteSig), and an argument is typed only when every candidate whose labels
-// fit agrees on its parameter's type.
+// fit agrees on its parameter's type. A parameter typed by the function's own
+// generic parameter X takes the call's expected type when the function returns
+// X (`let g: T = gen(.make(5))`), and no type otherwise.
+//
+// Two more positions take the type of a neighbouring expression, as the grammar's
+// swExprAnn answers it: an operand of == / != (swDsNoteEq), and the element
+// argument of a collection method (swDsRecvCall, `xs.append(.zero)`).
 //
 // A member is identified by the byte offset of its dot in its file; each grammar
 // registers its members there (swDsDots) and supplies swDsApply(dot, ty), which
@@ -295,6 +301,15 @@ function swDsScan(s, base, from, to, ty, out) {
         else { swDsClosure(s, base, a, z, t, out) }
         return
     }
+    // `f(args)`: its expected result, for a generic f returning its own parameter.
+    if (swDsIdCh(ch)) {
+        var ne = a
+        while (ne < z && swDsIdCh(s.charAt(ne))) { ne++ }
+        if (ne < z && s.charAt(ne) == "(" && swDsGroupEnd(s, ne) == z - 1) {
+            swDsCallWant["$" + c.curFile() + "@" + swDsByte(s, base, a)] = t
+            return
+        }
+    }
     var top = swDsTop(s, a, z)
     // c ? x : y - the `?` stands apart (an optional chain's is adjacent).
     for (var k = 0; k < top.length; k++) {
@@ -480,6 +495,51 @@ function swDsNoteSig(name, params) {
     if (!hasOwn(swDsSigs, "$" + name)) { swDsSigs["$" + name] = [] }
     swDsSigs["$" + name].push(params)
 }
+// "name#k" -> the generic parameter names of the k-th signature of name, and its
+// declared result type, for a function whose result IS one of them (or an
+// Optional of one); the
+// declaration spans [from, to) and rtxt is its result type as written.
+var swDsSigGen = {}
+function swDsNoteGenRet(name, from, to, rtxt) {
+    var r = swDsUnopt(stripWs(rtxt))
+    if (r == "" || !swDsIdCh(r.charAt(0))) { return }
+    for (var i = 0; i < r.length; i++) { if (!swDsIdCh(r.charAt(i))) { return } }
+    var src = c.srcSlice(from, to)
+    var lt = src.indexOf("<")
+    var op = src.indexOf("(")
+    if (lt < 0 || (op >= 0 && op < lt)) { return }
+    var gt = lt + 1
+    var depth = 1
+    while (gt < src.length && depth > 0) {
+        if (src.charAt(gt) == "<") { depth++ } else if (src.charAt(gt) == ">") { depth-- }
+        gt++
+    }
+    var gens = []
+    var parts = swDsGenArgs("G" + stripWs(src.substring(lt, gt)), "G")
+    if (parts == null) { return }
+    for (var j = 0; j < parts.length; j++) {
+        var gn = parts[j]
+        var col = gn.indexOf(":")
+        gens.push(col < 0 ? gn : gn.substring(0, col))
+    }
+    swDsSigGen["$" + name + "#" + (swDsSigs["$" + name].length - 1)] = {gens: gens, ret: r}
+}
+// file@offset of a call -> the type its value is expected to have.
+var swDsCallWant = {}
+// A parameter type as the k-th candidate of the call at key binds it: its generic
+// parameter X is the call's expected type when the result is X, else unknown.
+function swDsGenSubst(name, k, key, pt) {
+    var gk = "$" + name + "#" + k
+    if (!hasOwn(swDsSigGen, gk)) { return pt }
+    var g = swDsSigGen[gk]
+    var bare = swDsUnopt(pt)
+    for (var i = 0; i < g.gens.length; i++) {
+        if (g.gens[i] != bare) { continue }
+        if (bare == g.ret && hasOwn(swDsCallWant, key)) { return swDsCallWant[key] }
+        return ""
+    }
+    return pt
+}
 // A call `name(args)` spanning [from, to), trailing closures included: its
 // arguments are typed once the walk is complete (swDsFlush), when every
 // declaration is known. A call with no dot in it holds no implicit member and
@@ -489,6 +549,14 @@ function swDsNoteCall(name, from, to) {
     var src = c.srcSlice(from, to)
     var op = src.indexOf(name) + name.length
     if (name.length == 0 || op < name.length || !swDsMayHold(src, op)) { return }
+    var args = swDsCallArgs(src, from, op)
+    if (args.length > 0) {
+        swDsCalls.push({name: name, file: c.curFile(), args: args, key: "$" + c.curFile() + "@" + swDsByte(src, from, op - name.length)})
+    }
+}
+// The arguments of the call whose name ends at src[op] (src starts at byte from):
+// {lbl, txt, at} each.
+function swDsCallArgs(src, from, op) {
     var args = []
     var k = op
     if (src.charAt(op) == "(") {
@@ -522,7 +590,52 @@ function swDsNoteCall(name, from, to) {
         tlbl = ""
         k = be + 1
     }
-    if (args.length > 0) { swDsCalls.push({name: name, file: c.curFile(), args: args}) }
+    return args
+}
+// A collection method `.name(args)` spanning "from:to" on a receiver of type rty:
+// the argument that is an element takes the element type.
+function swDsRecvCall(span, name, rty) {
+    var ct = swDsCollTy(rty)
+    if (ct.length != 1 || span == undefined) { return }
+    var c0 = span.indexOf(":")
+    var from = parseInt(span.substring(0, c0), 10)
+    var src = c.srcSlice(from, parseInt(span.substring(c0 + 1, span.length), 10))
+    var op = src.indexOf(name) + name.length
+    if (op < name.length || !swDsMayHold(src, op)) { return }
+    var args = swDsCallArgs(src, from, op)
+    if (args.length == 0) { return }
+    var want = ""
+    if (name == "append" || name == "insert" || name == "contains" || name == "remove") {
+        if (args[0].lbl == "") { want = ct[0] }
+        else if (args[0].lbl == "contentsOf") { want = "[" + ct[0] + "]" }
+    } else if ((name == "firstIndex" || name == "lastIndex") && args[0].lbl == "of") { want = ct[0] }
+    if (want != "") { swDsWantText(args[0].txt, args[0].at, want, c.curFile()) }
+}
+// An == / != spanning [from, to): a leading-dot operand takes the other operand's
+// type.
+function swDsNoteEq(from, to) {
+    var src = c.srcSlice(from, to)
+    if (!swDsMayHold(src, 0)) { return }
+    var top = swDsTop(src, 0, src.length)
+    var ops = []
+    for (var k = 0; k < top.length; k++) {
+        var p = top[k]
+        var two = src.substring(p, p + 2)
+        if ((two == "==" || two == "!=") && src.charAt(p + 2) != "=" && (p == 0 || "=!<>".indexOf(src.charAt(p - 1)) < 0)) {
+            ops.push(p)
+            k++
+        }
+    }
+    if (ops.length != 1) { return }
+    var at = ops[0]
+    swDsEqSide(src, from, 0, at, at + 2, src.length)
+    swDsEqSide(src, from, at + 2, src.length, 0, at)
+}
+function swDsEqSide(src, from, a, z, oa, oz) {
+    var s0 = swDsTrimStart(src, a, z)
+    if (s0 >= z || src.charAt(s0) != "." || !swDsIdCh(src.charAt(s0 + 1))) { return }
+    var ty = swExprAnn(stripWs(src.substring(oa, oz)))
+    if (ty != "") { swDsWantText(src.substring(a, z), swDsByte(src, from, a), ty, c.curFile()) }
 }
 // The parameter each argument binds in params, or null when the labels do not
 // fit: in order, a parameter with a default may be skipped, a variadic one also
@@ -573,7 +686,7 @@ function swDsFlush() {
             var bound = swDsBind(cands[k], cl.args)
             if (bound == null) { continue }
             for (var j = 0; j < cl.args.length; j++) {
-                var pt = swDsParamTy(bound[j])
+                var pt = swDsGenSubst(cl.name, k, cl.key, swDsParamTy(bound[j]))
                 if (fits == 0) { tys.push(pt) } else if (tys[j] != pt) { tys[j] = "" }
             }
             fits++

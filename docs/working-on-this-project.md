@@ -1022,7 +1022,8 @@ the integer types),
 a program that imports "strings"; goLibFile in `go-constfold.js` names it),
 `csharp-overload.js` (both csharp grammars: the better function member among
 applicable overloads), `swift-dotwant.js` (both swift grammars: the expected
-type of an implicit member inside an array, ternary, closure or call argument),
+type of an implicit member inside an array, ternary, closure, call argument,
+== operand or collection-method argument),
 `js-callee.js` (all four
 js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ONE implementation of a feature, not a home for
 helpers that happen to be duplicated (7.12 still holds for those).

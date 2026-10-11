@@ -19,8 +19,9 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and Foundation - stdlib usage strictly mirrors the features file
 // (Int/String/Bool/Array/Dictionary basics, print/exit/abs/min/max and
-// map/filter/forEach) - so no CaseIterable/Equatable/Comparable/Codable
-// conformances (own protocols carry the generic constraints), no key paths
+// map/filter/forEach) - so no CaseIterable/Comparable/Codable conformances, and
+// Equatable only where a section tests the synthesized == (own protocols carry
+// the generic constraints), no key paths
 // (\.p is the stdlib KeyPath type) and no stride. Concurrency at RUNTIME:
 // async functions and one actor are defined and type-checked, never awaited.
 // Also out: macros (#... / @attached), result builders (@resultBuilder),
@@ -3414,6 +3415,116 @@ func s69() {
     check("cnt3", xs.count == 2 && xs.map { $0.count } == [2, 2] && "héllo".count == 5 && [4, 5].last! == 5)
 }
 
+// ===== SECTION 70: Self as a value =====
+// Inside a type, Self names the type of the running member's receiver: a static
+// member, an instance member, a mutating write through it, a construction, a
+// protocol extension (the conforming type) and an enum.
+struct P70 {
+    static var num = 5
+    var v = 1
+    static func b() -> Int { Self.num }
+    func c() -> Int { Self.num + v }
+    static func make() -> Self { Self(v: 3) }
+    mutating func bump() { Self.num += 1 }
+}
+class Q70 {
+    class var k: Int { return 7 }
+    class func f() -> Int { return Self.k + 1 }
+    func g() -> Int { return Self.k * 2 }
+    required init() {}
+}
+class R70: Q70 {
+    override class var k: Int { return 10 }
+}
+enum E70 {
+    case a, b
+    static let label = "E!"
+    func lab() -> String { return Self.label }
+    static func first() -> Self { return Self.a }
+}
+protocol Named70 { static var tag: String { get } }
+extension Named70 { func tagged() -> String { return Self.tag } }
+struct N70a: Named70 { static var tag = "n1" }
+struct N70b: Named70 { static var tag = "n2" }
+func s70() {
+    check("slf1", P70.b() == 5 && P70().c() == 6 && P70.make().c() == 8)
+    var p = P70()
+    p.bump()
+    check("slf2", P70.num == 6 && Q70.f() == 8 && Q70().g() == 14 && R70().g() == 20)
+    check("slf3", E70.b.lab() == "E!" && E70.first() == .a && N70a().tagged() == "n1" && N70b().tagged() == "n2")
+}
+
+// ===== SECTION 71: the expected type through ==, a generic result, a receiver =====
+// Both types declare every static member, so no single-owner guess can pick one:
+// an == operand gives the other operand its type, a generic function returning
+// its own parameter passes the slot's type to that parameter's arguments, and a
+// collection method's element argument takes the receiver's element type.
+struct T71: Equatable {
+    var v: Int
+    static let one = T71(v: 1)
+    static let zero = T71(v: 0)
+    static func make(_ n: Int) -> T71 { return T71(v: n) }
+}
+struct U71: Equatable {
+    var w: Int
+    static let one = U71(w: 11)
+    static let zero = U71(w: 10)
+    static func make(_ n: Int) -> U71 { return U71(w: n * 100) }
+}
+enum E71 { case one, two; static let best = E71.two }
+enum F71 { case one, three; static let best = F71.three }
+func gen71<X>(_ x: X) -> X { return x }
+func pick71<X>(_ a: X, _ b: X, first: Bool) -> X { return first ? a : b }
+func opt71<X: Equatable>(_ x: X) -> X? { return x }
+func head71(_ xs: [U71]) -> Bool { return xs[0] == .one }
+struct H71 { var items: [T71] = [] }
+func s71() {
+    let tj: [T71] = [T71.one, T71.zero]
+    let ej: [E71] = [.one, .two]
+    check("xeq1", tj[0] == .one && .one == tj[0] && tj[1] != .one && head71([.one]) && !head71([.zero]))
+    check("xeq2", ej[1] == .best && .best == ej[1] && ej[0] != .best)
+    let g: T71 = gen71(.make(5))
+    let h: U71 = gen71(.make(5))
+    let p: U71 = pick71(.make(2), .one, first: true)
+    let o: T71? = opt71(.make(4))
+    check("xeq3", g.v == 5 && h.w == 500 && p.w == 200 && o!.v == 4)
+    var arr: [T71] = []
+    arr.append(.zero)
+    arr.insert(.make(7), at: 0)
+    arr.append(contentsOf: [.one])
+    var hd = H71()
+    hd.items.append(.make(6))
+    check("xeq4", arr.map { $0.v } == [7, 0, 1] && arr.contains(.one) && arr.firstIndex(of: .zero)! == 1 && hd.items[0].v == 6)
+}
+
+// ===== SECTION 72: a struct's synthesized == =====
+// An Equatable struct with no == of its own compares its stored properties, nested
+// structs and arrays included; contains(_:) uses that ==.
+struct In72: Equatable { var a: Int; var s: String }
+struct Out72: Equatable { var i: In72; var xs: [Int]; var d: Double }
+struct Odd72: Equatable {
+    var a: Int
+    var b: Int
+    static func == (l: Odd72, r: Odd72) -> Bool { return l.a == r.a }
+}
+func s72() {
+    let o1 = Out72(i: In72(a: 1, s: "x"), xs: [1, 2], d: 1.5)
+    let o2 = Out72(i: In72(a: 1, s: "x"), xs: [1, 2], d: 1.5)
+    let o3 = Out72(i: In72(a: 1, s: "y"), xs: [1, 2], d: 1.5)
+    check("seq1", o1 == o2 && !(o1 == o3) && o1 != o3 && Odd72(a: 1, b: 2) == Odd72(a: 1, b: 3))
+    var m = In72(a: 5, s: "q")
+    let m0 = m
+    m.a = 6
+    let ch1 = m == m0
+    m.a = 5
+    check("seq2", !ch1 && m == m0 && [In72(a: 1, s: "a")] == [In72(a: 1, s: "a")])
+    let ins = [In72(a: 1, s: "a"), In72(a: 2, s: "b")]
+    let xs = [1.5, 2.5]
+    let y = 2.5
+    check("seq3", ins.contains(In72(a: 2, s: "b")) && !ins.contains(In72(a: 2, s: "c"))
+                  && xs.contains(y) && [[1], [2]].contains([2]) && [Int8(3)].contains(Int8(3)))
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3484,6 +3595,9 @@ func main() {
     s67() // SECTION-CALL 67
     s68() // SECTION-CALL 68
     s69() // SECTION-CALL 69
+    s70() // SECTION-CALL 70
+    s71() // SECTION-CALL 71
+    s72() // SECTION-CALL 72
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -2447,6 +2447,16 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 			}
 			return true
 		}
+		// A struct's synthesized ==: same type, every stored property equal.
+		// Twin of swStructEq in languages/swift-interpreter.abnf.
+		if cls, ok := lo.props["__class"].(*jsObject); ok && cls.props["__struct"] == true && cls == ro.props["__class"] {
+			for _, f := range swStrArray(cls.props["__fields"]) {
+				if !rt.swEqualDepth(lo.props[f], ro.props[f], depth+1) {
+					return false
+				}
+			}
+			return true
+		}
 		return false
 	}
 	return rt.strictEq(l, r)
@@ -2868,18 +2878,23 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 		}
 		return &jsArray{elems: out}, true
 	case "contains":
-		// contains(_:) is a value test and contains(where:) a PREDICATE; the
-		// label does not reach here, so the closure argument tells them apart.
-		// The value form stays with the shared table.
-		if len(args) > 0 && isCallable(args[0]) {
-			for _, e := range o.elems {
+		// contains(_:) is a value test by Swift's == and contains(where:) a
+		// PREDICATE; the label does not reach here, so the closure argument
+		// tells them apart. Twins: arrayMethod in languages/swift-interpreter.abnf
+		// and swSeqMethod in lib/swift-rt.metajs.
+		if len(args) == 0 {
+			return nil, false
+		}
+		for _, e := range o.elems {
+			if isCallable(args[0]) {
 				if rt.truthy(rt.call(args[0], jsUndef, []interface{}{e})) {
 					return true, true
 				}
+			} else if rt.swEqual(e, args[0]) {
+				return true, true
 			}
-			return false, true
 		}
-		return nil, false
+		return false, true
 	case "indices":
 		return swMkRange(0, float64(n), false), true
 	case "enumerated":

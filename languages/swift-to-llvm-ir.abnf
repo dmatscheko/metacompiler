@@ -1145,7 +1145,7 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = EqExpr { "&&" EqExpr } ;
 // === / !== compare object identity; the three-character forms are listed first
 // so `a === b` is not read as `a == (= b)`.
-EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+EqExpr      <~~ var eqi = takeAll(); if (eqi.length > 1) { swDsNoteEq(up.start, up.pos) }; push(foldBinary(eqi)) ~~>
             = RelExpr { ( "===" | "!==" | "==" | "!=" | "~=" ) <~~ push(stripWs(up.in)) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = Coalesce { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Coalesce } ;
@@ -1326,7 +1326,7 @@ NotChar61   = :script(~~
 NotChar63   = :script(~~
     (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
 ~~) ;
-MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); push({kind:"mcall", name: mn, args: takeAll()}) ~~>
+MethodSfx   <~~ var mn = popName(); swDsNoteCall(mn, up.start, up.pos); push({kind:"mcall", name: mn, args: takeAll(), span: up.start + ":" + up.pos}) ~~>
             = "." Id <~~ push({mname: swBt(up.in)}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push(makeFieldSfx(swBt(up.in))) ~~> ;
 // t.0 / t.1: a tuple element read. A tuple is an object whose elements live under
@@ -2787,6 +2787,42 @@ KwContinue  = "continue" KwEnd ;
         return makeRawStr([{s: text.substring(n + 1, text.length - n - 1)}], n)
     }
 
+    // `Self` as a value (twin of swSelfType in swift-interpreter.abnf): self when it
+    // is a type (a static member), self's __class when it is an instance - an enum's
+    // member table leads back to its descriptor through __desc - else p1, the
+    // enclosing type read statically.
+    function rtSelfType() {
+        return rtFunc("sw_selftype", 2, function(b, ps) {
+            var tyB = curF.NewBlock("")
+            var c2 = curF.NewBlock("")
+            var insB = curF.NewBlock("")
+            var stB = curF.NewBlock("")
+            var descB = curF.NewBlock("")
+            var tblB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, b.NewCall(rtIsTypeVal(), [ps[0]])), tyB, c2)
+            tyB.NewRet(ps[0])
+            var cls = c2.NewCall(rtClassOf(), [ps[0]])
+            c2.NewCondBr(truthy(c2, cls), insB, stB)
+            stB.NewRet(ps[1])
+            var d = callExt(insB, "js_get", [cls, emitStr(insB, "__desc")])
+            insB.NewCondBr(truthy(insB, d), descB, tblB)
+            descB.NewRet(d)
+            tblB.NewRet(cls)
+        })
+    }
+    function emitSelfType(b) {
+        var ct = curType()
+        if (ct == null) { fail("Self is only available in a type") }
+        var stV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ct.key)])
+        var t = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, "self")])
+        var boundB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        var fromB = b
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), joinB, boundB)
+        var sv = boundB.NewCall(rtSelfType(), [boundB.NewCall(rtKGet(), [curScopeV, emitStr(boundB, "self")]), stV])
+        boundB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(stV, fromB), llvm.ir.NewIncoming(sv, boundB)])}
+    }
     // ----- Strings are sequences of extended grapheme clusters -----
     // .count counts CLUSTERS, so an astral emoji is one and a base letter plus its
     // combining mark is one; and == compares by CANONICAL EQUIVALENCE, so the
@@ -3343,6 +3379,7 @@ KwContinue  = "continue" KwEnd ;
     // The plain read is the lowered sw_kget helper below rather than
     // core.scopeGetExt: that field names an EXTERN, and js_kget is not one here.
     makeVarRef = function(name) {
+        if (name == "Self") { return emitSelfType }
         // A TYPE name is read under its qualified key, resolved at EMIT time (which
         // is top-down, so typeStack names the enclosing types): a nested type has no
         // bare binding in the surrounding scope at all. See the typeInfo block.
@@ -5382,6 +5419,9 @@ KwContinue  = "continue" KwEnd ;
         var chead = swChainHead(txt)
         var wAnns = swChainAnns(chead, suffixes)
         swLastChain = {txt: txt, ann: wAnns[suffixes.length]}
+        for (var wi = 0; wi < suffixes.length; wi++) {
+            if (suffixes[wi].kind == "mcall") { swDsRecvCall(suffixes[wi].span, suffixes[wi].name, wAnns[wi]) }
+        }
         var obsName = swObsChainName(txt, suffixes)
         var propHead = swPropChainHead(txt, suffixes)
         var propNames = []
@@ -6119,6 +6159,11 @@ KwContinue  = "continue" KwEnd ;
             // descriptor's own __isenum). rec.kind is the
             // resolved key's own answer; the bare tables are the fallback for a name
             // no record claims.
+            if (name == "Self") {
+                var sk = curType() == null ? "" : curType().key
+                var sr = emitSelfType(b)
+                return withTypeCtx(sk, function() { return emitConstruct(sr.b, sk, sr.v, args) })
+            }
             var ck = isTypeName(name) ? typeKeyOf(name) : name
             var krec = typeAt(ck)
             var isEnumT = krec == null ? enumNames[name] == 1 : krec.kind == "enum"
@@ -6808,6 +6853,7 @@ KwContinue  = "continue" KwEnd ;
     // property, read through its getter (an observed one lives under __v_<name>,
     // where sw_kget cannot see it).
     function emitPathHead(b, name) {
+        if (name == "Self") { return emitSelfType(b) }
         var nameV = emitStr(b, name)
         if (!isSetterName(name)) { return {b: b, v: b.NewCall(rtKGet(), [curScopeV, nameV])} }
         var selfB = curF.NewBlock("")
@@ -7487,6 +7533,7 @@ KwContinue  = "continue" KwEnd ;
         if (items[k] != undefined && items[k].rtxt != undefined) { rtxt = items[k].rtxt; k++ }
         swDotClaim(from, to, rtxt)
         swDsNoteSig(items[0], items[1].params)
+        swDsNoteGenRet(items[0], from, to, rtxt)
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start}
     }
     // The inout parameters of the function whose body is currently being emitted:
@@ -9341,6 +9388,7 @@ KwContinue  = "continue" KwEnd ;
             var tblV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [tblV, emitStr(b, "__name"), emitStr(b, name)])
             callExt(b, "js_set", [eV, emitStr(b, "__members"), tblV])
+            callExt(b, "js_set", [tblV, emitStr(b, "__desc"), eV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), eV])
             // $etbl$ is keyed by the QUALIFIED key for the same reason the descriptor
             // is: two nested enums of the same name at different levels would

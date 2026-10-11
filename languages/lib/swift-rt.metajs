@@ -1010,6 +1010,19 @@ function swEqual(l, r, depth) {
             }
             return true
         }
+        // A struct's synthesized ==: same type, every stored property equal.
+        // Twin of swStructEq in languages/swift-interpreter.abnf.
+        var cls = l["__class"]
+        if (swIsObj(cls) && cls["__struct"] === true && cls === r["__class"]) {
+            var ks = cls["__fields"]
+            if (!rtIsArr(ks)) { return false }
+            var f = 0
+            while (f < ks.length) {
+                if (!swEqual(l[ks[f]], r[ks[f]], depth + 1)) { return false }
+                f = f + 1
+            }
+            return true
+        }
         return false
     }
     return l === r
@@ -1510,9 +1523,9 @@ function swListMethod(o, name, args) {
         if (gi < 0 || gi >= o.length) { fail("list index out of range") }
         return o[gi]
     }
-    // contains(_:) is a value test and contains(where:) a PREDICATE; the label does
-    // not reach here, so the closure argument is what tells them apart
-    // (`[1, 3].contains(where: { $0 > 2 })` is true).
+    // contains(_:) is a value test by Swift's == and contains(where:) a PREDICATE;
+    // the label does not reach here, so the closure argument is what tells them
+    // apart (`[1, 3].contains(where: { $0 > 2 })` is true).
     if (name === "contains") {
         var ci = 0
         if (args.length > 0 && typeof args[0] == "function") {
@@ -1523,7 +1536,7 @@ function swListMethod(o, name, args) {
             return false
         }
         while (ci < o.length) {
-            if (o[ci] === args[0]) { return true }
+            if (swEqual(o[ci], args[0], 0)) { return true }
             ci = ci + 1
         }
         return false
