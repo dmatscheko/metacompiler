@@ -17,7 +17,7 @@
 //   jsonHIsFn(v)            typeof v is "function" (a class included)
 //   jsonHIsBig(v)           v is a BigInt
 //   jsonHIsObj(v)           v is an object that serializes by its keys (no array,
-//                           BigInt or function)
+//                           BigInt, function or symbol)
 //   jsonHStr(v)             ToString(v); a finite number gives Number::toString
 //   jsonHParseNum(s)        the double a JSON number lexeme denotes
 //   jsonHRaise(text)        throw the Error the text names ("TypeError: ...")

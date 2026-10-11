@@ -140,6 +140,7 @@ function js_jstypeof(v) {
     if (jvIsObj(v)) {
         if (v["__isclass"] === true) { return "function" }
         if (v["__jsobject"] !== undefined) { return "function" }
+        if (v["__symkey"] !== undefined) { return "symbol" }
     }
     return typeof v
 }
@@ -304,6 +305,94 @@ var jvBigIntFn = anytype
 // meet one, and js_jsmset skips the test.
 var jvPvN = 0
 
+// SYMBOLS. A symbol is an object {__symdesc, __symkey}: a new one per Symbol() call,
+// one per name for the well-known ones and per key for Symbol.for. As a property KEY
+// it is its __symkey - "__#@" and a name no identifier can spell - so every key
+// listing already skips it, as it skips the engine's own "__" slots, and the
+// private-name exemption files a class method under it. Every member extern that
+// takes a key turns a symbol into its key first, once jvSymN says one exists. Twins:
+// the symbol block of abnf/jsrtjsprint.go, jsSym* in both *-interpreter.abnf.
+var jvSymN = 0
+var jvSymWK = {}
+var jvSymReg = {}
+var jvSymbolFn = anytype
+function jvSymMake(desc, key) {
+    var s = {}
+    s["__symdesc"] = desc
+    s["__symkey"] = key
+    jvSymN = jvSymN + 1
+    return s
+}
+function jvIsSym(v) {
+    if (!jvIsObj(v)) { return false }
+    return v["__symkey"] !== undefined
+}
+function jvSymStr(s) {
+    var d = anytype
+    d = s["__symdesc"]
+    if (d === undefined) { return "Symbol()" }
+    return "Symbol(" + d + ")"
+}
+function jvSymWellKnown(n) {
+    var s = anytype
+    s = jvSymWK[n]
+    if (s !== undefined) { return s }
+    s = jvSymMake("Symbol." + n, "__#@" + n)
+    jvSymWK[n] = s
+    return s
+}
+// The Symbol global: every call makes a new symbol.
+function js_jssymbolfn() {
+    if (jvSymbolFn === undefined) {
+        jvSymbolFn = fnMetaSet(function () {
+            var d = anytype
+            d = undefined
+            if (arguments.length > 0) {
+                if (arguments[0] !== undefined) { d = jvStr(arguments[0]) }
+            }
+            return jvSymMake(d, "__#@" + (jvSymN + 1) + "@")
+        }, "Symbol", 0)
+    }
+    return jvSymbolFn
+}
+// The class and destructuring computed keys, which reach no member extern.
+function js_jspropkey(k) {
+    if (jvSymN > 0) {
+        if (jvIsSym(k)) { return k["__symkey"] }
+    }
+    return k
+}
+// Symbol.for / Symbol.keyFor and a symbol's toString / valueOf, or jvMiss.
+function jvSymCall(recv, name, args) {
+    if (jvSymbolFn !== undefined && recv === jvSymbolFn) {
+        if (name == "for") {
+            var k = jvStr(jvArg(args, 0))
+            var s = anytype
+            s = jvSymReg["$" + k]
+            if (s === undefined) {
+                s = jvSymMake(k, "__#@for@" + k)
+                jvSymReg["$" + k] = s
+            }
+            return s
+        }
+        if (name == "keyFor") {
+            var a = anytype
+            a = jvArg(args, 0)
+            if (!jvIsSym(a)) { jbRaise("TypeError: " + jvStr(a) + " is not a symbol") }
+            var sk = a["__symkey"]
+            if (sk.length >= 8) {
+                if (sk.substring(0, 8) == "__#@for@") { return a["__symdesc"] }
+            }
+            return undefined
+        }
+    }
+    if (jvIsSym(recv)) {
+        if (name == "toString") { return jvSymStr(recv) }
+        if (name == "valueOf") { return recv }
+    }
+    return jvMiss
+}
+
 // ===================================================== function properties ==
 //
 // `f.p = 1` on a FUNCTION. A function value is a closure handle and the C floor's
@@ -453,6 +542,7 @@ function jvStr(v) {
     if (jbIsBig(v)) { return jbStr(v) }
     if (jxIsRe(v)) { return jxStr(v) }
     if (jvIsObj(v)) {
+        if (v["__symkey"] !== undefined) { return jvSymStr(v) }
         var r = jvCallMethod(v, "toString")
         if (r !== jvMiss) {
             if (typeof r == "string") { return r }
@@ -610,6 +700,9 @@ function js_jsge(a, b) {
 // undefined (a real JS hole cannot be modelled - the interpreter half's arrays
 // carry no side data, so both halves blank the slot).
 function js_jsdel(o, key) {
+    if (jvSymN > 0) {
+        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsdel(o, key["__symkey"]) } }
+    }
     if (Array.isArray(o)) {
         var idx = jvToNumber(key)
         if (idx === Math.trunc(idx)) {
@@ -1175,6 +1268,9 @@ function js_jsmget(o, key) {
         if (fm !== undefined) { return fm }
         return o[key]
     }
+    if (jvSymN > 0) {
+        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsmget(o, key["__symkey"]) } }
+    }
     return o[key]
 }
 
@@ -1413,6 +1509,9 @@ function js_jsvget(o, key) {
         if (v === undefined) { return jvValueMiss(o, key) }
         return v
     }
+    if (jvSymN > 0) {
+        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsvget(o, key["__symkey"]) } }
+    }
     return o[key]
 }
 
@@ -1442,7 +1541,10 @@ function jvValueMiss(o, key) {
             if (pd !== undefined) { return jvProtoRead(pd, key) }
         }
         if (jvIsObjectGlobal(o)) { return jvStaticValue(o, key) }
-        if (key.length < 2 || key.substring(0, 2) != "__") {
+        if (key == "description") {
+            if (o["__symkey"] !== undefined) { return o["__symdesc"] }
+        }
+        if (key.length < 2 || key.substring(0, 2) != "__" || jvIsPrivateKey(key)) {
             var fn = jvFindClassMethod(o, key)
             if (fn !== undefined) { return jvMethodValue(fn, key) }
             // Object.prototype's four methods.
@@ -1476,6 +1578,7 @@ function jvStaticHas(g, key) {
         return key == "resolve" || key == "reject" || key == "all" || key == "allSettled" || key == "race" || key == "any"
     }
     if (g == "Array") { return key == "isArray" }
+    if (g == "Symbol") { return key == "for" || key == "keyFor" }
     return false
 }
 function jvStaticValue(g, key) {
@@ -1484,6 +1587,10 @@ function jvStaticValue(g, key) {
     if (jvStringFn !== undefined && g === jvStringFn) { gn = "String" }
     if (jpFn !== undefined && g === jpFn) { gn = "Promise" }
     if (jvArrayFn !== undefined && g === jvArrayFn) { gn = "Array" }
+    if (jvSymbolFn !== undefined && g === jvSymbolFn) {
+        if (key == "iterator" || key == "asyncIterator") { return jvSymWellKnown(key) }
+        gn = "Symbol"
+    }
     if (!jvStaticHas(gn, key)) { return undefined }
     var k = "$" + gn + "." + key
     var got = anytype
@@ -1607,6 +1714,9 @@ function jvProtoWrite(d, key, v) {
 // descriptor rather than as own properties, but `"m" in instance` is true in node.
 // Twin: m["js_jshas"] in abnf/jsrtjsprint.go.
 function js_jshas(o, key) {
+    if (jvSymN > 0) {
+        if (typeof key == "object") { if (jvIsSym(key)) { return js_jshas(o, key["__symkey"]) } }
+    }
     // Every object inherits Object.prototype's names (`"toString" in {}`), an Array its
     // methods and length, a function or a class call / apply / bind / name / length. Twin of
     // js_jshas in abnf/jsrtjsprint.go.
@@ -1669,6 +1779,9 @@ function js_jshas(o, key) {
 // slot (or a slot on the __class/__super chain) holds an accessor, call its setter
 // with the receiver".
 function js_jsmset(o, key, v) {
+    if (jvSymN > 0) {
+        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsmset(o, key["__symkey"], v) } }
+    }
     // A member write on a class DESCRIPTOR is a write to its static namespace, and a
     // setter anywhere on the static chain wins over a fresh own slot - the same rule
     // js_set follows for an ordinary object.
@@ -3548,6 +3661,20 @@ function jvFallbackCall(recv, name, args) {
 // regular-expression surface (jxMcall, asked FIRST) and the class-method
 // dispatch. A receiver none of them claims lands in jvFallbackCall.
 function js_jsmcall(recv, key, args) {
+    if (jvSymN > 0) {
+        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsmcall(recv, key["__symkey"], args) } }
+        var symRecv = recv === jvSymbolFn
+        if (!symRecv) {
+            if (typeof recv == "object") {
+                if (recv !== null) { symRecv = recv["__symkey"] !== undefined }
+            }
+        }
+        if (symRecv) {
+            var sc = anytype
+            sc = jvSymCall(recv, jvStr(key), args)
+            if (sc !== jvMiss) { return sc }
+        }
+    }
     var name = jvStr(key)
     // A CLASS DESCRIPTOR stops here: js_jsmget already answered every static, so
     // reaching this line means the name is not one - and jvFallbackCall below would
@@ -4663,6 +4790,7 @@ function jsonHIsBig(v) { return jbIsBig(v) }
 function jsonHIsObj(v) {
     if (!jvIsObj(v)) { return false }
     if (jbIsBig(v)) { return false }
+    if (v["__symkey"] !== undefined) { return false }
     return v["__isclass"] !== true
 }
 function jsonHStr(v) { return jvStr(v) }

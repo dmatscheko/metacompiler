@@ -89,7 +89,11 @@ func (rt *jsrt) jsonIsFn(v interface{}) bool { return isCallable(v) || isClassDe
 // jsonIsObj: an object that serializes by its keys.
 func jsonIsObj(v interface{}) bool {
 	o, ok := v.(*jsObject)
-	return ok && !isClassDesc(o)
+	if !ok || isClassDesc(o) {
+		return false
+	}
+	_, isSym := o.props["__symkey"]
+	return !isSym
 }
 
 // jsonToJSON is v.toJSON(key); a class method takes its receiver PREPENDED (see

@@ -3354,6 +3354,30 @@ function s63() {
         [0, 1, "", "a"].filter(Boolean).length === 2 && Object.is(NaN, 0 / 0) && !Object.is(0, -0));
 }
 
+// ===== SECTION 64: symbols and Symbol.iterator =====
+// A class or an object literal with a [Symbol.iterator] method is iterable; a symbol is
+// its own type and a property key no key listing shows. Values read off node 24.
+class R64 {
+    n: number;
+    constructor(n: number) { this.n = n; }
+    [Symbol.iterator](): any {
+        let i = 0;
+        const n = this.n;
+        return { next() { i++; return i <= n ? { value: i, done: false } : { value: undefined, done: true }; } };
+    }
+}
+function s64() {
+    const out: number[] = [];
+    for (const v of new R64(3) as any) { out.push(v); }
+    const s1 = Symbol("k");
+    const o2: any = {};
+    o2[s1] = 5;
+    o2.plain = 1;
+    check("sy64a", out.join() === "1,2,3" && [...(new R64(2) as any)].join() === "1,2" && typeof s1 === "symbol" &&
+        String(Symbol.iterator) === "Symbol(Symbol.iterator)" && o2[s1] === 5 && Object.keys(o2).join() === "plain" &&
+        Symbol.for("a") === Symbol.for("a") && s1.description === "k");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3420,6 +3444,7 @@ function main(): number {
     s61(); // SECTION-CALL 61
     s62(); // SECTION-CALL 62
     s63(); // SECTION-CALL 63
+    s64(); // SECTION-CALL 64
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

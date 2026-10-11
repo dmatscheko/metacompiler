@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-70.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-71.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-70, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-71, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -14,7 +14,8 @@
 //                             the own names of Math / JSON / Object and `in`,
 //                             super reaching Object.prototype, g.return(v) as a
 //                             return completion, where yield and return stand,
-//                             prototypes, static methods as values, Boolean
+//                             prototypes, static methods as values, Boolean,
+//                             symbols
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1542,6 +1543,45 @@ function s70() {
         Object.is(10n, 10n) && !Object.is({}, {}) && Object.is("a", "a"))
 }
 
+// ===== SECTION 71: symbols, Symbol.iterator, a private method read as a value =====
+// A class or an object literal with a [Symbol.iterator] method is iterable by for-of,
+// a spread, destructuring, Array.from and yield*. A symbol is its own type, unique per
+// Symbol() call, registered by Symbol.for, a property key that no key listing shows.
+// `this.#m` read without a call is the method. Values read off node 24.
+class R71 {
+    constructor(n) { this.n = n }
+    [Symbol.iterator]() {
+        let i = 0
+        const n = this.n
+        return { next() { i++; return i <= n ? { value: i, done: false } : { value: undefined, done: true } } }
+    }
+}
+function* g71() { yield* new R71(2) }
+class P71 { #m() { return 1 } get() { const f = this.#m; return typeof f + f.call(this) } }
+function s71() {
+    const out = []
+    for (const v of new R71(3)) { out.push(v) }
+    const [x, y] = new R71(5)
+    check("sy71a", out.join() === "1,2,3" && [...new R71(3)].join() === "1,2,3" && Array.from(new R71(2)).join() === "1,2" &&
+        x === 1 && y === 2 && [...g71()].join() === "1,2")
+    const obj = { *[Symbol.iterator]() { yield 7; yield 8 } }
+    check("sy71b", [...obj].join() === "7,8" && Object.keys(obj).length === 0 && JSON.stringify(obj) === "{}")
+    const s1 = Symbol("k")
+    const o2 = {}
+    o2[s1] = 5
+    o2.plain = 1
+    const ks = []
+    for (const k in o2) { ks.push(k) }
+    check("sy71c", typeof Symbol === "function" && typeof Symbol.iterator === "symbol" && typeof s1 === "symbol" &&
+        String(Symbol.iterator) === "Symbol(Symbol.iterator)" && Symbol("hi").toString() === "Symbol(hi)" &&
+        s1.description === "k" && Symbol().description === undefined && o2[s1] === 5 && (s1 in o2) &&
+        Object.keys(o2).join() === "plain" && ks.join() === "plain" && Symbol("k") !== s1 &&
+        JSON.stringify({ x: s1, y: 1 }) === '{"y":1}')
+    check("sy71d", Symbol.for("app") === Symbol.for("app") && Symbol.keyFor(Symbol.for("app")) === "app" &&
+        Symbol.keyFor(s1) === undefined && Symbol.iterator === Symbol.iterator && typeof new R71(1)[Symbol.iterator] === "function" &&
+        new Map([[s1, "v"]]).get(s1) === "v" && new P71().get() === "function1")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1571,6 +1611,7 @@ function main() {
     s68() // SECTION-CALL 68
     s69() // SECTION-CALL 69
     s70() // SECTION-CALL 70
+    s71() // SECTION-CALL 71
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

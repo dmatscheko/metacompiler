@@ -886,7 +886,7 @@ TypeAssertion = "<" Type ">" UnaryExpr ;
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew NotReserved Id <~~ push({cls: idName(up.in)}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwNew NotReserved Id <~~ push({cls: jsbRef(idName(up.in))}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
 // argument list at all - go through makeNewGeneral, which takes the callee as a value.
@@ -2603,7 +2603,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitIterOf(b, v) {
-        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "@@iterator")])
+        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@iterator")])
         var callB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, joinB)
@@ -2911,7 +2911,7 @@ NotFuncHead = :script(~~
                                        (props[i].accName == undefined) ? "" : props[i].accName, props[i].params)
                     var gV = (props[i].acc == "get") ? clo : hUndef
                     var sV = (props[i].acc == "set") ? clo : hUndef
-                    callExt(b, "js_defprop", [obj, kr.v, gV, sV])
+                    callExt(b, "js_defprop", [obj, callExt(b, "js_jspropkey", [kr.v]), gV, sV])
                     continue
                 }
                 var vr = props[i].t(b)
@@ -4282,7 +4282,7 @@ NotFuncHead = :script(~~
             if (f.dkeyT != undefined) {
                 var kr = f.dkeyT(b)
                 b = kr.b
-                keyV = kr.v
+                keyV = callExt(b, "js_jspropkey", [kr.v])
             } else {
                 keyV = emitStr(b, f.dkey)
                 taken.push(f.dkey)
@@ -4464,7 +4464,11 @@ NotFuncHead = :script(~~
     }
     // A key descriptor as a {b, v} pair in the class-definition block.
     function emitMemberKey(b, m) {
-        if (m.nameT != undefined) { return m.nameT(b) }
+        if (m.nameT != undefined) {
+            // A computed key may be a symbol, which js_jspropkey turns into its key.
+            var kr = m.nameT(b)
+            return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
+        }
         return {b: b, v: emitStr(b, m.name)}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
@@ -5796,6 +5800,8 @@ NotFuncHead = :script(~~
         // The Promise global: a function value, so `new Promise(exec)` constructs one and
         // `typeof Promise` is "function"; the statics resolve through js_jsmcall.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Promise"), callExt(b, "js_jspromfn", [])])
+        // The Symbol global: Symbol(desc), Symbol.iterator, Symbol.for (js_jssymbolfn).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
         b = emitImported(b)

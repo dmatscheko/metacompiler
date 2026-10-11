@@ -268,6 +268,7 @@ var jsvStaticNames = map[string][]string{
 	"String":  {"fromCharCode"},
 	"Promise": {"resolve", "reject", "all", "allSettled", "race", "any"},
 	"Array":   {"isArray"},
+	"Symbol":  {"for", "keyFor"},
 }
 
 func jsvInNames(names []string, k string) bool {
@@ -284,6 +285,12 @@ func jsvInNames(names []string, k string) bool {
 func (rt *jsrt) jsvString(v interface{}) string {
 	switch t := v.(type) {
 	case *jsObject:
+		if d, isSym := t.props["__symdesc"]; isSym {
+			if d == jsUndef {
+				return "Symbol()"
+			}
+			return "Symbol(" + rt.toString(d) + ")"
+		}
 		if r, ok := rt.jsvCallMethod(t, "toString"); ok {
 			return rt.toString(r)
 		}
@@ -1833,6 +1840,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if o.props["__jsobject"] != nil {
 				return rt.wrapStr("function")
 			}
+			if _, isSym := o.props["__symkey"]; isSym {
+				return rt.wrapStr("symbol")
+			}
 		}
 		return rt.wrapStr(rt.typeOf(v))
 	}
@@ -1963,18 +1973,56 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// is not a builtin global answers one, arrows and methods included (node: no
 	// prototype), as every callable is also accepted by `new` here. Twins: protoView
 	// in both *-interpreter.abnf, jvProtoView in languages/lib/js-rt.metajs.
+	// SYMBOLS. A symbol is an object {__symdesc, __symkey}: a new one per Symbol()
+	// call, one per name for the well-known ones and per key for Symbol.for. As a
+	// property KEY it is its __symkey - "__#@" and a name no identifier can spell - so
+	// every key listing already skips it, as it skips the engine's own "__" slots, and
+	// the private-name exemption files a class method under it. Every member extern
+	// that takes a key turns a symbol into its key first (see the end of this
+	// function). Twins: jsSym* in both *-interpreter.abnf, jvSym* in
+	// languages/lib/js-rt.metajs.
+	symN := 0
+	symWK := map[string]*jsObject{}
+	symReg := map[string]*jsObject{}
+	symMake := func(desc interface{}, key string) *jsObject {
+		s := newJSObject()
+		s.set("__symdesc", desc)
+		s.set("__symkey", key)
+		return s
+	}
+	symWellKnown := func(n string) *jsObject {
+		if s, found := symWK[n]; found {
+			return s
+		}
+		s := symMake("Symbol."+n, "__#@"+n)
+		symWK[n] = s
+		return s
+	}
+	symbolFn := jsHostFunc("Symbol", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		var desc interface{} = jsUndef
+		if len(args) > 0 && args[0] != jsUndef {
+			desc = rt.jsvString(args[0])
+		}
+		symN++
+		return symMake(desc, "__#@"+strconv.Itoa(symN)+"@")
+	})
+	jsvFnMetaSet(symbolFn, "Symbol", 0)
+	m["js_jssymbolfn"] = func(a []uint64) uint64 { return w(symbolFn) }
 	// A STATIC METHOD of a builtin global read as a value - `typeof Object.keys`,
 	// `const k = Object.keys` - one interned function per global and name, which
 	// re-enters js_jsmcall on the global. The names are the ones js_jsmcall answers;
 	// the length is node's. Twins: staticValue in both *-interpreter.abnf,
 	// jvStaticValue in languages/lib/js-rt.metajs.
 	staticVals := map[string]*hostFunc{}
-	staticValue := func(g interface{}, name string) *hostFunc {
+	staticValue := func(g interface{}, name string) interface{} {
 		gname := ""
 		if jsvIsObjectGlobal(g) {
 			gname = "Object"
 		} else if hf, ok := g.(*hostFunc); ok {
 			gname = hf.name
+		}
+		if g == interface{}(symbolFn) && (name == "iterator" || name == "asyncIterator") {
+			return symWellKnown(name)
 		}
 		if !jsvInNames(jsvStaticNames[gname], name) {
 			return nil
@@ -2427,8 +2475,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return r
 		}
 		name := rt.toString(u(a[1]))
-		if jsvInternalKey(name) {
+		if jsvInternalKey(name) && !jsvPrivateKey(name) {
 			return r
+		}
+		if d, isSym := recv.props["__symdesc"]; isSym && name == "description" {
+			return w(d)
 		}
 		if of, isProto := recv.props["__bvof"]; isProto {
 			if fam := jsvBuiltinFam(of, name); fam != 0 {
@@ -2958,6 +3009,80 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// class. This is what routes the emitters' own thrown strings (the
 	// iterator-throw TypeError) through the hierarchy.
 	m["js_jserrmk"] = func(a []uint64) uint64 { return w(rt.jsErrFromText(rt.toString(u(a[0])))) }
+
+	// A symbol KEY becomes its __symkey before any member extern sees it.
+	symKey := func(v interface{}) (string, bool) {
+		if o, ok := v.(*jsObject); ok {
+			if k, isSym := o.props["__symkey"].(string); isSym {
+				return k, true
+			}
+		}
+		return "", false
+	}
+	keyed := func(name string) {
+		inner := m[name]
+		m[name] = func(a []uint64) uint64 {
+			if k, isSym := symKey(u(a[1])); isSym {
+				b := append([]uint64{}, a...)
+				b[1] = rt.wrapStr(k)
+				return inner(b)
+			}
+			return inner(a)
+		}
+	}
+	keyed("js_jsvget")
+	keyed("js_jsmget")
+	keyed("js_jsmset")
+	keyed("js_jshas")
+	keyed("js_jsdel")
+	keyed("js_jsmcall")
+	// The class and destructuring computed keys, which reach no member extern.
+	m["js_jspropkey"] = func(a []uint64) uint64 {
+		if k, isSym := symKey(u(a[0])); isSym {
+			return rt.wrapStr(k)
+		}
+		return a[0]
+	}
+	// Symbol.for / Symbol.keyFor, and a symbol's toString / valueOf.
+	symCall := m["js_jsmcall"]
+	m["js_jsmcall"] = func(a []uint64) uint64 {
+		name := rt.toString(u(a[1]))
+		args, _ := u(a[2]).(*jsArray)
+		arg0 := interface{}(jsUndef)
+		if args != nil && len(args.elems) > 0 {
+			arg0 = args.elems[0]
+		}
+		if u(a[0]) == interface{}(symbolFn) {
+			switch name {
+			case "for":
+				k := rt.jsvString(arg0)
+				s, found := symReg[k]
+				if !found {
+					s = symMake(k, "__#@for@"+k)
+					symReg[k] = s
+				}
+				return w(s)
+			case "keyFor":
+				s, isObj := arg0.(*jsObject)
+				if _, isSym := symKey(arg0); !isSym {
+					panic(&jsThrown{value: rt.jsErrFromText("TypeError: " + rt.jsvString(arg0) + " is not a symbol")})
+				}
+				if k, _ := symKey(s); strings.HasPrefix(k, "__#@for@") && isObj {
+					return w(s.props["__symdesc"])
+				}
+				return jsHUndefined
+			}
+		}
+		if _, isSym := symKey(u(a[0])); isSym {
+			switch name {
+			case "toString":
+				return rt.wrapStr(rt.jsvString(u(a[0])))
+			case "valueOf":
+				return a[0]
+			}
+		}
+		return symCall(a)
+	}
 
 	// BigInt last: its wrappers sit in FRONT of the js_js* names registered above
 	// (js_jsadd, js_jseq, js_jslt, ...), so they have to exist first.

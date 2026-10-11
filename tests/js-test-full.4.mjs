@@ -58,10 +58,18 @@ function s57() {
     check("exp5", new S57D().m() === "d")
 }
 
+// ===== SECTION 72: a builtin class named only by `new` =====
+// lib/js-builtins.js is compiled into a program that names Set, Map, Array or Boolean;
+// this file names Set nowhere but in a `new`. Values read off node 24.
+function s72() {
+    check("nw72a", new Set([1, 2, 2]).size === 2)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
     s57() // SECTION-CALL 57
+    s72() // SECTION-CALL 72
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

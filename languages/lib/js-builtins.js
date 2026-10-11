@@ -8,13 +8,14 @@
 // It is a Script ('.js'), runs before the program's own top level, and a program that
 // declares a Set, a Map, an Array.from or a Boolean of its own replaces these.
 //
-// ITERATION. This subset has no Symbol, so there is no [Symbol.iterator]: for-of, a
-// spread, array destructuring and yield* drive any value with a callable `next` member
-// lazily, and an array or a string by index. A Set or a Map is neither, so the
-// grammars' iteration sites first call a value's "@@iterator" method when it has one
-// (jsIterOf / emitIterOf) - the spec's own name for the well-known symbol, which no
-// identifier can spell. A class method is never enumerated, so it stays out of
-// Object.keys and JSON. The fields are '__'-prefixed for the same reason.
+// ITERATION. for-of, a spread, array destructuring and yield* drive any value with a
+// callable `next` member lazily, and an array or a string by index. A Set or a Map is
+// neither, so the grammars' iteration sites first call a value's [Symbol.iterator]
+// method when it has one (jsIterOf / emitIterOf). This file spells that key as the
+// string Symbol.iterator stands for, "__#@iterator", so that a program which never
+// names a symbol itself has none, and the member externs skip their symbol test (see
+// jvSymN in lib/js-rt.metajs). The fields are '__'-prefixed so they stay out of
+// Object.keys and JSON.
 //
 // Every message and value below is node 24's.
 
@@ -44,7 +45,7 @@ function __iterCheck(v) {
     var t = typeof v
     if (t === "string" || Array.isArray(v)) { return v }
     if (t === "object" || t === "function") {
-        if (typeof v.next === "function" || typeof v["@@iterator"] === "function") { return v }
+        if (typeof v.next === "function" || typeof v["__#@iterator"] === "function") { return v }
         throw new TypeError(t + " is not iterable (cannot read property Symbol(Symbol.iterator))")
     }
     throw new TypeError(t + " " + v + " is not iterable (cannot read property Symbol(Symbol.iterator))")
@@ -143,7 +144,7 @@ class __CollIter {
         this.__c = undefined
         return {value: undefined, done: true}
     }
-    ["@@iterator"]() { return this }
+    ["__#@iterator"]() { return this }
 }
 
 class Set extends __Coll {
@@ -163,7 +164,7 @@ class Set extends __Coll {
     values() { return new __CollIter(this, 1) }
     keys() { return new __CollIter(this, 1) }
     entries() { return new __CollIter(this, 2) }
-    ["@@iterator"]() { return new __CollIter(this, 1) }
+    ["__#@iterator"]() { return new __CollIter(this, 1) }
     toString() { return "[object Set]" }
 }
 
@@ -195,7 +196,7 @@ class Map extends __Coll {
     keys() { return new __CollIter(this, 0) }
     values() { return new __CollIter(this, 1) }
     entries() { return new __CollIter(this, 2) }
-    ["@@iterator"]() { return new __CollIter(this, 2) }
+    ["__#@iterator"]() { return new __CollIter(this, 2) }
     toString() { return "[object Map]" }
 }
 
@@ -207,7 +208,7 @@ Array.from = function from(items, mapFn, self) {
     var out = []
     var t = typeof items
     if (t === "string" || Array.isArray(items)
-        || ((t === "object" || t === "function") && (typeof items.next === "function" || typeof items["@@iterator"] === "function"))) {
+        || ((t === "object" || t === "function") && (typeof items.next === "function" || typeof items["__#@iterator"] === "function"))) {
         var i = 0
         for (var v of items) {
             out.push(mapFn === undefined ? v : mapFn.call(self, v, i))

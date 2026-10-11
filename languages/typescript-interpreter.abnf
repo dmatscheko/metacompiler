@@ -570,14 +570,14 @@ DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up
 // because the plain form's Id cannot start at a '#'.
 PrivateDotSuffix <~~ push(privDotSuffix(pop())) ~~>
             = "." "#" Id <~~ push(idName(up.in)) ~~> ;
-IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
+IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: jsPropKeyT(pop())}) ~~>
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
 // CallSuffix/IndexSuffix, because the marker they push differs by the 'opt' flag.
 OptChainSuffix = "?." ( OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ) ;
 OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-OptIndexSuffix <~~ push({kind:"member", opt: true, txt: cpTxt(up.in, up.pos), key: pop()}) ~~>
+OptIndexSuffix <~~ push({kind:"member", opt: true, txt: cpTxt(up.in, up.pos), key: jsPropKeyT(pop())}) ~~>
             = "[" Expression "]" ;
 OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: idName(up.in), key: makeConst(idName(up.in))}) ~~> ;
 // 'this?.#foo' - the optional-chaining form of PrivateDotSuffix. A private member is an
@@ -622,7 +622,7 @@ TypeAssertion = "<" Type ">" UnaryExpr ;
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew NotReserved Id <~~ push({cls: idName(up.in)}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwNew NotReserved Id <~~ push({cls: jsbRef(idName(up.in))}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // See the twin of this comment in js-interpreter.abnf.
 NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
@@ -2229,6 +2229,43 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-interpreter.abnf.
+    // Symbols: see the twin of this block in js-interpreter.abnf.
+    var jsSymN = 0
+    var jsSymWK = {}
+    var jsSymReg = {}
+    function jsSymMake(desc, key) {
+        var s = {}
+        s["__symdesc"] = desc
+        s["__symkey"] = key
+        return s
+    }
+    function jsIsSym(v) { return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__symkey") }
+    // ToPropertyKey's symbol case: a computed key that is a symbol becomes its key.
+    function jsPropKey(k) { return jsIsSym(k) ? k.__symkey : k }
+    function jsPropKeyT(t) { return function() { return jsPropKey(t()) } }
+    function jsKeyStr(k) { return jsIsSym(k) ? k.__symkey : "" + k }
+    function jsSymStr(s) { return "Symbol(" + ((s.__symdesc === undefined) ? "" : s.__symdesc) + ")" }
+    function jsSymWellKnown(n) {
+        if (!hasOwn(jsSymWK, n)) { jsSymWK[n] = jsSymMake("Symbol." + n, "__#@" + n) }
+        return jsSymWK[n]
+    }
+    // The Symbol global: every call makes a new symbol.
+    function jsSymbolFn() {
+        var d = anytype
+        d = (arguments.length > 0 && arguments[0] !== undefined) ? jsStr(arguments[0]) : undefined
+        jsSymN = jsSymN + 1
+        return jsSymMake(d, "__#@" + jsSymN + "@")
+    }
+    function jsSymFor(k) {
+        var ks = jsStr(k)
+        if (!hasOwn(jsSymReg, "$" + ks)) { jsSymReg["$" + ks] = jsSymMake(ks, "__#@for@" + ks) }
+        return jsSymReg["$" + ks]
+    }
+    function jsSymKeyFor(s) {
+        if (!jsIsSym(s)) { biRaise("TypeError: " + jsStr(s) + " is not a symbol") }
+        if (s.__symkey.substring(0, 8) == "__#@for@") { return s.__symdesc }
+        return undefined
+    }
     function jsStr(v) {
         if (v === undefined) { return "undefined" }
         if (v === null) { return "null" }
@@ -2248,6 +2285,7 @@ NotFuncHead = :script(~~
             return out
         }
         if (typeof v == "object") {
+            if (jsIsSym(v)) { return jsSymStr(v) }
             var r = jsCallMethod(v, "toString")
             if (r != null) { return "" + r.v }
             return jsProtoTag(v)
@@ -3043,6 +3081,16 @@ NotFuncHead = :script(~~
             if (psr !== jpMiss) { return {v: psr} }
         }
         if (target === jsObjectGlobal) { return jsObjectStatic(name, args) }
+        if (target === jsSymbolFn) {
+            if (name == "for") { return {v: jsSymFor(args[0])} }
+            if (name == "keyFor") { return {v: jsSymKeyFor(args[0])} }
+            return null
+        }
+        if (jsIsSym(target)) {
+            if (name == "toString") { return {v: jsSymStr(target)} }
+            if (name == "valueOf") { return {v: target} }
+            return null
+        }
         if (target === jsArrayFn) {
             if (name == "isArray") { return {v: Array.isArray(args[0])} }
             return null
@@ -3485,7 +3533,8 @@ NotFuncHead = :script(~~
     function jsonHIsFn(v) { return typeof v == "function" || isClassDesc(v) }
     function jsonHIsBig(v) { return isBigInt(v) }
     function jsonHIsObj(v) {
-        return v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v) && !isBigInt(v) && !isClassDesc(v)
+        return v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v) && !isBigInt(v) && !isClassDesc(v) &&
+            !jsIsSym(v)
     }
     function jsonHStr(v) { return jsStr(v) }
     function jsonHParseNum(s) { return parseFloat(s) }
@@ -3503,7 +3552,7 @@ NotFuncHead = :script(~~
         "Object": jsObjectGlobal, "Array": jsArrayFn, "JSON": jsJsonObj,
         // The Promise global: a function value, so `new Promise(exec)` constructs one
         // and `typeof Promise` is "function". The statics resolve through jsBuiltin.
-        "Promise": jsPromiseFn,
+        "Promise": jsPromiseFn, "Symbol": jsSymbolFn,
         // NaN and Infinity are global BINDINGS in JavaScript.
         "NaN": 0 / 0, "Infinity": 1 / 0, "undefined": undefined,
         // See the twin of this comment in js-interpreter.abnf.
@@ -3837,6 +3886,7 @@ NotFuncHead = :script(~~
         var v = anytype // A member is of any type.
         v = getMemberRaw(o, k)
         if (v != undefined) { return v }
+        if (k === "description" && jsIsSym(o)) { return o.__symdesc }
         var sv = anytype // A static method of a builtin global, or undefined.
         sv = staticValue(o, k)
         if (sv !== undefined) { return sv }
@@ -3863,13 +3913,17 @@ NotFuncHead = :script(~~
     var stNames = {"Object": ["assign", "entries", "freeze", "fromEntries", "getOwnPropertyNames", "is", "keys",
                               "seal", "values"],
                    "String": ["fromCharCode"], "Promise": ["resolve", "reject", "all", "allSettled", "race", "any"],
-                   "Array": ["isArray"]}
+                   "Array": ["isArray"], "Symbol": ["for", "keyFor"]}
     function staticValue(g, k) {
         var gn = ""
         if (g === jsObjectGlobal) { gn = "Object" }
         if (g === jsStringFn) { gn = "String" }
         if (g === jsPromiseFn) { gn = "Promise" }
         if (g === jsArrayFn) { gn = "Array" }
+        if (g === jsSymbolFn) {
+            if (k === "iterator" || k === "asyncIterator") { return jsSymWellKnown(k) }
+            gn = "Symbol"
+        }
         if (gn == "" || typeof k != "string" || stNames[gn].indexOf(k) < 0) { return undefined }
         var key = "$" + gn + "." + k
         if (hasOwn(stVals, key)) { return stVals[key] }
@@ -4384,6 +4438,7 @@ NotFuncHead = :script(~~
         if (isBigInt(v)) { return "bigint" }
         if (v != undefined && v != null && typeof v == "object" && v.__isclass === true) { return "function" }
         if (v === jsObjectGlobal) { return "function" }
+        if (jsIsSym(v)) { return "symbol" }
         return typeof v
     }
     function makeTypeof(t) {
@@ -5450,7 +5505,7 @@ NotFuncHead = :script(~~
     }
     function inOrInstanceof(op, l, r) {
         if (op == "instanceof") { return instanceOf(l, r) }
-        return propIn(l, r)
+        return propIn(jsPropKey(l), r)
     }
     function propIn(k, o) {
         if (o == undefined || o == null) fail("'in' on " + o)
@@ -5596,7 +5651,7 @@ NotFuncHead = :script(~~
             for (var i = 0; i < props.length; i++) {
                 var p = props[i]
                 if (p.spreadObj == true) { spreadInto(o, keys, p.t()); continue }
-                var key = (p.kt != undefined) ? "" + p.kt() : p.k
+                var key = (p.kt != undefined) ? jsKeyStr(p.kt()) : p.k
                 if (p.acc != undefined) { addAccessor(o, p.acc, key, p.fn()) }
                 else { scopePut(o, key, p.t()) }
                 if (!isInternalKey(key) && keys.indexOf(key) < 0) { keys.push(key) }
@@ -5751,8 +5806,8 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     function jsIterOf(v) {
         if (v == undefined || v == null || typeof v != "object") { return v }
-        var f = anytype // The "@@iterator" member, of any type at all.
-        f = getMember(v, "@@iterator")
+        var f = anytype // The [Symbol.iterator] member, of any type at all.
+        f = getMember(v, "__#@iterator")
         if (typeof f != "function") { return v }
         return callWithThis(f, v, [])
     }
@@ -6406,7 +6461,7 @@ NotFuncHead = :script(~~
         var used = []
         for (var f = 0; f < pat.fields.length; f++) {
             var fl = pat.fields[f]
-            var key = (fl.keyT != undefined && fl.keyT != null) ? "" + fl.keyT() : fl.key
+            var key = (fl.keyT != undefined && fl.keyT != null) ? jsKeyStr(fl.keyT()) : fl.key
             used.push(key)
             bindPatternMode(fl.pat, getMember(v, key), decl)
         }
@@ -6603,7 +6658,7 @@ NotFuncHead = :script(~~
     // The name a member is filed under. A computed key is only known at run time, so it
     // is a thunk and this is called from inside the class-building thunk.
     function memberKey(m) {
-        if (m.keyT != undefined && m.keyT != null) { return "" + m.keyT() }
+        if (m.keyT != undefined && m.keyT != null) { return jsKeyStr(m.keyT()) }
         return m.name
     }
     // Every TypeScript member production pushes {decs} first and {mods} second, so the

@@ -731,7 +731,7 @@ PrivateNameRef <~~ push(privRefConst(pop())) ~~>
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew NotReserved Id <~~ push({cls: idName(up.in)}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwNew NotReserved Id <~~ push({cls: jsbRef(idName(up.in))}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // The general 'new' forms: a member-path or parenthesized callee ('new a.b.C()',
 // 'new (mk())()'), a nested 'new', and 'new C' with no argument list at all. The callee
@@ -3639,10 +3639,11 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean) is JavaScript, compiled into a
-    // program that names Set, Map, Array or Boolean (jsbRef, at the VarRef and typeof-name tags),
-    // like an imported file but emitted FIRST, before every imported file's top level,
-    // since any of them may use it. Twin of jsbLoad in js-interpreter.abnf.
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean) is JavaScript,
+    // compiled into a program that names Set, Map, Array or Boolean (jsbRef, at the
+    // VarRef, typeof-name and new-name tags), like an imported file but emitted FIRST,
+    // before every imported file's top level, since any of them may use it. Twin of
+    // jsbLoad in js-interpreter.abnf.
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
@@ -3743,15 +3744,15 @@ NotFuncHead = :script(~~
         return exitB
     }
     // What a for-of, a spread, a destructuring or a yield* iterates: what the value's
-    // "@@iterator" method answers when it has one - a Set or a Map of
-    // lib/js-builtins.js, since this subset has no Symbol.iterator - and the value
-    // itself otherwise. Twin of jsIterOf in js-interpreter.abnf.
+    // [Symbol.iterator] method answers when it has one - a Set or a Map of
+    // lib/js-builtins.js, or a program's own iterable - and the value itself
+    // otherwise. Twin of jsIterOf in js-interpreter.abnf.
     //
     // This probe and the iteration sites' `next`, `return` and `throw` probes read with
     // js_jsvget, the member VALUE read: a class instance's methods live on its __class descriptor, and
     // under llvm.Run only js_jsvget finds them there.
     function emitIterOf(b, v) {
-        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "@@iterator")])
+        var fV = callExt(b, "js_jsvget", [v, emitStr(b, "__#@iterator")])
         var callB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")])), callB, joinB)
@@ -4088,7 +4089,7 @@ NotFuncHead = :script(~~
                                        (props[i].accName == undefined) ? "" : props[i].accName, props[i].params)
                     var gV = (props[i].acc == "get") ? clo : hUndef
                     var sV = (props[i].acc == "set") ? clo : hUndef
-                    callExt(b, "js_defprop", [obj, kr.v, gV, sV])
+                    callExt(b, "js_defprop", [obj, callExt(b, "js_jspropkey", [kr.v]), gV, sV])
                     continue
                 }
                 var vr = props[i].t(b)
@@ -5821,7 +5822,7 @@ NotFuncHead = :script(~~
             if (f.dkeyT != undefined) {
                 var kr = f.dkeyT(b)
                 b = kr.b
-                keyV = kr.v
+                keyV = callExt(b, "js_jspropkey", [kr.v])
             } else {
                 keyV = emitStr(b, f.dkey)
                 taken.push(f.dkey)
@@ -6052,7 +6053,11 @@ NotFuncHead = :script(~~
     }
     // A key descriptor as a {b, v} pair in the class-definition block.
     function emitMemberKey(b, m) {
-        if (m.nameT != undefined) { return m.nameT(b) }
+        if (m.nameT != undefined) {
+            // A computed key may be a symbol, which js_jspropkey turns into its key.
+            var kr = m.nameT(b)
+            return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
+        }
         return {b: b, v: emitStr(b, m.name)}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
@@ -7128,6 +7133,8 @@ NotFuncHead = :script(~~
         // `typeof Promise` is "function"; Promise.resolve / reject / all / allSettled /
         // race / any resolve through js_jsmcall, like String.fromCharCode above.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Promise"), callExt(b, "js_jspromfn", [])])
+        // The Symbol global: Symbol(desc), Symbol.iterator, Symbol.for (js_jssymbolfn).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
         b = emitImported(b)
