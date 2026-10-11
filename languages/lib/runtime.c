@@ -396,7 +396,7 @@ long CORO_ENTRY;     /* &coro_entry, from dlsym; 0 until the first generator */
 
 /* GEN_EXIT is the sentinel gen_close() throws INTO a suspended body so that the
  * `finally` clauses wrapping its yield run before the generator is abandoned -
- * JavaScript's return completion and CPython's GeneratorExit. It is one object,
+ * JavaScript's return completion (Python's close() is a throw instead). It is one object,
  * created on the first close and never freed (gc_roots traces it), and no
  * program can name it: nothing in any of the sixteen languages hands out a
  * reference to it, so `pending != GEN_EXIT` in js_try is an exact test. The

@@ -55,25 +55,23 @@ Known deviations, all deliberate:
     CPython's sequence - for two generators driven alternately, for a generator
     mutating shared state, for try / with / finally nested around a yield, for
     close() mid-run, and for an exception object built before a yield and raised
-    after it. The suspension signal is a host-level throw, so makeTry, runWith and
-    genClose let it pass through untouched (isGenSuspend), and close() replays to
-    the parked yield and raises there, which is how the `finally` runs at the
-    moment CPython runs it.
+    after it. The suspension signal is a host-level throw, so makeTry and runWith
+    let it pass through untouched (isGenSuspend), and close() replays to the
+    parked yield and raises there, which is how the `finally` runs at the moment
+    CPython runs it.
 
     gen.throw(exc) RAISES AT THE PARKED YIELD, so the body's own except and
-    finally clauses see it, and the record travels on the resume value exactly as
-    close()'s exit record does - which is what makes it per-coroutine by
-    construction. The compiled halves have it as runtime.c's gen_throw and
-    abnf/jsrt.go's throwInto. A generator that has not started, or that is done,
-    runs NOTHING - no `finally` - and the exception propagates out of throw()
-    itself, as in CPython.
+    finally clauses see it, and the record travels on the resume value - which is
+    what makes it per-coroutine by construction. The compiled halves have it as
+    runtime.c's gen_throw and abnf/jsrt.go's throwInto. A generator that has not
+    started, or that is done, runs NOTHING - no `finally` - and the exception
+    propagates out of throw() itself, as in CPython. close() is throw(
+    GeneratorExit()) in all three engines, so `except GeneratorExit` and a bare
+    `except` catch a close and `except Exception` does not.
 
-    STILL MISSING: a close() is not offered to `except`. The floor's GEN_EXIT
-    sentinel unwinds `finally` clauses without being catchable, so neither engine
-    lets a generator catch its own GeneratorExit, where CPython does. GEN_EXIT is
-    a floor object with no Python class, and js_try's guard that routes it past
-    every catch arm is shared with the fifteen other languages, where a close IS a
-    return completion and must not be catchable.
+    At a `yield from` a GeneratorExit is not forwarded to the delegate's throw():
+    the delegate is CLOSED and the GeneratorExit raised in the outer generator,
+    PEP 380's rule, so it is raised there even when the delegate swallows it.
   - A tuple is a list, so it is mutable and compares equal to a list.
   - Complex division is the textbook formula, not CPython's scaled (Smith)
     one, so a quotient can differ in the last digit.
@@ -8492,9 +8490,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         run.k = run.k + 1
         throw {__genYield: true, v: v}
     }
-    // Is this resume value the exit record genClose puts on the channel?
-    function isExitIn(s) { return s != undefined && s != null && s.__genExitIn == true }
-    // ... or the throw-in record genThrow puts there?
+    // Is this resume value the throw-in record genThrow puts on the channel?
     function isThrowIn(s) { return s != undefined && s != null && s.__genThrowIn == true }
     // The delegate of a `yield from`, as something steppable. A generator and an
     // iterator object are their own - which is what keeps `yield from endless()`
@@ -8537,7 +8533,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         catch (e) { st.done = true; throw e }
         return {done: !r.yielded, value: r.value}
     }
-    function pyDelegClose(d) { if (isGen(d)) { genClose(d) } }
     // `yield from xs` DELEGATES: every value xs produces is a yield of this
     // generator, driven ONE AT A TIME, so `yield from endless()` works, the
     // delegate's return value is kept, a send() reaches it, and a .throw() is
@@ -8549,24 +8544,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         st = pyDelegStep(d, undefined)
         while (!st.done) {
             var sent = anytype
-            sent = pyYieldDeleg(run, st.value, d)
-            // The RESUME DISPOSITION: a throw-in drives the delegate's throw(),
-            // anything else its next() WITH the sent value, which is how
-            // g.send(x) reaches a delegated generator at all.
-            if (isThrowIn(sent)) { st = pyDelegThrow(d, sent.v) }
+            sent = doYieldRaw(run, st.value)
+            // The RESUME DISPOSITION: a throw-in drives the delegate's throw() -
+            // close()'s GeneratorExit too - and anything else its next() WITH the
+            // sent value, which is how g.send(x) reaches a delegated generator.
+            if (isThrowIn(sent)) {
+                if (isGen(d) && pyIsInstance(sent.v, hostGlobals["GeneratorExit"])) {
+                    genClose(d)
+                    pyRaise(sent.v)
+                }
+                st = pyDelegThrow(d, sent.v)
+            }
             else { st = pyDelegStep(d, sent) }
         }
         return st.value
-    }
-    // Hand ONE delegated value out. If the generator is CLOSED while parked here the
-    // exit record arrives on the resume value, and CPython closes the delegate at
-    // exactly that point - so the delegate's finally clauses run BEFORE the signal
-    // reaches the yield from's own.
-    function pyYieldDeleg(run, val, d) {
-        var s = anytype
-        s = doYieldRaw(run, val)
-        if (isExitIn(s)) { pyDelegClose(d); throw {__genExit: true} }
-        return s
     }
     function doYield(isFrom, v) {
         var run = genRuns[genRuns.length - 1]
@@ -8574,7 +8565,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isFrom) { return doYieldFrom(run, v) }
         var sent = anytype
         sent = doYieldRaw(run, v)
-        if (isExitIn(sent)) { throw {__genExit: true} }
         // g.throw(exc) raises an ORDINARY Python exception here, so the body's own
         // except arms may take it.
         if (isThrowIn(sent)) { pyRaise(sent.v) }
@@ -8626,8 +8616,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // StopIteration and not the same exception again. This half is a
             // REPLAY engine: without the done flag the failing run would be replayed
             // from the top on every subsequent step and re-raised for ever.
-            // The close/throw signals are excluded: genClose and genThrow set the
-            // flag themselves and read st.ret afterwards.
             else { st.done = true; scopes = saved; genRuns.pop(); throw e }
         }
         scopes = saved
@@ -8654,37 +8642,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return exc
     }
     function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
-    // g.close(): abandon a suspended generator, RUNNING the `finally` clauses that
-    // wrap its yield, as the compiled halves do through runtime.c's gen_close. It
-    // is reachable in the replay model because the close does not need a frozen
-    // stack: replay to the yield the generator is parked at and raise there
-    // instead of resuming.
-    //
-    // The exit signal is deliberately NOT an ordinary Python exception, which is
-    // also what the floor does: gen_close's GEN_EXIT sentinel unwinds `finally`
-    // clauses but is not offered to `except`, so `except BaseException` inside a
-    // generator does not see a close in EITHER engine, where CPython delivers a
-    // catchable GeneratorExit. Making it catchable here alone would be a halves
-    // divergence; making it catchable in both is a floor change.
+    // g.close() is CPython's: throw(GeneratorExit) at the yield the generator is
+    // parked at, so `except GeneratorExit` and a bare `except` see it and `except
+    // Exception` does not. GeneratorExit propagating out is the close completing; a
+    // body that catches it and returns makes close() answer the return value; one
+    // that yields again raises RuntimeError and stays suspended. A generator that
+    // has not started or is done runs nothing. Twins: pyGenClose in abnf/jsrt.go
+    // and the "close" arm of js_pymcall in languages/lib/python-rt.metajs.
     function genClose(g) {
-        var st = g.st
-        if (st.done) { return undefined }
-        // A generator that has never been resumed has no suspension point and no
-        // body state, so close() only marks it closed - CPython's rule too.
-        if (st.count == 0) { st.done = true; return undefined }
         var r = anytype
-        try {
-            r = genStep(g, {__genExitIn: true})
-        } catch (e) {
-            st.done = true
-            if (e != undefined && e != null && e.__genExit == true) { return undefined }
+        try { r = genThrow(g, pyMakeExc("GeneratorExit", [])) }
+        catch (e) {
+            if (e == undefined || e == null || e.__exc != true) { throw e }
+            if (pyIsInstance(e.v, hostGlobals["GeneratorExit"])) { return undefined }
+            if (pyIsInstance(e.v, hostGlobals["StopIteration"])) { return e.v.value }
             throw e
         }
-        st.done = true
-        if (r.yielded) {
-            pyRaise(pyMakeExc("RuntimeError", ["generator ignored GeneratorExit"]))
-        }
-        return undefined
+        pyRaise(pyMakeExc("RuntimeError", ["generator ignored GeneratorExit"]))
     }
     // g.throw(exc): raise exc AT the yield the generator is parked at, so the body's
     // own try/except and finally clauses see it - the difference from close(), whose
@@ -9556,7 +9530,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                      "UnicodeEncodeError"]
+                      "UnicodeEncodeError", "GeneratorExit"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -9581,6 +9555,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["UnicodeError"] = "ValueError"
     pyExcParent["UnicodeDecodeError"] = "UnicodeError"
     pyExcParent["UnicodeEncodeError"] = "UnicodeError"
+    pyExcParent["GeneratorExit"] = "BaseException"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]

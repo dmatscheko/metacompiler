@@ -627,7 +627,7 @@ type jsGenerator struct {
 
 // genExit is the sentinel finish() sends INTO a suspended body so that the
 // `finally` clauses wrapping its yield run before the generator is abandoned -
-// JavaScript's return completion and CPython's GeneratorExit. js_yield turns it
+// JavaScript's return completion (Python's close() is a throw instead). js_yield turns it
 // into a panic on the BODY's goroutine, so the unwinding is the ordinary one and
 // every js_try between the yield and the body's entry runs its finally clause.
 //
@@ -16667,6 +16667,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return jsHUndefined
 		},
+		// The `yield from` CLOSE GUARD, emitted where a thrown value is about to
+		// be forwarded to the delegate: a GeneratorExit (g.close()) is not
+		// forwarded - a generator delegate is closed and the GeneratorExit
+		// raised in the outer generator, PEP 380's rule. Twin: js_pyyfclose in
+		// languages/lib/python-rt.metajs.
+		"js_pyyfclose": func(a []uint64) uint64 {
+			v := u(a[1])
+			if g, ok := u(a[0]).(*jsGenerator); ok && rt.pyIsInstance(v, rt.pyExcClass("GeneratorExit")) {
+				rt.pyGenClose(g)
+				panic(&jsThrown{value: v})
+			}
+			return jsHUndefined
+		},
 		// The BUILTIN render table: print(len) is "<built-in function len>" and
 		// print(map) is "<class 'map'>". A builtin has no def to record a name,
 		// so the emitter registers one entry per builtin at boot.
@@ -19786,10 +19799,7 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			}
 			return rt.pyGenValue(g.throwInto(rt, tv))
 		case "close":
-			// CPython's generator.close() answers None, not a {value, done}
-			// record - the record is JavaScript's g.return(v).
-			g.closeBody(rt)
-			return jsUndef
+			return rt.pyGenClose(g)
 		}
 	}
 	// A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
@@ -22188,10 +22198,37 @@ func pyExcParentName(name string) string {
 		return "ValueError"
 	case "UnicodeDecodeError", "UnicodeEncodeError":
 		return "UnicodeError"
-	case "Exception":
+	case "Exception", "GeneratorExit":
 		return "BaseException"
 	}
 	return "Exception"
+}
+
+// pyGenClose is CPython's generator.close(): throw(GeneratorExit()) at the parked
+// yield, so `except GeneratorExit` and a bare `except` see it and `except
+// Exception` does not. GeneratorExit propagating out is the close completing; a
+// body that catches it and returns makes close() answer the return value; one
+// that yields again raises RuntimeError and stays suspended. Twins: genClose in
+// languages/python-interpreter.abnf and the "close" arm of js_pymcall in
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyGenClose(g *jsGenerator) (out interface{}) {
+	ge := newJSObject()
+	ge.set("__class", rt.pyExcClass("GeneratorExit"))
+	ge.set("args", &jsArray{})
+	defer func() {
+		if p := recover(); p != nil {
+			if th, ok := p.(*jsThrown); ok && rt.pyIsInstance(th.value, rt.pyExcClass("GeneratorExit")) {
+				out = jsUndef
+				return
+			}
+			panic(p)
+		}
+	}()
+	rec := g.throwInto(rt, ge).(*jsObject)
+	if rec.props["done"] == true {
+		return rec.props["value"]
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("RuntimeError", "generator ignored GeneratorExit")})
 }
 
 func (rt *jsrt) pyExcClass(name string) *jsObject {

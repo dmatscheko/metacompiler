@@ -4000,6 +4000,75 @@ def s74():
     check("pow3", xs[2] ** ys[2] == 5.979866080580326e-12 and xs[3] ** ys[3] == 1.018795851248988e-187)
     check("pow4", xs[4] ** ys[4] == 11920928955078124.0)
 
+# ===== SECTION 75: close() raises a catchable GeneratorExit =====
+# g.close() is throw(GeneratorExit()) at the parked yield. GeneratorExit derives
+# from BaseException, so `except GeneratorExit` and a bare `except` catch it and
+# `except Exception` does not; a body that returns makes close() answer the value,
+# one that yields again is a RuntimeError, and at a `yield from` the delegate is
+# closed and the GeneratorExit raised in the outer generator. Values read off
+# CPython 3.14.
+def s75():
+    log = []
+    def g1():
+        try:
+            yield 1
+        except GeneratorExit:
+            log.append("ge")
+            raise
+        finally:
+            log.append("fin")
+    def g2():
+        try:
+            yield 1
+        except Exception:
+            log.append("WRONG")
+    def g3():
+        try:
+            yield 1
+        except:
+            log.append("bare")
+    def g4():
+        try:
+            yield 1
+        except GeneratorExit:
+            return 5
+    def g5():
+        try:
+            yield 1
+        except GeneratorExit:
+            pass
+        yield 2
+        yield 3
+    def sw():
+        try:
+            yield 1
+        except GeneratorExit:
+            log.append("sw")
+        return 7
+    def outer():
+        r = yield from sw()
+        log.append("resumed " + str(r))
+        yield 9
+    rs = []
+    for g in [g1, g2, g3, g4]:
+        it = g()
+        next(it)
+        rs.append(it.close())
+    check("gex1", log == ["ge", "fin", "bare"] and rs == [None, None, None, 5])
+    it = g5()
+    next(it)
+    msg = ""
+    try:
+        it.close()
+    except RuntimeError as e:
+        msg = str(e)
+    check("gex2", msg == "generator ignored GeneratorExit" and next(it) == 3)
+    it = outer()
+    next(it)
+    check("gex3", it.close() is None and log[-1] == "sw")
+    check("gex4", issubclass(GeneratorExit, BaseException) and not issubclass(GeneratorExit, Exception)
+          and isinstance(GeneratorExit(), BaseException) and repr(GeneratorExit()) == "GeneratorExit()")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4075,6 +4144,6 @@ def main():
     s72() # SECTION-CALL 72
     s73() # SECTION-CALL 73
     s74() # SECTION-CALL 74
-
+    s75() # SECTION-CALL 75
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

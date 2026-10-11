@@ -1949,6 +1949,7 @@ function pyExcParentName(name) {
     if (name == "UnicodeDecodeError") { return "UnicodeError" }
     if (name == "UnicodeEncodeError") { return "UnicodeError" }
     if (name == "Exception") { return "BaseException" }
+    if (name == "GeneratorExit") { return "BaseException" }
     return "Exception"
 }
 
@@ -4401,6 +4402,34 @@ function js_pyyfsend(d, sent) {
     if (!pyIsIter(d)) { return undefined }
     throw pyExcInstance("AttributeError",
                         "'" + pyToStr(d["__pyit"]) + "' object has no attribute 'send'")
+}
+
+// g.close() is throw(GeneratorExit()) through the floor's tag-15 `throw` member,
+// so the body's `except GeneratorExit` sees it. GeneratorExit propagating out is
+// the close completing; a body that returns answers its return value; one that
+// yields again raises RuntimeError and stays suspended. Twin of pyGenClose in
+// abnf/jsrt.go.
+function pyGenClose(g) {
+    var ge = {__class: pyExcClass("GeneratorExit"), args: []}
+    var cst = anytype
+    try { cst = g["throw"].apply(g, [ge]) }
+    catch (ce) {
+        if (pyDIsInstance(ce, pyExcClass("GeneratorExit"))) { return undefined }
+        throw ce
+    }
+    if (cst["done"] === true) { return cst["value"] }
+    pyRaiseExc("RuntimeError", "generator ignored GeneratorExit")
+}
+
+// The `yield from` CLOSE GUARD, emitted where a thrown value is about to be
+// forwarded to the delegate: a GeneratorExit (g.close()) is not forwarded - a
+// generator delegate is closed and the GeneratorExit raised in the outer
+// generator, PEP 380's rule. Twin of js_pyyfclose in abnf/jsrt.go.
+function js_pyyfclose(d, v) {
+    if (pyIsIter(d) || !pyIsGen(d)) { return undefined }
+    if (!pyDIsInstance(v, pyExcClass("GeneratorExit"))) { return undefined }
+    pyGenClose(d)
+    throw v
 }
 
 // next(it[, default]), the ordinary way to drive a generator.
@@ -7290,15 +7319,7 @@ function pyDMethodCall(target, name, args, kw) {
             tst = target["throw"].apply(target, [tv])
             return pyGenValue(tst)
         }
-        if (name == "close") {
-            // CPython's generator.close() answers None, not a {value, done}
-            // record - the record is JavaScript's g.return(v), which is what the
-            // floor's tag-15 `return` member builds and what this discards. The
-            // close itself runs the body's `finally` clauses (runtime.c's
-            // gen_close, abnf/jsrt.go's closeBody).
-            target["return"].apply(target, [undefined])
-            return undefined
-        }
+        if (name == "close") { return pyGenClose(target) }
     }
     // A method the builtin TYPE OBJECT itself carries - dict.fromkeys.
     var bcm = pyBuiltinClsMethod(target, name)
