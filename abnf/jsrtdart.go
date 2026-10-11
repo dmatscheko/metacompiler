@@ -419,6 +419,11 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 				dtIndexErr(u(a[1]), o)
 			}
 			return rt.wrapStr(rt.strAt(o, i))
+		case *jsObject:
+			if o.props["__dmatch"] == true {
+				v, _ := rt.dartMatchMember(o, "[]", []interface{}{u(a[1])})
+				return w(v)
+			}
 		}
 		// A Map (whose miss is guarded in the emitter), a Set, or anything else: the
 		// shared behaviour, unchanged.
@@ -606,9 +611,20 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 		}
 		// A NAMED constructor of one of dart:core's errors, reached through the
 		// postfix chain: ArgumentError.value(7). js_dartexctype put the marker here.
+		// `String` used as a name is the same marker, spent by its statics.
 		if o, ok := recv.(*jsObject); ok {
 			if tn, isMarker := o.props["__dexcType"].(string); isMarker {
+				if tn == "String" {
+					if v, hit := rt.dartStrStatic(name, args.elems); hit {
+						return w(v)
+					}
+				}
 				return w(rt.dartExcNew(tn, name, args.elems))
+			}
+			if o.props["__dmatch"] == true {
+				if v, hit := rt.dartMatchMember(o, name, args.elems); hit {
+					return w(v)
+				}
 			}
 		}
 		if str, ok := recv.(string); ok {
@@ -1511,6 +1527,17 @@ func (rt *jsrt) dartStrMember(s, name string, args []interface{}) (interface{}, 
 			out[i] = float64(c)
 		}
 		return &jsArray{elems: out}, true
+	case "runes":
+		out := &jsArray{}
+		for i := 0; i < n; i++ {
+			c := int(u[i])
+			if c >= 0xD800 && c <= 0xDBFF && i+1 < n && u[i+1] >= 0xDC00 && u[i+1] <= 0xDFFF {
+				c = (c-0xD800)*1024 + int(u[i+1]) - 0xDC00 + 0x10000
+				i++
+			}
+			out.elems = append(out.elems, float64(c))
+		}
+		return out, true
 	case "toUpperCase":
 		return dartStrCase(u, unicode.ToUpper), true
 	case "toLowerCase":
@@ -1612,8 +1639,179 @@ func (rt *jsrt) dartStrMember(s, name string, args []interface{}) (interface{}, 
 			return s, true
 		}
 		return strFromUnits(u[:at]) + rt.toString(argAt(args, 1)) + strFromUnits(u[at+len(p):]), true
+	// The receiver is the PATTERN of these two (String implements Pattern).
+	case "allMatches", "matchAsPrefix":
+		st := opt(1, 0)
+		if st < 0 || st > len(p) {
+			rt.dartRangeErr(float64(st), 0, len(p))
+		}
+		if name == "allMatches" {
+			return &jsArray{elems: dartAllMatches(u, p, ps, st)}, true
+		}
+		if !dartStrAt(p, st, u) {
+			return jsNull, true
+		}
+		return dartMatch(st, len(u), ps, s), true
+	case "replaceAllMapped":
+		var b strings.Builder
+		i := 0
+		for _, mv := range dartAllMatches(p, u, s, 0) {
+			mo := mv.(*jsObject)
+			b.WriteString(strFromUnits(u[i:jsToInt(rt.dartNumOf(mo.props["start"]))]))
+			b.WriteString(rt.dartStr(rt.call(argAt(args, 1), jsUndef, []interface{}{mo})))
+			i = jsToInt(rt.dartNumOf(mo.props["end"]))
+		}
+		b.WriteString(strFromUnits(u[i:]))
+		return b.String(), true
+	case "splitMapJoin":
+		onM, onN := dartNamedArg(args, "onMatch"), dartNamedArg(args, "onNonMatch")
+		nonMatch := func(t string) string {
+			if onN == nil || isUndefOrNull(onN) {
+				return t
+			}
+			return rt.dartStr(rt.call(onN, jsUndef, []interface{}{t}))
+		}
+		var b strings.Builder
+		i := 0
+		for _, mv := range dartAllMatches(p, u, s, 0) {
+			mo := mv.(*jsObject)
+			b.WriteString(nonMatch(strFromUnits(u[i:jsToInt(rt.dartNumOf(mo.props["start"]))])))
+			if onM == nil || isUndefOrNull(onM) {
+				b.WriteString(ps)
+			} else {
+				b.WriteString(rt.dartStr(rt.call(onM, jsUndef, []interface{}{mo})))
+			}
+			i = jsToInt(rt.dartNumOf(mo.props["end"]))
+		}
+		b.WriteString(nonMatch(strFromUnits(u[i:])))
+		return b.String(), true
 	}
 	return nil, false
+}
+
+// dartNamedArg is a named argument: a call's named arguments arrive as one trailing
+// Map. nil when the call has none of that name. Twin of dsNamed in
+// languages/lib/dart-str.js.
+func dartNamedArg(args []interface{}, key string) interface{} {
+	if len(args) == 0 {
+		return nil
+	}
+	keys, vals, ok := dictParts(args[len(args)-1])
+	if !ok {
+		return nil
+	}
+	for i, k := range keys.elems {
+		if k == key {
+			return vals.elems[i]
+		}
+	}
+	return nil
+}
+
+// dartMatch is the Match of a String pattern at code unit st of input; plen is the
+// pattern's length in code units. A String pattern has no capture groups. Twin of
+// dsMatch in languages/lib/dart-str.js.
+func dartMatch(st, plen int, input, pattern string) *jsObject {
+	o := newJSObject()
+	o.set("__dmatch", true)
+	o.set("start", float64(st))
+	o.set("end", float64(st+plen))
+	o.set("input", input)
+	o.set("pattern", pattern)
+	o.set("groupCount", float64(0))
+	return o
+}
+
+// dartAllMatches is Pattern.allMatches for the String pattern pat over in from
+// start: non-overlapping, left to right, an empty match moving one code unit on.
+// Twin of dsAllMatches in languages/lib/dart-str.js.
+func dartAllMatches(pat, in []uint16, inStr string, start int) []interface{} {
+	var out []interface{}
+	patStr := strFromUnits(pat)
+	for i := start; i+len(pat) <= len(in); {
+		at := dartStrFind(in, pat, i)
+		if at < 0 {
+			break
+		}
+		out = append(out, dartMatch(at, len(pat), inStr, patStr))
+		e := at + len(pat)
+		if e == i {
+			e++
+		}
+		i = e
+	}
+	return out
+}
+
+// dartMatchMember answers a Match's group(i) / [i] and groups(list): group 0 is the
+// matched text and any other a RangeError. Twin of dsMatchMember in
+// languages/lib/dart-str.js.
+func (rt *jsrt) dartMatchMember(mo *jsObject, name string, args []interface{}) (interface{}, bool) {
+	group := func(g interface{}) interface{} {
+		if jsToInt(rt.dartNumOf(g)) != 0 {
+			panic(&jsThrown{value: rt.dartExcNew("RangeError", "value", []interface{}{g})})
+		}
+		u := strUnits(rt.toString(mo.props["input"]))
+		return strFromUnits(u[jsToInt(rt.dartNumOf(mo.props["start"])):jsToInt(rt.dartNumOf(mo.props["end"]))])
+	}
+	switch name {
+	case "group", "[]":
+		return group(argAt(args, 0)), true
+	case "groups":
+		gs, _ := argAt(args, 0).(*jsArray)
+		out := &jsArray{}
+		if gs != nil {
+			for _, g := range gs.elems {
+				out.elems = append(out.elems, group(g))
+			}
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// dartStrStatic is String.fromCharCode(c) and String.fromCharCodes(codes, [start,
+// end]): a code past U+FFFF becomes a surrogate pair, any other one code unit. Twin
+// of dsStatic in languages/lib/dart-str.js.
+func (rt *jsrt) dartStrStatic(name string, args []interface{}) (interface{}, bool) {
+	unit := func(v interface{}) []uint16 {
+		c := jsToInt(rt.dartNumOf(v))
+		if c < 0 || c > 0x10FFFF {
+			rt.dartRangeErr(float64(c), 0, 0x10FFFF)
+		}
+		if c < 0x10000 {
+			return []uint16{uint16(c)}
+		}
+		c -= 0x10000
+		return []uint16{uint16(0xD800 + c/1024), uint16(0xDC00 + c%1024)}
+	}
+	switch name {
+	case "fromCharCode":
+		return strFromUnits(unit(argAt(args, 0))), true
+	case "fromCharCodes":
+		cs, _ := argAt(args, 0).(*jsArray)
+		if cs == nil {
+			return nil, false
+		}
+		from, to := 0, len(cs.elems)
+		if len(args) > 1 && !isUndefOrNull(args[1]) {
+			from = jsToInt(rt.dartNumOf(args[1]))
+		}
+		if len(args) > 2 && !isUndefOrNull(args[2]) {
+			to = jsToInt(rt.dartNumOf(args[2]))
+		}
+		var us []uint16
+		for i := from; i < to; i++ {
+			us = append(us, unit(cs.elems[i])...)
+		}
+		return strFromUnits(us), true
+	}
+	return nil, false
+}
+
+// dartRangeErr throws RangeError.range(v, lo, hi).
+func (rt *jsrt) dartRangeErr(v float64, lo, hi int) {
+	panic(&jsThrown{value: rt.dartExcNew("RangeError", "range", []interface{}{v, float64(lo), float64(hi)})})
 }
 
 // dartStrAt: does p occur in u at code unit i?

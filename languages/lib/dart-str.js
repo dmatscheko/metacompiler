@@ -13,6 +13,10 @@
 // Hooks the includer defines:
 //   dsHNum(v)          an int argument as a plain number
 //   dsHIndexErr(i, s)  throw dart's IndexError for index i of s (does not return)
+//   dsHRangeErr(v, lo, hi)  throw RangeError.range(v, lo, hi), or RangeError.value(v)
+//                      when lo is null (does not return)
+//   dsHCall(f, argv)   call the closure f
+//   dsHStr(v)          v's toString()
 
 // dsMember answers {hit: true, v} for a String member dart:core declares, and
 // {hit: false} for any other name.
@@ -25,6 +29,7 @@ function dsMember(s, name, args) {
         return {hit: true, v: s.charCodeAt(ci)}
     }
     if (name == "codeUnits") { return {hit: true, v: dsUnits(s)} }
+    if (name == "runes") { return {hit: true, v: dsRunes(s)} }
     if (name == "toUpperCase") { return {hit: true, v: dsCase(s, true)} }
     if (name == "toLowerCase") { return {hit: true, v: dsCase(s, false)} }
     if (name == "trim") { return {hit: true, v: dsTrim(s, true, true)} }
@@ -58,6 +63,50 @@ function dsMember(s, name, args) {
     if (name == "endsWith") { return {hit: true, v: dsAt(s, n - p.length, p)} }
     if (name == "split") { return {hit: true, v: dsSplit(s, p)} }
     if (name == "replaceAll") { return {hit: true, v: dsReplaceAll(s, p, args[1])} }
+    // The receiver is the PATTERN of these two (String implements Pattern).
+    if (name == "allMatches") {
+        var a0 = dsOpt(args, 1, 0)
+        if (a0 < 0 || a0 > p.length) { dsHRangeErr(a0, 0, p.length) }
+        return {hit: true, v: dsAllMatches(s, p, a0)}
+    }
+    if (name == "matchAsPrefix") {
+        var ms = dsOpt(args, 1, 0)
+        if (ms < 0 || ms > p.length) { dsHRangeErr(ms, 0, p.length) }
+        if (!dsAt(p, ms, s)) { return {hit: true, v: null} }
+        return {hit: true, v: dsMatch(ms, p, s)}
+    }
+    if (name == "replaceAllMapped") {
+        var ms2 = dsAllMatches(p, s, 0)
+        var ro = ""
+        var rp = 0
+        var ri = 0
+        while (ri < ms2.length) {
+            ro = ro + s.substring(rp, ms2[ri]["start"]) + dsHStr(dsHCall(args[1], [ms2[ri]]))
+            rp = ms2[ri]["end"]
+            ri = ri + 1
+        }
+        return {hit: true, v: ro + s.substring(rp, n)}
+    }
+    if (name == "splitMapJoin") {
+        var onM = dsNamed(args, "onMatch")
+        var onN = dsNamed(args, "onNonMatch")
+        var ms3 = dsAllMatches(p, s, 0)
+        var so = ""
+        var sp = 0
+        var si = 0
+        while (si < ms3.length) {
+            var nm = s.substring(sp, ms3[si]["start"])
+            if (onN !== null) { nm = dsHStr(dsHCall(onN, [nm])) }
+            var mm = ms3[si]["pattern"]
+            if (onM !== null) { mm = dsHStr(dsHCall(onM, [ms3[si]])) }
+            so = so + nm + mm
+            sp = ms3[si]["end"]
+            si = si + 1
+        }
+        var tail = s.substring(sp, n)
+        if (onN !== null) { tail = dsHStr(dsHCall(onN, [tail])) }
+        return {hit: true, v: so + tail}
+    }
     if (name == "replaceFirst") {
         var fi = dsFind(s, p, dsOpt(args, 2, 0))
         if (fi < 0) { return {hit: true, v: s} }
@@ -207,6 +256,107 @@ function dsCpWidth(s, i) {
 // characters ("ß" -> "SS") keeps its own case. Twin of dartStrCase in
 // abnf/jsrtdart.go (unicode.ToUpper / ToLower).
 function dsCase(s, up) { return unicodeCase(s, up ? 1 : 0) }
+
+// A named argument: a call's named arguments arrive as one trailing Map. null when
+// the call has none of that name.
+function dsNamed(args, key) {
+    if (args.length == 0) { return null }
+    var d = args[args.length - 1]
+    if (typeof d != "object" || d === null || Array.isArray(d) || d["__dict"] !== true) { return null }
+    var ks = d["keys"]
+    var i = 0
+    while (i < ks.length) {
+        if (ks[i] === key) { return d["vals"][i] }
+        i = i + 1
+    }
+    return null
+}
+
+// The Match of the String pattern p at code unit st of input - what allMatches,
+// matchAsPrefix and the replaceAllMapped / splitMapJoin callbacks see. A String
+// pattern has no capture groups.
+function dsMatch(st, input, p) {
+    return {__dmatch: true, start: st, end: st + p.length, input: input, pattern: p, groupCount: 0}
+}
+function dsIsMatch(v) { return typeof v == "object" && v !== null && !Array.isArray(v) && v["__dmatch"] === true }
+
+// Pattern.allMatches for the String pattern p over s from start: non-overlapping,
+// left to right, and an empty match moves one code unit on (dart:core's
+// _StringAllMatchesIterator).
+function dsAllMatches(p, s, start) {
+    var out = []
+    var i = start
+    while (i + p.length <= s.length) {
+        var at = dsFind(s, p, i)
+        if (at < 0) { return out }
+        out.push(dsMatch(at, s, p))
+        var e = at + p.length
+        if (e == i) { e = e + 1 }
+        i = e
+    }
+    return out
+}
+
+// A Match's members: group(0) / [0] is the matched text and any other group a
+// RangeError; groups(indexes) is the list of those groups. {hit: false} for any
+// other name (start, end, input, pattern and groupCount are fields).
+function dsMatchMember(m, name, args) {
+    if (name == "group" || name == "[]") { return {hit: true, v: dsMatchGroup(m, args[0])} }
+    if (name == "groups") {
+        var gs = args[0]
+        var out = []
+        var i = 0
+        while (i < gs.length) {
+            out.push(dsMatchGroup(m, gs[i]))
+            i = i + 1
+        }
+        return {hit: true, v: out}
+    }
+    return {hit: false, v: undefined}
+}
+function dsMatchGroup(m, g) {
+    if (dsHNum(g) != 0) { dsHRangeErr(g, null, null) }
+    return m["input"].substring(m["start"], m["end"])
+}
+
+// String.runes: the code points, as ints; an unpaired surrogate is one of its own.
+// dart:core answers an Iterable (printed in parentheses); this is a List.
+function dsRunes(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var w = dsCpWidth(s, i)
+        if (w == 2) { out.push((s.charCodeAt(i) - 55296) * 1024 + (s.charCodeAt(i + 1) - 56320) + 65536) }
+        else { out.push(s.charCodeAt(i)) }
+        i = i + w
+    }
+    return out
+}
+
+// The static String.fromCharCode(c) and String.fromCharCodes(codes, [start, end]):
+// a code past U+FFFF becomes a surrogate pair and any other is one code unit.
+// {hit: false} for any other name.
+function dsStatic(name, args) {
+    if (name == "fromCharCode") { return {hit: true, v: dsFromCode(dsHNum(args[0]))} }
+    if (name == "fromCharCodes") {
+        var cs = args[0]
+        var e = dsOpt(args, 2, cs.length)
+        var out = ""
+        var i = dsOpt(args, 1, 0)
+        while (i < e) {
+            out = out + dsFromCode(dsHNum(cs[i]))
+            i = i + 1
+        }
+        return {hit: true, v: out}
+    }
+    return {hit: false, v: undefined}
+}
+function dsFromCode(c) {
+    if (c < 0 || c > 1114111) { dsHRangeErr(c, 0, 1114111) }
+    if (c < 65536) { return String.fromCharCode(c) }
+    var u = c - 65536
+    return String.fromCharCode(55296 + Math.floor(u / 1024)) + String.fromCharCode(56320 + u % 1024)
+}
 
 // String.codeUnits: the UTF-16 code units, as ints.
 function dsUnits(s) {

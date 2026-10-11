@@ -1858,6 +1858,12 @@ KwDeferred  = "deferred" KwEnd ;
     function dIsNum(v) { return typeof v == "number" || dIsFlo(v) || szIs(v) }
     // lib/dart-str.js's hooks. Twins: dsHNum / dsHIndexErr in languages/lib/dart-rt.metajs.
     function dsHNum(v) { return Math.trunc(dNum(v)) }
+    function dsHRangeErr(v, lo, hi) {
+        if (lo === null) { dxRaiseA("RangeError", "value", [v]) }
+        dxRaiseA("RangeError", "range", [v, lo, hi])
+    }
+    function dsHCall(f, argv) { return f.apply(undefined, argv) }
+    function dsHStr(v) { return dstr(v) }
     function dsHIndexErr(i, s) { dxRaiseA("IndexError", "", [i, s, "index"]) }
     function dIsInt(v) { return typeof v == "number" || szIs(v) }
     // dInt normalises any numeric operand to an int, truncating a double toward zero -
@@ -3303,6 +3309,7 @@ KwDeferred  = "deferred" KwEnd ;
         return v.length
     }
     function dget(o, i) {
+        if (dsIsMatch(o)) { return dsMatchGroup(o, i) }
         if (o != null && o != undefined && typeof o == "object" && o.__class != undefined) {
             var m = findMember(o.__class, "[]")
             if (m != null) { return m.fn.apply(undefined, [o, i]) }
@@ -3323,9 +3330,11 @@ KwDeferred  = "deferred" KwEnd ;
         // bounds" and the object thrown is an IndexError (errors.dart:445). The twins
         // are js_dtidx in abnf/jsrtdart.go and in languages/lib/dart-rt.metajs; the
         // long note, including what the "(index)" name leaves inexact, is at the first.
+        // A code UNIT: substring keeps a lone surrogate, where the host's charAt
+        // answers U+FFFD for one.
         if (typeof o == "string") {
             if (i < 0 || i >= o.length) { dxRaiseA("IndexError", "", [i, o, "index"]) }
-            return o.charAt(i)
+            return o.substring(i, i + 1)
         }
         if (i < 0 || i >= o.length) { dxRaiseA("IndexError", "", [i, o, "index"]) }
         return o[i]
@@ -3389,7 +3398,7 @@ KwDeferred  = "deferred" KwEnd ;
             var ng = dNumMethod(cur, name, [])
             if (ng != null) { return ng.v }
         }
-        if (typeof cur == "string" && name == "codeUnits") { return dsMember(cur, name, []).v }
+        if (typeof cur == "string" && (name == "codeUnits" || name == "runes")) { return dsMember(cur, name, []).v }
         if (name == "length") { return dlen(cur) }
         if (name == "isEmpty") { return dlen(cur) == 0 }
         if (name == "isNotEmpty") { return dlen(cur) != 0 }
@@ -3493,9 +3502,18 @@ KwDeferred  = "deferred" KwEnd ;
         // VarRef followed by an mcall suffix (QualCall's rule requires TypeArgs), so
         // varMiss hands the name over as a {__dexcType} marker and this is where it
         // is spent.
+        // `String` used as a name is the same kind of marker, spent by its statics.
         if (target != null && target != undefined && typeof target == "object"
             && hasOwn(target, "__dexcType")) {
+            if (target.__dexcType == "String") {
+                var st = dsStatic(name, args)
+                if (st.hit) { return st.v }
+            }
             return dxNew(target.__dexcType, name, args)
+        }
+        if (dsIsMatch(target)) {
+            var mt = dsMatchMember(target, name, args)
+            if (mt.hit) { return mt.v }
         }
         if (dIsNum(target)) {
             var nm = dNumMethod(target, name, args)
@@ -4901,7 +4919,7 @@ KwDeferred  = "deferred" KwEnd ;
         // One of dart:core's errors or exceptions used as a NAME rather than called:
         // the receiver of a named constructor (ArgumentError.value(7)) or a Type
         // value. A marker object, not a class descriptor - see the dx* block.
-        if (dxIsName(name)) { return {v: {__dexcType: name}} }
+        if (dxIsName(name) || name == "String") { return {v: {__dexcType: name}} }
         // An unqualified GETTER of a non-object receiver: `extension SX on String { bool
         // e() => isEmpty; }`. The hasOwn arm at the top of this function already answers
         // `length`, because a host string's own property set is exactly {length} - but a

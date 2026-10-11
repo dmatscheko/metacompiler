@@ -303,13 +303,9 @@ function dtDictFind(keys, k) { return rtDictFind(keys, k) }
 
 // dtCopyArr is SHARED as rtCopyArr - lib/runtime.metajs.
 
-// The number of CODE POINTS in a string: pyStrLen in the Go twin, so a surrogate
-// pair counts once.
-// SHARED as rtRuneLen - lib/runtime.metajs.
-function dtStrLen(s) { return rtRuneLen(s) }
-
-// The code POINT at code-point index i, as a string: rt.strAt.
-function dtStrAt(s, at) {
+// The code POINT at code-point index i, as a string: the walk the language-neutral
+// js_pylen / js_pyiter / js_pyspread make over a string (pyStrChars in the twin).
+function dtRuneAt(s, at) {
     var n = 0
     var i = 0
     while (i < s.length) {
@@ -324,16 +320,6 @@ function dtStrAt(s, at) {
         i = i + w
     }
     return ""
-}
-
-function dtStrRange(s, from, to) {
-    var out = ""
-    var i = from
-    while (i < to) {
-        out = out + dtStrAt(s, i)
-        i = i + 1
-    }
-    return out
 }
 
 // ===================================================== rendering ============
@@ -1473,16 +1459,16 @@ function dtMember(recv, name, args) {
     if (typeof recv == "string") {
         var sm = dsMember(recv, name, args)
         if (sm.hit) { return sm.v }
-        if (name === "length") { return dtStrLen(recv) }
+        if (name === "length") { return recv.length }
         if (name === "charAt") {
             var ci = Math.trunc(dtNum(dtArgAt(args, 0)))
-            var ch = dtStrAt(recv, ci)
+            var ch = recv.substring(ci, ci + 1)
             if (ch === "") { fail("charAt out of range") }
             return ch
         }
         if (name === "equals") { return recv === dtArgAt(args, 0) }
         if (name === "substring") {
-            var n = dtStrLen(recv)
+            var n = recv.length
             var bg = 0
             var en = n
             if (args.length > 0) { bg = Math.trunc(dtNum(args[0])) }
@@ -1490,7 +1476,7 @@ function dtMember(recv, name, args) {
             if (bg < 0) { bg = 0 }
             if (en > n) { en = n }
             if (bg > en) { return "" }
-            return dtStrRange(recv, bg, en)
+            return recv.substring(bg, en)
         }
         if (name === "isEmpty") { return recv.length == 0 }
         fail("unknown String method: " + name)
@@ -1635,10 +1621,10 @@ function js_pyget(c, k) {
         return c[idx]
     }
     if (typeof c == "string") {
-        var n = dtStrLen(c)
+        var n = c.length
         if (idx < 0) { idx = idx + n }
         if (idx < 0 || idx >= n) { fail("string index out of range: " + Math.trunc(dtNum(k))) }
-        return dtStrAt(c, idx)
+        return c.substring(idx, idx + 1)
     }
     fail("indexing a " + typeof c)
     return undefined
@@ -1669,16 +1655,25 @@ function dtIndexErr(k, c) {
 // lib/dart-str.js's hooks. Twins: dsHNum / dsHIndexErr in languages/dart-interpreter.abnf.
 function dsHNum(v) { return Math.trunc(dtNumOf(v)) }
 function dsHIndexErr(i, s) { dtIndexErr(i, s) }
+function dsHRangeErr(v, lo, hi) {
+    if (lo === null) { throw dtExcNew("RangeError", "value", [v]) }
+    throw dtExcNew("RangeError", "range", [v, lo, hi])
+}
+function dsHCall(f, argv) { return f.apply(undefined, argv) }
+function dsHStr(v) { return dtStr(v) }
 function js_dtidx(c, k) {
     if (rtIsArr(c)) {
         var idx = Math.trunc(dtNum(k))
         if (idx < 0 || idx >= c.length) { dtIndexErr(k, c) }
         return c[idx]
     }
+    // A Dart String is UTF-16 CODE UNITS ("a\u{1F600}b"[3] is "b"), as rt.strAt
+    // indexes in the Go twin.
+    if (dsIsMatch(c)) { return dsMatchGroup(c, k) }
     if (typeof c == "string") {
         var si = Math.trunc(dtNum(k))
-        if (si < 0 || si >= dtStrLen(c)) { dtIndexErr(k, c) }
-        return dtStrAt(c, si)
+        if (si < 0 || si >= c.length) { dtIndexErr(k, c) }
+        return c.substring(si, si + 1)
     }
     // A Map (whose miss is guarded in the emitter), a Set, or anything else.
     return js_pyget(c, k)
@@ -1699,7 +1694,7 @@ function js_dtidxset(c, k, v) {
 function js_pylen(v) {
     var els = dtSetElems(v)
     if (els !== undefined) { return els.length }
-    if (typeof v == "string") { return dtStrLen(v) }
+    if (typeof v == "string") { return rtRuneLen(v) }
     if (rtIsArr(v)) { return v.length }
     if (rtIsDictObj(v)) { return v["keys"].length }
     fail("len() of a " + typeof v)
@@ -1715,9 +1710,9 @@ function js_pyiter(v) {
     if (typeof v == "string") {
         var out = []
         var i = 0
-        var n = dtStrLen(v)
+        var n = rtRuneLen(v)
         while (i < n) {
-            out.push(dtStrAt(v, i))
+            out.push(dtRuneAt(v, i))
             i = i + 1
         }
         return out
@@ -1740,9 +1735,9 @@ function js_pyslice(c, lo, hi) {
         return out
     }
     if (typeof c == "string") {
-        var n = dtStrLen(c)
+        var n = c.length
         var sr = dtSliceRange(lo, hi, n)
-        return dtStrRange(c, sr.from, sr.to)
+        return c.substring(sr.from, sr.to)
     }
     fail("slicing a " + typeof c)
     return undefined
@@ -1796,9 +1791,9 @@ function js_pyspread(arr, it) {
     }
     if (typeof it == "string") {
         var si = 0
-        var n = dtStrLen(it)
+        var n = rtRuneLen(it)
         while (si < n) {
-            arr.push(dtStrAt(it, si))
+            arr.push(dtRuneAt(it, si))
             si = si + 1
         }
         return undefined
@@ -2021,9 +2016,18 @@ function js_dartnm(recv, name, args) {
     }
     // A NAMED constructor of one of dart:core's errors, reached through the postfix
     // chain: ArgumentError.value(7). js_dartexctype put the marker here.
+    // `String` used as a name is the same marker, spent by its statics.
     if (dtIsObj(recv)) {
         var tn = recv["__dexcType"]
+        if (tn === "String") {
+            var st = dsStatic(name, args)
+            if (st.hit) { return st.v }
+        }
         if (typeof tn == "string") { return dtExcNew(tn, name, args) }
+        if (dsIsMatch(recv)) {
+            var mt = dsMatchMember(recv, name, args)
+            if (mt.hit) { return mt.v }
+        }
     }
     return dtMember(recv, name, args)
 }

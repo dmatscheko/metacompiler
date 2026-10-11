@@ -1440,6 +1440,33 @@ void s33() {
   check("st15", e == "range");
 }
 
+// ===== SECTION 34: code units past the BMP, runes, String's statics, String patterns =====
+// THERE IS NO dart TOOLCHAIN ON THIS MACHINE: every expected value is dart:core's
+// documentation (string.dart, pattern.dart). "a\u{1F600}b" is four code units, so
+// index 3 is "b"; runes are its three code points. A String is a Pattern: its
+// allMatches / matchAsPrefix find it in another string, and a Match of it has group 0
+// only. The splitMapJoin row is the doc's own example with a String pattern.
+void s34() {
+  var ss = ["a\u{1F600}b", "abcab", "ab", "Eats shoots leaves"];
+  var s = ss[0];
+  check("su1", s.length == 4 && s.substring(3) == "b" && s[3] == "b" && s.substring(1, 3) == "\u{1F600}");
+  check("su2", s[1] + s[2] == "\u{1F600}" && s.codeUnitAt(2) == 56832);
+  var rs = <int>[];
+  for (var r in s.runes) { rs.add(r); }
+  check("su3", rs.length == 3 && rs[1] == 128512 && rs[2] == 98);
+  check("su4", String.fromCharCode(65) == "A" && String.fromCharCode(128512) == "\u{1F600}" &&
+      String.fromCharCodes([72, 105, 33], 1) == "i!" && String.fromCharCodes(rs) == s);
+  var ms = <Match>[];
+  for (var m in ss[2].allMatches(ss[1])) { ms.add(m); }
+  check("su5", ms.length == 2 && ms[1].start == 3 && ms[1].end == 5 && ms[0][0] == "ab" &&
+      ms[0].group(0) == "ab" && ms[0].groupCount == 0 && ms[0].input == ss[1]);
+  check("su6", ss[2].matchAsPrefix(ss[1])!.end == 2 && ss[2].matchAsPrefix(ss[1], 1) == null &&
+      ss[2].matchAsPrefix(ss[1], 3)!.start == 3);
+  check("su7", ss[1].replaceAllMapped(ss[2], (m) => "<${m.start}>") == "<0>c<3>");
+  check("su8", ss[3].splitMapJoin("shoots", onMatch: (m) => "${m[0]}", onNonMatch: (n) => "*") == "*shoots*" &&
+      ss[1].splitMapJoin("b", onMatch: (m) => "B") == "aBcaB");
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1474,6 +1501,7 @@ int main() {
   s31(); // SECTION-CALL 31
   s32(); // SECTION-CALL 32
   s33(); // SECTION-CALL 33
+  s34(); // SECTION-CALL 34
   print("full: $checks checks, $fails failures");
   return fails;
 }
