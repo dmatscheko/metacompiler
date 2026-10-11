@@ -429,6 +429,18 @@ function s15() {
     var dn = []
     for (var xv of delegEndless()) { if (dn.length === 2) { break } dn[dn.length] = xv }
     check("gen11", dn.length === 2 && dn[1] === 1 && reached === 2)
+    // `this` in a generator body is the receiver of the CALL that made the generator,
+    // not of next(): a method's object, .call's argument, globalThis for a plain call
+    // in sloppy code, and two generators over one function each keep their own.
+    function* plainThis() { yield this === globalThis }
+    var thisA = {t: "A", m: function* () { yield this.t; yield this.t }}
+    var thisB = {t: "B", m: thisA.m}
+    var ta = thisA.m(), tb = thisB.m()
+    check("gen12", plainThis().next().value === true && ta.next().value + tb.next().value + ta.next().value === "ABA")
+    function* callThis() { yield this.t }
+    check("gen13", callThis.call({t: "C"}).next().value === "C")
+    class Gen15 { static *s() { yield this === Gen15 } }
+    check("gen14", Gen15.s().next().value === true)
 }
 
 // ===== SECTION 16: async syntax =====
@@ -481,6 +493,11 @@ function s16() {
         // which is what clang-check and native-full read.
         if (!ok) { exit(1) }
     })
+    // An async method's `this` is its receiver, also after an await. A rejection
+    // (a TypeError reading this.t) is a failure too, not a silent no-op.
+    var tobj = { t: "T", async m() { await 0; return this.t } }
+    tobj.m().then(function(v) { check("asy10", v === "T"); if (v !== "T") { exit(1) } },
+                  function(e) { check("asy10", false); exit(1) })
 }
 function nop() {}
 

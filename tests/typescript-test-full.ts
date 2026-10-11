@@ -611,6 +611,20 @@ function s19() {
     const dn: number[] = [];
     for (const xv of delegEndless()) { if (dn.length === 2) { break; } dn.push(xv); }
     check("asy11", dn.join(",") === "0,1" && reached === 2);
+    // `this` in a generator or async body is the receiver of the CALL, not of next():
+    // .call's argument, a method's object (each generator keeps its own), a static
+    // method's class, and an async method's object also after an await.
+    function* callThis(this: { t: string }): Generator<string, void, void> { yield this.t; }
+    check("asy12", callThis.call({ t: "C" }).next().value === "C");
+    const thisA = { t: "A", *m(): Generator<string, void, void> { yield this.t; yield this.t; } };
+    const thisB = { t: "B", m: thisA.m };
+    const ta = thisA.m(), tb = thisB.m();
+    check("asy13", [ta.next().value, tb.next().value, ta.next().value].join("") === "ABA");
+    class Gen19 { static *s(): Generator<boolean, void, void> { yield this === Gen19; } }
+    check("asy15", Gen19.s().next().value === true);
+    const tobj = { t: "T", async m(): Promise<string> { await 0; return this.t; } };
+    tobj.m().then(function (v: string) { check("asy16", v === "T"); if (v !== "T") { exit(1); } },
+                  function (e: any) { check("asy16", false); exit(1); });
 }
 
 function nop(): void {}

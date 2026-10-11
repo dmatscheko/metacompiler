@@ -4011,11 +4011,46 @@ NotFuncHead = :script(~~
     // and 'yield' is a handshake with the pending next() (see abnf/jsrt.go). The upshot for
     // the compiler is that a generator needs no code transformation at all: 'yield' is one
     // more external call, and every statement form works inside a generator unchanged.
+    // A generator or async body runs at its first RESUMPTION, not at the call, so it
+    // cannot take its receiver from js_this at entry: by then js_this answers whatever
+    // call resumed it (natively the generator object behind next(), under llvm.Run
+    // nothing). What the program calls is therefore a thin BINDER that takes `this` at
+    // the call exactly as an ordinary function does (OrdinaryCallBindThis, strict or
+    // sloppy) and builds the coroutine over a body closure whose environment is the
+    // binder's scope; the body is emitted without a `this` of its own (lexThis) and
+    // finds this one. A class INSTANCE method needs no binder: its receiver travels
+    // in the argument array.
+    function coroOf(b, idx, kind, sc) {
+        var gf = callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), sc])])
+        if (kind == "async") { return callExt(b, "js_jsasyncfn", [gf]) }
+        if (kind == "agen") { return callExt(b, "js_jsasyncgen", [gf]) }
+        return gf
+    }
+    function emitThisBinder(b, strict, idx, kind) {
+        funcCount++
+        var bidx = funcCount
+        var f = m.NewFunc("jsf_" + bidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        var wb = f.NewBlock("entry")
+        curScopeV = callExt(wb, "js_scope_new", [f.Params[0]])
+        var thisV = callExt(wb, "js_this", [])
+        if (!strict) {
+            var gV = callExt(wb, "js_scope_get", [curScopeV, emitStr(wb, "globalThis")])
+            thisV = wb.NewSelect(truthy(wb, callExt(wb, "js_eq", [thisV, hNull])), gV, thisV)
+        }
+        callExt(wb, "js_scope_decl", [curScopeV, emitStr(wb, "this"), thisV])
+        wb.NewRet(jsCall(wb, coroOf(wb, idx, kind, curScopeV), thisV, f.Params[1]))
+        curF = savedF
+        curScopeV = savedScope
+        return {b: b, v: callExt(b, "js_closure", [handle(bidx), curScopeV])}
+    }
     function makeGenFn(params, bodyT, ownStrict, nm, txt) {
         return fnDef(function(b) {
             pendingPlainGen = true // Consumed by the emitFunction call below.
-            var idx = emitFunction(params, genRetBody(bodyT), false, false, ownStrict)
-            return {b: b, v: callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])}
+            var idx = emitFunction(params, genRetBody(bodyT), false, true, ownStrict)
+            return emitThisBinder(b, emitStrict || ownStrict === true, idx, "gen")
         }, nm, params, txt)
     }
     // A PLAIN generator body (not an async one): g.return(v) resumes it with a MARKER
@@ -4101,9 +4136,9 @@ NotFuncHead = :script(~~
     function makeAsyncFn(params, bodyT, isArrow, ownStrict, nm, txt) {
         return fnDef(function(b) {
             pendingAsyncFn = true // Consumed by the emitFunction call below.
-            var idx = emitFunction(params, bodyT, false, isArrow, ownStrict)
-            return {b: b, v: callExt(b, "js_jsasyncfn",
-                [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])}
+            var idx = emitFunction(params, bodyT, false, true, ownStrict)
+            if (isArrow) { return {b: b, v: coroOf(b, idx, "async", curScopeV)} }
+            return emitThisBinder(b, emitStrict || ownStrict === true, idx, "async")
         }, nm, params, txt)
     }
     // ----- Async generators -----
@@ -4115,9 +4150,8 @@ NotFuncHead = :script(~~
     function makeAsyncGenFn(params, bodyT, ownStrict, nm, txt) {
         return fnDef(function(b) {
             pendingAsyncGen = true // Consumed by the emitFunction call below.
-            var idx = emitFunction(params, bodyT, false, false, ownStrict)
-            return {b: b, v: callExt(b, "js_jsasyncgen",
-                [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])}
+            var idx = emitFunction(params, bodyT, false, true, ownStrict)
+            return emitThisBinder(b, emitStrict || ownStrict === true, idx, "agen")
         }, nm, params, txt)
     }
     // items = [name?, params, bodyThunk]: the optional name of an EXPRESSION is bound only
@@ -6009,6 +6043,12 @@ NotFuncHead = :script(~~
     // `return` answers `this`. Twin of ctorSuperDone in js-interpreter.abnf.
     var superFields = null
     var derivedCtorF = null
+    // A class coroutine method's value: an instance method's receiver is in its
+    // arguments, a static one's is taken by a binder (emitThisBinder).
+    function clsCoro(b, idx, kind, statik) {
+        if (statik) { return emitThisBinder(b, true, idx, kind).v }
+        return coroOf(b, idx, kind, curScopeV)
+    }
     function emitClassFunc(params, body, isInstance, initFields, implicitSuper, derived) {
         funcCount++
         var idx = funcCount
@@ -6047,7 +6087,9 @@ NotFuncHead = :script(~~
             // js_jssetthis at the call site (manual 7.3). Without this declaration
             // `this` inside `static s() {}` would walk OUT of the method and find the
             // top level binding, where node says `typeof this` is "function".
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])])
+            // isInstance null is a static coroutine method's body: its binder
+            // declared `this` (emitThisBinder).
+            if (isInstance === false) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])]) }
         }
         b = bindParams(b, params, f.Params[1], off)
         if (implicitSuper != undefined && implicitSuper != null) {
@@ -6211,31 +6253,28 @@ NotFuncHead = :script(~~
             if (mm.gen == true && mm.async == true) {
                 // An async generator method.
                 pendingAsyncGen = true
-                idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
+                idx = emitClassFunc(mm.params, mm.body, mm.statik ? null : true, null, null)
                 // The meta goes on the OUTERMOST value - the one that lands on the
                 // descriptor and that a read of the method answers - and not on the
                 // closure inside: js_jsasyncfn / js_jsasyncgen / js_genfn each hand back
                 // a NEW function value.
-                clsRawSet(b, mtgt, mk.v, fnMetaAt(b, callExt(b, "js_jsasyncgen",
-                    [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])]), memberFnName(mm), mm.params))
+                clsRawSet(b, mtgt, mk.v, fnMetaAt(b, clsCoro(b, idx, "agen", mm.statik), memberFnName(mm), mm.params))
                 continue
             }
             if (mm.gen == true) {
                 // A generator method: the same body, wrapped so that calling it produces a
                 // generator object instead of running it.
                 pendingPlainGen = true
-                idx = emitClassFunc(mm.params, genRetBody(mm.body), !mm.statik, null, null)
-                clsRawSet(b, mtgt, mk.v, fnMetaAt(b,
-                    callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])]), memberFnName(mm), mm.params))
+                idx = emitClassFunc(mm.params, genRetBody(mm.body), mm.statik ? null : true, null, null)
+                clsRawSet(b, mtgt, mk.v, fnMetaAt(b, clsCoro(b, idx, "gen", mm.statik), memberFnName(mm), mm.params))
                 continue
             }
             if (mm.async == true) {
                 // An async method: the same body, driven from the microtask queue and
                 // answering a promise (see makeAsyncFn).
                 pendingAsyncFn = true
-                idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
-                clsRawSet(b, mtgt, mk.v, fnMetaAt(b, callExt(b, "js_jsasyncfn",
-                    [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])]), memberFnName(mm), mm.params))
+                idx = emitClassFunc(mm.params, mm.body, mm.statik ? null : true, null, null)
+                clsRawSet(b, mtgt, mk.v, fnMetaAt(b, clsCoro(b, idx, "async", mm.statik), memberFnName(mm), mm.params))
                 continue
             }
             idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
