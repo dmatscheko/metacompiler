@@ -1227,6 +1227,8 @@ PctAnyScan = :script(~~
             var e = c.peek(i)
             if (e < 0) { return no }
             if (e === 92 && close !== 92) { i = i + 2; continue }  // an escaped character
+            // A bracket delimiter NESTS: `%w[a [] b]` is three words.
+            if (isBracket && e === d) { depth = depth + 1; i = i + 1; continue }
             if (e === close) {
                 depth = depth - 1
                 i = i + 1
@@ -1658,11 +1660,24 @@ RegexLit    <~~ push(makeRegex(takeAll())) ~~>
             = "/" :whitespace() { ReTplExpr | ReSlashChunk } "/" ReFlags :whitespace(Whitespace) ;
 PctR        <~~ push(makeRegex(takeAll())) ~~>
             = "%r" :whitespace() ReBody ReFlags :whitespace(Whitespace) ;
-ReBody      = "{" { ReTplExpr | ReBrcChunk } "}"
-            | "(" { ReTplExpr | ReParChunk } ")"
-            | "[" { ReTplExpr | ReBrkChunk } "]"
-            | "<" { ReTplExpr | ReAngChunk } ">"
+ReBody      = "{" { ReTplExpr | ReBrcChunk | ReBrcNest } "}"
+            | "(" { ReTplExpr | ReParChunk | ReParNest } ")"
+            | "[" { ReTplExpr | ReBrkChunk | ReBrkNest } "]"
+            | "<" { ReTplExpr | ReAngChunk | ReAngNest } ">"
             | "|" { ReTplExpr | RePipChunk } "|" ;
+// A bracket delimiter NESTS (`%r{a{2}}`): an inner pair is part of the pattern.
+ReBrcNest   = ReBrcOpen { ReTplExpr | ReBrcChunk | ReBrcNest } ReBrcClose ;
+ReBrcOpen   <~~ push({s: "{"}) ~~> = "{" ;
+ReBrcClose  <~~ push({s: "}"}) ~~> = "}" ;
+ReParNest   = ReParOpen { ReTplExpr | ReParChunk | ReParNest } ReParClose ;
+ReParOpen   <~~ push({s: "("}) ~~> = "(" ;
+ReParClose  <~~ push({s: ")"}) ~~> = ")" ;
+ReBrkNest   = ReBrkOpen { ReTplExpr | ReBrkChunk | ReBrkNest } ReBrkClose ;
+ReBrkOpen   <~~ push({s: "["}) ~~> = "[" ;
+ReBrkClose  <~~ push({s: "]"}) ~~> = "]" ;
+ReAngNest   = ReAngOpen { ReTplExpr | ReAngChunk | ReAngNest } ReAngClose ;
+ReAngOpen   <~~ push({s: "<"}) ~~> = "<" ;
+ReAngClose  <~~ push({s: ">"}) ~~> = ">" ;
 ReTplExpr   <~~ push({e: pop()}) ~~>
             = "#{" :whitespace(Whitespace) Expression "}" :whitespace() ;
 // The flag letters Ruby allows after a regexp. i / m / x change the match (mkRegex
@@ -1685,10 +1700,10 @@ RePipCh     = ReEsc | HashChar | RePipPlain ;
 // An escape is carried through as the two characters it is written with.
 ReEsc       = "\\" "\x20"..."\U0010ffff" ;
 ReSlashPlain = "\x00"..."\x22" | "\x24"..."\x2e" | "\x30"..."\x5b" | "\x5d"..."\U0010ffff" ;
-ReBrcPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7c" | "\x7e"..."\U0010ffff" ;
-ReParPlain  = "\x00"..."\x22" | "\x24"..."\x28" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
-ReBrkPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5e"..."\U0010ffff" ;
-ReAngPlain  = "\x00"..."\x22" | "\x24"..."\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrcPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+ReParPlain  = "\x00"..."\x22" | "\x24"..."\x27" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrkPlain  = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
+ReAngPlain  = "\x00"..."\x22" | "\x24"..."\x3b" | "\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
 RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
@@ -6876,21 +6891,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (own[m1].name == "initialize") { hasInit = true }
         }
         for (var m2 = 0; m2 < front.length; m2++) { mnames.push(front[m2].name) }
-        classMethods["$" + name] = mnames
+        // A class opened twice declares the methods of BOTH bodies.
+        classMethods["$" + name] = unionNames(classMethods["$" + name], mnames)
         noteMethodNames(mnames)
-        declaredClassNames.push(name)
+        if (!nameIn(declaredClassNames, name)) { declaredClassNames.push(name) }
         var snames = []
         for (var m3 = 0; m3 < sdefs.length; m3++) { snames.push(sdefs[m3].name) }
-        classSMethods["$" + name] = snames
+        classSMethods["$" + name] = unionNames(classSMethods["$" + name], snames)
         var rnames = []
         for (var m4 = 0; m4 < r.restricted.length; m4++) { rnames.push(r.restricted[m4].name) }
-        restrictedMethods["$" + name] = rnames
+        restrictedMethods["$" + name] = unionNames(restrictedMethods["$" + name], rnames)
         if (superName != "") { classSupers["$" + name] = superName }
         // A prepend gives the class a synthetic ancestor even without a superclass,
         // so `super` inside the prepended method is a legal thing to emit.
         if (front.length > 0 && superName == "") { classHasSuper["$" + name] = true }
         var coreName = name + "$core"
         return function(b) {
+            // A class statement for a name the same enclosing class or module has
+            // already emitted REOPENS that class object (MRI): its methods and @ivars
+            // stay, and this body adds to them.
+            var ekey = "$" + curClsName + "::" + name
+            if (emittedClasses[ekey] != undefined) { return emitReopen(b, emittedClasses[ekey], name, r, incAnc, pos) }
+            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0}
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
@@ -6910,34 +6932,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitNameList(b, clsV, snames, "__snames")
             var savedCls = curClsName
             curClsName = name
-            // A NESTED class or module is declared in the ENCLOSING scope, not inside the
-            // body closure - so a method of the outer class can name it - and is then
-            // published on the class under $c$, which is what makes Outer::Inner resolve.
-            // This is the same treatment a module body already gives its items.
-            for (var ni = 0; ni < r.cstmts.length; ni++) {
-                if (!hoistedCstmt(r.cstmts[ni])) { continue }
-                var nres = r.cstmts[ni].t(b)
-                b = nres.b
-                var nn = r.cstmts[ni].name
-                if (nn != undefined && nn != "") {
-                    callExt(b, "js_set", [clsV, emitStr(b, "$c$" + nn),
-                                          callExt(b, "js_scope_get", [curScopeV, emitStr(b, nn)])])
-                }
-            }
-            // The class body statements, with `self` bound to the class object.
-            var bodyTs = []
-            for (var ci = 0; ci < r.cstmts.length; ci++) {
-                if (hoistedCstmt(r.cstmts[ci])) { continue }
-                bodyTs.push(r.cstmts[ci].t)
-            }
-            var lastV = hNull
-            if (bodyTs.length > 0) {
-                nextSelfIsCls = true
-                var cbIdx = emitFunc([], makeBody(bodyTs), true)
-                var cbArgs = callExt(b, "js_arr_new", [])
-                callExt(b, "js_arr_push", [cbArgs, clsV])
-                lastV = callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])
-            }
+            var cb = emitClassBody(b, clsV, r)
+            b = cb.b
+            var lastV = cb.v
             // `class MyErr < StandardError; def initialize(m); super(m); end; end'.
             // The superclass is a BUILTIN, which carries no compiled `initialize'
             // for js_supercall to find.
@@ -6978,12 +6975,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitMethods(b, ownDstV, own, "", name, r.restricted)
             b = emitMethods(b, clsV, front, "", name, [])
             b = emitMethods(b, clsV, sdefs, "$s$", name, [])
-            // alias / alias_method: the new name is bound to the SAME closure, after
-            // every method of the body exists.
-            for (var ai = 0; ai < r.aliases.length; ai++) {
-                callExt(b, "js_set", [ownDstV, emitStr(b, r.aliases[ai].to),
-                                      callExt(b, "js_get", [ownDstV, emitStr(b, r.aliases[ai].from)])])
-            }
+            b = emitAliases(b, ownDstV, r)
             curClsName = savedCls
             // A subclass with no initialize of its own INHERITS one, so the default is
             // only emitted when nothing above supplies it: a root class, or one whose
@@ -7007,6 +6999,82 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // A class body is an EXPRESSION: its value is its last statement's.
             return {b: b, v: lastV}
         }
+    }
+
+    // The class statements emitted so far, by enclosing class and name: the mixins
+    // and singleton names a REOPENING body adds to, and whether the class's own
+    // methods live one level down (a prepend).
+    var emittedClasses = {}
+    function unionNames(prev, add) {
+        if (prev == undefined) { return add }
+        var out = prev.slice(0)
+        for (var i = 0; i < add.length; i++) { if (!nameIn(out, add[i])) { out.push(add[i]) } }
+        return out
+    }
+    // A class body: the nested classes and modules first, declared in the ENCLOSING
+    // scope (so a method of the outer class can name them) and published on the
+    // class under $c$, which is what makes Outer::Inner resolve - then the other
+    // statements, run with `self` bound to the class object.
+    function emitClassBody(b, clsV, r) {
+        for (var ni = 0; ni < r.cstmts.length; ni++) {
+            if (!hoistedCstmt(r.cstmts[ni])) { continue }
+            var nres = r.cstmts[ni].t(b)
+            b = nres.b
+            var nn = r.cstmts[ni].name
+            if (nn != undefined && nn != "") {
+                callExt(b, "js_set", [clsV, emitStr(b, "$c$" + nn),
+                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, nn)])])
+            }
+        }
+        var bodyTs = []
+        for (var ci = 0; ci < r.cstmts.length; ci++) {
+            if (hoistedCstmt(r.cstmts[ci])) { continue }
+            bodyTs.push(r.cstmts[ci].t)
+        }
+        if (bodyTs.length == 0) { return {b: b, v: hNull} }
+        nextSelfIsCls = true
+        var cbIdx = emitFunc([], makeBody(bodyTs), true)
+        var cbArgs = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [cbArgs, clsV])
+        return {b: b, v: callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])}
+    }
+    // alias / alias_method: the new name is bound to the SAME closure, after every
+    // method of the body exists.
+    function emitAliases(b, dstV, r) {
+        for (var ai = 0; ai < r.aliases.length; ai++) {
+            callExt(b, "js_set", [dstV, emitStr(b, r.aliases[ai].to),
+                                  callExt(b, "js_get", [dstV, emitStr(b, r.aliases[ai].from)])])
+        }
+        return b
+    }
+    // A second `class C ... end` for a class already emitted: the body runs against
+    // the existing class object. A module included only now is spliced in front of
+    // the class's methods as at first definition; one included before is not
+    // spliced again, so a method the class overrode it with stays.
+    function emitReopen(b, prev, name, r, incAnc, pos) {
+        if (r.prepends.length > 0 || r.extends.length > 0) { notImpl("prepend / extend in a reopened class body", pos) }
+        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+        var newAnc = []
+        for (var i = 0; i < incAnc.length; i++) { if (!nameIn(prev.anc, incAnc[i])) { newAnc.push(incAnc[i]) } }
+        prev.anc = newAnc.concat(prev.anc)
+        b = emitMixRecord(b, clsV, prev.anc, "$mix$", "__mixorder")
+        var snames = []
+        for (var k = 0; k < r.sdefs.length; k++) { snames.push(r.sdefs[k].name) }
+        prev.snames = unionNames(prev.snames, snames)
+        b = emitNameList(b, clsV, prev.snames, "__snames")
+        var savedCls = curClsName
+        curClsName = name
+        var cb = emitClassBody(b, clsV, r)
+        b = cb.b
+        var own = mixinDefsAll(newAnc)
+        if (nameIn(newAnc, "Comparable")) { own.push(comparableBetween()) }
+        for (var m = 0; m < r.methods.length; m++) { own.push(r.methods[m]) }
+        var ownDstV = prev.core ? callExt(b, "js_get", [clsV, emitStr(b, "__super")]) : clsV
+        b = emitMethods(b, ownDstV, own, "", name, r.restricted)
+        b = emitMethods(b, clsV, r.sdefs, "$s$", name, [])
+        b = emitAliases(b, ownDstV, r)
+        curClsName = savedCls
+        return {b: b, v: cb.v}
     }
 
     // class << VALUE ... end - the singleton class of a value. The class machinery here
@@ -7107,7 +7175,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // in the CURRENT scope, so a name it introduces stays visible where the
             // module was written - which is what lets a mixed-in method read a
             // constant of its module. Each one is then published on the module under
-            // $c$ as well, for the M::NAME form.
+            // $c$ as well, for the M::NAME form. `self` is the module object meanwhile,
+            // bound in the current scope and put back afterwards, so a body @ivar is
+            // the module's own.
+            var savedHasSelf = curHasSelf
+            var savedSelfIsCls = curSelfIsCls
+            var outerSelfV = curHasSelf ? callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]) : hNull
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), modV])
+            curHasSelf = true
+            curSelfIsCls = true
             for (var ci = 0; ci < r.cstmts.length; ci++) {
                 var res = r.cstmts[ci].t(b)
                 b = res.b
@@ -7117,6 +7193,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                           callExt(b, "js_scope_get", [curScopeV, emitStr(b, cn)])])
                 }
             }
+            curHasSelf = savedHasSelf
+            curSelfIsCls = savedSelfIsCls
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), outerSelfV])
             var savedModObj = curModObjBody
             curModObjBody = name
             b = emitMethods(b, modV, mixDefs, "", name, [])

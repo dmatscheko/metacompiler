@@ -3710,6 +3710,75 @@ def s82
                  1.method(:abs).call == 1 && "ab".method(:upcase).call == "AB" && -3.method(:abs).call == 3)
 end
 
+# ===== SECTION 83: Math domain errors, Regexp.new, nested % delimiters, class reopen =====
+# Math.sqrt / log / acos ... outside their real domain raise Math::DomainError;
+# Regexp.new takes a String and the IGNORECASE / EXTENDED / MULTILINE bits, and
+# #inspect escapes a "/" of the source; a bracket delimiter nests in %w and %r; a
+# reopened class keeps its methods and class-level @ivars, and a module body's
+# @ivars are the module's; a Range's NoMethodError names the Range, and #name /
+# #receiver answer. Every right-hand side is /usr/bin/ruby 2.6.10's own answer.
+# THIS SECTION RUNS UNDER REAL RUBY.
+class S83K
+  @x = 1
+  def self.x
+    @x
+  end
+  def a
+    "a"
+  end
+end
+S83K0 = S83K.new
+class S83K
+  @y = 2
+  def self.y
+    @y
+  end
+  def b
+    a + "b"
+  end
+end
+module S83M
+  @m = 5
+  def self.m
+    @m
+  end
+end
+def s83
+  dm = []
+  [[:sqrt, -1], [:log, -2], [:log2, -1], [:log10, -1], [:acos, 2], [:asin, -2], [:atanh, 2], [:acosh, 0]].each do |nm, v|
+    begin
+      Math.send(nm, v)
+    rescue Math::DomainError => e
+      dm << e.message
+    end
+  end
+  check("md83a", dm.length == 8 && dm[0] == "Numerical argument is out of domain - \"sqrt\"" &&
+                 dm[7] == "Numerical argument is out of domain - \"acosh\"" && Math.sqrt(4) == 2.0 &&
+                 Math.log(0) == -Float::INFINITY && Math.atanh(1) == Float::INFINITY)
+  src = ["ab", "a.b", "x/y"]
+  r = Regexp.new(src[0], Regexp::IGNORECASE)
+  check("rx83b", r.inspect == "/ab/i" && (r =~ "xAB") == 1 && Regexp.new(src[1], Regexp::MULTILINE).match?("a\nb") &&
+                 !Regexp.new(src[1]).match?("a\nb") && [Regexp::IGNORECASE, Regexp::EXTENDED, Regexp::MULTILINE] == [1, 2, 4] &&
+                 Regexp.new(src[0], true).inspect == "/ab/i" && Regexp.new(src[0], 7).options == 7 && /a/mi.options == 5)
+  check("rx83c", %r{a/b}.inspect == "/a\\/b/" && Regexp.new(src[2]).inspect == "/x\\/y/" && Regexp.new(src[2]).source == "x/y" &&
+                 %r{a/b}.to_s == "(?-mix:a\\/b)" && %r{a{2}b}.source == "a{2}b")
+  check("pw83d", %w[a [] b] == ["a", "[]", "b"] && %w(a (b) c) == ["a", "(b)", "c"] && %i{x {y} z}.length == 3)
+  check("cr83e", [S83K.x, S83K.y, S83K.new.b, S83K0.b] == [1, 2, "ab", "ab"] && S83K.instance_variables == [:@x, :@y] &&
+                 S83M.m == 5 && S83M.instance_variables == [:@m])
+  nm = []
+  begin
+    (1..3).s83_foo
+  rescue NoMethodError => e
+    nm << e.message << e.name << e.receiver
+  end
+  begin
+    nil.s83_bar
+  rescue NoMethodError => e
+    nm << e.name << e.receiver
+  end
+  check("nm83f", nm == ["undefined method `s83_foo' for 1..3:Range", :s83_foo, 1..3, :s83_bar, nil])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3754,5 +3823,6 @@ s79() # SECTION-CALL 79
 s80() # SECTION-CALL 80
 s81() # SECTION-CALL 81
 s82() # SECTION-CALL 82
+s83() # SECTION-CALL 83
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

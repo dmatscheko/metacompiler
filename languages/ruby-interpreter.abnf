@@ -1484,6 +1484,8 @@ PctAnyScan = :script(~~
             var e = c.peek(i)
             if (e < 0) { return no }
             if (e === 92 && close !== 92) { i = i + 2; continue }  // an escaped character
+            // A bracket delimiter NESTS: `%w[a [] b]` is three words.
+            if (isBracket && e === d) { depth = depth + 1; i = i + 1; continue }
             if (e === close) {
                 depth = depth - 1
                 i = i + 1
@@ -1623,11 +1625,24 @@ RegexLit    <~~ push(makeRegex(takeAll())) ~~>
             = "/" :whitespace() { ReTplExpr | ReSlashChunk } "/" ReFlags :whitespace(Whitespace) ;
 PctR        <~~ push(makeRegex(takeAll())) ~~>
             = "%r" :whitespace() ReBody ReFlags :whitespace(Whitespace) ;
-ReBody      = "{" { ReTplExpr | ReBrcChunk } "}"
-            | "(" { ReTplExpr | ReParChunk } ")"
-            | "[" { ReTplExpr | ReBrkChunk } "]"
-            | "<" { ReTplExpr | ReAngChunk } ">"
+ReBody      = "{" { ReTplExpr | ReBrcChunk | ReBrcNest } "}"
+            | "(" { ReTplExpr | ReParChunk | ReParNest } ")"
+            | "[" { ReTplExpr | ReBrkChunk | ReBrkNest } "]"
+            | "<" { ReTplExpr | ReAngChunk | ReAngNest } ">"
             | "|" { ReTplExpr | RePipChunk } "|" ;
+// A bracket delimiter NESTS (`%r{a{2}}`): an inner pair is part of the pattern.
+ReBrcNest   = ReBrcOpen { ReTplExpr | ReBrcChunk | ReBrcNest } ReBrcClose ;
+ReBrcOpen   <~~ push({s: "{"}) ~~> = "{" ;
+ReBrcClose  <~~ push({s: "}"}) ~~> = "}" ;
+ReParNest   = ReParOpen { ReTplExpr | ReParChunk | ReParNest } ReParClose ;
+ReParOpen   <~~ push({s: "("}) ~~> = "(" ;
+ReParClose  <~~ push({s: ")"}) ~~> = ")" ;
+ReBrkNest   = ReBrkOpen { ReTplExpr | ReBrkChunk | ReBrkNest } ReBrkClose ;
+ReBrkOpen   <~~ push({s: "["}) ~~> = "[" ;
+ReBrkClose  <~~ push({s: "]"}) ~~> = "]" ;
+ReAngNest   = ReAngOpen { ReTplExpr | ReAngChunk | ReAngNest } ReAngClose ;
+ReAngOpen   <~~ push({s: "<"}) ~~> = "<" ;
+ReAngClose  <~~ push({s: ">"}) ~~> = ">" ;
 ReTplExpr   <~~ push({e: pop()}) ~~>
             = "#{" :whitespace(Whitespace) Expression "}" :whitespace() ;
 // The flag letters Ruby allows after a regexp. i / m / x change the match (mkRegex
@@ -1650,10 +1665,10 @@ RePipCh     = ReEsc | HashChar | RePipPlain ;
 // An escape is carried through as the two characters it is written with.
 ReEsc       = "\\" "\x20"..."\U0010ffff" ;
 ReSlashPlain = "\x00"..."\x22" | "\x24"..."\x2e" | "\x30"..."\x5b" | "\x5d"..."\U0010ffff" ;
-ReBrcPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7c" | "\x7e"..."\U0010ffff" ;
-ReParPlain  = "\x00"..."\x22" | "\x24"..."\x28" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
-ReBrkPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5e"..."\U0010ffff" ;
-ReAngPlain  = "\x00"..."\x22" | "\x24"..."\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrcPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+ReParPlain  = "\x00"..."\x22" | "\x24"..."\x27" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrkPlain  = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
+ReAngPlain  = "\x00"..."\x22" | "\x24"..."\x3b" | "\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
 RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
@@ -5247,7 +5262,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "max") { return ra.length == 0 ? null : ra[ra.length - 1] }
         }
         var av = anytype
-        av = arrayMethod(rangeToA(t), name, args, blk)
+        av = delegArr(rangeToA(t), t, name, args, blk)
         // #each answers the RECEIVER in MRI, and the receiver is the range.
         if (name == "each" && blk != null) { return t }
         return av
@@ -5411,7 +5426,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isCpx(v)) { return cpxText(v, false) }
         if (isRange(v)) { return rstr(v.lo) + (v.excl ? "..." : "..") + rstr(v.hi) }
         // Regexp#to_s is the embeddable (?-mix:...) form, not the /.../ literal.
-        if (isRegex(v)) { return "(?" + reOpts(v.rflags, true) + ":" + v.src + ")" }
+        if (isRegex(v)) { return "(?" + reOpts(v.rflags, true) + ":" + reDescSrc(v.src) + ")" }
         if (isMatchD(v)) { return rxGroup(v.rev.prog, v.text, v.m, 0) }
         if (Array.isArray(v)) { return rinspect(v) }
         if (isDict(v)) { return rinspect(v) }
@@ -5477,7 +5492,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function rinspect(v) {
         if (v === null || v === undefined) { return "nil" }
-        if (isRegex(v)) { return "/" + v.src + "/" + reOpts(v.rflags, false) }
+        if (isRegex(v)) { return "/" + reDescSrc(v.src) + "/" + reOpts(v.rflags, false) }
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return strInspect(v) }
         if (isSym(v)) { return ":" + v.s }
@@ -7052,6 +7067,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (!embed || off == "") { return on }
         return on + "-" + off
     }
+    // A Regexp's source as #inspect and #to_s write it: every "/" not already
+    // escaped gets a backslash. Twins: rubyReDescSrc in abnf/jsrtregex.go,
+    // rbReDescSrc in lib/ruby-rt.metajs.
+    function reDescSrc(src) {
+        var out = ""
+        for (var i = 0; i < src.length; i++) {
+            var c = src.charAt(i)
+            if (c == "\\" && i + 1 < src.length) { out += c + src.charAt(i + 1); i++ }
+            else if (c == "/") { out += "\\/" }
+            else { out += c }
+        }
+        return out
+    }
+    // Regexp#options: IGNORECASE 1, EXTENDED 2, MULTILINE 4. Twins: rubyReOptBits in
+    // abnf/jsrtregex.go, rbReOptBits in lib/ruby-rt.metajs.
+    function reOptBits(rflags) {
+        return (rflags.indexOf("i") >= 0 ? 1 : 0) + (rflags.indexOf("x") >= 0 ? 2 : 0) + (rflags.indexOf("m") >= 0 ? 4 : 0)
+    }
+    // Regexp.new(src[, opts]): a String source, or a Regexp whose source and options
+    // are kept (opts ignored). An Integer opts is the IGNORECASE / EXTENDED /
+    // MULTILINE bit set; any other truthy one means IGNORECASE (MRI 2.6). Twins:
+    // rubyRegexNew in abnf/jsrtregex.go, rbRegexNew in lib/ruby-rt.metajs.
+    function regexNew(args) {
+        if (isRegex(args[0])) { return args[0] }
+        var o = anytype
+        o = args.length > 1 ? args[1] : null
+        var rf = ""
+        if (typeof o == "number") {
+            var bits = Math.floor(o)
+            if (Math.floor(bits / 4) % 2 == 1) { rf += "m" }
+            if (bits % 2 == 1) { rf += "i" }
+            if (Math.floor(bits / 2) % 2 == 1) { rf += "x" }
+        } else if (rtest(o)) { rf = "i" }
+        return mkRegex(rstr(args[0]), rf)
+    }
     function mkRegex(src, rflags) {
         var key = "$" + rflags + "\x00" + src
         if (hasOwn(regexCache, key)) { return regexCache[key] }
@@ -7311,7 +7361,38 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // class name unless that text already starts with "#". Twins: rubyNoMethod in
     // abnf/jsrt.go, rbNoMethod in languages/lib/ruby-rt.metajs.
     function noMethod(t, name) {
-        raiseErr("NoMethodError", "undefined method `" + name + "' for " + noMethodDesc(t))
+        var r = anytype
+        r = t
+        if (nmDeleg.arr !== null && t === nmDeleg.arr) { r = nmDeleg.recv }
+        nameErr("NoMethodError", "undefined method `" + name + "' for " + noMethodDesc(r), name, r)
+    }
+    // A NameError / NoMethodError carrying MRI's #name and #receiver, in the hidden
+    // __nmname / __nmrecv slots. Twins: rubyNameErr in abnf/jsrt.go, rbNameErr in
+    // lib/ruby-rt.metajs.
+    function nameErr(cls, msg, name, recv) {
+        var e = anytype
+        e = mkExc(hostGlobals[cls], msg)
+        e.__nmname = mkSym(name)
+        e.__nmrecv = recv
+        throw {__exc: true, v: e}
+    }
+    // A Range, Hash or Enumerator answers most methods through an Array of its
+    // elements; nmDeleg names the delegator while that Array runs, so a
+    // NoMethodError says `1..3:Range' as MRI's does. Twins: rubyDelegArr in
+    // abnf/jsrt.go, rbDelegArr in lib/ruby-rt.metajs.
+    var nmDeleg = {arr: null, recv: null}
+    function delegArr(arr, recv, name, args, blk) {
+        var sa = anytype
+        var sr = anytype
+        sa = nmDeleg.arr
+        sr = nmDeleg.recv
+        nmDeleg.arr = arr
+        nmDeleg.recv = recv
+        var v = anytype
+        v = arrayMethod(arr, name, args, blk)
+        nmDeleg.arr = sa
+        nmDeleg.recv = sr
+        return v
     }
     function noMethodDesc(t) {
         var cn = classOf(t).__name
@@ -7323,7 +7404,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A bare name that is neither a local nor a method: NameError, worded as MRI 2.6
     // does. Twins: js_rlvar in languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
     function undefinedName(name) {
-        raiseErr("NameError", "undefined local variable or method `" + name + "' for " + noMethodDesc(ivarSelf()))
+        nameErr("NameError", "undefined local variable or method `" + name + "' for " + noMethodDesc(ivarSelf()), name, ivarSelf())
     }
     // Object#object_id. nil, true, false and an Integer have MRI's fixed ids (8, 20,
     // 0, 2n+1); anything else is numbered on first request, in a table searched with
@@ -8045,7 +8126,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return name == "===" ? mi !== null : mi
             }
             if (name == "source") { return target.src }
-            if (name == "options") { return 0 }
+            if (name == "options") { return reOptBits(target.rflags) }
             if (name == "names") { return target.prog.names.slice(0) }
             if (name == "to_s") { return rstr(target) }
             if (name == "inspect") { return rinspect(target) }
@@ -8320,7 +8401,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (name == "select" || name == "filter" || name == "reject") { return hs }
                     return arrReplaceDict(target, hs)
                 }
-                return arrayMethod(hp, name, args, blk)
+                return delegArr(hp, target, name, args, blk)
             }
             noMethod(target, name)
         }
@@ -8430,6 +8511,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }, ahead of the
             // generic instance construction below.
             if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
+            if (name == "new" && target === hostGlobals["Regexp"]) { return regexNew(args) }
             // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default is kept in
             // the hidden __hdef / __hdefp slots and honoured by hashDefault at every
             // read.
@@ -8823,7 +8905,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return memo
         }
         // Everything else is Enumerable, and an eager Enumerator IS its element list.
-        return arrayMethod(items, name, args, blk)
+        return delegArr(items, t, name, args, blk)
     }
     function arrayMethod(t, name, args, blk) {
         var i
@@ -12072,33 +12154,45 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var mathMod = hostGlobals["Math"]
         mathMod["$c$PI"] = mkFlo(Math.PI)
         mathMod["$c$E"] = mkFlo(Math.E)
-        mathMod["$s$sqrt"] = function() { return mkFlo(Math.sqrt(toF(arguments[1]))) }
+        mathMod["$s$sqrt"] = function() { return mkFlo(Math.sqrt(mathArg("sqrt", arguments[1]))) }
         mathMod["$s$cbrt"] = function() { return mkFlo(Math.cbrt(toF(arguments[1]))) }
         mathMod["$s$sin"] = function() { return mkFlo(Math.sin(toF(arguments[1]))) }
         mathMod["$s$cos"] = function() { return mkFlo(Math.cos(toF(arguments[1]))) }
         mathMod["$s$tan"] = function() { return mkFlo(Math.tan(toF(arguments[1]))) }
-        mathMod["$s$asin"] = function() { return mkFlo(Math.asin(toF(arguments[1]))) }
-        mathMod["$s$acos"] = function() { return mkFlo(Math.acos(toF(arguments[1]))) }
+        mathMod["$s$asin"] = function() { return mkFlo(Math.asin(mathArg("asin", arguments[1]))) }
+        mathMod["$s$acos"] = function() { return mkFlo(Math.acos(mathArg("acos", arguments[1]))) }
         mathMod["$s$atan"] = function() { return mkFlo(Math.atan(toF(arguments[1]))) }
         mathMod["$s$sinh"] = function() { return mkFlo(Math.sinh(toF(arguments[1]))) }
         mathMod["$s$cosh"] = function() { return mkFlo(Math.cosh(toF(arguments[1]))) }
         mathMod["$s$tanh"] = function() { return mkFlo(Math.tanh(toF(arguments[1]))) }
         mathMod["$s$asinh"] = function() { return mkFlo(Math.asinh(toF(arguments[1]))) }
-        mathMod["$s$acosh"] = function() { return mkFlo(Math.acosh(toF(arguments[1]))) }
-        mathMod["$s$atanh"] = function() { return mkFlo(Math.atanh(toF(arguments[1]))) }
+        mathMod["$s$acosh"] = function() { return mkFlo(Math.acosh(mathArg("acosh", arguments[1]))) }
+        mathMod["$s$atanh"] = function() { return mkFlo(Math.atanh(mathArg("atanh", arguments[1]))) }
         mathMod["$s$exp"] = function() { return mkFlo(Math.exp(toF(arguments[1]))) }
-        mathMod["$s$log2"] = function() { return mkFlo(Math.log2(toF(arguments[1]))) }
-        mathMod["$s$log10"] = function() { return mkFlo(Math.log10(toF(arguments[1]))) }
+        mathMod["$s$log2"] = function() { return mkFlo(Math.log2(mathArg("log2", arguments[1]))) }
+        mathMod["$s$log10"] = function() { return mkFlo(Math.log10(mathArg("log10", arguments[1]))) }
         // One ulp from MRI on some arguments: see rubyMathCall in abnf/jsrt.go.
         mathMod["$s$atan2"] = function() { return mkFlo(Math.atan2(toF(arguments[1]), toF(arguments[2]))) }
         mathMod["$s$hypot"] = function() { return mkFlo(Math.hypot(toF(arguments[1]), toF(arguments[2]))) }
         // Math.log(x) and Math.log(x, base); JavaScript's Math.log has no base.
         mathMod["$s$log"] = function() {
             if (arguments.length > 2) {
-                return mkFlo(Math.log(toF(arguments[1])) / Math.log(toF(arguments[2])))
+                return mkFlo(Math.log(mathArg("log", arguments[1])) / Math.log(mathArg("log", arguments[2])))
             }
-            return mkFlo(Math.log(toF(arguments[1])))
+            return mkFlo(Math.log(mathArg("log", arguments[1])))
         }
+    }
+    // A Math argument as a Float, raising MRI's Math::DomainError outside the
+    // function's real domain (a NaN is in it). Twins: rubyMathArg in abnf/jsrt.go,
+    // rbMathArg in languages/lib/ruby-rt.metajs.
+    function mathArg(name, v) {
+        var x = toF(v)
+        var bad = false
+        if (name == "sqrt" || name == "log" || name == "log2" || name == "log10") { bad = x < 0 }
+        else if (name == "asin" || name == "acos" || name == "atanh") { bad = x < -1 || x > 1 }
+        else if (name == "acosh") { bad = x < 1 }
+        if (bad) { raiseErr("Math::DomainError", "Numerical argument is out of domain - \"" + name + "\"") }
+        return x
     }
     // The exception hierarchy, enough of it that `rescue => e` (StandardError) and the
     // named rescues of real code discriminate correctly.
@@ -12127,6 +12221,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Integer#digits raises on a negative receiver.
     hostGlobals["Math::DomainError"] = mkBuiltinClass("Math::DomainError", stdErr)
     hostGlobals["Math"]["$c$DomainError"] = hostGlobals["Math::DomainError"]
+    // Regexp's option bits, the second argument of Regexp.new.
+    hostGlobals["Regexp"]["$c$IGNORECASE"] = 1
+    hostGlobals["Regexp"]["$c$EXTENDED"] = 2
+    hostGlobals["Regexp"]["$c$MULTILINE"] = 4
     // Exception#initialize / #message: the message defaults to the class name, which
     // is what `raise S18Sub` (no message) has to produce.
     function excInitFn() {
@@ -12157,6 +12255,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // - "prog.rb:2:in `<main>'". An exception raised by the runtime rather than by a
     // `raise', and one that was never raised at all, has no site and answers nil,
     // which is what MRI does for an un-raised exception object.
+    // NameError#name / #receiver: what the hidden slots nameErr fills record, nil
+    // for a NameError raised by the program itself.
+    hostGlobals["NameError"]["name"] = function() {
+        var self = arguments[0]
+        return hasOwn(self, "__nmname") ? self.__nmname : null
+    }
+    hostGlobals["NameError"]["receiver"] = function() {
+        var self = arguments[0]
+        return hasOwn(self, "__nmrecv") ? self.__nmrecv : null
+    }
     excBase["backtrace"] = function() {
         var self = arguments[0]
         if (typeof self.__rwhere == "string") { return [self.__rwhere] }

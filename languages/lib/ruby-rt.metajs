@@ -3544,6 +3544,12 @@ function rbBuiltinClass(name) {
         c["$c$E"] = rbMkFlo(Math.E)
         c["$c$DomainError"] = rbBuiltinClass("Math::DomainError")
     }
+    // Regexp's option bits, the second argument of Regexp.new.
+    if (name == "Regexp") {
+        c["$c$IGNORECASE"] = 1
+        c["$c$EXTENDED"] = 2
+        c["$c$MULTILINE"] = 4
+    }
     rbClassTable[k] = c
     return c
 }
@@ -3557,8 +3563,19 @@ function rbBuiltinClass(name) {
 //
 // Every name below is a member of the host Math, which languages/lib/runtime.c
 // seeds and abnf/jsrt.go's standardJSBindings binds - the SAME set in both.
+// A Math argument outside the function's real domain (a NaN is in it) raises MRI's
+// Math::DomainError. Twin of rubyMathArg in abnf/jsrt.go.
+function rbMathArg(name, x) {
+    var bad = false
+    if (name == "sqrt" || name == "log" || name == "log2" || name == "log10") { bad = x < 0 }
+    else if (name == "asin" || name == "acos" || name == "atanh") { bad = x < -1 || x > 1 }
+    else if (name == "acosh") { bad = x < 1 }
+    if (bad) { rbRaiseErr("Math::DomainError", "Numerical argument is out of domain - \"" + name + "\"") }
+    return x
+}
+
 function rbMathCall(name, args) {
-    var x = rbToF(rbArgAt(args, 0))
+    var x = rbMathArg(name, rbToF(rbArgAt(args, 0)))
     if (name == "sqrt") { return rbMkFlo(Math.sqrt(x)) }
     if (name == "cbrt") { return rbMkFlo(Math.cbrt(x)) }
     if (name == "sin") { return rbMkFlo(Math.sin(x)) }
@@ -3579,7 +3596,7 @@ function rbMathCall(name, args) {
     if (name == "atan2") { return rbMkFlo(Math.atan2(x, rbToF(rbArgAt(args, 1)))) }
     if (name == "hypot") { return rbMkFlo(Math.hypot(x, rbToF(rbArgAt(args, 1)))) }
     if (name == "log") {
-        if (args.length > 1) { return rbMkFlo(Math.log(x) / Math.log(rbToF(rbArgAt(args, 1)))) }
+        if (args.length > 1) { return rbMkFlo(Math.log(x) / Math.log(rbMathArg("log", rbToF(rbArgAt(args, 1))))) }
         return rbMkFlo(Math.log(x))
     }
     return undefined
@@ -4112,7 +4129,7 @@ function rbRangeMethod(t, name, args) {
         }
         return rbMkEnum(picked)
     }
-    var av = rbArrayMethod(rbRangeToArr(t), name, args)
+    var av = rbDelegArr(rbRangeToArr(t), t, name, args)
     // #each answers the RECEIVER in MRI, and the receiver is the range.
     if (name == "each" && blk !== null) { return t }
     return av
@@ -4445,6 +4462,48 @@ function rbReOpts(flags, embed) {
     return on + "-" + off
 }
 
+// A Regexp's source as #inspect and #to_s write it: every "/" not already
+// escaped gets a backslash. Twin of rubyReDescSrc in abnf/jsrtregex.go.
+function rbReDescSrc(src) {
+    var out = ""
+    var i = 0
+    while (i < src.length) {
+        var c = src.charAt(i)
+        if (c == "\\" && i + 1 < src.length) { out = out + c + src.charAt(i + 1); i = i + 1 }
+        else if (c == "/") { out = out + "\\/" }
+        else { out = out + c }
+        i = i + 1
+    }
+    return out
+}
+
+// Regexp#options from the engine flags. Twin of rubyReOptBits in
+// abnf/jsrtregex.go.
+function rbReOptBits(flags) {
+    var f = flags
+    if (f.substring(0, 2) == "mp") { f = f.substring(2, f.length) }
+    var n = 0
+    if (f.indexOf("i") >= 0) { n = n + 1 }
+    if (f.indexOf("x") >= 0) { n = n + 2 }
+    if (f.indexOf("s") >= 0) { n = n + 4 }
+    return n
+}
+
+// Regexp.new(src[, opts]). Twin of rubyRegexNew in abnf/jsrtregex.go.
+function rbRegexNew(argv) {
+    var a0 = rbArgAt(argv, 0)
+    if (rbRxIsRegex(a0)) { return a0 }
+    var o = rbArgAt(argv, 1)
+    var bits = 0
+    if (typeof o == "number") { bits = Math.floor(o) }
+    else if (!rtIsNil(o) && o !== false) { bits = 1 }
+    var f = "mp"
+    if (bits % 2 == 1) { f = f + "i" }
+    if (Math.floor(bits / 4) % 2 == 1) { f = f + "s" }
+    if (Math.floor(bits / 2) % 2 == 1) { f = f + "x" }
+    return js_rxnew(rbStr(a0), f)
+}
+
 function rbRxMethod(target, name, args) {
     if (rbRxIsRegex(target)) {
         var re = rbRxObjRe(target)
@@ -4459,10 +4518,10 @@ function rbRxMethod(target, name, args) {
         if (name == "=~") { return rbRxMatchOp(target, rbArgAt(args, 0)) }
         if (name == "===") { return rbRxMatchOp(target, rbArgAt(args, 0)) !== null }
         if (name == "source") { return re["src"] }
-        if (name == "options") { return 0 }
+        if (name == "options") { return rbReOptBits(re["flags"]) }
         if (name == "names") { return rtCopyArr(re["names"]) }
-        if (name == "to_s") { return "(?" + rbReOpts(re["flags"], true) + ":" + re["src"] + ")" }
-        if (name == "inspect") { return "/" + re["src"] + "/" + rbReOpts(re["flags"], false) }
+        if (name == "to_s") { return "(?" + rbReOpts(re["flags"], true) + ":" + rbReDescSrc(re["src"]) + ")" }
+        if (name == "inspect") { return "/" + rbReDescSrc(re["src"]) + "/" + rbReOpts(re["flags"], false) }
         return undefined
     }
     if (rbRxIsMatch(target)) {
@@ -5615,7 +5674,7 @@ function rbEnumMethod(t, name, args) {
         return memo
     }
     // Everything else is Enumerable, and an eager Enumerator IS its element list.
-    return rbArrayMethod(items, name, args)
+    return rbDelegArr(items, t, name, args)
 }
 // rubyArrayMethod (rbArrayMethod, below the Hash surface). select and reject use
 // RUBY truthiness, and pop/first/last answer nil (not an error) on an empty
@@ -5828,7 +5887,7 @@ function rbHashMethod(o, keys, vals, name, args) {
         if (name == "select" || name == "filter" || name == "reject") { return hs }
         return rbHashReplace(o, hs)
     }
-    return rbArrayMethod(hp, name, args)
+    return rbDelegArr(hp, o, name, args)
 }
 
 // The Array/Enumerable names that REQUIRE a block; called without one MRI hands
@@ -6849,6 +6908,15 @@ function rbMethod(target, name, args) {
         var mvr = rtPairGet(rbMethodFns, rbMethodRec, target)
         if (mvr !== undefined) { return rbSym(mvr[1]) }
     }
+    // NameError#name / #receiver: the hidden slots rbNameErr fills, nil for a
+    // NameError the program raised itself.
+    if (name == "name" || name == "receiver") {
+        if (rbExcInst(target) && rbIsA(target, rbBuiltinClass("NameError")) && rbFindMethod(target, name) === undefined) {
+            var nv = target[name == "name" ? "__nmname" : "__nmrecv"]
+            if (nv === undefined) { return null }
+            return nv
+        }
+    }
     // Comparable#between? and #clamp are defined by <=> ALONE, so Integer, Float,
     // Rational and String all answer them off ONE pair of arms. rbSpaceship is the
     // whole rule and it is big-aware. A user class that defines either method
@@ -7757,6 +7825,7 @@ function js_rnew(cls, args) {
             // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default lives in the
             // hidden __hdef / __hdefp slot and rbHashDefault honours it at every read.
             if (bn == "Hash") { return rbNewHash(argv) }
+            if (bn == "Regexp") { return rbRegexNew(argv) }
             return rbExc(cls, argv)
         }
     }
@@ -7839,7 +7908,33 @@ function rbHashOf(v) {
 // NoMethodError for a name no method table answers. Twin of rubyNoMethod in
 // abnf/jsrt.go, which states the wording rule.
 function rbNoMethod(t, name) {
-    rbRaiseErr("NoMethodError", "undefined method `" + name + "' for " + rbNoMethodDesc(t))
+    var r = anytype
+    r = t
+    if (rbNmDeleg[0] !== null && t === rbNmDeleg[0]) { r = rbNmDeleg[1] }
+    rbNameErr("NoMethodError", "undefined method `" + name + "' for " + rbNoMethodDesc(r), name, r)
+}
+
+// A NameError / NoMethodError carrying MRI's #name and #receiver in the hidden
+// __nmname / __nmrecv slots. Twin of rubyNameErr in abnf/jsrt.go.
+function rbNameErr(cls, msg, name, recv) {
+    var e = rbExc(rbBuiltinClass(cls), [msg])
+    e["__nmname"] = rbSym(name)
+    e["__nmrecv"] = recv
+    js_rraise(e, undefined)
+}
+
+// The Array a Range, Hash or Enumerator is delegating to right now, and that
+// delegator, so a NoMethodError names it. Twin of rubyDelegArr in abnf/jsrt.go.
+var rbNmDeleg = [null, null]
+function rbDelegArr(arr, recv, name, args) {
+    var sa = rbNmDeleg[0]
+    var sr = rbNmDeleg[1]
+    rbNmDeleg[0] = arr
+    rbNmDeleg[1] = recv
+    var v = rbArrayMethod(arr, name, args)
+    rbNmDeleg[0] = sa
+    rbNmDeleg[1] = sr
+    return v
 }
 
 // The receiver as a NoMethodError / NameError message names it. Twin of
@@ -8602,7 +8697,8 @@ function js_rlvar(scope, name) {
         if (scopeHas(s, "$blk")) { inFrame = false }
         s = scopeParent(s)
     }
-    rbRaiseErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(rbScopeSelf(scope)))
+    var lself = rbScopeSelf(scope)
+    rbNameErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(lself), n, lself)
     return null
 }
 // The callee of a bare `name(args)` that names no def: a chain walk, with a miss

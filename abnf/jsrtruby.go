@@ -141,8 +141,8 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 				inFrame = false
 			}
 		}
-		rt.rubyRaiseErr("NameError", "undefined local variable or method `"+name+"' for "+
-			rt.rubyNoMethodDesc(rubyScopeSelf(rt, a[0])))
+		self := rubyScopeSelf(rt, a[0])
+		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 		return 0
 	}
 	// The callee of a bare `name(args)` that names no def: the chain walk of

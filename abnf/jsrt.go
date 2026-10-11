@@ -430,6 +430,11 @@ type jsrt struct {
 	// fills it; every other grammar leaves it nil.
 	rubyClasses map[string]*jsObject
 
+	// rubyNmArr / rubyNmRecv: the Array a Range, Hash or Enumerator is delegating
+	// to right now, and that delegator (rubyDelegArr), so a NoMethodError names it.
+	rubyNmArr  *jsArray
+	rubyNmRecv interface{}
+
 	// rubyGlobals holds Ruby's $globals, which live outside every scope: a write
 	// inside a method is visible everywhere, and a read of a never-assigned one
 	// answers nil. Only js_rgset / js_rgget (ruby-to-llvm-ir.abnf) touch it.
@@ -6162,6 +6167,12 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 		c.set("$c$E", jsFlo{f: math.E})
 		c.set("$c$DomainError", rt.rubyBuiltinClass("Math::DomainError"))
 	}
+	// Regexp's option bits, the second argument of Regexp.new.
+	if name == "Regexp" {
+		c.set("$c$IGNORECASE", 1.0)
+		c.set("$c$EXTENDED", 2.0)
+		c.set("$c$MULTILINE", 4.0)
+	}
 	rt.rubyClasses[name] = c
 	return c
 }
@@ -6178,7 +6189,7 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 // rounded value, so no port can reproduce it: Math.atan2 / Math.atan one ulp from
 // MRI on some arguments is expected.
 func rubyMathCall(name string, rt *jsrt, args []interface{}) (interface{}, bool) {
-	a := func(i int) float64 { return rt.toNumber(argAt(args, i)) }
+	a := func(i int) float64 { return rt.rubyMathArg(name, rt.toNumber(argAt(args, i))) }
 	one := map[string]func(float64) float64{
 		"sqrt": math.Sqrt, "cbrt": math.Cbrt, "sin": math.Sin, "cos": math.Cos,
 		"tan": math.Tan, "asin": math.Asin, "acos": math.Acos, "atan": math.Atan,
@@ -6201,6 +6212,25 @@ func rubyMathCall(name string, rt *jsrt, args []interface{}) (interface{}, bool)
 		return jsFlo{f: math.Log(a(0))}, true
 	}
 	return nil, false
+}
+
+// rubyMathArg raises MRI's Math::DomainError for an argument outside the
+// function's real domain (a NaN is in it). Twins: mathArg in
+// ruby-interpreter.abnf, rbMathArg in languages/lib/ruby-rt.metajs.
+func (rt *jsrt) rubyMathArg(name string, x float64) float64 {
+	bad := false
+	switch name {
+	case "sqrt", "log", "log2", "log10":
+		bad = x < 0
+	case "asin", "acos", "atanh":
+		bad = x < -1 || x > 1
+	case "acosh":
+		bad = x < 1
+	}
+	if bad {
+		rt.rubyRaiseErr("Math::DomainError", "Numerical argument is out of domain - \""+name+"\"")
+	}
+	return x
 }
 
 // ----- Ruby ranges -----
@@ -6488,7 +6518,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 			return rt.rubyRangeLen(t)
 		}
 	}
-	av := rt.rubyArrayMethod(rt.rubyRangeToArr(t), name, args)
+	av := rt.rubyDelegArr(rt.rubyRangeToArr(t), t, name, args)
 	// #each answers the RECEIVER in MRI, and the receiver is the range.
 	if name == "each" && blk != nil {
 		return t
@@ -6848,7 +6878,47 @@ func (rt *jsrt) rubyRaiseErr(cls, msg string) {
 // then ":" and its class name unless that text already starts with "#". Twins:
 // noMethod in ruby-interpreter.abnf, rbNoMethod in languages/lib/ruby-rt.metajs.
 func (rt *jsrt) rubyNoMethod(t interface{}, name string) {
-	rt.rubyRaiseErr("NoMethodError", "undefined method `"+name+"' for "+rt.rubyNoMethodDesc(t))
+	if a, isArr := t.(*jsArray); isArr && rt.rubyNmArr != nil && a == rt.rubyNmArr {
+		t = rt.rubyNmRecv
+	}
+	rt.rubyNameErr("NoMethodError", "undefined method `"+name+"' for "+rt.rubyNoMethodDesc(t), name, t)
+}
+
+// rubyNameErr raises a NameError / NoMethodError carrying MRI's #name and
+// #receiver in the hidden __nmname / __nmrecv slots. Twins: nameErr in
+// ruby-interpreter.abnf, rbNameErr in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyNameErr(cls, msg, name string, recv interface{}) {
+	e := rt.rubyExc(rt.rubyBuiltinClass(cls), []interface{}{msg})
+	e.set("__nmname", jsSym{s: name})
+	e.set("__nmrecv", recv)
+	panic(&jsThrown{value: e})
+}
+
+// rubyNameErrSlot answers NameError#name / #receiver (name) from slot, for a NameError
+// instance whose class defines no method of that name; nil when the slot is unset.
+func (rt *jsrt) rubyNameErrSlot(target interface{}, name, slot string) (interface{}, bool) {
+	o, isObj := target.(*jsObject)
+	if !isObj || !rubyExcInst(o) || rt.rubyIsA(o, rt.rubyBuiltinClass("NameError")) != true {
+		return nil, false
+	}
+	if _, hasOwn := rubyFindMethod(target, name); hasOwn {
+		return nil, false
+	}
+	if v, ok := o.props[slot]; ok {
+		return v, true
+	}
+	return jsNull, true
+}
+
+// rubyDelegArr runs an Array method for a Range, Hash or Enumerator answering
+// through the Array of its elements, naming the delegator for a NoMethodError as
+// MRI does (`1..3:Range'). Twins: delegArr in ruby-interpreter.abnf, rbDelegArr
+// in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyDelegArr(arr *jsArray, recv interface{}, name string, args []interface{}) interface{} {
+	sa, sr := rt.rubyNmArr, rt.rubyNmRecv
+	rt.rubyNmArr, rt.rubyNmRecv = arr, recv
+	defer func() { rt.rubyNmArr, rt.rubyNmRecv = sa, sr }()
+	return rt.rubyArrayMethod(arr, name, args)
 }
 
 // rubyNoMethodDesc is the receiver as a NoMethodError / NameError message names it.
@@ -9502,6 +9572,12 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return jsNull
 			}
 		}
+	// NameError#receiver (and #name, in the Method#name arm below): the hidden
+	// slots rubyNameErr fills, nil for a NameError the program raised itself.
+	case "receiver":
+		if v, ok := rt.rubyNameErrSlot(target, name, "__nmrecv"); ok {
+			return v
+		}
 	case "message", "full_message":
 		// Exception#message: the raise argument, or the class name. Only for an
 		// INSTANCE that does not define a message method of its own, so a user
@@ -9600,6 +9676,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		// stand-in. An omission is not a divergence.
 		if mv, isMeth := rt.rubyMethodValOf(target); isMeth {
 			return jsSym{s: mv.name}
+		}
+		if v, ok := rt.rubyNameErrSlot(target, name, "__nmname"); ok {
+			return v
 		}
 	case "between?", "clamp":
 		// Comparable#between? and #clamp are defined by <=> ALONE, so Integer,
@@ -10823,7 +10902,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		keys.dropIdx()
 		return o, true
 	}
-	return rt.rubyArrayMethod(hp, name, args), true
+	return rt.rubyDelegArr(hp, o, name, args), true
 }
 
 // rubyArrayMethod mirrors the arrayMethod of ruby-interpreter.abnf. select and
@@ -11019,7 +11098,7 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 		return memo
 	}
 	// Everything else is Enumerable, and an eager Enumerator IS its element list.
-	return rt.rubyArrayMethod(items, name, args)
+	return rt.rubyDelegArr(items, t, name, args)
 }
 
 // rubyArrWantsBlock lists the Array/Enumerable names that REQUIRE a block; called
@@ -13613,6 +13692,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					// rubyHashDefault honours it at every read.
 					if bn == "Hash" {
 						return w(rubyNewHash(argv))
+					}
+					if bn == "Regexp" {
+						return w(rt.rubyRegexNew(argv))
 					}
 					return w(rt.rubyExc(cls, argv))
 				}

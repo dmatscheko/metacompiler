@@ -1969,7 +1969,7 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 		case "source":
 			return re.src, true
 		case "options":
-			return float64(0), true
+			return float64(rubyReOptBits(re.flags)), true
 		case "names":
 			out := &jsArray{}
 			for _, n := range re.names {
@@ -1977,9 +1977,9 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 			}
 			return out, true
 		case "to_s":
-			return "(?" + rubyReOpts(re.flags, true) + ":" + re.src + ")", true
+			return "(?" + rubyReOpts(re.flags, true) + ":" + rubyReDescSrc(re.src) + ")", true
 		case "inspect":
-			return "/" + re.src + "/" + rubyReOpts(re.flags, false), true
+			return "/" + rubyReDescSrc(re.src) + "/" + rubyReOpts(re.flags, false), true
 		}
 		return nil, false
 	}
@@ -2215,6 +2215,73 @@ func init() {
 	// js_rxmcall reads its argument array in position 2, exactly like the
 	// js_rmcall it wraps, so the handle recycler may hand that array through.
 	jsThroughArgs["js_rxmcall"] = 1 << 2
+}
+
+// rubyReDescSrc is a Regexp's source as #inspect and #to_s write it: every "/"
+// not already escaped gets a backslash. Twin of reDescSrc in
+// ruby-interpreter.abnf.
+func rubyReDescSrc(src string) string {
+	var b strings.Builder
+	for i := 0; i < len(src); i++ {
+		switch {
+		case src[i] == '\\' && i+1 < len(src):
+			b.WriteByte(src[i])
+			b.WriteByte(src[i+1])
+			i++
+		case src[i] == '/':
+			b.WriteString("\\/")
+		default:
+			b.WriteByte(src[i])
+		}
+	}
+	return b.String()
+}
+
+// rubyReOptBits is Regexp#options from the engine flags: IGNORECASE 1, EXTENDED
+// 2, MULTILINE 4. Twin of reOptBits in ruby-interpreter.abnf.
+func rubyReOptBits(flags string) int {
+	flags = strings.TrimPrefix(flags, "mp")
+	n := 0
+	if strings.Contains(flags, "i") {
+		n += 1
+	}
+	if strings.Contains(flags, "x") {
+		n += 2
+	}
+	if strings.Contains(flags, "s") {
+		n += 4
+	}
+	return n
+}
+
+// rubyRegexNew is Regexp.new(src[, opts]): a String source, or a Regexp kept as
+// it is (opts ignored). An Integer opts is the option bit set; any other truthy
+// one means IGNORECASE (MRI 2.6). Twin of regexNew in ruby-interpreter.abnf.
+func (rt *jsrt) rubyRegexNew(args []interface{}) interface{} {
+	if rxIsRegexObj(argAt(args, 0)) {
+		return argAt(args, 0)
+	}
+	bits := 0
+	if f, isNum := argAt(args, 1).(float64); isNum {
+		bits = int(f)
+	} else if rubyTruthy(argAt(args, 1)) {
+		bits = 1
+	}
+	flags := "mp"
+	if bits&1 != 0 {
+		flags += "i"
+	}
+	if bits&4 != 0 {
+		flags += "s"
+	}
+	if bits&2 != 0 {
+		flags += "x"
+	}
+	src := rt.rubyStr(argAt(args, 0))
+	if re := rxGet(src, flags); !re.ok {
+		rt.fail("invalid regexp /%s/: %s", src, re.err)
+	}
+	return rxNewRegexObj(src, flags)
 }
 
 // rubyReOpts is a Ruby Regexp's options as MRI writes them, from the engine flags
