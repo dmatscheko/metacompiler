@@ -1043,7 +1043,7 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 
 // f(a, b): a function, a builtin or an identifier-named conversion (int(x)). A
 // trailing '...' spreads a slice into the variadic parameter.
-Call        <~~ push(makeCall(takeAll())) ~~>
+Call        <~~ push(makeCall(goAppendC(takeAll(), up.in))) ~~>
             = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before

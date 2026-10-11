@@ -976,16 +976,22 @@ function stElemTy(t) {
 // element types. A call, a conversion, a slice or an assertion anywhere ends it
 // unknown.
 function goChainC(t, text, pos) {
+    var ty = stChainTy(text)
+    if (ty != "") { regSt(pos, ty) }
+    return t
+}
+// The type of a chain's text, or "" (a bare name answers its binding's).
+function stChainTy(text) {
     var i = 0
     while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
-    if (i == 0 || i == text.length) { return t }
+    if (i == 0) { return "" }
     var ty = stBare(cTyLookup(text.substring(0, i)))
     while (i < text.length && ty != "") {
         var ch = text.charAt(i)
         if (ch == ".") {
             var j = i + 1
             while (j < text.length && cIsIdCh(text.charCodeAt(j))) { j = j + 1 }
-            if (j == i + 1) { return t }
+            if (j == i + 1) { return "" }
             var sn = ty.charAt(0) == "*" ? ty.substring(1) : ty
             ty = goFieldTyHook(sn, text.substring(i + 1, j))
             i = j
@@ -999,16 +1005,38 @@ function goChainC(t, text, pos) {
                 else if (c2 == 34 || c2 == 96 || c2 == 39) { q = c2 }
                 else if (c2 == 91) { d = d + 1 }
                 else if (c2 == 93) { d = d - 1; if (d == 0) { break } }
-                else if (c2 == 58 && d == 1) { return t }
+                else if (c2 == 58 && d == 1) { return "" }
                 k = k + 1
             }
-            if (k >= text.length) { return t }
+            if (k >= text.length) { return "" }
             ty = stElemTy(ty)
             i = k + 1
-        } else { return t }
+        } else { return "" }
     }
-    if (ty != "") { regSt(pos, ty) }
-    return t
+    return ty
+}
+// append(s, v, ...): each appended struct value is a copy, by s's element type.
+// items = ["append", s, v..., {spread}?]; text is the call's.
+function goAppendC(items, text) {
+    if (items.length < 3 || items[0] !== "append") { return items }
+    var a = text.indexOf("(") + 1
+    var e = a
+    var d = 0
+    while (e < text.length) {
+        var cc = text.charCodeAt(e)
+        if (cc == 40 || cc == 91 || cc == 123) { d = d + 1 }
+        if (cc == 41 || cc == 93 || cc == 125) { if (d == 0) { break } d = d - 1 }
+        if (cc == 44 && d == 0) { break }
+        e = e + 1
+    }
+    var cty = goStCopyTy(stElemTy(stChainTy(text.substring(a, e))))
+    if (cty == "") { return items }
+    var i = 2
+    while (i < items.length) {
+        if (typeof items[i] == "function") { items[i] = goStoreThunk(items[i], cty) }
+        i = i + 1
+    }
+    return items
 }
 function cIsIdCh(cc) { return (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95 }
 // `for k, v := range x`: the names are noted as they are bound, and the ranged

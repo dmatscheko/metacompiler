@@ -1157,7 +1157,7 @@ LitVal      = SeqNest | Expression ;
 
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
-Call        <~~ push(makeCall(takeAll())) ~~>
+Call        <~~ push(makeCall(goAppendC(takeAll(), up.in))) ~~>
             = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 
 VarRef      <~~ push(goNameC(up.in, up.pos)) ~~>

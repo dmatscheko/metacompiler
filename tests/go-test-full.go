@@ -3023,9 +3023,9 @@ func s48() {
 
 // ===== SECTION 49: a struct is a value, a pointer is not =====
 // Expected values read off `go run` (go 1.27). Assignment, a short declaration, a
-// dereference, an argument, a result, a composite-literal element, a range variable
-// and a channel send all COPY a struct (and an array of them); a pointer stays the
-// same object, and == on two pointers is identity.
+// dereference, an argument, a result, a composite-literal element, a range variable,
+// a channel send and append all COPY a struct (and an array of them); a pointer stays
+// the same object, and == on two pointers is identity.
 type T49 struct{ a int }
 type U49 struct {
 	t T49
@@ -3092,6 +3092,11 @@ func s49() {
 	q2 := ps[0]
 	q2.a = 32
 	check("vs8", x.a == 32 && y.a == 31 && ps[0] == x)
+	ap := []T49{}
+	ap = append(ap, a, h)
+	a.a = 1
+	h.a = 2
+	check("vs9", ap[0].a == 124 && ap[1].a == 77)
 }
 
 func main() {
