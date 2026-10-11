@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-363** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-369** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -71,6 +71,10 @@ Same root cause as T-170 (no tuple type). Close together with T-170.
 "int"/"float" sample in pyTypeSample / pyDescTypeSample (interpreter,
 abnf/jsrtpydesc.go, layer 2). `bit_length`, `is_integer`, `as_integer_ratio`,
 `to_bytes`, `hex`, `fromhex` and the rest of int/float's methods are absent.
+
+### T-367 python: a lone high surrogate before a non-surrogate is read as a pair · P1 · PY · OPEN [V]
+`t = "a\ud83db" + "\ude00"`: len 3 (CPython 4); natively `ord(t[1])` fails "ord()
+expected a character, but string of length 3". Both halves.
 
 ---
 
@@ -172,6 +176,15 @@ non-struct types: "unknown method 'Desc'" (the value carries no runtime type - T
 GODEBUG=panicnil=0 with go.mod's go 1.16; make the check self-describing or assert
 the go 1.21+ answer).
 
+### T-365 go: `for range` over a slice is ~140k instructions per iteration natively · P2 · GO · OPEN [V]
+`for _, x := range xs` over 3 elements: ~413k instructions per call (13,996M vs 1,594M
+for a plain call, 30k calls), ~8x the collections - js_gorange appears to normalise
+into a keys/vals dict on every range. Profile and fix; consider a bench row.
+
+### T-366 go: variadic calls build the slice object expensively · P3 · GO · OPEN [V]
+~40k instructions per variadic call remain: emitSlOf builds the slice with obj_new, 6
+js_set calls and a scope_get of $slclass. Build it in one floor/layer-2 call.
+
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
@@ -179,6 +192,11 @@ the go 1.21+ answer).
 ---
 
 # DA — Dart  (no dart here: spec-only)
+
+### T-368 dart: `List.join` · P1 · DA · OPEN [V spec-only]
+`[1,2].join(" ")`: "unknown List method: join" (interpreter) / "unknown list method
+'join'" (compiled). Sweep dart:core List's documented members (join, indexOf,
+contains, sublist, any/every, fold/reduce, sort, reversed, ...).
 
 ---
 
@@ -208,14 +226,6 @@ engines "not found"; bash `declare -- ef` / `declare -- q`.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-154 replay-based generators repeat side effects in the interpreters · P2 · CORE + JS + PY · IN PROGRESS (CORE worker, round 7) [V]
-js, typescript and python INTERPRETER halves drive generators and async functions by
-replaying the body, so effects before a `yield`/`await` run again: js
-`take(inf(), 3)` prints `t0 t2 t5` (node `t0 t1 t2`); an async-generator trace is
-garbage. The compiled halves are correct. Manual 7.14 explains the mechanism. Find a
-real suspension for the interpreter halves that works under goja and -frozen, cost it,
-implement or write the costed design here and DECLINE.
-
 ### T-158 frame elimination on arithmetic predicates · P3 · CORE + PY + RB · OPEN [V]
 `rtTag`'s −13.9% on python came from removing ONE scope frame from ONE predicate.
 The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
@@ -223,23 +233,19 @@ The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
 a measurement against a dead-code matched control (tests/bench.sh header). Never
 introduce a delegating wrapper on a hot path: that cost python +41% once.
 
-### T-293 correctly rounded transcendentals · P3 · CORE · IN PROGRESS (CORE worker, round 7) [V]
-CPython (Apple libm) and MRI are correctly rounded on exp/log/pow and nearly so on
-sin/cos/atan/atan2; our Go-port legs are 1-9 ulps off on many rows (python T-265,
-ruby T-229 declined for this reason). Design: CORE-MATH-style double-double with a
-Ziv rounding test, one MetaJS module (interpreter + layer 2) + Go port + runtime.c
-d_*. Cost it; implement or DECLINE.
+### T-363 pow is up to 421 ulps off in every leg that uses math.Pow / d_pow · P1 · CORE · OPEN [V]
+600-row probe: 544/600 not correctly rounded (max 421 ulps); node, CPython and Apple
+libm 0/600. `1.9687173381259235 ** 596.2128067674018` gives 2.48822920238156e+175 in
+every leg (node 2.488229202381568e+175). Design: double-double pow with a Ziv test,
+~250 lines per engine (MetaJS module for interpreter + layer 2, Go port, runtime.c
+d_pow), routed for python, ruby, js, lua, php (java stays on fdlibm, go on its Go port).
 
-### T-352 interpreter host `charAt` at a lone-surrogate index answers U+FFFD · P2 · CORE · IN PROGRESS (CORE worker, round 7) [V]
-goja and -frozen: `s.charAt(i)` where s[i] is a lone surrogate gives U+FFFD, while
-substring keeps the unit (dart's dxQuote uses charAt). Make charAt keep the unit in both
-hosts.
-
-### T-359 goja: a lone surrogate in a kotlin string literal becomes U+FFFD · P1 · CORE · IN PROGRESS (CORE worker, round 7) [V]
-`val s = "\uDE00\uD83D"; println(s.map { it.code }.joinToString(" "))`: goja interp
-and goja-built llvm.Run/native "65533 65533"; -frozen "56832 55357" (= JVM). A
-goja-vs-frozen divergence in both kotlin halves: the literal crosses a goja→Go string
-conversion (cf. the js fix gojaWTF8). Find every such crossing, not only kotlin's.
+### T-364 coroutines: a stackful context switch in the floor · P3 · CORE · OPEN [V]
+Native next() costs ~83k extra instructions / ~8.5 µs; a parked generator ~21.4 KB
+(pthread + condvar). Replace with hand-written IR inline asm for arm64 and x86-64 that
+saves callee-saved registers and swaps sp (~350 lines: asm, gen_resume rewrite, a
+gc_sweep hook freeing unreachable coroutine stacks); extern surface, emitters and Go
+twin unchanged. Native-only, one hand-written file in lib. Cost, implement or DECLINE.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -250,25 +256,12 @@ interpreter 17 `Array.isArray` + 49 tuple refs, python-rt.metajs 42 `pyIsArr`, p
 compiler 54 tuple refs, jsrt.go `*jsArray`. Unblocks T-011, `%`-formatting arity (`"%d %d" % (1,2,3)` must say "not all arguments converted during string formatting"; `"%s" % [1, 2]` must stay `[1, 2]`),
 `BaseException.__str__`, hashability as a real rule.
 
-### T-171 moving floor bodies into layer 2 · P3 · CORE · IN PROGRESS (CORE worker, round 7) [U]
-The floor→layer-2 upcall costs 120 ns; a nine-iteration binary search over boxed
-arrays costs 3.2 µs. `case_map` moved whole, passed every gate and was reverted at
-15×/135×/2.0×. `d_pow` and its family cannot move (manual 7.7). The direction worth
-taking is the VARIADIC PROLOGUE (`scope_get` and `ar_block` repacking args dominate
-`sample` on the spread-heaviest go program).
-
 ### T-172 a catchable `GeneratorExit` · P3 · CORE + PY · OPEN [V]
 `js_try`'s `pending != GEN_EXIT` guard is shared with fifteen languages (where a close
 is a return completion and must not be catchable); `GEN_EXIT` has no Python class, so
 `except Exception` (must not catch) and bare `except:` (must) cannot be told apart;
 the floor needs `gen_close(g, sentinel)` reached through the tag-15 `return` member,
 which has nowhere to pass one. New extern → three engines → plus coro-poc.
-
-### T-173 coroutines as CPS in the emitter · P3 · CORE · IN PROGRESS (CORE worker, round 7) [U]
-Today: pthread + condvar, 4.1 µs per `next()` natively vs 0.75 µs under llvm.Run,
-~18.8 KB per live suspended generator, and an abandoned generator parks its thread
-forever. `swapcontext` is dead (deprecated on darwin; no `#include` in runtime.c).
-The extern surface would stay identical.
 
 ### T-181 corpus: other languages · P3 · per language · OPEN [V]
 batch 0 of 2 wine files parse; swift 80% (an 18-file lexical tail: suppressed
@@ -514,6 +507,12 @@ T-351 bash: `declare -p` of an empty or declared-only array — DONE bf02b13
 T-349 go: a method on a defined non-struct type aborts — DONE 1dfd541 186c060 (Stringer of a defined non-struct type: T-240)
 T-350 go: pointer map keys; value-receiver copies; native struct map keys — DONE df44f10
 T-346 swift: `Int64 is Int`; `type(of:)` — DONE 6cffef4 (Int64/UInt64 carry width 65 on swift's own box; no floor change)
+T-359 goja: a lone surrogate in a kotlin string literal becomes U+FFFD — DONE 2c0a569
+T-352 interpreter host `charAt` at a lone-surrogate index answers U+FFFD — DONE 5fed219
+T-171 moving floor bodies into layer 2 — PARTIAL cf8be7a (variadic prologue js_gorest/js_pyrest in the floor: go -10.7%); go's slice building is T-366
+T-154 replay-based generators repeat side effects in the interpreters — DECLINED: a host coroutine is impossible under the pinned goja (one LIFO VM stack; a second Runtime cannot call the first's closures); the feasible pure-MetaJS design (resumable statement drivers + an evaluation tape for the parked statement) is ~1,200 lines per grammar × js/ts/python. Replay is quadratic (13.9G → 44.1G instructions, n=400 → 800)
+T-293 correctly rounded transcendentals — DECLINED for full correct rounding (~3,000-3,600 lines over three engines; still disagrees with Apple libm where libm is wrong, e.g. cos 33/600); pow alone is T-363
+T-173 coroutines as CPS in the emitter — DECLINED: CPS in the emitter is ~1,200-1,800 lines in compile-core plus 100-200 per emitter, high risk; the cheaper stackful context switch is T-364
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -561,7 +560,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
