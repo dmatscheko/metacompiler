@@ -1659,6 +1659,37 @@ void s38() {
   check("pe38i", ws.join() == "ab" && w == "b" && () == () && ().toString() == "()");
 }
 
+// ===== SECTION 39: invoking a function-typed field or getter =====
+// `o.cb(x)` where cb is a FIELD or a GETTER, not a method, reads it and invokes the
+// value; an unqualified `cb(x)` inside the class is `this.cb(x)`; every function has
+// a `call` method, so `onTap?.call()` runs the callback. Dart language spec
+// (17.21.1 ordinary invocation, dart:core Function.call); no dart toolchain here.
+class S39K {
+  final int Function(int) cb;
+  void Function()? onTap;
+  S39K(this.cb);
+  int run(int x) => cb(x) + 1;
+  int Function(int) get twice => (x) => cb(cb(x));
+}
+class S39Sub extends S39K {
+  S39Sub() : super((x) => x * 10);
+}
+void s39() {
+  var k = S39K((x) => x + 1);
+  check("fn39a", k.cb(4) == 5 && k.run(4) == 6 && k.twice(4) == 6);
+  var taps = 0;
+  k.onTap = () { taps = taps + 1; };
+  k.onTap!();
+  k.onTap?.call();
+  check("fn39b", taps == 2 && k.cb.call(9) == 10);
+  var ks = [k, S39Sub()];
+  var outs = [];
+  for (var e in ks) {
+    outs.add(e.cb(2));
+  }
+  check("fn39c", outs.join(",") == "3,20");
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1698,6 +1729,7 @@ int main() {
   s36(); // SECTION-CALL 36
   s37(); // SECTION-CALL 37
   s38(); // SECTION-CALL 38
+  s39(); // SECTION-CALL 39
   print("full: $checks checks, $fails failures");
   return fails;
 }

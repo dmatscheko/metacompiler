@@ -2006,6 +2006,9 @@ function js_dartnm(recv, name, args) {
     // x.toString() is Object.toString() unless the class overrides it, and dtStr
     // answers both - the interpreter's mcall has the same first arm.
     if (name == "toString" && args.length == 0) { return dtStr(recv) }
+    // Every function value has a `call` method that invokes it (dart:core
+    // Function.call). Twin of dartMethod in abnf/jsrtdart.go.
+    if (name == "call" && typeof recv == "function") { return recv.apply(undefined, args) }
     if (dtIsNum(recv)) {
         var hit = dtNumMember(recv, name, args)
         if (hit.hit) { return hit.v }
@@ -2028,8 +2031,24 @@ function js_dartnm(recv, name, args) {
             var rm = dsReMember(recv, name, args)
             if (rm.hit) { return rm.v }
         }
+        var fc = dtFieldCallee(recv, name)
+        if (typeof fc == "function") { return fc.apply(undefined, args) }
     }
     return dtMember(recv, name, args)
+}
+
+// The function an instance's FIELD or GETTER named `name` holds, when its class
+// declares no method of that name: `o.cb(x)` reads the field and invokes its value
+// (Dart 3, 17.21.1). Twin of dartFieldCallee in abnf/jsrtdart.go.
+function dtFieldCallee(recv, name) {
+    if (recv["__class"] === undefined) { return null }
+    if (typeof dtFindMethod(recv, name) == "function") { return null }
+    var f = recv[name]
+    if (f === undefined) {
+        var g = dtFindMethod(recv, "get$" + name)
+        if (typeof g == "function") { f = g.apply(undefined, [recv]) }
+    }
+    return f
 }
 
 // RegExp(source, {multiLine, caseSensitive, unicode, dotAll}): the callee's

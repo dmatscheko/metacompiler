@@ -617,6 +617,11 @@ func (rt *jsrt) dartMethod(recv interface{}, name string, args []interface{}) in
 	if name == "toString" && len(args) == 0 {
 		return rt.dartStr(recv)
 	}
+	// Every function value has a `call` method that invokes it (dart:core
+	// Function.call): `onTap?.call()`. Twin of js_dartnm in lib/dart-rt.metajs.
+	if name == "call" && isCallable(recv) {
+		return rt.call(recv, jsUndef, args)
+	}
 	if dartIsNum(recv) {
 		if v, hit := rt.dartNumMember(recv, name, args); hit {
 			return v
@@ -643,6 +648,9 @@ func (rt *jsrt) dartMethod(recv interface{}, name string, args []interface{}) in
 			if v, hit := rt.dartReMember(o, name, args); hit {
 				return v
 			}
+		}
+		if f, hit := rt.dartFieldCallee(o, name); hit {
+			return rt.call(f, jsUndef, args)
 		}
 	}
 	if arr, ok := recv.(*jsArray); ok {
@@ -2418,6 +2426,26 @@ func dartFindMethod(o *jsObject, name string) interface{} {
 		c = co.props["__super"]
 	}
 	return nil
+}
+
+// dartFieldCallee answers the function an instance's FIELD or GETTER named `name`
+// holds, when its class declares no method of that name: `o.cb(x)` on a
+// function-typed field reads the field and invokes its value (Dart 3, 17.21.1
+// "Ordinary Invocation"). Twin of dtFieldCallee in lib/dart-rt.metajs and of
+// mcall's field arm in dart-interpreter.abnf.
+func (rt *jsrt) dartFieldCallee(o *jsObject, name string) (interface{}, bool) {
+	if _, inst := o.props["__class"]; !inst || dartFindMethod(o, name) != nil {
+		return nil, false
+	}
+	f, ok := o.props[name]
+	if !ok {
+		g := dartFindMethod(o, "get$"+name)
+		if g == nil {
+			return nil, false
+		}
+		f = rt.call(g, jsUndef, []interface{}{o})
+	}
+	return f, isCallable(f)
 }
 
 func dartIsRecord(v interface{}) bool {

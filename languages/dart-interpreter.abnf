@@ -3580,6 +3580,10 @@ KwDeferred  = "deferred" KwEnd ;
         // answers both (an override wins there). Without this the call would fall
         // through to the extension lookup and fail.
         if (name == "toString" && args.length == 0) { return dstr(target) }
+        // Every function value has a `call` method that invokes it (dart:core
+        // Function.call), so `onTap?.call()` runs the callback. Twin of dartMethod's
+        // first arm in abnf/jsrtdart.go.
+        if (name == "call" && typeof target == "function") { return target.apply(undefined, args) }
         // A NAMED constructor of one of dart:core's errors, reached through the
         // postfix chain rather than QualCall: `ArgumentError.value(7)` is a bare
         // VarRef followed by an mcall suffix (QualCall's rule requires TypeArgs), so
@@ -3642,9 +3646,18 @@ KwDeferred  = "deferred" KwEnd ;
         if (target != null && target != undefined && typeof target == "object" && target.__class != undefined) {
             var m = findMember(target.__class, name)
             if (m == null) {
-                // A no-argument getter can be called like a method.
+                // A FIELD or GETTER holding a function is invoked with the arguments:
+                // `o.cb(x)` reads cb and calls its value (Dart 3, 17.21.1). Twin of
+                // dartFieldCallee in abnf/jsrtdart.go.
+                if (hasOwn(target, name) && typeof target[name] == "function") {
+                    return target[name].apply(undefined, args)
+                }
                 var g = findMember(target.__class, "get$" + name)
-                if (g != null) { return g.fn.apply(undefined, [target]) }
+                if (g != null) {
+                    var gv = g.fn.apply(undefined, [target])
+                    if (typeof gv == "function") { return gv.apply(undefined, args) }
+                    return gv
+                }
                 var ex = extLookup(name)
                 if (ex != null) { return ex.apply(undefined, concat2impl([target], args)) }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
@@ -3971,10 +3984,12 @@ KwDeferred  = "deferred" KwEnd ;
             var argv = evalArgs(args)
             var box = tryGetVar(name)
             if (box == null) {
-                // An unqualified call inside a method reaches the receiver's own members.
+                // An unqualified call inside a method reaches the receiver's own members,
+                // a function-typed field or getter included (mcall invokes its value).
                 var self = findThis()
                 if (self != undefined && self != null && self.__class != undefined
-                    && findMember(self.__class, name) != null) { return mcall(self, name, argv) }
+                    && (findMember(self.__class, name) != null || hasOwn(self, name)
+                        || findMember(self.__class, "get$" + name) != null)) { return mcall(self, name, argv) }
                 // An extension type applied explicitly (ExInt(6)) is the identity.
                 if (hasOwn(extensionTypes, "$" + name)) { return argv[0] }
                 // dart:core's own errors and exceptions: FormatException("x"),
