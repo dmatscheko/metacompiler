@@ -1278,6 +1278,34 @@ function k1Arith(op, l, r) {
     return ktNorm(sintOp(k1OpCode(op), a, b), wu.w, wu.u)
 }
 
+// jsrtkotlin.go ktFloorDivMod. Math.floorDiv / Int.floorDiv (mod false) and
+// Math.floorMod / Int.mod (mod true): the quotient rounded toward negative
+// infinity at the promoted width, and the remainder taking the divisor's sign,
+// typed like the divisor (Long.mod(Int) is an Int, Int.mod(Byte) a Byte).
+function k4FloorDivMod(l, r, mod) {
+    var q = anytype
+    q = k1Arith("/", l, r)
+    var m = anytype
+    m = k1Arith("%", l, r)
+    var adjust = !k1Cmp("==", m, 0) && k1Cmp("<", m, 0) != k1Cmp("<", r, 0)
+    if (!mod) {
+        if (adjust) { return k1Arith("-", q, 1) }
+        return q
+    }
+    if (adjust) { m = k1Arith("+", m, r) }
+    var wr = 32
+    var ur = 0
+    if (sintIs(r)) {
+        wr = sintWidth(r)
+        if (sintUns(r)) { ur = 1 }
+    }
+    if (wr < ktWU(l, r).w) { return k1Conv(m, wr, ur) }
+    return m
+}
+// jsrtkotlin.go ktIntKind's ok: an integer of any width (an Int is a plain
+// number, every other width a box); a Char is not one.
+function k4IsIntKind(v) { return typeof v == "number" || sintIs(v) }
+
 // jsrtkotlin.go ktShift (265). The result type is the LEFT operand's alone and
 // the COUNT is MASKED - & 31 for a 32 bit left operand, & 63 for a 64 bit one -
 // which is why `1 shl 32` is 1 rather than 0.
@@ -1537,6 +1565,9 @@ function ktNumMethod(recv, name, args) {
     }
     if (name == "rangeTo" || name == "until" || name == "downTo") {
         if (args.length == 1) { return k4RangeMake(recv, args[0], name) }
+    }
+    if (name == "floorDiv" || name == "mod") {
+        if (k4IsIntKind(recv) && k4IsIntKind(ktArg(args, 0))) { return k4FloorDivMod(recv, args[0], name == "mod") }
     }
     if (name == "toByte") { return k1Conv(recv, 8, 0) }
     if (name == "toShort") { return k1Conv(recv, 16, 0) }
@@ -6237,9 +6268,44 @@ function k4bAdoptTy(v, ty) {
 // element types a type argument fixes. Twin of ktAdoptEl in abnf/jsrtkotlin.go.
 function k4bAdoptOne(x, ty) {
     if (ty == "") { return x }
+    if (ty.indexOf("<") >= 0) {
+        var ne = k4bNestedElems(ty)
+        return js_ktadoptel(x, ne[1], ne[0])
+    }
     var n = k4bAdoptTy(x, ty)
     if (n === undefined) { return x }
     return n
+}
+// Go: ktNestedElems. [key, element] types a nested collection type fixes.
+function k4bNestedElems(ty) {
+    var t = ty
+    if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+    var lt = t.indexOf("<")
+    if (lt < 0 || t.charAt(t.length - 1) != ">") { return ["", ""] }
+    var targs = []
+    var depth = 0
+    var from = lt + 1
+    var i = lt + 1
+    while (i < t.length - 1) {
+        var ch = t.charAt(i)
+        if (ch == "<") { depth = depth + 1 }
+        if (ch == ">") { depth = depth - 1 }
+        if (ch == "," && depth == 0) {
+            targs.push(t.substring(from, i))
+            from = i + 1
+        }
+        i = i + 1
+    }
+    targs.push(t.substring(from, t.length - 1))
+    if (targs.length == 2) { return [k4bNestedElTy(targs[0]), k4bNestedElTy(targs[1])] }
+    return ["", k4bNestedElTy(targs[0])]
+}
+function k4bNestedElTy(s) {
+    if (s.indexOf("<") >= 0) { return s }
+    var b = s
+    if (b.charAt(b.length - 1) == "?") { b = b.substring(0, b.length - 1) }
+    if (b == "Long" || b == "Short" || b == "Byte" || b == "UInt" || b == "ULong" || b == "UShort" || b == "UByte") { return s }
+    return ""
 }
 function k4bAdoptAll(arr, ty) {
     if (ty == "") { return }
@@ -7056,6 +7122,8 @@ function k4JavaMath() {
     o["min"] = ktGlobalFn("min")
     o["toRadians"] = k4JavaAngleFn("toRadians")
     o["toDegrees"] = k4JavaAngleFn("toDegrees")
+    o["floorDiv"] = function (x, y) { return k4FloorDivMod(x, y, false) }
+    o["floorMod"] = function (x, y) { return k4FloorDivMod(x, y, true) }
     o["round"] = function (x) {
         var w = 64
         if (floIs(x)) {
@@ -7137,6 +7205,37 @@ function k4ArrayOfN(name, args) {
         i = i + 1
     }
     return out
+}
+
+// jsrtkotlin.go ktJavaCollection: a java.util collection constructor - empty,
+// with an Int capacity, or a copy of a collection (of a map).
+function k4JavaCollection(name, src) {
+    if (name == "HashMap" || name == "LinkedHashMap") {
+        var mp = ktMakeMap()
+        var ks = ktMapKeys(src)
+        if (ks !== undefined) {
+            var vs = ktMapVals(src)
+            var i = 0
+            while (i < ks.length) {
+                ktMapPut(mp, ks[i], vs[i])
+                i = i + 1
+            }
+        }
+        return mp
+    }
+    var els = []
+    if (ktIsArr(src)) { els = src }
+    else if (ktIsSet(src)) { els = ktSetElems(src) }
+    if (name == "ArrayList") {
+        var out = []
+        var j = 0
+        while (j < els.length) {
+            out.push(els[j])
+            j = j + 1
+        }
+        return out
+    }
+    return k3SetFrom(els)
 }
 
 // The name groups of ktGlobalFn, hoisted out so the big if-chain reads as the Go
@@ -7263,6 +7362,9 @@ function k4Contract(name, args) {
 // emitted scope and the call site is an ordinary call.
 function ktGlobalFn(name) {
     if (name == "Math") { return k4JavaMath() }
+    if (name == "ArrayList" || name == "HashSet" || name == "LinkedHashSet" || name == "HashMap" || name == "LinkedHashMap") {
+        return function (src) { return k4JavaCollection(name, src) }
+    }
     // kotlin.properties.Delegates: the three standard property delegates.
     if (name == "Delegates") {
         var d = {}

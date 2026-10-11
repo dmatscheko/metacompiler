@@ -52,8 +52,9 @@ var ktOneArgColl = {"$List": 1, "$MutableList": 1, "$ArrayList": 1, "$Set": 1, "
                     "$Iterable": 1, "$Array": 1, "$Sequence": 1}
 var ktTwoArgColl = {"$Map": 1, "$MutableMap": 1, "$HashMap": 1, "$LinkedHashMap": 1, "$Pair": 1}
 
-// {k, v}: the numeric key and element (value) types a collection type fixes - a
-// Pair's first and second - or null when it fixes none.
+// {k, v}: the key and element (value) types a collection type fixes - a Pair's
+// first and second - or null when it fixes none. Each is a numeric type, or a
+// collection type that itself fixes numeric elements (List<List<Long>>), "" else.
 function ktElemTypes(ty) {
     var t = (ty.length > 0 && ty.charAt(ty.length - 1) == "?") ? ty.substring(0, ty.length - 1) : ty
     var prim = ktPrimArrElem["$" + t]
@@ -64,21 +65,28 @@ function ktElemTypes(ty) {
     var targs = ktSplitTArgs(t.substring(lt + 1, t.length - 1))
     var k = ""
     var v = ""
-    if (ktOneArgColl["$" + base] != undefined && targs.length == 1) { v = ktNumTy(targs[0]) }
-    else if (ktTwoArgColl["$" + base] != undefined && targs.length == 2) { k = ktNumTy(targs[0]); v = ktNumTy(targs[1]) }
+    if (ktOneArgColl["$" + base] != undefined && targs.length == 1) { v = ktElemTy(targs[0]) }
+    else if (ktTwoArgColl["$" + base] != undefined && targs.length == 2) { k = ktElemTy(targs[0]); v = ktElemTy(targs[1]) }
     if (k == "" && v == "") { return null }
     return {k: k, v: v}
 }
+function ktElemTy(t) {
+    var n = ktNumTy(t)
+    if (n != "") { return n }
+    return ktLitElems(t) != null ? t : ""
+}
 function ktTyElems(ty) { return ty == "" ? null : ktElemTypes(ty) }
-// The element types a collection's integer literals are retyped to, or null.
+// The element types a collection's integer literals are retyped to, or null: a
+// numeric type, or a nested collection type whose own elements are retyped.
 function ktLitElems(ty) {
     var el = ktTyElems(ty)
     if (el == null) { return null }
-    var k = ktLitTy(el.k)
-    var v = ktLitTy(el.v)
+    var k = ktLitElTy(el.k)
+    var v = ktLitElTy(el.v)
     if (k == "" && v == "") { return null }
     return {k: k, v: v}
 }
+function ktLitElTy(t) { return t.indexOf("<") >= 0 ? t : ktLitTy(t) }
 
 // The type a FUNCTION type's result adopts - `() -> Long`, `(Int) -> Long`, the
 // nullable `(() -> Long)?` - or "" for any other type, for a result that retypes
@@ -622,8 +630,8 @@ function ktInitText(dtext, name, dtype) {
 // indexOf / lastIndexOf / remove retype the element, and addAll / removeAll /
 // containsAll / retainAll retype the collection argument's elements.
 function ktMArgTypes(name, nargs, el, isMap) {
-    var v = ktLitTy(el.v)
-    var k = ktLitTy(el.k)
+    var v = ktLitElTy(el.v)
+    var k = ktLitElTy(el.k)
     if (isMap) {
         if (name == "put") { return [k, v] }
         if (name == "get" || name == "containsKey" || name == "remove" || name == "getValue") { return [k] }
@@ -648,8 +656,21 @@ function ktCompoundTys(ty) {
     var el = ktTyElems(ty)
     if (el == null) { return [] }
     if (ktIsMapTy(ty)) { return [ty] }
-    var v = ktLitTy(el.v)
+    var v = ktLitElTy(el.v)
     return v == "" ? [] : ["List<" + v + ">", v]
+}
+
+// The types the right operand of `xs + x` / `xs - x` adopts when the left one is
+// a name or a builder call of a known collection type - as for `xs += x`
+// (ktCompoundTys); [] else. items are a sum's operands and operators, txt its
+// source text and at its offset.
+function ktPlusTys(items, txt, at) {
+    if (items.length != 3 || (items[1] !== "+" && items[1] !== "-")) { return [] }
+    var saved = ktAt
+    ktAt = at
+    var tys = ktCompoundTys(ktLeadType(txt, items[1]))
+    ktAt = saved
+    return tys
 }
 // The type a method's RESULT takes: sum() of an empty collection is its element
 // type's zero, not an Int.

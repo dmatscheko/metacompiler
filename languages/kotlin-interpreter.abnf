@@ -1382,7 +1382,7 @@ RangeInfix  = ( "..<" | ".." "<" ) <~~ push({rop: "..<"}) ~~>
             | KwDownTo <~~ push({rop: "downTo"}) ~~>
             | KwStep <~~ push({rop: "step"}) ~~> ;
 
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+AddExpr     <~~ push(foldBinary(kAdoptPlus(takeAll(), up.in, up.start))) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -2828,6 +2828,26 @@ NotMemberKw = :script(~~
         if ((op == "/" || op == "%") && i64IsZero(lb.p)) { kThrowExc("ArithmeticException", "/ by zero") }
         return kNorm(szPair(szArith(op, la, lb)), w, u)
     }
+    // Math.floorDiv / Int.floorDiv (mod false) and Math.floorMod / Int.mod (mod
+    // true): the quotient rounded toward negative infinity at the promoted width,
+    // and the remainder taking the divisor's sign, typed like the divisor
+    // (Long.mod(Int) is an Int and Int.mod(Byte) a Byte, as kotlin-stdlib's
+    // FloorDivMod.kt declares). Twin of ktFloorDivMod in abnf/jsrtkotlin.go and
+    // k4FloorDivMod in lib/kotlin-rt.metajs.
+    function kFloorDivMod(l, r, mod) {
+        var q = anytype
+        q = kArith("/", l, r)
+        var m = anytype
+        m = kArith("%", l, r)
+        var adjust = !kCmpI("==", m, 0) && kCmpI("<", m, 0) != kCmpI("<", r, 0)
+        if (!mod) { return adjust ? kArith("-", q, 1) : q }
+        if (adjust) { m = kArith("+", m, r) }
+        var wr = szIs(r) ? r.w : 32
+        if (wr < kWidth(l, r)) { return kConv(m, wr, kUns(r, r)) }
+        return m
+    }
+    // An integer of any width - not a Char, which kIsIntegral also admits.
+    function kIsIntKind(v) { return typeof v == "number" || szIs(v) }
     // shl / shr / ushr. The result type is the LEFT operand's alone and the COUNT is
     // MASKED - & 31 for a 32 bit left operand, & 63 for a 64 bit one - which is why
     // `1 shl 32` is 1 rather than 0.
@@ -2982,11 +3002,12 @@ NotMemberKw = :script(~~
     }
     // A collection's contents retyped IN PLACE by the element types a type argument
     // fixes: vty for a list's, array's or set's elements and a map's values, kty for
-    // a map's keys, and a Pair's first / second by kty / vty. Twin of ktAdoptEl in
+    // a map's keys, and a Pair's first / second by kty / vty; a collection type
+    // (List<Long>) retypes a nested collection. Twin of ktAdoptEl in
     // abnf/jsrtkotlin.go and js_ktadoptel in languages/lib/kotlin-rt.metajs.
     function kAdoptAll(arr, ty) {
         if (ty == "") { return }
-        for (var i = 0; i < arr.length; i++) { arr[i] = kAdoptTy(arr[i], ty) }
+        for (var i = 0; i < arr.length; i++) { arr[i] = kAdoptVal(arr[i], ty) }
     }
     // A method suffix on a collection whose element (key) types are known: the
     // positional arguments ktMArgTypes names are retyped, and the result by
@@ -3013,6 +3034,14 @@ NotMemberKw = :script(~~
         if (sfx[i].kind == "mcall") { sfx[i] = kAdoptMArgs(sfx[i], ty) }
         else { kAdoptIdxSfx(sfx[i], ty) }
     }
+    // `xs + 1` on a List<Long>: the right operand adopts the element type
+    // (ktPlusTys), as plus(element: T) types it. Twin of ktAdoptPlus in
+    // kotlin-to-llvm-ir.abnf.
+    function kAdoptPlus(items, txt, at) {
+        var tys = ktPlusTys(items, txt, at)
+        for (var i = 0; i < tys.length; i++) { items[2] = kAdoptThunk(items[2], tys[i]) }
+        return items
+    }
     // `m[1]` on a map whose key type is a Long: the literal key adopts it.
     function kAdoptIdxSfx(s, ty) {
         var el = ktTyElems(ty)
@@ -3023,8 +3052,8 @@ NotMemberKw = :script(~~
         else if (kIsSet(v)) { kAdoptAll(v.keys, vty) }
         else if (kIsMap(v)) { kAdoptAll(v.keys, kty); kAdoptAll(v.vals, vty) }
         else if (v !== null && v !== undefined && typeof v == "object" && v.second !== undefined) {
-            v.first = kAdoptTy(v.first, kty)
-            v.second = kAdoptTy(v.second, vty)
+            v.first = kAdoptVal(v.first, kty)
+            v.second = kAdoptVal(v.second, vty)
         }
         return v
     }
@@ -3723,6 +3752,8 @@ NotMemberKw = :script(~~
     var kJavaMath = {PI: kFlo(ktmConst("PI")), E: kFlo(ktmConst("E")), abs: hostGlobals["abs"],
                      max: hostGlobals["max"], min: hostGlobals["min"],
                      toRadians: kJavaAngleFn("toRadians"), toDegrees: kJavaAngleFn("toDegrees"),
+                     floorDiv: function(x, y) { return kFloorDivMod(x, y, false) },
+                     floorMod: function(x, y) { return kFloorDivMod(x, y, true) },
                      round: function(x) { return kConv(kFlo(ktmRoundHalfUp(kNumD(x))), kIsF32(x) ? 32 : 64, false) }}
     for (var kji = 0; kji < ktmJava.length; kji += 2) { kJavaMath[ktmJava[kji]] = kJavaMathFn(ktmJava[kji + 1]) }
     hostGlobals["Math"] = kJavaMath
@@ -3833,6 +3864,31 @@ NotMemberKw = :script(~~
     hostGlobals["emptyArray"] = hostGlobals["arrayOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
     hostGlobals["emptySet"] = function() { return kMakeSet() }
+    // The java.util collection constructors - ArrayList, HashSet / LinkedHashSet,
+    // HashMap / LinkedHashMap: empty, with an Int capacity, or a copy of a
+    // collection (of a map). A HashSet / HashMap iterates in insertion order, as
+    // hashSetOf / hashMapOf do (kMakeSet). Twin of ktJavaCollection in
+    // abnf/jsrtkotlin.go and k4JavaCollection in lib/kotlin-rt.metajs.
+    function kJavaCollection(kind) {
+        return function(src) {
+            if (kind == "map") {
+                var m = kMakeMap()
+                if (kIsMap(src)) { for (var i = 0; i < src.keys.length; i++) { kMapPut(m, src.keys[i], src.vals[i]) } }
+                return m
+            }
+            var els = []
+            if (Array.isArray(src)) { els = src } else if (kIsSet(src)) { els = src.keys }
+            if (kind == "set") { return kSetFrom(els) }
+            var out = []
+            for (var j = 0; j < els.length; j++) { out.push(els[j]) }
+            return out
+        }
+    }
+    hostGlobals["ArrayList"] = kJavaCollection("list")
+    hostGlobals["HashSet"] = kJavaCollection("set")
+    hostGlobals["LinkedHashSet"] = hostGlobals["HashSet"]
+    hostGlobals["HashMap"] = kJavaCollection("map")
+    hostGlobals["LinkedHashMap"] = hostGlobals["HashMap"]
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
     // A global NAME is declared by each grammar's own builtin block (js_scope_decl in
     // kotlin-to-llvm-ir.abnf, ktGlobalFn in abnf/jsrtkotlin.go), not by the runtime.
@@ -4833,6 +4889,10 @@ NotMemberKw = :script(~~
     function kCharMethod(cv, name, args) {
         var code = cv.__char
         if (name == "code") { return {v: code} }
+        // The deprecated numeric conversions read the code: 'a'.toInt() is 97,
+        // 'é'.toByte() is -23. Twin of ktNumMethod in abnf/jsrtkotlin.go.
+        var ccw = kDeclWidth[kConvName(name)]
+        if (ccw != undefined && kDeclUns[kConvName(name)] != true) { return {v: kConv(code, ccw, false)} }
         if (name == "toString") { return {v: String.fromCharCode(code)} }
         if (name == "isLetter") { return {v: kIsLetterCh(code)} }
         if (name == "isDigit") { return {v: code >= 48 && code <= 57} }
@@ -6660,6 +6720,9 @@ NotMemberKw = :script(~~
             // different value from the Double 0.1.
             if (name == "toFloat") { return kFlo32(kNumD(target)) }
             if (name == "toChar") { return kChar(szNum(kConv(target, 16, true)) & 65535) }
+        }
+        if ((name == "floorDiv" || name == "mod") && args.length == 1 && kIsIntKind(target) && kIsIntKind(args[0])) {
+            return kFloorDivMod(target, args[0], name == "mod")
         }
         // coerceIn(min, max) / coerceIn(range): the third member of the coerce family.
         if (name == "coerceIn" && (kIsFlo(target) || szIs(target) || typeof target == "number")) {

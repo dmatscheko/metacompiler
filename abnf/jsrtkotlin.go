@@ -597,6 +597,12 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		if len(args) == 1 {
 			return ktRangeMake(target, args[0], name), true
 		}
+	case "floorDiv", "mod":
+		_, _, li := ktIntKind(target)
+		_, _, ri := ktIntKind(argAt(args, 0))
+		if li && ri {
+			return rt.ktFloorDivMod(target, args[0], name == "mod"), true
+		}
 	case "toByte":
 		return rt.ktConv(target, 8, false), true
 	case "toShort":
@@ -754,6 +760,33 @@ func ktBoxTypeName(b jsGInt) string {
 		return "Int"
 	}
 	return "Long"
+}
+
+// ktFloorDivMod is Math.floorDiv / Int.floorDiv (mod false) and Math.floorMod /
+// Int.mod (mod true) on two integral operands: the quotient rounded toward
+// negative infinity at the promoted width, and the remainder taking the divisor's
+// sign, typed like the divisor (Long.mod(Int) is an Int and Int.mod(Byte) a
+// Byte, as kotlin-stdlib's FloorDivMod.kt declares). Twin of kFloorDivMod in
+// kotlin-interpreter.abnf and k4FloorDivMod in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktFloorDivMod(l, r interface{}, mod bool) interface{} {
+	q := rt.ktArith("/", l, r)
+	m := rt.ktArith("%", l, r)
+	adjust := !rt.ktCmp("==", m, 0.0) && rt.ktCmp("<", m, 0.0) != rt.ktCmp("<", r, 0.0)
+	if !mod {
+		if adjust {
+			q = rt.ktArith("-", q, 1.0)
+		}
+		return q
+	}
+	if adjust {
+		m = rt.ktArith("+", m, r)
+	}
+	if wr, ur, ok := ktIntKind(r); ok {
+		if wp, _ := ktWU(l, r); wr < wp {
+			return rt.ktConv(m, wr, ur)
+		}
+	}
+	return m
 }
 
 // ktNumLess is the "<" the coerce pair needs: integral operands compare at the
@@ -6524,12 +6557,18 @@ func ktFieldTy(o *jsObject, name string) string {
 // argument fixes - `listOf<Long>(1, 2)`, `val m: Map<Long, Int> = mapOf(1 to 2)`,
 // `Pair<Long, Int>(1, 2)`: vty for a list's, array's or set's elements and a map's
 // values, kty for a map's keys; a Pair takes kty for first and vty for second. ""
-// leaves that side alone. An integer literal is the only Int a legal program can
+// leaves that side alone; a collection type (List<Long>) retypes a nested
+// collection the same way. An integer literal is the only Int a legal program can
 // put where a Long is expected, so the retyping changes nothing else. The twins
 // are kAdoptEl in kotlin-interpreter.abnf and js_ktadoptel in
 // languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktAdoptEl(v interface{}, vty, kty string) {
 	one := func(x interface{}, ty string) interface{} {
+		if strings.IndexByte(ty, '<') >= 0 {
+			k, v := ktNestedElems(ty)
+			rt.ktAdoptEl(x, v, k)
+			return x
+		}
 		if ty != "" {
 			if n := rt.ktAdoptTy(x, ty); n != nil {
 				return n
@@ -6556,6 +6595,48 @@ func (rt *jsrt) ktAdoptEl(v interface{}, vty, kty string) {
 			o.set("second", one(o.props["second"], vty))
 		}
 	}
+}
+
+// ktNestedElems is the key and element types a nested collection type fixes,
+// e.g. "" and "Long" for List<Long>: ktLitElems of lib/kotlin-decltypes.js, which
+// hands such a type down as an element type. Twin of k4bNestedElems in
+// languages/lib/kotlin-rt.metajs.
+func ktNestedElems(ty string) (string, string) {
+	t := strings.TrimSuffix(ty, "?")
+	lt := strings.IndexByte(t, '<')
+	if lt < 0 || !strings.HasSuffix(t, ">") {
+		return "", ""
+	}
+	var targs []string
+	depth, from := 0, lt+1
+	for i := lt + 1; i < len(t)-1; i++ {
+		switch t[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				targs = append(targs, t[from:i])
+				from = i + 1
+			}
+		}
+	}
+	targs = append(targs, t[from:len(t)-1])
+	elTy := func(s string) string {
+		if strings.IndexByte(s, '<') >= 0 {
+			return s
+		}
+		switch strings.TrimSuffix(s, "?") {
+		case "Long", "Short", "Byte", "UInt", "ULong", "UShort", "UByte":
+			return s
+		}
+		return ""
+	}
+	if len(targs) == 2 {
+		return elTy(targs[0]), elTy(targs[1])
+	}
+	return "", elTy(targs[0])
 }
 
 // ktAdoptTy retypes a value by a declared type name, or answers nil when the type
@@ -6684,6 +6765,35 @@ func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
 	}
 	rt.fail("unknown name: %s", sub)
 	return nil
+}
+
+// ktJavaCollection is a java.util collection constructor - ArrayList, HashSet /
+// LinkedHashSet, HashMap / LinkedHashMap: empty, with an Int capacity, or a copy
+// of a collection (of a map). A HashSet / HashMap iterates in insertion order, as
+// hashSetOf / hashMapOf do (ktMakeSet). Twin of kJavaCollection in
+// kotlin-interpreter.abnf and k4JavaCollection in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
+	if name == "HashMap" || name == "LinkedHashMap" {
+		mp := ktMakeMap()
+		if keys, vals, isMap := dictParts(src); isMap {
+			if _, isSet := ktSetParts(src); !isSet {
+				for i, k := range keys.elems {
+					rt.ktMapPut(mp, k, vals.elems[i])
+				}
+			}
+		}
+		return mp
+	}
+	var els []interface{}
+	if a, ok := src.(*jsArray); ok {
+		els = a.elems
+	} else if keys, isSet := ktSetParts(src); isSet {
+		els = keys.elems
+	}
+	if name == "ArrayList" {
+		return &jsArray{elems: append([]interface{}{}, els...)}
+	}
+	return rt.ktSetFrom(els)
 }
 
 // ktGlobalFn is the VALUE of one global builder name.
@@ -6978,6 +7088,10 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 	case "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.ktSetFrom(args)
+		})
+	case "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.ktJavaCollection(name, argAt(args, 0))
 		})
 	case "sortedSetOf":
 		// A java.util.TreeSet: ascending order, not insertion order.

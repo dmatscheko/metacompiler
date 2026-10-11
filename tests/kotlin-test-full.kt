@@ -4638,6 +4638,50 @@ fun sec92() {
         "" + Math.log(Math.E) == "1.0" && "" + Math.PI == "3.141592653589793" && "" + Math.hypot(3.0, 4.0) == "5.0")
 }
 
+// ===== SECTION 93: an integer literal typed by a collection's element type =====
+// `xs + 1` on a List<Long> is plus(element: Long), so the literal is a Long (and
+// `xs - 5` removes the Long 5); a nested type argument (List<List<Long>>,
+// Map<String, List<Long>>) types the literals of the inner builders too. Kotlin
+// language specification, "Integer literals" (the expected type decides).
+fun s93any(x: Any?): Any? = x
+
+fun sec93() {
+    val a = emptyList<Long>() + 1
+    val xs = listOf(5L, 6L)
+    check("ad93a", s93any(a[0]) is Long && a[0] * 2000000000 * 2 == 4000000000L && xs - 5 == listOf(6L) && (xs + 7)[2] * 2000000000 * 2 == 28000000000L)
+    val b: List<List<Long>> = listOf(listOf(1, 2), listOf(3))
+    val c: Map<String, List<Long>> = mapOf("x" to listOf(4))
+    val mb = mutableListOf<List<Long>>()
+    mb.add(listOf(5))
+    check("ad93b", s93any(b[0][0]) is Long && b[1][0] * 2000000000 * 2 == 12000000000L && c["x"]!![0] * 2000000000 * 2 == 16000000000L &&
+        mb[0][0] * 2000000000 * 2 == 20000000000L)
+}
+
+// ===== SECTION 94: java.util constructors, floorDiv / floorMod, Char codes =====
+// ArrayList / HashSet / HashMap / LinkedHashMap construct empty, with a capacity
+// or as a copy. Math.floorDiv / floorMod and Int.floorDiv / Int.mod round toward
+// negative infinity, mod typed like the divisor (Long.mod(Int) is an Int, per
+// kotlin-stdlib 2.2.21's FloorDivMod.kt signatures). The deprecated Char.toInt()
+// family reads the code. Rows from java (JDK 24).
+fun sec94() {
+    val h = HashMap<Long, String>()
+    h[5L] = "five"
+    val al = ArrayList<Int>(10)
+    al.add(3)
+    val cp = ArrayList(listOf(1, 2))
+    cp.add(9)
+    val hs = HashSet(listOf(4, 4, 5))
+    val lm = LinkedHashMap(mapOf("z" to 2))
+    check("ju94a", "" + h == "{5=five}" && h[5L] == "five" && al == listOf(3) && cp == listOf(1, 2, 9) && hs.size == 2 && "" + lm == "{z=2}")
+    val n = listOf(-7, 2, 7, -2, Int.MIN_VALUE, -1)
+    check("fd94b", Math.floorDiv(n[0], n[1]) == -4 && Math.floorMod(n[0], n[1]) == 1 && Math.floorDiv(n[2], n[3]) == -4 &&
+        Math.floorMod(n[2], n[3]) == -1 && Math.floorDiv(n[4], n[5]) == Int.MIN_VALUE && Math.floorDiv(n[4].toLong(), n[5].toLong()) == 2147483648L)
+    check("fd94c", n[0].floorDiv(n[1]) == -4 && n[0].mod(n[1]) == 1 && s93any(n[0].toLong().mod(n[1])) is Int && s93any(n[0].toLong().floorDiv(n[1])) is Long &&
+        s93any(Math.floorMod(-7L, n[1])) is Int && n[2].mod(n[3].toLong()) == -1L)
+    val cs = listOf('a', 'é')
+    check("ch94d", cs[0].toInt() == 97 && cs[0].toLong() * 3000000000 == 291000000000L && cs[1].toByte() == (-23).toByte() && cs[1].toShort() == 233.toShort())
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4732,6 +4776,8 @@ fun main() {
     sec90() // SECTION-CALL 90
     sec91() // SECTION-CALL 91
     sec92() // SECTION-CALL 92
+    sec93() // SECTION-CALL 93
+    sec94() // SECTION-CALL 94
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

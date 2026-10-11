@@ -239,6 +239,12 @@ func ktJavaMath(rt *jsrt) *jsObject {
 	o.set("toDegrees", jsHostFunc("toDegrees", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return jsJFlo{f: giFloat(rt, argAt(args, 0)) * 57.29577951308232}
 	}))
+	o.set("floorDiv", jsHostFunc("floorDiv", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.ktFloorDivMod(argAt(args, 0), argAt(args, 1), false)
+	}))
+	o.set("floorMod", jsHostFunc("floorMod", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.ktFloorDivMod(argAt(args, 0), argAt(args, 1), true)
+	}))
 	o.set("round", jsHostFunc("round", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		a := argAt(args, 0)
 		w := uint8(64)

@@ -1344,7 +1344,7 @@ RangeInfix  = ( "..<" | ".." ) <~~ push({rop: up.in}) ~~>
             | KwDownTo <~~ push({rop: "downTo"}) ~~>
             | KwStep <~~ push({rop: "step"}) ~~> ;
 
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+AddExpr     <~~ push(foldBinary(ktAdoptPlus(takeAll(), up.in, up.start))) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -6121,6 +6121,14 @@ KwContract  = "contract" KwEnd ;
         if (sfx[i].kind == "mcall") { sfx[i] = ktAdoptMArgs(sfx[i], ty) }
         else { ktAdoptIdxSfx(sfx[i], ty) }
     }
+    // `xs + 1` on a List<Long>: the right operand adopts the element type
+    // (ktPlusTys), as plus(element: T) types it. Twin of kAdoptPlus in
+    // kotlin-interpreter.abnf.
+    function ktAdoptPlus(items, txt, at) {
+        var tys = ktPlusTys(items, txt, at)
+        for (var i = 0; i < tys.length; i++) { items[2] = ktAdoptThunk(items[2], tys[i]) }
+        return items
+    }
     // `m[1]` on a map whose key type is a Long: the literal key adopts it.
     function ktAdoptIdxSfx(s, ty) {
         var el = ktTyElems(ty)
@@ -7926,8 +7934,13 @@ KwContract  = "contract" KwEnd ;
         // java.lang.Math, declared only for a program that names Math and does not
         // declare it (js_ktglobal's ktJavaMath in abnf/jsrtktmath.go); without it the
         // name would reach the host's own Math.
-        if (ktVarSeen["$Math"] == true && classNames["Math"] == undefined) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"), callExt(b, "js_ktglobal", [emitStr(b, "Math"), hFalse])])
+        // The java.util collection constructors (ktJavaCollection) the same way.
+        var ktOnDemand = ["Math", "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap"]
+        for (var kd = 0; kd < ktOnDemand.length; kd++) {
+            var odn = ktOnDemand[kd]
+            if (ktVarSeen["$" + odn] == true && classNames[odn] == undefined) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, odn), callExt(b, "js_ktglobal", [emitStr(b, odn), hFalse])])
+            }
         }
         // java.lang.System's two clocks, declared only for a program that names System
         // and does not declare it. Each member is a closure over js_ktclock(kind, us).
