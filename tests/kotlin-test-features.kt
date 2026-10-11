@@ -1170,6 +1170,9 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("char-surrogate-half", ("" + astral[1])[0].code == 55357 && astral[2].toString()[0].code == 56832 &&
         "${astral[1]}${astral[2]}" == astral.substring(1) && halves == listOf(97, 55357, 56832))
     check("char-surrogate-sb", sbAstral.toString() == "x" + astral.substring(1) && sbAstral.length == 3)
+    // A LONE surrogate in a literal is one unit too, in either order (JVM: 56832 55357).
+    check("char-surrogate-lone", "\uDE00\uD83D".map { it.code } == listOf(56832, 55357) &&
+        "a\uD83Db"[1].code == 55357)
 
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")

@@ -39,8 +39,9 @@ type compilerscript struct {
 // exactly like goja's own map wrapper: reads go through vm.ToValue, writes store
 // the exported value back into the same map.
 type ltrObject struct {
-	vm  *goja.Runtime
-	ltr map[string]r.Object
+	vm     *goja.Runtime
+	ltr    map[string]r.Object
+	export func(goja.Value) interface{}
 }
 
 func (o *ltrObject) Get(key string) goja.Value {
@@ -55,7 +56,7 @@ func (o *ltrObject) Get(key string) goja.Value {
 }
 
 func (o *ltrObject) Set(key string, val goja.Value) bool {
-	o.ltr[key] = val.Export()
+	o.ltr[key] = o.export(val)
 	return true
 }
 
@@ -205,11 +206,12 @@ func (cs *compilerscript) initFuncMap() {
 		return nil
 	})
 
-	cs.vm.Set("pushg", func(v interface{}) {
-		cs.Stack = append(cs.Stack, v)
+	cs.vm.Set("pushg", func(call goja.FunctionCall) goja.Value {
+		cs.Stack = append(cs.Stack, cs.common.export(call.Argument(0)))
+		return goja.Undefined()
 	})
 
-	cs.vm.Set("ltr", cs.vm.NewDynamicObject(&ltrObject{vm: cs.vm, ltr: cs.LtrStream}))
+	cs.vm.Set("ltr", cs.vm.NewDynamicObject(&ltrObject{vm: cs.vm, ltr: cs.LtrStream, export: cs.common.export}))
 
 	// The local stack functions are installed ONCE and work on the upStream of
 	// the tag that is running (cs.curUp, set by HandleTagCode). Re-setting them
@@ -229,12 +231,13 @@ func (cs *compilerscript) initFuncMap() {
 		return nil
 	})
 
-	cs.vm.Set("push", func(v interface{}) {
+	cs.vm.Set("push", func(call goja.FunctionCall) goja.Value {
 		stack, ok := cs.curUp["stack"].([]interface{})
 		if !ok {
 			stack = []interface{}{}
 		}
-		cs.curUp["stack"] = append(stack, v)
+		cs.curUp["stack"] = append(stack, cs.common.export(call.Argument(0)))
+		return goja.Undefined()
 	})
 
 	cs.compilerFuncMap["compile"] = func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {

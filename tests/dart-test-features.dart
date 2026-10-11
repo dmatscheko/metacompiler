@@ -829,6 +829,11 @@ int main() {
   check("typetest-cast-cast-isnot", (((tchO as FShape) as FShape) is! int));
   check("typetest-chain-still-binds-below-equality", (1 is int == true));
 
+  // ----- a lone surrogate in a literal is one UTF-16 code unit -----
+  var loneSur = "\uDE00\uD83D";
+  check("string-lone-surrogate", loneSur.length == 2 && loneSur.codeUnitAt(0) == 56832 &&
+      loneSur.codeUnitAt(1) == 55357 && "a\uD83Db".codeUnitAt(1) == 55357);
+
   // ----- everything combined in one small pipeline -----
   check("combined-pipeline", transform([1, 2, -3]) == "o1e2x");
 

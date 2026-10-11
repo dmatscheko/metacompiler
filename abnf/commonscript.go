@@ -30,9 +30,10 @@ type cachedProgram struct {
 
 type commonscript struct {
 	vm              *goja.Runtime
-	codeCache       []cachedProgram          // Compiled programs by tag UID (for tags and :script() commands with a UID > 0).
-	codeCacheBySrc  map[string]*goja.Program // Compiled programs by name plus source text (for everything without a UID).
-	referencesCache *references              // Keeps the tag UIDs stable over multiple correctReferencesAndIDs() calls.
+	codeCache       []cachedProgram              // Compiled programs by tag UID (for tags and :script() commands with a UID > 0).
+	codeCacheBySrc  map[string]*goja.Program     // Compiled programs by name plus source text (for everything without a UID).
+	referencesCache *references                  // Keeps the tag UIDs stable over multiple correctReferencesAndIDs() calls.
+	export          func(goja.Value) interface{} // Export for a value stored on the Go side (gojaExporter).
 }
 
 // UnescapeTilde resolves the only escape sequence of a tags raw Code string: It replaces
@@ -189,6 +190,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	common.vm = vm
 	common.codeCache = make([]cachedProgram, 100)
 	common.codeCacheBySrc = map[string]*goja.Program{}
+	common.export = gojaExporter(vm)
 
 	if preventDefaultOutput { // Script output disabled.
 		vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
@@ -439,6 +441,117 @@ func gojaWTF8(vm *goja.Runtime) func(goja.Value) string {
 			u[i] = uint16(c.(int64))
 		}
 		return strFromUnits(u)
+	}
+}
+
+// gojaExporter returns goja's Export for a value that is STORED on the Go side
+// (the tag stacks, ltr) and read back by a script later. Export turns a string
+// holding a lone surrogate into U+FFFD, so such a string is kept as the goja
+// value itself, which ToValue hands back unchanged; every other part of the
+// export is goja's own. Only an export that contains U+FFFD can have lost a
+// unit, so anything else costs one walk over the exported value.
+func gojaExporter(vm *goja.Runtime) func(goja.Value) interface{} {
+	v, err := vm.RunString(`(function (s) {
+		for (var i = 0; i < s.length; i++) {
+			var c = s.charCodeAt(i);
+			if (c < 0xD800 || c > 0xDFFF) continue;
+			if (c <= 0xDBFF && i + 1 < s.length) {
+				var d = s.charCodeAt(i + 1);
+				if (d >= 0xDC00 && d <= 0xDFFF) { i++; continue; }
+			}
+			return true;
+		}
+		return false;
+	})`)
+	if err != nil {
+		panic(err)
+	}
+	loneFn, _ := goja.AssertFunction(v)
+	lone := func(s goja.Value) bool {
+		r, err := loneFn(goja.Undefined(), s)
+		return err == nil && r.ToBoolean()
+	}
+	// An export is a graph (goja exports a shared or cyclic object once). A walk
+	// first runs without bookkeeping on a budget of visits; past it, the walk
+	// restarts and visits each map and slice once.
+	type walk struct {
+		budget int
+		seen   map[uintptr]bool
+	}
+	first := func(w *walk, x interface{}) bool {
+		if w.seen == nil {
+			w.budget--
+			return w.budget >= 0
+		}
+		p := reflect.ValueOf(x).Pointer()
+		if p == 0 || w.seen[p] {
+			return false
+		}
+		w.seen[p] = true
+		return true
+	}
+	var lost func(w *walk, e interface{}) bool
+	lost = func(w *walk, e interface{}) bool {
+		switch x := e.(type) {
+		case string:
+			return strings.Contains(x, "\uFFFD")
+		case map[string]interface{}:
+			if first(w, x) {
+				for _, ev := range x {
+					if lost(w, ev) {
+						return true
+					}
+				}
+			}
+		case []interface{}:
+			if len(x) > 0 && first(w, x) {
+				for _, ev := range x {
+					if lost(w, ev) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	// restore puts the goja string back wherever the export lost a unit,
+	// reading the original value at the same key or index.
+	var restore func(w *walk, e interface{}, v goja.Value) interface{}
+	restore = func(w *walk, e interface{}, v goja.Value) interface{} {
+		switch x := e.(type) {
+		case string:
+			if strings.Contains(x, "\uFFFD") && lone(v) {
+				return v
+			}
+		case map[string]interface{}:
+			if o, ok := v.(*goja.Object); ok && first(w, x) {
+				for k, ev := range x {
+					x[k] = restore(w, ev, o.Get(k))
+				}
+			}
+		case []interface{}:
+			if o, ok := v.(*goja.Object); ok && len(x) > 0 && first(w, x) {
+				for i, ev := range x {
+					x[i] = restore(w, ev, o.Get(strconv.Itoa(i)))
+				}
+			}
+		}
+		return e
+	}
+	return func(v goja.Value) interface{} {
+		if v == nil {
+			return nil
+		}
+		e := v.Export()
+		w := walk{budget: 256}
+		found := lost(&w, e)
+		if !found && w.budget < 0 {
+			found = lost(&walk{seen: map[uintptr]bool{}}, e)
+		}
+		if found {
+			e = restore(&walk{seen: map[uintptr]bool{}}, e, v)
+		}
+		return e
 	}
 }
 

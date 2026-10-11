@@ -105,8 +105,9 @@ func (ps *parserscript) initFuncMap() {
 		return nil
 	})
 
-	ps.vm.Set("push", func(v interface{}) {
-		ps.stack = append(ps.stack, v)
+	ps.vm.Set("push", func(call goja.FunctionCall) goja.Value {
+		ps.stack = append(ps.stack, ps.common.export(call.Argument(0)))
+		return goja.Undefined()
 	})
 }
 
