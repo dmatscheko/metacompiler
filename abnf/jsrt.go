@@ -5128,7 +5128,7 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 			if ch == "" {
 				rt.fail("charAt(%d) out of range for %q", i, o)
 			}
-			return gojaCharAt(ch)
+			return ch
 		case "equals":
 			return rt.strictEq(o, argAt(args, 0))
 		case "substring":
@@ -12142,7 +12142,7 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			}
 			return math.NaN()
 		case "charAt":
-			return gojaCharAt(rt.strAt(recv, jsToInt(argN(0))))
+			return rt.strAt(recv, jsToInt(argN(0)))
 		case "indexOf":
 			// The position clamps to [0, length] in code units. Twin of mid 22 in
 			// languages/lib/runtime.c's builtin_method.
@@ -12399,23 +12399,6 @@ func wtf8Clean(s string) string {
 		i++
 	}
 	return string(b)
-}
-
-// gojaCharAt is charAt's one code unit result with a lone surrogate replaced by
-// U+FFFD, because that is what the pinned goja does: its stringproto_charAt
-// (builtin_string.go) ends in string(s.charAt(pos)), a rune-to-string conversion,
-// and Go writes U+FFFD for a rune that is not a scalar value. Later goja
-// versions slice the string instead and keep the half. Being right where goja is
-// wrong would be a divergence, and the engines agreeing is the whole point of
-// -frozen, so charAt - and only charAt - loses the half here too. Index access
-// (s[i]), charCodeAt, substring and split are exact in both engines. Delete this
-// once goja is updated (and the utf16-astral-charat check in
-// tests/metajs-test-features.js will say so).
-func gojaCharAt(ch string) string {
-	if len(ch) == 3 && ch[0] == 0xED {
-		return wtf8Clean(ch)
-	}
-	return ch
 }
 
 // unitLen is the JS length of s: its number of UTF-16 code units. It walks s,

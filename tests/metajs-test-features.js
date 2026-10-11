@@ -212,10 +212,9 @@ check("utf16-astral-index", "🎉"[0] + "🎉"[1], "🎉");
 check("utf16-astral-fromcharcode", String.fromCharCode(55356) + String.fromCharCode(57225), "🎉");
 check("utf16-astral-fromcharcode2", String.fromCharCode(55356, 57225), "🎉");
 check("utf16-astral-split", "🎉".split("").join(""), "🎉");
-// charAt is the one exception: the pinned goja turns a lone half into U+FFFD,
-// and jsrt matches it deliberately (gojaCharAt). When this check starts failing,
-// goja has been updated and gojaCharAt can go.
-check("utf16-astral-charat", "🎉".charAt(0).charCodeAt(0), 65533);
+// charAt answers the code unit, a lone half included (node: 55356 57225).
+check("utf16-astral-charat", "🎉".charAt(0).charCodeAt(0), 55356);
+check("utf16-astral-charat2", "🎉".charAt(1).charCodeAt(0), 57225);
 
 // ----- control flow: if / while / do-while / for -----
 function grade(n) {

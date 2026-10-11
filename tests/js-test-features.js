@@ -85,6 +85,9 @@ check("str-compare", "apple" < "banana" && "a" < "b" && !("b" < "a"));
 check("str-escapes", "a\tb".length === 3 && "a\nb".charCodeAt(1) === 10 && "\\".length === 1 && "\"".length === 1);
 check("str-unicode-len", "héllo".length === 5);
 check("str-unicode-code", "é".charCodeAt(0) === 233);
+// charAt answers one code UNIT, half of a surrogate pair included (node: 55357 56832).
+check("str-charat-surrogate-half", "a\uD83D\uDE00".charAt(1).charCodeAt(0) === 55357 &&
+    ["\uDE00\uD83D"][0].charAt(0).charCodeAt(0) === 56832 && "a\uD83D\uDE00".charAt(2) === "\uDE00");
 check("str-unicode-slice", "héllo".slice(0, 2) === "hé");
 check("str-fromcharcode", String.fromCharCode(72, 105) === "Hi");
 var tpl = 6;

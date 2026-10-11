@@ -1220,7 +1220,7 @@ long str_cat(long x, long y) {
 }
 
 /* wtf8_clean replaces every lone surrogate with U+FFFD, which is what println
- * shows (Go's wtf8Clean) and what charAt answers (gojaCharAt). */
+ * shows (Go's wtf8Clean). */
 long wtf8_clean(long h) {
 	const char *p = str_ptr(h);
 	long n = str_len(h);
@@ -4657,8 +4657,7 @@ long builtin_method(long recv, long mid, long args) {
 			long b = arg_num(args, 0);
 			long i = d_is_nan(b) ? 0 : d_to_long(d_trunc(b));
 			if (i < 0 || i >= n) { return mk_cstr(""); }
-			/* goja answers U+FFFD for a lone surrogate here (gojaCharAt). */
-			return wtf8_clean(u_slice(recv, i, i + 1));
+			return u_slice(recv, i, i + 1);
 		}
 		if (mid == 22) {                                      /* indexOf, in UNITS */
 			long from = arr_len(args) > 1 ? clamp_sub(arg_num(args, 1), n) : 0;

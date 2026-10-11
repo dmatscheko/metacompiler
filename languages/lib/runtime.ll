@@ -35713,7 +35713,7 @@ dead547:
 	%705 = icmp eq i64 %703, %704
 	%706 = zext i1 %705 to i32
 	%707 = icmp ne i32 %706, 0
-	br i1 %707, label %746, label %754
+	br i1 %707, label %745, label %753
 
 708:
 	%709 = sext i32 0 to i64
@@ -35766,8 +35766,7 @@ dead547:
 	%742 = sext i32 1 to i64
 	%743 = add i64 %741, %742
 	%744 = call i64 @u_slice(i64 %739, i64 %740, i64 %743)
-	%745 = call i64 @wtf8_clean(i64 %744)
-	ret i64 %745
+	ret i64 %744
 
 dead548:
 	br label %738
@@ -35775,468 +35774,468 @@ dead548:
 dead549:
 	br label %702
 
-746:
-	%747 = alloca i64
-	%748 = load i64, i64* %5
-	%749 = call i64 @arr_len(i64 %748)
-	%750 = sext i32 1 to i64
-	%751 = icmp sgt i64 %749, %750
-	%752 = zext i1 %751 to i32
-	%753 = icmp ne i32 %752, 0
-	br i1 %753, label %760, label %766
+745:
+	%746 = alloca i64
+	%747 = load i64, i64* %5
+	%748 = call i64 @arr_len(i64 %747)
+	%749 = sext i32 1 to i64
+	%750 = icmp sgt i64 %748, %749
+	%751 = zext i1 %750 to i32
+	%752 = icmp ne i32 %751, 0
+	br i1 %752, label %759, label %765
 
-754:
-	%755 = load i64, i64* %4
-	%756 = sext i32 23 to i64
-	%757 = icmp eq i64 %755, %756
-	%758 = zext i1 %757 to i32
-	%759 = icmp ne i32 %758, 0
-	br i1 %759, label %818, label %836
+753:
+	%754 = load i64, i64* %4
+	%755 = sext i32 23 to i64
+	%756 = icmp eq i64 %754, %755
+	%757 = zext i1 %756 to i32
+	%758 = icmp ne i32 %757, 0
+	br i1 %758, label %817, label %835
 
-760:
-	%761 = load i64, i64* %5
-	%762 = sext i32 1 to i64
-	%763 = call i64 @arg_num(i64 %761, i64 %762)
-	%764 = load i64, i64* %618
-	%765 = call i64 @clamp_sub(i64 %763, i64 %764)
-	br label %768
+759:
+	%760 = load i64, i64* %5
+	%761 = sext i32 1 to i64
+	%762 = call i64 @arg_num(i64 %760, i64 %761)
+	%763 = load i64, i64* %618
+	%764 = call i64 @clamp_sub(i64 %762, i64 %763)
+	br label %767
 
-766:
-	%767 = sext i32 0 to i64
-	br label %768
+765:
+	%766 = sext i32 0 to i64
+	br label %767
 
-768:
-	%769 = phi i64 [ %765, %760 ], [ %767, %766 ]
-	store i64 %769, i64* %747
-	%770 = alloca i64
-	%771 = load i64, i64* %747
-	%772 = sext i32 0 to i64
-	%773 = icmp sgt i64 %771, %772
-	%774 = zext i1 %773 to i32
-	%775 = icmp ne i32 %774, 0
-	br i1 %775, label %776, label %781
+767:
+	%768 = phi i64 [ %764, %759 ], [ %766, %765 ]
+	store i64 %768, i64* %746
+	%769 = alloca i64
+	%770 = load i64, i64* %746
+	%771 = sext i32 0 to i64
+	%772 = icmp sgt i64 %770, %771
+	%773 = zext i1 %772 to i32
+	%774 = icmp ne i32 %773, 0
+	br i1 %774, label %775, label %780
 
-776:
-	%777 = load i64, i64* %3
-	%778 = load i64, i64* %747
-	%779 = load i64, i64* %618
-	%780 = call i64 @u_slice(i64 %777, i64 %778, i64 %779)
-	br label %783
+775:
+	%776 = load i64, i64* %3
+	%777 = load i64, i64* %746
+	%778 = load i64, i64* %618
+	%779 = call i64 @u_slice(i64 %776, i64 %777, i64 %778)
+	br label %782
 
-781:
-	%782 = load i64, i64* %3
-	br label %783
+780:
+	%781 = load i64, i64* %3
+	br label %782
 
-783:
-	%784 = phi i64 [ %780, %776 ], [ %782, %781 ]
-	store i64 %784, i64* %770
-	%785 = alloca i64
-	%786 = load i64, i64* %770
-	%787 = load i64, i64* %5
-	%788 = sext i32 0 to i64
-	%789 = call i64 @arg_str(i64 %787, i64 %788)
-	%790 = call i64 @str_index_of(i64 %786, i64 %789)
-	store i64 %790, i64* %785
-	%791 = load i64, i64* %785
-	%792 = sext i32 0 to i64
-	%793 = icmp slt i64 %791, %792
-	%794 = zext i1 %793 to i32
-	%795 = icmp ne i32 %794, 0
-	br i1 %795, label %796, label %800
+782:
+	%783 = phi i64 [ %779, %775 ], [ %781, %780 ]
+	store i64 %783, i64* %769
+	%784 = alloca i64
+	%785 = load i64, i64* %769
+	%786 = load i64, i64* %5
+	%787 = sext i32 0 to i64
+	%788 = call i64 @arg_str(i64 %786, i64 %787)
+	%789 = call i64 @str_index_of(i64 %785, i64 %788)
+	store i64 %789, i64* %784
+	%790 = load i64, i64* %784
+	%791 = sext i32 0 to i64
+	%792 = icmp slt i64 %790, %791
+	%793 = zext i1 %792 to i32
+	%794 = icmp ne i32 %793, 0
+	br i1 %794, label %795, label %799
 
-796:
-	%797 = sext i32 -1 to i64
-	%798 = call i64 @d_from_long(i64 %797)
-	%799 = call i64 @mk_num(i64 %798)
-	ret i64 %799
+795:
+	%796 = sext i32 -1 to i64
+	%797 = call i64 @d_from_long(i64 %796)
+	%798 = call i64 @mk_num(i64 %797)
+	ret i64 %798
 
-800:
-	%801 = load i64, i64* %785
-	%802 = sext i32 0 to i64
-	%803 = icmp sgt i64 %801, %802
-	%804 = zext i1 %803 to i32
-	%805 = icmp ne i32 %804, 0
-	br i1 %805, label %806, label %812
+799:
+	%800 = load i64, i64* %784
+	%801 = sext i32 0 to i64
+	%802 = icmp sgt i64 %800, %801
+	%803 = zext i1 %802 to i32
+	%804 = icmp ne i32 %803, 0
+	br i1 %804, label %805, label %811
 
 dead550:
-	br label %800
+	br label %799
 
-806:
-	%807 = load i64, i64* %770
-	%808 = sext i32 0 to i64
-	%809 = load i64, i64* %785
-	%810 = call i64 @str_slice(i64 %807, i64 %808, i64 %809)
-	%811 = call i64 @str_ulen(i64 %810)
-	store i64 %811, i64* %785
-	br label %812
+805:
+	%806 = load i64, i64* %769
+	%807 = sext i32 0 to i64
+	%808 = load i64, i64* %784
+	%809 = call i64 @str_slice(i64 %806, i64 %807, i64 %808)
+	%810 = call i64 @str_ulen(i64 %809)
+	store i64 %810, i64* %784
+	br label %811
 
-812:
-	%813 = load i64, i64* %747
-	%814 = load i64, i64* %785
-	%815 = add i64 %813, %814
-	%816 = call i64 @d_from_long(i64 %815)
-	%817 = call i64 @mk_num(i64 %816)
-	ret i64 %817
+811:
+	%812 = load i64, i64* %746
+	%813 = load i64, i64* %784
+	%814 = add i64 %812, %813
+	%815 = call i64 @d_from_long(i64 %814)
+	%816 = call i64 @mk_num(i64 %815)
+	ret i64 %816
 
 dead551:
-	br label %754
+	br label %753
 
-818:
-	%819 = alloca i64
-	%820 = load i64, i64* %5
-	%821 = sext i32 0 to i64
-	%822 = call i64 @arg_str(i64 %820, i64 %821)
-	store i64 %822, i64* %819
-	%823 = alloca i64
-	%824 = load i64, i64* %5
-	%825 = sext i32 1 to i64
-	%826 = call i64 @arg_str(i64 %824, i64 %825)
-	store i64 %826, i64* %823
-	%827 = alloca i64
-	%828 = load i64, i64* %3
-	%829 = load i64, i64* %819
-	%830 = call i64 @str_index_of(i64 %828, i64 %829)
-	store i64 %830, i64* %827
-	%831 = load i64, i64* %827
-	%832 = sext i32 0 to i64
-	%833 = icmp slt i64 %831, %832
-	%834 = zext i1 %833 to i32
-	%835 = icmp ne i32 %834, 0
-	br i1 %835, label %842, label %844
+817:
+	%818 = alloca i64
+	%819 = load i64, i64* %5
+	%820 = sext i32 0 to i64
+	%821 = call i64 @arg_str(i64 %819, i64 %820)
+	store i64 %821, i64* %818
+	%822 = alloca i64
+	%823 = load i64, i64* %5
+	%824 = sext i32 1 to i64
+	%825 = call i64 @arg_str(i64 %823, i64 %824)
+	store i64 %825, i64* %822
+	%826 = alloca i64
+	%827 = load i64, i64* %3
+	%828 = load i64, i64* %818
+	%829 = call i64 @str_index_of(i64 %827, i64 %828)
+	store i64 %829, i64* %826
+	%830 = load i64, i64* %826
+	%831 = sext i32 0 to i64
+	%832 = icmp slt i64 %830, %831
+	%833 = zext i1 %832 to i32
+	%834 = icmp ne i32 %833, 0
+	br i1 %834, label %841, label %843
 
-836:
-	%837 = load i64, i64* %4
-	%838 = sext i32 24 to i64
-	%839 = icmp eq i64 %837, %838
-	%840 = zext i1 %839 to i32
-	%841 = icmp ne i32 %840, 0
-	br i1 %841, label %859, label %867
+835:
+	%836 = load i64, i64* %4
+	%837 = sext i32 24 to i64
+	%838 = icmp eq i64 %836, %837
+	%839 = zext i1 %838 to i32
+	%840 = icmp ne i32 %839, 0
+	br i1 %840, label %858, label %866
 
-842:
-	%843 = load i64, i64* %3
-	ret i64 %843
+841:
+	%842 = load i64, i64* %3
+	ret i64 %842
 
-844:
-	%845 = load i64, i64* %3
-	%846 = sext i32 0 to i64
-	%847 = load i64, i64* %827
-	%848 = call i64 @str_slice(i64 %845, i64 %846, i64 %847)
-	%849 = load i64, i64* %823
-	%850 = call i64 @str_cat(i64 %848, i64 %849)
-	%851 = load i64, i64* %3
-	%852 = load i64, i64* %827
-	%853 = load i64, i64* %819
-	%854 = call i64 @str_len(i64 %853)
-	%855 = add i64 %852, %854
-	%856 = load i64, i64* %618
-	%857 = call i64 @str_slice(i64 %851, i64 %855, i64 %856)
-	%858 = call i64 @str_cat(i64 %850, i64 %857)
-	ret i64 %858
+843:
+	%844 = load i64, i64* %3
+	%845 = sext i32 0 to i64
+	%846 = load i64, i64* %826
+	%847 = call i64 @str_slice(i64 %844, i64 %845, i64 %846)
+	%848 = load i64, i64* %822
+	%849 = call i64 @str_cat(i64 %847, i64 %848)
+	%850 = load i64, i64* %3
+	%851 = load i64, i64* %826
+	%852 = load i64, i64* %818
+	%853 = call i64 @str_len(i64 %852)
+	%854 = add i64 %851, %853
+	%855 = load i64, i64* %618
+	%856 = call i64 @str_slice(i64 %850, i64 %854, i64 %855)
+	%857 = call i64 @str_cat(i64 %849, i64 %856)
+	ret i64 %857
 
 dead552:
-	br label %844
+	br label %843
 
 dead553:
-	br label %836
+	br label %835
 
-859:
-	%860 = load i64, i64* %618
-	%861 = load i64, i64* %5
-	%862 = call i32 @slice_range(i64 %860, i64 %861)
-	%863 = load i64, i64* %3
-	%864 = load i64, i64* @G_BEGIN
-	%865 = load i64, i64* @G_END
-	%866 = call i64 @u_slice(i64 %863, i64 %864, i64 %865)
-	ret i64 %866
+858:
+	%859 = load i64, i64* %618
+	%860 = load i64, i64* %5
+	%861 = call i32 @slice_range(i64 %859, i64 %860)
+	%862 = load i64, i64* %3
+	%863 = load i64, i64* @G_BEGIN
+	%864 = load i64, i64* @G_END
+	%865 = call i64 @u_slice(i64 %862, i64 %863, i64 %864)
+	ret i64 %865
 
-867:
-	%868 = load i64, i64* %4
-	%869 = sext i32 25 to i64
-	%870 = icmp eq i64 %868, %869
-	%871 = zext i1 %870 to i32
-	%872 = icmp ne i32 %871, 0
-	br i1 %872, label %873, label %881
+866:
+	%867 = load i64, i64* %4
+	%868 = sext i32 25 to i64
+	%869 = icmp eq i64 %867, %868
+	%870 = zext i1 %869 to i32
+	%871 = icmp ne i32 %870, 0
+	br i1 %871, label %872, label %880
 
 dead554:
-	br label %867
+	br label %866
 
-873:
-	%874 = load i64, i64* %618
-	%875 = load i64, i64* %5
-	%876 = call i32 @substring_range(i64 %874, i64 %875)
-	%877 = load i64, i64* %3
-	%878 = load i64, i64* @G_BEGIN
-	%879 = load i64, i64* @G_END
-	%880 = call i64 @u_slice(i64 %877, i64 %878, i64 %879)
-	ret i64 %880
+872:
+	%873 = load i64, i64* %618
+	%874 = load i64, i64* %5
+	%875 = call i32 @substring_range(i64 %873, i64 %874)
+	%876 = load i64, i64* %3
+	%877 = load i64, i64* @G_BEGIN
+	%878 = load i64, i64* @G_END
+	%879 = call i64 @u_slice(i64 %876, i64 %877, i64 %878)
+	ret i64 %879
 
-881:
-	%882 = load i64, i64* %4
-	%883 = sext i32 26 to i64
-	%884 = icmp eq i64 %882, %883
-	%885 = zext i1 %884 to i32
-	%886 = icmp ne i32 %885, 0
-	br i1 %886, label %887, label %904
+880:
+	%881 = load i64, i64* %4
+	%882 = sext i32 26 to i64
+	%883 = icmp eq i64 %881, %882
+	%884 = zext i1 %883 to i32
+	%885 = icmp ne i32 %884, 0
+	br i1 %885, label %886, label %903
 
 dead555:
-	br label %881
+	br label %880
 
-887:
-	%888 = alloca i64
-	%889 = load i64, i64* %5
-	%890 = sext i32 0 to i64
-	%891 = call i64 @arg_str(i64 %889, i64 %890)
-	store i64 %891, i64* %888
-	%892 = alloca i64
-	%893 = call i64 @mk_arr()
-	store i64 %893, i64* %892
-	%894 = alloca i64
-	%895 = load i64, i64* %888
-	%896 = call i64 @str_len(i64 %895)
-	store i64 %896, i64* %894
-	%897 = alloca i64
-	%898 = sext i32 0 to i64
-	store i64 %898, i64* %897
-	%899 = load i64, i64* %894
-	%900 = sext i32 0 to i64
-	%901 = icmp eq i64 %899, %900
-	%902 = zext i1 %901 to i32
-	%903 = icmp ne i32 %902, 0
-	br i1 %903, label %910, label %913
+886:
+	%887 = alloca i64
+	%888 = load i64, i64* %5
+	%889 = sext i32 0 to i64
+	%890 = call i64 @arg_str(i64 %888, i64 %889)
+	store i64 %890, i64* %887
+	%891 = alloca i64
+	%892 = call i64 @mk_arr()
+	store i64 %892, i64* %891
+	%893 = alloca i64
+	%894 = load i64, i64* %887
+	%895 = call i64 @str_len(i64 %894)
+	store i64 %895, i64* %893
+	%896 = alloca i64
+	%897 = sext i32 0 to i64
+	store i64 %897, i64* %896
+	%898 = load i64, i64* %893
+	%899 = sext i32 0 to i64
+	%900 = icmp eq i64 %898, %899
+	%901 = zext i1 %900 to i32
+	%902 = icmp ne i32 %901, 0
+	br i1 %902, label %909, label %912
 
-904:
-	%905 = load i64, i64* %4
-	%906 = sext i32 27 to i64
-	%907 = icmp eq i64 %905, %906
-	%908 = zext i1 %907 to i32
-	%909 = icmp ne i32 %908, 0
-	br i1 %909, label %970, label %974
+903:
+	%904 = load i64, i64* %4
+	%905 = sext i32 27 to i64
+	%906 = icmp eq i64 %904, %905
+	%907 = zext i1 %906 to i32
+	%908 = icmp ne i32 %907, 0
+	br i1 %908, label %969, label %973
 
-910:
-	%911 = alloca i64
-	%912 = sext i32 0 to i64
-	store i64 %912, i64* %911
-	br label %914
-
-913:
-	br label %934
-
-914:
-	%915 = load i64, i64* %911
-	%916 = load i64, i64* %618
-	%917 = icmp slt i64 %915, %916
-	%918 = zext i1 %917 to i32
-	%919 = icmp ne i32 %918, 0
-	br i1 %919, label %920, label %932
-
-920:
-	%921 = load i64, i64* %892
-	%922 = load i64, i64* %3
-	%923 = load i64, i64* %911
-	%924 = load i64, i64* %911
-	%925 = sext i32 1 to i64
-	%926 = add i64 %924, %925
-	%927 = call i64 @u_slice(i64 %922, i64 %923, i64 %926)
-	%928 = call i32 @arr_push(i64 %921, i64 %927)
-	%929 = load i64, i64* %911
-	%930 = sext i32 1 to i64
-	%931 = add i64 %929, %930
-	store i64 %931, i64* %911
-	br label %914
-
-932:
-	%933 = load i64, i64* %892
-	ret i64 %933
-
-dead556:
+909:
+	%910 = alloca i64
+	%911 = sext i32 0 to i64
+	store i64 %911, i64* %910
 	br label %913
 
-934:
-	%935 = icmp ne i32 1, 0
-	br i1 %935, label %936, label %952
+912:
+	br label %933
 
-936:
-	%937 = alloca i64
-	%938 = load i64, i64* %3
-	%939 = load i64, i64* %897
-	%940 = load i64, i64* %3
-	%941 = call i64 @str_len(i64 %940)
-	%942 = call i64 @str_slice(i64 %938, i64 %939, i64 %941)
-	store i64 %942, i64* %937
-	%943 = alloca i64
-	%944 = load i64, i64* %937
-	%945 = load i64, i64* %888
-	%946 = call i64 @str_index_of(i64 %944, i64 %945)
-	store i64 %946, i64* %943
-	%947 = load i64, i64* %943
-	%948 = sext i32 0 to i64
-	%949 = icmp slt i64 %947, %948
-	%950 = zext i1 %949 to i32
-	%951 = icmp ne i32 %950, 0
-	br i1 %951, label %953, label %958
+913:
+	%914 = load i64, i64* %910
+	%915 = load i64, i64* %618
+	%916 = icmp slt i64 %914, %915
+	%917 = zext i1 %916 to i32
+	%918 = icmp ne i32 %917, 0
+	br i1 %918, label %919, label %931
+
+919:
+	%920 = load i64, i64* %891
+	%921 = load i64, i64* %3
+	%922 = load i64, i64* %910
+	%923 = load i64, i64* %910
+	%924 = sext i32 1 to i64
+	%925 = add i64 %923, %924
+	%926 = call i64 @u_slice(i64 %921, i64 %922, i64 %925)
+	%927 = call i32 @arr_push(i64 %920, i64 %926)
+	%928 = load i64, i64* %910
+	%929 = sext i32 1 to i64
+	%930 = add i64 %928, %929
+	store i64 %930, i64* %910
+	br label %913
+
+931:
+	%932 = load i64, i64* %891
+	ret i64 %932
+
+dead556:
+	br label %912
+
+933:
+	%934 = icmp ne i32 1, 0
+	br i1 %934, label %935, label %951
+
+935:
+	%936 = alloca i64
+	%937 = load i64, i64* %3
+	%938 = load i64, i64* %896
+	%939 = load i64, i64* %3
+	%940 = call i64 @str_len(i64 %939)
+	%941 = call i64 @str_slice(i64 %937, i64 %938, i64 %940)
+	store i64 %941, i64* %936
+	%942 = alloca i64
+	%943 = load i64, i64* %936
+	%944 = load i64, i64* %887
+	%945 = call i64 @str_index_of(i64 %943, i64 %944)
+	store i64 %945, i64* %942
+	%946 = load i64, i64* %942
+	%947 = sext i32 0 to i64
+	%948 = icmp slt i64 %946, %947
+	%949 = zext i1 %948 to i32
+	%950 = icmp ne i32 %949, 0
+	br i1 %950, label %952, label %957
+
+951:
+	br label %903
 
 952:
-	br label %904
+	%953 = load i64, i64* %891
+	%954 = load i64, i64* %936
+	%955 = call i32 @arr_push(i64 %953, i64 %954)
+	%956 = load i64, i64* %891
+	ret i64 %956
 
-953:
-	%954 = load i64, i64* %892
-	%955 = load i64, i64* %937
-	%956 = call i32 @arr_push(i64 %954, i64 %955)
-	%957 = load i64, i64* %892
-	ret i64 %957
-
-958:
-	%959 = load i64, i64* %892
-	%960 = load i64, i64* %937
-	%961 = sext i32 0 to i64
-	%962 = load i64, i64* %943
-	%963 = call i64 @str_slice(i64 %960, i64 %961, i64 %962)
-	%964 = call i32 @arr_push(i64 %959, i64 %963)
-	%965 = load i64, i64* %897
-	%966 = load i64, i64* %943
-	%967 = add i64 %965, %966
-	%968 = load i64, i64* %894
-	%969 = add i64 %967, %968
-	store i64 %969, i64* %897
-	br label %934
+957:
+	%958 = load i64, i64* %891
+	%959 = load i64, i64* %936
+	%960 = sext i32 0 to i64
+	%961 = load i64, i64* %942
+	%962 = call i64 @str_slice(i64 %959, i64 %960, i64 %961)
+	%963 = call i32 @arr_push(i64 %958, i64 %962)
+	%964 = load i64, i64* %896
+	%965 = load i64, i64* %942
+	%966 = add i64 %964, %965
+	%967 = load i64, i64* %893
+	%968 = add i64 %966, %967
+	store i64 %968, i64* %896
+	br label %933
 
 dead557:
-	br label %958
+	br label %957
 
-970:
-	%971 = load i64, i64* %3
-	%972 = sext i32 3 to i64
-	%973 = call i64 @case_str(i64 %971, i64 %972)
-	ret i64 %973
+969:
+	%970 = load i64, i64* %3
+	%971 = sext i32 3 to i64
+	%972 = call i64 @case_str(i64 %970, i64 %971)
+	ret i64 %972
 
-974:
-	%975 = load i64, i64* %4
-	%976 = sext i32 28 to i64
-	%977 = icmp eq i64 %975, %976
-	%978 = zext i1 %977 to i32
-	%979 = icmp ne i32 %978, 0
-	br i1 %979, label %980, label %984
+973:
+	%974 = load i64, i64* %4
+	%975 = sext i32 28 to i64
+	%976 = icmp eq i64 %974, %975
+	%977 = zext i1 %976 to i32
+	%978 = icmp ne i32 %977, 0
+	br i1 %978, label %979, label %983
 
 dead558:
-	br label %974
+	br label %973
 
-980:
-	%981 = load i64, i64* %3
-	%982 = sext i32 6 to i64
-	%983 = call i64 @case_str(i64 %981, i64 %982)
-	ret i64 %983
+979:
+	%980 = load i64, i64* %3
+	%981 = sext i32 6 to i64
+	%982 = call i64 @case_str(i64 %980, i64 %981)
+	ret i64 %982
 
-984:
-	%985 = load i64, i64* %4
-	%986 = sext i32 29 to i64
-	%987 = icmp eq i64 %985, %986
-	%988 = zext i1 %987 to i32
-	%989 = icmp ne i32 %988, 0
-	br i1 %989, label %990, label %1000
+983:
+	%984 = load i64, i64* %4
+	%985 = sext i32 29 to i64
+	%986 = icmp eq i64 %984, %985
+	%987 = zext i1 %986 to i32
+	%988 = icmp ne i32 %987, 0
+	br i1 %988, label %989, label %999
 
 dead559:
-	br label %984
+	br label %983
 
-990:
-	%991 = alloca i32*
-	%992 = load i64, i64* %3
-	%993 = call i32* @str_ptr(i64 %992)
-	%994 = bitcast i32* %993 to i32*
-	store i32* %994, i32** %991
-	%995 = alloca i64
-	%996 = sext i32 0 to i64
-	store i64 %996, i64* %995
-	%997 = alloca i64
-	%998 = load i64, i64* %3
-	%999 = call i64 @str_len(i64 %998)
-	store i64 %999, i64* %997
-	br label %1001
+989:
+	%990 = alloca i32*
+	%991 = load i64, i64* %3
+	%992 = call i32* @str_ptr(i64 %991)
+	%993 = bitcast i32* %992 to i32*
+	store i32* %993, i32** %990
+	%994 = alloca i64
+	%995 = sext i32 0 to i64
+	store i64 %995, i64* %994
+	%996 = alloca i64
+	%997 = load i64, i64* %3
+	%998 = call i64 @str_len(i64 %997)
+	store i64 %998, i64* %996
+	br label %1000
 
-1000:
+999:
 	br label %626
 
-1001:
-	%1002 = load i64, i64* %995
-	%1003 = load i64, i64* %997
-	%1004 = icmp slt i64 %1002, %1003
-	%1005 = zext i1 %1004 to i32
-	%1006 = icmp ne i32 %1005, 0
-	%1007 = zext i1 %1006 to i32
-	%1008 = icmp ne i32 %1007, 0
-	br i1 %1008, label %1014, label %1024
+1000:
+	%1001 = load i64, i64* %994
+	%1002 = load i64, i64* %996
+	%1003 = icmp slt i64 %1001, %1002
+	%1004 = zext i1 %1003 to i32
+	%1005 = icmp ne i32 %1004, 0
+	%1006 = zext i1 %1005 to i32
+	%1007 = icmp ne i32 %1006, 0
+	br i1 %1007, label %1013, label %1023
 
-1009:
-	%1010 = load i64, i64* %995
-	%1011 = sext i32 1 to i64
-	%1012 = add i64 %1010, %1011
-	store i64 %1012, i64* %995
-	br label %1001
+1008:
+	%1009 = load i64, i64* %994
+	%1010 = sext i32 1 to i64
+	%1011 = add i64 %1009, %1010
+	store i64 %1011, i64* %994
+	br label %1000
+
+1012:
+	br label %1026
 
 1013:
-	br label %1027
+	%1014 = load i64, i64* %994
+	%1015 = load i32*, i32** %990
+	%1016 = getelementptr i8, i32* %1015, i64 %1014
+	%1017 = load i8, i8* %1016
+	%1018 = sext i8 %1017 to i32
+	%1019 = and i32 %1018, 255
+	%1020 = call i32 @is_space(i32 %1019)
+	%1021 = icmp ne i32 %1020, 0
+	%1022 = zext i1 %1021 to i32
+	br label %1023
 
-1014:
-	%1015 = load i64, i64* %995
-	%1016 = load i32*, i32** %991
-	%1017 = getelementptr i8, i32* %1016, i64 %1015
-	%1018 = load i8, i8* %1017
-	%1019 = sext i8 %1018 to i32
-	%1020 = and i32 %1019, 255
-	%1021 = call i32 @is_space(i32 %1020)
-	%1022 = icmp ne i32 %1021, 0
-	%1023 = zext i1 %1022 to i32
-	br label %1024
+1023:
+	%1024 = phi i32 [ %1006, %1000 ], [ %1022, %1013 ]
+	%1025 = icmp ne i32 %1024, 0
+	br i1 %1025, label %1008, label %1012
 
-1024:
-	%1025 = phi i32 [ %1007, %1001 ], [ %1023, %1014 ]
-	%1026 = icmp ne i32 %1025, 0
-	br i1 %1026, label %1009, label %1013
+1026:
+	%1027 = load i64, i64* %996
+	%1028 = load i64, i64* %994
+	%1029 = icmp sgt i64 %1027, %1028
+	%1030 = zext i1 %1029 to i32
+	%1031 = icmp ne i32 %1030, 0
+	%1032 = zext i1 %1031 to i32
+	%1033 = icmp ne i32 %1032, 0
+	br i1 %1033, label %1043, label %1055
 
-1027:
-	%1028 = load i64, i64* %997
-	%1029 = load i64, i64* %995
-	%1030 = icmp sgt i64 %1028, %1029
-	%1031 = zext i1 %1030 to i32
-	%1032 = icmp ne i32 %1031, 0
-	%1033 = zext i1 %1032 to i32
-	%1034 = icmp ne i32 %1033, 0
-	br i1 %1034, label %1044, label %1056
+1034:
+	%1035 = load i64, i64* %996
+	%1036 = sext i32 1 to i64
+	%1037 = sub i64 %1035, %1036
+	store i64 %1037, i64* %996
+	br label %1026
 
-1035:
-	%1036 = load i64, i64* %997
-	%1037 = sext i32 1 to i64
-	%1038 = sub i64 %1036, %1037
-	store i64 %1038, i64* %997
-	br label %1027
+1038:
+	%1039 = load i64, i64* %3
+	%1040 = load i64, i64* %994
+	%1041 = load i64, i64* %996
+	%1042 = call i64 @str_slice(i64 %1039, i64 %1040, i64 %1041)
+	ret i64 %1042
 
-1039:
-	%1040 = load i64, i64* %3
-	%1041 = load i64, i64* %995
-	%1042 = load i64, i64* %997
-	%1043 = call i64 @str_slice(i64 %1040, i64 %1041, i64 %1042)
-	ret i64 %1043
+1043:
+	%1044 = load i64, i64* %996
+	%1045 = sext i32 1 to i64
+	%1046 = sub i64 %1044, %1045
+	%1047 = load i32*, i32** %990
+	%1048 = getelementptr i8, i32* %1047, i64 %1046
+	%1049 = load i8, i8* %1048
+	%1050 = sext i8 %1049 to i32
+	%1051 = and i32 %1050, 255
+	%1052 = call i32 @is_space(i32 %1051)
+	%1053 = icmp ne i32 %1052, 0
+	%1054 = zext i1 %1053 to i32
+	br label %1055
 
-1044:
-	%1045 = load i64, i64* %997
-	%1046 = sext i32 1 to i64
-	%1047 = sub i64 %1045, %1046
-	%1048 = load i32*, i32** %991
-	%1049 = getelementptr i8, i32* %1048, i64 %1047
-	%1050 = load i8, i8* %1049
-	%1051 = sext i8 %1050 to i32
-	%1052 = and i32 %1051, 255
-	%1053 = call i32 @is_space(i32 %1052)
-	%1054 = icmp ne i32 %1053, 0
-	%1055 = zext i1 %1054 to i32
-	br label %1056
-
-1056:
-	%1057 = phi i32 [ %1033, %1027 ], [ %1055, %1044 ]
-	%1058 = icmp ne i32 %1057, 0
-	br i1 %1058, label %1035, label %1039
+1055:
+	%1056 = phi i32 [ %1032, %1026 ], [ %1054, %1043 ]
+	%1057 = icmp ne i32 %1056, 0
+	br i1 %1057, label %1034, label %1038
 
 dead560:
-	br label %1000
+	br label %999
 
 dead561:
 	ret i64 0

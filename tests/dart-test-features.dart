@@ -833,6 +833,8 @@ int main() {
   var loneSur = "\uDE00\uD83D";
   check("string-lone-surrogate", loneSur.length == 2 && loneSur.codeUnitAt(0) == 56832 &&
       loneSur.codeUnitAt(1) == 55357 && "a\uD83Db".codeUnitAt(1) == 55357);
+  // Error.safeToString quotes a String argument and keeps an astral character whole.
+  check("assert-quote-astral", AssertionError("a\u{1F389}b").toString() == 'Assertion failed: "a\u{1F389}b"');
 
   // ----- everything combined in one small pipeline -----
   check("combined-pipeline", transform([1, 2, -3]) == "o1e2x");

@@ -275,7 +275,7 @@ function s08() {
     check("u10", String.fromCharCode(55356) + String.fromCharCode(57225) === "🎉")
     check("u11", String.fromCharCode(55356, 57225) === "🎉")
     check("u12", "🎉".split("").join("") === "🎉")
-    check("u13", "🎉".charAt(0).charCodeAt(0) === 65533)
+    check("u13", "🎉".charAt(0).charCodeAt(0) === 55356 && "🎉".charAt(1) === "🎉"[1])
     check("u14", ("a" + "🎉" + "é") === "a🎉é")
     check("u15", "a🎉é".length === 4)
 }

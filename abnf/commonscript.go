@@ -399,6 +399,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("llvm", newHostAPIObject(vm, gojaLLVMMap(wtf8)))
 
 	installGojaCaseMapping(vm)
+	installGojaCharAt(vm)
 	installGojaMathSurface(vm)
 
 	return &common
@@ -682,6 +683,28 @@ func installGojaCaseMapping(vm *goja.Runtime) {
 		String.prototype.toUpperCase = function () { return unicodeCase(this, 3) };
 		String.prototype.toLowerCase = function () { return unicodeCase(this, 6) };
 	`); err != nil {
+		panic(err)
+	}
+}
+
+// installGojaCharAt makes String.prototype.charAt answer a lone surrogate's own
+// unit, as ECMAScript does: the pinned goja's charAt ends in a rune to string
+// conversion, which writes U+FFFD. Only a U+FFFD result is re-read, through
+// substring, which keeps the unit. Twin of charAt in jsrt.go and mid 21 in
+// languages/lib/runtime.c.
+func installGojaCharAt(vm *goja.Runtime) {
+	proto := vm.Get("String").ToObject(vm).Get("prototype").ToObject(vm)
+	charAt := proto.Get("charAt").Export().(func(goja.FunctionCall) goja.Value)
+	substring := proto.Get("substring").Export().(func(goja.FunctionCall) goja.Value)
+	fn := func(call goja.FunctionCall) goja.Value {
+		c := charAt(call)
+		if c.String() != "\uFFFD" {
+			return c
+		}
+		i := call.Argument(0).ToInteger()
+		return substring(goja.FunctionCall{This: call.This, Arguments: []goja.Value{vm.ToValue(i), vm.ToValue(i + 1)}})
+	}
+	if err := proto.DefineDataProperty("charAt", vm.ToValue(fn), goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE); err != nil {
 		panic(err)
 	}
 }
