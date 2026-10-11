@@ -3805,6 +3805,46 @@ def s84
                  %q[a\]b\\c\'d] == "a]b\\c\\'d" && %w[a\nb] == ["a\\nb"])
 end
 
+# ===== SECTION 85: reopening a builtin class adds methods =====
+# `class String ... end` reopens the builtin class, so its methods answer for every
+# String; inside one, `self` is the receiver and a bare name is one of its methods.
+# Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS
+# UNDER REAL RUBY.
+class String
+  def s85_shout
+    upcase + "!"
+  end
+  def s85_twice
+    s85_shout + s85_shout
+  end
+  def s85_each2
+    yield self
+    yield self
+  end
+end
+class Integer
+  def s85_double
+    self * 2
+  end
+end
+class Array
+  def s85_second
+    self[1]
+  end
+end
+class Hash
+  def s85_keys
+    keys.map(&:to_s)
+  end
+end
+def s85
+  ys = []
+  "q".s85_each2 { |s| ys << s }
+  check("ro85a", "hi".s85_shout == "HI!" && "a".s85_twice == "A!A!" && ys == ["q", "q"] && 21.s85_double == 42)
+  check("ro85b", [1, 2, 3].s85_second == 2 && {a: 1}.s85_keys == ["a"] && "x".respond_to?(:s85_shout) &&
+                 !5.respond_to?(:s85_shout) && "x".class == String && "x".is_a?(String))
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3851,5 +3891,6 @@ s81() # SECTION-CALL 81
 s82() # SECTION-CALL 82
 s83() # SECTION-CALL 83
 s84() # SECTION-CALL 84
+s85() # SECTION-CALL 85
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

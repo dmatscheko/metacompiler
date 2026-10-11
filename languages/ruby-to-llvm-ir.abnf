@@ -2425,6 +2425,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // so a regexp literal can be checked for validity while the tags run.
     include("lib/regex.js")
     rxFail = function (msg) { println("ruby compiler error: " + msg); exit(1) }
+    // The builtin method names, for a bare name inside a method added to a builtin
+    // class (builtinSelfMethod).
+    include("lib/ruby-respond.js")
 
     var hidCount = 0
     // The argument array of the function being emitted (js_rblock reads the block out
@@ -6428,7 +6431,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             // Inside a method body a bare name that is a method of the SAME class (or
             // of one above it) is a call on the implicit self - `def intro; speak; end'.
-            if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name)) {
+            if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name) || builtinSelfMethod(curClsName, name)) {
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])}
             }
@@ -6900,6 +6903,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var r = clsItems(items, 1)
         var superName = r.supername
+        // Reopening a BUILTIN class (`class String; def shout ...`) adds to the
+        // builtin's own class object - the one js_rclass hands out - which the
+        // runtime asks for a builtin value once js_rbreopen has said so. It is not a
+        // class of the program, so none of the build-time tables below records it.
+        if (superName == "" && reopenableBuiltin(name) && classMethods["$" + name] == undefined) {
+            var bnames = []
+            for (var bm = 0; bm < r.methods.length; bm++) { bnames.push(r.methods[bm].name) }
+            noteMethodNames(bnames)
+            reopenedBuiltins["$" + name] = unionNames(reopenedBuiltins["$" + name], bnames)
+            var bincAnc = mixAncestry(r.includes, 0)
+            return function(b) {
+                var bkey = "$" + curClsName + "::" + name
+                if (curClsName == "" && emittedClasses[bkey] == undefined) {
+                    emittedClasses[bkey] = {anc: [], snames: [], core: false}
+                    callExt(b, "js_rbreopen", [])
+                }
+                if (emittedClasses[bkey] == undefined) { notImpl("a nested class named like a builtin class", pos) }
+                return emitReopen(b, emittedClasses[bkey], name, r, bincAnc, pos)
+            }
+        }
         // A mixin is spliced at BUILD time: an included module's methods go in FRONT
         // of the class's own (so the class wins), a prepended module's behind them
         // (so the module wins). `include Comparable` has no compiled module behind
@@ -7389,6 +7412,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // FloatDomainError < RangeError: what Float::INFINITY.to_i and
         // "%d" % Float::INFINITY raise.
         "FloatDomainError"]
+    // The builtin classes a `class` statement reopens rather than shadows. Object and
+    // the modules are left out: their methods would reach every value. Twin of the
+    // same list in ruby-interpreter.abnf.
+    // The methods each reopened builtin class gained, by class name.
+    var reopenedBuiltins = {}
+    // Inside a method added to a builtin class, `self` is a builtin value and a bare
+    // name that is not a local may be one of its methods (`upcase + "!"` in
+    // String#shout). Twin of builtinSelfMethod in ruby-interpreter.abnf.
+    function builtinSelfMethod(cls, name) {
+        if (reopenedBuiltins["$" + cls] == undefined || curDefLocals == null || knownLocal(name)) { return false }
+        return rbResponds(cls, name) || nameIn(reopenedBuiltins["$" + cls], name)
+    }
+    function reopenableBuiltin(n) {
+        return nameIn(rubyBuiltinClasses, n) && n != "Object" && n != "BasicObject" && n != "Class" &&
+            n != "Module" && n != "Kernel" && n != "Comparable" && n != "Enumerable" && n != "Math"
+    }
     function buildMain(items) {
         // The walk of an imported file ends here too (importDepth > 0): stash its top-level
         // thunks for the real jsmain instead of emitting a second one.

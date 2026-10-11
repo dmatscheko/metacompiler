@@ -6786,7 +6786,12 @@ function js_rrespond(target, args) {
     var n = rbStr(rbArgAt(args, 0))
     var all = rbNPos(args) > 1 && rbTruthy(rbArgAt(args, 1))
     var rcls = rbRespondClass(target)
-    if (rcls != "") { return rbResponds(rcls, n) || (all && rbRespondsPriv(n)) }
+    if (rcls != "") {
+        if (rbBuiltinExtOn) {
+            if (rbBuiltinExtFind(target, n) !== undefined) { return true }
+        }
+        return rbResponds(rcls, n) || (all && rbRespondsPriv(n))
+    }
     if (!rbIsObj(target)) { return rbMethod(target, "respond_to?", args) }
     if (rbResponds("", n)) { return true }
     if (rbSingFind(target, n) !== undefined) { return true }
@@ -6845,6 +6850,16 @@ function rbMethod(target, name, args) {
         // js_rxmcall, so a Regexp / MatchData method or a String one taking a
         // pattern reaches the regexp half.
         return js_rxmcall(target, mn, rest)
+    }
+    if (rbBuiltinExtOn) {
+        var bxm = anytype
+        bxm = rbBuiltinExtFind(target, name)
+        if (bxm !== undefined) {
+            var bxa = [target]
+            var bxi = 0
+            while (bxi < args.length) { bxa.push(args[bxi]); bxi = bxi + 1 }
+            return bxm.apply(undefined, bxa)
+        }
     }
     // Ruby's universal reflective methods, answered for every kind of value.
     if (name == "class") {
@@ -7391,6 +7406,10 @@ function js_pyget(c, k) {
 // the method call for js_rlen (a Symbol, MatchData, a user object) and an error
 // for js_pylen. Twin of rlen in ruby-interpreter.abnf.
 function js_rlen(v, name) {
+    // A size / length a program added to the builtin class wins (see rbMethod).
+    if (rbBuiltinExtOn && name !== null) {
+        if (rbBuiltinExtFind(v, name) !== undefined) { return js_rxmcall(v, name, []) }
+    }
     if (typeof v == "string") { return rbCharCount(v) }
     if (rbIsArr(v)) { return v.length }
     if (rbIsDict(v)) { return v["keys"].length }
@@ -7543,6 +7562,29 @@ function rbWhen(l, r) {
 // The builtin class objects: one object per name, so `1.class == Integer` and
 // `when Integer` compare identities.
 function js_rclass(name) { return rbBuiltinClass(rbStr(name)) }
+
+// `class String ... end` reopening a builtin class: its methods go onto the
+// builtin's own class object, and from here on rbMethod asks it.
+var rbBuiltinExtOn = false
+function js_rbreopen() {
+    rbBuiltinExtOn = true
+    return null
+}
+// A method a program added to a builtin class by reopening it, for a builtin value
+// (not an instance or a class object); it wins over the builtin method of the same
+// name, as in MRI. Twins: rubyBuiltinExtFind in abnf/jsrtruby.go, the
+// builtinReopened arm of mcall in ruby-interpreter.abnf.
+function rbBuiltinExtFind(v, name) {
+    if (rbIsObj(v)) {
+        if (v["__class"] !== undefined || v["__isclass"] === true) { return undefined }
+    }
+    var cn = rbClassName(v)
+    if (cn == "") { return undefined }
+    var bm = anytype
+    bm = rbBuiltinClass(cn)[name]
+    if (bm !== undefined && rbIsFn(bm)) { return bm }
+    return undefined
+}
 
 // Ruby's to_s, for string interpolation and puts.
 function js_rstr(v) { return rbStr(v) }

@@ -435,6 +435,10 @@ type jsrt struct {
 	rubyNmArr  *jsArray
 	rubyNmRecv interface{}
 
+	// rubyBuiltinExt: the program reopened a builtin class (js_rbreopen), so
+	// rubyMethod asks that class's own method table for a builtin value.
+	rubyBuiltinExt bool
+
 	// rubyGlobals holds Ruby's $globals, which live outside every scope: a write
 	// inside a method is visible everywhere, and a read of a never-assigned one
 	// answers nil. Only js_rgset / js_rgget (ruby-to-llvm-ir.abnf) touch it.
@@ -9507,6 +9511,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 		}
 		return rt.rubyMethod(target, mn, args[1:])
+	}
+	if rt.rubyBuiltinExt {
+		if bm, found := rt.rubyBuiltinExtFind(target, name); found {
+			return rt.call(bm, jsUndef, append([]interface{}{target}, args...))
+		}
 	}
 	// Ruby's universal reflective methods, answered for every kind of value.
 	switch name {

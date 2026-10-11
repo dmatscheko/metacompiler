@@ -7090,6 +7090,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // (a Symbol, MatchData, a user object) is the method call. Twin of js_rlen in
     // abnf/jsrtruby.go and lib/ruby-rt.metajs.
     function rlen(v, name) {
+        // A size / length a program added to the builtin class wins (see mcall).
+        if (builtinReopened && name != null && v !== null && v !== undefined && !isUserObj(v) && !isClassObj(v) &&
+            typeof lookupMethod(classOf(v), name) == "function") { return mcall(v, name, [], null) }
         if (isDict(v)) { return v.keys.length }
         // An Enumerator's length is its element count. A bare `.size' / `.length'
         // is lowered to this shortcut in BOTH halves rather than to a method call.
@@ -8152,13 +8155,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // `p.frozen?'). None of the arms below matches a function, and the last
             // one names the method.
         }
+        // A method a program added to a builtin class by reopening it, which wins over
+        // the builtin one of the same name as in MRI. Twins: rubyBuiltinExt in
+        // abnf/jsrtruby.go, rbBuiltinExt in languages/lib/ruby-rt.metajs.
+        if (builtinReopened && !isUserObj(target) && !isClassObj(target)) {
+            var bxm = anytype
+            bxm = lookupMethod(classOf(target), name)
+            if (typeof bxm == "function") {
+                blockStack.push(blk)
+                var bxr = anytype
+                bxr = bxm.apply(undefined, blk == null ? concat2impl([target], args)
+                                                      : concat2impl([target], concat2impl(args, [mkBlkArg(blk)])))
+                blockStack.pop()
+                return bxr
+            }
+        }
         // The methods every value answers.
         if (name == "class") { return classOf(target) }
         // A user instance or class answers from its own tables further down.
         // A builtin value carries no instance variables.
         if (name == "instance_variables" && !isUserObj(target) && !isClassObj(target)) { return [] }
         if (name == "respond_to?" && !isUserObj(target) && !isClassObj(target)) {
-            return rbResponds(classOf(target).__name, rstr(args[0])) || (args.length > 1 && rtest(args[1]) && respondsPrivate(rstr(args[0])))
+            return rbResponds(classOf(target).__name, rstr(args[0])) || (args.length > 1 && rtest(args[1]) && respondsPrivate(rstr(args[0]))) ||
+                (builtinReopened && typeof lookupMethod(classOf(target), rstr(args[0])) == "function")
         }
         // Object#method on a builtin value: a Method that re-dispatches by name, or
         // MRI's NameError when the value does not respond to it. Twins: the
@@ -11027,8 +11046,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (typeof cm == "function") { return cm }
             return undefined
         }
-        if (s.__class == undefined) { return undefined }
+        if (s.__class == undefined) { return builtinSelfMethod(s, name) }
         return lookupMethod(s.__class, name)
+    }
+    // Inside a method added to a builtin class, `self` is a builtin value and a bare
+    // name may be one of its builtin methods (`upcase + "!"` in String#shout): the
+    // answer re-dispatches by name, taking self first like a method closure does.
+    function builtinSelfMethod(s, name) {
+        if (!builtinReopened) { return undefined }
+        var sc = classOf(s)
+        if (sc === hostGlobals["Object"]) { return undefined }
+        if (!rbResponds(sc.__name, name) && typeof lookupMethod(sc, name) != "function") { return undefined }
+        return function() {
+            var a = argsArray(arguments)
+            return mcall(a[0], name, a.slice(1), null)
+        }
     }
     makeVarRef = function(name) {
         return function() {
@@ -11099,6 +11131,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var cls = anytype
             if (existing != undefined && existing != null && existing.__isclass === true && existing.__builtin !== true) {
                 cls = existing
+            } else if (existing == undefined && supName == null && reopenableBuiltin(name)) {
+                // Reopening a BUILTIN class (`class String; def shout ...`) adds to the
+                // builtin's own object, which mcall asks for a builtin value.
+                cls = hostGlobals[name]
+                builtinReopened = true
             } else {
                 cls = {__isclass: true, __name: name, __super: null, __mixins: [], __prepends: []}
             }
@@ -12074,6 +12111,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // methods, flagged __builtin so valueIsA tests the host representation instead of
     // walking a __class chain. The exception classes carry __super so `rescue
     // StandardError` catches an ArgumentError.
+    // Set once a program reopens a builtin class, so mcall only asks the builtin's
+    // method table then.
+    var builtinReopened = false
+    // The builtin classes a `class` statement reopens rather than shadows. Object and
+    // the modules are left out: their methods would reach every value. Twin of
+    // reopenableBuiltin in ruby-to-llvm-ir.abnf.
+    function reopenableBuiltin(n) {
+        if (!hasOwn(hostGlobals, n) || hostGlobals[n] == null || hostGlobals[n].__builtin !== true) { return false }
+        return n != "Object" && n != "BasicObject" && n != "Class" && n != "Module" && n != "Kernel" &&
+            n != "Comparable" && n != "Enumerable" && n != "Math"
+    }
     function mkBuiltinClass(name, sup) { return {__isclass: true, __name: name, __builtin: true, __super: sup} }
     function valueIsA(v, cls) {
         if (cls === null || cls === undefined || cls.__isclass !== true) { return false }

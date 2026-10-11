@@ -63,12 +63,27 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return w(rt.rubyRespond(u(a[0]), arr.elems))
 	}
 
+	// `class String ... end` reopening a builtin class: its methods go onto the
+	// builtin's own class object, and from here on rubyMethod asks it.
+	m["js_rbreopen"] = func(a []uint64) uint64 {
+		rt.rubyBuiltinExt = true
+		return jsHUndefined
+	}
+
 	// A bare `.length` / `.size`: a String, Array, Hash, Enumerator or Range counts
 	// through js_pylen, anything else (a Symbol, MatchData, a user object) is the
 	// method call. Twin of rlen in ruby-interpreter.abnf.
 	pylen := m["js_pylen"]
 	m["js_rlen"] = func(a []uint64) uint64 {
 		v := u(a[0])
+		// A size / length a program added to the builtin class wins (see rubyMethod).
+		if rt.rubyBuiltinExt {
+			if n, isStr := u(a[1]).(string); isStr {
+				if _, found := rt.rubyBuiltinExtFind(v, n); found {
+					return m["js_rxmcall"]([]uint64{a[0], a[1], w(&jsArray{})})
+				}
+			}
+		}
 		counted := false
 		switch v.(type) {
 		case string, *jsArray:
@@ -1289,6 +1304,11 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 	n := rt.rubyStr(argAt(pos, 0))
 	all := rubyTruthy(argAt(pos, 1))
 	if cls := rt.rubyRespondClass(target); cls != "" {
+		if rt.rubyBuiltinExt {
+			if _, found := rt.rubyBuiltinExtFind(target, n); found {
+				return true
+			}
+		}
 		return rubyResponds(cls, n) || (all && rt.rubyRespondsPrivate(n))
 	}
 	o, isObj := target.(*jsObject)
@@ -2126,4 +2146,27 @@ func rubySymPlain(s string) bool {
 	}
 	t := s[i]
 	return s[0] != '$' && s[0] != '@' && i == n-1 && (t == '?' || t == '!' || t == '=')
+}
+
+// rubyBuiltinExtFind is a method a program added to a builtin class by reopening
+// it, for a builtin value (not an instance or a class object); it wins over the
+// builtin method of the same name, as in MRI. Twins: the builtinReopened arm of
+// mcall in ruby-interpreter.abnf, rbBuiltinExtFind in languages/lib/ruby-rt.metajs.
+func (rt *jsrt) rubyBuiltinExtFind(v interface{}, name string) (interface{}, bool) {
+	if o, isObj := v.(*jsObject); isObj {
+		if _, inst := o.props["__class"]; inst {
+			return nil, false
+		}
+		if _, cls := o.props["__isclass"]; cls {
+			return nil, false
+		}
+	}
+	cn := rubyClassName(v)
+	if cn == "" {
+		return nil, false
+	}
+	if bm, has := rt.rubyBuiltinClass(cn).props[name]; has && isCallable(bm) {
+		return bm, true
+	}
+	return nil, false
 }
