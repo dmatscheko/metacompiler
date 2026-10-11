@@ -1389,6 +1389,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     include("lib/interp-core.js")
     // PHP's byte-string primitives, shared with layer 2 (lib/php-rt.metajs).
     include("lib/php-strings.js")
+    include("lib/php-stdlib-index.js")
 
     // ----- Arguments and the calling convention -------------------------------
     // Every PHP callable is ONE host function taking a single "argset":
@@ -5228,19 +5229,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
 
     // lib/php-stdlib.php: PHP's array and string library, written in PHP on the
-    // natives above. It is compiled into a program that NAMES one of its functions -
+    // natives above. A library function is compiled into a program that NAMES it -
     // calls it, or spells it in a string literal (a callback) - at the first such
-    // mention, the way `require` compiles a file, so its functions are global before
-    // the program runs. An engine native is reached directly here, so naming one
-    // does not load it. Twin of phpLibRef in php-to-llvm-ir.abnf.
-    var phpLibNames = null
-    var phpLibDone = false
+    // mention, the way `require` compiles a file, so it is global before the
+    // program runs; the functions it names follow the same way
+    // (lib/php-stdlib-index.js). An engine native is reached directly here, so
+    // naming one does not load it. Twin of phpLibRef in php-to-llvm-ir.abnf.
+    var phpLib = null
+    var phpLibDone = {}
+    var phpLibBase = true
     function phpLibRef(name) {
-        if (phpLibDone || hasOwn(phpBuiltins, name)) { return name }
-        if (phpLibNames == null) { phpLibNames = phpLibScan(load("lib/php-stdlib.php")) }
-        if (phpLibNames["$" + name] !== true) { return name }
-        phpLibDone = true
-        var text = load("lib/php-stdlib.php")
+        if (hasOwn(phpBuiltins, name)) { return name }
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        if (!phpLibHas(phpLib, name) || phpLibDone["$" + name] === true) { return name }
+        phpLibDone["$" + name] = true
+        var text = phpLibText(phpLib, name, phpLibBase)
+        phpLibBase = false
         var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
         c.pushSource("php-stdlib.php", text)
         var outerDefs = topDefs
@@ -5249,21 +5253,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         topDefs = outerDefs
         c.popSource()
         return name
-    }
-    // The names of the library's functions: every line that starts "function ".
-    function phpLibScan(text) {
-        var names = {}
-        var i = 0
-        while (i < text.length) {
-            if (text.substring(i, i + 9) == "function ") {
-                var j = i + 9
-                while (j < text.length && text.charAt(j) != "(") { j = j + 1 }
-                names["$" + text.substring(i + 9, j)] = true
-            }
-            while (i < text.length && text.charAt(i) != "\n") { i = i + 1 }
-            i = i + 1
-        }
-        return names
     }
 
     c.compile(c.asg)
