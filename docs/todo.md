@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-354 python: `int.real` compiled · P1 · PY · OPEN [V]
+### T-354 python: `int.real` compiled · P1 · PY · IN PROGRESS (PY+PHP worker, round 9) [V]
 `x = 7; x.real` and `"{0.real}".format(7)`: llvm.Run and native "AttributeError: 'int'
 object has no attribute 'real'"; interpreter and CPython 7. Check imag, numerator,
 denominator, conjugate() on int/float/bool too.
@@ -208,7 +208,7 @@ boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-353 php: echo of a lone byte prints U+FFFD · P1 · PHP · OPEN [V spec-only]
+### T-353 php: echo of a lone byte prints U+FFFD · P1 · PHP · IN PROGRESS (PY+PHP worker, round 9) [V spec-only]
 `echo chr(200)` prints EF BF BD in all engines (PHP writes 0xC8): lone bytes are held
 as U+DC80..U+DCFF and every print path cleans them. Use the `writeBytes` host global
 (added for lua) for php's echo/print of such strings. Also: a program naming any stdlib
