@@ -705,7 +705,7 @@ function pyStr(v) {
             if (fz) { return "frozenset(" + so + "})" }
             return so + "}"
         }
-        if (pyIsDView(v)) { return "dict_" + pyToStr(v["__dview"]) + "(" + pyRepr(pyDViewElems(v)) + ")" }
+        if (typeof v == "object" && pyIsDView(v)) { return "dict_" + pyToStr(v["__dview"]) + "(" + pyRepr(pyDViewElems(v)) + ")" }
         if (pyIsDict(v)) {
             var ks = v["keys"]
             var vs = v["vals"]
@@ -979,7 +979,7 @@ function pyTypeName(v) {
             return "set"
         }
         if (pyIsDict(v)) { return "dict" }
-        if (pyIsDView(v)) { return "dict_" + pyToStr(v["__dview"]) }
+        if (typeof v == "object" && pyIsDView(v)) { return "dict_" + pyToStr(v["__dview"]) }
         if (pyIsCplx(v)) { return "complex" }
         // A CURSOR names its own type: CPython's list_iterator / str_iterator /
         // dict_keyiterator / map / filter / zip / enumerate / reversed. It is
@@ -3502,7 +3502,7 @@ function pyAContains(x, y) {
     }
     if (typeof y == "string") { return y.indexOf(pyToStr(x)) >= 0 }
     if (pyIsDict(y)) { return pyDictFind(y["keys"], x) >= 0 }
-    if (pyIsDView(y)) { return pyDViewHas(y, x) }
+    if (typeof y == "object" && pyIsDView(y)) { return pyDViewHas(y, x) }
     // A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
     // rule. The scan STOPS at the match rather than draining, so
     // `it = iter(xs); 1 in it; list(it)` leaves the rest.
@@ -3691,9 +3691,10 @@ function js_pybin(opv, l, r) {
         }
         return pyAContains(l, r) == want
     }
-    // A set-like view's set algebra takes any iterable on either side.
-    if ((op == "&" || op == "|" || op == "-" || op == "^") && (pyDViewSetLike(l) || pyDViewSetLike(r)) &&
-        pyInstClassOf(l) === null && pyInstClassOf(r) === null && pyIsIterable(l) && pyIsIterable(r)) {
+    // A set-like view's set algebra takes any iterable on either side; a pair
+    // with no object in it skips the test.
+    if ((typeof l == "object" || typeof r == "object") && (op == "&" || op == "|" || op == "-" || op == "^") &&
+        (pyDViewSetLike(l) || pyDViewSetLike(r)) && pyInstClassOf(l) === null && pyInstClassOf(r) === null && pyIsIterable(l) && pyIsIterable(r)) {
         return pyASetBin(op, js_pyset_new(l), js_pyset_new(r))["v"]
     }
     var sb = pyASetBin(op, l, r)
@@ -4647,7 +4648,7 @@ function js_pybool(v) {
     if (els !== null) { return els.length > 0 }
     if (pyIsArr(v)) { return v.length > 0 }
     if (pyIsDict(v)) { return v["keys"].length > 0 }
-    if (pyIsDView(v)) { return pyDViewLen(v) > 0 }
+    if (typeof v == "object" && pyIsDView(v)) { return pyDViewLen(v) > 0 }
     return pyATruthy(v)
 }
 
@@ -4936,7 +4937,7 @@ function pyElemsOf(v) {
     if (pyIsArr(v)) { return v }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
-    if (pyIsDView(v)) { return pyDViewElems(v) }
+    if (typeof v == "object" && pyIsDView(v)) { return pyDViewElems(v) }
     var it = pyAUserIter(v)
     if (it !== undefined) { return pyADrainIter(it) }
     throw pyExcInstance("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
@@ -6593,7 +6594,7 @@ function js_pylenof(v) {
     if (typeof v == "string") { return pyStrLen(v) }
     if (pyIsArr(v)) { return v.length }
     if (pyIsDict(v)) { return v["keys"].length }
-    if (pyIsDView(v)) { return pyDViewLen(v) }
+    if (typeof v == "object" && pyIsDView(v)) { return pyDViewLen(v) }
     pyRaiseExc("TypeError", "object of type '" + pyTypeName(v) + "' has no len()")
     return 0
 }
@@ -6628,7 +6629,7 @@ function js_pyiterof(v) {
     if (pyIsArr(v)) { return v }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
-    if (pyIsDView(v)) { return pyDViewElems(v) }
+    if (typeof v == "object" && pyIsDView(v)) { return pyDViewElems(v) }
     var it = pyAUserIter(v)
     if (it !== undefined) { return pyADrainIter(it) }
     pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
@@ -7124,7 +7125,7 @@ function js_pytruthy__raw(v) {
     if (els !== null) { return els.length > 0 }
     if (pyIsArr(v)) { return v.length > 0 }
     if (pyIsDict(v)) { return v["keys"].length > 0 }
-    if (pyIsDView(v)) { return pyDViewLen(v) > 0 }
+    if (typeof v == "object" && pyIsDView(v)) { return pyDViewLen(v) > 0 }
     return pyDTruthy(v)
 }
 
@@ -8052,7 +8053,7 @@ function pyDMethodCall(target, name, args, kw) {
         }
     }
     // A set-like dict view's one method, isdisjoint(iterable).
-    if (pyIsDView(target)) {
+    if (typeof target == "object" && pyIsDView(target)) {
         if (name != "isdisjoint" || !pyDViewSetLike(target)) {
             throw pyExcInstance("AttributeError", "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
         }
