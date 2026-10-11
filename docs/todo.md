@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-370** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-373** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -129,37 +129,32 @@ name: sqrt" (the compiler answers both).
 
 # GO — Go  (oracle: `go run`)
 
-### T-240 go: a value of a defined non-struct type is the underlying value · P2 · GO · IN PROGRESS (GO+SH worker, round 10) [V]
-`type MyInt int; var v interface{} = MyInt(4); _ = v.(int)` succeeds in all engines; go
-panics. Same family: int vs int64, rune vs int32 in type switches/asserts. Value-model:
-see T-081.
-
-### T-266 go: pointers, nil typed values and panic values in fmt and panics · P2 · GO · IN PROGRESS (GO+SH worker, round 10) [V]
-A pointer to a struct is the struct: `&T{}.(T)` does not panic (go `interface {} is
-*main.T, not main.T`), `%#v` of `&T{}` prints `main.T{...}` (go `&main.T{...}`). A nil
-chan/func/pointer operand reads as a nil interface (`%T` prints `<nil>`); `%T` of a
-func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` where
-llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
-0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
-
-### T-361 go: pointer to a slice; package var init order; interface dispatch on defined types · P1 · GO · IN PROGRESS (GO+SH worker, round 10) [V]
-`xs := []int{}; p := &xs; *p = append(*p, 1); add(&xs)` (`func add(p *[]int)`) prints
-`0 1`, go `2 2` (makeAddrVar returns the slice header, not a cell; also `ps :=
-&stack; ps.Push(9)`). `var g = f()` before `func f`: "unknown name: f" (go initialises
-package vars by dependency). `var d D = C(1); d.Desc()` with Desc on two defined
-non-struct types: "unknown method 'Desc'" (the value carries no runtime type - T-240).
-`go run tests/go-test-full.go` fails pn1-pn3 under go 1.27 (panic(nil) needs
-GODEBUG=panicnil=0 with go.mod's go 1.16; make the check self-describing or assert
-the go 1.21+ answer).
-
-### T-365 go: `for range` over a slice is ~140k instructions per iteration natively · P2 · GO · OPEN [V]
+### T-365 go: `for range` over a slice is ~140k instructions per iteration natively · P2 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
 `for _, x := range xs` over 3 elements: ~413k instructions per call (13,996M vs 1,594M
 for a plain call, 30k calls), ~8x the collections - js_gorange appears to normalise
 into a keys/vals dict on every range. Profile and fix; consider a bench row.
 
-### T-366 go: variadic calls build the slice object expensively · P3 · GO · OPEN [V]
+### T-366 go: variadic calls build the slice object expensively · P3 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
 ~40k instructions per variadic call remain: emitSlOf builds the slice with obj_new, 6
 js_set calls and a scope_get of $slclass. Build it in one floor/layer-2 call.
+
+### T-370 go: runtime types where the static type is not tracked · P2 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
+(a) generic `Show[T any](Blue)` prints 2 (go Blue: a type parameter has no runtime
+type); (b) `map[any]int{MyInt(1): 1, 1: 2}` has len 1 (go 2: key boxing needs the
+map's key type at every index site); (c) values reaching an interface through struct
+fields of interface type, channel sends, user-method parameters go in unboxed;
+(d) imported packages' defined types are not boxed; (e) `var x any = &T{1}; x.(T)`
+does not panic (pointer boxes at every interface store - the "&P{1} is P{1}" model);
+`%T` of a named func / func literal lacks the signature; `%T` of `&n` with n from an
+untyped constant.
+
+### T-371 go: native float multiply on a defined float type; method values; value-receiver method sets · P1 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
+`type Circ float64; func (c Circ) A() float64 { return 3 * float64(c) }`: the native
+build fails, unresolved `js_jfmul` (emitTypedBin uses floExt; runtime.c says nothing
+emits it) - go prints 6. Interpreter only: `c := Color(1); f := c.String; f()` "call of
+a non function: f". All engines: `fmt.Println(*t)` where String has a pointer receiver
+calls String (go prints `{5}`). Interpreter: `strings.Join` "unknown name: strings" -
+check the strings package's coverage in both halves.
 
 ---
 
@@ -186,9 +181,9 @@ contains, sublist, any/every, fold/reduce, sort, reversed, ...).
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-362 bash: a scalar declared without a value · P1 · SH · IN PROGRESS (GO+SH worker, round 10) [V]
-`declare ef; declare -p ef` and `f(){ local q=1; unset q; declare -p q; }`: both
-engines "not found"; bash `declare -- ef` / `declare -- q`.
+### T-372 bash: `unset` of a caller's local reveals the outer binding · P1 · SH · IN PROGRESS (GO+SH worker, round 11) [V]
+`g=1; f3(){ unset g; }; f4(){ local g=5; f3; declare -p g; }; f4`: bash `declare --
+g="1"`; both engines "not found".
 
 ---
 
@@ -490,6 +485,10 @@ T-356 ruby: uncaught-error prefix and stream; Exception methods compiled; small 
 T-355 js: missing builtin globals and `.prototype` objects — PARTIAL 9ed9581 (prototype views, statics as values, Boolean, Object.is); Date/Function/native-code spelling DECLINED (clock, runtime compilation, no source kept)
 T-049 js: `Symbol.iterator` — DONE d7710ab (symbols as objects, no floor tag; limits in T-369)
 T-048 js: `with` — DONE 3a11a57 (lexical lowering + runtime chain walk; exact without an object-backed scope)
+T-362 bash: a scalar declared without a value — DONE af02bbd
+T-361 go: pointer to a slice; package var init order; interface dispatch on defined types — DONE c1375a5
+T-240 go: a value of a defined non-struct type is the underlying value — PARTIAL c1375a5 (boxed at interface stores whose static type is known); rest is T-370
+T-266 go: pointers, nil typed values and panic values in fmt and panics — PARTIAL c1375a5 (fmt of pointers/chan/func, %T of nil typed values, panic of defined types); pointer boxes at interface stores DECLINED this round as too risky (manual 7.9 model); rest in T-370
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
