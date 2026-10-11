@@ -1203,7 +1203,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // isinstance(x, str), type(x) is Dog and the class patterns of `match` all go
     // through the same machinery.
     var pyTypeNames = ["object", "type", "str", "int", "float", "bool", "list", "tuple",
-                       "dict", "set", "bytes", "function", "NoneType", "complex"]
+                       "dict", "set", "frozenset", "bytes", "function", "NoneType", "complex"]
     for (var pti = 0; pti < pyTypeNames.length; pti++) {
         hostGlobals[pyTypeNames[pti]] = {__isclass: true, __name: pyTypeNames[pti], __bases: [], __builtin: true}
     }
@@ -1221,7 +1221,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (bigIsBig(v)) { return hostGlobals["int"] }
         if (isCplx(v)) { return hostGlobals["complex"] }
         if (Array.isArray(v)) { return hostGlobals["list"] }
-        if (isSet(v)) { return hostGlobals["set"] }
+        if (isSet(v)) { return hostGlobals[v.__frozen === true ? "frozenset" : "set"] }
         if (isDict(v)) { return hostGlobals["dict"] }
         // CPython's type(gen).__name__, and the name its AttributeError uses.
         if (isGen(v)) { return pyBuiltinTypeObj("generator") }
@@ -1359,6 +1359,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 args = pyKwPos("complex", args, named, ["real", "imag"], 0)
                 if (args[0] === undefined) { args[0] = 0 }
             }
+            else if (name == "bytes") { args = pyKwPos("bytes", args, named, ["source", "encoding", "errors"], 0) }
             else if (name != "dict" && name != "type") { pyListErr("TypeError", name + "() takes no keyword arguments") }
         }
         var v = args.length > 0 ? args[0] : undefined
@@ -1382,9 +1383,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "bool") { return pytruthy(v) }
         if (name == "list") { return args.length == 0 ? [] : iterToList(v).slice(0) }
         if (name == "tuple") { return args.length == 0 ? [] : iterToList(v).slice(0) }
-        if (name == "set") {
+        if (name == "set" || name == "frozenset") {
             var out = newSet()
             if (args.length > 0) { var a = iterToList(v); for (var i = 0; i < a.length; i++) { setAdd(out, a[i]) } }
+            if (name == "frozenset") { pyFreeze(out) }
             return out
         }
         // dict(mapping_or_pairs=(), **kw): the source is read by update()'s rules.
@@ -1399,6 +1401,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "type") { return pyTypeOf(v) }
         if (name == "complex") { return pyComplexNew(args) }
+        if (name == "bytes") { return pyBytesNew(args) }
         fail("TypeError: cannot construct " + name)
     }
     // A builtin's arguments as positionals: the keyword arguments of NAMES are
@@ -2143,7 +2146,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "string") { return pySIsStrMethod(name) }
         if (Array.isArray(o)) { return pyIsListMethod(name) }
         // A set is a dict whose keys are its members, so it is asked FIRST.
-        if (isSet(o)) { return pyIsSetMethod(name) }
+        if (isSet(o)) { return pyIsSetMethod(name) && !(o.__frozen === true && pySetMutator(name)) }
         if (isDict(o)) { return pyIsDictMethod(name) }
         return false
     }
@@ -2322,6 +2325,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // membership, len and insertion order come from the dict machinery unchanged.
     function newSet() { return {__dict: true, __set: true, keys: [], vals: []} }
     function isSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
+    // A frozenset is a set carrying __frozen: hashable, and without the methods
+    // that mutate. Its set algebra answers a frozenset when the frozenset is the
+    // left operand or the receiver, as CPython's does. Twin of the "__frozen"
+    // prop in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyFreeze(s2) { s2.__frozen = true; return s2 }
+    function pySetMutator(name) {
+        if (name == "add" || name == "remove" || name == "discard" || name == "pop") { return true }
+        if (name == "clear" || name == "update" || name == "intersection_update") { return true }
+        return name == "difference_update" || name == "symmetric_difference_update"
+    }
     function setAdd(s2, v) {
         pyHashCheck(v, true)
         if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null }
@@ -2347,14 +2360,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python programs do. So the array stays hashable until a real tuple type
     // exists, and the halves are made to agree on it instead (core.keyEq below,
     // pyKeyEq in languages/lib/python-rt.metajs, dictKeyEq in abnf/jsrt.go).
-    // bytearray and frozenset do not exist in this subset at all.
+    // A frozenset is hashable; bytearray does not exist in this subset at all.
     //
     // Twins: pyHashCheck / pyHashName in languages/lib/python-rt.metajs and
     // pyHashCheck / pyUnhashName in abnf/jsrt.go.
     function pyHashName(v) {
         if (v === null || v === undefined) { return "" }
         if (typeof v != "object") { return "" }
-        if (v.__set === true) { return "set" }
+        if (v.__set === true) { return v.__frozen === true ? "" : "set" }
         if (v.__dict === true) { return "dict" }
         return ""
     }
@@ -2470,6 +2483,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // pyEqual). See pyHashCheck above for why the array cannot instead be refused
         // as unhashable.
         if (Array.isArray(a) && Array.isArray(b)) { return pyEq(a, b) }
+        // A frozenset key, by its members.
+        if (isSet(a) && isSet(b)) { return pyEq(a, b) }
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
         return floVal(a) == floVal(b)
     }
@@ -2679,13 +2694,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return out + "]"
         }
         if (isSet(v)) {
-            if (v.keys.length == 0) { return "set()" }
+            var fz = v.__frozen === true
+            if (v.keys.length == 0) { return fz ? "frozenset()" : "set()" }
             var out3 = "{"
             for (var j = 0; j < v.keys.length; j++) {
                 if (j > 0) out3 += ", "
                 out3 += prepr(v.keys[j])
             }
-            return out3 + "}"
+            return fz ? "frozenset(" + out3 + "})" : out3 + "}"
         }
         if (isDict(v)) {
             var out2 = "{"
@@ -5038,6 +5054,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // than the two method sets, because pop/clear/copy/update are on BOTH
             // types.
             if (isSet(target)) {
+                if (target.__frozen === true && pySetMutator(name)) { pyAttrErr(target, name) }
                 if (pyIsSetMethod(name)) { return pySetMethod(target, name, args) }
                 if (pyIsDictOnly(name)) { pyAttrErr(target, name) }
                 if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
@@ -5060,6 +5077,45 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("method call ." + name + "() on " + pstr(target))
     }
 
+    // bytes(source, encoding, errors), with the keywords already in their slots:
+    // a list of byte values in this value model - a str under an encoding
+    // (str.encode), a count of zero bytes, or an iterable of ints in range(256).
+    // None and an absent argument are the same value here. Twin of rt.pyBytesNew
+    // in abnf/jsrtpysub.go and js_pybytes in lib/python-rt.metajs.
+    function pyBytesNew(args) {
+        if (args.length > 3) { pyListErr("TypeError", "bytes() takes at most 3 arguments (" + args.length + " given)") }
+        var v = anytype
+        v = pyArgAt(args, 0)
+        var enc = pyArgAt(args, 1)
+        var errs = pyArgAt(args, 2)
+        if (typeof v == "string") {
+            if (enc === undefined) { pyListErr("TypeError", "string argument without an encoding") }
+            return pyStrEncode(v, enc, errs)
+        }
+        if (enc !== undefined) { pyListErr("TypeError", "encoding without a string argument") }
+        if (errs !== undefined) { pyListErr("TypeError", "errors without a string argument") }
+        var out = []
+        if (args.length == 0) { return out }
+        var tn = pyTypeOf(v).__name
+        if (tn == "int" || tn == "bool") {
+            var n = floVal(v)
+            if (n < 0) { pyListErr("ValueError", "negative count") }
+            for (var i = 0; i < n; i++) { out.push(0) }
+            return out
+        }
+        if (tn == "NoneType" || tn == "float" || tn == "complex") {
+            pyListErr("TypeError", "cannot convert '" + tn + "' object to bytes")
+        }
+        var src = iterToList(v)
+        for (var j = 0; j < src.length; j++) {
+            var et = pyTypeOf(src[j]).__name
+            if (et != "int" && et != "bool") { pyListErr("TypeError", "'" + et + "' object cannot be interpreted as an integer") }
+            var b = floVal(src[j])
+            if (b < 0 || b > 255) { pyListErr("ValueError", "bytes must be in range(0, 256)") }
+            out.push(b)
+        }
+        return out
+    }
     // bytes.decode(encoding="utf-8") of a list of byte values: UTF-8 (strict,
     // with CPython's UnicodeDecodeError texts), ASCII or Latin-1, and
     // LookupError for any other codec. Twin of rt.pyBytesDecode in abnf/jsrt.go
@@ -5478,7 +5534,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return undefined
         }
         if (name == "clear") { pyDictClear(s); return undefined }
-        if (name == "copy") { return pySetOf(s.keys) } // SHALLOW.
+        if (name == "copy") { return pySetLike(s, pySetOf(s.keys)) } // SHALLOW.
         // pop() removes and returns an ARBITRARY element - CPython promises no
         // order at all. This project's sets keep insertion order (it is what
         // makes a set render deterministically, which the byte-identical
@@ -5517,7 +5573,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "union") {
             var out = pySetOf(s.keys)
             pySetAddAll(out, args)
-            return out
+            return pySetLike(s, out)
         }
         if (name == "update") {
             pySetAddAll(s, args)
@@ -5550,7 +5606,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // symmetric_difference (exactly one) answer a NEW set; each _update form
         // writes the same answer back into the receiver and returns None.
         if (name == "intersection" || name == "difference" || name == "symmetric_difference") {
-            return pySetAlgebra(s, name, args)
+            return pySetLike(s, pySetAlgebra(s, name, args))
         }
         if (name == "intersection_update" || name == "difference_update" || name == "symmetric_difference_update") {
             var upd = pySetAlgebra(s, name.substring(0, name.length - 7), args)
@@ -5582,6 +5638,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             out = kept
         }
+        return out
+    }
+    // A new set from one of s's methods: a frozenset when s is one.
+    function pySetLike(s, out) {
+        if (s.__frozen === true) { pyFreeze(out) }
         return out
     }
     function pySetOf(els) {
@@ -5733,6 +5794,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < l.keys.length; i++) { if (dictFind(r, l.keys[i]) < 0) { setAdd(out, l.keys[i]) } }
             for (i = 0; i < r.keys.length; i++) { if (dictFind(l, r.keys[i]) < 0) { setAdd(out, r.keys[i]) } }
         }
+        if (l.__frozen === true) { pyFreeze(out) }
         return out
     }
     // s <= t is "every member of s is a member of t"; s < t adds "and t is
@@ -9712,7 +9774,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(o)) { return }
         var tn = pyTypeOf(o).__name
         if (tn == "NoneType" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
-            tn == "list" || tn == "dict" || tn == "set" || tn == "complex") {
+            tn == "list" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex") {
             pyRaise(pyMakeExc("AttributeError", ["'" + tn + "' object has no attribute '" + name +
                                                  "' and no __dict__ for setting new attributes"]))
         }
@@ -9838,7 +9900,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // hands out, so `[].__class__ is list` holds.
         if (pyBuiltinAttr(o, name)) { return pyBoundBuiltin(o, name) }
         if (name == "__class__") { return pyTypeOf(o) }
-        if (isSet(o)) { pyRaise(pyMakeExc("AttributeError", ["'set' object has no attribute '" + name + "'"])) }
+        if (isSet(o)) { pyAttrErr(o, name) }
         if (typeof o == "object" && hasOwn(o, name)) {
             if (o[name] === pyDeleted) { fail("AttributeError: '" + name + "'") }
             return o[name]

@@ -3426,6 +3426,12 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 				return rt.pyEqual(aa, bb)
 			}
 		}
+		// A frozenset key, by its members.
+		if _, isA := pySetElems(a); isA {
+			if _, isB := pySetElems(b); isB {
+				return rt.pyEqual(a, b)
+			}
+		}
 	}
 	// GO: a struct or array key compares BY VALUE (goValueEq), because both are
 	// value types and Go's == on them is element-by-element. Neither is
@@ -3726,7 +3732,11 @@ func (rt *jsrt) pyString(v interface{}) string {
 			return "<class '" + name + "'>"
 		}
 		if els, ok := pySetElems(t); ok {
+			fz := pySetFrozen(t)
 			if len(els.elems) == 0 {
+				if fz {
+					return "frozenset()"
+				}
 				return "set()" // {} is the empty DICT
 			}
 			out := "{"
@@ -3735,6 +3745,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 					out += ", "
 				}
 				out += rt.pyRepr(e)
+			}
+			if fz {
+				return "frozenset(" + out + "})"
 			}
 			return out + "}"
 		}
@@ -15836,6 +15849,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return boolH(rt.pyContains(l, r) == want)
 			}
 			if v, ok := rt.pySetBin(op, l, r); ok {
+				v = pyFreezeLike(v, pySetFrozen(l))
 				return w(v)
 			}
 			switch op {
@@ -18140,6 +18154,35 @@ func newPySet(elems *jsArray) *jsObject {
 	return o
 }
 
+// A frozenset is a set carrying "__frozen": hashable, and without the methods
+// that mutate. Its set algebra answers a frozenset when the frozenset is the left
+// operand or the receiver, as CPython's does. Twins: pyFreeze / pySetMutator in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pySetFrozen(v interface{}) bool {
+	o, isObj := v.(*jsObject)
+	return isObj && o.props["__frozen"] == true
+}
+
+// pyFreezeLike marks r a frozenset when r is a set and the operand it came from
+// is one.
+func pyFreezeLike(r interface{}, frozen bool) interface{} {
+	if o, isObj := r.(*jsObject); isObj && frozen {
+		if _, isSet := pySetElems(o); isSet {
+			o.set("__frozen", true)
+		}
+	}
+	return r
+}
+
+func pySetMutator(name string) bool {
+	switch name {
+	case "add", "remove", "discard", "pop", "clear", "update",
+		"intersection_update", "difference_update", "symmetric_difference_update":
+		return true
+	}
+	return false
+}
+
 func pySetElems(v interface{}) (*jsArray, bool) {
 	o, isObj := v.(*jsObject)
 	if !isObj {
@@ -18187,14 +18230,17 @@ func (rt *jsrt) pySetAdd(els *jsArray, v interface{}) {
 // and the two directions of that mistake are not symmetric:
 // treating a tuple as hashable only accepts a program CPython would reject,
 // while treating a list as unhashable would abort `{(1, 2), (3, 4)}` and
-// `d[i, j]`, which CPython accepts. bytearray and frozenset are not in this
-// subset at all.
+// `d[i, j]`, which CPython accepts. A frozenset is hashable; bytearray is not in
+// this subset at all.
 func pyUnhashName(v interface{}) string {
 	o, isObj := v.(*jsObject)
 	if !isObj {
 		return ""
 	}
 	if tag, has := o.props["__set"]; has && tag == true {
+		if o.props["__frozen"] == true {
+			return ""
+		}
 		return "set"
 	}
 	if tag, has := o.props["__dict"]; has && tag == true {
@@ -19476,7 +19522,7 @@ func (rt *jsrt) pyNoDictAttr(obj interface{}, name string) {
 		tn = "complex"
 	}
 	switch tn {
-	case "NoneType", "int", "float", "bool", "str", "list", "dict", "set", "complex":
+	case "NoneType", "int", "float", "bool", "str", "list", "dict", "set", "frozenset", "complex":
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+tn+"' object has no attribute '"+name+"' and no __dict__ for setting new attributes")})
 	}
@@ -19713,8 +19759,13 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	// does - and the two "only" lists are narrower than the two method sets,
 	// because pop/clear/copy/update are on BOTH types.
 	if els, isSet := pySetElems(target); isSet {
+		fz := pySetFrozen(target)
+		if fz && pySetMutator(name) {
+			panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+				"'frozenset' object has no attribute '"+name+"'")})
+		}
 		if pyIsSetMethod(name) {
-			return rt.pySetMethod(els, name, args)
+			return pyFreezeLike(rt.pySetMethod(els, name, args), fz)
 		}
 		if pyIsDictOnly(name) {
 			panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
@@ -20407,7 +20458,7 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	// A set is a dict whose keys are its members in the interpreter half, so it
 	// is asked FIRST here too and the two name sets stay disjoint.
 	if _, isSet := pySetElems(target); isSet {
-		return pyIsSetMethod(name)
+		return pyIsSetMethod(name) && !(pySetFrozen(target) && pySetMutator(name))
 	}
 	if _, _, isDict := dictParts(target); isDict {
 		return pyIsDictMethod(name)
@@ -21195,6 +21246,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 			}
 		}
 		if _, isSet := pySetElems(t); isSet {
+			if t.props["__frozen"] == true {
+				return "frozenset"
+			}
 			return "set"
 		}
 		if _, _, isDict := dictParts(t); isDict {

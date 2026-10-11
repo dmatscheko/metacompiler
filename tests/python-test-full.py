@@ -3813,6 +3813,44 @@ def s68():
     check("sord4", err(lambda: I(1) < v[0]) == "TypeError: '<' not supported between instances of 'I' and 'str'")
     check("sord5", S("a") < S("b") and S("a") < "b" and I(3) < 4 and "a" < S("b") and 2 < I(3))
 
+# ===== SECTION 69: bytes(...) and frozenset =====
+# bytes(...) builds the bytes value (a list of byte values here) from a count, a
+# str under an encoding or an iterable of ints in range(256). frozenset is a
+# hashable set without the mutating methods; its algebra answers a frozenset
+# when it is the left operand or the receiver.
+def s69():
+    def err(f):
+        try:
+            f()
+            return "no error"
+        except Exception as e:
+            return type(e).__name__ + ": " + str(e)
+    v = [3, "hé", [104, 105], None, -1, 1.5, [256], ["a"], 0]
+    check("byn1", list(bytes(v[0])) == [0, 0, 0] and list(bytes(v[1], "utf-8")) == [104, 195, 169] and list(bytes(v[2])) == [104, 105])
+    check("byn2", list(bytes()) == [] and list(bytes(v[8])) == [] and list(bytes(True)) == [0] and list(bytes(range(3))) == [0, 1, 2])
+    check("byn3", list(bytes(v[1], encoding="latin-1")) == [104, 233] and list(bytes(v[1], "ascii", "replace")) == [104, 63])
+    check("byn4", err(lambda: bytes(v[1])) == "TypeError: string argument without an encoding" and err(lambda: bytes(v[0], "utf-8")) == "TypeError: encoding without a string argument")
+    check("byn5", err(lambda: bytes(v[3])) == "TypeError: cannot convert 'NoneType' object to bytes" and err(lambda: bytes(v[5])) == "TypeError: cannot convert 'float' object to bytes")
+    check("byn6", err(lambda: bytes(v[4])) == "ValueError: negative count" and err(lambda: bytes(v[6])) == "ValueError: bytes must be in range(0, 256)")
+    check("byn7", err(lambda: bytes(v[7])) == "TypeError: 'str' object cannot be interpreted as an integer" and err(lambda: bytes(v[1], "ascii")).startswith("UnicodeEncodeError: 'ascii' codec"))
+    check("byn8", isinstance(b"x", bytes) == isinstance(bytes(v[2]), bytes) and bytes(v[2]).decode() == "hi")
+    a = frozenset([1, 2, 2])
+    check("fzs1", repr(a) == "frozenset({1, 2})" and repr(frozenset()) == "frozenset()" and str(frozenset("aa")) == "frozenset({'a'})" and len(a) == 2)
+    check("fzs2", type(a).__name__ == "frozenset" and isinstance(a, frozenset) and not isinstance(a, set) and not isinstance({1}, frozenset))
+    check("fzs3", a == {1, 2} and {2, 1} == a and 1 in a and 5 not in a and a < {1, 2, 3} and {1} < a)
+    check("fzs4", type(a | {3}).__name__ == "frozenset" and type({3} | a).__name__ == "set" and a & {2} == {2} and a - {1} == {2})
+    check("fzs5", type(a.union([3])).__name__ == "frozenset" and type(a.copy()).__name__ == "frozenset" and a.symmetric_difference([1, 5]) == {2, 5})
+    d = {a: "fs"}
+    check("fzs6", d[frozenset([2, 1])] == "fs" and d.get(frozenset([1])) is None and frozenset([1, 2]) in d)
+    s = {a, frozenset([2, 1]), frozenset([1])}
+    check("fzs7", len(s) == 2 and frozenset([1]) in s and {1, 2} in s and repr(frozenset([frozenset([1])])) == "frozenset({frozenset({1})})")
+    check("fzs8", err(lambda: a.add(3)) == "AttributeError: 'frozenset' object has no attribute 'add'" and err(lambda: a.discard(1)) == "AttributeError: 'frozenset' object has no attribute 'discard'")
+    check("fzs9", err(lambda: a.update([1])) == "AttributeError: 'frozenset' object has no attribute 'update'" and not hasattr(a, "pop") and hasattr(a, "union"))
+    check("fzs10", err(lambda: {a: 1}[{1, 2}]) == "TypeError: cannot use 'set' as a dict key (unhashable type: 'set')" and err(lambda: frozenset(1)) == "TypeError: 'int' object is not iterable")
+    b = a
+    b |= {9}
+    check("fzs11", a == {1, 2} and b == {1, 2, 9} and type(b).__name__ == "frozenset")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3882,5 +3920,6 @@ def main():
     s66() # SECTION-CALL 66
     s67() # SECTION-CALL 67
     s68() # SECTION-CALL 68
+    s69() # SECTION-CALL 69
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

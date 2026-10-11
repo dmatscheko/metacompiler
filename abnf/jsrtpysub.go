@@ -436,3 +436,91 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV interface{}) string {
 	}
 	return sb.String()
 }
+
+// pyBytesNew is bytes(source, encoding, errors), with the keywords already in
+// their slots: a list of byte values in this value model - a str under an
+// encoding (str.encode), a count of zero bytes, or an iterable of ints in
+// range(256). None and an absent argument are the same value here. Twins:
+// pyBytesNew in languages/python-interpreter.abnf, js_pybytes in
+// lib/python-rt.metajs.
+func (rt *jsrt) pyBytesNew(args []interface{}) interface{} {
+	raise := func(cls, msg string) { panic(&jsThrown{value: rt.pyExcInstance(cls, msg)}) }
+	if len(args) > 3 {
+		raise("TypeError", fmt.Sprintf("bytes() takes at most 3 arguments (%d given)", len(args)))
+	}
+	at := func(i int) interface{} {
+		if i < len(args) {
+			return args[i]
+		}
+		return jsUndef
+	}
+	v, enc, errs := at(0), at(1), at(2)
+	if s, ok := v.(string); ok {
+		if enc == jsUndef {
+			raise("TypeError", "string argument without an encoding")
+		}
+		return rt.pysEncode(s, enc, errs)
+	}
+	if enc != jsUndef {
+		raise("TypeError", "encoding without a string argument")
+	}
+	if errs != jsUndef {
+		raise("TypeError", "errors without a string argument")
+	}
+	out := &jsArray{}
+	if len(args) == 0 {
+		return out
+	}
+	switch tn := pyTypeName(rt, v); tn {
+	case "int", "bool":
+		n := rt.toNumber(v)
+		if n < 0 {
+			raise("ValueError", "negative count")
+		}
+		for i := 0; float64(i) < n; i++ {
+			out.elems = append(out.elems, float64(0))
+		}
+		return out
+	case "NoneType", "float", "complex":
+		raise("TypeError", "cannot convert '"+tn+"' object to bytes")
+	}
+	for _, e := range rt.pyElemsOf(v) {
+		et := pyTypeName(rt, e)
+		if et != "int" && et != "bool" {
+			raise("TypeError", "'"+et+"' object cannot be interpreted as an integer")
+		}
+		b := rt.toNumber(e)
+		if b < 0 || b > 255 {
+			raise("ValueError", "bytes must be in range(0, 256)")
+		}
+		out.elems = append(out.elems, b)
+	}
+	return out
+}
+
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		// bytes(...), bound as [positionals, keywords].
+		m["js_pybytes"] = func(a []uint64) uint64 {
+			el := rt.unwrap(a[0]).(*jsArray).elems
+			pos := el[0].(*jsArray).elems
+			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
+				pos = rt.pyKwPos("bytes", pos, el[1], []string{"source", "encoding", "errors"}, 0)
+			}
+			return rt.wrap(rt.pyBytesNew(pos))
+		}
+		// frozenset(iterable=()). Twins: pyConvert in
+		// languages/python-interpreter.abnf, js_pyfrozenset in lib/python-rt.metajs.
+		m["js_pyfrozenset"] = func(a []uint64) uint64 {
+			out := &jsArray{}
+			if v := rt.unwrap(a[0]); !isUndefOrNull(v) {
+				for _, e := range rt.pyElemsOf(v) {
+					rt.pySetAdd(out, e)
+				}
+			}
+			fs := newPySet(out)
+			fs.set("__frozen", true)
+			return rt.wrap(fs)
+		}
+	})
+}

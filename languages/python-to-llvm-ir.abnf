@@ -4129,6 +4129,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyTypeBuiltin["$set"] = true
     pyTypeBuiltin["$tuple"] = true
     pyTypeBuiltin["$complex"] = true
+    pyTypeBuiltin["$bytes"] = true
+    pyTypeBuiltin["$frozenset"] = true
     // `type` is a class too: `str(type)` is <class 'type'>. Calling it still runs
     // the same js_pytype forwarder, through __conv.
     pyTypeBuiltin["$type"] = true
@@ -4313,6 +4315,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declKwBuiltin(b, "complex", "js_pycomplexnew", [])
         b = declBuiltin(b, "repr", "js_pyrepr", 1)
         b = declBuiltinDflt(b, "set", "js_pyset_new", emitNoArgList)
+        b = declBuiltinDflt(b, "frozenset", "js_pyfrozenset", emitNoArgList)
+        b = declKwBuiltin(b, "bytes", "js_pybytes", [])
         b = declKwBuiltin(b, "sum", "js_pysum", [])
         b = declBuiltinDflt(b, "tuple", "js_pylist", emitNoArgList)
         // ord(c) / chr(n): hostGlobals in python-interpreter.abnf, js_pyord /
@@ -4372,7 +4376,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // object. js_pybuiltincls is name-generic in both compiled engines
         // (rt.pyBuiltinClass in abnf/jsrt.go, pyBuiltinClass in
         // lib/python-rt.metajs), so only the binding is needed.
-        var pyPlainTypes = ["object", "bytes", "NoneType", "function"]
+        var pyPlainTypes = ["object", "NoneType", "function"]
         for (var pt0 = 0; pt0 < pyPlainTypes.length; pt0++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pyPlainTypes[pt0]),
                                          callExt(b, "js_pybuiltincls", [emitStr(b, pyPlainTypes[pt0])])])

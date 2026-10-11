@@ -247,6 +247,8 @@ function pyKeyEq(a, b) {
     // string and number keys that are almost every key.
     if (typeof a == "object") {
         if (Array.isArray(a) && Array.isArray(b)) { return pyEqual(a, b) }
+        // A frozenset key, by its members.
+        if (pySetElemsOf(a) !== null && pySetElemsOf(b) !== null) { return pyEqual(a, b) }
     }
     return false
 }
@@ -261,11 +263,14 @@ function pyKeyEq(a, b) {
 // The wording differs between the two positions. dict and set are refused; the
 // ARRAY is not, because a tuple is an array here and refusing it would abort
 // `{(1,2)}` and `d[i, j]`, which CPython accepts - see the note at
-// python-interpreter.abnf's pyHashCheck. bytearray and frozenset are not in this
-// subset at all.
+// python-interpreter.abnf's pyHashCheck. A frozenset is hashable; bytearray is
+// not in this subset at all.
 function pyHashName(v) {
     if (!pyIsObj(v)) { return "" }
-    if (v["__set"] === true) { return "set" }
+    if (v["__set"] === true) {
+        if (v["__frozen"] === true) { return "" }
+        return "set"
+    }
     if (v["__dict"] === true) { return "dict" }
     return ""
 }
@@ -338,6 +343,27 @@ function pyDictSet(d, k, v) {
 // the two answer the same question for every value this model builds.
 
 function pyNewSet(elems) { return {__set: true, elems: elems} }
+
+// Go: pySetFrozen / pyFreezeLike / pySetMutator. A frozenset is a set carrying
+// __frozen: hashable, and without the methods that mutate. Its set algebra
+// answers a frozenset when the frozenset is the left operand or the receiver.
+function pySetFrozen(v) { return pyIsObj(v) && v["__frozen"] === true }
+function pyFreezeLike(r, frozen) {
+    if (frozen && pySetElemsOf(r) !== null) { r["__frozen"] = true }
+    return r
+}
+function pySetMutator(name) {
+    if (name == "add" || name == "remove" || name == "discard" || name == "pop") { return true }
+    if (name == "clear" || name == "update" || name == "intersection_update") { return true }
+    return name == "difference_update" || name == "symmetric_difference_update"
+}
+
+// Go: js_pyfrozenset. frozenset(iterable=()).
+function js_pyfrozenset(src) {
+    var fs = js_pyset_new(src)
+    fs["__frozen"] = true
+    return fs
+}
 
 function pySetElemsOf(v) {
     if (!rtTag(v, "__set")) { return null }
@@ -570,12 +596,17 @@ function pyStr(v) {
     if (pyIsObj(v)) {
         var els = pySetElemsOf(v)
         if (els != null) {
-            if (els.length == 0) { return "set()" } // {} is the empty DICT
+            var fz = v["__frozen"] === true
+            if (els.length == 0) {
+                if (fz) { return "frozenset()" }
+                return "set()" // {} is the empty DICT
+            }
             var so = "{"
             for (var j = 0; j < els.length; j++) {
                 if (j > 0) { so = so + ", " }
                 so = so + pyRepr(els[j])
             }
+            if (fz) { return "frozenset(" + so + "})" }
             return so + "}"
         }
         if (pyIsDict(v)) {
@@ -837,7 +868,10 @@ function pyTypeName(v) {
         // class.
         if (pyIsClass(v)) { return "type" }
         if (v["__name"] !== undefined && pyInstClassOf(v) === null) { return "type" }
-        if (pySetElemsOf(v) != null) { return "set" }
+        if (pySetElemsOf(v) != null) {
+            if (v["__frozen"] === true) { return "frozenset" }
+            return "set"
+        }
         if (pyIsDict(v)) { return "dict" }
         if (pyIsCplx(v)) { return "complex" }
         // A CURSOR names its own type: CPython's list_iterator / str_iterator /
@@ -1594,7 +1628,7 @@ function pyNoDictAttr(obj, name) {
     var tn = pyTypeName(obj)
     if (pyIsCplx(obj)) { tn = "complex" }
     if (tn == "NoneType" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
-        tn == "list" || tn == "dict" || tn == "set" || tn == "complex") {
+        tn == "list" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex") {
         pyRaiseExc("AttributeError", "'" + tn + "' object has no attribute '" + name +
                    "' and no __dict__ for setting new attributes")
     }
@@ -3029,7 +3063,7 @@ function js_pybin(opv, l, r) {
         return pyAContains(l, r) == want
     }
     var sb = pyASetBin(op, l, r)
-    if (sb !== null) { return sb["v"] }
+    if (sb !== null) { return pyFreezeLike(sb["v"], pySetFrozen(l)) }
     // The bit operators, at ARBITRARY PRECISION - see pyABitBin above.
     //
     // Three tiers, and the first two exist so nothing allocates on the path a
@@ -3439,6 +3473,55 @@ function js_pystrnew(args) {
         return pyBytesDecode(pos[0], pos[1])
     }
     return js_pyrxstr(pos[0])
+}
+
+// Go: js_pybytes. bytes(source, encoding, errors), bound as [positionals,
+// keywords]: a list of byte values in this value model - a str under an encoding
+// (str.encode), a count of zero bytes, or an iterable of ints in range(256). None
+// and an absent argument are the same value here.
+function js_pybytes(bound) {
+    var args = bound[0]
+    if (pyIsDict(bound[1]) && bound[1]["keys"].length > 0) {
+        args = pyKwPos("bytes", args, bound[1], ["source", "encoding", "errors"], 0)
+    }
+    if (args.length > 3) { pyRaiseExc("TypeError", "bytes() takes at most 3 arguments (" + args.length + " given)") }
+    var v = anytype
+    v = args.length > 0 ? args[0] : undefined
+    var enc = args.length > 1 ? args[1] : undefined
+    var errs = args.length > 2 ? args[2] : undefined
+    if (typeof v == "string") {
+        if (enc === undefined) { pyRaiseExc("TypeError", "string argument without an encoding") }
+        return pyStrEncode(v, enc, errs)
+    }
+    if (enc !== undefined) { pyRaiseExc("TypeError", "encoding without a string argument") }
+    if (errs !== undefined) { pyRaiseExc("TypeError", "errors without a string argument") }
+    var out = []
+    if (args.length == 0) { return out }
+    var tn = pyTypeName(v)
+    if (tn == "int" || tn == "bool") {
+        var n = pyNum(v)
+        if (n < 0) { pyRaiseExc("ValueError", "negative count") }
+        var i = 0
+        while (i < n) {
+            out.push(0)
+            i = i + 1
+        }
+        return out
+    }
+    if (tn == "NoneType" || tn == "float" || tn == "complex") {
+        pyRaiseExc("TypeError", "cannot convert '" + tn + "' object to bytes")
+    }
+    var src = pyElemsOf(v)
+    var j = 0
+    while (j < src.length) {
+        var et = pyTypeName(src[j])
+        if (et != "int" && et != "bool") { pyRaiseExc("TypeError", "'" + et + "' object cannot be interpreted as an integer") }
+        var b = pyNum(src[j])
+        if (b < 0 || b > 255) { pyRaiseExc("ValueError", "bytes must be in range(0, 256)") }
+        out.push(b)
+        j = j + 1
+    }
+    return out
 }
 
 // Go: rt.pyBytesDecode. bytes.decode(encoding="utf-8") of a list of byte values:
@@ -7094,7 +7177,11 @@ function pyDMethodCall(target, name, args, kw) {
     // because pop/clear/copy/update are on BOTH types.
     var pdEls = pySetElemsOf(target)
     if (pdEls !== null && pdEls !== undefined) {
-        if (pyIsSetMethod(name)) { return pySetMethod(pdEls, name, args) }
+        var pdFz = pySetFrozen(target)
+        if (pdFz && pySetMutator(name)) {
+            throw pyExcInstance("AttributeError", "'frozenset' object has no attribute '" + name + "'")
+        }
+        if (pyIsSetMethod(name)) { return pyFreezeLike(pySetMethod(pdEls, name, args), pdFz) }
         if (pyIsDictOnly(name)) {
             throw pyExcInstance("AttributeError",
                                 "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
@@ -7733,7 +7820,7 @@ function pyDBuiltinAttr(obj, name) {
     if (pyIsArr(obj)) { return pyIsListMethod(name) }
     // A set is a dict whose keys are its members, so it is asked FIRST.
     var els = pySetElemsOf(obj)
-    if (els !== null && els !== undefined) { return pyIsSetMethod(name) }
+    if (els !== null && els !== undefined) { return pyIsSetMethod(name) && !(pySetFrozen(obj) && pySetMutator(name)) }
     if (pyIsDict(obj)) { return pyIsDictMethod(name) }
     return false
 }
