@@ -75,14 +75,6 @@ TypeError (3.14: `int | str | 1.5`). (g) `sys` binds no module: `sys.set_int_max
 Frozen interpreter: `(3**4097).bit_length()` ~100M steps; `y >> 4499` costly; int(str) parse quadratic; bin()/format()
 slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per StringBuilder.append.
 
-### T-419 python: `object()`; the 4300-digit int→str limit · P2 · PY · IN PROGRESS (PY worker, round 16) [V]
-`object()` cannot be constructed (interpreter "cannot construct object", compiled
-"'type' object is not callable"). CPython's 4300-digit limit on int → str is not
-modelled: `str(12345678901234567890**333)` prints where python3 raises ValueError
-(sys.set_int_max_str_digits). Also: type's `__or__` (X|Y), `__new__`, `__sizeof__` on
-type objects; the `object` type object is bare. The java ratchet's -frozen peak is
-59.8M (just under 60%): split it before it grows (P3, JV).
-
 ---
 
 # RB — Ruby
@@ -485,6 +477,7 @@ T-425 php: non-callable Error, case-insensitive class names, missing-class error
 T-421 csharp: String.Format/standard numeric formats, StringComparison/SplitOptions/Normalize, System.Linq operators, remaining default contexts, target-typed new(), typed empty collections, List capacity, collection initializers (culture collation stays a loud failure) — DONE b7898d34
 T-426 php: array union, case-insensitive class names in catch/instanceof/extends, Name::class at compile time, early binding, Closure::fromCallable, builtin TypeErrors, relative callbacks in array_*, compile-time finally/break jump checks — DONE 97ee2042
 T-427 csharp: System.Math, re-enumerable iterators (fresh enumerator per GetEnumerator), foreach over user GetEnumerator, explicit-interface member shadowing — DONE 14b6e8f4
+T-419 python: object() and object's own methods/__new__, exact int**int past 4096, the 4300-digit int<->str limit, type | type unions; java/python ratchets split for the frozen step brake; __sizeof__ DECLINED (CPython allocator layout, not a rule); sys.set_int_max_str_digits moved to T-431 — DONE f43fa335
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f

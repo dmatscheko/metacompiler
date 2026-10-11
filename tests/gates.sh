@@ -65,7 +65,7 @@ done
 FULL_TIMEOUT=900
 
 # A FLOOR on the total ratchet assertion count (the files legitimately grow).
-FULL_ASSERTIONS=12023
+FULL_ASSERTIONS=12061
 
 # A CEILING on section gaps, summed per half over all languages. A gapped half
 # still reports the assertions it ran, so the total barely moves when a section
@@ -247,7 +247,7 @@ fi
 if [ "$QUICK" = 0 ]; then
     # 6 and 7 are THE ONLY GATES THAT SEE LAYER 2.
     # CLANG_MODULES is a FLOOR, like FULL_ASSERTIONS: it may grow, never shrink.
-    CLANG_MODULES=19
+    CLANG_MODULES=21
     crc=$(rc_of clang)
     held=$(grep -c 'row HELD' "$log/clang")
     ok=$(grep -c 'the clang executable agrees' "$log/clang")
