@@ -17,14 +17,14 @@ def check_true(name, got):
 
 d = {"a": 1, "b": 2, "c": 3}
 
-# ---- dict.items(): a list of [key, value] pairs in insertion order ----
+# ---- dict.items(): (key, value) tuples in insertion order ----
 its = d.items()
 check("items len", len(its), 3)
 check("first pair key", its[0][0], "a")
 check("first pair value", its[0][1], 1)
 check("third pair key", its[2][0], "c")
 check("third pair value", its[2][1], 3)
-check("items render", f"{d.items()}", "[['a', 1], ['b', 2], ['c', 3]]")
+check("items render", f"{list(d.items())}", "[('a', 1), ('b', 2), ('c', 3)]")
 
 # iterating items (single loop target, then index the pair)
 ksum = ""

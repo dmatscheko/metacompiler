@@ -133,16 +133,19 @@ func pyDecAscii(s string) string {
 }
 
 // pyOrdCheck raises CPython's TypeError for an ORDERING of two values of
-// different kinds: only numbers (bool, int, float - not complex), str, two lists
-// (a tuple is a list here) and two sets have an order. Twin of pyOrdCheck in
+// different kinds: only numbers (bool, int, float - not complex), str, two lists,
+// two tuples and two sets have an order. Twin of pyOrdCheck in
 // languages/python-interpreter.abnf and pyAOrdCheck in lib/python-rt.metajs.
 func pyOrdKind(v interface{}) byte {
-	switch v.(type) {
+	switch t := v.(type) {
 	case float64, bool, *jsPyFlo, *jsBigInt:
 		return 'n'
 	case string:
 		return 's'
 	case *jsArray:
+		if t.kind == pyTupKind {
+			return 'u'
+		}
 		return 'l'
 	}
 	if _, ok := pySetElems(v); ok {
@@ -181,6 +184,8 @@ func (rt *jsrt) pyBinTypeErr(op string, l, r, a, b interface{}) string {
 			return "can only concatenate str (not \"" + rn + "\") to str"
 		case 'l':
 			return "can only concatenate list (not \"" + rn + "\") to list"
+		case 'u':
+			return "can only concatenate tuple (not \"" + rn + "\") to tuple"
 		}
 	}
 	na, nb := pyNumTypeName(a), pyNumTypeName(b)
@@ -221,7 +226,7 @@ func (rt *jsrt) pyBinTypeErr(op string, l, r, a, b interface{}) string {
 			return ""
 		}
 		qa, qb := pyAddKind(a), pyAddKind(b)
-		seqA, seqB := qa == 's' || qa == 'l', qb == 's' || qb == 'l'
+		seqA, seqB := qa == 's' || qa == 'l' || qa == 'u', qb == 's' || qb == 'l' || qb == 'u'
 		if (seqA && nb == "int") || (seqB && na == "int") {
 			return ""
 		}

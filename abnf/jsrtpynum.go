@@ -57,8 +57,8 @@ func (rt *jsrt) pyNumMethod(v interface{}, name string, args []interface{}, kw i
 			rt.pyRaise("OverflowError", "cannot convert Infinity to integer ratio")
 		}
 		r := new(big.Rat).SetFloat64(f.f)
-		return &jsArray{elems: []interface{}{rt.pyBigNarrow(new(big.Int).Set(r.Num())),
-			rt.pyBigNarrow(new(big.Int).Set(r.Denom()))}}
+		return pyTup(&jsArray{elems: []interface{}{rt.pyBigNarrow(new(big.Int).Set(r.Num())),
+			rt.pyBigNarrow(new(big.Int).Set(r.Denom()))}})
 	}
 	x, _ := pyBigOperand(v)
 	switch name {
@@ -68,7 +68,7 @@ func (rt *jsrt) pyNumMethod(v interface{}, name string, args []interface{}, kw i
 	case "is_integer":
 		return true
 	case "as_integer_ratio":
-		return &jsArray{elems: []interface{}{rt.pyBigNarrow(x), 1.0}}
+		return pyTup(&jsArray{elems: []interface{}{rt.pyBigNarrow(x), 1.0}})
 	case "bit_length":
 		return float64(x.BitLen())
 	case "bit_count":

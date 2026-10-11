@@ -881,10 +881,10 @@ check("sorted-copy-untouched", str(bs), "[3, 1, 2]")
 check("sorted-str", str(sorted("cba")), "['a', 'b', 'c']")
 check("reversed-list", str(list(reversed(bs))), "[2, 1, 3]")
 check("reversed-str", str(list(reversed("abc"))), "['c', 'b', 'a']")
-check("enumerate", str(list(enumerate(bt))), "[[0, 'a'], [1, 'b']]")
-check("enumerate-start", str(list(enumerate(bt, bn[4]))), "[[7, 'a'], [8, 'b']]")
-check("zip-equal", str(list(zip(bs, bs))), "[[3, 3], [1, 1], [2, 2]]")
-check("zip-shortest", str(list(zip(bs, bt))), "[[3, 'a'], [1, 'b']]")
+check("enumerate", str(list(enumerate(bt))), "[(0, 'a'), (1, 'b')]")
+check("enumerate-start", str(list(enumerate(bt, bn[4]))), "[(7, 'a'), (8, 'b')]")
+check("zip-equal", str(list(zip(bs, bs))), "[(3, 3), (1, 1), (2, 2)]")
+check("zip-shortest", str(list(zip(bs, bt))), "[(3, 'a'), (1, 'b')]")
 check("map-builtin", str(list(map(abs, [-1, -2]))), "[1, 2]")
 check("map-class-as-fn", ", ".join(map(str, bs)), "3, 1, 2")
 check("map-two-sources", str(list(map(lambda a, b: a + b, bs, bs))), "[6, 2, 4]")
@@ -944,8 +944,8 @@ check("bin-zero", bin(bn[6]), "0b0")
 # Arbitrary precision: past 2^53 a double has lost digits, so this is the whole
 # reason the digits come out through the big-integer path in all three engines.
 check("hex-bignum", hex(bn[5] ** 70), "0x400000000000000000")
-check("divmod-positive", str(divmod(bn[4], bn[5])), "[3, 1]")
-check("divmod-negative-floors", str(divmod(-bn[4], bn[5])), "[-4, 1]")
+check("divmod-positive", str(divmod(bn[4], bn[5])), "(3, 1)")
+check("divmod-negative-floors", str(divmod(-bn[4], bn[5])), "(-4, 1)")
 
 # round() rounds HALF TO EVEN, which is wrong on every other integer if it is
 # written as floor(x + 0.5).
@@ -1381,7 +1381,7 @@ check("bound-method-off-instance", sbm(), "EA")
 spd = {}
 for spk in ["a", "b"]:
     spd[spk] = len(spd)
-check("dict-popitem-lifo", str(spd.popitem()), "['b', 1]")
+check("dict-popitem-lifo", str(spd.popitem()), "('b', 1)")
 check("dict-popitem-rest", str(spd), "{'a': 0}")
 check("dict-popitem-empty", why(lambda: {}.popitem()),
       "KeyError|'popitem(): dictionary is empty'|KeyError('popitem(): dictionary is empty')")
@@ -2446,9 +2446,7 @@ check("bigflo-int-of-float", [str(int(1e23)), str(int(-2.0 ** 60)), str(int(2.5)
 #
 # %d %i %u take any real number and truncate it exactly; %x %X %o need an int;
 # %e %f %g a real number; %c an int or one character. Everything else, and a
-# wrong argument count, is CPython's catchable error. (A tuple is a list here, so
-# an argument tuple whose length differs from the conversion count is read as
-# ONE value - the case a list really is in CPython.)
+# wrong argument count, is CPython's catchable error.
 def pc_err(f, a):
     try:
         return f % a

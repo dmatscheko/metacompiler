@@ -685,8 +685,8 @@ import re
 def s22():
     m = re.search(r"(\d+)-(\d+)", "ab 12-34 cd")
     check("re01", m.group(0) == "12-34" and m.group(1) == "12" and m.group(2) == "34")
-    check("re02", m.start() == 3 and m.end() == 8 and m.span() == [3, 8])
-    check("re03", m.span(1) == [3, 5] and len(m.groups()) == 2)
+    check("re02", m.start() == 3 and m.end() == 8 and m.span() == (3, 8))
+    check("re03", m.span(1) == (3, 5) and len(m.groups()) == 2)
     n = re.search(r"(?P<k>[a-z]+)=(?P<v>\d+)", "x: size=42")
     check("re04", n.group("k") == "size" and n.group("v") == "42")
     check("re05", n.groupdict()["k"] == "size" and n.groupdict()["v"] == "42")
@@ -696,11 +696,11 @@ def s22():
     check("re06", re.match(r"\d", "a1") == None and re.match(r"a", "a1").group(0) == "a")
     check("re07", re.fullmatch(r"a|ab", "ab").group(0) == "ab" and re.fullmatch(r"a", "ab") == None)
     check("re08", re.findall(r"\d+", "a1 b22 c333") == ["1", "22", "333"])
-    check("re09", re.findall(r"(\w)=(\d)", "a=1,b=2") == [["a", "1"], ["b", "2"]])
+    check("re09", re.findall(r"(\w)=(\d)", "a=1,b=2") == [("a", "1"), ("b", "2")])
     check("re10", re.sub(r"\s+", " ", "a   b \t c") == "a b c")
     check("re11", re.sub(r"(\w)(\d)", r"\2\1", "a1 b2") == "1a 2b")
     check("re12", re.sub(r"(\d)", r"[\g<1>]", "a1") == "a[1]")
-    check("re13", re.subn(r"o", "0", "foo boo") == ["f00 b00", 4])
+    check("re13", re.subn(r"o", "0", "foo boo") == ("f00 b00", 4))
     check("re14", re.split(r"\s*,\s*", "a , b,c") == ["a", "b", "c"])
     # A capture group in the separator is SPLICED into the result (Python's rule).
     check("re15", re.split(r"(,)", "a,b") == ["a", ",", "b"])
@@ -1233,9 +1233,8 @@ class S27Ann:
 # ===== SECTION 28: printf-style % formatting =====
 # Every right-hand side is CPython 3.14.6's own answer.
 #
-# An ARRAY is read as the argument TUPLE exactly when its length equals the
-# conversion count, and as a single value otherwise - because a tuple IS a list in
-# this value model. pct20 is that rule from the "single value" side.
+# The arguments come from a TUPLE; any other value, a list included, is a single
+# value. pct20 is that rule from the "single value" side.
 def s28():
     check("pct01", ("%s" % "hi") == "hi" and ("%s and %s" % ("a", "b")) == "a and b")
     check("pct02", ("%d" % 42) == "42" and ("%5d|" % 42) == "   42|" and ("%-5d|" % 42) == "42   |")
@@ -2340,9 +2339,9 @@ def s38():
         return out
 
     p = mkd()
-    check("su15", p.popitem() == ["c", 3] and len(p) == 2)
-    check("su16", p.popitem() == ["b", 2] and list(p.keys()) == ["a"])
-    check("su17", p.popitem() == ["a", 1] and p == {})
+    check("su15", p.popitem() == ("c", 3) and len(p) == 2)
+    check("su16", p.popitem() == ("b", 2) and list(p.keys()) == ["a"])
+    check("su17", p.popitem() == ("a", 1) and p == {})
     msg = ""
     try:
         p.popitem()
@@ -2806,25 +2805,15 @@ def s41():
 
 
 # ===== SECTION 42: an unhashable set member or dict key =====
-# `a = [1]; b = [1]; len({a, b})` raises TypeError in CPython. Two separate
-# things follow from that row.
-#
-# 1. dict and set ARE refused, in all three engines, with CPython 3.14's exact
-#    wording - which differs between the two positions:
-#      {[1]}    cannot use 'list' as a set element (unhashable type: 'list')
-#      {{}: 1}  cannot use 'dict' as a dict key (unhashable type: 'dict')
-#    with one exception CPython really has: set.__contains__ / .discard / .remove
-#    convert a SET argument to a frozenset instead of refusing it, so `{1} in {1}`
-#    is False while `{} in {1}` and `{1} in {1: 2}` both raise.
-#
-# 2. The LIST is deliberately NOT refused, and that is the divergence this section
-#    records. A tuple IS a list in this value model, and the two directions of
-#    the mistake are not symmetric: treating a tuple as hashable only ACCEPTS a
-#    program CPython would reject, while treating a list as unhashable would
-#    abort `{(1, 2), (3, 4)}` and `d[i, j]` - legal Python, and among the most
-#    common things Python programs do. So the array stays hashable, and a tuple
-#    key compares by CONTENTS in all three engines (core.keyEq, pyKeyEq,
-#    dictKeyEq), which is CPython's rule for a tuple (`d[1, 2] = v; d[1, 2]`).
+# `a = [1]; b = [1]; len({a, b})` raises TypeError in CPython. A list, a dict, a
+# set and a tuple holding one are refused, in all three engines, with CPython
+# 3.14's exact wording - which differs between the two positions:
+#   {[1]}    cannot use 'list' as a set element (unhashable type: 'list')
+#   {{}: 1}  cannot use 'dict' as a dict key (unhashable type: 'dict')
+# with one exception CPython really has: set.__contains__ / .discard / .remove
+# convert a SET argument to a frozenset instead of refusing it, so `{1} in {1}`
+# is False while `{} in {1}` and `{1} in {1: 2}` both raise. A tuple key compares
+# by CONTENTS (`d[1, 2] = v; d[1, 2]`).
 #
 # Every value is read out of a list so the constant folder cannot pre-compute a
 # row, and every error is CAUGHT.
@@ -2911,18 +2900,16 @@ def s42():
     nested[a_tup] = 5
     check("uh25", nested[(1, 2)] == 5 and not ((1, 3) in nested))
 
-    # --- RECORDED DIVERGENCE: a list is hashable here, because it is a tuple.
-    # CPython raises for every row below.
-    # They CATCH rather than assert directly, so this section still runs to the
-    # end under CPython instead of aborting on the first of them.
+    # --- a list is unhashable, and so is a tuple holding one -----------------
     def lsetlen():
         try:
             return len({[1], [1], [2]})
         except TypeError:
             return 0 - 1
-    check("uh26", msg(lambda: {a_list}) == "no raise")
-    check("uh27", msg(lambda: {a_list: 1}) == "no raise")
-    check("uh28", lsetlen() == 2)
+    check("uh26", msg(lambda: {a_list}) == "cannot use 'list' as a set element (unhashable type: 'list')")
+    check("uh27", msg(lambda: {a_list: 1}) == "cannot use 'list' as a dict key (unhashable type: 'list')")
+    check("uh28", lsetlen() == 0 - 1 and msg(lambda: {(1, a_list): 1}) == "cannot use 'tuple' as a dict key (unhashable type: 'list')"
+          and msg(lambda: a_list in {1: 2}) == "cannot use 'list' as a dict key (unhashable type: 'list')")
 
     # --- a BOXED number on the left of `in` -------------------------------
     # `in` and `not in` are CONTAINER operators, so a boxed operand (`3j in xs`,
@@ -4191,6 +4178,71 @@ def s78():
     check("opty6", v[2].__add__("t") == "st" and v[3].__len__() == 1 and v[5].__len__() == 1 and "ab".__mul__(2) == "abab" and [1].__add__([2]) == [1, 2]
           and v[5].__getitem__(1) == 2 and "abc".__contains__("b") and getattr("x", "__add__")("y") == "xy" and hasattr(v[3], "__len__") and not hasattr(v[2], "__sub__"))
 
+# ===== SECTION 79: the tuple is its own type =====
+# A tuple prints parenthesized (a one-element one with its comma), is type
+# tuple, never equals or orders against a list, concatenates only with a
+# tuple, is immutable, and is hashable when its elements are. dict.items(),
+# enumerate, zip, divmod, *args, exception args and the re results are
+# tuples; a starred target is a list. "%" takes its arguments from a tuple
+# only. Rows from CPython 3.14.
+def s79():
+    v = [(1, 2), (5,), (), [1, 2], {"a": 1}]
+    t = v[0]
+    check("tup1", [repr(x) for x in v[:4]] == ["(1, 2)", "(5,)", "()", "[1, 2]"] and str(((1, 2), [3, (4,)])) == "((1, 2), [3, (4,)])")
+    check("tup2", type(t).__name__ == "tuple" and isinstance(t, tuple) and not isinstance(t, list) and not isinstance(v[3], tuple) and type(v[2]) is tuple)
+    check("tup3", t != v[3] and not (t == v[3]) and [t] != [v[3]] and t == (1, 2) and v[3] not in [t] and list(t) == v[3] and tuple(v[3]) == t)
+    check("tup4", repr(t + (3,)) == "(1, 2, 3)" and repr(t * 2) == "(1, 2, 1, 2)" and repr(t[1:]) == "(2,)" and repr(v[1] * 0) == "()" and repr(v[3][1:]) == "[2]")
+    msgs = []
+    def setit():
+        t[0] = 9
+    def delit():
+        del t[0]
+    for f in [lambda: t < v[3], lambda: v[3] + t, lambda: t + v[3], lambda: t.append(3), setit, delit, lambda: t.index(9)]:
+        try:
+            f()
+        except (TypeError, AttributeError, ValueError) as e:
+            msgs.append(str(e))
+    check("tup5", msgs == ["'<' not supported between instances of 'tuple' and 'list'", 'can only concatenate list (not "tuple") to list',
+                           'can only concatenate tuple (not "list") to tuple', "'tuple' object has no attribute 'append'",
+                           "'tuple' object does not support item assignment", "'tuple' object doesn't support item deletion",
+                           "tuple.index(x): x not in tuple"])
+    a = (1, 2)
+    b = a
+    a += (3,)
+    c = [1]
+    e = c
+    c += (2,)
+    p, *q = (1, 2, 3)
+    check("tup6", repr(a) == "(1, 2, 3)" and repr(b) == "(1, 2)" and e is c and c == [1, 2] and repr(q) == "[2, 3]")
+    def f(*args):
+        return args
+    def g():
+        return 1, 2
+    check("tup7", repr(f()) == "()" and repr(f(1)) == "(1,)" and repr(g()) == "(1, 2)" and repr(divmod(7, 2)) == "(3, 1)")
+    check("tup8", str(list(enumerate("ab"))) == "[(0, 'a'), (1, 'b')]" and str(list(zip([1, 2], "ab"))) == "[(1, 'a'), (2, 'b')]"
+          and str(list(v[4].items())) == "[('a', 1)]" and repr(v[4].copy().popitem()) == "('a', 1)" and repr("a b".partition(" ")) == "('a', ' ', 'b')")
+    err = ValueError("boom")
+    err2 = Exception(1, 2)
+    check("tup9", repr(err.args) == "('boom',)" and str(err2) == "(1, 2)" and repr(err2.args) == "(1, 2)" and repr(err2) == "Exception(1, 2)")
+    import re
+    m = re.match(r"(a)(b)?", "ac")
+    check("tup10", repr(m.groups()) == "('a', None)" and repr(m.span(1)) == "(0, 1)" and repr(re.findall(r"(\w)(\d)", "a1 b2")) == "[('a', '1'), ('b', '2')]"
+          and repr(re.subn("a", "b", "aa")) == "('bb', 2)")
+    d = {(1, 2): "a"}
+    d[3, 4] = "b"
+    check("tup11", repr(d) == "{(1, 2): 'a', (3, 4): 'b'}" and d[1, 2] == "a" and len({(1, 2), (1, 2)}) == 1)
+    check("tup12", "%d %d" % t == "1 2" and "%s" % v[3] == "[1, 2]" and "%s" % (t,) == "(1, 2)")
+    msgs = []
+    for f2 in [lambda: "%d %d" % (1, 2, 3), lambda: "%d %d" % (1,), lambda: {v[3]: 1}, lambda: {(1, v[3])}]:
+        try:
+            f2()
+        except TypeError as e3:
+            msgs.append(str(e3))
+    check("tup13", msgs == ["not all arguments converted during string formatting", "not enough arguments for format string",
+                            "cannot use 'list' as a dict key (unhashable type: 'list')", "cannot use 'tuple' as a set element (unhashable type: 'list')"])
+    x = *t, *(9,)
+    check("tup14", repr(x) == "(1, 2, 9)" and repr(tuple("xy")) == "('x', 'y')" and repr((7).as_integer_ratio()) == "(7, 1)" and t.count(1) == 1 and t.index(2) == 1)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4270,5 +4322,6 @@ def main():
     s76() # SECTION-CALL 76
     s77() # SECTION-CALL 77
     s78() # SECTION-CALL 78
+    s79() # SECTION-CALL 79
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

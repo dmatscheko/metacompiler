@@ -3339,7 +3339,8 @@ func (rt *jsrt) pyDictFind(keys *jsArray, k interface{}) int {
 	// The type assertion is inline: almost every key is a string or a number and
 	// this is the hottest function on the dict path.
 	if rt.pyLang {
-		if _, isObj := k.(*jsObject); isObj {
+		switch k.(type) {
+		case *jsObject, *jsArray:
 			rt.pyHashCheck(k, false)
 		}
 	}
@@ -3408,9 +3409,8 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 			return rt.pyNumEq(a, b)
 		}
 		// PYTHON: a TUPLE key hashes by its CONTENTS, so `{(1,2): "x"}[(1,2)]` is
-		// a hit off two different objects - and a tuple IS an array in this value
-		// model. So the comparison is Python's == (as on the set side: pySetHas ->
-		// pyEqual). Neither operand is dictKeyable, so every such lookup already
+		// a hit off two different objects, and the comparison is Python's == (as
+		// on the set side: pySetHas -> pyEqual). Neither operand is dictKeyable, so every such lookup already
 		// arrives here through the scan.
 		if aa, isA := a.(*jsArray); isA {
 			if bb, isB := b.(*jsArray); isB {
@@ -3721,12 +3721,23 @@ func (rt *jsrt) pyString(v interface{}) string {
 		}
 		return "False"
 	case *jsArray:
+		// A tuple is parenthesized, and a one-element one keeps its comma.
+		tup := t.kind == pyTupKind
 		out := "["
+		if tup {
+			out = "("
+		}
 		for i, e := range t.elems {
 			if i > 0 {
 				out += ", "
 			}
 			out += rt.pyRepr(e)
+		}
+		if tup {
+			if len(t.elems) == 1 {
+				return out + ",)"
+			}
+			return out + ")"
 		}
 		return out + "]"
 	case *jsObject:
@@ -14731,7 +14742,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
-			if !ok {
+			if !ok || arr.kind == pyTupKind {
 				rt.pyNoItemOp(u(a[0]), false)
 			}
 			idx := rt.pySeqIdx(arr, u(a[1]))
@@ -15410,6 +15421,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.scopeOf(a[0]).pyFn = true
 			return 0
 		},
+		// A Python tuple: the array, marked (pyTupKind).
+		"js_pytup": func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				pyTup(arr)
+			}
+			return a[0]
+		},
+		// tuple(iterable): list()'s fresh array, marked.
+		"js_pytupconv": func(a []uint64) uint64 {
+			return w(pyTup(rt.pyExt("js_pylist", u(a[0])).(*jsArray)))
+		},
 		"js_pyrest": func(a []uint64) uint64 { // *args: the call arguments from index N on, as a list.
 			arr := u(a[0]).(*jsArray)
 			from := int(a[1])
@@ -15776,6 +15798,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				for _, i := range idx {
 					out.elems = append(out.elems, o.elems[i])
 				}
+				if o.kind == pyTupKind {
+					pyTup(out)
+				}
 				return w(out)
 			case string:
 				cs := pyStrChars(rt, o)
@@ -15796,6 +15821,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !isArr {
 				rt.fail("slice assignment to a %s", rt.typeOf(u(a[0])))
 				return 0
+			}
+			if arr.kind == pyTupKind {
+				rt.pyNoItemOp(arr, false)
 			}
 			vals := rt.pySeqElems(u(a[4]))
 			if isUndefOrNull(u(a[3])) || rt.toNumber(u(a[3])) == 1 {
@@ -15830,6 +15858,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !isArr {
 				rt.fail("deleting a slice of a %s", rt.typeOf(u(a[0])))
 				return 0
+			}
+			if arr.kind == pyTupKind {
+				rt.pyNoItemOp(arr, true)
 			}
 			idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
 			drop := map[int]bool{}
@@ -15891,8 +15922,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			sub := newJSObject()
 			sub.set("__class", cls)
-			sub.set("args", &jsArray{elems: []interface{}{msg, &jsArray{elems: matched}}})
-			sub.set("exceptions", &jsArray{elems: matched})
+			sub.set("args", pyTup(&jsArray{elems: []interface{}{msg, &jsArray{elems: matched}}}))
+			sub.set("exceptions", pyTup(&jsArray{elems: matched}))
 			return w(sub)
 		},
 		// `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=) updates a set in
@@ -15923,7 +15954,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// `xs += it` is list.extend IN PLACE, so every alias of xs sees it and
 			// any iterable is accepted; on anything else it is the binary `+`.
 			if op == "+=" {
-				if la, ok := l.(*jsArray); ok {
+				if la, ok := l.(*jsArray); ok && la.kind != pyTupKind {
 					la.elems = append(la.elems, rt.pyElemsOf(r)...)
 					return a[1]
 				}
@@ -16092,10 +16123,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// bytes are a list of byte numbers here), which is not what the
 				// JavaScript + of the shared runtime does with two arrays.
 				if la, ok := l.(*jsArray); ok {
-					if ra, ok2 := r.(*jsArray); ok2 {
+					if ra, ok2 := r.(*jsArray); ok2 && (la.kind == pyTupKind) == (ra.kind == pyTupKind) {
 						out := &jsArray{}
 						out.elems = append(out.elems, la.elems...)
 						out.elems = append(out.elems, ra.elems...)
+						if la.kind == pyTupKind {
+							pyTup(out)
+						}
 						return w(out)
 					}
 				}
@@ -16286,7 +16320,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return 0
 			}
 			arr, ok := u(a[0]).(*jsArray)
-			if !ok {
+			if !ok || arr.kind == pyTupKind {
 				rt.pyNoItemOp(u(a[0]), true)
 			}
 			i := rt.pySeqIdx(arr, u(a[1]))
@@ -16429,7 +16463,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pybuiltincls": func(a []uint64) uint64 {
 			return w(rt.pyBuiltinClass(rt.toString(u(a[0]))))
 		},
-		// A sequence pattern matches lists and tuples (one type here), never a
+		// A sequence pattern matches lists and tuples, never a
 		// string or a dict: (value, count before the *rest, count after it,
 		// is there a *rest) -> does the shape fit.
 		"js_pymatchseq": func(a []uint64) uint64 {
@@ -16813,7 +16847,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			var out []interface{}
 			for i, e := range rt.pyElemsOf(argAt(args, 0)) {
-				out = append(out, &jsArray{elems: []interface{}{start + float64(i), e}})
+				out = append(out, pyTup(&jsArray{elems: []interface{}{start + float64(i), e}}))
 			}
 			return w(rt.pyMkIter("enumerate", out))
 		},
@@ -16833,7 +16867,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			var out []interface{}
 			for i := 0; i < n; i++ {
-				row := &jsArray{}
+				row := pyTup(&jsArray{})
 				for _, s := range srcs {
 					row.elems = append(row.elems, s[i])
 				}
@@ -16926,9 +16960,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pybinstr": func(a []uint64) uint64 { return rt.wrapStr(rt.pyRadix(u(a[0]), 2, "0b")) },
 		"js_pyhexstr": func(a []uint64) uint64 { return rt.wrapStr(rt.pyRadix(u(a[0]), 16, "0x")) },
 		"js_pyoctstr": func(a []uint64) uint64 { return rt.wrapStr(rt.pyRadix(u(a[0]), 8, "0o")) },
-		// divmod(a, b) is the PAIR (a // b, a % b) - floor division and the
-		// floored remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list here
-		// (docs/working-on-this-project.md 7.9).
 		// An exception that escaped the program: abort with CPython's last
 		// traceback line, `Name: str(e)`, or the bare name when str(e) is empty.
 		// Twin of pyUncaughtText in languages/python-interpreter.abnf and
@@ -16946,6 +16977,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.fail("uncaught exception: %s", text)
 			return 0
 		},
+		// divmod(a, b) is the pair (a // b, a % b) - floor division and the
+		// floored remainder, so divmod(-7, 2) is (-4, 1).
 		"js_pydivmod": func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
 			if rt.toNumber(r) == 0 {
@@ -16953,7 +16986,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			q := pyIntOrFlo(math.Floor(rt.toNumber(l)/rt.toNumber(r)), l, r)
 			m := pyIntOrFlo(pyFloorMod(rt.toNumber(l), rt.toNumber(r)), l, r)
-			return w(&jsArray{elems: []interface{}{q, m}})
+			return w(pyTup(&jsArray{elems: []interface{}{q, m}}))
 		},
 		// round(x[, n]): CPython rounds HALF TO EVEN, so round(2.5) is 2 and
 		// round(0.5) is 0 - the one thing a Math.floor(x + 0.5) spelling gets
@@ -18025,7 +18058,7 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 	}
 	if xa, ok := x.(*jsArray); ok {
 		ya, ok2 := y.(*jsArray)
-		if !ok2 || len(xa.elems) != len(ya.elems) {
+		if !ok2 || len(xa.elems) != len(ya.elems) || (xa.kind == pyTupKind) != (ya.kind == pyTupKind) {
 			return false
 		}
 		for i := range xa.elems {
@@ -18370,40 +18403,46 @@ func (rt *jsrt) pySetAdd(els *jsArray, v interface{}) {
 // The twin of pyHashName / pyHashCheck in languages/lib/python-rt.metajs and of
 // pyHashName / pyHashCheck in languages/python-interpreter.abnf. CPython:
 //
-//	{[1]}      TypeError: cannot use 'list' as a set element (unhashable type: 'list')
-//	{{}: 1}    TypeError: cannot use 'dict' as a dict key (unhashable type: 'dict')
+//	{[1]}        TypeError: cannot use 'list' as a set element (unhashable type: 'list')
+//	{(1, {}): 1} TypeError: cannot use 'tuple' as a dict key (unhashable type: 'dict')
 //
 // The wording differs between the two positions, and the OUTER name is the type
-// handed over while the INNER one is the type that is unhashable - they differ
-// only for a tuple holding a list, which this value model cannot build, so one
-// name serves both slots.
-//
-// dict and set are refused; the ARRAY is not. A tuple IS an array here
-// and the two directions of that mistake are not symmetric:
-// treating a tuple as hashable only accepts a program CPython would reject,
-// while treating a list as unhashable would abort `{(1, 2), (3, 4)}` and
-// `d[i, j]`, which CPython accepts. A frozenset is hashable; bytearray is not in
-// this subset at all.
-func pyUnhashName(v interface{}) string {
-	o, isObj := v.(*jsObject)
-	if !isObj {
-		return ""
-	}
-	if tag, has := o.props["__set"]; has && tag == true {
-		if o.props["__frozen"] == true {
+// handed over while the INNER one is the type that is unhashable. A frozenset is
+// hashable; bytearray is not in this subset at all. An array is refused only in
+// a Python program (rt.pyLang): the set and dict helpers are shared, and a list
+// is a perfectly good key in dart or swift.
+func (rt *jsrt) pyUnhashName(v interface{}) string {
+	switch t := v.(type) {
+	case *jsArray:
+		if !rt.pyLang {
 			return ""
 		}
-		return "set"
-	}
-	if tag, has := o.props["__dict"]; has && tag == true {
-		return "dict"
+		if t.kind != pyTupKind {
+			return "list"
+		}
+		for _, e := range t.elems {
+			if n := rt.pyUnhashName(e); n != "" {
+				return n
+			}
+		}
+		return ""
+	case *jsObject:
+		if tag, has := t.props["__set"]; has && tag == true {
+			if t.props["__frozen"] == true {
+				return ""
+			}
+			return "set"
+		}
+		if tag, has := t.props["__dict"]; has && tag == true {
+			return "dict"
+		}
 	}
 	return ""
 }
 
 // elem: true for a set MEMBER, false for a dict KEY.
 func (rt *jsrt) pyHashCheck(v interface{}, elem bool) {
-	n := pyUnhashName(v)
+	n := rt.pyUnhashName(v)
 	if n == "" {
 		return
 	}
@@ -18412,7 +18451,7 @@ func (rt *jsrt) pyHashCheck(v interface{}, elem bool) {
 		where = "a set element"
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-		fmt.Sprintf("cannot use '%s' as %s (unhashable type: '%s')", n, where, n))})
+		fmt.Sprintf("cannot use '%s' as %s (unhashable type: '%s')", pyTypeName(rt, v), where, n))})
 }
 
 // pyHashCheckMember is the set LOOKUP form. CPython's set.__contains__ /
@@ -19351,7 +19390,7 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			}
 			return cls.props["__name"]
 		case "__mro__", "__bases__":
-			return rt.pyMroAttr(cls, name)
+			return pyTup(rt.pyMroAttr(cls, name))
 		}
 		if v, found := pyLookup(cls, name); found {
 			// A staticmethod / classmethod read off the CLASS: the static one
@@ -19423,7 +19462,7 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	}
 	if name == "__mro__" || name == "__bases__" {
 		if _, isType := rt.pyClassName(obj); isType {
-			return rt.pyMroAttr(obj.(*jsObject), name)
+			return pyTup(rt.pyMroAttr(obj.(*jsObject), name))
 		}
 	}
 	// list.count / str.upper / dict.get read off the BUILTIN type object: an
@@ -19786,7 +19825,7 @@ func (rt *jsrt) pyGenValue(res interface{}) interface{} {
 			v = jsNull
 		}
 		exc.set("value", v)
-		args := &jsArray{}
+		args := pyTup(&jsArray{})
 		if v != jsNull {
 			args.elems = append(args.elems, v)
 		}
@@ -19978,7 +20017,10 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	// in languages/lib/python-rt.metajs and pyListMethod in
 	// languages/python-interpreter.abnf.
 	if arr, isArr := target.(*jsArray); isArr && pyIsListMethod(name) {
-		return rt.pyListMethod(arr, name, args, kw)
+		if arr.kind != pyTupKind || pyIsTupleMethod(name) {
+			return rt.pyListMethod(arr, name, args, kw)
+		}
+		rt.pyRaise("AttributeError", "'tuple' object has no attribute '"+name+"'")
 	}
 	// rt.memberCall is the SHARED member-call table that many languages land
 	// in, and some of its names are ones Python cannot utter: `xs.sumOf(f)`
@@ -20008,7 +20050,7 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if f, ok := pyValDunder(target, name); ok {
 		return rt.call(f, jsUndef, append([]interface{}{target}, args...))
 	}
-	if pyNumTypeName(target) != "" {
+	if pyNumTypeName(target) != "" || pyIsTup(target) {
 		rt.pyRaise("AttributeError", "'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")
 	}
 	if pyForeignMethod(target, name) {
@@ -20137,6 +20179,9 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 			if rt.pyEqual(arr.elems[i], argAt(args, 0)) {
 				return float64(i)
 			}
+		}
+		if arr.kind == pyTupKind {
+			rt.pyRaise("ValueError", "tuple.index(x): x not in tuple")
 		}
 		panic(&jsThrown{value: rt.pyExcInstance("ValueError", "list.index(x): x not in list")})
 	case "sort":
@@ -20382,13 +20427,12 @@ func (rt *jsrt) pyDictMethod(keys, vals *jsArray, name string, args []interface{
 	case "values":
 		return &jsArray{elems: append([]interface{}{}, vals.elems...)}
 	case "items":
-		// A list of [key, value] pairs in insertion order (each pair a 2-element
-		// list, since the subset has no tuples; CPython answers a dict_items VIEW
-		// of TUPLES). Every form - a written d.items() and getattr(d, "items")() -
-		// arrives here.
+		// A list of (key, value) tuples in insertion order, where CPython answers
+		// a dict_items VIEW of them. Every form - a written d.items() and
+		// getattr(d, "items")() - arrives here.
 		pairs := &jsArray{}
 		for i, k := range keys.elems {
-			pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{k, vals.elems[i]}})
+			pairs.elems = append(pairs.elems, pyTup(&jsArray{elems: []interface{}{k, vals.elems[i]}}))
 		}
 		return pairs
 	case "get":
@@ -20413,10 +20457,9 @@ func (rt *jsrt) pyDictMethod(keys, vals *jsArray, name string, args []interface{
 		panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", argAt(args, 0))})
 	case "popitem":
 		// The LAST inserted pair, removed - CPython's popitem is LIFO since 3.7.
-		// The pair is a 2-element list, like items()' pairs, because this subset
-		// has no tuple. Empty raises the KeyError whose argument is a sentence
-		// rather than a key, which the arg-carrying KeyError renders as CPython
-		// renders it.
+		// The pair is a tuple, like items()' pairs. Empty raises the KeyError
+		// whose argument is a sentence rather than a key, which the arg-carrying
+		// KeyError renders as CPython renders it.
 		if len(keys.elems) == 0 {
 			panic(&jsThrown{value: rt.pyExcInstanceV("KeyError", "popitem(): dictionary is empty")})
 		}
@@ -20425,7 +20468,7 @@ func (rt *jsrt) pyDictMethod(keys, vals *jsArray, name string, args []interface{
 		keys.elems = keys.elems[:i]
 		vals.elems = vals.elems[:i]
 		keys.dropIdx()
-		return &jsArray{elems: []interface{}{k, v}}
+		return pyTup(&jsArray{elems: []interface{}{k, v}})
 	case "clear":
 		keys.elems = keys.elems[:0]
 		vals.elems = vals.elems[:0]
@@ -20690,7 +20733,10 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if _, isStr := target.(string); isStr {
 		return pysIsStrMethod(name)
 	}
-	if _, isArr := target.(*jsArray); isArr {
+	if arr, isArr := target.(*jsArray); isArr {
+		if arr.kind == pyTupKind {
+			return pyIsTupleMethod(name)
+		}
 		return pyIsListMethod(name)
 	}
 	// A set is a dict whose keys are its members in the interpreter half, so it
@@ -21109,6 +21155,9 @@ func pyIterKind(rt *jsrt, v interface{}) string {
 		}
 		return "str_ascii_iterator"
 	case *jsArray:
+		if t.kind == pyTupKind {
+			return "tuple_iterator"
+		}
 		return "list_iterator"
 	}
 	if _, ok := pySetElems(v); ok {
@@ -21130,7 +21179,7 @@ func (rt *jsrt) pyStopIter(args []interface{}, val interface{}) uint64 {
 	if o, ok := exc.(*jsObject); ok {
 		// CPython's StopIteration carries no argument at all unless the generator
 		// returned a value; see pyGenValue.
-		args := &jsArray{}
+		args := pyTup(&jsArray{})
 		if isUndefOrNull(val) {
 			o.set("value", jsNull)
 		} else {
@@ -21276,7 +21325,7 @@ func (rt *jsrt) pyNoItemOp(c interface{}, del bool) {
 	_, isStr := c.(string)
 	_, isSet := pySetElems(c)
 	_, _, isInst := pyInstance(c)
-	if isStr || isSet || isInst {
+	if isStr || isSet || isInst || pyIsTup(c) {
 		how = "doesn't"
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+tn+"' object "+how+" support item deletion")})
@@ -21433,8 +21482,8 @@ func (rt *jsrt) pyPrintText(v interface{}, name, dflt string) string {
 }
 
 // pyAddKind classes an operand of Python's `+`, which is defined only within one
-// kind: 'n' a number (bool, int, float, complex), 's' a str, 'l' a list, and 0
-// anything else.
+// kind: 'n' a number (bool, int, float, complex), 's' a str, 'l' a list, 'u' a
+// tuple, and 0 anything else.
 func pyAddKind(v interface{}) byte {
 	switch t := v.(type) {
 	case float64, bool, *jsPyFlo, *jsBigInt:
@@ -21442,6 +21491,9 @@ func pyAddKind(v interface{}) byte {
 	case string:
 		return 's'
 	case *jsArray:
+		if t.kind == pyTupKind {
+			return 'u'
+		}
 		return 'l'
 	case *jsObject:
 		if isPyComplex(t) {
@@ -21466,6 +21518,8 @@ func (rt *jsrt) pyAddCheck(l, r interface{}) {
 		msg = "can only concatenate str (not \"" + rn + "\") to str"
 	case 'l':
 		msg = "can only concatenate list (not \"" + rn + "\") to list"
+	case 'u':
+		msg = "can only concatenate tuple (not \"" + rn + "\") to tuple"
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 }
@@ -21489,6 +21543,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		// float is boxed (jsPyFlo) in the first place.
 		return "int"
 	case *jsArray:
+		if t.kind == pyTupKind {
+			return "tuple"
+		}
 		return "list"
 	case *jsObject:
 		// type(C) is 'type' for a class object - a BUILTIN one (what type(3)
@@ -22286,7 +22343,7 @@ func (rt *jsrt) pyExcGroupLeaves(v interface{}) (leaves []interface{}, msg inter
 func (rt *jsrt) pyExcInstanceV(name string, arg interface{}) interface{} {
 	inst := newJSObject()
 	inst.set("__class", rt.pyExcClass(name))
-	inst.set("args", &jsArray{elems: []interface{}{arg}})
+	inst.set("args", pyTup(&jsArray{elems: []interface{}{arg}}))
 	return inst
 }
 
@@ -22327,7 +22384,7 @@ func pyExcParentName(name string) string {
 func (rt *jsrt) pyGenClose(g *jsGenerator) (out interface{}) {
 	ge := newJSObject()
 	ge.set("__class", rt.pyExcClass("GeneratorExit"))
-	ge.set("args", &jsArray{})
+	ge.set("args", pyTup(&jsArray{}))
 	defer func() {
 		if p := recover(); p != nil {
 			if th, ok := p.(*jsThrown); ok && rt.pyIsInstance(th.value, rt.pyExcClass("GeneratorExit")) {
@@ -22362,7 +22419,7 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	// the program raised through the module's own class objects.
 	inst := newJSObject()
 	inst.set("__class", rt.pyExcClass(name))
-	inst.set("args", &jsArray{elems: []interface{}{msg}})
+	inst.set("args", pyTup(&jsArray{elems: []interface{}{msg}}))
 	return inst
 }
 
@@ -22380,29 +22437,11 @@ func pyIsAlign(ch byte) bool { return ch == '<' || ch == '>' || ch == '^' || ch 
 // with CPython's text.
 //
 // THE ARGUMENT TUPLE. CPython takes one value per conversion from a TUPLE and
-// treats every other object as a single value - but a tuple IS a list in this
-// value model, so an ARRAY is read as the argument tuple exactly when its length
-// equals the conversion count, and as one value otherwise. That is CPython's
-// answer in every case except a ONE-element list meeting a single conversion,
-// where the two readings are genuinely indistinguishable here.
+// treats every other object - a list included - as a single value.
 //
 // pyPct in languages/python-interpreter.abnf and languages/lib/python-rt.metajs
 // are the same body; those two spell the float verbs out over floPrec because
 // their dialect has no strconv.
-func pyPctCount(f string) int {
-	n, i := 0, 0
-	for i < len(f) {
-		if f[i] == '%' {
-			if i+1 < len(f) && f[i+1] == '%' {
-				i += 2
-				continue
-			}
-			n++
-		}
-		i++
-	}
-	return n
-}
 
 func (rt *jsrt) pyPctTypeErr(msg string) {
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
@@ -22613,10 +22652,9 @@ func pyPctExp(n float64, typ byte, prec int) string {
 }
 
 func (rt *jsrt) pyPct(f string, arg interface{}) string {
-	nconv := pyPctCount(f)
 	var args []interface{}
 	var dictK, dictV *jsArray
-	if arr, ok := arg.(*jsArray); ok && len(arr.elems) == nconv {
+	if arr, ok := arg.(*jsArray); ok && arr.kind == pyTupKind {
 		args = arr.elems
 	} else if k, v, ok := dictParts(arg); ok {
 		if _, isSet := pySetElems(arg); !isSet {
@@ -23285,6 +23323,9 @@ func (rt *jsrt) pySeqRepeat(seq, n interface{}) (interface{}, bool) {
 		out := &jsArray{}
 		for i := 0; i < k; i++ {
 			out.elems = append(out.elems, s.elems...)
+		}
+		if s.kind == pyTupKind {
+			pyTup(out)
 		}
 		return out, true
 	}

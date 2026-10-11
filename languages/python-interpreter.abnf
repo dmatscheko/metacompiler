@@ -24,7 +24,7 @@ SYNTAX, type hint syntax (erased), and imports.
 Values: int, float, complex (a boxed real/imag pair) and arbitrary precision
 integers (a boxed sign and decimal limb array, entered only when a literal or a
 result leaves the exact range of a double, and left again as soon as one fits),
-bool, None, Ellipsis, str, bytes, list, tuple (modelled as a list), dict and set.
+bool, None, Ellipsis, str, bytes, list, tuple (an array marked as one), dict and set.
 Numeric literals cover the 0x / 0o / 0b prefixes, underscore separators, leading
 and trailing dot floats, exponents and the imaginary j suffix. String literals
 cover every prefix (r, b, u and the rf/br orders), all four quote styles, adjacent
@@ -72,7 +72,6 @@ Known deviations, all deliberate:
     At a `yield from` a GeneratorExit is not forwarded to the delegate's throw():
     the delegate is CLOSED and the GeneratorExit raised in the outer generator,
     PEP 380's rule, so it is raised there even when the delegate swallows it.
-  - A tuple is a list, so it is mutable and compares equal to a list.
   - Complex division is the textbook formula, not CPython's scaled (Smith)
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
@@ -751,8 +750,8 @@ SliceStep   <~~ push({sstep: pop()}) ~~> = Expression ;
 // sliced entries are slice objects (test_compile line 407 writes `d[1:2, 1:2] = 1`).
 // Tried BEFORE SliceSfx and IndexSfx and gated on TupSliceAhead, so it fires only for
 // the shape those two cannot parse. The value model has no slice type, so a sliced
-// entry is the three-element list [start, stop, step] with None for an omitted bound;
-// the tuple itself is the plain list every other tuple in this subset is.
+// entry is the three-element tuple (start, stop, step) with None for an omitted bound,
+// which keeps the key hashable as CPython's slice objects are.
 SubTupSfx   <~~ push({kind: "index", idx: makeSubTuple(takeAll())}) ~~>
             = TupSliceAhead "[" :whitespace(WhitespaceNL) SubItem { "," SubItem } [ "," ] "]" :whitespace(Whitespace) ;
 SubItem     = SubSlice | SubIndex ;
@@ -769,9 +768,7 @@ Primary     = EmptyTuple | GenExpParen | Grouped | StringLit | Ellipsis | PyNumL
             | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
 
 // () is the empty tuple; ( a ) is plain grouping; ( a, b ) / ( a, ) is a TUPLE.
-// A tuple is modelled as a plain list - the value model has one sequence type - so
-// indexing, len, iteration, slicing and == all work on it unchanged.
-EmptyTuple  <~~ push(makeConst([])) ~~>
+EmptyTuple  <~~ push(makeConst(pyTup([]))) ~~>
             = "(" :whitespace(WhitespaceNL) ")" :whitespace(Whitespace) ;
 Grouped     <~~ push(makeParen(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) StarExpr { "," <~~ push({tcomma: true}) ~~> [ StarExpr ] } ")" :whitespace(Whitespace) ;
@@ -1109,7 +1106,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The __class shape matches rtIsType, so type tests can discriminate later.
     function pyExcType(n) {
         return function() {
-            var inst = {__class: {__name: n}, args: []}
+            var inst = {__class: {__name: n}, args: pyTup([])}
             for (var i = 0; i < arguments.length; i++) inst.args.push(arguments[i])
             return inst
         }
@@ -1208,6 +1205,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     for (var pti = 0; pti < pyTypeNames.length; pti++) {
         hostGlobals[pyTypeNames[pti]] = {__isclass: true, __name: pyTypeNames[pti], __bases: [], __builtin: true}
     }
+    // A TUPLE is a host array carrying kind 16 (arrKind / arrKindSet: the number
+    // every engine keeps on an array - jsArray.kind in abnf/jsrt.go, field d of
+    // the floor's array cell - which a copy does not inherit; 16 stays clear of
+    // kotlin's 1-3, since the shared js_py* externs see both). Indexing, len,
+    // iteration and unpacking work on it as on a list; what differs - repr,
+    // type, ==, ordering, hashing, immutability - asks isTup. Twin of pyTup /
+    // pyIsTup in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyTup(a) { return arrKindSet(a, 16) }
+    function isTup(v) { return arrKind(v) == 16 }
     // type(v): the class of a user instance, else the builtin type object.
     function pyTypeOf(v) {
         if (pyUser(v)) { return v.__class }
@@ -1221,7 +1227,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isFlo(v)) { return hostGlobals["float"] }
         if (bigIsBig(v)) { return hostGlobals["int"] }
         if (isCplx(v)) { return hostGlobals["complex"] }
-        if (Array.isArray(v)) { return hostGlobals["list"] }
+        if (Array.isArray(v)) { return hostGlobals[isTup(v) ? "tuple" : "list"] }
         if (isSet(v)) { return hostGlobals[v.__frozen === true ? "frozenset" : "set"] }
         if (isDict(v)) { return hostGlobals["dict"] }
         // CPython's type(gen).__name__, and the name its AttributeError uses.
@@ -1387,7 +1393,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "bool") { return pytruthy(v) }
         if (name == "list") { return args.length == 0 ? [] : iterToList(v).slice(0) }
-        if (name == "tuple") { return args.length == 0 ? [] : iterToList(v).slice(0) }
+        if (name == "tuple") { return pyTup(args.length == 0 ? [] : iterToList(v).slice(0)) }
         if (name == "set" || name == "frozenset") {
             var out = newSet()
             if (args.length > 0) { var a = iterToList(v); for (var i = 0; i < a.length; i++) { setAdd(out, a[i]) } }
@@ -1765,7 +1771,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return "str_ascii_iterator"
         }
-        if (Array.isArray(v)) { return "list_iterator" }
+        if (Array.isArray(v)) { return isTup(v) ? "tuple_iterator" : "list_iterator" }
         if (isSet(v)) { return "set_iterator" }
         if (isDict(v)) { return "dict_keyiterator" }
         return "iterator"
@@ -1804,7 +1810,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var s = (start === undefined) ? 0 : start
         var a = iterToList(v)
         var out = []
-        for (var i = 0; i < a.length; i++) { out.push([binOp("+", s, i), a[i]]) }
+        for (var i = 0; i < a.length; i++) { out.push(pyTup([binOp("+", s, i), a[i]])) }
         return pyMkIter("enumerate", out)
     }
     hostGlobals["zip"] = function() {
@@ -1821,7 +1827,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < n; i++) {
             var row = []
             for (var k = 0; k < srcs.length; k++) { row.push(srcs[k][i]) }
-            out.push(row)
+            out.push(pyTup(row))
         }
         return pyMkIter("zip", out)
     }
@@ -1913,9 +1919,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return sign + prefix + out
     }
     // divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
-    // remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list in this value
-    // model (docs/working-on-this-project.md 7.9).
-    hostGlobals["divmod"] = function(a, b) { return [binOp("//", a, b), binOp("%", a, b)] }
+    // remainder, so divmod(-7, 2) is (-4, 1).
+    hostGlobals["divmod"] = function(a, b) { return pyTup([binOp("//", a, b), binOp("%", a, b)]) }
     // round(x[, n]) rounds HALF TO EVEN, so round(0.5) is 0, round(1.5) is 2 and
     // round(2.5) is 2 - which a Math.floor(x + 0.5) spelling gets wrong on every
     // other integer. pyFixed is this grammar's exact decimal formatter and rounds
@@ -2184,7 +2189,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // is hasattr answering True for a call that then aborts.
     function pyBuiltinAttr(o, name) {
         if (typeof o == "string") { return pySIsStrMethod(name) }
-        if (Array.isArray(o)) { return pyIsListMethod(name) }
+        if (Array.isArray(o)) { return isTup(o) ? pyIsTupleMethod(name) : pyIsListMethod(name) }
         // A set is a dict whose keys are its members, so it is asked FIRST.
         if (isSet(o)) { return pyIsSetMethod(name) && !(o.__frozen === true && pySetMutator(name)) }
         if (isDict(o)) { return pyIsDictMethod(name) }
@@ -2198,9 +2203,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyValDunder(o, name) {
         var vtn = pyValTName(o)
         if (vtn == "" || !pyIsDunder(name)) { return null }
+        if (isTup(o) && (name == "__setitem__" || name == "__delitem__" || name == "__init__" || name == "__iadd__")) { return null }
         return pyBDelegate(vtn, name)
     }
-    // The builtin type a delegate serves for a plain value, or "".
+    // A tuple's two methods. Twin of pyIsTupleMethod in abnf/jsrt.go and
+    // lib/python-rt.metajs.
+    function pyIsTupleMethod(name) { return name == "count" || name == "index" }
+    // The builtin type a delegate serves for a plain value, or "". A tuple is
+    // served by list's delegates, less the ones that mutate.
     function pyValTName(v) {
         if (typeof v == "string") { return "str" }
         if (Array.isArray(v)) { return "list" }
@@ -2408,26 +2418,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null }
     }
 
-    // ----- Hashability: the only rule this value model can express ------------
+    // ----- Hashability ----------------------------------------------------------
     //
-    // CPython refuses a MUTABLE container as a set element or a dict key:
+    // CPython refuses a MUTABLE container as a set element or a dict key, and a
+    // tuple holding one:
     //
-    //   {[1]}      TypeError: cannot use 'list' as a set element (unhashable type: 'list')
-    //   {{}: 1}    TypeError: cannot use 'dict' as a dict key (unhashable type: 'dict')
+    //   {[1]}        TypeError: cannot use 'list' as a set element (unhashable type: 'list')
+    //   {(1, {}): 1} TypeError: cannot use 'tuple' as a dict key (unhashable type: 'dict')
     //
-    // and the wording differs between the two positions, so both are spelled out.
     // The OUTER name is the type of the object handed over and the INNER one the
-    // type that is unhashable; they differ only for a tuple holding a list, which
-    // this value model cannot build (see below), so one name serves both slots.
-    //
-    // WHAT IS REFUSED HERE IS dict AND set, AND NOT list. A tuple IS a list in
-    // this value model, and the two directions of the mistake
-    // are not symmetric: treating a tuple as hashable only ACCEPTS a program
-    // CPython would reject, while treating a list as unhashable would ABORT
-    // `{(1, 2), (3, 4)}` and `d[i, j]` - legal, and among the most common things
-    // Python programs do. So the array stays hashable until a real tuple type
-    // exists, and the halves are made to agree on it instead (core.keyEq below,
-    // pyKeyEq in languages/lib/python-rt.metajs, dictKeyEq in abnf/jsrt.go).
+    // type that is unhashable, and the wording differs between the two positions.
     // A frozenset is hashable; bytearray does not exist in this subset at all.
     //
     // Twins: pyHashCheck / pyHashName in languages/lib/python-rt.metajs and
@@ -2435,6 +2435,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyHashName(v) {
         if (v === null || v === undefined) { return "" }
         if (typeof v != "object") { return "" }
+        if (Array.isArray(v)) {
+            if (!isTup(v)) { return "list" }
+            for (var i = 0; i < v.length; i++) {
+                var inner = pyHashName(v[i])
+                if (inner != "") { return inner }
+            }
+            return ""
+        }
         if (v.__set === true) { return v.__frozen === true ? "" : "set" }
         if (v.__dict === true) { return "dict" }
         return ""
@@ -2446,7 +2454,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (n == "") { return }
         var where = "a dict key"
         if (elem) { where = "a set element" }
-        pyRaise(pyMakeExc("TypeError", ["cannot use '" + n + "' as " + where
+        pyRaise(pyMakeExc("TypeError", ["cannot use '" + pyTypeOf(v).__name + "' as " + where
                                         + " (unhashable type: '" + n + "')"]))
     }
     // The LOOKUP form. CPython's set.__contains__ / .discard / .remove convert a
@@ -2560,10 +2568,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // keeps ===.
     core.keyEq = function(a, b) {
         // A tuple key. CPython hashes a tuple by its CONTENTS, so `{(1,2): "x"}[(1,2)]`
-        // is a hit off two different objects - and a tuple IS an array here, so
-        // `{(1,2), (1,2)}` has one member, as in both compiled halves (pySetHas ->
-        // pyEqual). See pyHashCheck above for why the array cannot instead be refused
-        // as unhashable.
+        // is a hit off two different objects and `{(1,2), (1,2)}` has one member, as
+        // in both compiled halves (pySetHas -> pyEqual).
         if (Array.isArray(a) && Array.isArray(b)) { return pyEq(a, b) }
         // A frozenset key, by its members.
         if (isSet(a) && isSet(b)) { return pyEq(a, b) }
@@ -2617,7 +2623,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
         if (Array.isArray(a) && Array.isArray(b)) {
-            if (a.length != b.length) { return false }
+            if (a.length != b.length || isTup(a) != isTup(b)) { return false }
             for (var i = 0; i < a.length; i++) { if (!pyEq(a[i], b[i])) { return false } }
             return true
         }
@@ -2810,11 +2816,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                    + prepr(rxGroup(v.prog, v.string, v.m, 0)) + ">"
         }
         if (Array.isArray(v)) {
-            var out = "["
+            // A tuple is parenthesized, and a one-element one keeps its comma.
+            var tup = isTup(v)
+            var out = tup ? "(" : "["
             for (var i = 0; i < v.length; i++) {
                 if (i > 0) out += ", "
                 out += prepr(v[i])
             }
+            if (tup) { return v.length == 1 ? out + ",)" : out + ")" }
             return out + "]"
         }
         if (isSet(v)) {
@@ -3204,7 +3213,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (tname == "int") { return nk == "int" }
         if (tname == "float") { return nk == "int" || nk == "float" }
         if (tname == "str") { return typeof o == "string" }
-        if (tname == "list") { return Array.isArray(o) }
+        if (tname == "list") { return Array.isArray(o) && !isTup(o) }
         return isDict(o) && !isSet(o)
     }
     // A number's and a dict's operators decline a foreign operand; str's and
@@ -3310,7 +3319,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyNoItemOp(o, del) {
         var tn = pyTypeOf(o).__name
         if (!del) { pyListErr("TypeError", "'" + tn + "' object does not support item assignment") }
-        var seq = typeof o == "string" || isSet(o) || pyUser(o)
+        var seq = typeof o == "string" || isSet(o) || pyUser(o) || isTup(o)
         pyListErr("TypeError", "'" + tn + "' object " + (seq ? "doesn't" : "does not") + " support item deletion")
     }
     // Slicing with Python bounds: open ends, negative wrap around, clamping.
@@ -3322,7 +3331,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "string") return o.slice(lo, hi)
         var out = []
         for (var i = lo; i < hi; i++) out.push(o[i])
-        return out
+        return isTup(o) ? pyTup(out) : out
     }
     // The list a for loop or comprehension runs over: dicts iterate their keys
     // (a snapshot), strings their characters.
@@ -3504,7 +3513,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyMGroups(md) {
         var out = []
         for (var i = 1; i <= md.prog.ngroups; i++) { out.push(pyReNone(rxGroup(md.prog, md.string, md.m, i))) }
-        return out
+        return pyTup(out)
     }
     function pyMGroupDict(md) {
         var d = newDict()
@@ -3599,7 +3608,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return parts
     }
     // re.findall: no group -> the whole matches, one group -> that group, more ->
-    // the capture tuple of each match (a tuple is a list in this value model).
+    // the capture tuple of each match.
     function pyReFindAll(rv, s, asMatch) {
         var out = []
         var at = 0
@@ -3612,7 +3621,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else {
                 var t = []
                 for (var g = 1; g <= rv.prog.ngroups; g++) { t.push(pyReNone(rxGroup(rv.prog, s, m, g))) }
-                out.push(t)
+                out.push(pyTup(t))
             }
             at = m.end == m.begin ? m.end + 1 : m.end
         }
@@ -3663,7 +3672,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "finditer") { return pyReFindAll(rv, "" + a[0], true) }
         if (name == "sub" || name == "subn") {
             var r = pyReSub(rv, a[0], "" + a[1], a.length > 2 ? a[2] | 0 : 0)
-            return name == "sub" ? r.text : [r.text, r.n]
+            return name == "sub" ? r.text : pyTup([r.text, r.n])
         }
         if (name == "split") { return pyReSplit(rv, "" + a[0], a.length > 1 ? a[1] | 0 : 0) }
         fail("unknown Pattern method: " + name)
@@ -3674,7 +3683,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.length == 1) { return pyMGroup(md, a[0]) }
             var out = []
             for (var i = 0; i < a.length; i++) { out.push(pyMGroup(md, a[i])) }
-            return out
+            return pyTup(out)
         }
         if (name == "groups") { return pyMGroups(md) }
         if (name == "groupdict") { return pyMGroupDict(md) }
@@ -3682,7 +3691,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "end") { return pyMSpan(md, a.length > 0 ? a[0] : 0, 1) }
         if (name == "span") {
             var k = a.length > 0 ? a[0] : 0
-            return [pyMSpan(md, k, 0), pyMSpan(md, k, 1)]
+            return pyTup([pyMSpan(md, k, 0), pyMSpan(md, k, 1)])
         }
         if (name == "expand") { return rxExpand(md.prog, md.string, md.m, pyReTemplate("" + a[0])) }
         fail("unknown Match method: " + name)
@@ -5198,10 +5207,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "partition") { pat = pySFind(s, psep, 0, n) }
             else { pat = pySRFind(s, psep, 0, n) }
             if (pat < 0) {
-                if (name == "partition") { return [s, "", ""] }
-                return ["", "", s]
+                if (name == "partition") { return pyTup([s, "", ""]) }
+                return pyTup(["", "", s])
             }
-            return [s.substring(0, pat), psep, s.substring(pat + psep.length, n)]
+            return pyTup([s.substring(0, pat), psep, s.substring(pat + psep.length, n)])
         }
         if (name == "removeprefix") {
             var pre = pySStrArg(args[0], "removeprefix() argument must be str", true)
@@ -5275,10 +5284,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(target)) {
             // THE WHOLE LIST METHOD SURFACE. The twins are pyListMethod in
             // abnf/jsrt.go and pyListMethod in languages/lib/python-rt.metajs.
-            if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
+            if (pyIsListMethod(name) && (!isTup(target) || pyIsTupleMethod(name))) { return pyListMethod(target, name, args, kw) }
             var ldel = pyValDunder(target, name)
             if (ldel != null) { return ldel.apply(undefined, [target].concat(args)) }
-            if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
+            if (isTup(target) || pyForeignMethod(target, name)) { pyAttrErr(target, name) }
             fail("unknown list method: " + name)
         }
         if (isDict(target)) {
@@ -5534,6 +5543,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var xi = from; xi < to; xi++) {
                 if (pytruthy(binOp("==", xs[xi], pyArgAt(args, 0)))) { return xi }
             }
+            if (isTup(xs)) { pyListErr("ValueError", "tuple.index(x): x not in tuple") }
             pyListErr("ValueError", "list.index(x): x not in list")
         }
         if (name == "sort") { pySortList(xs, args, kw); return undefined }
@@ -5669,13 +5679,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyDictMethod(d, name, args, kw) {
         if (name == "keys") { return d.keys.slice(0) }
         if (name == "values") { return d.vals.slice(0) }
-        // .items(): a list of [key, value] pairs in insertion order (each pair a
-        // 2 element list, since a tuple is a list in this value model).
-        // pair[0]/pair[1] read them. CPython answers a dict_items VIEW of TUPLES.
+        // .items(): a list of (key, value) tuples in insertion order, where
+        // CPython answers a dict_items VIEW of them.
         if (name == "items") {
             var pairs = []
             for (var ii = 0; ii < d.keys.length; ii++) {
-                pairs.push([d.keys[ii], d.vals[ii]])
+                pairs.push(pyTup([d.keys[ii], d.vals[ii]]))
             }
             return pairs
         }
@@ -5698,7 +5707,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyRaise(pyMakeExc("KeyError", [pyArgAt(args, 0)]))
         }
         // popitem(): the LAST inserted pair, removed - CPython's is LIFO since 3.7.
-        // The pair is a 2-element list, like items()' pairs. Empty raises the
+        // The pair is a tuple, like items()' pairs. Empty raises the
         // KeyError whose argument is a sentence rather than a key.
         if (name == "popitem") {
             if (d.keys.length == 0) {
@@ -5711,7 +5720,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             listRemoveAt(d.keys, pl)
             listRemoveAt(d.vals, pl)
             d.__idx = null
-            return [pk, pvv]
+            return pyTup([pk, pvv])
         }
         if (name == "clear") { pyDictClear(d); return undefined }
         // SHALLOW, like CPython's: the values are shared, only the two spine
@@ -7421,7 +7430,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // really is out of range. A string `+` reaches the same test; the typeof
         // then keeps "99..." out of the box, and it is paid only on the rare side.
         if (op == "+") {
-            if (Array.isArray(l) && Array.isArray(r)) return l.concat(r)
+            if (Array.isArray(l) && Array.isArray(r)) {
+                var ltup = isTup(l)
+                if (ltup != isTup(r)) { pyAddCheck(l, r) }
+                return ltup ? pyTup(l.concat(r)) : l.concat(r)
+            }
             var sadd = l + r
             // A text or NaN result is the only sign of a mixed pair, so the
             // number-plus-number path pays one typeof and one compare.
@@ -7523,22 +7536,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("unsupported operator " + op)
     }
     // CPython's `+` is defined only within one kind - numbers (bool, int, float,
-    // complex), str, or a list - and raises TypeError for any other pair.
+    // complex), str, a list or a tuple - and raises TypeError for any other pair.
     // Twin of pyAAddCheck in lib/python-rt.metajs and rt.pyAddCheck in abnf/jsrt.go.
     function pyAddKind(v) {
         if (typeof v == "number" || typeof v == "boolean") { return "n" }
         if (typeof v == "string") { return "s" }
-        if (Array.isArray(v)) { return "l" }
+        if (Array.isArray(v)) { return isTup(v) ? "u" : "l" }
         if (isFlo(v) || bigIsBig(v) || isCplx(v)) { return "n" }
         return ""
     }
     // CPython orders two values only within one kind: numbers (bool, int, float -
-    // not complex), str, two lists (a tuple is a list here), two sets. Twin of
+    // not complex), str, two lists, two tuples, two sets. Twin of
     // rt.pyOrdCheck in abnf/pyarith.go and pyAOrdCheck in lib/python-rt.metajs.
     function pyOrdKind(v) {
         if (pyNumeric(v)) { return "n" }
         if (typeof v == "string") { return "s" }
-        if (Array.isArray(v)) { return "l" }
+        if (Array.isArray(v)) { return isTup(v) ? "u" : "l" }
         if (isSet(v)) { return "t" }
         return ""
     }
@@ -7562,6 +7575,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (kl != "" && kl == pyAddKind(b)) { return "" }
             if (kl == "s") { return "can only concatenate str (not \"" + pyTypeOf(r).__name + "\") to str" }
             if (kl == "l") { return "can only concatenate list (not \"" + pyTypeOf(r).__name + "\") to list" }
+            if (kl == "u") { return "can only concatenate tuple (not \"" + pyTypeOf(r).__name + "\") to tuple" }
         }
         var na = pyNumTName(a)
         var nb = pyNumTName(b)
@@ -7591,6 +7605,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rn = pyTypeOf(r).__name
         if (kl == "s") { pyListErr("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
         if (kl == "l") { pyListErr("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
+        if (kl == "u") { pyListErr("TypeError", "can only concatenate tuple (not \"" + rn + "\") to tuple") }
         pyListErr("TypeError", "unsupported operand type(s) for +: '" + pyTypeOf(l).__name + "' and '" + rn + "'")
     }
     // The operators pyBinTypeErr rules on in binOp: `+` has pyAddCheck, `%` of a
@@ -7623,13 +7638,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyListErr("OverflowError", "cannot fit 'int' into an index-sized integer")
             }
         }
-        if (seq.length == 0 || pytruthy(binOp("<=", k, 0))) { return isStr ? "" : [] }
+        if (seq.length == 0 || pytruthy(binOp("<=", k, 0))) { return isStr ? "" : (isTup(seq) ? pyTup([]) : []) }
         var len = isStr ? pyLen(seq) : seq.length
         if (bigIsBig(k) || len * k > 281474976710656) {
             if (isStr && pytruthy(binOp(">", binOp("*", len, k), pyIdxMax))) { pyListErr("OverflowError", "repeated string is too long") }
             pyListErr("MemoryError", "")
         }
-        return isStr ? strRepeat(seq, k) : listRepeat(seq, k)
+        if (isStr) { return strRepeat(seq, k) }
+        return isTup(seq) ? pyTup(listRepeat(seq, k)) : listRepeat(seq, k)
     }
     function listRepeat(a, n) {
         var out = []
@@ -7652,25 +7668,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // exception with CPython's text.
     //
     // THE ARGUMENT TUPLE. CPython takes one value per conversion from a TUPLE and
-    // treats every other object as a single value - but a tuple IS a list in this
-    // value model (see "a tuple prints as a list" in the open list), so an ARRAY is
-    // read as the argument tuple exactly when its length equals the conversion
-    // count, and as one value otherwise. That is CPython's answer in every case
-    // except a ONE-element list meeting a single conversion, where the two
-    // readings are genuinely indistinguishable here: "%s" % (1,) is "1" and
-    // "%s" % [1] is "[1]" in CPython, and they are the same value in this model.
-    function pyPctCount(fmt) {
-        var n = 0
-        var i = 0
-        while (i < fmt.length) {
-            if (fmt.charAt(i) == "%") {
-                if (i + 1 < fmt.length && fmt.charAt(i + 1) == "%") { i = i + 2 ; continue }
-                n = n + 1
-            }
-            i = i + 1
-        }
-        return n
-    }
+    // treats every other object - a list included - as a single value.
     function pyPctTypeErr(msg) { pyRaise(pyMakeExc("TypeError", [msg])) }
     function pyPctValueErr(msg) { pyRaise(pyMakeExc("ValueError", [msg])) }
     // The name CPython's operand errors print: a complex is "complex".
@@ -7844,10 +7842,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return neg ? ("-" + out) : out
     }
     function pyPct(fmt, arg) {
-        var nconv = pyPctCount(fmt)
         var args = anytype
         var dict = null
-        if (Array.isArray(arg) && arg.length == nconv) { args = arg }
+        if (isTup(arg)) { args = arg }
         else if (isDict(arg) && !isSet(arg)) { dict = arg ; args = [arg] }
         else { args = [arg] }
         var out = ""
@@ -9057,9 +9054,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // items = [{sitem} | {sslice}...] -> the TUPLE a mixed subscript indexes with.
     // `d[1:2, 1:2]` is one key in CPython too: a tuple whose sliced entries are slice
-    // objects. This value model has one sequence type and no slice type, so the tuple is
-    // a plain list and a sliced entry is the three-element list [start, stop, step] with
-    // None for an omitted bound. That is enough to store through such a subscript, read
+    // objects. This value model has no slice type, so a sliced entry is the three-element
+    // tuple (start, stop, step) with None for an omitted bound. That is enough to store
+    // through such a subscript, read
     // it back and pull the bounds apart; it is NOT a CPython slice object (it has no
     // .start / .stop / .step attributes and no indices() method).
     function makeSubTuple(items) {
@@ -9073,10 +9070,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     one.push(sl.lo != null ? sl.lo() : null)
                     one.push(sl.hi != null ? sl.hi() : null)
                     one.push(sl.step != null ? sl.step() : null)
-                    a.push(one)
+                    a.push(pyTup(one))
                 } else { a.push(it.sitem()) }
             }
-            return a
+            return pyTup(a)
         }
     }
     // The indices a slice selects, in order - Python's rules: negative bounds wrap,
@@ -9110,7 +9107,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ix = sliceIdx(o.length, lo, hi, st)
         var out = []
         for (var j = 0; j < ix.length; j++) { out.push(o[ix[j]]) }
-        return out
+        return isTup(o) ? pyTup(out) : out
     }
     // Decide ONCE, at build time, which of the two binders a comprehension clause needs.
     // Both fields are always present and always the right type: the frozen engine is
@@ -9264,6 +9261,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // must receive exactly as many values as it selects (Python's rule).
         if (last.kind == "slice") {
             if (pyUser(o) && o.__val !== undefined) { o = o.__val }
+            if (isTup(o)) { pyNoItemOp(o, false) }
             var lo = key.lo
             var hi = key.hi
             var st = key.st
@@ -9288,7 +9286,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (si != null) { si(o, idx, v); return }
         }
         if (isDict(o) && !isSet(o)) { dictSet(o, idx, v); return }
-        if (!Array.isArray(o)) { pyNoItemOp(o, false) }
+        if (!Array.isArray(o) || isTup(o)) { pyNoItemOp(o, false) }
         var pos = pySeqIdx(o, idx)
         if (pos < 0) pos += o.length
         if (pos < 0 || pos >= o.length) { pyListErr("IndexError", "list assignment index out of range") }
@@ -9378,7 +9376,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { parts.push(items[i]) }
         }
         if (parts.length == 1 && !sawComma) { return parts[0] }
-        return makeList(parts)
+        return makeTupleLit(parts)
     }
     // name := value: assign in the enclosing scope and yield the value.
     function makeWalrus(name, valT) {
@@ -9440,6 +9438,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (last.kind == "slice") {
             if (pyUser(o) && o.__val !== undefined) { o = o.__val }
+            if (isTup(o)) { pyNoItemOp(o, true) }
             var ix = sliceIdx(o.length, last.lo != null ? last.lo() : undefined,
                               last.hi != null ? last.hi() : undefined,
                               last.step != null ? last.step() : undefined)
@@ -9467,7 +9466,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             o.__idx = null
             return
         }
-        if (!Array.isArray(o)) { pyNoItemOp(o, true) }
+        if (!Array.isArray(o) || isTup(o)) { pyNoItemOp(o, true) }
         var pos = pySeqIdx(o, idx)
         if (pos < 0) { pos += o.length }
         if (pos < 0 || pos >= o.length) { pyListErr("IndexError", "list assignment index out of range") }
@@ -9516,7 +9515,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the binary one. Twin of the "+=" arm of js_pybin and of js_pyinplace in
     // abnf/jsrt.go and lib/python-rt.metajs.
     function pyAugOp(bop, a, b) {
-        if (bop == "+" && Array.isArray(a)) {
+        if (bop == "+" && Array.isArray(a) && !isTup(a)) {
             var src = pyIterOrTypeErr(b).slice(0)
             for (var i = 0; i < src.length; i++) { a.push(src[i]) }
             return a
@@ -9711,7 +9710,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < items.length; i++) {
             if (typeof items[i] == "function" || items[i].splat != undefined) { parts.push(items[i]) }
         }
-        return makeList(parts)
+        return makeTupleLit(parts)
+    }
+    function makeTupleLit(items) {
+        var listT = makeList(items)
+        return function() { return pyTup(listT()) }
     }
     // a if c else b: genuinely lowered, short-circuiting like Python.
     function makeTernary(items) {
@@ -9839,8 +9842,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     installExceptions()
     // Build an exception instance of a builtin type.
     function pyMakeExc(name, args) {
-        var inst = {__class: hostGlobals[name], args: args}
-        if (name == "ExceptionGroup" && args.length > 1) { inst.exceptions = args[1] }
+        var inst = {__class: hostGlobals[name], args: pyTup(args)}
+        if (name == "ExceptionGroup" && args.length > 1) { inst.exceptions = pyTup(args[1].slice(0)) }
         return inst
     }
     function pyRaise(v) { throw {__exc: true, v: v} }
@@ -9999,7 +10002,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             rest = keep
             if (hit.length == 0) { continue }
             var grp = pyMakeExc("ExceptionGroup", ["", hit])
-            grp.exceptions = hit
+            grp.exceptions = pyTup(hit.slice(0))
             var r = runHandler(clauses[k], grp)
             if (r != undefined) { sig = r }
         }
@@ -10146,8 +10149,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Every exception carries its constructor arguments as .args, whether or not
         // the class defines __init__ (a subclass that calls Base.__init__ sets it too).
         if (clsIsSub(cls, hostGlobals["BaseException"]) && !hasOwn(obj, "args")) {
-            obj.args = args
-            if (args.length > 1 && Array.isArray(args[1])) { obj.exceptions = args[1] }
+            obj.args = pyTup(args)
+            if (args.length > 1 && Array.isArray(args[1])) { obj.exceptions = pyTup(args[1].slice(0)) }
         }
         return obj
     }
@@ -10236,8 +10239,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // can write: CPython qualifies only a NESTED class, and a nested
             // `class` here is bound by the same name as a top-level one.
             if (name == "__name__" || name == "__qualname__") { return pyShortName(o.__name) }
-            // A tuple prints as a list in this subset.
-            if (name == "__mro__" || name == "__bases__") { return pyMroAttr(o, name) }
+            if (name == "__mro__" || name == "__bases__") { return pyTup(pyMroAttr(o, name)) }
             var cv = clsFind(o, name)
             if (cv != null) {
                 // A staticmethod / classmethod read off the CLASS: the static one
@@ -10420,11 +10422,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             r = pynRatio(f)
             if (r == "nan") { pyListErr("ValueError", "cannot convert NaN to integer ratio") }
             if (r == "inf") { pyListErr("OverflowError", "cannot convert Infinity to integer ratio") }
-            return [pyIntOfBits(r.neg, r.bits), pyIntOfBits(false, pynPow2Bits(r.dexp))]
+            return pyTup([pyIntOfBits(r.neg, r.bits), pyIntOfBits(false, pynPow2Bits(r.dexp))])
         }
         if (name == "conjugate") { return pyNumAttr(o, "real") }
         if (name == "is_integer") { return true }
-        if (name == "as_integer_ratio") { return [pyNumAttr(o, "real"), 1] }
+        if (name == "as_integer_ratio") { return pyTup([pyNumAttr(o, "real"), 1]) }
         var ib = pyIntBits(o)
         if (name == "bit_length") { return ib.bits.length }
         if (name == "bit_count") { return pynBitCount(ib.bits) }
@@ -10523,8 +10525,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var self = arguments[0]
             var rest = []
             for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
-            self.args = rest
-            if (rest.length > 1 && Array.isArray(rest[1])) { self.exceptions = rest[1] }
+            self.args = pyTup(rest)
+            if (rest.length > 1 && Array.isArray(rest[1])) { self.exceptions = pyTup(rest[1].slice(0)) }
         }
     }
 
@@ -11037,7 +11039,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (plist.rest != null) {
             var extra = []
             for (var k = ai; k < args.length; k++) { extra.push(args[k]) }
-            scopePut(fscope, plist.rest, extra)
+            scopePut(fscope, plist.rest, pyTup(extra))
         }
         if (plist.kwrest != null) {
             var kw = newDict()

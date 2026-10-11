@@ -292,7 +292,7 @@ func (rt *jsrt) rxPySpan(md interface{}, key interface{}, which int) float64 {
 // cannot simply be rxCaptureArray, which fills Ruby's nil.
 func rxPyGroups(md interface{}) *jsArray {
 	re, text, m := rxMatchOf(md)
-	out := &jsArray{}
+	out := pyTup(&jsArray{})
 	rxPyAppendGroups(out, re, text, m)
 	return out
 }
@@ -454,8 +454,7 @@ func rxPyAppendGroups(parts *jsArray, re *rxRe, text []rune, m *rxMatch) {
 }
 
 // rxPyFindAll is re.findall / re.finditer: no group -> the whole matches, one
-// group -> that group, more -> the capture tuple of each match (a tuple is a list
-// in this value model).
+// group -> that group, more -> the capture tuple of each match.
 func (rt *jsrt) rxPyFindAll(rv *jsObject, s string, asMatch bool) *jsArray {
 	re := rxPyReOf(rv)
 	src, _ := rv.props["__src"].(string)
@@ -482,7 +481,7 @@ func (rt *jsrt) rxPyFindAll(rv *jsObject, s string, asMatch bool) *jsArray {
 				out.elems = append(out.elems, jsUndef)
 			}
 		default:
-			t := &jsArray{}
+			t := pyTup(&jsArray{})
 			rxPyAppendGroups(t, re, text, m)
 			out.elems = append(out.elems, t)
 		}
@@ -575,7 +574,7 @@ func (rt *jsrt) rxPyReMethod(rv *jsObject, name string, a []interface{}) interfa
 		if name == "sub" {
 			return text
 		}
-		return &jsArray{elems: []interface{}{text, float64(n)}}
+		return pyTup(&jsArray{elems: []interface{}{text, float64(n)}})
 	case "split":
 		return rt.rxPySplit(rv, rt.toString(argAt(a, 0)), rxPyIntArg(a, 1))
 	}
@@ -592,7 +591,7 @@ func (rt *jsrt) rxPyMatchMethod(md interface{}, name string, a []interface{}) in
 		if len(a) == 1 {
 			return rt.rxPyGroup(md, a[0])
 		}
-		out := &jsArray{}
+		out := pyTup(&jsArray{})
 		for _, k := range a {
 			out.elems = append(out.elems, rt.rxPyGroup(md, k))
 		}
@@ -607,7 +606,7 @@ func (rt *jsrt) rxPyMatchMethod(md interface{}, name string, a []interface{}) in
 		return rt.rxPySpan(md, rxPyKeyArg(a), 1)
 	case "span":
 		k := rxPyKeyArg(a)
-		return &jsArray{elems: []interface{}{rt.rxPySpan(md, k, 0), rt.rxPySpan(md, k, 1)}}
+		return pyTup(&jsArray{elems: []interface{}{rt.rxPySpan(md, k, 0), rt.rxPySpan(md, k, 1)}})
 	case "expand":
 		re, text, m := rxMatchOf(md)
 		return re.expand(text, m, rxPyTemplate(rt.toString(argAt(a, 0))))

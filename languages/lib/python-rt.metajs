@@ -119,6 +119,17 @@ function pyIsObj(v) {
 }
 
 function pyIsArr(v) { return Array.isArray(v) }
+// Go: pyTupKind / pyTup / pyIsTup in abnf/jsrtpysub.go. A TUPLE is an array
+// carrying kind 16 (arrKind / arrKindSet, host ids 99/100: field d of the
+// floor's array cell, which a copy does not inherit).
+function pyTup(a) { return arrKindSet(a, 16) }
+function pyIsTup(v) { return arrKind(v) == 16 }
+// A tuple's two methods.
+function pyIsTupleMethod(name) { return name == "count" || name == "index" }
+// Go: js_pytup and js_pytupconv. A tuple display marks the array it built, and
+// tuple(iterable) is list()'s fresh array, marked.
+function js_pytup(a) { return arrKindSet(a, 16) }
+function js_pytupconv(v) { return arrKindSet(js_pylist(v), 16) }
 function pyIsStr(v) { return typeof v == "string" }
 function pyIsNum(v) { return typeof v == "number" }
 function pyIsBool(v) { return typeof v == "boolean" }
@@ -248,9 +259,8 @@ function pyKeyEq(a, b) {
         return pyNum(a) == pyNum(b)
     }
     // A TUPLE key. CPython hashes a tuple by its CONTENTS, so `{(1,2): "x"}[(1,2)]`
-    // is a hit off two different objects - and a tuple IS an array in this value
-    // model, so arrays compare by Python ==, the same rule the set side uses
-    // (pySetHas -> pyEqual). The typeof gate keeps the Array.isArray CALL off the
+    // is a hit off two different objects: arrays compare by Python ==, the same
+    // rule the set side uses (pySetHas -> pyEqual). The typeof gate keeps the Array.isArray CALL off the
     // string and number keys that are almost every key.
     if (typeof a == "object") {
         if (Array.isArray(a) && Array.isArray(b)) { return pyEqual(a, b) }
@@ -267,12 +277,21 @@ function pyKeyEq(a, b) {
 //   {[1]}      TypeError: cannot use 'list' as a set element (unhashable type: 'list')
 //   {{}: 1}    TypeError: cannot use 'dict' as a dict key (unhashable type: 'dict')
 //
-// The wording differs between the two positions. dict and set are refused; the
-// ARRAY is not, because a tuple is an array here and refusing it would abort
-// `{(1,2)}` and `d[i, j]`, which CPython accepts - see the note at
-// python-interpreter.abnf's pyHashCheck. A frozenset is hashable; bytearray is
-// not in this subset at all.
+// The wording differs between the two positions, and the OUTER name is the type
+// handed over while the INNER one is the type that is unhashable: a list, or a
+// tuple holding one, `{(1, [2]): 3}`. A frozenset is hashable; bytearray is not
+// in this subset at all.
 function pyHashName(v) {
+    if (Array.isArray(v)) {
+        if (!pyIsTup(v)) { return "list" }
+        var i = 0
+        while (i < v.length) {
+            var inner = pyHashName(v[i])
+            if (inner != "") { return inner }
+            i = i + 1
+        }
+        return ""
+    }
     if (!pyIsObj(v)) { return "" }
     if (v["__set"] === true) {
         if (v["__frozen"] === true) { return "" }
@@ -288,7 +307,7 @@ function pyHashCheck(v, elem) {
     if (n == "") { return undefined }
     var where = "a dict key"
     if (elem) { where = "a set element" }
-    pyRaiseExc("TypeError", "cannot use '" + n + "' as " + where
+    pyRaiseExc("TypeError", "cannot use '" + pyTypeName(v) + "' as " + where
                             + " (unhashable type: '" + n + "')")
     return undefined
 }
@@ -591,10 +610,17 @@ function pyStr(v) {
         return "<class '" + cn + "'>"
     }
     if (Array.isArray(v)) {
+        // A tuple is parenthesized, and a one-element one keeps its comma.
+        var tup = pyIsTup(v)
         var out = "["
+        if (tup) { out = "(" }
         for (var i = 0; i < v.length; i++) {
             if (i > 0) { out = out + ", " }
             out = out + pyRepr(v[i])
+        }
+        if (tup) {
+            if (v.length == 1) { return out + ",)" }
+            return out + ")"
         }
         return out + "]"
     }
@@ -848,7 +874,10 @@ function pyTypeName(v) {
     // the value can tell the two Python types apart - which is why the float is
     // boxed in the first place.
     if (typeof v == "number") { return "int" }
-    if (Array.isArray(v)) { return "list" }
+    if (Array.isArray(v)) {
+        if (pyIsTup(v)) { return "tuple" }
+        return "list"
+    }
     // CPython's type(gen).__name__, and the name its AttributeError uses.
     if (pyIsGen(v)) { return "generator" }
     if (typeof v == "function") {
@@ -961,6 +990,7 @@ function pyEqual(x, y) {
     if (Array.isArray(x)) {
         if (!Array.isArray(y)) { return false }
         if (x.length != y.length) { return false }
+        if (pyIsTup(x) != pyIsTup(y)) { return false }
         for (var j = 0; j < x.length; j++) {
             if (!pyEqual(x[j], y[j])) { return false }
         }
@@ -1217,7 +1247,7 @@ function pyBDelAccepts(tname, o) {
     if (tname == "int") { return nk == "int" }
     if (tname == "float") { return nk == "int" || nk == "float" }
     if (tname == "str") { return typeof o == "string" }
-    if (tname == "list") { return pyIsArr(o) }
+    if (tname == "list") { return pyIsArr(o) && !pyIsTup(o) }
     return pyIsDict(o) && pySetElemsOf(o) === null
 }
 
@@ -1278,6 +1308,10 @@ function pyValDunder(v, name) {
     }
     if (tn == "" || name.length <= 4) { return undefined }
     if (name.substring(0, 2) != "__" || name.substring(name.length - 2, name.length) != "__") { return undefined }
+    // A tuple is served by list's delegates, less the ones that mutate.
+    if (pyIsTup(v)) {
+        if (name == "__setitem__" || name == "__delitem__" || name == "__init__" || name == "__iadd__") { return undefined }
+    }
     return pyBDelegate(tn, name)
 }
 function pyValDunderAttr(v, name) { return pyValDunder(v, name) !== undefined }
@@ -1443,7 +1477,7 @@ function pyGetAttr(obj, name) {
         // write: CPython qualifies only a NESTED class, and a nested `class` here
         // is bound by the same name as a top-level one.
         if (name == "__name__" || name == "__qualname__") { return pyShortName(pyToStr(obj["__name"])) }
-        if (name == "__mro__" || name == "__bases__") { return pyMroAttr(obj, name) }
+        if (name == "__mro__" || name == "__bases__") { return pyTup(pyMroAttr(obj, name)) }
         if (pyLookupHas(obj, name)) {
             var cv = pyLookupVal(obj, name)
             // A staticmethod / classmethod read off the CLASS: the static one
@@ -1497,7 +1531,7 @@ function pyGetAttr(obj, name) {
     var bcm = pyBuiltinClsMethod(obj, name)
     if (bcm !== undefined) { return pyBMSet(bcm, name, obj, null) }
     if (name == "__mro__" || name == "__bases__") {
-        if (pyClassName(obj) !== null) { return pyMroAttr(obj, name) }
+        if (pyClassName(obj) !== null) { return pyTup(pyMroAttr(obj, name)) }
     }
     // list.count / str.upper / dict.get read off the BUILTIN type object: an
     // unbound method descriptor. It sits HERE rather than in the pyIsClass branch
@@ -1679,11 +1713,11 @@ function pyNumMethod(o, name, args, kw) {
         r = pynRatio(f)
         if (r == "nan") { pyRaiseExc("ValueError", "cannot convert NaN to integer ratio") }
         if (r == "inf") { pyRaiseExc("OverflowError", "cannot convert Infinity to integer ratio") }
-        return [pyIntOfBits(r["neg"], r["bits"]), pyIntOfBits(false, pynPow2Bits(r["dexp"]))]
+        return pyTup([pyIntOfBits(r["neg"], r["bits"]), pyIntOfBits(false, pynPow2Bits(r["dexp"]))])
     }
     if (name == "conjugate") { return pyNumAttr(o, "real") }
     if (name == "is_integer") { return true }
-    if (name == "as_integer_ratio") { return [pyNumAttr(o, "real"), 1] }
+    if (name == "as_integer_ratio") { return pyTup([pyNumAttr(o, "real"), 1]) }
     var bits = pyIntBits(o)
     if (name == "bit_length") { return bits.length }
     if (name == "bit_count") { return pynBitCount(bits) }
@@ -1983,7 +2017,7 @@ function js_pyvars(o) { return pyGetAttr(o, "__dict__") }
 // (and `except <ThatName>`) for a StopIteration / UnboundLocalError / AttributeError
 // the RUNTIME raised, exactly like for one the program raised.
 function pyExcInstance(name, msg) {
-    return {__class: pyExcClass(name), args: [msg]}
+    return {__class: pyExcClass(name), args: pyTup([msg])}
 }
 
 // The class a RUNTIME-raised exception carries, with CPython's hierarchy above
@@ -2023,7 +2057,7 @@ function pyRaiseExc(name, msg) { throw pyExcInstance(name, msg) }
 // because MetaJS is typed and pyExcInstance's msg is a string at every other call
 // site.
 function pyExcInstanceV(name, arg) {
-    return {__class: pyExcClass(name), args: [arg]}
+    return {__class: pyExcClass(name), args: pyTup([arg])}
 }
 
 function pyRaiseExcV(name, arg) { throw pyExcInstanceV(name, arg) }
@@ -2795,6 +2829,7 @@ function pyASeqRepeat(seq, n) {
         }
         a = a + 1
     }
+    if (pyIsTup(seq)) { pyTup(out) }
     return {v: out}
 }
 
@@ -3317,6 +3352,7 @@ function pyABinTypeErr(op, l, r, a, b) {
         if (kl != "" && kl == pyAAddKind(b)) { return "" }
         if (kl == "s") { return "can only concatenate str (not \"" + pyTypeName(r) + "\") to str" }
         if (kl == "l") { return "can only concatenate list (not \"" + pyTypeName(r) + "\") to list" }
+        if (kl == "u") { return "can only concatenate tuple (not \"" + pyTypeName(r) + "\") to tuple" }
     }
     var na = pyNumTName(a)
     var nb = pyNumTName(b)
@@ -3389,23 +3425,29 @@ function pyAContains(x, y) {
 // ============================================================================
 
 // CPython's `+` is defined only within one kind - numbers (bool, int, float,
-// complex), str, or a list - and raises TypeError for any other pair.
+// complex), str, a list or a tuple - and raises TypeError for any other pair.
 // Go: rt.pyAddCheck.
 function pyAAddKind(v) {
     if (typeof v == "number" || typeof v == "boolean") { return "n" }
     if (typeof v == "string") { return "s" }
-    if (pyIsArr(v)) { return "l" }
+    if (pyIsArr(v)) {
+        if (pyIsTup(v)) { return "u" }
+        return "l"
+    }
     if (pyIsFlo(v) || pyIsBig(v) || pyIsCplx(v)) { return "n" }
     return ""
 }
 
 // CPython orders two values only within one kind: numbers (bool, int, float -
-// not complex), str, two lists (a tuple is a list here), two sets. Go:
-// rt.pyOrdCheck in abnf/pyarith.go.
+// not complex), str, two lists, two tuples, two sets. Go: rt.pyOrdCheck in
+// abnf/pyarith.go.
 function pyAOrdKind(v) {
     if (typeof v == "number" || typeof v == "boolean") { return "n" }
     if (typeof v == "string") { return "s" }
-    if (pyIsArr(v)) { return "l" }
+    if (pyIsArr(v)) {
+        if (pyIsTup(v)) { return "u" }
+        return "l"
+    }
     if (pyIsFlo(v) || pyIsBig(v)) { return "n" }
     if (pySetElemsOf(v) !== null) { return "t" }
     return ""
@@ -3422,6 +3464,7 @@ function pyAAddCheck(l, r) {
     var rn = pyTypeName(r)
     if (kl == "s") { pyRaiseExc("TypeError", "can only concatenate str (not \"" + rn + "\") to str") }
     if (kl == "l") { pyRaiseExc("TypeError", "can only concatenate list (not \"" + rn + "\") to list") }
+    if (kl == "u") { pyRaiseExc("TypeError", "can only concatenate tuple (not \"" + rn + "\") to tuple") }
     pyRaiseExc("TypeError", "unsupported operand type(s) for +: '" + pyTypeName(l) + "' and '" + rn + "'")
 }
 
@@ -3456,7 +3499,7 @@ function js_pybin(opv, l, r) {
     // iterable is accepted; on anything else it is the binary `+`. The length is
     // read first so `xs += xs` doubles.
     if (op == "+=") {
-        if (pyIsArr(l)) {
+        if (pyIsArr(l) && !pyIsTup(l)) {
             var ext = pyElemsOf(r)
             var en = ext.length
             var ei = 0
@@ -3586,6 +3629,8 @@ function js_pybin(opv, l, r) {
         // Two sequences CONCATENATE in Python ([1] + [2] is [1, 2], and bytes
         // are a list of byte numbers here), which is not what jsAdd does.
         if (pyIsArr(l) && pyIsArr(r)) {
+            var ltup = pyIsTup(l)
+            if (ltup != pyIsTup(r)) { pyAAddCheck(l, r) }
             var out = []
             var i = 0
             while (i < l.length) {
@@ -3597,6 +3642,7 @@ function js_pybin(opv, l, r) {
                 out.push(r[j])
                 j = j + 1
             }
+            if (ltup) { pyTup(out) }
             return out
         }
         if (typeof l == "number" && typeof r == "number") {
@@ -4587,7 +4633,10 @@ function pyIterKind(v) {
         }
         return "str_ascii_iterator"
     }
-    if (pyIsArr(v)) { return "list_iterator" }
+    if (pyIsArr(v)) {
+        if (pyIsTup(v)) { return "tuple_iterator" }
+        return "list_iterator"
+    }
     if (pySetElemsOf(v) !== null && pySetElemsOf(v) !== undefined) { return "set_iterator" }
     if (pyIsDict(v)) { return "dict_keyiterator" }
     return "iterator"
@@ -4625,7 +4674,7 @@ function js_pyyfsend(d, sent) {
 // yields again raises RuntimeError and stays suspended. Twin of pyGenClose in
 // abnf/jsrt.go.
 function pyGenClose(g) {
-    var ge = {__class: pyExcClass("GeneratorExit"), args: []}
+    var ge = {__class: pyExcClass("GeneratorExit"), args: pyTup([])}
     var cst = anytype
     try { cst = g["throw"].apply(g, [ge]) }
     catch (ce) {
@@ -4676,7 +4725,7 @@ function pyStopIter(args, val) {
     exc["value"] = sv
     // CPython's StopIteration carries no argument at all unless the generator
     // returned a value; see pyGenValue.
-    var sargs = []
+    var sargs = pyTup([])
     if (sv !== null) { sargs.push(sv) }
     exc["args"] = sargs
     throw exc
@@ -4689,7 +4738,7 @@ function js_pyenumerate(args) {
     var out = []
     var i = 0
     while (i < a.length) {
-        out.push([start + i, a[i]])
+        out.push(pyTup([start + i, a[i]]))
         i = i + 1
     }
     return pyMkIter("enumerate", out)
@@ -4726,7 +4775,13 @@ function js_pyzip(args) {
         srcs.push(pyElemsOf(args[i]))
         i = i + 1
     }
-    return pyMkIter("zip", pyZipRows(srcs))
+    var rows = pyZipRows(srcs)
+    var j = 0
+    while (j < rows.length) {
+        pyTup(rows[j])
+        j = j + 1
+    }
+    return pyMkIter("zip", rows)
 }
 
 function js_pymapfn(args) {
@@ -4883,14 +4938,13 @@ function js_pyuncaught(v) {
 }
 
 // divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
-// remainder, so divmod(-7, 2) is (-4, 1). A tuple is a list in this value model
-// (docs/working-on-this-project.md 7.9).
+// remainder, so divmod(-7, 2) is (-4, 1).
 function js_pydivmod(l, r) {
     if (pyNum(r) == 0) {
         pyRaiseExc("ZeroDivisionError", "division by zero")
     }
-    return [pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r),
-            pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r)]
+    return pyTup([pyIntOrFlo(Math.floor(pyNum(l) / pyNum(r)), l, r),
+                  pyIntOrFlo(pyAFloorMod(pyNum(l), pyNum(r)), l, r)])
 }
 
 // round(x[, n]) rounds HALF TO EVEN, so round(0.5) is 0, round(1.5) is 2 and
@@ -5305,27 +5359,13 @@ function pyFloNegate(f) {
 // ----- "fmt" % args, CPython's printf-style formatting -----
 //
 // The whole reasoning - what is supported, what fails loudly, and the ARGUMENT
-// TUPLE rule an array has to be read under while a tuple is still a list in this
-// value model - is at rt.pyPct in abnf/jsrt.go. pyPct in
+// TUPLE rule - is at rt.pyPct in abnf/jsrt.go. pyPct in
 // languages/python-interpreter.abnf is this same body.
 //
 // The float verbs are where the three halves differ in SPELLING and not in
 // answer: Go says strconv.FormatFloat, and this half (like the interpreter's)
 // builds the same text out of rtFixed and floPrec - host id 70 of
 // languages/lib/runtime.c.
-function pyBPctCount(f) {
-    var n = 0
-    var i = 0
-    while (i < f.length) {
-        if (f.charAt(i) == "%") {
-            if (i + 1 < f.length && f.charAt(i + 1) == "%") { i = i + 2 ; continue }
-            n = n + 1
-        }
-        i = i + 1
-    }
-    return n
-}
-
 function pyBPctTypeErr(msg) { pyRaiseExc("TypeError", msg) }
 
 // The name CPython's operand errors print: a complex is "complex".
@@ -5554,10 +5594,9 @@ function pyBCodePoint(n) {
 }
 
 function pyBPct(f, arg) {
-    var nconv = pyBPctCount(f)
     var args = []
     var dict = null
-    if (pyIsArr(arg) && arg.length == nconv) { args = arg }
+    if (pyIsTup(arg)) { args = arg }
     else if (pyIsDict(arg) && pySetElemsOf(arg) === null) { dict = arg ; args = [arg] }
     else { args = [arg] }
     var out = ""
@@ -6171,7 +6210,7 @@ function pyNoItemOp(c, del) {
     var tn = pyTypeName(c)
     if (!del) { pyRaiseExc("TypeError", "'" + tn + "' object does not support item assignment") }
     var how = "does not"
-    if (typeof c == "string" || pySetElemsOf(c) !== null || pyInstClassOf(c) !== null) { how = "doesn't" }
+    if (typeof c == "string" || pySetElemsOf(c) !== null || pyInstClassOf(c) !== null || pyIsTup(c)) { how = "doesn't" }
     pyRaiseExc("TypeError", "'" + tn + "' object " + how + " support item deletion")
 }
 
@@ -6194,7 +6233,7 @@ function js_pyset(c, k, v) {
         pyDictSet(c, k, v)
         return undefined
     }
-    if (!pyIsArr(c)) { pyNoItemOp(c, false) }
+    if (!pyIsArr(c) || pyIsTup(c)) { pyNoItemOp(c, false) }
     var idx = pySeqIdx(c, k)
     if (idx < 0) { idx = idx + c.length }
     if (idx < 0 || idx >= c.length) { pyRaiseExc("IndexError", "list assignment index out of range") }
@@ -6441,6 +6480,7 @@ function js_pyslice3(c0, lo, hi, step) {
             out.push(c[idx[i]])
             i = i + 1
         }
+        if (pyIsTup(c)) { pyTup(out) }
         return out
     }
     if (typeof c == "string") {
@@ -6470,6 +6510,7 @@ function js_pysetslice(arr0, lo, hi, step, values) {
         fail("slice assignment to a " + typeof arr)
         return undefined
     }
+    if (pyIsTup(arr)) { pyNoItemOp(arr, false) }
     var vals = pySeqElems(values)
     if (rtIsNil(step) || pyNum(step) == 1) {
         var idx = pySliceIndices(arr.length, lo, hi, step)
@@ -6521,6 +6562,7 @@ function js_pysetslice(arr0, lo, hi, step, values) {
 function js_pydelslice(arr0, lo, hi, step) {
     var arr = anytype
     arr = pyUnwrapBuiltin(arr0)
+    if (pyIsTup(arr)) { pyNoItemOp(arr, true) }
     if (!pyIsArr(arr)) {
         fail("deleting a slice of a " + typeof arr)
         return undefined
@@ -6609,7 +6651,7 @@ function js_pydel_item(c, k) {
         pyCRemoveAt(vals, i)
         return undefined
     }
-    if (!pyIsArr(c)) { pyNoItemOp(c, true) }
+    if (!pyIsArr(c) || pyIsTup(c)) { pyNoItemOp(c, true) }
     var ai = pySeqIdx(c, k)
     if (ai < 0) { ai = ai + c.length }
     if (ai < 0 || ai >= c.length) { pyRaiseExc("IndexError", "list assignment index out of range") }
@@ -6619,7 +6661,7 @@ function js_pydel_item(c, k) {
 
 
 // ----- js_pymatchseq ----------------------------------------------------------
-// A sequence pattern matches lists and tuples (one type here), never a string
+// A sequence pattern matches lists and tuples, never a string
 // and never a dict: (value, count before the *rest, count after it, is there a
 // *rest) -> does the shape fit.
 function js_pymatchseq(v, before, after, hasRest) {
@@ -7484,7 +7526,7 @@ function pyGenValue(st) {
         sv = st["value"]
         if (sv === undefined) { sv = null }
         exc["value"] = sv
-        var sargs = []
+        var sargs = pyTup([])
         if (sv !== null) { sargs.push(sv) }
         exc["args"] = sargs
         throw exc
@@ -7689,7 +7731,10 @@ function pyDMethodCall(target, name, args, kw) {
     // pyListMethod in abnf/jsrt.go; the interpreter: pyListMethod in
     // languages/python-interpreter.abnf.
     if (pyIsArr(target)) {
-        if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
+        if (pyIsListMethod(name)) {
+            if (pyIsTupleMethod(name) || !pyIsTup(target)) { return pyListMethod(target, name, args, kw) }
+            throw pyExcInstance("AttributeError", "'tuple' object has no attribute '" + name + "'")
+        }
     }
     // conjugate() of a complex flips the sign of its imaginary part.
     if (name == "conjugate") {
@@ -7701,7 +7746,7 @@ function pyDMethodCall(target, name, args, kw) {
     // name on a number is CPython's AttributeError.
     var vdel = pyValDunder(target, name)
     if (vdel !== undefined) { return pyCallSelf(vdel, target, args) }
-    if (pyNumTName(target) != "") {
+    if (pyNumTName(target) != "" || pyIsTup(target)) {
         throw pyExcInstance("AttributeError",
                             "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
     }
@@ -7845,6 +7890,7 @@ function pyListMethod(xs, name, args, kw) {
             if (pyAEqual(xs[xi], pyEArgAt(args, 0))) { return xi }
             xi = xi + 1
         }
+        if (pyIsTup(xs)) { throw pyExcInstance("ValueError", "tuple.index(x): x not in tuple") }
         throw pyExcInstance("ValueError", "list.index(x): x not in list")
     }
     if (name == "sort") {
@@ -8006,15 +8052,14 @@ function pyDictMethod(d, name, args, kw) {
     var vals = d["vals"]
     if (name == "keys") { return pyCCopyArr(keys) }
     if (name == "values") { return pyCCopyArr(vals) }
-    // .items(): a list of [key, value] pairs in insertion order (each pair a
-    // 2 element list, since the subset has no tuples; CPython answers a
-    // dict_items VIEW of TUPLES). Every form, written or via getattr, arrives
-    // here.
+    // .items(): a list of (key, value) tuples in insertion order, where
+    // CPython answers a dict_items VIEW of them. Every form, written or via
+    // getattr, arrives here.
     if (name == "items") {
         var pairs = []
         var pi2 = 0
         while (pi2 < keys.length) {
-            pairs.push([keys[pi2], vals[pi2]])
+            pairs.push(pyTup([keys[pi2], vals[pi2]]))
             pi2 = pi2 + 1
         }
         return pairs
@@ -8038,9 +8083,8 @@ function pyDictMethod(d, name, args, kw) {
         throw pyExcInstanceV("KeyError", pyEArgAt(args, 0))
     }
     // popitem(): the LAST inserted pair, removed - CPython's is LIFO since 3.7.
-    // The pair is a 2-element list, like items()' pairs, because this subset has
-    // no tuple. Empty raises the KeyError whose argument is a sentence rather
-    // than a key.
+    // The pair is a tuple, like items()' pairs. Empty raises the KeyError whose
+    // argument is a sentence rather than a key.
     if (name == "popitem") {
         if (keys.length == 0) {
             throw pyExcInstanceV("KeyError", "popitem(): dictionary is empty")
@@ -8052,7 +8096,7 @@ function pyDictMethod(d, name, args, kw) {
         ppV = vals[ppI]
         pyCRemoveAt(keys, ppI)
         pyCRemoveAt(vals, ppI)
-        return [ppK, ppV]
+        return pyTup([ppK, ppV])
     }
     if (name == "clear") {
         pyCTruncate(keys)
@@ -8321,7 +8365,10 @@ function pySetAlgebra(els, name, args) {
 // hasattr answering True for a call that then aborts.
 function pyDBuiltinAttr(obj, name) {
     if (typeof obj == "string") { return pySIsStrMethod(name) }
-    if (pyIsArr(obj)) { return pyIsListMethod(name) }
+    if (pyIsArr(obj)) {
+        if (pyIsTup(obj)) { return pyIsTupleMethod(name) }
+        return pyIsListMethod(name)
+    }
     // A set is a dict whose keys are its members, so it is asked FIRST.
     var els = pySetElemsOf(obj)
     if (els !== null && els !== undefined) { return pyIsSetMethod(name) && !(pySetFrozen(obj) && pySetMutator(name)) }
@@ -8731,9 +8778,10 @@ function js_pyexcsplit(grp, typ, cls) {
     if (matched.length == 0) { return undefined }
     var sub = {}
     sub["__class"] = cls
-    // Go puts the SAME jsArray into args[1] and "exceptions"; kept aliased.
-    sub["args"] = [r["msg"], matched]
-    sub["exceptions"] = matched
+    // args[1] is the list of matches and "exceptions" the same matches as a
+    // tuple, as Go builds them.
+    sub["args"] = pyTup([r["msg"], matched])
+    sub["exceptions"] = pyTup(pyCCopyArr(matched))
     return sub
 }
 
@@ -9051,7 +9099,7 @@ function pyERxAppendGroups(parts, re, text, m) {
 // pyERxGroups is Go rxPyGroups.
 function pyERxGroups(md) {
     var mo = pyERxMatchOf(md)
-    var out = []
+    var out = pyTup([])
     pyERxAppendGroups(out, mo["re"], mo["text"], mo["m"])
     return out
 }
@@ -9191,7 +9239,7 @@ function pyERxSplit(rv, s, maxsplit) {
 
 // pyERxFindAll is Go (*jsrt).rxPyFindAll - re.findall / re.finditer: no group ->
 // the whole matches, one group -> that group, more -> the capture tuple of each
-// match (a tuple is a list in this value model).
+// match.
 function pyERxFindAll(rv, s, asMatch) {
     var re = pyERxReOf(rv)
     var src = rv["__src"]
@@ -9212,7 +9260,7 @@ function pyERxFindAll(rv, s, asMatch) {
             var g1 = rxGroup(re, s, m, 1)
             if (g1 === null) { out.push(undefined) } else { out.push(g1) }
         } else {
-            var t = []
+            var t = pyTup([])
             pyERxAppendGroups(t, re, s, m)
             out.push(t)
         }
@@ -9320,7 +9368,7 @@ function pyERxReMethod(rv, name, a) {
     if (name == "sub" || name == "subn") {
         var r = pyERxSub(rv, pyEArgAt(a, 0), pyToStr(pyEArgAt(a, 1)), pyERxIntArg(a, 2))
         if (name == "sub") { return r["text"] }
-        return [r["text"], r["n"]]
+        return pyTup([r["text"], r["n"]])
     }
     if (name == "split") { return pyERxSplit(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1)) }
     fail("unknown Pattern method: " + name)
@@ -9332,7 +9380,7 @@ function pyERxMatchMethod(md, name, a) {
     if (name == "group") {
         if (a.length == 0) { return pyERxGroup(md, 0) }
         if (a.length == 1) { return pyERxGroup(md, a[0]) }
-        var out = []
+        var out = pyTup([])
         var i = 0
         while (i < a.length) {
             out.push(pyERxGroup(md, a[i]))
@@ -9346,7 +9394,7 @@ function pyERxMatchMethod(md, name, a) {
     if (name == "end") { return pyERxSpan(md, pyERxKeyArg(a), 1) }
     if (name == "span") {
         var k = pyERxKeyArg(a)
-        return [pyERxSpan(md, k, 0), pyERxSpan(md, k, 1)]
+        return pyTup([pyERxSpan(md, k, 0), pyERxSpan(md, k, 1)])
     }
     if (name == "expand") {
         var mo = pyERxMatchOf(md)
@@ -11115,10 +11163,10 @@ function pyStrMethod(s, name, args, kw) {
         if (name == "partition") { pat = pySFind(s, psep, 0, n) }
         else { pat = pySRFind(s, psep, 0, n) }
         if (pat < 0) {
-            if (name == "partition") { return [s, "", ""] }
-            return ["", "", s]
+            if (name == "partition") { return pyTup([s, "", ""]) }
+            return pyTup(["", "", s])
         }
-        return [s.substring(0, pat), psep, s.substring(pat + psep.length, n)]
+        return pyTup([s.substring(0, pat), psep, s.substring(pat + psep.length, n)])
     }
     if (name == "removeprefix") {
         var pre = pySStrArg(args[0], "removeprefix() argument must be str", true)

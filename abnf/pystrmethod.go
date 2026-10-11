@@ -1447,11 +1447,11 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		}
 		if at < 0 {
 			if name == "partition" {
-				return &jsArray{elems: []interface{}{s, "", ""}}
+				return pyTup(&jsArray{elems: []interface{}{s, "", ""}})
 			}
-			return &jsArray{elems: []interface{}{"", "", s}}
+			return pyTup(&jsArray{elems: []interface{}{"", "", s}})
 		}
-		return &jsArray{elems: []interface{}{e.sSub(s, 0, at), sep, e.sSub(s, at+e.sLen(sep), n)}}
+		return pyTup(&jsArray{elems: []interface{}{e.sSub(s, 0, at), sep, e.sSub(s, at+e.sLen(sep), n)}})
 
 	case "removeprefix":
 		pre := e.strArg(pysArgAt(args, 0), "removeprefix() argument must be str", true)

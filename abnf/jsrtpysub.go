@@ -226,7 +226,7 @@ func pyBDelAccepts(tname string, o interface{}) bool {
 		return ok
 	case "list":
 		_, ok := o.(*jsArray)
-		return ok
+		return ok && !pyIsTup(o)
 	}
 	if _, isSet := pySetElems(o); isSet {
 		return false
@@ -303,6 +303,24 @@ func pyNumTypeName(v interface{}) string {
 	return ""
 }
 
+// pyTupKind is the jsArray.kind a Python TUPLE carries (arrKind / arrKindSet in
+// the other two engines; 16 stays clear of kotlin's 1-3, since the shared js_py*
+// externs see both). Indexing, len, iteration and unpacking treat it as any
+// array; what differs - repr, type, ==, ordering, hashing, immutability - asks
+// pyIsTup. Twin of pyTup / isTup in languages/python-interpreter.abnf and pyTup
+// / pyIsTup in lib/python-rt.metajs.
+const pyTupKind = 16
+
+func pyTup(a *jsArray) *jsArray {
+	a.kind = pyTupKind
+	return a
+}
+
+func pyIsTup(v interface{}) bool {
+	a, ok := v.(*jsArray)
+	return ok && a.kind == pyTupKind
+}
+
 // pyValDunder is the delegate through which a builtin VALUE answers the dunder
 // name - (5).__add__, "s".__add__, [].__len__ - for the receiver sites only: a
 // type object's own dunders stay delegates, which unwrap a subclass instance.
@@ -321,8 +339,19 @@ func pyValDunder(v interface{}, name string) (*hostFunc, bool) {
 	if tn == "" || len(name) <= 4 || !strings.HasPrefix(name, "__") || !strings.HasSuffix(name, "__") {
 		return nil, false
 	}
+	// A tuple is served by list's delegates, less the ones that mutate.
+	if pyIsTup(v) {
+		switch name {
+		case "__setitem__", "__delitem__", "__init__", "__iadd__":
+			return nil, false
+		}
+	}
 	return pyBuiltinDelegate(tn, name)
 }
+
+// pyIsTupleMethod names a tuple's two methods. Twin of pyIsTupleMethod in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pyIsTupleMethod(name string) bool { return name == "count" || name == "index" }
 
 func pyValDunderAttr(v interface{}, name string) bool {
 	_, ok := pyValDunder(v, name)

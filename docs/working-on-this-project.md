@@ -756,8 +756,11 @@ a decision was taken:
   `ToString`, which is what makes `int[]` render `System.Int32[]`.
 - **Dart**: `Map`/`Set`/`Record` `toString` is spec-derived rather than
   corpus-derived, and `Record.toString` is explicitly unspecified in `dart:core`.
-- **Python**: a tuple prints as a list (see todo.md 3.1 for why a real tuple type
-  is atomic and ~640 lines).
+- **Python**: a tuple is an array carrying kind 16 (`arrKind` / `arrKindSet`,
+  `jsArray.kind`, field d of the floor's array cell), which every engine already
+  kept; `d.items()`, `keys()` and `values()` are lists rather than views, so
+  `print(d.items())` reads `[('a', 1)]` where CPython prints
+  `dict_items([('a', 1)])`.
 
 **Recorded at their sites in the same way, moved here from todo.md 2.11 when that
 list was compressed.** ~~**C#** `e.ToString()` prints `[object Object]`~~ -
