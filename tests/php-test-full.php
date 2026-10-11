@@ -1708,6 +1708,21 @@ function s42() {
         && $px[2] ** $py[2] === 5.979866080580326E-12 && pow($px[3], $py[3]) === 1.018795851248988E-187);
 }
 
+// ===== SECTION 43: keywords in any letter case =====
+// PHP's keywords are case-insensitive (manual, "List of Keywords"): `Class`,
+// `FUNCTION`, `ForEach ... AS`, `RETURN`, `NEW`, `If/ElseIf/Else` are the
+// keywords themselves. No PHP toolchain here: the values follow from that rule.
+Abstract Class S43Base { abstract Function f(); }
+CLASS S43Impl Extends S43Base { public FUNCTION f() { RETURN 7; } }
+function s43() {
+    $c = NEW S43Impl();
+    $sum = 0;
+    ForEach ([1, 2] AS $v) { $sum += $v * $c->f(); }
+    $w = "";
+    If ($sum > 100) { $w = "big"; } ElseIf ($sum == 21) { $w = "ok"; } Else { $w = "other"; }
+    check("kwci1", $sum === 21 && $w === "ok");
+}
+
 function main() {
     global $checks;
     global $failures;
@@ -1754,6 +1769,7 @@ function main() {
     s40(); // SECTION-CALL 40
     s41(); // SECTION-CALL 41
     s42(); // SECTION-CALL 42
+    s43(); // SECTION-CALL 43
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

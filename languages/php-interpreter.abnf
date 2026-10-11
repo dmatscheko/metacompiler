@@ -87,7 +87,7 @@ Program     <~~ runProgram(takeAll()) ~~>
 // One item of a top level: a declaration or a statement. Factored out because a
 // BRACED namespace body holds exactly the same items (see NsDecl).
 TopItem     = Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
-OpenTag     = "<?php" :whitespace(Whitespace) ;
+OpenTag     = "<?" :whitespace() CiP CiH CiP :whitespace(Whitespace) ;
 // Text before the first open tag. Unlike the '?>' form it keeps a leading newline:
 // only the newline directly after a CLOSE tag is swallowed.
 LeadHtml    <~~ push(makeHtmlOut(pop(), false)) ~~>
@@ -207,7 +207,10 @@ ReturnType  = ":" TypeHint ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
 ExtBase     <~~ push({ext: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
-ClassMod    = ( "abstract" | "final" | "readonly" ) KwEnd ;
+ClassMod    = ( CiAbstract | CiFinal | CiReadonly ) KwEnd ;
+CiAbstract  = CiA :whitespace() CiB CiS CiT CiR CiA CiC CiT :whitespace(Whitespace) ;
+CiFinal     = CiF :whitespace() CiI CiN CiA CiL :whitespace(Whitespace) ;
+CiReadonly  = CiR :whitespace() CiE CiA CiD CiO CiN CiL CiY :whitespace(Whitespace) ;
 ExtName     = [ "\\" ] Id { "\\" Id } ;
 ImplList    = ImplName { "," ImplName } ;
 ImplName    <~~ push({impl: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
@@ -1311,60 +1314,85 @@ NotKw       = :script(~~
     })()
 ~~) ;
 
-KwFunction  = "function" KwEnd ;
-KwClass     = "class" KwEnd ;
-KwNew       = "new" KwEnd ;
-KwIf        = "if" KwEnd ;
-KwElseif    = "elseif" KwEnd ;
-KwElse      = "else" KwEnd ;
-KwWhile     = "while" KwEnd ;
-KwFor       = "for" KwEnd ;
-KwForeach   = "foreach" KwEnd ;
-KwAs        = "as" KwEnd ;
-KwInsteadof = "insteadof" KwEnd ;
-KwCase      = "case" KwEnd ;
-KwGoto      = "goto" KwEnd ;
-KwYield     = "yield" KwEnd ;
-KwFrom      = "from" KwEnd ;
-KwEndif     = "endif" KwEnd ;
-KwEndwhile  = "endwhile" KwEnd ;
-KwEndfor    = "endfor" KwEnd ;
-KwEndforeach = "endforeach" KwEnd ;
-KwEndswitch = "endswitch" KwEnd ;
-KwReturn    = "return" KwEnd ;
-KwBreak     = "break" KwEnd ;
-KwContinue  = "continue" KwEnd ;
+// Keywords are case-insensitive in PHP (`Class C`, `foreach ($a AS $v)`, `<?PHP`), so
+// each is spelled one letter at a time in either case. KwEcho keeps its literal
+// spelling: its statement reads the keyword text back.
+CiA = "a" | "A" ;
+CiB = "b" | "B" ;
+CiC = "c" | "C" ;
+CiD = "d" | "D" ;
+CiE = "e" | "E" ;
+CiF = "f" | "F" ;
+CiG = "g" | "G" ;
+CiH = "h" | "H" ;
+CiI = "i" | "I" ;
+CiK = "k" | "K" ;
+CiL = "l" | "L" ;
+CiM = "m" | "M" ;
+CiN = "n" | "N" ;
+CiO = "o" | "O" ;
+CiP = "p" | "P" ;
+CiR = "r" | "R" ;
+CiS = "s" | "S" ;
+CiT = "t" | "T" ;
+CiU = "u" | "U" ;
+CiW = "w" | "W" ;
+CiX = "x" | "X" ;
+CiY = "y" | "Y" ;
+KwFunction  = CiF :whitespace() CiU CiN CiC CiT CiI CiO CiN :whitespace(Whitespace) KwEnd ;
+KwClass     = CiC :whitespace() CiL CiA CiS CiS :whitespace(Whitespace) KwEnd ;
+KwNew       = CiN :whitespace() CiE CiW :whitespace(Whitespace) KwEnd ;
+KwIf        = CiI :whitespace() CiF :whitespace(Whitespace) KwEnd ;
+KwElseif    = CiE :whitespace() CiL CiS CiE CiI CiF :whitespace(Whitespace) KwEnd ;
+KwElse      = CiE :whitespace() CiL CiS CiE :whitespace(Whitespace) KwEnd ;
+KwWhile     = CiW :whitespace() CiH CiI CiL CiE :whitespace(Whitespace) KwEnd ;
+KwFor       = CiF :whitespace() CiO CiR :whitespace(Whitespace) KwEnd ;
+KwForeach   = CiF :whitespace() CiO CiR CiE CiA CiC CiH :whitespace(Whitespace) KwEnd ;
+KwAs        = CiA :whitespace() CiS :whitespace(Whitespace) KwEnd ;
+KwInsteadof = CiI :whitespace() CiN CiS CiT CiE CiA CiD CiO CiF :whitespace(Whitespace) KwEnd ;
+KwCase      = CiC :whitespace() CiA CiS CiE :whitespace(Whitespace) KwEnd ;
+KwGoto      = CiG :whitespace() CiO CiT CiO :whitespace(Whitespace) KwEnd ;
+KwYield     = CiY :whitespace() CiI CiE CiL CiD :whitespace(Whitespace) KwEnd ;
+KwFrom      = CiF :whitespace() CiR CiO CiM :whitespace(Whitespace) KwEnd ;
+KwEndif     = CiE :whitespace() CiN CiD CiI CiF :whitespace(Whitespace) KwEnd ;
+KwEndwhile  = CiE :whitespace() CiN CiD CiW CiH CiI CiL CiE :whitespace(Whitespace) KwEnd ;
+KwEndfor    = CiE :whitespace() CiN CiD CiF CiO CiR :whitespace(Whitespace) KwEnd ;
+KwEndforeach = CiE :whitespace() CiN CiD CiF CiO CiR CiE CiA CiC CiH :whitespace(Whitespace) KwEnd ;
+KwEndswitch = CiE :whitespace() CiN CiD CiS CiW CiI CiT CiC CiH :whitespace(Whitespace) KwEnd ;
+KwReturn    = CiR :whitespace() CiE CiT CiU CiR CiN :whitespace(Whitespace) KwEnd ;
+KwBreak     = CiB :whitespace() CiR CiE CiA CiK :whitespace(Whitespace) KwEnd ;
+KwContinue  = CiC :whitespace() CiO CiN CiT CiI CiN CiU CiE :whitespace(Whitespace) KwEnd ;
 KwEcho      = ( "echo" | "print" ) KwEnd ;
-KwUse       = "use" KwEnd ;
-KwArray     = "array" KwEnd ;
-KwList      = "list" KwEnd ;
-KwGlobal    = "global" KwEnd ;
-KwExtends   = "extends" KwEnd ;
-KwInterface = "interface" KwEnd ;
-KwTrait     = "trait" KwEnd ;
-KwNamespace = "namespace" KwEnd ;
-KwImplements = "implements" KwEnd ;
-KwStatic    = "static" KwEnd ;
-KwConst     = "const" KwEnd ;
-KwEnum      = "enum" KwEnd ;
-KwSwitch    = "switch" KwEnd ;
-KwDo        = "do" KwEnd ;
-KwTry       = "try" KwEnd ;
-KwCatch     = "catch" KwEnd ;
-KwFinally   = "finally" KwEnd ;
-KwThrow     = "throw" KwEnd ;
-KwDeclare   = "declare" KwEnd ;
-KwMatch     = "match" KwEnd ;
+KwUse       = CiU :whitespace() CiS CiE :whitespace(Whitespace) KwEnd ;
+KwArray     = CiA :whitespace() CiR CiR CiA CiY :whitespace(Whitespace) KwEnd ;
+KwList      = CiL :whitespace() CiI CiS CiT :whitespace(Whitespace) KwEnd ;
+KwGlobal    = CiG :whitespace() CiL CiO CiB CiA CiL :whitespace(Whitespace) KwEnd ;
+KwExtends   = CiE :whitespace() CiX CiT CiE CiN CiD CiS :whitespace(Whitespace) KwEnd ;
+KwInterface = CiI :whitespace() CiN CiT CiE CiR CiF CiA CiC CiE :whitespace(Whitespace) KwEnd ;
+KwTrait     = CiT :whitespace() CiR CiA CiI CiT :whitespace(Whitespace) KwEnd ;
+KwNamespace = CiN :whitespace() CiA CiM CiE CiS CiP CiA CiC CiE :whitespace(Whitespace) KwEnd ;
+KwImplements = CiI :whitespace() CiM CiP CiL CiE CiM CiE CiN CiT CiS :whitespace(Whitespace) KwEnd ;
+KwStatic    = CiS :whitespace() CiT CiA CiT CiI CiC :whitespace(Whitespace) KwEnd ;
+KwConst     = CiC :whitespace() CiO CiN CiS CiT :whitespace(Whitespace) KwEnd ;
+KwEnum      = CiE :whitespace() CiN CiU CiM :whitespace(Whitespace) KwEnd ;
+KwSwitch    = CiS :whitespace() CiW CiI CiT CiC CiH :whitespace(Whitespace) KwEnd ;
+KwDo        = CiD :whitespace() CiO :whitespace(Whitespace) KwEnd ;
+KwTry       = CiT :whitespace() CiR CiY :whitespace(Whitespace) KwEnd ;
+KwCatch     = CiC :whitespace() CiA CiT CiC CiH :whitespace(Whitespace) KwEnd ;
+KwFinally   = CiF :whitespace() CiI CiN CiA CiL CiL CiY :whitespace(Whitespace) KwEnd ;
+KwThrow     = CiT :whitespace() CiH CiR CiO CiW :whitespace(Whitespace) KwEnd ;
+KwDeclare   = CiD :whitespace() CiE CiC CiL CiA CiR CiE :whitespace(Whitespace) KwEnd ;
+KwMatch     = CiM :whitespace() CiA CiT CiC CiH :whitespace(Whitespace) KwEnd ;
 // The tag fires BEFORE the parameter and body tags (they are further right in the
 // sequence), so it records where this arrow function's variable references start -
 // exactly as in php-to-llvm-ir.abnf, so both engines capture the same set.
-KwFn        <~~ push({vmark: varMark()}) ~~> = "fn" KwEnd ;
-KwClone     = "clone" KwEnd ;
-KwInstanceof = "instanceof" KwEnd ;
-KwIsset     = "isset" KwEnd ;
-KwEmpty     = "empty" KwEnd ;
-KwUnset     = "unset" KwEnd ;
-KwDefault   = "default" KwEnd ;
+KwFn        <~~ push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
+KwClone     = CiC :whitespace() CiL CiO CiN CiE :whitespace(Whitespace) KwEnd ;
+KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace(Whitespace) KwEnd ;
+KwIsset     = CiI :whitespace() CiS CiS CiE CiT :whitespace(Whitespace) KwEnd ;
+KwEmpty     = CiE :whitespace() CiM CiP CiT CiY :whitespace(Whitespace) KwEnd ;
+KwUnset     = CiU :whitespace() CiN CiS CiE CiT :whitespace(Whitespace) KwEnd ;
+KwDefault   = CiD :whitespace() CiE CiF CiA CiU CiL CiT :whitespace(Whitespace) KwEnd ;
 
 // A member name after '->' or '::' may be any identifier, including a reserved word.
 MemberName  = Id ;
