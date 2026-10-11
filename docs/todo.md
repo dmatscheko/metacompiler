@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-417** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-418** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -86,13 +86,11 @@ digits and its switch to exponent notation may not be the fixed window `csFloStr
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
 
-### T-414 csharp/dart: static field named Count; generic statics; target-typed default; function-typed fields · P1 · CS + DA · IN PROGRESS (CS+DA worker, round 19) [V spec-only]
-C#: `class G { public static int Count; } G.Count = 3;` - interpreter prints empty,
-compiler "Length/Count of a object" (C# 3). Gen<int>.N and Gen<long>.N share one
-variable (types erased; C# keeps them separate per closed type). `0 == default` is
-False (C# True: target-typed default). Dart: `class K { final int Function() cb; … }
-K(() => 3).cb()` "unknown method 'cb'" in both engines (Dart 3; common in Flutter:
-`widget.onTap()`).
+### T-417 csharp: target-typed `default` beyond ==; nullable default; List.IndexOf; Keys/Values members · P1 · CS · IN PROGRESS (CS worker, round 20) [V spec-only]
+`return default;` from an int/bool method, `y = default;`, `c ? 5 : default` print an
+empty line (C# 0 / False / 0 / 0, 12.8.21). `int? n = 0; n == default` True (C#
+False: default is null for int?). `new List<int>{1,2}.IndexOf(2)` unknown in both
+halves (BCL 1). A user member named Keys/Values is read as the dictionary call (probe).
 
 ---
 
@@ -486,6 +484,7 @@ T-410 swift: `Self` as a value; expected types through `==`, generics and receiv
 T-412 swift: inherited static/class methods compiled; a type parameter as a value; Set by context — DONE 08310e01 d75d7754
 T-396 corpus long tails: csharp, php, dart, java — DONE c1b3ed36..a629d763 (csharp 2674→2709, php 2692→2736, dart 3339→3371, java compiler 4329→4331; no must-parse lost). Remainder DECLINED by measured cluster: java 10 files javac itself rejects + 4 attribution-only; php reserved words as names, PHP 8.5 forms, constructs PHP rejects; csharp unsafe pointers (no pointer model), Mono prototype syntax, #if, identifier escapes; dart 53 unsplit multitests, unreleased primary constructors
 T-413 swift: Set-keyed dictionaries; builtin types as values compiled — DONE 5905648d 7870660a
+T-414 csharp/dart: static field named Count; generic statics; target-typed default; function-typed fields — DONE 43826f1a..6a5ba560 (spec-only)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
