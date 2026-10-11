@@ -121,7 +121,7 @@ interpreter's type test (goTypeName answers "slice"), even `[]int`. A nested arr
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context · P1 · SW · IN PROGRESS (SW+PHP+SH worker, round 16) [V]
+### T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context · P1 · SW · IN PROGRESS (SW+SH worker, round 16) [V]
 Optional-chain assignment `a?.b = c` does not parse (common in real Swift; 2 corpus
 files). Both halves: `func ap(_ f: (inout Int)->()) -> Int { var v=4; f(&v); return v };
 ap { (x: inout Int) in x += 2 }` prints 4 (swiftc 6: inout never written back); `[1, 2]
@@ -146,7 +146,7 @@ aborts "range over a object" (compiler). `method_exists` undefined. `self::` out
 class aborts (bug66015.phpt). A decoded JSON key starting with `__` collides with
 hidden slots compiled.
 
-### T-397 php: foreach by value walks the live array · P1 · PHP · IN PROGRESS (SW+PHP+SH worker, round 16) [V spec-only]
+### T-397 php: foreach by value walks the live array · P1 · PHP · OPEN [V spec-only]
 `$a=["x"=>1,"y"=>2]; $i=1; foreach($a as $k=>$v){$a[$i]=$v; unset($a[$k]); $i++;}`
 leaves `[y=>2, 2=>1]` in both halves; PHP iterates a snapshot (bug68215.expected:
 `[1=>1, 2=>2]`).
@@ -159,7 +159,7 @@ leaves `[y=>2, 2=>1]` in both halves; PHP iterates a snapshot (bug68215.expected
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-398 batch: `%~n0` inside `call :label`; native string arena · P2 · SH · IN PROGRESS (SW+PHP+SH worker, round 16) [V]
+### T-398 batch: `%~n0` inside `call :label`; native string arena · P2 · SH · IN PROGRESS (SW+SH worker, round 16) [V]
 Both halves: inside `call :label`, `%~n0` / `%~dp0` answer the label instead of the
 batch file (wine .exp line 988). Native only: batch-rt's 2 MB string arena is exhausted
 by tests/reference batch test_builtins.cmd after 726 lines (grow or collect).
