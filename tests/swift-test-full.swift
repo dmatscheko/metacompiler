@@ -2952,6 +2952,49 @@ func s56() {
 
 // ===== END SECTIONS =====
 
+// ===== SECTION 57: String.Index moves, removeSubrange/replaceSubrange, append(contentsOf:) =====
+// An index is the Character offset here, so only its printed form differs from
+// swiftc's (`13[utf8]`); every comparison, move and subscript below agrees. A
+// user type's own index(after:) / startIndex keep their meaning. Every expected
+// value is swiftc 6.1.2's.
+struct Ring57 {
+    var n: Int
+    func index(after i: Int) -> Int { return (i + 1) % n }
+    var startIndex: Int { return 7 }
+}
+func s57() {
+    let ks = [1, 2, 4]
+    var s = "hello"
+    s.insert("x", at: s.startIndex)
+    s.insert("y", at: s.endIndex)
+    s.insert("Z", at: s.index(s.startIndex, offsetBy: ks[1]))
+    check("57a", s == "xhZelloy" && s[s.index(after: s.startIndex)] == "h" && s[s.index(before: s.endIndex)] == "y")
+    var t = "héllo wörld"
+    let mid = t.index(t.startIndex, offsetBy: ks[2] + 2)
+    check("57b", t.distance(from: mid, to: t.endIndex) == 5 && t[mid...] == "wörld")
+    t.removeSubrange(t.startIndex..<mid)
+    t.replaceSubrange(t.index(before: t.endIndex)..<t.endIndex, with: "D!")
+    var u = "abcdef"
+    u.replaceSubrange(u.index(u.startIndex, offsetBy: ks[0])..<u.index(u.startIndex, offsetBy: 3), with: "XYZ")
+    check("57c", t == "wörlD!" && u == "aXYZdef")
+    var a = ["a", "b", "c"]
+    a.append(contentsOf: ["d", "e"])
+    var nested = [[1], [2]]
+    nested.append([3, 4])
+    nested.append(contentsOf: [[5]])
+    var ns = [0]
+    ns.append(contentsOf: 1...3)
+    var cs: [Character] = ["x"]
+    cs.append(contentsOf: "yz")
+    check("57d", a == ["a", "b", "c", "d", "e"] && a.count == 5 && nested.count == 4 && ns == [0, 1, 2, 3] && cs.count == 3)
+    var v = [1, 2, 3, 4, 5]
+    v.removeSubrange(ks[0]..<3)
+    v.replaceSubrange(0..<1, with: [9, 8])
+    check("57e", v == [9, 8, 4, 5] && v.startIndex == 0 && v.endIndex == 4 && v.index(after: 2) == 3)
+    let r = Ring57(n: 3)
+    check("57f", r.index(after: 2) == 0 && r.startIndex == 7)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3009,6 +3052,7 @@ func main() {
     s54() // SECTION-CALL 54
     s55() // SECTION-CALL 55
     s56() // SECTION-CALL 56
+    s57() // SECTION-CALL 57
     print("full: \(checks) checks, \(fails) failures")
 }
 

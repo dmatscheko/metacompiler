@@ -1720,6 +1720,34 @@ function swSeqMethod(o, name, args) {
     var out = []
     var n = o.length
     if (name === "isEmpty") { return n == 0 }
+    // append(contentsOf:): the emitter hands over the elements as an array
+    // (rtLabelMeth in languages/swift-to-llvm-ir.abnf).
+    if (name === "$appendSeq") {
+        var xs = args[0]
+        if (Array.isArray(xs)) {
+            i = 0
+            while (i < xs.length) { o.push(xs[i]); i = i + 1 }
+        }
+        return undefined
+    }
+    // In place; a replacement that is not an array is one element (a String
+    // receiver's text, joined back by rtStrMut). Twins: arrayMethod in
+    // languages/swift-interpreter.abnf, swSeqMethod in abnf/jsrtswift.go.
+    if (name === "removeSubrange" || name === "replaceSubrange") {
+        var rb = swSliceBounds(args[0], n)
+        var ins = []
+        if (name === "replaceSubrange") {
+            if (Array.isArray(args[1])) { ins = args[1] } else { ins.push(args[1]) }
+        }
+        i = 0
+        while (i < rb["lo"]) { out.push(o[i]); i = i + 1 }
+        i = 0
+        while (i < ins.length) { out.push(ins[i]); i = i + 1 }
+        i = rb["hi"]
+        while (i < n) { out.push(o[i]); i = i + 1 }
+        swSetRepl(o, out)
+        return undefined
+    }
     // removeFirst() answers the element; removeFirst(k) answers Void. Both trap on
     // an empty array, with swiftc 6.1.2's own two messages.
     if (name === "removeFirst") {

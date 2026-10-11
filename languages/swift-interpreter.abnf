@@ -2988,6 +2988,12 @@ KwContinue  = "continue" KwEnd ;
         // printable form here, and a Dictionary's are opaque too. swiftc 6.1.2
         // prints `0..<3` for [3, 1, 2].indices, which this matches exactly.
         if (name == "indices" && Array.isArray(o)) { return {__range: true, lo: 0, hi: o.length, closed: false} }
+        // A String.Index is the Character offset here (see swIsSeqMember), so the
+        // String and the Array bounds are the same two numbers. Twin of rtBoundIdx
+        // in swift-to-llvm-ir.abnf.
+        if ((name == "startIndex" || name == "endIndex") && (typeof o == "string" || Array.isArray(o))) {
+            return name == "startIndex" ? 0 : swlen(o)
+        }
         if ((name == "first" || name == "last") && swIsColl(o)) { return swFirstLast(o, name == "last") }
         // The String views and the lazy view, as plain arrays: `.utf8` is the UTF-8
         // bytes, `.unicodeScalars` one String per code point and `.lazy` the
@@ -3263,6 +3269,8 @@ KwContinue  = "continue" KwEnd ;
         }
         if (typeof target == "string") {
             if (name == "count" && args.length == 0) { return swGraphemeCount(target) }
+            var sln = swLabelName(name, mcLabels)
+            if (swIsIdxMove(sln)) { return swIdxMove(sln, args) }
             // Swift maps case fully but has no Final_Sigma: unicodeCase modes 3 and 2.
             // Twin of js_swcase (abnf/jsrtswift.go, lib/swift-rt.metajs).
             if (name == "uppercased") { return unicodeCase(target, 3) }
@@ -3346,7 +3354,7 @@ KwContinue  = "continue" KwEnd ;
         // Only an Optional can be nil, so map/flatMap on nil is Optional's: nil.
         if ((target === null || target === undefined) && (name == "map" || name == "flatMap")) { return null }
         if (target === null || target === undefined) { fail("method ." + name + " on nil") }
-        if (Array.isArray(target)) { return arrayMethod(target, name, args) }
+        if (Array.isArray(target)) { return arrayMethod(target, swLabelName(name, mcLabels), args) }
         // super.m(args): resolve from the superclass of the DECLARING type, same self.
         if (isSuperRef(target)) {
             var base = superBase()
@@ -3387,9 +3395,61 @@ KwContinue  = "continue" KwEnd ;
         }
         fail("unknown method '" + name + "'")
     }
+    // Members a String or an Array tells apart only by their argument LABELS get a
+    // name of their own here: append(contentsOf:) and the index moves. A user type's
+    // members keep their own names. Twin of swLabelName in swift-to-llvm-ir.abnf.
+    function swLabelName(name, labels) {
+        var nl = labels == null ? 0 : labels.length
+        var l0 = nl > 0 ? labels[0] : null
+        if (name == "append" && l0 == "contentsOf") { return "$appendSeq" }
+        if (name == "index" && l0 == "after") { return "$idxAfter" }
+        if (name == "index" && l0 == "before") { return "$idxBefore" }
+        if (name == "index" && nl == 2 && labels[1] == "offsetBy") { return "$idxOffset" }
+        if (name == "distance" && l0 == "from") { return "$distance" }
+        return name
+    }
+    function swIsIdxMove(n) {
+        return n == "$idxAfter" || n == "$idxBefore" || n == "$idxOffset" || n == "$distance"
+    }
+    // An index is the Character (or element) offset, so moving one is arithmetic.
+    function swIdxMove(n, args) {
+        var i0 = szNum(args[0])
+        if (n == "$idxAfter") { return i0 + 1 }
+        if (n == "$idxBefore") { return i0 - 1 }
+        if (n == "$idxOffset") { return i0 + szNum(args[1]) }
+        return szNum(args[1]) - i0
+    }
+    // The elements a range-replacing member puts in: a collection's own, or the one
+    // value (a String receiver's replacement text, joined back by swStrMutate).
+    function swSubrangeElems(v) {
+        if (Array.isArray(v)) { return v }
+        if (isRange(v) || swIsSet(v)) { return swSeqVal(v) }
+        return [v]
+    }
     function arrayMethod(t, name, args) {
         var i
         var out
+        if (swIsIdxMove(name)) { return swIdxMove(name, args) }
+        // append(contentsOf:) adds each element of any Sequence; a String's are its
+        // Characters. Twins: rtLabelMeth in swift-to-llvm-ir.abnf (which hands the
+        // runtime an array), swSeqMethod in abnf/jsrtswift.go and lib/swift-rt.metajs.
+        if (name == "$appendSeq") {
+            var sq = swSeqVal(args[0])
+            for (i = 0; i < sq.length; i++) { t.push(sq[i]) }
+            return undefined
+        }
+        // removeSubrange(r) / replaceSubrange(r, with: c), in place. Same twins.
+        if (name == "removeSubrange" || name == "replaceSubrange") {
+            var rb = swRangeBounds(args[0], t.length)
+            var ins = name == "replaceSubrange" ? swSubrangeElems(args[1]) : []
+            out = []
+            for (i = 0; i < rb.lo; i++) { out.push(t[i]) }
+            for (i = 0; i < ins.length; i++) { out.push(ins[i]) }
+            for (i = rb.hi; i < t.length; i++) { out.push(t[i]) }
+            while (t.length > 0) { t.pop() }
+            for (i = 0; i < out.length; i++) { t.push(out[i]) }
+            return undefined
+        }
         if (name == "count") {
             if (args.length == 0) { return t.length }
             var cn = 0
@@ -5430,7 +5490,8 @@ KwContinue  = "continue" KwEnd ;
     // swift-to-llvm-ir.abnf.
     function swStrMutName(n) {
         return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
-            || n == "removeAll" || n == "popLast" || n == "reserveCapacity"
+            || n == "removeAll" || n == "popLast" || n == "reserveCapacity" || n == "removeSubrange"
+            || n == "replaceSubrange"
     }
     function swStrMutRef(txt, suffixes) {
         var n = suffixes.length

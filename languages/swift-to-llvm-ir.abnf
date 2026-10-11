@@ -3541,7 +3541,8 @@ KwContinue  = "continue" KwEnd ;
     // is answered here, or null. Twin of swStrMutRef in swift-interpreter.abnf.
     function swStrMutName(n) {
         return n == "append" || n == "insert" || n == "remove" || n == "removeFirst" || n == "removeLast"
-            || n == "removeAll" || n == "popLast" || n == "reserveCapacity"
+            || n == "removeAll" || n == "popLast" || n == "reserveCapacity" || n == "removeSubrange"
+            || n == "replaceSubrange"
     }
     function swStrMutRef(txt, suffixes) {
         var n = suffixes.length
@@ -3590,6 +3591,82 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_arr_push", [pair, rV])
             b.NewRet(pair)
         })
+    }
+    // Members a String or an Array tells apart only by their argument LABELS get a
+    // name of their own: append(contentsOf:) and the index moves. A user type's
+    // members keep their own names (rtLabelMeth decides by the receiver). Twin of
+    // swLabelName in swift-interpreter.abnf.
+    function swLabelName(name, recs) {
+        var nl = recs.length
+        var l0 = nl > 0 ? recs[0].lbl : null
+        if (name == "append" && l0 == "contentsOf") { return "$appendSeq" }
+        if (name == "index" && l0 == "after") { return "$idxAfter" }
+        if (name == "index" && l0 == "before") { return "$idxBefore" }
+        if (name == "index" && nl == 2 && recs[1].lbl == "offsetBy") { return "$idxOffset" }
+        if (name == "distance" && l0 == "from") { return "$distance" }
+        return name
+    }
+    // The call of a label-renamed member. append(contentsOf:) on an Array hands the
+    // runtime's $appendSeq an array (a String's Characters, a Range's values); an
+    // index is the Character or element offset (see swIsSeqMember), so on a String or
+    // an Array the moves are arithmetic. Any other receiver gets the member under its
+    // own name. Twins: swLabelName, swIdxMove and the $appendSeq arm of arrayMethod in
+    // swift-interpreter.abnf.
+    function rtLabelMeth(lname, name) {
+        return rtFunc("sw_lm" + lname.substring(1), 2, function(b, ps) {
+            var colB = curF.NewBlock("")
+            var othB = curF.NewBlock("")
+            var isArr = callExt(b, "js_is_type", [ps[0], emitStr(b, "Array")])
+            if (lname == "$appendSeq") {
+                b.NewCondBr(truthy(b, isArr), colB, othB)
+                var a0 = callExt(colB, "js_arg", [ps[1], handle(0)])
+                var strB = curF.NewBlock("")
+                var seqB = curF.NewBlock("")
+                var goB = curF.NewBlock("")
+                colB.NewCondBr(truthy(colB, callExt(colB, "js_is_type", [a0, emitStr(colB, "String")])), strB, seqB)
+                var gV = strB.NewCall(rtGSplit(), [a0])
+                strB.NewBr(goB)
+                var rV = seqB.NewCall(rtRangeArr(), [a0])
+                seqB.NewBr(goB)
+                var elV = goB.NewPhi([llvm.ir.NewIncoming(gV, strB), llvm.ir.NewIncoming(rV, seqB)])
+                var na = callExt(goB, "js_arr_new", [])
+                callExt(goB, "js_arr_push", [na, elV])
+                goB.NewRet(callExt(goB, "js_swmcall", [ps[0], emitStr(goB, lname), na]))
+            } else {
+                var chkB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, isArr), colB, chkB)
+                chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [ps[0], emitStr(chkB, "String")])), colB, othB)
+                var i0 = callExt(colB, "js_arg", [ps[1], handle(0)])
+                var rv = null
+                if (lname == "$idxAfter") { rv = callExt(colB, "js_jadd", [i0, emitNum(colB, 1)]) }
+                if (lname == "$idxBefore") { rv = callExt(colB, "js_sub", [i0, emitNum(colB, 1)]) }
+                if (lname == "$idxOffset") { rv = callExt(colB, "js_jadd", [i0, callExt(colB, "js_arg", [ps[1], handle(1)])]) }
+                if (lname == "$distance") { rv = callExt(colB, "js_sub", [callExt(colB, "js_arg", [ps[1], handle(1)]), i0]) }
+                colB.NewRet(rv)
+            }
+            othB.NewRet(swEmitMCall(othB, ps[0], name, emitStr(othB, name), ps[1]))
+        })
+    }
+    // s.startIndex / s.endIndex on a String or an Array: 0 and the count (an index
+    // is the Character offset); any other receiver's own (or computed) property. Twin of the
+    // startIndex arm of swGetField in swift-interpreter.abnf.
+    function rtBoundIdx(end) {
+        return rtFunc(end ? "sw_endidx" : "sw_startidx", 1, function(b, ps) {
+            var colB = curF.NewBlock("")
+            var chkB = curF.NewBlock("")
+            var othB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ps[0], emitStr(b, "Array")])), colB, chkB)
+            chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [ps[0], emitStr(chkB, "String")])), colB, othB)
+            colB.NewRet(end ? colB.NewCall(rtSwCount(hasUniStr), [ps[0]]) : emitNum(colB, 0))
+            var pn = end ? "endIndex" : "startIndex"
+            if (isComputedName(pn)) { othB.NewRet(othB.NewCall(rtGetProp(), [ps[0], emitStr(othB, pn)])) }
+            else { othB.NewRet(callExt(othB, "js_get", [ps[0], emitStr(othB, pn)])) }
+        })
+    }
+    function swEmitLMCall(b, recvV, s, nameV, argsV) {
+        var lname = swLabelName(s.name, s.args)
+        if (lname != s.name) { return b.NewCall(rtLabelMeth(lname, s.name), [recvV, argsV]) }
+        return swEmitMCall(b, recvV, s.name, nameV, argsV)
     }
     function swEmitMCall(b, recvV, name, nameV, argsV) {
         if (name == "popLast") { return b.NewCall(rtPopLast(), [recvV]) }
@@ -4497,6 +4574,7 @@ KwContinue  = "continue" KwEnd ;
     function emitFieldRead(b, cur, name) {
         if (name == "count") { return b.NewCall(rtSwCount(hasUniStr), [cur]) }
         if (name == "isEmpty") { return b.NewCall(rtIsEmpty(), [cur]) }
+        if (name == "startIndex" || name == "endIndex") { return b.NewCall(rtBoundIdx(name == "endIndex"), [cur]) }
         if (name == "first" || name == "last") { return b.NewCall(rtFirstLast(name == "last"), [cur]) }
         if (name == "rawValue") { return callExt(b, "js_get", [cur, emitStr(b, "__raw")]) }
         var bt = builtinCompOf(name)
@@ -4922,12 +5000,12 @@ KwContinue  = "continue" KwEnd ;
                         var sa = smAssign(smB)
                         var r1 = callExt(sa.b, "js_swidx", [pairV, emitNum(sa.b, 1)])
                         sa.b.NewBr(jmB)
-                        var r2 = swEmitMCall(omB, cur, s.name, mnameV, ea.v)
+                        var r2 = swEmitLMCall(omB, cur, s, mnameV, ea.v)
                         omB.NewBr(jmB)
                         b = jmB
                         cur = jmB.NewPhi([llvm.ir.NewIncoming(r1, sa.b), llvm.ir.NewIncoming(r2, omB)])
                     } else {
-                        cur = swEmitMCall(b, cur, s.name, mnameV, ea.v)
+                        cur = swEmitLMCall(b, cur, s, mnameV, ea.v)
                     }
                     emitWriteBacks(b, ea.boxes)
                     pathKey = null

@@ -2541,6 +2541,35 @@ func (rt *jsrt) swSeqMethod(o *jsArray, name string, args []interface{}, rnd *sw
 	switch name {
 	case "isEmpty":
 		return n == 0, true
+	case "$appendSeq":
+		// append(contentsOf:): the emitter hands over the elements as an array
+		// (rtLabelMeth in languages/swift-to-llvm-ir.abnf).
+		if xs, ok := args[0].(*jsArray); ok {
+			o.elems = append(o.elems, xs.elems...)
+		}
+		return jsUndef, true
+	case "removeSubrange", "replaceSubrange":
+		// In place; a replacement that is not an array is one element (a String
+		// receiver's text, joined back by rtStrMut). Twins: arrayMethod in
+		// languages/swift-interpreter.abnf, swSeqMethod in lib/swift-rt.metajs.
+		r, _ := args[0].(*jsObject)
+		if r == nil {
+			rt.fail("%s needs a range", name)
+		}
+		lo, hi := rt.swSliceBounds(r, n)
+		var ins []interface{}
+		if name == "replaceSubrange" {
+			if xs, ok := args[1].(*jsArray); ok {
+				ins = xs.elems
+			} else {
+				ins = []interface{}{args[1]}
+			}
+		}
+		out := make([]interface{}, 0, n-(hi-lo)+len(ins))
+		out = append(out, o.elems[:lo]...)
+		out = append(out, ins...)
+		o.elems = append(out, o.elems[hi:]...)
+		return jsUndef, true
 	case "removeFirst":
 		// removeFirst() answers the element; removeFirst(k) answers Void. Both
 		// trap on an empty array, with swiftc 6.1.2's own two messages.
