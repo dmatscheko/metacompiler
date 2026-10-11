@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-404** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-405** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,13 +114,10 @@ not change the renderer.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-403 swift: stored-property types keyed by name across types; implicit members to static funcs · P1 · SW · IN PROGRESS (SW worker, round 17) [V]
-`class A { var v = 0; var xs = [1, 2] }; struct S { var v: Any; var xs: [Any] }; var s
-= S(v: 1.5, xs: [1.5]); s.xs[0] = 3; print(s.v, s.xs[0])` prints `7 3.0` (swiftc
-`7 3`): the property type registry is keyed by name only. `let s: S = .foo { ... }`
-(static func via implicit member + trailing closure) does not parse, and `.foo(...)`
-builds an enum case instead of calling `S.foo`. Also: `mec batch-to-llvm-ir.abnf -qq`
-prints nothing (P3).
+### T-404 swift: `.init(...)` as an implicit member; ambiguous static names · P2 · SW · OPEN [V]
+`let s: S = .init(n: 3)` unsupported; a static member name declared in two types falls
+back to an enum case (Swift picks by the expected type - needs the declared type at
+the use site, which `let s: S` gives).
 
 ---
 
@@ -469,6 +466,7 @@ T-397 php: foreach by value walks the live array — DONE 108cb5ad
 T-399 ts interpreter: stores to namespace exports before declaration / to exported functions — DONE 6e3f3443
 T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context — DONE 196e9a27 eee094e4 (the wrong answers, key paths, postfix/inout operators); DECLINED with reasons: macros (compiler plugins), #line/#function/#file (call-site defaults + swiftc module name), `case A<T>()` (always a type error in Swift), `for await` (needs an executor), local property wrappers, debugger-only `$x1`, `@const` (swiftc 6.1.2 rejects it), prefix+postfix of one operator name
 T-398 batch: `%~n0` inside `call :label`; native string arena — DONE 73990fef
+T-403 swift: stored-property types keyed by name across types; implicit members to static funcs — DONE 64a8ae13 cd910ffc (and the -qq fix for bash/c/toys 4f397c98)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
