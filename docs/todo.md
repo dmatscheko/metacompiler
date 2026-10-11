@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-327** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-329** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -150,16 +150,6 @@ leg node's answers.
 
 # JV — Java
 
-### T-308 java: astral characters in string literals become U+FFFD · P1 · JV · IN PROGRESS (SW+JV+CS worker, round 6) [V]
-`"😀"` (literal or `\uD83D\uDE00`): `(int) s.charAt(0)` prints 65533 in all legs;
-java 55357. Compare python T-200 / ruby T-187 (each fixed in its own grammar).
-
-### T-309 java: `super.toString()` on implicit Object; qualified `new java.util.ArrayList` · P1 · JV · IN PROGRESS (SW+JV+CS worker, round 6) [V]
-`super.toString()` aborts "unknown super method 'toString'" (java `A@...`); in the
-interpreter `super.toString().startsWith(...)` does not parse. `new
-java.util.ArrayList<>()` without an import: "unknown class: java.util.ArrayList"
-(interpreter).
-
 ---
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
@@ -170,12 +160,6 @@ java.util.ArrayList<>()` without an import: "unknown class: java.util.ArrayList"
 digits and its switch to exponent notation may not be the fixed window `csFloStr32`
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
-
-### T-310 csharp: the string and char API · P1 · CS · IN PROGRESS (SW+JV+CS worker, round 6) [V spec-only]
-`char.IsDigit`/`char.IsLetter` unknown (interpreter); `ch.CompareTo('B')` fails in all
-legs (spec -1); `string.Concat`, `new string('A', 3)`, `s.ToCharArray()` fail; the
-interpreter has Substring/IndexOf/Equals while layer 2 has ToUpper/ToLower/Trim. Build
-one C# string/char surface for all three engines (cf. java's lib/java-strings.js).
 
 ---
 
@@ -228,17 +212,10 @@ pointer's static type). Related value-model limit: T-266.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-300 swift: unqualified `.none` builds an enum case · P1 · SW · IN PROGRESS (SW+JV+CS worker, round 6) [V]
-`let n: Int? = .none; print(n == nil)`: swiftc `true`, ours `false`. Fix needs to know
-no user enum declares `none` (or resolve by the declared Optional type).
-
-### T-301 swift: in-place mutation of an observed variable does not fire didSet · P1 · SW · IN PROGRESS (SW+JV+CS worker, round 6) [V]
-`var a = [1] { didSet { print("d", a.count) } }; a.append(2); a[0] = 5`: swiftc
-prints `d 2` twice; we print nothing. Only `=` and compound assignment are observed.
-
-### T-302 swift: `print(x as Any)` on an Optional; nested Unicode.Scalar · P2 · SW · IN PROGRESS (SW+JV+CS worker, round 6) [V]
-`print(Optional(7) as Any)` prints `7` (swiftc `Optional(7)`: the Optional-box
-limit); a Unicode.Scalar in a collection prints `"é"` (swiftc `"\u{00E9}"`).
+### T-327 swift: `d["k"] = nil`; mutating String methods · P1 · SW · OPEN [V]
+`d["k"] = nil` does not remove the key (swiftc `d.count` 0, ours 1; compiled path is the
+shared js_pyset - use a swift-specific store). `s.append("c")` and the other mutating
+String methods abort "unknown String method: append" (swiftc `abc`).
 
 ---
 
@@ -353,6 +330,13 @@ In a lib/*-rt.metajs, `xs.sort(function(a, b) {...})` dies natively "call of a n
 function value: undefined". Fix the frozen/layer-2 builtin, assert it in the metajs
 ratchet. Also: `gofmt -l abnf/` lists jsrtswift.go (a doubled blank line) and the
 generated jsagrammar.go - make the generator gofmt-clean or exclude it knowingly.
+
+### T-328 Go twin: a lone-surrogate char renders as U+FFFD · P1 · CORE · OPEN [V]
+llvm.Run only: `"" + c`, `String.valueOf(c)`, `new String(char[])` of surrogate halves,
+StringBuilder.append of chars print 65533 / `��` where java, the interpreter and
+native give 55357 / 😀. jsChar renders with string(rune(code)) in abnf/jsrt.go
+(toString, toGoNatural); use strFromUnits([]uint16{code}) for a surrogate. Affects
+kotlin too.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -570,6 +554,12 @@ T-304 ruby: `Integer#lcm`, `#abs2`, `#conj`, `#real?` — DONE 77d835c
 T-305 ruby: an unknown method aborts instead of raising NoMethodError — DONE 537185e (a bare `nope(1)` is T-325)
 T-306 ruby: `p %w[a b].map(...)` and `p /x/.class` do not parse — DONE bec6cae
 T-307 ruby: `C.instance_variables` on a class object — DONE 59ae38d (class reopen / module bodies: T-326)
+T-308 java: astral characters in string literals become U+FFFD — DONE d5dbe6f
+T-309 java: `super.toString()` on implicit Object; qualified `new java.util.ArrayList` — DONE d5dbe6f
+T-310 csharp: the string and char API — DONE ec556e0 (spec-only; culture-sensitive Compare left absent)
+T-300 swift: unqualified `.none` builds an enum case — DONE 587ef41
+T-301 swift: in-place mutation of an observed variable does not fire didSet — DONE 7136d77 2b458da
+T-302 swift: `print(x as Any)` on an Optional; nested Unicode.Scalar — DONE 12eb521 fa6adb5
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
