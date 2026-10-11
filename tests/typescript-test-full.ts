@@ -3471,6 +3471,45 @@ function s67() {
         Object.prototype.toString.call(tagged) === "[object Tagged]" && String(new T67()) === "[object T67]");
 }
 
+// ===== SECTION 68: class static order, namespace privacy, isNaN / isFinite, GetMethod =====
+// Static fields and static blocks run in source order, after the methods exist and with
+// `this` bound to the class. Only an EXPORTED namespace member is a property of the
+// namespace object; the rest stay private to the body. The global isNaN /
+// isFinite convert with ToNumber first; a well-known-symbol member that is present but
+// not callable is a TypeError. Values read off node 24 (namespaces through tsc 6.0.3's
+// output).
+namespace N68 {
+    const hidden = 1;
+    let priv = 5;
+    function inner(): number { return priv + hidden; }
+    export let count = 0;
+    export function inc(): number { count++; return count; }
+    export var v = priv * 2;
+    export function f(): number { return inner(); }
+}
+namespace N68 { export function seeHidden(): string { return typeof (N68 as any).hidden; } }
+namespace O68 { export namespace I { const z = 1; export const w = z + 1; } const y = 4; export const k = I.w + y; }
+const sv68: number[] = [0, 2, 10];
+class K1_68 { static { (K1_68 as any).st = sv68[1]; } static st = sv68[0]; }
+class K2_68 { static a = K2_68.f() + 1; static f(): number { return sv68[2]; } }
+class K3_68 { static a: string = this.name; static b = this.a + "!"; }
+function s68() {
+    check("st68a", K1_68.st === 0 && K2_68.a === 11 && K3_68.a === "K3_68" && K3_68.b === "K3_68!");
+    const n: any = N68;
+    const o: any = O68;
+    check("ns68b", n.hidden === undefined && n.priv === undefined && n.inner === undefined && N68.f() === 6 &&
+        N68.inc() === 1 && N68.v === 10 && N68.seeHidden() === "undefined" &&
+        Object.keys(N68).join() === "count,inc,v,f,seeHidden" && O68.I.w === 2 && O68.k === 6 &&
+        o.y === undefined && o.I.z === undefined && Object.keys(O68).join() === "I,k");
+    const nv: any[] = ["abc", "12", NaN, 3, " 7 ", undefined, null, "", Infinity];
+    const err = (f: () => any): string => { try { return String(f()); } catch (e: any) { return e.constructor.name + ": " + e.message; } };
+    const bad: any[] = [1, "x"];
+    check("nn68c", nv.map(isNaN).join() === "true,false,true,false,false,true,false,false,false" &&
+        nv.map(isFinite).join() === "false,true,false,true,true,false,true,true,false" &&
+        err(() => "" + { [Symbol.toPrimitive]: bad[1] }) === 'TypeError: string "x" is not a function' &&
+        err(() => ({}) instanceof ({ [Symbol.hasInstance]: bad[0] } as any)) === "TypeError: number 1 is not a function");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3541,6 +3580,7 @@ function main(): number {
     s65(); // SECTION-CALL 65
     s66(); // SECTION-CALL 66
     s67(); // SECTION-CALL 67
+    s68(); // SECTION-CALL 68
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

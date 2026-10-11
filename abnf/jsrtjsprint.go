@@ -465,14 +465,41 @@ func (rt *jsrt) jsvSymMember(o *jsObject, key string) interface{} {
 // js-interpreter.abnf, jvExoticPrim in languages/lib/js-rt.metajs.
 func (rt *jsrt) jsvExoticPrim(o *jsObject, hint string) (interface{}, bool) {
 	f := rt.jsvSymMember(o, "__#@toPrimitive")
-	if !isCallable(f) {
+	if f == nil {
 		return nil, false
 	}
+	rt.jsvNeedFn(f)
 	r := rt.call(f, o, []interface{}{hint})
 	if jsvIsObjLike(r) {
 		panic(&jsThrown{value: rt.jsErrFromText("TypeError: Cannot convert object to primitive value")})
 	}
 	return r, true
+}
+
+// jsvNeedFn is GetMethod's TypeError (ES2023 7.3.11) for a well-known-symbol member
+// that is present but not callable, in V8's words: "number 1 is not a function",
+// 'string "x" ...', "object ...". Twins: jsNeedFn in both *-interpreter.abnf,
+// jvNeedFn in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvNeedFn(f interface{}) {
+	if isCallable(f) {
+		return
+	}
+	what := "object"
+	switch t := f.(type) {
+	case float64:
+		what = "number " + rt.jsvString(t)
+	case string:
+		what = "string \"" + t + "\""
+	case bool:
+		what = "boolean " + rt.jsvString(t)
+	default:
+		if _, ok := bigOf(f); ok {
+			what = "bigint"
+		} else if jsvIsSym(f) {
+			what = "symbol"
+		}
+	}
+	panic(&jsThrown{value: rt.jsErrFromText("TypeError: " + what + " is not a function")})
 }
 
 // jsvLooseEq is the abstract equality comparison. null == undefined is true, both are
@@ -2287,7 +2314,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// A [Symbol.hasInstance] method on the right decides. Twins: instanceOf in
 		// js-interpreter.abnf, js_jsinstanceof in languages/lib/js-rt.metajs.
 		if _, isObj := target.(*jsObject); isObj || isCallable(target) {
-			if f := u(m["js_jsvget"]([]uint64{a[1], rt.wrapStr("__#@hasInstance")})); isCallable(f) {
+			if f := u(m["js_jsvget"]([]uint64{a[1], rt.wrapStr("__#@hasInstance")})); !isUndefOrNull(f) {
+				rt.jsvNeedFn(f)
 				return boolH(rt.truthy(rt.call(f, target, []interface{}{v})))
 			}
 		}

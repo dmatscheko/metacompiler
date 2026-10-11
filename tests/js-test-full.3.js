@@ -1744,6 +1744,32 @@ function s76() {
         String(tagged) === "[object Tagged]" && Object.prototype.toString.call(new T2()) === "[object T2]" && `${new T2()}` === "[object T2]")
 }
 
+// ===== SECTION 77: class static order, the global isNaN / isFinite, GetMethod =====
+// Static fields and static blocks run in source order, after the methods exist and with
+// `this` bound to the class. The global isNaN / isFinite convert with ToNumber first.
+// A well-known-symbol member that is present but not callable is a TypeError. Values
+// read off node 24.
+function s77() {
+    const sv = [0, 2, 10]
+    class K1 { static { K1.st = sv[1] } static st = sv[0] }
+    class K2 { static a = K2.f() + 1; static f() { return sv[2] } }
+    class K3 { static a = this.name; static b = this.a + "!"; static { this.c = this.b + "?" } }
+    const log = []
+    class K4 { static x = (log.push("x"), 1); static { log.push("blk") } static y = (log.push("y"), 2) }
+    check("st77a", K1.st === 0 && K2.a === 11 && K3.a === "K3" && K3.b === "K3!" && K3.c === "K3!?" &&
+        log.join() === "x,blk,y" && Object.keys(K4).join() === "x,y")
+    const nv = ["abc", "12", NaN, 3, "1e3", " 7 ", undefined, null, true, "", Infinity, "-Infinity"]
+    check("nn77b", nv.map(isNaN).join() === "true,false,true,false,false,false,true,false,false,false,false,false" &&
+        nv.map(isFinite).join() === "false,true,false,true,true,true,false,true,true,true,false,false" &&
+        typeof isNaN === "function" && isNaN.length === 1)
+    const err = (f) => { try { return String(f()) } catch (e) { return e.constructor.name + ": " + e.message } }
+    const bad = [1, "x", {}, true, 2.5]
+    check("gm77c", bad.map((b) => err(() => "" + { [Symbol.toPrimitive]: b })).join("|") ===
+        'TypeError: number 1 is not a function|TypeError: string "x" is not a function|TypeError: object is not a function|TypeError: boolean true is not a function|TypeError: number 2.5 is not a function' &&
+        err(() => ({}) instanceof { [Symbol.hasInstance]: bad[0] }) === "TypeError: number 1 is not a function" &&
+        "" + { [Symbol.toPrimitive]: undefined } === "[object Object]")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1778,6 +1804,7 @@ function main() {
     s74() // SECTION-CALL 74
     s75() // SECTION-CALL 75
     s76() // SECTION-CALL 76
+    s77() // SECTION-CALL 77
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

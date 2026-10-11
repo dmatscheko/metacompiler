@@ -130,20 +130,23 @@ EnumMember  <~~ push(makeEnumMember(takeAll())) ~~>
             = EnumName [ "=" AssignExpr ] ;
 EnumName    = Id <~~ push({mname: idName(up.in)}) ~~> | StringLit <~~ push({mnameT: pop()}) ~~> ;
 
-// A NAMESPACE is real too, and its object IS the scope its body runs in: a declaration
-// inside the body lands directly in the namespace object, so the members see each other
-// by bare name and the outside reaches them as 'Ns.member'. That one identification gives
-// nesting, dotted names ('namespace A.B {}') and MERGING (a second 'namespace A {}' block
-// reopens the very same object) for free. 'export' in front of a member is the
-// transparent prefix it is everywhere else.
+// A NAMESPACE is real too: an EXPORTED declaration inside the body lands directly in the
+// namespace object, so the outside reaches it as 'Ns.member' and the body sees it by bare
+// name, live; every other declaration lands in a private scope the body runs in, invisible
+// from outside. Nesting, dotted names ('namespace A.B {}') and MERGING (a second
+// 'namespace A {}' block reopens the very same object, with a fresh private scope) follow.
 NamespaceDecl <~~ push(makeNamespace(takeAll(), up.start, up.pos)) ~~>
             = ( KwNamespace | KwModule ) NamespaceName "{" NamespaceBody "}" ;
 NamespaceName <~~ push({nspath: takeAll()}) ~~>
             = Id <~~ push(idName(up.in)) ~~> { "." Id <~~ push(idName(up.in)) ~~> } ;
 // The body is a bare statement list, NOT a Block: a Block would push a scope of its own
 // and the declarations would never reach the namespace object.
-NamespaceBody <~~ push(makeSeq(takeAll())) ~~>
-            = { Statement } ;
+NamespaceBody <~~ push({nsstmts: takeAll()}) ~~>
+            = { NsExport | Statement } ;
+// 'export <declaration>' in a namespace body; its own 'var' names are claimed here so
+// that they hoist into the namespace object rather than the private scope.
+NsExport    <~~ push(makeNsExport(pop(), claimVars(up.start, up.pos))) ~~>
+            = KwExport ExportBody ;
 
 // An AMBIENT declaration ('declare ...') describes something that exists elsewhere, so it
 // has no run-time effect at all: the whole form is parsed and erased. This is what lets a
@@ -2394,11 +2397,21 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-interpreter.abnf.
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsNeedFn(f) {
+        if (typeof f == "function") { return }
+        var t = jsTypeofVal(f)
+        var what = t
+        if (t == "number" || t == "boolean") { what = t + " " + jsStr(f) }
+        else if (t == "string") { what = "string \"" + f + "\"" }
+        biRaise("TypeError: " + what + " is not a function")
+    }
     function jsExoticPrim(v, hint) {
         if (!hasOwn(jsSymWK, "toPrimitive")) { return null }
         var f = anytype // The method, if there is one.
         f = getMember(v, "__#@toPrimitive")
-        if (typeof f != "function") { return null }
+        if (f === undefined || f === null) { return null }
+        jsNeedFn(f)
         var r = anytype
         r = callWithThis(f, v, [hint])
         if (jsIsObjLike(r)) { biRaise("TypeError: Cannot convert object to primitive value") }
@@ -3687,7 +3700,13 @@ NotFuncHead = :script(~~
         biRaise("ReferenceError: " + name + " is not defined")
     }
     declVar = function(name, value) {
-        scopePut(scopes[scopes.length - 1], name, value)
+        var top = scopes[scopes.length - 1]
+        if (top === nsExpFrame) {
+            scopePut(nsExpObj, name, value)
+            trackKey(nsExpObj, name)
+            return
+        }
+        scopePut(top, name, value)
     }
     // Assignment walks the chain; a name that is nowhere declared becomes an
     // implicit global (real, non strict JavaScript), never an error.
@@ -5679,7 +5698,10 @@ NotFuncHead = :script(~~
             if (typeof cls == "object" || typeof cls == "function") {
                 var hi = anytype // The method, if there is one.
                 hi = getMember(cls, "__#@hasInstance")
-                if (typeof hi == "function") { return jsTruthy(callWithThis(hi, cls, [v])) }
+                if (hi !== undefined && hi !== null) {
+                    jsNeedFn(hi)
+                    return jsTruthy(callWithThis(hi, cls, [v]))
+                }
             }
         }
         if (v == undefined || v == null) { return false }
@@ -7406,27 +7428,67 @@ NotFuncHead = :script(~~
     }
 
     // ----- TypeScript namespaces -----
-    // The namespace OBJECT is the scope its body runs in. That single identification is
-    // the whole implementation: a declaration inside the body lands directly in the
-    // object (declVar writes into the innermost scope), so the members see each other by
-    // bare name, the outside reads them as 'Ns.member', a nested 'namespace Inner {}'
-    // declares Inner inside the outer object, and a SECOND 'namespace Ns {}' block simply
-    // reopens the object that is already bound - which is exactly declaration merging.
+    // The body runs in two scopes: the namespace OBJECT, and above it a PRIVATE scope.
+    // A plain declaration lands in the private one (declVar writes into the innermost
+    // scope), so `namespace N { const hidden = 1 }` leaves N.hidden undefined, as tsc's
+    // output does. While an exported declaration runs, declVar redirects a write aimed
+    // at that private scope into the object (nsExpFrame/nsExpObj), so 'Ns.member' reads
+    // it and the body still sees it by bare name - live, since the object is on the
+    // chain. A nested 'namespace Inner {}' declares Inner the same way, and a SECOND
+    // 'namespace Ns {}' block reopens the object that is already bound - which is exactly
+    // declaration merging.
     // items = [{nspath: [names]}, bodyThunk].
-    // The body's vars are hoisted into the namespace object, the scope it runs in.
+    var nsExpFrame = anytype // The private scope whose exported declaration is running,
+    var nsExpObj = anytype   // and its namespace object.
+    nsExpFrame = null
+    nsExpObj = null
+    function makeNsExport(t, vars) {
+        return {nsexp: t, vars: vars}
+    }
     function makeNamespace(items, from, to) {
         var names = items[0].nspath
-        var bodyT = items[1]
+        var stmts = items[1].nsstmts
         var vars = claimVars(from, to)
+        var expVars = []
+        var body = []
+        for (var i = 0; i < stmts.length; i++) {
+            var st = stmts[i]
+            if (st != undefined && st.nsexp != undefined) {
+                for (var k = 0; k < st.vars.length; k++) { expVars.push(st.vars[k]) }
+                body.push(nsExportStmt(st.nsexp, st.vars))
+            } else {
+                body.push(st)
+            }
+        }
+        var bodyT = makeSeq(body)
         return function() {
             var obj = nsResolve(names)
-            for (var i = 0; i < vars.length; i++) {
-                if (!objHasOwn.call(obj, vars[i])) { scopePut(obj, vars[i], undefined) }
+            var priv = {}
+            for (var i = 0; i < expVars.length; i++) {
+                if (!objHasOwn.call(obj, expVars[i])) { scopePut(obj, expVars[i], undefined) }
             }
+            for (var j = 0; j < vars.length; j++) { scopePut(priv, vars[j], undefined) }
             scopes.push(obj)
+            scopes.push(priv)
             bodyT()
             scopes.pop()
+            scopes.pop()
             return undefined
+        }
+    }
+    // An exported 'var' was hoisted into the object already; it becomes an enumerable
+    // key where its statement runs, which is where tsc's `N.v = ...` assigns it.
+    function nsExportStmt(t, vars) {
+        return function() {
+            var savedFrame = nsExpFrame
+            var savedObj = nsExpObj
+            nsExpFrame = scopes[scopes.length - 1]
+            nsExpObj = scopes[scopes.length - 2]
+            var r = t()
+            for (var i = 0; i < vars.length; i++) { trackKey(nsExpObj, vars[i]) }
+            nsExpFrame = savedFrame
+            nsExpObj = savedObj
+            return r
         }
     }
     // The object a (possibly dotted) namespace name denotes, creating what is missing.
@@ -8345,7 +8407,7 @@ NotFuncHead = :script(~~
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite") { jsbWant = true }
         return name
     }
     function jsbLoad() {

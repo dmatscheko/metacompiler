@@ -1,12 +1,12 @@
 // js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
-// Array.of and Boolean, written in the language itself and compiled INTO a program by
+// Array.of, Boolean, isNaN and isFinite, written in the language itself and compiled INTO a program by
 // the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
-// A program that names Set, Map, Array or Boolean gets this file in front of it; one
+// A program that names Set, Map, Array, Boolean, isNaN or isFinite gets this file in front of it; one
 // that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
 // makes the interpreter, llvm.Run and a native binary agree on every answer here.
 //
 // It is a Script ('.js'), runs before the program's own top level, and a program that
-// declares a Set, a Map, an Array.from or a Boolean of its own replaces these.
+// declares a Set, a Map, an Array.from, a Boolean or an isNaN of its own replaces these.
 //
 // ITERATION. for-of, a spread, array destructuring and yield* drive any value with a
 // callable `next` member lazily, and an array or a string by index. A Set or a Map is
@@ -230,3 +230,8 @@ Array.of = function of(...items) { return items }
 // Boolean(v): ToBoolean, so `[0, 1, ""].filter(Boolean)` keeps the truthy ones. There
 // are no wrapper objects here: `new Boolean(v)` builds a plain object.
 function Boolean(v) { return !!v }
+
+// The global isNaN and isFinite convert their argument with ToNumber first (so
+// isNaN("abc") is true and isFinite("12") is true), unlike Number.isNaN/isFinite.
+function isNaN(v) { var n = +v; return n !== n }
+function isFinite(v) { var n = +v; return n === n && n !== Infinity && n !== -Infinity }

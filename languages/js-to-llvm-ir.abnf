@@ -3646,15 +3646,15 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean) is JavaScript,
-    // compiled into a program that names Set, Map, Array or Boolean (jsbRef, at the
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite) is JavaScript,
+    // compiled into a program that names one of them (jsbRef, at the
     // VarRef, typeof-name and new-name tags), like an imported file but emitted FIRST,
     // before every imported file's top level, since any of them may use it. Twin of
     // jsbLoad in js-interpreter.abnf.
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite") { jsbWant = true }
         return name
     }
     function jsbLoad() {
@@ -6415,7 +6415,7 @@ NotFuncHead = :script(~~
     // declaration and the expression form.
     function makeClassInfo(items) {
         var info = {name: "", superName: null, extT: null, fields: [], statics: [], methods: [],
-                    accessors: [], sblocks: [], ctor: null}
+                    accessors: [], sinits: [], ctor: null}
         for (var i = 0; i < items.length; i++) {
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
@@ -6435,17 +6435,17 @@ NotFuncHead = :script(~~
                 continue
             }
             if (m.kind == "ctor") { info.ctor = m }
-            else if (m.kind == "sblock") { info.sblocks.push(m) }
+            else if (m.kind == "sblock") { info.sinits.push(m) }
             else if (m.kind == "accessor") { info.accessors.push(m) }
             else if (m.kind == "method") { info.methods.push(m) }
-            else if (m.statik) { info.statics.push(m) }
+            else if (m.statik) { info.sinits.push(m) }
             else { info.fields.push(m) }
         }
         return info
     }
-    // Build the descriptor object, bind it under the class name, then attach the static
-    // fields, the constructor, the methods and the accessors, and finally run the static
-    // blocks (with 'this' bound to the class, which is what a static block's this is).
+    // Build the descriptor object, bind it under the class name, then attach the
+    // constructor, the methods and the accessors, and finally run the static fields and
+    // static blocks.
     function emitClass(b, info) {
         // A heritage expression is evaluated FIRST, before anything of the class exists,
         // and bound to the synthetic name makeClassInfo reserved for it.
@@ -6470,22 +6470,6 @@ NotFuncHead = :script(~~
                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)]))
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
-        for (var s = 0; s < info.statics.length; s++) {
-            var kr = emitMemberKey(b, info.statics[s])
-            b = kr.b
-            var sv = hUndef
-            if (info.statics[s].init != null && info.statics[s].init != undefined) {
-                var rs = info.statics[s].init(b)
-                b = rs.b
-                sv = rs.v
-            }
-            // js_jssfield rather than clsRawSet: a static FIELD is an ENUMERABLE own
-            // property of the class object and a static method/accessor is not, and
-            // all three live in the same __statics table, so the enumerable ones are
-            // named in a list beside them for Object.keys to read. See jsvSfTrack in
-            // abnf/jsrtjsprint.go.
-            callExt(b, "js_jssfield", [statsV, kr.v, sv])
-        }
         var ctorIdx = anytype
         if (info.ctor != null) {
             ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.superName != null)
@@ -6545,10 +6529,31 @@ NotFuncHead = :script(~~
             var sV = (aa.acc == "set") ? aclo : hUndef
             callExt(b, "js_defprop", [aa.statik ? statsV : clsV, ak.v, gV, sV])
         }
-        for (var bi = 0; bi < info.sblocks.length; bi++) {
-            var bidx = emitFunction([], info.sblocks[bi].body, false, false)
-            jsCall(b, callExt(b, "js_closure", [handle(bidx), curScopeV]), clsV,
-                                   callExt(b, "js_arr_new", []))
+        // Static fields and static blocks run in SOURCE ORDER, after the methods and
+        // accessors exist, each as a function with 'this' bound to the class
+        // (ClassDefinitionEvaluation, ES2023 15.7.14 steps 31-32).
+        for (var si = 0; si < info.sinits.length; si++) {
+            var it = info.sinits[si]
+            if (it.kind == "sblock") {
+                var bidx = emitFunction([], it.body, false, false)
+                jsCall(b, callExt(b, "js_closure", [handle(bidx), curScopeV]), clsV,
+                                       callExt(b, "js_arr_new", []))
+                continue
+            }
+            var kr = emitMemberKey(b, it)
+            b = kr.b
+            var sv = hUndef
+            if (it.init != null && it.init != undefined) {
+                var iidx = emitFunction([], makeReturn([it.init]), false, false)
+                sv = jsCall(b, callExt(b, "js_closure", [handle(iidx), curScopeV]), clsV,
+                            callExt(b, "js_arr_new", []))
+            }
+            // js_jssfield rather than clsRawSet: a static FIELD is an ENUMERABLE own
+            // property of the class object and a static method/accessor is not, and
+            // all three live in the same __statics table, so the enumerable ones are
+            // named in a list beside them for Object.keys to read. See jsvSfTrack in
+            // abnf/jsrtjsprint.go.
+            callExt(b, "js_jssfield", [statsV, kr.v, sv])
         }
         return {b: b, v: clsV}
     }

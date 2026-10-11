@@ -791,11 +791,24 @@ function jvExoticPrim(v, hint) {
     if (v["__symkey"] !== undefined) { return jvMiss }
     var f = anytype
     f = js_jsvget(v, "__#@toPrimitive")
-    if (!jvIsCallable(f)) { return jvMiss }
+    if (f === undefined || f === null) { return jvMiss }
+    jvNeedFn(f)
     var r = anytype
     r = jvCallT(f, v, [hint])
     if (jvIsObjLike(r)) { throw jvErrFromText("TypeError: Cannot convert object to primitive value") }
     return r
+}
+
+// GetMethod's TypeError for a well-known-symbol member that is present but not
+// callable. Twins: jsvNeedFn in abnf/jsrtjsprint.go, jsNeedFn in both
+// *-interpreter.abnf.
+function jvNeedFn(f) {
+    if (jvIsCallable(f)) { return undefined }
+    var t = js_jstypeof(f)
+    var what = t
+    if (t == "number" || t == "boolean") { what = t + " " + jvStr(f) }
+    else if (t == "string") { what = "string \"" + f + "\"" }
+    throw jvErrFromText("TypeError: " + what + " is not a function")
 }
 
 // The primitive form of an operand of ==, <, > or +. A BigInt box is already a
@@ -2366,7 +2379,10 @@ function js_jsinstanceof(v, c) {
         if (jvIsObj(c) || jvIsCallable(c)) {
             var hi = anytype
             hi = js_jsvget(c, "__#@hasInstance")
-            if (jvIsCallable(hi)) { return !js_jsnot(jvCallT(hi, c, [v])) }
+            if (hi !== undefined && hi !== null) {
+                jvNeedFn(hi)
+                return !js_jsnot(jvCallT(hi, c, [v]))
+            }
         }
     }
     if (jvIsObjectGlobal(c)) {

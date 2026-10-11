@@ -3470,11 +3470,23 @@ NotFuncHead = :script(~~
     // with the hint. {v} or null when it has none; an object result is node's TypeError.
     // Asked only once the program has read Symbol.toPrimitive. Twins: jsvExoticPrim in
     // abnf/jsrtjsprint.go, jvExoticPrim in languages/lib/js-rt.metajs.
+    // GetMethod's TypeError (ES2023 7.3.11) for a well-known-symbol member that is
+    // present but not callable, in V8's words. Twins: jsvNeedFn in
+    // abnf/jsrtjsprint.go, jvNeedFn in languages/lib/js-rt.metajs.
+    function jsNeedFn(f) {
+        if (typeof f == "function") { return }
+        var t = jsTypeofVal(f)
+        var what = t
+        if (t == "number" || t == "boolean") { what = t + " " + jsStr(f) }
+        else if (t == "string") { what = "string \"" + f + "\"" }
+        biRaise("TypeError: " + what + " is not a function")
+    }
     function jsExoticPrim(v, hint) {
         if (!hasOwn(jsSymWK, "toPrimitive")) { return null }
         var f = anytype // The method, if there is one.
         f = getMember(v, "__#@toPrimitive")
-        if (typeof f != "function") { return null }
+        if (f === undefined || f === null) { return null }
+        jsNeedFn(f)
         var r = anytype
         r = callWithThis(f, v, [hint])
         if (jsIsObjLike(r)) { biRaise("TypeError: Cannot convert object to primitive value") }
@@ -7291,7 +7303,10 @@ NotFuncHead = :script(~~
             if (typeof cls == "object" || typeof cls == "function") {
                 var hi = anytype // The method, if there is one.
                 hi = getMember(cls, "__#@hasInstance")
-                if (typeof hi == "function") { return jsTruthy(callWithThis(hi, cls, [v])) }
+                if (hi !== undefined && hi !== null) {
+                    jsNeedFn(hi)
+                    return jsTruthy(callWithThis(hi, cls, [v]))
+                }
             }
         }
         if (v == undefined || v == null) { return false }
@@ -9994,15 +10009,15 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean) is JavaScript,
-    // compiled into a program that names Set, Map, Array or Boolean (jsbRef, at the
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite) is JavaScript,
+    // compiled into a program that names one of them (jsbRef, at the
     // VarRef, typeof-name and new-name tags) and run before anything that could use it:
     // before an imported file's top level and before the program's. Twin of jsbLoad in
     // js-to-llvm-ir.abnf.
     var jsbWant = false
     var jsbDone = false
     function jsbRef(name) {
-        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean") { jsbWant = true }
+        if (name == "Set" || name == "Map" || name == "Array" || name == "Boolean" || name == "isNaN" || name == "isFinite") { jsbWant = true }
         return name
     }
     function jsbLoad() {
