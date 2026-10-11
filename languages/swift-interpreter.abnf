@@ -4285,6 +4285,9 @@ KwContinue  = "continue" KwEnd ;
         var cut = -1
         for (var i = 0; i < last.length; i++) { if (last.charAt(i) == ".") { cut = i } }
         var caseName = cut < 0 ? last : last.substring(cut + 1)
+        var opt = swPatOptional(k)
+        if (opt == "none") { return v === null || v === undefined }
+        if (opt == "some") { return v !== null && v !== undefined && matchPat(k.pargs[0], v, binding) }
         if (isCaseVal(v)) {
             if (v.__ename !== caseName) { return false }
             if (k.pargs == null) { return true }
@@ -7192,7 +7195,28 @@ KwContinue  = "continue" KwEnd ;
             else if (it.cassoc != undefined) { assoc = it.cassoc }
             else if (it.craw != undefined) { rawT = it.craw }
         }
+        swCaseNames["$" + cname] = true
         return {cname: cname, cassoc: assoc, craw: rawT}
+    }
+    // Every enum case name the program declares, collected by the walk. An
+    // implicit `.none` / `.some(x)` that no program enum can mean is Optional's
+    // (swDotOptional). Twin in swift-to-llvm-ir.abnf.
+    var swCaseNames = {}
+    // "none" with no arguments is nil, "some" with one is its argument; "" when
+    // the leading-dot member is not Optional's.
+    function swDotOptional(dname, nargs) {
+        if (dname == "none" && nargs < 0 && swCaseNames["$none"] !== true) { return "none" }
+        if (dname == "some" && nargs == 1 && swCaseNames["$some"] !== true) { return "some" }
+        return ""
+    }
+    // The same question for an enum-case PATTERN: `.none`, `.some(let x)`, and the
+    // qualified `Optional.none` / `Optional.some(p)`, which are always Optional's.
+    function swPatOptional(k) {
+        var nargs = k.pargs == null ? -1 : k.pargs.length
+        if (k.pdot && k.ppath.indexOf(".") < 0) { return swDotOptional(k.ppath, nargs) }
+        if (k.ppath == "Optional.none" && nargs < 0) { return "none" }
+        if (k.ppath == "Optional.some" && nargs == 1) { return "some" }
+        return ""
     }
     // Only a real raw-value type gives the cases implicit raw values; the rest of an
     // enum's inheritance clause (Error, a protocol, ...) does not.
@@ -7267,10 +7291,16 @@ KwContinue  = "continue" KwEnd ;
             if (it.dname != undefined) { dname = it.dname }
             else if (it.dargs != undefined) { args = it.dargs }
         }
-        if (args == null) { return function() { return newCaseVal(null, dname, undefined, null, null, undefined) } }
+        if (args == null) {
+            return function() {
+                if (swDotOptional(dname, -1) == "none") { return null }
+                return newCaseVal(null, dname, undefined, null, null, undefined)
+            }
+        }
         var recs = args
         return function() {
             var ea = evalArgs(recs)
+            if (swDotOptional(dname, ea.argv.length) == "some") { return ea.argv[0] }
             return newCaseVal(null, dname, undefined, ea.argv, null, undefined)
         }
     }

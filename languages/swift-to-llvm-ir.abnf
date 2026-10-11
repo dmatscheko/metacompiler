@@ -4079,6 +4079,17 @@ KwContinue  = "continue" KwEnd ;
             if (k.ppath != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, k.ppath), emitCopy(b, v)]) }
             return b
         }
+        // Optional's own cases: `.none` is nil, `.some(p)` matches p against the
+        // wrapped value itself (an Optional is not boxed here).
+        var opt = swPatOptional(k)
+        if (opt == "none") {
+            var nilB = curF.NewBlock("")
+            var undB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), nilB, undB)
+            undB.NewCondBr(truthy(undB, callExt(undB, "js_seq", [v, hUndef])), nilB, failB)
+            return nilB
+        }
+        if (opt == "some") { return emitMatchPat(emitNotNil(b, v, failB), k.pargs[0], v, binding, failB) }
         // An enum case pattern matches by case NAME (a leading `.` has no type to
         // resolve against, and a qualified path names the same case); the sub-patterns
         // then match the associated values in order. sw_ename answers undefined for a
@@ -8011,7 +8022,28 @@ KwContinue  = "continue" KwEnd ;
             else if (it.cassoc != undefined) { assoc = it.cassoc }
             else if (it.craw != undefined) { rawT = it.craw }
         }
+        swCaseNames["$" + cname] = true
         return {cname: cname, cassoc: assoc, craw: rawT}
+    }
+    // Every enum case name the program declares, collected by the walk. An
+    // implicit `.none` / `.some(x)` that no program enum can mean is Optional's
+    // (swDotOptional). Twin in swift-interpreter.abnf.
+    var swCaseNames = {}
+    // "none" with no arguments is nil, "some" with one is its argument; "" when
+    // the leading-dot member is not Optional's.
+    function swDotOptional(dname, nargs) {
+        if (dname == "none" && nargs < 0 && swCaseNames["$none"] !== true) { return "none" }
+        if (dname == "some" && nargs == 1 && swCaseNames["$some"] !== true) { return "some" }
+        return ""
+    }
+    // The same question for an enum-case PATTERN: `.none`, `.some(let x)`, and the
+    // qualified `Optional.none` / `Optional.some(p)`, which are always Optional's.
+    function swPatOptional(k) {
+        var nargs = k.pargs == null ? -1 : k.pargs.length
+        if (k.pdot && k.ppath.indexOf(".") < 0) { return swDotOptional(k.ppath, nargs) }
+        if (k.ppath == "Optional.none" && nargs < 0) { return "none" }
+        if (k.ppath == "Optional.some" && nargs == 1) { return "some" }
+        return ""
     }
     function rawKind(t) {
         if (t == "Int" || t == "Int8" || t == "Int16" || t == "Int32" || t == "Int64"
@@ -8147,8 +8179,10 @@ KwContinue  = "continue" KwEnd ;
         hasRichEnum = true
         return function(b) {
             if (args == null) {
+                if (swDotOptional(dname, -1) == "none") { return {b: b, v: hNull} }
                 return {b: b, v: emitCaseObj(b, null, dname, hUndef, hNull, null, emitStr(b, dname + "()"))}
             }
+            if (swDotOptional(dname, args.length) == "some") { return args[0].t(b) }
             var vals = callExt(b, "js_arr_new", [])
             var key = emitStr(b, dname + "(")
             for (var j = 0; j < args.length; j++) {

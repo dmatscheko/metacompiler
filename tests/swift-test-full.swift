@@ -2813,6 +2813,27 @@ func s52() {
                  && "\([3, 4].map { v -> Double in v / 8 })" == "[0.375, 0.5]" && { x -> Double? in x / 2 }(3)! == 1.5)
 }
 
+// ===== SECTION 53: an implicit `.none` with an Optional context =====
+// No enum of this file declares a case `none`, so a leading-dot `.none` can only
+// be Optional's: nil, as a value and as a pattern (swiftc 6.1.2).
+func opt53(_ x: Int?) -> String { return x == nil ? "nil" : "val" }
+func none53() -> Int? { return .none }
+func s53() {
+    let n: Int? = .none
+    var s: String? = "x"
+    s = .none
+    let arr: [Int?] = [1, .none, 3]
+    check("53a", n == nil && s == nil && opt53(.none) == "nil" && opt53(3) == "val" && none53() == nil
+                 && arr[1] == nil && (n ?? 9) == 9 && n == .none)
+    var hit = ""
+    let z = Int("x")
+    switch z { case .none: hit = "none"; default: hit = "other" }
+    let o: Int? = arr[2]
+    switch o { case .none: hit += "-none"; case let v?: hit += "-\(v)" }
+    if case .none = z { hit += "-if" }
+    check("53b", hit == "none-3-if")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2868,6 +2889,7 @@ func main() {
     s50() // SECTION-CALL 50
     s51() // SECTION-CALL 51
     s52() // SECTION-CALL 52
+    s53() // SECTION-CALL 53
     print("full: \(checks) checks, \(fails) failures")
 }
 
