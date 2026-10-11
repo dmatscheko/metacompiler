@@ -23,11 +23,11 @@ errorlevel as a pseudo-variable; rem and :: comments; the caret escape and the c
 continuation.
 
 Variable names are case insensitive, for-variable letters are not, and labels are case
-sensitive. Keywords are recognised in all-lowercase or all-UPPERCASE. %VAR% is expanded the way
-cmd.exe expands it - the whole command line is expanded BEFORE it runs, so %VAR% inside a ( )
-block is the value from before the block while !VAR! is the current one. The run's exit code is
-the script's, so a self checking script that ends with `exit /b <failures>` is green exactly
-when it passes.
+sensitive. Keywords and switches (/a /f ...) are recognised in any letter case. %VAR% is
+expanded the way cmd.exe expands it - the whole command line is expanded BEFORE it runs, so
+%VAR% inside a ( ) block is the value from before the block while !VAR! is the current one.
+The run's exit code is the script's, so a self checking script that ends with
+`exit /b <failures>` is green exactly when it passes.
 
 Two rules are worth spelling out because a straightforward reading gets them wrong. A ~
 modifier run and a for-variable are both letters, so %%~ff and %%~pd are ambiguous; the rule
@@ -58,11 +58,15 @@ produce capturable output - echo and ver.") ;
 // ----- program: a flat list of labels and statement-lines (PC executes them) -----
 Program     <~~ push(runProgram(takeAll())) ~~>
             = { Line } ;
-Line        = BlankLine | ColonComment | LabelLine | StmtLine ;
+Line        = BlankLine | ColonComment | LabelLine | StmtLine | StrayClose ;
+// A ) that opens a top-level line closes no block: cmd.exe skips the line, which is
+// what `call (` relies on - the lines after it run, and its ) is passed over.
+StrayClose  = [ At ] ")" :whitespace() { NotNL } Newline ;
 BlankLine   = Newline ;
 ColonComment = "::" :whitespace() { NotNL } Newline ;
+// An @ and blanks may stand before the colon, and blanks after it: `@  :  dest9`.
 LabelLine   <~~ push({lbl: pop()}) ~~>
-            = ":" LabelName :whitespace() { NotNL } Newline ;
+            = [ "@" ] ":" LabelName :whitespace() { NotNL } Newline ;
 StmtLine    <~~ push({stmt: pop()}) ~~>
             = [ At ] Chain Newline ;
 At          = "@" :whitespace() ;
@@ -71,23 +75,67 @@ At          = "@" :whitespace() ;
 // 'a & b' runs both, 'a && b' runs b only after success, 'a || b' only after failure.
 // A redirection is attached to the piece it follows; there is no filesystem here, so an
 // output redirection DISCARDS (the same capture machinery that backs for /f 'command').
+// A trailing `&` with nothing after it runs nothing more (`call say&`).
 Chain       <~~ push(makeChain(takeAll())) ~~>
-            = Piece { ChainOp Piece } ;
+            = Pipeline { ChainOp Pipeline } [ "&" ] ;
+// `a | b` feeds a's output to b's input. Nothing here carries data between two
+// commands (see the description), so a real pipeline is reported as not implemented.
+Pipeline    <~~ push(makePipe(takeAll(), up.start)) ~~>
+            = Piece { "|" NotBar Piece } ;
+NotBar      = :script(~~
+    (function() { return c.peek(0) === 124 ? abnf.newToken("\x01or-operator", 0) : undefined })()
+~~) ;
 ChainOp     <~~ push(up.in) ~~> = "&&" | "||" | "&" ;
+// A redirection may also come FIRST: `> nul echo a` is `echo a > nul`. Every command
+// of a chain may carry its own @ (`a&&@echo b`).
 Piece       <~~ push(makeRedir(takeAll())) ~~>
-            = Stmt { Redir } ;
+            = { Redir } [ At ] Stmt { Redir } ;
 Redir       <~~ push(mkRedir(takeAll())) ~~>
             = [ RedirFd ] RedirOp RedirTarget ;
 RedirFd     <~~ push({fd: up.in}) ~~> = "0"..."9" ;
-RedirOp     <~~ push({op: up.in}) ~~> = ">>" | ">&" | ">" | "<" ;
-RedirTarget <~~ push({tgt: up.in}) ~~> = RTChar :whitespace() { RTChar } :whitespace(Hspace) ;
+RedirOp     <~~ push({op: up.in}) ~~> = ">>" | ">&" | ">" | "<&" | "<" ;
+// Quoted and bare runs mix: `> "say one.bat"`, `>."\foo"`.
+RedirTarget <~~ push({tgt: up.in}) ~~>
+            = RTPart :whitespace() { RTPart } :whitespace(Hspace) ;
+RTPart      = RTChar | '"' { NotDQNL } '"' ;
 
 // A statement (also used inside ( ) blocks, where Newlines separate them).
 Stmt        = Rem | EchoCtl | EchoDot | EchoParen | Echo
-            | SetA | SetP | SetQ | Set
-            | Setlocal | Endlocal | Shift | Ver
-            | If | ForL | ForF | For
-            | GotoEof | Goto | CallSet | Call | ExitB | Exit | Group ;
+            | SetA | SetABad | SetP | SetQ | Set | SetDyn | SetShow
+            | Setlocal | Endlocal | ShiftBad | Shift | Ver
+            | If | ForL | ForF | ForDR | For
+            | GotoEof | Goto | GotoDyn | CallSet | Call | CallExt | CallInt | ExitB | Exit | GroupElse | Group | ExtCmd ;
+
+// Any other command - mkdir, cd, del, type, copy, a program name - is recognized with
+// its argument text and reported as not implemented: there is no filesystem and no
+// process table behind a grammar run (see the description). A statement keyword is
+// never a command name here, in any letter case, so a keyword statement this grammar
+// fails to read stays a parse error instead of turning into an unknown command.
+ExtCmd      <~~ push(makeExtCmd(takeAll(), up.start)) ~~> = NotKwName ExtName LineText ;
+// A %VAR% in the name is allowed: cmd.exe expands the line BEFORE it reads the
+// command, so `%V%echo foo` is a command whose name only exists at run time.
+ExtName     <~~ push(up.in) ~~> = ExtNamePt :whitespace() { ExtNamePt } :whitespace(Hspace) ;
+ExtNamePt   = BareChar | "%" | "!" | '"' { NotDQNL } [ '"' ] ;
+NotKwName   = :script(~~
+    (function() {
+        var w = ""
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        var w0 = i
+        while (i < w0 + 16 && ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122))) {
+            w = w + String.fromCharCode(cc >= 65 && cc <= 90 ? cc + 32 : cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var kws = "|rem|echo|set|setlocal|endlocal|shift|ver|if|for|goto|call|exit|"
+        var boundary = !((cc >= 48 && cc <= 57) || cc === 95)
+        if (w.length > 0 && boundary && kws.indexOf("|" + w + "|") >= 0) {
+            return abnf.newToken("\x01statement-keyword", 0)
+        }
+        return undefined
+    })()
+~~) ;
 
 // ----- echo -----
 Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
@@ -116,21 +164,30 @@ EchoEol = :script(~~
 // The :whitespace() comes BEFORE the separator: only the GLUED form is this rule.
 EchoDot     <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh LineText ;
 EchoSepCh   = "." | ":" | "/" ;
-EchoParen   <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "(" :whitespace(Hspace) ;
+// `echo(` prints an empty line and `echo(3` prints 3: the ( is the separator.
+EchoParen   <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() "(" LineText ;
 Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
 
 // ----- set VAR=value  /  set /a expr  /  set /p VAR=prompt -----
-SetA        <~~ push(makeSetA(pop())) ~~> = KwSet "/a" :whitespace(Hspace) ArithBody ;
-ArithBody   = ArithQuoted | Arith ;
-ArithQuoted <~~ push(pop()) ~~> = '"' :whitespace(Hspace) Arith '"' :whitespace(Hspace) ;
+// set /a ignores double quotes wherever they stand - `set /a "x=1","y=2"` and
+// `set /a ""x=1""` - so inside the expression a quote is whitespace (AWs).
+SetA        <~~ push(makeSetA(pop())) ~~>
+            = KwSet ( "/a" | "/A" ) :whitespace(AWs) Arith :whitespace(Hspace) { '"' } CmdEnd ;
+// `set /a x=6 7` ("Missing operator") and other malformed expressions are an error
+// cmd.exe reports with an errorlevel: reported as not implemented.
+SetABad     <~~ takeAll(); push(batUnsup("a malformed set /a expression", up.start)) ~~>
+            = KwSet ( "/a" | "/A" ) LineText ;
+AWs         = { @+" \t" | '"' | LineCont } ;
 // set /p prompts and reads a line; there is no stdin in this runtime, so it always reads
 // nothing and (as cmd.exe does on end of file) leaves the variable unchanged.
 SetP        <~~ push(makeSetP(takeAll())) ~~>
-            = KwSet "/p" :whitespace(Hspace) SetName "=" ( LineText | Empty ) ;
+            = KwSet ( "/p" | "/P" ) :whitespace(Hspace) SetName "=" ( LineText | Empty ) ;
 // 'set "name=value"' is the quoted form: the quotes delimit the assignment rather than
 // becoming part of the value, which is how a value with a trailing space is written.
+// Text after the closing quote is ignored: `set "V=jim" fred` sets jim.
 SetQ        <~~ push(makeSet(takeAll())) ~~>
-            = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) ;
+            = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) [ SetQTail ] ;
+SetQTail    <~~ pop() ~~> = LineText ;
 QLineText   <~~ push(makeWord(takeAll())) ~~>
             = :whitespace() { QLinePart } :whitespace() ;
 QLinePart   = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | QLineChars ;
@@ -138,8 +195,35 @@ QLineChars  <~~ push(makeStr(up.in)) ~~> = QLineChar :whitespace() { QLineChar }
 QLineChar   = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " or %
 Set         <~~ push(makeSet(takeAll())) ~~>
             = KwSet SetName "=" ( LineText | Empty ) ;
+// `set %%i=` sets the variable a for-variable NAMES; the compiled half keeps one slot
+// per name it can see, so a computed name is reported as not implemented.
+SetDyn      <~~ takeAll(); push(batUnsup("set of a computed variable name", up.start)) ~~>
+            = KwSet [ SetName ] DynNamePt :whitespace() { DynNamePt | SetNameCh } :whitespace(Hspace) "=" ( LineText | Empty ) ;
+DynNamePt   = ForRef | VarPct | BangVar | ParamRef | PctLit ;
+SetNameCh   = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." | "-" ;
+// `set` / `set PREFIX` LISTS variables, with the names in the case they were written
+// in, which this lower-cased environment no longer has; `set /Q`, `set =` and
+// `set "="` are usage errors. All are reported as not implemented.
+SetShow     <~~ takeAll(); push(batUnsup("set without a value", up.start)) ~~>
+            = KwSet [ SetName | "/" :whitespace() SlChar :whitespace(Hspace) | "=" | '"="' ] CmdEnd ;
+// The command ends here: only a redirection, a separator, a ) or the end of the line
+// may follow.
+CmdEnd      = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        if (cc == -1 || cc == 10 || cc == 13 || cc == 62 || cc == 60 || cc == 38 || cc == 124 || cc == 41) {
+            return undefined
+        }
+        var nx = c.peek(i + 1)
+        if (cc >= 48 && cc <= 57 && (nx == 62 || nx == 60)) { return undefined }   // 2> 1<
+        return abnf.newToken("\x01command-continues", 0)
+    })()
+~~) ;
+// A name may carry . and - after its first character: `set WINE_expected.1=x`.
 SetName     <~~ push(up.in) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { SetNameCh } :whitespace() ;
 Empty       <~~ push(makeStr("")) ~~> = "" ;
 
 // ----- setlocal / endlocal / shift / ver -----
@@ -148,19 +232,34 @@ SlOpt       <~~ push(up.in) ~~> = SlChar :whitespace() { SlChar } :whitespace(Hs
 SlChar      = "a"..."z" | "A"..."Z" ;
 Endlocal    <~~ push(makeEndlocal()) ~~> = KwEndlocal ;
 Shift       <~~ push(makeShift(takeAll())) ~~> = KwShift [ ShiftOpt ] ;
+// `shift /abc` and `shift /-1` are usage errors: reported as not implemented.
+ShiftBad    <~~ takeAll(); push(batUnsup("shift with an invalid switch", up.start)) ~~>
+            = KwShift "/" LineText ;
 ShiftOpt    <~~ push(up.in) ~~> = "/" :whitespace() "0"..."9" :whitespace(Hspace) ;
 Ver         <~~ push(makeVer()) ~~> = KwVer ;
 
 // ----- goto / call / exit -----
-GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
+GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":" :whitespace() CiE CiO CiF :whitespace(Hspace) KwEnd ;
 // 'goto :label' and 'goto label' are the same jump; ':eof' is matched by GotoEof above.
-Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) ;
+// A label ends at a second colon, and the rest is ignored: `goto :dest10:comment`.
+Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) [ GotoTail ] ;
+GotoTail    = ":" :whitespace() { LineChar } :whitespace(Hspace) ;
+// `goto :%next%` jumps to a label computed at run time; the compiled half lays its
+// jumps out ahead of time, so this is reported as not implemented.
+GotoDyn     <~~ takeAll(); push(batUnsup("goto a computed label", up.start)) ~~>
+            = KwGoto [ ":" ] Word ;
 // 'call set NAME=text' re-parses its argument, so the text goes through a SECOND round of
 // %VAR% expansion - the documented way to expand a name that another variable holds.
 CallSet     <~~ push(makeCallSet(takeAll())) ~~>
             = KwCall KwSet SetName "=" ( LineText | Empty ) ;
 Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { ArgWord } :whitespace(Hspace) ;
-ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" :whitespace(Hspace) [ Word ] :whitespace(Hspace) ;
+// `call other.bat args` runs another batch FILE - a command, like ExtCmd.
+CallExt     <~~ push(makeExtCmd(takeAll(), up.start)) ~~> = KwCall NotKwName ExtName LineText ;
+// `call echo %%f` runs an internal command after a SECOND expansion round, and a bare
+// `call` sets errorlevel; only `call set` (CallSet) is modelled.
+CallInt     <~~ takeAll(); push(batUnsup("call of an internal command", up.start)) ~~>
+            = KwCall LineText ;
+ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit ( "/b" | "/B" ) :whitespace(Hspace) [ Word ] :whitespace(Hspace) ;
 Exit        <~~ push(makeExit(takeAll())) ~~> = KwExit [ Word ] :whitespace(Hspace) ;
 
 // ----- if / for (parenthesized bodies) -----
@@ -168,49 +267,87 @@ If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf { IfFlag } Cond Body [ KwElse Body ] ;
 IfFlag      = IfNot | IfCi ;
 IfNot       <~~ push({neg: true}) ~~> = KwNot ;
-IfCi        <~~ push({ci: true}) ~~> = "/i" :whitespace(Hspace) ;
+IfCi        <~~ push({ci: true}) ~~> = ( "/i" | "/I" ) :whitespace(Hspace) ;
 // for /l counts start,step,end; for /f parses text; the plain for walks a word list.
+// The three numbers are separated by a comma, a semicolon, an = or just whitespace:
+// `for /l %%b in (1 1 3)` counts 1, 2, 3.
 ForL        <~~ push(makeForL(takeAll())) ~~>
-            = KwFor "/l" :whitespace(Hspace) ForVar KwIn "(" :whitespace(Hspace)
-              ForNum "," :whitespace(Hspace) ForNum "," :whitespace(Hspace) ForNum
+            = KwFor ( "/l" | "/L" ) :whitespace(Hspace) ForVar KwIn "(" :whitespace(Hspace)
+              ForNum [ ForLSep ] ForNum [ ForLSep ] ForNum
               ")" :whitespace(Hspace) KwDo Body ;
-ForF        <~~ push(makeForF(takeAll())) ~~>
-            = KwFor "/f" :whitespace(Hspace) [ ForOpts ] ForVar KwIn "(" :whitespace(Hspace)
+ForLSep     = ( "," | ";" | "=" ) :whitespace(Hspace) ;
+ForF        <~~ push(makeForF(takeAll(), up.start)) ~~>
+            = KwFor ( "/f" | "/F" ) :whitespace(Hspace) [ ForOpts | ForOptsBare ] ForVar KwIn "(" :whitespace(Hspace)
               ForFSrc ")" :whitespace(Hspace) KwDo Body ;
+// The options may also stand unquoted when they hold no space: `for /f usebackq %%i`.
 ForOpts     <~~ push({opts: up.in}) ~~> = '"' :whitespace() { NotDQ } '"' :whitespace(Hspace) ;
-ForFSrc     = ForFLit | ForFCmd | ForFFile ;
-ForFLit     <~~ push({lit: pop()}) ~~> = RawQuoted ;
+ForOptsBare <~~ push({opts: "\x22" + up.in + "\x22"}) ~~>
+            = !"%%" BareChar :whitespace() { BareChar } :whitespace(Hspace) ;
+ForFSrc     = ForFLit | ForFCmd | ForFBq | ForFFile ;
+// The string runs to the LAST quote before the closing ), so it may hold quotes:
+// `("f "a b" c")` is the text `f "a b" c`.
+ForFLit     <~~ push({lit: makeWord(takeAll())}) ~~>
+            = DqOpen :whitespace() { DPart | LitInnerDq } DqClose :whitespace(Hspace) ;
+LitInnerDq  <~~ push(makeStr("\x22")) ~~> = '"' NotLitEnd ;
+NotLitEnd   = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        return cc == 41 ? abnf.newToken("\x01string-ends", 0) : undefined
+    })()
+~~) ;
 // The single-quoted form is a COMMAND whose output is parsed. External programs are out of
 // scope for this runtime, so the command is a chain of the internal commands that produce
 // capturable output - echo and ver.
 ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace(Hspace) SqChain "'" :whitespace(Hspace) ;
+// Under the usebackq option the command is back-quoted instead (and a double-quoted
+// set names a FILE - see makeForF).
+ForFBq      <~~ push({cmd: pop(), bq: true}) ~~> = "`" :whitespace(Hspace) SqChain "`" :whitespace(Hspace) ;
 SqChain     <~~ push(makeSeq(takeAll())) ~~> = SqCmd { "&" SqCmd } ;
-SqCmd       = SqEchoDot | SqEcho | SqVer ;
+SqCmd       = SqEchoDot | SqEcho | SqVer | SqExt ;
+// Any other command there is one this runtime cannot run (see ExtCmd).
+SqExt       <~~ push(makeExtCmd(takeAll(), up.start)) ~~> = SqName SqText ;
+SqName      <~~ push(up.in) ~~> = SqNameCh :whitespace() { SqNameCh } :whitespace(Hspace) ;
+SqNameCh    = "\x22"..."\x24" | "\x28"..."\x5f" | "\x61"..."\U0010ffff" ;
 SqVer       <~~ push(makeVer()) ~~> = KwVer ;
 // cmd parses the command inside for /f ('...') with the same command parser, so the glued
 // `echo.` / `echo:` / `echo/` separator (see EchoDot) applies here too.
 SqEchoDot   <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh SqText ;
 SqEcho      <~~ push(makeEcho(pop())) ~~> = KwEcho SqText ;
-// A bare word is a FILE set. The path model behind this runtime answers existence, not
+// Bare words are a FILE set. The path model behind this runtime answers existence, not
 // contents, so a file set always reads nothing and the loop runs zero times.
-ForFFile    <~~ push({file: pop()}) ~~> = Word ;
+ForFFile    <~~ var ws = takeAll(); push({file: ws[0]}) ~~> = Word { Word } ;
 SqText      <~~ push(makeWord(takeAll())) ~~> = [ SqPart ] :whitespace() { SqPart } ;
 SqPart      = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | SqChars ;
 SqChars     <~~ push(makeStr(up.in)) ~~> = SqChar :whitespace() { SqChar } ;
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor ForVar KwIn "(" :whitespace(Hspace) { Word } ")" :whitespace(Hspace) KwDo Body ;
+            = KwFor ForVar KwIn "(" :whitespace(Hspace) { Word | Newline } ")" :whitespace(Hspace) KwDo Body ;
+// The set may span lines: `for %%a in ("f"` / `"g")`. for /d and for /r walk
+// directories, which the path model cannot list (see the description): recognized
+// and reported as not implemented.
+ForDR       <~~ takeAll(); push(batUnsup("for /d and for /r (a directory walk)", up.start)) ~~>
+            = KwFor ForDRSw [ !"%%" Word ] ForVar KwIn "(" :whitespace(Hspace) { Word | Newline } ")"
+              :whitespace(Hspace) KwDo Body ;
+ForDRSw     = ( "/d" | "/D" | "/r" | "/R" ) :whitespace(Hspace) ;
 ForVar      = "%%" :whitespace() ForLetter :whitespace(Hspace) ;
 ForNum      <~~ push(makeWord(takeAll())) ~~>
             = ForNumPart :whitespace() { ForNumPart } :whitespace(Hspace) ;
 ForNumPart  = ForRef | VarPct | ParamRef | BangVar | ForNumChars ;
 ForNumChars <~~ push(makeStr(up.in)) ~~> = FNChar :whitespace() { FNChar } ;
-FNChar      = "0"..."9" | "-" | "+" ;
+// A bound that is not a number counts as 0, as in set /a: `(a,2,3)` starts at 0.
+FNChar      = "0"..."9" | "-" | "+" | "a"..."z" | "A"..."Z" ;
 // A body is a ( ... ) block (statements separated by newlines) or a single statement.
 Body        = Block | Single ;
 Block       <~~ push({body: makeSeq(takeAll())}) ~~>
             = "(" :whitespace(Hspace) OptNL { Chain SepNL } ")" :whitespace(Hspace) ;
 Single      <~~ push({body: pop()}) ~~> = Stmt ;
 Group       <~~ push(makeGroup(pop())) ~~> = Block ;
+// `a && (b) else c` - an else after a block that is no if body. What cmd.exe makes of
+// it depends on where the chain splits (wine's suite records it), which this grammar
+// does not model: reported as not implemented.
+GroupElse   <~~ takeAll(); push(batUnsup("a ( ) block followed by else", up.start)) ~~>
+            = Block KwElse Body ;
 OptNL       = { Newline } ;
 SepNL       = { Newline } ;
 
@@ -223,7 +360,19 @@ ExistCond   <~~ push(mkExist(pop())) ~~> = KwExist Word ;
 DefinedCond <~~ push(mkDefined(pop())) ~~> = KwDefined SetName ;
 CmpCond     <~~ push(mkCmp(takeAll())) ~~> = CmpArg CmpOp CmpArg ;
 StrCond     <~~ push(mkStrCmp(takeAll())) ~~> = CmpArg "==" <~~ push("==") ~~> CmpArg ;
-CmpArg      = QWord | Word ;
+// An operand ends at `==` even with no space around it: `if 1==1 echo` compares 1 and
+// 1. A single = and the parentheses are ordinary text: `if (a)==(b) (`.
+CmpArg      = QWord | CmpWord ;
+CmpWord     <~~ push(makeWord(takeAll())) ~~>
+            = CmpPart :whitespace() { CmpPart } :whitespace(Hspace) ;
+CmpPart     = DQuote | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
+            | EscNL | EscCh | PctLit | BangLit | CmpBare ;
+CmpBare     <~~ push(makeStr(up.in)) ~~> = CmpCh :whitespace() { CmpCh } :whitespace() ;
+CmpCh       = "\x23"..."\x24" | "\x27"..."\x29" | "\x2a"..."\x3b" | "=" NotEqNext | "\x3f"..."\x5d"
+            | "\x5f"..."\x7b" | "\x7d"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
+NotEqNext   = :script(~~
+    (function() { return c.peek(0) === 61 ? abnf.newToken("\x01double-equals", 0) : undefined })()
+~~) ;
 QWord       <~~ push(pop()) ~~> = DQuote ;
 CmpOp       = ( "EQU" | "NEQ" | "LSS" | "LEQ" | "GTR" | "GEQ"
               | "equ" | "neq" | "lss" | "leq" | "gtr" | "geq" ) <~~ push(up.in) ~~> ;
@@ -240,13 +389,17 @@ Part        = DQuote | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
 ArgWord     <~~ push(makeWord(takeAll())) ~~>
             = ArgPart :whitespace() { ArgPart } :whitespace(Hspace) ;
 ArgPart     = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
-            | EscNL | EscCh | PctLit | BangLit | Bareword ;
+            | EscNL | EscCh | PctLit | BangLit | Bareword | ArgParen ;
+// A BALANCED ( ) run is argument text - `call :sub a(b)c` passes `a(b)c`; balance is
+// what keeps it from taking the ) that closes an enclosing block.
+ArgParen    <~~ push(makeWord(takeAll())) ~~>
+            = LParen :whitespace() { ArgPart } RParen :whitespace() ;
 
 // %VAR%, with the substring (:~n,m) and substitution (:from=to) operators.
 VarPct      <~~ push(mkVarRef(takeAll())) ~~>
             = "%" :whitespace() VarNm [ VarMod ] "%" :whitespace() ;
 VarNm       <~~ push({nm: up.in}) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { SetNameCh } :whitespace() ;
 VarMod      = SubStrMod | SubstMod ;
 SubStrMod   <~~ push(mkSubStr(takeAll())) ~~> = ":~" [ SubStart ] [ SubLenPart ] ;
 SubStart    <~~ push({start: up.in}) ~~> = SNum ;
@@ -298,8 +451,13 @@ ModOkFor    = :script(~~
         return abnf.newToken("\x01this-modifier-is-the-variable", 0)
     })()
 ~~) ;
-ForLetter   <~~ push({fv: up.in}) ~~>
-            = ( "a"..."z" | "A"..."Z" ) :whitespace() ;
+// A digit or punctuation is a for-variable too - `for %%0 in (a b)`, `%%}` - and a
+// caret-escaped character (`%%^[`) names the character itself. tokens=1-32 hands
+// out consecutive characters, which is how the punctuation after Z gets reached.
+ForLetter   <~~ push({fv: unCaret(up.in)}) ~~>
+            = ( "a"..."z" | "A"..."Z" | "0"..."9" | "[" | "\\" | "]" | "_" | "`" | "{" | "}"
+              | ForEscLetter ) :whitespace() ;
+ForEscLetter = "^" :whitespace() "\x21"..."\x7e" ;
 // %1..%9 call arguments (%0 is the label), %* the whole tail, %~1 with the same modifiers.
 ParamStar   <~~ push(mkParamStar()) ~~> = "%*" :whitespace() ;
 ParamRef    <~~ push(mkParamRef(takeAll())) ~~>
@@ -339,7 +497,64 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
 LineText    <~~ push(makeWord(takeAll())) ~~>
             = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
-            | EscNL | EscCh | PctLit | BangLit | DqLit | LineParen | LParenLit | LineChars ;
+            | EscNL | EscCh | PctLit | BangLit | DqLit | LineParen | LParenLit | LineChars
+            | TopRParen ;
+// Outside every ( ) block a ) closes nothing, so it is text: `echo @echo ) > f.bat`.
+TopRParen   <~~ push(makeStr(")")) ~~> = ")" :whitespace() AtTopLevel ;
+// Is the line holding this position outside every multi-line ( ) block? A pure
+// function of the source before it (a guard may not carry mutable parser state): a
+// line ENDING in an unquoted ( that stands apart from the word before it (`if x (`,
+// `call (`, but not `call say(`) opens a block, a line STARTING with )
+// closes one - the shape a multi-line block has. rem and : lines are skipped. Being
+// pure, the walk RESUMES from the line it last stopped at (kept on the parser stack,
+// as js-interpreter.abnf's InGen does), so one parse walks the source once.
+AtTopLevel  = :script(~~
+    (function() {
+        var back = c.getSdx()
+        var p = 0
+        var cap = 0
+        while (c.peek(p - 1) >= 0 && c.peek(p - 1) != 10 && cap < 1000000) { p = p - 1; cap = cap + 1 }
+        var q = 0 - back
+        var depth = 0
+        var memo = pop()
+        if (memo != null && memo.at <= back + p) { q = memo.at - back; depth = memo.depth }
+        while (q < p) {
+            var e = q
+            while (c.peek(e) >= 0 && c.peek(e) != 10) { e = e + 1 }
+            var a = q
+            while (a < e && (c.peek(a) == 32 || c.peek(a) == 9 || c.peek(a) == 64)) { a = a + 1 }
+            var z = e - 1
+            while (z >= a && (c.peek(z) == 32 || c.peek(z) == 9 || c.peek(z) == 13)) { z = z - 1 }
+            var w = ""
+            var k = a
+            while (k < e && k < a + 3) { w = w + String.fromCharCode(c.peek(k) | 32); k = k + 1 }
+            var rem = c.peek(a) == 58 || (w == "rem" && (a + 3 >= e || c.peek(a + 3) == 32 || c.peek(a + 3) == 9))
+            if (!rem && z >= a) {
+                if (c.peek(a) == 41 && depth > 0) { depth = depth - 1 }
+                var quotes = 0
+                var j = a
+                while (j < z) { if (c.peek(j) == 34) { quotes = quotes + 1 } ; j = j + 1 }
+                var pre = z == a ? 32 : c.peek(z - 1)
+                var opens = pre == 32 || pre == 9 || pre == 38 || pre == 124 || pre == 40
+                if (c.peek(z) == 40 && opens && quotes % 2 == 0) { depth = depth + 1 }
+            }
+            q = e + 1
+        }
+        push({at: back + p, depth: depth})
+        // ... and no ( earlier on this line is still open: `(echo a)` closes its block.
+        var open = 0
+        var inq = false
+        var t = p
+        while (t < -1) {
+            var ct = c.peek(t)
+            if (ct == 34) { inq = !inq }
+            if (!inq && ct == 40) { open = open + 1 }
+            if (!inq && ct == 41 && open > 0) { open = open - 1 }
+            t = t + 1
+        }
+        return (depth == 0 && open == 0) ? undefined : abnf.newToken("\x01inside-a-block", 0)
+    })()
+~~) ;
 // A ( ) pair is ordinary text - `echo Done (ok)` and `set x=(a)` are values, not blocks.
 // Requiring the run to be BALANCED is what keeps it from stealing the ) that closes an
 // enclosing block: inside `(set x=1)` the value has no ( , so the ) still terminates.
@@ -353,68 +568,112 @@ LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
 
 // ----- arithmetic (32 bit integer), in the precedence set /? documents -----
 Arith       = ArithSeq ;
-ArithSeq    <~~ push(foldSeq(takeAll())) ~~> = ArithAssign { "," :whitespace(Hspace) ArithAssign } ;
+ArithSeq    <~~ push(foldSeq(takeAll())) ~~> = ArithAssign { "," :whitespace(AWs) ArithAssign } ;
 ArithAssign = ArithSet | ArithOr ;
 ArithSet    <~~ push(mkAssign(takeAll())) ~~> = ArithName AssignOp ArithAssign ;
-ArithName   <~~ push(up.in) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
-AssignOp    <~~ push(up.in) ~~>
-            = ( "*=" | "/=" | "%%=" | "%=" | "+=" | "-=" | "&=" | "^=" | "|=" | "<<=" | ">>=" | AssignEq )
-              :whitespace(Hspace) ;
+// Quotes inside a name vanish too: `WINE_""foo` is WINE_foo.
+ArithName   <~~ push(noQuotes(up.in)) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { ANameCh } :whitespace(AWs) ;
+ANameCh     = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | '"' ;
+// The compound forms built on & | ^ << >> are caret-escaped outside quotes (see OrOp);
+// unCaret reads `^<^<=` as `<<=`. Whitespace may stand inside one: `x  +  = 6`.
+AssignOp    <~~ push(unCaret(up.in)) ~~>
+            = ( [ CompoundOp ] AssignEq ) :whitespace(AWs) ;
+CompoundOp  = "*" | "/" | "%%" | "%" | "+" | "-" | "&" | "^&" | "^|" | "^^" | "^<^<" | "^>^>"
+            | "^" | "|" | "<<" | ">>" ;
 AssignEq    = "=" ;
 ArithOr     <~~ push(foldArith(takeAll())) ~~> = ArithXor { OrOp ArithXor } ;
-OrOp        <~~ push(up.in) ~~> = "|" :whitespace(Hspace) ;
+// Outside quotes an & or | ends the COMMAND (`set /a x=1 +2 & call :f`) and << >> are
+// redirections, so the operator is the quoted or caret-escaped spelling there (`^&`,
+// `^<^<`) - wine's suite settles it.
+OrOp        <~~ push("|") ~~> = ( "^|" | "|" InQuotes ) :whitespace(AWs) ;
 ArithXor    <~~ push(foldArith(takeAll())) ~~> = ArithAnd { XorOp ArithAnd } ;
-XorOp       <~~ push(up.in) ~~> = "^" :whitespace(Hspace) ;
+// Outside quotes a lone ^ is the escape character, so XOR is spelled ^^ there.
+XorOp       <~~ push("^") ~~> = ( "^^" | "^" InQuotes ) :whitespace(AWs) ;
 ArithAnd    <~~ push(foldArith(takeAll())) ~~> = ArithShift { AndOp ArithShift } ;
-AndOp       <~~ push(up.in) ~~> = "&" :whitespace(Hspace) ;
+AndOp       <~~ push("&") ~~> = ( "^&" | "&" InQuotes ) :whitespace(AWs) ;
+// The text before this point on the line holds an odd number of double quotes.
+InQuotes    = :script(~~
+    (function() {
+        var i = -1
+        var n = 0
+        var cc = c.peek(i)
+        while (cc >= 0 && cc != 10 && cc != 13 && i > -100000) {
+            if (cc == 34) { n = n + 1 }
+            i = i - 1
+            cc = c.peek(i)
+        }
+        return (n % 2 == 1) ? undefined : abnf.newToken("\x01outside-quotes", 0)
+    })()
+~~) ;
 ArithShift  <~~ push(foldArith(takeAll())) ~~> = ArithAdd { ShiftOp ArithAdd } ;
-ShiftOp     <~~ push(up.in) ~~> = ( "<<" | ">>" ) :whitespace(Hspace) ;
+ShiftOp     = ShiftL | ShiftR ;
+// The two characters may be apart: `"6  < < 7"` shifts.
+ShiftL      <~~ push("<<") ~~> = ( "^<^<" | "<" "<" InQuotes ) :whitespace(AWs) ;
+ShiftR      <~~ push(">>") ~~> = ( "^>^>" | ">" ">" InQuotes ) :whitespace(AWs) ;
 ArithAdd    <~~ push(foldArith(takeAll())) ~~> = ArithMul { AddOp ArithMul } ;
-AddOp       <~~ push(up.in) ~~> = ( "+" | "-" ) :whitespace(Hspace) ;
+AddOp       <~~ push(up.in) ~~> = ( "+" | "-" ) :whitespace(AWs) ;
 ArithMul    <~~ push(foldArith(takeAll())) ~~> = ArithUnary { MulOp ArithUnary } ;
-MulOp       <~~ push(up.in) ~~> = ( "*" | "/" | "%%" | "%" ) :whitespace(Hspace) ;
+MulOp       <~~ push(up.in) ~~> = ( "*" | "/" | "%%" | "%" ) :whitespace(AWs) ;
 // ArithExp comes FIRST: !counter! is a delayed expansion, not a logical not of 'counter!'.
 ArithUnary  = ArithExp | ArithNot | ArithBNot | ArithNeg | ArithAtom ;
-ArithNot    <~~ push(mkANot(pop())) ~~> = "!" :whitespace(Hspace) ArithUnary ;
-ArithBNot   <~~ push(mkABNot(pop())) ~~> = "~" :whitespace(Hspace) ArithUnary ;
-ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" :whitespace(Hspace) ArithUnary ;
+ArithNot    <~~ push(mkANot(pop())) ~~> = "!" :whitespace(AWs) ArithUnary ;
+ArithBNot   <~~ push(mkABNot(pop())) ~~> = "~" :whitespace(AWs) ArithUnary ;
+ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" :whitespace(AWs) ArithUnary ;
 ArithAtom   = ArithParen | ArithHex | ArithOct | ArithNum | ArithExp | ArithVar ;
-ArithParen  <~~ push(pop()) ~~> = "(" :whitespace(Hspace) Arith ")" :whitespace(Hspace) ;
-ArithHex    <~~ push(mkAHex(up.in)) ~~> = ( "0x" | "0X" ) :whitespace() HexDig :whitespace() { HexDig } :whitespace(Hspace) ;
+ArithParen  <~~ push(pop()) ~~> = "(" :whitespace(AWs) Arith ")" :whitespace(AWs) ;
+ArithHex    <~~ push(mkAHex(up.in)) ~~> = ( "0x" | "0X" ) :whitespace() HexDig :whitespace() { HexDig } :whitespace(AWs) ;
 HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
-ArithOct    <~~ push(mkAOct(up.in)) ~~> = "0" :whitespace() OctDig :whitespace() { OctDig } :whitespace(Hspace) ;
+ArithOct    <~~ push(mkAOct(up.in)) ~~> = "0" :whitespace() OctDig :whitespace() { OctDig } :whitespace(AWs) ;
 OctDig      = "0"..."7" ;
-ArithNum    <~~ push(mkANum(up.in)) ~~> = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Hspace) ;
+ArithNum    <~~ push(mkANum(up.in)) ~~> = "0"..."9" :whitespace() { "0"..."9" } :whitespace(AWs) ;
 // A %VAR% / %1 expansion is a value inside set /a too.
-ArithExp    <~~ push(mkAStr(pop())) ~~> = ArithExpPart :whitespace(Hspace) ;
+ArithExp    <~~ push(mkAStr(pop())) ~~> = ArithExpPart :whitespace(AWs) ;
 ArithExpPart = ForRef | VarPct | ParamRef | BangVar ;
-ArithVar    <~~ push(mkAVar(up.in)) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
+ArithVar    <~~ push(mkAVar(noQuotes(up.in))) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { ANameCh } :whitespace(AWs) ;
 
-// ----- keywords (lowercase or UPPERCASE; word-boundary terminated) -----
-KwRem     = ( "rem" | "REM" ) KwEnd ;
-KwEcho    = ( "echo" | "ECHO" ) KwEnd ;
-KwEchoW   = ( "echo" | "ECHO" ) ;                 // no boundary: echo. is echo + '.'
-KwOn      = ( "on" | "ON" ) KwEnd ;
-KwOff     = ( "off" | "OFF" ) KwEnd ;
-KwSet     = ( "set" | "SET" ) KwEnd ;
-KwSetlocal = ( "setlocal" | "SETLOCAL" ) KwEnd ;
-KwEndlocal = ( "endlocal" | "ENDLOCAL" ) KwEnd ;
-KwShift   = ( "shift" | "SHIFT" ) KwEnd ;
-KwVer     = ( "ver" | "VER" ) KwEnd ;
-KwIf      = ( "if" | "IF" ) KwEnd ;
-KwNot     = ( "not" | "NOT" ) KwEnd ;
-KwElse    = ( "else" | "ELSE" ) KwEnd ;
-KwDefined = ( "defined" | "DEFINED" ) KwEnd ;
-KwExist   = ( "exist" | "EXIST" ) KwEnd ;
-KwErrorlevel = ( "errorlevel" | "ERRORLEVEL" ) KwEnd ;
-KwFor     = ( "for" | "FOR" ) KwEnd ;
-KwIn      = ( "in" | "IN" ) KwEnd ;
-KwDo      = ( "do" | "DO" ) KwEnd ;
-KwGoto    = ( "goto" | "GOTO" ) KwEnd ;
-KwCall    = ( "call" | "CALL" ) KwEnd ;
-KwExit    = ( "exit" | "EXIT" ) KwEnd ;
+// ----- keywords (any letter case, as cmd.exe reads them; word-boundary terminated) -----
+KwRem     = CiR :whitespace() CiE CiM :whitespace(Hspace) KwEnd ;
+KwEcho    = CiE :whitespace() CiC CiH CiO :whitespace(Hspace) KwEnd ;
+KwEchoW   = CiE :whitespace() CiC CiH CiO :whitespace(Hspace) ;                 // no boundary: echo. is echo + '.'
+KwOn      = CiO :whitespace() CiN :whitespace(Hspace) KwEnd ;
+KwOff     = CiO :whitespace() CiF CiF :whitespace(Hspace) KwEnd ;
+KwSet     = CiS :whitespace() CiE CiT :whitespace(Hspace) KwEnd ;
+KwSetlocal = CiS :whitespace() CiE CiT CiL CiO CiC CiA CiL :whitespace(Hspace) KwEnd ;
+KwEndlocal = CiE :whitespace() CiN CiD CiL CiO CiC CiA CiL :whitespace(Hspace) KwEnd ;
+KwShift   = CiS :whitespace() CiH CiI CiF CiT :whitespace(Hspace) KwEnd ;
+KwVer     = CiV :whitespace() CiE CiR :whitespace(Hspace) KwEnd ;
+KwIf      = CiI :whitespace() CiF :whitespace(Hspace) KwEnd ;
+KwNot     = CiN :whitespace() CiO CiT :whitespace(Hspace) KwEnd ;
+KwElse    = CiE :whitespace() CiL CiS CiE :whitespace(Hspace) KwEnd ;
+KwDefined = CiD :whitespace() CiE CiF CiI CiN CiE CiD :whitespace(Hspace) KwEnd ;
+KwExist   = CiE :whitespace() CiX CiI CiS CiT :whitespace(Hspace) KwEnd ;
+KwErrorlevel = CiE :whitespace() CiR CiR CiO CiR CiL CiE CiV CiE CiL :whitespace(Hspace) KwEnd ;
+KwFor     = CiF :whitespace() CiO CiR :whitespace(Hspace) KwEnd ;
+KwIn      = CiI :whitespace() CiN :whitespace(Hspace) KwEnd ;
+KwDo      = CiD :whitespace() CiO :whitespace(Hspace) KwEnd ;
+KwGoto    = CiG :whitespace() CiO CiT CiO :whitespace(Hspace) KwEnd ;
+KwCall    = CiC :whitespace() CiA CiL CiL :whitespace(Hspace) KwEnd ;
+KwExit    = CiE :whitespace() CiX CiI CiT :whitespace(Hspace) KwEnd ;
+// One letter in either case.
+CiA = "a" | "A" ;
+CiC = "c" | "C" ;
+CiD = "d" | "D" ;
+CiE = "e" | "E" ;
+CiF = "f" | "F" ;
+CiG = "g" | "G" ;
+CiH = "h" | "H" ;
+CiI = "i" | "I" ;
+CiL = "l" | "L" ;
+CiM = "m" | "M" ;
+CiN = "n" | "N" ;
+CiO = "o" | "O" ;
+CiR = "r" | "R" ;
+CiS = "s" | "S" ;
+CiT = "t" | "T" ;
+CiV = "v" | "V" ;
+CiX = "x" | "X" ;
 KwEnd     = :script(~~
     (function() {
         var cc = c.peek(0)
@@ -439,13 +698,15 @@ BareChar    = "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x
 // ( then falls through to LParenLit.
 LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d"
             | "\x3f"..."\x5d" | "\x5f"..."\x7b" | "\x7d"..."\U0010ffff" ;
-// A redirection target: printable except whitespace " & < > | .
-RTChar      = "\x21" | "\x23"..."\x25" | "\x27"..."\x3b" | "\x3d" | "\x3f"..."\x7b"
+// A redirection target: printable except whitespace " & < > | ( ) - a ) ends the
+// block around `(echo a >&2)`.
+RTChar      = "\x21" | "\x23"..."\x25" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x7b"
             | "\x7d"..."\U0010ffff" ;
-// Text inside a single-quoted for /f command: not ' % ! & and not a newline.
-SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x28"..."\U0010ffff" ;
+// Text inside a quoted for /f command: not ' ` % ! & and not a newline.
+SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x28"..."\x5f" | "\x61"..."\U0010ffff" ;
 NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotDQ       = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;                     // not " (0x22)
+NotDQNL     = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\U0010ffff" ;
 NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " % newline
 
 :startScript(~~
@@ -521,6 +782,21 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         return v
     }
     function escBody(s) { return s.substring(1) }
+    function noQuotes(s) {
+        var out = "", i = 0
+        for (i = 0; i < s.length; i++) { if (s.charAt(i) != "\x22") { out = out + s.charAt(i) } }
+        return out
+    }
+    // Each ^ makes the character after it literal: `^<^<=` -> `<<=`, `^^=` -> `^=`.
+    function unCaret(s) {
+        var out = "", i = 0
+        while (i < s.length) {
+            if (s.charAt(i) == "^" && i + 1 < s.length) { i = i + 1 }
+            out = out + s.charAt(i)
+            i = i + 1
+        }
+        return out
+    }
 
     // ===================================================================================
     //  The environment.
@@ -574,7 +850,9 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     // for-loop variables live in their own table, keyed by the %%x letter (case SENSITIVE).
     var forVars = {}
     function setForVar(letter, val) { forVars["$" + letter] = "" + val }
-    function getForVar(letter) { return hasOwn(forVars, "$" + letter) ? forVars["$" + letter] : "" }
+    // A for-variable no loop has set is left as written: %%z reads `%z` (the %% already
+    // became one %). Twin of the gf_ slot initializer in batch-to-llvm-ir.abnf.
+    function getForVar(letter) { return hasOwn(forVars, "$" + letter) ? forVars["$" + letter] : "%" + letter }
     function nextLetter(letter, n) {
         var cc = letter.charCodeAt(0) + n
         return String.fromCharCode(cc)
@@ -875,6 +1153,19 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     // ===================================================================================
 
     function makeNop() { return function() { return undefined } }
+    // A construct this grammar recognizes but does not run: fatal unless
+    // -warn-unsupported, which turns it into a warning and a no-op.
+    function batUnsup(what, pos) {
+        var where = c.file + ":" + c.lineOf(pos)
+        if (!c.warnUnsupported) {
+            eprintln(what + " not implemented (" + where + "); use -warn-unsupported to ignore")
+            exit(2)
+        }
+        eprintln("warning: " + where + ": " + what + " not implemented (ignored)")
+        return makeNop()
+    }
+    function makeExtCmd(items, pos) { return batUnsup("the command " + items[0], pos) }
+    function makePipe(items, pos) { return items.length == 1 ? items[0] : batUnsup("a pipe", pos) }
     function makeGroup(rec) { return rec.body }
     function makeEcho(wordT) { return function() { outLine(wordT()); return undefined } }
     function makeVer() {
@@ -976,11 +1267,14 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     }
     // A redirection has nowhere to go in this runtime, so an output redirection swallows the
     // output; an input redirection is a no-op (set /p already reads nothing).
+    // items = [{out}..., stmt, {out}...]: the redirections around one statement.
     function makeRedir(items) {
-        var st = items[0]
-        if (items.length == 1) { return st }
-        var out = false, i = 1
-        for (i = 1; i < items.length; i++) { if (items[i].out) { out = true } }
+        if (items.length == 1) { return items[0] }
+        var out = false, i = 0, si = 0
+        for (i = 0; i < items.length; i++) {
+            if (items[i].out == undefined) { si = i } else if (items[i].out) { out = true }
+        }
+        var st = items[si]
         if (!out) { return st }
         return function() {
             capStart()
@@ -1066,7 +1360,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
 
     // ----- for /f: options, tokenizing and the line walk -----
     function parseFOpts(raw) {
-        var o = {eol: ";", skip: 0, delims: " \t", tokens: "1"}
+        var o = {eol: ";", skip: 0, delims: " \t", tokens: "1", bq: false}
         if (raw == null) { return o }
         var s = raw.substring(1, raw.length - 1)
         var i = 0
@@ -1086,6 +1380,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             if (key == "skip") { o.skip = toInt(val) }
             if (key == "delims") { o.delims = val }
             if (key == "tokens") { o.tokens = val }
+            if (key == "usebackq") { o.bq = true }
         }
         return o
     }
@@ -1157,17 +1452,24 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         return out
     }
     // items = [{opts}?, letter, {lit}|{cmd}, {body}]
-    function makeForF(items) {
+    function makeForF(items, pos) {
         var idx = 0, optRaw = null
         if (items[0].opts != undefined) { optRaw = items[0].opts; idx = 1 }
         var letter = items[idx].fv
         var src = items[idx + 1]
         var bodyT = items[idx + 2].body
+        // usebackq turns 'text' into a literal string and `cmd` into the command; the
+        // command half of each pairing is modelled, the other half is not.
+        var bqOpt = optRaw != null && lower(optRaw).indexOf("usebackq") >= 0
+        if (src.cmd != undefined && (src.bq == true) != bqOpt) {
+            return batUnsup("for /f over a usebackq 'string' (or a `command` without it)", pos)
+        }
         return function() {
             var o = parseFOpts(optRaw)
             var spec = parseTokens(o.tokens)
             var text = ""
-            if (src.lit != undefined) { text = stripQuotes(src.lit()) }
+            if (src.lit != undefined && o.bq) { src.lit(); text = "" }       // a file name
+            else if (src.lit != undefined) { text = stripQuotes(src.lit()) }
             else if (src.file != undefined) { src.file(); text = "" }   // no contents in the model
             else { capStart(); src.cmd(); text = capEnd() }
             var lines = splitLines(text)

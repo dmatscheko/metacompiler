@@ -155,6 +155,16 @@ run_one() {
         [ -f "$pre" ] || pre=""
     fi
 
+    # Wine's harness (tests/batch.c, convert_input_data) replaces @space@, @tab@ and
+    # @\xHH@ with the characters they name before cmd.exe reads a test file, so the
+    # batch corpus is run in that converted form. The line structure is unchanged.
+    src="$file"
+    if [ "$lang" = "batch" ]; then
+        src="$MEC_SWEEP_RESDIR/$$.cmd"
+        perl -pe 's/\@space\@/ /g; s/\@tab\@/\t/g; s/\@\\x([0-9a-fA-F]{2})\@/chr(hex($1))/ge' \
+            "$file" > "$src"
+    fi
+
     # Cap the captured output (a corpus program may print without bound) while
     # still learning the run's real exit status: the producer writes it to a
     # side file. If head closed the pipe first the producer dies by SIGPIPE and
@@ -162,10 +172,10 @@ run_one() {
     rcf="$MEC_SWEEP_RESDIR/$$.rc"
     rm -f "$rcf"
     if [ -n "$pre" ]; then
-        out="$( { RUN "$MEC_SWEEP_BIN" "$pre" "$file" -pipe "$grammar" -q -warn-unsupported -warn-imports 2>&1
+        out="$( { RUN "$MEC_SWEEP_BIN" "$pre" "$src" -pipe "$grammar" -q -warn-unsupported -warn-imports 2>&1
                   echo $? > "$rcf"; } | head -c 65536 )"
     else
-        out="$( { RUN "$MEC_SWEEP_BIN" "$grammar" "$file" -q -warn-unsupported -warn-imports 2>&1
+        out="$( { RUN "$MEC_SWEEP_BIN" "$grammar" "$src" -q -warn-unsupported -warn-imports 2>&1
                   echo $? > "$rcf"; } | head -c 65536 )"
     fi
     rc="$(cat "$rcf" 2>/dev/null || echo 0)"
@@ -218,10 +228,10 @@ run_one() {
         cgram="$(printf '%s' "$grammar" | sed 's/-interpreter\.abnf$/-to-llvm-ir.abnf/')"
         if [ "$cgram" != "$grammar" ] && [ -f "$cgram" ]; then
             if [ -n "$pre" ]; then
-                cout="$(RUN "$MEC_SWEEP_BIN" "$pre" "$file" -pipe "$cgram" -q \
+                cout="$(RUN "$MEC_SWEEP_BIN" "$pre" "$src" -pipe "$cgram" -q \
                             -warn-unsupported -warn-imports -max-steps 2000000 2>&1 | head -c 4096)"
             else
-                cout="$(RUN "$MEC_SWEEP_BIN" "$cgram" "$file" -q -warn-unsupported \
+                cout="$(RUN "$MEC_SWEEP_BIN" "$cgram" "$src" -q -warn-unsupported \
                             -warn-imports -max-steps 2000000 2>&1 | head -c 4096)"
             fi
             case "$cout" in

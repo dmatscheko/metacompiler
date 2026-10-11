@@ -1175,6 +1175,137 @@ set /a s27lnext=%1+1
 call :s27loc %s27lnext%
 exit /b 0
 
+rem ===== SECTION 28: letter case, separators and quoting =====
+rem The forms below are settled by the wine suite's expectation files
+rem (tests/reference/batch/wine-cmd-tests/tests/*.exp): keywords and switches in
+rem any letter case, an if operand that ends at == or holds parentheses, for /l
+rem numbers separated by blanks (a non-number counts as 0), a for set spanning
+rem lines, a digit as a for-variable, and set /a operators that are caret-escaped
+rem outside quotes, with quotes allowed anywhere and & ending the command.
+:s28
+SeT s28a=1
+If 1==1 SET /A s28a=s28a+1
+set cid=cs1
+set got=%s28a%
+set want=2
+call :check
+set s28b=no
+if 1==1 set s28b=yes
+set cid=cs2
+set got=%s28b%
+set want=yes
+call :check
+set s28c=no
+if (a)==(a) set s28c=yes
+set cid=cs3
+set got=%s28c%
+set want=yes
+call :check
+set /a s28d=0
+for /l %%i in (1 1 3) do set /a s28d=s28d+%%i
+set cid=cs4
+set got=%s28d%
+set want=6
+call :check
+set /a s28e=0
+for /L %%i in (a,1,2) do set /a s28e=s28e+1
+set cid=cs5
+set got=%s28e%
+set want=3
+call :check
+set /a s28f=0
+for %%a in (x
+y
+z) do set /a s28f=s28f+1
+set cid=cs6
+set got=%s28f%
+set want=3
+call :check
+for %%0 in (a) do set s28g=%%0%%1
+set cid=cs7
+set got=%s28g%
+set want=a%%1
+call :check
+set /a s28h=6 ^& 3
+set /a s28i=5 ^| 2
+set /a s28j=5 ^^ 1
+set /a s28k=1 ^<^< 3
+set cid=cs8
+set got=%s28h% %s28i% %s28j% %s28k%
+set want=2 7 4 8
+call :check
+set /a "s28l=1","s28m=2"
+set /a s28n=4 & set s28o=after
+set /a s28p=4
+set /a s28p  +  = 6
+set cid=cs9
+set got=%s28l% %s28m% %s28n% %s28o% %s28p%
+set want=1 2 4 after 10
+call :check
+set "s28q=jim" fred
+set cid=cs10
+set got=%s28q%
+set want=jim
+call :check
+exit /b 0
+
+rem ===== SECTION 29: labels, ) lines, errorlevel and for /f sources =====
+rem An @ and blanks may precede a label's colon and goto ignores what follows a
+rem second colon; goto :EOF is case insensitive; a line opening with ) is
+rem swallowed while a ) inside top-level text is text; !errorlevel! reads the
+rem errorlevel; a for /f string runs to the LAST quote before its ) and usebackq
+rem runs a back-quoted command. Wine's expectation files settle each one.
+:s29
+set s29a=start
+goto s29jump:this is ignored
+set s29a=fell
+@  :  s29jump
+set cid=lb1
+set got=%s29a%
+set want=start
+call :check
+call :s29eof
+set cid=lb2
+set got=%s29b%
+set want=before
+call :check
+set s29c=one
+) set s29c=two
+set s29d=a)b
+set cid=lb3
+set got=%s29c% %s29d%
+set want=one a)b
+call :check
+setlocal enabledelayedexpansion
+call :s29err 3
+set s29e=!errorlevel!
+endlocal & set s29e=%s29e%
+set cid=lb4
+set got=%s29e%
+set want=3
+call :check
+for /f "delims=" %%v in ("a "b" c") do set s29f=%%v
+set s29f=%s29f:"=%
+set cid=lb5
+set got=%s29f%
+set want=a b c
+call :check
+for /f "usebackq delims=" %%v in (`echo bq`) do set s29g=%%v
+set cid=lb6
+set got=%s29g%
+set want=bq
+call :check
+exit /b 0
+
+:s29eof
+set s29b=before
+goto :EOF
+set s29b=after
+exit /b 0
+
+:s29err
+exit /b %1
+
 rem ===== END SECTIONS =====
 
 :main
@@ -1205,5 +1336,7 @@ call :s24 SECTION-CALL 24
 call :s25 SECTION-CALL 25
 call :s26 SECTION-CALL 26
 call :s27 SECTION-CALL 27
+call :s28 SECTION-CALL 28
+call :s29 SECTION-CALL 29
 echo full: %checks% checks, %fails% failures
 exit /b %fails%

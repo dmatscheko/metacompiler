@@ -51,33 +51,65 @@ cannot see it. See docs/abnf-dialect-gotchas.md.") ;
 // ----- program: a flat list of labels and statement-lines (PC executes them) -----
 Program     <~~ push(runProgram(takeAll())) ~~>
             = { Line } ;
-Line        = BlankLine | ColonComment | LabelLine | StmtLine ;
+Line        = BlankLine | ColonComment | LabelLine | StmtLine | StrayClose ;
+StrayClose  = [ At ] ")" :whitespace() { NotNL } Newline ;
 BlankLine   = Newline ;
 ColonComment = "::" :whitespace() { NotNL } Newline ;
 LabelLine   <~~ push({lbl: pop()}) ~~>
-            = ":" LabelName :whitespace() { NotNL } Newline ;
+            = [ "@" ] ":" LabelName :whitespace() { NotNL } Newline ;
 StmtLine    <~~ push({stmt: pop()}) ~~>
             = [ At ] Chain Newline ;
 At          = "@" :whitespace() ;
 
 // ----- command chains and redirection -----
 Chain       <~~ push(makeChain(takeAll())) ~~>
-            = Piece { ChainOp Piece } ;
+            = Pipeline { ChainOp Pipeline } [ "&" ] ;
+Pipeline    <~~ push(makePipe(takeAll(), up.start)) ~~>
+            = Piece { "|" NotBar Piece } ;
+NotBar      = :script(~~
+    (function() { return c.peek(0) === 124 ? abnf.newToken("\x01or-operator", 0) : undefined })()
+~~) ;
 ChainOp     <~~ push(up.in) ~~> = "&&" | "||" | "&" ;
 Piece       <~~ push(makeRedir(takeAll())) ~~>
-            = Stmt { Redir } ;
+            = { Redir } [ At ] Stmt { Redir } ;
 Redir       <~~ push(mkRedir(takeAll())) ~~>
             = [ RedirFd ] RedirOp RedirTarget ;
 RedirFd     <~~ push({fd: up.in}) ~~> = "0"..."9" ;
-RedirOp     <~~ push({op: up.in}) ~~> = ">>" | ">&" | ">" | "<" ;
-RedirTarget <~~ push({tgt: up.in}) ~~> = RTChar :whitespace() { RTChar } :whitespace(Hspace) ;
+RedirOp     <~~ push({op: up.in}) ~~> = ">>" | ">&" | ">" | "<&" | "<" ;
+RedirTarget <~~ push({tgt: up.in}) ~~>
+            = RTPart :whitespace() { RTPart } :whitespace(Hspace) ;
+RTPart      = RTChar | '"' { NotDQNL } '"' ;
 
 // A statement (also used inside ( ) blocks, where Newlines separate them).
 Stmt        = Rem | EchoCtl | EchoDot | EchoParen | Echo
-            | SetA | SetP | SetQ | Set
-            | Setlocal | Endlocal | Shift | Ver
-            | If | ForL | ForF | For
-            | GotoEof | Goto | CallSet | Call | ExitB | Exit | Group ;
+            | SetA | SetABad | SetP | SetQ | Set | SetDyn | SetShow
+            | Setlocal | Endlocal | ShiftBad | Shift | Ver
+            | If | ForL | ForF | ForDR | For
+            | GotoEof | Goto | GotoDyn | CallSet | Call | CallExt | CallInt | ExitB | Exit | GroupElse | Group | ExtCmd ;
+
+ExtCmd      <~~ push(makeExtCmd(takeAll(), up.start)) ~~> = NotKwName ExtName LineText ;
+ExtName     <~~ push(up.in) ~~> = ExtNamePt :whitespace() { ExtNamePt } :whitespace(Hspace) ;
+ExtNamePt   = BareChar | "%" | "!" | '"' { NotDQNL } [ '"' ] ;
+NotKwName   = :script(~~
+    (function() {
+        var w = ""
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        var w0 = i
+        while (i < w0 + 16 && ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122))) {
+            w = w + String.fromCharCode(cc >= 65 && cc <= 90 ? cc + 32 : cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var kws = "|rem|echo|set|setlocal|endlocal|shift|ver|if|for|goto|call|exit|"
+        var boundary = !((cc >= 48 && cc <= 57) || cc === 95)
+        if (w.length > 0 && boundary && kws.indexOf("|" + w + "|") >= 0) {
+            return abnf.newToken("\x01statement-keyword", 0)
+        }
+        return undefined
+    })()
+~~) ;
 
 // ----- echo -----
 Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
@@ -94,17 +126,20 @@ EchoEol = :script(~~
 // Glued `echo.` / `echo:` / `echo/` (see the interpreter for the wine-derived table).
 EchoDot     <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh LineText ;
 EchoSepCh   = "." | ":" | "/" ;
-EchoParen   <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "(" :whitespace(Hspace) ;
+EchoParen   <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() "(" LineText ;
 Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
 
 // ----- set VAR=value  /  set /a expr  /  set /p VAR=prompt -----
-SetA        <~~ push(makeSetA(pop())) ~~> = KwSet "/a" :whitespace(Hspace) ArithBody ;
-ArithBody   = ArithQuoted | Arith ;
-ArithQuoted <~~ push(pop()) ~~> = '"' :whitespace(Hspace) Arith '"' :whitespace(Hspace) ;
+SetA        <~~ push(makeSetA(pop())) ~~>
+            = KwSet ( "/a" | "/A" ) :whitespace(AWs) Arith :whitespace(Hspace) { '"' } CmdEnd ;
+SetABad     <~~ takeAll(); push(batUnsup("a malformed set /a expression", up.start)) ~~>
+            = KwSet ( "/a" | "/A" ) LineText ;
+AWs         = { @+" \t" | '"' | LineCont } ;
 SetP        <~~ push(makeSetP(takeAll())) ~~>
-            = KwSet "/p" :whitespace(Hspace) SetName "=" ( LineText | Empty ) ;
+            = KwSet ( "/p" | "/P" ) :whitespace(Hspace) SetName "=" ( LineText | Empty ) ;
 SetQ        <~~ push(makeSet(takeAll())) ~~>
-            = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) ;
+            = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) [ SetQTail ] ;
+SetQTail    <~~ pop() ~~> = LineText ;
 QLineText   <~~ push(makeWord(takeAll())) ~~>
             = :whitespace() { QLinePart } :whitespace() ;
 QLinePart   = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | QLineChars ;
@@ -112,8 +147,27 @@ QLineChars  <~~ push(makeStr(up.in)) ~~> = QLineChar :whitespace() { QLineChar }
 QLineChar   = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " or %
 Set         <~~ push(makeSet(takeAll())) ~~>
             = KwSet SetName "=" ( LineText | Empty ) ;
+SetDyn      <~~ takeAll(); push(batUnsup("set of a computed variable name", up.start)) ~~>
+            = KwSet [ SetName ] DynNamePt :whitespace() { DynNamePt | SetNameCh } :whitespace(Hspace) "=" ( LineText | Empty ) ;
+DynNamePt   = ForRef | VarPct | BangVar | ParamRef | PctLit ;
+SetNameCh   = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." | "-" ;
+SetShow     <~~ takeAll(); push(batUnsup("set without a value", up.start)) ~~>
+            = KwSet [ SetName | "/" :whitespace() SlChar :whitespace(Hspace) | "=" | '"="' ] CmdEnd ;
+CmdEnd      = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        if (cc == -1 || cc == 10 || cc == 13 || cc == 62 || cc == 60 || cc == 38 || cc == 124 || cc == 41) {
+            return undefined
+        }
+        var nx = c.peek(i + 1)
+        if (cc >= 48 && cc <= 57 && (nx == 62 || nx == 60)) { return undefined }   // 2> 1<
+        return abnf.newToken("\x01command-continues", 0)
+    })()
+~~) ;
 SetName     <~~ push(up.in) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { SetNameCh } :whitespace() ;
 Empty       <~~ push(makeStr("")) ~~> = "" ;
 
 // ----- setlocal / endlocal / shift / ver -----
@@ -122,17 +176,25 @@ SlOpt       <~~ push(up.in) ~~> = SlChar :whitespace() { SlChar } :whitespace(Hs
 SlChar      = "a"..."z" | "A"..."Z" ;
 Endlocal    <~~ push(makeEndlocal()) ~~> = KwEndlocal ;
 Shift       <~~ push(makeShift(takeAll())) ~~> = KwShift [ ShiftOpt ] ;
+ShiftBad    <~~ takeAll(); push(batUnsup("shift with an invalid switch", up.start)) ~~>
+            = KwShift "/" LineText ;
 ShiftOpt    <~~ push(up.in) ~~> = "/" :whitespace() "0"..."9" :whitespace(Hspace) ;
 Ver         <~~ push(makeVer()) ~~> = KwVer ;
 
 // ----- goto / call / exit -----
-GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
+GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":" :whitespace() CiE CiO CiF :whitespace(Hspace) KwEnd ;
 // 'goto :label' and 'goto label' are the same jump; ':eof' is matched by GotoEof above.
-Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) ;
+Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) [ GotoTail ] ;
+GotoTail    = ":" :whitespace() { LineChar } :whitespace(Hspace) ;
+GotoDyn     <~~ takeAll(); push(batUnsup("goto a computed label", up.start)) ~~>
+            = KwGoto [ ":" ] Word ;
 CallSet     <~~ push(makeCallSet(takeAll())) ~~>
             = KwCall KwSet SetName "=" ( LineText | Empty ) ;
 Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { ArgWord } :whitespace(Hspace) ;
-ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" :whitespace(Hspace) [ Word ] :whitespace(Hspace) ;
+CallExt     <~~ push(makeExtCmd(takeAll(), up.start)) ~~> = KwCall NotKwName ExtName LineText ;
+CallInt     <~~ takeAll(); push(batUnsup("call of an internal command", up.start)) ~~>
+            = KwCall LineText ;
+ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit ( "/b" | "/B" ) :whitespace(Hspace) [ Word ] :whitespace(Hspace) ;
 Exit        <~~ push(makeExit(takeAll())) ~~> = KwExit [ Word ] :whitespace(Hspace) ;
 
 // ----- if / for (parenthesized bodies) -----
@@ -140,42 +202,65 @@ If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf { IfFlag } Cond Body [ KwElse Body ] ;
 IfFlag      = IfNot | IfCi ;
 IfNot       <~~ push({neg: true}) ~~> = KwNot ;
-IfCi        <~~ push({ci: true}) ~~> = "/i" :whitespace(Hspace) ;
+IfCi        <~~ push({ci: true}) ~~> = ( "/i" | "/I" ) :whitespace(Hspace) ;
 // for /l counts start,step,end; for /f parses text; the plain for walks a word list.
 ForL        <~~ push(makeForL(takeAll())) ~~>
-            = KwFor "/l" :whitespace(Hspace) ForVar KwIn "(" :whitespace(Hspace)
-              ForNum "," :whitespace(Hspace) ForNum "," :whitespace(Hspace) ForNum
+            = KwFor ( "/l" | "/L" ) :whitespace(Hspace) ForVar KwIn "(" :whitespace(Hspace)
+              ForNum [ ForLSep ] ForNum [ ForLSep ] ForNum
               ")" :whitespace(Hspace) KwDo Body ;
-ForF        <~~ push(makeForF(takeAll())) ~~>
-            = KwFor "/f" :whitespace(Hspace) [ ForOpts ] ForVar KwIn "(" :whitespace(Hspace)
+ForLSep     = ( "," | ";" | "=" ) :whitespace(Hspace) ;
+ForF        <~~ push(makeForF(takeAll(), up.start)) ~~>
+            = KwFor ( "/f" | "/F" ) :whitespace(Hspace) [ ForOpts | ForOptsBare ] ForVar KwIn "(" :whitespace(Hspace)
               ForFSrc ")" :whitespace(Hspace) KwDo Body ;
 ForOpts     <~~ push({opts: up.in}) ~~> = '"' :whitespace() { NotDQ } '"' :whitespace(Hspace) ;
-ForFSrc     = ForFLit | ForFCmd | ForFFile ;
-ForFLit     <~~ push({lit: pop()}) ~~> = RawQuoted ;
+ForOptsBare <~~ push({opts: "\x22" + up.in + "\x22"}) ~~>
+            = !"%%" BareChar :whitespace() { BareChar } :whitespace(Hspace) ;
+ForFSrc     = ForFLit | ForFCmd | ForFBq | ForFFile ;
+ForFLit     <~~ push({lit: makeWord(takeAll())}) ~~>
+            = DqOpen :whitespace() { DPart | LitInnerDq } DqClose :whitespace(Hspace) ;
+LitInnerDq  <~~ push(makeStr("\x22")) ~~> = '"' NotLitEnd ;
+NotLitEnd   = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        return cc == 41 ? abnf.newToken("\x01string-ends", 0) : undefined
+    })()
+~~) ;
 ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace(Hspace) SqChain "'" :whitespace(Hspace) ;
+ForFBq      <~~ push({cmd: pop(), bq: true}) ~~> = "`" :whitespace(Hspace) SqChain "`" :whitespace(Hspace) ;
 SqChain     <~~ push(makeSeq(takeAll())) ~~> = SqCmd { "&" SqCmd } ;
-SqCmd       = SqEchoDot | SqEcho | SqVer ;
+SqCmd       = SqEchoDot | SqEcho | SqVer | SqExt ;
+SqExt       <~~ push(makeExtCmd(takeAll(), up.start)) ~~> = SqName SqText ;
+SqName      <~~ push(up.in) ~~> = SqNameCh :whitespace() { SqNameCh } :whitespace(Hspace) ;
+SqNameCh    = "\x22"..."\x24" | "\x28"..."\x5f" | "\x61"..."\U0010ffff" ;
 SqVer       <~~ push(makeVer()) ~~> = KwVer ;
 SqEchoDot   <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh SqText ;
 SqEcho      <~~ push(makeEcho(pop())) ~~> = KwEcho SqText ;
-ForFFile    <~~ push({file: pop()}) ~~> = Word ;
+ForFFile    <~~ var ws = takeAll(); push({file: ws[0]}) ~~> = Word { Word } ;
 SqText      <~~ push(makeWord(takeAll())) ~~> = [ SqPart ] :whitespace() { SqPart } ;
 SqPart      = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | SqChars ;
 SqChars     <~~ push(makeStr(up.in)) ~~> = SqChar :whitespace() { SqChar } ;
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor ForVar KwIn "(" :whitespace(Hspace) { Word } ")" :whitespace(Hspace) KwDo Body ;
+            = KwFor ForVar KwIn "(" :whitespace(Hspace) { Word | Newline } ")" :whitespace(Hspace) KwDo Body ;
+ForDR       <~~ takeAll(); push(batUnsup("for /d and for /r (a directory walk)", up.start)) ~~>
+            = KwFor ForDRSw [ !"%%" Word ] ForVar KwIn "(" :whitespace(Hspace) { Word | Newline } ")"
+              :whitespace(Hspace) KwDo Body ;
+ForDRSw     = ( "/d" | "/D" | "/r" | "/R" ) :whitespace(Hspace) ;
 ForVar      = "%%" :whitespace() ForLetter :whitespace(Hspace) ;
 ForNum      <~~ push(makeWord(takeAll())) ~~>
             = ForNumPart :whitespace() { ForNumPart } :whitespace(Hspace) ;
 ForNumPart  = ForRef | VarPct | ParamRef | BangVar | ForNumChars ;
 ForNumChars <~~ push(makeStr(up.in)) ~~> = FNChar :whitespace() { FNChar } ;
-FNChar      = "0"..."9" | "-" | "+" ;
+FNChar      = "0"..."9" | "-" | "+" | "a"..."z" | "A"..."Z" ;
 // A body is a ( ... ) block (statements separated by newlines) or a single statement.
 Body        = Block | Single ;
 Block       <~~ push({body: makeSeq(takeAll())}) ~~>
             = "(" :whitespace(Hspace) OptNL { Chain SepNL } ")" :whitespace(Hspace) ;
 Single      <~~ push({body: pop()}) ~~> = Stmt ;
 Group       <~~ push(makeGroup(pop())) ~~> = Block ;
+GroupElse   <~~ takeAll(); push(batUnsup("a ( ) block followed by else", up.start)) ~~>
+            = Block KwElse Body ;
 OptNL       = { Newline } ;
 SepNL       = { Newline } ;
 
@@ -187,7 +272,17 @@ ExistCond   <~~ push(mkExist(pop())) ~~> = KwExist Word ;
 DefinedCond <~~ push(mkDefined(pop())) ~~> = KwDefined SetName ;
 CmpCond     <~~ push(mkCmp(takeAll())) ~~> = CmpArg CmpOp CmpArg ;
 StrCond     <~~ push(mkStrCmp(takeAll())) ~~> = CmpArg "==" <~~ push("==") ~~> CmpArg ;
-CmpArg      = QWord | Word ;
+CmpArg      = QWord | CmpWord ;
+CmpWord     <~~ push(makeWord(takeAll())) ~~>
+            = CmpPart :whitespace() { CmpPart } :whitespace(Hspace) ;
+CmpPart     = DQuote | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
+            | EscNL | EscCh | PctLit | BangLit | CmpBare ;
+CmpBare     <~~ push(makeStr(up.in)) ~~> = CmpCh :whitespace() { CmpCh } :whitespace() ;
+CmpCh       = "\x23"..."\x24" | "\x27"..."\x29" | "\x2a"..."\x3b" | "=" NotEqNext | "\x3f"..."\x5d"
+            | "\x5f"..."\x7b" | "\x7d"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
+NotEqNext   = :script(~~
+    (function() { return c.peek(0) === 61 ? abnf.newToken("\x01double-equals", 0) : undefined })()
+~~) ;
 QWord       <~~ push(pop()) ~~> = DQuote ;
 CmpOp       = ( "EQU" | "NEQ" | "LSS" | "LEQ" | "GTR" | "GEQ"
               | "equ" | "neq" | "lss" | "leq" | "gtr" | "geq" ) <~~ push(up.in) ~~> ;
@@ -201,13 +296,15 @@ Part        = DQuote | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
 ArgWord     <~~ push(makeWord(takeAll())) ~~>
             = ArgPart :whitespace() { ArgPart } :whitespace(Hspace) ;
 ArgPart     = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
-            | EscNL | EscCh | PctLit | BangLit | Bareword ;
+            | EscNL | EscCh | PctLit | BangLit | Bareword | ArgParen ;
+ArgParen    <~~ push(makeWord(takeAll())) ~~>
+            = LParen :whitespace() { ArgPart } RParen :whitespace() ;
 
 // %VAR%, with the substring (:~n,m) and substitution (:from=to) operators.
 VarPct      <~~ push(mkVarRef(takeAll())) ~~>
             = "%" :whitespace() VarNm [ VarMod ] "%" :whitespace() ;
 VarNm       <~~ push({nm: up.in}) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { SetNameCh } :whitespace() ;
 VarMod      = SubStrMod | SubstMod ;
 SubStrMod   <~~ push(mkSubStr(takeAll())) ~~> = ":~" [ SubStart ] [ SubLenPart ] ;
 SubStart    <~~ push({start: up.in}) ~~> = SNum ;
@@ -253,8 +350,10 @@ ModOkFor    = :script(~~
         return abnf.newToken("\x01this-modifier-is-the-variable", 0)
     })()
 ~~) ;
-ForLetter   <~~ push({fv: up.in}) ~~>
-            = ( "a"..."z" | "A"..."Z" ) :whitespace() ;
+ForLetter   <~~ push({fv: unCaret(up.in)}) ~~>
+            = ( "a"..."z" | "A"..."Z" | "0"..."9" | "[" | "\\" | "]" | "_" | "`" | "{" | "}"
+              | ForEscLetter ) :whitespace() ;
+ForEscLetter = "^" :whitespace() "\x21"..."\x7e" ;
 // %1..%9 call arguments (%0 is the label), %* the whole tail, %~1 with the same modifiers.
 ParamStar   <~~ push(mkParamStar()) ~~> = "%*" :whitespace() ;
 ParamRef    <~~ push(mkParamRef(takeAll())) ~~>
@@ -291,7 +390,55 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
 LineText    <~~ push(makeWord(takeAll())) ~~>
             = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
-            | EscNL | EscCh | PctLit | BangLit | DqLit | LineParen | LParenLit | LineChars ;
+            | EscNL | EscCh | PctLit | BangLit | DqLit | LineParen | LParenLit | LineChars
+            | TopRParen ;
+TopRParen   <~~ push(makeStr(")")) ~~> = ")" :whitespace() AtTopLevel ;
+AtTopLevel  = :script(~~
+    (function() {
+        var back = c.getSdx()
+        var p = 0
+        var cap = 0
+        while (c.peek(p - 1) >= 0 && c.peek(p - 1) != 10 && cap < 1000000) { p = p - 1; cap = cap + 1 }
+        var q = 0 - back
+        var depth = 0
+        var memo = pop()
+        if (memo != null && memo.at <= back + p) { q = memo.at - back; depth = memo.depth }
+        while (q < p) {
+            var e = q
+            while (c.peek(e) >= 0 && c.peek(e) != 10) { e = e + 1 }
+            var a = q
+            while (a < e && (c.peek(a) == 32 || c.peek(a) == 9 || c.peek(a) == 64)) { a = a + 1 }
+            var z = e - 1
+            while (z >= a && (c.peek(z) == 32 || c.peek(z) == 9 || c.peek(z) == 13)) { z = z - 1 }
+            var w = ""
+            var k = a
+            while (k < e && k < a + 3) { w = w + String.fromCharCode(c.peek(k) | 32); k = k + 1 }
+            var rem = c.peek(a) == 58 || (w == "rem" && (a + 3 >= e || c.peek(a + 3) == 32 || c.peek(a + 3) == 9))
+            if (!rem && z >= a) {
+                if (c.peek(a) == 41 && depth > 0) { depth = depth - 1 }
+                var quotes = 0
+                var j = a
+                while (j < z) { if (c.peek(j) == 34) { quotes = quotes + 1 } ; j = j + 1 }
+                var pre = z == a ? 32 : c.peek(z - 1)
+                var opens = pre == 32 || pre == 9 || pre == 38 || pre == 124 || pre == 40
+                if (c.peek(z) == 40 && opens && quotes % 2 == 0) { depth = depth + 1 }
+            }
+            q = e + 1
+        }
+        push({at: back + p, depth: depth})
+        var open = 0
+        var inq = false
+        var t = p
+        while (t < -1) {
+            var ct = c.peek(t)
+            if (ct == 34) { inq = !inq }
+            if (!inq && ct == 40) { open = open + 1 }
+            if (!inq && ct == 41 && open > 0) { open = open - 1 }
+            t = t + 1
+        }
+        return (depth == 0 && open == 0) ? undefined : abnf.newToken("\x01inside-a-block", 0)
+    })()
+~~) ;
 // A balanced ( ) pair is ordinary text (see the interpreter).
 LineParen   <~~ push(makeWord(takeAll())) ~~>
             = LParen :whitespace() { LinePart } RParen :whitespace() ;
@@ -303,68 +450,102 @@ LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
 
 // ----- arithmetic (32 bit integer), in the precedence set /? documents -----
 Arith       = ArithSeq ;
-ArithSeq    <~~ push(foldSeq(takeAll())) ~~> = ArithAssign { "," :whitespace(Hspace) ArithAssign } ;
+ArithSeq    <~~ push(foldSeq(takeAll())) ~~> = ArithAssign { "," :whitespace(AWs) ArithAssign } ;
 ArithAssign = ArithSet | ArithOr ;
 ArithSet    <~~ push(mkAssign(takeAll())) ~~> = ArithName AssignOp ArithAssign ;
-ArithName   <~~ push(up.in) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
-AssignOp    <~~ push(up.in) ~~>
-            = ( "*=" | "/=" | "%%=" | "%=" | "+=" | "-=" | "&=" | "^=" | "|=" | "<<=" | ">>=" | AssignEq )
-              :whitespace(Hspace) ;
+ArithName   <~~ push(noQuotes(up.in)) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { ANameCh } :whitespace(AWs) ;
+ANameCh     = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | '"' ;
+AssignOp    <~~ push(unCaret(up.in)) ~~>
+            = ( [ CompoundOp ] AssignEq ) :whitespace(AWs) ;
+CompoundOp  = "*" | "/" | "%%" | "%" | "+" | "-" | "&" | "^&" | "^|" | "^^" | "^<^<" | "^>^>"
+            | "^" | "|" | "<<" | ">>" ;
 AssignEq    = "=" ;
 ArithOr     <~~ push(foldArith(takeAll())) ~~> = ArithXor { OrOp ArithXor } ;
-OrOp        <~~ push(up.in) ~~> = "|" :whitespace(Hspace) ;
+OrOp        <~~ push("|") ~~> = ( "^|" | "|" InQuotes ) :whitespace(AWs) ;
 ArithXor    <~~ push(foldArith(takeAll())) ~~> = ArithAnd { XorOp ArithAnd } ;
-XorOp       <~~ push(up.in) ~~> = "^" :whitespace(Hspace) ;
+XorOp       <~~ push("^") ~~> = ( "^^" | "^" InQuotes ) :whitespace(AWs) ;
 ArithAnd    <~~ push(foldArith(takeAll())) ~~> = ArithShift { AndOp ArithShift } ;
-AndOp       <~~ push(up.in) ~~> = "&" :whitespace(Hspace) ;
+AndOp       <~~ push("&") ~~> = ( "^&" | "&" InQuotes ) :whitespace(AWs) ;
+InQuotes    = :script(~~
+    (function() {
+        var i = -1
+        var n = 0
+        var cc = c.peek(i)
+        while (cc >= 0 && cc != 10 && cc != 13 && i > -100000) {
+            if (cc == 34) { n = n + 1 }
+            i = i - 1
+            cc = c.peek(i)
+        }
+        return (n % 2 == 1) ? undefined : abnf.newToken("\x01outside-quotes", 0)
+    })()
+~~) ;
 ArithShift  <~~ push(foldArith(takeAll())) ~~> = ArithAdd { ShiftOp ArithAdd } ;
-ShiftOp     <~~ push(up.in) ~~> = ( "<<" | ">>" ) :whitespace(Hspace) ;
+ShiftOp     = ShiftL | ShiftR ;
+ShiftL      <~~ push("<<") ~~> = ( "^<^<" | "<" "<" InQuotes ) :whitespace(AWs) ;
+ShiftR      <~~ push(">>") ~~> = ( "^>^>" | ">" ">" InQuotes ) :whitespace(AWs) ;
 ArithAdd    <~~ push(foldArith(takeAll())) ~~> = ArithMul { AddOp ArithMul } ;
-AddOp       <~~ push(up.in) ~~> = ( "+" | "-" ) :whitespace(Hspace) ;
+AddOp       <~~ push(up.in) ~~> = ( "+" | "-" ) :whitespace(AWs) ;
 ArithMul    <~~ push(foldArith(takeAll())) ~~> = ArithUnary { MulOp ArithUnary } ;
-MulOp       <~~ push(up.in) ~~> = ( "*" | "/" | "%%" | "%" ) :whitespace(Hspace) ;
+MulOp       <~~ push(up.in) ~~> = ( "*" | "/" | "%%" | "%" ) :whitespace(AWs) ;
 // ArithExp comes FIRST: !counter! is a delayed expansion, not a logical not of 'counter!'.
 ArithUnary  = ArithExp | ArithNot | ArithBNot | ArithNeg | ArithAtom ;
-ArithNot    <~~ push(mkANot(pop())) ~~> = "!" :whitespace(Hspace) ArithUnary ;
-ArithBNot   <~~ push(mkABNot(pop())) ~~> = "~" :whitespace(Hspace) ArithUnary ;
-ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" :whitespace(Hspace) ArithUnary ;
+ArithNot    <~~ push(mkANot(pop())) ~~> = "!" :whitespace(AWs) ArithUnary ;
+ArithBNot   <~~ push(mkABNot(pop())) ~~> = "~" :whitespace(AWs) ArithUnary ;
+ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" :whitespace(AWs) ArithUnary ;
 ArithAtom   = ArithParen | ArithHex | ArithOct | ArithNum | ArithExp | ArithVar ;
-ArithParen  <~~ push(pop()) ~~> = "(" :whitespace(Hspace) Arith ")" :whitespace(Hspace) ;
-ArithHex    <~~ push(mkAHex(up.in)) ~~> = ( "0x" | "0X" ) :whitespace() HexDig :whitespace() { HexDig } :whitespace(Hspace) ;
+ArithParen  <~~ push(pop()) ~~> = "(" :whitespace(AWs) Arith ")" :whitespace(AWs) ;
+ArithHex    <~~ push(mkAHex(up.in)) ~~> = ( "0x" | "0X" ) :whitespace() HexDig :whitespace() { HexDig } :whitespace(AWs) ;
 HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
-ArithOct    <~~ push(mkAOct(up.in)) ~~> = "0" :whitespace() OctDig :whitespace() { OctDig } :whitespace(Hspace) ;
+ArithOct    <~~ push(mkAOct(up.in)) ~~> = "0" :whitespace() OctDig :whitespace() { OctDig } :whitespace(AWs) ;
 OctDig      = "0"..."7" ;
-ArithNum    <~~ push(mkANum(up.in)) ~~> = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Hspace) ;
+ArithNum    <~~ push(mkANum(up.in)) ~~> = "0"..."9" :whitespace() { "0"..."9" } :whitespace(AWs) ;
 // A %VAR% / %1 expansion is a value inside set /a too.
-ArithExp    <~~ push(mkAStr(pop())) ~~> = ArithExpPart :whitespace(Hspace) ;
+ArithExp    <~~ push(mkAStr(pop())) ~~> = ArithExpPart :whitespace(AWs) ;
 ArithExpPart = ForRef | VarPct | ParamRef | BangVar ;
-ArithVar    <~~ push(mkAVar(up.in)) ~~>
-            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
+ArithVar    <~~ push(mkAVar(noQuotes(up.in))) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { ANameCh } :whitespace(AWs) ;
 
-// ----- keywords (lowercase or UPPERCASE; word-boundary terminated) -----
-KwRem     = ( "rem" | "REM" ) KwEnd ;
-KwEcho    = ( "echo" | "ECHO" ) KwEnd ;
-KwEchoW   = ( "echo" | "ECHO" ) ;                 // no boundary: echo. is echo + '.'
-KwOn      = ( "on" | "ON" ) KwEnd ;
-KwOff     = ( "off" | "OFF" ) KwEnd ;
-KwSet     = ( "set" | "SET" ) KwEnd ;
-KwSetlocal = ( "setlocal" | "SETLOCAL" ) KwEnd ;
-KwEndlocal = ( "endlocal" | "ENDLOCAL" ) KwEnd ;
-KwShift   = ( "shift" | "SHIFT" ) KwEnd ;
-KwVer     = ( "ver" | "VER" ) KwEnd ;
-KwIf      = ( "if" | "IF" ) KwEnd ;
-KwNot     = ( "not" | "NOT" ) KwEnd ;
-KwElse    = ( "else" | "ELSE" ) KwEnd ;
-KwDefined = ( "defined" | "DEFINED" ) KwEnd ;
-KwExist   = ( "exist" | "EXIST" ) KwEnd ;
-KwErrorlevel = ( "errorlevel" | "ERRORLEVEL" ) KwEnd ;
-KwFor     = ( "for" | "FOR" ) KwEnd ;
-KwIn      = ( "in" | "IN" ) KwEnd ;
-KwDo      = ( "do" | "DO" ) KwEnd ;
-KwGoto    = ( "goto" | "GOTO" ) KwEnd ;
-KwCall    = ( "call" | "CALL" ) KwEnd ;
-KwExit    = ( "exit" | "EXIT" ) KwEnd ;
+// ----- keywords (any letter case, as cmd.exe reads them; word-boundary terminated) -----
+KwRem     = CiR :whitespace() CiE CiM :whitespace(Hspace) KwEnd ;
+KwEcho    = CiE :whitespace() CiC CiH CiO :whitespace(Hspace) KwEnd ;
+KwEchoW   = CiE :whitespace() CiC CiH CiO :whitespace(Hspace) ;                 // no boundary: echo. is echo + '.'
+KwOn      = CiO :whitespace() CiN :whitespace(Hspace) KwEnd ;
+KwOff     = CiO :whitespace() CiF CiF :whitespace(Hspace) KwEnd ;
+KwSet     = CiS :whitespace() CiE CiT :whitespace(Hspace) KwEnd ;
+KwSetlocal = CiS :whitespace() CiE CiT CiL CiO CiC CiA CiL :whitespace(Hspace) KwEnd ;
+KwEndlocal = CiE :whitespace() CiN CiD CiL CiO CiC CiA CiL :whitespace(Hspace) KwEnd ;
+KwShift   = CiS :whitespace() CiH CiI CiF CiT :whitespace(Hspace) KwEnd ;
+KwVer     = CiV :whitespace() CiE CiR :whitespace(Hspace) KwEnd ;
+KwIf      = CiI :whitespace() CiF :whitespace(Hspace) KwEnd ;
+KwNot     = CiN :whitespace() CiO CiT :whitespace(Hspace) KwEnd ;
+KwElse    = CiE :whitespace() CiL CiS CiE :whitespace(Hspace) KwEnd ;
+KwDefined = CiD :whitespace() CiE CiF CiI CiN CiE CiD :whitespace(Hspace) KwEnd ;
+KwExist   = CiE :whitespace() CiX CiI CiS CiT :whitespace(Hspace) KwEnd ;
+KwErrorlevel = CiE :whitespace() CiR CiR CiO CiR CiL CiE CiV CiE CiL :whitespace(Hspace) KwEnd ;
+KwFor     = CiF :whitespace() CiO CiR :whitespace(Hspace) KwEnd ;
+KwIn      = CiI :whitespace() CiN :whitespace(Hspace) KwEnd ;
+KwDo      = CiD :whitespace() CiO :whitespace(Hspace) KwEnd ;
+KwGoto    = CiG :whitespace() CiO CiT CiO :whitespace(Hspace) KwEnd ;
+KwCall    = CiC :whitespace() CiA CiL CiL :whitespace(Hspace) KwEnd ;
+KwExit    = CiE :whitespace() CiX CiI CiT :whitespace(Hspace) KwEnd ;
+CiA = "a" | "A" ;
+CiC = "c" | "C" ;
+CiD = "d" | "D" ;
+CiE = "e" | "E" ;
+CiF = "f" | "F" ;
+CiG = "g" | "G" ;
+CiH = "h" | "H" ;
+CiI = "i" | "I" ;
+CiL = "l" | "L" ;
+CiM = "m" | "M" ;
+CiN = "n" | "N" ;
+CiO = "o" | "O" ;
+CiR = "r" | "R" ;
+CiS = "s" | "S" ;
+CiT = "t" | "T" ;
+CiV = "v" | "V" ;
+CiX = "x" | "X" ;
 KwEnd     = :script(~~
     (function() {
         var cc = c.peek(0)
@@ -388,14 +569,14 @@ BareChar    = "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x
 LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d"
             | "\x3f"..."\x5d" | "\x5f"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // A redirection target: printable except whitespace " & < > | .
-RTChar      = "\x21" | "\x23"..."\x25" | "\x27"..."\x3b" | "\x3d" | "\x3f"..."\x7b"
+RTChar      = "\x21" | "\x23"..."\x25" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x7b"
             | "\x7d"..."\U0010ffff" ;
 // Text inside a single-quoted for /f command: not ' % ! & and not a newline.
-SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x28"..."\U0010ffff" ;
+SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x28"..."\x5f" | "\x61"..."\U0010ffff" ;
 NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotDQ       = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;                     // not " (0x22)
+NotDQNL     = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\U0010ffff" ;
 NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " % newline
-
 :startScript(~~
 
     // ===================================================================================
@@ -447,6 +628,21 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         return v
     }
     function escBody(s) { return s.substring(1) }
+    function noQuotes(s) {
+        var out = "", i = 0
+        for (i = 0; i < s.length; i++) { if (s.charAt(i) != "\x22") { out = out + s.charAt(i) } }
+        return out
+    }
+    // Each ^ makes the character after it literal: `^<^<=` -> `<<=`, `^^=` -> `^=`.
+    function unCaret(s) {
+        var out = "", i = 0
+        while (i < s.length) {
+            if (s.charAt(i) == "^" && i + 1 < s.length) { i = i + 1 }
+            out = out + s.charAt(i)
+            i = i + 1
+        }
+        return out
+    }
     function nextLetter(letter, n) { return String.fromCharCode(letter.charCodeAt(0) + n) }
     function utf8Len(s) {
         var n = 0, i = 0
@@ -581,13 +777,16 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         pctSlotList.push(g)
         return g
     }
-    var forSlots = {}, forSlotList = []
+    // A for-variable no loop has set reads as written, `%z`: the entry block starts
+    // each slot at that text. Twin of getForVar in batch-interpreter.abnf.
+    var forSlots = {}, forSlotList = [], forLetterList = []
     function getForSlot(letter) {
         var key = "$" + letter
         if (hasOwn(forSlots, key)) { return forSlots[key] }
-        var g = m.NewGlobalDef("gf_" + letter, nullStr)
+        var g = m.NewGlobalDef("gf_" + forSlotList.length, nullStr)
         forSlots[key] = g
         forSlotList.push(g)
+        forLetterList.push(letter)
         return g
     }
 
@@ -753,8 +952,11 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         var nm = items[0].nm
         var mod = (items.length > 1) ? items[1] : null
         var lit = "!" + nm + "!"
+        var isErr = (lower(nm) == "errorlevel")
         return {fn: function(b) {
-            var v = b.NewLoad(i8ptr, getVarSlot(nm))
+            var v
+            if (isErr) { v = b.NewCall(rtInt2str, b.NewLoad(i32, gErrLvl)) }
+            else { v = b.NewLoad(i8ptr, getVarSlot(nm)) }
             if (mod != null) { v = applyMod(b, v, mod) }
             var on = b.NewICmp(NE, b.NewLoad(i32, gDelayed), zero)
             return {b: b, v: b.NewSelect(on, v, gepStr(b, lit))}
@@ -921,6 +1123,20 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     var batSetlocal = null, batEndlocal = null, batShift = null, batLookup = null
 
     function makeNop() { return function(b) { return b } }
+    // A construct the grammar recognizes but does not lower: fatal unless
+    // -warn-unsupported, which turns it into a warning and a no-op. Twin of batUnsup in
+    // batch-interpreter.abnf.
+    function batUnsup(what, pos) {
+        var where = c.file + ":" + c.lineOf(pos)
+        if (!c.warnUnsupported) {
+            eprintln(what + " not implemented (" + where + "); use -warn-unsupported to ignore")
+            exit(2)
+        }
+        eprintln("warning: " + where + ": " + what + " not implemented (ignored)")
+        return makeNop()
+    }
+    function makeExtCmd(items, pos) { return batUnsup("the command " + items[0], pos) }
+    function makePipe(items, pos) { return items.length == 1 ? items[0] : batUnsup("a pipe", pos) }
     function makeGroup(rec) { return rec.body }
     function makeEcho(wordT) {
         return function(b) {
@@ -1108,11 +1324,14 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         for (i = 0; i < items.length; i++) { if (items[i].op != undefined) { op = items[i].op } }
         return {out: (op != "<")}
     }
+    // items = [{out}..., stmt, {out}...]: the redirections around one statement.
     function makeRedir(items) {
-        var st = items[0]
-        if (items.length == 1) { return st }
-        var out = false, i
-        for (i = 1; i < items.length; i++) { if (items[i].out) { out = true } }
+        if (items.length == 1) { return items[0] }
+        var out = false, i, si = 0
+        for (i = 0; i < items.length; i++) {
+            if (items[i].out == undefined) { si = i } else if (items[i].out) { out = true }
+        }
+        var st = items[si]
         if (!out) { return st }
         return function(b) {
             b.NewCall(rtCapStart)
@@ -1214,7 +1433,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     }
     // ----- for /f -----
     function parseFOpts(raw) {
-        var o = {eol: ";", skip: 0, delims: " \t", tokens: "1"}
+        var o = {eol: ";", skip: 0, delims: " \t", tokens: "1", bq: false}
         if (raw == null) { return o }
         var s = raw.substring(1, raw.length - 1)
         var i = 0
@@ -1234,6 +1453,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             if (key == "skip") { o.skip = parseDec(val) }
             if (key == "delims") { o.delims = val }
             if (key == "tokens") { o.tokens = val }
+            if (key == "usebackq") { o.bq = true }
         }
         return o
     }
@@ -1260,20 +1480,27 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         }
         return {nums: nums, star: star, last: lastNum}
     }
-    function makeForF(items) {
+    function makeForF(items, pos) {
         var idx = 0, optRaw = null
         if (items[0].opts != undefined) { optRaw = items[0].opts; idx = 1 }
         var letter = items[idx].fv
         var src = items[idx + 1]
         var bodyT = items[idx + 2].body
         var o = parseFOpts(optRaw)
+        // usebackq: the command half of each pairing is lowered (see the interpreter).
+        if (src.cmd != undefined && (src.bq == true) != o.bq) {
+            return batUnsup("for /f over a usebackq 'string' (or a `command` without it)", pos)
+        }
         var spec = parseTokens(o.tokens)
         loopCount = loopCount + 1
         var gText = m.NewGlobalDef("ff_t" + loopCount, nullStr)
         var gIdx = m.NewGlobalDef("ff_i" + loopCount, zero)
         return function(b) {
             var txt
-            if (src.lit != undefined) {
+            if (src.lit != undefined && o.bq) {
+                var rq = src.lit.fn(b); b = rq.b
+                txt = emptyPtr(b)                      // usebackq: a file name, no contents
+            } else if (src.lit != undefined) {
                 var r = src.lit.fn(b); b = r.b
                 txt = b.NewCall(rtStripq, r.v)
             } else if (src.file != undefined) {
@@ -1447,7 +1674,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         var i
         for (i = 0; i < varSlotList.length; i++) { entry.NewStore(ep, varSlotList[i]) }
         for (i = 0; i < pctSlotList.length; i++) { entry.NewStore(ep, pctSlotList[i]) }
-        for (i = 0; i < forSlotList.length; i++) { entry.NewStore(ep, forSlotList[i]) }
+        for (i = 0; i < forSlotList.length; i++) { entry.NewStore(gepStr(entry, "%" + forLetterList[i]), forSlotList[i]) }
         for (i = 0; i < defSlotList.length; i++) { entry.NewStore(zero, defSlotList[i]) }
         for (i = 0; i < ARGN; i++) { entry.NewStore(ep, entry.NewGetElementPtr(argsTy, gArgs, zero, ci32(i))) }
         entry.NewStore(ep, entry.NewGetElementPtr(frameTy, gArgTail, zero, zero))
