@@ -485,8 +485,8 @@ MemAttr     = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ SkipParen ]
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
-FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" FunRetType ] [ GenWhere ] FnBody ;
+FunDecl     <~~ push(makeFun(takeAll(), up.start, up.pos)) ~~>
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" FunRetType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // AnnType, except that a type no adoption acts on is captured as TEXT too: the
 // member-chain typer (swChainAnns) reads a function's declared return type.
 FunRetType  = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | OtherAnnType ;
@@ -499,8 +499,8 @@ FunRetType  = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 // because `return (1, 2)` would otherwise parse as one expression - the identifier
 // `return` applied to a tuple.
 FnBody      = RetBody | ExprBody | Block ;
-ExprBody    <~~ swAnnClose(); push(makeExprBody(pop())) ~~>
-            = "{" <~~ swAnnOpen() ~~> Expression "}" ;
+ExprBody    <~~ swAnnClose(); var eb = takeAll(); push(makeExprBody(swDotPend(eb[0], eb[1], up.pos))) ~~>
+            = "{" <~~ swAnnOpen() ~~> Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> "}" ;
 // `throws(E)` is a TYPED throw (SE-0413); the thrown value is the same either way,
 // so the type is parsed and dropped.
 FnEffects   = { "throws" KwEnd [ ThrownType ] | ( "rethrows" | "async" ) KwEnd } ;
@@ -570,7 +570,7 @@ MemberSemi  <~~ push({}) ~~> = ";" ;
 // contributes none. See declType for what nesting changes.
 MemberType  <~~ push({nested: pop(), nidx: lastDeclIdx}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
-InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
+InitDecl    <~~ swDotClaim(up.start, up.pos, ""); push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
 // deinit is accepted and ignored - this runtime is garbage collected, so there is
 // no deterministic point at which to run it.
@@ -578,22 +578,23 @@ DeinitDecl  <~~ push({}) ~~> = KwDeinit SkipBlock ;
 // subscript(i: Int) -> Int { get { ... } set { ... } } becomes the pair of ordinary
 // methods __sub_get / __sub_set, which is what [i] reads and writes dispatch to. A
 // second subscript of a different arity is an overload of the same pair.
-SubscriptDecl <~~ var ms = makeSubscript(takeAll()); for (var i = 0; i < ms.length; i++) { push(ms[i]) } ~~>
+SubscriptDecl <~~ swDotClaim(up.start, up.pos, ""); var ms = makeSubscript(takeAll()); for (var i = 0; i < ms.length; i++) { push(ms[i]) } ~~>
             = KwSubscript [ SkipAngle ] ParamList [ "->" AnnType ] [ GenWhere ] PropAccessors ;
-MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
+MethodDecl  <~~ push({method: makeFun(takeAll(), up.start, up.pos)}) ~~>
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // var w = 2, h = 3 declares two stored properties; each binding pushes its own
 // {prop} record, so the type builder sees them in declaration order.
 PropDecl    = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
 PropBind    <~~ push(makeProp(takeAll())) ~~>
-            = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
+            = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ]
+              [ "=" Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] ;
 // A computed property (`var scaled: Int { get { ... } set { ... } }`, or the
 // getter-only shorthand `var family: String { "beast" }`) and a stored property
 // with willSet/didSet observers - the two share one syntax, told apart by which
 // accessors the braces hold. An observed property keeps its storage under a
 // hidden name and gets a generated getter/setter, so every property read and
 // write goes through the same accessor lookup.
-ComputedProp <~~ push(makeComputed(takeAll())) ~~>
+ComputedProp <~~ push(makeComputed(takeAll(), up.start, up.pos)) ~~>
             = ( "let" | "var" ) KwEnd Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" PropDefault ] PropAccessors ;
 PropDefault <~~ push({pdefault: pop()}) ~~> = Expression ;
 // The accessor list is tried first: `get` and `set` are ordinary identifiers, so a
@@ -948,7 +949,7 @@ LocalComputed <~~ takeAll(); push(notImplStmt("a local computed variable", up.st
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] [ LocalObs ] ;
+            = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ LocalObs ] ;
 // `var w = 0 { didSet { ... } }` on a top-level or local variable: the observers are
 // the same accessors a property's are, and only willSet/didSet are accepted here.
 LocalObs    <~~ push({lobs: takeAll()}) ~~> = "{" ObsAccessor { ObsAccessor } "}" ;
@@ -1094,8 +1095,8 @@ CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
 CaseItem    <~~ push({cpat: pop()}) ~~> = Pattern ;
 CaseWhere   <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 
-Return      <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ Expression ] [ ";" ] ;
+Return      <~~ push(makeReturn(takeAll(), up.pos)) ~~>
+            = KwReturn [ Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ ";" ] ;
 Break       <~~ push(makeBreakL(takeAll())) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
 Continue    <~~ push(makeContinueL(takeAll())) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
 BreakLbl    <~~ push({lbl: swBt(up.in)}) ~~> = Id ;
@@ -1128,7 +1129,8 @@ Expression  = PackRepeat | Assignment | Ternary ;
 // matched before ExprStmt, so no guard is needed to tell the two apart.
 PackRepeat  <~~ push(makePackRepeat(pop())) ~~> = KwRepeat Expression ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~>
+              Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ;
 
 // An assignment TARGET is a name followed by field reads, tuple-element reads,
 // force-unwraps and subscripts, in any order: `n.next!.v = 4` and `tp.0 = 3`.
@@ -1521,12 +1523,17 @@ SuperRef    <~~ push(makeSuperRef()) ~~> = KwSuper ;
 
 // An implicit member expression: `.tails`, `.circle(r: 5)`, `.make { 1 }`. Swift
 // resolves the leading dot against the expected TYPE; this front end has no type
-// checker, so a name that is a static member of exactly one type and no enum case
-// is that type's member (swDotStatic), and anything else builds an unqualified enum
-// case value carrying only the case name and, if given, its associated values.
-// Matching and == compare enum cases by NAME, so an unqualified `.tails` and a
-// qualified `Coin06.tails` are the same value.
-DotMember   <~~ push(makeDotMember(takeAll())) ~~>
+// checker, so the type is known only where the walk sees the declared type of the
+// slot the member fills: an annotated let/var or stored property (`let s: S =
+// .init(n: 3)`), an assignment to an annotated name (swDotWant), and the value a
+// func, method, closure or computed property with a declared type returns
+// (swDotPend). Without one, a name that is a static member of exactly one type and
+// no enum case is that type's member (swDotStatic), and anything else builds an
+// unqualified enum case value carrying only the case name and, if given, its
+// associated values. Matching and == compare enum cases by NAME, so an unqualified
+// `.tails` and a qualified `Coin06.tails` are the same value. The span is how a
+// declaration recognizes a value that IS this member.
+DotMember   <~~ push(makeDotMember(takeAll(), up.start + ":" + up.pos)) ~~>
             = "." Id <~~ push({dname: swBt(up.in)}) ~~> [ DotArgs ] ;
 DotArgs     <~~ push({dargs: takeAll()}) ~~>
             = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
@@ -5514,6 +5521,7 @@ KwContinue  = "continue" KwEnd ;
         // With no parameter names the arguments bind as the shorthand $0..$3.
         if (params.length == 0) { params = ["$0", "$1", "$2", "$3"] }
         inouts = swClInouts(params, inouts, up.start, end)
+        swDotClaim(up.start, end, rtype)
         var body = items.slice(start)
         return function() {
             var captured = scopes.slice(0)
@@ -6282,6 +6290,7 @@ KwContinue  = "continue" KwEnd ;
                      ? swElemTyOf(declTyOf(ref.name)) : ""
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
+        if (hasLocal && ref.path.length == 0 && op == "=") { valT = swDotWant(valT, items[3], localAnn) }
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         // `s = [1, 2]` into a local declared `Set<Int>`.
         var setTy = ref.path.length == 0 && hasLocal && swIsSetTy(localAnn)
@@ -6833,7 +6842,7 @@ KwContinue  = "continue" KwEnd ;
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
         if (k == 1 && items[2] != undefined) { annTxt = swExprAnn(items[2].itext) }
         swNoteLocalAnn(name, annTxt)
-        var init = items[k]
+        var init = swDotWant(items[k], items[k + 1], annTxt)
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
         // annotation carries its numeric leaves down, so a[0] / 2 is 1.5.
         if (elemTy != "") {
@@ -6996,8 +7005,8 @@ KwContinue  = "continue" KwEnd ;
             return res
         }
     }
-    function makeReturn(items) {
-        var t = items.length > 0 ? items[0] : makeConst(undefined)
+    function makeReturn(items, pos) {
+        var t = items.length > 0 ? swDotPend(items[0], items[1], pos) : makeConst(undefined)
         return function() { return {isRet: true, v: t()} }
     }
 
@@ -7099,7 +7108,7 @@ KwContinue  = "continue" KwEnd ;
         return relabelTuple(v, f.rlabels)
     }
     // items = [name, {params}, {tlabels}? | {itype}?, bodyThunk]
-    function makeFun(items) {
+    function makeFun(items, from, to) {
         var k = 2
         var labels = null
         var rty = ""
@@ -7116,6 +7125,9 @@ KwContinue  = "continue" KwEnd ;
         // Any other return type adopts nothing; its text is only for swFnRetOf.
         else if (items[k] != undefined && items[k].otype != undefined) { ret = items[k].otype; k++ }
         if (ret == "") { ret = rty }
+        var rtxt = ""
+        if (items[k] != undefined && items[k].rtxt != undefined) { rtxt = items[k].rtxt; k++ }
+        swDotClaim(from, to, rtxt)
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret}
     }
     function makeInit(items) {
@@ -7548,11 +7560,11 @@ KwContinue  = "continue" KwEnd ;
         var annTxt = ty
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
         notePropTy(items[0], annTxt)
-        if (items[k] != undefined && swIsSetTy(annTxt)) {
-            var st = items[k]
-            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: function() { return swSetOf(st()) }}
+        var pinit = swDotWant(items[k], items[k + 1], annTxt)
+        if (pinit != undefined && swIsSetTy(annTxt)) {
+            return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: function() { return swSetOf(pinit()) }}
         }
-        if (items[k] != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: items[k]} }
+        if (pinit != undefined) { return {prop: items[0], ty: ty, ann: annTxt, hasInit: true, init: pinit} }
         return {prop: items[0], ty: ty, ann: annTxt, hasInit: false, init: null}
     }
     // A parameter record with no label, type, default or inout - what a generated
@@ -7582,7 +7594,7 @@ KwContinue  = "continue" KwEnd ;
         return {acc: {kind: kind, param: param, body: body}}
     }
     function makeImplicitGetter(body) { return {acc: {kind: "get", param: null, body: body}} }
-    function makeComputed(items) {
+    function makeComputed(items, from, to) {
         var name = items[0]
         var dflt = null
         var get = null
@@ -7614,6 +7626,7 @@ KwContinue  = "continue" KwEnd ;
             else if (a.kind == "didSet") { did = a.body; if (a.param != null) { didP = a.param } }
         }
         notePropTy(name, oty != "" ? oty : pty)
+        swDotClaim(from, to, oty != "" ? oty : pty)
         return {cprop: {name: name, get: get, set: set, setP: setP, will: will, willP: willP,
                         did: did, didP: didP, observed: (will != null || did != null),
                         dflt: dflt, ty: pty, ann: oty}}
@@ -8373,8 +8386,23 @@ KwContinue  = "continue" KwEnd ;
             if (!seen) { ts.push(tn) }
         }
     }
-    // The one type whose static member an implicit `.name` means, or "": the name
-    // must be no enum case and a static member of exactly one type.
+    // The type an implicit `.name` reads from, or "": the expected type when the walk
+    // knows one and it declares the name (a static member or an enum case), else the
+    // one type whose static member it must be - no enum case, and a static member of
+    // exactly one type. Twin of swDotOwner in swift-to-llvm-ir.abnf.
+    function swDotOwner(dname, want) {
+        if (want != "") {
+            var th = swResolve(want)
+            if (th != null && isTypeVal(th.v) && (swHasStatic(dname, want) || (th.v.__isenum === true && hasOwn(th.v, dname)))) { return want }
+        }
+        return swDotStatic(dname)
+    }
+    function swHasStatic(dname, tn) {
+        if (!hasOwn(swStaticReg, "$" + dname)) { return false }
+        var ts = swStaticReg["$" + dname]
+        for (var i = 0; i < ts.length; i++) { if (ts[i] == tn) { return true } }
+        return false
+    }
     function swDotStatic(dname) {
         if (swCaseNames["$" + dname] === true || !hasOwn(swStaticReg, "$" + dname)) { return "" }
         var ts = swStaticReg["$" + dname]
@@ -8461,8 +8489,9 @@ KwContinue  = "continue" KwEnd ;
             declType(name, e, isNestedDecl(myIdx))
         }
     }
-    // `.tails` / `.circle(r: 5)`: an enum case with no type to resolve against.
-    function makeDotMember(items) {
+    // `.tails` / `.circle(r: 5)`: a static member or an enum case, resolved against
+    // the expected type a declaration hands down through cell.want.
+    function makeDotMember(items, at) {
         var dname = ""
         var args = null
         for (var i = 0; i < items.length; i++) {
@@ -8471,13 +8500,15 @@ KwContinue  = "continue" KwEnd ;
             if (it.dname != undefined) { dname = it.dname }
             else if (it.dargs != undefined) { args = it.dargs }
         }
+        var cell = {want: ""}
+        swLastDot = {at: at, dname: dname, args: args, cell: cell}
         // The owning type of a static member, decided at the first run, when every
         // type is registered: "" for none.
         var stTn = anytype
         stTn = null
         if (args == null) {
             return function() {
-                if (stTn === null) { stTn = swDotStatic(dname) }
+                if (stTn === null) { stTn = swDotOwner(dname, cell.want) }
                 if (stTn != "") { return core.getField(swResolve(stTn).v, dname) }
                 if (swDotOptional(dname, -1) == "none") { return null }
                 return newCaseVal(null, dname, undefined, null, null, undefined)
@@ -8485,7 +8516,7 @@ KwContinue  = "continue" KwEnd ;
         }
         var recs = args
         return function() {
-            if (stTn === null) { stTn = swDotStatic(dname) }
+            if (stTn === null) { stTn = swDotOwner(dname, cell.want) }
             var ea = evalArgs(recs)
             if (stTn != "") {
                 pendingLabels = recLabels(recs)
@@ -8497,6 +8528,67 @@ KwContinue  = "continue" KwEnd ;
             if (swDotOptional(dname, ea.argv.length) == "some") { return ea.argv[0] }
             return newCaseVal(null, dname, undefined, ea.argv, null, undefined)
         }
+    }
+    // The leading-dot member the walk built last, and its source span.
+    var swLastDot = {at: "", dname: "", args: null, cell: null}
+    // A declared slot's initializer when it IS a leading-dot member (its text opens
+    // with the dot and its span is the member's own): `.init(args)` becomes the call
+    // T(args), and any other member resolves against T first. T is the annotation's
+    // nominal type, through Optional and generic arguments. Twin of swDotWant in
+    // swift-to-llvm-ir.abnf.
+    function swDotWant(init, rec, ann) {
+        if (!swIsDotInit(init, rec)) { return init }
+        return swDotRetarget(init, swLastDot, ann)
+    }
+    function swIsDotInit(init, rec) {
+        if (init == undefined || rec == undefined || rec.iat == undefined) { return false }
+        return rec.iat == swLastDot.at && rec.itext.charAt(0) == "."
+    }
+    function swDotRetarget(init, dot, ann) {
+        var tn = swDotTyName(ann)
+        if (tn == "") { return init }
+        if (dot.dname != "init") {
+            dot.cell.want = tn
+            return init
+        }
+        if (dot.args == null) { return init }
+        return makeCall(concat2impl([tn], dot.args))
+    }
+    // A returned leading-dot member (a `return` or a single-expression body) waits
+    // here for the declaration that encloses it - a func's return type, a computed
+    // property's type - which is only known once that declaration completes. The
+    // statement calls h.t, so retargeting it replaces the thunk.
+    var swDotRets = []
+    function swDotPend(t, rec, pos) {
+        if (!swIsDotInit(t, rec)) { return t }
+        var h = {t: t}
+        swDotRets.push({pos: pos, dot: swLastDot, h: h})
+        return function() { var f = h.t; return f() }
+    }
+    // The pending returns inside [from, to] belong to the declaration spanning it;
+    // ann is its result type, "" for one whose result is not the member's type (a
+    // closure without a declared one, an init, a subscript).
+    function swDotClaim(from, to, ann) {
+        if (swDotRets.length == 0) { return }
+        var keep = []
+        for (var i = 0; i < swDotRets.length; i++) {
+            var e = swDotRets[i]
+            if (e.pos >= from && e.pos <= to) { e.h.t = swDotRetarget(e.h.t, e.dot, ann) }
+            else { keep.push(e) }
+        }
+        swDotRets = keep
+    }
+    function swDotTyName(ann) {
+        var t = ann
+        while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
+        var lt = t.indexOf("<")
+        if (lt > 0 && t.charAt(t.length - 1) == ">") { t = t.substring(0, lt) }
+        if (t.length == 0) { return "" }
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return "" }
+        }
+        return t
     }
     // Enum case equality: the case NAME plus the associated values, so a leading-dot
     // case and a qualified one of the same enum compare equal.

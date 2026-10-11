@@ -3264,6 +3264,52 @@ func s65() {
     check("imp4", ss.map { $0.n } == [2, 0, 7])
 }
 
+// ===== SECTION 66: an implicit member resolved by the declared type =====
+// `.init(...)` is the declared type's initializer, and a member name that two types
+// (and an enum case) share is the declared type's: Swift resolves `.name` against
+// the expected type, which an annotation, a return type or a computed property's
+// type gives.
+struct P66 {
+    var n: Int
+    init(n: Int) { self.n = n * 2 }
+    static var blank: P66 { .init(n: 0) }
+    static func forge(_ k: Int) -> P66 { return P66(n: k + 1) }
+    func bumped() -> P66 { return .init(n: n + 1) }
+}
+struct Q66 {
+    var t: String
+    static var blank: Q66 { Q66(t: "qz") }
+    static func forge(_ k: Int) -> Q66 { Q66(t: "q\(k)") }
+}
+enum E66 { case blank, forge(Int) }
+class R66 {
+    var v: Int
+    init(v: Int) { self.v = v }
+    init() { v = -1 }
+    var p: P66 = .init(n: 5)
+    var q: Q66? = .forge(3)
+}
+func q66(_ b: Bool) -> Q66 {
+    if b { return .blank }
+    return .forge(2)
+}
+func s66() {
+    let p: P66 = .init(n: 3)
+    let p2: P66? = .forge(4)
+    let q: Q66 = .blank
+    check("dty1", p.n == 6 && p2!.n == 10 && q.t == "qz")
+    var r: R66 = .init(v: 7)
+    let v1 = r.v
+    r = .init()
+    check("dty2", v1 == 7 && r.v == -1 && r.p.n == 10 && r.q!.t == "q3")
+    let e: E66 = .forge(1)
+    var eOk = false
+    if case .forge(let k) = e { eOk = k == 1 }
+    check("dty3", eOk && P66.blank.n == 0 && P66(n: 1).bumped().n == 6)
+    let g = { () -> P66 in return .init(n: 4) }
+    check("dty4", q66(true).t == "qz" && q66(false).t == "q2" && g().n == 8)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3330,6 +3376,7 @@ func main() {
     s63() // SECTION-CALL 63
     s64() // SECTION-CALL 64
     s65() // SECTION-CALL 65
+    s66() // SECTION-CALL 66
     print("full: \(checks) checks, \(fails) failures")
 }
 
