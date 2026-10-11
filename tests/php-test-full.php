@@ -2122,6 +2122,69 @@ function s51() {
     check("prp2", $o->x === 1 && $r->y === 2);
 }
 
+// ===== SECTION 52: goto out of try, catch and nested try bodies =====
+// A goto may leave a try or catch body (never enter one): every finally on the way
+// out runs first, innermost first, and the jump lands on the label in whichever
+// enclosing body declares it - a loop it leaves is simply left.
+function s52a() {
+    $log = "";
+    try { $log .= "t"; goto out; } finally { $log .= "f"; }
+    $log .= "X";
+    out:
+    return $log . "o";
+}
+function s52b($n) {
+    $log = "";
+    for ($i = 0; $i < $n; $i++) {
+        try {
+            try { if ($i == 2) { goto done; } $log .= $i; } finally { $log .= "f"; }
+        } catch (Exception $e) { $log .= "c"; }
+    }
+    done:
+    return $log . "d";
+}
+function s52c() {
+    $log = "";
+    $k = 0;
+    again:
+    $k++;
+    try { throw new Exception("e" . $k); }
+    catch (Exception $e) { $log .= $e->getMessage(); if ($k < 3) goto again; }
+    return $log;
+}
+function s52d() {
+    $log = "";
+    try {
+        $log .= "a";
+        try { goto mid; } finally { $log .= "1"; }
+        $log .= "X";
+        mid:
+        $log .= "m";
+        goto end;
+    } finally { $log .= "2"; }
+    $log .= "Y";
+    end:
+    return $log;
+}
+function s52e() {
+    $log = "";
+    for ($i = 0; $i < 3; $i++) {
+        try {
+            try { if ($i == 1) goto skip; } finally { $log .= "a" . $i; }
+        } finally { $log .= "b" . $i; }
+        $log .= "n" . $i;
+        skip:
+    }
+    return $log;
+}
+function s52() {
+    check("gto1", s52a() === "tfo");
+    check("gto2", s52b(5) === "0f1ffd");
+    check("gto3", s52c() === "e1e2e3");
+    check("gto4", s52d() === "a1m2");
+    check("gto5", s52e() === "a0b0n0a1b1a2b2n2");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2179,6 +2242,7 @@ function main() {
     s49(); // SECTION-CALL 49
     s50(); // SECTION-CALL 50
     s51(); // SECTION-CALL 51
+    s52(); // SECTION-CALL 52
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

@@ -7016,6 +7016,8 @@ long js_getret(void)   { return RETSLOT; }
 long js_ctl_return(long v) { return mk_ctl(1, v); }
 long js_ctl_break(void)    { return mk_ctl(2, H_UNDEF); }
 long js_ctl_continue(void) { return mk_ctl(3, H_UNDEF); }
+/* n is the RAW index of the goto's label (compile-core's ctlLabels), not a handle. */
+long js_ctl_goto(long n)   { return mk_ctl(4 + n, H_UNDEF); }
 long js_ctl_kind(long h)   { if (tag_of(h) == 10) { return fa(h); } return 0; }
 long js_ctl_value(long h)  { if (tag_of(h) == 10) { return fb(h); } return H_UNDEF; }
 

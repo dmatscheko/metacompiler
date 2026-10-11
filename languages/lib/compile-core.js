@@ -433,16 +433,34 @@ function emitContinue(b) {
     exit(1)
 }
 
+// A goto that leaves a try body is the fourth signal: js_ctl_goto(n) has kind 4 + n,
+// n being the label's index in ctlLabels, so dispatching it is one raw compare per
+// label. A grammar with goto registers each label's block with ctlLabel (which
+// records the function it lies in) and emits the jump with emitGoto.
+var ctlLabels = []
+function ctlLabel(blk) {
+    ctlLabels.push({tag: curFTag, blk: blk})
+    return ctlLabels.length - 1
+}
+function emitGoto(b, n) {
+    if (ctlLabels[n].tag == curFTag) { b.NewBr(ctlLabels[n].blk); return }
+    b.NewRet(callExt(b, "js_ctl_goto", [handle(n)]))
+}
+
 // excDispatch is emitted right after a js_try call: ctl is its result. If ctl is a
 // control signal, re-issue the return/break/continue AS IF a return/break/continue
 // statement stood here - so if this try is itself inside another try body, the signal
-// re-signals (via retStmt/emitBreak/emitContinue) and propagates outward. Otherwise
-// fall through. Returns the block to continue in.
+// re-signals (via retStmt/emitBreak/emitContinue) and propagates outward. A goto
+// signal branches to its label when the label lies in this function, else, inside a
+// try body, travels on unchanged. Otherwise fall through. Returns the block to
+// continue in.
 function excDispatch(b, ctl) {
     var kind = callExt(b, "js_ctl_kind", [ctl])
     var normB = curF.NewBlock("")
     var retB = curF.NewBlock("")
     var afterRet = curF.NewBlock("")
+    var gotos = ctlLabels.length > 0
+    var restB = gotos ? curF.NewBlock("") : normB
     b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, handle(1)), retB, afterRet)
     // retStmt terminates retB and hands back a fresh unreachable block; nothing else
     // flows into it, so terminate it too, or the emitted module has a block with no
@@ -458,10 +476,25 @@ function excDispatch(b, ctl) {
         var afterBrk = curF.NewBlock("")
         afterRet.NewCondBr(afterRet.NewICmp(llvm.enum.IPredEQ, kind, handle(2)), brkB, afterBrk)
         emitBreak(brkB)
-        afterBrk.NewCondBr(afterBrk.NewICmp(llvm.enum.IPredEQ, kind, handle(3)), contB, normB)
+        afterBrk.NewCondBr(afterBrk.NewICmp(llvm.enum.IPredEQ, kind, handle(3)), contB, restB)
         emitContinue(contB)
     } else {
-        afterRet.NewBr(normB)
+        afterRet.NewBr(restB)
+    }
+    if (!gotos) { return normB }
+    var outer = false
+    for (var i = 0; i < ctlLabels.length; i++) {
+        if (ctlLabels[i].tag != curFTag) { outer = true; continue }
+        var nextB = curF.NewBlock("")
+        restB.NewCondBr(restB.NewICmp(llvm.enum.IPredEQ, kind, handle(4 + i)), ctlLabels[i].blk, nextB)
+        restB = nextB
+    }
+    if (outer && inCtlBody()) {
+        var fwdB = curF.NewBlock("")
+        restB.NewCondBr(restB.NewICmp(llvm.enum.IPredUGE, kind, handle(4)), fwdB, normB)
+        fwdB.NewRet(ctl)
+    } else {
+        restB.NewBr(normB)
     }
     return normB
 }

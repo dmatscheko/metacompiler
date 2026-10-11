@@ -469,9 +469,10 @@ need it; swift, java, csharp, dart, go, ruby, kotlin do not.
 
 The general form is broader than truthiness: **any emitter consuming a `callExt`
 result as a number** needs the check, and `grep NewICmp` over the grammar finds
-them. `js_ctl_kind` is the second instance — it answers a raw 0/1/2/3 (0 not a
-signal, 1 return, 2 break, 3 continue), so the test must be `IPredEQ …, 1`,
-because `truthy()` silently accepts break and continue too. Ruby goes furthest and
+them. `js_ctl_kind` is the second instance — it answers a raw kind (0 not a
+signal, 1 return, 2 break, 3 continue, 4 + n a goto to compile-core's label n), so
+the test must be `IPredEQ …, 1`, because `truthy()` silently accepts every other
+signal too. Ruby goes furthest and
 overrides `truthy()` itself with `IPredUGE, v, handle(3)`: handles 0/1/2 are
 undefined/null/false and 3 is true, so `>= 3` *is* Ruby truthiness with no call at
 all — sound natively only because `runtime.c` seeds the same four handles.

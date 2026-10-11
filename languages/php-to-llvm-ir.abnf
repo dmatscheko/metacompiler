@@ -2415,13 +2415,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         return function(b) {
             for (var k = 0; k < labels.length; k++) {
-                labelBlocks["$" + labels[k]] = curF.NewBlock("")
-                labelTags["$" + labels[k]] = curFTag
+                labelIds["$" + labels[k]] = ctlLabel(curF.NewBlock(""))
             }
             for (var q = 0; q < items.length; q++) {
                 var it = items[q]
                 if (it != undefined && it.lblstmt != undefined) {
-                    var lb = labelBlocks["$" + it.lblstmt]
+                    var lb = ctlLabels[labelIds["$" + it.lblstmt]].blk
                     b.NewBr(lb)
                     b = lb
                 } else {
@@ -2530,16 +2529,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return exitB
         }
     }
-    // The labels of the statement run currently being emitted, by name. makeBody
-    // registers its own before it emits anything, which is what lets a goto that sits
-    // EARLIER in the run branch to a label further down.
-    var labelBlocks = {}
-    // The IR function each label's block belongs to (curFTag). A try, catch or
-    // finally body is an IR closure of its own, and the control-signal protocol
-    // (lib/compile-core.js) carries return/break/continue out of one but no goto, so
-    // a goto that would leave such a body is refused here rather than emitted as a
-    // branch into another function.
-    var labelTags = {}
+    // The labels of the statement run currently being emitted, by name, as indexes
+    // into compile-core's ctlLabels (the block and the IR function it lies in).
+    // makeBody registers its own before it emits anything, which is what lets a goto
+    // that sits EARLIER in the run branch to a label further down.
+    var labelIds = {}
+    // The function each try/catch/finally closure is written in, by its curFTag. A
+    // goto may leave such closures outward, as a control signal (emitGoto); a label
+    // inside one is out of reach from anywhere else.
+    var ctlOuterTag = {}
     function popLabel() {
         var items = takeAll()
         var nm = ""
@@ -2555,10 +2553,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeLabelStmt(name) { return {lblstmt: name} }
     function makeGoto(name) {
         return function(b) {
-            var lb = labelBlocks["$" + name]
-            if (lb == undefined) { fail("goto to an unknown label " + name) }
-            if (labelTags["$" + name] != curFTag) { fail("goto " + name + " out of a try/catch/finally body is not supported") }
-            b.NewBr(lb)
+            var n = labelIds["$" + name]
+            if (n == undefined) { fail("goto to an unknown label " + name) }
+            var t = curFTag
+            while (t != ctlLabels[n].tag) {
+                t = ctlOuterTag["$" + t]
+                if (t == undefined) { fail("goto " + name + " into a try/catch/finally body is not supported") }
+            }
+            emitGoto(b, n)
             return deadBlock()
         }
     }
@@ -5490,7 +5492,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curF = f
         curFTag = idx
         loopStack = []
-        if (isCtl) { ctlEnter(idx) }
+        if (isCtl) {
+            ctlEnter(idx)
+            ctlOuterTag["$" + idx] = savedTag
+        }
         var b = f.NewBlock("entry")
         // A try/catch/finally body is a closure only to get its own unwinding; PHP has
         // no block scope, so it runs in the frame it is written in (its env).

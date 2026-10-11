@@ -57526,6 +57526,21 @@ dead1001:
 	ret i64 0
 }
 
+define i64 @js_ctl_goto(i64 %0) {
+entry:
+	%1 = alloca i64
+	store i64 %0, i64* %1
+	%2 = load i64, i64* %1
+	%3 = sext i32 4 to i64
+	%4 = add i64 %3, %2
+	%5 = load i64, i64* @H_UNDEF
+	%6 = call i64 @mk_ctl(i64 %4, i64 %5)
+	ret i64 %6
+
+dead1002:
+	ret i64 0
+}
+
 define i64 @js_ctl_kind(i64 %0) {
 entry:
 	%1 = alloca i64
@@ -57547,10 +57562,10 @@ entry:
 	%12 = sext i32 0 to i64
 	ret i64 %12
 
-dead1002:
+dead1003:
 	br label %11
 
-dead1003:
+dead1004:
 	ret i64 0
 }
 
@@ -57575,10 +57590,10 @@ entry:
 	%12 = load i64, i64* @H_UNDEF
 	ret i64 %12
 
-dead1004:
+dead1005:
 	br label %11
 
-dead1005:
+dead1006:
 	ret i64 0
 }
 
@@ -60007,10 +60022,10 @@ entry:
 	%184 = trunc i64 %183 to i32
 	ret i32 %184
 
-dead1006:
+dead1007:
 	br label %181
 
-dead1007:
+dead1008:
 	ret i32 0
 }
 

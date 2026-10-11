@@ -190,13 +190,13 @@ type jsThrown struct {
 	value interface{}
 }
 
-// jsCtl is a control-flow signal for a return/break/continue that LEAVES a try body.
+// jsCtl is a control-flow signal for a return/break/continue/goto that LEAVES a try body.
 // A try/catch/finally body compiles to its own IR closure, so a non-local jump inside
 // it cannot branch to the enclosing function/loop directly; instead the closure
 // returns a jsCtl, which js_try passes through and the try's compiled dispatch
 // (compile-core excDispatch) re-issues as a real ret/br in the enclosing frame.
 type jsCtl struct {
-	kind  byte        // 1 = return, 2 = break, 3 = continue
+	kind  uint64      // 1 = return, 2 = break, 3 = continue, 4 + n = goto label n
 	value interface{} // the returned value (kind 1); ignored otherwise
 }
 
@@ -14797,9 +14797,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_ctl_return":   func(a []uint64) uint64 { return w(&jsCtl{kind: 1, value: u(a[0])}) },
 		"js_ctl_break":    func(a []uint64) uint64 { return w(&jsCtl{kind: 2}) },
 		"js_ctl_continue": func(a []uint64) uint64 { return w(&jsCtl{kind: 3}) },
-		"js_ctl_kind": func(a []uint64) uint64 { // 1/2/3 for a signal, 0 for an ordinary value
+		// a[0] is the RAW label index (compile-core's ctlLabels), not a handle.
+		"js_ctl_goto": func(a []uint64) uint64 { return w(&jsCtl{kind: 4 + a[0]}) },
+		"js_ctl_kind": func(a []uint64) uint64 { // the raw kind for a signal, 0 for an ordinary value
 			if c, ok := u(a[0]).(*jsCtl); ok {
-				return uint64(c.kind)
+				return c.kind
 			}
 			return 0
 		},
