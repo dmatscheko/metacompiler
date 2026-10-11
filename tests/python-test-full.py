@@ -1672,6 +1672,13 @@ def s31():
                    fmterr("{a{}", 1) == "ValueError:unexpected '{' in field name" and
                    fmterr("{:{:{}}}", 1, 2, 3) == "ValueError:Max string recursion exceeded" and
                    fmterr("{5!z}", 1) == "IndexError:Replacement index 5 out of range for positional args tuple")
+    # Automatic and manual field numbering may not be mixed, and a field name's
+    # accessors are checked as they are read.
+    check("str40", fmterr("{0}{}", 1) == "ValueError:cannot switch from manual field specification to automatic field numbering" and
+                   fmterr("{}{0}", 1) == "ValueError:cannot switch from automatic field numbering to manual field specification" and
+                   fmterr("{0.}", 1) == "ValueError:Empty attribute in format string" and
+                   fmterr("{0[0]x}", [1]) == "ValueError:Only '.' or '[' may follow ']' in format field specifier" and
+                   fmterr("{:{}}", v[2], 5) == "abc  ")
     # ord() and chr() refuse their domain with catchable exceptions.
     def bierr(f, x):
         try:

@@ -769,7 +769,8 @@ func (e *pyStrEnv) badConv(conv string) {
 
 // fmtOne renders one parsed replacement field: its name, conversion ("" for
 // none) and spec. `auto` is the automatic field counter, threaded through so a
-// nested width field takes the next argument. Twin of pySFmtOne.
+// nested width field takes the next argument, and -1 once a field was numbered
+// by hand. Twin of pySFmtOne.
 func (e *pyStrEnv) fmtOne(nm, conv, spec string, args []interface{}, kw interface{}, auto, depth int) (string, int) {
 	at := auto
 	head := ""
@@ -781,12 +782,19 @@ func (e *pyStrEnv) fmtOne(nm, conv, spec string, args []interface{}, kw interfac
 	}
 	var v interface{} = jsUndef
 	if head == "" {
+		if at < 0 {
+			e.raise("ValueError", "cannot switch from manual field specification to automatic field numbering")
+		}
 		if at >= len(args) {
 			e.raise("IndexError", "Replacement index "+strconv.Itoa(at)+" out of range for positional args tuple")
 		}
 		v = args[at]
 		at++
 	} else if e.allDigits(head) {
+		if at > 0 {
+			e.raise("ValueError", "cannot switch from automatic field numbering to manual field specification")
+		}
+		at = -1
 		ix, _ := strconv.Atoi(head)
 		if ix >= len(args) {
 			e.raise("IndexError", "Replacement index "+strconv.Itoa(ix)+" out of range for positional args tuple")
@@ -797,31 +805,32 @@ func (e *pyStrEnv) fmtOne(nm, conv, spec string, args []interface{}, kw interfac
 	}
 	for p < nl {
 		c := e.sAt(nm, p)
+		key := ""
+		p++
 		if c == "." {
-			an := ""
-			p++
 			for p < nl && e.sAt(nm, p) != "." && e.sAt(nm, p) != "[" {
-				an += e.sAt(nm, p)
+				key += e.sAt(nm, p)
 				p++
 			}
-			v = e.rt.pyGetAttr(v, an)
 		} else if c == "[" {
-			key := ""
-			p++
 			for p < nl && e.sAt(nm, p) != "]" {
 				key += e.sAt(nm, p)
 				p++
 			}
 			p++
-			if e.allDigits(key) {
-				ix, _ := strconv.Atoi(key)
-				v = e.getIt(v, float64(ix))
-			} else {
-				v = e.getIt(v, key)
-			}
 		} else {
-			e.raise("ValueError", "Invalid format field: "+nm)
-			p++
+			e.raise("ValueError", "Only '.' or '[' may follow ']' in format field specifier")
+		}
+		if key == "" {
+			e.raise("ValueError", "Empty attribute in format string")
+		}
+		if c == "." {
+			v = e.rt.pyGetAttr(v, key)
+		} else if e.allDigits(key) {
+			ix, _ := strconv.Atoi(key)
+			v = e.getIt(v, float64(ix))
+		} else {
+			v = e.getIt(v, key)
 		}
 	}
 	if conv != "" && conv != "r" && conv != "s" && conv != "a" {

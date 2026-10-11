@@ -4445,7 +4445,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // looked up before the conversion is checked, and the spec is expanded after.
     function pySFmtOne(nm, conv, spec, args, kw, auto, depth) {
         var at = auto
-        // The head: empty (automatic), all digits (positional) or a keyword.
+        // The head: empty (automatic), all digits (positional) or a keyword. `auto`
+        // is also CPython's numbering state: -1 once a field was numbered by hand,
+        // and the two styles may not be mixed in one format string.
         var head = ""
         var p = 0
         while (p < nm.length && nm.charAt(p) != "." && nm.charAt(p) != "[") {
@@ -4454,41 +4456,42 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var v = anytype
         if (head == "") {
+            if (at < 0) { pySRaise("ValueError", "cannot switch from manual field specification to automatic field numbering") }
             if (at >= args.length) { pySRaise("IndexError", "Replacement index " + at + " out of range for positional args tuple") }
             v = args[at]
             at = at + 1
         } else if (pySAllDigits(head)) {
+            if (at > 0) { pySRaise("ValueError", "cannot switch from automatic field numbering to manual field specification") }
+            at = 0 - 1
             var ix = parseInt(head, 10)
             if (ix >= args.length) { pySRaise("IndexError", "Replacement index " + ix + " out of range for positional args tuple") }
             v = args[ix]
         } else {
             v = pySKwGet(kw, head)
         }
-        // .attr and [key] accessors.
+        // .attr and [key] accessors, each looked up as soon as it is read.
         while (p < nm.length) {
             var c2 = nm.charAt(p)
+            var key = ""
+            p = p + 1
             if (c2 == ".") {
-                var an = ""
-                p = p + 1
                 while (p < nm.length && nm.charAt(p) != "." && nm.charAt(p) != "[") {
-                    an = an + nm.charAt(p)
+                    key = key + nm.charAt(p)
                     p = p + 1
                 }
-                v = pySGetAttr(v, an)
             } else if (c2 == "[") {
-                var key = ""
-                p = p + 1
                 while (p < nm.length && nm.charAt(p) != "]") {
                     key = key + nm.charAt(p)
                     p = p + 1
                 }
                 p = p + 1
-                if (pySAllDigits(key)) { v = pySGetItem(v, parseInt(key, 10)) }
-                else { v = pySGetItem(v, key) }
             } else {
-                pySRaise("ValueError", "Invalid format field: " + nm)
-                p = p + 1
+                pySRaise("ValueError", "Only '.' or '[' may follow ']' in format field specifier")
             }
+            if (key == "") { pySRaise("ValueError", "Empty attribute in format string") }
+            if (c2 == ".") { v = pySGetAttr(v, key) }
+            else if (pySAllDigits(key)) { v = pySGetItem(v, parseInt(key, 10)) }
+            else { v = pySGetItem(v, key) }
         }
         if (conv != "" && conv != "r" && conv != "s" && conv != "a") { pySBadConv(conv) }
         // A spec may itself carry replacement fields ("{:{w}}").
