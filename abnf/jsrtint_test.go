@@ -183,3 +183,26 @@ func goOp(op string, a, b int64, w uint8, u bool) int64 {
 	}
 	return giTrunc(x, w, u)
 }
+
+// TestReleasedSlotsAreReused: a loop that creates and releases one scope per
+// iteration keeps the handle table at its live size plus the quarantine, a
+// released handle reads nil until the quarantine has passed, and a released
+// value wrapped again gets a fresh handle rather than its stale one.
+func TestReleasedSlotsAreReused(t *testing.T) {
+	rt := newJSRT(nil)
+	first := &jsScope{}
+	h0 := rt.wrap(first)
+	rt.releaseHandle(h0)
+	if v := rt.unwrap(h0); v != nil {
+		t.Fatalf("a released handle must read nil, got %v", v)
+	}
+	if h := rt.wrap(first); h == h0 {
+		t.Fatalf("re-wrapping a released value answered its stale handle %d", h)
+	}
+	for i := 0; i < 4*relQuarantine; i++ {
+		rt.releaseHandle(rt.wrap(&jsScope{}))
+	}
+	if limit := uint64(relQuarantine + 16); rt.count > limit {
+		t.Fatalf("table grew to %d slots for one live scope (limit %d)", rt.count, limit)
+	}
+}

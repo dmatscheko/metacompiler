@@ -344,7 +344,11 @@ type jsrt struct {
 	// size copies and re-maps tens of megabytes per growth step (it showed up as
 	// runtime.madvise/mmap). Chunks are allocated once and never moved.
 	chunks [][]interface{}
-	count  uint64 // Handles handed out so far = the next free slot.
+	count  uint64 // Handles handed out so far = the next never-used slot.
+
+	// Released slots, oldest first from freeHead on (see releaseHandle).
+	freed    []uint64
+	freeHead int
 
 	strIntern map[string]uint64
 	numIntern map[uint64]uint64      // Keyed by the float bits, so -0 and +0 stay distinct handles.
@@ -1317,9 +1321,11 @@ var jsThroughArgs = map[string]uint32{
 }
 
 // releaseHandle drops the value behind a handle the IR machine proved dead. Only
-// a scope or an argument array is ever released, and only its VALUE: the slot
-// stays taken, so a handle that (against the analysis) is used again finds nil
-// and fails loudly instead of silently reading whatever moved in.
+// a scope or an argument array is ever released. The slot is reused, but only
+// after relQuarantine later releases: a handle that (against the analysis) is
+// used again soon after finds nil and fails loudly instead of silently reading
+// whatever moved in, while a long run's table stays the size of its live set.
+// The value forgets its handle, so wrapping it again hands out a fresh one.
 func (rt *jsrt) releaseHandle(h uint64) {
 	if h&numTag != 0 || h >= rt.count {
 		return
@@ -1327,13 +1333,20 @@ func (rt *jsrt) releaseHandle(h uint64) {
 	chunk, off := rt.chunks[h>>tblChunkBits], h&tblChunkMask
 	switch v := chunk[off].(type) {
 	case *jsScope:
-		chunk[off] = nil
+		v.id = jsHandleID{}
 	case *jsArray:
-		if !v.pinned {
-			chunk[off] = nil
+		if v.pinned {
+			return
 		}
+		v.id = jsHandleID{}
+	default:
+		return
 	}
+	chunk[off] = nil
+	rt.freed = append(rt.freed, h)
 }
+
+const relQuarantine = 1 << 16
 
 // pinArray marks an argument array that the callee about to run can keep past
 // its own return, so the call site must not reclaim it. Handles that are not an
@@ -1411,6 +1424,10 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 		return rt.wrapID(&t.id, v)
 	case *jsClosure:
 		return rt.wrapID(&t.id, v)
+	case *boundMethod:
+		// Every member read builds a fresh one, so interning it by identity
+		// would only grow the intern map.
+		return rt.alloc(v)
 	}
 
 	rv := reflect.ValueOf(v)
@@ -1445,8 +1462,19 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 	}
 }
 
-// alloc puts v in the next free table slot and returns its handle.
+// alloc puts v in a free table slot and returns its handle: the oldest
+// released slot once more than relQuarantine wait, else a never-used one.
 func (rt *jsrt) alloc(v interface{}) uint64 {
+	if len(rt.freed)-rt.freeHead > relQuarantine {
+		h := rt.freed[rt.freeHead]
+		rt.freeHead++
+		if rt.freeHead >= relQuarantine && rt.freeHead*2 >= len(rt.freed) {
+			rt.freed = rt.freed[:copy(rt.freed, rt.freed[rt.freeHead:])]
+			rt.freeHead = 0
+		}
+		rt.chunks[h>>tblChunkBits][h&tblChunkMask] = v
+		return h
+	}
 	h := rt.count
 	if int(h>>tblChunkBits) == len(rt.chunks) {
 		rt.chunks = append(rt.chunks, make([]interface{}, tblChunkSize))
