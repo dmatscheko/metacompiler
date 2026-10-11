@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-429** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-430** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -122,15 +122,11 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-426 php: array union, case-insensitive class checks, hoisting, builtin TypeErrors · P2 · PHP · IN PROGRESS (PHP worker, round 21) [V]
-Spec / php-src corpus answers, both engines unless noted: (a) array union `$a + $b` aborts ("unsupported operand
-type: array used as a number"; blocks dynamic_call_freeing). (b) `catch (exception $e)`, `instanceof`,
-`method_exists`/`class_exists` compare class names case-sensitively. (c) `Nope::class` of an undeclared class raises
-'Class "Nope" not found' (PHP: "Nope" at compile time). (d) classes are not hoisted: use before declaration fails.
-(e) `Closure::fromCallable` missing. (f) `count(" Ab")`, `abs(" Ab")` should raise TypeError; `array_values("str")`
-crashes the interpreter in its own JS and returns [] compiled. (g) relative callables ('self::m') passed to
-array_map & co resolve in the stdlib function's frame. (h) `break`/`continue` out of finally (try_finally_009) and
-goto into finally (finally_goto_001/002/004) are not compile errors.
+### T-429 php: is_a/is_subclass_of/get_parent_class; object arithmetic TypeError; small reflection tails · P2 · PHP · IN PROGRESS (PHP worker, round 22) [V]
+Spec answers, all engines: (a) `is_a`, `is_subclass_of`, `get_parent_class` undefined. (b) `new stdClass + 1` coerces
+to 0; PHP: TypeError "Unsupported operand types: stdClass + int". (c) `get_debug_type()` of a closure answers
+"unknown" (PHP "Closure"). (d) `class_exists('\Foo')` with a leading backslash answers false (PHP strips it).
+(e) `'SELF::m'` callables in another case are rejected (js_phclassmiss compares "self" exactly).
 
 ---
 
@@ -474,6 +470,7 @@ T-420 php: named-argument errors, class-relative callables, scalar property writ
 T-424 swift: member shadows global, line-start paren, closure defer, Array + literal typing, print(to:) through a path, inout write-back after defer/catch — DONE 89d8a44c
 T-425 php: non-callable Error, case-insensitive class names, missing-class errors, builtin string callables, goto-out-of-finally compile error, LSB forwarding through callables, callback TypeErrors, numeral interpolation keys — DONE 5921cef7
 T-421 csharp: String.Format/standard numeric formats, StringComparison/SplitOptions/Normalize, System.Linq operators, remaining default contexts, target-typed new(), typed empty collections, List capacity, collection initializers (culture collation stays a loud failure) — DONE b7898d34
+T-426 php: array union, case-insensitive class names in catch/instanceof/extends, Name::class at compile time, early binding, Closure::fromCallable, builtin TypeErrors, relative callbacks in array_*, compile-time finally/break jump checks — DONE 97ee2042
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
