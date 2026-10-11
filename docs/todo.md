@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-430** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-433** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,6 +63,18 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
+### T-431 python: explicit None to a defaulted parameter (compiled); attribute protocol hooks · P1 · PY · OPEN [V]
+(a) compiled halves: `def k(a=5): return a; k(None)` returns 5 (python3/interp: None) — the emitter tests "argument
+absent" with `js_seq(arg, undefined)` and None is undefined. Serious: silent wrong answer. (b) all engines: `del c.missing`
+succeeds silently (python3: AttributeError "'C' object has no attribute 'missing'"). (c) a user class's `__setattr__`,
+`__getattribute__`, `__getattr__` are never dispatched. (d) `repr(list[int])` prints `[object Object]` (python3
+`list[int]`). (e) `(-1) ** (10**20+1)` gives 1 (exponents > 2^53 go through doubles). (f) `(int | str) | 1.5` raises
+TypeError (3.14: `int | str | 1.5`). (g) `sys` binds no module: `sys.set_int_max_str_digits`/`get_int_max_str_digits`.
+
+### T-432 python: big-int performance (thousands of digits) · P3 · PY · OPEN [V]
+Frozen interpreter: `(3**4097).bit_length()` ~100M steps; `y >> 4499` costly; int(str) parse quadratic; bin()/format()
+slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per StringBuilder.append.
+
 ### T-419 python: `object()`; the 4300-digit int→str limit · P2 · PY · IN PROGRESS (PY worker, round 16) [V]
 `object()` cannot be constructed (interpreter "cannot construct object", compiled
 "'type' object is not callable"). CPython's 4300-digit limit on int → str is not
@@ -87,12 +99,13 @@ type objects; the `object` type object is bare. The java ratchet's -frozen peak 
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-427 csharp: System.Math; iterator re-enumeration; foreach over GetEnumerator · P1 · CS · IN PROGRESS (CS worker, round 22) [V spec-only]
-(a) `Math.Max(1, 2)`: "unknown name: Math" (interp) / "unknown method 'Max'" (llvm.Run); System.Math is absent.
-(b) interpreter: an iterator whose body foreach-es another iterator object (`Evens(Nat())`) yields "0 4" instead of
-"0 2 4 6" (compiled right). Compiled generators are one-shot: enumerating the same IEnumerable twice resumes where
-it stopped; C# restarts with a fresh enumerator (affects foreach, LINQ, string.Join, all engines).
-(c) foreach over a user class with GetEnumerator(): interpreter visits nothing; compiled dies "len() of a object".
+### T-430 csharp: double constants; LINQ over user IEnumerable; Math tails · P2 · CS · OPEN [V spec-only]
+(a) `double.NaN`, `double.PositiveInfinity`, `NegativeInfinity`, `Epsilon`, `MaxValue`, `MinValue` absent (the double
+type object only has Parse/TryParse; interpreter renders `[object Object]`). (b) LINQ / `string.Join` over a user class
+implementing IEnumerable<T> (`bag.Where(...)`, `bag.Sum()`) unsupported in all engines (extension dispatch looks for a
+method on the class). (c) Math: Max/Min of mixed integral types (uint vs long) answer the picked argument's type, not the
+promoted overload's; `Abs(short.MinValue)` does not throw; MidpointRounding overloads, MathF, BigMul, DivRem, CopySign
+absent. (Math.Sin(2) last-ulp vs platform libm is unspecified by ECMA: not a defect.)
 
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
 `flt36`/`flt37` in tests/csharp-test-full.cs assert `1E+07`, `1E+20`,
@@ -471,6 +484,7 @@ T-424 swift: member shadows global, line-start paren, closure defer, Array + lit
 T-425 php: non-callable Error, case-insensitive class names, missing-class errors, builtin string callables, goto-out-of-finally compile error, LSB forwarding through callables, callback TypeErrors, numeral interpolation keys — DONE 5921cef7
 T-421 csharp: String.Format/standard numeric formats, StringComparison/SplitOptions/Normalize, System.Linq operators, remaining default contexts, target-typed new(), typed empty collections, List capacity, collection initializers (culture collation stays a loud failure) — DONE b7898d34
 T-426 php: array union, case-insensitive class names in catch/instanceof/extends, Name::class at compile time, early binding, Closure::fromCallable, builtin TypeErrors, relative callbacks in array_*, compile-time finally/break jump checks — DONE 97ee2042
+T-427 csharp: System.Math, re-enumerable iterators (fresh enumerator per GetEnumerator), foreach over user GetEnumerator, explicit-interface member shadowing — DONE 14b6e8f4
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
