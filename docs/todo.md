@@ -126,7 +126,7 @@ method 'toInt'" (compiled 97).
 
 # GO — Go  (oracle: `go run`)
 
-### T-381 go: a slice of a defined type prints its elements raw · P1 · GO · OPEN [V]
+### T-381 go: a slice of a defined type prints its elements raw · P1 · GO · IN PROGRESS (GO worker, round 13) [V]
 `ks := []Kind{1, 3}; fmt.Println(ks)` prints `[1 3]`; go `[kind1 kind3]` (String() per
 element). Also: AssertBase/TSSubject/DeferChain/PanicOperand chains never call
 goRecvsC, so `switch m[MyInt(1)].(type)` on a map[any] does not box the key (probe);
