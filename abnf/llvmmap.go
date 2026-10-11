@@ -988,6 +988,10 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// Run executes the named function with the given stdin content for getchar() and
 	// returns {Ret, Out}. The input parameter can be left out.
 	"Run": run,
+	// WriteOut writes a Run's program output to standard output. It is the
+	// program's output, not the grammar's default output, so -qq keeps it, as it
+	// keeps what the handle runtime's print externs write.
+	"WriteOut": func(res *RunResult) { fmt.Fprint(outWriter, res.Out) },
 	// RunJS executes a MetaJS module (IR emitted by metajs-to-llvm-ir.abnf, where every
 	// value is an i64 handle and the js_* externals implement the semantics). The
 	// named function is the module entry (usually "jsmain"); its i64 handle result

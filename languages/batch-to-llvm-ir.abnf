@@ -1726,7 +1726,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
 
     println(m)
     var res = llvm.Run(m, "main", "", rts)
-    print(res.Out)
+    llvm.WriteOut(res)
     println("batch-to-llvm-ir: exit status " + res.Ret)
     exit(res.Ret)
 
