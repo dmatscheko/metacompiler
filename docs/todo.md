@@ -130,7 +130,7 @@ slot (`let f: () -> T = { .make(8) }`: swiftc t8, ours nil).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-407 php: method-name case across a parent chain; small library and runtime gaps · P2 · PHP · OPEN [V spec-only]
+### T-407 php: method-name case across a parent chain; small library and runtime gaps · P2 · PHP · IN PROGRESS (PHP worker, round 17) [V spec-only]
 A subclass overriding `getName` as `GETNAME`: `$child->getName()` calls the parent's
 (PHP the child's). `get_class` of an anonymous class lacks the "\0path" suffix
 (anon_class_name.phpt). The interpreter builds a new class per evaluation of `new
