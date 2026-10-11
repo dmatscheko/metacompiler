@@ -1306,6 +1306,44 @@ exit /b 0
 :s29err
 exit /b %1
 
+rem ===== SECTION 30: parameter zero, a variable named errorlevel, a long run =====
+rem Inside `call :label` %0 and %~0 are the label, but a modifier that splits a
+rem path (%~x0, %~nx0) names the batch file (wine test_builtins: "Testing
+rem parameter zero"). A set variable named errorlevel hides the exit code. The
+rem 300 command captures of for /f take 8 KiB of string space each.
+:s30
+set cid=pz1
+set got=%0 %~0 %~x0
+set want=:s30 :s30 .cmd
+call :check
+set s30n=%~nx0
+call :s30in
+set cid=pz2
+set got=%s30m%
+set want=%s30n% :s30in
+call :check
+setlocal
+set errorlevel=7
+call :s30err 3
+set cid=pz3
+set got=%errorlevel%
+set want=7
+call :check
+endlocal
+for /l %%i in (1,1,300) do for /f %%v in ('echo %%i') do set s30t=%%v
+set cid=pz4
+set got=%s30t%
+set want=300
+call :check
+exit /b 0
+
+:s30in
+set s30m=%~nx0 %0
+exit /b 0
+
+:s30err
+exit /b %1
+
 rem ===== END SECTIONS =====
 
 :main
@@ -1338,5 +1376,6 @@ call :s26 SECTION-CALL 26
 call :s27 SECTION-CALL 27
 call :s28 SECTION-CALL 28
 call :s29 SECTION-CALL 29
+call :s30 SECTION-CALL 30
 echo full: %checks% checks, %fails% failures
 exit /b %fails%

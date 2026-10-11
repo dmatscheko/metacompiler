@@ -28,8 +28,7 @@
  *     the module, and checks that @__mec_ginit is empty - which is why NO global
  *     in this file has an initializer: an initialized global emits a store into
  *     __mec_ginit, and nothing would call it once main is gone.
- *   - The 2 MiB arena is bounds-checked (rt_bump, rt_die); tests/bench/mod.bat
- *     uses most of it.
+ *   - The arena grows in 2 MiB chunks (rt_bump) and is never freed.
  */
 
 int putchar(int c);
@@ -50,6 +49,7 @@ int bat_shift(int from);
  * Neither is reached on any successful path. */
 long write(int fd, const char *buf, unsigned long n);
 void exit(int code);
+void *malloc(unsigned long n);
 
 /* One byte to fd 2, out of a stack char[1] - the arena is exactly what is gone
  * when this runs. Same shape as runtime.c's o_ch. */
@@ -99,15 +99,37 @@ void rt_die(char *what, int want, int used, int cap) {
 
 /* ---------------------------------------------------------------- the arena */
 
-static char AR[2097152];
+/* A string is bumped out of the current chunk; a request the chunk cannot hold
+ * starts a new one of 2 MiB (or of the request, if larger), so every string
+ * stays contiguous and the old chunk's tail is left unused. Nothing is freed.
+ * malloc is one of the libc names llvm.Run implements. */
+static char *AR;
 static int APOS;
+static int ACAP;
 
-/* The comparison is `n > 2097152 - p` and not `p + n > 2097152` so that it
- * cannot itself overflow: p is always in [0, 2097152] and n >= 0. */
+/* rt_bump's slow path, out of line so that the bump itself stays small. */
+static char *rt_chunk(int n) {
+    int sz = n > 2097152 ? n : 2097152;
+    char *c;
+    if (n < 0) {
+        rt_die("string arena", n, APOS, ACAP);
+    }
+    c = (char *)malloc((unsigned long)sz);
+    if (c == 0) {
+        rt_die("string arena", n, APOS, ACAP);
+    }
+    AR = c;
+    ACAP = sz;
+    APOS = n;
+    return c;
+}
+
+/* The comparison is `n > ACAP - p` and not `p + n > ACAP` so that it cannot
+ * itself overflow: p is always in [0, ACAP]. */
 char *rt_bump(int n) {
     int p = APOS;
-    if (n < 0 || n > 2097152 - p) {
-        rt_die("string arena", n, p, 2097152);
+    if (n < 0 || n > ACAP - p) {
+        return rt_chunk(n);
     }
     APOS = p + n;
     return &AR[p];

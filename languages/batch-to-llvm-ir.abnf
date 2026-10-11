@@ -936,14 +936,20 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         for (i = 0; i < upto; i++) { if (items[i].mods != undefined) { return items[i].mods.substring(1) } }
         return null                               // null = no ~ at all, so the value is raw
     }
+    // %ERRORLEVEL% is the exit code only while no variable of that name is set: a
+    // `set errorlevel=7` hides it. Twin of liveVal in batch-interpreter.abnf.
+    function errOrVar(b, v) {
+        var set = b.NewICmp(NE, b.NewLoad(i32, getDefSlot("errorlevel")), zero)
+        return b.NewSelect(set, v, b.NewCall(rtInt2str, b.NewLoad(i32, gErrLvl)))
+    }
     function mkVarRef(items) {
         var nm = items[0].nm
         var mod = (items.length > 1) ? items[1] : null
         var isErr = (lower(nm) == "errorlevel")
         return {fn: function(b) {
-            var v
-            if (isErr) { v = b.NewCall(rtInt2str, b.NewLoad(i32, gErrLvl)) }
-            else { notePct(nm); v = b.NewLoad(i8ptr, getPctSlot(nm)) }
+            notePct(nm)
+            var v = b.NewLoad(i8ptr, getPctSlot(nm))
+            if (isErr) { v = errOrVar(b, v) }
             if (mod != null) { v = applyMod(b, v, mod) }
             return {b: b, v: v}
         }, c: undefined}
@@ -954,9 +960,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         var lit = "!" + nm + "!"
         var isErr = (lower(nm) == "errorlevel")
         return {fn: function(b) {
-            var v
-            if (isErr) { v = b.NewCall(rtInt2str, b.NewLoad(i32, gErrLvl)) }
-            else { v = b.NewLoad(i8ptr, getVarSlot(nm)) }
+            var v = b.NewLoad(i8ptr, getVarSlot(nm))
+            if (isErr) { v = errOrVar(b, v) }
             if (mod != null) { v = applyMod(b, v, mod) }
             var on = b.NewICmp(NE, b.NewLoad(i32, gDelayed), zero)
             return {b: b, v: b.NewSelect(on, v, gepStr(b, lit))}
@@ -980,7 +985,10 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         var mask = maskOf(modsOf(items, items.length - 1))
         return {fn: function(b) {
             var v
-            if (n == 0) { v = b.NewLoad(i8ptr, b.NewGetElementPtr(frameTy, gArgLbl, zero, b.NewLoad(i32, gFrame))) }
+            // A path-splitting modifier on %0 names the batch file even inside
+            // `call :label` - frame 0's. Twin of mkParamRef in batch-interpreter.abnf.
+            if (n == 0 && mask >= 0) { v = b.NewLoad(i8ptr, b.NewGetElementPtr(frameTy, gArgLbl, zero, zero)) }
+            else if (n == 0) { v = b.NewLoad(i8ptr, b.NewGetElementPtr(frameTy, gArgLbl, zero, b.NewLoad(i32, gFrame))) }
             else { v = b.NewLoad(i8ptr, argSlot(b, n)) }
             v = applyTilde(b, v, mask)
             return {b: b, v: v}
@@ -1678,7 +1686,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         for (i = 0; i < defSlotList.length; i++) { entry.NewStore(zero, defSlotList[i]) }
         for (i = 0; i < ARGN; i++) { entry.NewStore(ep, entry.NewGetElementPtr(argsTy, gArgs, zero, ci32(i))) }
         entry.NewStore(ep, entry.NewGetElementPtr(frameTy, gArgTail, zero, zero))
-        entry.NewStore(ep, entry.NewGetElementPtr(frameTy, gArgLbl, zero, zero))
+        // The script's own %0 is the batch file as it was named to compile it.
+        entry.NewStore(gepStr(entry, c.file), entry.NewGetElementPtr(frameTy, gArgLbl, zero, zero))
         entry.NewStore(zero, gCsp)
         entry.NewStore(zero, gFrame)
         entry.NewStore(zero, gErrLvl)

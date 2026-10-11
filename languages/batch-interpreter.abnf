@@ -859,7 +859,8 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     }
 
     // ----- call arguments: %0..%9, %* and shift -----
-    var argFrames = [{lbl: "", a: []}]
+    // The script's own %0 is the batch file as it was named to run it.
+    var argFrames = [{lbl: c.file, a: []}]
     function curFrame() { return argFrames[argFrames.length - 1] }
     function argAt(n) {
         var f = curFrame()
@@ -1040,8 +1041,11 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     function mkParamRef(items) {                   // [{mods}?, {pn}]
         var n = toInt(items[items.length - 1].pn)
         var mods = modsOf(items, items.length - 1)
+        // Inside `call :label` a %0 is the label, but a modifier that splits a path
+        // (%~n0, %~dp0) still names the batch file (wine's cmd tests).
+        var file0 = n == 0 && mods != null && mods != ""
         return function() {
-            var v = argAt(n)
+            var v = file0 ? argFrames[0].lbl : argAt(n)
             return (mods == null) ? v : applyMods(mods, v)
         }
     }
