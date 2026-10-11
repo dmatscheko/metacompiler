@@ -146,7 +146,7 @@ aborts "range over a object" (compiler). `method_exists` undefined. `self::` out
 class aborts (bug66015.phpt). A decoded JSON key starting with `__` collides with
 hidden slots compiled.
 
-### T-397 php: foreach by value walks the live array · P1 · PHP · OPEN [V spec-only]
+### T-397 php: foreach by value walks the live array · P1 · PHP · IN PROGRESS (PHP+GO worker, round 15) [V spec-only]
 `$a=["x"=>1,"y"=>2]; $i=1; foreach($a as $k=>$v){$a[$i]=$v; unset($a[$k]); $i++;}`
 leaves `[y=>2, 2=>1]` in both halves; PHP iterates a snapshot (bug68215.expected:
 `[1=>1, 2=>2]`).
