@@ -1294,7 +1294,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function sliceStr(v, offT, lenT) {
         var vlen = charLen(v)
         var off = offT()
-        if (off < 0) { off = vlen + off; if (off < 0) { off = 0 } }
+        // x=abc; "${x: -5}" is empty: a negative offset past the start selects nothing.
+        if (off < 0) { off = vlen + off; if (off < 0) { return "" } }
         if (off > vlen) { return "" }
         if (lenT == null) { return v.slice(charIdx(v, off)) }
         var ln = lenT()
@@ -1468,6 +1469,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < varNames.length; i++) {
             var nm = varNames[i]
             if (nm.length >= p.length && nm.slice(0, p.length) == p && isSetVar(nm)) { out.push(nm) }
+        }
+        // An array with an element is set too (declare -A h=([k]=1); "${!h*}" is h).
+        // A declared one with none is not; neither is `e=()` here, which bash lists -
+        // the store keeps no record of an empty array being assigned.
+        for (i = 0; i < stNames.length; i++) {
+            var an = stNames[i]
+            if (an.length >= p.length && an.slice(0, p.length) == p && isArr(an) && !isSetVar(an)
+                && arrValList(an).length > 0) { out.push(an) }
         }
         // Insertion sort: Array.prototype.sort is outside the -frozen JS subset.
         var j
@@ -1668,6 +1677,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bare = (op == "" && pe == "" && xf == "")
         if (lenp && bare) { pe = "len" }
         if (indp && bare && pfx == "") { pe = "ind" }
+        // $@ and $* WITH AN OPERATOR are the positional parameters as a LIST, exactly as
+        // ${a[@]} / ${a[*]} are an array's: `set -- "a b" c "" d; printf '<%s>' "${@:2}"`
+        // is <c><><d> and "${*/c/C}" replaces in each parameter before the join. So they
+        // take the subscripted path below with "@"/"*" as both the name and the
+        // subscript (scValList, scGet and scHas answer the parameters for those names).
+        // @A, @a, @K and @k describe a VARIABLE and stay out. Twin of the same routing
+        // in languages/bash-to-llvm-ir.abnf.
+        if (!hasIdx && (name == "@" || name == "*") && !lenp && !indp
+            && (pe == "substr" || isPatOp(pe) || op != "" || xf == "Q" || xf == "E" || xf == "P"
+                || xf == "U" || xf == "L" || xf == "u")) {
+            var posSub = name
+            hasIdx = true
+            var posArgs = [function() { return posSub }]
+            for (var pa = 0; pa < args.length; pa++) { posArgs.push(args[pa]) }
+            args = posArgs
+        }
         // NAME[SUBSCRIPT]: the first word thunk is the subscript, the rest belong to the
         // operator form (a default word, a pattern, a replacement).
         var idxT = null
@@ -1706,9 +1731,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return function() {
                     var sub = readIdx()
                     if (sub != "@" && sub != "*") { return sliceStr(scGet(name, sub), offT, lenT) }
+                    // The positional list counts from $0: "${@:1}" is $1 on and "${@:0}"
+                    // starts with the script name.
                     var vals = scValList(name)
+                    if (isPosName(name)) { vals = [scriptName]; for (var pv = 0; pv < posParams.length; pv++) { vals.push(posParams[pv]) } }
                     var off = offT()
-                    if (off < 0) { off = vals.length + off; if (off < 0) { off = 0 } }
+                    // A negative offset counts from the end, and one reaching past the
+                    // start selects nothing (bash 5.3: a=(p q r); "${a[@]: -5}" is no word).
+                    if (off < 0) { off = vals.length + off; if (off < 0) { off = vals.length } }
                     var n = (lenT != null) ? lenT() : (vals.length - off)
                     if (n < 0) { n = vals.length + n - off }
                     var out = []
@@ -1816,7 +1846,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // in sorted order. Measured: `Zq=1; Zw=2; echo "${!Z*}"` -> "Zq Zw".
         if (pfx != "") {
             var pfxName = name
-            var pfxAt = (pfx == "@")
+            var pfxAt = (pfx.charAt(pfx.length - 1) == "@")
             return function() {
                 var ks = varNamesWithPrefix(pfxName)
                 if (pfxAt) { return encFields(ks) }
@@ -1865,8 +1895,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var colon = (op.charAt(0) == ":")
             var o = colon ? op.slice(1) : op
             var blank = colon ? (!isSetVar(nameOf()) || v == "") : (!isSetVar(nameOf()))
-            if (o == "-") { return blank ? ((wordT != null) ? wordJoin(wordT()) : "") : v }
-            if (o == "+") { return blank ? "" : ((wordT != null) ? wordJoin(wordT()) : "") }
+            if (o == "-") { return blank ? dfltWord(wordT) : v }
+            if (o == "+") { return blank ? "" : dfltWord(wordT) }
             if (o == "=") {
                 if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; setVarVal(nameOf(), d); return d }
                 return v
@@ -2225,6 +2255,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // languages/bash-to-llvm-ir.abnf.
     var uqStar = false
     function starFields() { return uqStar && ifsFirst() == "" }
+    // THE WORD OF ${v-w} / ${v+w} EXPANDS IN THE CONTEXT OF THE ${...} ITSELF: its fields
+    // survive ("${x:-$@}" is still a list) and, unquoted under a null IFS, a $* in it
+    // stays fields as an unquoted $* does (`IFS=; printf '<%s>' ${x:-$*}` is <a b><c><d>
+    // for the parameters "a b" c "" d). dfltWord sets uqKeep for that one word, whose
+    // mkWord then keeps uqStar instead of clearing it. Twin of dfltWordEmit in
+    // languages/bash-to-llvm-ir.abnf.
+    var uqKeep = false
+    function dfltWord(wordT) {
+        if (wordT == null) { return "" }
+        uqKeep = true
+        var r = wordT()
+        uqKeep = false
+        return r
+    }
     function starJoin(list) {
         if (starFields()) { return encFields(list) }
         return joinList(list, ifsFirst())
@@ -2411,17 +2455,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isSetVar(name)) { return ["0"] }
         return []
     }
+    // "@" and "*" name the positional parameters (see mkParamExp), keyed from 1.
+    function isPosName(name) { return name == "@" || name == "*" }
     function scValList(name) {
+        if (isPosName(name)) { return posParams.slice(0) }
         if (isArr(name)) { return arrValList(name) }
         if (isSetVar(name)) { return [getVarVal(name)] }
         return []
     }
     function scGet(name, key) {
+        if (isPosName(name)) { var pk = strToInt(key); return (pk >= 1 && pk <= posParams.length) ? posParams[pk - 1] : "" }
         if (isArr(name)) { return arrGet(name, key) }
         if (isSetVar(name) && key == "0") { return getVarVal(name) }
         return ""
     }
     function scHas(name, key) {
+        if (isPosName(name)) { var hk = strToInt(key); return hk >= 1 && hk <= posParams.length }
         if (isArr(name)) { return arrHas(name, key) }
         return isSetVar(name) && key == "0"
     }
@@ -2436,8 +2485,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = colon ? op.slice(1) : op
         var blank = (vals.length == 0)
         if (colon && !blank) { blank = (joinList(vals, ifsFirst()) == "") }
-        if (o == "+") { return blank ? "" : ((wordT != null) ? wordJoin(wordT()) : "") }
-        if (blank) { return (wordT != null) ? wordJoin(wordT()) : "" }
+        // An unset or empty [@] list under + stays that empty list: "${a[@]+x}" is no word.
+        if (o == "+") { return blank ? ((sub == "@") ? encFields([]) : "") : dfltWord(wordT) }
+        if (blank) { return (o == "-") ? dfltWord(wordT) : ((wordT != null) ? wordJoin(wordT()) : "") }
         return joined
     }
     // ${a[k]-default} and its three siblings: the scalar arms with "is it set" asked of
@@ -2448,8 +2498,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var colon = (op.charAt(0) == ":")
         var o = colon ? op.slice(1) : op
         var blank = colon ? (!scHas(name, sub) || v == "") : (!scHas(name, sub))
-        if (o == "-") { return blank ? ((wordT != null) ? wordJoin(wordT()) : "") : v }
-        if (o == "+") { return blank ? "" : ((wordT != null) ? wordJoin(wordT()) : "") }
+        if (o == "-") { return blank ? dfltWord(wordT) : v }
+        if (o == "+") { return blank ? "" : dfltWord(wordT) }
         if (o == "=") {
             if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; arrSet(name, sub, d); return d }
             return v
@@ -2603,10 +2653,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkTilde() { return function() { return getVarVal("HOME") } }
 
     // A double-quoted string: no splitting, but "$@" / "${a[@]}" still contribute several
-    // fields, joined onto the neighbouring text at the boundaries.
+    // fields, joined onto the neighbouring text at the boundaries. One whose every part
+    // is such a list, and empty, is NO field at all: with no parameters `f "$@"` passes
+    // nothing, where "$*" or "x$@" pass one. Twin of mkDqWord in bash-to-llvm-ir.abnf.
     function mkDqWord(segs) {
         return function() {
             var res = [""]
+            var opened = segs.length == 0
             var svq = uqStar
             uqStar = false
             var i
@@ -2617,9 +2670,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     res[res.length - 1] = res[res.length - 1] + f[0]
                     var j
                     for (j = 1; j < f.length; j++) { res.push(f[j]) }
+                    opened = true
                 }
             }
             uqStar = svq
+            if (!opened) { return encFields([]) }
             if (res.length == 1) { return res[0] }
             return encFields(res)
         }
@@ -2659,7 +2714,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var open = ""
                 var opened = false
                 var svq = uqStar
-                uqStar = false
+                var svk = uqKeep
+                if (!uqKeep) { uqStar = false }
+                uqKeep = false
                 var k
                 for (k = 0; k < segThunks.length; k++) {
                     var v = segThunks[k]()
@@ -2674,6 +2731,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     } else { open = open + v; opened = true }
                 }
                 uqStar = svq
+                uqKeep = svk
                 if (opened) { res.push(open) }
                 if (res.length == 1) { return res[0] }
                 return encFields(res)

@@ -392,7 +392,11 @@ PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
 // `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
 // "bad substitution"; this is the alternative that reaches that documented behaviour.
 PeLenBad    <~~ push({lenp: 1}) ~~> = "#" PeCore ;
-PeIndForm   <~~ push({indp: 1}) ~~> = "!" PeCore ;
+PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
+// ${!prefix*} / ${!prefix@}: the NAMES of the set variables starting with the prefix.
+// Twin of PePfxNames in bash-interpreter.abnf; see there.
+PePfxNames  <~~ push({pfx: up.in}) ~~> = PeName PfxTok PeBraceEnd ;
+PfxTok      = "*" | "@" ;
 PeCore      = PePatForm | PeCaseForm | PeReplForm | PeXform | PeOpForm | PeSubstrForm | PePlain ;
 PeOpForm    = PeTarget PeOp [ BraceWord ] ;
 PePlain     = PeTarget PeBraceEnd ;
@@ -1250,6 +1254,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtScHas = rtDecl("rt_sc_has", false, [1, 1])
     var rtScCount = rtDecl("rt_sc_count", false, [1])
     var rtScList = rtDecl("rt_sc_list", true, [1, 1, 0, 0])
+    var rtParams0 = rtDecl("rt_params0", true, [])
+    var rtPfxNames = rtDecl("rt_pfxnames", true, [1, 1, 0])
     var rtDeclp = rtDecl("rt_declp", false, [1, 1, 0])
     // The ${v@A} / ${v@K} / ${v@k} / ${v@a} family, all measured against bash 5.3.15 -
     // see the block comment above rt_declasg in languages/lib/bash-rt.c.
@@ -1436,7 +1442,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, word objects / arithmetic thunks]
     function mkParamExp(items) {
-        var pe = "", name = "", op = "", anchor = "", xf = ""
+        var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
         var words = []     // word objects {fn, c}
         var ariths = []    // bare arithmetic thunks (the ${v:off:len} offsets)
@@ -1451,6 +1457,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.lenp != undefined) { lenp = true }
             else if (it.indp != undefined) { indp = true }
             else if (it.xf != undefined) { xf = it.xf }
+            else if (it.pfx != undefined) { pfx = it.pfx }
             else if (it.pe != undefined) { pe = it.pe }
             else if (it.pname != undefined) { name = it.pname }
             else if (it.op != undefined) { op = it.op }
@@ -1460,7 +1467,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // their array forms ${#a[@]} and ${!a[@]}); combined with an operator it does not.
         var bare = (op == "" && pe == "" && xf == "")
         if (lenp && bare) { pe = "len" }
-        if (indp && bare) { pe = "ind" }
+        if (indp && bare && pfx == "") { pe = "ind" }
+        // ${!prefix*} / ${!prefix@}: sorted, joined by IFS's first character for *.
+        if (pfx != "") {
+            var pfxAt = pfx.charAt(pfx.length - 1) == "@"
+            var pfxName = name
+            return {c: undefined, f: pfxAt, fn: function(b) {
+                return {b: b, v: b.NewCall(rtPfxNames, [gepStr(b, pfxName), ifsFirstValue(b), pfxAt ? zero : one])}
+            }}
+        }
+        // $@ and $* WITH AN OPERATOR are the positional parameters as a LIST, as
+        // ${a[@]} / ${a[*]} are an array's, so they take the subscripted path below with
+        // "@"/"*" as both the name and the subscript (rt_sc_count / rt_sc_get /
+        // rt_sc_has / rt_sc_list answer the parameters for those names). @A, @a, @K and
+        // @k describe a VARIABLE and stay out. Twin of the same routing in
+        // bash-interpreter.abnf.
+        if (!hasIdx && (name == "@" || name == "*") && !lenp && !indp
+            && (pe == "substr" || isPatOp(pe) || op != "" || xf == "Q" || xf == "E" || xf == "P"
+                || xf == "U" || xf == "L" || xf == "u")) {
+            hasIdx = true
+            var posWords = [makeConst(name)]
+            for (var pw = 0; pw < words.length; pw++) { posWords.push(words[pw]) }
+            words = posWords
+        }
         // The @-transforms. @U/@L/@u are rt_case, @Q/@K/@k are rt_shq, @A is the assignment
         // that would recreate the variable, @E decodes the $'...' escapes at run time and
         // @P is rt_prompt. -r and -x are modelled in neither half, so they are absent from
@@ -1540,12 +1569,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var k = kindOf(b, rs.v)
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                    var all = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
+                    // The positional list counts from $0: "${@:1}" is $1 on.
+                    var all = (name == "@" || name == "*") ? b.NewCall(rtParams0)
+                                                           : b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
                     var ro = offT(b); b = ro.b
                     var rlv = null
                     if (lenT != null) { var rl = lenT(b); b = rl.b; rlv = rl.v }
                     var cnt = b.NewCall(rtNFields, all)
                     var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(cnt, ro.v), ro.v)
+                    // A negative offset reaching past the start selects nothing.
+                    off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, off, zero), cnt, off)
                     var n = b.NewSub(cnt, off)
                     if (rlv != null) { n = rlv }
                     var lstV = b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), starArg(b, b.NewZExt(star, i32))])
@@ -1553,7 +1586,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var ev = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
                     var elen = b.NewCall(rtCharLen, ev)
                     var eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(elen, ro.v), ro.v)
-                    eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, eoff, zero), zero, eoff)
+                    eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, eoff, zero), elen, eoff)
                     var en = llvm.constant.NewInt(i32, -1)
                     if (rlv != null) {
                         en = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, rlv, zero),
@@ -1623,12 +1656,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), one, zero])))
                     }
                     var de = emptyPtr(b)
-                    if (idxWordT != null) { var rw = evalWord(b, idxWordT); b = rw.b; de = rw.v }
+                    if (idxWordT != null) {
+                        var rw = (idxO == "-" || idxO == "+") ? dfltWordEmit(b, idxWordT) : evalWord(b, idxWordT)
+                        b = rw.b
+                        de = rw.v
+                    }
                     var pickedE = b.NewSelect(blankE, de, one1)
                     var pickedL = b.NewSelect(blankL, de, lst)
                     if (idxO == "+") {
                         pickedE = b.NewSelect(blankE, emptyPtr(b), de)
-                        pickedL = b.NewSelect(blankL, emptyPtr(b), de)
+                        // An unset or empty [@] list stays that empty list: "${a[@]+x}" is no word.
+                        pickedL = b.NewSelect(blankL, b.NewSelect(star, emptyPtr(b), gepStr(b, "\x02")), de)
                     }
                     if (idxO == "=") { b.NewCall(rtArrSet, [nmOf(b), kk, pickedE]) }
                     one1 = pickedE
@@ -1726,8 +1764,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // Offsets and lengths of ${v:off:len} are in CHARACTERS in bash, so the computation
                 // runs in character units and rt_csubstr converts to byte positions.
                 var len = b.NewCall(rtCharLen, v)
-                // a negative offset counts from the end
+                // a negative offset counts from the end, and one past the start selects nothing
                 var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(len, ro.v), ro.v)
+                off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, off, zero), len, off)
                 if (lenT == null) {
                     return {b: b, v: b.NewCall(rtCSubstr, [v, off, llvm.constant.NewInt(i32, -1)])}
                 }
@@ -1785,18 +1824,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtReplace, [v, rp2.v, rep, llvm.constant.NewInt(i32, rmode)])}
             }}
         }
-        if (op == "" && name == "*" && !indirect) { return {c: undefined, fn: function(b) { return {b: b, v: starParams(b)} }} }
+        if (op == "" && name == "*" && !indirect) { return {c: undefined, f: true, fn: function(b) { return {b: b, v: starParams(b)} }} }
         if (op == "") { return {c: undefined, f: (name == "@"), fn: function(b) { return {b: b, v: valOf(b)} }} }
         var colon = (op.charAt(0) == ":")
         var o = colon ? op.slice(1) : op
-        return {c: undefined, fn: function(b) {
+        return {c: undefined, f: (o == "-" || o == "+"), fn: function(b) {
             var v = valOf(b)
             // ":" forms treat "" like unset; the bare forms only test set-ness, which the
             // unset marker (a distinct empty string) records.
             var blank = colon ? isEmptyStr(b, v)
                               : b.NewICmp(llvm.enum.IPredEQ, v, unsetPtr(b))
             var d = emptyPtr(b)
-            if (wordT != null) { var r = evalWord(b, wordT); b = r.b; d = r.v }
+            if (wordT != null) {
+                var r = (o == "-" || o == "+") ? dfltWordEmit(b, wordT) : evalWord(b, wordT)
+                b = r.b
+                d = r.v
+            }
             if (o == "+") { return {b: b, v: b.NewSelect(blank, emptyPtr(b), d)} }
             var picked = b.NewSelect(blank, d, v)
             if (o == "=") { setOf(b, picked) }
@@ -1804,7 +1847,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }}
     }
     function mkVarRef(name) {
-        if (name == "*") { return {f: false, fn: function(b) { return {b: b, v: starParams(b)} }, c: undefined} }
+        // f: an unquoted $* under a null IFS is a field list (starArg).
+        if (name == "*") { return {f: true, fn: function(b) { return {b: b, v: starParams(b)} }, c: undefined} }
         var multi = (name == "@")
         return {f: multi, fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
     }
@@ -1932,7 +1976,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b.NewSelect(isEmptyStr(b, f), gepStr(b, " "), f)
     }
     // A double-quoted string: no splitting, but "$@" / "${a[@]}" still contribute several
-    // fields, joined onto the neighbouring text at the boundaries.
+    // fields, joined onto the neighbouring text at the boundaries. One whose every part is
+    // such a list, and empty, is NO field (`opened` stays 0): with no parameters `f "$@"`
+    // passes nothing. Twin of mkDqWord in bash-interpreter.abnf.
     function mkDqWord(segs) {
         if (segs.length == 0) { return makeConst("") }
         var anyFields = false
@@ -1940,8 +1986,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < segs.length; i++) { if (segs[i].f == true) { anyFields = true } }
         if (!anyFields) { return mkWord(segs) }
         return {c: undefined, f: true, fn: function(b) {
+            // Quoted: a $* inside joins even within an unquoted ${x:-"$*"}.
+            var svq = uqStarEmit
+            uqStarEmit = false
             var acc = gepStr(b, "\x02")
             var open = emptyPtr(b)      // the field being built
+            var opened = zero
             var k
             for (k = 0; k < segs.length; k++) {
                 var r = segs[k].fn(b)
@@ -1949,12 +1999,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (segs[k].f == true) {
                     var nacc = b.NewCall(rtBndAcc, [acc, open, r.v])
                     open = b.NewCall(rtBndOpen, [open, r.v])
+                    opened = b.NewCall(rtBndOpened2, [opened, r.v, zero, zero])
                     acc = nacc
                 } else {
                     open = b.NewCall(rtStrcat, [open, r.v])
+                    opened = one
                 }
             }
-            return {b: b, v: b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [acc, open]), gepStr(b, "\x01")])}
+            uqStarEmit = svq
+            var full = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [acc, open]), gepStr(b, "\x01")])
+            return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredNE, opened, zero), full, acc)}
         }}
     }
 
@@ -2544,6 +2598,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return cont
     }
 
+    // THE WORD OF ${v-w} / ${v+w} EXPANDS IN THE CONTEXT OF THE ${...} ITSELF: its fields
+    // survive ("${x:-$@}" is still a list) and, unquoted under a null IFS, a $* in it stays
+    // fields as an unquoted $* does. So, unlike evalWord, uqStarEmit is kept and nothing
+    // is joined; the expansion is marked f. Twin of dfltWord in bash-interpreter.abnf.
+    function dfltWordEmit(b, w) { return w.fn(b) }
     // Evaluate ONE word to a single string: a word that can produce several fields is
     // flattened (space-joined), which is what every builtin with a fixed argument list wants.
     function evalWord(b, w) {

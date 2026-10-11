@@ -1921,6 +1921,36 @@ s34() {
   check xi5 "${KQ34[*]@A}" 'declare -A KQ34=(["k one"]="y" )'
 }
 
+# ===== SECTION 35: the operator forms of $@ and $*, ${!prefix@}, and an empty "$@" =====
+# $@ and $* with an operator are the positional parameters as a LIST, like
+# ${a[@]} / ${a[*]}: "${@:2}" is the parameters from $2 (the offset counts from $0),
+# a pattern operator applies to each parameter before the join. The word of
+# ${x:-w} keeps its fields, and under a null IFS an unquoted $* in it stays fields.
+# "$@" with no parameters is no word at all. Every expected value is bash 5.3's.
+s35() {
+  set -- "a b" c "" d
+  check pp1 "$(printf '<%s>' "${@:2}")" '<c><><d>'
+  check pp2 "$(printf '<%s>' "${*:2}"),$(printf '<%s>' "${@:1:2}")" '<c  d>,<a b><c>'
+  check pp3 "$(printf '<%s>' "${@@Q}")" "<'a b'><'c'><''><'d'>"
+  check pp4 "${*@Q}" "'a b' 'c' '' 'd'"
+  check pp5 "$(printf '<%s>' "${@:-x}")" '<a b><c><><d>'
+  check pp6 "${*/c/C}|${*#c}" 'a b C  d|a b   d'
+  check pp7 "$(printf '<%s>' "${@#a}" "${@%b}")" '< b><c><><d><a ><c><><d>'
+  check pp8 "$(printf '<%s>' "${@: -1}" "${@: -9}")" '<d>'
+  local Zq35=1 Zw35=2
+  declare -A Zh35=([k]=1)
+  check pp9 "$(printf '<%s>' "${!Zq35@}" "${!Zw*}")" '<Zq35><Zw35>'
+  check pp10 "$(printf '<%s>' "${!Zh*}")" '<Zh35>'
+  local x35=""
+  check pp11 "$(printf '<%s>' "${x35:-$@}")" '<a b><c><><d>'
+  check pp12 "$(IFS=; printf '<%s>' ${x35:-$*} ${x35:-pre$*post})" '<a b><c><d><prea b><c><dpost>'
+  check pp13 "$(IFS=; printf '<%s>' "${x35:-$*}")" '<a bcd>'
+  local A35=(p q r)
+  check pp14 "$(printf '<%s>' "${A35[@]: -5}" x "${x35: -3}")" '<x><>'
+  set --
+  check pp15 "$(printf '<%s>' x "$@" y "${@:1}" "${@+set}" "${*-un}")" '<x><y><un>'
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -1955,5 +1985,6 @@ s31   # SECTION-CALL 31
 s32   # SECTION-CALL 32
 s33   # SECTION-CALL 33
 s34   # SECTION-CALL 34
+s35   # SECTION-CALL 35
 echo "full: $checks checks, $fails failures"
 exit $fails

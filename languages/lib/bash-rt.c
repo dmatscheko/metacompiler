@@ -198,6 +198,9 @@ char *rt_ifsfirst(void);
 char *rt_sc_get(char *nm, char *k);
 int rt_sc_has(char *nm, char *k);
 char *rt_sc_list(char *nm, char *sep, int star, int keys);
+int rt_isposnm(char *nm);
+char *rt_params0(void);
+char *rt_pfxnames(char *p, char *sep, int star);
 int rt_arr_nextidx(char *nm);
 int rt_arr_clear(char *nm);
 int rt_arr_append(char *nm, char *f);
@@ -1995,6 +1998,16 @@ int rt_arr_clear(char *nm) {
     return 0;
 }
 
+/* "@" and "*" name the POSITIONAL PARAMETERS at the four rt_sc_ sites below,
+ * keyed from 1: the emitter routes the operator forms of $@ and $* (${@:2},
+ * ${*@Q}, a pattern replacement) through the subscripted-array path. Twin of
+ * isPosName in languages/bash-interpreter.abnf. */
+int rt_isposnm(char *nm) {
+    if (rt_streq(nm, "@") != 0) return 1;
+    if (rt_streq(nm, "*") != 0) return 1;
+    return 0;
+}
+
 /* ---- a SET SCALAR IS A ONE-ELEMENT ARRAY ----------------------------------
  * bash 5.3 answers Q for "${x[@]}" with x=Q, Q for "${x[0]}", 1 for ${#x[@]}
  * and 0 for ${!x[@]}: a plain scalar occupies index 0 of an array of one.
@@ -2014,7 +2027,9 @@ int rt_arr_clear(char *nm) {
  * emitter passes the name it already passes to rt_arr_get. */
 int rt_sc_count(char *nm) {
     char *v;
-    int c = rt_arr_count(nm);
+    int c;
+    if (rt_isposnm(nm) != 0) return frame_n;
+    c = rt_arr_count(nm);
     if (c > 0) return c;
     v = rt_getvar_byname(nm);
     return v != &unset_marker[0] ? 1 : 0;
@@ -2022,6 +2037,7 @@ int rt_sc_count(char *nm) {
 
 char *rt_sc_get(char *nm, char *k) {
     char *v;
+    if (rt_isposnm(nm) != 0) return rt_param(rt_str2int(k));
     if (rt_arr_count(nm) > 0) return rt_arr_get(nm, k);
     v = rt_getvar_byname(nm);
     if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return v;
@@ -2030,6 +2046,12 @@ char *rt_sc_get(char *nm, char *k) {
 
 int rt_sc_has(char *nm, char *k) {
     char *v;
+    int pk;
+    if (rt_isposnm(nm) != 0) {
+        pk = rt_str2int(k);
+        if (pk >= 1 && pk <= frame_n) return 1;
+        return 0;
+    }
     if (rt_arr_count(nm) > 0) return rt_arr_has(nm, k);
     v = rt_getvar_byname(nm);
     if (v != &unset_marker[0] && rt_streq(k, "0") != 0) return 1;
@@ -2041,12 +2063,69 @@ int rt_sc_has(char *nm, char *k) {
  * key "0" the payload, which is what ${!x[@]} reports. */
 char *rt_sc_list(char *nm, char *sep, int star, int keys) {
     char *v;
+    if (rt_isposnm(nm) != 0) return rt_params(sep, star);
     if (rt_arr_count(nm) > 0) return rt_arr_list(nm, sep, star, keys);
     v = rt_getvar_byname(nm);
     if (v == &unset_marker[0]) return star != 0 ? &empty[0] : "\002";
     if (keys != 0) v = "0";
     if (star != 0) return v;
     return rt_strcat(rt_strcat("\002", v), "\001");
+}
+
+/* The positional parameters as a field list that starts at $0, which is what
+ * ${@:off:len} counts from ("${@:1}" is $1 on). */
+char *rt_params0(void) {
+    return rt_catfields(rt_strcat(rt_strcat("\002", script_name), "\001"), rt_params(empty, 0));
+}
+
+/* ${!p*} / ${!p@}: the names of the SET variables starting with p, sorted - a
+ * scalar that is not the unset marker, or an array with an element (arrays live
+ * in arr_nm, not among the scalar slots). Joined with sep when star is set, a
+ * field list otherwise. Twin of varNamesWithPrefix in
+ * languages/bash-interpreter.abnf. */
+char *rt_pfxnames(char *p, char *sep, int star) {
+    char *nm[1024];
+    int n = 0;
+    int pl = rt_strlen(p);
+    int total = nvars + arr_n;
+    int i = 0;
+    int j;
+    int dup;
+    char *v;
+    char *out;
+    char *t;
+    while (i < total) {
+        v = i < nvars ? varnames[i] : arr_nm[i - nvars];
+        int ok = rt_strlen(v) >= pl && rt_streq(rt_substr(v, 0, pl), p) != 0;
+        if (ok && rt_getvar_byname(v) == &unset_marker[0] && rt_arr_count(v) == 0) ok = 0;
+        dup = 0;
+        j = 0;
+        while (ok && j < n) {
+            if (rt_streq(nm[j], v) != 0) dup = 1;
+            j = j + 1;
+        }
+        if (ok && dup == 0 && n < 1024) {
+            j = n - 1;
+            while (j >= 0 && rt_strcmp(nm[j], v) > 0) {
+                nm[j + 1] = nm[j];
+                j = j - 1;
+            }
+            nm[j + 1] = v;
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    out = star != 0 ? empty : "\002";
+    i = 0;
+    while (i < n) {
+        t = out;
+        if (star != 0 && i > 0) t = rt_strcat(t, sep);
+        t = rt_strcat(t, nm[i]);
+        if (star == 0) t = rt_strcat(t, "\001");
+        out = t;
+        i = i + 1;
+    }
+    return out;
 }
 
 /* ---- declare -p ------------------------------------------------------------
