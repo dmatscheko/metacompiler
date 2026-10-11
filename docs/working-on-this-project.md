@@ -668,6 +668,15 @@ memory to the OS**, is stop-the-world, and **only `runtime.c` has one** —
   pointer, and clang had already dropped the owning handle — 9 `string.sub`
   failures under `MEC_GC=stress`, while `off`/`auto`/`poison` saw nothing.
   Interior pointers resolve by `idx = (v - base) / bsize`.
+- **Objects that live for the whole run are allocated in a PERMANENT region**
+  (`PERM_LO` in `runtime.c`): what `boot()` seeds, a layer-2 library's top level
+  (`jsrtlib_boot` brackets it with `js_gc_perm(1)`/`js_gc_perm(0)`), the
+  string-literal and small-integer caches. They are never marked or swept; the
+  region is a root, traced by tag and scanned conservatively each collection,
+  because those objects stay mutable. Marked like the rest of the heap, the whole
+  runtime library is re-traced by every collection, and a language pays for each
+  layer-2 function it never calls (csharp: ~600 instructions per function per
+  collection, against ~200 for a permanent one).
 - **Any new emitted module-level global holding a handle must be pinned with
   `js_gc_pin`** — the emitted module has globals the floor cannot see. `js_gc_pin`
   is the identity in both halves.

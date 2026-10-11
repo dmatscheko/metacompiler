@@ -402,6 +402,33 @@ long GC_COUNT;
 long PINS[8192];     /* js_gc_pin: module globals that hold a handle for ever */
 long PIN_N;
 
+/* ---- the PERMANENT region -------------------------------------------------
+ * Objects that live for the whole run - everything runtime.c's boot() seeds, a
+ * layer-2 library's scope, functions and constants (allocated between
+ * js_gc_perm(1) and js_gc_perm(0) in its jsrtlib_boot), the interned string
+ * literals and the small-integer cache - are allocated here instead of in the
+ * chunks. Marking them every collection made the collector's cost grow with the
+ * size of the language's runtime library although a program uses little of it.
+ *
+ * The region is ONE malloc: cells bump up from PERM_LO, raw buffers bump down
+ * from PERM_HI, and it is full when the two meet - an allocation then falls
+ * back to the ordinary heap, which is always sound. Nothing in it is ever
+ * freed, marked or swept, and gc_try rejects an address in it with two
+ * compares. Permanent objects are still MUTABLE (a library's module variables,
+ * a table filled lazily, a scope that grew into a fresh buffer), so the region
+ * is a ROOT: every collection traces each permanent cell by its tag and scans
+ * the raw half conservatively. That costs a few compares per word, against a
+ * chunk lookup, a mark and a sweep slot per object before.
+ *
+ * PERM_ON counts the open js_gc_perm brackets; non-zero routes ar_alloc_k here. */
+long PERM_LO;
+long PERM_HI;
+long PERM_CTOP;
+long PERM_RBOT;
+long PERM_ON;
+long SMC_YOUNG;      /* cached string literals NOT in the region: 0 skips the SMC root loop */
+long NIC_YOUNG;      /* likewise for the small-integer cache */
+
 /* ----- the three RECOVERABLE-ERROR HOOKS -----------------------------------
  *
  * scope_get, get_member and set_member are shared by all sixteen languages. By
@@ -481,6 +508,8 @@ long bm_new(long nblk) {
 long AR_IX;          /* malloc'd triples lo,hi,chunk - sorted ascending by lo */
 long AR_IX_N;
 long AR_IX_CAP;
+long AR_LO;          /* the lowest payload address of any chunk, and one past the */
+long AR_HI;          /* highest: gc_try rejects anything outside without a search */
 
 void ar_ix_add(long c, long lo, long hi) {
 	long *a;
@@ -509,6 +538,8 @@ void ar_ix_add(long c, long lo, long hi) {
 	a[i * 3 + 1] = hi;
 	a[i * 3 + 2] = c;
 	AR_IX_N = AR_IX_N + 1;
+	if (lo < AR_LO) { AR_LO = lo; }
+	if (hi > AR_HI) { AR_HI = hi; }
 }
 
 /* The chunk whose PAYLOAD contains v, or 0. The ranges are disjoint (each is one
@@ -619,11 +650,33 @@ long ar_block(long need, long kind) {
 	}
 }
 
+/* A block of the permanent region, or 0 when it is full. Every cell is 64 bytes
+ * (cell_new is the only kind-1 allocation), which is what lets gc_roots walk
+ * the cell half by stride. */
+long perm_block(long need, long kind) {
+	long b;
+	if (kind == 1) {
+		if (need != 64 || PERM_CTOP + 64 > PERM_RBOT) { return 0; }
+		b = PERM_CTOP;
+		PERM_CTOP = b + 64;
+		return b;
+	}
+	if (PERM_RBOT - need < PERM_CTOP) { return 0; }
+	PERM_RBOT = PERM_RBOT - need;
+	return PERM_RBOT;
+}
+int is_perm(long h) { return h >= PERM_LO && h < PERM_HI; }
+long perm_used(void) { return (PERM_CTOP - PERM_LO) + (PERM_HI - PERM_RBOT); }
+
 /* kind 1 = the payload is a Cell (traced by its tag), 0 = a raw buffer. */
 char *ar_alloc_k(long n, long kind) {
 	long need = (n + 15) & (0 - 16);
 	long b;
 	if (need < 16) { need = 16; }
+	if (PERM_ON != 0) {
+		b = perm_block(need, kind);
+		if (b != 0) { return (char *)b; }
+	}
 	if (GC_ON != 0) {
 		if (GC_MODE == 2) { gc_collect(); }
 		else if (GC_MODE != 1 && GC_ALLOCED > GC_THRESH) { gc_collect(); }
@@ -638,6 +691,7 @@ void ar_init(void) {
 	long i = 0;
 	AR_CHUNKS = 0; GC_BIG = 0; GC_ON = 0;
 	AR_IX = 0; AR_IX_N = 0; AR_IX_CAP = 0;
+	AR_LO = 9223372036854775807; AR_HI = 0;
 	GC_ALLOCED = 0; GC_LIVE = 0; GC_HEAP = 0; GC_COUNT = 0; PIN_N = 0;
 	/* The same floor a collection leaves behind, so a short program still gets
 	 * one collection instead of running the whole matrix without ever entering
@@ -648,6 +702,14 @@ void ar_init(void) {
 	GC_MTOP = 0;
 	GC_MCAP = 65536;
 	GC_REGS = (long)malloc(512);
+	/* Address space only: the pages are touched as the region fills. */
+	PERM_LO = (long)malloc(8388608);
+	PERM_HI = PERM_LO + 8388608;
+	PERM_CTOP = PERM_LO;
+	PERM_RBOT = PERM_HI;
+	PERM_ON = 0;
+	SMC_YOUNG = 0;
+	NIC_YOUNG = 0;
 }
 
 /* ---------------------------------------------------------------- values */
@@ -764,38 +826,31 @@ void gc_mark(long c, long idx, int deep) {
  *
  * THIS IS THE HOTTEST FUNCTION IN THE COLLECTOR: it is asked about every word of
  * the conservatively scanned C stack and of every raw buffer, and most of those
- * are not pointers. The chunk lookup is ar_ix_find's binary search. */
-void gc_try(long v, int deep) {
-	long c;
+ * are not pointers. The chunk lookup is ar_ix_find's binary search, so the
+ * cheap rejections come first: a small integer, the bytes of a string, a raw
+ * double all fall outside [AR_LO, AR_HI), and a permanent object is never
+ * marked (the region is traced as a root instead). */
+void gc_try_chunk(long v, int deep) {
+	long c = ar_ix_find(v);
 	long *w;
-	long off;
-	if (v < 4096) { return; }
-	c = ar_ix_find(v);
 	if (c == 0) { return; }
 	w = (long *)c;
-	off = v - c - 128;
 	{
-		long idx = off / w[1];
+		long idx = (v - c - 128) / w[1];
 		if (idx < w[3]) { gc_mark(c, idx, deep); }
 	}
 }
+void gc_try(long v, int deep) {
+	if (v < AR_LO || v >= AR_HI) { return; }
+	if (v >= PERM_LO && v < PERM_HI) { return; }
+	gc_try_chunk(v, deep);
+}
 
-void gc_trace(long b, long c) {
-	long *cw = (long *)c;
+/* The children of the cell at b. w[0..6] IS the Cell: tag, a, b, c, d, e, f -
+ * the block address is the cell address (there is no header in front of it). */
+void gc_trace_cell(long b) {
 	long *w = (long *)b;
-	long t;
-	if (cw[6] == 0) {
-		/* A raw buffer reached from the C stack. Its shape is not known here
-		 * (a scope's names/values/type-classes share one block, a string's
-		 * unit array holds code points), so every word in it is a candidate. */
-		long q = b;
-		long end = b + cw[1];
-		while (q + 8 <= end) { long *x = (long *)q; gc_try(x[0], 1); q = q + 8; }
-		return;
-	}
-	/* w[0..6] IS the Cell: tag, a, b, c, d, e, f - the block address is the
-	 * cell address (there is no header in front of it). */
-	t = w[0];
+	long t = w[0];
 	if (t == 4)  { gc_try(w[1], 0); gc_try(w[3], 0); return; }  /* bytes, units */
 	if (t == 5)  { gc_try(w[1], 1); return; }                   /* array elements */
 	if (t == 6)  { gc_try(w[1], 1); gc_try(w[2], 1); return; }  /* keys, values */
@@ -814,6 +869,20 @@ void gc_trace(long b, long c) {
 	 * no children - every field of those is a raw long, not a handle. */
 }
 
+void gc_trace(long b, long c) {
+	long *cw = (long *)c;
+	if (cw[6] == 0) {
+		/* A raw buffer reached from the C stack. Its shape is not known here
+		 * (a scope's names/values/type-classes share one block, a string's
+		 * unit array holds code points), so every word in it is a candidate. */
+		long q = b;
+		long end = b + cw[1];
+		while (q + 8 <= end) { long *x = (long *)q; gc_try(x[0], 1); q = q + 8; }
+		return;
+	}
+	gc_trace_cell(b);
+}
+
 void gc_drain(void) {
 	while (GC_MTOP > 0) {
 		long *ms = (long *)GC_MSTACK;
@@ -822,11 +891,14 @@ void gc_drain(void) {
 	}
 }
 
+/* gc_try's two rejections are spelled out here because most words of a scanned
+ * range are not heap pointers, and clang does not inline gc_try. */
 void gc_scan_range(long lo, long hi) {
 	long p = (lo + 7) & (0 - 8);
 	while (p < hi) {
 		long *x = (long *)p;
-		gc_try(x[0], 1);
+		long v = x[0];
+		if (v >= AR_LO && v < AR_HI && (v < PERM_LO || v >= PERM_HI)) { gc_try_chunk(v, 1); }
 		p = p + 8;
 	}
 }
@@ -906,6 +978,9 @@ void gc_collect(void) {
 	gc_drain();
 	gc_sweep();
 	GC_ALLOCED = 0;
+	/* The permanent region is live by definition; counting it keeps the
+	 * threshold what it would be had those objects been marked. */
+	GC_LIVE = GC_LIVE + perm_used();
 	GC_THRESH = GC_LIVE;
 	if (GC_THRESH < 1048576) { GC_THRESH = 1048576; }
 	GC_COUNT = GC_COUNT + 1;
@@ -965,15 +1040,25 @@ long mk_num_raw(long bits) {
 	return h;
 }
 
+/* Fill slot v of the small-integer cache. A cached cell lives as long as the
+ * cache, so it is allocated permanent. */
+long nic_fill(long v, long bits) {
+	long h;
+	PERM_ON = PERM_ON + 1;
+	h = mk_num_raw(bits);
+	PERM_ON = PERM_ON - 1;
+	if (!is_perm(h)) { NIC_YOUNG = NIC_YOUNG + 1; }
+	NIC[v + 256] = h;
+	return h;
+}
+
 long mk_num(long bits) {
 	long v = small_int_bits(bits);
 	long h;
 	if (v < 0) { return mk_num_raw(bits); }
 	h = NIC[v + 256];
 	if (h != 0) { return h; }
-	h = mk_num_raw(bits);
-	NIC[v + 256] = h;
-	return h;
+	return nic_fill(v, bits);
 }
 long num_bits(long h) { return fa(h); }
 
@@ -1017,12 +1102,15 @@ long str_intern(const char *p, long n) {
 		slot = (slot + 1) & 8191;
 		probes = probes + 1;
 	}
+	if (probes >= 64) { return mk_str(p, n); }
+	/* A cached literal lives as long as the cache: permanent. */
+	PERM_ON = PERM_ON + 1;
 	h = mk_str(p, n);
-	if (probes < 64) {
-		SMC_PTR[slot] = k;
-		SMC_LEN[slot] = n;
-		SMC_VAL[slot] = h;
-	}
+	PERM_ON = PERM_ON - 1;
+	if (!is_perm(h)) { SMC_YOUNG = SMC_YOUNG + 1; }
+	SMC_PTR[slot] = k;
+	SMC_LEN[slot] = n;
+	SMC_VAL[slot] = h;
 	return h;
 }
 
@@ -6452,11 +6540,16 @@ void gc_roots(void) {
 	gc_try(RT_MISS_FN, 1);
 	gc_try(RETSLOT, 1);
 	gc_try(GEN_EXIT, 1);
-	while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; }
+	if (NIC_YOUNG != 0) { while (i < 1281) { gc_try(NIC[i], 1); i = i + 1; } }
 	i = 0;
-	while (i < 8192) { gc_try(SMC_VAL[i], 1); i = i + 1; }
+	if (SMC_YOUNG != 0) { while (i < 8192) { gc_try(SMC_VAL[i], 1); i = i + 1; } }
 	i = 0;
 	while (i < PIN_N) { gc_try(PINS[i], 1); i = i + 1; }
+	/* The permanent region (see PERM_LO): each cell by its tag, and the raw
+	 * half word by word, as gc_trace scans a raw buffer. */
+	i = PERM_LO;
+	while (i < PERM_CTOP) { gc_trace_cell(i); i = i + 64; }
+	gc_scan_range(PERM_RBOT, PERM_HI);
 	i = 0;
 	gc_scan_jb(JBP, JB_DEPTH);
 	/* Every SUSPENDED coroutine stack, the registers it parked with, and the
@@ -6504,6 +6597,14 @@ long js_gc_pin(long v) {
 	return v;
 }
 
+/* js_gc_perm(1) opens and js_gc_perm(0) closes a bracket inside which every
+ * allocation is permanent (see PERM_LO). A -rt-lib library's jsrtlib_boot
+ * brackets its top level with it. No-op in the Go half (abnf/jsrt.go). */
+long js_gc_perm(long on) {
+	if (on != 0) { PERM_ON = PERM_ON + 1; } else { PERM_ON = PERM_ON - 1; }
+	return 0;
+}
+
 /* The recoverable-error hooks. An emitter that wants a name with no binding
  * (or a member read on null/undefined) to be a CATCHABLE exception registers a
  * closure here in its boot block; one that wants the abort registers nothing.
@@ -6531,9 +6632,7 @@ long js_num_i(long v) {
 	if (v >= -256 && v <= 1024) {
 		h = NIC[v + 256];
 		if (h != 0) { return h; }
-		h = mk_num(d_from_long(v));
-		NIC[v + 256] = h;
-		return h;
+		return nic_fill(v, d_from_long(v));
 	}
 	return mk_num(d_from_long(v));
 }
@@ -7041,6 +7140,8 @@ void boot(void) {
 	while (jbi < 512) { long *jp = (long *)JB_MAIN; jp[jbi] = 0; jbi = jbi + 1; }
 	JBP = JB_MAIN;
 	ar_init();
+	/* Everything boot() seeds lives for the whole run. */
+	PERM_ON = 1;
 	u.d = 0.0; DZERO = u.l;
 	u.d = 1.0; DONE = u.l;
 	DINF = 9218868437227405312;
@@ -7197,6 +7298,7 @@ void boot(void) {
 			if (e[0] == 112) { GC_MODE = 3; }     /* p */
 		}
 	}
+	PERM_ON = 0;
 	GC_ON = 1;
 }
 
@@ -7231,7 +7333,9 @@ int main(void) {
 		o_cstr(" live=");
 		o_str(to_string(mk_num(d_from_long(GC_LIVE))));
 		o_cstr(" heap=");
-		o_str(to_string(mk_num(d_from_long(GC_HEAP))));
+		o_str(to_string(mk_num(d_from_long(GC_HEAP + perm_used()))));
+		o_cstr(" perm=");
+		o_str(to_string(mk_num(d_from_long(perm_used()))));
 		o_cstr(" pinned=");
 		o_str(to_string(mk_num(d_from_long(PIN_N))));
 		o_ch(10);

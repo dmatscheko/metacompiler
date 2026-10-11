@@ -12984,6 +12984,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// life of the program and that the C floor's root set cannot otherwise see.
 		// This half is garbage collected by Go, so there is nothing to do.
 		"js_gc_pin": func(a []uint64) uint64 { return a[0] },
+		// js_gc_perm brackets allocations the C floor keeps outside the traced
+		// heap (runtime.c's PERM_LO); nothing to do under Go's collector.
+		"js_gc_perm": func(a []uint64) uint64 { return 0 },
 
 		// The two recoverable-error hooks. An emitter registers a closure here in
 		// its boot block to make "no such variable" / "member of null" a CATCHABLE

@@ -73983,16 +73983,20 @@ entry:
 	br i1 %1, label %boot, label %done
 
 boot:
-	%2 = call i64 @js_scope_new(i64 0)
-	%3 = call i64 @js_gc_pin(i64 %2)
-	store i64 %3, i64* @jsrtlib_env
-	%4 = call i64 @js_arr_new()
-	%5 = call i64 @jsrtlib_run(i64 %3, i64 %4)
+	%2 = call i64 @js_gc_perm(i64 1)
+	%3 = call i64 @js_scope_new(i64 0)
+	%4 = call i64 @js_gc_pin(i64 %3)
+	store i64 %4, i64* @jsrtlib_env
+	%5 = call i64 @js_arr_new()
+	%6 = call i64 @jsrtlib_run(i64 %4, i64 %5)
+	%7 = call i64 @js_gc_perm(i64 0)
 	br label %done
 
 done:
 	ret i64 0
 }
+
+declare i64 @js_gc_perm(i64 %0)
 
 define i64 @js_pyget(i64 %0, i64 %1) {
 entry:
