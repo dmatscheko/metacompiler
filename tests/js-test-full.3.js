@@ -1630,6 +1630,28 @@ function s73() {
         err === "TypeError: Cannot convert undefined or null to object")
 }
 
+// ===== SECTION 74: var is function scoped and hoisted =====
+// A var declared in any nested block (if, a bare block, a loop body, try / catch /
+// finally, switch) is one binding of the whole function, bound to undefined from its
+// entry: readable after the block, before its declaration, by a closure made earlier.
+// A parameter of the same name keeps its argument, a var without an initializer
+// assigns nothing, and an assignment inside a catch clause whose parameter it names
+// lands on the parameter. A for-in/of head without a keyword assigns the existing
+// variable, with var the function's. Values read off node 24.
+function s74() {
+    const f1 = function () { if (true) { var w = 3 } { var z = 4 } for (var i = 0; i < 2; i++) { var q = i } return w + z + q + i }
+    const f2 = function () { try { var t1 = 5 } catch (e) { var t2 = 6 } finally { var t3 = 7 } switch (1) { case 1: var t4 = 8 } return t1 + t3 + t4 + (t2 === undefined ? 100 : 0) }
+    const f3 = function (a) { var r = typeof later; var a; var later = 1; var g = function () { return h }; var h = 9; return r + a + g() }
+    const f4 = function () { try { throw 1 } catch (e) { var e = 2 } return e }
+    const f5 = function () { var n = 1; { var n = 2 } var n; return n }
+    check("vh74a", f1() === 10 && f2() === 120 && f3(7) === "undefined79" && f4() === undefined && f5() === 2)
+    const f6 = function () { var k = 0; for (k of [5, 6]) {} let m = ""; for (m in { a: 1, b: 2 }) {} return k + m }
+    const f7 = function () { for (var [a, b] of [[1, 2], [3, 4]]) {} for (var p in { x: 1 }) {} var [c, { d }] = [5, { d: 6 }]; return a + b + p + c + d }
+    const f8 = function () { const fs = []; for (var i = 0; i < 3; i++) { fs.push(() => i) } return fs.map(f => f()).join() }
+    const f9 = () => { { var av = 5 } return av }
+    check("vh74b", f6() === "6b" && f7() === "7x56" && f8() === "3,3,3" && f9() === 5)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1661,6 +1683,7 @@ function main() {
     s70() // SECTION-CALL 70
     s71() // SECTION-CALL 71
     s73() // SECTION-CALL 73
+    s74() // SECTION-CALL 74
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

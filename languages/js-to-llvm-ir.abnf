@@ -235,15 +235,24 @@ DefaultLabel <~~ push({isdflt: true}) ~~>
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
-// var, let and const all declare a block scoped variable in the current scope.
+// A function's body. Its `var` names are hoisted: bound (to undefined) in the
+// function's own scope on entry, whichever nested block declares them. Twin in
+// js-interpreter.abnf.
+FuncBody    <~~ push(makeFuncBody(pop(), up.start, up.pos)) ~~>
+            = Block ;
+
+// let and const declare a block scoped variable in the current scope; var assigns the
+// one its function body hoisted (makeFuncBody). DeclKw tells the declarators which.
 VarDecl     = VarDeclCore StmtEnd ;
-VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
-            = KwVar Declarator { "," Declarator } ;
+VarDeclCore <~~ push(makeSeq(takeAll())); declKinds.pop() ~~>
+            = DeclKw Declarator { "," Declarator } ;
+DeclKw      <~~ declKinds.push(up.in) ~~>
+            = KwVar ;
 // One declaration list may MIX plain names and destructuring patterns
 // ('var a, [b] = 1'), and a pattern declarator is also what makes
 // 'for (var [d] = 1;;)' a legal for-loop initializer.
 Declarator  = PatternDeclarator | NameDeclarator ;
-NameDeclarator <~~ push(makeDecl(takeAll(), up.in)) ~~>
+NameDeclarator <~~ push(makeDecl(takeAll(), up.in, up.pos)) ~~>
             = NotBindName Id <~~ push(idName(up.in)) ~~> [ "=" AssignExpr ] ;
 PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = DPattern "=" AssignExpr ;
@@ -296,7 +305,7 @@ Throw       <~~ push(makeThrow(pop())) ~~>
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDeclStrict(takeAll())) ~~>
-            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] Block ;
+            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
             = "(" [ ParamSeq ] ")" ;
@@ -778,9 +787,9 @@ AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
 // awaited operand is what tells them apart (see makeAsyncGenFn).
 AsyncFuncExpr = AsyncGenExpr | AsyncPlainExpr ;
 AsyncGenExpr <~~ push(makeAsyncGenExpr(takeAll(), up.in)) ~~>
-            = KwAsync KwFunction "*" [ FnExprName ] ParamList [ UseStrictMark ] Block ;
+            = KwAsync KwFunction "*" [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 AsyncPlainExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
-            = KwAsync KwFunction [ FnExprName ] ParamList [ UseStrictMark ] Block ;
+            = KwAsync KwFunction [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 // The optional name of a function expression, in every one of its three forms. It
 // pushes {fname} rather than nothing: a named function expression keeps ITS OWN name in
 // `f.name`, and never takes the one of the binding it is assigned to.
@@ -789,7 +798,7 @@ FnExprName  <~~ push({fname: idName(up.in)}) ~~>
 // 'function* () {}': the body is an ordinary IR function, and js_genfn turns the closure
 // into a generator function, so calling it produces a generator object.
 GenFuncExpr <~~ push(makeGenFuncExpr(takeAll(), up.in)) ~~>
-            = KwFunction "*" [ NotYieldWord FnExprName ] ParamList [ UseStrictMark ] Block ;
+            = KwFunction "*" [ NotYieldWord FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 // A class EXPRESSION - 'var P = class { ... }' - builds the very same descriptor as a
 // class declaration and evaluates TO it. An anonymous one still needs a name, because
 // super() and the method closures resolve their defining class by name; ClassAnonName
@@ -810,7 +819,7 @@ ClassExprWidened <~~ push(makeClassExpr(takeAll())) ~~>
 
 // The optional name of a function expression is bound only inside its own body (fnSelf).
 FunctionExpr <~~ push(makeFunctionExprItems(takeAll(), up.in)) ~~>
-            = KwFunction [ FnExprName ] ParamList [ UseStrictMark ] Block ;
+            = KwFunction [ FnExprName ] ParamList [ UseStrictMark ] FuncBody ;
 
 // The object literal, with the whole ES2015+ property surface: `key: value`, spread,
 // computed keys, shorthand names, shorthand methods (incl. the async form) and
@@ -833,7 +842,7 @@ SpreadProp  <~~ push({spreadT: pop()}) ~~>
 // error even though the comma operator is fine inside 'a[b, c]'. The '(' form is the
 // computed shorthand METHOD '{[k](x) {}}'.
 ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
-            = "[" AssignExpr "]" ( ":" AssignExpr | ParamList Block ) ;
+            = "[" AssignExpr "]" ( ":" AssignExpr | ParamList FuncBody ) ;
 // A getter takes no parameter and a setter takes exactly one - that is in the grammar
 // of the accessor productions, not an early error, so it is enforced here. The pair
 // becomes an accessor property (js_defprop): reading the key runs the getter with the
@@ -842,12 +851,12 @@ ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
 // ('({get [a]() {}, set [a](b) {}})').
 GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
             = ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams
-              | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) [ UseStrictMark ] Block ;
+              | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) [ UseStrictMark ] FuncBody ;
 GetterParams = "(" ")" ;
 SetterParams = "(" Param ")" ;
 // A shorthand method: '{ m(x) { ... } }', with the async and generator prefixes.
 MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
-            = [ AsyncMod ] [ GenMod ] MemberKey ParamList [ UseStrictMark ] Block ;
+            = [ AsyncMod ] [ GenMod ] MemberKey ParamList [ UseStrictMark ] FuncBody ;
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
 // '{ val }' is '{ val: val }'.
@@ -878,7 +887,7 @@ ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
             | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
-ArrowBlock  <~~ push({body: pop()}) ~~>  = Block NotArrowTail ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = FuncBody NotArrowTail ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = !"{" AssignExpr ;
 
 // Template literals: `text ${expr} more`. Each ${...} is evaluated and coerced to
@@ -928,7 +937,7 @@ ForOf       = ForOfPat | ForOfName | ForOfPath | ForOfNoRef ;
 // assignment form are written, not declared, and the member leaf only exists there.
 ForOfPat    = ForOfPatDecl | ForOfPatAssign ;
 ForOfPatDecl <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" KwVar DPattern ForOfOp Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" DeclKw DPattern <~~ push(forDeclTarget(pop(), up.pos)) ~~> ForOfOp Expression ")" NestedStatement ;
 ForOfPatAssign <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfAPat ForOfOp Expression ")" NestedStatement ;
 ForOfAPat   <~~ push({apat: pop()}) ~~>
@@ -942,8 +951,8 @@ ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
 // 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
 // the same shapes with 'in' are legal uses of an ordinary variable named 'let'.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
-ForOfDecl   = KwVar NotBindName Id <~~ push(idName(up.in)) ~~> ;
-ForOfBare   = NotBindName Id <~~ push(idName(up.in)) ~~> ;
+ForOfDecl   = DeclKw NotBindName Id <~~ push(forDeclTarget({dtype: "id", name: idName(up.in)}, up.pos)) ~~> ;
+ForOfBare   = NotBindName Id <~~ push({apat: {dtype: "id", name: idName(up.in)}}) ~~> ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // The member-path target: 'for (a.b of xs)', 'for (a(x)[1] in d)'. At least one suffix is
@@ -977,8 +986,8 @@ ForOfNoRef  <~~ takeAll(); push(notImplStmt("for-in/of over a non-reference", up
 // rest ('[a, ...r]', '{a, ...r}'), computed and literal keys ('{[k]: v}', '{"a": b}') and
 // arbitrary nesting - so the same production serves the binding here, a destructuring
 // ASSIGNMENT, a destructuring parameter and a destructuring for-of head.
-Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
-            = KwVar DPattern "=" AssignExpr StmtEnd ;
+Destructure <~~ push(makeDestructure(takeAll(), up.pos)); declKinds.pop() ~~>
+            = DeclKw DPattern "=" AssignExpr StmtEnd ;
 
 DPattern    = ArrPattern | ObjPattern ;
 // Every array position may be empty, which is what makes the holes ('[, a]') and the
@@ -1144,32 +1153,32 @@ ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
 // 'static { ... }': a block that runs once, at class definition time, with 'this' bound
 // to the class itself.
 ClassStaticBlock <~~ push({kind: "sblock", body: pop()}) ~~>
-            = "static" KwEnd Block ;
+            = "static" KwEnd FuncBody ;
 // An accessor member. Reading or writing the key on an instance runs the getter/setter
 // with the instance as 'this' - the accessor lives on the class descriptor, and the
 // member lookup follows the __class/__super chain to find it.
 ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
             = MemberMods ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams
-                         | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) Block ;
+                         | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) FuncBody ;
 // 'async m() {}' and the generator forms. An async method's body is compiled as a
 // generator body driven by js_jsasyncfn (see makeAsyncFn); a generator method goes
 // through the generator lowering.
 ClassSpecialMethod <~~ push(makeClassSpecial(takeAll())) ~~>
-            = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey ParamList Block ;
+            = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey ParamList FuncBody ;
 // A private member '#x'. Private names are not properties in the spec, but they behave
 // exactly like non-enumerable ones, so they are stored under the mangled key
 // '__#<body>#x' (privDeclare): the
 // '__' prefix is what keeps them out of js_keys, and so out of for-in and object spread.
 ClassPrivate <~~ push(makeClassPrivate(takeAll())) ~~>
-            = MemberMods "#" Id <~~ push(privDeclare(idName(up.in))) ~~> ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+            = MemberMods "#" Id <~~ push(privDeclare(idName(up.in))) ~~> ( ParamList FuncBody | [ "=" AssignExpr ] [ ";" ] ) ;
 // A computed key: 'class A { ["a" + "b"]() {} }'. The key expression is evaluated once,
 // when the class is defined.
 ClassComputed <~~ push(makeClassComputed(takeAll())) ~~>
-            = MemberMods "[" AssignExpr "]" ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+            = MemberMods "[" AssignExpr "]" ( ParamList FuncBody | [ "=" AssignExpr ] [ ";" ] ) ;
 // A member whose key is a string or number literal - class a { 'constructor'() {} },
 // class a { 1 = 2 }. Tried before MethodDef/FieldDef, which only know the bare-Id form.
 ClassLiteralMember <~~ push(makeClassComputed(takeAll())) ~~>
-            = MemberMods ( StringLit | NumberLit ) ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+            = MemberMods ( StringLit | NumberLit ) ( ParamList FuncBody | [ "=" AssignExpr ] [ ";" ] ) ;
 // The key of a widened member: a name, a string/number literal or a computed [expr].
 // PropKey (the object-literal key) has no computed form because ComputedProp spells that
 // case out separately; here the computed form has to be part of the key itself, because
@@ -1178,13 +1187,13 @@ MemberKey   = Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit | "[" Assig
 
 // A constructor.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
-            = KwConstructor CtorParams Block ;
+            = KwConstructor CtorParams FuncBody ;
 CtorParams  <~~ push(takeAll()) ~~>
             = "(" [ ParamSeq ] ")" ;
 
 // A method (instance unless 'static').
 MethodDef   <~~ push(makeMethod(takeAll())) ~~>
-            = MemberMods Id <~~ push({mname: idName(up.in)}) ~~> ParamList Block ;
+            = MemberMods Id <~~ push({mname: idName(up.in)}) ~~> ParamList FuncBody ;
 
 // A field (instance unless 'static'), with an optional initializer.
 FieldDef    <~~ push(makeField(takeAll())) ~~>
@@ -1304,11 +1313,11 @@ Debugger    <~~ push(function(b) { return b }) ~~>
 // The declaration forms of the same three: async, async generator and generator.
 AsyncFuncDecl = AsyncGenDecl | AsyncPlainDecl ;
 AsyncGenDecl <~~ push(makeAsyncGenDecl(takeAll())) ~~>
-            = KwAsync KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] Block ;
+            = KwAsync KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 AsyncPlainDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
-            = KwAsync KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] Block ;
+            = KwAsync KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
-            = KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] Block ;
+            = KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
@@ -5966,10 +5975,82 @@ NotFuncHead = :script(~~
     function makeDestructure(items, pos) {
         var pat = items[0]
         var init = items[1]
+        var ext = "js_scope_decl"
+        if (declIsVar()) {
+            notePatVars(pat, pos)
+            ext = "js_scope_set_or_create"
+        }
         return function(b) {
             var r = init(b)
-            return bindPattern(r.b, pat, r.v, "js_scope_decl")
+            return bindPattern(r.b, pat, r.v, ext)
         }
+    }
+
+    // ----- var: hoisted to the function scope -----
+    // The keyword of every declaration being walked, innermost last (DeclKw pushes,
+    // the declaration's own tag pops), and the var names the walk has met, each with
+    // its source position: the FuncBody whose span holds a name claims it, and the
+    // inner bodies are walked - and claim - first. buildMain claims the rest. Twin in
+    // js-interpreter.abnf.
+    var declKinds = []
+    var varRecs = []
+    function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
+    function claimVars(from, to) {
+        var names = []
+        var keep = []
+        for (var i = 0; i < varRecs.length; i++) {
+            var r = varRecs[i]
+            if (r.at >= from && r.at <= to) {
+                if (names.indexOf(r.name) < 0) { names.push(r.name) }
+            } else { keep.push(r) }
+        }
+        varRecs = keep
+        return names
+    }
+    // Binds each hoisted name to undefined in the current scope unless the scope
+    // already has it (a parameter keeps its argument, the program scope its println):
+    // js_scope_own answers the binding's value or undefined, and declaring a name
+    // with the value it already holds changes nothing.
+    function emitHoist(b, names) {
+        for (var i = 0; i < names.length; i++) {
+            var nm = emitStr(b, names[i])
+            callExt(b, "js_scope_decl", [curScopeV, nm, callExt(b, "js_scope_own", [curScopeV, nm])])
+        }
+        return b
+    }
+    function makeFuncBody(bodyT, from, to) {
+        var names = claimVars(from, to)
+        if (names.length == 0) { return bodyT }
+        return function(b) { return bodyT(emitHoist(b, names)) }
+    }
+    // The leaf names of a binding pattern.
+    function patNames(pat, out) {
+        if (pat.dtype == "id") { out.push(pat.name) }
+        else if (pat.dtype == "rest") { patNames(pat.pat, out) }
+        else if (pat.dtype == "arr") {
+            for (var i = 0; i < pat.elems.length; i++) { patNames(pat.elems[i], out) }
+        } else if (pat.dtype == "obj") {
+            for (var f = 0; f < pat.fields.length; f++) {
+                if (pat.fields[f].dtype == "orest") { out.push(pat.fields[f].name) } else { patNames(pat.fields[f].pat, out) }
+            }
+        }
+        return out
+    }
+    function notePatVars(pat, pos) {
+        var ns = patNames(pat, [])
+        for (var i = 0; i < ns.length; i++) { varRecs.push({name: ns[i], at: pos}) }
+    }
+    // A for-in/of head with a declaration keyword: let / const bind the target afresh
+    // (a plain name in the loop's one slot), var assigns the hoisted names.
+    function forDeclTarget(pat, pos) {
+        var isVar = declIsVar()
+        declKinds.pop()
+        if (isVar) {
+            notePatVars(pat, pos)
+            return {apat: pat}
+        }
+        if (pat.dtype == "id") { return pat.name }
+        return pat
     }
     // The destructuring-target form of a super property (see ATargetSuper). A bare
     // 'super.d' is its own leaf kind, which bindPattern stores through js_supset; with
@@ -6807,11 +6888,21 @@ NotFuncHead = :script(~~
     function exprToClause(t) {
         return function(b) { return t(b).b }
     }
-    // items = [name] or [name, initThunk].
-    function makeDecl(items, txt) {
+    // items = [name] or [name, initThunk]. A var assigns the binding its function body
+    // hoisted, and without an initializer emits nothing at all.
+    function makeDecl(items, txt, pos) {
         var name = items[0]
         // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
+        if (declIsVar()) {
+            varRecs.push({name: name, at: pos})
+            return function(b) {
+                if (items.length == 1) { return b }
+                var vr = items[1](b)
+                callExt(vr.b, "js_scope_set_or_create", [curScopeV, emitStr(vr.b, name), vr.v])
+                return vr.b
+            }
+        }
         return function(b) {
             var v = hUndef
             if (items.length > 1) {
@@ -7137,6 +7228,14 @@ NotFuncHead = :script(~~
             items.push(itemsIn[bi])
         }
         emitStrict = fileStrict
+        // Every var no function body claimed is the program's own, hoisted in front of
+        // its statements.
+        var topVars = claimVars(0, 2147483647)
+        if (topVars.length > 0) {
+            var hoisted = [function(hb) { return emitHoist(hb, topVars) }]
+            for (var hi = 0; hi < items.length; hi++) { hoisted.push(items[hi]) }
+            items = hoisted
+        }
         // The walk of an imported file ends here too (importDepth > 0): stash its
         // top-level statement thunks for the real jsrun instead of emitting a second one.
         if (importDepth > 0) {
