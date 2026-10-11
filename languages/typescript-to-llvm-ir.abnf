@@ -4584,6 +4584,8 @@ NotFuncHead = :script(~~
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
             if (m.cname != undefined) { info.name = m.cname; continue }
+            // See the twin of this comment in js-to-llvm-ir.abnf.
+            if (m.ext == "Object") { m = {extT: makeVarRef("Object")} }
             if (m.ext != undefined) { info.superName = m.ext; continue }
             // See the twin of this comment in js-to-llvm-ir.abnf.
             if (m.extT != undefined) {
@@ -4610,7 +4612,8 @@ NotFuncHead = :script(~~
         if (info.extT != null) {
             var hr = info.extT(b)
             b = hr.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.superName), hr.v])
+            // See the twin of this comment in js-to-llvm-ir.abnf.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.superName), callExt(b, "js_jsheritage", [hr.v])])
         }
         var clsV = callExt(b, "js_obj_new", [])
         clsRawSet(b, clsV, emitStr(b, "__isclass"), hTrue)

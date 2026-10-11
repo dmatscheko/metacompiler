@@ -3204,6 +3204,20 @@ function s56() {
         && Object.getOwnPropertyNames(Array).join() === "length,name,prototype,isArray,from,fromAsync,of");
 }
 
+// ===== SECTION 57: extends Object =====
+// `class A extends Object` is a derived class whose parent constructor does nothing:
+// super() is required and returns, and a default constructor works. Values read off
+// node 24.
+class S57A extends Object {}
+class S57B extends Object { x: number; constructor(x: number) { super(); this.x = x; } m(): number { return this.x + 1; } }
+class S57C extends S57B { m(): number { return super.m() * 10; } }
+function s57() {
+    const a = new S57A();
+    const c = new S57C(2);
+    check("xob01", a instanceof S57A && a instanceof Object && Object.keys(a).length === 0 && String(a) === "[object Object]");
+    check("xob02", new S57B(4).m() === 5 && c.m() === 30 && c instanceof S57B && JSON.stringify(c) === '{"x":2}');
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3263,6 +3277,7 @@ function main(): number {
     s54(); // SECTION-CALL 54
     s55(); // SECTION-CALL 55
     s56(); // SECTION-CALL 56
+    s57(); // SECTION-CALL 57
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

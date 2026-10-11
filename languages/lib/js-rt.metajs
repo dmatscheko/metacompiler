@@ -1982,6 +1982,21 @@ function jvProtoTag(v) {
     return "[object Object]"
 }
 
+// `class A extends Object`: a class descriptor stands in for the Object global. Twin
+// of js_jsheritage in abnf/jsrtjsprint.go, which says why.
+var jvObjectRoot = anytype
+function js_jsheritage(v) {
+    if (!jvIsObjectGlobal(v)) { return v }
+    if (jvObjectRoot === undefined) {
+        var r = {}
+        r["__isclass"] = true
+        r["__name"] = "Object"
+        r["__ctor"] = function () { return undefined }
+        jvObjectRoot = r
+    }
+    return jvObjectRoot
+}
+
 // Object.prototype's four methods, applied to a receiver. No value here has the
 // prototype chain they are inherited through, so a call or a value read that finds
 // no member of one of these names lands here. Twins: jsvProtoApply in

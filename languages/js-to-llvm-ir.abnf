@@ -6050,6 +6050,9 @@ NotFuncHead = :script(~~
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
             if (m.cname != undefined) { info.name = m.cname; continue }
+            // `extends Object` is read as the heritage EXPRESSION `Object`, so that
+            // js_jsheritage below sees the value the name holds at run time.
+            if (m.ext == "Object") { m = {extT: makeVarRef("Object")} }
             if (m.ext != undefined) { info.superName = m.ext; continue }
             // A heritage EXPRESSION. The value is bound to a synthetic scope name here, at
             // BUILD time, so that emitClass and emitClassFunc keep resolving the parent by
@@ -6079,7 +6082,9 @@ NotFuncHead = :script(~~
         if (info.extT != null) {
             var hr = info.extT(b)
             b = hr.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.superName), hr.v])
+            // js_jsheritage stands a class descriptor in for the Object global, which
+            // is not one here; any other value comes back unchanged.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.superName), callExt(b, "js_jsheritage", [hr.v])])
         }
         var clsV = callExt(b, "js_obj_new", [])
         clsRawSet(b, clsV, emitStr(b, "__isclass"), hTrue)

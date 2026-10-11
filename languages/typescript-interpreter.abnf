@@ -6434,6 +6434,12 @@ NotFuncHead = :script(~~
     function makeStaticBlock(body) { return {kind: "staticblock", body: body} }
 
     // See the twin of this comment in js-interpreter.abnf.
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsObjectRootClass = {"__isclass": true, "__name": "Object", "__ctor": function() { return undefined }}
+    function jsHeritage(v) {
+        if (v === jsObjectGlobal) { return jsObjectRootClass }
+        return v
+    }
     function makeClassValue(items) {
         var name = ""
         var superName = null
@@ -6468,11 +6474,12 @@ NotFuncHead = :script(~~
             cls["__name"] = name
             if (superT != null) {
                 var supv = anytype // A heritage expression yields a class descriptor.
-                supv = superT()
+                supv = jsHeritage(superT())
                 if (supv == undefined || supv == null || !supv.__isclass) fail("class heritage is not a class")
                 cls["__super"] = supv
             } else if (superName != null) {
-                var sup = getVar(superName)
+                var sup = anytype // A class descriptor, or what the name holds instead.
+                sup = jsHeritage(getVar(superName))
                 if (sup == undefined || !sup.__isclass) fail("unknown superclass: " + superName)
                 cls["__super"] = sup
             }

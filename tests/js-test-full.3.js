@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-62.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-63.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,10 +6,10 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-62, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-63, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
-//                             hasOwnProperty, delete, Object.prototype
+//                             hasOwnProperty, delete, Object.prototype, extends Object
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1288,6 +1288,23 @@ function s62() {
         && Object.getOwnPropertyNames(Object).length === 26)
 }
 
+// ===== SECTION 63: extends Object =====
+// `class A extends Object` is a derived class whose parent constructor does nothing:
+// super() is required and returns, a default constructor works, and the heritage may
+// also be an expression that evaluates to Object. Values read off node 24.
+class A63 extends Object {}
+class B63 extends Object { constructor(x) { super(); this.x = x } m() { return this.x + 1 } }
+class C63 extends B63 { m() { return super.m() * 10 } }
+function o63() { return Object }
+class D63 extends o63() { constructor() { super(); this.d = 1 } }
+function s63() {
+    var a = new A63()
+    var c = new C63(2)
+    check("xob1", a instanceof A63 && a instanceof Object && Object.keys(a).length === 0 && String(a) === "[object Object]")
+    check("xob2", new B63(4).m() === 5 && c.m() === 30 && c instanceof B63 && JSON.stringify(c) === '{"x":2}')
+    check("xob3", JSON.stringify(new D63()) === '{"d":1}' && new (class extends (Object) {})() instanceof Object)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1309,6 +1326,7 @@ function main() {
     s60() // SECTION-CALL 60
     s61() // SECTION-CALL 61
     s62() // SECTION-CALL 62
+    s63() // SECTION-CALL 63
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

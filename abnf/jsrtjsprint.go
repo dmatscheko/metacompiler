@@ -1935,6 +1935,27 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return w(o)
 	}
 
+	// `class A extends Object`: the Object global is not a class descriptor here, so
+	// the heritage stands for this one - no members, and a constructor that does
+	// nothing, which is all Object's own construction gives a subclass instance. Any
+	// other heritage value comes back unchanged. Twins: js_jsheritage in
+	// languages/lib/js-rt.metajs and jsHeritage in both *-interpreter.abnf.
+	var objectRoot *jsObject
+	m["js_jsheritage"] = func(a []uint64) uint64 {
+		if !jsvIsObjectGlobal(u(a[0])) {
+			return a[0]
+		}
+		if objectRoot == nil {
+			objectRoot = newJSObject()
+			objectRoot.set("__isclass", true)
+			objectRoot.set("__name", "Object")
+			objectRoot.set("__ctor", jsHostFunc("Object", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return jsUndef
+			}))
+		}
+		return w(objectRoot)
+	}
+
 	// js_jsmget hides the String/Array method names from js_get, so that the CALL
 	// site falls into js_jsmcall below instead of the shared boundMethod path, whose
 	// semantics differ for several of them.
