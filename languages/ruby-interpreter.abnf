@@ -3311,7 +3311,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (op == "/") { return {v: bigOut(bigDivMod(a, b).q)} }
         if (op == "%") { return {v: bigOut(bigDivMod(a, b).r)} }
         if (op == "**") {
-            if (b.sign < 0 && !bigIsZero(b)) { return {v: mkFlo(Math.pow(bigToNum(l), bigToNum(r)))} }
+            if (b.sign < 0 && !bigIsZero(b)) {
+                if (typeof r == "number" && r >= -4096) { return {v: ratPow(mkRat(l, 1), r)} }
+                return {v: mkFlo(Math.pow(bigToNum(l), bigToNum(r)))}
+            }
             var e = bigToNum(r)
             if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
             return {v: bigOut(bigPow(a, e))}
@@ -4787,7 +4790,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (op == "/") { return idiv(l, r) }
         if (op == "%") { return imod(l, r) }
         if (op == "**") {
-            if (r < 0) { return mkFlo(Math.pow(l, r)) }
+            // A negative Integer power is an exact Rational (2 ** -1 is (1/2)).
+            // ... except a base of 1 or -1, which MRI answers with an Integer.
+            if (r < 0) {
+                if (l == 1 || l == 0 - 1) { return imod(r, 2) == 0 ? 1 : l }
+                if (r >= -4096) { return ratPow(mkRat(l, 1), r) }
+                return mkFlo(Math.pow(l, r))
+            }
             var pw = Math.pow(l, r)
             if (over53(pw) && r <= 4096) { return bigOut(bigPow(bigOf(l), r)) }
             return pw
@@ -7370,7 +7379,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         if (name == "fdiv") { return mkFlo(intFdiv(t, args[0])) }
-        if (name == "pow") { return rbin("**", t, args[0]) }
+        if (name == "pow" && args.length < 2) { return rbin("**", t, args[0]) }
         return numberMethod(t, name, args, blk)
     }
     // ----- Numeric#div / #divmod / #modulo / #rationalize -----
@@ -7549,7 +7558,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "zero?") { return numEq(t.re, 0) && numEq(t.im, 0) }
         if (name == "real?") { return false }
         if (cpxUndefNames.indexOf(name) >= 0) {
-            raiseErr("NoMethodError", "undefined method `" + name + "' for " + rinspect(t) + ":Complex")
+            noMethod(t, name)
         }
         var into = ""
         if (name == "to_i" || name == "to_int") { into = "Integer" }
@@ -7585,7 +7594,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "abs" || name == "magnitude") {
             if (isRat(t)) { return numCmp(t.n, 0) < 0 ? mkRat(rneg(t.n), t.d) : t }
             var x2 = toF(t)
-            return mkFlo(x2 < 0 ? 0 - x2 : x2)
+            return mkFlo(signNeg(x2) ? 0 - x2 : x2)
         }
         // #floor / #ceil / #round all take an optional ndigits, and only a POSITIVE
         // one answers a Float (and does not raise on an infinity); 0 and negatives
@@ -7620,7 +7629,194 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "integer?") { return false }
         if (name == "real") { return reOf(t) }
         if (name == "imaginary" || name == "imag") { return imOf(t) }
+        var nm = anytype
+        nm = numMore(t, name, args)
+        if (nm !== undefined) { return nm }
         noMethod(t, name)
+    }
+    // Numeric's remaining public methods (MRI 2.6) for an Integer, a Float, a
+    // Rational and a Complex, past what each type's own arms answer. undefined for a
+    // name the receiver's class does not have. Twins: rubyNumMore in
+    // abnf/jsrtruby.go, rbNumMore in lib/ruby-rt.metajs.
+    function numMore(t, name, args) {
+        var isI = typeof t == "number" || isBig(t)
+        if (name == "dup" || name == "clone") { return t }
+        if (name == "eql?") { return arrEql(t, args[0]) }
+        if (name == "nonzero?") { return numEq(t, 0) ? null : t }
+        if (isCpx(t)) {
+            var cd = args[0]
+            if (name == "abs2") { return numBin("+", numBin("*", t.re, t.re), numBin("*", t.im, t.im)) }
+            if (name == "coerce") { return [isCpx(cd) ? cd : mkCpx(cd, 0), t] }
+            // #quo and #fdiv divide each part by a real divisor.
+            if ((name == "quo" || name == "fdiv") && !isCpx(cd)) {
+                var cre = anytype
+                var cim = anytype
+                cre = name == "quo" ? numMore(t.re, "quo", args) : mkFlo(toF(t.re) / toF(cd))
+                cim = name == "quo" ? numMore(t.im, "quo", args) : mkFlo(toF(t.im) / toF(cd))
+                return mkCpx(cre, cim)
+            }
+            return undefined
+        }
+        if (name == "abs2") { return numBin("*", t, t) }
+        if (name == "conj" || name == "conjugate") { return t }
+        if (name == "real?") { return true }
+        if (name == "rect" || name == "rectangular") { return [t, 0] }
+        if (name == "i") { return mkCpx(0, t) }
+        if (name == "arg" || name == "angle" || name == "phase" || name == "polar") {
+            // A Float's sign BIT decides (-0.0.arg is pi) and NaN answers itself.
+            var ar = anytype
+            ar = 0
+            if (isFlo(t)) {
+                if (t.f !== t.f) { ar = t } else if (signNeg(t.f)) { ar = mkFlo(Math.PI) }
+            } else if (numCmp(t, 0) < 0) { ar = mkFlo(Math.PI) }
+            if (name == "polar") { return [mcall(t, "abs", [], null), ar] }
+            return ar
+        }
+        if (name == "coerce") {
+            var co = args[0]
+            var coI = typeof co == "number" || isBig(co)
+            if (isI) { return coI ? [co, t] : [mkFlo(toF(co)), mkFlo(toF(t))] }
+            if (isRat(t)) {
+                if (coI) { return [mkRat(co, 1), t] }
+                return isFlo(co) ? [co, mkFlo(toF(t))] : [co, t]
+            }
+            return [mkFlo(toF(co)), t]
+        }
+        // #quo is exact division: a Rational unless a Float takes part.
+        if (name == "quo") {
+            var qy = args[0]
+            if (isFlo(t) || isFlo(qy)) { return numBin("/", mkFlo(toF(t)), qy) }
+            if (numEq(qy, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+            return numBin("/", asRat(t), asRat(qy))
+        }
+        // #remainder truncates where #modulo floors: the modulo, moved by one divisor
+        // when it is nonzero and the operands' signs differ.
+        if (name == "remainder") {
+            var ry = args[0]
+            var rm = anytype
+            rm = numBin("%", t, ry)
+            if (!numEq(rm, 0) && (numCmp(t, 0) < 0) != (numCmp(ry, 0) < 0)) { return numBin("-", rm, ry) }
+            return rm
+        }
+        if (isFlo(t)) {
+            if (name == "next_float") { return mkFlo(floStep(t.f, 1)) }
+            if (name == "prev_float") { return mkFlo(floStep(t.f, 0 - 1)) }
+        }
+        if (!isI) {
+            if (name == "fdiv") { return mkFlo(toF(t) / toF(args[0])) }
+            return undefined
+        }
+        if (name == "ord") { return t }
+        if (name == "gcd" || name == "lcm" || name == "gcdlcm") {
+            var gy = args[0]
+            if (typeof gy != "number" && !isBig(gy)) { raiseErr("TypeError", "not an integer") }
+            var g = anytype
+            g = numGcd(t, gy)
+            if (name == "gcd") { return g }
+            var l = anytype
+            l = numEq(g, 0) ? 0 : realAbs(numBin("*", numBin("/", t, g), gy))
+            return name == "lcm" ? l : [g, l]
+        }
+        if (name == "allbits?") { return numEq(numBin("&", t, args[0]), args[0]) }
+        if (name == "anybits?") { return !numEq(numBin("&", t, args[0]), 0) }
+        if (name == "nobits?") { return numEq(numBin("&", t, args[0]), 0) }
+        if (name == "bit_length") { return intBitLen(t) }
+        // Integer#size is the machine bytes: 8 for anything a Fixnum or a one-word
+        // Bignum holds, then whole bytes of the magnitude.
+        if (name == "size") {
+            var sb = Math.ceil(intBitLen(realAbs(t)) / 8)
+            return sb > 8 ? sb : 8
+        }
+        if (name == "digits") {
+            var db = anytype
+            db = args.length > 0 ? args[0] : 10
+            if (numCmp(db, 0) < 0) { raiseErr("ArgumentError", "negative radix") }
+            if (numCmp(db, 2) < 0) { raiseErr("ArgumentError", "invalid radix " + intText(db)) }
+            if (numCmp(t, 0) < 0) { raiseErr("Math::DomainError", "out of domain") }
+            var dv = anytype
+            dv = t
+            var ds = [numBin("%", dv, db)]
+            dv = numBin("/", dv, db)
+            while (numCmp(dv, 0) > 0) {
+                ds.push(numBin("%", dv, db))
+                dv = numBin("/", dv, db)
+            }
+            return ds
+        }
+        // Integer#pow(b, m) is (self ** b) % m by square-and-multiply, so the power
+        // itself is never formed.
+        if (name == "pow" && args.length > 1) {
+            var pe = anytype
+            var pm = anytype
+            pe = args[0]
+            pm = args[1]
+            if (!(typeof pe == "number" || isBig(pe))) { raiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer") }
+            if (!(typeof pm == "number" || isBig(pm))) { raiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers") }
+            if (numCmp(pe, 0) < 0) { raiseErr("RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified") }
+            // MRI 2.6 answers a zero exponent with 1, reduced only by a NEGATIVE
+            // modulus: 5.pow(0, 1) is 1 and 5.pow(0, -7) is -6.
+            if (numEq(pe, 0)) { return numCmp(pm, 0) > 0 ? 1 : numBin("+", 1, pm) }
+            var pr = anytype
+            var pb = anytype
+            pr = 1
+            pb = numBin("%", t, pm)
+            while (numCmp(pe, 0) > 0) {
+                if (numEq(numBin("%", pe, 2), 1)) { pr = numBin("%", numBin("*", pr, pb), pm) }
+                pb = numBin("%", numBin("*", pb, pb), pm)
+                pe = numBin("/", pe, 2)
+            }
+            return numBin("%", pr, pm)
+        }
+        if (name == "[]") { return intBitAt(t, args[0]) }
+        return undefined
+    }
+    // Euclid on exact Integers, a big where needed.
+    function numGcd(a, b) {
+        var x = anytype
+        var y = anytype
+        x = realAbs(a)
+        y = realAbs(b)
+        while (!numEq(y, 0)) { var t = anytype; t = numBin("%", x, y); x = y; y = t }
+        return x
+    }
+    // Integer#bit_length: the bits of x, or of ~x for a negative x.
+    function intBitLen(x) {
+        var v = anytype
+        v = numCmp(x, 0) < 0 ? numBin("-", rneg(x), 1) : x
+        var n = 0
+        while (numCmp(v, 4294967296) >= 0) { v = numBin("/", v, 4294967296); n = n + 32 }
+        while (numCmp(v, 0) > 0) { v = numBin("/", v, 2); n = n + 1 }
+        return n
+    }
+    // Float#next_float (dir 1) and #prev_float (dir -1), without bit access: the gap
+    // to the neighbour is the unit in the last place of the binade |x| sits in, or
+    // half of it stepping down out of an exact power of two. Every scaling here is
+    // by a power of two inside the normal range, so it is exact. Twins: math.Nextafter
+    // in abnf/jsrtruby.go, rbFloStep in lib/ruby-rt.metajs.
+    function floStep(x, dir) {
+        if (x !== x) { return x }
+        var tiny = 1
+        for (var i = 0; i < 1074; i++) { tiny = tiny / 2 }
+        if (x == 0) { return dir > 0 ? tiny : 0 - tiny }
+        if (x - x !== 0) {
+            if ((x > 0) == (dir > 0)) { return x }
+            var mx = 1
+            for (var j = 0; j < 1023; j++) { mx = mx * 2 }
+            mx = (mx - mx / 9007199254740992) * 2
+            return x > 0 ? mx : 0 - mx
+        }
+        var a = x < 0 ? 0 - x : x
+        var p = 1
+        while (p <= a / 2) { p = p * 2 }
+        while (p > a) { p = p / 2 }
+        var ulp = p
+        for (var k = 0; k < 52; k++) { ulp = ulp / 2 }
+        if (ulp < tiny) { ulp = tiny }
+        var up = (x > 0) == (dir > 0)
+        if (!up && a == p && ulp / 2 >= tiny) { ulp = ulp / 2 }
+        var r = up ? a + ulp : a - ulp
+        if (x > 0) { return r }
+        return r == 0 ? 0 / (0 - 1) : 0 - r
     }
     function mcall(target, name, args, blk) {
         // Object#send / #__send__ / #public_send: the method NAME is the first
@@ -7793,10 +7989,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (target < 0 || target > 255) { raiseErr("RangeError", intStr(target) + " out of char range") }
                 return String.fromCharCode(target)
             }
-            if (name == "gcd") {
-                if (typeof args[0] != "number" && !isBig(args[0])) { raiseErr("TypeError", "not an integer") }
-                return gcd2(target, toF(args[0]))
-            }
             // Integer is a real number with denominator 1, always finite.
             if (name == "numerator" || name == "real") { return target }
             if (name == "denominator") { return 1 }
@@ -7806,7 +7998,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "infinite?") { return null }
             if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(target, name, args) }
             if (name == "fdiv") { return mkFlo(intFdiv(target, args[0])) }
-            if (name == "pow") { return rbin("**", target, args[0]) }
+            if (name == "pow" && args.length < 2) { return rbin("**", target, args[0]) }
             if (name == "times") {
                 for (var ni = 0; ni < target; ni++) { blockCall(blk, [ni]) }
                 return target
@@ -7819,6 +8011,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var wi = target; wi >= toF(args[0]); wi--) { blockCall(blk, [wi]) }
                 return target
             }
+            var im = anytype
+            im = numMore(target, name, args)
+            if (im !== undefined) { return im }
             noMethod(target, name)
         }
         if (target === true || target === false) {
@@ -11781,6 +11976,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // FloatDomainError < RangeError is what an infinity or a NaN raises when it is
     // asked for an Integer - Float::INFINITY.to_i and "%d" % Float::INFINITY both.
     hostGlobals["FloatDomainError"] = mkBuiltinClass("FloatDomainError", hostGlobals["RangeError"])
+    // Math::DomainError < StandardError, a scoped constant of Math (MRI 2.6), what
+    // Integer#digits raises on a negative receiver.
+    hostGlobals["Math::DomainError"] = mkBuiltinClass("Math::DomainError", stdErr)
+    hostGlobals["Math"]["$c$DomainError"] = hostGlobals["Math::DomainError"]
     // Exception#initialize / #message: the message defaults to the class name, which
     // is what `raise S18Sub` (no message) has to produce.
     function excInitFn() {

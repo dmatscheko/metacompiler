@@ -35,6 +35,7 @@ func init() {
 	// plain package var and rubyBuiltinClass makes a class object for any name, so
 	// this is the whole registration.
 	rubyExcParent["FloatDomainError"] = "RangeError"
+	rubyExcParent["Math::DomainError"] = "StandardError"
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		rt.addRubyFmtExterns(m)
 	})
@@ -1126,29 +1127,37 @@ var rubyRespondNames = map[string][]string{
 	"private": {"format", "lambda", "loop", "p", "print", "printf", "proc", "puts", "raise",
 		"rand", "require", "sprintf"},
 	"Integer": {"%", "&", "*", "**", "+", "+@", "-", "-@", "/", "<", "<=", "<=>", ">", ">=",
-		"^", "abs", "ceil", "chr", "denominator", "div", "divmod", "equal?", "even?", "fdiv",
-		"finite?", "floor", "frozen?", "gcd", "imag", "imaginary", "infinite?", "instance_of?",
-		"instance_variables", "integer?", "is_a?", "kind_of?", "magnitude", "modulo", "negative?",
-		"next", "nil?", "numerator", "odd?", "positive?", "pow", "pred", "public_send",
-		"rationalize", "real", "round", "send", "succ", "to_c", "to_f", "to_i", "to_int", "to_r",
-		"truncate", "zero?", "|"},
+		"[]", "^", "abs", "abs2", "allbits?", "angle", "anybits?", "arg", "bit_length", "ceil",
+		"chr", "clone", "coerce", "conj", "conjugate", "denominator", "digits", "div", "divmod",
+		"dup", "eql?", "equal?", "even?", "fdiv", "finite?", "floor", "frozen?", "gcd", "gcdlcm",
+		"i", "imag", "imaginary", "infinite?", "instance_of?", "instance_variables", "integer?",
+		"is_a?", "kind_of?", "lcm", "magnitude", "modulo", "negative?", "next", "nil?", "nobits?",
+		"nonzero?", "numerator", "odd?", "ord", "phase", "polar", "positive?", "pow", "pred",
+		"public_send", "quo", "rationalize", "real", "real?", "rect", "rectangular", "remainder",
+		"round", "send", "size", "succ", "to_c", "to_f", "to_i", "to_int", "to_r", "truncate",
+		"zero?", "|"},
 	"Float": {"%", "*", "**", "+", "+@", "-", "-@", "/", "<", "<=", "<=>", ">", ">=", "abs",
-		"ceil", "denominator", "div", "divmod", "equal?", "finite?", "floor", "frozen?", "imag",
-		"imaginary", "infinite?", "instance_of?", "instance_variables", "integer?", "is_a?",
-		"kind_of?", "magnitude", "modulo", "nan?", "negative?", "nil?", "numerator", "positive?",
-		"public_send", "rationalize", "real", "round", "send", "to_c", "to_f", "to_i", "to_int",
-		"to_r", "truncate", "zero?"},
+		"abs2", "angle", "arg", "ceil", "clone", "coerce", "conj", "conjugate", "denominator",
+		"div", "divmod", "dup", "eql?", "equal?", "fdiv", "finite?", "floor", "frozen?", "i",
+		"imag", "imaginary", "infinite?", "instance_of?", "instance_variables", "integer?",
+		"is_a?", "kind_of?", "magnitude", "modulo", "nan?", "negative?", "next_float", "nil?",
+		"nonzero?", "numerator", "phase", "polar", "positive?", "prev_float", "public_send",
+		"quo", "rationalize", "real", "real?", "rect", "rectangular", "remainder", "round",
+		"send", "to_c", "to_f", "to_i", "to_int", "to_r", "truncate", "zero?"},
 	"Rational": {"%", "*", "**", "+", "+@", "-", "-@", "/", "<", "<=", "<=>", ">", ">=", "abs",
-		"ceil", "denominator", "div", "divmod", "equal?", "finite?", "floor", "frozen?", "imag",
-		"imaginary", "infinite?", "instance_of?", "instance_variables", "integer?", "is_a?",
-		"kind_of?", "magnitude", "negative?", "nil?", "numerator", "positive?", "public_send",
-		"rationalize", "real", "round", "send", "to_c", "to_f", "to_i", "to_int", "to_r",
+		"abs2", "angle", "arg", "ceil", "clone", "coerce", "conj", "conjugate", "denominator",
+		"div", "divmod", "dup", "eql?", "equal?", "fdiv", "finite?", "floor", "frozen?", "i",
+		"imag", "imaginary", "infinite?", "instance_of?", "instance_variables", "integer?",
+		"is_a?", "kind_of?", "magnitude", "negative?", "nil?", "nonzero?", "numerator", "phase",
+		"polar", "positive?", "public_send", "quo", "rationalize", "real", "real?", "rect",
+		"rectangular", "remainder", "round", "send", "to_c", "to_f", "to_i", "to_int", "to_r",
 		"truncate", "zero?"},
-	"Complex": {"*", "+", "+@", "-", "-@", "/", "abs", "angle", "arg", "conj", "conjugate",
-		"denominator", "equal?", "finite?", "frozen?", "imag", "imaginary", "infinite?",
-		"instance_of?", "instance_variables", "integer?", "is_a?", "kind_of?", "magnitude",
-		"nil?", "numerator", "phase", "polar", "public_send", "rationalize", "real", "real?",
-		"rect", "rectangular", "send", "to_c", "to_f", "to_i", "to_int", "to_r", "zero?"},
+	"Complex": {"*", "+", "+@", "-", "-@", "/", "abs", "abs2", "angle", "arg", "clone",
+		"coerce", "conj", "conjugate", "denominator", "dup", "eql?", "equal?", "fdiv", "finite?",
+		"frozen?", "imag", "imaginary", "infinite?", "instance_of?", "instance_variables",
+		"integer?", "is_a?", "kind_of?", "magnitude", "nil?", "nonzero?", "numerator", "phase",
+		"polar", "public_send", "quo", "rationalize", "real", "real?", "rect", "rectangular",
+		"send", "to_c", "to_f", "to_i", "to_int", "to_r", "zero?"},
 	"String": {"%", "*", "+", "+@", "<", "<<", "<=", "<=>", ">", ">=", "[]", "ascii_only?",
 		"b", "bytes", "bytesize", "capitalize", "casecmp", "casecmp?", "center", "chars", "chomp",
 		"chomp!", "chop", "chop!", "chr", "clear", "clone", "codepoints", "concat", "count",
@@ -1486,7 +1495,7 @@ func (rt *jsrt) rubyCpxMethod(t jsCpx, name string) (interface{}, bool) {
 	case "real?":
 		return false, true
 	case "round", "floor", "ceil", "truncate", "positive?", "negative?", "div", "divmod", "modulo", "remainder":
-		rt.rubyRaiseErr("NoMethodError", "undefined method `"+name+"' for "+rt.rubyInspect(t)+":Complex")
+		rt.rubyNoMethod(t, name)
 	}
 	into := map[string]string{"to_i": "Integer", "to_int": "Integer", "to_f": "Float", "to_r": "Rational", "rationalize": "Rational"}[name]
 	if into != "" {
@@ -1617,4 +1626,234 @@ func (rt *jsrt) rubyCpxText(t jsCpx, insp bool) string {
 		out += "*"
 	}
 	return out + "i"
+}
+
+// rubyNumMore is Numeric's remaining public methods for an Integer, a Float and a
+// Rational, reached once rubyNumMethod has no arm of its own. Twin of numMore in
+// languages/ruby-interpreter.abnf, which states the rules.
+func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (interface{}, bool) {
+	pos, _ := rubyBlockArgs(args)
+	a0 := argAt(pos, 0)
+	_, isF := t.(jsFlo)
+	ti, isI := rubyIntBig(t)
+	sign := func(v interface{}) int { c, _ := rt.rubySpaceship(v, 0.0); return c }
+	switch name {
+	case "dup", "clone":
+		return t, true
+	case "eql?":
+		return rt.rubyEql(t, a0), true
+	case "nonzero?":
+		if rt.rubyEq(t, 0.0) {
+			return jsNull, true
+		}
+		return t, true
+	}
+	if c, isCpx := t.(jsCpx); isCpx {
+		_, cd := a0.(jsCpx)
+		switch name {
+		case "abs2":
+			return rt.rubyNumBin("+", rt.rubyNumBin("*", c.re, c.re), rt.rubyNumBin("*", c.im, c.im)), true
+		case "coerce":
+			if cd {
+				return &jsArray{elems: []interface{}{a0, t}}, true
+			}
+			return &jsArray{elems: []interface{}{jsCpx{re: a0, im: 0.0}, t}}, true
+		case "quo":
+			if !cd {
+				re, _ := rt.rubyNumMore(c.re, "quo", pos)
+				im, _ := rt.rubyNumMore(c.im, "quo", pos)
+				return jsCpx{re: re, im: im}, true
+			}
+		case "fdiv":
+			if !cd {
+				return jsCpx{re: jsFlo{f: rubyToF(c.re) / rubyToF(a0)}, im: jsFlo{f: rubyToF(c.im) / rubyToF(a0)}}, true
+			}
+		}
+		return nil, false
+	}
+	switch name {
+	case "abs2":
+		return rt.rubyNumBin("*", t, t), true
+	case "conj", "conjugate":
+		return t, true
+	case "real?":
+		return true, true
+	case "rect", "rectangular":
+		return &jsArray{elems: []interface{}{t, 0.0}}, true
+	case "i":
+		return jsCpx{re: 0.0, im: t}, true
+	case "arg", "angle", "phase", "polar":
+		var ar interface{} = 0.0
+		if f, ok := t.(jsFlo); ok {
+			if f.f != f.f {
+				ar = t
+			} else if math.Signbit(f.f) {
+				ar = jsFlo{f: math.Pi}
+			}
+		} else if sign(t) < 0 {
+			ar = jsFlo{f: math.Pi}
+		}
+		if name == "polar" {
+			return &jsArray{elems: []interface{}{rt.rubyMethod(t, "abs", nil), ar}}, true
+		}
+		return ar, true
+	case "coerce":
+		_, coI := rubyIntBig(a0)
+		if isI {
+			if coI {
+				return &jsArray{elems: []interface{}{a0, t}}, true
+			}
+			return &jsArray{elems: []interface{}{jsFlo{f: rubyToF(a0)}, jsFlo{f: rubyToF(t)}}}, true
+		}
+		if _, isR := t.(jsRat); isR {
+			if coI {
+				return &jsArray{elems: []interface{}{rt.rubyAsRat(a0), t}}, true
+			}
+			if _, coF := a0.(jsFlo); coF {
+				return &jsArray{elems: []interface{}{a0, jsFlo{f: rubyToF(t)}}}, true
+			}
+			return &jsArray{elems: []interface{}{a0, t}}, true
+		}
+		return &jsArray{elems: []interface{}{jsFlo{f: rubyToF(a0)}, t}}, true
+	case "quo":
+		if _, qF := a0.(jsFlo); isF || qF {
+			return rt.rubyNumBin("/", jsFlo{f: rubyToF(t)}, a0), true
+		}
+		if rt.rubyEq(a0, 0.0) {
+			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+		}
+		return rt.rubyNumBin("/", rt.rubyAsRat(t), rt.rubyAsRat(a0)), true
+	case "remainder":
+		m := rt.rubyNumBin("%", t, a0)
+		if !rt.rubyEq(m, 0.0) && (sign(t) < 0) != (sign(a0) < 0) {
+			return rt.rubyNumBin("-", m, a0), true
+		}
+		return m, true
+	}
+	if f, ok := t.(jsFlo); ok {
+		switch name {
+		case "next_float":
+			return jsFlo{f: math.Nextafter(f.f, math.Inf(1))}, true
+		case "prev_float":
+			return jsFlo{f: math.Nextafter(f.f, math.Inf(-1))}, true
+		}
+		return nil, false
+	}
+	if !isI {
+		return nil, false
+	}
+	narrow := rt.rubyBigNarrow
+	switch name {
+	case "ord":
+		return t, true
+	case "gcd", "lcm", "gcdlcm":
+		y, yI := rubyIntBig(a0)
+		if !yI {
+			rt.rubyRaiseErr("TypeError", "not an integer")
+		}
+		g := new(big.Int).GCD(nil, nil, new(big.Int).Abs(ti), new(big.Int).Abs(y))
+		if name == "gcd" {
+			return narrow(g), true
+		}
+		l := new(big.Int)
+		if g.Sign() != 0 {
+			l.Abs(l.Mul(new(big.Int).Quo(ti, g), y))
+		}
+		if name == "lcm" {
+			return narrow(l), true
+		}
+		return &jsArray{elems: []interface{}{narrow(g), narrow(l)}}, true
+	case "allbits?", "anybits?", "nobits?":
+		m, _ := rubyIntBig(a0)
+		and := new(big.Int).And(ti, m)
+		switch name {
+		case "allbits?":
+			return and.Cmp(m) == 0, true
+		case "anybits?":
+			return and.Sign() != 0, true
+		}
+		return and.Sign() == 0, true
+	case "bit_length":
+		return float64(rubyBitLen(ti)), true
+	case "size":
+		if n := (new(big.Int).Abs(ti).BitLen() + 7) / 8; n > 8 {
+			return float64(n), true
+		}
+		return 8.0, true
+	case "digits":
+		base := big.NewInt(10)
+		if len(pos) > 0 {
+			base, _ = rubyIntBig(a0)
+		}
+		if base.Sign() < 0 {
+			rt.rubyRaiseErr("ArgumentError", "negative radix")
+		}
+		if base.Cmp(big.NewInt(2)) < 0 {
+			rt.rubyRaiseErr("ArgumentError", "invalid radix "+base.String())
+		}
+		if ti.Sign() < 0 {
+			rt.rubyRaiseErr("Math::DomainError", "out of domain")
+		}
+		out := &jsArray{}
+		v := new(big.Int).Set(ti)
+		for {
+			q, r := new(big.Int).QuoRem(v, base, new(big.Int))
+			out.elems = append(out.elems, narrow(r))
+			if q.Sign() == 0 {
+				return out, true
+			}
+			v = q
+		}
+	case "pow":
+		if len(pos) < 2 {
+			return rt.rubyBin("**", t, a0), true
+		}
+		e, eI := rubyIntBig(a0)
+		if !eI {
+			rt.rubyRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer")
+		}
+		m, mI := rubyIntBig(argAt(pos, 1))
+		if !mI {
+			rt.rubyRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers")
+		}
+		if e.Sign() < 0 {
+			rt.rubyRaiseErr("RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified")
+		}
+		if e.Sign() == 0 {
+			if m.Sign() > 0 {
+				return 1.0, true
+			}
+			return narrow(new(big.Int).Add(m, big.NewInt(1))), true
+		}
+		if m.Sign() == 0 {
+			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+		}
+		am := new(big.Int).Abs(m)
+		r := new(big.Int).Exp(new(big.Int).Mod(ti, am), e, am)
+		r.Mod(r, am)
+		if m.Sign() < 0 && r.Sign() != 0 {
+			r.Add(r, m)
+		}
+		return narrow(r), true
+	case "[]":
+		return rt.rubyIntBit(t, a0), true
+	}
+	return nil, false
+}
+
+// rubyIntBig is an Integer value as a big.Int; ok=false for anything else.
+func rubyIntBig(v interface{}) (*big.Int, bool) {
+	switch v.(type) {
+	case float64, *jsBigInt:
+		return rubyBigOf(v)
+	}
+	return nil, false
+}
+
+// rubyBitLen is Integer#bit_length: the bits of x, or of ~x for a negative x.
+func rubyBitLen(x *big.Int) int {
+	if x.Sign() < 0 {
+		return new(big.Int).Not(x).BitLen()
+	}
+	return x.BitLen()
 }

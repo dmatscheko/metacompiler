@@ -542,7 +542,11 @@ function rbABigStep(op, x, y) {
         return rtABigNarrow(dm["r"])
     }
     if (op == "**") {
-        if (y["neg"]) { return rbMkFlo(Math.pow(rbABigToF(x), rbABigToF(y))) }
+        if (y["neg"]) {
+            var ny = rtABigNarrow(y)
+            if (typeof ny == "number" && ny >= -4096) { return rbRatPow(rbMkRat(rtABigNarrow(x), 1), ny) }
+            return rbMkFlo(Math.pow(rbABigToF(x), rbABigToF(y)))
+        }
         var e = rtABigNarrow(y)
         if (typeof e != "number") { return Math.pow(rbABigToF(x), rbABigToF(y)) }
         if (e > 4096) { return Math.pow(rbABigToF(x), e) }
@@ -1452,7 +1456,16 @@ function rbNumBin(op, l, r) {
     if (op == "/") { return rbIDiv(a, b) }
     if (op == "%") { return rbIMod(a, b) }
     if (op == "**") {
-        if (b < 0) { return rbMkFlo(Math.pow(a, b)) }
+        // A negative Integer power is an exact Rational. Twin of numBin in
+        // ruby-interpreter.abnf.
+        if (b < 0) {
+            if (a == 1 || a == 0 - 1) {
+                if (rbIMod(b, 2) == 0) { return 1 }
+                return a
+            }
+            if (b >= -4096) { return rbRatPow(rbMkRat(a, 1), b) }
+            return rbMkFlo(Math.pow(a, b))
+        }
         var pw = Math.pow(a, b)
         if (pw >= 9007199254740992 || pw <= RB_MIN53) { return rbABigOr(op, a, b, pw) }
         return pw
@@ -3503,6 +3516,7 @@ function rbBuiltinClass(name) {
     if (name == "Math") {
         c["$c$PI"] = rbMkFlo(Math.PI)
         c["$c$E"] = rbMkFlo(Math.E)
+        c["$c$DomainError"] = rbBuiltinClass("Math::DomainError")
     }
     rbClassTable[k] = c
     return c
@@ -3571,6 +3585,9 @@ var rbExcParent = {
     $ScriptError: "Exception",
     $NotImplementedError: "ScriptError"
 }
+
+// Math::DomainError < StandardError: a scoped name, so not an identifier key above.
+rbExcParent["$Math::DomainError"] = "StandardError"
 
 function rbExcParentOf(name) {
     var p = rbExcParent["$" + name]
@@ -4707,7 +4724,7 @@ function rbCpxMethod(t, name) {
     if (name == "zero?") { return rbEq(re, 0) && rbEq(im, 0) }
     if (name == "real?") { return false }
     if (rbCpxUndefNames.indexOf(name) >= 0) {
-        rbRaiseErr("NoMethodError", "undefined method `" + name + "' for " + rbInspect(t) + ":Complex")
+        rbNoMethod(t, name)
     }
     var into = ""
     if (name == "to_i" || name == "to_int") { into = "Integer" }
@@ -4734,7 +4751,7 @@ function rbNumMethod(t, name, args) {
     // Integer's own methods, which Float, Rational and Complex do not have.
     if (!isInt && !rtTag(t, "__bint")) {
         if (name == "even?" || name == "odd?" || name == "succ" || name == "next" || name == "pred"
-            || name == "chr" || name == "times" || name == "upto" || name == "downto" || name == "gcd") { return undefined }
+            || name == "chr" || name == "times" || name == "upto" || name == "downto" || name == "gcd" || name == "pow") { return undefined }
     }
     if (name == "to_s" || name == "inspect") {
         // Past 2^53 rtBaseStr converts through int64 and SATURATES, so the exact
@@ -4852,13 +4869,8 @@ function rbNumMethod(t, name, args) {
         return t
     }
     if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return rbNumDivOp(t, name, args) }
-    if (name == "fdiv") { return rbMkFlo(rbIntFdiv(t, rbArgAt(args, 0))) }
-    if (name == "pow" || name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
-    if (name == "gcd") {
-        var gy = rbArgAt(args, 0)
-        if (typeof gy != "number" && !rtTag(gy, "__bint")) { rbRaiseErr("TypeError", "not an integer") }
-        return rbGcd(x, rbToF(gy))
-    }
+    if (name == "fdiv" && !rbIsCpx(t)) { return rbMkFlo(rbIntFdiv(t, rbArgAt(args, 0))) }
+    if (name == "**") { return rbBin("**", t, rbArgAt(args, 0)) }
     // between? / clamp are Comparable's, shared with String, and answered
     // exactly by rbMethod through rbSpaceship before this table is reached.
     if (name == "real") { return rbReOf(t) }
@@ -4871,7 +4883,218 @@ function rbNumMethod(t, name, args) {
         if (c === null) { return null }
         return c
     }
+    return rbNumMore(t, name, args)
+}
+
+// Numeric's remaining public methods for an Integer, a Float and a Rational.
+// Twin of numMore in ruby-interpreter.abnf, which states the rules.
+function rbNumMore(t, name, args) {
+    var n = rbNPos(args)
+    var a0 = rbPosAt(args, n, 0)
+    var isI = typeof t == "number" || rbIsBig(t)
+    if (name == "dup" || name == "clone") { return t }
+    if (name == "eql?") { return rbEql(t, a0) }
+    if (name == "nonzero?") {
+        if (rbEq(t, 0)) { return null }
+        return t
+    }
+    if (rbIsCpx(t)) {
+        if (name == "abs2") { return rbNumBin("+", rbNumBin("*", t["re"], t["re"]), rbNumBin("*", t["im"], t["im"])) }
+        if (name == "coerce") {
+            if (rbIsCpx(a0)) { return [a0, t] }
+            return [rbMkCpx(a0, 0), t]
+        }
+        if (name == "quo" && !rbIsCpx(a0)) { return rbMkCpx(rbNumMore(t["re"], "quo", args), rbNumMore(t["im"], "quo", args)) }
+        if (name == "fdiv" && !rbIsCpx(a0)) { return rbMkCpx(rbMkFlo(rbToF(t["re"]) / rbToF(a0)), rbMkFlo(rbToF(t["im"]) / rbToF(a0))) }
+        return undefined
+    }
+    if (name == "abs2") { return rbNumBin("*", t, t) }
+    if (name == "conj" || name == "conjugate") { return t }
+    if (name == "real?") { return true }
+    if (name == "rect" || name == "rectangular") { return [t, 0] }
+    if (name == "i") { return rbMkCpx(0, t) }
+    if (name == "arg" || name == "angle" || name == "phase" || name == "polar") {
+        var ar = anytype
+        ar = 0
+        if (rbIsFlo(t)) {
+            var af = t["f"]
+            if (af !== af) {
+                ar = t
+            } else if (af < 0 || (af == 0 && 1 / af < 0)) {
+                ar = rbMkFlo(Math.PI)
+            }
+        } else if (rbNumCmp(t, 0) < 0) {
+            ar = rbMkFlo(Math.PI)
+        }
+        if (name == "polar") { return [rbMethod(t, "abs", []), ar] }
+        return ar
+    }
+    if (name == "coerce") {
+        var coI = typeof a0 == "number" || rbIsBig(a0)
+        if (isI) {
+            if (coI) { return [a0, t] }
+            return [rbMkFlo(rbToF(a0)), rbMkFlo(rbToF(t))]
+        }
+        if (rbIsRat(t)) {
+            if (coI) { return [rbMkRat(a0, 1), t] }
+            if (rbIsFlo(a0)) { return [a0, rbMkFlo(rbToF(t))] }
+            return [a0, t]
+        }
+        return [rbMkFlo(rbToF(a0)), t]
+    }
+    if (name == "quo") {
+        if (rbIsFlo(t) || rbIsFlo(a0)) { return rbNumBin("/", rbMkFlo(rbToF(t)), a0) }
+        if (rbEq(a0, 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+        return rbNumBin("/", rbAsRat(t), rbAsRat(a0))
+    }
+    if (name == "remainder") {
+        var rm = rbNumBin("%", t, a0)
+        if (!rbEq(rm, 0) && (rbNumCmp(t, 0) < 0) != (rbNumCmp(a0, 0) < 0)) { return rbNumBin("-", rm, a0) }
+        return rm
+    }
+    if (rbIsFlo(t)) {
+        if (name == "next_float") { return rbMkFlo(rbFloStep(t["f"], 1)) }
+        if (name == "prev_float") { return rbMkFlo(rbFloStep(t["f"], 0 - 1)) }
+        return undefined
+    }
+    if (!isI) { return undefined }
+    if (name == "ord") { return t }
+    if (name == "gcd" || name == "lcm" || name == "gcdlcm") {
+        if (typeof a0 != "number" && !rbIsBig(a0)) { rbRaiseErr("TypeError", "not an integer") }
+        var g = rbNumGcd(t, a0)
+        if (name == "gcd") { return g }
+        var l = anytype
+        l = 0
+        if (!rbEq(g, 0)) { l = rbRealAbs(rbNumBin("*", rbNumBin("/", t, g), a0)) }
+        if (name == "lcm") { return l }
+        return [g, l]
+    }
+    if (name == "allbits?") { return rbEq(rbNumBin("&", t, a0), a0) }
+    if (name == "anybits?") { return !rbEq(rbNumBin("&", t, a0), 0) }
+    if (name == "nobits?") { return rbEq(rbNumBin("&", t, a0), 0) }
+    if (name == "bit_length") { return rbIntBitLen(t) }
+    if (name == "size") {
+        var sb = Math.ceil(rbIntBitLen(rbRealAbs(t)) / 8)
+        if (sb > 8) { return sb }
+        return 8
+    }
+    if (name == "digits") {
+        var db = anytype
+        db = 10
+        if (n > 0) { db = a0 }
+        if (rbNumCmp(db, 0) < 0) { rbRaiseErr("ArgumentError", "negative radix") }
+        if (rbNumCmp(db, 2) < 0) { rbRaiseErr("ArgumentError", "invalid radix " + rbStr(db)) }
+        if (rbNumCmp(t, 0) < 0) { rbRaiseErr("Math::DomainError", "out of domain") }
+        var dv = anytype
+        dv = rbNumBin("/", t, db)
+        var ds = [rbNumBin("%", t, db)]
+        while (rbNumCmp(dv, 0) > 0) {
+            ds.push(rbNumBin("%", dv, db))
+            dv = rbNumBin("/", dv, db)
+        }
+        return ds
+    }
+    if (name == "pow") {
+        if (n < 2) { return rbBin("**", t, a0) }
+        var pm = rbPosAt(args, n, 1)
+        if (typeof a0 != "number" && !rbIsBig(a0)) { rbRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer") }
+        if (typeof pm != "number" && !rbIsBig(pm)) { rbRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers") }
+        if (rbNumCmp(a0, 0) < 0) { rbRaiseErr("RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified") }
+        if (rbEq(a0, 0)) {
+            if (rbNumCmp(pm, 0) > 0) { return 1 }
+            return rbNumBin("+", 1, pm)
+        }
+        var pe = anytype
+        var pr = anytype
+        var pb = anytype
+        pe = a0
+        pr = 1
+        pb = rbNumBin("%", t, pm)
+        while (rbNumCmp(pe, 0) > 0) {
+            if (rbEq(rbNumBin("%", pe, 2), 1)) { pr = rbNumBin("%", rbNumBin("*", pr, pb), pm) }
+            pb = rbNumBin("%", rbNumBin("*", pb, pb), pm)
+            pe = rbNumBin("/", pe, 2)
+        }
+        return rbNumBin("%", pr, pm)
+    }
+    if (name == "[]") { return rbIntBit(t, a0) }
     return undefined
+}
+
+function rbNumGcd(a, b) {
+    var x = anytype
+    var y = anytype
+    var r = anytype
+    x = rbRealAbs(a)
+    y = rbRealAbs(b)
+    while (!rbEq(y, 0)) {
+        r = rbNumBin("%", x, y)
+        x = y
+        y = r
+    }
+    return x
+}
+
+function rbIntBitLen(x) {
+    var v = anytype
+    v = x
+    if (rbNumCmp(x, 0) < 0) { v = rbNumBin("-", rbNeg(x), 1) }
+    var n = 0
+    while (rbNumCmp(v, 4294967296) >= 0) {
+        v = rbNumBin("/", v, 4294967296)
+        n = n + 32
+    }
+    while (rbNumCmp(v, 0) > 0) {
+        v = rbNumBin("/", v, 2)
+        n = n + 1
+    }
+    return n
+}
+
+// Float#next_float / #prev_float. Twin of floStep in ruby-interpreter.abnf.
+function rbFloStep(x, dir) {
+    if (x !== x) { return x }
+    var tiny = 1
+    var i = 0
+    while (i < 1074) {
+        tiny = tiny / 2
+        i = i + 1
+    }
+    if (x == 0) {
+        if (dir > 0) { return tiny }
+        return 0 - tiny
+    }
+    if (x - x !== 0) {
+        if ((x > 0) == (dir > 0)) { return x }
+        var mx = 1
+        var j = 0
+        while (j < 1023) {
+            mx = mx * 2
+            j = j + 1
+        }
+        mx = (mx - mx / 9007199254740992) * 2
+        if (x > 0) { return mx }
+        return 0 - mx
+    }
+    var a = x
+    if (x < 0) { a = 0 - x }
+    var p = 1
+    while (p <= a / 2) { p = p * 2 }
+    while (p > a) { p = p / 2 }
+    var ulp = p
+    var k = 0
+    while (k < 52) {
+        ulp = ulp / 2
+        k = k + 1
+    }
+    if (ulp < tiny) { ulp = tiny }
+    var up = (x > 0) == (dir > 0)
+    if (!up && a == p && ulp / 2 >= tiny) { ulp = ulp / 2 }
+    var r = a - ulp
+    if (up) { r = a + ulp }
+    if (x > 0) { return r }
+    if (r == 0) { return 0 / (0 - 1) }
+    return 0 - r
 }
 
 // ----- Array helpers: the sort / min / max / flatten / join family -------------

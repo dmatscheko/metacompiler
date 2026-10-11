@@ -4633,7 +4633,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // `rescue A, B => e': any of the listed classes matches.
                     for (var ti = 0; ti < cl.etypes.length; ti++) {
                         var moreB = (ti + 1 < cl.etypes.length) ? curF.NewBlock("") : nextB
-                        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cl.etypes[ti])])
+                        // A scoped name (`rescue Math::DomainError') walks its $c$ steps.
+                        var clsR = makeScopedConst(cl.etypes[ti])(b)
+                        b = clsR.b
+                        var clsV = clsR.v
                         b.NewCondBr(truthy(b, callExt(b, "js_rcase", [clsV, excV])), runB, moreB)
                         b = moreB
                     }

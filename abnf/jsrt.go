@@ -4051,6 +4051,9 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 		return rt.rubyBigNarrow(m), true
 	case "**":
 		if y.Sign() < 0 {
+			if y.IsInt64() && y.Int64() >= -4096 {
+				return rt.rubyRatPow(rt.rubyAsRat(l), y), true
+			}
 			return jsFlo{f: math.Pow(rubyToF(l), rubyToF(r))}, true
 		}
 		if !y.IsInt64() || y.Int64() > 4096 {
@@ -5357,7 +5360,18 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		// definition rather than by codegen.
 		return math.FMA(-math.Floor(x/y), y, x)
 	case "**":
+		// A negative Integer power is an exact Rational (2 ** -1 is (1/2)).
+		// ... except a base of 1 or -1, which MRI answers with an Integer.
 		if y < 0 {
+			if x == 1 || x == -1 {
+				if math.Mod(y, 2) == 0 {
+					return 1.0
+				}
+				return x
+			}
+			if y >= -4096 {
+				return rt.rubyRatPow(rubyMkRat(x, 1), big.NewInt(int64(y)))
+			}
 			return jsFlo{f: math.Pow(x, y)}
 		}
 		if p := math.Pow(x, y); !rubyOver53(p) {
@@ -5763,7 +5777,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	// Integer's own methods, which Float, Rational and Complex do not have.
 	if !isInt && !isBig {
 		switch name {
-		case "even?", "odd?", "succ", "next", "pred", "chr", "times", "upto", "downto", "gcd":
+		case "even?", "odd?", "succ", "next", "pred", "chr", "times", "upto", "downto", "gcd", "pow":
 			return nil, false
 		}
 	}
@@ -5883,17 +5897,11 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	case "div", "divmod", "modulo", "rationalize":
 		return rt.rubyNumDivOp(t, name, args), true
 	case "fdiv":
-		return jsFlo{f: rubyIntFdiv(t, argAt(args, 0))}, true
-	case "pow", "**":
-		return rt.rubyBin("**", t, argAt(args, 0)), true
-	case "gcd":
-		y := argAt(args, 0)
-		if _, yInt := y.(float64); !yInt {
-			if _, yBig := y.(*jsBigInt); !yBig {
-				rt.rubyRaiseErr("TypeError", "not an integer")
-			}
+		if _, isCpx := t.(jsCpx); !isCpx {
+			return jsFlo{f: rubyIntFdiv(t, argAt(args, 0))}, true
 		}
-		return rubyGcd(x, rubyToF(y)), true
+	case "**":
+		return rt.rubyBin("**", t, argAt(args, 0)), true
 	// between? / clamp are not here: they are Comparable's, shared with String,
 	// and must be exact on a big Integer - rubyMethod answers both through
 	// rubySpaceship before this table is reached.
@@ -5912,7 +5920,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		}
 		return float64(c), true
 	}
-	return nil, false
+	return rt.rubyNumMore(t, name, args)
 }
 
 // rubyBigMethod is the Integer method set for a value past 2^53, and the twin of
@@ -6110,6 +6118,7 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 	if name == "Math" {
 		c.set("$c$PI", jsFlo{f: math.Pi})
 		c.set("$c$E", jsFlo{f: math.E})
+		c.set("$c$DomainError", rt.rubyBuiltinClass("Math::DomainError"))
 	}
 	rt.rubyClasses[name] = c
 	return c

@@ -3534,6 +3534,40 @@ def s77
   check("nm77c", k == [NoMethodError, true, true, true])
 end
 
+# ===== SECTION 78: Numeric's public methods on Integer, Float and Rational =====
+# lcm / gcdlcm / abs2 / conj / real? / bit_length / digits / size / pow(b, m) /
+# quo / remainder / coerce / next_float / nonzero? / arg / polar / i / eql?, big
+# receivers included; a negative Integer power is a Rational; a Float has no #pow;
+# Integer#digits on a negative raises Math::DomainError. Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s78
+  v = [4, 6, 7, -6, 2**70, 1.5, -2.25, Rational(3, 4), 0, 255, 2**64]
+  check("nu78a", [v[0].lcm(v[1]), v[2].abs2, v[2].conj, v[2].real?, v[3].lcm(v[0]), v[3].gcdlcm(v[0]),
+                  v[4].lcm(v[1]), v[4].abs2, v[5].abs2, v[6].conjugate, v[7].abs2, v[5].real?] ==
+                 [12, 49, 7, true, 12, [2, 12], 3541774862152233910272, 1393796574908163946345982392040522594123776,
+                  2.25, -2.25, Rational(9, 16), true])
+  check("nu78b", [v[9].bit_length, v[3].bit_length, v[10].bit_length, v[2].size, v[4].size, v[9].digits,
+                  v[9].digits(16), v[8].digits, v[2].pow(3, 5), v[3].pow(3, -7), v[4].pow(2**69, 10**9 + 7),
+                  v[2].pow(0, 1)] == [8, 3, 65, 8, 9, [5, 5, 2], [15, 15], [0], 3, -6, 642077754, 1])
+  check("nu78c", [v[2].quo(2), v[1].quo(2), v[2].quo(2.0), v[2].remainder(-4), v[3].remainder(4), v[6].remainder(2),
+                  v[2].coerce(2), v[2].coerce(1.5), v[7].coerce(2), v[5].coerce(2)] ==
+                 [Rational(7, 2), Rational(3, 1), 3.5, 3, -2, -0.25, [2, 7], [1.5, 7.0], [Rational(2, 1), Rational(3, 4)],
+                  [2.0, 1.5]])
+  check("nu78d", [v[5].next_float, v[5].prev_float, 0.0.next_float, v[8].nonzero?, v[2].nonzero?, v[3].arg,
+                  v[2].angle, (-0.0).arg, v[6].polar, v[2].i, v[2].eql?(7), v[2].eql?(7.0)] ==
+                 [1.5000000000000002, 1.4999999999999998, 5.0e-324, nil, 7, Math::PI, 0, Math::PI,
+                  [2.25, Math::PI], Complex(0, 7), true, false])
+  check("nu78e", [v[1] ** -1, v[3] ** -2, v[4] ** -1, 1 ** -3, -1 ** -3, v[5].respond_to?(:pow)] ==
+                 [Rational(1, 6), Rational(1, 36), Rational(1, 1180591620717411303424), 1, -1, false])
+  k = nil
+  begin
+    v[3].digits
+  rescue Math::DomainError => e
+    k = [e.class, e.message, e.is_a?(StandardError)]
+  end
+  check("nu78f", k == [Math::DomainError, "out of domain", true])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3573,5 +3607,6 @@ s74() # SECTION-CALL 74
 s75() # SECTION-CALL 75
 s76() # SECTION-CALL 76
 s77() # SECTION-CALL 77
+s78() # SECTION-CALL 78
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
