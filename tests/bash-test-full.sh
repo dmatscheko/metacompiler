@@ -1543,11 +1543,6 @@ s31() {
 # every assertion was settled against bash 5.3 and nothing else.
 #
 # NOT asserted, on purpose:
-#   * `declare -p` of an EMPTY array (`a=(); declare -p a`): bash answers
-#     `declare -a a=()`, both engines answer `not found`, because the compiler's
-#     array store keeps no record of a declared-but-empty INDEXED array. The
-#     rule is written identically into both halves; see rt_declp in
-#     languages/lib/bash-rt.c.
 #   * -x / -r, which neither engine models. (More than one attribute is
 #     modelled and pinned in SECTION 34, and so is the associative KEY-QUOTING
 #     rule, rt_keymeta / keyNeedsQuote.)
@@ -1669,6 +1664,23 @@ declare -i Q32="7"'
   declare -p nosuchname32 2>/dev/null
   check dp12 "$?" 1
   check dp13 "$(declare -p nosuchname32 2>/dev/null)" ""
+  # An array set EMPTY is `=()`, one only declared has no value at all.
+  local ea32=()
+  local -a eb32
+  check dp14 "$(declare -p ea32 eb32)" 'declare -a ea32=()
+declare -a eb32'
+  local -A ec32
+  check dp15 "$(declare -p ec32)" 'declare -A ec32'
+  local -A ed32=()
+  check dp16 "$(declare -p ed32)" 'declare -A ed32=()'
+  local ee32=(1)
+  unset 'ee32[0]'
+  check dp17 "$(declare -p ee32)" 'declare -a ee32=()'
+  local -ai ef32
+  check dp18 "$(declare -p ef32)" 'declare -ai ef32'
+  local -a eg32
+  eg32=x
+  check dp19 "$(declare -p eg32)" 'declare -a eg32=([0]="x")'
   # A value may itself begin with "=": `x==y` assigns "=y", also as a prefix
   # assignment, to an element, after += and to IFS.
   local e32

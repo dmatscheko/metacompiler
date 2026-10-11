@@ -1275,6 +1275,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrNext = rtDecl("rt_arr_nextidx", false, [1])
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
     var rtArrMark = rtDecl("rt_arr_mark", false, [1])
+    var rtArrDmark = rtDecl("rt_arr_dmark", false, [1])
     var rtFinList = rtDecl("rt_finlist", true, [1])
     var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
@@ -2535,7 +2536,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (integer) { intVars["$" + names[j]] = true }
                 if (upper) { upVars["$" + names[j]] = true; loVars["$" + names[j]] = false }
                 if (lower) { loVars["$" + names[j]] = true; upVars["$" + names[j]] = false }
-                if (isArray || (localize && curFrame != null)) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
+                // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
+                if ((isArray && asgs[j] != null) || (localize && curFrame != null)) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
+                if (isArray && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
                 if (asgs[j] != null) {
                     b = emitAssign(b, asgs[j], assoc)
                 }

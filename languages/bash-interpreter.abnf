@@ -1140,7 +1140,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
         fr.push({name: name, had: isSetVar(name), val: getVarVal(name),
                  ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                 hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false}})
+                 hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false, decl: false}})
     }
 
     function allDigits(s) {
@@ -1408,15 +1408,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out + "\""
     }
-    // IS THIS NAME AN ARRAY, asked the way languages/bash-to-llvm-ir.abnf has to ask it:
-    // "it holds at least one element, or it is known associative". That runtime is a flat
-    // triple table with no record of a declared-but-EMPTY indexed array, so `a=();
-    // declare -p a` answers `not found` in both engines where bash answers
-    // `declare -a a=()`. Keeping the rule identical here keeps the two halves
-    // byte-identical; a fifth compiler table for that one case is not worth it.
+    // IS THIS NAME A SET ARRAY: it holds an element, or was set empty (`a=()`, or its
+    // last element unset) - `declare -a a=()`. One only DECLARED (`declare -a a`) prints
+    // `declare -a a` while its scalar slot is unset. Twin of rt_declp in
+    // languages/lib/bash-rt.c.
     function declIsArr(name) {
         if (!isArr(name)) { return false }
-        return arrKeyList(name).length > 0 || arrs[arrKey(name)].assoc
+        return arrKeyList(name).length > 0 || arrs[arrKey(name)].lit
+    }
+    function declOnly(name) {
+        return isArr(name) && arrs[arrKey(name)].decl && !isSetVar(name)
     }
     // Does this subscript need quoting inside `[...]`? bash quotes an associative key only
     // when the shell would need it - `[ab_c]`, `[k]` and `[5x]` stay bare, `["k one"]` and
@@ -1454,6 +1455,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function declLine(name) {
         var at = varAttrs(name)
         if (declIsArr(name)) { return "declare -" + at + " " + declArrAssign(name) }
+        if (declOnly(name)) { return "declare -" + at + " " + name }
         if (!isSetVar(name)) { return "" }
         return "declare -" + ((at == "") ? "-" : at) + " " + name + "=" + declQuote(getVarVal(name))
     }
@@ -1994,7 +1996,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (integer) { intVars["$" + names[k]] = true }
                 if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
                 if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
-                if (isArray && asgs[k] == null) { arrNew(names[k], assoc) }
+                // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
+                if (isArray && asgs[k] == null) { arrEnsure(names[k], assoc); arrs[arrKey(names[k])].decl = true }
                 if (asgs[k] != null) {
                     if (isArray) { arrNew(names[k], assoc) }
                     runAssign(asgs[k], assoc)
@@ -2356,7 +2359,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nm = stNames[i]
             var ak = arrKey(nm)
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
-            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false},
+            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false, decl: false},
                       ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm)})
         }
         return out
@@ -2396,7 +2399,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arrNew(name, assoc) {
         touchState(name)
-        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, lit: false}
+        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, lit: false, decl: false}
         return arrs[arrKey(name)]
     }
     function arrEnsure(name, assoc) {
@@ -2433,7 +2436,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A shallow copy of one array store, for `local`'s save entry.
     function arrCopy(a) {
-        var c2 = {assoc: a.assoc, keys: [], vals: {}, lit: a.lit}
+        var c2 = {assoc: a.assoc, keys: [], vals: {}, lit: a.lit, decl: a.decl}
         var i
         for (i = 0; i < a.keys.length; i++) {
             var kk = a.keys[i]
@@ -2468,6 +2471,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             a.keys.pop()
         }
         delete0(a.vals, "$" + kk)
+        a.lit = true
     }
     // The frozen engine has no `delete`, so an erased key is remembered by the key LIST only.
     function delete0(o, k) { o[k] = "" }

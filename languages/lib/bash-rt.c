@@ -60,7 +60,7 @@ char *varnames[1024];
 int ls_id[512];
 char *ls_val[512];
 int ls_acnt[512];
-int ls_amark[512];   /* the binding's empty-array mark (rt_arr_mark), restored too */
+int ls_amark[512];   /* the binding's array marks (rt_arr_mark 1, rt_arr_dmark 2), restored too */
 int ls_top;
 
 /* The array save stack the entries above index into. LASMAX = 4096. */
@@ -206,6 +206,8 @@ char *rt_pfxnames(char *p, char *sep, int star);
 int rt_arr_nextidx(char *nm);
 int rt_arr_clear(char *nm);
 int rt_arr_mark(char *nm);
+int rt_arr_dmark(char *nm);
+int rt_arr_dmarked(char *nm);
 char *rt_finlist(char *v);
 int rt_isfin(char *v);
 int rt_arr_append(char *nm, char *f);
@@ -1912,7 +1914,7 @@ int rt_arr_has(char *nm, char *k) {
 }
 
 /* i32 rt_arr_del(i8* nm, i8* k): remove one entry, shifting the tail of the
- * store down over the hole. */
+ * store down over the hole; the array stays set (rt_arr_mark). */
 int rt_arr_del(char *nm, char *k) {
     int at = rt_arr_find(nm, k);
     int i = at;
@@ -1930,6 +1932,7 @@ int rt_arr_del(char *nm, char *k) {
                 break;
             }
         }
+        rt_arr_mark(nm);
     }
     return 0;
 }
@@ -2005,11 +2008,19 @@ int rt_isfin(char *v) {
 
 /* AN ARRAY ASSIGNED A LITERAL IS SET EVEN WITH NO ELEMENT: bash 5.3 lists `e=()`
  * in ${!e*} and not `declare -a e`. A row store keeps nothing for an empty array,
- * so the literal leaves a mark - one row of the array named "\003NAME" - which
- * rt_arr_clear drops with the rows and the subshell snapshot copies with them.
- * Twin of the `lit` flag of an array in bash-interpreter.abnf. */
+ * so the literal leaves a mark - the row ("\003NAME", "") - which rt_arr_clear
+ * drops with the rows and the subshell snapshot copies with them. Unsetting an
+ * element leaves the same mark: `b[0]=1; unset 'b[0]'` is the set, empty
+ * `declare -a b=()`. Twin of the `lit` flag of an array in bash-interpreter.abnf. */
 int rt_arr_mark(char *nm) {
     return rt_arr_set(rt_strcat("\003", nm), empty, empty);
+}
+
+/* A DECLARED-ONLY ARRAY (`declare -a e` with no value) is not set, but
+ * `declare -p e` prints `declare -a e`: the row ("\003NAME", "d") records the
+ * declaration. Twin of the `decl` flag of an array in bash-interpreter.abnf. */
+int rt_arr_dmark(char *nm) {
+    return rt_arr_set(rt_strcat("\003", nm), "d", empty);
 }
 
 /* Is the row name rn NAME's mark? */
@@ -2020,13 +2031,22 @@ int rt_ismark(char *rn, char *nm) {
     return nm[i] == 0 && rn[i + 1] == 0;
 }
 
-int rt_arr_marked(char *nm) {
+/* Does NAME carry the mark with key k ("" set, "d" declared)? */
+int rt_arr_haskmark(char *nm, char *k) {
     int i = 0;
     while (i < arr_n) {
-        if (rt_ismark(arr_nm[i], nm) != 0) return 1;
+        if (rt_ismark(arr_nm[i], nm) != 0 && rt_streq(arr_k[i], k) != 0) return 1;
         i = i + 1;
     }
     return 0;
+}
+
+int rt_arr_marked(char *nm) {
+    return rt_arr_haskmark(nm, empty);
+}
+
+int rt_arr_dmarked(char *nm) {
+    return rt_arr_haskmark(nm, "d");
 }
 
 /* i32 rt_arr_clear(i8* nm): drop every entry of one array, and its mark. */
@@ -2191,12 +2211,9 @@ char *rt_pfxnames(char *p, char *sep, int star) {
  * are asked here. languages/bash-interpreter.abnf's declLine is the same text,
  * character for character, from its own tables.
  *
- * IS IT AN ARRAY: "at least one element, or the emitter knows it associative".
- * There is no record of a declared-but-EMPTY indexed array in this flat triple
- * store, so `a=(); declare -p a` says `not found` in BOTH engines where bash
- * says `declare -a a=()`; the interpreter's declIsArr is deliberately written to
- * the same rule, because a fifth table plus a subshell snapshot entry for that
- * one line was judged not worth it. */
+ * IS IT AN ARRAY: at least one element, or set empty (rt_arr_mark) - then
+ * `declare -a a=()`. One only declared (rt_arr_dmark) is `declare -a a`. The
+ * interpreter's declIsArr / declOnly ask the same two questions. */
 /* The $'...' form, with bash's escape table - the same one shellQuote uses in
  * languages/bash-interpreter.abnf.
  *
@@ -2603,11 +2620,27 @@ char *rt_prompt(char *s) {
 
 int rt_declp(char *nm, char *flag, int assoc) {
     int n = rt_arr_count(nm);
-    int isarr = (n > 0 || assoc != 0) ? 1 : 0;
+    int isarr = (n > 0 || rt_arr_marked(nm) != 0) ? 1 : 0;
     char *v;
     int saved;
     if (isarr == 0) {
         v = rt_getvar_byname(nm);
+        /* Declared with -a/-A: with no value `declare -a e`; a plain assignment
+         * since then is element 0, which this store keeps in the scalar slot. */
+        if (rt_arr_dmarked(nm) != 0) {
+            rt_prints("declare -");
+            rt_prints(assoc != 0 ? "A" : "a");
+            rt_prints(flag);
+            rt_prints(" ");
+            rt_prints(nm);
+            if (v != &unset_marker[0]) {
+                rt_prints("=([0]=");
+                rt_prints(rt_dqs(v));
+                rt_prints(assoc != 0 ? " )" : ")");
+            }
+            rt_prints("\n");
+            return 0;
+        }
         if (v == &unset_marker[0]) {
             /* On the standard error CHANNEL, so a 2>/dev/null silences it exactly
              * as the shell does - the same rule rt_nounset follows. */
@@ -3050,7 +3083,7 @@ int rt_push_local(int id)
     ls_amark[t] = 0;
     if (arr_n > 0) {
         char *nm = varnames[id];
-        ls_amark[t] = rt_arr_marked(nm);
+        ls_amark[t] = rt_arr_marked(nm) + 2 * rt_arr_dmarked(nm);
         int i = 0;
         while (i < arr_n) {
             if (rt_streq(nm, arr_nm[i]) != 0) {
@@ -3088,7 +3121,8 @@ int rt_pop_locals(int d)
                 rt_arr_set(nm, las_k[i], las_v[i]);
                 i = i + 1;
             }
-            if (ls_amark[t] != 0) rt_arr_mark(nm);
+            if (ls_amark[t] == 1 || ls_amark[t] == 3) rt_arr_mark(nm);
+            if (ls_amark[t] >= 2) rt_arr_dmark(nm);
         }
         las_top = las_top - cnt;
         t = ls_top;
