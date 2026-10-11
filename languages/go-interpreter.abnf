@@ -317,10 +317,15 @@ NamedAhead = :script(~~
     })()
 ~~) ;
 
-// A package level var, registered right away. Grouped (var ( a int; b = 2 )) runs each
-// spec in order. A single const at top level is bound right away too.
-TopVar      <~~ var t = pop(); t() ~~>
-            = VarGroup | VarDecl ;
+// A package level var runs once the whole file is walked, in Go's initialisation
+// order (goTopVarOrder), each spec of a group (var ( a = b; b = 2 )) on its own. A
+// single const at top level is bound right away.
+TopVar      = TopVarGroup | TopVarOne ;
+TopVarOne   <~~ goTopPend.push({t: pop(), rec: goTopVarRec(c.srcSlice(up.start, up.pos))}) ~~>
+            = VarDecl ;
+TopVarGroup = "var" KwEnd "(" { TopVarSpec } ")" [ ";" ] ;
+TopVarSpec  <~~ goTopPend.push({t: pop(), rec: goTopVarRec("var " + c.srcSlice(up.start, up.pos))}) ~~>
+            = VarSpec ;
 TopConst    <~~ var t = pop(); t() ~~>
             = ConstGroup | ConstSingle ;
 
@@ -610,17 +615,17 @@ CaseType    <~~ push({ct: up.in}) ~~>
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
 // its Expression on the '{', leaking the marker (pushes are not rolled back) and
 // blocking every later composite literal.
-ValueSwitch <~~ push(makeSwitch(takeAll())); cSwExit() ~~>
+ValueSwitch <~~ push(makeSwitch(goSwBoxC(takeAll()))); cSwExit() ~~>
             = "switch" KwEnd [ InitAhead FInit ";" ]
               ( "{" CSwOn { CaseLabel | Statement } "}"
               | SwitchSubj "{" CSwOn { CaseLabel | Statement } "}" ) ;
-SwitchSubj  <~~ push({subj: pop()}) ~~>
-            = CondOn Expression CondOff ;
+SwitchSubj  = CondOn SwSubjE CondOff ;
+SwSubjE     <~~ push({subj: pop(), sty: stAt(up.pos)}) ~~> = Expression ;
 // The body is parsed flat: the labels must be tried before Statement (a bare 'case'
 // would parse as an identifier expression), and the builder groups the statements
 // under the label they follow.
 CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
-            = CCaseOn ( "case" KwEnd Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+            = CCaseOn ( "case" KwEnd Expression <~~ push({v: pop(), sty: stAt(up.pos)}) ~~> { "," Expression <~~ push({v: pop(), sty: stAt(up.pos)}) ~~> }
               | "default" KwEnd ) ":" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
@@ -628,7 +633,7 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 // Go's semicolon insertion makes `return` a RESTRICTED production: a line break right
 // after it ends the statement. Without SameLine a bare `return` followed by `case <-c:`
 // reads `case` as the start of its result expression and the whole switch falls apart.
-RetVals     = Expression { "," Expression } ;
+RetVals     = ArgExpr { "," ArgExpr } ;
 
 // break / continue carry an optional label; the labelled forms travel up as a
 // signal until the loop that carries that label catches them.
@@ -802,7 +807,7 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(goRecvsC(takeAll(), up.start)), up.in, up.pos)) ~~>
+CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start))), up.in, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -819,7 +824,7 @@ TypeArgsMany = "[" Type "," Type { "," Type } "]" ;
 TypeArgsKw   = "[" NonExprT "]" ;
 NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
             = "[" [ Expression <~~ push({lo: pop()}) ~~> ] ":" [ Expression <~~ push({hi: pop()}) ~~> ]
@@ -827,7 +832,7 @@ SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
-            = "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
+            = "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 Spread      <~~ push({spread: true}) ~~> = "..." ;
 // x.(T): a type assertion. The value is unchanged - a successful assertion yields
 // the same underlying value - but it is CHECKED, and a value that does not hold the
@@ -892,7 +897,10 @@ CompElem    <~~ push(makeCompElem(takeAll())) ~~>
 // starts with '{', so trying the group first is unambiguous.
 CompKey     <~~ push({ckey: pop(), ktext: firstWord(up.in)}) ~~>
             = ( CompNested | Expression ) ":" ;
-CompValue   = CompNested | Expression ;
+CompValue   = CompNested | CompExpr ;
+// An element reports its static type after it, so one going into an interface
+// element is boxed (goDtBoxTo).
+CompExpr    <~~ var ce = pop(); push(ce); push({esty: stAt(up.pos)}) ~~> = Expression ;
 CompNested  <~~ push({cnested: pop()}) ~~>
             = CompBody ;
 
@@ -1045,8 +1053,10 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 
 // f(a, b): a function, a builtin or an identifier-named conversion (int(x)). A
 // trailing '...' spreads a slice into the variadic parameter.
-Call        <~~ push(makeCall(goAppendC(takeAll(), up.in))) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
+Call        <~~ push(makeCall(goCallBoxC(goAppendC(takeAll(), up.in)))) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+// A call argument reports its static type after it, for goSplitArgs.
+ArgExpr     <~~ var ae = pop(); push(ae); push({aty: stAt(up.pos)}) ~~> = Expression ;
 
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
 // the element's ',' or the closing '}' at bracket depth 0. Like InitAhead it decides
@@ -1421,7 +1431,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var out = ""
             var prevStr = true
             for (var i = 0; i < arguments.length; i++) {
-                var isStr = typeof arguments[i] == "string"
+                var isStr = goKindStr(arguments[i])
                 if (i > 0 && !prevStr && !isStr) { out += " " }
                 out += gstr(arguments[i])
                 prevStr = isStr
@@ -1433,7 +1443,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var out = ""
             var prevStr = true
             for (var i = 0; i < arguments.length; i++) {
-                var isStr = typeof arguments[i] == "string"
+                var isStr = goKindStr(arguments[i])
                 if (i > 0 && !prevStr && !isStr) { out += " " }
                 out += gstr(arguments[i])
                 prevStr = isStr
@@ -1651,6 +1661,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 gStrDepth = gStrDepth - 1
                 return gstr(sv)
             }
+            if (v.__class.__dt === true) { return goDtStr(v) }
             var out2 = "{"
             var fs = v.__class.__fields
             for (var k = 0; k < fs.length; k++) {
@@ -1754,9 +1765,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return gstr(r)
     }
     function gfHIsErr(v) { return goMeth(v, "Error") !== undefined }
+    function gfHIsDt(v) { return isDtBox(v) }
+    function gfHDtVal(v) { return v.__dv }
     function gfHStr(v) { return gstr(v) }
     function gfHStructName(v) {
         var c = v.__class
+        if (c.__dt === true) { return gfQualTy(c.__name) }
         if (typeof c.__pkg == "string") { return c.__pkg + "." + c.__name }
         return c.__name == "struct" ? "" : c.__name
     }
@@ -1846,21 +1860,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     // ----- Postfix suffixes: (args), [lo:hi:max] -----
-    // items = [argThunks..., {spread}?]
+    // items = [argThunk, {aty}]..., {spread}?] (goSplitArgs)
     function makeCallSfx(items) {
-        var args = items
-        var spread = false
-        if (items.length > 0 && typeof items[items.length - 1] != "function") {
-            spread = true
-            args = items.slice(0, items.length - 1)
-        }
-        return {kind: "call", args: args, spread: spread}
+        var sp = goSplitArgs(items)
+        return {kind: "call", args: sp.args, atys: sp.atys, spread: sp.spread}
     }
     // `.m(args)`, whose last argument may be spread too (`fmt.Println(ys...)`).
     // The twin is makeMethodSfx in go-to-llvm-ir.abnf.
     function makeMethodSfx(name, items, at) {
         var c = makeCallSfx(items)
-        return {kind: "mcall", name: name, args: c.args, spread: c.spread, at: at, rc: null, dt: null, dtk: false}
+        return {kind: "mcall", name: name, args: c.args, atys: c.atys, spread: c.spread, at: at, rc: null, dt: null, dtk: false}
     }
     function makeSliceSfx(items) {
         var lo = null, hi = null, mx = null
@@ -2190,7 +2199,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var hit = goErrAsFind(err, want, cls, target)
         if (hit == null) { return false }
         if (hit.via) { return true }
-        if (isPtr(target)) { ptrSet(target, hit.v) } else {
+        // A box goes into the variable as the value inside (goDtUnbox).
+        if (isPtr(target)) { ptrSet(target, goDtUnbox(hit.v, want)) } else {
             var fs = target.__class.__fields
             for (var i = 0; i < fs.length; i++) { target[fs[i]] = hit.v[fs[i]] }
         }
@@ -2527,6 +2537,54 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // the method closure. Twins: js_godtcall in lib/go-rt.metajs and
     // abnf/jsrtgolang.go.
     var goDtFns = {}
+    // The box a value of defined type ty gets in an interface (go-constfold.js,
+    // goDtBoxTy): an instance of the type's descriptor, built on first use, whose
+    // methods call the type's own on the value inside. Twins: emitDtBox in
+    // go-to-llvm-ir.abnf, js_godtbox in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    var goDtCls = {}
+    function goDtClass(ty) {
+        var k = "$" + ty
+        if (hasOwn(goDtCls, k)) { return goDtCls[k] }
+        var cls = {__isclass: true, __dt: true, __name: ty, __fields: ["__dv"]}
+        if (goIsDefTy(ty)) { cls.__pkg = "main" }
+        var ms = goTyMeths[k]
+        if (ms !== undefined) {
+            for (var i = 0; i < ms.length; i++) { cls[ms[i]] = goDtMeth(ty + "." + ms[i]) }
+        }
+        goDtCls[k] = cls
+        return cls
+    }
+    function goDtMeth(fn) {
+        return function() {
+            var args = [arguments[0].__dv]
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            return goDtFns["$" + fn].apply(undefined, args)
+        }
+    }
+    // A box prints the value inside; a pointer's box prints a struct as &{...},
+    // unless the struct has Error() or String().
+    function goDtStr(v) {
+        var dv = anytype
+        dv = v.__dv
+        if (v.__class.__name.charAt(0) == "*" && goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined) { return "&" + gstr(dv) }
+        return gstr(dv)
+    }
+    // Is v of a string KIND - fmt's spacing rule asks reflect's Kind, so a defined
+    // string type's box counts.
+    function goKindStr(v) { return typeof v == "string" || (isDtBox(v) && typeof v.__dv == "string") }
+    function isDtBox(v) { return v !== undefined && v !== null && typeof v == "object" && v.__class != undefined && v.__class.__dt === true }
+    // A box stays itself, and so does a struct instance unless a pointer's static
+    // type is what boxes it (a value of `type Q Point` is a Point already).
+    function goDtBox(v, ty) {
+        if (isDtBox(v) || (ty.charAt(0) != "*" && goIsStructVal(v))) { return v }
+        return {__class: goDtClass(ty), __dv: v}
+    }
+    function goDtBoxThunk(t, ty) {
+        if (ty == "") { return t }
+        return function() { return goDtBox(t(), ty) }
+    }
+    // v as type ty once a type test has matched: the value inside ty's box.
+    function goDtUnbox(v, ty) { return (isDtBox(v) && v.__class.__name == ty) ? v.__dv : v }
     function goDtCall(recv, s, args) {
         var p = s.dt
         if (p.dyn) {
@@ -3485,7 +3543,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             i = 1
         }
         var v = items[i]
-        if (typeof v == "function") { return {ekey: key, ekeyn: keyn, ektext: ktext, eval: v} }
+        if (typeof v == "function") { return {ekey: key, ekeyn: keyn, ektext: ktext, eval: v, esty: items[i + 1].esty} }
         return {ekey: key, ekeyn: keyn, ektext: ktext, enest: v.cnested.celems}
     }
     // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
@@ -3631,7 +3689,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // spelling that is no longer a defined name, so neither branch re-enters.
             var rn = resolveDefined(desc.cname)
             if (rn != desc.cname) {
-                if (isCompositeText(rn)) { return buildLit(descOfTypeText(rn), elems) }
+                if (isCompositeText(rn)) { return buildLit(descOfTypeText(rn), goNoEstys(elems)) }
                 return buildLit({ckind: "struct", cname: rn}, elems)
             }
             // pkga.Item{...}: another package's type. Its descriptor is not in this
@@ -3655,7 +3713,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var e = 0; e < elems.length; e++) {
             var name = elems[e].ektext
             if (name == null) { name = fs[pos]; pos++ }
-            scopePut(obj, name, elemValue(elems[e], fieldTypeOf(cls, name)))
+            scopePut(obj, name, elemValue(goNoEsty(elems[e]), fieldTypeOf(cls, name)))
         }
         return obj
     }
@@ -3668,8 +3726,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The value of one element: either its expression, or a nested brace group built
     // against the element type text (\[\]P{{1, 2}} -> a P, \[\]\[\]int{{1}} -> a slice).
+    // A literal of a NAMED type's elements, and a struct's fields, are not boxed:
+    // go-to-llvm-ir.abnf's StructLit carries no element types.
+    function goNoEsty(e) {
+        if (e.esty == undefined || e.esty == "") { return e }
+        return {ekey: e.ekey, ekeyn: e.ekeyn, ektext: e.ektext, eval: e.eval, esty: ""}
+    }
+    function goNoEstys(es) {
+        var out = []
+        for (var i = 0; i < es.length; i++) { out.push(goNoEsty(es[i])) }
+        return out
+    }
     function elemValue(e, elemType) {
-        if (e.enest == undefined) { return gAdoptTy(elemType, goStoreTy(e.eval(), elemType)) }
+        if (e.enest == undefined) {
+            var bt = e.esty == "" ? "" : goDtBoxTo(e.esty, elemType)
+            if (bt != "") { return goDtBox(e.eval(), bt) }
+            return gAdoptTy(elemType, goStoreTy(e.eval(), elemType))
+        }
         return buildLit(descOfTypeText(elemType), e.enest)
     }
     // The [N] of an array type text, as the thunk buildLit's array branch wants, or
@@ -3845,7 +3918,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cokDeclNames(isDecl, vName, okName)
         return function() {
             var v = baseT()
-            if (typeMatches(ty, v)) { cokBind(isDecl, vName, v); cokBind(isDecl, okName, true); return }
+            if (typeMatches(ty, v)) { cokBind(isDecl, vName, goDtUnbox(v, ty)); cokBind(isDecl, okName, true); return }
             cokBind(isDecl, vName, zeroOfType2(ty))
             cokBind(isDecl, okName, false)
         }
@@ -3934,8 +4007,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var v = getVar(name)
             // An ARRAY is a VALUE in Go, and every assignment of one copies it
             // (goVal). So &arr cannot be the array: `h := &arr` would hand h a copy
-            // and `h[0] = 5` would be lost. It gets a real cell, like a scalar.
-            if (v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v)) { return v }
+            // and `h[0] = 5` would be lost. It gets a real cell, like a scalar. So
+            // does a slice: its HEADER is a value, and `*p = append(*p, 1)` must
+            // reach the variable.
+            if (v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v) && !isSl(v)) { return v }
             var cell = varCell(name)
             if (dty != "") { cell.ty = dty }
             return cell
@@ -4011,6 +4086,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var cty = goStCopyTy(sp.tys[ai])
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
+                if (lref.path.length == 0 && lref.stars == 0) { exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], cTyLookup(lref.name))) }
             }
         }
         return function() {
@@ -4150,7 +4226,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (inits.length == names.length) {
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
-                inits[vi] = goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi]))
+                inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
             }
         }
         return function() {
@@ -4422,7 +4498,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [{k:init}?, {tsname}?, subjectThunk, ({ct}-list label | statement)...]
     function makeTypeCase(items) {
         var ts = []
-        for (var i = 0; i < items.length; i++) { ts.push(firstWord(items[i].ct)) }
+        for (var i = 0; i < items.length; i++) { ts.push(goQualWord(items[i].ct, firstWord(items[i].ct))) }
         return {isTypeCase: true, isDefault: items.length == 0, types: ts}
     }
     function firstWord(s) {
@@ -4535,7 +4611,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Declared interface name -> its method names. Filled at parse time by the
     // IfaceBody tag, read long after by the type test and the type assertion. The
     // predeclared `error` is the interface {Error() string}.
-    var ifaceMeths = {"error": ["Error"]}
+    var ifaceMeths = {"error": ["Error"], "fmt.Stringer": ["String"]}
     // The comma-joined method set of a declared interface, or "" for anything else.
     function ifaceMethodCsv(name) {
         if (name == undefined || name == null || !hasOwn(ifaceMeths, name)) { return "" }
@@ -4617,13 +4693,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                        byte: 1, rune: 1, float32: 1, float64: 1, complex128: 1}
     function goAssertType(v, want) {
         if (hasOwn(ifaceMeths, want)) { return goAssertIface(v, want) }
+        // A DEFINED non-struct type is decided when the value is its box, and the
+        // value inside is the answer.
+        if (goIsDefTy(want) && isDtBox(v)) {
+            if (v.__class.__name == want) { return v.__dv }
+            goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(want))
+        }
         var w = want
         if (w.charAt(0) == "*") {
             w = w.substring(1)
             if (structAt(curPkgName, w) == undefined) { return v }
         } else if (!hasOwn(goScalarTys, w) && structAt(curPkgName, w) == undefined) { return v }
         if (goTypeIs(v, w) == 0) { goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(want)) }
-        return v
+        return goDtUnbox(v, w)
     }
     // The dynamic type a TypeAssertionError names: fmt's %T, except that nil is
     // "nil". Twin of goTypeText in abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
@@ -4663,7 +4745,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var res = undefined
             if (hit >= 0) {
                 scopes.push({})
-                if (bind != null) { declVar(bind, v) }
+                // A one-type case binds the value AS that type: a box is opened.
+                if (bind != null) { declVar(bind, cases[hit].types.length == 1 ? goDtUnbox(v, cases[hit].types[0]) : v) }
                 var body = cases[hit].body
                 for (var b = 0; b < body.length; b++) {
                     var r = body[b]()
@@ -4676,24 +4759,48 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return res
         }
     }
-    // Multiple return values travel as an array.
-    function makeReturn(items) {
+    // Multiple return values travel as an array. Each value reports its static type
+    // (ArgExpr): one of a type that is boxed in an interface carries the box type to
+    // invokeBodyG, which knows the result types. Twin of makeReturn in
+    // go-to-llvm-ir.abnf.
+    function makeReturn(itemsIn) {
+        var sp = goSplitArgs(itemsIn)
+        var items = sp.args
+        var bx = null
+        for (var b = 0; b < items.length; b++) {
+            var bt = goDtBoxTy(sp.atys[b])
+            if (bt != "") {
+                if (bx == null) { bx = []; for (var z = 0; z < items.length; z++) { bx.push("") } }
+                bx[b] = bt
+            }
+        }
         if (items.length == 0) return function() { return {isRet: true, v: undefined} }
         if (items.length == 1) {
             var t = items[0]
+            if (bx != null) { return function() { return {isRet: true, v: t(), bx: bx} } }
             return function() { return {isRet: true, v: t()} }
         }
         return function() {
             var vals = []
             for (var i = 0; i < items.length; i++) vals.push(items[i]())
-            return {isRet: true, v: vals}
+            return {isRet: true, v: vals, bx: bx}
         }
+    }
+    // A returned value boxed where its declared result type is an interface.
+    function goRetBox(v, bx, rtl) {
+        if (bx.length == 1) { return (rtl.length == 1 && bx[0] != "" && goIsIfaceTy(rtl[0])) ? goDtBox(v, bx[0]) : v }
+        var out = []
+        for (var i = 0; i < v.length; i++) {
+            out.push((i < rtl.length && bx[i] != "" && goIsIfaceTy(rtl[i])) ? goDtBox(v[i], bx[i]) : v[i])
+        }
+        return out
     }
     // items = [{v: thunk}...]: one label; no values means 'default'.
     function makeCaseLabel(items) {
         var vals = []
-        for (var i = 0; i < items.length; i++) vals.push(items[i].v)
-        return {isDefault: items.length == 0, vals: vals}
+        var stys = []
+        for (var i = 0; i < items.length; i++) { vals.push(items[i].v); stys.push(items[i].sty) }
+        return {isDefault: items.length == 0, vals: vals, stys: stys}
     }
     // items = [{subj}?, label or statement thunk...]: Go switch, no fallthrough.
     // The flat item list is regrouped: every statement belongs to the last label.
@@ -5174,6 +5281,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     var methodTodo = []
+    // The package vars of the file being walked, {t, rec}; run by goRunTopVars.
+    var goTopPend = []
+    function goRunTopVars() {
+        var recs = []
+        var i
+        for (i = 0; i < goTopPend.length; i++) { recs.push(goTopPend[i].rec) }
+        var ord = goTopVarOrder(recs)
+        for (i = 0; i < ord.length; i++) { goTopPend[ord[i]].t() }
+        goTopPend = []
+    }
     function makeFunClosure(params, body, rets, rtys, variadic, ptypes) {
         var env = pkgEnv()
         return function() {
@@ -5286,6 +5403,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // interface values, so an equal value is the same one unless the later panic
     // computed it (fresh, see PanicCall). Twins: goPanicReport in lib/go-rt.metajs
     // and in abnf/jsrtgolang.go.
+    // A panic value as the runtime prints it: an error's Error() or a Stringer's
+    // String(), and the value of a defined type as main.T(v), a string kind quoted.
+    // Twins: goPanicText in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function goPanicText(v) {
+        if (isDtBox(v) && goIsDefTy(v.__class.__name) && goMeth(v, "Error") === undefined && goMeth(v, "String") === undefined) {
+            var dv = anytype
+            dv = v.__dv
+            return gfTypeName(v) + "(" + (typeof dv == "string" ? "\"" + dv + "\"" : gstr(dv)) + ")"
+        }
+        return gstr(v)
+    }
     function goPanicReport(e) {
         var ch = goChainOf(e)
         var vs = []
@@ -5301,7 +5429,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var lines = []
         for (var k = 0; k < vs.length; k++) {
             if (same[k]) { continue }
-            var ln = (k > 0 ? "\t" : "") + "panic: " + gstr(vs[k])
+            var ln = (k > 0 ? "\t" : "") + "panic: " + goPanicText(vs[k])
             if (recs[k] && k + 1 < vs.length && same[k + 1]) { ln += " [recovered, repanicked]" }
             else if (recs[k]) { ln += " [recovered]" }
             lines.push(ln)
@@ -5388,6 +5516,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else { deferFrames.pop(); scopes = saved; throw e }
         }
         deferFrames.pop()
+        if (res != undefined && res != null && res.isRet && res.bx != undefined && res.bx != null) { res.v = goRetBox(res.v, res.bx, rtl) }
         // NO RETURN SIGNAL in a function that declares results means its panic was
         // RECOVERED, and Go's answer there is the zero value of each declared result
         // type. (A function with NAMED results reads them back below, so only the
@@ -5510,7 +5639,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedPkg = curPkgName
         curPkgName = pname
         c.pushSource(file, text)
-        goPrescan(text)
+        goPrescanPkg(text)
         // constByPos and convByPos are keyed by a source OFFSET, and an imported file is
         // parsed with its own offsets starting at zero - so a literal in the import would
         // otherwise be read back as the constant (or conversion) of whatever the MAIN
@@ -5546,7 +5675,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedRun = scopes
         curPkgScope = pkgScope
         scopes = [globalScope, pkgScope]
+        var savedTop = goTopPend
+        goTopPend = []
         c.compile(asg)
+        goRunTopVars()
+        goTopPend = savedTop
         scopes = savedRun
         curPkgScope = savedPkgScope
         constByPos = savedConsts
@@ -5598,6 +5731,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cls["__ptr$" + mm.name] = byPtr
         cls[mm.name] = mfn
     }
+    goRunTopVars()
 
     function runEntry(f) {
         try {

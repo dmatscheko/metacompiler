@@ -393,7 +393,8 @@ function goCopyCoded(v, code) {
         }
         return out
     }
-    if (!goIsStructVal(v) || (code != "S" && code != "?")) { return v }
+    // A defined type's box (js_godtbox) never changes, so it needs no copy.
+    if (!goIsStructVal(v) || (code != "S" && code != "?") || goIsDt(v)) { return v }
     var cls = goClassOf(v)
     var fs = cls.__fields
     var fc = cls.__fcopy
@@ -544,6 +545,12 @@ function gopObj(o, depth) {
     }
 
     if (cls === undefined) { return undefined }
+    if (goIsDt(o)) {
+        var dv = anytype
+        dv = o.__dv
+        if (goStrOf(cls.__name).charAt(0) == "*" && goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined) { return "&" + gopRender(dv, depth) }
+        return gopRender(dv, depth)
+    }
     var name = goStrOf(cls.__name)
 
     // A slice header prints only its own window [o, o+n) of the backing array.
@@ -581,12 +588,11 @@ function gopObj(o, depth) {
     // a value tree at run time, not from a fixed call site. The object-backed form
     // (new(T) over a one-slot object) IS readable and is rendered exactly. Nothing
     // in tests/go-test-full.go prints a scope-backed pointer.
+    // The holder is the SCOPE that declares the variable (emitPtrCell).
     if (name == "$ptr") {
-        var holder = o.o
-        if (goIsObj(holder)) {
-            var key = goStrOf(o.k)
-            if (goHas(holder, key)) { return "&" + gopRender(holder[key], depth + 1) }
-        }
+        var key = goStrOf(o.k)
+        var sc = goCellScope(o.o, key)
+        if (sc !== undefined) { return "&" + gopRender(scopeGet(sc, key), depth + 1) }
         return "&<nil>"
     }
 
@@ -1060,9 +1066,12 @@ function gfHMeth(v) {
     return r
 }
 function gfHIsErr(v) { return goMeth(v, "Error") !== undefined }
+function gfHIsDt(v) { return goIsDt(v) }
+function gfHDtVal(v) { return v.__dv }
 function gfHStr(v) { return gopStr(v) }
 function gfHStructName(v) {
     var c = goClassOf(v)
+    if (c.__dt === true) { return gfQualTy(goStrOf(c.__name)) }
     var nm = goStrOf(c.__name)
     if (goHas(c, "__pkg")) { return goStrOf(c.__pkg) + "." + nm }
     if (nm == "struct") { return "" }
@@ -1196,7 +1205,8 @@ function gopCompose(args, mode) {
     var prevStr = true
     var i = 0
     while (i < args.length) {
-        var isStr = typeof args[i] == "string"
+        // fmt asks reflect's Kind, so a defined string type's box is a string too.
+        var isStr = typeof args[i] == "string" || (goIsDt(args[i]) && typeof args[i].__dv == "string")
         if (i > 0 && !prevStr && !isStr) { out = out + " " }
         out = out + gopStr(args[i])
         prevStr = isStr
@@ -1565,7 +1575,8 @@ function goErrAs(err, target) {
     if (hit === null) { return false }
     if (hit.via) { return true }
     if (cell) {
-        if (sc !== undefined) { scopeDecl(sc, key, hit.v) }
+        // A box goes into the variable as the value inside ("t:T", goAsWant).
+        if (sc !== undefined) { scopeDecl(sc, key, goDtUnbox(hit.v, want.substring(2))) }
         return true
     }
     var fs = tc.__fields
@@ -2265,7 +2276,7 @@ function goPanicReport(ch, p, pfresh) {
     var k = 0
     while (k < vs.length) {
         if (!same[k]) {
-            var ln = "panic: " + gopStr(vs[k])
+            var ln = "panic: " + goPanicText(vs[k])
             if (k > 0) { ln = "\t" + ln }
             if (recs[k] && k + 1 < vs.length && same[k + 1]) { ln = ln + " [recovered, repanicked]" }
             else if (recs[k]) { ln = ln + " [recovered]" }
@@ -2452,7 +2463,54 @@ function js_goassert(v, want, disp) {
     if (goTypeIs(v, goStrOf(want)) == 0) {
         goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(goStrOf(disp)))
     }
+    return goDtUnbox(v, goStrOf(want))
+}
+
+// ----- a value of a defined non-struct type in an interface ------------------
+//
+// js_godtbox(v, cls): v in the box of a defined non-struct type, whose descriptor
+// the emitter declared ($dt$T). A box stays itself, and so does a struct instance
+// unless a pointer's static type boxes it (a value of `type Q Point` is a Point).
+// js_godtas(v, want, disp): x.(T) for such a T - the value inside its box, the
+// conversion panic for another box, the identity for a value that is not one (its
+// type is not known). Twins: js_godtbox / js_godtas in abnf/jsrtgolang.go, goDtBox
+// / goAssertType in languages/go-interpreter.abnf.
+function goIsDt(v) {
+    var cls = goClassOf(v)
+    if (cls === undefined) { return false }
+    return cls.__dt === true
+}
+function goDtUnbox(v, want) {
+    if (goIsDt(v) && goStrOf(goClassOf(v).__name) == want) { return v.__dv }
     return v
+}
+function js_godtbox(v, cls) {
+    if (goIsDt(v)) { return v }
+    if (goIsStructVal(v) && goStrOf(cls.__name).charAt(0) != "*") { return v }
+    var o = {}
+    o.__class = cls
+    o.__dv = v
+    return o
+}
+function js_godtas(v, want, disp) {
+    if (!goIsDt(v)) { return v }
+    var w = goStrOf(want)
+    if (goStrOf(goClassOf(v).__name) != w) {
+        goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(goStrOf(disp)))
+    }
+    return v.__dv
+}
+// A panic value as the runtime prints it: an error's Error() or a Stringer's
+// String(), and the value of a defined type as main.T(v), a string kind quoted.
+// Twins: goPanicText in abnf/jsrtgolang.go and languages/go-interpreter.abnf.
+function goPanicText(v) {
+    if (goIsDt(v) && goHas(goClassOf(v), "__pkg") && goMeth(v, "Error") === undefined && goMeth(v, "String") === undefined) {
+        var dv = anytype
+        dv = v.__dv
+        if (typeof dv == "string") { return gfTypeName(v) + "(\"" + dv + "\")" }
+        return gfTypeName(v) + "(" + gopStr(dv) + ")"
+    }
+    return gopStr(v)
 }
 
 // ----- multi-value results ---------------------------------------------------

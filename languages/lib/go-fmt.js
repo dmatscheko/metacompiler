@@ -26,6 +26,11 @@
 //   gfHMeth(v)          the text of v's Error() or else String() method, or
 //                       undefined when it has neither
 //   gfHIsErr(v)         whether v has an Error() method
+//   gfHIsDt(v)          whether a "struct" is the box of a defined non-struct
+//                       type's value (go-constfold.js, goDtBoxTy), or of a pointer
+//                       (goFmtBoxTy); gfHDtVal(v) is the value inside, which fmt
+//                       formats in its place - behind "&" for a pointer to a struct
+//                       with neither Error() nor String()
 //   gfHStr(v)           fmt's %v text of v
 //   gfHShort(a, f32)    the shortest decimal of a > 0 as DIGITS "e" EXP, EXP the
 //                       exponent of the first digit
@@ -48,8 +53,9 @@
 //
 // What the value model cannot show, shared with the twin: a pointer to a struct is
 // the struct (%#v writes main.T{...} where go writes &main.T{...}), a defined
-// non-struct type is its underlying type, an int64 or uint64 reads int or uint,
-// and a function has no signature for %T to print.
+// non-struct type is its underlying type unless the operand was boxed on its way
+// in, an int64 or uint64 reads int or uint, and a function has no signature for
+// %T to print.
 
 // The flags, width and precision of one directive. f.plusV is fmt's own split: on
 // %v, '+' asks for field names and is not a numeric flag any more ('#' asks for Go
@@ -227,7 +233,11 @@ function gfAddr(o, k) {
 function gfAddrText(o) { return "0x" + gfToBase(gfIntText(gfAddr(o, "")), 16, false) }
 
 // fmtPointer: the address in hex, with 0x unless # asks to drop it.
-function gfPointer(f, v) {
+function gfPointer(f, v0) {
+    var v = anytype
+    v = v0
+    // A box's address is the value's inside it.
+    if (gfHKind(v) == "struct" && gfHIsDt(v)) { v = gfHDtVal(v) }
     if (gfHKind(v) == "nil") { return gfBad(f, "p", v) }
     var r = gfHRef(v)
     if (r.length == 0) { return gfBad(f, "p", v) }
@@ -296,6 +306,18 @@ function gfArg(f, v, verb, depth, noMeth) {
         var ms = anytype
         ms = gfHMeth(v)
         if (ms !== undefined) { return gfString(f, ms, verb) }
+    }
+    if (k == "struct" && gfHIsDt(v)) {
+        var dv = gfHDtVal(v)
+        if (gfTypeName(v).charAt(0) == "*" && gfHKind(dv) == "struct") {
+            if (!noMeth && (verb == "v" || verb == "s" || verb == "x" || verb == "X" || verb == "q")) {
+                var pm = anytype
+                pm = gfHMeth(dv)
+                if (pm !== undefined) { return gfString(f, pm, verb) }
+            }
+            return "&" + gfArg(f, dv, verb, depth, noMeth)
+        }
+        return gfArg(f, dv, verb, depth, noMeth)
     }
     if (k == "bool") {
         if (verb == "t" || verb == "v") { return gfPad(f, v === true ? "true" : "false") }
@@ -502,6 +524,11 @@ function gfAnonTy(v) {
 // and it is not modelled.
 function gfGoSyn(f, v, slot, depth) {
     var k = gfHKind(v)
+    if (k == "struct" && gfHIsDt(v)) {
+        var dv = gfHDtVal(v)
+        if (gfTypeName(v).charAt(0) == "*" && gfHKind(dv) == "struct") { return "&" + gfGoSyn(f, dv, slot, depth) }
+        return gfGoSyn(f, dv, slot, depth)
+    }
     if (k == "nil") {
         if (depth == 0) { return gfPad(f, "<nil>") }
         return gfNilOf(slot)

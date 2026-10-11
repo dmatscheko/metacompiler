@@ -1,5 +1,11 @@
 //go:build ignore
 
+//go:debug panicnil=0
+
+// The directive above: the repository's go.mod says go 1.16, under which a
+// toolchain recovers panic(nil) as nil; this file asserts the Go 1.21+ answer
+// (a *runtime.PanicNilError), as the grammars implement it.
+
 // Full-syntax test: Go (Go 1.22 core language).
 //
 // This file belongs to the SECOND test group (./test.sh --full): it is NOT part
@@ -3273,6 +3279,92 @@ func get51() *w51 { return &g51 }
 
 var g51 = mkw51()
 
+// ===== SECTION 52: package variable order, a pointer to a slice, defined types in interfaces =====
+// Expected values read off `go run` (go 1.27). A package variable waits for the
+// variables its initializer reaches, through the functions it calls, so g52 is
+// initialised after h52 and the group's a52 after b52. &xs of a slice is the
+// variable: append through the pointer reaches it. A value of a defined
+// non-struct type keeps its type in an interface: fmt calls its String() and
+// Error(), %T names it, a type switch and x.(T) tell it from its underlying type
+// (and int64 from int), and a method called through the interface finds it.
+var g52 = f52()
+
+func f52() int { return 41 + h52 }
+
+var h52 = 1
+
+var (
+	a52 = b52 + 1
+	b52 = 2
+)
+
+type col52 int
+type sq52 float64
+type circ52 float64
+type err52 int
+type shape52 interface{ area() float64 }
+
+const (
+	red52 col52 = iota
+	green52
+)
+
+func (c col52) String() string { return [...]string{"red", "green"}[c] }
+func (s sq52) area() float64   { return float64(s * s) }
+func (c circ52) area() float64 { x := float64(c * c); return x + x + x }
+func (e err52) Error() string  { return fmt.Sprint("code ", int(e)) }
+func add52(p *[]int, v int)    { *p = append(*p, v) }
+func find52(c int) error       { return err52(c) }
+func kind52(v any) string {
+	switch t := v.(type) {
+	case col52:
+		return fmt.Sprint("col ", int(t)+1)
+	case int:
+		return "int"
+	case int64:
+		return "int64"
+	case fmt.Stringer:
+		return "stringer"
+	}
+	return "other"
+}
+
+func s52() {
+	check("vo1", g52 == 42 && h52 == 1 && a52 == 3)
+	xs := []int{}
+	p := &xs
+	*p = append(*p, 1)
+	add52(&xs, 2)
+	check("ps1", len(xs) == 2 && len(*p) == 2 && xs[1] == 2 && (*p)[0] == 1)
+	c := green52
+	check("dt1", fmt.Sprint(c, red52) == "green red" && fmt.Sprintf("%v|%s|%d|%T", c, c, c, c) == "green|green|1|main.col52")
+	var sh shape52 = sq52(2)
+	ss := []shape52{sq52(1), circ52(1)}
+	check("dt2", sh.area() == 4 && ss[0].area()+ss[1].area() == 4)
+	check("dt3", kind52(green52) == "col 2" && kind52(3) == "int" && kind52(int64(3)) == "int64")
+	var v any = col52(1)
+	_, isInt := v.(int)
+	m, isCol := v.(col52)
+	check("dt4", !isInt && isCol && m+1 == 2 && v == col52(1) && v != any(1))
+	e := find52(7)
+	var ec err52
+	check("dt5", e.Error() == "code 7" && fmt.Sprint(e) == "code 7" && errors.As(e, &ec) && ec == 7)
+	r := fmt.Sprint(func() (r any) {
+		defer func() { r = recover() }()
+		_ = v.(int)
+		return nil
+	}())
+	check("dt6", r == "interface conversion: interface {} is main.col52, not int")
+	check("dt7", fmt.Sprint(str52("a"), str52("b"), 1, 2) == "ab1 2" && fmt.Sprintf("%q|%v", str52("x"), str52("y")) == "\"x\"|y")
+	pt := &pt52{3}
+	var np *pt52
+	var ch chan int
+	check("dt8", fmt.Sprintf("%v|%+v|%#v|%T|%T|%v|%T", pt, &pt52{4}, pt, pt, np, np, ch) == "&{3}|&{a:4}|&main.pt52{a:3}|*main.pt52|*main.pt52|<nil>|chan int")
+}
+
+type str52 string
+type pt52 struct{ a int }
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3325,6 +3417,7 @@ func main() {
 	s49() // SECTION-CALL 49
 	s50() // SECTION-CALL 50
 	s51() // SECTION-CALL 51
+	s52() // SECTION-CALL 52
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

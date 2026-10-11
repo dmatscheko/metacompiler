@@ -181,6 +181,10 @@ func (rt *jsrt) gopCompose(argsV interface{}, mode int) (string, bool) {
 	prevStr := true
 	for i, e := range arr.elems {
 		_, isStr := e.(string)
+		// fmt asks reflect's Kind, so a defined string type's box is a string too.
+		if dv, ok := goDtVal(e); ok {
+			_, isStr = dv.(string)
+		}
 		if i > 0 && !prevStr && !isStr {
 			out += " "
 		}
@@ -292,6 +296,12 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 
 	if cls == nil {
 		return "", false
+	}
+	if dv, ok := goDtVal(o); ok {
+		if strings.HasPrefix(rt.toString(cls.props["__name"]), "*") && goIsStructVal(dv) && goMeth(dv, "Error") == nil && goMeth(dv, "String") == nil {
+			return "&" + rt.gopRender(dv, depth), true
+		}
+		return rt.gopRender(dv, depth), true
 	}
 	name, _ := cls.props["__name"].(string)
 
@@ -589,6 +599,12 @@ func (rt *jsrt) gopFormat(format string, args []interface{}, wrap *[]int) string
 // gopGoSyn is gfGoSyn in languages/lib/go-fmt.js: %#v, v as a Go literal of its
 // type, slot being the type the enclosing composite declares for it.
 func (rt *jsrt) gopGoSyn(f gopFlags, v interface{}, slot string, depth int) string {
+	if dv, ok := goDtVal(v); ok {
+		if strings.HasPrefix(rt.gopTypeName(v), "*") && gopKind(dv) == "struct" {
+			return "&" + rt.gopGoSyn(f, dv, slot, depth)
+		}
+		return rt.gopGoSyn(f, dv, slot, depth)
+	}
 	k := gopKind(v)
 	switch k {
 	case "nil":
@@ -899,7 +915,7 @@ func (rt *jsrt) goPanicReport(ps []goAbort) string {
 		if k > 0 {
 			out += "\t"
 		}
-		out += "panic: " + rt.gopStr(p.v)
+		out += "panic: " + rt.goPanicText(p.v)
 		if p.rec && k+1 < len(ps) && same(k+1) {
 			out += " [recovered, repanicked]"
 		} else if p.rec {
@@ -908,6 +924,44 @@ func (rt *jsrt) goPanicReport(ps []goAbort) string {
 		out += "\n"
 	}
 	return out
+}
+
+// goPanicText is a panic value as the runtime prints it: an error's Error() or a
+// Stringer's String(), and the value of a defined type as main.T(v), a string kind
+// quoted. Twin of goPanicText in languages/go-interpreter.abnf and lib/go-rt.metajs.
+func (rt *jsrt) goPanicText(v interface{}) string {
+	if dv, ok := goDtVal(v); ok {
+		cls := goClassOf(v)
+		if _, def := cls.props["__pkg"]; def && goMeth(v, "Error") == nil && goMeth(v, "String") == nil {
+			if s, isStr := dv.(string); isStr {
+				return rt.gopTypeName(v) + "(\"" + s + "\")"
+			}
+			return rt.gopTypeName(v) + "(" + rt.gopStr(dv) + ")"
+		}
+	}
+	return rt.gopStr(v)
+}
+
+// goDtVal is the value inside the box a value of a defined non-struct type gets in
+// an interface (js_godtbox), and false for anything else.
+func goDtVal(v interface{}) (interface{}, bool) {
+	cls := goClassOf(v)
+	if cls == nil || cls.props["__dt"] != true {
+		return nil, false
+	}
+	if dv, ok := v.(*jsObject).props["__dv"]; ok {
+		return dv, true
+	}
+	return jsUndef, true
+}
+
+// goDtUnbox is v as type want once a type test has matched: the value inside
+// want's box.
+func goDtUnbox(rt *jsrt, v interface{}, want string) interface{} {
+	if dv, ok := goDtVal(v); ok && rt.toString(goClassOf(v).props["__name"]) == want {
+		return dv
+	}
+	return v
 }
 
 // gopAddrs is gfAddr's table, one per runtime: the referents %p has met, in order.
@@ -976,6 +1030,10 @@ func (rt *jsrt) gopRef(v interface{}) (o interface{}, key string, off int64, ok 
 
 // gopPointer is gfPointer: fmtPointer's %p.
 func (rt *jsrt) gopPointer(f gopFlags, v interface{}) string {
+	// A box's address is the value's inside it.
+	if dv, ok := goDtVal(v); ok {
+		v = dv
+	}
 	if gopKind(v) == "nil" {
 		return rt.gopBad(f, 'p', v)
 	}
@@ -1098,6 +1156,9 @@ func (rt *jsrt) gopTypeName(v interface{}) string {
 		return gopFmtTy(v)
 	case "struct":
 		cls := goClassOf(v)
+		if cls.props["__dt"] == true {
+			return gopQualTy(rt.toString(cls.props["__name"]))
+		}
 		if pkg, ok := cls.props["__pkg"].(string); ok {
 			return pkg + "." + rt.toString(cls.props["__name"])
 		}
@@ -1411,6 +1472,17 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 		if ms, ok := rt.gopMeth(v); ok {
 			return rt.gopString(f, ms, verb)
 		}
+	}
+	if dv, ok := goDtVal(v); ok {
+		if strings.HasPrefix(rt.gopTypeName(v), "*") && gopKind(dv) == "struct" {
+			if !noMeth && (verb == 'v' || verb == 's' || verb == 'x' || verb == 'X' || verb == 'q') {
+				if ms, ok := rt.gopMeth(dv); ok {
+					return rt.gopString(f, ms, verb)
+				}
+			}
+			return "&" + rt.gopArg(f, dv, verb, depth, noMeth)
+		}
+		return rt.gopArg(f, dv, verb, depth, noMeth)
 	}
 	switch k {
 	case "bool", "int", "float", "complex":
@@ -2046,7 +2118,7 @@ func init() {
 			// "runtime error: <msg>" (see goRTErr).
 			text := ""
 			if exc, ok := p.(*jsThrown); ok {
-				text = rt.gopStr(exc.value)
+				text = rt.goPanicText(exc.value)
 			} else if s, ok := p.(string); ok {
 				text = s
 			} else {
@@ -2205,7 +2277,40 @@ func init() {
 			if goTypeIs(rt, v, rt.toString(u(a[1]))) == 0 {
 				goConvFail("interface {} is " + goTypeText(rt, v) + ", not " + gopQualTy(rt.toString(u(a[2]))))
 			}
-			return a[0]
+			return w(goDtUnbox(rt, v, rt.toString(u(a[1]))))
+		}
+		// js_godtbox(v, cls): v in the box of a defined non-struct type, whose
+		// descriptor the emitter declared ($dt$T). A box stays itself, and so
+		// does a struct instance unless a pointer's static type boxes it (a value
+		// of `type Q Point` is a Point already). js_godtas(v, want, written): x.(T) for such a T -
+		// the value inside its box, the conversion panic for another box, and the
+		// identity for a value that is not one (its type is not known). Twins:
+		// goDtBox / goAssertType in languages/go-interpreter.abnf, js_godtbox /
+		// js_godtas in lib/go-rt.metajs.
+		m["js_godtbox"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if _, isBox := goDtVal(v); isBox {
+				return a[0]
+			}
+			cls, _ := u(a[1]).(*jsObject)
+			if goIsStructVal(v) && (cls == nil || !strings.HasPrefix(rt.toString(cls.props["__name"]), "*")) {
+				return a[0]
+			}
+			o := newJSObject()
+			o.set("__class", u(a[1]))
+			o.set("__dv", v)
+			return w(o)
+		}
+		m["js_godtas"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if _, ok := goDtVal(v); !ok {
+				return a[0]
+			}
+			want := rt.toString(u(a[1]))
+			if rt.toString(goClassOf(v).props["__name"]) != want {
+				goConvFail("interface {} is " + goTypeText(rt, v) + ", not " + gopQualTy(rt.toString(u(a[2]))))
+			}
+			return w(goDtUnbox(rt, v, want))
 		}
 		// A DECLARED INTERFACE IS MATCHED STRUCTURALLY: a value satisfies it
 		// exactly when it has every method. js_gotypeis can only compare type
@@ -2723,7 +2828,8 @@ func (rt *jsrt) goErrAs(err, target interface{}) bool {
 	}
 	if cell {
 		if sc != nil {
-			rt.scopeSet(sc, key, hit)
+			// A box goes into the variable as the value inside ("t:T", goAsWant).
+			rt.scopeSet(sc, key, goDtUnbox(rt, hit, strings.TrimPrefix(want, "t:")))
 		}
 		return true
 	}

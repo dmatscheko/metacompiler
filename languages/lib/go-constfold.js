@@ -1013,7 +1013,7 @@ function stChainFrom(head, hty, loc, text) {
     var i = head.length
     var ty = stBare(hty)
     if (ty == "" && i < text.length && text.charAt(i) == "(") {
-        if (goIsDefTy(head)) { ty = head }
+        if (goIsDefTy(head) || goDtWide["$" + head] === true) { ty = head }
         else if (!loc && goFnRty["$" + head] !== undefined) { ty = goFnRty["$" + head] }
         if (ty != "") {
             i = stClose(text, i)
@@ -1094,7 +1094,10 @@ var goDefTys = {}     // "$T" -> true: `type T U`, a defined type
 var goMethRty = {}    // "$T.M" -> M's single result type ("" for none or several)
 var goMethPtr = {}    // "$T.M" -> true for a pointer receiver
 var goMethRecv = {}   // "$M" -> every receiver type that declares M
-function goNoteDefTy(name) { goDefTys["$" + name] = true }
+function goNoteDefTy(name) {
+    goDefTys["$" + name] = true
+    if (goPreForeign) { goDtForeign["$" + name] = true }
+}
 function goIsDefTy(t) { return goDefTys["$" + t] === true }
 function goNoteMeth(rt, name, byPtr, rtys) {
     var k = "$" + rt + "." + name
@@ -1102,10 +1105,163 @@ function goNoteMeth(rt, name, byPtr, rtys) {
     goMethRty[k] = rtys.length == 1 ? rtys[0] : ""
     goMethPtr[k] = byPtr
     if (seen) { return }
+    if (!byPtr) {
+        if (goTyMeths["$" + rt] === undefined) { goTyMeths["$" + rt] = [] }
+        goTyMeths["$" + rt].push(name)
+    }
     if (goMethRecv["$" + name] === undefined) { goMethRecv["$" + name] = [] }
     goMethRecv["$" + name].push(rt)
 }
 var goFnRty = {}      // "$f" -> top-level function f's single result type ("" otherwise)
+var goFnPTys = {}     // "$f" -> top-level function f's parameter types (goPreParams)
+
+// ----- A VALUE OF A DEFINED NON-STRUCT TYPE IN AN INTERFACE -----
+// A Celsius IS its float64 in this value model, so in an interface it would lose its
+// type: %T, a type switch, x.(T), fmt's String() / Error() and a method called
+// through the interface all need it. So where a value of such a static type reaches
+// an interface-typed place - fmt's operands, panic, a var, parameter, result,
+// element or == operand of interface type - it is BOXED: an instance of the type's
+// descriptor {__dt, __name, __fields: ["__dv"]} holding the value in __dv, whose
+// methods are the type's value-receiver methods called on the value inside.
+// Whatever handles a struct instance (method sets, ==, type names) handles the box;
+// fmt prints the value inside and x.(T) takes it out. A value whose static type is
+// not known goes in unboxed. Twins: goDtBox in go-interpreter.abnf, emitDtBox in
+// go-to-llvm-ir.abnf, js_godtbox in abnf/jsrtgolang.go and lib/go-rt.metajs.
+var goIfaceTys = {}   // "$I" -> true: `type I interface {...}`
+var goTyMeths = {}    // "$T" -> the value-receiver method names of T
+function goIsIfaceTy(t) {
+    if (t == "any" || t == "error" || t == "fmt.Stringer" || t.indexOf("interface") == 0) { return true }
+    return goIfaceTys["$" + t] === true
+}
+// The type a value of static type sty is boxed as on its way into an interface,
+// or "". The 64-bit integer types are boxed too: an int64 is the same plain number
+// as an int, and a uint64 or uintptr the same box as a uint.
+var goDtWide = {"$int64": true, "$uint64": true, "$uintptr": true}
+function goDtBoxTy(sty) {
+    var t = stBare(sty)
+    if (goDtForeign["$" + t] === true) { return "" }
+    return (goIsDefTy(t) || goDtWide["$" + t] === true) ? t : ""
+}
+// The box type for a value of static type sty stored where type dty is declared.
+function goDtBoxTo(sty, dty) {
+    if (dty == "" || !goIsIfaceTy(stBare(dty))) { return "" }
+    return goDtBoxTy(sty)
+}
+// A type text's leading word w, with the name after a package qualifier kept
+// (`case fmt.Stringer:`).
+function goQualWord(t, w) {
+    if (w == "" || t.charAt(w.length) != ".") { return w }
+    var e = w.length + 1
+    while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
+    return t.substring(0, e)
+}
+// A call's argument list: each argument is followed by its {aty} (ArgExpr), and a
+// trailing {spread} spreads the last one.
+function goSplitArgs(items) {
+    var args = []
+    var atys = []
+    var spread = false
+    var i = 0
+    while (i < items.length) {
+        var it = items[i]
+        if (typeof it == "function") { args.push(it); atys.push("") }
+        else if (it != null && it.aty !== undefined) { if (atys.length > 0) { atys[atys.length - 1] = it.aty } }
+        else if (it != null && it.spread === true) { spread = true }
+        i = i + 1
+    }
+    return {args: args, atys: atys, spread: spread}
+}
+// The parameter type argument j of a call meets, from goPreParams' list.
+function goParamTyAt(pts, j) {
+    var t = ""
+    if (j < pts.length) { t = pts[j] }
+    else if (pts.length > 0) { t = pts[pts.length - 1] }
+    if (t.indexOf("...") == 0) { return t.substring(3) }
+    return j < pts.length ? t : ""
+}
+// The operands of fmt's printing functions are interfaces, and so are the
+// arguments a top-level function declares as one, and the elements append adds to
+// a slice of them: each is boxed by its static type (goDtBoxThunk is the grammar's).
+var goFmtBoxes = {"$fmt.Println": true, "$fmt.Print": true, "$fmt.Printf": true, "$fmt.Sprint": true,
+                  "$fmt.Sprintf": true, "$fmt.Errorf": true, "$errors.Is": true, "$errors.Join": true}
+// The operands fmt only PRINTS also carry a pointer's, a channel's or a func's
+// static type, so %T names it (a nil one too) and a pointer to a struct prints as
+// &{...}; nothing else ever sees that box.
+var goFmtPrints = {"$Println": true, "$Print": true, "$Printf": true, "$Sprint": true, "$Sprintf": true}
+function goFmtBoxTy(sty, name) {
+    var t = goDtBoxTy(sty)
+    if (t != "" || goFmtPrints["$" + name] !== true) { return t }
+    var b = stBare(sty)
+    if (b.indexOf("?") >= 0) { return "" }
+    if (b.length > 1 && b.charAt(0) == "*") { return b }
+    // A channel or func type only where its text, blanks taken out, still reads
+    // as reflect spells it (gfQualTy restores the blank of "chanint").
+    if (b.indexOf("chan") == 0 && b.length > 4 && stHeadLen(b) == b.length) { return b }
+    if (b.indexOf("func(") == 0 && b.charAt(b.length - 1) == ")" && b.indexOf(",") < 0) { return b }
+    return ""
+}
+function goBoxArgsC(items) {
+    var i = 1
+    while (i < items.length) {
+        var s = items[i]
+        if (s != null && typeof s == "object" && s.kind == "mcall" && s.rc != null && !s.rc.loc && s.rc.hty == ""
+            && goFmtBoxes["$" + s.rc.text + "." + s.name] === true) {
+            var j = 0
+            while (j < s.args.length) {
+                if (!(s.spread && j == s.args.length - 1)) {
+                    s.args[j] = goDtBoxThunk(s.args[j], s.rc.text == "fmt" ? goFmtBoxTy(s.atys[j], s.name) : goDtBoxTy(s.atys[j]))
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return items
+}
+// A value switch compares each case value with the subject, so either side is
+// boxed into the other's interface type. items are makeSwitch's.
+function goSwBoxC(items) {
+    var subj = null
+    var i = 0
+    while (i < items.length) {
+        if (items[i] != null && typeof items[i] == "object" && items[i].subj !== undefined) { subj = items[i] }
+        i = i + 1
+    }
+    if (subj == null) { return items }
+    i = 0
+    while (i < items.length) {
+        var it = items[i]
+        if (it != null && typeof it == "object" && it.vals !== undefined) {
+            var k = 0
+            while (k < it.vals.length) {
+                it.vals[k] = goDtBoxThunk(it.vals[k], goDtBoxTo(it.stys[k], subj.sty))
+                if (goDtBoxTo(subj.sty, it.stys[k]) != "") { subj.subj = goDtBoxThunk(subj.subj, goDtBoxTo(subj.sty, it.stys[k])) }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    return items
+}
+// items = [name, (argThunk, {aty})..., {spread}?] of a call `name(args)`: the
+// arguments boxed where the parameter is an interface, the {aty} markers dropped.
+function goCallBoxC(items) {
+    var name = items[0]
+    var sp = goSplitArgs(items.slice(1))
+    var pts = null
+    if (name == "append" && sp.atys.length > 0) { pts = ["", "..." + stElemTy(sp.atys[0])] }
+    else if (goFnPTys["$" + name] !== undefined && !cIsLocal(name)) { pts = goFnPTys["$" + name] }
+    var out = [name]
+    var j = 0
+    while (j < sp.args.length) {
+        var t = sp.args[j]
+        if (pts != null && !(sp.spread && j == sp.args.length - 1)) { t = goDtBoxThunk(t, goDtBoxTo(sp.atys[j], goParamTyAt(pts, j))) }
+        out.push(t)
+        j = j + 1
+    }
+    if (sp.spread) { out.push({spread: true}) }
+    return out
+}
 // Is name bound inside a function (a frame below the package one)?
 function cIsLocal(name) {
     var s = cScopes.length - 1
@@ -1129,6 +1285,15 @@ function cIsLocal(name) {
 // field types, with the whitespace taken out as up.in takes it out of a type the
 // walk captures.
 var goPreFld = {}     // "$S.f" -> the type of field f of struct S
+// An imported file's declarations: its defined types are not boxed (goDtBoxTy),
+// since their methods live in the package's own scope.
+var goPreForeign = false
+var goDtForeign = {}
+function goPrescanPkg(text) {
+    goPreForeign = true
+    goPrescan(text)
+    goPreForeign = false
+}
 function goPrescan(text) {
     var i = 0
     while (i < text.length) {
@@ -1175,8 +1340,10 @@ function goPreFunc(text, i) {
     var name = text.substring(ns, i)
     if (text.charAt(i) == "[") { i = stClose(text, i); if (i < 0) { return } i = i + 1 }
     if (text.charAt(i) != "(") { return }
+    var ps = i
     i = stClose(text, i)
     if (i < 0) { return }
+    if (recv == "" && goFnPTys["$" + name] === undefined) { goFnPTys["$" + name] = goPreParams(text.substring(ps + 1, i)) }
     i = stSkipWs(text, i + 1)
     var rty = ""
     var nres = 0
@@ -1206,6 +1373,9 @@ function goPreFunc(text, i) {
     var rtys = []
     if (nres == 1) { rtys.push(rty) }
     if (nres == 2) { rtys.push(""); rtys.push("") }
+    var ob = text.indexOf("{", i)
+    var cb = ob < 0 ? -1 : stClose(text, ob)
+    if (cb > 0) { goNoteFnText(recv != "" ? "." + name : name, text.substring(ob, cb + 1)) }
     if (recv != "") { goNoteMeth(recv, name, ptr, rtys) }
     else if (goFnRty["$" + name] === undefined) { goFnRty["$" + name] = nres == 1 ? rty : "" }
 }
@@ -1226,8 +1396,53 @@ function goPreType(text, i) {
         goPreFields(name, text.substring(ob + 1, cb))
         return
     }
-    if (rest.substring(0, 1) == "=" || rest.substring(0, 9) == "interface") { return }
+    if (rest.substring(0, 9) == "interface") { goIfaceTys["$" + name] = true; return }
+    if (rest.substring(0, 1) == "=") { return }
     goNoteDefTy(name)
+}
+// A parameter list's text: one type text per parameter, whitespace taken out
+// ("...T" for a variadic one). `a, b int` gives both names the type after them.
+function goPreParams(t) {
+    var parts = []
+    var d = 0
+    var s = 0
+    var i = 0
+    while (i <= t.length) {
+        var ch = i < t.length ? t.charAt(i) : ","
+        if (ch == "(" || ch == "[" || ch == "{") { d = d + 1 }
+        if (ch == ")" || ch == "]" || ch == "}") { d = d - 1 }
+        if (d == 0 && ch == ",") { parts.push(t.substring(s, i)); s = i + 1 }
+        i = i + 1
+    }
+    var plain = []
+    var typed = []
+    var named = false
+    var k = 0
+    while (k < parts.length) {
+        var p = parts[k]
+        var a = 0
+        while (a < p.length && goIsWs(p.charAt(a))) { a = a + 1 }
+        var e = a
+        while (e < p.length && cIsIdCh(p.charCodeAt(e))) { e = e + 1 }
+        var rest = e < p.length ? stNoWs(p.substring(e)) : ""
+        if (e > a && rest != "" && goIsWs(p.charAt(e))) { named = true; typed.push(rest) }
+        else { typed.push("") }
+        if (stNoWs(p) != "") { plain.push(stNoWs(p)) }
+        k = k + 1
+    }
+    if (!named) { return plain }
+    var out = []
+    var pend = 0
+    k = 0
+    while (k < typed.length) {
+        if (typed[k] == "") { pend = pend + 1 }
+        else {
+            while (pend >= 0) { out.push(typed[k]); pend = pend - 1 }
+            pend = 0
+        }
+        k = k + 1
+    }
+    return out
 }
 // One struct body: fields separated by ';' or a line break, each `a, b T` or an
 // embedded `T` / `*T` / `pkg.T` (named for its last identifier), a tag dropped.
@@ -1329,6 +1544,135 @@ function goDtPlan(rc, name) {
     return {fn: cands[0] + "." + name, ty: cands[0], ptr: goMethPtr["$" + cands[0] + "." + name] === true,
             dyn: true, isPtr: false}
 }
+// ----- THE ORDER PACKAGE VARIABLES ARE INITIALISED IN -----
+// Go initialises package variables in declaration order, except that a variable
+// waits until every variable its initializer refers to is initialised - directly or
+// through the bodies of the functions and methods it names (spec, "Package
+// initialization"). `var g = f()` before `func f() int { return h }` and `var h = 1`
+// initialises h first. The references are read from the source text: every
+// identifier, and a selector's name stands for every method of that name. That
+// over-approximates (a local shadowing a package name counts too), which can only
+// make a variable wait, and a cycle of waits falls back to declaration order.
+var goFnText = {}     // "$f" -> the body text of function f, "$.M" -> of every method M
+function goNoteFnText(key, body) {
+    var k = "$" + key
+    goFnText[k] = goFnText[k] === undefined ? body : goFnText[k] + body
+}
+// The identifiers of a text, string and rune literals skipped; ".M" for a selector.
+function goTextIds(text) {
+    var out = []
+    var i = 0
+    while (i < text.length) {
+        var cc = text.charCodeAt(i)
+        if (cc == 34 || cc == 39 || cc == 96) {
+            var j = i + 1
+            while (j < text.length && text.charCodeAt(j) != cc) {
+                if (cc != 96 && text.charCodeAt(j) == 92) { j = j + 1 }
+                j = j + 1
+            }
+            i = j + 1
+        } else if (cc >= 48 && cc <= 57) {
+            while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
+        } else if (cIsIdCh(cc)) {
+            var e = i
+            while (e < text.length && cIsIdCh(text.charCodeAt(e))) { e = e + 1 }
+            var dot = i > 0 && text.charAt(i - 1) == "."
+            out.push((dot ? "." : "") + text.substring(i, e))
+            i = e
+        } else { i = i + 1 }
+    }
+    return out
+}
+function goIsWs(ch) { return ch == " " || ch == "\t" || ch == "\n" || ch == "\r" }
+// The names a `var` declaration's text declares: each spec's leading identifiers.
+function goVarNames(text) {
+    var out = []
+    var i = 3
+    while (i < text.length && goIsWs(text.charAt(i))) { i = i + 1 }
+    var grouped = text.charAt(i) == "("
+    if (grouped) { i = i + 1 }
+    var d = 0
+    var lead = true
+    while (i < text.length) {
+        var ch = text.charAt(i)
+        if (d == 0 && (ch == "\n" || ch == ";")) { lead = grouped; i = i + 1; continue }
+        if (ch == "(" || ch == "[" || ch == "{") { d = d + 1; lead = false }
+        else if (ch == ")" || ch == "]" || ch == "}") { d = d - 1 }
+        else if (lead && cIsIdCh(text.charCodeAt(i))) {
+            var e = i
+            while (e < text.length && cIsIdCh(text.charCodeAt(e))) { e = e + 1 }
+            out.push(text.substring(i, e))
+            var n = stSkipWs(text, e)
+            lead = n < text.length && text.charAt(n) == ","
+            i = lead ? n + 1 : e
+            continue
+        } else if (!goIsWs(ch)) { lead = false }
+        i = i + 1
+    }
+    return out
+}
+// One package var declaration: the names it declares and every identifier its
+// initializer reaches, through function and method bodies.
+function goTopVarRec(text) {
+    var seen = {}
+    var refs = []
+    var work = goTextIds(text)
+    while (work.length > 0) {
+        var id = work.pop()
+        if (seen["$" + id] !== true) {
+            seen["$" + id] = true
+            refs.push(id)
+            var body = goFnText["$" + id]
+            if (body !== undefined) {
+                var more = goTextIds(body)
+                var k = 0
+                while (k < more.length) { work.push(more[k]); k = k + 1 }
+            }
+        }
+    }
+    return {names: goVarNames(text), refs: refs}
+}
+// The order to initialise the records in: repeatedly the first one in declaration
+// order that refers to no other record still waiting.
+function goTopVarOrder(recs) {
+    var done = []
+    var order = []
+    var i = 0
+    while (i < recs.length) { done.push(false); i = i + 1 }
+    while (order.length < recs.length) {
+        var pick = -1
+        var first = -1
+        i = 0
+        while (i < recs.length && pick < 0) {
+            if (!done[i]) {
+                if (first < 0) { first = i }
+                if (!goTopVarWaits(recs, done, i)) { pick = i }
+            }
+            i = i + 1
+        }
+        if (pick < 0) { pick = first }
+        done[pick] = true
+        order.push(pick)
+    }
+    return order
+}
+function goTopVarWaits(recs, done, i) {
+    var want = {}
+    var r = 0
+    while (r < recs[i].refs.length) { want["$" + recs[i].refs[r]] = true; r = r + 1 }
+    var j = 0
+    while (j < recs.length) {
+        if (j != i && !done[j]) {
+            var n = 0
+            while (n < recs[j].names.length) {
+                if (want["$" + recs[j].names[n]] === true) { return true }
+                n = n + 1
+            }
+        }
+        j = j + 1
+    }
+    return false
+}
 // append(s, v, ...): each appended struct value is a copy, by s's element type.
 // items = ["append", s, v..., {spread}?]; text is the call's.
 function goAppendC(items, text) {
@@ -1381,6 +1725,7 @@ function cSwExit() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks.pop()) } }
 // every `const`, grouped or not; CSpecOn steps the index once per spec.
 var cIotaIdx = 0
 var cLastFns = []
+var cLastTy = ""
 function cSpecVal(fns, n, ok, io) {
     if (!ok) { return null }
     return fns[n](io)
@@ -1415,7 +1760,8 @@ function cBindSpec(items) {
         names.push(items[i])
     }
     var typed = false
-    if (i < items.length && items[i] != undefined && items[i].ty != undefined) { typed = true; i++ }
+    var cty = ""
+    if (i < items.length && items[i] != undefined && items[i].ty != undefined) { typed = true; cty = items[i].ty; i++ }
     var rest = []
     var ats = []
     var k = i
@@ -1437,9 +1783,15 @@ function cBindSpec(items) {
         fns = cLastFns
     }
     var okn = fns.length === names.length
+    // A typed constant's static type, which a spec with no '=' repeats with the
+    // expressions: `const ( Red Color = iota; Green )` makes Green a Color.
+    if (cIotaIdx <= 0) { cLastTy = "" }
+    if (typed) { cLastTy = cty }
+    else if (rest.length > 0) { cLastTy = "" }
     var n = 0
     while (n < names.length) {
         cBindConst(names[n], typed ? null : cSpecVal(fns, n, okn, cIotaIdx))
+        if (cLastTy != "") { cBindTy(names[n], cLastTy) }
         n = n + 1
     }
     // A TYPED const is deliberately NOT an untyped folding constant (cBindConst
@@ -1497,6 +1849,11 @@ function goCmpFold(items) {
         var rt = stBare(stAt(items[4].at))
         if ((ops[0] == "==" || ops[0] == "!=") && (lt.charAt(0) == "*" || rt.charAt(0) == "*")) {
             ops[0] = ops[0] + "p"
+        }
+        // An operand compared with an interface is converted to it (goDtBoxTo).
+        if (ops[0] == "==" || ops[0] == "!=") {
+            ts[0] = goDtBoxThunk(ts[0], goDtBoxTo(lt, rt))
+            ts[1] = goDtBoxThunk(ts[1], goDtBoxTo(rt, lt))
         }
         var l = constAt(items[1].at)
         var r = constAt(items[4].at)

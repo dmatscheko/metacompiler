@@ -341,9 +341,15 @@ NamedAhead = :script(~~
     })()
 ~~) ;
 
-// A package level var: its declaration thunk becomes a top level statement.
-// Grouped form (var ( a int; b = 2 )) is GENUINELY bound one spec at a time.
-TopVar      = VarGroup | VarDecl ;
+// A package level var: its declaration thunk is emitted after every other top level
+// declaration, in Go's initialisation order (goTopOrder), each spec of a group
+// (var ( a = b; b = 2 )) on its own. Twin of TopVar in go-interpreter.abnf.
+TopVar      = TopVarGroup | TopVarOne ;
+TopVarOne   <~~ push(goTopVarC(pop(), c.srcSlice(up.start, up.pos))) ~~>
+            = VarDecl ;
+TopVarGroup = "var" KwEnd "(" { TopVarSpec } ")" [ ";" ] ;
+TopVarSpec  <~~ push(goTopVarC(pop(), "var " + c.srcSlice(up.start, up.pos))) ~~>
+            = VarSpec ;
 
 Type        = "*" Type | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
             | StructTypeT | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) [ "." Id ] [ TypeArgs ] ;
@@ -627,17 +633,17 @@ CaseType    <~~ push({ct: up.in}) ~~>
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
 // its Expression on the '{', leaking the marker (pushes are not rolled back) and
 // blocking every later composite literal.
-ValueSwitch <~~ push(makeSwitch(takeAll())); cSwExit() ~~>
+ValueSwitch <~~ push(makeSwitch(goSwBoxC(takeAll()))); cSwExit() ~~>
             = "switch" KwEnd [ InitAhead FInit ";" ]
               ( "{" CSwOn { CaseLabel | Statement } "}"
               | SwitchSubj "{" CSwOn { CaseLabel | Statement } "}" ) ;
-SwitchSubj  <~~ push({subj: pop()}) ~~>
-            = CondOn Expression CondOff ;
+SwitchSubj  = CondOn SwSubjE CondOff ;
+SwSubjE     <~~ push({subj: pop(), sty: stAt(up.pos)}) ~~> = Expression ;
 // The body is parsed flat: the labels must be tried before Statement (a bare 'case'
 // would parse as an identifier expression), and the builder groups the statements
 // under the label they follow.
 CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
-            = CCaseOn ( "case" KwEnd Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+            = CCaseOn ( "case" KwEnd Expression <~~ push({v: pop(), sty: stAt(up.pos)}) ~~> { "," Expression <~~ push({v: pop(), sty: stAt(up.pos)}) ~~> }
               | "default" KwEnd ) ":" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
@@ -645,7 +651,7 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 // Go's semicolon insertion makes `return` a RESTRICTED production: a line break right
 // after it ends the statement. Without SameLine a bare `return` followed by `case <-c:`
 // reads `case` as the start of its result expression and the whole switch falls apart.
-RetVals     = Expression { "," Expression } ;
+RetVals     = ArgExpr { "," ArgExpr } ;
 
 // break / continue carry an optional label: they leave (resp. re-enter) the loop that
 // carries that label rather than the innermost one.
@@ -819,7 +825,7 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(goRecvsC(takeAll(), up.start)), up.in, up.pos)) ~~>
+CallMember  <~~ push(goChainC(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start))), up.in, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -845,9 +851,9 @@ SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
 // Call covers only the 'Id(args)' form, so without this suffix a call on any other
 // expression does not parse at all.
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
-            = "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
+            = "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -1027,7 +1033,10 @@ SeqElem     <~~ push(makeSeqElem(takeAll())) ~~>
 // struct key needs: `[]Named{{{1, 2}: "p"}}` and `map[string]Named{"x": {{1, 2}: "p"}}`.
 // Disjoint from Expression: no Go expression starts with '{'.
 SeqKey      <~~ push({ekey: pop(), ektext: firstWord(up.in)}) ~~> = ( SeqNest | Expression ) ":" ;
-SeqVal      = SeqNest | Expression ;
+SeqVal      = SeqNest | SeqExpr ;
+// An element reports its static type after it, so one going into an interface
+// element is boxed (goDtBoxTo). Twin of CompExpr in go-interpreter.abnf.
+SeqExpr     <~~ var se = pop(); push(se); push({esty: stAt(up.pos)}) ~~> = Expression ;
 SeqNest     <~~ push({enest: pop()}) ~~> = SeqBody ;
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
 // the element's ',' or the closing '}' at bracket depth 0. It decides before anything
@@ -1085,7 +1094,8 @@ MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
 MapKey      = SeqNest | Expression ;
 // A value may be a bare brace group built against the map's VALUE type, as in
 // map[string][]int{"a": {1, 2}}.
-MapVal      = SeqNest | Expression ;
+MapVal      = SeqNest | MapValE ;
+MapValE     <~~ push({mvt: pop(), esty: stAt(up.pos)}) ~~> = Expression ;
 MakeMap     <~~ push(makeMakeMap(takeAll())) ~~>
             = "make" KwEnd "(" MapTypeZ ")" ;
 
@@ -1159,8 +1169,10 @@ LitVal      = SeqNest | Expression ;
 
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
-Call        <~~ push(makeCall(goAppendC(takeAll(), up.in))) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
+Call        <~~ push(makeCall(goCallBoxC(goAppendC(takeAll(), up.in)))) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+// A call argument reports its static type after it, for goSplitArgs.
+ArgExpr     <~~ var ae = pop(); push(ae); push({aty: stAt(up.pos)}) ~~> = Expression ;
 
 VarRef      <~~ push(goNameC(up.in, up.pos)) ~~>
             = Id ;
@@ -2094,9 +2106,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    function makeMethodSfx(name, args, at) {
-        var sp = takeSpread(args)
-        return {kind: "mcall", name: name, args: args, spread: sp, at: at, rc: null}
+    function makeMethodSfx(name, items, at) {
+        var sp = goSplitArgs(items)
+        return {kind: "mcall", name: name, args: sp.args, atys: sp.atys, spread: sp.spread, at: at, rc: null}
     }
     // A call of a method of a DEFINED type, by its plan (go-constfold.js, goDtPlan):
     // a pointer receiver named by a bare variable gets that variable's cell, a value
@@ -2124,10 +2136,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var fV = p.fn == "" ? hUndef : callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.fn)])
         return {b: b, v: callExt(b, "js_godtcall", [r, emitStr(b, s.name), argsV, fV, p.dyn ? hTrue : hFalse])}
     }
-    // items = [argThunks..., {spread}?]: the '(args)' suffix of a postfix chain.
+    // items = [(argThunk, {aty})..., {spread}?]: the '(args)' suffix of a postfix
+    // chain (goSplitArgs).
     function makeCallSfx(items) {
-        var sp = takeSpread(items)
-        return {kind: "call", args: items, spread: sp}
+        var sp = goSplitArgs(items)
+        return {kind: "call", args: sp.args, atys: sp.atys, spread: sp.spread}
     }
     // A trailing {spread} marker is popped off an argument list; it means the last
     // argument is a slice to be spread into the variadic parameter.
@@ -2211,6 +2224,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     } else {
                         var aw = assertTyWant(s.at)
                         if (aw != "") { cur = callExt(b, "js_goassert", [cur, emitStr(b, aw), emitStr(b, s.at)]) }
+                        else if (goIsDefTy(s.at)) { cur = callExt(b, "js_godtas", [cur, emitStr(b, s.at), emitStr(b, s.at)]) }
                     }
                 } else if (s.kind == "call") {
                     var ec = emitArgs2(b, s.args, s.spread)
@@ -2249,12 +2263,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // indexed, or a nested brace group built against the element type), and only the
     // result differs - a slice gets a header over the array, an array IS the array.
     function makeSeqElem(items) {
-        var e = {ekey: null, ektext: null, eval: null, enest: null}
+        var e = {ekey: null, ektext: null, eval: null, enest: null, esty: ""}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { e.eval = it }
             else if (it.ekey != undefined) { e.ekey = it.ekey; e.ektext = it.ektext }
             else if (it.enest != undefined) { e.enest = it.enest }
+            else if (it.esty != undefined) { e.esty = it.esty; if (goDtBoxTy(it.esty) != "") { goDtNote(goDtBoxTy(it.esty)) } }
         }
         return e
     }
@@ -2277,6 +2292,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // The element type is DECLARED here, so the value adopts its width:
             // []uint8{255} holds a uint8 255, and the a[0]++ after it is 0.
             var re = e.eval(b)
+            var bt = (e.esty == undefined || e.esty == "") ? "" : goDtBoxTo(e.esty, cet)
+            if (bt != "") { return {b: re.b, v: emitDtBox(re.b, re.v, bt)} }
             return {b: re.b, v: emitStoreCopy(re.b, emitAdoptTy(re.b, cet, re.v), cet)}
         }
         var els = e.enest.selems
@@ -2426,6 +2443,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var zero = items[1].mzero
         var entries = items.slice(2)
         var mty = "map[" + kty + "]" + zero
+        for (var ei = 0; ei < entries.length; ei++) {
+            var em = entries[ei].mv
+            if (typeof em != "function" && em.mvt != undefined) { entries[ei].mv = goDtBoxThunk(em.mvt, goDtBoxTo(em.esty, zero)) }
+        }
         return function(b) {
             var mV = emitMapNew(b, zero, mty)
             for (var i = 0; i < entries.length; i++) {
@@ -3552,18 +3573,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return emitSelect(b, emitIsPtr(b, cur), mkCell, function(eb) {
                 // An ARRAY is a VALUE in Go and every assignment of one copies it, so
                 // &arr cannot be the array: `h := &arr` would hand h a copy and
-                // `h[0] = 5` would be lost. It gets a real cell, like a scalar. (A
-                // slice header, a map and a struct are references already.) js_is_type
-                // "Array" is true for a plain array handle and false for the $sl
-                // header. Mirrors makeAddrVar in go-interpreter.abnf.
+                // `h[0] = 5` would be lost. It gets a real cell, like a scalar, and so
+                // does a slice: its $sl HEADER is a value, and `*p = append(*p, 1)`
+                // must reach the variable. (A map and a struct are references
+                // already.) Mirrors makeAddrVar in go-interpreter.abnf.
                 var isArr = callExt(eb, "js_is_type", [cur, emitStr(eb, "Array")])
-                return emitSelect(eb, isArr, mkCell, function(nb) {
+                return emitSelect(eb, isArr, mkCell, function(sb) { return emitSelect(sb, emitIsSl(sb, cur), mkCell, function(nb) {
                     // nil (typeof "object" too) gets a cell: `var p *T; pp := &p`.
                     var isObj = callExt(nb, "js_seq", [callExt(nb, "js_typeof", [cur]), emitStr(nb, "object")])
                     return emitSelect(nb, isObj, function(ob) {
                         return emitSelect(ob, callExt(ob, "js_seq", [cur, hNull]), mkCell, function(tb) { return {b: tb, v: cur} })
                     }, mkCell)
-                })
+                }) })
             })
         }
     }
@@ -3686,6 +3707,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var cty = goStCopyTy(sp.tys[ai])
                 if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
                 exprs[ai] = goStoreThunk(exprs[ai], cty)
+                if (lref.path.length == 0 && lref.stars == 0) { exprs[ai] = goDtBoxThunk(exprs[ai], goDtBoxTo(sp.tys[ai], cTyLookup(lref.name))) }
             }
         }
         return function(b) {
@@ -3758,7 +3780,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // in Go. go-interpreter.abnf's makeAssertOk does the same with zeroOfType2.
             if (vName != "_") {
                 var vr = emitSelect(b, okV,
-                    function(tb) { return {b: tb, v: r.v} },
+                    function(tb) { return {b: tb, v: emitDtUnbox(tb, r.v, ty)} },
                     function(eb) { return {b: eb, v: emitZeroTy(eb, ty)} })
                 b = vr.b
                 cokDecl(b, isDecl, vName, vr.v)
@@ -3897,7 +3919,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (inits.length == names.length) {
             for (var vi = 0; vi < inits.length; vi++) {
                 if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
-                inits[vi] = goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi]))
+                inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
             }
         }
         return function(b) {
@@ -4195,8 +4217,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [{v: thunk}...]: one label; no values means 'default'.
     function makeCaseLabel(items) {
         var vals = []
-        for (var i = 0; i < items.length; i++) vals.push(items[i].v)
-        return {isDefault: items.length == 0, vals: vals}
+        var stys = []
+        for (var i = 0; i < items.length; i++) { vals.push(items[i].v); stys.push(items[i].sty) }
+        return {isDefault: items.length == 0, vals: vals, stys: stys}
     }
     // items = [{subj}?, label or statement thunk...]: Go switch. The flat item list is
     // regrouped (every statement belongs to the last label). The dispatch compares (or,
@@ -4277,7 +4300,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [{ct}...]: one 'case T1, T2:' label; no types means 'default'.
     function makeTypeCase(items) {
         var ts = []
-        for (var i = 0; i < items.length; i++) { ts.push(firstWord(items[i].ct)) }
+        for (var i = 0; i < items.length; i++) { ts.push(goQualWord(items[i].ct, firstWord(items[i].ct))) }
         return {isTypeCase: true, isDefault: items.length == 0, types: ts}
     }
     // The bare type name out of the captured source text (it may carry comments or
@@ -4336,7 +4359,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var saved = curScopeV
                 if (bind != null) {
                     curScopeV = callExt(bb, "js_scope_new", [curScopeV])
-                    callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, bind), subjV])
+                    // A one-type case binds the value AS that type: a box is opened.
+                    var bv = cases[k3].types.length == 1 ? emitDtUnbox(bb, subjV, cases[k3].types[0]) : subjV
+                    callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, bind), bv])
                 }
                 var body = cases[k3].body
                 for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
@@ -4494,7 +4519,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                           function(tb) { return {b: tb, v: emitZeroTy(tb, at)} },
                           function(eb) { return {b: eb, v: v} })
     }
-    function makeReturn(items) {
+    // Each value reports its static type (ArgExpr); one going into a result of
+    // interface type is boxed (goDtBoxTo). Twin of goRetBox in go-interpreter.abnf.
+    function makeReturn(itemsIn) {
+        var sp = goSplitArgs(itemsIn)
+        var items = sp.args
+        var atys = sp.atys
+        for (var n = 0; n < atys.length; n++) { if (goDtBoxTy(atys[n]) != "") { goDtNote(goDtBoxTy(atys[n])) } }
         return function(b) {
             var v = hUndef
             // A struct result is a copy (emitStoreCopy), by the declared result type.
@@ -4502,12 +4533,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var r = items[0](b)
                 b = r.b
                 v = curRtys.length == 1 ? emitStoreCopy(b, r.v, curRtys[0]) : r.v
+                if (curRtys.length == 1 && goDtBoxTo(atys[0], curRtys[0]) != "") { v = emitDtBox(b, v, goDtBoxTo(atys[0], curRtys[0])) }
             } else if (items.length > 1) {
                 var arr = callExt(b, "js_arr_new", [])
                 for (var i = 0; i < items.length; i++) {
                     var r2 = items[i](b)
                     b = r2.b
-                    callExt(b, "js_arr_push", [arr, i < curRtys.length ? emitStoreCopy(b, r2.v, curRtys[i]) : r2.v])
+                    var rv = i < curRtys.length ? emitStoreCopy(b, r2.v, curRtys[i]) : r2.v
+                    if (i < curRtys.length && goDtBoxTo(atys[i], curRtys[i]) != "") { rv = emitDtBox(b, rv, goDtBoxTo(atys[i], curRtys[i])) }
+                    callExt(b, "js_arr_push", [arr, rv])
                 }
                 v = arr
             }
@@ -4947,7 +4981,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Declared interface name -> its method names. Filled at parse time by the
     // IfaceBody tag, read long after by the type test and the type assertion. The
     // predeclared `error` is the interface {Error() string}.
-    var ifaceMeths = {"$error": ["Error"]}
+    var ifaceMeths = {"$error": ["Error"], "$fmt.Stringer": ["String"]}
     // A DECLARED INTERFACE is matched STRUCTURALLY - a value satisfies it exactly when
     // it has every method - so its arm of a type switch and its comma-ok assertion go
     // to js_goifis and not to js_gotypeis, which can only compare NAMES. Static: a
@@ -5300,7 +5334,90 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // jsmain: declare fmt/os/len/append, run the top level, call main(). An imported
     // file's Program also lands here (importDepth > 0): its top-level declaration thunks
     // are stashed for the real jsmain instead of emitting a second one.
+    // ----- A value of a defined non-struct type in an interface -----
+    // (go-constfold.js, goDtBoxTy.) The box is js_godtbox(value, descriptor), the
+    // descriptor "$dt$T" declared in jsmain for every type the walk boxes, its
+    // methods wrappers that call "T.M" on the value inside. Twins: goDtClass and
+    // goDtBox in go-interpreter.abnf.
+    var goDtUsed = []
+    var goDtSeen = {}
+    function goDtNote(ty) {
+        if (goDtSeen["$" + ty] !== true) { goDtSeen["$" + ty] = true; goDtUsed.push(ty) }
+    }
+    function goDtBoxThunk(t, ty) {
+        if (ty == "") { return t }
+        goDtNote(ty)
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: emitDtBox(r.b, r.v, ty)}
+        }
+    }
+    function emitDtBox(b, v, ty) {
+        return callExt(b, "js_godtbox", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$dt$" + ty)])])
+    }
+    // v as type ty once a type test has matched: the value inside ty's box.
+    function emitDtUnbox(b, v, ty) {
+        if (isIface(ty) || goDtBoxTy(ty) == "") { return v }
+        return callExt(b, "js_godtas", [v, emitStr(b, ty), emitStr(b, ty)])
+    }
+    function declDtClasses(b) {
+        for (var i = 0; i < goDtUsed.length; i++) {
+            var ty = goDtUsed[i]
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__dt"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, ty)])
+            if (goIsDefTy(ty)) { callExt(b, "js_set", [clsV, emitStr(b, "__pkg"), emitStr(b, "main")]) }
+            emitNameList(b, clsV, "__fields", ["__dv"])
+            var ms = goTyMeths["$" + ty]
+            if (ms !== undefined) {
+                for (var k = 0; k < ms.length; k++) {
+                    callExt(b, "js_set", [clsV, emitStr(b, ms[k]), callExt(b, "js_closure", [handle(dtWrapper(ty + "." + ms[k])), curScopeV])])
+                }
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$dt$" + ty), clsV])
+        }
+        return b
+    }
+    // A box's method: "T.M" called with the value inside as its receiver.
+    function dtWrapper(fn) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = f.NewBlock("entry")
+        var a0 = fb.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(0)])
+        callExt(fb, "js_pyset", [f.Params[1], emitNum(fb, 0), callExt(fb, "js_get", [a0, emitStr(fb, "__dv")])])
+        var fV = callExt(fb, "js_scope_get", [f.Params[0], emitStr(fb, fn)])
+        fb.NewRet(callExt(fb, "js_call", [fV, hUndef, f.Params[1]]))
+        return idx
+    }
+    // A package var's emitter waits in goTopFns; the item list carries {topvar: index}
+    // (a thunk does not keep its identity across the tag stack).
+    var goTopFns = []
+    var goTopRecs = []
+    function goTopVarC(t, text) {
+        goTopFns.push(t)
+        goTopRecs.push(goTopVarRec(text))
+        return {topvar: goTopFns.length - 1}
+    }
+    // A file's top level items with its package vars moved to the end, in
+    // initialisation order.
+    function goTopOrder(items) {
+        var out = []
+        var vs = []
+        var recs = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "object" && it != null && it.topvar != undefined) { vs.push(it.topvar); recs.push(goTopRecs[it.topvar]) }
+            else { out.push(it) }
+        }
+        var ord = goTopVarOrder(recs)
+        for (i = 0; i < ord.length; i++) { out.push(goTopFns[vs[ord[i]]]) }
+        return out
+    }
     function buildMain(items) {
+        items = goTopOrder(items)
         if (importDepth > 0) {
             stashImported(items) // emitted later under this file's own source (see compile-core)
             return
@@ -5384,6 +5501,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_arr_push", [pf, emitStr(b, "k")])
         callExt(b, "js_set", [pcls, emitStr(b, "__fields"), pf])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ptrclass"), pcls])
+        b = declDtClasses(b)
         b = goEmitImportedPkgs(b) // imported declarations, each in ITS PACKAGE'S scope
         b = buildPackages(b)
         b = makeSeq(items)(b)
@@ -5522,7 +5640,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var text = c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
-        goPrescan(text)
+        goPrescanPkg(text)
         importDepth = importDepth + 1
         // constByPos and convByPos are keyed by a source OFFSET, and an imported file is
         // parsed with its own offsets starting at zero, so each file gets its own tables
