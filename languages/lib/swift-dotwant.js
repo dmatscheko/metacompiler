@@ -667,6 +667,41 @@ function swDsEqSide(src, from, a, z, oa, oz) {
     var ty = swExprAnn(stripWs(src.substring(oa, oz)))
     if (ty != "") { swDsWantText(src.substring(a, z), swDsByte(src, from, a), ty, c.curFile()) }
 }
+// A chain of n operands joined by binary `+` spanning [from, to): when one operand
+// is an Array of an adoptable element type (swExprAnn), that is the type of every
+// operand, so an array LITERAL among them adopts it - `[Double]() + [1]` is
+// `[1.0]` under swiftc 6.1.2. Answers the Array type, or "".
+function swDsConcatTy(from, to, n) {
+    var src = c.srcSlice(from, to)
+    if (src.indexOf("[") < 0) { return "" }
+    var top = swDsTop(src, 0, src.length)
+    var cuts = [0]
+    for (var k = 0; k < top.length; k++) {
+        var p = top[k]
+        if (src.charAt(p) == "+" && src.charAt(p + 1) != "=" && (p == 0 || "&+".indexOf(src.charAt(p - 1)) < 0)) {
+            cuts.push(p)
+            cuts.push(p + 1)
+        }
+    }
+    cuts.push(src.length)
+    if (cuts.length != 2 * n) { return "" }
+    for (var i = 0; i < cuts.length; i += 2) {
+        var ty = swExprAnn(stripWs(src.substring(cuts[i], cuts[i + 1])))
+        if (ty.charAt(0) == "[" && swElemTyOf(ty) != "" && swDsSplit(ty, 1, ty.length - 1, ":").length == 2) { return ty }
+    }
+    return ""
+}
+// An additive chain [operand, op, operand, ...] spanning [from, to): an Array
+// concatenation wraps every operand in the grammar's swAdoptThunk.
+function swFoldAdd(items, from, to) {
+    if (items.length < 3) { return foldBinary(items) }
+    for (var i = 1; i < items.length; i += 2) { if (items[i] != "+") { return foldBinary(items) } }
+    var ty = swDsConcatTy(from, to, (items.length + 1) / 2)
+    if (ty == "") { return foldBinary(items) }
+    var adopted = []
+    for (var j = 0; j < items.length; j++) { adopted.push(j % 2 == 1 ? items[j] : swAdoptThunk(items[j], ty)) }
+    return foldBinary(adopted)
+}
 // The parameter each argument binds in params, or null when the labels do not
 // fit: in order, a parameter with a default may be skipped, a variadic one also
 // takes the unlabelled arguments that follow it, and the first trailing closure

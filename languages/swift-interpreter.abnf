@@ -485,7 +485,7 @@ MemAttr     = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ SkipParen ]
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
-FunDecl     <~~ push(makeFun(takeAll(), up.start, up.pos)) ~~>
+FunDecl     <~~ var fd = makeFun(takeAll(), up.start, up.pos); swNoteTop(fd.name); push(fd) ~~>
             = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" FunRetType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // AnnType, except that a type no adoption acts on is captured as TEXT too: the
 // member-chain typer (swChainAnns) reads a function's declared return type.
@@ -1197,7 +1197,7 @@ CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
 // are spelled with a guard so they cannot start on the first character of || / &&
 // or of an overflow operator. | and ^ carry Swift's AdditionPrecedence, & its
 // MultiplicationPrecedence and the shifts their own, higher, level.
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+AddExpr     <~~ push(swFoldAdd(takeAll(), up.start, up.pos)) ~~>
             = MulExpr { ( "&+" | "&-" | "+" | "-" | BitOr | "^" ) <~~ push(stripWs(up.in)) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ShiftExpr { ( "&*" | "*" | "/" | "%" | BitAnd ) <~~ push(stripWs(up.in)) ~~> ShiftExpr } ;
@@ -1378,7 +1378,18 @@ NoSpaceParen = :script(~~
         return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
     })()
 ~~) ;
-MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
+// The `(` of a call has to be on the callee's line: Swift starts a new statement
+// at a `(` that opens a line, so `let r = a` followed by `(print("hi"))` is two
+// statements. A space before it on the same line is still a call (`print ("x")`).
+SameLineParen = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        return (cc === 10 || cc === 13) ? abnf.newToken("\x01paren-on-new-line", 0) : undefined
+    })()
+~~) ;
+MArgs       = SameLineParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
             | NoTrailCtx TrailArg { LabTrail } ;
 // A zero-width guard that FAILS when the `{` ahead is the BODY of an
 // if / while / switch / for / guard / catch rather than a trailing closure. Swift resolves
@@ -1667,7 +1678,7 @@ GenFollow   = :script(~~
 
 // f(args): a global function or a struct/class constructor (calls init).
 Call        <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
-            = Id <~~ push(swBt(up.in)) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
+            = Id <~~ push(swBt(up.in)) ~~> SameLineParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with only trailing closures, in any
 // expression position (`return filter { $0 > 1 }`). NoTrailCtx is what keeps
 // `if cond { ... }` from reading as a call of cond.
@@ -3367,6 +3378,9 @@ KwContinue  = "continue" KwEnd ;
     // js_swadoptdeep in languages/lib/swift-rt.metajs, swAdoptDeep in
     // abnf/jsrtswift.go, swCollectFnTys / swFnMaker in swift-to-llvm-ir.abnf.
     function swAdoptAnn(v, ty) { return swAdoptDeep(v, ty) }
+    // An operand thunk that adopts its value to ty (swFoldAdd in
+    // lib/swift-dotwant.js). Twin in swift-to-llvm-ir.abnf.
+    function swAdoptThunk(t, ty) { return function() { return swAdoptAnn(t(), ty) } }
     function swAdoptDeep(v, ty0) {
         if (ty0 == undefined || ty0 == null || ty0 == "") { return v }
         if (v === null || v === undefined) { return v }
@@ -5825,6 +5839,31 @@ KwContinue  = "continue" KwEnd ;
         if (n > 1 && args.length == 1 && isTupleVal(args[0]) && args[0].__tuple == n) { return tupleArray(args[0]) }
         return args
     }
+    // Runs a closure body from item k0, leaving its value in st.last; an explicit
+    // `return` carries the value and clears st.ranOff. A `defer` marker runs the
+    // rest of the body inside a try whose finally is the defer body, the shape of
+    // swSeqWithDefers. Twin of the closure body in makeClosure in
+    // swift-to-llvm-ir.abnf.
+    function swClRun(body, k0, st) {
+        for (var k = k0; k < body.length; k++) {
+            if (body[k].expr != undefined) {
+                st.last = body[k].expr()
+                continue
+            }
+            var s = body[k].stmt
+            if (typeof s != "function") {
+                try { swClRun(body, k + 1, st) } finally { s.isdefer() }
+                return
+            }
+            st.last = undefined
+            var r = s()
+            if (r != undefined) {
+                st.last = (r.isRet != undefined) ? r.v : r
+                st.ranOff = false
+                return
+            }
+        }
+    }
     function makeClosure(items, txt, end) {
         var params = []
         var ptypes = []
@@ -5888,23 +5927,11 @@ KwContinue  = "continue" KwEnd ;
                     }
                     declVar(params[i], i < ptypes.length ? swAdoptAnn(av, ptypes[i]) : av)
                 }
+                var st = {last: undefined, ranOff: true}
+                swClRun(body, 0, st)
                 var last = anytype // A block's value hops types across items.
-                last = undefined
-                var ranOff = true
-                for (var k = 0; k < body.length; k++) {
-                    if (body[k].expr != undefined) {
-                        last = body[k].expr()
-                    } else {
-                        last = undefined
-                        var r = body[k].stmt()
-                        if (r != undefined) {
-                            // An explicit `return` inside the closure body carries the value.
-                            last = (r.isRet != undefined) ? r.v : r
-                            ranOff = false
-                            break
-                        }
-                    }
-                }
+                last = st.last
+                var ranOff = st.ranOff
                 if (ranOff && last === undefined && plainIo != "") { last = getVar(plainIo) }
                 for (var bk = 0; bk < boxes.length; bk++) { boxes[bk].box.v = getVar(boxes[bk].name) }
                 scopes = saved
@@ -6040,7 +6067,7 @@ KwContinue  = "continue" KwEnd ;
                 argv.push(pbox)
                 boxes.push({name: "", at: at, box: pbox})
             } else if (recs[i].ref != null) {
-                var box = {__ref: 1, v: getVar(recs[i].ref)}
+                var box = {__ref: 1, v: swGetName(recs[i].ref)}
                 argv.push(box)
                 boxes.push({name: recs[i].ref, box: box})
             } else if (recs[i].dflt != null) {
@@ -6054,7 +6081,7 @@ KwContinue  = "continue" KwEnd ;
     function writeBacks(boxes) {
         for (var i = 0; i < boxes.length; i++) {
             var at = boxes[i].at
-            if (at == undefined) { setVar(boxes[i].name, boxes[i].box.v) }
+            if (at == undefined) { swSetName(boxes[i].name, boxes[i].box.v) }
             else if (at.field) { swSetField(at.obj, at.key, boxes[i].box.v) }
             else { setElem(at.obj, at.key, boxes[i].box.v) }
         }
@@ -6241,24 +6268,30 @@ KwContinue  = "continue" KwEnd ;
         // print(_:separator:terminator:) - the labels have to be split out here,
         // because a host function only sees positional arguments.
         // debugPrint is print with each item rendered as it prints inside a
-        // collection, and `to: &s` appends the text to s instead of writing it.
+        // collection, and `to: &s` appends the text to s instead of writing it - s
+        // being any inout target, `&p.log` and `&xs[1]` included, opened and
+        // written back as an inout argument is.
         if ((name == "print" || name == "debugPrint") && lookupSig(name) == null) {
             var pos = []
             var sepT = null
             var termT = null
-            var toRef = ""
+            var toRecs = []
             for (var q = 0; q < recs.length; q++) {
                 if (recs[q].lbl == "separator") { sepT = recs[q].t }
                 else if (recs[q].lbl == "terminator") { termT = recs[q].t }
-                else if (recs[q].lbl == "to" && recs[q].ref != null) { toRef = recs[q].ref }
+                else if (recs[q].lbl == "to" && (recs[q].ref != null || (recs[q].rpath != undefined && recs[q].rpath != null))) { toRecs.push(recs[q]) }
                 else { pos.push(recs[q]) }
             }
             var debugP = name == "debugPrint"
-            if (sepT != null || termT != null || toRef != "" || debugP) {
+            if (sepT != null || termT != null || toRecs.length > 0 || debugP) {
                 return function() {
                     var ea = evalArgs(pos)
                     var text = swPrintText(ea.argv, sepT == null ? undefined : sepT(), termT == null ? undefined : termT(), debugP)
-                    if (toRef != "") { setVar(toRef, swstr(getVar(toRef)) + text) } else { print(text) }
+                    if (toRecs.length > 0) {
+                        var tea = evalArgs(toRecs)
+                        tea.argv[0].v = swstr(tea.argv[0].v) + text
+                        writeBacks(tea.boxes)
+                    } else { print(text) }
                     writeBacks(ea.boxes)
                     return undefined
                 }
@@ -6836,7 +6869,7 @@ KwContinue  = "continue" KwEnd ;
             if (ref.path.length == 0) {
                 var oldL = ref.name == "self" ? null : lookupOrNull(ref.name)
                 if (catTy != "") { v = swAdoptAnn(v, catTy) }
-                if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
+                if (op != "=") { v = applyOp(op, swGetName(ref.name), v) }
                 // `self = X` inside a mutating method rewrites the value in place, so
                 // the caller's variable (which holds the same struct value) changes too.
                 if (ref.name == "self" && isStructVal(v)) { assignSelf(v); return v }
@@ -6846,7 +6879,7 @@ KwContinue  = "continue" KwEnd ;
                     if (oldL != null) { v = swAdoptLike(oldL.v, v, declTy) }
                     else { v = swAdoptLike(swSelfSlot(ref.name), v, declTy) }
                 }
-                if (obs != null) { swObsWrite(ref.name, obs, v) } else { setVar(ref.name, v) }
+                if (obs != null) { swObsWrite(ref.name, obs, v) } else { swSetName(ref.name, v) }
             } else {
                 var before = obs == null ? null : swObsBefore(ref.name)
                 if (propTrack < 0) { propTrack = swPropChainHit(ref.name, pathNames) ? 1 : 0 }
@@ -7150,6 +7183,7 @@ KwContinue  = "continue" KwEnd ;
     // around the store (swObsWrite). Neither fires for the initial value.
     // Twin of makeDecl in swift-to-llvm-ir.abnf.
     function makeDecl(items) {
+        swNoteTop(items[0])
         var last = items[items.length - 1]
         if (last == undefined || last.lobs == undefined) { return makePlainDecl(items) }
         var core = []
@@ -7248,7 +7282,7 @@ KwContinue  = "continue" KwEnd ;
         recs = null
         if (track) { recs = swPropHead(ref.name, recs) }
         var o = anytype
-        o = ref.name == "Self" ? swSelfType() : getVar(ref.name)
+        o = ref.name == "Self" ? swSelfType() : swGetName(ref.name)
         // The object owning the last property step, for swExfRef.
         var own = anytype
         own = null
@@ -8531,6 +8565,8 @@ KwContinue  = "continue" KwEnd ;
         var fieldNames = []
         for (var fi = 0; fi < mem.fields.length; fi++) { fieldNames.push(mem.fields[fi].store) }
         scopePut(typeFieldAnn, "$" + name, {fs: mem.fields, cs: mem.comps, sup: superName})
+        for (var pf = 0; pf < mem.fields.length; pf++) { scopePut(swPropNames, "$" + mem.fields[pf].name, true) }
+        for (var pc = 0; pc < mem.comps.length; pc++) { scopePut(swPropNames, "$" + mem.comps[pc].name, true) }
         return function() {
             var cls = {__isclass: true, __name: name, __struct: isStruct, __fields: fieldNames}
             // The inheritance clause: a name that resolves to a class is the
@@ -8939,9 +8975,9 @@ KwContinue  = "continue" KwEnd ;
         var key = "$" + name
         if (name == "Self") { return swSelfType }
         return function() {
-            if (!hasOwn(nestedTypeNames, key)) { return getVar(name) }
+            if (!hasOwn(nestedTypeNames, key)) { return swGetName(name) }
             var h = swResolve(name)
-            if (h == null) { return getVar(name) }
+            if (h == null) { return swGetName(name) }
             return h.v
         }
     }
@@ -9279,8 +9315,35 @@ KwContinue  = "continue" KwEnd ;
     function isCaseVal(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__ecase === true
     }
+    // A property shadows a global of the same name. Swift looks a name up in the
+    // member's own scopes, then in its type's members, and only then outside the
+    // type, so a name a top-level declaration binds (walk time: no body open) and
+    // some type declares as a property is read and written through self when the
+    // scope walk meets self's frame before a binding of it. Twin of swShadowedTops
+    // in swift-to-llvm-ir.abnf.
+    var swTopNames = {}
+    var swPropNames = {}
+    function swNoteTop(n) { if (localAnnMarks.length == 0) { scopePut(swTopNames, "$" + n, true) } }
+    function swShadowed(name) {
+        if (!hasOwn(swTopNames, "$" + name) || !hasOwn(swPropNames, "$" + name)) { return false }
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { return false }
+            if (hasOwn(scopes[i], "self")) {
+                var s = scopes[i]["self"]
+                if (s === undefined || s === null || typeof s != "object") { return false }
+                return hasOwn(s, name) || hasOwn(s, "__v_" + name) || findAccessor(s, "__get_" + name) != null
+            }
+        }
+        return false
+    }
+    function swGetName(name) { return swShadowed(name) ? core.varMiss(name).v : getVar(name) }
+    function swSetName(name, v) {
+        if (swShadowed(name) && core.setMiss(name, v)) { return }
+        setVar(name, v)
+    }
     // A scope-chain read that answers null instead of aborting on an unknown name.
     function lookupOrNull(name) {
+        if (swShadowed(name)) { return null }
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], name)) { return {v: scopes[i][name]} }
         }

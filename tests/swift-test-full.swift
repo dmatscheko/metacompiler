@@ -3965,6 +3965,47 @@ func s83() {
     check("83c", bx.n == 15 && bx.inner.b == 18 && arr == [1, 12, 3] && ps[0].a == 11 && ps[0].b == 1)
 }
 
+// ===== SECTION 84: member lookup, a line-start paren, defer in a closure, Array +, print(to:) =====
+// Inside a member a property shadows a global of the same name; a `(` that opens
+// a line starts a new statement; a closure body may defer; an Array literal
+// concatenated to a typed Array takes its element type; print(to:) appends to
+// any inout target. Every value read off swiftc 6.1.2.
+var lvl84 = 5
+var out84 = "g"
+final class G84 {
+    var lvl84 = 0
+    var out84 = ""
+    func read() -> Int { return lvl84 }
+    func bump() { lvl84 += 3; print("m", to: &out84) }
+}
+struct H84 { var lvl84 = 7; func next() -> Int { lvl84 + 1 } }
+struct Log84 { var text = "" }
+struct Rec84 { var log = Log84() }
+func s84() {
+    let g = G84()
+    g.bump()
+    check("84a", g.read() == 3 && H84().next() == 8 && lvl84 == 5 && g.out84 == "m\n" && out84 == "g")
+    var seen: [String] = []
+    let r = lvl84
+    (seen.append("paren"))
+    check("84b", r == 5 && seen == ["paren"])
+    let f = { (x: Int) -> Int in
+        defer { seen.append("d\(x)") }
+        seen.append("b\(x)")
+        return x + 1
+    }
+    check("84c", f(2) == 3 && seen == ["paren", "b2", "d2"])
+    let cat = [Double]() + [1]
+    var dd: [Double] = [2.5]
+    dd = dd + [3]
+    check("84d", "\(cat)" == "[1.0]" && "\(dd)" == "[2.5, 3.0]")
+    var rec = Rec84()
+    print("a", 1, to: &rec.log.text)
+    var parts = ["", "z"]
+    print("e", terminator: "", to: &parts[1])
+    check("84e", rec.log.text == "a 1\n" && parts == ["", "ze"])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4049,6 +4090,7 @@ func main() {
     s81() // SECTION-CALL 81
     s82() // SECTION-CALL 82
     s83() // SECTION-CALL 83
+    s84() // SECTION-CALL 84
     print("full: \(checks) checks, \(fails) failures")
 }
 

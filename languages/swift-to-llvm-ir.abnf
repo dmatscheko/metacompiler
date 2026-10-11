@@ -484,7 +484,7 @@ MemAttr     = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ SkipParen ]
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
-FunDecl     <~~ push(makeFun(takeAll(), up.start, up.pos)) ~~>
+FunDecl     <~~ var fd = makeFun(takeAll(), up.start, up.pos); swNoteTop(fd.name); push(fd) ~~>
             = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" FunRetType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // AnnType, except that a type no adoption acts on is captured as TEXT too: the
 // member-chain typer (swChainAnns) reads a function's declared return type.
@@ -1178,7 +1178,7 @@ CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
 // are spelled with a guard so they cannot start on the first character of || / &&
 // or of an overflow operator. | and ^ carry Swift's AdditionPrecedence, & its
 // MultiplicationPrecedence and the shifts their own, higher, level.
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+AddExpr     <~~ push(swFoldAdd(takeAll(), up.start, up.pos)) ~~>
             = MulExpr { ( "&+" | "&-" | "+" | "-" | BitOr | "^" ) <~~ push(stripWs(up.in)) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ShiftExpr { ( "&*" | "*" | "/" | "%" | BitAnd ) <~~ push(stripWs(up.in)) ~~> ShiftExpr } ;
@@ -1357,7 +1357,18 @@ NoSpaceParen = :script(~~
         return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
     })()
 ~~) ;
-MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
+// The `(` of a call has to be on the callee's line: Swift starts a new statement
+// at a `(` that opens a line, so `let r = a` followed by `(print("hi"))` is two
+// statements. A space before it on the same line is still a call (`print ("x")`).
+SameLineParen = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        return (cc === 10 || cc === 13) ? abnf.newToken("\x01paren-on-new-line", 0) : undefined
+    })()
+~~) ;
+MArgs       = SameLineParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
             | NoTrailCtx TrailArg { LabTrail } ;
 // A zero-width guard that FAILS when the `{` ahead is the BODY of an
 // if / while / switch / for / guard / catch rather than a trailing closure. Swift resolves
@@ -1628,7 +1639,7 @@ GenFollow   = :script(~~
 ~~) ;
 
 Call        <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
-            = Id <~~ push(swBt(up.in)) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
+            = Id <~~ push(swBt(up.in)) ~~> SameLineParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with only trailing closures, in any
 // expression position (`return filter { $0 > 1 }`). NoTrailCtx is what keeps
 // `if cond { ... }` from reading as a call of cond.
@@ -2530,6 +2541,14 @@ KwContinue  = "continue" KwEnd ;
         var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
         var e = swTyTrim(kv[kv.length - 1])
         return swAdoptable(e) ? e : ""
+    }
+    // An operand thunk that adopts its value to ty (swFoldAdd in
+    // lib/swift-dotwant.js). Twin in swift-interpreter.abnf.
+    function swAdoptThunk(t, ty) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: swEmitAdopt(r.b, r.v, ty)}
+        }
     }
     function swEmitAdopt(b, v, ty) {
         if (ty == undefined || ty == null || ty == "") { return v }
@@ -5980,9 +5999,23 @@ KwContinue  = "continue" KwEnd ;
         for (var fi = 0; fi < params.length; fi++) {
             if (firstIo == "" && typeof params[fi] == "object" && params[fi].inout == true) { firstIo = params[fi].name }
         }
+        // A `defer` marker makes the body a statement sequence that swSeqWithDefers
+        // wraps, as a block's is: such a body has statements, so its value comes
+        // from an explicit `return`. Twin of swClRun in swift-interpreter.abnf.
+        var deferSeq = null
+        for (var dk = 0; dk < body.length && deferSeq == null; dk++) {
+            if (body[dk].stmt != undefined && typeof body[dk].stmt != "function") {
+                var stmts = []
+                for (var sk = 0; sk < body.length; sk++) {
+                    stmts.push(body[sk].expr != undefined ? exprToStmt(body[sk].expr) : body[sk].stmt)
+                }
+                deferSeq = swSeqWithDefers(stmts)
+            }
+        }
         var bodyStmt = function(b) {
             var v = hUndef
-            for (var k = 0; k < body.length; k++) {
+            if (deferSeq != null) { b = deferSeq(b) }
+            for (var k = 0; k < body.length && deferSeq == null; k++) {
                 if (body[k].expr != undefined) {
                     var r = body[k].expr(b)
                     b = r.b
@@ -6514,16 +6547,17 @@ KwContinue  = "continue" KwEnd ;
         // argument with String(describing:) and honours both labels.
         // debugPrint is print with each item rendered as it prints inside a
         // collection, and `to: &s` appends the text to s instead of writing it
-        // (js_swprintstr answers the text).
+        // (js_swprintstr answers the text) - s being any inout target, `&p.log` and
+        // `&xs[1]` included, opened and written back as an inout argument is.
         if ((name == "print" || name == "debugPrint") && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
             var pos = []
             var sepT = null
             var termT = null
-            var toRef = ""
+            var toRecs = []
             for (var q = 0; q < args.length; q++) {
                 if (args[q].lbl == "separator") { sepT = args[q].t }
                 else if (args[q].lbl == "terminator") { termT = args[q].t }
-                else if (args[q].lbl == "to" && args[q].ref != null) { toRef = args[q].ref }
+                else if (args[q].lbl == "to" && args[q].ref != null) { toRecs.push(args[q]) }
                 else { pos.push(args[q]) }
             }
             var debugP = name == "debugPrint"
@@ -6534,19 +6568,23 @@ KwContinue  = "continue" KwEnd ;
                 if (sepT != null) { var rs = sepT(b); b = rs.b; sepV = rs.v }
                 var termV = hUndef
                 if (termT != null) { var rt2 = termT(b); b = rt2.b; termV = rt2.v }
-                if (toRef == "" && !debugP) {
+                if (toRecs.length == 0 && !debugP) {
                     callExt(b, "js_swprint", [ea.v, sepV, termV])
                     return {b: b, v: hUndef}
                 }
                 var textV = callExt(b, "js_swprintstr", [ea.v, sepV, termV, debugP ? hTrue : hFalse])
-                if (toRef == "") {
+                if (toRecs.length == 0) {
                     var one = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [one, textV])
                     callExt(b, "js_swprint", [one, hUndef, emitStr(b, "")])
                     return {b: b, v: hUndef}
                 }
-                var curV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, toRef)])
-                b.NewCall(rtKSet(), [curScopeV, emitStr(b, toRef), callExt(b, "js_swarith", [emitStr(b, "+"), curV, textV])])
+                var tea = emitArgRecs(b, toRecs)
+                b = tea.b
+                var toBox = tea.boxes[0].box
+                callExt(b, "js_set", [toBox, emitStr(b, "v"), callExt(b, "js_swarith",
+                                      [emitStr(b, "+"), callExt(b, "js_get", [toBox, emitStr(b, "v")]), textV])])
+                emitWriteBacks(b, tea.boxes)
                 return {b: b, v: hUndef}
             }
         }
@@ -7117,6 +7155,37 @@ KwContinue  = "continue" KwEnd ;
         localAnnReg["$" + n] = t
         localObsReg["$" + n] = null
     }
+    // The names a TOP-LEVEL declaration binds (walk time: no body is open), and
+    // the properties of the type being emitted that collide with one. Swift looks a
+    // name up in the member's own scopes, then in its type's members, and only then
+    // outside the type, so a property shadows a global of the same name. A member's
+    // frame therefore binds each colliding name to undefined, which every "a local,
+    // else self" probe (sw_kget, sw_kset, emitPathHead, ...) reads as no local.
+    // Twin of swShadowed in swift-interpreter.abnf.
+    var swTopNames = {}
+    function swNoteTop(n) { if (localAnnMarks.length == 0) { swTopNames["$" + n] = true } }
+    function swShadowedTops(params) {
+        var out = []
+        var ct = curType()
+        var tn = ct == null ? null : ct.name
+        var guard = 0
+        while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
+            var r = typeFieldAnn["$" + tn]
+            for (var i = 0; i < r.fs.length + r.cs.length; i++) {
+                var n = i < r.fs.length ? r.fs[i].name : r.cs[i - r.fs.length].name
+                if (!hasOwn(swTopNames, "$" + n) || out.indexOf(n) >= 0) { continue }
+                var isParam = false
+                for (var j = 0; j < params.length; j++) {
+                    var pn = typeof params[j] == "string" ? params[j] : params[j].name
+                    if (pn == n) { isParam = true }
+                }
+                if (!isParam) { out.push(n) }
+            }
+            tn = r.sup
+            guard = guard + 1
+        }
+        return out
+    }
     // A parameter list's names and types, declared into the body that follows it.
     var localAnnPending = []
     function swAnnParams(ps) {
@@ -7305,6 +7374,7 @@ KwContinue  = "continue" KwEnd ;
     // calls them around the store (emitObsWrite). Neither fires for the initial
     // value. Twin of makeDecl in swift-interpreter.abnf.
     function makeDecl(items) {
+        swNoteTop(items[0])
         var last = items[items.length - 1]
         if (last == undefined || last.lobs == undefined) { return makePlainDecl(items) }
         var core = []
@@ -7992,6 +8062,10 @@ KwContinue  = "continue" KwEnd ;
             var thisV = callExt(b, "js_arg", [f.Params[1], handle(0)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), thisV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), thisV])
+            var shadowed = swShadowedTops(params)
+            for (var si = 0; si < shadowed.length; si++) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, shadowed[si]), hUndef])
+            }
             off = 1
         } else if (selfName != undefined && selfName != null && selfName != "") {
             var selfTV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, selfName)])
