@@ -802,7 +802,7 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(takeAll()), up.in, up.pos)) ~~>
+CallMember  <~~ push(goChainC(foldCallMember(goRecvsC(takeAll(), up.start)), up.in, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -818,7 +818,7 @@ TypeArgsSfx  = TypeArgsMany | TypeArgsKw ;
 TypeArgsMany = "[" Type "," Type { "," Type } "]" ;
 TypeArgsKw   = "[" NonExprT "]" ;
 NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
-MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
+MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
@@ -1853,9 +1853,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // `.m(args)`, whose last argument may be spread too (`fmt.Println(ys...)`).
     // The twin is makeMethodSfx in go-to-llvm-ir.abnf.
-    function makeMethodSfx(name, items) {
+    function makeMethodSfx(name, items, at) {
         var c = makeCallSfx(items)
-        return {kind: "mcall", name: name, args: c.args, spread: c.spread}
+        return {kind: "mcall", name: name, args: c.args, spread: c.spread, at: at, rc: null, dt: null, dtk: false}
     }
     function makeSliceSfx(items) {
         var lo = null, hi = null, mx = null
@@ -1888,7 +1888,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
-                if (s.kind == "mcall") { cur = mcall(cur, s.name, callArgs(s)) }
+                if (s.kind == "mcall") {
+                    if (!s.dtk) { s.dt = goDtPlan(s.rc, s.name); s.dtk = true }
+                    cur = s.dt === null ? mcall(cur, s.name, callArgs(s)) : goDtCall(cur, s, callArgs(s))
+                }
                 else if (s.kind == "field") {
                     // A NIL POINTER DEREFERENCE IS A RECOVERABLE RUNTIME PANIC, not an
                     // abort, so `defer func(){ recover() }()` around `p.X` on a nil p
@@ -2512,6 +2515,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (deeper != null) { return deeper }
         }
         return null
+    }
+    // A method of a DEFINED type (go-constfold.js, goDtPlan). A pointer receiver
+    // named by a bare variable gets that variable's cell, so `*s = append(*s, v)`
+    // reaches the caller; a value receiver reads through a cell and is copied by
+    // the method closure. Twins: js_godtcall in lib/go-rt.metajs and
+    // abnf/jsrtgolang.go.
+    var goDtFns = {}
+    function goDtCall(recv, s, args) {
+        var p = s.dt
+        if (p.dyn) {
+            if (goHasMethod(recv, s.name)) { return mcall(recv, s.name, args) }
+            if (p.fn == "") { return mcall(recv, s.name, args) }
+        }
+        var r = anytype
+        r = recv
+        if (p.ptr) {
+            if (!p.isPtr && !p.dyn && !isPtr(recv) && s.rc != null && s.rc.head != "" && s.rc.text == s.rc.head) { r = varCell(s.rc.head) }
+        } else if (isPtr(recv)) { r = ptrGet(recv) }
+        return goDtFns["$" + p.fn].apply(undefined, concat2impl([r], args))
     }
     function mcall(target, name, args) {
         if (target === undefined || target === null) { goNilDeref() }   // recoverable; see goNilDeref
@@ -5017,6 +5039,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // text is the whole answer: a composite literal of a defined type is a
             // literal of what it is defined over.
             definedUnder[items[0]] = last.under
+            goNoteDefTy(items[0])
             // ... and under the package-qualified key, so `pkga.L{1, 2}` and
             // `var x pkga.L` resolve exactly as the unqualified form does inside the
             // package. Both keys, so every existing flat reader is unchanged.
@@ -5124,6 +5147,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var body = items[i]
         if (recv != null) {
             // A method: attached to its struct descriptor after the whole compile.
+            goNoteMeth(recv[recv.length - 1], name, recv.length > 2, rtys)
             methodTodo.push({recvName: recv, name: name, params: params, body: body, rets: rets, rtys: rtys, variadic: variadic, ptypes: ptypes, env: pkgEnv(), pkg: curPkgName})
         } else {
             curGlobals()[name] = makeFunClosure(params, body, rets, rtys, variadic, ptypes)
@@ -5559,11 +5583,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var byPtr = mm.recvName.length > 2
         var recvType = mm.recvName[mm.recvName.length - 1]
         var cls = structAt(mm.pkg, recvType)
+        var mfn = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
+                                     body: mm.body, rets: mm.rets, rtys: mm.rtys, variadic: mm.variadic, byPtr: byPtr,
+                                     ptypes: mm.ptypes, env: mm.env})
+        if (cls == undefined && goIsDefTy(recvType)) { goDtFns["$" + recvType + "." + mm.name] = mfn; continue }
         if (cls == undefined) fail("method receiver type not found: " + recvType)
         cls["__ptr$" + mm.name] = byPtr
-        cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
-                                          body: mm.body, rets: mm.rets, rtys: mm.rtys, variadic: mm.variadic, byPtr: byPtr,
-                                          ptypes: mm.ptypes, env: mm.env})
+        cls[mm.name] = mfn
     }
 
     function runEntry(f) {

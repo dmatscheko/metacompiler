@@ -3105,6 +3105,70 @@ func s49() {
 	check("vs10", k1.a == 3 && c1.a == 4 && d1.a == 3 && e1.a == 3 && f1.a == 6)
 }
 
+// ===== SECTION 50: methods of a defined type that is not a struct =====
+// Expected values read off `go run` (go 1.27). A value of `type C float64` is its
+// float64 here, so its method is found by the receiver's static type: a variable,
+// a conversion, a field, an element, a range variable and a method's result. A
+// pointer receiver of a slice type writes the caller's variable; one of an int
+// type through &n too. An interface value takes the one type declaring the method.
+type c50 float64
+type f50 float64
+type stack50 []int
+type count50 int
+type bag50 map[string]int
+type arr50 [3]int
+type rd50 struct{ t c50 }
+type fer50 interface{ toF() f50 }
+
+func (c c50) toF() f50           { return f50(c*9/5 + 32) }
+func (f f50) toC() c50           { return c50((f - 32) * 5 / 9) }
+func (c c50) desc() string       { return fmt.Sprintf("%.1fC", float64(c)) }
+func (f f50) desc() string       { return fmt.Sprintf("%.1fF", float64(f)) }
+func (s *stack50) push(v int)    { *s = append(*s, v) }
+func (s stack50) top() int       { return s[len(s)-1] }
+func (n *count50) add(k int)     { *n += count50(k) }
+func (n count50) get() int       { return int(n) }
+func (b bag50) put(k string)     { b[k]++ }
+func (a arr50) zero()            { a[0] = 0 }
+func (a arr50) sum() int         { return a[0] + a[1] + a[2] }
+func late50(n int) late50T       { return late50T(n) }
+func (l late50T) twice() late50T { return l * 2 }
+
+type late50T int
+
+func s50() {
+	c := c50(100)
+	check("dtm1", c.desc() == "100.0C" && c.toF().desc() == "212.0F")
+	check("dtm2", c.toF().toC().desc() == "100.0C")
+	var st stack50
+	st.push(1)
+	st.push(2)
+	check("dtm3", len(st) == 2 && st.top() == 2)
+	var n count50
+	n.add(5)
+	p := &n
+	p.add(1)
+	check("dtm4", n.get() == 6 && p.get() == 6)
+	b := bag50{}
+	b.put("a")
+	b.put("a")
+	check("dtm5", b["a"] == 2)
+	a := arr50{1, 2, 3}
+	a.zero()
+	check("dtm6", a.sum() == 6)
+	r := rd50{t: 40}
+	check("dtm7", r.t.desc() == "40.0C")
+	cs := []c50{0, 100}
+	out := ""
+	for _, x := range cs {
+		out += x.desc()
+	}
+	check("dtm8", out == "0.0C100.0C" && cs[1].toF().desc() == "212.0F")
+	var fr fer50 = c
+	check("dtm9", fr.toF().desc() == "212.0F")
+	check("dtm10", late50(3).twice() == 6)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3155,6 +3219,7 @@ func main() {
 	s47() // SECTION-CALL 47
 	s48() // SECTION-CALL 48
 	s49() // SECTION-CALL 49
+	s50() // SECTION-CALL 50
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

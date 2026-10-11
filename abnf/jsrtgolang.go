@@ -2283,6 +2283,25 @@ func init() {
 			}
 			return baseField(a)
 		}
+		// js_godtcall(recv, name, args, fn, dyn): a method of a DEFINED type, fn,
+		// called with the receiver first; dyn = the static type is unknown, so a
+		// struct's own method wins, and with no fn the call is an ordinary one.
+		// Twins: js_godtcall in lib/go-rt.metajs, goDtCall in go-interpreter.abnf.
+		m["js_godtcall"] = func(a []uint64) uint64 {
+			args, ok := u(a[2]).(*jsArray)
+			if !ok {
+				rt.fail("js_godtcall args must be an array")
+			}
+			if rt.truthy(u(a[4])) {
+				if fn, recv, found := rt.goMethod(u(a[0]), rt.toString(u(a[1]))); found {
+					return w(rt.call(fn, jsUndef, append([]interface{}{recv}, args.elems...)))
+				}
+				if !isCallable(u(a[3])) {
+					return m["js_gomcall"](a[:3])
+				}
+			}
+			return w(rt.call(u(a[3]), jsUndef, append([]interface{}{u(a[0])}, args.elems...)))
+		}
 		m["js_gomcall"] = func(a []uint64) uint64 {
 			goNilDeref(rt, u(a[0]))
 			// A FUNC-TYPED FIELD IS CALLABLE: `type H struct { f func(int) int }`

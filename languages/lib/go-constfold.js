@@ -984,9 +984,10 @@ function stElemTy(t) {
     return ""
 }
 // A selector/index chain, from its matched TEXT (whitespace already stripped): a
-// name, then `.field` and `[index]` steps, typed through the binding's type, the
-// field types of the struct declarations (goFieldTyHook, one per grammar) and the
-// element types. A call, a conversion, a slice or an assertion anywhere ends it
+// name or a conversion to a defined type, then `.field`, `[index]` and `.m(args)`
+// steps, typed through the binding's type, the field types of the struct
+// declarations (goFieldTyHook, one per grammar), the element types and a method's
+// single result type. A plain call, a slice or an assertion anywhere ends it
 // unknown.
 function goChainC(t, text, pos) {
     var ty = stChainTy(text)
@@ -995,10 +996,26 @@ function goChainC(t, text, pos) {
 }
 // The type of a chain's text, or "" (a bare name answers its binding's).
 function stChainTy(text) {
+    var i = stHeadLen(text)
+    if (i == 0) { return "" }
+    return stChainFrom(text.substring(0, i), cTyLookup(text.substring(0, i)), text)
+}
+function stHeadLen(text) {
     var i = 0
     while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
-    if (i == 0) { return "" }
-    var ty = stBare(cTyLookup(text.substring(0, i)))
+    return i
+}
+// The chain's type from its head NAME and that name's binding type hty: a name
+// with no binding type that is applied like a call converts to a defined type.
+function stChainFrom(head, hty, text) {
+    var i = head.length
+    var ty = stBare(hty)
+    if (ty == "" && i < text.length && text.charAt(i) == "(" && goIsDefTy(head)) {
+        i = stClose(text, i)
+        if (i < 0) { return "" }
+        ty = head
+        i = i + 1
+    }
     while (i < text.length && ty != "") {
         var ch = text.charAt(i)
         if (ch == ".") {
@@ -1006,27 +1023,123 @@ function stChainTy(text) {
             while (j < text.length && cIsIdCh(text.charCodeAt(j))) { j = j + 1 }
             if (j == i + 1) { return "" }
             var sn = ty.charAt(0) == "*" ? ty.substring(1) : ty
-            ty = goFieldTyHook(sn, text.substring(i + 1, j))
+            var nm = text.substring(i + 1, j)
+            if (j < text.length && text.charAt(j) == "(") {
+                ty = goMethRtyOf(sn, nm)
+                j = stClose(text, j)
+                if (j < 0) { return "" }
+                j = j + 1
+            } else { ty = goFieldTyHook(sn, nm) }
             i = j
         } else if (ch == "[") {
-            var d = 0
-            var k = i
-            var q = 0
-            while (k < text.length) {
-                var c2 = text.charCodeAt(k)
-                if (q != 0) { if (c2 == q) { q = 0 } else if (c2 == 92) { k = k + 1 } }
-                else if (c2 == 34 || c2 == 96 || c2 == 39) { q = c2 }
-                else if (c2 == 91) { d = d + 1 }
-                else if (c2 == 93) { d = d - 1; if (d == 0) { break } }
-                else if (c2 == 58 && d == 1) { return "" }
-                k = k + 1
-            }
-            if (k >= text.length) { return "" }
+            var k = stClose(text, i)
+            if (k < 0) { return "" }
             ty = stElemTy(ty)
             i = k + 1
         } else { return "" }
     }
     return ty
+}
+// The result type of method nm of type sn. A receiver type that does not declare
+// it (an interface) takes the result type every declaring type agrees on.
+function goMethRtyOf(sn, nm) {
+    var mk = "$" + sn + "." + nm
+    if (goMethRty[mk] !== undefined) { return goMethRty[mk] }
+    var rs = goMethRecv["$" + nm]
+    if (rs === undefined) { return "" }
+    var t = goMethRty["$" + rs[0] + "." + nm]
+    var i = 1
+    while (i < rs.length) {
+        if (goMethRty["$" + rs[i] + "." + nm] != t) { return "" }
+        i = i + 1
+    }
+    return t
+}
+// The index of the bracket that closes the one at text[i] ('(' or '['), or -1. A
+// ':' directly inside a '[' is a slice expression, which is not typed here.
+function stClose(text, i) {
+    var d = 0
+    var k = i
+    var q = 0
+    while (k < text.length) {
+        var c2 = text.charCodeAt(k)
+        if (q != 0) { if (c2 == q) { q = 0 } else if (c2 == 92) { k = k + 1 } }
+        else if (c2 == 34 || c2 == 96 || c2 == 39) { q = c2 }
+        else if (c2 == 91 || c2 == 40 || c2 == 123) { d = d + 1 }
+        else if (c2 == 93 || c2 == 41 || c2 == 125) { d = d - 1; if (d == 0) { return k } }
+        else if (c2 == 58 && d == 1 && text.charCodeAt(i) == 91) { return 0 - 1 }
+        k = k + 1
+    }
+    return 0 - 1
+}
+
+// ----- METHODS OF A DEFINED TYPE THAT IS NOT A STRUCT -----
+// `type Celsius float64`: a Celsius value IS its float64 here, with no descriptor
+// to carry a method, so a method of a defined type is bound to the name "T.M" and
+// x.M() is resolved by x's STATIC type - the receiver's text, typed by stChainFrom
+// from its head's binding type (taken at walk time) once every declaration is in.
+// A receiver of unknown static type (an interface value) tries a struct's own
+// method of that name first and then the ONE defined type that declares M.
+// Twins: goDtCall in go-interpreter.abnf, js_godtcall in lib/go-rt.metajs and
+// abnf/jsrtgolang.go.
+var goDefTys = {}     // "$T" -> true: `type T U`, a defined type
+var goMethRty = {}    // "$T.M" -> M's single result type ("" for none or several)
+var goMethPtr = {}    // "$T.M" -> true for a pointer receiver
+var goMethRecv = {}   // "$M" -> every receiver type that declares M
+function goNoteDefTy(name) { goDefTys["$" + name] = true }
+function goIsDefTy(t) { return goDefTys["$" + t] === true }
+function goNoteMeth(rt, name, byPtr, rtys) {
+    var k = "$" + rt + "." + name
+    goMethRty[k] = rtys.length == 1 ? rtys[0] : ""
+    goMethPtr[k] = byPtr
+    if (goMethRecv["$" + name] === undefined) { goMethRecv["$" + name] = [] }
+    goMethRecv["$" + name].push(rt)
+}
+// Every .m(args) suffix of a chain that starts at source offset start gets its
+// receiver record (goRecvC); items are the chain's primary and suffixes.
+function goRecvsC(items, start) {
+    var i = 1
+    while (i < items.length) {
+        var s = items[i]
+        if (s != null && typeof s == "object" && s.kind == "mcall" && s.at != undefined) { s.rc = goRecvC(start, s.at) }
+        i = i + 1
+    }
+    return items
+}
+// The receiver record of the mcall suffix that starts at source offset at, in a
+// chain starting at start: the head name, its binding type now, the stripped text.
+function goRecvC(start, at) {
+    var raw = c.srcSlice(start, at)
+    var t = ""
+    var i = 0
+    while (i < raw.length) {
+        var cc = raw.charCodeAt(i)
+        if (cc != 32 && cc != 9 && cc != 10 && cc != 13) { t = t + raw.charAt(i) }
+        i = i + 1
+    }
+    var h = t.substring(0, stHeadLen(t))
+    return {head: h, hty: h == "" ? "" : cTyLookup(h), text: t}
+}
+// How rc.M() is called: null for an ordinary method call, else {fn: "T.M" (or ""
+// when several defined types declare M), ty: T, ptr, dyn}. dyn = the static type
+// is unknown, so a struct's own method still wins at run time.
+function goDtPlan(rc, name) {
+    var rs = goMethRecv["$" + name]
+    if (rs === undefined) { return null }
+    var cands = []
+    var i = 0
+    while (i < rs.length) { if (goIsDefTy(rs[i])) { cands.push(rs[i]) } i = i + 1 }
+    if (cands.length == 0) { return null }
+    var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.text)
+    var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
+    if (bt != "" && goMethRty["$" + bt + "." + name] !== undefined) {
+        if (!goIsDefTy(bt)) { return null }
+        return {fn: bt + "." + name, ty: bt, ptr: goMethPtr["$" + bt + "." + name] === true, dyn: false,
+                isPtr: bt != t}
+    }
+    if (cands.length != 1) { return {fn: "", ty: "", ptr: false, dyn: true, isPtr: false} }
+    return {fn: cands[0] + "." + name, ty: cands[0], ptr: goMethPtr["$" + cands[0] + "." + name] === true,
+            dyn: true, isPtr: false}
 }
 // append(s, v, ...): each appended struct value is a copy, by s's element type.
 // items = ["append", s, v..., {spread}?]; text is the call's.

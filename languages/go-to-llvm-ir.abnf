@@ -819,7 +819,7 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(goChainC(foldCallMember(takeAll()), up.in, up.pos)) ~~>
+CallMember  <~~ push(goChainC(foldCallMember(goRecvsC(takeAll(), up.start)), up.in, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -846,7 +846,7 @@ SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
 // expression does not parse at all.
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
-MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
+MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
@@ -2090,9 +2090,35 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    function makeMethodSfx(name, args) {
+    function makeMethodSfx(name, args, at) {
         var sp = takeSpread(args)
-        return {kind: "mcall", name: name, args: args, spread: sp}
+        return {kind: "mcall", name: name, args: args, spread: sp, at: at, rc: null}
+    }
+    // A call of a method of a DEFINED type, by its plan (go-constfold.js, goDtPlan):
+    // a pointer receiver named by a bare variable gets that variable's cell, a value
+    // receiver reads through a cell and is copied by its type. Twin of goDtCall in
+    // go-interpreter.abnf.
+    function emitDtCall(b, cur, s, p, argsV) {
+        var r = cur
+        var rc = s.rc
+        if (p.ptr) {
+            if (!p.isPtr && !p.dyn && rc != null && rc.head != "" && rc.text == rc.head) {
+                var cv = cur
+                var scopeV = curScopeV
+                var nm = rc.head
+                var sel = emitSelect(b, emitIsPtr(b, cv), function(tb) { return {b: tb, v: cv} },
+                                     function(eb) { return {b: eb, v: emitPtrCell(eb, scopeV, emitStr(eb, nm))} })
+                b = sel.b
+                r = sel.v
+            }
+        } else if (p.isPtr || p.dyn) {
+            var dr = emitDerefV(b, cur)
+            b = dr.b
+            r = dr.v
+            if (!p.dyn) { r = emitStoreCopy(b, r, p.ty) }
+        } else { r = emitStoreCopy(b, r, p.ty) }
+        var fV = p.fn == "" ? hUndef : callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.fn)])
+        return {b: b, v: callExt(b, "js_godtcall", [r, emitStr(b, s.name), argsV, fV, p.dyn ? hTrue : hFalse])}
     }
     // items = [argThunks..., {spread}?]: the '(args)' suffix of a postfix chain.
     function makeCallSfx(items) {
@@ -2160,7 +2186,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (s.kind == "mcall") {
                     var ea = emitArgs2(b, s.args, s.spread)
                     b = ea.b
-                    cur = callExt(b, "js_gomcall", [cur, emitStr(b, s.name), ea.v])
+                    var dp = goDtPlan(s.rc, s.name)
+                    if (dp != null) {
+                        var dc = emitDtCall(b, cur, s, dp, ea.v)
+                        b = dc.b
+                        cur = dc.v
+                    } else { cur = callExt(b, "js_gomcall", [cur, emitStr(b, s.name), ea.v]) }
                 } else if (s.kind == "field") {
                     cur = callExt(b, "js_gofield", [cur, emitStr(b, s.name)])
                 } else if (s.kind == "slice") {
@@ -4995,6 +5026,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // is read from inside the emit closures, which run long after every
             // TypeDecl has been walked - so a type used before it is declared is fine.
             definedUnder[dName] = dUnder
+            goNoteDefTy(dName)
             // ... and under the package-qualified key, so `pkga.L{1, 2}` and
             // `var x pkga.L` resolve the same way the unqualified form does inside the
             // package. Both keys, so every existing flat reader is unchanged.
@@ -5184,9 +5216,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var byPtr = recv.length > 2
             var rName = recv[0]
             var rType = recv[recv.length - 1]
+            goNoteMeth(rType, name, byPtr, rtys)
             return function(b) {
                 var idx = emitFunc(params, body, rName, rets, rtys)
                 defPos(b, at)
+                // A defined type's value has no descriptor: its method is the name "T.M".
+                if (goIsDefTy(rType)) {
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rType + "." + name),
+                                                 callExt(b, "js_closure", [handle(idx), curScopeV])])
+                    return b
+                }
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rType)])
                 callExt(b, "js_set", [clsV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
                 if (byPtr) { callExt(b, "js_set", [clsV, emitStr(b, "__ptr$" + name), hTrue]) }

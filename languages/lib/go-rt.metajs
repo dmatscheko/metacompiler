@@ -2087,6 +2087,20 @@ function js_gomcall(recv, namev, args) {
     return goMemberCall(recv, name, args)
 }
 
+// A method of a DEFINED type (go-constfold.js, goDtPlan): fn called with the
+// receiver first. dyn = the receiver's static type is unknown, so a struct's own
+// method of that name wins, and with no fn the call is an ordinary one. Twins:
+// goDtCall in go-interpreter.abnf, js_godtcall in abnf/jsrtgolang.go.
+function js_godtcall(recv, namev, args, fn, dyn) {
+    if (!Array.isArray(args)) { fail("js_godtcall args must be an array") }
+    if (dyn === true) {
+        var mv = goMethod(recv, goStrOf(namev))
+        if (mv !== undefined) { return mv.fn.apply(undefined, goPrepend(mv.recv, args)) }
+        if (!goIsFn(fn)) { return js_gomcall(recv, namev, args) }
+    }
+    return fn.apply(undefined, goPrepend(recv, args))
+}
+
 // rt.getMember, over what a Go program can reach through it: a package object's
 // exported function, a struct field the field walk above did not find, and the
 // two lengths. Everything Go spells as a method on a builtin type is a package
