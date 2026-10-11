@@ -91,6 +91,33 @@ func (rt *jsrt) pyPromoteArith(op string, l, r interface{}) (interface{}, bool) 
 	return rt.pyBigNarrow(out), true
 }
 
+// pyOrdCheck raises CPython's TypeError for an ORDERING of two values of
+// different kinds: only numbers (bool, int, float - not complex), str, two lists
+// (a tuple is a list here) and two sets have an order. Twin of pyOrdCheck in
+// languages/python-interpreter.abnf and pyAOrdCheck in lib/python-rt.metajs.
+func pyOrdKind(v interface{}) byte {
+	switch v.(type) {
+	case float64, bool, *jsPyFlo, *jsBigInt:
+		return 'n'
+	case string:
+		return 's'
+	case *jsArray:
+		return 'l'
+	}
+	if _, ok := pySetElems(v); ok {
+		return 't'
+	}
+	return 0
+}
+
+func (rt *jsrt) pyOrdCheck(op string, l, r interface{}) {
+	if k := pyOrdKind(l); k != 0 && k == pyOrdKind(r) {
+		return
+	}
+	msg := "'" + op + "' not supported between instances of '" + pyTypeName(rt, l) + "' and '" + pyTypeName(rt, r) + "'"
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -101,6 +128,16 @@ func init() {
 		}
 		m["js_pybin"] = func(a []uint64) uint64 {
 			switch op := rt.toString(u(a[0])); op {
+			case "<", ">", "<=", ">=":
+				l, r := u(a[1]), u(a[2])
+				_, lnum := l.(float64)
+				_, rnum := r.(float64)
+				if !lnum || !rnum {
+					if v, ok := rt.pyDunderBin(op, l, r); ok {
+						return w(v)
+					}
+					rt.pyOrdCheck(op, l, r)
+				}
 			case "+", "-", "*", "+=":
 				if op == "+=" {
 					op = "+"

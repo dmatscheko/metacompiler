@@ -2947,6 +2947,23 @@ function pyAAddKind(v) {
     return ""
 }
 
+// CPython orders two values only within one kind: numbers (bool, int, float -
+// not complex), str, two lists (a tuple is a list here), two sets. Go:
+// rt.pyOrdCheck in abnf/pyarith.go.
+function pyAOrdKind(v) {
+    if (typeof v == "number" || typeof v == "boolean") { return "n" }
+    if (typeof v == "string") { return "s" }
+    if (pyIsArr(v)) { return "l" }
+    if (pyIsFlo(v) || pyIsBig(v)) { return "n" }
+    if (pySetElemsOf(v) !== null) { return "t" }
+    return ""
+}
+function pyAOrdCheck(op, l, r) {
+    var k = pyAOrdKind(l)
+    if (k != "" && k == pyAOrdKind(r)) { return }
+    pyRaiseExc("TypeError", "'" + op + "' not supported between instances of '" + pyTypeName(l) + "' and '" + pyTypeName(r) + "'")
+}
+
 function pyAAddCheck(l, r) {
     var kl = pyAAddKind(l)
     if (kl != "" && kl == pyAAddKind(r)) { return }
@@ -2978,6 +2995,13 @@ function js_pybin(opv, l, r) {
             return l
         }
         op = "+"
+    }
+    // An ORDERING of two values of different kinds is a TypeError, after a user
+    // class has had its __lt__ / reflected __gt__ chance.
+    if ((typeof l != "number" || typeof r != "number") && (op == "<" || op == ">" || op == "<=" || op == ">=")) {
+        var od = pyADunderBin(op, l, r)
+        if (od !== null) { return od["v"] }
+        pyAOrdCheck(op, l, r)
     }
     if (op == "is") { return pyAStrictEq(l, r) }
     if (op == "is not") { return !pyAStrictEq(l, r) }

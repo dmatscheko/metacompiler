@@ -5561,6 +5561,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyDunder[">"] = "__gt__"
     pyDunder["<="] = "__le__"
     pyDunder[">="] = "__ge__"
+    // A comparison's reflection is its mirror (a < b falls back to b.__gt__(a)),
+    // not an __r variant.
+    var pyReflected = {}
+    pyReflected["<"] = "__gt__"
+    pyReflected[">"] = "__lt__"
+    pyReflected["<="] = "__ge__"
+    pyReflected[">="] = "__le__"
     function pyUser(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined && v.__class != null
     }
@@ -5570,7 +5577,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (n == null) { return null }
         if (pyUser(l)) { var f = clsFind(l.__class, n); if (f != null) { return {v: f(l, r)} } }
         if (pyUser(r)) {
-            var rn = "__r" + n.substring(2)
+            var rn = hasOwn(pyReflected, op) ? pyReflected[op] : "__r" + n.substring(2)
             var g = clsFind(r.__class, rn)
             if (g != null) { return {v: g(r, l)} }
         }
@@ -6809,6 +6816,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // precision int on the right is an ordinary argument, and floOp/boxOp would
         // otherwise take the pair for arithmetic and answer NaN.
         if (op == "%" && typeof l == "string") { return pyPct(l, r) }
+        // An ORDERING of two values of different kinds is a TypeError, after a user
+        // class has had its __lt__ / reflected __gt__ chance.
+        if ((typeof l != "number" || typeof r != "number") && (op == "<" || op == ">" || op == "<=" || op == ">=")) {
+            if (pyUser(l) || pyUser(r)) {
+                var uord = userOp(op, l, r)
+                if (uord != null) { return uord.v }
+            }
+            pyOrdCheck(op, l, r)
+        }
         // Both overload gates - boxed numbers and user classes - sit behind ONE
         // typeof test, because pyBoxed and pyUser can only ever be true for an
         // object. An ordinary number therefore pays two comparisons and no call at
@@ -6952,6 +6968,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(v)) { return "l" }
         if (isFlo(v) || bigIsBig(v) || isCplx(v)) { return "n" }
         return ""
+    }
+    // CPython orders two values only within one kind: numbers (bool, int, float -
+    // not complex), str, two lists (a tuple is a list here), two sets. Twin of
+    // rt.pyOrdCheck in abnf/pyarith.go and pyAOrdCheck in lib/python-rt.metajs.
+    function pyOrdKind(v) {
+        if (pyNumeric(v)) { return "n" }
+        if (typeof v == "string") { return "s" }
+        if (Array.isArray(v)) { return "l" }
+        if (isSet(v)) { return "t" }
+        return ""
+    }
+    function pyOrdCheck(op, l, r) {
+        var k = pyOrdKind(l)
+        if (k != "" && k == pyOrdKind(r)) { return }
+        pyListErr("TypeError", "'" + op + "' not supported between instances of '" + pyTypeOf(l).__name + "' and '" + pyTypeOf(r).__name + "'")
     }
     function pyAddCheck(l, r) {
         var kl = pyAddKind(l)
@@ -8992,19 +9023,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeInvert(t) { return function() { return pyInvert(t()) } }
     // items alternates operands and {cop} markers. Each operand is evaluated once and
-    // the chain stops at the first false link (Python's semantics exactly).
+    // the chain stops at the first false link (Python's semantics exactly). The
+    // value is that of the last link evaluated, so a dunder's own result survives.
     function makeCompare(items) {
         if (items.length == 1) { return items[0] }
         return function() {
             var l = anytype // The operands of a chain may be of mixed types.
             l = items[0]()
+            var res = anytype // The last link's value.
+            res = true
             for (var i = 1; i < items.length; i += 2) {
                 var r = anytype
                 r = items[i + 1]()
-                if (!pytruthy(binOp(items[i].cop, l, r))) { return false }
+                res = binOp(items[i].cop, l, r)
+                if (!pytruthy(res)) { return res }
                 l = r
             }
-            return true
+            return res
         }
     }
     // ( a ): plain grouping. ( a, b, ... ) / ( a, ): a TUPLE, built as a list (a

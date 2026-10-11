@@ -3683,6 +3683,41 @@ def s65():
                            "LookupError: unknown encoding: nope", "TypeError: decoding str is not supported"])
 
 
+# ===== SECTION 66: ordering across kinds =====
+# Only numbers, two strs, two sequences and two sets have an order; any other
+# pair raises CPython's TypeError, after a user class's __lt__ or reflected
+# __gt__ has had its chance - and a comparison's value is the dunder's own.
+def s66():
+    def err(f):
+        try:
+            f()
+            return "no error"
+        except TypeError as e:
+            return str(e)
+    vals = [1, "a", 1.5, None, True, {1: 2}, {1}, 2 ** 70]
+    check("ord1", err(lambda: sorted([vals[0], vals[1]])) == "'<' not supported between instances of 'str' and 'int'")
+    check("ord2", err(lambda: [vals[0]] < [vals[1]]) == "'<' not supported between instances of 'int' and 'str'")
+    check("ord3", err(lambda: vals[1] > vals[0]) == "'>' not supported between instances of 'str' and 'int'")
+    check("ord4", err(lambda: vals[1] <= vals[2]) == "'<=' not supported between instances of 'str' and 'float'")
+    check("ord5", err(lambda: vals[0] >= vals[1]) == "'>=' not supported between instances of 'int' and 'str'")
+    check("ord6", err(lambda: vals[3] < vals[0]) == "'<' not supported between instances of 'NoneType' and 'int'")
+    check("ord7", err(lambda: vals[5] < vals[5]) == "'<' not supported between instances of 'dict' and 'dict'")
+    check("ord8", err(lambda: vals[6] < vals[0]) == "'<' not supported between instances of 'set' and 'int'")
+    check("ord9", err(lambda: vals[7] < vals[1]) == "'<' not supported between instances of 'int' and 'str'")
+    check("ord10", err(lambda: max(vals[0], vals[1])) == "'>' not supported between instances of 'str' and 'int'")
+    check("ord11", err(lambda: min([vals[1], vals[0]])) == "'<' not supported between instances of 'int' and 'str'")
+    check("ord12", (vals[4] < vals[2]) and (vals[7] > vals[2]) and not (vals[6] < vals[6]) and [1, "a"] <= [1, "a"])
+    class A:
+        def __gt__(self, o):
+            return "A.gt"
+        def __lt__(self, o):
+            return "A.lt"
+    class B:
+        pass
+    check("ord13", (vals[0] < A()) == "A.gt" and (A() < vals[0]) == "A.lt" and (vals[0] > A()) == "A.lt")
+    check("ord14", err(lambda: B() < vals[0]) == "'<' not supported between instances of 'B' and 'int'")
+    check("ord15", (1 < 3 < 2) is False and (1 < 2 < 3) is True)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3749,5 +3784,6 @@ def main():
     s63() # SECTION-CALL 63
     s64() # SECTION-CALL 64
     s65() # SECTION-CALL 65
+    s66() # SECTION-CALL 66
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
