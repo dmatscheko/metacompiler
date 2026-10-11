@@ -1653,6 +1653,10 @@ void s38() {
   var h = S38F.a(() => 9);
   var hf = h.f;
   check("pe38h", hf() == 9);
+  // `()` is the empty record, and a collection-for may assign an existing variable.
+  var w;
+  var ws = [for (w in ["a", "b"]) w];
+  check("pe38i", ws.join() == "ab" && w == "b" && () == () && ().toString() == "()");
 }
 
 int main() {

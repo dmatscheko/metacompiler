@@ -591,7 +591,9 @@ ForInPat    <~~ push(makeForInPat(takeAll())) ~~>
             = KwFor "(" ( KwVar | KwFinal ) PatVarHead KwIn Expression ")" Statement ;
 ForInTyped  <~~ push(makeForIn(takeAll())) ~~>
             = KwFor "(" ForInLead Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
-ForInBare   <~~ push(makeForIn(takeAll())) ~~>
+// A bare name is not a declaration: `for (w in xs)` ASSIGNS the existing w, which
+// keeps the last element after the loop.
+ForInBare   <~~ push(makeForInAssign(takeAll())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 ForInLead   = [ Annotations ] ( KwVar | KwFinal | Type ) ;
 ForCStyle   <~~ push(makeFor(takeAll())) ~~>
@@ -1112,7 +1114,9 @@ SymDotted   = Id { "." Id } ;
 // A record literal (Dart 3). It is told apart from a parenthesized expression by needing
 // either two fields, a trailing comma after a single one, or a named field - which is why
 // the three shapes are separate alternatives and RecordLit comes before "(" Expression ")".
-RecordLit   = RecMulti | RecSingle | RecNamedOne ;
+RecordLit   = RecMulti | RecSingle | RecNamedOne | RecEmpty ;
+// `()`: the empty record.
+RecEmpty    <~~ push(makeRecord([])) ~~> = "(" ")" ;
 RecMulti    <~~ push(makeRecord(takeAll())) ~~>
             = "(" RecField "," RecField { "," RecField } [ "," ] ")" ;
 RecSingle   <~~ push(makeRecord(takeAll())) ~~>
@@ -1215,7 +1219,11 @@ ExprElem    <~~ push({ekind: "val", t: pop()}) ~~> = AssignExpr ;
 // The head of a collection-for is either `x in e` or the C-style triple; both reuse the
 // statement-level pieces, so the markers arrive in the same shape.
 ForElemHead = ForElemIn | ForElemC ;
-ForElemIn   = [ ForInLead ] Id <~~ push({feName: up.in}) ~~> KwIn ForElemIter ;
+// Two complete alternatives: an optional lead would take the bare loop variable of
+// `for (global in xs)` for a TYPE and then miss the name.
+ForElemIn   = ForInLead Id <~~ push({feName: up.in}) ~~> KwIn ForElemIter
+            | ElemAsgName KwIn ForElemIter ;
+ElemAsgName <~~ push({feName: up.in}); push({feAssign: true}) ~~> = Id ;
 ForElemIter <~~ push({feIter: pop()}) ~~> = Expression ;
 ForElemC    = [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ;
 
@@ -3235,11 +3243,12 @@ KwDeferred  = "deferred" KwEnd ;
     // descriptor last.
     function makeForElem(items) {
         var d = {ekind: "for", name: null, iter: null, init: null, cond: null, post: null,
-                 body: items[items.length - 1]}
+                 assign: false, body: items[items.length - 1]}
         for (var i = 0; i < items.length - 1; i++) {
             var it = items[i]
             if (it.feName != undefined) { d.name = it.feName }
             else if (it.feIter != undefined) { d.iter = it.feIter }
+            else if (it.feAssign != undefined) { d.assign = true }
             else if (it.k == "init") { d.init = it.t }
             else if (it.k == "cond") { d.cond = it.t }
             else if (it.k == "post") { d.post = it.t }
@@ -3306,7 +3315,10 @@ KwDeferred  = "deferred" KwEnd ;
             src = e.iter()
             if (isDict(src)) { src = src.keys.slice(0) }
             var cnt = dlen(src)
-            for (var j = 0; j < cnt; j++) { declVar(e.name, dget(src, j)); emitElem(e.body, sink) }
+            for (var j = 0; j < cnt; j++) {
+                if (e.assign) { setVar(e.name, dget(src, j)) } else { declVar(e.name, dget(src, j)) }
+                emitElem(e.body, sink)
+            }
         } else {
             if (e.init != null) { e.init() }
             while (e.cond == null || core.test(e.cond())) {
@@ -4936,10 +4948,15 @@ KwDeferred  = "deferred" KwEnd ;
             return res
         }
     }
+    function makeForInAssign(items) {
+        items.push(true)
+        return makeForIn(items)
+    }
     function makeForIn(items) {
         var name = items[0]
         var iterT = items[1]
         var bodyT = items[2]
+        var assign = items.length > 3
         return function() {
             var it = anytype
             it = iterT()
@@ -4949,7 +4966,7 @@ KwDeferred  = "deferred" KwEnd ;
             var res = undefined
             var n = dlen(it)
             for (var i = 0; i < n; i++) {
-                declVar(name, dget(it, i))
+                if (assign) { setVar(name, dget(it, i)) } else { declVar(name, dget(it, i)) }
                 var r = bodyT()
                 if (r != undefined) {
                     var act = loopRoute(r, myLabel)

@@ -553,7 +553,7 @@ ForInPat    <~~ push(makeForInPat(takeAll())) ~~>
             = KwFor "(" ( KwVar | KwFinal ) PatVarHead KwIn Expression ")" Statement ;
 ForInTyped  <~~ push(makeForIn(takeAll())) ~~>
             = KwFor "(" ForInLead Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
-ForInBare   <~~ push(makeForIn(takeAll())) ~~>
+ForInBare   <~~ push(makeForInAssign(takeAll())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 ForInLead   = [ Annotations ] ( KwVar | KwFinal | Type ) ;
 ForCStyle   <~~ push(makeFor(takeAll())) ~~>
@@ -1056,7 +1056,8 @@ SymDotted   = Id { "." Id } ;
 // A record literal (Dart 3). It is told apart from a parenthesized expression by needing
 // either two fields, a trailing comma after a single one, or a named field - which is why
 // the three shapes are separate alternatives and RecordLit comes before "(" Expression ")".
-RecordLit   = RecMulti | RecSingle | RecNamedOne ;
+RecordLit   = RecMulti | RecSingle | RecNamedOne | RecEmpty ;
+RecEmpty    <~~ push(makeRecord([])) ~~> = "(" ")" ;
 RecMulti    <~~ push(makeRecord(takeAll())) ~~>
             = "(" RecField "," RecField { "," RecField } [ "," ] ")" ;
 RecSingle   <~~ push(makeRecord(takeAll())) ~~>
@@ -1157,7 +1158,9 @@ ExprElem    <~~ push({ekind: "val", t: pop()}) ~~> = AssignExpr ;
 // The head of a collection-for is either `x in e` or the C-style triple; both reuse the
 // statement-level pieces, so the markers arrive in the same shape.
 ForElemHead = ForElemIn | ForElemC ;
-ForElemIn   = [ ForInLead ] Id <~~ push({feName: up.in}) ~~> KwIn ForElemIter ;
+ForElemIn   = ForInLead Id <~~ push({feName: up.in}) ~~> KwIn ForElemIter
+            | ElemAsgName KwIn ForElemIter ;
+ElemAsgName <~~ push({feName: up.in}); push({feAssign: true}) ~~> = Id ;
 ForElemIter <~~ push({feIter: pop()}) ~~> = Expression ;
 ForElemC    = [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ;
 
@@ -3906,11 +3909,12 @@ KwSuper     = "super" KwEnd ;
     }
     function makeForElem(items) {
         var body = items[items.length - 1]
-        var d = {ekind: "for", body: body, feName: null, feIter: null, init: null, cond: null, post: null}
+        var d = {ekind: "for", body: body, feName: null, feIter: null, feAssign: false, init: null, cond: null, post: null}
         for (var i = 0; i < items.length - 1; i++) {
             var it = items[i]
             if (it.feName != undefined) { d.feName = it.feName }
             else if (it.feIter != undefined) { d.feIter = it.feIter }
+            else if (it.feAssign != undefined) { d.feAssign = true }
             else if (it.k == "init") { d.init = it.t }
             else if (it.k == "cond") { d.cond = it.t }
             else if (it.k == "post") { d.post = it.t }
@@ -4029,7 +4033,10 @@ KwSuper     = "super" KwEnd ;
         // emission in a statement thunk, so `for (var i in xs) e` and the C-style head
         // both behave exactly like their statement twins.
         var bodyT = function(bb) { return emitElem(bb, sink, e.body) }
-        if (e.feName != null) { return makeForIn([e.feName, e.feIter, bodyT])(b) }
+        if (e.feName != null) {
+            if (e.feAssign) { return makeForInAssign([e.feName, e.feIter, bodyT])(b) }
+            return makeForIn([e.feName, e.feIter, bodyT])(b)
+        }
         var parts = []
         if (e.init != null) { parts.push({k: "init", t: e.init}) }
         if (e.cond != null) { parts.push({k: "cond", t: e.cond}) }
@@ -5094,10 +5101,17 @@ KwSuper     = "super" KwEnd ;
             return exitB
         }
     }
+    // `for (w in xs)` assigns the existing w. Twin of makeForInAssign in
+    // dart-interpreter.abnf.
+    function makeForInAssign(items) {
+        items.push(true)
+        return makeForIn(items)
+    }
     function makeForIn(items) {
         var name = items[0]
         var iterT = items[1]
         var bodyT = items[2]
+        var assign = items.length > 3
         return function(b) {
             var lbl = takeLabel()
             var saved = curScopeV
@@ -5111,7 +5125,7 @@ KwSuper     = "super" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), itV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), lenV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])
+            if (!assign) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull]) }
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
