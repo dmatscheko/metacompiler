@@ -1768,6 +1768,11 @@ func init() {
 		// js_ktglobal(name) is the VALUE of one global builder; buildMain declares
 		// one per name. See the block above ktRecvStack.
 		m["js_ktglobal"] = func(a []uint64) uint64 { return w(ktGlobalFn(rt, rt.toString(u(a[0])))) }
+		// js_ktadoptel(coll, vty, kty): see ktAdoptEl.
+		m["js_ktadoptel"] = func(a []uint64) uint64 {
+			rt.ktAdoptEl(u(a[0]), rt.toString(u(a[1])), rt.toString(u(a[2])))
+			return a[0]
+		}
 		// js_ktclock(kind, us) is System.currentTimeMillis (0) / nanoTime (1); see ktClock.
 		m["js_ktclock"] = func(a []uint64) uint64 { return w(rt.ktClock(int(giFloat(rt, u(a[0]))), u(a[1]))) }
 
@@ -6481,6 +6486,44 @@ func ktFieldTy(o *jsObject, name string) string {
 		cls, _ = cls.props["__super"].(*jsObject)
 	}
 	return ""
+}
+
+// ktAdoptEl retypes a collection's contents IN PLACE by the element types a type
+// argument fixes - `listOf<Long>(1, 2)`, `val m: Map<Long, Int> = mapOf(1 to 2)`,
+// `Pair<Long, Int>(1, 2)`: vty for a list's, array's or set's elements and a map's
+// values, kty for a map's keys; a Pair takes kty for first and vty for second. ""
+// leaves that side alone. An integer literal is the only Int a legal program can
+// put where a Long is expected, so the retyping changes nothing else. The twins
+// are kAdoptEl in kotlin-interpreter.abnf and js_ktadoptel in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktAdoptEl(v interface{}, vty, kty string) {
+	one := func(x interface{}, ty string) interface{} {
+		if ty != "" {
+			if n := rt.ktAdoptTy(x, ty); n != nil {
+				return n
+			}
+		}
+		return x
+	}
+	all := func(arr *jsArray, ty string) {
+		for i, e := range arr.elems {
+			arr.elems[i] = one(e, ty)
+		}
+	}
+	switch o := v.(type) {
+	case *jsArray:
+		all(o, vty)
+	case *jsObject:
+		if keys, isSet := ktSetParts(o); isSet {
+			all(keys, vty)
+		} else if keys, vals, isMap := dictParts(o); isMap {
+			all(keys, kty)
+			all(vals, vty)
+		} else if _, isPair := o.props["second"]; isPair {
+			o.set("first", one(o.props["first"], kty))
+			o.set("second", one(o.props["second"], vty))
+		}
+	}
 }
 
 // ktAdoptTy retypes a value by a declared type name, or answers nil when the type

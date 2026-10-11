@@ -4539,6 +4539,46 @@ fun sec89() {
         System.currentTimeMillis() > 1600000000000L)
 }
 
+// ===== SECTION 90: an integer literal takes its expected type argument =====
+// A type argument fixes the expected type of a collection's elements, so the
+// integer literals in listOf<Long>(1, 2), `val ls: List<Long> = listOf(1, 2)`,
+// Pair<Long, Int>(1, 2), `ml.add(3)` on a MutableList<Long>, `la[0] = 5` into a
+// LongArray and `y = 7` into a `var y = 5L` are Longs (Kotlin spec, integer literal
+// types); a product of two is a 64-bit multiply, and an empty List<Long>'s sum is
+// a Long (List<Float>'s the Float 0.0).
+fun s90any(x: Any?): Any? = x
+
+fun sec90() {
+    val ls: List<Long> = listOf(1, 2, 3)
+    val hs = hashSetOf<Long>(1, 2)
+    check("kl90a", s90any(ls[0]) is Long && s90any(hs.first()) is Long)
+    var y = 5L
+    y = 7
+    var w: Long = 3
+    w = 4
+    check("kl90b", s90any(y) is Long && s90any(w) is Long && y * 1000000000 * 10 == 70000000000L)
+    val mm = mutableMapOf<Long, String>()
+    mm[1] = "x"
+    val ml = mutableListOf<Long>()
+    ml.add(3)
+    ml.add(0, 2)
+    check("kl90c", s90any(mm.keys.first()) is Long && s90any(ml[0]) is Long && s90any(ml[1]) is Long)
+    val p = Pair<Long, Int>(1, 2)
+    val la = LongArray(2)
+    la[0] = 5
+    check("kl90d", s90any(p.first) is Long && s90any(p.second) is Int && s90any(la[0]) is Long)
+    val lo = listOf<Long>(100000, 100000)
+    check("kl90e", lo[0] * lo[1] == 10000000000L && "" + listOf<Float>().sum() == "0.0" &&
+        s90any(listOf<Long>().sum()) is Long)
+    val n: Long? = null
+    val z = n ?: 0
+    val ml2: MutableList<Long> = mutableListOf(1, 2)
+    ml2[0] = 9
+    val mp: Map<Long, Double> = mapOf(1 to 2.0)
+    check("kl90f", s90any(z) is Long && s90any(ml2[0]) is Long && s90any(ml2[1]) is Long &&
+        s90any(mp.keys.first()) is Long && s90any(arrayOf<Long>(1, 2)[0]) is Long)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4630,6 +4670,7 @@ fun main() {
     sec87() // SECTION-CALL 87
     sec88() // SECTION-CALL 88
     sec89() // SECTION-CALL 89
+    sec90() // SECTION-CALL 90
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

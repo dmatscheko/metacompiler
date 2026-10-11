@@ -6198,6 +6198,45 @@ function k4bAdoptTy(v, ty) {
     return undefined
 }
 
+// js_ktadoptel(coll, vty, kty) retypes a collection's contents in place by the
+// element types a type argument fixes. Twin of ktAdoptEl in abnf/jsrtkotlin.go.
+function k4bAdoptOne(x, ty) {
+    if (ty == "") { return x }
+    var n = k4bAdoptTy(x, ty)
+    if (n === undefined) { return x }
+    return n
+}
+function k4bAdoptAll(arr, ty) {
+    if (ty == "") { return }
+    var i = 0
+    while (i < arr.length) {
+        arr[i] = k4bAdoptOne(arr[i], ty)
+        i = i + 1
+    }
+}
+function js_ktadoptel(v, vty, kty) {
+    if (Array.isArray(v)) {
+        k4bAdoptAll(v, vty)
+        return v
+    }
+    if (ktIsSet(v)) {
+        k4bAdoptAll(ktSetElems(v), vty)
+        return v
+    }
+    if (rtIsDictObj(v)) {
+        k4bAdoptAll(ktMapKeys(v), kty)
+        k4bAdoptAll(ktMapVals(v), vty)
+        return v
+    }
+    if (ktIsObj(v)) {
+        if (v["second"] !== undefined) {
+            v["first"] = k4bAdoptOne(v["first"], kty)
+            v["second"] = k4bAdoptOne(v["second"], vty)
+        }
+    }
+    return v
+}
+
 // js_ktset is js_set plus the map handle: `mm[2] = "b"` is Map.put, which the
 // shared setMember cannot answer (it would store a plain PROPERTY named "2").
 function js_ktset(o, key, val) {

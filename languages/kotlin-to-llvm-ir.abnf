@@ -464,10 +464,10 @@ TopProp     = DelegateDecl | TopDecl | TopBareProp ;
 TopBareProp <~~ push(makeBareDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd [ SkipAngle ] { Annotation } [ RecvSeg { RecvSeg } ]
               NotHardKw KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] [ ";" ] ;
-TopDecl     <~~ push(makeDecl(takeAll())) ~~>
+TopDecl     <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in)) ~~>
             = ( "val" | "var" ) KwEnd NotHardKw KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression { PropVis } [ ";" ] ;
 
-FunDecl     <~~ push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
+FunDecl     <~~ ktNoteBody(up.start, up.pos); push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
 // The angle run AFTER the name - `fun naturalOrder<in T : Comparable<T>>(a: T, b: T)`
 // (psi/examples/util/Comparison.kt, clean tree) - is where Kotlin's parser still accepts
 // type parameters even though the language wants them before the name. Skipped, not
@@ -507,7 +507,7 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // decoration: `inline fun <reified T> Any.isA(): Boolean = this is T` resolves `is T`
 // against the call site, exactly as the non-extension form does. TypeParams only fills
 // pendingReified, so the item list makeFun reads is unchanged.
-ExtFun      <~~ push(makeExtFunStmt(makeFun(takeAll(), retLblTop(), reifiedTop()))); retLblPop(); reifiedPop() ~~>
+ExtFun      <~~ ktNoteBody(up.start, up.pos); push(makeExtFunStmt(makeFun(takeAll(), retLblTop(), reifiedTop()))); retLblPop(); reifiedPop() ~~>
             = KwFun [ TypeParams ] AnnoRecv { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun"); reifiedPush() ~~> ParamList [ ":" Type ] [ WhereClause ] FunBody ;
 // The receiver of an extension may carry annotations, including use-site targeted ones
 // (fun @receiver:Ann @Other Int.f()). They are erased like every other annotation.
@@ -569,7 +569,7 @@ ParamList   <~~ push(makeParamList(takeAll())) ~~>
 // `vararg` is NOT one of the ignorable Modifiers: it changes how the parameter binds
 // (it collects the remaining call arguments), so it is matched on its own. Kotlin
 // allows annotations on either side of it, hence the two Modifiers slots.
-Param       <~~ push(makeParam(takeAll())) ~~>
+Param       <~~ ktAt = up.start; push(makeParam(takeAll())) ~~>
 // The type is OPTIONAL and a `val`/`var` is accepted in front of the name. Both are
 // semantic errors on an ordinary function, never syntactic ones: psi/ParameterType.kt
 // (`fun test1(a) {}`, `fun test2(a = 4) {}`) and psi/operators/
@@ -602,7 +602,7 @@ CollLit     <~~ push(makeCollLit(takeAll())) ~~>
             = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
 
 // class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
-ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+ClassDecl   <~~ ktNoteBody(up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
             = [ DataMod <~~ push({dmod: up.in}) ~~> KwEnd ] KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] ( CtorModsOnly CtorParams | [ PrimaryCtorKw ] [ CtorParams ] ) [ ":" Supers ] [ WhereClause ] [ "{" { Member } "}" ] ;
 // The primary constructor may be written out - class Foo constructor(x: Int) - with its
 // own visibility and annotations (class A private @Inject constructor(...)). The keyword
@@ -659,7 +659,7 @@ CtorParams  <~~ push({cparams: takeAll()}) ~~>
             = "(" [ CtorParam { "," CtorParam } [ "," ] ] ")" ;
 // A default value (= expr) is genuine, exactly like a function Param's (common in data
 // classes - data class Spec(val action: String = "", val flags: Int = 0)).
-CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
+CtorParam   <~~ ktAt = up.start; push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" PType [ "=" ParamDefault ] ;
 
 // A nested typealias is erased exactly like a top-level one.
@@ -738,7 +738,7 @@ NestedTypeSkip <~~ notImpl("nested type declaration", up.pos) ~~>
 // modifier, and every alternative Member tries after this one either drains the run
 // itself or ignores it), so `lateinit` reaches makeProp instead of leaking into the
 // next declaration that reads pendingMods.
-PropDecl    <~~ push(makeProp(takeAll())) ~~>
+PropDecl    <~~ ktAt = up.start; push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push(up.in); push({pmods: takeLateinit()}) ~~> [ ":" PType ] [ "=" Expression ] { PropVis } [ ";" ] ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // `by lazy { init }` is special-cased (eager, see LazyProp); every other delegate goes
@@ -752,7 +752,7 @@ PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // delegated property (val Recv.x by ...) has no single owner to pass as thisRef and
 // stays unsupported.
 PropDelegate = LazyProp | RealPropDelegate | UnsupDelegate ;
-LazyProp    <~~ push(makeProp(takeAll())) ~~>
+LazyProp    <~~ ktAt = up.start; push(makeProp(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
 // A delegated MEMBER property may still declare accessors - `val p: Int by A()` on one
 // line and `get() = 1` on the next (psi/propertyDelegate/PropertyWithGetter.kt), or
@@ -924,7 +924,7 @@ NewStmtLine = :script(~~
 ~~) ;
 
 
-Decl        <~~ push(makeDecl(takeAll())) ~~>
+Decl        <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in)) ~~>
             = ( "val" | "var" ) KwEnd NotHardKw KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression [ ";" ] ;
 // `val x: Int` / `var r` with no initializer. Kotlin's PARSER accepts this - the
 // missing initializer is a later, semantic error ("must either have a type annotation
@@ -932,7 +932,7 @@ Decl        <~~ push(makeDecl(takeAll())) ~~>
 // declared as undefined. The `!"="` lookahead keeps this from swallowing a declaration
 // whose INITIALIZER failed to parse: that must stay a parse error, not become a
 // silently value-less binding.
-BareDecl    <~~ push(makeBareDecl(takeAll())) ~~>
+BareDecl    <~~ ktAt = up.start; push(makeBareDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd NotHardKw KId <~~ push(up.in) ~~> [ ":" DeclType ] !"=" [ ";" ] ;
 // The declared type of a local/top-level val or var. Types are erased, with ONE
 // exception that is observable: a lambda-with-receiver type (Int.(Int) -> Int) says the
@@ -947,7 +947,7 @@ DeclType    <~~ var dt = stripWs(up.in); pendingRecvLambda = isRecvFnType(dt); p
 // through the delegate protocol (RealDelegateDecl), and UnsupDelegateDecl keeps a
 // placeholder so the rest still lowers under -warn-unsupported.
 DelegateDecl = LazyDecl | RealDelegateDecl | UnsupDelegateDecl ;
-LazyDecl    <~~ push(makeDecl(takeAll())) ~~>
+LazyDecl    <~~ ktAt = up.start; push(makeDecl(takeAll())) ~~>
             = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
 // The same delegate protocol for a local or top-level `val x by d`: the binding holds
 // a delegate BOX (js_ktdbox), and every read (js_ktget) and every write (js_ktvarset)
@@ -1053,7 +1053,7 @@ AnnAssign   = Annotation { Annotation } ( SuperAssign | Assignment | CallAssign 
 SuperAssign <~~ push(makeSuperAssign(takeAll(), up.pos)) ~~>
             = KwSuper [ SuperQual ] "." KId <~~ push({sfname: up.in}) ~~>
               ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
+Assignment  <~~ ktAt = up.start; push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 // An assignment whose left side is a postfix expression containing a call, so a plain
 // Target (KId rooted, dot/index steps) cannot cover it: foo(x).field = y,
@@ -1303,7 +1303,7 @@ NotAssign   = :script(~~
 ~~) ;
 
 // a ?: b yields a unless it is null (the elvis operator; the right side only runs then).
-Elvis       <~~ push(makeElvis(takeAll())) ~~>
+Elvis       <~~ ktAt = up.start; push(makeElvis(takeAll(), up.in)) ~~>
             = InfixExpr { "?:" InfixExpr } ;
 
 // A stdlib infix call - a to b (Pair), a and b / a shl b - binds tighter than elvis
@@ -1396,7 +1396,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // trailing lambda - list.map { it * 2 } - which becomes the last argument.
 // A trailing "!!" (non-null assertion) is consumed and dropped: in the untyped handle
 // world it is the identity, so x!! lowers exactly like x (and x!!.m() still chains).
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+CallMember  <~~ ktAt = up.start; push(foldCallMember(takeAll(), up.in)) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | "!!" } ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
 // `X()::class`, `object {}::class`, `foo()::bar`. CallableRef in Primary covers only a
@@ -1707,7 +1707,7 @@ ThisExpr    <~~ push(makeThisAt(pop().tlbl)) ~~>
 // A lambda may carry its own LABEL - exec lab@{ ... return@lab } - which becomes the
 // target of a return@lab inside it (instead of the callee's implicit label). LamLabel
 // registers it on the walk-time return-target stack; makeLambda pops it again.
-Lambda      <~~ push(makeLambda(takeAll())) ~~>
+Lambda      <~~ ktNoteBody(up.start, up.pos); push(makeLambda(takeAll())) ~~>
             = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
 LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> AtAdjacent "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
@@ -2040,7 +2040,7 @@ QualRefBase <~~ push(stripWs(up.in)) ~~>
 // genuine: it lowers to exactly what a named local function lowers to (an own IR
 // function plus a js_closure over the current scope), only without a name. Its `return`
 // returns from IT, which is the whole point of the form (unlike a lambda's).
-AnonFun     <~~ push(makeAnonFun(takeAll())) ~~>
+AnonFun     <~~ ktNoteBody(up.start, up.pos); push(makeAnonFun(takeAll())) ~~>
             = [ ContextClause ] KwFun ParamList [ ":" Type ] [ ContractClause ] [ WhereClause ] ( Block | "=" ExprBody ) ;
 // The anonymous-function shapes the subset cannot lower: one with a RECEIVER
 // (fun T.(a: foo): bar {}), a NAMED one (fun name() = a), a generic one, and any of
@@ -2092,7 +2092,7 @@ InterfaceCtor <~~ push(notImplStmt("interface", up.pos)) ~~>
 // ClassDecl records `data`/`value`, so makeInterfaceStmt can tell the two apart -
 // an ordinary interface with one abstract member is NOT convertible, which is
 // Kotlin's rule. The twin of IfaceKw/buildInterface in kotlin-interpreter.abnf.
-InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
+InterfaceReal <~~ ktNoteBody(up.start, up.pos); push(makeInterfaceStmt(takeAll())) ~~>
             = [ KwFun <~~ push({samfun: true}) ~~> ] KwInterface KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Supers ] [ WhereClause ] ( "{" { Member } "}" | !"{" ) ;
 InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
             = [ KwFun ] KwInterface KId [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ] ;
@@ -2102,7 +2102,7 @@ InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
 // literal), or no body at all (a bodiless object), falls back to ObjectSkip
 // (notImplemented), so the widened surface still parses.
 ObjectDecl  = ObjectCtor | ObjectReal | ObjectNoBody | ObjectSkip ;
-ObjectReal  <~~ push(makeObjectStmt(takeAll())) ~~>
+ObjectReal  <~~ ktNoteBody(up.start, up.pos); push(makeObjectStmt(takeAll())) ~~>
             = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] "{" { Member } "}" ;
 // object Foo(a: Int) / object Foo private () / object Foo<T, R>: an object declaration
 // may not HAVE a primary constructor or type parameters, but that is a semantic rule -
@@ -2136,7 +2136,7 @@ ObjectSkip  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
 // (when (this) { A -> ... }). An entry with its own body, and a body outside the member
 // subset, fall back to EnumSkip.
 EnumClass   = EnumReal | EnumSkip ;
-EnumReal    <~~ push(makeEnumStmt(takeAll())) ~~>
+EnumReal    <~~ ktNoteBody(up.start, up.pos); push(makeEnumStmt(takeAll())) ~~>
             = KwEnum KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" Supers ]
               "{" [ EnumEntry { "," EnumEntry } [ "," ] ] [ ";" { Member } ] "}" ;
 // An entry may carry its OWN CLASS BODY - `LOW(1) { override fun label() = "low" }` -
@@ -2381,6 +2381,8 @@ KwContract  = "contract" KwEnd ;
     // Shared emitter machinery (module, handle constants, externs, loopStack
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
+    // The static types an integer literal adopts (ktAdoptThunk applies them).
+    include("lib/kotlin-decltypes.js")
 
     // ===== THE SCOPE PROBES, LOWERED HERE RATHER THAN LEFT AS EXTERNS =====
     //
@@ -3301,6 +3303,7 @@ KwContract  = "contract" KwEnd ;
             else if (items[i].isvararg != undefined) { rec.vararg = true }
             else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
+        ktNoteDecl(rec.name, rec.ty)
         // A PARAMETER whose declared type is a receiver function type - the DSL builder
         // shape, `fun doc(body: Node.() -> Unit)` - binds its receiver as `this`
         // exactly as a local `val f: T.() -> R` does, so `t.body()` inside the callee
@@ -4024,8 +4027,13 @@ KwContract  = "contract" KwEnd ;
     // A when compiles to a test chain; the result travels in a hidden scope variable.
     // items = [thunk, thunk, ...]: a ?: b yields a unless it is null. Each step only
     // runs the right side in its own block when the left value was null (phi merge).
-    function makeElvis(items) {
+    function makeElvis(items, txt) {
         if (items.length == 1) return items[0]
+        // `n ?: 0` with n a Long?: the literal takes the left operand's type.
+        var ety = ktLitTy(ktLeadType(txt, "?:"))
+        if (ety != "") {
+            for (var ei = 1; ei < items.length; ei++) { items[ei] = ktAdoptThunk(items[ei], ety) }
+        }
         return function(b) {
             var r = items[0](b)
             b = r.b
@@ -4123,10 +4131,19 @@ KwContract  = "contract" KwEnd ;
         }
     }
 
-    foldCallMember = function(items) {
+    foldCallMember = function(items, txt) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
+        if (suffixes[0].kind == "mcall") {
+            var cel = ktTyElems(ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
+            if (cel != null) { suffixes[0] = ktAdoptMArgs(suffixes[0], cel) }
+        }
+        function emitSuffixT(b, cur, s) {
+            var sr = emitSuffix(b, cur, s)
+            if (s.ktRes == undefined) { return sr }
+            return {b: sr.b, v: emitAdoptV(sr.b, sr.v, ktWidthOfType(s.ktRes))}
+        }
         function emitSuffix(b, cur, s) {
             if (s.kind == "mcall") {
                 // An extension function wins only when no builtin or class method
@@ -4308,13 +4325,13 @@ KwContract  = "contract" KwEnd ;
                     var mergeB = curF.NewBlock("")
                     var isNull = callExt(b, "js_eq", [cur, hNull])
                     b.NewCondBr(truthy(b, isNull), mergeB, doB)
-                    var rs = emitSuffix(doB, cur, s)
+                    var rs = emitSuffixT(doB, cur, s)
                     rs.b.NewBr(mergeB)
                     var phi = mergeB.NewPhi([llvm.ir.NewIncoming(hNull, b), llvm.ir.NewIncoming(rs.v, rs.b)])
                     b = mergeB
                     cur = phi
                 } else {
-                    var r2 = emitSuffix(b, cur, s)
+                    var r2 = emitSuffixT(b, cur, s)
                     b = r2.b
                     cur = r2.v
                 }
@@ -4848,6 +4865,12 @@ KwContract  = "contract" KwEnd ;
                 args = args.concat([{at: makeConst(targs.length > ri ? targs[ri] : "Any")}])
             }
         }
+        // A builder call's static type, and its elements retyped by the explicit type
+        // arguments (listOf<Long>(1, 2)).
+        var bty = (classNames[name] == undefined && funNames["$" + name] != true) ? ktBuilderType(name, targs) : ""
+        return ktAdoptThunk(makeCallBody(name, args), bty)
+    }
+    function makeCallBody(name, args) {
         return function(b) {
             // Regex(pattern) / Regex(pattern, options). Kotlin has no regexp literal,
             // so this constructor call IS the literal syntax; the pattern is compiled
@@ -5005,6 +5028,17 @@ KwContract  = "contract" KwEnd ;
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // `y = 7` into a Long variable and `xs[i] = 7` / `m[1] = v` into a collection of
+        // Longs: the literal takes the declared (or inferred) type.
+        if (op == "=" && ref.name != "field") {
+            var aty = ktDeclTypeOf(ref.name)
+            if (ref.path.length == 0) { valT = ktAdoptThunk(valT, ktLitTy(aty)) }
+            var ael = ktLitElems(aty)
+            if (ref.path.length == 1 && ref.path[0].idx != undefined && ael != null) {
+                valT = ktAdoptThunk(valT, ael.v)
+                ref = {name: ref.name, path: [{idx: ktAdoptThunk(ref.path[0].idx, ael.k)}]}
+            }
+        }
         // A write to a MEMBER extension property - `n.slot = 5` - is routed through the
         // extset$name accessor rather than stored as a field. The test lives INSIDE the
         // thunk: memberExtPropNames is filled by splitMembers, which runs when the
@@ -5267,23 +5301,27 @@ KwContract  = "contract" KwEnd ;
         if (w == undefined) { return {w: 0, u: false, flo: false} }
         return {w: w, u: ktDeclUns["$" + t] == true, flo: false}
     }
-    function makeDecl(items) {
+    function makeDecl(items, txt) {
         var name = items[0]
-        var at = 1
-        var dw = {w: 0, u: false, flo: false}
-        if (items[at] != undefined && items[at].dtype != undefined) {
-            if (isRecvFnType(items[at].dtype)) { recvLambdaNames["$" + name] = true }
-            dw = ktWidthOfType(items[at].dtype)
-            at++
-        }
-        var init = items[at]
+        var typed = items[1] != undefined && items[1].dtype != undefined
+        var dt = typed ? items[1].dtype : ""
+        var init = items[typed ? 2 : 1]
+        if (typed && isRecvFnType(dt)) { recvLambdaNames["$" + name] = true }
+        var dw = ktWidthOfType(dt)
+        // A declared collection type retypes the literals of a builder call it
+        // initializes (`val ls: List<Long> = listOf(1, 2)`); any other initializer
+        // already holds its own elements.
+        var itxt = ktInitText(txt, name, dt)
+        var el = anytype
+        el = (typed && ktIsBuilder(itxt)) ? ktLitElems(dt) : null
+        ktNoteDecl(name, typed ? dt : ktExprType(itxt))
         return function(b) {
             var r = init(b)
             b = r.b
             var v = r.v
             // js_ktadopt narrows only an INTEGRAL value, so `val s: String = "x"` and
             // a lambda pass through untouched.
-            v = emitAdoptV(b, v, dw)
+            v = emitAdoptTy(b, v, dw, el)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
         }
@@ -5876,6 +5914,7 @@ KwContract  = "contract" KwEnd ;
             else if (items[i].isvararg != undefined) { rec.vararg = true }
             else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
+        ktNoteDecl(rec.name, rec.ty)
         return rec
     }
     // The signature of a primary constructor, in the shape emitParamSig consumes.
@@ -5966,11 +6005,12 @@ KwContract  = "contract" KwEnd ;
         // slot is optional.
         if (items[at] != undefined && items[at].pmods != undefined) { li = items[at].pmods === true; at++ }
         if (items[at] != undefined && items[at].pty != undefined) { ty = items[at].pty; at++ }
+        ktNoteDecl(items[0], ty)
         // A bodiless property (abstract/lateinit/interface: no `= init`) still needs a
         // backing field so an implicit `name = ...` in a method resolves to this.name and
         // reads before assignment are defined. Default it to null (identical to `= null`).
         if (items[at] == undefined) { return {prop: items[0], init: makeConst(null), ty: ty, li: li} }
-        return {prop: items[0], init: ktAdoptThunk(items[at], ty), ty: ty, li: li}
+        return {prop: items[0], init: ktAdoptThunk(items[at], ktTyElems(ty) == null ? ty : ""), ty: ty, li: li}
     }
     // Wrap a property initializer so its value adopts the declared type, the way a
     // local's does. Returns the thunk unchanged when the type carries no width, so a
@@ -5978,11 +6018,34 @@ KwContract  = "contract" KwEnd ;
     function ktAdoptThunk(t, ty) {
         if (ty == undefined || ty == "" || t == undefined || t == null) { return t }
         var dw = ktWidthOfType(ty)
-        if (dw.w == 0 && dw.flo != true) { return t }
+        var el = ktLitElems(ty)
+        if (dw.w == 0 && dw.flo != true && el == null) { return t }
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: emitAdoptV(r.b, r.v, dw)}
+            return {b: r.b, v: emitAdoptTy(r.b, r.v, dw, el)}
         }
+    }
+    // One value retyped by a declared type: its own width, or its elements'.
+    function emitAdoptTy(b, v, dw, el) {
+        if (el != null) { return callExt(b, "js_ktadoptel", [v, emitStr(b, el.v), emitStr(b, el.k)]) }
+        return emitAdoptV(b, v, dw)
+    }
+
+    // A method suffix on a collection whose element (key) types are known: the
+    // positional arguments ktMArgTypes names are retyped, and the result by
+    // ktMResType (ktRes, applied by emitSuffixT).
+    function ktAdoptMArgs(s, el) {
+        var as = s.args
+        for (var i = 0; i < as.length; i++) { if (as[i].aname != undefined || as[i].spread == true) { return s } }
+        var tys = ktMArgTypes(s.name, as.length, el)
+        var out = []
+        for (var j = 0; j < as.length; j++) {
+            out.push(j < tys.length ? {at: ktAdoptThunk(as[j].at, tys[j])} : as[j])
+        }
+        var ns = {kind: s.kind, name: s.name, targ: s.targ, args: out, safe: s.safe}
+        var rty = ktMResType(s.name, as.length, el)
+        if (rty != "") { ns.ktRes = rty }
+        return ns
     }
 
     // The super-constructor call of `class C(...) : Base(args)`. A user Base runs its

@@ -1008,6 +1008,8 @@ them, so one implementation serves all three engines), `java-lang.java` (the
 same for java.lang's StringBuilder, compiled when a program creates one),
 `php-stdlib.php` (both php grammars: PHP's array and string library WRITTEN IN
 PHP, compiled with a program that names one of its functions),
+`kotlin-decltypes.js` (both kotlin grammars: the static types an integer literal
+adopts - type arguments, declared and inferred names - read at walk time),
 `csharp-overload.js` (both csharp grammars: the better function member among
 applicable overloads), `js-callee.js` (all four
 js/ts grammars: V8's re-printing of a callee in "is not a function"). Each is ONE implementation of a feature, not a home for
