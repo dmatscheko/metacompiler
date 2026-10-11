@@ -1496,14 +1496,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var varLog = []
     function noteVarName(n) { varLog.push(n); return n }
     function varMark() { return varLog.length }
+    // The distinct names logged since mark, minus exclude, in order of first
+    // appearance. One pass with a seen-set: a bare $GLOBALS walks the WHOLE log, so a
+    // scan of `out` per entry is quadratic in the program's size. Every logged name
+    // starts with '$', so no key can meet an Object.prototype member.
     function varsSince(mark, exclude) {
         var out = []
+        var seen = {}
+        for (var j = 0; j < exclude.length; j++) { seen[exclude[j]] = true }
         for (var i = mark; i < varLog.length; i++) {
             var n = varLog[i]
-            var skip = false
-            for (var j = 0; j < exclude.length; j++) { if (exclude[j] == n) { skip = true } }
-            for (var k = 0; k < out.length; k++) { if (out[k] == n) { skip = true } }
-            if (!skip) { out.push(n) }
+            if (seen[n] !== true) {
+                seen[n] = true
+                out.push(n)
+            }
         }
         return out
     }

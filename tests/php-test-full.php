@@ -1388,8 +1388,6 @@ function s36() {
     check("gl5", $s36a === 13 && s36local() === "local/13" && "{$GLOBALS['s36a']}" === "13");
 }
 
-// ===== END SECTIONS =====
-
 // ===== SECTION 37: $GLOBALS as an array; partial application across classes =====
 // A bare $GLOBALS is PHP 8.1's read-only copy of the global symbol table: an array
 // of the main frame's variables, by value. A method partially applied where other
@@ -1407,6 +1405,11 @@ function s37() {
     $n = 0;
     foreach ($GLOBALS as $k => $v) { if ($k === "checks" || $k === "failures") { $n++; } }
     check("glob4", $n == 2);
+    // Each bare $GLOBALS rebuilds the copy from every name the program spells: the
+    // cost must stay linear in the program's size, or ten reads exhaust the brake.
+    $n = 0;
+    for ($i = 0; $i < 10; $i++) { $n += count($GLOBALS) > 2 ? 1 : 0; }
+    check("glob5", $n === 10);
     $a = new S37A();
     $f = $a->m(?, 2);
     check("pfa1", $f(1) === "m12" && ($a->m(?, 2))(1) === "m12" && ($a->m(1, ?))(5) === "m15");
@@ -1738,6 +1741,8 @@ function s44() {
         && ($nan <=> $r[4]) === 1 && $nan > $r[4] && $r[4] < $nan && (1 <=> $r[3]) === -1 && "a" < [1]
         && [1] > "a" && (1.75 <=> "1.75abc") === -1 && INF == "INF");
 }
+
+// ===== END SECTIONS =====
 
 function main() {
     global $checks;
