@@ -116,12 +116,6 @@ crashes. LINQ extension methods unavailable on lists.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-424 swift: global shadows implicit-self property; `(` line start continues expression; `defer` in a closure; `+` literal typing · P2 · SW · IN PROGRESS (SW worker, round 26) [V]
-(a) `var a = 5; final class G { var a = 0; func nz() -> Int { return a } }` — `G().nz()` prints 5 (swiftc 0),
-interpreter and llvm.Run. (b) a line starting with `(` after `let r = a` continues the expression; Swift starts a
-new statement. (c) `defer` inside a closure body crashes both halves ("Not a function"). (d) `[Double]() + [1]`
-prints `[1]` (swiftc `[1.0]`). Unverified: `print(..., to: &p.s)` with a path in the compiler.
-
 ---
 
 # DA — Dart  (no dart here: spec-only)
@@ -473,6 +467,7 @@ T-418 swift: zip, type(of:) of empty collections, NaN spellings parse (sign/payl
 T-422 swift: lazy Sequence iteration (sequence(), user Sequence/IteratorProtocol, AnyIterator) — DONE dd4e2a5a
 T-423 swift: [Double]() element typing on append; inout through field/element — DONE 103a47c1
 T-420 php: named-argument errors, class-relative callables, scalar property writes, compiled goto out of try/catch (js_ctl_goto), hashed key index for long arrays (n=4000: 643G→3.4G) — DONE 47a950f6
+T-424 swift: member shadows global, line-start paren, closure defer, Array + literal typing, print(to:) through a path, inout write-back after defer/catch — DONE 89d8a44c
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
