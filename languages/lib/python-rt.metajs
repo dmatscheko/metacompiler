@@ -139,9 +139,13 @@ function pyIsBig(v) { return rtTag(v, "__pybig") }
 // ints - and one double cannot carry that, because 2.0 and 2 ARE the same double.
 // So the float is the boxed one and the int stays the plain number, which leaves
 // the common integer path untouched. The field is not `=== true` like the tags
-// above, so rtTag cannot answer it.
+// above, so rtTag cannot answer it; pyIsObj's tests are inlined for the same
+// reason rtTag inlines them - every arithmetic operator asks this.
 function pyIsFlo(v) {
-    if (!pyIsObj(v)) { return false }
+    if (v === null) { return false }
+    if (v === undefined) { return false }
+    if (typeof v != "object") { return false }
+    if (Array.isArray(v)) { return false }
     return v["__flo"] !== undefined
 }
 function pyMkFlo(f) { return {__flo: f} }
@@ -1014,11 +1018,19 @@ function pyClassOf(v) {
     return null
 }
 
+// The instance's class, or null. pyIsObj's tests are inlined, twice: js_pybin
+// asks this of both operands of every binary operator, before any arithmetic.
 function pyInstClassOf(v) {
-    if (!pyIsObj(v)) { return null }
+    if (v === null) { return null }
+    if (v === undefined) { return null }
+    if (typeof v != "object") { return null }
+    if (Array.isArray(v)) { return null }
     if (v["__mro"] !== undefined) { return null }
     var c = v["__class"]
-    if (!pyIsObj(c)) { return null }
+    if (c === null) { return null }
+    if (c === undefined) { return null }
+    if (typeof c != "object") { return null }
+    if (Array.isArray(c)) { return null }
     return c
 }
 
