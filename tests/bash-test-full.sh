@@ -1474,6 +1474,20 @@ s30() {
   s30f13() { local s30i=inner1; s30f12; check dsc41 "$s30i" inner1; }
   s30f13
   check dsc42 "$s30i" 8
+  # --- `unset` of a CALLER's local drops that binding and reveals the next one out;
+  # a write after it lands on the outer binding and survives the caller's return
+  s30g=1
+  s30f14() { unset s30g; }
+  s30f15() { local s30g=5; s30f14; check dsc43 "$(declare -p s30g)" 'declare -- s30g="1"'; s30g=7; }
+  s30f15
+  check dsc44 "$s30g" 7
+  s30f16() { local s30g=2; local s30g=3; s30f14; check dsc45 "${s30g-U}" 9; }
+  s30f17() { local s30g=9; s30f16; check dsc46 "${s30g-U}" 9; }
+  s30f17
+  # an unset of the function's OWN local leaves it local and unset
+  s30f18() { local s30g=4; unset s30g; check dsc47 "${s30g-U}" U; }
+  s30f18
+  check dsc48 "$s30g" 7
 }
 
 # ===== SECTION 31: printf conversions, flags, width and precision =====

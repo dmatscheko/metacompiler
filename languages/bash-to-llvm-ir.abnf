@@ -1323,6 +1323,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSsRestore = rtDecl("rt_ss_restore", false, [0])
     var rtPushLocal = rtDecl("rt_push_local", false, [0])
     var rtPopLocals = rtDecl("rt_pop_locals", false, [0])
+    var rtUnsetUp = rtDecl("rt_unset_up", false, [0, 0, 0])
 
     // ===================================================================================
     //  Value helpers used by the thunks.
@@ -3715,6 +3716,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         // A local unset in the function that declared it stays declared
                         // (rt_arr_smark). Twin of localHere in bash-interpreter.abnf.
                         if (curFrame != null && hasOwn(curFrame.locs, "$" + sp0.name)) { b.NewCall(rtArrSmark, gepStr(b, sp0.name)) }
+                        // Not ours: a CALLER's local of that name is dropped instead, which
+                        // overwrites the unset just stored with the next binding outward.
+                        else if (curFrame != null && sp0.name != "FUNCNAME") {
+                            b.NewCall(rtUnsetUp, [llvm.constant.NewInt(i32, getVarId(sp0.name)), b.NewLoad(i32, curFrame.depth),
+                                                  llvm.constant.NewInt(i32, getVarId("FUNCNAME"))])
+                        }
                     } else {
                         var kk = sp0.key
                         if (!hasOwn(assocArrays, "$" + sp0.name)) { kk = numToStr(parseDec(kk)) }

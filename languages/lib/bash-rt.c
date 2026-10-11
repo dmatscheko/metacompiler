@@ -232,6 +232,7 @@ int rt_ss_save(int u);
 int rt_ss_restore(int u);
 int rt_push_local(int id);
 int rt_pop_locals(int d);
+int rt_unset_up(int id, int d, int fn);
 int rt_fskind(char *p);
 char *rt_getvar_byname(char *n);
 int rt_setvar_byname(char *n, char *v);
@@ -3122,7 +3123,28 @@ int rt_push_local(int id)
     return 0;
 }
 
-/* Restore every entry above `d` (innermost first). */
+/* Put entry t's saved binding back; its array rows start at las index `rows`. */
+int rt_ls_restore(int t, int rows)
+{
+    gvars[ls_id[t]] = ls_val[t];
+    int cnt = ls_acnt[t];
+    if (arr_n > 0 || cnt > 0) {
+        char *nm = varnames[ls_id[t]];
+        rt_arr_clear(nm);
+        int i = rows;
+        while (i < rows + cnt) {
+            rt_arr_set(nm, las_k[i], las_v[i]);
+            i = i + 1;
+        }
+        if ((ls_amark[t] & 1) != 0) rt_arr_mark(nm);
+        if ((ls_amark[t] & 2) != 0) rt_arr_dmark(nm);
+        if ((ls_amark[t] & 4) != 0) rt_arr_smark(nm);
+    }
+    return 0;
+}
+
+/* Restore every entry above `d` (innermost first). An id of -1 is an entry
+ * rt_unset_up already retired: it only releases its array rows. */
 int rt_pop_locals(int d)
 {
     int t;
@@ -3130,22 +3152,48 @@ int rt_pop_locals(int d)
     while (t > d) {
         t = t - 1;
         ls_top = t;
-        gvars[ls_id[t]] = ls_val[t];
         int cnt = ls_acnt[t];
-        if (arr_n > 0 || cnt > 0) {
-            char *nm = varnames[ls_id[t]];
-            rt_arr_clear(nm);
-            int i = las_top - cnt;
-            while (i < las_top) {
-                rt_arr_set(nm, las_k[i], las_v[i]);
-                i = i + 1;
-            }
-            if ((ls_amark[t] & 1) != 0) rt_arr_mark(nm);
-            if ((ls_amark[t] & 2) != 0) rt_arr_dmark(nm);
-            if ((ls_amark[t] & 4) != 0) rt_arr_smark(nm);
-        }
+        if (ls_id[t] >= 0) rt_ls_restore(t, las_top - cnt);
         las_top = las_top - cnt;
         t = ls_top;
+    }
+    return 0;
+}
+
+/* `unset` of a name that is a local of a CALLER: bash drops that caller's
+ * binding, so the next one outward is visible again. `d` is the current call's
+ * save-stack depth at entry and every call's first entry is its FUNCNAME (slot
+ * `fn`), which is how the frames below d are told apart. The innermost frame
+ * holding `id` loses it as a whole: its LOWEST entry (the value before the
+ * first `local`) is restored and every entry of `id` in it is retired, so the
+ * frame's return restores nothing over later writes. Answers 1 when a frame
+ * held `id`. Twin of unsetCallerLocal in bash-interpreter.abnf. */
+int rt_unset_up(int id, int d, int fn)
+{
+    int top = d;
+    int low = -1;
+    int t = d - 1;
+    while (t >= 0) {
+        if (ls_id[t] == id) low = t;
+        if (ls_id[t] == fn) {
+            if (low >= 0) {
+                int rows = las_top;
+                int i = ls_top - 1;
+                while (i >= low) {
+                    rows = rows - ls_acnt[i];
+                    i = i - 1;
+                }
+                rt_ls_restore(low, rows);
+                i = t;
+                while (i < top) {
+                    if (ls_id[i] == id) ls_id[i] = -1;
+                    i = i + 1;
+                }
+                return 1;
+            }
+            top = t;
+        }
+        t = t - 1;
     }
     return 0;
 }

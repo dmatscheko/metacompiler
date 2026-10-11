@@ -1116,16 +1116,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function popLocalFrame() {
         var fr = localFrames.pop()
         var i
-        for (i = fr.length - 1; i >= 0; i--) {
-            var e = fr[i]
-            vars["$" + e.name] = e.val
-            varsHas["$" + e.name] = e.had
-            intVars["$" + e.name] = e.ai
-            upVars["$" + e.name] = e.au
-            loVars["$" + e.name] = e.al
-            dclVars["$" + e.name] = e.ad
-            if (e.hasArr) { arrs[arrKey(e.name)] = e.arr } else { arrs[arrKey(e.name)] = null }
+        for (i = fr.length - 1; i >= 0; i--) { restoreLocal(fr[i]) }
+    }
+    function restoreLocal(e) {
+        vars["$" + e.name] = e.val
+        varsHas["$" + e.name] = e.had
+        intVars["$" + e.name] = e.ai
+        upVars["$" + e.name] = e.au
+        loVars["$" + e.name] = e.al
+        dclVars["$" + e.name] = e.ad
+        if (e.hasArr) { arrs[arrKey(e.name)] = e.arr } else { arrs[arrKey(e.name)] = null }
+    }
+    // `unset NAME` where NAME is a local of a CALLER: bash removes that caller's local
+    // binding outright, so the next binding outward is visible again (`g=1; f(){ unset g; };
+    // h(){ local g=5; f; echo $g; }` prints 1). The innermost frame holding NAME loses it as
+    // a whole - a name declared local twice there restores its FIRST saved value - and its
+    // entries are dropped so that frame's return does not restore over later writes.
+    // Answers false when no caller frame holds NAME. Twin of rt_unset_up in bash-rt.c.
+    function unsetCallerLocal(name) {
+        var j
+        for (j = localFrames.length - 2; j >= 0; j--) {
+            var fr = localFrames[j]
+            var keep = []
+            var first = null
+            var i
+            for (i = 0; i < fr.length; i++) {
+                if (fr[i].name != name) { keep.push(fr[i]) }
+                else if (first == null) { first = fr[i] }
+            }
+            if (first != null) { restoreLocal(first); localFrames[j] = keep; return true }
         }
+        return false
     }
     // Record NAME's current binding in the innermost call frame, so it is restored on return.
     //
@@ -3772,8 +3793,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (ui = 0; ui < args.length; ui++) {
                 var sp = splitSubscript(args[ui])
                 if (sp.key == null) {
-                    unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name)
-                    if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
+                    if (localHere(sp.name) || !unsetCallerLocal(sp.name)) {
+                        unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name)
+                        if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
+                    }
                 }
                 else { arrDel(sp.name, sp.key) }
             }
