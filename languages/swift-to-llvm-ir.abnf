@@ -132,7 +132,10 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // the ones this grammar lexes as WHITESPACE" - the space characters have to be cut
 // out, or a non-breaking space after a name would be absorbed into it. KwEnd and
 // IdBacktick are the lib file verbatim.
-Id          = ( "a"..."z" | "A"..."Z" | "_" | IdUni ) :whitespace()
+// A backtick-quoted name (`protocol`, `self`) is the same name as the bare word;
+// every site that records a name's text strips the quotes with swBt.
+Id          = IdBacktick | IdPlain ;
+IdPlain     = ( "a"..."z" | "A"..."Z" | "_" | IdUni ) :whitespace()
               { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | IdUni } :whitespace(Whitespace) ;
 IdUni       = "\u00a1"..."\u167f" | "\u1681"..."\u1fff" | "\u200b"..."\u2027"
             | "\u202a"..."\u202e" | "\u2030"..."\u205e" | "\u2060"..."\u2fff"
@@ -156,7 +159,8 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 // Top level items become statements of jsmain, emitted in source order.
 Program     <~~ buildMain(takeAll()) ~~>
             = [ Hashbang ] { TopItem } ;
-TopItem     = PoundIfTop | OpDeclTop | FunTop | TypeTop | UnsupTop | TopStmt ;
+TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | FunTop StmtSep | TypeTop StmtSep
+            | UnsupTop StmtSep | TopStmt ;
 // An operator / precedencegroup declaration is matched BEFORE the modifier-led
 // items: `prefix` is in the modifier list (it precedes `func`), so a greedy
 // Modifiers would eat the `prefix` of `prefix operator ~~~` and leave nothing.
@@ -177,28 +181,28 @@ TopStmt     = Statement ;
 PoundIfTop  <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyTop { PoundElseIf PoundCond PoundBodyTop }
               [ PoundElse PoundBodyTop ] PoundEndif ;
-PoundBodyTop <~~ push({branch: takeAll()}) ~~> = { TopItem } ;
+PoundBodyTop <~~ push({branch: takeAll()}) ~~> = PoundSkip | { TopItem } ;
 // A statement-level #if lives in the item list of a block (and of a switch body),
 // not in Statement itself, because it can contribute more than one statement -
 // and because Statement wraps exactly one popped thunk in stmtPos.
 PoundIfStmt <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyStmt { PoundElseIf PoundCond PoundBodyStmt }
               [ PoundElse PoundBodyStmt ] PoundEndif ;
-PoundBodyStmt <~~ push({branch: takeAll()}) ~~> = { PoundIfStmt | Statement } ;
+PoundBodyStmt <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfStmt | Statement } ;
 PoundIfMember <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyMember { PoundElseIf PoundCond PoundBodyMember }
               [ PoundElse PoundBodyMember ] PoundEndif ;
-PoundBodyMember <~~ push({branch: takeAll()}) ~~> = { Member } ;
+PoundBodyMember <~~ push({branch: takeAll()}) ~~> = PoundSkip | { Member } ;
 // A #if around case labels of a switch: its branches hold labels AND statements.
 PoundIfCase <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyCase { PoundElseIf PoundCond PoundBodyCase }
               [ PoundElse PoundBodyCase ] PoundEndif ;
-PoundBodyCase <~~ push({branch: takeAll()}) ~~> = { PoundIfCase | CaseLabel | Statement } ;
+PoundBodyCase <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfCase | CaseLabel | Statement } ;
 // A #if inside a closure body, whose items are the {stmt} / {expr} lambda records.
 PoundIfLam  <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyLam { PoundElseIf PoundCond PoundBodyLam }
               [ PoundElse PoundBodyLam ] PoundEndif ;
-PoundBodyLam <~~ push({branch: takeAll()}) ~~> = { PoundIfLam | LamStmt } ;
+PoundBodyLam <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfLam | LamStmt } ;
 // #elseif is spelled before #else on purpose: as a PEG, "#else" would match the
 // prefix of "#elseif" and leave a stray `if` to be read as an if statement.
 PoundIf     = "#if" ;
@@ -210,6 +214,236 @@ PoundEndif  = "#endif" ;
 PoundCond   <~~ push({pcond: up.in}) ~~>
             = :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
 PoundCondChar = "\x00"..."\x09" | "\x0b" | "\x0c" | "\x0e"..."\U0010ffff" ;
+// An INACTIVE clause of a VERSION check is not parsed at all: swiftc skips the body
+// of a clause that is off when its condition (or, for #else, the one before it)
+// mentions compiler(...), swift(...) or the legacy _compiler_version("..."), so code
+// for a newer compiler may sit there
+// (`#if compiler(>=99) ... #else`). PoundSkipScan decides that from the source
+// alone - it walks back to the chain's #if, re-evaluates every clause up to this
+// one exactly as poundPick does, and then returns the raw body up to the next
+// directive at the same depth as ONE token; any other clause makes it fail.
+PoundSkip   = :whitespace() PoundSkipScan :whitespace(Whitespace) ;
+PoundSkipScan = :script(~~
+    (function() {
+        var ev = function(s) {
+            var vals = []
+            var ops = []
+            var i = 0
+            var n = s.length
+            var bad = false
+            var guardN = 0
+            while (i < n && !bad && guardN < 10000) {
+                guardN++
+                var ch = s.charCodeAt(i)
+                if (ch == 32 || ch == 9 || ch == 13 || ch == 10) { i++; continue }
+                if (ch == 47) { i = n; continue }
+                if (ch == 33 || ch == 40) { ops.push(ch == 33 ? "!" : "("); i++; continue }
+                var isAnd = ch == 38 && i + 1 < n && s.charCodeAt(i + 1) == 38
+                var isOr = ch == 124 && i + 1 < n && s.charCodeAt(i + 1) == 124
+                if (ch == 41 || isAnd || isOr) {
+                    var stopAt = ch == 41 ? 0 : (isAnd ? 2 : 1)
+                    while (ops.length > 0 && ops[ops.length - 1] != "(" && vals.length >= 2
+                           && (ops[ops.length - 1] == "&" ? 2 : 1) >= stopAt) {
+                        var o = ops.pop()
+                        var rb = vals.pop()
+                        var ra = vals.pop()
+                        if (o == "&") { vals.push(ra == 0 || rb == 0 ? 0 : (ra == 1 && rb == 1 ? 1 : 2)) }
+                        else { vals.push(ra == 1 || rb == 1 ? 1 : (ra == 0 && rb == 0 ? 0 : 2)) }
+                    }
+                    if (ch == 41) {
+                        if (ops.length == 0) { bad = true; continue }
+                        ops.pop()
+                        while (ops.length > 0 && ops[ops.length - 1] == "!" && vals.length > 0) {
+                            ops.pop()
+                            var nv = vals.pop()
+                            vals.push(nv == 2 ? 2 : 1 - nv)
+                        }
+                        i++
+                    } else {
+                        ops.push(isAnd ? "&" : "|")
+                        i += 2
+                    }
+                    continue
+                }
+                var st = i
+                while (i < n) {
+                    var cc = s.charCodeAt(i)
+                    if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122)
+                        || cc == 95 || cc == 36 || cc == 46 || cc >= 128) { i++ } else { break }
+                }
+                if (i == st) { bad = true; continue }
+                var name = s.substring(st, i)
+                var arg = ""
+                var j = i
+                while (j < n && (s.charCodeAt(j) == 32 || s.charCodeAt(j) == 9)) { j++ }
+                if (j < n && s.charCodeAt(j) == 40) {
+                    var depth = 0
+                    var k = j
+                    while (k < n) {
+                        var ck = s.charCodeAt(k)
+                        if (ck == 40) { depth++ }
+                        if (ck == 41) { depth--; if (depth == 0) { break } }
+                        k++
+                    }
+                    arg = s.substring(j + 1, k)
+                    i = k + 1
+                }
+                var v = 2
+                if (name == "true" || name == "1") { v = 1 }
+                if (name == "false" || name == "0") { v = 0 }
+                if (name == "_compiler_version") { v = 1 }
+                if ((name == "compiler" || name == "swift" || name == "_compiler_version") && arg != "") {
+                    var a = ""
+                    for (var q = 0; q < arg.length; q++) { if (arg.charCodeAt(q) != 32) { a += arg.charAt(q) } }
+                    var ge = a.substring(0, 2) == ">="
+                    var lt = a.substring(0, 1) == "<"
+                    if (ge || lt) {
+                        var want = (ge ? a.substring(2) : a.substring(1)) + "."
+                        var have = (name == "swift" ? "5.10" : "6.1.2") + "."
+                        var cmp = 0
+                        var wn = 0
+                        var hn = 0
+                        var wi = 0
+                        var hi = 0
+                        while (cmp == 0 && (wi < want.length || hi < have.length)) {
+                            wn = 0
+                            hn = 0
+                            while (wi < want.length && want.charCodeAt(wi) != 46) { wn = wn * 10 + (want.charCodeAt(wi) - 48); wi++ }
+                            while (hi < have.length && have.charCodeAt(hi) != 46) { hn = hn * 10 + (have.charCodeAt(hi) - 48); hi++ }
+                            wi++
+                            hi++
+                            if (hn > wn) { cmp = 1 }
+                            if (hn < wn) { cmp = 0 - 1 }
+                        }
+                        v = ge ? (cmp >= 0 ? 1 : 0) : (cmp < 0 ? 1 : 0)
+                    }
+                }
+                vals.push(v)
+                while (ops.length > 0 && ops[ops.length - 1] == "!" && vals.length > 0) {
+                    ops.pop()
+                    var mv = vals.pop()
+                    vals.push(mv == 2 ? 2 : 1 - mv)
+                }
+            }
+            while (!bad && ops.length > 0 && vals.length >= 2) {
+                var o2 = ops.pop()
+                if (o2 == "(" || o2 == "!") { bad = true; continue }
+                var b2 = vals.pop()
+                var a2 = vals.pop()
+                if (o2 == "&") { vals.push(a2 == 0 || b2 == 0 ? 0 : (a2 == 1 && b2 == 1 ? 1 : 2)) }
+                else { vals.push(a2 == 1 || b2 == 1 ? 1 : (a2 == 0 && b2 == 0 ? 0 : 2)) }
+            }
+            if (bad || vals.length != 1 || ops.length != 0) { return 2 }
+            return vals[0]
+        }
+        // The directive word of the line starting at relative offset ls (`#elseif`
+        // gives "elseif"), "" when the line holds none; rest is the text after it.
+        var word = function(ls) {
+            var p = ls
+            while (c.peek(p) === 32 || c.peek(p) === 9) { p++ }
+            if (c.peek(p) !== 35) { return "" }
+            p++
+            var w = ""
+            while (c.peek(p) >= 97 && c.peek(p) <= 122) { w += String.fromCharCode(c.peek(p)); p++ }
+            return w
+        }
+        var rest = function(ls) {
+            var p = ls
+            while (c.peek(p) !== 35) { p++ }
+            p++
+            while (c.peek(p) >= 97 && c.peek(p) <= 122) { p++ }
+            var t = ""
+            while (c.peek(p) >= 0 && c.peek(p) !== 10) { t += String.fromCharCode(c.peek(p)); p++ }
+            return t
+        }
+        var lineStart = function(p0) {
+            var p = p0
+            var cap = 0
+            while (c.peek(p - 1) >= 0 && c.peek(p - 1) !== 10 && cap < 1000000) { p--; cap++ }
+            return p
+        }
+        var nextLine = function(p0) {
+            var p = p0
+            var cap = 0
+            while (c.peek(p) >= 0 && c.peek(p) !== 10 && cap < 1000000) { p++; cap++ }
+            return c.peek(p) < 0 ? p : p + 1
+        }
+        var cur = lineStart(0)
+        var cw = word(cur)
+        if (cw !== "if" && cw !== "elseif" && cw !== "else") { return abnf.newToken("\x01not-a-clause", 0) }
+        var start = cur
+        var depth = 0
+        var guardN = 0
+        while (cw !== "if" && guardN < 1000000) {
+            guardN++
+            if (c.peek(start - 1) < 0) { return abnf.newToken("\x01no-chain", 0) }
+            start = lineStart(start - 1)
+            var bw = word(start)
+            if (bw === "endif") { depth++ }
+            if (bw === "if") { if (depth === 0) { break } ; depth-- }
+        }
+        var found = false
+        var isVer = false
+        var skip = false
+        var p = start
+        depth = 0
+        guardN = 0
+        while (guardN < 1000000) {
+            guardN++
+            var w = word(p)
+            if ((w === "if" && p === start) || (depth === 0 && (w === "elseif" || w === "else"))) {
+                var active = false
+                if (w === "else") { active = !found }
+                else {
+                    var cond = rest(p)
+                    isVer = cond.indexOf("compiler(") >= 0 || cond.indexOf("swift(") >= 0
+                            || cond.indexOf("_compiler_version(") >= 0
+                    active = !found && ev(cond) !== 0
+                }
+                if (active) { found = true }
+                if (p === cur) { skip = !active && isVer; break }
+            }
+            if (w === "if" && p !== start) { depth++ }
+            if (w === "endif") { depth-- }
+            p = nextLine(p)
+        }
+        if (!skip) { return abnf.newToken("\x01clause-is-parsed", 0) }
+        var end = nextLine(0)
+        depth = 0
+        guardN = 0
+        while (c.peek(end) >= 0 && guardN < 1000000) {
+            guardN++
+            var ew = word(end)
+            if (ew === "if") { depth++ }
+            if (depth === 0 && (ew === "elseif" || ew === "else" || ew === "endif")) { break }
+            if (ew === "endif") { depth-- }
+            end = nextLine(end)
+        }
+        var s = ""
+        var q = 0
+        while (q < end) {
+            var b0 = c.peek(q)
+            if (b0 < 128) { s = s + String.fromCharCode(b0); q = q + 1 }
+            else if (b0 < 224) {
+                s = s + String.fromCharCode(((b0 - 192) * 64) + (c.peek(q + 1) - 128))
+                q = q + 2
+            }
+            else if (b0 < 240) {
+                s = s + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(q + 1) - 128) * 64)
+                                            + (c.peek(q + 2) - 128))
+                q = q + 3
+            }
+            else {
+                var cp = ((b0 - 240) * 262144) + ((c.peek(q + 1) - 128) * 4096)
+                         + ((c.peek(q + 2) - 128) * 64) + (c.peek(q + 3) - 128) - 65536
+                s = s + String.fromCharCode(55296 + Math.floor(cp / 1024))
+                s = s + String.fromCharCode(56320 + (cp - Math.floor(cp / 1024) * 1024))
+                q = q + 4
+            }
+        }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
 
 // #sourceLocation(...) / #error(...) / #warning(...): accepted and ignored.
 PoundDirective <~~ push(function(b) { return b }) ~~>
@@ -231,7 +465,7 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
               | "final" | "static" | "mutating" | "nonmutating"
               | "override" | "lazy" | "weak" | "unowned" | "convenience"
               | "required" | "dynamic" | "indirect" | "package"
-              | "nonisolated" | "distributed" | "borrowing" | "consuming" ) KwEnd ;
+              | "nonisolated" | "distributed" | "borrowing" | "consuming" | "__consuming" ) KwEnd ;
 // `class` is a type-member modifier (class var / class func) as well as a
 // declaration keyword, so it is NOT in Modifier - a greedy Modifiers would eat the
 // `class` of `@objc class Cache { ... }` and leave nothing for ClassDecl. Member
@@ -246,7 +480,7 @@ MemLazy     <~~ push({mlazy: 1}) ~~> = "lazy" KwEnd ;
 MemMut      <~~ push({mmut: 1}) ~~> = "mutating" KwEnd ;
 // A member attribute keeps its NAME: @Wrapper on a stored property is a property
 // wrapper, and everything else (@objc, @escaping, ...) is parsed and dropped.
-MemAttr     = "@" Id <~~ push({mattr: up.in}) ~~> { "." Id } [ SkipParen ] ;
+MemAttr     = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ SkipParen ] ;
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
@@ -266,7 +500,10 @@ FunRetType  = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 FnBody      = RetBody | ExprBody | Block ;
 ExprBody    <~~ swAnnClose(); push(makeExprBody(pop())) ~~>
             = "{" <~~ swAnnOpen() ~~> Expression "}" ;
-FnEffects   = { ( "throws" | "rethrows" | "async" ) KwEnd } ;
+// `throws(E)` is a TYPED throw (SE-0413); the thrown value is the same either way,
+// so the type is parsed and dropped.
+FnEffects   = { "throws" KwEnd [ ThrownType ] | ( "rethrows" | "async" ) KwEnd } ;
+ThrownType  = NoSpaceParen "(" !")" Type ")" ;
 // A generic constraint clause on a function/type: where T: P, U == V (ignored).
 GenWhere    = KwWhere GenConstraint { "," GenConstraint } ;
 GenConstraint = Type ( ":" TypeList | "==" Type | "=" Type ) ;
@@ -278,7 +515,7 @@ ParamList   <~~ var ps = takeAll(); swAnnParams(ps); push({params: ps}) ~~>
 // name; with one, the label and the name are the same. The label `_` means "no
 // label". The declared type is kept as text, for picking between overloads.
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = { ParamLead } Id <~~ push({pid: up.in}) ~~> [ Id <~~ push({pid: up.in}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
+            = { ParamLead } Id <~~ push({pid: swBt(up.in)}) ~~> [ Id <~~ push({pid: swBt(up.in)}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
 ParamInout  <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
 // A DECLARATION attribute in front of the parameter name - `func f(@_noImplicitCopy
 // _ x: K)`. It contributes nothing here, so it pushes nothing; its argument list (if
@@ -288,15 +525,20 @@ ParamLead   = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 ParamType   <~~ push({ptype: up.in}) ~~> = Type ;
 ParamVariadic <~~ push({pvar: 1}) ~~> = "..." ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
-// Parameter/type attributes (@escaping, @autoclosure) take no argument list here,
-// so no SkipParen: the ( ... ) that follows belongs to a function type.
-ParamAttr   = "@" Id <~~ push({pattr: up.in}) ~~> { "." Id } ;
+// Parameter/type attributes (@escaping, @autoclosure) take no argument list, so
+// the ( ... ) that follows belongs to a function type. The few type attributes
+// that DO take one (`@isolated(any)`, `@convention(c)`) are named, which is how
+// swiftc tells `@convention(c) () -> Int` from `@escaping(Int) -> Int` too.
+ParamAttr   = "@" ( "isolated" NoSpaceParen "(" "any" KwEnd ")"
+                  | ArgAttrName NoSpaceParen SkipParen
+                  | Id <~~ push({pattr: swBt(up.in)}) ~~> { "." Id } ) ;
+ArgAttrName = ( "convention" | "differentiable" | "_opaqueReturnTypeOf" ) KwEnd ;
 
 // class / struct with stored properties, methods and an explicit init.
 StructDecl  <~~ push(makeStructStmt(takeAll())) ~~>
-            = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwStruct Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwClass Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 // The inheritance clause: for a class its first entry may be the SUPERCLASS, and
 // every entry may be a protocol whose default implementations are mixed in. Each
 // name is kept as text and resolved when the type is created.
@@ -307,7 +549,7 @@ InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = [ "~" ] Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
 ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwActor Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+            = KwActor Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
 
@@ -339,7 +581,7 @@ MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
 // {prop} record, so the type builder sees them in declaration order.
 PropDecl    = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
 PropBind    <~~ push(makeProp(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
+            = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
 // A computed property (`var scaled: Int { get { ... } set { ... } }`, or the
 // getter-only shorthand `var family: String { "beast" }`) and a stored property
 // with willSet/didSet observers - the two share one syntax, told apart by which
@@ -347,7 +589,7 @@ PropBind    <~~ push(makeProp(takeAll())) ~~>
 // the type, which is what a member read/write of x is emitted as; an observed
 // property keeps its storage under the hidden name __v_x.
 ComputedProp <~~ push(makeComputed(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" PropDefault ] PropAccessors ;
+            = ( "let" | "var" ) KwEnd Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" PropDefault ] PropAccessors ;
 PropDefault <~~ push({pdefault: pop()}) ~~> = Expression ;
 // The accessor list is tried first: `get` and `set` are ordinary identifiers, so a
 // getter-only body would otherwise read `get { ... }` as a trailing-closure call.
@@ -363,7 +605,7 @@ Accessor    <~~ push(makeAccessor(takeAll())) ~~>
             = [ Modifiers ] AccKind <~~ push({akind: up.in}) ~~> [ AccParam ] [ FnEffects ] AccBody ;
 AccKind     = ( "willSet" | "didSet" | "get" | "set" | "_modify" | "_read"
               | "unsafeAddress" | "unsafeMutableAddress" ) KwEnd ;
-AccParam    = "(" Id <~~ push({aparam: up.in}) ~~> ")" ;
+AccParam    = "(" Id <~~ push({aparam: swBt(up.in)}) ~~> ")" ;
 AccBody     <~~ push({abody: pop()}) ~~> = FnBody ;
 // `var family: String { "beast" }` - the braces ARE the getter body.
 ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
@@ -372,21 +614,22 @@ ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 // like a struct, methods / computed properties / static members. Its body is the
 // SAME Member list a struct has plus CaseDecl.
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
+            = KwEnum Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
 // The FIRST entry of an enum's inheritance clause may be its raw-value type
 // (`: Int`, `: String`); every entry there may equally be a PROTOCOL.
 // The first entry is recorded BOTH ways: rawKind decides whether it is really a
 // raw-value type, and the adoption ignores a name that is no protocol.
 EnumConform = EnumRawType { "," EnumProto } ;
-EnumRawType <~~ push({eraw: stripWs(up.in)}) ~~> = Type ;
-EnumProto   <~~ push({inherit: stripWs(up.in)}) ~~> = Type ;
+// A `~Copyable` entry suppresses a conformance, exactly as in InheritName.
+EnumRawType <~~ push({eraw: stripWs(up.in)}) ~~> = [ "~" ] Type ;
+EnumProto   <~~ push({inherit: stripWs(up.in)}) ~~> = [ "~" ] Type ;
 CaseDecl    = KwCase ECase { "," ECase } [ ";" ] ;
 ECase       <~~ push({ecase: makeECase(takeAll())}) ~~>
-            = Id <~~ push({cname: up.in}) ~~> [ ECaseAssoc | "=" ECaseRaw ] ;
+            = Id <~~ push({cname: swBt(up.in)}) ~~> [ ECaseAssoc | "=" ECaseRaw ] ;
 ECaseAssoc  <~~ push({cassoc: takeAll()}) ~~>
             = "(" [ ECaseParam { "," ECaseParam } ] ")" ;
 ECaseParam  <~~ push(makeECaseParam(takeAll())) ~~> = [ ECaseLabel ] Type ;
-ECaseLabel  = Id <~~ push({clabel: up.in}) ~~> ":" ;
+ECaseLabel  = Id <~~ push({clabel: swBt(up.in)}) ~~> ":" ;
 ECaseRaw    <~~ push({craw: pop()}) ~~> = Expression ;
 
 // import / protocol / extension / typealias declarations.
@@ -413,7 +656,7 @@ ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
 // protocol declares. A member the extension alone introduces is bound statically to
 // the extension's own implementation even when the conforming type declares one.
 ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
-            = KwProtocol Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
+            = KwProtocol Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
               "{" { ProtoMember } "}" ;
 // A requirement has no body, so it is matched BEFORE the member forms: `var name:
 // String { get }` would otherwise read as a computed property whose getter returns
@@ -424,12 +667,12 @@ ProtoMember = PoundIfProto | ProtoReq | Member ;
 PoundIfProto <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyProto { PoundElseIf PoundCond PoundBodyProto }
               [ PoundElse PoundBodyProto ] PoundEndif ;
-PoundBodyProto <~~ push({branch: takeAll()}) ~~> = { PoundIfProto | ProtoReq | Member } ;
+PoundBodyProto <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfProto | ProtoReq | Member } ;
 ProtoReq    = AssocTypeDecl | [ MemberModifiers ] ( ProtoVar | ProtoFunc | ProtoInit | ProtoSubscript ) ;
 AssocTypeDecl <~~ push({}) ~~>
             = "associatedtype" KwEnd Id [ ":" TypeList ] [ "=" Type ] [ GenWhere ] [ ";" ] ;
 ProtoVar    <~~ push({}) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push({preq: up.in}) ~~> [ ":" Type ]
+            = ( "let" | "var" ) KwEnd Id <~~ push({preq: swBt(up.in)}) ~~> [ ":" Type ]
               "{" ProtoAcc { ProtoAcc } "}" ;
 ProtoAcc    = ( "get" | "set" | "async" | "throws" ) KwEnd ;
 ProtoFunc   <~~ swAnnParams([]); push({}) ~~>
@@ -449,7 +692,7 @@ ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: an alias needs nothing at run time; its target text is recorded for
 // the write-site adoption test (swTyUnalias).
 TypeAliasDecl <~~ push(makeTypeAliasStmt(takeAll())) ~~>
-            = KwTypealias Id <~~ push({alname: up.in}) ~~> [ SkipAngle ] "="
+            = KwTypealias Id <~~ push({alname: swBt(up.in)}) ~~> [ SkipAngle ] "="
               Type <~~ push({alty: stripWs(up.in)}) ~~> [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
@@ -464,7 +707,10 @@ Type        = { TypeAttr } TypeMod TypeSuffixed { TypeAmp TypeMod TypeSuffixed }
 TypeAttr    = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 // The optional / implicitly-unwrapped marker has to be ADJACENT to the type:
 // `x is T ? a : b` must keep its conditional, and `T?` never has a space in Swift.
-TypeSuffixed = TypeCore { NoSpace ( "?" | "!" ) } ;
+// `.Type` / `.Protocol` after a parenthesized type names its metatype:
+// `(P & Q).Type`.
+// A leading `~` suppresses a conformance in a composition: `any ~Copyable`.
+TypeSuffixed = [ "~" ] TypeCore { NoSpace ( "?" | "!" ) | "." ( "Type" | "Protocol" ) KwEnd } ;
 // A zero-width guard that fails when whitespace (or end of file) is ahead - the
 // dialect skips whitespace before each token, so "no space here" has to be asked
 // explicitly.
@@ -484,7 +730,9 @@ TypeAmp     = "&" !"&" ;
 // `repeat each T` is a PACK EXPANSION type (SE-0393): `repeat` is a real keyword
 // here and `each` a contextual one, and both only ever precede the type they
 // modify - so they belong in the same modifier run as `some` / `any`.
-TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" | "repeat" ) KwEnd NotTypeEnd } ;
+// `sending` (SE-0430) marks a value handed across an isolation boundary; like the
+// ownership modifiers it changes nothing a single-threaded run can observe.
+TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "sending" | "each" | "repeat" ) KwEnd NotTypeEnd } ;
 NotTypeEnd  = !")" !"," !"=" !">" !"{" ;
 TypeCore    = "[" Type [ ":" Type ] "]"
             | "(" [ TupleTypeElem { "," TupleTypeElem } ] ")" [ TypeEffects ] [ "->" Type ]
@@ -518,29 +766,48 @@ AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 LabelledTupleType <~~ push({tlabels: takeAll(), atype: stripWs(up.in)}) ~~>
             = "(" LtNamed { "," LtElem } ")" NotArrow ;
 LtElem      = LtNamed | LtAnon ;
-LtNamed     = Id <~~ push(up.in) ~~> ":" Type ;
+LtNamed     = Id <~~ push(swBt(up.in)) ~~> ":" Type ;
 LtAnon      <~~ push("") ~~> = Type ;
 NotArrow    = !"->" ;
-TypeEffects = { ( "async" | "throws" | "rethrows" ) KwEnd } ;
+TypeEffects = { "throws" KwEnd [ ThrownType ] | ( "async" | "rethrows" ) KwEnd } ;
 
 // Every statement production pushes exactly one thunk: function(block) -> block.
 // AttrDecl is a declaration STATEMENT carrying an attribute - `@_noImplicitCopy let y = x`
 // inside a body, `@A<Float> var test0: Int { ... }` at top level. It needs at
 // least one `@`, so it can never be confused with a bare expression statement.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = AttrDecl
-            | PoundDirective
-            | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
-            | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
-            | Continue | Fallthrough | Do | Defer | Empty | TupleAssign
-            | ExprStmt ;
+            = AttrDecl StmtSep
+            | PoundDirective StmtSep
+            | Decl StmtSep | LocalFunc StmtSep | LocalType StmtSep | CplxIf StmtSep | If StmtSep
+            | CplxGuard StmtSep | Guard StmtSep | CplxWhile StmtSep | While StmtSep
+            | Repeat StmtSep | For StmtSep | Switch StmtSep | Return StmtSep | Throw StmtSep
+            | Break StmtSep | Continue StmtSep | Fallthrough StmtSep | Do StmtSep
+            | Defer StmtSep | Empty | TupleAssign StmtSep
+            | ExprStmt StmtSep ;
+// swiftc's "consecutive statements on a line must be separated by ';'": a statement
+// ends at a `;` (its own, or the next token), a line break, a `}`, a comment or the
+// end of the file. A zero-width guard; the parse position is right after the
+// statement's last token, since whitespace is skipped BEFORE a token. Each
+// alternative carries it, so one that only matched a PREFIX of the line gives way
+// to the next instead of failing the statement.
+StmtSep     = :script(~~
+    (function() {
+        if (c.peek(-1) === 59) { return undefined }
+        var i = 0
+        var ch = c.peek(i)
+        while (ch === 32 || ch === 9 || ch === 11 || ch === 12) { i++; ch = c.peek(i) }
+        if (ch < 0 || ch === 10 || ch === 13 || ch === 59 || ch === 125) { return undefined }
+        if (ch === 47 && (c.peek(i + 1) === 47 || c.peek(i + 1) === 42)) { return undefined }
+        return abnf.newToken("\x01statement-continues-on-line", 0)
+    })()
+~~) ;
 
 AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
 
 // A loop (or switch) label: `outer: for ... { ... break outer }`. It is part of the
 // loop production rather than a statement of its own, so the builder sees its own
 // label and a labelled break/continue can name the loop it leaves.
-LoopLabel   = Id <~~ push({lbl: up.in}) ~~> ":" ;
+LoopLabel   = Id <~~ push({lbl: swBt(up.in)}) ~~> ":" ;
 
 // A nested function declaration inside a body: a closure over the enclosing scope
 // bound to its own name (so it can recurse and can capture surrounding locals).
@@ -614,7 +881,7 @@ CondInit    <~~ push({cinit: pop()}) ~~> = Expression ;
 PatWhere    <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 BindPat     <~~ push({bnames: takeAll()}) ~~>
             = "(" BindName { "," BindName } ")" | BindName ;
-BindName    <~~ push(up.in) ~~> = Wildcard | Id ;
+BindName    <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 
 // A pattern: `_`, `let x`, `x?` (optional pattern), a tuple of patterns, or an
 // enum case - `.busy`, `Load19.busy`, optionally with a sub-pattern argument list.
@@ -648,7 +915,7 @@ PatTuple    <~~ push({ptup: takeAll()}) ~~> = "(" Pattern { "," Pattern } ")" ;
 PatWild     <~~ push({pwild: 1}) ~~> = Wildcard ;
 PatEnum     <~~ push(makePatEnum(takeAll())) ~~>
             = [ "." <~~ push({pdot: 1}) ~~> ] PatPath [ PatArgs ] ;
-PatPath     <~~ push({ppath: stripWs(up.in)}) ~~> = Id { "." Id } ;
+PatPath     <~~ push({ppath: swBt(stripWs(up.in))}) ~~> = Id { "." Id } ;
 PatArgs     <~~ push({pargs: takeAll()}) ~~> = "(" [ PatArg { "," PatArg } ] ")" ;
 PatArg      = [ PatArgLabel ] Pattern ;
 PatArgLabel = Id ":" ;
@@ -659,13 +926,18 @@ Block       <~~ swAnnClose(); push(makeBlockStmt(takeAll())) ~~>
 RetBody     <~~ swAnnClose(); push(makeBlockStmt(takeAll())) ~~>
             = "{" <~~ swAnnOpen() ~~> Return { PoundIfStmt | Statement } "}" ;
 
-Decl        = DeclTuple | DeclPlain ;
+Decl        = DeclTuple | LocalComputed | DeclPlain ;
+// A computed variable at top level or in a body - `var t: Int { ... }`, a result
+// builder's `@A var v: Int { 1; 2 }` - is recognized, and reported as not
+// implemented: a READ of the name would have to run the getter.
+LocalComputed <~~ takeAll(); push(notImplStmt("a local computed variable", up.start)) ~~>
+            = "var" KwEnd Id ":" Type SkipBlock ;
 // One let/var may declare SEVERAL bindings: `let a = 1, b = 2`. Each binding builds
 // its own declaration thunk and the statement runs them in order.
 DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] [ LocalObs ] ;
+            = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in}) ~~> ] [ LocalObs ] ;
 // `var w = 0 { didSet { ... } }` on a top-level or local variable: the observers are
 // the same accessors a property's are, and only willSet/didSet are accepted here.
 LocalObs    <~~ push({lobs: takeAll()}) ~~> = "{" ObsAccessor { ObsAccessor } "}" ;
@@ -731,7 +1003,7 @@ DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
 TupNames    <~~ push({tnames: takeAll()}) ~~>
             = "(" TupName { "," TupName } ")" ;
-TupName     <~~ push(up.in) ~~> = Wildcard | Id ;
+TupName     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 // (x, y) = (y, x) - assignment through a tuple pattern (a swap, typically).
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
@@ -749,7 +1021,12 @@ Repeat      <~~ push(makeRepeat(takeAll())) ~~>
 // `for case PAT in xs` filters: only the elements the pattern matches run the body
 // (and the pattern's `let` names are bound for that iteration). Tried first - its
 // `case` would otherwise be read as the loop variable's name by ForRange/ForList.
-For         = ForCase | ForRange | ForList ;
+For         = ForCase | ForRange | ForList | ForAwait ;
+// `for await x in seq` / `for try await` walk an AsyncSequence, which needs an
+// executor this runtime does not have: recognized, reported as not implemented.
+ForAwait    <~~ takeAll(); push(notImplStmt("for await", up.start)) ~~>
+            = [ LoopLabel ] KwFor [ KwTry ] KwAwait [ "var" KwEnd ] ForPat [ ForPatType ] KwIn
+              Expression [ ForWhere ] Block ;
 ForCase     <~~ push(makeForCase(takeAll())) ~~>
             = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
 // The bounds are read at AddExpr level, BELOW RangeExpr, so the loop keeps its own
@@ -762,11 +1039,16 @@ ForRange    <~~ push(makeForRange(takeAll())) ~~>
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
 ForList     <~~ push(makeForList(takeAll())) ~~>
-            = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn
+            = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> [ ForPatType ] KwIn
               Expression <~~ swForSeq(up.in) ~~> [ ForWhere ] Block ;
 // The loop variable: a name, _ , or a tuple pattern (for (k, v) in aDictionary).
 ForPat      = TupNames | ForName ;
-ForName     <~~ push({fname: up.in}) ~~> = Wildcard | Id ;
+ForName     <~~ push({fname: swBt(up.in)}) ~~> = Wildcard | Id ;
+// `for x: Double in xs` - the annotation types the loop variable (swForSeq).
+// The element literal adopts it - `for x: Double in [1, 2]` walks 1.0 and 2.0 - so a
+// simple name's annotation travels to makeForList as {fty}; a tuple pattern's
+// annotation only restates the element type.
+ForPatType  <~~ push({fty: swForAnn}) ~~> = ":" Type <~~ swForTy(stripWs(up.in)) ~~> ;
 // for x in xs where COND { ... }: the body runs only for the elements that pass.
 ForWhere    <~~ push({fwhere: pop()}) ~~> = KwWhere Expression ;
 
@@ -797,7 +1079,7 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
 Break       <~~ push(makeBreakL(takeAll())) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
 Continue    <~~ push(makeContinueL(takeAll())) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
-BreakLbl    <~~ push({lbl: up.in}) ~~> = Id ;
+BreakLbl    <~~ push({lbl: swBt(up.in)}) ~~> = Id ;
 
 // A zero-width guard that fails at end of line (a newline or a // comment before the
 // next token): the label of `break outer` must start on the SAME line, otherwise a
@@ -812,7 +1094,8 @@ SameLine    = :script(~~
             : undefined
     })()
 ~~) ;
-Empty       <~~ push(function(b) { return b }) ~~> = ";" ;
+// `;` alone, or `()` - the empty tuple as a statement (`case 0: ()`): a no-op.
+Empty       <~~ push(function(b) { return b }) ~~> = ";" | "(" ")" StmtSep ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
@@ -837,8 +1120,8 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // `= b` and silently become an assignment. A `!` here is otherwise a no-op - an
 // Optional IS its value in this model - so it pushes nothing.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~>
-              { "." Id <~~ push({key: up.in}) ~~> | "." TTupIdx | TForce | TIndex } ;
+            = Id <~~ push(swBt(up.in)) ~~>
+              { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } ;
 TTupIdx     <~~ push({key: up.in}) ~~> = "0"..."9" { "0"..."9" } ;
 TForce      = NoSpace "!" NotChar61 ;
 TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
@@ -909,7 +1192,21 @@ NotAmpOp    = :script(~~
 CustomBin   <~~ push(foldCustomOps(takeAll())) ~~>
             = UnaryExpr { CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | CustomPrefix | BitNot | TryExpr | Await | EachExpr | CallMember ;
+UnaryExpr   = Neg | Not | CustomPrefix | BitNot | TryExpr | Await | EachExpr | OwnExpr | CallMember ;
+// `copy x` / `consume x` (SE-0377 / SE-0366): an explicit copy or end of lifetime,
+// which yields the value itself. Both are CONTEXTUAL keywords - `copy(x)` and
+// `consume.x` stay a call and a member read - so a name has to follow on the same
+// line, which is swiftc's own test.
+OwnExpr     = ( "copy" | "consume" | "_move" | "_borrow" ) KwEnd OwnStart UnaryExpr ;
+OwnStart    = :script(~~
+    (function() {
+        var i = 0
+        var ch = c.peek(i)
+        while (ch === 32 || ch === 9) { i++; ch = c.peek(i) }
+        var ok = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95 || ch === 36 || ch === 96
+        return ok ? undefined : abnf.newToken("\x01not-an-ownership-operand", 0)
+    })()
+~~) ;
 // `each x` inside a pack expansion - the element of the value pack x for the
 // iteration the enclosing `repeat` is on. `each` is a CONTEXTUAL keyword, so it is
 // also a legal variable name; EachStart is what tells the two apart, by demanding
@@ -989,8 +1286,8 @@ NotChar63   = :script(~~
     (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
 ~~) ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
-FieldSfx    = "." Id <~~ push(makeFieldSfx(up.in)) ~~> ;
+            = "." Id <~~ push({mname: swBt(up.in)}) ~~> MArgs ;
+FieldSfx    = "." Id <~~ push(makeFieldSfx(swBt(up.in))) ~~> ;
 // t.0 / t.1: a tuple element read. A tuple is an object whose elements live under
 // the property names "0", "1", ... (and additionally under their label when the
 // element has one), so an element read is an ordinary field read.
@@ -1084,7 +1381,7 @@ NoTrailCtx  = :script(~~
 // carry their argument label (Swift 5.3 multiple trailing closures).
 TrailArg    <~~ push(makeTrailArg(pop())) ~~> = Closure ;
 LabTrail    <~~ push(makeLabTrail(takeAll())) ~~>
-            = Id <~~ push({alabel: up.in}) ~~> ":" Closure ;
+            = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" Closure ;
 
 // An argument carries its label (matched against the parameter labels of the
 // callee, so a call may leave defaulted parameters out) and, for &x, the name it
@@ -1101,10 +1398,10 @@ CallArg     <~~ push(makeCallArg(takeAll())) ~~>
 OpRefArg    <~~ push(makeOpRef(stripWs(up.in), up.pos)) ~~>
             = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
 OpRefChar   = @+"+-*/%<>=!&|^~?" ;
-ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
+ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
 // &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
 // character of a && operator.
-InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
+InoutArg    = "&" !"&" Id <~~ push({aref: swBt(up.in)}) ~~> ;
 
 Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
@@ -1157,7 +1454,7 @@ SuperRef    <~~ push(makeSuperRef()) ~~> = KwSuper ;
 // its associated values. Matching and == compare enum cases by NAME, so an
 // unqualified `.tails` and a qualified `Coin06.tails` are the same value.
 DotMember   <~~ push(makeDotMember(takeAll())) ~~>
-            = "." Id <~~ push({dname: up.in}) ~~> [ DotArgs ] ;
+            = "." Id <~~ push({dname: swBt(up.in)}) ~~> [ DotArgs ] ;
 DotArgs     <~~ push({dargs: takeAll()}) ~~>
             = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" ;
 
@@ -1181,7 +1478,7 @@ Paren       <~~ push(makeParen(takeAll(), up.pos)) ~~>
             = "(" TupleElem { "," TupleElem } ")" ;
 TupleElem   <~~ push(makeTupleElem(takeAll())) ~~>
             = [ TupleLabel ] Expression ;
-TupleLabel  = Id <~~ push({tlabel: up.in}) ~~> ":" ;
+TupleLabel  = Id <~~ push({tlabel: swBt(up.in)}) ~~> ":" ;
 // Closure shorthand arguments ($0, $1, ...): a closure without a signature binds
 // its arguments under exactly these names, so the shorthand is an ordinary read.
 Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
@@ -1198,16 +1495,16 @@ ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
             = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" ClRetTy ] KwIn
             | [ CaptureList ] ClParam { "," ClParam } [ "->" ClRetTy ] KwIn
             | CaptureList KwIn ;
-ClParam     = Id <~~ push(up.in) ~~> [ ":" ClParamTy ] ;
+ClParam     = Id <~~ push(swBt(up.in)) ~~> [ ":" ClParamTy ] ;
 ClParamTy   <~~ push({cptype: stripWs(up.in)}) ~~> = Type ;
 ClRetTy     <~~ push({crtype: stripWs(up.in)}) ~~> = Type ;
 // { [x, weak y] in ... }: a capture list snapshots the named variables at the
 // moment the closure is created.
 CaptureList <~~ push({caps: takeAll()}) ~~>
             = "[" [ CapItem { "," CapItem } ] "]" ;
-CapItem     = [ CapMode ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
+CapItem     = [ CapMode ] Id <~~ push(swBt(up.in)) ~~> [ "=" DiscardExpr ] ;
 CapMode     = ( "weak" | "unowned" ) KwEnd ;
-LamStmt     = LamCtrl | LamExpr ;
+LamStmt     = LamCtrl StmtSep | LamExpr StmtSep ;
 // A closure body is an ordinary body: every statement form except the bare
 // expression (which LamExpr takes, so that the closure's VALUE is its last
 // expression) belongs here, which includes `g { 1 }` (TrailCall).
@@ -1219,11 +1516,11 @@ LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 
 DictLit     <~~ push(makeDict(takeAll())) ~~>
-            = "[" ( ":" | DictEntry { "," DictEntry } ) "]" ;
+            = "[" ( ":" | DictEntry { "," DictEntry } [ "," ] ) "]" ;
 DictEntry   <~~ var v = pop(); push({dk: pop(), dv: v}) ~~>
             = Expression ":" Expression ;
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
-            = "[" [ Expression { "," Expression } ] "]" ;
+            = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
 // `[Int]()`, `[String: Int]()`, `[() async -> ()]()` - a collection TYPE written as
 // a literal and immediately constructed EMPTY. It is ordered BEFORE ArrayLit and
 // DictLit: those two would match `[Int]` and `[String: Int]` as a one-element array /
@@ -1245,7 +1542,7 @@ OptNone     <~~ takeAll(); push(makeConst(null)) ~~> = "Optional" [ NoSpace GenA
 GenCall     <~~ push(swGenCall(takeAll())) ~~>
             = GenName "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 GenRef      <~~ push(makeVarRef(takeAll()[0])) ~~> = GenName ;
-GenName     = Id <~~ push(up.in) ~~> NoSpace GenArgs GenFollow ;
+GenName     = Id <~~ push(swBt(up.in)) ~~> NoSpace GenArgs GenFollow ;
 GenArgs     = "<" GenArgList ">" ;
 GenArgList  <~~ push({gargs: stripWs(up.in)}) ~~> = Type { "," Type } ;
 GenFollow   = :script(~~
@@ -1256,12 +1553,12 @@ GenFollow   = :script(~~
 ~~) ;
 
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
+            = Id <~~ push(swBt(up.in)) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with only trailing closures, in any
 // expression position (`return filter { $0 > 1 }`). NoTrailCtx is what keeps
 // `if cond { ... }` from reading as a call of cond.
 TrailCall   <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> NoTrailCtx TrailArg { LabTrail } ;
+            = Id <~~ push(swBt(up.in)) ~~> NoTrailCtx TrailArg { LabTrail } ;
 
 // String interpolation: "sum = \(a + b)".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
@@ -1308,20 +1605,19 @@ MlContEol   = "\n" | "\r" ;
 // excluded so an escape and an interpolation are reached first.
 MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
 
-// Raw string literals: #"..."# and ##"..."##. Nothing inside is an escape - a
-// backslash is a backslash - and the only interpolation is \#( ... ) / \##( ... ),
-// whose pound count matches the delimiter's. Levels 1..3 are ordinary rules
+// Raw string literals: #"..."# and ##"..."##. A backslash is a backslash unless it
+// carries the delimiter's own pound count: \#( ... ) / \##( ... ) interpolates and
+// \#n / \##t are the ordinary escapes (makeRawStr). Levels 1..3 are ordinary rules
 // (RawStr1..3) because the matching `\#( ... )` interpolation needs a real
 // Expression sub-parse; a scanner cannot call the parser back. The multi-line raw
 // forms (###""" ... """###) ride the same rules: the opening delimiter starts with
-// ###" and the closing one ends with "###, so the extra quotes are simply content -
-// which is exactly the text Swift keeps.
+// ###" and the closing one ends with "###, so the content arrives as `""` + newline
+// ... newline + `""`, which makeRawStr recognizes and lays out as a multi-line
+// literal. Without the newline (`##""" a "##`) the quotes are content.
 // Level 4 and up (`#####"This is a string"#####`) is RawScan, a `:script` that
 // counts the pounds and returns the whole literal as ONE token, so the level is
-// unbounded. Two shapes are deliberately DECLINED rather than mis-read (a parse
-// failure): a MULTI-LINE raw literal (`####""" ... """####`),
-// whose closing-delimiter indentation strip lives in makeMultiStr, and any literal
-// carrying its own `\####(` interpolation.
+// unbounded. A literal carrying its own `\####(` interpolation is DECLINED rather
+// than mis-read (a parse failure).
 RawStrN     <~~ push(makeRawScanned(up.in)) ~~> = RawScan ;
 RawScan     = :script(~~
     (function() {
@@ -1337,12 +1633,10 @@ RawScan     = :script(~~
         if (n < 4) { return abnf.newToken("\x01not-a-deep-raw-string", 0) }
         if (c.peek(i) !== 34) { return abnf.newToken("\x01not-a-deep-raw-string", 0) }
         i++
-        // `####""####` is the EMPTY literal, not the multi-line opener: the second
-        // quote is already the closing delimiter. Three quotes IS the multi-line
-        // form, which this scanner declines.
-        if (c.peek(i) === 34 && c.peek(i + 1) === 34) {
-            return abnf.newToken("\x01multiline-raw-string", 0)
-        }
+        // `####""####` is the EMPTY literal: the second quote is already the
+        // closing delimiter. Three quotes is the multi-line form, whose content may
+        // span lines.
+        var multi = c.peek(i) === 34 && c.peek(i + 1) === 34
         var body = i
         var end = -1
         var guardN = 0
@@ -1350,7 +1644,7 @@ RawScan     = :script(~~
             guardN++
             var cc = c.peek(i)
             if (cc < 0) { return abnf.newToken("\x01unterminated-raw-string", 0) }
-            if (cc === 10) { return abnf.newToken("\x01newline-in-raw-string", 0) }
+            if (cc === 10 && !multi) { return abnf.newToken("\x01newline-in-raw-string", 0) }
             if (cc === 34) {
                 var k = i + 1
                 var hit = true
@@ -1400,24 +1694,24 @@ RawScan     = :script(~~
         return abnf.newToken(s, 0)
     })()
 ~~) ;
-RawStr3     <~~ push(makeRawStr(takeAll())) ~~>
+RawStr3     <~~ push(makeRawStr(takeAll(), 3)) ~~>
             = '###"' :whitespace() { Raw3Expr | Raw3Chunk } '"###' :whitespace(Whitespace) ;
 Raw3Expr    <~~ push({e: pop()}) ~~> = "\\###(" :whitespace(Whitespace) [ TplLabel ] Expression ")" ;
 Raw3Chunk   <~~ push({s: up.in}) ~~> = Raw3Char { Raw3Char } ;
 Raw3Char    = !'"###' !"\\###(" "\x00"..."\U0010ffff" ;
-RawStr2     <~~ push(makeRawStr(takeAll())) ~~>
+RawStr2     <~~ push(makeRawStr(takeAll(), 2)) ~~>
             = '##"' :whitespace() { Raw2Expr | Raw2Chunk } '"##' :whitespace(Whitespace) ;
 Raw2Expr    <~~ push({e: pop()}) ~~> = "\\##(" :whitespace(Whitespace) Expression ")" ;
 Raw2Chunk   <~~ push({s: up.in}) ~~> = Raw2Char { Raw2Char } ;
 Raw2Char    = !'"##' !"\\##(" "\x00"..."\U0010ffff" ;
-RawStr1     <~~ push(makeRawStr(takeAll())) ~~>
+RawStr1     <~~ push(makeRawStr(takeAll(), 1)) ~~>
             = '#"' :whitespace() { Raw1Expr | Raw1Chunk } '"#' :whitespace(Whitespace) ;
 Raw1Expr    <~~ push({e: pop()}) ~~> = "\\#(" :whitespace(Whitespace) Expression ")" ;
 Raw1Chunk   <~~ push({s: up.in}) ~~> = Raw1Char { Raw1Char } ;
 Raw1Char    = !'"#' !"\\#(" "\x00"..."\U0010ffff" ;
 
 Nil         <~~ push(makeConst(null)) ~~>  = "nil" KwEnd ;
-VarRef      <~~ push(makeVarRef(up.in)) ~~> = Id ;
+VarRef      <~~ push(makeVarRef(swBt(up.in))) ~~> = Id ;
 
 // ----- Widened surface: a balanced { ... } / < ... > run consumed but ignored -----
 SkipBlock   = "{" { SkipItem } "}" ;
@@ -1441,22 +1735,32 @@ DiscardExpr <~~ pop() ~~> = Expression ;
 
 KwFunc      = "func" KwEnd ;
 // A function name is an identifier or, for an operator declaration, the operator.
-FuncName    = Id <~~ push(up.in) ~~> | OpName <~~ push(stripWs(up.in)) ~~> ;
+FuncName    = Id <~~ push(swBt(up.in)) ~~> | OpName <~~ push(stripWs(up.in)) ~~> ;
 // A run of Swift operator characters. Whitespace is switched off after the first
 // one so the run is contiguous - with the ambient rule in force, `a + b` would
 // lex as the single operator `+b`.
 OpName      = OpChar :whitespace() { OpChar } :whitespace(Whitespace) ;
-OpChar      = "/" | "=" | "-" | "+" | "!" | "*" | "%" | "<" | ">" | "&" | "|" | "^" | "~" | "?" ;
+// A `<` directly followed by a name opens the generic parameter list instead:
+// `func %%%%<T, U>(x: T, y: U)` declares the operator %%%%, which swiftc splits the
+// same way.
+OpChar      = "/" | "=" | "-" | "+" | "!" | "*" | "%" | "<" NotGenOpen | ">" | "&" | "|" | "^" | "~" | "?" ;
+NotGenOpen  = :script(~~
+    (function() {
+        var ch = c.peek(0)
+        var name = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95
+        return name ? abnf.newToken("\x01generic-list-follows", 0) : undefined
+    })()
+~~) ;
 
 // precedencegroup G { higherThan: H  associativity: right }: the relations are
 // recorded and used to fold the custom-operator chain; the group's own name is what
 // an `infix operator` declaration refers to.
 PrecGroupDecl <~~ push(makePrecGroup(takeAll())) ~~>
-            = "precedencegroup" KwEnd Id <~~ push(up.in) ~~> "{" { PrecAttr } "}" ;
+            = "precedencegroup" KwEnd Id <~~ push(swBt(up.in)) ~~> "{" { PrecAttr } "}" ;
 PrecAttr    = PrecHigher | PrecLower | PrecAssoc | PrecFlag ;
 PrecHigher  <~~ push({phigher: takeAll()}) ~~> = "higherThan" ":" PrecRef { "," PrecRef } ;
 PrecLower   <~~ push({plower: takeAll()}) ~~> = "lowerThan" ":" PrecRef { "," PrecRef } ;
-PrecRef     <~~ push(up.in) ~~> = Id ;
+PrecRef     <~~ push(swBt(up.in)) ~~> = Id ;
 PrecAssoc   = "associativity" ":" PrecAssocVal ;
 PrecAssocVal <~~ push({passoc: up.in}) ~~> = ( "left" | "right" | "none" ) KwEnd ;
 PrecFlag    = "assignment" ":" ( "true" | "false" ) KwEnd ;
@@ -1464,7 +1768,7 @@ PrecFlag    = "assignment" ":" ( "true" | "false" ) KwEnd ;
 // infix one, the precedence group whose relations order it against the others.
 OperatorDecl <~~ push(makeOperatorDecl(takeAll())) ~~>
             = OpFixity "operator" KwEnd OpName <~~ push({oname: stripWs(up.in)}) ~~>
-              [ ":" Id <~~ push({ogroup: up.in}) ~~> ] [ ";" ] ;
+              [ ":" Id <~~ push({ogroup: swBt(up.in)}) ~~> ] [ ";" ] ;
 OpFixity    <~~ push({ofix: stripWs(up.in)}) ~~> = ( "prefix" | "postfix" | "infix" ) KwEnd ;
 KwImport    = "import" KwEnd ;
 KwWhere     = "where" KwEnd ;
@@ -2273,7 +2577,10 @@ KwContinue  = "continue" KwEnd ;
     // A multi-line literal: the indentation of the CLOSING delimiter is removed from
     // every line, and the newline that follows the opening delimiter and the one that
     // precedes the closing one are not part of the value.
-    function makeMultiStr(items) {
+    function makeMultiStr(items) { return makeTemplate(swMlLayout(items, 0)) }
+    // The layout of a multi-line literal's chunks. rawLvl 0 is the escaped form; a
+    // raw literal (rawLvl = its pound count) only honours escapes at its own level.
+    function swMlLayout(items, rawLvl) {
         var parts = []
         for (var i = 0; i < items.length; i++) { parts.push(items[i]) }
         var indent = ""
@@ -2298,9 +2605,9 @@ KwContinue  = "continue" KwEnd ;
             var txt = parts[n].s
             if (n == 0) { txt = dropFirstLine(txt) }
             if (n == parts.length - 1) { txt = dropLastLine(txt) }
-            out.push({s: swUnescape(stripIndent(txt, indent))})
+            out.push({s: swUnescape(swRawEsc(stripIndent(txt, indent), rawLvl))})
         }
-        return makeTemplate(out)
+        return out
     }
     function dropFirstLine(t) {
         for (var i = 0; i < t.length; i++) { if (t.charAt(i) == "\n") { return t.substring(i + 1) } }
@@ -2325,14 +2632,64 @@ KwContinue  = "continue" KwEnd ;
         }
         return out
     }
-    // A raw literal keeps its characters verbatim; only \#( ... ) interpolates.
-    function makeRawStr(items) { return makeTemplate(items) }
+    // A raw literal keeps its characters verbatim except the escapes written with
+    // its own pound count. Its content is `""` + newline ... newline + `""` exactly
+    // when it is the multi-line form (#""" ... """#), which is then laid out like
+    // MultiStr with the two quote pairs removed.
+    function makeRawStr(items, lvl) {
+        var n = items.length
+        if (n > 0 && items[0].s != undefined && items[n - 1].s != undefined
+            && swRawMlOpen(items[0].s) && swRawMlClose(items[n - 1].s)) {
+            var parts = []
+            for (var i = 0; i < n; i++) { parts.push(items[i]) }
+            var last = parts[n - 1].s
+            parts[n - 1] = {s: last.substring(0, last.length - 2)}
+            parts[0] = {s: parts[0].s.substring(2)}
+            return makeTemplate(swMlLayout(parts, lvl))
+        }
+        var out = []
+        for (var k = 0; k < n; k++) {
+            out.push(items[k].s == undefined ? items[k] : {s: swUnescape(swRawEsc(items[k].s, lvl))})
+        }
+        return makeTemplate(out)
+    }
+    // `""`, optional spaces/tabs, then a line break: the multi-line opener's tail.
+    function swRawMlOpen(t) {
+        if (t.length < 3 || t.charCodeAt(0) != 34 || t.charCodeAt(1) != 34) { return false }
+        var i = 2
+        while (i < t.length && (t.charCodeAt(i) == 32 || t.charCodeAt(i) == 9)) { i++ }
+        return i < t.length && (t.charCodeAt(i) == 10 || t.charCodeAt(i) == 13)
+    }
+    // A line break, optional spaces/tabs, then `""`: the multi-line closer's head.
+    function swRawMlClose(t) {
+        if (t.length < 3 || t.charCodeAt(t.length - 1) != 34 || t.charCodeAt(t.length - 2) != 34) { return false }
+        var i = t.length - 3
+        while (i >= 0 && (t.charCodeAt(i) == 32 || t.charCodeAt(i) == 9)) { i-- }
+        return i >= 0 && (t.charCodeAt(i) == 10 || t.charCodeAt(i) == 13)
+    }
+    // Rewrites raw text into swUnescape's input: a backslash followed by exactly lvl
+    // pounds is an escape (the pounds are dropped), every other backslash is doubled
+    // so it stays literal. lvl 0 returns the text unchanged.
+    function swRawEsc(t, lvl) {
+        if (lvl == 0) { return t }
+        var out = ""
+        var i = 0
+        while (i < t.length) {
+            if (t.charCodeAt(i) != 92) { out += t.charAt(i); i++; continue }
+            var j = i + 1
+            while (j < t.length && t.charCodeAt(j) == 35) { j++ }
+            if (j - i - 1 == lvl) { out += "\\"; i = j; continue }
+            out += "\\\\"
+            i++
+        }
+        return out
+    }
     // The token RawScan returned is the WHOLE literal, delimiters included: n pound
     // signs, a quote, the content verbatim, the closing quote and n pound signs.
     function makeRawScanned(text) {
         var n = 0
         while (n < text.length && text.charAt(n) == "#") { n++ }
-        return makeConst(text.substring(n + 1, text.length - n - 1))
+        return makeRawStr([{s: text.substring(n + 1, text.length - n - 1)}], n)
     }
 
     // ----- Strings are sequences of extended grapheme clusters -----
@@ -5968,9 +6325,20 @@ KwContinue  = "continue" KwEnd ;
     // ELEMENT type; the note is pending for the body's swAnnOpen. Twins of
     // swForPat / swForSeq in swift-interpreter.abnf.
     var swForVar = ""
-    function swForPat(txt) { swForVar = txt.length > 0 && txt.charAt(0) != "(" && txt != "_" ? txt : "" }
+    // A name's (or a dotted path's) text without the quotes of its backtick-quoted
+    // parts; a name itself can never contain a backtick.
+    function swBt(s) {
+        if (s.indexOf("`") < 0) { return s }
+        var out = ""
+        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) != 96) { out += s.charAt(i) } }
+        return out
+    }
+    var swForAnn = ""
+    function swForPat(txt) { swForVar = txt.length > 0 && txt.charAt(0) != "(" && txt != "_" ? txt : ""; swForAnn = "" }
+    function swForTy(t) { swForAnn = swForVar != "" ? t : "" }
     function swForSeq(seqTxt) {
         if (swForVar == "") { return }
+        if (swForAnn != "") { localAnnPending.push({n: swForVar, t: swForAnn}); return }
         var a = seqTxt == "" ? "" : swInferAnn(seqTxt)
         localAnnPending.push({n: swForVar, t: a == "" ? "" : swTyPeel(a, 1)})
     }
@@ -6464,7 +6832,7 @@ KwContinue  = "continue" KwEnd ;
             return exitB
         }
     }
-    // items = [{lbl}?, pat, listT, {fwhere}?, bodyT]. The sequence walked by index is
+    // items = [{lbl}?, pat, {fty}?, listT, {fwhere}?, bodyT]. The sequence walked by index is
     // the array itself, or - for a dictionary - its `(key:, value:)` pairs, which a
     // plain name binds whole and `(k, v)` destructures. Twin: swSeqVal in
     // swift-interpreter.abnf.
@@ -6472,8 +6840,11 @@ KwContinue  = "continue" KwEnd ;
         var lbl = itemLbl(items)
         var rest = itemsAfterLbl(items)
         var pat = rest[0]
-        var listT = rest[1]
-        var k = 2
+        var k = 1
+        var ety = ""
+        if (rest[k].fty != undefined) { ety = swAdoptNeeded(rest[k].fty) ? "[" + rest[k].fty + "]" : ""; k++ }
+        var listT = rest[k]
+        k++
         var whereT = null
         if (rest[k] != undefined && rest[k].fwhere != undefined) { whereT = rest[k].fwhere; k++ }
         var bodyT = rest[k]
@@ -6493,6 +6864,8 @@ KwContinue  = "continue" KwEnd ;
             if (hasRanges || hasSets) { r = {b: r.b, v: r.b.NewCall(rtRangeArr(), [r.v])} }
             // A String is a sequence of CLUSTERS, not of code units - see rtStrSeq.
             if (hasUniStr) { r = {b: r.b, v: r.b.NewCall(rtStrSeq(), [r.v])} }
+            // `for x: Double in [1, 2]`: the annotation types the elements.
+            if (ety != "") { r = {b: r.b, v: swEmitAdopt(r.b, r.v, ety)} }
             b = r.b
             // The indexable sequence: the value itself for an array or a string, its
             // `(key:, value:)` pairs for a dictionary (rtArrayOf).
@@ -6881,14 +7254,128 @@ KwContinue  = "continue" KwEnd ;
     // the time any call runs the name refers to the complete set.
     var funcOverloads = {}
     // #if branch selection. items alternates {pcond} and {branch}; the answer is
-    // the item list of the first branch whose condition is not statically false.
-    // Nothing here evaluates os(...) / canImport(...) / swift(>=...): an ordinary
-    // condition is treated as live, so the first branch wins.
-    function poundLive(s) {
-        var t = stripWs(s)
-        if (t == "false") { return false }
-        if (t == "0") { return false }
-        return true
+    // the item list of the first branch whose condition is not false.
+    function poundLive(s) { return poundEval(s) != 0 }
+    // An #if condition, three-valued: 0 false, 1 true, 2 unknown. The version checks
+    // compiler(>=V) / compiler(<V) / swift(...) are decided against swiftc 6.1.2,
+    // whose default language mode is 5.10 (_compiler_version(>=V) is compiler's);
+    // the legacy quoted _compiler_version("...") is always true, as on every
+    // compiler built without a vendor version (swiftc 6.1.2 included); true /
+    // false / 1 / 0 are literals;
+    // os(...), canImport(...), a $Feature or anything unparsed is unknown, which
+    // keeps a branch LIVE, so such a condition picks the first branch. ! && || and
+    // parentheses combine them. Twin of the evaluator inside PoundSkipScan, which
+    // cannot call this one (a :script runs in the parser VM).
+    function poundEval(s) {
+        var vals = []
+        var ops = []
+        var i = 0
+        var n = s.length
+        var bad = false
+        var guardN = 0
+        while (i < n && !bad && guardN < 10000) {
+            guardN++
+            var ch = s.charCodeAt(i)
+            if (ch == 32 || ch == 9 || ch == 13 || ch == 10) { i++; continue }
+            if (ch == 47) { i = n; continue }
+            if (ch == 33 || ch == 40) { ops.push(ch == 33 ? "!" : "("); i++; continue }
+            var isAnd = ch == 38 && i + 1 < n && s.charCodeAt(i + 1) == 38
+            var isOr = ch == 124 && i + 1 < n && s.charCodeAt(i + 1) == 124
+            if (ch == 41 || isAnd || isOr) {
+                var stopAt = ch == 41 ? 0 : (isAnd ? 2 : 1)
+                while (ops.length > 0 && ops[ops.length - 1] != "(" && vals.length >= 2
+                       && (ops[ops.length - 1] == "&" ? 2 : 1) >= stopAt) {
+                    var o = ops.pop()
+                    var rb = vals.pop()
+                    var ra = vals.pop()
+                    if (o == "&") { vals.push(ra == 0 || rb == 0 ? 0 : (ra == 1 && rb == 1 ? 1 : 2)) }
+                    else { vals.push(ra == 1 || rb == 1 ? 1 : (ra == 0 && rb == 0 ? 0 : 2)) }
+                }
+                if (ch == 41) {
+                    if (ops.length == 0) { bad = true; continue }
+                    ops.pop()
+                    while (ops.length > 0 && ops[ops.length - 1] == "!" && vals.length > 0) {
+                        ops.pop()
+                        var nv = vals.pop()
+                        vals.push(nv == 2 ? 2 : 1 - nv)
+                    }
+                    i++
+                } else {
+                    ops.push(isAnd ? "&" : "|")
+                    i += 2
+                }
+                continue
+            }
+            var st = i
+            while (i < n) {
+                var cc = s.charCodeAt(i)
+                if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122)
+                    || cc == 95 || cc == 36 || cc == 46 || cc >= 128) { i++ } else { break }
+            }
+            if (i == st) { bad = true; continue }
+            var name = s.substring(st, i)
+            var arg = ""
+            var j = i
+            while (j < n && (s.charCodeAt(j) == 32 || s.charCodeAt(j) == 9)) { j++ }
+            if (j < n && s.charCodeAt(j) == 40) {
+                var depth = 0
+                var k = j
+                while (k < n) {
+                    var ck = s.charCodeAt(k)
+                    if (ck == 40) { depth++ }
+                    if (ck == 41) { depth--; if (depth == 0) { break } }
+                    k++
+                }
+                arg = s.substring(j + 1, k)
+                i = k + 1
+            }
+            var v = 2
+            if (name == "true" || name == "1") { v = 1 }
+            if (name == "false" || name == "0") { v = 0 }
+            if (name == "_compiler_version") { v = 1 }
+            if ((name == "compiler" || name == "swift" || name == "_compiler_version") && arg != "") {
+                var a = ""
+                for (var q = 0; q < arg.length; q++) { if (arg.charCodeAt(q) != 32) { a += arg.charAt(q) } }
+                var ge = a.substring(0, 2) == ">="
+                var lt = a.substring(0, 1) == "<"
+                if (ge || lt) {
+                    var want = (ge ? a.substring(2) : a.substring(1)) + "."
+                    var have = (name == "swift" ? "5.10" : "6.1.2") + "."
+                    var cmp = 0
+                    var wn = 0
+                    var hn = 0
+                    var wi = 0
+                    var hi = 0
+                    while (cmp == 0 && (wi < want.length || hi < have.length)) {
+                        wn = 0
+                        hn = 0
+                        while (wi < want.length && want.charCodeAt(wi) != 46) { wn = wn * 10 + (want.charCodeAt(wi) - 48); wi++ }
+                        while (hi < have.length && have.charCodeAt(hi) != 46) { hn = hn * 10 + (have.charCodeAt(hi) - 48); hi++ }
+                        wi++
+                        hi++
+                        if (hn > wn) { cmp = 1 }
+                        if (hn < wn) { cmp = 0 - 1 }
+                    }
+                    v = ge ? (cmp >= 0 ? 1 : 0) : (cmp < 0 ? 1 : 0)
+                }
+            }
+            vals.push(v)
+            while (ops.length > 0 && ops[ops.length - 1] == "!" && vals.length > 0) {
+                ops.pop()
+                var mv = vals.pop()
+                vals.push(mv == 2 ? 2 : 1 - mv)
+            }
+        }
+        while (!bad && ops.length > 0 && vals.length >= 2) {
+            var o2 = ops.pop()
+            if (o2 == "(" || o2 == "!") { bad = true; continue }
+            var b2 = vals.pop()
+            var a2 = vals.pop()
+            if (o2 == "&") { vals.push(a2 == 0 || b2 == 0 ? 0 : (a2 == 1 && b2 == 1 ? 1 : 2)) }
+            else { vals.push(a2 == 1 || b2 == 1 ? 1 : (a2 == 0 && b2 == 0 ? 0 : 2)) }
+        }
+        if (bad || vals.length != 1 || ops.length != 0) { return 2 }
+        return vals[0]
     }
     function poundPick(items) {
         var i = 0

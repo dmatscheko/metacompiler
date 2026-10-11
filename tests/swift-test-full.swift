@@ -3018,6 +3018,92 @@ func s58() {
     check("58i", "\(type(of: sh))" == "Array<Int>" && "\(type(of: ["k": 1.5]))" == "Dictionary<String, Double>" && "\(type(of: Set([a])))" == "Set<Int64>" && "\(type(of: P58()))" == "P58")
 }
 
+// ===== SECTION 59: raw multi-line strings, escaped names, typed throws, ownership =====
+// A raw literal honours only the escapes written with its own pound count, and its
+// multi-line form lays out like a plain one. Backtick-quoted names are the bare
+// names; `throws(E)`, `sending`, `@isolated(any)`, `~Copyable`, `copy` / `consume`
+// change nothing a run can see; a for-in annotation types the element literals.
+// Every expected value is swiftc 6.1.2's.
+enum E59: Error { case bad }
+struct NC59: ~Copyable { var v = 4 }
+enum Maybe59<T: ~Copyable>: ~Copyable { case none59 }
+infix operator %%%% : AdditionPrecedence
+func %%%%<T, U>(x: T, y: U) -> Int { return 7 }
+func thr59(_ n: Int) throws(E59) -> Int { if n < 0 { throw .bad }; return n * 2 }
+func send59(_ s: sending String) -> sending String { return s + "!" }
+func iso59(_ f: @isolated(any) () -> Int) -> Int { return 1 }
+func conv59(_ f: @convention(c) (Int) -> Int) -> Int { return f(3) }
+func `protocol`(`in` x: Int) -> Int { return x + 1 }
+func s59() {
+    let r1 = #"""
+        a "q" \n
+          b\#tc
+        """#
+    check("lex1", r1 == "a \"q\" \\n\n  b\tc")
+    let r4 = ####"""
+      x"""###y \####n z
+      """####
+    check("lex2", r4 == "x\"\"\"###y \n z")
+    check("lex3", #"p\#nq\r"# == "p\nq\\r" && ###"""##"### == "\"\"##")
+    let xs = [1, 2, 3,]
+    let d = ["k": 1,]
+    check("lex4", xs.count == 3 && d.count == 1)
+    var sum = 0.0
+    for x: Double in [1, 2] { sum += x / 4 }
+    check("lex5", sum == 0.75)
+    check("lex6", `protocol`(in: 4) == 5 && 1 %%%% "a" == 7)
+    let `default` = 3
+    check("lex7", `default` + 1 == 4)
+    var caught = false
+    do { _ = try thr59(-1) } catch { caught = true }
+    check("lex8", caught && (try? thr59(2)) == 4)
+    check("lex9", send59("hi") == "hi!" && iso59({ 2 }) == 1)
+    let a = 5
+    let b = copy a
+    let c = consume b
+    check("lex10", c == 5)
+    let nc = NC59()
+    check("lex11", nc.v == 4 && conv59({ $0 + 1 }) == 4)
+    var hit = 0
+    switch hit {
+    case 0:
+        ()
+    default:
+        hit = 2
+    }
+    check("lex12", hit == 0)
+}
+
+// ===== SECTION 60: #if version checks =====
+// compiler(...) and swift(...) are decided against swiftc 6.1.2 in its default
+// language mode 5.10 (the quoted legacy _compiler_version is always true there),
+// and an inactive clause of a version check is not parsed at all - it may hold
+// code for another compiler.
+func s60() {
+    var got = ""
+#if compiler(>=6.1)
+    got += "a"
+#else
+    got += "b" this is not Swift at all
+#endif
+#if !compiler(>=5)
+    unparsed junk here
+#elseif swift(>=6)
+    got += "c"
+#else
+    got += "d"
+#endif
+#if swift(<5.10) || false
+    got += "e"
+#endif
+#if !_compiler_version("777.*.7")
+    more junk
+#elseif _compiler_version(>=6.1)
+    got += "f"
+#endif
+    check("ver1", got == "adf")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3077,6 +3163,8 @@ func main() {
     s56() // SECTION-CALL 56
     s57() // SECTION-CALL 57
     s58() // SECTION-CALL 58
+    s59() // SECTION-CALL 59
+    s60() // SECTION-CALL 60
     print("full: \(checks) checks, \(fails) failures")
 }
 
