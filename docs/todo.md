@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-406** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-408** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,12 +130,16 @@ slot (`let f: () -> T = { .make(8) }`: swiftc t8, ours nil).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-400 php: array pointer functions, ini_set, object ids, anonymous class names · P1 · PHP · IN PROGRESS (PHP+CORE worker, round 16) [V spec-only]
-`reset()`, `current()`, `key()`, `next()`, `end()` undefined (bug32993.phpt); `ini_set()`
-undefined, `precision` not modelled; var_dump's `#id` is assigned at first dump, not at
-creation; compiled anonymous classes print `class@anonymous1` (PHP `class@anonymous`,
-anon/012.phpt); constants/bug69676_3.phpt aborts compiled "undefined constant A2::N";
-method dispatch is case-sensitive (PHP method names are case-insensitive).
+### T-407 php: method-name case across a parent chain; small library and runtime gaps · P2 · PHP · OPEN [V spec-only]
+A subclass overriding `getName` as `GETNAME`: `$child->getName()` calls the parent's
+(PHP the child's). `get_class` of an anonymous class lacks the "\0path" suffix
+(anon_class_name.phpt). The interpreter builds a new class per evaluation of `new
+class` (PHP: one per declaration site). Promoted constructor properties are listed
+last (PHP: class-body order). Go twin only: `INF == "1e1000"` false under llvm.Run
+(interp/native/corpus true). Interpreter only: print_r(), call_user_func() undefined.
+sprintf `%g` above 15 digits / on subnormals rounds the shortest digits.
+Self-referencing class constants (bug45910) recurse without the "Cannot declare
+self-referencing constant" error. (Handle reuse after free DECLINED: no refcounts.)
 
 ---
 
@@ -159,11 +163,10 @@ runtime.c ~2390: `"Inf"`, `"-Inf"` and any 8-character string starting with "Inf
 Probe every language that converts strings through it (python float(), ruby to_f,
 php, lua tonumber, kotlin toDouble...) against its oracle and fix the floor.
 
-### T-401 the php ratchet's -frozen run is at ~94M of the 100M step brake · P2 · CORE · IN PROGRESS (PHP+CORE worker, round 16) [V]
-tests/php-test-full.php under the -frozen interpreter uses ~94M of `-max-steps` 1e8;
-the next sections will read as FROZEN-DIFF. Split it into parts as js was
-(js-test-full.N.js: test.sh / native-full / launch.json), or find why php's frozen
-interpreter steps are so high. Check every ratchet's step headroom while there.
+### T-406 the python ratchet's -frozen interpreter run is at ~87M of the 100M brake · P2 · CORE · OPEN [V]
+Measured max steps per top-level call: python interpreter -frozen 87M (lua 72M, java
+61M next). Find the superlinear cost (php's was a quadratic dedupe in varsSince) or
+split the file as js is; leave every ratchet under ~60%.
 
 ### T-396 corpus long tails: csharp, php, dart, java · P3 · per language · IN PROGRESS (CORPUS worker, round 18) [V]
 Measured after round 13. csharp 78 fails (unsafe pointers 10, generic names as values 7,
@@ -472,6 +475,8 @@ T-398 batch: `%~n0` inside `call :label`; native string arena — DONE 73990fef
 T-403 swift: stored-property types keyed by name across types; implicit members to static funcs — DONE 64a8ae13 cd910ffc (and the -qq fix for bash/c/toys 4f397c98)
 T-402 js/ts: function declarations are not hoisted — DONE e4a8fdc3 (with Annex B block functions)
 T-404 swift: `.init(...)` as an implicit member; ambiguous static names — PARTIAL 8ed63e0f (declared-type slots: annotated let/var, property defaults, assignments, returns); sub-expression contexts are T-405
+T-401 the php ratchet's -frozen run is at ~94M of the 100M step brake — DONE c00a8c2f (root cause: quadratic varsSince; php -frozen 93M → 31M steps, no split needed)
+T-400 php: array pointer functions, ini_set, object ids, anonymous class names — DONE 4a852b8d (php-src corpus: interp 807→842, compiled 928→964, no losses)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -519,7 +524,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
