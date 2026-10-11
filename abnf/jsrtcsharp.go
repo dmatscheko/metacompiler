@@ -501,6 +501,12 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 	if name == "char" || name == "Char" {
 		o.set("MinValue", jsChar{code: 0})
 		o.set("MaxValue", jsChar{code: 65535})
+		o.set("__cstype", "char")
+		return o
+	}
+	if name == "string" || name == "String" {
+		o.set("Empty", "")
+		o.set("__cstype", "string")
 		return o
 	}
 	alias := map[string]string{"SByte": "sbyte", "Byte": "byte", "Int16": "short",
@@ -1341,38 +1347,12 @@ func init() {
 		baseCsMcall := m["js_mcall"]
 		m["js_csmcall"] = func(a []uint64) uint64 {
 			name := rt.toString(u(a[1]))
-			// System.String.Substring(int startIndex, int length) takes a LENGTH,
-			// not an end index; the shared memberCall reads a range and CLAMPS, so
-			// `"abcdef".Substring(1, 3)` would be "bc" where C# answers "bcd". The
-			// twins are csSubstr in csharp-interpreter.abnf and the substring arm
-			// of js_mcall in languages/lib/csharp-rt.metajs.
-			if str, isStr := u(a[0]).(string); isStr && name == "substring" {
-				args, _ := u(a[2]).(*jsArray)
-				n := rt.strLen(str)
-				b := 0
-				if args != nil && len(args.elems) > 0 {
-					b = jsToInt(rt.toNumber(args.elems[0]))
-				}
-				if b < 0 {
-					rt.csThrow("ArgumentOutOfRangeException", "StartIndex cannot be less than zero. (Parameter 'startIndex')")
-				}
-				if b > n {
-					rt.csThrow("ArgumentOutOfRangeException", "startIndex cannot be larger than length of string. (Parameter 'startIndex')")
-				}
-				end := n
-				if args != nil && len(args.elems) > 1 {
-					ln := jsToInt(rt.toNumber(args.elems[1]))
-					if ln < 0 {
-						rt.csThrow("ArgumentOutOfRangeException", "Length cannot be less than zero. (Parameter 'length')")
-					}
-					if b+ln > n {
-						rt.csThrow("ArgumentOutOfRangeException", "Index and length must refer to a location within the string. (Parameter 'length')")
-					}
-					end = b + ln
-				}
-				return rt.wrapStr(rt.strRange(str, b, end))
+			var elems []interface{}
+			if args, ok := u(a[2]).(*jsArray); ok {
+				elems = args.elems
 			}
-			if name == "Equals" || name == "GetHashCode" || name == "GetType" {
+			// Equals with ONE argument: the static string.Equals(a, b) is not it.
+			if (name == "Equals" && len(elems) == 1) || name == "GetHashCode" || name == "GetType" {
 				recv := u(a[0])
 				if rt.csUserMethod(recv, name) == nil {
 					args, _ := u(a[2]).(*jsArray)
@@ -1389,7 +1369,33 @@ func init() {
 					return w(rt.csTypeOfVal(recv))
 				}
 			}
+			// System.String and System.Char: abnf/jsrtcsstr.go, the twin of
+			// lib/csharp-strings.js. char and string carry their STATIC members by
+			// name (__cstype, see csTypeObject).
+			switch r := u(a[0]).(type) {
+			case string:
+				if v, ok := rt.csxStrMethod(r, name, elems); ok {
+					return w(v)
+				}
+			case jsChar:
+				return w(rt.csxCharMethod(r, name, elems))
+			case *jsObject:
+				switch r.props["__cstype"] {
+				case "char":
+					return w(rt.csxCharStatic(name, elems))
+				case "string":
+					return w(rt.csxStringStatic(name, elems))
+				}
+			}
 			return baseCsMcall(a)
+		}
+		// new string(...): lib/csharp-strings.js's csxNewString.
+		m["js_csnewstr"] = func(a []uint64) uint64 {
+			args, _ := u(a[0]).(*jsArray)
+			if args == nil {
+				return rt.wrapStr("")
+			}
+			return rt.wrapStr(rt.csxNewString(args.elems))
 		}
 		// One of the integral type NAMES as an expression primary.
 		m["js_cstype"] = func(a []uint64) uint64 { return w(rt.csTypeObject(rt.toString(u(a[0])))) }

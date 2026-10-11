@@ -1468,6 +1468,9 @@ KwLet       = "let" KwEnd ;
     // statement builders); C#-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
     include("lib/csharp-overload.js")
+    include("lib/java-chars.js")
+    include("lib/utf16-strings.js")
+    include("lib/csharp-strings.js")
 
     // The host names a program can see. Console is built here.
     hostGlobals["Console"] = {
@@ -1508,8 +1511,12 @@ KwLet       = "let" KwEnd ;
         hostGlobals[csTypeNames[cti]] = cto
         hostGlobals[csTypeNames[cti + 1]] = cto
     }
-    hostGlobals["char"] = {MinValue: {__char: 0}, MaxValue: {__char: 65535}}
+    // char and string carry their STATIC members by name (__cstype): mcall0 hands
+    // `char.IsDigit(c)` and `string.Join(...)` to lib/csharp-strings.js.
+    hostGlobals["char"] = {MinValue: {__char: 0}, MaxValue: {__char: 65535}, __cstype: "char"}
     hostGlobals["Char"] = hostGlobals["char"]
+    hostGlobals["string"] = {Empty: "", __cstype: "string"}
+    hostGlobals["String"] = hostGlobals["string"]
 
     // The class whose body is currently being built (for base calls), and the stack that
     // restores the outer name when a nested class ends.
@@ -2128,8 +2135,8 @@ KwLet       = "let" KwEnd ;
     //                   return s + " " + SR.Format(SR.Arg_ParamName_Name, _paramName);
     //               return s; } }
     // with SR.Arg_ParamName_Name = "(Parameter '{0}')" - a SPACE separator, not a
-    // newline (that is .NET Framework's older form). csSubstr below and
-    // abnf/jsrtcsharp.go raise "StartIndex cannot be less than zero. (Parameter
+    // newline (that is .NET Framework's older form). lib/csharp-strings.js and
+    // abnf/jsrtcsstr.go raise "StartIndex cannot be less than zero. (Parameter
     // 'startIndex')" from the same documentation.
     //
     // ArgumentException is NOT in this list - its one-argument overload really is
@@ -2417,21 +2424,14 @@ KwLet       = "let" KwEnd ;
     function csIdxChk(o, i) {
         if (i < 0 || i >= o.length) { csThrowExc("IndexOutOfRangeException", csIdxMsg) }
     }
-    // ----- String.Substring -----
-    //
-    // System.String.Substring(int startIndex, int length) takes a LENGTH, not an end
-    // index, and an out-of-range argument raises ArgumentOutOfRangeException; the
-    // four messages are the BCL's, uncheckable here.
-    function csSubstr(s, args) {
-        var b = csNumD(args[0])
-        if (b < 0) { csThrowExc("ArgumentOutOfRangeException", "StartIndex cannot be less than zero. (Parameter 'startIndex')") }
-        if (b > s.length) { csThrowExc("ArgumentOutOfRangeException", "startIndex cannot be larger than length of string. (Parameter 'startIndex')") }
-        if (args.length < 2) { return s.slice(b) }
-        var n = csNumD(args[1])
-        if (n < 0) { csThrowExc("ArgumentOutOfRangeException", "Length cannot be less than zero. (Parameter 'length')") }
-        if (b + n > s.length) { csThrowExc("ArgumentOutOfRangeException", "Index and length must refer to a location within the string. (Parameter 'length')") }
-        return s.slice(b, b + n)
-    }
+    // ----- System.String and System.Char (lib/csharp-strings.js) -----
+    // The value-model hooks that file asks through.
+    function csxkIsChar(v) { return csIsChar(v) }
+    function csxkCode(v) { return csIsChar(v) ? v.__char : csNumD(v) }
+    function csxkChar(c) { return csChar(c) }
+    function csxkNum(v) { return csNumD(v) }
+    function csxkStr(v) { return csStr(v) }
+    function csxkThrow(t, msg) { csThrowExc(t, msg) }
 
     // ----- iterators ('yield return'), driven by REPLAY -----
     // A method whose body contains a yield is an ITERATOR: calling it runs NOTHING and
@@ -2700,11 +2700,10 @@ KwLet       = "let" KwEnd ;
         if (name == "Invoke" && !csHasMethod(target, name) && csIsDelegVal(target)) {
             return csDelegInvoke(target, args)
         }
-        if (typeof target == "string") {
-            if (name == "Substring") return csSubstr(target, args)
-            if (name == "IndexOf") return target.indexOf(args[0])
-            if (name == "Equals") return target === args[0]
-            fail("unknown string method: " + name)
+        if (typeof target == "string") { return csxStrMethod(target, name, args) }
+        if (csIsChar(target)) { return csxCharMethod(target, name, args) }
+        if (target !== null && typeof target == "object" && target.__cstype !== undefined) {
+            return target.__cstype == "char" ? csxCharStatic(name, args) : csxStringStatic(name, args)
         }
         if (isDict(target)) {
             if (name == "ContainsKey") return dictFind(target, args[0]) >= 0
@@ -3099,6 +3098,11 @@ KwLet       = "let" KwEnd ;
                 if (holder != null) { return holder[key]() }
             }
             var clsName = declName
+            if (clsName == "string" || clsName == "String") {
+                var sargs = []
+                for (var si = 0; si < args.length; si++) { sargs.push(args[si]()) }
+                return csxNewString(sargs)
+            }
             if (clsName == "List") {
                 for (var i = 0; i < args.length; i++) { args[i]() }
                 var la = []

@@ -973,10 +973,15 @@ go-fmt.js                 <- go-rt.metajs, go interpreter (fmt.Sprintf; Go twin:
                              gopFormat in abnf/jsrtgolang.go)
 fdlibm.js                 <- java-rt.metajs, java interpreter
                              (Go twin: abnf/jsrtfdlibm.go)
-java-chars.js             <- java-rt.metajs, java interpreter
-                             (Go twin: abnf/jsrtjavachars.go)
+java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
+                             csharp interpreter (Go twin: abnf/jsrtjavachars.go)
 java-strings.js           <- java-rt.metajs, java interpreter (String's methods
                              and String.format; Go twin: abnf/jsrtjavastr.go)
+csharp-strings.js         <- csharp-rt.metajs, csharp interpreter (System.String
+                             and System.Char; Go twin: abnf/jsrtcsstr.go)
+utf16-strings.js          <- java-rt.metajs, csharp-rt.metajs, java and csharp
+                             interpreters (case mapping and literal search over
+                             UTF-16 units; Go twin: abnf/jsrtjavastr.go)
 ruby-respond.js           <- ruby-rt.metajs, ruby interpreter (respond_to? on a
                              builtin; Go twin: rubyRespondNames in
                              abnf/jsrtruby.go, kept equal by a go test)

@@ -3509,6 +3509,17 @@ KwLet       = "let" KwEnd ;
                 var facV = callExt(b, "js_get", [selfV, emitStr(b, "__tnew_" + clsName)])
                 return {b: b, v: callExt(b, "js_call", [facV, hUndef, callExt(b, "js_arr_new", [])])}
             }
+            // new string(c, n) / new string(char[] [, start, length]):
+            // lib/csharp-strings.js's csxNewString, through js_csnewstr.
+            if (clsName == "string" || clsName == "String") {
+                var sargsV = callExt(b, "js_arr_new", [])
+                for (var si = 0; si < args.length; si++) {
+                    var sr = args[si](b)
+                    b = sr.b
+                    callExt(b, "js_arr_push", [sargsV, sr.v])
+                }
+                return {b: b, v: callExt(b, "js_csnewstr", [sargsV])}
+            }
             if (clsName == "List") {
                 for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b }
                 var laV = callExt(b, "js_arr_new", [])
@@ -3911,7 +3922,6 @@ KwLet       = "let" KwEnd ;
     function csMName(name) {
         if (name == "Add") return "add"
         if (name == "Contains") return "contains"
-        if (name == "Substring") return "substring"
         if (name == "IndexOf") return "indexOf"
         // "Equals" is NOT lowered to the runtime's "equals": it is one of
         // System.Object's four inherited members (ECMA-334 8.2.3) and js_mcall
@@ -6511,7 +6521,7 @@ KwLet       = "let" KwEnd ;
         // abnf/jsrtcsharp.go) rather than as emitted literals.
         var csTypeIdents = ["sbyte", "SByte", "byte", "Byte", "short", "Int16",
                             "ushort", "UInt16", "int", "Int32", "uint", "UInt32",
-                            "long", "Int64", "ulong", "UInt64", "char", "Char"]
+                            "long", "Int64", "ulong", "UInt64", "char", "Char", "string", "String"]
         for (var cti = 0; cti < csTypeIdents.length; cti++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, csTypeIdents[cti]),
                                          callExt(b, "js_cstype", [emitStr(b, csTypeIdents[cti])])])

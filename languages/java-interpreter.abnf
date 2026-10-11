@@ -2176,6 +2176,7 @@ HasStatic   = :script(~~
     include("lib/fdlibm.js")
     include("lib/java-chars.js")
     include("lib/regex.js")
+    include("lib/utf16-strings.js")
     include("lib/java-strings.js")
     // rxFail is regex.js's error KNOB, overridden by assignment.
     rxFail = function (msg) { fail("regexp: " + msg) }

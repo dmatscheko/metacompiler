@@ -80,6 +80,7 @@ import "./runtime.metajs"
 import "./fdlibm.js"
 import "./java-chars.js"
 import "./regex.js"
+import "./utf16-strings.js"
 import "./java-strings.js"
 
 // rxFail is regex.js's error knob, overridden by assignment.

@@ -1,6 +1,7 @@
 // java-chars.js -- java.lang.Character's classification of a code point, for
-// java-interpreter.abnf (include) and languages/lib/java-rt.metajs (import).
-// abnf/jsrtjavachars.go is the Go twin's copy, over the same table.
+// java-interpreter.abnf (include) and languages/lib/java-rt.metajs (import), and
+// for System.Char's through lib/csharp-strings.js. abnf/jsrtjavachars.go is the
+// Go twin's copy, over the same table.
 //
 // The table is java 24.0.2's (Unicode 16.0), read from java.lang.Character over
 // every code point U+0000..U+10FFFF: one record per run of code points of one

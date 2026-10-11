@@ -2551,6 +2551,47 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s38b5", v.M(iv[0]) == "int" && v.M(sv[0]) == "object" && (v + v) == "V+V" && (v + sv[0]) == "V+object");
         }
 
+        // ===== SECTION 39: System.String and System.Char =====
+        //
+        // The BCL's documented members, ordinal: char.IsX classify by Unicode
+        // general category (IsUpper is Lu, IsWhiteSpace the separators plus
+        // U+0009..U+000D and U+0085), Char.CompareTo orders by code, Split keeps
+        // empty entries and splits at whitespace when given no separator,
+        // ToUpper maps one unit to one unit (so "ß" stays), Concat and Join render
+        // null as the empty string. No C# toolchain here: every value is the
+        // documentation's.
+        static void S39()
+        {
+            string[] w = { "Hello, World", "  x  ", "a,,b,", "a b\tc", "abc" };
+            char[] c = { 'A', 'B', '7', '\u05D0', '\u00A0', '\u001C', '\u01C5', '\u00DF', 'x' };
+            string s = w[0];
+            Program.Check("s39c1", char.IsDigit(c[2]) && !char.IsDigit(c[0]) && char.IsLetter(c[3]) && char.IsLetterOrDigit(c[2])
+                && char.IsUpper(c[0]) && !char.IsUpper(c[6]) && !char.IsLower(c[0]) && char.IsWhiteSpace(c[4])
+                && !char.IsWhiteSpace(c[5]) && char.IsDigit("a1", 1) && !char.IsLetter("a1", 1));
+            Program.Check("s39c2", c[0].CompareTo(c[1]) < 0 && c[1].CompareTo(c[0]) > 0 && c[0].CompareTo(c[0]) == 0
+                && char.ToUpper(c[8]) == 'X' && char.ToLower(c[0]) == 'a' && char.ToUpper(c[7]) == c[7]);
+            Program.Check("s39s1", s.IndexOf('o') == 4 && s.IndexOf("o", 5) == 8 && s.IndexOf('o', 5, 3) == -1 && s.LastIndexOf('o') == 8
+                && s.LastIndexOf("World", 10) == -1 && s.Contains("World") && s.Contains('W') && s.StartsWith("Hell")
+                && s.EndsWith('d') && !s.EndsWith("x"));
+            Program.Check("s39s2", s.ToUpper() == "HELLO, WORLD" && s.ToLower() == "hello, world" && "ab\u00DF".ToUpper() == "AB\u00DF"
+                && w[1].Trim() == "x" && w[1].TrimStart() == "x  " && w[1].TrimEnd() == "  x" && s.Trim('H', 'd') == "ello, Worl"
+                && s.Replace("l", "L") == "HeLLo, WorLd" && s.Replace('o', '0') == "Hell0, W0rld");
+            Program.Check("s39s3", w[2].Split(',').Length == 4 && w[2].Split(',')[1] == "" && string.Join("|", w[3].Split()) == "a|b|c"
+                && string.Join("|", s.Split(", ")) == "Hello|World" && string.Join("|", "a-b_c".Split('-', '_')) == "a|b|c");
+            Program.Check("s39s4", s.PadLeft(14, '*') == "**Hello, World" && w[4].PadRight(5) == "abc  " && s.Insert(5, "!") == "Hello!, World"
+                && s.Remove(5) == "Hello" && s.Remove(5, 2) == "HelloWorld");
+            char[] cs = s.ToCharArray();
+            Program.Check("s39n1", cs.Length == 12 && cs[1] == 'e' && new string(cs, 0, 5) == "Hello" && new string(c[0], 3) == "AAA"
+                && new string(w[4].ToCharArray()) == "abc" && w[4].ToCharArray(1, 2)[1] == 'c');
+            Program.Check("s39n2", string.Concat("x", 1, c[0]) == "x1A" && string.Concat("a", null, "b") == "ab"
+                && string.Join(",", 1, 2, 3) == "1,2,3" && string.Join("-", new string[] { "p", "q" }) == "p-q"
+                && string.IsNullOrEmpty("") && string.IsNullOrEmpty(null) && !string.IsNullOrEmpty(s)
+                && string.IsNullOrWhiteSpace(w[1].Substring(0, 2)) && string.Empty.Length == 0 && string.Equals(w[4], "abc"));
+            string msg = "";
+            try { s.Remove(20); } catch (ArgumentOutOfRangeException) { msg = "range"; }
+            Program.Check("s39e1", msg == "range");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2591,6 +2632,7 @@ b";                                                   // verbatim keeps the newl
             Program.S36(); // SECTION-CALL 36
             Program.S37(); // SECTION-CALL 37
             Program.S38(); // SECTION-CALL 38
+            Program.S39(); // SECTION-CALL 39
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

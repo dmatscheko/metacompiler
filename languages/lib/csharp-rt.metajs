@@ -97,6 +97,9 @@
 // The shared layer-2 runtime. It supplies the externs every language implements
 // identically, parameterised by the rtk* hooks below.
 import "./runtime.metajs"
+import "./java-chars.js"
+import "./utf16-strings.js"
+import "./csharp-strings.js"
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return csCmp(op, l, r) }
@@ -121,6 +124,18 @@ function rtkDictFind(keys, k) { return csDictFind(keys, k) }
 function csChar(code) { return rtCharBox(code) }
 
 function csIsChar(v) { return rtIsCharBox(v) }
+
+// ----- System.String and System.Char (lib/csharp-strings.js) ------------------
+// The value-model hooks that file asks through.
+function csxkIsChar(v) { return csIsChar(v) }
+function csxkCode(v) {
+    if (csIsChar(v)) { return v["__char"] }
+    return rtjNum(v)
+}
+function csxkChar(c) { return csChar(c) }
+function csxkNum(v) { return rtjNum(v) }
+function csxkStr(v) { return cpStr(v) }
+function csxkThrow(t, msg) { csThrow(t, msg) }
 
 // ===================================================== value readings =======
 
@@ -1100,6 +1115,12 @@ function csTypeObject(name0) {
     if (name0 == "char" || name0 == "Char") {
         o["MinValue"] = csChar(0)
         o["MaxValue"] = csChar(65535)
+        o["__cstype"] = "char"
+        return o
+    }
+    if (name0 == "string" || name0 == "String") {
+        o["Empty"] = ""
+        o["__cstype"] = "string"
         return o
     }
     var name = csTypeAlias(name0)
@@ -1361,7 +1382,8 @@ function js_jchareq(l, r) {
 // __class/__super walk js_mcall does anyway. The twin is mcall0 in
 // languages/csharp-interpreter.abnf.
 function js_csmcall(recv, name, args) {
-    if (name == "Equals" || name == "GetHashCode" || name == "GetType") {
+    // Equals with ONE argument: the static string.Equals(a, b) is not it.
+    if ((name == "Equals" && args.length == 1) || name == "GetHashCode" || name == "GetType") {
         if (csUserMethod(recv, name) === undefined) {
             if (name == "Equals") { return csObjEquals(recv, args[0]) }
             if (name == "GetHashCode") { return csHash(recv) }
@@ -1376,27 +1398,7 @@ function js_mcall(recv, name, args) {
         if (name == "length") { return recv.length }
         if (name == "charAt") { return recv.charAt(rtjNum(args[0])) }
         if (name == "equals") { return rtjStrictEq(recv, args[0]) }
-        // System.String.Substring(int startIndex, int length) takes a LENGTH, not
-        // an end index, and an out-of-range argument raises
-        // ArgumentOutOfRangeException rather than clamping. The twin is csSubstr in
-        // languages/csharp-interpreter.abnf.
-        if (name == "substring") {
-            var b = args.length > 0 ? rtjNum(args[0]) : 0
-            if (b < 0) { csThrow("ArgumentOutOfRangeException", "StartIndex cannot be less than zero. (Parameter 'startIndex')") }
-            if (b > recv.length) { csThrow("ArgumentOutOfRangeException", "startIndex cannot be larger than length of string. (Parameter 'startIndex')") }
-            if (args.length < 2) { return rtSubstring(recv, b, recv.length) }
-            var n = rtjNum(args[1])
-            if (n < 0) { csThrow("ArgumentOutOfRangeException", "Length cannot be less than zero. (Parameter 'length')") }
-            if (b + n > recv.length) { csThrow("ArgumentOutOfRangeException", "Index and length must refer to a location within the string. (Parameter 'length')") }
-            return rtSubstring(recv, b, b + n)
-        }
-        if (name == "indexOf") { return recv.indexOf(cpToString(args[0])) }
-        if (name == "contains") { return recv.indexOf(cpToString(args[0])) >= 0 }
-        if (name == "ToUpper") { return recv.toUpperCase() }
-        if (name == "ToLower") { return recv.toLowerCase() }
-        if (name == "Trim") { return recv.trim() }
-        fail("unknown String method: " + name)
-        return undefined
+        return csxStrMethod(recv, name, args)
     }
     if (recv === undefined || recv === null) {
         fail("method call '" + name + "' on a " + (recv === null ? "null" : "undefined"))
@@ -1408,9 +1410,12 @@ function js_mcall(recv, name, args) {
     }
     if (Array.isArray(recv)) { return csListMethod(recv, name, args) }
     if (csIsDict(recv)) { return csDictMethod(recv, name, args) }
-    if (csIsChar(recv)) {
-        fail("method call '" + name + "' on a char")
-        return undefined
+    if (csIsChar(recv)) { return csxCharMethod(recv, name, args) }
+    // char and string carry their STATIC members by name (csTypeObject).
+    var cst = recv["__cstype"]
+    if (cst !== undefined) {
+        if (cst == "char") { return csxCharStatic(name, args) }
+        return csxStringStatic(name, args)
     }
     var cls = recv["__class"]
     if (cls !== undefined) {
@@ -2021,6 +2026,9 @@ function js_csnewlen(n) {
 
 // One of the integral type NAMES as an expression primary.
 function js_cstype(name) { return csTypeObject(name) }
+
+// new string(...): lib/csharp-strings.js.
+function js_csnewstr(args) { return csxNewString(args) }
 
 // C#'s .Length / .Count. A string's Length counts UTF-16 CODE UNITS (System.String
 // is a UTF-16 sequence, so "😀".Length is 2) - which is what a MetaJS
