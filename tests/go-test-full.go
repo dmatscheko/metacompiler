@@ -3021,6 +3021,79 @@ func s48() {
 	check("dp4", f48d() == "iB")
 }
 
+// ===== SECTION 49: a struct is a value, a pointer is not =====
+// Expected values read off `go run` (go 1.27). Assignment, a short declaration, a
+// dereference, an argument, a result, a composite-literal element, a range variable
+// and a channel send all COPY a struct (and an array of them); a pointer stays the
+// same object, and == on two pointers is identity.
+type T49 struct{ a int }
+type U49 struct {
+	t T49
+	n []int
+	p *T49
+}
+
+func id49(t T49) T49   { return t }
+func mod49(t T49)      { t.a = 50 }
+func ret49(t *T49) T49 { return *t }
+
+func s49() {
+	a := T49{1}
+	p := &a
+	b := a
+	b.a = 2
+	c := *p
+	c.a = 9
+	d := id49(a)
+	d.a = 7
+	mod49(a)
+	e := ret49(p)
+	e.a = 8
+	check("vs1", a.a == 1 && b.a == 2 && c.a == 9 && d.a == 7 && e.a == 8)
+	p.a = 10
+	check("vs2", a.a == 10 && b.a == 2 && c.a == 9)
+	x := &T49{1}
+	y := &T49{1}
+	check("vs3", x != y && *x == *y && x == x && p == &a)
+	u := U49{t: T49{3}, n: []int{1}, p: x}
+	v := u
+	v.t.a = 4
+	v.n[0] = 9
+	v.p.a = 5
+	check("vs4", u.t.a == 3 && u.n[0] == 9 && u.p.a == 5 && v.t.a == 4)
+	arr := []T49{{1}, {2}}
+	f := arr[0]
+	f.a = 99
+	m := map[string]T49{"k": {1}}
+	g := m["k"]
+	g.a = 5
+	check("vs5", arr[0].a == 1 && f.a == 99 && m["k"].a == 1 && g.a == 5)
+	var h T49
+	h = a
+	h.a = 77
+	ts := [2]T49{{1}, {2}}
+	ts2 := ts
+	ts2[0].a = 6
+	check("vs6", a.a == 10 && h.a == 77 && ts[0].a == 1 && ts2[0].a == 6)
+	for _, t := range arr {
+		t.a = 1000
+	}
+	var ip interface{} = a
+	a.a = 123
+	ch := make(chan T49, 1)
+	ch <- a
+	a.a = 124
+	got := <-ch
+	check("vs7", arr[0].a == 1 && ip.(T49).a == 10 && got.a == 123)
+	ps := []*T49{x, y}
+	for _, q := range ps {
+		q.a = 31
+	}
+	q2 := ps[0]
+	q2.a = 32
+	check("vs8", x.a == 32 && y.a == 31 && ps[0] == x)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3070,6 +3143,7 @@ func main() {
 	s46() // SECTION-CALL 46
 	s47() // SECTION-CALL 47
 	s48() // SECTION-CALL 48
+	s49() // SECTION-CALL 49
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

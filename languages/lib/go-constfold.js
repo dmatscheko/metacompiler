@@ -614,6 +614,7 @@ var constByPos = {}
 var cNone = {s: 0, n: [], d: [], f: false, none: true}
 function regConst(pos, c) {
     if (pos == undefined || pos == null) { return }
+    stByPos["p" + pos] = ""
     constByPos["p" + pos] = (c == null) ? cNone : c
     if (c == null) { cFnByPos["p" + pos] = cFnNone } else { cFnByPos["p" + pos] = cKonstFn(c) }
 }
@@ -803,22 +804,26 @@ function cFromRadixText(text) {
 //     order in Go; this fold runs in source order, so a forward reference declines.
 //   - a name declared with := , var, or as a parameter anywhere its frame can see,
 //     and every name at all once the frame that bound it has been popped.
-// A frame is {n: names, v: constants} as two parallel arrays rather than an object,
-// because a frame has to be TRUNCATED (the switch-case rule) and enumerated, and
-// neither is expressible on an object in the frozen script subset.
-var cScopes = [{n: [], v: []}]
+// A frame is {n: names, v: constants, t: static types} as parallel arrays rather than
+// an object, because a frame has to be TRUNCATED (the switch-case rule) and
+// enumerated, and neither is expressible on an object in the frozen script subset.
+// The t column is the STATIC TYPES section's (below); a binder that does not set it
+// leaves "", which means "not known".
+var cScopes = [{n: [], v: [], t: []}]
 var cPend = []
+var cPendT = []
 var cSwMarks = []
 function cTop() { return cScopes[cScopes.length - 1] }
 // A parameter or receiver name is collected here and applied to the NEXT frame,
 // which is the function body: poisoning it where the tag fires would poison it in
 // the PACKAGE frame instead and kill `const n` for the whole file.
-function cPendName(name) { cPend.push(name); return name }
+function cPendName(name) { cPend.push(name); cPendT.push(""); return name }
 function cScopeEnter() {
-    var f = {n: [], v: []}
+    var f = {n: [], v: [], t: []}
     var i = 0
-    while (i < cPend.length) { f.n.push(cPend[i]); f.v.push(null); i = i + 1 }
+    while (i < cPend.length) { f.n.push(cPend[i]); f.v.push(null); f.t.push(cPendT[i]); i = i + 1 }
     cPend = []
+    cPendT = []
     cScopes.push(f)
 }
 function cScopeExit() { if (cScopes.length > 1) { cScopes.pop() } }
@@ -826,6 +831,7 @@ function cBindConst(name, c) {
     var f = cTop()
     f.n.push(name)
     f.v.push(c == undefined ? null : c)
+    f.t.push("")
 }
 // Returns the name so it can be written inline in a tag that also pushes it.
 function cPoisonName(name) { cBindConst(name, null); return name }
@@ -842,13 +848,189 @@ function cLookup(name) {
     }
     return null
 }
+// ----- STATIC TYPES: which stores copy a struct -----
+// A struct and a pointer to it are ONE object in this value model, so a store
+// cannot tell a copy (b := a) from an alias (q := p) by the value. What the front
+// end knows of the static type decides, and it knows it for a few forms only:
+//   - a binding keeps the type text it was declared with: a typed var, a parameter,
+//     a receiver (cPendTy), or the type of the single expression a := binds
+//     (cBindTy); an assignment target keeps the one it had (cAssignName), and every
+//     other binder - range, type switch, comma-ok, named result - leaves "".
+//   - an expression reports its type against its END position, like constByPos: a
+//     name its binding's, &x a pointer ("*" + x's), *p what p points at ("?" when
+//     that is not known: a value of some type), a composite literal its own type
+//     marked fresh ("=T": a new value, nothing to copy). regConst clears the entry,
+//     so a node ending where a reporting operand ends reads as "" unless it reports.
+// "" means "not known", and an unknown store does not copy - the pointer reading,
+// which can only lose a copy, never an alias. Readers: goStCopyTy (the stores in
+// both grammars) and goCmpFold's pointer comparison.
+var stByPos = {}
+function regSt(pos, ty) {
+    if (pos == undefined || pos == null) { return }
+    stByPos["p" + pos] = ty
+}
+function stAt(pos) {
+    if (pos == undefined || pos == null) { return "" }
+    var t = stByPos["p" + pos]
+    if (t == undefined) { return "" }
+    return t
+}
+function cTyLookup(name) {
+    var s = cScopes.length - 1
+    while (s >= 0) {
+        var f = cScopes[s]
+        var i = f.n.length - 1
+        while (i >= 0) {
+            if (f.n[i] === name) { return f.t[i] }
+            i = i - 1
+        }
+        s = s - 1
+    }
+    return ""
+}
+// The newest binding of name in the innermost frame takes the type ty.
+function cBindTy(name, ty) {
+    var f = cTop()
+    var i = f.n.length - 1
+    while (i >= 0) {
+        if (f.n[i] === name) { f.t[i] = ty; return }
+        i = i - 1
+    }
+}
+// A pending parameter or receiver name takes its declared type.
+function cPendTy(name, ty) {
+    var i = cPend.length - 1
+    while (i >= 0) {
+        if (cPend[i] === name) { cPendT[i] = ty; return }
+        i = i - 1
+    }
+}
+// An assignment target: a poison binding (it is not a constant here) that keeps the
+// static type the name already had.
+function cAssignName(name) {
+    var t = cTyLookup(name)
+    cBindConst(name, null)
+    cBindTy(name, t)
+    return name
+}
+// A type with "=" (fresh) taken off: what a binding of that expression holds.
+function stBare(t) { return (t.length > 0 && t.charAt(0) == "=") ? t.substring(1) : t }
+// The type a store must copy with, or "" when it copies nothing: a fresh value, a
+// pointer, a slice, map, channel, function or interface, and an unknown type are
+// the value itself. The grammar resolves the text to a struct or an array of them.
+function goStCopyTy(t) {
+    if (t == "" || t.charAt(0) == "=" || t.charAt(0) == "*") { return "" }
+    if (t == "any" || t == "error" || t.indexOf("[]") == 0 || t.indexOf("map[") == 0) { return "" }
+    if (t.indexOf("chan") == 0 || t.indexOf("<-") == 0 || t.indexOf("func") == 0) { return "" }
+    if (t.indexOf("interface") == 0) { return "" }
+    return t
+}
+// *x and &x, at the position they and their operand share.
+function goDerefC(t, pos) {
+    var it = stAt(pos)
+    regConst(pos, null)
+    var b = stBare(it)
+    regSt(pos, (b.length > 1 && b.charAt(0) == "*") ? b.substring(1) : "?")
+    return t
+}
+function goAddrC(t, pos) {
+    var it = stBare(stAt(pos))
+    regConst(pos, null)
+    regSt(pos, "*" + (it == "" ? "?" : it))
+    return t
+}
+function goAddrNameC(t, name, pos) {
+    var it = cTyLookup(name)
+    regSt(pos, "*" + (it == "" ? "?" : it))
+    return t
+}
+// A composite literal of type ty: a fresh value.
+function goLitC(t, ty, pos) {
+    regSt(pos, "=" + ty)
+    return t
+}
+// The element type of a slice, array or map type text, or "".
+function stElemTy(t) {
+    var b = stBare(t)
+    if (b.length > 0 && b.charAt(0) == "*") { b = b.substring(1) }
+    if (b.indexOf("map[") == 0) {
+        var d = 0
+        var i = 3
+        while (i < b.length) {
+            var ch = b.charAt(i)
+            if (ch == "[") { d = d + 1 }
+            if (ch == "]") { d = d - 1; if (d == 0) { return b.substring(i + 1) } }
+            i = i + 1
+        }
+        return ""
+    }
+    if (b.length > 1 && b.charAt(0) == "[") {
+        var cl = b.indexOf("]")
+        if (cl > 0) { return b.substring(cl + 1) }
+    }
+    return ""
+}
+// A selector/index chain, from its matched TEXT (whitespace already stripped): a
+// name, then `.field` and `[index]` steps, typed through the binding's type, the
+// field types of the struct declarations (goFieldTyHook, one per grammar) and the
+// element types. A call, a conversion, a slice or an assertion anywhere ends it
+// unknown.
+function goChainC(t, text, pos) {
+    var i = 0
+    while (i < text.length && cIsIdCh(text.charCodeAt(i))) { i = i + 1 }
+    if (i == 0 || i == text.length) { return t }
+    var ty = stBare(cTyLookup(text.substring(0, i)))
+    while (i < text.length && ty != "") {
+        var ch = text.charAt(i)
+        if (ch == ".") {
+            var j = i + 1
+            while (j < text.length && cIsIdCh(text.charCodeAt(j))) { j = j + 1 }
+            if (j == i + 1) { return t }
+            var sn = ty.charAt(0) == "*" ? ty.substring(1) : ty
+            ty = goFieldTyHook(sn, text.substring(i + 1, j))
+            i = j
+        } else if (ch == "[") {
+            var d = 0
+            var k = i
+            var q = 0
+            while (k < text.length) {
+                var c2 = text.charCodeAt(k)
+                if (q != 0) { if (c2 == q) { q = 0 } else if (c2 == 92) { k = k + 1 } }
+                else if (c2 == 34 || c2 == 96 || c2 == 39) { q = c2 }
+                else if (c2 == 91) { d = d + 1 }
+                else if (c2 == 93) { d = d - 1; if (d == 0) { break } }
+                else if (c2 == 58 && d == 1) { return t }
+                k = k + 1
+            }
+            if (k >= text.length) { return t }
+            ty = stElemTy(ty)
+            i = k + 1
+        } else { return t }
+    }
+    if (ty != "") { regSt(pos, ty) }
+    return t
+}
+function cIsIdCh(cc) { return (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 95 }
+// `for k, v := range x`: the names are noted as they are bound, and the ranged
+// expression's element type becomes v's - and the copy each iteration makes of a
+// struct element ({rcopy}, read by makeForRange in both grammars).
+var cRangeNames = []
+function cRangeStart(lbl) { cRangeNames = []; return lbl }
+function cRangeVar(name) { cPoisonName(name); cRangeNames.push(name); return name }
+function goRangeC(pos) {
+    var et = stElemTy(stAt(pos))
+    if (cRangeNames.length > 1) { cBindTy(cRangeNames[1], et) }
+    cRangeNames = []
+    return {rcopy: goStCopyTy(et)}
+}
+
 // The switch body's mark: its frame DEPTH as well as its length, so a truncation
 // that would land in the wrong frame does nothing at all instead.
 function cSwEnter() { cSwMarks.push({d: cScopes.length, k: cTop().n.length}) }
 function cSwTrunc(m) {
     if (cScopes.length !== m.d) { return }
     var f = cTop()
-    while (f.n.length > m.k) { f.n.pop(); f.v.pop() }
+    while (f.n.length > m.k) { f.n.pop(); f.v.pop(); f.t.pop() }
 }
 function cSwCase() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks[cSwMarks.length - 1]) } }
 function cSwExit() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks.pop()) } }
@@ -877,6 +1059,7 @@ function goNameC(name, pos) {
         return makeVarRef(name)
     }
     regConst(pos, cLookup(name))
+    regSt(pos, cTyLookup(name))
     return makeVarRef(name)
 }
 // A const spec binds its names and hands the item list on with the position markers
@@ -966,6 +1149,13 @@ function goCmpFold(items) {
         i += 3
     }
     if (ops.length == 1) {
+        // == between POINTERS is identity: &T{1} == &T{1} is false while *x == *y
+        // compares the structs. "==p" / "!=p" are the grammars' pointer operators.
+        var lt = stBare(stAt(items[1].at))
+        var rt = stBare(stAt(items[4].at))
+        if ((ops[0] == "==" || ops[0] == "!=") && (lt.charAt(0) == "*" || rt.charAt(0) == "*")) {
+            ops[0] = ops[0] + "p"
+        }
         var l = constAt(items[1].at)
         var r = constAt(items[4].at)
         // The clear has to come AFTER the two reads: this node ends exactly where

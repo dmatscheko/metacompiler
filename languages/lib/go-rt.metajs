@@ -397,6 +397,71 @@ function goCopyVal(v) {
     return o
 }
 
+// js_gocopy(v, code): the copy a store of a struct VALUE makes, by the code
+// goCopyCodeC in languages/go-to-llvm-ir.abnf chose - "S" a struct (its fields by
+// the descriptor's __fcopy codes), "A" + code an array of such elements, "?" a value
+// of a type the front end did not know (a struct as "S", an array with its nested
+// arrays), "" nothing (goIsStructVal says what a struct is). js_goptreq /
+// js_goptrne: == on pointers, identity for two structs. Twins: goCopyCoded /
+// goPtrEq in abnf/jsrtgolang.go, goCopyBy / goPtrEq in languages/go-interpreter.abnf.
+function js_gocopy(v, code) { return goCopyCoded(v, goStrOf(code)) }
+function goCopyCoded(v, code) {
+    if (code == "") { return v }
+    if (Array.isArray(v)) {
+        if (code.charAt(0) != "A" && code != "?") { return v }
+        var ec = "?"
+        if (code.charAt(0) == "A") { ec = code.substring(1) }
+        var out = []
+        var i = 0
+        while (i < v.length) {
+            if (ec == "?" && !Array.isArray(v[i])) { out.push(v[i]) } else { out.push(goCopyCoded(v[i], ec)) }
+            i = i + 1
+        }
+        return out
+    }
+    if (!goIsStructVal(v) || (code != "S" && code != "?")) { return v }
+    var cls = goClassOf(v)
+    var fs = cls.__fields
+    var fc = cls.__fcopy
+    var o = {}
+    // The hidden slots by hand (keysOf skips them): see goCopyVal.
+    o.__class = cls
+    if (v.__nil === true) { o.__nil = true }
+    var ks = keysOf(v)
+    var j = 0
+    while (j < ks.length) {
+        var pv = anytype
+        pv = v[ks[j]]
+        if (Array.isArray(fs) && Array.isArray(fc)) {
+            var f = 0
+            while (f < fs.length) {
+                if (fs[f] === ks[j]) {
+                    if (f < fc.length && fc[f] != "") { pv = goCopyCoded(pv, goStrOf(fc[f])) }
+                    f = fs.length
+                }
+                f = f + 1
+            }
+        }
+        o[ks[j]] = pv
+        j = j + 1
+    }
+    return o
+}
+function js_goptreq(a, b) { return goPtrEq(a, b) }
+function js_goptrne(a, b) { return !goPtrEq(a, b) }
+function goPtrEq(a, b) {
+    if (goIsStructVal(a) && goIsStructVal(b)) { return a === b }
+    return goValueEq(a, b)
+}
+// An instance of a declared struct, not of a "$..." runtime descriptor (a slice
+// header, a pointer cell, a complex number).
+function goIsStructVal(v) {
+    var cls = goClassOf(v)
+    if (cls === undefined) { return false }
+    var nm = cls.__name
+    return !(typeof nm == "string" && nm.length > 0 && nm.charAt(0) == "$")
+}
+
 // ===================================================== rendering ============
 //
 // fmt's %v. abnf/jsrtgolang.go's gopStr / gopRender / gopObj, function for

@@ -806,6 +806,77 @@ func (rt *jsrt) goChainOf(p interface{}) []goAbort {
 	return c
 }
 
+// goCopyCoded copies v as code says: "S" a struct (its fields by the descriptor's
+// __fcopy codes), "A" + code an array of such elements, "?" a value of a type the
+// front end did not know (a struct as "S", an array with its nested arrays), ""
+// nothing (goIsStructVal says what a struct is).
+func (rt *jsrt) goCopyCoded(v interface{}, code string) interface{} {
+	if code == "" {
+		return v
+	}
+	if arr, ok := v.(*jsArray); ok {
+		if code[0] != 'A' && code != "?" {
+			return v
+		}
+		ec := "?"
+		if code[0] == 'A' {
+			ec = code[1:]
+		}
+		out := &jsArray{elems: make([]interface{}, len(arr.elems))}
+		for i, e := range arr.elems {
+			if _, isArr := e.(*jsArray); ec == "?" && !isArr {
+				out.elems[i] = e
+				continue
+			}
+			out.elems[i] = rt.goCopyCoded(e, ec)
+		}
+		return out
+	}
+	o, ok := v.(*jsObject)
+	if !ok || !goIsStructVal(v) || (code != "S" && code != "?") {
+		return v
+	}
+	cls := goClassOf(v)
+	fs, _ := cls.props["__fields"].(*jsArray)
+	fc, _ := cls.props["__fcopy"].(*jsArray)
+	out := newJSObject()
+	for _, k := range o.keys {
+		pv := o.props[k]
+		if fs != nil && fc != nil {
+			for i, f := range fs.elems {
+				if f == k {
+					if c, _ := argAt(fc.elems, i).(string); c != "" {
+						pv = rt.goCopyCoded(pv, c)
+					}
+					break
+				}
+			}
+		}
+		out.set(k, pv)
+	}
+	return out
+}
+
+// goPtrEq is == between pointers: two struct objects are the same pointer only when
+// they are the same object; anything else (a cell, nil) compares as == does.
+func (rt *jsrt) goPtrEq(a, b interface{}) bool {
+	if goIsStructVal(a) && goIsStructVal(b) {
+		return a == b
+	}
+	return rt.goValueEq(a, b)
+}
+
+// goIsStructVal: an instance of a declared struct, not of a "$..." runtime
+// descriptor (a slice header, a pointer cell, a complex number).
+func goIsStructVal(v interface{}) bool {
+	cls := goClassOf(v)
+	if cls == nil {
+		return false
+	}
+	nm, _ := cls.props["__name"].(string)
+	return !strings.HasPrefix(nm, "$")
+}
+
 // goDeferCall calls one deferred function and answers the panic it raised, or nil.
 func (rt *jsrt) goDeferCall(f interface{}, args []interface{}) (caught interface{}) {
 	defer func() { caught = recover() }()
@@ -1991,6 +2062,16 @@ func init() {
 		// remaining calls run for it, while the panic it aborted stays on the chain
 		// with its recovered bit frozen. Twins: goFrameDefers in
 		// languages/go-interpreter.abnf, js_gorundefers in lib/go-rt.metajs.
+		// js_gocopy(v, code): the copy a store of a struct VALUE makes, by the code
+		// goCopyCodeC in languages/go-to-llvm-ir.abnf chose. js_goptreq / js_goptrne:
+		// == on pointers, identity for two structs. Twins: js_gocopy / js_goptreq in
+		// lib/go-rt.metajs, goCopyBy / goPtrEq in languages/go-interpreter.abnf.
+		m["js_gocopy"] = func(a []uint64) uint64 {
+			code, _ := u(a[1]).(string)
+			return w(rt.goCopyCoded(u(a[0]), code))
+		}
+		m["js_goptreq"] = func(a []uint64) uint64 { return w(rt.goPtrEq(u(a[0]), u(a[1]))) }
+		m["js_goptrne"] = func(a []uint64) uint64 { return w(!rt.goPtrEq(u(a[0]), u(a[1]))) }
 		// panic(v) and $panicf(v): the second argument says the value was computed
 		// at the panic, which goPanicReport needs (see PanicCall in the grammars).
 		basePanic := m["js_gopanic"]

@@ -464,7 +464,7 @@ CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 
 // var x int = 5 / var s string -- the zero value depends on the type.
 VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
-            = "var" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
+            = "var" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList <~~ push({vend: up.pos}) ~~> ] [ ";" ] ;
 VType       <~~ push({ty: noteTy(up.in)}) ~~>
             = Type ;
 
@@ -473,7 +473,7 @@ VType       <~~ push({ty: noteTy(up.in)}) ~~>
 VarGroup    <~~ push(makeVarGroup(takeAll())) ~~>
             = "var" KwEnd "(" { VarSpec } ")" [ ";" ] ;
 VarSpec     <~~ push(makeVarDecl(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
+            = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList <~~ push({vend: up.pos}) ~~> ] [ ";" ] ;
 
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
@@ -535,14 +535,14 @@ AssertType  <~~ push({at: firstType(up.in)}) ~~> = Type ;
 ExprOnly    <~~ clrDeclNames(); push(exprToStmt(pop())) ~~>
             = Expression ;
 
-ShortDecl   <~~ push(makeShortDecl(takeAll())) ~~>
+ShortDecl   <~~ push(makeShortDecl(takeAll(), up.pos)) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } ":=" ExprList ;
 
 IncDecStmt  <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // a = e / a, b = b, a / p.x = e / s[i] = e / a += e
-Assign      <~~ push(makeAssign(takeAll())) ~~>
+Assign      <~~ push(makeAssign(takeAll(), up.pos)) ~~>
             = Target { "," Target } AssignOp <~~ push({op: up.in}) ~~> ExprList ;
 // Longest first: '&^=' before '&=', and the bare '=' last of all.
 AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "=" ;
@@ -562,7 +562,7 @@ TgtPlain    <~~ push(makeTargetRef(takeAll())) ~~>
 TgtParen    <~~ push(makeTargetRef(takeAll())) ~~>
             = "(" TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ")"
               { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(cPoisonName(up.in)) ~~> ;
+TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(cAssignName(up.in)) ~~> ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -591,9 +591,9 @@ ForEver     <~~ push(makeForEver(takeAll())) ~~>
 // wrapped as {rv: ...} rather than pushed bare, because with the group optional
 // makeForRange can no longer tell "no names" from "one name" by item count alone.
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~>
-              [ Id <~~ push({rv: cPoisonName(up.in)}) ~~> [ "," Id <~~ push({rv: cPoisonName(up.in)}) ~~> ] ( ":=" | "=" <~~ push({rset: true}) ~~> ) ]
-              "range" KwEnd CondOn Expression CondOff Block ;
+            = "for" KwEnd <~~ push({lbl: cRangeStart(takeLabel())}) ~~>
+              [ Id <~~ push({rv: cRangeVar(up.in)}) ~~> [ "," Id <~~ push({rv: cRangeVar(up.in)}) ~~> ] ( ":=" | "=" <~~ push({rset: true}) ~~> ) ]
+              "range" KwEnd CondOn Expression <~~ push(goRangeC(up.pos)) ~~> CondOff Block ;
 ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
 FInit       <~~ push({k:"init", t:pop(), names: takeDeclNames()}) ~~> = SimpleStmt2 ;
@@ -789,9 +789,9 @@ Not         <~~ push(goClearC(makeNot(pop()), up.pos)) ~~>
 // still the identity on the value: structs, slices and maps already behave like
 // references, so &Point{1, 2} and &s[i] need no cell. Mirrors go-interpreter.abnf.
 AddrOf      = AddrVar | AddrAny ;
-AddrVar     <~~ push(makeAddrVar(pop())) ~~>
+AddrVar     <~~ var an = pop(); push(goAddrNameC(makeAddrVar(an), an, up.pos)) ~~>
             = "&" Id <~~ push(up.in) ~~> NotSfxStart ;
-AddrAny     <~~ push(goClearC(pop(), up.pos)) ~~>
+AddrAny     <~~ push(goAddrC(pop(), up.pos)) ~~>
             = "&" UnaryExpr ;
 // &name is only the variable form when the name is not the head of a composite
 // literal, a call, a selector or an index. Anchored to the very NEXT byte, so it must
@@ -805,7 +805,7 @@ NotSfxStart = :script(~~
         return undefined
     })()
 ~~) ;
-Deref       <~~ push(goClearC(makeDeref(pop()), up.pos)) ~~>
+Deref       <~~ push(goDerefC(makeDeref(pop()), up.pos)) ~~>
             = "*" UnaryExpr ;
 
 // p.manhattan(), fmt.Println(...), p.x, s[i], and slice expressions s[lo:hi:max].
@@ -817,7 +817,7 @@ PostfixExpr = CallMember ;
 // the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
 // rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
 // still on the name's line.
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+CallMember  <~~ push(goChainC(foldCallMember(takeAll()), up.in, up.pos)) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
@@ -1007,12 +1007,12 @@ FuncLit     <~~ push(makeFuncLit(takeAll())) ~~>
 
 // []int{1, 2, 3} and [][]int{{1}, {2, 3}} - a slice literal, whose elements may be
 // bare brace groups built against the element type.
-SliceLit    <~~ push(makeSliceLit(takeAll())) ~~>
+SliceLit    <~~ var li = takeAll(); push(goLitC(makeSliceLit(li), "[]" + li[0].cet, up.pos)) ~~>
             = "[" "]" ElemT SeqBody ;
 // [3]int{1, 2, 3}, [...]string{"x", "y"} (length inferred), [5]int{0: 1, 4: 9}
 // (indexed elements) and [2][2]int{{1, 2}, {3, 4}}. An ARRAY, not a slice: it is a
 // value, so assigning it copies.
-ArrayLit    <~~ push(makeArrayLit(takeAll())) ~~>
+ArrayLit    <~~ var ai = takeAll(); push(goLitC(makeArrayLit(ai), "[1]" + ai[1].cet, up.pos)) ~~>
             = "[" ( ArrDots | ArrLen ) "]" ElemT SeqBody ;
 ArrDots     <~~ push({alen: null}) ~~> = "..." ;
 ArrLen      <~~ push({alen: pop()}) ~~> = Expression ;
@@ -1073,7 +1073,7 @@ MakeSlice   <~~ push(makeMakeSlice(takeAll())) ~~>
 
 // map[string]int{"a": 1} and make(map[string]int). The value type decides the
 // zero value that a read of a missing key yields.
-MapLit      <~~ push(makeMapLit(takeAll())) ~~>
+MapLit      <~~ var mi = takeAll(); push(goLitC(makeMapLit(mi), "map[" + mi[0].mkey + "]" + mi[1].mzero, up.pos)) ~~>
             = MapTypeZ "{" [ MapEntry { "," MapEntry } ] "}" ;
 MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
             = MapKey ":" MapVal ;
@@ -1110,7 +1110,7 @@ ZType       <~~ push({mzero: up.in}) ~~>
 
 // Point{3, 4} positional, Point{y: 4, x: 3} keyed, Point{} empty. A keyed element is
 // tried first: its 'name:' would otherwise parse as a bare expression.
-StructLit   <~~ push(makeStructLit(takeAll())) ~~>
+StructLit   <~~ var si = takeAll(); push(goLitC(makeStructLit(si), si[0], up.pos)) ~~>
             = StructGate NotTypeKw Id <~~ push(up.in) ~~> [ TypeArgs ]
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
 // pkga.Item{N: 3}: a composite literal of ANOTHER PACKAGE'S type. It has to be tried
@@ -1124,7 +1124,7 @@ StructLit   <~~ push(makeStructLit(takeAll())) ~~>
 // '(', `pkga` alone fails at the missing '.', and the chain form `x.y.z` fails at the
 // second '.'. It is strictly longer than StructLit's bare-name form, never a prefix of
 // it. StructGate keeps it out of an if/for header, so `if x.y {` is still a condition.
-QualStructLit <~~ push(makeQualStructLit(takeAll())) ~~>
+QualStructLit <~~ var qi = takeAll(); push(goLitC(makeQualStructLit(qi), qi[0] + "." + qi[1], up.pos)) ~~>
             = StructGate NotTypeKw Id <~~ push(up.in) ~~> "." Id <~~ push(up.in) ~~> [ TypeArgs ]
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
 // struct{ a, b int }{10, 20}: an anonymous struct type carries its own field list, so
@@ -1395,6 +1395,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // types), and nil equals an unset slice/map/pointer.
     binExt["=="] = "js_goeq"
     binExt["!="] = "js_gone"
+    // == on POINTERS (goCmpFold in go-constfold.js) is identity for two structs.
+    binExt["==p"] = "js_goptreq"
+    binExt["!=p"] = "js_goptrne"
 
     binExt["<<="] = "js_goshl"
     binExt[">>="] = "js_goshr"
@@ -2133,6 +2136,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (items[i] != undefined && items[i].vararg == true) { variadic = true }
         }
         for (var z = 0; z < pend; z++) { ptypes.push("") }
+        for (var pn = 0; pn < names.length; pn++) {
+            cPendTy(names[pn], (variadic && pn == names.length - 1) ? "[]" : ptypes[pn])
+        }
         return {params: names, variadic: variadic, ptypes: ptypes}
     }
     // Go's suffix chain: the shared core knows .m(), .field and [i]; the plain call on
@@ -2234,7 +2240,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // The element type is DECLARED here, so the value adopts its width:
             // []uint8{255} holds a uint8 255, and the a[0]++ after it is 0.
             var re = e.eval(b)
-            return {b: re.b, v: emitAdoptTy(re.b, cet, re.v)}
+            return {b: re.b, v: emitStoreCopy(re.b, emitAdoptTy(re.b, cet, re.v), cet)}
         }
         var els = e.enest.selems
         // A POINTER element type: `[]*P{nil, {7}}` builds the elided element against
@@ -2619,6 +2625,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "struct")])
             emitNameList(b, clsV, "__fields", fields)
             emitNameList(b, clsV, "__ftypes", ftypes)
+            emitFCopy(b, clsV, ftypes)
             return emitStructVal(b, clsV, fields, ftypes, args)
         }
     }
@@ -2647,7 +2654,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (name == null) { name = fields[pos]; pos++ }
             else if (key == null) { pos++ }
             key = null
-            callExt(b, "js_set", [objV, emitStr(b, name), emitAdoptTy(b, ftypeOfName(fields, ftypes, name), r.v)])
+            var fty = ftypeOfName(fields, ftypes, name)
+            callExt(b, "js_set", [objV, emitStr(b, name), emitStoreCopy(b, emitAdoptTy(b, fty, r.v), fty)])
         }
         return {b: b, v: objV}
     }
@@ -2689,6 +2697,58 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return ""
     }
     // A runtime array of strings, set as one property of a struct descriptor.
+    // A STRUCT IS A VALUE: storing one where its type is declared copies it (see
+    // goCopyCode in go-interpreter.abnf, its twin). The code of a type text, decided
+    // at emission, when every struct is declared: "S" a struct, "A" + code an array
+    // of those elements, "?" a value whose type the front end does not know, ""
+    // nothing to copy. js_gocopy (lib/go-rt.metajs, abnf/jsrtgolang.go) applies it;
+    // a struct's own fields copy by the descriptor's __fcopy codes.
+    function goCopyCodeC(ty) {
+        if (ty == undefined || ty == null || ty == "") { return "" }
+        if (ty == "?") { return "?" }
+        if (ty.charCodeAt(0) == 91) {
+            var cl = ty.indexOf("]")
+            if (cl <= 1) { return "" }
+            return "A" + goCopyCodeC(ty.substring(cl + 1))
+        }
+        if (structFields[ty] != undefined || (curEmitPkg != null && structFields[sKey(curEmitPkg, ty)] != undefined)) { return "S" }
+        var rn = resolveDefined(ty)
+        if (rn != ty) { return goCopyCodeC(rn) }
+        return ""
+    }
+    function emitStoreCopy(b, v, ty) {
+        var code = goCopyCodeC(ty)
+        if (code == "") { return v }
+        return callExt(b, "js_gocopy", [v, emitStr(b, code)])
+    }
+    // A store that copies an array anyway ($acopy) copies a struct by its code.
+    function emitStoreVal(b, v, ty) {
+        if (goCopyCodeC(ty) != "") { return emitStoreCopy(b, v, ty) }
+        return emitHelper(b, "$acopy", [v])
+    }
+    // The last value of a := / = / var reports its static type (go-constfold.js); a
+    // thunk storing a struct value copies it. Twin of goStoreThunk in
+    // go-interpreter.abnf.
+    function goStoreThunk(t, ty) {
+        if (ty == "") { return t }
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: emitStoreCopy(r.b, r.v, ty)}
+        }
+    }
+    // The declared type of a struct's field at WALK time, for goChainC.
+    function goFieldTyHook(sname, field) {
+        var fs = sFieldsWalk(sname)
+        var ft = sFTypesWalk(sname)
+        if (fs == undefined || fs == null || ft == undefined || ft == null) { return "" }
+        for (var i = 0; i < fs.length; i++) { if (fs[i] == field) { return ft[i] } }
+        return ""
+    }
+    function emitFCopy(b, clsV, ftypes) {
+        var codes = []
+        for (var i = 0; i < ftypes.length; i++) { codes.push(goCopyCodeC(ftypes[i])) }
+        emitNameList(b, clsV, "__fcopy", codes)
+    }
     function emitNameList(b, clsV, prop, names) {
         var arrV = callExt(b, "js_arr_new", [])
         for (var i = 0; i < names.length; i++) {
@@ -3567,7 +3627,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     // items = [ref..., {op}, exprThunks...]
-    function makeAssign(items) {
+    function makeAssign(items, pos) {
         // Not a declaration: clear the names a ':=' left behind, or a for-init
         // spelled `for i = 0; ...` inherits them (see cokDeclNames).
         lastDeclNames = []
@@ -3579,6 +3639,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             refs.push(items[i])
         }
         var exprs = items.slice(i)
+        // A struct value the right side reports is copied into any target (an
+        // interface too); otherwise a plain name copies by its own declared type.
+        // Twin of makeAssign in go-interpreter.abnf.
+        if (op == "=" && refs.length == exprs.length && exprs.length > 0) {
+            var lref = refs[refs.length - 1]
+            var cty = goStCopyTy(stAt(pos))
+            if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
+            exprs[exprs.length - 1] = goStoreThunk(exprs[exprs.length - 1], cty)
+        }
         return function(b) {
             if (op != "=") {
                 var rr = emitRefRead(b, refs[0])
@@ -3658,7 +3727,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return b
         }
     }
-    function makeShortDecl(items) {
+    function makeShortDecl(items, pos) {
         var names = []
         var i = 0
         for (; i < items.length; i++) {
@@ -3667,6 +3736,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         lastDeclNames = names
         var exprs = items.slice(i)
+        if (names.length == exprs.length && exprs.length > 0) {
+            var sty = stAt(pos)
+            cBindTy(names[names.length - 1], stBare(sty))
+            exprs[exprs.length - 1] = goStoreThunk(exprs[exprs.length - 1], goStCopyTy(sty))
+        }
         return function(b) {
             var vals = []
             for (var k = 0; k < exprs.length; k++) {
@@ -3771,8 +3845,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var pk = 0; pk < names.length; pk++) { notePkgTopName(names[pk]) }
         var ty = ""
         if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
-        if (ty != "") { for (var dn = 0; dn < names.length; dn++) { goDeclTys["$" + names[dn]] = ty } }
+        if (ty != "") { for (var dn = 0; dn < names.length; dn++) { goDeclTys["$" + names[dn]] = ty; cBindTy(names[dn], ty) } }
         var inits = items.slice(i)
+        // {vend}: the initializers' end, where the last one reports its type, so
+        // `var i any = a` copies too. Twin of makeVarDecl in go-interpreter.abnf.
+        if (inits.length > 0 && inits[inits.length - 1].vend != undefined) {
+            var vend = inits.pop().vend
+            if (inits.length == names.length) {
+                var vty = stAt(vend)
+                if (ty == "") { cBindTy(names[names.length - 1], stBare(vty)) }
+                inits[inits.length - 1] = goStoreThunk(inits[inits.length - 1], goStCopyTy(vty))
+            }
+        }
         return function(b) {
             var vals = []
             if (inits.length == 0) {
@@ -3794,7 +3878,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var n = 0; n < names.length; n++) {
                 // A float64/float32 declaration CONVERTS its initializer, so
                 // `var d float64 = 1` holds a float64 and d/2 is 0.5, not 0.
-                var dv = emitAdoptTy(b, ty, vals[n])
+                var dv = emitAdoptTy(b, ty, inits.length == 0 ? vals[n] : emitStoreCopy(b, vals[n], ty))
                 if (names[n] != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), dv]) }
             }
             return b
@@ -4225,6 +4309,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // value), slices (index and element) and maps (key and entry, insertion order).
     function makeForRange(items) {
         var bodyT = items.pop()
+        // {rcopy}: the copy a struct ELEMENT makes on its way into the value variable.
+        var rcopy = items.pop().rcopy
         var listT = items.pop()
         var lbl = items[0].lbl
         // The binder group is optional, so the names arrive as {rv} markers and
@@ -4273,7 +4359,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var bb = bodyB
             if (vName != null && vName != "_") {
                 callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, vName),
-                                             callExt(bb, "js_range_val", [aV2, cV2])])
+                                             emitStoreCopy(bb, callExt(bb, "js_range_val", [aV2, cV2]), rcopy)])
             }
             loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             bodyT(bb).NewBr(postB)
@@ -4357,16 +4443,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeReturn(items) {
         return function(b) {
             var v = hUndef
+            // A struct result is a copy (emitStoreCopy), by the declared result type.
             if (items.length == 1) {
                 var r = items[0](b)
                 b = r.b
-                v = r.v
+                v = curRtys.length == 1 ? emitStoreCopy(b, r.v, curRtys[0]) : r.v
             } else if (items.length > 1) {
                 var arr = callExt(b, "js_arr_new", [])
                 for (var i = 0; i < items.length; i++) {
                     var r2 = items[i](b)
                     b = r2.b
-                    callExt(b, "js_arr_push", [arr, r2.v])
+                    callExt(b, "js_arr_push", [arr, i < curRtys.length ? emitStoreCopy(b, r2.v, curRtys[i]) : r2.v])
                 }
                 v = arr
             }
@@ -4423,7 +4510,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // ch <- v
     function makeChanSend(items, pos) {
         var chT = items[0]
-        var valT = items[1]
+        // A sent struct value is a copy, like any store (goStoreThunk).
+        var valT = goStoreThunk(items[1], goStCopyTy(stAt(pos)))
         return function(b) {
             var r1 = chT(b)
             var r2 = valT(r1.b)
@@ -4941,8 +5029,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 // the identity on everything else).
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                              emitAdoptTy(b, pt,
-                                                 emitHelper(b, "$acopy",
-                                                        [callExt(b, "js_arg", [f.Params[1], handle(i + off)])]))])
+                                                 emitStoreVal(b, callExt(b, "js_arg", [f.Params[1], handle(i + off)]), pt))])
             }
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
@@ -5022,6 +5109,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             callExt(b, "js_set", [clsV, emitStr(b, "__pkg"), emitStr(b, pkg)])
             emitNameList(b, clsV, "__fields", fields)
             emitNameList(b, clsV, "__ftypes", ftypes)
+            emitFCopy(b, clsV, ftypes)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             return b
         }
@@ -5035,6 +5123,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var out = [""]
             for (var i = 0; i < items.length - 1; i++) { out.push(items[i]) }
             return out
+        }
+        // The receiver binding's static type (go-constfold.js): *T or T.
+        if (items.length >= 2 && typeof items[0] == "string") {
+            cPendTy(items[0], (items.length > 2 ? "*" : "") + items[items.length - 1])
         }
         return items
     }
@@ -5378,12 +5470,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedConvs = convByPos
         var savedScopes = cScopes
         var savedPend = cPend
+        var savedPendT = cPendT
+        var savedSts = stByPos
         var savedSwMarks = cSwMarks
         constByPos = {}
         cFnByPos = {}
         convByPos = {}
-        cScopes = [{n: [], v: []}]
+        stByPos = {}
+        cScopes = [{n: [], v: [], t: []}]
         cPend = []
+        cPendT = []
         cSwMarks = []
         c.compile(asg)
         constByPos = savedConsts
@@ -5391,6 +5487,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         convByPos = savedConvs
         cScopes = savedScopes
         cPend = savedPend
+        cPendT = savedPendT
+        stByPos = savedSts
         cSwMarks = savedSwMarks
         importDepth = importDepth - 1
         c.popSource()
