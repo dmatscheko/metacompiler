@@ -5179,6 +5179,22 @@ KwContinue  = "continue" KwEnd ;
             nameB.NewRet(callExt(nameB, "js_swtypeof", [ps[0]]))
         })
     }
+    // A generic parameter bound from a VALUE (swDsMarkTypeParams): the value's type
+    // as a type value - a program type's descriptor, a builtin's own (Int, Double,
+    // ...) when the program has one in scope, else the type's name. Twin of
+    // swTypeValue in swift-interpreter.abnf.
+    function rtTypeValue() {
+        return rtFunc("sw_typevalue", 2, function(b, ps) {
+            var tv = b.NewCall(rtTypeOfVal(), [ps[1]])
+            var strB = curF.NewBlock("")
+            var outB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [tv]), emitStr(b, "string")])), strB, outB)
+            outB.NewRet(tv)
+            var inB = curF.NewBlock("")
+            strB.NewCondBr(truthy(strB, callExt(strB, "js_seq", [callExt(strB, "js_scope_typeof", [ps[0], tv]), emitStr(strB, "undefined")])), outB, inB)
+            inB.NewRet(callExt(inB, "js_scope_get", [ps[0], tv]))
+        })
+    }
     // The bound function sw_statref hands out: $f called with $r prepended.
     var swStatRefIdx = 0
     function swStatRefFn() {
@@ -7427,37 +7443,6 @@ KwContinue  = "continue" KwEnd ;
 
     function paramName(items) { return items[items.length - 1] }
 
-    // A generic parameter that a METATYPE parameter names (`func z<X: P>(_ t: X.Type)`)
-    // is a value in the body - `X.zz` reads the static zz of the type t holds - so it
-    // is bound to that argument. A name that is a declared type stays the type
-    // itself (`_ t: Base.Type` handed a subclass must not rebind Base). Answers
-    // [{tp, name}], the first metatype parameter of each generic name. Twin of
-    // swMetaTypeParams in swift-interpreter.abnf.
-    function swMetaTypeParams(params) {
-        var out = []
-        var seen = {}
-        for (var i = 0; i < params.length; i++) {
-            var p = params[i]
-            if (typeof p == "string" || p.variadic || p.type == undefined) { continue }
-            var t = p.type
-            while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
-            if (t.length < 6 || t.substring(t.length - 5) != ".Type") { continue }
-            var tp = t.substring(0, t.length - 5)
-            if (!swIsPlainId(tp) || tp == "Self" || isTypeName(tp) || isBuiltinTypeName(tp)
-                || hasOwn(swAliasReg, "$" + tp) || hasOwn(seen, "$" + tp)) { continue }
-            seen["$" + tp] = true
-            out.push({tp: tp, name: p.name})
-        }
-        return out
-    }
-    function swIsPlainId(s) {
-        if (s.length == 0) { return false }
-        for (var i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return false }
-        }
-        return true
-    }
     // True while a static member's body is emitted with the type descriptor as its
     // receiver: an unqualified method call and `super.m()` then reach the STATIC
     // members of that descriptor.
@@ -7573,10 +7558,10 @@ KwContinue  = "continue" KwEnd ;
             var pv = swEmitAdopt(b, av, prm.adopt)
             if (prm.isSet) { pv = emitSetOf(b, pv) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), pv])
-        }
-        var mtps = swMetaTypeParams(params)
-        for (var mt = 0; mt < mtps.length; mt++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mtps[mt].tp), b.NewCall(rtKGet(), [curScopeV, emitStr(b, mtps[mt].name)])])
+            // A generic parameter this one binds (swDsMarkTypeParams): the type it
+            // holds, or the type of its value.
+            if (prm.tmeta != undefined) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.tmeta), pv]) }
+            if (prm.tval != undefined) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.tval), b.NewCall(rtTypeValue(), [curScopeV, pv])]) }
         }
         inoutStack.push(inouts)
         var endB = body(b)
@@ -7658,6 +7643,7 @@ KwContinue  = "continue" KwEnd ;
         swDotClaim(from, to, rtxt)
         swDsNoteSig(items[0], items[1].params)
         swDsNoteGenRet(items[0], from, to, rtxt)
+        swDsMarkTypeParams(items[1].params, from, to)
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start}
     }
     // The inout parameters of the function whose body is currently being emitted:
@@ -9715,7 +9701,12 @@ KwContinue  = "continue" KwEnd ;
         while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
         var lt = t.indexOf("<")
         if (lt > 0 && t.charAt(t.length - 1) == ">") { t = t.substring(0, lt) }
-        return swIsPlainId(t) ? t : ""
+        if (t.length == 0) { return "" }
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return "" }
+        }
+        return t
     }
     var swDotRets = []
     function swDotPend(t, rec, pos) {

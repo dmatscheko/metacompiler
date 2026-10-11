@@ -7189,6 +7189,7 @@ KwContinue  = "continue" KwEnd ;
         swDotClaim(from, to, rtxt)
         swDsNoteSig(items[0], items[1].params)
         swDsNoteGenRet(items[0], from, to, rtxt)
+        swDsMarkTypeParams(items[1].params, from, to)
         return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret}
     }
     function makeInit(items) {
@@ -7429,48 +7430,29 @@ KwContinue  = "continue" KwEnd ;
             declVar("self", self)
         }
         for (var j = 0; j < f.params.length; j++) {
-            declVar(f.params[j].name, f.params[j].isSet ? swSetOf(bnd.vals[j]) : bnd.vals[j])
-        }
-        if (f.mtps === undefined) { f.mtps = swMetaTypeParams(f.params) }
-        for (var mt = 0; mt < f.mtps.length; mt++) {
-            var mth = swResolve(f.mtps[mt].tp)
-            if (mth == null || !isTypeVal(mth.v)) { declVar(f.mtps[mt].tp, getVar(f.mtps[mt].name)) }
+            var pj = f.params[j]
+            var pv = anytype
+            pv = pj.isSet ? swSetOf(bnd.vals[j]) : bnd.vals[j]
+            declVar(pj.name, pv)
+            // A generic parameter this one binds (swDsMarkTypeParams): the type it
+            // holds, or the type of its value.
+            if (pj.tmeta != undefined) { declVar(pj.tmeta, pv) }
+            if (pj.tval != undefined) { declVar(pj.tval, swTypeValue(pv)) }
         }
         var r = f.body()
         for (var k = 0; k < bnd.boxes.length; k++) { bnd.boxes[k].box.v = getVar(bnd.boxes[k].name) }
         scopes = saved
         return relabelRet(f, (r != undefined && r.isRet) ? r.v : undefined)
     }
-    // A generic parameter that a METATYPE parameter names (`func z<X: P>(_ t: X.Type)`)
-    // is a value in the body - `X.zz` reads the static zz of the type t holds - so it
-    // is bound to that argument, unless the name resolves to a type (`_ t: Base.Type`
-    // handed a subclass must not rebind Base). Answers [{tp, name}], the first
-    // metatype parameter of each name. Twin of swMetaTypeParams in
-    // swift-to-llvm-ir.abnf.
-    function swMetaTypeParams(params) {
-        var out = []
-        var seen = {}
-        for (var i = 0; i < params.length; i++) {
-            var p = params[i]
-            if (p.variadic || p.type == undefined) { continue }
-            var t = p.type
-            while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
-            if (t.length < 6 || t.substring(t.length - 5) != ".Type") { continue }
-            var tp = t.substring(0, t.length - 5)
-            if (!swIsPlainId(tp) || tp == "Self" || isBuiltinTypeName(tp)
-                || hasOwn(swAliasReg, "$" + tp) || hasOwn(seen, "$" + tp)) { continue }
-            seen["$" + tp] = true
-            out.push({tp: tp, name: p.name})
-        }
-        return out
-    }
-    function swIsPlainId(s) {
-        if (s.length == 0) { return false }
-        for (var i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return false }
-        }
-        return true
+    // A generic parameter bound from a VALUE: the value's type as a type value - a
+    // program type's descriptor, a builtin's own (Int, Double, ...), else the type's
+    // name. Twin of rtTypeValue in swift-to-llvm-ir.abnf.
+    function swTypeValue(v) {
+        var t = anytype
+        t = hostGlobals["type"](v)
+        if (typeof t != "string" || !hasOwn(hostGlobals, t)) { return t }
+        if (swIntWidthOf(t) != null || t == "Double" || t == "Float" || hostGlobals[t].__btab != undefined) { return hostGlobals[t] }
+        return t
     }
     function makeFunClosure(f) {
         return function() {
@@ -8756,7 +8738,12 @@ KwContinue  = "continue" KwEnd ;
         while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
         var lt = t.indexOf("<")
         if (lt > 0 && t.charAt(t.length - 1) == ">") { t = t.substring(0, lt) }
-        return swIsPlainId(t) ? t : ""
+        if (t.length == 0) { return "" }
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return "" }
+        }
+        return t
     }
     // Enum case equality: the case NAME plus the associated values, so a leading-dot
     // case and a qualified one of the same enum compare equal.

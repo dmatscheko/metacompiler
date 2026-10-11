@@ -3576,15 +3576,17 @@ func s73() {
 
 // ===== SECTION 74: a generic parameter as a type value =====
 // `X.zz74` inside `func f<X: P>(_ t: X.Type)` reads the static of whatever type t
-// holds, a builtin's included.
+// holds, and inside `func f<X: P>(_ v: X)` that of v's type, a builtin's included.
 protocol Z74 { static var zz74: Self { get } }
 extension Int: Z74 { static var zz74: Int { return 99 } }
 struct W74: Z74 { var v: Int; static var zz74: W74 { return W74(v: 98) } }
 func zeroOf74<X: Z74>(_ t: X.Type) -> X { return X.zz74 }
 func both74<X: Z74>(_ a: X.Type, _ b: X.Type) -> [X] { return [X.zz74, b.zz74] }
+func ofValue74<X: Z74>(_ v: X) -> X { return X.zz74 }
 func s74() {
     check("tpv1", zeroOf74(Int.self) == 99 && zeroOf74(W74.self).v == 98)
     check("tpv2", both74(Int.self, Int.self) == [99, 99] && both74(W74.self, W74.self)[1].v == 98)
+    check("tpv3", ofValue74(5) == 99 && ofValue74(W74(v: 1)).v == 98)
 }
 
 // ===== SECTION 75: an array literal typed as a Set by its context =====

@@ -31,6 +31,9 @@
 // A member is identified by the byte offset of its dot in its file; each grammar
 // registers its members there (swDsDots) and supplies swDsApply(dot, ty), which
 // retargets one.
+//
+// The generic parameter names read for that (swDsGenNames) also mark which
+// parameter binds each one as a type VALUE in the body (swDsMarkTypeParams).
 
 var swDsDots = {}
 function swDsKey(at) { return c.curFile() + "@" + at }
@@ -504,10 +507,17 @@ function swDsNoteGenRet(name, from, to, rtxt) {
     var r = swDsUnopt(stripWs(rtxt))
     if (r == "" || !swDsIdCh(r.charAt(0))) { return }
     for (var i = 0; i < r.length; i++) { if (!swDsIdCh(r.charAt(i))) { return } }
+    var gens = swDsGenNames(from, to)
+    if (gens == null) { return }
+    swDsSigGen["$" + name + "#" + (swDsSigs["$" + name].length - 1)] = {gens: gens, ret: r}
+}
+// The generic parameter names of the declaration spanning [from, to) - its
+// `<X: P, Y>` ahead of the parameter list - or null when it has none.
+function swDsGenNames(from, to) {
     var src = c.srcSlice(from, to)
     var lt = src.indexOf("<")
     var op = src.indexOf("(")
-    if (lt < 0 || (op >= 0 && op < lt)) { return }
+    if (lt < 0 || (op >= 0 && op < lt)) { return null }
     var gt = lt + 1
     var depth = 1
     while (gt < src.length && depth > 0) {
@@ -516,13 +526,33 @@ function swDsNoteGenRet(name, from, to, rtxt) {
     }
     var gens = []
     var parts = swDsGenArgs("G" + stripWs(src.substring(lt, gt)), "G")
-    if (parts == null) { return }
+    if (parts == null) { return null }
     for (var j = 0; j < parts.length; j++) {
         var gn = parts[j]
         var col = gn.indexOf(":")
         gens.push(col < 0 ? gn : gn.substring(0, col))
     }
-    swDsSigGen["$" + name + "#" + (swDsSigs["$" + name].length - 1)] = {gens: gens, ret: r}
+    return gens
+}
+// A generic parameter is also a VALUE in the body: X in `func f<X: P>(_ t: X.Type)`
+// is the type t holds (`X.zz` reads its static zz), and in `func f<X: P>(_ v: X)`
+// the type of v. The parameter that binds each one is marked for the prologue -
+// tmeta for a metatype, tval for a value, a metatype preferred.
+function swDsMarkTypeParams(params, from, to) {
+    var gens = swDsGenNames(from, to)
+    if (gens == null) { return }
+    for (var g = 0; g < gens.length; g++) {
+        var meta = null
+        var val = null
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (typeof p != "object" || p.variadic || p.inout || p.type == undefined) { continue }
+            var t = swDsUnopt(p.type)
+            if (meta == null && t == gens[g] + ".Type") { meta = p }
+            if (val == null && t == gens[g]) { val = p }
+        }
+        if (meta != null) { meta.tmeta = gens[g] } else if (val != null) { val.tval = gens[g] }
+    }
 }
 // file@offset of a call -> the type its value is expected to have.
 var swDsCallWant = {}
