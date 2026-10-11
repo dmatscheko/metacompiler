@@ -521,7 +521,7 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // A PARAMETER adopts through the same annotation text, structural forms included -
 // `(xs: [Double])` and `(g: (Double) -> Double)` both adopt - but the gate is
 // swAdoptNeeded, so an annotation with no adoptable leaf in it still emits nothing.
-AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | Type ;
+AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | ScalarAnnType | Type ;
 // The captured TEXT rides along beside the labels: a labelled tuple type declares
 // its element types too, and `let t: (x: Double, y: Int) = (3, 4)` has to hold 3.0
 // exactly as the anonymous `(Double, Int)` form does. swAdoptDeep strips each
@@ -693,7 +693,7 @@ ObsKind     = ( "willSet" | "didSet" ) KwEnd ;
 // spelled longest-first (PEG first-match: "Int" would otherwise match the front of
 // "Int8") and closed with a KwEnd so a user type called `Int8Box` is not read as
 // `Int8`.
-DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | OtherAnnType ;
+DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | ScalarAnnType | OtherAnnType ;
 // Any other annotation is captured as TEXT only for the write-site check that an
 // EXISTENTIAL slot (`Any`, a protocol, ...) does not adopt; see swKeepMode.
 OtherAnnType <~~ push({otype: stripWs(up.in)}) ~~> = Type ;
@@ -725,6 +725,9 @@ NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
 //
 // The inner types are the general Type: only the top level has to be a container
 // here, and swAdoptDeep ignores every leaf it does not recognise.
+// `Unicode.Scalar`: a String literal it types becomes a scalar (swMkScalar).
+ScalarAnnType <~~ push({atype: stripWs(up.in)}) ~~>
+            = ( "Unicode" NoSpace "." NoSpace "Scalar" | "UnicodeScalar" ) KwEnd NotTypeSuffix ;
 OptNumAnnType <~~ push({atype: stripWs(up.in)}) ~~>
             = NumTypeName NoSpace ( "?" | "!" ) NotTypeSuffix ;
 DeepAnnType <~~ push({atype: stripWs(up.in)}) ~~>
@@ -879,7 +882,7 @@ Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = Cast <~~ push({at: up.pos}) ~~> { "??" Cast } ;
 // e as T / e as? T / e as! T / e is T. With no cast operator it is a pure
 // pass-through (a single item).
-Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
+Cast        <~~ push(makeCast(takeAll(), up.pos, up.in)) ~~>
             = RangeExpr { CastOp CastType } ;
 // a...b / a..<b as a VALUE (Swift's RangeFormationPrecedence sits here): the
 // pattern-match operator ~= tests it, and a for-in can walk it.
@@ -2036,6 +2039,10 @@ KwContinue  = "continue" KwEnd ;
         // 1.0 is "1.0", not the "1" a JS number would give.
         if (isFlo(v)) { return swFloDesc(v) }
         if (typeof v != "object") { return "" + v }
+        // An Optional kept inside an Any (swCastOptAny) prints as Swift's
+        // Optional does, its value in the nested form: Optional("hi").
+        if (v.__optany !== undefined) { return "Optional(" + swRender(v.__optany, true, depth + 1) + ")" }
+        if (v.__usc !== undefined) { return nested ? swScalarDebug(v.__usc) : v.__usc }
         // A Range printed as itself: swiftc 6.1.2 prints
         // `0..<3` and `1...3`, which is what a...b / a..<b are spelled as.
         // A ONE-SIDED range prints Swift's PartialRangeFrom/Through/UpTo, whose real
@@ -2582,7 +2589,7 @@ KwContinue  = "continue" KwEnd ;
     // `ty` is "" when the site carries no adoptable annotation, which is the
     // common case; every caller checks that first so this costs nothing.
     function swAdoptable(ty) {
-        if (ty == "Double" || ty == "Float") { return true }
+        if (ty == "Double" || ty == "Float" || ty == "Unicode.Scalar" || ty == "UnicodeScalar") { return true }
         return swIntWidthOf(ty) != null
     }
     // Does this annotation TEXT carry an adoptable leaf anywhere inside it? A
@@ -2610,7 +2617,9 @@ KwContinue  = "continue" KwEnd ;
             else {
                 var s = i
                 while (i < ty.length && !swTyIsSep(ty.charAt(i))) { i = i + 1 }
-                if (swAdoptable(ty.substring(s, i))) { return true }
+                // "." separates, so Unicode.Scalar arrives as its last token.
+                var tok = ty.substring(s, i)
+                if (swAdoptable(tok) || tok == "Scalar") { return true }
             }
         }
         return false
@@ -2641,7 +2650,11 @@ KwContinue  = "continue" KwEnd ;
             return swAdoptNum(v) ? swF32(swD(v) * 1) : v
         }
         var iw = swIntWidthOf(ty)
-        if (iw == null || isFlo(v)) { return v }
+        if (iw == null) {
+            if ((ty == "Unicode.Scalar" || ty == "UnicodeScalar") && typeof v == "string") { return swMkScalar(v) }
+            return v
+        }
+        if (isFlo(v)) { return v }
         return swAdoptNum(v) ? szConv(v, iw.w, iw.u) : v
     }
     // The WRITE half of the same rule: `var d: Double = 0; d = 3` must hold 3.0,
@@ -2673,6 +2686,7 @@ KwContinue  = "continue" KwEnd ;
             if (isFlo(v)) { return v }
             return swAdoptNum(v) ? szConv(v, old.w, old.u) : v
         }
+        if (typeof old == "object" && old.__usc !== undefined) { return swAdoptTy(v, "Unicode.Scalar") }
         return v
     }
     // ----- The STRUCTURAL declared type -----
@@ -2899,10 +2913,52 @@ KwContinue  = "continue" KwEnd ;
         var i = 0
         while (i < s.length) {
             var w = swCpAt(s, i) > 65535 ? 2 : 1
-            out.push(s.substring(i, i + w))
+            out.push(swMkScalar(s.substring(i, i + w)))
             i = i + w
         }
         return out
+    }
+    // A Unicode.Scalar: {__usc: s, value, isASCII}, s its one-scalar String. It
+    // prints as the glyph, compares as its scalar, and inside a collection prints
+    // its debugDescription, which escapes every scalar outside printable ASCII
+    // (Unicode.Scalar.escaped(asASCII: true)): "\u{00E9}". Twins: swMkScalar /
+    // swScalarDebug in abnf/jsrtswift.go and lib/swift-rt.metajs.
+    function swMkScalar(s) {
+        var cp = swCpAt(s, 0)
+        return {__usc: s, value: cp, isASCII: cp < 128}
+    }
+    function swHexUp(n, width) {
+        var digits = "0123456789ABCDEF"
+        var out = ""
+        var x = n
+        while (x > 0) {
+            out = digits.charAt(x % 16) + out
+            x = (x - x % 16) / 16
+        }
+        while (out.length < width) { out = "0" + out }
+        return out
+    }
+    function swScalarDebug(s) {
+        var cp = swCpAt(s, 0)
+        var e = s
+        if (s == "\\") { e = "\\\\" }
+        else if (s == "'") { e = "\\'" }
+        else if (s == "\"") { e = "\\\"" }
+        else if (cp >= 32 && cp < 127) { e = s }
+        else if (cp == 0) { e = "\\0" }
+        else if (cp == 10) { e = "\\n" }
+        else if (cp == 13) { e = "\\r" }
+        else if (cp == 9) { e = "\\t" }
+        else if (cp < 128) { e = "\\u{" + swHexUp(cp, 2) + "}" }
+        else if (cp < 65536) { e = "\\u{" + swHexUp(cp, 4) + "}" }
+        else { e = "\\u{" + swHexUp(cp, 8) + "}" }
+        return "\"" + e + "\""
+    }
+    // A scalar's text, a String's itself, null for anything else.
+    function swScalarText(v) {
+        if (typeof v == "string") { return v }
+        if (v !== null && typeof v == "object" && v.__usc !== undefined) { return v.__usc }
+        return null
     }
     function swIsColl(v) {
         if (typeof v == "string") { return true }
@@ -3907,8 +3963,12 @@ KwContinue  = "continue" KwEnd ;
         return Math.floor(v) == v && bits == 64 && !uns
     }
     function makeCastOne(t, op, tname) {
-        if (op == "is") { return function() { return swIsType(t(), tname) } }
-        if (op == "as?") { return function() { var v = t(); return swIsType(v, tname) ? v : null } }
+        if (op == "is") { return function() { return swIsType(swOptOpen(t()), tname) } }
+        if (op == "as?") { return function() { var v = swOptOpen(t()); return swIsType(v, tname) ? v : null } }
+        if (op == "as!") {
+            if (!swAdoptable(tname)) { return function() { return swOptOpen(t()) } }
+            return function() { return swAdoptTy(swOptOpen(t()), tname) }
+        }
         // `3 as Int8` is a COERCION, not a no-op: the literal takes the WIDTH (and
         // the floatness) of the named type exactly as a declared type would, so
         // `(3 as Double) / 2` is 1.5, `(250 as UInt8) &+ 10` is 4 and
@@ -3919,7 +3979,7 @@ KwContinue  = "continue" KwEnd ;
         if (!swAdoptable(tname)) { return t }
         return function() { return swAdoptTy(t(), tname) }
     }
-    function makeCast(items, pos) {
+    function makeCast(items, pos, txt) {
         if (items.length == 1) { return items[0] }
         var t = items[0]
         var op = ""
@@ -3930,7 +3990,32 @@ KwContinue  = "continue" KwEnd ;
             t = makeCastOne(t, op, ty)
         }
         if (op == "as?" && swAdoptable(ty)) { swAsqCasts.push({at: pos, ty: ty}) }
+        if (swCastOptAny(items, txt)) {
+            var inner = t
+            return function() {
+                var v = anytype
+                v = inner()
+                if (v === null || v === undefined) { return v }
+                return {__optany: v}
+            }
+        }
         return t
+    }
+    // `x as Any` where x is an OPTIONAL by its static type (swExprAnn) keeps the
+    // Optional inside the Any: print shows `Optional(7)` and a cast back out
+    // (`as? Int`, swOptOpen) unwraps it. nil stays nil, which prints "nil" as
+    // swiftc does. An Optional is otherwise its own value in this model; this box
+    // exists only behind such a cast. Twin of makeCast in swift-to-llvm-ir.abnf.
+    function swCastOptAny(items, txt0) {
+        if (items.length != 3 || items[1].cast != "as" || items[2].ctype != "Any") { return false }
+        var txt = stripWs(txt0)
+        var cut = txt.length - items[1].cast.length - items[2].ctype.length
+        if (cut <= 0) { return false }
+        return swTyIsOpt(swExprAnn(txt.substring(0, cut)))
+    }
+    function swOptOpen(v) {
+        if (v !== null && typeof v == "object" && v.__optany !== undefined) { return v.__optany }
+        return v
     }
     // The `as? T` casts to a numeric T, by END position (a thunk loses its identity
     // on the tag stack under goja): the right side of a `??` after one is typed T,
@@ -7405,6 +7490,12 @@ KwContinue  = "continue" KwEnd ;
     function swEqD(l, r, depth) {
         if (depth > 32) { return false }
         if (typeof l == "string" && typeof r == "string") { return swStrEq(l, r) }
+        // A Unicode.Scalar against a scalar or a String literal: by scalar.
+        if ((l !== null && typeof l == "object" && l.__usc !== undefined)
+            || (r !== null && typeof r == "object" && r.__usc !== undefined)) {
+            var lt = swScalarText(l)
+            return lt !== null && lt === swScalarText(r)
+        }
         // A float box is an object, so it too has to be compared BY VALUE, and
         // ACROSS the box boundary: `1.0 == 1` holds in Swift (the untyped literal
         // takes the Double type), and 2.0 == 2 must not depend on which side is
@@ -7828,7 +7919,7 @@ KwContinue  = "continue" KwEnd ;
         return {__dict: true, keys: [], vals: []}
     }}
     // Character("b"): a Character IS its one-cluster String in this model.
-    hostGlobals["Character"] = {__conv: function(v) { return v }}
+    hostGlobals["Character"] = {__conv: function(v) { var t = swScalarText(v); return t === null ? v : t }}
     // Optional(v): an Optional IS its value in this model.
     hostGlobals["Optional"] = {__conv: function(v) { return v }}
     hostGlobals["Int"] = swIntType(64, false)

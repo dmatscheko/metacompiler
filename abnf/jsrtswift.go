@@ -310,7 +310,13 @@ func init() {
 				return v
 			}
 			bits, uns, ok := swAdoptWidth(ty)
-			if !ok || swIsFlo(v) || !isNum {
+			if !ok {
+				if s, isStr := v.(string); isStr && (ty == "Unicode.Scalar" || ty == "UnicodeScalar") {
+					return swMkScalar(s)
+				}
+				return v
+			}
+			if swIsFlo(v) || !isNum {
 				return v
 			}
 			return rt.giConv(v, bits, uns)
@@ -360,6 +366,11 @@ func init() {
 					return v
 				}
 				return rt.giConv(v, gi.w, gi.u)
+			}
+			if o, ok := old.(*jsObject); ok {
+				if _, isSc := o.props["__usc"]; isSc {
+					return swAdopt(v, "Unicode.Scalar")
+				}
 			}
 			return v
 		}
@@ -688,6 +699,26 @@ func init() {
 		// false. Telling them apart needs a nominal type on the value that nothing
 		// else in this front end would use. Twins: swIsNamed in
 		// languages/swift-interpreter.abnf and js_swis in lib/swift-rt.metajs.
+		// `x as Any` of an Optional x: the Optional kept inside the Any, and the
+		// cast back out that unwraps it. Twins: swCastOptAny / swOptOpen in
+		// languages/swift-interpreter.abnf, js_swoptany / js_swoptopen in
+		// lib/swift-rt.metajs.
+		m["js_swoptany"] = func(a []uint64) uint64 {
+			if isUndefOrNull(u(a[0])) {
+				return a[0]
+			}
+			o := newJSObject()
+			o.set("__optany", u(a[0]))
+			return w(o)
+		}
+		m["js_swoptopen"] = func(a []uint64) uint64 {
+			if o, ok := u(a[0]).(*jsObject); ok {
+				if inner, has := o.props["__optany"]; has {
+					return w(inner)
+				}
+			}
+			return a[0]
+		}
 		m["js_swis"] = func(a []uint64) uint64 {
 			tname := rt.toString(u(a[1]))
 			t := tname
@@ -1163,8 +1194,14 @@ func init() {
 					return w(&jsArray{elems: out})
 				case "unicodeScalars":
 					out := []interface{}{}
-					for _, r := range s {
-						out = append(out, string(r))
+					u16 := strUnits(s)
+					for i := 0; i < len(u16); {
+						n := 1
+						if isHighSurr(rune(u16[i])) && i+1 < len(u16) && isLowSurr(rune(u16[i+1])) {
+							n = 2
+						}
+						out = append(out, swMkScalar(strFromUnits(u16[i:i+n])))
+						i += n
 					}
 					return w(&jsArray{elems: out})
 				}
@@ -1697,6 +1734,16 @@ func (rt *jsrt) swRender(v interface{}, nested bool, depth int) string {
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case *jsObject:
+		// An Optional kept inside an Any (js_swoptany) prints as Swift's Optional.
+		if inner, ok := t.props["__optany"]; ok {
+			return "Optional(" + rt.swRender(inner, true, depth+1) + ")"
+		}
+		if s, ok := t.props["__usc"].(string); ok {
+			if nested {
+				return swScalarDebug(s)
+			}
+			return s
+		}
 		// A Set prints as its members; nested in a collection it is `Set([...])`.
 		if els, ok := swSetElems(t); ok {
 			s := rt.swRender(els, true, depth)
@@ -2093,6 +2140,74 @@ func swStrArray(v interface{}) []string {
 // case compares by name plus associated
 // values (which the compiler also encodes in __eqkey; this path agrees with it
 // and additionally handles the shapes __eqkey cannot round-trip).
+// A Unicode.Scalar: {__usc, value, isASCII}. Twins: swMkScalar / swScalarDebug /
+// swScalarText in languages/swift-interpreter.abnf, whose comment has the rule,
+// and in lib/swift-rt.metajs.
+func swMkScalar(s string) *jsObject {
+	cp := 0
+	u16 := strUnits(s)
+	if len(u16) > 1 && isHighSurr(rune(u16[0])) && isLowSurr(rune(u16[1])) {
+		cp = int(surrPair(rune(u16[0]), rune(u16[1])))
+	} else if len(u16) > 0 {
+		cp = int(u16[0])
+	}
+	o := newJSObject()
+	o.set("__usc", s)
+	o.set("value", float64(cp))
+	o.set("isASCII", cp < 128)
+	return o
+}
+
+func swScalarDebug(s string) string {
+	o := swMkScalar(s)
+	cp := int(o.props["value"].(float64))
+	e := s
+	switch {
+	case s == "\\":
+		e = "\\\\"
+	case s == "'":
+		e = "\\'"
+	case s == "\"":
+		e = "\\\""
+	case cp >= 32 && cp < 127:
+	case cp == 0:
+		e = "\\0"
+	case cp == 10:
+		e = "\\n"
+	case cp == 13:
+		e = "\\r"
+	case cp == 9:
+		e = "\\t"
+	case cp < 128:
+		e = fmt.Sprintf("\\u{%02X}", cp)
+	case cp < 65536:
+		e = fmt.Sprintf("\\u{%04X}", cp)
+	default:
+		e = fmt.Sprintf("\\u{%08X}", cp)
+	}
+	return "\"" + e + "\""
+}
+
+func swIsScalar(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	_, ok = o.props["__usc"]
+	return ok
+}
+
+func swScalarText(v interface{}) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case *jsObject:
+		s, ok := t.props["__usc"].(string)
+		return s, ok
+	}
+	return "", false
+}
+
 func (rt *jsrt) swEqual(l, r interface{}) bool {
 	return rt.swEqualDepth(l, r, 0)
 }
@@ -2103,6 +2218,12 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 	}
 	if isNullish(l) || isNullish(r) {
 		return isNullish(l) && isNullish(r)
+	}
+	// A Unicode.Scalar against a scalar or a String literal: by scalar.
+	if swIsScalar(l) || swIsScalar(r) {
+		lt, lok := swScalarText(l)
+		rtx, rok := swScalarText(r)
+		return lok && rok && lt == rtx
 	}
 	// A float box compares BY VALUE and ACROSS the box boundary: `1.0 == 1` holds
 	// in Swift (the untyped literal takes the Double type). It has to be spelled

@@ -753,6 +753,14 @@ function swRender(v, nested, depth) {
         return out + "]"
     }
     if (swIsObj(v)) {
+        // An Optional kept inside an Any (js_swoptany) prints as Swift's Optional.
+        var inner = v["__optany"]
+        if (inner !== undefined) { return "Optional(" + swRender(inner, true, depth + 1) + ")" }
+        var usc = v["__usc"]
+        if (usc !== undefined) {
+            if (nested) { return swScalarDebug(usc) }
+            return usc
+        }
         // A Set prints as its members; nested in a collection it is `Set([...])`.
         if (v["__set"] === true) {
             var sout = swRender(v["elems"], true, depth)
@@ -892,6 +900,12 @@ function swEqual(l, r, depth) {
         var ln = l === undefined || l === null
         var rn = r === undefined || r === null
         return ln && rn
+    }
+    // A Unicode.Scalar against a scalar or a String literal: by scalar.
+    if (swIsScalar(l) || swIsScalar(r)) {
+        var lt = swScalarText(l)
+        if (lt === null) { return false }
+        return lt === swScalarText(r)
     }
     // A float box compares BY VALUE and ACROSS the box boundary: `1.0 == 1` holds
     // in Swift (the untyped literal takes the Double type). It has to be spelled
@@ -1142,6 +1156,23 @@ function js_swidx(c, k) {
 
 // `x!`: an Optional IS its value in this model, so only nil traps. Twin of
 // js_swforce in abnf/jsrtswift.go and ForceSfx in swift-interpreter.abnf.
+// `x as Any` of an Optional x: the Optional kept inside the Any, and the cast
+// back out that unwraps it. Twins in abnf/jsrtswift.go; swCastOptAny / swOptOpen
+// in languages/swift-interpreter.abnf.
+function js_swoptany(v) {
+    if (v === null || v === undefined) { return v }
+    var o = {}
+    o["__optany"] = v
+    return o
+}
+function js_swoptopen(v) {
+    if (swIsObj(v)) {
+        var inner = v["__optany"]
+        if (inner !== undefined) { return inner }
+    }
+    return v
+}
+
 function js_swforce(v) {
     if (v === null || v === undefined) {
         swAbort("Fatal error: Unexpectedly found nil while unwrapping an Optional value")
@@ -2190,7 +2221,11 @@ function js_swadopt(v, ty) {
         return swAdoptNum(v) ? swMkF32(swNum(v)) : v
     }
     var bits = swAdoptWidth(ty)
-    if (bits == 0 || floIs(v)) { return v }
+    if (bits == 0) {
+        if ((ty == "Unicode.Scalar" || ty == "UnicodeScalar") && typeof v == "string") { return swMkScalar(v) }
+        return v
+    }
+    if (floIs(v)) { return v }
     return swAdoptNum(v) ? sintConv(v, bits, swAdoptUns(ty)) : v
 }
 
@@ -2218,6 +2253,7 @@ function js_swadoptlike(old, v, ty) {
         if (floIs(v)) { return v }
         return swAdoptNum(v) ? sintConv(v, sintWidth(old), sintUns(old)) : v
     }
+    if (swIsScalar(old)) { return js_swadopt(v, "Unicode.Scalar") }
     return v
 }
 
@@ -2615,10 +2651,58 @@ function swScalarsOf(s) {
     while (i < s.length) {
         var w = 1
         if (swCpAt(s, i) > 65535) { w = 2 }
-        out.push(s.substring(i, i + w))
+        out.push(swMkScalar(s.substring(i, i + w)))
         i = i + w
     }
     return out
+}
+
+// A Unicode.Scalar: {__usc, value, isASCII}. Twins: swMkScalar / swScalarDebug /
+// swScalarText in languages/swift-interpreter.abnf, whose comment has the rule,
+// and in abnf/jsrtswift.go.
+function swMkScalar(s) {
+    var cp = swCpAt(s, 0)
+    var o = {}
+    o["__usc"] = s
+    o["value"] = cp
+    o["isASCII"] = cp < 128
+    return o
+}
+function swHexUp(n, width) {
+    var digits = "0123456789ABCDEF"
+    var out = ""
+    var x = n
+    while (x > 0) {
+        out = digits.charAt(x % 16) + out
+        x = (x - x % 16) / 16
+    }
+    while (out.length < width) { out = "0" + out }
+    return out
+}
+function swScalarDebug(s) {
+    var cp = swCpAt(s, 0)
+    var e = s
+    if (s == "\\") { e = "\\\\" }
+    else if (s == "'") { e = "\\'" }
+    else if (s == "\"") { e = "\\\"" }
+    else if (cp >= 32 && cp < 127) { e = s }
+    else if (cp == 0) { e = "\\0" }
+    else if (cp == 10) { e = "\\n" }
+    else if (cp == 13) { e = "\\r" }
+    else if (cp == 9) { e = "\\t" }
+    else if (cp < 128) { e = "\\u{" + swHexUp(cp, 2) + "}" }
+    else if (cp < 65536) { e = "\\u{" + swHexUp(cp, 4) + "}" }
+    else { e = "\\u{" + swHexUp(cp, 8) + "}" }
+    return "\"" + e + "\""
+}
+function swIsScalar(v) {
+    if (!swIsObj(v)) { return false }
+    return v["__usc"] !== undefined
+}
+function swScalarText(v) {
+    if (typeof v == "string") { return v }
+    if (swIsScalar(v)) { return v["__usc"] }
+    return null
 }
 
 // The members a sized integer or a Double answers for itself. Everything else

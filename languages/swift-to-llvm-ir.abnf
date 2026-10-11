@@ -510,7 +510,7 @@ TupleTypeLabel = Id [ Id ] ":" ;
 // A PARAMETER adopts through the same annotation text, structural forms included -
 // `(xs: [Double])` and `(g: (Double) -> Double)` both adopt - but the gate is
 // swAdoptNeeded, so an annotation with no adoptable leaf in it still emits nothing.
-AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | Type ;
+AnnType     = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | ScalarAnnType | Type ;
 // The captured TEXT rides along beside the labels: a labelled tuple type declares
 // its element types too, and `let t: (x: Double, y: Int) = (3, 4)` has to hold 3.0
 // exactly as the anonymous `(Double, Int)` form does. js_swadoptdeep strips each
@@ -680,7 +680,7 @@ ObsKind     = ( "willSet" | "didSet" ) KwEnd ;
 // general Type; the names are spelled longest-first (PEG first-match: "Int" would
 // otherwise match the front of "Int8") and closed with a KwEnd so a user type called
 // `Int8Box` is not read as `Int8`.
-DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | OtherAnnType ;
+DeclAnnType = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepAnnType | ScalarAnnType | OtherAnnType ;
 // Any other annotation is captured as TEXT only for the write-site check that an
 // EXISTENTIAL slot (`Any`, a protocol, ...) does not adopt; see swKeepMode.
 OtherAnnType <~~ push({otype: stripWs(up.in)}) ~~> = Type ;
@@ -712,6 +712,9 @@ NumTypeName = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
 //
 // The inner types are the general Type: only the top level has to be a container
 // here, and js_swadoptdeep ignores every leaf it does not recognise.
+// `Unicode.Scalar`: a String literal it types becomes a scalar (swMkScalar).
+ScalarAnnType <~~ push({atype: stripWs(up.in)}) ~~>
+            = ( "Unicode" NoSpace "." NoSpace "Scalar" | "UnicodeScalar" ) KwEnd NotTypeSuffix ;
 OptNumAnnType <~~ push({atype: stripWs(up.in)}) ~~>
             = NumTypeName NoSpace ( "?" | "!" ) NotTypeSuffix ;
 DeepAnnType <~~ push({atype: stripWs(up.in)}) ~~>
@@ -860,7 +863,7 @@ Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = Cast <~~ push({at: up.pos}) ~~> { "??" Cast } ;
 // e as T / e as? T / e as! T / e is T. With no cast operator it is a pure
 // pass-through (a single item).
-Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
+Cast        <~~ push(makeCast(takeAll(), up.pos, up.in)) ~~>
             = RangeExpr { CastOp CastType } ;
 // a...b / a..<b as a VALUE (Swift's RangeFormationPrecedence sits here): the
 // pattern-match operator ~= tests it, and a for-in can walk it.
@@ -1843,7 +1846,7 @@ KwContinue  = "continue" KwEnd ;
     // engine: js_swadopt in abnf/jsrtswift.go and languages/lib/swift-rt.metajs,
     // swAdoptTy in languages/swift-interpreter.abnf.
     function swAdoptable(ty) {
-        if (ty == "Double" || ty == "Float") { return true }
+        if (ty == "Double" || ty == "Float" || ty == "Unicode.Scalar" || ty == "UnicodeScalar") { return true }
         return swIntWidthOf(ty) != null
     }
     // Does this annotation TEXT carry an adoptable leaf anywhere inside it? A
@@ -1871,7 +1874,9 @@ KwContinue  = "continue" KwEnd ;
             else {
                 var s = i
                 while (i < ty.length && !swTyIsSep(ty.charAt(i))) { i = i + 1 }
-                if (swAdoptable(ty.substring(s, i))) { return true }
+                // "." separates, so Unicode.Scalar arrives as its last token.
+                var tok = ty.substring(s, i)
+                if (swAdoptable(tok) || tok == "Scalar") { return true }
             }
         }
         return false
@@ -2489,15 +2494,24 @@ KwContinue  = "continue" KwEnd ;
         // swAdoptable test is at EMIT time, so a cast to a non-numeric name emits
         // no call at all.
         if (op != "is" && op != "as?") {
+            if (op == "as!" && !swAdoptable(tname)) {
+                return function(b) {
+                    var ro = t(b)
+                    return {b: ro.b, v: swEmitOptOpen(ro.b, ro.v)}
+                }
+            }
             if (!swAdoptable(tname)) { return t }
+            var opens = op == "as!"
             return function(b) {
                 var ra = t(b)
-                return {b: ra.b, v: swEmitAdopt(ra.b, ra.v, tname)}
+                var av = opens ? swEmitOptOpen(ra.b, ra.v) : ra.v
+                return {b: ra.b, v: swEmitAdopt(ra.b, av, tname)}
             }
         }
         return function(b) {
             var r = t(b)
             b = r.b
+            r = {b: b, v: swEmitOptOpen(b, r.v)}
             var ri = emitIsType(r.b, r.v, tname)
             var joinB = ri.b
             var hit = ri.v
@@ -2511,7 +2525,7 @@ KwContinue  = "continue" KwEnd ;
             return {b: mB, v: mB.NewPhi([llvm.ir.NewIncoming(r.v, yB), llvm.ir.NewIncoming(hNull, nB)])}
         }
     }
-    function makeCast(items, pos) {
+    function makeCast(items, pos, txt) {
         if (items.length == 1) { return items[0] }
         var t = items[0]
         var op = ""
@@ -2522,7 +2536,31 @@ KwContinue  = "continue" KwEnd ;
             t = makeCastOne(t, op, ty)
         }
         if (op == "as?" && swAdoptable(ty)) { swAsqCasts.push({at: pos, ty: ty}) }
+        if (swCastOptAny(items, txt)) {
+            swOptAnyUsed = true
+            var inner = t
+            return function(b) {
+                var ri = inner(b)
+                return {b: ri.b, v: callExt(ri.b, "js_swoptany", [ri.v])}
+            }
+        }
         return t
+    }
+    // `x as Any` of an OPTIONAL x keeps the Optional inside the Any
+    // (js_swoptany); a cast back out unwraps it (js_swoptopen), emitted only in a
+    // program that makes such a box. Twin of swCastOptAny / swOptOpen in
+    // swift-interpreter.abnf.
+    var swOptAnyUsed = false
+    function swCastOptAny(items, txt0) {
+        if (items.length != 3 || items[1].cast != "as" || items[2].ctype != "Any") { return false }
+        var txt = stripWs(txt0)
+        var cut = txt.length - items[1].cast.length - items[2].ctype.length
+        if (cut <= 0) { return false }
+        return swTyIsOpt(swExprAnn(txt.substring(0, cut)))
+    }
+    function swEmitOptOpen(b, v) {
+        if (!swOptAnyUsed) { return v }
+        return callExt(b, "js_swoptopen", [v])
     }
     // The `as? T` casts to a numeric T, by END position: the right side of a `??`
     // after one is typed T. Twin of swAsqTyOf in swift-interpreter.abnf.
@@ -5313,18 +5351,19 @@ KwContinue  = "continue" KwEnd ;
             && classNames[name] != 1 && enumNames[name] != 1) {
             return function(b) { return {b: b, v: callExt(b, "js_dict_new", [])} }
         }
-        // Optional(v): an Optional IS its value in this model, and so is a
-        // Character(c) its one-cluster String.
-        if ((name == "Optional" || name == "Character") && args.length == 1 && lookupSig(name) == null
+        // Optional(v): an Optional IS its value in this model.
+        if (name == "Optional" && args.length == 1 && lookupSig(name) == null
             && classNames[name] != 1 && enumNames[name] != 1) {
             return function(b) {
                 var eo = emitArgRecs(b, args)
                 return {b: eo.b, v: callExt(eo.b, "js_swidx", [eo.v, emitNum(eo.b, 0)])}
             }
         }
-        if ((name == "Double" || name == "Float" || name == "String")
+        // Character(c) is its one-cluster String, so it renders its argument:
+        // a String is itself and a Unicode.Scalar its glyph.
+        if ((name == "Double" || name == "Float" || name == "String" || (name == "Character" && args.length == 1))
             && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
-            var convExt = name == "String" ? "js_swstr" : "js_swflo"
+            var convExt = (name == "String" || name == "Character") ? "js_swstr" : "js_swflo"
             if (name == "Float") { convExt = "js_swflo32" }
             // `String(x)` and `String(describing: x)` are two initializers, and the
             // one argument they disagree on is a Character SEQUENCE. The label is

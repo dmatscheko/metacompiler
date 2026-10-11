@@ -2864,6 +2864,28 @@ func s54() {
     check("54c", clog == 0 && c.n == 4)
 }
 
+// ===== SECTION 55: an Optional kept inside an Any; a Unicode.Scalar in a collection =====
+// `x as Any` of an Optional keeps the Optional (`Optional(7)`, nil stays nil) and a
+// cast back out unwraps it. A Unicode.Scalar prints as its glyph, but inside a
+// collection as its debugDescription, which escapes everything outside printable
+// ASCII. Every expected value is swiftc 6.1.2's.
+func half55(_ x: Int) -> Int? { return x % 2 == 0 ? x / 2 : nil }
+func s55() {
+    let ns = [7, 4]
+    let o: Int? = ns[0]
+    let a = o as Any
+    let s: String? = "q"
+    check("55a", "\(a)" == "Optional(7)" && "\(s as Any)" == "Optional(\"q\")" && "\(half55(ns[1]) as Any)" == "Optional(2)"
+                 && "\(half55(ns[0]) as Any)" == "nil" && "\([o as Any, 1])" == "[Optional(7), 1]")
+    check("55b", (a as? Int)! + 1 == 8 && a is Int && (a as! Int) * 2 == 14)
+    let u: Unicode.Scalar = "\u{E9}"
+    let sc = Array("a\u{E9}\u{1F600}".unicodeScalars)
+    check("55c", "\(u)" == "\u{E9}" && "\([u])" == "[\"\\u{00E9}\"]" && "\(sc)" == "[\"a\", \"\\u{00E9}\", \"\\u{0001F600}\"]"
+                 && "\((u, 1))" == "(\"\\u{00E9}\", 1)")
+    check("55d", u.value == 233 && sc[2].value == 128512 && sc[0] == "a" && sc[1] == u && String(sc[1]) == "\u{E9}"
+                 && Character(sc[0]) == "a")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -2921,6 +2943,7 @@ func main() {
     s52() // SECTION-CALL 52
     s53() // SECTION-CALL 53
     s54() // SECTION-CALL 54
+    s55() // SECTION-CALL 55
     print("full: \(checks) checks, \(fails) failures")
 }
 
