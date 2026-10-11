@@ -4625,6 +4625,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         },
         "strpos": function(h, n, off) { return phpPosResult("strpos", phsStrpos(phpStr(h), phpStr(n), phpInt(off))) },
         "strrpos": function(h, n, off) { return phpPosResult("strrpos", phsStrrpos(phpStr(h), phpStr(n), phpInt(off))) },
+        "strcmp": function(a, b) { return phsStrcmp(phpStr(a), phpStr(b)) },
         "ord": function(s) { return phsOrd(phpStr(s)) },
         "chr": function(n) { return phsChr(phpInt(n)) },
         "strtolower": function(s) { return phsCase(phpStr(s), false) },

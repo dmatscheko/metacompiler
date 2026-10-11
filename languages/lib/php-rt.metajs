@@ -1964,6 +1964,7 @@ function phPosResult(name, at) {
 
 function js_phstrpos(h, needle, off) { return phPosResult("strpos", phsStrpos(phStr(h), phStr(needle), phInt(off))) }
 function js_phstrrpos(h, needle, off) { return phPosResult("strrpos", phsStrrpos(phStr(h), phStr(needle), phInt(off))) }
+function js_phstrcmp(a, b) { return phsStrcmp(phStr(a), phStr(b)) }
 function js_phord(s) { return phsOrd(phStr(s)) }
 function js_phchr(n) { return phsChr(phInt(n)) }
 function js_phcase(s, up) { return phsCase(phStr(s), up === true) }

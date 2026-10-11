@@ -158,6 +158,9 @@ func init() {
 		m["js_phstrrpos"] = func(a []uint64) uint64 {
 			return pos("strrpos", phpStrrpos(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])), num(u(a[2]))))
 		}
+		m["js_phstrcmp"] = func(a []uint64) uint64 {
+			return w(phpMkInt(int64(strings.Compare(rt.phpStr(u(a[0])), rt.phpStr(u(a[1]))))))
+		}
 		m["js_phord"] = func(a []uint64) uint64 {
 			s := rt.phpStr(u(a[0]))
 			if s == "" {

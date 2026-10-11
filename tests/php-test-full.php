@@ -1525,8 +1525,9 @@ function call_twice($f, $v) { return $f($v) + $f($v); }
 
 // ===== SECTION 39: the string function library and sprintf =====
 // substr / strpos and the str_* family over BYTE offsets, the trim character
-// lists, str_replace with arrays and its count, the comparison functions' -1/0/1,
-// sprintf's flags, widths, precisions and conversions, and number_format.
+// lists, str_replace with arrays and its count, the comparison functions' -1/0/1
+// (natural order too), levenshtein and similar_text, sprintf's flags, widths,
+// precisions and conversions, and number_format - with non-ASCII text kept whole.
 function s39() {
     $s = "Hello World";
     check("str1", substr($s, 0, 5) === "Hello" && substr($s, -5) === "World" && substr($s, 3, -3) === "lo Wo"
@@ -1577,6 +1578,29 @@ function s39() {
     check("fmt5", number_format(1234567.891) === "1,234,568" && number_format(1234567.891, 2) === "1,234,567.89"
         && number_format(1234567.891, 2, ",", ".") === "1.234.567,89" && number_format(0.5) === "1"
         && number_format(-1234.567, 1) === "-1,234.6" && number_format(-0.4) === "0" && number_format(2.675, 2) === "2.68");
+    $nat = ["img12.png", "img10.png", "IMG2.png", "img1.png"];
+    natsort($nat);
+    $natc = $nat;
+    natcasesort($natc);
+    $ns = ["10", "9", "2", "1"];
+    sort($ns, SORT_NATURAL);
+    check("str16", strnatcmp("img12.png", "img10.png") === 1 && strnatcmp("img2", "img10") === -1 && strcmp("img2", "img10") === 1
+        && strnatcasecmp("A1", "a2") === -1 && strnatcmp("x01", "x1") === -1 && strnatcmp("a  b", "a b") === 0
+        && $nat === [2 => "IMG2.png", 3 => "img1.png", 1 => "img10.png", 0 => "img12.png"]
+        && $natc === [3 => "img1.png", 2 => "IMG2.png", 1 => "img10.png", 0 => "img12.png"] && $ns === ["1", "2", "9", "10"]);
+    $pct = 0;
+    $sim = similar_text("Hello", "World", $pct);
+    check("str17", levenshtein("kitten", "sitting") === 3 && levenshtein("", "abc") === 3 && levenshtein("flaw", "lawn", 2, 3, 4) === 6
+        && similar_text("bafoobar", "barfoo") === 5 && similar_text("barfoo", "bafoobar") === 3 && similar_text("World", "Word") === 4
+        && $sim === 1 && $pct === 20.0);
+    // A non-ASCII string keeps its characters through every byte-walking function.
+    check("str18", ucwords("héllo wörld") === "Héllo Wörld" && nl2br("é\nü") === "é<br />\nü" && stripslashes("é\\'x") === "é'x"
+        && strtr("héllo", "l", "L") === "héLLo" && strtr("héllo", ["é" => "e", "ll" => "LL"]) === "heLLo"
+        && sprintf("é %d ü %s", 5, "ö") === "é 5 ü ö" && sprintf("%5s|", "é") === "   é|" && trim("  héllo  ") === "héllo"
+        && wordwrap("héllo wörld foo", 6) === "héllo\nwörld\nfoo" && str_pad("é", 4, "*") === "é**");
+    check("str19", strcmp("é", "è") === 1 && strcmp("a", "é") === -1 && strtoupper("héllo") === "HéLLO"
+        && substr_count("ééé", "é") === 3 && str_replace("é", "e", "café é") === "cafe e" && explode("é", "aébéc") === ["a", "b", "c"]
+        && str_word_count("héllo wörld") === 4 && strpos("aéb", "b") === 3);
     $e1 = "";
     try { explode("", "x"); } catch (ValueError $e) { $e1 = $e->getMessage(); }
     $e2 = "";

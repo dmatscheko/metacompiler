@@ -5,11 +5,15 @@
 // functions (phpLibRef), so the interpreter half, llvm.Run and the native binary
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
-// array_key_last, array_pop, substr, strpos, strrpos, ord, chr, strtolower,
-// strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and __mec_fmtfloat, the
-// one intrinsic, for sprintf's float conversions. A native also gets a wrapper
+// array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and
+// __mec_fmtfloat, the one intrinsic, for sprintf's float conversions. A native also gets a wrapper
 // here of the same name, which is what a string callable or f(...) reaches: a
 // direct call never does, since the call is lowered to the native first.
+//
+// A string is walked by BYTE offsets, but rebuilt from substr() RUNS between the
+// ASCII bytes a function acts on: a one-byte piece of a multi-byte character is
+// a stand-in (php-strings.js), which compares right but must not be copied out.
 //
 // Parameter names are the manual's, so named arguments bind. Errors are PHP 8's
 // own ValueError / TypeError / ArgumentCountError texts. Deliberately absent:
@@ -22,6 +26,7 @@ const COUNT_RECURSIVE = 1;
 const SORT_REGULAR = 0;
 const SORT_NUMERIC = 1;
 const SORT_STRING = 2;
+const SORT_NATURAL = 6;
 const SORT_FLAG_CASE = 8;
 const ARRAY_FILTER_USE_BOTH = 1;
 const ARRAY_FILTER_USE_KEY = 2;
@@ -51,6 +56,7 @@ function array_pop(&$array) { return array_pop($array); }
 function substr($string, $offset, $length = null) { return substr($string, $offset, $length); }
 function strpos($haystack, $needle, $offset = 0) { return strpos($haystack, $needle, $offset); }
 function strrpos($haystack, $needle, $offset = 0) { return strrpos($haystack, $needle, $offset); }
+function strcmp($string1, $string2) { return strcmp($string1, $string2); }
 function ord($character) { return ord($character); }
 function chr($codepoint) { return chr($codepoint); }
 function strtolower($string) { return strtolower($string); }
@@ -67,6 +73,7 @@ function __mec_flagcmp($a, $b, $flags) {
         if ($flags & SORT_FLAG_CASE) { return strcasecmp((string)$a, (string)$b); }
         return strcmp((string)$a, (string)$b);
     }
+    if ($f == SORT_NATURAL) { return __mec_natcmp($a, $b, ($flags & SORT_FLAG_CASE) != 0); }
     return $a <=> $b;
 }
 // A user comparison callback's answer as an ordering. A bool is PHP 8's
@@ -123,6 +130,8 @@ function usort(&$array, $callback) { return __mec_sort($array, 1, $callback, 0, 
 function asort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, 1, true); }
 function arsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, -1, true); }
 function uasort(&$array, $callback) { return __mec_sort($array, 1, $callback, 0, 1, true); }
+function natsort(&$array) { return __mec_sort($array, 1, null, SORT_NATURAL, 1, true); }
+function natcasesort(&$array) { return __mec_sort($array, 1, null, SORT_NATURAL | SORT_FLAG_CASE, 1, true); }
 function ksort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 0, null, $flags, 1, true); }
 function krsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 0, null, $flags, -1, true); }
 function uksort(&$array, $callback) { return __mec_sort($array, 0, $callback, 0, 1, true); }
@@ -515,9 +524,21 @@ function array_reduce($array, $callback, $initial = null) {
     foreach ($array as $v) { $acc = $callback($acc, $v); }
     return $acc;
 }
+// The callback's by-reference parameter writes back only where a call of a
+// callable VALUE passes a reference: the interpreter half does, the compiler
+// half's dynamic call passes the value.
 function array_walk(&$array, $callback, ...$arg) {
     foreach ($array as $k => &$v) {
         if (count($arg) > 0) { $callback($v, $k, $arg[0]); } else { $callback($v, $k); }
+    }
+    unset($v);
+    return true;
+}
+function array_walk_recursive(&$array, $callback, ...$arg) {
+    foreach ($array as $k => &$v) {
+        if (is_array($v)) { array_walk_recursive($v, $callback, ...$arg); }
+        elseif (count($arg) > 0) { $callback($v, $k, $arg[0]); }
+        else { $callback($v, $k); }
     }
     unset($v);
     return true;
@@ -705,21 +726,7 @@ function substr_count($haystack, $needle, $offset = 0, $length = null) {
 }
 
 // ----- strings: comparing ----------------------------------------------------
-// Byte order, answering -1 / 0 / 1 (PHP 8.2).
-function strcmp($string1, $string2) {
-    $a = (string)$string1;
-    $b = (string)$string2;
-    if ($a === $b) { return 0; }
-    $na = strlen($a);
-    $nb = strlen($b);
-    $n = $na < $nb ? $na : $nb;
-    for ($i = 0; $i < $n; $i++) {
-        $x = ord(substr($a, $i, 1));
-        $y = ord(substr($b, $i, 1));
-        if ($x != $y) { return $x < $y ? -1 : 1; }
-    }
-    return $na <=> $nb;
-}
+// strcmp is the native (byte order, -1 / 0 / 1); the rest are written on it.
 function strcasecmp($string1, $string2) { return strcmp(strtolower($string1), strtolower($string2)); }
 function strncmp($string1, $string2, $length) {
     if ($length < 0) { throw new ValueError("strncmp(): Argument #3 (\$length) must be greater than or equal to 0"); }
@@ -729,30 +736,167 @@ function strncasecmp($string1, $string2, $length) {
     if ($length < 0) { throw new ValueError("strncasecmp(): Argument #3 (\$length) must be greater than or equal to 0"); }
     return strcmp(strtolower(substr($string1, 0, $length)), strtolower(substr($string2, 0, $length)));
 }
+// strnatcmp_ex: leading zeros skipped once, whitespace skipped, a run of digits
+// compared by value (or left-aligned when either starts with 0), anything else
+// byte by byte - folding ASCII case for strnatcasecmp.
+function strnatcmp($string1, $string2) { return __mec_natcmp($string1, $string2, false); }
+function strnatcasecmp($string1, $string2) { return __mec_natcmp($string1, $string2, true); }
+// The one-byte piece at $i, "" past the end (C's terminating NUL).
+function __mec_byte($s, $i, $n) { return $i < $n ? substr($s, $i, 1) : ""; }
+function __mec_isdigit($c) { return $c !== "" && strpos("0123456789", $c) !== false; }
+function __mec_isspace($c) { return $c !== "" && strpos(" \t\n\v\f\r", $c) !== false; }
+function __mec_natcmp($string1, $string2, $ci) {
+    $a = (string)$string1;
+    $b = (string)$string2;
+    $na = strlen($a);
+    $nb = strlen($b);
+    if ($na == 0 || $nb == 0) { return $na == $nb ? 0 : ($na > $nb ? 1 : -1); }
+    $ap = 0;
+    $bp = 0;
+    $leading = true;
+    while (true) {
+        $ca = __mec_byte($a, $ap, $na);
+        $cb = __mec_byte($b, $bp, $nb);
+        while ($leading && $ca === "0" && $ap + 1 < $na && __mec_isdigit(__mec_byte($a, $ap + 1, $na))) { $ap++; $ca = __mec_byte($a, $ap, $na); }
+        while ($leading && $cb === "0" && $bp + 1 < $nb && __mec_isdigit(__mec_byte($b, $bp + 1, $nb))) { $bp++; $cb = __mec_byte($b, $bp, $nb); }
+        $leading = false;
+        while (__mec_isspace($ca)) { $ap++; $ca = __mec_byte($a, $ap, $na); }
+        while (__mec_isspace($cb)) { $bp++; $cb = __mec_byte($b, $bp, $nb); }
+        if (__mec_isdigit($ca) && __mec_isdigit($cb)) {
+            $r = __mec_natrun($a, $ap, $na, $b, $bp, $nb, $ca === "0" || $cb === "0");
+            if ($r != 0) { return $r; }
+            if ($ap == $na && $bp == $nb) { return 0; }
+            if ($ap == $na) { return -1; }
+            if ($bp == $nb) { return 1; }
+            $ca = __mec_byte($a, $ap, $na);
+            $cb = __mec_byte($b, $bp, $nb);
+        }
+        if ($ci) {
+            $ca = strtoupper($ca);
+            $cb = strtoupper($cb);
+        }
+        $c = strcmp($ca, $cb);
+        if ($c != 0) { return $c; }
+        $ap++;
+        $bp++;
+        if ($ap >= $na && $bp >= $nb) { return 0; }
+        if ($ap >= $na) { return -1; }
+        if ($bp >= $nb) { return 1; }
+    }
+}
+// compare_left (a fractional run, $left: the first differing digit wins) and
+// compare_right (the longer run wins, else the first difference), advancing both
+// positions past the digits they read.
+function __mec_natrun($a, &$ap, $na, $b, &$bp, $nb, $left) {
+    $bias = 0;
+    while (true) {
+        $da = __mec_isdigit(__mec_byte($a, $ap, $na));
+        $db = __mec_isdigit(__mec_byte($b, $bp, $nb));
+        if (!$da && !$db) { return $bias; }
+        if (!$da) { return -1; }
+        if (!$db) { return 1; }
+        $c = strcmp(__mec_byte($a, $ap, $na), __mec_byte($b, $bp, $nb));
+        if ($left && $c != 0) { return $c; }
+        if ($bias == 0) { $bias = $c; }
+        $ap++;
+        $bp++;
+    }
+}
+function levenshtein($string1, $string2, $insertion_cost = 1, $replacement_cost = 1, $deletion_cost = 1) {
+    $a = str_split((string)$string1);
+    $b = str_split((string)$string2);
+    $na = strlen($string1);
+    $nb = strlen($string2);
+    if ($na == 0) { return $nb * $insertion_cost; }
+    if ($nb == 0) { return $na * $deletion_cost; }
+    $p1 = [];
+    for ($j = 0; $j <= $nb; $j++) { $p1[] = $j * $insertion_cost; }
+    for ($i = 0; $i < $na; $i++) {
+        $p2 = [$p1[0] + $deletion_cost];
+        for ($j = 0; $j < $nb; $j++) {
+            $c0 = $p1[$j] + ($a[$i] === $b[$j] ? 0 : $replacement_cost);
+            $c1 = $p1[$j + 1] + $deletion_cost;
+            if ($c1 < $c0) { $c0 = $c1; }
+            $c2 = $p2[$j] + $insertion_cost;
+            if ($c2 < $c0) { $c0 = $c2; }
+            $p2[] = $c0;
+        }
+        $p1 = $p2;
+    }
+    return $p1[$nb];
+}
+// php_similar_char: the longest common run, then the same on what lies left of
+// it (only when it was not the first run found) and right of it.
+function __mec_similar($a, $a0, $la, $b, $b0, $lb) {
+    $max = 0;
+    $count = 0;
+    $pa = 0;
+    $pb = 0;
+    for ($i = 0; $i < $la; $i++) {
+        for ($j = 0; $j < $lb; $j++) {
+            $l = 0;
+            while ($i + $l < $la && $j + $l < $lb && $a[$a0 + $i + $l] === $b[$b0 + $j + $l]) { $l++; }
+            if ($l > $max) {
+                $max = $l;
+                $count++;
+                $pa = $i;
+                $pb = $j;
+            }
+        }
+    }
+    $sum = $max;
+    if ($sum > 0) {
+        if ($pa > 0 && $pb > 0 && $count > 1) { $sum += __mec_similar($a, $a0, $pa, $b, $b0, $pb); }
+        if ($pa + $max < $la && $pb + $max < $lb) {
+            $sum += __mec_similar($a, $a0 + $pa + $max, $la - $pa - $max, $b, $b0 + $pb + $max, $lb - $pb - $max);
+        }
+    }
+    return $sum;
+}
+function similar_text($string1, $string2, &$percent = null) {
+    $la = strlen($string1);
+    $lb = strlen($string2);
+    if ($la + $lb == 0) {
+        $percent = 0.0;
+        return 0;
+    }
+    $sim = __mec_similar(str_split((string)$string1), 0, $la, str_split((string)$string2), 0, $lb);
+    $percent = $sim * 200.0 / ($la + $lb);
+    return $sim;
+}
 
 // ----- strings: case and whitespace ------------------------------------------
 function ucfirst($string) { return strtoupper(substr($string, 0, 1)) . substr($string, 1); }
 function lcfirst($string) { return strtolower(substr($string, 0, 1)) . substr($string, 1); }
 function ucwords($string, $separators = " \t\r\n\f\v") {
+    $string = (string)$string;
     $out = "";
+    $at = 0;
     $up = true;
     $n = strlen($string);
     for ($i = 0; $i < $n; $i++) {
         $c = substr($string, $i, 1);
-        $out .= $up ? strtoupper($c) : $c;
+        if ($up) {
+            $u = strtoupper($c);
+            if ($u !== $c) {
+                $out .= substr($string, $at, $i - $at) . $u;
+                $at = $i + 1;
+            }
+        }
         $up = strpos($separators, $c) !== false;
     }
-    return $out;
+    return $out . substr($string, $at);
 }
-// The byte set a trim character list names: "a..z" is a range.
+// The byte set a trim character list names, keyed by the one-byte piece: "a..z"
+// is a range.
 function __mec_charset($characters) {
     $set = [];
     $n = strlen($characters);
     for ($i = 0; $i < $n; $i++) {
-        $c = ord(substr($characters, $i, 1));
+        $c = substr($characters, $i, 1);
         if ($i + 3 < $n && substr($characters, $i + 1, 2) == "..") {
             $e = ord(substr($characters, $i + 3, 1));
-            for ($x = $c; $x <= $e; $x++) { $set[$x] = true; }
+            for ($x = ord($c); $x <= $e; $x++) { $set[chr($x)] = true; }
             $i += 3;
         } else {
             $set[$c] = true;
@@ -765,8 +909,8 @@ function __mec_trim($string, $characters, $left, $right) {
     $string = (string)$string;
     $a = 0;
     $b = strlen($string);
-    if ($left) { while ($a < $b && isset($set[ord(substr($string, $a, 1))])) { $a++; } }
-    if ($right) { while ($b > $a && isset($set[ord(substr($string, $b - 1, 1))])) { $b--; } }
+    if ($left) { while ($a < $b && isset($set[substr($string, $a, 1)])) { $a++; } }
+    if ($right) { while ($b > $a && isset($set[substr($string, $b - 1, 1)])) { $b--; } }
     return substr($string, $a, $b - $a);
 }
 function trim($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, true, true); }
@@ -832,24 +976,27 @@ function substr_replace($string, $replace, $offset, $length = null) {
 }
 function strtr($string, ...$args) {
     $string = (string)$string;
+    $n = strlen($string);
+    $out = "";
+    $at = 0;
     if (count($args) == 2) {
         $from = (string)$args[0];
         $to = (string)$args[1];
         $m = strlen($from) < strlen($to) ? strlen($from) : strlen($to);
         $map = [];
-        for ($i = 0; $i < $m; $i++) { $map[ord(substr($from, $i, 1))] = substr($to, $i, 1); }
-        $out = "";
-        $n = strlen($string);
+        for ($i = 0; $i < $m; $i++) { $map[substr($from, $i, 1)] = substr($to, $i, 1); }
+        if (count($map) == 0) { return $string; }
         for ($i = 0; $i < $n; $i++) {
             $c = substr($string, $i, 1);
-            $out .= $map[ord($c)] ?? $c;
+            if (isset($map[$c])) {
+                $out .= substr($string, $at, $i - $at) . $map[$c];
+                $at = $i + 1;
+            }
         }
-        return $out;
+        return $out . substr($string, $at);
     }
     $pairs = [];
     foreach ($args[0] as $k => $v) { if ((string)$k !== "") { $pairs[(string)$k] = (string)$v; } }
-    $out = "";
-    $n = strlen($string);
     $i = 0;
     while ($i < $n) {
         $best = null;
@@ -857,26 +1004,33 @@ function strtr($string, ...$args) {
             $k = (string)$k;
             if (($best === null || strlen($k) > strlen($best)) && substr($string, $i, strlen($k)) === $k) { $best = $k; }
         }
-        if ($best === null) { $out .= substr($string, $i, 1); $i++; }
-        else { $out .= $pairs[$best]; $i += strlen($best); }
+        if ($best === null) {
+            $i++;
+        } else {
+            $out .= substr($string, $at, $i - $at) . $pairs[$best];
+            $i += strlen($best);
+            $at = $i;
+        }
     }
-    return $out;
+    return $out . substr($string, $at);
 }
 function nl2br($string, $use_xhtml = true) {
+    $string = (string)$string;
     $br = $use_xhtml ? "<br />" : "<br>";
     $out = "";
+    $at = 0;
     $n = strlen($string);
     for ($i = 0; $i < $n; $i++) {
         $c = substr($string, $i, 1);
-        if ($c == "\r" || $c == "\n") {
-            $out .= $br . $c;
+        if ($c === "\r" || $c === "\n") {
             $d = substr($string, $i + 1, 1);
-            if (($d == "\r" || $d == "\n") && $d != $c) { $out .= $d; $i++; }
-        } else {
-            $out .= $c;
+            $end = ($d === "\r" || $d === "\n") && $d !== $c ? $i + 2 : $i + 1;
+            $out .= substr($string, $at, $i - $at) . $br . substr($string, $i, $end - $i);
+            $at = $end;
+            $i = $end - 1;
         }
     }
-    return $out;
+    return $out . substr($string, $at);
 }
 function htmlspecialchars($string, $flags = 11, $encoding = null, $double_encode = true) {
     $map = ["&" => "&amp;", "\"" => "&quot;", "<" => "&lt;", ">" => "&gt;"];
@@ -887,20 +1041,24 @@ function htmlspecialchars($string, $flags = 11, $encoding = null, $double_encode
 function addslashes($string) {
     return strtr($string, ["\\" => "\\\\", "'" => "\\'", "\"" => "\\\"", "\x00" => "\\0"]);
 }
+// A backslash is dropped and the byte after it kept (\0 is a NUL byte).
 function stripslashes($string) {
+    $string = (string)$string;
     $out = "";
+    $at = 0;
     $n = strlen($string);
     for ($i = 0; $i < $n; $i++) {
-        $c = substr($string, $i, 1);
-        if ($c == "\\" && $i + 1 < $n) {
+        if (substr($string, $i, 1) === "\\") {
+            $out .= substr($string, $at, $i - $at);
+            $at = $i + 1;
+            if ($i + 1 < $n && substr($string, $i + 1, 1) === "0") {
+                $out .= "\x00";
+                $at = $i + 2;
+            }
             $i++;
-            $d = substr($string, $i, 1);
-            $out .= $d == "0" ? "\x00" : $d;
-        } elseif ($c != "\\") {
-            $out .= $c;
         }
     }
-    return $out;
+    return $out . substr($string, $at);
 }
 // A word is a run of ASCII letters, ' and -; the string's first byte cannot open
 // one with ' or -, nor its last byte end one with - (php_str_word_count).
@@ -936,19 +1094,25 @@ function wordwrap($string, $width = 75, $break = "\n", $cut_long_words = false) 
     $laststart = 0;
     $lastspace = 0;
     if ($bl == 1 && !$cut_long_words) {
-        $out = str_split($text);
+        $at = [];
         for ($cur = 0; $cur < $n; $cur++) {
-            $c = $out[$cur];
+            $c = substr($text, $cur, 1);
             if ($c === $break) { $laststart = $lastspace = $cur + 1; }
             elseif ($c === " ") {
-                if ($cur - $laststart >= $width) { $out[$cur] = $break; $laststart = $cur + 1; }
+                if ($cur - $laststart >= $width) { $at[$cur] = true; $laststart = $cur + 1; }
                 $lastspace = $cur;
             } elseif ($cur - $laststart >= $width && $laststart != $lastspace) {
-                $out[$lastspace] = $break;
+                $at[$lastspace] = true;
                 $laststart = $lastspace + 1;
             }
         }
-        return implode("", $out);
+        $out = "";
+        $from = 0;
+        foreach (array_keys($at) as $p) {
+            $out .= substr($text, $from, $p - $from) . $break;
+            $from = $p + 1;
+        }
+        return $out . substr($text, $from);
     }
     $out = "";
     for ($cur = 0; $cur < $n; $cur++) {
@@ -1004,14 +1168,17 @@ function __mec_format($format, $args) {
     $next = 0;
     $i = 0;
     while ($i < $n) {
-        $c = $format[$i];
-        if ($c != "%") { $out .= $c; $i++; continue; }
+        $p = strpos($format, "%", $i);
+        if ($p === false) { $p = $n; }
+        $out .= substr($format, $i, $p - $i);
+        $i = $p;
+        if ($i >= $n) { break; }
         $i++;
-        if ($i < $n && $format[$i] == "%") { $out .= "%"; $i++; continue; }
+        if (substr($format, $i, 1) === "%") { $out .= "%"; $i++; continue; }
         $argnum = -1;
         $j = $i;
-        while ($j < $n && ord($format[$j]) >= 48 && ord($format[$j]) <= 57) { $j++; }
-        if ($j > $i && $j < $n && $format[$j] == "\$") {
+        while ($j < $n && ord(substr($format, $j, 1)) >= 48 && ord(substr($format, $j, 1)) <= 57) { $j++; }
+        if ($j > $i && $j < $n && substr($format, $j, 1) == "\$") {
             $argnum = (int)substr($format, $i, $j - $i) - 1;
             if ($argnum < 0) { throw new ValueError("Argument number specifier must be greater than zero and less than 2147483647"); }
             $i = $j + 1;
@@ -1020,24 +1187,24 @@ function __mec_format($format, $args) {
         $plus = false;
         $pad = " ";
         while ($i < $n) {
-            $f = $format[$i];
+            $f = substr($format, $i, 1);
             if ($f == "-") { $left = true; }
             elseif ($f == "+") { $plus = true; }
             elseif ($f == "0" || $f == " ") { $pad = $f; }
-            elseif ($f == "'") { $i++; $pad = $format[$i]; }
+            elseif ($f == "'") { $i++; $pad = substr($format, $i, 1); }
             else { break; }
             $i++;
         }
         $width = 0;
-        while ($i < $n && ord($format[$i]) >= 48 && ord($format[$i]) <= 57) { $width = $width * 10 + (int)$format[$i]; $i++; }
+        while ($i < $n && ord(substr($format, $i, 1)) >= 48 && ord(substr($format, $i, 1)) <= 57) { $width = $width * 10 + (int)substr($format, $i, 1); $i++; }
         $prec = -1;
-        if ($i < $n && $format[$i] == ".") {
+        if ($i < $n && substr($format, $i, 1) == ".") {
             $i++;
             $prec = 0;
-            while ($i < $n && ord($format[$i]) >= 48 && ord($format[$i]) <= 57) { $prec = $prec * 10 + (int)$format[$i]; $i++; }
+            while ($i < $n && ord(substr($format, $i, 1)) >= 48 && ord(substr($format, $i, 1)) <= 57) { $prec = $prec * 10 + (int)substr($format, $i, 1); $i++; }
         }
         if ($i >= $n) { throw new ValueError("Missing format specifier at end of string"); }
-        $conv = $format[$i];
+        $conv = substr($format, $i, 1);
         $i++;
         $at = $argnum >= 0 ? $argnum : $next++;
         if ($at >= count($args)) {

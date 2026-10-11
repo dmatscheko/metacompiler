@@ -1,5 +1,5 @@
-// php-strings.js -- PHP's byte-string primitives: substr, strpos, strrpos, ord,
-// chr, the ASCII case maps and sprintf's float conversions. Everything else in
+// php-strings.js -- PHP's byte-string primitives: substr, strpos, strrpos,
+// strcmp, ord, chr, the ASCII case maps and sprintf's float conversions. Everything else in
 // PHP's string and array library is written in PHP itself (lib/php-stdlib.php)
 // on top of these.
 //
@@ -181,6 +181,21 @@ function phsStrrpos(h, needle, off) {
         p = p - 1
     }
     return 0 - 1
+}
+
+// strcmp(a, b): byte order, -1 / 0 / 1 (PHP 8.2).
+function phsStrcmp(a, b) {
+    if (a == b) { return 0 }
+    if (phsAscii(a) && phsAscii(b)) { return a < b ? 0 - 1 : 1 }
+    var ab = phsBytes(a)
+    var bb = phsBytes(b)
+    var i = 0
+    while (i < ab.length && i < bb.length) {
+        if (ab[i] != bb[i]) { return ab[i] < bb[i] ? 0 - 1 : 1 }
+        i = i + 1
+    }
+    if (ab.length == bb.length) { return 0 }
+    return ab.length < bb.length ? 0 - 1 : 1
 }
 
 // ord(s): the first byte, 0 for "".

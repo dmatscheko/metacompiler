@@ -4855,6 +4855,7 @@ KwInstanceof = "instanceof" KwEnd ;
         if (name == "substr") { return "js_phsubstr" }
         if (name == "strpos") { return "js_phstrpos" }
         if (name == "strrpos") { return "js_phstrrpos" }
+        if (name == "strcmp") { return "js_phstrcmp" }
         if (name == "ord") { return "js_phord" }
         if (name == "chr") { return "js_phchr" }
         if (name == "__mec_fmtfloat") { return "js_phfmtfloat" }
@@ -4865,7 +4866,7 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     function phpNativeArgc(ext) {
         if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat") { return 3 }
-        if (ext == "js_phkeyexists") { return 2 }
+        if (ext == "js_phkeyexists" || ext == "js_phstrcmp") { return 2 }
         return 1
     }
     // The is_* family, mapped onto the ONE js_phis extern.
