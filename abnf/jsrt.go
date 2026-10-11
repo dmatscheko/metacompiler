@@ -7841,14 +7841,7 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		}
 		return o, true
 	case "casecmp":
-		la, lb := strings.ToLower(o), strings.ToLower(sarg(0))
-		if la < lb {
-			return float64(-1), true
-		}
-		if la > lb {
-			return float64(1), true
-		}
-		return float64(0), true
+		return float64(rubyCasecmp(o, sarg(0))), true
 	case "casecmp?":
 		return caseMapMode(o, caseFold|caseFull) == caseMapMode(sarg(0), caseFold|caseFull), true
 	case "rindex":

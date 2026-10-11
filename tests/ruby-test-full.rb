@@ -2066,6 +2066,10 @@ def s40
   cz = ["\u00dfa", "\u0130", "A\u03a3", "STRASSE", "stra\u00dfe"]
   check("ab27a", cz[0].upcase == "SSA" && cz[1].downcase == "i\u0307" && cz[2].downcase == "a\u03c3" &&
                  cz[0].capitalize == "Ssa" && cz[0].swapcase == "SSA" && cz[4].casecmp?(cz[3]))
+  # casecmp folds ASCII only, to upper case, and then compares bytes.
+  cc = ["\u0130stanbul", "[", "a", "\u00e9", "\u00c9", "\u{1F600}", "\u{E000}"]
+  check("ab27b", cc[0].casecmp(cz[3]) == 1 && cc[1].casecmp(cc[2]) == 1 && cc[3].casecmp(cc[4]) == 1 &&
+                 cc[5].casecmp(cc[6]) == 1 && cc[6].casecmp(cc[5]) == -1 && "aBc".casecmp("AbC") == 0)
   check("ab28", w[1].strip == "pad" && w[2].strip == "" && w[3].chars == ["a", "b", "c"])
   check("ab29", w[4].split(",") == ["a", "b", "", "c"] && w[0].split(" ") == ["Hello", "World"])
   check("ab30", w[0].index("World") == 6 && w[0].index("zz").nil? && w[2].empty? && !w[3].empty?)

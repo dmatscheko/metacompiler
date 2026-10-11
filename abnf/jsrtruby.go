@@ -2045,3 +2045,18 @@ func rubyScopeSelf(rt *jsrt, h uint64) interface{} {
 	}
 	return self
 }
+
+// rubyCasecmp is String#casecmp: ASCII folded to UPPER case, then MRI's byte
+// order, which is code-point order and therefore Go's string order. Twins:
+// rbCasecmp in ruby-interpreter.abnf and languages/lib/ruby-rt.metajs.
+func rubyCasecmp(a, b string) int {
+	up := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' {
+				return r - 32
+			}
+			return r
+		}, s)
+	}
+	return strings.Compare(up(a), up(b))
+}
