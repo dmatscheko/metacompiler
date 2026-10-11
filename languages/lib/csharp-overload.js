@@ -104,6 +104,63 @@ function csxPartOrder(sigs, from, to) {
 }
 // The numeric types an argument of which a parameter of type t also accepts.
 function csxWidenOf(t) { return csxWidenFrom(csxNorm(t)) }
+
+// ----- closed constructed types -----
+// A generic class keeps its static fields once per CLOSED type (ECMA-334
+// 15.5.2), so `Gen<int>.N` and `Gen<long>.N` are two variables. A closed type
+// is keyed by its type argument list with the aliases folded: 'Gen<int>' and
+// 'Gen<Int32>' -> "int". "" when the text is not exactly Name<args>.
+function csxClosedKey(text) {
+    var t = stripWs(text)
+    var a = t.indexOf("<")
+    if (a <= 0 || t.charAt(t.length - 1) != ">" || t.substring(0, a).indexOf(".") >= 0) { return "" }
+    var depth = 0
+    var cur = ""
+    var parts = []
+    for (var i = a; i < t.length; i++) {
+        var ch = t.charAt(i)
+        if (ch == "<") {
+            depth++
+            if (depth == 1) { continue }
+        } else if (ch == ">") {
+            depth--
+            if (depth == 0) {
+                if (i != t.length - 1) { return "" }
+                parts.push(csxNorm(cur))
+                break
+            }
+        } else if (ch == "," && depth == 1) {
+            parts.push(csxNorm(cur))
+            cur = ""
+            continue
+        }
+        cur += ch
+    }
+    return parts.join(",")
+}
+// The key of a type argument list already split ('new Gen<int>()').
+function csxKeyOf(targs) {
+    var parts = []
+    for (var i = 0; i < targs.length; i++) { parts.push(csxNorm(targs[i])) }
+    return parts.join(",")
+}
+// Whether a key mentions one of the type parameters tps: type arguments are
+// erased, so 'Gen<T>' in a generic body is not a closed type here and names the
+// class whose body it stands in.
+function csxKeyNamesAny(key, tps) {
+    if (tps == undefined || tps == null) { return false }
+    var id = ""
+    for (var i = 0; i <= key.length; i++) {
+        var ch = (i < key.length) ? key.charAt(i) : ","
+        if ((ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9") || ch == "_") {
+            id += ch
+            continue
+        }
+        for (var j = 0; j < tps.length; j++) { if (tps[j] == id) { return true } }
+        id = ""
+    }
+    return false
+}
 // The order the exact-arity candidates are tried in: most specific first, and
 // declaration order where neither is better, so the first applicable one is
 // the better function member whenever there is one. `tys[i]` is candidate i's

@@ -192,7 +192,8 @@ PrimaryCtor <~~ push({primary: pop()}) ~~>
             = ParamList ;
 // The first base type. A qualified name ('B.Inner') keeps its last segment, which is the
 // simple name every type is registered under.
-BaseSpec    <~~ push({ext: csLastSeg(stripWs(up.in))}) ~~>
+// A constructed base ('Base<int>') is the class Base, closed over its arguments.
+BaseSpec    <~~ push({ext: csSimpleName(up.in), extKey: csxClosedKey(up.in)}) ~~>
             = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 // 'class' or 'struct': a struct is built exactly like a class, and additionally copies
 // on a declaration whose declared type names it (C# value semantics) and has a zeroed
@@ -1175,7 +1176,7 @@ GenSeed     = GenName "." GenMemb ;
 // keeps the relational chain `a < b > c` from being read as a constructed type.
 // csSimpleName drops the type arguments and keeps the last segment, which is the
 // simple name every nested type is registered under.
-GenName     <~~ push(csGenSeed(csSimpleName(up.in))) ~~>
+GenName     <~~ push(csGenSeed(csSimpleName(up.in), csxClosedKey(up.in))) ~~>
             = Id SkipAngle { "." Id SkipAngle DotAhead }
             | Id "." Id SkipAngle { "." Id SkipAngle DotAhead }
             | Id "." Id "." Id SkipAngle { "." Id SkipAngle DotAhead } ;
@@ -3341,6 +3342,7 @@ KwLet       = "let" KwEnd ;
                 return eo
             }
             var cls = getVar(clsName)
+            if (targs.length > 0) { cls = csClosedOf(cls, clsName, csxKeyOf(targs), defClass) }
             if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
             var obj = {__class: cls}
             // Reified type arguments: bind one factory per type parameter on the instance.
@@ -4784,7 +4786,49 @@ KwLet       = "let" KwEnd ;
     // first (they may themselves be dotted), then the last segment is kept.
     // The seed record for a constructed type used as a receiver: the erased class
     // name, in the same shape VarSeed pushes for a bare name.
-    function csGenSeed(n) { return {seedvar: n, seedt: makeVarRef(n)} }
+    // A constructed type name as a receiver: the descriptor of that CLOSED type
+    // (csClosedOf), or the plain class when the text names no single closed type.
+    function csGenSeed(n, key) {
+        if (key == "") { return {seedvar: n, seedt: makeVarRef(n)} }
+        var defClass = curClassName
+        return {seedvar: n, seedt: function() { return csClosedOf(getVar(n), n, key, defClass) }}
+    }
+    // The descriptor of closed type n<key>. A generic class with static fields
+    // (__mkview, see buildClassFrom) gets one descriptor per closed type, built on
+    // first use; a key that mentions a type parameter of the enclosing class defClass
+    // is the class whose body this is (csCurClassNamed). Twin of csClosedRef in
+    // csharp-to-llvm-ir.abnf.
+    function csClosedOf(c, n, key, defClass) {
+        if (c === null || c === undefined || typeof c != "object" || c.__mkview === undefined) { return c }
+        if (csxKeyNamesAny(key, hasOwn(csClassTParams, defClass) ? csClassTParams[defClass] : null)) {
+            return csCurClassNamed(n, c)
+        }
+        var slot = "__cv$" + key
+        if (!hasOwn(c, slot)) { c[slot] = c.__mkview() }
+        return c[slot]
+    }
+    // The descriptor of class n as the running member sees it - its own class, which
+    // may be a closed type's - or dflt outside n's body.
+    function csCurClassNamed(n, dflt) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            var cc = anytype
+            cc = undefined
+            if (hasOwn(scopes[i], "this")) {
+                var self = scopes[i]["this"]
+                if (self !== null && self !== undefined && typeof self == "object") { cc = self.__class }
+            } else if (hasOwn(scopes[i], "__cscls")) {
+                cc = scopes[i]["__cscls"]
+            } else {
+                continue
+            }
+            for (var g = 0; cc != undefined && g < 64; g++) {
+                if (cc.__name == n) { return cc }
+                cc = cc.__super
+            }
+            return dflt
+        }
+        return dflt
+    }
     function csSimpleName(s) {
         var t = stripWs(s)
         var out = ""
@@ -5509,6 +5553,7 @@ KwLet       = "let" KwEnd ;
             if (typeof members[i].ext == "string") {
                 // Lenient: a base that is not a known class (an interface) is ignored.
                 sup = globalScope[members[i].ext]
+                if (sup != undefined && members[i].extKey != "") { sup = csClosedOf(sup, members[i].ext, members[i].extKey, name) }
                 if (sup != undefined) cls.__super = sup
                 // ...EXCEPT a BCL exception name, which is not a class here at all (see
                 // csBclExc): __excbase records the name, which gives csExcMatches a
@@ -5698,6 +5743,25 @@ KwLet       = "let" KwEnd ;
         }
         csClassMembers[name] = tbl
         if (sup != null) { csSupers[name] = sup.__name }
+        // A generic class with static fields: __mkview builds the descriptor of one more
+        // closed type - the whole class again, so its static members and initializers
+        // bind that descriptor - and leaves the open one registered (csClosedOf).
+        var hasStatic = false
+        var nested = false
+        for (i = 0; i < members.length; i++) {
+            if (members[i].kind == "field" && members[i].statik) { hasStatic = true }
+            if (members[i].nestedName != undefined) { nested = true }
+        }
+        if (tparams != undefined && tparams != null && tparams.length > 0 && hasStatic && !nested) {
+            cls.__mkview = function() {
+                var last = lastBuiltClass
+                buildClassFrom(name, members, kind, primary, null)
+                var v = globalScope[name]
+                globalScope[name] = cls
+                lastBuiltClass = last
+                return v
+            }
+        }
     }
     function makePrimaryClosure(pinfo, initFields) {
         return function() {

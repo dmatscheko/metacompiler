@@ -2741,6 +2741,48 @@ b";                                                   // verbatim keeps the newl
                 && !(true == default) && r != default);
         }
 
+        // ===== SECTION 43: static fields of generic classes, constructed bases =====
+        //
+        // ECMA-334 15.5.2: a static field of a generic class belongs to each CLOSED
+        // type, so Gen<int>.N and Gen<long>.N are two variables, each with its own
+        // initializers; static and instance members of a Gen<int> see Gen<int>'s.
+        // 15.3.4: a class may derive from a constructed type ('S43Der : S43Gen<int>')
+        // and inherits its members, statics included. No C# toolchain here: the
+        // values follow from the spec.
+        class S43Gen<T>
+        {
+            public static int N;
+            public static int Made = 0;
+            public static List<string> Log = new List<string>();
+            public S43Gen() { Made++; }
+            public static void Bump() { N += 10; }
+            public int Inst() { return N * 100 + Made; }
+            public static int Self() { return S43Gen<T>.N + 1; }
+        }
+        class S43Der : S43Gen<int>
+        {
+            public int Peek() { return N; }
+        }
+        static void S43()
+        {
+            int[] n = { 1, 2 };
+            S43Gen<int>.N = n[0];
+            S43Gen<long>.N = n[1];
+            S43Gen<int>.Bump();
+            Program.Check("s43g1", S43Gen<int>.N == 11 && S43Gen<long>.N == 2 && S43Gen<Int32>.N == 11
+                && S43Gen<string>.N == 0 && S43Gen<long>.Self() == 3);
+            var a = new S43Gen<int>();
+            var b = new S43Gen<int>();
+            var c = new S43Gen<long>();
+            S43Gen<int>.Log.Add("x");
+            Program.Check("s43g2", S43Gen<int>.Made == 2 && S43Gen<long>.Made == 1 && a.Inst() == 1102
+                && c.Inst() == 201 && S43Gen<int>.Log.Count == 1 && S43Gen<long>.Log.Count == 0);
+            var d = new S43Der();
+            S43Der.N++;
+            Program.Check("s43b1", d.Peek() == 12 && S43Gen<int>.N == 12 && S43Gen<int>.Made == 3
+                && S43Gen<long>.N == 2 && d.Inst() == 1203);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2785,6 +2827,7 @@ b";                                                   // verbatim keeps the newl
             Program.S40(); // SECTION-CALL 40
             Program.S41(); // SECTION-CALL 41
             Program.S42(); // SECTION-CALL 42
+            Program.S43(); // SECTION-CALL 43
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

@@ -182,7 +182,8 @@ PrimaryCtor <~~ push({primary: pop()}) ~~>
             = ParamList ;
 // The first base type. A qualified name ('B.Inner') keeps its last segment, which is the
 // simple name every type is registered under.
-BaseSpec    <~~ push({ext: csLastSeg(stripWs(up.in))}) ~~>
+// A constructed base ('Base<int>') is the class Base, closed over its arguments.
+BaseSpec    <~~ push({ext: csSimpleName(up.in), extKey: csxClosedKey(up.in)}) ~~>
             = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 // 'class' or 'struct': a struct is built exactly like a class, and additionally copies
 // on a declaration whose declared type names it (C# value semantics) and has a zeroed
@@ -1165,7 +1166,7 @@ GenSeed     = GenName "." GenMemb ;
 // keeps the relational chain `a < b > c` from being read as a constructed type.
 // csSimpleName drops the type arguments and keeps the last segment, which is the
 // simple name every nested type is registered under.
-GenName     <~~ push(csGenSeed(csSimpleName(up.in))) ~~>
+GenName     <~~ push(csGenSeed(csSimpleName(up.in), csxClosedKey(up.in))) ~~>
             = Id SkipAngle { "." Id SkipAngle DotAhead }
             | Id "." Id SkipAngle { "." Id SkipAngle DotAhead }
             | Id "." Id "." Id SkipAngle { "." Id SkipAngle DotAhead } ;
@@ -3368,7 +3369,7 @@ KwLet       = "let" KwEnd ;
         }
         if (wcls != "") {
             var wkey = ref.path[0].key
-            return {b: b, obj: callExt(b, "js_scope_get", [curScopeV, emitStr(b, wcls)]),
+            return {b: b, obj: csDeclOwnerV(b, ref.sseed, wcls),
                     key: emitStr(b, wkey), keyName: wkey, isField: true}
         }
         if (ref.base != undefined) {
@@ -3611,7 +3612,7 @@ KwLet       = "let" KwEnd ;
                 var ty = csMemberTys[c]
                 var at = (ty != undefined && ty[name] != undefined) ? ty[name] : ""
                 var dt = csDataMembers[c]
-                return {kind: t[name], cls: c, ty: at, dat: (dt != undefined && dt[name] == true)}
+                return {kind: t[name], cls: c, from: cls, ty: at, dat: (dt != undefined && dt[name] == true)}
             }
             c = csSupers[c] != undefined ? csSupers[c] : ""
         }
@@ -3765,6 +3766,11 @@ KwLet       = "let" KwEnd ;
                 return {b: b, v: eo}
             }
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+            if (targs.length > 0) {
+                var cvr = csClosedRef(b, clsV, clsName, csxKeyOf(targs), defClass)
+                b = cvr.b
+                clsV = cvr.v
+            }
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
             // Reified type arguments: bind one factory per type parameter on the instance.
@@ -4276,7 +4282,7 @@ KwLet       = "let" KwEnd ;
             // (see csStaticSeed); the registries are complete now, so ask them here.
             var seedCls = sfx0Static ? csStaticSeed(seedName, sfx0Name) : ""
             var cur = anytype
-            if (seedCls != "") { cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, seedCls)]) }
+            if (seedCls != "") { cur = csDeclOwnerV(b, seedName, seedCls) }
             else {
                 var r = primary(b)
                 b = r.b
@@ -4992,7 +4998,62 @@ KwLet       = "let" KwEnd ;
     // first (they may themselves be dotted), then the last segment is kept.
     // The seed record for a constructed type used as a receiver: the erased class
     // name, in the same shape VarSeed pushes for a bare name.
-    function csGenSeed(n) { return {seedvar: n, seedt: makeVarRef(n)} }
+    // A constructed type name as a receiver: the descriptor of that CLOSED type
+    // (csClosedRef), or the plain class when the text names no single closed type.
+    function csGenSeed(n, key) {
+        if (key == "") { return {seedvar: n, seedt: makeVarRef(n)} }
+        var defClass = curClassName
+        return {seedvar: n, seedt: function(b) {
+            return csClosedRef(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, n)]), n, key, defClass)
+        }}
+    }
+    // The generic classes with static fields: each gets one descriptor per closed type
+    // (makeClassStmt). Complete once the file is walked.
+    var csViewClasses = {}
+    // The class whose constructors buildClassStmt is emitting: a base that keeps its
+    // statics per closed type is reached through that class' own __super, which may be
+    // a closed type's descriptor ('class D : Gen<int>').
+    var csCtorOwner = ""
+    // The descriptor of closed type n<key>, cached on the open descriptor and built by
+    // its __mkview on first use. A key that mentions a type parameter of the enclosing
+    // class defClass is the class whose body this is, which is what the name already
+    // resolves to inside a closed type's members. Twin of csClosedOf in
+    // csharp-interpreter.abnf.
+    function csClosedRef(b, clsV, n, key, defClass) {
+        if (csViewClasses[n] !== true || csxKeyNamesAny(key, csClassTParams[defClass])) { return {b: b, v: clsV} }
+        var slot = emitStr(b, "__cv$" + key)
+        var hitB = curF.NewBlock("")
+        var missB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_has", [clsV, slot])), hitB, missB)
+        var hv = callExt(hitB, "js_get", [clsV, slot])
+        hitB.NewBr(mergeB)
+        var mv = callExt(missB, "js_call", [callExt(missB, "js_get", [clsV, emitStr(missB, "__mkview")]),
+                                            hUndef, callExt(missB, "js_arr_new", [])])
+        callExt(missB, "js_set", [clsV, slot, mv])
+        missB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(hv, hitB), llvm.ir.NewIncoming(mv, missB)])}
+    }
+    // A generic class with static fields is built by a FUNCTION whose own scope declares
+    // the class name, so every member closure resolves the name - and with it every
+    // unqualified static - to the descriptor that call built. The declaration calls it
+    // once for the open descriptor and keeps it as __mkview for the closed ones.
+    function csViewClassStmt(name, inner) {
+        return function(b) {
+            var bi = emitFunc([], csViewBuilderBody(name, inner), false, null, undefined, false, null)
+            var bv = callExt(b, "js_closure", [handle(bi), curScopeV])
+            var clsV = callExt(b, "js_call", [bv, hUndef, callExt(b, "js_arr_new", [])])
+            callExt(b, "js_set", [clsV, emitStr(b, "__mkview"), bv])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            return b
+        }
+    }
+    function csViewBuilderBody(name, inner) {
+        return function(b) {
+            b = inner(b)
+            return retStmt(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
+        }
+    }
     function csSimpleName(s) {
         var t = stripWs(s)
         var out = ""
@@ -5144,8 +5205,23 @@ KwLet       = "let" KwEnd ;
     // from a base lives on that base's descriptor, and js_get does not walk
     // __super).
     function csUnqualOwner(b, mi) {
-        if (mi.kind == "static") { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, mi.cls)]) }
+        if (mi.kind == "static") { return csDeclOwnerV(b, mi.from, mi.cls) }
         return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+    }
+    // The descriptor of declCls, a base of fromCls that declares a static member. When
+    // declCls keeps its statics per closed type, the base fromCls derives from may be a
+    // closed one, so the descriptor is reached through fromCls' __super links.
+    function csDeclOwnerV(b, fromCls, declCls) {
+        if (csViewClasses[declCls] !== true || fromCls == declCls) {
+            return callExt(b, "js_scope_get", [curScopeV, emitStr(b, declCls)])
+        }
+        var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, fromCls)])
+        var c = fromCls
+        for (var n = 0; c != declCls && n < 32; n++) {
+            v = callExt(b, "js_get", [v, emitStr(b, "__super")])
+            c = csSupers[c]
+        }
+        return v
     }
     // Reading one. A property with accessor bodies is a CALL, not a slot; a field, an
     // auto-property and a primary-constructor parameter are all plain slots.
@@ -6070,7 +6146,9 @@ KwLet       = "let" KwEnd ;
             }
         }
         if (superName != undefined && superName != null && !isThisInit) {
-            var supClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
+            var supClsV = (csViewClasses[superName] === true)
+                ? callExt(b, "js_get", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, csCtorOwner)]), emitStr(b, "__super")])
+                : callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
             var supCtorV = callExt(b, "js_get", [supClsV, emitStr(b, "__ctor")])
             var sargsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [sargsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
@@ -6455,8 +6533,10 @@ KwLet       = "let" KwEnd ;
             for (i = 0; i < members.length; i++) {
                 if (members[i].ext != undefined && csKnownClasses[members[i].ext] == true) {
                     superName = members[i].ext
-                    callExt(b, "js_set", [clsV, emitStr(b, "__super"),
-                                          callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
+                    var supR = {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])}
+                    if (members[i].extKey != "") { supR = csClosedRef(b, supR.v, superName, members[i].extKey, name) }
+                    b = supR.b
+                    callExt(b, "js_set", [clsV, emitStr(b, "__super"), supR.v])
                 }
             }
             // ...EXCEPT a BCL exception name, which is not a class here at all.
@@ -6508,6 +6588,7 @@ KwLet       = "let" KwEnd ;
             }
             if (anyMty) { callExt(b, "js_set", [clsV, emitStr(b, "__mty"), mtyV]) }
             var ctorIdx
+            csCtorOwner = name
             if (ctorInfos.length > 1) {
                 // Overloaded constructors: each is emitted on its own and stored in a
                 // '__ctors' array, and '__ctor' becomes a dispatcher that picks one
@@ -6736,6 +6817,16 @@ KwLet       = "let" KwEnd ;
         var isRecord = (kind == "record" || kind == "recordclass" || kind == "recordstruct")
         if (isRecord) { csNoteValEq() }
         var t = buildClassStmt(name, members, kind, primary, isRecord)
+        var hasStatic = false
+        var nested = false
+        for (var vk = 0; vk < members.length; vk++) {
+            if (members[vk].kind == "field" && members[vk].statik) { hasStatic = true }
+            if (members[vk].nestedName != undefined) { nested = true }
+        }
+        if (tparams.length > 0 && hasStatic && !nested) {
+            csViewClasses[name] = true
+            t = csViewClassStmt(name, t)
+        }
         lastBuiltClass = name
         curClassName = classStack.pop()
         return t
