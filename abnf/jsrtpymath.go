@@ -221,7 +221,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 	case "copysign":
 		return pyMathFlo(math.Copysign(pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)))
 	case "atan2":
-		return pyMathFlo(math.Atan2(pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)))
+		return pyMathFlo(fdAtan2(pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)))
 	case "hypot":
 		// VARIADIC since 3.8, and scaled so hypot(1e300, 1e300) does not overflow.
 		mx := 0.0
@@ -244,11 +244,11 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		}
 		return pyMathFlo(mx * math.Sqrt(sum))
 	case "sin":
-		return pyMathFlo(math.Sin(pyMathArg(rt, args, 0)))
+		return pyMathFlo(fdSin(pyMathArg(rt, args, 0)))
 	case "cos":
-		return pyMathFlo(math.Cos(pyMathArg(rt, args, 0)))
+		return pyMathFlo(fdCos(pyMathArg(rt, args, 0)))
 	case "tan":
-		return pyMathFlo(math.Tan(pyMathArg(rt, args, 0)))
+		return pyMathFlo(fdTan(pyMathArg(rt, args, 0)))
 	case "asin":
 		as1 := pyMathArg(rt, args, 0)
 		if as1 < -1 || as1 > 1 {

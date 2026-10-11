@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -365,4 +366,228 @@ func pyRoundTens(i *big.Int, k int, sticky bool) *big.Int {
 		q.Neg(q)
 	}
 	return q
+}
+
+// ---- hash() ----
+//
+// CPython hashes in Py_uhash_t: 64-bit unsigned arithmetic that wraps. Twin of
+// the pynHash* functions in languages/lib/python-num.js, which carry the word
+// as four 16-bit limbs, and of hostGlobals["hash"] in
+// languages/python-interpreter.abnf, which has the rules.
+
+const pyHashP = uint64(1)<<61 - 1
+
+// pyHashFix: -1 is the error return of CPython's hash slots, so it is -2.
+func pyHashFix(x uint64) uint64 {
+	if x == ^uint64(0) {
+		return ^uint64(1)
+	}
+	return x
+}
+
+// pyHashBig is long_hash: the magnitude modulo 2^61 - 1, signed.
+func pyHashBig(n *big.Int) uint64 {
+	m := new(big.Int).Mod(new(big.Int).Abs(n), new(big.Int).SetUint64(pyHashP)).Uint64()
+	if n.Sign() < 0 {
+		m = -m
+	}
+	return pyHashFix(m)
+}
+
+// pyHashSmall is the hash of an int below 2^53 in size: itself, -1 excepted.
+func pyHashSmall(n float64) uint64 { return pyHashFix(uint64(int64(n))) }
+
+// pyHashFloat is _Py_HashDouble for a finite v that is not integral below 2^53:
+// the mantissa enters 28 bits at a time and the binary exponent as a rotation,
+// since 2^61 = 1 modulo 2^61 - 1.
+func pyHashFloat(v float64) uint64 {
+	m, e := math.Frexp(math.Abs(v))
+	if m == 0 {
+		return 0
+	}
+	x := uint64(0)
+	for m != 0 {
+		x = ((x << 28) & pyHashP) | x>>(61-28)
+		m *= 268435456.0
+		e -= 28
+		y := uint64(m)
+		m -= float64(y)
+		x += y
+		if x >= pyHashP {
+			x -= pyHashP
+		}
+	}
+	if e >= 0 {
+		e = e % 61
+	} else {
+		e = 60 - (-1-e)%61
+	}
+	x = ((x << uint(e)) & pyHashP) | x>>uint(61-e)
+	if v < 0 {
+		x = -x
+	}
+	return pyHashFix(x)
+}
+
+// pyHashTuple is tuplehash: xxHash's round over the items' hashes.
+func pyHashTuple(lanes []uint64) uint64 {
+	const p1, p2, p5 = 11400714785074694791, 14029467366897019727, 2870177450012600261
+	acc := uint64(p5)
+	for _, l := range lanes {
+		acc += l * p2
+		acc = acc<<31 | acc>>33
+		acc *= p1
+	}
+	acc += uint64(len(lanes)) ^ (p5 ^ 3527539)
+	if acc == ^uint64(0) {
+		return 1546275796
+	}
+	return acc
+}
+
+// pyHashFrozen is frozenset_hash: the members' shuffled hashes XORed, then the
+// size and a final dispersal.
+func pyHashFrozen(lanes []uint64) uint64 {
+	h := uint64(0)
+	for _, l := range lanes {
+		h ^= ((l ^ 89869747) ^ (l << 16)) * 3644798167
+	}
+	h ^= (uint64(len(lanes)) + 1) * 1927868237
+	h ^= (h >> 11) ^ (h >> 25)
+	h = h*69069 + 907133923
+	if h == ^uint64(0) {
+		return 590923713
+	}
+	return h
+}
+
+// pyHashUnits is the fixed polynomial over UTF-16 code units that stands in for
+// CPython's randomized str hash.
+func pyHashUnits(units []uint16) uint64 {
+	h := uint64(0)
+	for _, u := range units {
+		h = (h*31 + uint64(u)) % 2147483647
+	}
+	return h
+}
+
+// pyHashW is hash(v) as a word; js_pyhash reads it signed.
+func (rt *jsrt) pyHashW(v interface{}) uint64 {
+	switch t := v.(type) {
+	case jsUndefT, jsNullT:
+		return 4238894112
+	case bool:
+		if t {
+			return 1
+		}
+		return 0
+	case float64:
+		return pyHashSmall(t)
+	case *jsBigInt:
+		return pyHashBig(t.v)
+	case *jsPyFlo:
+		return rt.pyHashF(t.f, v)
+	case string:
+		return pyHashUnits(strUnits(t))
+	}
+	if re, im, ok := pyComplexParts(v); ok {
+		return pyHashFix(rt.pyHashF(re, v) + rt.pyHashF(im, v)*1000003)
+	}
+	if arr, ok := v.(*jsArray); ok && arr.kind == pyTupKind {
+		lanes := make([]uint64, len(arr.elems))
+		for i, e := range arr.elems {
+			lanes[i] = rt.pyHashW(e)
+		}
+		return pyHashTuple(lanes)
+	}
+	if els, ok := pySetElems(v); ok && pySetFrozen(v) {
+		lanes := make([]uint64, len(els.elems))
+		for i, e := range els.elems {
+			lanes[i] = rt.pyHashW(e)
+		}
+		return pyHashFrozen(lanes)
+	}
+	_, isArr := v.(*jsArray)
+	_, isSet := pySetElems(v)
+	_, _, isDict := dictParts(v)
+	if isArr || isSet || isDict {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
+	}
+	if _, cls, ok := pyInstance(v); ok {
+		for _, c := range pyMRO(cls) {
+			if m, has := c.props["__hash__"]; has && !isUndefOrNull(m) {
+				return rt.pyHashCall(m, v)
+			}
+			if _, has := c.props["__eq__"]; has {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
+			}
+			if pyBuiltinClsName(c) != "" {
+				return rt.pyHashW(pyUnwrapBuiltin(v))
+			}
+		}
+	}
+	return rt.pyHashId(v)
+}
+
+// pyHashCall is a class's own __hash__ m on v: the answer must be an int, kept
+// when it fits 64 bits and hashed as an int otherwise.
+func (rt *jsrt) pyHashCall(m, v interface{}) uint64 {
+	switch h := rt.call(m, jsUndef, []interface{}{v}).(type) {
+	case bool:
+		if h {
+			return 1
+		}
+		return 0
+	case float64:
+		return pyHashSmall(h)
+	case *jsBigInt:
+		if h.v.IsInt64() {
+			return pyHashFix(uint64(h.v.Int64()))
+		}
+		return pyHashBig(h.v)
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "__hash__ method should return an integer")})
+}
+
+// pyHashF is a double's hash: an integral one as the int it equals, an infinity
+// as +-314159, a NaN by the identity of the value holding it.
+func (rt *jsrt) pyHashF(f float64, holder interface{}) uint64 {
+	switch {
+	case math.IsNaN(f):
+		return rt.pyHashId(holder)
+	case math.IsInf(f, 1):
+		return 314159
+	case math.IsInf(f, -1):
+		return uint64(math.MaxUint64 - 314159 + 1)
+	case f == math.Floor(f) && math.Abs(f) < 1<<53:
+		return pyHashSmall(f)
+	}
+	return pyHashFloat(f)
+}
+
+// pyHashId is the identity hash: the order in which hash() first met the value.
+func (rt *jsrt) pyHashId(v interface{}) uint64 {
+	for i, o := range rt.pyHashIds {
+		if pySameValue(o, v) {
+			return uint64(i + 1)
+		}
+	}
+	rt.pyHashIds = append(rt.pyHashIds, v)
+	return uint64(len(rt.pyHashIds))
+}
+
+// pySameValue is identity for any two values, functions included, which Go's ==
+// on interfaces would panic on.
+func pySameValue(a, b interface{}) bool {
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb {
+		return false
+	}
+	if ta != nil && ta.Kind() == reflect.Func {
+		return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+	}
+	if ta != nil && !ta.Comparable() {
+		return false
+	}
+	return a == b
 }

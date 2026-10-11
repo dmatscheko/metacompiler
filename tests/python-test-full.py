@@ -4279,6 +4279,107 @@ def s81():
     check("fls3", all(m.startswith("could not convert string to float: ") for m in msgs) and len(msgs) == 17)
     check("fls4", msgs[15] == "could not convert string to float: '\\x1c1'")
 
+# ===== SECTION 82: a negative base to a fractional power is complex =====
+# float_pow hands a negative finite base with a non-integral exponent to
+# complex_pow (_Py_c_pow), whose cos and sin are the platform libm's. Rows from
+# CPython 3.14.
+def s82():
+    import math
+    v = [-3, 0.5, -8, 1/3, -2.0, 2.5, -1e300, 1.5, -1, -0.5, -0.0, 0.5]
+    check("cpw1", repr(v[0] ** v[1]) == "(1.0605752387249068e-16+1.7320508075688772j)")
+    check("cpw2", repr(pow(v[2], v[3])) == "(1.0000000000000002+1.7320508075688772j)" and repr(v[4] ** v[5]) == "(1.7319121124709869e-15+5.656854249492381j)")
+    check("cpw3", repr(v[8] ** v[9]) == "(6.123233995736766e-17-1j)" and repr(v[10] ** v[11]) == "0.0")
+    try:
+        v[6] ** v[7]
+        check("cpw4", False)
+    except OverflowError as e:
+        check("cpw4", str(e) == "complex exponentiation")
+    x = -4
+    x **= 0.5
+    check("cpw5", type(x).__name__ == "complex" and repr(math.cos(math.pi / 2)) == "6.123233995736766e-17")
+    check("cpw6", repr(math.sin(math.pi)) == "1.2246467991473532e-16" and repr(math.atan2(1.0, -1.0)) == "2.356194490192345")
+
+# ===== SECTION 83: augmented assignment names its own operator =====
+# PyNumber_InPlace*: an instance's __isub__ first; when neither operand serves
+# the operator the TypeError says "-=". `x *= seq` repeats a right-hand sequence
+# only when x has no sequence slots. str % a list or dict never complains about
+# leftover arguments. Rows from CPython 3.14.
+def s83():
+    class C:
+        def __init__(self):
+            self.v = 1
+        def __isub__(self, o):
+            self.v = self.v + o
+            return self
+    class A:
+        def __init__(self):
+            self.v = 1
+        def __sub__(self, o):
+            return self.v - o
+    vals = [4, "s", {1}, [1], 2.5, A()]
+    def aug(op, x, y):
+        try:
+            if op == "-":
+                x -= y
+            elif op == "**":
+                x **= y
+            elif op == "*":
+                x *= y
+            elif op == "+":
+                x += y
+            else:
+                x <<= y
+            return repr(x)
+        except TypeError as e:
+            return str(e)
+    msgs = [aug("-", vals[0], vals[1]), aug("**", vals[0], vals[1]), aug("*", vals[2], vals[1]),
+            aug("+", vals[4], vals[3]), aug("<<", vals[4], vals[0]), aug("-", vals[5], vals[1]), aug("*", vals[0], "ab")]
+    check("aug1", msgs[0] == "unsupported operand type(s) for -=: 'int' and 'str'" and msgs[1] == "unsupported operand type(s) for **=: 'int' and 'str'")
+    check("aug2", msgs[2] == "unsupported operand type(s) for *=: 'set' and 'str'" and msgs[3] == "unsupported operand type(s) for +=: 'float' and 'list'")
+    check("aug3", msgs[4] == "unsupported operand type(s) for <<=: 'float' and 'int'" and msgs[5] == "unsupported operand type(s) for -: 'int' and 'str'")
+    check("aug4", msgs[6] == "'abababab'")
+    c = C()
+    c -= 5
+    check("aug5", c.v == 6 and "s" % [1] == "s" and "%s" % {"a": 1} == "{'a': 1}")
+
+# ===== SECTION 84: hash() =====
+# CPython's values for the numbers, None, tuples and frozensets (Py_uhash_t
+# arithmetic modulo 2^61 - 1, xxHash for a tuple); str's is randomized per
+# process, so only its invariants are asserted. Rows from CPython 3.14.
+def s84():
+    class H:
+        def __hash__(self):
+            return 2 ** 70
+    class E:
+        def __eq__(self, o):
+            return True
+    class P:
+        pass
+    v = [-1, 2**61, -2**61, 10**30, 1.5, 0.1, 1e300, 5e-324, 2.0**70, float("-inf"), 1+2j, (1, 2), ((1, 2), 3), (None, True, 1.5), frozenset({1, 2}), None]
+    h = [hash(x) for x in v]
+    check("hsh1", h[0:4] == [-2, 1, -2, 465258685558744706] and h[4] == 1152921504606846977)
+    check("hsh2", h[5:10] == [230584300921369408, 1224995262755759164, 16777216, 512, -314159] and h[10] == 2000007)
+    check("hsh3", h[11:14] == [-3550055125485641917, -333907151259015829, -4953812201219247177])
+    check("hsh4", h[14] == -1826646154956904602 and h[15] == 4238894112 and hash(frozenset()) == 133146708735736)
+    p = P()
+    check("hsh5", hash(H()) == 512 and hash(p) == hash(p) and hash("") == 0 and hash("ab") == hash("ab") and hash(1) == hash(1.0) == hash(True))
+    msgs = []
+    for x in [[1], {1: 2}, {1}, E(), (1, [2])]:
+        try:
+            hash(x)
+        except TypeError as e:
+            msgs.append(str(e))
+    check("hsh6", msgs == ["unhashable type: 'list'", "unhashable type: 'dict'", "unhashable type: 'set'", "unhashable type: 'E'", "unhashable type: 'list'"])
+
+# ===== SECTION 85: a tuple is its own tuple, and tuple has list's operators =====
+# tuple(t) hands back t; tuple's dunders are list's less the mutating ones, and
+# its named methods are count and index. Rows from CPython 3.14.
+def s85():
+    t = (1, 2)
+    check("tpl1", tuple(t) is t and tuple([1]) is not tuple([1]) and list(t) is not t)
+    check("tpl2", hasattr(tuple, "__add__") and hasattr(tuple, "__len__") and hasattr(tuple, "count") and not hasattr(tuple, "append"))
+    check("tpl3", not hasattr(tuple, "__setitem__") and not hasattr((), "__imul__") and not hasattr(tuple, "__delitem__"))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4361,5 +4462,9 @@ def main():
     s79() # SECTION-CALL 79
     s80() # SECTION-CALL 80
     s81() # SECTION-CALL 81
+    s82() # SECTION-CALL 82
+    s83() # SECTION-CALL 83
+    s84() # SECTION-CALL 84
+    s85() # SECTION-CALL 85
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

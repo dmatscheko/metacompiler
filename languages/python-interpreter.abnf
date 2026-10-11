@@ -1100,6 +1100,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // int's and float's own methods at the bit and double level (pyNumMethod).
     include("lib/python-num.js")
 
+    // sin, cos, tan and atan2 are fdlibm's (lib/fdlibm.js), which agree with the
+    // platform libm CPython calls where the host's Math does not: cos(pi/2) is
+    // 6.123233995736766e-17, the host's ...757e-17.
+    include("lib/fdlibm.js")
+
     // The host names a program can see.
     // The builtin exception types: callables producing an instance that carries
     // the constructor arguments as .args (enough for raise/except as/e.args[N]).
@@ -1434,7 +1439,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "bool") { return pytruthy(v) }
         if (name == "list") { return args.length == 0 ? [] : iterToList(v).slice(0) }
-        if (name == "tuple") { return pyTup(args.length == 0 ? [] : iterToList(v).slice(0)) }
+        // tuple(t) of a tuple is t itself: an immutable value needs no copy.
+        if (name == "tuple") {
+            if (args.length > 0 && isTup(v)) { return v }
+            return pyTup(args.length == 0 ? [] : iterToList(v).slice(0))
+        }
         if (name == "set" || name == "frozenset") {
             var out = newSet()
             if (args.length > 0) { var a = iterToList(v); for (var i = 0; i < a.length; i++) { setAdd(out, a[i]) } }
@@ -1728,6 +1737,116 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // abs() keeps the type: abs(-2) is the int 2, abs(-1.5) the float 1.5.
     // A bool answers an int, abs(-0.0) is 0.0, and an instance answers its
     // type's __abs__ (a builtin subclass's is a delegate).
+    // hash(v): CPython's value for the numbers, None, tuples and frozensets
+    // (lib/python-num.js has the arithmetic), a fixed function of the text for
+    // str (CPython's is randomized per process), a class's own __hash__, the
+    // identity for anything else hashable, and TypeError for a list, a dict, a
+    // set and a class that defines __eq__ without __hash__. Twin of js_pyhash in
+    // abnf/jsrt.go and lib/python-rt.metajs.
+    hostGlobals["hash"] = function(v) {
+        var s = pynWSigned(pyHashW(v))
+        return pyIntOfBits(s.neg, s.bits)
+    }
+    function pyHashW(v) {
+        if (v === null || v === undefined) { return pynWNum(4238894112) }
+        if (typeof v == "boolean") { return pynWNum(v ? 1 : 0) }
+        if (typeof v == "number") { return pyHashSmall(v) }
+        if (bigIsBig(v)) {
+            var ib = pyIntBits(v)
+            return pynHashInt(ib.neg, ib.bits)
+        }
+        if (isFlo(v)) { return pyHashF(v.__flo, v) }
+        if (isCplx(v)) { return pynHashCplx(pyHashF(v.real, v), pyHashF(v.imag, v)) }
+        if (typeof v == "string") {
+            var us = []
+            for (var i = 0; i < v.length; i++) { us.push(v.charCodeAt(i)) }
+            return pynHashUnits(us)
+        }
+        if (isTup(v)) {
+            var lanes = []
+            for (var j = 0; j < v.length; j++) { lanes.push(pyHashW(v[j])) }
+            return pynHashTuple(lanes)
+        }
+        if (isSet(v) && v.__frozen === true) {
+            var fl = []
+            var els = iterToList(v)
+            for (var k = 0; k < els.length; k++) { fl.push(pyHashW(els[k])) }
+            return pynHashFrozen(fl)
+        }
+        if (Array.isArray(v) || isSet(v) || isDict(v)) { pyListErr("TypeError", "unhashable type: '" + pyTypeOf(v).__name + "'") }
+        if (pyUser(v) && v.__isclass !== true) {
+            var own = pyHashOwner(v.__class)
+            if (own !== undefined) {
+                if (own.builtin === true) { return pyHashW(pyBDelSelf(v)) }
+                if (own.m === null) { pyListErr("TypeError", "unhashable type: '" + pyTypeOf(v).__name + "'") }
+                var h = anytype
+                h = own.m(v)
+                if (typeof h == "boolean") { return pynWNum(h ? 1 : 0) }
+                if (typeof h != "number" && !bigIsBig(h)) { pyListErr("TypeError", "__hash__ method should return an integer") }
+                if (typeof h == "number") { return pyHashSmall(h) }
+                var hb = pyIntBits(h)
+                if (pynFitsI64(hb.neg, hb.bits)) { return pynWFix(pynWOfInt(hb.neg, hb.bits)) }
+                return pynHashInt(hb.neg, hb.bits)
+            }
+        }
+        return pyHashId(v)
+    }
+    // An int below 2^53 in size is its own hash, -1 excepted.
+    function pyHashSmall(n) {
+        if (n == -1) { return pynWNeg(pynWNum(2)) }
+        if (n < 0) { return pynWNeg(pynWNum(-n)) }
+        return pynWNum(n)
+    }
+    // The hash of a double: an integral one as the int it equals, an infinity
+    // as +-314159, a NaN by the identity of the value holding it.
+    function pyHashF(f, holder) {
+        if (f !== f) { return pyHashId(holder) }
+        if (f - f != 0) { return f > 0 ? pynWNum(314159) : pynWNeg(pynWNum(314159)) }
+        if (f == Math.floor(f) && f < 9007199254740992 && f > -9007199254740992) { return pyHashSmall(f) }
+        return pynHashFloat(f)
+    }
+    // The first class on cls's resolution order that settles hashing: one
+    // defining __hash__ ({m}), one defining __eq__ alone ({m: null}: the
+    // implicit __hash__ = None), or a builtin type ({builtin}). undefined is
+    // object's identity hash. A class attribute bound to None is not kept in any
+    // engine, so an explicit `__hash__ = None` is not seen either.
+    function pyHashOwner(cls) {
+        if (cls == undefined || cls == null) { return undefined }
+        if (hasOwn(cls, "__mro")) {
+            var mro = cls.__mro
+            for (var mi = 0; mi < mro.length; mi++) {
+                var r = pyHashOwnerOne(mro[mi])
+                if (r !== undefined) { return r }
+            }
+            return undefined
+        }
+        var r0 = pyHashOwnerOne(cls)
+        if (r0 !== undefined) { return r0 }
+        var bs = cls.__bases
+        if (bs != undefined && bs != null) {
+            for (var i = 0; i < bs.length; i++) {
+                var rb = pyHashOwner(bs[i])
+                if (rb !== undefined) { return rb }
+            }
+        }
+        return undefined
+    }
+    function pyHashOwnerOne(k) {
+        if (hasOwn(k, "__hash__") && k.__hash__ != null) { return {m: k.__hash__} }
+        if (hasOwn(k, "__eq__")) { return {m: null} }
+        if (k.__builtin === true) { return {builtin: true} }
+        return undefined
+    }
+    // The identity hash: the order in which hash() first met the value. The
+    // table keeps every value it numbers alive.
+    var pyHashIds = []
+    function pyHashId(v) {
+        for (var i = 0; i < pyHashIds.length; i++) {
+            if (pyHashIds[i] === v) { return pynWNum(i + 1) }
+        }
+        pyHashIds.push(v)
+        return pynWNum(pyHashIds.length)
+    }
     hostGlobals["abs"] = function(v) {
         if (pyUser(v)) {
             var af = clsFind(v.__class, "__abs__")
@@ -2146,7 +2265,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyBFuncNames = ["print", "len", "abs", "isinstance", "issubclass", "repr", "sum",
                         "max", "min", "ord", "chr", "iter", "next", "sorted", "all", "any",
                         "bin", "hex", "oct", "divmod", "round", "pow", "callable", "ascii",
-                        "getattr", "hasattr", "setattr", "vars", "format"]
+                        "getattr", "hasattr", "setattr", "vars", "format", "hash"]
     var pyBClassNames = ["range", "enumerate", "zip", "map", "filter", "reversed"]
     for (var bn0 = 0; bn0 < pyBFuncNames.length; bn0++) {
         if (typeof hostGlobals[pyBFuncNames[bn0]] == "function") {
@@ -2244,7 +2363,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyValDunder(o, name) {
         var vtn = pyValTName(o)
         if (vtn == "" || !pyIsDunder(name)) { return null }
-        if (isTup(o) && (name == "__setitem__" || name == "__delitem__" || name == "__init__" || name == "__iadd__")) { return null }
+        if (isTup(o) && pyTupMutator(name)) { return null }
         return pyBDelegate(vtn, name)
     }
     // A tuple's two methods. Twin of pyIsTupleMethod in abnf/jsrt.go and
@@ -2283,6 +2402,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // pyTypeSample supplies.
     function pyTypeSample(tname) {
         if (tname == "list") { return [] }
+        if (tname == "tuple") { return pyTup([]) }
         if (tname == "str") { return "" }
         if (tname == "set") { return newSet() }
         if (tname == "dict") { return newDict() }
@@ -3111,6 +3231,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyBDelKeys = []
     var pyBDelFns = []
     function pyBDelegate(tname, name) {
+        // A tuple's dunders are list's, less the ones that mutate; its two named
+        // methods are its own.
+        if (tname == "tuple") { return name.substring(0, 2) != "__" || pyTupMutator(name) ? null : pyBDelegate("list", name) }
         if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict") { return null }
         var key = tname + "." + name
         for (var i = 0; i < pyBDelKeys.length; i++) { if (pyBDelKeys[i] == key) { return pyBDelFns[i] } }
@@ -3120,6 +3243,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyBDelFns.push(f)
         }
         return f
+    }
+    // The dunders of list that change the list, which a tuple does not have.
+    function pyTupMutator(name) {
+        return name == "__setitem__" || name == "__delitem__" || name == "__init__" || name == "__iadd__" || name == "__imul__"
     }
     function pyBDelMake(tname, name) {
         var num = tname == "int" || tname == "float"
@@ -3940,7 +4067,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cs < 0 || (cs === 0 && 1 / cs < 0)) { return pyFlo(cm / (0 - 1)) }
             return pyFlo(cm)
         }
-        if (name == "atan2") { return pyFlo(Math.atan2(pyMArg(args, 0), pyMArg(args, 1))) }
+        if (name == "atan2") { return pyFlo(fdlibm().atan2(pyMArg(args, 0), pyMArg(args, 1))) }
         if (name == "hypot") {
             var mx = 0
             var i = 0
@@ -3960,9 +4087,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return pyFlo(mx * Math.sqrt(sum))
         }
-        if (name == "sin") { return pyFlo(Math.sin(pyMArg(args, 0))) }
-        if (name == "cos") { return pyFlo(Math.cos(pyMArg(args, 0))) }
-        if (name == "tan") { return pyFlo(Math.tan(pyMArg(args, 0))) }
+        if (name == "sin") { return pyFlo(fdlibm().sin(pyMArg(args, 0))) }
+        if (name == "cos") { return pyFlo(fdlibm().cos(pyMArg(args, 0))) }
+        if (name == "tan") { return pyFlo(fdlibm().tan(pyMArg(args, 0))) }
         if (name == "asin") {
             var as1 = pyMArg(args, 0)
             if (as1 < 0 - 1 || as1 > 1) { pyMDom("unit", as1) }
@@ -6385,7 +6512,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // either side is one - and one side always is, to be here at all.
         if (op == "//") { return {v: pyFlo(fdiv(x, y))} }
         if (op == "%") { return {v: pyFlo(fmod(x, y))} }
-        if (op == "**") { return {v: pyFlo(pyPowF(x, y))} }
+        if (op == "**") {
+            if (pyPowIsCplx(x, y)) { return {v: pyPowCplx(x, y)} }
+            return {v: pyFlo(pyPowF(x, y))}
+        }
         if (op == "|") { return {v: x | y} }
         if (op == "&") { return {v: x & y} }
         if (op == "^") { return {v: x ^ y} }
@@ -6401,6 +6531,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var p = Math.pow(x, y)
         if (p == p && p - p != 0 && x - x == 0 && y - y == 0) { pyRaise(pyMakeExc("OverflowError", [34, "Result too large"])) }
         return p
+    }
+    // A negative finite base to a finite power that is not a whole number is
+    // complex: CPython's float_pow hands the pair to complex_pow, which for a
+    // fractional exponent is _Py_c_pow. Twin of rt.pyPowCplx in abnf/jsrt.go and
+    // pyAPowCplx in lib/python-rt.metajs.
+    function pyPowIsCplx(x, y) { return x < 0 && x - x == 0 && y - y == 0 && y != Math.floor(y) }
+    function pyPowCplx(x, y) {
+        var pw = pyCxPowGen(x, 0, y, 0)
+        if (pyCxIsInf(pw[0]) || pyCxIsInf(pw[1])) { pyRaise(pyMakeExc("OverflowError", ["complex exponentiation"])) }
+        return pyCplx(pw[0], pw[1])
     }
     // Python's ==, for the pairs where at least one side is a float box.
     function floEq(a, b) {
@@ -6642,13 +6782,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var vabs = pyCxHypot(a, b)
         var len = Math.pow(vabs, c)
-        var at = Math.atan2(b, a)
+        var at = fdlibm().atan2(b, a)
         var phase = at * c
         if (d != 0) {
             len = len / Math.exp(at * d)
             phase = pyCxFma(d, Math.log(vabs), phase)
         }
-        return [len * Math.cos(phase), len * Math.sin(phase)]
+        return [len * fdlibm().cos(phase), len * fdlibm().sin(phase)]
     }
 
     // c_powu: square and multiply, the order of the products CPython's.
@@ -7899,7 +8039,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         else { args = [arg] }
         var out = ""
         var ai = 0
-        var mapped = false
+        // A subscriptable right operand other than a tuple or a str (a dict, a
+        // list) is a mapping to PyUnicode_Format, which then never complains
+        // that arguments were left over.
+        var mapped = !isTup(arg) && (Array.isArray(arg) || (isDict(arg) && !isSet(arg)))
         var i = 0
         while (i < fmt.length) {
             var c = fmt.charAt(i)
@@ -7955,6 +8098,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             i = i + 1
             var v = anytype
             if (key != null) {
+                if (dict == null && Array.isArray(arg) && !isTup(arg) && pyTypeOf(arg).__name == "list") {
+                    pyPctTypeErr("list indices must be integers or slices, not str")
+                }
                 if (dict == null) { pyPctTypeErr("format requires a mapping") }
                 var di = dictFind(dict, key)
                 if (di < 0) { pyRaise(pyMakeExc("KeyError", [key])) }
@@ -9562,9 +9708,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `xs += it` is list.extend IN PLACE (every alias of xs sees it, and any
     // iterable is accepted), `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=)
     // updates a set in place when t is a set; every other augmented operator is
-    // the binary one. Twin of the "+=" arm of js_pybin and of js_pyinplace in
-    // abnf/jsrt.go and lib/python-rt.metajs.
+    // the binary one, whose "unsupported operand" TypeError names the statement's
+    // operator (pyAugErr). Twin of js_pyinplace in abnf/jsrt.go and
+    // lib/python-rt.metajs.
     function pyAugOp(bop, a, b) {
+        // An instance's own in-place dunder (__isub__) is asked first, and
+        // NotImplemented passes it by.
+        if (pyUser(a) && hasOwn(pyDunder, bop)) {
+            var im = clsFind(a.__class, "__i" + pyDunder[bop].substring(2))
+            if (im != null) {
+                var iv = im(a, b)
+                if (iv !== pyNotImpl) { return iv }
+            }
+        }
         if (bop == "+" && Array.isArray(a) && !isTup(a)) {
             var src = pyIterOrTypeErr(b).slice(0)
             for (var i = 0; i < src.length; i++) { a.push(src[i]) }
@@ -9581,7 +9737,37 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             mcall(a, "update", [b], undefined)
             return a
         }
-        return binOp(bop, a, b)
+        var res = anytype
+        try {
+            res = binOp(bop, a, b)
+        } catch (e) {
+            throw pyAugErr(e, bop, a, b)
+        }
+        return res
+    }
+    // CPython names the augmented operator (-=, **=) in the TypeError it raises
+    // when neither operand serves it, so the binary operator's "unsupported
+    // operand" error for these two operands is renamed; anything else thrown -
+    // the same text from an operation inside a dunder included, whose operands
+    // differ - passes unchanged. `x *= seq` repeats a sequence on the right only
+    // when x has no sequence slots at all (PyNumber_InPlaceMultiply), so a set,
+    // a dict or an instance on the left is unsupported where the binary `*`
+    // complained about the count.
+    function pyAugErr(e, bop, a, b) {
+        if (typeof e != "object" || e === null || e.__exc !== true) { return e }
+        var inst = e.v
+        if (typeof inst != "object" || inst === null || inst.__class !== hostGlobals["TypeError"]) { return e }
+        var args = inst.args
+        if (!Array.isArray(args) || args.length != 1 || typeof args[0] != "string") { return e }
+        var names = "'" + pyTypeOf(a).__name + "' and '" + pyTypeOf(b).__name + "'"
+        var aug = {__exc: true, v: pyMakeExc("TypeError", ["unsupported operand type(s) for " + bop + "=: " + names])}
+        var m = args[0]
+        if (m == "unsupported operand type(s) for " + (bop == "**" ? "** or pow()" : bop) + ": " + names) { return aug }
+        if (bop == "*" && m.substring(0, 39) == "can't multiply sequence by non-int of t" && typeof a != "string" &&
+            !Array.isArray(a) && (isSet(a) || isDict(a) || pyUser(a))) {
+            return aug
+        }
+        return e
     }
 
     // ----- Statement thunks -----

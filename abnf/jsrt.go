@@ -464,6 +464,10 @@ type jsrt struct {
 	// (see rubyObjectId in jsrtruby.go).
 	rubyOids []interface{}
 
+	// pyHashIds is Python's identity hash table: the values hash() numbered so
+	// far, in order (see pyHashId in jsrtpynum.go).
+	pyHashIds []interface{}
+
 	// rubyMethodVals remembers which callables `method(:x)` handed out, and the
 	// owner and name each one carries. MRI's Method is a class of its own -
 	// #class is Method, #to_s is `#<Method: Object#x>` and #arity counts optionals
@@ -15439,7 +15443,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return a[0]
 		},
 		// tuple(iterable): list()'s fresh array, marked.
-		"js_pytupconv": func(a []uint64) uint64 {
+		"js_pytupconv": func(a []uint64) uint64 { // tuple(t) of a tuple is t itself
+			if pyIsTup(u(a[0])) {
+				return a[0]
+			}
 			return w(pyTup(rt.pyExt("js_pylist", u(a[0])).(*jsArray)))
 		},
 		"js_pyrest": func(a []uint64) uint64 { // *args: the call arguments from index N on, as a list.
@@ -15936,24 +15943,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			sub.set("exceptions", pyTup(&jsArray{elems: matched}))
 			return w(sub)
 		},
-		// `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=) updates a set in
-		// place when t is a set, so every alias sees it; anything else is the
-		// binary operator. Twin of pyAugOp in languages/python-interpreter.abnf.
-		"js_pyinplace": func(a []uint64) uint64 { // (operator without "=", left, right)
-			op := rt.toString(u(a[0]))
-			l, r := u(a[1]), u(a[2])
-			if le, ok := pySetElems(l); ok {
-				if v, ok := rt.pySetBin(op, l, r); ok && !pySetFrozen(l) {
-					ve, _ := pySetElems(v)
-					le.elems = ve.elems
-					return a[1]
-				}
-			} else if keys, vals, ok := dictParts(l); ok && op == "|" {
-				rt.pyDictUpdateFrom(keys, vals, r)
-				return a[1]
-			}
-			return w(rt.pyExt("js_pybin", op, l, r))
-		},
 		// Every user visible binary operator of the Python compiler goes through
 		// here so an instance of a user class can answer it with a dunder
 		// (__add__, __lt__, __eq__, __contains__, ...). Everything that is not
@@ -15961,14 +15950,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pybin": func(a []uint64) uint64 { // (operator, left, right)
 			op := rt.toString(u(a[0]))
 			l, r := u(a[1]), u(a[2])
-			// `xs += it` is list.extend IN PLACE, so every alias of xs sees it and
-			// any iterable is accepted; on anything else it is the binary `+`.
-			if op == "+=" {
-				if la, ok := l.(*jsArray); ok && la.kind != pyTupKind {
-					la.elems = append(la.elems, rt.pyElemsOf(r)...)
-					return a[1]
-				}
-				op = "+"
+			// An augmented assignment arrives as its own operator ("-=").
+			switch op {
+			case "+=", "-=", "*=", "/=", "//=", "%=", "**=", "|=", "&=", "^=", "<<=", ">>=", "@=":
+				return w(rt.pyAugBin(op[:len(op)-1], l, r))
 			}
 			switch op {
 			case "is":
@@ -16206,6 +16191,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// comes from math/big; pyBigNarrow hands back a plain number whenever
 				// it still fits, so nothing below 2^53 changes shape.
 				e := rt.pyToF(r)
+				if e != math.Floor(e) {
+					if fb := rt.pyToF(l); fb < 0 && !math.IsInf(fb, 0) && !math.IsInf(e, 0) && !math.IsNaN(e) {
+						return w(rt.pyPowCplx(fb, e))
+					}
+				}
 				if e < 0 {
 					base := rt.pyToF(l)
 					if bi, ok := l.(*jsBigInt); ok { // float(int) past the double range raises
@@ -16683,6 +16673,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(&jsPyFlo{f: rt.pyBigToF(bi.v)})
 			}
 			return w(&jsPyFlo{f: rt.toNumber(u(a[0]))})
+		},
+		// hash(v); pyHashW in abnf/jsrtpynum.go.
+		"js_pyhash": func(a []uint64) uint64 {
+			x := rt.pyHashW(u(a[0]))
+			if int64(x) >= -(1<<53) && int64(x) < 1<<53 {
+				return w(float64(int64(x)))
+			}
+			return w(rt.pyBigNarrow(big.NewInt(int64(x))))
 		},
 		// The float LITERAL builder: constant folding cannot carry a box, so
 		// languages/python-to-llvm-ir.abnf emits this call for 1.0 and 1e3.
@@ -17960,6 +17958,97 @@ func (rt *jsrt) pyPowF(x, y float64) float64 {
 	return p
 }
 
+// pyAugBin is an augmented assignment, op its binary operator: an instance's own
+// in-place dunder (__isub__) first, unless it answers NotImplemented; `xs += it`
+// is list.extend in place, `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=)
+// updates a set in place when t is a set, so every alias sees it; anything else
+// is the binary operator, its TypeError renamed by pyAugErr. Twin of pyAAug in
+// lib/python-rt.metajs (which first lets arithmetic on two numbers through) and
+// pyAugOp in languages/python-interpreter.abnf.
+func (rt *jsrt) pyAugBin(op string, l, r interface{}) interface{} {
+	if _, cls, ok := pyInstance(l); ok && pyBinDunder[op] != "" {
+		if m, found := pyLookup(cls, "__i"+pyBinDunder[op][2:]); found && isCallable(m) {
+			if v := rt.call(m, jsUndef, []interface{}{l, r}); v != pyNotImplemented {
+				return v
+			}
+		}
+	}
+	if la, ok := l.(*jsArray); ok && op == "+" && la.kind != pyTupKind {
+		la.elems = append(la.elems, rt.pyElemsOf(r)...)
+		return l
+	}
+	if le, ok := pySetElems(l); ok {
+		if v, ok := rt.pySetBin(op, l, r); ok && !pySetFrozen(l) {
+			ve, _ := pySetElems(v)
+			le.elems = ve.elems
+			return l
+		}
+	} else if keys, vals, ok := dictParts(l); ok && op == "|" {
+		rt.pyDictUpdateFrom(keys, vals, r)
+		return l
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			panic(rt.pyAugErr(p, op, l, r))
+		}
+	}()
+	return rt.pyExt("js_pybin", op, l, r)
+}
+
+// pyAugErr is CPython's TypeError for an augmented operator neither operand
+// serves: the binary operator's "unsupported operand" error for these two
+// operands names -= or **= instead, and anything else passes unchanged. Twin of
+// pyAugErr in languages/python-interpreter.abnf, which explains.
+func (rt *jsrt) pyAugErr(p interface{}, op string, l, r interface{}) interface{} {
+	th, ok := p.(*jsThrown)
+	if !ok {
+		return p
+	}
+	inst, ok := th.value.(*jsObject)
+	if !ok || inst.props["__class"] != rt.pyExcClass("TypeError") {
+		return p
+	}
+	args, ok := inst.props["args"].(*jsArray)
+	if !ok || len(args.elems) != 1 {
+		return p
+	}
+	m, ok := args.elems[0].(string)
+	if !ok {
+		return p
+	}
+	shown := op
+	if op == "**" {
+		shown = "** or pow()"
+	}
+	names := "'" + pyTypeName(rt, l) + "' and '" + pyTypeName(rt, r) + "'"
+	aug := &jsThrown{value: rt.pyExcInstance("TypeError", "unsupported operand type(s) for "+op+"=: "+names)}
+	if m == "unsupported operand type(s) for "+shown+": "+names {
+		return aug
+	}
+	if op == "*" && strings.HasPrefix(m, "can't multiply sequence by non-int of t") {
+		_, isStr := l.(string)
+		_, isArr := l.(*jsArray)
+		_, isSet := pySetElems(l)
+		_, _, isDict := dictParts(l)
+		_, _, isInst := pyInstance(l)
+		if !isStr && !isArr && (isSet || isDict || isInst) {
+			return aug
+		}
+	}
+	return p
+}
+
+// pyPowCplx is a negative finite base to a finite fractional power: complex,
+// through _Py_c_pow. Twin of pyPowCplx in languages/python-interpreter.abnf and
+// pyAPowCplx in lib/python-rt.metajs.
+func (rt *jsrt) pyPowCplx(x, y float64) interface{} {
+	pr, pi, _ := pyCxPow(x, 0, y, 0)
+	if math.IsInf(pr, 0) || math.IsInf(pi, 0) {
+		panic(&jsThrown{value: rt.pyExcInstance("OverflowError", "complex exponentiation")})
+	}
+	return newPyComplex(pr, pi)
+}
+
 // pyIntTrueDiv is int / int, the exact quotient rounded once to the nearest
 // double (big.Rat rounds half to even, subnormals included); a quotient past the
 // double range is CPython's OverflowError. b is not zero. Twin of bigTrueDiv in
@@ -18903,13 +18992,13 @@ func pyCxPow(a, b, c, d float64) (float64, float64, bool) {
 	}
 	vabs := pyCxHypot(a, b)
 	ln := crPow(vabs, c)
-	at := math.Atan2(b, a)
+	at := fdAtan2(b, a)
 	phase := float64(at * c)
 	if d != 0 {
 		ln /= math.Exp(float64(at * d))
 		phase = pyCxFma(d, math.Log(vabs), phase)
 	}
-	return float64(ln * math.Cos(phase)), float64(ln * math.Sin(phase)), true
+	return float64(ln * fdCos(phase)), float64(ln * fdSin(phase)), true
 }
 
 // pyCxAbs is abs(complex): the libm hypot, and CPython's OverflowError when
@@ -22727,7 +22816,10 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 	}
 	out := ""
 	ai := 0
-	mapped := false
+	// A dict or a list is a mapping to PyUnicode_Format, as in pyPct of
+	// languages/python-interpreter.abnf.
+	arr, isArr := arg.(*jsArray)
+	mapped := (isArr && arr.kind != pyTupKind) || dictK != nil
 	i := 0
 	for i < len(f) {
 		if f[i] != '%' {
@@ -22809,6 +22901,9 @@ func (rt *jsrt) pyPct(f string, arg interface{}) string {
 		i++
 		var v interface{}
 		if hasKey {
+			if dictK == nil && isArr && arr.kind != pyTupKind && pyTypeName(rt, arg) == "list" {
+				rt.pyPctTypeErr("list indices must be integers or slices, not str")
+			}
 			if dictK == nil {
 				rt.pyPctTypeErr("format requires a mapping")
 			}

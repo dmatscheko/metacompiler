@@ -96,6 +96,9 @@ import "./runtime.metajs"
 // int's and float's own methods at the bit and double level (pyNumMethod).
 import "./python-num.js"
 
+// sin, cos, tan and atan2 (math and the complex power), as the interpreter's.
+import "./fdlibm.js"
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return pyAJavaStr(v) }
 function rtkNum(v) { return pyNum(v) }
@@ -127,9 +130,13 @@ function pyIsTup(v) { return arrKind(v) == 16 }
 // A tuple's two methods.
 function pyIsTupleMethod(name) { return name == "count" || name == "index" }
 // Go: js_pytup and js_pytupconv. A tuple display marks the array it built, and
-// tuple(iterable) is list()'s fresh array, marked.
+// tuple(iterable) is list()'s fresh array, marked - but tuple(t) of a tuple is t
+// itself, an immutable value needing no copy.
 function js_pytup(a) { return arrKindSet(a, 16) }
-function js_pytupconv(v) { return arrKindSet(js_pylist(v), 16) }
+function js_pytupconv(v) {
+    if (pyIsTup(v)) { return v }
+    return arrKindSet(js_pylist(v), 16)
+}
 function pyIsStr(v) { return typeof v == "string" }
 function pyIsNum(v) { return typeof v == "number" }
 function pyIsBool(v) { return typeof v == "boolean" }
@@ -1131,6 +1138,12 @@ function pyClassMember(k, name) {
 // [key, delegate, is-a-named-method] triples, so a delegate is made once.
 var pyBDelTab = []
 function pyBDelegate(tname, name) {
+    // A tuple's dunders are list's, less the ones that mutate; its two named
+    // methods are its own.
+    if (tname == "tuple") {
+        if (name.substring(0, 2) != "__" || pyTupMutator(name)) { return undefined }
+        return pyBDelegate("list", name)
+    }
     if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict") { return undefined }
     var key = tname + "." + name
     var i = 0
@@ -1144,6 +1157,12 @@ function pyBDelegate(tname, name) {
     pyBDelTab.push(f)
     pyBDelTab.push(meth)
     return f
+}
+
+// Go: pyTupMutator. The dunders of list that change the list, which a tuple
+// does not have.
+function pyTupMutator(name) {
+    return name == "__setitem__" || name == "__delitem__" || name == "__init__" || name == "__iadd__" || name == "__imul__"
 }
 
 // Go: pyIsBDelMethod. Is m a delegate for one of a builtin type's named methods?
@@ -1309,9 +1328,7 @@ function pyValDunder(v, name) {
     if (tn == "" || name.length <= 4) { return undefined }
     if (name.substring(0, 2) != "__" || name.substring(name.length - 2, name.length) != "__") { return undefined }
     // A tuple is served by list's delegates, less the ones that mutate.
-    if (pyIsTup(v)) {
-        if (name == "__setitem__" || name == "__delitem__" || name == "__init__" || name == "__iadd__") { return undefined }
-    }
+    if (pyIsTup(v) && pyTupMutator(name)) { return undefined }
     return pyBDelegate(tn, name)
 }
 function pyValDunderAttr(v, name) { return pyValDunder(v, name) !== undefined }
@@ -2766,6 +2783,14 @@ function pyAPowF(x, y) {
     return p
 }
 
+// A negative finite base to a finite fractional power is complex, through
+// _Py_c_pow. Go: rt.pyPowCplx; twin of pyPowCplx in python-interpreter.abnf.
+function pyAPowCplx(x, y) {
+    var pw = pyCxPowGen(x, 0, y, 0)
+    if (pyCxIsInf(pw[0]) || pyCxIsInf(pw[1])) { pyRaiseExc("OverflowError", "complex exponentiation") }
+    return pyNewCplx(pw[0], pw[1])
+}
+
 // An operand of js_pybin's arithmetic arms as a double: an int, a bool, a
 // float box or a bigint, and CPython's TypeError for op on l and r for anything
 // else (4 - "s", "s" * 2.5). The arms before these have taken sets, sequences,
@@ -3147,13 +3172,13 @@ function pyCxPowGen(a, b, c, d) {
     }
     var vabs = pyCxHypot(a, b)
     var len = Math.pow(vabs, c)
-    var at = Math.atan2(b, a)
+    var at = fdlibm().atan2(b, a)
     var phase = at * c
     if (d != 0) {
         len = len / Math.exp(at * d)
         phase = pyCxFma(d, Math.log(vabs), phase)
     }
-    return [len * Math.cos(phase), len * Math.sin(phase)]
+    return [len * fdlibm().cos(phase), len * fdlibm().sin(phase)]
 }
 
 // c_powu: square and multiply, the order of the products CPython's.
@@ -3479,11 +3504,38 @@ function pyAAddCheck(l, r) {
     pyRaiseExc("TypeError", "unsupported operand type(s) for +: '" + pyTypeName(l) + "' and '" + rn + "'")
 }
 
-// Go: js_pyinplace. `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=) updates
-// a set in place when t is a set, so every alias sees it; anything else is the
-// binary operator.
-function js_pyinplace(opv, l, r) {
-    var op = pyToStr(opv)
+// Go: rt.pyAugBin. An augmented assignment that is not plain arithmetic on
+// numbers, op its binary operator: `xs += it` is list.extend in place (the
+// length read first, so `xs += xs` doubles), `d |= m` is d.update(m), and
+// `s |= t` (&=, -=, ^=) updates a set in place when t is a set, so every alias
+// sees it; anything else is the binary operator, whose "unsupported operand"
+// TypeError names the augmented one (pyAAugErr). An instance's own in-place
+// dunder (__isub__) is asked first, and NotImplemented passes it by.
+function pyAAug(op, l, r) {
+    var lc = pyInstClassOf(l)
+    if (lc !== null) {
+        var bn = pyABinDunder(op)
+        if (bn != "") {
+            var iname = "__i" + bn.substring(2)
+            if (pyLookupHas(lc, iname)) {
+                var im = pyLookupVal(lc, iname)
+                if (pyIsCallable(im)) {
+                    var iv = pyCallSelf(im, l, [r])
+                    if (iv !== pyNotImpl) { return iv }
+                }
+            }
+        }
+    }
+    if (op == "+" && pyIsArr(l) && !pyIsTup(l)) {
+        var ext = pyElemsOf(r)
+        var en = ext.length
+        var ei = 0
+        while (ei < en) {
+            l.push(ext[ei])
+            ei = ei + 1
+        }
+        return l
+    }
     if (pySetElemsOf(l) !== null) {
         var sb = pyASetBin(op, l, r)
         if (sb !== null && !pySetFrozen(l)) {
@@ -3496,7 +3548,42 @@ function js_pyinplace(opv, l, r) {
             return l
         }
     }
-    return js_pybin(opv, l, r)
+    var res = anytype
+    try {
+        res = js_pybin(op, l, r)
+    } catch (e) {
+        throw pyAAugErr(e, op, l, r)
+    }
+    return res
+}
+
+// An arithmetic operator (+ - * / // % **) on an int or a float box each, which
+// it always serves.
+function pyAArithPair(op, l, r) {
+    if (typeof l != "number" && (typeof l != "object" || l === null || Array.isArray(l) || l["__flo"] === undefined)) { return false }
+    if (typeof r != "number" && (typeof r != "object" || r === null || Array.isArray(r) || r["__flo"] === undefined)) { return false }
+    return op == "+" || op == "-" || op == "*" || op == "/" || op == "//" || op == "%" || op == "**"
+}
+
+// Go: rt.pyAugErr; twin of pyAugErr in python-interpreter.abnf, which explains.
+function pyAAugErr(e, op, l, r) {
+    var x = anytype
+    x = e
+    if (typeof x != "object" || x === null || x["__class"] !== pyExcClass("TypeError")) { return x }
+    var args = anytype
+    args = x["args"]
+    if (!pyIsArr(args) || args.length != 1 || typeof args[0] != "string") { return x }
+    var shown = op
+    if (op == "**") { shown = "** or pow()" }
+    var names = "'" + pyTypeName(l) + "' and '" + pyTypeName(r) + "'"
+    var aug = "unsupported operand type(s) for " + op + "=: " + names
+    var m = pyToStr(args[0])
+    if (m == "unsupported operand type(s) for " + shown + ": " + names) { return pyExcInstance("TypeError", aug) }
+    if (op == "*" && m.substring(0, 39) == "can't multiply sequence by non-int of t" && typeof l != "string" &&
+        !pyIsArr(l) && (pySetElemsOf(l) !== null || pyIsDict(l) || pyInstClassOf(l) !== null)) {
+        return pyExcInstance("TypeError", aug)
+    }
+    return x
 }
 
 // Go: js_pybin. Every user visible binary operator of the Python
@@ -3506,21 +3593,29 @@ function js_pyinplace(opv, l, r) {
 // sees "|" - matching Go exactly, including that.
 function js_pybin(opv, l, r) {
     var op = pyToStr(opv)
-    // `xs += it` is list.extend IN PLACE, so every alias of xs sees it and any
-    // iterable is accepted; on anything else it is the binary `+`. The length is
-    // read first so `xs += xs` doubles.
-    if (op == "+=") {
-        if (pyIsArr(l) && !pyIsTup(l)) {
-            var ext = pyElemsOf(r)
-            var en = ext.length
-            var ei = 0
-            while (ei < en) {
-                l.push(ext[ei])
-                ei = ei + 1
-            }
-            return l
-        }
-        op = "+"
+    // An augmented assignment arrives as its own operator ("-="). Two ints, or
+    // arithmetic on an int or float box each, is the binary operator; the rest
+    // is pyAAug's, out of line. The operator is renamed by constants rather than
+    // sliced, so nothing is allocated, and a one-character operator pays one test.
+    var aug = op.length > 1
+    if (aug) {
+        if (op == "+=") { op = "+" }
+        else if (op == "-=") { op = "-" }
+        else if (op == "*=") { op = "*" }
+        else if (op == "/=") { op = "/" }
+        else if (op == "//=") { op = "//" }
+        else if (op == "%=") { op = "%" }
+        else if (op == "**=") { op = "**" }
+        else if (op == "|=") { op = "|" }
+        else if (op == "&=") { op = "&" }
+        else if (op == "^=") { op = "^" }
+        else if (op == "<<=") { op = "<<" }
+        else if (op == ">>=") { op = ">>" }
+        else if (op == "@=") { op = "@" }
+        else { aug = false }
+    }
+    if (aug && !(typeof l == "number" && typeof r == "number" && op != "@") && !pyAArithPair(op, l, r)) {
+        return pyAAug(op, l, r)
     }
     if (op == "is") { return pyAStrictEq(l, r) }
     if (op == "is not") { return !pyAStrictEq(l, r) }
@@ -3723,6 +3818,10 @@ function js_pybin(opv, l, r) {
     // number whenever it still fits, so nothing below 2^53 changes shape.
     if (op == "**") {
         var ex = pyAOperand(r, op, l, r)
+        if (ex != Math.floor(ex)) {
+            var fb = pyAOperand(l, op, l, r)
+            if (fb < 0 && fb - fb == 0 && ex - ex == 0) { return pyAPowCplx(fb, ex) }
+        }
         if (ex < 0) {
             // float(int) past the double range raises.
             if (pyIsBig(l)) { return pyMkFlo(pyAPowF(pyBigToF(l), ex)) }
@@ -4342,6 +4441,106 @@ function js_pyfloat(v0) {
     if (typeof v == "string") { return pyMkFlo(pyStrToF(v)) }
     if (pyIsBig(v)) { return pyMkFlo(pyBigToF(v)) }
     return pyMkFlo(pyNum(v))
+}
+
+// Go: js_pyhash. hash(v); the rules are hostGlobals["hash"]'s in
+// python-interpreter.abnf, the arithmetic lib/python-num.js's.
+function js_pyhash(v) {
+    var s = pynWSigned(pyHashW(v))
+    return pyIntOfBits(s["neg"], s["bits"])
+}
+function pyHashW(v0) {
+    var v = anytype
+    v = v0
+    if (v === null || v === undefined) { return pynWNum(4238894112) }
+    if (typeof v == "boolean") { return pynWNum(v ? 1 : 0) }
+    if (typeof v == "number") { return pyHashSmall(v) }
+    if (pyIsBig(v)) { return pynHashInt(pyIntNeg(v), pyIntBits(v)) }
+    if (pyIsFlo(v)) { return pyHashF(v["__flo"], v) }
+    if (pyIsCplx(v)) { return pynHashCplx(pyHashF(pyCplxRe(v), v), pyHashF(pyCplxIm(v), v)) }
+    if (typeof v == "string") {
+        var us = []
+        var i = 0
+        while (i < v.length) {
+            us.push(v.charCodeAt(i))
+            i = i + 1
+        }
+        return pynHashUnits(us)
+    }
+    if (pyIsTup(v)) {
+        var lanes = []
+        var j = 0
+        while (j < v.length) {
+            lanes.push(pyHashW(v[j]))
+            j = j + 1
+        }
+        return pynHashTuple(lanes)
+    }
+    if (pySetElemsOf(v) !== null && pySetFrozen(v)) {
+        var fl = []
+        var els = pySetElemsOf(v)
+        var k = 0
+        while (k < els.length) {
+            fl.push(pyHashW(els[k]))
+            k = k + 1
+        }
+        return pynHashFrozen(fl)
+    }
+    if (pyIsArr(v) || pySetElemsOf(v) !== null || pyIsDict(v)) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
+    var cls = pyInstClassOf(v)
+    if (cls !== null) {
+        var mro = pyMRO(cls)
+        var mi = 0
+        while (mi < mro.length) {
+            var c = mro[mi]
+            if (c["__hash__"] !== undefined) { return pyHashCall(c["__hash__"], v) }
+            if (c["__eq__"] !== undefined) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
+            if (c["__mro"] === undefined && c["__name"] !== undefined) { return pyHashW(pyUnwrapBuiltin(v)) }
+            mi = mi + 1
+        }
+    }
+    return pyHashId(v)
+}
+// A class's own __hash__ m on v: the answer must be an int, kept when it fits
+// 64 bits and hashed as an int otherwise.
+function pyHashCall(m, v) {
+    var h = anytype
+    h = pyCallSelf(m, v, [])
+    if (typeof h == "boolean") { return pynWNum(h ? 1 : 0) }
+    if (typeof h == "number") { return pyHashSmall(h) }
+    if (!pyIsBig(h)) { pyRaiseExc("TypeError", "__hash__ method should return an integer") }
+    var hb = pyIntBits(h)
+    if (pynFitsI64(pyIntNeg(h), hb)) { return pynWFix(pynWOfInt(pyIntNeg(h), hb)) }
+    return pynHashInt(pyIntNeg(h), hb)
+}
+// An int below 2^53 in size is its own hash, -1 excepted.
+function pyHashSmall(n) {
+    if (n == -1) { return pynWNeg(pynWNum(2)) }
+    if (n < 0) { return pynWNeg(pynWNum(0 - n)) }
+    return pynWNum(n)
+}
+// A double's hash: an integral one as the int it equals, an infinity as
+// +-314159, a NaN by the identity of the value holding it.
+function pyHashF(f, holder) {
+    if (f !== f) { return pyHashId(holder) }
+    if (f - f != 0) {
+        if (f > 0) { return pynWNum(314159) }
+        return pynWNeg(pynWNum(314159))
+    }
+    if (f == Math.floor(f) && f < 9007199254740992 && f > -9007199254740992) { return pyHashSmall(f) }
+    return pynHashFloat(f)
+}
+// The identity hash: the order in which hash() first met the value. The table
+// keeps every value it numbers alive.
+var pyHashIds = []
+function pyHashId(v) {
+    var i = 0
+    while (i < pyHashIds.length) {
+        if (pyHashIds[i] === v) { return pynWNum(i + 1) }
+        i = i + 1
+    }
+    pyHashIds.push(v)
+    return pynWNum(pyHashIds.length)
 }
 
 // js_pyflo: the float LITERAL builder. Constant folding cannot carry a box, so
@@ -5651,7 +5850,9 @@ function pyBPct(f, arg) {
     else { args = [arg] }
     var out = ""
     var ai = 0
-    var mapped = false
+    // A dict or a list is a mapping to PyUnicode_Format, as in pyPct of
+    // python-interpreter.abnf.
+    var mapped = !pyIsTup(arg) && (pyIsArr(arg) || (pyIsDict(arg) && pySetElemsOf(arg) === null))
     var i = 0
     while (i < f.length) {
         var c = f.charAt(i)
@@ -5707,6 +5908,9 @@ function pyBPct(f, arg) {
         i = i + 1
         var v = anytype
         if (hasKey) {
+            if (dict === null && pyIsArr(arg) && !pyIsTup(arg) && pyTypeName(arg) == "list") {
+                pyBPctTypeErr("list indices must be integers or slices, not str")
+            }
             if (dict === null) { pyBPctTypeErr("format requires a mapping") }
             var at = pyDictFind(dict["keys"], key)
             if (at < 0) { pyRaiseExcV("KeyError", key) }
@@ -8490,6 +8694,7 @@ function pyDDescGet(m, owner, name) {
 // of the type, which pyDTypeSample gives.
 function pyDTypeSample(tname) {
     if (tname == "list") { return [] }
+    if (tname == "tuple") { return pyTup([]) }
     if (tname == "str") { return "" }
     if (tname == "set") { return pyNewSet([]) }
     if (tname == "dict") { return pyNewDict() }
@@ -9706,7 +9911,7 @@ function pyMathCall(name, args) {
         if (cs < 0 || (cs === 0 && 1 / cs < 0)) { return pyMkFlo(cm / (0 - 1)) }
         return pyMkFlo(cm)
     }
-    if (name == "atan2") { return pyMkFlo(Math.atan2(pyMArg(args, 0), pyMArg(args, 1))) }
+    if (name == "atan2") { return pyMkFlo(fdlibm().atan2(pyMArg(args, 0), pyMArg(args, 1))) }
     if (name == "hypot") {
         var mx = 0
         var i = 0
@@ -9726,9 +9931,9 @@ function pyMathCall(name, args) {
         }
         return pyMkFlo(mx * Math.sqrt(sum))
     }
-    if (name == "sin") { return pyMkFlo(Math.sin(pyMArg(args, 0))) }
-    if (name == "cos") { return pyMkFlo(Math.cos(pyMArg(args, 0))) }
-    if (name == "tan") { return pyMkFlo(Math.tan(pyMArg(args, 0))) }
+    if (name == "sin") { return pyMkFlo(fdlibm().sin(pyMArg(args, 0))) }
+    if (name == "cos") { return pyMkFlo(fdlibm().cos(pyMArg(args, 0))) }
+    if (name == "tan") { return pyMkFlo(fdlibm().tan(pyMArg(args, 0))) }
     if (name == "asin") {
         var as1 = pyMArg(args, 0)
         if (as1 < 0 - 1 || as1 > 1) { pyMDom("unit", as1) }

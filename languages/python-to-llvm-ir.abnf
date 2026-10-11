@@ -2794,12 +2794,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sbTarget(ref)
         var op = items[1].op
         var valT = items[2]
-        // js_pybin's "+=" is list.extend in place on a list and `+` otherwise;
-        // js_pyinplace updates a set or a dict in place for |= &= -= ^= and is
-        // the binary operator otherwise.
-        var aop = op == "+=" ? op : op.substring(0, op.length - 1)
-        var inPlace = op == "|=" || op == "&=" || op == "-=" || op == "^="
-        var augExt = inPlace ? "js_pyinplace" : "js_pybin"
+        // js_pybin takes the augmented operator itself: list.extend for +=, a
+        // set or dict updated in place for |= &= -= ^=, the binary operator
+        // otherwise, with the augmented operator named in its TypeError.
+        var aop = op
+        var augExt = "js_pybin"
         // CPython walks the target once: `f().k += 1` calls f a single time, and
         // the subscript of `a[g()] += 1` is evaluated before the right side.
         return function(b) {
@@ -4343,6 +4342,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "round", "js_pyround", 0)
         b = declBuiltin(b, "pow", "js_pypow", 0)
         b = declBuiltin(b, "callable", "js_pycallable", 1)
+        b = declBuiltin(b, "hash", "js_pyhash", 1)
         b = declBuiltin(b, "ascii", "js_pyascii", 1)
         b = declBuiltin(b, "getattr", "js_pygetattr3", 0)
         b = declBuiltin(b, "hasattr", "js_pyhasattr", 2)

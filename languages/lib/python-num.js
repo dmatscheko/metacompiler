@@ -370,3 +370,241 @@ function pynDecInc(d) {
     if (j < 0) { return "1" + out }
     return d.substring(0, j) + String.fromCharCode(d.charCodeAt(j) + 1) + out
 }
+
+// ---- hash() ----
+//
+// CPython hashes in Py_uhash_t: 64-bit unsigned arithmetic that wraps. A double
+// holds 53 bits, so a 64-bit word here is four 16-bit limbs, least significant
+// first; a product of two limbs is below 2^32 and a column of four of them plus
+// a carry below 2^35, so every step is exact. Go twin: the pyHash* functions in
+// abnf/jsrtpynum.go, on uint64.
+
+// The word of a non-negative integral double.
+function pynWNum(n) {
+    var out = []
+    var i = 0
+    while (i < 4) {
+        var q = Math.floor(n / 65536)
+        out.push(n - q * 65536)
+        n = q
+        i = i + 1
+    }
+    return out
+}
+// The word of four limbs written most significant first.
+function pynW(a3, a2, a1, a0) { return [a0, a1, a2, a3] }
+function pynWAdd(a, b) {
+    var out = []
+    var c = 0
+    var i = 0
+    while (i < 4) {
+        var s = a[i] + b[i] + c
+        c = s >= 65536 ? 1 : 0
+        out.push(s - c * 65536)
+        i = i + 1
+    }
+    return out
+}
+function pynWMul(a, b) {
+    var out = []
+    var c = 0
+    var k = 0
+    while (k < 4) {
+        var s = c
+        var i = 0
+        while (i <= k) {
+            s = s + a[i] * b[k - i]
+            i = i + 1
+        }
+        c = Math.floor(s / 65536)
+        out.push(s - c * 65536)
+        k = k + 1
+    }
+    return out
+}
+function pynWNeg(a) {
+    return pynWAdd([65535 - a[0], 65535 - a[1], 65535 - a[2], 65535 - a[3]], [1, 0, 0, 0])
+}
+function pynWXor(a, b) { return [a[0] ^ b[0], a[1] ^ b[1], a[2] ^ b[2], a[3] ^ b[3]] }
+function pynWOr(a, b) { return [a[0] | b[0], a[1] | b[1], a[2] | b[2], a[3] | b[3]] }
+function pynWAnd(a, b) { return [a[0] & b[0], a[1] & b[1], a[2] & b[2], a[3] & b[3]] }
+// a shifted left (k > 0) or right (k < 0) by |k| < 64 bits.
+function pynWShift(a, k) {
+    var out = []
+    var i = 0
+    if (k >= 0) {
+        var q = Math.floor(k / 16)
+        var s = k - q * 16
+        while (i < 4) {
+            var hi = i - q >= 0 ? a[i - q] : 0
+            var lo = i - q - 1 >= 0 ? a[i - q - 1] : 0
+            out.push(((hi << s) & 65535) | (lo >> (16 - s)))
+            i = i + 1
+        }
+        return out
+    }
+    var q2 = Math.floor((0 - k) / 16)
+    var s2 = 0 - k - q2 * 16
+    while (i < 4) {
+        var lo2 = i + q2 < 4 ? a[i + q2] : 0
+        var hi2 = i + q2 + 1 < 4 ? a[i + q2 + 1] : 0
+        out.push((lo2 >> s2) | ((hi2 << (16 - s2)) & 65535))
+        i = i + 1
+    }
+    return out
+}
+function pynWEq(a, b) { return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] }
+function pynWGe(a, b) {
+    var i = 3
+    while (i >= 0) {
+        if (a[i] != b[i]) { return a[i] > b[i] }
+        i = i - 1
+    }
+    return true
+}
+var pynWP = pynW(8191, 65535, 65535, 65535)
+var pynWM1 = pynW(65535, 65535, 65535, 65535)
+// The modulus 2^61 - 1 taken once from a word below 2^62.
+function pynWModP(x) {
+    var r = pynWAdd(pynWAnd(x, pynWP), pynWShift(x, -61))
+    if (pynWGe(r, pynWP)) { r = pynWAdd(r, pynWNeg(pynWP)) }
+    return r
+}
+// -1 is the error return of CPython's hash slots, so a hash of -1 is -2.
+function pynWFix(x) {
+    if (pynWEq(x, pynWM1)) { return pynW(65535, 65535, 65535, 65534) }
+    return x
+}
+
+// The word of an int's two's complement, from its sign and magnitude bits (the
+// low 64 bits).
+function pynWOfInt(neg, bits) {
+    var w = [0, 0, 0, 0]
+    var i = 0
+    while (i < bits.length && i < 64) {
+        if (bits[i] == 1) { w[Math.floor(i / 16)] = w[Math.floor(i / 16)] + pynScale2(1, i - Math.floor(i / 16) * 16) }
+        i = i + 1
+    }
+    if (neg) { return pynWNeg(w) }
+    return w
+}
+// Does the int fit a signed 64-bit word (-2^63 is the one magnitude of 64 bits)?
+function pynFitsI64(neg, bits) {
+    if (bits.length < 64) { return true }
+    return neg && bits.length == 64 && pynBitCount(bits) == 1
+}
+// A word read as a signed hash: {neg, bits}.
+function pynWSigned(x) {
+    var neg = x[3] >= 32768
+    var m = neg ? pynWNeg(x) : x
+    var bits = []
+    var i = 0
+    while (i < 4) {
+        var v = m[i]
+        var j = 0
+        while (j < 16) {
+            bits.push(v % 2)
+            v = Math.floor(v / 2)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return {neg: neg, bits: pynBitsTrim(bits)}
+}
+
+// hash(int): the magnitude modulo 2^61 - 1, signed (long_hash).
+function pynHashInt(neg, bits) {
+    var x = [0, 0, 0, 0]
+    var i = bits.length - 1
+    while (i >= 0) {
+        x = pynWShift(x, 1)
+        if (bits[i] == 1) { x[0] = x[0] + 1 }
+        if (pynWGe(x, pynWP)) { x = pynWAdd(x, pynWNeg(pynWP)) }
+        i = i - 1
+    }
+    if (neg) { x = pynWNeg(x) }
+    return pynWFix(x)
+}
+
+// hash(float) for a finite x (_Py_HashDouble): the value modulo 2^61 - 1, which
+// is the int's hash for an integral x. The mantissa enters 28 bits at a time and
+// the binary exponent as a rotation, since 2^61 = 1 modulo 2^61 - 1.
+function pynHashFloat(v) {
+    var m = v < 0 ? 0 - v : v
+    if (m == 0) { return [0, 0, 0, 0] }
+    var e = 0
+    while (m >= 1) {
+        m = m / 2
+        e = e + 1
+    }
+    while (m < 0.5) {
+        m = m * 2
+        e = e - 1
+    }
+    var x = [0, 0, 0, 0]
+    while (m != 0) {
+        x = pynWOr(pynWAnd(pynWShift(x, 28), pynWP), pynWShift(x, -33))
+        m = m * 268435456
+        e = e - 28
+        var y = Math.floor(m)
+        m = m - y
+        x = pynWAdd(x, pynWNum(y))
+        if (pynWGe(x, pynWP)) { x = pynWAdd(x, pynWNeg(pynWP)) }
+    }
+    if (e >= 0) { e = e % 61 } else { e = 60 - (-1 - e) % 61 }
+    x = pynWOr(pynWAnd(pynWShift(x, e), pynWP), pynWShift(x, e - 61))
+    if (v < 0) { x = pynWNeg(x) }
+    return pynWFix(x)
+}
+
+// hash(complex): the real part's hash plus 1000003 times the imaginary part's.
+function pynHashCplx(hr, hi) { return pynWFix(pynWAdd(hr, pynWMul(hi, pynWNum(1000003)))) }
+
+// hash(tuple), tuplehash: xxHash's round over the items' hashes.
+function pynHashTuple(lanes) {
+    var p1 = pynW(40503, 31153, 34283, 51847)
+    var p2 = pynW(49842, 44605, 10196, 60239)
+    var p5 = pynW(10196, 60207, 5718, 26565)
+    var acc = p5
+    var i = 0
+    while (i < lanes.length) {
+        acc = pynWAdd(acc, pynWMul(lanes[i], p2))
+        acc = pynWOr(pynWShift(acc, 31), pynWShift(acc, -33))
+        acc = pynWMul(acc, p1)
+        i = i + 1
+    }
+    acc = pynWAdd(acc, pynWXor(pynWNum(lanes.length), pynWXor(p5, pynWNum(3527539))))
+    if (pynWEq(acc, pynWM1)) { return pynWNum(1546275796) }
+    return acc
+}
+
+// hash(frozenset), frozenset_hash: the members' shuffled hashes XORed (so the
+// order cannot matter), then the size and a final dispersal.
+function pynHashFrozen(lanes) {
+    var h = [0, 0, 0, 0]
+    var i = 0
+    while (i < lanes.length) {
+        var l = lanes[i]
+        h = pynWXor(h, pynWMul(pynWXor(pynWXor(l, pynWNum(89869747)), pynWShift(l, 16)), pynWNum(3644798167)))
+        i = i + 1
+    }
+    h = pynWXor(h, pynWMul(pynWNum(lanes.length + 1), pynWNum(1927868237)))
+    h = pynWXor(h, pynWXor(pynWShift(h, -11), pynWShift(h, -25)))
+    h = pynWAdd(pynWMul(h, pynWNum(69069)), pynWNum(907133923))
+    if (pynWEq(h, pynWM1)) { return pynWNum(590923713) }
+    return h
+}
+
+// hash(str) and hash(bytes): CPython's is SipHash under a per-process random
+// key, so no value is reproducible; this is a fixed polynomial over the code
+// units instead, keeping only what is guaranteed - equal strings hash equal, and
+// hash("") is 0.
+function pynHashUnits(units) {
+    var h = 0
+    var i = 0
+    while (i < units.length) {
+        h = (h * 31 + units[i]) % 2147483647
+        i = i + 1
+    }
+    return pynWNum(h)
+}

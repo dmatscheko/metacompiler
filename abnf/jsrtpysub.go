@@ -28,6 +28,14 @@ var (
 
 // pyBuiltinDelegate is the delegate the builtin type tname answers for name.
 func pyBuiltinDelegate(tname, name string) (*hostFunc, bool) {
+	// A tuple's dunders are list's, less the ones that mutate; its two named
+	// methods are its own.
+	if tname == "tuple" {
+		if !strings.HasPrefix(name, "__") || pyTupMutator(name) {
+			return nil, false
+		}
+		return pyBuiltinDelegate("list", name)
+	}
 	switch tname {
 	case "str", "int", "float", "list", "dict":
 	default:
@@ -42,6 +50,16 @@ func pyBuiltinDelegate(tname, name string) (*hostFunc, bool) {
 		pyBDelCache[key] = f
 	}
 	return f, f != nil
+}
+
+// pyTupMutator: the dunders of list that change the list, which a tuple does
+// not have.
+func pyTupMutator(name string) bool {
+	switch name {
+	case "__setitem__", "__delitem__", "__init__", "__iadd__", "__imul__":
+		return true
+	}
+	return false
 }
 
 // pyIsBDelMethod says whether v is a delegate for one of a builtin type's
@@ -340,11 +358,8 @@ func pyValDunder(v interface{}, name string) (*hostFunc, bool) {
 		return nil, false
 	}
 	// A tuple is served by list's delegates, less the ones that mutate.
-	if pyIsTup(v) {
-		switch name {
-		case "__setitem__", "__delitem__", "__init__", "__iadd__":
-			return nil, false
-		}
+	if pyIsTup(v) && pyTupMutator(name) {
+		return nil, false
 	}
 	return pyBuiltinDelegate(tn, name)
 }

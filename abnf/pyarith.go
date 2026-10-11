@@ -264,10 +264,7 @@ func init() {
 					}
 					rt.pyOrdCheck(op, l, r)
 				}
-			case "+", "-", "*", "+=":
-				if op == "+=" {
-					op = "+"
-				}
+			case "+", "-", "*":
 				if v, ok := rt.pyPromoteArith(op, u(a[1]), u(a[2])); ok {
 					return w(v)
 				}

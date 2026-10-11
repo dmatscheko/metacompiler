@@ -89,6 +89,8 @@ func pyDescTypeSample(tname string) interface{} {
 	switch tname {
 	case "list":
 		return &jsArray{}
+	case "tuple":
+		return &jsArray{kind: pyTupKind}
 	case "str":
 		return ""
 	case "set":
