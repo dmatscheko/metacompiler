@@ -3587,6 +3587,12 @@ KwContinue  = "continue" KwEnd ;
         }
         // A Dictionary's `values` live under `vals` (its `keys` are an own field).
         if (name == "values" && isDict(o)) { return o.vals.slice(0) }
+        // `Q.make` unapplied: the static method, bound to the descriptor it was
+        // read from. Twin of sw_statref in swift-to-llvm-ir.abnf.
+        if (isTypeVal(o)) {
+            var sfn = findAccessor(o, "__static_" + name)
+            if (sfn != null) { return bindSelf(sfn, o) }
+        }
         if (hasOwn(o, name)) { return o[name] }
         // A nested type declared inside an ENUM is installed on the enum's MEMBER
         // TABLE, not on the descriptor, so `Outer.Mode` as a field read has to look
@@ -3708,6 +3714,17 @@ KwContinue  = "continue" KwEnd ;
         }
         o[k] = v
     }
+    // A FIELD write: the setter (a computed, observed or static property) when the
+    // value has no own slot of that name, else the slot. Unlike setElem it never
+    // reaches a user subscript.
+    function swSetField(o, k, v) {
+        if (o === null || o === undefined) { fail("assignment into nil") }
+        if (typeof o == "object" && !hasOwn(o, k)) {
+            var s = findAccessor(o, "__set_" + k)
+            if (s != null) { s(o, v); return }
+        }
+        o[k] = v
+    }
     function getElemP(o, k) {
         if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
         var sg2 = subAccessor(o, "__sub_get")
@@ -3743,10 +3760,19 @@ KwContinue  = "continue" KwEnd ;
         if (t == "\n") { println(out) } else { print(out + t) }
     }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
+    // type(of: v): a value of a program type answers its type DESCRIPTOR, which
+    // prints as the name and answers the type's static members
+    // (`type(of: x).make()`); a builtin answers its name. Twin of rtTypeOfVal in
+    // swift-to-llvm-ir.abnf.
+    hostGlobals["type"] = function(v) {
+        if (v !== null && typeof v == "object" && v.__class != undefined && v.__class !== null && !Array.isArray(v)) {
+            return v.__class.__desc != undefined ? v.__class.__desc : v.__class
+        }
+        return swTypeOf(v)
+    }
     // abs/max/min are Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5,
     // not the 1 a |0 truncation gives) and compares by its VALUE (two boxes are two
     // objects, and `a > b` between objects is false).
-    hostGlobals["type"] = function(v) { return swTypeOf(v) }
     hostGlobals["abs"] = function(v) {
         // `< 0` is FALSE for -0.0, yet abs(-0.0) is 0.0 (swift 6.1.2, and the
         // compiled halves through Math.abs). The sign of a zero only shows through 1/v.
@@ -3883,7 +3909,10 @@ KwContinue  = "continue" KwEnd ;
         // super.m(args): resolve from the superclass of the DECLARING type, same self.
         if (isSuperRef(target)) {
             var base = superBase()
-            var sm = base == null ? null : classFind(base, name)
+            // In a class method self is the type descriptor, and super.m() is the
+            // superclass's STATIC m.
+            var skey = isTypeVal(findThis()) ? "__static_" + name : name
+            var sm = base == null ? null : classFind(base, skey)
             if (typeof sm != "function") { fail("unknown super method '" + name + "'") }
             return sm.apply(undefined, concat2impl([findThis()], args))
         }
@@ -3892,7 +3921,7 @@ KwContinue  = "continue" KwEnd ;
         if (target.__isenum === true && hasOwn(target, name) && typeof target[name] == "function") {
             return target[name].apply(undefined, args)
         }
-        if (target.__isenum === true || target.__isclass === true || target.__isprotocol === true) {
+        if (isTypeVal(target)) {
             var tt = accTable(target)
             var sf = tt == null ? null : classFind(tt, "__static_" + name)
             if (typeof sf == "function") { return sf.apply(undefined, concat2impl([target], args)) }
@@ -5647,8 +5676,12 @@ KwContinue  = "continue" KwEnd ;
         // (`[Double]`, `[String: Double]`, `(Double, Int)`, `Double?`,
         // `(Double) -> Double`). The compiler half's twin is its own makeParam.
         var ad = (!isVar && swAdoptNeeded(type)) ? type : ""
+        // A `Set<T>` parameter makes its argument a Set, as a `Set<T>` declaration
+        // makes its initializer one; an Optional one keeps its nil. Twin of
+        // makeParam in swift-to-llvm-ir.abnf.
         return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
-                inout: isInout, hasDefault: hasDflt, dflt: dflt}
+                inout: isInout, hasDefault: hasDflt, dflt: dflt,
+                isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?"}
     }
     // An argument: {lbl, t} for a value, {lbl, ref} for &x, {lbl, dflt} for a
     // default the call site filled in.
@@ -6208,6 +6241,10 @@ KwContinue  = "continue" KwEnd ;
                 } else if (s.kind == "kpath") {
                     var kpf = s.kp()
                     cur = kpf(cur)
+                } else if (s.kind == "field" && s.name == "self") {
+                    // `T.self` is the type itself (its descriptor) and `x.self` the
+                    // value: the postfix self expression is the identity. Twin in
+                    // swift-to-llvm-ir.abnf's member chain.
                 } else if (s.kind == "field") {
                     if (cur === undefined || cur === null) { fail("field ." + s.name + " of nil") }
                     if (propOn && i + 1 < suffixes.length) { propRecs = swPropBefore(cur, s.name, propRecs) }
@@ -6317,6 +6354,7 @@ KwContinue  = "continue" KwEnd ;
         var propTrack = -1
         var optChain = false
         for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
+        var lastField = ref.path.length > 0 && ref.path[ref.path.length - 1].key != undefined
         return function() {
             if (mode < 0) { mode = swKeepMode(ref, hasLocal, localAnn) }
             // An optional-chain target is resolved BEFORE the right-hand side, which
@@ -6350,11 +6388,14 @@ KwContinue  = "continue" KwEnd ;
                 var before = obs == null ? null : swObsBefore(ref.name)
                 if (propTrack < 0) { propTrack = swPropChainHit(ref.name, pathNames) ? 1 : 0 }
                 var p = pre !== null ? pre : swResolvePath(ref, propTrack == 1)
-                if (op != "=") { v = applyOp(op, getElemP(p.obj, p.key), v) }
+                // A FIELD target is read and written as a field: getElemP and setElem
+                // try a user subscript first, which `m.x += 1` on a type that has
+                // one must not reach.
+                if (op != "=") { v = applyOp(op, lastField ? swFieldOf(p.obj, p.key) : getElemP(p.obj, p.key), v) }
                 if (mode == 0 || (mode == 2 && !swExfOf(exr.lk < 0 ? findThis() : p.own, exr.key))) {
                     v = swAdoptLike(swSafeElem(p.obj, p.key), v, elemTy)
                 }
-                setElem(p.obj, p.key, v)
+                if (lastField) { swSetField(p.obj, p.key, v) } else { setElem(p.obj, p.key, v) }
                 if (p.recs != null) { swPropReplay(p.recs) }
                 if (before != null) { swObsAfter(ref.name, obs, before) }
             }
@@ -6711,7 +6752,7 @@ KwContinue  = "continue" KwEnd ;
             var nv = anytype
             nv = r.holder["__v_" + r.key]
             scopePut(r.holder, "__v_" + r.key, r.old)
-            setElem(r.holder, r.key, nv)
+            swSetField(r.holder, r.key, nv)
         }
     }
     // A FIELD read along a path: an own slot, else a getter (an observed or
@@ -6857,6 +6898,10 @@ KwContinue  = "continue" KwEnd ;
         if (k == 1 && items[2] != undefined) { annTxt = swExprAnn(items[2].itext) }
         swNoteLocalAnn(name, annTxt)
         var init = swDotWant(items[k], items[k + 1], annTxt)
+        if (init != undefined && swIsSetArrTy(annTxt)) {
+            var setsT = init
+            init = function() { return swSetArr(setsT()) }
+        }
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
         // annotation carries its numeric leaves down, so a[0] / 2 is 1.5.
         if (elemTy != "") {
@@ -7383,11 +7428,49 @@ KwContinue  = "continue" KwEnd ;
             declVar("this", self)
             declVar("self", self)
         }
-        for (var j = 0; j < f.params.length; j++) { declVar(f.params[j].name, bnd.vals[j]) }
+        for (var j = 0; j < f.params.length; j++) {
+            declVar(f.params[j].name, f.params[j].isSet ? swSetOf(bnd.vals[j]) : bnd.vals[j])
+        }
+        if (f.mtps === undefined) { f.mtps = swMetaTypeParams(f.params) }
+        for (var mt = 0; mt < f.mtps.length; mt++) {
+            var mth = swResolve(f.mtps[mt].tp)
+            if (mth == null || !isTypeVal(mth.v)) { declVar(f.mtps[mt].tp, getVar(f.mtps[mt].name)) }
+        }
         var r = f.body()
         for (var k = 0; k < bnd.boxes.length; k++) { bnd.boxes[k].box.v = getVar(bnd.boxes[k].name) }
         scopes = saved
         return relabelRet(f, (r != undefined && r.isRet) ? r.v : undefined)
+    }
+    // A generic parameter that a METATYPE parameter names (`func z<X: P>(_ t: X.Type)`)
+    // is a value in the body - `X.zz` reads the static zz of the type t holds - so it
+    // is bound to that argument, unless the name resolves to a type (`_ t: Base.Type`
+    // handed a subclass must not rebind Base). Answers [{tp, name}], the first
+    // metatype parameter of each name. Twin of swMetaTypeParams in
+    // swift-to-llvm-ir.abnf.
+    function swMetaTypeParams(params) {
+        var out = []
+        var seen = {}
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p.variadic || p.type == undefined) { continue }
+            var t = p.type
+            while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
+            if (t.length < 6 || t.substring(t.length - 5) != ".Type") { continue }
+            var tp = t.substring(0, t.length - 5)
+            if (!swIsPlainId(tp) || tp == "Self" || isBuiltinTypeName(tp)
+                || hasOwn(swAliasReg, "$" + tp) || hasOwn(seen, "$" + tp)) { continue }
+            seen["$" + tp] = true
+            out.push({tp: tp, name: p.name})
+        }
+        return out
+    }
+    function swIsPlainId(s) {
+        if (s.length == 0) { return false }
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return false }
+        }
+        return true
     }
     function makeFunClosure(f) {
         return function() {
@@ -7679,6 +7762,7 @@ KwContinue  = "continue" KwEnd ;
     function accTable(o) {
         if (o === null || o === undefined) { return null }
         if (typeof o != "object") { return builtinTableFor(o) }
+        if (o.__btab != undefined) { return o.__btab }
         if (o.__isenum === true) { return o.__members == undefined ? null : o.__members }
         if (o.__isprotocol === true) { return o.__members == undefined ? null : o.__members }
         if (o.__isclass === true) { return o }
@@ -8223,6 +8307,16 @@ KwContinue  = "continue" KwEnd ;
             if (target == null) {
                 if (!isBuiltinTypeName(base)) { return }
                 target = builtinTable(base == "Character" ? "String" : base, true)
+                // A builtin's STATIC members (its own, and the static defaults of a
+                // protocol it conforms to) live on this table too, and its type value
+                // (Int, Double, ...) reaches them through __btab, as a program type's
+                // descriptor reaches its superclass's through __super. Twin of
+                // swLinkBuiltinDesc in swift-to-llvm-ir.abnf.
+                if (mem.statMethods.length + mem.statComps.length + mem.statProps.length > 0
+                    || mem.inherits.length > 0) {
+                    if (!hasOwn(hostGlobals, base)) { hostGlobals[base] = {} }
+                    hostGlobals[base].__btab = target
+                }
             }
             installMembers(target, mem)
             // Extension-declared stored fields do not exist in Swift, but a
@@ -8290,7 +8384,8 @@ KwContinue  = "continue" KwEnd ;
     }
     function isTypeVal(v) {
         return v != undefined && v !== null && typeof v == "object"
-               && (v.__isclass === true || v.__isenum === true || v.__isprotocol === true)
+               && (v.__isclass === true || v.__isenum === true || v.__isprotocol === true
+                   || v.__btab != undefined)
     }
     // The type this name means LEXICALLY: a nested type of the enclosing type, then of
     // the type that encloses THAT, and so on. The enclosing type of the running member
@@ -8661,12 +8756,7 @@ KwContinue  = "continue" KwEnd ;
         while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
         var lt = t.indexOf("<")
         if (lt > 0 && t.charAt(t.length - 1) == ">") { t = t.substring(0, lt) }
-        if (t.length == 0) { return "" }
-        for (var i = 0; i < t.length; i++) {
-            var ch = t.charAt(i)
-            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return "" }
-        }
-        return t
+        return swIsPlainId(t) ? t : ""
     }
     // Enum case equality: the case NAME plus the associated values, so a leading-dot
     // case and a qualified one of the same enum compare equal.
@@ -8717,6 +8807,12 @@ KwContinue  = "continue" KwEnd ;
             if (!swWhole(l) || !swWhole(r)) { return false }
             return szEq(l, r)
         }
+        // A Set meets an Array only where the array is a LITERAL its context typed
+        // as a Set (`[ss].contains([1])`, `ss == [1, 2]`): Swift has no Set-to-Array
+        // ==, so the array compares as the Set it denotes. Twins: swEqualDepth in
+        // abnf/jsrtswift.go and swEqual in lib/swift-rt.metajs.
+        if (swIsSet(l) && Array.isArray(r)) { return swEqD(l, swSetOf(r), depth + 1) }
+        if (Array.isArray(l) && swIsSet(r)) { return swEqD(swSetOf(l), r, depth + 1) }
         if (Array.isArray(l) || Array.isArray(r)) {
             if (!Array.isArray(l) || !Array.isArray(r) || l.length != r.length) { return false }
             for (var i = 0; i < l.length; i++) { if (!swEqD(l[i], r[i], depth + 1)) { return false } }
@@ -9047,6 +9143,18 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < els.length; i++) { if (swEq(els[i], v)) { return i } }
         return -1
     }
+    // `let a: [Set<Int>] = [[1], [2, 3]]`: an Array OF Sets, so each element literal
+    // is made a Set. Twin of swIsSetArrTy / rtSetArr in swift-to-llvm-ir.abnf.
+    function swIsSetArrTy(t) {
+        if (t.length < 3 || t.charAt(0) != "[" || t.charAt(t.length - 1) != "]") { return false }
+        var inner = t.substring(1, t.length - 1)
+        return (inner == "Set" || inner.charAt(inner.length - 1) == ">") && swIsSetTy(inner)
+    }
+    function swSetArr(a) {
+        var out = []
+        for (var i = 0; i < a.length; i++) { out.push(swSetOf(a[i])) }
+        return out
+    }
     function swSetAdd(els, v) {
         if (swSetIdx(els, v) >= 0) { return false }
         els.push(v)
@@ -9198,6 +9306,12 @@ KwContinue  = "continue" KwEnd ;
             // The unqualified form of the same rule mcall applies to `self.m()`.
             var pfn = protoStatic(name)
             if (pfn != null) { return {v: bindSelf(pfn, self)} }
+            // Inside a static method self is the type descriptor, and an unqualified
+            // `s()` is `Self.s()`: the static, inherited or not, with that receiver.
+            if (isTypeVal(self)) {
+                var sfn = findAccessor(self, "__static_" + name)
+                if (sfn != null) { return {v: bindSelf(sfn, self)} }
+            }
             var mm = self.__class == undefined ? null : classFind(self.__class, name)
             if (typeof mm == "function") { return {v: bindSelf(mm, self)} }
             // `extension Int: P { ... }` conforms a BUILTIN, so the receiver of a

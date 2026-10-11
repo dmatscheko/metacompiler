@@ -3507,7 +3507,10 @@ KwContinue  = "continue" KwEnd ;
             var c3 = curF.NewBlock("")
             b.NewCondBr(truthy(b, b.NewCall(rtProbe("sw_isclass", "__isclass"), [v])), yesB, c2)
             c2.NewCondBr(truthy(c2, c2.NewCall(rtProbe("sw_isenum", "__isenum"), [v])), yesB, c3)
-            c3.NewCondBr(truthy(c3, c3.NewCall(rtProbe("sw_isproto", "__isprotocol"), [v])), yesB, noB)
+            var c4 = curF.NewBlock("")
+            c3.NewCondBr(truthy(c3, c3.NewCall(rtProbe("sw_isproto", "__isprotocol"), [v])), yesB, c4)
+            // A builtin's type value once an extension gave it statics (swLinkBuiltinDesc).
+            c4.NewCondBr(truthy(c4, c4.NewCall(rtProbe("sw_isbtype", "__btype"), [v])), yesB, noB)
             yesB.NewRet(hTrue)
             noB.NewRet(hFalse)
         })
@@ -4632,20 +4635,20 @@ KwContinue  = "continue" KwEnd ;
             oneB.NewRet(emitNum(oneB, 1))
         })
     }
-    // Finds a subscript accessor on the value's type (an instance uses its __class, a
-    // type descriptor its own __static_ entry), or undefined.
+    // Finds a subscript accessor on the value's type, declared or inherited (an
+    // instance walks from its __class, a type value from its own __static_ entry),
+    // or undefined. Twin of subAccessor in swift-interpreter.abnf.
     function rtSubLookup() {
         return rtFunc("sw_sublookup", 2, function(b, ps) {
             var cls = b.NewCall(rtClassOf(), [ps[0]])
             var instB = curF.NewBlock("")
             var statB = curF.NewBlock("")
             b.NewCondBr(truthy(b, cls), instB, statB)
-            instB.NewRet(callExt(instB, "js_get", [cls, ps[1]]))
-            var isDesc = b.NewCall(rtProbe("sw_isclass", "__isclass"), [ps[0]])
+            instB.NewRet(instB.NewCall(rtFindM(), [ps[0], ps[1]]))
             var descB = curF.NewBlock("")
             var noB = curF.NewBlock("")
-            statB.NewCondBr(truthy(statB, isDesc), descB, noB)
-            descB.NewRet(callExt(descB, "js_get", [ps[0], callExt(descB, "js_jadd", [emitStr(descB, "__static_"), ps[1]])]))
+            statB.NewCondBr(truthy(statB, statB.NewCall(rtIsTypeVal(), [ps[0]])), descB, noB)
+            descB.NewRet(descB.NewCall(rtFindStat(), [ps[0], callExt(descB, "js_jadd", [emitStr(descB, "__static_"), ps[1]])]))
             noB.NewRet(hUndef)
         })
     }
@@ -5135,7 +5138,62 @@ KwContinue  = "continue" KwEnd ;
             return callExt(b, "js_swget", [cur, emitStr(b, name)])
         }
         if (name == "lazy") { return b.NewCall(rtLazy(), [cur]) }
+        if (hasOwn(swStatMeths, "$" + name)) { return b.NewCall(rtStatRef(), [cur, emitStr(b, name)]) }
         return callExt(b, "js_get", [cur, emitStr(b, name)])
+    }
+    // `Q.make` unapplied: a static method a type descriptor declares or inherits, as
+    // a function value bound to that descriptor; any other value's member is a plain
+    // read. Twin of the static arm of swGetField in swift-interpreter.abnf.
+    var swStatMeths = {}
+    function rtStatRef() {
+        return rtFunc("sw_statref", 2, function(b, ps) {
+            var fV = b.NewCall(rtFindStat(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__static_"), ps[1]])])
+            var hitB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [b.NewCall(rtClassOf(), [ps[0]]), hUndef])), hitB, missB)
+            var bindB = curF.NewBlock("")
+            hitB.NewCondBr(truthy(hitB, fV), bindB, missB)
+            var sc = callExt(bindB, "js_scope_new", [handle(0)])
+            callExt(bindB, "js_scope_decl", [sc, emitStr(bindB, "$r"), ps[0]])
+            callExt(bindB, "js_scope_decl", [sc, emitStr(bindB, "$f"), fV])
+            bindB.NewRet(callExt(bindB, "js_closure", [handle(swStatRefFn()), sc]))
+            missB.NewRet(callExt(missB, "js_get", [ps[0], ps[1]]))
+        })
+    }
+    // type(of: v): a value of a program type answers its type DESCRIPTOR (an enum
+    // case's member table leads back to it through __desc), which prints as the
+    // name and answers the type's static members; a builtin answers its name. Twin
+    // of hostGlobals["type"] in swift-interpreter.abnf.
+    function rtTypeOfVal() {
+        return rtFunc("sw_typeofval", 1, function(b, ps) {
+            var cls = b.NewCall(rtClassOf(), [ps[0]])
+            var instB = curF.NewBlock("")
+            var nameB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, cls), instB, nameB)
+            var dsc = instB.NewCall(rtSafeGet(), [cls, emitStr(instB, "__desc")])
+            var enumB = curF.NewBlock("")
+            var ownB = curF.NewBlock("")
+            instB.NewCondBr(truthy(instB, dsc), enumB, ownB)
+            enumB.NewRet(dsc)
+            ownB.NewRet(cls)
+            nameB.NewRet(callExt(nameB, "js_swtypeof", [ps[0]]))
+        })
+    }
+    // The bound function sw_statref hands out: $f called with $r prepended.
+    var swStatRefIdx = 0
+    function swStatRefFn() {
+        if (swStatRefIdx > 0) { return swStatRefIdx }
+        funcCount++
+        swStatRefIdx = funcCount
+        var f = m.NewFunc("jsf_" + swStatRefIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        curF = f
+        var b = f.NewBlock("entry")
+        var rV = callExt(b, "js_scope_get", [f.Params[0], emitStr(b, "$r")])
+        var fnV = callExt(b, "js_scope_get", [f.Params[0], emitStr(b, "$f")])
+        b.NewRet(b.NewCall(rtPrependCall(), [rV, fnV, f.Params[1]]))
+        curF = savedF
+        return swStatRefIdx
     }
     function emitIndexRead(b, cur, idxV) {
         if (!hasSubscript) { return callExt(b, core.indexExt, [cur, idxV]) }
@@ -5378,11 +5436,16 @@ KwContinue  = "continue" KwEnd ;
                     b = ea0.b
                     var mkeyV = emitStr(b, s0.name)
                     if (s0.name == "init") { mkeyV = emitOverloadKey(b, "init", superRec(sname) == null ? [] : superRec(sname).inits, s0.args, sargs, 1) }
-                    cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, mkeyV]), hUndef, sargs])
+                    // In a class method, super.m() is the superclass's static m,
+                    // declared there or further up.
+                    if (swStatCtx) { cur = callExt(b, "js_call", [b.NewCall(rtFindStat(), [sV, emitStr(b, "__static_" + s0.name)]), hUndef, sargs]) }
+                    else { cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, mkeyV]), hUndef, sargs]) }
                 } else {
                     var gargs = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [gargs, thisV])
-                    if (isComputedName(s0.name)) {
+                    if (swStatCtx) {
+                        cur = callExt(b, "js_call", [b.NewCall(rtFindStat(), [sV, emitStr(b, "__get_" + s0.name)]), hUndef, gargs])
+                    } else if (isComputedName(s0.name)) {
                         cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, emitStr(b, "__get_" + s0.name)]), hUndef, gargs])
                     } else if (false) {} else {
                         cur = callExt(b, "js_get", [thisV, emitStr(b, s0.name)])
@@ -5563,6 +5626,9 @@ KwContinue  = "continue" KwEnd ;
                     callExt(b, "js_arr_push", [kargs, cur])
                     cur = callExt(b, "js_call", [rkp.v, hUndef, kargs])
                     pathKey = null
+                } else if (s.kind == "field" && s.name == "self") {
+                    // `T.self` is the type itself (its descriptor) and `x.self` the
+                    // value: the postfix self expression is the identity.
                 } else if (s.kind == "field") {
                     // `A.B.C(...)`: the intermediate `.B` is a plain member read of a
                     // nested descriptor, so the qualified path advances through it.
@@ -5898,8 +5964,12 @@ KwContinue  = "continue" KwEnd ;
         // declines every annotation with no adoptable leaf in it, so a `[String]`
         // parameter emits no call.
         var ad = (!isVar && swAdoptNeeded(type)) ? type : ""
+        // A `Set<T>` parameter makes its argument a Set, as a `Set<T>` declaration
+        // makes its initializer one: `f([1, 1, 2])` binds a two-member Set. An
+        // Optional one keeps its nil.
         return {name: name, label: label, type: type, adopt: ad, variadic: isVar, auto: isAuto,
-                inout: isInout, hasDefault: hasDflt, dflt: dflt}
+                inout: isInout, hasDefault: hasDflt, dflt: dflt,
+                isSet: !isVar && !isInout && swIsSetTy(type) && type.charAt(type.length - 1) != "?"}
     }
     function pName(p) { return (typeof p == "string") ? p : p.name }
     function makeCallArg(items) {
@@ -6069,7 +6139,7 @@ KwContinue  = "continue" KwEnd ;
             var tyT = args[0].t
             return function(b) {
                 var rt3 = tyT(b)
-                return {b: rt3.b, v: callExt(rt3.b, "js_swtypeof", [rt3.v])}
+                return {b: rt3.b, v: rt3.b.NewCall(rtTypeOfVal(), [rt3.v])}
             }
         }
         // Int(x) / Int8(x) / UInt64(x): the integer types are descriptors, not
@@ -6228,7 +6298,9 @@ KwContinue  = "continue" KwEnd ;
                     var sbt = selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "$ext$" + builtinMethOf(name))])
                     sv = callExt(selfB, "js_swextcall", [selfRV, emitStr(selfB, name), ea.v, sbt])
                 } else {
-                    sv = callExt(selfB, "js_mcall", [selfRV, emitStr(selfB, name), ea.v])
+                    // In a static member self is a descriptor, whose methods only
+                    // js_swmcall's static arm finds.
+                    sv = callExt(selfB, swStatCtx ? "js_swmcall" : "js_mcall", [selfRV, emitStr(selfB, name), ea.v])
                 }
                 selfB.NewBr(joinB)
                 // The phi first: a block's phis must lead it, and the write-backs emit calls.
@@ -6973,6 +7045,7 @@ KwContinue  = "continue" KwEnd ;
         if (k == 1 && items[2] != undefined) { annTxt = swExprAnn(items[2].itext) }
         swNoteLocalAnn(name, annTxt)
         var init = swDotWant(items[k], items[k + 1], annTxt)
+        if (init != undefined && swIsSetArrTy(annTxt)) { init = swSetArrInit(init) }
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
         // annotation carries its numeric leaves down, so a[0] / 2 is 1.5.
         if (elemTy != "" && init != undefined) {
@@ -7354,15 +7427,56 @@ KwContinue  = "continue" KwEnd ;
 
     function paramName(items) { return items[items.length - 1] }
 
+    // A generic parameter that a METATYPE parameter names (`func z<X: P>(_ t: X.Type)`)
+    // is a value in the body - `X.zz` reads the static zz of the type t holds - so it
+    // is bound to that argument. A name that is a declared type stays the type
+    // itself (`_ t: Base.Type` handed a subclass must not rebind Base). Answers
+    // [{tp, name}], the first metatype parameter of each generic name. Twin of
+    // swMetaTypeParams in swift-interpreter.abnf.
+    function swMetaTypeParams(params) {
+        var out = []
+        var seen = {}
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (typeof p == "string" || p.variadic || p.type == undefined) { continue }
+            var t = p.type
+            while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
+            if (t.length < 6 || t.substring(t.length - 5) != ".Type") { continue }
+            var tp = t.substring(0, t.length - 5)
+            if (!swIsPlainId(tp) || tp == "Self" || isTypeName(tp) || isBuiltinTypeName(tp)
+                || hasOwn(swAliasReg, "$" + tp) || hasOwn(seen, "$" + tp)) { continue }
+            seen["$" + tp] = true
+            out.push({tp: tp, name: p.name})
+        }
+        return out
+    }
+    function swIsPlainId(s) {
+        if (s.length == 0) { return false }
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return false }
+        }
+        return true
+    }
+    // True while a static member's body is emitted with the type descriptor as its
+    // receiver: an unqualified method call and `super.m()` then reach the STATIC
+    // members of that descriptor.
+    // emitFunc takes it from swStatNext for every receiver function (an instance
+    // member resets it), and a closure inherits its enclosing function's.
+    var swStatCtx = false
+    var swStatNext = false
+    function emitStatFunc(params, body, isRecv, rlabels, rtype, selfName) {
+        swStatNext = isRecv
+        return emitFunc(params, body, isRecv, false, rlabels, rtype, selfName)
+    }
     // Every user function/method/init/closure becomes jsf_N(env, args). Instance
     // functions bind arg 0 to both this and self so implicit property access works.
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
-    // selfName, when given, is the SCOPE NAME of the type descriptor a STATIC method
-    // stands in. Swift lets a static method read the type's own static members
-    // unqualified (`static func f() { return s + 1 }`), and sw_kget answers an
-    // unqualified name from `this` - but a static has no `this` of its own, so the
-    // descriptor is bound for it.
+    // selfName, when given, is the SCOPE NAME of the type descriptor a static member
+    // that takes no receiver (an operator, a stored static's initializer) stands in.
+    // Swift lets it read the type's own static members unqualified, and sw_kget
+    // answers an unqualified name from `this` - so the descriptor is bound for it.
     function emitFunc(params, body, isInstance, isCtl, rlabels, rtype, selfName) {
         funcCount++
         var idx = funcCount
@@ -7371,6 +7485,9 @@ KwContinue  = "continue" KwEnd ;
         var savedScope = curScopeV
         var savedLoops = loopStack
         var savedTag = curFTag
+        var savedStat = swStatCtx
+        if (isInstance) { swStatCtx = swStatNext }
+        swStatNext = false
         curF = f
         curFTag = idx
         loopStack = []
@@ -7453,7 +7570,13 @@ KwContinue  = "continue" KwEnd ;
             // called g(3) binds 3.0, so `x / 2` is 1.5, not an Int division's 1.
             // The memberwise initializer is emitted through here too, which is
             // how `T(a: 3)` fills a `var a: Double` field.
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), swEmitAdopt(b, av, prm.adopt)])
+            var pv = swEmitAdopt(b, av, prm.adopt)
+            if (prm.isSet) { pv = emitSetOf(b, pv) }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, prm.name), pv])
+        }
+        var mtps = swMetaTypeParams(params)
+        for (var mt = 0; mt < mtps.length; mt++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mtps[mt].tp), b.NewCall(rtKGet(), [curScopeV, emitStr(b, mtps[mt].name)])])
         }
         inoutStack.push(inouts)
         var endB = body(b)
@@ -7467,6 +7590,7 @@ KwContinue  = "continue" KwEnd ;
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        swStatCtx = savedStat
         return idx
     }
     // The default-property initializer: sets the properties that have a default
@@ -8030,7 +8154,10 @@ KwContinue  = "continue" KwEnd ;
             } else if (it.method != undefined) {
                 memberMethods["$" + it.method.name] = 1
                 if (isStatic && isOperatorName(it.method.name)) { hasOpOverload = true }
-                if (isStatic) { mem.statMethods.push(it.method) } else {
+                if (isStatic) {
+                    mem.statMethods.push(it.method)
+                    if (!isOperatorName(it.method.name)) { swStatMeths["$" + it.method.name] = 1 }
+                } else {
                     mem.methods.push(it.method)
                     if (it.method.name == "init") { mem.hasInit = true }
                 }
@@ -8448,12 +8575,9 @@ KwContinue  = "continue" KwEnd ;
         for (var i = 0; i < names.length; i++) {
             var lst = cands["$" + names[i]]
             if (lst.length < 2) { continue }
-            // A STATIC SUBSCRIPT is the one static reached with a receiver: sw_subget
-            // pushes the type descriptor at args[0] exactly as it does an instance,
-            // so its dispatcher counts from 1 while every other static counts from 0
-            // (with 0 the arity test `nargs <= P.length + off` would reject EVERY
-            // candidate and the fallback would run the first).
-            var noff = names[i].slice(0, 15) == "__static___sub_" ? 1 : aoff
+            // A static OPERATOR is the one member called without a receiver, so its
+            // dispatcher counts the operands from 0.
+            var noff = isOperatorName(names[i]) ? 0 : aoff
             // The alias is taken ONCE per group. On a later `extension T` pass the
             // plain name already holds the previous dispatcher, and copying that into
             // name$0 would bury candidate 0 behind an infinite indirection.
@@ -8570,35 +8694,35 @@ KwContinue  = "continue" KwEnd ;
         for (var wp = 0; wp < mem.wrapped.length; wp++) { b = emitWrapped(b, tblV, mem.wrapped[wp]) }
         for (var sm = 0; sm < mem.statMethods.length; sm++) {
             var st = mem.statMethods[sm]
-            // A static subscript is reached through the same [i] path as an instance
-            // one, which passes the receiver first, so it is emitted as an instance
-            // function whose `this` is the type descriptor.
-            var sidx = emitFunc(st.params, st.body, st.name.slice(0, 6) == "__sub_", false, st.rlabels, st.rtype, statSelfName(tname))
-            var skey = st.name.slice(0, 6) == "__sub_" ? "__static_" + st.name : st.name
-            if (isOperatorName(st.name)) { skey = st.name }
+            // A static method (a static subscript included) is stored as
+            // __static_<name> and called with the type descriptor it was REACHED
+            // through as its receiver, as an instance method gets its instance:
+            // `R.f()` runs Q's inherited `class func f` with self == R. js_swmcall
+            // finds it on a descriptor through __super. An operator stays a plain
+            // two-operand function under its own name, found through its operands.
+            var isOp = isOperatorName(st.name)
+            var sidx = emitStatFunc(st.params, st.body, !isOp, st.rlabels, st.rtype, isOp ? statSelfName(tname) : "")
+            var skey = isOp ? st.name : "__static_" + st.name
             // Two `static func g` of the same name are an OVERLOAD exactly as two
             // instance methods are (a bare-name slot would keep only the LAST of them).
-            // The instance machinery transfers
-            // whole, at ARGUMENT OFFSET 0: memberCall passes a receiver only when the
-            // target has a __class, and a type descriptor has none.
             var sn = ovNext(tname, true, skey)
             callExt(b, "js_set", [statV, emitStr(b, memberKey(skey, sn)),
                                   callExt(b, "js_closure", [handle(sidx), curScopeV])])
             noteOverload(statNames, statCands, skey, sn, st.params, tname, true)
         }
-        b = emitOverloadSlots(b, statV, statNames, statCands, 0, tname, true)
+        b = emitOverloadSlots(b, statV, statNames, statCands, 1, tname, true)
         // A static accessor reads the type's other statics unqualified, as a static
-        // method does; sw_setprop passes the receiver first, so a setter is emitted
-        // as an instance function whose `this` is the descriptor.
+        // method does; sw_getprop and sw_setprop pass the descriptor first, so both
+        // are receiver functions too.
         for (var sc = 0; sc < mem.statComps.length; sc++) {
             var sp = mem.statComps[sc]
             if (sp.get != null) {
                 callExt(b, "js_set", [statV, emitStr(b, "__get_" + sp.name),
-                                      callExt(b, "js_closure", [handle(emitFunc([], sp.get, false, false, undefined, undefined, statSelfName(tname))), curScopeV])])
+                                      callExt(b, "js_closure", [handle(emitStatFunc([], sp.get, true)), curScopeV])])
             }
             if (sp.set != null) {
                 callExt(b, "js_set", [statV, emitStr(b, "__set_" + sp.name),
-                                      callExt(b, "js_closure", [handle(emitFunc([plainParam(sp.setP)], sp.set, true)), curScopeV])])
+                                      callExt(b, "js_closure", [handle(emitStatFunc([plainParam(sp.setP)], sp.set, true)), curScopeV])])
             }
         }
         // A nested type is installed on the enclosing descriptor, and read back under
@@ -8921,6 +9045,23 @@ KwContinue  = "continue" KwEnd ;
     // The one member table an `extension Int`/`extension String` hangs its members
     // on, made on the first such block and looked up by every later one.
     var builtinExtTbl = {}
+    // A builtin's STATIC members (its own, and the static defaults of a protocol it
+    // conforms to) live on its $ext$ table, and its type value reaches them through
+    // __super, as a program type's descriptor reaches its superclass's: `Int.zz`,
+    // `Int.make()`. Int..UInt64, Double and Float already have a descriptor; any
+    // other builtin gets one here. Twin of __btab in swift-interpreter.abnf.
+    var builtinDescs = {}
+    function swLinkBuiltinDesc(b, base, tV) {
+        var dV
+        if (swIntWidthOf(base) != null || base == "Double" || base == "Float") {
+            dV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, base)])
+        } else {
+            dV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, base), dV])
+        }
+        callExt(b, "js_set", [dV, emitStr(b, "__super"), tV])
+        callExt(b, "js_set", [dV, emitStr(b, "__btype"), hTrue])
+    }
     function extTable(b, base, firstBlock) {
         if (!firstBlock) { return b.NewCall(rtKGet(), [curScopeV, emitStr(b, "$ext$" + base)]) }
         var tV = callExt(b, "js_obj_new", [])
@@ -8952,20 +9093,23 @@ KwContinue  = "continue" KwEnd ;
     // The recursion is what makes a later `extension A1 { func a() }` reach a type
     // that conforms to `protocol C1: A1`: the parent's extension puts the member on
     // the PARENT's table. (The interpreter's adoptProtocol recurses the same way.)
-    function emitAdoptProtocol(b, clsV, pn) { return emitAdoptProtocolD(b, clsV, pn, 0) }
-    function emitAdoptProtocolD(b, clsV, pn, d) {
+    // statV is where the type keeps its STATIC members (an enum's descriptor, not its
+    // member table); the default's __static_ keys go there.
+    function emitAdoptProtocol(b, clsV, pn, statV) { return emitAdoptProtocolD(b, clsV, statV == undefined ? clsV : statV, pn, 0) }
+    function emitAdoptProtocolD(b, clsV, statV, pn, d) {
         if (d > 16) { return b }
         var ps0 = protoParentsOf(pn)
-        for (var q0 = 0; q0 < ps0.length; q0++) { b = emitAdoptProtocolD(b, clsV, ps0[q0], d + 1) }
+        for (var q0 = 0; q0 < ps0.length; q0++) { b = emitAdoptProtocolD(b, clsV, statV, ps0[q0], d + 1) }
         var keys = protoMembers["$" + pn]
         if (keys == undefined) { return b }
         var pv = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(pn))])
         for (var i = 0; i < keys.length; i++) {
-            var have = callExt(b, "js_get", [clsV, emitStr(b, keys[i])])
+            var toV = keys[i].slice(0, 9) == "__static_" ? statV : clsV
+            var have = callExt(b, "js_get", [toV, emitStr(b, keys[i])])
             var setB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
             b.NewCondBr(truthy(b, have), joinB, setB)
-            callExt(setB, "js_set", [clsV, emitStr(setB, keys[i]), callExt(setB, "js_get", [pv, emitStr(setB, keys[i])])])
+            callExt(setB, "js_set", [toV, emitStr(setB, keys[i]), callExt(setB, "js_get", [pv, emitStr(setB, keys[i])])])
             setB.NewBr(joinB)
             b = joinB
         }
@@ -9060,6 +9204,9 @@ KwContinue  = "continue" KwEnd ;
     function noteProtoKeys(pn, mem) {
         var ks = protoKeys(pn)
         for (var i = 0; i < mem.methods.length; i++) { ks.push(mem.methods[i].name) }
+        for (var si = 0; si < mem.statMethods.length; si++) {
+            if (!isOperatorName(mem.statMethods[si].name)) { ks.push("__static_" + mem.statMethods[si].name) }
+        }
         for (var j = 0; j < mem.comps.length; j++) {
             if (mem.comps[j].get != null || mem.comps[j].observed) { ks.push("__get_" + mem.comps[j].name) }
             if (mem.comps[j].set != null || mem.comps[j].observed) { ks.push("__set_" + mem.comps[j].name) }
@@ -9187,8 +9334,12 @@ KwContinue  = "continue" KwEnd ;
             // reachable from every use site.
             var firstBlock = !hasOwn(builtinExtTbl, "$" + base)
             builtinExtTbl["$" + base] = 1
+            var linkDesc = (mem.statMethods.length + mem.statComps.length + mem.statProps.length > 0
+                            || mem.inherits.length > 0) && !hasOwn(builtinDescs, "$" + base)
+            if (linkDesc) { builtinDescs["$" + base] = 1 }
             return function(b) {
                 var tV = extTable(b, base, firstBlock)
+                if (linkDesc) { swLinkBuiltinDesc(b, base, tV) }
                 typeStack.push({name: base, key: rec.key, superName: null})
                 b = emitExtMembers(b, tV, tV, mem, rec.key, initIdxs)
                 for (var bq = 0; bq < bprotos.length; bq++) { b = emitAdoptProtocol(b, tV, bprotos[bq]) }
@@ -9214,7 +9365,7 @@ KwContinue  = "continue" KwEnd ;
             for (var pi = 0; pi < mem.inherits.length; pi++) {
                 var pn = baseTypeName(mem.inherits[pi])
                 if (protoNames[pn] != 1) { continue }
-                b = emitAdoptProtocol(b, instV, pn)
+                b = emitAdoptProtocol(b, instV, pn, tV)
                 emitConfMark(b, instV, pn)
             }
             typeStack.pop()
@@ -9399,7 +9550,7 @@ KwContinue  = "continue" KwEnd ;
             for (var pi = 0; pi < eInh.length; pi++) {
                 var pn = baseTypeName(eInh[pi])
                 if (protoNames[pn] != 1) { continue }
-                b = emitAdoptProtocol(b, tblV, pn)
+                b = emitAdoptProtocol(b, tblV, pn, eV)
                 emitConfMark(b, tblV, pn)
             }
             b = emitInstallMembers(b, tblV, eV, mem, rec.key, true)
@@ -9564,12 +9715,7 @@ KwContinue  = "continue" KwEnd ;
         while (t.length > 0 && (t.charAt(t.length - 1) == "?" || t.charAt(t.length - 1) == "!")) { t = t.substring(0, t.length - 1) }
         var lt = t.indexOf("<")
         if (lt > 0 && t.charAt(t.length - 1) == ">") { t = t.substring(0, lt) }
-        if (t.length == 0) { return "" }
-        for (var i = 0; i < t.length; i++) {
-            var ch = t.charAt(i)
-            if (!(ch == "_" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (i > 0 && ch >= "0" && ch <= "9"))) { return "" }
-        }
-        return t
+        return swIsPlainId(t) ? t : ""
     }
     var swDotRets = []
     function swDotPend(t, rec, pos) {
@@ -9843,6 +9989,37 @@ KwContinue  = "continue" KwEnd ;
             var r = t(b)
             return {b: r.b, v: emitSetOf(r.b, r.v)}
         }
+    }
+    // `let a: [Set<Int>] = [[1], [2, 3]]`: an Array OF Sets, so each element literal
+    // is made a Set. Twin of swIsSetArrTy in swift-interpreter.abnf.
+    function swIsSetArrTy(t) {
+        if (t.length < 3 || t.charAt(0) != "[" || t.charAt(t.length - 1) != "]") { return false }
+        var inner = t.substring(1, t.length - 1)
+        return (inner == "Set" || inner.charAt(inner.length - 1) == ">") && swIsSetTy(inner)
+    }
+    function swSetArrInit(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: r.b.NewCall(rtSetArr(), [r.v])}
+        }
+    }
+    function rtSetArr() {
+        return rtFunc("sw_setarr", 1, function(b, ps) {
+            var out = callExt(b, "js_arr_new", [])
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+            var lenV = callExt(b, "js_pylen", [ps[0]])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
+            callExt(bodyB, "js_arr_push", [out, emitSetOf(bodyB, callExt(bodyB, "js_swidx", [ps[0], iV]))])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(out)
+        })
     }
     // ~= : containment when the left side is a range, == otherwise.
     function rtRangeHas() {

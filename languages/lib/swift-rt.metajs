@@ -930,7 +930,13 @@ function swEqual(l, r, depth) {
         return l === r
     }
     if (rtIsArr(l)) {
-        if (!rtIsArr(r)) { return false }
+        if (!rtIsArr(r)) {
+            // A Set meets an Array only where the array is a LITERAL its context
+            // typed as a Set (`[ss].contains([1])`): it compares as that Set. Twin
+            // of swEqualDepth in abnf/jsrtswift.go.
+            if (swIsObj(r) && r["__set"] === true) { return swEqual(js_swsetof(l), r, depth + 1) }
+            return false
+        }
         if (l.length !== r.length) { return false }
         var i = 0
         while (i < l.length) {
@@ -992,7 +998,10 @@ function swEqual(l, r, depth) {
         }
         // Two Sets are equal when they hold the same members, in any order.
         if (l["__set"] === true) {
-            if (r["__set"] !== true) { return false }
+            if (r["__set"] !== true) {
+                if (rtIsArr(r)) { return swEqual(l, js_swsetof(r), depth + 1) }
+                return false
+            }
             if (l["elems"].length !== r["elems"].length) { return false }
             return swSetSel(l["elems"], r["elems"], false).length == 0
         }
@@ -1494,6 +1503,10 @@ function js_mcall(recv, name, args) {
             if (typeof fld == "function") { return fld.apply(undefined, args) }
             fail("unknown method '" + name + "' on an instance")
         }
+        // A type descriptor's static method, declared or inherited, takes the
+        // descriptor as its receiver. Twin of swStaticFn in abnf/jsrtswift.go.
+        var sf = rtFindMethod(recv, "__static_" + name)
+        if (typeof sf == "function") { return sf.apply(undefined, rtPrepend(recv, args)) }
         var f = recv[name]
         if (typeof f == "function") { return f.apply(undefined, args) }
         fail("unknown method '" + name + "'")

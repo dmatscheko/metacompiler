@@ -1027,6 +1027,14 @@ func init() {
 						rt.fail("unknown Array method: %s", name)
 					}
 				}
+				if fn := swStaticFn(u(a[0]), rt.toString(u(a[1]))); fn != nil {
+					args, _ := u(a[2]).(*jsArray)
+					elems := []interface{}{u(a[0])}
+					if args != nil {
+						elems = append(elems, args.elems...)
+					}
+					return w(rt.call(fn, jsUndef, elems))
+				}
 				return baseMcall(a)
 			}
 			name := rt.toString(u(a[1]))
@@ -2196,6 +2204,29 @@ func swFieldFn(rt *jsrt, v interface{}, name string) interface{} {
 	return p
 }
 
+// swStaticFn answers the static method `name` a TYPE DESCRIPTOR (an object with
+// no __class) declares or inherits through __super, stored as __static_<name>.
+// It is called with the descriptor it was reached through as its receiver, so an
+// inherited `class func` sees the subclass as self. Twins: js_mcall in
+// languages/lib/swift-rt.metajs, mcall in languages/swift-interpreter.abnf.
+func swStaticFn(v interface{}, name string) interface{} {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil
+	}
+	if _, hasCls := o.props["__class"]; hasCls {
+		return nil
+	}
+	key := "__static_" + name
+	for c, n := o, 0; c != nil && n < 64; n++ {
+		if f, ok := c.props[key]; ok && isCallable(f) {
+			return f
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	return nil
+}
+
 func swNumProp(o *jsObject, key string) (int, bool) {
 	f, ok := o.props[key].(float64)
 	if !ok {
@@ -2357,9 +2388,24 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 	if giIsInt(l) || giIsInt(r) {
 		return rt.giEq(l, r)
 	}
+	// A Set meets an Array only where the array is a LITERAL its context typed as a
+	// Set (`[ss].contains([1])`, `ss == [1, 2]`): Swift has no Set-to-Array ==, so
+	// the array compares as the Set it denotes. Twins: swEqual in
+	// languages/lib/swift-rt.metajs, swEqD in languages/swift-interpreter.abnf.
+	if ra, ok := r.(*jsArray); ok {
+		if _, isSet := swSetElems(l); isSet {
+			return rt.swEqualDepth(l, rt.swSetOf(ra), depth+1)
+		}
+	}
 	if la, ok := l.(*jsArray); ok {
 		ra, ok := r.(*jsArray)
-		if !ok || len(la.elems) != len(ra.elems) {
+		if !ok {
+			if _, isSet := swSetElems(r); isSet {
+				return rt.swEqualDepth(rt.swSetOf(la), r, depth+1)
+			}
+			return false
+		}
+		if len(la.elems) != len(ra.elems) {
 			return false
 		}
 		for i := range la.elems {

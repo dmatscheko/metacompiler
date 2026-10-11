@@ -3525,6 +3525,107 @@ func s72() {
                   && xs.contains(y) && [[1], [2]].contains([2]) && [Int8(3)].contains(Int8(3)))
 }
 
+// ===== SECTION 73: static members reached through the type value =====
+// A static or class method takes the type value it was reached through as self,
+// so an inherited `class func` sees the subclass; an unqualified call and super.m()
+// inside one reach the statics. type(of:), T.self, a metatype parameter and an
+// unapplied Type.m are all that same type value, and a builtin's extension statics
+// are reached from Int itself.
+protocol Mk73 { static func mk() -> Int }
+extension Mk73 { static func twice() -> Int { return mk() * 2 } }
+class Q73: Mk73 {
+    static var k = 10
+    class var ck: Int { return 1 }
+    static func s() -> Int { return 1 }
+    class func f() -> Int { return self.k + ck }
+    class func g() -> Int { return s() + k }
+    class func who() -> String { return "Q" }
+    class func mk() -> Int { return 7 }
+    class func viaClosure() -> [Int] { return [1, 2].map { $0 + mk() } }
+    static subscript(i: Int) -> Int { return i * 10 }
+    static func ov(_ a: Int) -> String { return "int" }
+    static func ov(_ a: String) -> String { return "str" }
+    func viaSelf() -> Int { return Self.s() + type(of: self).ck }
+}
+class R73: Q73 {
+    override class var ck: Int { return 2 }
+    override class func who() -> String { return "R" }
+    override class func mk() -> Int { return 70 + super.mk() }
+    static func t() -> Int { return s() + 100 }
+}
+struct V73 { static func hi() -> String { return "static" }; func hi() -> String { return "inst" } }
+enum E73: Mk73 { case a; static func mk() -> Int { return 5 } }
+protocol Z73 { static var zz: Self { get } }
+extension Int: Z73 { static var zz: Int { return 99 } }
+extension Int { static func dbl73(_ x: Int) -> Int { return x * 2 } }
+func s73() {
+    check("stc1", R73.s() == 1 && R73.f() == 12 && Q73.f() == 11 && R73.g() == 11 && R73.t() == 101)
+    check("stc2", R73.who() == "R" && R73.mk() == 77 && R73.ov("x") == "str" && R73.ov(1) == "int")
+    let x: Q73 = R73()
+    check("stc3", type(of: x).who() == "R" && type(of: x).ck == 2 && x.viaSelf() == 3 && Q73().viaSelf() == 2)
+    let mt: Q73.Type = R73.self
+    let ms: [Mk73.Type] = [Q73.self, R73.self, E73.self]
+    var tot = 0
+    for m in ms { tot += m.mk() }
+    check("stc4", mt.who() == "R" && mt.f() == 12 && tot == 89 && R73.twice() == 154 && E73.twice() == 10)
+    let fn = V73.hi
+    check("stc5", fn() == "static" && V73().hi() == "inst" && Int.zz == 99 && Int.dbl73(4) == 8)
+    let made = [1, 2].map(Int.dbl73)
+    check("stc6", R73[4] == 40 && R73.viaClosure() == [78, 79] && made == [2, 4])
+}
+
+// ===== SECTION 74: a generic parameter as a type value =====
+// `X.zz74` inside `func f<X: P>(_ t: X.Type)` reads the static of whatever type t
+// holds, a builtin's included.
+protocol Z74 { static var zz74: Self { get } }
+extension Int: Z74 { static var zz74: Int { return 99 } }
+struct W74: Z74 { var v: Int; static var zz74: W74 { return W74(v: 98) } }
+func zeroOf74<X: Z74>(_ t: X.Type) -> X { return X.zz74 }
+func both74<X: Z74>(_ a: X.Type, _ b: X.Type) -> [X] { return [X.zz74, b.zz74] }
+func s74() {
+    check("tpv1", zeroOf74(Int.self) == 99 && zeroOf74(W74.self).v == 98)
+    check("tpv2", both74(Int.self, Int.self) == [99, 99] && both74(W74.self, W74.self)[1].v == 98)
+}
+
+// ===== SECTION 75: an array literal typed as a Set by its context =====
+// The element type of `[ss]`, a Set<Int> parameter and an [Set<Int>] annotation
+// make an array literal a Set, so it compares as one.
+func count75(_ s: Set<Int>) -> Int { return s.count }
+func s75() {
+    let ss: Set<Int> = [1, 2]
+    check("sbc1", [ss].contains([1]) == false && [ss].contains([2, 1]) && ss == [2, 1] && [2, 1, 1] == ss)
+    check("sbc2", ([ss].firstIndex(of: [1, 2]) ?? -1) == 0 && count75([1, 1, 2]) == 2)
+    let arr: [Set<Int>] = [[1], [2, 3]]
+    check("sbc3", arr.contains([3, 2]) && !arr.contains([4]) && arr[1].count == 2)
+}
+
+// ===== SECTION 76: a field write on a type that has a subscript =====
+// `m.x += 2` and `T.n += 1` write the PROPERTY, never the type's subscript.
+struct M76 {
+    var x = 1
+    var store = [0, 0]
+    subscript(i: Int) -> Int {
+        get { return store[i] }
+        set { store[i] = newValue }
+    }
+}
+class C76 {
+    static var n = 0
+    static subscript(i: Int) -> Int { return i * 10 }
+    static func bump() -> Int { Self.n += 1; n += 1; return n }
+}
+func s76() {
+    var m = M76()
+    m.x = 5
+    m.x += 2
+    m[1] = 9
+    m[1] += 1
+    check("fws1", m.x == 7 && m.store == [0, 10])
+    C76.n += 3
+    C76.n = C76.n + 1
+    check("fws2", C76.n == 4 && C76.bump() == 6 && C76[2] == 20)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3598,6 +3699,10 @@ func main() {
     s70() // SECTION-CALL 70
     s71() // SECTION-CALL 71
     s72() // SECTION-CALL 72
+    s73() // SECTION-CALL 73
+    s74() // SECTION-CALL 74
+    s75() // SECTION-CALL 75
+    s76() // SECTION-CALL 76
     print("full: \(checks) checks, \(fails) failures")
 }
 
