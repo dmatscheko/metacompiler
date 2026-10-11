@@ -317,33 +317,33 @@ The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
 a measurement against a dead-code matched control (tests/bench.sh header). Never
 introduce a delegating wrapper on a hot path: that cost python +41% once.
 
-### T-284 full case mapping (`"ß".upper()` is `SS`) · P2 · CORE · OPEN [V]
+### T-284 full case mapping (`"ß".upper()` is `SS`) · P2 · CORE · IN PROGRESS (CORE worker, round 5) [V]
 Hosts, Go twins and the floor implement the simple per-rune mapping. Full mapping
 (SpecialCasing + Final_Sigma) natively in C, then per language: python/ruby/swift/
 kotlin/java/js want full, C#/Go want simple. metajs cm03-cm05 and cm08 assert the
 simple answer node contradicts - correct them with the change.
 
-### T-285 -frozen js memory, remainder · P3 · CORE · OPEN [V]
+### T-285 -frozen js memory, remainder · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
 js-test-full.js part 1 under -frozen still needs 5.3 GB: a released handle-table slot
 is never reused (by design, so a failed analysis fails loudly), and InGen rescans the
 whole prefix per call. Decide slot reuse, or make InGen incremental.
 
-### T-286 -callgraph: a definition's line in the other languages · P3 · CORE · OPEN [V]
+### T-286 -callgraph: a definition's line in the other languages · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
 js, ts, metajs, java, kotlin, go, lua and the rest still name a definition by its
 body's line: their markers are `up.pos`, the END of the node. Needs the engine to
 expose a tag's start position (`up.start`, past whitespace) in compiler.go and
 frozen.go; that also changes -trace/-why line attribution.
 
-### T-287 layer 2 `rtABigDivMag` binary-searches each quotient limb · P3 · CORE · OPEN [V]
+### T-287 layer 2 `rtABigDivMag` binary-searches each quotient limb · P3 · CORE · IN PROGRESS (CORE worker, round 5) [V]
 The interpreters now estimate the limb (magQuotEst); runtime.metajs's native twin
 still searches. Port the estimate and bench.
 
-### T-288 js-to-llvm-ir under goja turns a lone `\uD800` literal into U+FFFD · P1 · CORE · OPEN [V]
+### T-288 js-to-llvm-ir under goja turns a lone `\uD800` literal into U+FFFD · P1 · CORE · IN PROGRESS (CORE worker, round 5) [V]
 `u === "\uD800A\uDC00"` is false under goja and natively, true under -frozen: the
 literal is handed to Go as a UTF-8 string. A goja-vs-frozen divergence in the
 emitted module. Carry lone surrogates through the goja bridge (WTF-8).
 
-### T-289 native `d_asin` loses precision near 1 · P1 · CORE · Shared: runtime.c · OPEN [V]
+### T-289 native `d_asin` loses precision near 1 · P1 · CORE · Shared: runtime.c · IN PROGRESS (CORE worker, round 5) [V]
 `1 - x*x` cancels (Go fuses it into an FMA on arm64): native math.asin is off by up to
 907 ulps near 1; run vs native differ on 95/150 rows. `(1-x)*(1+x)` avoids it. Repro:
 python `math.asin(x/(1+x))` for x = 37.9365... gives 1.3436684803445726, CPython
