@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-424** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-425** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -116,15 +116,11 @@ crashes. LINQ extension methods unavailable on lists.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-422 swift: lazy Sequence iteration — `sequence(first:next:)`, user `Sequence`/`IteratorProtocol` types · P1 · SW · IN PROGRESS (SW worker, round 25) [V]
-`Array(Cnt(n: 2))` for a user `Sequence` aborts in all engines ("Array(): not a sequence" /
-"len() of a object"); for-in over it prints nothing in the interpreter. `sequence(first:next:)` and
-`sequence(state:next:)` are unknown. Both need a lazy iterator path in for-in (the compiled for-in is
-index-based via js_pylen/js_swidx); an eager version hangs on the infinite-plus-prefix idiom.
-
-### T-423 swift: `[Double]()` / `Array<Double>()` element type lost on append; `&s.field` inout args · P2 · SW · IN PROGRESS (SW worker, round 25) [V]
-`var ga = [Double](); ga.append(3); print(ga)` prints `[3]` (swiftc `[3.0]`): append adoption only reads
-explicit annotations. `swap(&s.a, &s.b)` / `f(&p.x)` do not parse (InoutArg takes a bare name only).
+### T-424 swift: global shadows implicit-self property; `(` line start continues expression; `defer` in a closure; `+` literal typing · P2 · SW · IN PROGRESS (SW worker, round 26) [V]
+(a) `var a = 5; final class G { var a = 0; func nz() -> Int { return a } }` — `G().nz()` prints 5 (swiftc 0),
+interpreter and llvm.Run. (b) a line starting with `(` after `let r = a` continues the expression; Swift starts a
+new statement. (c) `defer` inside a closure body crashes both halves ("Not a function"). (d) `[Double]() + [1]`
+prints `[1]` (swiftc `[1.0]`). Unverified: `print(..., to: &p.s)` with a path in the compiler.
 
 ---
 
@@ -473,6 +469,8 @@ T-411 php: array / "Class::method" callables; named args to closures compiled; d
 T-415 php: error cases and precedence from the php-src corpus — PARTIAL 05df225e (4 of 5; goto out of a try is now a compile error); the goto signal is T-420
 T-417 csharp: target-typed `default` beyond ==; nullable default; List.IndexOf; Keys/Values members — DONE 3f3adbeb (spec-only; plus the List/Dictionary/String BCL sweep, lib/csharp-collections.js)
 T-418 swift: zip, type(of:) of empty collections, NaN spellings parse (sign/payload DECLINED: needs double-bit host builtins + payload-carrying soft-float in the shared C floor, ~300-400 lines over 10 files) — DONE 74e50eb0
+T-422 swift: lazy Sequence iteration (sequence(), user Sequence/IteratorProtocol, AnyIterator) — DONE dd4e2a5a
+T-423 swift: [Double]() element typing on append; inout through field/element — DONE 103a47c1
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
