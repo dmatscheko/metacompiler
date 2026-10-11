@@ -2465,6 +2465,10 @@ function goTypeIs(v, want) {
     if (w == "rune") { w = "int32" }
     var got = goTypeNameOf(v)
     if (got == w) { return 1 }
+    if (w.charAt(0) == "[" || w.substring(0, 4) == "map[") {
+        if (gfTypeName(v) == gfQualTy(w)) { return 1 }
+        return 0
+    }
     if (got == "int" && (w == "int64" || w == "int32")) { return 2 }
     if (got == "uint" && (w == "uint64" || w == "uintptr")) { return 2 }
     return 0
@@ -2538,8 +2542,28 @@ function js_godtreg(cls) {
 function goSlotCls(ty) {
     var r = anytype
     r = undefined
-    if (typeof ty != "string" || ty == "" || !goHas(GO_DTREG, "$" + ty)) { return r }
-    return GO_DTREG["$" + ty]
+    if (typeof ty != "string" || ty == "") { return r }
+    if (goHas(GO_DTREG, "$" + ty)) { return GO_DTREG["$" + ty] }
+    // An array of a registered type prints its elements through that type's
+    // method, so its own box descriptor is made on first use.
+    var et = goArrElemTy(ty)
+    if (et == "" || goSlotCls(et) === undefined) { return r }
+    var cls = {}
+    cls.__isclass = true
+    cls.__dt = true
+    cls.__name = ty
+    cls.__fields = ["__dv"]
+    GO_DTREG["$" + ty] = cls
+    return cls
+}
+// "T" for an array type "[N]T" of literal length N, else "". Twin of
+// goArrElemTy in languages/lib/go-constfold.js and abnf/jsrtgolang.go.
+function goArrElemTy(t) {
+    if (t.length < 4 || t.charAt(0) != "[") { return "" }
+    var i = 1
+    while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) { i = i + 1 }
+    if (i == 1 || i >= t.length - 1 || t.charAt(i) != "]") { return "" }
+    return t.substring(i + 1)
 }
 function goSlotBox(v, ty) {
     var cls = goSlotCls(ty)

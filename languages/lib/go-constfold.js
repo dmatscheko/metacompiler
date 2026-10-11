@@ -725,6 +725,22 @@ function goFoldConst(items, ops, pos, ty) {
     return cMaterialize(acc)
 }
 
+// The static type of a binary run that did not fold (same items layout). Go gives
+// + - * / % & | ^ &^ the type of its operands, an untyped constant taking the
+// other's, and a shift the type of its LEFT operand. "" when none is known.
+function goRunSty(items, ops) {
+    var acc = goRunOpSty(items[1].at)
+    var k = 0
+    while (k < ops.length) {
+        if (acc == "" && ops[k] != "<<" && ops[k] != ">>") { acc = goRunOpSty(items[3 * k + 4].at) }
+        k = k + 1
+    }
+    return acc
+}
+function goRunOpSty(pos) {
+    var t = stBare(stAt(pos))
+    return t == "?" ? "" : t
+}
 // ^x is -x-1 at arbitrary precision; a written-out unsigned conversion complements
 // within its width instead, which is not a constant fold.
 function goComplC(items) {
@@ -1234,6 +1250,9 @@ function goLitKeyed(elems) {
 // composite operand's elements are interfaceable values of their slot's type, so
 // the printers box each such element before rendering it.
 function goDtPrints(ty) {
+    // An array of such a type prints each element through it.
+    var et = goArrElemTy(ty)
+    if (et != "") { return goDtPrints(et) }
     var ms = goTyMeths["$" + ty]
     if (ms === undefined || goDtBoxTy(ty) != ty) { return false }
     var i = 0
@@ -1256,6 +1275,11 @@ function goQualWord(t, w) {
     while (e < t.length && cIsIdCh(t.charCodeAt(e))) { e = e + 1 }
     return t.substring(0, e)
 }
+// A slice, array or map type: a type test decides it by fmt's %T of the value,
+// which reads the element and key types a slice header or map records.
+function goCompTy(t) { return t.charAt(0) == "[" || t.substring(0, 4) == "map[" }
+// A type switch's case label: a composite type keeps its whole text.
+function goCaseTy(ct, w) { return goCompTy(ct) ? ct : goQualWord(ct, w) }
 // A call's argument list: each argument is followed by its {aty} (ArgExpr), and a
 // trailing {spread} spreads the last one.
 function goSplitArgs(items) {

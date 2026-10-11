@@ -605,6 +605,7 @@ func (rt *jsrt) gopFormat(format string, args []interface{}, wrap *[]int) string
 // type, slot being the type the enclosing composite declares for it.
 func (rt *jsrt) gopGoSyn(f gopFlags, v interface{}, slot string, depth int) string {
 	if dv, ok := goDtVal(v); ok {
+		dv = rt.goDtShown(v, dv)
 		if strings.HasPrefix(rt.gopTypeName(v), "*") && gopKind(dv) == "struct" {
 			return "&" + rt.gopGoSyn(f, dv, slot, depth)
 		}
@@ -1009,8 +1010,39 @@ func (rt *jsrt) goSlotCls(ty string) *jsObject {
 		return nil
 	}
 	goDtReg.Lock()
-	defer goDtReg.Unlock()
-	return goDtReg.m[rt][ty]
+	cls := goDtReg.m[rt][ty]
+	goDtReg.Unlock()
+	if cls != nil {
+		return cls
+	}
+	// An array of a registered type prints its elements through that type's
+	// method, so its own box descriptor is made on first use.
+	et := goArrElemTy(ty)
+	if et == "" || rt.goSlotCls(et) == nil {
+		return nil
+	}
+	cls = newJSObject()
+	cls.set("__isclass", true)
+	cls.set("__dt", true)
+	cls.set("__name", ty)
+	cls.set("__fields", &jsArray{elems: []interface{}{"__dv"}})
+	goDtReg.Lock()
+	goDtReg.m[rt][ty] = cls
+	goDtReg.Unlock()
+	return cls
+}
+
+// goArrElemTy is "T" for an array type "[N]T" of literal length N, else "".
+// Twin of goArrElemTy in languages/lib/go-constfold.js.
+func goArrElemTy(t string) string {
+	i := 1
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+		i++
+	}
+	if len(t) < 4 || t[0] != '[' || i == 1 || i >= len(t)-1 || t[i] != ']' {
+		return ""
+	}
+	return t[i+1:]
 }
 
 func goSlotIn(v interface{}, cls *jsObject) interface{} {
@@ -2785,6 +2817,12 @@ func goTypeIs(rt *jsrt, v interface{}, want string) int {
 	got := goTypeNameOf(rt, v)
 	if got == want {
 		return 1
+	}
+	if strings.HasPrefix(want, "[") || strings.HasPrefix(want, "map[") {
+		if rt.gopTypeName(v) == gopQualTy(want) {
+			return 1
+		}
+		return 0
 	}
 	if (got == "int" && (want == "int64" || want == "int32")) || (got == "uint" && (want == "uint64" || want == "uintptr")) {
 		return 2

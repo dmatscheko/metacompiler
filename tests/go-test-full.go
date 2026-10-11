@@ -3684,6 +3684,69 @@ func s59() {
 	check("dc4", fmt.Sprint(a, []err59{1.5}, []pk59{1}, [][]col59{{4}}) == "[c3 c1 c2] [e1.5] [1] [[c4]]")
 }
 
+// ===== SECTION 60: static type of arithmetic, composite type tests, nested arrays =====
+type k60 int
+
+func (k k60) String() string { return fmt.Sprintf("k%d", int(k)) }
+
+type w60 int64
+
+type g60 struct {
+	Cells [2]k60
+	Rows  [][2]k60
+	hid   [2]k60
+}
+
+func ty60(v any) string {
+	switch v.(type) {
+	case []int:
+		return "ints"
+	case []k60:
+		return "ks"
+	case []string:
+		return "strs"
+	case [][]int:
+		return "intss"
+	case [2]int:
+		return "arr"
+	case map[string]int:
+		return "msi"
+	case []any:
+		return "anys"
+	}
+	return "other"
+}
+
+func s60() {
+	y := []k60{1, 2, 3}
+	kk := k60(5)
+	z := kk + y[1]
+	check("ar1", fmt.Sprint(y[0]+y[2], kk+1, kk*2, 1+kk, y[0]<<2, z) == "k4 k6 k10 k6 k4 k7")
+	var a, b w60 = 2, 3
+	var p any = a * b
+	_, isW := p.(w60)
+	var i1, i2 int64 = 4, 5
+	var q any = i1 + i2
+	_, is64 := q.(int64)
+	check("ar2", isW && is64 && fmt.Sprintf("%v %d %T", y[0]+y[1], y[0]+y[1], kk-1) == "k3 3 main.k60")
+	got := ""
+	for _, v := range []any{[]int{1}, []k60{1}, []string{"x"}, [][]int{{1}}, [2]int{}, map[string]int{}, []any{1}, make([]int, 1), 3} {
+		got += ty60(v) + " "
+	}
+	_, ok1 := any([]int{}).([]int)
+	_, ok2 := any([]int{}).([]k60)
+	_, ok3 := any(map[string]int{}).(map[string]int)
+	check("ct1", got == "ints ks strs intss arr msi anys ints other " && ok1 && !ok2 && ok3)
+	var n [2][2]k60
+	n[0][1] = 7
+	check("na1", fmt.Sprint(n, n[0]) == "[[k0 k7] [k0 k0]] [k0 k7]" && fmt.Sprintf("%d|%#v", n, n) == "[[0 7] [0 0]]|[2][2]main.k60{[2]main.k60{0, 7}, [2]main.k60{0, 0}}")
+	g := g60{}
+	g.Cells[1] = 4
+	g.hid[0] = 2
+	g.Rows = append(g.Rows, [2]k60{5, 6})
+	check("na2", fmt.Sprint(g) == "{[k0 k4] [[k5 k6]] [2 0]}" && fmt.Sprintf("%+v", map[string][2]k60{"x": {1, 2}}) == "map[x:[k1 k2]]")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3744,6 +3807,7 @@ func main() {
 	s57() // SECTION-CALL 57
 	s58() // SECTION-CALL 58
 	s59() // SECTION-CALL 59
+	s60() // SECTION-CALL 60
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -2886,12 +2886,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         if (ops.length == 0) { return ts[0] }
         // Built BEFORE the clear below: this run ends where its last operand does, so
-        // regConst(pos, null) would erase the very entry the composition reads.
+        // regConst(pos, null) would erase the very entries these two read.
         var cfn = goFoldCFn(items, ops, ty)
+        var sty = goRunSty(items, ops)
         var folded = goFoldConst(items, ops, pos, ty)
         if (folded != null) { return folded }
         regConst(pos, null)
         regCFn(pos, cfn)
+        regSt(pos, sty)
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -4600,7 +4602,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [{k:init}?, {tsname}?, subjectThunk, ({ct}-list label | statement)...]
     function makeTypeCase(items) {
         var ts = []
-        for (var i = 0; i < items.length; i++) { ts.push(goQualWord(items[i].ct, firstWord(items[i].ct))) }
+        for (var i = 0; i < items.length; i++) { ts.push(goCaseTy(items[i].ct, firstWord(items[i].ct))) }
         return {isTypeCase: true, isDefault: items.length == 0, types: ts}
     }
     function firstWord(s) {
@@ -4696,6 +4698,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (w == "rune") { w = "int32" }
         var got = goTypeName(v)
         if (got == w) { return 1 }
+        if (goCompTy(w)) { return gfTypeName(v) == gfQualTy(w) ? 1 : 0 }
         if (got == "int" && (w == "int64" || w == "int32")) { return 2 }
         if (got == "uint" && (w == "uint64" || w == "uintptr")) { return 2 }
         return 0
