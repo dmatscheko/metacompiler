@@ -1164,11 +1164,11 @@ function js_luminint() { return luNorm(luMinPair()) }
 // ------------------------------------------------------------- printing ----
 
 // A Lua string is a BYTE string, so lua-to-llvm-ir.abnf holds one host character
-// per byte: every code unit is 0..255. js_luaout is the one place that model is
-// undone again - the bytes are decoded as UTF-8 on the way to the terminal, so a
-// program prints the byte sequence it holds. A byte that starts no valid sequence
-// is passed through as its own code point, which is what utf8.DecodeRune's
-// (RuneError, 1) answer makes the Go twin do.
+// per byte: every code unit is 0..255. print writes those bytes raw (js_luaprint);
+// js_luaout decodes them as UTF-8 for the message of an uncaught error, which
+// leaves as text through fail(). A byte that starts no valid sequence is passed
+// through as its own code point, which is what utf8.DecodeRune's (RuneError, 1)
+// answer makes the Go twin do.
 //
 // luChar is BYTE-IDENTICAL to swift-rt.metajs's js_char, and deliberately not
 // shared: lib/runtime.metajs's own js_char has a different contract (the {__char}
@@ -1231,15 +1231,15 @@ function js_luaout(s) {
 }
 
 // Lua's print separates its arguments with a TAB. Every element has already been
-// rendered by the emitter's lua_strall (lua_str + js_luaout), so this only joins
-// and writes.
+// rendered to a Lua byte string by the emitter's lua_strall, so this only joins and
+// writes the bytes.
 function js_luaprint(args) {
     var out = ""
     for (var i = 0; i < args.length; i++) {
         if (i > 0) { out = out + "\t" }
         out = out + args[i]
     }
-    println(out)
+    writeBytes(out + "\n")
     return undefined
 }
 

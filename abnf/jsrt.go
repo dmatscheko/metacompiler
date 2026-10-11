@@ -12233,6 +12233,16 @@ func strUnits(s string) []uint16 {
 	return u
 }
 
+// lowBytes is the low byte of each UTF-16 unit of s (the writeBytes host global).
+func lowBytes(s string) []byte {
+	units := strUnits(s)
+	b := make([]byte, len(units))
+	for i, c := range units {
+		b[i] = byte(c)
+	}
+	return b
+}
+
 // strFromUnits builds a string back from UTF-16 code units: a surrogate pair
 // becomes the astral character it spells, a lone surrogate its WTF-8 form.
 func strFromUnits(u []uint16) string {
@@ -16445,18 +16455,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				out += rt.toString(e)
 			}
-			fmt.Fprintln(outWriter, wtf8Clean(out))
+			// Each element is a Lua byte string (one unit per byte), written raw.
+			outWriter.Write(lowBytes(out + "\n"))
 			return 0
 		},
 		// A Lua string is a BYTE string, so lua-to-llvm-ir.abnf (like
 		// lua-interpreter.abnf) holds one host character per byte: every code unit
 		// of a Lua string is 0..255 and # / string.len / string.sub therefore count
-		// and cut in bytes, which is what real Lua does. js_luaout is the one place
-		// that model is undone again - the bytes are decoded as UTF-8 on the way to
-		// the terminal, so a program prints the byte sequence it holds. A byte that
-		// starts no valid sequence is passed through as its own code point, the
-		// closest a UTF-8 terminal can come to the raw byte real Lua would write.
-		// Only the Lua compiler emits this, and only around print.
+		// and cut in bytes, which is what real Lua does. print writes those bytes
+		// raw (js_luaprint); js_luaout decodes them as UTF-8 for the one output that
+		// travels as TEXT, the message of an uncaught error, which leaves through
+		// the engine's own failure channel. A byte that starts no valid sequence is
+		// passed through as its own code point. Only the Lua compiler emits this.
 		"js_luaout": func(a []uint64) uint64 {
 			units := strUnits(rt.toString(u(a[0])))
 			b := make([]byte, 0, len(units))
@@ -17302,6 +17312,13 @@ func standardJSBindings() map[string]interface{} {
 		}),
 		"print": jsHostFunc("print", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			fmt.Fprint(outWriter, rt.printArgs(args)...)
+			return jsUndef
+		}),
+		// writeBytes(s): the low byte of each UTF-16 unit of s, to standard output
+		// and with no newline - the raw output of a language whose strings hold
+		// one byte per unit (lua). Host id 98 in languages/lib/runtime.c.
+		"writeBytes": jsHostFunc("writeBytes", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			outWriter.Write(lowBytes(rt.toString(argAt(args, 0))))
 			return jsUndef
 		}),
 		// eprintln is the DIAGNOSTIC channel (warnings): standard error, never

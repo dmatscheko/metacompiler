@@ -194,10 +194,14 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
 		vm.Set("println", func(a ...interface{}) (n int, err error) { return 0, nil })
 		vm.Set("printf", func(format string, a ...interface{}) (n int, err error) { return 0, nil })
+		vm.Set("writeBytes", func(v goja.Value) {})
 	} else { // Script output enabled (routed through outWriter so -pipe can capture it).
 		vm.Set("print", func(a ...interface{}) (int, error) { return fmt.Fprint(outWriter, a...) })
 		vm.Set("println", func(a ...interface{}) (int, error) { return fmt.Fprintln(outWriter, a...) })
 		vm.Set("printf", func(format string, a ...interface{}) (int, error) { return fmt.Fprintf(outWriter, format, a...) })
+		// writeBytes: the frozen host's binding of the same name (standardJSBindings).
+		wtf8 := gojaWTF8(vm)
+		vm.Set("writeBytes", func(v goja.Value) { outWriter.Write(lowBytes(wtf8(v))) })
 	}
 
 	// eprintln is the DIAGNOSTIC channel of the tag scripts (warnings). It goes

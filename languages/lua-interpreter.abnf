@@ -1018,10 +1018,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // operators, whose code-unit order IS byte order - and \xNN / \ddd become the single
     // byte they name instead of a code point.
     //
-    // Two conversions bound the model. luaUtf8 encodes source text and \u{...} on the way
-    // IN (it is called only from the literal readers), and luaOut decodes on the way OUT
-    // to the terminal, so what a program prints is the byte sequence it holds. Nothing
-    // in between needs to know.
+    // luaUtf8 encodes source text and \u{...} on the way IN (it is called only from the
+    // literal readers), and print writes the bytes OUT raw (writeBytes), so what a
+    // program prints is the byte sequence it holds. Nothing in between needs to know.
     function utf8Enc(cp) {
         if (cp < 128) { return String.fromCharCode(cp) }
         if (cp < 2048) {
@@ -1056,9 +1055,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    // The byte string back to host text for printing. A byte that starts no valid
-    // sequence is passed through as its own code point, which is the closest a UTF-8
-    // terminal can come to the raw byte real Lua would write.
+    // The byte string back to host text, for the message of an uncaught error, which
+    // is printed as text. A byte that starts no valid sequence is passed through as its
+    // own code point.
     function luaOut(s) {
         var out = ""
         var i = 0
@@ -2359,9 +2358,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (i > 0) { out += "\t" }
             out += luaToStr(arguments[i])
         }
-        // The byte string is decoded back to host text here, at the one place it leaves
-        // the program (see the byte-string note above luaUtf8).
-        println(luaOut(out))
+        // The byte string leaves the program as the bytes it holds (see the byte-string
+        // note above luaUtf8).
+        writeBytes(out + "\n")
     }
     globalScope["exit"] = function(code) { exit(numOf(code) | 0) }
 

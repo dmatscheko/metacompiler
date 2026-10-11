@@ -358,6 +358,7 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 		b["println"] = noop
 		b["print"] = noop
 		b["printf"] = noop
+		b["writeBytes"] = noop
 	}
 	b["sleep"] = jsHostFunc("sleep", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		time.Sleep(time.Duration(rt.toNumber(argAt(args, 0))) * time.Millisecond)

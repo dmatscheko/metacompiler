@@ -1355,6 +1355,18 @@
             "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-features.lua", "-q"]
         },
         {
+            "name": "Lua print writes raw bytes (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-bytes.lua", "-q"]
+        },
+        {
+            "name": "Lua print writes raw bytes (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-bytes.lua", "-q"]
+        },
+        {
             "name": "MetaJS features (interpreter)",
             "type": "go",
             "request": "launch",

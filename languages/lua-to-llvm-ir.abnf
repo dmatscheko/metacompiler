@@ -698,8 +698,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // string is held with ONE CHARACTER PER BYTE (every code unit is 0..255) and #,
     // string.len, string.sub, string.rep and the relational operators all measure and cut
     // in bytes for free. utf8Enc/luaUtf8 encode source text and \u{...} on the way IN;
-    // the js_luaout extern decodes on the way OUT, at print. lua-interpreter.abnf carries
-    // exactly the same pair.
+    // print writes the bytes raw (the writeBytes host global), and only the text of an
+    // uncaught error is decoded back (js_luaout). lua-interpreter.abnf does the same.
     function utf8Enc(cp) {
         if (cp < 128) { return String.fromCharCode(cp) }
         if (cp < 2048) {
@@ -1271,10 +1271,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var iV2 = callExt(bodyB, "js_get", [cell, emitStr(bodyB, "i")])
         var elemV = callExt(bodyB, "js_get", [src, iV2])
         if (name == "lua_strall") {
-            // lua_strall feeds print, and print is where the byte string leaves the
-            // program: js_luaout decodes the bytes back to text. Concatenation uses
-            // lua_str directly and must NOT decode - the result is a Lua string again.
-            callExt(bodyB, "js_arr_push", [outArr, callExt(bodyB, "js_luaout", [callLua(bodyB, "lua_str", [elemV])])])
+            // lua_strall feeds print, which writes the byte strings raw (js_luaprint).
+            callExt(bodyB, "js_arr_push", [outArr, callLua(bodyB, "lua_str", [elemV])])
         } else if (name == "lua_spread") {
             callExt(bodyB, "js_set", [ps[0], callExt(bodyB, "js_add", [ps[1], iV2]), elemV])
         } else {

@@ -1033,6 +1033,8 @@ KwDefault   = "default" KwEnd ;
         "byteLen": byteLen,
         // Upper or lower case, simple or full. Host id 97.
         "unicodeCase": unicodeCase,
+        // The low byte of each UTF-16 unit, to standard output. Host id 98.
+        "writeBytes": writeBytes,
         "fail": failHost,
         // Infinity and NaN are values, not functions, and the dialect cannot write
         // either as a literal (there is no exponent literal - manual chapter 4).

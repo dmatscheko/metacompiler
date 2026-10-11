@@ -6172,6 +6172,26 @@ long host_call(long id, long self, long args) {
 	}
 	/* unicodeCase(s, mode): see case_str. */
 	if (id == 97) { return case_str(arg_str(args, 0), d_to_long(arg_num(args, 1))); }
+	/* writeBytes(s): the low byte of each UTF-16 unit of s, to standard output -
+	 * the raw output of a language whose strings hold one byte per unit (lua).
+	 * Twin of lowBytes in abnf/jsrt.go. */
+	if (id == 98) {
+		long s = arg_str(args, 0);
+		const char *p = str_ptr(s);
+		long len = str_len(s);
+		while (i < len) {
+			long cp;
+			u_decode(p, len, i);
+			i = i + G_ADV;
+			cp = G_CP;
+			if (cp >= 65536) {
+				putchar((int)((55296 + ((cp - 65536) >> 10)) & 255));
+				cp = 56320 + ((cp - 65536) & 1023);
+			}
+			putchar((int)(cp & 255));
+		}
+		return H_UNDEF;
+	}
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -6914,6 +6934,7 @@ void boot(void) {
 	seed_root("exit", mk_host(6));
 	seed_root("byteLen", mk_host(32));
 	seed_root("unicodeCase", mk_host(97));
+	seed_root("writeBytes", mk_host(98));
 	seed_root("sprintf", mk_host(33));
 	seed_root("printf", mk_host(34));
 	seed_root("sprint", mk_host(35));

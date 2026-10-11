@@ -22,7 +22,7 @@
 //     and prints the summary line 'full: <checks> checks, <failures> failures'
 //   - main() returns the failure count (exit 0 == full support, verified)
 //
-// All three engines bind the SAME 51 host globals - the C floor's seed_root list in
+// All three engines bind the SAME 52 host globals - the C floor's seed_root list in
 // languages/lib/runtime.c is the authority. SECTION 31 asserts every one of them on
 // both halves; abnf/hostglobals_test.go parses the three sources and fails
 // `go test ./abnf/` if a future name lands in fewer than three of them.
@@ -1633,7 +1633,7 @@ function s30() {
     check("gen08", typeof fake === "object" && isGenerator(fake) === false)
 }
 
-// ===== SECTION 31: the host-global SET, all 50 names on both halves =====
+// ===== SECTION 31: the host-global SET, all 52 names on both halves =====
 // The --full runner makes both halves run this same file and report the same
 // assertion count, so these rows hold only because the halves bind the same set.
 //
@@ -1657,6 +1657,7 @@ function s31() {
     check("hg04", typeof fail === "function" && typeof exit === "function")
     check("hg05", typeof parseInt === "function" && typeof parseFloat === "function")
     check("hg06", typeof byteLen === "function" && typeof floPrec === "function" && typeof unicodeCase === "function")
+    check("hg06a", typeof writeBytes === "function" && writeBytes("") === undefined)
     // The eleven sized-integer names.
     check("hg07", typeof sint === "function" && typeof sintRaw === "function")
     check("hg08", typeof sintIs === "function" && typeof sintHi === "function")

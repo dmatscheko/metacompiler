@@ -46,7 +46,11 @@
 #             feature files are written as a sum of (expr - expected) terms, so
 #             the right answer is 0 and any wrong one is not.
 #
-# EXPECT_ROWS covers those two by comparing what the binary actually produced
+# One real-language row joins them: lua/bytes, because what lua's print writes
+# for a string that is not valid UTF-8 is visible only in the output bytes. Its
+# fixture is real lua 5.5's output, not a blessed one of ours.
+#
+# EXPECT_ROWS covers those by comparing what the binary actually produced
 # against a checked-in fixture, which is the only thing left when there is no
 # count to print. Each row is
 #
@@ -112,7 +116,8 @@ ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java kotlin:kt
 # <lang>:<label>:<source file>:<fixture path | exit-only>   - see the comment above
 EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuck-features.expected
              calculator:features:tests/calculator-test-features.txt:exit-only
-             calculator:compiler:tests/calculator-compiler-features.txt:exit-only"
+             calculator:compiler:tests/calculator-compiler-features.txt:exit-only
+             lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected"
 
 JOBS="${MEC_JOBS:-$( (sysctl -n hw.ncpu || nproc || echo 4) 2>/dev/null )}"
 case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac
