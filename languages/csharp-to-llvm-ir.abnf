@@ -1067,7 +1067,7 @@ NewExpr     = NewAnon | NewTarget | NewImplArr | NewObjInit | NewArrLit | NewArr
 // `new(...)` (C# 9 target-typed new): the type is the one its context converts it
 // to, through the same cell a bare `default` has (lib/csharp-default.js).
 NewTarget   <~~ push(makeNewTarget(takeAll(), up.pos)) ~~>
-            = KwNew "(" ArgList ")" [ ObjInit ] ;
+            = KwNew "(" ArgList ")" [ ObjInit | CollInit ] ;
 // An anonymous type ('new { X = 1, Y = 2 }'): a plain object with those members.
 NewAnon     <~~ push(makeAnon(pop())) ~~>
             = KwNew AnonInit ;
@@ -1115,8 +1115,16 @@ ArrDim      <~~ push({adim: pop()}) ~~>
             = Expression ;
 ArrInit     <~~ push({ainit: pop()}) ~~>
             = ArrLit ;
-NewObject   <~~ push(makeNew(csDfltNew(takeAll(), up.start, up.pos))) ~~>
-            = KwNew NewName "(" ArgList ")" [ ObjInit | SkipBlock ] ;
+NewObject   <~~ push(makeCollNew(csDfltNew(takeAll(), up.start, up.pos))) ~~>
+            = KwNew NewName "(" ArgList ")" [ ObjInit | CollInit | SkipBlock ] ;
+// `{ a, b }` / `{ { k, v }, ... }` after a constructor call: a COLLECTION initializer,
+// one Add per element, an element in braces passing its values as Add's arguments
+// (ECMA-334 12.8.17.2.3).
+CollInit    <~~ push({collinit: takeAll()}) ~~>
+            = "{" [ InitElem { "," InitElem } ] [ "," ] "}" ;
+InitElem    = CollPair | Expression ;
+CollPair    <~~ push({cpair: takeAll()}) ~~>
+            = "{" Expression { "," Expression } "}" ;
 // { X = expr, ... }: the trailing member initializer of an object creation.
 ObjInit     <~~ push({objinit: takeAll()}) ~~>
             = "{" [ MemberInit { "," MemberInit } ] [ "," ] "}" ;
@@ -3753,13 +3761,41 @@ KwLet       = "let" KwEnd ;
     // emitted. Twin of makeNewTarget in csharp-interpreter.abnf.
     function makeNewTarget(items, end) {
         var cell = csDfltCell(end)
-        return function(b) { return makeNew(csNewTargetItems(cell, items))(b) }
+        return function(b) { return makeCollNew(csNewTargetItems(cell, items))(b) }
     }
     function csNewTargetItems(cell, items) {
         if (cell.ty == "") { fail("a target-typed new() whose type its context does not name is not modelled") }
         var all = [{cname: csSimpleName(cell.ty), targs: csTypeArgs(cell.ty)}]
         for (var i = 0; i < items.length; i++) { all.push(items[i]) }
         return all
+    }
+    // A creation with a collection initializer: the object, then one Add per element.
+    // Twin of makeCollNew in csharp-interpreter.abnf.
+    function makeCollNew(items) {
+        var rest = []
+        var elems = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] !== null && typeof items[i] == "object" && items[i].collinit != undefined) { elems = items[i].collinit }
+            else { rest.push(items[i]) }
+        }
+        var make = makeNew(rest)
+        if (elems == null) { return make }
+        return function(b) {
+            var r = make(b)
+            b = r.b
+            for (var j = 0; j < elems.length; j++) {
+                var e = elems[j]
+                var parts = typeof e == "function" ? [e] : e.cpair
+                var argsV = callExt(b, "js_arr_new", [])
+                for (var k = 0; k < parts.length; k++) {
+                    var ar = parts[k](b)
+                    b = ar.b
+                    callExt(b, "js_arr_push", [argsV, ar.v])
+                }
+                callExt(b, "js_csmcall", [r.v, emitStr(b, "Add"), argsV])
+            }
+            return {b: b, v: r.v}
+        }
     }
     function makeNew(items) {
         var clsName = items[0].cname

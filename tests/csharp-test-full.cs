@@ -3376,6 +3376,19 @@ b";                                                   // verbatim keeps the newl
             Func<S54Pt> f = () => new(n[4], n[5]);
             Program.Check("s54n2", h.Items.Count == 1 && h.Map.Count == 0 && h.P.Y == 6 && S54Make(n[1]).Y == 3
                 && S54Sum(new(n[4], n[5])) == 30 && f().X == 10);
+            // A collection initializer after the constructor call Adds each element;
+            // a default written through an indexer takes the element / value type.
+            Dictionary<string, int> dd = new() { { "a", n[0] } };
+            dd["k"] = default;
+            var d2 = new Dictionary<string, bool>();
+            d2["k"] = default;
+            List<int> l = new() { n[2], n[3] };
+            l[0] = default;
+            var l2 = new List<int>() { n[0], n[1] };
+            int[] arr = new int[n[0]];
+            arr[0] = default;
+            Program.Check("s54n3", "" + dd["k"] + d2["k"] + l[0] + arr[0] == "0False00" && dd["a"] == 1 && dd.Count == 2
+                && l.Count == 2 && l[1] == 6 && l2.Count == 2 && l2[1] == 2);
         }
 
         static int Main()

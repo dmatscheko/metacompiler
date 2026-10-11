@@ -562,7 +562,8 @@ function csDfltArgName(t) {
 }
 // An assignment spanning [start, end) whose right side is a default literal or a
 // lambda: a field or property target (`F`, `this.F`, `o.F`, `C.F`) waits for the
-// member's type; an element of a local array or List takes the element type.
+// member's type; an element of a local array or List takes the element type, an
+// entry of a local Dictionary the value type.
 function csDfltAssign(start, end) {
     var cell = csDfltAt(end, "")
     var lam = csLamAt(end, "")
@@ -577,6 +578,7 @@ function csDfltAssign(start, end) {
         var ety = ""
         if (lt.length > 2 && lt.substring(lt.length - 2, lt.length) == "[]") { ety = lt.substring(0, lt.length - 2) }
         else if (csDfltTName(lt) == "List" && csDfltTArgs(lt).length == 1) { ety = csDfltTArgs(lt)[0] }
+        else if (csDfltTName(lt) == "Dictionary" && csDfltTArgs(lt).length == 2) { ety = csDfltTArgs(lt)[1] }
         if (ety != "") {
             csDfltSet(cell, ety)
             csLamSet(lam, ety)

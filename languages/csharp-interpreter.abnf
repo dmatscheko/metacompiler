@@ -1077,7 +1077,7 @@ NewExpr     = NewAnon | NewTarget | NewImplArr | NewObjInit | NewArrLit | NewArr
 // `new(...)` (C# 9 target-typed new): the type is the one its context converts it
 // to, through the same cell a bare `default` has (lib/csharp-default.js).
 NewTarget   <~~ push(makeNewTarget(takeAll(), up.pos)) ~~>
-            = KwNew "(" ArgList ")" [ ObjInit ] ;
+            = KwNew "(" ArgList ")" [ ObjInit | CollInit ] ;
 // An anonymous type ('new { X = 1, Y = 2 }'): a plain object with those members.
 NewAnon     <~~ push(makeAnon(pop())) ~~>
             = KwNew AnonInit ;
@@ -1124,8 +1124,16 @@ ArrDim      <~~ push({adim: pop()}) ~~>
             = Expression ;
 ArrInit     <~~ push({ainit: pop()}) ~~>
             = ArrLit ;
-NewObject   <~~ push(makeNew(csDfltNew(takeAll(), up.start, up.pos))) ~~>
-            = KwNew NewName "(" ArgList ")" [ ObjInit | SkipBlock ] ;
+NewObject   <~~ push(makeCollNew(csDfltNew(takeAll(), up.start, up.pos))) ~~>
+            = KwNew NewName "(" ArgList ")" [ ObjInit | CollInit | SkipBlock ] ;
+// `{ a, b }` / `{ { k, v }, ... }` after a constructor call: a COLLECTION initializer,
+// one Add per element, an element in braces passing its values as Add's arguments
+// (ECMA-334 12.8.17.2.3).
+CollInit    <~~ push({collinit: takeAll()}) ~~>
+            = "{" [ InitElem { "," InitElem } ] [ "," ] "}" ;
+InitElem    = CollPair | Expression ;
+CollPair    <~~ push({cpair: takeAll()}) ~~>
+            = "{" Expression { "," Expression } "}" ;
 // { X = expr, ... }: the trailing member initializer of an object creation.
 ObjInit     <~~ push({objinit: takeAll()}) ~~>
             = "{" [ MemberInit { "," MemberInit } ] [ "," ] "}" ;
@@ -3407,7 +3415,7 @@ KwLet       = "let" KwEnd ;
         var cell = csDfltCell(end)
         var made = null
         return function() {
-            if (made == null) { made = makeNew(csNewTargetItems(cell, items)) }
+            if (made == null) { made = makeCollNew(csNewTargetItems(cell, items)) }
             return made()
         }
     }
@@ -3416,6 +3424,29 @@ KwLet       = "let" KwEnd ;
         var all = [{cname: csSimpleName(cell.ty), targs: csTypeArgs(cell.ty)}]
         for (var i = 0; i < items.length; i++) { all.push(items[i]) }
         return all
+    }
+    // A creation with a collection initializer: the object, then one Add per element.
+    // Twin of makeCollNew in csharp-to-llvm-ir.abnf.
+    function makeCollNew(items) {
+        var rest = []
+        var elems = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] !== null && typeof items[i] == "object" && items[i].collinit != undefined) { elems = items[i].collinit }
+            else { rest.push(items[i]) }
+        }
+        var make = makeNew(rest)
+        if (elems == null) { return make }
+        return function() {
+            var o = make()
+            for (var j = 0; j < elems.length; j++) {
+                var e = elems[j]
+                var args = []
+                if (typeof e == "function") { args.push(e()) }
+                else { for (var k = 0; k < e.cpair.length; k++) { args.push(e.cpair[k]()) } }
+                mcall(o, "Add", args)
+            }
+            return o
+        }
     }
     function makeNew(items) {
         var declName = items[0].cname
