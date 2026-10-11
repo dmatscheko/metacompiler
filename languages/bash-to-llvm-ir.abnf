@@ -1364,7 +1364,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var optSave = saveOpts(b)
             var undoBase = attrUndo.length
             subDepth = subDepth + 1
+            var svq = uqStarEmit
+            uqStarEmit = false
             var eb = bodyT(b)
+            uqStarEmit = svq
             subDepth = subDepth - 1
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
@@ -1525,7 +1528,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var rs = subOf(b); b = rs.b
                     var k = kindOf(b, rs.v)
                     var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                    return {b: b, v: b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b),
+                    return {b: b, v: b.NewCall(rtScList, [nmOf(b), starSepSp(b),
                         b.NewZExt(star, i32), one])}
                 }}
             }
@@ -1545,7 +1548,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(cnt, ro.v), ro.v)
                     var n = b.NewSub(cnt, off)
                     if (rlv != null) { n = rlv }
-                    var lstV = b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), b.NewZExt(star, i32)])
+                    var lstV = b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), starArg(b, b.NewZExt(star, i32))])
                     // ${a[i]:off:len} slices the ELEMENT, not the element list.
                     var ev = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
                     var elen = b.NewCall(rtCharLen, ev)
@@ -1581,8 +1584,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var rv3 = emptyPtr(b)
                     if (mRepW != null) { var rr3 = evalWord(b, mRepW); b = rr3.b; rv3 = rr3.v }
                     var allE = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
-                    var lstM = b.NewCall(rtMapf, [allE, mOpC, pv, rv3, mModeC,
-                                                  ifsFirstValue(b), b.NewZExt(star, i32)])
+                    var mSep = (mOp == 0) ? starSepSp(b) : ifsFirstValue(b)
+                    var mStar = b.NewZExt(star, i32)
+                    if (mOp != 0) { mStar = starArg(b, mStar) }
+                    var lstM = b.NewCall(rtMapf, [allE, mOpC, pv, rv3, mModeC, mSep, mStar])
                     var evM = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
                     var elM = evM
                     if (mOp == 0) { elM = b.NewCall(rtStrip, [evM, pv, mModeC]) }
@@ -1601,7 +1606,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var k = kindOf(b, rs.v)
                 var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                 var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
-                var lst = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), b.NewZExt(star, i32), zero])
+                var starA = starArg(b, b.NewZExt(star, i32))
+                var lst = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), starA, zero])
                 var one1 = b.NewCall(rtScGet, [nmOf(b), keyOf(b, rs.v)])
                 if (op != "") {
                     var kk = keyOf(b, rs.v)
@@ -1643,22 +1649,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (xf != "" && op == "") {
                     var wholeV = null
                     if (xf == "A") {
+                        // Unquoted, [@] is the [*] string too, split like any other value.
+                        var starXa = uqStarEmit ? starArg(b, one) : starA
                         wholeV = b.NewCall(rtDeclXa, [nmOf(b), attrLetters(b, nmOf(b)), one1, elemSet,
-                                                      assocI, ifsValue(b), b.NewZExt(star, i32)])
+                                                      assocI, ifsValue(b), starXa])
                     } else if (xf == "K") {
                         wholeV = b.NewCall(rtKvq, [nmOf(b), assocI, one1, elemSet])
                     } else if (xf == "k") {
-                        wholeV = b.NewCall(rtKvp, [nmOf(b), ifsFirstValue(b), b.NewZExt(star, i32),
+                        wholeV = b.NewCall(rtKvp, [nmOf(b), ifsFirstValue(b), starA,
                                                    one1, elemSet])
                     } else if (xf == "a") {
-                        wholeV = b.NewCall(rtAttrf, [nmOf(b), attrLetters(b, nmOf(b)), ifsFirstValue(b),
-                                                     b.NewZExt(star, i32)])
+                        wholeV = b.NewCall(rtAttrf, [nmOf(b), attrLetters(b, nmOf(b)), ifsFirstValue(b), starA])
                     } else if (xfMapKind(xf) >= 0) {
                         var allX = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
                         wholeV = b.NewCall(rtMapf, [allX, llvm.constant.NewInt(i32, xfMapKind(xf)),
                                                     emptyPtr(b), emptyPtr(b),
                                                     llvm.constant.NewInt(i32, xfMapMode(xf)),
-                                                    ifsFirstValue(b), b.NewZExt(star, i32)])
+                                                    ifsFirstValue(b), starA])
                     }
                     if (wholeV != null) {
                         return {b: b, v: b.NewSelect(whole, wholeV, applyXf(b, one1, elemSet, nmOf(b)))}
@@ -1778,6 +1785,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtReplace, [v, rp2.v, rep, llvm.constant.NewInt(i32, rmode)])}
             }}
         }
+        if (op == "" && name == "*" && !indirect) { return {c: undefined, fn: function(b) { return {b: b, v: starParams(b)} }} }
         if (op == "") { return {c: undefined, f: (name == "@"), fn: function(b) { return {b: b, v: valOf(b)} }} }
         var colon = (op.charAt(0) == ":")
         var o = colon ? op.slice(1) : op
@@ -1796,6 +1804,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }}
     }
     function mkVarRef(name) {
+        if (name == "*") { return {f: false, fn: function(b) { return {b: b, v: starParams(b)} }, c: undefined} }
         var multi = (name == "@")
         return {f: multi, fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
     }
@@ -1905,6 +1914,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var v = ifsValue(b)
         return b.NewCall(rtSubstr, [v, zero, one])
     }
+    // AN UNQUOTED [*] UNDER A NULL IFS IS A FIELD LIST, and ${!a[*]} and the strips join
+    // with a blank there instead. uqStarEmit is on while an unquoted expansion is EMITTED
+    // (mkWord) and off for every word evalWord emits - the words nested in a ${...} and
+    // the command words, whose own unquoted expansions turn it back on - and inside a
+    // command substitution; it only changes the star flag and separator a [*] producer
+    // hands the runtime. Twin of uqStar in languages/bash-interpreter.abnf.
+    var uqStarEmit = false
+    function starArg(b, star) {
+        if (!uqStarEmit) { return star }
+        return b.NewSelect(isEmptyStr(b, ifsFirstValue(b)), zero, star)
+    }
+    function starParams(b) { return b.NewCall(rtParams, [ifsFirstValue(b), starArg(b, one)]) }
+    function starSepSp(b) {
+        var f = ifsFirstValue(b)
+        if (!uqStarEmit) { return f }
+        return b.NewSelect(isEmptyStr(b, f), gepStr(b, " "), f)
+    }
     // A double-quoted string: no splitting, but "$@" / "${a[@]}" still contribute several
     // fields, joined onto the neighbouring text at the boundaries.
     function mkDqWord(segs) {
@@ -1982,7 +2008,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (segs.length == 1 && segs[0].sp != undefined) {
             var only = segs[0].sp
             return {s: anySub, f: true, c: undefined, fn: function(b) {
+                var svq0 = uqStarEmit
+                uqStarEmit = true
                 var r0 = only.fn(b)
+                uqStarEmit = svq0
                 b = r0.b
                 return {b: b, v: b.NewCall(rtSplitIfs, [r0.v, ifsValue(b)])}
             }}
@@ -2005,7 +2034,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var lead = zero
                 var trail = zero
                 if (sg.sp != undefined) {
+                    var svq = uqStarEmit
+                    uqStarEmit = true
                     var r = sg.sp.fn(b)
+                    uqStarEmit = svq
                     b = r.b
                     // An unquoted expansion is split on IFS. "$@" and ${a[@]} are joined
                     // first (rt_uqlist), except under a null IFS, where they stay a list
@@ -2515,7 +2547,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Evaluate ONE word to a single string: a word that can produce several fields is
     // flattened (space-joined), which is what every builtin with a fixed argument list wants.
     function evalWord(b, w) {
+        var svq = uqStarEmit
+        uqStarEmit = false
         var r = w.fn(b)
+        uqStarEmit = svq
         if (w.f == true) { return {b: r.b, v: r.b.NewCall(rtWordJoin, r.v)} }
         return r
     }

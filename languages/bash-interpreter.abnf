@@ -1694,7 +1694,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var sub = readIdx()
                     var ks = scKeyList(name)
                     if (sub == "@") { return encFields(ks) }
-                    return joinList(ks, ifsFirst())
+                    return starJoinSp(ks)
                 }
             }
             if (pe == "substr") {
@@ -1713,7 +1713,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var i2
                     for (i2 = off; i2 < off + n && i2 < vals.length; i2++) { out.push(vals[i2]) }
                     if (sub == "@") { return encFields(out) }
-                    return joinList(out, ifsFirst())
+                    return starJoin(out)
                 }
             }
             // ${a[@]@Q} transforms EVERY element, and the result is still a field list:
@@ -1738,11 +1738,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // delimiter. So `printf '<%s>' "${a[@]@A}"` prints three items under the
                     // default IFS, one under IFS=: and two (`declare -a a`, the value) under
                     // IFS==. The [*] form is the one string `declare -a a=(...)` whatever
-                    // IFS holds. Twin of rt_declxa in languages/lib/bash-rt.c.
+                    // IFS holds, except unquoted under a null IFS (see starFields). Twin of
+                    // rt_declxa in languages/lib/bash-rt.c.
                     if (idxXf == "A" && declIsArr(idxName)) {
                         var dflag = "-" + varAttrs(idxName)
                         var dasg = declArrAssign(idxName)
-                        if (sub == "*") { return "declare " + dflag + " " + dasg }
+                        // Unquoted, [@] is the [*] string too, split like any other value.
+                        if ((sub == "*" || uqStar) && !starFields()) { return "declare " + dflag + " " + dasg }
                         if (ifsFirst() == "") { return encFields(["declare", dflag, dasg]) }
                         var dval = dasg.slice(idxName.length + 1)
                         var dtxt = "declare " + dflag + " " + idxName + "="
@@ -1757,14 +1759,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         if (idxXf == "K") { return kvJoinedK(idxName) }
                         var kvs = kvPairs(idxName)
                         if (sub == "@") { return encFields(kvs) }
-                        return joinList(kvs, ifsFirst())
+                        return starJoin(kvs)
                     }
                     var vals = scValList(idxName)
                     var outv = []
                     var q
                     for (q = 0; q < vals.length; q++) { outv.push(xformOne(vals[q], idxXf, idxName, true)) }
                     if (sub == "@") { return encFields(outv) }
-                    return joinList(outv, ifsFirst())
+                    return starJoin(outv)
                 }
             }
             // A PATTERN OPERATOR ON A SUBSCRIPTED EXPANSION (${a[@]/x/Y}, ${a[1]#p}).
@@ -1793,7 +1795,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         pout.push(applyPatOp(pvals[pq], idxPe, idxAnch, pat, rep))
                     }
                     if (sub == "@") { return encFields(pout) }
-                    return joinList(pout, ifsFirst())
+                    if (idxPe == "#" || idxPe == "##" || idxPe == "%" || idxPe == "%%") { return starJoinSp(pout) }
+                    return starJoin(pout)
                 }
             }
             var idxOp = op
@@ -1853,6 +1856,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return applyPatOp(getVarVal(nameOf()), sPe, sAnch, pat, rep)
             }
         }
+        if (op == "" && name == "*" && !indirect) { return function() { return starJoin(posParams) } }
         if (op == "") { return function() { return getVarVal(nameOf()) } }
         return function() {
             var v = getVarVal(nameOf())
@@ -2210,6 +2214,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function mkSplittable(t) { return {sp: t} }
+    // AN UNQUOTED [*] UNDER A NULL IFS IS A FIELD LIST: with nothing to join on, bash 5.3
+    // keeps the elements apart exactly as for [@] (`IFS=; set -- "a b" c "" d; printf
+    // '<%s>' $*` is <a b><c><d>), while "$*" is still the one string "a bcd". ${!a[*]}
+    // and the four strips join with a blank instead, so `${a[*]%d}` stays ONE field.
+    // uqStar is set while an unquoted expansion runs (mkWord) and cleared inside quotes,
+    // the words nested in a ${...} and command substitutions. Twin of uqStarEmit in
+    // languages/bash-to-llvm-ir.abnf.
+    var uqStar = false
+    function starFields() { return uqStar && ifsFirst() == "" }
+    function starJoin(list) {
+        if (starFields()) { return encFields(list) }
+        return joinList(list, ifsFirst())
+    }
+    function starJoinSp(list) {
+        if (starFields()) { return joinList(list, " ") }
+        return joinList(list, ifsFirst())
+    }
 
     // ---- arrays -------------------------------------------------------------------------
     // One store for both kinds: keys are strings, kept in insertion order for an associative
@@ -2407,7 +2428,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `d=(""); echo "${d[@]-D}"` is empty while "${d[@]:-D}" is D.
     function listOpValue(name, sub, op, wordT) {
         var vals = scValList(name)
-        var joined = (sub == "@") ? encFields(vals) : joinList(vals, ifsFirst())
+        var joined = (sub == "@") ? encFields(vals) : starJoin(vals)
         if (op == "") { return joined }
         var colon = (op.charAt(0) == ":")
         var o = colon ? op.slice(1) : op
@@ -2476,7 +2497,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var savedFrames = localFrames
             localFrames = []
             var r = anytype
+            var svq = uqStar
+            uqStar = false
             r = bodyT()
+            uqStar = svq
             runExitTrap()
             restoreShellState(saved)
             localFrames = savedFrames
@@ -2487,7 +2511,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     function mkArCmdSub(subT) { return function() { return strToInt(wordJoin(subT())) } }
-    function mkVarRef(name) { return function() { return getVarVal(name) } }
+    function mkVarRef(name) {
+        if (name == "*") { return function() { return starJoin(posParams) } }
+        return function() { return getVarVal(name) }
+    }
     function mkArith(intThunk) { return function() { return numToStr(intThunk()) } }
     // ---- brace expansion (purely syntactic, so it is done once at BUILD time) ----
     // A word's segment list is turned into N segment lists (the cross product of every brace
@@ -2578,6 +2605,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkDqWord(segs) {
         return function() {
             var res = [""]
+            var svq = uqStar
+            uqStar = false
             var i
             for (i = 0; i < segs.length; i++) {
                 var v = segs[i]()
@@ -2588,6 +2617,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     for (j = 1; j < f.length; j++) { res.push(f[j]) }
                 }
             }
+            uqStar = svq
             if (res.length == 1) { return res[0] }
             return encFields(res)
         }
@@ -2626,6 +2656,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var res = []
                 var open = ""
                 var opened = false
+                var svq = uqStar
+                uqStar = false
                 var k
                 for (k = 0; k < segThunks.length; k++) {
                     var v = segThunks[k]()
@@ -2639,6 +2671,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         }
                     } else { open = open + v; opened = true }
                 }
+                uqStar = svq
                 if (opened) { res.push(open) }
                 if (res.length == 1) { return res[0] }
                 return encFields(res)
@@ -2669,7 +2702,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var sg = segThunks[k]
                 if (typeof sg == "function") { open = open + sg(); opened = true }
                 else {
+                    var svq = uqStar
+                    uqStar = true
                     var v = uqList(sg.sp())
+                    uqStar = svq
                     var f = anytype
                     var lead = false
                     var trail = false

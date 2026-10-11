@@ -1252,6 +1252,31 @@ s28() {
   set -- $@
   check ifs21 "$#" 2
   check ifs22 "[$2]" "[b c]"
+  # AN UNQUOTED [*] UNDER A NULL IFS IS A FIELD LIST, exactly like [@]: there is
+  # nothing to join on, so each non-empty element stands alone. Quoted, it is the
+  # one joined string. ${!a[*]} and the strips join with a blank and stay ONE field.
+  set -- "a b" c "" d
+  set -- $*
+  check ifs23 "$#|$1|$3" "3|a b|d"
+  local -a st28=("a b" c "" d)
+  set -- x${st28[*]}y
+  check ifs24 "$#|$1|$3" "3|xa b|dy"
+  set -- ${st28[*]^^}
+  check ifs25 "$#|$1" "3|A B"
+  set -- ${st28[*]:1}
+  check ifs26 "$#|$1" "2|c"
+  set -- ${st28[*]@A}
+  check ifs27 "$#|$2" "3|-a"
+  local -a sk28=(ab c "" d)
+  set -- ${sk28[*]%d}
+  check ifs28 "$#|$1" "1|ab c  "
+  set -- ${!sk28[*]}
+  check ifs29 "$#|$1" "1|0 1 2 3"
+  # unquoted, ${a[@]@A} is the [*] string split on IFS, value and all
+  IFS=" a"
+  local -a a28=(x y)
+  set -- ${a28[@]@A}
+  check ifs30 "$#|$3|$4|$5" '6|-||28=([0]="x"'
   IFS="$saved_ifs"
   set --
 }
