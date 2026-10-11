@@ -2327,7 +2327,8 @@ func s38() {
 // 39k-39n are the controls: inferred and numeric slots still adopt, and a
 // shadowing declaration decides for its own scope only. 39p-39r: one property
 // NAME declared Any in one type and Double in another is decided by the type of
-// the object written, an inherited property included.
+// the object written, an inherited property included. 39s-39u: the same for an
+// element of such a property (`[Any]` in one type, `[Double]` in another).
 protocol P39 {}
 extension Int: P39 {}
 extension Double: P39 {}
@@ -2342,6 +2343,10 @@ struct MA39 { var m39: Any; mutating func set() { m39 = 4 } }
 struct MD39 { var m39: Double; mutating func set() { m39 = 4 } }
 class BA39 { var m39: Any = 1.5; func set() { m39 = 5 } }
 class SA39: BA39 { func set2() { m39 = 6 } }
+class N39 { var e39 = [1.5, 2.5]; var dv39 = ["a": 1.5] }
+struct X39 { var e39: [Any]; var dv39: [String: Any] }
+class XB39 { var e39: [Any] = [1.5] }
+class XS39: XB39 { func put() { e39[0] = 4 } }
 func s39() {
     var a: Any = 1.5
     a = 2
@@ -2421,6 +2426,19 @@ func s39() {
     var mds = [MD39(m39: 1.5)]
     mds[0].m39 = 9
     check("39r", "\(ams[0].m39)" == "9" && "\(mds[0].m39)" == "9.0")
+    var x = X39(e39: [1.5], dv39: ["a": 1.5])
+    x.e39[0] = 3
+    x.dv39["a"] = 2
+    let n = N39()
+    n.e39[0] = 3
+    n.dv39["a"] = 2
+    check("39s", "\(x.e39[0]) \(x.dv39["a"]!)" == "3 2" && "\(n.e39[0]) \(n.dv39["a"]!)" == "3.0 2.0")
+    let xs = XS39()
+    xs.put()
+    check("39t", "\(xs.e39[0])" == "4")
+    var xa = [X39(e39: [0.5], dv39: [:])]
+    xa[0].e39[0] = 8
+    check("39u", "\(xa[0].e39[0])" == "8")
 }
 
 // ===== SECTION 40: optional subscripts, `as?` before `??`, builtin extensions =====
@@ -3210,6 +3228,42 @@ func s64() {
     check("prj1", Proj64().both() == 12)
 }
 
+// ===== SECTION 65: an implicit member that names a static member =====
+// `.name` resolves against the expected type, and a static func or property is a
+// member as much as an enum case is: `let s: S65 = .make { 41 }` calls S65.make.
+struct S65 {
+    var n: Int
+    static func make(_ f: () -> Int) -> S65 { return S65(n: f()) }
+    static func dbl(_ k: Int) -> S65 { return S65(n: k * 2) }
+    static var zero: S65 { return S65(n: 0) }
+}
+extension S65 {
+    static func twice(_ k: Int, by f: (Int) -> Int) -> S65 { return S65(n: f(f(k))) }
+}
+enum D65 {
+    case up, down
+    static func pick(_ b: Bool) -> D65 { return b ? .up : .down }
+}
+class K65 {
+    var tag: String
+    init(_ t: String) { tag = t }
+    static func named(_ s: String) -> K65 { return K65(s) }
+}
+func take65(_ s: S65) -> Int { return s.n }
+func s65() {
+    let a: S65 = .make { 41 }
+    let b: S65 = .dbl(5)
+    let z: S65 = .zero
+    check("imp1", a.n == 41 && b.n == 10 && z.n == 0)
+    let u: S65 = .twice(3) { $0 + 10 }
+    check("imp2", u.n == 23 && take65(.dbl(21)) == 42)
+    let d: D65 = .pick(false)
+    let k: K65 = .named("x")
+    check("imp3", d == .down && k.tag == "x")
+    let ss: [S65] = [.dbl(1), .zero, .make { 7 }]
+    check("imp4", ss.map { $0.n } == [2, 0, 7])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3275,6 +3329,7 @@ func main() {
     s62() // SECTION-CALL 62
     s63() // SECTION-CALL 63
     s64() // SECTION-CALL 64
+    s65() // SECTION-CALL 65
     print("full: \(checks) checks, \(fails) failures")
 }
 

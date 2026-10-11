@@ -1498,15 +1498,18 @@ HexFDig     = "0"..."9" | "a"..."f" | "A"..."F" ;
 // lookup base is not self's own type.)
 SuperRef    <~~ push(makeSuperRef()) ~~> = KwSuper ;
 
-// An implicit member expression: `.tails`, `.circle(r: 5)`. Swift resolves the
-// leading dot against the expected TYPE; this front end has no type checker, so it
-// builds an unqualified enum case value carrying only the case name and, if given,
-// its associated values. Matching and == compare enum cases by NAME, so an
-// unqualified `.tails` and a qualified `Coin06.tails` are the same value.
+// An implicit member expression: `.tails`, `.circle(r: 5)`, `.make { 1 }`. Swift
+// resolves the leading dot against the expected TYPE; this front end has no type
+// checker, so a name that is a static member of exactly one type and no enum case
+// is that type's member (swDotStatic), and anything else builds an unqualified enum
+// case value carrying only the case name and, if given, its associated values.
+// Matching and == compare enum cases by NAME, so an unqualified `.tails` and a
+// qualified `Coin06.tails` are the same value.
 DotMember   <~~ push(makeDotMember(takeAll())) ~~>
             = "." Id <~~ push({dname: swBt(up.in)}) ~~> [ DotArgs ] ;
 DotArgs     <~~ push({dargs: takeAll()}) ~~>
-            = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" ;
+            = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
+            | NoTrailCtx TrailArg { LabTrail } ;
 
 // The # expression literals. #available / #unavailable answer a constant (this
 // runtime has no platform to compare against, and the guarded code is the code
@@ -6188,6 +6191,8 @@ KwContinue  = "continue" KwEnd ;
         var hr = emitPathHead(b, ref.name)
         b = hr.b
         var o = hr.v
+        // The object owning the last property step, for swExfRef.
+        var own = null
         for (var i = 0; i < ref.path.length; i++) {
             var s = ref.path[i]
             if (s.opt == true) {
@@ -6199,6 +6204,7 @@ KwContinue  = "continue" KwEnd ;
                 nilExits.push(nB)
                 b = contB
             }
+            if (s.key != undefined) { own = o }
             if (i == ref.path.length - 1) { break }
             if (s.key != undefined) {
                 if (precs != undefined && hasOwn(swObsProps, "$" + s.key)) { precs.push(emitPropBefore(b, o, s.key)) }
@@ -6207,9 +6213,9 @@ KwContinue  = "continue" KwEnd ;
             else { var ri = s.idx(b); b = ri.b; o = emitIndexRead(b, o, ri.v) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), keyName: last.key, isField: true} }
+        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), keyName: last.key, isField: true, own: own} }
         var kr = last.idx(b)
-        return {b: kr.b, obj: o, key: kr.v, keyName: "", isField: false}
+        return {b: kr.b, obj: o, key: kr.v, keyName: "", isField: false, own: own}
     }
     // The value an element write is about to overwrite, read WITHOUT the ordinary
     // subscript machinery: `ages["carol"] = 40` adds a key, and a Swift dictionary
@@ -6258,8 +6264,9 @@ KwContinue  = "continue" KwEnd ;
             // A write to an existential slot keeps what it is given; see swKeepMode.
             // An implicit `self.x` is decided by the enclosing type, statically.
             var mode = swKeepMode(ref, hasLocal, localAnn)
-            if (mode == 2 && ref.path.length == 0) {
-                mode = curType() != null && swSelfExist(curType().name, ref.name) ? 1 : 0
+            var exr = swExfRef(ref)
+            if (mode == 2 && exr.lk < 0) {
+                mode = curType() != null && swSelfExist(curType().name, exr.key) ? 1 : 0
             }
             var keepTy = mode == 1
             // An optional-chain target is resolved BEFORE the right-hand side, which
@@ -6349,11 +6356,7 @@ KwContinue  = "continue" KwEnd ;
                     if (op != "=" || !keepTy) {
                         var oldf = emitFieldRead(b, p.obj, p.keyName)
                         if (op != "=") { v = emitBin(b, op, oldf, v) }
-                        if (mode == 2) {
-                            var exfV = b.NewCall(rtSafeGet(), [b.NewCall(rtClassOf(), [p.obj]), emitStr(b, "__exf_" + p.keyName)])
-                            var adV = callExt(b, "js_swadoptlike", [oldf, v, emitStr(b, "")])
-                            v = b.NewSelect(truthy(b, exfV), v, adV)
-                        } else if (!keepTy) { v = callExt(b, "js_swadoptlike", [oldf, v, emitStr(b, "")]) }
+                        if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, oldf, v, "") }
                     }
                     if (isSetterName(p.keyName)) {
                         b.NewCall(rtSetProp(), [p.obj, p.key, v])
@@ -6365,14 +6368,14 @@ KwContinue  = "continue" KwEnd ;
                         var olds = b.NewCall(rtSubGet(), [p.obj, p.key])
                         v = emitBin(b, op, olds, v)
                     }
-                    if (!keepTy) { v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)]) }
+                    if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, swSafeElem(b, p), v, elemTy) }
                     b.NewCall(rtSubSet(), [p.obj, p.key, v])
                 } else {
                     if (op != "=") {
                         var oldm = callExt(b, "js_swidx", [p.obj, p.key])
                         v = emitBin(b, op, oldm, v)
                     }
-                    if (!keepTy) { v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)]) }
+                    if (!keepTy) { v = swEmitPathAdopt(b, mode, p.own, exr.key, swSafeElem(b, p), v, elemTy) }
                     callExt(b, "js_swdset", [p.obj, p.key, v])
                 }
                 if (precs.length > 0) { b = emitPropReplay(b, precs) }
@@ -6580,10 +6583,9 @@ KwContinue  = "continue" KwEnd ;
     // declared type is the local's (`a`, `a[0]`) or else the last PROPERTY's on the
     // path (`s.v`, `s.xs[0]`; an unqualified name with no local declaration is an
     // implicit `self.x`), peeled by the subscripts after it. Properties are known by
-    // NAME, so a name declared existential in one type and numeric in another is 2
-    // - answered by the owner's `__exf_<name>` marker - when the property is the
-    // last step, and adopts otherwise. Asked after the walk, so every protocol and
-    // property is known.
+    // NAME, so a name declared existential in one type and numeric in another is 2,
+    // answered by the owning object's type (swExfRef). Asked after the walk, so
+    // every protocol and property is known.
     function swKeepMode(ref, hasLocal, localAnn) {
         var lk = -1
         for (var i = 0; i < ref.path.length; i++) { if (ref.path[i].key != undefined) { lk = i } }
@@ -6598,11 +6600,42 @@ KwContinue  = "continue" KwEnd ;
         }
         if (ex == 0) { return 0 }
         if (ex == cands.length) { return 1 }
-        return n == 0 ? 2 : 0
+        return 2
+    }
+    // The marker a type carries when its property `name`, peeled by n subscripts, is
+    // existential: `__exf_<name>` for the property itself, `__exf<n>_<name>` below
+    // it (`var xs: [Any]` marks `__exf1_xs`). Twin of swExfMarks in
+    // swift-interpreter.abnf.
+    function swExfKey(name, n) { return n == 0 ? "__exf_" + name : "__exf" + n + "_" + name }
+    function swExfMarks(out, name, ann) {
+        if (ann == undefined || ann === null) { return }
+        if (swTyIsExist(ann)) { out.push(swExfKey(name, 0)) }
+        var n = 1
+        var t = swTyPeel(ann, 1)
+        while (t != "") {
+            if (swTyIsExist(t)) { out.push(swExfKey(name, n)) }
+            n = n + 1
+            t = swTyPeel(ann, n)
+        }
+    }
+    // A write's last property step (lk, -1 for an implicit `self.x`) and the marker
+    // its owner answers mode 2 with.
+    function swExfRef(ref) {
+        var lk = -1
+        for (var i = 0; i < ref.path.length; i++) { if (ref.path[i].key != undefined) { lk = i } }
+        return {lk: lk, key: swExfKey(lk >= 0 ? ref.path[lk].key : ref.name, ref.path.length - 1 - lk)}
+    }
+    // The adopted value of a path write (mode 0), or, in mode 2, the value as given
+    // when the owner's type carries the write's marker.
+    function swEmitPathAdopt(b, mode, own, key, old, v, ty) {
+        var adV = callExt(b, "js_swadoptlike", [old, v, emitStr(b, ty)])
+        if (mode != 2) { return adV }
+        var exfV = b.NewCall(rtSafeGet(), [b.NewCall(rtClassOf(), [own]), emitStr(b, key)])
+        return b.NewSelect(truthy(b, exfV), v, adV)
     }
     // Per type NAME, its stored properties and its superclass, so a descriptor can
-    // carry an `__exf_<name>` marker for every existential property it has,
-    // inherited ones included.
+    // carry the swExfKey marker of every existential property it has, inherited
+    // ones included.
     var typeFieldAnn = {}
     function swTypeExFields(tn0) {
         var out = []
@@ -6610,23 +6643,18 @@ KwContinue  = "continue" KwEnd ;
         var guard = 0
         while (tn != null && hasOwn(typeFieldAnn, "$" + tn) && guard < 64) {
             var r = typeFieldAnn["$" + tn]
-            for (var i = 0; i < r.fs.length; i++) {
-                var a = r.fs[i].ann
-                if (a != undefined && swTyIsExist(a)) { out.push(r.fs[i].store) }
-            }
+            for (var i = 0; i < r.fs.length; i++) { swExfMarks(out, r.fs[i].store, r.fs[i].ann) }
             // A computed or observed property, by its own name.
-            for (var j = 0; j < r.cs.length; j++) {
-                if (swTyIsExist(r.cs[j].ann)) { out.push(r.cs[j].name) }
-            }
+            for (var j = 0; j < r.cs.length; j++) { swExfMarks(out, r.cs[j].name, r.cs[j].ann) }
             tn = r.sup
             guard = guard + 1
         }
         return out
     }
     // An implicit `self.x` inside a type body, decided by that type's own property.
-    function swSelfExist(tn, name) {
+    function swSelfExist(tn, key) {
         var exf = swTypeExFields(tn)
-        for (var i = 0; i < exf.length; i++) { if (exf[i] == name) { return true } }
+        for (var i = 0; i < exf.length; i++) { if (exf[i] == key) { return true } }
         return false
     }
     // The numeric type each name was DECLARED at, filled as the walk passes the
@@ -8622,6 +8650,7 @@ KwContinue  = "continue" KwEnd ;
     function makeTypeStmt(items, isStruct) {
         var name = items[0]
         var mem = splitMembers(items, 1)
+        swNoteStatics(name, mem)
         if (declaresWrappedValue(mem)) { wrapperNames["$" + name] = 1 }
         if (isStruct) { hasStructs = true }
         var rec = newTypeRec(name)
@@ -8690,7 +8719,7 @@ KwContinue  = "continue" KwEnd ;
             }
             // An existential stored property is marked on the type; see swKeepMode.
             var exf = swTypeExFields(name)
-            for (var xf = 0; xf < exf.length; xf++) { callExt(b, "js_set", [clsV, emitStr(b, "__exf_" + exf[xf]), hTrue]) }
+            for (var xf = 0; xf < exf.length; xf++) { callExt(b, "js_set", [clsV, emitStr(b, exf[xf]), hTrue]) }
             // ONE binding, under the qualified key (== the bare name at top level).
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.key), clsV])
             if (superName != null) {
@@ -8977,6 +9006,7 @@ KwContinue  = "continue" KwEnd ;
         var parts = swSplitDots(path)
         var base = parts[parts.length - 1]
         var mem = splitMembers(items, k)
+        swNoteStatics(base, mem)
         if (protoNames[base] == 1) { noteProtoKeys(base, mem) }
         var pathKey = typeKeyOfPath(path)
         var rec = pathKey == null ? typeRec(base) : typeRec(pathKey)
@@ -9124,6 +9154,31 @@ KwContinue  = "continue" KwEnd ;
     // implicit `.none` / `.some(x)` that no program enum can mean is Optional's
     // (swDotOptional). Twin in swift-interpreter.abnf.
     var swCaseNames = {}
+    // Per static member NAME, the types declaring it (an extension's included).
+    // Twin of swStaticReg in swift-interpreter.abnf.
+    var swStaticReg = {}
+    function swNoteStatics(tn, mem) {
+        var ns = []
+        for (var i = 0; i < mem.statProps.length; i++) { ns.push(mem.statProps[i].name) }
+        for (var j = 0; j < mem.statMethods.length; j++) { ns.push(mem.statMethods[j].name) }
+        for (var k = 0; k < mem.statComps.length; k++) { ns.push(mem.statComps[k].name) }
+        for (var q = 0; q < ns.length; q++) {
+            if (!hasOwn(swStaticReg, "$" + ns[q])) { swStaticReg["$" + ns[q]] = [] }
+            var ts = swStaticReg["$" + ns[q]]
+            var seen = false
+            for (var t = 0; t < ts.length; t++) { if (ts[t] == tn) { seen = true } }
+            if (!seen) { ts.push(tn) }
+        }
+    }
+    // The one type whose static member an implicit `.name` means, or "": the name
+    // must be no enum case and a static member of exactly one type. Asked at emit
+    // time, when every type is registered.
+    function swDotStatic(dname) {
+        if (swCaseNames["$" + dname] === true || !hasOwn(swStaticReg, "$" + dname)) { return "" }
+        var ts = swStaticReg["$" + dname]
+        if (ts.length != 1 || typeAt(typeKeyOf(ts[0])) == null) { return "" }
+        return ts[0]
+    }
     // "none" with no arguments is nil, "some" with one is its argument; "" when
     // the leading-dot member is not Optional's.
     function swDotOptional(dname, nargs) {
@@ -9162,6 +9217,7 @@ KwContinue  = "continue" KwEnd ;
     function makeEnumStmt(items) {
         var name = items[0]
         var mem = splitMembers(items, 1)
+        swNoteStatics(name, mem)
         var kind = rawKind(mem.raw)
         enumNames[name] = 1
         hasRichEnum = true
@@ -9273,6 +9329,16 @@ KwContinue  = "continue" KwEnd ;
         }
         hasRichEnum = true
         return function(b) {
+            var stTn = swDotStatic(dname)
+            if (stTn != "") {
+                var clsV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, typeKeyOf(stTn))])
+                if (args == null) { return {b: b, v: emitFieldRead(b, clsV, dname)} }
+                var ea = emitArgRecsInto(b, args, null, "")
+                b = ea.b
+                var rv = swEmitLMCall(b, clsV, {name: dname, args: args}, emitStr(b, dname), ea.v)
+                emitWriteBacks(b, ea.boxes)
+                return {b: b, v: rv}
+            }
             if (args == null) {
                 if (swDotOptional(dname, -1) == "none") { return {b: b, v: hNull} }
                 return {b: b, v: emitCaseObj(b, null, dname, hUndef, hNull, null, emitStr(b, dname + "()"))}
