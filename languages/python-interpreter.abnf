@@ -7632,7 +7632,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "**") {
             var e = bigToNum(r)
             if (e < 0) { return {v: pyFlo(pyPowF(bigIsBig(l) ? bigToFlo(l) : bigToNum(l), e))} }
-            if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
+            // Exact at any exponent a double counts exactly, as in rt.pyBin's
+            // `**` (abnf/jsrt.go) and pyABigBin (lib/python-rt.metajs).
+            if (e > 9007199254740992) { return {v: pyPowF(bigToNum(l), e)} }
             return {v: bigOut(bigPow(a, e))}
         }
         // The bit operators at arbitrary precision, not bigToNum and the tag

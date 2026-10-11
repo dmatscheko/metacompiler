@@ -16371,7 +16371,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					}
 					return w(&jsPyFlo{f: rt.pyPowF(base, e)})
 				}
-				if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 4096 {
+				if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 9007199254740992 {
 					if bl, ok := pyBigOperand(l); ok {
 						return w(rt.pyBigNarrow(new(big.Int).Exp(bl, big.NewInt(int64(e)), nil)))
 					}

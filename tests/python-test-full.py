@@ -4516,6 +4516,18 @@ def s89():
         return a is sentinel
     check("obj9", f() and not f(0))
 
+# ===== SECTION 90: int ** int at a large exponent =====
+# An int raised to a non-negative int is an exact int whatever the exponent's
+# size; no exponent turns it into a float. Rows from CPython 3.14.
+def s90():
+    v = [10, 4097, 5000, 2, 7, 3]
+    check("pwb1", v[3] ** v[1] % 1000003 == 2 ** 4097 % 1000003 == 833217 and type(v[3] ** v[1]) is int)
+    check("pwb2", pow(v[4], v[1]) % 1009 == 783 and pow(-3, 4097) % 1013 == 435 and (-2) ** v[1] < 0)
+    check("pwb3", len(str(2 ** 4097)) == 1234 and str(v[3] ** v[1])[-6:] == "380672")
+    x = v[3]
+    x **= 4100
+    check("pwb4", x % 997 == 12 and x > 2 ** 4099 and x == 2 ** 4100)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4606,5 +4618,6 @@ def main():
     s87() # SECTION-CALL 87
     s88() # SECTION-CALL 88
     s89() # SECTION-CALL 89
+    s90() # SECTION-CALL 90
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

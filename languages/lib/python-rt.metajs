@@ -2505,7 +2505,6 @@ function pyABigBin(op, x, y) {
         if (y["neg"]) { return null }
         var e = rtABigNarrow(y)
         if (typeof e != "number") { return null }
-        if (e > 4096) { return null }
         return rtABigPow(x, e)
     }
     return null
@@ -4040,7 +4039,7 @@ function js_pybin(opv, l, r) {
             if (pyIsBig(l)) { return pyMkFlo(pyAPowF(pyBigToF(l), ex)) }
             return pyMkFlo(pyAPowF(pyAOperand(l, op, l, r), ex))
         }
-        if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
+        if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 9007199254740992) {
             var bl = pyABigOperand(l)
             if (bl !== null) { return rtABigNarrow(rtABigPow(bl, ex)) }
         }
