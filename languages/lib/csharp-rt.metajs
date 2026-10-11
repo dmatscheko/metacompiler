@@ -102,6 +102,7 @@ import "./utf16-strings.js"
 import "./csharp-strings.js"
 import "./csharp-collections.js"
 import "./csharp-linq.js"
+import "./csharp-math.js"
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return csCmp(op, l, r) }
@@ -212,6 +213,9 @@ function csxkNumKind(v) {
 function csxkFlo(x) { return flo(x, 2) }
 function csxkFlo32(x) { return flo(rtF32Round(x), 5) }
 function csxkAdd(a, b) { return js_csadd2(a, b) }
+
+// ----- System.Math (lib/csharp-math.js) --------------------------------------
+function csxkArith(op, a, b) { return csArith(op, a, b) }
 // A lambda declaring two parameters: the LINQ overloads that also pass the
 // element's index are chosen by it. Twin of the fnMetaSet in the interpreter's
 // makeLambda.
@@ -1239,6 +1243,13 @@ function csTypeObject(name0) {
         o["__cstype"] = "Enumerable"
         return o
     }
+    if (name0 == "Math") {
+        o["__cstype"] = "Math"
+        o["PI"] = flo(Math.PI, 2)
+        o["E"] = flo(Math.E, 2)
+        o["Tau"] = flo(2 * Math.PI, 2)
+        return o
+    }
     var name = csTypeAlias(name0)
     var w = csTypeW(name)
     if (w == 0) { return o }
@@ -1548,6 +1559,7 @@ function js_mcall(recv, name, args) {
     if (cst !== undefined) {
         if (cst == "char") { return csxCharStatic(name, args) }
         if (cst == "Enumerable") { return csqStatic(name, args) }
+        if (cst == "Math") { return csmStatic(name, args) }
         return csxStringStatic(name, args)
     }
     var cls = recv["__class"]

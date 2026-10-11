@@ -517,6 +517,12 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 	case "Enumerable":
 		o.set("__cstype", "Enumerable")
 		return o
+	case "Math":
+		o.set("__cstype", "Math")
+		o.set("PI", jsJFlo{f: math.Pi, sty: floCS})
+		o.set("E", jsJFlo{f: math.E, sty: floCS})
+		o.set("Tau", jsJFlo{f: 2 * math.Pi, sty: floCS})
+		return o
 	}
 	// double.Parse / double.TryParse: csxParseDouble over the string; TryParse's
 	// out argument is a reference box, written 0 on a failure. Twins: the double
@@ -1454,6 +1460,8 @@ func init() {
 					return w(rt.csxStringStatic(name, elems))
 				case "Enumerable":
 					return w(rt.csqStatic(name, elems))
+				case "Math":
+					return w(rt.csmStatic(name, elems))
 				}
 				if _, isQuery := csqIsQuery(r); isQuery {
 					return w(rt.csqMethod(r, name, elems))

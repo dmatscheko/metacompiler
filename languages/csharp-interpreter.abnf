@@ -1683,6 +1683,7 @@ KwLet       = "let" KwEnd ;
     include("lib/csharp-strings.js")
     include("lib/csharp-collections.js")
     include("lib/csharp-linq.js")
+    include("lib/csharp-math.js")
 
     // The host names a program can see. Console is built here.
     // With more than one argument the first is a composite format string
@@ -1714,6 +1715,8 @@ KwLet       = "let" KwEnd ;
     hostGlobals["StringComparer"] = csxStrComparerType()
     // System.Linq.Enumerable's static members (lib/csharp-linq.js's csqStatic).
     hostGlobals["Enumerable"] = {__cstype: "Enumerable"}
+    // System.Math's static members (lib/csharp-math.js's csmStatic) and constants.
+    hostGlobals["Math"] = {__cstype: "Math", PI: {__flo: Math.PI}, E: {__flo: Math.E}, Tau: {__flo: 2 * Math.PI}}
 
     // The integral type NAMES as expression primaries, so `int.MaxValue` and
     // `ulong.MaxValue` resolve. Each keyword and its System alias name the same
@@ -2758,6 +2761,8 @@ KwLet       = "let" KwEnd ;
     function csxkFlo(x) { return csFlo(x) }
     function csxkFlo32(x) { return csFlo32(x) }
     function csxkAdd(a, b) { return csAdd(a, b) }
+    // ----- System.Math (lib/csharp-math.js) -----
+    function csxkArith(op, a, b) { return csArith(op, a, b) }
 
     // ----- iterators ('yield return'), driven by REPLAY -----
     // A method whose body contains a yield is an ITERATOR: calling it runs NOTHING and
@@ -3034,6 +3039,7 @@ KwLet       = "let" KwEnd ;
         if (csIsChar(target)) { return csxCharMethod(target, name, args) }
         if (target !== null && typeof target == "object" && target.__cstype !== undefined) {
             if (target.__cstype == "Enumerable") { return csqStatic(name, args) }
+            if (target.__cstype == "Math") { return csmStatic(name, args) }
             return target.__cstype == "char" ? csxCharStatic(name, args) : csxStringStatic(name, args)
         }
         if (csqIsQuery(target)) { return csqMethod(target, name, args) }

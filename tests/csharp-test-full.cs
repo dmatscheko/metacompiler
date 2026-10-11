@@ -3391,6 +3391,49 @@ b";                                                   // verbatim keeps the newl
                 && l.Count == 2 && l[1] == 6 && l2.Count == 2 && l2[1] == 2);
         }
 
+        // ===== SECTION 55: System.Math =====
+        //
+        // The overload follows the arguments: Abs, Sign, Max, Min and Clamp of
+        // integral arguments stay integral (Max(int, long) is a long, so the product
+        // below does not wrap), a double argument makes a double, and Abs of
+        // MinValue overflows. Round is to even and keeps a zero's sign, Max / Min of
+        // doubles are IEEE 754-2019's (NaN wins, +0 > -0), Pow(1, NaN) is 1, and
+        // Sign(NaN) throws. No C# toolchain here: the values are the BCL docs' and
+        // were cross-checked with python3's math module.
+        static void S55()
+        {
+            int[] i = { 1, -2, 3, int.MinValue, 0 };
+            long[] l = { 5L, -7L, long.MinValue };
+            double[] d = { 2.5, -2.5, 0.5, -0.4, 3.7, 0.0, 2.0, 1.5 };
+            double nz = -d[5];
+            double nan = d[5] / d[5];
+            Program.Check("s55m1", Math.Max(i[0], i[2]) == 3 && Math.Min(i[0], i[1]) == -2 && Math.Abs(i[1]) == 2
+                && Math.Max(i[2], i[0]) / 2 == 1 && "" + Math.Max(i[0], d[0]) == "2.5" && Math.Max(i[2], d[0]) / 2 == 1.5
+                && Math.Max(i[2], l[1]) * 1000000000 == 3000000000L && Math.Abs(l[1]) == 7L && Math.Sign(i[1]) == -1
+                && Math.Sign(l[0]) == 1 && Math.Sign(i[4]) == 0 && Math.Sign(d[3]) == -1);
+            Program.Check("s55r1", "" + Math.Round(d[0]) + Math.Round(d[1]) + Math.Round(d[2]) + Math.Round(d[3]) + Math.Round(d[7]) == "2-20-02"
+                && "" + Math.Floor(d[3]) + Math.Ceiling(d[3]) + Math.Truncate(d[4]) + Math.Ceiling(-d[4]) == "-1-03-3"
+                && "" + Math.Round(3.14159, 2) + ";" + Math.Round(2.135, 2) + ";" + Math.Round(d[0], 0) == "3.14;2.13;2"
+                && "" + Math.Abs(nz) + Math.Abs(d[1]) == "02.5");
+            Program.Check("s55f1", Math.Sqrt(d[6]) == 1.4142135623730951 && Math.Pow(d[6], 10) == 1024.0
+                && Math.Pow(d[0], d[1]) == 0.10119288512538814 && Math.Log10(1000) == 3.0 && Math.Log(8, 2) == 3.0
+                && Math.Log2(1024) == 10.0 && Math.Cbrt(27) == 3.0 && "" + Math.PI == "3.141592653589793"
+                && "" + Math.E == "2.718281828459045" && Math.Tau == 2 * Math.PI && Math.Abs(Math.Sin(d[6]) - 0.9092974268256817) < 1e-15
+                && Math.Atan2(d[0], d[1]) == 2.356194490192345 && Math.Exp(d[5]) == 1.0);
+            Program.Check("s55n1", "" + Math.Max(d[5], nz) + Math.Min(d[5], nz) + Math.Max(nz, d[5]) + Math.Min(nz, d[5]) == "0-00-0"
+                && "" + Math.Max(nan, d[0]) + Math.Min(d[0], nan) == "NaNNaN" && Math.Pow(1, nan) == 1.0
+                && Math.Pow(-1, 1 / d[5]) == 1.0);
+            Program.Check("s55c1", Math.Clamp(i[2], 0, 2) == 2 && Math.Clamp(i[1], 0, 5) == 0 && "" + Math.Clamp(d[1], -1.0, 1.0) == "-1"
+                && Math.Clamp(i[0], d[5], d[7]) / 2 == 0.5);
+            string ex = "";
+            try { Math.Abs(i[3]); } catch (OverflowException e) { ex += "a" + (e.Message == "Negating the minimum value of a twos complement number is invalid." ? "" : "?"); }
+            try { Math.Abs(l[2]); } catch (OverflowException) { ex += "b"; }
+            try { Math.Sign(nan); } catch (ArithmeticException) { ex += "c"; }
+            try { Math.Clamp(i[0], 5, 2); } catch (ArgumentException) { ex += "d"; }
+            try { Math.Round(d[0], 16); } catch (ArgumentOutOfRangeException) { ex += "e"; }
+            Program.Check("s55e1", ex == "abcde");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3447,6 +3490,7 @@ b";                                                   // verbatim keeps the newl
             Program.S52(); // SECTION-CALL 52
             Program.S53(); // SECTION-CALL 53
             Program.S54(); // SECTION-CALL 54
+            Program.S55(); // SECTION-CALL 55
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
