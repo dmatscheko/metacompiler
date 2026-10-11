@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-361** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-363** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -149,12 +149,12 @@ name: sqrt" (the compiler answers both).
 
 # GO — Go  (oracle: `go run`)
 
-### T-240 go: a value of a defined non-struct type is the underlying value · P2 · GO · OPEN [V]
+### T-240 go: a value of a defined non-struct type is the underlying value · P2 · GO · IN PROGRESS (GO+SH worker, round 10) [V]
 `type MyInt int; var v interface{} = MyInt(4); _ = v.(int)` succeeds in all engines; go
 panics. Same family: int vs int64, rune vs int32 in type switches/asserts. Value-model:
 see T-081.
 
-### T-266 go: pointers, nil typed values and panic values in fmt and panics · P2 · GO · OPEN [V]
+### T-266 go: pointers, nil typed values and panic values in fmt and panics · P2 · GO · IN PROGRESS (GO+SH worker, round 10) [V]
 A pointer to a struct is the struct: `&T{}.(T)` does not panic (go `interface {} is
 *main.T, not main.T`), `%#v` of `&T{}` prints `main.T{...}` (go `&main.T{...}`). A nil
 chan/func/pointer operand reads as a nil interface (`%T` prints `<nil>`); `%T` of a
@@ -162,28 +162,19 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-349 go: a method on a defined non-struct type aborts · P1 · GO · IN PROGRESS (GO+SW+SH worker, round 9) [V]
-`type Celsius float64; func (c Celsius) String() string {...}` aborts all legs
-("method receiver type not found" / "cannot set field 'String' on *abnf.jsClosure").
-
-### T-350 go: pointer map keys; value-receiver copies; native struct map keys · P1 · GO + CORE · IN PROGRESS (GO+SW+SH worker, round 9) [V]
-(a) `map[*K]` with two `&K{1}` keys: interp/run `1 2 2`, native `2 1 1`, go `2 1 2`
-(keys compare by value; needs a key-type flag on the map's lookup path). (b) A value
-receiver's copy deep-copies pointer fields in all engines: `func (u U) touch(){
-u.p.a=5 }` leaves 1 (go 5) - rt.goCopyVal / goMethod in abnf/jsrt.go. (c) Values whose
-static type the front end cannot see (a call result's field, range over an array) are
-not copied. (d) Native: `v:=map[K]int{}; v[K{1}]=1; v[K{1}]=2; len(v)` is 2 (interp,
-run, go: 1) - a run-vs-native divergence in layer 2's struct-key hashing.
+### T-361 go: pointer to a slice; package var init order; interface dispatch on defined types · P1 · GO · IN PROGRESS (GO+SH worker, round 10) [V]
+`xs := []int{}; p := &xs; *p = append(*p, 1); add(&xs)` (`func add(p *[]int)`) prints
+`0 1`, go `2 2` (makeAddrVar returns the slice header, not a cell; also `ps :=
+&stack; ps.Push(9)`). `var g = f()` before `func f`: "unknown name: f" (go initialises
+package vars by dependency). `var d D = C(1); d.Desc()` with Desc on two defined
+non-struct types: "unknown method 'Desc'" (the value carries no runtime type - T-240).
+`go run tests/go-test-full.go` fails pn1-pn3 under go 1.27 (panic(nil) needs
+GODEBUG=panicnil=0 with go.mod's go 1.16; make the check self-describing or assert
+the go 1.21+ answer).
 
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
-
-### T-346 swift: `Int64 is Int`; `type(of:)` · P1 · SW · IN PROGRESS (GO+SW+SH worker, round 9) [V]
-`Int64 is Int` and `Int is Int64` are true (swiftc false); `as? Int` succeeds on an
-Int64; UInt ≡ UInt64. Fix locally: a flag on swift's own {__sz} box (Int64 always
-boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
-("unknown name: type").
 
 ---
 
@@ -205,9 +196,9 @@ boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
 bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
 bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
 
-### T-351 bash: `declare -p` of an empty or declared-only array · P1 · SH · IN PROGRESS (GO+SW+SH worker, round 9) [V]
-`ea=(); declare -a eb; declare -p ea eb`: bash `declare -a ea=()` / `declare -a eb`;
-both engines "bash: declare: ea: not found".
+### T-362 bash: a scalar declared without a value · P1 · SH · IN PROGRESS (GO+SH worker, round 10) [V]
+`declare ef; declare -p ef` and `f(){ local q=1; unset q; declare -p q; }`: both
+engines "not found"; bash `declare -- ef` / `declare -- q`.
 
 ---
 
@@ -519,6 +510,10 @@ T-080 kotlin: `Array`, `Sequence` and a Map's `values` say `List is empty.` — 
 T-347 kotlin: Long/Int identity in Any equality, sets and LongRange — PARTIAL a2b2800 5eecfc1 d57a423 (LongRange/LongArray Longs, float≠int through Any, Long sum); Int vs Long equality is T-357
 T-353 php: echo of a lone byte prints U+FFFD — DONE 01cb044 d123350 (spec-only; raw bytes via writeBytes; only reached library functions are compiled, 1.02 s → 0.12 s)
 T-354 python: `int.real` compiled — DONE 1fd5daa
+T-351 bash: `declare -p` of an empty or declared-only array — DONE bf02b13
+T-349 go: a method on a defined non-struct type aborts — DONE 1dfd541 186c060 (Stringer of a defined non-struct type: T-240)
+T-350 go: pointer map keys; value-receiver copies; native struct map keys — DONE df44f10
+T-346 swift: `Int64 is Int`; `type(of:)` — DONE 6cffef4 (Int64/UInt64 carry width 65 on swift's own box; no floor change)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
