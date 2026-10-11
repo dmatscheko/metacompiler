@@ -327,3 +327,46 @@ function pynFromHex(src) {
     if (v - v != 0) { return "overflow" }
     return neg ? -v : v
 }
+
+// round(i, -k) on the decimal DIGITS d of |i| (no sign, no leading zero) for
+// k > 0: the digits of the nearest multiple of 10^k, a tie going to the even
+// multiple. sticky says the true value lies just above |i| (a float's dropped
+// fraction), which breaks a tie upward. Go twin: pyRoundTens in
+// abnf/jsrtpynum.go.
+function pynRoundTens(d, k, sticky) {
+    var cut = d.length - k
+    if (cut < 0) { return "0" }
+    var head = d.substring(0, cut)
+    var tail = d.substring(cut, d.length)
+    // tail against the half, 5 followed by k-1 zeros.
+    var c = 0
+    if (tail.charAt(0) > "5") { c = 1 }
+    if (tail.charAt(0) < "5") { c = -1 }
+    var i = 1
+    while (c == 0 && i < k) {
+        if (tail.charAt(i) != "0") { c = 1 }
+        i = i + 1
+    }
+    var last = head.length > 0 ? head.charCodeAt(head.length - 1) - 48 : 0
+    if (c > 0 || (c == 0 && (sticky || last % 2 == 1))) { head = pynDecInc(head) }
+    if (head == "" || head == "0") { return "0" }
+    var out = head
+    var z = 0
+    while (z < k) {
+        out = out + "0"
+        z = z + 1
+    }
+    return out
+}
+
+// The decimal digit string d plus one ("" is zero).
+function pynDecInc(d) {
+    var out = ""
+    var j = d.length - 1
+    while (j >= 0 && d.charAt(j) == "9") {
+        out = "0" + out
+        j = j - 1
+    }
+    if (j < 0) { return "1" + out }
+    return d.substring(0, j) + String.fromCharCode(d.charCodeAt(j) + 1) + out
+}

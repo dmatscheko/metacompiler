@@ -652,6 +652,9 @@ function pyStr(v) {
     // rather than invented. The name comes from the js_pyfnname side table;
     // CPython calls an unnamed one <lambda>, and so does every engine here.
     if (typeof v == "function") { return pyFuncRender(v) }
+    if (pyIsObj(v)) {
+        if (v["__pyconst"] !== undefined) { return pyToStr(v["__pyconst"]) }
+    }
     return pyToStr(v)
 }
 
@@ -855,7 +858,10 @@ function pyTypeName(v) {
             // An UNBOUND descriptor is its own CPython type; a module-level
             // builtin and a bound builtin method share one.
             if (pyBMTab[bml + 4] == "d") { return "method_descriptor" }
-            if (pyBMTab[bml + 3] === null) { return "builtin_function_or_method" }
+            if (pyBMTab[bml + 3] === null) {
+                if (pyBMTab[bml + 4] != "m" && pySlotDunder(pyToStr(pyBMTab[bml + 1]))) { return "method-wrapper" }
+                return "builtin_function_or_method"
+            }
             return "method"
         }
         var bfk = rtPairGet(pyBBFnObjs, pyBBFnCodes, v)
@@ -899,6 +905,11 @@ function pyTypeName(v) {
         // An instance of a user class is a "'C' object" in every message.
         var ic = pyInstClassOf(v)
         if (ic !== null && ic["__name"] !== undefined) { return pyToStr(ic["__name"]) }
+        var pc = v["__pyconst"]
+        if (pc !== undefined) {
+            if (pc == "Ellipsis") { return "ellipsis" }
+            return pyToStr(pc) + "Type"
+        }
         return "object"
     }
     return "object"
@@ -1140,8 +1151,14 @@ function pyBDelMake(tname, name, meth) {
     var num = tname == "int" || tname == "float"
     if (name == "__repr__") { return function(self) { return pyRepr(pyUnwrapBuiltin(self)) } }
     if (name == "__str__" && tname == "str") { return function(self) { return pyUnwrapBuiltin(self) } }
-    if (name == "__eq__") { return function(self, o) { return pyAEqual(pyUnwrapBuiltin(self), o) } }
-    if (name == "__ne__") { return function(self, o) { return !pyAEqual(pyUnwrapBuiltin(self), o) } }
+    if (name == "__eq__" || name == "__ne__") {
+        var neg = name == "__ne__"
+        return function(self, o) {
+            var b = pyUnwrapBuiltin(o)
+            if (!pyBDelAccepts(tname, b)) { return pyNotImpl }
+            return pyAEqual(pyUnwrapBuiltin(self), b) != neg
+        }
+    }
     if (num) {
         if (name == "__bool__") { return function(self) { return js_pybool(pyUnwrapBuiltin(self)) } }
         if (name == "__neg__") { return function(self) { return js_pyunary("-", pyUnwrapBuiltin(self)) } }
@@ -1183,12 +1200,25 @@ function pyBDelMake(tname, name, meth) {
     var k = 0
     while (k < ops.length) {
         var dn = pyDunderOf(ops[k])
-        if (name == dn) { return pyBDelBin(ops[k], false) }
+        if (name == dn) { return pyBDelBin(tname, ops[k], false) }
         var ordered = ops[k] == "<" || ops[k] == ">" || ops[k] == "<=" || ops[k] == ">="
-        if (!ordered && name == "__r" + dn.substring(2, dn.length)) { return pyBDelBin(ops[k], true) }
+        if (!ordered && name == "__r" + dn.substring(2, dn.length)) { return pyBDelBin(tname, ops[k], true) }
         k = k + 1
     }
     return undefined
+}
+
+// Go: pyBDelAccepts. Does builtin type tname's binary dunder serve the other
+// operand o (a subclass instance already unwrapped)? int serves ints (a bool is
+// one), float ints and floats, a container its own kind; for anything else the
+// dunder answers NotImplemented, so int.__add__(5, 2.5) declines.
+function pyBDelAccepts(tname, o) {
+    var nk = pyNumTName(o)
+    if (tname == "int") { return nk == "int" }
+    if (tname == "float") { return nk == "int" || nk == "float" }
+    if (tname == "str") { return typeof o == "string" }
+    if (tname == "list") { return pyIsArr(o) }
+    return pyIsDict(o) && pySetElemsOf(o) === null
 }
 
 // Go: pyNumDunder. int's and float's conversion and rounding dunders, each the
@@ -1241,22 +1271,22 @@ function pyNumDunderAttr(v, name) {
     return pyBDelegate(tn, name) !== undefined
 }
 
-// Go: pyNotImplemented. CPython's NotImplemented, answered only by these
-// delegates: an ORDERING of a builtin subclass's value with a value of another
-// kind declines, so pyADunderBin tries the other operand and the ordering then
-// raises with the operands' own types.
-var pyNotImpl = {}
-function pyBDelBin(op, reflected) {
-    if (reflected) { return function(self, o) { return js_pybin(op, o, pyUnwrapBuiltin(self)) } }
-    if (op == "<" || op == ">" || op == "<=" || op == ">=") {
-        return function(self, o) {
-            var a = pyUnwrapBuiltin(self)
-            var k = pyAOrdKind(a)
-            if (k == "" || k != pyAOrdKind(pyUnwrapBuiltin(o))) { return pyNotImpl }
-            return js_pybin(op, a, o)
-        }
+// Go: pyNotImplemented. CPython's NotImplemented singleton, the builtin name
+// NotImplemented. A binary dunder answers it to decline an operand, and
+// pyADunderBin then offers the operation to the other operand.
+var pyNotImpl = {__pyconst: "NotImplemented"}
+// A number's and a dict's operators decline a foreign operand; str's and
+// list's `+`, `*` and `%` raise their own TypeError instead, and only their
+// orderings decline.
+function pyBDelBin(tname, op, reflected) {
+    var gated = tname == "int" || tname == "float" || tname == "dict" || op == "<" || op == ">" || op == "<=" || op == ">="
+    return function(self, o) {
+        var a = pyUnwrapBuiltin(self)
+        var b = pyUnwrapBuiltin(o)
+        if (gated && !pyBDelAccepts(tname, b)) { return pyNotImpl }
+        if (reflected) { return js_pybin(op, b, a) }
+        return js_pybin(op, a, b)
     }
-    return function(self, o) { return js_pybin(op, pyUnwrapBuiltin(self), o) }
 }
 
 // Go: pyDunderName. The dunder each binary operator a delegate serves is asked by.
@@ -2356,17 +2386,22 @@ function pyABitsToNum(bits) {
     return acc
 }
 
-// Python's |, &, ^, << and >> over two exact ints. null for a shift count that is
-// negative (CPython raises ValueError) or past the cap.
+// Python's |, &, ^, << and >> over two exact ints.
 function pyABitBin(op, x, y) {
     var an = x["neg"]
     var bn = y["neg"]
     var a = pyABitsFromLimbs(x["limbs"])
     var b = pyABitsFromLimbs(y["limbs"])
     if (op == "<<" || op == ">>") {
-        if (bn) { return null }
+        // Go: rt.pyBitBin. A negative count is CPython's ValueError; past the
+        // cap, >> is 0 or -1 and << of a nonzero int is too large to hold.
+        if (bn) { pyRaiseExc("ValueError", "negative shift count") }
         var k = pyABitsToNum(b)
-        if (k > PY_BIT_SHIFT_MAX) { return null }
+        if (k > PY_BIT_SHIFT_MAX) {
+            if (op == ">>" && an) { return pyABitsToBig(true, [1]) }
+            if (op == ">>" || a.length == 0) { return pyABitsToBig(false, []) }
+            pyRaiseExc("OverflowError", "too many digits in integer")
+        }
         if (op == "<<") { return pyABitsToBig(an, rtABitsShl(a, k)) }
         if (!an) { return pyABitsToBig(false, rtABitsShr(a, k)) }
         // floor(-a / 2^k) is -(((a-1) >> k) + 1), which is Python's -5 >> 1 == -3.
@@ -2487,7 +2522,14 @@ function pyATruthy(v) {
     if (pyIsFlo(v)) { return v["__flo"] != 0 }
     var cls = pyInstClassOf(v)
     if (cls !== null) { return pyAUserTruthy(cls, v) }
+    pyNotImplBool(v)
     return true
+}
+
+// Go: rt.pyNotImplBool. NotImplemented in a boolean context is CPython's
+// TypeError.
+function pyNotImplBool(v) {
+    if (v === pyNotImpl) { pyRaiseExc("TypeError", "NotImplemented should not be used in a boolean context") }
 }
 
 // Go: rt.typeOf - the JAVASCRIPT typeof, which is what the two
@@ -3128,6 +3170,11 @@ function pyABinDunder(op) {
     if (op == ">") { return "__gt__" }
     if (op == "<=") { return "__le__" }
     if (op == ">=") { return "__ge__" }
+    if (op == "|") { return "__or__" }
+    if (op == "&") { return "__and__" }
+    if (op == "^") { return "__xor__" }
+    if (op == "<<") { return "__lshift__" }
+    if (op == ">>") { return "__rshift__" }
     return ""
 }
 
@@ -3146,13 +3193,25 @@ function pyABinReflected(op) {
     if (op == ">") { return "__lt__" }
     if (op == "<=") { return "__ge__" }
     if (op == ">=") { return "__le__" }
+    if (op == "|") { return "__ror__" }
+    if (op == "&") { return "__rand__" }
+    if (op == "^") { return "__rxor__" }
+    if (op == "<<") { return "__rlshift__" }
+    if (op == ">>") { return "__rrshift__" }
     return ""
 }
 
-// The left operand's dunder first, then the right operand's reflected form.
-// Answers {v: ...} or null.
+// The left operand's dunder first, then the right operand's reflected form, an
+// answer of NotImplemented handing over. When an instance is involved and both
+// decline, a builtin subclass's value is offered to the builtin operation
+// itself, == falls back to identity and any other operator is CPython's
+// TypeError. Answers {v: ...}, or null when neither operand is an instance.
 function pyADunderBin(op, l, r) {
     var lc = pyInstClassOf(l)
+    var rc = pyInstClassOf(r)
+    if (lc === null && rc === null) { return null }
+    // "fmt" % x is str's formatting whatever x is.
+    if (op == "%" && typeof l == "string") { return null }
     if (lc !== null) {
         var n1 = pyABinDunder(op)
         if (n1 != "" && pyLookupHas(lc, n1)) {
@@ -3163,7 +3222,6 @@ function pyADunderBin(op, l, r) {
             }
         }
     }
-    var rc = pyInstClassOf(r)
     if (rc !== null) {
         var n2 = pyABinReflected(op)
         if (n2 != "" && pyLookupHas(rc, n2)) {
@@ -3176,9 +3234,60 @@ function pyADunderBin(op, l, r) {
     }
     if (op == "!=") { // Python's default __ne__ is the negation of __eq__.
         var e = pyADunderBin("==", l, r)
-        if (e !== null) { return {v: !pyATruthy(e["v"])} }
+        return {v: !pyATruthy(e["v"])}
     }
-    return null
+    var a = pyUnwrapBuiltin(l)
+    var b = pyUnwrapBuiltin(r)
+    if (op == "==") {
+        if (a !== l || b !== r) { return {v: pyAEqual(a, b)} }
+        return {v: l === r}
+    }
+    var msg = pyABinTypeErr(op, l, r, a, b)
+    if (msg != "") { pyRaiseExc("TypeError", msg) }
+    return {v: js_pybin(op, a, b)}
+}
+
+// Go: rt.pyBinTypeErr. CPython's TypeError text for binary operator op on
+// operands whose builtin values are a and b (a subclass instance unwrapped),
+// named by l and r's own types; "" when op serves that pair.
+function pyABinTypeErr(op, l, r, a, b) {
+    var ln = pyTypeName(l)
+    var rn = pyTypeName(r)
+    if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+        var ok = pyAOrdKind(a)
+        if (ok != "" && ok == pyAOrdKind(b)) { return "" }
+        return "'" + op + "' not supported between instances of '" + ln + "' and '" + rn + "'"
+    }
+    if (op == "+") {
+        var kl = pyAAddKind(a)
+        if (kl != "" && kl == pyAAddKind(b)) { return "" }
+        if (kl == "s") { return "can only concatenate str (not \"" + rn + "\") to str" }
+        if (kl == "l") { return "can only concatenate list (not \"" + rn + "\") to list" }
+    }
+    var na = pyNumTName(a)
+    var nb = pyNumTName(b)
+    var nums = na != "" && nb != ""
+    var ints = na == "int" && nb == "int"
+    var sets = pySetElemsOf(a) !== null && pySetElemsOf(b) !== null
+    if (op == "-" && (nums || sets)) { return "" }
+    if (op == "/" || op == "//" || op == "**") {
+        if (nums) { return "" }
+    }
+    if (op == "%" && (nums || typeof a == "string")) { return "" }
+    if ((op == "<<" || op == ">>") && ints) { return "" }
+    if ((op == "&" || op == "|" || op == "^") && (ints || sets)) { return "" }
+    if (op == "|" && pyIsDict(a) && pyIsDict(b) && pySetElemsOf(a) === null && pySetElemsOf(b) === null) { return "" }
+    if (op == "*") {
+        if (nums) { return "" }
+        var sa = typeof a == "string" || pyIsArr(a)
+        var sb = typeof b == "string" || pyIsArr(b)
+        if ((sa && nb == "int") || (sb && na == "int")) { return "" }
+        if (sa) { return "can't multiply sequence by non-int of type '" + rn + "'" }
+        if (sb) { return "can't multiply sequence by non-int of type '" + ln + "'" }
+    }
+    var shown = op
+    if (op == "**") { shown = "** or pow()" }
+    return "unsupported operand type(s) for " + shown + ": '" + ln + "' and '" + rn + "'"
 }
 
 // ============================================================================
@@ -3348,7 +3457,6 @@ function js_pybin(opv, l, r) {
             var br = pyABigOperand(r)
             if (br !== null) {
                 var bb = pyABitBin(op, bl, br)
-                if (bb === null) { pyFail("negative shift count") }
                 return rtABigNarrow(bb)
             }
         }
@@ -3536,10 +3644,23 @@ function js_pyunary(opv, v) {
     var op = pyToStr(opv)
     var name = "__neg__"
     if (op == "~") { name = "__invert__" }
+    if (op == "+") { name = "__pos__" }
     var cls = pyInstClassOf(v)
     if (cls !== null && pyLookupHas(cls, name)) {
         var m = pyLookupVal(cls, name)
         if (pyIsCallable(m)) { return pyCallSelf(m, v, []) }
+    }
+    if (typeof v != "number") {
+        var nk = pyNumTName(v)
+        if (nk == "" || (op == "~" && nk != "int")) {
+            pyRaiseExc("TypeError", "bad operand type for unary " + op + ": '" + pyTypeName(v) + "'")
+        }
+    }
+    if (op == "+") {
+        // +True is the int 1; every other number is itself.
+        if (v === true) { return 1 }
+        if (v === false) { return 0 }
+        return v
     }
     if (op == "~") {
         // ~x is -x-1 at ARBITRARY PRECISION, not ECMAScript's ToInt32 complement.
@@ -4694,22 +4815,47 @@ function js_pydivmod(l, r) {
 // round(2.5) is 2 - which a Math.floor(x + 0.5) spelling gets wrong on every
 // other integer. rtFixed is the shared exact decimal formatter and rounds half
 // to even by construction (docs/working-on-this-project.md 7.7).
+//
+// Go: rt.pyRound. An int with no n, or with n >= 0, is already round and comes
+// back as the int it is; a float with no n is the EXACT int of the rounded
+// double (round(1e300) has 301 digits). A negative n rounds to a multiple of
+// 10**-n (pyARoundTens). Past 400 digits a float is its own rounding.
 function js_pyround(args) {
     var v = pyEArgAt(args, 0)
-    // An int with no n, or with n >= 0, is already round: it comes back as the
-    // int it is, exactly.
+    var hasN = args.length >= 2 && args[1] !== undefined && args[1] !== null
+    var n = 0
+    if (hasN) { n = Math.min(400, Math.trunc(pyNum(args[1]))) }
     if (pyNumTName(v) == "int") {
-        if (args.length < 2 || args[1] === undefined || args[1] === null || pyNum(args[1]) >= 0) { return js_pyint([[v], undefined]) }
+        var i = js_pyint([[v], undefined])
+        if (n >= 0) { return i }
+        return pyARoundTens(i, 0 - n, false)
     }
     var f = pyAToF(v)
-    if (args.length < 2 || args[1] === undefined || args[1] === null) {
-        return parseFloat(rtFixed(f, 0))
+    var finite = f == f && f - f == 0
+    if (!hasN) {
+        // int() raises CPython's OverflowError / ValueError for inf / nan.
+        if (!finite) { return js_pyint([[v], undefined]) }
+        return js_pyint([[pyMkFlo(parseFloat(rtFixed(f, 0)))], undefined])
     }
-    var nd = Math.trunc(pyNum(args[1]))
-    if (nd < 0) { nd = 0 }
-    var r = parseFloat(rtFixed(f, nd))
-    if (nd <= 0 && !pyIsFlo(v)) { return r }
+    if (!finite) { return pyMkFlo(f) }
+    if (n >= 0) { return pyMkFlo(parseFloat(rtFixed(f, n))) }
+    var t = Math.trunc(f)
+    var r = pyAToF(js_pyfloat(pyARoundTens(js_pyint([[pyMkFlo(t)], undefined]), 0 - n, f != t)))
+    if (r == 0 && (f < 0 || 1 / f < 0)) { return pyMkFlo(pyFloNegate(0)) }
     return pyMkFlo(r)
+}
+
+// round(i, -k) for an int i and k > 0, exactly, on i's decimal digits
+// (pynRoundTens in lib/python-num.js). sticky is a float's dropped fraction.
+function pyARoundTens(i, k, sticky) {
+    var neg = pyACompare(i, 0) < 0
+    var m = anytype
+    m = i
+    if (neg) { m = js_pyunary("-", i) }
+    var r = anytype
+    r = js_pyint([[pynRoundTens(pyStr(m), k, sticky)], undefined])
+    if (neg) { return js_pyunary("-", r) }
+    return r
 }
 
 // pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR form,
@@ -6349,9 +6495,12 @@ function js_pydict(args) {
 // The Ellipsis singleton: `...` is a value of its own and `x is ...` has to
 // hold, so there is exactly one of it per runtime.
 function js_pyellipsis() {
-    if (pyCEllipsis === null) { pyCEllipsis = {__name: "ellipsis"} }
+    if (pyCEllipsis === null) { pyCEllipsis = {__pyconst: "Ellipsis"} }
     return pyCEllipsis
 }
+
+// Go: js_pynotimpl. The NotImplemented singleton.
+function js_pynotimpl() { return pyNotImpl }
 
 
 // ----- js_pydel_item ----------------------------------------------------------
@@ -6549,6 +6698,7 @@ function pyDTruthy(v) {
     }
     var cls = pyInstClassOf(v)
     if (cls !== null) { return pyAUserTruthy(cls, v) }
+    pyNotImplBool(v)
     // Go's default arm. A complex - even complex(0,0) - is an object and is
     // therefore TRUE here, exactly as in the Go twin (Python itself would say
     // false; the twin is the specification).
@@ -6720,9 +6870,18 @@ function pyBMRender(i) {
     // module is reachable as __self__ but is not part of the render.
     if (kind == "m") { return "<built-in function " + nm + ">" }
     if (pyBMTab[i + 3] === null) {
+        if (pySlotDunder(nm)) { return "<method-wrapper '" + nm + "' of " + pyBMOwner(self) + " object>" }
         return "<built-in method " + nm + " of " + pyBMOwner(self) + " object>"
     }
     return "<bound method " + pyBMOwner(self) + "." + nm + " of " + pyRepr(self) + ">"
+}
+
+// Go: pySlotDunder. A builtin type's dunder that CPython implements as a type
+// SLOT binds as a method-wrapper ((5).__add__); the few that are ordinary
+// methods (__round__, __format__, ...) bind as built-in methods.
+function pySlotDunder(nm) {
+    if (nm.length <= 4 || nm.substring(0, 2) != "__" || nm.substring(nm.length - 2, nm.length) != "__") { return false }
+    return nm != "__round__" && nm != "__format__" && nm != "__trunc__" && nm != "__floor__" && nm != "__ceil__"
 }
 // The class a classmethod reached through super() binds to: the ORIGINAL cls -
 // `super().who()` inside C.who() must still pass C - which __sobj already is

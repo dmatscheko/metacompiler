@@ -159,6 +159,86 @@ func (rt *jsrt) pyOrdCheck(op string, l, r interface{}) {
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 }
 
+// pyBinTypeErr is CPython's TypeError text for binary operator op on operands
+// whose builtin values are a and b (a subclass instance unwrapped), named by l
+// and r's own types; "" when op serves that pair. Twin of pyBinTypeErr in
+// languages/python-interpreter.abnf and pyABinTypeErr in lib/python-rt.metajs.
+func (rt *jsrt) pyBinTypeErr(op string, l, r, a, b interface{}) string {
+	ln, rn := pyTypeName(rt, l), pyTypeName(rt, r)
+	switch op {
+	case "<", ">", "<=", ">=":
+		if k := pyOrdKind(a); k != 0 && k == pyOrdKind(b) {
+			return ""
+		}
+		return "'" + op + "' not supported between instances of '" + ln + "' and '" + rn + "'"
+	case "+":
+		kl := pyAddKind(a)
+		if kl != 0 && kl == pyAddKind(b) {
+			return ""
+		}
+		switch kl {
+		case 's':
+			return "can only concatenate str (not \"" + rn + "\") to str"
+		case 'l':
+			return "can only concatenate list (not \"" + rn + "\") to list"
+		}
+	}
+	na, nb := pyNumTypeName(a), pyNumTypeName(b)
+	nums := na != "" && nb != ""
+	ints := na == "int" && nb == "int"
+	_, sa := pySetElems(a)
+	_, sb := pySetElems(b)
+	sets := sa && sb
+	_, isStr := a.(string)
+	switch op {
+	case "-":
+		if nums || sets {
+			return ""
+		}
+	case "/", "//", "**":
+		if nums {
+			return ""
+		}
+	case "%":
+		if nums || isStr {
+			return ""
+		}
+	case "<<", ">>":
+		if ints {
+			return ""
+		}
+	case "&", "|", "^":
+		if ints || sets {
+			return ""
+		}
+		if _, _, da := dictParts(a); op == "|" && da && !sa {
+			if _, _, db := dictParts(b); db && !sb {
+				return ""
+			}
+		}
+	case "*":
+		if nums {
+			return ""
+		}
+		qa, qb := pyAddKind(a), pyAddKind(b)
+		seqA, seqB := qa == 's' || qa == 'l', qb == 's' || qb == 'l'
+		if (seqA && nb == "int") || (seqB && na == "int") {
+			return ""
+		}
+		if seqA {
+			return "can't multiply sequence by non-int of type '" + rn + "'"
+		}
+		if seqB {
+			return "can't multiply sequence by non-int of type '" + ln + "'"
+		}
+	}
+	shown := op
+	if op == "**" {
+		shown = "** or pow()"
+	}
+	return "unsupported operand type(s) for " + shown + ": '" + ln + "' and '" + rn + "'"
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap

@@ -4069,6 +4069,79 @@ def s75():
     check("gex4", issubclass(GeneratorExit, BaseException) and not issubclass(GeneratorExit, Exception)
           and isinstance(GeneratorExit(), BaseException) and repr(GeneratorExit()) == "GeneratorExit()")
 
+# ===== SECTION 76: NotImplemented and the operator fallbacks =====
+# A builtin type's binary dunder answers NotImplemented for an operand it does
+# not serve (int.__add__(5, 2.5)); the operator then asks the other operand, a
+# builtin subclass falls back to its value, == to identity, and anything else is
+# CPython's TypeError named by the operands' own types. NotImplemented and
+# Ellipsis are named singletons. Rows from CPython 3.14.
+class NiA:
+    def __init__(self, v):
+        self.v = v
+    def __add__(self, o):
+        if isinstance(o, NiA):
+            return NiA(self.v + o.v)
+        return NotImplemented
+    def __eq__(self, o):
+        if isinstance(o, NiA):
+            return self.v == o.v
+        return NotImplemented
+class NiB:
+    def __radd__(self, o):
+        return "B.radd"
+    def __eq__(self, o):
+        return "B.eq"
+class NiS(int):
+    pass
+def s76():
+    v = [5, 2.5, True, "s", None, 7.5, 5.0]
+    check("ni1", [repr(NotImplemented), str(NotImplemented), type(NotImplemented).__name__, repr(Ellipsis), type(...).__name__, str([...])] ==
+          ["NotImplemented", "NotImplemented", "NotImplementedType", "Ellipsis", "ellipsis", "[Ellipsis]"] and Ellipsis is ...)
+    check("ni2", int.__add__(v[0], v[1]) is NotImplemented and int.__eq__(v[0], v[6]) is NotImplemented and int.__lt__(v[0], v[5]) is NotImplemented
+          and int.__add__(v[0], v[2]) == 6 and float.__add__(v[1], v[0]) == 7.5 and v[0].__radd__(v[1]) is NotImplemented and str.__lt__(v[3], v[0]) is NotImplemented)
+    msgs = []
+    try:
+        bool(NotImplemented)
+    except TypeError as e:
+        msgs.append(str(e))
+    a = NiA(1)
+    for f in [lambda: a + v[0], lambda: v[0] - a, lambda: a * v[3], lambda: a ** v[0], lambda: a < v[0]]:
+        try:
+            f()
+        except TypeError as e:
+            msgs.append(str(e))
+    check("ni3", msgs == ["NotImplemented should not be used in a boolean context", "unsupported operand type(s) for +: 'NiA' and 'int'",
+                          "unsupported operand type(s) for -: 'int' and 'NiA'", "can't multiply sequence by non-int of type 'NiA'",
+                          "unsupported operand type(s) for ** or pow(): 'NiA' and 'int'", "'<' not supported between instances of 'NiA' and 'int'"])
+    check("ni4", (a + NiA(2)).v == 3 and a + NiB() == "B.radd" and a == NiA(1) and not (a == v[0]) and a != v[0] and a == a and (a == NiB()) == "B.eq")
+    s = NiS(3)
+    check("ni5", [s + v[1], v[1] + s, s < v[1], v[1] > s, s == 3.0, s + v[2], s << s, s | 4] == [5.5, 5.5, False, False, True, 4, 24, 7]
+          and type(s + v[1]).__name__ == "float")
+    check("ni6", repr(v[0].__add__).split(" at ")[0].rstrip(">") == "<method-wrapper '__add__' of int object" and repr(v[1].__round__).split(" at ")[0].rstrip(">") == "<built-in method __round__ of float object"
+          and type(v[0].__add__).__name__ == "method-wrapper")
+
+# ===== SECTION 77: round() to tens, shift counts, unary plus =====
+# round(x, -n) rounds to a multiple of 10**n, half to even on the exact value;
+# round(float) is the EXACT int of the rounded double. A negative shift count is
+# a catchable ValueError, a shift past the cap is 0 or -1 for >> and an
+# OverflowError for <<. Unary + makes a bool an int. Rows from CPython 3.14.
+def s77():
+    n = [1250, 1350, -1250, 5, -15, 2**70 + 5 * 10**5, 1250.4, -5.0, 1e300, -2]
+    check("rt1", [round(n[0], n[9]), round(n[1], n[9]), round(n[2], n[9]), round(n[3], -1), round(n[4], -1), round(n[5], -6)] == [1200, 1400, -1200, 0, -20, 1180591620717412000000])
+    check("rt2", [repr(round(n[6], n[9])), repr(round(n[7], n[9])), repr(round(float(n[1]), n[9]))] == ["1300.0", "-0.0", "1400.0"]
+          and round(n[8]) == 10**300 + 52504760255204420248704468581108159154915854115511802457988908195786371375080447864043704443832883878176942523235360430575644792184786706982848387200926575803737830233794788090059368953234970799945081119038967640880074652742780142494579258788820056842838115669472196386865459400540160
+          and type(round(n[8])).__name__ == "int")
+    msgs = []
+    for f in [lambda: n[3] << -7, lambda: n[3] >> n[9], lambda: n[3] << 10**20, lambda: +"s", lambda: -"s", lambda: ~n[6]]:
+        try:
+            f()
+        except (ValueError, OverflowError, TypeError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("rt3", msgs == ["ValueError: negative shift count", "ValueError: negative shift count", "OverflowError: too many digits in integer",
+                          "TypeError: bad operand type for unary +: 'str'", "TypeError: bad operand type for unary -: 'str'", "TypeError: bad operand type for unary ~: 'float'"])
+    t = [True, 5, -5]
+    check("rt4", [repr(+t[0]), repr(-t[0]), repr(+t[1])] == ["1", "-1", "5"] and t[1] >> 10**20 == 0 and t[2] >> 10**20 == -1 and 0 << 10**20 == 0)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4145,5 +4218,7 @@ def main():
     s73() # SECTION-CALL 73
     s74() # SECTION-CALL 74
     s75() # SECTION-CALL 75
+    s76() # SECTION-CALL 76
+    s77() # SECTION-CALL 77
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

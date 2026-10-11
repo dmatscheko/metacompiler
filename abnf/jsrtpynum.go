@@ -304,3 +304,65 @@ func (rt *jsrt) pyFloatFromHex(src string) interface{} {
 	}
 	return &jsPyFlo{f: f}
 }
+
+// pyRound is round(x[, n]). An int with no n, or with n >= 0, is already round
+// and comes back as the int it is; a float with no n is the EXACT int of the
+// double rounded half to even (round(1e300) has 301 digits). A negative n
+// rounds to a multiple of 10**-n (pyRoundTens). Past 400 digits a float is its
+// own rounding. Twin of hostGlobals["round"] in languages/python-interpreter.abnf
+// and js_pyround in lib/python-rt.metajs.
+func (rt *jsrt) pyRound(args []interface{}) interface{} {
+	v := argAt(args, 0)
+	hasN := len(args) >= 2 && !isUndefOrNull(args[1])
+	n := 0
+	if hasN {
+		n = int(math.Max(-1e6, math.Min(400, math.Trunc(rt.toNumber(args[1])))))
+	}
+	if pyNumTypeName(v) == "int" {
+		i := rt.pyIntNew([]interface{}{v})
+		if n >= 0 {
+			return i
+		}
+		x, _ := pyBigOperand(i)
+		return rt.pyBigNarrow(pyRoundTens(x, -n, false))
+	}
+	f := rt.pyToF(v)
+	finite := !math.IsNaN(f) && !math.IsInf(f, 0)
+	if !hasN {
+		if !finite { // int() raises CPython's OverflowError / ValueError.
+			return rt.pyIntNew([]interface{}{v})
+		}
+		return rt.pyIntNew([]interface{}{&jsPyFlo{f: pyRoundHalfEven(f, 0)}})
+	}
+	if n >= 0 || !finite {
+		return &jsPyFlo{f: pyRoundHalfEven(f, n)}
+	}
+	t := math.Trunc(f)
+	x, _ := new(big.Float).SetFloat64(t).Int(nil)
+	r, _ := new(big.Float).SetInt(pyRoundTens(x, -n, f != t)).Float64()
+	if r == 0 && math.Signbit(f) {
+		r = math.Copysign(0, -1)
+	}
+	return &jsPyFlo{f: r}
+}
+
+// pyRoundTens is round(i, -k) for k > 0: the nearest multiple of 10**k, a tie
+// going to the even multiple. sticky says the true value lies just above |i|
+// (a float's dropped fraction), which breaks a tie upward. Twin of pynRoundTens
+// in languages/lib/python-num.js.
+func pyRoundTens(i *big.Int, k int, sticky bool) *big.Int {
+	m := new(big.Int).Abs(i)
+	if len(m.String()) < k {
+		return new(big.Int)
+	}
+	p := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(k)), nil)
+	q, rem := new(big.Int).QuoRem(m, p, new(big.Int))
+	if c := new(big.Int).Lsh(rem, 1).Cmp(p); c > 0 || (c == 0 && (sticky || q.Bit(0) == 1)) {
+		q.Add(q, big.NewInt(1))
+	}
+	q.Mul(q, p)
+	if i.Sign() < 0 {
+		q.Neg(q)
+	}
+	return q
+}

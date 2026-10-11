@@ -821,9 +821,9 @@ Term        <~~ push(foldBinary(takeAll())) ~~>
 Factor      = Neg | Pos | Invert | Await | Power ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
-// Unary plus. It is the identity on every numeric type this model has, so the operand
-// thunk is simply passed through. `a = +4294967296` is real code in CPython's suite.
-Pos         = "+" Factor ;
+// Unary plus: __pos__ on an instance, the int a bool is (js_pyunary).
+Pos         <~~ push(makePos(pop())) ~~>
+            = "+" Factor ;
 // ~x: the bitwise complement of the 32 bit integer value, and __invert__ on an
 // instance of a user class (js_pyunary decides, like unary minus).
 Invert      <~~ push(makeInvert(pop())) ~~>
@@ -3394,12 +3394,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (items.length == 1) { return items[0] }
         return foldBinary([items[0], "**", items[1]])
     }
-    // ~x: the same unary dispatcher as -x, which runs __invert__ on an instance of
-    // a user class and otherwise complements the 32 bit integer value.
-    function makeInvert(t) {
+    // ~x and +x: the same unary dispatcher as -x, which runs __invert__ /
+    // __pos__ on an instance of a user class.
+    function makeInvert(t) { return makeUnary("~", t) }
+    function makePos(t) { return makeUnary("+", t) }
+    function makeUnary(op, t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_pyunary", [emitStr(r.b, "~"), r.v])}
+            return {b: r.b, v: callExt(r.b, "js_pyunary", [emitStr(r.b, op), r.v])}
         }
     }
     // | ^ & << >>: on two sets these are the set algebra (union, symmetric
@@ -4256,6 +4258,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // js_pygetattr reads re.I / re.DOTALL straight out of it, and js_pyrxmcall
         // dispatches re.search(...) on it (abnf/jsrtregexpy.go).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "re"), callExt(b, "js_pyre_module", [])])
+        // The two named singletons.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "NotImplemented"), callExt(b, "js_pynotimpl", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Ellipsis"), callExt(b, "js_pyellipsis", [])])
         // The `math` module, bound the same way and for the same reason: `import
         // math` binds nothing in this flat import model, so the module object is
         // simply always there. js_pygetattr reads math.pi / math.inf straight out of

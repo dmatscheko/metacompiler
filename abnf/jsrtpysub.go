@@ -120,10 +120,15 @@ func pyBDelMake(tname, name string) *hostFunc {
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyRepr(v) })
 	case name == "__str__" && tname == "str":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return v })
-	case name == "__eq__":
-		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyEqual(v, arg(a)) })
-	case name == "__ne__":
-		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return !rt.pyEqual(v, arg(a)) })
+	case name == "__eq__" || name == "__ne__":
+		neg := name == "__ne__"
+		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			o := pyUnwrapBuiltin(arg(a))
+			if !pyBDelAccepts(tname, o) {
+				return pyNotImplemented
+			}
+			return rt.pyEqual(v, o) != neg
+		})
 	case num && name == "__bool__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyTruthyOf(v) })
 	case num && name == "__neg__":
@@ -181,22 +186,53 @@ func pyBDelMake(tname, name string) *hostFunc {
 		dn := pyDunderName[op]
 		op := op
 		ordered := op == "<" || op == ">" || op == "<=" || op == ">="
-		if name == dn && ordered {
-			return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
-				if k := pyOrdKind(v); k == 0 || k != pyOrdKind(pyUnwrapBuiltin(arg(a))) {
-					return pyNotImplemented
-				}
-				return rt.pyExt("js_pybin", op, v, arg(a))
-			})
+		reflected := !ordered && name == "__r"+dn[2:]
+		if name != dn && !reflected {
+			continue
 		}
-		if name == dn {
-			return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pybin", op, v, arg(a)) })
-		}
-		if !ordered && name == "__r"+dn[2:] {
-			return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pybin", op, arg(a), v) })
-		}
+		// A number's and a dict's operators decline a foreign operand; str's
+		// and list's `+`, `*` and `%` raise their own TypeError instead, and only
+		// their orderings decline.
+		gated := num || tname == "dict" || ordered
+		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			o := pyUnwrapBuiltin(arg(a))
+			if gated && !pyBDelAccepts(tname, o) {
+				return pyNotImplemented
+			}
+			if reflected {
+				return rt.pyExt("js_pybin", op, o, v)
+			}
+			return rt.pyExt("js_pybin", op, v, o)
+		})
 	}
 	return nil
+}
+
+// pyBDelAccepts says whether builtin type tname's binary dunder serves the
+// other operand o (a subclass instance already unwrapped): int serves ints (a
+// bool is one), float ints and floats, a container its own kind. For anything
+// else the dunder answers NotImplemented, so int.__add__(5, 2.5) declines.
+// Twin of pyBDelAccepts in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func pyBDelAccepts(tname string, o interface{}) bool {
+	nk := pyNumTypeName(o)
+	switch tname {
+	case "int":
+		return nk == "int"
+	case "float":
+		return nk == "int" || nk == "float"
+	case "str":
+		_, ok := o.(string)
+		return ok
+	case "list":
+		_, ok := o.(*jsArray)
+		return ok
+	}
+	if _, isSet := pySetElems(o); isSet {
+		return false
+	}
+	_, _, ok := dictParts(o)
+	return ok
 }
 
 // pyNumDunder is int's and float's conversion and rounding dunders, each the
@@ -275,12 +311,19 @@ func pyNumDunderAttr(v interface{}, name string) bool {
 	return ok
 }
 
-// pyNotImplemented is CPython's NotImplemented, answered only by the delegates:
-// an ORDERING of a builtin subclass's value with a value of another kind
-// declines, so pyDunderBin tries the other operand and the ordering then raises
-// with the operands' own types ('S' and 'int', not 'str' and 'int'). Twins:
-// pyNotImpl in languages/python-interpreter.abnf and lib/python-rt.metajs.
-var pyNotImplemented = newJSObject()
+// pyNotImplemented is CPython's NotImplemented singleton, the builtin name
+// NotImplemented (js_pynotimpl). A binary dunder answers it to decline an
+// operand, and pyDunderBin then offers the operation to the other operand.
+// Twins: pyNotImpl in languages/python-interpreter.abnf and lib/python-rt.metajs.
+var pyNotImplemented = pyConstObj("NotImplemented")
+
+// pyConstObj is a named singleton - NotImplemented, Ellipsis - which prints as
+// its name.
+func pyConstObj(name string) *jsObject {
+	o := newJSObject()
+	o.set("__pyconst", name)
+	return o
+}
 
 // pyDunderName is the dunder each binary operator a delegate serves is asked by.
 var pyDunderName = map[string]string{

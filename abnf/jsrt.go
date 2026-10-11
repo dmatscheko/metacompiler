@@ -3793,6 +3793,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 		if mod, isMod := pyIsModule(t); isMod {
 			return "<module '" + rt.toString(mod.props["__pymod"]) + "' (built-in)>"
 		}
+		if c, ok := t.props["__pyconst"].(string); ok {
+			return c
+		}
 		return rt.toString(v)
 	default:
 		if isCallable(v) {
@@ -3807,6 +3810,21 @@ func (rt *jsrt) pyString(v interface{}) string {
 		}
 		return rt.toString(v)
 	}
+}
+
+// pySlotDunder says whether a builtin type's dunder is one CPython implements as
+// a type SLOT, which binds as a method-wrapper ((5).__add__); the few that are
+// ordinary methods (__round__, __format__, ...) bind as built-in methods. Twin
+// of pySlotDunder in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pySlotDunder(name string) bool {
+	if len(name) <= 4 || !strings.HasPrefix(name, "__") || !strings.HasSuffix(name, "__") {
+		return false
+	}
+	switch name {
+	case "__round__", "__format__", "__trunc__", "__floor__", "__ceil__":
+		return false
+	}
+	return true
 }
 
 // pyFuncRender is how a FUNCTION prints. CPython says <function fn at 0x...>; the
@@ -3829,6 +3847,9 @@ func (rt *jsrt) pyFuncRender(v interface{}) string {
 			return "<built-in function " + bi.name + ">"
 		}
 		if bi.fn == nil {
+			if pySlotDunder(bi.name) {
+				return "<method-wrapper '" + bi.name + "' of " + bi.typ + " object>"
+			}
 			return "<built-in method " + bi.name + " of " + bi.typ + " object>"
 		}
 		return "<bound method " + bi.typ + "." + bi.name + " of " + rt.pyRepr(bi.self) + ">"
@@ -5001,9 +5022,11 @@ const pyBitShiftMax = 1 << 20
 // arbitrary precision ints - exactly what math/big's And/Or/Xor/Lsh/Rsh implement
 // (not ToInt32: `-1 & 0xffffffff` is 4294967295 and `1 << 40` is 1099511627776).
 //
-// ok is false for a shift count that is negative (CPython raises ValueError) or
-// past the cap, so the caller can fail rather than answer a wrong number.
-func pyBitBin(op string, x, y *big.Int) (*big.Int, bool) {
+// A negative shift count is CPython's ValueError; past the cap, >> is 0 or -1
+// and << of a nonzero int is the OverflowError CPython raises for a result too
+// large to hold. Twin of bigBitBin in languages/python-interpreter.abnf and
+// pyABitBin in lib/python-rt.metajs.
+func (rt *jsrt) pyBitBin(op string, x, y *big.Int) *big.Int {
 	out := new(big.Int)
 	switch op {
 	case "&":
@@ -5013,8 +5036,14 @@ func pyBitBin(op string, x, y *big.Int) (*big.Int, bool) {
 	case "^":
 		out.Xor(x, y)
 	case "<<", ">>":
-		if y.Sign() < 0 || !y.IsInt64() || y.Int64() > pyBitShiftMax {
-			return nil, false
+		if y.Sign() < 0 {
+			rt.pyRaise("ValueError", "negative shift count")
+		}
+		if !y.IsInt64() || y.Int64() > pyBitShiftMax {
+			if op == "<<" && x.Sign() != 0 {
+				rt.pyRaise("OverflowError", "too many digits in integer")
+			}
+			return out.Rsh(x, pyBitShiftMax+1)
 		}
 		n := uint(y.Int64())
 		if op == "<<" {
@@ -5024,10 +5053,8 @@ func pyBitBin(op string, x, y *big.Int) (*big.Int, bool) {
 			// which is Python's floor: -5 >> 1 is -3.
 			out.Rsh(x, n)
 		}
-	default:
-		return nil, false
 	}
-	return out, true
+	return out
 }
 
 // pyBigBin is Python's integer arithmetic in arbitrary precision. `//` and `%`
@@ -14626,6 +14653,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return 0
 			}
+			rt.pyNotImplBool(u(a[0]))
 			if rt.truthy(u(a[0])) {
 				return 1
 			}
@@ -15924,11 +15952,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// has had its __and__ / __lshift__ chance (pyDunderBin).
 				if x, xok := pyBigOperand(l); xok {
 					if y, yok := pyBigOperand(r); yok {
-						v, ok := pyBitBin(op, x, y)
-						if !ok {
-							rt.fail("negative shift count")
-						}
-						return w(rt.pyBigNarrow(v))
+						return w(rt.pyBigNarrow(rt.pyBitBin(op, x, y)))
 					}
 				}
 				if v, ok := rt.pyDunderBin(op, l, r); ok {
@@ -16181,12 +16205,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// hold, so there is exactly one of it per runtime.
 		"js_pyellipsis": func(a []uint64) uint64 {
 			if rt.pyEllipsis == nil {
-				o := newJSObject()
-				o.set("__name", "ellipsis")
-				rt.pyEllipsis = o
+				rt.pyEllipsis = pyConstObj("Ellipsis")
 			}
 			return w(rt.pyEllipsis)
 		},
+		"js_pynotimpl": func(a []uint64) uint64 { return w(pyNotImplemented) },
 		// del NAME: the binding stays, holding the deleted sentinel, so a later
 		// read raises instead of falling through to an enclosing binding.
 		"js_pydel_var": func(a []uint64) uint64 {
@@ -16302,22 +16325,38 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.pyFuncNames[u(a[0])] = rt.toString(u(a[1]))
 			return a[0]
 		},
-		// Unary - / ~ with the __neg__ / __invert__ fallback.
+		// Unary - / ~ / + with the __neg__ / __invert__ / __pos__ fallback, and
+		// CPython's TypeError for an operand the operator does not serve.
 		"js_pyunary": func(a []uint64) uint64 { // (operator, value)
 			op := rt.toString(u(a[0]))
 			v := u(a[1])
 			name := "__neg__"
-			if op == "~" {
+			switch op {
+			case "~":
 				name = "__invert__"
+			case "+":
+				name = "__pos__"
 			}
 			if _, cls, ok := pyInstance(v); ok {
 				if m, found := pyLookup(cls, name); found && isCallable(m) {
 					return w(rt.call(m, jsUndef, []interface{}{v}))
 				}
 			}
+			nk := pyNumTypeName(v)
+			if nk == "" || (op == "~" && nk != "int") {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"bad operand type for unary "+op+": '"+pyTypeName(rt, v)+"'")})
+			}
+			if op == "+" {
+				// +True is the int 1; every other number is itself.
+				if b, ok := v.(bool); ok {
+					return w(pyBoolInt(b))
+				}
+				return a[1]
+			}
 			if op == "~" {
 				// ~x is -x-1 in Python's infinite two's complement, at arbitrary
-				// precision; the ToInt32 fallback is only for a non-int operand.
+				// precision.
 				if x, ok := pyBigOperand(v); ok {
 					out := new(big.Int).Not(x)
 					return w(rt.pyBigNarrow(out))
@@ -16874,26 +16913,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// round(x[, n]): CPython rounds HALF TO EVEN, so round(2.5) is 2 and
 		// round(0.5) is 0 - the one thing a Math.floor(x + 0.5) spelling gets
-		// wrong, and it is wrong on every other integer. With no n the answer is
-		// an INT; with an n it keeps the argument's type.
-		"js_pyround": func(a []uint64) uint64 {
-			args := rt.argArray(u(a[0]))
-			v := argAt(args, 0)
-			// An int with no n, or with n >= 0, is already round: it comes back
-			// as the int it is, exactly.
-			if pyNumTypeName(v) == "int" && (len(args) < 2 || isUndefOrNull(args[1]) || rt.toNumber(args[1]) >= 0) {
-				return w(rt.pyIntNew([]interface{}{v}))
-			}
-			if len(args) < 2 || isUndefOrNull(args[1]) {
-				return w(pyRoundHalfEven(rt.pyToF(v), 0))
-			}
-			nd := int(rt.toNumber(args[1]))
-			r := pyRoundHalfEven(rt.pyToF(v), nd)
-			if nd <= 0 && !pyIsFlo(v) {
-				return w(r)
-			}
-			return w(&jsPyFlo{f: r})
-		},
+		// wrong, and it is wrong on every other integer (rt.pyRound).
+		"js_pyround": func(a []uint64) uint64 { return w(rt.pyRound(rt.argArray(u(a[0])))) },
 		// pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR
 		// form, which is exact through math/big.
 		"js_pypow": func(a []uint64) uint64 {
@@ -20961,7 +20982,17 @@ func (rt *jsrt) pyTruthyOf(v interface{}) bool {
 	if _, cls, ok := pyInstance(v); ok {
 		return rt.pyUserTruthy(cls, v)
 	}
+	rt.pyNotImplBool(v)
 	return rt.truthy(v)
+}
+
+// pyNotImplBool raises CPython's TypeError for NotImplemented in a boolean
+// context. Twin of pytruthy in languages/python-interpreter.abnf and pyDTruthy
+// in lib/python-rt.metajs.
+func (rt *jsrt) pyNotImplBool(v interface{}) {
+	if o, ok := v.(*jsObject); ok && o == pyNotImplemented {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "NotImplemented should not be used in a boolean context")})
+	}
 }
 
 // argArray unwraps the argument array a signature-less builtin (declBuiltin with
@@ -21474,6 +21505,12 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 				return rt.toString(n)
 			}
 		}
+		if c, ok := t.props["__pyconst"].(string); ok {
+			if c == "Ellipsis" {
+				return "ellipsis"
+			}
+			return c + "Type"
+		}
 		return "object"
 	case *jsGenerator:
 		// CPython's type(gen).__name__, and the name its AttributeError uses.
@@ -21488,6 +21525,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 				return "method_descriptor"
 			}
 			if bi.fn == nil {
+				if bi.kind != "m" && pySlotDunder(bi.name) {
+					return "method-wrapper"
+				}
 				return "builtin_function_or_method"
 			}
 			return "method"
@@ -21633,39 +21673,65 @@ var pyBinDunder = map[string]string{
 	"+": "__add__", "-": "__sub__", "*": "__mul__", "/": "__truediv__",
 	"//": "__floordiv__", "%": "__mod__", "@": "__matmul__", "**": "__pow__",
 	"==": "__eq__", "!=": "__ne__", "<": "__lt__", ">": "__gt__",
-	"<=": "__le__", ">=": "__ge__",
+	"<=": "__le__", ">=": "__ge__", "|": "__or__", "&": "__and__", "^": "__xor__",
+	"<<": "__lshift__", ">>": "__rshift__",
 }
 var pyBinReflected = map[string]string{
 	"+": "__radd__", "-": "__rsub__", "*": "__rmul__", "/": "__rtruediv__",
 	"//": "__rfloordiv__", "%": "__rmod__", "@": "__rmatmul__", "**": "__rpow__",
 	"==": "__eq__", "!=": "__ne__", "<": "__gt__", ">": "__lt__",
-	"<=": "__ge__", ">=": "__le__",
+	"<=": "__ge__", ">=": "__le__", "|": "__ror__", "&": "__rand__", "^": "__rxor__",
+	"<<": "__rlshift__", ">>": "__rrshift__",
 }
 
 // pyDunderBin answers a binary operator through a user class's dunder, trying
-// the left operand first and then the right one's reflected form. ok is false
-// when neither side defines one - the caller then takes the builtin path.
+// the left operand first and then the right one's reflected form, an answer of
+// NotImplemented handing over. When an instance is involved and both decline,
+// a builtin subclass's value is offered to the builtin operation itself
+// (CPython's float slot serves S(3) in S(3) + 2.5), == falls back to identity
+// and any other operator is CPython's TypeError, named by the operands' own
+// types. ok is false only when neither operand is an instance - the caller then
+// takes the builtin path. Twin of userOp / pyUserEq in
+// languages/python-interpreter.abnf and pyADunderBin in lib/python-rt.metajs.
 func (rt *jsrt) pyDunderBin(op string, l, r interface{}) (interface{}, bool) {
-	if _, cls, ok := pyInstance(l); ok {
-		if m, found := pyLookup(cls, pyBinDunder[op]); found && isCallable(m) {
+	_, lcls, li := pyInstance(l)
+	_, rcls, ri := pyInstance(r)
+	if !li && !ri {
+		return nil, false
+	}
+	// "fmt" % x is str's formatting whatever x is.
+	if _, isStr := l.(string); isStr && op == "%" {
+		return nil, false
+	}
+	if li {
+		if m, found := pyLookup(lcls, pyBinDunder[op]); found && isCallable(m) {
 			if v := rt.call(m, jsUndef, []interface{}{l, r}); v != pyNotImplemented {
 				return v, true
 			}
 		}
 	}
-	if _, cls, ok := pyInstance(r); ok {
-		if m, found := pyLookup(cls, pyBinReflected[op]); found && isCallable(m) {
+	if ri {
+		if m, found := pyLookup(rcls, pyBinReflected[op]); found && isCallable(m) {
 			if v := rt.call(m, jsUndef, []interface{}{r, l}); v != pyNotImplemented {
 				return v, true
 			}
 		}
 	}
 	if op == "!=" { // Python's default __ne__ is the negation of __eq__.
-		if v, ok := rt.pyDunderBin("==", l, r); ok {
-			return !rt.truthy(v), true
-		}
+		v, _ := rt.pyDunderBin("==", l, r)
+		return !rt.pyTruthyOf(v), true
 	}
-	return nil, false
+	a, b := pyUnwrapBuiltin(l), pyUnwrapBuiltin(r)
+	if op == "==" {
+		if a != l || b != r {
+			return rt.pyEqual(a, b), true
+		}
+		return l == r, true
+	}
+	if msg := rt.pyBinTypeErr(op, l, r, a, b); msg != "" {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
+	}
+	return rt.pyExt("js_pybin", op, a, b), true
 }
 
 // ----------------------------------------------------------------------------
