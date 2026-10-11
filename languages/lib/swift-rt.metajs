@@ -2233,6 +2233,15 @@ function js_swstrinit(v) {
 // Swift's print(_:separator:terminator:). args is the argument ARRAY, sep the
 // separator and term the terminator; nil means the default (" " and "\n").
 function js_swprint(args, sep, term) {
+    print(js_swprintstr(args, sep, term, false))
+    return undefined
+}
+
+// The text print (debug false) or debugPrint (true) writes, for a call with
+// `to:` or a debugPrint. debugPrint renders each item as it prints inside a
+// collection - a String quoted and escaped. Twin of swPrintText in
+// abnf/jsrtswift.go and swift-interpreter.abnf.
+function js_swprintstr(args, sep, term, debug) {
     var s = " "
     if (sep !== undefined && sep !== null) { s = swDesc(sep) }
     var t = "\n"
@@ -2241,11 +2250,10 @@ function js_swprint(args, sep, term) {
     var i = 0
     while (i < args.length) {
         if (i > 0) { out = out + s }
-        out = out + swDesc(args[i])
+        out = out + swRender(args[i], debug, 0)
         i = i + 1
     }
-    print(out + t)
-    return undefined
+    return out + t
 }
 
 // Swift's ==. js_seq compares an Array, a Dictionary and a tuple by IDENTITY; in

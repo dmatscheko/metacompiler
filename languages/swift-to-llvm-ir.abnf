@@ -6360,6 +6360,16 @@ KwContinue  = "continue" KwEnd ;
         }
         // numericCast(x) passes the value through: the context's adoption converts.
         if (name == "numericCast" && args.length == 1) { return args[0].t }
+        // withExtendedLifetime(x, body): body(x). There is no lifetime to extend.
+        if (name == "withExtendedLifetime" && args.length == 2) {
+            return function(b) {
+                var rx = args[0].t(b)
+                var rf = args[1].t(rx.b)
+                var argv = callExt(rf.b, "js_arr_new", [])
+                callExt(rf.b, "js_arr_push", [argv, rx.v])
+                return {b: rf.b, v: callExt(rf.b, "js_call", [rf.v, hUndef, argv])}
+            }
+        }
         // swap(&a, &b): the two names trade values.
         if (name == "swap" && args.length == 2 && args[0].ref != null && args[1].ref != null) {
             return function(b) {
@@ -6433,15 +6443,21 @@ KwContinue  = "continue" KwEnd ;
         // function (which prints the raw runtime value and cannot see the labelled
         // arguments). js_swprint renders every
         // argument with String(describing:) and honours both labels.
-        if (name == "print" && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+        // debugPrint is print with each item rendered as it prints inside a
+        // collection, and `to: &s` appends the text to s instead of writing it
+        // (js_swprintstr answers the text).
+        if ((name == "print" || name == "debugPrint") && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
             var pos = []
             var sepT = null
             var termT = null
+            var toRef = ""
             for (var q = 0; q < args.length; q++) {
                 if (args[q].lbl == "separator") { sepT = args[q].t }
                 else if (args[q].lbl == "terminator") { termT = args[q].t }
+                else if (args[q].lbl == "to" && args[q].ref != null) { toRef = args[q].ref }
                 else { pos.push(args[q]) }
             }
+            var debugP = name == "debugPrint"
             return function(b) {
                 var ea = emitArgRecs(b, pos)
                 b = ea.b
@@ -6449,7 +6465,19 @@ KwContinue  = "continue" KwEnd ;
                 if (sepT != null) { var rs = sepT(b); b = rs.b; sepV = rs.v }
                 var termV = hUndef
                 if (termT != null) { var rt2 = termT(b); b = rt2.b; termV = rt2.v }
-                callExt(b, "js_swprint", [ea.v, sepV, termV])
+                if (toRef == "" && !debugP) {
+                    callExt(b, "js_swprint", [ea.v, sepV, termV])
+                    return {b: b, v: hUndef}
+                }
+                var textV = callExt(b, "js_swprintstr", [ea.v, sepV, termV, debugP ? hTrue : hFalse])
+                if (toRef == "") {
+                    var one = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [one, textV])
+                    callExt(b, "js_swprint", [one, hUndef, emitStr(b, "")])
+                    return {b: b, v: hUndef}
+                }
+                var curV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, toRef)])
+                b.NewCall(rtKSet(), [curScopeV, emitStr(b, toRef), callExt(b, "js_swarith", [emitStr(b, "+"), curV, textV])])
                 return {b: b, v: hUndef}
             }
         }

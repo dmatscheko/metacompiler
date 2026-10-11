@@ -3779,18 +3779,23 @@ KwContinue  = "continue" KwEnd ;
         }
         println(out)
     }
-    // print(_:separator:terminator:). The two labelled arguments would otherwise
-    // arrive positionally; makeCall splits them out and calls this instead.
-    function swPrintSep(argv, sep, term) {
+    // The text print(_:separator:terminator:) writes, or debugPrint's, which
+    // renders each item as it prints inside a collection - a String quoted and
+    // escaped. The labelled arguments would otherwise arrive positionally;
+    // makeCall splits them out and calls this instead. Twin of swPrintText in
+    // abnf/jsrtswift.go and js_swprintstr in lib/swift-rt.metajs.
+    function swPrintText(argv, sep, term, debug) {
         var s = (sep === undefined || sep === null) ? " " : swstr(sep)
         var t = (term === undefined || term === null) ? "\n" : swstr(term)
         var out = ""
         for (var i = 0; i < argv.length; i++) {
             if (i > 0) { out += s }
-            out += swstr(argv[i])
+            out += swRender(argv[i], debug, 0)
         }
-        if (t == "\n") { println(out) } else { print(out + t) }
+        return out + t
     }
+    // withExtendedLifetime(x, body): body(x). There is no lifetime to extend.
+    hostGlobals["withExtendedLifetime"] = function(x, body) { return body(x) }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     // type(of: v): a value of a program type answers its type DESCRIPTOR, which
     // prints as the name and answers the type's static members
@@ -6202,19 +6207,25 @@ KwContinue  = "continue" KwEnd ;
         var recs = planArgs(name, items.slice(1))
         // print(_:separator:terminator:) - the labels have to be split out here,
         // because a host function only sees positional arguments.
-        if (name == "print" && lookupSig(name) == null) {
+        // debugPrint is print with each item rendered as it prints inside a
+        // collection, and `to: &s` appends the text to s instead of writing it.
+        if ((name == "print" || name == "debugPrint") && lookupSig(name) == null) {
             var pos = []
             var sepT = null
             var termT = null
+            var toRef = ""
             for (var q = 0; q < recs.length; q++) {
                 if (recs[q].lbl == "separator") { sepT = recs[q].t }
                 else if (recs[q].lbl == "terminator") { termT = recs[q].t }
+                else if (recs[q].lbl == "to" && recs[q].ref != null) { toRef = recs[q].ref }
                 else { pos.push(recs[q]) }
             }
-            if (sepT != null || termT != null) {
+            var debugP = name == "debugPrint"
+            if (sepT != null || termT != null || toRef != "" || debugP) {
                 return function() {
                     var ea = evalArgs(pos)
-                    swPrintSep(ea.argv, sepT == null ? undefined : sepT(), termT == null ? undefined : termT())
+                    var text = swPrintText(ea.argv, sepT == null ? undefined : sepT(), termT == null ? undefined : termT(), debugP)
+                    if (toRef != "") { setVar(toRef, swstr(getVar(toRef)) + text) } else { print(text) }
                     writeBacks(ea.boxes)
                     return undefined
                 }

@@ -3755,8 +3755,9 @@ func s80() {
 }
 
 // ===== SECTION 81: the standard library's free functions =====
-// zip, stride, repeatElement, swap, numericCast, min/max of three or more, abs
-// at a sized width, the trapping functions on their passing path, a closure taking an
+// zip, stride, repeatElement, swap, numericCast, withExtendedLifetime,
+// debugPrint and print(to:), min/max of three or more, abs at a sized width,
+// the trapping functions on their passing path, a closure taking an
 // n-tuple apart, nested tuple patterns, type(of:) of an empty collection, and
 // strtod's NaN spellings. Every value read off swiftc 6.1.2.
 func s81() {
@@ -3818,6 +3819,11 @@ func s81() {
     let u8s: [UInt8] = [250]
     let widened: Int = numericCast(u8s[0])
     check("81l", widened + 10 == 260 && "\(type(of: widened))" == "Int")
+    // print(to:) appends to a String; debugPrint renders a String quoted.
+    var log = ""
+    print("x", 1, to: &log)
+    debugPrint("q\n", [1.5], terminator: "", to: &log)
+    check("81m", log == "x 1\n\"q\\n\" [1.5]" && withExtendedLifetime(5) { $0 * 2 } == 10)
 }
 
 func main() {

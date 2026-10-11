@@ -66,27 +66,13 @@ func init() {
 		// a[1] the separator and a[2] the terminator; undefined means the
 		// default (" " and "\n").
 		m["js_swprint"] = func(a []uint64) uint64 {
-			args, ok := u(a[0]).(*jsArray)
-			if !ok {
-				rt.fail("js_swprint needs an argument array")
-			}
-			sep := " "
-			if s := u(a[1]); !isNullish(s) {
-				sep = rt.swDesc(s)
-			}
-			term := "\n"
-			if t := u(a[2]); !isNullish(t) {
-				term = rt.swDesc(t)
-			}
-			out := ""
-			for i, e := range args.elems {
-				if i > 0 {
-					out += sep
-				}
-				out += rt.swDesc(e)
-			}
-			fmt.Fprint(outWriter, wtf8Clean(out+term))
+			fmt.Fprint(outWriter, wtf8Clean(rt.swPrintText(u(a[0]), u(a[1]), u(a[2]), false)))
 			return 0
+		}
+		// The text print (a[3] false) or debugPrint (true) writes, for a call
+		// with `to:` or a debugPrint.
+		m["js_swprintstr"] = func(a []uint64) uint64 {
+			return rt.wrapStr(rt.swPrintText(u(a[0]), u(a[1]), u(a[2]), a[3] == jsHTrue))
 		}
 
 		// Swift's ==. `js_seq` compares an Array, a Dictionary and a tuple by
@@ -1553,6 +1539,33 @@ func swAdoptWidth(ty string) (uint8, bool, bool) {
 		return 8, true, true
 	}
 	return 0, false, false
+}
+
+// swPrintText is the text print / debugPrint writes for an argument array, a
+// separator and a terminator (undefined: " " and "\n"). debugPrint renders each
+// item as it prints inside a collection - a String quoted and escaped. Twin of
+// swPrintText in swift-interpreter.abnf and lib/swift-rt.metajs.
+func (rt *jsrt) swPrintText(argv, sepV, termV interface{}, debug bool) string {
+	args, ok := argv.(*jsArray)
+	if !ok {
+		rt.fail("js_swprint needs an argument array")
+	}
+	sep := " "
+	if !isNullish(sepV) {
+		sep = rt.swDesc(sepV)
+	}
+	term := "\n"
+	if !isNullish(termV) {
+		term = rt.swDesc(termV)
+	}
+	out := ""
+	for i, e := range args.elems {
+		if i > 0 {
+			out += sep
+		}
+		out += rt.swRender(e, debug, 0)
+	}
+	return out + term
 }
 
 // swTupleOf builds the {__tuple: n, "0": ..., "1": ...} object a Swift tuple is.
