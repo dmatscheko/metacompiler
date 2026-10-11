@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-325** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-327** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -82,26 +82,21 @@ non-ASCII digits, and 3.14's "Did you mean" suffix (P3).
 
 # RB — Ruby
 
-### T-303 ruby: `#hash` / `#object_id` are constant 0 · P2 · RB · IN PROGRESS (RB worker, round 5) [V]
-All four legs answer 0, so `a.hash == b.hash` holds for unequal values; MRI gives
-value-based hashes (`1.hash != 2.hash`, `"a".hash == "a".hash`) and distinct ids.
-Make hash value-based; object_id distinct per object where the model allows.
+### T-325 ruby: `$!`, bare undefined calls, `Object#inspect`, Module class · P1 · RB · IN PROGRESS (JS+RB worker, round 6) [V]
+`x = (raise "boom" rescue $!)` gives nil in all engines (MRI `#<RuntimeError: boom>`).
+A bare `nope(1)` aborts ("unknown name" / "variable not defined"; MRI NoMethodError
+"undefined method `nope' for main:Object"). `Object#inspect` calls a user #to_s (MRI 2.6
+`#<P:0x...>` for a class defining only to_s). `Kernel.class` / `Comparable.class`
+answer Class (MRI Module). `1.method(:zz)` raises NoMethodError for `method` (MRI
+NameError "undefined method `zz' for class `Integer'").
 
-### T-304 ruby: `Integer#lcm`, `#abs2`, `#conj`, `#real?` · P1 · RB · IN PROGRESS (RB worker, round 5) [V]
-Abort in every leg; MRI `4.lcm(6)` 12, `7.abs2` 49, `7.conj` 7, `7.real?` true. Sweep
-Numeric's remaining public methods against MRI 2.6 while there.
-
-### T-305 ruby: an unknown method aborts instead of raising NoMethodError · P1 · RB · IN PROGRESS (RB worker, round 5) [V]
-Every leg aborts, so `begin; 5.nope; rescue NoMethodError => e; p e.message; end`
-cannot rescue it; MRI prints "undefined method `nope' for 5:Integer". Make it a
-catchable NoMethodError in all three engines (message as MRI 2.6).
-
-### T-306 ruby: `p %w[a b].map(...)` and `p /x/.class` do not parse · P1 · RB · IN PROGRESS (RB worker, round 5) [V]
-Both grammars; MRI accepts both (the second with an ambiguity warning).
-
-### T-307 ruby: `C.instance_variables` on a class object · P3 · RB · IN PROGRESS (RB worker, round 5) [V]
-Compiled class objects store class-level ivars and methods as the same plain keys;
-needs a recorded name list (like `__ivn`).
+### T-326 ruby: Math domain errors, Regexp gaps, `%w` nesting, class reopen · P1 · RB · IN PROGRESS (JS+RB worker, round 6) [V]
+`Math.sqrt(-1)`, `Math.log(-1)` answer NaN (MRI Math::DomainError). `Regexp.new("ab",
+Regexp::IGNORECASE)`: interpreter "uninitialized constant", compiled `#<Regexp>`.
+`%r{a/b}.inspect` does not escape "/" (MRI `/a\/b/`). `%w[a [] b]` (nested brackets)
+does not parse. Compiled: reopening a class builds a new class object (earlier class
+@ivars lost); a module body's @ivars land on main. A Range/Enumerator NoMethodError
+names the Array it delegates to (MRI `1..3:Range`); NoMethodError#name missing.
 
 ---
 
@@ -126,24 +121,24 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-316 js: compiled own-key lists of builtins; Object.getOwnPropertyNames(Math); `"toString" in {}` · P1 · JS · OPEN [V]
+### T-316 js: compiled own-key lists of builtins; Object.getOwnPropertyNames(Math); `"toString" in {}` · P1 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
 `Object.keys(JSON)` is "stringify,parse" in run and native (node and interpreters "");
 `Object.keys(Object).length` 1 (node 0): the Go twin and layer 2 list those members as
 keys. `Object.getOwnPropertyNames(Math)` [] in all legs (node 44 names). `"toString"
 in {}` false (node true).
 
-### T-317 js: generator close semantics with finally / a non-done delegate · P2 · JS · OPEN [V]
+### T-317 js: generator close semantics with finally / a non-done delegate · P2 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
 `try{yield 1}finally{return 42}` then `g.return(7)`: node `{value:42,done:true}`, ours
 `{value:7}`; `finally{yield 99}`: node `{value:99,done:false}`, ours
 `{value:7,done:true}`; a yield* delegate whose return() answers {done:false}: node
 yields it and stays in the yield*. No engine can yield during a close (closeBody /
 gen_close). All engines.
 
-### T-318 js: `super.toString()` without an own toString · P1 · JS · OPEN [V]
+### T-318 js: `super.toString()` without an own toString · P1 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
 In a class with no toString (e.g. extends Object): node "[object Object]", ours
 TypeError "not a function". All engines.
 
-### T-319 js: value reads of builtin methods on arrays/strings leak goja's host methods · P1 · JS · OPEN [V]
+### T-319 js: value reads of builtin methods on arrays/strings leak goja's host methods · P1 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
 `typeof [1].valueOf`: node "function"; goja-interp "function" (host leak), -frozen /
 run / native "undefined" - a live goja-vs-frozen divergence the matrix does not
 exercise; `[1].push` read as a value is bound under -frozen/compiled but takes `.call`
@@ -570,6 +565,11 @@ T-280 bash: `tests/probe.sh bash` - llvm.Run leg has an extra trailing blank lin
 T-281 c: `long` → `float` rounds twice — DONE 7c300b5
 T-283 kotlin: `toInt` and Unicode digits; hex-float precision — DONE fcc558b
 T-282 dart: the String member surface is tiny — PARTIAL 06500be (spec-only; the common String members); rest is T-323
+T-303 ruby: `#hash` / `#object_id` are constant 0 — DONE 6af52ff (String/Rational/Complex share an id per value: no identity in the model)
+T-304 ruby: `Integer#lcm`, `#abs2`, `#conj`, `#real?` — DONE 77d835c
+T-305 ruby: an unknown method aborts instead of raising NoMethodError — DONE 537185e (a bare `nope(1)` is T-325)
+T-306 ruby: `p %w[a b].map(...)` and `p /x/.class` do not parse — DONE bec6cae
+T-307 ruby: `C.instance_variables` on a class object — DONE 59ae38d (class reopen / module bodies: T-326)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
