@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-399** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-400** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,14 +78,11 @@ are lists, not views). `tuple(t) is t` False; `hasattr(tuple, "__add__")` False.
 
 # JS — JavaScript and TypeScript
 
-### T-393 ts: namespace `this` through an exported variable; uninitialised exports in the interpreter · P2 · JS · IN PROGRESS (JS worker, round 13) [V]
-`namespace N { export const f = function(this:any){ return this === N }; export
-function callF(){ return f() } }`: tsc+node true (tsc emits `N.f()`); all legs false.
-Interpreter only: `export let cache: T | undefined;` with no initializer lists `cache`
-in Object.keys (tsc creates no property until assignment). Also check whether
-tsc 6.0.3's transpileModule crash on the whole tests/typescript-test-full.ts ("Invalid
-cast ... isIdentifier" in emitReturnStatement) is a tsc bug or an invalid construct in
-the file.
+### T-399 ts interpreter: stores to namespace exports before declaration / to exported functions · P3 · JS · OPEN [U]
+`namespace N { export function set(v){ x = v } set(1); export let x; }` - the store
+falls through to a global (tsc writes `N.x = 1`). Assigning by bare name to an exported
+function rebinds the namespace object's slot (tsc keeps the local binding separate).
+Neither settled against tsc+node yet.
 
 ---
 
@@ -475,6 +472,7 @@ T-384 python: binary operators on mismatched builtin types; huge repeats; int **
 T-170 a real tuple type for Python — DONE 93334360 (a tuple is an array of kind 16; no runtime.c change)
 T-011 python: `d.items()` renders pairs as lists — DONE 93334360
 T-181 corpus: other languages — PARTIAL 38b08481..4999997a (swift 115→118/123 swiftc-accepted, batch 0→2/2, c 213→217, java 4323→4329, php 2681→2691, dart 3336→3339, csharp +1; no must-parse file lost); remaining tail is T-395/T-396
+T-393 ts: namespace `this` through an exported variable; uninitialised exports in the interpreter — DONE 3d7770f6 (the tsc crash is TS18030 on `this?.#foo`, input tsc rejects)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
