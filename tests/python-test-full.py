@@ -3718,6 +3718,45 @@ def s66():
     check("ord14", err(lambda: B() < vals[0]) == "'<' not supported between instances of 'B' and 'int'")
     check("ord15", (1 < 3 < 2) is False and (1 < 2 < 3) is True)
 
+# ===== SECTION 67: str keywords, str.encode, no-argument constructors =====
+# split/rsplit/splitlines/expandtabs/encode/replace take keywords under CPython
+# 3.14's names and every other str method refuses them; encode() answers the bytes
+# (a list of byte values here) with the codec's UnicodeEncodeError; float(), list()
+# and friends have a value with no argument; int() and float() read any Unicode
+# decimal digit.
+def s67():
+    def err(f):
+        try:
+            f()
+            return "no error"
+        except Exception as e:
+            return type(e).__name__ + ": " + str(e)
+    s = ["bob", "a,b,,c", "  x y  ", "é", "Hello", "abcabc", "a\tb", "a\nb\n", "€😀"]
+    check("skw1", s[0].split(sep="o") == ["b", "b"] and s[1].split(sep=",", maxsplit=1) == ["a", "b,,c"])
+    check("skw2", s[1].rsplit(sep=",", maxsplit=1) == ["a,b,", "c"] and s[2].split(maxsplit=1) == ["x", "y  "])
+    check("skw3", s[5].replace("a", "X", count=1) == "Xbcabc" and s[6].expandtabs(tabsize=4) == "a   b")
+    check("skw4", s[7].splitlines(keepends=True) == ["a\n", "b\n"])
+    check("skw5", err(lambda: s[2].strip(chars=" x")) == "TypeError: str.strip() takes no keyword arguments")
+    check("skw6", err(lambda: s[4].endswith(suffix="lo")) == "TypeError: str.endswith() takes no keyword arguments")
+    check("skw7", err(lambda: s[4].ljust(width=9)) == "TypeError: str.ljust() takes no keyword arguments")
+    check("skw8", err(lambda: s[0].split(foo=1)) == "TypeError: split() got an unexpected keyword argument 'foo'")
+    check("skw9", err(lambda: s[0].split(",", sep=",")) == "TypeError: argument for split() given by name ('sep') and position (1)")
+    check("skw10", err(lambda: s[0].replace(old="a", new="b")) == "TypeError: replace() takes at least 2 positional arguments (0 given)")
+    check("enc1", len(s[3].encode()) == 2 and s[3].encode().decode() == "é" and list(s[3].encode("utf-8")) == [195, 169])
+    check("enc2", list(s[3].encode(encoding="latin-1")) == [233] and list(s[8].encode()) == [226, 130, 172, 240, 159, 152, 128])
+    check("enc3", err(lambda: s[3].encode("ascii")) == "UnicodeEncodeError: 'ascii' codec can't encode character '\\xe9' in position 0: ordinal not in range(128)")
+    check("enc4", err(lambda: ("a" + s[8]).encode("latin-1")) == "UnicodeEncodeError: 'latin-1' codec can't encode characters in position 1-2: ordinal not in range(256)")
+    check("enc5", list(s[3].encode("ascii", errors="replace")) == [63] and list(s[3].encode("ascii", "ignore")) == [])
+    check("enc6", s[8].encode("ascii", "backslashreplace").decode() == "\\u20ac\\U0001f600")
+    check("enc7", s[3].encode("ascii", "xmlcharrefreplace").decode() == "&#233;")
+    check("enc8", err(lambda: s[3].encode("klingon")) == "LookupError: unknown encoding: klingon")
+    check("ctor1", repr(float()) == "0.0" and int() == 0 and str() == "" and list() == [] and len(tuple()) == 0)
+    check("ctor2", dict() == {} and repr(set()) == "set()" and bool() is False and complex() == 0)
+    check("ctor3", err(lambda: list(None)) == "TypeError: 'NoneType' object is not iterable")
+    nd = ["٣", "١٢٣", "٣.٥", "３", " ٤٢ ", "𝟗"]
+    check("ctor4", int(nd[0]) == 3 and int(nd[1]) + 1 == 124 and float(nd[2]) == 3.5 and int(nd[3]) == 3)
+    check("ctor5", int(nd[4]) == 42 and int(nd[5]) == 9 and int(nd[1], 16) == 291)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3785,5 +3824,6 @@ def main():
     s64() # SECTION-CALL 64
     s65() # SECTION-CALL 65
     s66() # SECTION-CALL 66
+    s67() # SECTION-CALL 67
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

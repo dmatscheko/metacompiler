@@ -3693,6 +3693,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 			return "<class '" + name + "'>"
 		}
 		if els, ok := pySetElems(t); ok {
+			if len(els.elems) == 0 {
+				return "set()" // {} is the empty DICT
+			}
 			out := "{"
 			for i, e := range els.elems {
 				if i > 0 {
@@ -17256,6 +17259,7 @@ func digitValue(c byte) int {
 // are the same body, with the infinity BUILT as Math.pow(2, 1024) because the
 // script dialect has no exponent form in a numeric literal.
 func pyStrToF(s string) float64 {
+	s = pyDecAscii(s)
 	t := strings.TrimSpace(s)
 	neg := false
 	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
@@ -21537,7 +21541,7 @@ func (rt *jsrt) pyIntNew(args []interface{}) interface{} {
 // single underscores between digits or right after the prefix, and under base
 // 0 no leading zero on a non-zero decimal.
 func (rt *jsrt) pyParseInt(s string, base int) interface{} {
-	t := strings.TrimSpace(s)
+	t := strings.TrimSpace(pyDecAscii(s))
 	neg := false
 	if t != "" && (t[0] == '+' || t[0] == '-') {
 		neg, t = t[0] == '-', t[1:]
@@ -21825,7 +21829,7 @@ func pyExcParentName(name string) string {
 		return "ArithmeticError"
 	case "UnicodeError":
 		return "ValueError"
-	case "UnicodeDecodeError":
+	case "UnicodeDecodeError", "UnicodeEncodeError":
 		return "UnicodeError"
 	case "Exception":
 		return "BaseException"

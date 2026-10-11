@@ -25,12 +25,13 @@ package abnf
 // zfill and the per-character walks) count CODE POINTS, as CPython does.
 //
 // The documented divergences from CPython are listed in the MetaJS chapter's
-// header and are NOT repeated here; the short form is: no bytes type (encode() is
-// the identity), ASCII-exact classification with a cased-derived fallback outside
+// header and are NOT repeated here; the short form is: bytes are a list of byte
+// values (encode() answers one), ASCII-exact classification with a cased-derived fallback outside
 // it, and a case mapping restricted to the mappings that do not change the code
 // unit count (which is what makes goja, this engine and the C floor agree).
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -1038,6 +1039,145 @@ func pysArgAt(args []interface{}, i int) interface{} {
 	return jsUndef
 }
 
+// pysKwArgs moves the keyword arguments of the str methods that take any into
+// their slots, under CPython 3.14's parameter names; every other one is
+// positional-only. Twin of pyStrKwArgs in languages/python-interpreter.abnf and
+// in lib/python-rt.metajs.
+func (rt *jsrt) pysKwArgs(name string, args []interface{}, kw interface{}) []interface{} {
+	switch name {
+	case "format":
+		return args
+	case "split", "rsplit":
+		return rt.pyKwPos(name, args, kw, []string{"sep", "maxsplit"}, 0)
+	case "splitlines":
+		return rt.pyKwPos(name, args, kw, []string{"keepends"}, 0)
+	case "expandtabs":
+		return rt.pyKwPos(name, args, kw, []string{"tabsize"}, 0)
+	case "encode":
+		return rt.pyKwPos(name, args, kw, []string{"encoding", "errors"}, 0)
+	case "replace":
+		if len(args) < 2 {
+			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+				fmt.Sprintf("replace() takes at least 2 positional arguments (%d given)", len(args)))})
+		}
+		return rt.pyKwPos(name, args, kw, []string{"old", "new", "count"}, 2)
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "str."+name+"() takes no keyword arguments")})
+}
+
+// pysEncode is str.encode(encoding="utf-8", errors="strict"): the bytes - a list
+// of byte values in this value model - in UTF-8, ASCII or Latin-1. A run of
+// characters the codec cannot encode raises CPython's UnicodeEncodeError under
+// "strict"; "ignore", "replace", "backslashreplace" and "xmlcharrefreplace"
+// substitute. Twin of pyStrEncode in languages/python-interpreter.abnf and in
+// lib/python-rt.metajs.
+func (rt *jsrt) pysEncode(s string, encV, errV interface{}) interface{} {
+	enc, errs := "utf-8", "strict"
+	if encV != nil && encV != jsUndef && encV != jsNull {
+		enc = rt.toString(encV)
+	}
+	if errV != nil && errV != jsUndef && errV != jsNull {
+		errs = rt.toString(errV)
+	}
+	limit, codec := 0, "utf-8"
+	switch strings.ReplaceAll(strings.ToLower(enc), "_", "-") {
+	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
+		limit, codec = 256, "latin-1"
+	case "ascii", "us-ascii":
+		limit, codec = 128, "ascii"
+	case "utf-8", "utf8":
+	default:
+		panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown encoding: "+enc)})
+	}
+	units := strUnits(s)
+	var cps []int
+	for i := 0; i < len(units); i++ {
+		c := int(units[i])
+		if c >= 0xd800 && c <= 0xdbff && i+1 < len(units) && units[i+1] >= 0xdc00 && units[i+1] <= 0xdfff {
+			c = (c-0xd800)*1024 + int(units[i+1]) - 0xdc00 + 0x10000
+			i++
+		}
+		cps = append(cps, c)
+	}
+	bad := func(cp int) bool {
+		if limit == 0 {
+			return cp >= 0xd800 && cp <= 0xdfff
+		}
+		return cp >= limit
+	}
+	out := &jsArray{}
+	push := func(b int) { out.elems = append(out.elems, float64(b)) }
+	ascii := func(t string) {
+		for i := 0; i < len(t); i++ {
+			push(int(t[i]))
+		}
+	}
+	for k := 0; k < len(cps); {
+		cp := cps[k]
+		if !bad(cp) {
+			switch {
+			case limit != 0 || cp < 0x80:
+				push(cp)
+			case cp < 0x800:
+				push(0xc0 | cp>>6)
+				push(0x80 | cp&63)
+			case cp < 0x10000:
+				push(0xe0 | cp>>12)
+				push(0x80 | cp>>6&63)
+				push(0x80 | cp&63)
+			default:
+				push(0xf0 | cp>>18)
+				push(0x80 | cp>>12&63)
+				push(0x80 | cp>>6&63)
+				push(0x80 | cp&63)
+			}
+			k++
+			continue
+		}
+		j := k
+		for j < len(cps) && bad(cps[j]) {
+			j++
+		}
+		if errs == "strict" {
+			where := fmt.Sprintf("character '%s' in position %d", pysEncEsc(cp), k)
+			if j-k > 1 {
+				where = fmt.Sprintf("characters in position %d-%d", k, j-1)
+			}
+			why := fmt.Sprintf("ordinal not in range(%d)", limit)
+			if limit == 0 {
+				why = "surrogates not allowed"
+			}
+			panic(&jsThrown{value: rt.pyExcInstance("UnicodeEncodeError", "'"+codec+"' codec can't encode "+where+": "+why)})
+		}
+		for q := k; q < j; q++ {
+			switch errs {
+			case "replace":
+				push('?')
+			case "backslashreplace":
+				ascii(pysEncEsc(cps[q]))
+			case "xmlcharrefreplace":
+				ascii(fmt.Sprintf("&#%d;", cps[q]))
+			case "ignore":
+			default:
+				panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown error handler name '"+errs+"'")})
+			}
+		}
+		k = j
+	}
+	return out
+}
+
+// pysEncEsc is a code point as repr spells it inside a string.
+func pysEncEsc(cp int) string {
+	switch {
+	case cp < 0x100:
+		return fmt.Sprintf("\\x%02x", cp)
+	case cp < 0x10000:
+		return fmt.Sprintf("\\u%04x", cp)
+	}
+	return fmt.Sprintf("\\U%08x", cp)
+}
+
 func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) interface{} {
 	n := e.sLen(s)
 	rt := e.rt
@@ -1189,8 +1329,7 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 	case "expandtabs":
 		return e.expandTabs(s, pysOptInt(rt, args, 0, 8))
 	case "encode":
-		// No bytes type in this value model; CPython answers b'...'.
-		return s
+		return rt.pysEncode(s, pysArgAt(args, 0), pysArgAt(args, 1))
 
 	case "partition", "rpartition":
 		sep := e.strArg(pysArgAt(args, 0))
@@ -1265,7 +1404,11 @@ func init() {
 						if !ok {
 							rt.fail("js_pymcall args must be an array")
 						}
-						return w(env.call(s, name, arr.elems, u(a[3])))
+						args, kw := arr.elems, u(a[3])
+						if keys, _, isDict := dictParts(kw); isDict && len(keys.elems) > 0 {
+							args = rt.pysKwArgs(name, args, kw)
+						}
+						return w(env.call(s, name, args, kw))
 					}
 				}
 				return base(a)

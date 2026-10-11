@@ -1320,7 +1320,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Math.pow(2, 1024) is the spelling. The sign is applied by dividing by -1
     // rather than by `0 - v`, for the same reason the signed zeros are - see
     // floNegate. float("-nan") is nan in CPython, so the sign is dropped there.
-    function pyStrToF(s) {
+    function pyStrToF(s0) {
+        var s = pyDecAscii(s0)
         var t = s.trim()
         var sign = 1
         if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
@@ -1373,6 +1374,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "int") { return pyIntNew(args) }
         if (name == "float") {
+            if (args.length == 0) { return pyFlo(0) }
             if (typeof v == "string") { return pyFlo(pyStrToF(v)) }
             if (bigIsBig(v)) { return pyFlo(bigToFlo(v)) }
             return pyFlo(floVal(v))
@@ -1450,8 +1452,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // underscores between digits or right after the prefix, and under base 0 no
     // leading zero on a non-zero decimal. Past 2^53 the digits accumulate in
     // binOp, so the result is exact.
+    // The zero of every non-ASCII Unicode decimal-digit run (category Nd, Unicode
+    // 16.0; each is ten consecutive code points). int() and float() read any such
+    // digit as its ASCII one, as CPython's _PyUnicode_TransformDecimalAndSpaceToASCII
+    // does. Twin of pyDecAscii in abnf/pyarith.go and lib/python-rt.metajs.
+    var pyNdZeros = [
+        1632, 1776, 1984, 2406, 2534, 2662, 2790, 2918, 3046, 3174, 3302, 3430, 3558,
+        3664, 3792, 3872, 4160, 4240, 6112, 6160, 6470, 6608, 6784, 6800, 6992, 7088,
+        7232, 7248, 42528, 43216, 43264, 43472, 43504, 43600, 44016, 65296, 66720,
+        68912, 68928, 69734, 69872, 69942, 70096, 70384, 70736, 70864, 71248, 71360,
+        71376, 71386, 71472, 71904, 72016, 72688, 72784, 73040, 73120, 73552, 90416,
+        92768, 92864, 93008, 93552, 118000, 120782, 120792, 120802, 120812, 120822,
+        123200, 123632, 124144, 124401, 125264, 130032]
+    function pyDecAscii(s) {
+        var i = 0
+        while (i < s.length && s.charCodeAt(i) < 128) { i = i + 1 }
+        if (i == s.length) { return s }
+        var out = s.substring(0, i)
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            var w = 1
+            if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+                var t = s.charCodeAt(i + 1)
+                if (t >= 56320 && t <= 57343) {
+                    c = (c - 55296) * 1024 + (t - 56320) + 65536
+                    w = 2
+                }
+            }
+            var d = 0 - 1
+            for (var z = 0; z < pyNdZeros.length && d < 0; z++) {
+                if (c >= pyNdZeros[z] && c < pyNdZeros[z] + 10) { d = c - pyNdZeros[z] }
+            }
+            out = out + (d >= 0 ? String.fromCharCode(48 + d) : s.substring(i, i + w))
+            i = i + w
+        }
+        return out
+    }
     function pyParseInt(s, base) {
-        var t = s.trim()
+        var t = pyDecAscii(s).trim()
         var neg = false
         if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
             neg = t.charAt(0) == "-"
@@ -3778,8 +3816,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // covers Latin, Greek and Cyrillic; isdigit is ASCII-only, so CPython's Arabic-Indic
     // digits answer False here. isspace carries the Unicode space code points by hand.
     //
-    // NOT CARRIED: bytes. `encode()` answers the string itself, because there is no
-    // bytes type in this value model - CPython prints b'abc'.
+    // bytes are a list of byte values in this value model, so `encode()` answers
+    // one - and it prints as a list, where CPython prints b'abc'.
 
     // ---- the character primitives ----
 
@@ -4615,7 +4653,121 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return false
     }
 
+    // The str methods that take keyword arguments, under CPython 3.14's parameter
+    // names; every other one is positional-only. Twin of pysKwArgs in
+    // abnf/pystrmethod.go and pyStrKwArgs in lib/python-rt.metajs.
+    function pyStrKwArgs(name, args, kw) {
+        if (name == "format") { return args }
+        if (name == "split" || name == "rsplit") { return pyKwPos(name, args, kw, ["sep", "maxsplit"], 0) }
+        if (name == "splitlines") { return pyKwPos(name, args, kw, ["keepends"], 0) }
+        if (name == "expandtabs") { return pyKwPos(name, args, kw, ["tabsize"], 0) }
+        if (name == "encode") { return pyKwPos(name, args, kw, ["encoding", "errors"], 0) }
+        if (name == "replace") {
+            if (args.length < 2) { pyListErr("TypeError", "replace() takes at least 2 positional arguments (" + args.length + " given)") }
+            return pyKwPos(name, args, kw, ["old", "new", "count"], 2)
+        }
+        pyListErr("TypeError", "str." + name + "() takes no keyword arguments")
+        return args
+    }
+    // str.encode(encoding="utf-8", errors="strict"): the bytes - a list of byte
+    // values in this value model - in UTF-8, ASCII or Latin-1. A run of characters
+    // the codec cannot encode raises CPython's UnicodeEncodeError under "strict";
+    // "ignore", "replace", "backslashreplace" and "xmlcharrefreplace" substitute.
+    // Twin of pysEncode in abnf/pystrmethod.go and pyStrEncode in
+    // lib/python-rt.metajs.
+    function pyStrEncode(s, encV, errV) {
+        var enc = "utf-8"
+        if (encV !== undefined && encV !== null) { enc = pstr(encV) }
+        var errs = "strict"
+        if (errV !== undefined && errV !== null) { errs = pstr(errV) }
+        var e = ""
+        for (var ei = 0; ei < enc.length; ei++) { e = e + (enc.charAt(ei) == "_" ? "-" : enc.charAt(ei).toLowerCase()) }
+        var limit = 0
+        var codec = "utf-8"
+        if (e == "latin-1" || e == "latin1" || e == "iso-8859-1" || e == "iso8859-1") { limit = 256; codec = "latin-1" }
+        else if (e == "ascii" || e == "us-ascii") { limit = 128; codec = "ascii" }
+        else if (e != "utf-8" && e != "utf8") { pyListErr("LookupError", "unknown encoding: " + enc) }
+        var cps = []
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+                var t = s.charCodeAt(i + 1)
+                if (t >= 56320 && t <= 57343) {
+                    c = (c - 55296) * 1024 + (t - 56320) + 65536
+                    i = i + 1
+                }
+            }
+            cps.push(c)
+            i = i + 1
+        }
+        var out = []
+        var k = 0
+        while (k < cps.length) {
+            if (!pyEncBad(cps[k], limit)) {
+                pyEncPush(out, cps[k], limit)
+                k = k + 1
+                continue
+            }
+            var j = k
+            while (j < cps.length && pyEncBad(cps[j], limit)) { j = j + 1 }
+            if (errs == "strict") {
+                var where = "character '" + pyEncEsc(cps[k]) + "' in position " + k
+                if (j - k > 1) { where = "characters in position " + k + "-" + (j - 1) }
+                var why = limit == 0 ? "surrogates not allowed" : "ordinal not in range(" + limit + ")"
+                pyListErr("UnicodeEncodeError", "'" + codec + "' codec can't encode " + where + ": " + why)
+            }
+            for (var q = k; q < j; q++) {
+                if (errs == "replace") { out.push(63) }
+                else if (errs == "backslashreplace") { pyEncAscii(out, pyEncEsc(cps[q])) }
+                else if (errs == "xmlcharrefreplace") { pyEncAscii(out, "&#" + cps[q] + ";") }
+                else if (errs != "ignore") { pyListErr("LookupError", "unknown error handler name '" + errs + "'") }
+            }
+            k = j
+        }
+        return out
+    }
+    // A code point the codec cannot encode: past the limit, or (UTF-8, limit 0) a
+    // lone surrogate.
+    function pyEncBad(cp, limit) {
+        if (limit == 0) { return cp >= 55296 && cp <= 57343 }
+        return cp >= limit
+    }
+    function pyEncPush(out, cp, limit) {
+        if (limit != 0 || cp < 128) { out.push(cp) }
+        else if (cp < 2048) {
+            out.push(192 + Math.floor(cp / 64))
+            out.push(128 + cp % 64)
+        } else if (cp < 65536) {
+            out.push(224 + Math.floor(cp / 4096))
+            out.push(128 + Math.floor(cp / 64) % 64)
+            out.push(128 + cp % 64)
+        } else {
+            out.push(240 + Math.floor(cp / 262144))
+            out.push(128 + Math.floor(cp / 4096) % 64)
+            out.push(128 + Math.floor(cp / 64) % 64)
+            out.push(128 + cp % 64)
+        }
+    }
+    function pyEncAscii(out, txt) { for (var i = 0; i < txt.length; i++) { out.push(txt.charCodeAt(i)) } }
+    // A code point as repr spells it inside a string: \xhh, \uhhhh or \Uhhhhhhhh.
+    function pyEncEsc(cp) {
+        var w = 8
+        var head = "\\U"
+        if (cp < 256) { w = 2; head = "\\x" }
+        else if (cp < 65536) { w = 4; head = "\\u" }
+        var d = "0123456789abcdef"
+        var hex = ""
+        var v = cp
+        for (var i = 0; i < w; i++) {
+            hex = d.charAt(v % 16) + hex
+            v = Math.floor(v / 16)
+        }
+        return head + hex
+    }
+
     function pyStrMethod(s, name, args, kw) {
+        if (kw !== null && kw !== undefined && kw.keys.length > 0) { args = pyStrKwArgs(name, args, kw) }
         var n = s.length
         var cn = 0 // The code point count, taken only by the methods that need it.
         if (name == "upper") { return pySMapCase(s, true) }
@@ -4730,9 +4882,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "rjust") { return pySJust(s, pySOptInt(args, 0, 0), pySFillArg(args, 1), true) }
         if (name == "zfill") { return pySZfill(s, pySOptInt(args, 0, 0)) }
         if (name == "expandtabs") { return pySExpandTabs(s, pySOptInt(args, 0, 8)) }
-        // There is no bytes type in this value model, so encode() is the identity;
-        // CPython answers b'...'. Recorded in the header of this chapter.
-        if (name == "encode") { return s }
+        if (name == "encode") { return pyStrEncode(s, pyArgAt(args, 0), pyArgAt(args, 1)) }
 
         if (name == "partition" || name == "rpartition") {
             var psep = pySStrArg(args[0])
@@ -9129,7 +9279,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "LookupError", "IndexError", "KeyError", "ValueError", "TypeError",
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
-                      "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError"]
+                      "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
+                      "UnicodeEncodeError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -9153,6 +9304,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["OverflowError"] = "ArithmeticError"
     pyExcParent["UnicodeError"] = "ValueError"
     pyExcParent["UnicodeDecodeError"] = "UnicodeError"
+    pyExcParent["UnicodeEncodeError"] = "UnicodeError"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]

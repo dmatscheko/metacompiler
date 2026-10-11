@@ -4199,6 +4199,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return declBind(b, name, callExt(b, "js_closure", [handle(idx), curScopeV]))
     }
 
+    // A one-argument conversion that has a value of its own when called with NO
+    // argument (float() is 0.0, list() is []): js_arg answers undefined for an
+    // absent argument, which is None, so the count decides and DFLT emits the
+    // argument EXT is handed instead.
+    function declBuiltinDflt(b, name, ext, dflt) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = f.NewBlock("entry")
+        var noneB = f.NewBlock("")
+        var someB = f.NewBlock("")
+        var n = fb.NewCall(getExtern("js_get", 2), [f.Params[1], emitStr(fb, "length")])
+        fb.NewCondBr(truthy(fb, fb.NewCall(getExtern("js_seq", 2), [n, emitNum(fb, 0)])), noneB, someB)
+        noneB.NewRet(noneB.NewCall(getExtern(ext, 1), [dflt(noneB)]))
+        var a0 = someB.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(0)])
+        someB.NewRet(someB.NewCall(getExtern(ext, 1), [a0]))
+        return declBind(b, name, callExt(b, "js_closure", [handle(idx), curScopeV]))
+    }
+    function emitNoArgZero(b) { return emitNum(b, 0) }
+    function emitNoArgList(b) { return b.NewCall(getExtern("js_arr_new", 0), []) }
+
     // A builtin whose keywords are bound by a signature: the keyword-only KWNAMES,
     // then *args and **unknown (the extended layout), handed whole to EXT.
     function declKwBuiltin(b, name, ext, kwNames) {
@@ -4241,13 +4262,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         lb.NewRet(lb.NewCall(getExtern("js_pylenof", 1), [lArg]))
         b = declBind(b, "len", callExt(b, "js_closure", [handle(lenIdx), curScopeV]))
         // list(x): a fresh list from any iterable, via js_pylist.
-        funcCount++
-        var listIdx = funcCount
-        var tf = m.NewFunc("jsf_" + listIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-        var tb = tf.NewBlock("entry")
-        var tArg = tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])
-        tb.NewRet(tb.NewCall(getExtern("js_pylist", 1), [tArg]))
-        b = declBind(b, "list", callExt(b, "js_closure", [handle(listIdx), curScopeV]))
+        b = declBuiltinDflt(b, "list", "js_pylist", emitNoArgList)
         // range(stop) / range(start, stop[, step])
         funcCount++
         var rgIdx = funcCount
@@ -4294,12 +4309,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declKwBuiltin(b, "min", "js_pymin", [])
         // The remaining conversions pyConvert of python-interpreter.abnf offers.
         b = declBuiltin(b, "bool", "js_pybool", 1)
-        b = declBuiltin(b, "float", "js_pyfloat", 1)
+        b = declBuiltinDflt(b, "float", "js_pyfloat", emitNoArgZero)
         b = declKwBuiltin(b, "complex", "js_pycomplexnew", [])
         b = declBuiltin(b, "repr", "js_pyrepr", 1)
-        b = declBuiltin(b, "set", "js_pyset_new", 1)
+        b = declBuiltinDflt(b, "set", "js_pyset_new", emitNoArgList)
         b = declKwBuiltin(b, "sum", "js_pysum", [])
-        b = declBuiltin(b, "tuple", "js_pylist", 1)
+        b = declBuiltinDflt(b, "tuple", "js_pylist", emitNoArgList)
         // ord(c) / chr(n): hostGlobals in python-interpreter.abnf, js_pyord /
         // js_pychr in lib/python-rt.metajs and in abnf/jsrt.go.
         b = declBuiltin(b, "ord", "js_pyord", 1)
@@ -4394,7 +4409,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "NameError", "StopIteration", "ArithmeticError", "LookupError",
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
-                        "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError"]
+                        "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
+                        "UnicodeEncodeError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"
@@ -4406,6 +4422,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         excParent["OverflowError"] = "ArithmeticError"
         excParent["UnicodeError"] = "ValueError"
         excParent["UnicodeDecodeError"] = "UnicodeError"
+        excParent["UnicodeEncodeError"] = "UnicodeError"
         var excMade = {}
         for (var e0 = 0; e0 < excNames.length; e0++) {
             var eBases = callExt(b, "js_arr_new", [])

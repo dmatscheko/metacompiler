@@ -28,6 +28,7 @@ package abnf
 import (
 	"math"
 	"math/big"
+	"strings"
 )
 
 const pyMax53 = 9007199254740992.0 // 2^53
@@ -89,6 +90,46 @@ func (rt *jsrt) pyPromoteArith(op string, l, r interface{}) (interface{}, bool) 
 		out.Mul(ix, iy)
 	}
 	return rt.pyBigNarrow(out), true
+}
+
+// pyNdZeros is the zero of every non-ASCII Unicode decimal-digit run (category
+// Nd, Unicode 16.0; each is ten consecutive code points). int() and float() read
+// any such digit as its ASCII one, as CPython's
+// _PyUnicode_TransformDecimalAndSpaceToASCII does. Twin of pyDecAscii in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+var pyNdZeros = []rune{
+	1632, 1776, 1984, 2406, 2534, 2662, 2790, 2918, 3046, 3174, 3302, 3430, 3558, 3664,
+	3792, 3872, 4160, 4240, 6112, 6160, 6470, 6608, 6784, 6800, 6992, 7088, 7232, 7248,
+	42528, 43216, 43264, 43472, 43504, 43600, 44016, 65296, 66720, 68912, 68928, 69734,
+	69872, 69942, 70096, 70384, 70736, 70864, 71248, 71360, 71376, 71386, 71472, 71904,
+	72016, 72688, 72784, 73040, 73120, 73552, 90416, 92768, 92864, 93008, 93552, 118000,
+	120782, 120792, 120802, 120812, 120822, 123200, 123632, 124144, 124401, 125264, 130032}
+
+func pyDecAscii(s string) string {
+	i := 0
+	for i < len(s) && s[i] < 0x80 {
+		i++
+	}
+	if i == len(s) {
+		return s
+	}
+	var b strings.Builder
+	b.WriteString(s[:i])
+	for _, c := range s[i:] {
+		d := rune(-1)
+		for _, z := range pyNdZeros {
+			if c >= z && c < z+10 {
+				d = c - z
+				break
+			}
+		}
+		if d >= 0 {
+			b.WriteRune('0' + d)
+		} else {
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }
 
 // pyOrdCheck raises CPython's TypeError for an ORDERING of two values of
