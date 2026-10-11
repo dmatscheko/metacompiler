@@ -217,7 +217,7 @@ MemberSemi  = ";" ;
 
 // A finalizer ('~X() { ... }'). There is no garbage collector to run it, so it is parsed
 // and dropped - it pushes nothing, and the class body simply skips it.
-Finalizer   = [ LeadMods ] "~" Id ParamList ( Block | ";" ) ;
+Finalizer   = [ LeadMods ] "~" Id ParamList ( Block | "=>" DiscardExpr ";" | ";" ) ;
 
 // An overloaded operator ('public static Vec operator +(Vec a, Vec b)', also the unary
 // forms) and a user conversion ('public static implicit operator Vec(int n)'). Both are
@@ -468,8 +468,10 @@ Lock        <~~ push(makeLock(pop(), pop())) ~~>
 // form is a BlockItem rather than a Statement (it scopes the rest of its block, which is
 // exactly the using statement C# rewrites it to - see makeBlockStmt).
 UsingStmt   <~~ push(makeUsing(pop(), pop())) ~~>
-            = KwUsing "(" UsingInit ")" Statement ;
-UsingInit   = UsingDecl | UsingExpr ;
+            = KwUsing "(" UsingInit Statement ;
+// The ')' is part of each alternative: 'a ? fs : null' reads as the declaration
+// 'a? fs' up to the ':', and only the missing ')' sends it on to UsingExpr.
+UsingInit   = UsingDecl ")" | UsingExpr ")" ;
 // 'using (new Res())' is an expression, but 'new Res' also reads as a type plus a
 // declarator - so a declaration here must not be followed by an argument list.
 UsingDecl   <~~ push(makeUseDecl(pop())) ~~>
@@ -512,18 +514,41 @@ Case        = TypeKwCase | ConstCase | PatCase ;
 // expression, so it has to be read as a type pattern before ConstCase gets to it - while
 // 'case int.MaxValue:' still falls through, because the '.' defeats this rule.
 TypeKwCase  <~~ push(makePatCase(takeAll())) ~~>
-            = KwCase TypeKwPat [ ArmGuard ] ":" { Statement } ;
+            = KwCase TypeKwPat [ ArmGuard ] ":" { SecItem } ;
 TypeKwPat   <~~ push(csPatType(takeAll())) ~~>
             = TypeKw [ PatBind ] ;
 TypeKw      <~~ push({patty: stripWs(up.in)}) ~~>
             = ( PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "dynamic" KwEnd )
               { "*" | "[" { "," } "]" } [ "?" ] ;
 ConstCase   <~~ push(makeCase(takeAll())) ~~>
-            = KwCase CondExpr ":" { Statement } ;
+            = KwCase CondExpr ":" { SecItem } ;
 PatCase     <~~ push(makePatCase(takeAll())) ~~>
-            = KwCase Pattern [ ArmGuard ] ":" { Statement } ;
+            = KwCase Pattern [ ArmGuard ] ":" { SecItem } ;
 Default     <~~ push(makeDefault(takeAll())) ~~>
-            = KwDefault ":" { Statement } ;
+            = KwDefault ":" { SecItem } ;
+// A section's statements may carry LABELS ('case 3: ... LBL4: ...'), and a 'goto'
+// anywhere in the switch may jump to one of them, across sections.
+SecItem     = NotSecKw LabelItem | Statement ;
+// 'default:' and 'case' open the NEXT section; they are never a label.
+NotSecKw    = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var kws = ["case", "default"]
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(s + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))) {
+                    return abnf.newToken("\x01section-kw", 0)
+                }
+            }
+        }
+        return undefined
+    })()
+~~) ;
 
 // foreach (var x in coll) body.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
@@ -593,11 +618,15 @@ Decon       <~~ push(makeDecon(takeAll())) ~~>
             = [ DeconVar ] "(" DeconTgt "," DeconTgt { "," DeconTgt } ")" "=" Expression ";" ;
 DeconVar    <~~ push({deconVar: true}) ~~>
             = "var" KwEnd ;
-DeconTgt    = DeconTyped | DeconPlain ;
+DeconTgt    = DeconTyped | DeconPlain | DeconPlace ;
 DeconTyped  <~~ push({dtName: pop(), dtDecl: true}) ~~>
             = Type DeconId ;
 DeconPlain  <~~ push({dtName: pop(), dtDecl: false}) ~~>
-            = DeconId ;
+            = DeconId DeclEndAhead ;
+// An element may also be a member or an element ('(c.P1, c.P2) = (1, 2)',
+// '(a[i], a[j]) = (a[j], a[i])'), written like the target of an assignment.
+DeconPlace  <~~ push({dtTgt: pop()}) ~~>
+            = PlainTarget ;
 DeconId     <~~ push(up.in) ~~>
             = Id ;
 
@@ -618,7 +647,17 @@ Declarator  <~~ push(makeDeclInfo(takeAll())) ~~>
 DeclInit    = DeclDefault | DeclExpr ;
 // '= default' without a type argument takes the declared type's default.
 DeclDefault <~~ push({bareDefault: true}) ~~>
-            = "=" "default" KwEnd !"(" ;
+            = "=" "default" KwEnd DeclEndAhead ;
+// ... and only when the declarator ends there: 'var i = default == M()' is an
+// expression whose operand is the default literal.
+DeclEndAhead = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var a = c.peek(s)
+        return (a === 59 || a === 44 || a === 41) ? undefined : abnf.newToken("\x01decl-continues", 0)
+    })()
+~~) ;
 DeclExpr    <~~ push({dinit: pop()}) ~~>
             = "=" InitVal ;
 
@@ -654,7 +693,7 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 // primary at all - `((IF) ia).Prop = 3`, `GetList().Offset += added`,
 // `t.GetMe().GetMe().bar++`, `(new Foo()).s += "A"`. ParenTarget carries no tag,
 // so exactly one target record reaches the enclosing Assignment / IncDec.
-Target      = ParenTarget | ChainTarget | PlainTarget ;
+Target      = ParenTarget | ChainTarget | GenTarget | PlainTarget ;
 ParenTarget = "(" Target ")" ;
 // The suffix run is one greedy repetition rather than "{ Sfx } LastSfx": a PEG
 // repetition never gives a match back, so the two-part spelling could never see
@@ -662,6 +701,11 @@ ParenTarget = "(" Target ")" ;
 // a fast-fail: without it every expression is parsed twice per nesting level.
 ChainTarget <~~ push(makeChainTarget(takeAll())) ~~>
             = PlaceAhead CallSeed ChainSfx { ChainSfx } ;
+// A path rooted at a CONSTRUCTED type - 'Test<int>.Count = 0', '++Test<long>.Count',
+// 'Outer.Inner<string>.Values = v'. GenSeed would take the whole 'Test<int>.Count' as
+// a value, so the type name is the root here and the member is an ordinary step.
+GenTarget   <~~ push(makeChainTarget(takeAll())) ~~>
+            = GenName ChainSfx { ChainSfx } ;
 ChainSfx    = MethodSfx | CallSfx | FieldSfx | IndexSfx ;
 PlaceAhead  = :script(~~
     (function() {
@@ -907,20 +951,26 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 
 // A cast is identity ((Type) expr yields expr). A primitive cast accepts any unary
 // operand; a reference cast excludes a leading '-'/'+' so '(a) - b' stays subtraction.
-Cast        = PrimCast | RefCast ;
+Cast        = PrimArrCast | PrimCast | RefCast ;
+// A cast to an ARRAY or POINTER of a primitive ('(int[]) o', '(int [,,]) null') converts
+// nothing: only a cast to the primitive itself narrows or widens the value.
+PrimArrCast <~~ push(makeCast(pop())) ~~>
+            = "(" PrimType CastSfx { CastSfx } [ "?" ] ")" UnaryExpr ;
+CastSfx     = "*" | "[" { "," } "]" ;
 PrimCast    <~~ push(makeCast(pop(), pop())) ~~>
-            = "(" CastPrim { "*" | "[" "]" } [ "?" ] ")" UnaryExpr ;
+            = "(" CastPrim [ "?" ] ")" UnaryExpr ;
 CastPrim    <~~ push({castty: stripWs(up.in)}) ~~>
             = PrimType ;
 RefCast     <~~ push(makeCast(pop())) ~~>
             = "(" RefType ")" UnaryNoPM ;
 // Cast is in here so a cast of a cast - `(TService) (object) x`, which the mono
 // suite is full of - parses; without it the inner cast is not a legal operand of
-// the outer one.
-UnaryNoPM   = Not | Cast | PostfixExpr ;
+// the outer one. A '~', a '!' or a keyword such as 'await' after the ')' makes it
+// a cast too (C# 12.9.7): '(E1) ~E2.A', '(int) await t'.
+UnaryNoPM   = Not | BitNot | Await | Cast | PostfixExpr ;
 // The trailing '?' is the NULLABLE suffix of a cast target - '(MyStruct?) s'. It is
 // inside the parentheses, so the ternary '(cond) ? a : b' is untouched.
-RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "*" | "[" "]" } [ "?" ] ;
+RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) [ "?" ] { "*" | "[" { "," } "]" } [ "?" ] ;
 
 // 'new C().m()' and 'base.M().n()' continue into the member chain, so an object
 // creation and a base call are SEEDS of the chain (CallSeed), not alternatives beside it.
@@ -1023,7 +1073,7 @@ NFSfx       <~~ push({kind: "nfg"}) ~~>
 // new alternative can shadow anything: one demands the `delegate` keyword, the other
 // an `=>` after its head.
 CallSeed    = KwExpr | NewExpr | BaseCall | Lambda | AnonMethod
-            | AliasSeed | GenSeed | SelfCall | Primary | VarSeed ;
+            | AliasSeed | GenSeed | SelfCall | Primary | GenVarSeed | VarSeed ;
 // 'G<int>.Instance' / 'C<object>.Foo(x)' - a CONSTRUCTED type name as the receiver of
 // a static member. Type arguments are erased, so the seed is the plain class name and
 // the member behind it is an ordinary field or call suffix; GenSeed pushes both, which
@@ -1057,7 +1107,7 @@ DotAhead    = :script(~~
 ~~) ;
 GenMemb     = GenMCall | GenField ;
 GenMCall    <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
+            = Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 GenField    = Id <~~ push({kind:"field", name: up.in}) ~~> ;
 // 'MyAssembly01::GlobalClass' - the namespace-alias qualifier an 'extern alias'
 // enables. There are no assemblies here, so the alias is dropped and the name behind
@@ -1066,7 +1116,7 @@ GenField    = Id <~~ push({kind:"field", name: up.in}) ~~> ;
 AliasSeed   = Id "::" AliasTail ;
 AliasTail   = AliasCall | AliasVar ;
 AliasCall   <~~ push(makeSelfCall(popName(), takeAll())) ~~>
-            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
+            = Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 AliasVar    <~~ push({seedvar: up.in, seedt: makeVarRef(up.in)}) ~~>
             = Id ;
 // A bare name in SEED position. It pushes its own name beside its thunk, so the member
@@ -1076,15 +1126,33 @@ AliasVar    <~~ push({seedvar: up.in, seedt: makeVarRef(up.in)}) ~~>
 // 'true' / 'false' / 'null' are still keywords rather than identifiers.
 VarSeed     <~~ push({seedvar: up.in, seedt: makeVarRef(up.in)}) ~~>
             = Id ;
+// A generic method group as a VALUE - 'new D(F<int>)', 'Apply(FP.Id<int>)',
+// 'X = Make<string>;'. C# 7.6.4.2 keeps 'Id<...>' as a type-argument list only when
+// the token after '>' is one of a fixed set; GenStop admits the ones that end an
+// operand here (')', ']', '}', ';', ',', '==', '!='), so 'a < b > c' stays a pair
+// of comparisons. Type arguments are erased: the value is the name's.
+GenVarSeed  = VarSeed TArgSkip GenStop ;
+GenStop     = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var a = c.peek(s)
+        var b = c.peek(s + 1)
+        if (a === 41 || a === 93 || a === 125 || a === 59 || a === 44) { return undefined }
+        if ((a === 61 || a === 33) && b === 61) { return undefined }
+        return abnf.newToken("\x01gen-continues", 0)
+    })()
+~~) ;
+
 KwExpr      = TypeofExpr | NameofExpr | SizeofExpr | DefaultExpr ;
 SelfCall    <~~ push(makeSelfCall(popName(), takeAll())) ~~>
-            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
+            = Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" ArgList ")" ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> [ TArgSkip GenStop ] ;
 
 // A call's argument list. A NAMED argument ('S22Vol(1, d: 5)') keeps its parameter name
 // beside its thunk; csFixArgs turns the mixed list back into a positional one using the
@@ -1092,6 +1160,7 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 // with the 'omitted' marker (undefined) that the parameter binder answers with the
 // parameter's default. `in` at a call site is parsed and dropped (it is read-only);
 // `ref` and `out` build a REFERENCE BOX over the argument's place - see csRefArg.
+// A named argument may itself be `ref` / `out` / `out var` ('M(s: "b", v: out var o)').
 ArgList     = [ Arg { "," Arg } ] ;
 Arg         = OutVarArg | NamedArg | RefArg | PlainArg ;
 // `M(out int x)` / `M(out var x)` (C# 7): the argument DECLARES the variable, in
@@ -1101,7 +1170,7 @@ OutVarArg   <~~ push(csOutVar(pop())) ~~>
 OutVarName  <~~ push(up.in) ~~>
             = Id ;
 NamedArg    <~~ push(csNamedArg(takeAll())) ~~>
-            = ArgName ":" !":" [ ArgRefMod ] Expression ;
+            = ArgName ":" !":" ( OutVarArg | RefArg | [ ArgRefMod ] Expression ) ;
 ArgName     <~~ push({argname: up.in}) ~~>
             = Id ;
 // `M(ref r)` / `M(out o)`: an ARGUMENT PASSED BY REFERENCE (ECMA-334 12.6.2.3.3 /
@@ -1268,9 +1337,9 @@ LamBareParam <~~ push(up.in) ~~>
 // 'whatever this delegate type takes, ignored' - here an empty parameter list.
 AnonMethod  = AnonParams | AnonBare ;
 AnonParams  <~~ push(makeLambda(takeAll())) ~~>
-            = KwDelegate ParamList LamBlock ;
+            = [ LambdaMod ] KwDelegate ParamList LamBlock ;
 AnonBare    <~~ push(makeBareAnon(takeAll())) ~~>
-            = KwDelegate LamBlock ;
+            = [ LambdaMod ] KwDelegate LamBlock ;
 LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({body: pop()}) ~~> = Block ;
 LamExpr     <~~ push({ebody: pop()}) ~~> = Expression ;
@@ -1313,9 +1382,14 @@ InterpStr   <~~ push(makeTemplate(takeAll())) ~~>
 IsBrace     <~~ push({s: up.in.substring(0, 1)}) ~~>
             = "{" "{" | "}" "}" ;
 IsExpr      <~~ push(makeIsExpr(takeAll())) ~~>
-            = "{" :whitespace(Whitespace) Expression [ IsAlign ] [ IsFmt ] :whitespace() "}" ;
+            = "{" :whitespace(Whitespace) Expression [ IsAlign ] [ IsFmt ] :whitespace() IsHoleEnd ;
+// Blanks may stand around a hole's alignment and before its '}' ('{ res, 7 }'); skipping is
+// already off there, so they are consumed explicitly.
+IsHoleEnd   = { IsHoleWs } "}" ;
+IsHoleWs    = " " | @"\t" | @"\n" | @"\r" ;
 IsAlign     <~~ push({align: parseInt(stripWs(up.in).substring(1))}) ~~>
-            = "," :whitespace() IsAlignN :whitespace(Whitespace) ;
+            = "," :whitespace() IsAlignW :whitespace(Whitespace) ;
+IsAlignW    = { IsHoleWs } IsAlignN ;
 IsAlignN    = "-" IsDigit { IsDigit } | IsDigit { IsDigit } ;
 IsDigit     = "0"..."9" ;
 IsFmt       <~~ push({fmt: up.in.substring(1)}) ~~>
@@ -1344,6 +1418,13 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x
 // A balanced < ... > run (generic parameters / arguments), parsed and ignored.
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+// The type-argument list of a call or a method group in an EXPRESSION ('F<int>(x)',
+// 'M<(int, string)>()'). Unlike SkipAngle it admits only the characters a type can
+// be spelled with, so in 'if ((int) o < x) { ... } if (x > y)' the '<' of a
+// comparison is never taken for one that ends many statements later.
+TArgSkip    = "<" { TArgSkip | TArgCh } ">" ;
+TArgCh      = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." | "," | "?" | "[" | "]"
+            | "(" | ")" | "*" | ":" | "@" | "\x7f"..."\U0010ffff" ;
 
 // A balanced ( ... ) run (constructor init arguments), parsed and ignored.
 SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
@@ -1395,7 +1476,7 @@ EnumInit    <~~ push({einit: pop()}) ~~>
 // accepted and dropped. It does switch multicast combination on (csHasDeleg), so a
 // program that declares no delegate type keeps the plain arithmetic meaning of '+=' / '-='.
 DelegateDecl <~~ csNoteDeleg() ~~>
-            = LeadMods KwDelegate Type Id [ SkipAngle ] SkipParen ";" ;
+            = LeadMods KwDelegate [ "ref" KwEnd [ "readonly" KwEnd ] ] Type Id [ SkipAngle ] SkipParen { WhereClause } ";" ;
 
 // A delegate declaration is legal at file scope AND in a class body; it is listed in
 // Member as well, so a nested one does not fall through to Method (which would then
@@ -3973,20 +4054,33 @@ KwLet       = "let" KwEnd ;
         var declAll = false
         var names = []
         var decls = []
+        var asg = []      // a member / element target's assignment, else null
+        var held = {vals: []}
         var valT = items[items.length - 1]
         for (var i = 0; i < items.length - 1; i++) {
             var it = items[i]
             if (it.deconVar == true) { declAll = true; continue }
+            if (it.dtTgt != undefined) {
+                asg.push(makeAssign([it.dtTgt, "=", csDeconSlot(held, names.length)], 0))
+                names.push("")
+                decls.push(false)
+                continue
+            }
+            asg.push(null)
             names.push(it.dtName)
             decls.push(it.dtDecl == true)
         }
         return function() {
             var vals = csDeconstruct(valT(), names.length)
+            held.vals = vals
             for (var j = 0; j < names.length; j++) {
+                if (asg[j] != null) { asg[j](); continue }
                 if (declAll || decls[j]) { declVar(names[j], vals[j]) } else { setVar(names[j], vals[j]) }
             }
         }
     }
+    // Element k of the deconstructed value, as the right side of a target's assignment.
+    function csDeconSlot(held, k) { return function() { return held.vals[k] } }
 
     // ----- collection expressions, ranges and index-from-end -----
     function makeCollection(items) {
@@ -4268,7 +4362,7 @@ KwLet       = "let" KwEnd ;
         var c = {isDefault: false, v: null, pat: null, guard: null, body: []}
         var body = []
         for (var i = 1; i < items.length; i++) {
-            if (typeof items[i] == "function") { body.push(items[i]); continue }
+            if (typeof items[i] == "function" || items[i].labelName != undefined) { body.push(items[i]); continue }
             if (items[i].guard != undefined) { c.guard = items[i].guard }
         }
         c.pat = items[0]
@@ -4293,6 +4387,23 @@ KwLet       = "let" KwEnd ;
     function makeSwitch(items) {
         var scrut = items[0]
         var cases = items.slice(1)
+        // Each section's statements without its label records, and every label of the
+        // switch as (section, statement index), for a 'goto' into a section.
+        var lnames = []
+        var lsec = []
+        var lidx = []
+        for (var ci = 0; ci < cases.length; ci++) {
+            var th = []
+            var raw = cases[ci].body
+            for (var bi = 0; bi < raw.length; bi++) {
+                if (typeof raw[bi] != "function" && raw[bi].labelName != undefined) {
+                    lnames.push(raw[bi].labelName)
+                    lsec.push(ci)
+                    lidx.push(th.length)
+                } else { th.push(raw[bi]) }
+            }
+            cases[ci].body = th
+        }
         return function() {
             var v = scrut()
             var start = -1
@@ -4306,24 +4417,32 @@ KwLet       = "let" KwEnd ;
             // names the section to resume in, and execution falls through from there
             // exactly as if the switch had matched it in the first place.
             var guard = 0
+            var startK = 0
             while (start >= 0) {
                 guard++
                 if (guard > 10000000) { fail("goto case loop does not terminate") }
                 var next = -2
+                var nextK = 0
                 for (var j = start; j < cases.length && next == -2; j++) {
                     var body = cases[j].body
-                    for (var k = 0; k < body.length; k++) {
+                    for (var k = (j == start ? startK : 0); k < body.length; k++) {
                         var r = body[k]()
                         if (r === BRK) { return undefined }
                         if (r != undefined) {
                             if (typeof r != "function" && r.sig == "gotodefault") { next = dflt; break }
                             if (typeof r != "function" && r.sig == "gotocase") { next = csCaseIndex(cases, r.cv); break }
+                            if (typeof r != "function" && r.sig == "goto") {
+                                var at = -1
+                                for (var q = lnames.length - 1; q >= 0; q--) { if (lnames[q] == r.label) { at = q } }
+                                if (at >= 0) { next = lsec[at]; nextK = lidx[at]; break }
+                            }
                             return r
                         }
                     }
                 }
                 if (next == -2) { return undefined }
                 start = next
+                startK = nextK
             }
             return undefined
         }

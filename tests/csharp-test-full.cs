@@ -2614,6 +2614,86 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s40a1", a == "x" && b == "d" && (o[1] as string ?? "e").Length == 1);
         }
 
+        // ===== SECTION 41: generic names as values, labels in switch sections,
+        // named ref/out arguments, casts and member deconstruction =====
+        //
+        // ECMA-334 12.8.4 / 6.2.5: 'F<int>' followed by ')', ',' or ';' keeps its
+        // type-argument list, so it is a method group (here converted to a delegate)
+        // and 'G<int>.N' names a static member of a constructed type - both as a value
+        // and as an assignment target. 13.5 / 13.10.4: a label may stand in a switch
+        // section and a goto may enter it from another section. 12.6.2: a named
+        // argument may be 'out var' or 'ref'. 12.9.7: '(T) ~x' and '(T) await t' are
+        // casts, and a cast to a primitive ARRAY converts nothing. 13.7.2 / 12.21.2:
+        // a deconstruction may store into members and elements (the right side is
+        // evaluated first). No C# toolchain here: the values follow from the spec.
+        class S41Gen<T>
+        {
+            public static int N;
+        }
+        delegate int S41Fn(int x);
+        enum S41E { A = 1, B = 2 }
+        class S41P { public int P1; public int P2 { get; set; } }
+        static int S41Twice<T>(int x) { return x * 2; }
+        static int S41Apply(S41Fn f, int v) { return f(v); }
+        static void S41Out(string str, out int v) { v = str.Length; }
+        static void S41Bump(int k, ref int acc) { acc += k; }
+        static int S41Sw(int a)
+        {
+            int res = 0;
+            switch (a)
+            {
+            case 1:
+                res += 1;
+                if (res > 0) goto later;
+                res += 100;
+                break;
+            case 2:
+                res += 2;
+            mid:
+                res += 3;
+                break;
+            case 3:
+                res += 5;
+            later:
+                res += 7;
+                if (res < 20) goto mid;
+                break;
+            default:
+                goto mid;
+            }
+            return res;
+        }
+        static void S41()
+        {
+            int[] n = { 4, 3, 5, 1 };
+            S41Gen<int>.N = n[0];
+            ++S41Gen<int>.N;
+            S41Gen<int>.N += n[1];
+            S41Fn f = S41Twice<int>;
+            Program.Check("s41g1", S41Gen<int>.N == 8 && f(n[1]) == 6 && S41Apply(S41Twice<long>, n[2]) == 10);
+            int a = n[3], b = n[0], c = n[1];
+            Program.Check("s41g2", (a < b && b > c) && !(a > b));
+            Program.Check("s41l1", S41Sw(1) == 11 && S41Sw(2) == 5 && S41Sw(3) == 15 && S41Sw(4) == 3);
+            S41Out(str: "abc", v: out var o5);
+            S41Out(v: out int o6, str: "hello");
+            int acc = n[3];
+            S41Bump(acc: ref acc, k: n[2]);
+            Program.Check("s41n1", o5 == 3 && o6 == 5 && acc == 6);
+            S41E e = (S41E) ~S41E.A;
+            object o = new int[] { n[0], n[2] };
+            int[] arr = (int[]) o;
+            int[,] z = (int [,]) null;
+            Program.Check("s41c1", (int) e == -2 && arr[1] == 5 && z == null);
+            var p = new S41P();
+            (p.P1, p.P2) = (n[0], n[1]);
+            int[] s = { 10, 20, 30 };
+            int i = 0, j = 2;
+            (s[i], s[j]) = (s[j], s[i]);
+            Program.Check("s41d1", p.P1 == 4 && p.P2 == 3 && s[0] == 30 && s[1] == 20 && s[2] == 10);
+            string t = $"[{ n[0] }|{ n[1], 3 }]";
+            Program.Check("s41i1", t == "[4|  3]");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2656,6 +2736,7 @@ b";                                                   // verbatim keeps the newl
             Program.S38(); // SECTION-CALL 38
             Program.S39(); // SECTION-CALL 39
             Program.S40(); // SECTION-CALL 40
+            Program.S41(); // SECTION-CALL 41
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
