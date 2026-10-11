@@ -854,7 +854,8 @@ CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null}) ~~>
+            = "." Id <~~ push({fname: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 // x.(T): a type assertion. The value is unchanged, but it is CHECKED, and a value
@@ -1507,10 +1508,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (usesF32 && typeof gfRel[op] == "string") {
             return emitF32Fix(b, gfRel[op], coreEmitBin(b, op, l, r), l, r)
         }
-        // There is deliberately no floExt arm here: every key floExt has ('-' '*' '/' '%'
-        // and their compound forms) is also a key of giBase, which is consulted at the top
-        // of this function and returns. floExt itself is live: emitTypedBin uses it on the
-        // STATICALLY TYPED float path (`float64(9) / x`).
         return coreEmitBin(b, op, l, r)
     }
     var cxOps = {"+": 1, "-": 1, "*": 1, "/": 1, "+=": 1, "-=": 1, "*=": 1, "/=": 1}
@@ -1518,13 +1515,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Go's float64 is a DIFFERENT type from int, and the handle runtime models every
     // number as one JS double, so `a / b` with a = 1.0, b = 3.0 would arrive as the same
     // two operands as `1 / 3`. A float literal emits the js_gflo box, float64(x) boxes,
-    // and the js_jf* operators answer a float whenever one operand is one. Twin of
+    // and js_giarith / js_giadd answer a float whenever one operand is one. Twin of
     // go-interpreter.abnf's {__flo} box; keep the two in step.
     function makeFloConst(f) {
         return function(b) { return {b: b, v: callExt(b, "js_gflo", [emitNum(b, f)])} }
     }
-    var floExt = {"-": "js_jfsub", "*": "js_jfmul", "/": "js_jfdiv", "%": "js_jfmod",
-                  "-=": "js_jfsub", "*=": "js_jfmul", "/=": "js_jfdiv", "%=": "js_jfmod"}
     // ^x is 'x XOR -1'. On an unsigned operand of known width Go complements WITHIN
     // that width, so ^uint8(0xF0) is 0x0F and not -241.
     // items = [operandThunk, {at}].
@@ -1894,12 +1889,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function emitTypedBin(b, ty, op, l, r) {
         if (isFloatTy(ty)) {
             // Both operands are float64 by construction here, so one side is boxed
-            // and the js_jf* externs answer a float; '+' goes through js_jadd, which
-            // has the same rule.
+            // and js_giarith's float arm answers a float; '+' goes through binExt,
+            // which has the same rule.
             var boxExt = isF32Ty(ty) ? "js_gflo32" : "js_gflo"
-            var fe2 = floExt[op]
-            if (typeof fe2 == "string") { return callExt(b, fe2, [callExt(b, boxExt, [l]), r]) }
-            if (typeof binExt[op] == "string") { return callExt(b, binExt[op], [callExt(b, boxExt, [l]), r]) }
+            if (op == "-" || op == "*" || op == "/" || op == "%") {
+                return callExt(b, "js_giarith", [emitStr(b, op), callExt(b, boxExt, [l]), r])
+            }
+            if (typeof binExt[op] == "string"){ return callExt(b, binExt[op], [callExt(b, boxExt, [l]), r]) }
         }
         var v = emitBin(b, op, l, r)
         var w = uintBits(ty)
@@ -2115,6 +2111,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // receiver reads through a cell and is copied by its type. Twin of goDtCall in
     // go-interpreter.abnf.
     function emitDtCall(b, cur, s, p, argsV) {
+        var rr = emitDtRecv(b, cur, s, p)
+        b = rr.b
+        var fV = p.fn == "" ? hUndef : callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.fn)])
+        return {b: b, v: callExt(b, "js_godtcall", [rr.v, emitStr(b, s.name), argsV, fV, p.dyn ? hTrue : hFalse])}
+    }
+    // A METHOD VALUE of a defined type (`f := c.String`): the receiver is evaluated and
+    // copied now. Twin of goDtBind in go-interpreter.abnf.
+    function emitDtBind(b, cur, s, p) {
+        var rr = emitDtRecv(b, cur, s, p)
+        b = rr.b
+        return {b: b, v: callExt(b, "js_godtbind", [rr.v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.fn)])])}
+    }
+    function emitDtRecv(b, cur, s, p) {
         var r = cur
         var rc = s.rc
         if (p.ptr) {
@@ -2133,8 +2142,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             r = dr.v
             if (!p.dyn) { r = emitStoreCopy(b, r, p.ty) }
         } else { r = emitStoreCopy(b, r, p.ty) }
-        var fV = p.fn == "" ? hUndef : callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.fn)])
-        return {b: b, v: callExt(b, "js_godtcall", [r, emitStr(b, s.name), argsV, fV, p.dyn ? hTrue : hFalse])}
+        return {b: b, v: r}
     }
     // items = [(argThunk, {aty})..., {spread}?]: the '(args)' suffix of a postfix
     // chain (goSplitArgs).
@@ -2210,7 +2218,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                         cur = dc.v
                     } else { cur = callExt(b, "js_gomcall", [cur, emitStr(b, s.name), ea.v]) }
                 } else if (s.kind == "field") {
-                    cur = callExt(b, "js_gofield", [cur, emitStr(b, s.name)])
+                    var fp = goDtPlan(s.rc, s.name)
+                    var fme = goDtMethExpr(s.rc, s.name)
+                    if (fme != "") { cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, fme)]) }
+                    else if (fp != null && !fp.dyn) {
+                        var fb = emitDtBind(b, cur, s, fp)
+                        b = fb.b
+                        cur = fb.v
+                    } else { cur = callExt(b, "js_gofield", [cur, emitStr(b, s.name)]) }
                 } else if (s.kind == "slice") {
                     var lov = hUndef, hiv = hUndef
                     if (s.lo != null) { var rl = s.lo(b); b = rl.b; lov = rl.v }
@@ -5350,6 +5365,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function(b) {
             var r = t(b)
             return {b: r.b, v: emitDtBox(r.b, r.v, ty)}
+        }
+    }
+    // An fmt operand of struct type ty whose pointer methods fmt must skip: a copy
+    // marked __vv. Twin of goVvThunk in go-interpreter.abnf.
+    function goVvThunk(t, ty) {
+        return function(b) {
+            var r = t(b)
+            if (goCopyCodeC(ty) == "") { return r }
+            var v = emitStoreCopy(r.b, r.v, ty)
+            callExt(r.b, "js_set", [v, emitStr(r.b, "__vv"), hTrue])
+            return {b: r.b, v: v}
         }
     }
     function emitDtBox(b, v, ty) {

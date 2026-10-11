@@ -508,6 +508,15 @@ function goNameExported(name) {
     return c0 >= 65 && c0 <= 90
 }
 
+// Does fmt call cls's method name on o? An fmt operand statically of a struct type is
+// a copy marked __vv (goVvThunk in go-to-llvm-ir.abnf), whose method set lacks the
+// pointer-receiver methods. Twins: goPrintMeth in abnf/jsrtgolang.go and
+// go-interpreter.abnf.
+function goPrintMeth(o, cls, name) {
+    if (!goHas(cls, name) || !goIsFn(cls[name])) { return false }
+    return !(goIsObj(o) && o.__vv === true && cls["__ptr$" + name] === true)
+}
+
 // gopObj renders the object shapes the Go grammars build. It answers undefined
 // for a shape it does not know, which falls back to the generic ToString.
 function gopObj(o, depth) {
@@ -516,14 +525,8 @@ function gopObj(o, depth) {
     // THE error INTERFACE WINS OVER fmt.Stringer, which wins over every built-in
     // rendering - exactly the order fmt's handleMethods uses.
     if (cls !== undefined && depth < 32) {
-        if (goHas(cls, "Error")) {
-            var emth = cls.Error
-            if (goIsFn(emth)) { return gopRender(emth(o), depth + 1) }
-        }
-        if (goHas(cls, "String")) {
-            var mth = cls.String
-            if (goIsFn(mth)) { return gopRender(mth(o), depth + 1) }
-        }
+        if (goPrintMeth(o, cls, "Error")) { return gopRender(cls.Error(o), depth + 1) }
+        if (goPrintMeth(o, cls, "String")) { return gopRender(cls.String(o), depth + 1) }
     }
 
     // A map: map[k:v k:v], with the keys SORTED, which is what fmt has done
@@ -1059,8 +1062,8 @@ function gfHMeth(v) {
     if (cls === undefined) { return r }
     var m = anytype
     m = undefined
-    if (goHas(cls, "Error") && goIsFn(cls.Error)) { m = cls.Error }
-    else if (goHas(cls, "String") && goIsFn(cls.String)) { m = cls.String }
+    if (goPrintMeth(v, cls, "Error")) { m = cls.Error }
+    else if (goPrintMeth(v, cls, "String")) { m = cls.String }
     if (m === undefined) { return r }
     r = gopStr(m(v))
     return r
@@ -2068,6 +2071,10 @@ function js_gomcall(recv, namev, args) {
 // receiver first. dyn = the receiver's static type is unknown, so a struct's own
 // method of that name wins, and with no fn the call is an ordinary one. Twins:
 // goDtCall in go-interpreter.abnf, js_godtcall in abnf/jsrtgolang.go.
+// The method value recv.M of a defined type, its receiver already evaluated. Twins:
+// js_godtbind in abnf/jsrtgolang.go, goDtBind in go-interpreter.abnf.
+function js_godtbind(recv, fn) { return goBind(fn, recv) }
+
 function js_godtcall(recv, namev, args, fn, dyn) {
     if (!Array.isArray(args)) { fail("js_godtcall args must be an array") }
     if (dyn === true) {

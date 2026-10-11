@@ -1200,6 +1200,14 @@ function goFmtBoxTy(sty, name) {
     if (b.indexOf("func(") == 0 && b.charAt(b.length - 1) == ")" && b.indexOf(",") < 0) { return b }
     return ""
 }
+// An fmt operand of STRUCT type T whose Error or String has a pointer receiver: a
+// value's method set lacks that method, so fmt must not call it (goVvThunk is the
+// grammar's). Answers T, or "".
+function goFmtVvTy(sty) {
+    var t = stBare(sty)
+    if (t == "" || !cIsIdCh(t.charCodeAt(0)) || stHeadLen(t) != t.length || goIsDefTy(t)) { return "" }
+    return (goMethPtr["$" + t + ".Error"] === true || goMethPtr["$" + t + ".String"] === true) ? t : ""
+}
 function goBoxArgsC(items) {
     var i = 1
     while (i < items.length) {
@@ -1209,7 +1217,9 @@ function goBoxArgsC(items) {
             var j = 0
             while (j < s.args.length) {
                 if (!(s.spread && j == s.args.length - 1)) {
-                    s.args[j] = goDtBoxThunk(s.args[j], s.rc.text == "fmt" ? goFmtBoxTy(s.atys[j], s.name) : goDtBoxTy(s.atys[j]))
+                    var vt = s.rc.text == "fmt" ? goFmtVvTy(s.atys[j]) : ""
+                    if (vt != "") { s.args[j] = goVvThunk(s.args[j], vt) }
+                    else { s.args[j] = goDtBoxThunk(s.args[j], s.rc.text == "fmt" ? goFmtBoxTy(s.atys[j], s.name) : goDtBoxTy(s.atys[j])) }
                 }
                 j = j + 1
             }
@@ -1498,13 +1508,13 @@ function goPreField(sname, f) {
     while (st > 0 && cIsIdCh(et.charCodeAt(st - 1))) { st = st - 1 }
     if (st < last) { goPreFld["$" + sname + "." + et.substring(st, last)] = et }
 }
-// Every .m(args) suffix of a chain that starts at source offset start gets its
-// receiver record (goRecvC); items are the chain's primary and suffixes.
+// Every .m(args) and .m suffix of a chain that starts at source offset start gets
+// its receiver record (goRecvC); items are the chain's primary and suffixes.
 function goRecvsC(items, start) {
     var i = 1
     while (i < items.length) {
         var s = items[i]
-        if (s != null && typeof s == "object" && s.kind == "mcall" && s.at != undefined) { s.rc = goRecvC(start, s.at) }
+        if (s != null && typeof s == "object" && (s.kind == "mcall" || s.kind == "field") && s.at != undefined) { s.rc = goRecvC(start, s.at) }
         i = i + 1
     }
     return items
@@ -1543,6 +1553,14 @@ function goDtPlan(rc, name) {
     if (cands.length != 1) { return {fn: "", ty: "", ptr: false, dyn: true, isPtr: false} }
     return {fn: cands[0] + "." + name, ty: cands[0], ptr: goMethPtr["$" + cands[0] + "." + name] === true,
             dyn: true, isPtr: false}
+}
+// The method EXPRESSION T.M of a defined type T (`f := Color.String`): the method's
+// own function "T.M", which takes the receiver as its first argument; "" when rc.name
+// is not one. A pointer method is spelled (*T).M and is not one.
+function goDtMethExpr(rc, name) {
+    if (rc == null || rc.loc || rc.hty != "" || rc.text != rc.head || !goIsDefTy(rc.head)) { return "" }
+    var k = "$" + rc.head + "." + name
+    return (goMethRty[k] !== undefined && goMethPtr[k] !== true) ? rc.head + "." + name : ""
 }
 // ----- THE ORDER PACKAGE VARIABLES ARE INITIALISED IN -----
 // Go initialises package variables in declaration order, except that a variable

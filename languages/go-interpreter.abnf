@@ -825,7 +825,8 @@ TypeArgsKw   = "[" NonExprT "]" ;
 NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null, dt: null, dtk: false, me: ""}) ~~>
+            = "." Id <~~ push({fname: up.in}) ~~> ;
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
             = "[" [ Expression <~~ push({lo: pop()}) ~~> ] ":" [ Expression <~~ push({hi: pop()}) ~~> ]
               [ ":" Expression <~~ push({mx: pop()}) ~~> ] "]" ;
@@ -1641,20 +1642,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (typeof v == "object" && v.__class != undefined) {
             // fmt.Stringer: a String() method on the type wins over the memberwise
             // form, exactly as it does in Go. Only a method on the type ITSELF is
-            // found (not one promoted from an embedded struct), and Go's method-set
-            // rule is not modelled, so a pointer-receiver String() is used for the
-            // value form too. The depth guard keeps a String() that prints its own
-            // receiver from recursing forever.
+            // found (not one promoted from an embedded struct). Go's method-set rule
+            // is applied only where goPrintMeth can see it. The depth guard keeps a
+            // String() that prints its own receiver from recursing forever.
             // THE error INTERFACE WINS OVER fmt.Stringer, which is the order fmt's
             // handleMethods uses (error first, then Stringer).
-            if (typeof v.__class["Error"] == "function" && gStrDepth < 32) {
+            if (goPrintMeth(v, "Error") && gStrDepth < 32) {
                 gStrDepth = gStrDepth + 1
                 var ev = anytype
                 ev = v.__class["Error"](v)
                 gStrDepth = gStrDepth - 1
                 return gstr(ev)
             }
-            if (typeof v.__class["String"] == "function" && gStrDepth < 32) {
+            if (goPrintMeth(v, "String") && gStrDepth < 32) {
                 gStrDepth = gStrDepth + 1
                 var sv = anytype
                 sv = v.__class["String"](v)
@@ -1749,6 +1749,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < fs.length; i++) { vs.push(v[fs[i]]) }
         return [fs, vs]
     }
+    // Does fmt call v's method name? A struct VALUE's method set lacks a pointer
+    // receiver's methods, and the value model cannot tell a value from a pointer, so
+    // an fmt operand statically of a struct type T is handed over as a copy marked
+    // __vv (goVvThunk) and its pointer methods are skipped. Twins: goPrintMeth in
+    // abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function goPrintMeth(v, name) {
+        if (typeof v.__class[name] != "function") { return false }
+        return !(v.__vv === true && v.__class["__ptr$" + name] == true)
+    }
+    function goVvThunk(t, ty) {
+        return function() {
+            var v = anytype
+            v = t()
+            var code = goCopyCode(ty)
+            if (code == "") { return v }
+            v = goCopyBy(v, code)
+            v.__vv = true
+            return v
+        }
+    }
     // Error() wins over String(), as in gstr; the depth guard is gstr's too.
     function gfHMeth(v) {
         var r = anytype
@@ -1756,8 +1776,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (v === undefined || v === null || typeof v != "object" || v.__class == undefined || gStrDepth >= 32) { return r }
         var m = anytype
         m = undefined
-        if (typeof v.__class["Error"] == "function") { m = v.__class["Error"] }
-        else if (typeof v.__class["String"] == "function") { m = v.__class["String"] }
+        if (goPrintMeth(v, "Error")) { m = v.__class["Error"] }
+        else if (goPrintMeth(v, "String")) { m = v.__class["String"] }
         if (m === undefined) { return r }
         gStrDepth = gStrDepth + 1
         r = m(v)
@@ -1911,7 +1931,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     // abort, so `defer func(){ recover() }()` around `p.X` on a nil p
                     // recovers. All three engines raise goNilDeref's one wording.
                     if (cur === undefined || cur === null) { goNilDeref() }
-                    cur = goField(cur, s.name)
+                    if (!s.dtk) { s.dt = goDtPlan(s.rc, s.name); s.me = goDtMethExpr(s.rc, s.name); s.dtk = true }
+                    if (s.me != "") { cur = goDtFns["$" + s.me] }
+                    else { cur = (s.dt === null || s.dt.dyn) ? goField(cur, s.name) : goDtBind(cur, s) }
                 }
                 else if (s.kind == "call") {
                     if (typeof cur != "function") { fail("call of a non function value") }
@@ -2591,13 +2613,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (goHasMethod(recv, s.name)) { return mcall(recv, s.name, args) }
             if (p.fn == "") { return mcall(recv, s.name, args) }
         }
+        return goDtFns["$" + p.fn].apply(undefined, concat2impl([goDtRecv(recv, s)], args))
+    }
+    function goDtRecv(recv, s) {
+        var p = s.dt
         var r = anytype
         r = recv
         if (p.ptr) {
             if (!p.isPtr && !p.dyn && !isPtr(recv) && s.rc != null && s.rc.head != "" && s.rc.text == s.rc.head) { r = varCell(s.rc.head) }
         } else { r = goStoreTy(isPtr(recv) ? ptrGet(recv) : recv, p.ty) }
-        return goDtFns["$" + p.fn].apply(undefined, concat2impl([r], args))
+        return r
     }
+    // A METHOD VALUE of a defined type (`f := c.String`): the receiver is evaluated
+    // and copied NOW, as goField does for a struct. Twin of js_godtbind in
+    // abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function goDtBind(recv, s) { return bindMethod(goDtRecv(recv, s), goDtFns["$" + s.dt.fn]) }
     function mcall(target, name, args) {
         if (target === undefined || target === null) { goNilDeref() }   // recoverable; see goNilDeref
         if (typeof target == "object" && target.__class != undefined) {

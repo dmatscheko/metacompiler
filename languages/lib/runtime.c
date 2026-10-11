@@ -6670,9 +6670,7 @@ long js_giadd(long l, long r) {
  * There is no js_jfsub / js_jfmul / js_jfmod / js_jfneg / js_jfint: NOTHING
  * EMITS THEM. Java routes -, *, / and % through js_jvarith, unary minus through
  * js_jvneg and (int) through js_jvint / makePrimCast's width-exact narrowing;
- * Go's own floExt map still names js_jfsub/js_jfmul/js_jfmod but is unreachable,
- * because emitBinNum consults giBase FIRST and giBase already holds every key
- * floExt has, so those ops leave through js_giarith - whose tag-14 arm calls
+ * Go's float operators leave through js_giarith, whose tag-14 arm calls
  * jf_arith. js_jfdiv IS emitted. */
 long js_jflo(long v)  { return jf_make(to_number(v), 0); }
 long js_gflo(long v)  { return jf_make(to_number(v), 1); }

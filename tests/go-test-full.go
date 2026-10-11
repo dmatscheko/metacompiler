@@ -3365,6 +3365,54 @@ func s52() {
 type str52 string
 type pt52 struct{ a int }
 
+// ===== SECTION 53: float arithmetic on a defined float type, method values, method sets in fmt =====
+type circ53 float64
+
+func (c circ53) area() float64 { return 3 * float64(c) }
+func (c circ53) half() float64 { return float64(c)/2 - 0.25 }
+
+type col53 int
+
+func (c col53) String() string  { return fmt.Sprintf("C%d", int(c)) }
+func (c col53) add(d int) col53 { return c + col53(d) }
+
+type lst53 []int
+
+func (l *lst53) push(x int) { *l = append(*l, x) }
+
+type pv53 struct{ n int }
+
+func (t *pv53) String() string { return "ptr" }
+
+type pe53 struct{ m string }
+
+func (e *pe53) Error() string { return "E:" + e.m }
+
+func s53() {
+	check("fm1", circ53(2).area() == 6 && circ53(3).half() == 1.25)
+	c := col53(1)
+	f := c.String
+	c = 5
+	g := c.add
+	check("mv1", f() == "C1" && g(2) == 7 && c.String() == "C5")
+	var l lst53
+	p := l.push
+	p(1)
+	p(2)
+	check("mv2", len(l) == 2 && l[1] == 2)
+	e := col53.String
+	fs := []func() string{c.String, col53(9).String}
+	check("mv3", e(3) == "C3" && fs[0]()+fs[1]() == "C5C9")
+	t := &pv53{5}
+	tv := pv53{6}
+	check("ms1", fmt.Sprint(*t) == "{5}" && fmt.Sprint(t) == "ptr" && fmt.Sprint(tv, &tv) == "{6} ptr")
+	check("ms2", fmt.Sprintf("%v %s %+v|%v", tv, tv, tv, &tv) == "{6} {%!s(int=6)} {n:6}|ptr")
+	var err error = &pe53{"x"}
+	ev := pe53{"y"}
+	var st fmt.Stringer = &pv53{1}
+	check("ms3", fmt.Sprint(err) == "E:x" && fmt.Sprint(ev) == "{y}" && fmt.Sprint(st) == "ptr")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3418,6 +3466,7 @@ func main() {
 	s50() // SECTION-CALL 50
 	s51() // SECTION-CALL 51
 	s52() // SECTION-CALL 52
+	s53() // SECTION-CALL 53
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

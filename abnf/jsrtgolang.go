@@ -271,10 +271,10 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 	// method that prints its own receiver terminates. The twins are gstr in
 	// languages/go-interpreter.abnf and gopObj in languages/lib/go-rt.metajs.
 	if cls != nil && depth < 32 {
-		if mth, ok := cls.props["Error"]; ok && isCallable(mth) {
+		if mth := goPrintMeth(o, cls, "Error"); mth != nil {
 			return rt.gopRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
 		}
-		if mth, ok := cls.props["String"]; ok && isCallable(mth) {
+		if mth := goPrintMeth(o, cls, "String"); mth != nil {
 			return rt.gopRender(rt.call(mth, jsUndef, []interface{}{o}), depth+1), true
 		}
 	}
@@ -1551,12 +1551,28 @@ func (rt *jsrt) gopMeth(v interface{}) (string, bool) {
 	if cls == nil {
 		return "", false
 	}
+	o, _ := v.(*jsObject)
 	for _, name := range []string{"Error", "String"} {
-		if mth, ok := cls.props[name]; ok && isCallable(mth) {
+		if mth := goPrintMeth(o, cls, name); mth != nil {
 			return rt.gopStr(rt.call(mth, jsUndef, []interface{}{v})), true
 		}
 	}
 	return "", false
+}
+
+// goPrintMeth is the method name of cls that fmt calls on o, or nil. An fmt operand
+// statically of a struct type is a copy marked __vv (goVvThunk in
+// go-to-llvm-ir.abnf), whose method set lacks the pointer-receiver methods. Twins:
+// goPrintMeth in languages/go-interpreter.abnf and lib/go-rt.metajs.
+func goPrintMeth(o *jsObject, cls *jsObject, name string) interface{} {
+	mth, ok := cls.props[name]
+	if !ok || !isCallable(mth) {
+		return nil
+	}
+	if o != nil && o.props["__vv"] == true && cls.props["__ptr$"+name] == true {
+		return nil
+	}
+	return mth
 }
 
 // gopString is fmtString (gfString).
@@ -2406,6 +2422,15 @@ func init() {
 				}
 			}
 			return w(rt.call(u(a[3]), jsUndef, append([]interface{}{u(a[0])}, args.elems...)))
+		}
+		// js_godtbind(recv, fn): the method value recv.M of a defined type, its
+		// receiver already evaluated. Twins: js_godtbind in lib/go-rt.metajs,
+		// goDtBind in go-interpreter.abnf.
+		m["js_godtbind"] = func(a []uint64) uint64 {
+			recv, fn := u(a[0]), u(a[1])
+			return w(jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return rt.call(fn, jsUndef, append([]interface{}{recv}, args...))
+			}))
 		}
 		m["js_gomcall"] = func(a []uint64) uint64 {
 			goNilDeref(rt, u(a[0]))
