@@ -178,11 +178,11 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-349 go: a method on a defined non-struct type aborts · P1 · GO · OPEN [V]
+### T-349 go: a method on a defined non-struct type aborts · P1 · GO · IN PROGRESS (GO+SW+SH worker, round 9) [V]
 `type Celsius float64; func (c Celsius) String() string {...}` aborts all legs
 ("method receiver type not found" / "cannot set field 'String' on *abnf.jsClosure").
 
-### T-350 go: pointer map keys; value-receiver copies; native struct map keys · P1 · GO + CORE · OPEN [V]
+### T-350 go: pointer map keys; value-receiver copies; native struct map keys · P1 · GO + CORE · IN PROGRESS (GO+SW+SH worker, round 9) [V]
 (a) `map[*K]` with two `&K{1}` keys: interp/run `1 2 2`, native `2 1 1`, go `2 1 2`
 (keys compare by value; needs a key-type flag on the map's lookup path). (b) A value
 receiver's copy deep-copies pointer fields in all engines: `func (u U) touch(){
@@ -195,7 +195,7 @@ run, go: 1) - a run-vs-native divergence in layer 2's struct-key hashing.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-346 swift: `Int64 is Int`; `type(of:)` · P1 · SW · OPEN [V]
+### T-346 swift: `Int64 is Int`; `type(of:)` · P1 · SW · IN PROGRESS (GO+SW+SH worker, round 9) [V]
 `Int64 is Int` and `Int is Int64` are true (swiftc false); `as? Int` succeeds on an
 Int64; UInt ≡ UInt64. Fix locally: a flag on swift's own {__sz} box (Int64 always
 boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
@@ -230,7 +230,7 @@ PHP indexes bytes. A lone byte >=128 is held as U+0080..U+00FF, so `ord(chr(200)
 bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
 bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
 
-### T-351 bash: `declare -p` of an empty or declared-only array · P1 · SH · OPEN [V]
+### T-351 bash: `declare -p` of an empty or declared-only array · P1 · SH · IN PROGRESS (GO+SW+SH worker, round 9) [V]
 `ea=(); declare -a eb; declare -p ea eb`: bash `declare -a ea=()` / `declare -a eb`;
 both engines "bash: declare: ea: not found".
 
