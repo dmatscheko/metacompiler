@@ -136,9 +136,17 @@ function swIntegral(v) {
 }
 
 // swNum is giFloat, the plain-number reading of any operand: sintNum is the
-// UNSIGNED-aware one an UInt64 box needs (int64(-1) read as a uint64 is 1.8e19),
+// UNSIGNED-aware one an UInt box needs (int64(-1) read as a uint64 is 1.8e19),
 // and it falls through to to_number for everything else.
 function swNum(v) { return sintNum(v) }
+
+// Double(x) / Float(x) of a number. A UInt64 box is width 65 (swAdoptWidth),
+// which the floor reads signed, so it is read at width 64. Twin of swIntToD in
+// abnf/jsrtswift.go.
+function swIntToD(v) {
+    if (sintIs(v) && sintUns(v)) { return sintNum(sintConv(v, 64, true)) }
+    return sintNum(v)
+}
 
 // swMkFlo is jsJFlo{f: x}: style 0, which is never consulted - see the header.
 function swMkFlo(x) { return flo(x, 0) }
@@ -2201,7 +2209,7 @@ function js_swflo(v) {
     if (v === undefined || v === null) { fail("Double conversion of nil") }
     if (v === true) { return swMkFlo(1) }
     if (v === false) { return swMkFlo(0) }
-    return swMkFlo(swNum(v))
+    return swMkFlo(swIntToD(v))
 }
 
 // Float(x): the same conversion at the 32 bit width. Every Float in a program
@@ -2222,7 +2230,7 @@ function js_swflo32(v) {
     if (v === undefined || v === null) { fail("Float conversion of nil") }
     if (v === true) { return swMkF32(1) }
     if (v === false) { return swMkF32(0) }
-    return swMkF32(swNum(v))
+    return swMkF32(swIntToD(v))
 }
 
 // `let x: Float = 1` and every other declared-Float binding site - the float half
@@ -2251,12 +2259,15 @@ function js_swadoptf32(v) {
 // `let x: Int = "5"` site is a deliberate conversion). The Go twin is js_swadopt
 // in abnf/jsrtswift.go; the interpreter's is swAdoptTy.
 function swAdoptNum(v) { return typeof v == "number" || sintIs(v) }
+// Int64 and UInt64 say 65: see swIntWidthOf in swift-interpreter.abnf.
 function swAdoptWidth(ty) {
-    if (ty == "Int" || ty == "Int64") { return 64 }
+    if (ty == "Int") { return 64 }
+    if (ty == "Int64") { return 65 }
     if (ty == "Int32") { return 32 }
     if (ty == "Int16") { return 16 }
     if (ty == "Int8") { return 8 }
-    if (ty == "UInt" || ty == "UInt64") { return 64 }
+    if (ty == "UInt") { return 64 }
+    if (ty == "UInt64") { return 65 }
     if (ty == "UInt32") { return 32 }
     if (ty == "UInt16") { return 16 }
     if (ty == "UInt8") { return 8 }
@@ -2585,7 +2596,55 @@ function js_swshift(op, l, r) {
         if (o === "<<") { o = ">>" } else { o = "<<" }
         n = 0 - n
     }
+    // An Int64 / UInt64 box says 65 (swAdoptWidth), where the over-shift is 64.
+    if (n >= 64 && sintIs(l) && sintWidth(l) > 64) {
+        var neg = o === ">>" && !sintUns(l) && sintCmp(l, 0) < 0
+        return sintConv(neg ? 0 - 1 : 0, sintWidth(l), sintUns(l))
+    }
     return swGiArith(o, l, sintConv(n, 64, false))
+}
+
+// type(of: v). Twin of swTypeOf in swift-interpreter.abnf and js_swtypeof in
+// abnf/jsrtswift.go.
+function js_swtypeof(v) {
+    if (typeof v == "boolean") { return "Bool" }
+    if (typeof v == "string") { return "String" }
+    if (floIs(v)) {
+        if (swIsF32(v)) { return "Float" }
+        return "Double"
+    }
+    if (sintIs(v)) { return swIntTyName(sintWidth(v), sintUns(v)) }
+    if (typeof v == "number") {
+        if (Math.floor(v) == v) { return "Int" }
+        return "Double"
+    }
+    if (rtIsArr(v)) {
+        if (v.length > 0) { return "Array<" + js_swtypeof(v[0]) + ">" }
+        return "Array<Any>"
+    }
+    if (swIsObj(v)) {
+        if (v["__set"] === true) {
+            var els = v["elems"]
+            if (els.length > 0) { return "Set<" + js_swtypeof(els[0]) + ">" }
+            return "Set<Any>"
+        }
+        if (rtIsDictObj(v)) {
+            var ks = v["keys"]
+            if (ks.length == 0) { return "Dictionary<Any, Any>" }
+            return "Dictionary<" + js_swtypeof(ks[0]) + ", " + js_swtypeof(v["vals"][0]) + ">"
+        }
+        var cls = v["__class"]
+        if (swIsObj(cls) && typeof cls["__name"] == "string") { return cls["__name"] }
+    }
+    fail("type(of:) of this value is not supported")
+    return ""
+}
+function swIntTyName(w, u) {
+    var n = "Int"
+    if (u) { n = "UInt" }
+    if (w > 64) { return n + "64" }
+    if (w == 64) { return n }
+    return n + w
 }
 
 // -x and ~x, both at the operand's own width. A fractional Double keeps the
@@ -2775,10 +2834,11 @@ function js_swget(v, k) {
     }
     if (sintIs(v)) {
         if (k === "description") { return sintStr(v) }
-        if (k === "bitWidth") { return sintWidth(v) }
+        if (k === "bitWidth") { return sintWidth(v) > 64 ? 64 : sintWidth(v) }
+        // magnitude is the UNSIGNED type of the same width (swiftc 6.1.2).
         if (k === "magnitude") {
-            if (!sintUns(v) && sintCmp(v, 0) < 0) { return sintConv(sintOp(1, 0, v), sintWidth(v), sintUns(v)) }
-            return v
+            if (!sintUns(v) && sintCmp(v, 0) < 0) { return sintConv(sintOp(1, 0, v), sintWidth(v), true) }
+            return sintConv(v, sintWidth(v), true)
         }
     }
     // indices is a PROPERTY on every Collection. Only an Array is answered: a String's indices are String.Index values
@@ -2803,7 +2863,7 @@ function js_swget(v, k) {
     if (typeof v == "number") {
         if (k === "description") { return swDesc(v) }
         if (k === "bitWidth") { return 64 }
-        if (k === "magnitude") { return Math.abs(v) }
+        if (k === "magnitude") { return sintConv(Math.abs(v), 64, true) }
     }
     return v[k]
 }

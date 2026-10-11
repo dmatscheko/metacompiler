@@ -2995,6 +2995,29 @@ func s57() {
     check("57f", r.index(after: 2) == 0 && r.startIndex == 7)
 }
 
+// ===== SECTION 58: Int64 and UInt64 are types of their own; type(of:) =====
+// Int64 is not Int and UInt64 is not UInt, though each pair has one width. The
+// bounds, bitWidth, the over-shift, magnitude (the UNSIGNED type of the same
+// width) and every type(of:) name are swiftc 6.1.2's.
+struct P58 { var x = 1 }
+func s58() {
+    let vs: [Any] = [Int64(5), 5, UInt(3), UInt64(4)]
+    check("58a", (vs[0] is Int64) && !(vs[0] is Int) && (vs[1] is Int) && !(vs[1] is Int64))
+    check("58b", (vs[2] is UInt) && !(vs[2] is UInt64) && (vs[3] is UInt64) && !(vs[3] is UInt))
+    check("58c", (vs[0] as? Int) == nil && (vs[0] as? Int64) == 5 && (vs[3] as? UInt) == nil)
+    let ns: [Int64] = [Int64.min, -7]
+    let sh = [64, 63]
+    check("58d", Int64.bitWidth == 64 && ns[1].bitWidth == 64 && ns[1] >> sh[0] == -1 && ns[1] << sh[0] == 0 && ns[0] >> sh[1] == -1)
+    check("58e", "\(ns[0].magnitude)" == "9223372036854775808" && "\(type(of: ns[1].magnitude))" == "UInt64" && Int8(-128).magnitude == 128)
+    let us: [UInt64] = [UInt64.max]
+    check("58f", Double(us[0]) == 18446744073709551615.0 && us[0] >> UInt64(sh[0]) == 0 && "\(us[0])" == "18446744073709551615")
+    var a: Int64 = 10
+    a += 5
+    check("58g", "\(type(of: a))" == "Int64" && "\(type(of: sh[0]))" == "Int" && "\(type(of: UInt(1)))" == "UInt" && "\(type(of: Int8(1)))" == "Int8")
+    check("58h", "\(type(of: 1.5))" == "Double" && "\(type(of: Float(1)))" == "Float" && "\(type(of: "s"))" == "String" && "\(type(of: true))" == "Bool")
+    check("58i", "\(type(of: sh))" == "Array<Int>" && "\(type(of: ["k": 1.5]))" == "Dictionary<String, Double>" && "\(type(of: Set([a])))" == "Set<Int64>" && "\(type(of: P58()))" == "P58")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3053,6 +3076,7 @@ func main() {
     s55() // SECTION-CALL 55
     s56() // SECTION-CALL 56
     s57() // SECTION-CALL 57
+    s58() // SECTION-CALL 58
     print("full: \(checks) checks, \(fails) failures")
 }
 

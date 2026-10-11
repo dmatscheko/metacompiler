@@ -1825,11 +1825,13 @@ KwContinue  = "continue" KwEnd ;
     var swIntTypeNames = ["Int", "Int64", "Int32", "Int16", "Int8",
                           "UInt", "UInt64", "UInt32", "UInt16", "UInt8"]
     function swIntWidthOf(name) {
-        if (name == "Int" || name == "Int64") { return {w: 64, u: false} }
+        if (name == "Int") { return {w: 64, u: false} }
+        if (name == "Int64") { return {w: 65, u: false} }
         if (name == "Int32") { return {w: 32, u: false} }
         if (name == "Int16") { return {w: 16, u: false} }
         if (name == "Int8") { return {w: 8, u: false} }
-        if (name == "UInt" || name == "UInt64") { return {w: 64, u: true} }
+        if (name == "UInt") { return {w: 64, u: true} }
+        if (name == "UInt64") { return {w: 65, u: true} }
         if (name == "UInt32") { return {w: 32, u: true} }
         if (name == "UInt16") { return {w: 16, u: true} }
         if (name == "UInt8") { return {w: 8, u: true} }
@@ -2117,12 +2119,12 @@ KwContinue  = "continue" KwEnd ;
     function swBoundDigits(w, u, isMax) {
         if (u) {
             if (!isMax) { return "0" }
-            if (w == 64) { return "18446744073709551615" }
+            if (w >= 64) { return "18446744073709551615" }
             if (w == 32) { return "4294967295" }
             if (w == 16) { return "65535" }
             return "255"
         }
-        if (w == 64) { return isMax ? "9223372036854775807" : "-9223372036854775808" }
+        if (w >= 64) { return isMax ? "9223372036854775807" : "-9223372036854775808" }
         if (w == 32) { return isMax ? "2147483647" : "-2147483648" }
         if (w == 16) { return isMax ? "32767" : "-32768" }
         return isMax ? "127" : "-128"
@@ -5478,6 +5480,15 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: hUndef}
             }
         }
+        // type(of: v): the runtime's js_swtypeof, resolved here so the global scope
+        // every program starts with stays as it was.
+        if (name == "type" && args.length == 1 && args[0].lbl == "of" && lookupSig(name) == null) {
+            var tyT = args[0].t
+            return function(b) {
+                var rt3 = tyT(b)
+                return {b: rt3.b, v: callExt(rt3.b, "js_swtypeof", [rt3.v])}
+            }
+        }
         // Int(x) / Int8(x) / UInt64(x): the integer types are descriptors, not
         // functions (so Int.max stays an ordinary property read), and the call form
         // is resolved here at walk time. A user type of the same name still wins.
@@ -8612,7 +8623,7 @@ KwContinue  = "continue" KwEnd ;
             var intV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [intV, emitStr(b, "max"), swEmitBound(b, it.w, it.u, true)])
             callExt(b, "js_set", [intV, emitStr(b, "min"), swEmitBound(b, it.w, it.u, false)])
-            callExt(b, "js_set", [intV, emitStr(b, "bitWidth"), emitNum(b, it.w)])
+            callExt(b, "js_set", [intV, emitStr(b, "bitWidth"), emitNum(b, it.w > 64 ? 64 : it.w)])
             callExt(b, "js_set", [intV, emitStr(b, "zero"), swEmitConv(b, emitNum(b, 0), it)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tn), intV])
         }

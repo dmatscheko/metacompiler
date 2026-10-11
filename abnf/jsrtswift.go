@@ -225,7 +225,7 @@ func init() {
 				}
 				return w(swMkFlo(0))
 			}
-			return w(swMkFlo(swNum(rt, v)))
+			return w(swMkFlo(swIntToD(rt, v)))
 		}
 		// Float(x): the same conversion at the 32 bit width. Every Float in a
 		// program comes from here or
@@ -259,7 +259,7 @@ func init() {
 				}
 				return w(swMkF32(0))
 			}
-			return w(swMkF32(swNum(rt, v)))
+			return w(swMkF32(swIntToD(rt, v)))
 		}
 		// `let x: Float = 1` and `var x: Float` - the declared-type adoption, the
 		// float half of the rule that makes `let d: Double = 3` hold 3.0. It has
@@ -1072,8 +1072,19 @@ func init() {
 				}
 				n = -n
 			}
+			// An Int64 / UInt64 box says 65 (swAdoptWidth), where the over-shift
+			// is 64.
+			if b, ok := l.(jsGInt); ok && b.w > 64 && n >= 64 {
+				if op == ">>" && !b.u && b.v < 0 {
+					return w(giNorm(-1, b.w, b.u))
+				}
+				return w(giNorm(0, b.w, b.u))
+			}
 			return w(rt.giArith(op, l, giNorm(n, 64, false)))
 		}
+		// type(of: v). Twins: swTypeOf in swift-interpreter.abnf, js_swtypeof in
+		// lib/swift-rt.metajs.
+		m["js_swtypeof"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swTypeOf(u(a[0]))) }
 		// -x and ~x, both at the operand's own width. A fractional Double keeps
 		// the floating point negation.
 		m["js_swneg"] = func(a []uint64) uint64 {
@@ -1174,12 +1185,15 @@ func init() {
 				case "description":
 					return rt.wrapStr(giStr(b))
 				case "bitWidth":
-					return rt.wrapNum(float64(b.w))
-				case "magnitude":
-					if !b.u && b.v < 0 {
-						return w(giNorm(-b.v, b.w, b.u))
+					if b.w > 64 {
+						return rt.wrapNum(64)
 					}
-					return a[0]
+					return rt.wrapNum(float64(b.w))
+				case "magnitude": // the UNSIGNED type of the same width
+					if !b.u && b.v < 0 {
+						return w(giNorm(-b.v, b.w, true))
+					}
+					return w(giNorm(b.v, b.w, true))
 				}
 			}
 			// indices is a PROPERTY on every Collection. Only an Array is
@@ -1237,7 +1251,7 @@ func init() {
 				case "bitWidth":
 					return rt.wrapNum(64)
 				case "magnitude":
-					return rt.wrapNum(math.Abs(f))
+					return w(giNorm(int64(math.Abs(f)), 64, true))
 				}
 			}
 			return baseGet(a)
@@ -1404,19 +1418,24 @@ func init() {
 // answer for the literal case, `1 + 2.0 == 3.0` - instead of being rejected.
 
 // swAdoptWidth is swIntWidthOf: the (bits, unsigned) an integer type name
-// declares, for the declared-type adoption above.
+// declares, for the declared-type adoption above. Int64 and UInt64 say 65: see
+// swIntWidthOf in swift-interpreter.abnf.
 func swAdoptWidth(ty string) (uint8, bool, bool) {
 	switch ty {
-	case "Int", "Int64":
+	case "Int":
 		return 64, false, true
+	case "Int64":
+		return 65, false, true
 	case "Int32":
 		return 32, false, true
 	case "Int16":
 		return 16, false, true
 	case "Int8":
 		return 8, false, true
-	case "UInt", "UInt64":
+	case "UInt":
 		return 64, true, true
+	case "UInt64":
+		return 65, true, true
 	case "UInt32":
 		return 32, true, true
 	case "UInt16":
@@ -1655,7 +1674,80 @@ func swIsWhole(v interface{}) bool {
 
 // swNum is the plain-number reading of an operand, for the Double side of a
 // mixed operation.
+func swIntTyName(w uint8, u bool) string {
+	n := "Int"
+	if u {
+		n = "UInt"
+	}
+	if w > 64 {
+		return n + "64"
+	}
+	if w == 64 {
+		return n
+	}
+	return n + strconv.Itoa(int(w))
+}
+
+// swTypeOf is type(of: v): the dynamic type's name, as print shows it.
+func (rt *jsrt) swTypeOf(v interface{}) string {
+	switch t := v.(type) {
+	case bool:
+		return "Bool"
+	case string:
+		return "String"
+	case jsGInt:
+		return swIntTyName(t.w, t.u)
+	case float64:
+		if t == math.Trunc(t) {
+			return "Int"
+		}
+		return "Double"
+	case *jsArray:
+		if len(t.elems) > 0 {
+			return "Array<" + rt.swTypeOf(t.elems[0]) + ">"
+		}
+		return "Array<Any>"
+	}
+	if swIsFlo(v) {
+		if swIsF32(v) {
+			return "Float"
+		}
+		return "Double"
+	}
+	if els, ok := swSetElems(v); ok {
+		if len(els.elems) > 0 {
+			return "Set<" + rt.swTypeOf(els.elems[0]) + ">"
+		}
+		return "Set<Any>"
+	}
+	if keys, vals, ok := dictParts(v); ok {
+		if len(keys.elems) == 0 {
+			return "Dictionary<Any, Any>"
+		}
+		return "Dictionary<" + rt.swTypeOf(keys.elems[0]) + ", " + rt.swTypeOf(vals.elems[0]) + ">"
+	}
+	if o, ok := v.(*jsObject); ok {
+		if cls, ok := o.props["__class"].(*jsObject); ok {
+			if n, ok := cls.props["__name"].(string); ok {
+				return n
+			}
+		}
+	}
+	rt.fail("type(of:) of this value is not supported")
+	return ""
+}
+
 func swNum(rt *jsrt, v interface{}) float64 { return giFloat(rt, v) }
+
+// swIntToD is Double(x) / Float(x) of a number. A UInt64 box is width 65
+// (swAdoptWidth), which giFloat reads signed. Twin of swIntToD in
+// lib/swift-rt.metajs.
+func swIntToD(rt *jsrt, v interface{}) float64 {
+	if b, ok := v.(jsGInt); ok && b.u {
+		return float64(uint64(b.v))
+	}
+	return giFloat(rt, v)
+}
 
 // swIntFromStr is Int("17") / UInt8("300"): the failable string initializer. It
 // reports false for anything that is not a complete, in-range decimal integer.

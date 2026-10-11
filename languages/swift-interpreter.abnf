@@ -2464,6 +2464,11 @@ KwContinue  = "continue" KwEnd ;
     function swShift(op, l, r) {
         var n = szNum(r)
         if (n < 0) { return szArith(op == "<<" ? ">>" : "<<", l, 0 - n) }
+        // An Int64 / UInt64 box says 65 (swIntWidthOf), where the over-shift is 64.
+        if (n >= 64 && szIs(l) && l.w > 64) {
+            var neg = op == ">>" && !l.u && szCmp(l, 0) < 0
+            return szConv(neg ? 0 - 1 : 0, l.w, l.u)
+        }
         return szArith(op, l, n)
     }
     // ----- The integer types -----
@@ -2486,10 +2491,10 @@ KwContinue  = "continue" KwEnd ;
         var one = i64Make(0, 1)
         var zero = i64Make(0, 0)
         if (u) {
-            var top = w == 64 ? i64Not(zero) : i64Sub(i64Shl(one, w), one)
+            var top = w >= 64 ? i64Not(zero) : i64Sub(i64Shl(one, w), one)
             return {mx: szNorm(top, w, true), mn: szNorm(zero, w, true)}
         }
-        var h = i64Shl(one, w - 1)
+        var h = i64Shl(one, (w > 64 ? 64 : w) - 1)
         return {mx: szNorm(i64Sub(h, one), w, false), mn: szNorm(i64Neg(h), w, false)}
     }
     // Int("17") / UInt8("300"): the failable string initializer. Swift answers nil
@@ -2551,21 +2556,58 @@ KwContinue  = "continue" KwEnd ;
     // `Int.max` stays an ordinary property read.
     function swIntType(w, u) {
         var b = swIntBounds(w, u)
-        return {max: b.mx, min: b.mn, bitWidth: w, zero: szConv(0, w, u),
+        return {max: b.mx, min: b.mn, bitWidth: w > 64 ? 64 : w, zero: szConv(0, w, u),
                 __conv: function(x) { return swIntConv(x, w, u) }}
     }
     // The declared width of `var u: UInt8 = 250` (swIntWidth is consulted by
     // makeDecl); the name has to survive the annotation for the value to carry it.
+    //
+    // INT64 AND UINT64 SAY 65. They are 64 bits like Int and UInt but other types:
+    // `Int64(5) is Int` is false. A width of 65 truncates as 64 everywhere and is
+    // never unboxed (szNorm unboxes width 64 only), so the box carries the type, and
+    // bitWidth, the bounds and the over-shift read it as 64. Twins: swIntWidthOf in
+    // swift-to-llvm-ir.abnf, swAdoptWidth in lib/swift-rt.metajs and
+    // abnf/jsrtswift.go.
     function swIntWidthOf(name) {
-        if (name == "Int" || name == "Int64") { return {w: 64, u: false} }
+        if (name == "Int") { return {w: 64, u: false} }
+        if (name == "Int64") { return {w: 65, u: false} }
         if (name == "Int32") { return {w: 32, u: false} }
         if (name == "Int16") { return {w: 16, u: false} }
         if (name == "Int8") { return {w: 8, u: false} }
-        if (name == "UInt" || name == "UInt64") { return {w: 64, u: true} }
+        if (name == "UInt") { return {w: 64, u: true} }
+        if (name == "UInt64") { return {w: 65, u: true} }
         if (name == "UInt32") { return {w: 32, u: true} }
         if (name == "UInt16") { return {w: 16, u: true} }
         if (name == "UInt8") { return {w: 8, u: true} }
         return null
+    }
+    function swIntTyName(w, u) {
+        var n = (u ? "UInt" : "Int")
+        if (w > 64) { return n + "64" }
+        return w == 64 ? n : n + w
+    }
+    // type(of: v): the dynamic type's name, as print shows it. A plain number is an
+    // Int (a fraction that reached here unboxed is a Double), a box names its own
+    // type, and a collection names its element types off its first element.
+    // Twins: js_swtypeof in lib/swift-rt.metajs and abnf/jsrtswift.go.
+    function swTypeOf(v) {
+        if (v === true || v === false) { return "Bool" }
+        if (typeof v == "string") { return "String" }
+        if (isFlo(v)) { return isF32(v) ? "Float" : "Double" }
+        if (szIs(v)) { return swIntTyName(v.w, v.u) }
+        if (typeof v == "number") { return Math.floor(v) == v ? "Int" : "Double" }
+        if (Array.isArray(v)) { return "Array<" + (v.length > 0 ? swTypeOf(v[0]) : "Any") + ">" }
+        if (v !== null && v !== undefined && typeof v == "object") {
+            if (v.__set === true) { return "Set<" + (v.elems.length > 0 ? swTypeOf(v.elems[0]) : "Any") + ">" }
+            if (isDict(v)) {
+                if (v.keys.length == 0) { return "Dictionary<Any, Any>" }
+                return "Dictionary<" + swTypeOf(v.keys[0]) + ", " + swTypeOf(v.vals[0]) + ">"
+            }
+            var cls = v.__class
+            if (cls != undefined && cls !== null && typeof cls.__name == "string") { return cls.__name }
+        }
+        fail("type(of:) of this value is not supported")
+        return ""
     }
     // ----- Declared-type adoption -----
     //
@@ -3032,8 +3074,10 @@ KwContinue  = "continue" KwEnd ;
         }
         if (szIs(o)) {
             if (name == "description") { return szStr(o) }
-            if (name == "bitWidth") { return o.w }
-            if (name == "magnitude") { return szCmp(o, szConv(0, o.w, o.u)) < 0 ? szNeg(o) : o }
+            if (name == "bitWidth") { return o.w > 64 ? 64 : o.w }
+            // magnitude is the UNSIGNED type of the same width: Int8(-128).magnitude
+            // is the UInt8 128 (swiftc 6.1.2).
+            if (name == "magnitude") { return szConv(szCmp(o, szConv(0, o.w, o.u)) < 0 ? szNeg(o) : o, o.w, true) }
             var it = builtinTable("Int", false)
             if (it != null && hasOwn(it, name)) { return it[name] }
             var ig = findAccessor(o, "__get_" + name)
@@ -3044,7 +3088,7 @@ KwContinue  = "continue" KwEnd ;
         if (typeof o == "number") {
             if (name == "description") { return szStr(o) }
             if (name == "bitWidth") { return 64 }
-            if (name == "magnitude") { return o < 0 ? 0 - o : o }
+            if (name == "magnitude") { return szConv(o < 0 ? 0 - o : o, 64, true) }
         }
         if (typeof o == "object" && o.__superref === true) {
             var sbase = superBase()
@@ -3222,6 +3266,7 @@ KwContinue  = "continue" KwEnd ;
     // abs/max/min are Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5,
     // not the 1 a |0 truncation gives) and compares by its VALUE (two boxes are two
     // objects, and `a > b` between objects is false).
+    hostGlobals["type"] = function(v) { return swTypeOf(v) }
     hostGlobals["abs"] = function(v) {
         // `< 0` is FALSE for -0.0, yet abs(-0.0) is 0.0 (swift 6.1.2, and the
         // compiled halves through Math.abs). The sign of a zero only shows through 1/v.
@@ -3994,12 +4039,8 @@ KwContinue  = "continue" KwEnd ;
     // 7.15): a {__flo} box is a Double, the same box with __f32 is a Float, a plain
     // integral number or a {__sz} box is an integer of the width the box names.
     //
-    // ONE RESIDUE, and it is the value model rather than this test: `Int` and
-    // `Int64` are the same width and signedness here (swIntWidthOf maps both to
-    // 64/signed) and normalise to the same representation, so `8 as Int64 is Int`
-    // answers true where swiftc says false, and `42 is Int64` likewise. Telling
-    // them apart needs a nominal type on the value, which nothing else in this
-    // front end would use. Every other row settled against swiftc 6.1.2.
+    // Int64 and UInt64 are widths of their own (swIntWidthOf), so `8 as Int64 is
+    // Int` is false as in swiftc 6.1.2.
     //
     // Non-numeric names fall through to the shared probe unchanged (a String, an
     // Array, a user class and `Any`). Twins: js_swis in
@@ -8175,12 +8216,12 @@ KwContinue  = "continue" KwEnd ;
     // Optional(v): an Optional IS its value in this model.
     hostGlobals["Optional"] = {__conv: function(v) { return v }}
     hostGlobals["Int"] = swIntType(64, false)
-    hostGlobals["Int64"] = swIntType(64, false)
+    hostGlobals["Int64"] = swIntType(65, false)
     hostGlobals["Int32"] = swIntType(32, false)
     hostGlobals["Int16"] = swIntType(16, false)
     hostGlobals["Int8"] = swIntType(8, false)
     hostGlobals["UInt"] = swIntType(64, true)
-    hostGlobals["UInt64"] = swIntType(64, true)
+    hostGlobals["UInt64"] = swIntType(65, true)
     hostGlobals["UInt32"] = swIntType(32, true)
     hostGlobals["UInt16"] = swIntType(16, true)
     hostGlobals["UInt8"] = swIntType(8, true)
