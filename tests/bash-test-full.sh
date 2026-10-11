@@ -990,6 +990,10 @@ s25() {
   # a prefix character that is NOT opening a group is an ordinary literal
   if [[ "a@b" == "a@b" ]]; then check peg14 yes yes; else check peg14 no yes; fi
   if [[ "a+b" == a+b ]]; then check peg15 yes yes; else check peg15 no yes; fi
+  # an empty pattern matches only at an anchor, and only a single "/" takes one:
+  # after "//" a "#" or "%" is pattern text
+  local v25=aab
+  check pex24 "${v25/#/x}|${v25/%/x}|${v25//#a/x}|${v25//%b/x}" "xaab|aabx|aab|aab"
 }
 
 

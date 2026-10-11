@@ -426,8 +426,11 @@ PeCaseOp    <~~ push({pe: up.in}) ~~> = "^^" | "^" | ",," | "," ;
 
 // ${v/pat/rep} first match, ${v//pat/rep} every match, ${v/#pat/rep} anchored at the
 // start, ${v/%pat/rep} anchored at the end. The replacement may be omitted (delete).
-PeReplForm  = PeTarget PeReplOp [ PeReplAnchor ] ReplPat [ ReplTail ] ;
-PeReplOp    <~~ push({pe: up.in}) ~~> = "//" | "/" ;
+// Only a single "/" takes an anchor: after "//" a "#" or "%" is pattern text, so
+// `v=aab; echo ${v//#a/x}` is aab in bash 5.3.
+PeReplForm  = PeTarget ( PeReplAll | PeReplOne [ PeReplAnchor ] ) ReplPat [ ReplTail ] ;
+PeReplAll   <~~ push({pe: up.in}) ~~> = "//" ;
+PeReplOne   <~~ push({pe: up.in}) ~~> = "/" ;
 PeReplAnchor <~~ push({anchor: up.in}) ~~> = "#" | "%" ;
 ReplPat     <~~ push(mkWord(takeAll())) ~~> = { ReplSeg } ;
 ReplSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | ReplBare ;
