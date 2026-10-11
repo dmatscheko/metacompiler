@@ -11107,9 +11107,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- object's own methods -----
     //
-    // CPython's object type carries __init__, __new__, __eq__, __ne__, __hash__,
-    // __repr__, __str__, __format__, __setattr__, __getattribute__ and
-    // __delattr__, and every class inherits them: A.__init__ is object.__init__,
+    // CPython's object type carries __init__, __new__, __eq__, __ne__, the four
+    // orderings, __hash__, __repr__, __str__, __format__, __setattr__,
+    // __getattribute__ and __delattr__, and every class inherits them: A.__init__ is object.__init__,
     // super().__init__() works in a class whose only base is object. The class
     // chains here leave object out, so an attribute READ that finds nothing on
     // the chain asks pyObjectMethod last; the engine's own dispatch (==, hash(),
@@ -11119,12 +11119,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // They render as CPython's slot wrappers (bfnText's "~" code), __new__ as a
     // builtin.
     var pyObjMNames = ["__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
-                       "__format__", "__setattr__", "__getattribute__", "__delattr__"]
+                       "__format__", "__setattr__", "__getattribute__", "__delattr__",
+                       "__lt__", "__le__", "__gt__", "__ge__"]
     var pyObjMFns = []
     function pyObjectMethod(name) {
         if (pyObjMFns.length == 0) {
             pyObjMFns = [pyObjInit, pyObjNew, pyObjEq, pyObjNe, pyObjHash, pyObjRepr, pyObjStr,
-                         pyObjFormat, pySetAttrFn, pyObjGetattr, pyObjDelattr]
+                         pyObjFormat, pySetAttrFn, pyObjGetattr, pyObjDelattr,
+                         pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjOrder()]
             for (var k = 0; k < pyObjMFns.length; k++) {
                 bfnFns.push(pyObjMFns[k])
                 bfnCodes.push(k == 1 ? "__new__" : "~" + pyObjMNames[k])
@@ -11206,6 +11208,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return pstr(a)
     }
+    // object's four orderings decline every pair; one function each.
+    function pyObjOrder() { return function(a, b) { return pyNotImpl } }
     function pySetAttrFn(a, k, v) { pySetAttr(a, k, v); return undefined }
     function pyObjGetattr(a, k) { return pyattr(a, k) }
     function pyObjDelattr(a, k) { pyDelAttr(a, k); return undefined }

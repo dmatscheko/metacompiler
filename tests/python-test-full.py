@@ -4668,6 +4668,8 @@ def s93():
         check("obj6", e.args == ("x", "y") and e.extra == 2)
     check("obj7", str(object.__init__) == "<slot wrapper '__init__' of 'object' objects>" and type(object.__init__).__name__ == "wrapper_descriptor"
           and object.__eq__.__name__ == "__eq__" and type(o.__init__).__name__ == "method-wrapper")
+    check("obj8", object.__lt__(1, 2) is NotImplemented and o.__lt__(o) is NotImplemented and o.__ge__(1) is NotImplemented
+          and object.__lt__ is not object.__le__ and str(object.__gt__) == "<slot wrapper '__gt__' of 'object' objects>")
 
 def main():
     s01() # SECTION-CALL 01

@@ -2232,9 +2232,9 @@ function pyUnionEq(a, b) {
 
 // ----- object's own methods ------------------------------------------------
 //
-// CPython's object type carries __init__, __new__, __eq__, __ne__, __hash__,
-// __repr__, __str__, __format__, __setattr__, __getattribute__ and __delattr__,
-// and every class inherits them: A.__init__ is object.__init__, and
+// CPython's object type carries __init__, __new__, __eq__, __ne__, the four
+// orderings, __hash__, __repr__, __str__, __format__, __setattr__,
+// __getattribute__ and __delattr__, and every class inherits them: A.__init__ is object.__init__, and
 // super().__init__() works in a class whose only base is object. The class
 // chains here leave object out, so an attribute READ that finds nothing on the
 // chain asks pyObjectMethod last; the runtime's own dispatch (==, hash(), str())
@@ -2242,12 +2242,14 @@ function pyUnionEq(a, b) {
 // registered with the builtin render table on first use ("~" renders a slot
 // wrapper). Go: rt.pyObjectMethod in abnf/jsrtpysub.go.
 var pyObjMNames = ["__init__", "__new__", "__eq__", "__ne__", "__hash__", "__repr__", "__str__",
-                   "__format__", "__setattr__", "__getattribute__", "__delattr__"]
+                   "__format__", "__setattr__", "__getattribute__", "__delattr__",
+                   "__lt__", "__le__", "__gt__", "__ge__"]
 var pyObjMFns = []
 function pyObjectMethod(name) {
     if (pyObjMFns.length == 0) {
         pyObjMFns = [pyObjInit, pyObjNew, pyObjEq, pyObjNe, pyObjHash, pyObjRepr, pyObjStr,
-                     pyObjFormat, js_pysetattr, js_pygetattr, js_pydel_attr]
+                     pyObjFormat, js_pysetattr, js_pygetattr, js_pydel_attr,
+                     pyObjOrder(), pyObjOrder(), pyObjOrder(), pyObjOrder()]
         var k = 0
         while (k < pyObjMFns.length) {
             if (k == 1) { js_pybfn(pyObjMFns[k], "__new__") } else { js_pybfn(pyObjMFns[k], "~" + pyObjMNames[k]) }
@@ -2321,6 +2323,8 @@ function pyIsExcClass(cls) {
     }
     return false
 }
+// object's four orderings decline every pair; one function each.
+function pyObjOrder() { return function(a, b) { return pyNotImpl } }
 // True for the very same object, else NotImplemented.
 function pyObjEq(a, b) {
     var r = anytype
