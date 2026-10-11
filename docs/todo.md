@@ -226,21 +226,21 @@ engines "not found"; bash `declare -- ef` / `declare -- q`.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-158 frame elimination on arithmetic predicates · P3 · CORE + PY + RB · OPEN [V]
+### T-158 frame elimination on arithmetic predicates · P3 · CORE + PY + RB · IN PROGRESS (CORE worker, round 8) [V]
 `rtTag`'s −13.9% on python came from removing ONE scope frame from ONE predicate.
 The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
 `pyInstClassOf`, `rbUserObj`, `rbIsClassObj`. Each needs its own call-site sizing and
 a measurement against a dead-code matched control (tests/bench.sh header). Never
 introduce a delegating wrapper on a hot path: that cost python +41% once.
 
-### T-363 pow is up to 421 ulps off in every leg that uses math.Pow / d_pow · P1 · CORE · OPEN [V]
+### T-363 pow is up to 421 ulps off in every leg that uses math.Pow / d_pow · P1 · CORE · IN PROGRESS (CORE worker, round 8) [V]
 600-row probe: 544/600 not correctly rounded (max 421 ulps); node, CPython and Apple
 libm 0/600. `1.9687173381259235 ** 596.2128067674018` gives 2.48822920238156e+175 in
 every leg (node 2.488229202381568e+175). Design: double-double pow with a Ziv test,
 ~250 lines per engine (MetaJS module for interpreter + layer 2, Go port, runtime.c
 d_pow), routed for python, ruby, js, lua, php (java stays on fdlibm, go on its Go port).
 
-### T-364 coroutines: a stackful context switch in the floor · P3 · CORE · OPEN [V]
+### T-364 coroutines: a stackful context switch in the floor · P3 · CORE · IN PROGRESS (CORE worker, round 8) [V]
 Native next() costs ~83k extra instructions / ~8.5 µs; a parked generator ~21.4 KB
 (pthread + condvar). Replace with hand-written IR inline asm for arm64 and x86-64 that
 saves callee-saved registers and swaps sp (~350 lines: asm, gen_resume rewrite, a
@@ -256,7 +256,7 @@ interpreter 17 `Array.isArray` + 49 tuple refs, python-rt.metajs 42 `pyIsArr`, p
 compiler 54 tuple refs, jsrt.go `*jsArray`. Unblocks T-011, `%`-formatting arity (`"%d %d" % (1,2,3)` must say "not all arguments converted during string formatting"; `"%s" % [1, 2]` must stay `[1, 2]`),
 `BaseException.__str__`, hashability as a real rule.
 
-### T-172 a catchable `GeneratorExit` · P3 · CORE + PY · OPEN [V]
+### T-172 a catchable `GeneratorExit` · P3 · CORE + PY · IN PROGRESS (CORE worker, round 8) [V]
 `js_try`'s `pending != GEN_EXIT` guard is shared with fifteen languages (where a close
 is a return completion and must not be catchable); `GEN_EXIT` has no Python class, so
 `except Exception` (must not catch) and bare `except:` (must) cannot be told apart;
