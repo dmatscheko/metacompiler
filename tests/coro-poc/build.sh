@@ -57,7 +57,7 @@ go build -o "$WORK/mec" . || { echo "build.sh: go build failed" >&2; exit 2; }
 build_floor() {   # $1 = output .ll, $2 = optional perl -0 mutation of the C
     python3 "$HERE/coro-floor.py" -o "$WORK/f.c" || return 2
     if [ -n "${2:-}" ]; then perl -0pi -e "$2" "$WORK/f.c" || return 2; fi
-    "$WORK/mec" languages/c-to-llvm-ir.abnf "$WORK/f.c" 2>/dev/null \
+    "$WORK/mec" languages/c-to-llvm-ir.abnf "$WORK/f.c" -i languages/lib 2>/dev/null \
         | awk -f "$WORK/modonly.awk" > "$1"
     [ -s "$1" ]
 }
