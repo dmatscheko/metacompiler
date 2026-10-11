@@ -63,7 +63,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-419 python: `object()`; the 4300-digit int→str limit · P2 · PY · OPEN [V]
+### T-419 python: `object()`; the 4300-digit int→str limit · P2 · PY · IN PROGRESS (PY worker, round 16) [V]
 `object()` cannot be constructed (interpreter "cannot construct object", compiled
 "'type' object is not callable"). CPython's 4300-digit limit on int → str is not
 modelled: `str(12345678901234567890**333)` prints where python3 raises ValueError
@@ -113,7 +113,7 @@ halves (BCL 1). A user member named Keys/Values is read as the dictionary call (
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-418 swift: `zip`; `type(of:)` of an empty collection; NaN sign/payload · P1 · SW · OPEN [V]
+### T-418 swift: `zip`; `type(of:)` of an empty collection; NaN sign/payload · P1 · SW · IN PROGRESS (SW worker, round 24) [V]
 `zip` is unknown in every engine (`Dictionary(uniqueKeysWithValues: zip(ks, 1...))`).
 `type(of: Set<Int>())` prints `Set<Any>` (swiftc `Set<Int>`; needs the static type).
 `Double("-nan")` prints nan (swiftc -nan); `nan(0x1)` / `snan` give nil. Not covered:
