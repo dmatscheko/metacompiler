@@ -358,7 +358,11 @@ func (rt *jsrt) csqNext(it *csqIter) bool {
 		}
 		if it.i == 0 {
 			it.i = 1
-			it.cur = it.prop("x")
+			if it.q.props["has"] == true {
+				it.cur = it.prop("x")
+			} else {
+				it.cur = csqDefault(it.q.props["src"], false, nil)
+			}
 			return true
 		}
 		return false
@@ -593,7 +597,33 @@ func (rt *jsrt) csqAverage(it *csqIter) interface{} {
 	return jsJFlo{f: acc / float64(n), sty: floCS}
 }
 
-func (rt *jsrt) csqMinMax(it *csqIter, sign int) interface{} {
+// csqElemTy / csqDefault: lib/csharp-linq.js's.
+func csqElemTy(v interface{}) string {
+	switch t := v.(type) {
+	case *jsArray:
+		return csxElemTy(t)
+	case string:
+		return "char"
+	}
+	q, ok := csqIsQuery(v)
+	if !ok {
+		return ""
+	}
+	switch q.props["__linq"] {
+	case "range":
+		return "int"
+	case "select", "selmany", "zip", "group", "grp", "repeat":
+		return ""
+	}
+	return csqElemTy(q.props["src"])
+}
+
+func csqDefault(src interface{}, seen bool, any interface{}) interface{} {
+	return csxDefaultFor(csqElemTy(src), seen, any)
+}
+
+// csqMinMax: src is the source, nil when the elements were selected.
+func (rt *jsrt) csqMinMax(it *csqIter, sign int, src interface{}) interface{} {
 	has := false
 	var best interface{}
 	for rt.csqNext(it) {
@@ -603,6 +633,11 @@ func (rt *jsrt) csqMinMax(it *csqIter, sign int) interface{} {
 		has = true
 	}
 	if !has {
+		if src != nil {
+			if ety := csqElemTy(src); ety != "" && csqNullish(csxDefaultFor(ety, false, nil)) {
+				return jsNull
+			}
+		}
 		rt.csThrow("InvalidOperationException", csqMsgEmpty)
 	}
 	return best
@@ -625,7 +660,7 @@ func (rt *jsrt) csqMinMaxBy(it *csqIter, f interface{}, sign int) interface{} {
 }
 
 // csqPick: First (which 0) / Last (1) / Single (2); dflt nil throws.
-func (rt *jsrt) csqPick(it *csqIter, pred interface{}, which int, orDefault bool, dflt interface{}) interface{} {
+func (rt *jsrt) csqPick(it *csqIter, pred interface{}, which int, orDefault bool, dflt, src interface{}) interface{} {
 	has, seen := false, false
 	var got, any interface{}
 	for rt.csqNext(it) {
@@ -655,10 +690,7 @@ func (rt *jsrt) csqPick(it *csqIter, pred interface{}, which int, orDefault bool
 		if dflt != nil {
 			return dflt
 		}
-		if seen {
-			return csxZeroLike(any)
-		}
-		return jsNull
+		return csqDefault(src, seen, any)
 	}
 	if csqNullish(pred) {
 		rt.csThrow("InvalidOperationException", csqMsgEmpty)
@@ -744,6 +776,7 @@ func (rt *jsrt) csqMethod(recv interface{}, name string, args []interface{}) int
 			q.set("n", float64(rt.csxNum(arg(0))))
 		case "Append", "Prepend", "DefaultIfEmpty":
 			q.set("x", arg(0))
+			q.set("has", n > 0)
 		default:
 			rt.csqSrcChk(arg(0), "second")
 			q.set("b", arg(0))
@@ -805,7 +838,7 @@ func (rt *jsrt) csqMethod(recv interface{}, name string, args []interface{}) int
 		for rt.csqNext(it) {
 			out.elems = append(out.elems, it.cur)
 		}
-		return out
+		return csxTyped(out, csqElemTy(recv), name == "ToList")
 	case "ToDictionary":
 		return rt.csqToDict(it, args)
 	case "Count", "LongCount":
@@ -838,10 +871,12 @@ func (rt *jsrt) csqMethod(recv interface{}, name string, args []interface{}) int
 		}
 		return false
 	case "Sum", "Average", "Min", "Max":
+		var src interface{} = recv
 		if n > 0 {
 			sq := csqMake("select", recv)
 			sq.set("f", args[0])
 			it = rt.csqOpen(sq)
+			src = nil
 		}
 		switch name {
 		case "Sum":
@@ -849,9 +884,9 @@ func (rt *jsrt) csqMethod(recv interface{}, name string, args []interface{}) int
 		case "Average":
 			return rt.csqAverage(it)
 		case "Max":
-			return rt.csqMinMax(it, 1)
+			return rt.csqMinMax(it, 1, src)
 		}
-		return rt.csqMinMax(it, -1)
+		return rt.csqMinMax(it, -1, src)
 	case "MinBy":
 		return rt.csqMinMaxBy(it, arg(0), -1)
 	case "MaxBy":
@@ -868,20 +903,21 @@ func (rt *jsrt) csqMethod(recv interface{}, name string, args []interface{}) int
 		if n > 1 {
 			dflt = args[1]
 		}
-		return rt.csqPick(it, pred, which, orDef, dflt)
+		return rt.csqPick(it, pred, which, orDef, dflt, recv)
 	case "ElementAt", "ElementAtOrDefault":
 		at := rt.csxNum(args[0])
-		var last interface{} = jsNull
-		for ei := 0; at >= 0 && rt.csqNext(it); ei++ {
+		var any interface{} = jsNull
+		ei := 0
+		for ; at >= 0 && rt.csqNext(it); ei++ {
 			if ei == at {
 				return it.cur
 			}
-			last = csxZeroLike(it.cur)
+			any = it.cur
 		}
 		if name == "ElementAt" {
 			rt.csxArgRange(csxMsgIdxLess, "index")
 		}
-		return last
+		return csqDefault(recv, ei > 0, any)
 	case "Aggregate":
 		return rt.csqAggregate(it, args)
 	case "SequenceEqual":

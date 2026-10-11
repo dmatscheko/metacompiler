@@ -1099,22 +1099,22 @@ NewObjInit  <~~ push(makeNew(takeAll())) ~~>
 NewName     <~~ push({cname: csSimpleName(up.in), targs: csTypeArgs(up.in)}) ~~>
             = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } [ "?" ] ;
 // The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
-NewArrLit   <~~ push(makeArray(takeAll())) ~~>
+NewArrLit   <~~ push(makeTypedArray(makeArray(takeAll()), csDfltNewArrTy(up.start, up.pos), csDfltNewListTy(up.start, up.pos))) ~~>
             = KwNew Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
 // 'new[] { 1, 2, 3 }': an implicitly typed array - no type name at all.
 NewImplArr  <~~ push(makeArray(takeAll())) ~~>
             = KwNew "[" { "," } "]" "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
 // 'new A[1] { new A() }': a sized array MAY still carry an initializer, which wins.
-NewArrSize  <~~ push(makeSizedArray(takeAll())) ~~>
+NewArrSize  <~~ push(makeSizedArray(takeAll(), csDfltNewArrTy(up.start, up.pos))) ~~>
             = KwNew Type "[" ArrDim { "," ArrDim } "]" { "[" { "," } "]" } [ ArrInit ] ;
 // `stackalloc T[n]` / `stackalloc T[] { ... }`: a stack buffer. Nothing here has a
 // stack, so it allocates the same array `new T[n]` would - which is all a program
 // that only reads and writes it can observe. The sized form comes first: the
 // literal form has no dimension between its brackets.
 StackAlloc  = StackSized | StackLit ;
-StackSized  <~~ push(makeSizedArray(takeAll())) ~~>
+StackSized  <~~ push(makeSizedArray(takeAll(), csDfltNewArrTy(up.start, up.pos))) ~~>
             = KwStackalloc Type "[" ArrDim { "," ArrDim } "]" [ ArrInit ] ;
-StackLit    <~~ push(makeArray(takeAll())) ~~>
+StackLit    <~~ push(makeTypedArray(makeArray(takeAll()), csDfltNewArrTy(up.start, up.pos), csDfltNewListTy(up.start, up.pos))) ~~>
             = KwStackalloc Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
 ArrDim      <~~ push({adim: pop()}) ~~>
             = Expression ;
@@ -3422,7 +3422,7 @@ KwLet       = "let" KwEnd ;
             if (clsName == "List") {
                 var lav = []
                 for (var i = 0; i < args.length; i++) { lav.push(args[i]()) }
-                var la = csxListCtor([], lav)
+                var la = csxListCtor(csxTyped([], targs.length == 1 ? stripWs(targs[0]) : "", true), lav)
                 if (minits != null) { csApplyInits(la, minits) }
                 return la
             }
@@ -3643,15 +3643,21 @@ KwLet       = "let" KwEnd ;
             return a
         }
     }
-    function makeNewArray(sizeT) {
+    function makeNewArray(sizeT, ety) {
         return function() {
             var n = sizeT()
             // ECMA-335 III.4.16: newarr throws OverflowException when the element
             // count is negative.
             if (csNumD(n) < 0) { csThrowExc("OverflowException", csOvfMsg) }
             var a = []
-            for (var i = 0; i < n; i++) a.push(0)
-            return a
+            if (ety == "") {
+                for (var i = 0; i < n; i++) a.push(0)
+                return a
+            }
+            // A struct element is a zeroed instance of its own, one per element.
+            var isStruct = hasOwn(csStructs, ety)
+            for (var j = 0; j < n; j++) a.push(isStruct ? getVar(ety).__zero() : csxDefaultOf(ety))
+            return csxTyped(a, ety, false)
         }
     }
     // ----- `(object) x` suppresses a user-defined operator -----
@@ -4195,15 +4201,23 @@ KwLet       = "let" KwEnd ;
     // 'new int[n]' / 'new int[r, c]' / 'new A[1] { ... }': an explicit initializer wins
     // over the sizes; otherwise the FIRST dimension gives the length (the further ones
     // are evaluated so their calls stay visible, then dropped - the model is flat).
-    function makeSizedArray(items) {
+    // `new T[n]`: n elements of default(T) (ECMA-334 17.2: array elements are
+    // initialized to their default value), the array carrying T (csxTyped).
+    function makeSizedArray(items, ety) {
         var dims = []
         var init = null
         for (var i = 0; i < items.length; i++) {
             if (items[i].ainit != undefined) { init = items[i].ainit; continue }
             if (items[i].adim != undefined) { dims.push(items[i].adim) }
         }
-        if (init != null) { return init }
-        return makeNewArray(dims[0])
+        if (init != null) { return makeTypedArray(init, ety, "") }
+        return makeNewArray(dims[0], dims.length == 1 ? ety : "")
+    }
+    // `new T[] { ... }` carries T; `new List<T> { ... }` (read as this literal) is a
+    // List carrying T.
+    function makeTypedArray(t, ety, lety) {
+        if (ety == "" && lety == "") { return t }
+        return function() { return ety != "" ? csxTyped(t(), ety, false) : csxTyped(t(), lety, true) }
     }
     // A nested member initializer ('P1 = { X = 1 }') assigns INTO the object the member
     // already holds; an indexed one ('[k] = e') writes through the index.
@@ -4613,6 +4627,13 @@ KwLet       = "let" KwEnd ;
         // untyped literals in the initializer adopt it and a[0] / 2 is 1.5.
         // csImplicitConv answers an array type with the array unchanged, so the two
         // are complementary rather than alternatives.
+        // A collection literal takes the declared List<T> / T[] (csxTypedAs).
+        var cety = csDfltCollInit(ty, info)
+        if (cety != "") {
+            var lit = init
+            var isList = csDfltIsListTy(ty)
+            init = function() { return csxTypedAs(lit(), cety, isList) }
+        }
         var el = csElemAdoptTy(ty)
         if (el != "") { return function() { declVar(name, csAdoptArr(el, init())) } }
         return function() { declVar(name, csImplicitConv(ty, init())) }

@@ -302,7 +302,7 @@ function csqNext(it) {
         }
         if (it["i"] == 0) {
             it["i"] = 1
-            it["cur"] = q["x"]
+            it["cur"] = q["has"] ? q["x"] : csqDefault(q["src"], false, null)
             return true
         }
         return false
@@ -516,8 +516,25 @@ function csqAverage(it) {
     if (kind == "f") { return csxkFlo32(acc / n) }
     return csxkFlo(acc / n)
 }
-// Min / Max by Comparer<T>.Default; the first of equal elements wins.
-function csqMinMax(it, sign) {
+// The element type of a source as far as it is known: a typed collection's, a
+// string's char, Range's int, and through every operator that keeps the
+// elements; "" otherwise.
+function csqElemTy(v) {
+    if (Array.isArray(v)) { return csxElemTy(v) }
+    if (typeof v == "string") { return "char" }
+    if (!csqIsQuery(v)) { return "" }
+    var op = v["__linq"]
+    if (op == "range") { return "int" }
+    if (op == "select" || op == "selmany" || op == "zip" || op == "group" || op == "grp" || op == "repeat") { return "" }
+    return csqElemTy(v["src"])
+}
+// default(T) for the elements of src: by T when known, else the default of the
+// kind of an element seen, else null.
+function csqDefault(src, seen, any) { return csxDefaultFor(csqElemTy(src), seen, any) }
+// Min / Max by Comparer<T>.Default; the first of equal elements wins. An empty
+// sequence of a reference or nullable type answers null (src the source, null
+// when the elements were selected).
+function csqMinMax(it, sign, src) {
     var has = false
     var best = anytype
     best = undefined
@@ -527,7 +544,11 @@ function csqMinMax(it, sign) {
         if (!has || csxCmp(x, best) * sign > 0) { best = x }
         has = true
     }
-    if (!has) { csxkThrow("InvalidOperationException", csqMsgEmpty()) }
+    if (!has) {
+        var ety = src === null ? "" : csqElemTy(src)
+        if (ety != "" && csxDefaultFor(ety, false, null) === null) { return null }
+        csxkThrow("InvalidOperationException", csqMsgEmpty())
+    }
     return best
 }
 // MinBy / MaxBy: the first element whose key is least / greatest.
@@ -554,7 +575,7 @@ function csqMinMaxBy(it, f, sign) {
 // First / Last / Single, with or without a predicate, throwing or answering a
 // default: which is 0 first, 1 last, 2 single; dflt is the default to answer, or
 // undefined to throw.
-function csqPick(it, pred, which, orDefault, dflt) {
+function csqPick(it, pred, which, orDefault, dflt, src) {
     var has = false
     var got = anytype
     var any = anytype
@@ -580,7 +601,7 @@ function csqPick(it, pred, which, orDefault, dflt) {
     if (has) { return got }
     if (orDefault) {
         if (dflt !== undefined) { return dflt }
-        return seen ? csxZeroLike(any) : null
+        return csqDefault(src, seen, any)
     }
     if (csxIsNull(pred)) { csxkThrow("InvalidOperationException", csqMsgEmpty()) }
     csqNoMatch()
@@ -665,6 +686,7 @@ function csqMethod(recv, name, args) {
     if (name == "Append" || name == "Prepend" || name == "DefaultIfEmpty") {
         q = csqMake(name == "Append" ? "append" : (name == "Prepend" ? "prepend" : "defempty"), recv)
         q["x"] = n > 0 ? args[0] : null
+        q["has"] = n > 0
         return q
     }
     if (name == "Reverse") { return csqMake("reverse", recv) }
@@ -689,7 +711,7 @@ function csqMethod(recv, name, args) {
     if (name == "ToList" || name == "ToArray") {
         var out = []
         while (csqNext(it)) { out.push(it["cur"]) }
-        return out
+        return csxTyped(out, csqElemTy(recv), name == "ToList")
     }
     if (name == "ToDictionary") { return csqToDict(it, args) }
     if (name == "Count" || name == "LongCount") {
@@ -725,7 +747,7 @@ function csqMethod(recv, name, args) {
         }
         if (name == "Sum") { return csqSum(it) }
         if (name == "Average") { return csqAverage(it) }
-        return csqMinMax(it, name == "Max" ? 1 : 0 - 1)
+        return csqMinMax(it, name == "Max" ? 1 : 0 - 1, n > 0 ? null : recv)
     }
     if (name == "MinBy" || name == "MaxBy") { return csqMinMaxBy(it, args[0], name == "MaxBy" ? 1 : 0 - 1) }
     if (name == "First" || name == "FirstOrDefault" || name == "Last" || name == "LastOrDefault"
@@ -738,20 +760,20 @@ function csqMethod(recv, name, args) {
         dflt = undefined
         if (n > 0 && csxkIsDeleg(args[0])) { pred = args[0] } else if (n > 0) { dflt = args[0] }
         if (n > 1) { dflt = args[1] }
-        return csqPick(it, pred, which, orDef, dflt)
+        return csqPick(it, pred, which, orDef, dflt, recv)
     }
     if (name == "ElementAt" || name == "ElementAtOrDefault") {
         var at = csxkNum(args[0])
         var ei = 0
-        var last = anytype
-        last = null
+        var any = anytype
+        any = null
         while (at >= 0 && csqNext(it)) {
             if (ei == at) { return it["cur"] }
-            last = csxZeroLike(it["cur"])
+            any = it["cur"]
             ei = ei + 1
         }
         if (name == "ElementAt") { csxArgRange(csxMsgIdxLess(), "index") }
-        return last
+        return csqDefault(recv, ei > 0, any)
     }
     if (name == "Aggregate") { return csqAggregate(it, args) }
     if (name == "SequenceEqual") {

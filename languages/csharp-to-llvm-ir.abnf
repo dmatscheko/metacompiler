@@ -1091,21 +1091,21 @@ NewObjInit  <~~ push(makeNew(takeAll())) ~~>
 NewName     <~~ push({cname: csSimpleName(up.in), targs: csTypeArgs(up.in)}) ~~>
             = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } [ "?" ] ;
 // The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
-NewArrLit   <~~ push(makeArray(takeAll())) ~~>
+NewArrLit   <~~ push(makeTypedArray(makeArray(takeAll()), csDfltNewArrTy(up.start, up.pos), csDfltNewListTy(up.start, up.pos))) ~~>
             = KwNew Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
 // 'new[] { 1, 2, 3 }': an implicitly typed array - no type name at all.
 NewImplArr  <~~ push(makeArray(takeAll())) ~~>
             = KwNew "[" { "," } "]" "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
 // 'new A[1] { new A() }': a sized array MAY still carry an initializer, which wins.
-NewArrSize  <~~ push(makeSizedArray(takeAll())) ~~>
+NewArrSize  <~~ push(makeSizedArray(takeAll(), csDfltNewArrTy(up.start, up.pos))) ~~>
             = KwNew Type "[" ArrDim { "," ArrDim } "]" { "[" { "," } "]" } [ ArrInit ] ;
 // `stackalloc T[n]` / `stackalloc T[] { ... }`: a stack buffer. Nothing here has a
 // stack, so it allocates the same array `new T[n]` would - which is all a program
 // that only reads and writes it can observe.
 StackAlloc  = StackSized | StackLit ;
-StackSized  <~~ push(makeSizedArray(takeAll())) ~~>
+StackSized  <~~ push(makeSizedArray(takeAll(), csDfltNewArrTy(up.start, up.pos))) ~~>
             = KwStackalloc Type "[" ArrDim { "," ArrDim } "]" [ ArrInit ] ;
-StackLit    <~~ push(makeArray(takeAll())) ~~>
+StackLit    <~~ push(makeTypedArray(makeArray(takeAll()), csDfltNewArrTy(up.start, up.pos), csDfltNewListTy(up.start, up.pos))) ~~>
             = KwStackalloc Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
 ArrDim      <~~ push({adim: pop()}) ~~>
             = Expression ;
@@ -2417,15 +2417,27 @@ KwLet       = "let" KwEnd ;
     // 'new int[n]' / 'new int[r, c]' / 'new A[1] { ... }': an explicit initializer wins
     // over the sizes; otherwise the FIRST dimension gives the length (the further ones
     // are evaluated so their calls stay visible, then dropped - the model is flat).
-    function makeSizedArray(items) {
+    // `new T[n]`: n elements of default(T) (ECMA-334 17.2), the array carrying T
+    // (js_cstyped). Twin of makeSizedArray in csharp-interpreter.abnf.
+    function makeSizedArray(items, ety) {
         var dims = []
         var init = null
         for (var i = 0; i < items.length; i++) {
             if (items[i].ainit != undefined) { init = items[i].ainit; continue }
             if (items[i].adim != undefined) { dims.push(items[i].adim) }
         }
-        if (init != null) { return init }
-        return makeNewArray(dims[0])
+        if (init != null) { return makeTypedArray(init, ety, "") }
+        return makeNewArray(dims[0], dims.length == 1 ? ety : "")
+    }
+    // `new T[] { ... }` carries T; `new List<T> { ... }` (read as this literal) is a
+    // List carrying T.
+    function makeTypedArray(t, ety, lety) {
+        if (ety == "" && lety == "") { return t }
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_cstyped", [r.v, emitStr(r.b, ety != "" ? ety : lety),
+                                                           emitNum(r.b, ety != "" ? 0 : 1)])}
+        }
     }
     // A nested member initializer ('P1 = { X = 1 }') assigns INTO the object the member
     // already holds; an indexed one ('[k] = e') writes through the index.
@@ -3765,6 +3777,10 @@ KwLet       = "let" KwEnd ;
                     callExt(b, "js_arr_push", [cargsV, r.v])
                 }
                 var newV = callExt(b, clsName == "List" ? "js_arr_new" : "js_dict_new", [])
+                // A List carries its element type (js_cstyped, lib/csharp-collections.js).
+                if (clsName == "List") {
+                    newV = callExt(b, "js_cstyped", [newV, emitStr(b, targs.length == 1 ? stripWs(targs[0]) : ""), emitNum(b, 1)])
+                }
                 // The value type, for the default(TValue) TryGetValue hands out.
                 if (clsName == "Dictionary" && targs.length == 2) {
                     callExt(b, "js_set", [newV, emitStr(b, "__vty"), emitStr(b, stripWs(targs[1]))])
@@ -3847,12 +3863,38 @@ KwLet       = "let" KwEnd ;
             return {b: b, v: arr}
         }
     }
-    function makeNewArray(sizeT) {
+    var fillCount = 0
+    function makeNewArray(sizeT, ety) {
         return function(b) {
             var r = sizeT(b)
             b = r.b
             // ECMA-335 III.4.16: newarr throws OverflowException on a negative count.
-            return {b: b, v: callExt(b, "js_arr_new_n", [callExt(b, "js_csnewlen", [r.v]), emitNum(b, 0)])}
+            var nV = callExt(b, "js_csnewlen", [r.v])
+            if (ety == "") { return {b: b, v: callExt(b, "js_arr_new_n", [nV, emitNum(b, 0)])} }
+            if (csStructs[ety] == undefined) {
+                var dr = makeDefaultOf(ety)(b)
+                b = dr.b
+                var av = callExt(b, "js_arr_new_n", [nV, dr.v])
+                return {b: b, v: callExt(b, "js_cstyped", [av, emitStr(b, ety), emitNum(b, 0)])}
+            }
+            // A struct element is a zeroed instance of its own, one per element.
+            fillCount++
+            var iName = "$fill" + fillCount
+            var arrV = callExt(b, "js_cstyped", [callExt(b, "js_arr_new_n", [nV, emitNum(b, 0)]),
+                                                  emitStr(b, ety), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [arrV])])), bodyB, exitB)
+            var zr = makeDefaultOf(ety)(bodyB)
+            var i2 = callExt(zr.b, "js_scope_get", [curScopeV, emitStr(zr.b, iName)])
+            callExt(zr.b, "js_csidxset", [arrV, i2, zr.v])
+            callExt(zr.b, "js_scope_set", [curScopeV, emitStr(zr.b, iName), callExt(zr.b, "js_jadd", [i2, emitNum(zr.b, 1)])])
+            zr.b.NewBr(headB)
+            return {b: exitB, v: arrV}
         }
     }
     // 'x' -> the char value of its single (possibly escaped) character. js_char boxes the
@@ -4710,10 +4752,14 @@ KwLet       = "let" KwEnd ;
         var declW = csTypeW["$" + ty]
         var declU = csTypeU["$" + ty]
         var elemTy = csElemAdoptTy(ty)
+        // A collection literal takes the declared List<T> / T[] (js_cstypedas).
+        var cety = csDfltCollInit(ty, info)
+        var cList = csDfltIsListTy(ty)
         return function(b) {
             var r = init(b)
             b = r.b
             var v = r.v
+            if (cety != "") { v = callExt(b, "js_cstypedas", [v, emitStr(b, cety), emitNum(b, cList ? 1 : 0)]) }
             if (isDbl) { v = callExt(b, dblExt, [v]) }
             // `double[] a = {3, 4}`: the declared type names the ELEMENT type, so
             // the untyped literals in the initializer adopt it and a[0] / 2 is 1.5.

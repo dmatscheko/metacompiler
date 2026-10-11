@@ -3255,6 +3255,50 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s51e1", S51Show(arr[1]) == "0" && S51Show(lst[0]) == "False");
         }
 
+        // ===== SECTION 52: a collection's element type =====
+        //
+        // default(T) where a member hands one out on an EMPTY collection: List.Find /
+        // FindLast and Enumerable's ...OrDefault members, ElementAtOrDefault and
+        // DefaultIfEmpty answer default(T) of the element type (0 for an int, false,
+        // '\0', null for a string), and Min / Max of an empty sequence of a reference
+        // type answer null. `new T[n]` holds n default(T) values (ECMA-334 17.2), a
+        // struct element being a zeroed instance of its own. A List's Reverse() is its
+        // own in-place member; an array has none, so `arr.Reverse()` is
+        // Enumerable.Reverse and leaves the array alone.
+        struct S52Pt { public int X; }
+        static string S52Show(object o) { return o == null ? "null" : o.ToString(); }
+        static void S52()
+        {
+            int[] n = { 1, 2, 3, 9 };
+            var a = new List<int>();
+            List<int> b = [];
+            Program.Check("s52f1", S52Show(a.Find(x => x > n[0])) == "0" && S52Show(b.FindLast(x => x > n[0])) == "0"
+                && S52Show(new List<bool>().Find(x => x)) == "False" && S52Show(new List<string>().Find(x => x == "")) == "null");
+            Program.Check("s52q1", S52Show(new int[0].FirstOrDefault()) == "0" && S52Show(a.Where(x => x > n[1]).FirstOrDefault()) == "0"
+                && S52Show(a.LastOrDefault()) == "0" && S52Show(a.SingleOrDefault()) == "0" && S52Show(a.ElementAtOrDefault(n[2])) == "0"
+                && S52Show(a.DefaultIfEmpty().First()) == "0" && S52Show(new List<bool>().FirstOrDefault()) == "False"
+                && new List<char>().FirstOrDefault() == '\0' && S52Show(new List<string>().FirstOrDefault()) == "null"
+                && S52Show(new List<string>().Max()) == "null" && S52Show(new int?[0].Min()) == "null");
+            var bs = new bool[n[1]];
+            var ss = new string[n[1]];
+            var cs = new char[n[1]];
+            var ds = new double[n[1]];
+            var ps = new S52Pt[n[1]];
+            ps[0].X = 5;
+            Program.Check("s52a1", "" + bs[0] == "False" && ss[1] == null && cs[1] == '\0' && "" + (ds[0] + 0.5) == "0.5"
+                && ps[0].X == 5 && ps[1].X == 0);
+            int[] arr = { n[0], n[1], n[2] };
+            var rev = arr.Reverse();
+            var lst = new List<int> { n[0], n[1], n[2] };
+            lst.Reverse();
+            var tl = arr.Where(x => x > n[0]).ToList();
+            tl.Reverse();
+            int[] lit = [n[2], n[3]];
+            Program.Check("s52r1", string.Join(",", rev) == "3,2,1" && string.Join(",", arr) == "1,2,3"
+                && string.Join(",", lst) == "3,2,1" && string.Join(",", tl) == "3,2"
+                && string.Join(",", lit.Reverse()) == "9,3" && string.Join(",", lit) == "3,9");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3308,6 +3352,7 @@ b";                                                   // verbatim keeps the newl
             Program.S49(); // SECTION-CALL 49
             Program.S50(); // SECTION-CALL 50
             Program.S51(); // SECTION-CALL 51
+            Program.S52(); // SECTION-CALL 52
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

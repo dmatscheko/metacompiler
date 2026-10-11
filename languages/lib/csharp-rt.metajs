@@ -2157,6 +2157,10 @@ function csConsoleText(argv) {
     if (argv.length == 0) { return "" }
     return cpStr(argv[0])
 }
+// The element type and List-ness a collection carries (lib/csharp-collections.js's
+// csxTyped / csxTypedAs).
+function js_cstyped(a, ety, isList) { return csxTyped(a, ety, isList == 1) }
+function js_cstypedas(a, ety, isList) { return csxTypedAs(a, ety, isList == 1) }
 // An interpolation hole's ':format' (lib/csharp-strings.js's csxFmtValue).
 function js_csfmt(v, spec) {
     if (v === undefined || v === null) { return "" }

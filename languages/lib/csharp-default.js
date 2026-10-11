@@ -84,6 +84,64 @@ function csDfltTName(t) {
     var d = csDfltLastDot(s)
     return d >= 0 ? s.substring(d + 1, s.length) : s
 }
+// The element type of the array type or List<T> named by ty, "" for another type.
+function csDfltElemOf(ty) {
+    var t = stripWs(ty)
+    if (t.length > 2 && t.substring(t.length - 2, t.length) == "[]") { return t.substring(0, t.length - 2) }
+    var as = csDfltTArgs(t)
+    if (csDfltTName(t) == "List" && as.length == 1) { return as[0] }
+    return ""
+}
+function csDfltIsListTy(ty) { return csDfltTName(ty) == "List" }
+// A declaration of a List<T> / T[] whose initializer is a collection literal
+// (`= [ ... ]`, `= { ... }`): T, which the literal's array takes; "" otherwise.
+function csDfltCollInit(ty, info) {
+    if (info.dsrc == undefined) { return "" }
+    var s = stripWs(info.dsrc)
+    if (s.charAt(0) == "=") { s = s.substring(1, s.length) }
+    if (s.charAt(0) != "[" && s.charAt(0) != "{") { return "" }
+    return csDfltElemOf(ty)
+}
+// `new T[n]` / `new T[] { ... }` spanning [start, end): the element type, one
+// "[]" per bracket pair after the first.
+function csDfltNewArrTy(start, end) {
+    var s = stripWs(c.srcSlice(start, end))
+    if (s.substring(0, 3) != "new" && s.substring(0, 10) != "stackalloc") { return "" }
+    var i = s.substring(0, 3) == "new" ? 3 : 10
+    var from = i
+    var depth = 0
+    while (i < s.length && !(s.charAt(i) == "[" && depth == 0)) {
+        if (s.charAt(i) == "<") { depth++ }
+        if (s.charAt(i) == ">") { depth-- }
+        if ((s.charAt(i) == "{" || s.charAt(i) == "(") && depth == 0) { return "" }
+        i++
+    }
+    var ty = s.substring(from, i)
+    if (ty == "" || i >= s.length) { return "" }
+    var d = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "[" || ch == "(" || ch == "{") { d++ }
+        if (ch == "]" || ch == ")" || ch == "}") { d-- }
+        i++
+        if (d == 0) { break }
+    }
+    while (i + 1 < s.length && s.charAt(i) == "[" && s.charAt(i + 1) == "]") {
+        ty = ty + "[]"
+        i += 2
+    }
+    return ty
+}
+// `new List<T> { ... }` spanning [start, end) (the array-literal form a collection
+// initializer of a List takes): T; "" for any other creation.
+function csDfltNewListTy(start, end) {
+    var s = stripWs(c.srcSlice(start, end))
+    var b = s.indexOf("{")
+    if (s.substring(0, 3) != "new" || b < 0) { return "" }
+    var ty = s.substring(3, b)
+    var as = csDfltTArgs(ty)
+    return csDfltTName(ty) == "List" && as.length == 1 ? as[0] : ""
+}
 function csDfltLastDot(s) {
     var i = s.length - 1
     while (i >= 0 && s.charAt(i) != ".") { i-- }

@@ -1,6 +1,9 @@
 package abnf
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // List<T>'s and Dictionary<TKey,TValue>'s members: the Go twin's port of
 // languages/lib/csharp-collections.js, whose header has the rules (default(T),
@@ -209,6 +212,64 @@ func csxDefaultOf(ty string) interface{} {
 	switch ty {
 	case "int", "uint", "long", "ulong", "short", "ushort", "byte", "sbyte", "double", "float", "decimal":
 		return float64(0)
+	}
+	return jsNull
+}
+
+// ----- the kind a List<T> or T[] carries: lib/csharp-collections.js's -----
+
+var csxTyMu sync.Mutex
+var csxTyNames = []string{""}
+
+func csxTyCode(ty string) int {
+	csxTyMu.Lock()
+	defer csxTyMu.Unlock()
+	for i, t := range csxTyNames {
+		if t == ty {
+			return i
+		}
+	}
+	csxTyNames = append(csxTyNames, ty)
+	return len(csxTyNames) - 1
+}
+
+func csxTyped(a *jsArray, ety string, isList bool) *jsArray {
+	k := 2 * csxTyCode(ety)
+	if isList {
+		k++
+	}
+	a.kind = k
+	return a
+}
+
+func csxIsList(a *jsArray) bool { return a.kind%2 == 1 }
+
+func csxElemTy(a *jsArray) string {
+	csxTyMu.Lock()
+	defer csxTyMu.Unlock()
+	if i := a.kind / 2; i < len(csxTyNames) {
+		return csxTyNames[i]
+	}
+	return ""
+}
+
+func csxElemDefault(a *jsArray) interface{} {
+	var first interface{} = jsNull
+	if len(a.elems) > 0 {
+		first = a.elems[0]
+	}
+	return csxDefaultFor(csxElemTy(a), len(a.elems) > 0, first)
+}
+
+// csxDefaultFor: lib/csharp-collections.js's.
+func csxDefaultFor(ty string, seen bool, any interface{}) interface{} {
+	if ty != "" {
+		if d := csxDefaultOf(ty); !isUndefOrNull(d) || ty[len(ty)-1] == '?' {
+			return d
+		}
+	}
+	if seen {
+		return csxZeroLike(any)
 	}
 	return jsNull
 }
@@ -551,10 +612,14 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 	case "GetRange", "Slice":
 		b, c := rt.csxNum(arg(0)), rt.csxNum(arg(1))
 		rt.csxRangeChk(len(a.elems), b, c)
-		return &jsArray{elems: append([]interface{}{}, a.elems[b:b+c]...)}
+		return csxTyped(&jsArray{elems: append([]interface{}{}, a.elems[b:b+c]...)}, csxElemTy(a), true)
 	case "ToArray":
-		return &jsArray{elems: append([]interface{}{}, a.elems...)}
+		return csxTyped(&jsArray{elems: append([]interface{}{}, a.elems...)}, csxElemTy(a), false)
 	case "Reverse":
+		// An array has no Reverse() of its own: it is Enumerable.Reverse.
+		if n == 0 && !csxIsList(a) {
+			return rt.csqMethod(a, name, args)
+		}
 		if n == 0 {
 			csxReverseRange(a, 0, len(a.elems))
 			return jsUndef
@@ -594,10 +659,7 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 		if fi >= 0 {
 			return a.elems[fi]
 		}
-		if len(a.elems) > 0 {
-			return csxZeroLike(a.elems[0])
-		}
-		return jsNull
+		return csxElemDefault(a)
 	case "FindAll":
 		out := &jsArray{}
 		for _, e := range append([]interface{}{}, a.elems...) {
@@ -605,7 +667,7 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 				out.elems = append(out.elems, e)
 			}
 		}
-		return out
+		return csxTyped(out, csxElemTy(a), true)
 	case "TrueForAll":
 		for _, e := range append([]interface{}{}, a.elems...) {
 			if !rt.csxPred(arg(0), e) {
@@ -623,7 +685,7 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 		for _, e := range append([]interface{}{}, a.elems...) {
 			out.elems = append(out.elems, rt.csxCall(arg(0), []interface{}{e}))
 		}
-		return out
+		return csxTyped(out, "", true)
 	case "CopyTo":
 		dst, _ := arg(0).(*jsArray)
 		di, si, cn := 0, 0, len(a.elems)

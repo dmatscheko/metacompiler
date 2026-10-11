@@ -14,11 +14,12 @@
 //   csxkDictFind(d, k)  the position of key k in a dictionary, or -1
 //   csxkRefSet(box, v)  write v through an `out` argument's reference box
 //
-// A List<T> is a plain array and a Dictionary a {__dict, keys, vals} object, so
-// a member that hands out default(T) (Find, TryGetValue) cannot read T off the
-// value: a Dictionary created by `new Dictionary<K,V>()` carries V's name in
-// __vty, and otherwise the default of an element's own kind stands in (an
-// empty List<int>'s Find answers null, not 0).
+// A List<T> is a plain array and a Dictionary a {__dict, keys, vals} object. A
+// member that hands out default(T) (Find, TryGetValue) reads T where the value
+// carries it: a List or array created with its element type spelled carries T
+// in its kind (csxTyped), a Dictionary created by `new Dictionary<K,V>()` V's
+// name in __vty; otherwise the default of an element's own kind stands in, and
+// null when there is no element.
 //
 // Sort() and BinarySearch() order by Comparer<T>.Default: numbers and chars by
 // value (Double.CompareTo puts NaN first), bools false-first, and a user type
@@ -110,6 +111,48 @@ function csxDefaultOf(ty) {
         || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
         || ty == "float" || ty == "decimal") { return 0 }
     return null
+}
+
+// ----- the kind a List<T> or T[] carries -----
+//
+// Both are plain arrays. The array's kind number (arrKind) tells them apart and
+// names T where the program spelled it: bit 0 is set on a List, the bits above
+// it hold T's index in csxTyNames (0: not known). Twin: csxTyped in
+// abnf/jsrtcscoll.go.
+var csxTyNames = [""]
+function csxTyCode(ty) {
+    var i = 0
+    while (i < csxTyNames.length) {
+        if (csxTyNames[i] == ty) { return i }
+        i = i + 1
+    }
+    csxTyNames.push(ty)
+    return csxTyNames.length - 1
+}
+function csxTyped(a, ety, isList) {
+    arrKindSet(a, (isList ? 1 : 0) + 2 * csxTyCode(ety))
+    return a
+}
+function csxIsList(a) { return arrKind(a) % 2 == 1 }
+function csxElemTy(a) { return csxTyNames[Math.floor(arrKind(a) / 2)] }
+// default(T) for a's elements: by T when it is known, else the default of the
+// first element's own kind, else null.
+function csxElemDefault(a) { return csxDefaultFor(csxElemTy(a), a.length > 0, a.length > 0 ? a[0] : null) }
+// default(T) for T named ty (a value type, or a nullable one), else the default
+// of the kind of an element seen (a type parameter or a reference type), else null.
+function csxDefaultFor(ty, seen, any) {
+    if (ty != "") {
+        var d = anytype
+        d = csxDefaultOf(ty)
+        if (d !== null || ty.charAt(ty.length - 1) == "?") { return d }
+    }
+    return seen ? csxZeroLike(any) : null
+}
+// The collection a declaration of type List<ety> / ety[] initializes: an untagged
+// array (a collection expression, `List<int> l = [];`) takes the declared type.
+function csxTypedAs(a, ety, isList) {
+    if (!Array.isArray(a) || arrKind(a) != 0) { return a }
+    return csxTyped(a, ety, isList)
 }
 
 // ----- List<T> -----
@@ -400,10 +443,12 @@ function csxListMethod(a, name, args) {
         var gb = csxkNum(args[0])
         var gc = csxkNum(args[1])
         csxRangeChk(a.length, gb, gc)
-        return csxSlice(a, gb, gb + gc)
+        return csxTyped(csxSlice(a, gb, gb + gc), csxElemTy(a), true)
     }
-    if (name == "ToArray") { return csxSlice(a, 0, a.length) }
+    if (name == "ToArray") { return csxTyped(csxSlice(a, 0, a.length), csxElemTy(a), false) }
     if (name == "Reverse") {
+        // An array has no Reverse() of its own: it is Enumerable.Reverse.
+        if (n == 0 && !csxIsList(a)) { return csqMethod(a, name, args) }
         if (n == 0) {
             csxReverseRange(a, 0, a.length)
             return undefined
@@ -433,7 +478,7 @@ function csxListMethod(a, name, args) {
         var fi = name == "Find" ? csxFindIdx(a, 0, a.length, 1, args[0])
                                 : csxFindIdx(a, a.length - 1, a.length, 0 - 1, args[0])
         if (fi >= 0) { return a[fi] }
-        return a.length > 0 ? csxZeroLike(a[0]) : null
+        return csxElemDefault(a)
     }
     if (name == "FindAll") {
         var hits = []
@@ -442,7 +487,7 @@ function csxListMethod(a, name, args) {
             if (csxkCall(args[0], [a[i]]) === true) { hits.push(a[i]) }
             i = i + 1
         }
-        return hits
+        return csxTyped(hits, csxElemTy(a), true)
     }
     if (name == "TrueForAll") {
         i = 0
@@ -467,7 +512,7 @@ function csxListMethod(a, name, args) {
             conv.push(csxkCall(args[0], [a[i]]))
             i = i + 1
         }
-        return conv
+        return csxTyped(conv, "", true)
     }
     if (name == "CopyTo") {
         var dst = args[0]

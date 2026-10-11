@@ -1495,6 +1495,20 @@ func init() {
 			jsvFnMetaSet(u(a[0]), "", jsToInt(rt.toNumber(u(a[1]))))
 			return a[0]
 		}
+		// The element type and List-ness a collection carries: lib/csharp-rt.metajs's
+		// js_cstyped / js_cstypedas.
+		m["js_cstyped"] = func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				csxTyped(arr, rt.toString(u(a[1])), rt.toNumber(u(a[2])) == 1)
+			}
+			return a[0]
+		}
+		m["js_cstypedas"] = func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok && arr.kind == 0 {
+				csxTyped(arr, rt.toString(u(a[1])), rt.toNumber(u(a[2])) == 1)
+			}
+			return a[0]
+		}
 		// An interpolation hole's ':format': csxFmtValue, lib/csharp-strings.js's.
 		m["js_csfmt"] = func(a []uint64) uint64 {
 			v := u(a[0])
