@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-418** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-420** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -62,6 +62,14 @@ its report; anything structural there is a CORE ticket.
 ---
 
 # PY — Python
+
+### T-419 python: `object()`; the 4300-digit int→str limit · P2 · PY · OPEN [V]
+`object()` cannot be constructed (interpreter "cannot construct object", compiled
+"'type' object is not callable"). CPython's 4300-digit limit on int → str is not
+modelled: `str(12345678901234567890**333)` prints where python3 raises ValueError
+(sys.set_int_max_str_digits). Also: type's `__or__` (X|Y), `__new__`, `__sizeof__` on
+type objects; the `object` type object is bare. The java ratchet's -frozen peak is
+59.8M (just under 60%): split it before it grows (P3, JV).
 
 ---
 
@@ -105,12 +113,11 @@ halves (BCL 1). A user member named Keys/Values is read as the dictionary call (
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-416 swift: Dictionary API gaps; array/dictionary type syntax as values · P1 · SW · IN PROGRESS (SW worker, round 23) [V]
-`d["a", default: 0] += 1` does not parse (swiftc `["a": 1]`); `removeValue(forKey:)`,
-`updateValue(_:forKey:)` unknown; `Dictionary(grouping:by:)` unsupported (interpreter
-"only the empty initializer", compiled "variable not defined: Dictionary").
-`print([Int].self)` prints `[Int]` (swiftc `Array<Int>`): array/dictionary type syntax
-as values.
+### T-418 swift: `zip`; `type(of:)` of an empty collection; NaN sign/payload · P1 · SW · OPEN [V]
+`zip` is unknown in every engine (`Dictionary(uniqueKeysWithValues: zip(ks, 1...))`).
+`type(of: Set<Int>())` prints `Set<Any>` (swiftc `Set<Int>`; needs the static type).
+`Double("-nan")` prints nan (swiftc -nan); `nan(0x1)` / `snan` give nil. Not covered:
+`Dictionary.capacity`, `index(forKey:)`, Dictionary.Index subscripts (P3).
 
 ---
 
@@ -156,29 +163,6 @@ signal in the compile-core protocol). By-reference returns degrade to by-value
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
-
-### T-406 the python ratchet's -frozen interpreter run is at ~87M of the 100M brake · P2 · CORE · IN PROGRESS (CORE+PY worker, round 15) [V]
-Measured max steps per top-level call: python interpreter -frozen 87M (lua 72M, java
-61M next). Find the superlinear cost (php's was a quadratic dedupe in varsSince) or
-split the file as js is; leave every ratchet under ~60%.
-
-### T-408 string → float conversions in the other languages · P1 · CORE + per language · IN PROGRESS (CORE+PY worker, round 15) [V]
-lua: `tonumber("1e400")` / `"1e400"+1` nil/error in llvm.Run only (jsrtlua.go:325 treats
-ErrRange as failure; lua inf). swift: `Double("Inf")`, `"inf"`, `"nan"`, `"Infinity"`
-nil in all engines (swiftc inf/nan); `Double("1e400")` nil in llvm.Run (jsrtswift.go
-ErrRange). ruby: interpreter `"Infinity".to_f` ±Infinity (MRI 0.0); `Float("1e400")`
-raises in llvm.Run (MRI Infinity); `Float("0x10")`, `Float("0x1p4")`, `Float(".5")` raise
-(MRI 16.0/16.0/0.5); `"1_000".to_f` 1.0 (MRI 1000.0). metajs: the goja interpreter reads
-"0x10", "0b101", "0o17" as numbers, llvm.Run/native NaN (goja-vs-native split). dart
-`double.parse`/`tryParse` and C# `double.Parse`/`TryParse` are missing.
-
-### T-409 python: +2.36% bench after the T-394 commit; `__hash__ = None`; `id()` · P2 · PY · IN PROGRESS (CORE+PY worker, round 15) [V]
-bench python went 20.23G → 20.71G (+2.36%, outside the 1.13-1.73% spread; collections
-2462 → 2492) at 40c43710 (complex powers / aug ops / hash / tuple). Bisect inside the
-commit (fdlibm import? hash code?) and recover it. Also: a class attribute bound to
-None is lost (`class N: __hash__ = None; N.__hash__` AttributeError) so `__hash__ =
-None` is not honoured; `id()` missing; hasattr on type objects misses `__hash__`,
-`__lt__`, frozenset/bool/complex/set dunders; `hasattr(list, "__imul__")` False.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -485,6 +469,10 @@ T-412 swift: inherited static/class methods compiled; a type parameter as a valu
 T-396 corpus long tails: csharp, php, dart, java — DONE c1b3ed36..a629d763 (csharp 2674→2709, php 2692→2736, dart 3339→3371, java compiler 4329→4331; no must-parse lost). Remainder DECLINED by measured cluster: java 10 files javac itself rejects + 4 attribution-only; php reserved words as names, PHP 8.5 forms, constructs PHP rejects; csharp unsafe pointers (no pointer model), Mono prototype syntax, #if, identifier escapes; dart 53 unsplit multitests, unreleased primary constructors
 T-413 swift: Set-keyed dictionaries; builtin types as values compiled — DONE 5905648d 7870660a
 T-414 csharp/dart: static field named Count; generic statics; target-typed default; function-typed fields — DONE 43826f1a..6a5ba560 (spec-only)
+T-409 python: +2.36% bench after the T-394 commit; `__hash__ = None`; `id()` — DONE 3af2e89d 00631154 (bench python 20.73G → 12.40G, output identical to CPython)
+T-408 string → float conversions in the other languages — DONE 8750f160 63e2e8ec e916fd11
+T-406 the python ratchet's -frozen interpreter run is at ~87M of the 100M brake — DONE 2fc5f8e4 (python 89M→34M, lua 73M→51M, java 61M→60M; every other half ≤42M)
+T-416 swift: Dictionary API gaps; array/dictionary type syntax as values — DONE dc8e3e7e
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
