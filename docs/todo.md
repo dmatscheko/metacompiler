@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-400** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-402** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,12 +108,6 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-390 go: static type of arithmetic on defined types; `case []T:`; nested arrays · P1 · GO · IN PROGRESS (PHP+GO worker, round 15) [V]
-`fmt.Println(y[0]+y[2])`, `kk+1` print `4`/`6` (go `kind4`/`kind6`): arithmetic on a
-defined type loses its static type (all legs). `case []T:` never matches a slice in the
-interpreter's type test (goTypeName answers "slice"), even `[]int`. A nested array
-(`[2][2]Kind`) or an array in a struct field prints elements raw.
-
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
@@ -134,19 +128,12 @@ as [Double]` prints `[1, 2]` (swiftc `[1.0, 2.0]`); `let (a, b): (Double, Int) =
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-389 php: string/number comparison, visibility, foreach over objects, method_exists · P1 · PHP · IN PROGRESS (PHP+GO worker, round 15) [V spec-only]
-php-src corpus: `NAN == "NAN"` true (expected false); `1.75 <=> "1.75abc"` 0 (expected
--1) (Zend/tests/string_to_number_comparison, type_coercion/nan_comp_op). var_dump of
-non-public properties lacks `:protected`/`:private` (visibility not modelled; json_encode
-and (array) include them). `foreach` over an object prints nothing (interpreter) /
-aborts "range over a object" (compiler). `method_exists` undefined. `self::` outside a
-class aborts (bug66015.phpt). A decoded JSON key starting with `__` collides with
-hidden slots compiled.
-
-### T-397 php: foreach by value walks the live array · P1 · PHP · IN PROGRESS (PHP+GO worker, round 15) [V spec-only]
-`$a=["x"=>1,"y"=>2]; $i=1; foreach($a as $k=>$v){$a[$i]=$v; unset($a[$k]); $i++;}`
-leaves `[y=>2, 2=>1]` in both halves; PHP iterates a snapshot (bug68215.expected:
-`[1=>1, 2=>2]`).
+### T-400 php: array pointer functions, ini_set, object ids, anonymous class names · P1 · PHP · IN PROGRESS (PHP+CORE worker, round 16) [V spec-only]
+`reset()`, `current()`, `key()`, `next()`, `end()` undefined (bug32993.phpt); `ini_set()`
+undefined, `precision` not modelled; var_dump's `#id` is assigned at first dump, not at
+creation; compiled anonymous classes print `class@anonymous1` (PHP `class@anonymous`,
+anon/012.phpt); constants/bug69676_3.phpt aborts compiled "undefined constant A2::N";
+method dispatch is case-sensitive (PHP method names are case-insensitive).
 
 ---
 
@@ -174,6 +161,12 @@ runtime.c ~2390: `"Inf"`, `"-Inf"` and any 8-character string starting with "Inf
 ("Infinitx") read as ±Infinity; JavaScript says NaN (js no longer goes through it).
 Probe every language that converts strings through it (python float(), ruby to_f,
 php, lua tonumber, kotlin toDouble...) against its oracle and fix the floor.
+
+### T-401 the php ratchet's -frozen run is at ~94M of the 100M step brake · P2 · CORE · IN PROGRESS (PHP+CORE worker, round 16) [V]
+tests/php-test-full.php under the -frozen interpreter uses ~94M of `-max-steps` 1e8;
+the next sections will read as FROZEN-DIFF. Split it into parts as js was
+(js-test-full.N.js: test.sh / native-full / launch.json), or find why php's frozen
+interpreter steps are so high. Check every ratchet's step headroom while there.
 
 ### T-396 corpus long tails: csharp, php, dart, java · P3 · per language · OPEN [V]
 Measured after round 13. csharp 78 fails (unsafe pointers 10, generic names as values 7,
@@ -473,6 +466,9 @@ T-170 a real tuple type for Python — DONE 93334360 (a tuple is an array of kin
 T-011 python: `d.items()` renders pairs as lists — DONE 93334360
 T-181 corpus: other languages — PARTIAL 38b08481..4999997a (swift 115→118/123 swiftc-accepted, batch 0→2/2, c 213→217, java 4323→4329, php 2681→2691, dart 3336→3339, csharp +1; no must-parse file lost); remaining tail is T-395/T-396
 T-393 ts: namespace `this` through an exported variable; uninitialised exports in the interpreter — DONE 3d7770f6 (the tsc crash is TS18030 on `this?.#foo`, input tsc rejects)
+T-390 go: static type of arithmetic on defined types; `case []T:`; nested arrays — DONE b9299286
+T-389 php: string/number comparison, visibility, foreach over objects, method_exists — DONE b6da4a79 0b0d526b da00a2fa (spec-only; visibility modelled; php-src corpus interp 766→787, compiled 895→912)
+T-397 php: foreach by value walks the live array — DONE 108cb5ad
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
