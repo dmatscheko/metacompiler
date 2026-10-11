@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-320** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-325** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -201,9 +201,9 @@ Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
 
-### T-283 kotlin: `toInt` and Unicode digits; hex-float precision · P3 · KT · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
-`"١٢".toInt()` is 12 in the jar, NFE here. A hex-float mantissa in toDouble is exact
-only to 53 bits in the interpreter and layer 2 (the Go twin uses strconv).
+### T-322 kotlin: decimal `toFloat` rounds through double · P1 · KT · OPEN [V]
+`"1.00000005960464477539062500000001".toFloat()` and `"1.0000000596046448".toFloat()`
+give 1.0 in all engines; Float.parseFloat (the jar) 1.0000001. Round once to binary32.
 
 ---
 
@@ -222,13 +222,12 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-267 go: `panic(any(nil))`, `any`, `fmt.Errorf` · P1 · GO · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
-"unknown name: any", "unknown method 'Errorf'" in both halves. go prints `panic: nil`
-(go 1.21+ `panic called with nil argument`; check go run) and supports Errorf (with
-`%w`, errors.Is/As/Unwrap if cheap).
-
-### T-268 go: `gofmt -l abnf/` lists abnf/jsrtgolang.go · P3 · GO · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
-One line in goConvFail; gofmt it.
+### T-321 go: pointer identity, `f(ys...)` on Println, re-panic suffix, errors.As · P1 · GO · OPEN [V]
+`&T{1} == &T{1}` is true in both engines (go false; struct pointers compare by field),
+so `errors.Is(err, find(0))` is wrong; `fmt.Println(ys...)` dies "TypeError: Not a
+function" in the interpreter (check the compiler); an uncaught re-panic lacks go
+1.23+'s " [recovered, repanicked]" suffix; errors.As is not modelled (needs a nil
+pointer's static type). Related value-model limit: T-266.
 
 ---
 
@@ -250,10 +249,12 @@ limit); a Unicode.Scalar in a collection prints `"é"` (swiftc `"\u{00E9}"`).
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-282 dart: the String member surface is tiny · P1 · DA · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V spec-only]
-`"ab".toUpperCase()` (and `codeUnitAt`) aborts in all three engines ("unknown String method:
-toUpperCase"); only substring, indexOf, charAt, isEmpty are curated. Implement the
-dart:core String API (spec-only).
+### T-323 dart: String remainder; layer 2 indexes strings by code point · P1 · DA · OPEN [V spec-only]
+dart layer 2 indexes by code point (dtStrAt / dtStrRange) while the twin and the
+interpreter use UTF-16 units: `"a\u{1F600}b".substring(3)` is "b" interpreted and
+under llvm.Run, "" natively - a halves divergence. Left from T-282: `runes` (an
+Iterable), allMatches/matchAsPrefix/splitMapJoin/replaceAllMapped (need RegExp/Match),
+static String.fromCharCode(s) (the interpreter has no `String` name).
 
 ---
 
@@ -282,27 +283,17 @@ see T-293.)
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-278 bash: an assignment whose value starts with `=` · P1 · SH · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
-`x==y; echo "[$x]"` prints `[=y]` in bash; both engines "command not found: x==y"
-(exit 127): `AsgEq = "=" NotEq` in both grammars. Also `IFS==`.
-
-### T-279 bash: unquoted `$*` / `${a[*]}` under a null IFS · P1 · SH · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
-`IFS=; set -- "a b" c "" d; printf '<%s>' $*` - bash `<a b><c><d>`, ours `<a bcd>`
-(all engines); `${a[*]@A}` likewise (bash 3 fields, ours 1). The [*] producer must
-know it is unquoted. Minor: quoted `"${a[@]@A}"` with a letter in IFS.
-
-### T-280 bash: `tests/probe.sh bash` - llvm.Run leg has an extra trailing blank line · P3 · SH · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
-`mec bash-to-llvm-ir.abnf -qq` prints nothing, `-q` prints a leading newline; the
-probe's run leg shows one extra blank line. Cosmetic, but it makes every bash probe
-read as a disagreement.
+### T-320 bash: positional-parameter operator forms · P1 · SH · OPEN [V]
+Interpreter: `set -- "a b" c "" d; printf '<%s>' "${@:2}"` gives `< bcd>` (bash
+`<c><><d>`); same for "${*:2}", ${*@Q}/${@@Q} (empty), ${*:-x}/${@:-x} (answer x),
+${*/c/C}, ${*#c}. "${!Z@}" one field (bash <Zq><Zw>); the compiler does not parse
+`${!Z@}`; ${!h*} for an associative array h is empty (bash h). The default word of
+${x:-$*} / ${x:-$@} is flattened with spaces under a null IFS (bash keeps fields).
+(bash 5.3 leaks \x01 into `${a[*]%d}` under a null IFS - a bash bug, not mirrored.)
 
 ---
 
 # C — C subset
-
-### T-281 c: `long` → `float` rounds twice · P3 · C · IN PROGRESS (GO+DA+SH+C+KT worker, round 5) [V]
-Via double in both engines, so a 64-bit value near a binary32 tie can differ from cc.
-Probe and round once.
 
 ---
 
@@ -361,6 +352,12 @@ sin/cos/atan/atan2; our Go-port legs are 1-9 ulps off on many rows (python T-265
 ruby T-229 declined for this reason). Design: CORE-MATH-style double-double with a
 Ziv rounding test, one MetaJS module (interpreter + layer 2) + Go port + runtime.c
 d_*. Cost it; implement or DECLINE.
+
+### T-324 layer 2 `Array.sort` with a comparator fails · P1 · CORE · OPEN [V]
+In a lib/*-rt.metajs, `xs.sort(function(a, b) {...})` dies natively "call of a non
+function value: undefined". Fix the frozen/layer-2 builtin, assert it in the metajs
+ratchet. Also: `gofmt -l abnf/` lists jsrtswift.go (a doubled blank line) and the
+generated jsagrammar.go - make the generator gofmt-clean or exclude it knowingly.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -565,6 +562,14 @@ T-295 js: `yield*` answers the outer `return()` value — DONE 73c2117 (a delega
 T-296 js: Object.prototype methods on objects — DONE 950df0f
 T-297 js: `class A extends Object {}` aborts the interpreter — DONE 73edcce
 T-298 ts: a stray "END SECTIONS" marker at tests/typescript-test-full.ts ~1065 — DONE 3c9563d
+T-267 go: `panic(any(nil))`, `any`, `fmt.Errorf` — DONE 5e648df (errors.As not modelled: T-321)
+T-268 go: `gofmt -l abnf/` lists abnf/jsrtgolang.go — DONE bb3637c
+T-278 bash: an assignment whose value starts with `=` — DONE 9438d8b
+T-279 bash: unquoted `$*` / `${a[*]}` under a null IFS — DONE 0588fd9
+T-280 bash: `tests/probe.sh bash` - llvm.Run leg has an extra trailing blank line — DONE 15bfa80
+T-281 c: `long` → `float` rounds twice — DONE 7c300b5
+T-283 kotlin: `toInt` and Unicode digits; hex-float precision — DONE fcc558b
+T-282 dart: the String member surface is tiny — PARTIAL 06500be (spec-only; the common String members); rest is T-323
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
