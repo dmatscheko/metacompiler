@@ -7661,35 +7661,29 @@ KwContract  = "contract" KwEnd ;
         var lob = lo.NewBlock("entry")
         lob.NewRet(lo.Params[1])
         var loV = callExt(b, "js_closure", [handle(loIdx), curScopeV])
-        // The ARRAY constructors collapse onto listOf: this value model cannot tell an
-        // Array from a List (both are a plain host array), which is a deliberate and
-        // documented simplification. emptyList() with no arguments yields the empty
-        // list, since jsf just returns its arg array. The SET constructors do NOT
-        // collapse - a Set is its own shape (ktMakeSet in abnf/jsrtkotlin.go), so
-        // they are js_ktglobal builders like mapOf.
+        // The LIST constructors return their argument array. emptyList() with no
+        // arguments yields the empty list, since jsf just returns its arg array. The
+        // ARRAY and SEQUENCE builders are the same list carrying the kind number
+        // kotlin-stdlib's messages need (ktArrWords in abnf/jsrtkotlin.go), so they
+        // are js_ktglobal builders; the SET constructors are too, a Set being its own
+        // shape (ktMakeSet). The value model cannot tell one element WIDTH from
+        // another (a Byte and an Int are the same host number), so `byteArrayOf(200)`
+        // - a Kotlin COMPILE error, whose legal spelling is
+        // `byteArrayOf((-56).toByte())` - is accepted here, exactly as in the
+        // interpreter half. A Sequence is EAGER in this subset (see
+        // kotlin-interpreter.abnf), so every operator on it is the list operator.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "mutableListOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayListOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayOf"), loV])
-        // The typed array constructors are the same "return the argument array"
-        // function: intArrayOf(1, 2) is a list of those elements in this value model.
-        // The value model cannot tell one element WIDTH from another either (a Byte and
-        // an Int are the same host number), so `byteArrayOf(200)` - a Kotlin COMPILE
-        // error, whose legal spelling is `byteArrayOf((-56).toByte())` - is accepted
-        // here, exactly as in the interpreter half. The unsigned builders are Kotlin's
-        // @ExperimentalUnsignedTypes ones; the whole family is declared so a program
-        // using any of them resolves the name in both halves.
-        var arrayBuilders = ["intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
+        var arrayBuilders = ["arrayOf", "intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
                              "booleanArrayOf", "charArrayOf", "byteArrayOf", "shortArrayOf",
                              "ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf",
-                             "emptyArray", "emptyList"]
+                             "emptyArray", "sequenceOf", "emptySequence"]
         for (var ab = 0; ab < arrayBuilders.length; ab++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, arrayBuilders[ab]), loV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, arrayBuilders[ab]),
+                                         callExt(b, "js_ktglobal", [emitStr(b, arrayBuilders[ab]), hFalse])])
         }
-        // A Sequence is EAGER in this subset (see kotlin-interpreter.abnf), so
-        // sequenceOf IS listOf and every operator on it is the list operator.
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sequenceOf"), loV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptySequence"), loV])
         // The remaining global BUILDERS. Each is a runtime VALUE from js_ktglobal
         // (abnf/jsrtkotlin.go), the compiler-half twin of hostGlobals[...] in
         // kotlin-interpreter.abnf. What they build - the {__dict, keys, vals} map

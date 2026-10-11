@@ -472,6 +472,7 @@ func programJSBindings() map[string]interface{} {
 		return floPrecStr(rt.toNumber(argAt(args, 0)), int(jsToInt(rt.toNumber(argAt(args, 1)))))
 	})
 	fnMetaBindings(b)
+	arrKindBindings(b)
 	// fail(msg): a RUNTIME ERROR, not an exception - the twin of host id 36 in
 	// languages/lib/runtime.c (rt.fail panics with exactly that text). Every
 	// layer-2 file calls it, so it must be bound under llvm.Run too.
@@ -599,6 +600,28 @@ func fnMetaBindings(b map[string]interface{}) {
 	b["fnMetaSet"] = jsHostFunc("fnMetaSet", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		v := argAt(args, 0)
 		jsvFnMetaSet(v, rt.toString(argAt(args, 1)), int(rt.toNumber(argAt(args, 2))))
+		return v
+	})
+}
+
+// arrKindBindings adds arrKind(a) and arrKindSet(a, k), host ids 99/100 of
+// languages/lib/runtime.c: the small kind number kept on an array (jsArray.kind).
+// arrKind answers 0 for an untagged array and for a non-array; arrKindSet ignores
+// a non-array and answers its first argument. The frozen grammar host binds them
+// too (frozenBaseBindings), and commonscript.go binds the goja twin, because an
+// interpreter half keeps the same kinds as its compiler half.
+func arrKindBindings(b map[string]interface{}) {
+	b["arrKind"] = jsHostFunc("arrKind", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if a, ok := argAt(args, 0).(*jsArray); ok {
+			return float64(a.kind)
+		}
+		return float64(0)
+	})
+	b["arrKindSet"] = jsHostFunc("arrKindSet", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		if a, ok := v.(*jsArray); ok {
+			a.kind = int(rt.toNumber(argAt(args, 1)))
+		}
 		return v
 	})
 }

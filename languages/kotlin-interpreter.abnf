@@ -3637,13 +3637,16 @@ NotMemberKw = :script(~~
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
         return out
     }
-    // The ARRAY constructors collapse onto listOf: this value model cannot tell an
-    // Array from a List (both are a plain host array), which is a deliberate and
-    // documented simplification. The SET constructors do NOT - a Set is its own shape
-    // (see kMakeSet), so setOf(1, 1, 2) deduplicates and setOf(2, 1) == setOf(1, 2).
+    // The ARRAY and SEQUENCE builders are listOf's list carrying its kind number
+    // (kArrWords). The SET constructors are a shape of their own (see kMakeSet), so
+    // setOf(1, 1, 2) deduplicates and setOf(2, 1) == setOf(1, 2).
     hostGlobals["mutableListOf"] = hostGlobals["listOf"]
     hostGlobals["arrayListOf"] = hostGlobals["listOf"]
-    hostGlobals["arrayOf"] = hostGlobals["listOf"]
+    hostGlobals["arrayOf"] = function() {
+        var out = []
+        for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
+        return arrKindSet(out, 1)
+    }
     hostGlobals["setOf"] = function() {
         var s = kMakeSet()
         for (var i = 0; i < arguments.length; i++) { kSetAdd(s, arguments[i]) }
@@ -3661,28 +3664,27 @@ NotMemberKw = :script(~~
         for (var j = 0; j < sorted.length; j++) { kSetAdd(s, sorted[j]) }
         return s
     }
-    // The PRIMITIVE-array builders. All of them collapse onto listOf: this value model
-    // cannot tell an Array from a List (both are a plain host array), and it cannot tell
-    // one element WIDTH from another either - a Byte and an Int are the same host number.
+    // The PRIMITIVE-array builders are arrayOf. This value model cannot tell one
+    // element WIDTH from another - a Byte and an Int are the same host number.
     // So `byteArrayOf(200)`, which Kotlin refuses at compile time (200 is not a Byte
     // literal; the legal spelling is `byteArrayOf((-56).toByte())`), is accepted here.
     // That is the same width-blindness the rest of the numeric surface already has, and
     // it is a TYPE question, not a syntax one. The full family is declared so that a
     // program which uses any of them resolves the name; the unsigned ones (ubyteArrayOf
     // and friends) are Kotlin's @ExperimentalUnsignedTypes builders.
-    hostGlobals["intArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["charArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["booleanArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["doubleArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["floatArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["longArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["byteArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["shortArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["ubyteArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["ushortArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["uintArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["ulongArrayOf"] = hostGlobals["listOf"]
-    hostGlobals["emptyArray"] = hostGlobals["listOf"]
+    hostGlobals["intArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["charArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["booleanArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["doubleArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["floatArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["longArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["byteArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["shortArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["ubyteArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["ushortArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["uintArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["ulongArrayOf"] = hostGlobals["arrayOf"]
+    hostGlobals["emptyArray"] = hostGlobals["arrayOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
     hostGlobals["emptySet"] = function() { return kMakeSet() }
     // ----- Maps, Pair/Triple, `with` and StringBuilder -----
@@ -3729,8 +3731,12 @@ NotMemberKw = :script(~~
     hostGlobals["repeat"] = function(n, f) {
         for (var i = 0; i < kNum(n); i++) { f(i) }
     }
-    hostGlobals["sequenceOf"] = hostGlobals["listOf"]
-    hostGlobals["emptySequence"] = hostGlobals["listOf"]
+    hostGlobals["sequenceOf"] = function() {
+        var out = []
+        for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
+        return arrKindSet(out, 2)
+    }
+    hostGlobals["emptySequence"] = hostGlobals["sequenceOf"]
     // A Sequence is EAGER here: `asSequence()` copies the list and every operator on
     // it is the list operator. Kotlin's laziness is observable only through side
     // effects in the intermediate lambdas and through an infinite generateSequence,
@@ -3757,7 +3763,7 @@ NotMemberKw = :script(~~
             eprintln("warning: generateSequence is EAGER here and stopped at " + kSeqCap +
                      " elements; a Sequence is not lazy in this subset")
         }
-        return out
+        return arrKindSet(out, 2)
     }
     // StringBuilder: append/toString/length/clear, on a {__sb} box whose methods are
     // answered by mcall.
@@ -3885,16 +3891,16 @@ NotMemberKw = :script(~~
         return out
     }
     hostGlobals["MutableList"] = hostGlobals["List"]
-    hostGlobals["Array"] = hostGlobals["List"]
+    hostGlobals["Array"] = function(n, init) { return arrKindSet(hostGlobals["List"](n, init), 1) }
     hostGlobals["arrayOfNulls"] = function(n) {
         var out = []
         for (var i = 0; i < kNum(n); i++) { out.push(null) }
-        return out
+        return arrKindSet(out, 1)
     }
     hostGlobals["IntArray"] = function(n, init) {
         var out = []
         for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : 0) }
-        return out
+        return arrKindSet(out, 1)
     }
     hostGlobals["LongArray"] = hostGlobals["IntArray"]
     hostGlobals["ShortArray"] = hostGlobals["IntArray"]
@@ -3905,7 +3911,7 @@ NotMemberKw = :script(~~
     hostGlobals["CharArray"] = function(n, init) {
         var out = []
         for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : kChar(0)) }
-        return out
+        return arrKindSet(out, 1)
     }
     hostGlobals["UByteArray"] = hostGlobals["IntArray"]
     hostGlobals["UShortArray"] = hostGlobals["IntArray"]
@@ -3914,7 +3920,7 @@ NotMemberKw = :script(~~
     hostGlobals["BooleanArray"] = function(n, init) {
         var out = []
         for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : false) }
-        return out
+        return arrKindSet(out, 1)
     }
     hostGlobals["listOfNotNull"] = function() {
         var out = []
@@ -4767,7 +4773,8 @@ NotMemberKw = :script(~~
             }
             return {v: kChar(sv.charCodeAt(name == "last" ? n - 1 : 0))}
         }
-        if (name == "toCharArray" || name == "toList") { return {v: kChars(sv)} }
+        if (name == "toCharArray") { return {v: arrKindSet(kChars(sv), 1)} }
+        if (name == "toList") { return {v: kChars(sv)} }
         if (name == "trim") { return {v: kTrimSide(sv, true, true)} }
         if (name == "trimStart") { return {v: kTrimSide(sv, true, false)} }
         if (name == "trimEnd") { return {v: kTrimSide(sv, false, true)} }
@@ -5494,13 +5501,16 @@ NotMemberKw = :script(~~
         }
         return out
     }
-    // A LIST receiver, which is also every receiver whose kind this value model cannot
-    // recover: an Array, a Sequence and a Map's `values` view are the same host array.
-    // Every caller that DOES still know its receiver's kind - a Set, a Map, a range, a
-    // String - calls kSeqMethodK with the word kotlin-stdlib's overload for that kind
-    // uses. See kNoElemKind.
+    // A host array, whose own kind number says whether it is a List, an Array, a
+    // Sequence or a values view. Every caller whose receiver was materialized into a
+    // fresh array - a Set, a Map, a range, a String - calls kSeqMethodK with the word
+    // kotlin-stdlib's overload for that kind uses. See kNoElemKind.
     function kSeqMethod(es, name, rawArgs) { return kSeqMethodK(es, name, rawArgs, "List") }
     function kSeqMethodK(es, name, rawArgs, kind) {
+        if (kind == "List") {
+            var ak = arrKind(es)
+            if (ak != 0) { kind = kArrWords[ak] }
+        }
         // A callable reference passed where a lambda is expected - list.map(Box::v),
         // forEach(::println) - is the closure it stands for at every BUILTIN member.
         var args = kNormArgs(rawArgs)
@@ -6227,7 +6237,7 @@ NotMemberKw = :script(~~
         if (name == "isNotEmpty") { return {v: m.keys.length > 0} }
         // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a Collection.
         if (name == "keys") { return {v: kSetFrom(m.keys)} }
-        if (name == "values") { return {v: kSeqMethod(m.vals, "toList", []).v} }
+        if (name == "values") { return {v: arrKindSet(kSeqMethod(m.vals, "toList", []).v, 3)} }
         // Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
         // `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
         if (name == "entries") { return {v: kSetOfDistinct(kElems(m))} }
@@ -6600,7 +6610,7 @@ NotMemberKw = :script(~~
                 if (typeof st.v == "function") { kSetNamed(sp.named); return st.v.apply(undefined, args) }
             }
             if (target.__isenum === true) {
-                if (name == "values") return target.__entries.slice(0)
+                if (name == "values") return arrKindSet(target.__entries.slice(0), 1)
                 if (name == "valueOf") {
                     var ev = clsStatic(target, args[0])
                     if (ev != null) return ev.v
@@ -6767,12 +6777,12 @@ NotMemberKw = :script(~~
             if (name == "map") {
                 out = []
                 for (i = 0; i < tgt.length; i++) out.push(args[0](tgt[i]))
-                return out
+                return kKindOut(tgt, name, out)
             }
             if (name == "filter") {
                 out = []
                 for (i = 0; i < tgt.length; i++) { if (args[0](tgt[i])) out.push(tgt[i]) }
-                return out
+                return kKindOut(tgt, name, out)
             }
             if (name == "forEach") {
                 for (i = 0; i < tgt.length; i++) args[0](tgt[i])
@@ -6789,7 +6799,7 @@ NotMemberKw = :script(~~
                 return false
             }
             var kqm = kSeqMethodK(tgt, name, args, tgtKind)
-            if (kqm != null) { return kqm.v }
+            if (kqm != null) { return kKindOut(tgt, name, kqm.v) }
             return mfallback(tgt, name, args, "list")
         }
         if (target.__class != undefined) {
@@ -9883,7 +9893,7 @@ NotMemberKw = :script(~~
         if (kIsMap(o)) {
             if (name == "size") { return o.keys.length }
             if (name == "keys") { return kSetFrom(o.keys) }
-            if (name == "values") { return kSeqMethod(o.vals, "toList", []).v }
+            if (name == "values") { return arrKindSet(kSeqMethod(o.vals, "toList", []).v, 3) }
             if (name == "entries") { return kSetOfDistinct(kElems(o)) }
             return extPropGet(o, name)
         }
@@ -10122,14 +10132,45 @@ NotMemberKw = :script(~~
     // keys/entries and a range are all Iterable and none of them is a List, so they
     // take the Collection wording. kSeqMethodK carries the word from the receiver that
     // still knows it, because kElems/kChars/rangeList have already materialized the
-    // elements by the time the message is chosen. Two kinds are NOT reachable and both
-    // are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
-    // empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an
-    // Array, a Sequence and a Map's `values` view are all the SAME host array as a
-    // List in this value model, and telling them apart needs a nominal type on the
-    // value. A range's first()/last() are kotlin.ranges' own overloads and say
-    // "Progression 1..0 is empty." instead (_Ranges.kt).
+    // elements by the time the message is chosen. An Array (_Arrays.kt), a Sequence
+    // (_Sequences.kt) and a Map's `values` view are the SAME host array as a List, so
+    // those three are told apart by the kind number on the array (kArrWords). A
+    // range's first()/last() are kotlin.ranges' own overloads and say "Progression
+    // 1..0 is empty." instead (_Ranges.kt).
     function kNoElemKind(kind) { kNoElem(kind + " is empty.") }
+    // The kind numbers kept on a host array (arrKind / arrKindSet): 0 a List, 1 an
+    // Array, 2 a Sequence, 3 a Map's values view. Twin of ktArrWords in
+    // abnf/jsrtkotlin.go.
+    var kArrWords = ["List", "Array", "Sequence", "Collection"]
+    // The kind of the array a member call answers: an Array's to*Array / copyOf
+    // family and Array.plus answer an Array, asSequence a Sequence, and a Sequence's
+    // intermediate operations another Sequence (_Sequences.kt); every other member a
+    // List. Twin of ktResultKind in abnf/jsrtkotlin.go.
+    var kSeqKeeps = ["map", "mapNotNull", "mapIndexed", "mapIndexedNotNull", "filter",
+        "filterNot", "filterIndexed", "filterNotNull", "filterIsInstance", "take", "drop",
+        "takeWhile", "dropWhile", "distinct", "distinctBy", "sorted", "sortedBy",
+        "sortedDescending", "sortedByDescending", "sortedWith", "flatMap", "flatten", "plus",
+        "minus", "zip", "zipWithNext", "chunked", "windowed", "withIndex", "onEach",
+        "runningFold", "runningReduce", "scan", "shuffled"]
+    var kArrResults = ["toTypedArray", "toIntArray", "toLongArray", "toShortArray",
+        "toByteArray", "toDoubleArray", "toFloatArray", "toBooleanArray", "toCharArray",
+        "copyOf", "copyOfRange", "sortedArray", "sortedArrayDescending", "reversedArray",
+        "sliceArray"]
+    function kResultKind(recv, name) {
+        if (name == "asSequence") { return 2 }
+        if (kArrResults.indexOf(name) >= 0) { return 1 }
+        if (recv == 1 && name == "plus") { return 1 }
+        if (recv == 2 && kSeqKeeps.indexOf(name) >= 0) { return 2 }
+        return 0
+    }
+    // Tags a member call's fresh array answer with the kind kResultKind gives it.
+    function kKindOut(recv, name, out) {
+        if (Array.isArray(out) && out !== recv) {
+            var rk = kResultKind(arrKind(recv), name)
+            if (rk != 0) { arrKindSet(out, rk) }
+        }
+        return out
+    }
     // first(predicate) and single(predicate) exist ONLY on Iterable and on
     // CharSequence, so a List receiver resolves to the Iterable overload and says
     // "Collection contains no element matching the predicate." - the predicate word is
@@ -10139,16 +10180,20 @@ NotMemberKw = :script(~~
         if (word == "Char sequence") { kNoElem(word + " contains no character matching the predicate.") }
         kNoElem(word + " contains no element matching the predicate.")
     }
+    // An Array and a Sequence declare their own predicate overloads, so they keep
+    // their word too.
     function kPredWord(kind) {
-        if (kind == "Char sequence") { return "Char sequence" }
+        if (kind == "Char sequence" || kind == "Array" || kind == "Sequence") { return kind }
         return "Collection"
     }
     // reduce()/reduceIndexed() are Iterable-only ("Empty collection can't be
     // reduced."); reduceRight()/reduceRightIndexed() are the List ones ("Empty list
-    // can't be reduced."). Both spell CharSequence's as "Empty char sequence can't be
-    // reduced." (_Strings.kt).
+    // can't be reduced."). CharSequence, Array and Sequence spell their own word in
+    // both directions ("Empty char sequence can't be reduced.", "Empty array ...").
     function kRedWord(kind, fromRight) {
         if (kind == "Char sequence") { return "char sequence" }
+        if (kind == "Array") { return "array" }
+        if (kind == "Sequence") { return "sequence" }
         if (fromRight) { return "list" }
         return "collection"
     }
@@ -10169,7 +10214,7 @@ NotMemberKw = :script(~~
         // behind the interface - Arrays$ArrayList (which is what `listOf` and
         // `arrayOf` produce) raises ArrayIndexOutOfBoundsException where a plain
         // ArrayList raises IndexOutOfBoundsException - and this value model has ONE
-        // array type for all of them (hostGlobals["arrayOf"] IS hostGlobals["listOf"]),
+        // array type for every List (listOf, mutableListOf and arrayListOf are one builder),
         // so the common SUPERTYPE is the only answer that is right for every
         // receiver. `catch (e: IndexOutOfBoundsException)` catches the JVM's too.
         // Kotlin's StringBuilder is a CharSequence, so sb[i] indexes like a String and

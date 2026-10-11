@@ -161,6 +161,13 @@ type jsArray struct {
 	// pinned marks an argument array a callee can keep past the call, so the
 	// call site must not reclaim it (see machine.recycle and jsrt.pinArray).
 	pinned bool
+
+	// kind is a small number a language keeps on the array to tell its own
+	// nominal collection kinds apart (kotlin: an Array, a Sequence, a Map's
+	// values view); 0 for an array nobody tagged. A copy starts at 0. Read and
+	// written by arrKind / arrKindSet (arrKindBindings in jsrtint.go); the floor's
+	// twin is field d of the array cell in languages/lib/runtime.c.
+	kind int
 }
 
 // jsClosure is a compiled MetaJS function: an IR function plus the captured

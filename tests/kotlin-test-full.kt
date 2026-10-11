@@ -4260,11 +4260,7 @@ fun sec84() {
         s84text { setOf(1, 2, 3).single { it > 9 } } ==
         nse + ": Collection contains no element matching the predicate.")
     // A Map's keys and entries are SETS (java.util.Map's keySet/entrySet), so they
-    // take the Collection wording too. `values` is a Collection VIEW and would as
-    // well, but it is a bare host array in this value model - the same array a List
-    // is - so it answers "List is empty." and is deliberately NOT asserted here:
-    // recovering it needs a nominal type on the value, and an Array ("Array is empty.")
-    // and a Sequence ("Sequence is empty.") are unreachable for exactly the same reason.
+    // take the Collection wording too; `values`, an Array and a Sequence are SECTION 87.
     check("ax84I", s84text { emap.keys.first() } == nse + ": Collection is empty." &&
         s84text { emap.entries.first() } == nse + ": Collection is empty." &&
         s84text { emap.keys.last() } == nse + ": Collection is empty.")
@@ -4420,6 +4416,56 @@ fun sec86() {
         s86units(StringBuilder(ins[1]).reverse().toString()) == "55357 56833 55357 56832")
 }
 
+// ===== SECTION 87: the Array, Sequence and Map.values families of the messages =====
+// An Array (_Arrays.kt) and a Sequence (_Sequences.kt) have their own overloads of
+// first/last/single/reduce, and each names its own kind in every message, the
+// predicate and reduceRight forms included. A Map's `values` is a Collection, so it
+// takes the Iterable wording. An Array's map() answers a List, a Sequence's map()
+// another Sequence. Rows read from the kotlin-stdlib 2.2.21 jar, called from java.
+fun s87text(f: () -> Any?): String {
+    return try { "" + f() } catch (e: Throwable) { e.toString() }
+}
+
+fun sec87() {
+    val nse = "java.util.NoSuchElementException: "
+    val iae = "java.lang.IllegalArgumentException: "
+    val uoe = "java.lang.UnsupportedOperationException: "
+    val ea = arrayOf<Int>()
+    val two = arrayOf(1, 2)
+    val es = emptySequence<Int>()
+    val ts = sequenceOf(1, 2)
+    check("ax87a", s87text { ea.first() } == nse + "Array is empty." &&
+        s87text { ea.last() } == nse + "Array is empty." && s87text { ea.random() } == nse + "Array is empty.")
+    check("ax87b", s87text { two.single() } == iae + "Array has more than one element." &&
+        s87text { two.single { true } } == iae + "Array contains more than one matching element.")
+    check("ax87c", s87text { two.first { false } } == nse + "Array contains no element matching the predicate." &&
+        s87text { two.last { false } } == nse + "Array contains no element matching the predicate.")
+    check("ax87d", s87text { ea.reduce { a, b -> b } } == uoe + "Empty array can't be reduced." &&
+        s87text { ea.reduceRight { a, b -> b } } == uoe + "Empty array can't be reduced.")
+    check("ax87e", s87text { intArrayOf().first() } == nse + "Array is empty." &&
+        s87text { IntArray(0).first() } == nse + "Array is empty." &&
+        s87text { Array(0) { it }.first() } == nse + "Array is empty.")
+    check("ax87f", s87text { es.first() } == nse + "Sequence is empty." &&
+        s87text { ts.single() } == iae + "Sequence has more than one element." &&
+        s87text { ts.first { false } } == nse + "Sequence contains no element matching the predicate.")
+    check("ax87g", s87text { es.reduce { a, b -> b } } == uoe + "Empty sequence can't be reduced.")
+    val ev = mapOf<Int, Int>().values
+    val tv = mapOf(1 to 2, 3 to 4).values
+    check("ax87h", s87text { ev.first() } == nse + "Collection is empty." &&
+        s87text { tv.single() } == iae + "Collection has more than one element." &&
+        s87text { tv.last { false } } == nse + "Collection contains no element matching the predicate.")
+    // The kind an operation answers: a Sequence pipeline stays a Sequence, asSequence
+    // makes one, an Array's map/toList and a Sequence's toList are Lists.
+    check("ax87i", s87text { ts.map { it * 2 }.filter { it > 9 }.first() } == nse + "Sequence is empty." &&
+        s87text { listOf<Int>().asSequence().first() } == nse + "Sequence is empty.")
+    check("ax87j", s87text { ea.map { it }.first() } == nse + "List is empty." &&
+        s87text { ea.toList().first() } == nse + "List is empty." &&
+        s87text { es.toList().first() } == nse + "List is empty.")
+    check("ax87k", s87text { listOf<Int>().toTypedArray().first() } == nse + "Array is empty." &&
+        s87text { "".toCharArray().first() } == nse + "Array is empty.")
+    check("ax87l", two.first() + ts.last() + tv.first() == 5)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4508,6 +4554,7 @@ fun main() {
     sec84() // SECTION-CALL 84
     sec85() // SECTION-CALL 85
     sec86() // SECTION-CALL 86
+    sec87() // SECTION-CALL 87
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

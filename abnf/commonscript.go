@@ -234,6 +234,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("floPrec", func(v float64, n int) string { return floPrecStr(v, n) })
 
 	installGojaFnMeta(vm)
+	installGojaArrKind(vm)
 
 	// The WTF-8 byte length of a string. JS .length counts UTF-16 code units,
 	// but the emitters need the byte count of the char arrays they emit
@@ -503,6 +504,37 @@ func installGojaFnMeta(vm *goja.Runtime) {
 			}
 		}
 		return f
+	})
+}
+
+// installGojaArrKind binds arrKind(a) and arrKindSet(a, k), the goja twin of
+// arrKindBindings (jsrtint.go). The number is kept ON the array under a private
+// symbol, so a copy (slice, concat, a literal) starts untagged, as jsArray's does.
+func installGojaArrKind(vm *goja.Runtime) {
+	sym := goja.NewSymbol("arrKind")
+	arrObj := func(v goja.Value) *goja.Object {
+		o, ok := v.(*goja.Object)
+		if !ok || o.ClassName() != "Array" {
+			return nil
+		}
+		return o
+	}
+	vm.Set("arrKind", func(call goja.FunctionCall) goja.Value {
+		if o := arrObj(call.Argument(0)); o != nil {
+			if v := o.GetSymbol(sym); v != nil {
+				return v
+			}
+		}
+		return vm.ToValue(0)
+	})
+	vm.Set("arrKindSet", func(call goja.FunctionCall) goja.Value {
+		a := call.Argument(0)
+		if o := arrObj(a); o != nil {
+			if err := o.DefineDataPropertySymbol(sym, vm.ToValue(call.Argument(1).ToInteger()), goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE); err != nil {
+				panic(err)
+			}
+		}
+		return a
 	})
 }
 

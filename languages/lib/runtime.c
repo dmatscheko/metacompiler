@@ -6192,6 +6192,19 @@ long host_call(long id, long self, long args) {
 		}
 		return H_UNDEF;
 	}
+	/* arrKind(a) / arrKindSet(a, k): the small kind number a language keeps on
+	 * an array cell, in field d (the collector never reads it; mk_arr zeroes
+	 * it, so a copy starts at 0). Twin of jsArray.kind in abnf/jsrt.go. */
+	if (id == 99) {
+		long a = arg_at(args, 0);
+		if (tag_of(a) != 5) { return mk_num(d_from_long(0)); }
+		return mk_num(d_from_long(fd(a)));
+	}
+	if (id == 100) {
+		long a = arg_at(args, 0);
+		if (tag_of(a) == 5) { sd(a, d_to_long(arg_num(args, 1))); }
+		return a;
+	}
 	die("unknown host function");
 	return H_UNDEF;
 }
@@ -6972,6 +6985,8 @@ void boot(void) {
 	seed_root("floPrec", mk_host(70));
 	seed_root("fnMeta", mk_host(94));
 	seed_root("fnMetaSet", mk_host(95));
+	seed_root("arrKind", mk_host(99));
+	seed_root("arrKindSet", mk_host(100));
 	seed_root("Infinity", mk_num(DINF));
 	seed_root("NaN", mk_num(DNAN));
 	seed_root("anytype", cell_new(12));

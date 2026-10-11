@@ -751,14 +751,49 @@ function ktNoElemNull() { ktRaise("NoSuchElementException", null) }
 // keys/entries and a range are all Iterable and none of them is a List, so they take
 // the Collection wording. ktSeqMethodK carries the word from the receiver that still
 // knows it, because ktElems/ktChars/ktRangeList have already materialized the
-// elements by the time the message is chosen. Two kinds are NOT reachable and both
-// are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
-// empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an Array,
-// a Sequence and a Map's `values` view are all the SAME host array as a List in this
-// value model, and telling them apart needs a nominal type on the value.
-// A range's first()/last() are kotlin.ranges' own overloads and say "Progression
-// 1..0 is empty." instead (_Ranges.kt).
+// elements by the time the message is chosen. An Array (_Arrays.kt), a Sequence
+// (_Sequences.kt) and a Map's `values` view are the SAME host array as a List, so
+// those three are told apart by the kind number on the array (ktArrWord). A range's
+// first()/last() are kotlin.ranges' own overloads and say "Progression 1..0 is
+// empty." instead (_Ranges.kt).
 function ktNoElemKind(kind) { ktNoElem(kind + " is empty.") }
+// The kind numbers kept on a host array (arrKind / arrKindSet, host ids 99/100):
+// 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view. Twin of ktArrWords in
+// abnf/jsrtkotlin.go.
+function ktArrWord(k) {
+    if (k == 1) { return "Array" }
+    if (k == 2) { return "Sequence" }
+    if (k == 3) { return "Collection" }
+    return "List"
+}
+// The kind of the array a member call answers: an Array's to*Array / copyOf family
+// and Array.plus answer an Array, asSequence a Sequence, and a Sequence's
+// intermediate operations another Sequence (_Sequences.kt); every other member a
+// List. Twin of ktResultKind in abnf/jsrtkotlin.go.
+function ktResultKind(recv, name) {
+    if (name == "asSequence") { return 2 }
+    if (k3IsCopyName(name)) {
+        if (name == "toList" || name == "toMutableList" || name == "asIterable" || name == "asList") { return 0 }
+        return 1
+    }
+    if (name == "copyOf" || name == "copyOfRange" || name == "sortedArray" ||
+        name == "sortedArrayDescending" || name == "reversedArray" || name == "sliceArray") { return 1 }
+    if (recv == 1 && name == "plus") { return 1 }
+    if (recv == 2 && ktSeqKeeps(name)) { return 2 }
+    return 0
+}
+// The Sequence members whose answer is again a Sequence.
+function ktSeqKeeps(name) {
+    if (name == "map" || name == "mapNotNull" || name == "mapIndexed" || name == "mapIndexedNotNull") { return true }
+    if (name == "filter" || name == "filterNot" || name == "filterIndexed" || name == "filterNotNull") { return true }
+    if (name == "filterIsInstance" || name == "take" || name == "drop" || name == "takeWhile") { return true }
+    if (name == "dropWhile" || name == "distinct" || name == "distinctBy" || name == "sorted") { return true }
+    if (name == "sortedBy" || name == "sortedDescending" || name == "sortedByDescending") { return true }
+    if (name == "sortedWith" || name == "flatMap" || name == "flatten" || name == "plus") { return true }
+    if (name == "minus" || name == "zip" || name == "zipWithNext" || name == "chunked") { return true }
+    if (name == "windowed" || name == "withIndex" || name == "onEach" || name == "runningFold") { return true }
+    return name == "runningReduce" || name == "scan" || name == "shuffled"
+}
 // first(predicate) and single(predicate) exist ONLY on Iterable and on CharSequence,
 // so a List receiver resolves to the Iterable overload and says "Collection contains
 // no element matching the predicate." - the predicate word is NOT the receiver word.
@@ -768,16 +803,20 @@ function ktNoMatch(word) {
     if (word == "Char sequence") { ktNoElem(word + " contains no character matching the predicate.") }
     ktNoElem(word + " contains no element matching the predicate.")
 }
+// An Array and a Sequence declare their own predicate overloads, so they keep their
+// word too.
 function ktPredWord(kind) {
-    if (kind == "Char sequence") { return "Char sequence" }
+    if (kind == "Char sequence" || kind == "Array" || kind == "Sequence") { return kind }
     return "Collection"
 }
 // reduce()/reduceIndexed() are Iterable-only ("Empty collection can't be reduced.");
 // reduceRight()/reduceRightIndexed() are the List ones ("Empty list can't be
-// reduced."). Both spell CharSequence's as "Empty char sequence can't be reduced."
-// (_Strings.kt).
+// reduced."). CharSequence, Array and Sequence spell their own word in both
+// directions ("Empty char sequence can't be reduced.", "Empty array ...").
 function ktRedWord(kind, fromRight) {
     if (kind == "Char sequence") { return "char sequence" }
+    if (kind == "Array") { return "array" }
+    if (kind == "Sequence") { return "sequence" }
     if (fromRight) { return "list" }
     return "collection"
 }
@@ -788,8 +827,8 @@ function ktRedWord(kind, fromRight) {
 // straight back. The JVM's class depends on the List implementation behind the
 // interface - Arrays$ArrayList (what `listOf` and `arrayOf` both produce here)
 // raises ArrayIndexOutOfBoundsException, a plain ArrayList raises
-// IndexOutOfBoundsException - and this value model has ONE array type for all of
-// them, so the common SUPERTYPE is the only answer right for every receiver.
+// IndexOutOfBoundsException - and this value model has ONE array type for every
+// List, so the common SUPERTYPE is the only answer right for every receiver.
 function ktArrMiss(o, k) {
     // THE EXACT ARRAY TEST LIVES HERE, not on the fast path, and this is what makes
     // the fast path's cheap `typeof o["length"] == "number"` probe safe: a CLASS
@@ -2492,7 +2531,8 @@ function k2StrMethod2(s, name, args) {
         if (name == "last") { return ktChar(s.charCodeAt(n - 1)) }
         return ktChar(s.charCodeAt(0))
     }
-    if (name == "toCharArray" || name == "toList") { return ktChars(s) }
+    if (name == "toCharArray") { return arrKindSet(ktChars(s), 1) }
+    if (name == "toList") { return ktChars(s) }
     if (name == "trim") { return k2TrimSpace(s) }
     if (name == "trimStart") { return k2TrimLeftCut(s) }
     if (name == "trimEnd") { return k2TrimRightCut(s) }
@@ -3830,7 +3870,8 @@ function ktEnumMethod(recv, name, args) {
     if (recv["__isenum"] !== true) { return KT_MISS }
     es = recv["__entries"]
     if (!ktIsArr(es)) { return KT_MISS }
-    if (name == "values") { return k3Copy(es) }
+    // values() is an Array, entries an EnumEntries list.
+    if (name == "values") { return arrKindSet(k3Copy(es), 1) }
     if (name == "entries") { return k3Copy(es) }
     if (name == "valueOf") {
         want = k3Str2(ktArg(args, 0))
@@ -3860,14 +3901,14 @@ function ktEnumMethod(recv, name, args) {
 // repeated here.
 // ============================================================================
 
-// A LIST receiver, which is also every receiver whose kind this value model cannot
-// recover: an Array, a Sequence and a Map's `values` view are the same host array.
-// Every caller that DOES still know its receiver's kind - a Set, a Map, a range, a
-// String - calls ktSeqMethodK with the word kotlin-stdlib's overload for that kind
-// uses. See ktNoElemKind.
+// A host array, whose own kind number says whether it is a List, an Array, a
+// Sequence or a values view. Every caller whose receiver was materialized into a
+// fresh array - a Set, a Map, a range, a String - calls ktSeqMethodK with the word
+// kotlin-stdlib's overload for that kind uses. See ktNoElemKind.
 function ktSeqMethod(arr, name, args) { return ktSeqMethodK(arr, name, args, "List") }
 
 function ktSeqMethodK(arr, name, args, kind) {
+    if (kind == "List") { kind = ktArrWord(arrKind(arr)) }
     var es = arr
     var f = ktArg(args, 0)
     var out = []
@@ -4969,7 +5010,7 @@ function ktMapMethod(m, name, args) {
         // Collection, Map.entries a SET of entries - and Map.toList is a LIST of
         // PAIRS, which is why they do not share one branch.
         if (name == "keys") { return k3SetOfDistinct(keys) }
-        if (name == "values") { return k3Copy(vals) }
+        if (name == "values") { return arrKindSet(k3Copy(vals), 3) }
         if (name == "entries") { return k3SetOfDistinct(ktElems(m)) }
         out = []
         for (i = 0; i < keys.length; i = i + 1) {
@@ -6971,6 +7012,14 @@ function k4IsListName(n) {
     return n == "emptySequence"
 }
 
+// The kind number a list builder's answer carries: 2 for the Sequence builders, 1
+// for the Array ones, 0 for a List.
+function k4ListKind(n) {
+    if (n == "sequenceOf" || n == "emptySequence") { return 2 }
+    if (n == "listOf" || n == "mutableListOf" || n == "arrayListOf" || n == "emptyList") { return 0 }
+    return 1
+}
+
 function k4IsArrayCtorName(n) {
     if (n == "List") { return true }
     if (n == "MutableList") { return true }
@@ -7218,7 +7267,9 @@ function ktGlobalFn(name) {
                 as.push(arguments[i])
                 i = i + 1
             }
-            return k4ArrayOfN(aname, as)
+            var ao = k4ArrayOfN(aname, as)
+            if (aname != "List" && aname != "MutableList") { arrKindSet(ao, 1) }
+            return ao
         }
     }
     // listOfNotNull drops the nulls, so it cannot share listOf's "return the
@@ -7238,7 +7289,9 @@ function ktGlobalFn(name) {
     // returns its argument array; they are here too so a QUALIFIED spelling
     // (kotlin.collections.listOf) resolves through ktPkgMember, which has no reach
     // into the emitted scope.
+    // The Array and Sequence builders are the same list carrying its kind number.
     if (k4IsListName(name)) {
+        var lk = k4ListKind(name)
         return function () {
             var out = []
             var i = 0
@@ -7246,6 +7299,7 @@ function ktGlobalFn(name) {
                 out.push(arguments[i])
                 i = i + 1
             }
+            if (lk != 0) { arrKindSet(out, lk) }
             return out
         }
     }
@@ -7386,7 +7440,7 @@ function ktGlobalFn(name) {
                 eprintln("warning: generateSequence is EAGER here and stopped at " +
                     cap + " elements; a Sequence is not lazy in this subset")
             }
-            return out
+            return arrKindSet(out, 2)
         }
     }
     return undefined
@@ -7677,7 +7731,13 @@ function ktSmcall(recv, name, args) {
 
     if (ktIsArr(rv)) {
         var lv = ktSeqMethodK(rv, name, as, rvKind)
-        if (!ktMiss(lv)) { return lv }
+        if (!ktMiss(lv)) {
+            if (ktIsArr(lv) && lv !== rv) {
+                var lk = ktResultKind(arrKind(rv), name)
+                if (lk != 0) { arrKindSet(lv, lk) }
+            }
+            return lv
+        }
     }
 
     if (ktIsObj(rv)) {

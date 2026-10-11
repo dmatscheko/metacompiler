@@ -1501,6 +1501,11 @@ func init() {
 			}
 			if lst, isArr := recv.(*jsArray); isArr {
 				if v, handled := rt.ktSeqMethodK(lst, mname, arr.elems, recvKind); handled {
+					if out, isOut := v.(*jsArray); isOut && out != lst {
+						if k := ktResultKind(lst.kind, mname); k != 0 {
+							out.kind = k
+						}
+					}
 					return rt.wrap(v)
 				}
 			}
@@ -2730,7 +2735,9 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 			return jsChar{code: int32(rt.strCodeAt(s, n-1))}, true
 		}
 		return jsChar{code: int32(rt.strCodeAt(s, 0))}, true
-	case "toCharArray", "toList":
+	case "toCharArray":
+		return &jsArray{elems: chars(), kind: ktArrArray}, true
+	case "toList":
 		return &jsArray{elems: chars()}, true
 	case "trim":
 		return strings.TrimSpace(s), true
@@ -3741,7 +3748,10 @@ func (rt *jsrt) ktEnumMethod(recv interface{}, name string, args []interface{}) 
 		return nil, false
 	}
 	switch name {
-	case "values", "entries":
+	// values() is an Array, entries an EnumEntries list.
+	case "values":
+		return &jsArray{elems: append([]interface{}{}, es.elems...), kind: ktArrArray}, true
+	case "entries":
 		return &jsArray{elems: append([]interface{}{}, es.elems...)}, true
 	case "valueOf":
 		want := rt.toString(argAt(args, 0))
@@ -4184,11 +4194,11 @@ func (rt *jsrt) ktStrArg(v interface{}) string {
 	return rt.ktStr2(v)
 }
 
-// ktSeqMethod is ktSeqMethodK for a LIST receiver, which is also every receiver
-// whose kind this value model cannot recover: an Array, a Sequence and a Map's
-// `values` view are the same host array. Every caller that DOES still know its
-// receiver's kind - a Set, a Map, a range, a String - calls ktSeqMethodK with the
-// word kotlin-stdlib's overload for that kind uses. See ktNoElemKind.
+// ktSeqMethod is ktSeqMethodK for a host array, whose own kind number says whether
+// it is a List, an Array, a Sequence or a values view. Every caller whose receiver
+// was materialized into a fresh array - a Set, a Map, a range, a String - calls
+// ktSeqMethodK with the word kotlin-stdlib's overload for that kind uses. See
+// ktNoElemKind.
 func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interface{}, bool) {
 	return rt.ktSeqMethodK(o, name, args, ktKindList)
 }
@@ -4206,6 +4216,9 @@ func (rt *jsrt) ktSeqMethod(o *jsArray, name string, args []interface{}) (interf
 // already materialized by the time an empty-receiver message is chosen. See
 // ktNoElemKind for what the word is and where the two unreachable kinds went.
 func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind string) (interface{}, bool) {
+	if kind == ktKindList && o.kind != 0 {
+		kind = ktArrWords[o.kind]
+	}
 	es := o.elems
 	f := argAt(args, 0)
 	arr := func(v []interface{}) *jsArray { return &jsArray{elems: v} }
@@ -4656,7 +4669,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return arr(append([]interface{}{}, es[len(es)-k:]...)), true
 	// The ARRAY-to-collection conversions. An Array and a List are the same host array
-	// in this value model, so every one of them is a COPY of the elements - which is
+	// (told apart only by its kind number), so every one of them is a COPY of the elements - which is
 	// what Kotlin's toList/toMutableList/toTypedArray/to*Array do. `asList`,
 	// `asSequence` and `asIterable` are Kotlin VIEWS (a write through the array shows
 	// in them); the copy differs observably only for a program that mutates the array
@@ -5617,7 +5630,7 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			// Collection.
 			return ktSetOfDistinct(keys.elems), true
 		case "values":
-			return &jsArray{elems: append([]interface{}{}, vals.elems...)}, true
+			return &jsArray{elems: append([]interface{}{}, vals.elems...), kind: ktArrVals}, true
 		case "entries":
 			// Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
 			// `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
@@ -6792,6 +6805,9 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 					out.elems = append(out.elems, float64(0))
 				}
 			}
+			if name != "List" && name != "MutableList" {
+				out.kind = ktArrArray
+			}
 			return out
 		})
 	case "listOfNotNull":
@@ -6811,13 +6827,21 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 	// returns its argument array; they are here too so a QUALIFIED spelling
 	// (kotlin.collections.listOf) resolves through ktPkgMember, which has no reach
 	// into the emitted scope.
-	case "listOf", "mutableListOf", "arrayListOf", "arrayOf", "emptyList", "emptyArray",
-		"intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
-		"booleanArrayOf", "charArrayOf", "byteArrayOf", "shortArrayOf",
-		"ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf",
-		"sequenceOf", "emptySequence":
+	case "listOf", "mutableListOf", "arrayListOf", "emptyList":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return &jsArray{elems: append([]interface{}{}, args...)}
+		})
+	// The Array and Sequence builders are the same list, carrying its kind number.
+	case "arrayOf", "emptyArray",
+		"intArrayOf", "longArrayOf", "doubleArrayOf", "floatArrayOf",
+		"booleanArrayOf", "charArrayOf", "byteArrayOf", "shortArrayOf",
+		"ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return &jsArray{elems: append([]interface{}{}, args...), kind: ktArrArray}
+		})
+	case "sequenceOf", "emptySequence":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return &jsArray{elems: append([]interface{}{}, args...), kind: ktArrSeq}
 		})
 	case "setOf", "mutableSetOf", "hashSetOf", "linkedSetOf":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -6942,7 +6966,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 				fmt.Fprint(warnWriter, "warning: generateSequence is EAGER here and stopped at "+
 					strconv.Itoa(ktSeqCap)+" elements; a Sequence is not lazy in this subset\n")
 			}
-			return out
+			return ktArrTagged(out, ktArrSeq)
 		})
 	}
 	return jsUndef
@@ -7114,18 +7138,73 @@ func (rt *jsrt) ktNoElem(text interface{}) {
 // keys/entries and a range are all Iterable and none of them is a List, so they take
 // the Collection wording. ktSeqMethodK carries the word from the receiver that still
 // knows it, because ktElems/ktChars/ktRangeList have already materialized the
-// elements by the time the message is chosen. Two kinds are NOT reachable and both
-// are recorded rather than faked: an Array's own family (_Arrays.kt, "Array is
-// empty.") and a Sequence's (_Sequences.kt, "Sequence is empty."), because an Array,
-// a Sequence and a Map's `values` view are all the SAME host array as a List in this
-// value model, and telling them apart needs a nominal type on the value.
-// A range's first()/last() are kotlin.ranges' own overloads and say "Progression
-// 1..0 is empty." instead (_Ranges.kt).
+// elements by the time the message is chosen. An Array (_Arrays.kt), a Sequence
+// (_Sequences.kt) and a Map's `values` view are the SAME host array as a List, so
+// those three are told apart by the kind number on the array (ktArrWord). A range's
+// first()/last() are kotlin.ranges' own overloads and say "Progression 1..0 is
+// empty." instead (_Ranges.kt).
 const (
 	ktKindList = "List"
 	ktKindColl = "Collection"
 	ktKindChar = "Char sequence"
+	ktKindArr  = "Array"
+	ktKindSeq  = "Sequence"
 )
+
+// The kind numbers kept on a host array (jsArray.kind; arrKind / arrKindSet in the
+// other two engines): 0 a List, 1 an Array, 2 a Sequence, 3 a Map's values view.
+// Twin of kArrWords in kotlin-interpreter.abnf and ktArrWord in
+// languages/lib/kotlin-rt.metajs.
+const (
+	ktArrArray = 1
+	ktArrSeq   = 2
+	ktArrVals  = 3
+)
+
+var ktArrWords = [...]string{ktKindList, ktKindArr, ktKindSeq, ktKindColl}
+
+// ktArrTagged marks a fresh array with a kind number.
+func ktArrTagged(a *jsArray, k int) *jsArray {
+	a.kind = k
+	return a
+}
+
+// ktResultKind is the kind of the array a member call answers: an Array's
+// to*Array/copyOf family and Array.plus answer an Array, asSequence a Sequence, and
+// a Sequence's intermediate operations another Sequence (_Sequences.kt). 0 is a
+// List, which is what every other member answers. Twin of kResultKind in
+// kotlin-interpreter.abnf and ktResultKind in languages/lib/kotlin-rt.metajs.
+func ktResultKind(recv int, name string) int {
+	switch name {
+	case "asSequence":
+		return ktArrSeq
+	case "toTypedArray", "toIntArray", "toLongArray", "toShortArray", "toByteArray",
+		"toDoubleArray", "toFloatArray", "toBooleanArray", "toCharArray",
+		"copyOf", "copyOfRange", "sortedArray", "sortedArrayDescending", "reversedArray",
+		"sliceArray":
+		return ktArrArray
+	}
+	if recv == ktArrArray && name == "plus" {
+		return ktArrArray
+	}
+	if recv == ktArrSeq && ktSeqKeepsKind[name] {
+		return ktArrSeq
+	}
+	return 0
+}
+
+// The Sequence members whose answer is again a Sequence.
+var ktSeqKeepsKind = map[string]bool{
+	"map": true, "mapNotNull": true, "mapIndexed": true, "mapIndexedNotNull": true,
+	"filter": true, "filterNot": true, "filterIndexed": true, "filterNotNull": true,
+	"filterIsInstance": true, "take": true, "drop": true, "takeWhile": true,
+	"dropWhile": true, "distinct": true, "distinctBy": true, "sorted": true,
+	"sortedBy": true, "sortedDescending": true, "sortedByDescending": true,
+	"sortedWith": true, "flatMap": true, "flatten": true, "plus": true, "minus": true,
+	"zip": true, "zipWithNext": true, "chunked": true, "windowed": true,
+	"withIndex": true, "onEach": true, "runningFold": true, "runningReduce": true,
+	"scan": true, "shuffled": true,
+}
 
 func (rt *jsrt) ktNoElemKind(kind string) {
 	rt.ktNoElem(kind + " is empty.")
@@ -7144,20 +7223,27 @@ func (rt *jsrt) ktNoMatch(word string) {
 	rt.ktNoElem(word + " contains no element matching the predicate.")
 }
 
+// An Array and a Sequence declare their own predicate overloads, so they keep
+// their word too.
 func ktPredWord(kind string) string {
-	if kind == ktKindChar {
-		return ktKindChar
+	if kind == ktKindChar || kind == ktKindArr || kind == ktKindSeq {
+		return kind
 	}
 	return ktKindColl
 }
 
 // reduce()/reduceIndexed() are Iterable-only ("Empty collection can't be reduced.");
 // reduceRight()/reduceRightIndexed() are the List ones ("Empty list can't be
-// reduced."). Both spell CharSequence's as "Empty char sequence can't be reduced."
-// (_Strings.kt).
+// reduced."). CharSequence, Array and Sequence spell their own word in both
+// directions ("Empty char sequence can't be reduced.", "Empty array ...").
 func ktRedWord(kind string, fromRight bool) string {
-	if kind == ktKindChar {
+	switch kind {
+	case ktKindChar:
 		return "char sequence"
+	case ktKindArr:
+		return "array"
+	case ktKindSeq:
+		return "sequence"
 	}
 	if fromRight {
 		return "list"

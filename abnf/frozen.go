@@ -375,6 +375,8 @@ func frozenBaseBindings(preventDefaultOutput bool) map[string]interface{} {
 	// fnMeta / fnMetaSet - a function's name and length, kept on the function
 	// value. commonscript.go binds the goja twin.
 	fnMetaBindings(b)
+	// arrKind / arrKindSet - the kind number kept on an array (arrKindBindings).
+	arrKindBindings(b)
 	return b
 }
 

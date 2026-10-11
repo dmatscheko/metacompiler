@@ -1077,6 +1077,10 @@ KwDefault   = "default" KwEnd ;
         // in abnf/commonscript.go), so these names resolve to the host's own.
         "fnMeta": fnMeta,
         "fnMetaSet": fnMetaSet,
+        // arrKind(a) / arrKindSet(a, k): host ids 99/100, the kind number kept
+        // on an array; bound by both grammar hosts like the fnMeta pair.
+        "arrKind": arrKind,
+        "arrKindSet": arrKindSet,
         // The ten boxed-double names, the same set languages/lib/runtime.c
         // seeds (ids 51..60) and abnf/jsrtjvm.go's jfBindings adds.
         "flo": flHost,
