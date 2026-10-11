@@ -2307,7 +2307,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o.__builtin == true) {
                 var samp = pyTypeSample(o.__name)
                 if (samp !== undefined && pyBuiltinAttr(samp, name)) { return true }
-                return pyBDelegate(o.__name, name) != null
+                return pyBDelegate(o.__name, name) != null || (name == "__hash__" && pyBHashNone(o.__name))
             }
             return false
         }
@@ -2323,6 +2323,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return true }
+        if (name == "__hash__" && pyValHashNone(o)) { return true }
         if (pyNumAttr(o, name) !== undefined) { return true }
         // A SET's internal keys/vals arrays are not attributes (Go's set object
         // carries them under different names, so hasattr(s, "keys") must be False
@@ -2375,18 +2376,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyValDunder(o, name) {
         var vtn = pyValTName(o)
         if (vtn == "" || !pyIsDunder(name)) { return null }
-        if (isTup(o) && pyTupMutator(name)) { return null }
         return pyBDelegate(vtn, name)
     }
     // A tuple's two methods. Twin of pyIsTupleMethod in abnf/jsrt.go and
     // lib/python-rt.metajs.
     function pyIsTupleMethod(name) { return name == "count" || name == "index" }
-    // The builtin type a delegate serves for a plain value, or "". A tuple is
-    // served by list's delegates, less the ones that mutate.
+    // A list, a dict or a set: a value whose __hash__ is None (pyBHashNone). Twin
+    // of pyValHashNone in abnf/jsrtpysub.go and lib/python-rt.metajs.
+    function pyValHashNone(v) {
+        var tn = pyValTName(v)
+        return tn == "list" || tn == "dict" || tn == "set"
+    }
+    // The builtin type a delegate serves for a plain value, or "".
     function pyValTName(v) {
         if (typeof v == "string") { return "str" }
-        if (Array.isArray(v)) { return "list" }
-        if (isDict(v)) { return isSet(v) ? "" : "dict" }
+        if (Array.isArray(v)) { return isTup(v) ? "tuple" : "list" }
+        if (isSet(v)) { return v.__frozen === true ? "frozenset" : "set" }
+        if (isDict(v)) { return "dict" }
         return pyNumTName(v)
     }
     // What getattr() hands back for one of those names: CPython's `<built-in
@@ -2417,6 +2423,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (tname == "tuple") { return pyTup([]) }
         if (tname == "str") { return "" }
         if (tname == "set") { return newSet() }
+        if (tname == "frozenset") { return pyFreeze(newSet()) }
+        if (tname == "complex") { return pyCplx(0, 0) }
         if (tname == "dict") { return newDict() }
         if (tname == "int") { return 0 }
         if (tname == "float") { return pyFlo(0) }
@@ -3310,11 +3318,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // pyBDelegate in lib/python-rt.metajs.
     var pyBDelKeys = []
     var pyBDelFns = []
+    // bool's are int's; a tuple's are its own dunders, and its two named methods
+    // are not delegates.
     function pyBDelegate(tname, name) {
-        // A tuple's dunders are list's, less the ones that mutate; its two named
-        // methods are its own.
-        if (tname == "tuple") { return name.substring(0, 2) != "__" || pyTupMutator(name) ? null : pyBDelegate("list", name) }
-        if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict") { return null }
+        if (tname == "bool") { return pyBDelegate("int", name) }
+        if (tname == "tuple") {
+            if (name.substring(0, 2) != "__") { return null }
+        } else if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict" &&
+                   tname != "set" && tname != "frozenset" && tname != "complex") {
+            return null
+        }
         var key = tname + "." + name
         for (var i = 0; i < pyBDelKeys.length; i++) { if (pyBDelKeys[i] == key) { return pyBDelFns[i] } }
         var f = pyBDelMake(tname, name)
@@ -3323,10 +3336,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyBDelFns.push(f)
         }
         return f
-    }
-    // The dunders of list that change the list, which a tuple does not have.
-    function pyTupMutator(name) {
-        return name == "__setitem__" || name == "__delitem__" || name == "__init__" || name == "__iadd__" || name == "__imul__"
     }
     function pyBDelMake(tname, name) {
         var num = tname == "int" || tname == "float"
@@ -3339,8 +3348,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return mcall(pyBDelSelf(arguments[0]), name, rest, kTakeNamed())
             }
         }
+        var seq = tname == "list" || tname == "tuple" || tname == "str"
+        var setLike = tname == "set" || tname == "frozenset"
+        var cplx = tname == "complex"
         if (name == "__repr__") { return function(self) { return prepr(pyBDelSelf(self)) } }
         if (name == "__str__" && tname == "str") { return function(self) { return pyBDelSelf(self) } }
+        if (name == "__str__" && !num) { return function(self) { return pstr(pyBDelSelf(self)) } }
         if (name == "__eq__" || name == "__ne__") {
             var neg = name == "__ne__"
             return function(self, o) {
@@ -3348,6 +3361,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!pyBDelAccepts(tname, b)) { return pyNotImpl }
                 return pyEq(pyBDelSelf(self), b) != neg
             }
+        }
+        // list, dict and set have __hash__ = None: no delegate (see pyBHashNone).
+        if (name == "__hash__") {
+            if (pyBHashNone(tname)) { return null }
+            return function(self) { return hostGlobals["hash"](pyBDelSelf(self)) }
+        }
+        if (name == "__format__" && !num) { return function(self, spec) { return hostGlobals["format"](pyBDelSelf(self), spec) } }
+        // list.__init__ / dict.__init__ / set.__init__ refill the value in place,
+        // which is what super().__init__(xs) in a subclass's own __init__ reaches;
+        // an immutable value's is object's, which does nothing.
+        if (name == "__init__") {
+            if (tname == "list" || tname == "dict" || tname == "set") {
+                return function() {
+                    var rest = []
+                    for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+                    var fresh = pyConvert(tname, rest, kTakeNamed())
+                    mcall(pyBDelSelf(arguments[0]), "clear", [], undefined)
+                    mcall(pyBDelSelf(arguments[0]), tname == "list" ? "extend" : "update", [fresh], undefined)
+                    return undefined
+                }
+            }
+            return function() { return undefined }
         }
         if (num) {
             if (name == "__bool__") { return function(self) { return pytruthy(pyBDelSelf(self)) } }
@@ -3360,39 +3395,75 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var nd = pyNumDunder(tname, name)
             if (nd != null) { return nd }
+        } else if (cplx) {
+            if (name == "__bool__") { return function(self) { return pytruthy(pyBDelSelf(self)) } }
+            if (name == "__neg__") {
+                return function(self) {
+                    var c = pyBDelSelf(self)
+                    return pyCplx(floNegate(c.real), floNegate(c.imag))
+                }
+            }
+            if (name == "__pos__") { return function(self) { return pyBDelSelf(self) } }
+            if (name == "__abs__") { return function(self) { return hostGlobals["abs"](pyBDelSelf(self)) } }
+            if (name == "__complex__") { return function(self) { return pyBDelSelf(self) } }
         } else {
             if (name == "__len__") { return function(self) { return hostGlobals["len"](pyBDelSelf(self)) } }
             if (name == "__iter__") { return function(self) { return hostGlobals["iter"](pyBDelSelf(self)) } }
-            if (name == "__getitem__") { return function(self, k) { return pyget(pyBDelSelf(self), k) } }
+            if (name == "__getitem__" && !setLike) { return function(self, k) { return pyget(pyBDelSelf(self), k) } }
             if (name == "__contains__") { return function(self, k) { return pyIn(k, pyBDelSelf(self)) } }
             if (tname == "list" || tname == "dict") {
                 if (name == "__setitem__") { return function(self, k, v) { refStore(pyBDelSelf(self), {}, {idx: k}, v) } }
                 if (name == "__delitem__") { return function(self, k) { pyDelItem(pyBDelSelf(self), k) } }
+                if (name == "__reversed__") { return function(self) { return hostGlobals["reversed"](pyBDelSelf(self)) } }
             }
         }
-        // list.__init__ / dict.__init__ refill the value in place, which is what
-        // super().__init__(xs) in a subclass's own __init__ reaches.
-        if (name == "__init__" && (tname == "list" || tname == "dict")) {
-            return function() {
-                var rest = []
-                for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
-                var fresh = pyConvert(tname, rest, kTakeNamed())
-                mcall(pyBDelSelf(arguments[0]), "clear", [], undefined)
-                mcall(pyBDelSelf(arguments[0]), tname == "list" ? "extend" : "update", [fresh], undefined)
-                return undefined
-            }
-        }
-        var ops = num ? ["+", "-", "*", "/", "//", "%", "**", "<", ">", "<=", ">="] : ["+", "*", "<", ">", "<=", ">="]
+        var iop = pyBDelInplace(tname, name)
+        if (iop != "") { return pyBDelInplaceFn(tname, iop, setLike) }
+        var ops = []
+        if (num) { ops = ["+", "-", "*", "/", "//", "%", "**", "<", ">", "<=", ">="] }
         if (tname == "int") { ops = ops.concat(["|", "&", "^", "<<", ">>"]) }
+        if (seq) { ops = ["+", "*", "<", ">", "<=", ">="] }
         if (tname == "str") { ops.push("%") }
-        if (tname == "dict") { ops = ["|"] }
+        if (tname == "dict") { ops = ["|", "<", ">", "<=", ">="] }
+        if (setLike) { ops = ["|", "&", "-", "^", "<", ">", "<=", ">="] }
+        if (cplx) { ops = ["+", "-", "*", "/", "**", "<", ">", "<=", ">="] }
         for (var k = 0; k < ops.length; k++) {
             var op = ops[k]
             var dn = pyDunder[op]
+            var ordered = op == "<" || op == ">" || op == "<=" || op == ">="
+            // A sequence reflects only its repetition (and str its formatting).
+            var reflects = !ordered && (!seq || op == "*" || op == "%")
             if (name == dn) { return pyBDelBin(tname, op, false) }
-            if (op != "<" && op != ">" && op != "<=" && op != ">=" && name == "__r" + dn.substring(2)) { return pyBDelBin(tname, op, true) }
+            if (reflects && name == "__r" + dn.substring(2)) { return pyBDelBin(tname, op, true) }
         }
         return null
+    }
+    // The builtin types whose __hash__ is None: the mutable containers.
+    // hasattr(list, "__hash__") is True and list.__hash__ is None. Twin of
+    // pyBHashNone in abnf/jsrtpysub.go and lib/python-rt.metajs.
+    function pyBHashNone(tname) { return tname == "list" || tname == "dict" || tname == "set" }
+    // The binary operator of tname's in-place dunder name, or "": list's += and
+    // *=, dict's |=, set's |= &= -= ^=. Twin of pyBDelInplace in
+    // abnf/jsrtpysub.go and lib/python-rt.metajs.
+    function pyBDelInplace(tname, name) {
+        if (tname == "list" && name == "__iadd__") { return "+" }
+        if (tname == "list" && name == "__imul__") { return "*" }
+        if ((tname == "dict" || tname == "set") && name == "__ior__") { return "|" }
+        if (tname == "set" && name == "__iand__") { return "&" }
+        if (tname == "set" && name == "__isub__") { return "-" }
+        if (tname == "set" && name == "__ixor__") { return "^" }
+        return ""
+    }
+    // The augmented operator on the value itself, which every engine performs
+    // in place for these receivers; the receiver is the answer.
+    function pyBDelInplaceFn(tname, op, setLike) {
+        return function(self, o) {
+            var v = pyBDelSelf(self)
+            var b = pyBDelSelf(o)
+            if (setLike && !pyBDelAccepts(tname, b)) { return pyNotImpl }
+            pyAugOp(op, v, b)
+            return self
+        }
     }
     // int's and float's conversion and rounding dunders, each the builtin it
     // serves applied to the value: str(x) of a number is its repr, and floor and
@@ -3460,15 +3531,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nk = pyNumTName(o)
         if (tname == "int") { return nk == "int" }
         if (tname == "float") { return nk == "int" || nk == "float" }
+        if (tname == "complex") { return nk != "" }
         if (tname == "str") { return typeof o == "string" }
         if (tname == "list") { return Array.isArray(o) && !isTup(o) }
+        if (tname == "tuple") { return isTup(o) }
+        if (tname == "set" || tname == "frozenset") { return isSet(o) }
         return isDict(o) && !isSet(o)
     }
-    // A number's and a dict's operators decline a foreign operand; str's and
-    // list's `+`, `*` and `%` raise their own TypeError instead, and only their
-    // orderings decline.
+    // A number's, a dict's and a set's operators decline a foreign operand;
+    // str's, list's and tuple's `+`, `*` and `%` raise their own TypeError
+    // instead, and only their orderings decline. object's orderings, which dict
+    // and complex inherit, decline everything.
     function pyBDelBin(tname, op, reflected) {
-        var gated = tname == "int" || tname == "float" || tname == "dict" || op == "<" || op == ">" || op == "<=" || op == ">="
+        var ordered = op == "<" || op == ">" || op == "<=" || op == ">="
+        if (ordered && (tname == "dict" || tname == "complex")) { return function(self, o) { return pyNotImpl } }
+        var gated = ordered || !(tname == "list" || tname == "tuple" || tname == "str")
         return function(self, o) {
             var a = pyBDelSelf(self)
             var b = pyBDelSelf(o)
@@ -3497,6 +3574,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // 0.0 is falsy, and every OBJECT is truthy - so the float box has to be
         // read before the generic !!v, which would answer true for it.
         if (isFlo(v)) return v.__flo != 0
+        // A complex is false only at 0j, with both parts zero.
+        if (isCplx(v)) return v.real != 0 || v.imag != 0
         if (typeof v == "object" && pyUser(v)) { return pyUserTruthy(v) }
         if (v === pyNotImpl) { pyListErr("TypeError", "NotImplemented should not be used in a boolean context") }
         return !!v
@@ -5553,6 +5632,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isSet(target)) {
                 if (target.__frozen === true && pySetMutator(name)) { pyAttrErr(target, name) }
                 if (pyIsSetMethod(name)) { return pySetMethod(target, name, args) }
+                var sdl = pyValDunder(target, name)
+                if (sdl != null) { return sdl.apply(undefined, [target].concat(args)) }
                 if (pyIsDictOnly(name)) { pyAttrErr(target, name) }
                 if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
                 fail("unknown dict method: " + name)
@@ -7520,7 +7601,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // looked for, never an operand of an arithmetic rule, so it must fall
         // through to pyIn exactly as floOp lets it (`3j in xs`, `10**30 in xs`).
         if (op == "in" || op == "not in") { return null }
-        if (isCplx(l) || isCplx(r)) { return {v: cplxOp(op, l, r)} }
+        // An instance (a complex subclass's too) gets its dunders first.
+        if (isCplx(l) || isCplx(r)) { return pyUser(l) || pyUser(r) ? null : {v: cplxOp(op, l, r)} }
         var a = bigOf(l)
         var b = bigOf(r)
         if (a == null || b == null) { return {v: binOp(op, bigToNum(l), bigToNum(r))} }
@@ -7688,8 +7770,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (fo != null) { return fo.v }
             }
             if (pyBoxed(l) || pyBoxed(r)) {
-                // null is "not mine" - the container operators, which boxOp hands
-                // back the same way floOp above does.
+                // null is "not mine" - the container operators and a complex
+                // meeting an instance, which boxOp hands back as floOp does.
                 var bo = boxOp(op, l, r)
                 if (bo != null) { return bo.v }
             }
@@ -9799,7 +9881,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // `xs += it` is list.extend IN PLACE (every alias of xs sees it, and any
-    // iterable is accepted), `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=)
+    // iterable is accepted), `xs *= n` writes the repetition back into xs,
+    // `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=)
     // updates a set in place when t is a set; every other augmented operator is
     // the binary one, whose "unsupported operand" TypeError names the statement's
     // operator (pyAugErr). Twin of js_pyinplace in abnf/jsrt.go and
@@ -9817,6 +9900,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (bop == "+" && Array.isArray(a) && !isTup(a)) {
             var src = pyIterOrTypeErr(b).slice(0)
             for (var i = 0; i < src.length; i++) { a.push(src[i]) }
+            return a
+        }
+        // `xs *= n` writes the repetition back into xs.
+        if (bop == "*" && Array.isArray(a) && !isTup(a)) {
+            var rep = binOp("*", a, b)
+            while (a.length > 0) { a.pop() }
+            for (var ri = 0; ri < rep.length; ri++) { a.push(rep[ri]) }
             return a
         }
         if (isSet(a) && isSet(b) && a.__frozen !== true && (bop == "|" || bop == "&" || bop == "-" || bop == "^")) {
@@ -10469,6 +10559,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bt = pyBuiltinBase(cls)
         if (bt == "list") { obj.__val = [] }
         else if (bt == "dict") { obj.__val = newDict() }
+        else if (bt == "set") { obj.__val = newSet() }
         else if (bt != "") { obj.__val = pyConvert(bt, args, named) }
         var init = clsFind(cls, "__init__")
         if (init != null) {
@@ -10591,6 +10682,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // A dunder read off the type - str.__repr__(self) in a subclass.
                 var bdd = pyBDelegate(o.__name, name)
                 if (bdd != null) { return bdd }
+                if (name == "__hash__" && pyBHashNone(o.__name)) { return undefined }
             }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
             if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
@@ -10616,6 +10708,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // literally has a "keys" property holding its key ARRAY, and CPython's
         // d.keys is the method. x.__class__ is the same class object type(x)
         // hands out, so `[].__class__ is list` holds.
+        if (name == "__hash__" && pyValHashNone(o)) { return undefined }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return pyBoundBuiltin(o, name) }
         if (name == "__class__") { return pyTypeOf(o) }
         if (isSet(o)) { pyAttrErr(o, name) }

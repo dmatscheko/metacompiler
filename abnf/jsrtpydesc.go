@@ -95,6 +95,12 @@ func pyDescTypeSample(tname string) interface{} {
 		return ""
 	case "set":
 		return newPySet(&jsArray{})
+	case "frozenset":
+		fs := newPySet(&jsArray{})
+		fs.set("__frozen", true)
+		return fs
+	case "complex":
+		return newPyComplex(0, 0)
 	case "dict":
 		d := newJSObject()
 		d.set("__dict", true)

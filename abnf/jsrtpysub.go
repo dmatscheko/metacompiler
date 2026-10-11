@@ -27,17 +27,17 @@ var (
 )
 
 // pyBuiltinDelegate is the delegate the builtin type tname answers for name.
+// bool's are int's; a tuple's are its own dunders, and its two named methods
+// are not delegates.
 func pyBuiltinDelegate(tname, name string) (*hostFunc, bool) {
-	// A tuple's dunders are list's, less the ones that mutate; its two named
-	// methods are its own.
-	if tname == "tuple" {
-		if !strings.HasPrefix(name, "__") || pyTupMutator(name) {
+	switch tname {
+	case "bool":
+		return pyBuiltinDelegate("int", name)
+	case "tuple":
+		if !strings.HasPrefix(name, "__") {
 			return nil, false
 		}
-		return pyBuiltinDelegate("list", name)
-	}
-	switch tname {
-	case "str", "int", "float", "list", "dict":
+	case "str", "int", "float", "list", "dict", "set", "frozenset", "complex":
 	default:
 		return nil, false
 	}
@@ -50,16 +50,6 @@ func pyBuiltinDelegate(tname, name string) (*hostFunc, bool) {
 		pyBDelCache[key] = f
 	}
 	return f, f != nil
-}
-
-// pyTupMutator: the dunders of list that change the list, which a tuple does
-// not have.
-func pyTupMutator(name string) bool {
-	switch name {
-	case "__setitem__", "__delitem__", "__init__", "__iadd__", "__imul__":
-		return true
-	}
-	return false
 }
 
 // pyIsBDelMethod says whether v is a delegate for one of a builtin type's
@@ -103,6 +93,12 @@ func pyBuiltinHasMethod(tname, name string) bool {
 		return pyIsListMethod(name)
 	case "dict":
 		return pyIsDictMethod(name)
+	case "set":
+		return pyIsSetMethod(name)
+	case "frozenset":
+		return pyIsSetMethod(name) && !pySetMutator(name)
+	case "complex":
+		return name == "conjugate"
 	case "int", "float":
 		return pyIsNumMethod(pyDescTypeSample(tname), name)
 	}
@@ -110,14 +106,19 @@ func pyBuiltinHasMethod(tname, name string) bool {
 }
 
 func pyBDelMake(tname, name string) *hostFunc {
-	mk := func(fn func(rt *jsrt, self interface{}, args []interface{}) interface{}) *hostFunc {
+	// mkSelf's fn sees the receiver as passed (an in-place operator answers it)
+	// and its builtin value; mk's sees the value only.
+	mkSelf := func(fn func(rt *jsrt, self, v interface{}, args []interface{}) interface{}) *hostFunc {
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 					"descriptor '"+name+"' of '"+tname+"' object needs an argument")})
 			}
-			return fn(rt, pyBDelVal(args[0]), args[1:])
+			return fn(rt, args[0], pyBDelVal(args[0]), args[1:])
 		})
+	}
+	mk := func(fn func(rt *jsrt, v interface{}, args []interface{}) interface{}) *hostFunc {
+		return mkSelf(func(rt *jsrt, _, v interface{}, args []interface{}) interface{} { return fn(rt, v, args) })
 	}
 	arg := func(args []interface{}) interface{} {
 		if len(args) > 0 {
@@ -133,11 +134,15 @@ func pyBDelMake(tname, name string) *hostFunc {
 		return f
 	}
 	num := tname == "int" || tname == "float"
+	seq := tname == "list" || tname == "tuple" || tname == "str"
+	setLike := tname == "set" || tname == "frozenset"
 	switch {
 	case name == "__repr__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyRepr(v) })
 	case name == "__str__" && tname == "str":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return v })
+	case name == "__str__" && !num:
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyString(v) })
 	case name == "__eq__" || name == "__ne__":
 		neg := name == "__ne__"
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
@@ -147,6 +152,32 @@ func pyBDelMake(tname, name string) *hostFunc {
 			}
 			return rt.pyEqual(v, o) != neg
 		})
+	case name == "__hash__":
+		// list, dict and set have __hash__ = None: no delegate (see pyBHashNone).
+		if pyBHashNone(tname) {
+			return nil
+		}
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyhash", v) })
+	case name == "__format__" && !num:
+		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			return rt.pyExt("js_pyformatfn", &jsArray{elems: append([]interface{}{v}, a...)})
+		})
+	case name == "__init__" && (tname == "list" || tname == "dict" || tname == "set"):
+		// list.__init__ / dict.__init__ / set.__init__ refill the value in place,
+		// which is what super().__init__(xs) in a subclass's own __init__ reaches.
+		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+			fresh := rt.callPyValue(rt.pyBuiltinClass(tname), a, jsUndef)
+			rt.pyMCall(v, "clear", nil, jsUndef)
+			ext := "extend"
+			if tname != "list" {
+				ext = "update"
+			}
+			rt.pyMCall(v, ext, []interface{}{fresh}, jsUndef)
+			return jsUndef
+		})
+	case name == "__init__":
+		// object.__init__: nothing to do for an immutable value.
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return jsUndef })
 	case num && name == "__bool__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyTruthyOf(v) })
 	case num && name == "__neg__":
@@ -155,11 +186,23 @@ func pyBDelMake(tname, name string) *hostFunc {
 		if f := pyNumDunder(tname, name); f != nil {
 			return mk(f)
 		}
-	case !num && name == "__len__":
+	case tname == "complex" && name == "__bool__":
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyTruthyOf(v) })
+	case tname == "complex" && (name == "__neg__" || name == "__pos__"):
+		op := "+"
+		if name == "__neg__" {
+			op = "-"
+		}
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyunary", op, v) })
+	case tname == "complex" && name == "__abs__":
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyabs", v) })
+	case tname == "complex" && name == "__complex__":
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return v })
+	case tname != "complex" && name == "__len__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pylenof", v) })
-	case !num && name == "__iter__":
+	case tname != "complex" && name == "__iter__":
 		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyiterfn", v) })
-	case !num && name == "__getitem__":
+	case (seq || tname == "dict") && name == "__getitem__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pyidx", v, arg(a)) })
 	case (tname == "list" || tname == "dict") && name == "__setitem__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
@@ -172,46 +215,60 @@ func pyBDelMake(tname, name string) *hostFunc {
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
 			return rt.pyExt("js_pydel_item", v, arg(a))
 		})
-	case !num && name == "__contains__":
+	case (tname == "list" || tname == "dict") && name == "__reversed__":
+		return mk(func(rt *jsrt, v interface{}, _ []interface{}) interface{} { return rt.pyExt("js_pyreversed", v) })
+	case tname != "complex" && name == "__contains__":
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyContains(arg(a), v) })
-	case name == "__init__" && (tname == "list" || tname == "dict"):
-		// list.__init__ / dict.__init__ refill the value in place, which is what
-		// super().__init__(xs) in a subclass's own __init__ reaches.
-		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
-			fresh := rt.callPyValue(rt.pyBuiltinClass(tname), a, jsUndef)
-			rt.pyMCall(v, "clear", nil, jsUndef)
-			ext := "extend"
-			if tname == "dict" {
-				ext = "update"
+	}
+	if op := pyBDelInplace(tname, name); op != "" {
+		// The augmented operator on the value itself, which every engine performs
+		// in place for these receivers; the receiver is the answer.
+		return mkSelf(func(rt *jsrt, self, v interface{}, a []interface{}) interface{} {
+			o := pyUnwrapBuiltin(arg(a))
+			if setLike && !pyBDelAccepts(tname, o) {
+				return pyNotImplemented
 			}
-			rt.pyMCall(v, ext, []interface{}{fresh}, jsUndef)
-			return jsUndef
+			rt.pyExt("js_pybin", op+"=", v, o)
+			return self
 		})
 	}
-	ops := []string{"+", "*", "<", ">", "<=", ">="}
-	if num {
-		ops = append(ops, "-", "/", "//", "%", "**")
-	}
-	switch tname {
-	case "int":
-		ops = append(ops, "|", "&", "^", "<<", ">>")
-	case "str":
-		ops = append(ops, "%")
-	case "dict":
-		ops = []string{"|"}
+	var ops []string
+	switch {
+	case num:
+		ops = []string{"+", "*", "<", ">", "<=", ">=", "-", "/", "//", "%", "**"}
+		if tname == "int" {
+			ops = append(ops, "|", "&", "^", "<<", ">>")
+		}
+	case seq:
+		ops = []string{"+", "*", "<", ">", "<=", ">="}
+		if tname == "str" {
+			ops = append(ops, "%")
+		}
+	case tname == "dict":
+		ops = []string{"|", "<", ">", "<=", ">="}
+	case setLike:
+		ops = []string{"|", "&", "-", "^", "<", ">", "<=", ">="}
+	case tname == "complex":
+		ops = []string{"+", "-", "*", "/", "**", "<", ">", "<=", ">="}
 	}
 	for _, op := range ops {
 		dn := pyDunderName[op]
 		op := op
 		ordered := op == "<" || op == ">" || op == "<=" || op == ">="
-		reflected := !ordered && name == "__r"+dn[2:]
+		// A sequence reflects only its repetition (and str its formatting).
+		reflects := !ordered && (!seq || op == "*" || op == "%")
+		reflected := reflects && name == "__r"+dn[2:]
 		if name != dn && !reflected {
 			continue
 		}
-		// A number's and a dict's operators decline a foreign operand; str's
-		// and list's `+`, `*` and `%` raise their own TypeError instead, and only
-		// their orderings decline.
-		gated := num || tname == "dict" || ordered
+		// object's orderings, which dict and complex inherit, decline everything.
+		if ordered && (tname == "dict" || tname == "complex") {
+			return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return pyNotImplemented })
+		}
+		// A number's, a dict's and a set's operators decline a foreign operand;
+		// str's and list's `+`, `*` and `%` raise their own TypeError instead,
+		// and only their orderings decline.
+		gated := !seq || ordered
 		return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
 			o := pyUnwrapBuiltin(arg(a))
 			if gated && !pyBDelAccepts(tname, o) {
@@ -226,12 +283,38 @@ func pyBDelMake(tname, name string) *hostFunc {
 	return nil
 }
 
+// pyBHashNone names the builtin types whose __hash__ is None: the mutable
+// containers. hasattr(list, "__hash__") is True and list.__hash__ is None.
+// Twin of pyBHashNone in languages/python-interpreter.abnf and
+// lib/python-rt.metajs.
+func pyBHashNone(tname string) bool { return tname == "list" || tname == "dict" || tname == "set" }
+
+// pyBDelInplace is the binary operator of tname's in-place dunder name, or "":
+// list's += and *=, dict's |=, set's |= &= -= ^=.
+func pyBDelInplace(tname, name string) string {
+	switch {
+	case tname == "list" && name == "__iadd__":
+		return "+"
+	case tname == "list" && name == "__imul__":
+		return "*"
+	case (tname == "dict" || tname == "set") && name == "__ior__":
+		return "|"
+	case tname == "set" && name == "__iand__":
+		return "&"
+	case tname == "set" && name == "__isub__":
+		return "-"
+	case tname == "set" && name == "__ixor__":
+		return "^"
+	}
+	return ""
+}
+
 // pyBDelAccepts says whether builtin type tname's binary dunder serves the
 // other operand o (a subclass instance already unwrapped): int serves ints (a
-// bool is one), float ints and floats, a container its own kind. For anything
-// else the dunder answers NotImplemented, so int.__add__(5, 2.5) declines.
-// Twin of pyBDelAccepts in languages/python-interpreter.abnf and
-// lib/python-rt.metajs.
+// bool is one), float ints and floats, complex every number, a container its
+// own kind (a set and a frozenset each other). For anything else the dunder
+// answers NotImplemented, so int.__add__(5, 2.5) declines. Twin of
+// pyBDelAccepts in languages/python-interpreter.abnf and lib/python-rt.metajs.
 func pyBDelAccepts(tname string, o interface{}) bool {
 	nk := pyNumTypeName(o)
 	switch tname {
@@ -239,12 +322,19 @@ func pyBDelAccepts(tname string, o interface{}) bool {
 		return nk == "int"
 	case "float":
 		return nk == "int" || nk == "float"
+	case "complex":
+		return nk != ""
 	case "str":
 		_, ok := o.(string)
 		return ok
 	case "list":
 		_, ok := o.(*jsArray)
 		return ok && !pyIsTup(o)
+	case "tuple":
+		return pyIsTup(o)
+	case "set", "frozenset":
+		_, isSet := pySetElems(o)
+		return isSet
 	}
 	if _, isSet := pySetElems(o); isSet {
 		return false
@@ -350,15 +440,19 @@ func pyValDunder(v interface{}, name string) (*hostFunc, bool) {
 		tn = "str"
 	case *jsArray:
 		tn = "list"
+		if pyIsTup(v) {
+			tn = "tuple"
+		}
 	}
-	if _, _, isDict := dictParts(v); isDict {
+	if _, isSet := pySetElems(v); isSet {
+		tn = "set"
+		if pySetFrozen(v) {
+			tn = "frozenset"
+		}
+	} else if _, _, isDict := dictParts(v); isDict {
 		tn = "dict"
 	}
 	if tn == "" || len(name) <= 4 || !strings.HasPrefix(name, "__") || !strings.HasSuffix(name, "__") {
-		return nil, false
-	}
-	// A tuple is served by list's delegates, less the ones that mutate.
-	if pyIsTup(v) && pyTupMutator(name) {
 		return nil, false
 	}
 	return pyBuiltinDelegate(tn, name)
@@ -367,6 +461,20 @@ func pyValDunder(v interface{}, name string) (*hostFunc, bool) {
 // pyIsTupleMethod names a tuple's two methods. Twin of pyIsTupleMethod in
 // languages/python-interpreter.abnf and lib/python-rt.metajs.
 func pyIsTupleMethod(name string) bool { return name == "count" || name == "index" }
+
+// pyValHashNone says whether v is a value whose __hash__ is None (pyBHashNone):
+// a list, a dict or a set. Twin of pyValHashNone in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func pyValHashNone(v interface{}) bool {
+	if _, isArr := v.(*jsArray); isArr {
+		return !pyIsTup(v)
+	}
+	if _, isSet := pySetElems(v); isSet {
+		return !pySetFrozen(v)
+	}
+	_, _, isDict := dictParts(v)
+	return isDict
+}
 
 func pyValDunderAttr(v interface{}, name string) bool {
 	_, ok := pyValDunder(v, name)
@@ -425,9 +533,9 @@ func pyBuiltinBase(cls *jsObject) string {
 }
 
 // pyNewInstance is a call of a user class: a fresh instance and its __init__. A
-// subclass of a builtin type keeps its value in __val: str/int/float build it
-// from the arguments (their __new__), list/dict start empty and are filled by
-// __init__ (list.__init__ unless the subclass overrides it).
+// subclass of a builtin type keeps its value in __val: the immutable types build
+// it from the arguments (their __new__), list/dict/set start empty and are
+// filled by __init__ (list.__init__ unless the subclass overrides it).
 func (rt *jsrt) pyNewInstance(cls *jsObject, args []interface{}, kw interface{}) *jsObject {
 	inst := newJSObject()
 	inst.set("__class", cls)
@@ -437,6 +545,8 @@ func (rt *jsrt) pyNewInstance(cls *jsObject, args []interface{}, kw interface{})
 		inst.set("__val", &jsArray{})
 	case "dict":
 		inst.set("__val", pyDescTypeSample("dict"))
+	case "set":
+		inst.set("__val", newPySet(&jsArray{}))
 	default:
 		inst.set("__val", rt.callPyValue(rt.pyBuiltinClass(bt), args, kw))
 	}

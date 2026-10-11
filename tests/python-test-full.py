@@ -4441,6 +4441,36 @@ def s87():
     check("id1", id(o) == id(o) and id(o) != id(O()) and id(xs) == id(ys) and id(xs) != id([1]) and type(id(o)) is int)
     check("id2", hash(o) == id(o) >> 4)
 
+# ===== SECTION 88: the builtin types' dunders =====
+# hasattr on a type object answers every dunder the type has, object's
+# included (list.__hash__ is None, dict.__lt__ declines); set, frozenset,
+# complex and bool are served like list and int, so a subclass of set or
+# complex works; xs *= n repeats in place; 0j is false. Rows from CPython 3.14
+# (left out: __new__, __sizeof__, and type's own __or__).
+def s88():
+    names = ["__hash__", "__lt__", "__eq__", "__imul__", "__iadd__", "__radd__", "__rmul__", "__ior__", "__reversed__", "__init__", "__getitem__", "__complex__", "__format__", "__rand__"]
+    rows = []
+    for t in [list, tuple, dict, set, frozenset, bool, complex, str]:
+        rows.append("".join(["1" if hasattr(t, n) else "0" for n in names]))
+    check("dun1", rows[0:4] == ["11111010111010", "11100010011010", "11100001111010", "11100001010011"])
+    check("dun2", rows[4:8] == ["11100000010011", "11100110010011", "11100110010110", "11100010011010"])
+    check("dun3", list.__hash__ is None and [].__hash__ is None and dict.__lt__({}, {}) is NotImplemented and set.__or__({1}, [2]) is NotImplemented)
+    s1 = {1, 2}
+    r = set.__ior__(s1, {3})
+    check("dun4", r is s1 and sorted(s1) == [1, 2, 3] and set.__lt__({1}, s1) and frozenset.__hash__(frozenset([1])) == hash(frozenset([1])))
+    class S(set):
+        pass
+    class C(complex):
+        pass
+    st = S([1, 2])
+    st.add(5)
+    check("dun5", len(st) == 3 and 5 in st and sorted(st | {9}) == [1, 2, 5, 9] and C(1, 2) == 1 + 2j and C(3, 4) * 2 == 6 + 8j)
+    xs = [1, 2]
+    ys = xs
+    xs *= 2
+    zs = [0j, 1j]
+    check("dun6", ys == [1, 2, 1, 2] and xs is ys and not zs[0] and bool(zs[1]) and list.__iadd__(ys, (3,)) is xs)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4529,5 +4559,6 @@ def main():
     s85() # SECTION-CALL 85
     s86() # SECTION-CALL 86
     s87() # SECTION-CALL 87
+    s88() # SECTION-CALL 88
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

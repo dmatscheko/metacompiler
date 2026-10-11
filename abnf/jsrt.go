@@ -14816,38 +14816,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return rt.wrapNum(r)
 		},
 		"js_pytruthy": func(a []uint64) uint64 { // Python truthiness: empty lists/dicts/sets are falsy.
-			if els, ok := pySetElems(u(a[0])); ok {
-				if len(els.elems) > 0 {
-					return 1
-				}
-				return 0
-			}
-			if arr, ok := u(a[0]).(*jsArray); ok {
-				if len(arr.elems) > 0 {
-					return 1
-				}
-				return 0
-			}
-			if keys, _, ok := dictParts(u(a[0])); ok {
-				if len(keys.elems) > 0 {
-					return 1
-				}
-				return 0
-			}
-			if pyIsDView(u(a[0])) {
-				if pyDViewLen(u(a[0])) > 0 {
-					return 1
-				}
-				return 0
-			}
-			if _, cls, ok := pyInstance(u(a[0])); ok {
-				if rt.pyUserTruthy(cls, u(a[0])) {
-					return 1
-				}
-				return 0
-			}
-			rt.pyNotImplBool(u(a[0]))
-			if rt.truthy(u(a[0])) {
+			if rt.pyTruthyOf(u(a[0])) {
 				return 1
 			}
 			return 0
@@ -16225,16 +16194,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					}
 				}
 			}
-			if isPyComplex(l) || isPyComplex(r) {
-				// The complex arithmetic reads any operand as a number, so a mixed
-				// `+` is refused here unless a user class may still answer it.
-				_, _, li := pyInstance(l)
-				_, _, ri := pyInstance(r)
-				if op == "+" && !li && !ri {
-					rt.pyAddCheck(l, r)
-				}
-				if v, ok := rt.pyComplexBin(op, l, r); ok {
-					return w(v)
+			// The complex arithmetic reads any operand as a number, so a mixed `+`
+			// is refused here; an instance (a complex subclass's too) gets its
+			// dunders first.
+			if _, _, li := pyInstance(l); !li && (isPyComplex(l) || isPyComplex(r)) {
+				if _, _, ri := pyInstance(r); !ri {
+					if op == "+" {
+						rt.pyAddCheck(l, r)
+					}
+					if v, ok := rt.pyComplexBin(op, l, r); ok {
+						return w(v)
+					}
 				}
 			}
 			if v, ok := rt.pyDunderBin(op, l, r); ok {
@@ -18150,7 +18120,8 @@ func (rt *jsrt) pyPowF(x, y float64) float64 {
 
 // pyAugBin is an augmented assignment, op its binary operator: an instance's own
 // in-place dunder (__isub__) first, unless it answers NotImplemented; `xs += it`
-// is list.extend in place, `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=)
+// is list.extend in place and `xs *= n` the repetition written back into xs,
+// `d |= m` is d.update(m), and `s |= t` (&=, -=, ^=)
 // updates a set in place when t is a set, so every alias sees it; anything else
 // is the binary operator, its TypeError renamed by pyAugErr. Twin of pyAAug in
 // lib/python-rt.metajs (which first lets arithmetic on two numbers through) and
@@ -18166,6 +18137,14 @@ func (rt *jsrt) pyAugBin(op string, l, r interface{}) interface{} {
 	if la, ok := l.(*jsArray); ok && op == "+" && la.kind != pyTupKind {
 		la.elems = append(la.elems, rt.pyElemsOf(r)...)
 		return l
+	}
+	if la, ok := l.(*jsArray); ok && op == "*" && la.kind != pyTupKind {
+		rep := rt.pyExt("js_pybin", "*", l, r)
+		if ra, isArr := rep.(*jsArray); isArr {
+			la.elems = append(la.elems[:0:0], ra.elems...)
+			return l
+		}
+		return rep
 	}
 	if le, ok := pySetElems(l); ok {
 		if v, ok := rt.pySetBin(op, l, r); ok && !pySetFrozen(l) {
@@ -19824,6 +19803,9 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 		if f, ok := pyBuiltinDelegate(tn, name); ok {
 			return f
 		}
+		if name == "__hash__" && pyBHashNone(tn) {
+			return jsUndef
+		}
 	}
 	// A BOUND METHOD knows its own name, receiver and underlying function.
 	// Asked before the two name tables because a bound method
@@ -19918,6 +19900,9 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	}
 	// A BOUND built-in method, so getattr(xs, "count")(1) is
 	// the 1 CPython answers rather than whatever getMember made of the name.
+	if name == "__hash__" && pyValHashNone(obj) {
+		return jsUndef
+	}
 	if rt.pyBuiltinAttr(obj, name) || pyValDunderAttr(obj, name) {
 		return rt.pyBoundBuiltin(obj, name)
 	}
@@ -21416,6 +21401,10 @@ func (rt *jsrt) pyTruthyOf(v interface{}) bool {
 	if pyIsDView(v) {
 		return pyDViewLen(v) > 0
 	}
+	// A complex is false only at 0j, with both parts zero.
+	if re, im, ok := pyComplexParts(v); ok {
+		return re != 0 || im != 0
+	}
 	if _, cls, ok := pyInstance(v); ok {
 		return rt.pyUserTruthy(cls, v)
 	}
@@ -21591,10 +21580,13 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 		if _, ok := pyBuiltinDelegate(tn, name); ok {
 			return true
 		}
+		if name == "__hash__" && pyBHashNone(tn) {
+			return true
+		}
 	}
 	// The BUILT-IN methods of str / list / dict / set, and
 	// __class__, which EVERY value has (None.__class__ is NoneType).
-	if name == "__class__" || rt.pyBuiltinAttr(obj, name) || pyValDunderAttr(obj, name) {
+	if name == "__class__" || rt.pyBuiltinAttr(obj, name) || pyValDunderAttr(obj, name) || (name == "__hash__" && pyValHashNone(obj)) {
 		return true
 	}
 	if _, ok := pyNumAttr(obj, name); ok {
