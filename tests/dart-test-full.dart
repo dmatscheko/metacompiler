@@ -1690,6 +1690,25 @@ void s39() {
   check("fn39c", outs.join(",") == "3,20");
 }
 
+// ===== SECTION 40: double.parse and double.tryParse =====
+// dart:core's documentation of double.parse and its own examples: white space
+// trimmed, a sign, Infinity and NaN, a decimal literal, '0xFF' as 255.0; anything
+// else throws FormatException("Invalid double"), where tryParse answers null.
+// No Dart toolchain here: the values follow from the documentation.
+void s40() {
+  var xs = ["  3.14 \u00a0", "0.", "-1.e3", "1234E+7", "+.12e-9", "-NaN", "0xFF", "1f", "infinity"];
+  check("dpa40", double.parse(xs[0]) == 3.14 && double.parse(xs[1]) == 0.0 && double.parse(xs[2]) == -1000.0);
+  check("dpb40", double.parse(xs[3]) == 12340000000.0 && double.parse(xs[4]) == 1.2e-10 && double.parse(xs[5]).isNaN);
+  check("dpc40", double.parse(xs[6]) == 255.0 && double.tryParse(xs[7]) == null && double.tryParse(xs[8]) == null);
+  var msg = "";
+  try {
+    double.parse(xs[7]);
+  } on FormatException catch (e) {
+    msg = e.message;
+  }
+  check("dpd40", msg == "Invalid double");
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1730,6 +1749,7 @@ int main() {
   s37(); // SECTION-CALL 37
   s38(); // SECTION-CALL 38
   s39(); // SECTION-CALL 39
+  s40(); // SECTION-CALL 40
   print("full: $checks checks, $fails failures");
   return fails;
 }

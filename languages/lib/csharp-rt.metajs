@@ -1108,8 +1108,28 @@ function csParseInt(s, w, u) {
     return csNorm(acc, w, u)
 }
 
+// double.Parse / double.TryParse: csxParseDouble (lib/csharp-strings.js) over the
+// string; TryParse's out argument is a reference box, written 0 on a failure.
+// Twins: the double type object in csharp-interpreter.abnf and csTypeObject in
+// abnf/jsrtcsharp.go.
+function csDoubleParse(s) {
+    if (s === null || s === undefined) { csThrow("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
+    var f = anytype
+    f = csxParseDouble(cpStr(s))
+    if (f === null) { csThrow("FormatException", "The input string was not in a correct format.") }
+    return flo(f, 2)
+}
+function csDoubleTryParse(s, box) {
+    var f = anytype
+    f = null
+    if (typeof s == "string") { f = csxParseDouble(s) }
+    js_csrefwr(box, flo(f === null ? 0 : f, 2))
+    return f !== null
+}
+
 // csTypeObject: one of the integral type NAMES as an expression primary, so that
-// `int.MaxValue`, `ulong.MaxValue` and `int.Parse(s)` resolve.
+// `int.MaxValue`, `ulong.MaxValue` and `int.Parse(s)` resolve; double's two
+// parsers too.
 function csTypeObject(name0) {
     var o = {}
     if (name0 == "char" || name0 == "Char") {
@@ -1121,6 +1141,11 @@ function csTypeObject(name0) {
     if (name0 == "string" || name0 == "String") {
         o["Empty"] = ""
         o["__cstype"] = "string"
+        return o
+    }
+    if (name0 == "double" || name0 == "Double") {
+        o["Parse"] = csDoubleParse
+        o["TryParse"] = csDoubleTryParse
         return o
     }
     var name = csTypeAlias(name0)

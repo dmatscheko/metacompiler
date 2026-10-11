@@ -451,6 +451,27 @@ func (rt *jsrt) addDartExterns(m map[string]func(args []uint64) uint64) {
 	}
 	// A double literal, and the value of a `.toDouble()`-shaped conversion.
 	m["js_dartflo"] = func(a []uint64) uint64 { return w(jsDartFlo{f: rt.toNumber(u(a[0]))}) }
+	// The `double` class's two statics, parse and tryParse (dartParseDouble);
+	// parse throws FormatException("Invalid double", source). Twins: js_dartdouble
+	// in languages/lib/dart-rt.metajs, the interpreter's hostGlobals["double"].
+	m["js_dartdouble"] = func(a []uint64) uint64 {
+		o := newJSObject()
+		o.set("parse", jsHostFunc("parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			f, ok := dartParseDouble(rt.dartStr(argAt(args, 0)))
+			if !ok {
+				panic(&jsThrown{value: rt.dartExcNew("FormatException", "", []interface{}{"Invalid double", argAt(args, 0)})})
+			}
+			return jsDartFlo{f: f}
+		}))
+		o.set("tryParse", jsHostFunc("tryParse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			f, ok := dartParseDouble(rt.dartStr(argAt(args, 0)))
+			if !ok {
+				return jsNull
+			}
+			return jsDartFlo{f: f}
+		}))
+		return w(o)
+	}
 	// An int literal a double cannot hold exactly: the emitter passes its DIGITS,
 	// because emitNum would already have rounded 9223372036854775807 to
 	// 9223372036854776000 on the way into the module. (text, radix); a literal past
@@ -2572,6 +2593,79 @@ func dartStrCompare(a, b []uint16) int {
 		return 1
 	}
 	return 0
+}
+
+// dartParseDouble is double.parse's reading of s. Twin of dsParseDouble in
+// languages/lib/dart-str.js, which states the rules.
+func dartParseDouble(s string) (float64, bool) {
+	u := utf16.Encode([]rune(s))
+	a, b := 0, len(u)
+	for a < b && dartIsWs(u[a]) {
+		a++
+	}
+	for b > a && dartIsWs(u[b-1]) {
+		b--
+	}
+	t := string(utf16.Decode(u[a:b]))
+	body := t
+	neg := false
+	if body != "" && (body[0] == '+' || body[0] == '-') {
+		neg = body[0] == '-'
+		body = body[1:]
+	}
+	switch body {
+	case "Infinity":
+		if neg {
+			return math.Inf(-1), true
+		}
+		return math.Inf(1), true
+	case "NaN":
+		return math.NaN(), true
+	}
+	isDig := func(i int) bool { return i < len(body) && body[i] >= '0' && body[i] <= '9' }
+	if len(body) == len(t) && len(body) > 2 && body[0] == '0' && (body[1] == 'x' || body[1] == 'X') {
+		for i := 2; i < len(body); i++ {
+			c := body[i] | 0x20
+			if !isDig(i) && (c < 'a' || c > 'f') {
+				return 0, false
+			}
+		}
+		f, _ := strconv.ParseFloat(body+"p0", 64)
+		return f, true
+	}
+	q, nd := 0, 0
+	for ; isDig(q); q++ {
+		nd++
+	}
+	if q < len(body) && body[q] == '.' {
+		for q++; isDig(q); q++ {
+			nd++
+		}
+	}
+	if nd == 0 {
+		return 0, false
+	}
+	if q < len(body) && (body[q] == 'e' || body[q] == 'E') {
+		q++
+		if q < len(body) && (body[q] == '+' || body[q] == '-') {
+			q++
+		}
+		e0 := q
+		for isDig(q) {
+			q++
+		}
+		if q == e0 {
+			return 0, false
+		}
+	}
+	if q != len(body) {
+		return 0, false
+	}
+	f, _ := strconv.ParseFloat(body, 64) // out of range is +-Inf with ErrRange
+	if neg {
+		f = -f
+	}
+	return f, true
 }
 
 // dartIsWs is String.trim's white space: Unicode White_Space and the BOM.

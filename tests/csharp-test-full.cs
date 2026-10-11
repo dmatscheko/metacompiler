@@ -2797,6 +2797,31 @@ b";                                                   // verbatim keeps the newl
                 && S43Gen<long>.N == 2 && d.Inst() == 1203);
         }
 
+        // ===== SECTION 44: double.Parse and double.TryParse =====
+        //
+        // NumberStyles.Float | AllowThousands under the invariant culture: white
+        // space, a sign, "," group separators, an exponent, the Infinity and NaN
+        // symbols ignoring case; out of range is an infinity (.NET Core 3.0 on), and
+        // a failed TryParse writes 0. No C# toolchain here: the values follow from
+        // the documented number styles.
+        static void S44()
+        {
+            string[] xs = { " -2.5e3 ", "1,000.25", "+.5", "1e400", "-infinity", "x", "1e", "0x10" };
+            Program.Check("s44a1", double.Parse(xs[0]) == -2500 && double.Parse(xs[1]) == 1000.25 && Double.Parse(xs[2]) == 0.5);
+            Program.Check("s44a2", double.Parse(xs[3]) > 1e308 && double.Parse(xs[3]) == double.Parse(xs[3]) * 2);
+            double d;
+            bool ok = double.TryParse(xs[4], out d);
+            Program.Check("s44a3", ok && d < -1e308);
+            string bad = "";
+            for (int i = 5; i < 8; i++)
+            {
+                double e = 7;
+                if (!double.TryParse(xs[i], out e) && e == 0) { bad = bad + "f"; }
+                try { double.Parse(xs[i]); } catch (FormatException) { bad = bad + "x"; }
+            }
+            Program.Check("s44a4", bad == "fxfxfx");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -2842,6 +2867,7 @@ b";                                                   // verbatim keeps the newl
             Program.S41(); // SECTION-CALL 41
             Program.S42(); // SECTION-CALL 42
             Program.S43(); // SECTION-CALL 43
+            Program.S44(); // SECTION-CALL 44
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

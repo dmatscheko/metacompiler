@@ -1,5 +1,11 @@
 package abnf
 
+import (
+	"math"
+	"strconv"
+	"strings"
+)
+
 // System.String's and System.Char's members: the Go twin's port of
 // languages/lib/csharp-strings.js, whose header has the rules. The strings are
 // worked on as UTF-16 units, as the MetaJS hosts see them; the classification
@@ -455,4 +461,73 @@ func (rt *jsrt) csxNewString(args []interface{}) string {
 		u = append(u, uint16(rt.csxCode(v)))
 	}
 	return strFromUnits(u)
+}
+
+// csxParseDouble is double.Parse's reading of s, false where it throws
+// FormatException. Twin of csxParseDouble in languages/lib/csharp-strings.js,
+// which states the rules.
+func csxParseDouble(s string) (float64, bool) {
+	numWs := func(c byte) bool { return c == ' ' || (c >= '\t' && c <= '\r') }
+	i, j := 0, len(s)
+	for i < j && numWs(s[i]) {
+		i++
+	}
+	for j > i && numWs(s[j-1]) {
+		j--
+	}
+	p := i
+	neg := false
+	if p < j && (s[p] == '+' || s[p] == '-') {
+		neg = s[p] == '-'
+		p++
+	}
+	num := []byte{}
+	nd := 0
+	for ; p < j; p++ {
+		c := s[p]
+		if c >= '0' && c <= '9' {
+			num = append(num, c)
+			nd++
+		} else if c != ',' || nd == 0 {
+			break
+		}
+	}
+	if p < j && s[p] == '.' {
+		num = append(num, '.')
+		for p++; p < j && s[p] >= '0' && s[p] <= '9'; p++ {
+			num = append(num, s[p])
+			nd++
+		}
+	}
+	if nd > 0 && p < j && (s[p] == 'e' || s[p] == 'E') {
+		k := p + 1
+		if k < j && (s[k] == '+' || s[k] == '-') {
+			k++
+		}
+		k0 := k
+		for k < j && s[k] >= '0' && s[k] <= '9' {
+			k++
+		}
+		if k > k0 {
+			num = append(num, s[p:k]...)
+			p = k
+		}
+	}
+	if nd > 0 && p == j {
+		v, _ := strconv.ParseFloat(string(num), 64) // out of range is +-Inf with ErrRange
+		if neg {
+			v = -v
+		}
+		return v, true
+	}
+	t := strings.TrimFunc(s, func(r rune) bool { return r < 0x10000 && csxIsWs(int(r)) })
+	switch strings.ToLower(t) {
+	case "infinity", "+infinity":
+		return math.Inf(1), true
+	case "-infinity":
+		return math.Inf(-1), true
+	case "nan", "+nan", "-nan":
+		return math.NaN(), true
+	}
+	return 0, false
 }

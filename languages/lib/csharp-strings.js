@@ -353,3 +353,68 @@ function csxNewString(args) {
     }
     return out
 }
+
+// double.Parse's reading of s - NumberStyles.Float | AllowThousands under the
+// invariant culture - or null where it throws FormatException. ASCII white
+// space (U+0009..U+000D, U+0020) around a sign, digits with "," group
+// separators after the first digit, an optional "." and digits, and an
+// exponent e[+-]digits; out of range is an infinity (.NET Core 3.0 on). Failing
+// that, the string trimmed by char.IsWhiteSpace may be one of the symbols,
+// ignoring case: Infinity, +Infinity, -Infinity, NaN, +NaN, -NaN.
+function csxParseDouble(s) {
+    var i = 0
+    var j = s.length
+    while (i < j && csxNumWs(s.charCodeAt(i))) { i = i + 1 }
+    while (j > i && csxNumWs(s.charCodeAt(j - 1))) { j = j - 1 }
+    var p = i
+    var neg = false
+    if (p < j && (s.charAt(p) == "+" || s.charAt(p) == "-")) {
+        neg = s.charAt(p) == "-"
+        p = p + 1
+    }
+    var num = ""
+    var nd = 0
+    while (p < j) {
+        var c = s.charAt(p)
+        if (c >= "0" && c <= "9") {
+            num = num + c
+            nd = nd + 1
+        } else if (c != "," || nd == 0) {
+            break
+        }
+        p = p + 1
+    }
+    if (p < j && s.charAt(p) == ".") {
+        num = num + "."
+        p = p + 1
+        while (p < j && s.charAt(p) >= "0" && s.charAt(p) <= "9") {
+            num = num + s.charAt(p)
+            nd = nd + 1
+            p = p + 1
+        }
+    }
+    if (nd > 0 && p < j && (s.charAt(p) == "e" || s.charAt(p) == "E")) {
+        var k = p + 1
+        if (k < j && (s.charAt(k) == "+" || s.charAt(k) == "-")) { k = k + 1 }
+        var k0 = k
+        while (k < j && s.charAt(k) >= "0" && s.charAt(k) <= "9") { k = k + 1 }
+        if (k > k0) {
+            num = num + s.substring(p, k)
+            p = k
+        }
+    }
+    if (nd > 0 && p == j) {
+        var v = parseFloat(num)
+        return neg ? -v : v
+    }
+    var a = 0
+    var b = s.length
+    while (a < b && csxIsWs(s.charCodeAt(a))) { a = a + 1 }
+    while (b > a && csxIsWs(s.charCodeAt(b - 1))) { b = b - 1 }
+    var w = s.substring(a, b).toLowerCase()
+    if (w == "infinity" || w == "+infinity") { return 1 / 0 }
+    if (w == "-infinity") { return -1 / 0 }
+    if (w == "nan" || w == "+nan" || w == "-nan") { return 0 / 0 }
+    return null
+}
+function csxNumWs(c) { return c == 32 || (c >= 9 && c <= 13) }

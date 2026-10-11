@@ -249,6 +249,55 @@ function dsTrim(s, left, right) {
     return s.substring(a, b)
 }
 
+// double.parse's reading of s, or null where it throws FormatException: trimmed
+// as by String.trim, an optional sign, then "Infinity", "NaN" or a decimal
+// floating-point literal - digits with an optional "." and digits, or "." and
+// digits, then an optional e[+-]digits - or, as the documentation's '0xFF'
+// example has it, an unsigned hexadecimal integer literal. The includer brings
+// lib/hex-float.js.
+function dsParseDouble(s) {
+    var t = dsTrim(s, true, true)
+    var p = 0
+    var neg = false
+    if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
+        neg = t.charAt(0) == "-"
+        p = 1
+    }
+    var body = t.substring(p, t.length)
+    if (body == "Infinity") { return neg ? -1 / 0 : 1 / 0 }
+    if (body == "NaN") { return 0 / 0 }
+    if (p == 0 && body.length > 2 && body.charAt(0) == "0" && (body.charAt(1) == "x" || body.charAt(1) == "X")) {
+        var h = anytype
+        h = hexFloatScan(body, 2)
+        if (h === null || h["end"] != body.length || body.indexOf(".") >= 0 || body.indexOf("p") >= 0 || body.indexOf("P") >= 0) { return null }
+        return h["v"]
+    }
+    var q = 0
+    var nd = 0
+    while (q < body.length && body.charAt(q) >= "0" && body.charAt(q) <= "9") {
+        q = q + 1
+        nd = nd + 1
+    }
+    if (q < body.length && body.charAt(q) == ".") {
+        q = q + 1
+        while (q < body.length && body.charAt(q) >= "0" && body.charAt(q) <= "9") {
+            q = q + 1
+            nd = nd + 1
+        }
+    }
+    if (nd == 0) { return null }
+    if (q < body.length && (body.charAt(q) == "e" || body.charAt(q) == "E")) {
+        q = q + 1
+        if (q < body.length && (body.charAt(q) == "+" || body.charAt(q) == "-")) { q = q + 1 }
+        var e0 = q
+        while (q < body.length && body.charAt(q) >= "0" && body.charAt(q) <= "9") { q = q + 1 }
+        if (q == e0) { return null }
+    }
+    if (q != body.length) { return null }
+    var v = parseFloat(body)
+    return neg ? -v : v
+}
+
 // The width, in code units, of the code point starting at i.
 function dsCpWidth(s, i) {
     var c = s.charCodeAt(i)

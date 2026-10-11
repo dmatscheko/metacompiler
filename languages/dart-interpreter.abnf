@@ -1380,6 +1380,7 @@ KwDeferred  = "deferred" KwEnd ;
     // dart:core's String, RegExp and List members, shared with layer 2; the hooks are
     // below dNum. A RegExp runs on the shared regex engine.
     include("lib/regex.js")
+    include("lib/hex-float.js")
     include("lib/dart-str.js")
 
     // takeAll empties the local stack and returns the items in push order.
@@ -1389,6 +1390,24 @@ KwDeferred  = "deferred" KwEnd ;
 
     // print(x) writes x's string form followed by a newline (Dart print).
     hostGlobals["print"] = function(x) { println(dstr(x)) }
+    // double.parse / double.tryParse: dsParseDouble in lib/dart-str.js; parse
+    // throws FormatException("Invalid double", source). They are the statics of a
+    // class object, which is how mcall reaches a static. Twin: js_dartdouble.
+    hostGlobals["double"] = {__isclass: true, __name: "double", __own: {}, __ctors: {}, __fields: [],
+                             __lin: [], __bases: [], __statics: {
+        parse: function(src) {
+            var f = anytype
+            f = dsParseDouble(dstr(src))
+            if (f === null) { dxRaiseA("FormatException", "", ["Invalid double", src]) }
+            return dFlo(f)
+        },
+        tryParse: function(src) {
+            var f = anytype
+            f = dsParseDouble(dstr(src))
+            if (f === null) { return null }
+            return dFlo(f)
+        }
+    }}
     // RegExp(source, {multiLine, caseSensitive, unicode, dotAll}): dsRegExp in
     // lib/dart-str.js. Twin: js_dartregexp.
     hostGlobals["RegExp"] = function() {

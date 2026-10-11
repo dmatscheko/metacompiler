@@ -509,6 +509,36 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 		o.set("__cstype", "string")
 		return o
 	}
+	// double.Parse / double.TryParse: csxParseDouble over the string; TryParse's
+	// out argument is a reference box, written 0 on a failure. Twins: the double
+	// type object in csharp-interpreter.abnf and lib/csharp-rt.metajs.
+	if name == "double" || name == "Double" {
+		o.set("Parse", jsHostFunc("Parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			v := argAt(args, 0)
+			if isUndefOrNull(v) {
+				rt.csThrow("ArgumentNullException", "Value cannot be null. (Parameter 's')")
+			}
+			f, ok := csxParseDouble(rt.toString(v))
+			if !ok {
+				rt.csThrow("FormatException", "The input string was not in a correct format.")
+			}
+			return jsJFlo{f: f, sty: floCS}
+		}))
+		o.set("TryParse", jsHostFunc("TryParse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			f, ok := 0.0, false
+			if t, isStr := argAt(args, 0).(string); isStr {
+				f, ok = csxParseDouble(t)
+				if !ok {
+					f = 0
+				}
+			}
+			if box, isObj := argAt(args, 1).(*jsObject); isObj {
+				rt.call(box.props["wb"], jsUndef, []interface{}{jsJFlo{f: f, sty: floCS}})
+			}
+			return ok
+		}))
+		return o
+	}
 	alias := map[string]string{"SByte": "sbyte", "Byte": "byte", "Int16": "short",
 		"UInt16": "ushort", "Int32": "int", "UInt32": "uint", "Int64": "long", "UInt64": "ulong"}
 	if a, ok := alias[name]; ok {

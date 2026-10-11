@@ -5181,6 +5181,8 @@ KwSuper     = "super" KwEnd ;
         rb.NewRet(callExt(rb, "js_dartregexp", [rf.Params[1]]))
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "RegExp"),
                                      callExt(b, "js_closure", [handle(reIdx), curScopeV])])
+        // double.parse / double.tryParse: the class's statics as an object.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "double"), callExt(b, "js_dartdouble", [])])
         if (anyTypedColl) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0etk"), callExt(b, "js_arr_new", [])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0etv"), callExt(b, "js_arr_new", [])])

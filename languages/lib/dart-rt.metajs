@@ -109,6 +109,7 @@ import "./runtime.metajs"
 // dart:core's String, RegExp and List members, shared with the interpreter half;
 // a RegExp runs on the shared regex engine.
 import "./regex.js"
+import "./hex-float.js"
 import "./dart-str.js"
 
 // ----- the rtk* hooks the shared runtime calls -------------------------------
@@ -1863,6 +1864,26 @@ function js_dartexctype(name) { return {__dexcType: name} }
 
 // A double literal, and the value of a `.toDouble()`-shaped conversion.
 function js_dartflo(v) { return flo(dtNum(v), 0) }
+
+// The `double` class's two statics, parse and tryParse: dsParseDouble in
+// lib/dart-str.js; parse throws FormatException("Invalid double", source). Go:
+// js_dartdouble in abnf/jsrtdart.go; the interpreter's hostGlobals["double"].
+function js_dartdouble() {
+    var o = {}
+    o["parse"] = function(src) {
+        var f = anytype
+        f = dsParseDouble(dtStr(src))
+        if (f === null) { throw dtExcNew("FormatException", "", ["Invalid double", src]) }
+        return flo(f, 0)
+    }
+    o["tryParse"] = function(src) {
+        var f = anytype
+        f = dsParseDouble(dtStr(src))
+        if (f === null) { return null }
+        return flo(f, 0)
+    }
+    return o
+}
 
 // An int literal a double cannot hold exactly: the emitter passes its DIGITS,
 // because emitNum would round 9223372036854775807 to
