@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-408** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-410** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -62,13 +62,6 @@ its report; anything structural there is a CORE ticket.
 ---
 
 # PY — Python
-
-### T-394 python: complex from negative ** fractional; augmented-assignment errors; hash; views · P1 · PY · IN PROGRESS (PY+CORE worker, round 14) [V]
-`(-3) ** 0.5` gives nan in all engines (CPython the complex
-(1.0605752387249068e-16+1.7320508075688772j): needs c_pow on a correctly rounded cos).
-`x = 4; x -= "s"` says "for -:" (CPython "for -=:"). `hash` builtin undefined.
-`print(d.items())` gives [('a', 1)] (CPython dict_items([('a', 1)]): keys/values/items
-are lists, not views). `tuple(t) is t` False; `hasattr(tuple, "__add__")` False.
 
 ---
 
@@ -157,16 +150,28 @@ self-referencing constant" error. (Handle reuse after free DECLINED: no refcount
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-392 the C floor's `str_to_num` reads "Inf…" as Infinity · P1 · CORE · IN PROGRESS (PY+CORE worker, round 14) [V]
-runtime.c ~2390: `"Inf"`, `"-Inf"` and any 8-character string starting with "Inf"
-("Infinitx") read as ±Infinity; JavaScript says NaN (js no longer goes through it).
-Probe every language that converts strings through it (python float(), ruby to_f,
-php, lua tonumber, kotlin toDouble...) against its oracle and fix the floor.
-
-### T-406 the python ratchet's -frozen interpreter run is at ~87M of the 100M brake · P2 · CORE · OPEN [V]
+### T-406 the python ratchet's -frozen interpreter run is at ~87M of the 100M brake · P2 · CORE · IN PROGRESS (CORE+PY worker, round 15) [V]
 Measured max steps per top-level call: python interpreter -frozen 87M (lua 72M, java
 61M next). Find the superlinear cost (php's was a quadratic dedupe in varsSince) or
 split the file as js is; leave every ratchet under ~60%.
+
+### T-408 string → float conversions in the other languages · P1 · CORE + per language · IN PROGRESS (CORE+PY worker, round 15) [V]
+lua: `tonumber("1e400")` / `"1e400"+1` nil/error in llvm.Run only (jsrtlua.go:325 treats
+ErrRange as failure; lua inf). swift: `Double("Inf")`, `"inf"`, `"nan"`, `"Infinity"`
+nil in all engines (swiftc inf/nan); `Double("1e400")` nil in llvm.Run (jsrtswift.go
+ErrRange). ruby: interpreter `"Infinity".to_f` ±Infinity (MRI 0.0); `Float("1e400")`
+raises in llvm.Run (MRI Infinity); `Float("0x10")`, `Float("0x1p4")`, `Float(".5")` raise
+(MRI 16.0/16.0/0.5); `"1_000".to_f` 1.0 (MRI 1000.0). metajs: the goja interpreter reads
+"0x10", "0b101", "0o17" as numbers, llvm.Run/native NaN (goja-vs-native split). dart
+`double.parse`/`tryParse` and C# `double.Parse`/`TryParse` are missing.
+
+### T-409 python: +2.36% bench after the T-394 commit; `__hash__ = None`; `id()` · P2 · PY · IN PROGRESS (CORE+PY worker, round 15) [V]
+bench python went 20.23G → 20.71G (+2.36%, outside the 1.13-1.73% spread; collections
+2462 → 2492) at 40c43710 (complex powers / aug ops / hash / tuple). Bisect inside the
+commit (fdlibm import? hash code?) and recover it. Also: a class attribute bound to
+None is lost (`class N: __hash__ = None; N.__hash__` AttributeError) so `__hash__ =
+None` is not honoured; `id()` missing; hasattr on type objects misses `__hash__`,
+`__lt__`, frozenset/bool/complex/set dunders; `hasattr(list, "__imul__")` False.
 
 ### T-396 corpus long tails: csharp, php, dart, java · P3 · per language · IN PROGRESS (CORPUS worker, round 18) [V]
 Measured after round 13. csharp 78 fails (unsafe pointers 10, generic names as values 7,
@@ -477,6 +482,8 @@ T-402 js/ts: function declarations are not hoisted — DONE e4a8fdc3 (with Annex
 T-404 swift: `.init(...)` as an implicit member; ambiguous static names — PARTIAL 8ed63e0f (declared-type slots: annotated let/var, property defaults, assignments, returns); sub-expression contexts are T-405
 T-401 the php ratchet's -frozen run is at ~94M of the 100M step brake — DONE c00a8c2f (root cause: quadratic varsSince; php -frozen 93M → 31M steps, no split needed)
 T-400 php: array pointer functions, ini_set, object ids, anonymous class names — DONE 4a852b8d (php-src corpus: interp 807→842, compiled 928→964, no losses)
+T-392 the C floor's `str_to_num` reads "Inf…" as Infinity — DONE 56400ff3 (floor = strconv.ParseFloat; python float(str) validates the whole string)
+T-394 python: complex from negative ** fractional; augmented-assignment errors; hash; views — DONE 40c43710 060190f5 fe27ddbc
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
