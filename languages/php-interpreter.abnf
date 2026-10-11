@@ -86,7 +86,12 @@ Program     <~~ runProgram(takeAll()) ~~>
             = LeadHtml { TopItem } ;
 // One item of a top level: a declaration or a statement. Factored out because a
 // BRACED namespace body holds exactly the same items (see NsDecl).
-TopItem     = Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
+TopItem     = HaltTail | Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement ;
+// __halt_compiler(); ends the program TEXT: whatever follows it is data (read back
+// through __COMPILER_HALT_OFFSET__), never parsed. Nothing is pushed, so the
+// program simply ends there.
+HaltTail    = ( "__halt_compiler" | "__HALT_COMPILER" ) "(" ")" ( ";" | "?>" )
+              :whitespace() { "\x00"..."\U0010ffff" } :whitespace(Whitespace) ;
 OpenTag     = "<?" :whitespace() CiP CiH CiP :whitespace(Whitespace) ;
 // Text before the first open tag. Unlike the '?>' form it keeps a leading newline:
 // only the newline directly after a CLOSE tag is swallowed.
@@ -289,7 +294,7 @@ EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
             = [ AttrGrp ] KwEnum Name <~~ push(up.in) ~~> [ ":" TypeAtom ] [ KwImplements ImplList ] "{" { EnumMember } "}" ;
 EnumMember  = EnumCase | MethodDecl | ClassConst | UseTrait ;
 EnumCase    <~~ push({ecase: makeConstRec(takeAll())}) ~~>
-            = KwCase ConstName [ PlainEq Expression ] ";" ;
+            = [ AttrGrp ] KwCase ConstName [ PlainEq Expression ] ";" ;
 SkipDq      = '"' :whitespace() { SkipStrEsc | SkipDqChar } '"' :whitespace(Whitespace) ;
 SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whitespace) ;
 SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
@@ -425,7 +430,12 @@ EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
 
 // global $a, $b; -- binds each local name to the GLOBAL variable's storage cell.
 GlobalStmt  <~~ push(makeGlobal(takeAll())) ~~>
-            = KwGlobal DollarName { "," DollarName } Semi ;
+            = KwGlobal GlobalName { "," GlobalName } Semi ;
+// 'global $$k;' / 'global ${expr};': the NAME is computed when the statement runs.
+GlobalName  = GlobalDyn | GlobalPlain ;
+GlobalPlain <~~ push({gn: pop()}) ~~> = DollarName ;
+GlobalDyn   <~~ push({gnT: pop()}) ~~>
+            = "$" ( VarRef | "{" Expression "}" ) ;
 
 Empty       <~~ push(makeConstStmt()) ~~>
             = ";" ;
@@ -436,8 +446,11 @@ UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
 IsTarget    <~~ push({istgt: pop()}) ~~>
             = TgtOnly ;
 
+// '(void) f();' (PHP 8.5) discards a result on purpose. It is legal only as a whole
+// statement, and since a statement's value is discarded anyway the cast adds nothing.
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
-            = Expression Semi ;
+            = [ VoidCast ] Expression Semi ;
+VoidCast    = "(" "void" ")" ;
 
 // Both spellings of every compound statement: braces, and PHP's colon/endXXX form.
 // The alternative form is tried FIRST because it is decided by a single ':' - it is
@@ -479,9 +492,11 @@ AltWhileBody = ":" AltBody KwEndwhile Semi ;
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Body ) ;
 AltForBody  = ":" AltBody KwEndfor Semi ;
-ForInit     <~~ push({k: "init", t: exprToStmt(pop())}) ~~> = Expression ;
-ForCond     <~~ push({k: "cond", t: pop()}) ~~> = Expression ;
-ForPost     <~~ push({k: "post", t: exprToStmt(pop())}) ~~> = Expression ;
+// Each part is a comma LIST, evaluated left to right; the condition is the value
+// of its last expression ('for ($i = 0, $j = 9; $i < $j; $i++, $j--)').
+ForInit     <~~ push({k: "init", t: exprToStmt(seqExprs(takeAll()))}) ~~> = Expression { "," Expression } ;
+ForCond     <~~ push({k: "cond", t: seqExprs(takeAll())}) ~~> = Expression { "," Expression } ;
+ForPost     <~~ push({k: "post", t: exprToStmt(seqExprs(takeAll()))}) ~~> = Expression { "," Expression } ;
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
 ForEach     <~~ push(makeForeach(takeAll())) ~~>
@@ -510,13 +525,15 @@ Continue    <~~ push(makeContinue(takeAll())) ~~>
             = KwContinue [ Expression ] Semi ;
 
 // Every expression pushes exactly one thunk: function() -> value.
-Expression  = SuppressExpr | YieldExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
+Expression  = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
 SuppressExpr = "@" Expression ;
 
 // yield / yield $v / yield $k => $v / yield from $iterable. It is an EXPRESSION in
 // PHP, and the presence of one anywhere in a body is what turns that function into a
 // generator - which is why the tag marks the enclosing definition (genMark).
 // 'yield from' must be tried first: 'from' would otherwise parse as a bare constant.
+// It is a UnaryExpr, not an Expression form, so a BARE yield is an operand like any
+// other ('yield * -1', '$gen + yield', 'yield yield').
 YieldExpr   <~~ push(makeYield(takeAll())) ~~>
             = KwYield ( YieldFrom | [ YieldVal [ "=>" YieldVal ] ] ) ;
 YieldFrom   <~~ push({yfrom: pop()}) ~~>
@@ -525,9 +542,10 @@ YieldVal    <~~ push({yval: pop()}) ~~>
             = Ternary ;
 
 // $b = &$a : both names then share ONE storage cell, so a write through either is
-// visible through the other (PHP references, not a copy).
+// visible through the other (PHP references, not a copy). A right side followed by
+// '(' is a CALL ('$e =& $fn($a)', '$r =& $o->m()'), which is RefAssignVal's form.
 RefAssign   <~~ push(makeRefAssign(takeAll())) ~~>
-            = Target PlainEq "&" !"&" Target ;
+            = Target PlainEq "&" !"&" Target !"(" ;
 // '$h =& f();' - the right side is a call to a function DECLARED to return by
 // reference ('function &f()'). Only a variable-like right side has a storage cell to
 // share, so this form cannot go through makeRefAssign; it degrades to an ordinary
@@ -582,8 +600,8 @@ AssignOp    = "**=" | "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%=" |
             | "&=" | "|=" | "^=" | PlainEq ;
 PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { TStep }
-            | CallTgtAhead CallHead TStep { TStep } ;
+            = CallTgtAhead ChainHead TStep { TStep }
+            | TargetHead { TStep } ;
 // The same target WITHOUT the lookahead, for the two places that already know they
 // are reading one: isset() and unset(). The guard exists only to stop a speculative
 // Target from re-parsing every ordinary call statement, and inside those brackets
@@ -600,12 +618,24 @@ TStep       = ArrowField | ArrowDyn | TIndex | TAppend ;
 // At least one step is required: 'foo() = 1' is not a target in any reading.
 CallHead    <~~ push({headT: pop()}) ~~>
             = Call ;
+// A member CHAIN that ends in a call is an assignable head too, on the same terms:
+// '$foo->f1()[0] = 1', '$a->getFn()->b = new stdClass', 'self::get()->vars[] = 1'.
+// The head is everything up to the LAST call; each ChainSeg must end in one, so the
+// plain steps after it are left to TStep (a ChainSeg that finds no call rolls back).
+// A field step directly before '(' is a method call, not a field.
+ChainHead   <~~ push({headT: pop()}) ~~>
+            = ChainExpr ;
+ChainExpr   <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary ChainSeg { ChainSeg } | ChainCall0 { ChainSeg } ;
+ChainCall0  = Call | StaticExpr | "(" Expression ")" ;
+ChainSeg    = { ChainPlain } ( MethodSfx | DynMethodSfx | CallSfx | StaticSfx ) ;
+ChainPlain  = PlFieldSfx !"(" | DynFieldSfx !"(" | IndexSfx ;
 // Is the text ahead a call-headed TARGET? Without this, 'Assignment = Target ...'
 // parses every ordinary call statement twice - once speculatively as a target, once
 // for real - which is 2^depth on nested calls (the documented Dart trap). The guard
-// answers in one capped forward scan: a name, a balanced argument list, at least one
-// '->' or '[' step, and then an assignment operator or '++'/'--' at bracket depth 0
-// before the statement ends. A false POSITIVE only costs the parse that would have
+// answers in one capped forward scan: a ')' that closes at bracket depth 0 and is
+// followed by a '->', '[' or '::' step, and then an assignment operator or '++'/'--'
+// at depth 0 before the expression ends. A false POSITIVE only costs the parse that would have
 // happened anyway; a false negative is a parse failure, so it errs toward yes.
 CallTgtAhead = :script(~~
     (function() {
@@ -658,38 +688,10 @@ CallTgtAhead = :script(~~
         }
         var i = sk(0)
         var ch0 = c.peek(i)
-        if (!(ch0 === 92 || ch0 === 95 || (ch0 >= 65 && ch0 <= 90) || (ch0 >= 97 && ch0 <= 122))) { return bad() }
-        var st = i
-        while (it < CAP) {
-            it = it + 1
-            var cn = c.peek(i)
-            if (cn === 92 || cn === 95 || (cn >= 48 && cn <= 57) || (cn >= 65 && cn <= 90) || (cn >= 97 && cn <= 122)) { i = i + 1; continue }
-            break
-        }
-        if (i === st) { return bad() }
-        i = sk(i)
-        if (c.peek(i) !== 40) { return bad() }
+        if (!(ch0 === 36 || ch0 === 40 || ch0 === 92 || ch0 === 95 || (ch0 >= 65 && ch0 <= 90) || (ch0 >= 97 && ch0 <= 122))) { return bad() }
+        // seen: a ')' closing at depth 0 and followed by a step ('->', '?->', '[', '::').
+        var seen = false
         var depth = 0
-        while (it < CAP) {
-            it = it + 1
-            var d = c.peek(i)
-            if (d < 0) { return bad() }
-            if (d === 39 || d === 34) { i = skStr(i, d); continue }
-            if (d === 40 || d === 91 || d === 123) { depth = depth + 1; i = i + 1; continue }
-            if (d === 41 || d === 93 || d === 125) {
-                depth = depth - 1
-                i = i + 1
-                if (depth === 0) { break }
-                continue
-            }
-            i = i + 1
-        }
-        if (depth !== 0) { return bad() }
-        i = sk(i)
-        var s0 = c.peek(i)
-        var step = (s0 === 91) || (s0 === 45 && c.peek(i + 1) === 62)
-        if (!step) { return bad() }
-        depth = 0
         while (it < CAP) {
             it = it + 1
             var g2 = c.peek(i)
@@ -700,20 +702,34 @@ CallTgtAhead = :script(~~
                 if (depth === 0) { return bad() }
                 depth = depth - 1
                 i = i + 1
+                if (depth === 0 && g2 === 41) {
+                    var j = sk(i)
+                    var s0 = c.peek(j)
+                    var s1 = c.peek(j + 1)
+                    if (s0 === 91 || (s0 === 45 && s1 === 62) || (s0 === 58 && s1 === 58)
+                        || (s0 === 63 && s1 === 45 && c.peek(j + 2) === 62)) { seen = true }
+                }
                 continue
             }
             if (depth === 0) {
                 if (g2 === 59 || g2 === 44) { return bad() }
                 var n1 = c.peek(i + 1)
                 var n2 = c.peek(i + 2)
-                if (g2 === 43 && n1 === 43) { return undefined }
-                if (g2 === 45 && n1 === 45) { return undefined }
-                if (g2 === 61 && n1 !== 61 && n1 !== 62) { return undefined }
-                if (g2 === 63 && n1 === 63 && n2 === 61) { return undefined }
-                if ((g2 === 42 || g2 === 60 || g2 === 62) && n1 === g2 && n2 === 61) { return undefined }
+                var op = false
+                if (g2 === 43 && n1 === 43) { op = true }
+                if (g2 === 45 && n1 === 45) { op = true }
+                if (g2 === 61 && n1 !== 61 && n1 !== 62) { op = true }
+                if (g2 === 63 && n1 === 63 && n2 === 61) { op = true }
+                if ((g2 === 42 || g2 === 60 || g2 === 62) && n1 === g2 && n2 === 61) { op = true }
                 if (n1 === 61 && (g2 === 43 || g2 === 45 || g2 === 42 || g2 === 47 || g2 === 37
-                                  || g2 === 46 || g2 === 38 || g2 === 124 || g2 === 94)) { return undefined }
+                                  || g2 === 46 || g2 === 38 || g2 === 124 || g2 === 94)) { op = true }
+                if (op) { return seen ? undefined : bad() }
                 if (g2 === 61) { i = i + 2; continue }
+                if ((g2 === 33 || g2 === 60 || g2 === 62) && n1 === 61) {   // != <= >= <=> !==
+                    i = i + 2
+                    while (c.peek(i) === 61 || c.peek(i) === 62) { i = i + 1 }
+                    continue
+                }
             }
             i = i + 1
         }
@@ -815,7 +831,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | BitNot | NotOp
-            | Suppress | ThrowExpr | PowExpr ;
+            | Suppress | ThrowExpr | PrintExpr | YieldExpr | PowExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
@@ -843,13 +859,19 @@ CloneWith   <~~ var w = pop(); push(makeCloneWith(pop(), w)) ~~>
 // throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ;
+// print is an EXPRESSION whose value is always 1 ('$ok ?: print "x"', a match arm,
+// an argument). As a statement it is EchoStmt's, which is tried first.
+PrintExpr   <~~ push(makePrintExpr(pop())) ~~>
+            = "print" KwEnd Expression ;
 // $x instanceof Foo : the runtime type test, matching the class itself, every base
 // class and every implemented interface. Tried before the plain unary path; if no
 // 'instanceof' follows, this alternative fails and rolls back.
 InstanceofExpr <~~ push(makeInstanceof(takeAll())) ~~>
             = PostfixExpr KwInstanceof InstRef ;
+// The class may be a variable, a name, or a parenthesized expression yielding
+// one ('$o instanceof ("std" . $c)').
 InstRef     = InstDyn | InstName ;
-InstDyn     <~~ push({idyn: pop()}) ~~> = VarRef ;
+InstDyn     <~~ push({idyn: pop()}) ~~> = VarRef | "(" Expression ")" ;
 InstName    <~~ push({iname: up.in}) ~~> = ExtName ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
@@ -862,7 +884,74 @@ Pos         = "+" UnaryExpr ;
 // deliberately item-NEUTRAL (no tag) exactly like Pos.
 Suppress    = "@" UnaryExpr ;
 
-PostfixExpr = IncDec | CallMember ;
+// An assignment is also an OPERAND: '1 + $a = 1', 'null !== $k = key($a)',
+// 'false && $y = clone $x' - PHP's grammar takes 'variable = expr' wherever an
+// expression goes, and the operand's right side extends as far as an ordinary
+// assignment's would. AsgnAhead keeps the speculative Target off every operand: it
+// answers in one capped scan whether an assignment operator follows at bracket
+// depth 0 before the expression ends.
+PostfixExpr = AsgnOperand | IncDec | CallMember ;
+AsgnOperand = AsgnAhead ( RefAssign | Assignment ) ;
+AsgnAhead   = :script(~~
+    (function() {
+        var CAP = 20000
+        function bad() { return abnf.newToken("\x01noasgn", 0) }
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 13 || c.peek(i) === 10) { i = i + 1 }
+        if (c.peek(i) !== 36) { return bad() }
+        var depth = 0
+        var it = 0
+        while (it < CAP) {
+            it = it + 1
+            var g = c.peek(i)
+            if (g < 0) { return bad() }
+            if (g === 39 || g === 34) {
+                var q = g
+                i = i + 1
+                var h = 0
+                while (h < CAP) {
+                    h = h + 1
+                    var e = c.peek(i)
+                    if (e < 0) { return bad() }
+                    if (e === 92) { i = i + 2; continue }
+                    i = i + 1
+                    if (e === q) { break }
+                }
+                continue
+            }
+            if (g === 40 || g === 91 || g === 123) { depth = depth + 1; i = i + 1; continue }
+            if (g === 41 || g === 93 || g === 125) {
+                if (depth === 0) { return bad() }
+                depth = depth - 1
+                i = i + 1
+                continue
+            }
+            if (depth === 0) {
+                if (g === 59 || g === 44) { return bad() }
+                var n1 = c.peek(i + 1)
+                var n2 = c.peek(i + 2)
+                if (g === 61) {
+                    if (n1 !== 61 && n1 !== 62) { return undefined }
+                    i = i + 2
+                    while (c.peek(i) === 61) { i = i + 1 }
+                    continue
+                }
+                if ((g === 33 || g === 60 || g === 62) && n1 === 61) {   // != <= >= !==
+                    i = i + 2
+                    while (c.peek(i) === 61 || c.peek(i) === 62) { i = i + 1 }
+                    continue
+                }
+                if (g === 63 && n1 === 63 && n2 === 61) { return undefined }
+                if ((g === 42 || g === 60 || g === 62) && n1 === g && n2 === 61) { return undefined }
+                if (n1 === 61 && (g === 43 || g === 45 || g === 42 || g === 47 || g === 37
+                                  || g === 46 || g === 38 || g === 124 || g === 94)) { return undefined }
+            }
+            i = i + 1
+        }
+        return bad()
+    })()
+~~) ;
+
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
@@ -946,7 +1035,7 @@ StaticSfx   <~~ push(makeStaticSfx(takeAll())) ~~>
 Primary     = "(" Expression ")"
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
             | IncludeExpr
-            | HeredocLit | DqStr | SqStr | NumLit
+            | HeredocLit | DqStr | SqStr | BinStr | NumLit
             | True | False | Null
             | IssetExpr | EmptyTgt | EmptyExpr | GlobalsRead | GlobalsAll | VarVar | VarRef | StaticExpr | Call | ConstRef ;
 // $GLOBALS[e] as a value: the main frame's variable, read without creating it.
@@ -1008,10 +1097,11 @@ ArrowBody   <~~ push({body: arrowBody(pop())}) ~~>
 Match       <~~ push(makeMatch(takeAll())) ~~>
             = KwMatch "(" Expression ")" "{" [ MatchArm { "," MatchArm } [ "," ] ] "}" ;
 MatchArm    = MatchDefault | MatchCase ;
+// A condition list may end in a comma ('false, 0, => ...', 'default, => ...').
 MatchDefault <~~ push({marm: {conds: null, body: pop()}}) ~~>
-            = KwDefault "=>" Expression ;
+            = KwDefault [ "," ] "=>" Expression ;
 MatchCase   <~~ push({marm: makeArm(takeAll())}) ~~>
-            = MatchCond { "," MatchCond } "=>" Expression ;
+            = MatchCond { "," MatchCond } [ "," ] "=>" Expression ;
 MatchCond   <~~ push({mcond: pop()}) ~~>
             = Expression ;
 
@@ -1112,6 +1202,22 @@ DollarName  <~~ push(noteVarName(up.in)) ~~>
 // Double quoted strings interpolate '$var' and '{$expr}'; single quoted are literal.
 // A '$' or '{' that does not begin an interpolation falls through to TplSpecial as
 // a literal character (so no negative lookahead is needed).
+// b"..." / b'...' / b<<<EOT: the BINARY string prefix, a no-op since PHP strings are
+// byte strings anyway. BinAhead admits it only when the quote or '<<<' follows the 'b'
+// directly, so a name that merely starts with b is never split.
+BinStr      = BinAhead ( "b" | "B" ) ( HeredocLit | DqStr | SqStr ) ;
+BinAhead    = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 13 || c.peek(i) === 10) { i = i + 1 }
+        var b = c.peek(i)
+        if (b !== 98 && b !== 66) { return abnf.newToken("\x01nobin", 0) }
+        var q = c.peek(i + 1)
+        if (q === 34 || q === 39) { return undefined }
+        if (q === 60 && c.peek(i + 2) === 60 && c.peek(i + 3) === 60) { return undefined }
+        return abnf.newToken("\x01nobin", 0)
+    })()
+~~) ;
 DqStr       <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplBraceExpr | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
@@ -1660,7 +1766,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeGlobal(names) {
         return function() {
             for (var i = 0; i < names.length; i++) {
-                scopePut(scopes[scopes.length - 1], names[i], varCellIn(globalScope, names[i]))
+                var nm = names[i].gnT != undefined ? "$" + phpStr(names[i].gnT()) : names[i].gn
+                scopePut(scopes[scopes.length - 1], nm, varCellIn(globalScope, nm))
             }
             return null
         }
@@ -3857,6 +3964,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
 
     // ----- echo / print -----
+    function seqExprs(xs) {
+        if (xs.length == 1) { return xs[0] }
+        return function() {
+            var v = anytype
+            v = null
+            for (var i = 0; i < xs.length; i++) { v = xs[i]() }
+            return v
+        }
+    }
+    function makePrintExpr(e) {
+        var st = makeEcho([null, e])
+        var one = makeConst(phpIntLit("1"))
+        return function() { st(); return one() }
+    }
     function makeEcho(items) {
         var args = items.slice(1)
         return function() {
@@ -3950,14 +4071,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function resolveRefPhpV(ref, viv) {
         var o = anytype
         if (ref.headT != null && ref.headT != undefined) {
-            o = ref.headT()
+            o = phpCopy(ref.headT())   // a by-value array result is a temporary
             for (var h = 0; h < ref.path.length - 1; h++) {
                 var hs = stepOf(ref.path[h])
                 if (hs.key != undefined) { o = phpGetProp(o, hs.key) }
                 else if (hs.append === true) { o = null }
                 else { o = phpIndex(o, hs.idx()) }
             }
-            return {obj: o, last: stepOf(ref.path[ref.path.length - 1])}
+            var hl = stepOf(ref.path[ref.path.length - 1])
+            // A null call result written through '[...]' becomes a TEMPORARY array, so
+            // the write succeeds and is seen by nobody (`f()[0] = 1` with f returning null).
+            // Twin of emitRefPathV in php-to-llvm-ir.abnf.
+            if (viv && (o === null || o === undefined) && hl.key == undefined) { o = newArr() }
+            return {obj: o, last: hl}
         }
         var sc = ref.sref == null ? null : ref.sref()
         o = sc == null ? getVar(refName(ref)) : deref(sc.v)
@@ -4140,6 +4266,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // the ordinary array/property path runs unchanged.
     function strOffsetSet(ref, v) {
         if (ref.path.length != 1) { return false }
+        if (ref.headT != null && ref.headT != undefined) { return false }   // a call result is a temporary
         var st = ref.path[0]
         if (st.idx == undefined) { return false }
         var base = anytype

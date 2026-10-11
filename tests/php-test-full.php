@@ -1885,6 +1885,81 @@ function s46() {
         && sprintf("%g", $g[2]) === "4.94066e-324" && sprintf("%.1g|%.1g", $g[3], $g[4]) === "2|0.1");
 }
 
+// ===== SECTION 47: expression-position forms =====
+// A member chain that ends in a call is an assignable head: the write lands in
+// what the call returned, so it is seen through an object and lost in a by-value
+// array or a null (both temporaries). print is an expression worth 1, a bare yield
+// is an operand, an assignment is an operand ('1 + $w = 2'), each part of a for
+// header is a comma list, 'global' takes a computed name, b"" is a plain string,
+// '(void)' discards a statement's value, a match condition list may end in a
+// comma, instanceof takes a parenthesized class expression, and an enum case
+// takes attributes. PHP manual: Operator Precedence, Generators, for, Variable
+// variables, match, Type Operators.
+#[Attribute]
+class S47Attr {}
+class S47Box {
+    public $p = 0;
+    public $arr = [1];
+    function me() { return $this; }
+    function arr() { return $this->arr; }
+    function nul() { return null; }
+}
+enum S47E {
+    #[S47Attr]
+    case A;
+}
+function s47gen() {
+    $v = 3 + yield 5;
+    yield $v;
+}
+function s47glob() {
+    $n = "s47gv";
+    global $$n;
+    global ${"s47" . "gw"};
+    return $s47gv + $s47gw;
+}
+function s47val() { return 4; }
+function s47() {
+    $b = new S47Box();
+    $b->me()->p = 7;
+    $b->me()->arr[] = 2;
+    $b->arr()[0] = 9;
+    $b->nul()[0] = 1;
+    check("ex1", $b->p === 7 && count($b->arr) === 2 && $b->arr[0] === 1);
+    $b->me()->p ??= 5;
+    $b->me()->p += 1;
+    check("ex2", $b->p === 8);
+    $r = print "";
+    $t = false ?: print "";
+    check("ex3", $r === 1 && $t === 1);
+    $z = 1 + $w = 2;
+    $k = null;
+    check("ex4", $z === 3 && $w === 2 && (null !== $k = 5) && $k === 5);
+    $n = 0;
+    for ($i = 0, $j = 3; $i < $j; $i++, $j--) { $n++; }
+    $q = 0;
+    for ($m = 0; $q = $m, $m < 2; $m++) { }
+    check("ex5", $n === 2 && $i === 2 && $j === 1 && $q === 2);
+    $GLOBALS["s47gv"] = 11;
+    $GLOBALS["s47gw"] = 20;
+    check("ex6", s47glob() === 31);
+    check("ex7", b"x" . b'y' === "xy");
+    $cnt = 0;
+    (void) $cnt++;
+    check("ex8", $cnt === 1);
+    $mv = match (0) { 1, 0, => "z", default, => "d" };
+    $md = match (5) { 1, 0, => "z", default, => "d" };
+    check("ex9", $mv === "z" && $md === "d");
+    $cls = "S47";
+    check("ex10", $b instanceof ($cls . "Box") && !($b instanceof ("S47E")));
+    check("ex11", S47E::A->name === "A");
+    $got = [];
+    foreach (s47gen() as $y) { $got[] = $y; }
+    check("ex12", $got === [5, 3]);
+    $rv =& s47val();
+    check("ex13", $rv === 4);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1937,6 +2012,7 @@ function main() {
     s44(); // SECTION-CALL 44
     s45(); // SECTION-CALL 45
     s46(); // SECTION-CALL 46
+    s47(); // SECTION-CALL 47
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
