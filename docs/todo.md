@@ -87,7 +87,7 @@ type objects; the `object` type object is bare. The java ratchet's -frozen peak 
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-427 csharp: System.Math; iterator re-enumeration; foreach over GetEnumerator · P1 · CS · OPEN [V spec-only]
+### T-427 csharp: System.Math; iterator re-enumeration; foreach over GetEnumerator · P1 · CS · IN PROGRESS (CS worker, round 22) [V spec-only]
 (a) `Math.Max(1, 2)`: "unknown name: Math" (interp) / "unknown method 'Max'" (llvm.Run); System.Math is absent.
 (b) interpreter: an iterator whose body foreach-es another iterator object (`Evens(Nat())`) yields "0 4" instead of
 "0 2 4 6" (compiled right). Compiled generators are one-shot: enumerating the same IEnumerable twice resumes where
@@ -100,15 +100,6 @@ it stopped; C# restarts with a fresh enumerator (affects foreach, LINQ, string.J
 digits and its switch to exponent notation may not be the fixed window `csFloStr32`
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
-
-### T-421 csharp: string.Format, StringComparison, remaining `default` contexts, LINQ · P2 · CS · IN PROGRESS (CS worker, round 21) [V spec-only]
-`string.Format`, `StringComparison`, `StringSplitOptions`, `"a".Normalize()` unknown.
-String.Compare/CompareTo deliberately absent (culture collation), so `List<string>.Sort()`
-fails loudly. `List.Capacity` missing. `default` still untyped as a method argument,
-lambda body, `yield return`, async Task<T> body, field/property assignment; `== default`
-is a null test only for a nullable local. Find/TryGetValue/GetValueOrDefault on an
-empty untyped collection answer null instead of default(T). `Split((char[])null)`
-crashes. LINQ extension methods unavailable on lists.
 
 ---
 
@@ -482,6 +473,7 @@ T-423 swift: [Double]() element typing on append; inout through field/element �
 T-420 php: named-argument errors, class-relative callables, scalar property writes, compiled goto out of try/catch (js_ctl_goto), hashed key index for long arrays (n=4000: 643G→3.4G) — DONE 47a950f6
 T-424 swift: member shadows global, line-start paren, closure defer, Array + literal typing, print(to:) through a path, inout write-back after defer/catch — DONE 89d8a44c
 T-425 php: non-callable Error, case-insensitive class names, missing-class errors, builtin string callables, goto-out-of-finally compile error, LSB forwarding through callables, callback TypeErrors, numeral interpolation keys — DONE 5921cef7
+T-421 csharp: String.Format/standard numeric formats, StringComparison/SplitOptions/Normalize, System.Linq operators, remaining default contexts, target-typed new(), typed empty collections, List capacity, collection initializers (culture collation stays a loud failure) — DONE b7898d34
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
