@@ -3639,7 +3639,7 @@ long mk_host(long id) { long h = cell_new(8); sa(h, id); return h; }
 long mk_bound(long recv, long mid) { long h = cell_new(9); sa(h, recv); sb(h, mid); return h; }
 
 /* Method ids, grouped by receiver:
- *   1..9   array   push pop shift unshift reverse slice indexOf join concat
+ *   1..10  array   push pop shift unshift reverse slice indexOf join concat sort
  *   20..29 string  charCodeAt charAt indexOf replace slice substring split
  *                  toUpperCase toLowerCase trim
  *   40..41 function apply call
@@ -3654,6 +3654,7 @@ long method_id_array(long name) {
 	if (str_eq_c(name, "indexOf")) { return 7; }
 	if (str_eq_c(name, "join"))    { return 8; }
 	if (str_eq_c(name, "concat"))  { return 9; }
+	if (str_eq_c(name, "sort"))    { return 10; }
 	return 0;
 }
 long method_id_string(long name) {
@@ -4489,6 +4490,42 @@ long str_index_of(long h, long sub) {
 	return -1;
 }
 
+/* Array.prototype.sort (ECMA-262 23.1.3.30): a STABLE top-down merge sort, in
+ * place. undefined sorts last and never reaches the comparator; without one the
+ * elements compare as strings, as `<` compares two strings. Twin of arraySort in
+ * abnf/jsrt.go, which runs the same merges so a comparator with side effects sees
+ * the same calls in both engines. */
+int sort_before(long cmp, long a, long b) {
+	long pair;
+	if (a == H_UNDEF) { return 0; }
+	if (b == H_UNDEF) { return 1; }
+	if (cmp == H_UNDEF) { return js_compare(to_string(a), to_string(b)) == -1; }
+	pair = mk_arr();
+	arr_push(pair, a);
+	arr_push(pair, b);
+	return d_lt(to_number(js_call(cmp, H_UNDEF, pair)), d_from_long(0));
+}
+void sort_merge(long cmp, long a, long tmp, long lo, long hi) {
+	long mid;
+	long i;
+	long j;
+	long k;
+	if (hi - lo < 2) { return; }
+	mid = lo + (hi - lo) / 2;
+	sort_merge(cmp, a, tmp, lo, mid);
+	sort_merge(cmp, a, tmp, mid, hi);
+	i = lo; j = mid; k = lo;
+	while (i < mid && j < hi) {
+		if (sort_before(cmp, arr_get(a, j), arr_get(a, i))) { arr_set(tmp, k, arr_get(a, j)); j = j + 1; }
+		else { arr_set(tmp, k, arr_get(a, i)); i = i + 1; }
+		k = k + 1;
+	}
+	while (i < mid) { arr_set(tmp, k, arr_get(a, i)); i = i + 1; k = k + 1; }
+	while (j < hi) { arr_set(tmp, k, arr_get(a, j)); j = j + 1; k = k + 1; }
+	k = lo;
+	while (k < hi) { arr_set(a, k, arr_get(tmp, k)); k = k + 1; }
+}
+
 long builtin_method(long recv, long mid, long args) {
 	long t = tag_of(recv);
 	if (mid == 60) { return gen_next(recv, args); }   /* generator.next(v) */
@@ -4598,6 +4635,13 @@ long builtin_method(long recv, long mid, long args) {
 				i = i + 1;
 			}
 			return out;
+		}
+		if (mid == 10) {                                      /* sort, in place */
+			long tmp = mk_arr();
+			long i = 0;
+			while (i < arr_len(recv)) { arr_push(tmp, H_UNDEF); i = i + 1; }
+			sort_merge(arg_at(args, 0), recv, tmp, 0, arr_len(recv));
+			return recv;
 		}
 	}
 	if (t == 4) {

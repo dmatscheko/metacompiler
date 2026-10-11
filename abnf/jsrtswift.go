@@ -2024,7 +2024,6 @@ func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
 		return name + "(" + strings.Join(parts, ", ") + ")", true
 	}
 
-
 	// The type descriptor itself (`print(P.self)`) is its name.
 	if _, ok := o.props["__isclass"]; ok {
 		if n, ok := o.props["__name"].(string); ok {

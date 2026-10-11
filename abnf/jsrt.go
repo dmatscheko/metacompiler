@@ -2766,7 +2766,7 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			switch ks {
 			case "length":
 				return float64(len(o.elems))
-			case "push", "pop", "shift", "unshift", "reverse", "slice", "indexOf", "join", "concat":
+			case "push", "pop", "shift", "unshift", "reverse", "slice", "indexOf", "join", "concat", "sort":
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
@@ -11917,6 +11917,46 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	return nil
 }
 
+// arraySort is Array.prototype.sort (ECMA-262 23.1.3.30) over a[lo:hi]: a STABLE
+// top-down merge sort. undefined sorts last and never reaches the comparator;
+// without one the elements compare as strings, as `<` compares two strings. Twin
+// of sort_merge in languages/lib/runtime.c: the same merges, so a comparator with
+// side effects sees the same calls in both engines.
+func (rt *jsrt) arraySort(cmp interface{}, a, tmp []interface{}, lo, hi int) {
+	if hi-lo < 2 {
+		return
+	}
+	before := func(x, y interface{}) bool {
+		if x == jsUndef {
+			return false
+		}
+		if y == jsUndef {
+			return true
+		}
+		if cmp == jsUndef {
+			return rt.jsCompare(rt.toString(x), rt.toString(y)) == -1
+		}
+		return rt.toNumber(rt.call(cmp, jsUndef, []interface{}{x, y})) < 0
+	}
+	mid := lo + (hi-lo)/2
+	rt.arraySort(cmp, a, tmp, lo, mid)
+	rt.arraySort(cmp, a, tmp, mid, hi)
+	i, j, k := lo, mid, lo
+	for i < mid && j < hi {
+		if before(a[j], a[i]) {
+			tmp[k] = a[j]
+			j++
+		} else {
+			tmp[k] = a[i]
+			i++
+		}
+		k++
+	}
+	k += copy(tmp[k:], a[i:mid])
+	copy(tmp[k:], a[j:hi])
+	copy(a[lo:hi], tmp[lo:hi])
+}
+
 // builtinMethod implements the string and array methods of the subset, plus
 // apply/call on function values.
 func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
@@ -12023,6 +12063,11 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 				}
 			}
 			return out
+		case "sort":
+			recv.dropIdx()
+			tmp := make([]interface{}, len(recv.elems))
+			rt.arraySort(argAt(args, 0), recv.elems, tmp, 0, len(recv.elems))
+			return recv
 		}
 	case string:
 		switch m.name {

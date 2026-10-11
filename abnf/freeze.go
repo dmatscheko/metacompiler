@@ -2,6 +2,7 @@ package abnf
 
 import (
 	"fmt"
+	"go/format"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -167,7 +168,12 @@ func Freeze(grammarPath string, outDir string) error {
 		"// LLVM IR compiler). In frozen mode (-frozen) the Go core parses every\n" +
 		"// annotation script with it - without goja.\n\n" +
 		"var jsAgrammar = " + serialized + "\n"
-	if err := ioutil.WriteFile(outDir+string(os.PathSeparator)+"jsagrammar.go", []byte(agrammarSrc), 0644); err != nil {
+	// gofmt'd, so `gofmt -l abnf/` stays empty with the snapshot checked in.
+	agrammarGo, err := format.Source([]byte(agrammarSrc))
+	if err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(outDir+string(os.PathSeparator)+"jsagrammar.go", agrammarGo, 0644); err != nil {
 		return err
 	}
 

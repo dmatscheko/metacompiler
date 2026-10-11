@@ -310,6 +310,19 @@ function s09() {
     var ix = [1, 2, 1, 2, 1]
     check("arr17", ix.indexOf(1, 1) === 2 && ix.indexOf(1, -1) === 4 &&
                    ix.indexOf(2, -9) === 1 && ix.indexOf(1, 9) === -1)
+    // sort is in place, STABLE, puts undefined last without asking the comparator,
+    // and compares as strings when there is no comparator (node's answers).
+    var so = [3, 1, 10, 2]
+    var calls = 0
+    var sr = so.sort(function(x, y) { calls = calls + 1; return x - y })
+    check("arr18", sr === so && so.join(",") === "1,2,3,10" && calls > 0)
+    check("arr19", ["b", 10, 9, "a", 1].sort().join(",") === "1,10,9,a,b")
+    var st = [{k: 1, n: "a"}, {k: 0, n: "b"}, {k: 1, n: "c"}, {k: 0, n: "d"}]
+    st.sort(function(x, y) { return x.k - y.k })
+    check("arr20", st[0].n + st[1].n + st[2].n + st[3].n === "bdac")
+    var su = [3, undefined, 1]
+    su.sort(function(x, y) { return x - y })
+    check("arr21", su[0] === 1 && su[1] === 3 && su[2] === undefined && su.length === 3)
 }
 
 // ===== SECTION 10: objects =====
