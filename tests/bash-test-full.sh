@@ -1693,6 +1693,23 @@ declare -a eb32'
   local -a eg32
   eg32=x
   check dp19 "$(declare -p eg32)" 'declare -a eg32=([0]="x")'
+  # A SCALAR declared without a value is unset but declared, and so is a local
+  # unset in the function that declared it (its attributes are dropped); a global
+  # unset, or a local whose function returned, is gone.
+  local eh32
+  check dp20 "$(declare -p eh32)" 'declare -- eh32'
+  local -i ei32=4
+  unset ei32
+  check dp21 "$(declare -p ei32)" 'declare -- ei32'
+  ei32=1+1
+  check dp22 "$ei32" '1+1'
+  declare -g gd32
+  check dp23 "$(declare -p gd32)" 'declare -- gd32'
+  declare -g gu32=1
+  unset gu32
+  check dp24 "$(declare -p gu32 2>/dev/null)" ''
+  s32l
+  check dp25 "$(declare -p sx32 2>/dev/null)" ''
   # A value may itself begin with "=": `x==y` assigns "=y", also as a prefix
   # assignment, to an element, after += and to IFS.
   local e32
@@ -1713,6 +1730,7 @@ declare -a eb32'
   IFS="$o32"
 }
 s32q() { echo "$q32"; }
+s32l() { local sx32; }
 
 # ===== SECTION 33: word-splitting boundaries, read's remainder, $0, and a
 #       pattern operator on a subscripted expansion =====

@@ -1276,6 +1276,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
     var rtArrMark = rtDecl("rt_arr_mark", false, [1])
     var rtArrDmark = rtDecl("rt_arr_dmark", false, [1])
+    var rtArrSmark = rtDecl("rt_arr_smark", false, [1])
     var rtFinList = rtDecl("rt_finlist", true, [1])
     var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
@@ -2523,6 +2524,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // why subDepth is tested beside `localize` and not inside it.
                 if (subDepth > 0 && !(localize && curFrame != null)) { attrPushUndo(names[j]) }
                 if (localize && curFrame != null) {
+                    curFrame.locs["$" + names[j]] = true
                     attrPushUndo(names[j])
                     b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[j])))
                     // A local declaration starts from a CLEAN SLATE. bash does not inherit
@@ -2543,6 +2545,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = emitAssign(b, asgs[j], assoc)
                 }
                 else if (localize && !isArray) { storeVarRaw(b, names[j], unsetPtr(b)) }
+                if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             }
             storeStatusI(b, 0)
             return b
@@ -3709,6 +3712,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         intVars["$" + sp0.name] = false
                         upVars["$" + sp0.name] = false
                         loVars["$" + sp0.name] = false
+                        // A local unset in the function that declared it stays declared
+                        // (rt_arr_smark). Twin of localHere in bash-interpreter.abnf.
+                        if (curFrame != null && hasOwn(curFrame.locs, "$" + sp0.name)) { b.NewCall(rtArrSmark, gepStr(b, sp0.name)) }
                     } else {
                         var kk = sp0.key
                         if (!hasOwn(assocArrays, "$" + sp0.name)) { kk = numToStr(parseDec(kk)) }
@@ -4151,7 +4157,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The local-save-stack depth at entry: every ret unwinds back to it.
             var dslot = entry.NewAlloca(i32)
             entry.NewStore(entry.NewLoad(i32, gLsTop), dslot)
-            curFrame = {depth: dslot}
+            curFrame = {depth: dslot, locs: {}}
             // Every attribute the body declares is function-local, exactly like the value.
             var undoBase = attrUndo.length
             // $FUNCNAME: a local of the call, so the save stack restores it on return.

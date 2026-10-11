@@ -60,7 +60,7 @@ char *varnames[1024];
 int ls_id[512];
 char *ls_val[512];
 int ls_acnt[512];
-int ls_amark[512];   /* the binding's array marks (rt_arr_mark 1, rt_arr_dmark 2), restored too */
+int ls_amark[512];   /* the binding's marks (rt_arr_mark 1, rt_arr_dmark 2, rt_arr_smark 4), restored too */
 int ls_top;
 
 /* The array save stack the entries above index into. LASMAX = 4096. */
@@ -208,6 +208,8 @@ int rt_arr_clear(char *nm);
 int rt_arr_mark(char *nm);
 int rt_arr_dmark(char *nm);
 int rt_arr_dmarked(char *nm);
+int rt_arr_smark(char *nm);
+int rt_arr_smarked(char *nm);
 char *rt_finlist(char *v);
 int rt_isfin(char *v);
 int rt_arr_append(char *nm, char *f);
@@ -2020,6 +2022,14 @@ int rt_arr_dmark(char *nm) {
     return rt_arr_set(rt_strcat("\003", nm), "d", empty);
 }
 
+/* A SCALAR DECLARED WITHOUT A VALUE (`declare x`, or a local unset in the
+ * function that declared it) is not set, but `declare -p x` prints
+ * `declare -- x`: the row ("\003NAME", "s"). Twin of dclVars in
+ * bash-interpreter.abnf. */
+int rt_arr_smark(char *nm) {
+    return rt_arr_set(rt_strcat("\003", nm), "s", empty);
+}
+
 /* Is the row name rn NAME's mark? */
 int rt_ismark(char *rn, char *nm) {
     int i = 0;
@@ -2044,6 +2054,10 @@ int rt_arr_marked(char *nm) {
 
 int rt_arr_dmarked(char *nm) {
     return rt_arr_haskmark(nm, "d");
+}
+
+int rt_arr_smarked(char *nm) {
+    return rt_arr_haskmark(nm, "s");
 }
 
 /* i32 rt_arr_clear(i8* nm): drop every entry of one array, and its mark. */
@@ -2638,6 +2652,14 @@ int rt_declp(char *nm, char *flag, int assoc) {
             rt_prints("\n");
             return 0;
         }
+        if (v == &unset_marker[0] && rt_arr_smarked(nm) != 0) {
+            rt_prints("declare -");
+            rt_prints(flag[0] == 0 ? "-" : flag);
+            rt_prints(" ");
+            rt_prints(nm);
+            rt_prints("\n");
+            return 0;
+        }
         if (v == &unset_marker[0]) {
             /* On the standard error CHANNEL, so a 2>/dev/null silences it exactly
              * as the shell does - the same rule rt_nounset follows. */
@@ -3080,7 +3102,7 @@ int rt_push_local(int id)
     ls_amark[t] = 0;
     if (arr_n > 0) {
         char *nm = varnames[id];
-        ls_amark[t] = rt_arr_marked(nm) + 2 * rt_arr_dmarked(nm);
+        ls_amark[t] = rt_arr_marked(nm) + 2 * rt_arr_dmarked(nm) + 4 * rt_arr_smarked(nm);
         int i = 0;
         while (i < arr_n) {
             if (rt_streq(nm, arr_nm[i]) != 0) {
@@ -3118,8 +3140,9 @@ int rt_pop_locals(int d)
                 rt_arr_set(nm, las_k[i], las_v[i]);
                 i = i + 1;
             }
-            if (ls_amark[t] == 1 || ls_amark[t] == 3) rt_arr_mark(nm);
-            if (ls_amark[t] >= 2) rt_arr_dmark(nm);
+            if ((ls_amark[t] & 1) != 0) rt_arr_mark(nm);
+            if ((ls_amark[t] & 2) != 0) rt_arr_dmark(nm);
+            if ((ls_amark[t] & 4) != 0) rt_arr_smark(nm);
         }
         las_top = las_top - cnt;
         t = ls_top;

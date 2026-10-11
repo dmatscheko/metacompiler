@@ -1123,6 +1123,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             intVars["$" + e.name] = e.ai
             upVars["$" + e.name] = e.au
             loVars["$" + e.name] = e.al
+            dclVars["$" + e.name] = e.ad
             if (e.hasArr) { arrs[arrKey(e.name)] = e.arr } else { arrs[arrKey(e.name)] = null }
         }
     }
@@ -1140,9 +1141,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
         fr.push({name: name, had: isSetVar(name), val: getVarVal(name),
                  ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                 hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false, decl: false}})
+                 ad: attrOn(dclVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false, decl: false}})
     }
 
+    // Is NAME a local of the INNERMOST call frame?
+    function localHere(name) {
+        if (localFrames.length == 0) { return false }
+        var fr = localFrames[localFrames.length - 1]
+        var i
+        for (i = 0; i < fr.length; i++) { if (fr[i].name == name) { return true } }
+        return false
+    }
     function allDigits(s) {
         if (s.length == 0) { return false }
         var i
@@ -1448,8 +1457,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var at = varAttrs(name)
         if (declIsArr(name)) { return "declare -" + at + " " + declArrAssign(name) }
         if (declOnly(name)) { return "declare -" + at + " " + name }
-        if (!isSetVar(name)) { return "" }
-        return "declare -" + ((at == "") ? "-" : at) + " " + name + "=" + declQuote(getVarVal(name))
+        var head = "declare -" + ((at == "") ? "-" : at) + " " + name
+        if (!isSetVar(name)) { return attrOn(dclVars, name) ? head : "" }
+        return head + "=" + declQuote(getVarVal(name))
     }
 
     // `unset` drops the attributes with the value, in bash and here.
@@ -1458,6 +1468,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         intVars["$" + name] = false
         upVars["$" + name] = false
         loVars["$" + name] = false
+        dclVars["$" + name] = false
     }
     // ${!prefix*} / ${!prefix@}: the set variable names with that prefix, sorted.
     //     $ Zq=1; Zw=2; echo "${!Z*}"   ->  Zq Zw
@@ -1995,6 +2006,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     runAssign(asgs[k], assoc)
                 }
                 else if (localize && !isArray) { unsetVar(names[k]) }
+                if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
             }
             setStatus(0)
             return 0
@@ -2323,6 +2335,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var intVars = {}   // names declared with `declare -i`: their assignments are arithmetic
     var upVars = {}    // `declare -u`: EVERY later assignment is upper-cased, not just the first
     var loVars = {}    // `declare -l`: likewise, lower-cased
+    // DECLARED WITHOUT A VALUE: `declare x` leaves x unset, yet `declare -p x` prints
+    // `declare -- x`. So does a local unset in the frame that declared it - bash keeps the
+    // local binding, unset, until the function returns.
+    var dclVars = {}
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a call frame unwinding a `local` - so membership alone is not the answer.
     function attrOn(m, name) {
@@ -2352,7 +2368,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ak = arrKey(nm)
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
             out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false, decl: false},
-                      ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm)})
+                      ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), ad: attrOn(dclVars, nm)})
         }
         return out
     }
@@ -2364,6 +2380,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             intVars["$" + nm] = snap[i].ai
             upVars["$" + nm] = snap[i].au
             loVars["$" + nm] = snap[i].al
+            dclVars["$" + nm] = snap[i].ad
         }
         // A name FIRST SEEN inside the subshell has no saved entry, and leaving it is
         // the same leak the other way round: `( declare -A m=([z]=1) )` must not leave m
@@ -3754,7 +3771,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ui
             for (ui = 0; ui < args.length; ui++) {
                 var sp = splitSubscript(args[ui])
-                if (sp.key == null) { unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name) }
+                if (sp.key == null) {
+                    unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name)
+                    if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
+                }
                 else { arrDel(sp.name, sp.key) }
             }
             setStatus(0)
