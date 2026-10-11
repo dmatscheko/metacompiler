@@ -99,7 +99,7 @@ type objects; the `object` type object is bare. The java ratchet's -frozen peak 
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-430 csharp: double constants; LINQ over user IEnumerable; Math tails · P2 · CS · OPEN [V spec-only]
+### T-430 csharp: double constants; LINQ over user IEnumerable; Math tails · P2 · CS · IN PROGRESS (CS worker, round 23) [V spec-only]
 (a) `double.NaN`, `double.PositiveInfinity`, `NegativeInfinity`, `Epsilon`, `MaxValue`, `MinValue` absent (the double
 type object only has Parse/TryParse; interpreter renders `[object Object]`). (b) LINQ / `string.Join` over a user class
 implementing IEnumerable<T> (`bag.Where(...)`, `bag.Sum()`) unsupported in all engines (extension dispatch looks for a
