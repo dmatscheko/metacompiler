@@ -5018,7 +5018,7 @@ NotMemberKw = :script(~~
     // least one digit, an optional exponent) or a hexadecimal (0x, hex digits with an
     // optional point, a REQUIRED binary exponent p), and a decimal or hexadecimal may
     // end in one of f F d D. Nothing else may follow: "1.5abc" and "Inf" are errors.
-    // Answers {ok, v, empty}; `empty` selects java's "empty String" message. A hex
+    // Answers {ok, v, empty}; `empty` selects java's "empty String" message. A
     // mantissa of any length is rounded ONCE, to a float for Float.parseFloat (f32).
     function kJavaFloat(sv, f32) {
         var a = 0
@@ -5081,6 +5081,7 @@ NotMemberKw = :script(~~
                 }
                 if (j != n) { return {ok: false, v: 0, empty: false} }
                 v = parseFloat(t.substring(i, n))
+                if (f32) { v = kDecF32(t.substring(i, n), v) }
             }
         }
         return {ok: true, v: neg ? -v : v, empty: false}
@@ -5114,6 +5115,78 @@ NotMemberKw = :script(~~
         if (keepBits < 0) { sticky = 1 }
         if (half == 1 && (sticky == 1 || keep % 2 == 1)) { keep = keep + 1 }
         return keep * Math.pow(2, lastExp)
+    }
+    // Float.parseFloat of an unsigned decimal t whose double is d: rounded ONCE to
+    // binary32. Rounding d again is right except when d is exactly halfway between two
+    // floats; then the exact decimal decides (kDecCmp), and a true tie goes to even.
+    // Every float midpoint, including 2^-150 and 2^128 - 2^103, is a double.
+    // Twin of k2DecF32 in languages/lib/kotlin-rt.metajs; Go parses at 32 bits.
+    function kDecF32(t, d) {
+        var f = coreF32Round(d)
+        if (f == d) { return f }
+        var other = 2 * d - f
+        if (f == Math.pow(2, 1024)) {
+            other = Math.pow(2, 128) - Math.pow(2, 104)
+            if (d != Math.pow(2, 128) - Math.pow(2, 103)) { return f }
+        } else if (coreF32Round(other) != other) { return f }
+        var c = kDecCmp(t, d)
+        if (c == 0) { return f }
+        if ((c > 0) == (f > other)) { return f }
+        return other
+    }
+    // The sign of (the decimal text t) - d, exactly: d's exact decimal digits are
+    // built by scaling its integer significand by 2 or 5 per binary exponent step.
+    function kDecCmp(t, d) {
+        var e = 0
+        var m = d
+        while (m != Math.floor(m)) { m = m * 2; e = e - 1 }
+        while (m > 9007199254740992 && m % 2 == 0) { m = m / 2; e = e + 1 }
+        var dg = []
+        while (m > 0) { dg.push(m % 10); m = Math.floor(m / 10) }
+        var k = e < 0 ? 5 : 2
+        var steps = e < 0 ? -e : e
+        for (var s = 0; s < steps; s++) {
+            var carry = 0
+            for (var q = 0; q < dg.length; q++) { var pr = dg[q] * k + carry; dg[q] = pr % 10; carry = Math.floor(pr / 10) }
+            while (carry > 0) { dg.push(carry % 10); carry = Math.floor(carry / 10) }
+        }
+        var ds = []
+        for (var r = dg.length - 1; r >= 0; r--) { ds.push(dg[r]) }
+        var xs = []
+        var xe = 0
+        var j = 0
+        var frac = false
+        while (j < t.length && t.charAt(j) != "e" && t.charAt(j) != "E") {
+            if (t.charAt(j) == ".") { frac = true }
+            else { xs.push(t.charCodeAt(j) - 48); if (frac) { xe = xe - 1 } }
+            j++
+        }
+        if (j < t.length) {
+            j++
+            var es = 1
+            if (t.charAt(j) == "+" || t.charAt(j) == "-") { if (t.charAt(j) == "-") { es = -1 }; j++ }
+            var ev = 0
+            while (j < t.length) { if (ev < 100000) { ev = ev * 10 + (t.charCodeAt(j) - 48) }; j++ }
+            xe = xe + es * ev
+        }
+        return kDigitsCmp(xs, xe, ds, e < 0 ? e : 0)
+    }
+    // Compares a * 10^ae with b * 10^be for digit lists a and b (most significant
+    // first), b without leading zeros and nonzero.
+    function kDigitsCmp(a, ae, b, be) {
+        var i = 0
+        while (i < a.length && a[i] == 0) { i++ }
+        if (i == a.length) { return -1 }
+        var ma = a.length - i + ae
+        var mb = b.length + be
+        if (ma != mb) { return ma > mb ? 1 : -1 }
+        var n = Math.max(a.length - i, b.length)
+        for (var p = 0; p < n; p++) {
+            var ca = i + p < a.length ? a[i + p] : 0
+            var cb = p < b.length ? b[p] : 0
+            if (ca != cb) { return ca > cb ? 1 : -1 }
+        }
+        return 0
     }
     function kHexVal(c) {
         if (c >= 48 && c <= 57) { return c - 48 }

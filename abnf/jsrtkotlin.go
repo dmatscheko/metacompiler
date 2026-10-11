@@ -3195,14 +3195,15 @@ func ktJavaFloat(s string, f32 bool) (float64, bool, bool) {
 		}
 		num := t[i:n]
 		size := 64
+		if f32 {
+			// Float.parseFloat rounds the text straight to binary32, not through a
+			// double, which differs when the double lands on a float midpoint.
+			size = 32
+		}
 		if hex {
 			// Go's own hex floats agree with java's once the grammar is checked: 0x,
-			// digits, an optional point, and the p exponent. Float.parseFloat rounds a
-			// hex mantissa straight to binary32, so that is parsed at 32 bits.
+			// digits, an optional point, and the p exponent.
 			num = "0x" + t[i+2:n]
-			if f32 {
-				size = 32
-			}
 		}
 		f, err := strconv.ParseFloat(num, size)
 		if err != nil && !errors.Is(err, strconv.ErrRange) {

@@ -2867,6 +2867,132 @@ function k2HexRound(ds, e2, p, emin) {
     return keep * Math.pow(2, lastExp)
 }
 
+// k2DecF32 is kDecF32: Float.parseFloat of an unsigned decimal t whose double is
+// d, rounded ONCE to binary32. Only a d exactly halfway between two floats can
+// round differently; then the exact decimal decides and a true tie goes to even.
+function k2DecF32(t, d) {
+    var f = rtF32Round(d)
+    if (f == d) { return f }
+    var other = 2 * d - f
+    if (f == Math.pow(2, 1024)) {
+        other = rtScale2(16777215, 104)
+        if (d != rtScale2(33554431, 103)) { return f }
+    } else if (rtF32Round(other) != other) {
+        return f
+    }
+    var c = k2DecCmp(t, d)
+    if (c == 0) { return f }
+    if ((c > 0) == (f > other)) { return f }
+    return other
+}
+
+// k2DecCmp is kDecCmp: the sign of (the decimal text t) - d, exactly, from d's
+// exact decimal digits.
+function k2DecCmp(t, d) {
+    var e = 0
+    var m = d
+    while (m != Math.floor(m)) {
+        m = m * 2
+        e = e - 1
+    }
+    while (m > 9007199254740992 && m % 2 == 0) {
+        m = m / 2
+        e = e + 1
+    }
+    var dg = []
+    while (m > 0) {
+        dg.push(m % 10)
+        m = Math.floor(m / 10)
+    }
+    var k = 2
+    var steps = e
+    if (e < 0) {
+        k = 5
+        steps = -e
+    }
+    var s = 0
+    while (s < steps) {
+        var carry = 0
+        var q = 0
+        while (q < dg.length) {
+            var pr = dg[q] * k + carry
+            dg[q] = pr % 10
+            carry = Math.floor(pr / 10)
+            q = q + 1
+        }
+        while (carry > 0) {
+            dg.push(carry % 10)
+            carry = Math.floor(carry / 10)
+        }
+        s = s + 1
+    }
+    var ds = []
+    var r = dg.length - 1
+    while (r >= 0) {
+        ds.push(dg[r])
+        r = r - 1
+    }
+    var xs = []
+    var xe = 0
+    var j = 0
+    var frac = false
+    while (j < t.length && t.charAt(j) != "e" && t.charAt(j) != "E") {
+        if (t.charAt(j) == ".") {
+            frac = true
+        } else {
+            xs.push(t.charCodeAt(j) - 48)
+            if (frac) { xe = xe - 1 }
+        }
+        j = j + 1
+    }
+    if (j < t.length) {
+        j = j + 1
+        var es = 1
+        if (t.charAt(j) == "+" || t.charAt(j) == "-") {
+            if (t.charAt(j) == "-") { es = -1 }
+            j = j + 1
+        }
+        var ev = 0
+        while (j < t.length) {
+            if (ev < 100000) { ev = ev * 10 + (t.charCodeAt(j) - 48) }
+            j = j + 1
+        }
+        xe = xe + es * ev
+    }
+    var de = 0
+    if (e < 0) { de = e }
+    return k2DigitsCmp(xs, xe, ds, de)
+}
+
+// k2DigitsCmp is kDigitsCmp: compares a * 10^ae with b * 10^be for digit lists
+// (most significant first), b without leading zeros and nonzero.
+function k2DigitsCmp(a, ae, b, be) {
+    var i = 0
+    while (i < a.length && a[i] == 0) { i = i + 1 }
+    if (i == a.length) { return -1 }
+    var ma = a.length - i + ae
+    var mb = b.length + be
+    if (ma != mb) {
+        if (ma > mb) { return 1 }
+        return -1
+    }
+    var n = a.length - i
+    if (b.length > n) { n = b.length }
+    var p = 0
+    while (p < n) {
+        var ca = 0
+        if (i + p < a.length) { ca = a[i + p] }
+        var cb = 0
+        if (p < b.length) { cb = b[p] }
+        if (ca != cb) {
+            if (ca > cb) { return 1 }
+            return -1
+        }
+        p = p + 1
+    }
+    return 0
+}
+
 // k2DigitsFit is kDigitsFit: do these decimal digits fit an Int (or a Long),
 // with the sign already taken off? Compared as text against the limit.
 function k2DigitsFit(body, neg, long) {
@@ -2884,7 +3010,7 @@ function k2DigitsFit(body, neg, long) {
 // {ok, v, empty}. After String.trim (every char up to ' '), an optional sign,
 // then NaN, Infinity, a decimal (at least one digit, an optional point and
 // exponent) or a hexadecimal (0x, hex digits, an optional point, a REQUIRED p
-// exponent), and a decimal or hexadecimal may end in one of f F d D. A hex
+// exponent), and a decimal or hexadecimal may end in one of f F d D. A
 // mantissa of any length is rounded ONCE, to a float for Float.parseFloat (f32).
 function k2JavaFloat(s, f32) {
     var a = 0
@@ -2977,6 +3103,7 @@ function k2JavaFloat(s, f32) {
             }
             if (j != n) { return {ok: false, v: 0, empty: false} }
             v = parseFloat(t.substring(i, n))
+            if (f32) { v = k2DecF32(t.substring(i, n), v) }
         }
     }
     if (neg) { v = -v }

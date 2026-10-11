@@ -4384,6 +4384,13 @@ fun sec85() {
     check("ax85q", us[5].toDouble() == 1.0000000000000002 && s85text { us[6].toFloat() } == "1.0000001")
     check("ax85r", us[7].toDouble() == 4.9E-324 && s85text { us[8].toFloat() } == "1.4E-45" &&
         s85text { us[9].toFloat() } == "3.4028235E38")
+    // A decimal is rounded once to binary32 too: these land on a float midpoint as
+    // doubles, and their exact digits decide which way.
+    val ms = listOf("1.00000005960464477539062500000001", "1.0000000596046448", "1.000000059604644775390625",
+        "3.40282356779733661637539395458142568448e38", "7.0064923216240853546186479164495806564013097093825788587853414194489554134293031e-46")
+    check("ax85s", s85text { ms[0].toFloat() } == "1.0000001" && s85text { ms[1].toFloat() } == "1.0000001" &&
+        s85text { ms[2].toFloat() } == "1.0" && s85text { ms[3].toFloat() } == "Infinity" &&
+        s85text { ms[4].toFloatOrNull() } == "1.4E-45")
 }
 
 
