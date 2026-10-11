@@ -944,6 +944,19 @@ function goAddrNameC(t, name, pos) {
     regSt(pos, "*" + (it == "" ? "?" : it))
     return t
 }
+// The value list of a := / = / var: every value is followed by its {sty} (StoreExpr),
+// split here into the thunks and their static types.
+function goSplitSty(xs) {
+    var ts = []
+    var tys = []
+    var i = 0
+    while (i < xs.length) {
+        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push("") }
+        else if (xs[i].sty != undefined && tys.length > 0) { tys[tys.length - 1] = xs[i].sty }
+        i = i + 1
+    }
+    return {ts: ts, tys: tys}
+}
 // A composite literal of type ty: a fresh value.
 function goLitC(t, ty, pos) {
     regSt(pos, "=" + ty)

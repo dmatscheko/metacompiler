@@ -3097,6 +3097,12 @@ func s49() {
 	a.a = 1
 	h.a = 2
 	check("vs9", ap[0].a == 124 && ap[1].a == 77)
+	k1 := T49{3}
+	c1, d1 := k1, k1
+	c1.a = 4
+	var e1, f1 = k1, c1
+	f1.a = 6
+	check("vs10", k1.a == 3 && c1.a == 4 && d1.a == 3 && e1.a == 3 && f1.a == 6)
 }
 
 func main() {

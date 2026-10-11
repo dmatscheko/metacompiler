@@ -464,7 +464,7 @@ CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 
 // var x int = 5 / var s string -- the zero value depends on the type.
 VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
-            = "var" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList <~~ push({vend: up.pos}) ~~> ] [ ";" ] ;
+            = "var" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
 VType       <~~ push({ty: noteTy(up.in)}) ~~>
             = Type ;
 
@@ -473,7 +473,7 @@ VType       <~~ push({ty: noteTy(up.in)}) ~~>
 VarGroup    <~~ push(makeVarGroup(takeAll())) ~~>
             = "var" KwEnd "(" { VarSpec } ")" [ ";" ] ;
 VarSpec     <~~ push(makeVarDecl(takeAll())) ~~>
-            = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList <~~ push({vend: up.pos}) ~~> ] [ ";" ] ;
+            = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
 
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
@@ -535,14 +535,14 @@ AssertType  <~~ push({at: firstType(up.in)}) ~~> = Type ;
 ExprOnly    <~~ clrDeclNames(); push(exprToStmt(pop())) ~~>
             = Expression ;
 
-ShortDecl   <~~ push(makeShortDecl(takeAll(), up.pos)) ~~>
+ShortDecl   <~~ push(makeShortDecl(takeAll())) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } ":=" ExprList ;
 
 IncDecStmt  <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // a = e / a, b = b, a / p.x = e / s[i] = e / a += e
-Assign      <~~ push(makeAssign(takeAll(), up.pos)) ~~>
+Assign      <~~ push(makeAssign(takeAll())) ~~>
             = Target { "," Target } AssignOp <~~ push({op: up.in}) ~~> ExprList ;
 // Longest first: '&^=' before '&=', and the bare '=' last of all.
 AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "=" ;
@@ -566,7 +566,9 @@ TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(cAssignName(up.in))
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-ExprList    = Expression { "," Expression } ;
+ExprList    = StoreExpr { "," StoreExpr } ;
+// One value of a := / = / var, followed by the static type it reports (goSplitSty).
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stAt(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -3627,7 +3629,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     // items = [ref..., {op}, exprThunks...]
-    function makeAssign(items, pos) {
+    function makeAssign(items) {
         // Not a declaration: clear the names a ':=' left behind, or a for-init
         // spelled `for i = 0; ...` inherits them (see cokDeclNames).
         lastDeclNames = []
@@ -3638,15 +3640,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (items[i].op != undefined) { op = items[i].op; i++; break }
             refs.push(items[i])
         }
-        var exprs = items.slice(i)
+        var sp = goSplitSty(items.slice(i))
+        var exprs = sp.ts
         // A struct value the right side reports is copied into any target (an
         // interface too); otherwise a plain name copies by its own declared type.
         // Twin of makeAssign in go-interpreter.abnf.
-        if (op == "=" && refs.length == exprs.length && exprs.length > 0) {
-            var lref = refs[refs.length - 1]
-            var cty = goStCopyTy(stAt(pos))
-            if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
-            exprs[exprs.length - 1] = goStoreThunk(exprs[exprs.length - 1], cty)
+        if (op == "=" && refs.length == exprs.length) {
+            for (var ai = 0; ai < exprs.length; ai++) {
+                var lref = refs[ai]
+                var cty = goStCopyTy(sp.tys[ai])
+                if (cty == "" && lref.path.length == 0 && lref.stars == 0) { cty = goStCopyTy(cTyLookup(lref.name)) }
+                exprs[ai] = goStoreThunk(exprs[ai], cty)
+            }
         }
         return function(b) {
             if (op != "=") {
@@ -3727,7 +3732,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return b
         }
     }
-    function makeShortDecl(items, pos) {
+    function makeShortDecl(items) {
         var names = []
         var i = 0
         for (; i < items.length; i++) {
@@ -3735,11 +3740,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             names.push(items[i])
         }
         lastDeclNames = names
-        var exprs = items.slice(i)
-        if (names.length == exprs.length && exprs.length > 0) {
-            var sty = stAt(pos)
-            cBindTy(names[names.length - 1], stBare(sty))
-            exprs[exprs.length - 1] = goStoreThunk(exprs[exprs.length - 1], goStCopyTy(sty))
+        // Each value reports its static type (StoreExpr): a struct value is copied and
+        // the new name takes the type, so `b := a` copies and `q := p` aliases.
+        var sp = goSplitSty(items.slice(i))
+        var exprs = sp.ts
+        if (names.length == exprs.length) {
+            for (var si = 0; si < exprs.length; si++) {
+                cBindTy(names[si], stBare(sp.tys[si]))
+                exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
+            }
         }
         return function(b) {
             var vals = []
@@ -3846,15 +3855,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var ty = ""
         if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
         if (ty != "") { for (var dn = 0; dn < names.length; dn++) { goDeclTys["$" + names[dn]] = ty; cBindTy(names[dn], ty) } }
-        var inits = items.slice(i)
-        // {vend}: the initializers' end, where the last one reports its type, so
-        // `var i any = a` copies too. Twin of makeVarDecl in go-interpreter.abnf.
-        if (inits.length > 0 && inits[inits.length - 1].vend != undefined) {
-            var vend = inits.pop().vend
-            if (inits.length == names.length) {
-                var vty = stAt(vend)
-                if (ty == "") { cBindTy(names[names.length - 1], stBare(vty)) }
-                inits[inits.length - 1] = goStoreThunk(inits[inits.length - 1], goStCopyTy(vty))
+        // Each initializer reports its static type (StoreExpr), so `var i any = a`
+        // copies too. Twin of makeVarDecl in go-interpreter.abnf.
+        var sp = goSplitSty(items.slice(i))
+        var inits = sp.ts
+        if (inits.length == names.length) {
+            for (var vi = 0; vi < inits.length; vi++) {
+                if (ty == "") { cBindTy(names[vi], stBare(sp.tys[vi])) }
+                inits[vi] = goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi]))
             }
         }
         return function(b) {
