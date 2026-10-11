@@ -901,12 +901,6 @@ function swEqual(l, r, depth) {
         var rn = r === undefined || r === null
         return ln && rn
     }
-    // A Unicode.Scalar against a scalar or a String literal: by scalar.
-    if (swIsScalar(l) || swIsScalar(r)) {
-        var lt = swScalarText(l)
-        if (lt === null) { return false }
-        return lt === swScalarText(r)
-    }
     // A float box compares BY VALUE and ACROSS the box boundary: `1.0 == 1` holds
     // in Swift (the untyped literal takes the Double type). It has to be spelled
     // before the integer path, which would compare 1.5 against Int8(1) as the
@@ -941,6 +935,13 @@ function swEqual(l, r, depth) {
         if (!swEqual(l["lo"], r["lo"], depth + 1)) { return false }
         if (!swEqual(l["hi"], r["hi"], depth + 1)) { return false }
         return (l["closed"] === true) === (r["closed"] === true)
+    }
+    // A Unicode.Scalar against a scalar or a String literal: by scalar. Tested
+    // inline and after the numeric arms: this function is on the path of every ==.
+    if ((typeof l == "object" && l["__usc"] !== undefined) || (typeof r == "object" && r["__usc"] !== undefined)) {
+        var lt = swScalarText(l)
+        if (lt === null) { return false }
+        return lt === swScalarText(r)
     }
     if (swIsObj(l) && swIsObj(r)) {
         if (l === r) { return true }
@@ -2253,7 +2254,8 @@ function js_swadoptlike(old, v, ty) {
         if (floIs(v)) { return v }
         return swAdoptNum(v) ? sintConv(v, sintWidth(old), sintUns(old)) : v
     }
-    if (swIsScalar(old)) { return js_swadopt(v, "Unicode.Scalar") }
+    // Inline, as this runs at every write to an adopting slot.
+    if (typeof old == "object" && old["__usc"] !== undefined) { return js_swadopt(v, "Unicode.Scalar") }
     return v
 }
 
