@@ -1592,6 +1592,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 for (var z = 0; z < t.length; z++) { if (t.charAt(z) != "0" && t.charAt(z) != "_") { ok = false } }
             }
         }
+        // A base that is not a power of two converts at most 4300 digits
+        // (sys.get_int_max_str_digits()); the text is still validated first.
+        var nd = pyIntDigitsOver(t, b)
         var acc = anytype
         acc = 0
         var prevDigit = prefixed
@@ -1604,15 +1607,30 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var d = "0123456789abcdefghijklmnopqrstuvwxyz".indexOf(ch.toLowerCase())
             if (d < 0 || d >= b) { ok = false }
-            else if (typeof acc == "number" && acc <= (bigMaxNum - d) / b) { acc = acc * b + d }
-            else { acc = binOp("+", binOp("*", acc, b), d) }
+            else if (nd == 0) {
+                if (typeof acc == "number" && acc <= (bigMaxNum - d) / b) { acc = acc * b + d }
+                else { acc = binOp("+", binOp("*", acc, b), d) }
+            }
             prevDigit = true
         }
         if (!ok || !prevDigit) {
             pyListErr("ValueError", "invalid literal for int() with base " + base + ": " + pyStrRepr(s))
         }
+        if (nd > 0) {
+            pyListErr("ValueError", "Exceeds the limit (4300 digits) for integer string conversion: value has " + nd +
+                                    " digits; use sys.set_int_max_str_digits() to increase the limit")
+        }
         if (neg) { return binOp("-", 0, acc) }
         return acc
+    }
+    // The digit count of T in base B when CPython's int() refuses it for its
+    // length, else 0. Twin of pyIntDigitsOver in abnf/jsrtpynum.go and
+    // lib/python-rt.metajs.
+    function pyIntDigitsOver(t, b) {
+        if (t.length <= 4300 || b == 2 || b == 4 || b == 8 || b == 16 || b == 32) { return 0 }
+        var n = 0
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) != "_") { n = n + 1 } }
+        return n > 4300 ? n : 0
     }
     // int(x) of a number: an arbitrary precision integer stays itself and every
     // other number TRUNCATES towards zero (int(-2.9) is -2).
@@ -3040,7 +3058,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === true) return "True"
         if (v === false) return "False"
         if (isFlo(v)) { return floStr(v.__flo) }
-        if (pyBoxed(v)) { return isCplx(v) ? cplxStr(v) : bigStr(v) }
+        if (pyBoxed(v)) { return isCplx(v) ? cplxStr(v) : pyBigDec(v) }
         // A TYPE object renders as CPython's <class 'name'>, so print(type(1.0))
         // reads <class 'float'> rather than the default object rendering.
         if (v !== null && v !== undefined && typeof v == "object" && v.__isclass == true) {
@@ -7153,6 +7171,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             out += p
         }
         return (a.sign < 0) ? ("-" + out) : out
+    }
+    // An int's decimal text as Python shows it. CPython refuses one longer than
+    // sys.get_int_max_str_digits(), 4300 by default (the setter is not modelled).
+    // Twin of rt.pyBigDec in abnf/jsrtpynum.go and pyBigDec in
+    // lib/python-rt.metajs.
+    function pyBigDec(a) {
+        var s = bigStr(a)
+        if (s.length > 4300 && s.length - (a.sign < 0 ? 1 : 0) > 4300) {
+            pyListErr("ValueError", "Exceeds the limit (4300 digits) for integer string conversion; " +
+                                    "use sys.set_int_max_str_digits() to increase the limit")
+        }
+        return s
     }
     function bigToNum(v) { return bigIsBig(v) ? parseFloat(bigStr(v)) : v }
     // An arbitrary precision int as the nearest double, for float(n) and every

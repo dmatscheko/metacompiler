@@ -3747,6 +3747,8 @@ func (rt *jsrt) pyString(v interface{}) string {
 			return "True"
 		}
 		return "False"
+	case *jsBigInt:
+		return rt.pyBigDec(t.v)
 	case *jsArray:
 		// A tuple is parenthesized, and a one-element one keeps its comma.
 		tup := t.kind == pyTupKind
@@ -22487,6 +22489,9 @@ func (rt *jsrt) pyParseInt(s string, base int) interface{} {
 			ok = false
 		}
 	}
+	// A base that is not a power of two converts at most 4300 digits
+	// (sys.get_int_max_str_digits()); the text is still validated first.
+	nd := pyIntDigitsOver(t, b)
 	acc := new(big.Int)
 	prevDigit := prefixed
 	for i := 0; i < len(t) && ok; i++ {
@@ -22504,13 +22509,19 @@ func (rt *jsrt) pyParseInt(s string, base int) interface{} {
 			ok = false
 			break
 		}
-		acc.Mul(acc, big.NewInt(int64(b)))
-		acc.Add(acc, big.NewInt(int64(d)))
+		if nd == 0 {
+			acc.Mul(acc, big.NewInt(int64(b)))
+			acc.Add(acc, big.NewInt(int64(d)))
+		}
 		prevDigit = true
 	}
 	if !ok || !prevDigit {
 		panic(&jsThrown{value: rt.pyExcInstance("ValueError",
 			fmt.Sprintf("invalid literal for int() with base %d: %s", base, pyStrRepr(s)))})
+	}
+	if nd > 0 {
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", fmt.Sprintf("Exceeds the limit (4300 digits) for "+
+			"integer string conversion: value has %d digits; use sys.set_int_max_str_digits() to increase the limit", nd))})
 	}
 	if neg {
 		acc.Neg(acc)
@@ -22941,7 +22952,11 @@ func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space, alt b
 		body = rt.pyPctChar(v)
 	case 'd', 'i', 'u':
 		numeric = true
-		body = pyPctIntText(rt.pyPctInt(v, typ), 10, "", prec, false)
+		iv := rt.pyPctInt(v, typ)
+		if iv.BitLen() > 14000 { // below 2^14000 an int has at most 4215 digits
+			rt.pyBigDec(iv)
+		}
+		body = pyPctIntText(iv, 10, "", prec, false)
 	case 'x', 'X':
 		prefix := ""
 		if alt {
@@ -23405,7 +23420,12 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 			case "x", "X":
 				base = 16
 			}
-			digits := new(big.Int).Abs(bi).Text(base)
+			digits := ""
+			if base == 10 {
+				digits = rt.pyBigDec(new(big.Int).Abs(bi))
+			} else {
+				digits = new(big.Int).Abs(bi).Text(base)
+			}
 			if typ == "X" {
 				digits = strings.ToUpper(digits)
 			}

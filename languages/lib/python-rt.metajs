@@ -749,7 +749,34 @@ function pyStr(v) {
     if (pyIsObj(v)) {
         if (v["__pyconst"] !== undefined) { return pyToStr(v["__pyconst"]) }
     }
-    return pyToStr(v)
+    if (pyIsBig(v)) { return pyBigDec(v) }
+    return "" + v
+}
+
+// An int's decimal text as Python shows it. CPython refuses one longer than
+// sys.get_int_max_str_digits(), 4300 by default (the setter is not modelled).
+// Go: rt.pyBigDec in abnf/jsrtpynum.go.
+function pyBigDec(v) {
+    var s = rtABigStr(v)
+    if (s.length > 4300 && (!v["neg"] || s.length - 1 > 4300)) {
+        pyRaiseExc("ValueError", "Exceeds the limit (4300 digits) for integer string conversion; " +
+                   "use sys.set_int_max_str_digits() to increase the limit")
+    }
+    return s
+}
+
+// The digit count of T in base B when CPython's int() refuses it for its
+// length, else 0. Go: pyIntDigitsOver in abnf/jsrtpynum.go.
+function pyIntDigitsOver(t, b) {
+    if (t.length <= 4300 || b == 2 || b == 4 || b == 8 || b == 16 || b == 32) { return 0 }
+    var n = 0
+    var i = 0
+    while (i < t.length) {
+        if (t.charAt(i) != "_") { n = n + 1 }
+        i = i + 1
+    }
+    if (n > 4300) { return n }
+    return 0
 }
 
 function pyFuncRender(v) {
@@ -4236,6 +4263,9 @@ function pyParseInt(s, base) {
             }
         }
     }
+    // A base that is not a power of two converts at most 4300 digits
+    // (sys.get_int_max_str_digits()); the text is still validated first.
+    var nd = pyIntDigitsOver(t, b)
     var acc = anytype
     acc = 0
     var prevDigit = prefixed
@@ -4250,12 +4280,18 @@ function pyParseInt(s, base) {
         }
         var d = "0123456789abcdefghijklmnopqrstuvwxyz".indexOf(ch.toLowerCase())
         if (d < 0 || d >= b) { ok = false }
-        else if (typeof acc == "number" && acc <= (9007199254740992 - d) / b) { acc = acc * b + d }
-        else { acc = js_pybin("+", js_pybin("*", acc, b), d) }
+        else if (nd == 0) {
+            if (typeof acc == "number" && acc <= (9007199254740992 - d) / b) { acc = acc * b + d }
+            else { acc = js_pybin("+", js_pybin("*", acc, b), d) }
+        }
         prevDigit = true
     }
     if (!ok || !prevDigit) {
         pyRaiseExc("ValueError", "invalid literal for int() with base " + pyIntStr(base) + ": " + pyStrRepr(s))
+    }
+    if (nd > 0) {
+        pyRaiseExc("ValueError", "Exceeds the limit (4300 digits) for integer string conversion: value has " +
+                   pyIntStr(nd) + " digits; use sys.set_int_max_str_digits() to increase the limit")
     }
     if (neg) { return js_pybin("-", 0, acc) }
     return acc

@@ -1,4 +1,17 @@
-# Full-syntax test: Python (3.12 core grammar).
+# Full-syntax test: Python (3.12 core grammar) - part 1 of 2, sections 01-89.
+#
+# THE PYTHON RATCHET IS TWO FILES, so that neither -frozen interpreter leg comes
+# near the IR interpreter's step brake (-max-steps, 100M per call):
+#
+#   tests/python-test-full.py     sections 01-89, the Python 3.12 syntax walk and
+#                                 the builtins' semantics
+#   tests/python-test-full.2.py   sections 90-91, arbitrary precision ints at the
+#                                 sizes where CPython's own limits apply
+#
+# The section NUMBERS are global, the two files together run the assertions in
+# order, and ./test.sh --full reports them as the units python and python2. Add a
+# new section to whichever file it belongs in, and keep the numbers globally
+# unique across the two.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part
 # of the default matrix. The goal of the metacompiler is to support the full
@@ -4516,18 +4529,6 @@ def s89():
         return a is sentinel
     check("obj9", f() and not f(0))
 
-# ===== SECTION 90: int ** int at a large exponent =====
-# An int raised to a non-negative int is an exact int whatever the exponent's
-# size; no exponent turns it into a float. Rows from CPython 3.14.
-def s90():
-    v = [10, 4097, 5000, 2, 7, 3]
-    check("pwb1", v[3] ** v[1] % 1000003 == 2 ** 4097 % 1000003 == 833217 and type(v[3] ** v[1]) is int)
-    check("pwb2", pow(v[4], v[1]) % 1009 == 783 and pow(-3, 4097) % 1013 == 435 and (-2) ** v[1] < 0)
-    check("pwb3", len(str(2 ** 4097)) == 1234 and str(v[3] ** v[1])[-6:] == "380672")
-    x = v[3]
-    x **= 4100
-    check("pwb4", x % 997 == 12 and x > 2 ** 4099 and x == 2 ** 4100)
-
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4618,6 +4619,5 @@ def main():
     s87() # SECTION-CALL 87
     s88() # SECTION-CALL 88
     s89() # SECTION-CALL 89
-    s90() # SECTION-CALL 90
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

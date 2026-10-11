@@ -596,3 +596,29 @@ func pySameValue(a, b interface{}) bool {
 	}
 	return a == b
 }
+
+// pyBigDec is an int's decimal text as Python shows it. CPython refuses one
+// longer than sys.get_int_max_str_digits(), 4300 by default (the setter is not
+// modelled). Twin of pyBigDec in languages/python-interpreter.abnf and
+// languages/lib/python-rt.metajs.
+func (rt *jsrt) pyBigDec(v *big.Int) string {
+	s := v.String()
+	if n := len(s); n > 4300 && (v.Sign() >= 0 || n-1 > 4300) {
+		rt.pyRaise("ValueError", "Exceeds the limit (4300 digits) for integer string conversion; "+
+			"use sys.set_int_max_str_digits() to increase the limit")
+	}
+	return s
+}
+
+// pyIntDigitsOver is the digit count of t in base b when CPython's int()
+// refuses it for its length, else 0. Twin of pyIntDigitsOver in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func pyIntDigitsOver(t string, b int) int {
+	if len(t) <= 4300 || b&(b-1) == 0 {
+		return 0
+	}
+	if n := len(t) - strings.Count(t, "_"); n > 4300 {
+		return n
+	}
+	return 0
+}
