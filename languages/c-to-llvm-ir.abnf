@@ -593,7 +593,7 @@ Proto       <~~ registerProto() ~~>
 // The merged pushes: [{ret}, "*"?, name, [params...], bodyThunk]. The return type is
 // carried so a long or double return is i64 and a pointer return i32* (getFunc).
 FuncDef     <~~ buildFunction() ~~>
-            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> { Attr } [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
 // A function returning a struct/union (by value or pointer). A by-value return uses
 // the C ABI's sret shape: a hidden first pointer parameter the callee copies into.
@@ -631,7 +631,7 @@ ParenParam  <~~ push(makeParam(takeAll())) ~~>
 // A parameter whose type is a typedef name. Two identifiers in a row cannot be
 // anything else, which is what keeps this away from a K&R identifier list.
 TdParam     <~~ push(makeTdParam(takeAll())) ~~>
-            = TdName [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
+            = { PtrQual } TdName [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 // 'int (*f)(int)' as a parameter: one i32 holding a function identifier.
 FnPtrParam  <~~ push(makeFnPtrParam(takeAll())) ~~>
             = ParamType "(" Stars Id <~~ push(up.in) ~~> ")" FnParams ;
@@ -645,7 +645,7 @@ ParamAbs    <~~ push(makeParam(takeAll())) ~~>
 AbsFnTy     <~~ push({fnabs: true}) ~~> = FnParams ;
 // An unnamed parameter of typedef type; tried last.
 TdParamAbs  <~~ push(makeTdParam(takeAll())) ~~>
-            = TdName [ Stars ] [ ArrDims ] ;
+            = { PtrQual } TdName [ Stars ] [ ArrDims ] ;
 ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
             | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
@@ -1044,12 +1044,125 @@ AlignOf     <~~ push(makeSizeof(pop())) ~~>
 // A type name: base plus '*'s, optionally an abstract function-pointer declarator
 // (every function pointer type is the same ctFn) or an array declarator.
 TypeName    <~~ push(makeTypeName(takeAll())) ~~>
-            = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } [ AbsFnPtr | ArrDims ] ;
+            = { Attr | PtrQual } SizeBase { PtrQual } { "*" <~~ push("*") ~~> [ PtrQual ] } [ AbsFnPtr | ArrDims ] ;
 AbsFnPtr    <~~ push({fnabs: true}) ~~> = "(" { Attr } Stars { Attr } ")" FnParams ;
 SizeBase    = ScalarName
             | EnumRef <~~ push(ctInt) ~~>
             | KwStruct Id <~~ push(ctStruct(up.in)) ~~>
-            | KwUnion Id <~~ push(ctStruct(uKey(up.in))) ~~> ;
+            | KwUnion Id <~~ push(ctStruct(uKey(up.in))) ~~>
+            | IsTypedef Id <~~ push(typedefOf(up.in)) ~~> ;
+// A TYPEDEF NAME as a type name - `(myint)1`, `(u8)45`, `sizeof(I)`. A bare identifier
+// in parentheses is otherwise an expression, so the name has to be one a typedef
+// declared EARLIER in the file (or a standard header's, see stdTypedefs). The guard
+// re-derives that from the source - a :script cannot read the typedef table the tags
+// fill - and, being a pure function of the source, it RESUMES its scan from where the
+// previous call stopped (kept on the parser stack), so a parse scans the file once.
+// A declarator's name is the last identifier outside brackets and parentheses, or
+// the one after `*` in a `(*Name)` function-pointer declarator.
+IsTypedef = :script(~~
+    (function() {
+        var s = 0
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s += 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s += 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s += 2
+                continue
+            }
+            break
+        }
+        var name = ""
+        var nc = c.peek(s)
+        while ((nc >= 97 && nc <= 122) || (nc >= 65 && nc <= 90) || nc === 95 || (nc >= 48 && nc <= 57 && name.length > 0)) {
+            name = name + String.fromCharCode(nc)
+            s++
+            nc = c.peek(s)
+        }
+        if (name === "") { return abnf.newToken("\x01no-name", 0) }
+        var std = "|size_t|ssize_t|ptrdiff_t|intptr_t|uintptr_t|intmax_t|uintmax_t|wchar_t|wint_t|char16_t|char32_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|int_fast8_t|int_least8_t|"
+        if (std.indexOf("|" + name + "|") >= 0) { return undefined }
+        var back = c.getSdx()
+        var i = 0 - back
+        var names = "|"
+        var memo = pop()
+        if (memo != null && memo.tdAt != undefined && memo.tdAt <= back) { i = memo.tdAt - back; names = memo.tdNames }
+        var done = false
+        while (i < 0 && !done) {
+            var k = c.peek(i)
+            if (k === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } ; continue }
+            if (k === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
+            if (k === 34 || k === 39) {
+                i++
+                while (c.peek(i) >= 0 && c.peek(i) !== k && c.peek(i) !== 10) { if (c.peek(i) === 92) { i++ } ; i++ }
+                i++
+                continue
+            }
+            var isId = (k >= 97 && k <= 122) || (k >= 65 && k <= 90) || k === 95
+            if (!isId) { i++; continue }
+            var p = c.peek(i - 1)
+            var word = ""
+            var j = i
+            while ((c.peek(j) >= 97 && c.peek(j) <= 122) || (c.peek(j) >= 65 && c.peek(j) <= 90) || c.peek(j) === 95 || (c.peek(j) >= 48 && c.peek(j) <= 57)) {
+                word = word + String.fromCharCode(c.peek(j))
+                j++
+            }
+            var glued = (p >= 97 && p <= 122) || (p >= 65 && p <= 90) || p === 95 || (p >= 48 && p <= 57)
+            if (word !== "typedef" || glued) { i = j; continue }
+            // A typedef statement: collect its declarator names up to the ; at depth 0.
+            var t = j
+            var brace = 0
+            var paren = 0
+            var brack = 0
+            var cand = ""
+            var locked = false
+            var prev = 0
+            var found = ""
+            var ended = false
+            while (c.peek(t) >= 0 && !ended) {
+                var q = c.peek(t)
+                if (q === 123) { brace++ } else if (q === 125) { brace-- }
+                else if (brace === 0 && q === 40) { paren++ } else if (brace === 0 && q === 41) { paren-- }
+                else if (brace === 0 && q === 91) { brack++ } else if (brace === 0 && q === 93) { brack-- }
+                else if (brace === 0 && paren === 0 && (q === 44 || q === 59)) {
+                    if (cand !== "") { found = found + cand + "|" }
+                    cand = ""
+                    locked = false
+                    if (q === 59) { ended = true }
+                }
+                else if (brace === 0 && brack === 0 && ((q >= 97 && q <= 122) || (q >= 65 && q <= 90) || q === 95)) {
+                    var w2 = ""
+                    while ((c.peek(t) >= 97 && c.peek(t) <= 122) || (c.peek(t) >= 65 && c.peek(t) <= 90) || c.peek(t) === 95 || (c.peek(t) >= 48 && c.peek(t) <= 57)) {
+                        w2 = w2 + String.fromCharCode(c.peek(t))
+                        t++
+                    }
+                    if (!locked && (paren === 0 || prev === 42)) { cand = w2 }
+                    if (paren > 0 && prev === 42) { locked = true }
+                    prev = 0
+                    continue
+                }
+                if (q !== 32 && q !== 9 && q !== 10 && q !== 13) { prev = q }
+                t++
+            }
+            if (!ended || t > 0) { done = true; continue }
+            names = names + found
+            i = t
+        }
+        push({tdAt: back + i, tdNames: names})
+        return names.indexOf("|" + name + "|") >= 0 ? undefined : abnf.newToken("\x01not-a-typedef", 0)
+    })()
+~~) ;
 // A scalar type name, kept keyword by keyword so the width and the signedness both
 // survive.
 ScalarName  <~~ push(makeScalarName(takeAll())) ~~>

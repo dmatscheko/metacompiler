@@ -1956,6 +1956,37 @@ int s51(void) {
     return 0;
 }
 
+// ===== SECTION 52: a typedef name as a type name; attributes before a name =====
+/* A typedef name stands wherever a type name does (C11 6.7.8): in a cast, in
+   sizeof, after unary +, and for a function-pointer typedef declared in a list. A
+   GCC attribute may stand between a function's return type and its name; a
+   qualifier may lead a typedef parameter and a cast's type name. Every
+   expected value was printed by cc. */
+typedef unsigned char s52_u8;
+typedef long s52_I;
+typedef int s52_int;
+typedef int (*s52_Fn)(int), s52_Other;
+s52_int s52_g = (s52_int)1;
+int __attribute__((__noinline__)) s52_af(void) { return 42; }
+int s52_twice(int x) { return 2 * x; }
+int s52_first(const s52_u8 *p, volatile s52_I n) { return p[0] + (int)n; }
+int s52_v[2];
+s52_u8 s52_b[2];
+long s52_l;
+int s52(void) {
+    s52_v[0] = 300; s52_v[1] = -1;
+    check(5201, (s52_u8)s52_v[0] == 44);
+    check(5202, (s52_u8)s52_v[1] == 255);
+    check(5203, (s52_I)+5L * 2 == 10);
+    check(5204, s52_g == 1 && s52_af() == 42);
+    check(5205, (int)sizeof(s52_u8) == 1 && (int)sizeof(s52_I) == 8);
+    check(5206, ((s52_Fn)s52_twice)(4) == 8);
+    check(5207, (s52_Other)3.7 == 3);
+    s52_b[0] = 7; s52_l = 5;
+    check(5208, s52_first(s52_b, 2) == 9 && *(const long *)&s52_l == 5);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -2010,6 +2041,7 @@ int main() {
     s49(); // SECTION-CALL 49
     s50(); // SECTION-CALL 50
     s51(); // SECTION-CALL 51
+    s52(); // SECTION-CALL 52
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);
