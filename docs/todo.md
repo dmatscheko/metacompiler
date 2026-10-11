@@ -126,7 +126,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-390 go: static type of arithmetic on defined types; `case []T:`; nested arrays · P1 · GO · OPEN [V]
+### T-390 go: static type of arithmetic on defined types; `case []T:`; nested arrays · P1 · GO · IN PROGRESS (PHP+GO worker, round 15) [V]
 `fmt.Println(y[0]+y[2])`, `kk+1` print `4`/`6` (go `kind4`/`kind6`): arithmetic on a
 defined type loses its static type (all legs). `case []T:` never matches a slice in the
 interpreter's type test (goTypeName answers "slice"), even `[]int`. A nested array
@@ -144,7 +144,7 @@ interpreter's type test (goTypeName answers "slice"), even `[]int`. A nested arr
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-389 php: string/number comparison, visibility, foreach over objects, method_exists · P1 · PHP · OPEN [V spec-only]
+### T-389 php: string/number comparison, visibility, foreach over objects, method_exists · P1 · PHP · IN PROGRESS (PHP+GO worker, round 15) [V spec-only]
 php-src corpus: `NAN == "NAN"` true (expected false); `1.75 <=> "1.75abc"` 0 (expected
 -1) (Zend/tests/string_to_number_comparison, type_coercion/nan_comp_op). var_dump of
 non-public properties lacks `:protected`/`:private` (visibility not modelled; json_encode
