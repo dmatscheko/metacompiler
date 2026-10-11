@@ -5825,23 +5825,6 @@ function pyUnpackCheck(v, got, n, star) {
 }
 
 
-// ----- js_pyrest --------------------------------------------------------------
-// *args: the call arguments from index N on, as a list. N is a RAW parameter -
-// the emitter writes it with a bare handle(k) (see the js_pyrest entry in the
-// raw-argument mask in abnf/jsrt.go), which is what the i_raw name tells
-// -rt-lib to box.
-function js_pyrest(args, i_raw) {
-    var out = []
-    if (!pyIsArr(args)) { return out }
-    var i = i_raw
-    while (i < args.length) {
-        out.push(args[i])
-        i = i + 1
-    }
-    return out
-}
-
-
 // ----- js_pyspread ------------------------------------------------------------
 // (positional array, iterable): append every element of the iterable.
 // The source length is read ONCE, which is what Go's `append(dst, src...)` does

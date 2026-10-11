@@ -6437,6 +6437,19 @@ long js_obj_new(void)   { return mk_obj(); }
 long js_arr_new(void)   { return mk_arr(); }
 long js_arr_push(long a, long v) { arr_push(a, v); return 0; }
 long js_arg(long args, long i)   { if (i < arr_len(args)) { return arr_get(args, i); } return H_UNDEF; }
+/* A variadic parameter (Go's ...T, Python's *args, Kotlin's vararg): the call
+ * arguments from index `from` (a raw integer) on, as a new array. Twins of
+ * js_gorest and js_pyrest in abnf/jsrt.go. */
+long js_gorest(long args, long from) {
+	long out = mk_arr();
+	long n;
+	long i = from;
+	if (tag_of(args) != 5) { return out; }
+	n = arr_len(args);
+	while (i < n) { arr_push(out, arr_get(args, i)); i = i + 1; }
+	return out;
+}
+long js_pyrest(long args, long from) { return js_gorest(args, from); }
 
 long js_get(long o, long k)          { return get_member(o, k); }
 long js_set(long o, long k, long v)  { set_member(o, k, v); return 0; }

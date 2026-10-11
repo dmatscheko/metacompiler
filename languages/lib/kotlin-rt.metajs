@@ -5468,23 +5468,6 @@ function k4bSetMember(o, key, val) {
 
 // js_supercall is shared in lib/runtime.metajs; its rtkCall knob exists for Kotlin.
 
-// ------------------------------------------------------------- js_pyrest ---
-
-// *args: the call arguments from index N on, as a list (abnf/jsrt.go:7105). The
-// kotlin emitter writes the index with a bare handle(n), so it arrives as a RAW
-// integer and not as a value handle - hence the _raw suffix, exactly as
-// languages/lib/go-rt.metajs spells js_gorest.
-function js_pyrest(args, from_raw) {
-    if (!Array.isArray(args)) { fail("js_pyrest needs the argument array") }
-    var out = []
-    var i = from_raw
-    while (i < args.length) {
-        out.push(args[i])
-        i = i + 1
-    }
-    return out
-}
-
 // ============================================================== `x is T` =====
 
 // ktIsType (jsrtkotlin.go, the ktIsType installer at 951 and js_ktis at 954).

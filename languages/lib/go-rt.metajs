@@ -81,10 +81,9 @@
 //     compile-core's default "js_truthy", which is the C FLOOR's own function
 //     and already answers the raw 1/0. Like Swift, Java, C# and Dart, and
 //     unlike Lua and PHP.
-//  2. EXACTLY ONE `_raw` PARAMETER: js_gorest's start index, which the emitter
-//     writes with a bare handle(i + off). Every other handle(k) in the grammar
-//     goes to js_closure or js_arg, which are floor externs, and every operator
-//     selector goes through emitStr/emitNum.
+//  2. NO `_raw` PARAMETER: every bare handle(k) in the grammar goes to
+//     js_closure, js_arg or js_gorest, which are floor externs, and every
+//     operator selector goes through emitStr/emitNum.
 //  3. NO jsChar. Go has no character type; a rune is an int32, which is the
 //     sized-integer tag, and the emitter emits js_char / js_char_code /
 //     js_kindex zero times.
@@ -1824,17 +1823,6 @@ function js_goclear(args) {
         while (i < x.length) { x[i] = 0; i = i + 1 }
     }
     return undefined
-}
-
-// A variadic parameter: the arguments from index i on, as a slice. `from` is the
-// ONE `_raw` parameter of this grammar - the emitter writes it with a bare
-// handle(i + off), so it arrives as a raw integer and not as a value handle.
-function js_gorest(args, from_raw) {
-    if (!Array.isArray(args)) { fail("js_gorest needs the argument array") }
-    var out = []
-    var i = from_raw
-    while (i < args.length) { out.push(args[i]); i = i + 1 }
-    return out
 }
 
 // A Go named-type conversion T(v). One numeric type carries every integer width,
