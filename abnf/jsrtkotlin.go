@@ -902,13 +902,14 @@ func init() {
 		baseNe := m["js_sne"]
 		m["js_kteq"] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
-			if giIsInt(l) || giIsInt(r) {
-				return boolH(rt.giEq(l, r))
-			}
-			// Two boxes: a Float is not equal to a Double even at the same value
-			// (java.lang.Float#equals demands a Float). See ktFloClsEq.
+			// A float box: a Float is not equal to a Double even at the same value
+			// (java.lang.Float#equals demands a Float), nor to an integer. See
+			// ktFloClsEq.
 			if v, decided := ktFloClsEq(l, r); decided {
 				return boolH(v)
+			}
+			if giIsInt(l) || giIsInt(r) {
+				return boolH(rt.giEq(l, r))
 			}
 			// Two callable references / class literals. See ktRefEq; without it the
 			// comparison would fall through to identity and `b::v == b::v` be false.
@@ -935,12 +936,12 @@ func init() {
 		}
 		m["js_ktne"] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
-			if giIsInt(l) || giIsInt(r) {
-				return boolH(!rt.giEq(l, r))
-			}
-			// Two boxes: a Float is not equal to a Double even at the same value.
+			// A float box: see js_kteq.
 			if v, decided := ktFloClsEq(l, r); decided {
 				return boolH(!v)
+			}
+			if giIsInt(l) || giIsInt(r) {
+				return boolH(!rt.giEq(l, r))
 			}
 			// Two callable references / class literals. See ktRefEq.
 			if v, decided := ktRefEq(l, r); decided {
@@ -3835,17 +3836,17 @@ func (rt *jsrt) ktMapFind(keys *jsArray, k interface{}) int {
 // primitive `==` reach jvmArith / ktCmp, which never come through here. The twin
 // is ktFloEq in languages/lib/kotlin-rt.metajs and kEq in kotlin-interpreter.abnf.
 //
-// decided=false when either side is not a box, so a box against a plain number or
-// a sized integer keeps the caller's own fallback. That pairing is a compile error
-// in Kotlin (`1.5f == 1.5` and `1.0 == 1` are both rejected by kotlinc), so
-// narrowing it would move only unreachable answers.
+// A box against anything that is NOT a box is decided too, as unequal: a typed
+// `1.0 == 1` or `1.0 == 1L` is a compile error, so the pairing only arises through
+// Any, where Double.equals(Integer) is false - `setOf<Any>(1.0, 1)` has two
+// elements. decided=false when neither side is a box.
 func ktFloClsEq(l, r interface{}) (bool, bool) {
 	lf, lok := l.(jsJFlo)
-	if !lok {
-		return false, false
-	}
 	rf, rok := r.(jsJFlo)
-	if !rok {
+	if lok != rok {
+		return false, true
+	}
+	if !lok {
 		return false, false
 	}
 	if jvmIs32(lf.sty) != jvmIs32(rf.sty) {
@@ -3858,6 +3859,11 @@ func ktFloClsEq(l, r interface{}) (bool, bool) {
 // runtime's own strict equality for everything else (a data class still compares
 // through its generated equals, which memberCall reaches).
 func (rt *jsrt) ktEqVals(a, b interface{}) bool {
+	// A float box: width-aware, so a Float is not a Double key, and neither is an
+	// integer one. See ktFloClsEq.
+	if v, decided := ktFloClsEq(a, b); decided {
+		return v
+	}
 	if giIsInt(a) || giIsInt(b) {
 		return rt.giEq(a, b)
 	}
@@ -3865,10 +3871,6 @@ func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 		if cb, ok2 := b.(jsChar); ok2 {
 			return ca.code == cb.code
 		}
-	}
-	// Two boxes: width-aware, so a Float is not a Double key. See ktFloClsEq.
-	if v, decided := ktFloClsEq(a, b); decided {
-		return v
 	}
 	if oa, ok := a.(*jsObject); ok {
 		if _, ok2 := b.(*jsObject); ok2 {
@@ -6823,6 +6825,11 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 					out.elems = append(out.elems, rt.ktCall(init, float64(i)))
 				case name == "LongArray":
 					out.elems = append(out.elems, jsGInt{w: 64})
+				// A DoubleArray / FloatArray fills with 0.0 / 0.0f, a float.
+				case name == "DoubleArray":
+					out.elems = append(out.elems, jsJFlo{})
+				case name == "FloatArray":
+					out.elems = append(out.elems, jsJFlo{sty: floJavaF})
 				case name == "BooleanArray":
 					out.elems = append(out.elems, false)
 				case name == "CharArray":

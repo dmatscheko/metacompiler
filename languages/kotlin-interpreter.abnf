@@ -3923,8 +3923,17 @@ NotMemberKw = :script(~~
     }
     hostGlobals["ShortArray"] = hostGlobals["IntArray"]
     hostGlobals["ByteArray"] = hostGlobals["IntArray"]
-    hostGlobals["DoubleArray"] = hostGlobals["IntArray"]
-    hostGlobals["FloatArray"] = hostGlobals["IntArray"]
+    // A DoubleArray / FloatArray fills with 0.0 / 0.0f, a float.
+    hostGlobals["DoubleArray"] = function(n, init) {
+        var out = []
+        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : kFlo(0)) }
+        return arrKindSet(out, 1)
+    }
+    hostGlobals["FloatArray"] = function(n, init) {
+        var out = []
+        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : kFlo32(0)) }
+        return arrKindSet(out, 1)
+    }
     // CharArray(n) fills with Kotlin's NUL char, not 0 - a Char is its glyph here.
     hostGlobals["CharArray"] = function(n, init) {
         var out = []
@@ -7126,35 +7135,29 @@ NotMemberKw = :script(~~
         // null and is a Float object", so setOf(1.5f, 1.5) has TWO elements (Kotlin/JVM's
         // Float IS java.lang.Float). The two widths also HASH apart (kFltHash); this is
         // the half of that contract equality owes. `<`, `>` and a well-typed program's
-        // primitive == still promote through kFloOp2 / kCmp, which do not come here,
-        // and a box against a plain number or a sized integer is left alone (that pair
-        // is a compile error in Kotlin: kotlinc rejects `1.5f == 1.5` and `1.0 == 1`).
-        // Twins: ktFloEq in languages/lib/kotlin-rt.metajs, ktFloClsEq in
-        // abnf/jsrtkotlin.go.
+        // primitive == still promote through kFloOp2 / kCmp, which do not come here.
+        // A box against anything that is not a box is unequal: a typed `1.0 == 1` is a
+        // compile error, so the pair only arises through Any, where
+        // Double.equals(Integer) is false. Twins: ktFloEq in
+        // languages/lib/kotlin-rt.metajs, ktFloClsEq in abnf/jsrtkotlin.go.
         if (kIsFlo(l)) {
             if (kIsFlo(r)) {
                 if (kIsF32(l) !== kIsF32(r)) { return false }
                 return l.__flo === r.__flo
             }
+            return false
         }
+        if (kIsFlo(r)) { return false }
         // A Char equals its code, so both sides are unboxed into fresh locals (a
         // parameter must keep its inferred type under the frozen engine).
         var a = anytype
         var b = anytype
-        a = kIsChar(l) ? l.__char : (kIsFlo(l) ? l.__flo : l)
-        b = kIsChar(r) ? r.__char : (kIsFlo(r) ? r.__flo : r)
+        a = kIsChar(l) ? l.__char : l
+        b = kIsChar(r) ? r.__char : r
         // A sized integer equals another integer by VALUE across the box, which is
         // all a well-typed program can observe: it could not have written the
         // comparison at all if the two types disagreed.
         if (szIs(a) || szIs(b)) {
-            // A {__flo} BOX ON THE OTHER SIDE COMPARES AS A DOUBLE. kSz below is
-            // i64Trunc of the value, so a non-integral double would be TRUNCATED into
-            // the integer's width and `1L == 1.5` answer true. java: 1L == 1.5 is false
-            // as a primitive comparison (JLS 15.21.1 promotes the long TO double) and
-            // Long.valueOf(1).equals(1.5) is false as a boxed one; the compiler half
-            // (k0GiEq / rt.giEq) promotes to a double too.
-            if (kIsFlo(l)) { return kIsIntegral(b) && l.__flo === kNumD(b) }
-            if (kIsFlo(r)) { return kIsIntegral(a) && r.__flo === kNumD(a) }
             if (kIsIntegral(a) && kIsIntegral(b)) { return szEq(szIs(a) ? a : kSz(a, 64, kNoU), szIs(b) ? b : kSz(b, 64, kNoU)) }
             return false
         }

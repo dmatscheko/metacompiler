@@ -883,13 +883,15 @@ function ktIsF32(v) { return floStyle(v) === 3 }
 // come through here. java's rtjStrictEq (lib/runtime-jvm.metajs) is the same
 // pattern: the language layer promotes and floEq stays alone.
 //
-// KT_MISS when either side is not a box: the caller keeps its own fallback, so a
-// box against a plain number or a sized integer is untouched. That pairing is a
-// compile error in Kotlin (`1.5f == 1.5` and `1.0 == 1` are both rejected by
-// kotlinc), so narrowing it would move only unreachable answers.
+// A box against anything that is not a box is unequal: a typed `1.0 == 1` is a
+// compile error, so the pair only arises through Any, where Double.equals(Integer)
+// is false. KT_MISS when neither side is a box.
 function ktFloEq(a, b) {
-    if (!floIs(a)) { return KT_MISS }
-    if (!floIs(b)) { return KT_MISS }
+    if (!floIs(a)) {
+        if (floIs(b)) { return false }
+        return KT_MISS
+    }
+    if (!floIs(b)) { return false }
     if (ktIsF32(a) !== ktIsF32(b)) { return false }
     return floNum(a) === floNum(b)
 }
@@ -913,16 +915,16 @@ function k0GiEq(l, r) {
 // across the box, and the runtime's own strict equality for everything else - a
 // data class still compares through its generated equals.
 function ktEqVals(a, b) {
+    // A tag 14 box: ktFloEq, which is width-aware - a Float is not a Double key, and
+    // neither is an integer one. KT_MISS when neither side is a box.
+    var fe = anytype
+    fe = ktFloEq(a, b)
+    if (!ktMiss(fe)) { return fe }
     if (sintIs(a)) { return k0GiEq(a, b) }
     if (sintIs(b)) { return k0GiEq(a, b) }
     if (ktIsChar(a)) {
         if (ktIsChar(b)) { return a["__char"] === b["__char"] }
     }
-    // Two tag 14 boxes: ktFloEq, which is width-aware - a Float is not a Double
-    // key. KT_MISS keeps the fallback for a box against anything else.
-    var fe = anytype
-    fe = ktFloEq(a, b)
-    if (!ktMiss(fe)) { return fe }
     if (k0IsRec(a)) {
         if (k0IsRec(b)) {
             var mth = k0FindMember(a, "equals")
@@ -1742,12 +1744,13 @@ function k1JStr(v) {
 // across the box, a list/map/Pair STRUCTURALLY, an instance whose class declares
 // equals answers for itself, and everything else keeps the runtime's identity.
 function js_kteq(l, r) {
-    if (sintIs(l) || sintIs(r)) { return k1GiEq(l, r) }
-    // Two tag 14 boxes: a Float is not equal to a Double even at the same value
-    // (java.lang.Float#equals demands a Float). See ktFloEq in section 0.
+    // A tag 14 box: a Float is not equal to a Double even at the same value
+    // (java.lang.Float#equals demands a Float), nor to an integer. See ktFloEq in
+    // section 0.
     var fe = anytype
     fe = ktFloEq(l, r)
     if (!ktMiss(fe)) { return fe }
+    if (sintIs(l) || sintIs(r)) { return k1GiEq(l, r) }
     // Two callable references / class literals, ahead of ktStructEq exactly as in
     // the Go twin; without this arm the comparison falls through to identity and
     // `b::v == b::v` is false. KT_MISS is its handled=false.
@@ -1767,10 +1770,10 @@ function js_kteq(l, r) {
 
 // jsrtkotlin.go js_ktne (802).
 function js_ktne(l, r) {
-    if (sintIs(l) || sintIs(r)) { return !k1GiEq(l, r) }
     var fe = anytype
     fe = ktFloEq(l, r)
     if (!ktMiss(fe)) { return !fe }
+    if (sintIs(l) || sintIs(r)) { return !k1GiEq(l, r) }
     var re = ktRefEq(l, r)
     if (!ktMiss(re)) { return !re }
     var se = ktStructEq(l, r)
@@ -6970,7 +6973,12 @@ function k4ArrayOfN(name, args) {
                     if (name == "Array") { nul = true }
                     if (name == "arrayOfNulls") { nul = true }
                     if (nul) { out.push(null) } else {
-                        if (name == "LongArray") { out.push(ktAdoptLong(0)) } else { out.push(0) }
+                        if (name == "LongArray") { out.push(ktAdoptLong(0)) } else {
+                            // A DoubleArray / FloatArray fills with 0.0 / 0.0f, a float.
+                            if (name == "DoubleArray") { out.push(flo(0, 0)) } else {
+                                if (name == "FloatArray") { out.push(flo(0, 3)) } else { out.push(0) }
+                            }
+                        }
                     }
                 }
             }

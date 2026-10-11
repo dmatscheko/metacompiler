@@ -845,16 +845,17 @@ fun sec24() {
     check("f33g", listOf(1, 2, 3).indexOf(3) == 2 && listOf(1L, 2L).contains(2L) &&
                   mapOf('a' to 1)['a'] == 1 && setOf(1, 2, 2).size == 2)
     // The RESIDUE, asserted as it IS rather than as java answers it, so the next
-    // change to this area has to look at it: java says false for all three of these
-    // (Integer#equals demands an Integer), and this model says true because the box
-    // carries the KIND and the promotion. None of the three is reachable from source
-    // Kotlin either.
-    check("f33h", eq24(1, 1L) && eq24(1.toByte(), 1) && eq24(1, 1.0) && !eq24('a', "a"))
-    // ...but a sized integer against a FRACTIONAL double is false in both halves. Both
-    // readings of java say false: 1L == 1.5 as a primitive (JLS 15.21.1 promotes the
-    // long to double) and Long.valueOf(1).equals(1.5) as a boxed one.
+    // change to this area has to look at it: java says false for both of these
+    // (Integer#equals demands an Integer), and this model says true because an Int
+    // literal does not yet carry the type it is expected to have, so an Int and a
+    // Long cannot be told apart at equality without breaking `List<Long>` built
+    // from literals.
+    check("f33h", eq24(1, 1L) && eq24(1.toByte(), 1) && !eq24('a', "a"))
+    // A float box never equals an integer through Any: Double.equals(Integer) and
+    // Long.equals(Double) are false at every value, fractional or not.
     check("f33i", !eq24(1L, 1.5) && !eq24(1.5, 1L) && !eq24(2L, 2.5f) &&
-                  !eq24(1.toByte(), 1.5) && eq24(1L, 1.0) && eq24(100L, 100.0))
+                  !eq24(1.toByte(), 1.5) && !eq24(1L, 1.0) && !eq24(100L, 100.0) &&
+                  !eq24(1, 1.0) && !eq24(1.0f, 1))
 }
 // `==` taken through an Any boundary, which is the ONLY way source Kotlin can put
 // a Float and a Double on the two sides of it.
@@ -4466,7 +4467,7 @@ fun sec87() {
     check("ax87l", two.first() + ts.last() + tv.first() == 5)
 }
 
-// ===== SECTION 88: a LongRange's and a LongArray's elements are Longs =====
+// ===== SECTION 88: Long and floating elements keep their kind =====
 // A range with a Long bound is a LongRange, whose first/last/start/endInclusive and
 // elements are Longs; an integer literal in longArrayOf / LongArray is typed Long by
 // that expectation, so a product of two of them is a 64-bit multiply. Rows read from
@@ -4484,6 +4485,16 @@ fun sec88() {
     val lz = LongArray(2) { 100000 }
     check("ax88d", la[0] * la[1] == 10000000000L && lz[0] * lz[1] == 10000000000L)
     check("ax88e", s88any(LongArray(2)[0]) is Long && s88any(la[1]) is Long)
+    // Through Any a Double or a Float never equals an integer (Double.equals(Integer)
+    // is false), so they are separate set elements and map keys; a DoubleArray /
+    // FloatArray starts at 0.0 / 0.0f.
+    val ks = listOf<Any>(1.0, 1, 1.0f, 1L)
+    check("ax88f", setOf<Any>(ks[0], ks[1]).size == 2 && setOf<Any>(ks[2], ks[1]).size == 2 &&
+        setOf<Any>(ks[0], ks[3]).size == 2 && ks[0] != ks[1] && ks[3] != ks[0])
+    check("ax88g", mapOf<Any, Int>(ks[0] to 1, ks[1] to 2).size == 2 &&
+        listOf<Any>(1.0, 2).indexOf(2.0) == -1 && listOf<Any>(1.0, 2.0).indexOf(2.0) == 1)
+    check("ax88h", DoubleArray(2).joinToString() == "0.0, 0.0" &&
+        FloatArray(2).joinToString() == "0.0, 0.0" && s88any(DoubleArray(1)[0]) is Double)
 }
 
 
