@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-403** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-404** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,13 +114,13 @@ not change the renderer.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context · P1 · SW · IN PROGRESS (SW+SH worker, round 16) [V]
-Optional-chain assignment `a?.b = c` does not parse (common in real Swift; 2 corpus
-files). Both halves: `func ap(_ f: (inout Int)->()) -> Int { var v=4; f(&v); return v };
-ap { (x: inout Int) in x += 2 }` prints 4 (swiftc 6: inout never written back); `[1, 2]
-as [Double]` prints `[1, 2]` (swiftc `[1.0, 2.0]`); `let (a, b): (Double, Int) = (1,
-2)` prints `1 2` (swiftc `1.0 2`). Also unparsed: `$wrapper` names, `@const` + keypath,
-`case A<T>()`, macros, postfix custom operators, `for await`.
+### T-403 swift: stored-property types keyed by name across types; implicit members to static funcs · P1 · SW · IN PROGRESS (SW worker, round 17) [V]
+`class A { var v = 0; var xs = [1, 2] }; struct S { var v: Any; var xs: [Any] }; var s
+= S(v: 1.5, xs: [1.5]); s.xs[0] = 3; print(s.v, s.xs[0])` prints `7 3.0` (swiftc
+`7 3`): the property type registry is keyed by name only. `let s: S = .foo { ... }`
+(static func via implicit member + trailing closure) does not parse, and `.foo(...)`
+builds an enum case instead of calling `S.foo`. Also: `mec batch-to-llvm-ir.abnf -qq`
+prints nothing (P3).
 
 ---
 
@@ -144,11 +144,6 @@ method dispatch is case-sensitive (PHP method names are case-insensitive).
 ---
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
-
-### T-398 batch: `%~n0` inside `call :label`; native string arena · P2 · SH · IN PROGRESS (SW+SH worker, round 16) [V]
-Both halves: inside `call :label`, `%~n0` / `%~dp0` answer the label instead of the
-batch file (wine .exp line 988). Native only: batch-rt's 2 MB string arena is exhausted
-by tests/reference batch test_builtins.cmd after 726 lines (grow or collect).
 
 ---
 
@@ -472,6 +467,8 @@ T-390 go: static type of arithmetic on defined types; `case []T:`; nested arrays
 T-389 php: string/number comparison, visibility, foreach over objects, method_exists — DONE b6da4a79 0b0d526b da00a2fa (spec-only; visibility modelled; php-src corpus interp 766→787, compiled 895→912)
 T-397 php: foreach by value walks the live array — DONE 108cb5ad
 T-399 ts interpreter: stores to namespace exports before declaration / to exported functions — DONE 6e3f3443
+T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context — DONE 196e9a27 eee094e4 (the wrong answers, key paths, postfix/inout operators); DECLINED with reasons: macros (compiler plugins), #line/#function/#file (call-site defaults + swiftc module name), `case A<T>()` (always a type error in Swift), `for await` (needs an executor), local property wrappers, debugger-only `$x1`, `@const` (swiftc 6.1.2 rejects it), prefix+postfix of one operator name
+T-398 batch: `%~n0` inside `call :label`; native string arena — DONE 73990fef
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
