@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-402** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-403** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,11 +78,13 @@ are lists, not views). `tuple(t) is t` False; `hasattr(tuple, "__add__")` False.
 
 # JS — JavaScript and TypeScript
 
-### T-399 ts interpreter: stores to namespace exports before declaration / to exported functions · P3 · JS · IN PROGRESS (JS worker, round 14) [U]
-`namespace N { export function set(v){ x = v } set(1); export let x; }` - the store
-falls through to a global (tsc writes `N.x = 1`). Assigning by bare name to an exported
-function rebinds the namespace object's slot (tsc keeps the local binding separate).
-Neither settled against tsc+node yet.
+### T-402 js/ts: function declarations are not hoisted · P1 · JS · IN PROGRESS (JS worker, round 15) [V]
+`function t() { println(typeof f, f()); function f() { return 1; } }`: node `function 1`;
+JS interpreter, TS interpreter and TS compiler print `undefined` then ReferenceError
+(check the JS compiler). Same in namespace bodies (`println(typeof f); export function
+f(){}`). Hoist function declarations to the top of their function/block scope (Annex B
+block-function semantics in sloppy mode: check node). Also: `(f as any) = g;` does not
+parse in either TS grammar (check tsc).
 
 ---
 
@@ -469,6 +471,7 @@ T-393 ts: namespace `this` through an exported variable; uninitialised exports i
 T-390 go: static type of arithmetic on defined types; `case []T:`; nested arrays — DONE b9299286
 T-389 php: string/number comparison, visibility, foreach over objects, method_exists — DONE b6da4a79 0b0d526b da00a2fa (spec-only; visibility modelled; php-src corpus interp 766→787, compiled 895→912)
 T-397 php: foreach by value walks the live array — DONE 108cb5ad
+T-399 ts interpreter: stores to namespace exports before declaration / to exported functions — DONE 6e3f3443
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
