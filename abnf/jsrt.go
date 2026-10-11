@@ -6147,6 +6147,13 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 	c.set("__isclass", true)
 	c.set("__rbuiltin", name)
 	c.set("__name", name)
+	// The builtin names that are modules, not classes: their #class is Module.
+	// Twins: rbBuiltinClass in languages/lib/ruby-rt.metajs, isBuiltinModule in
+	// ruby-interpreter.abnf.
+	switch name {
+	case "Kernel", "Comparable", "Enumerable", "Math":
+		c.set("__ismodule", true)
+	}
 	// Math::PI and Math::E. A scoped constant is a "$c$"-prefixed slot on the
 	// namespace object (makeScopedConst in ruby-to-llvm-ir.abnf, lookupConst in
 	// ruby-interpreter.abnf).
@@ -6841,6 +6848,13 @@ func (rt *jsrt) rubyRaiseErr(cls, msg string) {
 // then ":" and its class name unless that text already starts with "#". Twins:
 // noMethod in ruby-interpreter.abnf, rbNoMethod in languages/lib/ruby-rt.metajs.
 func (rt *jsrt) rubyNoMethod(t interface{}, name string) {
+	rt.rubyRaiseErr("NoMethodError", "undefined method `"+name+"' for "+rt.rubyNoMethodDesc(t))
+}
+
+// rubyNoMethodDesc is the receiver as a NoMethodError / NameError message names it.
+// Twins: noMethodDesc in ruby-interpreter.abnf, rbNoMethodDesc in
+// languages/lib/ruby-rt.metajs.
+func (rt *jsrt) rubyNoMethodDesc(t interface{}) string {
 	cn := rt.rubyClassNameRT(t)
 	if o, isObj := t.(*jsObject); isObj && cn == "" {
 		cn = "Object"
@@ -6860,7 +6874,7 @@ func (rt *jsrt) rubyNoMethod(t interface{}, name string) {
 	if !strings.HasPrefix(d, "#") {
 		d += ":" + cn
 	}
-	rt.rubyRaiseErr("NoMethodError", "undefined method `"+name+"' for "+d)
+	return d
 }
 
 // rubyMissMark is the sentinel rubyMemberCall registers as rt.missCall, so the
@@ -8381,6 +8395,13 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 				return rt.toString(s)
 			}
 		}
+		// Object#inspect never calls a user #to_s: MRI's default form, with the
+		// address and instance variables left off as in rubyStr.
+		if _, isCls := t.props["__isclass"]; !isCls {
+			if n := rubyInstClassName(t); n != "" {
+				return "#<" + n + ">"
+			}
+		}
 	}
 	return rt.rubyStr(v)
 }
@@ -9408,6 +9429,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if rt.rubyClassNameRT(target) != "" && !rubyUserObj(target) {
 			return rt.rubyIsA(target, argAt(args, 0))
 		}
+	// Object#method on a builtin value: a Method that re-dispatches by name, or
+	// MRI's NameError when the value does not respond to it. Twins: the "method"
+	// arms of mcall in ruby-interpreter.abnf and rbMethod in lib/ruby-rt.metajs.
+	case "method":
+		o, isObj := target.(*jsObject)
+		isCls := isObj && o.props["__isclass"] == true
+		if kind := rt.rubyClassNameRT(target); kind != "" && !rubyUserObj(target) && !isCls && !isCallable(target) {
+			nm := rt.rubyStr(argAt(args, 0))
+			if rt.rubyRespond(target, []interface{}{jsSym{s: nm}}) != true {
+				rt.rubyRaiseErr("NameError", "undefined method `"+nm+"' for class `"+kind+"'")
+			}
+			recv := target
+			return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
+				fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+					return rt.rubyMethod(recv, "send", append([]interface{}{jsSym{s: nm}}, a...))
+				}}, kind, nm)
+		}
 	case "nil?":
 		return isUndefOrNull(target)
 	// Kernel#itself / #tap, unless a user class defines its own.
@@ -9953,7 +9991,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if _, userHas := rubyFindMethod(o, "method"); !userHas {
 					nm := rt.rubyStr(argAt(args, 0))
 					if _, found := rubyFindMethod(o, nm); !found {
-						rt.fail("undefined method '%s'", nm)
+						rt.rubyRaiseErr("NameError", "undefined method `"+nm+"' for class `"+rubyOwnerName(o)+"'")
 					}
 					recv := interface{}(o)
 					return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
@@ -13765,7 +13803,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// A CATCHABLE NameError, which is what MRI raises (and what the
 			// interpreter half prints).
 			panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("NameError"),
-				[]interface{}{"undefined method '" + name + "' for class 'Object'"})})
+				[]interface{}{"undefined method `" + name + "' for class `Object'"})})
 		},
 		"js_rgget": func(a []uint64) uint64 {
 			if v, ok := rt.rubyGlobals[rt.toString(u(a[0]))]; ok {

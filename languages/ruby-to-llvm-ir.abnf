@@ -4631,6 +4631,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             catchT = function(b) {
                 curInRescue = true
                 var excV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$exc")])
+                callExt(b, "js_rgset", [emitStr(b, "!"), excV])
                 hidCount++
                 var rName = "$resc" + hidCount
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rName), hNull])
@@ -4691,7 +4692,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (finallyT != undefined) {
                 finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
             }
+            // $! is the exception being handled (the catch closure sets it); once
+            // the begin completes it reverts to what it was before. An exception
+            // leaving the begin skips the restore and keeps it. Twin of makeTry
+            // in ruby-interpreter.abnf.
+            var bang0 = catchT != null ? callExt(b, "js_rgget", [emitStr(b, "!")]) : hUndef
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
+            if (catchT != null) { callExt(b, "js_rgset", [emitStr(b, "!"), bang0]) }
             var afterB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ctl, emitStr(b, retryName)])), headB, afterB)
             b = afterB
@@ -4940,12 +4947,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (callHasBlk) {
                 return emitBlkBreakCall(b, function(bb) {
-                    var fv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, calleeKey(name))])
+                    var fv = emitCallee(bb, name)
                     var ia = emitArgs(bb, args)
                     return {b: ia.b, v: callExt(ia.b, "js_call", [fv, hUndef, ia.v])}
                 })
             }
-            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, calleeKey(name))])
+            var fV = emitCallee(b, name)
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
@@ -4954,8 +4961,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The no-block tail of makeCall, as a function: what a plain `name(args)` emits
     // when nothing above claimed the name. It is what the printf / p arms fall back
     // to when the program defines a method of that name itself.
-    // The scope slot a call of `name` reads: a def's own (see curTopLocals).
-    function calleeKey(name) { return rubyMethods["$" + name] === true ? "$d$" + name : name }
+    // A name no def of the file declares resolves at run time, and a miss is MRI's
+    // NoMethodError on the implicit self (js_rfn).
+    function emitCallee(b, name) {
+        if (rubyMethods["$" + name] === true) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$d$" + name)]) }
+        return callExt(b, "js_rfn", [curScopeV, emitStr(b, name)])
+    }
     // The Object methods a bare call reaches on the implicit self (`respond_to?(:x)`
     // inside a method, `send(:m)` at the top level) when no def or local of the name
     // exists. Twin of selfCallNames in ruby-interpreter.abnf.
@@ -4977,7 +4988,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = eam.b
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
             }
-            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, calleeKey(name))])
+            var fV = emitCallee(b, name)
             var ea = emitArgs(b, args)
             b = ea.b
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
@@ -6321,10 +6332,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 bb.NewCondBr(truthy(bb, notMark), okB, noB)
                 callExt(noB, "js_rraise", [excV, hUndef])
                 noB.NewRet(hUndef)
+                callExt(okB, "js_rgset", [emitStr(okB, "!"), excV])
                 return fallbackT(okB)
             }
             var catchClo = callExt(b, "js_closure", [handle(emitFunc(["$exc"], catchT, false, false)), curScopeV])
-            return {b: b, v: callExt(b, "js_try", [tryClo, catchClo, hUndef])}
+            // $! is set for the fallback and restored after it, as in makeTry.
+            var bang0 = callExt(b, "js_rgget", [emitStr(b, "!")])
+            var tv = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            callExt(b, "js_rgset", [emitStr(b, "!"), bang0])
+            return {b: b, v: tv}
         }
     }
     // A def body carrying its own rescue/else/ensure clauses (no `begin`).
@@ -6376,7 +6392,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var dV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$d$" + name)])
                 return {b: b, v: callExt(b, "js_call", [dV, hUndef, callExt(b, "js_arr_new", [])])}
             }
-            return {b: b, v: callExt(b, inDefFrame(name) ? "js_rlvar" : "js_scope_get", [curScopeV, emitStr(b, name)])}
+            // A top-level name not bound as a local so far may be bound by nothing:
+            // js_rlvar raises MRI's NameError for that.
+            var walk = inDefFrame(name) || (curDefLocals == null && isLocalName(name) && !knownLocal(name))
+            return {b: b, v: callExt(b, walk ? "js_rlvar" : "js_scope_get", [curScopeV, emitStr(b, name)])}
         }
     }
     // The class registry: filled by makeClassStmt while the tags run, consulted while

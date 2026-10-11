@@ -141,8 +141,22 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 				inFrame = false
 			}
 		}
-		panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("NameError"),
-			[]interface{}{"undefined local variable or method '" + name + "'"})})
+		rt.rubyRaiseErr("NameError", "undefined local variable or method `"+name+"' for "+
+			rt.rubyNoMethodDesc(rubyScopeSelf(rt, a[0])))
+		return 0
+	}
+	// The callee of a bare `name(args)` that names no def: the chain walk of
+	// js_scope_get, with a miss raising MRI's NoMethodError on the implicit self.
+	// Twin of js_rfn in languages/lib/ruby-rt.metajs.
+	m["js_rfn"] = func(a []uint64) uint64 {
+		name := rt.toString(u(a[1]))
+		for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+			if v, ok := sc.get(name); ok {
+				return w(v)
+			}
+		}
+		rt.rubyNoMethod(rubyScopeSelf(rt, a[0]), name)
+		return 0
 	}
 	// An @ivar write where self is a class object. Twin of js_rcivset in
 	// languages/lib/ruby-rt.metajs.
@@ -2009,4 +2023,25 @@ func rubyCivSet(o *jsObject, k string, v interface{}) {
 		l.elems = append(l.elems, k)
 	}
 	o.set(k, v)
+}
+
+// rubyScopeSelf is the implicit receiver at scope h: the nearest `self` binding,
+// or the main object where that is nil (the top level and its defs, see
+// emitIvarSelf in ruby-to-llvm-ir.abnf). Twin of rbScopeSelf in
+// languages/lib/ruby-rt.metajs.
+func rubyScopeSelf(rt *jsrt, h uint64) interface{} {
+	var self, main interface{} = jsNull, jsNull
+	found := false
+	for sc := rt.scopeOf(h); sc != nil; sc = sc.parent {
+		if v, ok := sc.get("self"); ok && !found {
+			self, found = v, true
+		}
+		if v, ok := sc.get("$main"); ok {
+			main = v
+		}
+	}
+	if isNullish(self) {
+		return main
+	}
+	return self
 }

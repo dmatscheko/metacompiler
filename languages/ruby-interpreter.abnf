@@ -5514,6 +5514,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return rstr(mcall(v, "inspect", [], null))
             }
             if (isExcObj(v)) { return excInspect(v.__class.__name, rstr(v)) }
+            // Object#inspect never calls a user #to_s: MRI's default form, with the
+            // address and instance variables left off as in rstr.
+            return "#<" + v.__class.__name + ">"
         }
         // Module#inspect is the NAME even when the class defines #to_s, since MRI
         // binds the alias to the original Module#to_s.
@@ -7308,11 +7311,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // class name unless that text already starts with "#". Twins: rubyNoMethod in
     // abnf/jsrt.go, rbNoMethod in languages/lib/ruby-rt.metajs.
     function noMethod(t, name) {
+        raiseErr("NoMethodError", "undefined method `" + name + "' for " + noMethodDesc(t))
+    }
+    function noMethodDesc(t) {
         var cn = classOf(t).__name
         var d = rinspect(t)
         if (charCount(d) > 65) { d = "#<" + cn + ">" }
         if (d.slice(0, 1) != "#") { d = d + ":" + cn }
-        raiseErr("NoMethodError", "undefined method `" + name + "' for " + d)
+        return d
+    }
+    // A bare name that is neither a local nor a method: NameError, worded as MRI 2.6
+    // does. Twins: js_rlvar in languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
+    function undefinedName(name) {
+        raiseErr("NameError", "undefined local variable or method `" + name + "' for " + noMethodDesc(ivarSelf()))
     }
     // Object#object_id. nil, true, false and an Integer have MRI's fixed ids (8, 20,
     // 0, 2n+1); anything else is numbered on first request, in a table searched with
@@ -7968,6 +7979,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "respond_to?" && !isUserObj(target) && !isClassObj(target)) {
             return rbResponds(classOf(target).__name, rstr(args[0])) || (args.length > 1 && rtest(args[1]) && respondsPrivate(rstr(args[0])))
         }
+        // Object#method on a builtin value: a Method that re-dispatches by name, or
+        // MRI's NameError when the value does not respond to it. Twins: the
+        // "method" arms of rubyMethod in abnf/jsrt.go and rbMethod in
+        // lib/ruby-rt.metajs.
+        if (name == "method" && !isUserObj(target) && !isClassObj(target) && typeof target != "function") {
+            var bmn = rstr(args[0])
+            var bcn = classOf(target).__name
+            if (!rbResponds(bcn, bmn)) { raiseErr("NameError", "undefined method `" + bmn + "' for class `" + bcn + "'") }
+            var brecv = anytype
+            brecv = target
+            return markMethodVal(function() { return mcall(brecv, bmn, argsArray(arguments), null) }, bcn, bmn)
+        }
         if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
             if (name == "instance_of?") { return classOf(target) === args[0] }
             return valueIsA(target, args[0])
@@ -8346,7 +8369,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (typeof bm != "function") { bm = lookupMethod(target.__class, rstr(args[0])) }
                 if (typeof bm != "function") {
                     throw {__exc: true, v: mkExc(hostGlobals["NameError"],
-                                                 "undefined method '" + rstr(args[0]) + "' for class '" + target.__class.__name + "'")}
+                                                 "undefined method `" + rstr(args[0]) + "' for class `" + target.__class.__name + "'")}
                 }
                 return bindSelfMethod(target, rstr(args[0]), bm)
             }
@@ -10101,6 +10124,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if ((f == undefined || typeof f != "function") && rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
                 f = getVar("$d$" + name)
             }
+            // A call of a name nothing defines: NoMethodError on the implicit self.
+            // Twin of js_rfn in languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
+            if (f == undefined && !hasVar(name)) { noMethod(ivarSelf(), name) }
             if (f == undefined) { f = getVar(name) }
             // Kernel#Integer / #Float / #String / #Array before the class arm: the
             // name resolves to the builtin CLASS object, and calling that would build
@@ -10835,11 +10861,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (isLocalName(name) && frameScopeOf(scopes) != null) {
                 var gv = anytype
                 gv = hasOwn(globalScope, name) ? globalScope[name] : undefined
-                if (hasOwn(globalScope, name) ? typeof gv != "function" : !hasVar(name)) {
-                    throw {__exc: true, v: mkExc(hostGlobals["NameError"],
-                                                 "undefined local variable or method '" + name + "'")}
-                }
+                if (hasOwn(globalScope, name) ? typeof gv != "function" : !hasVar(name)) { undefinedName(name) }
             }
+            if (!hasVar(name)) { undefinedName(name) }
             return getVar(name)
         }
     }
@@ -11698,6 +11722,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var savedChain = scopes.slice()
                 var box = {v: null, again: false}
                 var threw = false
+                var handled = false
+                var bang0 = anytype
+                bang0 = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
                 try {
                     box.v = tryT()
                 } catch (e) {
@@ -11713,6 +11740,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // assigns are locals of the code around the begin.
                     if (hit.href != null) { bindExcTarget(hit.href, e.v) }
                     curExc.push(e.v)
+                    scopePut(rubyGlobals, "!", e.v)
                     try {
                         box.v = hit.handler()
                     } catch (e2) {
@@ -11722,8 +11750,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         else { throw e2 }
                     }
                     if (!box.again) { curExc.pop() }
+                    handled = true
                 } finally {
                     scopes = savedChain.slice()
+                    // $! is the exception being handled; once a rescue clause
+                    // completes it reverts to what it was before the begin. An
+                    // exception leaving the clause keeps it. Twin of makeTry in
+                    // ruby-to-llvm-ir.abnf.
+                    if (handled) { scopePut(rubyGlobals, "!", bang0) }
                     if (!threw && !box.again && !isSig(box.v) && elseT != undefined) {
                         box.v = elseT()
                     }
@@ -11759,7 +11793,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             } catch (e) {
                 scopes = savedChain.slice()
                 if (!excIsUser(e)) { throw e }
-                return altT()
+                var bang0 = anytype
+                bang0 = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
+                scopePut(rubyGlobals, "!", e.v)
+                var r = anytype
+                r = altT()
+                scopePut(rubyGlobals, "!", bang0)
+                return r
             }
         }
     }
@@ -11975,8 +12015,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                              // Class and Module are what a class object and a module
                              // object answer to #class.
                              "Class", "Module"]
+    // The builtin names that are modules, not classes: their #class is Module. Twins:
+    // rubyBuiltinClass in abnf/jsrt.go, rbBuiltinClass in languages/lib/ruby-rt.metajs.
+    function isBuiltinModule(n) { return n == "Kernel" || n == "Comparable" || n == "Enumerable" || n == "Math" }
     for (var bci = 0; bci < builtinClassNames.length; bci++) {
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
+        if (isBuiltinModule(builtinClassNames[bci])) { hostGlobals[builtinClassNames[bci]].__ismodule = true }
     }
     // MRI's `main` is an Object whose singleton #to_s and #inspect answer "main".
     function mainName(self) { return "main" }
@@ -12281,7 +12325,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // CATCHABLE NameError, which is what MRI raises and what a program may
         // rescue.
         throw {__exc: true, v: mkExc(hostGlobals["NameError"],
-                                     "undefined method '" + n + "' for class 'Object'")}
+                                     "undefined method `" + n + "' for class `Object'")}
     }
     // A method of the running `self` as a callable VALUE: an ordinary variadic
     // closure that re-dispatches on the receiver, which is what makes #call, #arity

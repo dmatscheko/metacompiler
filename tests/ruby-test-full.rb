@@ -3644,6 +3644,72 @@ def s81
                  S81C.new.instance_variables == [])
 end
 
+# ===== SECTION 82: $!, an undefined bare name, Object#inspect, builtin modules =====
+# $! is the exception a rescue clause is handling and reverts once the clause
+# completes; a bare call of a name nothing defines is NoMethodError on main, a bare
+# name NameError; Object#inspect ignores a user #to_s; Kernel / Comparable /
+# Enumerable / Math are Modules; #method on a builtin value answers a Method or
+# NameError. Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS
+# SECTION RUNS UNDER REAL RUBY.
+class S82P
+  def to_s
+    "P!"
+  end
+end
+class S82Q
+  def h
+    s82_nope
+  end
+end
+def s82
+  x = (raise "boom" rescue $!)
+  y = nil
+  begin
+    raise ArgumentError, "bad"
+  rescue
+    y = $!
+  end
+  check("bg82a", x.class == RuntimeError && x.message == "boom" && y.class == ArgumentError && $!.nil?)
+  m = []
+  begin
+    s82_nope(1)
+  rescue NoMethodError => e
+    m << e.message
+  end
+  begin
+    s82_nope
+  rescue NameError => e
+    m << e.class.to_s << e.message
+  end
+  begin
+    S82Q.new.h
+  rescue NameError => e
+    m << e.class.to_s << e.message.start_with?("undefined local variable or method `s82_nope' for #<S82Q")
+  end
+  check("nm82b", m == ["undefined method `s82_nope' for main:Object", "NameError",
+                       "undefined local variable or method `s82_nope' for main:Object", "NameError", true])
+  i = S82P.new.inspect
+  check("in82c", i.start_with?("#<S82P") && !i.include?("P!") && [S82P.new].inspect.start_with?("[#<S82P") &&
+                 "#{S82P.new}" == "P!")
+  check("md82d", [Kernel.class, Comparable.class, Enumerable.class, Math.class, String.class] ==
+                 [Module, Module, Module, Module, Class])
+  r = []
+  begin
+    1.method(:zz)
+  rescue NameError => e
+    r << e.class << e.message
+  end
+  begin
+    "s".method(:zz)
+  rescue NoMethodError => e
+    r << :wrong
+  rescue NameError => e
+    r << e.message
+  end
+  check("mv82e", r == [NameError, "undefined method `zz' for class `Integer'", "undefined method `zz' for class `String'"] &&
+                 1.method(:abs).call == 1 && "ab".method(:upcase).call == "AB" && -3.method(:abs).call == 3)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3687,5 +3753,6 @@ s78() # SECTION-CALL 78
 s79() # SECTION-CALL 79
 s80() # SECTION-CALL 80
 s81() # SECTION-CALL 81
+s82() # SECTION-CALL 82
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

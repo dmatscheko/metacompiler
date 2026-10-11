@@ -1794,6 +1794,12 @@ function rbInspect(v) {
         }
         // A Regexp / MatchData answers from the regexp half's own table.
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "inspect", [])) }
+        // Object#inspect never calls a user #to_s: MRI's default form, with the
+        // address and instance variables left off as in rbStr.
+        if (v["__isclass"] !== true) {
+            var icn = rbInstClassName(v)
+            if (icn != "") { return "#<" + icn + ">" }
+        }
     }
     return rbStr(v)
 }
@@ -3528,6 +3534,8 @@ function rbBuiltinClass(name) {
     var got = rbClassTable[k]
     if (got !== undefined) { return got }
     var c = {__isclass: true, __rbuiltin: name, __name: name}
+    // The builtin names that are modules, not classes: their #class is Module.
+    if (name == "Kernel" || name == "Comparable" || name == "Enumerable" || name == "Math") { c["__ismodule"] = true }
     // Math::PI and Math::E: a scoped constant is a "$c$"-prefixed slot on the
     // namespace object (makeScopedConst in ruby-to-llvm-ir.abnf). The twin is
     // rubyBuiltinClass in abnf/jsrt.go.
@@ -6723,6 +6731,13 @@ function rbMethod(target, name, args) {
     if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
         if (rbClassName(target) != "" && !rbUserObj(target)) { return rbIsA(target, rbArgAt(args, 0)) }
     }
+    // Object#method on a builtin value: a Method that re-dispatches by name, or
+    // MRI's NameError when the value does not respond to it. Twin of the "method"
+    // arm of rubyMethod in abnf/jsrt.go.
+    if (name == "method" && !rbUserObj(target) && !rbIsFn(target) && !(rbIsObj(target) && target["__isclass"] === true)) {
+        var bkind = rbClassName(target)
+        if (bkind != "") { return rbBuiltinMethodVal(target, bkind, rbStr(rbArgAt(args, 0))) }
+    }
     if (name == "nil?") { return rtIsNil(target) }
     // Kernel#itself / #tap, unless a user class defines its own.
     if ((name == "itself" || name == "tap") && rbFindMethod(target, name) === undefined) {
@@ -7059,7 +7074,7 @@ function rbMethod(target, name, args) {
             if (name == "method" && rbFindMethod(target, "method") === undefined) {
                 var mnm = rbStr(rbArgAt(args, 0))
                 var mm = rbFindMethod(target, mnm)
-                if (mm === undefined) { fail("undefined method '" + mnm + "'") }
+                if (mm === undefined) { rbRaiseErr("NameError", "undefined method `" + mnm + "' for class `" + rbOwnerName(target) + "'") }
                 return rbBindMethod(target, mnm, mm)
             }
         }
@@ -7824,6 +7839,12 @@ function rbHashOf(v) {
 // NoMethodError for a name no method table answers. Twin of rubyNoMethod in
 // abnf/jsrt.go, which states the wording rule.
 function rbNoMethod(t, name) {
+    rbRaiseErr("NoMethodError", "undefined method `" + name + "' for " + rbNoMethodDesc(t))
+}
+
+// The receiver as a NoMethodError / NameError message names it. Twin of
+// rubyNoMethodDesc in abnf/jsrt.go.
+function rbNoMethodDesc(t) {
     var cn = rbClassName(t)
     if (cn == "") {
         cn = "Object"
@@ -7839,7 +7860,7 @@ function rbNoMethod(t, name) {
     var d = rbInspect(t)
     if (rbCharCount(d) > 65) { d = "#<" + cn + ">" }
     if (d.slice(0, 1) != "#") { d = d + ":" + cn }
-    rbRaiseErr("NoMethodError", "undefined method `" + name + "' for " + d)
+    return d
 }
 
 
@@ -8581,8 +8602,40 @@ function js_rlvar(scope, name) {
         if (scopeHas(s, "$blk")) { inFrame = false }
         s = scopeParent(s)
     }
-    js_rraise(rbBuiltinClass("NameError"), "undefined local variable or method '" + n + "'")
+    rbRaiseErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(rbScopeSelf(scope)))
     return null
+}
+// The callee of a bare `name(args)` that names no def: a chain walk, with a miss
+// raising MRI's NoMethodError on the implicit self. Twin of js_rfn in
+// abnf/jsrtruby.go.
+function js_rfn(scope, name) {
+    var n = rbStr(name)
+    var s = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) { return scopeGet(s, n) }
+        s = scopeParent(s)
+    }
+    rbNoMethod(rbScopeSelf(scope), n)
+    return null
+}
+// The implicit receiver at a scope: the nearest `self` binding, or the main
+// object where that is nil. Twin of rubyScopeSelf in abnf/jsrtruby.go.
+function rbScopeSelf(scope) {
+    var self = anytype
+    var main = anytype
+    var s = anytype
+    var found = false
+    self = null
+    main = null
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (!found && scopeHas(s, "self")) { self = scopeGet(s, "self"); found = true }
+        if (scopeHas(s, "$main")) { main = scopeGet(s, "$main") }
+        s = scopeParent(s)
+    }
+    if (rtIsNil(self)) { return main }
+    return self
 }
 function js_rlset(scope, name, v, depth) {
     var n = rbStr(name)
@@ -8756,7 +8809,7 @@ function js_rmethodval(scope, name) {
         return rbMarkMethodVal(kw, "Object(Kernel)", kn)
     }
     // A CATCHABLE NameError, which is what MRI raises.
-    js_rraise(rbBuiltinClass("NameError"), "undefined method '" + n + "' for class 'Object'")
+    js_rraise(rbBuiltinClass("NameError"), "undefined method `" + n + "' for class `Object'")
     return null
 }
 
@@ -8766,6 +8819,19 @@ function js_rmethodval(scope, name) {
 // singleton method and a prepended module resolve as an ordinary call. The
 // underlying method's arity record is carried over, or `method(:m).arity` would
 // answer the 0 an unrecorded closure answers.
+function rbBuiltinMethodVal(recv, kind, name) {
+    if (js_rrespond(recv, [rbSym(name)]) !== true) {
+        rbRaiseErr("NameError", "undefined method `" + name + "' for class `" + kind + "'")
+    }
+    var w = function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) { args.push(arguments[i]); i = i + 1 }
+        return js_rxmcall(recv, name, args)
+    }
+    return rbMarkMethodVal(w, kind, name)
+}
+
 function rbBindMethod(self, name, m) {
     var w = function() {
         var args = []
