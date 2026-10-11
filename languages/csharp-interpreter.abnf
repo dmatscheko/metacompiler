@@ -1075,11 +1075,15 @@ ObjInit     <~~ push({objinit: takeAll()}) ~~>
 // 'X = e' assigns the member; 'P1 = { X = 1 }' is a NESTED initializer, which assigns
 // into the object the member already holds rather than replacing it; '[k] = e' is an
 // indexed initializer.
-MemberInit  = NestedInit | IndexedInit | PlainInit ;
+MemberInit  = NestedInit | NestedColl | IndexedInit | PlainInit ;
 PlainInit   <~~ push(makeMemberInit(pop(), pop())) ~~>
             = Id <~~ push(up.in) ~~> "=" Expression ;
 NestedInit  <~~ push(makeNestedInit(pop(), pop())) ~~>
             = Id <~~ push(up.in) ~~> "=" ObjInit ;
+// 'Books = { "a", "b" }': a COLLECTION initializer on a member calls the member's
+// own Add for each element (ECMA-334 12.8.17.2.3); the member is not replaced.
+NestedColl  <~~ push(makeNestedColl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "=" "{" [ Expression { "," Expression } ] [ "," ] "}" ;
 IndexedInit <~~ push(makeIndexedInit(pop(), pop())) ~~>
             = "[" Expression "]" "=" Expression ;
 
@@ -3987,12 +3991,28 @@ KwLet       = "let" KwEnd ;
     // A nested member initializer ('P1 = { X = 1 }') assigns INTO the object the member
     // already holds; an indexed one ('[k] = e') writes through the index.
     function makeNestedInit(oi, name) { return {mfield: name, mnest: oi.objinit} }
+    // One Add call per element, over the member's value at the time the initializer runs.
+    // The record crosses the tag stack, which deep-copies it, so the calls and the slot
+    // they read stay together inside one closure.
+    function makeNestedColl(items) {
+        var held = {vals: []}
+        var calls = []
+        var name = items[0]
+        for (var i = 1; i < items.length; i++) {
+            calls.push(foldCallMember([csDeconSlot(held, 0), {kind: "mcall", name: "Add", args: [items[i]]}]))
+        }
+        return {mcoll: function(o) {
+            held.vals = [o[name]]
+            for (var j = 0; j < calls.length; j++) { calls[j]() }
+        }}
+    }
     function makeIndexedInit(valT, keyT) { return {mindex: keyT, mval: valT} }
     function csApplyInits(o, ms) {
         for (var i = 0; i < ms.length; i++) {
             var m = ms[i]
             if (m.mindex != undefined) { csSetIndex(o, m.mindex(), m.mval()); continue }
             if (m.mnest != undefined) { csApplyInits(o[m.mfield], m.mnest); continue }
+            if (m.mcoll != undefined) { m.mcoll(o); continue }
             o[m.mfield] = m.mval()
         }
     }

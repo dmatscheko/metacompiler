@@ -1066,11 +1066,14 @@ ObjInit     <~~ push({objinit: takeAll()}) ~~>
 // 'X = e' assigns the member; 'P1 = { X = 1 }' is a NESTED initializer, which assigns
 // into the object the member already holds rather than replacing it; '[k] = e' is an
 // indexed initializer.
-MemberInit  = NestedInit | IndexedInit | PlainInit ;
+MemberInit  = NestedInit | NestedColl | IndexedInit | PlainInit ;
 PlainInit   <~~ push(makeMemberInit(pop(), pop())) ~~>
             = Id <~~ push(up.in) ~~> "=" Expression ;
 NestedInit  <~~ push(makeNestedInit(pop(), pop())) ~~>
             = Id <~~ push(up.in) ~~> "=" ObjInit ;
+// A member's collection initializer. Twin of NestedColl in csharp-interpreter.abnf.
+NestedColl  <~~ push(makeNestedColl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "=" "{" [ Expression { "," Expression } ] [ "," ] "}" ;
 IndexedInit <~~ push(makeIndexedInit(pop(), pop())) ~~>
             = "[" Expression "]" "=" Expression ;
 
@@ -2343,6 +2346,23 @@ KwLet       = "let" KwEnd ;
     // A nested member initializer ('P1 = { X = 1 }') assigns INTO the object the member
     // already holds; an indexed one ('[k] = e') writes through the index.
     function makeNestedInit(oi, name) { return {mfield: name, mnest: oi.objinit} }
+    // One Add call per element. Twin of makeNestedColl in csharp-interpreter.abnf.
+    function makeNestedColl(items) {
+        var held = {v: hUndef}
+        var calls = []
+        var name = items[0]
+        for (var i = 1; i < items.length; i++) {
+            calls.push(foldCallMember([csDeconSlot(held), {kind: "mcall", name: "Add", args: [items[i]]}]))
+        }
+        return {mcoll: function(b, oV) {
+            held.v = callExt(b, "js_get", [oV, emitStr(b, name)])
+            for (var j = 0; j < calls.length; j++) {
+                var rc = calls[j](b)
+                b = rc.b
+            }
+            return b
+        }}
+    }
     function makeIndexedInit(valT, keyT) { return {mindex: keyT, mval: valT} }
     function emitInits(b, oV, ms) {
         for (var i = 0; i < ms.length; i++) {
@@ -2359,6 +2379,7 @@ KwLet       = "let" KwEnd ;
                 b = emitInits(b, callExt(b, "js_get", [oV, emitStr(b, m.mfield)]), m.mnest)
                 continue
             }
+            if (m.mcoll != undefined) { b = m.mcoll(b, oV); continue }
             var r = m.mval(b)
             b = r.b
             callExt(b, "js_set", [oV, emitStr(b, m.mfield), r.v])

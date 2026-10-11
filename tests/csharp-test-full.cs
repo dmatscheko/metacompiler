@@ -2633,6 +2633,7 @@ b";                                                   // verbatim keeps the newl
         delegate int S41Fn(int x);
         enum S41E { A = 1, B = 2 }
         class S41P { public int P1; public int P2 { get; set; } }
+        class S41Lib { public string Name; public List<string> Books = new List<string>(); public List<int> Ns = new List<int> { 9 }; }
         static int S41Twice<T>(int x) { return x * 2; }
         static int S41Apply(S41Fn f, int v) { return f(v); }
         static void S41Out(string str, out int v) { v = str.Length; }
@@ -2694,6 +2695,10 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s41i1", t == "[4|  3]");
             // 'o is T<int> ? a : b' is a conditional over the type test (12.12.1).
             object[] os = { new S41Gen<int>(), n[0] };
+            // A member's collection initializer Adds to the list the member holds (12.8.17.2.3).
+            var lib = new S41Lib { Name = "N", Books = { "a", "b", }, Ns = { n[3], n[0] } };
+            Program.Check("s41m1", lib.Name == "N" && lib.Books.Count == 2 && lib.Books[1] == "b"
+                && lib.Ns.Count == 3 && lib.Ns[0] == 9 && lib.Ns[2] == 4);
             Program.Check("s41q1", (os[0] is S41Gen<int> ? "y" : "n") == "y" && (os[1] is string ? 1 : 2) == 2);
         }
 
