@@ -94,7 +94,7 @@ digits and its switch to exponent notation may not be the fixed window `csFloStr
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
 
-### T-421 csharp: string.Format, StringComparison, remaining `default` contexts, LINQ · P2 · CS · OPEN [V spec-only]
+### T-421 csharp: string.Format, StringComparison, remaining `default` contexts, LINQ · P2 · CS · IN PROGRESS (CS worker, round 21) [V spec-only]
 `string.Format`, `StringComparison`, `StringSplitOptions`, `"a".Normalize()` unknown.
 String.Compare/CompareTo deliberately absent (culture collation), so `List<string>.Sort()`
 fails loudly. `List.Capacity` missing. `default` still untyped as a method argument,
