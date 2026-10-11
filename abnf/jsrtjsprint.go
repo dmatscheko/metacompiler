@@ -1981,7 +1981,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if !isUndefOrNull(it) {
 			// js_jsvget, the member VALUE read: a class instance's return() lives on
 			// its __class descriptor, where rt.getMember does not look.
-			if r := u(m["js_jsvget"]([]uint64{a[0], w("return")})); isCallable(r) {
+			if r := u(m["js_jsretvget"]([]uint64{a[0], w("return")})); isCallable(r) {
 				rt.call(r, it, nil)
 			}
 		}
@@ -2033,6 +2033,57 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return 0
 	}
 	baseGet := m["js_get"]
+	// ----- g.return(v) at a yield* -----
+	//
+	// node hands the value of g.return(v) to the return() of the delegate a `yield*`
+	// is parked at, and when that answers {done: true, value: x} the generator
+	// returns x, not v. closeV is the value the close in progress carries:
+	// genReturn sets it around the close and answers it afterwards, and the
+	// yield*'s close region calls js_jsdelegclose, which passes it to the delegate
+	// and replaces it with a done answer's value. It is saved and restored, so a
+	// delegate generator closed from inside a close keeps its own. A not-done
+	// answer would make node yield it and stay in the yield*, which a close cannot
+	// do here (closeBody); the close keeps the value it had. Twins: js_jsdelegclose
+	// / jvGenReturn in languages/lib/js-rt.metajs, jpReturnDelegate / genClose in
+	// both *-interpreter.abnf.
+	var closeV interface{} = jsUndef
+	genReturn := func(g *jsGenerator) *hostFunc {
+		return jsHostFunc("return", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			saved := closeV
+			defer func() { closeV = saved }()
+			closeV = argAt(args, 0)
+			g.closeBody(rt)
+			g.retValue = closeV
+			res := newJSObject()
+			res.set("value", closeV)
+			res.set("done", true)
+			return res
+		})
+	}
+	// The emitters read a member spelled `.return` through these two instead of
+	// js_jsmget / js_jsvget, so that no other member read pays for the test.
+	m["js_jsretmget"] = func(a []uint64) uint64 {
+		if g, isGen := u(a[0]).(*jsGenerator); isGen {
+			return w(genReturn(g))
+		}
+		return m["js_jsmget"](a)
+	}
+	m["js_jsretvget"] = func(a []uint64) uint64 {
+		if g, isGen := u(a[0]).(*jsGenerator); isGen {
+			return w(genReturn(g))
+		}
+		return m["js_jsvget"](a)
+	}
+	m["js_jsdelegclose"] = func(a []uint64) uint64 {
+		rf := u(m["js_jsretvget"]([]uint64{a[0], w("return")}))
+		if !isCallable(rf) {
+			return jsHUndefined
+		}
+		if r, ok := rt.call(rf, u(a[0]), []interface{}{closeV}).(*jsObject); ok && rt.truthy(rt.unwrap(m["js_jsvget"]([]uint64{w(r), w("done")}))) {
+			closeV = rt.unwrap(m["js_jsvget"]([]uint64{w(r), w("value")}))
+		}
+		return jsHUndefined
+	}
 	// js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
 	// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site
 	// and which deliberately HIDES the String/Array method names so the call falls into

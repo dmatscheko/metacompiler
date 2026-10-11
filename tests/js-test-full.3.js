@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-63.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-64.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,10 +6,11 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-63, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-64, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
-//                             hasOwnProperty, delete, Object.prototype, extends Object
+//                             hasOwnProperty, delete, Object.prototype, extends Object,
+//                             g.return() at a yield*
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1305,6 +1306,39 @@ function s63() {
     check("xob3", JSON.stringify(new D63()) === '{"d":1}' && new (class extends (Object) {})() instanceof Object)
 }
 
+// ===== SECTION 64: g.return(v) at a yield* answers the delegate's return() =====
+// A close at a `yield*` hands v to the delegate's return(), and when that answers
+// done the generator returns ITS value - undefined for a bare {done: true} - with the
+// generator's own finally clauses still run. A delegate generator closes the same
+// way. Values read off node 24.
+var log64 = []
+function it64(ans) {
+    var o = {
+        n: 0,
+        next() { this.n++; return {value: this.n, done: false} },
+        return(v) { log64.push("ret:" + v); return ans }
+    }
+    // node iterates only through Symbol.iterator; these engines drive a callable next().
+    if (typeof Symbol !== "undefined") { o[Symbol.iterator] = function () { return this } }
+    return o
+}
+function* d64(it) { try { yield* it } finally { log64.push("fin") } }
+function* in64() { try { yield 1 } finally { log64.push("in") } }
+function s64() {
+    var g = d64(it64({done: true}))
+    var a = g.next()
+    var b = g.return(7)
+    check("ysr1", a.value === 1 && b.value === undefined && b.done === true && log64.join() === "ret:7,fin")
+    var h = d64(it64({value: 9, done: true}))
+    h.next()
+    var c = h.return(7)
+    check("ysr2", c.value === 9 && c.done === true && h.next().done === true)
+    var k = d64(in64())
+    k.next()
+    var e = k.return(5)
+    check("ysr3", e.value === 5 && e.done === true && log64.slice(4).join() === "in,fin")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1327,6 +1361,7 @@ function main() {
     s61() // SECTION-CALL 61
     s62() // SECTION-CALL 62
     s63() // SECTION-CALL 63
+    s64() // SECTION-CALL 64
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

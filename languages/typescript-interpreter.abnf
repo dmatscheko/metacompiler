@@ -5737,6 +5737,17 @@ NotFuncHead = :script(~~
         if (typeof rf == "function") { callWithThis(rf, v, []) }
         return undefined
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jpReturnDelegate(v) {
+        if (typeof v != "object") { return undefined }
+        var rf = anytype
+        rf = getMember(v, "return")
+        if (typeof rf != "function") { return undefined }
+        var r = anytype
+        r = callWithThis(rf, v, [jpCloseV])
+        if (jpIsObjV(r) && jsTruthy(getMember(r, "done"))) { jpCloseV = getMember(r, "value") }
+        return undefined
+    }
     function jpNoThrowMethod(v) {
         jpCloseDelegate(v)
         biRaise("TypeError: The iterator does not provide a 'throw' method.")
@@ -5824,7 +5835,7 @@ NotFuncHead = :script(~~
         try {
             s = doYieldRaw(run, val)
         } catch (e) {
-            if (e != undefined && e != null && e.__genExit == true) { jpCloseDelegate(dv) }
+            if (e != undefined && e != null && e.__genExit == true) { jpReturnDelegate(dv) }
             throw e
         }
         return s
@@ -5975,8 +5986,9 @@ NotFuncHead = :script(~~
         g["return"] = function() {
             var rv = anytype
             rv = (arguments.length > 0) ? arguments[0] : undefined
-            genClose(st, params, bodyT, env, self, args)
-            return {value: rv, done: true, __keys: ["value", "done"]}
+            var cv = anytype
+            cv = genClose(st, params, bodyT, env, self, args, rv)
+            return {value: cv, done: true, __keys: ["value", "done"]}
         }
         // See the twin of this comment in js-interpreter.abnf.
         g["throw"] = function() {
@@ -6003,18 +6015,29 @@ NotFuncHead = :script(~~
         return r
     }
     // See the twin of this comment in js-interpreter.abnf.
-    function genClose(st, params, bodyT, env, self, args) {
-        if (st.done) { return undefined }
-        if (st.count == 0) { st.done = true; return undefined }
+    // See the twin of this comment in js-interpreter.abnf.
+    var jpCloseV = anytype
+    jpCloseV = undefined
+    function genClose(st, params, bodyT, env, self, args, rv) {
+        if (st.done) { return rv }
+        if (st.count == 0) { st.done = true; return rv }
+        var savedV = anytype
+        savedV = jpCloseV
+        jpCloseV = rv
         try {
             genNext(st, params, bodyT, env, self, args, {__genExitIn: true})
         } catch (e) {
             st.done = true
-            if (e != undefined && e != null && e.__genExit == true) { return undefined }
-            throw e
+            if (e == undefined || e == null || e.__genExit != true) {
+                jpCloseV = savedV
+                throw e
+            }
         }
         st.done = true
-        return undefined
+        var out = anytype
+        out = jpCloseV
+        jpCloseV = savedV
+        return out
     }
     // One step: replay the body up to yield number st.count, and report what happened.
     function genNext(st, params, bodyT, env, self, args, sendv) {

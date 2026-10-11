@@ -1982,6 +1982,60 @@ function jvProtoTag(v) {
     return "[object Object]"
 }
 
+// g.return(v) at a yield*: the value the close in progress carries, which the
+// delegate's return() may replace. Twin of closeV / genReturn / js_jsdelegclose in
+// abnf/jsrtjsprint.go, which says why. jvCloseN counts the closes in progress, so a
+// delegate closed outside any is handed undefined.
+var jvCloseV = anytype
+var jvCloseN = 0
+function jvGenReturn(g) {
+    return function () {
+        var saved = anytype
+        saved = jvCloseV
+        var savedN = jvCloseN
+        jvCloseV = jvArg(arguments, 0)
+        jvCloseN = savedN + 1
+        var out = anytype
+        try {
+            jvCallT(g["return"], g, [jvCloseV])
+            out = jvCloseV
+        } finally {
+            jvCloseV = saved
+            jvCloseN = savedN
+        }
+        var res = {}
+        res["value"] = out
+        res["done"] = true
+        return res
+    }
+}
+// The emitters read a member spelled `.return` through these two instead of
+// js_jsmget / js_jsvget, so that no other member read pays for the test.
+function js_jsretmget(o, key) {
+    if (isGenerator(o)) { return jvGenReturn(o) }
+    return js_jsmget(o, key)
+}
+function js_jsretvget(o, key) {
+    if (isGenerator(o)) { return jvGenReturn(o) }
+    return js_jsvget(o, key)
+}
+function js_jsdelegclose(src) {
+    var rf = anytype
+    rf = js_jsretvget(src, "return")
+    if (!jvIsCallable(rf)) { return undefined }
+    var cv = anytype
+    cv = undefined
+    if (jvCloseN > 0) { cv = jvCloseV }
+    var r = anytype
+    r = jvCallT(rf, src, [cv])
+    if (jvIsObj(r)) {
+        if (!js_jsnot(js_jsvget(r, "done"))) {
+            if (jvCloseN > 0) { jvCloseV = js_jsvget(r, "value") }
+        }
+    }
+    return undefined
+}
+
 // `class A extends Object`: a class descriptor stands in for the Object global. Twin
 // of js_jsheritage in abnf/jsrtjsprint.go, which says why.
 var jvObjectRoot = anytype
@@ -5391,7 +5445,7 @@ function js_jsdrain() {
 // *-interpreter.abnf start scripts.
 function js_jsiterclose(it) {
     if (jvUndefOrNull(it)) { return undefined }
-    var r = js_jsvget(it, "return") // finds a class instance's return() too
+    var r = js_jsretvget(it, "return") // finds a class instance's return() too
     if (jvIsCallable(r)) { jvCallT(r, it, []) }
     return undefined
 }

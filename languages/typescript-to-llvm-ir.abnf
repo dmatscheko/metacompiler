@@ -2633,7 +2633,7 @@ NotFuncHead = :script(~~
             var lenV = callExt(headB, memGetExt(), [arrV, emitStr(headB, "length")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [lenV, callExt(headB, "js_num_i", [handle(n)])])),
                             stepB, closeB)
-            var retV = callExt(closeB, "js_jsvget", [srcV, emitStr(closeB, "return")])
+            var retV = callExt(closeB, "js_jsretvget", [srcV, emitStr(closeB, "return")])
             closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                     [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                              doCloseB, joinB)
@@ -3116,16 +3116,11 @@ NotFuncHead = :script(~~
         return emitFunction([], function(bb) {
             var opV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0yopen")])
             var cB = curF.NewBlock("")
-            var callB = curF.NewBlock("")
             var skB = curF.NewBlock("")
             bb.NewCondBr(truthy(bb, opV), cB, skB)
             callExt(cB, "js_scope_set", [curScopeV, emitStr(cB, "0yopen"), hFalse])
-            var srcV = callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, "0ysrc")])
-            var rfV = callExt(cB, "js_jsvget", [srcV, emitStr(cB, "return")])
-            cB.NewCondBr(truthy(cB, callExt(cB, "js_seq",
-                                 [callExt(cB, "js_typeof", [rfV]), emitStr(cB, "function")])), callB, skB)
-            callExt(jsThisSet(callB, srcV), "js_call", [rfV, srcV, callExt(callB, "js_arr_new", [])])
-            callB.NewBr(skB)
+            callExt(cB, "js_jsdelegclose", [callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, "0ysrc")])])
+            cB.NewBr(skB)
             return skB
         }, true)
     }
@@ -3196,7 +3191,7 @@ NotFuncHead = :script(~~
             ythrCallB.NewBr(joinB)
             // No throw method: close the delegate through return(), then raise the
             // TypeError node raises, spelled as the string its message renders to.
-            var yrfV = callExt(ythrNoB, "js_jsvget", [seqV, emitStr(ythrNoB, "return")])
+            var yrfV = callExt(ythrNoB, "js_jsretvget", [seqV, emitStr(ythrNoB, "return")])
             ythrNoB.NewCondBr(truthy(ythrNoB, callExt(ythrNoB, "js_seq",
                                   [callExt(ythrNoB, "js_typeof", [yrfV]), emitStr(ythrNoB, "function")])),
                               yretB, ythrowB)
@@ -3437,7 +3432,7 @@ NotFuncHead = :script(~~
                         var objV = cur
                         var keyV = kr.v
                         // See the twin of this comment in js-to-llvm-ir.abnf.
-                        var fV = callExt(b, "js_jsmget", [objV, keyV])
+                        var fV = callExt(b, (s.name === "return") ? "js_jsretmget" : "js_jsmget", [objV, keyV])
                         var argsV = callExt(b, "js_arr_new", [])
                         b = pushArgs(b, argsV, callS.args)
                         var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")]))
@@ -3465,7 +3460,7 @@ NotFuncHead = :script(~~
                     } else {
                         // See the twin of this comment in js-to-llvm-ir.abnf.
                         curThis = cur
-                        cur = callExt(b, "js_jsvget", [cur, kr.v])
+                        cur = callExt(b, (s.name === "return") ? "js_jsretvget" : "js_jsvget", [cur, kr.v])
                         i = i + 1
                     }
                 } else if (s.kind == "tag") {
@@ -4075,7 +4070,7 @@ NotFuncHead = :script(~~
                 var closeB = curF.NewBlock("")
                 var doCloseB = curF.NewBlock("")
                 brkB = closeB
-                var retV = callExt(closeB, "js_jsvget", [seqV, emitStr(closeB, "return")])
+                var retV = callExt(closeB, "js_jsretvget", [seqV, emitStr(closeB, "return")])
                 closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                         [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                                  doCloseB, exitB)

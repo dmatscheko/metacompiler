@@ -3691,7 +3691,7 @@ NotFuncHead = :script(~~
             var lenV = callExt(headB, memGetExt(), [arrV, emitStr(headB, "length")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [lenV, callExt(headB, "js_num_i", [handle(n)])])),
                             stepB, closeB)
-            var retV = callExt(closeB, "js_jsvget", [srcV, emitStr(closeB, "return")])
+            var retV = callExt(closeB, "js_jsretvget", [srcV, emitStr(closeB, "return")])
             closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                     [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                              doCloseB, joinB)
@@ -4271,24 +4271,20 @@ NotFuncHead = :script(~~
         }, true)
     }
     // The FINALLY body: if the body left the yield abnormally - which for a generator
-    // means gen_close threw GEN_EXIT in - run IteratorClose on the delegate, the same two
-    // steps makeForOf's closeB emits (a callable `return` member, called on the delegate
-    // as receiver). An array or a string delegate has none, and node closes neither.
-    // 0yopen is cleared first so a delegate whose own return() unwinds cannot re-enter.
+    // means gen_close threw GEN_EXIT in - run IteratorClose on the delegate
+    // (js_jsdelegclose: its `return` member, called with the value the close carries,
+    // whose answer may replace that value). An array or a string delegate has none, and
+    // node closes neither. 0yopen is cleared first so a delegate whose own return()
+    // unwinds cannot re-enter.
     function emitYieldStarClose() {
         return emitFunction([], function(bb) {
             var opV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "0yopen")])
             var cB = curF.NewBlock("")
-            var callB = curF.NewBlock("")
             var skB = curF.NewBlock("")
             bb.NewCondBr(truthy(bb, opV), cB, skB)
             callExt(cB, "js_scope_set", [curScopeV, emitStr(cB, "0yopen"), hFalse])
-            var srcV = callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, "0ysrc")])
-            var rfV = callExt(cB, "js_jsvget", [srcV, emitStr(cB, "return")])
-            cB.NewCondBr(truthy(cB, callExt(cB, "js_seq",
-                                 [callExt(cB, "js_typeof", [rfV]), emitStr(cB, "function")])), callB, skB)
-            callExt(jsThisSet(callB, srcV), "js_call", [rfV, srcV, callExt(callB, "js_arr_new", [])])
-            callB.NewBr(skB)
+            callExt(cB, "js_jsdelegclose", [callExt(cB, "js_scope_get", [curScopeV, emitStr(cB, "0ysrc")])])
+            cB.NewBr(skB)
             return skB
         }, true)
     }
@@ -4370,7 +4366,7 @@ NotFuncHead = :script(~~
             ythrCallB.NewBr(joinB)
             // No throw method: close the delegate through return(), then raise the
             // TypeError node raises, spelled as the string its message renders to.
-            var yrfV = callExt(ythrNoB, "js_jsvget", [seqV, emitStr(ythrNoB, "return")])
+            var yrfV = callExt(ythrNoB, "js_jsretvget", [seqV, emitStr(ythrNoB, "return")])
             ythrNoB.NewCondBr(truthy(ythrNoB, callExt(ythrNoB, "js_seq",
                                   [callExt(ythrNoB, "js_typeof", [yrfV]), emitStr(ythrNoB, "function")])),
                               yretB, ythrowB)
@@ -4697,8 +4693,11 @@ NotFuncHead = :script(~~
                         // HIDDEN, so the call falls into the js_jsmcall arm below
                         // rather than into the shared boundMethod path, whose
                         // semantics differ (indexOf ignores its from-index, map's
-                        // callback gets no index, ...). Everything else delegates.
-                        var fV = callExt(b, "js_jsmget", [objV, keyV])
+                        // callback gets no index, ...). Everything else delegates. A
+                        // member spelled `.return` reads through js_jsretmget, which
+                        // answers a generator's return() under node's yield* rule
+                        // (abnf/jsrtjsprint.go's genReturn) and delegates the rest.
+                        var fV = callExt(b, (s.name === "return") ? "js_jsretmget" : "js_jsmget", [objV, keyV])
                         var argsV = callExt(b, "js_arr_new", [])
                         b = pushArgs(b, argsV, callS.args)
                         var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")]))
@@ -4739,7 +4738,7 @@ NotFuncHead = :script(~~
                         // (so `typeof [].push` stops depending on which engine runs).
                         // See languages/lib/js-rt.metajs.
                         curThis = cur
-                        cur = callExt(b, "js_jsvget", [cur, kr.v])
+                        cur = callExt(b, (s.name === "return") ? "js_jsretvget" : "js_jsvget", [cur, kr.v])
                         i = i + 1
                     }
                 } else if (s.kind == "tag") {
@@ -5482,7 +5481,7 @@ NotFuncHead = :script(~~
                 var closeB = curF.NewBlock("")
                 var doCloseB = curF.NewBlock("")
                 brkB = closeB
-                var retV = callExt(closeB, "js_jsvget", [seqV, emitStr(closeB, "return")])
+                var retV = callExt(closeB, "js_jsretvget", [seqV, emitStr(closeB, "return")])
                 closeB.NewCondBr(truthy(closeB, callExt(closeB, "js_seq",
                                         [callExt(closeB, "js_typeof", [retV]), emitStr(closeB, "function")])),
                                  doCloseB, exitB)

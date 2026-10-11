@@ -3218,6 +3218,30 @@ function s57() {
     check("xob02", new S57B(4).m() === 5 && c.m() === 30 && c instanceof S57B && JSON.stringify(c) === '{"x":2}');
 }
 
+// ===== SECTION 58: g.return(v) at a yield* answers the delegate's return() =====
+// A close at a `yield*` hands v to the delegate's return(), and when that answers
+// done the generator returns ITS value. Values read off node 24.
+const s58log: string[] = [];
+function s58it(ans: any): any {
+    const o: any = {
+        n: 0,
+        next(): any { this.n++; return {value: this.n, done: false}; },
+        return(v: any): any { s58log.push("ret:" + v); return ans; }
+    };
+    if (typeof Symbol !== "undefined") { o[Symbol.iterator] = function () { return this; }; }
+    return o;
+}
+function* s58d(it: any): Generator<any, any, any> { try { yield* it; } finally { s58log.push("fin"); } }
+function s58() {
+    const g = s58d(s58it({done: true}));
+    g.next();
+    const b = g.return(7);
+    check("ysr01", b.value === undefined && b.done === true && s58log.join() === "ret:7,fin");
+    const h = s58d(s58it({value: 9, done: true}));
+    h.next();
+    check("ysr02", h.return(7).value === 9 && h.next().done === true);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3278,6 +3302,7 @@ function main(): number {
     s55(); // SECTION-CALL 55
     s56(); // SECTION-CALL 56
     s57(); // SECTION-CALL 57
+    s58(); // SECTION-CALL 58
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

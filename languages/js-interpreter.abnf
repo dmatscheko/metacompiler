@@ -7188,6 +7188,23 @@ NotFuncHead = :script(~~
         if (typeof rf == "function") { callWithThis(rf, v, []) }
         return undefined
     }
+    // IteratorClose for a CLOSE at a `yield*`: the delegate's return() is handed the
+    // value the close carries (jpCloseV), and a result that reports done replaces that
+    // value, so `g.return(7)` answers what the delegate's return() answered - node's
+    // yield* rule for a return completion. A result that is NOT done would make node
+    // yield it and stay in the yield*, which a close cannot do here (see genClose); the
+    // close goes on with the value it had. Twins: js_jsdelegclose in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function jpReturnDelegate(v) {
+        if (typeof v != "object") { return undefined }
+        var rf = anytype
+        rf = getMember(v, "return")
+        if (typeof rf != "function") { return undefined }
+        var r = anytype
+        r = callWithThis(rf, v, [jpCloseV])
+        if (jpIsObjV(r) && jsTruthy(getMember(r, "done"))) { jpCloseV = getMember(r, "value") }
+        return undefined
+    }
     function jpNoThrowMethod(v) {
         jpCloseDelegate(v)
         biRaise("TypeError: The iterator does not provide a 'throw' method.")
@@ -7304,7 +7321,7 @@ NotFuncHead = :script(~~
         try {
             s = doYieldRaw(run, val)
         } catch (e) {
-            if (e != undefined && e != null && e.__genExit == true) { jpCloseDelegate(dv) }
+            if (e != undefined && e != null && e.__genExit == true) { jpReturnDelegate(dv) }
             throw e
         }
         return s
@@ -7478,8 +7495,9 @@ NotFuncHead = :script(~~
         g["return"] = function() {
             var rv = anytype
             rv = (arguments.length > 0) ? arguments[0] : undefined
-            genClose(st, params, bodyT, env, self, args)
-            return {value: rv, done: true, __keys: ["value", "done"]}
+            var cv = anytype
+            cv = genClose(st, params, bodyT, env, self, args, rv)
+            return {value: cv, done: true, __keys: ["value", "done"]}
         }
         // g.throw(v): raise v AT the yield the body is parked at, so the body's
         // own catch and finally clauses see it - the difference from return(),
@@ -7518,18 +7536,31 @@ NotFuncHead = :script(~~
     // THROUGH the exit is abandoned where it stands, which is the answer both compiled
     // halves give (abnf/jsrt.go's closeBody says so in as many words); node's
     // "generator.return: yielded" shape is not expressible in any of the three.
-    function genClose(st, params, bodyT, env, self, args) {
-        if (st.done) { return undefined }
-        if (st.count == 0) { st.done = true; return undefined }
+    // The value the close in progress makes g.return() answer; a `yield*` the body is
+    // parked at may replace it (jpReturnDelegate). genClose saves and restores it, so
+    // a delegate closed from inside a close keeps its own.
+    var jpCloseV = anytype
+    jpCloseV = undefined
+    function genClose(st, params, bodyT, env, self, args, rv) {
+        if (st.done) { return rv }
+        if (st.count == 0) { st.done = true; return rv }
+        var savedV = anytype
+        savedV = jpCloseV
+        jpCloseV = rv
         try {
             genNext(st, params, bodyT, env, self, args, {__genExitIn: true})
         } catch (e) {
             st.done = true
-            if (e != undefined && e != null && e.__genExit == true) { return undefined }
-            throw e
+            if (e == undefined || e == null || e.__genExit != true) {
+                jpCloseV = savedV
+                throw e
+            }
         }
         st.done = true
-        return undefined
+        var out = anytype
+        out = jpCloseV
+        jpCloseV = savedV
+        return out
     }
     // One step: replay the body up to yield number st.count, and report what happened.
     function genNext(st, params, bodyT, env, self, args, sendv) {

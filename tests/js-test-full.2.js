@@ -6,10 +6,11 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-63, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-64, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
-//                             hasOwnProperty, delete, Object.prototype, extends Object
+//                             hasOwnProperty, delete, Object.prototype, extends Object,
+//                             g.return() at a yield*
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
