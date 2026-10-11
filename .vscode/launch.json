@@ -1799,6 +1799,18 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-undefconst.php", "-q"]
         },
         {
+            "name": "PHP goto out of finally SHOULD FAIL (interpreted)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-finallygoto.php", "-q"]
+        },
+        {
+            "name": "PHP goto out of finally SHOULD FAIL (compiled)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallygoto.php", "-q"]
+        },
+        {
             "name": "PHP recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",

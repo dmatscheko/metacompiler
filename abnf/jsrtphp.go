@@ -936,6 +936,44 @@ func (rt *jsrt) phpFindMethod(cls interface{}, name string) interface{} {
 	return nil
 }
 
+// phpCalledScope is the class 'static::' names inside a method body: the runtime
+// class of $this when there is one, else the class the running static call bound,
+// else fallback. Twin of js_phlsb in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpCalledScope(this, fallback interface{}) interface{} {
+	if o, ok := this.(*jsObject); ok {
+		if cls, has := o.props["__class"]; has {
+			return cls
+		}
+	}
+	if rt.phpLsb != nil {
+		return rt.phpLsb
+	}
+	return fallback
+}
+
+// phpCbFail raises a callback check's failure: PHP's TypeError "<where>, <reason>".
+// Twin of phCbFail in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpCbFail(where, reason string) {
+	rt.phpRaise("TypeError", where+", "+reason)
+}
+
+// phpCbMeth is the method half of a callback check: target (an object, or a class
+// for a static callable) has the method, or the magic method that stands in for a
+// missing one. Twin of js_phcbmeth in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpCbMeth(where string, target, name interface{}) {
+	if rt.phpMethodOf(target, name) != nil {
+		return
+	}
+	magic := "__callStatic"
+	if phpIsObj(target) {
+		magic = "__call"
+	}
+	if rt.phpMethodOf(target, magic) != nil {
+		return
+	}
+	rt.phpCbFail(where, "class "+rt.phpStr(rt.phpClassOf(target).props["__name"])+" does not have a method \""+rt.phpStr(name)+"\"")
+}
+
 // phpMethodOf is the method `name` of target - an object, or a class for a static
 // method - with the lower-cased retry js_phmcall makes, or nil.
 func (rt *jsrt) phpMethodOf(target, nameV interface{}) interface{} {
@@ -2257,6 +2295,77 @@ func init() {
 			}
 			return w(rt.phpPlaceArgs(jsvFnMeta(f).name, u(a[1])))
 		}
+		// A non-string callee: true for an array callback (which must have two
+		// elements), false for a value the call runs as it is (a closure, an object
+		// with __invoke), and PHP 8's Error for anything else. With where (a
+		// callback check, php_cbcheck) a failure is that argument's TypeError
+		// instead, an [$obj, 'm'] pair has its method checked, and true means
+		// ['C', 'm'], whose class the caller looks up. Twin of js_phcbarr in
+		// languages/lib/php-rt.metajs.
+		m["js_phcbarr"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			where, check := u(a[1]).(string)
+			if isCallable(v) {
+				return jsHFalse
+			}
+			if phpIsArr(v) {
+				if !check {
+					if rt.phpLen(v) != 2 {
+						rt.phpRaise("Error", "Array callback must have exactly two elements")
+					}
+					return jsHTrue
+				}
+				if rt.phpLen(v) != 2 {
+					rt.phpCbFail(where, "array must have exactly two members")
+				}
+				recv := rt.phpArrGet(v, float64(0))
+				_, isCls := recv.(string)
+				if !isCls && !phpIsObj(recv) {
+					rt.phpCbFail(where, "first array member is not a valid class name or object")
+				}
+				mn, isStr := rt.phpArrGet(v, float64(1)).(string)
+				if !isStr {
+					rt.phpCbFail(where, "second array member is not a valid method")
+				}
+				if isCls {
+					return jsHTrue
+				}
+				rt.phpCbMeth(where, recv, mn)
+				return jsHFalse
+			}
+			if phpIsObj(v) {
+				if rt.phpMethodOf(v, "__invoke") == nil {
+					if check {
+						rt.phpCbFail(where, "no array or string given")
+					}
+					rt.phpRaise("Error", "Object of type "+rt.phpDebugType(v)+" is not callable")
+				}
+				return jsHFalse
+			}
+			if t := rt.phpDebugType(v); t != "unknown" {
+				if check {
+					rt.phpCbFail(where, "no array or string given")
+				}
+				rt.phpRaise("Error", "Value of type "+t+" is not callable")
+			}
+			return jsHFalse
+		}
+		// The method half of a callback check. Twin of js_phcbmeth in
+		// languages/lib/php-rt.metajs.
+		m["js_phcbmeth"] = func(a []uint64) uint64 {
+			rt.phpCbMeth(rt.phpStr(u(a[0])), u(a[1]), u(a[2]))
+			return jsHUndefined
+		}
+		// The class a callable's class NAME forwards as the late-static-binding
+		// class: the caller's own for self / parent / static, none for a class named
+		// outright. Twin of js_phfwd in languages/lib/php-rt.metajs.
+		m["js_phfwd"] = func(a []uint64) uint64 {
+			switch phpCase(rt.phpStr(u(a[0])), false) {
+			case "self", "parent", "static":
+				return w(rt.phpCalledScope(u(a[1]), u(a[2])))
+			}
+			return jsHUndefined
+		}
 		// (clo, target, name) -> clo, carrying the meta of the method `name` of
 		// target (an object, or a class for a static method): a closure that
 		// dispatches to a method places its arguments as the method would. Twin of
@@ -2280,6 +2389,7 @@ func init() {
 		// php-interpreter.abnf and of js_phclassmiss in languages/lib/php-rt.metajs.
 		m["js_phclassmiss"] = func(a []uint64) uint64 {
 			name := rt.phpStr(u(a[0]))
+			where, check := u(a[3]).(string)
 			if name == "self" || name == "static" || name == "parent" {
 				cls := u(a[1])
 				if name == "static" {
@@ -2287,6 +2397,9 @@ func init() {
 				}
 				o, ok := cls.(*jsObject)
 				if !ok {
+					if check {
+						rt.phpCbFail(where, "cannot access \""+name+"\" when no class scope is active")
+					}
 					rt.phpRaise("Error", "Cannot use \""+name+"\" when no class scope is active")
 				}
 				if name != "parent" {
@@ -2295,7 +2408,13 @@ func init() {
 				if sup, has := o.props["__super"]; has && sup != nil && sup != jsUndef {
 					return w(sup)
 				}
+				if check {
+					rt.phpCbFail(where, "cannot access \"parent\" when current class scope has no parent")
+				}
 				rt.phpRaise("Error", "Cannot use \"parent\" when current class scope has no parent")
+			}
+			if check {
+				rt.phpCbFail(where, "class \""+name+"\" not found")
 			}
 			rt.phpRaise("Error", "Class \""+name+"\" not found")
 			return 0

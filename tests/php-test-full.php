@@ -2214,6 +2214,69 @@ function s53() {
     check("lix7", $neg[-7] === -14 && $neg["-7"] === -14 && $neg[19] === 38);
 }
 
+// ===== SECTION 54: callable and dispatch error tails =====
+// Calling a value that is no callable is an Error naming what it is
+// (dynamic_call/dynamic_call_freeing, first_class_callable_errors). A class name is
+// case-insensitive, in a callable too (dynamic_call/bug68475), and a missing class
+// under '::' is 'Class "X" not found' whatever follows (static_method_non_existing_class).
+// A builtin's name is a callable value. A self:: / parent:: callable forwards the
+// caller's late-static-binding class, as the direct call does. An internal function
+// rejects an invalid callback argument with a TypeError (bug70895,
+// methods-on-non-objects-call-user-func, call_user_func_002, bug48770_2). The simple
+// interpolation "$a[k]" takes a numeral key as its text (numeric_strings/neg_num_string).
+class S54P {}
+class S54A {
+    public static function who() { return static::class; }
+    public static function sm($x = "-") { return "sm" . $x; }
+}
+class S54B extends S54A {
+    public static function fwd() {
+        return call_user_func('parent::who') . " " . call_user_func(['parent', 'who']) . " "
+            . call_user_func('self::who') . " " . parent::who() . " " . call_user_func('S54A::who');
+    }
+}
+class S54C extends S54B {}
+function s54err($f) {
+    try { return $f(); } catch (Error $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s54() {
+    $vals = [new S54P, 5, 1.5, null, [1, 2, 3]];
+    $msgs = [];
+    foreach ($vals as $v) { $msgs[] = s54err(function() use ($v) { return $v(); }); }
+    check("cbl1", $msgs === ["Error: Object of type S54P is not callable", "Error: Value of type int is not callable",
+                             "Error: Value of type float is not callable", "Error: Value of type null is not callable",
+                             "Error: Array callback must have exactly two elements"]);
+    $lc = 's54a::sm';
+    $up = ['S54A', 'SM'];
+    $cn = 's54a';
+    check("cbl2", $lc(1) === "sm1" && $up(2) === "sm2" && call_user_func('S54a::sm', 3) === "sm3"
+        && get_class(new $cn) === "S54A" && $cn::sm(4) === "sm4");
+    $x = "m";
+    check("cbl3", s54err(function() use ($x) { return S54Nope::{$x}(); }) === "Error: Class \"S54Nope\" not found"
+        && s54err(function() { return S54Nope::m(); }) === "Error: Class \"S54Nope\" not found"
+        && s54err(function() { return S54A::nope(); }) === "Error: Call to undefined method S54A::nope()"
+        && s54err(function() { $f = 'S54A::nope'; return $f(); }) === "Error: Call to undefined method S54A::nope()");
+    check("cbl4", array_filter([1, "2", 3.5, 4], 'is_int') === [0 => 1, 3 => 4]
+        && array_map('gettype', [1, "a"]) === ["integer", "string"]
+        && array_map('is_numeric', ["1e3", "x"]) === [true, false]);
+    check("cbl5", S54B::fwd() === "S54B S54B S54B S54B S54A" && S54C::fwd() === "S54C S54C S54C S54C S54A");
+    $cuf = 'call_user_func(): Argument #1 ($callback) must be a valid callback, ';
+    $arr = [3, 1];
+    check("cbl6", s54err(function() { return call_user_func('s54_nope'); })
+            === "TypeError: " . $cuf . "function \"s54_nope\" not found or invalid function name"
+        && s54err(function() { return call_user_func([null, 'm']); })
+            === "TypeError: " . $cuf . "first array member is not a valid class name or object"
+        && s54err(function() { return call_user_func(['S54Nope', 'm']); }) === "TypeError: " . $cuf . "class \"S54Nope\" not found"
+        && s54err(function() { return call_user_func_array('S54A::nope', []); })
+            === "TypeError: call_user_func_array(): Argument #1 (\$callback) must be a valid callback, class S54A does not have a method \"nope\""
+        && s54err(function() { return array_map('%n', 0); })
+            === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, function \"%n\" not found or invalid function name"
+        && s54err(function() use ($arr) { return usort($arr, 'S54A::nope'); })
+            === "TypeError: usort(): Argument #2 (\$callback) must be a valid callback, class S54A does not have a method \"nope\"");
+    $a = ["0x0" => 5, "-0x0" => 6, "9223372036854775808" => 9, "-9223372036854775808" => 10, "00" => 7, "-1" => 4];
+    check("cbl7", "$a[0x0]|$a[-0x0]|$a[9223372036854775808]|$a[-9223372036854775808]|$a[00]|$a[-1]" === "5|6|9|10|7|4");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2273,6 +2336,7 @@ function main() {
     s51(); // SECTION-CALL 51
     s52(); // SECTION-CALL 52
     s53(); // SECTION-CALL 53
+    s54(); // SECTION-CALL 54
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

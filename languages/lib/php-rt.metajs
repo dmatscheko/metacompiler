@@ -2283,6 +2283,43 @@ function js_phplace(f, args) {
     if (typeof sig != "string") { sig = "" }
     return js_phplacesig(sig, args)
 }
+// A non-string callee: true for an array callback (which must have two elements),
+// false for a value the call runs as it is (a closure, an object with __invoke),
+// and PHP 8's Error for anything else. With where (a callback check, php_cbcheck)
+// a failure is that argument's TypeError instead, an [$obj, 'm'] pair has its
+// method checked, and true means ['C', 'm'], whose class the caller looks up.
+// Twin of js_phcbarr in abnf/jsrtphp.go.
+function js_phcbarr(v, where) {
+    if (typeof v == "function") { return false }
+    if (phIsArr(v)) {
+        if (where === undefined) {
+            if (phLen(v) != 2) { phRaise("Error", "Array callback must have exactly two elements") }
+            return true
+        }
+        if (phLen(v) != 2) { phCbFail(where, "array must have exactly two members") }
+        var recv = phArrGet(v, 0)
+        var isCls = typeof recv == "string"
+        if (!isCls && !phIsObj(recv)) { phCbFail(where, "first array member is not a valid class name or object") }
+        var mn = phArrGet(v, 1)
+        if (typeof mn != "string") { phCbFail(where, "second array member is not a valid method") }
+        if (isCls) { return true }
+        js_phcbmeth(where, recv, mn)
+        return false
+    }
+    if (phIsObj(v)) {
+        if (typeof phMethodOf(v, "__invoke") != "function") {
+            if (where !== undefined) { phCbFail(where, "no array or string given") }
+            phRaise("Error", "Object of type " + phDebugType(v) + " is not callable")
+        }
+        return false
+    }
+    var t = phDebugType(v)
+    if (t != "unknown") {
+        if (where !== undefined) { phCbFail(where, "no array or string given") }
+        phRaise("Error", "Value of type " + t + " is not callable")
+    }
+    return false
+}
 // clo, carrying the meta of the method `name` of target (an object, or a class for a
 // static method). Twin of js_phbindsig in abnf/jsrtphp.go.
 function js_phbindsig(clo, target, name) {
@@ -2618,20 +2655,36 @@ function phClassInit(cls) {
 // The class a run-time class name the scope did not declare denotes: self / static
 // / parent through the frame's classes (null outside a class), else PHP 8's
 // catchable Error. Twin of js_phclassmiss in abnf/jsrtphp.go.
-function js_phclassmiss(name, self, stat) {
+function js_phclassmiss(name, self, stat, where) {
     var nm = phStr(name)
     if (nm == "self" || nm == "static" || nm == "parent") {
         var cls = anytype
         cls = nm == "static" ? stat : self
         if (cls === null || typeof cls != "object") {
+            if (where !== undefined) { phCbFail(where, "cannot access \"" + nm + "\" when no class scope is active") }
             phRaise("Error", "Cannot use \"" + nm + "\" when no class scope is active")
         }
         if (nm != "parent") { return cls }
         var sup = cls["__super"]
         if (sup !== undefined && sup !== null) { return sup }
+        if (where !== undefined) { phCbFail(where, "cannot access \"parent\" when current class scope has no parent") }
         phRaise("Error", "Cannot use \"parent\" when current class scope has no parent")
     }
+    if (where !== undefined) { phCbFail(where, "class \"" + nm + "\" not found") }
     phRaise("Error", "Class \"" + nm + "\" not found")
+    return undefined
+}
+// A callback check's failure: PHP's TypeError "<where>, <reason>".
+function phCbFail(where, reason) { phRaise("TypeError", phStr(where) + ", " + reason) }
+// The method half of a callback check: target (an object, or a class for a static
+// callable) has the method, or the magic method that stands in for a missing one.
+// Twin of js_phcbmeth in abnf/jsrtphp.go.
+function js_phcbmeth(where, target, name) {
+    if (typeof phMethodOf(target, name) == "function") { return undefined }
+    var magic = "__callStatic"
+    if (phIsObj(target)) { magic = "__call" }
+    if (typeof phMethodOf(target, magic) == "function") { return undefined }
+    phCbFail(where, "class " + phStr(phClassOf(target)["__name"]) + " does not have a method \"" + phStr(name) + "\"")
     return undefined
 }
 // `new C`: the class is initialized before its first instance.
@@ -2731,12 +2784,23 @@ function js_phlsb(self, fallback) {
     if (phLsb !== undefined) { return phLsb }
     return fallback
 }
+// The class a callable's class NAME forwards as the late-static-binding class:
+// the caller's own (js_phlsb) for self / parent / static, none for a class named
+// outright. Twin of js_phfwd in abnf/jsrtphp.go.
+function js_phfwd(cn, self, fallback) {
+    var n = phsCase(phStr(cn), false)
+    if (n != "self" && n != "parent" && n != "static") { return undefined }
+    return js_phlsb(self, fallback)
+}
 
 // C::m($this, args): the method is resolved through the __super chain, and the
 // class the CALL named becomes the late-static-binding class for the duration -
 // which is what makes `static::who()` inside an inherited static method dispatch
-// to the subclass.
-function js_phscall(target, name, self, args) {
+// to the subclass. lsb overrides that: true for a self:: / parent:: / static::
+// call, which FORWARDS the caller's class (js_phlsb), or the class a relative
+// callable captured where it was resolved (js_phfwd). Twin of js_phscall in
+// abnf/jsrt.go.
+function js_phscall(target, name, self, args, lsb) {
     var cls = phClassOf(target)
     var owner = phOwner(cls, name)
     var key = anytype
@@ -2748,7 +2812,11 @@ function js_phscall(target, name, self, args) {
         if (owner !== undefined) { key = lc }
     }
     var saved = phLsb
-    phLsb = cls
+    var bind = anytype
+    bind = cls
+    if (lsb === true) { bind = js_phlsb(self, cls) }
+    else if (lsb !== undefined) { bind = lsb }
+    phLsb = bind
     var out = anytype
     if (owner === undefined) {
         // __callStatic($name, $args) is PHP's fallback for a missing static
@@ -2756,7 +2824,7 @@ function js_phscall(target, name, self, args) {
         var cs = phOwner(cls, "__callStatic")
         if (cs === undefined) {
             phLsb = saved
-            fail("undefined method " + phStr(cls["__name"]) + "::" + name)
+            phRaise("Error", "Call to undefined method " + phStr(cls["__name"]) + "::" + phStr(name) + "()")
             return null
         }
         var ar = []

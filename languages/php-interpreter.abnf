@@ -402,8 +402,8 @@ TryBody     <~~ push({trybody: pop().body}) ~~>
             = Block ;
 CatchClause <~~ push(phpCatch(takeAll())) ~~>
             = KwCatch "(" CatchType [ DollarName ] ")" Block <~~ push(pop().body) ~~> ;
-FinallyClause <~~ push({finbody: finBody(pop().body)}) ~~>
-            = KwFinally Block ;
+FinallyClause <~~ push({finbody: finBody(finLeave(pop().body))}) ~~>
+            = KwFinally <~~ finEnter() ~~> Block ;
 Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression Semi ;
 // declare(strict_types=1); / declare(ticks=1) { ... }. None of PHP's three directives
@@ -1243,7 +1243,11 @@ TplName     <~~ push({tvar: up.in}) ~~>
 TplIdx      = "[" TplKey "]" ;
 TplKey      <~~ push({tidx: up.in}) ~~>
             = TplNum | TplDollar | TplId ;
-TplNum      = [ "-" ] "0"..."9" { "0"..."9" } ;
+// PHP's T_NUM_STRING: a decimal, hex, binary or octal numeral, optionally negated,
+// taken as the key's TEXT - only a canonical decimal that fits becomes an int key.
+TplNum      = [ "-" ] ( "0" ( "x" | "X" ) TplHex { TplHex } | "0" ( "b" | "B" ) ( "0" | "1" ) { "0" | "1" }
+                      | "0" ( "o" | "O" ) "0"..."7" { "0"..."7" } | "0"..."9" { "0"..."9" } ) ;
+TplHex      = "0"..."9" | "a"..."f" | "A"..."F" ;
 TplDollar   = "$" TplId ;
 TplProp     <~~ push({tprop: up.in}) ~~>
             = "->" TplId ;
@@ -1892,8 +1896,33 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function isLabel(t) {
         return t !== null && t !== undefined && typeof t == "object" && t.__lbl != undefined
     }
-    function makeLabel(name) { return {__lbl: name} }
-    function makeGoto(name) { return function() { return {goto: name} } }
+    function makeLabel(name) {
+        walkLabels.push(name)
+        return {__lbl: name}
+    }
+    function makeGoto(name) {
+        walkGotos.push(name)
+        return function() { return {goto: name} }
+    }
+    // A goto may not leave a finally body: PHP rejects it at compile time ("jump out
+    // of a finally block is disallowed"). Every goto and label is logged as the tree
+    // is walked, and a finally body checks the gotos logged since it began against
+    // the labels logged since then. Twin of finTags in php-to-llvm-ir.abnf.
+    var walkGotos = []
+    var walkLabels = []
+    var finMarks = []
+    function finEnter() { finMarks.push({g: walkGotos.length, l: walkLabels.length}) }
+    function finLeave(body) {
+        var mk = finMarks.pop()
+        for (var gi = mk.g; gi < walkGotos.length; gi++) {
+            var found = false
+            for (var li = mk.l; li < walkLabels.length; li++) {
+                if (walkLabels[li] == walkGotos[gi]) { found = true }
+            }
+            if (!found) { fail("jump out of a finally block is disallowed") }
+        }
+        return body
+    }
     function makeConstStmt() { return function() { return null } }
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : null
@@ -3213,7 +3242,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (idx != null) {
             var key = anytype
-            if (idx.charAt(0) == "$") { key = null } else if (isCanonInt(idx)) { key = parseInt(idx, 10) } else { key = idx }
+            if (idx.charAt(0) == "$") { key = null } else { key = phpKey(idx) }
             var vn = idx
             return function() {
                 var k = anytype
@@ -3494,7 +3523,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return callNamed(cur, argset)
         }
-        if (isArr(cur) && cur.keys.length == 2) {
+        if (isArr(cur)) {
+            if (cur.keys.length != 2) { phpRaise("Error", "Array callback must have exactly two elements") }
             var recv = anytype
             recv = arrGet(cur, 0)
             var mname = phpStr(arrGet(cur, 1))
@@ -3505,8 +3535,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isObj(cur)) {
             var m = classFind(cur.__class, "__invoke")
             if (m != null) { return m(cur, argset) }
+            phpRaise("Error", "Object of type " + phpDebugType(cur) + " is not callable")
         }
-        fail("call of a non-callable value")
+        phpRaise("Error", "Value of type " + phpDebugType(cur) + " is not callable")
     }
     // '|>' folds LEFT: makePipe receives [v, f1, f2, ...] and builds f2(f1(v)).
     // pipeStep is a named function rather than an inline closure so each step
@@ -3566,12 +3597,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // call's context; anything else is an ordinary class name. A relative name with
     // no class scope, and a class that does not exist, are PHP 8's catchable Errors.
     // Twin of php_class_named in php-to-llvm-ir.abnf.
-    function resolveClassName(name) {
+    // where is undefined, or the callback argument a name is checked for
+    // (phpCheckCallback), which words a miss as that argument's TypeError.
+    function resolveClassName(name, where) {
         if (name == "self" || name == "static" || name == "parent") {
             var s = name == "static" ? ctxStatic() : ctxSelf()
-            if (s == null) { phpRaise("Error", "Cannot use \"" + name + "\" when no class scope is active") }
+            if (s == null) {
+                if (where != undefined) { cbFail(where, "cannot access \"" + name + "\" when no class scope is active") }
+                phpRaise("Error", "Cannot use \"" + name + "\" when no class scope is active")
+            }
             if (name != "parent") { return s }
             if (s.__super == null || s.__super == undefined) {
+                if (where != undefined) { cbFail(where, "cannot access \"parent\" when current class scope has no parent") }
                 phpRaise("Error", "Cannot use \"parent\" when current class scope has no parent")
             }
             return s.__super
@@ -3579,8 +3616,66 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var v = anytype
         v = null
         if (varExists(name) || hasOwn(hostGlobals, name)) { v = getVar(name) }
-        if (v == null || v == undefined || v.__isclass !== true) { phpRaise("Error", "Class \"" + name + "\" not found") }
+        if (v == null || v == undefined || v.__isclass !== true) {
+            var lk = classKey(name)
+            if (varExists(lk)) { v = getVar(lk) }
+        }
+        if (v == null || v == undefined || v.__isclass !== true) {
+            if (where != undefined) { cbFail(where, "class \"" + name + "\" not found") }
+            phpRaise("Error", "Class \"" + name + "\" not found")
+        }
         return v
+    }
+    // A callback handed to an internal function is checked where it is handed over:
+    // anything that is not a valid callback is a TypeError worded as
+    // "<where>, <reason>", where names the argument ("array_map(): Argument #1
+    // ($callback) must be a valid callback or null"). Answers cur. Twin of
+    // php_cbcheck in php-to-llvm-ir.abnf.
+    function cbFail(where, reason) { phpRaise("TypeError", where + ", " + reason) }
+    function cbMethod(where, cls, mname) {
+        if (classFind(cls, mname) != null || classFind(cls, phsCase(mname, false)) != null) { return null }
+        if (classFind(cls, "__callStatic") != null) { return null }
+        cbFail(where, "class " + cls.__name + " does not have a method \"" + mname + "\"")
+    }
+    function phpCheckCallback(cur, where) {
+        if (typeof cur == "function") { return cur }
+        if (typeof cur == "string") {
+            var sep = cur.indexOf("::")
+            if (sep >= 0) {
+                cbMethod(where, resolveClassName(cur.substring(0, sep), where), cur.substring(sep + 2))
+                return cur
+            }
+            if (hasOwn(phpBuiltins, cur) || (varExists(cur) && typeof getVar(cur) == "function")) { return cur }
+            cbFail(where, "function \"" + cur + "\" not found or invalid function name")
+        }
+        if (isArr(cur)) {
+            if (cur.keys.length != 2) { cbFail(where, "array must have exactly two members") }
+            var recv = anytype
+            recv = arrGet(cur, 0)
+            if (!isObj(recv) && typeof recv != "string") { cbFail(where, "first array member is not a valid class name or object") }
+            var mn = anytype
+            mn = arrGet(cur, 1)
+            if (typeof mn != "string") { cbFail(where, "second array member is not a valid method") }
+            if (isObj(recv)) {
+                if (classFind(recv.__class, mn) == null && classFind(recv.__class, phsCase(mn, false)) == null
+                    && classFind(recv.__class, "__call") == null) {
+                    cbFail(where, "class " + recv.__class.__name + " does not have a method \"" + mn + "\"")
+                }
+                return cur
+            }
+            cbMethod(where, resolveClassName(recv, where), mn)
+            return cur
+        }
+        if (isObj(cur) && classFind(cur.__class, "__invoke") != null) { return cur }
+        cbFail(where, "no array or string given")
+    }
+    // PHP class names are case-insensitive: a class is also declared under a hidden
+    // lower-cased key, which a run-time name that misses exactly falls back to.
+    // Twin of declClassAlias in php-to-llvm-ir.abnf.
+    function classKey(name) { return "\x00c" + phsCase(name, false) }
+    function declClass(name, cls) {
+        declVar(name, cls)
+        declVar(classKey(name), cls)
     }
     // The class behind a '::' whose base is a VALUE: $obj::CONST, or a class name
     // held in a string ($cn::make()).
@@ -3713,7 +3808,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The call half of a '::' access, also reached by a callable that names a
     // static method ('C::m' or ['C', 'm']).
-    function staticCall(cls, name, argset, baseText) {
+    // bound, when given, is the {self, bind} a relative callable captured in the
+    // frame that resolved it (callerCallable).
+    function staticCall(cls, name, argset, baseText, bound) {
         var forwards = (baseText == "self" || baseText == "static" || baseText == "parent")
         var m = classFind(cls, name)
         if (m == null) { m = classFind(cls, phsCase(name, false)) }
@@ -3723,17 +3820,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var self = anytype
         self = (forwards && varExists("$this")) ? getVar("$this") : null
-        var bind = forwards ? ctxStatic() : cls
+        var bind = anytype
+        bind = forwards ? ctxStatic() : cls
+        if (bound != undefined) {
+            self = bound.self
+            bind = bound.bind
+        }
         if (bind == null || bind == undefined) { bind = cls }
         if (isPartial(argset)) {
-            if (m == null) { fail("unknown static method " + cls.__name + "::" + name) }
+            if (m == null) { phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()") }
             var pm = m
             var pbind = bind
             var pself = self
             return makePartial(function(a2) { pendingStatic = pbind; return pm(pself, a2) }, argset)
         }
         if (argset.fcc === true) {
-            if (m == null) { fail("unknown static method " + cls.__name + "::" + name) }
+            if (m == null) { phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()") }
             var mm = m
             var bs = bind
             var fself = self
@@ -3748,7 +3850,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pendingStatic = bind
             return cs(null, argsOf([name, arrOf(argset.pos)]))
         }
-        fail("unknown static method " + cls.__name + "::" + name)
+        phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()")
     }
     // Splits the parsed pieces of a '::' form apart. Shared by the three sites that
     // parse one: a primary (Class::x), a member-chain suffix ($obj::x) and an
@@ -4046,7 +4148,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function resolveClass(v) {
         if (v != null && v != undefined && v.__isclass === true) { return v }
         if (isObj(v)) { return v.__class }
-        return getVar(phpStr(v))
+        return resolveClassName(phpStr(v))
     }
     function makeNew(items) {
         var name = items[0].cls
@@ -4484,7 +4586,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // relative callable ('parent::m', ['self', 'm']) in the class scope of the
     // caller, which the library function's own frame does not have. Twin of
     // callerCallable in php-to-llvm-ir.abnf.
-    function callerCallable(cur) {
+    function callerCallable(cur, fname) {
+        phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback")
         var cn = ""
         var mn = ""
         if (typeof cur == "string" && cur.indexOf("::") >= 0) {
@@ -4495,7 +4598,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             mn = phpStr(arrGet(cur, 1))
         } else { return cur }
         var cls = resolveClassName(cn)
-        return function(a2) { return staticCall(cls, mn, a2, cn) }
+        // A relative name forwards the CALLER's late-static-binding class and $this,
+        // which the library function's frame no longer has.
+        var bound = anytype
+        bound = undefined
+        if (cn == "self" || cn == "static" || cn == "parent") {
+            bound = {self: varExists("$this") ? getVar("$this") : null, bind: ctxStatic()}
+        }
+        return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
     }
     function makeCall(items) {
         var name = phpLibRef(items[0])
@@ -4503,7 +4613,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         return function() {
             var argset = evalArgs(args)
-            if (resolveCb && argset.pos.length > 0) { argset.pos[0] = callerCallable(argset.pos[0]) }
+            if (resolveCb && argset.pos.length > 0) { argset.pos[0] = callerCallable(argset.pos[0], name) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
                 var pname = name
@@ -4941,7 +5051,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeClassStmt(items) {
         var name = items[0]
         var p = classParts(items, 1)
-        return function() { declVar(name, buildClass(name, p)); return null }
+        return function() { declClass(name, buildClass(name, p)); return null }
     }
     // An enum: the class is built exactly like any other, then one instance per case
     // is created and stored as a class constant of that name. The instances ARE the
@@ -4965,7 +5075,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             ifs.push("UnitEnum")
             if (cases.length > 0 && cases[0].init != null) { ifs.push("BackedEnum") }
             cls.__ifaces = ifs
-            declVar(name, cls)
+            declClass(name, cls)
             var all = newArr()
             for (var c = 0; c < cases.length; c++) {
                 var obj = newObj(cls)
@@ -5004,7 +5114,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var name = items[0]
         var p = classParts(items, 1)
         return function() {
-            declVar(name, {__isclass: true, __istrait: true, __name: name, __parts: p, __super: null,
+            declClass(name, {__isclass: true, __istrait: true, __name: name, __parts: p, __super: null,
                            __props: [], __ifaces: [], __constT: [], __constV: newArr(), __statics: newArr()})
             return null
         }
@@ -5068,7 +5178,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else if (items[i].cconsts != undefined) { collectConsts(items[i].cconsts, consts) }
         }
         return function() {
-            declVar(name, {__isclass: true, __isiface: true, __name: name, __super: null,
+            declClass(name, {__isclass: true, __isiface: true, __name: name, __super: null,
                            __props: [], __ifaces: parents,
                            __constT: consts, __constV: newArr(), __statics: newArr()})
             return null
@@ -5190,6 +5300,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (p !== null && p !== undefined) { phpPrecision = phpInt(p) }
             return old
         },
+        "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where)) },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         "array_key_exists": function(k, a) {
             if (!isArr(a)) {
@@ -5761,6 +5872,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cls["getCode"] = function(self, argset) { return phpGetProp(self, "code") }
         if (sup == null) { cls.__mlc = ",__construct,getmessage,getcode," }
         scopePut(globalScope, name, cls)
+        scopePut(globalScope, classKey(name), cls)
     }
     declBuiltinClass("Exception", null)
     declBuiltinClass("Error", null)
@@ -5775,6 +5887,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // json_decode's objects. Twin of emitStdClass in php-to-llvm-ir.abnf.
     scopePut(globalScope, "stdClass", {__isclass: true, __name: "stdClass", __super: null, __props: [], __ifaces: [],
                                        __constT: [], __constV: newArr(), __statics: newArr()})
+    scopePut(globalScope, classKey("stdClass"), getVar("stdClass"))
     // A method call on something that is not an object. PHP 8 words it
     // `Call to a member function nope() on string`, with phpDebugType's names, as a
     // catchable Error. Twin of js_phmcall (languages/lib/php-rt.metajs and

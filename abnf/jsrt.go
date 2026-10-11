@@ -14529,12 +14529,26 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return jsHUndefined
 		},
-		// C::m($this, args): the method is resolved through the __super chain, and
-		// the class the CALL named becomes the late-static-binding class for the
+		// C::m($this, args, lsb): the method is resolved through the __super chain,
+		// and the class the CALL named becomes the late-static-binding class for the
 		// duration - which is what makes `static::who()` inside an inherited static
-		// method dispatch to the subclass.
+		// method dispatch to the subclass. lsb overrides that: true for a self:: /
+		// parent:: / static:: call, which FORWARDS the caller's class, or the class a
+		// relative callable captured (js_phfwd). Twin of js_phscall in
+		// languages/lib/php-rt.metajs.
 		"js_phscall": func(a []uint64) uint64 {
 			cls := rt.phpClassOf(u(a[0]))
+			bind := cls
+			switch l := u(a[4]).(type) {
+			case bool:
+				if l {
+					if c, ok := rt.phpCalledScope(u(a[2]), cls).(*jsObject); ok {
+						bind = c
+					}
+				}
+			case *jsObject:
+				bind = l
+			}
 			name := rt.toString(u(a[1]))
 			owner := phpOwner(cls, name)
 			if owner == nil {
@@ -14554,35 +14568,25 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						args.elems = append(args.elems, vals.elems...)
 					}
 					saved := rt.phpLsb
-					rt.phpLsb = cls
+					rt.phpLsb = bind
 					defer func() { rt.phpLsb = saved }()
 					return w(rt.call(cs.props["__callStatic"], jsUndef,
 						[]interface{}{u(a[2]), name, args}))
 				}
-				rt.fail("undefined method %s::%s", rt.phpStr(cls.props["__name"]), name)
+				rt.phpRaise("Error", "Call to undefined method "+rt.phpStr(cls.props["__name"])+"::"+name+"()")
 			}
 			args := []interface{}{u(a[2])}
 			if _, vals, ok := phpArrParts(u(a[3])); ok {
 				args = append(args, vals.elems...)
 			}
 			saved := rt.phpLsb
-			rt.phpLsb = cls
+			rt.phpLsb = bind
 			defer func() { rt.phpLsb = saved }()
 			return w(rt.call(owner.props[name], jsUndef, args))
 		},
 		// The 'static::' class inside a method body: the runtime class of $this when
 		// there is one, else the class the static call named, else 'self'.
-		"js_phlsb": func(a []uint64) uint64 {
-			if o, ok := u(a[0]).(*jsObject); ok {
-				if cls, has := o.props["__class"]; has {
-					return w(cls)
-				}
-			}
-			if rt.phpLsb != nil {
-				return w(rt.phpLsb)
-			}
-			return a[1]
-		},
+		"js_phlsb": func(a []uint64) uint64 { return w(rt.phpCalledScope(u(a[0]), u(a[1]))) },
 		// The few builtins whose result must keep PHP's int/float distinction:
 		// abs(-3.5) is a float, intdiv() truncates, max/min pick with PHP's own
 		// comparison and hand the ORIGINAL value back.

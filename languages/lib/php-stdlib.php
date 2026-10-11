@@ -6,12 +6,13 @@
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
-// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and five
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and six
 // intrinsics: __mec_fmtfloat for sprintf's float conversions ("r" is the
 // shortest digits serialize_precision=-1 lays out), __mec_math for
 // the math library's double operations, __mec_aptr for the internal array
-// pointer, __mec_precision for the precision setting and __mec_oid for an
-// object's handle. A native also gets a
+// pointer, __mec_precision for the precision setting, __mec_oid for an
+// object's handle and __mec_callable for the TypeError of an invalid callback
+// argument. A native also gets a
 // wrapper here of the same name, which is what a string callable or f(...)
 // reaches: a direct call never does, since the call is lowered to the native
 // first.
@@ -96,6 +97,19 @@ function ord($character) { return ord($character); }
 function chr($codepoint) { return chr($codepoint); }
 function strtolower($string) { return strtolower($string); }
 function strtoupper($string) { return strtoupper($string); }
+function is_int($value) { return is_int($value); }
+function is_integer($value) { return is_int($value); }
+function is_long($value) { return is_int($value); }
+function is_float($value) { return is_float($value); }
+function is_double($value) { return is_float($value); }
+function is_string($value) { return is_string($value); }
+function is_bool($value) { return is_bool($value); }
+function is_array($value) { return is_array($value); }
+function is_object($value) { return is_object($value); }
+function is_null($value) { return is_null($value); }
+function is_numeric($value) { return is_numeric($value); }
+function gettype($value) { return gettype($value); }
+function get_debug_type($value) { return get_debug_type($value); }
 
 // ----- comparison helpers ----------------------------------------------------
 // The sort flags' orderings: SORT_REGULAR is PHP's standard comparison (<=>),
@@ -161,15 +175,24 @@ function __mec_sort(&$array, $by, $cmp, $flags, $dir, $keep) {
 // ----- sorting ---------------------------------------------------------------
 function sort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, 1, false); }
 function rsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, -1, false); }
-function usort(&$array, $callback) { return __mec_sort($array, 1, $callback, 0, 1, false); }
+function usort(&$array, $callback) {
+    __mec_callable($callback, 'usort(): Argument #2 ($callback) must be a valid callback');
+    return __mec_sort($array, 1, $callback, 0, 1, false);
+}
 function asort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, 1, true); }
 function arsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 1, null, $flags, -1, true); }
-function uasort(&$array, $callback) { return __mec_sort($array, 1, $callback, 0, 1, true); }
+function uasort(&$array, $callback) {
+    __mec_callable($callback, 'uasort(): Argument #2 ($callback) must be a valid callback');
+    return __mec_sort($array, 1, $callback, 0, 1, true);
+}
 function natsort(&$array) { return __mec_sort($array, 1, null, SORT_NATURAL, 1, true); }
 function natcasesort(&$array) { return __mec_sort($array, 1, null, SORT_NATURAL | SORT_FLAG_CASE, 1, true); }
 function ksort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 0, null, $flags, 1, true); }
 function krsort(&$array, $flags = SORT_REGULAR) { return __mec_sort($array, 0, null, $flags, -1, true); }
-function uksort(&$array, $callback) { return __mec_sort($array, 0, $callback, 0, 1, true); }
+function uksort(&$array, $callback) {
+    __mec_callable($callback, 'uksort(): Argument #2 ($callback) must be a valid callback');
+    return __mec_sort($array, 0, $callback, 0, 1, true);
+}
 
 // ----- keys, values, searching -----------------------------------------------
 function array_keys($array, ...$filter) {
@@ -528,6 +551,7 @@ function array_intersect_uassoc($array, ...$rest) { $cb = __mec_takecb($rest); r
 function call_user_func($callback, ...$args) { return $callback(...$args); }
 function call_user_func_array($callback, $args) { return $callback(...$args); }
 function array_map($callback, $array, ...$arrays) {
+    if ($callback !== null) { __mec_callable($callback, 'array_map(): Argument #1 ($callback) must be a valid callback or null'); }
     $out = [];
     if (count($arrays) == 0) {
         if ($callback === null) { return $array; }
@@ -548,6 +572,7 @@ function array_map($callback, $array, ...$arrays) {
     return $out;
 }
 function array_filter($array, $callback = null, $mode = 0) {
+    if ($callback !== null) { __mec_callable($callback, 'array_filter(): Argument #2 ($callback) must be a valid callback or null'); }
     $out = [];
     foreach ($array as $k => $v) {
         if ($callback === null) { $ok = (bool)$v; }
@@ -559,6 +584,7 @@ function array_filter($array, $callback = null, $mode = 0) {
     return $out;
 }
 function array_reduce($array, $callback, $initial = null) {
+    __mec_callable($callback, 'array_reduce(): Argument #2 ($callback) must be a valid callback');
     $acc = $initial;
     foreach ($array as $v) { $acc = $callback($acc, $v); }
     return $acc;
@@ -567,6 +593,7 @@ function array_reduce($array, $callback, $initial = null) {
 // callable VALUE passes a reference: the interpreter half does, the compiler
 // half's dynamic call passes the value.
 function array_walk(&$array, $callback, ...$arg) {
+    __mec_callable($callback, 'array_walk(): Argument #2 ($callback) must be a valid callback');
     foreach ($array as $k => &$v) {
         if (count($arg) > 0) { $callback($v, $k, $arg[0]); } else { $callback($v, $k); }
     }
