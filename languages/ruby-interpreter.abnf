@@ -316,7 +316,7 @@ NotLocalCmd = :script(~~
         var i = 0
         var cc = c.peek(0)
         while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
-        if (!(cc === 45 || cc === 42 || cc === 38 || cc === 91)) { return undefined }
+        if (!(cc === 45 || cc === 42 || cc === 38 || cc === 91 || cc === 47 || cc === 37)) { return undefined }
         if (cc === 45 && c.peek(i + 1) === 62) { return undefined }
         function isId(ch) { return (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 }
         function isSp(ch) { return ch === 32 || ch === 9 || ch === 13 }
@@ -2216,8 +2216,25 @@ CmdArgAhead = :script(~~
         // one: `p (x).m` is p((x).m) in MRI, the parenthesis opening the argument.
         if (cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
             || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
-            || cc === 94 || cc === 47 || cc === 37 || cc === 43 || cc === 92) { return no }
+            || cc === 94 || cc === 43 || cc === 92) { return no }
         var nx = c.peek(i + 1)
+        // `p /x/` and `p %w[a b]`: a spaced `/` or `%` GLUED to what follows opens a
+        // regexp or a percent literal, as in MRI (which warns that the first argument
+        // is ambiguous); spaced on both sides it is the operator. A `%` opens a
+        // literal only with a delimiter: `%w[`, `%i(`, `%(`, but not `%2`.
+        if (cc === 47) {
+            if (nx === 32 || nx === 9 || nx === 61 || nx === 10 || nx < 0) { return no }
+            return undefined
+        }
+        if (cc === 37) {
+            function pctDelim(ch) {
+                return ch === 40 || ch === 91 || ch === 123 || ch === 60 || ch === 124 || ch === 33 || ch === 47
+            }
+            var kinds = "wWiIqQrsx"
+            if (pctDelim(nx)) { return undefined }
+            if (nx > 0 && kinds.indexOf(String.fromCharCode(nx)) >= 0 && pctDelim(c.peek(i + 2))) { return undefined }
+            return no
+        }
         // - * & ** are arguments only when glued to the value that follows. For `**`
         // the value follows the SECOND star (`a.b ** 2` is a power, `a.b **h` a splat),
         // and `&&` never opens an argument.

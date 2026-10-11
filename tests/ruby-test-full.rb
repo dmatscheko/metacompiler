@@ -3568,6 +3568,25 @@ def s78
   check("nu78f", k == [Math::DomainError, "out of domain", true])
 end
 
+# ===== SECTION 79: a regexp or percent literal as a command call's first argument =====
+# `m /x/` and `m %w[a b]` - a `/` or `%` spaced before and glued after - open a
+# literal argument of a METHOD m; after a local variable, or spaced on both sides,
+# they are division and modulo. Every right-hand side is /usr/bin/ruby 2.6.10's own
+# answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s79id(v)
+  v
+end
+def s79
+  a = s79id %w[a b].map { |s| s.upcase }
+  b = s79id /x/.class
+  c = s79id %i[p q]
+  d = s79id %(r s)
+  x = 10
+  y = 3
+  check("pl79a", a == ["A", "B"] && b == Regexp && c == [:p, :q] && d == "r s")
+  check("pl79b", [x /2, x %3, x / y, x %y, s79id(7) % 4] == [5, 1, 3, 1, 3])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3608,5 +3627,6 @@ s75() # SECTION-CALL 75
 s76() # SECTION-CALL 76
 s77() # SECTION-CALL 77
 s78() # SECTION-CALL 78
+s79() # SECTION-CALL 79
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
