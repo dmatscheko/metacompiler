@@ -2988,8 +2988,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(self) && self.__val !== undefined) { return self.__val }
         return self
     }
+    // CPython's NotImplemented, answered only by these delegates: an ORDERING of
+    // a builtin subclass's value with a value of another kind declines, so the
+    // dispatcher tries the other operand and then raises with the operands' own
+    // types ('S' and 'int', not 'str' and 'int'). Twin of pyNotImplemented in
+    // abnf/jsrtpysub.go and pyNotImpl in lib/python-rt.metajs.
+    var pyNotImpl = {__notimpl: true}
     function pyBDelBin(op, reflected) {
         if (reflected) { return function(self, o) { return binOp(op, o, pyBDelSelf(self)) } }
+        if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+            return function(self, o) {
+                var a = pyBDelSelf(self)
+                var k = pyOrdKind(a)
+                if (k == "" || k != pyOrdKind(pyBDelSelf(o))) { return pyNotImpl }
+                return binOp(op, a, o)
+            }
+        }
         return function(self, o) { return binOp(op, pyBDelSelf(self), o) }
     }
     // The first builtin type on cls's resolution order that pyBDelegate serves,
@@ -3759,10 +3773,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- the four engine adapters this chapter is written against ----
     function pySFail(msg) { fail(msg) }
-    // A CATCHABLE KeyError, for the one place in the str-method chunk where
-    // CPython raises rather than aborts: "{a}".format(b=1). pySFail is the
-    // engine's abort and cannot be caught.
+    // A catchable exception of class cls; pySRaiseKey is the KeyError whose
+    // argument is the missing key itself.
+    function pySRaise(cls, msg) { pyRaise(pyMakeExc(cls, [msg])) }
     function pySRaiseKey(nm) { pyRaise(pyMakeExc("KeyError", [nm])) }
+    function pySTypeName(v) { return pyTypeOf(v).__name }
+    function pySUnwrap(v) { return pyBDelSelf(v) }
     function pySFormat1(v, spec, conv) { return pyFormat(v, spec, conv) }
     function pySGetAttr(v, nm) { return pyattr(v, nm) }
     function pySGetItem(v, k) { return pyget(v, k) }
@@ -4429,12 +4445,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var v = anytype
         if (head == "") {
-            if (at >= args.length) { pySFail("IndexError: Replacement index " + at + " out of range") }
+            if (at >= args.length) { pySRaise("IndexError", "Replacement index " + at + " out of range for positional args tuple") }
             v = args[at]
             at = at + 1
         } else if (pySAllDigits(head)) {
             var ix = parseInt(head, 10)
-            if (ix >= args.length) { pySFail("IndexError: Replacement index " + ix + " out of range") }
+            if (ix >= args.length) { pySRaise("IndexError", "Replacement index " + ix + " out of range for positional args tuple") }
             v = args[ix]
         } else {
             v = pySKwGet(kw, head)
@@ -4461,7 +4477,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pySAllDigits(key)) { v = pySGetItem(v, parseInt(key, 10)) }
                 else { v = pySGetItem(v, key) }
             } else {
-                pySFail("ValueError: Invalid format field: " + nm)
+                pySRaise("ValueError", "Invalid format field: " + nm)
                 p = p + 1
             }
         }
@@ -4500,7 +4516,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     }
                     j = j + 1
                 }
-                if (depth != 0) { pySFail("ValueError: Single '{' encountered in format string") }
+                if (depth != 0) { pySRaise("ValueError", "Single '{' encountered in format string") }
                 var r = pySFmtOne(s.substring(i + 1, j), args, kw, at)
                 out = out + r["text"]
                 at = r["auto"]
@@ -4513,7 +4529,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     i = i + 2
                     continue
                 }
-                pySFail("ValueError: Single '}' encountered in format string")
+                pySRaise("ValueError", "Single '}' encountered in format string")
             }
             out = out + ch
             i = i + 1
@@ -4526,26 +4542,75 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- the dispatch table ----
 
-    function pySOptInt(args, i, dflt) {
+    // An integer argument (an int, a bool, or an int subclass's value), dflt when
+    // it is absent. A slice window (find's start and end) also takes None for its
+    // default; anywhere else None is refused like any other non-integer, each with
+    // CPython's own TypeError.
+    function pySIntArg(args, i, dflt, slice) {
         if (i >= args.length) { return dflt }
-        var v = args[i]
-        if (v === undefined || v === null) { return dflt }
-        return v | 0
+        var v = anytype
+        v = pySUnwrap(args[i])
+        if (v === undefined || v === null) {
+            if (slice) { return dflt }
+        } else {
+            var tn = pySTypeName(v)
+            if (tn == "int" || tn == "bool") { return v | 0 }
+        }
+        if (slice) { pySRaise("TypeError", "slice indices must be integers or None or have an __index__ method") }
+        pySRaise("TypeError", "'" + pySTypeName(args[i]) + "' object cannot be interpreted as an integer")
+        return dflt
     }
 
-    function pySStrArg(v) {
-        if (typeof v == "string") { return v }
-        pySFail("TypeError: a str argument is required")
+    // A str argument (a str or a str subclass's value); anything else raises
+    // TypeError(what + ", not " + its type). An Argument Clinic parameter
+    // (clinic) spells None's type "None" where the others say "NoneType".
+    function pySStrArg(v, what, clinic) {
+        var u = anytype
+        u = pySUnwrap(v)
+        if (typeof u == "string") { return u }
+        var tn = pySTypeName(v)
+        if (clinic && tn == "NoneType") { tn = "None" }
+        pySRaise("TypeError", what + ", not " + tn)
         return ""
     }
 
     function pySFillArg(args, i) {
         if (i >= args.length) { return " " }
-        var v = args[i]
-        if (v === undefined || v === null) { return " " }
-        var f = pySStrArg(v)
-        if (pySLen(f) != 1) { pySFail("TypeError: The fill character must be exactly one character long") }
+        var f = pySStrArg(args[i], "The fill character must be a unicode character", false)
+        if (pySLen(f) != 1) { pySRaise("TypeError", "The fill character must be exactly one character long") }
         return f
+    }
+
+    // CPython's arity errors, in the wording of each calling convention: a method
+    // with no parameters, a single-argument one, and Argument Clinic's
+    // positional-only ("expected at least") and keyword-capable ("takes at most")
+    // forms. format takes any number.
+    function pySArity(name, n) {
+        var lo = 0
+        var hi = 0
+        var style = 0
+        if (name == "format") { return }
+        if (name == "join" || name == "zfill" || name == "partition" || name == "rpartition" ||
+            name == "removeprefix" || name == "removesuffix" || name == "format_map") { lo = 1; hi = 1; style = 1 }
+        else if (name == "strip" || name == "lstrip" || name == "rstrip") { hi = 1; style = 2 }
+        else if (name == "find" || name == "rfind" || name == "index" || name == "rindex" ||
+                 name == "count" || name == "startswith" || name == "endswith") { lo = 1; hi = 3; style = 2 }
+        else if (name == "center" || name == "ljust" || name == "rjust") { lo = 1; hi = 2; style = 2 }
+        else if (name == "split" || name == "rsplit" || name == "encode") { hi = 2; style = 3 }
+        else if (name == "splitlines" || name == "expandtabs") { hi = 1; style = 3 }
+        else if (name == "replace") { lo = 2; hi = 3; style = 3 }
+        if (n >= lo && n <= hi) { return }
+        var msg = ""
+        if (style == 0) { msg = "str." + name + "() takes no arguments (" + n + " given)" }
+        else if (style == 1) { msg = "str." + name + "() takes exactly one argument (" + n + " given)" }
+        else if (style == 2) {
+            if (n < lo) { msg = name + " expected at least " + lo + " argument" + (lo == 1 ? "" : "s") + ", got " + n }
+            else { msg = name + " expected at most " + hi + " argument" + (hi == 1 ? "" : "s") + ", got " + n }
+        } else {
+            if (n < lo) { msg = name + "() takes at least " + lo + " positional arguments (" + n + " given)" }
+            else { msg = name + "() takes at most " + hi + " argument" + (hi == 1 ? "" : "s") + " (" + n + " given)" }
+        }
+        pySRaise("TypeError", msg)
     }
 
     // isdigit / isalpha / isalnum / isspace / isascii, which share "empty is False
@@ -4602,7 +4667,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = 0
         while (i < seq.length) {
             if (i > 0) { out = out + s }
-            out = out + pySStrArg(seq[i])
+            var u = anytype
+            u = pySUnwrap(seq[i])
+            if (typeof u != "string") {
+                pySRaise("TypeError", "sequence item " + i + ": expected str instance, " + pySTypeName(seq[i]) + " found")
+            }
+            out = out + u
             i = i + 1
         }
         return out
@@ -4746,6 +4816,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     function pyStrMethod(s, name, args, kw) {
         if (kw !== null && kw !== undefined && kw.keys.length > 0) { args = pyStrKwArgs(name, args, kw) }
+        else { pySArity(name, args.length) }
         var n = s.length
         var cn = 0 // The code point count, taken only by the methods that need it.
         if (name == "upper") { return unicodeCase(s, 3) }
@@ -4760,7 +4831,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var useWS = true
             if (args.length > 0) {
                 if (args[0] !== undefined && args[0] !== null) {
-                    chars = pySStrArg(args[0])
+                    var cu = anytype
+                    cu = pySUnwrap(args[0])
+                    if (typeof cu != "string") { pySRaise("TypeError", name + " arg must be None or str") }
+                    chars = cu
                     useWS = false
                 }
             }
@@ -4768,7 +4842,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
 
         if (name == "split" || name == "rsplit") {
-            var ms = pySOptInt(args, 1, -1)
+            var ms = pySIntArg(args, 1, -1, false)
             var noSep = args.length == 0
             if (!noSep) {
                 if (args[0] === undefined || args[0] === null) { noSep = true }
@@ -4777,8 +4851,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (name == "split") { return pySSplitWS(s, ms) }
                 return pySRSplitWS(s, ms)
             }
-            var sep = pySStrArg(args[0])
-            if (sep.length == 0) { pySFail("ValueError: empty separator") }
+            var sep = pySStrArg(args[0], "must be str or None", false)
+            if (sep.length == 0) { pySRaise("ValueError", "empty separator") }
             if (name == "split") { return pySSplitSep(s, sep, ms) }
             return pySRSplitSep(s, sep, ms)
         }
@@ -4797,43 +4871,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // join arm in abnf/pystrmethod.go and languages/lib/python-rt.metajs.
             var jseq = pySSeqOf(seq)
             if (jseq !== null) { seq = jseq }
-            if (!pySIsArr(seq)) { pySFail("TypeError: can only join an iterable") }
+            if (!pySIsArr(seq)) { pySRaise("TypeError", "can only join an iterable") }
             return pySJoin(s, seq)
         }
         if (name == "replace") {
-            return pySReplace(s, pySStrArg(args[0]), pySStrArg(args[1]), pySOptInt(args, 2, -1))
+            return pySReplace(s, pySStrArg(args[0], "replace() argument 1 must be str", true),
+                             pySStrArg(args[1], "replace() argument 2 must be str", true), pySIntArg(args, 2, -1, false))
         }
 
         // The window arguments and the answer are CODE POINT positions; the search
         // itself runs on units.
         if (name == "find" || name == "index" || name == "rfind" || name == "rindex") {
             cn = pySLen(s)
-            var sub = pySStrArg(args[0])
-            var st = pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn))
-            var en = pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn))
+            var sub = pySStrArg(args[0], name + "() argument 1 must be str", true)
+            var st = pySCpUnit(s, pySAdjStart(pySIntArg(args, 1, 0, true), cn))
+            var en = pySCpUnit(s, pySAdjEnd(pySIntArg(args, 2, cn, true), cn))
             var at = -1
             if (name == "find" || name == "index") { at = pySFind(s, sub, st, en) }
             else { at = pySRFind(s, sub, st, en) }
             if (at < 0) {
-                if (name == "index" || name == "rindex") { pySFail("ValueError: substring not found") }
+                if (name == "index" || name == "rindex") { pySRaise("ValueError", "substring not found") }
                 return at
             }
             return pySUnitCp(s, at)
         }
         if (name == "count") {
             cn = pySLen(s)
-            return pySCount(s, pySStrArg(args[0]), pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn)),
-                            pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn)))
+            return pySCount(s, pySStrArg(args[0], "count() argument 1 must be str", true), pySCpUnit(s, pySAdjStart(pySIntArg(args, 1, 0, true), cn)),
+                            pySCpUnit(s, pySAdjEnd(pySIntArg(args, 2, cn, true), cn)))
         }
         if (name == "startswith" || name == "endswith") {
             cn = pySLen(s)
-            var st2 = pySCpUnit(s, pySAdjStart(pySOptInt(args, 1, 0), cn))
-            var en2 = pySCpUnit(s, pySAdjEnd(pySOptInt(args, 2, cn), cn))
+            var st2 = pySCpUnit(s, pySAdjStart(pySIntArg(args, 1, 0, true), cn))
+            var en2 = pySCpUnit(s, pySAdjEnd(pySIntArg(args, 2, cn, true), cn))
             var pv = args[0]
             if (pySIsArr(pv)) {
                 var i2 = 0
                 while (i2 < pv.length) {
-                    var one = pySStrArg(pv[i2])
+                    var one = pySStrArg(pv[i2], "tuple for " + name + " must only contain str", false)
                     if (name == "startswith") {
                         if (pySStarts(s, one, st2, en2)) { return true }
                     } else {
@@ -4843,8 +4918,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 return false
             }
-            if (name == "startswith") { return pySStarts(s, pySStrArg(pv), st2, en2) }
-            return pySEnds(s, pySStrArg(pv), st2, en2)
+            var pw = pySStrArg(pv, name + " first arg must be str or a tuple of str", false)
+            if (name == "startswith") { return pySStarts(s, pw, st2, en2) }
+            return pySEnds(s, pw, st2, en2)
         }
 
         if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return pySAllCh(s, 1) }
@@ -4856,16 +4932,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "istitle") { return pySIsTitle(s) }
         if (name == "isascii") { return pySIsAscii(s) }
 
-        if (name == "center") { return pySCenter(s, pySOptInt(args, 0, 0), pySFillArg(args, 1)) }
-        if (name == "ljust") { return pySJust(s, pySOptInt(args, 0, 0), pySFillArg(args, 1), false) }
-        if (name == "rjust") { return pySJust(s, pySOptInt(args, 0, 0), pySFillArg(args, 1), true) }
-        if (name == "zfill") { return pySZfill(s, pySOptInt(args, 0, 0)) }
-        if (name == "expandtabs") { return pySExpandTabs(s, pySOptInt(args, 0, 8)) }
+        if (name == "center") { return pySCenter(s, pySIntArg(args, 0, 0, false), pySFillArg(args, 1)) }
+        if (name == "ljust") { return pySJust(s, pySIntArg(args, 0, 0, false), pySFillArg(args, 1), false) }
+        if (name == "rjust") { return pySJust(s, pySIntArg(args, 0, 0, false), pySFillArg(args, 1), true) }
+        if (name == "zfill") { return pySZfill(s, pySIntArg(args, 0, 0, false)) }
+        if (name == "expandtabs") { return pySExpandTabs(s, pySIntArg(args, 0, 8, false)) }
         if (name == "encode") { return pyStrEncode(s, pyArgAt(args, 0), pyArgAt(args, 1)) }
 
         if (name == "partition" || name == "rpartition") {
-            var psep = pySStrArg(args[0])
-            if (psep.length == 0) { pySFail("ValueError: empty separator") }
+            var psep = pySStrArg(args[0], "must be str", false)
+            if (psep.length == 0) { pySRaise("ValueError", "empty separator") }
             var pat = -1
             if (name == "partition") { pat = pySFind(s, psep, 0, n) }
             else { pat = pySRFind(s, psep, 0, n) }
@@ -4876,12 +4952,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return [s.substring(0, pat), psep, s.substring(pat + psep.length, n)]
         }
         if (name == "removeprefix") {
-            var pre = pySStrArg(args[0])
+            var pre = pySStrArg(args[0], "removeprefix() argument must be str", true)
             if (pre.length > 0 && pySStarts(s, pre, 0, n)) { return s.substring(pre.length, n) }
             return s
         }
         if (name == "removesuffix") {
-            var suf = pySStrArg(args[0])
+            var suf = pySStrArg(args[0], "removesuffix() argument must be str", true)
             if (suf.length > 0 && pySEnds(s, suf, 0, n)) { return s.substring(0, n - suf.length) }
             return s
         }
@@ -5704,11 +5780,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function userOp(op, l, r) {
         var n = hasOwn(pyDunder, op) ? pyDunder[op] : null
         if (n == null) { return null }
-        if (pyUser(l)) { var f = clsFind(l.__class, n); if (f != null) { return {v: f(l, r)} } }
+        if (pyUser(l)) {
+            var f = clsFind(l.__class, n)
+            if (f != null) {
+                var lv = f(l, r)
+                if (lv !== pyNotImpl) { return {v: lv} }
+            }
+        }
         if (pyUser(r)) {
             var rn = hasOwn(pyReflected, op) ? pyReflected[op] : "__r" + n.substring(2)
             var g = clsFind(r.__class, rn)
-            if (g != null) { return {v: g(r, l)} }
+            if (g != null) {
+                var rv = g(r, l)
+                if (rv !== pyNotImpl) { return {v: rv} }
+            }
         }
         return null
     }

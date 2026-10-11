@@ -21415,12 +21415,16 @@ var pyBinReflected = map[string]string{
 func (rt *jsrt) pyDunderBin(op string, l, r interface{}) (interface{}, bool) {
 	if _, cls, ok := pyInstance(l); ok {
 		if m, found := pyLookup(cls, pyBinDunder[op]); found && isCallable(m) {
-			return rt.call(m, jsUndef, []interface{}{l, r}), true
+			if v := rt.call(m, jsUndef, []interface{}{l, r}); v != pyNotImplemented {
+				return v, true
+			}
 		}
 	}
 	if _, cls, ok := pyInstance(r); ok {
 		if m, found := pyLookup(cls, pyBinReflected[op]); found && isCallable(m) {
-			return rt.call(m, jsUndef, []interface{}{r, l}), true
+			if v := rt.call(m, jsUndef, []interface{}{r, l}); v != pyNotImplemented {
+				return v, true
+			}
 		}
 	}
 	if op == "!=" { // Python's default __ne__ is the negation of __eq__.

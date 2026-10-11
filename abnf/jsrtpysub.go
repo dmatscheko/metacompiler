@@ -174,16 +174,31 @@ func pyBDelMake(tname, name string) *hostFunc {
 	for _, op := range ops {
 		dn := pyDunderName[op]
 		op := op
+		ordered := op == "<" || op == ">" || op == "<=" || op == ">="
+		if name == dn && ordered {
+			return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} {
+				if k := pyOrdKind(v); k == 0 || k != pyOrdKind(pyUnwrapBuiltin(arg(a))) {
+					return pyNotImplemented
+				}
+				return rt.pyExt("js_pybin", op, v, arg(a))
+			})
+		}
 		if name == dn {
 			return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pybin", op, v, arg(a)) })
 		}
-		ordered := op == "<" || op == ">" || op == "<=" || op == ">="
 		if !ordered && name == "__r"+dn[2:] {
 			return mk(func(rt *jsrt, v interface{}, a []interface{}) interface{} { return rt.pyExt("js_pybin", op, arg(a), v) })
 		}
 	}
 	return nil
 }
+
+// pyNotImplemented is CPython's NotImplemented, answered only by the delegates:
+// an ORDERING of a builtin subclass's value with a value of another kind
+// declines, so pyDunderBin tries the other operand and the ordering then raises
+// with the operands' own types ('S' and 'int', not 'str' and 'int'). Twins:
+// pyNotImpl in languages/python-interpreter.abnf and lib/python-rt.metajs.
+var pyNotImplemented = newJSObject()
 
 // pyDunderName is the dunder each binary operator a delegate serves is asked by.
 var pyDunderName = map[string]string{

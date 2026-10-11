@@ -3772,6 +3772,47 @@ def s67():
     check("ctor4", int(nd[0]) == 3 and int(nd[1]) + 1 == 124 and float(nd[2]) == 3.5 and int(nd[3]) == 3)
     check("ctor5", int(nd[4]) == 42 and int(nd[5]) == 9 and int(nd[1], 16) == 291)
 
+# ===== SECTION 68: str method argument errors, builtin-subclass ordering =====
+# A str method's wrong argument type, wrong arity, empty separator or missing
+# substring is a CATCHABLE exception with CPython's own text; a str subclass is a
+# str argument. Ordering a builtin subclass with another kind names the
+# subclass, in the operator the program wrote.
+def s68():
+    def err(f):
+        try:
+            f()
+            return "no error"
+        except Exception as e:
+            return type(e).__name__ + ": " + str(e)
+    class S(str): pass
+    class I(int): pass
+    v = ["ab", 1, None, 1.5, "", "xy"]
+    s = v[0]
+    check("sarg1", err(lambda: s.startswith(v[1])) == "TypeError: startswith first arg must be str or a tuple of str, not int")
+    check("sarg2", err(lambda: s.endswith((v[1],))) == "TypeError: tuple for endswith must only contain str, not int")
+    check("sarg3", err(lambda: s.rstrip(v[1])) == "TypeError: rstrip arg must be None or str")
+    check("sarg4", err(lambda: s.split(v[1])) == "TypeError: must be str or None, not int" and err(lambda: s.rsplit(v[4])) == "ValueError: empty separator")
+    check("sarg5", err(lambda: s.join(["a", v[1]])) == "TypeError: sequence item 1: expected str instance, int found")
+    check("sarg6", err(lambda: s.replace("a", v[1])) == "TypeError: replace() argument 2 must be str, not int")
+    check("sarg7", err(lambda: s.rfind(v[2])) == "TypeError: rfind() argument 1 must be str, not None" and err(lambda: s.index("z")) == "ValueError: substring not found")
+    check("sarg8", err(lambda: s.center(5, v[1])) == "TypeError: The fill character must be a unicode character, not int" and err(lambda: s.ljust(5, v[5])) == "TypeError: The fill character must be exactly one character long")
+    check("sarg9", err(lambda: s.partition(v[4])) == "ValueError: empty separator" and err(lambda: s.rpartition(v[1])) == "TypeError: must be str, not int")
+    check("sarg10", err(lambda: s.removesuffix(v[1])) == "TypeError: removesuffix() argument must be str, not int")
+    check("sarg11", err(lambda: s.zfill(v[0])) == "TypeError: 'str' object cannot be interpreted as an integer" and err(lambda: s.center(v[3])) == "TypeError: 'float' object cannot be interpreted as an integer")
+    check("sarg12", err(lambda: s.find("a", v[0])) == "TypeError: slice indices must be integers or None or have an __index__ method" and s.find("b", v[2]) == 1)
+    check("sarg13", err(lambda: s.split(None, v[2])) == "TypeError: 'NoneType' object cannot be interpreted as an integer")
+    check("sarg14", err(lambda: s.upper(v[1])) == "TypeError: str.upper() takes no arguments (1 given)" and err(lambda: s.join()) == "TypeError: str.join() takes exactly one argument (0 given)")
+    check("sarg15", err(lambda: s.count()) == "TypeError: count expected at least 1 argument, got 0" and err(lambda: s.strip("a", "b")) == "TypeError: strip expected at most 1 argument, got 2")
+    check("sarg16", err(lambda: s.split(",", 1, 2)) == "TypeError: split() takes at most 2 arguments (3 given)" and err(lambda: s.replace("a")) == "TypeError: replace() takes at least 2 positional arguments (1 given)")
+    check("sarg17", err(lambda: "{0}".format()) == "IndexError: Replacement index 0 out of range for positional args tuple")
+    check("sarg18", s.startswith(S("a")) and "-".join([S("a"), S("b")]) == "a-b" and s.replace(S("a"), S("z")) == "zb")
+    check("sarg19", s.center(I(4), S("*")) == "*ab*" and "abc".find("c", I(1)) == 2 and s.find("b", True) == 1)
+    check("sord1", err(lambda: S("b") < v[1]) == "TypeError: '<' not supported between instances of 'S' and 'int'")
+    check("sord2", err(lambda: v[1] < S("b")) == "TypeError: '<' not supported between instances of 'int' and 'S'")
+    check("sord3", err(lambda: v[1] >= S("b")) == "TypeError: '>=' not supported between instances of 'int' and 'S'")
+    check("sord4", err(lambda: I(1) < v[0]) == "TypeError: '<' not supported between instances of 'I' and 'str'")
+    check("sord5", S("a") < S("b") and S("a") < "b" and I(3) < 4 and "a" < S("b") and 2 < I(3))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3840,5 +3881,6 @@ def main():
     s65() # SECTION-CALL 65
     s66() # SECTION-CALL 66
     s67() # SECTION-CALL 67
+    s68() # SECTION-CALL 68
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

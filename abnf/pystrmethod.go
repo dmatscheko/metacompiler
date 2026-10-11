@@ -75,10 +75,12 @@ func (e *pyStrEnv) sCode(s string, i int) int  { return e.rt.strCodeAt(s, i) }
 func (e *pyStrEnv) sIndex(s, sub string) int   { return e.rt.strIndexOf(s, sub) }
 func (e *pyStrEnv) fail(msg string)            { e.rt.fail("%s", msg) }
 
-// raiseKey is a CATCHABLE KeyError, for the one place in this chunk where
-// CPython raises rather than aborts: "{a}".format(b=1). fail is the engine's
-// abort and cannot be caught. Twins: pySRaiseKey in
+// raise is a catchable exception of class cls; raiseKey is the KeyError whose
+// argument is the missing key itself. Twins: pySRaise and pySRaiseKey in
 // languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func (e *pyStrEnv) raise(cls, msg string) {
+	panic(&jsThrown{value: e.rt.pyExcInstance(cls, msg)})
+}
 func (e *pyStrEnv) raiseKey(nm string) {
 	panic(&jsThrown{value: e.rt.pyExcInstanceV("KeyError", nm)})
 }
@@ -791,14 +793,14 @@ func (e *pyStrEnv) fmtOne(body string, args []interface{}, kw interface{}, auto 
 	var v interface{} = jsUndef
 	if head == "" {
 		if at >= len(args) {
-			e.fail("IndexError: Replacement index " + strconv.Itoa(at) + " out of range")
+			e.raise("IndexError", "Replacement index "+strconv.Itoa(at)+" out of range for positional args tuple")
 		}
 		v = args[at]
 		at++
 	} else if e.allDigits(head) {
 		ix, _ := strconv.Atoi(head)
 		if ix >= len(args) {
-			e.fail("IndexError: Replacement index " + strconv.Itoa(ix) + " out of range")
+			e.raise("IndexError", "Replacement index "+strconv.Itoa(ix)+" out of range for positional args tuple")
 		}
 		v = args[ix]
 	} else {
@@ -829,7 +831,7 @@ func (e *pyStrEnv) fmtOne(body string, args []interface{}, kw interface{}, auto 
 				v = e.getIt(v, key)
 			}
 		} else {
-			e.fail("ValueError: Invalid format field: " + nm)
+			e.raise("ValueError", "Invalid format field: "+nm)
 			p++
 		}
 	}
@@ -864,7 +866,7 @@ func (e *pyStrEnv) formatGo(s string, args []interface{}, kw interface{}, auto i
 				}
 			}
 			if depth != 0 {
-				e.fail("ValueError: Single '{' encountered in format string")
+				e.raise("ValueError", "Single '{' encountered in format string")
 			}
 			var text string
 			text, at = e.fmtOne(e.sSub(s, i+1, j), args, kw, at)
@@ -878,7 +880,7 @@ func (e *pyStrEnv) formatGo(s string, args []interface{}, kw interface{}, auto i
 				i += 2
 				continue
 			}
-			e.fail("ValueError: Single '}' encountered in format string")
+			e.raise("ValueError", "Single '}' encountered in format string")
 		}
 		out += ch
 		i++
@@ -888,22 +890,42 @@ func (e *pyStrEnv) formatGo(s string, args []interface{}, kw interface{}, auto i
 
 // ---- the dispatch table ----
 
-func pysOptInt(rt *jsrt, args []interface{}, i, dflt int) int {
+// intArg is an integer argument (an int, a bool, or an int subclass's value),
+// dflt when it is absent. A slice window (find's start and end) also takes None
+// for its default; anywhere else None is refused like any other non-integer,
+// each with CPython's own TypeError. Twin of pySIntArg.
+func (e *pyStrEnv) intArg(args []interface{}, i, dflt int, slice bool) int {
 	if i >= len(args) {
 		return dflt
 	}
-	v := args[i]
+	v := pyUnwrapBuiltin(args[i])
 	if v == nil || v == jsUndef || v == jsNull {
-		return dflt
+		if slice {
+			return dflt
+		}
+	} else if tn := pyTypeName(e.rt, v); tn == "int" || tn == "bool" {
+		return int(e.rt.toInt32(e.rt.toNumber(v)))
 	}
-	return int(rt.toInt32(rt.toNumber(v)))
+	if slice {
+		e.raise("TypeError", "slice indices must be integers or None or have an __index__ method")
+	}
+	e.raise("TypeError", "'"+pyTypeName(e.rt, args[i])+"' object cannot be interpreted as an integer")
+	return dflt
 }
 
-func (e *pyStrEnv) strArg(v interface{}) string {
-	if s, ok := v.(string); ok {
+// strArg is a str argument (a str or a str subclass's value); anything else
+// raises TypeError(what + ", not " + its type). An Argument Clinic parameter
+// (clinic) spells None's type "None" where the others say "NoneType". Twin of
+// pySStrArg.
+func (e *pyStrEnv) strArg(v interface{}, what string, clinic bool) string {
+	if s, ok := pyUnwrapBuiltin(v).(string); ok {
 		return s
 	}
-	e.fail("TypeError: a str argument is required")
+	tn := pyTypeName(e.rt, v)
+	if clinic && tn == "NoneType" {
+		tn = "None"
+	}
+	e.raise("TypeError", what+", not "+tn)
 	return ""
 }
 
@@ -911,13 +933,9 @@ func (e *pyStrEnv) fillArg(args []interface{}, i int) string {
 	if i >= len(args) {
 		return " "
 	}
-	v := args[i]
-	if v == nil || v == jsUndef || v == jsNull {
-		return " "
-	}
-	f := e.strArg(v)
+	f := e.strArg(args[i], "The fill character must be a unicode character", false)
 	if e.cpLen(f) != 1 {
-		e.fail("TypeError: The fill character must be exactly one character long")
+		e.raise("TypeError", "The fill character must be exactly one character long")
 	}
 	return f
 }
@@ -982,9 +1000,64 @@ func (e *pyStrEnv) join(s string, seq []interface{}) string {
 		if i > 0 {
 			out += s
 		}
-		out += e.strArg(v)
+		u, ok := pyUnwrapBuiltin(v).(string)
+		if !ok {
+			e.raise("TypeError", fmt.Sprintf("sequence item %d: expected str instance, %s found", i, pyTypeName(e.rt, v)))
+		}
+		out += u
 	}
 	return out
+}
+
+// arity raises CPython's arity errors, in the wording of each calling
+// convention: a method with no parameters, a single-argument one, and Argument
+// Clinic's positional-only ("expected at least") and keyword-capable ("takes at
+// most") forms. format takes any number. Twin of pySArity.
+func (e *pyStrEnv) arity(name string, n int) {
+	lo, hi, style := 0, 0, 0
+	switch name {
+	case "format":
+		return
+	case "join", "zfill", "partition", "rpartition", "removeprefix", "removesuffix", "format_map":
+		lo, hi, style = 1, 1, 1
+	case "strip", "lstrip", "rstrip":
+		hi, style = 1, 2
+	case "find", "rfind", "index", "rindex", "count", "startswith", "endswith":
+		lo, hi, style = 1, 3, 2
+	case "center", "ljust", "rjust":
+		lo, hi, style = 1, 2, 2
+	case "split", "rsplit", "encode":
+		hi, style = 2, 3
+	case "splitlines", "expandtabs":
+		hi, style = 1, 3
+	case "replace":
+		lo, hi, style = 2, 3, 3
+	}
+	if n >= lo && n <= hi {
+		return
+	}
+	plural := func(k int) string {
+		if k == 1 {
+			return ""
+		}
+		return "s"
+	}
+	msg := ""
+	switch {
+	case style == 0:
+		msg = fmt.Sprintf("str.%s() takes no arguments (%d given)", name, n)
+	case style == 1:
+		msg = fmt.Sprintf("str.%s() takes exactly one argument (%d given)", name, n)
+	case style == 2 && n < lo:
+		msg = fmt.Sprintf("%s expected at least %d argument%s, got %d", name, lo, plural(lo), n)
+	case style == 2:
+		msg = fmt.Sprintf("%s expected at most %d argument%s, got %d", name, hi, plural(hi), n)
+	case n < lo:
+		msg = fmt.Sprintf("%s() takes at least %d positional arguments (%d given)", name, lo, n)
+	default:
+		msg = fmt.Sprintf("%s() takes at most %d argument%s (%d given)", name, hi, plural(hi), n)
+	}
+	e.raise("TypeError", msg)
 }
 
 // The names this table answers; the caller checks it FIRST so an unknown name
@@ -1171,12 +1244,16 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 	case "strip", "lstrip", "rstrip":
 		chars, useWS := "", true
 		if len(args) > 0 && args[0] != jsUndef && args[0] != jsNull && args[0] != nil {
-			chars, useWS = e.strArg(args[0]), false
+			cu, ok := pyUnwrapBuiltin(args[0]).(string)
+			if !ok {
+				e.raise("TypeError", name+" arg must be None or str")
+			}
+			chars, useWS = cu, false
 		}
 		return e.strip(s, chars, useWS, name != "rstrip", name != "lstrip")
 
 	case "split", "rsplit":
-		ms := pysOptInt(rt, args, 1, -1)
+		ms := e.intArg(args, 1, -1, false)
 		noSep := len(args) == 0
 		if !noSep {
 			noSep = args[0] == jsUndef || args[0] == jsNull || args[0] == nil
@@ -1187,9 +1264,9 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 			}
 			return &jsArray{elems: e.rsplitWS(s, ms)}
 		}
-		sep := e.strArg(args[0])
+		sep := e.strArg(args[0], "must be str or None", false)
 		if e.sLen(sep) == 0 {
-			e.fail("ValueError: empty separator")
+			e.raise("ValueError", "empty separator")
 		}
 		if name == "split" {
 			return &jsArray{elems: e.splitSep(s, sep, ms)}
@@ -1222,20 +1299,20 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		if a := pysArgAt(args, 0); pyIterName(e.rt, a) != "" || pyIsGenerator(a) {
 			return e.join(s, e.rt.pyElemsOf(a))
 		}
-		e.fail("TypeError: can only join an iterable")
+		e.raise("TypeError", "can only join an iterable")
 		return jsUndef
 
 	case "replace":
-		return e.replace(s, e.strArg(pysArgAt(args, 0)), e.strArg(pysArgAt(args, 1)),
-			pysOptInt(rt, args, 2, -1))
+		return e.replace(s, e.strArg(pysArgAt(args, 0), "replace() argument 1 must be str", true),
+			e.strArg(pysArgAt(args, 1), "replace() argument 2 must be str", true), e.intArg(args, 2, -1, false))
 
 	// The window arguments and the answer are CODE POINT positions; the search
 	// itself runs on units.
 	case "find", "index", "rfind", "rindex":
 		cn := e.cpLen(s)
-		sub := e.strArg(pysArgAt(args, 0))
-		st := e.cpUnit(s, pysAdjStart(pysOptInt(rt, args, 1, 0), cn))
-		en := e.cpUnit(s, pysAdjEnd(pysOptInt(rt, args, 2, cn), cn))
+		sub := e.strArg(pysArgAt(args, 0), name+"() argument 1 must be str", true)
+		st := e.cpUnit(s, pysAdjStart(e.intArg(args, 1, 0, true), cn))
+		en := e.cpUnit(s, pysAdjEnd(e.intArg(args, 2, cn, true), cn))
 		at := -1
 		if name == "find" || name == "index" {
 			at = e.find(s, sub, st, en)
@@ -1244,7 +1321,7 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		}
 		if at < 0 {
 			if name == "index" || name == "rindex" {
-				e.fail("ValueError: substring not found")
+				e.raise("ValueError", "substring not found")
 			}
 			return float64(at)
 		}
@@ -1252,14 +1329,14 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 
 	case "count":
 		cn := e.cpLen(s)
-		return float64(e.count(s, e.strArg(pysArgAt(args, 0)),
-			e.cpUnit(s, pysAdjStart(pysOptInt(rt, args, 1, 0), cn)),
-			e.cpUnit(s, pysAdjEnd(pysOptInt(rt, args, 2, cn), cn))))
+		return float64(e.count(s, e.strArg(pysArgAt(args, 0), "count() argument 1 must be str", true),
+			e.cpUnit(s, pysAdjStart(e.intArg(args, 1, 0, true), cn)),
+			e.cpUnit(s, pysAdjEnd(e.intArg(args, 2, cn, true), cn))))
 
 	case "startswith", "endswith":
 		cn := e.cpLen(s)
-		st := e.cpUnit(s, pysAdjStart(pysOptInt(rt, args, 1, 0), cn))
-		en := e.cpUnit(s, pysAdjEnd(pysOptInt(rt, args, 2, cn), cn))
+		st := e.cpUnit(s, pysAdjStart(e.intArg(args, 1, 0, true), cn))
+		en := e.cpUnit(s, pysAdjEnd(e.intArg(args, 2, cn, true), cn))
 		hit := func(one string) bool {
 			if name == "startswith" {
 				return e.starts(s, one, st, en)
@@ -1268,13 +1345,13 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		}
 		if arr, ok := pysArgAt(args, 0).(*jsArray); ok {
 			for _, p := range arr.elems {
-				if hit(e.strArg(p)) {
+				if hit(e.strArg(p, "tuple for "+name+" must only contain str", false)) {
 					return true
 				}
 			}
 			return false
 		}
-		return hit(e.strArg(pysArgAt(args, 0)))
+		return hit(e.strArg(pysArgAt(args, 0), name+" first arg must be str or a tuple of str", false))
 
 	case "isdigit", "isdecimal", "isnumeric":
 		return e.allCh(s, 1)
@@ -1294,22 +1371,22 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		return e.isAscii(s)
 
 	case "center":
-		return e.center(s, pysOptInt(rt, args, 0, 0), e.fillArg(args, 1))
+		return e.center(s, e.intArg(args, 0, 0, false), e.fillArg(args, 1))
 	case "ljust":
-		return e.just(s, pysOptInt(rt, args, 0, 0), e.fillArg(args, 1), false)
+		return e.just(s, e.intArg(args, 0, 0, false), e.fillArg(args, 1), false)
 	case "rjust":
-		return e.just(s, pysOptInt(rt, args, 0, 0), e.fillArg(args, 1), true)
+		return e.just(s, e.intArg(args, 0, 0, false), e.fillArg(args, 1), true)
 	case "zfill":
-		return e.zfill(s, pysOptInt(rt, args, 0, 0))
+		return e.zfill(s, e.intArg(args, 0, 0, false))
 	case "expandtabs":
-		return e.expandTabs(s, pysOptInt(rt, args, 0, 8))
+		return e.expandTabs(s, e.intArg(args, 0, 8, false))
 	case "encode":
 		return rt.pysEncode(s, pysArgAt(args, 0), pysArgAt(args, 1))
 
 	case "partition", "rpartition":
-		sep := e.strArg(pysArgAt(args, 0))
+		sep := e.strArg(pysArgAt(args, 0), "must be str", false)
 		if e.sLen(sep) == 0 {
-			e.fail("ValueError: empty separator")
+			e.raise("ValueError", "empty separator")
 		}
 		at := -1
 		if name == "partition" {
@@ -1326,13 +1403,13 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		return &jsArray{elems: []interface{}{e.sSub(s, 0, at), sep, e.sSub(s, at+e.sLen(sep), n)}}
 
 	case "removeprefix":
-		pre := e.strArg(pysArgAt(args, 0))
+		pre := e.strArg(pysArgAt(args, 0), "removeprefix() argument must be str", true)
 		if e.sLen(pre) > 0 && e.starts(s, pre, 0, n) {
 			return e.sSub(s, e.sLen(pre), n)
 		}
 		return s
 	case "removesuffix":
-		suf := e.strArg(pysArgAt(args, 0))
+		suf := e.strArg(pysArgAt(args, 0), "removesuffix() argument must be str", true)
 		if e.sLen(suf) > 0 && e.ends(s, suf, 0, n) {
 			return e.sSub(s, 0, n-e.sLen(suf))
 		}
@@ -1382,6 +1459,8 @@ func init() {
 						args, kw := arr.elems, u(a[3])
 						if keys, _, isDict := dictParts(kw); isDict && len(keys.elems) > 0 {
 							args = rt.pysKwArgs(name, args, kw)
+						} else {
+							env.arity(name, len(args))
 						}
 						return w(env.call(s, name, args, kw))
 					}
