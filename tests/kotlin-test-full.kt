@@ -4585,6 +4585,8 @@ fun s91mk(): () -> Long = { 7 }
 fun s91run(f: () -> Long): Any = f()
 fun s91first(xs: List<Long>): Any? = xs[0]
 fun s91key(m: Map<Long, Int>): Any? = m.keys.first()
+fun <T> s91id(x: T): T = x
+class S91Box<T>(val v: T)
 
 fun sec91() {
     val o: List<Any> = listOf(1, 2L)
@@ -4611,6 +4613,12 @@ fun sec91() {
     val p: Pair<Long, Long> = 1 to 2
     check("kl91g", s90any(ls[0]) is Long && s90any(p.first) is Long && s90any(p.second) is Long &&
         s90any(Array<Long>(2) { 0 }[1]) is Long)
+    val ms = mutableSetOf<Long>()
+    ms += 4
+    val ml = mutableListOf<Long>()
+    ml += 7
+    check("kl91h", s90any(s91id<Long>(5)) is Long && s90any(S91Box<Long>(3).v) is Long && s90any(maxOf<Long>(1, 2)) is Long &&
+        ms.contains(4L) && ml.contains(7L) && s90any(listOf<Long>(1, 2).getOrElse(5) { 0 }) is Long)
 }
 
 

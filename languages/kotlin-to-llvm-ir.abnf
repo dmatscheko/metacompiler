@@ -467,7 +467,7 @@ TopBareProp <~~ push(makeBareDecl(takeAll())) ~~>
 TopDecl     <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in)) ~~>
             = ( "val" | "var" ) KwEnd NotHardKw KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression { PropVis } [ ";" ] ;
 
-FunDecl     <~~ ktNoteBody(up.start, up.pos); push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
+FunDecl     <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
 // The angle run AFTER the name - `fun naturalOrder<in T : Comparable<T>>(a: T, b: T)`
 // (psi/examples/util/Comparison.kt, clean tree) - is where Kotlin's parser still accepts
 // type parameters even though the language wants them before the name. Skipped, not
@@ -602,7 +602,7 @@ CollLit     <~~ push(makeCollLit(takeAll())) ~~>
             = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
 
 // class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
-ClassDecl   <~~ ktNoteBody(up.start, up.pos); ktNoteClass(up.in, up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
+ClassDecl   <~~ ktNoteBody(up.start, up.pos); ktNoteClass(up.in, up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "class"); push(makeClassStmt(takeAll())) ~~>
             = [ DataMod <~~ push({dmod: up.in}) ~~> KwEnd ] KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] ( CtorModsOnly CtorParams | [ PrimaryCtorKw ] [ CtorParams ] ) [ ":" Supers ] [ WhereClause ] [ "{" { Member } "}" ] ;
 // The primary constructor may be written out - class Foo constructor(x: Int) - with its
 // own visibility and annotations (class A private @Inject constructor(...)). The keyword
@@ -4881,7 +4881,26 @@ KwContract  = "contract" KwEnd ;
         // A builder call's static type, and its elements retyped by the explicit type
         // arguments (listOf<Long>(1, 2)).
         var bty = (classNames[name] == undefined && funNames["$" + name] != true) ? ktBuilderType(name, targs) : ""
-        return ktAdoptThunk(makeCallBody(name, args), bty)
+        var body = makeCallBody(name, args)
+        // A generic function or class called with explicit type arguments -
+        // ident<Long>(5) - retypes the literals its parameter types fix, read at emit
+        // time (the declaration may come later in the file).
+        if (targs.length > 0) {
+            var direct = body
+            var pending = true
+            body = function(b) {
+                if (pending) { ktAdoptGenericArgs(name, targs, args); pending = false }
+                return direct(b)
+            }
+        }
+        return ktAdoptThunk(body, bty)
+    }
+    function ktAdoptGenericArgs(name, targs, args) {
+        var n = 0
+        while (n < args.length && args[n].aname == undefined && args[n].spread != true) { n++ }
+        var tys = ktGenericArgTys(name, targs, n)
+        if (tys == null) { return }
+        for (var i = 0; i < tys.length; i++) { args[i] = {at: ktAdoptThunk(args[i].at, tys[i])} }
     }
     function makeCallBody(name, args) {
         return function(b) {
@@ -5058,6 +5077,10 @@ KwContract  = "contract" KwEnd ;
         var valT = items[2]
         // `y = 7` into a Long variable and `xs[i] = 7` / `m[1] = v` into a collection of
         // Longs: the literal takes the declared (or inferred) type.
+        if ((op == "+=" || op == "-=") && ref.path.length == 0 && ref.name != "field") {
+            var cty = ktCompoundTys(ktDeclTypeOf(ref.name))
+            for (var ci = 0; ci < cty.length; ci++) { valT = ktAdoptThunk(valT, cty[ci]) }
+        }
         if (op == "=" && ref.name != "field") {
             var aty = ktDeclTypeOf(ref.name)
             if (ref.path.length == 0) { valT = ktAdoptThunk(valT, aty) }

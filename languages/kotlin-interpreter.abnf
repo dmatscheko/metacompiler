@@ -557,7 +557,7 @@ VisDecl     <~~ ktAt = up.start; push(makeDecl(takeAll())) ~~>
 
 // The generic parameter names are remembered while the body walks, so an `x is T`
 // inside can be resolved against the call site's type arguments (reified).
-FunDecl     <~~ ktNoteBody(up.start, up.pos); push(makeFun(takeAll())); retLblPop() ~~>
+FunDecl     <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); push(makeFun(takeAll())); retLblPop() ~~>
             = KwFun <~~ tpBegin() ~~> [ TypeParams ] KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" RetType ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 // The declared RETURN type, same rule again at the last binding site a value crosses:
 // `fun sf(): Long = 1` answers a Long, so `sf() * 1000000 * 1000000` is 64 bit.
@@ -677,7 +677,7 @@ ParamDefault <~~ push({pdef: pop()}) ~~>
 // still ACCEPTED (the file parses) and reported as not implemented, which is what keeps
 // the widened surface from shrinking as the member set grows.
 ClassDecl   = ClassReal | ClassSkip ;
-ClassReal   <~~ ktNoteBody(up.start, up.pos); ktNoteClass(up.in, up.start, up.pos); buildClass(takeAll()) ~~>
+ClassReal   <~~ ktNoteBody(up.start, up.pos); ktNoteClass(up.in, up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "class"); buildClass(takeAll()) ~~>
             = KwClass <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ PrimaryCtor ] [ ":" SuperList ] [ WhereClause ] [ "{" { Member } "}" ] ;
 // The primary constructor may spell itself out with modifiers and the `constructor`
@@ -10685,9 +10685,28 @@ NotMemberKw = :script(~~
             start = 2
         }
         var args = items.slice(start)
+        var body = makeCallBody(name, targs, args)
+        // A generic function or class called with explicit type arguments -
+        // ident<Long>(5) - retypes the literals its parameter types fix, read when the
+        // call first runs (the declaration may come later in the file).
+        if (targl.length > 0) {
+            var direct = body
+            var pending = true
+            body = function() {
+                if (pending) { kAdoptGenericArgs(name, targl, args); pending = false }
+                return direct()
+            }
+        }
         // A builder call's elements retyped by its explicit type arguments
         // (listOf<Long>(1, 2)).
-        return kAdoptThunk(makeCallBody(name, targs, args), ktBuilderType(name, targl))
+        return kAdoptThunk(body, ktBuilderType(name, targl))
+    }
+    function kAdoptGenericArgs(name, targl, args) {
+        var n = 0
+        while (n < args.length && typeof args[n] == "function") { n++ }
+        var tys = ktGenericArgTys(name, targl, n)
+        if (tys == null) { return }
+        for (var i = 0; i < tys.length; i++) { args[i] = kAdoptThunk(args[i], tys[i]) }
     }
     function makeCallBody(name, targs, args) {
         return function() {
@@ -10724,6 +10743,10 @@ NotMemberKw = :script(~~
         var valT = items[2]
         // `y = 7` into a Long variable and `xs[i] = 7` / `m[1] = v` into a collection of
         // Longs: the literal takes the declared (or inferred) type.
+        if ((op == "+=" || op == "-=") && ref.path.length == 0) {
+            var cty = ktCompoundTys(ktDeclTypeOf(ref.name))
+            for (var ci = 0; ci < cty.length; ci++) { valT = kAdoptThunk(valT, cty[ci]) }
+        }
         if (op == "=") {
             var aty = ktDeclTypeOf(ref.name)
             if (ref.path.length == 0) { valT = kAdoptThunk(valT, aty) }

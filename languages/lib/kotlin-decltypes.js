@@ -329,6 +329,119 @@ function ktLeadName(t) {
     return (c0 >= "0" && c0 <= "9") ? "" : t.substring(0, i)
 }
 
+// Generic functions and classes by name: their type parameters and the declared
+// types of their value parameters, read off the declaration's source text, for a
+// call with explicit type arguments (`ident<Long>(5)`, `Box<Long>(3)`) - a
+// parameter declared with a type parameter adopts the argument's type. A name
+// declared generic twice answers nothing.
+var ktGenerics = {}
+function ktNoteGeneric(raw, kw) {
+    var i = raw.indexOf(kw)
+    if (i < 0) { return }
+    i = ktSkipWs(raw, i + kw.length)
+    var tps = []
+    if (raw.charAt(i) == "<") {
+        var e = ktMatchClose(raw, i, "<", ">")
+        if (e < 0) { return }
+        tps = ktTParamNames(raw.substring(i + 1, e))
+        i = ktSkipWs(raw, e + 1)
+    }
+    var n0 = i
+    while (i < raw.length && ktIdChar(raw.charAt(i))) { i++ }
+    var name = raw.substring(n0, i)
+    i = ktSkipWs(raw, i)
+    if (raw.charAt(i) == "<") {
+        var e2 = ktMatchClose(raw, i, "<", ">")
+        if (e2 < 0) { return }
+        tps = ktTParamNames(raw.substring(i + 1, e2))
+        i = e2 + 1
+    }
+    if (name == "" || tps.length == 0) { return }
+    // A class's primary constructor may be preceded by modifiers and `constructor`.
+    while (i < raw.length && raw.charAt(i) != "(" && raw.charAt(i) != "{" && raw.charAt(i) != ":" && raw.charAt(i) != "=") { i++ }
+    var ptys = []
+    if (raw.charAt(i) == "(") {
+        var pe = ktMatchClose(raw, i, "(", ")")
+        if (pe < 0) { return }
+        var parts = ktSplitTop(raw.substring(i + 1, pe), ",")
+        for (var p = 0; p < parts.length; p++) {
+            var colon = ktSplitTop(parts[p], ":")
+            ptys.push(colon.length < 2 ? "" : stripWs(ktSplitTop(colon[1], "=")[0]))
+        }
+    }
+    ktGenerics["$" + name] = ktGenerics["$" + name] == undefined ? {tps: tps, ptys: ptys} : "#"
+}
+function ktSkipWs(s, i) {
+    while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i++ }
+    return i
+}
+// `out T : Comparable<T>, reified U` -> ["T", "U"]: each entry's last word before
+// its bound.
+function ktTParamNames(s) {
+    var out = []
+    var parts = ktSplitTop(s, ",")
+    for (var i = 0; i < parts.length; i++) {
+        var w = ktSplitTop(parts[i], ":")[0]
+        var e = w.length
+        while (e > 0 && !ktIdChar(w.charAt(e - 1))) { e-- }
+        var b = e
+        while (b > 0 && ktIdChar(w.charAt(b - 1))) { b-- }
+        if (e > b) { out.push(w.substring(b, e)) }
+    }
+    return out
+}
+// A text split at the separator where no bracket of any kind is open and outside
+// string and char literals.
+function ktSplitTop(s, sep) {
+    var out = []
+    var depth = 0
+    var from = 0
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "\"" || ch == "'") {
+            var q = ktQuoteEnd(s, i)
+            if (q < 0) { break }
+            i = q + 1
+            continue
+        }
+        if (ch == "(" || ch == "[" || ch == "{" || ch == "<") { depth++ }
+        else if (ch == ")" || ch == "]" || ch == "}" || (ch == ">" && s.charAt(i - 1) != "-")) { depth-- }
+        else if (depth == 0 && ch == sep) { out.push(s.substring(from, i)); from = i + 1 }
+        i++
+    }
+    out.push(s.substring(from))
+    return out
+}
+// The types the positional arguments of `name<targs>(...)` adopt (nargs of them),
+// or null: a generic's parameter types with its type parameters replaced by the
+// type arguments; maxOf / minOf take their one type argument for every argument.
+function ktGenericArgTys(name, targs, nargs) {
+    var out = []
+    if ((name == "maxOf" || name == "minOf") && targs.length == 1) {
+        for (var m = 0; m < nargs; m++) { out.push(targs[0]) }
+        return out
+    }
+    var g = ktGenerics["$" + name]
+    if (g == undefined || g == "#" || g.tps.length != targs.length) { return null }
+    for (var i = 0; i < nargs && i < g.ptys.length; i++) { out.push(ktSubstTParams(g.ptys[i], g.tps, targs)) }
+    return out
+}
+// A type text with every type parameter name replaced by its type argument.
+function ktSubstTParams(ty, tps, targs) {
+    var out = ""
+    var i = 0
+    while (i < ty.length) {
+        if (!ktIdChar(ty.charAt(i))) { out = out + ty.charAt(i); i++; continue }
+        var b = i
+        while (i < ty.length && ktIdChar(ty.charAt(i))) { i++ }
+        var w = ty.substring(b, i)
+        for (var k = 0; k < tps.length; k++) { if (tps[k] == w) { w = targs[k] } }
+        out = out + w
+    }
+    return out
+}
+
 // The type the left operand of `x in c` adopts, c being the source text from..to:
 // c's element type, or its key type for a map; "" when c's type is not known.
 function ktInElemTy(from, to) {
@@ -515,17 +628,28 @@ function ktMArgTypes(name, nargs, el, isMap) {
         if (name == "put") { return [k, v] }
         if (name == "get" || name == "containsKey" || name == "remove" || name == "getValue") { return [k] }
         if (name == "getOrDefault") { return [k, v] }
-        if (name == "getOrElse" || name == "getOrPut") { return [k] }
+        if (name == "getOrElse" || name == "getOrPut") { return [k, "()->" + v] }
         if (name == "containsValue") { return [v] }
         return []
     }
     if (name == "add" || name == "set") { return nargs == 1 ? [v] : ["", v] }
+    if (name == "getOrElse") { return ["", "(Int)->" + v] }
     if (name == "contains" || name == "indexOf" || name == "lastIndexOf" || name == "remove") { return [v] }
     if (v != "" && (name == "addAll" || name == "removeAll" || name == "containsAll" || name == "retainAll")) {
         return nargs == 1 ? ["List<" + v + ">"] : ["", "List<" + v + ">"]
     }
     if (name == "put") { return [k, v] }
     return []
+}
+// The type the right operand of `xs += x` / `xs -= x` adopts on a collection of
+// type ty: a map's entry Pair (or Map) by the map type; on a list or set the element
+// - or a collection of elements, which the "List<E>" step retypes - "" else.
+function ktCompoundTys(ty) {
+    var el = ktTyElems(ty)
+    if (el == null) { return [] }
+    if (ktIsMapTy(ty)) { return [ty] }
+    var v = ktLitTy(el.v)
+    return v == "" ? [] : ["List<" + v + ">", v]
 }
 // The type a method's RESULT takes: sum() of an empty collection is its element
 // type's zero, not an Int.
