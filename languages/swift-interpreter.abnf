@@ -2542,6 +2542,9 @@ KwContinue  = "continue" KwEnd ;
             }
             return out + "]"
         }
+        // A builtin's type value (`Int.self`, `type(of: "x")`) prints as its name.
+        // Twins: swObjDesc in abnf/jsrtswift.go and lib/swift-rt.metajs.
+        if (v.__tname !== undefined) { return v.__tname }
         // A user `description` (CustomStringConvertible) wins over every built-in
         // rendering, exactly as it does in Swift.
         var g = findAccessor(v, "__get_description")
@@ -3034,7 +3037,7 @@ KwContinue  = "continue" KwEnd ;
     function swIntType(w, u) {
         var b = swIntBounds(w, u)
         return {max: b.mx, min: b.mn, bitWidth: w > 64 ? 64 : w, zero: szConv(0, w, u),
-                __conv: function(x) { return swIntConv(x, w, u) }}
+                __conv: function(x) { return swIntConv(x, w, u) }, __tname: swIntTyName(w, u)}
     }
     // The declared width of `var u: UInt8 = 250` (swIntWidth is consulted by
     // makeDecl); the name has to survive the annotation for the value to carry it.
@@ -3762,13 +3765,16 @@ KwContinue  = "continue" KwEnd ;
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     // type(of: v): a value of a program type answers its type DESCRIPTOR, which
     // prints as the name and answers the type's static members
-    // (`type(of: x).make()`); a builtin answers its name. Twin of rtTypeOfVal in
-    // swift-to-llvm-ir.abnf.
+    // (`type(of: x).make()`); a builtin answers its own type value (Int, String,
+    // Bool, ...), so `type(of: "x") == String.self`, and a generic builtin
+    // (Array<Int>) its name. Twin of rtTypeValue in swift-to-llvm-ir.abnf.
     hostGlobals["type"] = function(v) {
         if (v !== null && typeof v == "object" && v.__class != undefined && v.__class !== null && !Array.isArray(v)) {
             return v.__class.__desc != undefined ? v.__class.__desc : v.__class
         }
-        return swTypeOf(v)
+        var n = swTypeOf(v)
+        if (hasOwn(hostGlobals, n) && hostGlobals[n].__tname !== undefined) { return hostGlobals[n] }
+        return n
     }
     // abs/max/min are Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5,
     // not the 1 a |0 truncation gives) and compares by its VALUE (two boxes are two
@@ -6343,8 +6349,10 @@ KwContinue  = "continue" KwEnd ;
         var hasLocal = localAnn != "?"
         if (hasLocal && ref.path.length == 0 && op == "=") { valT = swDotWant(valT, items[3], localAnn) }
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
-        // `s = [1, 2]` into a local declared `Set<Int>`.
+        // `s = [1, 2]` into a local declared `Set<Int>`, and `d[[1, 2]] = v` into
+        // one declared `[Set<Int>: V]`.
         var setTy = ref.path.length == 0 && hasLocal && swIsSetTy(localAnn)
+        var setKey = ref.path.length == 1 && ref.path[0].key == undefined && hasLocal && swIsSetKeyTy(localAnn)
         var mode = -1
         var exr = swExfRef(ref)
         // The path's field names, for swPropChainHit at the first run (every
@@ -6388,6 +6396,7 @@ KwContinue  = "continue" KwEnd ;
                 var before = obs == null ? null : swObsBefore(ref.name)
                 if (propTrack < 0) { propTrack = swPropChainHit(ref.name, pathNames) ? 1 : 0 }
                 var p = pre !== null ? pre : swResolvePath(ref, propTrack == 1)
+                if (setKey) { p.key = swSetOf(p.key) }
                 // A FIELD target is read and written as a field: getElemP and setElem
                 // try a user subscript first, which `m.x += 1` on a type that has
                 // one must not reach.
@@ -6901,6 +6910,9 @@ KwContinue  = "continue" KwEnd ;
         if (init != undefined && swIsSetArrTy(annTxt)) {
             var setsT = init
             init = function() { return swSetArr(setsT()) }
+        } else if (init != undefined && swIsSetKeyTy(annTxt)) {
+            var skT = init
+            init = function() { return swSetKeys(skT()) }
         }
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
         // annotation carries its numeric leaves down, so a[0] / 2 is 1.5.
@@ -7437,22 +7449,12 @@ KwContinue  = "continue" KwEnd ;
             // A generic parameter this one binds (swDsMarkTypeParams): the type it
             // holds, or the type of its value.
             if (pj.tmeta != undefined) { declVar(pj.tmeta, pv) }
-            if (pj.tval != undefined) { declVar(pj.tval, swTypeValue(pv)) }
+            if (pj.tval != undefined) { declVar(pj.tval, hostGlobals["type"](pv)) }
         }
         var r = f.body()
         for (var k = 0; k < bnd.boxes.length; k++) { bnd.boxes[k].box.v = getVar(bnd.boxes[k].name) }
         scopes = saved
         return relabelRet(f, (r != undefined && r.isRet) ? r.v : undefined)
-    }
-    // A generic parameter bound from a VALUE: the value's type as a type value - a
-    // program type's descriptor, a builtin's own (Int, Double, ...), else the type's
-    // name. Twin of rtTypeValue in swift-to-llvm-ir.abnf.
-    function swTypeValue(v) {
-        var t = anytype
-        t = hostGlobals["type"](v)
-        if (typeof t != "string" || !hasOwn(hostGlobals, t)) { return t }
-        if (swIntWidthOf(t) != null || t == "Double" || t == "Float" || hostGlobals[t].__btab != undefined) { return hostGlobals[t] }
-        return t
     }
     function makeFunClosure(f) {
         return function() {
@@ -9053,7 +9055,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function swFloType() {
         return swAddFloStatics({infinity: swFlo(swInfF), nan: swFlo(swNanF), pi: swFlo(3.141592653589793),
-                zero: swFlo(0), __conv: swFloConv}, false)
+                zero: swFlo(0), __conv: swFloConv, __tname: "Double"}, false)
     }
     // Float's own statics are FLOATS, so Float.pi prints 3.1415925 and not the
     // double's 3.141592653589793.
@@ -9066,7 +9068,7 @@ KwContinue  = "continue" KwEnd ;
     // 3.1415927.
     function swF32Type() {
         return swAddFloStatics({infinity: swF32(swInfF), nan: swF32(swNanF), pi: swF32(3.1415925025939941),
-                zero: swF32(0), __conv: swF32Conv}, true)
+                zero: swF32(0), __conv: swF32Conv, __tname: "Float"}, true)
     }
     hostGlobals["Double"] = swFloType()
     hostGlobals["Float"] = swF32Type()
@@ -9089,7 +9091,8 @@ KwContinue  = "continue" KwEnd ;
         if (lb == null && argv.length == 1 && Array.isArray(x)) { return swStrJoin(x) }
         return swstr(x)
     }
-    hostGlobals["String"] = {__convl: swStrInit}
+    hostGlobals["String"] = {__convl: swStrInit, __tname: "String"}
+    hostGlobals["Bool"] = {__tname: "Bool"}
     // Array(seq) and Array(repeating:count:). swiftc 6.1.2:
     //   Array("hi")                  ["h", "i"]     (Characters, i.e. CLUSTERS)
     //   Array([4, 5])                [4, 5]         (a COPY - Array is a value type)
@@ -9141,6 +9144,19 @@ KwContinue  = "continue" KwEnd ;
         var out = []
         for (var i = 0; i < a.length; i++) { out.push(swSetOf(a[i])) }
         return out
+    }
+    // `var d: [Set<Int>: V] = [[1, 2]: v]` and `d[[2, 1]] = v`: the KEY type makes
+    // an array literal key a Set, so [1, 2] and [2, 1] are one key. Twin of
+    // swIsSetKeyTy / swSetKeysInit in swift-to-llvm-ir.abnf.
+    function swIsSetKeyTy(t) {
+        var ct = swDsCollTy(t)
+        return ct.length == 2 && swIsSetTy(ct[0])
+    }
+    function swSetKeys(d) {
+        if (!isDict(d)) { return d }
+        d.keys = swSetArr(d.keys)
+        d.__idx = null
+        return d
     }
     function swSetAdd(els, v) {
         if (swSetIdx(els, v) >= 0) { return false }
@@ -9233,7 +9249,7 @@ KwContinue  = "continue" KwEnd ;
         return {__dict: true, keys: [], vals: []}
     }}
     // Character("b"): a Character IS its one-cluster String in this model.
-    hostGlobals["Character"] = {__conv: function(v) { var t = swScalarText(v); return t === null ? v : t }}
+    hostGlobals["Character"] = {__conv: function(v) { var t = swScalarText(v); return t === null ? v : t }, __tname: "Character"}
     // Optional(v): an Optional IS its value in this model.
     hostGlobals["Optional"] = {__conv: function(v) { return v }}
     hostGlobals["Int"] = swIntType(64, false)
@@ -9277,6 +9293,12 @@ KwContinue  = "continue" KwEnd ;
             if (!swWhole(a) || !swWhole(b)) { return false }
             return szEq(a, b)
         }
+        // A looked-up key (b; a is the stored one) that is a Set, Array,
+        // Dictionary, struct or enum case is a VALUE: Hashable means equal values
+        // are one key, so two distinct objects holding the same members find each
+        // other. Twins: the swLang arm of dictKeyEq in abnf/jsrt.go and
+        // rtkDictFind in lib/swift-rt.metajs.
+        if (b !== null && typeof b == "object") { return swEq(a, b) }
         return false
     }
     core.varMiss = function(name) {

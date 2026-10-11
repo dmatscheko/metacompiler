@@ -2037,6 +2037,11 @@ func (rt *jsrt) swSetMethod(set *jsArray, name string, args []interface{}, seq f
 // swObjDesc renders the object shapes the two Swift grammars build. It reports
 // false for a shape it does not know, which falls back to the generic ToString.
 func (rt *jsrt) swObjDesc(o *jsObject, depth int) (string, bool) {
+	// A builtin's type value (`Int.self`, `type(of: "x")`) is its name. Twins:
+	// swObjDesc in lib/swift-rt.metajs and swRender in swift-interpreter.abnf.
+	if n, ok := o.props["__tname"].(string); ok {
+		return n, true
+	}
 	// A user `description` (CustomStringConvertible) wins over every built-in
 	// rendering, exactly as it does in Swift. Both halves store a computed
 	// property as the method __get_<name> on the type descriptor.
@@ -2353,6 +2358,16 @@ func swScalarText(v interface{}) (string, bool) {
 		return s, ok
 	}
 	return "", false
+}
+
+// swIsValueKey: a Dictionary key that is an object or an array, i.e. one whose
+// == is not identity (a Set, Array, Dictionary, struct or enum case).
+func swIsValueKey(v interface{}) bool {
+	switch v.(type) {
+	case *jsObject, *jsArray:
+		return true
+	}
+	return false
 }
 
 func (rt *jsrt) swEqual(l, r interface{}) bool {

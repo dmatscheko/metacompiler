@@ -535,6 +535,11 @@ type jsrt struct {
 	// an object key is identity. See the goLang arm of dictKeyEq.
 	goLang bool
 
+	// swLang says the module came out of the SWIFT grammar (js_swtop is the
+	// program's top-level catch, emitted unconditionally). Its one rule is the
+	// swLang arm of dictKeyEq: a Swift value key compares by ==.
+	swLang bool
+
 	// accessorCount counts the getter/setter properties js_defprop has defined in
 	// this runtime. While it is zero - which it stays for every grammar that never
 	// emits js_defprop, and for every JS program without an accessor - getMember
@@ -1298,6 +1303,8 @@ func (rt *jsrt) attach(m *ir.Module) *machine {
 			rt.pyLang = true
 		case "js_gotop":
 			rt.goLang = true
+		case "js_swtop":
+			rt.swLang = true
 		}
 	}
 	ma.relNew, ma.relThru = jsReclaimable, jsThroughArgs
@@ -3437,6 +3444,13 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 	// is not a legal Go map key and is left on identity.
 	if rt.goLang && (goIsValueKey(a) || goIsValueKey(b)) {
 		return rt.goValueEq(a, b)
+	}
+	// SWIFT: a looked-up key that is a Set, Array, Dictionary, struct or enum case
+	// (b; a is the stored key) is Hashable by value, so it compares with Swift's ==
+	// (swEqual). Twins: core.keyEq in swift-interpreter.abnf and rtkDictFind in
+	// lib/swift-rt.metajs.
+	if rt.swLang && swIsValueKey(b) {
+		return rt.swEqual(a, b)
 	}
 	return rt.strictEq(a, b)
 }

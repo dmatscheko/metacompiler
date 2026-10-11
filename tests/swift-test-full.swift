@@ -3628,6 +3628,49 @@ func s76() {
     check("fws2", C76.n == 4 && C76.bump() == 6 && C76[2] == 20)
 }
 
+// ===== SECTION 77: a Dictionary keyed by a Set, an Array or a struct =====
+// A Hashable key compares BY VALUE: Set([1, 2]) and Set([2, 1]) are one key, and so
+// are two equal arrays or structs. The declared key type makes an array literal
+// key a Set.
+struct K77: Hashable { var x: Int; var y: Int }
+enum E77: Hashable { case a(Int), b }
+func s77() {
+    var d: [Set<Int>: String] = [Set([1]): "one"]
+    d[Set([2, 3])] = "two"
+    d[Set([3, 2])] = "TWO"
+    check("vkd1", d[Set([1])] == "one" && d.count == 2 && d[Set([3, 2])] == "TWO" && d[[2, 3]] == "TWO")
+    d[Set([1])] = nil
+    check("vkd2", d.count == 1 && d.keys.contains(Set([2, 3])))
+    var p: [K77: Int] = [K77(x: 1, y: 2): 3]
+    p[K77(x: 1, y: 2)] = 4
+    var e: [E77: Int] = [.a(1): 1, .b: 2]
+    e[.a(1)] = 5
+    var a: [[Int]: Int] = [[1, 2]: 1]
+    a[[1, 2]] = 2
+    a[[2, 1]] = 3
+    check("vkd3", p.count == 1 && p[K77(x: 1, y: 2)] == 4 && e.count == 2 && e[.a(1)] == 5
+                  && e[.a(2)] == nil && a.count == 2 && a[[1, 2]] == 2)
+    var sk: [Set<String>: Int] = [["a", "b"]: 1]
+    sk[["b", "a"]] = 2
+    sk[["c"]] = 3
+    check("vkd4", sk.count == 2 && sk[["a", "b"]] == 2 && sk[Set(["c"])] == 3)
+}
+
+// ===== SECTION 78: a builtin type as a value =====
+// `String.self`, `type(of: "x")` and a generic parameter bound from a String are
+// one type value, which prints as its name and compares equal to itself.
+func name78<T>(_ v: T) -> String { return "\(T.self)" }
+func meta78<T>(_ t: T.Type) -> String { return String(describing: t) }
+func s78() {
+    check("btv1", "\(String.self)" == "String" && "\(Bool.self)" == "Bool" && "\(Int8.self)" == "Int8"
+                  && "\(Double.self)" == "Double" && "\(Character.self)" == "Character")
+    check("btv2", name78("s") == "String" && name78(1) == "Int" && name78(true) == "Bool"
+                  && name78(2.5) == "Double" && name78([1]) == "Array<Int>" && meta78(UInt8.self) == "UInt8")
+    let t: Any.Type = String.self
+    check("btv3", type(of: "x") == String.self && type(of: 1) == Int.self && type(of: Int8(1)) != Int.self
+                  && Int.self != Int64.self && t == String.self && "\(type(of: true))" == "Bool")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -3705,6 +3748,8 @@ func main() {
     s74() // SECTION-CALL 74
     s75() // SECTION-CALL 75
     s76() // SECTION-CALL 76
+    s77() // SECTION-CALL 77
+    s78() // SECTION-CALL 78
     print("full: \(checks) checks, \(fails) failures")
 }
 

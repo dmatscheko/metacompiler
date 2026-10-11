@@ -5160,10 +5160,9 @@ KwContinue  = "continue" KwEnd ;
             missB.NewRet(callExt(missB, "js_get", [ps[0], ps[1]]))
         })
     }
-    // type(of: v): a value of a program type answers its type DESCRIPTOR (an enum
-    // case's member table leads back to it through __desc), which prints as the
-    // name and answers the type's static members; a builtin answers its name. Twin
-    // of hostGlobals["type"] in swift-interpreter.abnf.
+    // A value of a program type answers its type DESCRIPTOR (an enum case's member
+    // table leads back to it through __desc), which prints as the name and answers
+    // the type's static members; a builtin answers its name.
     function rtTypeOfVal() {
         return rtFunc("sw_typeofval", 1, function(b, ps) {
             var cls = b.NewCall(rtClassOf(), [ps[0]])
@@ -5179,10 +5178,10 @@ KwContinue  = "continue" KwEnd ;
             nameB.NewRet(callExt(nameB, "js_swtypeof", [ps[0]]))
         })
     }
-    // A generic parameter bound from a VALUE (swDsMarkTypeParams): the value's type
-    // as a type value - a program type's descriptor, a builtin's own (Int, Double,
-    // ...) when the program has one in scope, else the type's name. Twin of
-    // swTypeValue in swift-interpreter.abnf.
+    // type(of: v), and a generic parameter bound from a VALUE (swDsMarkTypeParams):
+    // the value's type as a type value - a program type's descriptor, a builtin's
+    // own (Int, String, Bool, ...), else the name of a generic builtin
+    // (Array<Int>). Twin of hostGlobals["type"] in swift-interpreter.abnf.
     function rtTypeValue() {
         return rtFunc("sw_typevalue", 2, function(b, ps) {
             var tv = b.NewCall(rtTypeOfVal(), [ps[1]])
@@ -6155,7 +6154,7 @@ KwContinue  = "continue" KwEnd ;
             var tyT = args[0].t
             return function(b) {
                 var rt3 = tyT(b)
-                return {b: rt3.b, v: rt3.b.NewCall(rtTypeOfVal(), [rt3.v])}
+                return {b: rt3.b, v: rt3.b.NewCall(rtTypeValue(), [curScopeV, rt3.v])}
             }
         }
         // Int(x) / Int8(x) / UInt64(x): the integer types are descriptors, not
@@ -6426,8 +6425,10 @@ KwContinue  = "continue" KwEnd ;
         var pathNames = []
         for (var pn = 0; pn + 1 < ref.path.length; pn++) { if (ref.path[pn].key != undefined) { pathNames.push(ref.path[pn].key) } }
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
-        // `s = [1, 2]` into a local declared `Set<Int>`.
+        // `s = [1, 2]` into a local declared `Set<Int>`, and `d[[1, 2]] = v` into
+        // one declared `[Set<Int>: V]`.
         if (ref.path.length == 0 && op == "=" && hasLocal && swIsSetTy(localAnn)) { valT = swSetInit(valT) }
+        var setKey = ref.path.length == 1 && ref.path[0].key == undefined && hasLocal && swIsSetKeyTy(localAnn)
         var optChain = false
         for (var oc = 0; oc < ref.path.length; oc++) { if (ref.path[oc].opt == true) { optChain = true } }
         return function(b) {
@@ -6528,6 +6529,7 @@ KwContinue  = "continue" KwEnd ;
                     p = emitRefPath(b, ref, precs, nilExits)
                     b = p.b
                 }
+                if (setKey) { p.key = emitSetOf(b, p.key) }
                 if (p.isField) {
                     if (op != "=" || !keepTy) {
                         var oldf = emitFieldRead(b, p.obj, p.keyName)
@@ -7062,6 +7064,7 @@ KwContinue  = "continue" KwEnd ;
         swNoteLocalAnn(name, annTxt)
         var init = swDotWant(items[k], items[k + 1], annTxt)
         if (init != undefined && swIsSetArrTy(annTxt)) { init = swSetArrInit(init) }
+        else if (init != undefined && swIsSetKeyTy(annTxt)) { init = swSetKeysInit(init) }
         // `let a: [Double] = [3, 4]`, `["a": 3]`, `(3, 4)`: the structural
         // annotation carries its numeric leaves down, so a[0] / 2 is 1.5.
         if (elemTy != "" && init != undefined) {
@@ -9034,12 +9037,17 @@ KwContinue  = "continue" KwEnd ;
     // A builtin's STATIC members (its own, and the static defaults of a protocol it
     // conforms to) live on its $ext$ table, and its type value reaches them through
     // __super, as a program type's descriptor reaches its superclass's: `Int.zz`,
-    // `Int.make()`. Int..UInt64, Double and Float already have a descriptor; any
-    // other builtin gets one here. Twin of __btab in swift-interpreter.abnf.
+    // `Int.make()`. Int..UInt64, Double, Float, String, Bool and Character already
+    // have a descriptor; any other builtin gets one here. Twin of __btab in
+    // swift-interpreter.abnf.
     var builtinDescs = {}
+    // The builtins besides the integer and float types that buildMain gives a type
+    // value; the twin is the __tname slot of hostGlobals in swift-interpreter.abnf.
+    var swPlainTypeNames = ["String", "Bool", "Character"]
     function swLinkBuiltinDesc(b, base, tV) {
         var dV
-        if (swIntWidthOf(base) != null || base == "Double" || base == "Float") {
+        if (swIntWidthOf(base) != null || base == "Double" || base == "Float" || base == "String"
+            || base == "Bool" || base == "Character") {
             dV = b.NewCall(rtKGet(), [curScopeV, emitStr(b, base)])
         } else {
             dV = callExt(b, "js_obj_new", [])
@@ -9760,6 +9768,7 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_set", [intV, emitStr(b, "min"), swEmitBound(b, it.w, it.u, false)])
             callExt(b, "js_set", [intV, emitStr(b, "bitWidth"), emitNum(b, it.w > 64 ? 64 : it.w)])
             callExt(b, "js_set", [intV, emitStr(b, "zero"), swEmitConv(b, emitNum(b, 0), it)])
+            callExt(b, "js_set", [intV, emitStr(b, "__tname"), emitStr(b, tn)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tn), intV])
         }
         // The FLOAT types, the same shape: Double.infinity / .nan / .pi / .zero,
@@ -9798,7 +9807,15 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_set", [floV, emitStr(b, stf.n),
                                       callExt(b, floExt, [emitNum(b, parseFloat(stx))])])
             }
+            callExt(b, "js_set", [floV, emitStr(b, "__tname"), emitStr(b, floTypeNames[fi])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, floTypeNames[fi]), floV])
+        }
+        // Every other builtin with a type value of its own: `String.self` and
+        // `type(of: "x")` are this one descriptor, which prints as its name.
+        for (var bi = 0; bi < swPlainTypeNames.length; bi++) {
+            var btV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [btV, emitStr(b, "__tname"), emitStr(b, swPlainTypeNames[bi])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, swPlainTypeNames[bi]), btV])
         }
         // abs/max/min are Double-aware: Math.abs would truncate a boxed operand to
         // an integer, and Math.max compares two boxes as OBJECTS.
@@ -9992,6 +10009,20 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             var r = t(b)
             return {b: r.b, v: r.b.NewCall(rtSetArr(), [r.v])}
+        }
+    }
+    // `var d: [Set<Int>: V] = [[1, 2]: v]`: the KEY type makes an array literal key
+    // a Set. Twin of swIsSetKeyTy / swSetKeys in swift-interpreter.abnf.
+    function swIsSetKeyTy(t) {
+        var ct = swDsCollTy(t)
+        return ct.length == 2 && swIsSetTy(ct[0])
+    }
+    function swSetKeysInit(t) {
+        return function(b) {
+            var r = t(b)
+            var keys = callExt(r.b, "js_get", [r.v, emitStr(r.b, "keys")])
+            callExt(r.b, "js_set", [r.v, emitStr(r.b, "keys"), r.b.NewCall(rtSetArr(), [keys])])
+            return {b: r.b, v: r.v}
         }
     }
     function rtSetArr() {
