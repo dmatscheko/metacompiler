@@ -2423,6 +2423,59 @@ func init() {
 			}
 			return w(rt.call(u(a[3]), jsUndef, append([]interface{}{u(a[0])}, args.elems...)))
 		}
+		// js_gorplan(v): the PLAN of a range loop, made once per loop, as
+		// [keys, base, off, n]: the i-th key is keys[i] (i itself when keys is
+		// null) and the i-th value base[off+i], so the emitted loop reads both with
+		// js_get alone. An int is its own bound; a slice reads its backing array in
+		// place; nil ranges zero times. A string ranges by RUNE (i the rune's BYTE
+		// offset, the value its code point) and a channel yields each received value
+		// until it is closed and drained - under the cooperative model every producer
+		// runs to completion inside the first receive, so the sequence is known here.
+		// Both, and a map, read as keys/vals. Twin of js_gorplan in lib/go-rt.metajs.
+		m["js_gorplan"] = func(a []uint64) uint64 {
+			plan := func(keys, base interface{}, off, n interface{}) uint64 {
+				return w(&jsArray{elems: []interface{}{keys, base, off, n}})
+			}
+			v := u(a[0])
+			switch x := v.(type) {
+			case jsUndefT, jsNullT:
+				return plan(jsNull, jsNull, 0.0, 0.0)
+			case float64:
+				return plan(jsNull, jsNull, 0.0, x)
+			case jsGInt:
+				return plan(jsNull, jsNull, 0.0, float64(giVal(rt, x)))
+			case *jsArray:
+				return plan(jsNull, x, 0.0, float64(len(x.elems)))
+			case string:
+				keys := &jsArray{}
+				vals := &jsArray{}
+				for i, r := range x {
+					keys.elems = append(keys.elems, float64(i))
+					vals.elems = append(vals.elems, float64(r))
+				}
+				return plan(keys, vals, 0.0, float64(len(keys.elems)))
+			}
+			if goIsSlice(v) {
+				o := v.(*jsObject)
+				return plan(jsNull, o.props["a"], o.props["o"], o.props["n"])
+			}
+			if _, _, isChan := goChanParts(v); isChan {
+				keys := &jsArray{}
+				for {
+					cv, ok := rt.goChanRecv(v)
+					if !ok {
+						break
+					}
+					keys.elems = append(keys.elems, cv)
+				}
+				return plan(keys, keys, 0.0, float64(len(keys.elems)))
+			}
+			if keys, vals, ok := dictParts(v); ok {
+				return plan(keys, vals, 0.0, float64(len(keys.elems)))
+			}
+			rt.fail("range over a %s", rt.typeOf(v))
+			return 0
+		}
 		// js_godtbind(recv, fn): the method value recv.M of a defined type, its
 		// receiver already evaluated. Twins: js_godtbind in lib/go-rt.metajs,
 		// goDtBind in go-interpreter.abnf.

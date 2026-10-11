@@ -2010,7 +2010,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
 
-    var hidCount = 0     // Names hidden range-loop counters.
     // STRUCT TYPE NAMES ARE PER PACKAGE, and the key carries the package because the
     // table is read from inside EMIT closures, long after the walk that filled it: two
     // imported packages may each declare `type Item struct{...}`. The declaration side
@@ -4081,10 +4080,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else {
                 headB.NewBr(bodyB)
             }
-            loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             // Per-iteration variables (Go 1.22): the body runs in a FRESH scope holding
             // copies of the loop variables, so a closure made inside keeps this turn's
-            // values; the copies are written back before the post statement runs.
+            // values; the copies are written back before the post statement runs - in
+            // contB, which a `continue` reaches too.
+            var contB = loopVars.length > 0 ? curF.NewBlock("") : postB
+            loopStack.push({cont: contB, brk: exitB, lbl: lbl})
             var bodyScopeV = null
             if (loopVars.length > 0) {
                 bodyScopeV = callExt(bodyB, "js_scope_new", [outerScopeV])
@@ -4094,15 +4095,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
                 curScopeV = bodyScopeV
             }
-            var endB = bodyT(bodyB)
+            bodyT(bodyB).NewBr(contB)
             if (loopVars.length > 0) {
                 for (var lw = 0; lw < loopVars.length; lw++) {
-                    callExt(endB, "js_scope_set", [outerScopeV, emitStr(endB, loopVars[lw]),
-                                                   callExt(endB, "js_scope_get", [bodyScopeV, emitStr(endB, loopVars[lw])])])
+                    callExt(contB, "js_scope_set", [outerScopeV, emitStr(contB, loopVars[lw]),
+                                                    callExt(contB, "js_scope_get", [bodyScopeV, emitStr(contB, loopVars[lw])])])
                 }
                 curScopeV = outerScopeV
+                contB.NewBr(postB)
             }
-            endB.NewBr(postB)
             loopStack.pop()
             var pb = postB
             if (post != null) pb = post(postB)
@@ -4387,9 +4388,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return exitB
         }
     }
-    // items = [{lbl}, {rv}?, {rv}?, listThunk, bodyThunk]. A hidden counter drives the
-    // loop; js_range_len/key/val make one emission cover ints (the bound is the
-    // value), slices (index and element) and maps (key and entry, insertion order).
+    // items = [{lbl}, {rv}?, {rv}?, listThunk, bodyThunk]. js_gorplan makes the loop's
+    // plan once - [keys, base, off, n], see lib/go-rt.metajs - and the counter is an SSA
+    // phi, so an iteration costs floor externs only: the i-th key is i or keys[i], the
+    // value base[off + i]. One emission covers ints, slices, arrays, strings, channels
+    // and maps.
     function makeForRange(items) {
         var bodyT = items.pop()
         // {rcopy}: the copy a struct ELEMENT makes on its way into the value variable.
@@ -4409,17 +4412,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         var iName = rnames.length > 0 ? rnames[0] : null
         var vName = rnames.length > 1 ? rnames[1] : null
+        var iDecl = !rset && iName != null && iName != "_"
+        var vDecl = !rset && vName != null && vName != "_"
         return function(b) {
-            hidCount++
-            var cName = "$c" + hidCount
-            var aName = "$a" + hidCount
             var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var r = listT(b)
             b = r.b
-            // js_gorange normalizes a STRING subject into a byte-offset / code-point
-            // pair of arrays (Go ranges a string by rune); everything else passes
-            // through, so one emitted loop still covers ints, slices and maps.
             // An ARRAY is ranged over a COPY when the value is bound; a pointer to one
             // ranges live. Twin of makeForRange in go-interpreter.abnf.
             var subj0 = r.v
@@ -4431,37 +4429,46 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = sel.b
                 subj0 = sel.v
             }
-            var subjV = callExt(b, "js_gorange", [emitHelper(b, "$sels", [subj0])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), subjV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), emitNum(b, 0)])
-            if (!rset && iName != null && iName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), hUndef])
-            if (!rset && vName != null && vName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
-            var lenV = callExt(b, "js_range_len", [subjV])
+            var dr = emitDerefV(b, subj0)
+            b = dr.b
+            var plan = callExt(b, "js_gorplan", [dr.v])
+            var keysV = callExt(b, "js_get", [plan, emitNum(b, 0)])
+            var baseV = callExt(b, "js_get", [plan, emitNum(b, 1)])
+            var offV = callExt(b, "js_get", [plan, emitNum(b, 2)])
+            var lenV = callExt(b, "js_get", [plan, emitNum(b, 3)])
+            var zeroV = emitNum(b, 0)
+            var preB = b
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            var cV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])
+            var cV = headB.NewPhi([llvm.ir.NewIncoming(zeroV, preB)])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [cV, lenV])), bodyB, exitB)
-            var cV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, cName)])
-            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            if (iName != null && iName != "_") {
-                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
-                                                callExt(bodyB, "js_range_key", [aV2, cV2])])
-            }
             var bb = bodyB
+            // Go 1.22: `:=` gives every iteration FRESH variables, so a closure made in
+            // the body keeps this turn's values - a scope per iteration, as in
+            // makeForClassic. The `=` form writes the enclosing variables.
+            if (iDecl || vDecl) { curScopeV = callExt(bb, "js_scope_new", [saved]) }
+            var setExt = rset ? "js_scope_set" : "js_scope_decl"
+            if (iName != null && iName != "_") {
+                var ks = emitSelect(bb, keysV,
+                                    function(tb) { return {b: tb, v: callExt(tb, "js_get", [keysV, cV])} },
+                                    function(eb) { return {b: eb, v: cV} })
+                bb = ks.b
+                callExt(bb, setExt, [curScopeV, emitStr(bb, iName), ks.v])
+            }
             if (vName != null && vName != "_") {
-                callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, vName),
-                                             emitStoreCopy(bb, callExt(bb, "js_range_val", [aV2, cV2]), rcopy)])
+                var ev = callExt(bb, "js_get", [baseV, callExt(bb, "js_add", [offV, cV])])
+                callExt(bb, setExt, [curScopeV, emitStr(bb, vName), emitStoreCopy(bb, ev, rcopy)])
             }
             loopStack.push({cont: postB, brk: exitB, lbl: lbl})
             bodyT(bb).NewBr(postB)
             loopStack.pop()
-            var cV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, cName), callExt(postB, "js_jadd", [cV3, emitNum(postB, 1)])])
-            postB.NewBr(headB)
             curScopeV = saved
+            var nextV = callExt(postB, "js_add", [cV, emitNum(postB, 1)])
+            cV.Incs = [llvm.ir.NewIncoming(zeroV, preB), llvm.ir.NewIncoming(nextV, postB)]
+            postB.NewBr(headB)
             return exitB
         }
     }
@@ -5642,7 +5649,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
-    core.stdlibImports = ["fmt", "os", "strings", "strconv", "math", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
+    core.stdlibImports = ["fmt", "os", "strconv", "math", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     function fail(msg) { println("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->
@@ -5655,7 +5662,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // once; repeats and cycles are no-ops.
     core.importFile = function(path, pos) {
         var file = c.findImport(path + ".go")
-        if (file == "") { return false }
+        var lib = file == "" ? goLibFile(path) : ""
+        if (file == "" && lib == "") { return false }
+        if (lib != "") { file = lib }
         if (importedFiles["$" + file] == true) { return true }
         importedFiles["$" + file] = true
         var pname = pkgBaseName(path)
@@ -5663,7 +5672,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         importPkgOfFile["$" + file] = pname
         var savedPkg = curPkgName
         curPkgName = pname
-        var text = c.readFile(file)
+        var text = lib != "" ? load(lib) : c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
         goPrescanPkg(text)

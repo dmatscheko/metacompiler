@@ -44,6 +44,7 @@ import (
 	"fmt"
 	f27 "fmt"
 	"os"
+	"strings"
 )
 
 var fails = 0
@@ -3413,6 +3414,70 @@ func s53() {
 	check("ms3", fmt.Sprint(err) == "E:x" && fmt.Sprint(ev) == "{y}" && fmt.Sprint(st) == "ptr")
 }
 
+// ===== SECTION 54: the strings package =====
+func s54() {
+	check("str1", strings.Join([]string{"a", "b", "c"}, ", ") == "a, b, c" && strings.Join(nil, "x") == "" && strings.Repeat("ab", 3) == "ababab")
+	check("str2", strings.Index("héllo", "l") == 3 && strings.LastIndex("abcabc", "bc") == 4 && strings.Index("abc", "") == 0 && strings.IndexRune("héllo", 'o') == 5)
+	check("str3", strings.Contains("seafood", "foo") && !strings.ContainsRune("abc", 'z') && strings.ContainsAny("hello", "xyz l") && strings.Count("cheese", "e") == 3 && strings.Count("five", "") == 5)
+	check("str4", strings.HasPrefix("golang", "go") && strings.HasSuffix("golang", "ng") && strings.TrimPrefix("golang", "go") == "lang" && strings.TrimSuffix("x.go", ".go") == "x")
+	check("str5", fmt.Sprint(strings.Split("a,b,,c", ",")) == "[a b  c]" && fmt.Sprint(strings.SplitN("a,b,c", ",", 2)) == "[a b,c]" && fmt.Sprintf("%q", strings.SplitAfter("a,b", ",")) == `["a," "b"]` && fmt.Sprintf("%q", strings.Split("hé", "")) == `["h" "é"]`)
+	check("str6", fmt.Sprintf("%q", strings.Fields("  x y\tz\n ")) == `["x" "y" "z"]` && strings.TrimSpace("\t a b \n") == "a b" && strings.Trim("xxhixx", "x") == "hi" && strings.TrimLeft("aab", "a") == "b" && strings.TrimRight("baa", "a") == "b")
+	check("str7", strings.ToUpper("héllo wörld ß") == "HÉLLO WÖRLD ß" && strings.ToLower("ΑΒΓ Привет İ") == "αβγ привет i" && strings.ToUpper("ĳ ź ς") == "Ĳ Ź Σ")
+	check("str8", strings.EqualFold("Go", "GO") && !strings.EqualFold("ı", "I") && strings.EqualFold("ſ", "S") && strings.Compare("a", "b") == -1)
+	check("str9", strings.Replace("oink oink oink", "k", "ky", 2) == "oinky oinky oink" && strings.ReplaceAll("abab", "a", "_") == "_b_b" && strings.Replace("ab", "", "-", -1) == "-a-b-")
+	r := strings.NewReplacer("a", "1", "b", "2", "ab", "X")
+	r2 := strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	check("str10", r.Replace("abcab") == "12c12" && r2.Replace("a<b>") == "a&lt;b&gt;")
+	b, a, ok := strings.Cut("k=v", "=")
+	check("str11", b == "k" && a == "v" && ok && strings.Map(func(r rune) rune { return r + 1 }, "abc") == "bcd")
+	var sb strings.Builder
+	sb.WriteString("hé")
+	sb.WriteByte('!')
+	sb.WriteRune('ö')
+	check("str12", sb.String() == "hé!ö" && sb.Len() == 6)
+}
+
+// ===== SECTION 55: range plans and per-iteration loop variables =====
+func nilRange55(xs []string) int {
+	n := 0
+	for i, x := range xs {
+		n += i + len(x)
+	}
+	return n
+}
+
+func s55() {
+	var nm map[string]int
+	k := 0
+	for range nm {
+		k++
+	}
+	check("rg1", nilRange55(nil) == 0 && nilRange55([]string{"ab", "c"}) == 4 && k == 0)
+	var fs []func() int
+	for i, v := range []int{4, 5, 6} {
+		fs = append(fs, func() int { return i*10 + v })
+	}
+	check("rg2", fs[0]() == 4 && fs[1]() == 15 && fs[2]() == 26)
+	n := 0
+	for i := 0; i < 10; {
+		n++
+		if i < 3 {
+			i += 3
+			continue
+		}
+		i++
+	}
+	check("rg3", n == 8)
+	var i2, v2 int
+	for i2, v2 = range []int{3, 4} {
+	}
+	sum := 0
+	for i := range 4 {
+		sum += i
+	}
+	check("rg4", i2 == 1 && v2 == 4 && sum == 6)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3467,6 +3532,8 @@ func main() {
 	s51() // SECTION-CALL 51
 	s52() // SECTION-CALL 52
 	s53() // SECTION-CALL 53
+	s54() // SECTION-CALL 54
+	s55() // SECTION-CALL 55
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

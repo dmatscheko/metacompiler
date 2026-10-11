@@ -14817,46 +14817,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.fail("len() of a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
-		// `for i, ch := range s` walks a Go string by RUNE: i is the rune's BYTE
-		// offset and ch its code point (an int32), NOT a one-character substring.
-		// Normalizing the subject into a keys/vals dict lets the single emitted
-		// range loop keep reading it through js_range_len/key/val. Anything else
-		// (int bound, slice, map) passes through unchanged.
-		"js_gorange": func(a []uint64) uint64 {
-			// Ranging a CHANNEL yields one received value per iteration and ends when
-			// the channel is closed and drained. Under the cooperative model every
-			// producer runs to completion inside the first receive, so the sequence is
-			// fully known here: drain it into the same keys/vals shape a map uses, with
-			// the received value as BOTH (the single range name is the value in Go).
-			if _, _, isChan := goChanParts(u(a[0])); isChan {
-				keys := &jsArray{}
-				vals := &jsArray{}
-				for {
-					v, ok := rt.goChanRecv(u(a[0]))
-					if !ok {
-						break
-					}
-					keys.elems = append(keys.elems, v)
-					vals.elems = append(vals.elems, v)
-				}
-				return w(&jsObject{props: map[string]interface{}{
-					"__dict": true, "keys": keys, "vals": vals,
-				}})
-			}
-			s, isStr := u(a[0]).(string)
-			if !isStr {
-				return a[0]
-			}
-			keys := &jsArray{}
-			vals := &jsArray{}
-			for i, r := range s {
-				keys.elems = append(keys.elems, float64(i))
-				vals.elems = append(vals.elems, float64(r))
-			}
-			return w(&jsObject{props: map[string]interface{}{
-				"__dict": true, "keys": keys, "vals": vals,
-			}})
-		},
 		// The variadic Go builtins, taking the callee's whole argument array: append
 		// starts a new slice from a nil one (append(m[k], v) where m[k] is missing),
 		// and min/max/clear are the Go 1.21 builtins.

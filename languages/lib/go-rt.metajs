@@ -1396,30 +1396,22 @@ function goDecodeUtf8(bs) {
 // js_gospread is the C FLOOR's (lib/runtime.c, next to js_bytelen); a copy here as
 // well would be a duplicate-symbol link error.
 
-// The Go range bound: an int is its own bound, otherwise the element/entry count.
-function js_range_len(v) {
-    if (typeof v == "number") { return goNum(v) }
-    if (typeof v == "string") { return v.length }
-    if (Array.isArray(v)) { return v.length }
-    if (goIsDict(v)) { return v.keys.length }
+// The PLAN of a range loop, made once per loop: [keys, base, off, n]. The i-th key
+// is keys[i] (i itself when keys is null) and the i-th value base[off + i], so the
+// emitted loop reads both with the floor's js_get alone. An int is its own bound; a
+// slice reads its backing array in place; a string, a channel and a map read the
+// dict goRangeDict makes of them; nil ranges zero times. Twin of js_gorplan in
+// abnf/jsrtgolang.go.
+function js_gorplan(v) {
+    if (v === undefined || v === null) { return [null, null, 0, 0] }
+    if (typeof v == "number") { return [null, null, 0, goNum(v)] }
+    if (Array.isArray(v)) { return [null, v, 0, v.length] }
+    var c = goClassOf(v)
+    if (c !== undefined && goStrOf(c.__name) == "$sl") { return [null, v.a, v.o, v.n] }
+    var d = goRangeDict(v)
+    if (goIsDict(d)) { return [d.keys, d.vals, 0, d.keys.length] }
     fail("range over a " + typeof v)
-    return 0
-}
-
-// The i-th range key: maps yield their key, everything else the index itself.
-function js_range_key(v, i) {
-    if (goIsDict(v)) { return v.keys[goIdx(i)] }
-    return i
-}
-
-// The i-th range value (maps by entry, lists by index).
-function js_range_val(v, i) {
-    if (goIsDict(v)) { return v.vals[goIdx(i)] }
-    if (Array.isArray(v)) {
-        var k = goIdx(i)
-        if (k >= 0 && k < v.length) { return v[k] }
-    }
-    return undefined
+    return [null, null, 0, 0]
 }
 
 // ===================================================== Go's own externs =====
@@ -1766,15 +1758,14 @@ function js_golen(v) {
 
 // `for i, ch := range s` walks a Go string by RUNE: i is the rune's BYTE offset
 // and ch its code point (an int32), NOT a one-character substring. Normalizing
-// the subject into a keys/vals dict lets the single emitted range loop keep
-// reading it through js_range_len/key/val.
+// the subject into a keys/vals dict lets js_gorplan read it like a map.
 //
 // Ranging a CHANNEL yields one received value per iteration and ends when the
 // channel is closed and drained. Under the cooperative model every producer runs
 // to completion inside the first receive, so the sequence is fully known here:
 // drain it into the same keys/vals shape a map uses, with the received value as
 // BOTH (the single range name is the value in Go).
-function js_gorange(v) {
+function goRangeDict(v) {
     if (goIsChan(v)) {
         var ck = []
         var cv = []
