@@ -1055,7 +1055,7 @@ s26() {
   check ansi4 "${q3@E}" "\$'${e3}'"
   e4=$'\t9'; check ansi5 "${e4@Q}" "\$'\\t9'"
 
-  # -- ${v^^} / ${v,,} walk CODEPOINTS and map the Latin-1 supplement.
+  # -- ${v^^} / ${v,,} walk CODEPOINTS and map each with the simple Unicode mapping.
   u1="aéb"
   check case1 "${u1^^}" "AÉB"
   check case2 "${u1,,}" "aéb"
@@ -1071,6 +1071,18 @@ s26() {
   check case7 "${u4^}" "日a"
   check case8 "${u4^^}" "日A"
   check case9 "${#u4}" 2
+  # towlower / towupper per character: capital sigma lowers to sigma, dotted I to a
+  # plain i, final sigma raises to capital sigma, and the sharp s stays
+  u5="ÉΣİaß"
+  check case10 "${u5,,}" "éσiaß"
+  check case11 "${u5@L}" "éσiaß"
+  check case12 "${u5,,[Σ]}" "Éσİaß"
+  u6="éσiaßς"
+  check case13 "${u6^^}" "ÉΣIAßΣ"
+  check case14 "${u6@U}" "ÉΣIAßΣ"
+  # @u raises the first CHARACTER, an astral one included
+  u7="𐐨𐐨"
+  check case15 "${u7@u}" "𐐀𐐨"
 
   # -- bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS, with a
   #    trailing odd word taking an empty value - not the indexed path's next

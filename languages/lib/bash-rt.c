@@ -1055,26 +1055,34 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
     return out;
 }
 
+#include "case-simple.h"
+
 /* rt_case: ${v^} / ${v^^} / ${v,} / ${v,,}; mode 0 = ^, 1 = ^^, 2 = ",", 3 = ",,".
  *
- * It walks CODEPOINTS, not bytes, and maps the Latin-1 supplement as bash
- * 5.3.15 does (${v^^} on an e-acute gives an E-acute). Latin-1 is
- * 0xC3 followed by 0x80..0xBE in UTF-8, upper and lower 0x20 apart, with the
- * multiplication and division signs (0x97 / 0xB7) not letters. Codepoints
- * outside ASCII and Latin-1 are copied through. */
+ * It walks CODEPOINTS, not bytes, and maps each one as towupper / towlower do: the
+ * Unicode SIMPLE mapping (case-simple.h), one character for one, so "ß" stays and
+ * "İ" lowers to "i". A mapped character can be one byte longer in UTF-8
+ * (U+0250 -> U+2C6F), hence the doubled buffer. */
 char *rt_case(char *s, int mode, char *pat) {
     int len = rt_strlen(s);
-    char *dst = rt_bump(len + 1);
+    char *dst = rt_bump(len + len + 1);
     int up = mode < 2;
     int all = (mode == 1) || (mode == 3);
     int i = 0;
+    int o = 0;
     int first = 1;
     int nopat = pat[0] == 0;
     char one[8];
     while (i < len) {
         int c0 = (int)(unsigned char)s[i];
         int touch = all || (first != 0);
-        int n;
+        int w = 1;
+        int t = 0;
+        long cp = c0;
+        if (c0 >= 240) { w = 4; cp = c0 & 7; }
+        else if (c0 >= 224) { w = 3; cp = c0 & 15; }
+        else if (c0 >= 192) { w = 2; cp = c0 & 31; }
+        if (i + w > len) { w = len - i; touch = 0; }
         /* THE PATTERN OPERAND. ${v^^[bn]} converts only the characters the glob
          * matches (bash 5.3: banana -> BaNaNa). The pattern is matched against
          * ONE character at a time, so the subject is the current
@@ -1082,56 +1090,45 @@ char *rt_case(char *s, int mode, char *pat) {
          * would allocate one temporary per character. An ABSENT pattern is ""
          * and means "every character"; rt_glob("", "a") is false, so the empty
          * case is tested for rather than handed to the matcher. */
-        if (touch != 0 && nopat == 0) {
-            int cw = 1;
-            int ct = 0;
-            if (c0 >= 240) { cw = 4; }
-            else if (c0 >= 224) { cw = 3; }
-            else if (c0 >= 192) { cw = 2; }
-            if (i + cw > len) { cw = len - i; }
-            while (ct < cw) {
-                one[ct] = s[i + ct];
-                ct = ct + 1;
-            }
-            one[cw] = 0;
-            touch = rt_glob(pat, one) != 0;
+        while (t < w) {
+            one[t] = s[i + t];
+            if (t > 0) { cp = (cp << 6) | ((int)(unsigned char)s[i + t] & 63); }
+            t = t + 1;
         }
-        if (c0 < 128) {
-            int isLow = (c0 >= 97) && (c0 <= 122);
-            int isUp = (c0 >= 65) && (c0 <= 90);
-            int raised = isLow ? c0 - 32 : c0;
-            int lowered = isUp ? c0 + 32 : c0;
-            int mapped = up ? raised : lowered;
-            dst[i] = (char)(touch ? mapped : c0);
-            n = 1;
-        } else if (c0 == 195 && i + 1 < len) {
-            int c1 = (int)(unsigned char)s[i + 1];
-            int isU = (c1 >= 128) && (c1 <= 158) && (c1 != 151);
-            int isL = (c1 >= 160) && (c1 <= 190) && (c1 != 183);
-            int m1 = c1;
-            if (up != 0 && isL != 0) { m1 = c1 - 32; }
-            if (up == 0 && isU != 0) { m1 = c1 + 32; }
-            dst[i] = (char)c0;
-            dst[i + 1] = (char)(touch ? m1 : c1);
-            n = 2;
-        } else {
-            /* any other codepoint: copy its bytes through unchanged */
-            int w = 1;
-            if (c0 >= 240) { w = 4; }
-            else if (c0 >= 224) { w = 3; }
-            else if (c0 >= 192) { w = 2; }
-            if (i + w > len) { w = len - i; }
-            int t = 0;
+        one[w] = 0;
+        if (touch != 0 && nopat == 0) { touch = rt_glob(pat, one) != 0; }
+        if (touch != 0 && (c0 < 128 || c0 >= 192)) { cp = case_map(cp, up); }
+        else { cp = -1; }
+        if (cp < 0) {
+            t = 0;
             while (t < w) {
-                dst[i + t] = s[i + t];
+                dst[o + t] = one[t];
                 t = t + 1;
             }
-            n = w;
+            o = o + w;
+        } else if (cp < 128) {
+            dst[o] = (char)cp;
+            o = o + 1;
+        } else if (cp < 2048) {
+            dst[o] = (char)(192 | (cp >> 6));
+            dst[o + 1] = (char)(128 | (cp & 63));
+            o = o + 2;
+        } else if (cp < 65536) {
+            dst[o] = (char)(224 | (cp >> 12));
+            dst[o + 1] = (char)(128 | ((cp >> 6) & 63));
+            dst[o + 2] = (char)(128 | (cp & 63));
+            o = o + 3;
+        } else {
+            dst[o] = (char)(240 | (cp >> 18));
+            dst[o + 1] = (char)(128 | ((cp >> 12) & 63));
+            dst[o + 2] = (char)(128 | ((cp >> 6) & 63));
+            dst[o + 3] = (char)(128 | (cp & 63));
+            o = o + 4;
         }
-        i = i + n;
+        i = i + w;
         first = 0;
     }
-    dst[len] = 0;
+    dst[o] = 0;
     return dst;
 }
 

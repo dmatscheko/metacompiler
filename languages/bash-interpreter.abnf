@@ -1262,17 +1262,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (i < v.length) {
             var ch = chunkAt(v, i)
             i = i + ch.length
-            // ASCII plus the Latin-1 supplement (U+00C0..U+00DE / U+00E0..U+00FE, minus
-            // the two multiplication/division signs, which are not letters). bash 5.3.15
-            // maps those: ${v^^} on "aeb" with an e-acute is "AEB" with an E-acute.
+            // towupper / towlower per character: the SIMPLE mapping, as for @U / @L.
             var touch = (all || first) && (nopat || globMatch(pat, ch))
-            if (touch && ch.length == 1) {
-                var cc = ch.charCodeAt(0)
-                var isL1u = cc >= 192 && cc <= 222 && cc != 215
-                var isL1l = cc >= 224 && cc <= 254 && cc != 247
-                if (up) { if ((cc >= 97 && cc <= 122) || isL1l) { ch = String.fromCharCode(cc - 32) } }
-                else { if ((cc >= 65 && cc <= 90) || isL1u) { ch = String.fromCharCode(cc + 32) } }
-            }
+            if (touch) { ch = unicodeCase(ch, up ? 1 : 0) }
             first = false
             out = out + ch
         }
@@ -1610,7 +1602,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // modes 1 and 0) - "ß" stays.
         if (xfOp == "U") { return unicodeCase(v, 1) }
         if (xfOp == "L") { return unicodeCase(v, 0) }
-        if (xfOp == "u") { if (v.length == 0) { return v } return unicodeCase(v.charAt(0), 1) + v.slice(1) }
+        if (xfOp == "u") { return caseMap(v, "^", "") }
         if (xfOp == "E") { return ansiC(v) }
         if (xfOp == "P") { return promptExpand(v) }
         if (xfOp == "a") { return varAttrs(nm) }
