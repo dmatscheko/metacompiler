@@ -401,6 +401,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 				o.props[k] = src.props[k]
 			}
 		}
+		o.props["__strtag"] = "Math"
 		o.props["pow"] = jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsPowD(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
 		})

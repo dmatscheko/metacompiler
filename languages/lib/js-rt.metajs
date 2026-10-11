@@ -446,12 +446,7 @@ function jvStr(v) {
             if (typeof r == "string") { return r }
             return jvStr(r)
         }
-        // A promise carries hidden slots only, so the generic arm would spell it
-        // "[object Object]" where node says "[object Promise]" (Promise.prototype
-        // has a @@toStringTag). Same arm in abnf/jsrtjsprint.go's jsvString and in
-        // the interpreter halves' jsStr.
-        if (jpIs(v)) { return "[object Promise]" }
-        return "[object Object]"
+        return jvProtoTag(v)
     }
     if (Array.isArray(v)) {
         var out = ""
@@ -717,11 +712,8 @@ function jvFnHasOwnShim(f, enumerable) {
     return function (k) {
         // `name` and `length` are the one pair of own properties for which
         // propertyIsEnumerable says FALSE, which is what the flag is for.
-        var kk = jvStr(k)
-        if (enumerable) {
-            if (kk === "name" || kk === "length") { return false }
-        }
-        return jvFnOwn(f, kk)
+        if (enumerable) { return jvPropEnum(f, k) }
+        return jvFnOwn(f, jvStr(k))
     }
 }
 // Whether kk is an own property of a function: `name` and `length` are own properties
@@ -729,6 +721,9 @@ function jvFnHasOwnShim(f, enumerable) {
 // abnf/jsrtjsprint.go.
 function jvFnOwn(f, kk) {
     if (kk === "name" || kk === "length") { return true }
+    if (jvArrayFn !== undefined && f === jvArrayFn) {
+        if (jvInNames(jvArrayOwnNames, kk)) { return true }
+    }
     if (jvFnPropsN == 0) { return false }
     var fp = anytype
     fp = jvFnPropsFind(f)
@@ -746,6 +741,9 @@ function jvHasOwn(self, k) {
         return jvIndexIn(kk, self.length)
     }
     if (!jvIsObj(self)) { return false }
+    if (jvIsObjectGlobal(self)) {
+        if (jvInNames(jvObjectOwnNames, kk)) { return true }
+    }
     var eo = anytype
     eo = jvErrOwn(self, kk)
     if (eo !== jvMiss) { return eo }
@@ -1366,6 +1364,14 @@ function jvValueMiss(o, key) {
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
             if (fn !== undefined) { return jvMethodValue(fn, key) }
+            // Object.prototype's four methods.
+            if (jvIsProtoName(key)) {
+                if (!jvIsClassDesc(o)) {
+                    if (!jbIsBig(o)) {
+                        if (!jxIsRe(o)) { return jvProtoShim(o, key) }
+                    }
+                }
+            }
             return undefined
         }
     }
@@ -1950,6 +1956,7 @@ function js_jsobject() {
     proto["toString"] = function () { return jvProtoTag(js_this()) }
     proto["valueOf"] = function () { return js_this() }
     proto["hasOwnProperty"] = function (k) { return jvHasOwn(js_this(), k) }
+    proto["propertyIsEnumerable"] = function (k) { return jvPropEnum(js_this(), k) }
     o["prototype"] = proto
     return o
 }
@@ -1963,8 +1970,72 @@ function jvProtoTag(v) {
     if (typeof v == "string") { return "[object String]" }
     if (typeof v == "boolean") { return "[object Boolean]" }
     if (jvIsCallable(v)) { return "[object Function]" }
+    // The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
+    // promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
+    if (jvIsObj(v)) {
+        if (v["__errh"] === true) { return "[object Error]" }
+        var tag = anytype
+        tag = v["__strtag"]
+        if (tag !== undefined) { return "[object " + tag + "]" }
+        if (jpIs(v)) { return "[object Promise]" }
+    }
     return "[object Object]"
 }
+
+// Object.prototype's four methods, applied to a receiver. No value here has the
+// prototype chain they are inherited through, so a call or a value read that finds
+// no member of one of these names lands here. Twins: jsvProtoApply in
+// abnf/jsrtjsprint.go, jsProtoApply in both *-interpreter.abnf.
+function jvIsProtoName(k) {
+    if (k == "toString") { return true }
+    if (k == "valueOf") { return true }
+    if (k == "hasOwnProperty") { return true }
+    return k == "propertyIsEnumerable"
+}
+function jvProtoApply(recv, name, args) {
+    if (name == "hasOwnProperty") { return jvHasOwn(recv, jvArg(args, 0)) }
+    if (name == "propertyIsEnumerable") { return jvPropEnum(recv, jvArg(args, 0)) }
+    if (name == "toString") { return jvProtoTag(recv) }
+    return recv
+}
+// One of the four READ AS A VALUE off a plain object or an instance. An explicit
+// receiver wins over the read-time one, so `({}).toString.call([1])` is
+// "[object Array]" as in node.
+function jvProtoShim(o, name) {
+    return function () {
+        var recv = anytype
+        recv = js_this()
+        if (recv === undefined) { recv = o }
+        var a = []
+        var i = 0
+        while (i < arguments.length) {
+            a.push(arguments[i])
+            i = i + 1
+        }
+        return jvProtoApply(recv, name, a)
+    }
+}
+// propertyIsEnumerable: an own ENUMERABLE key, which is exactly Object.keys - an
+// array's `length`, an Error's `message` and a function's `name` are own and not
+// enumerable.
+function jvPropEnum(self, k) { return jvInNames(jvOwnKeys(self), jvStr(k)) }
+function jvInNames(names, k) {
+    var i = 0
+    while (i < names.length) {
+        if (names[i] === k) { return true }
+        i = i + 1
+    }
+    return false
+}
+// The own property names of the Object and Array globals, in node's order. None of
+// them is enumerable. Twins: jsvObjectOwnNames / jsvArrayOwnNames in
+// abnf/jsrtjsprint.go.
+var jvObjectOwnNames = ["length", "name", "prototype", "assign", "getOwnPropertyDescriptor",
+    "getOwnPropertyDescriptors", "getOwnPropertyNames", "getOwnPropertySymbols", "hasOwn", "is",
+    "preventExtensions", "seal", "create", "defineProperties", "defineProperty", "freeze",
+    "getPrototypeOf", "setPrototypeOf", "isExtensible", "isFrozen", "isSealed", "keys", "entries",
+    "fromEntries", "values", "groupBy"]
+var jvArrayOwnNames = ["length", "name", "prototype", "isArray", "from", "fromAsync", "of"]
 
 // The `String` global. The runtime root binds an OBJECT (it carries fromCharCode);
 // this is a real function, and String.fromCharCode is answered by js_jsmcall.
@@ -2978,9 +3049,18 @@ function jvObjectGlobalMethod(name, args) {
         // enumerable half, and so does for-in, which preserves node's empty
         // `for (k in f)`. Twins: jsvGopnKeys in abnf/jsrtjsprint.go and jsGopnKeys in
         // both *-interpreter.abnf.
+        if (name == "getOwnPropertyNames" && jvIsObjectGlobal(src)) { return jvObjectOwnNames.slice(0) }
         if (name == "getOwnPropertyNames" && jvIsCallable(src)) {
-            out.push("length")
-            out.push("name")
+            if (jvArrayFn !== undefined && src === jvArrayFn) {
+                var an = 0
+                while (an < jvArrayOwnNames.length) {
+                    out.push(jvArrayOwnNames[an])
+                    an = an + 1
+                }
+            } else {
+                out.push("length")
+                out.push("name")
+            }
         }
         // An Error instance's own non-enumerable `stack` and `message` come first, as
         // in node (jvErrOwn).
@@ -3076,10 +3156,10 @@ function jvFallbackCall(recv, name, args) {
                 var av = jvAccGet(acc, recv)
                 if (jvIsCallable(av)) { return jvCallT(av, recv, args) }
             }
-            // There is no Object.prototype to inherit hasOwnProperty from. Twin of
-            // the js_jsmcall arm in abnf/jsrtjsprint.go.
-            if (name == "hasOwnProperty") {
-                if (recv[name] === undefined) { return jvHasOwn(recv, jvArg(args, 0)) }
+            // Object.prototype's four methods (jvProtoApply). Twin of the js_jsmcall
+            // arm in abnf/jsrtjsprint.go.
+            if (jvIsProtoName(name)) {
+                if (recv[name] === undefined) { return jvProtoApply(recv, name, args) }
             }
             // Nothing on the __class chain: the call site turns the sentinel into
             // node's "<callee> is not a function" TypeError.
@@ -3089,9 +3169,9 @@ function jvFallbackCall(recv, name, args) {
     }
     var own = js_jsmget(recv, name)
     if (jvIsCallable(own)) { return jvCallT(own, recv, args) }
-    if (name == "hasOwnProperty") {
+    if (jvIsProtoName(name)) {
         if (own === undefined) {
-            if (!jvUndefOrNull(recv)) { return jvHasOwn(recv, jvArg(args, 0)) }
+            if (!jvUndefOrNull(recv)) { return jvProtoApply(recv, name, args) }
         }
     }
     if (jvMissCallSet) { return jvMissCall }
@@ -4160,6 +4240,7 @@ function js_jsmath(src) {
         h[ks[i]] = true
     }
     o["pow"] = function (x, y) { return jvPow(x - 0, y - 0) }
+    o["__strtag"] = "Math"
     h["pow"] = true
     jvMathObj = o
     jvMathHid = h
@@ -4178,6 +4259,7 @@ function js_jsjson() {
     var o = {}
     o["stringify"] = function (v, r, s) { return jsonStringify(v, r, s) }
     o["parse"] = function (t, r) { return jsonParse(t, r) }
+    o["__strtag"] = "JSON" // Object.prototype.toString's tag; see jvProtoTag.
     return o
 }
 function jsonHKeys(o) { return js_jskeys(o) }

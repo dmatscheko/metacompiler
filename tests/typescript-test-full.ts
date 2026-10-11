@@ -3176,6 +3176,34 @@ function s55() {
     check("del01", r.join() === "true,true,true,true" && JSON.stringify(o) === '{"c":{"e":5}}' && Object.keys(m).join() === "abs");
 }
 
+// ===== SECTION 56: Object.prototype's methods on every object =====
+// Every object inherits toString, valueOf, hasOwnProperty and propertyIsEnumerable,
+// called or read as a value; Math and JSON have a @@toStringTag, and the Object and
+// Array globals have their own non-enumerable names. Values read off node 24.
+class S56C { q: number = 1; }
+function s56() {
+    const o: any = {a: 1};
+    const p: any = new S56C();
+    const vals: any[] = [o, p, new Error("e"), Math, JSON];
+    const tags: string[] = [];
+    let types = "";
+    let want = "";
+    for (const v of vals) {
+        tags.push(v.toString());
+        types = types + typeof v.toString + typeof v.valueOf + typeof v.hasOwnProperty + typeof v.propertyIsEnumerable;
+        want = want + "functionfunctionfunctionfunction";
+    }
+    check("opm01", tags.join() === "[object Object],[object Object],Error: e,[object Math],[object JSON]" && types === want);
+    check("opm02", o.valueOf() === o && p.valueOf() === p && (Math as any).valueOf() === Math);
+    check("opm03", o.propertyIsEnumerable("a") && !o.propertyIsEnumerable("b") && p.propertyIsEnumerable("q")
+        && !new Error("x").propertyIsEnumerable("message") && ![1].propertyIsEnumerable("length"));
+    check("opm04", String(Math) === "[object Math]" && `${JSON}` === "[object JSON]"
+        && Object.prototype.toString.call(new Error("x")) === "[object Error]");
+    const ts = o.toString;
+    check("opm05", ts.call([1]) === "[object Array]" && Object.hasOwnProperty("keys") && Array.hasOwnProperty("isArray")
+        && Object.getOwnPropertyNames(Array).join() === "length,name,prototype,isArray,from,fromAsync,of");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3234,6 +3262,7 @@ function main(): number {
     s53(); // SECTION-CALL 53
     s54(); // SECTION-CALL 54
     s55(); // SECTION-CALL 55
+    s56(); // SECTION-CALL 56
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

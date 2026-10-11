@@ -2250,9 +2250,7 @@ NotFuncHead = :script(~~
         if (typeof v == "object") {
             var r = jsCallMethod(v, "toString")
             if (r != null) { return "" + r.v }
-            // See the twin of this comment in js-interpreter.abnf.
-            if (jpIs(v)) { return "[object Promise]" }
-            return "[object Object]"
+            return jsProtoTag(v)
         }
         return "" + v
     }
@@ -2513,13 +2511,55 @@ NotFuncHead = :script(~~
         if (typeof v == "string") { return "[object String]" }
         if (typeof v == "boolean") { return "[object Boolean]" }
         if (typeof v == "function") { return "[object Function]" }
+        // See the twin of this comment in js-interpreter.abnf.
+        if (typeof v == "object") {
+            if (hasOwn(v, "__errh")) { return "[object Error]" }
+            if (hasOwn(v, "__strtag")) { return "[object " + v.__strtag + "]" }
+            if (jpIs(v)) { return "[object Promise]" }
+        }
         return "[object Object]"
     }
     var jsObjectProto = {
         "toString": function() { return jsProtoTag(jsThisArg()) },
         "valueOf": function() { return jsThisArg() },
-        "hasOwnProperty": function(k) { return jsHasOwn(jsThisArg(), k) }
+        "hasOwnProperty": function(k) { return jsHasOwn(jsThisArg(), k) },
+        "propertyIsEnumerable": function(k) { return jsPropEnum(jsThisArg(), k) }
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsIsProtoName(k) {
+        return k === "toString" || k === "valueOf" || k === "hasOwnProperty" || k === "propertyIsEnumerable"
+    }
+    function jsProtoApply(recv, name, args) {
+        var k = anytype // The queried key may be any value.
+        k = (args.length > 0) ? args[0] : undefined
+        if (name == "hasOwnProperty") { return jsHasOwn(recv, k) }
+        if (name == "propertyIsEnumerable") { return jsPropEnum(recv, k) }
+        if (name == "toString") { return jsProtoTag(recv) }
+        return recv
+    }
+    function jsProtoCall(target, name, args) {
+        if (!jsIsProtoName(name) || target == undefined || target == null) { return null }
+        if (getMemberRaw(target, name) !== undefined) { return null }
+        return {v: jsProtoApply(target, name, args)}
+    }
+    function jsProtoShim(o, name) {
+        return function() {
+            var recv = anytype
+            recv = pendingThis
+            pendingThis = undefined
+            if (recv === undefined) { recv = o }
+            var a = []
+            for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+            return jsProtoApply(recv, name, a)
+        }
+    }
+    function jsPropEnum(self, k) { return jsOwnKeys(self).indexOf("" + k) >= 0 }
+    var jsObjectOwnNames = ["length", "name", "prototype", "assign", "getOwnPropertyDescriptor",
+        "getOwnPropertyDescriptors", "getOwnPropertyNames", "getOwnPropertySymbols", "hasOwn", "is",
+        "preventExtensions", "seal", "create", "defineProperties", "defineProperty", "freeze",
+        "getPrototypeOf", "setPrototypeOf", "isExtensible", "isFrozen", "isSealed", "keys", "entries",
+        "fromEntries", "values", "groupBy"]
+    var jsArrayOwnNames = ["length", "name", "prototype", "isArray", "from", "fromAsync", "of"]
     // See the twin of this comment in js-interpreter.abnf.
     function jsHasOwn(self, k) {
         var kk = "" + k
@@ -2530,6 +2570,7 @@ NotFuncHead = :script(~~
             return ("" + n) === kk && n >= 0 && n < self.length && Math.floor(n) === n
         }
         if (self == undefined || self == null || typeof self != "object") { return false }
+        if (self === jsObjectGlobal) { return jsObjectOwnNames.indexOf(kk) >= 0 || (!isInternalKey(kk) && hasOwn(self, kk)) }
         var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
         eo = jsErrOwn(self, kk)
         if (eo !== undefined) { return eo }
@@ -2547,8 +2588,10 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsGopnKeys(v) {
+        if (v === jsObjectGlobal) { return jsObjectOwnNames.slice() }
         if (typeof v != "function") { return jsErrGopn(v, jsOwnKeys(v)) }
         var out = ["length", "name"]
+        if (v === jsArrayFn) { out = jsArrayOwnNames.slice() }
         var ks = jsOwnKeys(v)
         for (var i = 0; i < ks.length; i++) { out.push(ks[i]) }
         return out
@@ -3377,6 +3420,7 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     var jsMathObj = {}
     jsMathObj["__keys"] = []
+    jsMathObj["__strtag"] = "Math"
     var jsMathNames = ["abs", "acos", "acosh", "asin", "asinh", "atan", "atanh", "atan2", "cbrt",
         "ceil", "clz32", "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot", "imul", "log",
         "log1p", "log10", "log2", "max", "min", "random", "round", "sign", "sin", "sinh", "sqrt",
@@ -3389,7 +3433,8 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     var jsJsonObj = {
         "stringify": function(v, r, s) { return jsonStringify(v, r, s) },
-        "parse": function(t, r) { return jsonParse(t, r) }
+        "parse": function(t, r) { return jsonParse(t, r) },
+        "__strtag": "JSON"
     }
     function jsonHKeys(o) { return jsOwnKeys(o) }
     function jsonHGet(o, k) { return getMember(o, k) }
@@ -3768,6 +3813,7 @@ NotFuncHead = :script(~~
             var cm = anytype // The method closure, or absent.
             cm = findClassMethod(o, k)
             if (cm != undefined) { return methodValueShim(cm, "" + k) }
+            if (jsIsProtoName(k) && !isClassDesc(o) && !isBigInt(o) && !rxIsRegexObj(o)) { return jsProtoShim(o, k) }
         }
         return v
     }
@@ -3962,13 +4008,14 @@ NotFuncHead = :script(~~
             var k = anytype // The queried key may be any value; it is compared as text.
             k = (arguments.length > 0) ? arguments[0] : undefined
             // See the twin of this comment in js-interpreter.abnf.
-            if (enumerable && (k === "name" || k === "length")) { return false }
+            if (enumerable) { return jsPropEnum(fn, k) }
             return fnOwn(fn, "" + k)
         }
     }
     // See the twin of this comment in js-interpreter.abnf.
     function fnOwn(fn, kk) {
         if (kk === "name" || kk === "length") { return true }
+        if (fn === jsArrayFn && jsArrayOwnNames.indexOf(kk) >= 0) { return true }
         if (fnPropsN == 0) { return false }
         var fp = anytype
         fp = fnPropsFind(fn)
@@ -6293,18 +6340,20 @@ NotFuncHead = :script(~~
         if (target != undefined && target != null && target.__class != undefined) {
             var m = undefined
             for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
-            if (m == undefined && jsHasOwnCall(target, name)) { return jsHasOwn(target, args[0]) }
+            if (m == undefined) {
+                var pc = anytype // {v} or null.
+                pc = jsProtoCall(target, name, args)
+                if (pc != null) { return pc.v }
+            }
             // A missing (or non-callable) instance method is node's ordinary
             // "not a function" TypeError, and CATCHABLE.
             if (typeof m != "function") { biRaise("TypeError: " + site + " is not a function") }
             return m.apply(undefined, concat2impl([target], args))
         }
-        if (jsHasOwnCall(target, name)) { return jsHasOwn(target, args[0]) }
+        var pc2 = anytype // {v} or null.
+        pc2 = jsProtoCall(target, name, args)
+        if (pc2 != null) { return pc2.v }
         biRaise("TypeError: " + site + " is not a function")
-    }
-    // See the twin of this comment in js-interpreter.abnf.
-    function jsHasOwnCall(target, name) {
-        return name == "hasOwnProperty" && target != undefined && target != null && getMemberRaw(target, name) === undefined
     }
 
     // ----- Class members -----

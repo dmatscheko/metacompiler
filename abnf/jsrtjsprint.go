@@ -158,7 +158,88 @@ func jsvProtoTag(v interface{}) string {
 	if isCallable(v) {
 		return "[object Function]"
 	}
+	// The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
+	// promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
+	if o, ok := v.(*jsObject); ok {
+		if _, has := o.props["__errh"]; has {
+			return "[object Error]"
+		}
+		if t, has := o.props["__strtag"].(string); has {
+			return "[object " + t + "]"
+		}
+		if promIs(o) {
+			return "[object Promise]"
+		}
+	}
 	return "[object Object]"
+}
+
+// jsvIsProtoName names Object.prototype's four methods. No value here has the
+// prototype chain they are inherited through, so a call or a value read that finds no
+// member of one of these names is answered by jsvProtoApply. Twins: jsProtoApply in
+// both *-interpreter.abnf, jvProtoApply in languages/lib/js-rt.metajs.
+func jsvIsProtoName(name string) bool {
+	switch name {
+	case "toString", "valueOf", "hasOwnProperty", "propertyIsEnumerable":
+		return true
+	}
+	return false
+}
+
+func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{}) interface{} {
+	switch name {
+	case "hasOwnProperty":
+		return rt.jsvHasOwn(recv, rt.toString(argAt(args, 0)))
+	case "propertyIsEnumerable":
+		return jsvPropEnum(recv, rt.toString(argAt(args, 0)))
+	case "toString":
+		return jsvProtoTag(recv)
+	}
+	return recv
+}
+
+// jsvProtoShim is one of the four READ AS A VALUE off a plain object or an instance.
+// An explicit receiver wins over the read-time one, so `({}).toString.call([1])` is
+// "[object Array]" as in node.
+func jsvProtoShim(o *jsObject, name string) *hostFunc {
+	return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		var recv interface{} = o
+		if t := rt.unwrap(this); t != jsUndef {
+			recv = t
+		}
+		return rt.jsvProtoApply(recv, name, args)
+	})
+}
+
+// jsvPropEnum is propertyIsEnumerable: an own ENUMERABLE key, which is exactly
+// Object.keys - an array's `length`, an Error's `message` and a function's `name` are
+// own and not enumerable.
+func jsvPropEnum(v interface{}, k string) bool {
+	for _, x := range jsvOwnKeys(v) {
+		if x == k {
+			return true
+		}
+	}
+	return false
+}
+
+// The own property names of the Object and Array globals, in node's order. None of
+// them is enumerable. Twins: jsObjectOwnNames / jsArrayOwnNames in both
+// *-interpreter.abnf and in languages/lib/js-rt.metajs.
+var jsvObjectOwnNames = []string{"length", "name", "prototype", "assign", "getOwnPropertyDescriptor",
+	"getOwnPropertyDescriptors", "getOwnPropertyNames", "getOwnPropertySymbols", "hasOwn", "is",
+	"preventExtensions", "seal", "create", "defineProperties", "defineProperty", "freeze",
+	"getPrototypeOf", "setPrototypeOf", "isExtensible", "isFrozen", "isSealed", "keys", "entries",
+	"fromEntries", "values", "groupBy"}
+var jsvArrayOwnNames = []string{"length", "name", "prototype", "isArray", "from", "fromAsync", "of"}
+
+func jsvInNames(names []string, k string) bool {
+	for _, x := range names {
+		if x == k {
+			return true
+		}
+	}
+	return false
 }
 
 // jsvString is String(v). An object with a toString of its own answers with it (the
@@ -169,14 +250,7 @@ func (rt *jsrt) jsvString(v interface{}) string {
 		if r, ok := rt.jsvCallMethod(t, "toString"); ok {
 			return rt.toString(r)
 		}
-		// A promise carries hidden slots only, so the generic object arm below
-		// would spell it "[object Object]" where node says "[object Promise]" -
-		// Promise.prototype has a @@toStringTag. The same arm exists in
-		// languages/lib/js-rt.metajs's jvStr and in the interpreter's jsStr.
-		if promIs(t) {
-			return "[object Promise]"
-		}
-		return "[object Object]"
+		return jsvProtoTag(t)
 	case *jsArray:
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
@@ -332,11 +406,17 @@ func jsvOwnKeys(v interface{}) []string {
 // for-in, which is what preserves node's empty `for (k in f)`. Twins: jvGopnKeys in
 // languages/lib/js-rt.metajs and jsGopnKeys in both *-interpreter.abnf.
 func jsvGopnKeys(v interface{}) []string {
+	if jsvIsObjectGlobal(v) {
+		return append([]string{}, jsvObjectOwnNames...)
+	}
 	if !jsvIsFnLike(v) {
 		if o, isObj := v.(*jsObject); isObj {
 			return jsvErrGopn(o, jsvOwnKeys(v))
 		}
 		return jsvOwnKeys(v)
+	}
+	if jsvIsArrayGlobal(v) {
+		return append(append([]string{}, jsvArrayOwnNames...), jsvOwnKeys(v)...)
 	}
 	return append([]string{"length", "name"}, jsvOwnKeys(v)...)
 }
@@ -491,11 +571,9 @@ func (rt *jsrt) jsvFnMethod(recv interface{}, name string) interface{} {
 	case "hasOwnProperty", "propertyIsEnumerable":
 		enumerable := name == "propertyIsEnumerable"
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			// `name` and `length` are the one pair of own properties for which
-			// propertyIsEnumerable says FALSE, which is what `enumerable` is for.
 			k := rt.toString(argAt(args, 0))
-			if enumerable && (k == "name" || k == "length") {
-				return false
+			if enumerable {
+				return jsvPropEnum(recv, k)
 			}
 			return jsvFnOwn(recv, k)
 		})
@@ -553,6 +631,9 @@ func jsvFnOwn(f interface{}, k string) bool {
 	if k == "name" || k == "length" {
 		return true
 	}
+	if jsvIsArrayGlobal(f) && jsvInNames(jsvArrayOwnNames, k) {
+		return true
+	}
 	p := jsvFnPropsOf(f)
 	if p == nil {
 		return false
@@ -576,6 +657,9 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 	case *jsObject:
 		if own, ok := jsvErrOwn(o, k); ok {
 			return own
+		}
+		if jsvIsObjectGlobal(o) && jsvInNames(jsvObjectOwnNames, k) {
+			return true
 		}
 		_, has := o.props[k]
 		return has
@@ -1844,6 +1928,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		proto.set("hasOwnProperty", jsHostFunc("hasOwnProperty", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jsvHasOwn(u(this), rt.toString(argAt(args, 0)))
 		}))
+		proto.set("propertyIsEnumerable", jsHostFunc("propertyIsEnumerable", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsvPropEnum(u(this), rt.toString(argAt(args, 0)))
+		}))
 		o.set("prototype", proto)
 		return w(o)
 	}
@@ -1933,7 +2020,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// "function". The answer is jsvMethodValue: one unbound function per method, which
 	// takes `this` from its call site. The layer-2 twin is js_jsvget in
 	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
-	m["js_jsvget"] = func(a []uint64) uint64 {
+	vget := func(a []uint64) uint64 {
 		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else.
 		// Ordered in front of baseGet because the descriptor's own property map is
 		// where its INSTANCE methods live, and answering one of those for `C.m` would
@@ -1987,6 +2074,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		if fn, found := jsvFindClassMethod(recv, name); found {
 			return w(jsvMethodValue(name, fn))
+		}
+		return r
+	}
+	m["js_jsvget"] = func(a []uint64) uint64 {
+		r := vget(a)
+		if !isUndefOrNull(u(r)) {
+			return r
+		}
+		// Object.prototype's four methods, off a plain object or an instance.
+		if recv, isObj := u(a[0]).(*jsObject); isObj && !isClassDesc(recv) && !rxIsRegexObj(recv) {
+			if name := rt.toString(u(a[1])); jsvIsProtoName(name) {
+				return w(jsvProtoShim(recv, name))
+			}
 		}
 		return r
 	}
@@ -2349,13 +2449,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(v)
 			}
 		}
-		// `v.hasOwnProperty(k)` on a receiver with no member of that name, which is
-		// every one but a function (jsvFnMethod) - there is no Object.prototype to
-		// inherit it from. Twins: jvFallbackCall in languages/lib/js-rt.metajs, mcall
-		// in both *-interpreter.abnf.
-		if name := rt.toString(u(a[1])); name == "hasOwnProperty" && !isUndefOrNull(u(a[0])) &&
-			isUndefOrNull(u(m["js_jsvget"]([]uint64{a[0], a[1]}))) {
-			return w(rt.jsvHasOwn(u(a[0]), rt.toString(argAt(arr.elems, 0))))
+		// Object.prototype's four methods on a receiver with no member of that name
+		// (jsvProtoApply). A RegExp is left to js_jsxmcall below, which answers its
+		// toString. Twins: jvFallbackCall in languages/lib/js-rt.metajs, mcall in both
+		// *-interpreter.abnf.
+		if name := rt.toString(u(a[1])); jsvIsProtoName(name) && !isUndefOrNull(u(a[0])) && !rxIsRegexObj(u(a[0])) &&
+			isUndefOrNull(u(vget([]uint64{a[0], a[1]}))) {
+			return w(rt.jsvProtoApply(u(a[0]), name, arr.elems))
 		}
 		if next := m["js_jsxmcall"]; next != nil {
 			return next(a)

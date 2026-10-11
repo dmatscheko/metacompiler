@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-61.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-62.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,10 +6,10 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-61, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56 and 58-62, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
-//                             hasOwnProperty, delete
+//                             hasOwnProperty, delete, Object.prototype
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1250,6 +1250,44 @@ function s61() {
     check("del1", r.join() === "true,true,true,true" && JSON.stringify(o) === '{"c":{"e":5}}' && Object.keys(o).join() === "c")
 }
 
+// ===== SECTION 62: Object.prototype's methods on every object =====
+// Every object inherits toString, valueOf, hasOwnProperty and propertyIsEnumerable,
+// called or read as a value: a literal, a class instance, an Error, Math and JSON
+// (whose @@toStringTag names them). propertyIsEnumerable is Object.keys' question, and
+// the Object and Array globals have their own non-enumerable names. Values read off
+// node 24.
+class C62 { constructor() { this.q = 1 } }
+function s62() {
+    var o = {a: 1}
+    var p = new C62()
+    var vals = [o, p, new Error("e"), Math, JSON]
+    var tags = []
+    var types = ""
+    for (var i = 0; i < vals.length; i++) {
+        tags.push(vals[i].toString())
+        types = types + typeof vals[i].toString + typeof vals[i].valueOf
+            + typeof vals[i].hasOwnProperty + typeof vals[i].propertyIsEnumerable
+    }
+    check("opm1", tags.join() === "[object Object],[object Object],Error: e,[object Math],[object JSON]")
+    var want = ""
+    for (var j = 0; j < 20; j++) { want = want + "function" }
+    check("opm2", types === want)
+    check("opm3", o.valueOf() === o && p.valueOf() === p && Math.valueOf() === Math && [1, 2].valueOf().length === 2)
+    check("opm4", o.propertyIsEnumerable("a") && !o.propertyIsEnumerable("b") && p.propertyIsEnumerable("q")
+        && !new Error("x").propertyIsEnumerable("message") && ![1].propertyIsEnumerable("length")
+        && [1].propertyIsEnumerable(0) && "ab".propertyIsEnumerable(1))
+    check("opm5", String(Math) === "[object Math]" && `${JSON}` === "[object JSON]" && "" + o === "[object Object]"
+        && Object.prototype.toString.call(new Error("x")) === "[object Error]")
+    var ts = o.toString
+    var hp = p.hasOwnProperty
+    check("opm6", ts.call([1]) === "[object Array]" && hp.call(p, "q") && !hp.call(o, "q")
+        && Object.prototype.propertyIsEnumerable.call(o, "a"))
+    check("opm7", Object.hasOwnProperty("keys") && !Object.hasOwnProperty("toString") && Array.hasOwnProperty("isArray")
+        && !Array.propertyIsEnumerable("isArray") && Object.keys(Array).length === 0)
+    check("opm8", Object.getOwnPropertyNames(Array).join() === "length,name,prototype,isArray,from,fromAsync,of"
+        && Object.getOwnPropertyNames(Object).length === 26)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1270,6 +1308,7 @@ function main() {
     s59() // SECTION-CALL 59
     s60() // SECTION-CALL 60
     s61() // SECTION-CALL 61
+    s62() // SECTION-CALL 62
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
