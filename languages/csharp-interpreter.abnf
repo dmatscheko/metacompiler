@@ -901,7 +901,47 @@ PosPat      <~~ push(csPatPos(takeAll())) ~~>
             = "(" Pattern "," Pattern { "," Pattern } ")" [ PatBind ] ;
 ParenPat    = "(" Pattern ")" ;
 TypePat     <~~ push(csPatType(takeAll())) ~~>
-            = PatType [ PatBind ] ;
+            = PatTypeNQ CondQAhead | PatType [ PatBind ] ;
+// 'o is Foo<int> ? a : b' is a CONDITIONAL over the type test, not the nullable type
+// 'Foo<int>?' bound to 'a': when a '?' that a ':' follows comes after the type, the
+// type is read without the nullable suffix (a nullable type is no legal type pattern
+// anyway).
+PatTypeNQ   <~~ push({patty: stripWs(up.in)}) ~~>
+            = TypeName ArrSfxs ;
+CondQAhead  = :script(~~
+    (function() {
+        var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        if (c.peek(i) !== 63) { return abnf.newToken("\x01no-cond", 0) }
+        var n = c.peek(i + 1)
+        if (n === 63 || n === 46 || n === 91) { return abnf.newToken("\x01no-cond", 0) }   // ?? ?. ?[
+        i++
+        var k = i
+        while (c.peek(k) === 32 || c.peek(k) === 9 || c.peek(k) === 10 || c.peek(k) === 13) { k++ }
+        if (c.peek(k) === 63) { return abnf.newToken("\x01no-cond", 0) }   // 'T? ? a : b': nullable first
+        var depth = 0
+        var g = 0
+        while (g < 4000) {
+            g++
+            var ch = c.peek(i)
+            if (ch < 0) { break }
+            if (ch === 34 || ch === 39) {
+                var q = ch
+                i++
+                while (c.peek(i) >= 0 && c.peek(i) !== q) { if (c.peek(i) === 92) { i++ } i++ }
+                i++
+                continue
+            }
+            if (ch === 40 || ch === 91 || ch === 123) { depth++ }
+            else if (ch === 41 || ch === 93 || ch === 125) { if (depth === 0) { break } depth-- }
+            else if (depth === 0 && (ch === 59 || ch === 44)) { break }
+            else if (depth === 0 && ch === 58 && c.peek(i + 1) !== 58) { return undefined }
+            i++
+        }
+        return abnf.newToken("\x01no-cond", 0)
+    })()
+~~) ;
+
 ConstPat    <~~ push(csPatConst(pop())) ~~>
             = Shift ;
 PatType     <~~ push({patty: stripWs(up.in)}) ~~>

@@ -2692,6 +2692,9 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s41d1", p.P1 == 4 && p.P2 == 3 && s[0] == 30 && s[1] == 20 && s[2] == 10);
             string t = $"[{ n[0] }|{ n[1], 3 }]";
             Program.Check("s41i1", t == "[4|  3]");
+            // 'o is T<int> ? a : b' is a conditional over the type test (12.12.1).
+            object[] os = { new S41Gen<int>(), n[0] };
+            Program.Check("s41q1", (os[0] is S41Gen<int> ? "y" : "n") == "y" && (os[1] is string ? 1 : 2) == 2);
         }
 
         static int Main()
