@@ -473,6 +473,16 @@ func (rt *jsrt) csxCharStatic(name string, args []interface{}) interface{} {
 	return nil
 }
 
+// csxFmtArgs: lib/csharp-strings.js's (an array of a value type is one argument).
+func csxFmtArgs(args []interface{}, k int) []interface{} {
+	if len(args) == k+1 {
+		if a, ok := args[k].(*jsArray); ok && !isUndefOrNull(csxDefaultFor(csxElemTy(a), false, jsNull)) {
+			return []interface{}{a}
+		}
+	}
+	return csxParts(args, k)
+}
+
 func csxParts(args []interface{}, k int) []interface{} {
 	if len(args) == k+1 {
 		if a, ok := args[k].(*jsArray); ok {
@@ -534,7 +544,7 @@ func (rt *jsrt) csxStringStatic(name string, args []interface{}) interface{} {
 		}
 		rt.fail("String.Compare without an ordinal StringComparison is the culture's collation, which is not modelled")
 	case name == "Format" && n >= 1:
-		return rt.csxComposite(args[0], csxParts(args, 1))
+		return rt.csxComposite(args[0], csxFmtArgs(args, 1))
 	}
 	rt.fail("unknown string method: " + name)
 	return nil
@@ -1373,7 +1383,7 @@ func (rt *jsrt) csxComposite(f interface{}, args []interface{}) string {
 // argument the first is a composite format string.
 func (rt *jsrt) csxConsoleText(args []interface{}) string {
 	if len(args) > 1 {
-		return rt.csxComposite(args[0], csxParts(args[1:], 0))
+		return rt.csxComposite(args[0], csxFmtArgs(args[1:], 0))
 	}
 	return rt.cspStr(argAt(args, 0))
 }

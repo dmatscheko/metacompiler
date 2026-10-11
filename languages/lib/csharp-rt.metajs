@@ -2152,7 +2152,7 @@ function csConsoleText(argv) {
             rest.push(argv[i])
             i = i + 1
         }
-        return csxComposite(argv[0], csxParts(rest, 0))
+        return csxComposite(argv[0], csxFmtArgs(rest, 0))
     }
     if (argv.length == 0) { return "" }
     return cpStr(argv[0])

@@ -1683,7 +1683,7 @@ KwLet       = "let" KwEnd ;
         if (argv.length > 1) {
             var rest = []
             for (var i = 1; i < argv.length; i++) { rest.push(argv[i]) }
-            return csxComposite(argv[0], csxParts(rest, 0))
+            return csxComposite(argv[0], csxFmtArgs(rest, 0))
         }
         return argv.length == 0 || argv[0] === undefined ? "" : csStr(argv[0])
     }

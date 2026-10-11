@@ -3074,6 +3074,11 @@ b";                                                   // verbatim keeps the newl
             try { string.Format("{0", n[0]); } catch (FormatException) { ex += "b"; }
             try { d[0].ToString("D2"); } catch (FormatException) { ex += "d"; }
             Program.Check("s49f5", ex == "ibd");
+            int[] xs = { 4, 5 };
+            string[] ws2 = { "a", "b" };
+            object[] os = { 1, "z" };
+            Program.Check("s49f6", string.Format("{0}", xs) == "System.Int32[]" && string.Format("{0}-{1}", ws2) == "a-b"
+                && string.Format("{1}{0}", os) == "z1");
             string[] w = { "Hello", "LL", "he", "aXbxc", "x" };
             var c = StringComparison.OrdinalIgnoreCase;
             Program.Check("s49c1", w[0].IndexOf(w[1], c) == 2 && w[0].IndexOf(w[1], StringComparison.Ordinal) == -1

@@ -421,7 +421,7 @@ function csxStringStatic(name, args) {
         if (n == 3 && csxIsEnumBox(args[2])) { return csxCmpStr(csxCmpKind(args[2]), args[0], args[1]) }
         fail("String.Compare without an ordinal StringComparison is the culture's collation, which is not modelled")
     }
-    if (name == "Format" && n >= 1) { return csxComposite(args[0], csxParts(args, 1)) }
+    if (name == "Format" && n >= 1) { return csxComposite(args[0], csxFmtArgs(args, 1)) }
     fail("unknown string method: " + name)
     return undefined
 }
@@ -1007,6 +1007,15 @@ function csxAlign(s, al) {
     return al < 0 ? s + jxRepeat(" ", w - s.length) : jxRepeat(" ", w - s.length) + s
 }
 function csxBadFormat() { csxkThrow("FormatException", "Input string was not in a correct format.") }
+// A composite format's arguments from index k on: one array argument is the
+// params object[] array itself, unless its elements are of a value type (an
+// int[] converts to object, not to object[]).
+function csxFmtArgs(args, k) {
+    if (args.length == k + 1 && Array.isArray(args[k]) && csxDefaultFor(csxElemTy(args[k]), false, null) !== null) {
+        return [args[k]]
+    }
+    return csxParts(args, k)
+}
 // String.Format(format, args), args being the params object[] array.
 function csxComposite(fmt, args) {
     if (csxIsNull(fmt)) { csxkThrow("ArgumentNullException", "Value cannot be null. (Parameter 'format')") }

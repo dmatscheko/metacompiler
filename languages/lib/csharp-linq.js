@@ -95,8 +95,6 @@ function csqToArray(v) {
     while (csqNext(it)) { out.push(it["cur"]) }
     return out
 }
-// The elements of a source as an array that may be the source itself.
-function csqElems(v) { return Array.isArray(v) ? v : csqToArray(v) }
 
 function csqOpenQuery(q) {
     var op = q["__linq"]
