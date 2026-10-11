@@ -1541,11 +1541,29 @@ class S27 {
         return t;
     }
 
-    // `case null, default ->` (JEP 441) is NOT here: both halves already refuse
-    // it - the interpreter parses the label and then cannot resolve the name
-    // `default`, and the compiler grammar does not parse it at all. The guard
-    // that refuses `case default:` deliberately sits on the FIRST label only, so
-    // it neither creates nor closes that gap.
+    // `case null, default` (JLS 14.11.1) is the one label list that may name
+    // `default`; its arm takes null AND every value no other arm took, in the
+    // arrow and the colon form, as a statement and as an expression.
+    static String nd(Object o) {
+        return switch (o) {
+            case Integer i when i > 3 -> "big";
+            case null, default -> "nd";
+        };
+    }
+    static int ndColon(Integer o) {
+        int r = 0;
+        switch (o) {
+            case 1: r = 10; break;
+            case null, default: r = 99;
+        }
+        return r;
+    }
+    static int ndYield(Object o) {
+        return switch (o) {
+            case Integer i: yield i;
+            case null, default: yield -1;
+        };
+    }
     static String kind(Object o) {
         return switch (o) {
             case String s -> "s" + s.length();
@@ -1605,6 +1623,11 @@ class S27 {
             seen = seen + 1;
         }
         Main.check("pp15", seen == 2);
+
+        // ----- `case null, default`: the null label and the default arm at once -----
+        Main.check("pp16", S27.nd(null).equals("nd") && S27.nd(7).equals("big") && S27.nd("s").equals("nd"));
+        Main.check("pp17", S27.ndColon(null) == 99 && S27.ndColon(1) == 10 && S27.ndColon(5) == 99);
+        Main.check("pp18", S27.ndYield(null) == -1 && S27.ndYield(4) == 4 && S27.ndYield("s") == -1);
     }
 }
 

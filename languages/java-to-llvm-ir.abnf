@@ -488,7 +488,17 @@ Switch      <~~ push(makeSwitch(takeAll())) ~~>
 // per arm. Tried first; they fail fast at ':' for the classic forms.
 SwitchCase  = ArrowCase | ArrowDefault | Case | Default ;
 ArrowCase   <~~ pushArrowCase(takeAll()) ~~>
-            = KwCase NotDfltKw ALabel { "," ALabel } "->" ArrowBody ;
+            = KwCase NotDfltKw ALabels "->" ArrowBody ;
+// `case null, default` (JLS 14.11.1) is the one label list that names `default`;
+// the arm is then both the null arm and the default arm. Twin of CaseLabels in
+// java-interpreter.abnf.
+ALabels     = NullDflt | ALabel { "," ALabel } ;
+CLabels     = NullDflt | CLabel { "," CLabel } ;
+NullDflt    = NullDfltLab "," DfltLabel ;
+NullDfltLab <~~ push({alab: {v: makeConst(null)}}) ~~>
+            = "null" KwEnd ;
+DfltLabel   <~~ push({alab: {dflt: true}}) ~~>
+            = KwDefault ;
 ALabel      <~~ push({alab: makeArrowLabel(pop(), stripWs(up.in))}) ~~>
             = ALabCore ;
 // A label that is a bare name directly before the arrow - `case S -> ...` - has to be
@@ -546,7 +556,7 @@ ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
 // classic case object per label: all but the last have an empty body, so they
 // fall through into it, which is exactly what Java's stacked labels mean.
 Case        <~~ pushColonCase(takeAll()) ~~>
-            = KwCase NotDfltKw CLabel { "," CLabel } ":" { Statement } ;
+            = KwCase NotDfltKw CLabels ":" { Statement } ;
 // The colon form takes the same labels as the arrow form. It needs no ALabName
 // guard: without a '->' after it, a bare name cannot be read as a lambda.
 CLabel      <~~ push({alab: makeArrowLabel(pop(), stripWs(up.in))}) ~~>
@@ -989,7 +999,7 @@ SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { SwCase } "}" ;
 SwCase      = SwArrowCase | SwArrowDefault | Case | Default ;
 SwArrowCase <~~ pushArrowCase(takeAll()) ~~>
-            = KwCase NotDfltKw ALabel { "," ALabel } "->" SwArrowBody ;
+            = KwCase NotDfltKw ALabels "->" SwArrowBody ;
 SwArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" SwArrowBody ;
 // An arrow arm's expression IS the yield; a block or throw arm behaves as usual.
@@ -3983,7 +3993,8 @@ HasStatic   = :script(~~
         for (var i = 0; i < labels.length - 1; i++) {
             push({isDefault: false, lab: labels[i], body: []})
         }
-        push({isDefault: false, lab: labels[labels.length - 1], body: body})
+        var last = labels[labels.length - 1]
+        push({isDefault: last.dflt === true, lab: last, body: body})
     }
     function makeDefault(items) { return {isDefault: true, body: items} }
     // Arrow arms: one classic case object per label (empty bodies fall through
@@ -3999,7 +4010,8 @@ HasStatic   = :script(~~
         for (var i = 0; i < labels.length - 1; i++) {
             push({isDefault: false, lab: labels[i], body: []})
         }
-        push({isDefault: false, lab: labels[labels.length - 1], body: body.concat([switchBreak()])})
+        var last = labels[labels.length - 1]
+        push({isDefault: last.dflt === true, lab: last, body: body.concat([switchBreak()])})
     }
     function pushArrowDefault(items) {
         push({isDefault: true, body: items.concat([switchBreak()])})

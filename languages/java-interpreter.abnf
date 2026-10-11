@@ -496,7 +496,7 @@ Switch      <~~ push(makeSwitch(takeAll())) ~~>
 // per arm. Tried first; they fail fast at ':' for the classic forms.
 SwitchCase  = ArrowCase | ArrowDefault | Case | Default ;
 ArrowCase   <~~ pushArrowCase(takeAll()) ~~>
-            = KwCase NotDfltKw CaseLabel { "," CaseLabel } "->" ArrowBody ;
+            = KwCase NotDfltKw CaseLabels "->" ArrowBody ;
 ArrowBody   = Block | Throw | ExprStmt ;
 ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" ArrowBody ;
@@ -504,8 +504,17 @@ ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
 // classic case object per label: all but the last have an empty body, so they
 // fall through into it, which is exactly what Java's stacked labels mean.
 Case        <~~ pushColonCase(takeAll()) ~~>
-            = KwCase NotDfltKw CaseLabel { "," CaseLabel } ":" { Statement } ;
+            = KwCase NotDfltKw CaseLabels ":" { Statement } ;
 
+// `case null, default` (JLS 14.11.1) is the one label list that names `default`
+// (anywhere else it is default.label.not.allowed); the arm is then both the null
+// arm and the default arm.
+CaseLabels  = NullDflt | CaseLabel { "," NotDfltKw CaseLabel } ;
+NullDflt    = NullDfltLab "," DfltLabel ;
+NullDfltLab <~~ push({lab: makeLabel(takeAll())}) ~~>
+            = NullLabel ;
+DfltLabel   <~~ push({lab: {isdflt: true}}) ~~>
+            = KwDefault ;
 // ----- Case labels (shared by the statement switch and the switch expression).
 // A label is a PATTERN (type or record deconstruction, with an optional `when`
 // guard), `null`, a literal, a plain name, or any other constant expression.
@@ -1015,11 +1024,11 @@ SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { SwitchArm } "}" ;
 SwitchArm   = ArmArrow | ArmArrowDflt | ArmColon | ArmColonDflt ;
 ArmArrow    <~~ push(makeArm(takeAll(), false)) ~~>
-            = KwCase NotDfltKw CaseLabel { "," CaseLabel } "->" ArmBody ;
+            = KwCase NotDfltKw CaseLabels "->" ArmBody ;
 ArmArrowDflt <~~ push(makeArm(takeAll(), true)) ~~>
             = KwDefault "->" ArmBody ;
 ArmColon    <~~ push(makeArm(takeAll(), false)) ~~>
-            = KwCase NotDfltKw CaseLabel { "," CaseLabel } ":" ArmStmts ;
+            = KwCase NotDfltKw CaseLabels ":" ArmStmts ;
 ArmColonDflt <~~ push(makeArm(takeAll(), true)) ~~>
             = KwDefault ":" ArmStmts ;
 // An arrow body is a value, a block (which yields) or a throw; a colon body is a
@@ -4813,7 +4822,8 @@ HasStatic   = :script(~~
         for (var i = 0; i < labels.length - 1; i++) {
             push({isDefault: false, lab: labels[i], body: []})
         }
-        push({isDefault: false, lab: labels[labels.length - 1], body: body})
+        var last = labels[labels.length - 1]
+        push({isDefault: last.isdflt === true, lab: last, body: body})
     }
     // Does a case label match the scrutinee? A pattern binds and tests; `null`
     // matches only null; an ENUM scrutinee compares its label by NAME (the label
@@ -4845,7 +4855,8 @@ HasStatic   = :script(~~
         for (var i = 0; i < labels.length - 1; i++) {
             push({isDefault: false, lab: labels[i], body: []})
         }
-        push({isDefault: false, lab: labels[labels.length - 1], body: body.concat([switchBreak()])})
+        var last = labels[labels.length - 1]
+        push({isDefault: last.isdflt === true, lab: last, body: body.concat([switchBreak()])})
     }
     function pushArrowDefault(items) {
         push({isDefault: true, body: items.concat([switchBreak()])})
@@ -4865,7 +4876,9 @@ HasStatic   = :script(~~
         var stmts = null
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.lab != undefined) { labels.push(it.lab) }
+            if (it.lab != undefined) {
+                if (it.lab.isdflt === true) { isDefault = true } else { labels.push(it.lab) }
+            }
             else if (it.sval != undefined) { val = it.sval }
             else if (it.sstmts != undefined) { stmts = it.sstmts }
         }
@@ -4884,7 +4897,7 @@ HasStatic   = :script(~~
             var dflt = -1
             var i
             for (i = 0; i < arms.length; i++) {
-                if (arms[i].isDefault) { dflt = i; continue }
+                if (arms[i].isDefault) { dflt = i }
                 var ls = arms[i].labels
                 for (var j = 0; j < ls.length; j++) {
                     if (jLabelHit(ls[j], v)) { idx = i; break }
