@@ -1385,6 +1385,29 @@ function s36() {
 
 // ===== END SECTIONS =====
 
+// ===== SECTION 37: $GLOBALS as an array; partial application across classes =====
+// A bare $GLOBALS is PHP 8.1's read-only copy of the global symbol table: an array
+// of the main frame's variables, by value. A method partially applied where other
+// classes declare the same method name with other parameter lists binds the
+// receiver's own parameters.
+class S37A { function m($x, $y) { return "m" . $x . $y; } }
+class S37B { function m() { return "b"; } }
+class S37C { function m() { return "c"; } }
+function s37() {
+    $g = $GLOBALS;
+    check("glob1", isset($g["checks"]) && $g["checks"] === $GLOBALS["checks"]);
+    check("glob2", in_array("failures", array_keys($g)) && !in_array("g", array_keys($g)));
+    $g["checks"] = -1;
+    check("glob3", $GLOBALS["checks"] !== -1);
+    $n = 0;
+    foreach ($GLOBALS as $k => $v) { if ($k === "checks" || $k === "failures") { $n++; } }
+    check("glob4", $n == 2);
+    $a = new S37A();
+    $f = $a->m(?, 2);
+    check("pfa1", $f(1) === "m12" && ($a->m(?, 2))(1) === "m12" && ($a->m(1, ?))(5) === "m15");
+    check("pfa2", (new S37B())->m() . (new S37C())->m() === "bc");
+}
+
 function main() {
     global $checks;
     global $failures;
@@ -1425,6 +1448,7 @@ function main() {
     s34(); // SECTION-CALL 34
     s35(); // SECTION-CALL 35
     s36(); // SECTION-CALL 36
+    s37(); // SECTION-CALL 37
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

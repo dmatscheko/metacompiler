@@ -768,7 +768,26 @@ StaticHead  <~~ push(makeStaticHead(takeAll())) ~~>
 // same {body} record a Block does, so every loop builder is reused unchanged.
 BodyStmt    <~~ push({body: makeBody(takeAll())}) ~~>
             = Statement ;
-PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
+// Fails on a bare $GLOBALS (no '[' after it): that is GlobalsAll's read-only copy,
+// never a variable to bind or write.
+NotGlobalsBare = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i) }
+        var w = "$GLOBALS"
+        for (var k = 0; k < w.length; k++) {
+            if (c.peek(i + k) !== w.charCodeAt(k)) { return undefined }
+        }
+        i = i + w.length
+        cc = c.peek(i)
+        if (cc === 95 || (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc >= 128) { return undefined }
+        while (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i) }
+        if (cc === 91) { return undefined }
+        return abnf.newToken("\x01globals", 0)
+    })()
+~~) ;
+PlainHead   = NotGlobalsBare DollarName <~~ push({var: pop()}) ~~> ;
 // $$name / ${expr}: the VARIABLE NAME is computed at run time. The head carries the
 // name thunk instead of a literal name, and every reader below asks refNameV for the
 // name handle - so the scope call is the same one a plain variable makes, with a
@@ -957,10 +976,14 @@ Primary     = "(" Expression ")"
             | IncludeExpr
             | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
-            | GlobalsRead | VarRef | VarVarRef | StaticExpr | Call | ConstRef ;
+            | GlobalsRead | GlobalsAll | VarRef | VarVarRef | StaticExpr | Call | ConstRef ;
 // $GLOBALS[e] as a value: the main frame's variable, read without creating it.
 GlobalsRead <~~ push(makeGlobalsRead(pop())) ~~>
             = "$GLOBALS" KwEnd "[" Expression "]" ;
+// A bare $GLOBALS: PHP 8.1's read-only COPY of the global symbol table, an array of
+// the main frame's variables keyed by name.
+GlobalsAll  <~~ push(makeGlobalsAll()) ~~>
+            = "$GLOBALS" KwEnd !"[" ;
 
 // include / require (and _once): a file-inclusion expression. A single-quoted string
 // literal operand ('geomlib.php') names a project file: its path is resolved and the
@@ -1568,6 +1591,29 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) {
             var g = globalsRawV(b, {gkey: t})
             return readRawV(g.b, g.v)
+        }
+    }
+    // The bare $GLOBALS array: every variable name the program spells (varLog, in
+    // order of first appearance) that is set in the main frame - null included,
+    // never-set and unset excluded - by value. The superglobals CLI PHP also lists
+    // ($_SERVER, $argv, ...) are not modelled, and a name made only at run time
+    // ($$n) is not found. Twin of makeGlobalsAll in php-interpreter.abnf.
+    function makeGlobalsAll() {
+        return function(b) {
+            var names = varsSince(0, ["$this", "$GLOBALS"])
+            var arr = callExt(b, "js_pharr", [])
+            var frame = globalsFrameV(b)
+            for (var i = 0; i < names.length; i++) {
+                var raw = callExt(b, "js_scope_own", [frame, emitStr(b, names[i])])
+                var setB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [raw, hUndef])), nextB, setB)
+                var dv = phDeref(setB, raw)
+                callExt(dv.b, "js_phset", [arr, emitStr(dv.b, names[i].substring(1)), callExt(dv.b, "js_phcopy", [dv.v])])
+                dv.b.NewBr(nextB)
+                b = nextB
+            }
+            return {b: b, v: arr}
         }
     }
     // Write a variable, THROUGH its cell when the slot holds one. Returns the block to
@@ -4465,11 +4511,13 @@ KwInstanceof = "instanceof" KwEnd ;
         if (fn.name == undefined || fn.name == "") { return }
         var key = "$" + fn.name
         var prev = methSigs[key]
-        if (prev == undefined) {
+        // Strict: null (already ambiguous) == undefined, and a third declaration
+        // must not replace the null.
+        if (prev === undefined) {
             methSigs[key] = {params: fn.params, byref: fn.byref, rest: fn.rest}
             return
         }
-        if (prev == null) { return }
+        if (prev === null) { return }
         if (!sameParams(prev.params, fn.params) || prev.rest != fn.rest) { methSigs[key] = null }
     }
     function sameParams(a, b2) {

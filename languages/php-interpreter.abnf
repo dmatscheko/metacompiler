@@ -726,7 +726,26 @@ GlobalsHead <~~ push({gkey: pop()}) ~~>
             = "$GLOBALS" KwEnd "[" Expression "]" ;
 StaticHead  <~~ push({staticvar: takeAll()}) ~~>
             = StaticBase "::" ( StaticProp | StaticDynProp ) ;
-PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
+// Fails on a bare $GLOBALS (no '[' after it): that is GlobalsAll's read-only copy,
+// never a variable to bind or write.
+NotGlobalsBare = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i) }
+        var w = "$GLOBALS"
+        for (var k = 0; k < w.length; k++) {
+            if (c.peek(i + k) !== w.charCodeAt(k)) { return undefined }
+        }
+        i = i + w.length
+        cc = c.peek(i)
+        if (cc === 95 || (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc >= 128) { return undefined }
+        while (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i) }
+        if (cc === 91) { return undefined }
+        return abnf.newToken("\x01globals", 0)
+    })()
+~~) ;
+PlainHead   = NotGlobalsBare DollarName <~~ push({var: pop()}) ~~> ;
 // $$name = e / ${expr} = e : the variable NAME is computed.
 VarVarHead  <~~ push({varexpr: pop()}) ~~>
             = "$" ( VarRef | VarVar | "{" Expression "}" ) ;
@@ -925,10 +944,14 @@ Primary     = "(" Expression ")"
             | IncludeExpr
             | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
-            | IssetExpr | EmptyTgt | EmptyExpr | GlobalsRead | VarVar | VarRef | StaticExpr | Call | ConstRef ;
+            | IssetExpr | EmptyTgt | EmptyExpr | GlobalsRead | GlobalsAll | VarVar | VarRef | StaticExpr | Call | ConstRef ;
 // $GLOBALS[e] as a value: the main frame's variable, read without creating it.
 GlobalsRead <~~ push(makeGlobalsRead(pop())) ~~>
             = "$GLOBALS" KwEnd "[" Expression "]" ;
+// A bare $GLOBALS: PHP 8.1's read-only COPY of the global symbol table, an array of
+// the main frame's variables keyed by name.
+GlobalsAll  <~~ push(makeGlobalsAll()) ~~>
+            = "$GLOBALS" KwEnd !"[" ;
 
 // isset()/empty() are language constructs, not calls: isset() must NOT evaluate a
 // missing variable into an error, and empty() applies PHP truthiness.
@@ -3704,6 +3727,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return deref(v)
     }
     function makeGlobalsRead(t) { return function() { return globalsVal(t) } }
+    // The bare $GLOBALS array: every variable name the program spells (varLog, in
+    // order of first appearance) that is set in the main frame - null included,
+    // never-set and unset excluded - by value. Twin of makeGlobalsAll in
+    // php-to-llvm-ir.abnf, which is why a name made only at run time ($$n) is not
+    // listed here either.
+    function makeGlobalsAll() {
+        return function() {
+            var names = varsSince(0, ["$this", "$GLOBALS"])
+            var out = newArr()
+            for (var i = 0; i < names.length; i++) {
+                if (!hasOwn(globalScope, names[i])) { continue }
+                var v = anytype
+                v = globalScope[names[i]]
+                if (v === UNSET) { continue }
+                arrSet(out, names[i].substring(1), phpCopy(deref(v)))
+            }
+            return out
+        }
+    }
     function globalsCell(t) { return function() { return varCellIn(globalScope, globalsName(t)) } }
     function phpSet(name, value) {
         var fr = scopes[scopes.length - 1]
