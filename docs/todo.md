@@ -107,7 +107,7 @@ K(() => 3).cb()` "unknown method 'cb'" in both engines (Dart 3; common in Flutte
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-416 swift: Dictionary API gaps; array/dictionary type syntax as values · P1 · SW · OPEN [V]
+### T-416 swift: Dictionary API gaps; array/dictionary type syntax as values · P1 · SW · IN PROGRESS (SW worker, round 23) [V]
 `d["a", default: 0] += 1` does not parse (swiftc `["a": 1]`); `removeValue(forKey:)`,
 `updateValue(_:forKey:)` unknown; `Dictionary(grouping:by:)` unsupported (interpreter
 "only the empty initializer", compiled "variable not defined: Dictionary").
@@ -133,7 +133,7 @@ ignore an exponent and leading whitespace: `"1.5e3abc"+0` 1.5 (PHP 1500.0), `"12
 names a different link than PHP (P3). Native php costs ~180k instructions and ~25 KB
 per simple loop iteration / call (P3 perf).
 
-### T-415 php: error cases and precedence from the php-src corpus · P2 · PHP · OPEN [V spec-only]
+### T-415 php: error cases and precedence from the php-src corpus · P2 · PHP · IN PROGRESS (PHP worker, round 18) [V spec-only]
 A null method result written through `->` must throw Error "Attempt to assign property
 "a" on null" (bug52614; engines stop with an engine error). Reading `$x[]` in a by-value
 argument must raise "Cannot use [] for reading" (both recurse forever). Passing
