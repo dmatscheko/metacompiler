@@ -1012,7 +1012,7 @@ CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
 // PosArg also records its own source text: a call site can only pass a REFERENCE for
 // an argument that denotes one, and '$name' is exactly the spelling that does.
 ArgList     = Arg { "," Arg } [ "," ] ;
-Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | PosArg ;
+Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | AppendArg | PosArg ;
 // PHP 8.5 partial application ('f(1, ?)', 'f(b: ?)'). Twin of PlaceArg in
 // php-interpreter.abnf; see there.
 PlaceArg    <~~ push({aplace: true}) ~~>
@@ -1042,6 +1042,48 @@ FccArg      <~~ push({fcc: true}) ~~>
             = "..." ;
 PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in)}) ~~>
             = Expression ;
+// 'f($a[])' / 'f($x[][$y])': an APPEND target is an argument only for a by-reference
+// parameter, which then binds the new element's cell (targetCell). It has no value to
+// read, so the by-value slot is null. Twin of LvalArg in php-interpreter.abnf, which
+// takes every target this way; here only the '[]' form needs it, since PosArg
+// cannot parse it as an expression at all.
+AppendArg   <~~ pop(); push({pos: makeConst(null), vtext: plainVarText(up.in)}) ~~>
+            = AppendAhead TgtOnly ArgEnd ;
+AppendAhead = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 13 || c.peek(i) === 10) { i = i + 1 }
+        if (c.peek(i) !== 36) { return abnf.newToken("\x01noappend", 0) }
+        var depth = 0
+        var g = 0
+        while (g < 4000) {
+            g = g + 1
+            var ch = c.peek(i)
+            if (ch < 0) { break }
+            if (ch === 39 || ch === 34) {
+                var q = ch
+                i = i + 1
+                while (c.peek(i) >= 0 && c.peek(i) !== q) { if (c.peek(i) === 92) { i = i + 1 } i = i + 1 }
+                i = i + 1
+                continue
+            }
+            if (ch === 91) {
+                var j = i + 1
+                while (c.peek(j) === 32 || c.peek(j) === 9) { j = j + 1 }
+                if (c.peek(j) === 93) { return undefined }
+                depth = depth + 1
+            }
+            else if (ch === 40 || ch === 123) { depth = depth + 1 }
+            else if (ch === 41 || ch === 93 || ch === 125) {
+                if (depth === 0) { break }
+                depth = depth - 1
+            }
+            else if (ch === 44 && depth === 0) { break }
+            i = i + 1
+        }
+        return abnf.newToken("\x01noappend", 0)
+    })()
+~~) ;
 // The same access as a chain SUFFIX ($obj::CONST, $obj::class, $obj::method()).
 StaticSfx   <~~ push(makeStaticSfx(takeAll())) ~~>
             = "::" StaticMember [ StaticArgs ] ;
@@ -4669,6 +4711,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var w = trimWs(t)
         if (w.length < 2 || w.charAt(0) != "$") { return null }
         if (!isNameStart(w.charAt(1))) { return null }
+        // A bare $GLOBALS is a read-only copy, no variable (NotGlobalsBare): by value.
+        if (w == "$GLOBALS") { return null }
         var i = 2
         while (i < w.length && isNameChar(w.charAt(i))) { i++ }
         // Any run of '[...]' and '->name' steps, with brackets balanced and string

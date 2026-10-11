@@ -1919,6 +1919,7 @@ function s47glob() {
     return $s47gv + $s47gw;
 }
 function s47val() { return 4; }
+function s47set(&$r) { $r = 5; }
 function s47() {
     $b = new S47Box();
     $b->me()->p = 7;
@@ -1958,6 +1959,10 @@ function s47() {
     check("ex12", $got === [5, 3]);
     $rv =& s47val();
     check("ex13", $rv === 4);
+    // An append target binds a by-reference parameter to the NEW element.
+    $ap = [1];
+    s47set($ap[]);
+    check("ex14", $ap === [1, 5]);
 }
 
 // ===== END SECTIONS =====
