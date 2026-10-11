@@ -2036,6 +2036,38 @@ function s49() {
     check("cin3", s49try(fn() => new S49B()) === "Cannot declare self-referencing constant S49B::B");
 }
 
+// ===== SECTION 50: error cases and the loosest operators =====
+// Writing a property of null is a catchable Error (Zend/tests/bug52614); an append
+// '$a[]' read by value is "Cannot use [] for reading" (func_arg_fetch_optimization);
+// a bare $GLOBALS cannot bind a by-reference parameter
+// (restrict_globals/invalid_pass_by_ref). The word operators 'or' / 'and' bind
+// looser than assignment and yield (generators/yield_precedence), and a keyless
+// yield takes the next integer after the largest integer key used so far.
+class S50N { public $o; function nul() { return $this->o; } }
+function s50val($v) { return 1; }
+function s50ref(&$r) { $r = 1; }
+function s50noop() { return 0; }
+function s50gen() { yield "a" or s50noop(); }
+function s50keys() { yield 1; yield "k" => 2; yield 3; yield 10 => 4; yield 5; yield 3 => 6; yield 7; yield -5 => 8; yield 9; }
+function s50err($f) {
+    try { $f(); return "none"; } catch (Error $e) { return $e->getMessage(); }
+}
+function s50() {
+    $n = new S50N();
+    check("err1", s50err(function() use ($n) { $n->nul()->a = 1; }) === "Attempt to assign property \"a\" on null");
+    check("err2", s50err(function() { s50val($arr[]); }) === "Cannot use [] for reading");
+    check("err3", s50err(function() { s50ref($GLOBALS); }) === "s50ref(): Argument #1 (\$r) could not be passed by reference");
+    $a = false or true;
+    $b = true and false;
+    check("lop1", $a === false && $b === true);
+    $vs = [];
+    foreach (s50gen() as $v) { $vs[] = $v; }
+    check("lop2", $vs === ["a"]);
+    $ks = [];
+    foreach (s50keys() as $k => $v) { $ks[] = $k; }
+    check("gky1", $ks === [0, "k", 1, 10, 11, 3, 12, -5, 13]);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2091,6 +2123,7 @@ function main() {
     s47(); // SECTION-CALL 47
     s48(); // SECTION-CALL 48
     s49(); // SECTION-CALL 49
+    s50(); // SECTION-CALL 50
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

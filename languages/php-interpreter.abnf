@@ -525,8 +525,16 @@ Continue    <~~ push(makeContinue(takeAll())) ~~>
             = KwContinue [ Expression ] Semi ;
 
 // Every expression pushes exactly one thunk: function() -> value.
-Expression  = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
-SuppressExpr = "@" Expression ;
+// The word operators 'or' and 'and' are the LOOSEST of all, below assignment,
+// print and yield: '$a = f() or g()' assigns first, and 'yield "a" or die' yields
+// "a" (Zend/tests/generators/yield_precedence). '||' and '&&' keep their own levels
+// (OrExpr, AndExpr). Twin of Expression in php-to-llvm-ir.abnf.
+Expression  <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = WordAnd { "or" KwEnd WordAnd } ;
+WordAnd     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = ExprCore { "and" KwEnd ExprCore } ;
+ExprCore    = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
+SuppressExpr = "@" ExprCore ;
 
 // yield / yield $v / yield $k => $v / yield from $iterable. It is an EXPRESSION in
 // PHP, and the presence of one anywhere in a body is what turns that function into a
@@ -537,7 +545,7 @@ SuppressExpr = "@" Expression ;
 YieldExpr   <~~ push(makeYield(takeAll())) ~~>
             = KwYield ( YieldFrom | [ YieldVal [ "=>" YieldVal ] ] ) ;
 YieldFrom   <~~ push({yfrom: pop()}) ~~>
-            = KwFrom Expression ;
+            = KwFrom ExprCore ;
 YieldVal    <~~ push({yval: pop()}) ~~>
             = Ternary ;
 
@@ -553,7 +561,7 @@ RefAssign   <~~ push(makeRefAssign(takeAll())) ~~>
 // every read. Tried after RefAssign, so '$b = &$a' keeps its exact real-reference
 // binding.
 RefAssignVal <~~ var rv = pop(); push(makeAssign([pop(), "=", rv])) ~~>
-            = Target PlainEq "&" !"&" Expression ;
+            = Target PlainEq "&" !"&" ExprCore ;
 
 // list($a, $b) = e  /  [$a, $b] = e  -- array destructuring. A slot may be EMPTY
 // ([, $second]), KEYED (["y" => $py]) or itself a nested pattern ([[$m, $n], [$o]]),
@@ -584,14 +592,14 @@ DTarget     <~~ push({dt: pop()}) ~~>
 // cond ? a : b  /  cond ?: b (Elvis, yields cond when truthy) ; '??' null-coalescing
 // binds tighter than the ternary but looser than ||.
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
-            = Coalesce [ Elvis | "?" Expression ":" Expression ] ;
+            = Coalesce [ Elvis | "?" Expression ":" ExprCore ] ;
 Elvis       <~~ push({elvis: pop()}) ~~>
-            = "?:" Expression ;
+            = "?:" ExprCore ;
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = OrExpr { "??" OrExpr } ;
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Target AssignOp <~~ push(up.in) ~~> Expression ;
+            = Target AssignOp <~~ push(up.in) ~~> ExprCore ;
 // Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
 // '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
 // assignment - without the lookaheads it matches their first character and the rest
@@ -850,10 +858,10 @@ TAppend     <~~ push({append: true}) ~~>
 // ('&' !'&'), or 'a && b' parses as 'a & (&b)' - a wrong tree, not an error.
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { OrOp AndExpr } ;
-OrOp        = "||" | ( "or" KwEnd ) ;
+OrOp        = "||" ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = PipeExpr { AndOp PipeExpr } ;
-AndOp       = "&&" | ( "and" KwEnd ) ;
+AndOp       = "&&" ;
 // '$x |> f(...)' is PHP 8.5's pipe: the left value becomes the single argument of the
 // callable on the right, and the operator is LEFT associative, so '5 |> a |> b' is
 // 'b(a(5))'. Its level is fixed by php-src's own test
@@ -918,11 +926,11 @@ CloneWith   <~~ var w = pop(); push(makeCloneWith(pop(), w)) ~~>
             = KwClone "(" Expression "," Expression ")" ;
 // throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
-            = KwThrow Expression ;
+            = KwThrow ExprCore ;
 // print is an EXPRESSION whose value is always 1 ('$ok ?: print "x"', a match arm,
 // an argument). As a statement it is EchoStmt's, which is tried first.
 PrintExpr   <~~ push(makePrintExpr(pop())) ~~>
-            = "print" KwEnd Expression ;
+            = "print" KwEnd ExprCore ;
 // $x instanceof Foo : the runtime type test, matching the class itself, every base
 // class and every implemented interface. Tried before the plain unary path; if no
 // 'instanceof' follows, this alternative fails and rolls back.
@@ -954,7 +962,7 @@ PostfixExpr = TgtOperand | CallMember ;
 TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it) : makeAssign(it)) ~~>
             = Target ( IncDecOp | OpAssign ) ;
 IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
-OpAssign    = AssignOp <~~ push(up.in) ~~> Expression ;
+OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
@@ -987,7 +995,7 @@ CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
 // An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
 // first-class callable placeholder (strlen(...)), with an optional trailing comma.
 ArgList     = Arg { "," Arg } [ "," ] ;
-Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | LvalArg | PosArg ;
+Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | GlobalsArg | LvalArg | PosArg ;
 // PHP 8.5 partial application: a '?' in an argument position is a PLACEHOLDER, so
 // the call yields a closure taking one parameter per '?' instead of calling. It is
 // spelled 'b: ?' when the placeholder names the parameter it stands for. ArgEnd is
@@ -1003,6 +1011,11 @@ NamedPlaceArg <~~ push({argname: popLabel(), place: true}) ~~>
 // only a ',' or ')' may follow, otherwise the argument is an ordinary expression.
 LvalArg     <~~ push(makeLvalArg(pop())) ~~>
             = Target ArgEnd ;
+// A bare $GLOBALS argument is a read-only copy, never a variable: a by-reference
+// parameter cannot take it (Zend/tests/restrict_globals/invalid_pass_by_ref), which
+// the noref mark lets bindParams raise.
+GlobalsArg  <~~ push({argval: pop(), noref: true}) ~~>
+            = GlobalsAll ArgEnd ;
 ArgEnd      = :script(~~
     (function() {
         var i = 0
@@ -1597,8 +1610,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return t
     }
+    // An argument that APPENDS ('$a[]', '$x[][$k]') has no value: it binds only a
+    // by-reference parameter, and read by value it is PHP's "Cannot use [] for
+    // reading" (Zend/tests/func_arg_fetch_optimization), raised where the value is
+    // taken (bindParams) since the parameter decides which way it goes.
+    var APPEND_READ = {__appendread: true}
+    var NOREF = {__noref: true}
     function makeLvalArg(ref) {
+        for (var i = 0; i < ref.path.length; i++) {
+            if (ref.path[i].append === true) { return {argval: function() { return APPEND_READ }, argtgt: ref} }
+        }
         return {argval: function() { return readTargetVal(ref) }, argtgt: ref}
+    }
+    function argValue(v) {
+        if (v === APPEND_READ) { phpRaise("Error", "Cannot use [] for reading") }
+        return v
     }
     function evalArgs(args) {
         var pos = []
@@ -1643,7 +1669,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 continue
             }
             pos.push(a.argval())
-            tgts.push(a.argtgt == undefined ? null : mkCellMaker(a.argtgt, here))
+            tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here))
         }
         return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, fcc: fcc, holes: holes}
     }
@@ -1668,7 +1694,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // named argument no earlier parameter took, under its name.
             if (p.variadic === true) {
                 var rest = newArr()
-                for (var j = i; j < pos.length; j++) { arrPush(rest, pos[j]) }
+                for (var j = i; j < pos.length; j++) { arrPush(rest, argValue(pos[j])) }
                 if (named != null) {
                     for (var q = 0; q < argset.nkeys.length; q++) {
                         var nk = argset.nkeys[q]
@@ -1680,6 +1706,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 declVar(p.name, rest)
                 return
             }
+            if (p.byref === true && i < argset.tgts.length && argset.tgts[i] === NOREF) {
+                var fnm = varExists(FN_KEY) ? phpStr(getVar(FN_KEY)) : "{closure}"
+                phpRaise("Error", fnm + "(): Argument #" + (i + 1) + " (" + p.name + ") could not be passed by reference")
+            }
             if (p.byref === true && i < argset.tgts.length && argset.tgts[i] != null) {
                 scopePut(scopes[scopes.length - 1], p.name, argset.tgts[i]())
                 continue
@@ -1687,7 +1717,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var have = false
             var v = anytype
             v = null
-            if (i < pos.length) { v = pos[i]; have = true }
+            if (i < pos.length) { v = argValue(pos[i]); have = true }
             else if (named != null && hasOwn(named, p.name)) { v = named[p.name]; have = true }
             if (!have) { v = p.def == null ? null : p.def() }
             declVar(p.name, phpCopy(v))
@@ -3349,7 +3379,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return null
     }
     function phpSetProp(o, name, v) {
-        if (!isObj(o)) { fail("property write ->" + name + " on a non-object") }
+        // PHP 8 no longer makes a stdClass here: writing a property of a non-object
+        // is a catchable Error (Zend/tests/bug52614).
+        if (!isObj(o)) {
+            var q = String.fromCharCode(34)
+            phpRaise("Error", "Attempt to assign property " + q + name + q + " on " + phpDebugType(o))
+        }
         if (name != hookBacking) {
             var hs = classFind(o.__class, "__hset_" + name)
             if (hs != null) { callHook(o, hs, name, [v]); return }
@@ -3739,6 +3774,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (lo == "true") { return true }
             if (lo == "false") { return false }
             if (lo == "null") { return null }
+            // A bare 'exit' / 'die' is the language construct, not a constant.
+            if (lo == "exit" || lo == "die") { return phpBuiltins["exit"]() }
             if (name == "__FUNCTION__" || name == "__METHOD__") { return varExists(FN_KEY) ? getVar(FN_KEY) : "" }
             if (name == "__CLASS__") { var s = ctxSelf(); return s == null ? "" : s.__name }
             if (name == "PHP_EOL") { return "\n" }

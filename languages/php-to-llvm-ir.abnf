@@ -558,8 +558,16 @@ JumpLevel   <~~ push({lvl: phpSmallInt(up.in)}) ~~>
 // operand pushed. It is needed at TWO levels because PHP reads '@$ar[0] = "v"' as
 // '@($ar[0] = "v")': the Expression-level form covers the assignment, the UnaryExpr
 // one covers '@foo()' inside a larger expression.
-Expression  = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
-SuppressExpr = "@" Expression ;
+// The word operators 'or' and 'and' are the LOOSEST of all, below assignment,
+// print and yield: '$a = f() or g()' assigns first, and 'yield "a" or die' yields
+// "a" (Zend/tests/generators/yield_precedence). '||' and '&&' keep their own levels
+// (OrExpr, AndExpr). Twin of Expression in php-interpreter.abnf.
+Expression  <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = WordAnd { "or" KwEnd WordAnd } ;
+WordAnd     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = ExprCore { "and" KwEnd ExprCore } ;
+ExprCore    = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
+SuppressExpr = "@" ExprCore ;
 
 // yield / yield $v / yield $k => $v / yield from $it. A function whose body contains
 // one is a GENERATOR function: calling it does not run the body, it makes a generator
@@ -568,7 +576,7 @@ SuppressExpr = "@" Expression ;
 // small marker record, since the runtime's yield protocol carries a value only.
 YieldExpr   <~~ push(makeYield(takeAll())) ~~>
             = KwYield YieldFrom | KwYield YieldArg | KwYield ;
-YieldFrom   <~~ push({yfrom: pop()}) ~~> = KwFrom Expression ;
+YieldFrom   <~~ push({yfrom: pop()}) ~~> = KwFrom ExprCore ;
 YieldArg    <~~ push(makeYieldArg(takeAll())) ~~> = Ternary [ "=>" Ternary ] ;
 KwYield     = CiY :whitespace() CiI CiE CiL CiD :whitespace(Whitespace) KwEnd ;
 KwFrom      = CiF :whitespace() CiR CiO CiM :whitespace(Whitespace) KwEnd ;
@@ -589,7 +597,7 @@ RefAmp      <~~ noteRef() ~~> = "&" !"&" ;
 // every read. Tried AFTER RefAssign, so '$b = &$a' keeps its exact real-reference
 // binding. The '&' pushes nothing, so makeAssign sees just the two items.
 RefAssignVal <~~ push(makeAssign(takeAll())) ~~>
-            = Target PlainEq <~~ push("=") ~~> "&" !"&" Expression ;
+            = Target PlainEq <~~ push("=") ~~> "&" !"&" ExprCore ;
 
 // list($a, $b) = e  /  [$a, $b] = e  -- array destructuring. A slot may be EMPTY
 // ([, $second]), KEYED (["y" => $py]) or itself a nested pattern ([[$m, $n], [$o]]).
@@ -620,14 +628,14 @@ DTarget     <~~ push({dt: pop()}) ~~>
 // cond ? a : b  /  cond ?: b (Elvis, yields cond when truthy) ; '??' null-coalescing
 // binds tighter than the ternary but looser than ||.
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
-            = Coalesce [ Elvis | "?" Expression ":" Expression ] ;
+            = Coalesce [ Elvis | "?" Expression ":" ExprCore ] ;
 Elvis       <~~ push({elvis: pop()}) ~~>
-            = "?:" Expression ;
+            = "?:" ExprCore ;
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = OrExpr { "??" OrExpr } ;
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Target AssignOp <~~ push(up.in) ~~> Expression ;
+            = Target AssignOp <~~ push(up.in) ~~> ExprCore ;
 // Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
 // '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
 // assignment - without the lookaheads it matches their first character and the rest
@@ -879,10 +887,10 @@ TAppend     <~~ push({append: true}) ~~>
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { OrOp AndExpr } ;
-OrOp        = "||" | ( "or" KwEnd ) ;
+OrOp        = "||" ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = PipeExpr { AndOp PipeExpr } ;
-AndOp       = "&&" | ( "and" KwEnd ) ;
+AndOp       = "&&" ;
 // '$x |> f(...)' is PHP 8.5's pipe. Twin of PipeExpr in php-interpreter.abnf (the
 // precedence level and its php-src witness are explained there); the right operand
 // is normalized by phpCallable.
@@ -930,10 +938,10 @@ PowExpr     <~~ push(foldPow(takeAll())) ~~>
             = PostfixExpr [ "**" UnaryExpr ] ;
 // throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
 ThrowExpr   <~~ push(makeThrowExpr(pop())) ~~>
-            = KwThrow Expression ;
+            = KwThrow ExprCore ;
 // print as an EXPRESSION. Twin of PrintExpr in php-interpreter.abnf; see there.
 PrintExpr   <~~ push(makePrintExpr(pop())) ~~>
-            = "print" KwEnd Expression ;
+            = "print" KwEnd ExprCore ;
 // (int)$x / (string)$y / (array)$z ...: a type cast, lowered to js_phcast - the same
 // conversion table php-interpreter.abnf's phpCast has, so (int)3.9 is 3, (float)5 is
 // the boxed 5.0 and (array)5 is [5]. A parenthesized group '($x)' is not a cast (the
@@ -977,7 +985,7 @@ PostfixExpr = TgtOperand | CallMember ;
 TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it) : makeAssign(it)) ~~>
             = Target ( IncDecOp | OpAssign ) ;
 IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
-OpAssign    = AssignOp <~~ push(up.in) ~~> Expression ;
+OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
@@ -1014,7 +1022,7 @@ CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
 // PosArg also records its own source text: a call site can only pass a REFERENCE for
 // an argument that denotes one, and '$name' is exactly the spelling that does.
 ArgList     = Arg { "," Arg } [ "," ] ;
-Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | AppendArg | PosArg ;
+Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | AppendArg | GlobalsArg | PosArg ;
 // PHP 8.5 partial application ('f(1, ?)', 'f(b: ?)'). Twin of PlaceArg in
 // php-interpreter.abnf; see there.
 PlaceArg    <~~ push({aplace: true}) ~~>
@@ -1046,10 +1054,11 @@ PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in)}) ~~>
             = Expression ;
 // 'f($a[])' / 'f($x[][$y])': an APPEND target is an argument only for a by-reference
 // parameter, which then binds the new element's cell (targetCell). It has no value to
-// read, so the by-value slot is null. Twin of LvalArg in php-interpreter.abnf, which
-// takes every target this way; here only the '[]' form needs it, since PosArg
+// read, so taking it by value raises PHP's "Cannot use [] for reading"
+// (Zend/tests/func_arg_fetch_optimization). Twin of LvalArg in php-interpreter.abnf,
+// which takes every target this way; here only the '[]' form needs it, since PosArg
 // cannot parse it as an expression at all.
-AppendArg   <~~ pop(); push({pos: makeConst(null), vtext: plainVarText(up.in)}) ~~>
+AppendArg   <~~ pop(); push({pos: makeRaise("Cannot use [] for reading"), vtext: plainVarText(up.in)}) ~~>
             = AppendAhead TgtOnly ArgEnd ;
 AppendAhead = :script(~~
     (function() {
@@ -1104,6 +1113,11 @@ GlobalsRead <~~ push(makeGlobalsRead(pop())) ~~>
 // the main frame's variables keyed by name.
 GlobalsAll  <~~ push(makeGlobalsAll()) ~~>
             = "$GLOBALS" KwEnd !"[" ;
+// A bare $GLOBALS argument is never a variable: a by-reference parameter cannot take
+// it, which the noref mark lets emitPhArgs raise. Twin of GlobalsArg in
+// php-interpreter.abnf.
+GlobalsArg  <~~ push({pos: pop(), vtext: null, noref: true}) ~~>
+            = GlobalsAll ArgEnd ;
 
 // include / require (and _once): a file-inclusion expression. A single-quoted string
 // literal operand ('geomlib.php') names a project file: its path is resolved and the
@@ -1978,6 +1992,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // literal, which the two script hosts do not agree on.
     var dq = String.fromCharCode(34)
     function makeConstRef(name) {
+        // A bare 'exit' / 'die' is the language construct exit(), not a constant.
+        // Twin of makeConstRef in php-interpreter.abnf.
+        var lo = name.toLowerCase()
+        if (lo == "exit" || lo == "die") { return makeCall(["exit"]) }
         if (name == "__FUNCTION__" || name == "__METHOD__") { return makeConst(walkFnName) }
         if (name == "__CLASS__") {
             return function(b) {
@@ -2376,6 +2394,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             for (var k = 0; k < labels.length; k++) {
                 labelBlocks["$" + labels[k]] = curF.NewBlock("")
+                labelTags["$" + labels[k]] = curFTag
             }
             for (var q = 0; q < items.length; q++) {
                 var it = items[q]
@@ -2493,6 +2512,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // registers its own before it emits anything, which is what lets a goto that sits
     // EARLIER in the run branch to a label further down.
     var labelBlocks = {}
+    // The IR function each label's block belongs to (curFTag). A try, catch or
+    // finally body is an IR closure of its own, and the control-signal protocol
+    // (lib/compile-core.js) carries return/break/continue out of one but no goto, so
+    // a goto that would leave such a body is refused here rather than emitted as a
+    // branch into another function.
+    var labelTags = {}
     function popLabel() {
         var items = takeAll()
         var nm = ""
@@ -2510,6 +2535,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var lb = labelBlocks["$" + name]
             if (lb == undefined) { fail("goto to an unknown label " + name) }
+            if (labelTags["$" + name] != curFTag) { fail("goto " + name + " out of a try/catch/finally body is not supported") }
             b.NewBr(lb)
             return deadBlock()
         }
@@ -2807,6 +2833,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // everything else keeps the plain index loop.
     // One step of a generator: {value, done}. js_phmcall dispatches a generator's own
     // protocol (memberCall's *jsGenerator case), so this is an ordinary method call.
+    // The key of a KEYLESS yield is the generator's own: the next integer after the
+    // largest one used so far, explicit keys included (Generator::key()).
+    function genAutoKey(b, itN) {
+        var genV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, itN)])
+        return callExt(b, "js_phmcall", [genV, emitStr(b, "key"), callExt(b, "js_arr_new", [])])
+    }
     function genNext(b, genV) {
         return callExt(b, "js_phmcall", [genV, emitStr(b, "next"), callExt(b, "js_arr_new", [])])
     }
@@ -2863,7 +2895,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var kvK = callExt(kvB, "js_get", [rawV, emitStr(kvB, "k")])
         var kvV = callExt(kvB, "js_get", [rawV, emitStr(kvB, "v")])
         kvB.NewBr(joinB)
-        var autoK = callExt(plainB, "js_scope_get", [curScopeV, emitStr(plainB, ixN)])
+        var autoK = genAutoKey(plainB, itN)
         plainB.NewBr(joinB)
         var gK = joinB.NewPhi([llvm.ir.NewIncoming(kvK, kvB), llvm.ir.NewIncoming(autoK, plainB)])
         var gV = joinB.NewPhi([llvm.ir.NewIncoming(kvV, kvB), llvm.ir.NewIncoming(rawV, plainB)])
@@ -2950,7 +2982,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var kvK = callExt(kvB, "js_get", [rawV, emitStr(kvB, "k")])
             var kvV = callExt(kvB, "js_get", [rawV, emitStr(kvB, "v")])
             kvB.NewBr(joinB)
-            var autoK = callExt(plainB, "js_scope_get", [curScopeV, emitStr(plainB, ixN)])
+            var autoK = keyName == null ? hNull : genAutoKey(plainB, itN)
             plainB.NewBr(joinB)
             var gK = joinB.NewPhi([llvm.ir.NewIncoming(kvK, kvB), llvm.ir.NewIncoming(autoK, plainB)])
             var gV = joinB.NewPhi([llvm.ir.NewIncoming(kvV, kvB), llvm.ir.NewIncoming(rawV, plainB)])
@@ -3692,7 +3724,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                              llvm.ir.NewIncoming(rr.v, rr.b)])}
     }
     // $o->p = v, with the property's set HOOK in front of it and __set as the fallback.
+    // A null receiver (a call that returned null, an unset variable) raises PHP 8's
+    // catchable `Error: Attempt to assign property "p" on null` (Zend/tests/bug52614);
+    // the guard is two integer compares. Twin of phpSetProp in php-interpreter.abnf.
     function emitPropSet(b, objV, keyV, valV, name) {
+        var nullB = curF.NewBlock("")
+        var liveB = curF.NewBlock("")
+        b.NewCondBr(isNullishHandle(b, objV), nullB, liveB)
+        callExt(nullB, "js_phraise",
+                [emitStr(nullB, "Error"),
+                 callExt(nullB, "js_phcat",
+                         [callExt(nullB, "js_phcat", [emitStr(nullB, "Attempt to assign property " + dq),
+                                                       callExt(nullB, "js_phpname", [keyV])]),
+                          emitStr(nullB, dq + " on null")])])
+        nullB.NewBr(liveB) // never reached: js_phraise throws
+        b = liveB
         if (isHooked(name)) {
             var hn = emitStr(b, "__hset_" + name)
             var hm = emitHasMethod(b, objV, hn)
@@ -4798,6 +4844,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // The ref record an assignable argument text denotes, parsed with the grammar
     // itself. A text that does not parse as a Target is passed by value.
+    // A thunk raising a catchable PHP Error with a fixed message.
+    function makeRaise(msg) {
+        return function(b) {
+            callExt(b, "js_phraise", [emitStr(b, "Error"), emitStr(b, msg)])
+            return {b: b, v: hNull}
+        }
+    }
     function argTarget(src) {
         var frag = c.parseFrom(c.agrammar, src, "Target")
         if (frag == null || frag == undefined) { return null }
@@ -4810,7 +4863,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var funSigs = {}
     function noteSig(name, fn) {
         if (name == undefined || name == "") { return }
-        funSigs["$" + name] = {params: fn.params, byref: fn.byref, rest: fn.rest}
+        funSigs["$" + name] = {params: fn.params, byref: fn.byref, rest: fn.rest, fname: name}
     }
     function sigOf(name) {
         if (name == undefined) { return null }
@@ -4951,6 +5004,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     continue
                 }
                 var vv = anytype
+                if (byrefAt(sig, k2) && args[k2].noref === true) {
+                    // PHP's message names the function and the parameter.
+                    var who = sig.fname == undefined ? "{closure}" : sig.fname
+                    makeRaise(who + "(): Argument #" + (k2 + 1) + " (" + sig.params[k2]
+                              + ") could not be passed by reference")(b)
+                }
                 if (byrefAt(sig, k2) && args[k2].vtext != null) {
                     var rc = targetCell(b, argTarget(args[k2].vtext))
                     b = rc.b

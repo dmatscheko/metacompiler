@@ -1804,7 +1804,12 @@ function phGenStep(g, sent) {
         st["key"] = st["auto"]
         st["last"] = raw
     }
-    st["auto"] = st["auto"] + 1
+    // The next automatic key follows the largest integer key used so far, a
+    // keyless yield's or an explicit one's (PHP's largest_used_integer_key); a
+    // string key leaves it alone. Twin of jsGenerator.step in abnf/jsrt.go.
+    var ky = anytype
+    ky = st["key"]
+    if (typeof ky == "number" && ky >= st["auto"]) { st["auto"] = ky + 1 }
     return r
 }
 

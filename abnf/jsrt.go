@@ -709,7 +709,13 @@ func (g *jsGenerator) step(rt *jsrt, sent interface{}) interface{} {
 		g.lastKey = jsUndef
 	} else {
 		g.lastValue, g.lastKey = genSplitKV(st.value, g.autoKey)
-		g.autoKey++
+		// The next automatic key follows the largest integer key used so far,
+		// a keyless yield's or an explicit one's (PHP's largest_used_integer_key);
+		// a string key leaves it alone. Twin of the "auto" step in
+		// languages/lib/php-rt.metajs.
+		if n, isNum := g.lastKey.(float64); isNum && n >= g.autoKey {
+			g.autoKey = n + 1
+		}
 	}
 	res.set("value", st.value)
 	res.set("done", st.done)
