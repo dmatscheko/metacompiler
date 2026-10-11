@@ -525,8 +525,23 @@ SecItem     = NotSecKw LabelItem | Statement ;
 // 'default:' and 'case' open the NEXT section; they are never a label.
 NotSecKw    = :script(~~
     (function() {
-        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
-        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        // Whitespace and comments are not skipped before a :script, so scan past both:
+        // 'case 1: // note' followed by 'default:' must still see the keyword.
+        var s = 0
+        var g = 0
+        while (g < 100000) {
+            g++
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13) { s++; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) { while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ } continue }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s = s + 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s = s + 2
+                continue
+            }
+            break
+        }
         var kws = ["case", "default"]
         for (var k = 0; k < kws.length; k++) {
             var w = kws[k]
@@ -644,7 +659,20 @@ DeclDefault <~~ push({bareDefault: true}) ~~>
 DeclEndAhead = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
-        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var g0 = 0
+        while (g0 < 100000) {   // blanks AND comments: neither is skipped before a :script
+            g0++
+            var b0 = c.peek(s)
+            if (b0 === 32 || b0 === 9 || b0 === 10 || b0 === 13) { s++; continue }
+            if (b0 === 47 && c.peek(s + 1) === 47) { while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ } continue }
+            if (b0 === 47 && c.peek(s + 1) === 42) {
+                s = s + 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s = s + 2
+                continue
+            }
+            break
+        }
         var a = c.peek(s)
         return (a === 59 || a === 44 || a === 41) ? undefined : abnf.newToken("\x01decl-continues", 0)
     })()
@@ -902,7 +930,20 @@ PatTypeNQ   <~~ push({patty: stripWs(up.in)}) ~~>
 CondQAhead  = :script(~~
     (function() {
         var i = 0 // Whitespace is not skipped before a :script, so scan past it first.
-        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i++ }
+        var g0 = 0
+        while (g0 < 100000) {   // blanks AND comments: neither is skipped before a :script
+            g0++
+            var b0 = c.peek(i)
+            if (b0 === 32 || b0 === 9 || b0 === 10 || b0 === 13) { i++; continue }
+            if (b0 === 47 && c.peek(i + 1) === 47) { while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ } continue }
+            if (b0 === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i = i + 2
+                continue
+            }
+            break
+        }
         if (c.peek(i) !== 63) { return abnf.newToken("\x01no-cond", 0) }
         var n = c.peek(i + 1)
         if (n === 63 || n === 46 || n === 91) { return abnf.newToken("\x01no-cond", 0) }   // ?? ?. ?[
@@ -1166,7 +1207,20 @@ GenVarSeed  = VarSeed TArgSkip GenStop ;
 GenStop     = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
-        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var g0 = 0
+        while (g0 < 100000) {   // blanks AND comments: neither is skipped before a :script
+            g0++
+            var b0 = c.peek(s)
+            if (b0 === 32 || b0 === 9 || b0 === 10 || b0 === 13) { s++; continue }
+            if (b0 === 47 && c.peek(s + 1) === 47) { while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ } continue }
+            if (b0 === 47 && c.peek(s + 1) === 42) {
+                s = s + 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s = s + 2
+                continue
+            }
+            break
+        }
         var a = c.peek(s)
         var b = c.peek(s + 1)
         if (a === 41 || a === 93 || a === 125 || a === 59 || a === 44) { return undefined }

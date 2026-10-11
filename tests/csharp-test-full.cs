@@ -2664,6 +2664,15 @@ b";                                                   // verbatim keeps the newl
             }
             return res;
         }
+        // A comment before 'default:' does not make it a label.
+        static int S41Cm(int a)
+        {
+            switch (a)
+            {
+            case 1: return 1; // one
+            /* the rest */ default: return 2;
+            }
+        }
         static void S41()
         {
             int[] n = { 4, 3, 5, 1 };
@@ -2675,6 +2684,7 @@ b";                                                   // verbatim keeps the newl
             int a = n[3], b = n[0], c = n[1];
             Program.Check("s41g2", (a < b && b > c) && !(a > b));
             Program.Check("s41l1", S41Sw(1) == 11 && S41Sw(2) == 5 && S41Sw(3) == 15 && S41Sw(4) == 3);
+            Program.Check("s41l2", S41Cm(n[3]) == 1 && S41Cm(n[2]) == 2);
             S41Out(str: "abc", v: out var o5);
             S41Out(v: out int o6, str: "hello");
             int acc = n[3];
