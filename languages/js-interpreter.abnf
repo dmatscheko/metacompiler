@@ -754,7 +754,7 @@ PropComputedKey = "[" AssignExpr "]" ;
 AsyncMark   <~~ push({isasync: true}) ~~> = "async" KwEnd ;
 GenMark     <~~ push({isgen: true}) ~~> = "*" ;
 // '{val}' is '{val: val}' - the shorthand reads the variable of the same name.
-ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
+ShorthandProp <~~ push(makeProp(jsVarRef(idName(up.in)), idName(up.in))) ~~>
             = NotBindName Id ;
 
 // An array literal, with ELISIONS: '[1,,2]' has a hole in the middle and length 3,
@@ -1239,10 +1239,11 @@ ExportNamed = "{" [ ExportSpec { "," ExportSpec } [ "," ] ] "}" ;
 // unguarded, which is what makes 'export { a as default }' legal.
 ExportSpec  = ( NotReserved Id | StringLit ) [ KwAs ( Id | StringLit ) ] ;
 
-// 'with' introduces an object as a scope, which the scope model has no room for:
-// accepted, not lowered.
-With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
-            = KwWith "(" Expression ")" NestedStatement ;
+// 'with (o) body': o's properties are in scope for the names inside body. The tag on
+// KwWith runs before the body's tags, so withDepth says which references stand inside
+// one (see makeWith).
+With        <~~ push(makeWith(takeAll())) ~~>
+            = KwWith <~~ withDepth = withDepth + 1 ~~> "(" Expression ")" NestedStatement ;
 Debugger    <~~ push(function() {}) ~~>
             = KwDebugger StmtEnd ;
 // The async and generator function DECLARATIONS. Both bind a function value under their
@@ -1256,7 +1257,7 @@ GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
 Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(jsbRef(idName(up.in)))) ~~>
+VarRef      <~~ push(jsVarRef(jsbRef(idName(up.in)))) ~~>
             = NotReserved Id ;
 
 // JavaScript's own string literals, deliberately NOT the shared lib's
@@ -5873,8 +5874,83 @@ NotFuncHead = :script(~~
     // 'typeof <bare name>' is the ONE expression in JavaScript that may name an
     // undeclared variable without a ReferenceError, so it cannot go through getVar
     // (which fails). It walks the same chain by hand and answers "undefined" instead.
-    function makeTypeofName(name) {
+    // ----- with -----
+    // `with (o) body` runs body with a frame {"0with": o} on the scope chain. A NAME
+    // standing lexically inside a with body resolves through withFind, innermost first:
+    // a frame's own binding (a let, a parameter of a function defined in the body), else
+    // the object of a with frame when it has the property, else outward - so a property
+    // the body adds is seen at once. withDepth is >0 while the tags of a with body run,
+    // and only the references it marks pay for the walk. A call of a name the object
+    // answered runs with the object as `this` (withRecv). Twins: js_jswithget,
+    // js_jswithset and js_jswithrecv in abnf/jsrtjsprint.go and
+    // languages/lib/js-rt.metajs.
+    var withDepth = 0
+    var withRecv = anytype // The object the last with-resolved name came from.
+    withRecv = undefined
+    function withHas(o, k) {
+        if (o === null || o === undefined) { return false }
+        if (typeof o == "object" || typeof o == "function") { return propIn(k, o) }
+        return getMember(o, k) !== undefined
+    }
+    // The index of the scope frame that resolves name, or -1.
+    function withFind(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            var f = scopes[i]
+            if (hasOwn(f, name)) { return i }
+            if (hasOwn(f, "0with") && withHas(f["0with"], name)) { return i }
+        }
+        return 0 - 1
+    }
+    function withGet(name) {
+        withRecv = undefined
+        var i = withFind(name)
+        if (i < 0) { return getVar(name) }
+        var f = scopes[i]
+        if (hasOwn(f, name)) { return f[name] }
+        withRecv = f["0with"]
+        return getMember(withRecv, name)
+    }
+    function withSet(name, v) {
+        var i = withFind(name)
+        if (i < 0) { setVar(name, v); return }
+        var f = scopes[i]
+        if (hasOwn(f, name)) { scopePut(f, name, v); return }
+        setMember(f["0with"], name, v)
+    }
+    function isIdentText(t) {
+        if (typeof t != "string" || t.length == 0) { return false }
+        for (var i = 0; i < t.length; i++) {
+            var c = t.charCodeAt(i)
+            var ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 36 || (i > 0 && c >= 48 && c <= 57)
+            if (!ok) { return false }
+        }
+        return true
+    }
+    function jsVarRef(name) {
+        if (withDepth == 0) { return makeVarRef(name) }
+        return function() { return withGet(name) }
+    }
+    function makeWith(items) {
+        withDepth = withDepth - 1
+        var objT = items[0]
+        var bodyT = items[1]
         return function() {
+            var o = anytype // The object, of any type a member read accepts.
+            o = objT()
+            if (o === null || o === undefined) { biRaise("TypeError: Cannot convert undefined or null to object") }
+            var fr = {}
+            fr["0with"] = o
+            scopes.push(fr)
+            var r = anytype // The body's completion.
+            r = bodyT()
+            scopes.pop()
+            return r
+        }
+    }
+    function makeTypeofName(name) {
+        var inWith = withDepth > 0
+        return function() {
+            if (inWith && withFind(name) >= 0) { return jsTypeofVal(withGet(name)) }
             for (var i = scopes.length - 1; i >= 0; i--) {
                 if (hasOwn(scopes[i], name)) {
                     var v = anytype // The variable may hold any type.
@@ -8098,11 +8174,7 @@ NotFuncHead = :script(~~
         // assignment can have, and the value is written through it.
         if (pat.dtype == "ref") {
             var r = pat.ref
-            if (r.path.length == 0) {
-                if (decl) { declVar(r.name, v) } else { setVar(r.name, v) }
-            } else {
-                refSet(r, v)
-            }
+            if (decl && r.path.length == 0) { declVar(r.name, v) } else { refSet(r, v) }
             return
         }
         // A super-property leaf ('[super.d] = e'): the write goes through the super chain,
@@ -8552,6 +8624,7 @@ NotFuncHead = :script(~~
     // __ctor(instance, args...).
     function makeNew(items) {
         var clsName = items[0].cls
+        if (withDepth > 0) { return makeNewFrom(function() { return withGet(clsName) }, items.slice(1), clsName) }
         return makeNewFrom(function() { return getVar(clsName) }, items.slice(1), clsName)
     }
     // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the
@@ -9137,12 +9210,15 @@ NotFuncHead = :script(~~
         // CallHead. Seeded before the loop, so a member suffix that follows overwrites it
         // exactly as it would any other receiver ('super.a.b()' calls b on super.a).
         var supThis = (items[1].supthis == true)
+        // A bare name called inside a with body: the object that answered it is `this`.
+        var withThis = withDepth > 0 && isIdentText(items[1].ptxt)
         return function() {
             var cur = anytype     // A member chain hops between types,
             var curThis = anytype // so do the remembered receiver
             var lastKey = anytype // and the remembered key.
             if (supThis) { curThis = getVar("this") }
             cur = primary()
+            if (withThis) { curThis = withRecv }
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 // '?.' short-circuits the ENTIRE rest of the chain, not just its own
@@ -9202,11 +9278,12 @@ NotFuncHead = :script(~~
     // whatever suffixes came after the ')'. The parentheses mean nothing at run time, so
     // the inner reference is unwrapped and the extra suffixes are appended to its path.
     makeTargetRef = function(items) {
+        var w = withDepth > 0
         if (items[0] != undefined && items[0].parenref != undefined) {
             var inner = items[0].parenref
-            return {name: inner.name, ptxt: inner.ptxt, path: concat2impl(inner.path, items.slice(1))}
+            return {name: inner.name, ptxt: inner.ptxt, path: concat2impl(inner.path, items.slice(1)), w: w}
         }
-        return {name: items[0], ptxt: items[0], path: items.slice(1)}
+        return {name: items[0], ptxt: items[0], path: items.slice(1), w: w}
     }
 
     // Target items = [nameString, suffix marker...] -> reference descriptor.
@@ -9217,7 +9294,7 @@ NotFuncHead = :script(~~
         var curThis = anytype // may be of mixed types.
         // A reference starts at a NAME ('a.b = 1') or, for the LhsAssign form, at an
         // arbitrary primary expression ('[1].a = 2') that is evaluated here.
-        cur = (ref.prim != undefined) ? ref.prim() : getVar(ref.name)
+        cur = (ref.prim != undefined) ? ref.prim() : ((ref.w === true) ? withGet(ref.name) : getVar(ref.name))
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.kind == "member") {
@@ -9268,12 +9345,15 @@ NotFuncHead = :script(~~
     // The two halves of a target reference, shared by the assignment builders: a bare
     // name goes through the scope chain, a path through resolveRef's {obj, key} place.
     function refGet(ref) {
-        if (ref.path.length == 0) return getVar(ref.name)
+        if (ref.path.length == 0) { return (ref.w === true) ? withGet(ref.name) : getVar(ref.name) }
         var p = resolveRef(ref)
         return getMember(p.obj, p.key)
     }
     function refSet(ref, v) {
-        if (ref.path.length == 0) { setVar(ref.name, v); return }
+        if (ref.path.length == 0) {
+            if (ref.w === true) { withSet(ref.name, v) } else { setVar(ref.name, v) }
+            return
+        }
         var p = resolveRef(ref)
         setMember(p.obj, p.key, v)
     }
@@ -9332,8 +9412,8 @@ NotFuncHead = :script(~~
             var v = anytype // A compound assignment (s += n) may change the value's type.
             v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, getVar(ref.name), v)
-                setVar(ref.name, v)
+                if (op != "=") v = applyOp(op, refGet(ref), v)
+                refSet(ref, v)
             } else {
                 var p = resolveRef(ref)
                 if (op != "=") v = applyOp(op, getMember(p.obj, p.key), v)
@@ -9349,8 +9429,8 @@ NotFuncHead = :script(~~
         return function() {
             var n = anytype // A number, or a BigInt (which ++ steps by 1n).
             if (ref.path.length == 0) {
-                n = jsToNumeric(getVar(ref.name))
-                setVar(ref.name, jsStep(n, delta))
+                n = jsToNumeric(refGet(ref))
+                refSet(ref, jsStep(n, delta))
                 return n
             }
             var p = resolveRef(ref)
@@ -9375,8 +9455,8 @@ NotFuncHead = :script(~~
         return function() {
             var n = anytype
             if (ref.path.length == 0) {
-                n = jsStep(jsToNumeric(getVar(ref.name)), delta)
-                setVar(ref.name, n)
+                n = jsStep(jsToNumeric(refGet(ref)), delta)
+                refSet(ref, n)
                 return n
             }
             var p = resolveRef(ref)

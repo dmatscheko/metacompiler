@@ -441,7 +441,7 @@ YieldOne    <~~ push(makeYield(takeAll())) ~~>
 // parenthesized one is the only one that can start with '(', and the based one demands at
 // least one member suffix, which a bare name never has left over.
 Target      = TargetParen | TargetNamed | TargetBased ;
-TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
+TargetNamed <~~ push(jsTargetRef(takeAll())) ~~>
             = NotReserved NotThisTarget Id <~~ push(idName(up.in)) ~~> [ TargetTail ] ;
 TargetParen <~~ push(retarget(takeAll())) ~~>
             = "(" Target ")" [ TargetTail ] ;
@@ -851,7 +851,7 @@ MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
 // '{ val }' is '{ val: val }'.
-ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
+ShorthandProp <~~ push(makeProp(jsVarRef(idName(up.in)), idName(up.in))) ~~>
             = NotReserved Id ;
 
 // An array literal has ELISIONS: '[1,,2]' is three elements whose middle one is a hole,
@@ -956,7 +956,7 @@ ForOfPathHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 // TargetTail rather than '{ TargetSuffix }': the path must END in a member, so
 // 'for (a.b() of xs)' stays the syntax error it is instead of reaching emitRefPath with
 // a call as its last element.
-ForOfTarget <~~ push({apat: {dtype: "target", ref: makeTargetRef(takeAll())}}) ~~>
+ForOfTarget <~~ push({apat: {dtype: "target", ref: jsTargetRef(takeAll())}}) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> TargetTail ;
 // A for-in/of whose loop target is not a reference at all: 'for (0 of 0)',
 // 'for ([0] in 0)', 'for ({a: 0} of 0)'. Like AssignNoRef these PARSE in the spec and are
@@ -1069,7 +1069,7 @@ ATargetSuper <~~ push(makeSuperTarget(takeAll())) ~~>
             = KwSuper SuperKey { DotSuffix | IndexSuffix } ;
 // A name with at least one member suffix - the shape that distinguishes a target element
 // from the plain binding name behind it.
-TargetSuffixed <~~ push(makeTargetRef(takeAll())) ~~>
+TargetSuffixed <~~ push(jsTargetRef(takeAll())) ~~>
             = NotReserved Id <~~ push(idName(up.in)) ~~> TargetSuffix { TargetSuffix } ;
 AObjPattern <~~ push({dtype: "obj", fields: takeAll()}) ~~>
             = "{" [ AField { "," AField } [ "," ] ] "}" ;
@@ -1292,10 +1292,11 @@ ExportAll   = "*" [ KwAs Id ] KwFrom StringLit ;
 ExportNamed = "{" [ ExportSpec { "," ExportSpec } [ "," ] ] "}" ;
 ExportSpec  = ( Id | StringLit ) [ KwAs ( Id | StringLit ) ] ;
 
-// 'with' introduces an object as a scope, which the scope model has no room for:
-// accepted, not lowered.
-With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
-            = KwWith "(" Expression ")" NestedStatement ;
+// 'with (o) body': o's properties are in scope for the names inside body. The tag on
+// KwWith runs before the body's tags, so withDepth says which references stand inside
+// one (see makeWith).
+With        <~~ push(makeWith(takeAll())) ~~>
+            = KwWith <~~ withDepth = withDepth + 1 ~~> "(" Expression ")" NestedStatement ;
 // 'debugger' IS implemented: with no debugger attached the spec makes it a no-op,
 // which is exactly what the interpreter half does, so it lowers to nothing at all.
 Debugger    <~~ push(function(b) { return b }) ~~>
@@ -1312,7 +1313,7 @@ GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(jsbRef(idName(up.in)))) ~~>
+VarRef      <~~ push(jsVarRef(jsbRef(idName(up.in)))) ~~>
             = NotReserved Id ;
 
 // JavaScript's own string literals, deliberately NOT the shared lib's
@@ -3922,7 +3923,64 @@ NotFuncHead = :script(~~
     // and typed through js_jstypeof, which knows that `typeof K` is "function".
     // The read is safe exactly because js_scope_typeof already said the name
     // resolves: it cannot trip the js_rt_missvar hook.
+    // ----- with -----
+    // `with (o) body` emits body in a new scope holding o under "0with". A NAME standing
+    // lexically inside a with body resolves through js_jswithget / js_jswithset, which
+    // walk the scope chain innermost first: a scope's own binding, else the object of a
+    // "0with" scope when it has the property, else outward - so a property the body adds
+    // is seen at once. withDepth is >0 while the tags of a with body run, and only the
+    // references it marks are emitted that way. A call of a name the object answered
+    // runs with the object as `this` (js_jswithrecv). Twins: withGet / withSet /
+    // withRecv in js-interpreter.abnf.
+    var withDepth = 0
+    function isIdentText(t) {
+        if (typeof t != "string" || t.length == 0) { return false }
+        for (var i = 0; i < t.length; i++) {
+            var c = t.charCodeAt(i)
+            var ok = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c == 36 || (i > 0 && c >= 48 && c <= 57)
+            if (!ok) { return false }
+        }
+        return true
+    }
+    function jsVarRef(name) {
+        if (withDepth == 0) { return makeVarRef(name) }
+        return function(b) { return {b: b, v: callExt(b, "js_jswithget", [curScopeV, emitStr(b, name)])} }
+    }
+    function jsTargetRef(items) {
+        var ref = makeTargetRef(items)
+        ref.w = withDepth > 0
+        return ref
+    }
+    // A bare-name target's read and write, through the with walk when it stands in one.
+    function refNameGet(b, ref) {
+        return callExt(b, (ref.w === true) ? "js_jswithget" : "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+    }
+    function refNameSet(b, ref, ext, v) {
+        callExt(b, (ref.w === true) ? "js_jswithset" : ext, [curScopeV, emitStr(b, ref.name), v])
+    }
+    function makeWith(items) {
+        withDepth = withDepth - 1
+        var objT = items[0]
+        var bodyT = items[1]
+        return function(b) {
+            var r = objT(b)
+            b = r.b
+            var badB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_eq", [r.v, hNull])), badB, okB)
+            emitSiteThrow(badB, "Cannot convert undefined or null to object")
+            var saved = curScopeV
+            curScopeV = callExt(okB, "js_scope_new", [saved])
+            callExt(okB, "js_scope_decl", [curScopeV, emitStr(okB, "0with"), r.v])
+            var endB = bodyT(okB)
+            curScopeV = saved
+            return endB
+        }
+    }
     function makeTypeofName(name) {
+        if (withDepth > 0) {
+            return function(b) { return {b: b, v: callExt(b, "js_jswithtypeof", [curScopeV, emitStr(b, name)])} }
+        }
         return function(b) {
             var nmV = emitStr(b, name)
             var tv = callExt(b, "js_scope_typeof", [curScopeV, nmV])
@@ -4858,12 +4916,15 @@ NotFuncHead = :script(~~
         // CallHead. Seeded before the loop, so a member suffix that follows overwrites it
         // exactly as it would any other receiver ('super.a.b()' calls b on super.a).
         var supThis = (items[1].supthis == true)
+        // A bare name called inside a with body: the object that answered it is `this`.
+        var withThis = withDepth > 0 && isIdentText(items[1].ptxt)
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
             var curThis = hUndef
             if (supThis) { curThis = callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, "this")]) }
+            if (withThis) { curThis = callExt(b, "js_jswithrecv", []) }
             var shortIn = []
             var i = 0
             while (i < suffixes.length) {
@@ -4990,7 +5051,7 @@ NotFuncHead = :script(~~
             b = br.b
             cur = br.v
         } else {
-            cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+            cur = refNameGet(b, ref)
         }
         var curThis = hUndef
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -5037,17 +5098,15 @@ NotFuncHead = :script(~~
             b = r.b
             var v = r.v
             if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
                 // Plain `=` to an undeclared name becomes an implicit global
                 // (js_scope_set_or_create). A compound assignment first reads the
                 // old value, so it still requires a prior declaration.
                 var setExt = "js_scope_set_or_create"
                 if (op != "=") {
-                    var old = callExt(b, "js_scope_get", [curScopeV, nameV])
-                    v = emitBinOp(b, op, old, v)
+                    v = emitBinOp(b, op, refNameGet(b, ref), v)
                     setExt = "js_scope_set"
                 }
-                callExt(b, setExt, [curScopeV, nameV, v])
+                refNameSet(b, ref, setExt, v)
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -5074,7 +5133,7 @@ NotFuncHead = :script(~~
             var nameV = null, objV = null, keyV = null, oldV = null
             if (ref.path.length == 0) {
                 nameV = emitStr(b, ref.name)
-                oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
+                oldV = refNameGet(b, ref)
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -5092,7 +5151,7 @@ NotFuncHead = :script(~~
             b.NewCondBr(condI, assignB, mergeB)
             var r = valT(assignB)
             var ab = r.b
-            if (nameV != null) { callExt(ab, "js_scope_set", [curScopeV, emitStr(ab, ref.name), r.v]) }
+            if (nameV != null) { refNameSet(ab, ref, "js_scope_set", r.v) }
             else { callExt(ab, memSetExt(), [objV, keyV, r.v]) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
@@ -5110,9 +5169,8 @@ NotFuncHead = :script(~~
         return function(b) {
             var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_jstonumeric", [callExt(b, "js_scope_get", [curScopeV, nameV])])
-                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, "js_jsstep", [oldV, oneV])])
+                var oldV = callExt(b, "js_jstonumeric", [refNameGet(b, ref)])
+                refNameSet(b, ref, "js_scope_set", callExt(b, "js_jsstep", [oldV, oneV]))
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
@@ -5128,10 +5186,9 @@ NotFuncHead = :script(~~
         return function(b) {
             var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_jstonumeric", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+                var oldV = callExt(b, "js_jstonumeric", [refNameGet(b, ref)])
                 var newV = callExt(b, "js_jsstep", [oldV, oneV])
-                callExt(b, "js_scope_set", [curScopeV, nameV, newV])
+                refNameSet(b, ref, "js_scope_set", newV)
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
@@ -5759,20 +5816,23 @@ NotFuncHead = :script(~~
     // whose leaves may be member targets ('[a.b] = c').
     function assignRef(b, ref, valueH) {
         if (ref.path.length == 0 && ref.base == undefined) {
-            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), valueH])
+            refNameSet(b, ref, "js_scope_set_or_create", valueH)
             return b
         }
         var p = emitRefPath(b, ref)
         callExt(p.b, memSetExt(), [p.obj, p.key, valueH])
         return p.b
     }
+    // The store of an ASSIGNMENT pattern's name leaf: the implicit-global write, or the
+    // with walk's inside a with body.
+    function isAssignExt(ext) { return ext == "js_scope_set_or_create" || ext == "js_jswithset" }
     function bindPattern(b, pat, valueH, declExt) {
         if (pat.dtype == "hole") { return b }
         // A super-property leaf ('[super.d] = e'): the store goes through js_supset, which
         // is a place only an ASSIGNMENT pattern has - 'var [super.d] = e' is a syntax error
         // in the spec and the declExt test below says the same thing for the member leaf.
         if (pat.dtype == "supertarget") {
-            if (declExt != "js_scope_set_or_create") {
+            if (!isAssignExt(declExt)) {
                 notImpl("destructuring binding with a super target", 0)
                 return b
             }
@@ -5782,7 +5842,7 @@ NotFuncHead = :script(~~
         if (pat.dtype == "target") {
             // A member target is only a target in an ASSIGNMENT pattern; in a binding one
             // ('var [a.b] = c', 'function f([a.b])') there is nothing to declare.
-            if (declExt != "js_scope_set_or_create") {
+            if (!isAssignExt(declExt)) {
                 notImpl("destructuring binding with a member target", 0)
                 return b
             }
@@ -5925,9 +5985,10 @@ NotFuncHead = :script(~~
     function makeDestructAssign(items) {
         var pat = items[0]
         var valT = items[1]
+        var ext = (withDepth > 0) ? "js_jswithset" : "js_scope_set_or_create"
         return function(b) {
             var r = valT(b)
-            return {b: bindPattern(r.b, pat, r.v, "js_scope_set_or_create"), v: r.v}
+            return {b: bindPattern(r.b, pat, r.v, ext), v: r.v}
         }
     }
 
@@ -6433,8 +6494,9 @@ NotFuncHead = :script(~~
                 return {b: b, v: callExt(b, "js_jsxregexp", [rargs])}
             }
         }
+        var newExt = (withDepth > 0) ? "js_jswithget" : "js_scope_get"
         return makeNewFrom(function(b) {
-            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])}
+            return {b: b, v: callExt(b, newExt, [curScopeV, emitStr(b, clsName)])}
         }, argThunks, clsName)
     }
     // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the

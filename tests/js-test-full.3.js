@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56 and 58-71.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -6,7 +6,7 @@
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43, engine agreement, generators, Error, Math
-//   tests/js-test-full.3.js   sections 44-56 and 58-71, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -15,7 +15,9 @@
 //                             super reaching Object.prototype, g.return(v) as a
 //                             return completion, where yield and return stand,
 //                             prototypes, static methods as values, Boolean,
-//                             symbols
+//                             symbols, with
+//   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
+//   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
 //
 // The section NUMBERS are global (grammar comments and docs cite them), the four
@@ -1582,6 +1584,52 @@ function s71() {
         new Map([[s1, "v"]]).get(s1) === "v" && new P71().get() === "function1")
 }
 
+// ===== SECTION 73: with =====
+// A name inside a with body is the object's property when the object has it - read,
+// written, compounded, incremented, destructured, called with the object as `this` -
+// and the ordinary binding otherwise; a property added inside the body is seen at
+// once, a let in the body and a parameter shadow the object, a closure keeps the
+// object, and null is a TypeError. Values read off node 24.
+function f73(o, a) { with (o) { return a + b } }
+function mk73(q) { with (q) { return function () { return v } } }
+function s73() {
+    var o = { a: 1, b: 2, get2() { return this.b * 2 } }
+    var a = 100
+    var outer = 5
+    var seen = ""
+    with (o) {
+        seen = a + " " + b + " " + outer + " " + get2()
+        a = 10
+        outer = 6
+        b++
+        b += 5
+    }
+    check("wi73a", seen === "1 2 5 4" && o.a === 10 && a === 100 && outer === 6 && o.b === 8)
+    var p = {}
+    var late = ""
+    with (p) {
+        p.added = 7
+        late = added + " " + typeof added + " " + typeof nope
+    }
+    var q = { v: 1 }
+    var g = mk73(q)
+    q.v = 42
+    var shadow = 0
+    with ({ x: 1 }) { let x = 2; shadow = x }
+    check("wi73b", late === "7 number undefined" && g() === 42 && shadow === 2 && f73({ a: 1, b: 2 }, 10) === 3 &&
+        f73({ b: 3 }, 10) === 13)
+    var mathed = 0
+    with (Math) { mathed = max(3, 9) + floor(PI) }
+    var r = { s: "x", m: 0, n: 0 }
+    with (r) { s += "y"; [m, n] = [7, 8] }
+    var nested = ""
+    with ({ k: 1 }) { with ({ k: 2, j: 3 }) { nested = k + " " + j } nested = nested + " " + k }
+    var err = ""
+    try { with (null) { } } catch (e) { err = e.constructor.name + ": " + e.message }
+    check("wi73c", mathed === 12 && r.s === "xy" && r.m === 7 && r.n === 8 && nested === "2 3 1" &&
+        err === "TypeError: Cannot convert undefined or null to object")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1612,6 +1660,7 @@ function main() {
     s69() // SECTION-CALL 69
     s70() // SECTION-CALL 70
     s71() // SECTION-CALL 71
+    s73() // SECTION-CALL 73
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

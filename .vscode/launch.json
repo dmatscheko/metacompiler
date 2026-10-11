@@ -1751,7 +1751,7 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-recognize.py", "-q", "-warn-unsupported"]
         },
         {
-            "name": "JavaScript recognition SHOULD FAIL",
+            "name": "JavaScript recognition",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-recognize.js", "-q"]

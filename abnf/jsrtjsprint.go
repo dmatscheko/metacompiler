@@ -3084,6 +3084,56 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return symCall(a)
 	}
 
+	// `with`: a name inside a with body resolves innermost first - a scope's own
+	// binding, else the object a scope holds under "0with" when it has the property,
+	// else outward. withObj answers that object, nil when an ordinary binding (or
+	// nothing) resolves the name, which then goes the ordinary way; withRecv is the
+	// object the last js_jswithget read from, which a call of that name takes as
+	// `this`. Twins: withGet / withSet / withRecv in js-interpreter.abnf, js_jswith*
+	// in languages/lib/js-rt.metajs.
+	var withRecv interface{} = jsUndef
+	withObj := func(sc *jsScope, name string) interface{} {
+		for s := sc; s != nil; s = s.parent {
+			if s.has(name) {
+				return nil
+			}
+			if o, ok := s.get("0with"); ok {
+				if jsvIsObjLike(o) || isCallable(o) {
+					if u(m["js_jshas"]([]uint64{w(o), rt.wrapStr(name)})) == true {
+						return o
+					}
+				} else if !isUndefOrNull(u(m["js_jsvget"]([]uint64{w(o), rt.wrapStr(name)}))) {
+					return o
+				}
+			}
+		}
+		return nil
+	}
+	m["js_jswithget"] = func(a []uint64) uint64 {
+		withRecv = jsUndef
+		if o := withObj(rt.scopeOf(a[0]), rt.toString(u(a[1]))); o != nil {
+			withRecv = o
+			return m["js_jsvget"]([]uint64{w(o), a[1]})
+		}
+		return m["js_scope_get"](a)
+	}
+	m["js_jswithset"] = func(a []uint64) uint64 {
+		if o := withObj(rt.scopeOf(a[0]), rt.toString(u(a[1]))); o != nil {
+			return m["js_jsmset"]([]uint64{w(o), a[1], a[2]})
+		}
+		return m["js_scope_set_or_create"](a)
+	}
+	m["js_jswithrecv"] = func(a []uint64) uint64 { return w(withRecv) }
+	m["js_jswithtypeof"] = func(a []uint64) uint64 {
+		if o := withObj(rt.scopeOf(a[0]), rt.toString(u(a[1]))); o != nil {
+			return m["js_jstypeof"]([]uint64{m["js_jsvget"]([]uint64{w(o), a[1]})})
+		}
+		if tv := m["js_scope_typeof"](a); rt.toString(u(tv)) == "undefined" {
+			return tv
+		}
+		return m["js_jstypeof"]([]uint64{m["js_scope_get"](a)})
+	}
+
 	// BigInt last: its wrappers sit in FRONT of the js_js* names registered above
 	// (js_jsadd, js_jseq, js_jslt, ...), so they have to exist first.
 	rt.addJSONExterns(m)

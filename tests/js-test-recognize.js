@@ -8,14 +8,11 @@
 // import or export: those are a Module's, exercised by tests/js-test-multifile.mjs and
 // SECTION 57 of tests/js-test-full.4.mjs.
 //
-// A construct that is ACCEPTED but not lowered is routed to notImplemented, so:
-//   * a DEFAULT run of either grammar aborts cleanly at the first not-lowered construct
-//     (a "... not implemented (file:line); use -warn-unsupported to ignore" message);
-//   * a run WITH -warn-unsupported warns on each not-lowered construct, skips it, runs
-//     the genuinely supported code around it, and main() returns 0.
+// A construct that is ACCEPTED but not lowered would be routed to notImplemented (a
+// default run aborts at it, a -warn-unsupported run warns and skips it). None of the
+// constructs here is left in that state, so both runs complete and main() returns 0.
 //
-// Only genuinely supported behavior is asserted; the not-lowered constructs are merely
-// exercised (so they warn) and their placeholder results are never checked.
+// Only a few results are asserted; the rest are merely exercised.
 
 // Default and rest parameters: the bare names still bind by position; the default value
 // and the rest gathering are dropped (a + b is genuinely computed from the passed args).
@@ -112,13 +109,13 @@ var failures = 0;
 function check(cond) { if (!cond) { failures = failures + 1; } }
 
 function main() {
-    // Genuinely supported behavior around the not-lowered constructs.
+    // Asserted behavior.
     check(sum(3, 4, 5, 6) === 7);               // default/rest dropped; a + b === 7
     var c = Counter.make();                     // genuine class + static + fields
     check(c.inc() === 1);                       // genuine instance method
     check(c.inc() === 2);
 
-    // Exercise the not-lowered constructs (they warn); results are not checked.
+    // Exercised; results are not checked.
     spreads(function(x) { return x; });
     makeConfig("widget");
     operators({ a: { b: 1 }, missing: 0 });

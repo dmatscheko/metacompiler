@@ -355,6 +355,78 @@ function js_jssymbolfn() {
     }
     return jvSymbolFn
 }
+// `with`: a name inside a with body resolves innermost first - a scope's own binding,
+// else the object a scope holds under "0with" when it has the property, else outward.
+// jvWithRecv is the object the last js_jswithget read from, which a call of that name
+// takes as `this`. An unbound name is node's ReferenceError, and an assignment to one
+// binds it in the root scope, as js_scope_get and js_scope_set_or_create do. Twins:
+// the js_jswith* externs of abnf/jsrtjsprint.go, withGet / withSet / withRecv in
+// js-interpreter.abnf.
+var jvWithRecv = anytype
+// Does the with object o have the property n? A primitive answers through its
+// wrapper's members.
+function jvWithHas(o, n) {
+    if (jvIsObj(o) || Array.isArray(o) || jvIsCallable(o)) { return js_jshas(o, n) }
+    return !jvUndefOrNull(js_jsvget(o, n))
+}
+function js_jswithget(scope, name) {
+    var n = jvStr(name)
+    jvWithRecv = undefined
+    var s = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) { return scopeGet(s, n) }
+        if (scopeHas(s, "0with")) {
+            var o = anytype
+            o = scopeGet(s, "0with")
+            if (jvWithHas(o, n)) {
+                jvWithRecv = o
+                return js_jsvget(o, n)
+            }
+        }
+        s = scopeParent(s)
+    }
+    jbRaise("ReferenceError: " + n + " is not defined")
+    return undefined
+}
+function js_jswithset(scope, name, v) {
+    var n = jvStr(name)
+    var s = anytype
+    var last = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) {
+            scopeDecl(s, n, v)
+            return undefined
+        }
+        if (scopeHas(s, "0with")) {
+            var o = anytype
+            o = scopeGet(s, "0with")
+            if (jvWithHas(o, n)) { return js_jsmset(o, n, v) }
+        }
+        last = s
+        s = scopeParent(s)
+    }
+    scopeDecl(last, n, v)
+    return undefined
+}
+function js_jswithrecv() { return jvWithRecv }
+function js_jswithtypeof(scope, name) {
+    var n = jvStr(name)
+    var s = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, n)) { return js_jstypeof(scopeGet(s, n)) }
+        if (scopeHas(s, "0with")) {
+            var o = anytype
+            o = scopeGet(s, "0with")
+            if (jvWithHas(o, n)) { return js_jstypeof(js_jsvget(o, n)) }
+        }
+        s = scopeParent(s)
+    }
+    return "undefined"
+}
+
 // The class and destructuring computed keys, which reach no member extern.
 function js_jspropkey(k) {
     if (jvSymN > 0) {
