@@ -3944,6 +3944,10 @@ KwContinue  = "continue" KwEnd ;
     }
     // repeatElement(x, count: n): Swift's Repeated, as the array it walks as.
     hostGlobals["repeatElement"] = function(x, n) { return swArrayOf(x, n) }
+    // numericCast(x): the conversion to the integer type the context asks for,
+    // which is the context's own adoption (a declaration, a parameter); the call
+    // itself passes the value through.
+    hostGlobals["numericCast"] = function(x) { return x }
     // swap(&a, &b): the two inout boxes trade values; the call's write-back stores them.
     hostGlobals["swap"] = function(a, b) {
         var t = a.v

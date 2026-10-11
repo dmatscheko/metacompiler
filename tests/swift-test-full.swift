@@ -3755,8 +3755,8 @@ func s80() {
 }
 
 // ===== SECTION 81: the standard library's free functions =====
-// zip, stride, repeatElement, swap, min/max of three or more, abs at a sized
-// width, the trapping functions on their passing path, a closure taking an
+// zip, stride, repeatElement, swap, numericCast, min/max of three or more, abs
+// at a sized width, the trapping functions on their passing path, a closure taking an
 // n-tuple apart, nested tuple patterns, type(of:) of an empty collection, and
 // strtod's NaN spellings. Every value read off swiftc 6.1.2.
 func s81() {
@@ -3814,6 +3814,10 @@ func s81() {
     // strtod's NaN spellings parse (their sign and payload are not kept here).
     check("81k", Double("nan(0x1)")!.isNaN && Double("-snan")!.isNaN && Double("nan(a b)")!.isNaN
                  && Double("snan()") == nil && Double("nan(())") == nil && Float("nan(1)")!.isNaN)
+    // numericCast converts to the integer type its context asks for.
+    let u8s: [UInt8] = [250]
+    let widened: Int = numericCast(u8s[0])
+    check("81l", widened + 10 == 260 && "\(type(of: widened))" == "Int")
 }
 
 func main() {

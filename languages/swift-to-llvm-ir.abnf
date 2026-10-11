@@ -6358,6 +6358,8 @@ KwContinue  = "continue" KwEnd ;
                 return {b: rn.b, v: rn.b.NewCall(rtArrayRep(), [rx.v, rn.v])}
             }
         }
+        // numericCast(x) passes the value through: the context's adoption converts.
+        if (name == "numericCast" && args.length == 1) { return args[0].t }
         // swap(&a, &b): the two names trade values.
         if (name == "swap" && args.length == 2 && args[0].ref != null && args[1].ref != null) {
             return function(b) {
