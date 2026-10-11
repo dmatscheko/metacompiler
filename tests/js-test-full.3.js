@@ -1477,6 +1477,27 @@ function s68() {
         [j(w.next()), j(w.next()), j(w.return(1))].join() === "2/false,4/false,1/true")
 }
 
+// ===== SECTION 69: where `yield` and `return` stand, deep into a file =====
+// Whether a `yield` is an expression or an identifier, and whether a `return` is
+// inside a function, depends on the brackets and function heads before it in the
+// whole file; this section sits at the END of one, past every generator above. A
+// generator's nested function, arrow and generator method, then the identifier again
+// once the generator has closed. Values read off node 24.
+function* g69() {
+    var f = function () { return 1 }
+    yield f()
+    yield (() => { return 2 })()
+    var o = { *m() { yield 7 } }
+    yield o.m().next().value
+}
+function s69() {
+    var vals = []
+    for (var v of g69()) { vals.push(v) }
+    var yield = 3
+    function after() { var yield = 5; return yield + 1 }
+    check("ig69a", vals.join() === "1,2,7" && yield === 3 && after() === 6)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1504,6 +1525,7 @@ function main() {
     s66() // SECTION-CALL 66
     s67() // SECTION-CALL 67
     s68() // SECTION-CALL 68
+    s69() // SECTION-CALL 69
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

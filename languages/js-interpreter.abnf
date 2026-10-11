@@ -1835,9 +1835,9 @@ NotYieldBind = :script(~~
         if ((yc >= 48 && yc <= 57) || (yc >= 65 && yc <= 90) || yc === 95 || yc === 36
             || (yc >= 97 && yc <= 122)) { return undefined }
 
-        // Re-derived from the source text on every call - see NotStrict for why a guard
-        // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
-        // prefix it gives up and SUCCEEDS, so a very large file is never refused here.
+        // A pure function of the source prefix - see NotStrict for why a guard may not
+        // carry mutable parser state. The walk is capped: beyond 200000 bytes of prefix
+        // it gives up and SUCCEEDS, so a very large file is never refused here.
         var back = c.getSdx()
         if (back >= 200000) { return undefined }
 
@@ -1854,6 +1854,27 @@ NotYieldBind = :script(~~
         var word2 = ""       // the word before lastWord: 'set' in a 'set b(...)' head
         var prevSig = 0
         var i = 0 - back
+        // Being pure, the walk may RESUME: the state it ended in is kept on the parser
+        // stack, shared by InGen, InFunc and NotYieldBind, and a call at or past that
+        // position continues from it instead of from byte 0, so the walks of one parse
+        // add up to one pass over the source. A call behind it walks afresh. The
+        // bracket stacks travel as strings, one char (value + 2) per entry.
+        var memo = pop()
+        if (memo != null && memo.at <= back) {
+            gen = memo.gen
+            fnDepth = memo.fnDepth
+            pendGen = memo.pendGen
+            pendBody = memo.pendBody
+            lastWord = memo.lastWord
+            word2 = memo.word2
+            prevSig = memo.prevSig
+            for (var mk = 0; mk < memo.sgen.length; mk++) {
+                sgen.push(memo.sgen.charCodeAt(mk) - 2)
+                sfn.push(memo.sfn.charCodeAt(mk) - 2)
+            }
+            for (var mp = 0; mp < memo.pk.length; mp++) { pk.push(memo.pk.charCodeAt(mp) - 2) }
+            i = memo.at - back
+        }
         while (i < 0) {
             var ch = c.peek(i)
             if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 11 || ch === 12) { i = i + 1; continue }
@@ -1989,7 +2010,16 @@ NotYieldBind = :script(~~
             pendBody = -3
             i = i + 1
         }
-            return gen === 1 ? abnf.newToken("\x01yield-in-generator", 0) : undefined
+        var ssg = ""
+        var ssf = ""
+        var spk = ""
+        for (var sk = 0; sk < sgen.length; sk++) {
+            ssg = ssg + String.fromCharCode(sgen[sk] + 2)
+            ssf = ssf + String.fromCharCode(sfn[sk] + 2)
+        }
+        for (var sp = 0; sp < pk.length; sp++) { spk = spk + String.fromCharCode(pk[sp] + 2) }
+        push({at: back + i, gen: gen, fnDepth: fnDepth, pendGen: pendGen, pendBody: pendBody,
+              lastWord: lastWord, word2: word2, prevSig: prevSig, sgen: ssg, sfn: ssf, pk: spk})
         return gen === 1 ? abnf.newToken("\x01yield-in-generator", 0) : undefined
     })()
 ~~) ;
@@ -2138,8 +2168,10 @@ NotDeclHead = :script(~~
 // All three are answered by ONE walk of the source prefix, which each guard below
 // carries its own copy of - a :script runs in the parser VM and cannot call a helper
 // defined in the grammar's start script, and the three differ only in the final test.
-// The walk is STATELESS for the same reason NotStrict is (see there): the parser
-// backtracks constantly and nothing would undo a flag set by a rolled-back alternative.
+// The walk's answer is a PURE function of the source prefix, for the same reason
+// NotStrict's is (see there): the parser backtracks constantly and nothing would undo a
+// flag set by a rolled-back alternative. Its end state is memoized by position, which
+// a backtrack cannot invalidate.
 //
 // It tracks a bracket stack. A '(' preceded by a 'function' head (with or without a '*')
 // opens a parameter list, and its ')' hands the generator flag on to the body '{' that
@@ -2161,9 +2193,9 @@ NotDeclHead = :script(~~
 
 InGen = :script(~~
     (function() {
-        // Re-derived from the source text on every call - see NotStrict for why a guard
-        // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
-        // prefix it gives up and SUCCEEDS, so a very large file is never refused here.
+        // A pure function of the source prefix - see NotStrict for why a guard may not
+        // carry mutable parser state. The walk is capped: beyond 200000 bytes of prefix
+        // it gives up and SUCCEEDS, so a very large file is never refused here.
         var back = c.getSdx()
         if (back >= 200000) { return undefined }
 
@@ -2180,6 +2212,27 @@ InGen = :script(~~
         var word2 = ""       // the word before lastWord: 'set' in a 'set b(...)' head
         var prevSig = 0
         var i = 0 - back
+        // Being pure, the walk may RESUME: the state it ended in is kept on the parser
+        // stack, shared by InGen, InFunc and NotYieldBind, and a call at or past that
+        // position continues from it instead of from byte 0, so the walks of one parse
+        // add up to one pass over the source. A call behind it walks afresh. The
+        // bracket stacks travel as strings, one char (value + 2) per entry.
+        var memo = pop()
+        if (memo != null && memo.at <= back) {
+            gen = memo.gen
+            fnDepth = memo.fnDepth
+            pendGen = memo.pendGen
+            pendBody = memo.pendBody
+            lastWord = memo.lastWord
+            word2 = memo.word2
+            prevSig = memo.prevSig
+            for (var mk = 0; mk < memo.sgen.length; mk++) {
+                sgen.push(memo.sgen.charCodeAt(mk) - 2)
+                sfn.push(memo.sfn.charCodeAt(mk) - 2)
+            }
+            for (var mp = 0; mp < memo.pk.length; mp++) { pk.push(memo.pk.charCodeAt(mp) - 2) }
+            i = memo.at - back
+        }
         while (i < 0) {
             var ch = c.peek(i)
             if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 11 || ch === 12) { i = i + 1; continue }
@@ -2315,6 +2368,16 @@ InGen = :script(~~
             pendBody = -3
             i = i + 1
         }
+        var ssg = ""
+        var ssf = ""
+        var spk = ""
+        for (var sk = 0; sk < sgen.length; sk++) {
+            ssg = ssg + String.fromCharCode(sgen[sk] + 2)
+            ssf = ssf + String.fromCharCode(sfn[sk] + 2)
+        }
+        for (var sp = 0; sp < pk.length; sp++) { spk = spk + String.fromCharCode(pk[sp] + 2) }
+        push({at: back + i, gen: gen, fnDepth: fnDepth, pendGen: pendGen, pendBody: pendBody,
+              lastWord: lastWord, word2: word2, prevSig: prevSig, sgen: ssg, sfn: ssf, pk: spk})
         return gen === 1 ? undefined : abnf.newToken("\x01not-in-generator", 0)
     })()
 ~~) ;
@@ -2325,9 +2388,9 @@ InGen = :script(~~
 
 InFunc = :script(~~
     (function() {
-        // Re-derived from the source text on every call - see NotStrict for why a guard
-        // may not carry mutable parser state. The walk is capped: beyond 200000 bytes of
-        // prefix it gives up and SUCCEEDS, so a very large file is never refused here.
+        // A pure function of the source prefix - see NotStrict for why a guard may not
+        // carry mutable parser state. The walk is capped: beyond 200000 bytes of prefix
+        // it gives up and SUCCEEDS, so a very large file is never refused here.
         var back = c.getSdx()
         if (back >= 200000) { return undefined }
 
@@ -2344,6 +2407,27 @@ InFunc = :script(~~
         var word2 = ""       // the word before lastWord: 'set' in a 'set b(...)' head
         var prevSig = 0
         var i = 0 - back
+        // Being pure, the walk may RESUME: the state it ended in is kept on the parser
+        // stack, shared by InGen, InFunc and NotYieldBind, and a call at or past that
+        // position continues from it instead of from byte 0, so the walks of one parse
+        // add up to one pass over the source. A call behind it walks afresh. The
+        // bracket stacks travel as strings, one char (value + 2) per entry.
+        var memo = pop()
+        if (memo != null && memo.at <= back) {
+            gen = memo.gen
+            fnDepth = memo.fnDepth
+            pendGen = memo.pendGen
+            pendBody = memo.pendBody
+            lastWord = memo.lastWord
+            word2 = memo.word2
+            prevSig = memo.prevSig
+            for (var mk = 0; mk < memo.sgen.length; mk++) {
+                sgen.push(memo.sgen.charCodeAt(mk) - 2)
+                sfn.push(memo.sfn.charCodeAt(mk) - 2)
+            }
+            for (var mp = 0; mp < memo.pk.length; mp++) { pk.push(memo.pk.charCodeAt(mp) - 2) }
+            i = memo.at - back
+        }
         while (i < 0) {
             var ch = c.peek(i)
             if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 11 || ch === 12) { i = i + 1; continue }
@@ -2479,6 +2563,16 @@ InFunc = :script(~~
             pendBody = -3
             i = i + 1
         }
+        var ssg = ""
+        var ssf = ""
+        var spk = ""
+        for (var sk = 0; sk < sgen.length; sk++) {
+            ssg = ssg + String.fromCharCode(sgen[sk] + 2)
+            ssf = ssf + String.fromCharCode(sfn[sk] + 2)
+        }
+        for (var sp = 0; sp < pk.length; sp++) { spk = spk + String.fromCharCode(pk[sp] + 2) }
+        push({at: back + i, gen: gen, fnDepth: fnDepth, pendGen: pendGen, pendBody: pendBody,
+              lastWord: lastWord, word2: word2, prevSig: prevSig, sgen: ssg, sfn: ssf, pk: spk})
         return fnDepth > 0 ? undefined : abnf.newToken("\x01return-outside-function", 0)
     })()
 ~~) ;
