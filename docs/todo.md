@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-387** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-389** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -97,6 +97,11 @@ Global `isNaN` (and check isFinite, parseInt, parseFloat globals) missing in all
 engines. `{[Symbol.toPrimitive]: 1}` / `{[Symbol.hasInstance]: 5}`: node "TypeError:
 number 1 is not a function"; all engines ignore the member.
 
+### T-387 js: `toExponential` / `toFixed` / `toPrecision` exist only through goja's leak · P1 · JS · OPEN [V]
+`xs[0].toExponential()`, `toFixed(2)`, `toPrecision(2)`: the goja interpreter answers
+via goja's own methods; -frozen, llvm.Run and native "is not a function". Implement
+them (node's exact digits) in all engines.
+
 ---
 
 # JV — Java
@@ -140,6 +145,9 @@ and `case T:` / `x.(T)` qualification inside packages.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
+### T-388 php: `var_export`, `json_encode` / `json_decode` · P1 · PHP · OPEN [V spec-only]
+"Call to undefined function" in all engines.
+
 ---
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
@@ -155,15 +163,6 @@ and `case T:` / `x.(T)` qualification inside packages.
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
-
-### T-383 goja prints some doubles with the wrong digits in the interpreter legs · P1 · CORE · IN PROGRESS (CORE worker, round 9) [V]
-`repr`/`String`/`printf("%.17g")` of `0.0015425378683206609` prints
-`0.001542537868320661` (a different double) under goja in the python, js and php
-interpreters; -frozen and the compiled legs are right - a live goja-vs-frozen
-divergence (manual ch. 4: goja's Number→String is not always shortest/round-trip).
-Find every interpreter path that takes a double's digits from the host and route it
-through the round-trip choice (floPrec / coreDecDigits), or fix the goja host's
-Number→String once for all grammars.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · IN PROGRESS (PY worker, round 13) [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -457,6 +456,7 @@ T-377 python: NotImplemented; dunder fallbacks; round/shift edge cases — DONE 
 T-378 kotlin: literal adoption remainder; HashMap; Char.toInt in the interpreter — DONE b6ef1660
 T-379 ts: port var hoisting and symbol conversions to TypeScript — DONE 5d7ec9cc
 T-380 js: string iteration by code point; Array values()/entries(); generator @@iterator — DONE 39d20f9b (compiled object→number conversion is T-385)
+T-383 goja prints some doubles with the wrong digits in the interpreter legs — DONE 38b10604 4d01c067 (goja vendored at its pinned revision under third_party/goja with one patched file; 411,923 doubles agree with node)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
