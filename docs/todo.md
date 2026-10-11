@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-369** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-370** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,7 +72,7 @@ Same root cause as T-170 (no tuple type). Close together with T-170.
 abnf/jsrtpydesc.go, layer 2). `bit_length`, `is_integer`, `as_integer_ratio`,
 `to_bytes`, `hex`, `fromhex` and the rest of int/float's methods are absent.
 
-### T-367 python: a lone high surrogate before a non-surrogate is read as a pair · P1 · PY · OPEN [V]
+### T-367 python: a lone high surrogate before a non-surrogate is read as a pair · P1 · PY · IN PROGRESS (JS+PY+DA worker, round 9) [V]
 `t = "a\ud83db" + "\ude00"`: len 3 (CPython 4); natively `ord(t[1])` fails "ord()
 expected a character, but string of length 3". Both halves.
 
@@ -80,40 +80,16 @@ expected a character, but string of length 3". Both halves.
 
 # RB — Ruby
 
-### T-356 ruby: uncaught-error prefix and stream; Exception methods compiled; small gaps · P2 · RB · IN PROGRESS (JS+RB+SH worker, round 8) [V]
-MRI 2.6 prints `p.rb:2:in `X': msg (Class)` on stderr, X the builtin method raising
-or the enclosing method/block (`block in <main>`); ours has no prefix and writes to
-stdout - needs per-call-site/operator positions in three engines (cost on the hot call
-path: measure). Compiled only: a bare `message` inside a user exception subclass's
-method raises NameError (no static table of Exception's methods). `%W[a b\ c]` loses
-the escaped space (MRI `["a", "b c"]`); `"#{enum}"` prints [object Object]; each_char
-iterates UTF-16 units (astral characters split).
-
 ---
 
 # JS — JavaScript and TypeScript
 
-### T-048 js: `with` · P3 · JS · Shared: runtime.c · IN PROGRESS (JS+RB+SH worker, round 8) [V]
-The interpreter can implement it exactly; the compiled engines cannot, because the
-floor's scope is not object-backed - snapshot-in/write-back cannot see a property
-added inside the body, which would ship a designed-in halves divergence. Needs an
-object-backed scope in the floor, or DECLINED with that reason.
-
-### T-049 js: `Symbol.iterator` · P3 · JS + CORE · IN PROGRESS (JS+RB+SH worker, round 8) [V]
-No symbols exist in the value model; `for..of`, `yield*` and `js_iterable` test
-structurally for a callable `next` in three engines. Needs a new tag in runtime.c, a
-Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symbol
-registry, and computed keys in the class/object-literal emitters. Buys user classes
-becoming iterable. Cost first; implement or DECLINE with the measurement.
-
-### T-355 js: missing builtin globals and `.prototype` objects · P2 · JS · IN PROGRESS (JS+RB+SH worker, round 8) [V]
-Boolean, Function, Date, Symbol are undefined in every leg (node "function").
-`.prototype` is undefined for Error/TypeError/RangeError/SyntaxError/Map/Set (all legs)
-and for RegExp/Promise/BigInt compiled (the interpreter answers the host's - a halves
-divergence); `class C{}; C.prototype` undefined; `Array.isArray(Array.prototype)` false;
-`String(Object)` "[object Function]" (node "function Object() { [native code] }");
-`typeof Object.keys` (a static method read as a value) "undefined". Needs a prototype
-object per class descriptor and builtin - a value-model change: cost it.
+### T-369 js: `var` is block-scoped; for-of/in reuse an outer variable; symbol limits · P1 · JS · IN PROGRESS (JS+PY+DA worker, round 9) [V]
+`function t(){ if (true) { var w = 3 } return w }` raises ReferenceError (node 3); same
+for `{ var z }`, a for body, try. `var k=0; for (k of [5,6]){}; k` gives 0 (node 6);
+for-in likewise. Symbol limits: `"" + sym` gives "Symbol(k)" (node TypeError); object
+spread / Object.assign drop symbol keys; only iterator/asyncIterator are well-known;
+`[1][Symbol.iterator]` undefined.
 
 ---
 
@@ -193,7 +169,7 @@ js_set calls and a scope_get of $slclass. Build it in one floor/layer-2 call.
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-368 dart: `List.join` · P1 · DA · OPEN [V spec-only]
+### T-368 dart: `List.join` · P1 · DA · IN PROGRESS (JS+PY+DA worker, round 9) [V spec-only]
 `[1,2].join(" ")`: "unknown List method: join" (interpreter) / "unknown list method
 'join'" (compiled). Sweep dart:core List's documented members (join, indexOf,
 contains, sublist, any/every, fold/reduce, sort, reversed, ...).
@@ -209,10 +185,6 @@ contains, sublist, any/every, fold/reduce, sort, reversed, ...).
 ---
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
-
-### T-334 bash: `${x,,}` / `${x@L}` leave Σ and İ unchanged · P1 · SH · IN PROGRESS (JS+RB+SH worker, round 8) [V]
-bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
-bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
 
 ### T-362 bash: a scalar declared without a value · P1 · SH · IN PROGRESS (GO+SH worker, round 10) [V]
 `declare ef; declare -p ef` and `f(){ local q=1; unset q; declare -p q; }`: both
@@ -513,6 +485,11 @@ T-171 moving floor bodies into layer 2 — PARTIAL cf8be7a (variadic prologue js
 T-154 replay-based generators repeat side effects in the interpreters — DECLINED: a host coroutine is impossible under the pinned goja (one LIFO VM stack; a second Runtime cannot call the first's closures); the feasible pure-MetaJS design (resumable statement drivers + an evaluation tape for the parked statement) is ~1,200 lines per grammar × js/ts/python. Replay is quadratic (13.9G → 44.1G instructions, n=400 → 800)
 T-293 correctly rounded transcendentals — DECLINED for full correct rounding (~3,000-3,600 lines over three engines; still disagrees with Apple libm where libm is wrong, e.g. cos 33/600); pow alone is T-363
 T-173 coroutines as CPS in the emitter — DECLINED: CPS in the emitter is ~1,200-1,800 lines in compile-core plus 100-200 per emitter, high risk; the cheaper stackful context switch is T-364
+T-334 bash: `${x,,}` / `${x@L}` leave Σ and İ unchanged — DONE 4af15cf
+T-356 ruby: uncaught-error prefix and stream; Exception methods compiled; small gaps — PARTIAL 3d8c473 (Exception methods compiled, %W, Enumerator to_s, each_char, stderr); MRI's per-site prefix and "from" lines DECLINED: a shadow frame stack costs +2.13% for one store per statement (measured), ~+7.7% with frames
+T-355 js: missing builtin globals and `.prototype` objects — PARTIAL 9ed9581 (prototype views, statics as values, Boolean, Object.is); Date/Function/native-code spelling DECLINED (clock, runtime compilation, no source kept)
+T-049 js: `Symbol.iterator` — DONE d7710ab (symbols as objects, no floor tag; limits in T-369)
+T-048 js: `with` — DONE 3a11a57 (lexical lowering + runtime chain walk; exact without an object-backed scope)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
