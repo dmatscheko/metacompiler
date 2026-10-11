@@ -2755,6 +2755,17 @@ function pyAArith(op, l, r) {
     return pyAOperand(l, op, l, r) / pyAOperand(r, op, l, r)
 }
 
+// Go: rt.pyPowF. x ** y on doubles, with CPython's two errors: zero to a
+// negative power, and a finite pair whose power overflows.
+function pyAPowF(x, y) {
+    if (x == 0 && y < 0) { pyRaiseExc("ZeroDivisionError", "zero to a negative power") }
+    var p = Math.pow(x, y)
+    if (p == p && p - p != 0 && x - x == 0 && y - y == 0) {
+        throw {__class: pyExcClass("OverflowError"), args: pyTup([34, "Result too large"])}
+    }
+    return p
+}
+
 // An operand of js_pybin's arithmetic arms as a double: an int, a bool, a
 // float box or a bigint, and CPython's TypeError for op on l and r for anything
 // else (4 - "s", "s" * 2.5). The arms before these have taken sets, sequences,
@@ -3712,12 +3723,16 @@ function js_pybin(opv, l, r) {
     // number whenever it still fits, so nothing below 2^53 changes shape.
     if (op == "**") {
         var ex = pyAOperand(r, op, l, r)
-        if (ex < 0) { return pyMkFlo(Math.pow(pyAOperand(l, op, l, r), ex)) }
+        if (ex < 0) {
+            // float(int) past the double range raises.
+            if (pyIsBig(l)) { return pyMkFlo(pyAPowF(pyBigToF(l), ex)) }
+            return pyMkFlo(pyAPowF(pyAOperand(l, op, l, r), ex))
+        }
         if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
             var bl = pyABigOperand(l)
             if (bl !== null) { return rtABigNarrow(rtABigPow(bl, ex)) }
         }
-        return pyIntOrFlo(Math.pow(pyAOperand(l, op, l, r), ex), l, r)
+        return pyIntOrFlo(pyAPowF(pyAOperand(l, op, l, r), ex), l, r)
     }
     if (op == "==") { return pyAEqual(l, r) }
     if (op == "!=") { return !pyAEqual(l, r) }
@@ -5014,13 +5029,8 @@ function js_pypow(args) {
         }
         return acc
     }
-    var ex = pyNum(r)
-    if (ex < 0) { return pyMkFlo(Math.pow(pyNum(l), ex)) }
-    if (!pyIsFlo(l) && !pyIsFlo(r) && ex == Math.trunc(ex) && ex <= 4096) {
-        var bl = pyABigOperand(l)
-        if (bl !== null) { return rtABigNarrow(rtABigPow(bl, ex)) }
-    }
-    return pyIntOrFlo(Math.pow(pyNum(l), ex), l, r)
+    // Two arguments are exactly the ** operator.
+    return js_pybin("**", l, r)
 }
 
 // callable(x): a function, a class object, or an instance whose class defines

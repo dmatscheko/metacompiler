@@ -4243,6 +4243,24 @@ def s79():
     x = *t, *(9,)
     check("tup14", repr(x) == "(1, 2, 9)" and repr(tuple("xy")) == "('x', 'y')" and repr((7).as_integer_ratio()) == "(7, 1)" and t.count(1) == 1 and t.index(2) == 1)
 
+# ===== SECTION 80: pow() is **, and a float power's two errors =====
+# Two-argument pow is the ** operator, big operands included. A zero to a
+# negative power is ZeroDivisionError, a finite pair whose float power overflows
+# is OverflowError(34, 'Result too large'), and an int too large for a double
+# cannot be a float base. Rows from CPython 3.14.
+def s80():
+    v = [-10**20, 2.0, -1, 10**20, 0, 10**400, 2, "s"]
+    check("fpw1", pow(v[0], v[1]) == 1e40 and repr(pow(v[2], v[3])) == "1" and repr(v[6] ** -v[3]) == "0.0" and repr(pow(v[0], -1)) == "-1e-20")
+    msgs = []
+    for f in [lambda: v[4] ** -1, lambda: pow(0.0, -2.5), lambda: v[1] ** v[3], lambda: pow(10.0, 400), lambda: v[5] ** -1, lambda: pow(v[7], 2)]:
+        try:
+            f()
+        except (ZeroDivisionError, OverflowError, TypeError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("fpw2", msgs == ["ZeroDivisionError: zero to a negative power", "ZeroDivisionError: zero to a negative power",
+                           "OverflowError: (34, 'Result too large')", "OverflowError: (34, 'Result too large')",
+                           "OverflowError: int too large to convert to float", "TypeError: unsupported operand type(s) for ** or pow(): 'str' and 'int'"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4323,5 +4341,6 @@ def main():
     s77() # SECTION-CALL 77
     s78() # SECTION-CALL 78
     s79() # SECTION-CALL 79
+    s80() # SECTION-CALL 80
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

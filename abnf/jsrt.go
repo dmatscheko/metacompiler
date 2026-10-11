@@ -16195,16 +16195,20 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// 1e+30. Past 2^53 the double has lost digits, so the exact answer
 				// comes from math/big; pyBigNarrow hands back a plain number whenever
 				// it still fits, so nothing below 2^53 changes shape.
-				e := rt.toNumber(r)
+				e := rt.pyToF(r)
 				if e < 0 {
-					return w(&jsPyFlo{f: crPow(rt.toNumber(l), e)})
+					base := rt.pyToF(l)
+					if bi, ok := l.(*jsBigInt); ok { // float(int) past the double range raises
+						base = rt.pyBigToF(bi.v)
+					}
+					return w(&jsPyFlo{f: rt.pyPowF(base, e)})
 				}
 				if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 4096 {
 					if bl, ok := pyBigOperand(l); ok {
 						return w(rt.pyBigNarrow(new(big.Int).Exp(bl, big.NewInt(int64(e)), nil)))
 					}
 				}
-				return w(pyIntOrFlo(crPow(rt.toNumber(l), e), l, r))
+				return w(pyIntOrFlo(rt.pyPowF(rt.pyToF(l), e), l, r))
 			case "==":
 				return boolH(rt.pyEqual(l, r))
 			case "!=":
@@ -17007,16 +17011,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(rt.pyBigNarrow(new(big.Int).Exp(bl, br, bm)))
 			}
-			e := rt.toNumber(r)
-			if e < 0 {
-				return w(&jsPyFlo{f: crPow(rt.toNumber(l), e)})
-			}
-			if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 4096 {
-				if bl, ok := pyBigOperand(l); ok {
-					return w(rt.pyBigNarrow(new(big.Int).Exp(bl, big.NewInt(int64(e)), nil)))
-				}
-			}
-			return w(pyIntOrFlo(crPow(rt.toNumber(l), e), l, r))
+			// Two arguments are exactly the ** operator.
+			return w(rt.pyExt("js_pybin", "**", l, r))
 		},
 		// callable(x): a function, a class object, or an instance whose class
 		// defines __call__.
@@ -17897,6 +17893,23 @@ func (rt *jsrt) pyToF(v interface{}) float64 {
 		return f
 	}
 	return rt.toNumber(v)
+}
+
+// pyPowF is x ** y on doubles, with CPython's two errors: zero to a negative
+// power, and a finite pair whose power overflows. Twin of pyPowF in
+// languages/python-interpreter.abnf and pyAPowF in lib/python-rt.metajs.
+func (rt *jsrt) pyPowF(x, y float64) float64 {
+	if x == 0 && y < 0 {
+		rt.pyRaise("ZeroDivisionError", "zero to a negative power")
+	}
+	p := crPow(x, y)
+	if math.IsInf(p, 0) && !math.IsInf(x, 0) && !math.IsInf(y, 0) && !math.IsNaN(x) && !math.IsNaN(y) {
+		inst := newJSObject()
+		inst.set("__class", rt.pyExcClass("OverflowError"))
+		inst.set("args", pyTup(&jsArray{elems: []interface{}{34.0, "Result too large"}}))
+		panic(&jsThrown{value: inst})
+	}
+	return p
 }
 
 // pyIntTrueDiv is int / int, the exact quotient rounded once to the nearest

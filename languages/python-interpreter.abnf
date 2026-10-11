@@ -6344,13 +6344,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // either side is one - and one side always is, to be here at all.
         if (op == "//") { return {v: pyFlo(fdiv(x, y))} }
         if (op == "%") { return {v: pyFlo(fmod(x, y))} }
-        if (op == "**") { return {v: pyFlo(Math.pow(x, y))} }
+        if (op == "**") { return {v: pyFlo(pyPowF(x, y))} }
         if (op == "|") { return {v: x | y} }
         if (op == "&") { return {v: x & y} }
         if (op == "^") { return {v: x ^ y} }
         if (op == "<<") { return {v: x << y} }
         if (op == ">>") { return {v: x >> y} }
         return null
+    }
+    // x ** y on doubles, with CPython's two errors: zero to a negative power, and
+    // a finite pair whose power overflows. Twin of rt.pyPowF in abnf/jsrt.go and
+    // pyAPowF in lib/python-rt.metajs.
+    function pyPowF(x, y) {
+        if (x == 0 && y < 0) { pyListErr("ZeroDivisionError", "zero to a negative power") }
+        var p = Math.pow(x, y)
+        if (p == p && p - p != 0 && x - x == 0 && y - y == 0) { pyRaise(pyMakeExc("OverflowError", [34, "Result too large"])) }
+        return p
     }
     // Python's ==, for the pairs where at least one side is a float box.
     function floEq(a, b) {
@@ -7260,7 +7269,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (op == "**") {
             var e = bigToNum(r)
-            if (e < 0) { return {v: pyFlo(Math.pow(bigToNum(l), e))} }
+            if (e < 0) { return {v: pyFlo(pyPowF(bigIsBig(l) ? bigToFlo(l) : bigToNum(l), e))} }
             if (e > 4096) { return {v: Math.pow(bigToNum(l), e)} }
             return {v: bigOut(bigPow(a, e))}
         }
@@ -7472,7 +7481,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // path's: boxOp's `**` arm, which is bigPow. bigOut narrows it back to a
         // plain number when it fits, so nothing below 2^53 changes shape.
         if (op == "**") {
-            if (r < 0) { return pyFlo(Math.pow(l, r)) }
+            if (r < 0) { return pyFlo(pyPowF(l, r)) }
             var pw = Math.pow(l, r)
             if (pw > bigMaxNum || pw < 0 - bigMaxNum) { return boxOp("**", l, r).v }
             return pw
