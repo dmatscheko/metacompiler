@@ -7,7 +7,8 @@
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
 // strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and five
-// intrinsics: __mec_fmtfloat for sprintf's float conversions, __mec_math for
+// intrinsics: __mec_fmtfloat for sprintf's float conversions ("r" is the
+// shortest digits serialize_precision=-1 lays out), __mec_math for
 // the math library's double operations, __mec_aptr for the internal array
 // pointer, __mec_precision for the precision setting and __mec_oid for an
 // object's handle. A native also gets a
@@ -523,6 +524,9 @@ function array_diff_uassoc($array, ...$rest) { $cb = __mec_takecb($rest); return
 function array_intersect_uassoc($array, ...$rest) { $cb = __mec_takecb($rest); return __mec_setop($array, $rest, 2, true, null, $cb); }
 
 // ----- callbacks -------------------------------------------------------------
+// A string key of call_user_func_array's list is a named argument, as in a spread.
+function call_user_func($callback, ...$args) { return $callback(...$args); }
+function call_user_func_array($callback, $args) { return $callback(...$args); }
 function array_map($callback, $array, ...$arrays) {
     $out = [];
     if (count($arrays) == 0) {
@@ -1599,6 +1603,57 @@ function __mec_roundsig($sig, $exp, $places) {
     return $places > 0 ? $int . "." . $frac : $int;
 }
 
+// ----- print_r ---------------------------------------------------------------
+// zend_print_zval_r. A scalar is its string form; an array or object is a header
+// line, then "(" indented $indent spaces, each entry 4 further as "[key] => value"
+// with a nested block 8 further, then ")". An object already being printed further
+// up is " *RECURSION*" after its header.
+function print_r($value, $return = false) {
+    $s = __mec_printr($value, 0, []);
+    if ($return) { return $s; }
+    echo $s;
+    return true;
+}
+function __mec_printr($v, $indent, $seen) {
+    if (is_array($v)) { return "Array\n" . __mec_printrhash($v, $indent, false, $seen); }
+    if (!is_object($v)) { return (string)$v; }
+    $name = get_class($v);
+    $z = strpos($name, "\0");
+    if ($z !== false) { $name = substr($name, 0, $z); }
+    if ($v instanceof UnitEnum) {
+        $props = ["name" => $v->name];
+        $head = $name . " Enum";
+        if ($v instanceof BackedEnum) {
+            $props["value"] = $v->value;
+            $head .= is_int($v->value) ? ":int" : ":string";
+        }
+        $head .= "\n";
+    } else {
+        $props = (array)$v;
+        $head = $name . " Object\n";
+    }
+    foreach ($seen as $o) {
+        if ($o === $v) { return $head . " *RECURSION*"; }
+    }
+    $seen[] = $v;
+    return $head . __mec_printrhash($props, $indent, true, $seen);
+}
+// A mangled property name shows its visibility: "\0*\0p" is [p:protected] and
+// "\0C\0p" is [p:C:private].
+function __mec_printrhash($h, $indent, $isObj, $seen) {
+    $pad = str_repeat(" ", $indent);
+    $out = $pad . "(\n";
+    foreach ($h as $k => $e) {
+        if ($isObj && is_string($k) && $k !== "" && $k[0] === "\0") {
+            $p = strpos($k, "\0", 1);
+            $cls = substr($k, 1, $p - 1);
+            $k = substr($k, $p + 1) . ($cls === "*" ? ":protected" : ":" . $cls . ":private");
+        }
+        $out .= $pad . "    [" . $k . "] => " . __mec_printr($e, $indent + 8, $seen) . "\n";
+    }
+    return $out . $pad . ")\n";
+}
+
 // ----- var_export and JSON ---------------------------------------------------
 // A float at serialize_precision=-1, which var_export and json_encode share with
 // var_dump: the shortest round-tripping digits laid out by zend_gcvt at 17
@@ -1607,7 +1662,7 @@ function __mec_serfloat($num, $e) {
     if (is_nan($num)) { return "NAN"; }
     if (is_infinite($num)) { return $num < 0 ? "-INF" : "INF"; }
     if ($num == 0) { return fdiv(1, $num) < 0 ? "-0" : "0"; }
-    $s = __mec_fmtfloat($num, "g", 17);
+    $s = __mec_fmtfloat($num, "r", 17);
     if ($e === "E") { $s = strtoupper($s); }
     return $num < 0 ? "-" . $s : $s;
 }

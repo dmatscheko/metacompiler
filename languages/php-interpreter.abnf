@@ -206,14 +206,14 @@ ReturnType  = ":" TypeHint ;
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
-ExtBase     <~~ push({ext: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
+ExtBase     <~~ push({ext: lastSeg(stripWs(up.in)), raw: stripWs(up.in)}) ~~> = ExtName ;
 ClassMod    = ( CiAbstract | CiFinal | CiReadonly ) KwEnd ;
 CiAbstract  = CiA :whitespace() CiB CiS CiT CiR CiA CiC CiT :whitespace(Whitespace) ;
 CiFinal     = CiF :whitespace() CiI CiN CiA CiL :whitespace(Whitespace) ;
 CiReadonly  = CiR :whitespace() CiE CiA CiD CiO CiN CiL CiY :whitespace(Whitespace) ;
 ExtName     = [ "\\" ] Id { "\\" Id } ;
 ImplList    = ImplName { "," ImplName } ;
-ImplName    <~~ push({impl: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
+ImplName    <~~ push({impl: lastSeg(stripWs(up.in)), raw: stripWs(up.in)}) ~~> = ExtName ;
 Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: modifiers and a reference-return '&' are accepted and ignored; an
 // abstract/interface method has no body (';' instead of a block -> empty method).
@@ -992,7 +992,7 @@ NewDyn      <~~ push({clsdyn: pop()}) ~~> = VarRef ;
 // real class body (Member), not a balanced skip, and the constructor arguments are
 // labelled so makeNewAnon can tell them from the members.
 NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
-            = KwNew [ AttrGrp ] KwClass [ AnonArgs ] [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
+            = KwNew [ AttrGrp ] KwClass <~~ push({anonAt: up.pos}) ~~> [ AnonArgs ] [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
 AnonArgs    <~~ push({sargs: takeAll()}) ~~>
             = "(" [ ArgList ] ")" ;
 
@@ -2769,7 +2769,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // shortest representation. A precision is mode 2, the exact binary value
     // correctly rounded to ndigit digits (rounded=true). For a NORMAL double and
     // ndigit <= 15 that is the shortest digits rounded (they lie within half an ulp,
-    // finer than a 15-digit step) unless digits 15..17 sit exactly on a tie; a
+    // finer than a 15-digit step) unless they END in a 5 just past ndigit, a tie
+    // only the exact value breaks (0.15 is 0.1 at one digit, 2.5 is 2); a
     // subnormal's shortest digits are too few (1.7E-319 is 1.6999810742106E-319
     // to echo), and more digits need the exact decimal (phsExactDigits).
     //
@@ -2858,11 +2859,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         else if (n === 0 && 1 / n < 0) { sign = "-" }
         if (a === 0) { return sign + "0" }
         var r = {d: "", e: 0}
-        if (rounded && (nd > 15 || a < PHP_MIN_NORMAL)) { r = phsExactDigits(a, nd, coreExactDec, coreRoundHalfEven) }
-        else {
-            var sp = floSplit(a)
-            r = floRound(sp.d, sp.e, nd)
-        }
+        var sp = floSplit(a)
+        if (rounded && (nd > 15 || a < PHP_MIN_NORMAL || (sp.d.length == nd + 1 && sp.d.charAt(nd) == "5"))) {
+            r = phsExactDigits(a, nd, coreExactDec, coreRoundHalfEven)
+        } else { r = floRound(sp.d, sp.e, nd) }
         var d = r.d
         var decpt = r.e
         if (decpt < 0 ? decpt < 0 - 3 : decpt > nd) {
@@ -3398,7 +3398,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A constant is looked up along the base chain AND through the implemented
     // interfaces (an interface constant is visible on every implementor), and is
     // evaluated on first use with self:: bound to the class that declared it.
-    function constFind(cls, name) {
+    //
+    // A cycle is zend_get_class_constant_ex's error: a constant read from INSIDE
+    // another constant's initializer is marked while it is evaluated, and reading a
+    // marked one raises "Cannot declare self-referencing constant <shown>", shown
+    // as written (self::B, Foo::B). The outermost read is not marked, so
+    // `A = Foo::B; B = Foo::A` read as Foo::A reports Foo::B. Twin of phpConstIn
+    // in abnf/jsrtphp.go and phConstVal in lib/php-rt.metajs.
+    var constDepth = 0
+    function constFind(cls, name, shown) {
         var k = cls
         while (k != undefined && k != null) {
             var cv = k.__constV
@@ -3410,8 +3418,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (t != undefined && t != null) {
                 for (var j = 0; j < t.length; j++) {
                     if (t[j].name == name) {
+                        var rec = t[j]
+                        if (rec.visiting === true) { phpRaise("Error", "Cannot declare self-referencing constant " + shown) }
+                        if (constDepth > 0) { rec.visiting = true }
+                        constDepth = constDepth + 1
                         var val = anytype
-                        val = constEval(k, t[j])
+                        try { val = constEval(k, rec) } catch (e) {
+                            rec.visiting = false
+                            constDepth = constDepth - 1
+                            throw e
+                        }
+                        rec.visiting = false
+                        constDepth = constDepth - 1
                         dictSet(k.__constV, name, val)
                         return {v: val}
                     }
@@ -3424,7 +3442,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     var iv = anytype
                     iv = getVar(ifs[q])
                     if (iv != null && iv != undefined && iv.__isclass === true) {
-                        var r = constFind(iv, name)
+                        var r = constFind(iv, name, shown)
                         if (r != null) { return r }
                     }
                 }
@@ -3470,9 +3488,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (args != null) { fail("cannot call a static property") }
             return deref(staticCell(cls, prop).v)
         }
-        if (name == "class" && args == null) { return cls.__name }
+        if (name == "class" && args == null) { return fullName(cls) }
         if (args == null) {
-            var cr = constFind(cls, name)
+            var cr = constFind(cls, name, baseText + "::" + name)
             if (cr != null) { return cr.v }
             fail("unknown class constant " + cls.__name + "::" + name)
         }
@@ -4461,18 +4479,36 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // so an ANONYMOUS class (new class (...) { ... }) can build one the same way,
     // without a name and without declaring anything.
     function classParts(items, start) {
-        var p = {methods: [], props: [], statics: [], consts: [], ext: null, ifaces: [], uses: []}
+        var p = {methods: [], props: [], statics: [], consts: [], ext: null, ifaces: [], uses: [], rawNames: []}
         for (var i = start; i < items.length; i++) {
             var it = items[i]
             if (it == null || it == undefined) { continue }
-            if (it.method != undefined) { p.methods.push(it.method) }
+            if (it.method != undefined) {
+                p.methods.push(it.method)
+                // A promoted constructor parameter declares its property where the
+                // constructor stands in the body: PHP's slot order is body order.
+                if (it.method.name == "__construct") {
+                    var cps = it.method.params
+                    for (var pq = 0; pq < cps.length; pq++) {
+                        if (cps[pq].promote === true) {
+                            p.props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: [], vis: cps[pq].vis})
+                        }
+                    }
+                }
+            }
             else if (it.usetrait != undefined) { p.uses.push(it.usetrait) }
             else if (it.propdecl != undefined) {
                 if (it.propdecl.isStatic === true) { p.statics.push(it.propdecl) } else { p.props.push(it.propdecl) }
             }
             else if (it.cconsts != undefined) { collectConsts(it.cconsts, p.consts) }
-            else if (it.ext != undefined) { p.ext = stripWs(it.ext) }
-            else if (it.impl != undefined) { p.ifaces.push(stripWs(it.impl)) }
+            else if (it.ext != undefined) {
+                p.ext = stripWs(it.ext)
+                p.rawNames.unshift(it.raw)
+            }
+            else if (it.impl != undefined) {
+                p.ifaces.push(stripWs(it.impl))
+                p.rawNames.push(it.raw)
+            }
         }
         return p
     }
@@ -4563,19 +4599,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function buildClass(name, p) {
         var tm = traitMembers(p.uses)
-        // PHP's slot order: the class's own properties, those its constructor
-        // promotes (their slots exist before it fills them), then a trait's.
+        // PHP's slot order: the class's own properties in body order (promoted
+        // ones included, classParts), then a trait's.
         var props = []
         for (var op = 0; op < p.props.length; op++) { props.push(p.props[op]) }
-        for (var pm = 0; pm < p.methods.length; pm++) {
-            if (p.methods[pm].name != "__construct") { continue }
-            var cps = p.methods[pm].params
-            for (var pq = 0; pq < cps.length; pq++) {
-                if (cps[pq].promote === true) {
-                    props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: [], vis: cps[pq].vis})
-                }
-            }
-        }
         for (var tp2 = 0; tp2 < tm.props.length; tp2++) { props.push(tm.props[tp2]) }
         var consts = []
         for (var tc = 0; tc < tm.consts.length; tc++) { consts.push(tm.consts[tc]) }
@@ -4619,13 +4646,31 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // PHP method names are case-insensitive, so a method is stored under its declared
     // name and, when that differs, under its lower-cased name too: a call names it as
-    // written and retries lower-cased on a miss (mcall, the static call). A class
-    // that declares two spellings of one name along its parent chain keeps the
-    // exact spelling's. Twin of emitMethodSet in php-to-llvm-ir.abnf.
+    // written and retries lower-cased on a miss (mcall, the static call). An override
+    // must also win over every OTHER spelling its ancestors declared, or a call
+    // spelled the parent's way would find the parent's exact name first; so
+    // "__ms:" + the lower-cased name records the spellings seen down to this class,
+    // and the override is stored under each of them. The lookup itself stays one
+    // exact probe per class. Twin of js_phmset in abnf/jsrtphp.go and
+    // lib/php-rt.metajs.
     function setMethod(cls, mname, fn) {
-        cls[mname] = fn
         var lc = phsCase(mname, false)
+        var key = "__ms:" + lc
+        var spells = ","
+        var k = cls
+        while (k != undefined && k != null) {
+            if (typeof k[key] == "string") { spells = k[key]; break }
+            k = k.__super
+        }
+        var from = 1
+        while (from < spells.length) {
+            var to = spells.indexOf(",", from)
+            cls[spells.substring(from, to)] = fn
+            from = to + 1
+        }
+        cls[mname] = fn
         if (lc != mname) { cls[lc] = fn }
+        cls[key] = spells + mname + ","
     }
     function makeClassStmt(items) {
         var name = items[0]
@@ -4698,28 +4743,54 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return null
         }
     }
-    // new class (args) extends B implements I { ... } : the class descriptor is built
-    // fresh on every evaluation (so each 'new class' really is its own type) and is
-    // never declared, which is exactly what makes it anonymous.
+    // new class (args) extends B implements I { ... } : the class descriptor is never
+    // declared, which is what makes it anonymous, and is built the first time its
+    // declaration site runs and kept: PHP declares it once per site, so its statics
+    // persist and every instance shares one class.
+    var anonCount = 0
     function makeNewAnon(items) {
         var args = []
         var rest = []
+        var at = 0
         for (var i = 0; i < items.length; i++) {
             if (items[i] != null && items[i] != undefined && items[i].sargs != undefined) { args = items[i].sargs }
+            else if (items[i] != null && items[i] != undefined && items[i].anonAt != undefined) { at = items[i].anonAt }
             else { rest.push(items[i]) }
         }
         var p = classParts(rest, 0)
-        var shown = anonClassName(p.ext, p.ifaces)
-        return function() { return instantiate(buildClass(shown, p), evalArgs(args)) }
+        var shown = anonClassName(p.rawNames)
+        var sfx = anonSuffix(at, anonCount)
+        anonCount = anonCount + 1
+        var site = {cls: null}
+        return function() {
+            if (site.cls == null) {
+                site.cls = buildClass(shown, p)
+                site.cls.__anon = sfx
+            }
+            return instantiate(site.cls, evalArgs(args))
+        }
     }
     // The name an anonymous class shows: its parent's, else its first interface's,
-    // else "class", then "@anonymous" (PHP's full name goes on after a NUL byte that
-    // every display stops at). Twin of anonClassName in php-to-llvm-ir.abnf.
-    function anonClassName(ext, ifaces) {
-        var base = ext != null ? ext : (ifaces.length > 0 ? ifaces[0] : "class")
+    // as written (rawNames lists the parent first), else "class", then
+    // "@anonymous". Twin of anonClassName in php-to-llvm-ir.abnf.
+    function anonClassName(rawNames) {
+        var base = rawNames.length > 0 ? rawNames[0] : "class"
         if (base.charCodeAt(0) == 92) { base = base.substring(1) }
         return base + "@anonymous"
     }
+    // The rest of its full name, which get_class and ::class answer (fullName) and
+    // every display stops before. Twin of anonSuffix in php-to-llvm-ir.abnf, which
+    // spells it out.
+    function anonSuffix(pos, n) {
+        var hex = ""
+        var v = n
+        while (hex == "" || v > 0) {
+            hex = "0123456789abcdef".charAt(v % 16) + hex
+            v = (v - v % 16) / 16
+        }
+        return "\x00" + c.file + ":" + c.lineOf(pos) + "$" + hex
+    }
+    function fullName(cls) { return typeof cls.__anon == "string" ? cls.__name + cls.__anon : cls.__name }
     // An interface: a class descriptor with no bodies, so instanceof and the
     // implements list can resolve it. Extended interfaces land in __ifaces too.
     function makeIfaceStmt(items) {
@@ -4830,13 +4901,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "strtolower": function(s) { return phsCase(phpStr(s), false) },
         "strtoupper": function(s) { return phsCase(phpStr(s), true) },
         // sprintf's float conversions of |x|: "f" and "e" exact, "g" the zend_gcvt
-        // renderer echo uses, at the requested precision.
+        // renderer echo uses, at the requested precision, and "r" the same layout of
+        // the shortest digits (serialize_precision=-1).
         "__mec_fmtfloat": function(x, conv, prec) {
             var a = numOf(toNumV(x))
             if (a < 0) { a = 0 - a }
             var p = phpInt(prec)
-            if (conv == "g") {
-                var g = floFormat(a, p, false)
+            if (conv == "g" || conv == "r") {
+                var g = floFormat(a, p, conv == "g")
                 var out = ""
                 for (var i = 0; i < g.length; i++) { out = out + (g.charAt(i) == "E" ? "e" : g.charAt(i)) }
                 return out
@@ -4925,7 +4997,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // The diagnostics level is not modelled (every engine error here is fatal),
         // so error_reporting() accepts and reports a level without acting on it.
         "error_reporting": function(v) { return 32767 },
-        "get_class": function(v) { return isObj(v) ? v.__class.__name : false },
+        "get_class": function(v) { return isObj(v) ? fullName(v.__class) : false },
         "method_exists": function(v, m) { return phpMethodExists(v, m) },
         "gettype": function(v) { return phpTypeName(v) },
         "get_debug_type": function(v) { return phpDebugType(v) },

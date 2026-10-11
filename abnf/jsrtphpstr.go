@@ -341,8 +341,8 @@ func init() {
 			}
 			conv := rt.phpStr(u(a[1]))
 			prec := num(u(a[2]))
-			if conv == "g" {
-				return w(strings.Replace(phpFloFormat(x, prec, false), "E", "e", 1))
+			if conv == "g" || conv == "r" {
+				return w(strings.Replace(phpFloFormat(x, prec, conv == "g"), "E", "e", 1))
 			}
 			return w(phpFmtFloat(x, conv, prec))
 		}

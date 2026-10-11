@@ -636,7 +636,8 @@ check("json-decode-errors", $jcodes, [4, 4, 4, 4, 4, 10, 3, 3, 1, "Syntax error"
 // A non-public property is mangled by (array) ("\0*\0p", "\0Class\0q"), left out
 // of json_encode, printed with :protected / :"Class":private by var_dump and
 // iterated by foreach only where the class scope can read it; slots are the
-// class's own properties, then its promoted ones, then a trait's. method_exists
+// class's own properties in body order (a promoted one where the constructor
+// stands), then a trait's. method_exists
 // is case-insensitive and ignores visibility. A property initializer is a
 // constant expression in which self:: names the class (tests/bug66015.phpt).
 trait VisT { private $tp = "t"; }

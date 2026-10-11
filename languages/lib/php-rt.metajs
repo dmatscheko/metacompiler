@@ -433,11 +433,10 @@ function phFloFormat(n, nd, rounded) {
     } else if (n === 0 && 1 / n < 0) { sign = "-" }
     if (a === 0) { return sign + "0" }
     var r = {d: "", e: 0}
-    if (rounded && (nd > 15 || a < Math.pow(2, 0 - 1022))) { r = phsExactDigits(a, nd, rtExactDec, rtRoundHalfEven) }
-    else {
-        var sp = phFloSplit(a)
-        r = phFloRound(sp.d, sp.e, nd)
-    }
+    var sp = phFloSplit(a)
+    if (rounded && (nd > 15 || a < Math.pow(2, 0 - 1022) || (sp.d.length == nd + 1 && sp.d.charAt(nd) == "5"))) {
+        r = phsExactDigits(a, nd, rtExactDec, rtRoundHalfEven)
+    } else { r = phFloRound(sp.d, sp.e, nd) }
     var d = r.d
     var decpt = r.e
     var expo = decpt > nd
@@ -1293,15 +1292,25 @@ function phOwner(cls, key) {
 }
 
 // The constant stored under key on its declaring class o, computed on first read
-// from its {__lazyconst: closure} box. Twin of the box arm of phpConstIn in
-// abnf/jsrtphp.go.
-function phConstVal(o, key) {
+// from its {__lazyconst: closure} box; shown names it in the self-referencing
+// constant Error. Twin of the box arm of phpConstIn in abnf/jsrtphp.go.
+var phConstDepth = 0
+function phConstVal(o, key, shown) {
     var v = anytype
     v = o[key]
     if (typeof v == "object" && !rtIsNil(v) && !phIsList(v)) {
-        var f = v["__lazyconst"]
+        var box = v
+        var f = box["__lazyconst"]
         if (f !== undefined) {
-            v = f.apply(undefined, [null])
+            if (box["__visiting"] === true) { phRaise("Error", "Cannot declare self-referencing constant " + shown) }
+            if (phConstDepth > 0) { box["__visiting"] = true }
+            phConstDepth = phConstDepth + 1
+            try {
+                v = f.apply(undefined, [null])
+            } finally {
+                phConstDepth = phConstDepth - 1
+                box["__visiting"] = false
+            }
             o[key] = v
         }
     }
@@ -1310,12 +1319,12 @@ function phConstVal(o, key) {
 
 // phConstIn walks a class's own chain and then its interfaces: PHP inherits a
 // constant from a base class AND from every implemented interface.
-function phConstIn(cls, name, depth) {
+function phConstIn(cls, name, shown, depth) {
     if (cls === undefined) { return undefined }
     if (cls === null) { return undefined }
     if (depth > 16) { return undefined }
     var o = phOwner(cls, "k:" + name)
-    if (o !== undefined) { return {v: phConstVal(o, "k:" + name)} }
+    if (o !== undefined) { return {v: phConstVal(o, "k:" + name, shown)} }
     var k = cls
     var guard = 0
     while (guard < 64) {
@@ -1331,7 +1340,7 @@ function phConstIn(cls, name, depth) {
                 while (i < p.v.length) {
                     var iv = p.v[i]
                     if (iv !== undefined && iv !== null && typeof iv == "object") {
-                        var f = phConstIn(iv, name, depth + 1)
+                        var f = phConstIn(iv, name, shown, depth + 1)
                         if (f !== undefined) { return f }
                     }
                     i = i + 1
@@ -1912,8 +1921,7 @@ function js_phmcall(recv, name, args) {
             // rtFindMethod / rtPrepend, lib/runtime.metajs.
             var mm = rtFindMethod(cls, name)
             // Method names are case-insensitive: a class also holds each method under
-            // its lower-cased name (emitMethodSet in php-to-llvm-ir.abnf), which a miss
-            // retries.
+            // its lower-cased name (js_phmset), which a miss retries.
             if (typeof mm != "function") { mm = rtFindMethod(cls, phsCase(phStr(name), false)) }
             if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
             // PHP 8: `Error: Call to undefined method Foo::nope()`, and it is an
@@ -2131,8 +2139,42 @@ function js_phmexists(v, m) {
     return false
 }
 function js_phgetclass(v) {
-    if (phIsObj(v)) { return phClassName(v) }
+    if (phIsObj(v)) {
+        var cls = v["__class"]
+        if (cls !== undefined) { return phFullName(cls) }
+        return phClassName(v)
+    }
     return false
+}
+// The name get_class and ::class answer. Twin of phpFullName in abnf/jsrtphp.go.
+function phFullName(cls) {
+    var sfx = cls["__anon"]
+    if (typeof sfx == "string") { return phStr(cls["__name"]) + sfx }
+    return phStr(cls["__name"])
+}
+// A method declaration. Twin of setMethod in php-interpreter.abnf, which says why
+// every recorded spelling is set.
+function js_phmset(cls, name, fn) {
+    var mname = phStr(name)
+    var lc = phsCase(mname, false)
+    var key = "__ms:" + lc
+    var spells = ","
+    var k = cls
+    while (k !== undefined && k !== null) {
+        var sp = k[key]
+        if (typeof sp == "string") { spells = sp; break }
+        k = k["__super"]
+    }
+    var from = 1
+    while (from < spells.length) {
+        var to = spells.indexOf(",", from)
+        cls[spells.substring(from, to)] = fn
+        from = to + 1
+    }
+    cls[mname] = fn
+    cls[lc] = fn
+    cls[key] = spells + mname + ","
+    return null
 }
 
 // ----- PHP: arrays ----------------------------------------------------------
@@ -2214,14 +2256,15 @@ function js_phchr(n) { return phsChr(phInt(n)) }
 function js_phcase(s, up) { return phsCase(phStr(s), up === true) }
 
 // sprintf's float conversions of |x|: "f" and "e" exact (php-strings.js), "g"
-// the zend_gcvt renderer echo uses, at the requested precision.
+// the zend_gcvt renderer echo uses, at the requested precision, "r" the same
+// layout of the shortest digits. Twin of __mec_fmtfloat in php-interpreter.abnf.
 function js_phfmtfloat(x, conv, prec) {
     var a = phNumOf(phToNum(x))
     if (a < 0) { a = 0 - a }
     var c = phStr(conv)
     var p = phInt(prec)
-    if (c == "g") {
-        var g = phFloFormat(a, p, false)
+    if (c == "g" || c == "r") {
+        var g = phFloFormat(a, p, c == "g")
         var out = ""
         var i = 0
         while (i < g.length) {
@@ -2325,9 +2368,12 @@ function js_phvivroot(cur) {
 
 // ----- PHP: classes ---------------------------------------------------------
 
-function js_phconst(target, name) {
+// base is the class as the source wrote it, or null when it was named through a
+// value. Twin of phpConst in abnf/jsrtphp.go.
+function js_phconst(target, name, base) {
     var cls = phClassOf(target)
-    var f = phConstIn(cls, name, 0)
+    var shown = rtIsNil(base) ? phStr(cls["__name"]) : phStr(base)
+    var f = phConstIn(cls, name, shown + "::" + name, 0)
     if (f !== undefined) { return f.v }
     fail("undefined constant " + phStr(cls["__name"]) + "::" + name)
     return null
@@ -2351,7 +2397,7 @@ function js_phsset(target, name, v) {
 // C::class / $o::class
 function js_phcname(v) {
     if (typeof v == "string") { return v }
-    return phClassOf(v)["__name"]
+    return phFullName(phClassOf(v))
 }
 
 function js_phisa(v, t) {

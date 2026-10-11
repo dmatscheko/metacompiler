@@ -1792,6 +1792,15 @@ class S45M {
     function getName() { return "n"; }
     static function Make() { return "m"; }
 }
+// An override in another letter case still overrides: the method table is keyed
+// case-insensitively, so getName() on a child that declares GETNAME() runs the
+// child's, and a class's hello() beats its trait's Hello().
+class S45G { function getName() { return "G"; } function viaThis() { return $this->GETname(); } }
+class S45H extends S45G { function GETNAME() { return "H>" . parent::getname(); } }
+trait S45T { function Hello() { return "trait"; } }
+class S45K extends S45H { use S45T; function hello() { return "class"; } }
+// One anonymous class per declaration SITE: two evaluations share its statics.
+function s45anon() { return new class { public static $n = 0; function inc() { return ++static::$n; } }; }
 function s45miss($o) {
     try { $o->nope(); } catch (Error $e) { return $e->getMessage(); }
     return "";
@@ -1815,12 +1824,65 @@ function s45() {
     check("anc1", s45miss(new class {}) === "Call to undefined method class@anonymous::nope()"
         && s45miss(new class extends S45P {}) === "Call to undefined method S45P@anonymous::nope()"
         && s45miss(new class implements S45I {}) === "Call to undefined method S45I@anonymous::nope()");
+    $h = new S45H();
+    $k = new S45K();
+    check("mcs2", $h->getName() === "H>G" && $h->viaThis() === "H>G" && $k->GetName() === "H>G"
+        && $k->Hello() === "class" && $k->HELLO() === "class");
+    $x = s45anon();
+    $y = s45anon();
+    $n = get_class($x);
+    check("anc2", $x->inc() === 1 && $y->inc() === 2 && $n === get_class($y) && $n !== get_class(new class {})
+        && strstr($n, "\0", true) === "class@anonymous" && strlen($n) > 16 && $x::class === $n);
     $a = new S45M();
     $b = new S45M();
     $c = clone $a;
     check("oid1", is_int(spl_object_id($a)) && spl_object_id($a) === spl_object_id($a)
         && spl_object_id($a) !== spl_object_id($b) && spl_object_id($c) !== spl_object_id($a)
         && spl_object_id($c) !== spl_object_id($b));
+}
+
+// ===== SECTION 46: print_r, call_user_func, slot order, constant cycles =====
+// print_r is zend_print_zval_r: "Array\n(" blocks, entries indented four spaces
+// as "[key] => value", nested blocks eight further, visibility shown on mangled
+// property names, and an object already being printed is " *RECURSION*"
+// (enum/print_r.phpt for enums). A promoted constructor property takes its slot
+// where the constructor stands in the class body. A constant read inside
+// another constant's initializer is marked while it runs, so a cycle is
+// "Cannot declare self-referencing constant" naming the reference that found a
+// mark (constants/bug41633_3.phpt, constexpr/constant_expressions_self_referencing_array.phpt).
+// sprintf's %g is zend_gcvt at the requested precision, the exact binary value
+// correctly rounded (dtoa mode 2, half to even on an exact tie), as echo is.
+// A numeric string past the double range is INF.
+class S46A { public $a = 1; protected $b = [true, null]; private $c = 1.5; public $me; }
+enum S46E: string { case X = "x"; }
+class S46P { public $z = 0; function __construct(public $x, public $y = 2) {} public $w = 9; }
+class S46C { const A = S46C::B; const B = S46C::A; const OK = self::V . "!"; const V = "v"; }
+class S46D { const FOO = [self::BAR]; const BAR = [self::FOO]; }
+function s46cyc($f) {
+    try { return $f(); } catch (Error $e) { return $e->getMessage(); }
+}
+function s46() {
+    $o = new S46A();
+    $o->me = $o;
+    $want = "S46A Object\n(\n    [a] => 1\n    [b:protected] => Array\n        (\n            [0] => 1\n            [1] => \n        )\n\n"
+        . "    [c:S46A:private] => 1.5\n    [me] => S46A Object\n *RECURSION*\n)\n";
+    check("prr1", print_r($o, true) === $want);
+    check("prr2", print_r([1, ["k" => S46E::X]], true) === "Array\n(\n    [0] => 1\n    [1] => Array\n        (\n"
+        . "            [k] => S46E Enum:string\n                (\n                    [name] => X\n"
+        . "                    [value] => x\n                )\n\n        )\n\n)\n"
+        && print_r(0.1 + 0.2, true) === "0.3" && print_r(false, true) === "");
+    check("cuf1", call_user_func("strtoupper", "ab") === "AB" && call_user_func(fn($a, $b) => $a . $b, 1, 2) === "12"
+        && call_user_func_array("str_repeat", ["x", 3]) === "xxx");
+    check("ord1", array_keys((array) new S46P(1)) === ["z", "x", "y", "w"]);
+    check("cyc1", s46cyc(fn() => S46C::A) === "Cannot declare self-referencing constant S46C::B"
+        && s46cyc(fn() => S46C::B) === "Cannot declare self-referencing constant S46C::A"
+        && s46cyc(fn() => S46D::FOO) === "Cannot declare self-referencing constant self::BAR"
+        && S46C::OK === "v!");
+    $big = ["1e1000", "-1e1000"];
+    check("inf1", INF == $big[0] && -INF == $big[1] && $big[0] + 0 === INF && is_numeric($big[0]));
+    $g = [0.1, 1 / 3, 5e-324, 2.5, 0.15];
+    check("fmtg1", sprintf("%.17g", $g[0]) === "0.10000000000000001" && sprintf("%.20g", $g[1]) === "0.33333333333333331483"
+        && sprintf("%g", $g[2]) === "4.94066e-324" && sprintf("%.1g|%.1g", $g[3], $g[4]) === "2|0.1");
 }
 
 // ===== END SECTIONS =====
@@ -1874,6 +1936,7 @@ function main() {
     s43(); // SECTION-CALL 43
     s44(); // SECTION-CALL 44
     s45(); // SECTION-CALL 45
+    s46(); // SECTION-CALL 46
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

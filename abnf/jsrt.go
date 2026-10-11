@@ -14305,7 +14305,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_phlen":  func(a []uint64) uint64 { return rt.wrapNum(rt.phpLen(u(a[0]))) },
 		"js_phvals": func(a []uint64) uint64 { return w(rt.phpValsOf(u(a[0]))) },
 		// ----- classes: '::' constants, static properties and static dispatch -----
-		"js_phconst": func(a []uint64) uint64 { return w(rt.phpConst(u(a[0]), rt.toString(u(a[1])))) },
+		"js_phconst": func(a []uint64) uint64 { return w(rt.phpConst(u(a[0]), rt.toString(u(a[1])), u(a[2]))) },
 		"js_phsget":  func(a []uint64) uint64 { return w(rt.phpStaticGet(u(a[0]), rt.toString(u(a[1])))) },
 		"js_phsset": func(a []uint64) uint64 {
 			rt.phpStaticSet(u(a[0]), rt.toString(u(a[1])), u(a[2]))
@@ -14315,7 +14315,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if s, isStr := u(a[0]).(string); isStr {
 				return rt.wrapStr(s)
 			}
-			return w(rt.phpClassOf(u(a[0])).props["__name"])
+			return rt.wrapStr(rt.phpFullName(rt.phpClassOf(u(a[0]))))
 		},
 		// instanceof. The right side is a NAME, but it may also arrive as a class
 		// descriptor or an instance ($x instanceof $cn), so resolve it first.

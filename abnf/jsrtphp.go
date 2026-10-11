@@ -19,6 +19,7 @@ package abnf
 // each as one extra case for a type nothing else creates.
 
 import (
+	"errors"
 	"math"
 	"strconv"
 	"strings"
@@ -141,6 +142,9 @@ func phpFloStr(n float64) string {
 }
 func phpFloDump(n float64) string { return phpFloFormat(n, 17, false) }
 
+// phpConstDepth counts the constant initializers running (phpConstIn).
+var phpConstDepth int
+
 // phpPrecision is the running program's precision ini setting (js_phprecision).
 // One process runs one PHP program, so it is process state.
 var phpPrecision = 14
@@ -229,7 +233,10 @@ func phpFloFormat(n float64, nd int, rounded bool) string {
 	if a == 0 {
 		return sign + "0"
 	}
-	d, decpt := phpFloSplit(a, nd, rounded && (nd > 15 || a < 0x1p-1022))
+	d, decpt := phpFloSplit(a, nd, false)
+	if rounded && (nd > 15 || a < 0x1p-1022 || (len(d) == nd+1 && d[nd] == '5')) {
+		d, decpt = phpFloSplit(a, nd, true)
+	}
 	d, decpt = phpFloRound(d, decpt, nd)
 	exponential := decpt > nd
 	if decpt < 0 {
@@ -464,13 +471,21 @@ func phpNumStrVal(s string) interface{} {
 		return nil
 	}
 	if isF {
-		f, err := strconv.ParseFloat(s[st:en], 64)
-		if err != nil {
+		f, ok := phpStrtod(s[st:en])
+		if !ok {
 			return nil
 		}
 		return phpMkFlo(f)
 	}
 	return phpIntStrVal(s[st:en])
+}
+
+// phpStrtod reads a decimal number the caller has already scanned. A magnitude
+// past the double range is +-INF, as zend_strtod answers; strconv.ParseFloat
+// reports that as ErrRange beside the same value.
+func phpStrtod(txt string) (float64, bool) {
+	f, err := strconv.ParseFloat(txt, 64)
+	return f, err == nil || errors.Is(err, strconv.ErrRange)
 }
 
 // phpIntStrVal is the value a signed DIGIT RUN denotes, promoted to a float when
@@ -489,8 +504,8 @@ func phpIntStrVal(txt string) interface{} {
 	}
 	_ = neg
 	_ = body
-	f, err := strconv.ParseFloat(txt, 64)
-	if err != nil {
+	f, ok := phpStrtod(txt)
+	if !ok {
 		return nil
 	}
 	return phpMkFlo(f)
@@ -526,8 +541,8 @@ func phpLeadingNum(s string) interface{} {
 		return float64(0)
 	}
 	if isF {
-		f, err := strconv.ParseFloat(s[:i], 64)
-		if err != nil {
+		f, ok := phpStrtod(s[:i])
+		if !ok {
 			return float64(0)
 		}
 		return phpMkFlo(f)
@@ -1563,9 +1578,15 @@ func phpOwner(cls *jsObject, key string) *jsObject {
 	return nil
 }
 
-func (rt *jsrt) phpConst(target interface{}, name string) interface{} {
+// phpConst is C::NAME; base is the class as the source wrote it, or null when
+// the source named it through a value.
+func (rt *jsrt) phpConst(target interface{}, name string, base interface{}) interface{} {
 	cls := rt.phpClassOf(target)
-	if v, ok := rt.phpConstIn(cls, name, 0); ok {
+	shown := rt.phpStr(cls.props["__name"])
+	if !isNullish(base) {
+		shown = rt.phpStr(base)
+	}
+	if v, ok := rt.phpConstIn(cls, name, shown+"::"+name, 0); ok {
 		return v
 	}
 	rt.fail("undefined constant %s::%s", rt.phpStr(cls.props["__name"]), name)
@@ -1577,8 +1598,11 @@ func (rt *jsrt) phpConst(target interface{}, name string) interface{} {
 //
 // A declared constant is a {__lazyconst: closure} box until its first read (see
 // emitConstDecl in php-to-llvm-ir.abnf): the closure computes it, called with a
-// null $this, and the value replaces the box on the declaring class.
-func (rt *jsrt) phpConstIn(cls *jsObject, name string, depth int) (interface{}, bool) {
+// null $this, and the value replaces the box on the declaring class. A box read
+// from inside another constant's initializer is marked __visiting while it runs,
+// and reading a marked box is the self-referencing-constant Error naming shown;
+// constFind in php-interpreter.abnf explains the rule.
+func (rt *jsrt) phpConstIn(cls *jsObject, name, shown string, depth int) (interface{}, bool) {
 	if cls == nil || depth > 16 {
 		return nil, false
 	}
@@ -1587,7 +1611,20 @@ func (rt *jsrt) phpConstIn(cls *jsObject, name string, depth int) (interface{}, 
 		v := o.props[key]
 		if box, isO := v.(*jsObject); isO {
 			if f, lazy := box.props["__lazyconst"]; lazy {
-				v = rt.call(f, jsUndef, []interface{}{jsNull})
+				if box.props["__visiting"] == true {
+					rt.phpRaise("Error", "Cannot declare self-referencing constant "+shown)
+				}
+				if phpConstDepth > 0 {
+					box.set("__visiting", true)
+				}
+				phpConstDepth++
+				func() {
+					defer func() {
+						phpConstDepth--
+						box.set("__visiting", false)
+					}()
+					v = rt.call(f, jsUndef, []interface{}{jsNull})
+				}()
 				o.set(key, v)
 			}
 		}
@@ -1598,7 +1635,7 @@ func (rt *jsrt) phpConstIn(cls *jsObject, name string, depth int) (interface{}, 
 			if _, vals, ok := phpArrParts(ifs); ok {
 				for _, iv := range vals.elems {
 					if io, isO := iv.(*jsObject); isO {
-						if v, found := rt.phpConstIn(io, name, depth+1); found {
+						if v, found := rt.phpConstIn(io, name, shown, depth+1); found {
 							return v, true
 						}
 					}
@@ -1798,6 +1835,17 @@ func (rt *jsrt) phpDebugType(v interface{}) string {
 	return "unknown"
 }
 
+// phpFullName is the name get_class and ::class answer: an anonymous class's
+// carries the "\0file:line$n" suffix every display leaves off (anonSuffix in
+// php-to-llvm-ir.abnf).
+func (rt *jsrt) phpFullName(cls *jsObject) string {
+	name := rt.phpStr(cls.props["__name"])
+	if sfx, has := cls.props["__anon"].(string); has {
+		name += sfx
+	}
+	return name
+}
+
 func (rt *jsrt) phpClassName(v interface{}) string {
 	if o, ok := v.(*jsObject); ok {
 		if cls, has := o.props["__class"]; has {
@@ -1954,8 +2002,8 @@ func phpLit(text string, radix int) interface{} {
 		return phpMkInt(v)
 	}
 	if radix == 10 {
-		f, err := strconv.ParseFloat(text, 64)
-		if err != nil {
+		f, ok := phpStrtod(text)
+		if !ok {
 			return float64(0)
 		}
 		return phpMkFlo(f)
@@ -2025,8 +2073,8 @@ func init() {
 				if cls, has := o.props["__class"]; has && !isNullish(cls) {
 					if rt.phpFindMethod(cls, name) == nil {
 						// Method names are case-insensitive: a class also holds each
-						// method under its lower-cased name (emitMethodSet in
-						// php-to-llvm-ir.abnf), which a miss retries.
+						// method under its lower-cased name (js_phmset), which a
+						// miss retries.
 						if lc := phpCase(name, false); lc != name && rt.phpFindMethod(cls, lc) != nil {
 							return w(rt.memberCall(recv, lc, args.elems))
 						}
@@ -2331,10 +2379,46 @@ func init() {
 		m["js_phpkey"] = func(a []uint64) uint64 { return rt.wrapStr(phpPropKey(rt.phpStr(u(a[0])))) }
 		m["js_phpname"] = func(a []uint64) uint64 { return rt.wrapStr(phpPropName(rt.phpStr(u(a[0])))) }
 		m["js_phgetclass"] = func(a []uint64) uint64 {
-			if phpIsObj(u(a[0])) {
-				return rt.wrapStr(rt.phpClassName(u(a[0])))
+			if o, ok := u(a[0]).(*jsObject); ok && phpIsObj(o) {
+				if cls, isCls := o.props["__class"].(*jsObject); isCls {
+					return rt.wrapStr(rt.phpFullName(cls))
+				}
+				return rt.wrapStr(rt.phpClassName(o))
 			}
 			return jsHFalse
+		}
+		// js_phmset(cls, name, closure): a method declaration. Twin of setMethod
+		// in php-interpreter.abnf, which says why every recorded spelling is set.
+		m["js_phmset"] = func(a []uint64) uint64 {
+			cls, ok := u(a[0]).(*jsObject)
+			if !ok {
+				rt.fail("js_phmset on a non-class")
+			}
+			name := rt.phpStr(u(a[1]))
+			fn := u(a[2])
+			lc := phpCase(name, false)
+			key := "__ms:" + lc
+			spells := ","
+			for k := interface{}(cls); ; {
+				ko, isObj := k.(*jsObject)
+				if !isObj {
+					break
+				}
+				if s, has := ko.props[key].(string); has {
+					spells = s
+					break
+				}
+				k = ko.props["__super"]
+			}
+			for _, s := range strings.Split(spells, ",") {
+				if s != "" {
+					cls.set(s, fn)
+				}
+			}
+			cls.set(name, fn)
+			cls.set(lc, fn)
+			cls.set(key, spells+name+",")
+			return 0
 		}
 	})
 	// js_phmcall reads its argument array in position 2, exactly like the js_mcall

@@ -1052,7 +1052,7 @@ NewName     <~~ push({cls: lastSeg(stripWs(up.in))}) ~~> = QName ;
 // generated name, and the instantiation follows it.
 // 'new #[A1(7)] class () { }' attaches an attribute group to the anonymous class.
 NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
-            = KwNew [ AttrGrp ] KwClass [ "(" [ ArgList ] ")" ] [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ]
+            = KwNew [ AttrGrp ] KwClass <~~ push({anonAt: up.pos}) ~~> [ "(" [ ArgList ] ")" ] [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ]
               [ KwImplements ImplNames ] "{" { Member } "}" ;
 
 // fn (params) => expr : an arrow function. It is a closure whose body is a single
@@ -3652,7 +3652,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // with the ORIGINAL name (`Call to undefined method D::f()`), as PHP 8 and the
         // interpreter do.
         // Method names are case-insensitive: the lower-cased name is the class's own
-        // alias (emitMethodSet) and is tried before the fallback.
+        // alias (js_phmset) and is tried before the fallback.
         var lcV = callExt(magB, "js_phcase", [nameV, hFalse])
         var hl = emitHasMethod(magB, objV, lcV)
         var lcB = curF.NewBlock("")
@@ -3844,8 +3844,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var r = memT(b)
         return {b: r.b, v: callExt(r.b, "js_phstr", [r.v])}
     }
-    function emitStaticAccess(baseT, mem, args) { return emitStaticAccessV(baseT, mem, args, null, false) }
-    function emitStaticAccessV(baseT, mem, args, memT, memprop) {
+    function emitStaticAccess(baseT, mem, args) { return emitStaticAccessV(baseT, mem, args, null, false, null) }
+    // baseText is the class as written (self, Foo), which a constant cycle names;
+    // null when the base is a value.
+    function emitStaticAccessV(baseT, mem, args, memT, memprop, baseText) {
         return function(b) {
             var rb = baseT(b)
             b = rb.b
@@ -3859,7 +3861,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     return {b: b, v: callExt(b, "js_phscall", [rb.v, rn8.v, th8, ea8.v])}
                 }
                 if (memprop) { return {b: b, v: callExt(b, "js_phsget", [rb.v, rn8.v])} }
-                return {b: b, v: callExt(b, "js_phconst", [rb.v, rn8.v])}
+                return {b: b, v: callExt(b, "js_phconst", [rb.v, rn8.v, baseText == null ? hNull : emitStr(b, baseText)])}
             }
             if (args != null) {
                 // C::m(...): the first-class callable form yields a closure that
@@ -3876,13 +3878,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             // C::class is the class NAME, not a constant lookup.
             if (mem == "class") { return {b: b, v: callExt(b, "js_phcname", [rb.v])} }
-            return {b: b, v: callExt(b, "js_phconst", [rb.v, emitStr(b, mem)])}
+            return {b: b, v: callExt(b, "js_phconst", [rb.v, emitStr(b, mem), baseText == null ? hNull : emitStr(b, baseText)])}
         }
     }
     function staticParts(items) {
-        var out = {base: null, mem: "", args: null, memT: null, memprop: false}
+        var out = {base: null, baseText: null, mem: "", args: null, memT: null, memprop: false}
         for (var i = 0; i < items.length; i++) {
-            if (items[i].sbase != undefined) { out.base = staticBaseThunk(items[i].sbase) }
+            if (items[i].sbase != undefined) {
+                out.base = staticBaseThunk(items[i].sbase)
+                out.baseText = items[i].sbase
+            }
             else if (items[i].smem != undefined) { out.mem = items[i].smem }
             else if (items[i].smemT != undefined) {
                 out.memT = items[i].smemT
@@ -3942,7 +3947,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     function makeStaticExpr(items) {
         var p = staticParts(items)
-        return emitStaticAccessV(p.base, p.mem, p.args, p.memT, p.memprop)
+        return emitStaticAccessV(p.base, p.mem, p.args, p.memT, p.memprop, p.baseText)
     }
     // As a chain suffix the base is whatever the chain produced so far.
     function makeStaticSfx(items) {
@@ -4175,24 +4180,44 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             || it.fcc != undefined || it.aplace != undefined
     }
     // An anonymous class is declared under a key no program can spell, and shows
-    // the name anonClassName gives it.
+    // the name anonClassName gives it. PHP declares it ONCE per declaration site:
+    // the descriptor is built the first time the site runs and kept in a slot cell
+    // made where the program starts (emitStaticSlots), so its statics persist and
+    // every instance shares one class.
     var anonCount = 0
     function makeNewAnon(items) {
         anonCount++
         var name = "class@anonymous" + anonCount
-        var classItems = [name, {anonShown: true}]
+        var at = 0
         var args = []
+        var members = []
         for (var i = 0; i < items.length; i++) {
             if (isArgRec(items[i])) { args.push(items[i]) }
-            else { classItems.push(items[i]) }
+            else if (items[i] != undefined && items[i].anonAt != undefined) { at = items[i].anonAt }
+            else { members.push(items[i]) }
         }
+        var classItems = [name, {anonShown: anonSuffix(at, anonCount - 1)}]
+        for (var m2 = 0; m2 < members.length; m2++) { classItems.push(members[m2]) }
         var clsStmt = makeClassStmt(classItems)
         var newItems = [{cls: name}]
         for (var k = 0; k < args.length; k++) { newItems.push(args[k]) }
         var newT = makeNew(newItems)
+        hidCount++
+        var slot = "\x00ac" + hidCount
+        staticSlots.push({hidden: slot})
         return function(b) {
-            b = clsStmt(b)
-            return newT(b)
+            var cellV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, slot)])
+            var cur = callExt(b, "js_get", [cellV, emitStr(b, "v")])
+            var buildB = curF.NewBlock("")
+            var haveB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, cur, hUndef), buildB, haveB)
+            var bb = clsStmt(buildB)
+            callExt(bb, "js_set", [cellV, emitStr(bb, "v"), callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, name)])])
+            bb.NewBr(doneB)
+            callExt(haveB, "js_scope_decl", [curScopeV, emitStr(haveB, name), cur])
+            haveB.NewBr(doneB)
+            return newT(doneB)
         }
     }
     function makeNew(items) {
@@ -5517,12 +5542,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         return null
     }
+    // Method names compare case-insensitively: a class's hello() keeps out a
+    // trait's Hello().
     function hasMethod(list, nm) {
-        for (var i = 0; i < list.length; i++) { if (list[i].name == nm) { return true } }
+        var lc = phsCase(nm, false)
+        for (var i = 0; i < list.length; i++) { if (phsCase(list[i].name, false) == lc) { return true } }
         return false
     }
     function hasOwnName(names, nm) {
-        for (var i = 0; i < names.length; i++) { if (names[i] == nm) { return true } }
+        var lc = phsCase(nm, false)
+        for (var i = 0; i < names.length; i++) { if (phsCase(names[i], false) == lc) { return true } }
         return false
     }
     function makeEnumCase(items) {
@@ -5587,16 +5616,31 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // The name an anonymous class shows: its parent's, else its first interface's,
-    // else "class", then "@anonymous" (PHP's full name goes on after a NUL byte that
-    // every display stops at). Twin of anonClassName in php-interpreter.abnf.
+    // else "class", then "@anonymous". Twin of anonClassName in
+    // php-interpreter.abnf.
     function anonClassName(ext, ifaces) {
         var base = ext != null ? ext : (ifaces.length > 0 ? ifaces[0] : "class")
         if (base.charCodeAt(0) == 92) { base = base.substring(1) }
         return base + "@anonymous"
     }
+    // The rest of its full name, which get_class and ::class answer and every
+    // display stops before: a NUL byte, the file, ":" and the line of the class
+    // keyword, then "$" and the site's ordinal in hex (zend_generate_anon_class_name;
+    // PHP's ordinal also counts closures, so only its form is reproduced). Twin of
+    // anonSuffix in php-interpreter.abnf.
+    function anonSuffix(pos, n) {
+        var hex = ""
+        var v = n
+        while (hex == "" || v > 0) {
+            hex = "0123456789abcdef".charAt(v % 16) + hex
+            v = (v - v % 16) / 16
+        }
+        return "\x00" + c.file + ":" + c.lineOf(pos) + "$" + hex
+    }
     function makeClassStmt(items) {
         var name = items[0]
         var anon = false
+        var anonSfx = ""
         var extRaw = null
         var ifacesRaw = []
         var methods = []
@@ -5612,7 +5656,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 methods.push(items[i].method)
                 noteMethodSig(items[i].method)
                 noteMagic(items[i].method.name)
-                if (items[i].method.name == "__construct") { hasCtor = true }
+                if (items[i].method.name == "__construct") {
+                    hasCtor = true
+                    // A promoted parameter declares its property where the
+                    // constructor stands in the body: PHP's slot order is body order.
+                    var pvs = items[i].method.pvis
+                    for (var pq = 0; pq < pvs.length; pq++) {
+                        props.push({name: pvs[pq].name, init: null, isStatic: false, hooks: [], vis: pvs[pq].vis})
+                    }
+                }
             }
             else if (items[i].ext != undefined) {
                 ext = lastSeg(items[i].ext)
@@ -5622,7 +5674,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 ifaces.push(noteIterIface(lastSeg(stripWs(items[i].impl))))
                 ifacesRaw.push(stripWs(items[i].impl))
             }
-            else if (items[i].anonShown != undefined) { anon = true }
+            else if (items[i].anonShown != undefined) {
+                anon = true
+                anonSfx = items[i].anonShown
+            }
             else if (items[i].cconsts != undefined) {
                 var cs = items[i].cconsts
                 for (var q = 0; q < cs.length; q++) { consts.push(cs[q]) }
@@ -5631,14 +5686,6 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (items[i].propdecl != undefined && items[i].propdecl != null) {
                 if (items[i].propdecl.isStatic === true) { statics.push(items[i].propdecl) }
                 else { props.push(items[i].propdecl) }
-            }
-        }
-        // A promoted constructor parameter is a property declared after the
-        // class's own (its slot exists before the constructor fills it).
-        for (var pm = 0; pm < methods.length; pm++) {
-            var pvs = methods[pm].name == "__construct" ? methods[pm].pvis : []
-            for (var pq = 0; pq < pvs.length; pq++) {
-                props.push({name: pvs[pq].name, init: null, isStatic: false, hooks: [], vis: pvs[pq].vis})
             }
         }
         // Trait members are copied in where the class does not declare the name
@@ -5661,6 +5708,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, shown)])
+            if (anon) { callExt(b, "js_set", [clsV, emitStr(b, "__anon"), emitStr(b, anonSfx)]) }
             // Single inheritance: the __super chain is what the runtime's method
             // dispatch (js_phmcall / memberCall) walks, so `extends E` is one property.
             if (ext != "") {
@@ -5694,7 +5742,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (pvl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, pvl)]) }
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
-                emitMethodSet(b, clsV, methods[k].name, closureV(b, idx, curScopeV))
+                // Stored under its declared name, its lower-cased name and every other
+                // spelling an ancestor declared (setMethod in php-interpreter.abnf).
+                callExt(b, "js_phmset", [clsV, emitStr(b, methods[k].name), closureV(b, idx, curScopeV)])
             }
             if (!hasCtor && ext == "") {
                 var emptyBody = function(bb) { return bb }
@@ -5709,16 +5759,6 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // A declaration binds 'self' to the class while its initializers run and
     // hands back the binding it shadowed (null outside every class), which it puts
     // back afterwards: code after the declaration is not in the class's scope.
-    // PHP method names are case-insensitive, so a method is stored under its declared
-    // name and, when that differs, under its lower-cased name too: a call names it as
-    // written and retries lower-cased on a miss (js_phmcall / js_phscall). A class
-    // that declares two spellings of one name along its parent chain keeps the
-    // exact spelling's. Twin of setMethod in php-interpreter.abnf.
-    function emitMethodSet(b, clsV, mname, clo) {
-        callExt(b, "js_set", [clsV, emitStr(b, mname), clo])
-        var lc = phsCase(mname, false)
-        if (lc != mname) { callExt(b, "js_set", [clsV, emitStr(b, lc), clo]) }
-    }
     // A class constant is evaluated on first use, not where the class is declared:
     // `const A = self::B; const B = 1;` reads B, and a constant inherited from a parent
     // still reads `self::` as the parent. Its initializer becomes a method of the
