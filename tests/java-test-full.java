@@ -1265,8 +1265,13 @@ class S26 {
             default -> "d";
         };
         Main.check("ta14", w.equals("s2") && k instanceof final String fs && fs.length() == 2);
+
+        // ----- a type annotation on the type of a method REFERENCE (JLS 15.13) -----
+        Mk26 m = @TU Box26::new;
+        Main.check("ta15", m.make().v == 0);
     }
 }
+interface Mk26 { Box26 make(); }
 
 // ===== SECTION 29: unqualified instance and static field access =====
 // A member body may name a field WITHOUT `this.` / `Cls.`, and a local or a

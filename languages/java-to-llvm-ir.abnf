@@ -1105,7 +1105,9 @@ LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
 // int[]::clone) is recognised too; makeMethodRef strips both back off the text.
 // The receiver that is an arbitrary EXPRESSION - check()::m, new Foo()::m,
 // ((C) t)::m - is MRefSfx down in the member chain instead.
-MethodRef   <~~ push(makeMethodRef(jNoteRefText(stripWs(up.in)), up.pos)) ~~>
+// Type annotations on the referenced type. Twin of MethodRef in java-interpreter.abnf.
+MethodRef   = { Annotation } MRefCore ;
+MRefCore    <~~ push(makeMethodRef(jNoteRefText(stripWs(up.in)), up.pos)) ~~>
             = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] { "[" "]" }
               "::" [ SkipAngle ] ( Id | KwNew ) ;
 

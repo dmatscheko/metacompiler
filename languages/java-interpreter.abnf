@@ -1170,7 +1170,11 @@ LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
 // int[]::clone) is recognised too; makeMethodRef strips both back off the text.
 // The receiver that is an arbitrary EXPRESSION - check()::m, new Foo()::m,
 // ((C) t)::m - is MRefSfx down in the member chain instead.
-MethodRef   <~~ push(makeMethodRef(jNoteRefText(stripWs(up.in)), up.pos)) ~~>
+// A TYPE ANNOTATION may stand on the referenced type ('@A Outer.Inner<@B String>::<@C
+// Integer>new', JLS 9.7.4); annotations are erased, so they stay outside the text the
+// reference is resolved from (and the ones inside '<...>' go with the type arguments).
+MethodRef   = { Annotation } MRefCore ;
+MRefCore    <~~ push(makeMethodRef(jNoteRefText(stripWs(up.in)), up.pos)) ~~>
             = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] { "[" "]" }
               "::" [ SkipAngle ] ( Id | KwNew ) ;
 
