@@ -3434,6 +3434,82 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s55e1", ex == "abcde");
         }
 
+        // ===== SECTION 56: enumerating an iterator again, and the foreach pattern =====
+        //
+        // An iterator returning IEnumerable<T> answers an enumerable object whose
+        // every GetEnumerator starts a NEW enumerator over the same arguments
+        // (ECMA-334 15.14.6), so a second foreach, string.Join or LINQ operator
+        // reads the whole sequence again, and two enumerators do not share a
+        // position; an iterator body that foreach-es another iterator object gets a
+        // fresh enumeration of it too. One returning IEnumerator<T> is the enumerator
+        // itself, stepped in place. foreach takes any type with a GetEnumerator method
+        // (13.9.5): an iterator, a List's enumerator, or a user enumerator class; an
+        // explicit interface implementation of the same name does not replace it.
+        static IEnumerable<int> S56Nat() { int i = 0; while (true) { yield return i; i++; } }
+        static IEnumerable<int> S56Evens(IEnumerable<int> src) { foreach (int x in src) { if (x % 2 == 0) { yield return x; } } }
+        static IEnumerable<int> S56Three(int b) { yield return b; yield return b + 1; yield return b + 2; }
+        static IEnumerator<int> S56Two(int b) { yield return b; yield return b * 2; }
+        class S56Bag : IEnumerable<int>
+        {
+            int[] items = { 4, 5, 6 };
+            public IEnumerator<int> GetEnumerator() { foreach (int i in items) { yield return i; } }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() { return GetEnumerator(); }
+        }
+        class S56Counter : IEnumerator<int>
+        {
+            int i = 0;
+            int n;
+            public S56Counter(int n) { this.n = n; }
+            public int Current => i * 10;
+            object System.Collections.IEnumerator.Current => Current;
+            public bool MoveNext() { i++; return i <= n; }
+            public void Reset() { i = 0; }
+            public void Dispose() { }
+        }
+        class S56Tens : IEnumerable<int>
+        {
+            public IEnumerator<int> GetEnumerator() { return new S56Counter(3); }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() { return GetEnumerator(); }
+        }
+        class S56Wrap
+        {
+            List<string> xs = new List<string> { "p", "q" };
+            public IEnumerator<string> GetEnumerator() { return xs.GetEnumerator(); }
+        }
+        static void S56()
+        {
+            int[] n = { 1, 4 };
+            string ev = "";
+            foreach (int e in S56Evens(S56Nat())) { if (e > 6) { break; } ev += e; }
+            var t = S56Three(n[0]);
+            string twice = "";
+            foreach (int v in t) { twice += v; }
+            foreach (int v in t) { twice += v; }
+            Program.Check("s56r1", ev == "0246" && twice == "123123" && string.Join(",", t) + ";" + string.Join(",", t) == "1,2,3;1,2,3"
+                && t.Sum() + t.Sum() == 12 && t.Count() == 3 && t.ToList().Count == 3 && new List<int>(t).Count == 3);
+            var e1 = t.GetEnumerator();
+            e1.MoveNext();
+            e1.MoveNext();
+            var e2 = t.GetEnumerator();
+            e2.MoveNext();
+            var w = t.Where(x => x > 1);
+            Program.Check("s56r2", e1.Current == 2 && e2.Current == 1 && string.Join(",", w) + ";" + string.Join(",", w) == "2,3;2,3");
+            var two = S56Two(n[1]);
+            string st = "";
+            while (two.MoveNext()) { st += two.Current + ";"; }
+            Program.Check("s56r3", st == "4;8;");
+            string bag = "";
+            foreach (int x in new S56Bag()) { bag += x; }
+            string tens = "";
+            foreach (int x in new S56Tens()) { tens += x + ";"; }
+            string wr = "";
+            foreach (string s in new S56Wrap()) { wr += s; }
+            var c = new S56Counter(2);
+            string cs = "";
+            while (c.MoveNext()) { cs += c.Current + ";"; }
+            Program.Check("s56p1", bag == "456" && tens == "10;20;30;" && wr == "pq" && cs == "10;20;");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3491,6 +3567,7 @@ b";                                                   // verbatim keeps the newl
             Program.S53(); // SECTION-CALL 53
             Program.S54(); // SECTION-CALL 54
             Program.S55(); // SECTION-CALL 55
+            Program.S56(); // SECTION-CALL 56
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

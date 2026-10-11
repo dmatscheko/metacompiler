@@ -74,13 +74,20 @@ func (rt *jsrt) csxPred(f, v interface{}) bool {
 }
 
 // csxForSrc is what a foreach over v visits: a string's chars, a dictionary's
-// KeyValuePairs, else v itself. js_csforsrc.
+// KeyValuePairs, a fresh generator of an iterator's sequence, what a type's own
+// GetEnumerator answers, else v itself. js_csforsrc.
 func (rt *jsrt) csxForSrc(v interface{}) interface{} {
 	if _, _, ok := dictParts(v); ok {
 		return rt.csxDictPairs(v.(*jsObject))
 	}
 	if _, ok := csqIsQuery(v); ok {
 		return &jsArray{elems: rt.csqToArray(v)}
+	}
+	if sq, ok := csSeqOf(v); ok {
+		return rt.csSeqOpen(sq)
+	}
+	if rt.csUserMethod(v, "GetEnumerator") != nil {
+		return rt.csEnumSrc(rt.csxMcall(v, "GetEnumerator", nil))
 	}
 	s, ok := v.(string)
 	if !ok {
@@ -92,6 +99,57 @@ func (rt *jsrt) csxForSrc(v interface{}) interface{} {
 		out.elems[i] = jsChar{code: int32(c)}
 	}
 	return out
+}
+
+// An iterator method answers a SEQUENCE (js_csseqfn): its generator function and
+// arguments, from which every enumeration starts a fresh generator. Twin of
+// csIsSeq / csSeqOpen in languages/lib/csharp-rt.metajs.
+func csSeqOf(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	b, _ := o.props["__csseq"].(bool)
+	return o, b
+}
+
+func (rt *jsrt) csSeqOpen(sq *jsObject) *jsGenerator {
+	a, _ := sq.props["a"].(*jsArray)
+	g, _ := rt.call(sq.props["f"], jsUndef, a.elems).(*jsGenerator)
+	return g
+}
+
+// csEnumSrc: what foreach steps for an enumerator e - a sequence's fresh
+// generator, a cursor's generator, a generator, or an object whose next() calls
+// a user enumerator's MoveNext and reads its Current. Twin of csEnumSrc in
+// languages/lib/csharp-rt.metajs.
+func (rt *jsrt) csEnumSrc(e interface{}) interface{} {
+	if sq, ok := csSeqOf(e); ok {
+		return rt.csSeqOpen(sq)
+	}
+	if o, ok := e.(*jsObject); ok && o.props["__csenum"] == true {
+		return o.props["g"]
+	}
+	if _, ok := e.(*jsGenerator); ok {
+		return e
+	}
+	ad := newJSObject()
+	ad.set("next", jsHostFunc("next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		st := newJSObject()
+		if rt.csxMcall(e, "MoveNext", nil) == true {
+			st.set("done", false)
+			if rt.csUserMethod(e, "__get_Current") != nil {
+				st.set("value", rt.csxMcall(e, "__get_Current", nil))
+			} else {
+				st.set("value", rt.getMember(e, "Current"))
+			}
+		} else {
+			st.set("done", true)
+			st.set("value", jsUndef)
+		}
+		return st
+	}))
+	return ad
 }
 
 func (rt *jsrt) csxRefSet(box, v interface{}) {

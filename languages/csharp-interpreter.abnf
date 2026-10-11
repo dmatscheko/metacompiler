@@ -292,7 +292,7 @@ Method      <~~ push(makeMethod(csRetDrainMember(up.start, takeAll()))) ~~>
             = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
 // csSimpleName drops the type arguments of both the interface and the method itself
 // ('IEnumerable<Foo>.GetEnumerator', 'Echo<T>') and keeps the last segment.
-MethodName  <~~ push(csSimpleName(up.in)) ~~>
+MethodName  <~~ push({mname: csSimpleName(up.in), expl: csIsQualified(up.in)}) ~~>
             = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 MethodBody  = Block | ArrowBody ;
 // A member declared without a body: an abstract method, or an interface method that has
@@ -312,7 +312,7 @@ Property    <~~ push(makeProperty(csRetDrainMember(up.start, takeAll()))) ~~>
             = Mods FType PropName ( PropAccs [ PropInit ] | PropArrow ) ;
 // The name may be qualified with the interface it explicitly implements
 // ('int I.P { get { ... } }'); only the last segment is kept.
-PropName    <~~ push({pname: csSimpleName(up.in)}) ~~>
+PropName    <~~ push({pname: csSimpleName(up.in), pexpl: csIsQualified(up.in)}) ~~>
             = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 PropAccs    <~~ push({accs: takeAll()}) ~~>
             = "{" { Accessor } "}" ;
@@ -2673,10 +2673,16 @@ KwLet       = "let" KwEnd ;
         return o[i]
     }
     // foreach over a dictionary visits its KeyValuePairs; over a string, its chars
-    // (ECMA-334 13.9.5: string's enumerator yields char). Twin of js_csforsrc.
+    // (ECMA-334 13.9.5: string's enumerator yields char). An iterator's sequence
+    // is enumerated afresh by every foreach (an enumerable object's GetEnumerator
+    // starts a new enumerator, ECMA-334 15.14.6), and any other type through its
+    // own GetEnumerator (the foreach pattern, 13.9.5); both are then stepped by
+    // csEnumMove / csEnumCur. Twin of js_csforsrc.
     function csForSrc(v) {
         if (isDict(v)) { return csxDictPairs(v) }
         if (csqIsQuery(v)) { return csqToArray(v) }
+        if (csIsGen(v)) { return csNewGen(v.invoke) }
+        if (csIsUserObj(v) && csHasMethod(v, "GetEnumerator")) { return mcall(v, "GetEnumerator", []) }
         if (typeof v != "string") { return v }
         var out = []
         for (var i = 0; i < v.length; i++) { out.push(csChar(v.charCodeAt(i))) }
@@ -2744,6 +2750,7 @@ KwLet       = "let" KwEnd ;
     function csxkRefSet(box, v) { if (csIsRefBox(box)) { box.wb(v) } }
     // ----- System.Linq (lib/csharp-linq.js) -----
     function csxkIsGen(v) { return csIsGen(v) }
+    function csxkGenOpen(v) { return csNewGen(v.invoke) }
     function csxkGenNext(it) {
         var g = it.g
         if (!csGenStep(g)) { return false }
@@ -2855,6 +2862,11 @@ KwLet       = "let" KwEnd ;
     function csIsEnum(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__csenum === true
     }
+    // One step of what csForSrc answered when it is not an array: an iterator's own
+    // generator, a cursor, or a user enumerator's MoveNext / Current.
+    function csIsStepped(v) { return csIsGen(v) || csIsEnum(v) || csIsUserObj(v) }
+    function csEnumMove(e) { return csIsGen(e) ? csGenStep(e) : mcall(e, "MoveNext", []) === true }
+    function csEnumCur(e) { return csIsGen(e) ? e.cur : core.getField(e, "Current") }
 
     // ----- delegates -----
     // A delegate value IS the closure it names; a MULTICAST delegate ('f += g') is an
@@ -3053,8 +3065,11 @@ KwLet       = "let" KwEnd ;
             if (name == "Dispose") { return undefined }
             fail("unknown enumerator method: " + name)
         }
+        // An iterator's result is a sequence to GetEnumerator (a fresh enumeration)
+        // and, declared IEnumerator, an enumerator that MoveNext steps in place.
         if (csIsGen(target)) {
-            if (name == "GetEnumerator") { return csNewEnum(target) }
+            if (name == "GetEnumerator") { return csNewEnum(csNewGen(target.invoke)) }
+            if (name == "MoveNext") { return csGenStep(target) }
             return csqMethod(target, name, args)
         }
         if (Array.isArray(target)) {
@@ -4841,9 +4856,9 @@ KwLet       = "let" KwEnd ;
             declVar(name, undefined)
             var res = undefined
             var r = anytype
-            if (csIsGen(arr)) {
-                while (csGenStep(arr)) {
-                    setVar(name, arr.cur)
+            if (csIsStepped(arr)) {
+                while (csEnumMove(arr)) {
+                    setVar(name, csEnumCur(arr))
                     r = bodyT()
                     if (r != undefined) {
                         if (r === BRK) break
@@ -5045,6 +5060,41 @@ KwLet       = "let" KwEnd ;
             return dflt
         }
         return dflt
+    }
+    // Whether a member name is qualified by the interface it explicitly implements
+    // ('IEnumerable.GetEnumerator', 'IEnumerator<T>.Current').
+    function csIsQualified(s) {
+        var t = stripWs(s)
+        var depth = 0
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "<") { depth++ }
+            else if (ch == ">") { depth-- }
+            else if (ch == "." && depth == 0) { return true }
+        }
+        return false
+    }
+    // An explicit interface member implementation ('IEnumerator
+    // IEnumerable.GetEnumerator()') is reachable only through the interface
+    // (ECMA-334 18.6.2), which this model does not tell apart, so it gives way to the
+    // class's own member of the same name.
+    function csDropExplicit(members) {
+        var own = {}
+        var any = false
+        var i
+        for (i = 0; i < members.length; i++) {
+            var m = members[i]
+            if (m == undefined || (m.kind != "method" && m.kind != "prop")) { continue }
+            if (m.expl === true) { any = true } else { own["$" + m.name] = true }
+        }
+        if (!any) { return members }
+        var out = []
+        for (i = 0; i < members.length; i++) {
+            var m2 = members[i]
+            if (m2 != undefined && m2.expl === true && own["$" + m2.name] === true) { continue }
+            out.push(m2)
+        }
+        return out
     }
     function csSimpleName(s) {
         var t = stripWs(s)
@@ -5393,7 +5443,7 @@ KwLet       = "let" KwEnd ;
     function makeMethod(items) {
         var mods = items[0].mods
         var rty = stripWs(items[1].ty)
-        var name = items[2]
+        var name = items[2].mname
         var params = items[3].params
         var body = items[4]
         var isStatic = false
@@ -5411,7 +5461,7 @@ KwLet       = "let" KwEnd ;
         // (IEnumerable<double>) names nothing adoptable and csAdoptRet declines it.
         return {kind: "method", name: name, statik: isStatic, params: params,
                 body: isGen ? body : csAdoptRet(rty, body),
-                pinfo: items[3], ext: items[3].ext == true, isGen: isGen, hides: hides}
+                pinfo: items[3], ext: items[3].ext == true, isGen: isGen, hides: hides, expl: items[2].expl}
     }
     // Wraps a method body so its {isRet, v} answer adopts the declared return type.
     // Returns the body UNCHANGED when the type adopts nothing, which is almost always.
@@ -5432,7 +5482,7 @@ KwLet       = "let" KwEnd ;
         var mods = items[0].mods
         var isStatic = false
         for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
-        return {kind: "abstract", name: items[2], statik: isStatic}
+        return {kind: "abstract", name: items[2].mname, statik: isStatic}
     }
     // items: name, pinfo, [the ': base(...)' / ': this(...)' record], body. The
     // initializer record is optional, so the body is found by scanning rather than by
@@ -5644,9 +5694,10 @@ KwLet       = "let" KwEnd ;
         var remT = null
         var auto = true
         var init = null
+        var expl = false
         for (var i = 2; i < items.length; i++) {
             var it = items[i]
-            if (it.pname != undefined) { name = it.pname; continue }
+            if (it.pname != undefined) { name = it.pname; expl = it.pexpl; continue }
             if (it.pinit != undefined) { init = it.pinit; csDfltTo(it.pend, ";", ty); continue }
             if (it.parrow != undefined) { getT = it.parrow; auto = false; continue }   // '=> e' body
             if (it.accs != undefined) {
@@ -5670,7 +5721,7 @@ KwLet       = "let" KwEnd ;
         // `value` parameter is not adopted - the value arrives from the assignment.
         return {kind: "prop", name: name, statik: isStatic,
                 getT: getT == null ? getT : csAdoptRet(ty, getT), setT: setT,
-                addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
+                addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), expl: expl}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -6307,7 +6358,7 @@ KwLet       = "let" KwEnd ;
             rest = all
             csPartials[name] = all
         }
-        buildClassFrom(name, csFlatten(rest), kind, primary, tparams)
+        buildClassFrom(name, csDropExplicit(csFlatten(rest)), kind, primary, tparams)
         curClassName = classStack.pop()
     }
 
@@ -6315,7 +6366,7 @@ KwLet       = "let" KwEnd ;
     core.lang = "csharp"
     core.add = csAdd
     core.getField = function(o, name) {
-        if (name == "Current" && csIsEnum(o)) { return o.cur }
+        if (name == "Current" && (csIsEnum(o) || csIsGen(o))) { return o.cur }
         // .Count / .Length of a container and a dictionary's .Keys / .Values; on an
         // instance or a class it is a user member of that name (`static int Count`).
         // Twin of emitCsLen in csharp-to-llvm-ir.abnf.

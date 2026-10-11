@@ -20,6 +20,9 @@ func csqIsLazy(v interface{}) bool {
 	if _, ok := csqIsQuery(v); ok {
 		return true
 	}
+	if _, ok := csSeqOf(v); ok {
+		return true
+	}
 	_, ok := v.(*jsGenerator)
 	return ok
 }
@@ -83,6 +86,9 @@ func (rt *jsrt) csqOpen(v interface{}) *csqIter {
 	}
 	if g, ok := v.(*jsGenerator); ok {
 		return &csqIter{k: "g", g: g}
+	}
+	if sq, ok := csSeqOf(v); ok {
+		return &csqIter{k: "g", g: rt.csSeqOpen(sq)}
 	}
 	rt.csqSrcChk(v, "source")
 	_, isStr := v.(string)

@@ -494,6 +494,36 @@ func (rt *jsrt) csParseInt(s string, w uint8, u bool) interface{} {
 	return csNorm(v, w, u)
 }
 
+// A method of an iterator's sequence: GetEnumerator starts a fresh enumeration
+// on a cursor; MoveNext (an iterator declared IEnumerator) makes the sequence its
+// own cursor, so the emitter's cursor path steps it from then on; anything else
+// is a LINQ operator. Twin of csSeqMcall in languages/lib/csharp-rt.metajs.
+func (rt *jsrt) csSeqMcall(sq *jsObject, name string, args []interface{}) interface{} {
+	switch name {
+	case "GetEnumerator":
+		e := newJSObject()
+		e.set("__csenum", true)
+		e.set("g", rt.csSeqOpen(sq))
+		e.set("cur", jsUndef)
+		return e
+	case "MoveNext":
+		g, ok := sq.props["g"].(*jsGenerator)
+		if !ok {
+			g = rt.csSeqOpen(sq)
+			sq.set("__csenum", true)
+			sq.set("g", g)
+		}
+		st, _ := g.step(rt, jsUndef).(*jsObject)
+		if st == nil || st.props["done"] == true {
+			sq.set("cur", jsUndef)
+			return false
+		}
+		sq.set("cur", st.props["value"])
+		return true
+	}
+	return rt.csqMethod(sq, name, args)
+}
+
 // csTypeObject is one of the integral type names as an expression primary, so
 // that `int.MaxValue` and `ulong.MaxValue` resolve.
 func (rt *jsrt) csTypeObject(name string) *jsObject {
@@ -1453,6 +1483,9 @@ func init() {
 					return w(float64(rt.csxCmp(r, elems[0])))
 				}
 			case *jsObject:
+				if sq, ok := csSeqOf(r); ok {
+					return w(rt.csSeqMcall(sq, name, elems))
+				}
 				switch r.props["__cstype"] {
 				case "char":
 					return w(rt.csxCharStatic(name, elems))
@@ -1479,6 +1512,17 @@ func init() {
 				return rt.wrapStr("")
 			}
 			return rt.wrapStr(rt.csxNewString(args.elems))
+		}
+		// An iterator method: calling it answers a sequence (csSeqOf).
+		m["js_csseqfn"] = func(a []uint64) uint64 {
+			gf := u(a[0])
+			return w(jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				sq := newJSObject()
+				sq.set("__csseq", true)
+				sq.set("f", gf)
+				sq.set("a", &jsArray{elems: append([]interface{}{}, args...)})
+				return sq
+			}))
 		}
 		// One of the integral type NAMES as an expression primary.
 		m["js_cstype"] = func(a []uint64) uint64 { return w(rt.csTypeObject(rt.toString(u(a[0])))) }

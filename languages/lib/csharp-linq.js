@@ -3,6 +3,7 @@
 // Go twin's port; the three must answer alike. It sits on lib/csharp-strings.js's
 // and lib/csharp-collections.js's hooks and adds these:
 //   csxkIsGen(v)       is v a user iterator (a method with 'yield return')
+//   csxkGenOpen(v)     a fresh enumeration of the user iterator v
 //   csxkGenNext(it)    step it.g, a user iterator: false at its end, else true with
 //                      the value in it.cur
 //   csxkArity(f)       2 for a lambda declaring two parameters, else 0 (the
@@ -33,8 +34,7 @@
 // collection, through the operators that keep its elements), else the default of
 // the kind of an element seen, else null. Not modelled: MinBy / MaxBy of an empty
 // sequence, OfType<T>, the IEqualityComparer overloads other than
-// StringComparer's, ToLookup, and a second enumeration of a user iterator (it
-// continues where the first stopped). An iterator body that is itself driven by
+// StringComparer's, and ToLookup. An iterator body that is itself driven by
 // replay (the interpreter's model) re-reads its sources at every step.
 
 function csqMsgEmpty() { return "Sequence contains no elements" }
@@ -79,7 +79,7 @@ function csqOpen(v) {
     if (csxkIsGen(v)) {
         var it = {}
         it["k"] = "g"
-        it["g"] = v
+        it["g"] = csxkGenOpen(v)
         it["cur"] = undefined
         return it
     }

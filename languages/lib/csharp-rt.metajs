@@ -55,12 +55,14 @@
 // numerically (js_csflo is C#'s one) reads the signed cell correctly, so no
 // js_*num wrapper is owed.
 //
-// ----- generators: the floor drives them, and layer 2 owes NOTHING -----------
+// ----- generators: the floor drives them -----------------------------------
 //
-// csharp-to-llvm-ir.abnf lowers the WHOLE iterator protocol in the EMITTER, over
-// the floor's coroutine primitive (tags 15/16) and its own member syntax -
+// csharp-to-llvm-ir.abnf lowers the iterator protocol in the EMITTER, over the
+// floor's coroutine primitive (tags 15/16) and its own member syntax -
 //
-//     js_genfn(js_closure(...))                 the iterator method
+//     js_csseqfn(js_genfn(js_closure(...)))     the iterator method; layer 2 owes
+//                                               only the sequence it answers
+//                                               (js_csseqfn, below)
 //     js_typeof(js_get(g, "next")) === "function"   "is this a generator?"
 //     js_call(js_get(g, "next"), [])            MoveNext()
 //     js_get(step, "value") / js_get(step, "done")
@@ -191,7 +193,11 @@ function csxkRefSet(box, v) {
 }
 
 // ----- System.Linq (lib/csharp-linq.js) --------------------------------------
-function csxkIsGen(v) { return isGenerator(v) }
+function csxkIsGen(v) { return isGenerator(v) || csIsSeq(v) }
+function csxkGenOpen(v) {
+    if (csIsSeq(v)) { return csSeqOpen(v) }
+    return v
+}
 function csxkGenNext(it) {
     var g = it["g"]
     var st = g["next"].apply(g, [])
@@ -1554,6 +1560,7 @@ function js_mcall(recv, name, args) {
     if (Array.isArray(recv)) { return csxListMethod(recv, name, args) }
     if (csIsDict(recv)) { return csxDictMethod(recv, name, args) }
     if (csIsChar(recv)) { return csxCharMethod(recv, name, args) }
+    if (csIsSeq(recv)) { return csSeqMcall(recv, name, args) }
     // char and string carry their STATIC members by name (csTypeObject).
     var cst = recv["__cstype"]
     if (cst !== undefined) {
@@ -2112,6 +2119,8 @@ function js_csidxset(o, i, v) {
 function js_csforsrc(v) {
     if (csIsDict(v)) { return csxDictPairs(v) }
     if (csqIsQuery(v)) { return csqToArray(v) }
+    if (csIsSeq(v)) { return csSeqOpen(v) }
+    if (csUserMethod(v, "GetEnumerator") !== undefined) { return csEnumSrc(js_csmcall(v, "GetEnumerator", [])) }
     if (typeof v != "string") { return v }
     var out = []
     var i = 0
@@ -2120,6 +2129,77 @@ function js_csforsrc(v) {
         i = i + 1
     }
     return out
+}
+
+// ----- an iterator's sequence ------------------------------------------------
+// An iterator method answers a SEQUENCE: its generator function and arguments,
+// from which every enumeration starts a fresh generator (an enumerable object's
+// GetEnumerator starts a new enumerator, ECMA-334 15.14.6). Twins: csSeqOf /
+// csSeqOpen / csEnumSrc / csSeqMcall in abnf/jsrtcscoll.go and jsrtcsharp.go; the
+// interpreter keeps the body's thunk on its generator and copies it (csForSrc).
+function js_csseqfn(gf) {
+    return function() {
+        var sq = {}
+        sq["__csseq"] = true
+        sq["f"] = gf
+        sq["a"] = rtCopyArr(arguments)
+        return sq
+    }
+}
+function csIsSeq(v) {
+    if (v === undefined || v === null || typeof v != "object" || Array.isArray(v)) { return false }
+    return v["__csseq"] === true
+}
+function csSeqOpen(sq) {
+    var f = sq["f"]
+    return f.apply(undefined, sq["a"])
+}
+// What foreach steps for an enumerator e: a sequence's fresh generator, a cursor's
+// generator, a generator, or an object whose next() calls a user enumerator's
+// MoveNext and reads its Current.
+function csEnumSrc(e) {
+    if (csIsSeq(e)) { return csSeqOpen(e) }
+    if (isGenerator(e)) { return e }
+    if (e !== undefined && e !== null && typeof e == "object" && e["__csenum"] === true) { return e["g"] }
+    var ad = {}
+    ad["next"] = function() {
+        var st = {}
+        st["done"] = js_csmcall(e, "MoveNext", []) !== true
+        st["value"] = undefined
+        if (st["done"] === false) {
+            if (csUserMethod(e, "__get_Current") !== undefined) { st["value"] = js_csmcall(e, "__get_Current", []) }
+            else { st["value"] = e["Current"] }
+        }
+        return st
+    }
+    return ad
+}
+// GetEnumerator starts a fresh enumeration on a cursor; MoveNext (an iterator
+// declared IEnumerator) makes the sequence its own cursor, so the emitter's
+// cursor path steps it from then on; anything else is a LINQ operator.
+function csSeqMcall(sq, name, args) {
+    if (name == "GetEnumerator") {
+        var e = {}
+        e["__csenum"] = true
+        e["g"] = csSeqOpen(sq)
+        e["cur"] = undefined
+        return e
+    }
+    if (name == "MoveNext") {
+        if (sq["__csenum"] !== true) {
+            sq["g"] = csSeqOpen(sq)
+            sq["__csenum"] = true
+        }
+        var g = sq["g"]
+        var st = g["next"].apply(g, [])
+        if (st["done"] === true) {
+            sq["cur"] = undefined
+            return false
+        }
+        sq["cur"] = st["value"]
+        return true
+    }
+    return csqMethod(sq, name, args)
 }
 
 // ECMA-335 III.4.16: newarr throws OverflowException when the element count is
