@@ -758,9 +758,9 @@ a decision was taken:
   corpus-derived, and `Record.toString` is explicitly unspecified in `dart:core`.
 - **Python**: a tuple is an array carrying kind 16 (`arrKind` / `arrKindSet`,
   `jsArray.kind`, field d of the floor's array cell), which every engine already
-  kept; `d.items()`, `keys()` and `values()` are lists rather than views, so
-  `print(d.items())` reads `[('a', 1)]` where CPython prints
-  `dict_items([('a', 1)])`.
+  kept. `hash()` of a str is a fixed polynomial over its code units, where
+  CPython's is SipHash under a per-process random key, so no value of it is
+  reproducible anyway; only `hash("") == 0` and equal-strings-hash-equal hold.
 
 **Recorded at their sites in the same way, moved here from todo.md 2.11 when that
 list was compressed.** ~~**C#** `e.ToString()` prints `[object Object]`~~ -

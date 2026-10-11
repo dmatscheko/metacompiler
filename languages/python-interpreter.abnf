@@ -1175,6 +1175,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["len"] = function(x) {
         if (typeof x == "string") return pyLen(x)
         if (isDict(x)) return x.keys.length
+        if (isView(x)) return x.__vd.keys.length
         if (pyUser(x)) {
             var f = clsFind(x.__class, "__len__")
             if (f != null) { return f(x) }
@@ -1235,6 +1236,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(v)) { return hostGlobals[isTup(v) ? "tuple" : "list"] }
         if (isSet(v)) { return hostGlobals[v.__frozen === true ? "frozenset" : "set"] }
         if (isDict(v)) { return hostGlobals["dict"] }
+        if (isView(v)) { return pyBuiltinTypeObj("dict_" + v.__dview) }
         // CPython's type(gen).__name__, and the name its AttributeError uses.
         if (isGen(v)) { return pyBuiltinTypeObj("generator") }
         if (typeof v == "function") {
@@ -1773,7 +1775,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var k = 0; k < els.length; k++) { fl.push(pyHashW(els[k])) }
             return pynHashFrozen(fl)
         }
-        if (Array.isArray(v) || isSet(v) || isDict(v)) { pyListErr("TypeError", "unhashable type: '" + pyTypeOf(v).__name + "'") }
+        if (Array.isArray(v) || isSet(v) || isDict(v) || isView(v)) { pyListErr("TypeError", "unhashable type: '" + pyTypeOf(v).__name + "'") }
         if (pyUser(v) && v.__isclass !== true) {
             var own = pyHashOwner(v.__class)
             if (own !== undefined) {
@@ -1934,6 +1936,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(v)) { return isTup(v) ? "tuple_iterator" : "list_iterator" }
         if (isSet(v)) { return "set_iterator" }
         if (isDict(v)) { return "dict_keyiterator" }
+        if (isView(v)) { return v.__dview == "keys" ? "dict_keyiterator" : (v.__dview == "values" ? "dict_valueiterator" : "dict_itemiterator") }
         return "iterator"
     }
     hostGlobals["iter"] = function(v) {
@@ -2564,6 +2567,52 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // membership, len and insertion order come from the dict machinery unchanged.
     function newSet() { return {__dict: true, __set: true, keys: [], vals: []} }
     function isSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
+    // A dict view - keys(), values() or items() - is a live window on its dict:
+    // {__dview: the method's name, __vd: the dict}. It iterates, measures and
+    // prints as dict_keys([...]); a keys or items view is also set-like (==,
+    // & | - ^ and isdisjoint against any iterable). Twin of pyDView* in
+    // lib/python-rt.metajs and abnf/jsrtpyview.go.
+    function pyNewView(d, kind) { return {__dview: kind, __vd: d} }
+    function isView(v) { return v !== null && v !== undefined && typeof v == "object" && !Array.isArray(v) && v.__dview !== undefined }
+    // The view's elements now, as a fresh list.
+    function pyViewElems(v) {
+        var d = v.__vd
+        if (v.__dview == "keys") { return d.keys.slice(0) }
+        if (v.__dview == "values") { return d.vals.slice(0) }
+        var pairs = []
+        for (var i = 0; i < d.keys.length; i++) { pairs.push(pyTup([d.keys[i], d.vals[i]])) }
+        return pairs
+    }
+    function pyViewSetLike(v) { return isView(v) && v.__dview != "values" }
+    // x in view: a key is a lookup, an item a lookup and an ==, a value a scan.
+    function pyViewHas(v, x) {
+        var d = v.__vd
+        if (v.__dview == "keys") { return dictFind(d, x) >= 0 }
+        if (v.__dview == "items") {
+            if (!isTup(x) || x.length != 2) { return false }
+            var i = dictFind(d, x[0])
+            return i >= 0 && pyEq(d.vals[i], x[1])
+        }
+        for (var j = 0; j < d.vals.length; j++) { if (pyEq(d.vals[j], x)) { return true } }
+        return false
+    }
+    // An iterable as a fresh set, for the set algebra of a set-like view.
+    function pyViewToSet(v) {
+        var out = newSet()
+        var els = iterToList(v)
+        for (var i = 0; i < els.length; i++) { setAdd(out, els[i]) }
+        return out
+    }
+    // == between a set-like view and a set or another set-like view: the same
+    // members. A values view equals only itself.
+    function pyViewEq(a, b) {
+        if (!pyViewSetLike(a) || !(pyViewSetLike(b) || isSet(b))) { return a === b }
+        var sa = pyViewToSet(a)
+        var sb = isSet(b) ? b : pyViewToSet(b)
+        if (sa.keys.length != sb.keys.length) { return false }
+        for (var i = 0; i < sa.keys.length; i++) { if (dictFind(sb, sa.keys[i]) < 0) { return false } }
+        return true
+    }
     // A frozenset is a set carrying __frozen: hashable, and without the methods
     // that mutate. Its set algebra answers a frozenset when the frozenset is the
     // left operand or the receiver, as CPython's does. Twin of the "__frozen"
@@ -2783,6 +2832,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return a.origin === b.origin && pyEq(a.targs, b.targs)
         }
         if (a === null || a === undefined || b === null || b === undefined) { return false }
+        if (isView(a)) { return pyViewEq(a, b) }
+        if (isView(b)) { return pyViewEq(b, a) }
         if (Array.isArray(a) && Array.isArray(b)) {
             if (a.length != b.length || isTup(a) != isTup(b)) { return false }
             for (var i = 0; i < a.length; i++) { if (!pyEq(a[i], b[i])) { return false } }
@@ -2997,6 +3048,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return fz ? "frozenset(" + out3 + "})" : out3 + "}"
         }
+        if (isView(v)) { return "dict_" + v.__dview + "(" + prepr(pyViewElems(v)) + ")" }
         if (isDict(v)) {
             var out2 = "{"
             for (var k = 0; k < v.keys.length; k++) {
@@ -3413,6 +3465,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (Array.isArray(v)) return v.length > 0
         if (isDict(v)) return v.keys.length > 0
         if (v === undefined || v === null) return false
+        if (isView(v)) return v.__vd.keys.length > 0
         // 0.0 is falsy, and every OBJECT is truthy - so the float box has to be
         // read before the generic !!v, which would answer true for it.
         if (isFlo(v)) return v.__flo != 0
@@ -3512,6 +3565,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isPyIt(v)) return pyItRest(v)
         if (isDict(v)) return v.keys.slice(0)
         if (typeof v == "string") return pySChars(v)
+        if (isView(v)) return pyViewElems(v)
         if (pyUser(v)) {
             var itf = clsFind(v.__class, "__iter__")
             if (itf != null) { return pyDrainIter(itf(v)) }
@@ -3539,7 +3593,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Is v something a for loop or an unpacking can walk?
     function pyIterable(v) {
-        if (Array.isArray(v) || isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string") { return true }
+        if (Array.isArray(v) || isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string" || isView(v)) { return true }
         return pyUser(v) && clsFind(v.__class, "__iter__") != null
     }
     // ----- Regular expressions: the `re` module -----
@@ -4178,7 +4232,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The str-method chunk's hook for "materialize a generator or an iterator
     // object", null when the value is neither. See the join arm of pyStrMethod.
     function pySSeqOf(v) {
-        if (isPyIt(v) || isGen(v)) { return iterToList(v) }
+        if (isPyIt(v) || isGen(v) || isView(v)) { return iterToList(v) }
         return null
     }
     function pySTruthy(v) { return pytruthy(v) }
@@ -5493,6 +5547,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return bcm.apply(undefined, args)
             }
         }
+        // A set-like dict view's one method, isdisjoint(iterable).
+        if (isView(target)) {
+            if (name != "isdisjoint" || !pyViewSetLike(target)) { pyAttrErr(target, name) }
+            var dj = iterToList(pyArgAt(args, 0))
+            for (var di = 0; di < dj.length; di++) { if (pyViewHas(target, dj[di])) { return false } }
+            return true
+        }
         // conjugate() of a complex flips the sign of its imaginary part.
         if (name == "conjugate" && isCplx(target)) { return pyCplx(target.real, -target.imag) }
         if (pyIsNumMethod(target, name)) { return pyNumMethod(target, name, args, kw) }
@@ -5845,17 +5906,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `try: s.remove(9) / except KeyError` has to behave the same in all three
     // engines, and that is what makes it assertable in one ratchet file.
     function pyDictMethod(d, name, args, kw) {
-        if (name == "keys") { return d.keys.slice(0) }
-        if (name == "values") { return d.vals.slice(0) }
-        // .items(): a list of (key, value) tuples in insertion order, where
-        // CPython answers a dict_items VIEW of them.
-        if (name == "items") {
-            var pairs = []
-            for (var ii = 0; ii < d.keys.length; ii++) {
-                pairs.push(pyTup([d.keys[ii], d.vals[ii]]))
-            }
-            return pairs
-        }
+        if (name == "keys" || name == "values" || name == "items") { return pyNewView(d, name) }
         if (name == "get") {
             var gi = dictFind(d, pyArgAt(args, 0))
             if (gi >= 0) { return d.vals[gi] }
@@ -5947,7 +5998,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyPairOrErr(el, i) {
         var pel = []
         if (Array.isArray(el)) { pel = el.slice(0) }
-        else if (isGen(el) || isPyIt(el) || isDict(el) || typeof el == "string") { pel = iterToList(el) }
+        else if (isGen(el) || isPyIt(el) || isDict(el) || typeof el == "string" || isView(el)) { pel = iterToList(el) }
         else { pyListErr("TypeError", "object is not iterable") }
         if (pel.length != 2) {
             pyListErr("ValueError", "dictionary update sequence element #" + i +
@@ -7561,6 +7612,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // precision int on the right is an ordinary argument, and floOp/boxOp would
         // otherwise take the pair for arithmetic and answer NaN.
         if (op == "%" && typeof l == "string") { return pyPct(l, r) }
+        // A set-like view's set algebra takes any iterable on either side.
+        if ((op == "&" || op == "|" || op == "-" || op == "^") && (pyViewSetLike(l) || pyViewSetLike(r)) &&
+            !pyUser(l) && !pyUser(r) && pyIterable(l) && pyIterable(r)) {
+            return setOp(op, pyViewToSet(l), pyViewToSet(r))
+        }
         // An ORDERING of two values of different kinds is a TypeError, after a user
         // class has had its __lt__ / reflected __gt__ chance.
         if ((typeof l != "number" || typeof r != "number") && (op == "<" || op == ">" || op == "<=" || op == ">=")) {
@@ -8119,6 +8175,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyIn(l, r) {
         if (typeof r == "string") return r.indexOf(l) >= 0
         if (isDict(r)) return dictFind(r, l) >= 0
+        if (isView(r)) return pyViewHas(r, l)
         if (pyUser(r)) {
             var f = clsFind(r.__class, "__contains__")
             if (f != null) { return pytruthy(f(r, l)) }

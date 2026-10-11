@@ -377,6 +377,64 @@ function pyDictSet(d, k, v) {
 
 function pyNewSet(elems) { return {__set: true, elems: elems} }
 
+// ----- dict views --------------------------------------------------------------
+// keys(), values() and items() answer a live window on the dict, {__dview: the
+// method's name, __vd: the dict}. Go: abnf/jsrtpyview.go; the rules are
+// pyNewView's in languages/python-interpreter.abnf.
+function pyNewDView(d, kind) { return {__dview: kind, __vd: d} }
+function pyIsDView(v) {
+    if (v === null || v === undefined || typeof v != "object" || Array.isArray(v)) { return false }
+    return v["__dview"] !== undefined
+}
+// The view's elements now, as a fresh list.
+function pyDViewElems(v) {
+    var d = v["__vd"]
+    var kind = v["__dview"]
+    if (kind == "keys") { return pyCCopyArr(d["keys"]) }
+    if (kind == "values") { return pyCCopyArr(d["vals"]) }
+    var pairs = []
+    var i = 0
+    while (i < d["keys"].length) {
+        pairs.push(pyTup([d["keys"][i], d["vals"][i]]))
+        i = i + 1
+    }
+    return pairs
+}
+function pyDViewLen(v) { return v["__vd"]["keys"].length }
+function pyDViewSetLike(v) { return pyIsDView(v) && v["__dview"] != "values" }
+// x in view: a key is a lookup, an item a lookup and an ==, a value a scan.
+function pyDViewHas(v, x) {
+    var d = v["__vd"]
+    var kind = v["__dview"]
+    if (kind == "keys") { return pyDictFind(d["keys"], x) >= 0 }
+    if (kind == "items") {
+        if (!pyIsTup(x) || x.length != 2) { return false }
+        var i = pyDictFind(d["keys"], x[0])
+        return i >= 0 && pyAEqual(d["vals"][i], x[1])
+    }
+    var vs = d["vals"]
+    var j = 0
+    while (j < vs.length) {
+        if (pyAEqual(vs[j], x)) { return true }
+        j = j + 1
+    }
+    return false
+}
+// == between a set-like view and a set or another set-like view: the same
+// members. A values view equals only itself.
+function pyDViewEq(a, b) {
+    if (!pyDViewSetLike(a) || !(pyDViewSetLike(b) || pySetElemsOf(b) !== null)) { return a === b }
+    var sa = pySetElemsOf(js_pyset_new(a))
+    var sb = pySetElemsOf(js_pyset_new(b))
+    if (sa.length != sb.length) { return false }
+    var i = 0
+    while (i < sa.length) {
+        if (!pySetHas(sb, sa[i])) { return false }
+        i = i + 1
+    }
+    return true
+}
+
 // Go: pySetFrozen / pyFreezeLike / pySetMutator. A frozenset is a set carrying
 // __frozen: hashable, and without the methods that mutate. Its set algebra
 // answers a frozenset when the frozenset is the left operand or the receiver.
@@ -647,6 +705,7 @@ function pyStr(v) {
             if (fz) { return "frozenset(" + so + "})" }
             return so + "}"
         }
+        if (pyIsDView(v)) { return "dict_" + pyToStr(v["__dview"]) + "(" + pyRepr(pyDViewElems(v)) + ")" }
         if (pyIsDict(v)) {
             var ks = v["keys"]
             var vs = v["vals"]
@@ -920,6 +979,7 @@ function pyTypeName(v) {
             return "set"
         }
         if (pyIsDict(v)) { return "dict" }
+        if (pyIsDView(v)) { return "dict_" + pyToStr(v["__dview"]) }
         if (pyIsCplx(v)) { return "complex" }
         // A CURSOR names its own type: CPython's list_iterator / str_iterator /
         // dict_keyiterator / map / filter / zip / enumerate / reversed. It is
@@ -986,14 +1046,14 @@ function pyEqual(x, y) {
     var xs = pySetElemsOf(x)
     if (xs != null) {
         var ys = pySetElemsOf(y)
-        if (ys == null) { return false }
+        if (ys == null) { return pyIsDView(y) && pyDViewEq(y, x) }
         if (xs.length != ys.length) { return false }
         for (var i = 0; i < xs.length; i++) {
             if (!pySetHas(ys, xs[i])) { return false }
         }
         return true
     }
-    if (pySetElemsOf(y) != null) { return false }
+    if (pySetElemsOf(y) != null) { return pyIsDView(x) && pyDViewEq(x, y) }
     if (Array.isArray(x)) {
         if (!Array.isArray(y)) { return false }
         if (x.length != y.length) { return false }
@@ -1003,6 +1063,8 @@ function pyEqual(x, y) {
         }
         return true
     }
+    if (typeof x == "object" && pyIsDView(x)) { return pyDViewEq(x, y) }
+    if (typeof y == "object" && pyIsDView(y)) { return pyDViewEq(y, x) }
     if (pyIsDict(x)) {
         if (!pyIsDict(y)) { return false }
         var xk = x["keys"]
@@ -3440,6 +3502,7 @@ function pyAContains(x, y) {
     }
     if (typeof y == "string") { return y.indexOf(pyToStr(x)) >= 0 }
     if (pyIsDict(y)) { return pyDictFind(y["keys"], x) >= 0 }
+    if (pyIsDView(y)) { return pyDViewHas(y, x) }
     // A CURSOR or a GENERATOR is CONSUMED by `in`, up to the match - CPython's
     // rule. The scan STOPS at the match rather than draining, so
     // `it = iter(xs); 1 in it; list(it)` leaves the rest.
@@ -3627,6 +3690,11 @@ function js_pybin(opv, l, r) {
             if (pyIsCallable(cm)) { return pyATruthy(pyCallSelf(cm, r, [l])) == want }
         }
         return pyAContains(l, r) == want
+    }
+    // A set-like view's set algebra takes any iterable on either side.
+    if ((op == "&" || op == "|" || op == "-" || op == "^") && (pyDViewSetLike(l) || pyDViewSetLike(r)) &&
+        pyInstClassOf(l) === null && pyInstClassOf(r) === null && pyIsIterable(l) && pyIsIterable(r)) {
+        return pyASetBin(op, js_pyset_new(l), js_pyset_new(r))["v"]
     }
     var sb = pyASetBin(op, l, r)
     if (sb !== null) { return pyFreezeLike(sb["v"], pySetFrozen(l)) }
@@ -4486,7 +4554,7 @@ function pyHashW(v0) {
         }
         return pynHashFrozen(fl)
     }
-    if (pyIsArr(v) || pySetElemsOf(v) !== null || pyIsDict(v)) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
+    if (pyIsArr(v) || pySetElemsOf(v) !== null || pyIsDict(v) || pyIsDView(v)) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
     var cls = pyInstClassOf(v)
     if (cls !== null) {
         var mro = pyMRO(cls)
@@ -4579,6 +4647,7 @@ function js_pybool(v) {
     if (els !== null) { return els.length > 0 }
     if (pyIsArr(v)) { return v.length > 0 }
     if (pyIsDict(v)) { return v["keys"].length > 0 }
+    if (pyIsDView(v)) { return pyDViewLen(v) > 0 }
     return pyATruthy(v)
 }
 
@@ -4867,6 +4936,7 @@ function pyElemsOf(v) {
     if (pyIsArr(v)) { return v }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
+    if (pyIsDView(v)) { return pyDViewElems(v) }
     var it = pyAUserIter(v)
     if (it !== undefined) { return pyADrainIter(it) }
     throw pyExcInstance("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
@@ -4893,6 +4963,11 @@ function pyIterKind(v) {
     }
     if (pySetElemsOf(v) !== null && pySetElemsOf(v) !== undefined) { return "set_iterator" }
     if (pyIsDict(v)) { return "dict_keyiterator" }
+    if (pyIsDView(v)) {
+        if (v["__dview"] == "keys") { return "dict_keyiterator" }
+        if (v["__dview"] == "values") { return "dict_valueiterator" }
+        return "dict_itemiterator"
+    }
     return "iterator"
 }
 
@@ -5396,7 +5471,7 @@ function pyDHasAttr(obj, name) {
 // The str-method chunk's hook for "materialize a generator or an iterator
 // object", null when the value is neither. See the join arm of pyStrMethod.
 function pySSeqOf(v) {
-    if (pyIsIter(v) || pyIsGen(v)) { return pyElemsOf(v) }
+    if (pyIsIter(v) || pyIsGen(v) || pyIsDView(v)) { return pyElemsOf(v) }
     return null
 }
 
@@ -6518,6 +6593,7 @@ function js_pylenof(v) {
     if (typeof v == "string") { return pyStrLen(v) }
     if (pyIsArr(v)) { return v.length }
     if (pyIsDict(v)) { return v["keys"].length }
+    if (pyIsDView(v)) { return pyDViewLen(v) }
     pyRaiseExc("TypeError", "object of type '" + pyTypeName(v) + "' has no len()")
     return 0
 }
@@ -6552,6 +6628,7 @@ function js_pyiterof(v) {
     if (pyIsArr(v)) { return v }
     if (typeof v == "string") { return pySChars(v) }
     if (pyIsDict(v)) { return pyCCopyArr(v["keys"]) }
+    if (pyIsDView(v)) { return pyDViewElems(v) }
     var it = pyAUserIter(v)
     if (it !== undefined) { return pyADrainIter(it) }
     pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object is not iterable")
@@ -6617,8 +6694,8 @@ function js_pyspread(arr, it) {
         }
         return undefined
     }
-    if (pyIsDict(it)) {
-        var ks = it["keys"]
+    if (pyIsDict(it) || pyIsDView(it)) {
+        var ks = pyIsDict(it) ? it["keys"] : pyDViewElems(it)
         var ki = 0
         var kn = ks.length
         while (ki < kn) {
@@ -6704,8 +6781,8 @@ function js_pyset_spread(dst, src) {
         }
         return undefined
     }
-    if (pyIsDict(src)) {
-        var ks = src["keys"]
+    if (pyIsDict(src) || pyIsDView(src)) {
+        var ks = pyIsDict(src) ? src["keys"] : pyDViewElems(src)
         var ki = 0
         var kn = ks.length
         while (ki < kn) {
@@ -7047,6 +7124,7 @@ function js_pytruthy__raw(v) {
     if (els !== null) { return els.length > 0 }
     if (pyIsArr(v)) { return v.length > 0 }
     if (pyIsDict(v)) { return v["keys"].length > 0 }
+    if (pyIsDView(v)) { return pyDViewLen(v) > 0 }
     return pyDTruthy(v)
 }
 
@@ -7973,6 +8051,19 @@ function pyDMethodCall(target, name, args, kw) {
                                 "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
         }
     }
+    // A set-like dict view's one method, isdisjoint(iterable).
+    if (pyIsDView(target)) {
+        if (name != "isdisjoint" || !pyDViewSetLike(target)) {
+            throw pyExcInstance("AttributeError", "'" + pyTypeName(target) + "' object has no attribute '" + name + "'")
+        }
+        var dj = pyElemsOf(pyEArgAt(args, 0))
+        var di = 0
+        while (di < dj.length) {
+            if (pyDViewHas(target, dj[di])) { return false }
+            di = di + 1
+        }
+        return true
+    }
     if (pyIsDict(target)) {
         if (pyIsDictMethod(name)) { return pyDictMethod(target, name, args, kw) }
         if (pyIsSetOnly(name)) {
@@ -8304,20 +8395,7 @@ function pyIsSetOnlyAlgebra(name) {
 function pyDictMethod(d, name, args, kw) {
     var keys = d["keys"]
     var vals = d["vals"]
-    if (name == "keys") { return pyCCopyArr(keys) }
-    if (name == "values") { return pyCCopyArr(vals) }
-    // .items(): a list of (key, value) tuples in insertion order, where
-    // CPython answers a dict_items VIEW of them. Every form, written or via
-    // getattr, arrives here.
-    if (name == "items") {
-        var pairs = []
-        var pi2 = 0
-        while (pi2 < keys.length) {
-            pairs.push(pyTup([keys[pi2], vals[pi2]]))
-            pi2 = pi2 + 1
-        }
-        return pairs
-    }
+    if (name == "keys" || name == "values" || name == "items") { return pyNewDView(d, name) }
     if (name == "get") {
         var gi = pyDictFind(keys, pyEArgAt(args, 0))
         if (gi >= 0) { return vals[gi] }
@@ -8450,7 +8528,7 @@ function pyPairOrErr(el, i) {
 // is not iterable gets CPython's typeless "object is not iterable" rather than
 // pyElemsOf's "'int' object is not iterable".
 function pyIsIterable(v) {
-    if (pyIsIter(v) || pyIsGen(v) || pyIsArr(v) || pyIsDict(v)) { return true }
+    if (pyIsIter(v) || pyIsGen(v) || pyIsArr(v) || pyIsDict(v) || pyIsDView(v)) { return true }
     if (typeof v == "string") { return true }
     var els = pySetElemsOf(v)
     if (els !== null && els !== undefined) { return true }

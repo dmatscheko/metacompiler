@@ -323,7 +323,7 @@ check("dict-get-default", ages.get("dave", -1), -1)
 check("dict-keys", f"{list(ages.keys())}", "['alice', 'bob', 'carol']")
 check("dict-values", list(ages.values())[2], 35)
 its = ages.items()
-check_true("dict-items", len(its) == 3 and its[0][0] == "alice" and its[0][1] == 30)
+check_true("dict-items", len(its) == 3 and list(its)[0][0] == "alice" and list(its)[0][1] == 30)
 
 ksum = ""
 for k in ages:

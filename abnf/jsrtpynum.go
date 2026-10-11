@@ -510,7 +510,7 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 	_, isArr := v.(*jsArray)
 	_, isSet := pySetElems(v)
 	_, _, isDict := dictParts(v)
-	if isArr || isSet || isDict {
+	if isArr || isSet || isDict || pyIsDView(v) {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
 	}
 	if _, cls, ok := pyInstance(v); ok {

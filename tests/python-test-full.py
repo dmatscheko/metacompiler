@@ -4380,6 +4380,32 @@ def s85():
     check("tpl2", hasattr(tuple, "__add__") and hasattr(tuple, "__len__") and hasattr(tuple, "count") and not hasattr(tuple, "append"))
     check("tpl3", not hasattr(tuple, "__setitem__") and not hasattr((), "__imul__") and not hasattr(tuple, "__delitem__"))
 
+# ===== SECTION 86: dict views =====
+# keys(), values() and items() are live views: they print as dict_keys([...]),
+# follow later changes to the dict, test membership, are not subscriptable, and
+# a keys or items view is set-like against any iterable. Rows from CPython 3.14.
+def s86():
+    d = {"a": 1, "b": 2}
+    k = d.keys()
+    v = d.values()
+    it = d.items()
+    check("vw1", repr(k) == "dict_keys(['a', 'b'])" and str(v) == "dict_values([1, 2])" and repr(it) == "dict_items([('a', 1), ('b', 2)])")
+    d["c"] = 3
+    check("vw2", len(k) == 3 and list(v) == [1, 2, 3] and type(it).__name__ == "dict_items" and bool({}.keys()) == False)
+    check("vw3", "c" in k and 3 in v and ("a", 1) in it and ("a", 2) not in it and "a" not in it)
+    check("vw4", k == {"a", "b", "c"} and k != ["a", "b", "c"] and v != d.values() and it == {("a", 1), ("b", 2), ("c", 3)})
+    check("vw5", sorted(k & ["a", "z"]) == ["a"] and sorted(k - {"a"}) == ["b", "c"] and sorted({"q"} | k) == ["a", "b", "c", "q"])
+    check("vw6", k.isdisjoint({"q"}) and not k.isdisjoint(["a"]) and type(iter(v)).__name__ == "dict_valueiterator")
+    msgs = []
+    for f in [lambda: k[0], lambda: hash(it)]:
+        try:
+            f()
+        except TypeError as e:
+            msgs.append(str(e))
+    check("vw7", msgs == ["'dict_keys' object is not subscriptable", "unhashable type: 'dict_items'"])
+    x, y, z = d.values()
+    check("vw8", [x, y, z] == [1, 2, 3] and ", ".join(d.keys()) == "a, b, c" and [*d.items()][2] == ("c", 3) and dict(d.items()) == d)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4466,5 +4492,6 @@ def main():
     s83() # SECTION-CALL 83
     s84() # SECTION-CALL 84
     s85() # SECTION-CALL 85
+    s86() # SECTION-CALL 86
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

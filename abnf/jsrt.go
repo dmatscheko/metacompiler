@@ -3790,6 +3790,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 			}
 			return out + "}"
 		}
+		if _, kind, ok := pyDView(t); ok {
+			return "dict_" + kind + "(" + rt.pyRepr(&jsArray{elems: pyDViewElems(t)}) + ")"
+		}
 		if o, cls, isInst := pyInstance(t); isInst {
 			return rt.pyUserRender(o, cls, false)
 		}
@@ -14672,6 +14675,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return 0
 			}
+			if pyIsDView(u(a[0])) {
+				if pyDViewLen(u(a[0])) > 0 {
+					return 1
+				}
+				return 0
+			}
 			if _, cls, ok := pyInstance(u(a[0])); ok {
 				if rt.pyUserTruthy(cls, u(a[0])) {
 					return 1
@@ -15367,6 +15376,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
 			}
+			if pyIsDView(u(a[0])) {
+				return w(&jsArray{elems: pyDViewElems(u(a[0]))})
+			}
 			if it, ok := rt.pyUserIter(u(a[0])); ok {
 				return w(&jsArray{elems: rt.pyDrainIter(it)})
 			}
@@ -15691,6 +15703,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				arr.elems = append(arr.elems, keys.elems...)
 				return 0
 			}
+			if pyIsDView(u(a[1])) {
+				arr.dropIdx()
+				arr.elems = append(arr.elems, pyDViewElems(u(a[1]))...)
+				return 0
+			}
 			rt.fail("cannot unpack a %s with *", rt.typeOf(u(a[1])))
 			return 0
 		},
@@ -15969,6 +15986,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					}
 				}
 				return boolH(rt.pyContains(l, r) == want)
+			}
+			// A set-like view's set algebra takes any iterable on either side.
+			if (op == "&" || op == "|" || op == "-" || op == "^") && (pyDViewSetLike(l) || pyDViewSetLike(r)) {
+				_, _, li := pyInstance(l)
+				_, _, ri := pyInstance(r)
+				if !li && !ri && rt.pyIsIterable(l) && rt.pyIsIterable(r) {
+					v, _ := rt.pySetBin(op, rt.pyExt("js_pyset_new", l), rt.pyExt("js_pyset_new", r))
+					return w(v)
+				}
 			}
 			if v, ok := rt.pySetBin(op, l, r); ok {
 				v = pyFreezeLike(v, pySetFrozen(l))
@@ -18191,6 +18217,12 @@ func pyFloDigits(f float64) string {
 // decides where Python says it should. Cycles are not expected in this value model and
 // are not guarded against.
 func (rt *jsrt) pyEqual(x, y interface{}) bool {
+	if pyIsDView(x) {
+		return rt.pyDViewEq(x, y)
+	}
+	if pyIsDView(y) {
+		return rt.pyDViewEq(y, x)
+	}
 	if xs, ok := pySetElems(x); ok {
 		ys, ok2 := pySetElems(y)
 		if !ok2 || len(xs.elems) != len(ys.elems) {
@@ -20151,7 +20183,13 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 				"'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")})
 		}
 	}
+	if pyIsDView(target) {
+		return rt.pyDViewMethod(target, name, args)
+	}
 	if keys, vals, isDict := dictParts(target); isDict {
+		if name == "keys" || name == "values" || name == "items" {
+			return pyNewDView(target.(*jsObject), name)
+		}
 		if pyIsDictMethod(name) {
 			return rt.pyDictMethod(keys, vals, name, args, kw)
 		}
@@ -20572,19 +20610,6 @@ func pyIsSetOnly(name string) bool {
 // all three engines.
 func (rt *jsrt) pyDictMethod(keys, vals *jsArray, name string, args []interface{}, kw interface{}) interface{} {
 	switch name {
-	case "keys":
-		return &jsArray{elems: append([]interface{}{}, keys.elems...)}
-	case "values":
-		return &jsArray{elems: append([]interface{}{}, vals.elems...)}
-	case "items":
-		// A list of (key, value) tuples in insertion order, where CPython answers
-		// a dict_items VIEW of them. Every form - a written d.items() and
-		// getattr(d, "items")() - arrives here.
-		pairs := &jsArray{}
-		for i, k := range keys.elems {
-			pairs.elems = append(pairs.elems, pyTup(&jsArray{elems: []interface{}{k, vals.elems[i]}}))
-		}
-		return pairs
 	case "get":
 		if i := rt.pyDictFind(keys, argAt(args, 0)); i >= 0 {
 			return vals.elems[i]
@@ -20725,6 +20750,9 @@ func (rt *jsrt) pyIsIterable(v interface{}) bool {
 		return true
 	}
 	if _, _, ok := dictParts(v); ok {
+		return true
+	}
+	if pyIsDView(v) {
 		return true
 	}
 	if o, ok := v.(*jsObject); ok && pyIterName(rt, o) != "" {
@@ -21073,6 +21101,8 @@ func init() {
 				sized = true
 			} else if _, _, isDict := dictParts(v); isDict {
 				sized = true
+			} else if pyIsDView(v) {
+				return rt.wrap(float64(pyDViewLen(v)))
 			}
 			if !sized {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
@@ -21219,6 +21249,9 @@ func (rt *jsrt) pyTruthyOf(v interface{}) bool {
 	if keys, _, ok := dictParts(v); ok {
 		return len(keys.elems) > 0
 	}
+	if pyIsDView(v) {
+		return pyDViewLen(v) > 0
+	}
 	if _, cls, ok := pyInstance(v); ok {
 		return rt.pyUserTruthy(cls, v)
 	}
@@ -21274,6 +21307,9 @@ func (rt *jsrt) pyElemsOf(v interface{}) []interface{} {
 	if keys, _, ok := dictParts(v); ok {
 		return append([]interface{}{}, keys.elems...)
 	}
+	if pyIsDView(v) {
+		return pyDViewElems(v)
+	}
 	if it, ok := rt.pyUserIter(v); ok {
 		return rt.pyDrainIter(it)
 	}
@@ -21315,6 +21351,9 @@ func pyIterKind(rt *jsrt, v interface{}) string {
 	}
 	if _, _, ok := dictParts(v); ok {
 		return "dict_keyiterator"
+	}
+	if _, kind, ok := pyDView(v); ok {
+		return pyDViewIterKind(kind)
 	}
 	return "iterator"
 }
@@ -21718,6 +21757,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		if _, _, isDict := dictParts(t); isDict {
 			return "dict"
 		}
+		if _, kind, ok := pyDView(t); ok {
+			return "dict_" + kind
+		}
 		if isPyComplex(t) {
 			return "complex"
 		}
@@ -21832,6 +21874,9 @@ func (rt *jsrt) pyBuiltinClass(name string) *jsObject {
 // pyContains is 'x in y' for the builtin containers (the js_pyin logic, reached
 // from js_pybin once no __contains__ answered).
 func (rt *jsrt) pyContains(x, y interface{}) bool {
+	if pyIsDView(y) {
+		return rt.pyDViewHas(y, x)
+	}
 	if els, ok := pySetElems(y); ok {
 		rt.pyHashCheckMember(x)
 		for _, e := range els.elems {

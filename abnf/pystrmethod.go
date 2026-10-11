@@ -1347,7 +1347,7 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		// materialized rather than refused - `", ".join(map(str,
 		// xs))` is ordinary Python. Keep in step with the join arm of pyStrMethod
 		// in languages/lib/python-rt.metajs and languages/python-interpreter.abnf.
-		if a := pysArgAt(args, 0); pyIterName(e.rt, a) != "" || pyIsGenerator(a) {
+		if a := pysArgAt(args, 0); pyIterName(e.rt, a) != "" || pyIsGenerator(a) || pyIsDView(a) {
 			return e.join(s, e.rt.pyElemsOf(a))
 		}
 		e.raise("TypeError", "can only join an iterable")

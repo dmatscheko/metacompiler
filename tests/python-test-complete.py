@@ -18,7 +18,7 @@ def check_true(name, got):
 d = {"a": 1, "b": 2, "c": 3}
 
 # ---- dict.items(): (key, value) tuples in insertion order ----
-its = d.items()
+its = list(d.items())
 check("items len", len(its), 3)
 check("first pair key", its[0][0], "a")
 check("first pair value", its[0][1], 1)
