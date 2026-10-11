@@ -223,7 +223,7 @@ both engines "bash: declare: ea: not found".
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-154 replay-based generators repeat side effects in the interpreters · P2 · CORE + JS + PY · OPEN [V]
+### T-154 replay-based generators repeat side effects in the interpreters · P2 · CORE + JS + PY · IN PROGRESS (CORE worker, round 7) [V]
 js, typescript and python INTERPRETER halves drive generators and async functions by
 replaying the body, so effects before a `yield`/`await` run again: js
 `take(inf(), 3)` prints `t0 t2 t5` (node `t0 t1 t2`); an async-generator trace is
@@ -238,19 +238,19 @@ The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
 a measurement against a dead-code matched control (tests/bench.sh header). Never
 introduce a delegating wrapper on a hot path: that cost python +41% once.
 
-### T-293 correctly rounded transcendentals · P3 · CORE · OPEN [V]
+### T-293 correctly rounded transcendentals · P3 · CORE · IN PROGRESS (CORE worker, round 7) [V]
 CPython (Apple libm) and MRI are correctly rounded on exp/log/pow and nearly so on
 sin/cos/atan/atan2; our Go-port legs are 1-9 ulps off on many rows (python T-265,
 ruby T-229 declined for this reason). Design: CORE-MATH-style double-double with a
 Ziv rounding test, one MetaJS module (interpreter + layer 2) + Go port + runtime.c
 d_*. Cost it; implement or DECLINE.
 
-### T-352 interpreter host `charAt` at a lone-surrogate index answers U+FFFD · P2 · CORE · OPEN [V]
+### T-352 interpreter host `charAt` at a lone-surrogate index answers U+FFFD · P2 · CORE · IN PROGRESS (CORE worker, round 7) [V]
 goja and -frozen: `s.charAt(i)` where s[i] is a lone surrogate gives U+FFFD, while
 substring keeps the unit (dart's dxQuote uses charAt). Make charAt keep the unit in both
 hosts.
 
-### T-359 goja: a lone surrogate in a kotlin string literal becomes U+FFFD · P1 · CORE · OPEN [V]
+### T-359 goja: a lone surrogate in a kotlin string literal becomes U+FFFD · P1 · CORE · IN PROGRESS (CORE worker, round 7) [V]
 `val s = "\uDE00\uD83D"; println(s.map { it.code }.joinToString(" "))`: goja interp
 and goja-built llvm.Run/native "65533 65533"; -frozen "56832 55357" (= JVM). A
 goja-vs-frozen divergence in both kotlin halves: the literal crosses a goja→Go string
@@ -265,7 +265,7 @@ interpreter 17 `Array.isArray` + 49 tuple refs, python-rt.metajs 42 `pyIsArr`, p
 compiler 54 tuple refs, jsrt.go `*jsArray`. Unblocks T-011, `%`-formatting arity (`"%d %d" % (1,2,3)` must say "not all arguments converted during string formatting"; `"%s" % [1, 2]` must stay `[1, 2]`),
 `BaseException.__str__`, hashability as a real rule.
 
-### T-171 moving floor bodies into layer 2 · P3 · CORE · OPEN [U]
+### T-171 moving floor bodies into layer 2 · P3 · CORE · IN PROGRESS (CORE worker, round 7) [U]
 The floor→layer-2 upcall costs 120 ns; a nine-iteration binary search over boxed
 arrays costs 3.2 µs. `case_map` moved whole, passed every gate and was reverted at
 15×/135×/2.0×. `d_pow` and its family cannot move (manual 7.7). The direction worth
@@ -279,7 +279,7 @@ is a return completion and must not be catchable); `GEN_EXIT` has no Python clas
 the floor needs `gen_close(g, sentinel)` reached through the tag-15 `return` member,
 which has nowhere to pass one. New extern → three engines → plus coro-poc.
 
-### T-173 coroutines as CPS in the emitter · P3 · CORE · OPEN [U]
+### T-173 coroutines as CPS in the emitter · P3 · CORE · IN PROGRESS (CORE worker, round 7) [U]
 Today: pthread + condvar, 4.1 µs per `next()` natively vs 0.75 µs under llvm.Run,
 ~18.8 KB per live suspended generator, and an abandoned generator parks its thread
 forever. `swapcontext` is dead (deprecated on darwin; no `#include` in runtime.c).
