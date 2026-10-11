@@ -3496,12 +3496,19 @@ NotFuncHead = :script(~~
         // CallHead. Seeded before the loop, so a member suffix that follows overwrites it
         // exactly as it would any other receiver ('super.a.b()' calls b on super.a).
         var supThis = (items[1].supthis == true)
+        var headTxt = items[1].ptxt
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
             var curThis = hUndef
             if (supThis) { curThis = callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, "this")]) }
+            // A bare name that is an exported namespace variable (nsCallThis).
+            if (!supThis && nsIsVar(headTxt)) {
+                var nr = nsCallThis(b)
+                b = nr.b
+                curThis = nr.v
+            }
             var shortIn = []
             var i = 0
             while (i < suffixes.length) {
@@ -5321,6 +5328,8 @@ NotFuncHead = :script(~~
             }, false, true))
         }
         var compV = callExt(b, "js_obj_new", [])
+        // The namespace object itself, for a call through the companion (nsCallThis).
+        callExt(b, memSetExt(), [compV, emitStr(b, "0nso"), objV])
         for (var i = 0; i < names.length; i++) {
             var envV = callExt(b, "js_scope_new", [curScopeV])
             var nmV = emitStr(b, names[i])
@@ -5330,6 +5339,22 @@ NotFuncHead = :script(~~
                                       callExt(b, "js_closure", [handle(nsAccIdx[1]), envV])])
         }
         return compV
+    }
+    // The `this` of a call of an exported variable by bare name. tsc compiles the callee
+    // to `N.f`, so the call runs with the namespace object as its receiver - unless a
+    // nearer binding shadows the name, which the with walk tells apart: js_jswithrecv is
+    // the companion that answered the read just made, or undefined. Twin of nsCallRecv
+    // in typescript-interpreter.abnf.
+    function nsCallThis(b) {
+        var recv = callExt(b, "js_jswithrecv", [])
+        var objB = curF.NewBlock("")
+        var noB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [recv, hUndef])), noB, objB)
+        var o = callExt(objB, memGetExt(), [recv, emitStr(objB, "0nso")])
+        objB.NewBr(mergeB)
+        noB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(o, objB), llvm.ir.NewIncoming(hUndef, noB)])}
     }
     // items = [{nspath}, (statement thunk | {nsexport, t})...].
     // The body's vars are hoisted into the namespace's own scope.

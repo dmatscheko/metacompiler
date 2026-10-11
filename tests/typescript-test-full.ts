@@ -1014,6 +1014,9 @@ function s29(): void {
 }
 
 // ===== SECTION 30: private names through an optional chain =====
+// JavaScript allows 'this?.#foo'; tsc rejects it (TS18030, an optional chain cannot
+// contain private identifiers), and tsc 6.0.3's transpileModule then fails an internal
+// assertion emitting it in a 'return'. The run-time answer is node's.
 class S30 {
     #foo: number = 5;
     #bar: number = 7;
@@ -3570,6 +3573,39 @@ function s71() {
         C71.count === 5 && C71.D.deep === 8 && Object.keys(C71).join() === "count,step,log,inc,shadow,swap,a,rest,more,D");
 }
 
+// ===== SECTION 72: an exported namespace variable as a callee, and before it is set =====
+// tsc compiles a call of an exported variable by bare name inside its namespace to
+// 'N72.f()', so the function runs with the namespace object as `this` - unlike an
+// exported FUNCTION, which keeps its bare call, or a parameter of the same name. And an
+// exported variable declared without an initializer is not a property until something
+// is stored in it ('N72.later = v'). Values read off node 24 (through tsc 6.0.3's
+// output).
+function who72(t: any): string { return t === N72 ? "N" : t === N72.In ? "In" : typeof t; }
+namespace N72 {
+    export const f = function (this: any) { return who72(this); };
+    export let g = function (this: any) { return who72(this); };
+    export var v = function (this: any) { return who72(this); };
+    export function plain(this: any) { return who72(this); }
+    export function calls(): string { return f() + g() + v() + f?.() + f`t` + plain(); }
+    export function shadow(f: any): string { return f(); }
+    export namespace In { export const h = function (this: any) { return who72(this); }; export function calls(): string { return h() + f(); } }
+    export let later: number | undefined, cnt: any, opt: any, pair: any, loop: any;
+    export var hoisted: string;
+    export function fill(): void { later = 1; cnt = 0; cnt++; opt ??= 2; [pair] = [3]; for (loop of [4]) { } }
+}
+namespace N72 { export function late(): void { hoisted = "h"; } }
+function s72() {
+    check("ns72a", N72.calls() === "NNNNNobject" && N72.shadow(N72.f) === "object" && N72.In.calls() === "InN");
+    const vars = (): string => Object.keys(N72).filter(k => typeof (N72 as any)[k] != "function" && k != "In").join();
+    check("ns72b", vars() === "" && !("later" in N72) && !N72.hasOwnProperty("hoisted") && JSON.stringify(N72) === '{"In":{}}');
+    N72.fill();
+    N72.late();
+    check("ns72c", vars() === "later,cnt,opt,pair,loop,hoisted" && N72.hasOwnProperty("later") && N72.cnt === 1);
+    delete (N72 as any).cnt;
+    N72.fill();
+    check("ns72d", vars() === "later,opt,pair,loop,hoisted,cnt" && N72.cnt === 1);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3644,6 +3680,7 @@ function main(): number {
     s69(); // SECTION-CALL 69
     s70(); // SECTION-CALL 70
     s71(); // SECTION-CALL 71
+    s72(); // SECTION-CALL 72
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

@@ -135,8 +135,9 @@ EnumName    = Id <~~ push({mname: idName(up.in)}) ~~> | StringLit <~~ push({mnam
 // name, live; every other declaration lands in a private scope the body runs in, invisible
 // from outside. Nesting, dotted names ('namespace A.B {}') and MERGING (a second
 // 'namespace A {}' block reopens the very same object, with a fresh private scope) follow.
+// nsDepth counts the namespace bodies the tags are inside of while they build.
 NamespaceDecl <~~ push(makeNamespace(takeAll(), up.start, up.pos)) ~~>
-            = ( KwNamespace | KwModule ) NamespaceName "{" NamespaceBody "}" ;
+            = ( KwNamespace | KwModule ) NamespaceName "{" <~~ nsDepth = nsDepth + 1 ~~> NamespaceBody "}" <~~ nsDepth = nsDepth - 1 ~~> ;
 NamespaceName <~~ push({nspath: takeAll()}) ~~>
             = Id <~~ push(idName(up.in)) ~~> { "." Id <~~ push(idName(up.in)) ~~> } ;
 // The body is a bare statement list, NOT a Block: a Block would push a scope of its own
@@ -146,7 +147,11 @@ NamespaceBody <~~ push({nsstmts: takeAll()}) ~~>
 // 'export <declaration>' in a namespace body; its own 'var' names are claimed here so
 // that they hoist into the namespace object rather than the private scope.
 NsExport    <~~ push(makeNsExport(pop(), claimVars(up.start, up.pos))) ~~>
-            = KwExport ExportBody ;
+            = KwExport ( NsExportVar | ExportBody ) ;
+// An exported VARIABLE statement, which tsc compiles differently from an exported
+// function or class: every reference to it becomes 'Ns.name'.
+NsExportVar <~~ push({nsvar: pop()}); nsMarkVars(up.start, up.pos) ~~>
+            = VarDecl ;
 
 // An AMBIENT declaration ('declare ...') describes something that exists elsewhere, so it
 // has no run-time effect at all: the whole form is parsed and erased. This is what lets a
@@ -2731,7 +2736,11 @@ NotFuncHead = :script(~~
         var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
         eo = jsErrOwn(self, kk)
         if (eo !== undefined) { return eo }
-        return hasOwn(self, kk)
+        if (!hasOwn(self, kk)) { return false }
+        // A namespace object holds an exported variable, as undefined, before tsc creates
+        // the property (see nsExportDecl); its own properties are exactly its keys.
+        if (self[kk] === undefined && hasOwn(self, "__nsvars")) { return self["__keys"].indexOf(kk) >= 0 }
+        return true
     }
     // The receiver a Function.prototype shim armed for the call now running. The shims
     // set pendingThis and callWithThis clears it again, so it is read once at entry.
@@ -3708,8 +3717,7 @@ NotFuncHead = :script(~~
     declVar = function(name, value) {
         var top = scopes[scopes.length - 1]
         if (top === nsExpFrame) {
-            scopePut(nsExpObj, name, value)
-            trackKey(nsExpObj, name)
+            nsExportDecl(name, value)
             return
         }
         scopePut(top, name, value)
@@ -5781,6 +5789,7 @@ NotFuncHead = :script(~~
                     var keep = []
                     for (var i = 0; i < ks.length; i++) { if (i != at) { keep.push(ks[i]) } }
                     scopePut(tgt, "__keys", keep)
+                    nsKeyEpoch = nsKeyEpoch + 1
                 }
             }
             return true
@@ -6026,6 +6035,9 @@ NotFuncHead = :script(~~
         var target = items[1]
         var iterT = items[3]
         var bodyT = items[4]
+        // Inside a namespace body each iteration's store to an assignment target is
+        // tracked (nsTracked) before the body runs.
+        if (nsDepth > 0 && target.asg != undefined) { bodyT = nsTrackedBody(bodyT, nsPatNames(target.asg)) }
         if (items[2] == "in") {
             // for-in iterates the object's own keys (jsKeys), binding the loop variable
             // to each key string - mirrors the compiler's js_keys.
@@ -6655,13 +6667,14 @@ NotFuncHead = :script(~~
     function makeDestructure(items, pos) {
         var pat = items[0]
         var init = items[1]
+        nsNoteDecl(nsPatNames(pat), pos)
         if (declIsVar()) {
             notePatVars(pat, pos)
-            return function() {
+            return nsTracked(function() {
                 var av = anytype // The initializer may be an array or an object.
                 av = init()
                 bindPatternMode(pat, av, false)
-            }
+            }, nsPatNames(pat))
         }
         return function() {
             var v = anytype // The initializer may be an array or an object.
@@ -6674,12 +6687,18 @@ NotFuncHead = :script(~~
     function makePatternAssign(items) {
         var pat = items[0]
         var valT = items[1]
-        return function() {
+        return nsTracked(function() {
             var v = anytype // The right-hand side may be an array or an object.
             v = valT()
             bindPatternMode(pat, v, false)
             return v
-        }
+        }, nsPatNames(pat))
+    }
+    // A pattern's leaf names, for nsTracked (only collected inside a namespace body).
+    function nsPatNames(pat) {
+        var out = []
+        if (nsDepth > 0) { patNames(pat, out) }
+        return out
     }
     // A parameter descriptor for a destructuring parameter: items = [node] or
     // [node, defaultThunk], and the default rides on the node like everywhere else.
@@ -7441,13 +7460,133 @@ NotFuncHead = :script(~~
     // chain. A nested 'namespace Inner {}' declares Inner the same way, and a SECOND
     // 'namespace Ns {}' block reopens the object that is already bound - which is exactly
     // declaration merging.
+    // An exported VARIABLE is a property tsc creates only when something is stored in it
+    // ('export let x;' creates none), and every reference to it is 'Ns.x': a store
+    // makes the key (nsTrackNames), and a call of it by bare name runs with the object
+    // as `this` (nsVarHome). The object lists its exported variables under "__nsvars".
+    // The stores are found while building: a bare-name store built inside a namespace
+    // body (nsDepth > 0) is wrapped by nsTracked, so no store anywhere else pays for it,
+    // and the wrapper does the work only when some namespace exports a variable of a
+    // name it stores to (nsVarNames, complete once the program is built).
     // items = [{nspath: [names]}, bodyThunk].
     var nsExpFrame = anytype // The private scope whose exported declaration is running,
     var nsExpObj = anytype   // and its namespace object.
     nsExpFrame = null
     nsExpObj = null
+    var nsExpVar = false // The running exported declaration is a variable statement,
+    var nsNoInit = false // and the declarator storing now has no initializer.
+    var nsDepth = 0
+    var nsDeclRecs = [] // {name, at, file} of each declarator built inside a namespace body.
+    var nsVarNames = {} // Every name some namespace exports as a variable.
+    var nsKeyEpoch = 0  // Counts the keys a delete has dropped (see nsStored).
+    function nsNoteDecl(names, pos) {
+        if (nsDepth == 0) { return }
+        for (var i = 0; i < names.length; i++) { nsDeclRecs.push({name: names[i], at: pos, file: c.curFile()}) }
+    }
+    // The tag of an exported variable statement: the declarators it holds name exported
+    // variables. Nothing before its end can belong to a later one, so those go too.
+    function nsMarkVars(from, to) {
+        var file = c.curFile()
+        var keep = []
+        for (var i = 0; i < nsDeclRecs.length; i++) {
+            var r = nsDeclRecs[i]
+            if (r.file !== file || r.at > to) { keep.push(r) }
+            else if (r.at >= from) { nsVarNames[r.name] = true }
+        }
+        nsDeclRecs = keep
+    }
     function makeNsExport(t, vars) {
-        return {nsexp: t, vars: vars}
+        if (typeof t == "object" && t != null && t.nsvar != undefined) {
+            return {nsexp: t.nsvar, vars: vars, isvar: true}
+        }
+        return {nsexp: t, vars: vars, isvar: false}
+    }
+    // The declaration half of declVar's redirect: the export lands on the object.
+    function nsExportDecl(name, value) {
+        scopePut(nsExpObj, name, value)
+        if (nsExpVar) { nsVarAdd(nsExpObj, name) }
+        if (!nsNoInit) { trackKey(nsExpObj, name) }
+    }
+    function nsVarAdd(obj, name) {
+        var vs = obj["__nsvars"]
+        if (vs.indexOf(name) < 0) { vs.push(name) }
+    }
+    // The innermost binding of `name`, when it is a namespace object's exported variable;
+    // else undefined.
+    function nsVarHome(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (objHasOwn.call(scopes[i], name)) {
+                if (objHasOwn.call(scopes[i], "__nsvars") && scopes[i]["__nsvars"].indexOf(name) >= 0) { return scopes[i] }
+                return undefined
+            }
+        }
+        return undefined
+    }
+    // After a store to these names: the ones that are exported variables become keys.
+    // Answers whether every name was one (a shadowed name has to be looked up again).
+    function nsTrackNames(names) {
+        var all = true
+        for (var i = 0; i < names.length; i++) {
+            var home = anytype // A namespace object, or undefined.
+            home = nsVarHome(names[i])
+            if (home !== undefined) { trackKey(home, names[i]) } else { all = false }
+        }
+        return all
+    }
+    // The record of one store or call site inside a namespace body. w.on is -1 until
+    // the site first runs, then 0 when none of its names is an exported variable
+    // (nsVarNames), 1 when they have to be looked up, and 2 once they were found: where
+    // a name is bound is fixed by where the site stands, so the namespace object (home)
+    // stays the same, and so do the keys made until a delete drops one (w.epoch against
+    // nsKeyEpoch).
+    function nsSiteRec(names) {
+        return {names: names, on: -1, epoch: 0, home: null}
+    }
+    // A store thunk built inside a namespace body, tracking the names it stores to;
+    // anywhere else the thunk itself.
+    function nsTracked(t, names) {
+        if (nsDepth == 0) { return t }
+        var w = nsSiteRec(names)
+        return function() {
+            var r = anytype // Whatever the store answers.
+            r = t()
+            if (w.on != 0 && (w.on != 2 || w.epoch != nsKeyEpoch)) { nsStored(w) }
+            return r
+        }
+    }
+    // A loop body whose iteration has just stored to these names (makeForOf).
+    function nsTrackedBody(bodyT, names) {
+        var w = nsSiteRec(names)
+        return function() {
+            if (w.on != 0 && (w.on != 2 || w.epoch != nsKeyEpoch)) { nsStored(w) }
+            return bodyT()
+        }
+    }
+    function nsStored(w) {
+        if (nsWatchOn(w) && nsTrackNames(w.names)) {
+            w.on = 2
+            w.epoch = nsKeyEpoch
+        }
+    }
+    function nsWatchOn(w) {
+        if (w.on < 0) {
+            w.on = 0
+            for (var i = 0; i < w.names.length; i++) { if (hasOwn(nsVarNames, w.names[i])) { w.on = 1 } }
+        }
+        return w.on >= 1
+    }
+    // The receiver of a call by bare name inside a namespace body (foldCallMember).
+    // Twin of nsCallThis in typescript-to-llvm-ir.abnf.
+    function nsCallRecv(w) {
+        if (w.on == 2) { return w.home }
+        if (!nsWatchOn(w)) { return undefined }
+        var home = anytype // A namespace object, or undefined.
+        home = nsVarHome(w.names[0])
+        if (home !== undefined) {
+            w.on = 2
+            w.home = home
+        }
+        return home
     }
     function makeNamespace(items, from, to) {
         var names = items[0].nspath
@@ -7459,7 +7598,7 @@ NotFuncHead = :script(~~
             var st = stmts[i]
             if (st != undefined && st.nsexp != undefined) {
                 for (var k = 0; k < st.vars.length; k++) { expVars.push(st.vars[k]) }
-                body.push(nsExportStmt(st.nsexp, st.vars))
+                body.push(nsExportStmt(st.nsexp, st.isvar))
             } else {
                 body.push(st)
             }
@@ -7470,6 +7609,7 @@ NotFuncHead = :script(~~
             var priv = {}
             for (var i = 0; i < expVars.length; i++) {
                 if (!objHasOwn.call(obj, expVars[i])) { scopePut(obj, expVars[i], undefined) }
+                nsVarAdd(obj, expVars[i])
             }
             for (var j = 0; j < vars.length; j++) { scopePut(priv, vars[j], undefined) }
             scopes.push(priv)
@@ -7478,18 +7618,20 @@ NotFuncHead = :script(~~
             return undefined
         }
     }
-    // An exported 'var' was hoisted into the object already; it becomes an enumerable
-    // key where its statement runs, which is where tsc's `N.v = ...` assigns it.
-    function nsExportStmt(t, vars) {
+    // An exported 'var' was hoisted into the object already; its declarator's store
+    // makes the key (nsTracked), which is where tsc's `N.v = ...` assigns it.
+    function nsExportStmt(t, isVar) {
         return function() {
             var savedFrame = nsExpFrame
             var savedObj = nsExpObj
+            var savedVar = nsExpVar
             nsExpFrame = scopes[scopes.length - 1]
             nsExpObj = scopes[scopes.length - 2]
+            nsExpVar = isVar
             var r = t()
-            for (var i = 0; i < vars.length; i++) { trackKey(nsExpObj, vars[i]) }
             nsExpFrame = savedFrame
             nsExpObj = savedObj
+            nsExpVar = savedVar
             return r
         }
     }
@@ -7528,6 +7670,7 @@ NotFuncHead = :script(~~
     function nsNewObj() {
         var o = {}
         o["__keys"] = []
+        o["__nsvars"] = []
         return o
     }
 
@@ -7847,11 +7990,21 @@ NotFuncHead = :script(~~
         // CallHead. Seeded before the loop, so a member suffix that follows overwrites it
         // exactly as it would any other receiver ('super.a.b()' calls b on super.a).
         var supThis = (items[1].supthis == true)
+        // A bare name called inside a namespace body may be an exported variable, which
+        // tsc calls as 'Ns.f()' (nsCallRecv). seed: 1 super, 2 such a name, 0 neither.
+        var seed = supThis ? 1 : 0
+        var nsSite = nsSiteRec([])
+        if (nsDepth > 0 && !supThis && suffixes[0].kind != "member" && typeof items[1].ptxt == "string") {
+            seed = 2
+            nsSite = nsSiteRec([items[1].ptxt])
+        }
         return function() {
             var cur = anytype     // A member chain hops between types,
             var curThis = anytype // so do the remembered receiver
             var lastKey = anytype // and the remembered key.
-            if (supThis) { curThis = getVar("this") }
+            if (seed != 0) {
+                if (seed == 1) { curThis = getVar("this") } else if (nsSite.on != 0) { curThis = nsCallRecv(nsSite) }
+            }
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
@@ -7990,7 +8143,7 @@ NotFuncHead = :script(~~
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        return function() {
+        return nsTracked(function() {
             var cur = anytype // The current value may be of any type.
             cur = refGet(ref)
             var assign = false
@@ -8002,7 +8155,12 @@ NotFuncHead = :script(~~
             v = valT()
             refSet(ref, v)
             return v
-        }
+        }, refNames(ref))
+    }
+    // The bare name a target reference stores to, as nsTracked's list.
+    function refNames(ref) {
+        if (ref.path.length == 0) { return [ref.name] }
+        return []
     }
     // See the twin of this comment in js-interpreter.abnf.
     function makeLhsRef(items) {
@@ -8049,7 +8207,7 @@ NotFuncHead = :script(~~
         // NamedEvaluation, the assignment form: `f = function(){}` names it "f", and
         // only for a plain '=' to a bare NAME.
         if (op == "=" && ref.path.length == 0) { fnAnonName(ref.name, "=", txt) }
-        return function() {
+        return nsTracked(function() {
             var v = anytype // A compound assignment (s += n) may change the value's type.
             v = valT()
             if (ref.path.length == 0) {
@@ -8061,13 +8219,13 @@ NotFuncHead = :script(~~
                 setMember(p.obj, p.key, v)
             }
             return v
-        }
+        }, refNames(ref))
     }
     // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
     function makeIncDec(items) {
         var ref = items[0]
         var delta = (items[1] == "++") ? 1 : -1
-        return function() {
+        return nsTracked(function() {
             var n = anytype // A number, or a BigInt (which ++ steps by 1n).
             if (ref.path.length == 0) {
                 n = jsToNumeric(getVar(ref.name))
@@ -8078,7 +8236,7 @@ NotFuncHead = :script(~~
             n = jsToNumeric(getMember(p.obj, p.key))
             setMember(p.obj, p.key, jsStep(n, delta))
             return n
-        }
+        }, refNames(ref))
     }
     // ToNumeric: a BigInt stays a BigInt, everything else becomes a number. jsStep is
     // the +1 / -1 that ++ and -- perform, in whichever of the two types it got.
@@ -8107,7 +8265,7 @@ NotFuncHead = :script(~~
     // Prefix ++/--: like makeIncDec, but the expression value is the new one.
     function makePreIncDec(ref, op) {
         var delta = (op == "++") ? 1 : -1
-        return function() {
+        return nsTracked(function() {
             var n = anytype
             if (ref.path.length == 0) {
                 n = jsStep(jsToNumeric(getVar(ref.name)), delta)
@@ -8118,7 +8276,7 @@ NotFuncHead = :script(~~
             n = jsStep(jsToNumeric(getMember(p.obj, p.key)), delta)
             setMember(p.obj, p.key, n)
             return n
-        }
+        }, refNames(ref))
     }
 
     // ----- Statement thunks: function() -> undefined | BRK | CONT | {isRet, v} -----
@@ -8130,10 +8288,18 @@ NotFuncHead = :script(~~
         var init = items.length > 1 ? items[1] : makeConst(undefined)
         // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
+        nsNoteDecl([name], pos)
         if (declIsVar()) {
             varRecs.push({name: name, at: pos, file: c.curFile()})
             if (items.length == 1) { return function() {} }
-            return function() { varSet(name, init()) }
+            return nsTracked(function() { varSet(name, init()) }, [name])
+        }
+        if (nsDepth > 0 && items.length == 1) {
+            return function() {
+                nsNoInit = true
+                declVar(name, undefined)
+                nsNoInit = false
+            }
         }
         return function() { declVar(name, init()) }
     }
@@ -8193,9 +8359,10 @@ NotFuncHead = :script(~~
         }
         declVar(name, v)
     }
-    // The leaf names of a binding pattern.
+    // The leaf names of a binding pattern, and the bare-name targets of an assignment one.
     function patNames(pat, out) {
         if (pat.dtype == "id") { out.push(pat.name) }
+        else if (pat.dtype == "ref") { if (pat.ref.path.length == 0) { out.push(pat.ref.name) } }
         else if (pat.dtype == "arr") {
             for (var i = 0; i < pat.elems.length; i++) { patNames(pat.elems[i], out) }
             if (pat.rest != null) { patNames(pat.rest, out) }
