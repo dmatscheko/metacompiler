@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-413** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-414** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,13 +107,13 @@ not change the renderer.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-412 swift: inherited static/class methods compiled; a type parameter as a value; Set by context · P1 · SW · IN PROGRESS (SW worker, round 21) [V]
-Compiled only (a halves divergence): `class Q { static func s() -> Int {1}; class func
-f() -> Int { self.k + 1 } }; class R: Q {...}`: `R.s()` / `R.f()` "unknown method 's'"
-in llvm.Run and native (swiftc 1 / 11; interpreter right) - compiled statics have no
-receiver; emit them with the descriptor as receiver at every static call path. All
-engines: `func zeroOf<X: HasZ>(_ t: X.Type) -> X { X.zz }` "unknown name: X" (swiftc
-99 98); `let ss: Set<Int> = [1]; [ss].contains([1])` false (swiftc true).
+### T-413 swift: Set-keyed dictionaries; builtin types as values compiled · P1 · SW · IN PROGRESS (SW worker, round 22) [V]
+`var d: [Set<Int>: String] = [Set([1]): "one"]; d[Set([1])]` gives "none" in all
+engines (swiftc "one"): key lookup does not compare Sets by value. Compiled half:
+builtins with no extension (String, Bool, Array…) have no type value - `String.self`
+and a generic X bound from a String give the name string, not a descriptor. (Set print
+order follows insertion; Swift's is hash-seeded per process - DECLINED, not
+reproducible.)
 
 ---
 
@@ -487,6 +487,7 @@ T-394 python: complex from negative ** fractional; augmented-assignment errors; 
 T-405 swift: lazy static lets; implicit members in sub-expressions — DONE a577592b 51b679b0
 T-407 php: method-name case across a parent chain; small library and runtime gaps — DONE 3ef2eb58 (overrides recorded at declaration; a per-call lower-case lookup measured +15.1%, not taken)
 T-410 swift: `Self` as a value; expected types through `==`, generics and receivers — DONE 9f3db72d (plus synthesized struct == and Array.contains)
+T-412 swift: inherited static/class methods compiled; a type parameter as a value; Set by context — DONE 08310e01 d75d7754
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
