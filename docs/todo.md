@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-329** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-332** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,17 +66,17 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-311 python: ordering across kinds does not raise · P1 · PY · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
-`sorted([1, "a"])`, `[1] < ["a"]`, `1 < "a"`: CPython TypeError "'<' not supported
-between instances of 'str' and 'int'"; all engines answer.
+### T-329 python: a str method's argument-type error is uncatchable · P1 · PY · IN PROGRESS (PY+PHP worker, round 7) [V]
+`"ab".startswith(1)` aborts "TypeError: a str argument is required" (pySFail /
+e.fail) in all engines; CPython raises a catchable TypeError "startswith first arg
+must be str or a tuple of str, not int". Sweep every str method's argument errors.
+Also: builtin-subclass instances are unwrapped before comparison (`S("b") < 1` says
+'str', CPython 'S'; `1 < S("b")` reports '>' ... 'str' and 'int').
 
-### T-312 python: `str.split(sep=)`, `str.encode()`, no-argument constructors · P1 · PY · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
-`"bob".split(sep="o")` ignores the keyword (CPython `['b', 'b']`; check every str
-method's keywords). `str.encode()` returns the str (`len("é".encode())` 1, CPython 2;
-`.encode().decode()` fails). `float()` prints `[object Object]` (interpreter) / `nan`
-(compiled), CPython 0.0; `list()` / `tuple()` abort compiled ("'NoneType' object is
-not iterable": None and a missing argument are both undefined there). Also `int()` of
-non-ASCII digits, and 3.14's "Did you mean" suffix (P3).
+### T-330 python: `bytes(...)` and `frozenset` · P2 · PY · IN PROGRESS (PY+PHP worker, round 7) [V]
+`bytes(...)` is not callable (compiled "'type' object is not callable", interpreter
+"cannot construct bytes"); `frozenset` undefined. bytes is bound as a class object in
+the compiler (keep `isinstance(x, bytes)` working); frozenset needs a hashable set.
 
 ---
 
@@ -232,22 +232,20 @@ static String.fromCharCode(s) (the interpreter has no `String` name).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-313 php: partial application of a method declared with different arities · P1 · PHP · IN PROGRESS (PY+PHP+LUA worker, round 6) [V spec-only]
-Compiler only: with `class A{function m($x,$y)}`, `class B{function m()}`, `class
-C{function m()}`, `($a->m(?,2))(1)` prints "m"; spec "m12". Also: the bare `$GLOBALS`
-array (iteration, var_dump) is unsupported.
+### T-331 php: `array_key_exists`, `implode` and the array function library · P1 · PHP · IN PROGRESS (PY+PHP worker, round 7) [V spec-only]
+"Call to undefined function" in both halves. Sweep php's standard array/string
+function list (array_*, implode/explode, str_*, sprintf...) against the manual and add
+what is missing.
 
 ---
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-314 lua: `next()` is a stub compiled; `tostring`/`tonumber`/`type`/`table.concat` missing · P1 · LUA · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
-Compiled `next()` covers only the array part and returns only the key: `next({a=1})`
-nil (lua `a 1`), `next({10,20})` 1 (lua `1 10`). `tostring`, `tonumber`, `type`,
-`table.concat` are missing in all engines - sweep the whole base/table/math library
-against lua 5.5 while there.
-
-### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
+### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA + CORE · OPEN [V]
+Needs ONE raw-byte output primitive in all engines (runtime.c host id, jsrtint.go
+binding, metajs-interpreter hostGlobals, the tag-script host); then js_luaout/luaOut
+become the identity. Emitting libc putchar from the compiler alone would split
+llvm.Run output across two writers.
 lua writes the raw bytes. (math.log/log10/sin/atan last-digit differences vs C libm:
 see T-293.)
 
@@ -560,6 +558,10 @@ T-310 csharp: the string and char API — DONE ec556e0 (spec-only; culture-sensi
 T-300 swift: unqualified `.none` builds an enum case — DONE 587ef41
 T-301 swift: in-place mutation of an observed variable does not fire didSet — DONE 7136d77 2b458da
 T-302 swift: `print(x as Any)` on an Optional; nested Unicode.Scalar — DONE 12eb521 fa6adb5
+T-311 python: ordering across kinds does not raise — DONE 91496f3
+T-312 python: `str.split(sep=)`, `str.encode()`, no-argument constructors — PARTIAL 2ad3dec (keywords, encode, no-arg constructors, Unicode digits); bytes()/frozenset are T-330; the "Did you mean" suffix DECLINED: CPython adds it only to its own traceback, which no engine here prints
+T-313 php: partial application of a method declared with different arities — DONE bddc9e3 (spec-only)
+T-314 lua: `next()` is a stub compiled; `tostring`/`tonumber`/`type`/`table.concat` missing — DONE 158badc
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
