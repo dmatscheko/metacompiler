@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-381** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-382** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -126,17 +126,11 @@ method 'toInt'" (compiled 97).
 
 # GO — Go  (oracle: `go run`)
 
-### T-375 go: `map[any]` keys of defined types; imported packages' defined types · P1 · GO · IN PROGRESS (GO worker, round 12) [V]
-Compiler only: `k := shapes.Make(); k.String()` - "variable not defined: Kind.String"
-(interpreter and go `kind2`); printing k prints the underlying value in all engines.
-`map[any]int{MyInt(1): 1, 1: 2}` has len 1 (go 2): key boxing at the literal and every
-index/assign/delete/comma-ok site plus boxed-key equality in go's map lookup (~150
-lines); imported defined types need package-qualified static types (~100-150 lines).
-
-### T-376 go: `len`/`cap`/index/append pay ~19k instructions in `js_is_type` · P2 · GO · IN PROGRESS (GO worker, round 12) [V]
-emitIsSl / emitIsPtr call the layer-2 js_is_type (~19k instructions each); every fixed
-parameter pays an emitted `$acopy` helper call (~3.9k) even for scalar types. Use the
-static types go-constfold.js now has to skip both where the type is known.
+### T-381 go: a slice of a defined type prints its elements raw · P1 · GO · OPEN [V]
+`ks := []Kind{1, 3}; fmt.Println(ks)` prints `[1 3]`; go `[kind1 kind3]` (String() per
+element). Also: AssertBase/TSSubject/DeferChain/PanicOperand chains never call
+goRecvsC, so `switch m[MyInt(1)].(type)` on a map[any] does not box the key (probe);
+a package type sharing a name with a main-file type shares the flat prescan tables.
 
 ---
 
@@ -476,6 +470,8 @@ T-373 kotlin: Int ≠ Long at equality — DONE 9c4bdfd4 0cd6a242 (strict Int/Lo
 T-368 dart: `List.join` — DONE 072de00a (spec-only)
 T-367 python: a lone high surrogate before a non-surrogate is read as a pair — DONE fa9fdcd8
 T-369 js: `var` is block-scoped; for-of/in reuse an outer variable; symbol limits — DONE b5390929 b4ec7662 d6a71e8a (js only; the TS port is T-379)
+T-376 go: `len`/`cap`/index/append pay ~19k instructions in `js_is_type` — DONE 44b773a3 (bench go 384M → 100M instructions, output checked against go run)
+T-375 go: `map[any]` keys of defined types; imported packages' defined types — DONE b44a5741
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
