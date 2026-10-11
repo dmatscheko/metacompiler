@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-375** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-377** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -126,32 +126,17 @@ prints 3 (Kotlin 3.0).
 
 # GO — Go  (oracle: `go run`)
 
-### T-365 go: `for range` over a slice is ~140k instructions per iteration natively · P2 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
-`for _, x := range xs` over 3 elements: ~413k instructions per call (13,996M vs 1,594M
-for a plain call, 30k calls), ~8x the collections - js_gorange appears to normalise
-into a keys/vals dict on every range. Profile and fix; consider a bench row.
+### T-375 go: `map[any]` keys of defined types; imported packages' defined types · P1 · GO · IN PROGRESS (GO worker, round 12) [V]
+Compiler only: `k := shapes.Make(); k.String()` - "variable not defined: Kind.String"
+(interpreter and go `kind2`); printing k prints the underlying value in all engines.
+`map[any]int{MyInt(1): 1, 1: 2}` has len 1 (go 2): key boxing at the literal and every
+index/assign/delete/comma-ok site plus boxed-key equality in go's map lookup (~150
+lines); imported defined types need package-qualified static types (~100-150 lines).
 
-### T-366 go: variadic calls build the slice object expensively · P3 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
-~40k instructions per variadic call remain: emitSlOf builds the slice with obj_new, 6
-js_set calls and a scope_get of $slclass. Build it in one floor/layer-2 call.
-
-### T-370 go: runtime types where the static type is not tracked · P2 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
-(a) generic `Show[T any](Blue)` prints 2 (go Blue: a type parameter has no runtime
-type); (b) `map[any]int{MyInt(1): 1, 1: 2}` has len 1 (go 2: key boxing needs the
-map's key type at every index site); (c) values reaching an interface through struct
-fields of interface type, channel sends, user-method parameters go in unboxed;
-(d) imported packages' defined types are not boxed; (e) `var x any = &T{1}; x.(T)`
-does not panic (pointer boxes at every interface store - the "&P{1} is P{1}" model);
-`%T` of a named func / func literal lacks the signature; `%T` of `&n` with n from an
-untyped constant.
-
-### T-371 go: native float multiply on a defined float type; method values; value-receiver method sets · P1 · GO · IN PROGRESS (GO+SH worker, round 11) [V]
-`type Circ float64; func (c Circ) A() float64 { return 3 * float64(c) }`: the native
-build fails, unresolved `js_jfmul` (emitTypedBin uses floExt; runtime.c says nothing
-emits it) - go prints 6. Interpreter only: `c := Color(1); f := c.String; f()` "call of
-a non function: f". All engines: `fmt.Println(*t)` where String has a pointer receiver
-calls String (go prints `{5}`). Interpreter: `strings.Join` "unknown name: strings" -
-check the strings package's coverage in both halves.
+### T-376 go: `len`/`cap`/index/append pay ~19k instructions in `js_is_type` · P2 · GO · IN PROGRESS (GO worker, round 12) [V]
+emitIsSl / emitIsPtr call the layer-2 js_is_type (~19k instructions each); every fixed
+parameter pays an emitted `$acopy` helper call (~3.9k) even for scalar types. Use the
+static types go-constfold.js now has to skip both where the type is known.
 
 ---
 
@@ -177,10 +162,6 @@ contains, sublist, any/every, fold/reduce, sort, reversed, ...).
 ---
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
-
-### T-372 bash: `unset` of a caller's local reveals the outer binding · P1 · SH · IN PROGRESS (GO+SH worker, round 11) [V]
-`g=1; f3(){ unset g; }; f4(){ local g=5; f3; declare -p g; }; f4`: bash `declare --
-g="1"`; both engines "not found".
 
 ---
 
@@ -490,6 +471,11 @@ T-266 go: pointers, nil typed values and panic values in fmt and panics — PART
 T-358 kotlin: interpreter gaps - `System.currentTimeMillis`, `kotlin.math.*` — DONE 01caa10
 T-360 python: int/float methods off the type; missing int/float methods — DONE 015bfaf
 T-357 kotlin: integer literals do not take their expected type — PARTIAL c89e01c (literals adopt their expected type at every listed site; lib/kotlin-decltypes.js); Int≠Long equality is T-373
+T-372 bash: `unset` of a caller's local reveals the outer binding — DONE 79c62f8
+T-371 go: native float multiply on a defined float type; method values; value-receiver method sets — DONE 3b04c69 44b1354
+T-365 go: `for range` over a slice is ~140k instructions per iteration natively — DONE 44b1354 (14,115M → 3,353M; nil range, per-iteration loop vars, continue in classic loops fixed too)
+T-366 go: variadic calls build the slice object expensively — DONE cfe340c (5.9k → 3.1k per call; folding obj_new + 5 stores into one floor call DECLINED: a floor call costs about the same)
+T-370 go: runtime types where the static type is not tracked — PARTIAL ff7a8a2 (func %T, untyped &n, struct fields/channels/method params); (b)+(d) are T-375; (a) generic type parameters at run time (~300 lines, boxing T breaks generic arithmetic) and (e) pointer boxes at every interface store (~200 lines, high regression risk against the "&P{1} is P{1}" model) DECLINED
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
