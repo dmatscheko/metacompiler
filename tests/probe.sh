@@ -205,8 +205,10 @@ strip_engine() {
     # the program writes, so when the program's LAST output has no trailing
     # newline - `echo -n x`, which is ordinary in bash and batch - the tag is
     # GLUED onto it: `xbash-to-llvm-ir: exit status 0`. No line-anchored filter
-    # can see that. Strip the glued form first, then the plain one.
-    sed -E "s/($GNAMES): (exit status [0-9]+|wrote executable .*)\$//" \
+    # can see that. Strip the glued form first, then the plain one. The glued
+    # form needs program text before the tag: blanking a sign-off that stands on
+    # its own line would leave an empty line the grep below cannot drop.
+    sed -E "s/^(.+)($GNAMES): (exit status [0-9]+|wrote executable .*)\$/\\1/" \
   | grep -a -v -E "^([a-z0-9#+-]+ (interpreter|compiler)|$GNAMES): "
 }
 
