@@ -75,7 +75,7 @@ denominator, conjugate() on int/float/bool too.
 
 # RB — Ruby
 
-### T-356 ruby: uncaught-error prefix and stream; Exception methods compiled; small gaps · P2 · RB · OPEN [V]
+### T-356 ruby: uncaught-error prefix and stream; Exception methods compiled; small gaps · P2 · RB · IN PROGRESS (JS+RB+SH worker, round 8) [V]
 MRI 2.6 prints `p.rb:2:in `X': msg (Class)` on stderr, X the builtin method raising
 or the enclosing method/block (`block in <main>`); ours has no prefix and writes to
 stdout - needs per-call-site/operator positions in three engines (cost on the hot call
@@ -88,20 +88,20 @@ iterates UTF-16 units (astral characters split).
 
 # JS — JavaScript and TypeScript
 
-### T-048 js: `with` · P3 · JS · Shared: runtime.c · OPEN [V]
+### T-048 js: `with` · P3 · JS · Shared: runtime.c · IN PROGRESS (JS+RB+SH worker, round 8) [V]
 The interpreter can implement it exactly; the compiled engines cannot, because the
 floor's scope is not object-backed - snapshot-in/write-back cannot see a property
 added inside the body, which would ship a designed-in halves divergence. Needs an
 object-backed scope in the floor, or DECLINED with that reason.
 
-### T-049 js: `Symbol.iterator` · P3 · JS + CORE · OPEN [V]
+### T-049 js: `Symbol.iterator` · P3 · JS + CORE · IN PROGRESS (JS+RB+SH worker, round 8) [V]
 No symbols exist in the value model; `for..of`, `yield*` and `js_iterable` test
 structurally for a callable `next` in three engines. Needs a new tag in runtime.c, a
 Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symbol
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-355 js: missing builtin globals and `.prototype` objects · P2 · JS · OPEN [V]
+### T-355 js: missing builtin globals and `.prototype` objects · P2 · JS · IN PROGRESS (JS+RB+SH worker, round 8) [V]
 Boolean, Function, Date, Symbol are undefined in every leg (node "function").
 `.prototype` is undefined for Error/TypeError/RangeError/SyntaxError/Map/Set (all legs)
 and for RegExp/Promise/BigInt compiled (the interpreter answers the host's - a halves
@@ -212,7 +212,7 @@ only the functions reached.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-334 bash: `${x,,}` / `${x@L}` leave Σ and İ unchanged · P1 · SH · OPEN [V]
+### T-334 bash: `${x,,}` / `${x@L}` leave Σ and İ unchanged · P1 · SH · IN PROGRESS (JS+RB+SH worker, round 8) [V]
 bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
 bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
 
