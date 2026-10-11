@@ -155,11 +155,11 @@ leg node's answers.
 
 # JV — Java
 
-### T-308 java: astral characters in string literals become U+FFFD · P1 · JV · OPEN [V]
+### T-308 java: astral characters in string literals become U+FFFD · P1 · JV · IN PROGRESS (SW+JV+CS worker, round 6) [V]
 `"😀"` (literal or `\uD83D\uDE00`): `(int) s.charAt(0)` prints 65533 in all legs;
 java 55357. Compare python T-200 / ruby T-187 (each fixed in its own grammar).
 
-### T-309 java: `super.toString()` on implicit Object; qualified `new java.util.ArrayList` · P1 · JV · OPEN [V]
+### T-309 java: `super.toString()` on implicit Object; qualified `new java.util.ArrayList` · P1 · JV · IN PROGRESS (SW+JV+CS worker, round 6) [V]
 `super.toString()` aborts "unknown super method 'toString'" (java `A@...`); in the
 interpreter `super.toString().startsWith(...)` does not parse. `new
 java.util.ArrayList<>()` without an import: "unknown class: java.util.ArrayList"
@@ -176,7 +176,7 @@ digits and its switch to exponent notation may not be the fixed window `csFloStr
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
 
-### T-310 csharp: the string and char API · P1 · CS · OPEN [V spec-only]
+### T-310 csharp: the string and char API · P1 · CS · IN PROGRESS (SW+JV+CS worker, round 6) [V spec-only]
 `char.IsDigit`/`char.IsLetter` unknown (interpreter); `ch.CompareTo('B')` fails in all
 legs (spec -1); `string.Concat`, `new string('A', 3)`, `s.ToCharArray()` fail; the
 interpreter has Substring/IndexOf/Equals while layer 2 has ToUpper/ToLower/Trim. Build
@@ -234,15 +234,15 @@ One line in goConvFail; gofmt it.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-300 swift: unqualified `.none` builds an enum case · P1 · SW · OPEN [V]
+### T-300 swift: unqualified `.none` builds an enum case · P1 · SW · IN PROGRESS (SW+JV+CS worker, round 6) [V]
 `let n: Int? = .none; print(n == nil)`: swiftc `true`, ours `false`. Fix needs to know
 no user enum declares `none` (or resolve by the declared Optional type).
 
-### T-301 swift: in-place mutation of an observed variable does not fire didSet · P1 · SW · OPEN [V]
+### T-301 swift: in-place mutation of an observed variable does not fire didSet · P1 · SW · IN PROGRESS (SW+JV+CS worker, round 6) [V]
 `var a = [1] { didSet { print("d", a.count) } }; a.append(2); a[0] = 5`: swiftc
 prints `d 2` twice; we print nothing. Only `=` and compound assignment are observed.
 
-### T-302 swift: `print(x as Any)` on an Optional; nested Unicode.Scalar · P2 · SW · OPEN [V]
+### T-302 swift: `print(x as Any)` on an Optional; nested Unicode.Scalar · P2 · SW · IN PROGRESS (SW+JV+CS worker, round 6) [V]
 `print(Optional(7) as Any)` prints `7` (swiftc `Optional(7)`: the Optional-box
 limit); a Unicode.Scalar in a collection prints `"é"` (swiftc `"\u{00E9}"`).
 
