@@ -195,27 +195,29 @@ LabelDef    <~~ push(idName(up.in)); pendingLabel = idName(up.in) ~~>
 // function declaration a legal if/else body in sloppy mode ('if (x) function f(){}'),
 // while a loop or with body never accepts one.
 NestedStatement = NotDeclHead NotFuncHead Statement ;
-IfBody          = NotDeclHead Statement ;
+IfBody          <~~ push(makeIfBody(pop(), up.start, up.pos)) ~~>
+                = NotDeclHead Statement ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
 // anywhere. The body is a flat list - the labels must be tried before Statement,
 // because 'case 1:' would otherwise parse as two expression statements (semicolons
 // are optional).
-Switch      <~~ push(makeSwitch(takeAll())) ~~>
+Switch      <~~ push(makeJsSwitch(takeAll(), up.start, up.pos)) ~~>
             = KwSwitch "(" Expression ")" "{" { CaseLabel | Statement } [ DefaultLabel { CaseLabel | Statement } ] "}" ;
 CaseLabel   <~~ push({casev: pop()}) ~~>
             = KwCase AssignExpr ":" ;
 DefaultLabel <~~ push({isdflt: true}) ~~>
             = KwDefault ":" ;
 
-Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+Block       <~~ push(makeJsBlock(takeAll(), up.start, up.pos)) ~~>
             = "{" { Statement } "}" ;
 
 // A function's body. Its `var` names are hoisted: bound (to undefined) in the
-// function's own scope on entry, whichever nested block declares them. Twin in
+// function's own scope on entry, whichever nested block declares them, and so are
+// its function declarations (see "Function declarations"). Twin in
 // js-to-llvm-ir.abnf.
-FuncBody    <~~ push(makeFuncBody(pop(), up.start, up.pos)) ~~>
-            = Block ;
+FuncBody    <~~ push(makeFuncBody(takeAll(), up.start, up.pos)) ~~>
+            = "{" { Statement } "}" ;
 
 // let and const declare a block scoped variable in the current scope; var assigns the
 // one its function body hoisted (makeFuncBody). DeclKw tells the declarators which.
@@ -245,7 +247,7 @@ Do          <~~ push(makeDo(takeAll())) ~~>
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
-For         <~~ push(makeFor(takeAll())) ~~>
+For         <~~ push(makeFor(takeAll())); hoistLexKill(up.start, up.pos) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
@@ -282,8 +284,9 @@ LabelRef    <~~ push({lblref: idName(up.in)}) ~~>
 Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow NoLineBreak Expression StmtEnd ;
 
-// A function declaration binds the closure in the current scope when it executes.
-FuncDecl    <~~ push(makeFuncDecl(takeAll())) ~~>
+// A function declaration: the scope it stands in instantiates it on entry, before any
+// statement runs (lib/js-hoist.js).
+FuncDecl    <~~ push(makeFuncDecl(takeAll(), up.start)) ~~>
             = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
@@ -835,14 +838,14 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // each ELEMENT over an array or a string, which is what the specification's
 // async-from-sync iterator does (see forOfStep / forOfElem).
 ForOf       = ForOfPattern | ForOfAPattern | ForOfName | ForOfMember | ForOfPath ;
-ForOfPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+ForOfPattern <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForPatHead ForOfOp Expression ")" NestedStatement ;
 // The ASSIGNMENT-pattern form: 'for ([o.a] of xs)' writes through places that already
 // exist, so its leaves may be member targets, which a binding DPattern may not have.
 // Tried right after the binding form, which cannot match a '.' inside the brackets.
-ForOfAPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+ForOfAPattern <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" APattern <~~ push({asg: pop()}) ~~> ForOfOp Expression ")" NestedStatement ;
-ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+ForOfName   <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
 // The head pushes the loop name and then the operator. A target that starts with 'let'
 // is reachable only through the for-IN alternative: 'for (let x of y)' declares, and
@@ -860,7 +863,7 @@ ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // nothing to bind, so the target becomes the one-leaf reference '[a.b]' would produce and
 // takes the same write path. LhsSuffixes is what makes the path end in a member, so
 // 'for (f() of xs)' stays the syntax error it is and falls through to ForOfPath.
-ForOfMember <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+ForOfMember <~~ push(makeForOf(takeAll(), up.pos)); hoistLexKill(up.start, up.pos) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfMemberHead Expression ")" NestedStatement ;
 ForOfMemberHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
 ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
@@ -1043,7 +1046,7 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // holds the methods and the constructor. A method call on an instance dispatches through
 // mcall (which follows __super for inheritance); super.m() calls the parent's method on
 // 'this'.
-ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+ClassDecl   <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}) ~~>
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
               PrivBodyOpen { ClassMember } PrivBodyClose ;
@@ -1055,7 +1058,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 // production rather than an alternative inside ClassDecl because an inline group commits
 // like an ordered choice - 'extends a.b' would match the name 'a' and then die on the
 // '.', never reaching the expression alternative. Tried after ClassDecl.
-ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
+ClassDeclWidened <~~ push(makeClassStmt(takeAll(), up.start)) ~~>
             = KwClass NotBindName Id <~~ push({cname: idName(up.in)}) ~~>
               KwExtends ClassExt PrivBodyOpen { ClassMember } PrivBodyClose ;
 ClassExt    <~~ push({extT: pop()}) ~~>
@@ -1261,9 +1264,9 @@ Debugger    <~~ push(function() {}) ~~>
 // The async and generator function DECLARATIONS. Both bind a function value under their
 // name; the markers decide whether calling it runs the body (async, answering a Promise)
 // or returns a generator object (generator and async generator).
-AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
+AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll(), up.start)) ~~>
             = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
-GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
+GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll(), up.start)) ~~>
             = KwFunction GenMark NotBindName Id <~~ push(idName(up.in)) ~~> ParamList [ UseStrictMark ] FuncBody ;
 
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
@@ -3266,6 +3269,8 @@ NotFuncHead = :script(~~
     include("lib/js-num.js")
     // The callee text of "X is not a function" (sitePrimaryText / siteIndexText).
     include("lib/js-callee.js")
+    // Which scope instantiates each function declaration (makeFuncBody, makeJsBlock).
+    include("lib/js-hoist.js")
 
 
     // ----- JavaScript's own value semantics -----
@@ -4988,8 +4993,17 @@ NotFuncHead = :script(~~
             if (items[i] != undefined && items[i].ustrict == true) { fileStrict = true; continue }
             out.push(items[i])
         }
-        // Every var no function body claimed is the program's own.
-        return hoistVars(claimVars(0, 2147483647), makeSeq(out))
+        // Every var and function no function body claimed is the program's own.
+        var fns = hoistClaimFns(0, 2147483647)
+        hoistLexKill(0, 2147483647)
+        var names = claimVars(0, 2147483647)
+        var annex = hoistNames(hoistClaimAnnex(0, 2147483647))
+        if (!fileStrict) {
+            for (var a = 0; a < annex.length; a++) {
+                if (names.indexOf(annex[a]) < 0) { names.push(annex[a]) }
+            }
+        }
+        return hoistVars(names, makeSeq(withFnInit(fns, out)))
     }
     // The UseStrictMark of a function production, and the same item list without it. The
     // mark is optional and sits directly in front of the body thunk, which the builders
@@ -8115,14 +8129,14 @@ NotFuncHead = :script(~~
         }, nm, params, txt)
     }
     // items = [{isgen}?, name, params, bodyThunk] - the '*' form is an async GENERATOR.
-    function makeAsyncFuncDecl(itemsIn) {
+    function makeAsyncFuncDecl(itemsIn, pos) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
         var isGen = items[0] != undefined && items[0].isgen != undefined
         var name = items[items.length - 3]
         var mk = isGen ? makeAsyncGen(items[items.length - 2], items[items.length - 1], st, name)
                        : makeAsyncFn(items[items.length - 2], items[items.length - 1], st, name)
-        return function() { declVar(name, mk()) }
+        return fnDeclAt(name, mk, pos, false)
     }
     // The expression form: the optional name is bound only inside the body (fnSelf).
     function makeAsyncFuncExpr(itemsIn, txt) {
@@ -8261,7 +8275,7 @@ NotFuncHead = :script(~~
     }
     // items = [{isgen}?, name, params, bodyThunk] for a declaration, and the same
     // without the name for an expression. The '*' picks a generator over a function.
-    function makeGenOrFuncDecl(itemsIn) {
+    function makeGenOrFuncDecl(itemsIn, pos) {
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
         var isGen = false
@@ -8271,7 +8285,7 @@ NotFuncHead = :script(~~
         var params = items[at + 1]
         var body = items[at + 2]
         var mk = isGen ? makeGenerator(params, body, st, name) : makeFunctionExpr(body, params, st, name)
-        return function() { declVar(name, mk()) }
+        return fnDeclAt(name, mk, pos, !isGen)
     }
     // The expression form. The optional name is bound only inside the body (fnSelf);
     // what is left after the marker is params and body.
@@ -8801,11 +8815,12 @@ NotFuncHead = :script(~~
     }
 
     // A class declaration: build the descriptor and bind it under the class's name.
-    function makeClassStmt(items) {
+    function makeClassStmt(items, pos) {
         var name = ""
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].cname != undefined) { name = items[i].cname }
         }
+        hoistNoteLex(name, pos)
         var build = makeClassValue(items)
         return function() { declVar(name, build()) }
     }
@@ -9727,6 +9742,7 @@ NotFuncHead = :script(~~
             if (items.length == 1) { return function() {} }
             return function() { varSet(name, init()) }
         }
+        hoistNoteLex(name, pos)
         return function() { declVar(name, init()) }
     }
 
@@ -9769,9 +9785,16 @@ NotFuncHead = :script(~~
     // A function body with vars runs in a scope of its own under the parameters',
     // binding each to undefined - or to the argument of a parameter of that name, which
     // keeps it. A closure in a default value therefore does not see the body's vars.
-    function makeFuncBody(bodyT, from, to) {
+    // The body's functions are instantiated in that scope too, so an Annex B
+    // assignment and a var of the same name write the binding they read.
+    function makeFuncBody(items, from, to) {
+        var fns = hoistClaimFns(from, to)
+        hoistLexKill(from, to)
+        var annex = hoistNames(hoistClaimAnnex(from, to))
         var names = claimVars(from, to)
-        if (names.length == 0) { return bodyT }
+        if (names.length == 0 && annex.length == 0) { return makeBlockStmt(withFnInit(fns, items)) }
+        var bodyT = makeBlockStmt(items)
+        var initT = fns.length > 0 ? withFnInit(fns, [])[0] : null
         return function() {
             var ps = scopes[scopes.length - 1]
             var vs = {}
@@ -9780,11 +9803,79 @@ NotFuncHead = :script(~~
                 v = objHasOwn.call(ps, names[i]) ? ps[names[i]] : undefined
                 scopePut(vs, names[i], v)
             }
+            if (annex.length > 0) { annexHoist(vs, ps, annex) }
             scopes.push(vs)
+            if (initT != null) { initT() }
             var r = bodyT()
             scopes.pop()
             return r
         }
+    }
+    // ----- Function declarations -----
+    // Which scope instantiates each one, and which block functions get an Annex B
+    // binding: lib/js-hoist.js. Twin in js-to-llvm-ir.abnf.
+    // The statement list with the instantiation of its functions in front.
+    function withFnInit(fns, items) {
+        if (fns.length == 0) { return items }
+        var out = [function() {
+            for (var i = 0; i < fns.length; i++) { declVar(fns[i].name, fns[i].mk()) }
+        }]
+        for (var j = 0; j < items.length; j++) { out.push(items[j]) }
+        return out
+    }
+    // The declaration in place: nothing, or the Annex B assignment.
+    function fnDeclAt(name, mk, pos, plain) {
+        var rec = {name: name, mk: mk, at: pos, file: c.curFile(), plain: plain, ab: false}
+        hoistFns.push(rec)
+        return function() { if (rec.ab) { annexSet(name) } }
+    }
+    // The block's binding, copied to the function's own: in the scope makeFuncBody
+    // marks "0var", or the global scope. A parameter of the name has none there.
+    function annexSet(name) {
+        if (strictAt(scopes)) { return }
+        var top = scopes.length - 1
+        var v = anytype // The function, or whatever the block assigned to the name since.
+        v = scopes[top][name]
+        for (var i = top - 1; i >= 0; i--) {
+            var sc = scopes[i]
+            if (i == 0 || objHasOwn.call(sc, "0var")) {
+                if (objHasOwn.call(sc, name)) { scopePut(sc, name, v) }
+                return
+            }
+        }
+    }
+    // The Annex B bindings of a function body's scope vs (ps is the parameters'), and
+    // the "0var" mark annexSet finds it by. A parameter of the name keeps it: no
+    // Annex B binding then.
+    function annexHoist(vs, ps, annex) {
+        vs["0var"] = true
+        if (strictAt(scopes)) { return }
+        for (var a = 0; a < annex.length; a++) {
+            if (!objHasOwn.call(ps, annex[a]) && !objHasOwn.call(vs, annex[a])) { scopePut(vs, annex[a], undefined) }
+        }
+    }
+    function makeJsBlock(items, from, to) {
+        return makeBlockStmt(withFnInit(hoistBlockFns(from, to), items))
+    }
+    // A switch's case block is one scope for the functions declared in it.
+    function makeJsSwitch(items, from, to) {
+        var fns = hoistBlockFns(from, to)
+        var swT = makeSwitch(items)
+        if (fns.length == 0) { return swT }
+        var initT = withFnInit(fns, [])[0]
+        return function() {
+            scopes.push({})
+            initT()
+            var r = swT()
+            scopes.pop()
+            return r
+        }
+    }
+    // Annex B.3.4: a function declaration as an if body is one in a block of its own.
+    function makeIfBody(t, from, to) {
+        var fns = hoistBlockFns(from, to)
+        if (fns.length == 0) { return t }
+        return makeBlockStmt(withFnInit(fns, [t]))
     }
     // A var's assignment: to the binding the chain has, else (a host global's name)
     // a new one here.
@@ -9815,7 +9906,11 @@ NotFuncHead = :script(~~
     function forDeclTarget(pat, pos) {
         var isVar = declIsVar()
         declKinds.pop()
-        if (!isVar) { return pat }
+        if (!isVar) {
+            var ns = patNames(pat, [])
+            for (var i = 0; i < ns.length; i++) { hoistNoteLex(ns[i], pos) }
+            return pat
+        }
         notePatVars(pat, pos)
         return {asg: pat}
     }
@@ -9968,16 +10063,17 @@ NotFuncHead = :script(~~
         }
     }
 
-    // Local stack = [name, [paramNames...], bodyThunk] -- binds the closure when executed.
+    // Local stack = [name, [paramNames...], bodyThunk] -- the enclosing scope
+    // instantiates the closure on entry.
     // items = [name, params, (UseStrictMark)?, bodyThunk].
-    function makeFuncDecl(items) {
+    function makeFuncDecl(items, pos) {
         var st = itemsStrict(items)
         var a = itemsNoStrict(items)
         var name = a[0]
         var paramNames = a[1]
         var bodyT = a[2]
         var mk = fnDef(function() { return makeClosure(paramNames, bodyT, scopes, st) }, name, paramNames)
-        return function() { declVar(name, mk()) }
+        return fnDeclAt(name, mk, pos, true)
     }
 
     // ----- Core library config (see lib/interp-core.js) -----

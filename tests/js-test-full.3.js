@@ -1829,6 +1829,43 @@ function s79() {
         y.toExponential(null) === "2e+0" && typeof y.toExponential === "function" && tp.call(xs[3], 2) === "2.5")
 }
 
+// ===== SECTION 80: function declarations are hoisted =====
+// A function declaration is instantiated when its scope is entered, before any
+// statement runs: callable above it in a function body and at the top level, and in a
+// block from the block's first statement. Sloppy code also gives a plain function
+// declared in a block (a switch, an if body) a var of the function, undefined until
+// the declaration is evaluated in place, which then copies the block's binding - not
+// when a let, const or class of the name encloses it, a parameter has the name, or
+// the code is strict, and never for a generator. Values read off node 24.
+var s80top = typeof s80tf + s80tf()
+function s80tf() { return 4 }
+{ function s80tb() { return 5 } }
+function s80() {
+    const f1 = function () { const r = typeof g + g(); function g() { return 1 } return r }
+    const f2 = function () { var out = typeof h; { out += typeof h + h(); function h() { return 2 } } return out + typeof h }
+    const f3 = function () { let h = 1; { function h() {} } return h }
+    const f4 = function (h) { { function h() {} } return h }
+    const f5 = function () { "use strict"; { function h() {} } return typeof h }
+    check("fh80a", f1() === "function1" && f2() === "undefinedfunction2function" && f3() === 1 && f4(7) === 7 &&
+        f5() === "undefined" && s80top === "function4" && s80tb() === 5)
+    const f6 = function () { { function h() { return 1 } { function h() { return 2 } } } return h() }
+    const f7 = function (k) { switch (k) { case 1: return typeof q; case 2: function q() {} } return typeof q }
+    const f8 = function () { { function* gg() {} } return typeof gg }
+    const f9 = function () { { h = 5; function h() {} } return h }
+    const f10 = function () { function d() { return 1 } function d() { return 2 } return d() }
+    check("fh80b", f6() === 2 && f7(1) === "function" && f7(2) === "function" && f7(3) === "undefined" &&
+        f8() === "undefined" && f9() === 5 && f10() === 2)
+    const f11 = function () { var v = typeof v2; var v2 = 3; function v2() {} return v + v2 }
+    const f12 = function (c) { var r = typeof ib; if (c) function ib() {} return r + typeof ib }
+    const f13 = function () { try { { function th() { return "t" } } } finally {} return th() }
+    const f14 = function () { function h() { return "top" } { function h() { return "blk" } } return h() }
+    const f15 = () => { return af(); function af() { return "arrow" } }
+    const f16 = function () { var r; try { throw 1 } catch (h) { { function h() {} } r = typeof h } return r + typeof h }
+    const f17 = function () { var fs = []; for (var i = 0; i < 2; i++) { let j = i; fs.push(lf); function lf() { return j } } return fs[0]() + fs[1]() + (fs[0] === fs[1] ? "" : "!") }
+    check("fh80c", f11() === "function3" && f12(true) === "undefinedfunction" && f12(false) === "undefinedundefined" &&
+        f13() === "t" && f14() === "blk" && f15() === "arrow" && f16() === "numberfunction" && f17() === "1!")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1866,6 +1903,7 @@ function main() {
     s77() // SECTION-CALL 77
     s78() // SECTION-CALL 78
     s79() // SECTION-CALL 79
+    s80() // SECTION-CALL 80
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

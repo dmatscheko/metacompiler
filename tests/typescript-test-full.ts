@@ -3641,6 +3641,52 @@ function s73() {
     check("nx73c", N73.local === "gLfalse" && N73.other === "fK1true" && N73.f() === "h" && N73.K.n === "K");
 }
 
+// ===== SECTION 74: function declarations are hoisted; a type assertion as a target =====
+// A function declaration is instantiated when its scope is entered, before any
+// statement runs: callable above it in a function body, at the top level and in a
+// namespace body (where an exported one reaches the object only where it stands, as
+// tsc's 'N.f = f' does), and in a block from the block's first statement. Sloppy code
+// also gives a plain function declared in a block a var of the function, undefined
+// until the declaration is evaluated in place - not when a let of the name encloses
+// it, a parameter has the name, or the code is strict. A type assertion inside a
+// parenthesized assignment target is erased: '(f as any) = g' stores to f. Values read
+// off node 24 (through tsc 6.0.3's output, alwaysStrict off as this grammar's Script
+// goal is sloppy).
+var s74top: string = typeof s74tf + s74tf();
+function s74tf(): number { return 4; }
+namespace N74 {
+    export const early: string = typeof ef + typeof (N74 as any).ef + k();
+    export function ef(): number { return 1; }
+    function k(): string { return "k"; }
+    { function nb(): number { return 2; } }
+    export const late: string = typeof nb;
+}
+function s74() {
+    const f1 = function (): string { const r = typeof g + g(); function g(): number { return 1; } return r; };
+    const f2 = function (): string { var out = typeof h; { out += typeof h + h(); function h(): number { return 2; } } return out + typeof h; };
+    const f3 = function (): any { let h: any = 1; { function h() {} } return h; };
+    const f4 = function (h: any): any { { function h() {} } return h; };
+    const f5 = function (): string { "use strict"; { function h() {} } return typeof h; };
+    check("fh74a", f1() === "function1" && f2() === "undefinedfunction2function" && f3() === 1 && f4(7) === 7 &&
+        f5() === "undefined" && s74top === "function4" && N74.early === "functionundefinedk" && N74.late === "function");
+    const f6 = function (k: number): string { switch (k) { case 1: return typeof q; case 2: function q() {} } return typeof q; };
+    const f7 = function (): string { var r: string; try { throw 1; } catch (h) { { function h() {} } r = typeof h; } return r + typeof h; };
+    const f8 = (): string => { return af(); function af(): string { return "arrow"; } };
+    check("fh74b", f6(1) === "function" && f6(2) === "function" && f6(3) === "undefined" && f7() === "numberfunction" &&
+        f8() === "arrow");
+    let fa: any = 1;
+    (fa as any) = (): number => 7;
+    const o: any = { p: 1, q: 2 };
+    (o.p as number) = 5;
+    (<any>o).q = 3;
+    ((o as any).r as any) = 4;
+    (o.s satisfies any) = 6;
+    let n: number = 1;
+    (n as number) += 2;
+    (n as any)++;
+    check("fh74c", fa() === 7 && o.p === 5 && o.q === 3 && o.r === 4 && o.s === 6 && n === 4);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3717,6 +3763,7 @@ function main(): number {
     s71(); // SECTION-CALL 71
     s72(); // SECTION-CALL 72
     s73(); // SECTION-CALL 73
+    s74(); // SECTION-CALL 74
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
