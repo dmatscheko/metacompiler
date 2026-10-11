@@ -2087,11 +2087,27 @@ var goPanics = []
 var goPanicSet = []
 var goDeferAt = []
 
+// Whether a frame's panic value was computed at the panic ($panicf, see PanicCall
+// in the grammars), which goPanicReport needs. The thrown value cannot carry it,
+// so js_gopanic and js_gorepanic note it beside the value they throw (goRaised*)
+// and the catching frame takes it over when it catches that very value.
+var goPanicFresh = []
+var goRaisedOn = false
+var goRaisedV = anytype
+var goRaisedFresh = false
+
+function goCaughtFresh(e) {
+    var f = goRaisedOn && goRaisedFresh && goRaisedV === e
+    goRaisedOn = false
+    return f
+}
+
 // Go keeps every panic that has started and not finished on a chain, and reports
 // an unrecovered one with all of them. goActiveAt / goActiveV are the panics whose
 // frames are running their deferred calls (js_gorundefers), oldest first: the
-// frame's goPanics index and the value. A panic's own chain ([{v, rec}], rec when
-// recovered by then) is the active list it was raised under, taken when it first
+// frame's goPanics index (-1 once a newer panic of the same frame aborted it, its
+// recovered bit then kept in goActiveRec), the value and its fresh bit. A panic's
+// own chain ([{v, rec, fresh}], rec when recovered by then) is the active list it was raised under, taken when it first
 // reaches a frame's defers or js_gotop - nothing between its raise and there
 // changes the list. goPanicChain / goPanicChainSet keep it per goPanics entry, and
 // between frames it travels in goFly while goFlyOn and goFlyExc is the value
@@ -2099,6 +2115,8 @@ var goDeferAt = []
 // abnf/jsrtgolang.go.
 var goActiveAt = []
 var goActiveV = []
+var goActiveRec = []
+var goActiveFresh = []
 var goPanicChain = []
 var goPanicChainSet = []
 var goFly = []
@@ -2110,7 +2128,8 @@ function goChainNow() {
     var i = 0
     while (i < goActiveAt.length) {
         var at = goActiveAt[i]
-        out.push({v: goActiveV[i], rec: at >= goPanics.length || !goPanicSet[at]})
+        if (at < 0) { out.push({v: goActiveV[i], rec: goActiveRec[i], fresh: goActiveFresh[i]}) }
+        else { out.push({v: goActiveV[i], rec: at >= goPanics.length || !goPanicSet[at], fresh: goActiveFresh[i]}) }
         i = i + 1
     }
     return out
@@ -2119,6 +2138,7 @@ function goChainNow() {
 function js_gotry(fn) {
     goPanics.push(undefined)
     goPanicSet.push(false)
+    goPanicFresh.push(false)
     goPanicChain.push([])
     goPanicChainSet.push(false)
     var res = anytype
@@ -2128,6 +2148,7 @@ function js_gotry(fn) {
     } catch (e) {
         goPanics[goPanics.length - 1] = e
         goPanicSet[goPanicSet.length - 1] = true
+        goPanicFresh[goPanicFresh.length - 1] = goCaughtFresh(e)
         if (goFlyOn && goFlyExc === e) {
             goPanicChain[goPanicChain.length - 1] = goFly
             goPanicChainSet[goPanicChainSet.length - 1] = true
@@ -2164,12 +2185,14 @@ function js_gotop() {
     var had = goPanicSet[n]
     var ch = goPanicChain[n]
     if (!goPanicChainSet[n]) { ch = goChainNow() }
+    var fresh = goPanicFresh[n]
     goPanics.pop()
     goPanicSet.pop()
+    goPanicFresh.pop()
     goPanicChain.pop()
     goPanicChainSet.pop()
     if (!had) { return undefined }
-    goPanicReport(ch, p)
+    goPanicReport(ch, p, fresh)
     exit(2)
     return undefined
 }
@@ -2177,25 +2200,29 @@ function js_gotop() {
 // An unrecovered panic as Go reports it, one line each: its chain comes first,
 // oldest first, each later one indented by a tab and a recovered one marked
 // " [recovered]". A panic raised again with the very value it aborted is printed
-// once, marked " [recovered, repanicked]" (go 1.23+). Twins: goPanicReport in
+// once, marked " [recovered, repanicked]" (go 1.23+); an equal value counts as the
+// same one unless the later panic computed it (fresh). Twins: goPanicReport in
 // languages/go-interpreter.abnf and abnf/jsrtgolang.go.
-function goPanicReport(ch, p) {
+function goPanicReport(ch, p, pfresh) {
     var vs = []
     var recs = []
+    var same = [false]
     var i = 0
     while (i < ch.length) {
         vs.push(ch[i].v)
         recs.push(ch[i].rec)
+        if (i > 0) { same.push(!ch[i].fresh && ch[i].v === ch[i - 1].v) }
         i = i + 1
     }
+    if (ch.length > 0) { same.push(!pfresh && p === ch[ch.length - 1].v) }
     vs.push(p)
     recs.push(false)
     var k = 0
     while (k < vs.length) {
-        if (k == 0 || vs[k] !== vs[k - 1]) {
+        if (!same[k]) {
             var ln = "panic: " + gopStr(vs[k])
             if (k > 0) { ln = "\t" + ln }
-            if (recs[k] && k + 1 < vs.length && vs[k + 1] === vs[k]) { ln = ln + " [recovered, repanicked]" }
+            if (recs[k] && k + 1 < vs.length && same[k + 1]) { ln = ln + " [recovered, repanicked]" }
             else if (recs[k]) { ln = ln + " [recovered]" }
             eprintln(ln)
         }
@@ -2209,14 +2236,19 @@ function js_gorepanic() {
     var had = goPanicSet[n]
     var ch = goPanicChain[n]
     var chSet = goPanicChainSet[n]
+    var fresh = goPanicFresh[n]
     goPanics.pop()
     goPanicSet.pop()
+    goPanicFresh.pop()
     goPanicChain.pop()
     goPanicChainSet.pop()
     if (had) {
         goFly = ch
         goFlyExc = p
         goFlyOn = chSet
+        goRaisedOn = true
+        goRaisedV = p
+        goRaisedFresh = fresh
         throw p
     }
     return undefined
@@ -2412,13 +2444,16 @@ function js_gomvargs(args) {
     return args
 }
 
-// panic(v): the argument array is the callee's.
-function js_gopanic(args) {
+// panic(v): the argument array is the callee's; fresh is 1 for $panicf.
+function js_gopanic(args, fresh) {
     var v = anytype
     v = undefined
     if (Array.isArray(args) && args.length > 0) { v = args[0] }
     if (v === undefined || v === null) { v = goPanicNil() }
     goFlyOn = false
+    goRaisedOn = true
+    goRaisedV = v
+    goRaisedFresh = fresh == 1
     throw v
 }
 
@@ -2468,51 +2503,69 @@ function js_gorecover() {
 }
 
 // Runs collected [f, args] pairs LIFO (Go defer). goDeferAt records WHICH frame
-// these defers belong to, for a recover() inside one of them, and is popped even
-// when a defer panics itself - MetaJS has no `finally` here, so the unwinding
-// path pops it explicitly and rethrows. While they run for the frame's own panic,
-// that panic is ACTIVE (goActiveAt).
+// these defers belong to, for a recover() inside one of them. While they run for
+// the frame's panic, that panic is ACTIVE (goActiveAt). A deferred call that
+// panics does not stop the others: its panic becomes the frame's (js_gorepanic
+// raises it) and the remaining calls run for it, while the panic it aborted stays
+// on the chain with its recovered bit frozen (goActiveAt -1, goActiveRec). Twins:
+// goFrameDefers in languages/go-interpreter.abnf, js_gorundefers in
+// abnf/jsrtgolang.go.
 function js_gorundefers(list) {
     if (!Array.isArray(list)) { fail("js_gorundefers needs the defer list") }
     var at = goPanics.length - 1
     goDeferAt.push(at)
-    var orig = at >= 0 && goPanicSet[at]
-    if (orig) {
+    var base = goActiveAt.length
+    if (at >= 0 && goPanicSet[at]) {
         if (!goPanicChainSet[at]) {
             goPanicChain[at] = goChainNow()
             goPanicChainSet[at] = true
         }
         goActiveAt.push(at)
         goActiveV.push(goPanics[at])
+        goActiveRec.push(false)
+        goActiveFresh.push(goPanicFresh[at])
     }
-    try {
-        var i = list.length - 1
-        while (i >= 0) {
-            var pair = list[i]
-            if (!Array.isArray(pair) || pair.length != 2) { fail("broken defer entry") }
-            var f = pair[0]
-            var as = pair[1]
-            if (!Array.isArray(as)) { as = [] }
+    var i = list.length - 1
+    while (i >= 0) {
+        var pair = list[i]
+        if (!Array.isArray(pair) || pair.length != 2) { fail("broken defer entry") }
+        var f = pair[0]
+        var as = pair[1]
+        if (!Array.isArray(as)) { as = [] }
+        try {
             f.apply(undefined, as)
-            i = i - 1
-        }
-    } catch (e) {
-        goDeferAt.pop()
-        if (orig) {
-            if (!(goFlyOn && goFlyExc === e)) {
-                goFly = goChainNow()
-                goFlyExc = e
-                goFlyOn = true
+        } catch (e) {
+            if (at < 0) {
+                goDeferAt.pop()
+                throw e
             }
-            goActiveAt.pop()
-            goActiveV.pop()
+            var ch = goFly
+            if (!(goFlyOn && goFlyExc === e)) { ch = goChainNow() }
+            goFlyOn = false
+            var fresh = goCaughtFresh(e)
+            var top = goActiveAt.length - 1
+            if (top >= base) {
+                goActiveRec[top] = !goPanicSet[at]
+                goActiveAt[top] = -1
+            }
+            goPanics[at] = e
+            goPanicSet[at] = true
+            goPanicFresh[at] = fresh
+            goPanicChain[at] = ch
+            goPanicChainSet[at] = true
+            goActiveAt.push(at)
+            goActiveV.push(e)
+            goActiveRec.push(false)
+            goActiveFresh.push(fresh)
         }
-        throw e
+        i = i - 1
     }
     goDeferAt.pop()
-    if (orig) {
+    while (goActiveAt.length > base) {
         goActiveAt.pop()
         goActiveV.pop()
+        goActiveRec.pop()
+        goActiveFresh.pop()
     }
     return undefined
 }

@@ -2977,6 +2977,50 @@ func s47() {
 	check("sp1", fmt.Sprint(ys...) == fmt.Sprint(1, "a", 2.5) && a.add(ns...) == 9 && a.add() == 9)
 }
 
+// ===== SECTION 48: a deferred call that panics =====
+// Expected values read off `go run` (go 1.27). A deferred call that panics does not
+// stop the frame's other deferred calls: its panic replaces the one in flight and
+// the remaining calls run for it, so a later recover() takes the NEWER value.
+var log48 = ""
+
+func f48a() (got any) {
+	defer func() { got = recover() }()
+	defer func() { panic("B") }()
+	defer func() { log48 += "c" }()
+	panic("A")
+}
+
+func f48b() (got any) {
+	defer func() { got = recover() }()
+	defer func() { panic("B") }()
+	log48 += "b"
+	return "unused"
+}
+
+func f48c() (got any) {
+	defer func() { got = recover() }()
+	defer func() { panic("C") }()
+	defer func() { recover(); panic("B") }()
+	panic("A")
+}
+
+func f48d() (out string) {
+	defer func() { out += fmt.Sprint(recover()) }()
+	func() {
+		defer func() { out += "i" }()
+		defer func() { panic("B") }()
+		panic("A")
+	}()
+	return "x"
+}
+
+func s48() {
+	check("dp1", f48a() == "B" && log48 == "c")
+	check("dp2", f48b() == "B" && log48 == "cb")
+	check("dp3", f48c() == "C")
+	check("dp4", f48d() == "iB")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3025,6 +3069,7 @@ func main() {
 	s45() // SECTION-CALL 45
 	s46() // SECTION-CALL 46
 	s47() // SECTION-CALL 47
+	s48() // SECTION-CALL 48
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

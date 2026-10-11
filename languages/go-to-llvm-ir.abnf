@@ -862,7 +862,20 @@ Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | Flo
             | GoDecLit | True | False | Nil | FuncLit | SliceLit
             | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit
             | QualStructLit | StructLit
-            | ArrayLit | ConvExpr | CompLitNI | Call | VarRef ;
+            | ArrayLit | ConvExpr | CompLitNI | PanicCall | Call | VarRef ;
+
+// panic(v). Go reports a panic raised again with the value it aborted only once
+// ("[recovered, repanicked]"), and "the value" is the interface value: re-raising
+// what recover() answered, or a constant, is the same value, while a value computed
+// here (fmt.Sprint(r), a conversion, an operator) is a new one even when it is
+// equal. So a computed argument calls $panicf, which marks the panic fresh.
+PanicCall   = "panic" KwEnd "(" ( PanicPlain ")" | PanicFresh [ "," ] ")" ) ;
+PanicPlain  <~~ push(makeCall(["panic", pop()])) ~~> = PanicOperand [ "," ] ;
+PanicOperand <~~ push(foldCallMember(takeAll())) ~~>
+            = ( ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit | BinLit | LegOctLit | DecULit
+              | DqString | RawString | RuneLit | GoDecLit | True | False | Nil | VarRef ) { FieldSfx | IndexSfx } ;
+PanicFresh  <~~ push(makeCall(["$panicf", pop()])) ~~> = Expression ;
+
 
 // A conversion whose target type is written out: []byte(s), []rune(s) and the
 // PREDECLARED scalar spellings int(x), float64(n), uint8(b), ... The scalar forms
@@ -5186,7 +5199,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declBuiltin(b, "max", "js_gominmax", 1)
         // panic(v) raises; recover() answers the pending panic of the frame whose
         // deferred functions are running (nil outside one) and stops the unwinding.
-        b = declBuiltin(b, "panic", "js_gopanic", null)
+        // $panicf is panic of a value computed at the call (see PanicCall).
+        b = declBuiltin(b, "panic", "js_gopanic", 0)
+        b = declBuiltin(b, "$panicf", "js_gopanic", 1)
         b = declBuiltin(b, "recover", "js_gorecover", null)
         // Without recover() no division carries the js_gidivz pre-check (emitDivZ).
         if (!usesRecover) { callExt(b, "js_gidivthrow", []) }

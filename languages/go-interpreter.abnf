@@ -838,7 +838,20 @@ AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
 Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
             | GoDecLit | True | False | Nil | FuncLit | MakeCall | NewCall | ConvExpr
-            | CompositeLit | Call | Iota | VarRef ;
+            | CompositeLit | PanicCall | Call | Iota | VarRef ;
+
+// panic(v). Go reports a panic raised again with the value it aborted only once
+// ("[recovered, repanicked]"), and "the value" is the interface value: re-raising
+// what recover() answered, or a constant, is the same value, while a value computed
+// here (fmt.Sprint(r), a conversion, an operator) is a new one even when it is
+// equal. So a computed argument calls $panicf, which marks the panic fresh.
+PanicCall   = "panic" KwEnd "(" ( PanicPlain ")" | PanicFresh [ "," ] ")" ) ;
+PanicPlain  <~~ push(makeCall(["panic", pop()])) ~~> = PanicOperand [ "," ] ;
+PanicOperand <~~ push(foldCallMember(takeAll())) ~~>
+            = ( ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit | BinLit | LegOctLit | DecULit
+              | DqString | RawString | RuneLit | GoDecLit | True | False | Nil | VarRef ) { FieldSfx | IndexSfx } ;
+PanicFresh  <~~ push(makeCall(["$panicf", pop()])) ~~> = Expression ;
+
 
 // ----- Composite literals -----
 // One production covers every form: []T{...}, [N]T{...}, [...]T{...}, map[K]V{...},
@@ -5073,7 +5086,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var panicking = false
     hostGlobals["panic"] = function(v) {
         if (v === undefined || v === null) { v = goPanicNil() }
-        throw {__gopanic: true, v: v}
+        throw {__gopanic: true, v: v, fresh: false}
+    }
+    hostGlobals["$panicf"] = function(v) {
+        if (v === undefined || v === null) { v = goPanicNil() }
+        throw {__gopanic: true, v: v, fresh: true}
     }
     hostGlobals["recover"] = function() {
         if (!panicking) { return null }
@@ -5097,26 +5114,66 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // An unrecovered panic as Go reports it, one line each: its chain comes first,
     // oldest first, each later one indented by a tab and a recovered one
     // marked " [recovered]". A panic raised again with the very value it aborted is
-    // printed once, marked " [recovered, repanicked]" (go 1.23+). Value identity
-    // stands in for Go's interface identity, so an equal string or number counts as
-    // the same value. Twins: goPanicReport in lib/go-rt.metajs and in
-    // abnf/jsrtgolang.go.
+    // printed once, marked " [recovered, repanicked]" (go 1.23+). Go compares the
+    // interface values, so an equal value is the same one unless the later panic
+    // computed it (fresh, see PanicCall). Twins: goPanicReport in lib/go-rt.metajs
+    // and in abnf/jsrtgolang.go.
     function goPanicReport(e) {
         var ch = goChainOf(e)
         var vs = []
         var recs = []
+        var same = [false]
         for (var i = 0; i < ch.length; i++) { vs.push(ch[i].v); recs.push(ch[i].rec) }
         vs.push(e.v)
         recs.push(false)
+        for (var j = 1; j < vs.length; j++) {
+            var fr = j < ch.length ? ch[j].fresh : e.fresh
+            same.push(fr != true && vs[j] === vs[j - 1])
+        }
         var lines = []
         for (var k = 0; k < vs.length; k++) {
-            if (k > 0 && vs[k] === vs[k - 1]) { continue }
+            if (same[k]) { continue }
             var ln = (k > 0 ? "\t" : "") + "panic: " + gstr(vs[k])
-            if (recs[k] && k + 1 < vs.length && vs[k + 1] === vs[k]) { ln += " [recovered, repanicked]" }
+            if (recs[k] && k + 1 < vs.length && same[k + 1]) { ln += " [recovered, repanicked]" }
             else if (recs[k]) { ln += " [recovered]" }
             lines.push(ln)
         }
         return lines
+    }
+    // A frame's deferred calls, LIFO, for its panic `cur` (null when it returned).
+    // A deferred call that panics does not stop the others: its panic becomes the
+    // frame's and the remaining calls run for it, so a later recover() takes the
+    // newer value. Every panic the frame has seen stays ACTIVE until the frame is
+    // done (go reports an aborted one in the chain). Answers the panic still pending.
+    // Twins: js_gorundefers in lib/go-rt.metajs and in abnf/jsrtgolang.go.
+    function goFrameDefers(frame, cur) {
+        if (frame.length == 0) { return cur }
+        var pk0 = panicking
+        var pv0 = panicVal
+        var base = goActive.length
+        if (cur != null) { goChainOf(cur); goActive.push({v: cur.v, rec: false, fresh: cur.fresh}) }
+        for (var i = frame.length - 1; i >= 0; i--) {
+            panicking = cur != null
+            panicVal = cur != null ? cur.v : null
+            try {
+                frame[i].f.apply(undefined, frame[i].args)
+                if (!panicking) { cur = null }
+            } catch (e) {
+                if (e == undefined || e == null || e.__gopanic != true) {
+                    while (goActive.length > base) { goActive.pop() }
+                    panicking = pk0
+                    panicVal = pv0
+                    throw e
+                }
+                goChainOf(e)
+                cur = e
+                goActive.push({v: e.v, rec: false, fresh: e.fresh})
+            }
+        }
+        while (goActive.length > base) { goActive.pop() }
+        panicking = pk0
+        panicVal = pv0
+        return cur
     }
     // The value an UNNAMED-result function answers when its body produced no return
     // signal: one zero, or an array of them, or undefined when it declares no result.
@@ -5163,7 +5220,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             else { deferFrames.pop(); scopes = saved; throw e }
         }
         deferFrames.pop()
-        if (caught != null) { panicking = true; panicVal = caught.v }
         // NO RETURN SIGNAL in a function that declares results means its panic was
         // RECOVERED, and Go's answer there is the zero value of each declared result
         // type. (A function with NAMED results reads them back below, so only the
@@ -5173,28 +5229,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (rl.length == 1) { setVar(rl[0], res.v) }
             else { var rvs = goMvArr(res.v); for (var k = 0; k < rl.length; k++) { setVar(rl[k], rvs[k]) } }
         }
-        if (caught == null) { runDefers(frame) } else {
-            goChainOf(caught)
-            goActive.push({v: caught.v, rec: false})
-            try {
-                runDefers(frame)
-            } catch (e2) {
-                if (e2 != undefined && e2 != null && e2.__gopanic == true) {
-                    goChainOf(e2)
-                    panicking = false
-                    panicVal = null
-                }
-                goActive.pop()
-                throw e2
-            }
-            goActive.pop()
-        }
-        if (panicking) {
-            panicking = false
-            var pv = panicVal
-            panicVal = null
+        var pend = goFrameDefers(frame, caught)
+        if (pend != null) {
             scopes = saved
-            throw {__gopanic: true, v: pv, chain: caught == null ? null : caught.chain}
+            throw {__gopanic: true, v: pend.v, chain: pend.chain, fresh: pend.fresh}
         }
         if (rl.length > 0) {
             if (rl.length == 1) { out = getVar(rl[0]) }

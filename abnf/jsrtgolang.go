@@ -757,20 +757,24 @@ func (rt *jsrt) gopBad(f gopFlags, verb rune, v interface{}) string {
 // rec when it was recovered by then. Twins: goActive in languages/go-interpreter.abnf
 // and lib/go-rt.metajs.
 type goAbort struct {
-	v   interface{}
-	rec bool
+	v     interface{}
+	rec   bool
+	fresh bool // raised with a value computed at the panic (see $panicf)
 }
 
 type goActiveEnt struct {
-	at   int
-	orig interface{}
+	at     int
+	orig   interface{}
+	frozen bool // aborted by a newer panic of the same frame: rec is final
+	rec    bool
 }
 
 var goChains = struct {
 	sync.Mutex
 	active map[*jsrt][]goActiveEnt
 	chain  map[*jsThrown][]goAbort
-}{active: map[*jsrt][]goActiveEnt{}, chain: map[*jsThrown][]goAbort{}}
+	fresh  map[*jsThrown]bool
+}{active: map[*jsrt][]goActiveEnt{}, chain: map[*jsThrown][]goAbort{}, fresh: map[*jsThrown]bool{}}
 
 // goChainOf is the chain of the thrown value p, taken now if it has none yet. The
 // caller holds goChains.
@@ -785,15 +789,28 @@ func (rt *jsrt) goChainOf(p interface{}) []goAbort {
 	c := make([]goAbort, len(act))
 	for i, e := range act {
 		v := e.orig
+		fresh := false
 		if et, ok := v.(*jsThrown); ok {
 			v = et.value
+			fresh = goChains.fresh[et]
 		}
-		c[i] = goAbort{v: v, rec: e.at >= len(rt.goPanics) || rt.goPanics[e.at] == nil}
+		rec := e.rec
+		if !e.frozen {
+			rec = e.at >= len(rt.goPanics) || rt.goPanics[e.at] == nil
+		}
+		c[i] = goAbort{v: v, rec: rec, fresh: fresh}
 	}
 	if isT {
 		goChains.chain[t] = c
 	}
 	return c
+}
+
+// goDeferCall calls one deferred function and answers the panic it raised, or nil.
+func (rt *jsrt) goDeferCall(f interface{}, args []interface{}) (caught interface{}) {
+	defer func() { caught = recover() }()
+	rt.call(f, jsUndef, args)
+	return nil
 }
 
 // goPanicReport is an unrecovered panic as Go reports it, its chain first (the last
@@ -803,15 +820,16 @@ func (rt *jsrt) goChainOf(p interface{}) []goAbort {
 // goPanicReport in languages/go-interpreter.abnf and lib/go-rt.metajs.
 func (rt *jsrt) goPanicReport(ps []goAbort) string {
 	out := ""
+	same := func(k int) bool { return k > 0 && !ps[k].fresh && rt.strictEq(ps[k].v, ps[k-1].v) }
 	for k, p := range ps {
-		if k > 0 && rt.strictEq(p.v, ps[k-1].v) {
+		if same(k) {
 			continue
 		}
 		if k > 0 {
 			out += "\t"
 		}
 		out += "panic: " + rt.gopStr(p.v)
-		if p.rec && k+1 < len(ps) && rt.strictEq(ps[k+1].v, p.v) {
+		if p.rec && k+1 < len(ps) && same(k+1) {
 			out += " [recovered, repanicked]"
 		} else if p.rec {
 			out += " [recovered]"
@@ -1939,9 +1957,10 @@ func init() {
 			if t, ok := p.(*jsThrown); ok {
 				goChains.Lock()
 				chain := rt.goChainOf(t)
+				fresh := goChains.fresh[t]
 				goChains.Unlock()
 				if len(chain) > 0 {
-					fmt.Fprint(warnWriter, wtf8Clean(rt.goPanicReport(append(chain[:len(chain):len(chain)], goAbort{v: t.value}))))
+					fmt.Fprint(warnWriter, wtf8Clean(rt.goPanicReport(append(chain[:len(chain):len(chain)], goAbort{v: t.value, fresh: fresh}))))
 					os.Exit(2)
 				}
 			}
@@ -1966,35 +1985,80 @@ func init() {
 			os.Exit(2)
 			return 0
 		}
-		// The frame's deferred calls (the shared js_rundefers). While they run
-		// for the frame's own panic, that panic is ACTIVE (goChains).
+		// The frame's deferred calls, LIFO. While they run for the frame's panic,
+		// that panic is ACTIVE (goChains). A deferred call that panics does not stop
+		// the others: its panic becomes the frame's (js_gorepanic raises it) and the
+		// remaining calls run for it, while the panic it aborted stays on the chain
+		// with its recovered bit frozen. Twins: goFrameDefers in
+		// languages/go-interpreter.abnf, js_gorundefers in lib/go-rt.metajs.
+		// panic(v) and $panicf(v): the second argument says the value was computed
+		// at the panic, which goPanicReport needs (see PanicCall in the grammars).
+		basePanic := m["js_gopanic"]
+		m["js_gopanic"] = func(a []uint64) uint64 {
+			if len(a) > 1 && rt.truthy(u(a[1])) {
+				defer func() {
+					c := recover()
+					if t, ok := c.(*jsThrown); ok {
+						goChains.Lock()
+						goChains.fresh[t] = true
+						goChains.Unlock()
+					}
+					panic(c)
+				}()
+			}
+			return basePanic(a)
+		}
 		baseRunDefers := m["js_rundefers"]
 		m["js_gorundefers"] = func(a []uint64) uint64 {
 			at := len(rt.goPanics) - 1
-			if at < 0 || rt.goPanics[at] == nil {
+			if at < 0 {
 				return baseRunDefers(a)
 			}
-			orig := rt.goPanics[at]
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("js_gorundefers needs the defer list")
+			}
+			rt.goDeferAt = append(rt.goDeferAt, at)
+			defer func() { rt.goDeferAt = rt.goDeferAt[:len(rt.goDeferAt)-1] }()
 			goChains.Lock()
-			rt.goChainOf(orig)
-			goChains.active[rt] = append(goChains.active[rt], goActiveEnt{at: at, orig: orig})
+			base := len(goChains.active[rt])
+			if p := rt.goPanics[at]; p != nil {
+				rt.goChainOf(p)
+				goChains.active[rt] = append(goChains.active[rt], goActiveEnt{at: at, orig: p})
+			}
 			goChains.Unlock()
-			defer func() {
-				c := recover()
+			for i := len(arr.elems) - 1; i >= 0; i-- {
+				pair, ok := arr.elems[i].(*jsArray)
+				if !ok || len(pair.elems) != 2 {
+					rt.fail("broken defer entry")
+				}
+				args, _ := pair.elems[1].(*jsArray)
+				c := rt.goDeferCall(pair.elems[0], args.elems)
+				if c == nil {
+					continue
+				}
 				goChains.Lock()
-				if c != nil {
-					rt.goChainOf(c)
-				} else if t, ok := orig.(*jsThrown); ok && rt.goPanics[at] == nil {
-					delete(goChains.chain, t)
-				}
+				rt.goChainOf(c)
 				act := goChains.active[rt]
-				goChains.active[rt] = act[:len(act)-1]
-				goChains.Unlock()
-				if c != nil {
-					panic(c)
+				if top := len(act) - 1; top >= base {
+					act[top].frozen = true
+					act[top].rec = rt.goPanics[at] == nil
 				}
-			}()
-			return baseRunDefers(a)
+				rt.goPanics[at] = c
+				goChains.active[rt] = append(act, goActiveEnt{at: at, orig: c})
+				goChains.Unlock()
+			}
+			goChains.Lock()
+			act := goChains.active[rt]
+			for _, e := range act[base:] {
+				if t, ok := e.orig.(*jsThrown); ok && e.orig != rt.goPanics[at] {
+					delete(goChains.chain, t)
+					delete(goChains.fresh, t)
+				}
+			}
+			goChains.active[rt] = act[:base]
+			goChains.Unlock()
+			return 0
 		}
 		// The DIVISOR of an integer '/' or '%', checked before the operator runs.
 		// Go's integer divide by zero is a recoverable run-time panic; the floor's
