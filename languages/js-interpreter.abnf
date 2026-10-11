@@ -6624,12 +6624,14 @@ NotFuncHead = :script(~~
     //   \u{H...}  a code POINT - above the BMP it becomes the surrogate PAIR, which is
     //             why '"\u{1F600}".length' is 2 and not 1
     //   \<break>  a line continuation: backslash and break both vanish
+    // A plain character is copied by code unit with fromCharCode, not charAt: the host's
+    // charAt answers half of an astral character as U+FFFD (gojaCharAt in abnf/jsrt.go).
     function jsUnescape(s) {
         var out = ""
         var i = 0
         while (i < s.length) {
             var cc = s.charCodeAt(i)
-            if (cc != 92) { out = out + s.charAt(i); i = i + 1; continue }
+            if (cc != 92) { out = out + String.fromCharCode(cc); i = i + 1; continue }
             var e = s.charCodeAt(i + 1)
             if (e == 10) { i = i + 2; continue }                                  // \<LF>
             if (e == 13) { i = (s.charCodeAt(i + 2) == 10) ? i + 3 : i + 2; continue } // \<CR> / \<CRLF>

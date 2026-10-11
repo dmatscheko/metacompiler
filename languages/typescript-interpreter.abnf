@@ -5240,7 +5240,7 @@ NotFuncHead = :script(~~
         var i = 0
         while (i < s.length) {
             var cc = s.charCodeAt(i)
-            if (cc != 92) { out = out + s.charAt(i); i = i + 1; continue }
+            if (cc != 92) { out = out + String.fromCharCode(cc); i = i + 1; continue }
             var e = s.charCodeAt(i + 1)
             if (e == 10) { i = i + 2; continue }                                  // \<LF>
             if (e == 13) { i = (s.charCodeAt(i + 2) == 10) ? i + 3 : i + 2; continue } // \<CR> / \<CRLF>

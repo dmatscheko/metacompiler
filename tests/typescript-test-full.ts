@@ -62,6 +62,10 @@ function s01() {
     // toUpperCase / toLowerCase are the FULL mapping with the final sigma (node).
     check("bas6a", "\u00dfx".toUpperCase() === "SSX" && "\u0130".toLowerCase() === "i\u0307" &&
                    "A\u03a3".toLowerCase() === "a\u03c2" && "\u03a3A".toLowerCase() === "\u03c3a");
+    // An astral character written literally is its surrogate pair (node 24).
+    const astral: string = "😀";
+    check("bas6b", astral.length === 2 && astral.charCodeAt(0) === 0xD83D && astral.charCodeAt(1) === 0xDE00 &&
+                   astral === "\uD83D\uDE00");
 }
 
 // ===== SECTION 02: type annotations on primitives =====

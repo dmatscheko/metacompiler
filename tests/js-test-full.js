@@ -828,6 +828,11 @@ function s26() {
                    lu.charCodeAt(2) === 0xDC00 && lone.toLowerCase() === lone)
     // A lone surrogate LITERAL keeps its unit in an emitted string constant.
     check("sm21c", lone === "\uD800a\uDC00" && "\uD800".charCodeAt(0) === 0xD800 && "x\uDC00".charCodeAt(1) === 0xDC00)
+    // An astral character written literally is its surrogate pair, the same string as the
+    // escaped pair and as \u{...}.
+    var astral = "😀"
+    check("sm21e", astral.length === 2 && astral.charCodeAt(0) === 0xD83D && astral.charCodeAt(1) === 0xDE00 &&
+                   astral === "\uD83D\uDE00" && astral === "\u{1F600}" && "a😀b".charCodeAt(2) === 0xDE00)
     // The FULL mapping with the final sigma, as node.
     check("sm21d", "\u00dfx".toUpperCase() === "SSX" && "\ufb01".toUpperCase() === "FI" &&
                    "\u0130".toLowerCase() === "i\u0307" && "A\u03a3".toLowerCase() === "a\u03c2" &&
