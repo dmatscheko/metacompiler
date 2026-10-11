@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-420** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-421** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -127,26 +127,15 @@ halves (BCL 1). A user member named Keys/Values is read as the dictionary call (
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-411 php: array / "Class::method" callables; named args to closures compiled; dynamic static calls; numeric prefixes · P1 · PHP · IN PROGRESS (PHP worker, round 18) [V spec-only]
-`$f = ['K','s']; $f(1)`, `$f = [$obj,'m']; $f()`, `$f = 'K::s'; $f()` fail in both
-halves (so call_user_func / array_map work only with closures, names, __invoke).
-Compiled only: named arguments and string-key spreads into a closure/variable callee
-give an empty result (`$f(y: 5, x: 4)`; interpreter right). `$t::s()` with a
-class-name string aborts compiled; `K::$m()` rejected by both. Leading-numeric strings
-ignore an exponent and leading whitespace: `"1.5e3abc"+0` 1.5 (PHP 1500.0), `"12e2x"` 12,
-`" 5e1 z"` 0 (PHP 50.0). A constant cycle entered from a static-property initializer
-names a different link than PHP (P3). Native php costs ~180k instructions and ~25 KB
-per simple loop iteration / call (P3 perf).
-
-### T-415 php: error cases and precedence from the php-src corpus · P2 · PHP · IN PROGRESS (PHP worker, round 18) [V spec-only]
-A null method result written through `->` must throw Error "Attempt to assign property
-"a" on null" (bug52614; engines stop with an engine error). Reading `$x[]` in a by-value
-argument must raise "Cannot use [] for reading" (both recurse forever). Passing
-`$GLOBALS` by reference must raise "could not be passed by reference". `or`/`and` bind
-like `||` so `yield "a" or die` yields true (must yield "a"). Compiled: goto out of
-a try/finally loops forever (try bodies are separate IR closures; needs a goto control
-signal in the compile-core protocol). By-reference returns degrade to by-value
-(documented design).
+### T-420 php: goto out of a try (compiled); named-arg / callable errors; scalar property writes · P2 · PHP + CORE · OPEN [V spec-only]
+Compiled goto out of a try/finally is refused at compile time: carrying it needs a goto
+kind (4) in the js_ctl_* protocol (runtime.c js_ctl_goto, a jsCtl kind in jsrt.go,
+excDispatch in compile-core.js + refreeze). An unknown named argument raises nothing
+(PHP Error "Unknown named parameter $x"). A callable naming an unknown class, and
+'parent::m' / 'self::m' callable strings compiled, hit an uncatchable ":: on null"
+(PHP Error 'Class "X" not found'). Compiled: writing a property of an int/string aborts
+(PHP Error). Perf: jsdispatch is a linear if-chain over every jsf_ function; php array
+key lookup (phpKeyIndex / phKeyIndex) is linear.
 
 ---
 
@@ -473,6 +462,8 @@ T-409 python: +2.36% bench after the T-394 commit; `__hash__ = None`; `id()` —
 T-408 string → float conversions in the other languages — DONE 8750f160 63e2e8ec e916fd11
 T-406 the python ratchet's -frozen interpreter run is at ~87M of the 100M brake — DONE 2fc5f8e4 (python 89M→34M, lua 73M→51M, java 61M→60M; every other half ≤42M)
 T-416 swift: Dictionary API gaps; array/dictionary type syntax as values — DONE dc8e3e7e
+T-411 php: array / "Class::method" callables; named args to closures compiled; dynamic static calls; numeric prefixes — DONE 6cb9c923 2bb4e833 79aac241 (spec-only; bench php 7.17G → 0.91G, output identical)
+T-415 php: error cases and precedence from the php-src corpus — PARTIAL 05df225e (4 of 5; goto out of a try is now a compile error); the goto signal is T-420
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
