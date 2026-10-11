@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-316** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-320** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -126,24 +126,30 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-295 js: `yield*` answers the outer `return()` value · P1 · JS · IN PROGRESS (JS worker, round 5) [V]
-`function* d(){ yield* it }` where `it.return()` answers `{done:true}`: `g.next();
-g.return(7)` - node `{value: undefined, done: true}` (the delegate's return value); all
-four legs `{value: 7, done: true}`.
+### T-316 js: compiled own-key lists of builtins; Object.getOwnPropertyNames(Math); `"toString" in {}` · P1 · JS · OPEN [V]
+`Object.keys(JSON)` is "stringify,parse" in run and native (node and interpreters "");
+`Object.keys(Object).length` 1 (node 0): the Go twin and layer 2 list those members as
+keys. `Object.getOwnPropertyNames(Math)` [] in all legs (node 44 names). `"toString"
+in {}` false (node true).
 
-### T-296 js: Object.prototype methods on objects · P1 · JS · IN PROGRESS (JS worker, round 5) [V]
-`o.toString()`, `o.valueOf()`, `o.propertyIsEnumerable(k)` on plain objects, Math and
-JSON are "not a function" in all legs; node "[object Object]", "[object Math]".
-`typeof o.hasOwnProperty` is "undefined" (node "function"). `Object.hasOwnProperty
-("keys")` false (node true). `Object.getOwnPropertyNames(Array)` is
-`["length","name"]` (node adds prototype, isArray, from, of, fromAsync).
+### T-317 js: generator close semantics with finally / a non-done delegate · P2 · JS · OPEN [V]
+`try{yield 1}finally{return 42}` then `g.return(7)`: node `{value:42,done:true}`, ours
+`{value:7}`; `finally{yield 99}`: node `{value:99,done:false}`, ours
+`{value:7,done:true}`; a yield* delegate whose return() answers {done:false}: node
+yields it and stays in the yield*. No engine can yield during a close (closeBody /
+gen_close). All engines.
 
-### T-297 js: `class A extends Object {}` aborts the interpreter · P1 · JS · IN PROGRESS (JS worker, round 5) [V]
-"unknown superclass: Object"; the compiled legs accept it (= node).
+### T-318 js: `super.toString()` without an own toString · P1 · JS · OPEN [V]
+In a class with no toString (e.g. extends Object): node "[object Object]", ours
+TypeError "not a function". All engines.
 
-### T-298 ts: a stray "END SECTIONS" marker at tests/typescript-test-full.ts ~1065 · P3 · JS · IN PROGRESS (JS worker, round 5) [V]
-An older marker before the real end; remove it and check the ratchet harness still
-counts every section.
+### T-319 js: value reads of builtin methods on arrays/strings leak goja's host methods · P1 · JS · OPEN [V]
+`typeof [1].valueOf`: node "function"; goja-interp "function" (host leak), -frozen /
+run / native "undefined" - a live goja-vs-frozen divergence the matrix does not
+exercise; `[1].push` read as a value is bound under -frozen/compiled but takes `.call`
+receivers under goja; `const f = "ab".toString; f.call([1])` aborts the goja
+interpreter with a host error (node TypeError). Close the host leak and give every
+leg node's answers.
 
 ---
 
@@ -555,6 +561,10 @@ T-246 lua: errors lack lua 5.5's variable-name suffix — DONE 73cffca 65efcb2 b
 T-247 lua: "bad argument" wording and argument checks — DONE 39f7fed
 T-248 lua: smaller error-semantics gaps — DONE 7842c78
 T-249 lua: numeric table keys are very slow natively — DONE 0d9b10d (-42% instructions on the ticket loop)
+T-295 js: `yield*` answers the outer `return()` value — DONE 73c2117 (a delegate answering {done:false} at close is T-317)
+T-296 js: Object.prototype methods on objects — DONE 950df0f
+T-297 js: `class A extends Object {}` aborts the interpreter — DONE 73edcce
+T-298 ts: a stray "END SECTIONS" marker at tests/typescript-test-full.ts ~1065 — DONE 3c9563d
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
