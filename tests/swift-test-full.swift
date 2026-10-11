@@ -3925,6 +3925,46 @@ func s82() {
     check("82g", down == [5, 3, 1] && a1 == 7 && a2 == 8 && a3 == nil)
 }
 
+// ===== SECTION 83: a collection constructor types its variable; inout through a path =====
+// `var a = [Double]()` is as typed as `var a: [Double] = []`, so a literal it is
+// given later adopts Double; and an inout argument may name a field, an element or
+// a longer path. Every value read off swiftc 6.1.2.
+struct Pt83 { var a: Int; var b: Int; var x: Double }
+final class Box83 { var n = 5; var inner = Pt83(a: 7, b: 8, x: 1) }
+func bump83(_ v: inout Int) { v += 10 }
+func half83(_ v: inout Double) { v /= 2 }
+func s83() {
+    var ga = [Double]()
+    ga.append(3)
+    var gb = Array<Double>()
+    gb.append(4)
+    gb += [5]
+    var gd = [Float]()
+    gd.insert(1, at: 0)
+    var ge = [String: Double]()
+    ge["a"] = 2
+    var gf = Set<Double>()
+    gf.insert(3)
+    var gs: Set<Double> = []
+    gs.insert(6)
+    check("83a", "\(ga)" == "[3.0]" && "\(gb)" == "[4.0, 5.0]" && "\(gd)" == "[1.0]" && "\(ge)" == "[\"a\": 2.0]"
+                 && "\(gf)" == "[3.0]" && "\(gs)" == "[6.0]")
+    var p = Pt83(a: 1, b: 2, x: 3)
+    swap(&p.a, &p.b)
+    let swapped = "\(p.a)\(p.b)"
+    bump83(&p.a)
+    half83(&p.x)
+    check("83b", swapped == "21" && p.a == 12 && p.b == 1 && "\(p.x)" == "1.5")
+    let bx = Box83()
+    bump83(&bx.n)
+    bump83(&bx.inner.b)
+    var arr = [1, 2, 3]
+    bump83(&arr[1])
+    var ps = [Pt83(a: 1, b: 1, x: 1)]
+    bump83(&ps[0].a)
+    check("83c", bx.n == 15 && bx.inner.b == 18 && arr == [1, 12, 3] && ps[0].a == 11 && ps[0].b == 1)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4008,6 +4048,7 @@ func main() {
     s80() // SECTION-CALL 80
     s81() // SECTION-CALL 81
     s82() // SECTION-CALL 82
+    s83() // SECTION-CALL 83
     print("full: \(checks) checks, \(fails) failures")
 }
 

@@ -1469,8 +1469,10 @@ OpRefArg    <~~ push(makeOpRef(stripWs(up.in), up.pos)) ~~>
 OpRefChar   = @+"+-*/%<>=!&|^~?" ;
 ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
 // &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
-// character of a && operator.
-InoutArg    = "&" !"&" Id <~~ push({aref: swBt(up.in)}) ~~> ;
+// character of a && operator. A PATH after the name (`&p.a`, `&xs[i]`,
+// `&b.inner.n`) is the place an assignment target names, and travels as {apath}.
+InoutArg    <~~ var ir = makeTargetRef(takeAll()); push(ir.path.length == 0 ? {aref: ir.name} : {aref: ir.name, apath: ir}) ~~>
+            = "&" !"&" Id <~~ push(swBt(up.in)) ~~> { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TIndex } ;
 
 Primary     = Paren | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
@@ -3348,6 +3350,10 @@ KwContinue  = "continue" KwEnd ;
     // `[String: [Double]]` -> "" (see makeAssign for why the nested case declines).
     function swElemTyOf(ty) {
         if (ty == undefined || ty == null || ty.length < 3) { return "" }
+        if (ty.length > 5 && ty.substring(0, 4) == "Set<" && ty.charAt(ty.length - 1) == ">") {
+            var se = swTyTrim(ty.substring(4, ty.length - 1))
+            return swAdoptable(se) ? se : ""
+        }
         if (ty.charAt(0) != "[" || ty.charAt(ty.length - 1) != "]") { return "" }
         var kv = swTySplit(ty.substring(1, ty.length - 1), ":")
         var e = swTyTrim(kv[kv.length - 1])
@@ -5984,15 +5990,16 @@ KwContinue  = "continue" KwEnd ;
         var lbl = null
         var t = null
         var ref = null
+        var rpath = null
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { t = it }
             else if (it.alabel != undefined) { lbl = it.alabel }
-            else if (it.aref != undefined) { ref = it.aref }
+            else if (it.aref != undefined) { ref = it.aref; if (it.apath != undefined) { rpath = it.apath } }
         }
         // txt is the argument's text without its label, for the static type
         // type(of:) reads (swStaticCollTy).
-        return {lbl: lbl, t: t, ref: ref, dflt: null, txt: lbl == null ? txt : txt.substring(txt.indexOf(":") + 1)}
+        return {lbl: lbl, t: t, ref: ref, rpath: rpath, dflt: null, txt: lbl == null ? txt : txt.substring(txt.indexOf(":") + 1)}
     }
     function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null} }
     function makeLabTrail(items) { return {lbl: items[0].alabel, t: items[1], ref: null, dflt: null} }
@@ -6027,7 +6034,12 @@ KwContinue  = "continue" KwEnd ;
         var argv = []
         var boxes = []
         for (var i = 0; i < recs.length; i++) {
-            if (recs[i].ref != null) {
+            if (recs[i].rpath != undefined && recs[i].rpath != null) {
+                var at = swInoutAt(recs[i].rpath)
+                var pbox = {__ref: 1, v: at.field ? swFieldOf(at.obj, at.key) : getElemP(at.obj, at.key)}
+                argv.push(pbox)
+                boxes.push({name: "", at: at, box: pbox})
+            } else if (recs[i].ref != null) {
                 var box = {__ref: 1, v: getVar(recs[i].ref)}
                 argv.push(box)
                 boxes.push({name: recs[i].ref, box: box})
@@ -6040,7 +6052,19 @@ KwContinue  = "continue" KwEnd ;
         return {argv: argv, boxes: boxes}
     }
     function writeBacks(boxes) {
-        for (var i = 0; i < boxes.length; i++) { setVar(boxes[i].name, boxes[i].box.v) }
+        for (var i = 0; i < boxes.length; i++) {
+            var at = boxes[i].at
+            if (at == undefined) { setVar(boxes[i].name, boxes[i].box.v) }
+            else if (at.field) { swSetField(at.obj, at.key, boxes[i].box.v) }
+            else { setElem(at.obj, at.key, boxes[i].box.v) }
+        }
+    }
+    // The place an inout argument with a path names, resolved ONCE: its owner and
+    // key, read into the box before the call and written from it after. Twin of
+    // emitInoutAt in swift-to-llvm-ir.abnf.
+    function swInoutAt(ref) {
+        var rp = swResolvePath(ref, false)
+        return {obj: rp.obj, key: rp.key, field: ref.path[ref.path.length - 1].key != undefined}
     }
     // The callee side: bind the positional arguments to the parameters, collecting a
     // variadic tail into an array, filling in the defaults of the parameters no
@@ -6126,6 +6150,9 @@ KwContinue  = "continue" KwEnd ;
     // text, spelled as an annotation (`Set<T>`, `[T]`, `[K:V]`), when one
     // parenthesised argument list follows the generic arguments and nothing else
     // does. Twin in swift-to-llvm-ir.abnf.
+    function swIsCollCtor(txt) {
+        return txt != undefined && txt != null && txt != "" && (swSugarCallTy(txt) != "" || swGenCtorTy(txt) != "")
+    }
     function swGenCtorTy(txt) {
         var lt = txt.indexOf("<")
         if (lt < 0 || txt.charAt(txt.length - 1) != ")") { return "" }
@@ -6757,6 +6784,9 @@ KwContinue  = "continue" KwEnd ;
         // earlier in the walk. Only reached when the slot holds nil; see swAdoptLike.
         // An Optional IS its value here, so `Double?` adopts as `Double`.
         var declTy = ref.path.length == 0 ? swTyStripOpt(declTyOf(ref.name)) : ""
+        // `xs += [5]` on an `xs` declared `[Double]`: the appended elements are typed
+        // by xs. Twin in swift-to-llvm-ir.abnf.
+        var catTy = op == "+=" && declTy.length > 0 && declTy.charAt(0) == "[" && swElemTyOf(declTy) != "" ? declTy : ""
         // `d["b"] = 5` on a NEW key of a `[String: Double]` has NOTHING to adopt
         // from: swSafeElem answers undefined and the value 5 carries no floatness.
         // This is the second site where the value model's own record runs out
@@ -6805,6 +6835,7 @@ KwContinue  = "continue" KwEnd ;
             if (setTy && op == "=") { v = swSetOf(v) }
             if (ref.path.length == 0) {
                 var oldL = ref.name == "self" ? null : lookupOrNull(ref.name)
+                if (catTy != "") { v = swAdoptAnn(v, catTy) }
                 if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
                 // `self = X` inside a mutating method rewrites the value in place, so
                 // the caller's variable (which holds the same struct value) changes too.
@@ -7341,7 +7372,12 @@ KwContinue  = "continue" KwEnd ;
         // OTHER annotation can be existential, so a numeric one records "".
         var annTxt = elemTy
         if (items[k] != undefined && items[k].otype != undefined) { annTxt = items[k].otype; k++ }
+        if (annTxt.length > 4 && annTxt.substring(0, 4) == "Set<") { scopePut(declTyReg, "$" + name, annTxt) }
         if (k == 1 && items[2] != undefined) { annTxt = swExprAnn(items[2].itext) }
+        // `var a = [Double]()` / `Array<Double>()` / `Set<Double>()` is as typed as
+        // `var a: [Double] = []`: the initializer names the element type that
+        // append / insert / a write to a new key adopt. Twin in swift-to-llvm-ir.abnf.
+        if (k == 1 && items[2] != undefined && swIsCollCtor(items[2].itext)) { scopePut(declTyReg, "$" + name, annTxt) }
         swNoteLocalAnn(name, annTxt)
         var init = swDotWant(items[k], items[k + 1], annTxt)
         if (init != undefined && swIsSetArrTy(annTxt)) {
