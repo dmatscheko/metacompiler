@@ -3325,6 +3325,80 @@ NotFuncHead = :script(~~
         if (!hasOwn(jsSymWK, n)) { jsSymWK[n] = jsSymMake("Symbol." + n, "__#@" + n) }
         return jsSymWK[n]
     }
+    // The well-known symbols, the static members of Symbol. Twins: jsvSymWKNames in
+    // abnf/jsrtjsprint.go, jvSymIsWK in languages/lib/js-rt.metajs.
+    var jsSymWKNames = ["asyncIterator", "hasInstance", "isConcatSpreadable", "iterator", "match", "matchAll",
+                        "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables"]
+    // A symbol is a primitive that ToString and ToNumber refuse: `"" + s`, `${s}` and
+    // `s * 1` throw where String(s) and s.toString() answer "Symbol(desc)".
+    function jsSymConvErr(toStr) {
+        biRaise("TypeError: Cannot convert a Symbol value to a " + (toStr ? "string" : "number"))
+    }
+    // The own symbol-keyed properties of an object are listed in its __symkeys, in
+    // the order they were first written, because no key listing shows them and object
+    // spread and Object.assign still copy them. Twin: jvSymTrack in
+    // languages/lib/js-rt.metajs (the Go twin reads them off the key order).
+    function jsIsSymKey(key) { return key.length >= 4 && key.substring(0, 4) == "__#@" }
+    function jsSymTrack(o, key) {
+        if (!jsIsSymKey(key)) { return }
+        if (!hasOwn(o, "__symkeys")) { o["__symkeys"] = [] }
+        if (o["__symkeys"].indexOf(key) < 0) { o["__symkeys"].push(key) }
+    }
+    function jsSymKeysOf(o) {
+        if (o == undefined || o == null || typeof o != "object" || !hasOwn(o, "__symkeys")) { return [] }
+        return o["__symkeys"].slice()
+    }
+    // delete o[sym]: the key leaves the list (the slot itself is set to undefined).
+    function jsSymUntrack(o, key) {
+        if (!jsIsSymKey(key) || !hasOwn(o, "__symkeys")) { return }
+        var keep = []
+        var ks = o["__symkeys"]
+        for (var i = 0; i < ks.length; i++) { if (ks[i] !== key) { keep.push(ks[i]) } }
+        o["__symkeys"] = keep
+    }
+    // [Symbol.iterator] of an array or a string: a function answering an iterator over
+    // its elements - a string's CODE POINTS - with a [Symbol.iterator] of its own. Bound
+    // to the receiver it was read from. Twins: jsvSeqIter in abnf/jsrtjsprint.go,
+    // jvSeqIterFn in languages/lib/js-rt.metajs.
+    function jsSeqIterFn(o) {
+        return function() {
+            var src = anytype // The array, or the string's code points.
+            src = o
+            if (typeof o == "string") {
+                var cps = []
+                var i = 0
+                while (i < o.length) {
+                    var c = o.charCodeAt(i)
+                    var w = 1
+                    if (c >= 55296 && c <= 56319 && i + 1 < o.length) {
+                        var t = o.charCodeAt(i + 1)
+                        if (t >= 56320 && t <= 57343) { w = 2 }
+                    }
+                    cps.push(o.substring(i, i + w))
+                    i = i + w
+                }
+                src = cps
+            }
+            var st = {i: 0}
+            var it = {}
+            it["__keys"] = []
+            it["next"] = function() {
+                var r = {}
+                r["__keys"] = ["value", "done"]
+                if (st.i < src.length) {
+                    r["value"] = src[st.i]
+                    r["done"] = false
+                    st.i = st.i + 1
+                } else {
+                    r["value"] = undefined
+                    r["done"] = true
+                }
+                return r
+            }
+            it["__#@iterator"] = function() { return it }
+            return it
+        }
+    }
     // The Symbol global: every call makes a new symbol.
     function jsSymbolFn() {
         var d = anytype
@@ -3390,6 +3464,8 @@ NotFuncHead = :script(~~
         var ao = jsIsObjLike(a)
         var bo = jsIsObjLike(b)
         if (ao && bo) { return a === b }
+        // A symbol is a primitive equal to itself alone.
+        if (jsIsSym(a) || jsIsSym(b)) { return false }
         if (ao) { return jsLooseEq(jsToPrim(a), b) }
         if (bo) { return jsLooseEq(a, jsToPrim(b)) }
         // '==' is the one comparison that crosses the BigInt/Number line, and it does
@@ -4307,6 +4383,8 @@ NotFuncHead = :script(~~
                 if (args[a] === undefined || args[a] === null) { continue }
                 var ka = jsOwnKeys(args[a])
                 for (var b = 0; b < ka.length; b++) { setMember(src, ka[b], getMember(args[a], ka[b])) }
+                var sa = jsSymKeysOf(args[a])
+                for (var c = 0; c < sa.length; c++) { setMember(src, sa[c], getMember(args[a], sa[c])) }
             }
             return {v: src}
         }
@@ -4857,7 +4935,7 @@ NotFuncHead = :script(~~
             out.push(items[i])
         }
         // Every var no function body claimed is the program's own.
-        return hoistVars(claimVars(0, 2147483647), makeSeq(out), true)
+        return hoistVars(claimVars(0, 2147483647), makeSeq(out))
     }
     // The UseStrictMark of a function production, and the same item list without it. The
     // mark is optional and sits directly in front of the body thunk, which the builders
@@ -5051,6 +5129,7 @@ NotFuncHead = :script(~~
                 return undefined
             }
         }
+        if (k === "__#@iterator" && (typeof o == "string" || Array.isArray(o))) { return jsSeqIterFn(o) }
         return o[k]
     }
     // ================================================ the STATIC namespace ====
@@ -5223,7 +5302,7 @@ NotFuncHead = :script(~~
         if (g === jsPromiseFn) { gn = "Promise" }
         if (g === jsArrayFn) { gn = "Array" }
         if (g === jsSymbolFn) {
-            if (k === "iterator" || k === "asyncIterator") { return jsSymWellKnown(k) }
+            if (typeof k == "string" && jsSymWKNames.indexOf(k) >= 0) { return jsSymWellKnown(k) }
             gn = "Symbol"
         }
         if (gn == "" || typeof k != "string" || stNames[gn].indexOf(k) < 0) { return undefined }
@@ -5846,6 +5925,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { biRaise("TypeError: Cannot convert a BigInt value to a number") }
+            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
             return v - 0
         }
     }
@@ -5854,6 +5934,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { return biNot(v) }
+            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
             return ~v
         }
     }
@@ -7141,6 +7222,8 @@ NotFuncHead = :script(~~
             if (classStaticFind(o, "" + k) != undefined) { return true }
             return ("" + k) == "name"
         }
+        // A symbol key is listed in __symkeys (see jsSymTrack).
+        if (hasOwn(o, "__keys") && jsIsSymKey("" + k)) { return jsSymKeysOf(o).indexOf("" + k) >= 0 }
         // A mangled PRIVATE name is deliberately absent from __keys - nothing enumerates
         // one - so the brand check `#x in o` has to ask the slot itself.
         if (isPrivateKey("" + k) && hasOwn(o, "" + k)) { return true }
@@ -7230,7 +7313,10 @@ NotFuncHead = :script(~~
                 dfp = fnPropsOf(p.obj)
                 if (dfp !== undefined) { tgt = dfp }
             }
-            if (typeof tgt != "function") { scopePut(tgt, p.key, undefined) }
+            if (typeof tgt != "function") {
+                scopePut(tgt, p.key, undefined)
+                if (typeof p.key == "string") { jsSymUntrack(tgt, p.key) }
+            }
             if (tgt != undefined && tgt != null && typeof tgt != "function" && hasOwn(tgt, "__keys")) {
                 var ks = tgt["__keys"]
                 var at = ks.indexOf("" + p.key)
@@ -7279,21 +7365,27 @@ NotFuncHead = :script(~~
                 var key = (p.kt != undefined) ? jsKeyStr(p.kt()) : p.k
                 if (p.acc != undefined) { addAccessor(o, p.acc, key, p.fn()) }
                 else { scopePut(o, key, p.t()) }
-                if (!isInternalKey(key) && keys.indexOf(key) < 0) { keys.push(key) }
+                if (!isInternalKey(key)) { if (keys.indexOf(key) < 0) { keys.push(key) } }
+                else { jsSymTrack(o, key) }
             }
             o["__keys"] = keys
             return o
         }
     }
-    // '{...src}': copies src's own keys, in their own order, into the object being built.
-    // A key that is already there is overwritten in place and keeps its position, which
-    // is what JavaScript's property order does too.
+    // '{...src}': copies src's own keys, in their own order, into the object being built,
+    // then its symbol-keyed properties. A key that is already there is overwritten in
+    // place and keeps its position, which is what JavaScript's property order does too.
     function spreadInto(o, keys, src) {
         if (src == undefined || src == null) { return }
         var ks = ownKeys(src)
         for (var i = 0; i < ks.length; i++) {
             scopePut(o, ks[i], getMember(src, ks[i]))
             if (keys.indexOf(ks[i]) < 0) { keys.push(ks[i]) }
+        }
+        var sk = jsSymKeysOf(src)
+        for (var j = 0; j < sk.length; j++) {
+            scopePut(o, sk[j], getMember(src, sk[j]))
+            jsSymTrack(o, sk[j])
         }
     }
     // items = [valueThunk] or [valueThunk, {upd}]. Without the update tail this is a
@@ -7348,8 +7440,8 @@ NotFuncHead = :script(~~
     function trackKey(o, key) {
         if (o == undefined || o == null) { return }
         if (typeof key != "string") { return }
-        if (isInternalKey(key)) { return }
         if (!hasOwn(o, "__keys")) { return }
+        if (isInternalKey(key)) { jsSymTrack(o, key); return }
         // An Error instance's message and stack stay non-enumerable (see jsErrInit).
         if ((key === "message" || key === "stack") && hasOwn(o, "__errh")) { return }
         var ks = o["__keys"]
@@ -7430,6 +7522,7 @@ NotFuncHead = :script(~~
                 else {
                     var v = anytype // A substitution is an arbitrary expression.
                     v = items[i].expr()
+                    if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(true) }
                     out = out + jsStr(v)
                 }
             }
@@ -7459,7 +7552,8 @@ NotFuncHead = :script(~~
     // lib/js-builtins.js, or a program's own iterable - and the value itself otherwise.
     // Twin of emitIterOf in js-to-llvm-ir.abnf.
     function jsIterOf(v) {
-        if (v == undefined || v == null || typeof v != "object") { return v }
+        // An array is read by index (its [Symbol.iterator] is the same walk).
+        if (v == undefined || v == null || typeof v != "object" || Array.isArray(v)) { return v }
         var f = anytype // The [Symbol.iterator] member, of any type at all.
         f = getMember(v, "__#@iterator")
         if (typeof f != "function") { return v }
@@ -8915,6 +9009,22 @@ NotFuncHead = :script(~~
         // above and abnf/jsrtjsprint.go (js_jseq / js_jslt) for the compiler twin.
         if (op == "==") return jsLooseEq(l, r)
         if (op == "!=") return !jsLooseEq(l, r)
+        // A symbol operand: identity for === / !==, and every other operator converts
+        // it, which throws - to a string when '+' meets a string, to a number otherwise.
+        if (typeof l == "object" || typeof r == "object") {
+            if (jsIsSym(l) || jsIsSym(r)) {
+                if (op == "===") return l === r
+                if (op == "!==") return l !== r
+                if (op == "+") {
+                    var lp = anytype // The primitive form of each side.
+                    var rp = anytype
+                    lp = jsIsSym(l) ? l : jsToPrim(l)
+                    rp = jsIsSym(r) ? r : jsToPrim(r)
+                    jsSymConvErr(typeof lp == "string" || typeof rp == "string")
+                }
+                jsSymConvErr(false)
+            }
+        }
         // A BigInt is an object to the host engine, so every arm below would read it
         // wrong; it is dispatched first. Relational operators compare it numerically,
         // '+' concatenates when the other side is a string, and every remaining
@@ -9347,6 +9457,9 @@ NotFuncHead = :script(~~
     applyOp = function(op, a, b) {
         // A compound assignment is its operator applied to the current value, so it
         // takes the same BigInt path (and the same mixed-operand TypeError) as binOp.
+        if (typeof a == "object" || typeof b == "object") {
+            if (jsIsSym(a) || jsIsSym(b)) { return binOp(op.substring(0, op.length - 1), a, b) }
+        }
         if (isBigInt(a) || isBigInt(b)) {
             if (op == "+=" && (typeof a == "string" || typeof b == "string")) { return jsStr(a) + jsStr(b) }
             var br = biBinOp(op.substring(0, op.length - 1), a, b)
@@ -9499,7 +9612,7 @@ NotFuncHead = :script(~~
         // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
         if (declIsVar()) {
-            varRecs.push({name: name, at: pos})
+            varRecs.push({name: name, at: pos, file: c.curFile()})
             if (items.length == 1) { return function() {} }
             return function() { varSet(name, init()) }
         }
@@ -9509,39 +9622,59 @@ NotFuncHead = :script(~~
     // ----- var: hoisted to the function scope -----
     // The keyword of every declaration being walked, innermost last (DeclKw pushes,
     // the declaration's own tag pops), and the var names the walk has met, each with
-    // its source position: the FuncBody whose span holds a name claims it, and the
-    // inner bodies are walked - and claim - first. The Program claims the rest. Twin
-    // in js-to-llvm-ir.abnf.
+    // its source file and position: the FuncBody of that file whose span holds a name
+    // claims it, and the inner bodies are walked - and claim - first. The Program
+    // claims the rest. A file walked in the middle of another (js-builtins.js, an
+    // import) has positions of its own, hence the file. Twin in js-to-llvm-ir.abnf.
     var declKinds = []
     var varRecs = []
     function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
     function claimVars(from, to) {
+        var file = c.curFile()
         var names = []
         var keep = []
         for (var i = 0; i < varRecs.length; i++) {
             var r = varRecs[i]
-            if (r.at >= from && r.at <= to) {
+            if (r.file === file && r.at >= from && r.at <= to) {
                 if (names.indexOf(r.name) < 0) { names.push(r.name) }
             } else { keep.push(r) }
         }
         varRecs = keep
         return names
     }
-    // Binds each hoisted name to undefined in the scope the body runs in, unless that
-    // scope already has it - a parameter of the same name keeps its argument. At the
-    // program level (top) a name that already resolves - a host global like println -
-    // is left alone too, as a var naming an existing global property is.
-    function hoistVars(names, bodyT, top) {
+    // The program binds each hoisted name to undefined in its scope, unless the name
+    // already resolves - a host global like println - as a var naming an existing
+    // global property leaves it alone.
+    function hoistVars(names, bodyT) {
         if (names.length == 0) { return bodyT }
         return function() {
             var sc = scopes[scopes.length - 1]
             for (var i = 0; i < names.length; i++) {
-                if (top ? !hasVar(names[i]) : !objHasOwn.call(sc, names[i])) { scopePut(sc, names[i], undefined) }
+                if (!hasVar(names[i])) { scopePut(sc, names[i], undefined) }
             }
             return bodyT()
         }
     }
-    function makeFuncBody(bodyT, from, to) { return hoistVars(claimVars(from, to), bodyT, false) }
+    // A function body with vars runs in a scope of its own under the parameters',
+    // binding each to undefined - or to the argument of a parameter of that name, which
+    // keeps it. A closure in a default value therefore does not see the body's vars.
+    function makeFuncBody(bodyT, from, to) {
+        var names = claimVars(from, to)
+        if (names.length == 0) { return bodyT }
+        return function() {
+            var ps = scopes[scopes.length - 1]
+            var vs = {}
+            for (var i = 0; i < names.length; i++) {
+                var v = anytype // A parameter's argument, or undefined.
+                v = objHasOwn.call(ps, names[i]) ? ps[names[i]] : undefined
+                scopePut(vs, names[i], v)
+            }
+            scopes.push(vs)
+            var r = bodyT()
+            scopes.pop()
+            return r
+        }
+    }
     // A var's assignment: to the binding the chain has, else (a host global's name)
     // a new one here.
     function varSet(name, v) {
@@ -9564,7 +9697,7 @@ NotFuncHead = :script(~~
     }
     function notePatVars(pat, pos) {
         var ns = patNames(pat, [])
-        for (var i = 0; i < ns.length; i++) { varRecs.push({name: ns[i], at: pos}) }
+        for (var i = 0; i < ns.length; i++) { varRecs.push({name: ns[i], at: pos, file: c.curFile()}) }
     }
     // A for-in/of head with a declaration keyword: let / const bind the pattern
     // afresh, var assigns the hoisted names.

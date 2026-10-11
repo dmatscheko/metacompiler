@@ -316,11 +316,16 @@ var jvSymN = 0
 var jvSymWK = {}
 var jvSymReg = {}
 var jvSymbolFn = anytype
+// jvSymN > 0 as a boolean, for the operators' symbol test. The arithmetic ones ask it
+// only once jbStrict is armed, which the first symbol also does.
+var jvSymOn = false
 function jvSymMake(desc, key) {
     var s = {}
     s["__symdesc"] = desc
     s["__symkey"] = key
     jvSymN = jvSymN + 1
+    jvSymOn = true
+    jbStrict = true
     return s
 }
 function jvIsSym(v) {
@@ -341,6 +346,103 @@ function jvSymWellKnown(n) {
     jvSymWK[n] = s
     return s
 }
+// The well-known symbols, the static members of Symbol. Twins: jsSymWKNames in
+// js-interpreter.abnf, jsvSymWKNames in abnf/jsrtjsprint.go.
+function jvSymIsWK(n) {
+    return n == "asyncIterator" || n == "hasInstance" || n == "isConcatSpreadable" || n == "iterator" ||
+        n == "match" || n == "matchAll" || n == "replace" || n == "search" || n == "species" ||
+        n == "split" || n == "toPrimitive" || n == "toStringTag" || n == "unscopables"
+}
+// ToString / ToNumber of a symbol throw: `"" + s`, `${s}` and `s * 1` where String(s)
+// and s.toString() answer "Symbol(desc)". Twins: jsvSymConvErr in abnf/jsrtjsprint.go,
+// jsSymConvErr in js-interpreter.abnf.
+function jvSymConvErr(toStr) {
+    if (toStr) { throw jvErrFromText("TypeError: Cannot convert a Symbol value to a string") }
+    throw jvErrFromText("TypeError: Cannot convert a Symbol value to a number")
+}
+// ToNumber's TypeError when either operand is a symbol. The callers test jvSymOn
+// first, so a program that makes no symbol never calls it.
+function jvSymOperand(a, b) {
+    if (jvIsSym(a) || jvIsSym(b)) { jvSymConvErr(false) }
+}
+// The own symbol-keyed properties of an object, listed in its __symkeys in the order
+// they were first written: the floor's key listing skips every "__" key, and object
+// spread and Object.assign still copy them. Twin: jsSymTrack in js-interpreter.abnf
+// (the Go twin reads them off the key order).
+function jvIsSymKey(k) {
+    if (typeof k != "string") { return false }
+    if (k.length < 4) { return false }
+    return k.substring(0, 4) == "__#@"
+}
+function jvSymTrack(o, k) {
+    var ks = anytype
+    ks = o["__symkeys"]
+    if (ks === undefined) {
+        ks = []
+        o["__symkeys"] = ks
+    }
+    if (ks.indexOf(k) < 0) { ks.push(k) }
+}
+function jvSymKeys(o) {
+    if (!jvIsObj(o)) { return [] }
+    var ks = anytype
+    ks = o["__symkeys"]
+    if (ks === undefined) { return [] }
+    return ks.slice()
+}
+function jvSymUntrack(o, k) {
+    var ks = anytype
+    ks = o["__symkeys"]
+    if (ks === undefined) { return undefined }
+    var keep = []
+    var i = 0
+    while (i < ks.length) {
+        if (ks[i] !== k) { keep.push(ks[i]) }
+        i = i + 1
+    }
+    o["__symkeys"] = keep
+    return undefined
+}
+// [Symbol.iterator]() of an array or a string: an iterator over its elements - a
+// string's CODE POINTS - with a [Symbol.iterator] of its own. Twins: jsvSeqIter in
+// abnf/jsrtjsprint.go, jsSeqIterFn in js-interpreter.abnf.
+function jvSeqIter(o) {
+    var src = anytype
+    src = o
+    if (typeof o == "string") {
+        var cps = []
+        var i = 0
+        while (i < o.length) {
+            var c = o.charCodeAt(i)
+            var w = 1
+            if (c >= 55296 && c <= 56319 && i + 1 < o.length) {
+                var t = o.charCodeAt(i + 1)
+                if (t >= 56320 && t <= 57343) { w = 2 }
+            }
+            cps.push(o.substring(i, i + w))
+            i = i + w
+        }
+        src = cps
+    }
+    var st = {i: 0}
+    var it = {}
+    it["next"] = function () {
+        var r = {}
+        if (st["i"] < src.length) {
+            r["value"] = src[st["i"]]
+            r["done"] = false
+            st["i"] = st["i"] + 1
+        } else {
+            r["value"] = undefined
+            r["done"] = true
+        }
+        return r
+    }
+    it["__#@iterator"] = function () { return it }
+    return it
+}
+// The same, read as a value: bound to the receiver it was read from.
+function jvSeqIterFn(o) { return function () { return jvSeqIter(o) } }
 // The Symbol global: every call makes a new symbol.
 function js_jssymbolfn() {
     if (jvSymbolFn === undefined) {
@@ -678,6 +780,12 @@ function jvLooseEq(a, b) {
     var bo = jvIsObjLike(b)
     if (ao) {
         if (bo) { return a === b }
+    }
+    // A symbol is a primitive equal to itself alone.
+    if (jvSymOn) {
+        if (jvIsSym(a) || jvIsSym(b)) { return false }
+    }
+    if (ao) {
         return jvLooseEq(jvToPrimitive(a), b)
     }
     if (bo) { return jvLooseEq(a, jvToPrimitive(b)) }
@@ -708,6 +816,7 @@ function jvCompare(a, b) {
     if (typeof a != "object") {
         if (typeof b != "object") { return jvCmpPrim(a, b) }   // see js_jsadd
     }
+    if (jvSymOn) { jvSymOperand(a, b) }
     var pa = jvPrim(a)
     var pb = jvPrim(b)
     if (jbIsBig(pa) || jbIsBig(pb)) { return jbCmp(pa, pb) }
@@ -729,6 +838,19 @@ function js_jsadd(a, b) {
     if (jbIsBig(a) || jbIsBig(b)) { return jbAdd(jvPrim(a), jvPrim(b)) }
     if (!jvIsObjLike(a)) {
         if (!jvIsObjLike(b)) { return a + b }
+    }
+    // A symbol converts to a string when the other side is one, to a number
+    // otherwise, and both throw.
+    if (jvSymOn) {
+        if (jvIsSym(a) || jvIsSym(b)) {
+            var sl = anytype
+            var sr = anytype
+            sl = a
+            sr = b
+            if (!jvIsSym(a)) { sl = jvToPrimitive(a) }
+            if (!jvIsSym(b)) { sr = jvToPrimitive(b) }
+            jvSymConvErr(typeof sl == "string" || typeof sr == "string")
+        }
     }
     var lp = jvToPrimitive(a)
     var rp = jvToPrimitive(b)
@@ -773,7 +895,12 @@ function js_jsge(a, b) {
 // carry no side data, so both halves blank the slot).
 function js_jsdel(o, key) {
     if (jvSymN > 0) {
-        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsdel(o, key["__symkey"]) } }
+        if (typeof key == "object") {
+            if (jvIsSym(key)) {
+                if (jvIsObj(o)) { jvSymUntrack(o, key["__symkey"]) }
+                return js_jsdel(o, key["__symkey"])
+            }
+        }
     }
     if (Array.isArray(o)) {
         var idx = jvToNumber(key)
@@ -1341,7 +1468,12 @@ function js_jsmget(o, key) {
         return o[key]
     }
     if (jvSymN > 0) {
-        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsmget(o, key["__symkey"]) } }
+        if (typeof key == "object") {
+            if (jvIsSym(key)) {
+                if (key["__symkey"] == "__#@iterator") { if (Array.isArray(o) || typeof o == "string") { return jvSeqIterFn(o) } }
+                return js_jsmget(o, key["__symkey"])
+            }
+        }
     }
     return o[key]
 }
@@ -1582,7 +1714,12 @@ function js_jsvget(o, key) {
         return v
     }
     if (jvSymN > 0) {
-        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsvget(o, key["__symkey"]) } }
+        if (typeof key == "object") {
+            if (jvIsSym(key)) {
+                if (key["__symkey"] == "__#@iterator") { if (Array.isArray(o) || typeof o == "string") { return jvSeqIterFn(o) } }
+                return js_jsvget(o, key["__symkey"])
+            }
+        }
     }
     return o[key]
 }
@@ -1660,7 +1797,7 @@ function jvStaticValue(g, key) {
     if (jpFn !== undefined && g === jpFn) { gn = "Promise" }
     if (jvArrayFn !== undefined && g === jvArrayFn) { gn = "Array" }
     if (jvSymbolFn !== undefined && g === jvSymbolFn) {
-        if (key == "iterator" || key == "asyncIterator") { return jvSymWellKnown(key) }
+        if (jvSymIsWK(key)) { return jvSymWellKnown(key) }
         gn = "Symbol"
     }
     if (!jvStaticHas(gn, key)) { return undefined }
@@ -1853,6 +1990,7 @@ function js_jshas(o, key) {
 function js_jsmset(o, key, v) {
     if (jvSymN > 0) {
         if (typeof key == "object") { if (jvIsSym(key)) { return js_jsmset(o, key["__symkey"], v) } }
+        if (jvIsSymKey(key)) { if (jvIsObj(o)) { jvSymTrack(o, key) } }
     }
     // A member write on a class DESCRIPTOR is a write to its static namespace, and a
     // setter anywhere on the static chain wins over a fresh own slot - the same rule
@@ -2394,6 +2532,32 @@ function js_jserrmk(t) { return jvErrFromText(t) }
 
 // String(v). abnf/jsrtjsprint.go registers it as m["js_jsstr"].
 function js_jsstr(v) { return jvStr(v) }
+// A template substitution: js_jsstr, except that it is ToString proper, which a symbol
+// refuses. Twin of js_jstplstr in abnf/jsrtjsprint.go.
+function js_jstplstr(v) {
+    if (jvSymN > 0) { if (jvIsSym(v)) { jvSymConvErr(true) } }
+    return jvStr(v)
+}
+// The keys object spread copies: the own enumerable string keys, then the own symbol
+// keys. Twin of js_jsspreadkeys in abnf/jsrtjsprint.go.
+function js_jsspreadkeys(o) {
+    var ks = js_jskeys(o)
+    if (jvSymN == 0) { return ks }
+    var sk = jvSymKeys(o)
+    if (sk.length == 0) { return ks }
+    var out = []
+    var i = 0
+    while (i < ks.length) {
+        out.push(ks[i])
+        i = i + 1
+    }
+    i = 0
+    while (i < sk.length) {
+        out.push(sk[i])
+        i = i + 1
+    }
+    return out
+}
 
 // js_jsstr is also the template-literal path: both emitters route every
 // interpolated part through it.
@@ -3651,6 +3815,12 @@ function jvObjectGlobalMethod(name, args) {
                     js_jsmset(src, sk[sj], js_jsmget(s, sk[sj]))
                     sj = sj + 1
                 }
+                var ss = jvSymKeys(s)
+                var si = 0
+                while (si < ss.length) {
+                    js_jsmset(src, ss[si], js_jsmget(s, ss[si]))
+                    si = si + 1
+                }
             }
             ai = ai + 1
         }
@@ -3734,7 +3904,12 @@ function jvFallbackCall(recv, name, args) {
 // dispatch. A receiver none of them claims lands in jvFallbackCall.
 function js_jsmcall(recv, key, args) {
     if (jvSymN > 0) {
-        if (typeof key == "object") { if (jvIsSym(key)) { return js_jsmcall(recv, key["__symkey"], args) } }
+        if (typeof key == "object") {
+            if (jvIsSym(key)) {
+                if (key["__symkey"] == "__#@iterator") { if (Array.isArray(recv) || typeof recv == "string") { return jvSeqIter(recv) } }
+                return js_jsmcall(recv, key["__symkey"], args)
+            }
+        }
         var symRecv = recv === jvSymbolFn
         if (!symRecv) {
             if (typeof recv == "object") {
@@ -3882,7 +4057,9 @@ var jbDIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 // The strict rules are ARMED by a BigInt literal (js_jsbigint) or by BigInt(v),
 // exactly as abnf/jsrtjsbig.go's `strict` bool is: until a program evaluates
-// one, every wrapper below is a straight pass-through to the plain operator.
+// one, every wrapper below is a straight pass-through to the plain operator. The
+// first symbol arms it too, for the operators' symbol TypeError (jvSymOn): one flag
+// keeps the common case at one test.
 var jbStrict = false
 
 // The miss sentinel of the cross-file seams. jbAdd / jbEq / jbCmp / jbMcall
@@ -4671,7 +4848,10 @@ function js_jsnumberfn() {
 // Unary '+' is the ONE operator a BigInt refuses outright: there is no number
 // to coerce it to without losing precision.
 function js_jstonumber(v) {
-    if (jbStrict && jbIsBig(v)) { jbRaise("TypeError: Cannot convert a BigInt value to a number") }
+    if (jbStrict) {
+        if (jbIsBig(v)) { jbRaise("TypeError: Cannot convert a BigInt value to a number") }
+        if (jvSymOn) { jvSymOperand(v, undefined) }
+    }
     return v - 0
 }
 
@@ -4692,7 +4872,10 @@ function js_jsstep(v, d) {
 // ~x on a BigInt is exactly -x - 1 in arbitrary precision, so it gets an external of
 // its own: `x ^ -1` on the shared xor would be refused by the mixed-operand rule.
 function js_jsbnot(a) {
-    if (jbStrict && jbIsBig(a)) { return jbNotB(a) }
+    if (jbStrict) {
+        if (jbIsBig(a)) { return jbNotB(a) }
+        if (jvSymOn) { jvSymOperand(a, undefined) }
+    }
     return ~a
 }
 
@@ -4705,6 +4888,7 @@ function js_jssub(a, b) {
     if (jbStrict) {
         var r = jbBinary("-", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a - b
 }
@@ -4713,6 +4897,7 @@ function js_jsmul(a, b) {
     if (jbStrict) {
         var r = jbBinary("*", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a * b
 }
@@ -4721,6 +4906,7 @@ function js_jsdiv(a, b) {
     if (jbStrict) {
         var r = jbBinary("/", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a / b
 }
@@ -4729,6 +4915,7 @@ function js_jsmod(a, b) {
     if (jbStrict) {
         var r = jbBinary("%", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a % b
 }
@@ -4737,6 +4924,7 @@ function js_jsband(a, b) {
     if (jbStrict) {
         var r = jbBinary("&", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a & b
 }
@@ -4745,6 +4933,7 @@ function js_jsbor(a, b) {
     if (jbStrict) {
         var r = jbBinary("|", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a | b
 }
@@ -4753,6 +4942,7 @@ function js_jsbxor(a, b) {
     if (jbStrict) {
         var r = jbBinary("^", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a ^ b
 }
@@ -4761,6 +4951,7 @@ function js_jsshl(a, b) {
     if (jbStrict) {
         var r = jbBinary("<<", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a << b
 }
@@ -4769,6 +4960,7 @@ function js_jsshr(a, b) {
     if (jbStrict) {
         var r = jbBinary(">>", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a >> b
 }
@@ -4777,6 +4969,7 @@ function js_jsushr(a, b) {
     if (jbStrict) {
         var r = jbBinary(">>>", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return a >>> b
 }
@@ -4786,6 +4979,7 @@ function js_jspow(a, b) {
     if (jbStrict) {
         var r = jbBinary("**", a, b)
         if (r !== jbMiss) { return r }
+        if (jvSymOn) { jvSymOperand(a, b) }
     }
     return jvPow(a - 0, b - 0)
 }

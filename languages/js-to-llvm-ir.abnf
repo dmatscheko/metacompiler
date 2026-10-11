@@ -3811,17 +3811,18 @@ NotFuncHead = :script(~~
         pushB.NewBr(headB)
         return {b: joinB, v: joinB.NewPhi(joinIn)}
     }
-    // '{...src}': copy src's own keys into the literal under construction. js_jskeys
-    // yields them in insertion order (and skips the __-prefixed internal slots), so the
-    // copy walks that key array by index. js_jskeys and not the floor's js_keys: for a
-    // CLASS DESCRIPTOR the floor answers the descriptor's own map, which holds the
-    // INSTANCE methods, where node copies the static fields.
+    // '{...src}': copy src's own keys into the literal under construction.
+    // js_jsspreadkeys yields js_jskeys - the string keys in insertion order, without the
+    // __-prefixed internal slots - and then the symbol keys, so the copy walks that key
+    // array by index. js_jskeys and not the floor's js_keys: for a CLASS DESCRIPTOR the
+    // floor answers the descriptor's own map, which holds the INSTANCE methods, where
+    // node copies the static fields.
     function emitObjSpread(b, objV, t) {
         var r = t(b)
         b = r.b
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [saved])
-        var keysV = callExt(b, "js_jskeys", [r.v])
+        var keysV = callExt(b, "js_jsspreadkeys", [r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osk"), keysV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osrc"), r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osi"), callExt(b, "js_num_i", [handle(0)])])
@@ -5514,10 +5515,10 @@ NotFuncHead = :script(~~
 
     // Template literal: items = [{str:"chunk"} | {expr: thunk}...].
     //
-    // Every interpolated PART goes through js_jsstr - JavaScript's ToString, which is
-    // ToPrimitive with hint STRING, so an object's own `toString` runs and a BigInt
-    // spells its digits. The parts are strings by the time they meet, so the join is
-    // the floor's plain js_add in BOTH engines.
+    // Every interpolated PART goes through js_jstplstr - JavaScript's ToString, which is
+    // ToPrimitive with hint STRING, so an object's own `toString` runs, a BigInt spells
+    // its digits and a symbol throws. The parts are strings by the time they meet, so
+    // the join is the floor's plain js_add in BOTH engines.
     //
     // Seeding with "" and letting js_add coerce would be wrong twice over: the floor's
     // js_add stringifies an object as "[object Object]" whatever `toString` it carries,
@@ -5532,7 +5533,7 @@ NotFuncHead = :script(~~
                 else {
                     var r = items[i].expr(b)
                     b = r.b
-                    pv = callExt(b, "js_jsstr", [r.v])
+                    pv = callExt(b, "js_jstplstr", [r.v])
                 }
                 v = callExt(b, "js_add", [v, pv])
             }
@@ -5978,7 +5979,7 @@ NotFuncHead = :script(~~
         var ext = "js_scope_decl"
         if (declIsVar()) {
             notePatVars(pat, pos)
-            ext = "js_scope_set_or_create"
+            ext = "js_scope_set"
         }
         return function(b) {
             var r = init(b)
@@ -5989,39 +5990,49 @@ NotFuncHead = :script(~~
     // ----- var: hoisted to the function scope -----
     // The keyword of every declaration being walked, innermost last (DeclKw pushes,
     // the declaration's own tag pops), and the var names the walk has met, each with
-    // its source position: the FuncBody whose span holds a name claims it, and the
-    // inner bodies are walked - and claim - first. buildMain claims the rest. Twin in
-    // js-interpreter.abnf.
+    // its source file and position: the FuncBody of that file whose span holds a name
+    // claims it, and the inner bodies are walked - and claim - first. buildMain claims
+    // the rest. A file walked in the middle of another (js-builtins.js, an import) has
+    // positions of its own, hence the file. Twin in js-interpreter.abnf.
     var declKinds = []
     var varRecs = []
     function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
     function claimVars(from, to) {
+        var file = c.curFile()
         var names = []
         var keep = []
         for (var i = 0; i < varRecs.length; i++) {
             var r = varRecs[i]
-            if (r.at >= from && r.at <= to) {
+            if (r.file === file && r.at >= from && r.at <= to) {
                 if (names.indexOf(r.name) < 0) { names.push(r.name) }
             } else { keep.push(r) }
         }
         varRecs = keep
         return names
     }
-    // Binds each hoisted name to undefined in the current scope unless the scope
-    // already has it (a parameter keeps its argument, the program scope its println):
-    // js_scope_own answers the binding's value or undefined, and declaring a name
-    // with the value it already holds changes nothing.
-    function emitHoist(b, names) {
+    // Binds each hoisted name in scope sc to what scope from holds under it -
+    // undefined unless it is a parameter (which keeps its argument) or, at the program
+    // level, a global like println: js_scope_own answers the binding's value or
+    // undefined.
+    function emitHoist(b, sc, from, names) {
         for (var i = 0; i < names.length; i++) {
             var nm = emitStr(b, names[i])
-            callExt(b, "js_scope_decl", [curScopeV, nm, callExt(b, "js_scope_own", [curScopeV, nm])])
+            callExt(b, "js_scope_decl", [sc, nm, callExt(b, "js_scope_own", [from, nm])])
         }
         return b
     }
+    // A body with vars runs in a scope of its own under the parameters', holding just
+    // them: the names a loop reads most are then the first a lookup meets.
     function makeFuncBody(bodyT, from, to) {
         var names = claimVars(from, to)
         if (names.length == 0) { return bodyT }
-        return function(b) { return bodyT(emitHoist(b, names)) }
+        return function(b) {
+            var fnScope = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [fnScope])
+            var endB = bodyT(emitHoist(b, curScopeV, fnScope, names))
+            curScopeV = fnScope
+            return endB
+        }
     }
     // The leaf names of a binding pattern.
     function patNames(pat, out) {
@@ -6038,7 +6049,7 @@ NotFuncHead = :script(~~
     }
     function notePatVars(pat, pos) {
         var ns = patNames(pat, [])
-        for (var i = 0; i < ns.length; i++) { varRecs.push({name: ns[i], at: pos}) }
+        for (var i = 0; i < ns.length; i++) { varRecs.push({name: ns[i], at: pos, file: c.curFile()}) }
     }
     // A for-in/of head with a declaration keyword: let / const bind the target afresh
     // (a plain name in the loop's one slot), var assigns the hoisted names.
@@ -6889,17 +6900,19 @@ NotFuncHead = :script(~~
         return function(b) { return t(b).b }
     }
     // items = [name] or [name, initThunk]. A var assigns the binding its function body
-    // hoisted, and without an initializer emits nothing at all.
+    // hoisted, and without an initializer emits nothing at all. The write is js_scope_set:
+    // the hoisted name always exists, and an extern that binds nothing lets the
+    // enclosing block go without a scope of its own (compile-core's declCount).
     function makeDecl(items, txt, pos) {
         var name = items[0]
         // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
         if (declIsVar()) {
-            varRecs.push({name: name, at: pos})
+            varRecs.push({name: name, at: pos, file: c.curFile()})
             return function(b) {
                 if (items.length == 1) { return b }
                 var vr = items[1](b)
-                callExt(vr.b, "js_scope_set_or_create", [curScopeV, emitStr(vr.b, name), vr.v])
+                callExt(vr.b, "js_scope_set", [curScopeV, emitStr(vr.b, name), vr.v])
                 return vr.b
             }
         }
@@ -7232,7 +7245,7 @@ NotFuncHead = :script(~~
         // its statements.
         var topVars = claimVars(0, 2147483647)
         if (topVars.length > 0) {
-            var hoisted = [function(hb) { return emitHoist(hb, topVars) }]
+            var hoisted = [function(hb) { return emitHoist(hb, curScopeV, curScopeV, topVars) }]
             for (var hi = 0; hi < items.length; hi++) { hoisted.push(items[hi]) }
             items = hoisted
         }

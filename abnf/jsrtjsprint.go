@@ -319,6 +319,95 @@ func jsvIsObjLike(v interface{}) bool {
 	return false
 }
 
+// jsvSymWKNames are the well-known symbols, the static members of Symbol. Twins:
+// jsSymWKNames in js-interpreter.abnf, jvSymIsWK in languages/lib/js-rt.metajs.
+var jsvSymWKNames = []string{"asyncIterator", "hasInstance", "isConcatSpreadable", "iterator", "match",
+	"matchAll", "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables"}
+
+// jsvIsSym reports a symbol value (see the SYMBOLS note in addJSValueExterns).
+func jsvIsSym(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	_, isSym := o.props["__symkey"]
+	return isSym
+}
+
+// jsvSymConvErr is the TypeError of ToString / ToNumber on a symbol: `"" + s`, `${s}`
+// and `s * 1` throw where String(s) and s.toString() answer "Symbol(desc)". Twin of
+// jsSymConvErr in js-interpreter.abnf and jvSymConvErr in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvSymConvErr(toStr bool) {
+	what := "number"
+	if toStr {
+		what = "string"
+	}
+	panic(&jsThrown{value: rt.jsErrFromText("TypeError: Cannot convert a Symbol value to a " + what)})
+}
+
+// jsvSymOperand raises the ToNumber TypeError when either operand is a symbol.
+func (rt *jsrt) jsvSymOperand(l, r interface{}) {
+	if jsvIsSym(l) || jsvIsSym(r) {
+		rt.jsvSymConvErr(false)
+	}
+}
+
+// jsvSymKeys are an object's own symbol keys in insertion order: the ones no key
+// listing shows and object spread and Object.assign still copy.
+func jsvSymKeys(v interface{}) []string {
+	o, ok := v.(*jsObject)
+	if !ok || isClassDesc(o) {
+		return nil
+	}
+	var out []string
+	for _, k := range o.keys {
+		if _, has := o.props[k]; has && strings.HasPrefix(k, "__#@") {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// jsvSeqIter is [Symbol.iterator]() of an array or a string: an iterator over its
+// elements - a string's CODE POINTS - with a [Symbol.iterator] of its own. Twins:
+// jsSeqIterFn in js-interpreter.abnf, jvSeqIter in languages/lib/js-rt.metajs.
+func jsvSeqIter(src interface{}) *jsObject {
+	var cps []interface{}
+	if s, isStr := src.(string); isStr {
+		u := strUnits(s)
+		for i := 0; i < len(u); {
+			n := 1
+			if u[i] >= 0xD800 && u[i] <= 0xDBFF && i+1 < len(u) && u[i+1] >= 0xDC00 && u[i+1] <= 0xDFFF {
+				n = 2
+			}
+			cps = append(cps, strFromUnits(u[i:i+n]))
+			i += n
+		}
+	}
+	it := newJSObject()
+	i := 0
+	it.props["next"] = jsHostFunc("next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		elems := cps
+		if a, isArr := src.(*jsArray); isArr {
+			elems = a.elems
+		}
+		r := newJSObject()
+		if i < len(elems) {
+			r.set("value", elems[i])
+			r.set("done", false)
+			i++
+		} else {
+			r.set("value", jsUndef)
+			r.set("done", true)
+		}
+		return r
+	})
+	it.props["__#@iterator"] = jsHostFunc("[Symbol.iterator]", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return it
+	})
+	return it
+}
+
 // jsvToPrimitive is ToPrimitive(v, default): valueOf first, then toString. It is the
 // step the shared js_eq / js_lt lack: `[1] == 1` and `[2] > 1` are true in node.
 func (rt *jsrt) jsvToPrimitive(v interface{}) interface{} {
@@ -345,6 +434,10 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 	if ao && bo {
 		return rt.strictEq(a, b)
 	}
+	// A symbol is a primitive equal to itself alone.
+	if jsvIsSym(a) || jsvIsSym(b) {
+		return false
+	}
 	if ao {
 		return rt.jsvLooseEq(rt.jsvToPrimitive(a), b)
 	}
@@ -357,6 +450,7 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 // jsvCompare is the abstract relational comparison: ToPrimitive on both sides, then
 // the shared numeric/string ordering (2 means "NaN was involved", every relation false).
 func (rt *jsrt) jsvCompare(a, b interface{}) int {
+	rt.jsvSymOperand(a, b)
 	return rt.jsCompare(rt.jsvToPrimitive(a), rt.jsvToPrimitive(b))
 }
 
@@ -1139,6 +1233,9 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 				for _, k := range jsvOwnKeys(src) {
 					dst.set(k, rt.jsvGetKey(src, k))
 				}
+				for _, k := range jsvSymKeys(src) {
+					dst.set(k, rt.jsvGetKey(src, k))
+				}
 			}
 			return dst, true
 		case "fromEntries":
@@ -1823,6 +1920,23 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	}
 	// String(v) / the ToString an interpolation needs.
 	m["js_jsstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.jsvString(u(a[0]))) }
+	// A template substitution: js_jsstr, except that it is ToString proper, which a
+	// symbol refuses. Twin of js_jstplstr in languages/lib/js-rt.metajs.
+	m["js_jstplstr"] = func(a []uint64) uint64 {
+		if jsvIsSym(u(a[0])) {
+			rt.jsvSymConvErr(true)
+		}
+		return rt.wrapStr(rt.jsvString(u(a[0])))
+	}
+	// The keys object spread copies: the own enumerable string keys, then the own
+	// symbol keys. Twin of js_jsspreadkeys in languages/lib/js-rt.metajs.
+	m["js_jsspreadkeys"] = func(a []uint64) uint64 {
+		out := u(m["js_jskeys"]([]uint64{a[0]})).(*jsArray)
+		for _, k := range jsvSymKeys(u(a[0])) {
+			out.elems = append(out.elems, k)
+		}
+		return w(out)
+	}
 
 	// js_jstypeof is `typeof` for js/ts in BOTH compiled halves, and the twin of the
 	// layer-2 function of the same name. A CLASS DESCRIPTOR IS A FUNCTION to
@@ -1881,6 +1995,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		l, r := u(a[0]), u(a[1])
 		if !jsvIsObjLike(l) && !jsvIsObjLike(r) {
 			return baseAdd(a)
+		}
+		// A symbol converts to a string when the other side is one, to a number
+		// otherwise, and both throw.
+		if jsvIsSym(l) || jsvIsSym(r) {
+			lp, rp := l, r
+			if !jsvIsSym(l) {
+				lp = rt.jsvToPrimitive(l)
+			}
+			if !jsvIsSym(r) {
+				rp = rt.jsvToPrimitive(r)
+			}
+			_, lIsStr := lp.(string)
+			_, rIsStr := rp.(string)
+			rt.jsvSymConvErr(lIsStr || rIsStr)
 		}
 		lp, rp := rt.jsvToPrimitive(l), rt.jsvToPrimitive(r)
 		ls, lIsStr := lp.(string)
@@ -2021,7 +2149,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		} else if hf, ok := g.(*hostFunc); ok {
 			gname = hf.name
 		}
-		if g == interface{}(symbolFn) && (name == "iterator" || name == "asyncIterator") {
+		if g == interface{}(symbolFn) && jsvInNames(jsvSymWKNames, name) {
 			return symWellKnown(name)
 		}
 		if !jsvInNames(jsvStaticNames[gname], name) {
@@ -3023,6 +3151,22 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		inner := m[name]
 		m[name] = func(a []uint64) uint64 {
 			if k, isSym := symKey(u(a[1])); isSym {
+				// [Symbol.iterator] of an array or a string, read as a value (bound to
+				// the receiver) or called.
+				if recv := u(a[0]); k == "__#@iterator" {
+					_, isArr := recv.(*jsArray)
+					_, isStr := recv.(string)
+					if isArr || isStr {
+						switch name {
+						case "js_jsvget", "js_jsmget":
+							return w(jsHostFunc("[Symbol.iterator]", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+								return jsvSeqIter(recv)
+							}))
+						case "js_jsmcall":
+							return w(jsvSeqIter(recv))
+						}
+					}
+				}
 				b := append([]uint64{}, a...)
 				b[1] = rt.wrapStr(k)
 				return inner(b)

@@ -330,7 +330,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	}
 
 	// binary(name, base, op) registers `name` as `op` with the BigInt rules in front
-	// of the extern `base`.
+	// of the extern `base`. A symbol operand is ToNumber's TypeError.
 	binary := func(name, baseName, op string) {
 		base := m[baseName]
 		m[name] = func(a []uint64) uint64 {
@@ -339,6 +339,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 					return w(r)
 				}
 			}
+			rt.jsvSymOperand(u(a[0]), u(a[1]))
 			return base(a)
 		}
 	}
@@ -383,6 +384,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 				return w(r)
 			}
 		}
+		rt.jsvSymOperand(u(a[0]), u(a[1]))
 		return rt.wrapNum(jsPowD(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
 	}
 	// The program's Math global: the shared Math object's members, copied in order,
@@ -417,6 +419,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 				return w(bigWrap(new(big.Int).Not(x)))
 			}
 		}
+		rt.jsvSymOperand(u(a[0]), nil)
 		return baseBxor([]uint64{a[0], rt.wrapNum(-1)})
 	}
 
@@ -429,6 +432,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 				rt.bigRaise("TypeError: Cannot convert a BigInt value to a number")
 			}
 		}
+		rt.jsvSymOperand(u(a[0]), nil)
 		return baseToNum(a)
 	}
 

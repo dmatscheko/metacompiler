@@ -1650,6 +1650,49 @@ function s74() {
     const f8 = function () { const fs = []; for (var i = 0; i < 3; i++) { fs.push(() => i) } return fs.map(f => f()).join() }
     const f9 = () => { { var av = 5 } return av }
     check("vh74b", f6() === "6b" && f7() === "7x56" && f8() === "3,3,3" && f9() === 5)
+    // A default value's closure sees the parameters, not the body's vars.
+    const dx = "outer"
+    const f10 = function (a = () => dx) { var dx = "inner"; return a() + "," + dx }
+    const f11 = function (p, q = p + 1) { var p; var r = q; return p + r }
+    check("vh74c", f10() === "outer,inner" && f11(4) === 9)
+}
+
+// ===== SECTION 75: a symbol is a primitive ToString and ToNumber refuse =====
+// `"" + s`, `${s}`, `s * 1` and `s < 1` throw where String(s) and s.toString() answer;
+// a symbol is == to itself alone. Object spread and Object.assign copy symbol-keyed
+// properties, which no key listing shows. Symbol has all thirteen well-known symbols,
+// and an array's or a string's [Symbol.iterator]() is an iterator over its elements
+// (a string's code points). Values read off node 24.
+function s75() {
+    const err = (f) => { try { return String(f()) } catch (e) { return e.constructor.name + ": " + e.message } }
+    const v = [Symbol("k"), 1, "a", {}]
+    check("sy75a", err(() => "" + v[0]) === "TypeError: Cannot convert a Symbol value to a string" &&
+        err(() => v[0] + v[3]) === "TypeError: Cannot convert a Symbol value to a string" &&
+        err(() => `${v[0]}`) === "TypeError: Cannot convert a Symbol value to a string" &&
+        err(() => v[0] + v[1]) === "TypeError: Cannot convert a Symbol value to a number" &&
+        err(() => v[0] * v[1]) === "TypeError: Cannot convert a Symbol value to a number" &&
+        err(() => v[0] < v[1]) === "TypeError: Cannot convert a Symbol value to a number" &&
+        err(() => +v[0]) === "TypeError: Cannot convert a Symbol value to a number" &&
+        String(v[0]) === "Symbol(k)" && v[0].toString() === "Symbol(k)" &&
+        !(v[0] == "Symbol(k)") && v[0] == v[0] && v[0] != v[1])
+    const k2 = Symbol("two")
+    const o = { a: 1, [v[0]]: 3 }
+    o[k2] = 2
+    const sp = { ...o }
+    const as = Object.assign({}, o)
+    delete o[k2]
+    check("sy75b", sp[v[0]] === 3 && sp[k2] === 2 && Object.keys(sp).join() === "a" && as[v[0]] === 3 && as[k2] === 2 &&
+        JSON.stringify(as) === '{"a":1}' && { ...o }[k2] === undefined && !(k2 in o) && (v[0] in o))
+    const wk = ["asyncIterator", "hasInstance", "isConcatSpreadable", "iterator", "match", "matchAll", "replace",
+        "search", "species", "split", "toPrimitive", "toStringTag", "unscopables"]
+    check("sy75c", wk.every(n => typeof Symbol[n] === "symbol" && Symbol[n].description === "Symbol." + n && Symbol[n] === Symbol[n]))
+    const it = [7, 8][Symbol.iterator]()
+    const a1 = it.next().value
+    const a2 = it.next().value
+    const si = "a\u{1F600}b"[Symbol.iterator]()
+    check("sy75d", typeof [1][Symbol.iterator] === "function" && a1 === 7 && a2 === 8 && it.next().done === true &&
+        it[Symbol.iterator]() === it && si.next().value === "a" && si.next().value.length === 2 &&
+        [...[3, 4][Symbol.iterator]()].join() === "3,4")
 }
 
 // ===== END SECTIONS =====
@@ -1684,6 +1727,7 @@ function main() {
     s71() // SECTION-CALL 71
     s73() // SECTION-CALL 73
     s74() // SECTION-CALL 74
+    s75() // SECTION-CALL 75
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
