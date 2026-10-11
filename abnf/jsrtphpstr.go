@@ -256,7 +256,7 @@ func phpMath(op string, a, b float64) float64 {
 	case "hypot":
 		return math.Hypot(a, b)
 	case "pow":
-		return math.Pow(a, b)
+		return crPow(a, b)
 	case "div":
 		return a / b
 	case "fmod":

@@ -3873,6 +3873,18 @@ def s86
   check("ec86d", cs == ["a", "\u{1F600}", "b"] && "a\u{1F600}b".each_char.to_a.length == 3)
 end
 
+# ===== SECTION 87: Float#** is correctly rounded =====
+# Float#** is C's pow, the double nearest the exact power: a large y*log(x) keeps
+# every digit, and x ** -0.5 is not 1/sqrt(x). Every right-hand side is
+# /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS UNDER REAL RUBY.
+def s87
+  xs = [1.9687173381259235, 2.0, 1.0000005275492378, 0.9303244752705773, 25.0]
+  ys = [596.2128067674018, -0.5, -48986194.85211566, 5961.696604822106, 11.5]
+  check("pow87a", xs[0] ** ys[0] == 2.488229202381568e+175 && xs[1] ** ys[1] == 0.7071067811865476)
+  check("pow87b", xs[2] ** ys[2] == 5.979866080580326e-12 && xs[3] ** ys[3] == 1.018795851248988e-187)
+  check("pow87c", (xs[4] ** ys[4]).to_s == "1.1920928955078124e+16")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3921,5 +3933,6 @@ s83() # SECTION-CALL 83
 s84() # SECTION-CALL 84
 s85() # SECTION-CALL 85
 s86() # SECTION-CALL 86
+s87() # SECTION-CALL 87
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

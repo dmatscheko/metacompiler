@@ -554,5 +554,5 @@ func jsPowD(x, y float64) float64 {
 	if math.IsNaN(y) || (math.IsInf(y, 0) && math.Abs(x) == 1) {
 		return math.NaN()
 	}
-	return math.Pow(x, y)
+	return crPow(x, y)
 }

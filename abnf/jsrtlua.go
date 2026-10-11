@@ -433,7 +433,7 @@ func (rt *jsrt) luArith(op int, lv, rv interface{}) interface{} {
 		return luMkFlo(luNumOf(l) / luNumOf(r))
 	}
 	if op == 6 {
-		return luMkFlo(math.Pow(luNumOf(l), luNumOf(r)))
+		return luMkFlo(crPow(luNumOf(l), luNumOf(r)))
 	}
 	if luIsInt(l) && luIsInt(r) {
 		a, b := luInt64(l), luInt64(r)

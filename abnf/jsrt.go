@@ -4129,10 +4129,10 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 			if y.IsInt64() && y.Int64() >= -4096 {
 				return rt.rubyRatPow(rt.rubyAsRat(l), y), true
 			}
-			return jsFlo{f: math.Pow(rubyToF(l), rubyToF(r))}, true
+			return jsFlo{f: crPow(rubyToF(l), rubyToF(r))}, true
 		}
 		if !y.IsInt64() || y.Int64() > 4096 {
-			return math.Pow(rubyToF(l), rubyToF(r)), true
+			return crPow(rubyToF(l), rubyToF(r)), true
 		}
 		return rt.rubyBigNarrow(new(big.Int).Exp(x, y, nil)), true
 	case "&", "|", "^", "<<", ">>":
@@ -4166,7 +4166,7 @@ func (rt *jsrt) rubyBigPromote(op string, x, y float64) interface{} {
 	case "*":
 		return x * y
 	case "**":
-		return math.Pow(x, y)
+		return crPow(x, y)
 	case "&":
 		return float64(int64(x) & int64(y))
 	case "|":
@@ -4760,7 +4760,7 @@ func rubyRatIntOp(n, d float64, mode byte) float64 {
 }
 
 func (rt *jsrt) rubyRatDigitOp(v jsRat, mode byte, nd int) interface{} {
-	if v.bn != nil || (nd > 0 && math.Abs(v.n*math.Pow(10, float64(nd))) > 9007199254740992) {
+	if v.bn != nil || (nd > 0 && math.Abs(v.n*crPow(10, float64(nd))) > 9007199254740992) {
 		n, d := rubyRatParts(v)
 		if nd > 0 {
 			p := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(nd)), nil)
@@ -4773,7 +4773,7 @@ func (rt *jsrt) rubyRatDigitOp(v jsRat, mode byte, nd int) interface{} {
 		return rt.rubyIntDigitOp(k, -nd, mode)
 	}
 	if nd > 0 {
-		p := math.Pow(10, float64(nd))
+		p := crPow(10, float64(nd))
 		return rubyMkRat(rubyRatIntOp(v.n*p, v.d, mode), p)
 	}
 	k := rt.rubyIntFromF(rubyRatIntOp(v.n, v.d, mode))
@@ -5391,7 +5391,7 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		case "%":
 			return jsFlo{f: rubyFloMod(x, y)}
 		case "**":
-			return jsFlo{f: math.Pow(x, y)}
+			return jsFlo{f: crPow(x, y)}
 		}
 		rt.fail("Float does not support '%s'", op)
 	}
@@ -5447,9 +5447,9 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 			if y >= -4096 {
 				return rt.rubyRatPow(rubyMkRat(x, 1), big.NewInt(int64(y)))
 			}
-			return jsFlo{f: math.Pow(x, y)}
+			return jsFlo{f: crPow(x, y)}
 		}
-		if p := math.Pow(x, y); !rubyOver53(p) {
+		if p := crPow(x, y); !rubyOver53(p) {
 			return p
 		}
 		return rt.rubyBigPromote(op, x, y)
@@ -16095,14 +16095,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// it still fits, so nothing below 2^53 changes shape.
 				e := rt.toNumber(r)
 				if e < 0 {
-					return w(&jsPyFlo{f: math.Pow(rt.toNumber(l), e)})
+					return w(&jsPyFlo{f: crPow(rt.toNumber(l), e)})
 				}
 				if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 4096 {
 					if bl, ok := pyBigOperand(l); ok {
 						return w(rt.pyBigNarrow(new(big.Int).Exp(bl, big.NewInt(int64(e)), nil)))
 					}
 				}
-				return w(pyIntOrFlo(math.Pow(rt.toNumber(l), e), l, r))
+				return w(pyIntOrFlo(crPow(rt.toNumber(l), e), l, r))
 			case "==":
 				return boolH(rt.pyEqual(l, r))
 			case "!=":
@@ -16898,14 +16898,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			e := rt.toNumber(r)
 			if e < 0 {
-				return w(&jsPyFlo{f: math.Pow(rt.toNumber(l), e)})
+				return w(&jsPyFlo{f: crPow(rt.toNumber(l), e)})
 			}
 			if !pyIsFlo(l) && !pyIsFlo(r) && e == math.Trunc(e) && e <= 4096 {
 				if bl, ok := pyBigOperand(l); ok {
 					return w(rt.pyBigNarrow(new(big.Int).Exp(bl, big.NewInt(int64(e)), nil)))
 				}
 			}
-			return w(pyIntOrFlo(math.Pow(rt.toNumber(l), e), l, r))
+			return w(pyIntOrFlo(crPow(rt.toNumber(l), e), l, r))
 		},
 		// callable(x): a function, a class object, or an instance whose class
 		// defines __call__.
@@ -17189,7 +17189,7 @@ func standardJSBindings() map[string]interface{} {
 		return 1
 	})
 	mathObj.set("pow", jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		return math.Pow(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+		return crPow(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
 	}))
 	mathObj.set("atan2", jsHostFunc("atan2", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return math.Atan2(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
@@ -18724,7 +18724,7 @@ func pyCxPow(a, b, c, d float64) (float64, float64, bool) {
 		return 0, 0, true
 	}
 	vabs := pyCxHypot(a, b)
-	ln := math.Pow(vabs, c)
+	ln := crPow(vabs, c)
 	at := math.Atan2(b, a)
 	phase := float64(at * c)
 	if d != 0 {

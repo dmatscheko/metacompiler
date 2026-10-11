@@ -1010,6 +1010,14 @@ function s42() {
     pe **= pw[2]
     check("math43", n42(pe) && Math.pow(pw[2], pw[5]) === 1 && pw[1] ** pw[6] === 1 && Math.pow(pw[0], pw[6]) === 1)
 
+    // pow is correctly rounded: a large y*log(x) keeps every digit, and x ** -0.5
+    // is not 1/sqrt(x). Values read off node 24.
+    var px = [1.9687173381259235, 2, 1.0000005275492378, 0.9303244752705773]
+    var py = [596.2128067674018, -0.5, -48986194.85211566, 5961.696604822106]
+    check("math47", px[0] ** py[0] === 2.488229202381568e+175 && Math.pow(px[0], py[0]) === 2.488229202381568e+175
+        && px[1] ** py[1] === 0.7071067811865476)
+    check("math48", Math.pow(px[2], py[2]) === 5.979866080580326e-12 && px[3] ** py[3] === 1.018795851248988e-187)
+
     // Math's members are NOT ENUMERABLE: for-in, Object.keys and JSON see none of
     // them, while a property the program adds is an ordinary one and a write over a
     // member keeps it hidden. Values read off node 24.

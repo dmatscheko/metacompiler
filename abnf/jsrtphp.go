@@ -585,7 +585,7 @@ func (rt *jsrt) phpFloArith(op string, x, y float64) interface{} {
 		}
 		return phpMkFlo(x / y)
 	case "**":
-		return phpMkFlo(math.Pow(x, y))
+		return phpMkFlo(crPow(x, y))
 	}
 	rt.fail("unknown arithmetic operator %s", op)
 	return nil
@@ -648,7 +648,7 @@ func (rt *jsrt) phpIntArith(op string, x, y int64) interface{} {
 		return phpMkFlo(float64(x) / float64(y))
 	case "**":
 		if y < 0 {
-			return phpMkFlo(math.Pow(float64(x), float64(y)))
+			return phpMkFlo(crPow(float64(x), float64(y)))
 		}
 		// Squaring, with the same overflow test every multiplication gets: the
 		// first product that leaves 64 bits makes the WHOLE result a float.
@@ -657,7 +657,7 @@ func (rt *jsrt) phpIntArith(op string, x, y int64) interface{} {
 			if e&1 == 1 {
 				r, ov := phpMulOv(acc, base)
 				if ov {
-					return phpMkFlo(math.Pow(float64(x), float64(y)))
+					return phpMkFlo(crPow(float64(x), float64(y)))
 				}
 				acc = r
 			}
@@ -665,7 +665,7 @@ func (rt *jsrt) phpIntArith(op string, x, y int64) interface{} {
 			if e > 0 {
 				r, ov := phpMulOv(base, base)
 				if ov {
-					return phpMkFlo(math.Pow(float64(x), float64(y)))
+					return phpMkFlo(crPow(float64(x), float64(y)))
 				}
 				base = r
 			}

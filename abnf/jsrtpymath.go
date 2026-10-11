@@ -93,7 +93,7 @@ func pyMathRange(rt *jsrt, r, x float64) interface{} {
 // result ((-8) ** (1/3)) and 0 ** negative are ValueError("math domain error"),
 // any other infinite result OverflowError("math range error").
 func pyMathPow(rt *jsrt, x, y float64) interface{} {
-	r := math.Pow(x, y)
+	r := crPow(x, y)
 	if !math.IsInf(x, 0) && !math.IsNaN(x) && !math.IsInf(y, 0) && !math.IsNaN(y) {
 		if math.IsNaN(r) || (math.IsInf(r, 0) && x == 0) {
 			panic(&jsThrown{value: rt.pyExcInstance("ValueError", "math domain error")})

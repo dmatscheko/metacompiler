@@ -4673,14 +4673,15 @@ long d_sqrt(long x) {
 }
 double d_sqrt_d(double v) { union DB u; u.d = v; u.l = d_sqrt(u.l); return u.d; }
 
-/* ----- pow -----
+/* ----- exp, log, pow -----
  *
- * A FAITHFUL PORT of Go's own math.Pow, math.Exp, math.Log, math.Frexp,
- * math.Ldexp and math.Modf - the same constants, the same polynomials, the same
- * order of operations. The emitted arithmetic is correctly rounded IEEE-754, so
- * the same sequence of operations gives the same bits as the Go twin. Any other
+ * A FAITHFUL PORT of Go's own math.Exp, math.Log, math.Frexp, math.Ldexp and
+ * math.Modf - the same constants, the same polynomials, the same order of
+ * operations. The emitted arithmetic is correctly rounded IEEE-754, so the same
+ * sequence of operations gives the same bits as the Go twin. Any other
  * approximation of exp/log would disagree with it in the last bits, and "close
- * enough" is not an answer here. */
+ * enough" is not an answer here. pow is not Go's: d_pow rounds correctly, as
+ * crPow in abnf/jsrtpow.go does. */
 
 double d_frexp(double f, long *eout) {
 	union DB u;
@@ -4835,13 +4836,189 @@ int d_odd_int(double y) {
 	if (y - yi != 0.0) { return 0; }
 	return ((long)yi & 1) == 1;
 }
+/* A correctly rounded pow for a positive finite x and a finite non-zero y: the
+ * double nearest x^y, ties to even. Twin of crPow in abnf/jsrtpow.go, which
+ * explains the method; the arithmetic here is the same operation for operation.
+ * Double-double values travel as o[0] + o[1]. */
+void dd_two_sum(double a, double b, double *o) {
+	double s = a + b;
+	double bb = s - a;
+	o[0] = s;
+	o[1] = (a - (s - bb)) + (b - bb);
+}
+void dd_fast_two_sum(double a, double b, double *o) {
+	double s = a + b;
+	o[0] = s;
+	o[1] = b - (s - a);
+}
+void dd_two_prod(double a, double b, double *o) {
+	double p = a * b;
+	double t = 134217729.0 * a;
+	double ah = t - (t - a);
+	double al = a - ah;
+	double bh;
+	double bl;
+	t = 134217729.0 * b;
+	bh = t - (t - b);
+	bl = b - bh;
+	o[0] = p;
+	o[1] = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+}
+void dd_mul(double ah, double al, double bh, double bl, double *o) {
+	double t[2];
+	dd_two_prod(ah, bh, t);
+	dd_fast_two_sum(t[0], t[1] + (ah * bl + al * bh), o);
+}
+void dd_add(double ah, double al, double bh, double bl, double *o) {
+	double t[2];
+	dd_two_sum(ah, bh, t);
+	dd_fast_two_sum(t[0], t[1] + (al + bl), o);
+}
+/* exp(ah+al) = 2^k * (o[0]+o[1]); the answer is k. */
+long d_pow_exp_dd(double ah, double al, double *o) {
+	union DB u;
+	double kd; double q; double s[2]; double t[2]; double v[2];
+	long i;
+	u.d = ah * 1.4426950408889634 + 0.5;
+	u.l = d_floor(u.l);
+	kd = u.d;
+	dd_two_prod(kd, 1.9082149292705877e-10, t);
+	dd_add(ah - kd * 6.93147180369123816490e-01, 0.0, 0.0 - t[0], 0.0 - t[1], s);
+	dd_fast_two_sum(s[0], s[1] + (al - kd * 1.1612227229362532e-26), s);
+	s[0] = s[0] * 0.0625;
+	s[1] = s[1] * 0.0625;
+	q = 1.6059043836821613e-10;
+	q = 2.08767569878681e-09 + s[0] * q;
+	q = 2.505210838544172e-08 + s[0] * q;
+	q = 2.755731922398589e-07 + s[0] * q;
+	q = 2.7557319223985893e-06 + s[0] * q;
+	t[0] = q;
+	t[1] = 0.0;
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(2.48015873015873e-05, 2.1511947866775882e-23, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(0.0001984126984126984, 1.7209558293420705e-22, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(0.001388888888888889, -5.300543954373577e-20, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(0.008333333333333333, 1.1564823173178714e-19, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(0.041666666666666664, 2.3129646346357427e-18, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(0.16666666666666666, 9.25185853854297e-18, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(0.5, 0.0, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t); dd_add(1.0, 0.0, t[0], t[1], t);
+	dd_mul(s[0], s[1], t[0], t[1], t);
+	for (i = 0; i < 4; i = i + 1) {
+		dd_add(2.0, 0.0, t[0], t[1], v);
+		dd_mul(t[0], t[1], v[0], v[1], t);
+	}
+	dd_fast_two_sum(1.0, t[0], v);
+	dd_fast_two_sum(v[0], v[1] + t[1], o);
+	return (long)kd;
+}
+void d_pow_log_dd(double x, double *o) {
+	double l0 = d_log(x);
+	double v[2];
+	double c;
+	long k = d_pow_exp_dd(l0, 0.0, v);
+	c = ((d_ldexp(x, 0 - k) - v[0]) - v[1]) / v[0];
+	c = c - c * c * 0.5;
+	dd_fast_two_sum(l0, c, o);
+}
+/* x^y, rounded once, when it is a double or a midpoint between two. Twin of
+ * powExact in abnf/jsrtpow.go. */
+int d_pow_exact(double x, double y, double *o) {
+	union DB u;
+	double fr;
+	long ke[1];
+	long mx; long ex; long p; long ey; long i; long r; long m; long top; long t;
+	long s; long n; long rest; long half;
+	fr = d_frexp(x, ke);
+	mx = (long)d_ldexp(fr, 53);
+	ex = ke[0] - 53;
+	while ((mx & 1) == 0) { mx = mx >> 1; ex = ex + 1; }
+	fr = d_frexp(y, ke);
+	p = (long)d_ldexp(fr, 53);
+	ey = ke[0] - 53;
+	while ((p & 1) == 0) { p = p >> 1; ey = ey + 1; }
+	for (i = ey; i < 0 && mx != 1; i = i + 1) {
+		r = (long)d_sqrt_d((double)mx);
+		while (r * r > mx) { r = r - 1; }
+		while ((r + 1) * (r + 1) <= mx) { r = r + 1; }
+		if (r * r != mx) { return 0; }
+		mx = r;
+	}
+	if (ey >= 0) {
+		if (ey > 8 || p > 1099511627776L || p < -1099511627776L) { return 0; }
+		p = p << ey;
+		ex = ex * p;
+	} else {
+		if (ex % (1L << (0 - ey)) != 0) { return 0; }
+		ex = (ex >> (0 - ey)) * p;
+	}
+	m = 1;
+	if (mx != 1) {
+		if (p < 0) { return 0; }
+		for (i = 0; i < p; i = i + 1) {
+			if (m > 18014398509481984L / mx) { return 0; }
+			m = m * mx;
+		}
+		if (m >= 18014398509481984L) { return 0; }
+	}
+	top = ex;
+	for (t = m; t > 1; t = t >> 1) { top = top + 1; }
+	if (top >= -1022) {
+		u.l = d_from_long(m);
+		o[0] = d_ldexp(u.d, ex);
+		return 1;
+	}
+	s = -1074 - ex;
+	if (s > 60) { o[0] = 0.0; return 1; }
+	n = m >> s;
+	rest = m - (n << s);
+	half = 1L << (s - 1);
+	if (rest > half || (rest == half && (n & 1) == 1)) { n = n + 1; }
+	o[0] = d_ldexp((double)n, -1074);
+	return 1;
+}
+double d_pow_pos(double x, double y) {
+	double l[2]; double ph[2]; double v[2]; double ex[1];
+	double err; double c; double q; double s; double j; double rem; double up; double dn; double hi;
+	long k;
+	if (y == 2.0) { return x * x; }
+	if (y == -1.0) { return 1.0 / x; }
+	if (y == 0.5) { return d_sqrt_d(x); }
+	d_pow_log_dd(x, l);
+	dd_two_prod(y, l[0], ph);
+	if (ph[0] > 710.0) { return 1.0 / 0.0; }
+	if (ph[0] < -746.0) { return 0.0; }
+	dd_fast_two_sum(ph[0], ph[1] + y * l[1], ph);
+	k = d_pow_exp_dd(ph[0], ph[1], v);
+	err = v[0] * 3.2311742677852644e-27;
+	c = d_ldexp(1.0, -1022 - k);
+	if (v[0] >= c) {
+		hi = v[0] + (v[1] + err);
+		if (hi == v[0] + (v[1] - err)) { return d_ldexp(hi, k); }
+		if (d_pow_exact(x, y, ex)) { return ex[0]; }
+		return d_ldexp(v[0] + v[1], k);
+	}
+	q = d_ldexp(1.0, -1074 - k);
+	s = c + v[0];
+	j = s - c;
+	rem = v[0] - j;
+	up = rem + (v[1] + err);
+	dn = rem + (v[1] - err);
+	if (dn > q * 0.5) {
+		j = j + q;
+	} else if (up < 0.0 - q * 0.5) {
+		j = j - q;
+	} else if (up >= q * 0.5 || dn <= 0.0 - q * 0.5) {
+		if (d_pow_exact(x, y, ex)) { return ex[0]; }
+		if (rem + v[1] > q * 0.5) { j = j + q; }
+		else if (rem + v[1] < 0.0 - q * 0.5) { j = j - q; }
+	}
+	return d_ldexp(d_ldexp(j, k + 600), -600);
+}
 long d_pow(long xb, long yb) {
 	union DB ux;
 	union DB uy;
 	union DB ur;
-	double x; double y; double yi; double yf; double a1; double x1;
-	long ae; long xe; long i; long ke[1];
-	int ysign;
+	double x; double y;
 	ux.l = xb;
 	uy.l = yb;
 	x = ux.d;
@@ -4868,43 +5045,13 @@ long d_pow(long xb, long yb) {
 		if (y < 0.0) { return DZERO; }
 		return DINF;
 	}
-	if (y == 0.5) { return d_sqrt(xb); }
-	if (y == -0.5) { ur.d = 1.0 / d_sqrt_d(x); return ur.l; }
-	ysign = y < 0.0;
-	{ double ay = ysign ? 0.0 - y : y;
-	  yi = d_modf_int(ay);
-	  yf = ay - yi; }
-	if (yf != 0.0 && x < 0.0) { return DNAN; }
-	if (yi >= 9223372036854775808.0) {
-		double ax = x < 0.0 ? 0.0 - x : x;
-		if (x == -1.0) { return DONE; }
-		if ((ax < 1.0) == (!ysign)) { return DZERO; }
-		return DINF;
+	if (x < 0.0) {
+		if (d_modf_int(y) != y) { return DNAN; }
+		ur.d = d_pow_pos(0.0 - x, y);
+		if (d_odd_int(y)) { return d_neg(ur.l); }
+		return ur.l;
 	}
-	a1 = 1.0;
-	ae = 0;
-	if (yf != 0.0) {
-		if (yf > 0.5) { yf = yf - 1.0; yi = yi + 1.0; }
-		a1 = d_exp(yf * d_log(x));
-	}
-	x1 = d_frexp(x, ke);
-	xe = ke[0];
-	i = (long)yi;
-	while (i != 0) {
-		if (xe < -4096 || 4096 < xe) {
-			/* catastrophic under/overflow: the exponent alone decides */
-			ae = ae + xe;
-			i = 0;
-		} else {
-			if ((i & 1) == 1) { a1 = a1 * x1; ae = ae + xe; }
-			x1 = x1 * x1;
-			xe = xe << 1;
-			if (x1 < 0.5) { x1 = x1 + x1; xe = xe - 1; }
-			i = i >> 1;
-		}
-	}
-	if (ysign) { a1 = 1.0 / a1; ae = 0 - ae; }
-	ur.d = d_ldexp(a1, ae);
+	ur.d = d_pow_pos(x, y);
 	return ur.l;
 }
 

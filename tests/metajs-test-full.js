@@ -814,16 +814,15 @@ function s22() {
     check("ieee23", 1 / 1048576 * 1048576 === 1)
     check("ieee24", 4 / 3 * 3 === 4)
     // Math.pow with a NON-INTEGER exponent: repeated multiplication cannot reach one,
-    // so the C floor carries a faithful port of Go's own math.Pow (and the math.Exp,
-    // math.Log, math.Frexp, math.Ldexp and math.Modf underneath it), which gives the
-    // same bits because the arithmetic under it is correctly rounded.
+    // so the C floor's d_pow and the Go twin's crPow compute the correctly rounded
+    // power - the double nearest the exact value, as node's Math.pow answers.
     check("pow1", "" + Math.pow(2, 0.5) === "1.4142135623730951")
-    check("pow2", "" + Math.pow(2, 1.5) === "2.82842712474619")
+    check("pow2", "" + Math.pow(2, 1.5) === "2.8284271247461903")
     check("pow3", "" + Math.pow(10, 1 / 3) === "2.154434690031884")
     check("pow4", "" + Math.pow(0.5, -2.25) === "4.756828460010884")
     check("pow5", "" + Math.pow(7.25, 3.5) === "1026.0842537594017")
-    check("pow6", "" + Math.pow(2, -0.5) === "0.7071067811865475")
-    check("pow7", "" + Math.pow(1.0000001, 1000000) === "1.1051709126081526")
+    check("pow6", "" + Math.pow(2, -0.5) === "0.7071067811865476")
+    check("pow7", "" + Math.pow(1.0000001, 1000000) === "1.1051709126143208")
     check("pow8", Math.pow(3, 3) === 27 && Math.pow(2, 10) === 1024)
     check("pow9", Math.pow(2, -3) === 0.125 && Math.pow(0, 0) === 1)
     check("pow10", Math.pow(-2, 3) === -8 && "" + Math.pow(-2, 0.5) === "NaN")

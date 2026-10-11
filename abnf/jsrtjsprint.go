@@ -1043,7 +1043,7 @@ func jsvToFixed(x float64, digits int) string {
 	if x < 0 {
 		sign, x = "-", -x
 	}
-	scale := math.Pow(10, float64(digits))
+	scale := crPow(10, float64(digits))
 	n := math.Floor(x*scale + 0.5)
 	s := strconv.FormatFloat(n, 'f', 0, 64)
 	if digits > 0 {

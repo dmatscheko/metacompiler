@@ -3987,6 +3987,19 @@ def s73():
     check("lsur3", [ord(c) for c in "%3s|%.1s|%c" % (v[2][0], v[0][1:], v[2][1])] == [32, 32, 55357, 124, 55357, 124, 55357])
     check("lsur4", [ord(c) for c in "{:>3}|{:.1}|{:.1}".format(v[2][0], v[2], v[3])] == [32, 32, 55357, 124, 55357, 124, 128512])
 
+# ===== SECTION 74: a float power is correctly rounded =====
+# x ** y and math.pow are C's pow, which answers the double nearest the exact
+# power: a large y*log(x) must not cost the result its last digits. 25 ** 11.5
+# is 5 ** 23, a midpoint between two doubles, and rounds to the even one.
+def s74():
+    import math
+    xs = [1.9687173381259235, 2.0, 1.0000005275492378, 0.9303244752705773, 25.0]
+    ys = [596.2128067674018, -0.5, -48986194.85211566, 5961.696604822106, 11.5]
+    check("pow1", xs[0] ** ys[0] == 2.488229202381568e+175 and math.pow(xs[0], ys[0]) == 2.488229202381568e+175)
+    check("pow2", xs[1] ** ys[1] == 0.7071067811865476 and math.pow(xs[1], ys[1]) == 0.7071067811865476)
+    check("pow3", xs[2] ** ys[2] == 5.979866080580326e-12 and xs[3] ** ys[3] == 1.018795851248988e-187)
+    check("pow4", xs[4] ** ys[4] == 11920928955078124.0)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4061,5 +4074,7 @@ def main():
     s71() # SECTION-CALL 71
     s72() # SECTION-CALL 72
     s73() # SECTION-CALL 73
+    s74() # SECTION-CALL 74
+
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -1697,6 +1697,12 @@ function s42() {
     try { log(1, 0); } catch (ValueError $e) { $e2 = $e->getMessage(); }
     check("math6", $e1 === "sqrt(): Argument #1 (\$num) must be of type float, string given"
         && $e2 === "log(): Argument #2 (\$base) must be greater than 0");
+    // ** and pow() on floats are C's pow, the double nearest the exact power; no php
+    // here, so the right-hand sides are this machine's libm pow (python3's float **).
+    $px = [1.9687173381259235, 2.0, 1.0000005275492378, 0.9303244752705773];
+    $py = [596.2128067674018, -0.5, -48986194.85211566, 5961.696604822106];
+    check("math7", $px[0] ** $py[0] === 2.488229202381568E+175 && pow($px[1], $py[1]) === 0.7071067811865476
+        && $px[2] ** $py[2] === 5.979866080580326E-12 && pow($px[3], $py[3]) === 1.018795851248988E-187);
 }
 
 function main() {

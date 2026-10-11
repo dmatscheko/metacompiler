@@ -1571,6 +1571,18 @@ function s36()
     check("bt61", msg(table.move, {1}, 1, 1), "bad argument #4 to 'table.move' (number expected, got no value)")
 end
 
+-- ===== SECTION 37: ^ is correctly rounded =====
+-- ^ is C's pow, the double nearest the exact power: a large y*log(x) keeps every
+-- digit, and x ^ -0.5 is not 1/sqrt(x). Values printed by lua 5.5.
+function s37()
+    local xs = {1.9687173381259235, 2.0, 1.0000005275492378, 0.9303244752705773, 25.0}
+    local ys = {596.2128067674018, -0.5, -48986194.85211566, 5961.696604822106, 11.5}
+    check("pow1", xs[1] ^ ys[1], 2.4882292023815682e+175)
+    check("pow2", xs[2] ^ ys[2], 0.70710678118654757)
+    check("pow3", string.format("%.17g %.17g", xs[3] ^ ys[3], xs[4] ^ ys[4]), "5.9798660805803262e-12 1.018795851248988e-187")
+    check("pow4", xs[5] ^ ys[5], 11920928955078124.0)
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1583,5 +1595,6 @@ s33() -- SECTION-CALL 33
 s34() -- SECTION-CALL 34
 s35() -- SECTION-CALL 35
 s36() -- SECTION-CALL 36
+s37() -- SECTION-CALL 37
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)
