@@ -881,7 +881,7 @@ function goCxSign(s) {
 // abnf/jsrtgolang.go.
 import "./go-fmt.js"
 
-function gopFormat(format, args) { return gfFormat(format, args) }
+function gopFormat(format, args) { return gfFormat(format, args, GF_NOWRAP) }
 
 // The type name fmt writes in a bad-verb note for a SCALAR operand, "nil" for nil
 // and "" for anything else (a slice, map or struct). A 64 bit box answers "int" or
@@ -1017,6 +1017,7 @@ function gfHMeth(v) {
     r = gopStr(m(v))
     return r
 }
+function gfHIsErr(v) { return goMeth(v, "Error") !== undefined }
 function gfHStr(v) { return gopStr(v) }
 function gfHStructName(v) {
     var c = goClassOf(v)
@@ -1395,6 +1396,98 @@ function goRTErr(name, text) {
 function goRTPanic(msg) { throw goRTErr("runtime.errorString", "runtime error: " + msg) }
 function goBoundsPanic(msg) { throw goRTErr("runtime.boundsError", "runtime error: " + msg) }
 function goConvPanic(msg) { throw goRTErr("*runtime.TypeAssertionError", "interface conversion: " + msg) }
+// panic(nil) is a *runtime.PanicNilError since go 1.21 (runtime/panic.go).
+function goPanicNil() { return goRTErr("*runtime.PanicNilError", "runtime error: panic called with nil argument") }
+
+// errors.New and fmt.Errorf answer instances of go's own unexported types:
+// *errors.errorString, and *fmt.wrapError for one %w (Unwrap answers its error) or
+// *fmt.wrapErrors for several (errors.Is walks its list; it has no Unwrap method,
+// because only compiled code can build a slice). Each is a POINTER in go, so two
+// calls with the same text are different errors: the seq field gives every
+// instance its own identity under goValueEq's field-wise comparison. The twins are
+// goErrNew in abnf/jsrtgolang.go and languages/go-interpreter.abnf.
+var goErrClasses = {}
+var goErrSeq = 0
+function goErrWrapped(e) { return e.err }
+function goErrNew(name, o) {
+    var cls = goErrClasses[name]
+    if (cls === undefined) {
+        cls = {__isclass: true, __name: name, __fields: ["msg", "seq"], Error: goRTErrMsg}
+        if (name == "*fmt.wrapError") { cls.Unwrap = goErrWrapped }
+        goErrClasses[name] = cls
+    }
+    goErrSeq = goErrSeq + 1
+    o.__class = cls
+    o.seq = goErrSeq
+    return o
+}
+// A method of v's dynamic type, or undefined.
+function goMeth(v, name) {
+    var r = anytype
+    r = undefined
+    var cls = goClassOf(v)
+    if (cls === undefined) { return r }
+    if (goHas(cls, name) && goIsFn(cls[name])) { r = cls[name] }
+    return r
+}
+// fmt.Errorf's result for the text msg and the operand indexes of its %w verbs
+// (fmt/errors.go): an errorString for none, a wrapError for one (its error, or nil
+// when that operand is not one), a wrapErrors of the error operands for more. With
+// no explicit argument indexes (gfFormat has none) idx is ascending and distinct.
+function goErrorf(msg, args, idx) {
+    if (idx.length == 0) { return goErrNew("*errors.errorString", {msg: msg}) }
+    if (idx.length == 1) {
+        var w = anytype
+        w = args[idx[0]]
+        if (goMeth(w, "Error") === undefined) { w = null }
+        return goErrNew("*fmt.wrapError", {msg: msg, err: w})
+    }
+    var errs = []
+    var i = 0
+    while (i < idx.length) {
+        if (goMeth(args[idx[i]], "Error") !== undefined) { errs.push(args[idx[i]]) }
+        i = i + 1
+    }
+    return goErrNew("*fmt.wrapErrors", {msg: msg, errs: errs})
+}
+// What errors.Is follows from err: its Unwrap() result (a slice for an Unwrap()
+// []error), a wrapErrors' list, or null.
+function goErrUnwrap(err) {
+    var r = anytype
+    r = null
+    if (goIsObj(err) && Array.isArray(err.errs)) { return err.errs }
+    var m = goMeth(err, "Unwrap")
+    if (m !== undefined) { r = m(err) }
+    return r
+}
+// errors.Is (errors/wrap.go): err itself, its Is(target) method, then the errors it
+// wraps, depth first.
+function goErrIs(err, target) {
+    if (err === undefined || err === null || target === undefined || target === null) { return goValueEq(err, target) }
+    var cur = anytype
+    cur = err
+    while (true) {
+        if (goValueEq(cur, target)) { return true }
+        var im = goMeth(cur, "Is")
+        if (im !== undefined && im(cur, target) === true) { return true }
+        var u = anytype
+        u = goErrUnwrap(cur)
+        if (u === undefined || u === null) { return false }
+        var c = goClassOf(u)
+        if (c !== undefined && goStrOf(c.__name) == "$sl") { u = gfHElems(u) }
+        if (Array.isArray(u)) {
+            var i = 0
+            while (i < u.length) {
+                var e = u[i]
+                if (e !== undefined && e !== null && goErrIs(e, target)) { return true }
+                i = i + 1
+            }
+            return false
+        }
+        cur = u
+    }
+    return false
+}
 // Go's index and slice-bounds wordings (runtime/error.go, boundsErrorFmt).
 function goIdxPanic(i, n) {
     if (i < 0) { goBoundsPanic("index out of range [" + i + "]") }
@@ -2142,7 +2235,29 @@ function js_gopanic(args) {
     var v = anytype
     v = undefined
     if (Array.isArray(args) && args.length > 0) { v = args[0] }
+    if (v === undefined || v === null) { v = goPanicNil() }
     throw v
+}
+
+// fmt.Errorf and the errors package: mode 0 errors.New, 1 fmt.Errorf, 2 errors.Is,
+// 3 errors.Unwrap (declared in buildMain, languages/go-to-llvm-ir.abnf). The twin is
+// js_goerrors in abnf/jsrtgolang.go.
+function js_goerrors(args, mode) {
+    var m = goIdx(mode)
+    if (m == 0) { return goErrNew("*errors.errorString", {msg: gopStr(args[0])}) }
+    if (m == 1) {
+        var rest = args.slice(1)
+        var wrap = {on: true, idx: []}
+        var msg = gfFormat(gopStr(args[0]), rest, wrap)
+        return goErrorf(msg, rest, wrap.idx)
+    }
+    if (m == 2) { return goErrIs(args[0], args[1]) }
+    var u = anytype
+    u = goErrUnwrap(args[0])
+    if (Array.isArray(u)) { return null }
+    var c = goClassOf(u)
+    if (c !== undefined && goStrOf(c.__name) == "$sl") { return null }
+    return u
 }
 
 // recover(): the pending panic of the frame whose defers are running, or nil.

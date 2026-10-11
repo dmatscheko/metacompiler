@@ -25,6 +25,7 @@
 //   gfHFields(v)        a struct as [field names, field values]
 //   gfHMeth(v)          the text of v's Error() or else String() method, or
 //                       undefined when it has neither
+//   gfHIsErr(v)         whether v has an Error() method
 //   gfHStr(v)           fmt's %v text of v
 //   gfHShort(a, f32)    the shortest decimal of a > 0 as DIGITS "e" EXP, EXP the
 //                       exponent of the first digit
@@ -84,8 +85,12 @@ function gfDigitAt(s, i) {
     return c - 48
 }
 
-// fmt.Sprintf. A verb is one UTF-16 unit, or two for an astral character.
-function gfFormat(format, args) {
+// fmt.Sprintf, and fmt.Errorf when wrap.on: then every %w records its operand index
+// in wrap.idx, and an operand that is an error prints as %v would (a non-error one
+// keeps the bad verb, as in fmt). A verb is one UTF-16 unit, or two for an astral
+// character.
+var GF_NOWRAP = {on: false, idx: []}
+function gfFormat(format, args, wrap) {
     var out = ""
     var argi = 0
     var n = format.length
@@ -148,6 +153,10 @@ function gfFormat(format, args) {
         i = i + verb.length
         if (verb == "%") { out = out + "%"; continue }
         if (argi >= args.length) { out = out + "%!" + verb + "(MISSING)"; continue }
+        if (verb == "w" && wrap.on) {
+            wrap.idx.push(argi)
+            if (gfHIsErr(args[argi])) { verb = "v" }
+        }
         if (verb == "T") { out = out + gfTypeVerb(f, args[argi]) }
         else if (verb == "p") { out = out + gfPointer(f, args[argi]) }
         else {

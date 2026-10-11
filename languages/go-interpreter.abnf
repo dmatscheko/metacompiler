@@ -942,7 +942,7 @@ PtrTypeT    = "*" Type ;
 // conversion it is; otherwise CompLitNI's CompName matches the bare identifier
 // `interface` and its SkipBlock eats the `{}`.
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
-            = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | IfaceTypeT | ScalarType KwEnd ;
+            = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | IfaceTypeT | "any" KwEnd | "error" KwEnd | ScalarType KwEnd ;
 ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
             | "int16" | "int32" | "int64" | "uint8" | "int8" | "byte" | "rune"
             | "uint" | "int" ;
@@ -1425,12 +1425,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         Printf: function() {
             var a = []
             for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
-            print(gfFormat(gstr(arguments[0]), a))
+            print(gfFormat(gstr(arguments[0]), a, GF_NOWRAP))
         },
         Sprintf: function() {
             var a2 = []
             for (var j = 1; j < arguments.length; j++) { a2.push(arguments[j]) }
-            return gfFormat(gstr(arguments[0]), a2)
+            return gfFormat(gstr(arguments[0]), a2, GF_NOWRAP)
+        },
+        Errorf: function() {
+            var a3 = []
+            for (var j3 = 1; j3 < arguments.length; j3++) { a3.push(arguments[j3]) }
+            var wrap = {on: true, idx: []}
+            var msg = gfFormat(gstr(arguments[0]), a3, wrap)
+            return goErrorf(msg, a3, wrap.idx)
+        }
+    }
+    hostGlobals["errors"] = {
+        New: function(text) { return goErrNew("*errors.errorString", {msg: text}) },
+        Is: function(err, target) { return goErrIs(err, target) },
+        Unwrap: function(err) {
+            var u = goErrUnwrap(err)
+            if (isSl(u) || Array.isArray(u)) { return null }
+            return u
         }
     }
     // Go's two BUILTINS, which are NOT fmt: println separates every pair of operands
@@ -1709,6 +1725,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         gStrDepth = gStrDepth - 1
         return gstr(r)
     }
+    function gfHIsErr(v) { return goMeth(v, "Error") !== undefined }
     function gfHStr(v) { return gstr(v) }
     function gfHStructName(v) {
         var c = v.__class
@@ -2031,8 +2048,93 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goBoundsPanic(msg) { throw {__gopanic: true, v: goRTErr("runtime.boundsError", "runtime error: " + msg)} }
     // A store into a nil map: go's text carries no "runtime error: " prefix.
     function goPlainPanic(msg) { throw {__gopanic: true, v: goRTErr("runtime.plainError", msg)} }
+    // panic(nil) is a *runtime.PanicNilError since go 1.21 (runtime/panic.go).
+    function goPanicNil() { return goRTErr("*runtime.PanicNilError", "runtime error: panic called with nil argument") }
     // A failed type assertion.
     function goConvPanic(msg) { throw {__gopanic: true, v: goRTErr("*runtime.TypeAssertionError", "interface conversion: " + msg)} }
+    // errors.New and fmt.Errorf answer instances of go's own unexported types:
+    // *errors.errorString, and *fmt.wrapError for one %w (Unwrap answers its error) or
+    // *fmt.wrapErrors for several (errors.Is walks its list; it has no Unwrap method,
+    // because only compiled code can build a slice in the other two engines).
+    // Each is a POINTER in go, so two calls with the same text are different errors:
+    // the seq field gives every instance its own identity under goEq's field-wise
+    // comparison. The twins are goErrNew in abnf/jsrtgolang.go and
+    // languages/lib/go-rt.metajs.
+    var goErrSeq = 0
+    var goErrClasses = {}
+    function goErrMsg(e) { return e.msg }
+    function goErrWrapped(e) { return e.err }
+    function goErrNew(name, o) {
+        if (!hasOwn(goErrClasses, name)) {
+            var c = {__isclass: true, __name: name, __fields: ["msg", "seq"], __ftypes: ["string", "int"], Error: goErrMsg}
+            if (name == "*fmt.wrapError") { c.Unwrap = goErrWrapped }
+            goErrClasses[name] = c
+        }
+        goErrSeq = goErrSeq + 1
+        o.__class = goErrClasses[name]
+        o.seq = goErrSeq
+        return o
+    }
+    // fmt.Errorf's result for the text msg and the operand indexes of its %w verbs
+    // (fmt/errors.go): an errorString for none, a wrapError for one (its error, or nil
+    // when that operand is not one), a wrapErrors of the error operands for more. With
+    // no explicit argument indexes (gfFormat has none) idx is ascending and distinct.
+    function goErrorf(msg, args, idx) {
+        if (idx.length == 0) { return goErrNew("*errors.errorString", {msg: msg}) }
+        if (idx.length == 1) {
+            var w = anytype
+            w = args[idx[0]]
+            if (!gfHIsErr(w)) { w = null }
+            return goErrNew("*fmt.wrapError", {msg: msg, err: w})
+        }
+        var errs = []
+        for (var i = 0; i < idx.length; i++) {
+            if (gfHIsErr(args[idx[i]])) { errs.push(args[idx[i]]) }
+        }
+        return goErrNew("*fmt.wrapErrors", {msg: msg, errs: errs})
+    }
+    // A method of v's dynamic type, or undefined.
+    function goMeth(v, name) {
+        var r = anytype
+        r = undefined
+        if (v === undefined || v === null || typeof v != "object" || v.__class == undefined) { return r }
+        if (typeof v.__class[name] == "function") { r = v.__class[name] }
+        return r
+    }
+    // What errors.Is follows from err: its Unwrap() result (a slice for an Unwrap()
+    // []error), a wrapErrors' list, or null.
+    function goErrUnwrap(err) {
+        var r = anytype
+        r = null
+        if (err !== undefined && err !== null && typeof err == "object" && Array.isArray(err.errs)) { return err.errs }
+        var m = goMeth(err, "Unwrap")
+        if (m !== undefined) { r = m(err) }
+        return r
+    }
+    // errors.Is (errors/wrap.go): err itself, its Is(target) method, then the errors
+    // it wraps, depth first.
+    function goErrIs(err, target) {
+        if (err === undefined || err === null || target === undefined || target === null) { return goEq(err, target) }
+        var cur = anytype
+        cur = err
+        while (true) {
+            if (goEq(cur, target)) { return true }
+            var im = goMeth(cur, "Is")
+            if (im !== undefined && im(cur, target) == true) { return true }
+            var u = anytype
+            u = goErrUnwrap(cur)
+            if (isSl(u)) { u = slElems(u) }
+            if (Array.isArray(u)) {
+                for (var i = 0; i < u.length; i++) {
+                    if (u[i] !== undefined && u[i] !== null && goErrIs(u[i], target)) { return true }
+                }
+                return false
+            }
+            if (u === undefined || u === null) { return false }
+            cur = u
+        }
+        return false
+    }
     // Go's index and slice-bounds wordings (runtime/error.go, boundsErrorFmt).
     function goIdxPanic(i, n) {
         if (i < 0) { goBoundsPanic("index out of range [" + i + "]") }
@@ -3550,10 +3652,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function() { return goConvert(to, t()) }
     }
     // Does this type text spell an interface? `interface{}`, `interface{M()int}` and
-    // the predeclared alias `any`. Shared by makeConv and the compiler half's twin.
+    // the predeclared `any` and `error`. Shared by makeConv and the compiler half's twin.
     function isIfaceTyText(t) {
         if (t == undefined || t == null) { return false }
-        return t == "any" || t.indexOf("interface") == 0
+        return t == "any" || t == "error" || t.indexOf("interface") == 0
     }
     // items = [valueName, okName, {decl}, baseThunk, {at}]: v, ok := x.(T).
     // The '=' spelling ASSIGNS to variables that already exist; only ':=' declares.
@@ -4874,7 +4976,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     var panicVal = anytype // any panic value: a string, a number, an error instance
     panicVal = null
     var panicking = false
-    hostGlobals["panic"] = function(v) { throw {__gopanic: true, v: v} }
+    hostGlobals["panic"] = function(v) {
+        if (v === undefined || v === null) { v = goPanicNil() }
+        throw {__gopanic: true, v: v}
+    }
     hostGlobals["recover"] = function() {
         if (!panicking) { return null }
         panicking = false

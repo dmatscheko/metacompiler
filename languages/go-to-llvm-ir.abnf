@@ -914,7 +914,7 @@ PtrTypeT    = "*" Type ;
 // conversion it is; otherwise CompLitNI's CompName matches the bare identifier
 // `interface` and its SkipBlock eats the `{}`.
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
-            = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | IfaceTypeT | ScalarType KwEnd ;
+            = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | IfaceTypeT | "any" KwEnd | "error" KwEnd | ScalarType KwEnd ;
 ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
             | "int16" | "int32" | "int64" | "uint8" | "int8" | "byte" | "rune"
             | "uint" | "int" ;
@@ -4538,10 +4538,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     // Does this type text spell an interface? `interface{}`, `interface{M()int}` and
-    // the predeclared alias `any`. The twin is isIfaceTyText in go-interpreter.abnf.
+    // the predeclared `any` and `error`. The twin is isIfaceTyText in go-interpreter.abnf.
     function isIfaceTyText(t) {
         if (t == undefined || t == null) { return false }
-        return t == "any" || t.indexOf("interface") == 0
+        return t == "any" || t == "error" || t.indexOf("interface") == 0
     }
     // The bare type text out of the captured source (it may carry a comment or
     // trailing whitespace); brackets stay so []byte keeps its spelling.
@@ -5121,7 +5121,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declPrint(b, fmtV, "Sprint", "js_gostr", 1)
         b = declPrint(b, fmtV, "Printf", "js_goprint", 4)
         b = declPrint(b, fmtV, "Sprintf", "js_gostr", 4)
+        // fmt.Errorf and the errors package share one extern, js_goerrors(args, mode):
+        // 0 errors.New, 1 fmt.Errorf, 2 errors.Is, 3 errors.Unwrap.
+        b = declPrint(b, fmtV, "Errorf", "js_goerrors", 1)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "fmt"), fmtV])
+        var errV = callExt(b, "js_obj_new", [])
+        b = declPrint(b, errV, "New", "js_goerrors", 0)
+        b = declPrint(b, errV, "Is", "js_goerrors", 2)
+        b = declPrint(b, errV, "Unwrap", "js_goerrors", 3)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "errors"), errV])
         // Go's two BUILTINS. They are not fmt: println separates every pair and ends
         // with a newline, print separates nothing and ends with none. Real Go writes
         // both to STDERR and prints a pointer or a slice as an ADDRESS; this runtime

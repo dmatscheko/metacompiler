@@ -20,7 +20,8 @@
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and the standard library (the prologue's fmt/os calls are the whole
-// harness, mirroring the feature-matrix file), packages and modules, cgo,
+// harness, mirroring the feature-matrix file; SECTION 46 adds fmt.Errorf and
+// the errors package), packages and modules, cgo,
 // unsafe, build tags, reflection (struct tags appear as syntax only), and
 // goroutine scheduling beyond deterministic channel operations; generic
 // method constraints do not exist in Go 1.22 and are n/a. Unlike the
@@ -33,6 +34,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	f27 "fmt"
 	"os"
@@ -2874,6 +2876,57 @@ func s45() {
 	check("qv2", fmt.Sprintf("%#U|%#U|%#U", us[0], us[1], us[2]) == "U+0378|U+2028|U+4E16 '\u4e16'")
 }
 
+// ===== SECTION 46: panic(nil), any, fmt.Errorf and the errors package =====
+// Every expected value was read off `go run` (go 1.27). Since go 1.21 panic(nil)
+// recovers as a *runtime.PanicNilError - in a module that declares go 1.21 or
+// later; this repository's go.mod says 1.16, so check the file here with
+// GODEBUG=panicnil=0. errors.New and fmt.Errorf answer
+// POINTERS, so two errors with the same text are different; %w wraps.
+var base46 = errors.New("base")
+var twin46 = errors.New("base")
+
+type W46 struct{ k int }
+
+func (w W46) Error() string        { return fmt.Sprint("w", w.k) }
+func (w W46) Is(target error) bool { return target == twin46 }
+
+type M46 struct{ errs []error }
+
+func (m M46) Error() string   { return "m46" }
+func (m M46) Unwrap() []error { return m.errs }
+
+func rec46(f func()) (r any) {
+	defer func() { r = recover() }()
+	f()
+	return "none"
+}
+
+func s46() {
+	r := rec46(func() { panic(nil) })
+	e, ok := r.(error)
+	check("pn1", ok && e.Error() == "runtime error: panic called with nil argument")
+	check("pn2", fmt.Sprint(rec46(func() { panic(any(nil)) })) == "runtime error: panic called with nil argument")
+	check("pn3", fmt.Sprint(rec46(func() { panic(error(nil)) })) == "runtime error: panic called with nil argument")
+	var x any = 5
+	check("an1", any(nil) == nil && x == any(5) && fmt.Sprint([]any{1, "s", nil}) == "[1 s <nil>]")
+	ns := []int{3, -2}
+	plain := fmt.Errorf("plain %d %s", ns[0], "x")
+	check("ef1", plain.Error() == "plain 3 x" && errors.Unwrap(plain) == nil)
+	w := fmt.Errorf("find %d: %w", ns[1], base46)
+	check("ef2", fmt.Sprint(w) == "find -2: base" && errors.Unwrap(w) == base46)
+	check("ef3", errors.Is(w, base46) && !errors.Is(w, twin46) && base46 != twin46)
+	w2 := fmt.Errorf("outer: %w", w)
+	check("ef4", w2.Error() == "outer: find -2: base" && errors.Is(w2, base46) && errors.Unwrap(errors.Unwrap(w2)) == base46)
+	check("ef5", fmt.Errorf("n: %w", nil).Error() == "n: %!w(<nil>)" && fmt.Errorf("i: %w", ns[0]).Error() == "i: %!w(int=3)")
+	two := fmt.Errorf("%w and %w", base46, twin46)
+	check("ef6", two.Error() == "base and base" && errors.Is(two, base46) && errors.Is(two, twin46) && errors.Unwrap(two) == nil)
+	check("ef7", errors.Is(W46{1}, twin46) && !errors.Is(W46{1}, base46) && errors.Is(fmt.Errorf("x %w", W46{2}), twin46))
+	m := M46{[]error{plain, base46}}
+	check("ef8", errors.Is(m, base46) && !errors.Is(m, twin46) && errors.Unwrap(m) == nil)
+	check("ef9", errors.New("a") != errors.New("a") && !errors.Is(nil, base46) && errors.Is(nil, nil))
+	check("ef10", fmt.Sprintf("%q|%v", fmt.Errorf("q"), fmt.Errorf("%+w!", base46)) == "\"q\"|base!")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2920,6 +2973,7 @@ func main() {
 	s43() // SECTION-CALL 43
 	s44() // SECTION-CALL 44
 	s45() // SECTION-CALL 45
+	s46() // SECTION-CALL 46
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

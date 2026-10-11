@@ -61,6 +61,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -83,6 +84,38 @@ func init() {
 			}
 			fmt.Fprint(outWriter, wtf8Clean(out))
 			return 0
+		}
+		m["js_goerrors"] = func(a []uint64) uint64 {
+			arr, _ := u(a[0]).(*jsArray)
+			if arr == nil {
+				rt.fail("js_goerrors needs an argument array")
+			}
+			arg := func(i int) interface{} {
+				if i < len(arr.elems) {
+					return arr.elems[i]
+				}
+				return jsUndef
+			}
+			switch int(rt.toNumber(u(a[1]))) {
+			case 0:
+				return rt.wrap(goErrNew("*errors.errorString", rt.toString(arg(0)), jsNull))
+			case 1:
+				var idx []int
+				var rest []interface{}
+				if len(arr.elems) > 1 {
+					rest = arr.elems[1:]
+				}
+				msg := rt.gopFormat(rt.gopStr(arg(0)), rest, &idx)
+				return rt.wrap(goErrorf(msg, rest, idx))
+			case 2:
+				return rt.wrap(rt.goErrIs(arg(0), arg(1)))
+			default:
+				un := rt.goErrUnwrap(arg(0))
+				if _, isList := un.(*jsArray); isList || goIsSlice(un) {
+					return rt.wrap(jsNull)
+				}
+				return rt.wrap(un)
+			}
 		}
 		m["js_gostr"] = func(a []uint64) uint64 {
 			mode := int(rt.toNumber(u(a[1])))
@@ -119,7 +152,7 @@ func (rt *jsrt) gopCompose(argsV interface{}, mode int) (string, bool) {
 		if len(arr.elems) == 0 {
 			return "", false
 		}
-		return rt.gopFormat(rt.gopStr(arr.elems[0]), arr.elems[1:]), false
+		return rt.gopFormat(rt.gopStr(arr.elems[0]), arr.elems[1:], nil), false
 	case gopBuiltp:
 		out := ""
 		for _, e := range arr.elems {
@@ -398,7 +431,11 @@ type gopFlags struct {
 // its directive respelled, so this twin checks go-fmt.js's port of fmt/format.go
 // and strconv. %q and %U are formatted here the way go-fmt.js does, gaps included
 // (see the head of that file).
-func (rt *jsrt) gopFormat(format string, args []interface{}) string {
+//
+// With wrap non-nil it is fmt.Errorf's formatter: every %w records its operand index
+// in wrap, and an operand that is an error prints as %v would (a non-error one keeps
+// the bad verb, as in fmt).
+func (rt *jsrt) gopFormat(format string, args []interface{}, wrap *[]int) string {
 	var out strings.Builder
 	argi := 0
 	n := len(format)
@@ -494,6 +531,12 @@ func (rt *jsrt) gopFormat(format string, args []interface{}) string {
 		if argi >= len(args) {
 			out.WriteString("%!" + string(verb) + "(MISSING)")
 			continue
+		}
+		if verb == 'w' && wrap != nil {
+			*wrap = append(*wrap, argi)
+			if goMeth(args[argi], "Error") != nil {
+				verb = 'v'
+			}
 		}
 		switch verb {
 		case 'T':
@@ -2159,7 +2202,7 @@ func goTypeIs(rt *jsrt, v interface{}, want string) int {
 // goRTClasses holds one descriptor per runtime error type. It is built once, at
 // package initialisation, so concurrent runtimes only ever read it.
 var goRTClasses = goRTClassTable("runtime.errorString", "runtime.boundsError",
-	"runtime.plainError", "*runtime.TypeAssertionError")
+	"runtime.plainError", "*runtime.TypeAssertionError", "*runtime.PanicNilError")
 
 func goRTClassTable(names ...string) map[string]*jsObject {
 	out := map[string]*jsObject{}
@@ -2192,6 +2235,166 @@ func goRTErr(name, text string) *jsThrown {
 	o.set("__class", goRTClasses[name])
 	o.set("msg", text)
 	return &jsThrown{value: o}
+}
+
+// goPanicNil is the value of panic(nil): a *runtime.PanicNilError since go 1.21
+// (runtime/panic.go).
+func goPanicNil() interface{} {
+	return goRTErr("*runtime.PanicNilError", "runtime error: panic called with nil argument").value
+}
+
+// errors.New and fmt.Errorf answer instances of go's own unexported types:
+// *errors.errorString, and *fmt.wrapError for one %w (Unwrap answers its error) or
+// *fmt.wrapErrors for several (errors.Is walks its list; it has no Unwrap method,
+// because only compiled code can build a slice). Each is a POINTER in go, so two
+// calls with the same text are different errors: the seq field gives every instance
+// its own identity under goValueEq's field-wise comparison. The twins are goErrNew
+// in languages/go-interpreter.abnf and languages/lib/go-rt.metajs.
+var goErrClasses = goErrClassTable()
+
+var goErrSeq atomic.Int64
+
+func goErrClassTable() map[string]*jsObject {
+	out := map[string]*jsObject{}
+	// A method answering one field of its receiver.
+	field := func(name, key string) *hostFunc {
+		return &hostFunc{name: name, fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			if len(a) > 0 {
+				if o, ok := a[0].(*jsObject); ok {
+					if v, had := o.props[key]; had {
+						return v
+					}
+				}
+			}
+			return jsNull
+		}}
+	}
+	for _, name := range []string{"*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors"} {
+		cls := newJSObject()
+		cls.set("__isclass", true)
+		cls.set("__name", name)
+		cls.set("__fields", &jsArray{elems: []interface{}{"msg", "seq"}})
+		cls.set("Error", field("Error", "msg"))
+		if name == "*fmt.wrapError" {
+			cls.set("Unwrap", field("Unwrap", "err"))
+		}
+		out[name] = cls
+	}
+	return out
+}
+
+// goErrNew is one instance of the error type name; err is a wrapError's error, or
+// a wrapErrors' *jsArray.
+func goErrNew(name, msg string, err interface{}) *jsObject {
+	o := newJSObject()
+	o.set("__class", goErrClasses[name])
+	o.set("msg", msg)
+	o.set("seq", float64(goErrSeq.Add(1)))
+	if name == "*fmt.wrapError" {
+		o.set("err", err)
+	} else if name == "*fmt.wrapErrors" {
+		o.set("errs", err)
+	}
+	return o
+}
+
+// goErrorf is fmt.Errorf's result for the text msg and the operand indexes of its
+// %w verbs (fmt/errors.go): an errorString for none, a wrapError for one (its error,
+// or nil when that operand is not one), a wrapErrors of the error operands for more.
+// With no explicit argument indexes (gopFormat has none) idx is ascending and
+// distinct.
+func goErrorf(msg string, args []interface{}, idx []int) *jsObject {
+	switch len(idx) {
+	case 0:
+		return goErrNew("*errors.errorString", msg, jsNull)
+	case 1:
+		var w interface{} = jsNull
+		if goMeth(args[idx[0]], "Error") != nil {
+			w = args[idx[0]]
+		}
+		return goErrNew("*fmt.wrapError", msg, w)
+	}
+	errs := &jsArray{}
+	for _, n := range idx {
+		if goMeth(args[n], "Error") != nil {
+			errs.elems = append(errs.elems, args[n])
+		}
+	}
+	return goErrNew("*fmt.wrapErrors", msg, errs)
+}
+
+// goMeth is a method of v's dynamic type, or nil.
+func goMeth(v interface{}, name string) interface{} {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil
+	}
+	cls, _ := o.props["__class"].(*jsObject)
+	if cls == nil {
+		return nil
+	}
+	if m, ok := cls.props[name]; ok && isCallable(m) {
+		return m
+	}
+	return nil
+}
+
+// goIsSlice reports a slice header ($sl).
+func goIsSlice(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	cls, _ := o.props["__class"].(*jsObject)
+	return cls != nil && cls.props["__name"] == "$sl"
+}
+
+// goErrUnwrap is what errors.Is follows from err: its Unwrap() result (a slice for
+// an Unwrap() []error), a wrapErrors' list, or null.
+func (rt *jsrt) goErrUnwrap(err interface{}) interface{} {
+	if o, ok := err.(*jsObject); ok {
+		if l, ok := o.props["errs"].(*jsArray); ok {
+			return l
+		}
+	}
+	if m := goMeth(err, "Unwrap"); m != nil {
+		return rt.call(m, jsUndef, []interface{}{err})
+	}
+	return jsNull
+}
+
+// goErrIs is errors.Is (errors/wrap.go): err itself, its Is(target) method, then
+// the errors it wraps, depth first.
+func (rt *jsrt) goErrIs(err, target interface{}) bool {
+	if isUndefOrNull(err) || isUndefOrNull(target) {
+		return rt.goValueEq(err, target)
+	}
+	for {
+		if rt.goValueEq(err, target) {
+			return true
+		}
+		if m := goMeth(err, "Is"); m != nil && rt.truthy(rt.call(m, jsUndef, []interface{}{err, target})) {
+			return true
+		}
+		un := rt.goErrUnwrap(err)
+		var list []interface{}
+		if l, ok := un.(*jsArray); ok {
+			list = l.elems
+		} else if goIsSlice(un) {
+			list, _, _ = rt.gopListParts(un)
+		} else if isUndefOrNull(un) {
+			return false
+		} else {
+			err = un
+			continue
+		}
+		for _, e := range list {
+			if !isUndefOrNull(e) && rt.goErrIs(e, target) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // goRTFail raises a run-time panic whose text go prefixes with "runtime error: "

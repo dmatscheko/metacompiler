@@ -14772,6 +14772,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if args != nil && len(args.elems) > 0 {
 				v = args.elems[0]
 			}
+			if isUndefOrNull(v) {
+				v = goPanicNil()
+			}
 			panic(&jsThrown{value: v})
 		},
 		// recover(): the pending panic of the frame whose defers are running, or nil.
