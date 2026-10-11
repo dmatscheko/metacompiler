@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-341** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-344** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -82,25 +82,20 @@ the compiler (keep `isinstance(x, bytes)` working); frozenset needs a hashable s
 
 # RB — Ruby
 
-### T-325 ruby: `$!`, bare undefined calls, `Object#inspect`, Module class · P1 · RB · IN PROGRESS (JS+RB worker, round 6) [V]
-`x = (raise "boom" rescue $!)` gives nil in all engines (MRI `#<RuntimeError: boom>`).
-A bare `nope(1)` aborts ("unknown name" / "variable not defined"; MRI NoMethodError
-"undefined method `nope' for main:Object"). `Object#inspect` calls a user #to_s (MRI 2.6
-`#<P:0x...>` for a class defining only to_s). `Kernel.class` / `Comparable.class`
-answer Class (MRI Module). `1.method(:zz)` raises NoMethodError for `method` (MRI
-NameError "undefined method `zz' for class `Integer'").
-
-### T-326 ruby: Math domain errors, Regexp gaps, `%w` nesting, class reopen · P1 · RB · IN PROGRESS (JS+RB worker, round 6) [V]
-`Math.sqrt(-1)`, `Math.log(-1)` answer NaN (MRI Math::DomainError). `Regexp.new("ab",
-Regexp::IGNORECASE)`: interpreter "uninitialized constant", compiled `#<Regexp>`.
-`%r{a/b}.inspect` does not escape "/" (MRI `/a\/b/`). `%w[a [] b]` (nested brackets)
-does not parse. Compiled: reopening a class builds a new class object (earlier class
-@ivars lost); a module body's @ivars land on main. A Range/Enumerator NoMethodError
-names the Array it delegates to (MRI `1..3:Range`); NoMethodError#name missing.
-
-### T-335 ruby: `casecmp` folds Unicode · P1 · RB · OPEN [V]
+### T-335 ruby: `casecmp` folds Unicode · P1 · RB · IN PROGRESS (JS+RB worker, round 7) [V]
 `"İstanbul".casecmp("STRASSE")` gives -1; MRI 1 (`casecmp` folds ASCII only and
 compares bytes; `casecmp?` folds Unicode).
+
+### T-341 ruby: Enumerator printing, `{}.each` without a block, Symbol#inspect quoting · P1 · RB · IN PROGRESS (JS+RB worker, round 7) [V]
+`p (1..3).each` prints "[object Object]" (MRI `#<Enumerator: 1..3:each>`); `p({a:
+1}.each)` aborts every leg (goja host TypeError, run "call of a non function value",
+native "member 'apply' of null"; MRI `#<Enumerator: {:a=>1}:each>`). `:"a b"`,
+`:"[q]"` print unquoted. `%w[a\] b]` does not parse (MRI `["a]", "b"]`).
+
+### T-342 ruby: reopening a builtin class does not add methods · P1 · RB · IN PROGRESS (JS+RB worker, round 7) [V]
+`class String; def shout; upcase + "!"; end; end; "hi".shout` - NoMethodError in all
+engines; MRI "HI!". Also an uncaught internal error lacks MRI's "file:line:in
+`<main>': " prefix.
 
 ---
 
@@ -125,39 +120,19 @@ Go type, typeof/strict_eq/keysOf/dict-key arms in all engines, a well-known-symb
 registry, and computed keys in the class/object-literal emitters. Buys user classes
 becoming iterable. Cost first; implement or DECLINE with the measurement.
 
-### T-316 js: compiled own-key lists of builtins; Object.getOwnPropertyNames(Math); `"toString" in {}` · P1 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
-`Object.keys(JSON)` is "stringify,parse" in run and native (node and interpreters "");
-`Object.keys(Object).length` 1 (node 0): the Go twin and layer 2 list those members as
-keys. `Object.getOwnPropertyNames(Math)` [] in all legs (node 44 names). `"toString"
-in {}` false (node true).
-
-### T-317 js: generator close semantics with finally / a non-done delegate · P2 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
-`try{yield 1}finally{return 42}` then `g.return(7)`: node `{value:42,done:true}`, ours
-`{value:7}`; `finally{yield 99}`: node `{value:99,done:false}`, ours
-`{value:7,done:true}`; a yield* delegate whose return() answers {done:false}: node
-yields it and stays in the yield*. No engine can yield during a close (closeBody /
-gen_close). All engines.
-
-### T-318 js: `super.toString()` without an own toString · P1 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
-In a class with no toString (e.g. extends Object): node "[object Object]", ours
-TypeError "not a function". All engines.
-
-### T-319 js: value reads of builtin methods on arrays/strings leak goja's host methods · P1 · JS · IN PROGRESS (JS+RB worker, round 6) [V]
-`typeof [1].valueOf`: node "function"; goja-interp "function" (host leak), -frozen /
-run / native "undefined" - a live goja-vs-frozen divergence the matrix does not
-exercise; `[1].push` read as a value is bound under -frozen/compiled but takes `.call`
-receivers under goja; `const f = "ab".toString; f.call([1])` aborts the goja
-interpreter with a host error (node TypeError). Close the host leak and give every
-leg node's answers.
-
-### T-332 js: a surrogate-pair escape inside one literal in the interpreter · P1 · JS · OPEN [V]
+### T-332 js: a surrogate-pair escape inside one literal in the interpreter · P1 · JS · IN PROGRESS (JS+RB worker, round 7) [V]
 `"\uD83D\uDE00".charCodeAt(0)` gives 65533 (twice) in the js interpreter under both
 hosts; node 55357. Separate literals joined with + work; both compiler halves are
 right.
 
-### T-333 js: InGen rescans the whole prefix per call · P3 · JS · OPEN [V]
+### T-333 js: InGen rescans the whole prefix per call · P3 · JS · IN PROGRESS (JS+RB worker, round 7) [V]
 The remaining -frozen memory/time cost of js-test-full.js part 1 (1.2 GB after slot
 reuse): make InGen incremental in the js grammars.
+
+### T-343 js: `Array.prototype`, `typeof Object` · P1 · JS · IN PROGRESS (JS+RB worker, round 7) [V]
+`Array.prototype` is undefined, so `Array.prototype.slice.call(x)` raises TypeError
+(node: the slice); `typeof Object` is "object" (node "function"). Check the other
+builtin constructors' `prototype` and typeof.
 
 ---
 
@@ -558,6 +533,12 @@ T-327 swift: `d["k"] = nil`; mutating String methods — DONE c8e174b
 T-321 go: pointer identity, `f(ys...)` on Println, re-panic suffix, errors.As — PARTIAL 201e4bf (errors.As/Join, re-panic chain, spread call); pointer identity is T-336
 T-320 bash: positional-parameter operator forms — DONE 41d1aad (`${x:-"$@"}` under a null IFS is T-338)
 T-323 dart: String remainder; layer 2 indexes strings by code point — PARTIAL 16aeb1b (spec-only: UTF-16 layer 2, runes, String statics, String as Pattern); RegExp is T-339
+T-325 ruby: `$!`, bare undefined calls, `Object#inspect`, Module class — DONE d917e48
+T-326 ruby: Math domain errors, Regexp gaps, `%w` nesting, class reopen — DONE 33adf84
+T-316 js: compiled own-key lists of builtins; Object.getOwnPropertyNames(Math); `"toString" in {}` — DONE a75ebb9
+T-317 js: generator close semantics with finally / a non-done delegate — DONE f890f15 (the replay interpreters still repeat an outside iterator's effects: T-154)
+T-318 js: `super.toString()` without an own toString — DONE 9068454
+T-319 js: value reads of builtin methods on arrays/strings leak goja's host methods — DONE d2ea6d5
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
