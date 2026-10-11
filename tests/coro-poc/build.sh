@@ -63,7 +63,7 @@ build_floor() {   # $1 = output .ll, $2 = optional perl -0 mutation of the C
 }
 
 build_floor "$WORK/runtime-coro.ll" "" || { echo "build.sh: floor compile failed" >&2; exit 2; }
-clang -O2 -w -o "$WORK/coro-poc.out" "$HERE/gen.ll" "$WORK/runtime-coro.ll" \
+clang -O2 -w -o "$WORK/coro-poc.out" "$HERE/gen.ll" "$WORK/runtime-coro.ll" languages/lib/coro-switch.S \
     || { echo "build.sh: clang link failed" >&2; exit 2; }
 
 "$WORK/coro-poc.out" > "$WORK/native.out" 2>&1
@@ -73,7 +73,7 @@ go test ./abnf/ -run TestCoroPoC -v 2>&1 \
 
 echo "=== llvm.Run (abnf/jsrt.go: a goroutine and two channels) ==="
 cat "$WORK/gorun.out"
-echo "=== native (the C floor: a pthread and one condition variable), rc=$NRC ==="
+echo "=== native (the C floor: a stack of its own per coroutine), rc=$NRC ==="
 cat "$WORK/native.out"
 echo "==="
 if cmp -s "$WORK/gorun.out" "$WORK/native.out" && [ "$NRC" = "0" ]; then
@@ -100,7 +100,7 @@ if [ "$MODE" = "--break" ]; then
     echo "--- discriminating power: one GC root broken at a time, MEC_GC=stress ---"
     brk() {
         if build_floor "$WORK/v.ll" "$2" \
-           && clang -O2 -w -o "$WORK/v.out" "$HERE/gen.ll" "$WORK/v.ll" 2>/dev/null; then
+           && clang -O2 -w -o "$WORK/v.out" "$HERE/gen.ll" "$WORK/v.ll" languages/lib/coro-switch.S 2>/dev/null; then
             MEC_GC=stress "$WORK/v.out" > "$WORK/v.txt" 2>&1
             rc=$?
             if cmp -s "$WORK/native.out" "$WORK/v.txt"; then

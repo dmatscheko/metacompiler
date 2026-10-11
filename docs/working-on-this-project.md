@@ -45,7 +45,7 @@ found because the two disagreed. Retiring the Go twin was measured and **decline
 The layers, bottom up:
 
 ```
-libc                     malloc, putchar, write, exit, setjmp/longjmp, pthread
+libc                     malloc, putchar, write, exit, setjmp/longjmp, valloc
 languages/lib/runtime.c  the C FLOOR: ~35 irreducible primitives + the GC +
                          coroutines. Compiled by OUR c-to-llvm-ir.abnf.
 languages/lib/*.metajs   LAYER 2: each language's semantics in MetaJS, compiled by
@@ -54,8 +54,10 @@ languages/lib/*.metajs   LAYER 2: each language's semantics in MetaJS, compiled 
 languages/<lang>-to-llvm-ir.abnf   the emitter
 ```
 
-Every layer is compiled by this repository. `nm -u` on any native binary shows libc
-and nothing else.
+Every layer is compiled by this repository, except `languages/lib/coro-switch.S`:
+two assembly routines (arm64 and x86-64) that switch a generator's stack, which
+the C subset cannot spell. `nm -u` on any native binary shows libc and nothing
+else.
 
 ---
 
@@ -842,9 +844,9 @@ write would be a change to the shared print path.
 ## 7.11 Why `llvm.Run` can never run layer 2
 
 The link is fine, and `getenv`/`write`/`exit` are 9-line stubs. `setjmp`/`longjmp`
-is ~100 lines and every `throw` in all sixteen languages goes through it;
-`pthread_create` + `dlopen`/`dlsym` are worse, since `dlsym` must answer a real
-code address where the interpreter's function-as-value is a funcId in an i32.
+is ~100 lines and every `throw` in all sixteen languages goes through it; the
+generators' stack switch is assembly (`lib/coro-switch.S`), which an IR
+interpreter has no way to run at all.
 
 **The unfixable part is the collector: it has nothing to scan.** `gc_collect`
 walks `[sp, GC_STACK_BASE)`, but under `llvm.Run` an SSA value lives in `fr.regs`,

@@ -6,9 +6,9 @@
 ;   llvm.Run   abnf/coropoc_test.go parses it and hands it to runJSModule, so
 ;              js_genfn / js_yield are abnf/jsrt.go's goroutine + two channels
 ;              and a handle is an index into a Go table.
-;   native     tests/coro-poc/build.sh links it with the PATCHED C floor, so
-;              js_genfn / js_yield are a pthread + one condition variable and a
-;              handle is a Cell *.
+;   native     tests/coro-poc/build.sh links it with the C floor, so
+;              js_genfn / js_yield run each body on a stack of its own
+;              (lib/coro-switch.S) and a handle is a Cell *.
 ;
 ; It is hand-written rather than emitted because no grammar in this repository
 ; both EMITS js_genfn and has a layer 2 that can be linked natively today - php

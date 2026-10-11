@@ -6,7 +6,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
-	"runtime"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1118,16 +1118,24 @@ func stubUndefined(m *ir.Module) {
 // to llvm.BuildExecutable, then what -rt added, in that order and without duplicates.
 // Both sources compose on purpose - a grammar that knows where its own runtime lives
 // should not stop a user from adding a second object file to the same link.
+//
+// The C floor, lib/runtime.ll, always brings its stack switch, lib/coro-switch.S
+// from the same directory: the one hand-written assembly file it calls.
 func linkInputs(fromGrammar []string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, list := range [][]string{fromGrammar, RuntimeInputs} {
-		for _, p := range list {
-			if p == "" || seen[p] {
-				continue
-			}
+	add := func(p string) {
+		if p != "" && !seen[p] {
 			seen[p] = true
 			out = append(out, p)
+		}
+	}
+	for _, list := range [][]string{fromGrammar, RuntimeInputs} {
+		for _, p := range list {
+			add(p)
+			if filepath.Base(p) == "runtime.ll" {
+				add(filepath.Join(filepath.Dir(p), "coro-switch.S"))
+			}
 		}
 	}
 	return out
@@ -1228,41 +1236,6 @@ func quotedSymbol(s string) string {
 	return name
 }
 
-// rdynamicFlags answers the link flags a generator needs to find its own thread
-// entry, and it is a PLATFORM question rather than a preference.
-//
-// languages/lib/runtime.c's gen_resume takes the address of coro_entry with
-// dlsym(dlopen(0), "coro_entry") - see the comment at runtime.c:73, the reason
-// being that c-to-llvm-ir.abnf compiles a function NAME to a call and has no way
-// to spell a function POINTER, so the address has to come from the loader at run
-// time. That lookup only succeeds if coro_entry is in the executable's DYNAMIC
-// symbol table:
-//
-//   - Mach-O (darwin) puts every non-static global symbol of the executable in
-//     the symbol table that dlsym searches, so the lookup works with no flag.
-//     Passing -rdynamic would be accepted but is not a no-op: it enlarges the
-//     exported symbol table and so changes the binary's code layout, which the
-//     native benchmarks are sensitive to (manual chapter 4). So darwin does not
-//     get it.
-//   - ELF (linux and the BSDs) exports NOTHING from an executable by default.
-//     Without -rdynamic the dlsym answers NULL and gen_resume dies with
-//     "coroutines: dlsym of coro_entry failed" at the first generator.
-//   - Anything else (windows/PE) gets nothing: -rdynamic is not a flag clang
-//     accepts for a PE target, and no coroutine build is claimed to work there.
-//
-// Known and NOT handled here, because it is a separate question and would be a
-// guess: on a glibc older than 2.34, dlopen/dlsym live in libdl and
-// pthread_create in libpthread, so such a system also needs -ldl -lpthread. From
-// 2.34 both are folded into libc and -rdynamic alone is enough.
-func rdynamicFlags() []string {
-	switch runtime.GOOS {
-	case "darwin", "windows", "js", "plan9":
-		return nil
-	default:
-		return []string{"-rdynamic"}
-	}
-}
-
 // buildExecutable emits m as LLVM IR text and links it into a native executable with
 // clang (override with the MEC_CLANG env var), together with the runtime files the
 // grammar and -rt supply and the -L/-l libraries. It returns "" on success, else an
@@ -1316,7 +1289,6 @@ func buildExecutable(m *ir.Module, outPath string, runtime []string) string {
 	// Lua floors are compiled by it, so the emitted module leans on the backend to
 	// promote those slots to registers. Without any -O flag clang does none of it.
 	args := []string{"-Wno-override-module", "-O2", "-o", outPath, tmpName}
-	args = append(args, rdynamicFlags()...)
 	args = append(args, inputs...)
 	for _, d := range LinkDirs {
 		args = append(args, "-L"+d)

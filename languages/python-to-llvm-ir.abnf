@@ -4266,7 +4266,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         //
         // There is no file I/O primitive in this project's runtime:
         // languages/lib/runtime.c declares putchar, write(2), malloc, exit, getenv,
-        // setjmp/longjmp, pthread and dlopen/dlsym - no open/read/close - and
+        // setjmp/longjmp, valloc and mprotect - no open/read/close - and
         // c.readFile is the COMPILE-time import reader. `open` would be a new
         // capability across every engine (libc declarations and a file-handle tag in
         // runtime.c, a Go type in the twin, a layer-2 object, a host global in

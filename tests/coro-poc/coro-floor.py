@@ -18,7 +18,7 @@ import sys
 # Every one of these must be present in the floor, or the PoC below is testing
 # nothing.
 REQUIRED = [
-    ("libc prototypes", "long pthread_cond_broadcast(void *c);"),
+    ("the stack switch", "void mec_coro_switch(long *save, long to);"),
     ("registry globals", "long CORO;           /* long *: the live coroutines' control blocks */"),
     ("gc_trace tag 15", "\tif (t == 15) { gc_try(w[1], 1); gc_try(w[2], 1); "
                         "gc_try(w[4], 1); gc_try(w[6], 1); return; }"),

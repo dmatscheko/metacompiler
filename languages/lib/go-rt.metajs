@@ -93,7 +93,7 @@
 //     that finds its channel empty RUNS THE QUEUE - each queued goroutine to
 //     completion, in spawn order - until one of them fills it. There is no
 //     suspension point, so there is no second stack to keep and the floor's
-//     pthread-backed tag 15/16 coroutine is not needed. The whole model is goQueue
+//     tag 15/16 coroutine is not needed. The whole model is goQueue
 //     below: one array and one drain loop.
 //
 // ----- js_gounctl is lowered in the EMITTER -----------------------------------

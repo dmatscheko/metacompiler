@@ -6,8 +6,8 @@ package abnf
 // links into a native binary - and runs it through runJSModule, which is exactly
 // what llvm.RunJS does for every compiler grammar.  So js_genfn and js_yield here
 // are abnf/jsrt.go's goroutine and two channels, and a handle is an index into a
-// Go table; in the native binary they are a pthread and one condition variable
-// and a handle is a Cell *.  The two outputs have to agree byte for byte, which
+// Go table; in the native binary each body runs on a stack of its own
+// (lib/coro-switch.S) and a handle is a Cell *.  The two outputs have to agree byte for byte, which
 // is the whole claim.
 //
 //	go test ./abnf/ -run TestCoroPoC -v
