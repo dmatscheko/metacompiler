@@ -134,6 +134,24 @@ function phsHasHeld(s) {
     return false
 }
 
+// echo s: PHP writes a string's BYTES, so one holding a held byte goes out
+// through writeBytes (one unit per byte); any other string's UTF-8 text already
+// is its bytes. Twin of js_phecho in abnf/jsrtphp.go.
+function phsEcho(s) {
+    if (phsAscii(s) || !phsHasHeld(s)) {
+        print(s)
+        return
+    }
+    var bs = phsBytes(s)
+    var out = ""
+    var i = 0
+    while (i < bs.length) {
+        out = out + String.fromCharCode(bs[i])
+        i = i + 1
+    }
+    writeBytes(out)
+}
+
 // strlen: the byte count.
 function phsLen(s) {
     if (phsAscii(s)) { return s.length }

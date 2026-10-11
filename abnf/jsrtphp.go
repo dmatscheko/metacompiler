@@ -2050,6 +2050,17 @@ func init() {
 		m["js_phtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpTypeName(u(a[0]))) }
 		m["js_phdtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDebugType(u(a[0]))) }
 		m["js_phdump"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDump(u(a[0]), 0)) }
+		// echo v: PHP writes the string's BYTES, so a held byte goes out as that
+		// one byte. Twin of phsEcho in languages/lib/php-strings.js.
+		m["js_phecho"] = func(a []uint64) uint64 {
+			s := rt.phpStr(u(a[0]))
+			if raw := phpRaw(s); raw != s {
+				outWriter.Write([]byte(raw))
+			} else {
+				outWriter.Write([]byte(wtf8Clean(s)))
+			}
+			return w(jsUndef)
+		}
 		m["js_phgetclass"] = func(a []uint64) uint64 {
 			if phpIsObj(u(a[0])) {
 				return rt.wrapStr(rt.phpClassName(u(a[0])))

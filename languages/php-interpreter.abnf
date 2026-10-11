@@ -3740,7 +3740,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() {
             var out = ""
             for (var i = 0; i < args.length; i++) { out += phpStr(args[i]()) }
-            print(out)
+            phsEcho(out)
             return null
         }
     }
@@ -4763,7 +4763,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "gettype": function(v) { return phpTypeName(v) },
         "get_debug_type": function(v) { return phpDebugType(v) },
         "var_dump": function() {
-            for (var i = 0; i < arguments.length; i++) { print(dumpOf(arguments[i], 0)) }
+            for (var i = 0; i < arguments.length; i++) { phsEcho(dumpOf(arguments[i], 0)) }
             return null
         }
     }

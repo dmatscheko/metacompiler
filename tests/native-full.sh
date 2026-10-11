@@ -117,7 +117,8 @@ ROWS="bash:sh batch:cmd c:c csharp:cs dart:dart go:go java:java kotlin:kt
 EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuck-features.expected
              calculator:features:tests/calculator-test-features.txt:exit-only
              calculator:compiler:tests/calculator-compiler-features.txt:exit-only
-             lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected"
+             lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected
+             php:bytes:tests/php-test-bytes.php:tests/php-bytes.expected"
 
 JOBS="${MEC_JOBS:-$( (sysctl -n hw.ncpu || nproc || echo 4) 2>/dev/null )}"
 case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac

@@ -1499,6 +1499,18 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-features.php", "-q"]
         },
         {
+            "name": "PHP echo writes raw bytes (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-bytes.php", "-q"]
+        },
+        {
+            "name": "PHP echo writes raw bytes (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-bytes.php", "-q"]
+        },
+        {
             "name": "Python features (interpreter)",
             "type": "go",
             "request": "launch",

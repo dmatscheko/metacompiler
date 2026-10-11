@@ -4158,12 +4158,10 @@ KwInstanceof = "instanceof" KwEnd ;
     function makeEcho(items) {
         var args = items.slice(1)
         return function(b) {
-            var printV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])
             for (var i = 0; i < args.length; i++) {
                 var r = args[i](b)
                 b = r.b
-                var sv = callExt(b, "js_phstr", [r.v])
-                callExt(b, "js_call", [printV, hUndef, argList(b, [sv])])
+                callExt(b, "js_phecho", [r.v])
             }
             return b
         }
@@ -4950,10 +4948,7 @@ KwInstanceof = "instanceof" KwEnd ;
         // var_dump renders through js_phdump and prints the result: a float there
         // uses serialize_precision=-1, not the precision=14 echo uses.
         if (name == "var_dump") {
-            var printV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])
-            for (var d = 0; d < vs.length; d++) {
-                callExt(b, "js_call", [printV, hUndef, argList(b, [callExt(b, "js_phdump", [vs[d]])])])
-            }
+            for (var d = 0; d < vs.length; d++) { callExt(b, "js_phecho", [callExt(b, "js_phdump", [vs[d]])]) }
             return {b: b, v: hNull}
         }
         if (name == "gettype") { return {b: b, v: callExt(b, "js_phtype", [vs[0]])} }

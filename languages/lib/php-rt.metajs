@@ -1782,6 +1782,7 @@ function js_phtruthy__raw(v) { return phTest(v) }
 function js_phbool(v) { return phTest(v) }
 function js_phnot(v) { return !phTest(v) }
 function js_phstr(v) { return phStr(v) }
+function js_phecho(v) { phsEcho(phStr(v)) }
 // a . b. Only a seam between held bytes needs phsJoin's re-read: a ends in a
 // held byte (U+DC80..U+DCFF) and b starts with a held continuation byte.
 function js_phcat(l, r) {
