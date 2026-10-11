@@ -1062,8 +1062,6 @@ function s31(): void {
         && !((1n as any) < undefined) && !((1n as any) < "") && 2n > 1.5);
 }
 
-// ===== END SECTIONS =====
-
 // ===== SECTION 32: shift and logical assignment through an expression member =====
 // '[o][0].a >>= 1' assigns through a member of an arbitrary expression, which only
 // LhsAssign can express. The forward scan that decides whether an assignment operator

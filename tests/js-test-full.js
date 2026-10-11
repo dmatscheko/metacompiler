@@ -1056,8 +1056,6 @@ function s35() {
 
 // ===== END SECTIONS =====
 
-// ===== END SECTIONS =====
-
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
