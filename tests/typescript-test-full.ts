@@ -3279,6 +3279,13 @@ function s59() {
     try { "a".toString.call([1]); } catch (e: any) { errs.push(e.message); }
     check("bmv03", errs.join("|") === "Cannot convert undefined or null to object|" +
         "String.prototype.toString requires that 'this' be a String");
+    // Array / String / Number.prototype hold those same functions, and Object is a
+    // function to typeof (node 24).
+    const rest = function (...xs: any[]): any[] { return Array.prototype.slice.call(xs, 1); };
+    check("bmv04", typeof Object === "function" && Object.prototype.toString.call(Object) === "[object Function]" &&
+        typeof Array.prototype === "object" && Array.prototype.slice === [].slice && rest(1, 2, 3).join() === "2,3" &&
+        String.prototype.toUpperCase.call("ab") === "AB" && "x".slice === String.prototype.slice &&
+        Number.prototype.toFixed.call(1.25, 1) === "1.3" && Array.prototype.join.call([4, 5], "-") === "4-5");
 }
 
 // ===== SECTION 60: the own names of Math, JSON and Object, and `in` through the prototype =====

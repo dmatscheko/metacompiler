@@ -155,7 +155,7 @@ func jsvProtoTag(v interface{}) string {
 	case bool:
 		return "[object Boolean]"
 	}
-	if isCallable(v) {
+	if isCallable(v) || jsvIsObjectGlobal(v) {
 		return "[object Function]"
 	}
 	// The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
@@ -1802,6 +1802,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if c, has := o.props["__isclass"]; has && c == interface{}(true) {
 				return rt.wrapStr("function")
 			}
+			if o.props["__jsobject"] != nil {
+				return rt.wrapStr("function")
+			}
 		}
 		return rt.wrapStr(rt.typeOf(v))
 	}
@@ -2213,6 +2216,35 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		builtinVals[key] = f
 		return f
 	}
+	// Array.prototype, String.prototype and Number.prototype: an object whose members
+	// are the builtin method values, carrying a receiver of its kind in __bvof, which
+	// jsvBuiltinFam asks. Twins: builtinProto in both *-interpreter.abnf,
+	// jvBuiltinProto in languages/lib/js-rt.metajs.
+	builtinProtos := map[string]*jsObject{}
+	builtinProto := func(fn interface{}) interface{} {
+		hf, isHost := fn.(*hostFunc)
+		if !isHost {
+			return nil
+		}
+		var of interface{}
+		switch hf.name {
+		case "Array":
+			of = &jsArray{}
+		case "String":
+			of = ""
+		case "Number":
+			of = float64(0)
+		default:
+			return nil
+		}
+		if p, found := builtinProtos[hf.name]; found {
+			return p
+		}
+		p := newJSObject()
+		p.set("__bvof", of)
+		builtinProtos[hf.name] = p
+		return p
+	}
 	// js_jsvget is the VALUE read of a member - `const f = p.m`, `typeof p.m` - as
 	// opposed to js_jsmget, which the emitter uses at a member-followed-by-a-call site
 	// and which deliberately HIDES the String/Array method names so the call falls into
@@ -2263,11 +2295,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if hf, isFn := u(a[0]).(*hostFunc); isFn && hf.name == "Array" && rt.toString(u(a[1])) == "isArray" {
 				return w(isArrayFn)
 			}
+			if rt.toString(u(a[1])) == "prototype" {
+				if p := builtinProto(u(a[0])); p != nil {
+					return w(p)
+				}
+			}
 			return r
 		}
 		name := rt.toString(u(a[1]))
 		if jsvInternalKey(name) {
 			return r
+		}
+		if of, isProto := recv.props["__bvof"]; isProto {
+			if fam := jsvBuiltinFam(of, name); fam != 0 {
+				return w(builtinValue(fam, name))
+			}
 		}
 		// `e.constructor` is the CLASS an instance was built from (and, for
 		// `new F()`, the function F itself).

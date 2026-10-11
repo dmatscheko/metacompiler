@@ -137,7 +137,10 @@ function jvIsCallable(v) {
 // cannot.
 function js_jstypeof(v) {
     if (jbIsBig(v)) { return "bigint" }
-    if (jvIsObj(v)) { if (v["__isclass"] === true) { return "function" } }
+    if (jvIsObj(v)) {
+        if (v["__isclass"] === true) { return "function" }
+        if (v["__jsobject"] !== undefined) { return "function" }
+    }
     return typeof v
 }
 
@@ -292,6 +295,9 @@ var jvStringFn = anytype
 // Array.isArray read as a value (jvValueMiss).
 var jvArrayFn = anytype
 var jvIsArrayV = anytype
+
+// The `Number` global js_jsnumberfn handed out, for Number.prototype.
+var jvNumberFn = anytype
 
 // ===================================================== function properties ==
 //
@@ -1416,6 +1422,12 @@ function jvValueMiss(o, key) {
             cf = jvConstructorOf(o)
             if (cf !== undefined) { return cf }
         }
+        var bof = anytype
+        bof = o["__bvof"]
+        if (bof !== undefined) {
+            var pf = jvBuiltinFam(bof, key)
+            if (pf != "") { return jvBuiltinValue(pf, key) }
+        }
         if (key.length < 2 || key.substring(0, 2) != "__") {
             var fn = jvFindClassMethod(o, key)
             if (fn !== undefined) { return jvMethodValue(fn, key) }
@@ -1434,7 +1446,31 @@ function jvValueMiss(o, key) {
         if (jvIsArrayV === undefined) { jvIsArrayV = function (v) { return Array.isArray(v) } }
         return jvIsArrayV
     }
+    if (key == "prototype") { return jvBuiltinProto(o) }
     return undefined
+}
+
+// Array.prototype, String.prototype and Number.prototype: an object whose members are
+// the builtin method values, carrying a receiver of its kind in __bvof, which
+// jvBuiltinFam asks. Twins: builtinProto in abnf/jsrtjsprint.go and in
+// both *-interpreter.abnf.
+var jvBuiltinProtos = []
+function jvBuiltinProto(f) {
+    var at = -1
+    if (jvArrayFn !== undefined && f === jvArrayFn) { at = 0 }
+    if (jvStringFn !== undefined && f === jvStringFn) { at = 1 }
+    if (jvNumberFn !== undefined && f === jvNumberFn) { at = 2 }
+    if (at < 0) { return undefined }
+    if (jvBuiltinProtos.length == 0) {
+        var pa = {}
+        pa["__bvof"] = []
+        var ps = {}
+        ps["__bvof"] = ""
+        var pn = {}
+        pn["__bvof"] = 0
+        jvBuiltinProtos = [pa, ps, pn]
+    }
+    return jvBuiltinProtos[at]
 }
 
 // js_has plus the __class methods: an instance keeps its methods on its class
@@ -2067,7 +2103,7 @@ function jvProtoTag(v) {
     if (typeof v == "number") { return "[object Number]" }
     if (typeof v == "string") { return "[object String]" }
     if (typeof v == "boolean") { return "[object Boolean]" }
-    if (jvIsCallable(v)) { return "[object Function]" }
+    if (jvIsCallable(v) || jvIsObjectGlobal(v)) { return "[object Function]" }
     // The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
     // promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
     if (jvIsObj(v)) {
@@ -4275,11 +4311,14 @@ function js_jsbigintfn() {
 
 // Number(v): the only way back OUT of a BigInt, since unary '+' refuses it.
 function js_jsnumberfn() {
-    return function(v) {
-        if (jbIsBig(v)) { return jbToNum(v) }
-        if (v === undefined) { return NaN }
-        return jvToNumber(v)
+    if (jvNumberFn === undefined) {
+        jvNumberFn = function(v) {
+            if (jbIsBig(v)) { return jbToNum(v) }
+            if (v === undefined) { return NaN }
+            return jvToNumber(v)
+        }
     }
+    return jvNumberFn
 }
 
 // Unary '+' is the ONE operator a BigInt refuses outright: there is no number

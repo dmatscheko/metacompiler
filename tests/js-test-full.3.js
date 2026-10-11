@@ -1382,6 +1382,13 @@ function s65() {
     var up = "q".toUpperCase.bind("hi")
     check("bmv4", "ab".charAt.call(12345, 1) === "2" && [1, 2, 3].slice.apply([4, 5, 6], [1]).join() === "5,6" &&
         up() === "HI" && (2.5).toFixed.call(1.25, 1) === "1.3" && ["a", "b"].map("x".concat.bind("p")).join() === "pa0a,b,pb1a,b")
+    // Array / String / Number.prototype hold those same functions, and Object is a
+    // function to typeof.
+    var rest = function () { return Array.prototype.slice.call(arguments, 1) }
+    check("bmv5", typeof Object === "function" && Object.prototype.toString.call(Object) === "[object Function]" &&
+        typeof Array.prototype === "object" && Array.prototype.slice === [].slice && rest(1, 2, 3).join() === "2,3" &&
+        String.prototype.toUpperCase.call("ab") === "AB" && "x".slice === String.prototype.slice &&
+        Number.prototype.toFixed.call(1.25, 1) === "1.3" && Array.prototype.join.call([4, 5], "-") === "4-5")
 }
 
 // ===== SECTION 66: the own names of Math, JSON and Object, and `in` through the prototype =====

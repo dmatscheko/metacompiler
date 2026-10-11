@@ -2510,7 +2510,7 @@ NotFuncHead = :script(~~
         if (typeof v == "number") { return "[object Number]" }
         if (typeof v == "string") { return "[object String]" }
         if (typeof v == "boolean") { return "[object Boolean]" }
-        if (typeof v == "function") { return "[object Function]" }
+        if (typeof v == "function" || v === jsObjectGlobal) { return "[object Function]" }
         // See the twin of this comment in js-interpreter.abnf.
         if (typeof v == "object") {
             if (hasOwn(v, "__errh")) { return "[object Error]" }
@@ -3825,10 +3825,19 @@ NotFuncHead = :script(~~
             var bf = builtinFam(o, k)
             if (bf != "") { return builtinValue(bf, k) }
         }
+        if (k === "prototype" && typeof o == "function") {
+            var bp = anytype // The prototype object, or undefined for any other function.
+            bp = builtinProto(o)
+            if (bp !== undefined) { return bp }
+        }
         var v = anytype // A member is of any type.
         v = getMemberRaw(o, k)
         if (v != undefined) { return v }
         if (o === jsArrayFn && k === "isArray") { return jsIsArrayValue() }
+        if (typeof o == "object" && o !== null && hasOwn(o, "__bvof")) {
+            var pf = builtinFam(o.__bvof, k)
+            if (pf != "") { return builtinValue(pf, k) }
+        }
         // isPrivateKey: a private METHOD lives on the class descriptor under '__#m', so
         // the __-name skip would hide it from the walk.
         if (typeof o == "object" && !Array.isArray(o) && typeof k == "string" &&
@@ -3875,6 +3884,14 @@ NotFuncHead = :script(~~
         if (typeof o == "number") { return hasOwn(bvNum, k) ? "n" : "" }
         if (Array.isArray(o)) { return hasOwn(bvArr, k) ? "a" : "" }
         return ""
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    var bvProtos = []
+    function builtinProto(f) {
+        var at = f === jsArrayFn ? 0 : (f === jsStringFn ? 1 : (f === jsNumberFn ? 2 : -1))
+        if (at < 0) { return undefined }
+        if (bvProtos.length == 0) { bvProtos = [{"__bvof": []}, {"__bvof": ""}, {"__bvof": 0}] }
+        return bvProtos[at]
     }
     function builtinValue(fam, k) {
         var key = "$" + fam + k
@@ -4282,6 +4299,7 @@ NotFuncHead = :script(~~
     function jsTypeofVal(v) {
         if (isBigInt(v)) { return "bigint" }
         if (v != undefined && v != null && typeof v == "object" && v.__isclass === true) { return "function" }
+        if (v === jsObjectGlobal) { return "function" }
         return typeof v
     }
     function makeTypeof(t) {
