@@ -265,18 +265,16 @@ than re-read. The fix is a `!","` guard on the narrower rules. The general lesso
 is that **a rule which can match a PREFIX of a later alternative must exclude the
 continuation explicitly** — the grammar cannot discover it by backtracking.
 
-**goja's `Number→String` is not always the shortest round-tripping form.**
-Measured: **22 of 199,904 random doubles (~1 in 9,000)**, and at some
-subnormal boundaries it emits a non-digit character outright
-(`-;.627494252092118e-309`). The frozen host is exact, so **any grammar that
-takes a double's digits from `"" + n` has a live goja-vs-`-frozen` divergence**
-waiting for the first value that reaches it. Choose the digit count by
-round-trip (`floPrec(a, n)` for n = 1..17, stop when `parseFloat` agrees), never
-by counting the host's own printed digits. java is fixed, and **csharp is fixed
-too** - `coreDecDigits` (`lib/interp-core.js`) already chooses by `floPrec`
-round-trip, and this sentence listed it wrongly until 2026-08-10. **kotlin
-and go's interpreter halves still do this** (todo.md); lua's last such site, a
-number handed to `string.*`, now renders through `luaNumStr`.
+**goja is a patched copy in `third_party/goja`, because its `Number→String` was
+wrong.** Upstream goja's shortest-digits fallback (the Rhino-derived `ftoa`
+behind Grisu) is not always shortest or even round-trip - about 1 double in
+11,000, and at some subnormals a non-digit character (`F.250738585070127e-309`).
+Every grammar that takes a double's digits from `"" + n` inherits that as a
+goja-vs-`-frozen` divergence, so the one patch (`ftoa/ftostr.go`: shortest
+digits from `strconv`) fixes them all, and
+`TestNumberToStringAgreesAcrossHosts` pins goja against the frozen host's
+`jsNumString` on ~430,000 boundary doubles. Do not "upgrade" goja through
+`go get`: the `replace` in `go.mod` is what keeps the patch.
 
 **A RANDOM float probe has near-zero discriminating power; targeted values have
 all of it.** A 1,450-line random probe agreed with the oracle at base while 85

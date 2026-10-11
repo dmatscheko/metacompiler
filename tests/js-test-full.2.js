@@ -94,6 +94,11 @@ function s36() {
     check("tpl7", `${[1, 2]}` === "1,2" && `${[]}` === "")
     var t = { toString: function () { return "T" } }
     check("tpl8", `a${t}b${t}c` === "aTbTc")
+    // Number::toString is the SHORTEST digits that read back, closest to the value
+    // when several are that short; these doubles need all seventeen (node v24).
+    var sd = [0.0015425378683206609, 1.7385704740834339e+92, -7.209885073274179e-254]
+    check("tpl9", `${sd[0]}` === "0.0015425378683206609" && String(sd[1]) === "1.7385704740834339e+92" &&
+                  "" + sd[2] === "-7.209885073274179e-254")
 
     // The implicit global. A plain `=` to a name that is on NO scope of the chain
     // creates the binding in the ROOT scope (js_scope_set_or_create), so it outlives

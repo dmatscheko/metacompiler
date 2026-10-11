@@ -1,6 +1,7 @@
 package ftoa
 
 import (
+	"bytes"
 	"math"
 	"strconv"
 
@@ -39,6 +40,22 @@ func expand(b []byte, delta int) []byte {
 	return b1
 }
 
+// shortest appends the shortest digits that read back as d (d > 0) and returns
+// the decimal point's position. Among several shortest candidates strconv picks
+// the one closest to d, which is ECMAScript's Number::toString rule; the ftoa
+// fallback behind fast.Dtoa is not always shortest or even round-trip.
+func shortest(d float64, buf []byte) ([]byte, int) {
+	var tmp [32]byte
+	s := strconv.AppendFloat(tmp[:0], d, 'e', -1, 64) // d[.ddd]e±XX
+	e := bytes.IndexByte(s, 'e')
+	exp, _ := strconv.Atoi(string(s[e+1:]))
+	buf = append(buf, s[0])
+	if e > 1 {
+		buf = append(buf, s[2:e]...)
+	}
+	return buf, exp + 1
+}
+
 func FToStr(d float64, mode FToStrMode, precision int, buffer []byte) []byte {
 	if math.IsNaN(d) {
 		buffer = append(buffer, "NaN"...)
@@ -68,7 +85,8 @@ func FToStr(d float64, mode FToStrMode, precision int, buffer []byte) []byte {
 		}
 		switch mode {
 		case ModeStandard, ModeStandardExponential:
-			buffer, decPt, ok = fast.Dtoa(d, fast.ModeShortest, 0, buffer)
+			buffer, decPt = shortest(d, buffer)
+			ok = true
 		case ModeExponential, ModePrecision:
 			buffer, decPt, ok = fast.Dtoa(d, fast.ModePrecision, precision, buffer)
 		}

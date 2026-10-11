@@ -919,6 +919,9 @@ class S29Box { public $v = 1; }
 function s29dump() {
     var_dump(PHP_INT_MAX, PHP_INT_MAX + 1, PHP_INT_MIN);
     var_dump(0.1 + 0.2, 1 / 3, 3.0, 1.0E+25);
+    // Shortest round-tripping digits that need all seventeen.
+    $sd = [0.0015425378683206609, 1.7385704740834339E+92];
+    var_dump($sd[0], $sd[1]);
     var_dump(0b111111010000101010101010101010111111111111111111111111111111111111111111111111111111);
     var_dump(true, null, "ab", [1 => "x"]);
     // var_dump takes any number of values.

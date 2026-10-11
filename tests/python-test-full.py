@@ -1147,6 +1147,11 @@ def s27():
     check("nf2", float("INFINITY") == inf and float("infinity") == inf and float("-Inf") == 0 - inf)
     check("nf3", str(float("nan")) == "nan" and str(float("-nan")) == "nan" and str(float("NaN")) == "nan")
     check("nf4", float("  inf  ") == inf and str(float("1.5")) == "1.5")
+    # repr and str of a float are the SHORTEST digits that read back; these
+    # doubles need all seventeen.
+    sd = [0.0015425378683206609, 1.7385704740834339e+92, -7.209885073274179e-254]
+    check("nf5", repr(sd[0]) == "0.0015425378683206609" and str(sd[1]) == "1.7385704740834339e+92" and
+                 str(sd[2]) == "-7.209885073274179e-254")
     # The builtin TYPE OBJECTS. `int` is the class, not a conversion function, so
     # type(1) IS int.
     check("ty1", isinstance("a", str) and isinstance(1, int) and isinstance(1.0, float))
