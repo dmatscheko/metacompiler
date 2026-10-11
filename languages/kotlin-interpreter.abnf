@@ -3195,17 +3195,26 @@ NotMemberKw = :script(~~
     // `(5 downTo 1).reversed()` is "1..5 step 1", neither of which the direction and
     // the step alone can tell apart from the plain "1..5". It is also what
     // `x is IntRange` must answer false to.
+    // `lg` marks a LongRange / LongProgression: a bound was a Long, so every element,
+    // first, last, start and endInclusive is a Long again.
     function kRange(from, to, down) {
         return {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
-                ch: kIsChar(from), fl: kIsFlo(from), pg: false}
+                ch: kIsChar(from), fl: kIsFlo(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to)}
     }
+    // A signed 64-bit sized integer, the value model's Long. Twin of ktIsLongBox in
+    // abnf/jsrtkotlin.go.
+    function kIsLongBox(v) { return szIs(v) && v.w == 64 && !v.u }
+    // An element of a LongArray is a Long, so an integer literal written into one
+    // (`longArrayOf(1, 2)`, `LongArray(2) { 7 }`) is typed by that expectation. Twin
+    // of ktAdoptLong in abnf/jsrtkotlin.go.
+    function kAdoptLong(v) { return kAdoptTy(v, "Long") }
     // IntProgression.reversed(): "a progression that goes over the same range in the
     // opposite direction with the same step" - IntProgression.fromClosedRange(last,
     // first, -step), so the new FIRST is the old LAST ELEMENT (1..10 step 4 reverses
     // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
     function rangeRev(rg) {
         return {__range: true, from: rangeLastEl(rg), to: rg.from, st: rg.st,
-                down: !rg.down, ch: rg.ch, fl: false, pg: true}
+                down: !rg.down, ch: rg.ch, fl: false, pg: true, lg: rg.lg}
     }
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__range === true }
     // ----- kotlin.random -----
@@ -3305,7 +3314,7 @@ NotMemberKw = :script(~~
                     var stn = kNum(r)
                     if (stn <= 0) { fail("range step must be positive") }
                     v = {__range: true, from: v.from, to: v.to, st: stn, down: v.down,
-                         ch: v.ch, fl: v.fl, pg: true}
+                         ch: v.ch, fl: v.fl, pg: true, lg: v.lg}
                 } else if (isRange(v)) { fail("chained range expression") }
                 else if (rop == "downTo") { v = kRange(v, r, true) }
                 else if (rop == "..") { v = kRange(v, r, false) }
@@ -3337,6 +3346,7 @@ NotMemberKw = :script(~~
     function rangeEl(rg, n) {
         if (rg.ch) { return kChar(n) }
         if (rg.fl === true) { return kFlo(n) }
+        if (rg.lg === true) { return kAdoptLong(n) }
         return n
     }
     function rangeEmpty(rg) { return rg.down ? (rg.from < rg.to) : (rg.from > rg.to) }
@@ -3647,6 +3657,11 @@ NotMemberKw = :script(~~
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
         return arrKindSet(out, 1)
     }
+    hostGlobals["longArrayOf"] = function() {
+        var out = []
+        for (var i = 0; i < arguments.length; i++) out.push(kAdoptLong(arguments[i]))
+        return arrKindSet(out, 1)
+    }
     hostGlobals["setOf"] = function() {
         var s = kMakeSet()
         for (var i = 0; i < arguments.length; i++) { kSetAdd(s, arguments[i]) }
@@ -3677,7 +3692,6 @@ NotMemberKw = :script(~~
     hostGlobals["booleanArrayOf"] = hostGlobals["arrayOf"]
     hostGlobals["doubleArrayOf"] = hostGlobals["arrayOf"]
     hostGlobals["floatArrayOf"] = hostGlobals["arrayOf"]
-    hostGlobals["longArrayOf"] = hostGlobals["arrayOf"]
     hostGlobals["byteArrayOf"] = hostGlobals["arrayOf"]
     hostGlobals["shortArrayOf"] = hostGlobals["arrayOf"]
     hostGlobals["ubyteArrayOf"] = hostGlobals["arrayOf"]
@@ -3902,7 +3916,11 @@ NotMemberKw = :script(~~
         for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : 0) }
         return arrKindSet(out, 1)
     }
-    hostGlobals["LongArray"] = hostGlobals["IntArray"]
+    hostGlobals["LongArray"] = function(n, init) {
+        var out = []
+        for (var i = 0; i < kNum(n); i++) { out.push(kAdoptLong(typeof init == "function" ? init(i) : 0)) }
+        return arrKindSet(out, 1)
+    }
     hostGlobals["ShortArray"] = hostGlobals["IntArray"]
     hostGlobals["ByteArray"] = hostGlobals["IntArray"]
     hostGlobals["DoubleArray"] = hostGlobals["IntArray"]
@@ -6735,7 +6753,7 @@ NotMemberKw = :script(~~
                 var sn2 = kNum(args[0])
                 if (sn2 <= 0) { fail("range step must be positive") }
                 return {__range: true, from: tgt.from, to: tgt.to, st: sn2,
-                        down: tgt.down, ch: tgt.ch, fl: tgt.fl, pg: true}
+                        down: tgt.down, ch: tgt.ch, fl: tgt.fl, pg: true, lg: tgt.lg}
             }
             // kotlin.random: `(1..5).random()` throws NoSuchElementException on an
             // empty progression and randomOrNull() answers null.

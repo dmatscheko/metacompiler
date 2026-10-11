@@ -2160,7 +2160,8 @@ func init() {
 			_, isCh := from.(jsChar)
 			_, isFl := from.(jsJFlo)
 			return w(ktMakeRange(ktRange{from: fn, to: tn, st: sn,
-				down: rt.toNumber(u(a[3])) != 0, ch: isCh, fl: isFl}))
+				down: rt.toNumber(u(a[3])) != 0, ch: isCh, fl: isFl,
+				lg: ktIsLongBox(from) || ktIsLongBox(to)}))
 		}
 		// `r step k` re-steps an existing progression, keeping bounds and direction.
 		m["js_ktrestep"] = func(a []uint64) uint64 {
@@ -5825,6 +5826,26 @@ type ktRange struct {
 	// and the step alone can tell apart from a plain "1..5". It is also what
 	// `x is IntRange` has to answer false to.
 	pg bool
+	// lg marks a LongRange / LongProgression: a bound was a Long, so every element,
+	// first, last, start and endInclusive is a Long again.
+	lg bool
+}
+
+// ktAdoptLong is js_ktadopt at Long: an element of a LongArray is a Long, so an
+// integer literal written into one (`longArrayOf(1, 2)`, `LongArray(2) { 7 }`) is
+// typed by that expectation. Twin of kAdoptLong in kotlin-interpreter.abnf and
+// ktAdoptLong in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktAdoptLong(v interface{}) interface{} {
+	if !ktIsIntegral(v) {
+		return v
+	}
+	return rt.ktConv(v, 64, false)
+}
+
+// ktIsLongBox: a signed 64-bit sized integer, the value model's Long.
+func ktIsLongBox(v interface{}) bool {
+	g, ok := v.(jsGInt)
+	return ok && g.w == 64 && !g.u
 }
 
 // The function spelling of rangeTo / until / downTo, shared by the number and Char
@@ -5839,7 +5860,7 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 		tn = tn - 1
 	}
 	return ktMakeRange(ktRange{from: fn, to: tn, st: 1, down: name == "downTo",
-		ch: isCh, fl: isFl})
+		ch: isCh, fl: isFl, lg: ktIsLongBox(from) || ktIsLongBox(to)})
 }
 
 // IntProgression.reversed(): "a progression that goes over the same range in the
@@ -5848,7 +5869,7 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
 func ktRangeRev(rg ktRange) ktRange {
 	return ktRange{from: ktRangeLastEl(rg), to: rg.from, st: rg.st,
-		down: !rg.down, ch: rg.ch, pg: true}
+		down: !rg.down, ch: rg.ch, pg: true, lg: rg.lg}
 }
 
 // The number of elements in a progression, arithmetically: `(1..1000000).random()`
@@ -6003,6 +6024,7 @@ func ktRangeOf(v interface{}) (ktRange, bool) {
 	rg.ch, _ = o.props["ch"].(bool)
 	rg.fl, _ = o.props["fl"].(bool)
 	rg.pg, _ = o.props["pg"].(bool)
+	rg.lg, _ = o.props["lg"].(bool)
 	return rg, true
 }
 
@@ -6021,6 +6043,7 @@ func ktMakeRange(rg ktRange) *jsObject {
 	o.set("ch", rg.ch)
 	o.set("fl", rg.fl)
 	o.set("pg", rg.pg)
+	o.set("lg", rg.lg)
 	return o
 }
 
@@ -6049,6 +6072,9 @@ func ktRangeEl(rg ktRange, n float64) interface{} {
 	}
 	if rg.fl {
 		return jvmMkFlo(n)
+	}
+	if rg.lg {
+		return jsGInt{v: int64(n), w: 64}
 	}
 	return n
 }
@@ -6791,8 +6817,12 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			out := &jsArray{}
 			for i := 0; i < n; i++ {
 				switch {
+				case isCallable(init) && name == "LongArray":
+					out.elems = append(out.elems, rt.ktAdoptLong(rt.ktCall(init, float64(i))))
 				case isCallable(init):
 					out.elems = append(out.elems, rt.ktCall(init, float64(i)))
+				case name == "LongArray":
+					out.elems = append(out.elems, jsGInt{w: 64})
 				case name == "BooleanArray":
 					out.elems = append(out.elems, false)
 				case name == "CharArray":
@@ -6837,7 +6867,13 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		"booleanArrayOf", "charArrayOf", "byteArrayOf", "shortArrayOf",
 		"ubyteArrayOf", "ushortArrayOf", "uintArrayOf", "ulongArrayOf":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return &jsArray{elems: append([]interface{}{}, args...), kind: ktArrArray}
+			out := &jsArray{elems: append([]interface{}{}, args...), kind: ktArrArray}
+			if name == "longArrayOf" {
+				for i, e := range out.elems {
+					out.elems[i] = rt.ktAdoptLong(e)
+				}
+			}
+			return out
 		})
 	case "sequenceOf", "emptySequence":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {

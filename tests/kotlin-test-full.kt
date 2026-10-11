@@ -4466,6 +4466,26 @@ fun sec87() {
     check("ax87l", two.first() + ts.last() + tv.first() == 5)
 }
 
+// ===== SECTION 88: a LongRange's and a LongArray's elements are Longs =====
+// A range with a Long bound is a LongRange, whose first/last/start/endInclusive and
+// elements are Longs; an integer literal in longArrayOf / LongArray is typed Long by
+// that expectation, so a product of two of them is a 64-bit multiply. Rows read from
+// the kotlin-stdlib 2.2.21 jar, called from java.
+fun s88any(x: Any): Any = x
+
+fun sec88() {
+    val r = 1L..5L
+    check("ax88a", s88any(r.first) is Long && s88any(r.last) is Long &&
+        s88any(r.start) is Long && s88any(r.endInclusive) is Long)
+    check("ax88b", s88any(r.toList()[0]) is Long && s88any((1..5L).first) is Long &&
+        "" + r == "1..5" && (5L downTo 1L step 2).last == 1L)
+    check("ax88c", r.first * 3000000000L == 3000000000L)
+    val la = longArrayOf(100000, 100000)
+    val lz = LongArray(2) { 100000 }
+    check("ax88d", la[0] * la[1] == 10000000000L && lz[0] * lz[1] == 10000000000L)
+    check("ax88e", s88any(LongArray(2)[0]) is Long && s88any(la[1]) is Long)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -4555,6 +4575,7 @@ fun main() {
     sec85() // SECTION-CALL 85
     sec86() // SECTION-CALL 86
     sec87() // SECTION-CALL 87
+    sec88() // SECTION-CALL 88
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -6958,7 +6958,7 @@ function k4ArrayOfN(name, args) {
     var i = 0
     while (i < n) {
         if (k4Fn(init)) {
-            out.push(ktCall1(init, i))
+            if (name == "LongArray") { out.push(ktAdoptLong(ktCall1(init, i))) } else { out.push(ktCall1(init, i)) }
         } else {
             if (name == "BooleanArray") { out.push(false) } else {
                 // A Char is a real type here, so CharArray(n) fills with Kotlin's
@@ -6969,7 +6969,9 @@ function k4ArrayOfN(name, args) {
                     if (name == "MutableList") { nul = true }
                     if (name == "Array") { nul = true }
                     if (name == "arrayOfNulls") { nul = true }
-                    if (nul) { out.push(null) } else { out.push(0) }
+                    if (nul) { out.push(null) } else {
+                        if (name == "LongArray") { out.push(ktAdoptLong(0)) } else { out.push(0) }
+                    }
                 }
             }
         }
@@ -7292,6 +7294,7 @@ function ktGlobalFn(name) {
     // The Array and Sequence builders are the same list carrying its kind number.
     if (k4IsListName(name)) {
         var lk = k4ListKind(name)
+        var lname = name
         return function () {
             var out = []
             var i = 0
@@ -7300,6 +7303,13 @@ function ktGlobalFn(name) {
                 i = i + 1
             }
             if (lk != 0) { arrKindSet(out, lk) }
+            if (lname == "longArrayOf") {
+                i = 0
+                while (i < out.length) {
+                    out[i] = ktAdoptLong(out[i])
+                    i = i + 1
+                }
+            }
             return out
         }
     }
@@ -7949,7 +7959,8 @@ function js_ktrange(from, to, st, down) {
     // and no iteration for one, and its contains is the BOUNDS test alone
     // (`1.5 in 1.0..2.0` is true).
     return {__range: true, from: k4RangeNum(from), to: k4RangeNum(to),
-            st: stn, down: down !== 0, ch: ktIsChar(from), fl: floIs(from), pg: false}
+            st: stn, down: down !== 0, ch: ktIsChar(from), fl: floIs(from), pg: false,
+            lg: k4IsLongBox(from) || k4IsLongBox(to)}
 }
 
 // `r step k` re-steps an existing progression, keeping its bounds and direction.
@@ -7960,14 +7971,28 @@ function js_ktrestep(r, st) {
     // `step` answers an IntProgression, never an IntRange, whatever the step is:
     // `(1..5) step 1` prints "1..5 step 1" and `is IntRange` is false for it.
     return {__range: true, from: r["from"], to: r["to"], st: stn,
-            down: r["down"], ch: r["ch"], fl: r["fl"], pg: true}
+            down: r["down"], ch: r["ch"], fl: r["fl"], pg: true, lg: r["lg"] === true}
 }
 
 function k4RangeEl(rg, n) {
     if (rg["ch"] === true) { return ktChar(n) }
     if (rg["fl"] === true) { return flo(n, 0) }
+    if (rg["lg"] === true) { return ktAdoptLong(n) }
     return n
 }
+
+// `lg` marks a LongRange / LongProgression: a bound was a Long, so every element,
+// first, last, start and endInclusive is a Long again. k4IsLongBox is a signed
+// 64-bit sized integer, the value model's Long (ktIsLongBox in jsrtkotlin.go).
+function k4IsLongBox(v) {
+    if (!sintIs(v)) { return false }
+    return sintWidth(v) == 64 && !sintUns(v)
+}
+
+// An element of a LongArray is a Long, so an integer literal written into one
+// (`longArrayOf(1, 2)`, `LongArray(2) { 7 }`) is typed by that expectation. Twin of
+// ktAdoptLong in abnf/jsrtkotlin.go.
+function ktAdoptLong(v) { return js_ktadopt(v, 64, false) }
 
 // The LAST ELEMENT of a progression, which is what IntProgression.last answers -
 // getProgressionLastElement in kotlin.internal.ProgressionUtil. For a step of 1
@@ -8008,7 +8033,7 @@ function ktRangeEmpty(rg) {
 // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
 function ktRangeRev(rg) {
     return {__range: true, from: ktRangeLastEl(rg), to: rg["from"], st: rg["st"],
-            down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true}
+            down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true, lg: rg["lg"] === true}
 }
 
 // The number of elements in a progression, arithmetically: `(1..1000000).random()`
@@ -8034,7 +8059,8 @@ function k4RangeMake(from, to, name) {
     var tn = k4RangeNum(to)
     if (name == "until") { tn = tn - 1 }
     return {__range: true, from: k4RangeNum(from), to: tn, st: 1,
-            down: name == "downTo", ch: ktIsChar(from), fl: floIs(from), pg: false}
+            down: name == "downTo", ch: ktIsChar(from), fl: floIs(from), pg: false,
+            lg: k4IsLongBox(from) || k4IsLongBox(to)}
 }
 
 // ----------------------------------------------------------------------------
