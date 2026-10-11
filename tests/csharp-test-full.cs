@@ -22,10 +22,9 @@
 // inside one class body).
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
-// using directives beyond System, System.Collections.Generic and System.Linq
-// (section 50 covers the Enumerable operators), LINQ query syntax,
-// await operands (they need System.Threading.Tasks; async members are covered
-// definition-only), unsafe code / pointers / stackalloc, ref structs,
+// using directives beyond System, System.Collections.Generic, System.Linq
+// (section 50) and System.Threading.Tasks (section 51 awaits completed tasks
+// only), LINQ query syntax, unsafe code / pointers / stackalloc, ref structs,
 // assembly-level attributes, reflection, threads. Preprocessor directives are
 // covered (section 26) as far as they go: they are skipped as trivia, and
 // conditional compilation is NOT evaluated, so the text of every #if branch is
@@ -41,6 +40,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace Demo
 {
@@ -3176,6 +3176,85 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s50e1", ex == "abcdef");
         }
 
+        // ===== SECTION 51: the default literal in the remaining contexts =====
+        //
+        // ECMA-334 12.8.21: a bare `default` is the default value of the type its
+        // context converts it to - a method or constructor argument (the
+        // parameter's type), a lambda's or anonymous method's return (the delegate
+        // type's return type), `yield return` (the iterator's element type), an async
+        // member's return (the T of Task<T>), and an assignment to a field, a
+        // property or an element. `x == default` compares with null exactly when x is
+        // a nullable field or parameter, as for a nullable local.
+        delegate int S51Gen();
+        class S51Hold
+        {
+            public int F = 5;
+            public bool B = true;
+            public double D = 2.5;
+            public int? N = 3;
+            public char C = 'x';
+            public long P { get; set; } = 9;
+            public S51Hold() { }
+            public S51Hold(int f, bool b) { F = f; B = b; }
+            public void Reset() { F = default; this.B = default; D = default; this.N = default; C = default; P = default; }
+            public bool NIsDefault() { return N == default; }
+            public bool FIsDefault() { return this.F == default; }
+        }
+        static string S51Show(object o) { return o == null ? "null" : o.ToString(); }
+        static int S51Id(int x) { return x; }
+        static string S51Str(int a, bool b, char c, double d, string s) { return a + "|" + b + "|" + (int)c + "|" + d + "|" + (s == null); }
+        static int S51Named(int a, int b = 4) { return a * 10 + b; }
+        static bool S51NullParam(int? p) { return p == default; }
+        static IEnumerable<int> S51Gen1() { yield return default; yield return 7; }
+        static IEnumerable<bool> S51Gen2() { yield return default; }
+        static async Task<int> S51AsyncInt() { return default; }
+        static async Task S51Async()
+        {
+            Func<Task<int>> af = async () => default;
+            Program.Check("s51y2", S51Show(await S51AsyncInt()) == "0" && S51Show(await S51AsyncBool()) == "False"
+                && S51Show(await af()) == "0");
+        }
+        static async Task<bool> S51AsyncBool() { return default; }
+        static Func<int> S51MakeF() { return () => default; }
+        static int S51Twice(Func<int> f) { return f() * 2 + 1; }
+        static void S51()
+        {
+            int[] n = { 0, 3 };
+            Program.Check("s51a1", S51Show(S51Id(default)) == "0" && S51Str(default, default, default, default, default) == "0|False|0|0|True"
+                && S51Named(default) == 4 && S51Named(b: default, a: n[1]) == 30);
+            var made = new S51Hold(default, default);
+            Program.Check("s51a2", S51Show(made.F) == "0" && S51Show(made.B) == "False");
+            Func<int> f0 = () => default;
+            Func<int, bool> f1 = x => default;
+            Func<string> f2 = () => default;
+            Func<double> f3 = () => { return default; };
+            S51Gen g = () => default;
+            Func<int> f4 = delegate { return default; };
+            Program.Check("s51l1", S51Show(f0()) == "0" && S51Show(f1(n[1])) == "False" && S51Show(f2()) == "null"
+                && S51Show(f3()) == "0" && S51Show(g()) == "0" && S51Show(f4()) == "0");
+            f0 = () => default;
+            Program.Check("s51l2", S51Show(f0()) == "0" && S51Show(S51MakeF()()) == "0" && S51Twice(() => default) == 1);
+            string seq = "";
+            foreach (var x in S51Gen1()) { seq += S51Show(x) + ","; }
+            foreach (var x in S51Gen2()) { seq += S51Show(x) + ","; }
+            Program.Check("s51y1", seq == "0,7,False,");
+            S51Async();
+            var h = new S51Hold();
+            h.Reset();
+            Program.Check("s51m1", S51Show(h.F) == "0" && S51Show(h.B) == "False" && S51Show(h.D) == "0" && S51Show(h.N) == "null"
+                && (int)h.C == 0 && S51Show(h.P) == "0");
+            var h2 = new S51Hold();
+            h2.F = default;
+            h2.N = n[0];
+            Program.Check("s51m2", S51Show(h2.F) == "0" && !h2.NIsDefault() && h2.FIsDefault() && !S51NullParam(n[0])
+                && S51NullParam(null));
+            int[] arr = { 4, 5 };
+            arr[1] = default;
+            var lst = new List<bool> { true };
+            lst[0] = default;
+            Program.Check("s51e1", S51Show(arr[1]) == "0" && S51Show(lst[0]) == "False");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3228,6 +3307,7 @@ b";                                                   // verbatim keeps the newl
             Program.S48(); // SECTION-CALL 48
             Program.S49(); // SECTION-CALL 49
             Program.S50(); // SECTION-CALL 50
+            Program.S51(); // SECTION-CALL 51
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

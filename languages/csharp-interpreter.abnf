@@ -227,12 +227,12 @@ Finalizer   = [ LeadMods ] "~" Id ParamList ( Block | "=>" DiscardExpr ";" | ";"
 // static members of the declaring type; they become '__op1_<sym>' / '__op2_<sym>' and
 // '__conv_<T>' members, which binOp / makeNeg / makeCast / a typed declaration consult.
 OperatorDecl = ConvDecl | BinOpDecl ;
-ConvDecl    <~~ push(makeConvOp(csRetDrain(up.start, takeAll()))) ~~>
+ConvDecl    <~~ push(makeConvOp(csRetDrainMember(up.start, takeAll()))) ~~>
             = Mods ConvKind KwOperator CType ParamList MethodBody ;
 ConvKind    = ( "implicit" | "explicit" ) KwEnd ;
 CType       <~~ push({cty: stripWs(up.in)}) ~~>
             = Type ;
-BinOpDecl   <~~ push(makeOperatorDecl(csRetDrain(up.start, takeAll()))) ~~>
+BinOpDecl   <~~ push(makeOperatorDecl(csRetDrainMember(up.start, takeAll()))) ~~>
             = Mods FType KwOperator OpSym ParamList MethodBody ;
 // Longer symbols first, so '++' is never read as '+'.
 OpSym       <~~ push({opsym: stripWs(up.in)}) ~~>
@@ -248,7 +248,7 @@ KwOperator  = "operator" KwEnd ;
 // ('int IFoo<T>.this[int i] { get { ... } }'); there is one indexer per class here,
 // so the interface name is parsed and dropped. The body may be a block of accessors
 // or an expression, which is a get-only accessor - the same pair Property allows.
-IndexerDecl <~~ push(makeIndexer(csRetDrain(up.start, takeAll()))) ~~>
+IndexerDecl <~~ push(makeIndexer(csRetDrainMember(up.start, takeAll()))) ~~>
             = Mods FType [ IfaceQual ] KwThis IdxParams ( PropAccs | PropArrow ) ;
 // Each segment carries its OWN trailing dot. Written as `... { "." Id } "."` the
 // repetition is greedy and swallows the `.this`, and then the final "." has nothing
@@ -273,7 +273,7 @@ NestedType  <~~ push(makeNested()) ~~>
 // initializers do NOT run again. The arguments are ordinary expressions evaluated
 // in the constructor's own parameter scope, which is why they are parsed as an
 // ArgList rather than skipped.
-Ctor        <~~ push(makeCtor(takeAll())) ~~>
+Ctor        <~~ csDfltEndMember(); push(makeCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] CtorBody ;
 CtorInit    <~~ push(csCtorInit(takeAll())) ~~>
             = ":" CtorInitKw "(" ArgList ")" ;
@@ -288,7 +288,7 @@ CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 // its plain name (the interface view is not modelled separately).
 // FType (not a bare Type) so the RETURN TYPE reaches makeMethod: `double R()
 // { return 3; }` must answer 3.0, not the int 3 that then integer-divides.
-Method      <~~ push(makeMethod(csRetDrain(up.start, takeAll()))) ~~>
+Method      <~~ push(makeMethod(csRetDrainMember(up.start, takeAll()))) ~~>
             = Mods FType MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
 // csSimpleName drops the type arguments of both the interface and the method itself
 // ('IEnumerable<Foo>.GetEnumerator', 'Echo<T>') and keeps the last segment.
@@ -308,7 +308,7 @@ ArrowBody   <~~ csRetDflt(up.pos); push(makeArrowBody(pop())) ~~>
 // initializer, a read and a write all work unchanged. An accessor with a body instead
 // becomes a '__get_<name>' / '__set_<name>' member, which the field read (core.getField)
 // and the assignment path consult when the object carries no member of that name.
-Property    <~~ push(makeProperty(csRetDrain(up.start, takeAll()))) ~~>
+Property    <~~ push(makeProperty(csRetDrainMember(up.start, takeAll()))) ~~>
             = Mods FType PropName ( PropAccs [ PropInit ] | PropArrow ) ;
 // The name may be qualified with the interface it explicitly implements
 // ('int I.P { get { ... } }'); only the last segment is kept.
@@ -595,7 +595,7 @@ Return      <~~ csRetDflt(up.pos); push(makeReturn(takeAll())) ~~>
 // sequence is LAZY and 'foreach' and GetEnumerator/MoveNext/Current drive it one value
 // at a time.
 YieldStmt   = YieldBreak | YieldReturn ;
-YieldReturn <~~ push(makeYieldReturn(pop())) ~~>
+YieldReturn <~~ csYieldDflt(up.pos); push(makeYieldReturn(pop())) ~~>
             = KwYield KwReturn Expression ";" ;
 YieldBreak  <~~ push(makeYieldBreak()) ~~>
             = KwYield KwBreak ";" ;
@@ -721,7 +721,7 @@ ThrowExpr   <~~ push(excThrow(pop())) ~~>
 // The compound bitwise/shift forms apply like their arithmetic siblings, and '??='
 // assigns only when the place is null. Longer operators are listed before their
 // prefixes.
-Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
+Assignment  <~~ csDfltAssign(up.start, up.pos); push(makeAssign(takeAll(), up.pos)) ~~>
             = Target ( "<<=" | ">>>=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%="
                      | "&=" | "|=" | "^=" | ( "=" !"=" ) ) <~~ push(stripWs(up.in)) ~~> Expression ;
 
@@ -1120,7 +1120,7 @@ ArrDim      <~~ push({adim: pop()}) ~~>
             = Expression ;
 ArrInit     <~~ push({ainit: pop()}) ~~>
             = ArrLit ;
-NewObject   <~~ push(makeNew(takeAll())) ~~>
+NewObject   <~~ push(makeNew(csDfltNew(takeAll(), up.start, up.pos))) ~~>
             = KwNew NewName "(" ArgList ")" [ ObjInit | SkipBlock ] ;
 // { X = expr, ... }: the trailing member initializer of an object creation.
 ObjInit     <~~ push({objinit: takeAll()}) ~~>
@@ -1203,7 +1203,7 @@ DotAhead    = :script(~~
     })()
 ~~) ;
 GenMemb     = GenMCall | GenField ;
-GenMCall    <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+GenMCall    <~~ push({kind:"mcall", name: csDfltCall(popName(), up.start, up.pos), args: takeAll()}) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 GenField    = Id <~~ push({kind:"field", name: up.in}) ~~> ;
 // 'MyAssembly01::GlobalClass' - the namespace-alias qualifier an 'extern alias'
@@ -1255,10 +1255,10 @@ GenStop     = :script(~~
 ~~) ;
 
 KwExpr      = TypeofExpr | NameofExpr | SizeofExpr | DefaultExpr ;
-SelfCall    <~~ push(makeSelfCall(popName(), takeAll())) ~~>
+SelfCall    <~~ push(makeSelfCall(csDfltSelfCall(popName(), up.start, up.pos), takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ push({kind:"mcall", name: csDfltCall(popName(), up.start, up.pos), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" ArgList ")" ;
@@ -1320,7 +1320,7 @@ IdxTail     <~~ push(csIdxTail(takeAll())) ~~>
 // Null-conditional access ('a?.b', 'a?.m(...)', 'a?[i]'): when the receiver is null the
 // WHOLE remaining chain is skipped and the value is null. The '?' must be followed by '.'
 // or '[' so the ternary '?' is never captured here.
-NCMethodSfx <~~ push({kind: "mcall", nullsafe: true, name: popName(), args: takeAll()}) ~~>
+NCMethodSfx <~~ push({kind: "mcall", nullsafe: true, name: csDfltCall(popName(), up.start, up.pos), args: takeAll()}) ~~>
             = "?" "." Id <~~ push({mname: up.in}) ~~> "(" ArgList ")" ;
 NCFieldSfx  = "?" "." Id <~~ push({kind: "field", nullsafe: true, name: up.in}) ~~> ;
 NCIndexSfx  <~~ push({kind: "index", nullsafe: true, idx: pop()}) ~~>
@@ -1427,7 +1427,7 @@ CsRSfx      = "f" | "F" | "d" | "D" | "m" | "M" ;
 
 // A lambda ('x => e', '(a, b) => { ... }') is a real closure value (a Func / Action
 // delegate): it captures the current scope chain and is invoked at a call site (CallSfx).
-Lambda      <~~ csRetDrainTo(up.start, ""); push(makeLambda(takeAll())) ~~>
+Lambda      <~~ csLamDrain(up.start, up.pos); push(makeLambda(takeAll())) ~~>
             = [ LambdaMod ] LambdaHead "=>" LambdaBody ;
 // 'static x => ...' / 'async x => ...': parsed and dropped (capture is not restricted).
 LambdaMod   = ( "static" | "async" ) KwEnd ;
@@ -1446,13 +1446,13 @@ LamBareParam <~~ push(up.in) ~~>
 // The parameter list may be omitted entirely ('delegate { ... }'), which in C# means
 // 'whatever this delegate type takes, ignored' - here an empty parameter list.
 AnonMethod  = AnonParams | AnonBare ;
-AnonParams  <~~ csRetDrainTo(up.start, ""); push(makeLambda(takeAll())) ~~>
+AnonParams  <~~ csLamDrain(up.start, up.pos); push(makeLambda(takeAll())) ~~>
             = [ LambdaMod ] KwDelegate ParamList LamBlock ;
-AnonBare    <~~ csRetDrainTo(up.start, ""); push(makeBareAnon(takeAll())) ~~>
+AnonBare    <~~ csLamDrain(up.start, up.pos); push(makeBareAnon(takeAll())) ~~>
             = [ LambdaMod ] KwDelegate LamBlock ;
 LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({body: pop()}) ~~> = Block ;
-LamExpr     <~~ csDfltSet(csDfltAt(up.pos, ""), ""); push({ebody: pop()}) ~~> = Expression ;
+LamExpr     <~~ csLamExprDflt(up.pos); push({ebody: pop()}) ~~> = Expression ;
 // A LINQ query expression: accepted, reported as not implemented.
 // The whole query-expression syntax (C# 7.16) is RECOGNIZED - from/let/where/
 // join/orderby/group/select and the `into` continuation - and every
@@ -1585,7 +1585,7 @@ EnumInit    <~~ push({einit: pop()}) ~~>
 // closure it names here, so the declaration itself carries no runtime meaning - it is
 // accepted and dropped. It does switch multicast combination on (csHasDeleg), so a
 // program that declares no delegate type keeps the plain arithmetic meaning of '+=' / '-='.
-DelegateDecl <~~ csNoteDeleg() ~~>
+DelegateDecl <~~ csNoteDeleg(); csDfltDelegDecl(up.start, up.pos) ~~>
             = LeadMods KwDelegate [ "ref" KwEnd [ "readonly" KwEnd ] ] Type Id [ SkipAngle ] SkipParen { WhereClause } ";" ;
 
 // A delegate declaration is legal at file scope AND in a class body; it is listed in
@@ -1665,6 +1665,7 @@ KwLet       = "let" KwEnd ;
     // statement builders); C#-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
     include("lib/csharp-overload.js")
+    include("lib/csharp-default.js")
     include("lib/java-chars.js")
     include("lib/utf16-strings.js")
     include("lib/csharp-strings.js")
@@ -3233,7 +3234,7 @@ KwLet       = "let" KwEnd ;
         var elty = ""
         if (ref.path.length == 0 && ref.name != undefined && hasOwn(csLocalTypes, ref.name)) {
             lty = csLocalWriteTy(csLocalTypes[ref.name])
-            if (op == "=") { csDfltTarget(pos, "", csLocalDfltTy[ref.name]) }
+            if (op == "=") { csDfltLocalAssign(pos, ref.name) }
         } else if (ref.ety != undefined) {
             elty = ref.ety
         }
@@ -3718,11 +3719,19 @@ KwLet       = "let" KwEnd ;
             ts.push(items[k].eqt)
             objs.push(csIsObjCastOperand(items[k].eqin))
             dfls.push(items[k].eqin == "default")
-            nuls.push(csNullableLocal(items[k].eqin))
+            nuls.push(csDfltNullKind(items[k].eqin))
         }
         if (items.length == 1) { return ts[0] }
         var f = binOp
+        // A field's or property's nullability is known once the file is read.
+        var nulDone = false
         return function() {
+            if (!nulDone) {
+                for (var q = 0; q < nuls.length; q++) {
+                    if (nuls[q] >= 2) { nuls[q] = csDfltNullableMember(nuls[q]) ? 1 : 0 }
+                }
+                nulDone = true
+            }
             var v = anytype
             v = ts[0]()
             for (var i = 1; i < items.length; i += 2) {
@@ -3736,7 +3745,7 @@ KwLet       = "let" KwEnd ;
                     var onRight = dfls[(i + 1) / 2]
                     var other = anytype
                     other = onRight ? v : rv
-                    var isd = ((onRight && i == 1 && nuls[0]) || (!onRight && nuls[1]))
+                    var isd = ((onRight && i == 1 && nuls[0] == 1) || (!onRight && nuls[1] == 1))
                         ? (other === null || other === undefined) : csIsDefaultVal(other)
                     v = (items[i] == "==") ? isd : !isd
                     continue
@@ -4404,6 +4413,7 @@ KwLet       = "let" KwEnd ;
     // overloading is not modelled here either, so one entry per name is enough.
     var csParamNames = {}
     function csRegParams(name, pinfo) {
+        csDfltCallee(name, pinfo)
         if (name != undefined && name != "" && pinfo != undefined && pinfo != null) { csParamNames[name] = pinfo.params }
     }
     function csNamedArg(items) { return {argname: items[0].argname, argt: items[1]} }
@@ -4556,120 +4566,15 @@ KwLet       = "let" KwEnd ;
         if (hasOwn(csStructs, ty)) { return function() { return getVar(ty).__zero() } }
         return function() { return csxDefaultOf(ty) }
     }
-    // The bare `default` literal is TARGET-TYPED (ECMA-334 12.8.21): it is the default
-    // value of the type its context converts it to - a return's declared type, the
-    // variable an assignment or declaration writes, the other branch of a conditional.
-    // Each literal owns a cell for that type, keyed by the literal's end offset; the
-    // context fills it at parse time (csDfltTarget) and the literal reads it when it
-    // runs. A cell nothing typed is null, a reference type's default. The first
-    // context to type a cell wins, so `object o = c ? 5 : default` keeps the int the
-    // conditional gave it. Twin of makeDefaultBare in csharp-to-llvm-ir.abnf.
-    var csDfltCells = {}
+    // The bare `default` literal: its target type is lib/csharp-default.js's
+    // cell. Twin of makeDefaultBare in csharp-to-llvm-ir.abnf.
     function makeDefaultBare(end) {
-        var cell = {ty: "", set: false}
-        csDfltCells["$" + end] = cell
+        var cell = csDfltCell(end)
         return function() {
             if (hasOwn(csStructs, cell.ty)) { return getVar(cell.ty).__zero() }
             return csxDefaultOf(cell.ty)
         }
     }
-    // The cell of the default literal that ENDS the source before offset `to`, trailing
-    // blanks and one optional `closer` (`;`) skipped; null when the source there is not
-    // a default literal.
-    function csDfltAt(to, closer) {
-        var e = to
-        while (e > 0 && c.srcSlice(e - 1, e).trim() == "") { e-- }
-        if (closer != "" && c.srcSlice(e - 1, e) == closer) {
-            e--
-            while (e > 0 && c.srcSlice(e - 1, e).trim() == "") { e-- }
-        }
-        var k = "$" + e
-        return hasOwn(csDfltCells, k) ? csDfltCells[k] : null
-    }
-    function csDfltSet(cell, ty) {
-        if (cell == null || cell.set) { return }
-        cell.ty = stripWs(ty)
-        cell.set = true
-    }
-    function csDfltTarget(to, closer, ty) { csDfltSet(csDfltAt(to, closer), ty) }
-    // A `return default;` (or `=> default;`) is typed by the enclosing function
-    // member, whose tag runs after its body's: the cells wait here with their offsets,
-    // and the member (csRetDrain) takes the ones inside it. A lambda drains its own
-    // untyped, so a method's type never reaches a lambda's return.
-    var csRetDflts = []
-    function csRetDflt(to) {
-        var cell = csDfltAt(to, ";")
-        if (cell != null) { csRetDflts.push({at: to, cell: cell}) }
-    }
-    function csRetDrain(start, items) {
-        var ty = ""
-        for (var i = 0; i < items.length && ty == ""; i++) {
-            var it = items[i]
-            if (it != null && typeof it == "object" && it.ty != undefined) { ty = it.ty }
-            if (it != null && typeof it == "object" && it.cty != undefined) { ty = it.cty }
-        }
-        csRetDrainTo(start, ty)
-        return items
-    }
-    function csRetDrainTo(start, ty) {
-        while (csRetDflts.length > 0 && csRetDflts[csRetDflts.length - 1].at >= start) {
-            csDfltSet(csRetDflts.pop().cell, ty)
-        }
-    }
-    // The type of a literal's source text, or "" when it is not a literal: what the
-    // other branch of `c ? 5 : default` gives the default.
-    function csLitTypeName(t) {
-        if (t == "true" || t == "false") { return "bool" }
-        if (t.length == 0) { return "" }
-        var c0 = t.charAt(0)
-        if (c0 == "'") { return "char" }
-        if (c0 == "\"" || c0 == "$" || c0 == "@") { return "string" }
-        var s = (c0 == "-" || c0 == "+") ? t.substring(1, t.length) : t
-        if (s.length == 0) { return "" }
-        var d0 = s.charAt(0)
-        if (!(d0 >= "0" && d0 <= "9") && d0 != ".") { return "" }
-        if (s.length > 1 && (s.charAt(1) == "x" || s.charAt(1) == "X" || s.charAt(1) == "b" || s.charAt(1) == "B")) { return "int" }
-        var last = s.charAt(s.length - 1)
-        if (last == "f" || last == "F") { return "float" }
-        if (last == "m" || last == "M") { return "decimal" }
-        if (last == "d" || last == "D" || s.indexOf(".") >= 0 || s.indexOf("e") >= 0 || s.indexOf("E") >= 0) { return "double" }
-        return "int"
-    }
-    // The static type of an operand's source text as far as a parse can tell: a
-    // literal's, or a local's declared type.
-    function csOperandType(t) {
-        var lt = csLitTypeName(t)
-        if (lt != "") { return lt }
-        return hasOwn(csLocalDfltTy, t) ? csLocalDfltTy[t] : ""
-    }
-    // `c ? x : default`: the conditional's type is the other branch's (ECMA-334
-    // 12.18), so a default branch takes it when a parse can tell it. Otherwise the
-    // cell stays open for the context outside. Answers [cond, then, else].
-    function csCondDflt(items) {
-        if (items.length == 1) { return items }
-        var p1 = items[2]
-        var p2 = items[4]
-        var s1 = stripWs(c.srcSlice(p1.at, p1.e))
-        var s2 = stripWs(c.srcSlice(p2.at, p2.e))
-        var ty = ""
-        if (s1 == "default") {
-            ty = csOperandType(s2)
-            if (ty != "") { csDfltSet(csDfltAt(p1.e, ""), ty) }
-        } else if (s2 == "default") {
-            ty = csOperandType(s1)
-            if (ty != "") { csDfltSet(csDfltAt(p2.e, ""), ty) }
-        }
-        return [items[0], items[1], items[3]]
-    }
-    // Is the operand text a local declared with a nullable value type (`int? n`)?
-    function csNullableLocal(t) {
-        if (!hasOwn(csLocalDfltTy, t)) { return false }
-        var ty = csLocalDfltTy[t]
-        return ty.length > 1 && ty.charAt(ty.length - 1) == "?"
-    }
-    // Every local's declared type as written (`int?` kept), for the default literal.
-    // `var` records the initializer's type when it is a literal.
-    var csLocalDfltTy = {}
 
     // ----- local declarations -----
     // One declarator: its name, and either an initializer thunk or the bare '= default'
@@ -4693,8 +4598,8 @@ KwLet       = "let" KwEnd ;
             thunks.push(makeDecl(items[i], ty))
             names.push(items[i].dname)
             csLocalTypes[items[i].dname] = csSimpleName(ty)
-            csLocalDfltTy[items[i].dname] = csDeclDfltTy(ty, items[i])
-            if (items[i].dend >= 0) { csDfltTarget(items[i].dend, "", ty) }
+            csLocalDfltTy["$" + items[i].dname] = csDeclDfltTy(ty, items[i])
+            if (items[i].dend >= 0) { csDfltTo(items[i].dend, "", ty) }
         }
         lastDeclNames = names
         return makeSeq(thunks)
@@ -4711,14 +4616,6 @@ KwLet       = "let" KwEnd ;
         var el = csElemAdoptTy(ty)
         if (el != "") { return function() { declVar(name, csAdoptArr(el, init())) } }
         return function() { declVar(name, csImplicitConv(ty, init())) }
-    }
-    // A local's declared type for the default literal; `var x = 5` takes the
-    // initializer's when it is a literal (the "=" is the slice's first character).
-    function csDeclDfltTy(ty, info) {
-        var t = stripWs(ty)
-        if (t != "var") { return t }
-        var src = stripWs(info.dsrc)
-        return csLitTypeName(src.substring(1, src.length))
     }
     // An expression bodied method '=> e;' behaves like { return e; }.
     function makeArrowBody(t) {
@@ -5386,8 +5283,10 @@ KwLet       = "let" KwEnd ;
         if (variadic >= 0 && variadic < adopts.length) { adopts[variadic] = "" }
         var anyAdopt = false
         for (var k = 0; k < adopts.length; k++) { if (adopts[k] != "") { anyAdopt = true } }
-        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, ygen: csYieldCount,
-                adopts: adopts, anyAdopt: anyAdopt, ptypes: ptypes, refs: refs}
+        var pinfo = {params: names, dflts: dflts, ext: isExt, variadic: variadic, ygen: csYieldCount,
+                     adopts: adopts, anyAdopt: anyAdopt, ptypes: ptypes, refs: refs}
+        csDfltParams(pinfo)
+        return pinfo
     }
 
     // A method call binds its arguments like a lambda does: a missing argument takes the
@@ -5486,7 +5385,8 @@ KwLet       = "let" KwEnd ;
         var out = []
         for (var i = 2; i < items.length; i++) {
             var d = items[i].fdecl
-            csDfltTarget(items[i].fend, "", ty.ty)
+            csDfltTo(items[i].fend, "", ty.ty)
+            if (typeof d[0] == "string") { csDfltMember(d[0], ty.ty) }
             var one = []
             one.push(mods)
             one.push(ty)
@@ -5665,7 +5565,7 @@ KwLet       = "let" KwEnd ;
         for (var i = 2; i < items.length; i++) {
             var it = items[i]
             if (it.pname != undefined) { name = it.pname; continue }
-            if (it.pinit != undefined) { init = it.pinit; csDfltTarget(it.pend, ";", ty); continue }
+            if (it.pinit != undefined) { init = it.pinit; csDfltTo(it.pend, ";", ty); continue }
             if (it.parrow != undefined) { getT = it.parrow; auto = false; continue }   // '=> e' body
             if (it.accs != undefined) {
                 var accs = it.accs
@@ -5679,6 +5579,7 @@ KwLet       = "let" KwEnd ;
                 }
             }
         }
+        csDfltMember(name, ty)
         var isStatic = false
         for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
         if (auto) { return csAutoField(name, isStatic, init, ty) }
@@ -6770,6 +6671,7 @@ KwLet       = "let" KwEnd ;
     }
 
     c.compile(c.asg)
+    csDfltResolve()
 
     // The entry point defaults to the static Main of class Program, but the -main flag
     // (c.mainName) can name any other static method of Program.

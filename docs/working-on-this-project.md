@@ -1034,7 +1034,8 @@ the integer types),
 `go-strings.go` (both go grammars: the strings package WRITTEN IN GO, compiled with
 a program that imports "strings"; goLibFile in `go-constfold.js` names it),
 `csharp-overload.js` (both csharp grammars: the better function member among
-applicable overloads), `swift-dotwant.js` (both swift grammars: the expected
+applicable overloads), `csharp-default.js` (both csharp grammars: the target type
+of the bare `default` literal), `swift-dotwant.js` (both swift grammars: the expected
 type of an implicit member inside an array, ternary, closure, call argument,
 == operand or collection-method argument),
 `js-callee.js` (all four
