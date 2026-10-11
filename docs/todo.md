@@ -162,7 +162,7 @@ the next sections will read as FROZEN-DIFF. Split it into parts as js was
 (js-test-full.N.js: test.sh / native-full / launch.json), or find why php's frozen
 interpreter steps are so high. Check every ratchet's step headroom while there.
 
-### T-396 corpus long tails: csharp, php, dart, java · P3 · per language · OPEN [V]
+### T-396 corpus long tails: csharp, php, dart, java · P3 · per language · IN PROGRESS (CORPUS worker, round 18) [V]
 Measured after round 13. csharp 78 fails (unsafe pointers 10, generic names as values 7,
 async/await 6, ref/out 6, switch-section labels 5, patterns 5, identifier escapes 5,
 array casts 5, interpolation spacing 4, initializers 3, tuples 2, ~17 singles). php 60
