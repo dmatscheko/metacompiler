@@ -63,7 +63,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-431 python: explicit None to a defaulted parameter (compiled); attribute protocol hooks · P1 · PY · OPEN [V]
+### T-431 python: explicit None to a defaulted parameter (compiled); attribute protocol hooks · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 (a) compiled halves: `def k(a=5): return a; k(None)` returns 5 (python3/interp: None) — the emitter tests "argument
 absent" with `js_seq(arg, undefined)` and None is undefined. Serious: silent wrong answer. (b) all engines: `del c.missing`
 succeeds silently (python3: AttributeError "'C' object has no attribute 'missing'"). (c) a user class's `__setattr__`,
@@ -71,7 +71,7 @@ succeeds silently (python3: AttributeError "'C' object has no attribute 'missing
 `list[int]`). (e) `(-1) ** (10**20+1)` gives 1 (exponents > 2^53 go through doubles). (f) `(int | str) | 1.5` raises
 TypeError (3.14: `int | str | 1.5`). (g) `sys` binds no module: `sys.set_int_max_str_digits`/`get_int_max_str_digits`.
 
-### T-432 python: big-int performance (thousands of digits) · P3 · PY · OPEN [V]
+### T-432 python: big-int performance (thousands of digits) · P3 · PY · IN PROGRESS (PY worker, round 17) [V]
 Frozen interpreter: `(3**4097).bit_length()` ~100M steps; `y >> 4499` costly; int(str) parse quadratic; bin()/format()
 slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per StringBuilder.append.
 
