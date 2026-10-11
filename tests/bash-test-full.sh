@@ -1635,7 +1635,26 @@ declare -i Q32="7"'
   declare -p nosuchname32 2>/dev/null
   check dp12 "$?" 1
   check dp13 "$(declare -p nosuchname32 2>/dev/null)" ""
+  # A value may itself begin with "=": `x==y` assigns "=y", also as a prefix
+  # assignment, to an element, after += and to IFS.
+  local e32
+  e32==y
+  check asg1 "$e32" "=y"
+  e32===
+  check asg2 "$e32" "=="
+  local -a ea32
+  ea32[1]==b
+  check asg3 "${ea32[1]}" "=b"
+  e32=a
+  e32+==b
+  check asg4 "$e32" "a=b"
+  check asg5 "$(q32==a s32q)" "=a"
+  local o32="$IFS"
+  IFS==
+  check asg6 "$IFS" "="
+  IFS="$o32"
 }
+s32q() { echo "$q32"; }
 
 # ===== SECTION 33: word-splitting boundaries, read's remainder, $0, and a
 #       pattern operator on a subscripted expansion =====

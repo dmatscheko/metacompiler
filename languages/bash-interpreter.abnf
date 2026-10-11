@@ -186,7 +186,7 @@ PrefixCommand <~~ push(makePrefixCmd(takeAll())) ~~>
             = AsgPrefix { AsgPrefix } NotReserved CWord { CmdSuffix } ;
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ NsWord ] ;
-AsgEq       = "=" NotEq ;
+AsgEq       = "=" ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
 Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ RedirList ] ;
