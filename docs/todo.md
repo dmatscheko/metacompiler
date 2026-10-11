@@ -131,7 +131,7 @@ crashes. LINQ extension methods unavailable on lists.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-426 php: array union, case-insensitive class checks, hoisting, builtin TypeErrors · P2 · PHP · OPEN [V]
+### T-426 php: array union, case-insensitive class checks, hoisting, builtin TypeErrors · P2 · PHP · IN PROGRESS (PHP worker, round 21) [V]
 Spec / php-src corpus answers, both engines unless noted: (a) array union `$a + $b` aborts ("unsupported operand
 type: array used as a number"; blocks dynamic_call_freeing). (b) `catch (exception $e)`, `instanceof`,
 `method_exists`/`class_exists` compare class names case-sensitively. (c) `Nope::class` of an undeclared class raises
@@ -157,7 +157,7 @@ goto into finally (finally_goto_001/002/004) are not compile errors.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-428 core: GC marking cost scales with layer-2 module size · P2 · CORE · OPEN [V]
+### T-428 core: GC marking cost scales with layer-2 module size · P2 · CORE · IN PROGRESS (CORE worker, round 20) [V]
 Adding ~104 top-level functions to csharp-rt (LINQ, formatter) made the csharp bench +1.8% (5/5 paired) although
 the bench runs none of them: with MEC_GC=off the delta is +100M, with the collector +336M over 2,345 collections,
 i.e. the collector re-marks module-level function objects / globals each cycle. Every language pays for its
