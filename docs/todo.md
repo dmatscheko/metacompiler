@@ -71,14 +71,6 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-402 js/ts: function declarations are not hoisted · P1 · JS · IN PROGRESS (JS worker, round 15) [V]
-`function t() { println(typeof f, f()); function f() { return 1; } }`: node `function 1`;
-JS interpreter, TS interpreter and TS compiler print `undefined` then ReferenceError
-(check the JS compiler). Same in namespace bodies (`println(typeof f); export function
-f(){}`). Hoist function declarations to the top of their function/block scope (Annex B
-block-function semantics in sloppy mode: check node). Also: `(f as any) = g;` does not
-parse in either TS grammar (check tsc).
-
 ---
 
 # JV — Java
