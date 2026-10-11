@@ -839,18 +839,12 @@ fun sec24() {
     // Float.compareTo(Double) is declared in kotlin.Float, so these three ARE reachable
     // from ordinary Kotlin.
     check("f33f", fh[0] < 1.6 && fh[0] > 1.4 && fh[0] <= 1.5 && s24(fh[0] + dh[0]) == "3.0")
-    // A boxed Int, Long and Char key must NOT move. An Int and a small Long are
-    // ONE key here (this value model has one representation per kind, not per
-    // declared class).
+    // A boxed Int, Long and Char key must NOT move.
     check("f33g", listOf(1, 2, 3).indexOf(3) == 2 && listOf(1L, 2L).contains(2L) &&
                   mapOf('a' to 1)['a'] == 1 && setOf(1, 2, 2).size == 2)
-    // The RESIDUE, asserted as it IS rather than as java answers it, so the next
-    // change to this area has to look at it: java says false for both of these
-    // (Integer#equals demands an Integer), and this model says true because an Int
-    // literal does not yet carry the type it is expected to have, so an Int and a
-    // Long cannot be told apart at equality without breaking `List<Long>` built
-    // from literals.
-    check("f33h", eq24(1, 1L) && eq24(1.toByte(), 1) && !eq24('a', "a"))
+    // Two integers of different types are unequal through Any: Integer#equals
+    // demands an Integer (java).
+    check("f33h", !eq24(1, 1L) && !eq24(1.toByte(), 1) && !eq24('a', "a"))
     // A float box never equals an integer through Any: Double.equals(Integer) and
     // Long.equals(Double) are false at every value, fractional or not.
     check("f33i", !eq24(1L, 1.5) && !eq24(1.5, 1L) && !eq24(2L, 2.5f) &&
@@ -4580,6 +4574,63 @@ fun sec90() {
 }
 
 
+// ===== SECTION 91: an Int and a Long are two values =====
+// == through Any, equals() and a set's or map's keys tell the integer types apart
+// (java: Integer#equals demands an Integer, so setOf<Any>(1, 1L) has two
+// elements), so every integer LITERAL has to carry the type it is expected to
+// have: a function type's result, a collection parameter, a member reached through
+// a chain, a lookup argument, and a declared type over any initializer.
+class S91(val xs: MutableList<Long>, val m: MutableMap<Long, String>)
+fun s91mk(): () -> Long = { 7 }
+fun s91run(f: () -> Long): Any = f()
+fun s91first(xs: List<Long>): Any? = xs[0]
+fun s91key(m: Map<Long, Int>): Any? = m.keys.first()
+
+fun sec91() {
+    val o: List<Any> = listOf(1, 2L)
+    check("kl91a", setOf<Any>(1, 1L).size == 2 && mapOf<Any, String>(1 to "i", 1L to "l").size == 2 &&
+        !o.contains(2) && o.indexOf(2L) == 1)
+    val a: Any = 1
+    val b: Any = 1L
+    val x = 5L
+    val y: Long = 5
+    check("kl91b", a != b && !1L.equals(1) && !1.equals(1L) && listOf(1L) != listOf(1) && x == y && a.hashCode() == b.hashCode())
+    val f: () -> Long = { 1 }
+    val g: (Int) -> Long = { 3 }
+    check("kl91c", s90any(f()) is Long && s90any(s91mk()()) is Long && s90any(g(1)) is Long && s91run { 2 } is Long)
+    check("kl91d", s91first(listOf(1, 2)) is Long && s91key(mapOf(1 to 2)) is Long)
+    val s = S91(mutableListOf(), mutableMapOf())
+    s.xs.add(6)
+    s.m[1] = "a"
+    check("kl91e", s90any(s.xs[0]) is Long && s.m.containsKey(1L) && s.xs.contains(6L))
+    val m = mutableMapOf<Long, String>(1L to "x")
+    val st = setOf(1L, 2L)
+    check("kl91f", m[1] == "x" && m.containsKey(1) && m.getOrDefault(1, "d") == "x" && st.contains(2) && 2 in st &&
+        listOf(5L, 6L).indexOf(6) == 1)
+    val ls: List<Long> = listOf(1, 2).map { 4 }
+    val p: Pair<Long, Long> = 1 to 2
+    check("kl91g", s90any(ls[0]) is Long && s90any(p.first) is Long && s90any(p.second) is Long &&
+        s90any(Array<Long>(2) { 0 }[1]) is Long)
+}
+
+
+// ===== SECTION 92: java.lang.Math =====
+// A Kotlin/JVM program reaches java.lang.Math as `Math`: its functions answer a
+// Double whatever the argument, round answers a Long (an Int for a Float) rounding
+// half up, and abs/max/min keep the argument's type. Rows from java (JDK 24).
+fun s92any(x: Any?): Any? = x
+
+fun sec92() {
+    val d = listOf(9.0, 2.5, -2.5, 0.49999999999999994, 1.0)
+    check("km92a", "" + Math.sqrt(d[0]) == "3.0" && "" + Math.sqrt(9) == "3.0" && Math.round(d[1]) == 3L &&
+        Math.round(d[2]) == -2L && Math.round(d[3]) == 0L && s92any(Math.round(d[1])) is Long && s92any(Math.round(2.5f)) is Int)
+    check("km92b", Math.abs(-3) == 3 && Math.max(2, 7) == 7 && "" + Math.pow(2.0, 10.0) == "1024.0" &&
+        "" + Math.floor(-1.5) == "-2.0" && "" + Math.rint(d[1]) == "2.0" && "" + Math.signum(-2.0) == "-1.0")
+    check("km92c", "" + Math.toRadians(180.0) == "3.141592653589793" && "" + Math.toDegrees(d[4]) == "57.29577951308232" &&
+        "" + Math.log(Math.E) == "1.0" && "" + Math.PI == "3.141592653589793" && "" + Math.hypot(3.0, 4.0) == "5.0")
+}
+
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -4671,6 +4722,8 @@ fun main() {
     sec88() // SECTION-CALL 88
     sec89() // SECTION-CALL 89
     sec90() // SECTION-CALL 90
+    sec91() // SECTION-CALL 91
+    sec92() // SECTION-CALL 92
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -979,7 +979,8 @@ go-fmt.js                 <- go-rt.metajs, go interpreter (fmt.Sprintf; Go twin:
 fdlibm.js                 <- java-rt.metajs, java interpreter, kotlin-rt.metajs,
                              kotlin interpreter (Go twin: abnf/jsrtfdlibm.go)
 kotlin-math.js            <- kotlin-rt.metajs, kotlin interpreter (kotlin.math
-                             on doubles; Go twin: abnf/jsrtktmath.go)
+                             and java.lang.Math on doubles; Go twin:
+                             abnf/jsrtktmath.go)
 python-num.js             <- python-rt.metajs, python interpreter (int's and
                              float's own methods at the bit and double level;
                              Go twin: abnf/jsrtpynum.go)
@@ -1009,7 +1010,9 @@ same for java.lang's StringBuilder, compiled when a program creates one),
 `php-stdlib.php` (both php grammars: PHP's array and string library WRITTEN IN
 PHP, compiled with a program that names one of its functions),
 `kotlin-decltypes.js` (both kotlin grammars: the static types an integer literal
-adopts - type arguments, declared and inferred names - read at walk time),
+adopts - type arguments, declared and inferred names, class properties - read at
+walk time, and which `==` has an integer literal operand and so compares across
+the integer types),
 `go-strings.go` (both go grammars: the strings package WRITTEN IN GO, compiled with
 a program that imports "strings"; goLibFile in `go-constfold.js` names it),
 `csharp-overload.js` (both csharp grammars: the better function member among

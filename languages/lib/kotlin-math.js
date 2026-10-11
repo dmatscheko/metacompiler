@@ -144,3 +144,18 @@ function ktmConst(name) {
     if (name == "PI") { return 3.141592653589793 }
     return 2.718281828459045
 }
+
+// java.lang.Math, which a Kotlin/JVM program reaches as `Math`. These members are a
+// kotlin.math function of the same meaning, as java name, kotlin name pairs (rint is
+// kotlin's round, signum its sign); each answers a Double whatever its argument.
+var ktmJava = ["sqrt", "sqrt", "cbrt", "cbrt", "exp", "exp", "expm1", "expm1", "log", "ln",
+               "log10", "log10", "log1p", "ln1p", "sin", "sin", "cos", "cos", "tan", "tan",
+               "asin", "asin", "acos", "acos", "atan", "atan", "sinh", "sinh", "cosh", "cosh",
+               "tanh", "tanh", "floor", "floor", "ceil", "ceil", "rint", "round",
+               "signum", "sign", "atan2", "atan2", "hypot", "hypot", "pow", "pow"]
+
+// Math.toRadians / toDegrees: one multiplication by java's own constant.
+function ktmJavaAngle(name, x) {
+    if (name == "toRadians") { return x * 0.017453292519943295 }
+    return x * 57.29577951308232
+}

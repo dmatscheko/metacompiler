@@ -602,7 +602,7 @@ CollLit     <~~ push(makeCollLit(takeAll())) ~~>
             = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
 
 // class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
-ClassDecl   <~~ ktNoteBody(up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
+ClassDecl   <~~ ktNoteBody(up.start, up.pos); ktNoteClass(up.in, up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
             = [ DataMod <~~ push({dmod: up.in}) ~~> KwEnd ] KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] ( CtorModsOnly CtorParams | [ PrimaryCtorKw ] [ CtorParams ] ) [ ":" Supers ] [ WhereClause ] [ "{" { Member } "}" ] ;
 // The primary constructor may be written out - class Foo constructor(x: Int) - with its
 // own visibility and annotations (class A private @Inject constructor(...)). The keyword
@@ -738,7 +738,7 @@ NestedTypeSkip <~~ notImpl("nested type declaration", up.pos) ~~>
 // modifier, and every alternative Member tries after this one either drains the run
 // itself or ignores it), so `lateinit` reaches makeProp instead of leaking into the
 // next declaration that reads pendingMods.
-PropDecl    <~~ ktAt = up.start; push(makeProp(takeAll())) ~~>
+PropDecl    <~~ ktAt = up.start; push(makeProp(takeAll(), up.in)) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push(up.in); push({pmods: takeLateinit()}) ~~> [ ":" PType ] [ "=" Expression ] { PropVis } [ ";" ] ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // `by lazy { init }` is special-cased (eager, see LazyProp); every other delegate goes
@@ -1128,7 +1128,7 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 
 // Referential equality === / !== is lowered like structural == / != (in the untyped
 // handle world both are identity for objects), so the operands still run and fold.
-EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+EqExpr      <~~ push(foldBinary(ktEqOps(takeAll(), up.start, up.pos))) ~~>
             = RelExpr { EqOp RelExpr } ;
 EqOp        = "===" <~~ push("==") ~~> | "!==" <~~ push("!=") ~~>
             | "==" <~~ push("==") ~~> | "!=" <~~ push("!=") ~~> ;
@@ -1139,13 +1139,13 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // x in coll / x !in coll (membership): binds tighter than comparison, as in Kotlin.
 // Lowered to coll.contains(x) via js_mcall (the same call the interpreter makes), so
 // both engines agree; !in negates. The receiver is a list here.
-InExpr      <~~ push(makeInExpr(takeAll())) ~~>
+InExpr      <~~ push(makeInExpr(takeAll(), up.pos)) ~~>
             = TypeOp { InOp TypeOp } ;
 // The `in` operator must sit on its LEFT OPERAND's line, so a `when` arm's value never
 // swallows the next arm's `in 10..99 ->`. Twin of InOp in kotlin-interpreter.abnf; see
 // there.
 InOp        = SameLine InOpKw ;
-InOpKw      = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
+InOpKw      = "!" KwIn <~~ push({inop: "!in", at: up.pos}) ~~> | KwIn <~~ push({inop: "in", at: up.pos}) ~~> ;
 
 // The type-TEST operator level: x is T / x !is T, lowered to the dynamic js_is_type
 // probe (makeIsCheck). It sits directly under `in`, exactly where Kotlin's
@@ -3058,7 +3058,7 @@ KwContract  = "contract" KwEnd ;
     // the subset has no plusAssign).
     var opMethodOf = {"+": "plus", "-": "minus", "*": "times", "/": "div", "%": "rem",
                       "+=": "plus", "-=": "minus", "*=": "times", "/=": "div", "%=": "rem",
-                      "==": "equals", "!=": "equals"}
+                      "==": "equals", "!=": "equals", "==.": "equals", "!=.": "equals"}
     // A zero-width "is one of these classes" probe, folded with or.
     function emitClassProbe(b, v, cls) {
         var hit = truthy(b, callExt(b, "js_is_type", [v, emitStr(b, cls[0])]))
@@ -3103,7 +3103,7 @@ KwContract  = "contract" KwEnd ;
         var argsV = callExt(objB, "js_arr_new", [])
         callExt(objB, "js_arr_push", [argsV, r])
         var ov = callExt(objB, "js_ktsmcall", [l, emitStr(objB, mth), argsV])
-        if (op == "!=") { ov = callExt(objB, "js_not", [ov]) }
+        if (op == "!=" || op == "!=.") { ov = callExt(objB, "js_not", [ov]) }
         objB.NewBr(mergeB)
         var pr = emitPrimBin(primB, op, l, r)
         pr.b.NewBr(mergeB)
@@ -3219,10 +3219,12 @@ KwContract  = "contract" KwEnd ;
         if (co != undefined) { return callExt(b, "js_ktcmp", [emitStr(b, co), l, r]) }
         // The numeric half of `+` (emitPrimBin has already split the String case off).
         if (op == "+" || op == "+=") { return callExt(b, "js_ktadd", [l, r]) }
-        // == / != compare two integers by VALUE across the box; every other pair keeps
-        // the equality the runtime had, so a data class still uses its own equals.
-        if (op == "==") { return callExt(b, "js_kteq", [l, r]) }
-        if (op == "!=") { return callExt(b, "js_ktne", [l, r]) }
+        // Equality: "==." tells the integer types apart, "==" - an operand is an
+        // integer literal, see ktEqOps - compares two integers by VALUE across the
+        // box; every other pair keeps the equality the runtime had, so a data class
+        // still uses its own equals.
+        if (op == "==." || op == "==") { return callExt(b, "js_kteq", [l, r, op == "==." ? hTrue : hFalse]) }
+        if (op == "!=." || op == "!=") { return callExt(b, "js_ktne", [l, r, op == "!=." ? hTrue : hFalse]) }
         return coreEmitBinK(b, op, l, r)
     }
     // Kotlin folds a unary minus into an integer LITERAL when typing it: `2147483648`
@@ -3497,12 +3499,11 @@ KwContract  = "contract" KwEnd ;
     // Re-bind a scope slot to its declared type's width. A no-op for a type that is not
     // integral / Double / Float, so nothing is emitted for the ordinary case.
     function emitAdoptSlot(b, name, ty) {
-        if (ty == undefined || ty == "") { return b }
-        var dw = ktWidthOfType(ty)
-        if (dw.w == 0 && dw.flo != true) { return b }
+        var sp = ktAdoptPlan(ty)
+        if (sp == null) { return b }
         var nameV = emitStr(b, name)
         var curV = callExt(b, "js_scope_get", [curScopeV, nameV])
-        callExt(b, "js_scope_set", [curScopeV, nameV, emitAdoptV(b, curV, dw)])
+        callExt(b, "js_scope_set", [curScopeV, nameV, emitAdoptPlan(b, curV, sp)])
         return b
     }
     // One value, retyped by a declared type's width record.
@@ -3961,8 +3962,11 @@ KwContract  = "contract" KwEnd ;
     // x in coll / x !in coll -> coll.contains(x) via js_mcall (the same call the
     // interpreter makes), so the engines agree; !in negates. items alternates
     // operand thunks and {inop} markers.
-    function makeInExpr(items) {
+    function makeInExpr(items, end) {
         if (items.length == 1) { return items[0] }
+        // `3 in xs` with xs a collection of Longs: the literal takes the element type
+        // (a map's key type).
+        if (items.length == 3) { items[0] = ktAdoptThunk(items[0], ktInElemTy(items[1].at, end)) }
         return function(b) {
             var r = items[0](b)
             b = r.b
@@ -4136,9 +4140,16 @@ KwContract  = "contract" KwEnd ;
         var primary = items[0]
         var suffixes = items.slice(1)
         if (suffixes[0].kind == "mcall") {
-            var cel = ktTyElems(ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
-            if (cel != null) { suffixes[0] = ktAdoptMArgs(suffixes[0], cel) }
+            suffixes[0] = ktAdoptMArgs(suffixes[0], ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
+        } else if (suffixes[0].kind == "index") {
+            ktAdoptIdxSfx(suffixes[0], ktLeadType(txt, "["))
         }
+        // A call or an index after a run of member reads - `b.xs.add(3)`, `b.m[1]` -
+        // takes the last member's declared type, read at emit time (a class may be
+        // declared after its use).
+        var lazyAt = ktChainSites(suffixes)
+        var lead = ktLeadName(txt)
+        var leadAt = ktAt
         function emitSuffixT(b, cur, s) {
             var sr = emitSuffix(b, cur, s)
             if (s.ktRes == undefined) { return sr }
@@ -4313,6 +4324,8 @@ KwContract  = "contract" KwEnd ;
             })
         }
         return function(b) {
+            for (var li = 0; li < lazyAt.length; li++) { ktAdoptChainSfx(lead, leadAt, suffixes, lazyAt[li]) }
+            lazyAt = []
             var r = primary(b)
             b = r.b
             var cur = r.v
@@ -5024,6 +5037,21 @@ KwContract  = "contract" KwEnd ;
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v}
     }
+    // The path step naming the member an assignment writes through: the last step
+    // when it is `.name`, the one before a final `[i]` when that is; -1 otherwise.
+    function ktAssignMemberAt(ref) {
+        var n = ref.path.length
+        var last = (n >= 1 && ref.path[n - 1].key != undefined) ? n - 1 : 0 - 1
+        if (n >= 2 && ref.path[n - 1].idx != undefined && ref.path[n - 2].key != undefined) { last = n - 2 }
+        for (var i = 0; i < last; i++) { if (ref.path[i].key == undefined) { return 0 - 1 } }
+        return last
+    }
+    // The property names of path steps 0..last, all `.name` steps.
+    function ktPathKeys(path, last) {
+        var out = []
+        for (var i = 0; i <= last; i++) { out.push(path[i].key) }
+        return out
+    }
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
@@ -5032,7 +5060,7 @@ KwContract  = "contract" KwEnd ;
         // Longs: the literal takes the declared (or inferred) type.
         if (op == "=" && ref.name != "field") {
             var aty = ktDeclTypeOf(ref.name)
-            if (ref.path.length == 0) { valT = ktAdoptThunk(valT, ktLitTy(aty)) }
+            if (ref.path.length == 0) { valT = ktAdoptThunk(valT, aty) }
             var ael = ktLitElems(aty)
             if (ref.path.length == 1 && ref.path[0].idx != undefined && ael != null) {
                 valT = ktAdoptThunk(valT, ael.v)
@@ -5046,7 +5074,23 @@ KwContract  = "contract" KwEnd ;
         // walked - so a walk-time test would answer false for the very class that
         // declares the property.
         var lastStep = (ref.path.length > 0) ? ref.path[ref.path.length - 1] : null
+        // A write through a member - `b.xs = listOf(1)`, `b.m[1] = v` - takes the
+        // member's declared type, read at emit time.
+        var memAt = (op == "=") ? ktAssignMemberAt(ref) : 0 - 1
+        var memPos = ktAt
         return function(b) {
+            if (memAt >= 0) {
+                var mty = ktFieldChainType(ref.name, memPos, ktPathKeys(ref.path, memAt))
+                if (memAt == ref.path.length - 1) { valT = ktAdoptThunk(valT, mty) }
+                else {
+                    var mel = ktLitElems(mty)
+                    if (mel != null) {
+                        valT = ktAdoptThunk(valT, mel.v)
+                        ref.path[memAt + 1].idx = ktAdoptThunk(ref.path[memAt + 1].idx, mel.k)
+                    }
+                }
+                memAt = 0 - 1
+            }
             var mxWrite = null
             if (lastStep != null && lastStep.key != undefined && memberExtPropResolves(lastStep.key)) {
                 mxWrite = lastStep.key
@@ -5307,13 +5351,12 @@ KwContract  = "contract" KwEnd ;
         var dt = typed ? items[1].dtype : ""
         var init = items[typed ? 2 : 1]
         if (typed && isRecvFnType(dt)) { recvLambdaNames["$" + name] = true }
-        var dw = ktWidthOfType(dt)
-        // A declared collection type retypes the literals of a builder call it
-        // initializes (`val ls: List<Long> = listOf(1, 2)`); any other initializer
-        // already holds its own elements.
+        // A declared collection type retypes the elements of what it holds (a builder
+        // call's literals, or a generic call's result - `xs.map { 0 }`), and a declared
+        // function type the function's results.
         var itxt = ktInitText(txt, name, dt)
-        var el = anytype
-        el = (typed && ktIsBuilder(itxt)) ? ktLitElems(dt) : null
+        var sp = anytype
+        sp = typed ? ktAdoptPlan(dt) : null
         ktNoteDecl(name, typed ? dt : ktExprType(itxt))
         return function(b) {
             var r = init(b)
@@ -5321,7 +5364,7 @@ KwContract  = "contract" KwEnd ;
             var v = r.v
             // js_ktadopt narrows only an INTEGRAL value, so `val s: String = "x"` and
             // a lambda pass through untouched.
-            v = emitAdoptTy(b, v, dw, el)
+            if (sp != null) { v = emitAdoptPlan(b, v, sp) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
         }
@@ -5839,10 +5882,8 @@ KwContract  = "contract" KwEnd ;
     // return 1 }`) and the expression form (`fun f(): Long = 1`) both go through it -
     // the same split kRetAdopt makes in kotlin-interpreter.abnf.
     function emitRetAdopt(b, v) {
-        if (curRetTy == "") { return v }
-        var dw = ktWidthOfType(curRetTy)
-        if (dw.w == 0 && dw.flo != true) { return v }
-        return emitAdoptV(b, v, dw)
+        var sp = ktAdoptPlan(curRetTy)
+        return sp == null ? v : emitAdoptPlan(b, v, sp)
     }
     function makeFun(items, retEntry, reified) {
         var sig = items[1]
@@ -5915,6 +5956,7 @@ KwContract  = "contract" KwEnd ;
             else if (items[i].pty != undefined) { rec.ty = items[i].pty }
         }
         ktNoteDecl(rec.name, rec.ty)
+        if (rec.prop) { ktNoteMember(rec.name, rec.ty) }
         return rec
     }
     // The signature of a primary constructor, in the shape emitParamSig consumes.
@@ -5996,7 +6038,7 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_set", [clsV, emitStr(b, "__lateinit"), lV])
         return b
     }
-    function makeProp(items) {
+    function makeProp(items, txt) {
         notePropName(items[0])
         var ty = ""
         var at = 1
@@ -6006,38 +6048,67 @@ KwContract  = "contract" KwEnd ;
         if (items[at] != undefined && items[at].pmods != undefined) { li = items[at].pmods === true; at++ }
         if (items[at] != undefined && items[at].pty != undefined) { ty = items[at].pty; at++ }
         ktNoteDecl(items[0], ty)
+        ktNoteMember(items[0], ty != "" ? ty : ktExprType(ktInitText(txt, items[0], "")))
         // A bodiless property (abstract/lateinit/interface: no `= init`) still needs a
         // backing field so an implicit `name = ...` in a method resolves to this.name and
         // reads before assignment are defined. Default it to null (identical to `= null`).
         if (items[at] == undefined) { return {prop: items[0], init: makeConst(null), ty: ty, li: li} }
-        return {prop: items[0], init: ktAdoptThunk(items[at], ktTyElems(ty) == null ? ty : ""), ty: ty, li: li}
+        return {prop: items[0], init: ktAdoptThunk(items[at], ty), ty: ty, li: li}
     }
     // Wrap a property initializer so its value adopts the declared type, the way a
     // local's does. Returns the thunk unchanged when the type carries no width, so a
     // program that declares no sized property emits no adoption.
     function ktAdoptThunk(t, ty) {
         if (ty == undefined || ty == "" || t == undefined || t == null) { return t }
-        var dw = ktWidthOfType(ty)
-        var el = ktLitElems(ty)
-        if (dw.w == 0 && dw.flo != true && el == null) { return t }
+        var sp = ktAdoptPlan(ty)
+        if (sp == null) { return t }
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: emitAdoptTy(r.b, r.v, dw, el)}
+            return {b: r.b, v: emitAdoptPlan(r.b, r.v, sp)}
         }
     }
-    // One value retyped by a declared type: its own width, or its elements'.
-    function emitAdoptTy(b, v, dw, el) {
-        if (el != null) { return callExt(b, "js_ktadoptel", [v, emitStr(b, el.v), emitStr(b, el.k)]) }
-        return emitAdoptV(b, v, dw)
+    // What a declared type asks of a value, or null for nothing: {dw} its own width
+    // or float type, {el} its elements', {fr} a function's result. Twin of kPlanOf in
+    // kotlin-interpreter.abnf.
+    function ktAdoptPlan(ty) {
+        if (ty == undefined || ty == "") { return null }
+        var el = ktLitElems(ty)
+        if (el != null) { return {el: el} }
+        var fr = ktFnRetTy(ty)
+        if (fr != "") { return {fr: fr} }
+        var dw = ktWidthOfType(ty)
+        if (dw.w == 0 && dw.flo != true) { return null }
+        return {dw: dw}
+    }
+    function emitAdoptPlan(b, v, sp) {
+        if (sp.el != undefined) { return callExt(b, "js_ktadoptel", [v, emitStr(b, sp.el.v), emitStr(b, sp.el.k)]) }
+        if (sp.fr != undefined) { return callExt(b, "js_ktadoptfn", [v, emitStr(b, sp.fr)]) }
+        return emitAdoptV(b, v, sp.dw)
     }
 
     // A method suffix on a collection whose element (key) types are known: the
     // positional arguments ktMArgTypes names are retyped, and the result by
     // ktMResType (ktRes, applied by emitSuffixT).
-    function ktAdoptMArgs(s, el) {
+    // A member-chain step: the call's arguments or a map index's key, by the
+    // declared type of the member read just before it. Twin of kAdoptChainSfx in
+    // kotlin-interpreter.abnf.
+    function ktAdoptChainSfx(p, at, sfx, i) {
+        var ty = ktSfxChainType(p, at, sfx, i)
+        if (ty == "") { return }
+        if (sfx[i].kind == "mcall") { sfx[i] = ktAdoptMArgs(sfx[i], ty) }
+        else { ktAdoptIdxSfx(sfx[i], ty) }
+    }
+    // `m[1]` on a map whose key type is a Long: the literal key adopts it.
+    function ktAdoptIdxSfx(s, ty) {
+        var el = ktTyElems(ty)
+        if (el != null && ktIsMapTy(ty) && typeof s.idx == "function") { s.idx = ktAdoptThunk(s.idx, ktLitTy(el.k)) }
+    }
+    function ktAdoptMArgs(s, ty) {
+        var el = ktTyElems(ty)
+        if (el == null) { return s }
         var as = s.args
         for (var i = 0; i < as.length; i++) { if (as[i].aname != undefined || as[i].spread == true) { return s } }
-        var tys = ktMArgTypes(s.name, as.length, el)
+        var tys = ktMArgTypes(s.name, as.length, el, ktIsMapTy(ty))
         var out = []
         for (var j = 0; j < as.length; j++) {
             out.push(j < tys.length ? {at: ktAdoptThunk(as[j].at, tys[j])} : as[j])
@@ -6612,7 +6683,7 @@ KwContract  = "contract" KwEnd ;
             var acc = anytype
             for (var k = 0; k < props.length; k++) {
                 var eq = callExt(cmpB, "js_kteq", [callExt(cmpB, "js_get", [thisV, emitStr(cmpB, props[k])]),
-                                                  callExt(cmpB, "js_get", [otherV, emitStr(cmpB, props[k])])])
+                                                  callExt(cmpB, "js_get", [otherV, emitStr(cmpB, props[k])]), hTrue])
                 acc = (k == 0) ? eq : callExt(cmpB, "js_jband", [acc, eq])
             }
             cmpB.NewRet(acc)
@@ -7829,6 +7900,12 @@ KwContract  = "contract" KwEnd ;
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
+        // java.lang.Math, declared only for a program that names Math and does not
+        // declare it (js_ktglobal's ktJavaMath in abnf/jsrtktmath.go); without it the
+        // name would reach the host's own Math.
+        if (ktVarSeen["$Math"] == true && classNames["Math"] == undefined) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"), callExt(b, "js_ktglobal", [emitStr(b, "Math"), hFalse])])
+        }
         // java.lang.System's two clocks, declared only for a program that names System
         // and does not declare it. Each member is a closure over js_ktclock(kind, us).
         if (ktVarSeen["$System"] == true && classNames["System"] == undefined) {

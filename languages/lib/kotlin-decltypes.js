@@ -80,6 +80,27 @@ function ktLitElems(ty) {
     return {k: k, v: v}
 }
 
+// The type a FUNCTION type's result adopts - `() -> Long`, `(Int) -> Long`, the
+// nullable `(() -> Long)?` - or "" for any other type, for a result that retypes
+// nothing, and for a function type with a receiver (`T.() -> Long`, whose value
+// carries its own receiver protocol).
+function ktFnRetTy(ty) {
+    var t = (ty.length > 0 && ty.charAt(ty.length - 1) == "?") ? ty.substring(0, ty.length - 1) : ty
+    if (t.length > 1 && t.charAt(0) == "(" && ktMatchClose(t, 0, "(", ")") == t.length - 1) { t = t.substring(1, t.length - 1) }
+    if (t.substring(0, 7) == "suspend") { t = t.substring(7) }
+    if (t.length == 0 || t.charAt(0) != "(") { return "" }
+    var e = ktMatchClose(t, 0, "(", ")")
+    if (e < 0 || t.substring(e + 1, e + 3) != "->") { return "" }
+    return ktLitTy(t.substring(e + 3))
+}
+// Whether a collection type is a Map (its `in`, get and containsKey take a KEY).
+function ktIsMapTy(ty) {
+    var t = (ty.length > 0 && ty.charAt(ty.length - 1) == "?") ? ty.substring(0, ty.length - 1) : ty
+    var lt = t.indexOf("<")
+    var base = lt < 0 ? t : t.substring(0, lt)
+    return base == "Map" || base == "MutableMap" || base == "HashMap" || base == "LinkedHashMap"
+}
+
 // The static type of a builder call: the collection kind it builds, completed by
 // its explicit type arguments ("" when they are absent and the kind is generic).
 var ktBuilderKind = {"$listOf": "List", "$listOfNotNull": "List", "$emptyList": "List",
@@ -91,6 +112,10 @@ var ktBuilderKind = {"$listOf": "List", "$listOfNotNull": "List", "$emptyList": 
                      "$hashMapOf": "MutableMap", "$linkedMapOf": "MutableMap",
                      "$sortedMapOf": "MutableMap", "$arrayOf": "Array", "$emptyArray": "Array",
                      "$sequenceOf": "Sequence", "$Pair": "Pair",
+                     "$ArrayList": "MutableList", "$HashSet": "MutableSet",
+                     "$Array": "Array", "$List": "List", "$MutableList": "MutableList",
+                     "$LinkedHashSet": "MutableSet", "$HashMap": "MutableMap",
+                     "$LinkedHashMap": "MutableMap",
                      "$intArrayOf": "IntArray", "$longArrayOf": "LongArray",
                      "$shortArrayOf": "ShortArray", "$byteArrayOf": "ByteArray",
                      "$floatArrayOf": "FloatArray", "$doubleArrayOf": "DoubleArray",
@@ -150,16 +175,228 @@ function ktDeclTypeOf(name) {
     return ty
 }
 
+// An equality chain's operators, renamed "==." / "!=." (equality that tells the
+// integer types apart) unless an operand is an integer LITERAL, which keeps "==" /
+// "!=" (by value): a literal whose expected type was not seen here is still an Int.
+// The operands are read off the source (from..to); a text the scan cannot split is
+// treated as having a literal.
+function ktEqOps(items, from, to) {
+    if (items.length < 3) { return items }
+    if (ktEqHasLit(c.srcSlice(from, to))) { return items }
+    var out = []
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i]
+        if (it === "==") { out.push("==.") }
+        else if (it === "!=") { out.push("!=.") }
+        else { out.push(it) }
+    }
+    return out
+}
+function ktEqHasLit(raw) {
+    var depth = 0
+    var from = 0
+    var ops = 0
+    var i = 0
+    while (i < raw.length) {
+        var ch = raw.charAt(i)
+        if (ch == "\"" || ch == "'" || (ch == "/" && (raw.charAt(i + 1) == "/" || raw.charAt(i + 1) == "*"))) { return true }
+        if (ch == "(" || ch == "[" || ch == "{") { depth++ }
+        else if (ch == ")" || ch == "]" || ch == "}") { depth-- }
+        else if (depth == 0 && (ch == "=" || ch == "!") && raw.charAt(i + 1) == "=") {
+            var prev = i > 0 ? raw.charAt(i - 1) : ""
+            if (ch == "=" && (prev == "<" || prev == ">" || prev == "!" || prev == "=")) { i++; continue }
+            if (ktIsIntLitText(raw.substring(from, i))) { return true }
+            ops++
+            i = i + 2
+            if (raw.charAt(i) == "=") { i++ }
+            from = i
+            continue
+        }
+        i++
+    }
+    if (ops == 0) { return true }
+    return ktIsIntLitText(raw.substring(from))
+}
+// Whether an operand's text is an integer literal, signed and parenthesized or not.
+function ktIsIntLitText(t) {
+    var s = ""
+    for (var i = 0; i < t.length; i++) {
+        var ch = t.charAt(i)
+        if (ch != " " && ch != "\t" && ch != "\n" && ch != "\r" && ch != "(" && ch != ")") { s = s + ch }
+    }
+    if (s.length > 0 && (s.charAt(0) == "-" || s.charAt(0) == "+")) { s = s.substring(1) }
+    if (s.length == 0) { return false }
+    var c0 = s.charAt(0)
+    if (!(c0 >= "0" && c0 <= "9")) { return false }
+    for (var j = 1; j < s.length; j++) {
+        var cj = s.charAt(j)
+        var ok = (cj >= "0" && cj <= "9") || (cj >= "a" && cj <= "f") || (cj >= "A" && cj <= "F") || cj == "_" ||
+                 cj == "x" || cj == "X" || cj == "l" || cj == "L" || cj == "u" || cj == "U"
+        if (!ok) { return false }
+    }
+    return true
+}
+
+// The declared types of class PROPERTIES, for a receiver that is a member chain
+// (`b.xs.add(3)`, `this.m[1] = v`): each property with its source offset, and each
+// class with its extent, so a property is found in the class a chain step names.
+// Read lazily (at emit / first run), when every class has been seen.
+var ktMemberTys = {}
+var ktClassExt = {}
+var ktClassNames = []
+function ktNoteMember(name, ty) {
+    if (name == null || name == undefined || ty == "") { return }
+    var l = ktMemberTys["$" + name]
+    if (l == undefined) { l = []; ktMemberTys["$" + name] = l }
+    l.push({ty: ty, at: ktAt})
+}
+// A class declaration's extent, its name read off its text (`classS91(...){...}`,
+// `dataclassP(...)`).
+function ktNoteClass(txt, from, to) {
+    var i = txt.indexOf("class")
+    if (i < 0) { return }
+    var j = i + 5
+    while (j < txt.length && ktIdChar(txt.charAt(j))) { j++ }
+    if (j == i + 5) { return }
+    var name = txt.substring(i + 5, j)
+    if (ktClassExt["$" + name] == undefined) { ktClassNames.push(name) }
+    ktClassExt["$" + name] = {from: from, to: to}
+}
+// The innermost class whose body holds offset `at`, or "".
+function ktClassAt(at) {
+    var best = ""
+    var size = 0
+    for (var i = 0; i < ktClassNames.length; i++) {
+        var e = ktClassExt["$" + ktClassNames[i]]
+        if (e.from <= at && at <= e.to && (best == "" || e.to - e.from < size)) { best = ktClassNames[i]; size = e.to - e.from }
+    }
+    return best
+}
+// A type's class name: `Box<Long>?` is Box.
+function ktBaseName(ty) {
+    var t = (ty.length > 0 && ty.charAt(ty.length - 1) == "?") ? ty.substring(0, ty.length - 1) : ty
+    var lt = t.indexOf("<")
+    return lt < 0 ? t : t.substring(0, lt)
+}
+// The declared type of property `name` of class `cls`; for a class not known here,
+// the name's type when every declaration of it agrees, else "".
+function ktMemberTypeIn(cls, name) {
+    var l = ktMemberTys["$" + name]
+    if (l == undefined) { return "" }
+    var e = cls == "" ? undefined : ktClassExt["$" + cls]
+    if (e != undefined) {
+        for (var i = 0; i < l.length; i++) { if (e.from <= l[i].at && l[i].at <= e.to) { return l[i].ty } }
+        return ""
+    }
+    for (var j = 1; j < l.length; j++) { if (l[j].ty != l[0].ty) { return "" } }
+    return l[0].ty
+}
+// The declared type of `p.f1...fn` at offset `at`: p a local, a parameter, a
+// property or `this`, each step a property of the class the step before it has.
+// "" for p means an owner not known here, so the steps go by name alone.
+function ktFieldChainType(p, at, names) {
+    var ty = ""
+    if (p == "this") { ty = ktClassAt(at) }
+    else if (p != "") {
+        var saved = ktAt
+        ktAt = at
+        ty = ktDeclTypeOf(p)
+        ktAt = saved
+    }
+    for (var i = 0; i < names.length; i++) { ty = ktMemberTypeIn(ktBaseName(ty), names[i]) }
+    return ty
+}
+// The receiver type of a postfix chain's step i (a call or an index after `.name`):
+// the whole chain when every step before it is a property read, else the last
+// property by name alone.
+function ktSfxChainType(p, at, sfx, i) {
+    var names = []
+    var whole = true
+    for (var j = 0; j < i; j++) {
+        if (sfx[j].kind == "field") { names.push(sfx[j].name) } else { whole = false }
+    }
+    if (whole) { return ktFieldChainType(p, at, names) }
+    return ktFieldChainType("", at, [sfx[i - 1].name])
+}
+// The name a postfix chain's text starts with ("" when it starts with a call or a
+// literal): the owner ktSfxChainType begins at.
+function ktLeadName(t) {
+    if (t == undefined) { return "" }
+    var i = 0
+    while (i < t.length && ktIdChar(t.charAt(i))) { i++ }
+    if (i == 0 || i == t.length || t.charAt(i) == "(" || t.charAt(i) == "{" || t.charAt(i) == "<") { return "" }
+    var c0 = t.charAt(0)
+    return (c0 >= "0" && c0 <= "9") ? "" : t.substring(0, i)
+}
+
+// The type the left operand of `x in c` adopts, c being the source text from..to:
+// c's element type, or its key type for a map; "" when c's type is not known.
+function ktInElemTy(from, to) {
+    var t = stripWs(c.srcSlice(from, to))
+    var i = 0
+    while (i < t.length && ktIdChar(t.charAt(i))) { i++ }
+    var ty = ""
+    if (i == t.length) {
+        var saved = ktAt
+        ktAt = from
+        ty = ktDeclTypeOf(t)
+        ktAt = saved
+    } else if (ktCallEnd(t) == t.length) {
+        ty = ktCallType(t)
+    }
+    var el = ktTyElems(ty)
+    if (el == null) { return "" }
+    return ktLitTy(ktIsMapTy(ty) ? el.k : el.v)
+}
+
+// The positions in a postfix chain whose receiver is a member READ: a call or an
+// index directly after a `.name` step.
+function ktChainSites(sfx) {
+    var out = []
+    for (var i = 1; i < sfx.length; i++) {
+        var k = sfx[i].kind
+        if ((k == "mcall" || k == "index") && sfx[i - 1].kind == "field") { out.push(i) }
+    }
+    return out
+}
+
 function ktIdChar(c) {
     return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
 }
-// The index of the bracket closing the one at `at`, or -1 (also for a quote, whose
-// contents could hold a bracket).
+// The index of the quote closing the string or char literal opening at `at` (a raw
+// """ string's last quote; a template's ${...} may hold quotes of its own), or -1.
+function ktQuoteEnd(s, at) {
+    var q = s.charAt(at)
+    if (q == "\"" && s.substring(at, at + 3) == "\"\"\"") {
+        var e = s.indexOf("\"\"\"", at + 3)
+        return e < 0 ? -1 : e + 2
+    }
+    var i = at + 1
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "\\") { i = i + 2; continue }
+        if (ch == q) { return i }
+        if (q == "\"" && ch == "$" && s.charAt(i + 1) == "{") {
+            var e2 = ktMatchClose(s, i + 1, "{", "}")
+            if (e2 < 0) { return -1 }
+            i = e2 + 1
+            continue
+        }
+        i++
+    }
+    return -1
+}
+// The index of the bracket closing the one at `at`, or -1. String and char literals
+// are stepped over, so a bracket inside one does not count.
 function ktMatchClose(s, at, open, close) {
     var depth = 0
     for (var i = at; i < s.length; i++) {
         var c = s.charAt(i)
-        if (c == "\"" || c == "'") { return -1 }
+        if (c == "\"" || c == "'") {
+            i = ktQuoteEnd(s, i)
+            if (i < 0) { return -1 }
+            continue
+        }
         if (c == open) { depth++ }
         else if (c == close) { depth--; if (depth == 0) { return i } }
     }
@@ -191,7 +428,22 @@ function ktCallType(s) {
     while (i < s.length && ktIdChar(s.charAt(i))) { i++ }
     var targs = []
     if (i < s.length && s.charAt(i) == "<") { targs = ktSplitTArgs(s.substring(i + 1, ktMatchClose(s, i, "<", ">"))) }
+    else if (ktOneArgColl["$" + ktBuilderKind["$" + s.substring(0, i)]] != undefined && ktAllLongLits(s, i)) { targs = ["Long"] }
     return ktBuilderType(s.substring(0, i), targs)
+}
+// Whether a call's one argument list, opening at `at`, is a non-empty run of Long
+// literals - `setOf(1L, 2L)` is a Set<Long> with no type argument written.
+function ktAllLongLits(s, at) {
+    if (s.charAt(at) != "(") { return false }
+    var e = ktMatchClose(s, at, "(", ")")
+    if (e != s.length - 1 || e == at + 1) { return false }
+    var args = ktSplitTArgs(s.substring(at + 1, e))
+    for (var i = 0; i < args.length; i++) {
+        var a = args[i]
+        if (a.length > 0 && a.charAt(0) == "-") { a = a.substring(1) }
+        if (a.length == 0 || !ktIsLongLit(a)) { return false }
+    }
+    return true
 }
 // A Long literal's text: an L suffix, or no suffix and a value past Int.
 function ktIsLongLit(s) {
@@ -211,22 +463,21 @@ function ktIsLongLit(s) {
     if (body.length == 0) { return false }
     return last == "L" || last == "l" || parseInt(body, radix) > 2147483647
 }
-// Whether a text is one call of a collection builder, typed or not.
-function ktIsBuilder(s) {
-    if (ktCallEnd(s) != s.length) { return false }
-    var i = 0
-    while (i < s.length && ktIdChar(s.charAt(i))) { i++ }
-    return ktBuilderKind["$" + s.substring(0, i)] != undefined
-}
 // The static type of an initializer's text: "Long" for a Long literal, the builder
-// type of a single builder call (mutableListOf<Long>(), LongArray(2)), "" else.
+// type of a single builder call (mutableListOf<Long>(), LongArray(2)), the class
+// of a constructor call, "" else.
 function ktExprType(t) {
     var s = (t.length > 0 && t.charAt(0) == "-") ? t.substring(1) : t
     if (s.length == 0) { return "" }
     var c0 = s.charAt(0)
     if (c0 >= "0" && c0 <= "9") { return ktIsLongLit(s) ? "Long" : "" }
     var e = ktCallEnd(s)
-    return e == s.length ? ktCallType(s) : ""
+    if (e != s.length) { return "" }
+    var bt = ktCallType(s)
+    if (bt != "") { return bt }
+    // A constructor call types the declaration by its class: `val b = Box(...)`.
+    var pa = s.indexOf("(")
+    return (c0 >= "A" && c0 <= "Z" && pa > 0) ? ktBaseName(s.substring(0, pa)) : ""
 }
 // The static type of the operand an expression's text starts with when it is
 // directly followed by `sep` - the receiver of `xs.add(3)` or of
@@ -253,10 +504,27 @@ function ktInitText(dtext, name, dtype) {
 // The types a method's positional arguments take on a collection whose element
 // (key) types are known: add(x), add(i, x) and set(i, x) retype x by the element
 // type, put(k, v) k by the key type and v by the value type. "" leaves one alone.
-function ktMArgTypes(name, nargs, el) {
+// On a map, get / containsKey / getOrDefault / remove / getValue / getOrElse /
+// getOrPut retype the KEY, containsValue the value; on a list or set, contains /
+// indexOf / lastIndexOf / remove retype the element, and addAll / removeAll /
+// containsAll / retainAll retype the collection argument's elements.
+function ktMArgTypes(name, nargs, el, isMap) {
     var v = ktLitTy(el.v)
+    var k = ktLitTy(el.k)
+    if (isMap) {
+        if (name == "put") { return [k, v] }
+        if (name == "get" || name == "containsKey" || name == "remove" || name == "getValue") { return [k] }
+        if (name == "getOrDefault") { return [k, v] }
+        if (name == "getOrElse" || name == "getOrPut") { return [k] }
+        if (name == "containsValue") { return [v] }
+        return []
+    }
     if (name == "add" || name == "set") { return nargs == 1 ? [v] : ["", v] }
-    if (name == "put") { return [ktLitTy(el.k), v] }
+    if (name == "contains" || name == "indexOf" || name == "lastIndexOf" || name == "remove") { return [v] }
+    if (v != "" && (name == "addAll" || name == "removeAll" || name == "containsAll" || name == "retainAll")) {
+        return nargs == 1 ? ["List<" + v + ">"] : ["", "List<" + v + ">"]
+    }
+    if (name == "put") { return [k, v] }
     return []
 }
 // The type a method's RESULT takes: sum() of an empty collection is its element

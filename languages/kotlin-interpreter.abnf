@@ -677,7 +677,7 @@ ParamDefault <~~ push({pdef: pop()}) ~~>
 // still ACCEPTED (the file parses) and reported as not implemented, which is what keeps
 // the widened surface from shrinking as the member set grows.
 ClassDecl   = ClassReal | ClassSkip ;
-ClassReal   <~~ ktNoteBody(up.start, up.pos); buildClass(takeAll()) ~~>
+ClassReal   <~~ ktNoteBody(up.start, up.pos); ktNoteClass(up.in, up.start, up.pos); buildClass(takeAll()) ~~>
             = KwClass <~~ push({mods: takeMods()}) ~~> KId <~~ push(up.in); curClassPush(up.in) ~~> [ SkipAngle ]
               [ PrimaryCtor ] [ ":" SuperList ] [ WhereClause ] [ "{" { Member } "}" ] ;
 // The primary constructor may spell itself out with modifiers and the `constructor`
@@ -776,7 +776,7 @@ AbstractFun <~~ push({absname: takeAll()[0]}) ~~>
 // next declaration that reads pendingMods.
 PropDecl    <~~ ktAt = up.start; push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd { Annotation } KId <~~ push(up.in); push({pmods: takeMods()}) ~~> [ ":" PType ] [ "=" PropInit ] [ AccRun ] [ ";" ] ;
-PropInit    <~~ push({pinit: pop()}) ~~>
+PropInit    <~~ push({pinit: pop(), ptxt: up.in}) ~~>
             = Expression ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // get() / set(v) with a body. The setter parameter name defaults to `value`.
@@ -1178,7 +1178,7 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 
 // Referential equality === / !== is evaluated like structural == / != (untyped values
 // compare by identity for objects), so the operands still run and fold.
-EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+EqExpr      <~~ push(foldBinary(ktEqOps(takeAll(), up.start, up.pos))) ~~>
             = RelExpr { EqOp RelExpr } ;
 EqOp        = "===" <~~ push("==") ~~> | "!==" <~~ push("!=") ~~>
             | "==" <~~ push("==") ~~> | "!=" <~~ push("!=") ~~> ;
@@ -1189,7 +1189,7 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // x in coll / x !in coll (membership): binds tighter than comparison, as in Kotlin.
 // Lowered to coll.contains(x) (the same mcall the compiler emits), so both engines
 // agree; !in negates. The receiver is a list here (contains checks membership).
-InExpr      <~~ push(makeInExpr(takeAll())) ~~>
+InExpr      <~~ push(makeInExpr(takeAll(), up.pos)) ~~>
             = Elvis { InOp Elvis } ;
 // The `in` operator must sit on its LEFT OPERAND's line - the guard IsSfx already
 // carries, for the same reason and at the same boundary. A `when` arm's value is an
@@ -1203,7 +1203,7 @@ InExpr      <~~ push(makeInExpr(takeAll())) ~~>
 // Multi-line expressions are unaffected: Kotlin puts a continued operator at the END of
 // the line, where it still sits on its left operand's line.
 InOp        = SameLine InOpKw ;
-InOpKw      = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
+InOpKw      = "!" KwIn <~~ push({inop: "!in", at: up.pos}) ~~> | KwIn <~~ push({inop: "in", at: up.pos}) ~~> ;
 
 // x as T / x as? T = identity (untyped values); x is T / x !is T undecidable, so
 // not implemented. The suffix is optional, so plain expressions are unaffected.
@@ -2937,14 +2937,48 @@ NotMemberKw = :script(~~
         }
         return v
     }
+    // What a declared type asks of a value, or null for nothing: {ty} its own width
+    // or float type (kAdoptTy), {el} its elements' (kAdoptEl), {fr} a function's
+    // result (kAdoptFn). Memoised by the type's text. Twin of ktAdoptPlan in
+    // kotlin-to-llvm-ir.abnf.
+    var kPlanMemo = {}
+    function kPlanOf(dt) {
+        var m = anytype
+        m = kPlanMemo["$" + dt]
+        if (m !== undefined) { return m }
+        var p = anytype
+        p = null
+        var el = ktLitElems(dt)
+        var fr = ktFnRetTy(dt)
+        if (el != null) { p = {el: el} }
+        else if (fr != "") { p = {fr: fr} }
+        else if (kTypeWidth(dt) > 0 || kTypeFlo(dt)) { p = {ty: dt} }
+        kPlanMemo["$" + dt] = p
+        return p
+    }
+    function kAdoptPlan(v, p) {
+        if (p.el != undefined) { return kAdoptEl(v, p.el.v, p.el.k) }
+        if (p.fr != undefined) { return typeof v == "function" ? kAdoptFn(v, p.fr) : v }
+        return kAdoptTy(v, p.ty)
+    }
+    // One value retyped by a declared type: a local, a parameter, a return value.
+    function kAdoptVal(v, dt) {
+        if (dt == undefined || dt == null || dt == "") { return v }
+        var p = kPlanOf(dt)
+        return p == null ? v : kAdoptPlan(v, p)
+    }
+    // A function value whose declared type fixes its result's width - `val f: () ->
+    // Long = { 1 }` - answers through a wrapper that retypes each result. Twin of
+    // js_ktadoptfn in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kAdoptFn(f, rty) {
+        return function() { return kAdoptTy(f.apply(undefined, arguments), rty) }
+    }
     // Wrap an initializer thunk so its value adopts the declared type.
     function kAdoptThunk(t, dt) {
         if (dt == undefined || dt == null || dt == "" || typeof t != "function") { return t }
-        var el = ktLitElems(dt)
-        if (el != null) { return function() { return kAdoptEl(t(), el.v, el.k) } }
-        var w = kTypeWidth(dt)
-        if (w == 0 && !kTypeFlo(dt)) { return t }
-        return function() { return kAdoptTy(t(), dt) }
+        var p = kPlanOf(dt)
+        if (p == null) { return t }
+        return function() { return kAdoptPlan(t(), p) }
     }
     // A collection's contents retyped IN PLACE by the element types a type argument
     // fixes: vty for a list's, array's or set's elements and a map's values, kty for
@@ -2958,16 +2992,31 @@ NotMemberKw = :script(~~
     // positional arguments ktMArgTypes names are retyped, and the result by
     // ktMResType (ktRes, applied by foldCallMember). Twin of ktAdoptMArgs in
     // kotlin-to-llvm-ir.abnf.
-    function kAdoptMArgs(s, el) {
+    function kAdoptMArgs(s, ty) {
+        var el = ktTyElems(ty)
+        if (el == null) { return s }
         var as = s.args
         for (var i = 0; i < as.length; i++) { if (typeof as[i] != "function") { return s } }
-        var tys = ktMArgTypes(s.name, as.length, el)
+        var tys = ktMArgTypes(s.name, as.length, el, ktIsMapTy(ty))
         var out = []
         for (var j = 0; j < as.length; j++) { out.push(j < tys.length ? kAdoptThunk(as[j], tys[j]) : as[j]) }
         var ns = {kind: s.kind, name: s.name, targ: s.targ, args: out, safe: s.safe}
         var rty = ktMResType(s.name, as.length, el)
         if (rty != "") { ns.ktRes = rty }
         return ns
+    }
+    // A member-chain step: the call's arguments or a map index's key, by the
+    // declared type of the member read just before it.
+    function kAdoptChainSfx(p, at, sfx, i) {
+        var ty = ktSfxChainType(p, at, sfx, i)
+        if (ty == "") { return }
+        if (sfx[i].kind == "mcall") { sfx[i] = kAdoptMArgs(sfx[i], ty) }
+        else { kAdoptIdxSfx(sfx[i], ty) }
+    }
+    // `m[1]` on a map whose key type is a Long: the literal key adopts it.
+    function kAdoptIdxSfx(s, ty) {
+        var el = ktTyElems(ty)
+        if (el != null && ktIsMapTy(ty) && typeof s.idx == "function") { s.idx = kAdoptThunk(s.idx, ktLitTy(el.k)) }
     }
     function kAdoptEl(v, vty, kty) {
         if (Array.isArray(v)) { kAdoptAll(v, vty) }
@@ -3139,8 +3188,11 @@ NotMemberKw = :script(~~
     kNumOp2(">", "compareTo", function(l, r) { return l > r }, true)
     kNumOp2("<=", "compareTo", function(l, r) { return l <= r }, true)
     kNumOp2(">=", "compareTo", function(l, r) { return l >= r }, true)
-    binOps["=="] = function(l, r) { return kEq(l, r) }
-    binOps["!="] = function(l, r) { return !kEq(l, r) }
+    // "==." is the equality ktEqOps leaves without an integer literal operand.
+    binOps["=="] = function(l, r) { return kEq(l, r, true) }
+    binOps["!="] = function(l, r) { return !kEq(l, r, true) }
+    binOps["==."] = function(l, r) { return kEq(l, r, false) }
+    binOps["!=."] = function(l, r) { return !kEq(l, r, false) }
     // The compound assignments are the same operators (a *= b is a = a * b), so they
     // resolve through binOps rather than through the shared applyOps table, whose
     // arithmetic is 32 bit integer only and would truncate `d *= 2` on a Double.
@@ -3566,8 +3618,11 @@ NotMemberKw = :script(~~
     }
     // x in coll / x !in coll -> coll.contains(x) (via the same mcall the compiler
     // emits, so the engines agree); !in negates. items alternates operands and {inop}.
-    function makeInExpr(items) {
+    function makeInExpr(items, end) {
         if (items.length == 1) { return items[0] }
+        // `3 in xs` with xs a collection of Longs: the literal takes the element type
+        // (a map's key type).
+        if (items.length == 3) { items[0] = kAdoptThunk(items[0], ktInElemTy(items[1].at, end)) }
         return function() {
             var v = anytype // The fold turns the operand value into a boolean.
             v = items[0]()
@@ -3655,6 +3710,22 @@ NotMemberKw = :script(~~
         var kmn = ktmNames[kmi]
         hostGlobals[kmn] = (kmn == "PI" || kmn == "E") ? kFlo(ktmConst(kmn)) : kMathFn(kmn)
     }
+    // java.lang.Math (lib/kotlin-math.js's ktmJava): its functions answer a Double
+    // whatever the argument (Math.sqrt(9) is 3.0), round a Long (an Int for a Float)
+    // rounding half up, and abs/max/min keep the argument's type exactly as
+    // kotlin.math's do. Twin of ktJavaMath in abnf/jsrtktmath.go and k4JavaMath in
+    // languages/lib/kotlin-rt.metajs.
+    function kJavaMathFn(kn) {
+        if (ktmIsBinary(kn) || kn == "pow") { return function(x, y) { return kFlo(ktmMath2(kn, kNumD(x), kNumD(y))) } }
+        return function(x) { return kFlo(ktmMath1(kn, kNumD(x))) }
+    }
+    function kJavaAngleFn(jn) { return function(x) { return kFlo(ktmJavaAngle(jn, kNumD(x))) } }
+    var kJavaMath = {PI: kFlo(ktmConst("PI")), E: kFlo(ktmConst("E")), abs: hostGlobals["abs"],
+                     max: hostGlobals["max"], min: hostGlobals["min"],
+                     toRadians: kJavaAngleFn("toRadians"), toDegrees: kJavaAngleFn("toDegrees"),
+                     round: function(x) { return kConv(kFlo(ktmRoundHalfUp(kNumD(x))), kIsF32(x) ? 32 : 64, false) }}
+    for (var kji = 0; kji < ktmJava.length; kji += 2) { kJavaMath[ktmJava[kji]] = kJavaMathFn(ktmJava[kji + 1]) }
+    hostGlobals["Math"] = kJavaMath
     // java.lang.System's two clocks, from the host's microseconds since the epoch:
     // currentTimeMillis in milliseconds, nanoTime in nanoseconds (an arbitrary origin
     // in Java; only differences mean anything). Twin of ktClock in
@@ -4693,8 +4764,8 @@ NotMemberKw = :script(~~
         m.keys.push(k)
         m.vals.push(v)
     }
-    // `==` for the collection operations: numeric across the box, otherwise kEq.
-    function kEqVals(a, b) { return kEq(a, b) }
+    // `==` for the collection operations: kEq, so setOf<Any>(1, 1L) has two elements.
+    function kEqVals(a, b) { return kEq(a, b, false) }
     // The {first, second[, third]} shape `to`, Pair() and Triple() build. It is a plain
     // object rather than a class instance in both halves, so its rendering, its
     // componentN and its destructuring all live with the runtime.
@@ -5884,7 +5955,7 @@ NotMemberKw = :script(~~
         if (name == "contentEquals" || name == "contentDeepEquals") {
             var oth = args.length > 0 ? args[0] : null
             if (!Array.isArray(oth) || oth.length != es.length) { return {v: false} }
-            for (i = 0; i < es.length; i++) { if (!kEq(es[i], oth[i])) { return {v: false} } }
+            for (i = 0; i < es.length; i++) { if (!kEq(es[i], oth[i], false)) { return {v: false} } }
             return {v: true}
         }
         if (name == "sortedBy") { return {v: kSortBy(es, f, false)} }
@@ -6353,7 +6424,7 @@ NotMemberKw = :script(~~
         // that is the SUM of (key hash XOR value hash) - verified against java (JDK 24),
         // where Map.of(1, 2).hashCode() is 3.
         if (name == "hashCode") { return {v: kHash(m)} }
-        if (name == "equals") { return {v: kEq(m, f)} }
+        if (name == "equals") { return {v: kEq(m, f, false)} }
         // The kotlin.collections Map filters and mappers. Every one of them answers a
         // MAP, not a list of Pairs.
         if (name == "filterKeys" || name == "filterValues" || name == "filter" ||
@@ -6439,7 +6510,7 @@ NotMemberKw = :script(~~
         }
         if (name == "clear") { s.keys = []; return {v: undefined} }
         if (name == "hashCode") { return {v: kHash(s)} }
-        if (name == "equals") { return {v: kEq(s, f)} }
+        if (name == "equals") { return {v: kEq(s, f, false)} }
         // The Set-valued operators. plus/union add, minus/subtract remove and
         // intersect keeps the common elements - all of them answering a Set, where the
         // list versions answer a List.
@@ -6623,7 +6694,7 @@ NotMemberKw = :script(~~
             if (name == "inv") return kNorm(i64Not(szPair(target)), target.w, target.u)
             if (name == "toString") return szStr(target)
             if (name == "compareTo") return kCmpI("<", target, args[0]) ? 0 - 1 : (kCmpI(">", target, args[0]) ? 1 : 0)
-            if (name == "equals") return kEq(target, args[0])
+            if (name == "equals") return kEq(target, args[0], false)
             if (name == "coerceAtLeast") return kCmpI("<", target, args[0]) ? args[0] : target
             if (name == "coerceAtMost") return kCmpI(">", target, args[0]) ? args[0] : target
             if (name == "hashCode") return kHash(target)
@@ -6633,7 +6704,7 @@ NotMemberKw = :script(~~
             if (name == "inv") return ~target | 0
             if (name == "toString") return kstr(target)
             if (name == "compareTo") return kIsIntegral(args[0]) ? (kCmpI("<", target, args[0]) ? 0 - 1 : (kCmpI(">", target, args[0]) ? 1 : 0)) : (target < kNumD(args[0]) ? 0 - 1 : (target > kNumD(args[0]) ? 1 : 0))
-            if (name == "equals") return kEq(target, args[0])
+            if (name == "equals") return kEq(target, args[0], false)
             if (name == "coerceAtLeast") return kIsIntegral(args[0]) && kCmpI("<", target, args[0]) ? args[0] : target
             if (name == "coerceAtMost") return kIsIntegral(args[0]) && kCmpI(">", target, args[0]) ? args[0] : target
             if (name == "hashCode") return kHash(target)
@@ -6690,7 +6761,7 @@ NotMemberKw = :script(~~
             if (name == "invoke") { return kRefApply(target, args) }
             if (name == "get") { return kRefGet(target, args) }
             if (name == "set") { kRefSet(target, args); return undefined }
-            if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null) }
+            if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null, false) }
             // KCallable.toString() renders the REFERENCE, not the value it reads: this
             // branch sits above mcall's general toString, so `b::v.toString()` is
             // "reference v", as in the compiled half.
@@ -6702,7 +6773,7 @@ NotMemberKw = :script(~~
         if (target.__kclass === true) {
             if (name == "isInstance") { return kIsType(args.length > 0 ? args[0] : null, target.kname) }
             if (name == "toString") { return kstr(target) }
-            if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null) }
+            if (name == "equals") { return kEq(target, args.length > 0 ? args[0] : null, false) }
             fail("method ." + name + "() of a class literal")
         }
         // A class descriptor: a nested type constructor, a companion member or an enum
@@ -6792,7 +6863,7 @@ NotMemberKw = :script(~~
                 return pl2
             }
             // Pair/Triple are data classes in Kotlin, so equals/hashCode are structural.
-            if (name == "equals") { return kEq(target, args[0]) }
+            if (name == "equals") { return kEq(target, args[0], false) }
             if (name == "hashCode") { return kHash(target) }
         }
         // kotlin.Result, the {__result} box runCatching builds. The twin is
@@ -6870,12 +6941,12 @@ NotMemberKw = :script(~~
                 if (lgi < 0 || lgi >= tgt.length) { kIndexOob("IndexOutOfBoundsException", lgi, tgt.length) }
                 return tgt[lgi]
             }
-            if (name == "contains") { for (var ci2 = 0; ci2 < tgt.length; ci2++) { if (kEq(tgt[ci2], args[0])) return true } return false }
-            if (name == "indexOf") { for (var ii = 0; ii < tgt.length; ii++) { if (kEq(tgt[ii], args[0])) return ii } return -1 }
+            if (name == "contains") { for (var ci2 = 0; ci2 < tgt.length; ci2++) { if (kEq(tgt[ci2], args[0], false)) return true } return false }
+            if (name == "indexOf") { for (var ii = 0; ii < tgt.length; ii++) { if (kEq(tgt[ii], args[0], false)) return ii } return -1 }
             if (name == "isEmpty") return tgt.length == 0
             if (name == "isNotEmpty") return tgt.length > 0
             if (name == "hashCode") return kHash(tgt)
-            if (name == "equals") return kEq(tgt, args[0])
+            if (name == "equals") return kEq(tgt, args[0], false)
             var i
             var out
             if (name == "map") {
@@ -6985,7 +7056,7 @@ NotMemberKw = :script(~~
             if (name == "component" + (n + 1)) { return {v: kfield(target, dp[n])} }
         }
         if (name == "toString") { return {v: dataToString(target, cls, dp)} }
-        if (name == "equals") { return {v: kEq(target, args[0])} }
+        if (name == "equals") { return {v: kEq(target, args[0], false)} }
         if (name == "hashCode") { return {v: kHash(target)} }
         return null
     }
@@ -7202,10 +7273,30 @@ NotMemberKw = :script(~~
         if (typeof v == "string") return v
         return kstr(v)
     }
+    // The integer type of a value as width and signedness ("" for a non-integer):
+    // an Int is a plain number, every other integer type a sized box.
+    function kIntKind(v) {
+        if (typeof v == "number") { return "32" }
+        if (szIs(v)) { return v.u ? "u" + v.w : "" + v.w }
+        return ""
+    }
     // Structural equality: Kotlin's == is equals(). Identity for everything the value
     // model keeps as a primitive, plus the generated equals of a data/value class
     // (component-wise) - see kClassEq.
-    function kEq(l, r) {
+    function kEq(l, r, byValue) {
+        // Two integers of DIFFERENT types are unequal: Kotlin's == on Any is equals(),
+        // and java.lang.Long#equals answers true only for a Long, so 1 == 1L through
+        // Any, setOf<Any>(1, 1L) and 1L.equals(1) all see two values. byValue is an
+        // `==` with an integer LITERAL operand, which compares across the integer
+        // types: a literal whose expected type this front end did not see is still an
+        // Int. Twins: js_kteq in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+        if (!byValue) {
+            var lk = kIntKind(l)
+            if (lk != "") {
+                var rk = kIntKind(r)
+                if (rk != "" && rk != lk) { return false }
+            }
+        }
         // TWO {__flo} BOXES ARE COMPARED BEFORE THE UNBOXING BELOW, because a Float
         // and a Double are DIFFERENT KEYS: Kotlin's == on Any is java.lang.Float.equals
         // / Double.equals, and Float#equals answers true only "if the argument is not
@@ -7284,7 +7375,7 @@ NotMemberKw = :script(~~
         if (Array.isArray(a) || Array.isArray(b)) {
             if (!Array.isArray(a) || !Array.isArray(b)) { return -1 }
             if (a.length !== b.length) { return -1 }
-            for (var i = 0; i < a.length; i++) { if (!kEq(a[i], b[i])) { return -1 } }
+            for (var i = 0; i < a.length; i++) { if (!kEq(a[i], b[i], false)) { return -1 } }
             return 1
         }
         if (kIsMap(a) || kIsMap(b)) {
@@ -7293,7 +7384,7 @@ NotMemberKw = :script(~~
             for (var j = 0; j < a.keys.length; j++) {
                 var bi = kMapFind(b, a.keys[j])
                 if (bi < 0) { return -1 }
-                if (!kEq(a.vals[j], b.vals[bi])) { return -1 }
+                if (!kEq(a.vals[j], b.vals[bi], false)) { return -1 }
             }
             return 1
         }
@@ -7305,8 +7396,8 @@ NotMemberKw = :script(~~
         // second[, third]} shape, which no descriptor covers.
         if (kIsPair(a) || kIsPair(b)) {
             if (!kIsPair(a) || !kIsPair(b)) { return -1 }
-            if (!kEq(a.first, b.first) || !kEq(a.second, b.second)) { return -1 }
-            return kEq(kfield(a, "third"), kfield(b, "third")) ? 1 : -1
+            if (!kEq(a.first, b.first, false) || !kEq(a.second, b.second, false)) { return -1 }
+            return kEq(kfield(a, "third"), kfield(b, "third"), false) ? 1 : -1
         }
         return 0
     }
@@ -7321,7 +7412,7 @@ NotMemberKw = :script(~~
         var dp = lc.__dataProps
         if (dp == undefined || dp == null) { return false }
         for (var i = 0; i < dp.length; i++) {
-            if (!kEq(kfield(l, dp[i]), kfield(r, dp[i]))) { return false }
+            if (!kEq(kfield(l, dp[i]), kfield(r, dp[i]), false)) { return false }
         }
         return true
     }
@@ -7425,7 +7516,7 @@ NotMemberKw = :script(~~
                         if (cond.neg) hit = !hit
                     } else if (cond.v != undefined) {
                         var val = cond.v()
-                        hit = subj != null ? kEq(val, s) : val
+                        hit = subj != null ? kEq(val, s, true) : val
                     } else {
                         // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
                         var lo = cond.lo()
@@ -7447,10 +7538,21 @@ NotMemberKw = :script(~~
         var primary = items[0]
         var suffixes = items.slice(1)
         if (suffixes[0].kind == "mcall") {
-            var cel = ktTyElems(ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
-            if (cel != null) { suffixes[0] = kAdoptMArgs(suffixes[0], cel) }
+            suffixes[0] = kAdoptMArgs(suffixes[0], ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
+        } else if (suffixes[0].kind == "index") {
+            kAdoptIdxSfx(suffixes[0], ktLeadType(txt, "["))
         }
+        // A call or an index after a run of member reads - `b.xs.add(3)`, `b.m[1]` -
+        // takes the last member's declared type, read when it first runs (a class may
+        // be declared after its use).
+        var lazyAt = ktChainSites(suffixes)
+        var lead = ktLeadName(txt)
+        var leadAt = ktAt
         return function() {
+            if (lazyAt.length > 0) {
+                for (var li = 0; li < lazyAt.length; li++) { kAdoptChainSfx(lead, leadAt, suffixes, lazyAt[li]) }
+                lazyAt = []
+            }
             var cur = anytype // A member chain hops between types.
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
@@ -7951,8 +8053,8 @@ NotMemberKw = :script(~~
         var du = false
         var df = false
         var df32 = false
-        var el = anytype
-        el = null
+        var plan = anytype
+        plan = null
         var i = 1
         var mark = items[1]
         var dty = ""
@@ -7965,10 +8067,11 @@ NotMemberKw = :script(~~
             i = 2
         }
         var init = items[i]
-        // A declared collection type retypes the literals of a builder call it
-        // initializes; any other initializer already holds its own elements.
+        // A declared collection type retypes the elements of what it holds (a builder
+        // call's literals, or a generic call's result - `xs.map { 0 }`), and a declared
+        // function type the function's results.
         var itxt = ktInitText(txt, name, dty)
-        if (dty != "" && ktIsBuilder(itxt)) { el = ktLitElems(dty) }
+        if (dty != "") { plan = kPlanOf(dty) }
         ktNoteDecl(name, i == 2 ? dty : ktExprType(itxt))
         return function() {
             var v = anytype // A declaration binds a value of any type.
@@ -7979,7 +8082,7 @@ NotMemberKw = :script(~~
             if (s != undefined) return s
             if (dw > 0 && kIsIntegral(v)) { v = kConv(v, dw, du) }
             else if (df && kIsIntegral(v)) { v = df32 ? kFlo32(kNumD(v)) : kFlo(kNumD(v)) }
-            else if (el != null) { v = kAdoptEl(v, el.v, el.k) }
+            else if (plan != null) { v = kAdoptPlan(v, plan) }
             declVar(name, recvFn ? kRecvLambda(v) : v)
         }
     }
@@ -8158,7 +8261,7 @@ NotMemberKw = :script(~~
             if (v === kMISSING) {
                 v = (typeof p != "string" && p.def != null) ? p.def() : undefined
             }
-            if (typeof p != "string" && p.ty != undefined && p.ty != "") { v = kAdoptTy(v, p.ty) }
+            if (typeof p != "string" && p.ty != undefined && p.ty != "") { v = kAdoptVal(v, p.ty) }
             // A PARAMETER whose declared type is a lambda-WITH-RECEIVER (`body: T.() ->
             // Unit`) gets the same kRecvLambda wrapper a local `val` of that type gets,
             // so `t.body()` and `body(t)` both bind `this` to t inside the lambda - the
@@ -8214,7 +8317,7 @@ NotMemberKw = :script(~~
     // rather than inside the body so that both the block form (`fun f(): Long { return 1 }`)
     // and the expression form (`fun f(): Long = 1`) go through it.
     function kRetAdopt(f, v) {
-        return (f.rty == undefined || f.rty == "") ? v : kAdoptTy(v, f.rty)
+        return (f.rty == undefined || f.rty == "") ? v : kAdoptVal(v, f.rty)
     }
     // A top-level function's name, remembered against its closure so that
     // `::topLevelFun.name` can answer it (Kotlin: KFunction.name). A function VALUE
@@ -8302,6 +8405,7 @@ NotMemberKw = :script(~~
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].vv != undefined) { p.prop = true }
         }
+        if (p.prop) { ktNoteMember(p.pname, p.ty) }
         return p
     }
 
@@ -9284,13 +9388,13 @@ NotMemberKw = :script(~~
     // `name = ...` in a method resolves against `this`.
     function makeProp(items) {
         var r = {prop: items[0], init: null, getter: undefined, setter: undefined,
-                 sparam: null, hasField: true, ty: "", lateinit: false}
+                 sparam: null, hasField: true, ty: "", lateinit: false, itxt: ""}
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it == undefined || it == null) { continue }
             if (it.pmods != undefined) { r.lateinit = hasMod(it.pmods, "lateinit") }
             else if (it.pty != undefined) { r.ty = it.pty }
-            else if (it.pinit != undefined) { r.init = it.pinit }
+            else if (it.pinit != undefined) { r.init = it.pinit; if (it.ptxt != undefined) { r.itxt = it.ptxt } }
             else if (it.getter != undefined) { r.getter = it.getter }
             else if (it.setter != undefined) { r.setter = it.setter; r.sparam = it.sparam }
         }
@@ -9299,7 +9403,8 @@ NotMemberKw = :script(~~
             if (r.getter != undefined) { r.hasField = false }
         }
         ktNoteDecl(r.prop, r.ty)
-        r.init = kAdoptThunk(r.init, ktTyElems(r.ty) == null ? r.ty : "")
+        ktNoteMember(r.prop, r.ty != "" ? r.ty : ktExprType(r.itxt))
+        r.init = kAdoptThunk(r.init, r.ty)
         return r
     }
     // ----- Delegated properties (the getValue/setValue protocol) -----
@@ -10621,14 +10726,30 @@ NotMemberKw = :script(~~
         // Longs: the literal takes the declared (or inferred) type.
         if (op == "=") {
             var aty = ktDeclTypeOf(ref.name)
-            if (ref.path.length == 0) { valT = kAdoptThunk(valT, ktLitTy(aty)) }
+            if (ref.path.length == 0) { valT = kAdoptThunk(valT, aty) }
             var ael = ktLitElems(aty)
             if (ref.path.length == 1 && ref.path[0].idx != undefined && ael != null) {
                 valT = kAdoptThunk(valT, ael.v)
                 ref = {name: ref.name, path: [{idx: kAdoptThunk(ref.path[0].idx, ael.k)}]}
             }
         }
+        // A write through a member - `b.xs = listOf(1)`, `b.m[1] = v` - takes the
+        // member's declared type, read when it first runs.
+        var memAt = (op == "=") ? kAssignMemberAt(ref) : 0 - 1
+        var memPos = ktAt
         return function() {
+            if (memAt >= 0) {
+                var mty = ktFieldChainType(ref.name, memPos, kPathKeys(ref.path, memAt))
+                if (memAt == ref.path.length - 1) { valT = kAdoptThunk(valT, mty) }
+                else {
+                    var mel = ktLitElems(mty)
+                    if (mel != null) {
+                        valT = kAdoptThunk(valT, mel.v)
+                        ref.path[memAt + 1].idx = kAdoptThunk(ref.path[memAt + 1].idx, mel.k)
+                    }
+                }
+                memAt = 0 - 1
+            }
             var v = anytype // An assignment moves a value of any type.
             v = valT()
             if (ref.path.length == 0) {
@@ -10640,6 +10761,21 @@ NotMemberKw = :script(~~
             }
             return v
         }
+    }
+    // The path step naming the member an assignment writes through: the last step
+    // when it is `.name`, the one before a final `[i]` when that is; -1 otherwise.
+    function kAssignMemberAt(ref) {
+        var n = ref.path.length
+        var last = (n >= 1 && ref.path[n - 1].key != undefined) ? n - 1 : 0 - 1
+        if (n >= 2 && ref.path[n - 1].idx != undefined && ref.path[n - 2].key != undefined) { last = n - 2 }
+        for (var i = 0; i < last; i++) { if (ref.path[i].key == undefined) { return 0 - 1 } }
+        return last
+    }
+    // The property names of path steps 0..last, all `.name` steps.
+    function kPathKeys(path, last) {
+        var out = []
+        for (var i = 0; i <= last; i++) { out.push(path[i].key) }
+        return out
     }
     function kReadSlot(p) {
         return p.isIndex ? kIndex(p.obj, p.key) : kGetField(p.obj, p.key)

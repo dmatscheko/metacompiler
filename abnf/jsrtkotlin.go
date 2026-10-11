@@ -111,6 +111,26 @@ func ktWU(l, r interface{}) (uint8, bool) {
 
 // ktIsIntegral says whether a value is an operand of INTEGER arithmetic - which a
 // Char is, Kotlin's Char having code arithmetic, and a Double is not.
+// ktIntKind is the integer type of v as width and signedness: an Int is a plain
+// float64, every other integer type a jsGInt. ok is false for a non-integer (a
+// Char included).
+func ktIntKind(v interface{}) (uint8, bool, bool) {
+	switch x := v.(type) {
+	case float64:
+		return 32, false, true
+	case jsGInt:
+		return x.w, x.u, true
+	}
+	return 0, false, false
+}
+
+// ktKindDiffers says whether a and b are integers of two different types.
+func ktKindDiffers(a, b interface{}) bool {
+	aw, au, aok := ktIntKind(a)
+	bw, bu, bok := ktIntKind(b)
+	return aok && bok && (aw != bw || au != bu)
+}
+
 func ktIsIntegral(v interface{}) bool {
 	switch v.(type) {
 	case jsGInt, float64, jsChar:
@@ -626,7 +646,9 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		}
 		return float64(0), true
 	case "equals":
-		return rt.giEq(target, argAt(args, 0)), true
+		// equals() of an integer is its type's: 1L.equals(1) is false.
+		o := argAt(args, 0)
+		return !ktKindDiffers(target, o) && rt.giEq(target, o), true
 	case "coerceAtLeast":
 		o := argAt(args, 0)
 		if rt.ktNumLess(target, o) {
@@ -897,32 +919,42 @@ func init() {
 			}
 			return w(rt.jsAdd(l, r))
 		}
-		// == / != where a box may be involved. Two numbers compare by VALUE across
-		// the box (giEq); every other pair keeps the equality the runtime had, so a
-		// data class still compares through its own equals.
+		// Kotlin's == and != (js_kteq / js_ktne, (l, r, strict)). With strict, two
+		// integers of DIFFERENT types are unequal: == on Any is equals(), and
+		// java.lang.Long#equals answers true only for a Long, so 1 == 1L through Any
+		// and 1L.equals(1) are false. Without it two integers compare by VALUE across
+		// their types - the emitter's choice for an == with an integer LITERAL
+		// operand, since a literal whose expected type the front end did not see is
+		// still an Int (ktEqOps in languages/lib/kotlin-decltypes.js). Every other
+		// pair keeps the equality the runtime had, so a data class still compares
+		// through its own equals. Twins: kEqAt in kotlin-interpreter.abnf, js_kteq in
+		// languages/lib/kotlin-rt.metajs.
 		baseEq := m["js_seq"]
-		baseNe := m["js_sne"]
-		m["js_kteq"] = func(a []uint64) uint64 {
+		ktEquals := func(a []uint64) bool {
 			l, r := u(a[0]), u(a[1])
+			strict := rt.truthy(u(a[2]))
 			// A float box: a Float is not equal to a Double even at the same value
 			// (java.lang.Float#equals demands a Float), nor to an integer. See
 			// ktFloClsEq.
 			if v, decided := ktFloClsEq(l, r); decided {
-				return boolH(v)
+				return v
+			}
+			if strict && ktKindDiffers(l, r) {
+				return false
 			}
 			if giIsInt(l) || giIsInt(r) {
-				return boolH(rt.giEq(l, r))
+				return rt.giEq(l, r)
 			}
 			// Two callable references / class literals. See ktRefEq; without it the
 			// comparison would fall through to identity and `b::v == b::v` be false.
 			if v, decided := ktRefEq(l, r); decided {
-				return boolH(v)
+				return v
 			}
 			// A list, a map or a Pair/Triple compares STRUCTURALLY (ktStructEq): none
 			// of them carries a class descriptor, so the fallback below would be
 			// identity and `listOf(1, 2) == listOf(1, 2)` false.
 			if v, decided := rt.ktStructEq(l, r); decided {
-				return boolH(v)
+				return v
 			}
 			// An instance whose class declares equals (a data or value class does)
 			// answers for itself. The emit site already dispatches the convention when
@@ -931,33 +963,29 @@ func init() {
 			// instance, which emitEqualsFunc compares with js_kteq.
 			if lo, isObj := l.(*jsObject); isObj {
 				if mth, found := ktpFindMember(lo, "equals"); found {
-					return boolH(rt.truthy(rt.call(mth, jsUndef, []interface{}{lo, r})))
+					return rt.truthy(rt.call(mth, jsUndef, []interface{}{lo, r}))
 				}
 			}
-			return baseEq(a)
+			return u(baseEq(a[:2])) == true
 		}
-		m["js_ktne"] = func(a []uint64) uint64 {
-			l, r := u(a[0]), u(a[1])
-			// A float box: see js_kteq.
-			if v, decided := ktFloClsEq(l, r); decided {
-				return boolH(!v)
+		m["js_kteq"] = func(a []uint64) uint64 { return boolH(ktEquals(a)) }
+		m["js_ktne"] = func(a []uint64) uint64 { return boolH(!ktEquals(a)) }
+		// js_ktadoptfn(f, ty): a function value whose declared type fixes its
+		// result's width - `val f: () -> Long = { 1 }` - answers through a wrapper
+		// that retypes each result. Twin of kAdoptFn in kotlin-interpreter.abnf.
+		m["js_ktadoptfn"] = func(a []uint64) uint64 {
+			f := u(a[0])
+			if !isCallable(f) {
+				return a[0]
 			}
-			if giIsInt(l) || giIsInt(r) {
-				return boolH(!rt.giEq(l, r))
-			}
-			// Two callable references / class literals. See ktRefEq.
-			if v, decided := ktRefEq(l, r); decided {
-				return boolH(!v)
-			}
-			if v, decided := rt.ktStructEq(l, r); decided {
-				return boolH(!v)
-			}
-			if lo, isObj := l.(*jsObject); isObj {
-				if mth, found := ktpFindMember(lo, "equals"); found {
-					return boolH(!rt.truthy(rt.call(mth, jsUndef, []interface{}{lo, r})))
+			ty := rt.toString(u(a[1]))
+			return w(jsHostFunc("lambda", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				res := rt.call(f, jsUndef, args)
+				if n := rt.ktAdoptTy(res, ty); n != nil {
+					return n
 				}
-			}
-			return baseNe(a)
+				return res
+			}))
 		}
 		// A conversion method - toInt(), toLong(), toUInt(): (value, bits, unsigned).
 		m["js_ktconv"] = func(a []uint64) uint64 {
@@ -1613,7 +1641,7 @@ func init() {
 			// equals(other) is the third Any member, and it is the SAME comparison
 			// `==` makes - js_kteq: `listOf(1, 2).equals(listOf(1, 2))` is true.
 			if len(arr.elems) == 1 && mname == "equals" && !ktChainDeclares(recv, mname) {
-				return m["js_kteq"]([]uint64{w(recv), w(argAt(arr.elems, 0))})
+				return m["js_kteq"]([]uint64{w(recv), w(argAt(arr.elems, 0)), w(true)})
 			}
 			if next := m["js_rxktmcall"]; next != nil {
 				return next(a)
@@ -3824,7 +3852,7 @@ func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 }
 
 // ktMapFind compares keys the way Kotlin's Map does - by equals, which for the
-// value model here is ktEqVals (a boxed Long 1L and a plain Int 1 are the same key).
+// value model here is ktEqVals (a Long 1L and an Int 1 are two keys).
 func (rt *jsrt) ktMapFind(keys *jsArray, k interface{}) int {
 	for i, e := range keys.elems {
 		if rt.ktEqVals(e, k) {
@@ -3867,14 +3895,18 @@ func ktFloClsEq(l, r interface{}) (bool, bool) {
 	return lf.f == rf.f, true
 }
 
-// ktEqVals is `==` for the collection operations: numeric across the box, and the
-// runtime's own strict equality for everything else (a data class still compares
-// through its generated equals, which memberCall reaches).
+// ktEqVals is `==` for the collection operations: two integers are equal when
+// they have the same type and value (setOf<Any>(1, 1L) has two elements), and the
+// runtime's own strict equality decides everything else (a data class still
+// compares through its generated equals, which memberCall reaches).
 func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 	// A float box: width-aware, so a Float is not a Double key, and neither is an
 	// integer one. See ktFloClsEq.
 	if v, decided := ktFloClsEq(a, b); decided {
 		return v
+	}
+	if ktKindDiffers(a, b) {
+		return false
 	}
 	if giIsInt(a) || giIsInt(b) {
 		return rt.giEq(a, b)
@@ -6657,6 +6689,8 @@ func (rt *jsrt) ktPkgMember(pkg, name string) interface{} {
 // ktGlobalFn is the VALUE of one global builder name.
 func ktGlobalFn(rt *jsrt, name string) interface{} {
 	switch name {
+	case "Math":
+		return ktJavaMath(rt)
 	case "Delegates":
 		// kotlin.properties.Delegates: the three standard property delegates. Each
 		// answers a box js_ktdget / js_ktdset drive (see ktDelegKind).

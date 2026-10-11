@@ -198,6 +198,58 @@ func ktMathFn(name string) interface{} {
 	})
 }
 
+// ktJavaMathNames are java.lang.Math's members that are a kotlin.math function of
+// the same meaning (rint is kotlin's round, signum its sign).
+var ktJavaMathNames = map[string]string{
+	"sqrt": "sqrt", "cbrt": "cbrt", "exp": "exp", "expm1": "expm1", "log": "ln",
+	"log10": "log10", "log1p": "ln1p", "sin": "sin", "cos": "cos", "tan": "tan",
+	"asin": "asin", "acos": "acos", "atan": "atan", "sinh": "sinh", "cosh": "cosh",
+	"tanh": "tanh", "floor": "floor", "ceil": "ceil", "rint": "round", "signum": "sign",
+	"atan2": "atan2", "hypot": "hypot", "pow": "pow",
+}
+
+// ktJavaMath is java.lang.Math, which a Kotlin/JVM program reaches as `Math`: its
+// functions answer a Double whatever the argument (Math.sqrt(9) is 3.0), round a
+// Long (an Int for a Float) rounding half up, toRadians / toDegrees multiply by
+// java's own constant, and abs/max/min keep the argument's type exactly as
+// kotlin.math's do. Twin of kJavaMath in kotlin-interpreter.abnf and k4JavaMath in
+// languages/lib/kotlin-rt.metajs.
+func ktJavaMath(rt *jsrt) *jsObject {
+	o := newJSObject()
+	o.set("PI", jsJFlo{f: math.Pi})
+	o.set("E", jsJFlo{f: math.E})
+	for _, n := range []string{"abs", "max", "min"} {
+		o.set(n, ktGlobalFn(rt, n))
+	}
+	for jn, kn := range ktJavaMathNames {
+		kn := kn
+		if kn == "atan2" || kn == "hypot" || kn == "pow" {
+			o.set(jn, jsHostFunc(jn, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return jsJFlo{f: ktMath2(kn, giFloat(rt, argAt(args, 0)), giFloat(rt, argAt(args, 1)))}
+			}))
+			continue
+		}
+		o.set(jn, jsHostFunc(jn, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return jsJFlo{f: ktMath1(kn, giFloat(rt, argAt(args, 0)))}
+		}))
+	}
+	o.set("toRadians", jsHostFunc("toRadians", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jsJFlo{f: giFloat(rt, argAt(args, 0)) * 0.017453292519943295}
+	}))
+	o.set("toDegrees", jsHostFunc("toDegrees", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jsJFlo{f: giFloat(rt, argAt(args, 0)) * 57.29577951308232}
+	}))
+	o.set("round", jsHostFunc("round", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		a := argAt(args, 0)
+		w := uint8(64)
+		if f, ok := a.(jsJFlo); ok && f.sty == floJavaF {
+			w = 32
+		}
+		return rt.ktConv(jsJFlo{f: jvRoundHalfUp(giFloat(rt, a))}, w, false)
+	}))
+	return o
+}
+
 // ktMathMethod is the Double / Float extension members: pow, roundToInt and
 // roundToLong. roundToInt rounds half up (Math.round) and saturates at the Int
 // range; a NaN receiver throws, as MathJVM.kt does.
