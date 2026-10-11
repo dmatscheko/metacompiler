@@ -551,7 +551,7 @@ function gopObj(o, depth) {
     if (cls === undefined) { return undefined }
     if (goIsDt(o)) {
         var dv = anytype
-        dv = o.__dv
+        dv = goDtShown(o)
         if (goStrOf(cls.__name).charAt(0) == "*" && goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined) { return "&" + gopRender(dv, depth) }
         return gopRender(dv, depth)
     }
@@ -1078,7 +1078,7 @@ function gfHMeth(v) {
 }
 function gfHIsErr(v) { return goMeth(v, "Error") !== undefined }
 function gfHIsDt(v) { return goIsDt(v) }
-function gfHDtVal(v) { return v.__dv }
+function gfHDtVal(v) { return goDtShown(v) }
 function gfHStr(v) { return gopStr(v) }
 function gfHStructName(v) {
     var c = goClassOf(v)
@@ -2494,6 +2494,24 @@ function goIsDt(v) {
     var cls = goClassOf(v)
     if (cls === undefined) { return false }
     return cls.__dt === true
+}
+// The value box v shows fmt: an array type's box shows its elements boxed as
+// their element type prints them. Twins: goDtShown in abnf/jsrtgolang.go and
+// languages/go-interpreter.abnf.
+function goDtShown(v) {
+    var dv = anytype
+    dv = v.__dv
+    var name = goStrOf(goClassOf(v).__name)
+    if (!Array.isArray(dv) || name.charAt(0) != "[") { return dv }
+    var cls = goSlotCls(name.substring(name.indexOf("]") + 1))
+    if (cls === undefined) { return dv }
+    var out = []
+    var i = 0
+    while (i < dv.length) {
+        out.push(js_godtbox(dv[i], cls))
+        i = i + 1
+    }
+    return out
 }
 function goDtUnbox(v, want) {
     if (goIsDt(v) && goStrOf(goClassOf(v).__name) == want) { return v.__dv }

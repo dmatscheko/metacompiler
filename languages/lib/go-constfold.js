@@ -1194,9 +1194,40 @@ function goIsIfaceTy(t) {
 // as an int, and a uint64 or uintptr the same box as a uint.
 var goDtWide = {"$int64": true, "$uint64": true, "$uintptr": true}
 function goDtBoxTy(sty) {
-    var t = stBare(sty)
+    var t = goWalkQual(stBare(sty))
+    // An array of such a type is boxed as a whole: a plain array records no element
+    // type, and %v, %T and a type test need it.
+    var et = goArrElemTy(t)
+    if (et != "") { return goDtBoxTy(et) != "" ? t : "" }
     if (goDtForeign["$" + t] === true || goTyKey(t) != t) { return "" }
     return (goIsDefTy(t) || goDtWide["$" + t] === true) ? t : ""
+}
+// "[N]T" -> "T" for an array type of literal length N, else "".
+function goArrElemTy(t) {
+    if (t.length < 4 || t.charAt(0) != "[") { return "" }
+    var i = 1
+    while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) { i = i + 1 }
+    if (i == 1 || i >= t.length - 1 || t.charAt(i) != "]") { return "" }
+    return t.substring(i + 1)
+}
+// The static type of an array literal written as text ("[2]T", "[...]T", a
+// constant length already resolved by goArrConstLen) over element type et with n
+// elements: [...] counts them when none is keyed. "[1]T" stands for an array of
+// T whose length is not known.
+function goArrLitTy(text, et, n, keyed) {
+    if (goArrElemTy(text) != "") { return text }
+    if (text.substring(0, 5) == "[...]" && !keyed) { return "[" + n + "]" + et }
+    return "[1]" + et
+}
+// Is any element of a composite literal keyed ([5]int{0: 1})?
+function goLitKeyed(elems) {
+    var i = 0
+    while (i < elems.length) {
+        var e = elems[i]
+        if ((e.ekey !== undefined && e.ekey !== null) || (e.ekeyn !== undefined && e.ekeyn !== null)) { return true }
+        i = i + 1
+    }
+    return false
 }
 // Does fmt print a value held in a slot of type ty (a slice's element type, a map's
 // key or value type, a struct field's) through ty's own Error() or String()? A
@@ -1518,8 +1549,9 @@ function goPrescanPkg(text, pname) {
     goPrePkg = ""
 }
 // Type text t as written in package pkg, seen from outside: each name of a type
-// that pkg declares gets the qualifier.
-function goPkgQual(pkg, t) {
+// that pkg declares gets the qualifier (with defOnly, each defined non-struct
+// type's only).
+function goPkgQual(pkg, t, defOnly) {
     var out = ""
     var i = 0
     while (i < t.length) {
@@ -1528,11 +1560,17 @@ function goPkgQual(pkg, t) {
         if (j == i) { out = out + t.charAt(i); i = i + 1; continue }
         var id = t.substring(i, j)
         var dotted = (i > 0 && t.charAt(i - 1) == ".") || (j < t.length && t.charAt(j) == ".")
-        out = out + ((!dotted && goPkgTys["$" + pkg + "." + id] === true) ? pkg + "." + id : id)
+        var q = defOnly === true ? goDefTys["$" + pkg + "." + id] === true : goPkgTys["$" + pkg + "." + id] === true
+        out = out + ((!dotted && q) ? pkg + "." + id : id)
         i = j
     }
     return out
 }
+// A type text written in the package being walked, as a value records it for fmt,
+// a box or a type test: the package's own defined non-struct types qualified
+// ("[]Kind" -> "[]pk.Kind"), the spelling main's code uses for them. Such a value
+// carries no descriptor, so a bare name would be read as main's.
+function goWalkQual(t) { return goWalkPkg == "" ? t : goPkgQual(goWalkPkg, t, true) }
 function goPrescan(text) {
     var i = 0
     while (i < text.length) {

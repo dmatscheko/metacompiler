@@ -142,7 +142,7 @@ DefinedType <~~ push({under: firstType(up.in)}) ~~>
 StructBody  = "struct" KwEnd "{" { FieldDecl } "}" ;
 FieldDecl   = NamedField | EmbedField ;
 NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
-FType       <~~ push({fty: firstType(up.in)}) ~~> = Type ;
+FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09 as well as the promoted w.id).
 EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
@@ -268,7 +268,7 @@ AnonParam   = [ Variadic ] PType ;
 // struct field's. A parameter is an ordinary slot, so `func f(b uint8)` has to put
 // the width on the argument on the way in - without this the b++ inside f stepped
 // at 53 bits.
-PType       <~~ push({pty: firstType(up.in)}) ~~> = Type ;
+PType       <~~ push({pty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 Variadic    <~~ push({vararg: true}) ~~> = "..." ;
 // Results: a single type, or a parenthesized list that may name its results
 // (func f(a int) (q, r int)). Named results become zero-valued locals that a bare
@@ -454,7 +454,7 @@ CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 // var x int = 5 / var s string -- the zero value depends on the type.
 VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
             = "var" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ VType ] [ "=" ExprList ] [ ";" ] ;
-VType       <~~ push({ty: goArrConstLen(up.in)}) ~~>
+VType       <~~ push({ty: goWalkQual(goArrConstLen(up.in))}) ~~>
             = Type ;
 
 // var ( a int = 1; b = 2 ): each spec (one name) becomes a var-decl thunk; the group
@@ -495,7 +495,7 @@ AssertOk    <~~ push(makeAssertOk(cAssertOkC(takeAll()))) ~~>
               AssertBase "." "(" AssertType ")" NotComma ;
 AssertBase  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
-AssertType  <~~ push({at: firstType(up.in)}) ~~>
+AssertType  <~~ push({at: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
@@ -611,7 +611,7 @@ TypeSwitch  <~~ push(makeTypeSwitch(takeAll())); cSwExit() ~~>
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
               | "default" KwEnd ) ":" ;
-CaseType    <~~ push({ct: up.in}) ~~>
+CaseType    <~~ push({ct: goWalkQual(up.in)}) ~~>
             = Type ;
 // The subjectless body is tried before the subject so a bare 'switch {' never enters
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
@@ -843,7 +843,7 @@ Spread      <~~ push({spread: true}) ~~> = "..." ;
 // type for a predeclared scalar or a declared struct. Any other target is the
 // identity (see goAssertType).
 TypeAssertSfx = "." "(" AssertSfxTy ")" ;
-AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
+AssertSfxTy <~~ push({kind: "assert", at: goWalkQual(firstType(up.in))}) ~~> = Type ;
 
 // A string or bool literal reports its type, so a store binds it typed (`s := "a"`
 // makes &s a *string); the shared literal rules know nothing of static types.
@@ -873,7 +873,7 @@ PanicFresh  <~~ push(makeCall(["$panicf", pop()])) ~~> = Expression ;
 // Name{...} (positional or keyed by field) and struct{...}{...}. An element may be a
 // bare brace group ([][]int{{1}, {2, 3}}), which is built against the element type.
 // Gated off inside if/for/switch headers, where '{' opens the body instead.
-CompositeLit <~~ var ci = takeAll(); push(goLitC(makeCompositeLit(ci), compLitTy(ci[0]), up.pos)) ~~>
+CompositeLit <~~ var ci = takeAll(); push(goLitC(makeCompositeLit(ci), compLitTy(ci[0], ci[1].celems), up.pos)) ~~>
             = CompType CompBody ;
 // Only the BARE-NAME form is ambiguous with an if/for/switch body, so only it is
 // gated ('for _, v := range []any{...} {' is legal Go and must keep working).
@@ -881,7 +881,7 @@ CompType    = CompSlice | CompArray | CompMapT | CompStructT | GatedNamed ;
 GatedNamed  = StructGate CompNamed ;
 CompSlice   <~~ push({ckind: "slice", cet: pop().cet}) ~~>
             = "[" "]" CompElemT ;
-CompArray   <~~ push(makeArrDesc(takeAll())) ~~>
+CompArray   <~~ push(makeArrDesc(takeAll(), goWalkQual(goArrConstLen(up.in)))) ~~>
             = "[" ( "..." | Expression ) "]" CompElemT ;
 CompMapT    <~~ push({ckind: "map", czero: pop().mzero, ckeyt: pop().mkey}) ~~>
             = MapTypeZ ;
@@ -889,7 +889,7 @@ CompMapT    <~~ push({ckind: "map", czero: pop().mzero, ckeyt: pop().mkey}) ~~>
 // `pkga.Item{...}` is that package's type, not a type called `pkga`.
 CompNamed   <~~ push({ckind: "struct", cname: compTypeName(up.in)}) ~~>
             = NotTypeKw NamedType ;
-CompElemT   <~~ push({cet: firstType(up.in)}) ~~>
+CompElemT   <~~ push({cet: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
 // An anonymous struct type carries its own field list.
 CompStructT <~~ push({ckind: "anon", cfields: takeAll()}) ~~>
@@ -1049,9 +1049,9 @@ FuncLit     <~~ push(makeFuncLit(takeAll())); regSt(up.pos, goFuncLitTy(c.srcSli
 
 MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
 // The KEY type text, which an elided struct key is built against (see CompKey).
-KType       <~~ push({mkey: firstType(up.in)}) ~~>
+KType       <~~ push({mkey: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
-ZType       <~~ push({mzero: up.in}) ~~>
+ZType       <~~ push({mzero: goWalkQual(up.in)}) ~~>
             = Type ;
 
 // new(T): a zero value of T (a pointer to it in Go; our structs are references).
@@ -1800,7 +1800,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function gfHIsErr(v) { return goMeth(v, "Error") !== undefined }
     function gfHIsDt(v) { return isDtBox(v) }
-    function gfHDtVal(v) { return v.__dv }
+    function gfHDtVal(v) { return goDtShown(v) }
     function gfHStr(v) { return gstr(v) }
     function gfHStructName(v) {
         var c = v.__class
@@ -2621,9 +2621,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // unless the struct has Error() or String().
     function goDtStr(v) {
         var dv = anytype
-        dv = v.__dv
+        dv = goDtShown(v)
         if (v.__class.__name.charAt(0) == "*" && goIsStructVal(dv) && goMeth(dv, "Error") === undefined && goMeth(dv, "String") === undefined) { return "&" + gstr(dv) }
         return gstr(dv)
+    }
+    // The value a box shows fmt: an array type's box shows its elements boxed as
+    // their element type prints them. Twins: goDtShown in abnf/jsrtgolang.go and
+    // lib/go-rt.metajs.
+    function goDtShown(v) {
+        var dv = anytype
+        dv = v.__dv
+        var et = goArrElemTy(v.__class.__name)
+        return (et != "" && Array.isArray(dv)) ? goSlotsBox(dv, et) : dv
     }
     // Is v of a string KIND - fmt's spacing rule asks reflect's Kind, so a defined
     // string type's box counts.
@@ -3603,10 +3612,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return goArrConstLen(out)
     }
     // items = [lenThunk?, {cet}] for [N]T / [...]T.
-    function makeArrDesc(items) {
+    function makeArrDesc(items, text) {
         var last = items[items.length - 1]
         var lenT = items.length > 1 ? items[0] : null
-        return {ckind: "array", cet: last.cet, clen: lenT}
+        return {ckind: "array", cet: last.cet, clen: lenT, ctext: text}
     }
     // items = [{ckey}?, valueThunk or {cnested}]
     function makeCompElem(items) {
@@ -3909,9 +3918,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The static type a composite literal reports (goLitC): a named struct by its
     // name, an array as "[N]" + its element type, anything else as a slice (no copy).
-    function compLitTy(desc) {
+    function compLitTy(desc, elems) {
         if (desc.ckind == "struct" && desc.cname != undefined) { return desc.cname }
-        if (desc.ckind == "array") { return "[1]" + desc.cet }
+        if (desc.ckind == "array") { return goArrLitTy(desc.ctext, desc.cet, elems.length, goLitKeyed(elems)) }
         if (desc.ckind == "slice") { return "[]" + desc.cet }
         if (desc.ckind == "map") { return "map[" + desc.ckeyt + "]" + desc.czero }
         return "[]"
@@ -4786,9 +4795,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                        byte: 1, rune: 1, float32: 1, float64: 1, complex128: 1}
     function goAssertType(v, want) {
         if (hasOwn(ifaceMeths, want)) { return goAssertIface(v, want) }
-        // A DEFINED non-struct type is decided when the value is its box, and the
-        // value inside is the answer.
-        if (goIsDefTy(want) && isDtBox(v)) {
+        // A DEFINED non-struct type (or an array of one) is decided when the value
+        // is its box, and the value inside is the answer.
+        if ((goIsDefTy(want) || goArrElemTy(want) != "") && isDtBox(v)) {
             if (v.__class.__name == want) { return v.__dv }
             goConvPanic("interface {} is " + goTypeText(v) + ", not " + gfQualTy(want))
         }

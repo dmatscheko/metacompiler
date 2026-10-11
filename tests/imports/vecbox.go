@@ -5,6 +5,8 @@
 
 package vecbox
 
+import "fmt"
+
 type Vec struct {
 	a int
 	b int
@@ -54,3 +56,25 @@ func (l Lvl) String() string { return "lvl" + string(rune('0'+int(l))) }
 type Tag string
 
 func TagText(t Tag) string { return string(t) + "!" }
+
+// The package's OWN defined type in its own code is vecbox.Kind, not the main
+// file's Kind: fmt reaches its String() for a value, a slice element and an array
+// element, %T names it, and a type switch and an assertion compare against it.
+func Show(k Kind) string { return fmt.Sprint(k, []Kind{k}, [2]Kind{k, 1}) }
+
+func Types(k Kind) string { return fmt.Sprintf("%T %T %T", k, []Kind{k}, [1]Kind{k}) }
+
+func Box(n int) any { return Kind(n) }
+
+func Which(v any) string {
+	switch v.(type) {
+	case Kind:
+		return "own"
+	}
+	return "other"
+}
+
+func Unbox(v any) Kind {
+	k, _ := v.(Kind)
+	return k
+}

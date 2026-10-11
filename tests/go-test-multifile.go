@@ -151,6 +151,19 @@ func main() {
 	// underlying type, and lends neither to the main file's.
 	checkS("main type without the package type's String", fmt.Sprint(Lvl(1), []Lvl{2}, vecbox.Lvl(3)), "1 [2] lvl3")
 	checkS("package type over another underlying type", vecbox.TagText("x")+fmt.Sprint(Tag(4)), "x!4")
+	// The package's own Kind inside its own code, and arrays of defined types: an
+	// array records no element type, so it is boxed as a whole on its way into fmt
+	// or an interface.
+	checkS("own defined type in the package's fmt", vecbox.Show(4), "kind4 [kind4] [kind4 kind1]")
+	checkS("own defined type in the package's %T", vecbox.Types(3), "vecbox.Kind []vecbox.Kind [1]vecbox.Kind")
+	checkS("type switch and assertion in the package", vecbox.Which(vecbox.Box(2))+vecbox.Which(Kind(2))+
+		fmt.Sprint(vecbox.Unbox(vecbox.Box(6)), vecbox.Unbox(Kind(6))), "ownotherkind6 kind0")
+	checkS("array of a defined type", fmt.Sprintf("%v %T %d|%v", [2]Kind{2, 4}, [2]Kind{}, [2]vecbox.Kind{1, 2}, [...]vecbox.Kind{3}),
+		"[mainkind mainkind] [2]main.Kind [1 2]|[kind3]")
+	var aa any = [2]vecbox.Kind{3, 1}
+	ab := aa.([2]vecbox.Kind)
+	_, abOk := aa.([2]Kind)
+	checkS("assertion to an array of a defined type", fmt.Sprint(int(ab[0])*10+int(ab[1]), abOk, aa), "31 false [kind3 kind1]")
 
 	if fails == 0 {
 		fmt.Println("go multifile test passed")

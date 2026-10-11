@@ -158,7 +158,7 @@ FieldDecl   = NamedField | EmbedField ;
 NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
 // The field's type TEXT, which gives the field its zero value in a literal that
 // leaves it out (Go zero-fills; an absent property would read back as undefined).
-FType       <~~ push({fty: firstType(up.in)}) ~~> = Type ;
+FType       <~~ push({fty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // An embedded field's NAME is its type name (w.base09, plus the promoted w.id).
 EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
@@ -288,7 +288,7 @@ AnonParam   = [ Variadic ] PType ;
 // field's. A parameter is an ordinary slot, so `func f(b uint8)` has to put the
 // width on the argument on the way in - without this the b++ inside f stepped at
 // 53 bits.
-PType       <~~ push({pty: firstType(up.in)}) ~~> = Type ;
+PType       <~~ push({pty: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // The last parameter may be variadic: it collects the remaining arguments as a slice.
 Variadic    <~~ push({vararg: true}) ~~> = "..." ;
 // f(xs...) spreads a slice into a variadic parameter instead of passing it as one
@@ -471,7 +471,7 @@ CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 // var x int = 5 / var s string -- the zero value depends on the type.
 VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
             = "var" KwEnd Id <~~ push(cPoisonName(up.in)) ~~> { "," Id <~~ push(cPoisonName(up.in)) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
-VType       <~~ push({ty: noteTy(up.in)}) ~~>
+VType       <~~ push({ty: goWalkQual(noteTy(up.in))}) ~~>
             = Type ;
 
 // var ( a int = 1; b = 2 ): each spec (one name) becomes its own var-decl thunk and
@@ -534,7 +534,7 @@ TypeOk      <~~ push(makeTypeOk(cAssertOkC(takeAll()))) ~~>
               AssertBase "." "(" AssertType ")" NotComma ;
 AssertBase  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
-AssertType  <~~ push({at: firstType(up.in)}) ~~> = Type ;
+AssertType  <~~ push({at: goWalkQual(firstType(up.in))}) ~~> = Type ;
 // An expression statement is NOT a declaration, so it clears the pending
 // short-declaration names (see cokDeclNames): a for-init spelled `for f(); ...`
 // would otherwise inherit whatever the last ':=' in the file declared.
@@ -629,7 +629,7 @@ TSSubject   <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) 
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
               | "default" KwEnd ) ":" ;
-CaseType    <~~ push({ct: up.in}) ~~>
+CaseType    <~~ push({ct: goWalkQual(up.in)}) ~~>
             = Type ;
 // The subjectless body is tried before the subject so a bare 'switch {' never enters
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
@@ -866,7 +866,7 @@ IndexSfx    <~~ var iks = pop().ksty; push({kind:"index", idx: pop(), ksty: iks,
 // declared struct (assertTyWant). Any other target is the identity. The twin is
 // TypeAssertSfx in go-interpreter.abnf.
 TypeAssertSfx = "." "(" AssertSfxTy ")" ;
-AssertSfxTy <~~ push({kind: "assert", at: firstType(up.in)}) ~~> = Type ;
+AssertSfxTy <~~ push({kind: "assert", at: goWalkQual(firstType(up.in))}) ~~> = Type ;
 
 // A string or bool literal reports its type, so a store binds it typed (`s := "a"`
 // makes &s a *string); the shared literal rules know nothing of static types.
@@ -1028,11 +1028,13 @@ SliceLit    <~~ var li = takeAll(); push(goLitC(makeSliceLit(li), "[]" + li[0].c
 // [3]int{1, 2, 3}, [...]string{"x", "y"} (length inferred), [5]int{0: 1, 4: 9}
 // (indexed elements) and [2][2]int{{1, 2}, {3, 4}}. An ARRAY, not a slice: it is a
 // value, so assigning it copies.
-ArrayLit    <~~ var ai = takeAll(); push(goLitC(makeArrayLit(ai), "[1]" + ai[1].cet, up.pos)) ~~>
+ArrayLit    <~~ var ai = takeAll()
+                push(goLitC(makeArrayLit(ai), goArrLitTy(goWalkQual(goArrConstLen("[" + ai[0].altext + "]" + ai[1].cet)), ai[1].cet,
+                                                         ai[2].selems.length, goLitKeyed(ai[2].selems)), up.pos)) ~~>
             = "[" ( ArrDots | ArrLen ) "]" ElemT SeqBody ;
-ArrDots     <~~ push({alen: null}) ~~> = "..." ;
-ArrLen      <~~ push({alen: pop()}) ~~> = Expression ;
-ElemT       <~~ push({cet: firstType(up.in)}) ~~> = Type ;
+ArrDots     <~~ push({alen: null, altext: "..."}) ~~> = "..." ;
+ArrLen      <~~ push({alen: pop(), altext: up.in}) ~~> = Expression ;
+ElemT       <~~ push({cet: goWalkQual(firstType(up.in))}) ~~> = Type ;
 SeqBody     <~~ push({selems: takeAll()}) ~~>
             = "{" [ SeqElem { "," SeqElem } [ "," ] ] "}" ;
 SeqElem     <~~ push(makeSeqElem(takeAll())) ~~>
@@ -1128,9 +1130,9 @@ MakeChan    <~~ push(makeMakeChan(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~
 ChanElemT   <~~ push({cet: firstType(up.in)}) ~~> = Type ;
 MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
 // The KEY type text, which an elided struct key is built against (see MapKey).
-KType       <~~ push({mkey: firstType(up.in)}) ~~>
+KType       <~~ push({mkey: goWalkQual(firstType(up.in))}) ~~>
             = Type ;
-ZType       <~~ push({mzero: up.in}) ~~>
+ZType       <~~ push({mzero: goWalkQual(up.in)}) ~~>
             = Type ;
 
 // Point{3, 4} positional, Point{y: 4, x: 3} keyed, Point{} empty. A keyed element is
@@ -2269,7 +2271,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     } else {
                         var aw = assertTyWant(s.at)
                         if (aw != "") { cur = callExt(b, "js_goassert", [cur, emitStr(b, aw), emitStr(b, s.at)]) }
-                        else if (goIsDefTy(s.at)) { cur = callExt(b, "js_godtas", [cur, emitStr(b, s.at), emitStr(b, s.at)]) }
+                        else if (goIsDefTy(s.at) || goArrElemTy(s.at) != "") { cur = callExt(b, "js_godtas", [cur, emitStr(b, s.at), emitStr(b, s.at)]) }
                     }
                 } else if (s.kind == "call") {
                     var ec = emitArgs2(b, s.args, s.spread)

@@ -299,6 +299,7 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 		return "", false
 	}
 	if dv, ok := goDtVal(o); ok {
+		dv = rt.goDtShown(o, dv)
 		if strings.HasPrefix(rt.toString(cls.props["__name"]), "*") && goIsStructVal(dv) && goMeth(dv, "Error") == nil && goMeth(dv, "String") == nil {
 			return "&" + rt.gopRender(dv, depth), true
 		}
@@ -959,6 +960,26 @@ func goDtVal(v interface{}) (interface{}, bool) {
 	return jsUndef, true
 }
 
+// goDtShown is the value box v (holding dv) shows fmt: an array type's box shows
+// its elements boxed as their element type prints them. Twins: goDtShown in
+// languages/go-interpreter.abnf and lib/go-rt.metajs.
+func (rt *jsrt) goDtShown(v, dv interface{}) interface{} {
+	arr, isArr := dv.(*jsArray)
+	name := rt.toString(goClassOf(v).props["__name"])
+	if !isArr || !strings.HasPrefix(name, "[") {
+		return dv
+	}
+	cls := rt.goSlotCls(name[strings.Index(name, "]")+1:])
+	if cls == nil {
+		return dv
+	}
+	out := &jsArray{elems: make([]interface{}, len(arr.elems))}
+	for i, e := range arr.elems {
+		out.elems[i] = goSlotIn(e, cls)
+	}
+	return out
+}
+
 // goDtUnbox is v as type want once a type test has matched: the value inside
 // want's box.
 func goDtUnbox(rt *jsrt, v interface{}, want string) interface{} {
@@ -1545,6 +1566,7 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 		}
 	}
 	if dv, ok := goDtVal(v); ok {
+		dv = rt.goDtShown(v, dv)
 		if strings.HasPrefix(rt.gopTypeName(v), "*") && gopKind(dv) == "struct" {
 			if !noMeth && (verb == 'v' || verb == 's' || verb == 'x' || verb == 'X' || verb == 'q') {
 				if ms, ok := rt.gopMeth(dv); ok {
