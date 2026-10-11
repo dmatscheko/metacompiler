@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-391** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-393** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -83,24 +83,11 @@ dict dunders (`"s".__add__`, `[].__len__`) unbound.
 
 # JS — JavaScript and TypeScript
 
-### T-385 js: compiled arithmetic never converts an object operand · P1 · JS + CORE · IN PROGRESS (JS worker, round 11) [V]
-`const o=[{valueOf(){return 5}}][0]; +o, o*2, Number(o), Math.max(o,1)`: llvm.Run and
-native NaN on all (node 5, 10, 5, 5); same for [Symbol.toPrimitive]. js_jssub/mul/div/
-mod and the unary externs hand objects to the floor: an object test on layer 2's
-arithmetic hot path (bench!) or a floor hook. Under -frozen the interpreter answers NaN
-for `Number(o)` / `Math.max(o, 1)` where goja answers 5 (goja-vs-frozen split).
-
-### T-386 js: static block order; TS namespace privacy; isNaN; non-callable well-known members · P1 · JS · IN PROGRESS (JS worker, round 11) [V]
-`class K { static { K.st = 2 } static st = 0 }`: node 0, compiled 2 (interpreters 0).
-`namespace N { const hidden = 1 }; N.hidden`: TS interpreter 1 (tsc+node undefined).
-Global `isNaN` (and check isFinite, parseInt, parseFloat globals) missing in all
-engines. `{[Symbol.toPrimitive]: 1}` / `{[Symbol.hasInstance]: 5}`: node "TypeError:
-number 1 is not a function"; all engines ignore the member.
-
-### T-387 js: `toExponential` / `toFixed` / `toPrecision` exist only through goja's leak · P1 · JS · IN PROGRESS (JS worker, round 11) [V]
-`xs[0].toExponential()`, `toFixed(2)`, `toPrecision(2)`: the goja interpreter answers
-via goja's own methods; -frozen, llvm.Run and native "is not a function". Implement
-them (node's exact digits) in all engines.
+### T-391 ts: an exported `let`/`var` in a namespace is a snapshot compiled · P1 · JS · IN PROGRESS (JS worker, round 12) [V]
+`namespace C { export let count = 0; export function inc() { count++ } }; C.inc();
+C.count`: tsc+node 1, TS interpreter 1, llvm.Run/native 0 - makeNamespace copies
+exports once after the body. Rewrite reads/writes of exported names to object members
+(as tsc does).
 
 ---
 
@@ -168,6 +155,12 @@ hidden slots compiled.
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-392 the C floor's `str_to_num` reads "Inf…" as Infinity · P1 · CORE · OPEN [V]
+runtime.c ~2390: `"Inf"`, `"-Inf"` and any 8-character string starting with "Inf"
+("Infinitx") read as ±Infinity; JavaScript says NaN (js no longer goes through it).
+Probe every language that converts strings through it (python float(), ruby to_f,
+php, lua tonumber, kotlin toDouble...) against its oracle and fix the floor.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · IN PROGRESS (PY worker, round 13) [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -464,6 +457,9 @@ T-380 js: string iteration by code point; Array values()/entries(); generator @@
 T-383 goja prints some doubles with the wrong digits in the interpreter legs — DONE 38b10604 4d01c067 (goja vendored at its pinned revision under third_party/goja with one patched file; 411,923 doubles agree with node)
 T-388 php: `var_export`, `json_encode` / `json_decode` — DONE 7558be65 d5669a63 (spec-only; php-src corpus .phpt blocks match)
 T-382 go: arrays of defined types; a package's own defined types inside its code — DONE e38dafcc (nested arrays / arrays in struct fields: T-390)
+T-386 js: static block order; TS namespace privacy; isNaN; non-callable well-known members — DONE 7a8c3362
+T-385 js: compiled arithmetic never converts an object operand — DONE aba557f8 (layer-2 typeof on the slow path; bench js -13%)
+T-387 js: `toExponential` / `toFixed` / `toPrecision` exist only through goja's leak — DONE 216985a9
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
