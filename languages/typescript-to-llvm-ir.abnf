@@ -262,25 +262,28 @@ EnumKey     = Id <~~ push({mname: idName(up.in)}) ~~>
             | "[" AssignExpr "]" <~~ push({mnameT: pop()}) ~~> ;
 
 // ----- namespace / module -----
-// A namespace is an object: its body runs in a scope of its own and every EXPORTED
-// binding is copied onto that object afterwards, so 'Pack.bump(2)' finds the function
-// while the body itself still sees 'base' as a plain name. Re-opening a namespace merges
-// into the same object (the second 'namespace Pack {}' looks the existing binding up
-// instead of creating one - decided at build time, in source order, by nsDeclared), and a
-// dotted name 'namespace A.B {}' nests one object inside the other. 'module X {}' is the
-// older spelling of the same thing.
+// A namespace is an object: its body runs in a scope of its own. An exported function,
+// class, enum or namespace is a binding of that scope, copied onto the object where its
+// statement stands, so 'Pack.bump(2)' finds the function while the body still sees it as
+// a plain name. An exported VARIABLE lives on the object alone, as tsc compiles it
+// ('count++' is 'C.count++'), so a write from either side is seen by the other - see
+// makeNamespace. Re-opening a namespace merges into the same object (the second
+// 'namespace Pack {}' looks the existing binding up instead of creating one - decided at
+// build time, in source order, by nsDeclared), and a dotted name 'namespace A.B {}' nests
+// one object inside the other. 'module X {}' is the older spelling of the same thing.
+// The mid-rule tag names the namespace before its body's tags run (nsEnter).
 NamespaceDecl <~~ push(makeNamespace(takeAll(), up.start, up.pos)) ~~>
-            = ( KwNamespace | KwModule ) NsPath "{" { NsStatement } "}" ;
+            = ( KwNamespace | KwModule ) NsPath <~~ nsEnter() ~~> "{" { NsStatement } "}" ;
 NsPath      <~~ push({nspath: takeAll()}) ~~>
             = Id <~~ push(idName(up.in)) ~~> { "." Id <~~ push(idName(up.in)) ~~> }
             | StringLit <~~ pop(); push("0module") ~~> ;
 // Inside a namespace body an 'export' in front of a declaration is what publishes the
-// name on the namespace object. The exported NAME is read back out of the matched source
-// text (exportedName), which is far cheaper than threading it up through every one of the
-// declaration productions - and it answers "" for the type-only heads (type / interface /
-// declare), which bind nothing at run time and so must not be copied.
+// name on the namespace object; exportNames says which names (none for the type-only
+// heads - type / interface / declare - which bind nothing at run time). The 'var' names
+// of an exported declaration are claimed here so that the body's scope does not hoist
+// them: they live on the object.
 NsStatement = NsExport | Statement ;
-NsExport    <~~ push(makeNsExport(pop())) ~~>
+NsExport    <~~ push(makeNsExport(pop())); claimVars(up.start, up.pos) ~~>
             = KwExport <~~ exportNames = [] ~~> [ KwDefault ] ExportBody ;
 
 // ----- decorators -----
@@ -1005,7 +1008,7 @@ MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
 // '{ val }' is '{ val: val }'.
-ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
+ShorthandProp <~~ push(makeProp(tsVarRef(idName(up.in)), idName(up.in))) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -1102,7 +1105,7 @@ ForOfNoRef  <~~ takeAll(); push(notImplStmt("for-in/of over a non-reference", up
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" [ KwVar ] CondExpr ( KwOf | KwIn ) Expression ")" NestedStatement ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
-Destructure <~~ push(makeDestructure(takeAll(), up.pos)); declKinds.pop() ~~>
+Destructure <~~ push(makeVarSeq([makeDestructure(takeAll(), up.pos)])); declKinds.pop() ~~>
             = DeclKw DPattern "=" AssignExpr [ ";" ] ;
 
 DPattern    = ArrPattern | ObjPattern ;
@@ -1463,7 +1466,7 @@ GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(jsbRef(idName(up.in)))) ~~>
+VarRef      <~~ push(tsVarRef(jsbRef(idName(up.in)))) ~~>
             = NotReserved Id ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -2760,6 +2763,7 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function makeTypeofName(name) {
         return function(b) {
+            if (nsIsVar(name)) { return {b: b, v: callExt(b, "js_jswithtypeof", [curScopeV, emitStr(b, name)])} }
             var nmV = emitStr(b, name)
             var tv = callExt(b, "js_scope_typeof", [curScopeV, nmV])
             var absB = curF.NewBlock("")
@@ -3595,7 +3599,7 @@ NotFuncHead = :script(~~
             b = br.b
             cur = br.v
         } else {
-            cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+            cur = callExt(b, nsGetExt(ref.name), [curScopeV, emitStr(b, ref.name)])
         }
         var curThis = hUndef
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -3648,11 +3652,11 @@ NotFuncHead = :script(~~
                 // old value, so it still requires a prior declaration.
                 var setExt = "js_scope_set_or_create"
                 if (op != "=") {
-                    var old = callExt(b, "js_scope_get", [curScopeV, nameV])
+                    var old = callExt(b, nsGetExt(ref.name), [curScopeV, nameV])
                     v = emitBinOp(b, op, old, v)
                     setExt = "js_scope_set"
                 }
-                callExt(b, setExt, [curScopeV, nameV, v])
+                callExt(b, nsSetExt(ref.name, setExt), [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -3674,7 +3678,7 @@ NotFuncHead = :script(~~
             var nameV = null, objV = null, keyV = null, oldV = null
             if (ref.path.length == 0) {
                 nameV = emitStr(b, ref.name)
-                oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
+                oldV = callExt(b, nsGetExt(ref.name), [curScopeV, nameV])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -3692,7 +3696,7 @@ NotFuncHead = :script(~~
             b.NewCondBr(condI, assignB, mergeB)
             var r = valT(assignB)
             var ab = r.b
-            if (nameV != null) { callExt(ab, "js_scope_set", [curScopeV, emitStr(ab, ref.name), r.v]) }
+            if (nameV != null) { callExt(ab, nsSetExt(ref.name, "js_scope_set"), [curScopeV, emitStr(ab, ref.name), r.v]) }
             else { callExt(ab, memSetExt(), [objV, keyV, r.v]) }
             ab.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
@@ -3708,8 +3712,8 @@ NotFuncHead = :script(~~
             var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_jstonumeric", [callExt(b, "js_scope_get", [curScopeV, nameV])])
-                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, "js_jsstep", [oldV, oneV])])
+                var oldV = callExt(b, "js_jstonumeric", [callExt(b, nsGetExt(ref.name), [curScopeV, nameV])])
+                callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, callExt(b, "js_jsstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
@@ -3726,9 +3730,9 @@ NotFuncHead = :script(~~
             var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_jstonumeric", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+                var oldV = callExt(b, "js_jstonumeric", [callExt(b, nsGetExt(ref.name), [curScopeV, nameV])])
                 var newV = callExt(b, "js_jsstep", [oldV, oneV])
-                callExt(b, "js_scope_set", [curScopeV, nameV, newV])
+                callExt(b, nsSetExt(ref.name, "js_scope_set"), [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
@@ -4154,7 +4158,7 @@ NotFuncHead = :script(~~
             // A pattern target is re-bound per iteration (its leaves are fresh
             // declarations in the loop scope); a plain name reuses its single slot.
             if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
-            else { callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), elemV]) }
+            else { callExt(bodyB, nsSetExt(name, "js_scope_set"), [curScopeV, emitStr(bodyB, name), elemV]) }
             var brkB = exitB   // where `break` goes: exitB, or the closing block below.
             if (lazy) {
                 var closeB = curF.NewBlock("")
@@ -4224,7 +4228,7 @@ NotFuncHead = :script(~~
     // whose leaves may be member targets ('[a.b] = c').
     function assignRef(b, ref, valueH) {
         if (ref.path.length == 0 && ref.base == undefined) {
-            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), valueH])
+            callExt(b, nsSetExt(ref.name, "js_scope_set_or_create"), [curScopeV, emitStr(b, ref.name), valueH])
             return b
         }
         var p = emitRefPath(b, ref)
@@ -4258,7 +4262,7 @@ NotFuncHead = :script(~~
         b = d.b
         valueH = d.v
         if (pat.dtype == "id") {
-            callExt(b, declExt, [curScopeV, emitStr(b, pat.name), valueH])
+            nsLeafStore(b, declExt, pat.name, valueH)
             return b
         }
         if (pat.dtype == "arr") {
@@ -4361,13 +4365,15 @@ NotFuncHead = :script(~~
                                    callExt(contB, "js_add", [iC, callExt(contB, "js_num_i", [handle(1)])])])
         contB.NewBr(headB)
         curScopeV = saved
-        callExt(exitB, declExt, [curScopeV, emitStr(exitB, name), restV])
+        nsLeafStore(exitB, declExt, name, restV)
         return exitB
     }
     // items = [patternNode, initThunk]. Evaluate the initializer once, then bind.
     function makeDestructure(items, pos) {
         var pat = items[0]
         var init = items[1]
+        var leaves = patNames(pat, [])
+        for (var li = 0; li < leaves.length; li++) { pendingNames.push(leaves[li]) } // what an enclosing export publishes
         var ext = "js_scope_decl"
         if (declIsVar()) {
             notePatVars(pat, pos)
@@ -4915,7 +4921,7 @@ NotFuncHead = :script(~~
             }
         }
         return makeNewFrom(function(b) {
-            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])}
+            return {b: b, v: callExt(b, nsGetExt(clsName), [curScopeV, emitStr(b, clsName)])}
         }, argThunks, clsName)
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -5202,8 +5208,6 @@ NotFuncHead = :script(~~
     // shadowing it. The decision is taken here, at build time, walking the declarations
     // in source order - exactly the order in which they will run.
     var nsDeclared = {}
-    // 'export <decl>' inside a namespace body: the declaration's thunk plus the name it
-    // publishes on the namespace object.
     // The names a declaration BINDS, so that an 'export' in a namespace body knows what
     // to publish on the namespace object. Every builder that declares something records
     // its name here, and NsExport clears the slot before its body runs (a mid-rule tag)
@@ -5212,37 +5216,142 @@ NotFuncHead = :script(~~
     // 'export' in front of it bound. Threading the name up through every one of the
     // declaration productions instead would mean a second, name-capturing copy of each.
     // pendingNames collects the declarators of one 'var/let/const' list, which
-    // makeVarSeq then hands over in one piece ('export const a = 1, b = 2').
+    // makeVarSeq then hands over in one piece ('export const a = 1, b = 2'), and
+    // varSeqNames is that very list: an 'export' whose names ARE it exported variables.
     var exportNames = []
     var pendingNames = []
+    var varSeqNames = []
     // A type-layer declaration binds nothing at run time: it emits no code AND publishes
     // no name (an interface, a type alias, an ambient declaration, an overload signature).
     function tsNoop() { exportNames = []; return function(b) { return b } }
     function makeVarSeq(items) {
         exportNames = pendingNames
+        varSeqNames = pendingNames
         pendingNames = []
         return makeSeq(items)
     }
     function makeNsExport(t) {
         var names = exportNames
         exportNames = []
-        return {nsexport: (names.length > 0) ? names[0] : "", nsexports: names, t: t}
+        return {nsexport: (names.length > 0) ? names[0] : "", nsexports: names,
+                nsvar: names.length > 0 && names === varSeqNames, t: t}
+    }
+    // An exported VARIABLE is a property of the namespace object and nothing else, as
+    // tsc compiles it: a reference to it anywhere inside the namespace - a function body,
+    // a nested namespace, another block of the same namespace - reads and writes that
+    // property, so 'C.count' sees what 'count++' did and the body sees 'C.count = 5'.
+    // Each block's scope holds, under "0with", a companion object with one accessor per
+    // exported variable that forwards to the namespace object, and such a reference goes
+    // through the with walk (js_jswithget / js_jswithset / js_jswithtypeof): a nearer
+    // binding of the name - a parameter, a local - still shadows it, and the property is
+    // reached whether or not it exists yet ('export let x;' creates none, so an
+    // undefined read is undefined, not a ReferenceError). The declaration itself stores
+    // straight into the object (nsDeclStore).
+    // nsBuild holds, per NamespaceDecl being built, the full key of each part of its
+    // path ('namespace A.B' inside 'namespace O' is ["$O.A", "$O.A.B"]); nsEnter runs
+    // before the body's tags, makeNamespace after them. nsVarExports maps a full key to
+    // the variables any block of that namespace exports, so it is complete before
+    // anything is emitted. nsEmitKeys is the same chain while a body is being EMITTED,
+    // which is the lexical nesting, since a function body is emitted where it stands.
+    var nsBuild = []
+    var nsVarExports = {}
+    var nsEmitKeys = []
+    // While an exported variable declaration is emitted: the namespace object, and the
+    // scope its declarators bind in.
+    var nsExpObjV = anytype
+    var nsExpScopeV = anytype
+    nsExpObjV = null
+    nsExpScopeV = null
+    // The getter and the setter every companion accessor shares, emitted once; a closure
+    // over a scope holding the object ("0nso") and the name ("0nsn") makes each one.
+    var nsAccIdx = []
+    function nsEnter() {
+        var p = pop()
+        push(p)
+        var key = (nsBuild.length > 0) ? nsBuild[nsBuild.length - 1][nsBuild[nsBuild.length - 1].length - 1] + "." : "$"
+        var keys = []
+        for (var i = 0; i < p.nspath.length; i++) {
+            key = key + p.nspath[i]
+            keys.push(key)
+            key = key + "."
+        }
+        nsBuild.push(keys)
+    }
+    // Is `name`, referenced where it is being emitted, an exported variable of an
+    // enclosing namespace?
+    function nsIsVar(name) {
+        for (var i = nsEmitKeys.length - 1; i >= 0; i--) {
+            var vs = nsVarExports[nsEmitKeys[i]]
+            if (vs != undefined && vs.indexOf(name) >= 0) { return true }
+        }
+        return false
+    }
+    function nsGetExt(name) { return nsIsVar(name) ? "js_jswithget" : "js_scope_get" }
+    function nsSetExt(name, ext) { return nsIsVar(name) ? "js_jswithset" : ext }
+    // A declarator's store: onto the namespace object when it is an exported variable's
+    // (and only with an initializer - 'export let x;' creates no property, as in tsc),
+    // else the declaration `ext` makes.
+    function nsDeclStore(b, ext, name, v, hasInit) {
+        if (nsExpScopeV !== null && curScopeV === nsExpScopeV) {
+            if (hasInit) { callExt(b, memSetExt(), [nsExpObjV, emitStr(b, name), v]) }
+            return
+        }
+        callExt(b, ext, [curScopeV, emitStr(b, name), v])
+    }
+    // A binding pattern's name leaf: an assignment (the with walk for an exported
+    // variable) or a declaration.
+    function nsLeafStore(b, ext, name, v) {
+        if (ext == "js_scope_set_or_create") { callExt(b, nsSetExt(name, ext), [curScopeV, emitStr(b, name), v]) }
+        else { nsDeclStore(b, ext, name, v, true) }
+    }
+    function tsVarRef(name) {
+        return function(b) { return {b: b, v: callExt(b, nsGetExt(name), [curScopeV, emitStr(b, name)])} }
+    }
+    function nsAccessors(b, objV, names) {
+        if (nsAccIdx.length == 0) {
+            nsAccIdx.push(emitFunction([], function(fb) {
+                var o = callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nso")])
+                return retStmt(fb, callExt(fb, memGetExt(), [o, callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nsn")])]))
+            }, false, true))
+            nsAccIdx.push(emitFunction(["0nsv"], function(fb) {
+                callExt(fb, memSetExt(), [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nso")]),
+                                          callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nsn")]),
+                                          callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nsv")])])
+                return fb
+            }, false, true))
+        }
+        var compV = callExt(b, "js_obj_new", [])
+        for (var i = 0; i < names.length; i++) {
+            var envV = callExt(b, "js_scope_new", [curScopeV])
+            var nmV = emitStr(b, names[i])
+            callExt(b, "js_scope_decl", [envV, emitStr(b, "0nso"), objV])
+            callExt(b, "js_scope_decl", [envV, emitStr(b, "0nsn"), nmV])
+            callExt(b, "js_defprop", [compV, nmV, callExt(b, "js_closure", [handle(nsAccIdx[0]), envV]),
+                                      callExt(b, "js_closure", [handle(nsAccIdx[1]), envV])])
+        }
+        return compV
     }
     // items = [{nspath}, (statement thunk | {nsexport, t})...].
     // The body's vars are hoisted into the namespace's own scope.
     function makeNamespace(items, from, to) {
         var vars = claimVars(from, to)
         var path = items[0].nspath
+        var keys = nsBuild.pop()
         var body = items.slice(1)
-        var exports = []
         var stmts = []
+        var leafKey = keys[keys.length - 1]
+        if (nsVarExports[leafKey] == undefined) { nsVarExports[leafKey] = [] }
         for (var i = 0; i < body.length; i++) {
             var it = body[i]
             if (it != undefined && it.nsexport != undefined) {
-                for (var k = 0; k < it.nsexports.length; k++) { exports.push(it.nsexports[k]) }
-                stmts.push(it.t)
-            } else {
+                if (it.nsvar) {
+                    for (var k = 0; k < it.nsexports.length; k++) {
+                        if (nsVarExports[leafKey].indexOf(it.nsexports[k]) < 0) { nsVarExports[leafKey].push(it.nsexports[k]) }
+                    }
+                }
                 stmts.push(it)
+            } else {
+                stmts.push({t: it})
             }
         }
         // Create-or-reuse, decided per dotted path component in source order.
@@ -5255,6 +5364,8 @@ NotFuncHead = :script(~~
             nsDeclared["$" + key] = true
         }
         return function(b) {
+            var saved = curScopeV
+            var savedKeys = nsEmitKeys
             var obj = anytype
             for (var p = 0; p < path.length; p++) {
                 if (p == 0) {
@@ -5271,15 +5382,40 @@ NotFuncHead = :script(~~
                 } else {
                     obj = callExt(b, memGetExt(), [obj, emitStr(b, path[p])])
                 }
+                // One scope per path part, so that 'namespace A.B' sees A's variables.
+                curScopeV = callExt(b, "js_scope_new", [curScopeV])
+                var pv = nsVarExports[keys[p]]
+                if (pv != undefined && pv.length > 0) {
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0with"), nsAccessors(b, obj, pv)])
+                }
             }
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [saved])
+            nsEmitKeys = savedKeys.concat(keys)
             if (vars.length > 0) { b = emitHoist(b, curScopeV, curScopeV, vars) }
-            for (var i = 0; i < stmts.length; i++) { b = stmts[i](b) }
-            for (var e = 0; e < exports.length; e++) {
-                callExt(b, memSetExt(), [obj, emitStr(b, exports[e]),
-                    callExt(b, "js_scope_get", [curScopeV, emitStr(b, exports[e])])])
+            for (var i = 0; i < stmts.length; i++) {
+                var st = stmts[i]
+                if (st.nsexport == undefined) {
+                    b = st.t(b)
+                    continue
+                }
+                if (st.nsvar) {
+                    var savedObj = nsExpObjV
+                    var savedScope = nsExpScopeV
+                    nsExpObjV = obj
+                    nsExpScopeV = curScopeV
+                    b = st.t(b)
+                    nsExpObjV = savedObj
+                    nsExpScopeV = savedScope
+                    continue
+                }
+                // A function, class, enum or namespace is published where its statement
+                // stands, which is where tsc's 'N.f = f' is.
+                b = st.t(b)
+                for (var e = 0; e < st.nsexports.length; e++) {
+                    callExt(b, memSetExt(), [obj, emitStr(b, st.nsexports[e]),
+                        callExt(b, "js_scope_get", [curScopeV, emitStr(b, st.nsexports[e])])])
+                }
             }
+            nsEmitKeys = savedKeys
             curScopeV = saved
             return b
         }
@@ -5593,7 +5729,7 @@ NotFuncHead = :script(~~
             return function(b) {
                 if (items.length == 1) { return b }
                 var vr = items[1](b)
-                callExt(vr.b, "js_scope_set", [curScopeV, emitStr(vr.b, name), vr.v])
+                nsDeclStore(vr.b, "js_scope_set", name, vr.v, true)
                 return vr.b
             }
         }
@@ -5604,7 +5740,7 @@ NotFuncHead = :script(~~
                 b = r.b
                 v = r.v
             }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+            nsDeclStore(b, "js_scope_decl", name, v, items.length > 1)
             return b
         }
     }

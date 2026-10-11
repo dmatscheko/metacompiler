@@ -3543,6 +3543,33 @@ function s70() {
         xs[0].toPrecision() === "2.5" && xs[2].toFixed(20) === "1.00499999999999989342");
 }
 
+// ===== SECTION 71: an exported namespace variable is live =====
+// tsc compiles every reference to an exported variable inside its namespace - a function
+// body, another block of the same namespace, a dotted 'namespace A.B' - to a member of
+// the namespace object ('count++' is 'C71.count++'), so a write on either side is seen
+// on the other, while a parameter or a local of the same name still shadows it. Values
+// read off node 24 (through tsc 6.0.3's output).
+namespace C71 {
+    export let count = 0, step = 1;
+    export var log = "";
+    let priv = 10;
+    export function inc(): number { count += step; log = log + count; priv++; return priv; }
+    export function shadow(count: number): number { let step = 5; return count * step; }
+    export function swap(xs: number[]): string { for (count of xs) { step = step + count; } [count, step] = [step, count]; return typeof count; }
+    export const { a, ...rest } = { a: 1, b: 2 };
+}
+namespace C71 { export function more(): number { count = count * 10; return count + a + rest.b; } }
+namespace C71.D { export let deep = 3; export function both(): string { count++; deep += count; return count + "/" + deep; } }
+function s71() {
+    C71.inc(); C71.inc();
+    check("nv71a", C71.count === 2 && C71.log === "12" && C71.inc() === 13 && C71.shadow(7) === 35);
+    C71.count = 100;
+    C71.step = -1;
+    check("nv71b", C71.more() === 1003 && C71.count === 1000 && C71.inc() === 14 && C71.log === "123999");
+    check("nv71c", C71.swap([2, 3]) === "number" && C71.count === 4 && C71.step === 3 && C71.D.both() === "5/8" &&
+        C71.count === 5 && C71.D.deep === 8 && Object.keys(C71).join() === "count,step,log,inc,shadow,swap,a,rest,more,D");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3616,6 +3643,7 @@ function main(): number {
     s68(); // SECTION-CALL 68
     s69(); // SECTION-CALL 69
     s70(); // SECTION-CALL 70
+    s71(); // SECTION-CALL 71
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

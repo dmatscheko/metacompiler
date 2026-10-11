@@ -7431,7 +7431,8 @@ NotFuncHead = :script(~~
     }
 
     // ----- TypeScript namespaces -----
-    // The body runs in two scopes: the namespace OBJECT, and above it a PRIVATE scope.
+    // The body runs in two scopes: the namespace OBJECT (one per part of a dotted name),
+    // and above it a PRIVATE scope.
     // A plain declaration lands in the private one (declVar writes into the innermost
     // scope), so `namespace N { const hidden = 1 }` leaves N.hidden undefined, as tsc's
     // output does. While an exported declaration runs, declVar redirects a write aimed
@@ -7471,11 +7472,9 @@ NotFuncHead = :script(~~
                 if (!objHasOwn.call(obj, expVars[i])) { scopePut(obj, expVars[i], undefined) }
             }
             for (var j = 0; j < vars.length; j++) { scopePut(priv, vars[j], undefined) }
-            scopes.push(obj)
             scopes.push(priv)
             bodyT()
-            scopes.pop()
-            scopes.pop()
+            for (var k = 0; k <= names.length; k++) { scopes.pop() }
             return undefined
         }
     }
@@ -7496,7 +7495,9 @@ NotFuncHead = :script(~~
     }
     // The object a (possibly dotted) namespace name denotes, creating what is missing.
     // The first part is looked up in the scope chain rather than through getVar, because
-    // a namespace that does not exist yet must be created instead of failing.
+    // a namespace that does not exist yet must be created instead of failing. Each part's
+    // object is pushed as a scope, so the body of 'namespace A.B' sees A's exports by
+    // bare name as tsc resolves them; the caller pops them.
     function nsResolve(names) {
         var obj = anytype // The namespace object, and then each nested one.
         obj = nsLookup(names[0])
@@ -7504,6 +7505,7 @@ NotFuncHead = :script(~~
             obj = nsNewObj()
             declVar(names[0], obj)
         }
+        scopes.push(obj)
         for (var i = 1; i < names.length; i++) {
             var nxt = anytype // The nested namespace object.
             nxt = hasOwn(obj, names[i]) ? obj[names[i]] : undefined
@@ -7513,6 +7515,7 @@ NotFuncHead = :script(~~
                 trackKey(obj, names[i])
             }
             obj = nxt
+            scopes.push(obj)
         }
         return obj
     }
