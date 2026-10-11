@@ -4981,6 +4981,11 @@ function rbNumMethod(t, name, args) {
     if (name == "times") {
         var tblk = rbBlockOf(args)
         var i = 0
+        if (tblk === null) {
+            var tl = []
+            while (i < x) { tl.push(i); i = i + 1 }
+            return rbEnumAt(rbMkEnum(tl), t, name, args)
+        }
         while (i < x) {
             rbCall1(tblk, i)
             i = i + 1
@@ -4991,6 +4996,11 @@ function rbNumMethod(t, name, args) {
         var ublk = rbBlockOf(args)
         var u = x
         var hi = rbToF(rbArgAt(args, 0))
+        if (ublk === null) {
+            var ul = []
+            while (u <= hi) { ul.push(u); u = u + 1 }
+            return rbEnumAt(rbMkEnum(ul), t, name, args)
+        }
         while (u <= hi) {
             rbCall1(ublk, u)
             u = u + 1
@@ -5001,6 +5011,11 @@ function rbNumMethod(t, name, args) {
         var dblk = rbBlockOf(args)
         var d = x
         var lo = rbToF(rbArgAt(args, 0))
+        if (dblk === null) {
+            var dl = []
+            while (d >= lo) { dl.push(d); d = d - 1 }
+            return rbEnumAt(rbMkEnum(dl), t, name, args)
+        }
         while (d >= lo) {
             rbCall1(dblk, d)
             d = d - 1
@@ -7101,10 +7116,13 @@ function rbMethod(target, name, args) {
         if (name == "replace") { return rbStr(rbArgAt(args, 0)) }
         if (name == "each_char") {
             var ecb = rbBlockOf(args)
-            if (ecb !== null) {
-                var ec = 0
-                while (ec < target.length) { rbCall1(ecb, target.charAt(ec)); ec = ec + 1 }
+            var ec = 0
+            if (ecb === null) {
+                var ecl = []
+                while (ec < target.length) { ecl.push(target.charAt(ec)); ec = ec + 1 }
+                return rbEnumAt(rbMkEnum(ecl), target, name, args)
             }
+            while (ec < target.length) { rbCall1(ecb, target.charAt(ec)); ec = ec + 1 }
             return target
         }
         if (name == "dup" || name == "clone" || name == "freeze") { return target }
@@ -8719,34 +8737,19 @@ function rbStrExtra(target, name, args) {
         i = i + 1
     }
     if (nargs.length == 0) { nargs.push(0) }
-    if (name == "each_byte" || name == "each_codepoint") {
+    // Without a block, each_byte / each_codepoint / each_line / upto answer an
+    // Enumerator over what they would yield.
+    if (name == "each_byte" || name == "each_codepoint" || name == "each_line" || name == "upto") {
         var blk = rbBlockOf(args)
-        var list = name == "each_byte" ? smUtf8Bytes(target) : smCodePoints(target)
-        if (blk !== null) {
-            var k = 0
-            while (k < list.length) { rbCall1(blk, list[k]); k = k + 1 }
-        }
+        var list = []
+        if (name == "each_byte") { list = smUtf8Bytes(target) }
+        if (name == "each_codepoint") { list = smCodePoints(target) }
+        if (name == "each_line") { list = smLines(target) }
+        if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, pos.length > 1 && rbTruthy(pos[1])) }
+        if (blk === null) { return {ok: true, v: rbEnumAt(rbMkEnum(list), target, name, args)} }
+        var k = 0
+        while (k < list.length) { rbCall1(blk, list[k]); k = k + 1 }
         return {ok: true, v: target}
-    }
-    if (name == "each_line") {
-        var blk2 = rbBlockOf(args)
-        var ls = smLines(target)
-        if (blk2 !== null) {
-            var m = 0
-            while (m < ls.length) { rbCall1(blk2, ls[m]); m = m + 1 }
-        }
-        return {ok: true, v: target}
-    }
-    if (name == "upto") {
-        var blk3 = rbBlockOf(args)
-        var ul = smUptoList(target, sargs.length > 0 ? sargs[0] : target,
-                            pos.length > 1 && rbTruthy(pos[1]))
-        if (blk3 !== null) {
-            var u = 0
-            while (u < ul.length) { rbCall1(blk3, ul[u]); u = u + 1 }
-            return {ok: true, v: target}
-        }
-        return {ok: true, v: ul}
     }
     if (name == "dump") { return {ok: true, v: rbStrInspect(target)} }
     // String#slice! answers the REMOVED part; the removal itself is unrepresentable

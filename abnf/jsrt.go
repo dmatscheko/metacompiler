@@ -5943,22 +5943,29 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return rt.rubyRatPart(rt.rubyAsRat(t), true), true
 	case "denominator":
 		return rt.rubyRatPart(rt.rubyAsRat(t), false), true
-	case "times": // n.times { |i| ... }
-		_, tblk := rubyBlockArgs(args)
-		for i := 0.0; i < x; i++ {
-			rt.call(tblk, jsUndef, []interface{}{i})
+	case "times", "upto", "downto": // n.times { |i| ... }
+		// Without a block they answer an Enumerator over the numbers they would yield.
+		npos, nblk := rubyBlockArgs(args)
+		nl := &jsArray{}
+		switch name {
+		case "times":
+			for i := 0.0; i < x; i++ {
+				nl.elems = append(nl.elems, i)
+			}
+		case "upto":
+			for i := x; i <= rubyToF(argAt(npos, 0)); i++ {
+				nl.elems = append(nl.elems, i)
+			}
+		default:
+			for i := x; i >= rubyToF(argAt(npos, 0)); i-- {
+				nl.elems = append(nl.elems, i)
+			}
 		}
-		return t, true
-	case "upto":
-		upos, ublk := rubyBlockArgs(args)
-		for i := x; i <= rubyToF(argAt(upos, 0)); i++ {
-			rt.call(ublk, jsUndef, []interface{}{i})
+		if nblk == nil {
+			return rubyEnumAt(rubyMkEnum(nl), t, name, npos), true
 		}
-		return t, true
-	case "downto":
-		dpos, dblk := rubyBlockArgs(args)
-		for i := x; i >= rubyToF(argAt(dpos, 0)); i-- {
-			rt.call(dblk, jsUndef, []interface{}{i})
+		for _, i := range nl.elems {
+			rt.call(nblk, jsUndef, []interface{}{i})
 		}
 		return t, true
 	case "div", "divmod", "modulo", "rationalize":
@@ -9902,10 +9909,16 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "replace":
 			return rt.toString(argAt(args, 0))
 		case "each_char":
-			if _, blk := rubyBlockArgs(args); blk != nil {
+			cpos, blk := rubyBlockArgs(args)
+			if blk == nil {
+				chars := &jsArray{}
 				for i := 0; i < rt.strLen(o); i++ {
-					rt.call(blk, jsUndef, []interface{}{rt.strAt(o, i)})
+					chars.elems = append(chars.elems, rt.strAt(o, i))
 				}
+				return rubyEnumAt(rubyMkEnum(chars), o, name, cpos)
+			}
+			for i := 0; i < rt.strLen(o); i++ {
+				rt.call(blk, jsUndef, []interface{}{rt.strAt(o, i)})
 			}
 			return o
 		case "dup", "clone", "freeze", "to_str", "+@", "-@", "itself":
@@ -9924,7 +9937,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			ul := rubySmUptoList(o, lim, len(spos) > 1 && rubyTruthy(spos[1]))
 			if sblk == nil {
-				return rubySmStrArr(ul)
+				return rubyEnumAt(rubyMkEnum(rubySmStrArr(ul)), o, name, spos)
 			}
 			for _, e := range ul {
 				rt.call(sblk, jsUndef, []interface{}{e})
@@ -9938,20 +9951,21 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "slice!":
 			return rt.rubyMethod(o, "slice", args)
 		case "each_byte", "each_codepoint", "each_line":
-			if sblk != nil {
-				var list []interface{}
-				if name == "each_byte" {
-					list = rubySmNumArr([]byte(o)).elems
-				} else if name == "each_codepoint" {
-					for _, r := range o {
-						list = append(list, float64(r))
-					}
-				} else {
-					list = rubySmStrArr(rt.rubySmLines(o)).elems
+			var list []interface{}
+			if name == "each_byte" {
+				list = rubySmNumArr([]byte(o)).elems
+			} else if name == "each_codepoint" {
+				for _, r := range o {
+					list = append(list, float64(r))
 				}
-				for _, e := range list {
-					rt.call(sblk, jsUndef, []interface{}{e})
-				}
+			} else {
+				list = rubySmStrArr(rt.rubySmLines(o)).elems
+			}
+			if sblk == nil {
+				return rubyEnumAt(rubyMkEnum(&jsArray{elems: list}), o, name, spos)
+			}
+			for _, e := range list {
+				rt.call(sblk, jsUndef, []interface{}{e})
 			}
 			return o
 		}

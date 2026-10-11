@@ -3797,6 +3797,9 @@ def s84
   h = {a: 1}
   check("en84b", h.each.inspect == "#<Enumerator: {:a=>1}:each>" && h.each.to_a == [[:a, 1]] &&
                  [h.select].inspect == "[#<Enumerator: {:a=>1}:select>]")
+  check("en84e", 3.times.inspect == "#<Enumerator: 3:times>" && 1.upto(3).map { |x| x * 2 } == [2, 4, 6] &&
+                 "ab".each_char.inspect == "#<Enumerator: \"ab\":each_char>" && "ab".each_byte.to_a == [97, 98] &&
+                 "a".upto("c").inspect == "#<Enumerator: \"a\":upto(\"c\")>" && 3.downto(1).to_a == [3, 2, 1])
   sy = ["a b", "[q]", "9a", "", "a?=", "@1", "$-", "abc", "c=", "[]=", "<=>", "@iv", "$1", "$~", "Foo?"]
   check("sy84c", sy.map { |n| n.to_sym.inspect }.join(" ") ==
                  ":\"a b\" :\"[q]\" :\"9a\" :\"\" :\"a?=\" :\"@1\" :\"$-\" :abc :c= :[]= :<=> :@iv :$1 :$~ :Foo?" &&

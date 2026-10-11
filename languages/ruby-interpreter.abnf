@@ -4110,24 +4110,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             nargs.push(toF(args[i]))
         }
         if (nargs.length == 0) { nargs.push(0) }
-        if (name == "each_byte" || name == "each_codepoint") {
-            var list = name == "each_byte" ? smUtf8Bytes(target) : smCodePoints(target)
+        // Without a block, each_byte / each_codepoint / each_line / upto answer an
+        // Enumerator over what they would yield.
+        if (name == "each_byte" || name == "each_codepoint" || name == "each_line" || name == "upto") {
+            var list = []
+            if (name == "each_byte") { list = smUtf8Bytes(target) }
+            if (name == "each_codepoint") { list = smCodePoints(target) }
+            if (name == "each_line") { list = smLines(target) }
+            if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, args.length > 1 && rtest(args[1])) }
+            if (blk == null) { return {ok: true, v: enumAt(mkEnum(list), target, name, args)} }
             for (var k = 0; k < list.length; k++) { blockCall(blk, [list[k]]) }
             return {ok: true, v: target}
-        }
-        if (name == "each_line") {
-            var ls = smLines(target)
-            for (var m = 0; m < ls.length; m++) { blockCall(blk, [ls[m]]) }
-            return {ok: true, v: target}
-        }
-        if (name == "upto") {
-            var ul = smUptoList(target, sargs.length > 0 ? sargs[0] : target,
-                                args.length > 1 && rtest(args[1]))
-            if (blk != null) {
-                for (var u = 0; u < ul.length; u++) { blockCall(blk, [ul[u]]) }
-                return {ok: true, v: target}
-            }
-            return {ok: true, v: ul}
         }
         if (name == "dump") { return {ok: true, v: strInspect(target)} }
         // String#slice! answers the REMOVED part; the removal itself is
@@ -8311,16 +8304,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(target, name, args) }
             if (name == "fdiv") { return mkFlo(intFdiv(target, args[0])) }
             if (name == "pow" && args.length < 2) { return rbin("**", target, args[0]) }
-            if (name == "times") {
-                for (var ni = 0; ni < target; ni++) { blockCall(blk, [ni]) }
-                return target
-            }
-            if (name == "upto") {
-                for (var ui = target; ui <= toF(args[0]); ui++) { blockCall(blk, [ui]) }
-                return target
-            }
-            if (name == "downto") {
-                for (var wi = target; wi >= toF(args[0]); wi--) { blockCall(blk, [wi]) }
+            // Without a block, times / upto / downto answer an Enumerator over the
+            // numbers they would yield.
+            if (name == "times" || name == "upto" || name == "downto") {
+                var nl = []
+                if (name == "times") { for (var ni = 0; ni < target; ni++) { nl.push(ni) } }
+                if (name == "upto") { for (var ui = target; ui <= toF(args[0]); ui++) { nl.push(ui) } }
+                if (name == "downto") { for (var wi = target; wi >= toF(args[0]); wi--) { nl.push(wi) } }
+                if (blk == null) { return enumAt(mkEnum(nl), target, name, args) }
+                for (var nk = 0; nk < nl.length; nk++) { blockCall(blk, [nl[nk]]) }
                 return target
             }
             var im = anytype
@@ -8369,7 +8361,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "ord") { return target.length == 0 ? 0 : target.charCodeAt(0) }
             if (name == "succ" || name == "next") { return strSucc(target) }
             if (name == "replace") { return rstr(args[0]) }
-            if (name == "each_char") { for (var sc = 0; sc < target.length; sc++) { blockCall(blk, [target.charAt(sc)]) } return target }
+            if (name == "each_char") {
+                if (blk == null) { return enumAt(mkEnum(target.split("")), target, name, args) }
+                for (var sc = 0; sc < target.length; sc++) { blockCall(blk, [target.charAt(sc)]) }
+                return target
+            }
             if (name == "include?") { return target.indexOf(rstr(args[0])) >= 0 }
             // The pattern-taking String methods. match/match? compile a plain string
             // to a Regexp, and sub / gsub / scan match it LITERALLY ("a.c".gsub(".",
