@@ -3516,6 +3516,60 @@ func s56() {
 	check("if2", fmt.Sprint(<-ch) == "c5" && g.get(col56(6)) == "c6 main.col56")
 }
 
+// ===== SECTION 57: len, cap, x[i] and stores by static type =====
+type sl57 []int
+type ar57 [3]int
+type st57 string
+type bag57 struct {
+	items []int
+	arr   [2]int
+	m     map[string][]int
+}
+
+// The type parameter S57 shadows the package-level type S57 on purpose: a type
+// parameter stands for whatever instantiates it.
+type S57 [2]int
+
+func tlen57[S57 ~*[3]int](x S57) int { return len(x) + cap(x) }
+
+func nil57(xs []int) int { return len(xs) + cap(xs) }
+
+func set57(g ar57) ar57 {
+	g[0] = 99
+	return g
+}
+
+func s57() {
+	t := sl57{1, 2, 3}
+	check("sty1", len(t) == 3 && cap(t) == 3 && t[1] == 2 && nil57(nil) == 0)
+	var ta [3]int
+	check("sty2", tlen57(&ta) == 6 && len(st57("hé")) == 3 && st57("hé")[1] == 195)
+	var g ar57
+	g2 := set57(g)
+	check("sty3", g[0] == 0 && g2[0] == 99 && len(g) == 3 && cap(g) == 3)
+	b := bag57{items: []int{4, 5}, m: map[string][]int{"k": {7, 8, 9}}}
+	b.items[1] = 50
+	b.arr[1] = 3
+	b.m["k"][2] = 90
+	check("sty4", b.items[1] == 50 && b.arr[1] == 3 && len(b.m["k"]) == 3 && b.m["k"][2] == 90)
+	a := [2]int{1, 2}
+	var x any = a
+	c := a
+	a[0] = 7
+	c[1] = 8
+	check("sty5", fmt.Sprint(x, a, c) == "[1 2] [7 2] [1 8]")
+	sub := t[0:1]
+	var u8 []uint8 = make([]uint8, 2)
+	u8[0] = 255
+	u8[0]++
+	var a8 [2]int8
+	a8[0] = 127
+	a8[0]++
+	check("sty6", len(sub) == 1 && cap(sub) == 3 && u8[0] == 0 && a8[0] == -128)
+	p := &ar57{1, 2, 3}
+	check("sty7", len(p) == 3 && p[2] == 3)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3573,6 +3627,7 @@ func main() {
 	s54() // SECTION-CALL 54
 	s55() // SECTION-CALL 55
 	s56() // SECTION-CALL 56
+	s57() // SECTION-CALL 57
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

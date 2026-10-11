@@ -1663,13 +1663,14 @@ function goPreField(sname, f) {
     while (st > 0 && cIsIdCh(et.charCodeAt(st - 1))) { st = st - 1 }
     if (st < last) { goPreFld["$" + sname + "." + et.substring(st, last)] = et }
 }
-// Every .m(args) and .m suffix of a chain that starts at source offset start gets
-// its receiver record (goRecvC); items are the chain's primary and suffixes.
+// Every .m(args) and .m suffix of a chain that starts at source offset start, and
+// every [i] suffix that carries its offset, gets its receiver record (goRecvC);
+// items are the chain's primary and suffixes.
 function goRecvsC(items, start) {
     var i = 1
     while (i < items.length) {
         var s = items[i]
-        if (s != null && typeof s == "object" && (s.kind == "mcall" || s.kind == "field") && s.at != undefined) { s.rc = goRecvC(start, s.at) }
+        if (s != null && typeof s == "object" && (s.kind == "mcall" || s.kind == "field" || s.kind == "index") && s.at != undefined) { s.rc = goRecvC(start, s.at) }
         i = i + 1
     }
     return items

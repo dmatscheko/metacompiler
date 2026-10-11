@@ -2273,6 +2273,16 @@ func init() {
 			return basePyset([]uint64{a[0], a[1], w(giAdoptLike(rt, cur, u(a[2])))})
 		}
 
+		// Is v an instance of the descriptor cls, by identity? Twin of js_goiscls
+		// in languages/lib/go-rt.metajs.
+		m["js_goiscls"] = func(a []uint64) uint64 {
+			if o, ok := u(a[0]).(*jsObject); ok {
+				if c, ok := o.props["__class"].(*jsObject); ok && c == u(a[1]) {
+					return jsHTrue
+				}
+			}
+			return jsHFalse
+		}
 		// One arm of a type switch, and the ok of the comma-ok assertion: does v
 		// have dynamic type `want` (see goTypeIs)?
 		m["js_gotypeis"] = func(a []uint64) uint64 {

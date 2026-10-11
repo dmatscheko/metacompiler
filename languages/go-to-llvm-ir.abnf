@@ -226,7 +226,7 @@ NoBody      <~~ push(notImplStmt("function without a body", up.pos)) ~~> = [ "\x
 // instantiated one - only compile-time type CHECKING is lost, which a syntax-driven
 // front end does not do anyway.
 TypeParams  = "[" TypeParamGrp { "," TypeParamGrp } "]" ;
-TypeParamGrp = Id { "," Id } Constraint ;
+TypeParamGrp = Id <~~ goNoteTParam(up.in) ~~> { "," Id <~~ goNoteTParam(up.in) ~~> } Constraint ;
 Constraint  = ConstrTerm { "|" ConstrTerm } ;
 ConstrTerm  = [ "~" ] Type ;
 // A POINTER receiver is marked: its method sees the caller's struct, while a value
@@ -856,7 +856,7 @@ MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null}) ~~>
             = "." Id <~~ push({fname: up.in}) ~~> ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+IndexSfx    <~~ push({kind:"index", idx: pop(), at: up.start, rc: null}) ~~>
             = "[" Expression "]" ;
 // x.(T): a type assertion. The value is unchanged, but it is CHECKED, and a value
 // that does not hold the target type panics the way Go does: js_goifas by method set
@@ -1178,7 +1178,7 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos)}) ~~> =
 
 // f(a, b): a function or a builtin. A trailing '...' spreads a slice into the
 // variadic parameter.
-Call        <~~ push(makeCall(goCallBoxC(goAppendC(takeAll(), up.in)))) ~~>
+Call        <~~ var ci = goAppendC(takeAll(), up.in); push(makeCall(goCallBoxC(ci), goSplitArgs(ci.slice(1)).atys)) ~~>
             = Id <~~ push(up.in) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(ae); push({aty: stAt(up.pos)}) ~~> = Expression ;
@@ -2255,16 +2255,30 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
-                    cur = emitHelper(b, "$sidx", [cur, ir2.v])
+                    var xty = s.rc == null ? "" : stChainFrom(s.rc.head, s.rc.hty, s.rc.loc, s.rc.text)
+                    cur = emitIdxGet(b, cur, ir2.v, xty)
                 }
             }
             return {b: b, v: cur}
         }
     }
-    function makeCall(items) {
+    // atys: the arguments' static types, when the call site reported them.
+    function makeCall(items, atys) {
         var name = items[0]
         var args = items.slice(1)
         var spread = takeSpread(args)
+        // len(x) and cap(x) of an argument whose static type is known, where the name
+        // still means the builtin.
+        if ((name == "len" || name == "cap") && atys != undefined && atys.length == 1 && args.length == 1
+            && !spread && !goNameBound(name)) {
+            var lt = atys[0]
+            var lcall = makeCall([name, args[0]])
+            return function(b) {
+                var k = goSKind(lt)
+                if (k == "" || (k == "mp" && name == "cap")) { return lcall(b) }
+                return emitLenOf(b, args[0], k, name == "len" ? "n" : "c")
+            }
+        }
         // real/imag/complex are only declared in jsmain when the program uses them
         // (see usesComplex), and a program may reach complex() without ever writing
         // an imaginary literal.
@@ -2280,6 +2294,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
 
+    // Is name bound by the program - a declaration in scope here, or a top-level func?
+    function goNameBound(name) {
+        for (var si = 0; si < cScopes.length; si++) {
+            var fr = cScopes[si]
+            for (var ni = 0; ni < fr.n.length; ni++) { if (fr.n[ni] === name) { return true } }
+        }
+        return goFnPTys["$" + name] !== undefined
+    }
+    // len / cap (field "n" / "c") of a value of static kind k (goSKind): a slice
+    // reads its header, which only a nil slice of no header lacks; an array, a map
+    // and a string are measured by js_golen, the arm "len" and "cap" take for them.
+    function emitLenOf(b, t, k, fld) {
+        var r = t(b)
+        b = r.b
+        var x = r.v
+        if (k != "sl") { return {b: b, v: callExt(b, "js_golen", [x])} }
+        return emitSelect(b, emitIsSl(b, x),
+                          function(tb) { return {b: tb, v: slF(tb, x, fld)} },
+                          function(eb) { return {b: eb, v: callExt(eb, "js_golen", [x])} })
+    }
     // items = [{cet}, {selems}] / [{alen}, {cet}, {selems}]. One builder covers the
     // slice and the array form: the elements are laid out the same way (positional,
     // indexed, or a nested brace group built against the element type), and only the
@@ -2830,10 +2864,46 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (code == "") { return v }
         return callExt(b, "js_gocopy", [v, emitStr(b, code)])
     }
-    // A store that copies an array anyway ($acopy) copies a struct by its code.
+    // A store that copies an array anyway ($acopy) copies a struct by its code. A
+    // value whose static type cannot hold an array needs neither.
     function emitStoreVal(b, v, ty) {
         if (goCopyCodeC(ty) != "") { return emitStoreCopy(b, v, ty) }
+        return emitArrCopy(b, v, ty)
+    }
+    function emitArrCopy(b, v, ty) {
+        if (goNoArrTy(ty)) { return v }
         return emitHelper(b, "$acopy", [v])
+    }
+    // ----- what a STATIC type lets len, cap, x[i] and a store skip -----
+    // The type texts are go-constfold.js's static types, with defined names resolved.
+    // A type parameter is erased and may stand for anything, so its name is unknown.
+    var goTParams = {}
+    function goNoteTParam(name) { goTParams["$" + name] = true }
+    function goKnownTy(ty) {
+        var t = stBare(ty)
+        if (t == "" || goTParams["$" + t] === true) { return "" }
+        return resolveDefined(t)
+    }
+    // "sl" a slice, "ar" an array, "mp" a map, "st" a string, "" anything else: a
+    // pointer (len(p) of a *[N]T reads through the cell), an interface or an unknown
+    // type, which take the dynamic path.
+    function goSKind(ty) {
+        var t = goKnownTy(ty)
+        if (t.indexOf("[]") == 0) { return "sl" }
+        if (t.charCodeAt(0) == 91) { return "ar" }
+        if (t.indexOf("map[") == 0) { return "mp" }
+        if (t == "string") { return "st" }
+        return ""
+    }
+    // Can a value of this static type never be a Go array (a plain array, which $acopy
+    // copies)? A scalar, a struct, a slice, a map, a pointer and a func cannot; an
+    // interface or an unknown type can.
+    function goNoArrTy(ty) {
+        var t = goKnownTy(ty)
+        if (t == "") { return false }
+        if (goScalarTys[t] == 1 || sFields(t) != undefined) { return true }
+        var k = goSKind(t)
+        return k == "sl" || k == "mp" || t.charCodeAt(0) == 42 || t.indexOf("func(") == 0
     }
     // The last value of a := / = / var reports its static type (go-constfold.js); a
     // thunk storing a struct value copies it. Twin of goStoreThunk in
@@ -3121,14 +3191,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return exitB
     }
     var loopTmp = 0
-    function emitIsSl(b, v) { return callExt(b, "js_is_type", [v, emitStr(b, "$sl")]) }
-    // The slice descriptor lives in a module global, set once by declSlices and pinned
-    // (the collector cannot see a module global), so a header costs no scope lookup.
+    // The slice and pointer descriptors live in module globals, set once before the
+    // program runs and pinned (the collector cannot see a module global), so building
+    // a header or a cell costs no scope lookup, and the two probes are an identity
+    // compare against the descriptor (js_goiscls) rather than a type-name walk.
     var gSlClass = null
     function slClassG() {
         if (gSlClass == null) { gSlClass = m.NewGlobalDef("go.slclass", llvm.constant.NewInt(i64, 0)) }
         return gSlClass
     }
+    var gPtrClass = null
+    function ptrClassG() {
+        if (gPtrClass == null) { gPtrClass = m.NewGlobalDef("go.ptrclass", llvm.constant.NewInt(i64, 0)) }
+        return gPtrClass
+    }
+    function emitIsSl(b, v) { return callExt(b, "js_goiscls", [v, b.NewLoad(i64, slClassG())]) }
     function emitSlHdr(b, a, o, n, c) {
         var h = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [h, emitStr(b, "__class"), b.NewLoad(i64, slClassG())])
@@ -3495,11 +3572,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // ----- Pointers -----
     // A pointer to a variable is a CELL: a tiny class instance named "$ptr" carrying
     // the scope that holds the variable (o) and its name (k). The class shape is what
-    // makes the two probes work - js_is_type answers "$ptr" without aborting on a
-    // number, and js_goeq compares the declared fields, so two cells built for the same
+    // makes the two probes work - js_goiscls answers false on a number instead of
+    // aborting, and js_goeq compares the declared fields, so two cells built for the same
     // variable (p == &n) compare equal. new(int) gets a fresh one slot scope instead.
     // This mirrors the interpreter's makePtr/isPtr exactly; keep the two in step.
-    function emitPtrClass(b) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$ptrclass")]) }
+    function emitPtrClass(b) { return b.NewLoad(i64, ptrClassG()) }
     function emitPtrCell(b, scopeV, nameV) {
         var o = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [o, emitStr(b, "__class"), emitPtrClass(b)])
@@ -3507,7 +3584,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_set", [o, emitStr(b, "k"), nameV])
         return o
     }
-    function emitIsPtr(b, v) { return callExt(b, "js_is_type", [v, emitStr(b, "$ptr")]) }
+    function emitIsPtr(b, v) { return callExt(b, "js_goiscls", [v, emitPtrClass(b)]) }
     // A value-level if/else: both arms are emitted into their own blocks and joined
     // with a phi, the same shape makeOrAnd uses for the short-circuit operators.
     function emitSelect(b, condV, thenFn, elseFn) {
@@ -3669,7 +3746,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     makeTargetRef = function(items) {
         var i = 0
         while (i < items.length && typeof items[i] != "string") { i++ }
-        return {name: items[i], path: items.slice(i + 1), stars: i}
+        var ref = {name: items[i], path: items.slice(i + 1), stars: i, tys: []}
+        // tys[k]: the static type of what path[k] applies to, read now, while the
+        // binding the name refers to is in scope.
+        for (var k = 0; k <= ref.path.length; k++) {
+            ref.tys.push(goRefTy({name: ref.name, path: ref.path.slice(0, k), stars: i}))
+        }
+        return ref
     }
     // The value of a starred target's base: the variable, dereferenced stars - 1 times.
     function emitStarBase(b, ref) {
@@ -3680,6 +3763,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             v = r.v
         }
         return {b: b, v: v}
+    }
+    // x[i] and x[i] = v by the static type of x: each takes exactly the arm $sidx /
+    // $sset would take at run time (js_gislget itself falls back to js_map_get off a
+    // header), and an unknown type calls the helper, which also reads through a
+    // pointer to an array.
+    function emitIdxGet(b, x, iv, ty) {
+        var k = goSKind(ty)
+        if (k == "sl") { return callExt(b, "js_gislget", [x, iv]) }
+        if (k != "") { return callExt(b, "js_map_get", [x, iv]) }
+        return emitHelper(b, "$sidx", [x, iv])
+    }
+    function emitIdxSet(b, x, iv, v, ty) {
+        var k = goSKind(ty)
+        if (k == "sl") {
+            return emitSelect(b, emitIsSl(b, x),
+                              function(tb) { callExt(tb, "js_gisetsl", [x, iv, v]); return {b: tb, v: v} },
+                              function(eb) { callExt(eb, "js_gisetat", [x, iv, v]); return {b: eb, v: v} }).b
+        }
+        if (k != "") { callExt(b, "js_gisetat", [x, iv, v]); return b }
+        emitHelper(b, "$sset", [x, iv, v])
+        return b
     }
     function emitRefRead(b, ref) {
         if (ref.path.length == 0 && ref.stars > 0) {
@@ -3694,7 +3798,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = emitHelper(b, "$sidx", [o, r.v])
+                o = emitIdxGet(b, o, r.v, ref.tys[i])
             }
         }
         return {b: b, v: o}
@@ -3713,7 +3817,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 return r.b
             }
             if (ref.name != "_") {
-                callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), emitHelper(b, "$acopy", [v])])
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), emitArrCopy(b, v, ref.tys[0])])
             }
             return b
         }
@@ -3725,7 +3829,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = emitHelper(b, "$sidx", [o, r.v])
+                o = emitIdxGet(b, o, r.v, ref.tys[i])
             }
         }
         var last = ref.path[ref.path.length - 1]
@@ -3738,8 +3842,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         var kr = last.idx(b)
         b = kr.b
-        emitHelper(b, "$sset", [o, kr.v, v]) // Polymorphic: slice/array element or map entry.
-        return b
+        return emitIdxSet(b, o, kr.v, v, ref.tys[ref.path.length - 1])
     }
 
     // items = [ref..., {op}, exprThunks...]
@@ -3884,8 +3987,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             for (var n2 = 0; n2 < names.length; n2++) {
                 if (names[n2] != "_") {
-                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n2]),
-                                                 emitHelper(b, "$acopy", [vals[n2]])])
+                    var dv = vals[n2]
+                    // A fresh composite literal, and a value goStoreThunk has already
+                    // copied by its code, are new values; nothing else is decided here.
+                    var dt = n2 < sp.tys.length ? sp.tys[n2] : ""
+                    if (dt.charAt(0) != "=" && goCopyCodeC(goStCopyTy(dt)) == "") { dv = emitArrCopy(b, dv, dt) }
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n2]), dv])
                 }
             }
             return b
@@ -3947,7 +4054,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
                 for (var n = 0; n < sp.names.length; n++) {
                     if (sp.names[n] == "_") { continue }
-                    var v = (n < vals.length) ? emitHelper(b, "$acopy", [vals[n]]) : emitZeroDecl(b, ty)
+                    // A constant is never an array, so it is stored as it is.
+                    var v = (n < vals.length) ? vals[n] : emitZeroDecl(b, ty)
                     callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sp.names[n]), v])
                 }
             }
@@ -5577,7 +5685,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_arr_push", [pf, emitStr(b, "o")])
         callExt(b, "js_arr_push", [pf, emitStr(b, "k")])
         callExt(b, "js_set", [pcls, emitStr(b, "__fields"), pf])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ptrclass"), pcls])
+        b.NewStore(callExt(b, "js_gc_pin", [pcls]), ptrClassG())
         b = declDtClasses(b)
         b = goEmitImportedPkgs(b) // imported declarations, each in ITS PACKAGE'S scope
         b = buildPackages(b)

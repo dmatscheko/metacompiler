@@ -1288,6 +1288,15 @@ function js_is_type(v, t) {
     return false
 }
 
+// Is v an instance of the descriptor cls, by identity? The emitter's slice-header
+// and pointer-cell probes (emitIsSl / emitIsPtr) pass the module's own $sl / $ptr
+// descriptor, which answers what js_is_type answers by name without the name
+// walk. Twin of js_goiscls in abnf/jsrtgolang.go.
+function js_goiscls(v, cls) {
+    if (typeof v != "object" || v === null || Array.isArray(v)) { return false }
+    return v.__class === cls
+}
+
 // js_jadd: string concat, 32 bit add for two int32-valued operands, float add
 // when either side is boxed. The Go emitter uses it only for INDEX arithmetic
 // (an offset plus a length) and for the two halves of a complex, so the int32
