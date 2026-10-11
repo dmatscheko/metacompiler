@@ -1831,11 +1831,30 @@ KwDefault   = "default" KwEnd ;
         if (r >= Math.pow(2, 128)) { r = Math.pow(2, 1024) }
         return x < 0 ? -r : r
     }
+    // A boxed 64-bit integer as a FLOAT, rounded once (C11 6.3.1.4p2): reading it as a
+    // double first would round twice. Past 2^53 the bits under 2^11 - far below
+    // binary32's last bit there - are folded into a sticky bit at 2^11 (round to odd),
+    // which leaves a value a double holds exactly and cRoundF32 rounds as the whole
+    // would. Twin of emitJam64 in languages/c-to-llvm-ir.abnf.
+    function cSzF32(x) {
+        var p = x.p
+        var neg = !x.u && (p.h & 0x80000000) !== 0
+        if (neg) { p = i64Neg(p) }
+        var hi = p.h >>> 0
+        var lo = p.l >>> 0
+        if (hi >= 0x200000) {
+            var lost = (lo & 2047) !== 0
+            lo = ((lo & 0xfffff800) | (lost ? 2048 : 0)) >>> 0
+        }
+        var d = hi * 4294967296 + lo
+        return cRoundF32(neg ? 0 - d : d)
+    }
     // Give a value the representation its C type pins: an integer wraps to its
     // declared width and signedness (C11 6.3.1.3), a double keeps its value and a
     // float rounds to binary32 (C11 6.3.1.5).
     function convert(ct, x) {
         if (ct.k == "flt") {
+            if (ct.w == 4 && szIs(x)) return cSzF32(x)
             var d = szIs(x) ? szNum(x) : x
             return ct.w == 4 ? cRoundF32(d) : d
         }

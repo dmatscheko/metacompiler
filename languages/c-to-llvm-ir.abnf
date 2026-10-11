@@ -2876,9 +2876,31 @@ KwDefault   = "default" KwEnd ;
     function emitD2F(b, v) { return b.NewCall(softFn("__mec_d2f", 1, buildD2F), [v]) }
     // int -> double and double -> int through the soft-float helpers.
     function emitI2D(b, ct, v) {
-        // A 64-bit operand is ALREADY an i64 register and must not be extended again.
-        var w = llIs64(v) ? v : ((ct.k == "int" && ct.u == true) ? b.NewZExt(v, i64) : b.NewSExt(v, i64))
-        return b.NewCall(softFn("__mec_i2d", 1, buildI2D), [w])
+        var uns = ct.k == "int" && ct.u == true
+        if (!llIs64(v)) { return b.NewCall(softFn("__mec_i2d", 1, buildI2D), [uns ? b.NewZExt(v, i64) : b.NewSExt(v, i64)]) }
+        if (!uns) { return b.NewCall(softFn("__mec_i2d", 1, buildI2D), [v]) }
+        // An unsigned long at or past 2^63 is negative to __mec_i2d: it converts HALF
+        // the value, with the bit shifted out kept as a sticky bit so the one rounding
+        // still sees it, and doubles the (exact) result.
+        var big = b.NewICmp(llvm.enum.IPredSLT, v, zero64)
+        var half = b.NewOr(b.NewLShr(v, one64), b.NewAnd(v, one64))
+        var dv = b.NewCall(softFn("__mec_i2d", 1, buildI2D), [b.NewSelect(big, half, v)])
+        return b.NewSelect(big, emitDBin(b, "+", dv, dv), dv)
+    }
+    // A 64-bit integer bound for FLOAT is rounded once, not twice (C11 6.3.1.4p2):
+    // beyond 2^53 the conversion to double would round first. Below that it is exact;
+    // above it the bits under 2^11 - all far below binary32's last bit there - are
+    // folded into a sticky bit at 2^11 (round to odd), which the double then holds
+    // exactly and __mec_d2f rounds as the whole value would. Twin of cSzF32 in
+    // languages/c-interpreter.abnf.
+    function emitJam64(b, ct, v) {
+        var uns = ct.k == "int" && ct.u == true
+        var top = uns ? b.NewLShr(v, k64(53)) : b.NewAShr(v, k64(53))
+        var exact = b.NewICmp(llvm.enum.IPredEQ, top, zero64)
+        if (!uns) { exact = b.NewOr(exact, b.NewICmp(llvm.enum.IPredEQ, top, k64(-1))) }
+        var lost = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(v, k64(2047)), zero64)
+        var jam = b.NewOr(b.NewAnd(v, k64(-2048)), b.NewSelect(lost, k64(2048), zero64))
+        return b.NewSelect(exact, v, jam)
     }
     // The soft-float helper answers a full i64; the destination type narrows it
     // (emitConv does), so a (long) cast of a double keeps all 64 bits.
@@ -3276,8 +3298,8 @@ KwDefault   = "default" KwEnd ;
         var toF = ct.w == 4 && !(isFlt(rct) && rct.w == 4)
         if (r.cv != undefined) return emitDblConst(b, toF ? cRoundF32(r.cv) : r.cv)
         if (isFlt(rct)) return toF ? emitD2F(b, r.v) : r.v
-        var dv = emitI2D(b, rct, r.v)
-        return toF ? emitD2F(b, dv) : dv
+        if (!toF) return emitI2D(b, rct, r.v)
+        return emitD2F(b, emitI2D(b, rct, llIs64(r.v) ? emitJam64(b, rct, r.v) : r.v))
     }
     // One value as the representation the destination type needs: an integer becomes
     // a double when the destination is floating point, and a double truncates to an

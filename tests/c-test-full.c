@@ -1889,6 +1889,8 @@ int s50(void) {
    The operands come out of an array, so the emitted code is under test and not the
    constant folder; the last two rows check the folder against the same rule. */
 double s51_d[12];
+long s51_l[3];
+unsigned long s51_u[2];
 float s51_half(float x) { return x / 3; }
 double s51_widen(float x) { return x; }
 float s51_narrow(double x) { return x; }
@@ -1939,6 +1941,18 @@ int s51(void) {
     check(5123, l == 4);
     check(5124, (double)(0.1f + 0.2f) == 0.30000001192092896);
     check(5125, (double)(float)0.1 == 0.10000000149011612);
+    /* A long beyond 2^53 rounds to float ONCE: through double it would first land on
+       the tie halfway between two floats and then go to even, the wrong way. An
+       unsigned long past 2^63 converts as the unsigned value it is. */
+    s51_l[0] = 9007199791611905L;  s51_l[1] = -9007199791611905L;  s51_l[2] = 4611686293305294849L;
+    s51_u[0] = 9223373136366403585UL;  s51_u[1] = 18446742974197923841UL;
+    l = s51_l[0];
+    check(5126, (double)(float)l == 9007200328482816.0);
+    f = s51_l[1];
+    check(5127, (double)f == -9007200328482816.0);
+    check(5128, (double)(float)s51_l[2] == 4611686568183201792.0);
+    check(5129, (double)(float)s51_u[0] == 9223373136366403584.0);
+    check(5130, (double)s51_u[1] == 18446742974197923840.0);
     return 0;
 }
 
