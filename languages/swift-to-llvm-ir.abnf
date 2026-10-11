@@ -4759,6 +4759,13 @@ KwContinue  = "continue" KwEnd ;
         var wAnns = swChainAnns(chead, suffixes)
         swLastChain = {txt: txt, ann: wAnns[suffixes.length]}
         var obsName = swObsChainName(txt, suffixes)
+        var propHead = swPropChainHead(txt, suffixes)
+        var propNames = []
+        for (var pq = 0; pq + 1 < suffixes.length; pq++) { if (suffixes[pq].kind == "field") { propNames.push(suffixes[pq].name) } }
+        // While a mutating call through an observed property is emitted, the field
+        // reads before it record that property (emitPropBefore), in the chain's
+        // own emission. Twin of propOn in swift-interpreter.abnf.
+        var propRecs = null
         var run = function(b) {
             var anns = swChainAnns(chead, suffixes)
             var r = primary(b)
@@ -4863,6 +4870,9 @@ KwContinue  = "continue" KwEnd ;
                     if (pathKey != null && typeAt(pathKey + "." + s.name) != null) {
                         pathKey = pathKey + "." + s.name
                     } else { pathKey = null }
+                    if (propRecs != null && i + 1 < suffixes.length && hasOwn(swObsProps, "$" + s.name)) {
+                        propRecs.push(emitPropBefore(b, cur, s.name))
+                    }
                     cur = emitFieldRead(b, cur, s.name)
                 } else {
                     var ir2 = s.idx(b)
@@ -4881,14 +4891,24 @@ KwContinue  = "continue" KwEnd ;
             }
             return {b: mergeB, v: mergeB.NewPhi(inc)}
         }
-        if (obsName == "") { return run }
-        var obsRec = localObsReg["$" + obsName]
+        if (obsName == "" && propHead == "") { return run }
+        var obsRec = obsName == "" ? null : localObsReg["$" + obsName]
         var mname = suffixes[suffixes.length - 1].name
         return function(b) {
             if (!swIsMutator(mname)) { return run(b) }
-            var before = emitObsBefore(b, obsName)
+            var propHit = propHead != "" && swPropChainHit(propHead, propNames)
+            if (obsName == "" && !propHit) { return run(b) }
+            var precs = []
+            if (propHit) { b = emitPropHead(b, propHead, precs) }
+            var before = obsName == "" ? null : emitObsBefore(b, obsName)
+            var saveRecs = propRecs
+            propRecs = propHit ? precs : null
             var r = run(b)
-            return {b: emitObsReplay(r.b, obsName, obsRec, before), v: r.v}
+            propRecs = saveRecs
+            var rb = r.b
+            if (precs.length > 0) { rb = emitPropReplay(rb, precs) }
+            if (before != null) { rb = emitObsReplay(rb, obsName, obsRec, before) }
+            return {b: rb, v: r.v}
         }
     }
 
@@ -5490,11 +5510,18 @@ KwContinue  = "continue" KwEnd ;
     // Assignment: a plain name goes through js_kget/js_kset (locals, then the
     // properties of self); a .field path targets js_get/js_set; an [i] path
     // targets js_swidx/js_pyset (arrays and dictionaries).
-    function emitRefPath(b, ref) {
-        var o = b.NewCall(rtKGet(), [curScopeV, emitStr(b, ref.name)])
+    // precs, when given, collects the observed properties the path passes
+    // through (emitPropBefore).
+    function emitRefPath(b, ref, precs) {
+        var hr = emitPathHead(b, ref.name)
+        b = hr.b
+        var o = hr.v
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = emitFieldRead(b, o, s.key) }
+            if (s.key != undefined) {
+                if (precs != undefined && hasOwn(swObsProps, "$" + s.key)) { precs.push(emitPropBefore(b, o, s.key)) }
+                o = emitFieldRead(b, o, s.key)
+            }
             else { var ri = s.idx(b); b = ri.b; o = emitIndexRead(b, o, ri.v) }
         }
         var last = ref.path[ref.path.length - 1]
@@ -5538,6 +5565,8 @@ KwContinue  = "continue" KwEnd ;
                      ? swElemTyOf(declTyOf(ref.name)) : ""
         var localAnn = hasOwn(localAnnReg, "$" + ref.name) ? localAnnReg["$" + ref.name] : "?"
         var hasLocal = localAnn != "?"
+        var pathNames = []
+        for (var pn = 0; pn + 1 < ref.path.length; pn++) { if (ref.path[pn].key != undefined) { pathNames.push(ref.path[pn].key) } }
         var obs = hasOwn(localObsReg, "$" + ref.name) ? localObsReg["$" + ref.name] : null
         // `s = [1, 2]` into a local declared `Set<Int>`.
         if (ref.path.length == 0 && op == "=" && hasLocal && swIsSetTy(localAnn)) { valT = swSetInit(valT) }
@@ -5611,7 +5640,9 @@ KwContinue  = "continue" KwEnd ;
                 else { b.NewCall(rtKSet(), [curScopeV, nameV, v]) }
             } else {
                 var before = obs == null ? null : emitObsBefore(b, ref.name)
-                var p = emitRefPath(b, ref)
+                var precs = []
+                if (swPropChainHit(ref.name, pathNames)) { b = emitPropHead(b, ref.name, precs) }
+                var p = emitRefPath(b, ref, precs)
                 b = p.b
                 if (p.isField) {
                     if (op != "=" || !keepTy) {
@@ -5643,6 +5674,7 @@ KwContinue  = "continue" KwEnd ;
                     if (!keepTy) { v = callExt(b, "js_swadoptlike", [swSafeElem(b, p), v, emitStr(b, elemTy)]) }
                     callExt(b, "js_pyset", [p.obj, p.key, v])
                 }
+                if (precs.length > 0) { b = emitPropReplay(b, precs) }
                 if (before != null) { b = emitObsReplay(b, ref.name, obs, before) }
             }
             return {b: b, v: v}
@@ -5935,6 +5967,66 @@ KwContinue  = "continue" KwEnd ;
         var cp = emitCopy(b, cur)
         return {old: cp, isRef: truthy(b, callExt(b, "js_seq", [cp, cur]))}
     }
+    // The same for an observed stored PROPERTY a write or a mutating call reaches
+    // THROUGH (swPropBefore / swPropReplay in swift-interpreter.abnf). The names
+    // are known here, so only a field a program type declares observed is
+    // tracked; the run-time tests are that the holder really keeps it under
+    // __v_<name> and that it holds a value type.
+    function emitPropBefore(b, holderV, key) {
+        var bk = b.NewCall(rtSafeGet(), [holderV, emitStr(b, "__v_" + key)])
+        return {holder: holderV, key: key, old: emitCopy(b, bk), orig: bk}
+    }
+    function emitPropReplay(b, recs) {
+        for (var i = recs.length - 1; i >= 0; i--) {
+            var r = recs[i]
+            var fireB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [r.old, r.orig])), joinB, fireB)
+            var storeV = emitStr(fireB, "__v_" + r.key)
+            var nv = fireB.NewCall(rtSafeGet(), [r.holder, storeV])
+            callExt(fireB, "js_set", [r.holder, storeV, r.old])
+            fireB.NewCall(rtSetProp(), [r.holder, emitStr(fireB, r.key), nv])
+            fireB.NewBr(joinB)
+            b = joinB
+        }
+        return b
+    }
+    // The implicit-self head of a path or chain (`items.append(9)` in a method):
+    // the receiver's own property when no local of the name is in scope at run
+    // time - js_scope_typeof, as the unqualified write in makeAssign asks. On the
+    // local side the record holds undefined twice, which emitPropReplay skips.
+    function emitPropHead(b, head, recs) {
+        if (!hasOwn(swObsProps, "$" + head)) { return b }
+        var nameV = emitStr(b, head)
+        var selfB = curF.NewBlock("")
+        var locB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_scope_typeof", [curScopeV, nameV]), emitStr(b, "undefined")])), selfB, locB)
+        var r = emitPropBefore(selfB, selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "self")]), head)
+        selfB.NewBr(joinB)
+        locB.NewBr(joinB)
+        recs.push({holder: joinB.NewPhi([llvm.ir.NewIncoming(r.holder, selfB), llvm.ir.NewIncoming(hUndef, locB)]), key: head,
+                   old: joinB.NewPhi([llvm.ir.NewIncoming(r.old, selfB), llvm.ir.NewIncoming(hUndef, locB)]),
+                   orig: joinB.NewPhi([llvm.ir.NewIncoming(r.orig, selfB), llvm.ir.NewIncoming(hUndef, locB)])})
+        return joinB
+    }
+    // The head of an assignment path: a local, or - for a name some type declares
+    // as a computed or observed property and no local holds - the receiver's
+    // property, read through its getter (an observed one lives under __v_<name>,
+    // where sw_kget cannot see it).
+    function emitPathHead(b, name) {
+        var nameV = emitStr(b, name)
+        if (!isSetterName(name)) { return {b: b, v: b.NewCall(rtKGet(), [curScopeV, nameV])} }
+        var selfB = curF.NewBlock("")
+        var locB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_scope_typeof", [curScopeV, nameV]), emitStr(b, "undefined")])), selfB, locB)
+        var sv = emitFieldRead(selfB, selfB.NewCall(rtKGet(), [curScopeV, emitStr(selfB, "self")]), name)
+        var lv = locB.NewCall(rtKGet(), [curScopeV, emitStr(locB, name)])
+        selfB.NewBr(joinB)
+        locB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(sv, selfB), llvm.ir.NewIncoming(lv, locB)])}
+    }
     function emitObsReplay(b, name, obs, before) {
         var fireB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
@@ -5945,6 +6037,33 @@ KwContinue  = "continue" KwEnd ;
         emitObsWrite(fireB, name, nameV, obs, nv)
         fireB.NewBr(joinB)
         return joinB
+    }
+    // The OBSERVED stored property names the program declares (splitMembers), and
+    // the shape of a member chain whose mutating call may reach one: a bare name,
+    // fields and subscripts, then the call (`b.items.append(9)`,
+    // `arr[0].items.append(9)`, an implicit-self `items.append(9)`). Answers the
+    // head name, or "".
+    var swObsProps = {}
+    function swPropChainHead(txt, suffixes) {
+        var n = suffixes.length
+        if (n == 0 || suffixes[n - 1].kind != "mcall") { return "" }
+        for (var i = 0; i + 1 < n; i++) {
+            if (suffixes[i].kind != "field" && suffixes[i].kind != "index") { return "" }
+        }
+        var j = 0
+        while (j < txt.length) {
+            var k = txt.charCodeAt(j)
+            if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95)) { break }
+            j++
+        }
+        if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return "" }
+        return txt.substring(0, j)
+    }
+    // Does any name along such a chain (or path) name an observed property?
+    function swPropChainHit(head, names) {
+        if (hasOwn(swObsProps, "$" + head)) { return true }
+        for (var i = 0; i < names.length; i++) { if (hasOwn(swObsProps, "$" + names[i])) { return true } }
+        return false
     }
     // A mutating method: the builtin collections' by name, and every method a
     // program type declares `mutating` (recorded by splitMembers).
@@ -6911,6 +7030,7 @@ KwContinue  = "continue" KwEnd ;
                 if (isStatic) { mem.statComps.push(cp) } else {
                     mem.comps.push(cp)
                     if (cp.observed) {
+                        swObsProps["$" + cp.name] = true
                         var of = {name: cp.name, store: "__v_" + cp.name, ty: cp.ty, hasInit: cp.dflt != null, init: cp.dflt}
                         mem.fields.push(of)
                         if (of.hasInit) { mem.initProps.push(of) }

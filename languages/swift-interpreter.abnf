@@ -5426,6 +5426,16 @@ KwContinue  = "continue" KwEnd ;
         // statically bound member comes from, and whether map/flatMap is Optional's.
         var chainC = {}
         var obsName = swObsChainName(txt, suffixes)
+        var propHead = swPropChainHead(txt, suffixes)
+        var propNames = []
+        for (var pq = 0; pq + 1 < suffixes.length; pq++) { if (suffixes[pq].kind == "field") { propNames.push(suffixes[pq].name) } }
+        var propHit = -1
+        // While a mutating call through an observed property runs, the field reads
+        // before it record that property (swPropBefore) - in the run itself, so
+        // nothing along the chain is evaluated twice.
+        var propOn = false
+        var propRecs = anytype
+        propRecs = null
         var run = function() {
             var cur = anytype
             if (!hasOwn(chainC, "proto")) {
@@ -5484,6 +5494,7 @@ KwContinue  = "continue" KwEnd ;
                     writeBacks(eac.boxes)
                 } else if (s.kind == "field") {
                     if (cur === undefined || cur === null) { fail("field ." + s.name + " of nil") }
+                    if (propOn && i + 1 < suffixes.length) { propRecs = swPropBefore(cur, s.name, propRecs) }
                     cur = core.getField(cur, s.name)
                 } else {
                     cur = core.getIndex(cur, s.idx())
@@ -5491,14 +5502,31 @@ KwContinue  = "continue" KwEnd ;
             }
             return cur
         }
-        if (obsName == "") { return run }
-        var obsRec = localObsReg["$" + obsName]
+        if (obsName == "" && propHead == "") { return run }
+        var obsRec = obsName == "" ? null : localObsReg["$" + obsName]
         var mname = suffixes[suffixes.length - 1].name
+        // Decided at the first run, when every type and its mutating methods and
+        // observed properties are registered: 0 means a plain run from then on.
+        var gate = -1
         return function() {
-            if (!swIsMutator(mname)) { return run() }
-            var before = swObsBefore(obsName)
+            if (gate < 0) {
+                propHit = propHead != "" && swPropChainHit(propHead, propNames) ? 1 : 0
+                gate = swIsMutator(mname) && (obsName != "" || propHit == 1) ? 1 : 0
+            }
+            if (gate == 0) { return run() }
+            var saveOn = propOn
+            var saveRecs = anytype
+            saveRecs = propRecs
+            propOn = propHit == 1
+            propRecs = propOn ? swPropHead(propHead, null) : null
+            var before = obsName == "" ? null : swObsBefore(obsName)
             var r = anytype
             r = run()
+            var recs = anytype
+            recs = propRecs
+            propOn = saveOn
+            propRecs = saveRecs
+            if (recs != null) { swPropReplay(recs) }
             if (before != null) { swObsAfter(obsName, obsRec, before) }
             return r
         }
@@ -5564,6 +5592,11 @@ KwContinue  = "continue" KwEnd ;
         // `s = [1, 2]` into a local declared `Set<Int>`.
         var setTy = ref.path.length == 0 && hasLocal && swIsSetTy(localAnn)
         var mode = -1
+        // The path's field names, for swPropChainHit at the first run (every
+        // type's observed properties are registered by then).
+        var pathNames = []
+        for (var pn = 0; pn + 1 < ref.path.length; pn++) { if (ref.path[pn].key != undefined) { pathNames.push(ref.path[pn].key) } }
+        var propTrack = -1
         return function() {
             if (mode < 0) { mode = swKeepMode(ref, hasLocal, localAnn) }
             // `var v = anytype` first: MetaJS is typed, a local keeps the type of
@@ -5586,12 +5619,14 @@ KwContinue  = "continue" KwEnd ;
                 if (obs != null) { swObsWrite(ref.name, obs, v) } else { setVar(ref.name, v) }
             } else {
                 var before = obs == null ? null : swObsBefore(ref.name)
-                var p = resolveRef(ref)
+                if (propTrack < 0) { propTrack = swPropChainHit(ref.name, pathNames) ? 1 : 0 }
+                var p = swResolvePath(ref, propTrack == 1)
                 if (op != "=") { v = applyOp(op, getElemP(p.obj, p.key), v) }
                 if (mode == 0 || (mode == 2 && !swExfOf(p.obj, p.key))) {
                     v = swAdoptLike(swSafeElem(p.obj, p.key), v, elemTy)
                 }
                 setElem(p.obj, p.key, v)
+                if (p.recs != null) { swPropReplay(p.recs) }
                 if (before != null) { swObsAfter(ref.name, obs, before) }
             }
             return v
@@ -5888,6 +5923,98 @@ KwContinue  = "continue" KwEnd ;
         nv = getVar(name)
         setVar(name, before.old)
         swObsWrite(name, obs, nv)
+    }
+    // The same for an observed stored PROPERTY a write or a mutating call reaches
+    // THROUGH (`b.items[0] = 8`, `b.items.append(9)`): b.items is set as a whole,
+    // so its willSet / didSet fire. swPropBefore copies the property's value - null
+    // when it is not observed or holds a class instance - and swPropReplay, inner
+    // property first, puts each copy back and replays the change through the
+    // setter. Twin of emitPropBefore / emitPropReplay in swift-to-llvm-ir.abnf.
+    function swPropBefore(holder, key, recs) {
+        if (holder === null || typeof holder != "object" || !hasOwn(holder, "__v_" + key)) { return recs }
+        var cur = anytype
+        cur = holder["__v_" + key]
+        var cp = anytype
+        cp = swCopy(cur)
+        if (cp === cur) { return recs }
+        var out = recs == null ? [] : recs
+        out.push({holder: holder, key: key, old: cp})
+        return out
+    }
+    function swPropReplay(recs) {
+        for (var i = recs.length - 1; i >= 0; i--) {
+            var r = recs[i]
+            var nv = anytype
+            nv = r.holder["__v_" + r.key]
+            scopePut(r.holder, "__v_" + r.key, r.old)
+            setElem(r.holder, r.key, nv)
+        }
+    }
+    // A FIELD read along a path: an own slot, else a getter (an observed or
+    // computed property). Not getElemP, which would try a user subscript first.
+    function swFieldOf(o, k) {
+        if (o === null || typeof o != "object") { return undefined }
+        if (hasOwn(o, k)) { return o[k] }
+        var g = findAccessor(o, "__get_" + k)
+        if (g != null) { return g(o) }
+        return undefined
+    }
+    // An implicit-self head (`items.append(9)` in a method) is the receiver's own
+    // property when no local of the name is in scope.
+    function swPropHead(head, recs) {
+        if (lookupOrNull(head) != null) { return recs }
+        return swPropBefore(findThis(), head, recs)
+    }
+    // interp-core's resolveRef, reading each field through its getter (an observed
+    // property lives under __v_<name>) and collecting the observed properties on
+    // the way when the walk saw one of the path's names declared observed.
+    function swResolvePath(ref, track) {
+        var recs = anytype
+        recs = null
+        if (track) { recs = swPropHead(ref.name, recs) }
+        var o = anytype
+        o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.key != undefined) {
+                if (track) { recs = swPropBefore(o, s.key, recs) }
+                o = swFieldOf(o, s.key)
+            } else { o = core.getIndex(o, s.idx()) }
+            if (o === undefined || o === null) {
+                if (core.nilPath != null) { core.nilPath(ref.name) }
+                fail(core.nullWord + " in assignment path of " + ref.name)
+            }
+        }
+        var last = ref.path[ref.path.length - 1]
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx(), recs: recs}
+    }
+
+    // The OBSERVED stored property names the program declares (splitMembers), and
+    // the shape of a member chain whose mutating call may reach one: a bare name,
+    // fields and subscripts, then the call (`b.items.append(9)`,
+    // `arr[0].items.append(9)`, an implicit-self `items.append(9)`). Answers the
+    // head name, or "".
+    var swObsProps = {}
+    function swPropChainHead(txt, suffixes) {
+        var n = suffixes.length
+        if (n == 0 || suffixes[n - 1].kind != "mcall") { return "" }
+        for (var i = 0; i + 1 < n; i++) {
+            if (suffixes[i].kind != "field" && suffixes[i].kind != "index") { return "" }
+        }
+        var j = 0
+        while (j < txt.length) {
+            var k = txt.charCodeAt(j)
+            if (!((k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || k == 95)) { break }
+            j++
+        }
+        if (j == 0 || j >= txt.length || (txt.charAt(j) != "." && txt.charAt(j) != "[")) { return "" }
+        return txt.substring(0, j)
+    }
+    // Does any name along such a chain (or path) name an observed property?
+    function swPropChainHit(head, names) {
+        if (hasOwn(swObsProps, "$" + head)) { return true }
+        for (var i = 0; i < names.length; i++) { if (hasOwn(swObsProps, "$" + names[i])) { return true } }
+        return false
     }
     // A mutating method: the builtin collections' by name, and every method a
     // program type declares `mutating` (recorded by splitMembers).
@@ -6740,6 +6867,7 @@ KwContinue  = "continue" KwEnd ;
                 if (isStatic) { mem.statComps.push(cp) } else {
                     mem.comps.push(cp)
                     if (cp.observed) {
+                        swObsProps["$" + cp.name] = true
                         var of = {name: cp.name, store: "__v_" + cp.name, ty: cp.ty, hasInit: cp.dflt != null, init: cp.dflt}
                         mem.fields.push(of)
                         if (of.hasInit) { mem.initProps.push(of) }

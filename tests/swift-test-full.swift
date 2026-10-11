@@ -2841,6 +2841,16 @@ func s53() {
 // value, so mutating one fires nothing. Every expected value is swiftc 6.1.2's.
 struct P54 { var x = 0; var y = 0; mutating func bump() { x += 1 }; func peek() -> Int { return x } }
 final class C54 { var n = 0 }
+// The same through an observed stored PROPERTY: `b.items.append(9)`, `b.items[0]
+// = 8`, a mutating method on `b.pt`, and the implicit-self forms in a method.
+final class Box54 {
+    var log = ""
+    var items: [Int] = [] { willSet { log += "w\(newValue.count)," } didSet { log += "d\(oldValue.count)>\(items.count);" } }
+    var pt = P54() { didSet { log += "p\(oldValue.x)>\(pt.x);" } }
+    func add(_ v: Int) { items.append(v) }
+    func setFirst(_ v: Int) { items[0] = v }
+    func bumpIt() { pt.bump() }
+}
 func s54() {
     var log = ""
     var a = [1] { willSet { log += "w\(newValue.count)," } didSet { log += "d\(a.count)/\(oldValue.count);" } }
@@ -2862,6 +2872,19 @@ func s54() {
     var c = C54() { didSet { clog += 1 } }
     c.n = 4
     check("54c", clog == 0 && c.n == 4)
+    let b = Box54()
+    b.items.append(9)
+    b.items[0] = 8
+    b.pt.x = 4
+    b.pt.bump()
+    check("54d", b.log == "w1,d0>1;w1,d1>1;p0>4;p4>5;" && b.items == [8])
+    b.log = ""
+    b.add(5)
+    b.setFirst(7)
+    b.bumpIt()
+    let bs = [Box54()]
+    bs[0].items.append(1)
+    check("54e", b.log == "w2,d1>2;w2,d2>2;p5>6;" && b.items == [7, 5] && bs[0].log == "w1,d0>1;")
 }
 
 // ===== SECTION 55: an Optional kept inside an Any; a Unicode.Scalar in a collection =====
