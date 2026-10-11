@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-336** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-341** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -193,10 +193,6 @@ Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's
 mechanism likely closes all: a nominal type on the value. Design, cost, then
 implement or split.
 
-### T-322 kotlin: decimal `toFloat` rounds through double · P1 · KT · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
-`"1.00000005960464477539062500000001".toFloat()` and `"1.0000000596046448".toFloat()`
-give 1.0 in all engines; Float.parseFloat (the jar) 1.0000001. Round once to binary32.
-
 ---
 
 # GO — Go  (oracle: `go run`)
@@ -214,32 +210,38 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-321 go: pointer identity, `f(ys...)` on Println, re-panic suffix, errors.As · P1 · GO · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
-`&T{1} == &T{1}` is true in both engines (go false; struct pointers compare by field),
-so `errors.Is(err, find(0))` is wrong; `fmt.Println(ys...)` dies "TypeError: Not a
-function" in the interpreter (check the compiler); an uncaught re-panic lacks go
-1.23+'s " [recovered, repanicked]" suffix; errors.As is not modelled (needs a nil
-pointer's static type). Related value-model limit: T-266.
+### T-336 go: struct values alias; pointer identity · P1 · GO + CORE · OPEN [V]
+All engines: `a := T{1}; b := a; b.a = 2; c := *p; c.a = 9; d := id(a)` prints
+`10 10 10 10 10` (go `1 2 9 2 1`) - struct assignment, deref, argument passing and
+return do not copy. And `&T{1} == &T{1}` is true (go false): go's == is goValueEq in
+abnf/jsrt.go (CORE). Value semantics first (copy at store, the swift precedent), then
+pointer identity (goValueEq, the map-key path near jsrt.go:3403). Supersedes the
+pointer half of T-266.
+
+### T-337 go: a deferred call that panics stops the remaining defers · P1 · GO · OPEN [V]
+Go runs the frame's other defers and reports the chain (`f got B`, then `panic: C` /
+tab `panic: C`); ours prints `panic: A` / tab `panic: B`. Also `panic(fmt.Sprint(r))`
+with equal text reads as "[recovered, repanicked]" (values compared by value, not
+identity); go prints `[recovered]` and a second line.
 
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-327 swift: `d["k"] = nil`; mutating String methods · P1 · SW · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
-`d["k"] = nil` does not remove the key (swiftc `d.count` 0, ours 1; compiled path is the
-shared js_pyset - use a swift-specific store). `s.append("c")` and the other mutating
-String methods abort "unknown String method: append" (swiftc `abc`).
+### T-340 swift: String.Index, removeSubrange/replaceSubrange, `append(contentsOf:)` · P1 · SW · OPEN [V]
+`s.insert("x", at: s.startIndex)` aborts "unknown String method: index";
+removeSubrange/replaceSubrange missing; Array `append(contentsOf:)` appends the array
+as one element (`["a","b","c",["d","e"]]`).
 
 ---
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-323 dart: String remainder; layer 2 indexes strings by code point · P1 · DA · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V spec-only]
-dart layer 2 indexes by code point (dtStrAt / dtStrRange) while the twin and the
-interpreter use UTF-16 units: `"a\u{1F600}b".substring(3)` is "b" interpreted and
-under llvm.Run, "" natively - a halves divergence. Left from T-282: `runes` (an
-Iterable), allMatches/matchAsPrefix/splitMapJoin/replaceAllMapped (need RegExp/Match),
-static String.fromCharCode(s) (the interpreter has no `String` name).
+### T-339 dart: RegExp; List.map/where/toList/first · P1 · DA · OPEN [V spec-only]
+No engine has a regex-backed Pattern (RegExp/Match in three places; lib/regex.js may
+serve). List.map, where, toList, first are unsupported ("unknown List method: map").
+Also: the shared interpreter host's `charAt` at a lone-surrogate index answers U+FFFD
+(dart's dxQuote uses charAt) - CORE.
 
 ---
 
@@ -266,17 +268,15 @@ see T-293.)
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-320 bash: positional-parameter operator forms · P1 · SH · IN PROGRESS (SH+GO+KT+DA+SW worker, round 7) [V]
-Interpreter: `set -- "a b" c "" d; printf '<%s>' "${@:2}"` gives `< bcd>` (bash
-`<c><><d>`); same for "${*:2}", ${*@Q}/${@@Q} (empty), ${*:-x}/${@:-x} (answer x),
-${*/c/C}, ${*#c}. "${!Z@}" one field (bash <Zq><Zw>); the compiler does not parse
-`${!Z@}`; ${!h*} for an associative array h is empty (bash h). The default word of
-${x:-$*} / ${x:-$@} is flattened with spaces under a null IFS (bash keeps fields).
-(bash 5.3 leaks \x01 into `${a[*]%d}` under a null IFS - a bash bug, not mirrored.)
-
 ### T-334 bash: `${x,,}` / `${x@L}` leave Σ and İ unchanged · P1 · SH · OPEN [V]
 bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
 bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
+
+### T-338 bash: `@A/@a/@K/@k` on `$@`/`$*`; `${x:-"$@"}` under a null IFS; `${!e*}` · P1 · SH · OPEN [V]
+`set -- a b; echo ${@@A}`: bash `set -- 'a' 'b'`; interpreter empty, compiled
+`@=$'\002a\001b\001'` (a halves divergence). `${x:-"$@"}` under a null IFS loses the
+empty field (bash <a b><c><><d>, ours <a b><c><d>: needs quoted-field marking in the
+word model). `e=()` is not listed by `${!e*}`.
 
 ---
 
@@ -553,6 +553,11 @@ T-286 -callgraph: a definition's line in the other languages — DONE 235e3e5 e6
 T-287 layer 2 `rtABigDivMag` binary-searches each quotient limb — DONE 55bd00d (258e9 → 34e9 instructions on a bigint-division probe)
 T-288 js-to-llvm-ir under goja turns a lone `\uD800` literal into U+FFFD — DONE d1b1a42
 T-289 native `d_asin` loses precision near 1 — DONE 2dd1438
+T-322 kotlin: decimal `toFloat` rounds through double — DONE adc9f07
+T-327 swift: `d["k"] = nil`; mutating String methods — DONE c8e174b
+T-321 go: pointer identity, `f(ys...)` on Println, re-panic suffix, errors.As — PARTIAL 201e4bf (errors.As/Join, re-panic chain, spread call); pointer identity is T-336
+T-320 bash: positional-parameter operator forms — DONE 41d1aad (`${x:-"$@"}` under a null IFS is T-338)
+T-323 dart: String remainder; layer 2 indexes strings by code point — PARTIAL 16aeb1b (spec-only: UTF-16 layer 2, runes, String statics, String as Pattern); RegExp is T-339
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
