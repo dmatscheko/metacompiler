@@ -4369,6 +4369,18 @@ fun sec85() {
     check("ax85l", emp.reduceOrNull { a, b -> a + b } == null && emp.reduceRightOrNull { a, b -> a + b } == null)
     check("ax85m", many.reduceOrNull { a, b -> a - b } == -4 && many.reduceRightOrNull { a, b -> a - b } == 2)
     check("ax85n", many.asSequence().reduceOrNull { a, b -> a * b } == 6 && arrayOf<Int>().reduceOrNull { a, b -> a } == null)
+    // Integer.parseInt reads ANY Unicode decimal digit (Character.digit); the floating
+    // forms read ASCII only. A hex mantissa past 53 bits is rounded once, and
+    // Float.parseFloat rounds it straight to binary32, not through a double.
+    val us = listOf("\u0661\u0662", "-\u0661\u0662", "\uFF11\uFF12", "\u0662147483648", "\u19DA",
+        "0x1.00000000000008000001p0", "0x1.000001000000000001p0", "0x10p-1078",
+        "0x1.0000000000000000001p-150", "0x1.fffffefffffffffffffp127")
+    check("ax85o", us[0].toInt() == 12 && us[1].toInt() == -12 && us[2].toIntOrNull() == 12 && us[3].toLong() == 2147483648L)
+    check("ax85p", s85text { us[3].toInt() } == nfe + "For input string: \"\u0662147483648\"" &&
+        us[4].toIntOrNull() == null && us[0].toDoubleOrNull() == null)
+    check("ax85q", us[5].toDouble() == 1.0000000000000002 && s85text { us[6].toFloat() } == "1.0000001")
+    check("ax85r", us[7].toDouble() == 4.9E-324 && s85text { us[8].toFloat() } == "1.4E-45" &&
+        s85text { us[9].toFloat() } == "3.4028235E38")
 }
 
 

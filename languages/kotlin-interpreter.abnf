@@ -4943,12 +4943,13 @@ NotMemberKw = :script(~~
     // abnf/jsrtkotlin.go and k2ParseNum in languages/lib/kotlin-rt.metajs.
     //
     // The integer forms are Integer.parseInt / Long.parseLong: no trimming, a sign and
-    // at least one digit, and out of range is an error, not a wrap. The floating forms
-    // are Double.parseDouble (kJavaFloat).
+    // at least one digit - any Unicode decimal digit, as Character.digit reads it
+    // ("١٢" is 12) - and out of range is an error, not a wrap. The floating forms are
+    // Double.parseDouble and Float.parseFloat (kJavaFloat).
     function kParseNum(sv, name) {
         var orNull = name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull"
         if (name == "toDouble" || name == "toFloat" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
-            var jf = kJavaFloat(sv)
+            var jf = kJavaFloat(sv, name == "toFloat" || name == "toFloatOrNull")
             if (!jf.ok) {
                 if (orNull) { return null }
                 kThrowExc("NumberFormatException", jf.empty ? "empty String" : "For input string: \"" + sv + "\"")
@@ -4962,10 +4963,12 @@ NotMemberKw = :script(~~
         if (body.length > 0 && body.charAt(0) == "-") { neg = true; body = body.substring(1, body.length) }
         else if (body.length > 0 && body.charAt(0) == "+") { body = body.substring(1, body.length) }
         var bad = body.length == 0
+        var ascii = ""
         for (var i = 0; !bad && i < body.length; i++) {
-            var cc = body.charCodeAt(i)
-            if (cc < 48 || cc > 57) { bad = true }
+            var dv = kDecDigit(body.charCodeAt(i))
+            if (dv < 0) { bad = true } else { ascii = ascii + dv }
         }
+        body = ascii
         if (!bad) { bad = !kDigitsFit(body, neg, long) }
         if (bad) {
             if (orNull) { return null }
@@ -4983,6 +4986,21 @@ NotMemberKw = :script(~~
         if (long) { return kConv(acc, 64, false) }
         return kConv(acc, 32, false)
     }
+    // The value of a Unicode decimal digit (general category Nd) in the BMP, or -1:
+    // what java's Character.digit(c, 10) answers. Every such digit is one of these 37
+    // runs of ten, read off java 24. Twin of ktDecDigit in abnf/jsrtkotlin.go and
+    // k2DecDigit in languages/lib/kotlin-rt.metajs.
+    var kDigitZeros = [0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6,
+                       0xC66, 0xCE6, 0xD66, 0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0,
+                       0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50,
+                       0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10]
+    function kDecDigit(c) {
+        if (c >= 48 && c <= 57) { return c - 48 }
+        for (var i = 1; i < kDigitZeros.length; i++) {
+            if (c >= kDigitZeros[i] && c <= kDigitZeros[i] + 9) { return c - kDigitZeros[i] }
+        }
+        return -1
+    }
     // Do these decimal digits fit an Int (or a Long), with the sign already taken off?
     // Compared as TEXT against the limit, so no arithmetic can wrap first.
     function kDigitsFit(body, neg, long) {
@@ -4999,8 +5017,8 @@ NotMemberKw = :script(~~
     // optional point, a REQUIRED binary exponent p), and a decimal or hexadecimal may
     // end in one of f F d D. Nothing else may follow: "1.5abc" and "Inf" are errors.
     // Answers {ok, v, empty}; `empty` selects java's "empty String" message. A hex
-    // mantissa is exact while it fits 53 bits.
-    function kJavaFloat(sv) {
+    // mantissa of any length is rounded ONCE, to a float for Float.parseFloat (f32).
+    function kJavaFloat(sv, f32) {
         var a = 0
         var b = sv.length
         while (a < b && sv.charCodeAt(a) <= 32) { a++ }
@@ -5023,12 +5041,12 @@ NotMemberKw = :script(~~
             var j = i
             if (hex) {
                 j = i + 2
-                var m = 0
+                var ds = []
                 var fr = 0
                 var dot = false
                 while (j < n) {
                     var hc = kHexVal(t.charCodeAt(j))
-                    if (hc >= 0) { m = m * 16 + hc; nd++; if (dot) { fr++ } }
+                    if (hc >= 0) { ds.push(hc); nd++; if (dot) { fr++ } }
                     else if (t.charAt(j) == "." && !dot) { dot = true }
                     else { break }
                     j++
@@ -5041,7 +5059,7 @@ NotMemberKw = :script(~~
                 var ne = 0
                 while (j < n && t.charCodeAt(j) >= 48 && t.charCodeAt(j) <= 57) { ex = ex * 10 + (t.charCodeAt(j) - 48); ne++; j++ }
                 if (ne == 0 || j != n) { return {ok: false, v: 0, empty: false} }
-                v = m * Math.pow(2, es * ex - 4 * fr)
+                v = f32 ? kHexRound(ds, es * ex - 4 * fr, 24, -149) : kHexRound(ds, es * ex - 4 * fr, 53, -1074)
             } else {
                 var sawDot = false
                 while (j < n) {
@@ -5064,6 +5082,36 @@ NotMemberKw = :script(~~
             }
         }
         return {ok: true, v: neg ? -v : v, empty: false}
+    }
+    // The hex digits ds (most significant first) times 2^e2, rounded once to p
+    // significand bits, ties to even, with no bit below 2^emin (the least subnormal):
+    // java's parseHexString, which reads every digit. The result is exact in a double
+    // and Infinity past the format's range. Twin of k2HexRound in
+    // languages/lib/kotlin-rt.metajs; the Go twin hands the text to strconv.
+    function kHexRound(ds, e2, p, emin) {
+        var s = 0
+        while (s < ds.length && ds[s] == 0) { s++ }
+        if (s == ds.length) { return 0 }
+        var lead = ds[s]
+        var lb = lead >= 8 ? 4 : (lead >= 4 ? 3 : (lead >= 2 ? 2 : 1))
+        var nb = lb + 4 * (ds.length - s - 1)
+        var keepBits = p
+        var lastExp = e2 + nb - p
+        if (lastExp < emin) { keepBits = p - (emin - lastExp); lastExp = emin }
+        var keep = 0
+        var half = 0
+        var sticky = 0
+        for (var b = 0; b < nb; b++) {
+            var off = 4 - lb + b
+            var bit = (ds[s + Math.floor(off / 4)] >> (3 - off % 4)) & 1
+            if (b < keepBits) { keep = keep * 2 + bit }
+            else if (b == keepBits) { half = bit }
+            else { sticky = sticky | bit }
+        }
+        if (nb < keepBits) { keep = keep * Math.pow(2, keepBits - nb) }
+        if (keepBits < 0) { sticky = 1 }
+        if (half == 1 && (sticky == 1 || keep % 2 == 1)) { keep = keep + 1 }
+        return keep * Math.pow(2, lastExp)
     }
     function kHexVal(c) {
         if (c >= 48 && c <= 57) { return c - 48 }

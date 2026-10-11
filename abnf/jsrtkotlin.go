@@ -3035,7 +3035,7 @@ func ktTrimIndent(s string) string {
 func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 	orNull := strings.HasSuffix(name, "OrNull")
 	if name == "toDouble" || name == "toFloat" || name == "toDoubleOrNull" || name == "toFloatOrNull" {
-		f, ok, empty := ktJavaFloat(s)
+		f, ok, empty := ktJavaFloat(s, name == "toFloat" || name == "toFloatOrNull")
 		if !ok {
 			if orNull {
 				return jsNull, true
@@ -3059,11 +3059,16 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 		body = body[1:]
 	}
 	bad := body == ""
+	ascii := make([]byte, 0, len(body))
 	for _, r := range body {
-		if r < '0' || r > '9' {
+		d := ktDecDigit(r)
+		if d < 0 {
 			bad = true
+			break
 		}
+		ascii = append(ascii, byte('0'+d))
 	}
+	body = string(ascii)
 	if !bad {
 		bad = !ktDigitsFit(body, neg, long)
 	}
@@ -3085,6 +3090,25 @@ func ktParseNum(rt *jsrt, s, name string) (interface{}, bool) {
 		return ktNorm(v, 64, false), true
 	}
 	return ktNorm(v, 32, false), true
+}
+
+// ktDigitZeros are the first code points of the 37 runs of ten Unicode decimal
+// digits (Nd) in the BMP, read off java 24's Character.digit.
+var ktDigitZeros = [...]rune{0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6,
+	0xC66, 0xCE6, 0xD66, 0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0,
+	0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50,
+	0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10}
+
+// ktDecDigit is java's Character.digit(c, 10): the value of a Unicode decimal
+// digit in the BMP, or -1. Integer.parseInt accepts every one ("١٢" is 12). Twin of
+// kDecDigit in languages/kotlin-interpreter.abnf.
+func ktDecDigit(c rune) int {
+	for _, z := range ktDigitZeros {
+		if c >= z && c <= z+9 {
+			return int(c - z)
+		}
+	}
+	return -1
 }
 
 // ktDigitsFit: do these decimal digits fit an Int (or a Long), with the sign already
@@ -3110,7 +3134,7 @@ func ktDigitsFit(body string, neg, long bool) bool {
 // digits with an optional point, a REQUIRED binary exponent p), and a decimal or
 // hexadecimal may end in one of f F d D. Nothing else may follow. empty selects
 // java's "empty String" message. Twin of kJavaFloat in kotlin-interpreter.abnf.
-func ktJavaFloat(s string) (float64, bool, bool) {
+func ktJavaFloat(s string, f32 bool) (float64, bool, bool) {
 	t := strings.TrimFunc(s, func(r rune) bool { return r <= ' ' })
 	if t == "" {
 		return 0, false, true
@@ -3170,12 +3194,17 @@ func ktJavaFloat(s string) (float64, bool, bool) {
 			return 0, false, false
 		}
 		num := t[i:n]
+		size := 64
 		if hex {
 			// Go's own hex floats agree with java's once the grammar is checked: 0x,
-			// digits, an optional point, and the p exponent.
+			// digits, an optional point, and the p exponent. Float.parseFloat rounds a
+			// hex mantissa straight to binary32, so that is parsed at 32 bits.
 			num = "0x" + t[i+2:n]
+			if f32 {
+				size = 32
+			}
 		}
-		f, err := strconv.ParseFloat(num, 64)
+		f, err := strconv.ParseFloat(num, size)
 		if err != nil && !errors.Is(err, strconv.ErrRange) {
 			return 0, false, false
 		}

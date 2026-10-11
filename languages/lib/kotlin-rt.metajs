@@ -2782,7 +2782,7 @@ function k2TrimIndent(s) {
 function k2ParseNum(s, name) {
     var orNull = name == "toIntOrNull" || name == "toLongOrNull" || name == "toDoubleOrNull" || name == "toFloatOrNull"
     if (name == "toDouble" || name == "toFloat" || name == "toDoubleOrNull" || name == "toFloatOrNull") {
-        var jf = k2JavaFloat(s)
+        var jf = k2JavaFloat(s, name == "toFloat" || name == "toFloatOrNull")
         if (!jf.ok) {
             if (orNull) { return null }
             if (jf.empty) { ktRaise("NumberFormatException", "empty String") }
@@ -2801,12 +2801,14 @@ function k2ParseNum(s, name) {
         body = body.substring(1, body.length)
     }
     var bad = body.length == 0
+    var ascii = ""
     var i = 0
     while (!bad && i < body.length) {
-        var c = body.charCodeAt(i)
-        if (c < 48 || c > 57) { bad = true }
+        var dv = k2DecDigit(body.charCodeAt(i))
+        if (dv < 0) { bad = true } else { ascii = ascii + String.fromCharCode(48 + dv) }
         i = i + 1
     }
+    body = ascii
     if (!bad) { bad = !k2DigitsFit(body, neg, long) }
     if (bad) {
         if (orNull) { return null }
@@ -2816,6 +2818,57 @@ function k2ParseNum(s, name) {
     if (neg) { acc = sintOp(1, 0, acc) }
     if (long) { return ktNorm(acc, 64, 0) }
     return ktNorm(acc, 32, 0)
+}
+
+// k2DecDigit is kDecDigit: java's Character.digit(c, 10) - the value of a Unicode
+// decimal digit in the BMP, or -1 - over the same 37 runs of ten.
+var K2_DIGIT_ZEROS = [0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6,
+                      0xC66, 0xCE6, 0xD66, 0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0,
+                      0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50,
+                      0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10]
+function k2DecDigit(c) {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    var i = 1
+    while (i < K2_DIGIT_ZEROS.length) {
+        var z = K2_DIGIT_ZEROS[i]
+        if (c >= z && c <= z + 9) { return c - z }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+// k2HexRound is kHexRound: the hex digits ds times 2^e2, rounded once to p
+// significand bits, ties to even, with no bit below 2^emin.
+function k2HexRound(ds, e2, p, emin) {
+    var s = 0
+    while (s < ds.length && ds[s] == 0) { s = s + 1 }
+    if (s == ds.length) { return 0 }
+    var lead = ds[s]
+    var lb = 1
+    if (lead >= 8) { lb = 4 } else if (lead >= 4) { lb = 3 } else if (lead >= 2) { lb = 2 }
+    var nb = lb + 4 * (ds.length - s - 1)
+    var keepBits = p
+    var lastExp = e2 + nb - p
+    if (lastExp < emin) {
+        keepBits = p - (emin - lastExp)
+        lastExp = emin
+    }
+    var keep = 0
+    var half = 0
+    var sticky = 0
+    var b = 0
+    while (b < nb) {
+        var off = 4 - lb + b
+        var bit = (ds[s + Math.floor(off / 4)] >> (3 - off % 4)) & 1
+        if (b < keepBits) { keep = keep * 2 + bit }
+        else if (b == keepBits) { half = bit }
+        else { sticky = sticky | bit }
+        b = b + 1
+    }
+    if (nb < keepBits) { keep = keep * Math.pow(2, keepBits - nb) }
+    if (keepBits < 0) { sticky = 1 }
+    if (half == 1 && (sticky == 1 || keep % 2 == 1)) { keep = keep + 1 }
+    return keep * Math.pow(2, lastExp)
 }
 
 // k2DigitsFit is kDigitsFit: do these decimal digits fit an Int (or a Long),
@@ -2836,8 +2889,8 @@ function k2DigitsFit(body, neg, long) {
 // then NaN, Infinity, a decimal (at least one digit, an optional point and
 // exponent) or a hexadecimal (0x, hex digits, an optional point, a REQUIRED p
 // exponent), and a decimal or hexadecimal may end in one of f F d D. A hex
-// mantissa is exact while it fits 53 bits.
-function k2JavaFloat(s) {
+// mantissa of any length is rounded ONCE, to a float for Float.parseFloat (f32).
+function k2JavaFloat(s, f32) {
     var a = 0
     var b = s.length
     while (a < b && s.charCodeAt(a) <= 32) { a = a + 1 }
@@ -2864,14 +2917,14 @@ function k2JavaFloat(s) {
         var j = i
         if (hex) {
             j = i + 2
-            var m = 0
+            var ds = []
             var fr = 0
             var dot = false
             var more = true
             while (more && j < n) {
                 var hc = k2HexVal(t.charCodeAt(j))
                 if (hc >= 0) {
-                    m = m * 16 + hc
+                    ds.push(hc)
                     nd = nd + 1
                     if (dot) { fr = fr + 1 }
                     j = j + 1
@@ -2898,7 +2951,8 @@ function k2JavaFloat(s) {
                 j = j + 1
             }
             if (ne == 0 || j != n) { return {ok: false, v: 0, empty: false} }
-            v = m * Math.pow(2, es * ex - 4 * fr)
+            if (f32) { v = k2HexRound(ds, es * ex - 4 * fr, 24, 0 - 149) }
+            else { v = k2HexRound(ds, es * ex - 4 * fr, 53, 0 - 1074) }
         } else {
             var sawDot = false
             var go = true
