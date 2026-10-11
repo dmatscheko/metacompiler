@@ -1339,10 +1339,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
     // pyCall routes here rather than instantiating a class.
     function pyConvert(name, args, named) {
+        // int(I(5)): a numeric conversion reads a builtin subclass's value.
+        if (args.length > 0 && (name == "int" || name == "float" || name == "complex")
+            && pyUser(args[0]) && args[0].__val !== undefined) {
+            args = [args[0].__val].concat(args.slice(1))
+        }
         if (named != null && named.keys.length > 0) {
             if (name == "int") { return pyIntNew(pyKwPos("int", args, named, ["x", "base"], 1)) }
             if (name == "str") {
-                if (args.length == 0 && dictFind(named, "object") < 0) { args = [""] }
+                // str(encoding=...) with no object is "" - nothing is decoded.
+                if (args.length == 0 && dictFind(named, "object") < 0) {
+                    pyKwPos("str", [""], named, ["object", "encoding", "errors"], 0)
+                    return ""
+                }
                 args = pyKwPos("str", args, named, ["object", "encoding", "errors"], 0)
             }
             else if (name == "complex") {
@@ -1352,7 +1361,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (name != "dict" && name != "type") { pyListErr("TypeError", name + "() takes no keyword arguments") }
         }
         var v = args.length > 0 ? args[0] : undefined
-        if (name == "str") { return args.length == 0 ? "" : pstr(v) }
+        if (name == "str") {
+            if (args.length > 1 && (args[1] !== undefined || (args.length > 2 && args[2] !== undefined))) {
+                if (typeof v == "string") { pyListErr("TypeError", "decoding str is not supported") }
+                if (!Array.isArray(v)) {
+                    pyListErr("TypeError", "decoding to str: need a bytes-like object, " + pyTypeOf(v).__name + " found")
+                }
+                return pyBytesDecode(v, args[1])
+            }
+            return args.length == 0 ? "" : pstr(v)
+        }
         if (name == "int") { return pyIntNew(args) }
         if (name == "float") {
             if (typeof v == "string") { return pyFlo(pyStrToF(v)) }
@@ -1701,6 +1719,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     hostGlobals["iter"] = function(v) {
         if (isGen(v) || isPyIt(v)) { return v }
+        if (pyUser(v)) {
+            var itf = clsFind(v.__class, "__iter__")
+            if (itf != null) { return itf(v) }
+        }
         return pyMkIter(pyItKind(v), iterToList(v).slice(0))
     }
     // next(it[, default]) - the ordinary way to drive a generator.
@@ -2828,6 +2850,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var mro = cls.__mro
             for (var mi = 0; mi < mro.length; mi++) {
                 if (hasOwn(mro[mi], name)) { return mro[mi][name] }
+                if (mro[mi].__builtin === true) {
+                    var bd = pyBDelegate(mro[mi].__name, name)
+                    if (bd != null) { return bd }
+                }
             }
             return null
         }
@@ -2841,7 +2867,105 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return null
     }
-    // Python truthiness: empty lists and dicts are falsy.
+    // ----- subclasses of builtin types -----
+    //
+    // An instance of `class S(str)` keeps its builtin value in a hidden __val
+    // slot (pyNew), and the builtin TYPE in its resolution order answers a
+    // lookup with a DELEGATE that applies the builtin operation to that value:
+    // s.upper(), len(s), s + "c", s[0], str(s), iteration. Every dispatch site
+    // already asks the class for a dunder, so the delegates are found there, by
+    // super() and by hasattr alike, and a class's own definitions still win.
+    // Like CPython, a delegated method answers a plain builtin value
+    // (S("ab").upper() is a str). Delegates are made once per (type, name), so
+    // reading one twice gives the same function. Twin of abnf/jsrtpysub.go and
+    // pyBDelegate in lib/python-rt.metajs.
+    var pyBDelKeys = []
+    var pyBDelFns = []
+    function pyBDelegate(tname, name) {
+        if (tname != "str" && tname != "int" && tname != "float" && tname != "list" && tname != "dict") { return null }
+        var key = tname + "." + name
+        for (var i = 0; i < pyBDelKeys.length; i++) { if (pyBDelKeys[i] == key) { return pyBDelFns[i] } }
+        var f = pyBDelMake(tname, name)
+        if (f != null) {
+            pyBDelKeys.push(key)
+            pyBDelFns.push(f)
+        }
+        return f
+    }
+    function pyBDelMake(tname, name) {
+        var num = tname == "int" || tname == "float"
+        var sample = anytype
+        sample = pyTypeSample(tname)
+        if (sample !== undefined && pyBuiltinAttr(sample, name)) {
+            return function() {
+                var rest = []
+                for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+                return mcall(pyBDelSelf(arguments[0]), name, rest, kTakeNamed())
+            }
+        }
+        if (name == "__repr__") { return function(self) { return prepr(pyBDelSelf(self)) } }
+        if (name == "__str__" && tname == "str") { return function(self) { return pyBDelSelf(self) } }
+        if (name == "__eq__") { return function(self, o) { return pyEq(pyBDelSelf(self), o) } }
+        if (name == "__ne__") { return function(self, o) { return !pyEq(pyBDelSelf(self), o) } }
+        if (num) {
+            if (name == "__bool__") { return function(self) { return pytruthy(pyBDelSelf(self)) } }
+            if (name == "__neg__") { return function(self) { return binOp("-", 0, pyBDelSelf(self)) } }
+        } else {
+            if (name == "__len__") { return function(self) { return hostGlobals["len"](pyBDelSelf(self)) } }
+            if (name == "__iter__") { return function(self) { return hostGlobals["iter"](pyBDelSelf(self)) } }
+            if (name == "__getitem__") { return function(self, k) { return pyget(pyBDelSelf(self), k) } }
+            if (name == "__contains__") { return function(self, k) { return pyIn(k, pyBDelSelf(self)) } }
+            if (tname == "list" || tname == "dict") {
+                if (name == "__setitem__") { return function(self, k, v) { refStore(pyBDelSelf(self), {}, {idx: k}, v) } }
+                if (name == "__delitem__") { return function(self, k) { pyDelItem(pyBDelSelf(self), k) } }
+            }
+        }
+        // list.__init__ / dict.__init__ refill the value in place, which is what
+        // super().__init__(xs) in a subclass's own __init__ reaches.
+        if (name == "__init__" && (tname == "list" || tname == "dict")) {
+            return function() {
+                var rest = []
+                for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+                var fresh = pyConvert(tname, rest, kTakeNamed())
+                mcall(pyBDelSelf(arguments[0]), "clear", [], undefined)
+                mcall(pyBDelSelf(arguments[0]), tname == "list" ? "extend" : "update", [fresh], undefined)
+                return undefined
+            }
+        }
+        var ops = num ? ["+", "-", "*", "/", "//", "%", "**", "<", ">", "<=", ">="] : ["+", "*", "<", ">", "<=", ">="]
+        if (tname == "int") { ops = ops.concat(["|", "&", "^", "<<", ">>"]) }
+        if (tname == "str") { ops.push("%") }
+        if (tname == "dict") { ops = ["|"] }
+        for (var k = 0; k < ops.length; k++) {
+            var op = ops[k]
+            var dn = pyDunder[op]
+            if (name == dn) { return pyBDelBin(op, false) }
+            if (op != "<" && op != ">" && op != "<=" && op != ">=" && name == "__r" + dn.substring(2)) { return pyBDelBin(op, true) }
+        }
+        return null
+    }
+    // The builtin value a delegate works on: an instance's __val, or a plain
+    // value of the type itself (str.__repr__("x")).
+    function pyBDelSelf(self) {
+        if (pyUser(self) && self.__val !== undefined) { return self.__val }
+        return self
+    }
+    function pyBDelBin(op, reflected) {
+        if (reflected) { return function(self, o) { return binOp(op, o, pyBDelSelf(self)) } }
+        return function(self, o) { return binOp(op, pyBDelSelf(self), o) }
+    }
+    // The first builtin type on cls's resolution order that pyBDelegate serves,
+    // or "" - the kind of value pyNew keeps in __val.
+    function pyBuiltinBase(cls) {
+        if (!hasOwn(cls, "__mro")) { return "" }
+        var mro = cls.__mro
+        for (var i = 0; i < mro.length; i++) {
+            if (mro[i].__builtin === true && pyBDelegate(mro[i].__name, "__repr__") != null) { return mro[i].__name }
+        }
+        return ""
+    }
+    // Python truthiness: empty lists and dicts are falsy, and an instance asks
+    // its class for __bool__, then __len__.
     function pytruthy(v) {
         if (Array.isArray(v)) return v.length > 0
         if (isDict(v)) return v.keys.length > 0
@@ -2849,7 +2973,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // 0.0 is falsy, and every OBJECT is truthy - so the float box has to be
         // read before the generic !!v, which would answer true for it.
         if (isFlo(v)) return v.__flo != 0
+        if (typeof v == "object" && pyUser(v)) { return pyUserTruthy(v) }
         return !!v
+    }
+    function pyUserTruthy(v) {
+        var b = clsFind(v.__class, "__bool__")
+        if (b != null) { return pytruthy(b(v)) }
+        var n = clsFind(v.__class, "__len__")
+        if (n != null) { return pytruthy(n(v)) }
+        return true
     }
 
     function pyget(o, i) {
@@ -2936,7 +3068,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isPyIt(v)) return pyItRest(v)
         if (isDict(v)) return v.keys.slice(0)
         if (typeof v == "string") return pySChars(v)
+        if (pyUser(v)) {
+            var itf = clsFind(v.__class, "__iter__")
+            if (itf != null) { return pyDrainIter(itf(v)) }
+        }
         pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(v).__name + "' object is not iterable"]))
+    }
+    // What an __iter__ answered, as a list: a builtin iterable, or an instance
+    // whose __next__ is called until it raises StopIteration.
+    function pyDrainIter(it) {
+        if (!pyUser(it)) { return iterToList(it) }
+        var nx = clsFind(it.__class, "__next__")
+        if (nx == null) { pyListErr("TypeError", "iter() returned non-iterator of type '" + it.__class.__name + "'") }
+        var out = []
+        while (true) {
+            var saved = scopes
+            try { out.push(nx(it)) }
+            catch (e) {
+                scopes = saved
+                if (e != null && e != undefined && e.__exc === true && pyUser(e.v)
+                    && clsIsSub(e.v.__class, hostGlobals["StopIteration"])) { return out }
+                throw e
+            }
+        }
+        return out
+    }
+    // Is v something a for loop or an unpacking can walk?
+    function pyIterable(v) {
+        if (Array.isArray(v) || isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string") { return true }
+        return pyUser(v) && clsFind(v.__class, "__iter__") != null
     }
     // ----- Regular expressions: the `re` module -----
     //
@@ -4695,6 +4855,65 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("method call ." + name + "() on " + pstr(target))
     }
 
+    // bytes.decode(encoding="utf-8") of a list of byte values: UTF-8 (strict,
+    // with CPython's UnicodeDecodeError texts), ASCII or Latin-1, and
+    // LookupError for any other codec. Twin of rt.pyBytesDecode in abnf/jsrt.go
+    // and pyBytesDecode in lib/python-rt.metajs.
+    function pyBytesDecode(bs, encV) {
+        var enc = "utf-8"
+        if (encV !== undefined && encV !== null) { enc = pstr(encV) }
+        var e = ""
+        for (var ei = 0; ei < enc.length; ei++) { e = e + (enc.charAt(ei) == "_" ? "-" : enc.charAt(ei).toLowerCase()) }
+        var out = ""
+        var n = bs.length
+        if (e == "latin-1" || e == "latin1" || e == "iso-8859-1" || e == "iso8859-1") {
+            for (var l = 0; l < n; l++) { out = out + pyChrOf(bs[l]) }
+            return out
+        }
+        if (e == "ascii" || e == "us-ascii") {
+            for (var a = 0; a < n; a++) {
+                if (bs[a] > 127) { pyDecodeErr("ascii", bs, a, a + 1, "ordinal not in range(128)") }
+                out = out + pyChrOf(bs[a])
+            }
+            return out
+        }
+        if (e != "utf-8" && e != "utf8") { pyListErr("LookupError", "unknown encoding: " + enc) }
+        var i = 0
+        while (i < n) {
+            var b0 = bs[i]
+            if (b0 < 128) { out = out + pyChrOf(b0); i = i + 1; continue }
+            var need = 0
+            if (b0 >= 194 && b0 <= 223) { need = 1 }
+            else if (b0 >= 224 && b0 <= 239) { need = 2 }
+            else if (b0 >= 240 && b0 <= 244) { need = 3 }
+            else { pyDecodeErr("utf-8", bs, i, i + 1, "invalid start byte") }
+            var cp = b0 % (need == 1 ? 32 : need == 2 ? 16 : 8)
+            for (var k = 1; k <= need; k++) {
+                if (i + k >= n) { pyDecodeErr("utf-8", bs, i, n, "unexpected end of data") }
+                var c = bs[i + k]
+                var lo = 128
+                var hi = 191
+                if (k == 1 && b0 == 224) { lo = 160 }
+                if (k == 1 && b0 == 237) { hi = 159 }
+                if (k == 1 && b0 == 240) { lo = 144 }
+                if (k == 1 && b0 == 244) { hi = 143 }
+                if (c < lo || c > hi) { pyDecodeErr("utf-8", bs, i, i + k, "invalid continuation byte") }
+                cp = cp * 64 + c % 64
+            }
+            out = out + pyChrOf(cp)
+            i = i + need + 1
+        }
+        return out
+    }
+    function pyDecodeErr(codec, bs, from, to, why) {
+        var where = "byte 0x" + pyHex2(bs[from]) + " in position " + from
+        if (to - from > 1) { where = "bytes in position " + from + "-" + (to - 1) }
+        pyListErr("UnicodeDecodeError", "'" + codec + "' codec can't decode " + where + ": " + why)
+    }
+    function pyHex2(v) {
+        var d = "0123456789abcdef"
+        return d.charAt(Math.floor(v / 16) % 16) + d.charAt(v % 16)
+    }
     // Python's list methods, the NAME SET first so that
     // hasattr()/getattr() can ask exactly what the dispatcher answers. Keep in
     // step with pyIsListMethod in abnf/jsrt.go and in
@@ -4704,6 +4923,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "copy" || name == "count" || name == "sort") { return true }
         if (name == "insert" || name == "remove" || name == "extend") { return true }
         if (name == "index" || name == "reverse") { return true }
+        // A bytes value is a list of ints in this value model, so bytes.decode
+        // is offered on a list.
+        if (name == "decode") { return true }
         return false
     }
     // Every error below is a CATCHABLE Python exception with CPython 3.14's
@@ -4712,6 +4934,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // any of this assertable in one ratchet file.
     function pyListMethod(xs, name, args, kw) {
         var n = xs.length
+        if (name == "decode") {
+            var da = args
+            if (kw != null && kw != undefined && kw.keys.length > 0) { da = pyKwPos("decode", args, kw, ["encoding", "errors"], 0) }
+            return pyBytesDecode(xs, da.length > 0 ? da[0] : undefined)
+        }
         if (name == "append") { xs.push(pyArgAt(args, 0)); return undefined }
         if (name == "clear") { listTruncate(xs, 0); return undefined }
         if (name == "copy") { return xs.slice(0) }
@@ -4818,7 +5045,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // extend()'s argument, with CPython's TypeError instead of a hard abort.
     function pyIterOrTypeErr(v) {
         if (Array.isArray(v)) { return v }
-        if (isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string") { return iterToList(v) }
+        if (pyIterable(v)) { return iterToList(v) }
         pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object is not iterable")
         return []
     }
@@ -8219,6 +8446,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function pySliceStep(o, lo, hi, st) {
+        // A subclass of a builtin type slices its value (and answers the plain type).
+        if (pyUser(o) && o.__val !== undefined) { return pySliceStep(o.__val, lo, hi, st) }
         if (typeof o == "string") {
             var cs = pySChars(o)
             var ixs = sliceIdx(cs.length, lo, hi, st)
@@ -8382,6 +8611,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // xs[a:b:c] = values: a contiguous slice may change length, an extended one
         // must receive exactly as many values as it selects (Python's rule).
         if (last.kind == "slice") {
+            if (pyUser(o) && o.__val !== undefined) { o = o.__val }
             var lo = key.lo
             var hi = key.hi
             var st = key.st
@@ -8439,7 +8669,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function writeTarget(t, v) {
         if (t.tuple == undefined) { assignRef(t, v); return }
         var items = t.tuple
-        if (!(Array.isArray(v) || isGen(v) || isPyIt(v) || isDict(v) || typeof v == "string")) {
+        if (!pyIterable(v)) {
             pyListErr("TypeError", "cannot unpack non-iterable " + pyTypeOf(v).__name + " object")
         }
         var vals = iterToList(v)
@@ -8557,6 +8787,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (last.kind == "slice") {
+            if (pyUser(o) && o.__val !== undefined) { o = o.__val }
             var ix = sliceIdx(o.length, last.lo != null ? last.lo() : undefined,
                               last.hi != null ? last.hi() : undefined,
                               last.step != null ? last.step() : undefined)
@@ -8568,7 +8799,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var q = 0; q < keep.length; q++) { o.push(keep[q]) }
             return
         }
-        var idx = last.idx()
+        pyDelItem(o, last.idx())
+    }
+    // del o[idx].
+    function pyDelItem(o, idx) {
         if (pyUser(o)) {
             var dl = clsFind(o.__class, "__delitem__")
             if (dl != null) { dl(o, idx); return }
@@ -8860,7 +9094,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "LookupError", "IndexError", "KeyError", "ValueError", "TypeError",
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
-                      "OSError", "ExceptionGroup", "OverflowError"]
+                      "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -8882,6 +9116,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // math.floor(inf) is an OverflowError in CPython, not a ValueError - the
     // integral answer does not exist rather than being out of domain.
     pyExcParent["OverflowError"] = "ArithmeticError"
+    pyExcParent["UnicodeError"] = "ValueError"
+    pyExcParent["UnicodeDecodeError"] = "UnicodeError"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]
@@ -9193,6 +9429,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Cls(args): a fresh instance whose __init__ runs with it as self.
     function pyNew(cls, args, named) {
         var obj = {__class: cls}
+        // A subclass of a builtin type: str/int/float build their value from the
+        // arguments (their __new__), list/dict start empty and are filled by
+        // __init__ (list.__init__ unless the subclass overrides it).
+        var bt = pyBuiltinBase(cls)
+        if (bt == "list") { obj.__val = [] }
+        else if (bt == "dict") { obj.__val = newDict() }
+        else if (bt != "") { obj.__val = pyConvert(bt, args, named) }
         var init = clsFind(cls, "__init__")
         if (init != null) {
             kSetNamed(named)
@@ -9314,6 +9557,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o.__builtin == true) {
                 var samp = pyTypeSample(o.__name)
                 if (samp !== undefined && pyBuiltinAttr(samp, name)) { return pyUnboundDesc(o, name) }
+                // A dunder read off the type - str.__repr__(self) in a subclass.
+                var bdd = pyBDelegate(o.__name, name)
+                if (bdd != null) { return bdd }
             }
             // The builtin exception constructor, reachable as Base.__init__(self, ...).
             if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) { return pyExcInitFn() }
@@ -9532,6 +9778,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         for (var j = at + 1; j < mro.length; j++) {
             if (hasOwn(mro[j], name)) { return {v: mro[j][name]} }
+            if (mro[j].__builtin === true) {
+                var bd = pyBDelegate(mro[j].__name, name)
+                if (bd != null) { return {v: bd} }
+            }
         }
         // Every builtin exception class derives from BaseException, whose __init__
         // is synthesized rather than stored - see pyExcInitFn.
@@ -9858,7 +10108,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cls.__builtin == true) {
             // A builtin type object matches the corresponding primitive - through
             // pyBuiltinSub, so isinstance(True, int) is True (bool derives from
-            // int) and isinstance(anything, object) is True.
+            // int) and isinstance(anything, object) is True. An instance of a
+            // user subclass of the type matches by its class.
+            if (pyUser(v) && clsIsSub(v.__class, cls)) { return true }
             return pyBuiltinSub(pyTypeOf(v).__name, cls.__name)
         }
         if (!pyUser(v)) { return false }

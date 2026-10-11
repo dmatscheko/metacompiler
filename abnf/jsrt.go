@@ -14304,6 +14304,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return 0
 			}
+			if _, cls, ok := pyInstance(u(a[0])); ok {
+				if rt.pyUserTruthy(cls, u(a[0])) {
+					return 1
+				}
+				return 0
+			}
 			if rt.truthy(u(a[0])) {
 				return 1
 			}
@@ -15029,6 +15035,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
 			}
+			if it, ok := rt.pyUserIter(u(a[0])); ok {
+				return w(&jsArray{elems: rt.pyDrainIter(it)})
+			}
 			rt.fail("iteration over a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
@@ -15284,13 +15293,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			if cls, ok := pyClassObj(callee); ok {
-				inst := newJSObject()
-				inst.set("__class", cls)
-				if init, found := pyLookup(cls, "__init__"); found && isCallable(init) {
-					self := append([]interface{}{inst}, args.elems...)
-					rt.call(init, jsUndef, rt.pyBindCall(init, self, kw))
-				}
-				return w(inst)
+				return w(rt.pyNewInstance(cls, args.elems, kw))
 			}
 			if _, cls, ok := pyInstance(callee); ok {
 				if m, found := pyLookup(cls, "__call__"); found && isCallable(m) {
@@ -15459,7 +15462,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// undefined and mean what Python's defaults mean for the DIRECTION of the step,
 		// so xs[::-1] is the reversal.
 		"js_pyslice3": func(a []uint64) uint64 { // (sequence, lo, hi, step)
-			switch o := u(a[0]).(type) {
+			switch o := pyUnwrapBuiltin(u(a[0])).(type) { // A builtin subclass slices its value.
 			case *jsArray:
 				idx := rt.pySliceIndices(len(o.elems), u(a[1]), u(a[2]), u(a[3]))
 				out := &jsArray{}
@@ -15482,7 +15485,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// different length, so xs[1:3] = [9] shortens the list); an extended step
 		// assigns element by element and needs exactly as many values as it selects.
 		"js_pysetslice": func(a []uint64) uint64 { // (list, lo, hi, step, values)
-			arr, isArr := u(a[0]).(*jsArray)
+			arr, isArr := pyUnwrapBuiltin(u(a[0])).(*jsArray)
 			if !isArr {
 				rt.fail("slice assignment to a %s", rt.typeOf(u(a[0])))
 				return 0
@@ -15516,7 +15519,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// del xs[lo:hi:step]: drop every selected element.
 		"js_pydelslice": func(a []uint64) uint64 { // (list, lo, hi, step)
-			arr, isArr := u(a[0]).(*jsArray)
+			arr, isArr := pyUnwrapBuiltin(u(a[0])).(*jsArray)
 			if !isArr {
 				rt.fail("deleting a slice of a %s", rt.typeOf(u(a[0])))
 				return 0
@@ -15995,13 +15998,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			el := u(a[0]).(*jsArray).elems
 			pos := el[0].(*jsArray).elems
 			if keys, _, ok := dictParts(el[1]); ok && len(keys.elems) > 0 {
+				// str(encoding=...) with no object is "" - nothing is decoded.
 				if len(pos) == 0 && !rt.pyKwHas(el[1], "object") {
-					pos = []interface{}{""}
+					rt.pyKwPos("str", []interface{}{""}, el[1], []string{"object", "encoding", "errors"}, 0)
+					return rt.wrapStr("")
 				}
 				pos = rt.pyKwPos("str", pos, el[1], []string{"object", "encoding", "errors"}, 0)
 			}
 			if len(pos) == 0 {
 				return rt.wrapStr("")
+			}
+			if len(pos) > 1 && (pos[1] != jsUndef || (len(pos) > 2 && pos[2] != jsUndef)) {
+				return rt.wrapStr(rt.pyStrDecode(pos[0], pos[1]))
 			}
 			return pyExternMaps[rt]["js_pyrxstr"]([]uint64{w(pos[0])})
 		},
@@ -16253,12 +16261,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if arr, ok := v.(*jsArray); ok {
 				return boolH(len(arr.elems) > 0)
 			}
-			if keys, _, ok := dictParts(v); ok {
-				return boolH(len(keys.elems) > 0)
-			}
-			return boolH(rt.truthy(v))
+			return boolH(rt.pyTruthyOf(v))
 		},
 		"js_pyfloat": func(a []uint64) uint64 {
+			a = []uint64{w(pyUnwrapBuiltin(u(a[0])))}
 			if s, isStr := u(a[0]).(string); isStr {
 				return w(&jsPyFlo{f: pyStrToF(s)})
 			}
@@ -16342,6 +16348,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			v := u(a[0])
 			if _, ok := v.(*jsGenerator); ok {
 				return a[0]
+			}
+			if it, ok := rt.pyUserIter(v); ok {
+				return w(it)
 			}
 			if pyIterName(rt, v) != "" {
 				return a[0]
@@ -18695,7 +18704,7 @@ func pyLookup(c *jsObject, name string) (interface{}, bool) {
 		return nil, false
 	}
 	for _, k := range pyMRO(c) {
-		if v, ok := k.props[name]; ok {
+		if v, ok := pyClassMember(k, name); ok {
 			return v, true
 		}
 	}
@@ -18777,7 +18786,7 @@ func (rt *jsrt) pySuperFind(s *jsObject, name string) (interface{}, bool) {
 			"super(type, obj): obj must be an instance or subtype of type")})
 	}
 	for _, k := range mro[at+1:] {
-		if v, ok := k.props[name]; ok {
+		if v, ok := pyClassMember(k, name); ok {
 			return v, true
 		}
 	}
@@ -19003,6 +19012,10 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 	if tn, isType := rt.pyClassName(obj); isType {
 		if samp := pyDescTypeSample(tn); samp != nil && rt.pyBuiltinAttr(samp, name) {
 			return rt.pyUnboundDesc(obj.(*jsObject), name)
+		}
+		// A dunder read off the type - str.__repr__(self) in a subclass.
+		if f, ok := pyBuiltinDelegate(tn, name); ok {
+			return f
 		}
 	}
 	// A BOUND METHOD knows its own name, receiver and underlying function.
@@ -19412,6 +19425,10 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			}
 			return rt.unwrap(rt.pyBoundBuiltinCall(args[0], name, args[1:]))
 		}
+		// str.__repr__(self): a dunder called off the type.
+		if f, ok := pyBuiltinDelegate(tn, name); ok {
+			return rt.call(f, jsUndef, args)
+		}
 	}
 	if cls, ok := pyClassObj(target); ok {
 		if m, found := pyLookup(cls, name); found {
@@ -19443,6 +19460,11 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			if pyDescKind(m) != "" {
 				d := rt.pyDescGet(m, cls, name)
 				return rt.call(d, jsUndef, rt.pyBindCall(d, args, kw))
+			}
+			// A builtin type's method reached by a subclass instance takes its
+			// keywords straight to the builtin dispatcher.
+			if pyIsBDelMethod(m) {
+				return rt.pyMCall(pyBDelVal(target), name, args, kw)
 			}
 			if isCallable(m) {
 				self := append([]interface{}{target}, args...)
@@ -19528,6 +19550,8 @@ func pyIsListMethod(name string) bool {
 	case "append", "pop", "clear", "copy", "count",
 		"sort", "insert", "remove", "extend", "index", "reverse":
 		return true
+	case "decode": // A bytes value is a list of ints in this value model.
+		return true
 	}
 	return false
 }
@@ -19538,6 +19562,11 @@ func pyIsListMethod(name string) bool {
 func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw interface{}) interface{} {
 	n := len(arr.elems)
 	switch name {
+	case "decode":
+		if keys, _, ok := dictParts(kw); ok && len(keys.elems) > 0 {
+			args = rt.pyKwPos("decode", args, kw, []string{"encoding", "errors"}, 0)
+		}
+		return rt.pyBytesDecode(arr.elems, argAt(args, 0))
 	case "append":
 		arr.dropIdx()
 		arr.elems = append(arr.elems, argAt(args, 0))
@@ -19997,6 +20026,10 @@ func (rt *jsrt) pyIsIterable(v interface{}) bool {
 	if o, ok := v.(*jsObject); ok && pyIterName(rt, o) != "" {
 		return true
 	}
+	if _, cls, ok := pyInstance(v); ok {
+		m, found := pyLookup(cls, "__iter__")
+		return found && isCallable(m)
+	}
 	return false
 }
 
@@ -20265,13 +20298,7 @@ func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) i
 		}
 	}
 	if cls, ok := pyClassObj(v); ok {
-		inst := newJSObject()
-		inst.set("__class", cls)
-		if init, found := pyLookup(cls, "__init__"); found && isCallable(init) {
-			self := append([]interface{}{inst}, args...)
-			rt.call(init, jsUndef, rt.pyBindCall(init, self, kw))
-		}
-		return inst
+		return rt.pyNewInstance(cls, args, kw)
 	}
 	if _, cls, ok := pyInstance(v); ok {
 		if m, found := pyLookup(cls, "__call__"); found && isCallable(m) {
@@ -20482,6 +20509,9 @@ func (rt *jsrt) pyTruthyOf(v interface{}) bool {
 	if keys, _, ok := dictParts(v); ok {
 		return len(keys.elems) > 0
 	}
+	if _, cls, ok := pyInstance(v); ok {
+		return rt.pyUserTruthy(cls, v)
+	}
 	return rt.truthy(v)
 }
 
@@ -20523,6 +20553,9 @@ func (rt *jsrt) pyElemsOf(v interface{}) []interface{} {
 	}
 	if keys, _, ok := dictParts(v); ok {
 		return append([]interface{}{}, keys.elems...)
+	}
+	if it, ok := rt.pyUserIter(v); ok {
+		return rt.pyDrainIter(it)
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 		"'"+pyTypeName(rt, v)+"' object is not iterable")})
@@ -21369,7 +21402,7 @@ func (rt *jsrt) pyIntNew(args []interface{}) interface{} {
 	}
 	var v interface{} = jsUndef
 	if len(args) > 0 {
-		v = args[0]
+		v = pyUnwrapBuiltin(args[0])
 	}
 	if len(args) < 2 || args[1] == jsUndef {
 		switch x := v.(type) {
@@ -21512,8 +21545,6 @@ func (rt *jsrt) pySum(iter, start interface{}) interface{} {
 	case *jsPyFlo:
 		mode, f = 1, tv.f
 	}
-	add := pyExternMaps[rt]["js_pybin"]
-	plus := rt.wrapStr("+")
 	for _, e := range rt.pyElemsOf(iter) {
 		_, isNum := e.(float64)
 		_, isBool := e.(bool)
@@ -21535,7 +21566,7 @@ func (rt *jsrt) pySum(iter, start interface{}) interface{} {
 			}
 			t, mode = &jsPyFlo{f: pySumEnd(f, c)}, 2
 		}
-		t = rt.unwrap(add([]uint64{plus, rt.wrap(t), rt.wrap(e)}))
+		t = rt.pyExt("js_pybin", "+", t, e)
 		if _, stillInt := t.(float64); mode == 0 && (!isInt || !stillInt) {
 			mode = 2
 			if fl, ok := t.(*jsPyFlo); ok && !isInt {
@@ -21576,7 +21607,7 @@ func (rt *jsrt) pyOrder(op string, l, r interface{}) bool {
 			return c == 1
 		}
 	}
-	return rt.pyTruthyOf(rt.unwrap(pyExternMaps[rt]["js_pybin"]([]uint64{rt.wrapStr(op), rt.wrap(l), rt.wrap(r)})))
+	return rt.pyTruthyOf(rt.pyExt("js_pybin", op, l, r))
 }
 
 // pySeqOrder is an order comparison of two lists, CPython's: the first pair of
@@ -21584,7 +21615,7 @@ func (rt *jsrt) pyOrder(op string, l, r interface{}) bool {
 func (rt *jsrt) pySeqOrder(op string, l, r []interface{}) interface{} {
 	for i := 0; i < len(l) && i < len(r); i++ {
 		if !rt.pyEqual(l[i], r[i]) {
-			return rt.unwrap(pyExternMaps[rt]["js_pybin"]([]uint64{rt.wrapStr(op), rt.wrap(l[i]), rt.wrap(r[i])}))
+			return rt.pyExt("js_pybin", op, l[i], r[i])
 		}
 	}
 	switch op {
@@ -21702,6 +21733,12 @@ func pyExcParentName(name string) string {
 		return "NameError"
 	case "NotImplementedError":
 		return "RuntimeError"
+	case "OverflowError":
+		return "ArithmeticError"
+	case "UnicodeError":
+		return "ValueError"
+	case "UnicodeDecodeError":
+		return "UnicodeError"
 	case "Exception":
 		return "BaseException"
 	}

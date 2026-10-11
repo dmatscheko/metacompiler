@@ -4394,7 +4394,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "NameError", "StopIteration", "ArithmeticError", "LookupError",
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
-                        "NotImplementedError", "OverflowError"]
+                        "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"
@@ -4404,6 +4404,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // math.floor(inf) is an OverflowError in CPython, not a ValueError - the
         // integral answer does not exist rather than being out of domain.
         excParent["OverflowError"] = "ArithmeticError"
+        excParent["UnicodeError"] = "ValueError"
+        excParent["UnicodeDecodeError"] = "UnicodeError"
         var excMade = {}
         for (var e0 = 0; e0 < excNames.length; e0++) {
             var eBases = callExt(b, "js_arr_new", [])

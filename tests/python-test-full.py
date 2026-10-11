@@ -3435,6 +3435,13 @@ def s61():
     check("mrg1", msgs == ["OverflowError: math range error"] * 5 + ["ValueError: math domain error"] * 2)
     check("mrg2", math.exp(inf) == inf and math.exp(-1000) == 0.0 and math.cosh(-inf) == inf and math.pow(inf, 2) == inf
           and math.pow(0.0, -inf) == inf and repr(math.exp(709)) == "8.218407461554972e+307")
+    # OverflowError derives from ArithmeticError.
+    caught = ""
+    try:
+        math.exp(1000)
+    except ArithmeticError as e:
+        caught = type(e).__name__
+    check("mrg3", caught == "OverflowError")
 
 
 # ===== SECTION 62: sorted, min, max and list.sort take key= and reverse= =====
@@ -3580,6 +3587,102 @@ def s64():
     check("unp3", a == 1 and b == [] and c == 2 and d + e == "xy")
 
 
+# ===== SECTION 65: subclasses of builtin types; __iter__, __bool__; bytes.decode =====
+# An instance of `class S(str)` (list, dict, int, float alike) behaves as its
+# value for every builtin operation its class does not override - methods,
+# len, indexing, slicing, operators, iteration, str/repr, conversions - and a
+# builtin method answers the plain type. An instance's __iter__/__next__ and
+# __bool__/__len__ drive iteration and truthiness. A bytes value decodes as
+# UTF-8 (strict), ASCII or Latin-1, with CPython's UnicodeDecodeError texts.
+def s65():
+    class Name(str):
+        def shout(self):
+            return self.upper() + "!"
+        def __repr__(self):
+            return "Name(" + str.__repr__(self) + ")"
+    n = Name("bob")
+    check("sub1", n.shout() == "BOB!" and str(n) == "bob" and repr(n) == "Name('bob')" and len(n) == 3 and n[0] == "b"
+          and n[1:] == "ob" and "o" in n and n.split("o") == ["b", "b"] and n.startswith("b"))
+    check("sub2", n == "bob" and not (n != "bob") and n < "c" and "x" + n == "xbob" and n * 2 == "bobbob"
+          and isinstance(n, str) and isinstance(n, Name) and hasattr(n, "upper") and type(n.upper()).__name__ == "str")
+    class Stack(list):
+        def __init__(self, *items):
+            super().__init__(items)
+            self.pushes = len(items)
+        def push(self, x):
+            self.append(x)
+            self.pushes += 1
+    st = Stack(1, 2)
+    st.push(3)
+    check("sub3", st == [1, 2, 3] and len(st) == 3 and st[-1] == 3 and st.pushes == 3 and [x * 2 for x in st] == [2, 4, 6]
+          and sum(st) == 6 and max(st) == 3 and 3 in st and bool(st) and not bool(Stack()) and str(st) == "[1, 2, 3]")
+    st.sort(reverse=True)
+    st[0] = 7
+    del st[1]
+    check("sub4", st == [7, 1] and st.pop() == 1 and st + [9] == [7, 9] and type(st).__name__ == "Stack"
+          and type(st + [1]).__name__ == "list" and st[0:1] == [7])
+    class Counts(dict):
+        def total(self):
+            return sum(self.values())
+    c = Counts(a=1, b=2)
+    c["z"] = 3
+    check("sub5", c.total() == 6 and c["a"] == 1 and len(c) == 3 and sorted(c) == ["a", "b", "z"] and c.get("q", 0) == 0
+          and "a" in c)
+    class Meters(int):
+        def __str__(self):
+            return str(int(self)) + "m"
+    m = Meters(5)
+    class F(float):
+        pass
+    f = F(2.5)
+    check("sub6", str(m) == "5m" and m + 1 == 6 and 1 + m == 6 and m * 2 == 10 and m > 3 and -m == -5 and int(m) == 5
+          and float(m) == 5.0 and m == 5 and f + 1 == 3.5 and int(f) == 2 and repr(f) == "2.5")
+    class Up:
+        def __init__(self, n):
+            self.i = 0
+            self.n = n
+        def __iter__(self):
+            return self
+        def __next__(self):
+            if self.i >= self.n:
+                raise StopIteration
+            self.i += 1
+            return self.i
+    class Gen:
+        def __iter__(self):
+            yield 1
+            yield 2
+    class Box:
+        def __init__(self, k):
+            self.k = k
+        def __len__(self):
+            return self.k
+    class No:
+        def __bool__(self):
+            return False
+    a, b = Up(2)
+    got = []
+    for x in Up(2):
+        got.append(x)
+    check("sub7", list(Up(3)) == [1, 2, 3] and sum(Up(4)) == 10 and a + b == 3 and got == [1, 2] and list(Gen()) == [1, 2]
+          and sorted(Gen(), reverse=True) == [2, 1] and not Box(0) and Box(2) and not No() and bool(Box(1)))
+    check("byt3", b"caf\xc3\xa9".decode() == "café" and b"\xf0\x9f\x98\x80".decode("utf-8") == "\U0001F600"
+          and b"\xe9".decode("latin-1") == "é" and b"ab".decode(encoding="ascii") == "ab" and str(b"ab", "utf-8") == "ab")
+    msgs = []
+    for g in [lambda: b"\xff".decode(), lambda: b"a\xe9b".decode(), lambda: b"\xe2\x82".decode(), lambda: b"\xed\xa0\x80".decode(),
+              lambda: b"\xe9".decode("ascii"), lambda: b"a".decode("nope"), lambda: str("ab", "utf-8")]:
+        try:
+            g()
+        except (ValueError, LookupError, TypeError) as e:
+            msgs.append(type(e).__name__ + ": " + str(e))
+    check("byt4", msgs == ["UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte",
+                           "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe9 in position 1: invalid continuation byte",
+                           "UnicodeDecodeError: 'utf-8' codec can't decode bytes in position 0-1: unexpected end of data",
+                           "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xed in position 0: invalid continuation byte",
+                           "UnicodeDecodeError: 'ascii' codec can't decode byte 0xe9 in position 0: ordinal not in range(128)",
+                           "LookupError: unknown encoding: nope", "TypeError: decoding str is not supported"])
+
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3645,5 +3748,6 @@ def main():
     s62() # SECTION-CALL 62
     s63() # SECTION-CALL 63
     s64() # SECTION-CALL 64
+    s65() # SECTION-CALL 65
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
