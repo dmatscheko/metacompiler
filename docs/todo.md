@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-416** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-417** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -115,13 +115,12 @@ K(() => 3).cb()` "unknown method 'cb'" in both engines (Dart 3; common in Flutte
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-413 swift: Set-keyed dictionaries; builtin types as values compiled · P1 · SW · IN PROGRESS (SW worker, round 22) [V]
-`var d: [Set<Int>: String] = [Set([1]): "one"]; d[Set([1])]` gives "none" in all
-engines (swiftc "one"): key lookup does not compare Sets by value. Compiled half:
-builtins with no extension (String, Bool, Array…) have no type value - `String.self`
-and a generic X bound from a String give the name string, not a descriptor. (Set print
-order follows insertion; Swift's is hash-seeded per process - DECLINED, not
-reproducible.)
+### T-416 swift: Dictionary API gaps; array/dictionary type syntax as values · P1 · SW · OPEN [V]
+`d["a", default: 0] += 1` does not parse (swiftc `["a": 1]`); `removeValue(forKey:)`,
+`updateValue(_:forKey:)` unknown; `Dictionary(grouping:by:)` unsupported (interpreter
+"only the empty initializer", compiled "variable not defined: Dictionary").
+`print([Int].self)` prints `[Int]` (swiftc `Array<Int>`): array/dictionary type syntax
+as values.
 
 ---
 
@@ -494,6 +493,7 @@ T-407 php: method-name case across a parent chain; small library and runtime gap
 T-410 swift: `Self` as a value; expected types through `==`, generics and receivers — DONE 9f3db72d (plus synthesized struct == and Array.contains)
 T-412 swift: inherited static/class methods compiled; a type parameter as a value; Set by context — DONE 08310e01 d75d7754
 T-396 corpus long tails: csharp, php, dart, java — DONE c1b3ed36..a629d763 (csharp 2674→2709, php 2692→2736, dart 3339→3371, java compiler 4329→4331; no must-parse lost). Remainder DECLINED by measured cluster: java 10 files javac itself rejects + 4 attribution-only; php reserved words as names, PHP 8.5 forms, constructs PHP rejects; csharp unsafe pointers (no pointer model), Mono prototype syntax, #if, identifier escapes; dart 53 unsplit multitests, unreleased primary constructors
+T-413 swift: Set-keyed dictionaries; builtin types as values compiled — DONE 5905648d 7870660a
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
