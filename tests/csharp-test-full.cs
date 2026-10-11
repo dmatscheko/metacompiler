@@ -2722,6 +2722,13 @@ b";                                                   // verbatim keeps the newl
         // from the spec.
         class S42Cnt { public static int Count; public static string Length = "L"; }
         class S42Rec { public int Count; public int Length => Count * 10; }
+        class S42Bag
+        {
+            List<int> items = new List<int>();
+            public void Add(int x) { items.Add(x * 2); }
+            public bool Contains(int x) { return items.Contains(x * 2); }
+            public int IndexOf(int x) { return x + 100; }
+        }
         static void S42()
         {
             int[] n = { 3, 0, 5 };
@@ -2733,6 +2740,13 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s42c1", S42Cnt.Count == 9 && S42Cnt.Length == "L" && r.Count == 5
                 && r.Length == 50 && l.Count == 2 && "abc".Length == 3 && n.Length == 3);
             Program.Check("s42c2", r is { Count: 5 } && l is { Count: 2 });
+            // A class's own Add / Contains / IndexOf, beside List's.
+            var bag = new S42Bag();
+            bag.Add(n[0]);
+            bag.Add(n[2]);
+            l.Add(n[2]);
+            Program.Check("s42m1", bag.Contains(n[2]) && !bag.Contains(n[1]) && bag.IndexOf(n[2]) == 105
+                && l.Contains(n[2]) && l.Count == 3);
             long[] ls = { 0L, 7L };
             string[] ss = { null, "" };
             Program.Check("s42d1", n[1] == default && !(n[0] == default) && n[0] != default

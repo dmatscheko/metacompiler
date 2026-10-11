@@ -4215,9 +4215,27 @@ KwLet       = "let" KwEnd ;
         b.NewCondBr(truthy(b, callExt(b, "js_seq", [fV, hUndef])), mB, dB)
         var dr = emitDelegCall(dB, fV, argsV)
         dr.b.NewBr(mergeB)
-        var mv = callExt(mB, "js_csmcall", [recvV, emitStr(mB, csMName(name)), argsV])
-        mB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dr.v, dr.b), llvm.ir.NewIncoming(mv, mB)])}
+        var mr = emitCsMcall(mB, recvV, name, argsV)
+        mr.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dr.v, dr.b), llvm.ir.NewIncoming(mr.v, mr.b)])}
+    }
+    // recv.name(args). A List member reaches the runtime under its lowered name
+    // (csMName); when some class also declares a method of that name, an instance of a
+    // class - the only receiver carrying a __class - keeps the name as written.
+    function emitCsMcall(b, recvV, name, argsV) {
+        var ln = csMName(name)
+        if (ln == name || csMethNames[name] !== true) {
+            return {b: b, v: callExt(b, "js_csmcall", [recvV, emitStr(b, ln), argsV])}
+        }
+        var userB = curF.NewBlock("")
+        var stdB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_has", [recvV, emitStr(b, "__class")])), userB, stdB)
+        var uv = callExt(userB, "js_csmcall", [recvV, emitStr(userB, name), argsV])
+        userB.NewBr(mergeB)
+        var sv = callExt(stdB, "js_csmcall", [recvV, emitStr(stdB, ln), argsV])
+        stdB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(uv, userB), llvm.ir.NewIncoming(sv, stdB)])}
     }
     // '.HasValue' / '.Value' on a value that carries no such member: the nullable reading
     // (a null test, and the value itself). A real member of that name wins, so a user
@@ -4382,7 +4400,9 @@ KwLet       = "let" KwEnd ;
                     } else {
                         var ea2 = emitArgs(b, sfxArgs[i])
                         b = ea2.b
-                        cur = callExt(b, "js_csmcall", [cur, emitStr(b, csMName(s.name)), ea2.v])
+                        var cmr = emitCsMcall(b, cur, s.name, ea2.v)
+                        b = cmr.b
+                        cur = cmr.v
                     }
                 } else if (s.kind == "call") {
                     var eac = emitArgs(b, sfxArgs[i])
