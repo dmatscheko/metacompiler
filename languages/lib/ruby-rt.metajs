@@ -1676,6 +1676,7 @@ function rbStr(v) {
         // the same rule rbFuncRender below follows.
         var cn = rbInstClassName(v)
         if (cn != "") { return "#<" + cn + ">" }
+        if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "to_s", [])) }
     }
     if (typeof v == "function") { return rbFuncRender(v) }
     return "" + v
@@ -1791,6 +1792,8 @@ function rbInspect(v) {
             if (im !== undefined) { return rbStr(im.apply(undefined, [v])) }
             if (rbExcInst(v)) { return rbExcInspect(rbInstClassName(v), rbStr(v)) }
         }
+        // A Regexp / MatchData answers from the regexp half's own table.
+        if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "inspect", [])) }
     }
     return rbStr(v)
 }
@@ -3169,7 +3172,23 @@ function rbEq(l, r) {
     // plain string still reads its rescue value as that string.
     if (typeof r == "string" && rbExcObj(l)) { return rbStr(l) === r }
     if (typeof l == "string" && rbExcObj(r)) { return rbStr(r) === l }
+    // Two Regexps are == when their source and options are.
+    if (rbRxIsRegex(l) && rbRxIsRegex(r)) {
+        return l["__rxsrc"] === r["__rxsrc"] && rbReOpts(l["__rxflags"], false) == rbReOpts(r["__rxflags"], false)
+    }
     return rbPyEqual(l, r)
+}
+
+// #eql? on a builtin value. Twin of valEql in ruby-interpreter.abnf.
+function rbEqlDeep(a, b) {
+    if (!rbIsArr(a) || !rbIsArr(b)) { return rbEql(a, b) }
+    if (a.length != b.length) { return false }
+    var i = 0
+    while (i < a.length) {
+        if (!rbEqlDeep(a[i], b[i])) { return false }
+        i = i + 1
+    }
+    return true
 }
 
 // The first position at which an element is Ruby-== to v, or -1. Array#include?,
@@ -4035,7 +4054,8 @@ function rbRangeMethod(t, name, args) {
     }
     if (name == "nil?") { return false }
     if (name == "frozen?") { return false }
-    if (name == "hash" || name == "object_id") { return 0 }
+    if (name == "hash") { return rbHashOf(t) }
+    if (name == "object_id") { return rbObjectId(t) }
     if (name == "dup" || name == "clone" || name == "freeze" || name == "itself") { return t }
     if (name == "==" || name == "eql?" || name == "equal?") {
         var o = rbArgAt(args, 0)
@@ -4401,6 +4421,23 @@ function rbRxMatchOp(l, r) {
 // theirs - rbMethod then answers the methods every object has. `undefined` is a
 // safe miss sentinel because a Ruby method answers nil, which is null here and
 // never undefined.
+// A Regexp's options from the engine flags. Twin of rubyReOpts in
+// abnf/jsrtregex.go, which states the rule.
+function rbReOpts(flags, embed) {
+    var f = flags
+    if (f.substring(0, 2) == "mp") { f = f.substring(2, f.length) }
+    var m = f.indexOf("s") >= 0
+    var i = f.indexOf("i") >= 0
+    var x = f.indexOf("x") >= 0
+    var on = ""
+    var off = ""
+    if (m) { on = on + "m" } else { off = off + "m" }
+    if (i) { on = on + "i" } else { off = off + "i" }
+    if (x) { on = on + "x" } else { off = off + "x" }
+    if (!embed || off == "") { return on }
+    return on + "-" + off
+}
+
 function rbRxMethod(target, name, args) {
     if (rbRxIsRegex(target)) {
         var re = rbRxObjRe(target)
@@ -4417,8 +4454,8 @@ function rbRxMethod(target, name, args) {
         if (name == "source") { return re["src"] }
         if (name == "options") { return 0 }
         if (name == "names") { return rtCopyArr(re["names"]) }
-        if (name == "to_s") { return "(?-mix:" + re["src"] + ")" }
-        if (name == "inspect") { return "/" + re["src"] + "/" + re["flags"] }
+        if (name == "to_s") { return "(?" + rbReOpts(re["flags"], true) + ":" + re["src"] + ")" }
+        if (name == "inspect") { return "/" + re["src"] + "/" + rbReOpts(re["flags"], false) }
         return undefined
     }
     if (rbRxIsMatch(target)) {
@@ -4893,7 +4930,6 @@ function rbNumMore(t, name, args) {
     var a0 = rbPosAt(args, n, 0)
     var isI = typeof t == "number" || rbIsBig(t)
     if (name == "dup" || name == "clone") { return t }
-    if (name == "eql?") { return rbEql(t, a0) }
     if (name == "nonzero?") {
         if (rbEq(t, 0)) { return null }
         return t
@@ -6694,9 +6730,9 @@ function rbMethod(target, name, args) {
         if (name == "tap") { rbCall1(rbBlockOf(args), target) }
         return target
     }
-    // Object#hash / #object_id: 0 unless a user class defines its own, as in the
-    // other two engines.
-    if ((name == "hash" || name == "object_id") && rbFindMethod(target, name) === undefined) { return 0 }
+    // Object#hash / #object_id, unless a user class defines its own.
+    if (name == "hash" && rbFindMethod(target, name) === undefined) { return rbHashOf(target) }
+    if (name == "object_id" && rbFindMethod(target, name) === undefined) { return rbObjectId(target) }
     // TrueClass / FalseClass, which would otherwise fall through to the shared
     // member call and abort.
     if (name == "to_s" || name == "inspect") {
@@ -6765,6 +6801,10 @@ function rbMethod(target, name, args) {
         return rbIsNum(target)
     }
     if (name == "equal?") { return rbIdenticalP(target, rbArgAt(args, 0)) }
+    if (name == "eql?" && rbFindMethod(target, name) === undefined) {
+        if (rbRespondClass(target) == "" || rbIsFn(target)) { return rbIdenticalP(target, rbArgAt(args, 0)) }
+        return rbEqlDeep(target, rbArgAt(args, 0))
+    }
     if (name == "call" || name == "()" || name == "yield" || name == "[]" || name == "===") {
         if (rbIsFn(target)) { return target.apply(undefined, args) }
     }
@@ -7691,6 +7731,70 @@ function js_rnew(cls, args) {
 // of abnf/jsrt.go and raiseErr of ruby-interpreter.abnf.
 function rbRaiseErr(clsName, msg) {
     js_rraise(rbBuiltinClass(clsName), msg)
+}
+
+// Object#object_id. Twin of objectId in ruby-interpreter.abnf, which states the
+// rules.
+var rbOids = []
+function rbObjectId(v) {
+    if (rtIsNil(v)) { return 8 }
+    if (v === true) { return 20 }
+    if (v === false) { return 0 }
+    if (typeof v == "number" || rbIsBig(v)) { return rbNumBin("+", rbNumBin("*", v, 2), 1) }
+    var valued = typeof v == "string" || rbIsRat(v) || rbIsCpx(v)
+    var i = 0
+    while (i < rbOids.length) {
+        if (rbIdenticalP(rbOids[i], v) || (valued && rbEql(rbOids[i], v))) { return 16 + 8 * i }
+        i = i + 1
+    }
+    rbOids.push(v)
+    return 8 + 8 * rbOids.length
+}
+
+function rbStrHash(s) {
+    var h = 0
+    var i = 0
+    while (i < s.length) {
+        h = (h * 31 + s.charCodeAt(i)) % 2147483647
+        i = i + 1
+    }
+    return h
+}
+
+// Object#hash, by value. Twin of valHash in ruby-interpreter.abnf, which states
+// the rules.
+function rbHashOf(v) {
+    if (rbIsArr(v)) {
+        var ha = 7
+        var i = 0
+        while (i < v.length) {
+            ha = (ha * 31 + rbHashOf(v[i])) % 2147483647
+            i = i + 1
+        }
+        return ha
+    }
+    if (rbIsDict(v)) {
+        var keys = v["keys"]
+        var vals = v["vals"]
+        var hd = 11
+        var j = 0
+        while (j < keys.length) {
+            hd = (hd + (rbHashOf(keys[j]) * 31 + rbHashOf(vals[j])) % 2147483647) % 2147483647
+            j = j + 1
+        }
+        return hd
+    }
+    if (rbUserObj(v) && rbFindMethod(v, "hash") !== undefined) { return rbToF(rbNumBin("%", rbMethod(v, "hash", []), 2147483647)) }
+    if (rtIsNil(v) || v === true || v === false) { return rbStrHash("n" + rbInspect(v)) }
+    if (typeof v == "number" || rbIsBig(v)) { return rbStrHash("i" + rbInspect(v)) }
+    if (typeof v == "string") { return rbStrHash("s" + v) }
+    if (rbIsSym(v)) { return rbStrHash("y" + v["s"]) }
+    if (rbIsFlo(v)) { return rbStrHash("f" + rbInspect(v)) }
+    if (rbIsRat(v)) { return rbStrHash("r" + rbInspect(v)) }
+    if (rbIsCpx(v)) { return rbStrHash("c" + rbInspect(v)) }
+    if (rbIsRange(v)) { return rbStrHash("g" + rbInspect(v)) }
+    if (rbRxIsRegex(v)) { return rbStrHash("x" + rbInspect(v)) }
+    return rbStrHash("o" + rbInspect(rbObjectId(v)))
 }
 
 // NoMethodError for a name no method table answers. Twin of rubyNoMethod in

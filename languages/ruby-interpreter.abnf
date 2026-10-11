@@ -5411,7 +5411,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isCpx(v)) { return cpxText(v, false) }
         if (isRange(v)) { return rstr(v.lo) + (v.excl ? "..." : "..") + rstr(v.hi) }
         // Regexp#to_s is the embeddable (?-mix:...) form, not the /.../ literal.
-        if (isRegex(v)) { return "(?-mix:" + v.src + ")" }
+        if (isRegex(v)) { return "(?" + reOpts(v.rflags, true) + ":" + v.src + ")" }
         if (isMatchD(v)) { return rxGroup(v.rev.prog, v.text, v.m, 0) }
         if (Array.isArray(v)) { return rinspect(v) }
         if (isDict(v)) { return rinspect(v) }
@@ -5477,7 +5477,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function rinspect(v) {
         if (v === null || v === undefined) { return "nil" }
-        if (isRegex(v)) { return "/" + v.src + "/" + v.rflags }
+        if (isRegex(v)) { return "/" + v.src + "/" + reOpts(v.rflags, false) }
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return strInspect(v) }
         if (isSym(v)) { return ":" + v.s }
@@ -7037,6 +7037,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A Regexp value boxes the compiled program from lib/regex.js. regexCache keys
     // on flags+source, so the same literal inside a loop is compiled once.
     var regexCache = {}
+    // A Regexp's options as MRI writes them, in m-i-x order: the /.../ suffix of
+    // #inspect, or with embed the on-off prefix of #to_s ((?i-mx:...)). Twins:
+    // rubyReOpts in abnf/jsrtregex.go, rbReOpts in lib/ruby-rt.metajs.
+    function reOpts(rflags, embed) {
+        var m = rflags.indexOf("m") >= 0
+        var i = rflags.indexOf("i") >= 0
+        var x = rflags.indexOf("x") >= 0
+        var on = (m ? "m" : "") + (i ? "i" : "") + (x ? "x" : "")
+        var off = (m ? "" : "m") + (i ? "" : "i") + (x ? "" : "x")
+        if (!embed || off == "") { return on }
+        return on + "-" + off
+    }
     function mkRegex(src, rflags) {
         var key = "$" + rflags + "\x00" + src
         if (hasOwn(regexCache, key)) { return regexCache[key] }
@@ -7301,6 +7313,58 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (charCount(d) > 65) { d = "#<" + cn + ">" }
         if (d.slice(0, 1) != "#") { d = d + ":" + cn }
         raiseErr("NoMethodError", "undefined method `" + name + "' for " + d)
+    }
+    // Object#object_id. nil, true, false and an Integer have MRI's fixed ids (8, 20,
+    // 0, 2n+1); anything else is numbered on first request, in a table searched with
+    // equal? - so the id is as distinct as identity is in this value model. A String,
+    // a Rational and a Complex have no identity here (equal? is false even to
+    // themselves), so they share the id of an eql? value: x.object_id stays stable.
+    // Twins: rubyObjectId in abnf/jsrtruby.go, rbObjectId in lib/ruby-rt.metajs.
+    var oidObjs = []
+    function objectId(v) {
+        if (v === null || v === undefined) { return 8 }
+        if (v === true) { return 20 }
+        if (v === false) { return 0 }
+        if (typeof v == "number" || isBig(v)) { return numBin("+", numBin("*", v, 2), 1) }
+        var valued = typeof v == "string" || isRat(v) || isCpx(v)
+        for (var i = 0; i < oidObjs.length; i++) {
+            if (identicalP(oidObjs[i], v) || (valued && arrEql(oidObjs[i], v))) { return 16 + 8 * i }
+        }
+        oidObjs.push(v)
+        return 8 + 8 * oidObjs.length
+    }
+    // Object#hash, by value: eql? values hash alike. A leaf hashes its class tag and
+    // its text, an Array its elements' hashes in order, a Hash its pairs' in any
+    // order, a user object its own #hash or else its object_id. 31-bit, so all three
+    // engines compute it exactly alike. Twins: rubyHashOf in abnf/jsrtruby.go,
+    // rbHashOf in lib/ruby-rt.metajs.
+    function strHash(s) {
+        var h = 0
+        for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) % 2147483647 }
+        return h
+    }
+    function valHash(v) {
+        if (Array.isArray(v)) {
+            var ha = 7
+            for (var i = 0; i < v.length; i++) { ha = (ha * 31 + valHash(v[i])) % 2147483647 }
+            return ha
+        }
+        if (isDict(v)) {
+            var hd = 11
+            for (var j = 0; j < v.keys.length; j++) { hd = (hd + (valHash(v.keys[j]) * 31 + valHash(v.vals[j])) % 2147483647) % 2147483647 }
+            return hd
+        }
+        if (isUserObj(v) && singRespond(v, "hash")) { return toF(numBin("%", mcall(v, "hash", [], null), 2147483647)) }
+        if (v === null || v === undefined || v === true || v === false) { return strHash("n" + rinspect(v)) }
+        if (typeof v == "number" || isBig(v)) { return strHash("i" + intText(v)) }
+        if (typeof v == "string") { return strHash("s" + v) }
+        if (isSym(v)) { return strHash("y" + v.s) }
+        if (isFlo(v)) { return strHash("f" + rinspect(v)) }
+        if (isRat(v)) { return strHash("r" + rinspect(v)) }
+        if (isCpx(v)) { return strHash("c" + rinspect(v)) }
+        if (isRange(v)) { return strHash("g" + rinspect(v)) }
+        if (isRegex(v)) { return strHash("x" + rinspect(v)) }
+        return strHash("o" + intText(objectId(v)))
     }
     // String#start_with? / #end_with?: true when ANY of the given prefixes/suffixes
     // matches. Twins: rbStartsWith/rbEndsWith of lib/ruby-rt.metajs and the
@@ -7658,7 +7722,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function numMore(t, name, args) {
         var isI = typeof t == "number" || isBig(t)
         if (name == "dup" || name == "clone") { return t }
-        if (name == "eql?") { return arrEql(t, args[0]) }
         if (name == "nonzero?") { return numEq(t, 0) ? null : t }
         if (isCpx(t)) {
             var cd = args[0]
@@ -7890,7 +7953,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // The universal arms below this block are unreachable for a function
             // value, so #equal? is answered here too - a Proc IS a reference, so it
             // is plain identity.
-            if (name == "equal?") { return target === args[0] }
+            if (name == "equal?" || name == "eql?") { return target === args[0] }
             if (name == "class") { return classOf(target) }
             // NO `fail' here, and that is the point: a function value has to reach
             // Ruby's universal methods below too (`method(:x).is_a?(Method)',
@@ -7912,8 +7975,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "nil?") { return target === null || target === undefined }
         if (name == "frozen?") { return typeof target == "string" || isSym(target) || isNumV(target) }
         if (name == "equal?") { return identicalP(target, args[0]) }
-        // Object#hash / #object_id: 0 unless a user class defines its own.
-        if ((name == "hash" || name == "object_id") && !(isUserObj(target) && singRespond(target, name))) { return 0 }
+        // Object#eql? is identity; a builtin value's is == within its own class.
+        // Twins: the eql? arms of rubyMethod in abnf/jsrt.go and rbMethod in
+        // lib/ruby-rt.metajs.
+        if (name == "eql?" && !(isUserObj(target) && singRespond(target, name))) {
+            if (isUserObj(target) || isClassObj(target)) { return identicalP(target, args[0]) }
+            return valEql(target, args[0])
+        }
+        // Object#hash / #object_id, unless a user class defines its own.
+        if ((name == "hash" || name == "object_id") && !(isUserObj(target) && singRespond(target, name))) {
+            return name == "hash" ? valHash(target) : objectId(target)
+        }
         if (name == "tap") { blockCall(blk, [target]); return target }
         // Kernel#itself, unless a user class defines its own.
         if (name == "itself" && !(isUserObj(target) && singRespond(target, "itself"))) { return target }
@@ -8422,6 +8494,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // #include?, #index and #count(v) are ==. The compiler half spells it rbEql /
     // rt.rubyEql.
     function arrEql(a, b) { return classOf(a) === classOf(b) && rubyEq(a, b) }
+    // Array#eql? is eql? element by element, so [1].eql?([1.0]) is false. Twins:
+    // rubyEqlDeep in abnf/jsrtruby.go, rbEqlDeep in lib/ruby-rt.metajs.
+    function valEql(a, b) {
+        if (!Array.isArray(a) || !Array.isArray(b)) { return arrEql(a, b) }
+        if (a.length != b.length) { return false }
+        for (var i = 0; i < a.length; i++) { if (!valEql(a[i], b[i])) { return false } }
+        return true
+    }
     // A STABLE merge sort. MRI's Array#sort is not stable and its #sort_by is, so one
     // stable sort satisfies both contracts - and the extra guarantee is not something
     // a Ruby program is entitled to see the absence of.
@@ -12272,6 +12352,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return true
         }
+        // Two Regexps are == when their source and options are.
+        if (isRegex(l) && isRegex(r)) { return l.src === r.src && reOpts(l.rflags, false) == reOpts(r.rflags, false) }
         return false
     }
     binOps["=="] = function(l, r) { return rubyEq(l, r) }

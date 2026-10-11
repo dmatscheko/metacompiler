@@ -440,6 +440,10 @@ type jsrt struct {
 	// Kernel#lambda, which is all that Proc#lambda? needs. Filled by js_rlambda.
 	rubyLambdas map[interface{}]bool
 
+	// rubyOids is Object#object_id's table: the values numbered so far, in order
+	// (see rubyObjectId in jsrtruby.go).
+	rubyOids []interface{}
+
 	// rubyMethodVals remembers which callables `method(:x)` handed out, and the
 	// owner and name each one carries. MRI's Method is a class of its own -
 	// #class is Method, #to_s is `#<Method: Object#x>` and #arity counts optionals
@@ -6384,8 +6388,10 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		return bn == "Range"
 	case "nil?", "frozen?":
 		return false
-	case "hash", "object_id":
-		return float64(0)
+	case "hash":
+		return rt.rubyHashOf(t)
+	case "object_id":
+		return rt.rubyObjectId(t)
 	case "dup", "clone", "freeze", "itself":
 		return t
 	case "==", "eql?", "equal?":
@@ -8065,6 +8071,11 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		if n := rubyInstClassName(t); n != "" {
 			return "#<" + n + ">"
 		}
+		if rxIsRegexObj(t) || rxIsMatchObj(t) {
+			if s, ok := rt.rxRegexMethod(t, "to_s", nil); ok {
+				return rt.toString(s)
+			}
+		}
 	}
 	if isCallable(v) {
 		return rt.rubyFuncRender(v)
@@ -8333,6 +8344,12 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		if rubyExcInst(t) {
 			return rubyExcInspect(rubyInstClassName(t), rt.rubyStr(t))
 		}
+		// A Regexp / MatchData answers from the regexp half's own table.
+		if rxIsRegexObj(t) || rxIsMatchObj(t) {
+			if s, ok := rt.rxRegexMethod(t, "inspect", nil); ok {
+				return rt.toString(s)
+			}
+		}
 	}
 	return rt.rubyStr(v)
 }
@@ -8439,6 +8456,13 @@ func (rt *jsrt) rubyEq(l, r interface{}) bool {
 	}
 	if _, isB := r.(bool); isB {
 		return false
+	}
+	// Two Regexps are == when their source and options are.
+	if rxIsRegexObj(l) && rxIsRegexObj(r) {
+		lo, ro := l.(*jsObject), r.(*jsObject)
+		lf, _ := lo.props["__rxflags"].(string)
+		rf, _ := ro.props["__rxflags"].(string)
+		return lo.props["__rxsrc"] == ro.props["__rxsrc"] && rubyReOpts(lf, false) == rubyReOpts(rf, false)
 	}
 	return rt.rubyStructEq(l, r)
 }
@@ -9364,11 +9388,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return target
 		}
-	// Object#hash / #object_id: 0 unless a user class defines its own, as in the
-	// other two engines.
+	// Object#hash / #object_id, unless a user class defines its own.
 	case "hash", "object_id":
 		if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
-			return float64(0)
+			if name == "hash" {
+				return rt.rubyHashOf(target)
+			}
+			return rt.rubyObjectId(target)
 		}
 	case "to_s", "inspect":
 		// TrueClass / FalseClass, ahead of the shared memberCall.
@@ -9455,6 +9481,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		return isStr || rubyIsNum(target)
 	case "equal?":
 		return rubyIdenticalP(target, argAt(args, 0))
+	case "eql?":
+		if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+			if rt.rubyRespondClass(target) == "" || isCallable(target) {
+				return rubyIdenticalP(target, argAt(args, 0))
+			}
+			return rt.rubyEqlDeep(target, argAt(args, 0))
+		}
 	case "call", "()", "yield", "[]", "===":
 		// A Proc / lambda / block: p.call(x), p.(x), p[x] and p.yield(x).
 		if isCallable(target) {

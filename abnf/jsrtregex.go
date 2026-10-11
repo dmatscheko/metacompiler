@@ -1977,9 +1977,9 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 			}
 			return out, true
 		case "to_s":
-			return "(?-mix:" + re.src + ")", true
+			return "(?" + rubyReOpts(re.flags, true) + ":" + re.src + ")", true
 		case "inspect":
-			return "/" + re.src + "/" + re.flags, true
+			return "/" + re.src + "/" + rubyReOpts(re.flags, false), true
 		}
 		return nil, false
 	}
@@ -2215,4 +2215,27 @@ func init() {
 	// js_rxmcall reads its argument array in position 2, exactly like the
 	// js_rmcall it wraps, so the handle recycler may hand that array through.
 	jsThroughArgs["js_rxmcall"] = 1 << 2
+}
+
+// rubyReOpts is a Ruby Regexp's options as MRI writes them, from the engine flags
+// the ruby grammars compile with ("mp" then i, s for Ruby's m, x). Twin of reOpts
+// in languages/ruby-interpreter.abnf, which states the rule.
+func rubyReOpts(flags string, embed bool) string {
+	flags = strings.TrimPrefix(flags, "mp")
+	m, i, x := strings.Contains(flags, "s"), strings.Contains(flags, "i"), strings.Contains(flags, "x")
+	on, off := "", ""
+	for _, o := range []struct {
+		set bool
+		c   string
+	}{{m, "m"}, {i, "i"}, {x, "x"}} {
+		if o.set {
+			on += o.c
+		} else {
+			off += o.c
+		}
+	}
+	if !embed || off == "" {
+		return on
+	}
+	return on + "-" + off
 }

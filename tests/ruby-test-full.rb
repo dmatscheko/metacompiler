@@ -3587,6 +3587,29 @@ def s79
   check("pl79b", [x /2, x %3, x / y, x %y, s79id(7) % 4] == [5, 1, 3, 1, 3])
 end
 
+# ===== SECTION 80: #hash by value, #object_id by identity, #eql? everywhere =====
+# eql? values hash alike (a Hash's in any key order) and unequal ones do not here;
+# nil, true, false and an Integer have MRI's fixed object ids, and two objects
+# never share one. Object#eql? is identity, a builtin value's is == within its
+# class (Array element by element). Two Regexps are == by source and options, and
+# one prints as its literal. Every right-hand side is /usr/bin/ruby 2.6.10's own
+# answer. THIS SECTION RUNS UNDER REAL RUBY.
+class S80A
+end
+def s80
+  v = [1, 2, "a", "a", :s, 1.5, [1, 2], [2, 1], { a: 1, b: 2 }, { b: 2, a: 1 }, 1.0, S80A.new, S80A.new]
+  check("hs80a", v[0].hash != v[1].hash && v[2].hash == v[3].hash && v[6].hash == [1, 2].hash &&
+                 v[6].hash != v[7].hash && v[8].hash == v[9].hash && v[4].hash == :s.hash && v[5].hash == 1.5.hash &&
+                 v[0].hash != v[10].hash && v[11].hash == v[11].hash && v[11].hash != v[12].hash && v[0].hash.is_a?(Integer))
+  check("hs80b", [nil.object_id, true.object_id, false.object_id, v[0].object_id, v[1].object_id] == [8, 20, 0, 3, 5] &&
+                 v[11].object_id == v[11].object_id && v[11].object_id != v[12].object_id && v[6].object_id != v[7].object_id)
+  check("hs80c", [nil.eql?(nil), v[2].eql?(v[3]), v[6].eql?([1, 2]), [1].eql?([1.0]), v[11].eql?(v[11]),
+                  v[11].eql?(v[12]), v[0].eql?(v[10]), v[8].eql?(v[9])] == [true, true, true, false, true, false, false, true])
+  r = [/x/i, /x/i, /x/]
+  check("hs80d", r[0] == r[1] && r[0] != r[2] && r[0].eql?(r[1]) && r[0].hash == r[1].hash && r[0].inspect == "/x/i" &&
+                 r[0].to_s == "(?i-mx:x)" && [r[2]].inspect == "[/x/]")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3628,5 +3651,6 @@ s76() # SECTION-CALL 76
 s77() # SECTION-CALL 77
 s78() # SECTION-CALL 78
 s79() # SECTION-CALL 79
+s80() # SECTION-CALL 80
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

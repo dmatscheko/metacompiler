@@ -27,6 +27,7 @@ import (
 	"math"
 	"math/big"
 	"strings"
+	"unicode/utf16"
 )
 
 func init() {
@@ -1640,8 +1641,6 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 	switch name {
 	case "dup", "clone":
 		return t, true
-	case "eql?":
-		return rt.rubyEql(t, a0), true
 	case "nonzero?":
 		if rt.rubyEq(t, 0.0) {
 			return jsNull, true
@@ -1856,4 +1855,109 @@ func rubyBitLen(x *big.Int) int {
 		return new(big.Int).Not(x).BitLen()
 	}
 	return x.BitLen()
+}
+
+// rubyObjectId is Object#object_id. Twin of objectId in
+// languages/ruby-interpreter.abnf, which states the rules.
+func (rt *jsrt) rubyObjectId(v interface{}) interface{} {
+	if isUndefOrNull(v) {
+		return 8.0
+	}
+	if b, ok := v.(bool); ok {
+		if b {
+			return 20.0
+		}
+		return 0.0
+	}
+	if _, isI := rubyIntBig(v); isI {
+		return rt.rubyNumBin("+", rt.rubyNumBin("*", v, 2.0), 1.0)
+	}
+	valued := false
+	switch v.(type) {
+	case string, jsRat, jsCpx:
+		valued = true
+	}
+	for i, o := range rt.rubyOids {
+		if rubyIdenticalP(o, v) || (valued && rt.rubyEql(o, v)) {
+			return float64(16 + 8*i)
+		}
+	}
+	rt.rubyOids = append(rt.rubyOids, v)
+	return float64(8 + 8*len(rt.rubyOids))
+}
+
+// rubyStrHash is the 31-bit polynomial hash over a string's UTF-16 units.
+func rubyStrHash(s string) float64 {
+	h := int64(0)
+	for _, u := range utf16.Encode([]rune(s)) {
+		h = (h*31 + int64(u)) % 2147483647
+	}
+	return float64(h)
+}
+
+// rubyHashOf is Object#hash, by value. Twin of valHash in
+// languages/ruby-interpreter.abnf, which states the rules.
+func (rt *jsrt) rubyHashOf(v interface{}) float64 {
+	if a, ok := v.(*jsArray); ok {
+		h := int64(7)
+		for _, e := range a.elems {
+			h = (h*31 + int64(rt.rubyHashOf(e))) % 2147483647
+		}
+		return float64(h)
+	}
+	if keys, vals, isDict := dictParts(v); isDict {
+		h := int64(11)
+		for i := range keys.elems {
+			h = (h + (int64(rt.rubyHashOf(keys.elems[i]))*31+int64(rt.rubyHashOf(vals.elems[i])))%2147483647) % 2147483647
+		}
+		return float64(h)
+	}
+	if _, hasOwn := rubyFindMethod(v, "hash"); hasOwn && rubyUserObj(v) {
+		return rubyToF(rt.rubyNumBin("%", rt.rubyMethod(v, "hash", nil), 2147483647.0))
+	}
+	if isUndefOrNull(v) {
+		return rubyStrHash("n" + rt.rubyInspect(v))
+	}
+	switch t := v.(type) {
+	case bool:
+		return rubyStrHash("n" + rt.rubyInspect(v))
+	case float64, *jsBigInt:
+		return rubyStrHash("i" + rt.rubyInspect(v))
+	case string:
+		return rubyStrHash("s" + t)
+	case jsSym:
+		return rubyStrHash("y" + t.s)
+	case jsFlo:
+		return rubyStrHash("f" + rt.rubyInspect(v))
+	case jsRat:
+		return rubyStrHash("r" + rt.rubyInspect(v))
+	case jsCpx:
+		return rubyStrHash("c" + rt.rubyInspect(v))
+	}
+	if _, isRng := rubyIsRange(v); isRng {
+		return rubyStrHash("g" + rt.rubyInspect(v))
+	}
+	if rxIsRegexObj(v) {
+		return rubyStrHash("x" + rt.rubyInspect(v))
+	}
+	return rubyStrHash("o" + rt.rubyInspect(rt.rubyObjectId(v)))
+}
+
+// rubyEqlDeep is #eql? on a builtin value. Twin of valEql in
+// languages/ruby-interpreter.abnf.
+func (rt *jsrt) rubyEqlDeep(a, b interface{}) bool {
+	la, aArr := a.(*jsArray)
+	lb, bArr := b.(*jsArray)
+	if !aArr || !bArr {
+		return rt.rubyEql(a, b)
+	}
+	if len(la.elems) != len(lb.elems) {
+		return false
+	}
+	for i := range la.elems {
+		if !rt.rubyEqlDeep(la.elems[i], lb.elems[i]) {
+			return false
+		}
+	}
+	return true
 }
