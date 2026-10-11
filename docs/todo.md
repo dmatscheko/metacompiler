@@ -78,7 +78,7 @@ are lists, not views). `tuple(t) is t` False; `hasattr(tuple, "__add__")` False.
 
 # JS — JavaScript and TypeScript
 
-### T-399 ts interpreter: stores to namespace exports before declaration / to exported functions · P3 · JS · OPEN [U]
+### T-399 ts interpreter: stores to namespace exports before declaration / to exported functions · P3 · JS · IN PROGRESS (JS worker, round 14) [U]
 `namespace N { export function set(v){ x = v } set(1); export let x; }` - the store
 falls through to a global (tsc writes `N.x = 1`). Assigning by bare name to an exported
 function rebinds the namespace object's slot (tsc keeps the local binding separate).
