@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-377** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-379** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -70,11 +70,13 @@ Same root cause as T-170 (no tuple type). Close together with T-170.
 `t = "a\ud83db" + "\ude00"`: len 3 (CPython 4); natively `ord(t[1])` fails "ord()
 expected a character, but string of length 3". Both halves.
 
-### T-374 python: number dunders; unknown methods on numbers abort · P1 · PY · IN PROGRESS (PY+KT worker, round 11) [V]
-`(5).__add__(3)`, `(5).__str__()` abort "method call … on a number" in all engines;
-any unknown method on a number is fatal instead of AttributeError. `repr(int.from_bytes)`
-/ `repr(float.fromhex)` / `repr(dict.fromkeys)` print `<function <lambda>>` (CPython
-`<built-in method … of type object>`). `float.from_number` (3.14) absent.
+### T-377 python: NotImplemented; dunder fallbacks; round/shift edge cases · P1 · PY · IN PROGRESS (PY+KT worker, round 12) [V]
+`NotImplemented` is undefined (NameError). `int.__add__(5, 2.5)` / `int.__eq__(5, 5.0)`
+/ `int.__lt__(5, 7.5)` answer values (CPython NotImplemented). `round(1e300)` prints
+1e+300 (CPython the exact int); `round(int, negative n)` does not round; `+True` is True
+(CPython 1). `2 << -7` aborts "negative shift count" (CPython catchable ValueError).
+`repr((5).__add__)` `<built-in method ...>` (CPython `<method-wrapper '__add__' of int
+object at ...>`).
 
 ---
 
@@ -111,16 +113,11 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-373 kotlin: Int ≠ Long at equality · P2 · KT · IN PROGRESS (PY+KT worker, round 11) [V]
-`setOf<Any>(1, 1L).size` 1 (jar 2), `(1 as Any) == (1L as Any)` true, `1L.equals(1)`
-true. Strict equality now would turn every remaining unadopted literal site into a
-wrong `false`: first close lambda return types, generic function returns, non-simple
-receivers, collection arguments to collection-typed parameters, get/containsKey/
-contains arguments; then a literal `==` operand keeps value equality and the rest goes
-through a strict extern; set/map lookup strict in all 3 engines; measure breakage on
-the 64-file Compose app before enabling (~400-600 lines over 5 files). Also: `Math.sqrt
-(9.0)` - interpreter "unknown name: Math", compiler resolves the host JS Math and
-prints 3 (Kotlin 3.0).
+### T-378 kotlin: literal adoption remainder; HashMap; Char.toInt in the interpreter · P2 · KT · IN PROGRESS (PY+KT worker, round 12) [V]
+`emptyList<Long>() + 1` holds an Int element; nested collection types
+(`List<List<Long>>`) are not adopted; java.lang.Math floorDiv/floorMod absent.
+Interpreter: `HashMap<Long, String>()` "unknown name: HashMap"; `'a'.toInt()` "unknown
+method 'toInt'" (compiled 97).
 
 ---
 
@@ -476,6 +473,8 @@ T-371 go: native float multiply on a defined float type; method values; value-re
 T-365 go: `for range` over a slice is ~140k instructions per iteration natively — DONE 44b1354 (14,115M → 3,353M; nil range, per-iteration loop vars, continue in classic loops fixed too)
 T-366 go: variadic calls build the slice object expensively — DONE cfe340c (5.9k → 3.1k per call; folding obj_new + 5 stores into one floor call DECLINED: a floor call costs about the same)
 T-370 go: runtime types where the static type is not tracked — PARTIAL ff7a8a2 (func %T, untyped &n, struct fields/channels/method params); (b)+(d) are T-375; (a) generic type parameters at run time (~300 lines, boxing T breaks generic arithmetic) and (e) pointer boxes at every interface store (~200 lines, high regression risk against the "&P{1} is P{1}" model) DECLINED
+T-374 python: number dunders; unknown methods on numbers abort — DONE 042fc703
+T-373 kotlin: Int ≠ Long at equality — DONE 9c4bdfd4 0cd6a242 (strict Int/Long equality after closing the literal sites: 0 assertions broke; remainder in T-378)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
