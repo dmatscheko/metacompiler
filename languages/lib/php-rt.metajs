@@ -812,10 +812,11 @@ function phNumEq(a, b) {
     return phNumOf(a) == phNumOf(b)
 }
 
+// zend_compare's ZEND_THREEWAY_COMPARE: a NAN on either side answers 1.
 function phCmpNum(a, b) {
     if (a < b) { return 0 - 1 }
-    if (a > b) { return 1 }
-    return 0
+    if (a == b) { return 0 }
+    return 1
 }
 
 function phNumCmp(a, b) {
@@ -886,6 +887,7 @@ function phLooseNull(v) {
 }
 
 function phStrNumLoose(s, n) {
+    if (phNumOf(n) != phNumOf(n)) { return false }
     var ns = phNumStrVal(s)
     if (ns !== undefined) { return phNumEq(ns, n) }
     return s == phStr(n)
@@ -951,7 +953,8 @@ function phLoose(l, r) {
     return phNumEq(phToNum(l), phToNum(r))
 }
 
-// phCmp is the spaceship, and the engine behind < > <= >=.
+// phCmp is the spaceship, and the engine behind < > <= >= (a > b is b < a).
+// Twin of phpCmp in languages/php-interpreter.abnf.
 function phCmp(l, r) {
     var ln = rtIsNil(l)
     var rn = rtIsNil(r)
@@ -974,6 +977,8 @@ function phCmp(l, r) {
         }
         return 0
     }
+    if (lp !== undefined) { return 1 }
+    if (rp !== undefined) { return 0 - 1 }
     var ls = phIsStr(l)
     var rs = phIsStr(r)
     if (ls && rs) {
@@ -982,6 +987,8 @@ function phCmp(l, r) {
         if (nl !== undefined && nr !== undefined) { return phNumCmp(nl, nr) }
         return phCmpStr(l, r)
     }
+    if (ls && phIsNum(r) && phNumOf(r) != phNumOf(r)) { return 1 }
+    if (rs && phIsNum(l) && phNumOf(l) != phNumOf(l)) { return 1 }
     if (ls && phIsNum(r)) {
         var x = phNumStrVal(l)
         if (x === undefined) { return phCmpStr(l, phStr(r)) }
@@ -1821,9 +1828,9 @@ function js_phseq(l, r) { return phIdentical(l, r) }
 function js_phsne(l, r) { return !phIdentical(l, r) }
 function js_phcmp(l, r) { return phCmp(l, r) }
 function js_phlt(l, r) { return phCmp(l, r) < 0 }
-function js_phgt(l, r) { return phCmp(l, r) > 0 }
+function js_phgt(l, r) { return phCmp(r, l) < 0 }
 function js_phle(l, r) { return phCmp(l, r) <= 0 }
-function js_phge(l, r) { return phCmp(l, r) >= 0 }
+function js_phge(l, r) { return phCmp(r, l) <= 0 }
 
 function js_phadd(l, r) { return phArith("+", l, r) }
 function js_phsub(l, r) { return phArith("-", l, r) }

@@ -1723,6 +1723,22 @@ function s43() {
     check("kwci1", $sum === 21 && $w === "ok");
 }
 
+// ===== SECTION 44: comparison edges =====
+// zend_compare: a NAN against a number or a string is uncomparable (1 in either
+// order), `a > b` is `b < a`, and an array is greater than any scalar that is
+// not a bool or null (Zend/tests/type_coercion/nan_comp_op.phpt,
+// string_to_number_comparison.phpt).
+function s44() {
+    $nan = fdiv(0, 0);
+    $r = [0, "", "NAN", [], null, 1.5];
+    check("cmp1", !($nan == $r[2]) && !($r[2] == $nan) && ($nan <=> $r[0]) === 1 && ($r[0] <=> $nan) === 1
+        && !($nan < $r[0]) && !($nan <= $r[0]) && !($nan > $r[0]) && !($nan >= $r[0])
+        && ($nan <=> $r[1]) === 1 && ($r[1] <=> $nan) === 1 && !($nan >= $r[1]) && !($r[5] >= $nan));
+    check("cmp2", ($nan <=> $r[3]) === -1 && $nan < $r[3] && !($nan > $r[3]) && ($r[3] <=> $nan) === 1
+        && ($nan <=> $r[4]) === 1 && $nan > $r[4] && $r[4] < $nan && (1 <=> $r[3]) === -1 && "a" < [1]
+        && [1] > "a" && (1.75 <=> "1.75abc") === -1 && INF == "INF");
+}
+
 function main() {
     global $checks;
     global $failures;
@@ -1770,6 +1786,7 @@ function main() {
     s41(); // SECTION-CALL 41
     s42(); // SECTION-CALL 42
     s43(); // SECTION-CALL 43
+    s44(); // SECTION-CALL 44
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

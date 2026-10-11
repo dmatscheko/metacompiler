@@ -978,6 +978,9 @@ func (rt *jsrt) phpLooseNull(v interface{}) bool {
 }
 
 func (rt *jsrt) phpStrNumLoose(s string, n interface{}) bool {
+	if math.IsNaN(phpNumOf(n)) {
+		return false
+	}
 	if ns := phpNumStrVal(s); ns != nil {
 		return phpNumEq(ns, n)
 	}
@@ -1014,14 +1017,16 @@ func phpHiddenProp(k string) bool {
 	return len(k) > 1 && k[0] == '_' && k[1] == '_'
 }
 
+// phpCmpNum is zend_compare's ZEND_THREEWAY_COMPARE: a NAN on either side
+// answers 1.
 func phpCmpNum(a, b float64) float64 {
 	if a < b {
 		return -1
 	}
-	if a > b {
-		return 1
+	if a == b {
+		return 0
 	}
-	return 0
+	return 1
 }
 
 func phpCmpStr(a, b string) float64 {
@@ -1034,7 +1039,8 @@ func phpCmpStr(a, b string) float64 {
 	return 0
 }
 
-// phpCmp is the spaceship, and the engine behind < > <= >=.
+// phpCmp is the spaceship, and the engine behind < > <= >= (a > b is b < a).
+// Twin of phpCmp in languages/php-interpreter.abnf.
 func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 	if isNullish(l) {
 		l = jsNull
@@ -1071,6 +1077,12 @@ func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 		}
 		return 0
 	}
+	if la {
+		return 1
+	}
+	if ra {
+		return -1
+	}
 	ls, lIsS := l.(string)
 	rs, rIsS := r.(string)
 	if lIsS && rIsS {
@@ -1079,6 +1091,9 @@ func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 			return phpNumCmp(nl, nr)
 		}
 		return phpCmpStr(ls, rs)
+	}
+	if (lIsS && phpIsNum(r) && math.IsNaN(phpNumOf(r))) || (rIsS && phpIsNum(l) && math.IsNaN(phpNumOf(l))) {
+		return 1
 	}
 	if lIsS && phpIsNum(r) {
 		x := phpNumStrVal(ls)

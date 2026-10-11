@@ -4960,13 +4960,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return false
     }
     function strNumLoose(s, n) {
+        if (numOf(n) !== numOf(n)) { return false }
         var ns = numStrVal(s)
         if (ns != null) { return numEq(ns, n) }
         return s === phpStr(n)
     }
-    function cmpNum(a, b) { return a < b ? -1 : (a > b ? 1 : 0) }
+    // zend_compare's ZEND_THREEWAY_COMPARE: a NAN on either side answers 1.
+    function cmpNum(a, b) { return a < b ? -1 : (a == b ? 0 : 1) }
     function cmpStr(a, b) { return a < b ? -1 : (a > b ? 1 : 0) }
-    // The spaceship, and the engine behind < > <= >=.
+    // The spaceship, and the engine behind < > <= >=: zend_compare. `a > b` is
+    // `b < a` there, which only differs from `a <=> b > 0` where the order is
+    // partial (a NAN, arrays with different keys).
     function phpCmp(l, r) {
         if (l === undefined) { l = null }
         if (r === undefined) { r = null }
@@ -4983,12 +4987,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return 0
         }
+        // An array is greater than any non-array that is not a bool or null.
+        if (isArr(l)) { return 1 }
+        if (isArr(r)) { return -1 }
         if (typeof l == "string" && typeof r == "string") {
             var nl = numStrVal(l)
             var nr = numStrVal(r)
             if (nl != null && nr != null) { return numCmp(nl, nr) }
             return cmpStr(l, r)
         }
+        // A NAN against a string is uncomparable: 1 in either order.
+        if ((typeof l == "string" && isNum(r) && numOf(r) !== numOf(r)) || (typeof r == "string" && isNum(l) && numOf(l) !== numOf(l))) { return 1 }
         if (typeof l == "string" && isNum(r)) {
             var x = numStrVal(l)
             if (x == null) { return cmpStr(l, phpStr(r)) }
@@ -5244,9 +5253,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (op == "!=" || op == "<>") { return !phpLoose(l, r) }
         if (op == "<=>") { return phpCmp(l, r) }
         if (op == "<")  { return phpCmp(l, r) < 0 }
-        if (op == ">")  { return phpCmp(l, r) > 0 }
+        if (op == ">")  { return phpCmp(r, l) < 0 }
         if (op == "<=") { return phpCmp(l, r) <= 0 }
-        if (op == ">=") { return phpCmp(l, r) >= 0 }
+        if (op == ">=") { return phpCmp(r, l) <= 0 }
         if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>") { return phpBit(op, l, r) }
         return phpArith(op, l, r)
     }
