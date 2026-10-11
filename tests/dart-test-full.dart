@@ -1587,6 +1587,74 @@ void s37() {
   check("sep37", 1e3_0 == 1e30 && 1_2.3_4e1 == 123.4 && 2e-1_0 == 2e-10);
 }
 
+// ===== SECTION 38: pattern forms in elements, declarations and arms =====
+// An if-case collection element binds its pattern for the THEN element only; an
+// object pattern may head a pattern variable declaration and a for-in; a typed
+// map/list pattern carries type arguments; `final x as T` and `P!` are a cast and a
+// null-assert pattern behind a binder; an explicit instantiation `e<T>` may follow
+// any primary ('f[0]<int>'); a function-typed optional or field formal may be
+// nullable ('[String fmt(int i)? = null]', 'this.f()?'). Dart language spec
+// (patterns, collection elements, generic function instantiation, formal
+// parameters); no dart toolchain here.
+class S38Box<T> {
+  final T value;
+  S38Box(this.value);
+}
+class S38F {
+  var f;
+  S38F.a(int this.f()?);
+}
+T s38id<T>(T x) => x;
+String s38fmt(int v, [String fmt(int i)? = null]) => fmt == null ? "n$v" : fmt(v);
+String s38arm(Object? o) => switch (o) {
+      final int v as int => 'i$v',
+      bool? b! => 'b$b',
+      _ => 'o',
+    };
+String s38case(Object o) {
+  switch (o) {
+    case <int, String>{0: final s}:
+      return 'm$s';
+    case int() && < 3:
+      return 's';
+    case (3, final x) when x > 1:
+      return 'r$x';
+    case [final _, var t]:
+      return 'l$t';
+  }
+  return '-';
+}
+void s38() {
+  List<Object?> xs = [1, null, 5, "s"];
+  var got = [];
+  for (var x in xs) {
+    got.add([if (x case int y when y > 2) y * 10 else -1, if (x case String s) s]);
+  }
+  check("pe38a", got.toString() == "[[-1], [-1], [50], [-1, s]]");
+  var m = {for (var x in xs) if (x case int k) k: k + 1};
+  check("pe38b", m.toString() == "{1: 2, 5: 6}");
+  var S38Box<int>(value: e) = S38Box(41);
+  var sum = 0;
+  for (final S38Box(value: v) in [S38Box(1), S38Box(2)]) {
+    sum = sum + v;
+  }
+  check("pe38c", e == 41 && sum == 3);
+  check("pe38d", s38arm(3) == 'i3' && s38arm(true) == 'btrue' && s38arm('z') == 'o');
+  List<Object> ys = [<int, String>{0: 'z'}, 1, (3, 4), [5, 6], 9];
+  var cs = [];
+  for (var y in ys) {
+    cs.add(s38case(y));
+  }
+  check("pe38e", cs.join(",") == "mz,s,r4,l6,-");
+  var fs = [s38id, s38id];
+  var g = fs[0]<int>;
+  check("pe38f", g(7) == 7 && (true ? s38id : s38id)<String>("q") == "q");
+  check("pe38g", s38fmt(4) == "n4" && s38fmt(4, (i) => "f$i") == "f4");
+  var h = S38F.a(() => 9);
+  var hf = h.f;
+  check("pe38h", hf() == 9);
+}
+
 int main() {
   s01(); // SECTION-CALL 01
   s02(); // SECTION-CALL 02
@@ -1625,6 +1693,7 @@ int main() {
   s35(); // SECTION-CALL 35
   s36(); // SECTION-CALL 36
   s37(); // SECTION-CALL 37
+  s38(); // SECTION-CALL 38
   print("full: $checks checks, $fails failures");
   return fails;
 }

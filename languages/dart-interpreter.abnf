@@ -85,7 +85,8 @@ ShebangCh   = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // Library directives: accepted, not implemented (there is no module system). Each pushes
 // nothing, so only the statement thunks reach makeSeq.
-Directive   = ImportD | ExportD | PartD | LibraryD ;
+// Metadata may stand before a directive (`@A<int>(0) import "dart:core";`).
+Directive   = [ Annotations ] ( ImportD | ExportD | PartD | LibraryD ) ;
 // import 'lib.dart'; maps to a project file (searched under the program's directory and the
 // -i roots); a dart: import (dart:math, ...) is a builtin no-op. ImportUri captures the main
 // URI with its surrounding quotes stripped and hands it to resolveImport; the show/hide
@@ -138,7 +139,7 @@ ExternBody  <~~ push({ebody: makeConst(null)}) ~~> = ";" ;
 Annotations = Annotation { Annotation } ;
 // `@A<int>(0)`, `@GenericClass<int, String>.new()`, `@prefix.C.named(1)`. The type
 // arguments and the `.new` tear-off are part of the metadata grammar; all of it is erased.
-Annotation  = "@" Id [ SkipAngle ] { "." AnnPart } [ SkipParen ] ;
+Annotation  = "@" Id [ SkipAngle ] { "." AnnPart [ SkipAngle ] } [ SkipParen ] ;
 AnnPart     = KwNew | Id ;
 
 // An enum is a class whose values are canonical instances: the value list comes first,
@@ -148,7 +149,7 @@ EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
             = KwEnum [ KwConst ] CName [ ClsTParams ] [ PrimaryCtor ] [ WithClause ] [ ImplementsClause ]
               "{" EnumValue { "," EnumValue } [ "," ] [ ";" { Member } ] "}" ;
 EnumValue   <~~ push(makeEnumValue(takeAll())) ~~>
-            = EVName [ SkipAngle ] [ EnumArgs ] ;
+            = [ Annotations ] EVName [ SkipAngle ] [ EnumArgs ] ;
 EVName      <~~ push({evname: up.in}) ~~> = Id ;
 EnumArgs    <~~ push({eargs: takeAll()}) ~~> = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
@@ -377,10 +378,10 @@ ParamCore   = TypedThisParam | ThisParam | SuperParam | TypedParam | FnPlainPara
 ParamMods   = ParamMod { ParamMod } ;
 ParamMod    = ( "covariant" | "required" | "final" | "var" ) KwEnd ;
 ThisParam   <~~ push({thisf: popName()}) ~~>
-            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen [ "?" ] ] ;
 // A field-initialising formal may be written with its type: `const Pair(A this.fst)`.
 TypedThisParam <~~ push({thisf: popName()}) ~~>
-            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen [ "?" ] ] ;
 // A super parameter (2.17): IhKid(super.v) forwards v to the superclass constructor.
 SuperParam  <~~ push(makeSuperParam(false, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
@@ -400,9 +401,9 @@ NamedParam  = [ Annotations ] [ ParamMods ] NamedParamCore ;
 NamedParamCore = NamedTypedThisParam | NamedThisParam | NamedSuperParam | NamedTypedParam
             | NamedFnPlainParam | NamedPlainParam ;
 NamedThisParam  <~~ push(makeNamedParam(true, takeAll())) ~~>
-            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen [ "?" ] ] [ "=" AssignExpr ] ;
 NamedTypedThisParam <~~ push(makeNamedParam(true, takeAll())) ~~>
-            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen [ "?" ] ] [ "=" AssignExpr ] ;
 NamedSuperParam <~~ push(makeSuperParam(true, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 NamedTypedParam <~~ push(makeNamedParam(false, takeAll())) ~~>
@@ -421,15 +422,15 @@ OptParamCore = OptTypedThisParam | OptThisParam | OptSuperParam | OptTypedParam
             | OptFnPlainParam | OptPlainParam ;
 // `[int? this.j]`, `[A<U> this.a = const A()]` - a typed field-initialising formal.
 OptTypedThisParam <~~ push(makeOptParam(true, takeAll())) ~~>
-            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen [ "?" ] ] [ "=" AssignExpr ] ;
 OptFnPlainParam <~~ push(makeOptParam(false, takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] SkipParen [ "?" ] [ "=" AssignExpr ] ;
 OptThisParam  <~~ push(makeOptParam(true, takeAll())) ~~>
-            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen [ "?" ] ] [ "=" AssignExpr ] ;
 OptSuperParam <~~ push(makeSuperParam(false, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 OptTypedParam <~~ push(makeOptParam(false, takeAll())) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] [ "?" ] [ "=" AssignExpr ] ;
 OptPlainParam <~~ push(makeOptParam(false, takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
@@ -455,14 +456,21 @@ TypeFn      = KwFunction [ SkipAngle ] SkipParen [ "?" ] ;
 Pattern     = PatOr ;
 PatOr       <~~ push(makeOrPat(takeAll())) ~~>  = PatAnd { "||" PatAnd } ;
 PatAnd      <~~ push(makeAndPat(takeAll())) ~~> = PatUnary { "&&" PatUnary } ;
-PatUnary    = PatRelOp | PatPostfix ;
+// PatPostfix first: '<int, String>{0: _}' is a typed MAP pattern, not the relational
+// pattern '< int'. A relational pattern never parses as PatPostfix, so it is unharmed.
+PatUnary    = PatPostfix | PatRelOp ;
 // A relational pattern (< 10, >= 20) compares the matched value with a constant.
 PatRelOp    <~~ push(makeRelPat(takeAll())) ~~> = PatRelSym RelExpr ;
 PatRelSym   <~~ push({relop: up.in}) ~~> = "==" | "!=" | "<=" | ">=" | "<" | ">" ;
 PatPostfix  <~~ push(makePostPat(takeAll())) ~~>
             = PatPrimary { PatNullCheck | PatNullAssert | PatCast } ;
 PatNullCheck  <~~ push({post: "?"}) ~~> = "?" ;
-PatNullAssert <~~ push({post: "!"}) ~~> = "!" !"=" ;
+PatNullAssert <~~ push({post: "!"}) ~~> = "!" NotEqNext ;
+// '!' is a null-assert only when it is not the first half of '!=' - the next character
+// itself, so the '=>' after a pattern ('bool()! => 0') does not count.
+NotEqNext   = :script(~~
+    (function() { return c.peek(0) === 61 ? abnf.newToken("\x01neq", 0) : undefined })()
+~~) ;
 PatCast     = KwAs PatCastType ;
 PatCastType <~~ push({post: "as", ty: up.in}) ~~> = Type ;
 
@@ -471,13 +479,13 @@ PatPrimary  = PatList | PatMap | PatRecP | PatConstE | PatVarTyped | PatObject |
 // PatVarTyped, which would otherwise read `const` as the TYPE and `C` as the bound name.
 PatConstE   <~~ push({p: "const", t: pop()}) ~~> = ConstMember ;
 PatList     <~~ push(makeListPat(takeAll())) ~~>
-            = "[" [ PatListElem { "," PatListElem } [ "," ] ] "]" ;
+            = [ TypeArgs ] "[" [ PatListElem { "," PatListElem } [ "," ] ] "]" ;
 PatListElem = PatRest | PatElemP ;
 // [a, ..., b] skips the middle; [a, ...rest] binds it.
 PatRest     <~~ push(makeRestPat(takeAll())) ~~> = "..." [ Pattern ] ;
 PatElemP    <~~ push({pelem: pop()}) ~~> = Pattern ;
 PatMap      <~~ push(makeMapPat(takeAll())) ~~>
-            = "{" [ PatMapEntry { "," PatMapEntry } [ "," ] ] "}" ;
+            = [ TypeArgs ] "{" [ PatMapEntry { "," PatMapEntry } [ "," ] ] "}" ;
 PatMapEntry <~~ var mp = pop(); push({mkey: pop(), mpat: mp}) ~~> = RelExpr ":" Pattern ;
 PatRecP     <~~ push(makeRecPat(takeAll())) ~~>
             = "(" [ PatFieldP { "," PatFieldP } [ "," ] ] ")" ;
@@ -489,8 +497,10 @@ PatPosFieldP <~~ push({pfname: "", pfpat: pop()}) ~~> = Pattern ;
 // The TYPE has to be tagged: a variable pattern with a type annotation TESTS that type
 // (patterns feature spec, "Variable / Runtime semantics"); without the tag makeVarPat
 // would not see it and `case B b` would match an A.
-PatVarTyped <~~ push(makeVarPat(takeAll())) ~~> = PatVarLead PatName ;
-PatVarLead  = KwVar | KwFinal [ PatVarType ] | PatVarType ;
+// Four complete alternatives, not an optional type: in 'final value as int' the
+// optional would take 'value' as the TYPE and never give it back.
+PatVarTyped <~~ push(makeVarPat(takeAll())) ~~>
+            = KwVar PatName | KwFinal PatVarType PatName | KwFinal PatName | PatVarType PatName ;
 PatVarType  <~~ push({ptype: up.in}) ~~> = TypeNamed ;
 PatName     <~~ push({pvname: up.in}) ~~> = NotPatKw Id ;
 // A zero-width guard that fails when the next word is one of the operators that may
@@ -534,8 +544,10 @@ PatConst    <~~ push({p: "const", t: pop()}) ~~> = RelExpr ;
 VarDecl     = PatVarDecl | VarLate | VarKwDecl | VarFinalTyped | VarFinal | VarConstTyped | VarConst | VarTyped ;
 // A pattern variable declaration: var (a, b) = e; final [x, ...r] = e;
 PatVarDecl  <~~ push(makePatDecl(takeAll())) ~~>
-            = ( KwVar | KwFinal ) PatDeclHead "=" Expression ";" ;
+            = ( KwVar | KwFinal ) PatVarHead "=" Expression ";" ;
 PatDeclHead = PatList | PatMap | PatRecP ;
+// A declaration may also destructure an OBJECT: 'var Box<IntFn>(value: e) = b;'.
+PatVarHead  = PatDeclHead | PatObject ;
 // `late` only delays the initialisation check, which this front end does not make, so a
 // late declaration is an ordinary one (uninitialised means null).
 // A GROUP of alternatives is committed once it matches: `late final y = 1;` took the
@@ -576,17 +588,17 @@ ForAwait    = KwAwait ForInAny ;
 ForInAny    = ForInPat | ForInTyped | ForInBare ;
 // for (var (a, b) in pairs) - a pattern per element.
 ForInPat    <~~ push(makeForInPat(takeAll())) ~~>
-            = KwFor "(" ( KwVar | KwFinal ) PatDeclHead KwIn Expression ")" Statement ;
+            = KwFor "(" ( KwVar | KwFinal ) PatVarHead KwIn Expression ")" Statement ;
 ForInTyped  <~~ push(makeForIn(takeAll())) ~~>
             = KwFor "(" ForInLead Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 ForInBare   <~~ push(makeForIn(takeAll())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
-ForInLead   = KwVar | KwFinal | Type ;
+ForInLead   = [ Annotations ] ( KwVar | KwFinal | Type ) ;
 ForCStyle   <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      <~~ push(makeSeq(takeAll())) ~~> = ForVarHead Declarator { "," Declarator } ;
-ForVarHead  = KwVar | KwFinal Type | KwFinal | Type ;
+ForVarHead  = [ Annotations ] ( KwVar | KwFinal Type | KwFinal | Type ) ;
 ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 ForPost     <~~ push({k:"post", t: makeSeq(takeAll())}) ~~> = ForPostOne { "," ForPostOne } ;
@@ -957,7 +969,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | GenFieldSfx | AnonMethodSfx | FieldSfx | CallSfx | IndexSfx
-                      | NullAnonSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
+                      | NullAnonSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx | InstSfx } ;
 // An ANONYMOUS METHOD (Dart 3.11 experiment): `receiver.{ return this.length; }` and its
 // expression form `receiver.=> this.length`. It is invoked IMMEDIATELY - the corpus's own
 // `final v1 = buffer.{ return foo; }; v1.expectStaticType<Exactly<int>>` says the value is
@@ -980,6 +992,10 @@ CallSfx     <~~ push({kind: "callv", args: takeAll()}) ~~>
 // MethodSfx, which is tried first). The type arguments are erased.
 GenFieldSfx = "." Id <~~ push({kind:"field", name: up.in}) ~~> TypeArgs ;
 BangSfx     <~~ push({kind:"bang"}) ~~> = "!" !"=" ;
+// An explicit instantiation of whatever the chain produced: 'f[0]<int>',
+// '(b ? f1 : f2)<int>'. TypeLit's InstEnd rule decides it, and with types erased it
+// pushes nothing - the value is the chain's own.
+InstSfx     = TypeArgs InstEnd ;
 // Null-aware access (?., ?.(), ?[]): a null receiver short-circuits the whole remaining
 // suffix chain to null, exactly like Dart.
 NullMethodSfx <~~ push({kind:"nmcall", name: popName(), args: takeAll()}) ~~>
@@ -1180,11 +1196,15 @@ ListLit     <~~ push(makeList(takeAll())) ~~>
 // A collection element is a plain expression, a spread (...e splicing e's elements, ...?e
 // contributing nothing when e is null), a collection-if or a collection-for. The same
 // three control forms exist for map entries, one level down (MapElem).
-CollElem    = SpreadElem | IfElem | ForElem | NullAwareElem | ExprElem ;
+CollElem    = SpreadElem | IfCaseElem | IfElem | ForElem | NullAwareElem | ExprElem ;
 // A null-aware element (Dart 3.8): `?e` contributes nothing when e is null. "?" is not
 // glued to the expression (`? .cn` is legal), so an ordinary token match is right here.
 NullAwareElem <~~ push(makeNullAwareElem(pop())) ~~> = "?" AssignExpr ;
 SpreadElem  <~~ push(makeSpread(takeAll())) ~~> = "..." [ "?" <~~ push({nullaware: true}) ~~> ] AssignExpr ;
+// `[if (x case int? y when y > 0) y]`: an if-case element. The pattern's bindings are
+// in scope in the THEN element only, as in the if-case statement.
+IfCaseElem  <~~ push(makeIfCaseElem(takeAll())) ~~>
+            = KwIf "(" Expression KwCase Pattern [ SwGuard ] ")" CollElem [ KwElse CollElem ] ;
 IfElem      <~~ push(makeIfElem(takeAll())) ~~>
             = KwIf "(" Expression ")" CollElem [ KwElse CollElem ] ;
 // `[await for (var i in stream) i]` - an await-for stream loop as a collection element.
@@ -1201,12 +1221,14 @@ ForElemC    = [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ;
 
 MapLit      <~~ push(makeMap(takeAll())) ~~>
             = "{" [ MapElem { "," MapElem } [ "," ] ] "}" ;
-MapElem     = SpreadElem | IfMapElem | ForMapElem | MapNullKeyEntry | MapEntry ;
+MapElem     = SpreadElem | IfCaseMapElem | IfMapElem | ForMapElem | MapNullKeyEntry | MapEntry ;
 // `{?k: v}` / `{k: ?v}`: a null key or value drops the whole entry.
 MapNullKeyEntry <~~ push(makeNullMapEntry(takeAll())) ~~>
             = MapKeyQ AssignExpr ":" MapValQ AssignExpr ;
 MapKeyQ     <~~ push({nk: up.in}) ~~> = [ "?" ] ;
 MapValQ     <~~ push({nv: up.in}) ~~> = [ "?" ] ;
+IfCaseMapElem <~~ push(makeIfCaseElem(takeAll())) ~~>
+            = KwIf "(" Expression KwCase Pattern [ SwGuard ] ")" MapElem [ KwElse MapElem ] ;
 IfMapElem   <~~ push(makeIfElem(takeAll())) ~~>
             = KwIf "(" Expression ")" MapElem [ KwElse MapElem ] ;
 ForMapElem  <~~ push(makeForElem(takeAll())) ~~>
@@ -3197,6 +3219,15 @@ KwDeferred  = "deferred" KwEnd ;
         return {ekind: "nentry", nullk: stripWs(items[0].nk) == "?", mk: items[1],
                 nullv: stripWs(items[2].nv) == "?", mv: items[3]}
     }
+    function makeIfCaseElem(items) {
+        var d = {ekind: "ifcase", subj: items[0], pat: resolvePat(items[1], "case"), guard: null,
+                 then: null, els: null}
+        var idx = 2
+        if (items[idx].guard != undefined) { d.guard = items[idx].guard; idx = idx + 1 }
+        d.then = items[idx]
+        if (idx + 1 < items.length) { d.els = items[idx + 1] }
+        return d
+    }
     function makeIfElem(items) {
         return {ekind: "if", cond: items[0], then: items[1], els: items.length > 2 ? items[2] : null}
     }
@@ -3257,6 +3288,15 @@ KwDeferred  = "deferred" KwEnd ;
         if (e.ekind == "if") {
             if (core.test(e.cond())) { emitElem(e.then, sink) }
             else if (e.els != null) { emitElem(e.els, sink) }
+            return
+        }
+        if (e.ekind == "ifcase") {
+            scopes.push({})
+            var ok = patMatch(e.pat, e.subj())
+            if (ok && e.guard != null) { ok = core.test(e.guard()) }
+            if (ok) { emitElem(e.then, sink) }
+            scopes.pop()
+            if (!ok && e.els != null) { emitElem(e.els, sink) }
             return
         }
         // collection-for, in both the for-in and the C-style shape
