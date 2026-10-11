@@ -515,10 +515,13 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 	}
 	if _, cls, ok := pyInstance(v); ok {
 		for _, c := range pyMRO(cls) {
-			if m, has := c.props["__hash__"]; has && !isUndefOrNull(m) {
+			// `__hash__ = None` makes the class unhashable, as an __eq__ without
+			// a __hash__ does.
+			m, hasH := c.props["__hash__"]
+			if hasH && !isUndefOrNull(m) {
 				return rt.pyHashCall(m, v)
 			}
-			if _, has := c.props["__eq__"]; has {
+			if _, hasEq := c.props["__eq__"]; hasEq || hasH {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "unhashable type: '"+pyTypeName(rt, v)+"'")})
 			}
 			if pyBuiltinClsName(c) != "" {

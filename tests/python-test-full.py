@@ -4406,6 +4406,41 @@ def s86():
     x, y, z = d.values()
     check("vw8", [x, y, z] == [1, 2, 3] and ", ".join(d.keys()) == "a, b, c" and [*d.items()][2] == ("c", 3) and dict(d.items()) == d)
 
+# ===== SECTION 87: attributes bound to None, and id() =====
+# A class or instance attribute holding None is still an attribute, and
+# `__hash__ = None` makes a class unhashable. id() is an int that is equal
+# exactly for the same object, and hash(o) == id(o) >> 4 for an object with
+# the default hash. Rows from CPython 3.14.
+def s87():
+    class N:
+        __hash__ = None
+        x = None
+    class M(N):
+        pass
+    class I:
+        def __init__(self):
+            self.v = None
+    i = I()
+    check("non1", N.__hash__ is None and N.x is None and N().x is None and i.v is None and hasattr(i, "v") and hasattr(N, "__hash__"))
+    msgs = []
+    for o in [N(), M()]:
+        try:
+            hash(o)
+        except TypeError as e:
+            msgs.append(str(e))
+    check("non2", msgs == ["unhashable type: 'N'", "unhashable type: 'M'"])
+    del i.v
+    check("non3", not hasattr(i, "v"))
+    i.v = None
+    check("non4", hasattr(i, "v") and vars(i) == {"v": None})
+    class O:
+        pass
+    o = O()
+    xs = [1]
+    ys = xs
+    check("id1", id(o) == id(o) and id(o) != id(O()) and id(xs) == id(ys) and id(xs) != id([1]) and type(id(o)) is int)
+    check("id2", hash(o) == id(o) >> 4)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4493,5 +4528,6 @@ def main():
     s84() # SECTION-CALL 84
     s85() # SECTION-CALL 85
     s86() # SECTION-CALL 86
+    s87() # SECTION-CALL 87
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

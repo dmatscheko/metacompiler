@@ -1169,8 +1169,30 @@ function pyLookupHas(c, name) {
     var mro = pyMRO(c)
     for (var i = 0; i < mro.length; i++) {
         if (pyClassMember(mro[i], name) !== undefined) { return true }
+        if (mro[i]["__nonek"] !== undefined && pyNoneBound(mro[i], name)) { return true }
     }
     return false
+}
+
+// None is undefined here, so an attribute bound to None reads as absent; the
+// names an object binds to None are listed in its hidden __nonek. pySetAttr and
+// js_pydel_attr keep the list. Go and the interpreter test the key itself.
+function pyNoneBound(o, name) {
+    var nk = o["__nonek"]
+    if (nk === undefined) { return false }
+    var i = 0
+    while (i < nk.length) {
+        if (nk[i] === name) { return o[name] === undefined }
+        i = i + 1
+    }
+    return false
+}
+function pyPutAttr(o, name, v) {
+    o[name] = v
+    if (v === undefined && !pyNoneBound(o, name)) {
+        if (o["__nonek"] === undefined) { o["__nonek"] = [] }
+        o["__nonek"].push(name)
+    }
 }
 
 function pyLookupVal(c, name) {
@@ -1576,6 +1598,7 @@ function pyGetAttr(obj, name) {
         if (name == "__class__") { return cls }
         if (name == "__dict__") { return pyInstanceDict(obj) }
         if (obj[name] !== undefined) { return obj[name] }
+        if (pyNoneBound(obj, name)) { return undefined }
         if (pyLookupHas(cls, name)) {
             var v = pyLookupVal(cls, name)
             // staticmethod / classmethod, before every other arm: a static one
@@ -1930,11 +1953,11 @@ function pySetAttr(obj, name, v) {
             throw pyExcInstance("AttributeError",
                                 "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
         }
-        obj[name] = v
+        pyPutAttr(obj, name, v)
         return v
     }
     if (pyIsClass(obj)) {
-        obj[name] = v
+        pyPutAttr(obj, name, v)
         return v
     }
     if (typeof obj == "function") {
@@ -1948,7 +1971,7 @@ function pySetAttr(obj, name, v) {
     }
     pyNoDictAttr(obj, name)
     if (pyIsObj(obj)) {
-        obj[name] = v
+        pyPutAttr(obj, name, v)
         return v
     }
     fail("cannot set '" + name + "' on a " + pyTypeName(obj))
@@ -3659,9 +3682,10 @@ function js_pybin(opv, l, r) {
     // An augmented assignment arrives as its own operator ("-="). Two ints, or
     // arithmetic on an int or float box each, is the binary operator; the rest
     // is pyAAug's, out of line. The operator is renamed by constants rather than
-    // sliced, so nothing is allocated, and a one-character operator pays one test.
-    var aug = op.length > 1
-    if (aug) {
+    // sliced, so nothing is allocated, and a one-character operator pays one test
+    // and declares nothing (a declaration is a scope-slot write).
+    if (op.length > 1) {
+        var aug = true
         if (op == "+=") { op = "+" }
         else if (op == "-=") { op = "-" }
         else if (op == "*=") { op = "*" }
@@ -3676,9 +3700,33 @@ function js_pybin(opv, l, r) {
         else if (op == ">>=") { op = ">>" }
         else if (op == "@=") { op = "@" }
         else { aug = false }
+        if (aug && !(typeof l == "number" && typeof r == "number" && op != "@") && !pyAArithPair(op, l, r)) {
+            return pyAAug(op, l, r)
+        }
     }
-    if (aug && !(typeof l == "number" && typeof r == "number" && op != "@") && !pyAArithPair(op, l, r)) {
-        return pyAAug(op, l, r)
+    // Two plain ints: the answers the arms below reach for them, without their
+    // tests. A sum, difference or product leaving +-2^53 takes the promoting arm.
+    if (typeof l == "number" && typeof r == "number") {
+        if (op == "<") { return l < r }
+        if (op == "+") {
+            if (l + r < 9007199254740992 && l + r > -9007199254740992) { return l + r }
+        } else if (op == "%") {
+            return pyAFloorMod(l, r)
+        } else if (op == "-") {
+            if (l - r < 9007199254740992 && l - r > -9007199254740992) { return l - r }
+        } else if (op == "*") {
+            if (l * r < 9007199254740992 && l * r > -9007199254740992) { return l * r }
+        } else if (op == "==") {
+            return l === r
+        } else if (op == "!=") {
+            return l !== r
+        } else if (op == "<=") {
+            return l <= r
+        } else if (op == ">") {
+            return l > r
+        } else if (op == ">=") {
+            return l >= r
+        }
     }
     if (op == "is") { return pyAStrictEq(l, r) }
     if (op == "is not") { return !pyAStrictEq(l, r) }
@@ -4563,7 +4611,9 @@ function pyHashW(v0) {
         while (mi < mro.length) {
             var c = mro[mi]
             if (c["__hash__"] !== undefined) { return pyHashCall(c["__hash__"], v) }
-            if (c["__eq__"] !== undefined) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
+            // `__hash__ = None` makes the class unhashable, as an __eq__ without
+            // a __hash__ does.
+            if (c["__eq__"] !== undefined || pyNoneBound(c, "__hash__")) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
             if (c["__mro"] === undefined && c["__name"] !== undefined) { return pyHashW(pyUnwrapBuiltin(v)) }
             mi = mi + 1
         }
@@ -4599,18 +4649,22 @@ function pyHashF(f, holder) {
     if (f == Math.floor(f) && f < 9007199254740992 && f > -9007199254740992) { return pyHashSmall(f) }
     return pynHashFloat(f)
 }
-// The identity hash: the order in which hash() first met the value. The table
-// keeps every value it numbers alive.
+// The identity hash: the order in which hash() or id() first met the value. The
+// table keeps every value it numbers alive.
 var pyHashIds = []
-function pyHashId(v) {
+function pyHashId(v) { return pynWNum(pyIdIndex(v)) }
+function pyIdIndex(v) {
     var i = 0
     while (i < pyHashIds.length) {
-        if (pyHashIds[i] === v) { return pynWNum(i + 1) }
+        if (pyHashIds[i] === v) { return i + 1 }
         i = i + 1
     }
     pyHashIds.push(v)
-    return pynWNum(pyHashIds.length)
+    return pyHashIds.length
 }
+// Go: js_pyid. id(v) is 16 times the identity index, so hash(o) == id(o) >> 4
+// for an object with the default hash, as in CPython.
+function js_pyid(v) { return pyIdIndex(v) * 16 }
 
 // js_pyflo: the float LITERAL builder. Constant folding cannot carry a box, so
 // languages/python-to-llvm-ir.abnf emits this call for 1.0 and 1e3.
@@ -5417,7 +5471,7 @@ function pyDHasAttr(obj, name) {
     var cls = pyInstClassOf(obj)
     if (cls !== null && cls !== undefined) {
         if (name == "__class__" || name == "__dict__") { return true }
-        if (obj[name] !== undefined) { return true }
+        if (obj[name] !== undefined || pyNoneBound(obj, name)) { return true }
         return pyLookupHas(cls, name)
     }
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
@@ -7545,7 +7599,15 @@ function js_pydel_attr(obj, name) {
     if (obj === null || obj === undefined || typeof obj != "object") {
         fail("attribute deletion on a " + pyTypeName(obj))
     }
-    delKey(obj, pyToStr(name))
+    var dname = pyToStr(name)
+    delKey(obj, dname)
+    var nk = obj["__nonek"]
+    if (nk !== undefined) {
+        var ni = 0
+        while (ni < nk.length) {
+            if (nk[ni] === dname) { pyCRemoveAt(nk, ni) } else { ni = ni + 1 }
+        }
+    }
     return undefined
 }
 

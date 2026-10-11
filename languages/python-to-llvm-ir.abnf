@@ -1637,8 +1637,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // js_pyclass_fill took a SCOPE HANDLE and enumerated its names - the floor's
     // private storage again. The names a class body binds are known at emit time
-    // (pyBindSink), so the copy is emitted name by name over js_scope_get / js_set,
-    // both of which the C floor and abnf/jsrt.go have. The guard is what keeps a
+    // (pyBindSink), so the copy is emitted name by name over js_scope_get /
+    // js_pysetattr, which on a class is a plain store that also records a name
+    // bound to None (`__hash__ = None`) for layer 2. The guard is what keeps a
     // binding the body did not REACH (`if c: x = 1`) off the class, which is what
     // enumerating the scope gave for free.
     //
@@ -1666,7 +1667,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var hitB = pyFill1F.NewBlock("present")
             eb.NewCondBr(truthy(eb, callExt(eb, "js_scope_has", [sP, nP])), hitB, missB)
             missB.NewRet(handle(0))
-            callExt(hitB, "js_set", [cP, nP, callExt(hitB, "js_scope_get", [sP, nP])])
+            callExt(hitB, "js_pysetattr", [cP, nP, callExt(hitB, "js_scope_get", [sP, nP])])
             hitB.NewRet(handle(0))
         }
         var seen = {}
@@ -4343,6 +4344,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "pow", "js_pypow", 0)
         b = declBuiltin(b, "callable", "js_pycallable", 1)
         b = declBuiltin(b, "hash", "js_pyhash", 1)
+        b = declBuiltin(b, "id", "js_pyid", 1)
         b = declBuiltin(b, "ascii", "js_pyascii", 1)
         b = declBuiltin(b, "getattr", "js_pygetattr3", 0)
         b = declBuiltin(b, "hasattr", "js_pyhasattr", 2)

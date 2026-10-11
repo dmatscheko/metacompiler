@@ -16714,6 +16714,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(&jsPyFlo{f: rt.toNumber(u(a[0]))})
 		},
+		// id(v): 16 times the identity index pyHashId numbers values by. Twin
+		// of js_pyid in languages/lib/python-rt.metajs.
+		"js_pyid": func(a []uint64) uint64 {
+			return w(float64(rt.pyHashId(u(a[0])) * 16))
+		},
 		// hash(v); pyHashW in abnf/jsrtpynum.go.
 		"js_pyhash": func(a []uint64) uint64 {
 			x := rt.pyHashW(u(a[0]))

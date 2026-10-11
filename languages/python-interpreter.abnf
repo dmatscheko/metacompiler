@@ -1834,21 +1834,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return undefined
     }
     function pyHashOwnerOne(k) {
+        // `__hash__ = None` makes the class unhashable, as an __eq__ without a
+        // __hash__ does.
         if (hasOwn(k, "__hash__") && k.__hash__ != null) { return {m: k.__hash__} }
-        if (hasOwn(k, "__eq__")) { return {m: null} }
+        if (hasOwn(k, "__eq__") || hasOwn(k, "__hash__")) { return {m: null} }
         if (k.__builtin === true) { return {builtin: true} }
         return undefined
     }
-    // The identity hash: the order in which hash() first met the value. The
-    // table keeps every value it numbers alive.
+    // The identity hash: the order in which hash() or id() first met the value.
+    // The table keeps every value it numbers alive.
     var pyHashIds = []
-    function pyHashId(v) {
+    function pyHashId(v) { return pynWNum(pyIdIndex(v)) }
+    function pyIdIndex(v) {
         for (var i = 0; i < pyHashIds.length; i++) {
-            if (pyHashIds[i] === v) { return pynWNum(i + 1) }
+            if (pyHashIds[i] === v) { return i + 1 }
         }
         pyHashIds.push(v)
-        return pynWNum(pyHashIds.length)
+        return pyHashIds.length
     }
+    // id(v) is 16 times the identity index, so hash(o) == id(o) >> 4 for an
+    // object with the default hash, as in CPython. Twin of js_pyid in
+    // abnf/jsrt.go and languages/lib/python-rt.metajs.
+    hostGlobals["id"] = function(v) { return pyIdIndex(v) * 16 }
     hostGlobals["abs"] = function(v) {
         if (pyUser(v)) {
             var af = clsFind(v.__class, "__abs__")
@@ -2268,7 +2275,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var pyBFuncNames = ["print", "len", "abs", "isinstance", "issubclass", "repr", "sum",
                         "max", "min", "ord", "chr", "iter", "next", "sorted", "all", "any",
                         "bin", "hex", "oct", "divmod", "round", "pow", "callable", "ascii",
-                        "getattr", "hasattr", "setattr", "vars", "format", "hash"]
+                        "getattr", "hasattr", "setattr", "vars", "format", "hash", "id"]
     var pyBClassNames = ["range", "enumerate", "zip", "map", "filter", "reversed"]
     for (var bn0 = 0; bn0 < pyBFuncNames.length; bn0++) {
         if (typeof hostGlobals[pyBFuncNames[bn0]] == "function") {
@@ -2291,7 +2298,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (typeof o == "object" && o.__isclass == true) {
             if (name == "__name__" || name == "__qualname__" || name == "__mro__" || name == "__bases__" || name == "mro") { return true }
-            if (clsFind(o, name) != null) { return true }
+            if (clsFind(o, name) != null || clsHas(o, name)) { return true }
             // What pyattr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
             // unbound methods (list.count).
             if (pyBuiltinClsMethod(o, name) != null) { return true }
@@ -2325,7 +2332,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "object" && hasOwn(o, name)) { return o[name] !== pyDeleted }
         if (pyUser(o)) {
             if (name == "__dict__" || name == "__class__") { return true }
-            return clsFind(o.__class, name) != null
+            return clsFind(o.__class, name) != null || clsHas(o.__class, name)
         }
         if (typeof o == "function") {
             if (name == "__name__" || name == "__qualname__") { return true }
@@ -3267,6 +3274,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         return null
+    }
+    // Whether the class chain binds name at all: clsFind's null is also a
+    // binding to None (`__hash__ = None`).
+    function clsHas(cls, name) {
+        if (cls == undefined || cls == null) { return false }
+        if (hasOwn(cls, "__mro")) {
+            for (var mi = 0; mi < cls.__mro.length; mi++) {
+                if (hasOwn(cls.__mro[mi], name)) { return true }
+            }
+            return false
+        }
+        if (hasOwn(cls, name)) { return true }
+        var bs = cls.__bases
+        if (bs != undefined && bs != null) {
+            for (var i = 0; i < bs.length; i++) {
+                if (clsHas(bs[i], name)) { return true }
+            }
+        }
+        return false
     }
     // ----- subclasses of builtin types -----
     //
@@ -10540,6 +10566,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pyIsStatic(cv) || pyIsClsM(cv)) { return pyDescGet(cv, o, name) }
                 return cv
             }
+            if (clsHas(o, name)) { return undefined }
             // C.mro(), type's own method: the resolution order as a fresh list.
             if (name == "mro") { return function() { return pyMroAttr(o, "__mro__") } }
             // A method the TYPE OBJECT itself carries - dict.fromkeys - is a
@@ -10602,6 +10629,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (typeof m == "function") { return bindMethod(o, m, name) }
                 return m
             }
+            if (clsHas(o.__class, name)) { return undefined }
         }
         // A BOUND METHOD knows its own name, receiver and underlying function.
         // __qualname__ is answered HERE and nowhere else on
