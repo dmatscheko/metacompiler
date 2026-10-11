@@ -998,6 +998,8 @@ csharp-strings.js         <- csharp-rt.metajs, csharp interpreter (System.String
                              and System.Char; Go twin: abnf/jsrtcsstr.go)
 csharp-collections.js     <- csharp-rt.metajs, csharp interpreter (List<T> and
                              Dictionary<TKey,TValue>; Go twin: abnf/jsrtcscoll.go)
+csharp-linq.js            <- csharp-rt.metajs, csharp interpreter (System.Linq's
+                             Enumerable operators; Go twin: abnf/jsrtcslinq.go)
 utf16-strings.js          <- java-rt.metajs, csharp-rt.metajs, java and csharp
                              interpreters (case mapping and literal search over
                              UTF-16 units; Go twin: abnf/jsrtjavastr.go)

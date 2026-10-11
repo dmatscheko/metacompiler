@@ -76,6 +76,9 @@ func (rt *jsrt) csxForSrc(v interface{}) interface{} {
 	if _, _, ok := dictParts(v); ok {
 		return rt.csxDictPairs(v.(*jsObject))
 	}
+	if _, ok := csqIsQuery(v); ok {
+		return &jsArray{elems: rt.csqToArray(v)}
+	}
 	s, ok := v.(string)
 	if !ok {
 		return v
@@ -216,11 +219,10 @@ func (rt *jsrt) csxElemsOf(v interface{}) []interface{} {
 	if isUndefOrNull(v) {
 		rt.csThrow("ArgumentNullException", "Value cannot be null. (Parameter 'collection')")
 	}
-	e, ok := rt.csxForSrc(v).(*jsArray)
-	if !ok {
-		rt.fail("a lazy sequence as a collection argument is not modelled")
+	if e, ok := v.(*jsArray); ok {
+		return append([]interface{}{}, e.elems...)
 	}
-	return append([]interface{}{}, e.elems...)
+	return rt.csqToArray(v)
 }
 
 func (rt *jsrt) csxRangeChk(n, index, count int) {
@@ -479,8 +481,14 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 		a.elems = append(a.elems, arg(0))
 		return jsUndef
 	case "Count":
+		if n > 0 {
+			return rt.csqMethod(a, name, args)
+		}
 		return float64(len(a.elems))
 	case "Contains":
+		if n != 1 {
+			return rt.csqMethod(a, name, args)
+		}
 		return rt.csxSearch(a.elems, arg(0), 0, len(a.elems)) >= 0
 	case "IndexOf":
 		return float64(rt.csxListIndexOf(a.elems, args))
@@ -639,8 +647,7 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 		copy(dst.elems[di:di+cn], a.elems[si:si+cn])
 		return jsUndef
 	}
-	rt.fail("unknown List method: " + name)
-	return nil
+	return rt.csqMethod(a, name, args)
 }
 
 // ----- Dictionary<TKey,TValue> -----
@@ -718,6 +725,9 @@ func (rt *jsrt) csxDictMethod(d *jsObject, name string, args []interface{}) inte
 	case "Values":
 		return &jsArray{elems: append([]interface{}{}, vals.elems...)}
 	case "Count":
+		if n > 0 {
+			return rt.csqMethod(d, name, args)
+		}
 		return float64(len(keys.elems))
 	case "Add", "TryAdd":
 		rt.csxKeyChk(arg(0))
@@ -772,6 +782,5 @@ func (rt *jsrt) csxDictMethod(d *jsObject, name string, args []interface{}) inte
 		}
 		return csxDictDefault(d, vals)
 	}
-	rt.fail("unknown Dictionary method: " + name)
-	return nil
+	return rt.csqMethod(d, name, args)
 }

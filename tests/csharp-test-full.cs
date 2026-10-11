@@ -22,8 +22,8 @@
 // inside one class body).
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
-// using directives beyond System and System.Collections.Generic (the two the
-// feature matrix already carries), LINQ query syntax (it needs System.Linq),
+// using directives beyond System, System.Collections.Generic and System.Linq
+// (section 50 covers the Enumerable operators), LINQ query syntax,
 // await operands (they need System.Threading.Tasks; async members are covered
 // definition-only), unsafe code / pointers / stackalloc, ref structs,
 // assembly-level attributes, reflection, threads. Preprocessor directives are
@@ -40,6 +40,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Demo
 {
@@ -3100,6 +3101,81 @@ b";                                                   // verbatim keeps the newl
                 && "ab".Normalize(NormalizationForm.FormD) == "ab");
         }
 
+        // ===== SECTION 50: System.Linq's Enumerable operators =====
+        //
+        // The documented operators on a List, an array, a string, a Dictionary, an
+        // iterator and on each other's results: a query is DEFERRED (it reads its
+        // source when enumerated, so an element added afterwards is seen), Take and
+        // First stop reading an endless iterator, OrderBy / ThenBy sort stably,
+        // GroupBy yields the groups in the order their keys first occur, a lambda
+        // with two parameters gets the element's index, Sum over int is checked,
+        // Average of ints is a double, and the empty-sequence / no-match /
+        // more-than-one cases throw InvalidOperationException. No C# toolchain here:
+        // the values follow from the docs.
+        class S50P
+        {
+            public string Name;
+            public int Age;
+            public S50P(string n, int a) { Name = n; Age = a; }
+        }
+        static IEnumerable<int> S50Nat() { int i = 0; while (true) { yield return i; i++; } }
+        static string S50S<T>(IEnumerable<T> xs) { return string.Join(",", xs); }
+        static void S50()
+        {
+            int[] n = { 5, 3, 8, 1, 9, 2, 7 };
+            var l = new List<int> { n[0], n[1], n[2], n[3], n[4], n[5] };
+            var q = l.Where(x => x > n[5]);
+            l.Add(n[6]);
+            Program.Check("s50d1", S50S(q) == "5,3,8,9,7" && S50S(l.Select(x => x * 10).Take(2)) == "50,30"
+                && S50S(l.Where((x, i) => i % 2 == 0)) == "5,8,9,7" && S50S(l.Select((x, i) => x + i)) == "5,4,10,4,13,7,13");
+            Program.Check("s50a1", l.Sum() == 35 && l.Count() == 7 && l.Count(x => x > 4) == 4 && l.Min() == 1 && l.Max() == 9
+                && "" + l.Average() == "5" && "" + new[] { n[3], n[5] }.Average() == "1.5" && l.Any(x => x > 8)
+                && !l.All(x => x > 1) && l.Any() && !new List<int>().Any());
+            Program.Check("s50a2", l.Aggregate((a, b) => a + b) == 35 && l.Aggregate(n[1], (a, b) => a * 1 + b) == 38
+                && l.Aggregate(0, (a, b) => a + b, r => r * 2) == 70 && l.First() == 5 && l.First(x => x > 5) == 8
+                && l.Last() == 7 && l.FirstOrDefault(x => x > 100) == 0 && l.ElementAt(2) == 8
+                && l.Single(x => x == 8) == 8 && l.SingleOrDefault(x => x == 99) == 0 && l.Contains(9));
+            Program.Check("s50o1", S50S(l.OrderBy(x => x)) == "1,2,3,5,7,8,9" && S50S(l.OrderByDescending(x => x).Take(3)) == "9,8,7"
+                && S50S(l.Skip(5)) == "2,7" && S50S(new[] { n[3], n[3], n[5], n[1], n[1] }.Distinct()) == "1,2,3"
+                && S50S(l.TakeWhile(x => x > 2)) == "5,3,8" && S50S(l.SkipWhile(x => x > 2)) == "1,9,2,7");
+            var ps = new List<S50P> { new S50P("Cid", 30), new S50P("Bob", 25), new S50P("Ann", 30), new S50P("Dee", 22) };
+            Program.Check("s50o2", S50S(ps.OrderBy(p => p.Age).ThenBy(p => p.Name, StringComparer.Ordinal).Select(p => p.Name)) == "Dee,Bob,Ann,Cid"
+                && S50S(ps.OrderBy(p => p.Age).Select(p => p.Name)) == "Dee,Bob,Cid,Ann"
+                && S50S(ps.OrderByDescending(p => p.Age).ThenByDescending(p => p.Name, StringComparer.Ordinal).Select(p => p.Name)) == "Cid,Ann,Bob,Dee"
+                && ps.Sum(p => p.Age) == 107 && ps.Max(p => p.Age) == 30 && ps.MinBy(p => p.Age).Name == "Dee");
+            string grp = "";
+            foreach (var g in ps.GroupBy(p => p.Age)) { grp += g.Key + ":" + g.Count() + "=" + S50S(g.Select(p => p.Name)) + ";"; }
+            var d = ps.ToDictionary(p => p.Name, p => p.Age);
+            Program.Check("s50g1", grp == "30:2=Cid,Ann;25:1=Bob;22:1=Dee;" && d["Bob"] == 25 && d.Count == 4
+                && S50S(new[] { "apple", "avocado", "banana" }.GroupBy(w => w[0], (k, ws) => k + "" + ws.Count())) == "a2,b1");
+            Program.Check("s50z1", S50S(l.Zip(new[] { "a", "b" }, (x, s) => s + x)) == "a5,b3" && S50S(l.Take(2).Concat(new[] { 100 })) == "5,3,100"
+                && S50S(l.SelectMany(x => new[] { x, -x }).Take(4)) == "5,-5,3,-3" && S50S(new[] { 1, 2, 3 }.Union(new[] { 3, 4 })) == "1,2,3,4"
+                && S50S(new[] { 1, 2, 3 }.Intersect(new[] { 3, 2, 9 })) == "2,3" && S50S(new[] { 1, 2, 3 }.Except(new[] { 2 })) == "1,3"
+                && new[] { 1, 2 }.SequenceEqual(new[] { 1, 2 }) && l.Zip(l.Skip(1)).First().Item2 == 3);
+            var arr = l.Where(x => x < 5).ToArray();
+            var lst = l.Where(x => x < 5).ToList();
+            lst.Add(42);
+            Program.Check("s50t1", arr.Length == 3 && lst.Count == 4 && S50S(lst) == "3,1,2,42" && S50S(l) == "5,3,8,1,9,2,7");
+            Program.Check("s50i1", S50S(S50Nat().Where(x => x % 3 == 0).Take(4)) == "0,3,6,9" && S50Nat().First(x => x > 10) == 11
+                && S50S(Enumerable.Range(1, 4).Select(x => x * x)) == "1,4,9,16" && S50S(Enumerable.Repeat("ab", 2)) == "ab,ab"
+                && !Enumerable.Empty<int>().Any());
+            var dd = new Dictionary<string, int> { ["x"] = n[1], ["y"] = n[3], ["z"] = n[5] };
+            Program.Check("s50s1", new string("hello".Reverse().ToArray()) == "olleh" && "hello".Count(c => c == 'l') == 2
+                && string.Concat("abc".Select(c => char.ToUpper(c))) == "ABC"
+                && S50S(dd.OrderBy(kv => kv.Value).Select(kv => kv.Key)) == "y,z,x" && dd.Where(kv => kv.Value > 1).Count() == 2);
+            var ds = new List<double> { 1.5, 2.5, 4.0 };
+            Program.Check("s50f1", "" + ds.Sum() == "8" && "" + ds.Average() == "2.6666666666666665" && "" + ds.Max() == "4"
+                && "" + new List<int> { n[1], n[3] }.Average() == "2");
+            string ex = "";
+            try { new List<int>().First(); } catch (InvalidOperationException) { ex += "a"; }
+            try { l.Single(x => x > 1); } catch (InvalidOperationException) { ex += "b"; }
+            try { new int[0].Max(); } catch (InvalidOperationException) { ex += "c"; }
+            try { l.ElementAt(99); } catch (ArgumentOutOfRangeException) { ex += "d"; }
+            try { l.First(x => x > 99); } catch (InvalidOperationException) { ex += "e"; }
+            try { new[] { int.MaxValue, 1 }.Sum(); } catch (OverflowException) { ex += "f"; }
+            Program.Check("s50e1", ex == "abcdef");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3151,6 +3227,7 @@ b";                                                   // verbatim keeps the newl
             Program.S47(); // SECTION-CALL 47
             Program.S48(); // SECTION-CALL 48
             Program.S49(); // SECTION-CALL 49
+            Program.S50(); // SECTION-CALL 50
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

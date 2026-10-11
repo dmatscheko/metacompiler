@@ -324,8 +324,7 @@ function csxStrMethod(s, name, args) {
         return s
     }
     if (name == "IsNormalized") { return csxNormalized(s, args) }
-    fail("unknown string method: " + name)
-    return undefined
+    return csqMethod(s, name, args)
 }
 
 // A char receiver's method beyond System.Object's: CompareTo is the difference of
@@ -377,6 +376,12 @@ function csxParts(args, k) {
     }
     return out
 }
+// Concat's and Join's IEnumerable<T> parameter: one LINQ query or iterator
+// argument is its elements (lib/csharp-linq.js).
+function csxSeqParts(args, k) {
+    if (args.length == k + 1 && csqIsLazy(args[k])) { return csqToArray(args[k]) }
+    return csxParts(args, k)
+}
 function csxJoinParts(sep, parts) {
     var out = ""
     var i = 0
@@ -402,8 +407,8 @@ function csxCompareOrdinal(a, b) {
 // System.String's static members.
 function csxStringStatic(name, args) {
     var n = args.length
-    if (name == "Concat") { return csxJoinParts("", csxParts(args, 0)) }
-    if (name == "Join" && n >= 1) { return csxJoinParts(csxArgStr(args[0]), csxParts(args, 1)) }
+    if (name == "Concat") { return csxJoinParts("", csxSeqParts(args, 0)) }
+    if (name == "Join" && n >= 1) { return csxJoinParts(csxArgStr(args[0]), csxSeqParts(args, 1)) }
     if (name == "IsNullOrEmpty" && n == 1) { return args[0] === null || args[0] === undefined || args[0].length == 0 }
     if (name == "IsNullOrWhiteSpace" && n == 1) {
         if (args[0] === null || args[0] === undefined) { return true }

@@ -101,6 +101,7 @@ import "./java-chars.js"
 import "./utf16-strings.js"
 import "./csharp-strings.js"
 import "./csharp-collections.js"
+import "./csharp-linq.js"
 
 // ----- the JVM-family section's two knobs (lib/runtime.metajs) ---------------
 function rtjkCmp(op, l, r) { return csCmp(op, l, r) }
@@ -187,6 +188,34 @@ function csxkRefSet(box, v) {
     f(v)
     return undefined
 }
+
+// ----- System.Linq (lib/csharp-linq.js) --------------------------------------
+function csxkIsGen(v) { return isGenerator(v) }
+function csxkGenNext(it) {
+    var g = it["g"]
+    var st = g["next"].apply(g, [])
+    if (st["done"] === true) { return false }
+    it["cur"] = st["value"]
+    return true
+}
+// js_csarity records a two-parameter lambda's arity.
+function csxkArity(f) {
+    if (!csIsFn(f)) { return 0 }
+    return fnMeta(f, "length") == 2 ? 2 : 0
+}
+function csxkNumKind(v) {
+    if (floIs(v)) { return floStyle(v) == 5 ? "f" : "d" }
+    if (sintIs(v)) { return "l" }
+    if (typeof v == "number") { return "i" }
+    return ""
+}
+function csxkFlo(x) { return flo(x, 2) }
+function csxkFlo32(x) { return flo(rtF32Round(x), 5) }
+function csxkAdd(a, b) { return js_csadd2(a, b) }
+// A lambda declaring two parameters: the LINQ overloads that also pass the
+// element's index are chosen by it. Twin of the fnMetaSet in the interpreter's
+// makeLambda.
+function js_csarity(f, n) { return fnMetaSet(f, "", n) }
 
 // ===================================================== value readings =======
 
@@ -1206,6 +1235,10 @@ function csTypeObject(name0) {
         return csxEnumType(name0)
     }
     if (name0 == "StringComparer") { return csxStrComparerType() }
+    if (name0 == "Enumerable") {
+        o["__cstype"] = "Enumerable"
+        return o
+    }
     var name = csTypeAlias(name0)
     var w = csTypeW(name)
     if (w == 0) { return o }
@@ -1514,6 +1547,7 @@ function js_mcall(recv, name, args) {
     var cst = recv["__cstype"]
     if (cst !== undefined) {
         if (cst == "char") { return csxCharStatic(name, args) }
+        if (cst == "Enumerable") { return csqStatic(name, args) }
         return csxStringStatic(name, args)
     }
     var cls = recv["__class"]
@@ -1524,6 +1558,8 @@ function js_mcall(recv, name, args) {
         fail("unknown method '" + name + "' on an instance")
         return undefined
     }
+    // A LINQ query and a user iterator take the Enumerable operators.
+    if (csqIsQuery(recv) || isGenerator(recv)) { return csqMethod(recv, name, args) }
     var f = recv[name]
     if (csIsFn(f)) { return f.apply(undefined, args) }
     fail("unknown method '" + name + "'")
@@ -2063,6 +2099,7 @@ function js_csidxset(o, i, v) {
 // js_csforsrc in abnf/jsrtcsharp.go.
 function js_csforsrc(v) {
     if (csIsDict(v)) { return csxDictPairs(v) }
+    if (csqIsQuery(v)) { return csqToArray(v) }
     if (typeof v != "string") { return v }
     var out = []
     var i = 0

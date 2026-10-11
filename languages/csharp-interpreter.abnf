@@ -10,7 +10,9 @@ methods (block bodied and expression bodied '=> e;'), constructors (with an opti
 implicit base constructor, and 'base.M()' calls; a base class must appear before its
 subclasses), object creation with 'new', arrays (new int[n], new int[]{...}, a.Length,
 indexing), List<T> and Dictionary<K,V> with their documented members (lib/csharp-
-collections.js; a foreach over a dictionary visits KeyValuePairs), the 'foreach
+collections.js; a foreach over a dictionary visits KeyValuePairs), System.Linq's
+Enumerable operators (lib/csharp-linq.js: deferred queries over a list, an array, a
+string, a dictionary and an iterator), the 'foreach
 (var x in coll)' loop, 'var' and typed locals/params/returns (types are parsed; the
 semantics are dynamic), string concatenation with +, '$\"...{expr}...\"' interpolation,
 the String members .Length, .Substring, .IndexOf and .Equals, Console.WriteLine /
@@ -87,7 +89,7 @@ parameters are ordinary locals, read back only by a deconstruction.
 Not genuinely modelled: method overloading, unqualified FIELD access (fields are reached
 via this.x or ClassName.x; only an unqualified CALL resolves against the enclosing class),
 value semantics for structs outside a struct-typed declaration, disposal on a path that
-leaves a using block by an exception, and LINQ.
+leaves a using block by an exception, and LINQ query syntax.
 
 Fields live directly on the instance object, methods on the class descriptor; a
 constructor always exists (a default one is generated) and first applies the field
@@ -1667,6 +1669,7 @@ KwLet       = "let" KwEnd ;
     include("lib/utf16-strings.js")
     include("lib/csharp-strings.js")
     include("lib/csharp-collections.js")
+    include("lib/csharp-linq.js")
 
     // The host names a program can see. Console is built here.
     // With more than one argument the first is a composite format string
@@ -1696,6 +1699,8 @@ KwLet       = "let" KwEnd ;
     hostGlobals["StringSplitOptions"] = csxEnumType("StringSplitOptions")
     hostGlobals["NormalizationForm"] = csxEnumType("NormalizationForm")
     hostGlobals["StringComparer"] = csxStrComparerType()
+    // System.Linq.Enumerable's static members (lib/csharp-linq.js's csqStatic).
+    hostGlobals["Enumerable"] = {__cstype: "Enumerable"}
 
     // The integral type NAMES as expression primaries, so `int.MaxValue` and
     // `ulong.MaxValue` resolve. Each keyword and its System alias name the same
@@ -2655,6 +2660,7 @@ KwLet       = "let" KwEnd ;
     // (ECMA-334 13.9.5: string's enumerator yields char). Twin of js_csforsrc.
     function csForSrc(v) {
         if (isDict(v)) { return csxDictPairs(v) }
+        if (csqIsQuery(v)) { return csqToArray(v) }
         if (typeof v != "string") { return v }
         var out = []
         for (var i = 0; i < v.length; i++) { out.push(csChar(v.charCodeAt(i))) }
@@ -2720,6 +2726,25 @@ KwLet       = "let" KwEnd ;
     function csxkElems(v) { return csForSrc(v) }
     function csxkDictFind(d, k) { return dictFind(d, k) }
     function csxkRefSet(box, v) { if (csIsRefBox(box)) { box.wb(v) } }
+    // ----- System.Linq (lib/csharp-linq.js) -----
+    function csxkIsGen(v) { return csIsGen(v) }
+    function csxkGenNext(it) {
+        var g = it.g
+        if (!csGenStep(g)) { return false }
+        it.cur = g.cur
+        return true
+    }
+    // makeLambda records a two-parameter lambda's arity (fnMetaSet).
+    function csxkArity(f) { return typeof f == "function" && fnMeta(f, "length") == 2 ? 2 : 0 }
+    function csxkNumKind(v) {
+        if (typeof v == "number") { return "i" }
+        if (szIs(v)) { return "l" }
+        if (csIsFlo(v)) { return csIsF32(v) ? "f" : "d" }
+        return ""
+    }
+    function csxkFlo(x) { return csFlo(x) }
+    function csxkFlo32(x) { return csFlo32(x) }
+    function csxkAdd(a, b) { return csAdd(a, b) }
 
     // ----- iterators ('yield return'), driven by REPLAY -----
     // A method whose body contains a yield is an ITERATOR: calling it runs NOTHING and
@@ -2995,8 +3020,10 @@ KwLet       = "let" KwEnd ;
         if (typeof target == "string") { return csxStrMethod(target, name, args) }
         if (csIsChar(target)) { return csxCharMethod(target, name, args) }
         if (target !== null && typeof target == "object" && target.__cstype !== undefined) {
+            if (target.__cstype == "Enumerable") { return csqStatic(name, args) }
             return target.__cstype == "char" ? csxCharStatic(name, args) : csxStringStatic(name, args)
         }
+        if (csqIsQuery(target)) { return csqMethod(target, name, args) }
         if (isDict(target)) { return csxDictMethod(target, name, args) }
         if (csIsEnum(target)) {
             if (name == "MoveNext") {
@@ -3009,7 +3036,7 @@ KwLet       = "let" KwEnd ;
         }
         if (csIsGen(target)) {
             if (name == "GetEnumerator") { return csNewEnum(target) }
-            fail("unknown iterator method: " + name)
+            return csqMethod(target, name, args)
         }
         if (Array.isArray(target)) {
             if (name == "GetEnumerator") { return csNewEnum(csArrayGen(target)) }
@@ -4413,7 +4440,7 @@ KwLet       = "let" KwEnd ;
     function makeGotoDefault() { return function() { return {sig: "gotodefault"} } }
     // A lambda is a real closure value. It captures the scope chain live at the point it is
     // evaluated (a copy of the array, so the scope objects stay shared and later mutations
-    // of a captured local stay visible). LINQ stays unimplemented.
+    // of a captured local stay visible). LINQ query syntax stays unimplemented.
     function makeLambda(items) {
         var pinfo = items[0]
         var bm = items[1]
@@ -4421,6 +4448,12 @@ KwLet       = "let" KwEnd ;
         if (bm.body != undefined) { bodyT = bm.body }
         else { bodyT = makeArrowBody(bm.ebody) }
         var isGen = csGenCheck(pinfo)
+        // A lambda declaring two parameters says so (fnMeta's length): the LINQ
+        // overloads that also pass the element's index (lib/csharp-linq.js) are
+        // chosen by it. Twin of js_csarity in the compiler grammar.
+        if (pinfo.params.length == 2) {
+            return function() { return fnMetaSet(makeCsClosure(pinfo, bodyT, scopes.slice(0), isGen), "", 2) }
+        }
         return function() { return makeCsClosure(pinfo, bodyT, scopes.slice(0), isGen) }
     }
     // Binds a call's arguments to a parameter list: a missing argument takes the

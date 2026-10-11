@@ -146,12 +146,11 @@ function csxInsertAll(a, at, src) {
 // the list before it grows).
 function csxElemsOf(v) {
     if (csxIsNull(v)) { csxkThrow("ArgumentNullException", "Value cannot be null. (Parameter 'collection')") }
-    var e = csxkElems(v)
-    if (!Array.isArray(e)) { fail("a lazy sequence as a collection argument is not modelled") }
+    if (!Array.isArray(v)) { return csqToArray(v) }
     var out = []
     var i = 0
-    while (i < e.length) {
-        out.push(e[i])
+    while (i < v.length) {
+        out.push(v[i])
         i = i + 1
     }
     return out
@@ -343,8 +342,8 @@ function csxListMethod(a, name, args) {
         a.push(args[0])
         return undefined
     }
-    if (name == "Count") { return a.length }
-    if (name == "Contains") { return csxSearch(a, args[0], 0, a.length) >= 0 }
+    if (name == "Count" && n == 0) { return a.length }
+    if (name == "Contains" && n == 1) { return csxSearch(a, args[0], 0, a.length) >= 0 }
     if (name == "IndexOf") { return csxListIndexOf(a, args) }
     if (name == "LastIndexOf") { return csxListLastIndexOf(a, args) }
     if (name == "Clear") {
@@ -494,8 +493,7 @@ function csxListMethod(a, name, args) {
         }
         return undefined
     }
-    fail("unknown List method: " + name)
-    return undefined
+    return csqMethod(a, name, args)
 }
 
 // ----- Dictionary<TKey,TValue> -----
@@ -549,7 +547,7 @@ function csxDictMethod(d, name, args) {
     if (name == "__ctor") { return csxDictCtor(d, args) }
     if (name == "Keys") { return csxSlice(ks, 0, ks.length) }
     if (name == "Values") { return csxSlice(vs, 0, vs.length) }
-    if (name == "Count") { return ks.length }
+    if (name == "Count" && n == 0) { return ks.length }
     if (name == "Add" || name == "TryAdd") {
         csxKeyChk(args[0])
         if (csxkDictFind(d, args[0]) >= 0) {
@@ -587,8 +585,7 @@ function csxDictMethod(d, name, args) {
         if (gi >= 0) { return vs[gi] }
         return n > 1 ? args[1] : csxDictDefault(d)
     }
-    fail("unknown Dictionary method: " + name)
-    return undefined
+    return csqMethod(d, name, args)
 }
 // `new List<T>(collection)` copies it and `new List<T>(capacity)` is empty;
 // the same for a Dictionary built from another one.

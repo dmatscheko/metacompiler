@@ -485,6 +485,14 @@ func csxParts(args []interface{}, k int) []interface{} {
 	return args[k:]
 }
 
+// csxSeqParts: one LINQ query or iterator argument is its elements.
+func (rt *jsrt) csxSeqParts(args []interface{}, k int) []interface{} {
+	if len(args) == k+1 && csqIsLazy(args[k]) {
+		return rt.csqToArray(args[k])
+	}
+	return csxParts(args, k)
+}
+
 func (rt *jsrt) csxJoin(sep string, parts []interface{}) string {
 	out := ""
 	for i, p := range parts {
@@ -500,9 +508,9 @@ func (rt *jsrt) csxStringStatic(name string, args []interface{}) interface{} {
 	n := len(args)
 	switch {
 	case name == "Concat":
-		return rt.csxJoin("", csxParts(args, 0))
+		return rt.csxJoin("", rt.csxSeqParts(args, 0))
 	case name == "Join" && n >= 1:
-		return rt.csxJoin(strFromUnits(rt.csxArg(args[0])), csxParts(args, 1))
+		return rt.csxJoin(strFromUnits(rt.csxArg(args[0])), rt.csxSeqParts(args, 1))
 	case name == "IsNullOrEmpty" && n == 1:
 		s, ok := args[0].(string)
 		return !ok || s == ""

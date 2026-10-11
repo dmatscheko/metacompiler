@@ -11,7 +11,9 @@ methods, overrides with dynamic dispatch, runs the implicit base constructor, an
 'base.M()' calls; a base class must appear before its subclasses), object creation with
 'new', arrays (new int[n], new int[]{...}, a.Length, indexing), List<T> and
 Dictionary<K,V> with their documented members (lib/csharp-collections.js; a foreach over
-a dictionary visits KeyValuePairs), the 'foreach (var x in coll)' loop, 'var'
+a dictionary visits KeyValuePairs), System.Linq's Enumerable operators
+(lib/csharp-linq.js: deferred queries over a list, an array, a string, a dictionary and
+an iterator), the 'foreach (var x in coll)' loop, 'var'
 and typed locals/params/returns (parsed; dynamic semantics), string concatenation with +,
 '$\"...{expr}...\"' interpolation, the String members .Length, .Substring, .IndexOf and
 .Equals, Console.WriteLine / Console.Write mapped to the print builtin, if/else, while,
@@ -4022,7 +4024,12 @@ KwLet       = "let" KwEnd ;
         else { bodyT = makeArrowBody(bm.ebody) }
         return function(b) {
             var idx = emitFunc(pinfo.params, bodyT, false, null, undefined, false, pinfo)
-            return {b: b, v: csGenWrap(b, callExt(b, "js_closure", [handle(idx), curScopeV]))}
+            var cloV = csGenWrap(b, callExt(b, "js_closure", [handle(idx), curScopeV]))
+            // A lambda declaring two parameters says so: the LINQ overloads that also
+            // pass the element's index (lib/csharp-linq.js) are chosen by it. Twin of
+            // the fnMetaSet in the interpreter's makeLambda.
+            if (pinfo.params.length == 2) { cloV = callExt(b, "js_csarity", [cloV, emitNum(b, 2)]) }
+            return {b: b, v: cloV}
         }
     }
     // A local function: an own IR function closed over the current scope, bound by name.
@@ -7007,14 +7014,14 @@ KwLet       = "let" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
         // The integral type NAMES as expression primaries, so `int.MaxValue` and
         // `ulong.MaxValue` resolve, double for double.Parse / TryParse, and the BCL enums
-        // and comparers a String member takes. ulong.MaxValue is 18446744073709551615, which
+        // and comparers a String member takes, and Enumerable. ulong.MaxValue is 18446744073709551615, which
         // no double holds, so they arrive as runtime objects (js_cstype in
         // abnf/jsrtcsharp.go) rather than as emitted literals.
         var csTypeIdents = ["sbyte", "SByte", "byte", "Byte", "short", "Int16",
                             "ushort", "UInt16", "int", "Int32", "uint", "UInt32",
                             "long", "Int64", "ulong", "UInt64", "char", "Char", "string", "String",
                             "double", "Double", "StringComparison", "StringSplitOptions",
-                            "NormalizationForm", "StringComparer"]
+                            "NormalizationForm", "StringComparer", "Enumerable"]
         for (var cti = 0; cti < csTypeIdents.length; cti++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, csTypeIdents[cti]),
                                          callExt(b, "js_cstype", [emitStr(b, csTypeIdents[cti])])])

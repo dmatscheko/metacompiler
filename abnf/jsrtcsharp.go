@@ -514,6 +514,9 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 		return csxEnumType(name)
 	case "StringComparer":
 		return csxStrComparerType()
+	case "Enumerable":
+		o.set("__cstype", "Enumerable")
+		return o
 	}
 	// double.Parse / double.TryParse: csxParseDouble over the string; TryParse's
 	// out argument is a reference box, written 0 on a failure. Twins: the double
@@ -1429,6 +1432,11 @@ func init() {
 				if v, ok := rt.csxStrMethod(r, name, elems); ok {
 					return w(v)
 				}
+				if name != "length" && name != "charAt" && name != "equals" {
+					return w(rt.csqMethod(r, name, elems))
+				}
+			case *jsGenerator:
+				return w(rt.csqMethod(r, name, elems))
 			case jsChar:
 				return w(rt.csxCharMethod(r, name, elems))
 			case *jsArray:
@@ -1444,6 +1452,11 @@ func init() {
 					return w(rt.csxCharStatic(name, elems))
 				case "string":
 					return w(rt.csxStringStatic(name, elems))
+				case "Enumerable":
+					return w(rt.csqStatic(name, elems))
+				}
+				if _, isQuery := csqIsQuery(r); isQuery {
+					return w(rt.csqMethod(r, name, elems))
 				}
 				if _, _, isDict := dictParts(r); isDict {
 					return w(rt.csxDictMethod(r, name, elems))
@@ -1475,6 +1488,12 @@ func init() {
 				return jsUndef
 			}))
 			return rt.wrap(o)
+		}
+		// A two-parameter lambda's arity, which picks the LINQ overloads that also
+		// pass the element's index: lib/csharp-rt.metajs's js_csarity.
+		m["js_csarity"] = func(a []uint64) uint64 {
+			jsvFnMetaSet(u(a[0]), "", jsToInt(rt.toNumber(u(a[1]))))
+			return a[0]
 		}
 		// An interpolation hole's ':format': csxFmtValue, lib/csharp-strings.js's.
 		m["js_csfmt"] = func(a []uint64) uint64 {
