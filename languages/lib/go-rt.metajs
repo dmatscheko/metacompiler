@@ -534,6 +534,7 @@ function gopObj(o, depth) {
     // computed here.
     if (goIsDict(o)) {
         var order = gopKeyOrder(o.keys)
+        var mts = goMapTys(o)
         var out = "map["
         var i = 0
         while (i < order.length) {
@@ -541,7 +542,7 @@ function gopObj(o, depth) {
             var ix = order[i]
             var val = undefined
             if (ix < o.vals.length) { val = o.vals[ix] }
-            out = out + gopRender(o.keys[ix], depth + 1) + ":" + gopRender(val, depth + 1)
+            out = out + gopRender(goSlotBox(o.keys[ix], mts[0]), depth + 1) + ":" + gopRender(goSlotBox(val, mts[1]), depth + 1)
             i = i + 1
         }
         return out + "]"
@@ -562,12 +563,15 @@ function gopObj(o, depth) {
         if (!Array.isArray(back)) { return "[]" }
         var off = goIdx(o.o)
         var n = goIdx(o.n)
+        var ec = goSlotCls(gfHElemTy(o))
         var so = "["
         var si = 0
         while (si < n) {
             if (si > 0) { so = so + " " }
-            var e = undefined
+            var e = anytype
+            e = undefined
             if (off + si < back.length) { e = back[off + si] }
+            if (ec !== undefined) { e = js_godtbox(e, ec) }
             so = so + gopRender(e, depth + 1)
             si = si + 1
         }
@@ -614,7 +618,7 @@ function gopObj(o, depth) {
             // method guard's own limit says exactly that.
             var fd = depth + 1
             if (fd < 64 && !goNameExported(fn)) { fd = fd + 64 }
-            fo = fo + gopRender(goProp(o, fn), fd)
+            fo = fo + gopRender(goSlotBox(goProp(o, fn), goFieldTyAt(cls, fi)), fd)
             fi = fi + 1
         }
         return fo + "}"
@@ -1006,11 +1010,13 @@ function gfHElems(v) {
     if (!Array.isArray(back)) { return out }
     var off = goIdx(v.o)
     var n = goIdx(v.n)
+    var ec = goSlotCls(v.et)
     var i = 0
     while (i < n) {
         var e = anytype
         e = undefined
         if (off + i < back.length) { e = back[off + i] }
+        if (ec !== undefined) { e = js_godtbox(e, ec) }
         out.push(e)
         i = i + 1
     }
@@ -1025,21 +1031,23 @@ function gfHIsBytes(v) {
 }
 function gfHMapKV(v) {
     var order = gopKeyOrder(v.keys)
+    var mts = goMapTys(v)
     var ks = []
     var vs = []
     var i = 0
     while (i < order.length) {
-        ks.push(v.keys[order[i]])
+        ks.push(goSlotBox(v.keys[order[i]], mts[0]))
         var val = anytype
         val = undefined
         if (order[i] < v.vals.length) { val = v.vals[order[i]] }
-        vs.push(val)
+        vs.push(goSlotBox(val, mts[1]))
         i = i + 1
     }
     return [ks, vs]
 }
 function gfHFields(v) {
-    var flds = goClassOf(v).__fields
+    var cls = goClassOf(v)
+    var flds = cls.__fields
     var names = []
     var vals = []
     var i = 0
@@ -1049,7 +1057,7 @@ function gfHFields(v) {
         var fv = anytype
         fv = undefined
         if (goHas(v, fn)) { fv = v[fn] }
-        vals.push(fv)
+        vals.push(goSlotBox(fv, goFieldTyAt(cls, i)))
         i = i + 1
     }
     return [names, vals]
@@ -2498,6 +2506,38 @@ function js_godtbox(v, cls) {
     o.__class = cls
     o.__dv = v
     return o
+}
+// js_godtreg(cls): cls is the box descriptor of a defined type fmt prints through
+// Error() or String() inside a composite. goSlotBox is such an element as fmt
+// reaches it: boxed when its slot's type ty is registered (goSlotCls answers the
+// descriptor, or undefined). Twins: js_godtreg / goSlotBox in abnf/jsrtgolang.go,
+// goSlotBox in languages/go-interpreter.abnf.
+var GO_DTREG = {}
+function js_godtreg(cls) {
+    GO_DTREG["$" + goStrOf(cls.__name)] = cls
+    return undefined
+}
+function goSlotCls(ty) {
+    var r = anytype
+    r = undefined
+    if (typeof ty != "string" || ty == "" || !goHas(GO_DTREG, "$" + ty)) { return r }
+    return GO_DTREG["$" + ty]
+}
+function goSlotBox(v, ty) {
+    var cls = goSlotCls(ty)
+    if (cls === undefined) { return v }
+    return js_godtbox(v, cls)
+}
+// A map's key and value types, "" when it records none.
+function goMapTys(m) {
+    if (typeof m.mty != "string") { return ["", ""] }
+    var kt = gfMapKeyTy(m.mty)
+    return [kt, m.mty.substring(kt.length + 5)]
+}
+// A struct's declared type of field i, "" when unrecorded.
+function goFieldTyAt(cls, i) {
+    if (!goHas(cls, "__ftypes") || !Array.isArray(cls.__ftypes) || i >= cls.__ftypes.length) { return "" }
+    return goStrOf(cls.__ftypes[i])
 }
 function js_godtas(v, want, disp) {
     if (!goIsDt(v)) { return v }

@@ -1070,7 +1070,8 @@ function stChainFrom(head, hty, loc, text) {
                 j = j + 1
             } else {
                 ty = goFieldTyHook(sn, nm)
-                if (ty == "" && goPreFld["$" + sn + "." + nm] !== undefined) { ty = goPreFld["$" + sn + "." + nm] }
+                var fk = "$" + goTyKey(sn) + "." + nm
+                if (ty == "" && goPreFld[fk] !== undefined) { ty = goPreFld[fk] }
             }
             i = j
         } else if (ch == "[") {
@@ -1085,7 +1086,7 @@ function stChainFrom(head, hty, loc, text) {
 // The result type of method nm of type sn. A receiver type that does not declare
 // it (an interface) takes the result type every declaring type agrees on.
 function goMethRtyOf(sn, nm) {
-    var mk = "$" + sn + "." + nm
+    var mk = "$" + goTyKey(sn) + "." + nm
     if (goMethRty[mk] !== undefined) { return goMethRty[mk] }
     var rs = goMethRecv["$" + nm]
     if (rs === undefined) { return "" }
@@ -1131,17 +1132,18 @@ var goMethRecv = {}   // "$M" -> every receiver type that declares M
 function goNoteDefTy(name) {
     // The main file is prescanned first, and its own T keeps the bare name.
     if (goPreForeign && goDefTys["$" + name] !== true) { goDtForeign["$" + name] = true }
-    goDefTys["$" + name] = true
-    if (goPrePkg != "") { goDefTys["$" + goPrePkg + "." + name] = true }
+    if (!goPreShadow(name)) { goDefTys["$" + name] = true }
+    if (goNotePkg() != "") { goDefTys["$" + goNotePkg() + "." + name] = true }
 }
-function goIsDefTy(t) { return goDefTys["$" + t] === true }
+function goIsDefTy(t) { return goDefTys["$" + goTyKey(t)] === true }
 function goNoteMeth(rt, name, byPtr, rtys) {
-    goNoteMeth1(rt, name, byPtr, rtys)
-    if (goPrePkg == "") { return }
+    if (!goPreShadow(rt)) { goNoteMeth1(rt, name, byPtr, rtys) }
+    var pkg = goNotePkg()
+    if (pkg == "") { return }
     var qs = []
     var i = 0
-    while (i < rtys.length) { qs.push(goPkgQual(goPrePkg, rtys[i])); i = i + 1 }
-    goNoteMeth1(goPrePkg + "." + rt, name, byPtr, qs)
+    while (i < rtys.length) { qs.push(goPkgQual(pkg, rtys[i])); i = i + 1 }
+    goNoteMeth1(pkg + "." + rt, name, byPtr, qs)
 }
 function goNoteMeth1(rt, name, byPtr, rtys) {
     var k = "$" + rt + "." + name
@@ -1165,7 +1167,7 @@ function goMethPTysOf(rc, name) {
     var t = stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
     var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
     if (bt == "") { return null }
-    var own = goMethPTys["$" + bt + "." + name]
+    var own = goMethPTys["$" + goTyKey(bt) + "." + name]
     return own !== undefined ? own : null
 }
 
@@ -1193,8 +1195,22 @@ function goIsIfaceTy(t) {
 var goDtWide = {"$int64": true, "$uint64": true, "$uintptr": true}
 function goDtBoxTy(sty) {
     var t = stBare(sty)
-    if (goDtForeign["$" + t] === true) { return "" }
+    if (goDtForeign["$" + t] === true || goTyKey(t) != t) { return "" }
     return (goIsDefTy(t) || goDtWide["$" + t] === true) ? t : ""
+}
+// Does fmt print a value held in a slot of type ty (a slice's element type, a map's
+// key or value type, a struct field's) through ty's own Error() or String()? A
+// composite operand's elements are interfaceable values of their slot's type, so
+// the printers box each such element before rendering it.
+function goDtPrints(ty) {
+    var ms = goTyMeths["$" + ty]
+    if (ms === undefined || goDtBoxTy(ty) != ty) { return false }
+    var i = 0
+    while (i < ms.length) {
+        if (ms[i] == "Error" || ms[i] == "String") { return true }
+        i = i + 1
+    }
+    return false
 }
 // The box type for a value of static type sty stored where type dty is declared.
 function goDtBoxTo(sty, dty) {
@@ -1260,7 +1276,8 @@ function goFmtBoxTy(sty, name) {
 function goFmtVvTy(sty) {
     var t = stBare(sty)
     if (t == "" || !cIsIdCh(t.charCodeAt(0)) || stHeadLen(t) != t.length || goIsDefTy(t)) { return "" }
-    return (goMethPtr["$" + t + ".Error"] === true || goMethPtr["$" + t + ".String"] === true) ? t : ""
+    var k = goTyKey(t)
+    return (goMethPtr["$" + k + ".Error"] === true || goMethPtr["$" + k + ".String"] === true) ? t : ""
 }
 function goBoxArgsC(items) {
     var i = 1
@@ -1464,6 +1481,20 @@ var goPreFld = {}     // "$S.f" -> the type of field f of struct S
 var goPreForeign = false
 var goDtForeign = {}
 var goPrePkg = ""
+// A package type that shares its name with a main-file type is noted under "p.T"
+// only, so the bare key stays the main file's; the package's own code then reads
+// the tables through goTyKey, which qualifies such a name with goWalkPkg, the
+// package being walked ("" for the main file). The grammars set goWalkPkg.
+var goMainTys = {}    // "$T" -> true: a type the main file declares
+var goWalkPkg = ""
+// The package a declaration being noted belongs to: the one prescanned, else the
+// one walked ("" for the main file).
+function goNotePkg() { return goPrePkg != "" ? goPrePkg : goWalkPkg }
+function goPreShadow(t) { return goNotePkg() != "" && goMainTys["$" + t] === true }
+function goTyKey(t) {
+    if (goWalkPkg == "" || goMainTys["$" + t] !== true || goPkgTys["$" + goWalkPkg + "." + t] !== true) { return t }
+    return goWalkPkg + "." + t
+}
 var goPkgNames = {}   // "$p" -> true: an imported package's name
 var goPkgTys = {}     // "$p.T" -> true: a type declared in package p
 function goPrescanPkg(text, pname) {
@@ -1551,7 +1582,7 @@ function goPreFunc(text, i) {
     var ps = i
     i = stClose(text, i)
     if (i < 0) { return }
-    if (recv != "") { goMethPTys["$" + recv + "." + name] = goPreParams(text.substring(ps + 1, i)) }
+    if (recv != "") { goMethPTys["$" + (goPreShadow(recv) ? goNotePkg() + "." : "") + recv + "." + name] = goPreParams(text.substring(ps + 1, i)) }
     if (recv == "" && goFnPTys["$" + name] === undefined) {
         goFnPTys["$" + name] = goPreParams(text.substring(ps + 1, i))
         goFnSig["$" + name] = goSigAt(text, ps)
@@ -1601,6 +1632,7 @@ function goPreType(text, i) {
     if (i == ns) { return }
     var name = text.substring(ns, i)
     if (text.charAt(i) == "[") { return }
+    if (!goPreForeign) { goMainTys["$" + name] = true }
     i = stSkipWs(text, i)
     var rest = text.substring(i, i + 10)
     if (rest.substring(0, 6) == "struct") {
@@ -1774,7 +1806,7 @@ function goPreField(sname, f) {
         if (j > i && j < t.length) {
             var ty = stNoWs(t.substring(j))
             var k = 0
-            while (k < names.length) { goPreFld["$" + sname + "." + names[k]] = ty; k = k + 1 }
+            while (k < names.length) { goNoteFld(sname, names[k], ty); k = k + 1 }
         }
         return
     }
@@ -1783,7 +1815,13 @@ function goPreField(sname, f) {
     var last = et.length
     var st = last
     while (st > 0 && cIsIdCh(et.charCodeAt(st - 1))) { st = st - 1 }
-    if (st < last) { goPreFld["$" + sname + "." + et.substring(st, last)] = et }
+    if (st < last) { goNoteFld(sname, et.substring(st, last), et) }
+}
+// A shadowed package struct's field is "p.S.f", its type as the package spells it
+// seen from outside (goPreShadow).
+function goNoteFld(sname, f, ty) {
+    if (goPreShadow(sname)) { goPreFld["$" + goNotePkg() + "." + sname + "." + f] = goPkgQual(goNotePkg(), ty) }
+    else { goPreFld["$" + sname + "." + f] = ty }
 }
 // Every .m(args) and .m suffix of a chain that starts at source offset start, and
 // every [i] suffix that carries its offset, gets its receiver record (goRecvC);
@@ -1827,9 +1865,10 @@ function goDtPlan(rc, name) {
     if (cands.length == 0) { return null }
     var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
     var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
-    if (bt != "" && goMethRty["$" + bt + "." + name] !== undefined) {
+    var bk = goTyKey(bt)
+    if (bt != "" && goMethRty["$" + bk + "." + name] !== undefined) {
         if (!goIsDefTy(bt)) { return null }
-        return {fn: bt + "." + name, ty: bt, ptr: goMethPtr["$" + bt + "." + name] === true, dyn: false,
+        return {fn: bt + "." + name, ty: bt, ptr: goMethPtr["$" + bk + "." + name] === true, dyn: false,
                 isPtr: bt != t}
     }
     if (cands.length != 1) { return {fn: "", ty: "", ptr: false, dyn: true, isPtr: false} }
@@ -1844,7 +1883,7 @@ function goLibFile(path) { return path == "strings" ? "lib/go-strings.go" : "" }
 // is not one. A pointer method is spelled (*T).M and is not one.
 function goDtMethExpr(rc, name) {
     if (rc == null || rc.loc || rc.hty != "" || rc.text != rc.head || !goIsDefTy(rc.head)) { return "" }
-    var k = "$" + rc.head + "." + name
+    var k = "$" + goTyKey(rc.head) + "." + name
     return (goMethRty[k] !== undefined && goMethPtr[k] !== true) ? rc.head + "." + name : ""
 }
 // ----- THE ORDER PACKAGE VARIABLES ARE INITIALISED IN -----

@@ -45,3 +45,12 @@ func (k *Kind) Inc() { *k = *k + 1 }
 func Make() Kind { return Kind(2) }
 
 func Describe(k Kind) string { return "d:" + k.String() }
+
+// Names the main file declares too, with other underlying types and method sets.
+type Lvl int
+
+func (l Lvl) String() string { return "lvl" + string(rune('0'+int(l))) }
+
+type Tag string
+
+func TagText(t Tag) string { return string(t) + "!" }

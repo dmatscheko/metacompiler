@@ -3627,6 +3627,61 @@ func s58() {
 	t1, ok3 := a.(ms58)
 	t2 := a.(ms58)
 	check("ty58", fmt.Sprint(t1, ok3, t2) == "S(q)trueS(q)" && sw58(c58(1))+sw58(ms58("w"))+sw58(2) == "c58S(w)?")
+	// A defined-type key boxes in a type switch subject, a comma-ok assertion, a
+	// deferred call's target and a panic operand as it does in an expression.
+	km := map[any]any{mi58(1): "x", 1: 2}
+	tsw := "?"
+	switch v := km[mi58(1)].(type) {
+	case string:
+		tsw = "string " + v
+	case int:
+		tsw = "int"
+	}
+	_, ok4 := km[mi58(1)].(string)
+	dv := ""
+	fm := map[any]func(){mi58(1): func() { dv = "boxed" }, 1: func() { dv = "plain" }}
+	func() {
+		defer fm[mi58(1)]()
+	}()
+	pv := func() (r any) {
+		defer func() { r = recover() }()
+		panic(km[mi58(1)])
+	}()
+	check("mk6", tsw == "string x" && ok4 && dv == "boxed" && pv == "x")
+}
+
+// ===== SECTION 59: elements of a defined type inside a composite fmt prints =====
+type col59 int
+
+func (c col59) String() string { return fmt.Sprintf("c%d", int(c)) }
+
+type err59 float64
+
+func (e err59) Error() string { return fmt.Sprintf("e%.1f", float64(e)) }
+
+type pk59 int
+
+func (p *pk59) String() string { return "ptr" }
+
+type rec59 struct {
+	C  col59
+	cs []col59
+	M  map[col59]string
+}
+
+func s59() {
+	src := []int{3, 1, 2}
+	ks := []col59{}
+	for _, v := range src {
+		ks = append(ks, col59(v))
+	}
+	check("dc1", fmt.Sprint(ks, ks[1:]) == "[c3 c1 c2] [c1 c2]" && fmt.Sprintf("%v|%d|%s|%q", ks, ks, ks, ks[:1]) == "[c3 c1 c2]|[3 1 2]|[c3 c1 c2]|[\"c3\"]")
+	m := map[col59]col59{2: 5, 1: 4}
+	check("dc2", fmt.Sprint(m) == "map[c1:c4 c2:c5]" && fmt.Sprintf("%+v", map[string][]col59{"a": {7}}) == "map[a:[c7]]")
+	r := rec59{C: 1, cs: []col59{2}, M: map[col59]string{3: "x"}}
+	check("dc3", fmt.Sprint(r) == "{c1 [2] map[c3:x]}" && fmt.Sprintf("%+v", r) == "{C:c1 cs:[2] M:map[c3:x]}")
+	var a any = ks
+	check("dc4", fmt.Sprint(a, []err59{1.5}, []pk59{1}, [][]col59{{4}}) == "[c3 c1 c2] [e1.5] [1] [[c4]]")
 }
 
 func main() {
@@ -3688,6 +3743,7 @@ func main() {
 	s56() // SECTION-CALL 56
 	s57() // SECTION-CALL 57
 	s58() // SECTION-CALL 58
+	s59() // SECTION-CALL 59
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

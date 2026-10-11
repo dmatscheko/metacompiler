@@ -283,13 +283,14 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 	// go 1.12. The value model keeps insertion order, so the order is computed here.
 	if keys, vals, ok := dictParts(o); ok {
 		order := gopKeyOrder(keys.elems)
+		kt, vt := goMapTys(o)
 		parts := make([]string, 0, len(order))
 		for _, i := range order {
 			var val interface{} = jsUndef
 			if i < len(vals.elems) {
 				val = vals.elems[i]
 			}
-			parts = append(parts, rt.gopRender(keys.elems[i], depth+1)+":"+rt.gopRender(val, depth+1))
+			parts = append(parts, rt.gopRender(rt.goSlotBox(keys.elems[i], kt), depth+1)+":"+rt.gopRender(rt.goSlotBox(val, vt), depth+1))
 		}
 		return "map[" + strings.Join(parts, " ") + "]", true
 	}
@@ -313,13 +314,15 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 		}
 		off := int(rt.toNumber(o.props["o"]))
 		n := int(rt.toNumber(o.props["n"]))
+		et, _ := o.props["et"].(string)
+		ec := rt.goSlotCls(et)
 		parts := make([]string, 0, n)
 		for i := 0; i < n; i++ {
 			var e interface{} = jsUndef
 			if off+i < len(back.elems) {
 				e = back.elems[off+i]
 			}
-			parts = append(parts, rt.gopRender(e, depth+1))
+			parts = append(parts, rt.gopRender(goSlotIn(e, ec), depth+1))
 		}
 		return "[" + strings.Join(parts, " ") + "]", true
 	}
@@ -357,8 +360,9 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 		if flds == nil {
 			return "{}", true
 		}
+		fts := rt.goFieldTys(cls)
 		parts := make([]string, 0, len(flds.elems))
-		for _, f := range flds.elems {
+		for fi, f := range flds.elems {
 			fn, _ := f.(string)
 			var val interface{} = jsUndef
 			if fv, ok := o.props[fn]; ok {
@@ -376,7 +380,7 @@ func (rt *jsrt) gopObj(o *jsObject, depth int) (string, bool) {
 			if fd < gopNoMeth && !goNameExported(fn) {
 				fd += gopNoMeth
 			}
-			parts = append(parts, rt.gopRender(val, fd))
+			parts = append(parts, rt.gopRender(rt.goSlotBox(val, goTyAt(fts, fi)), fd))
 		}
 		return "{" + strings.Join(parts, " ") + "}", true
 	}
@@ -964,6 +968,73 @@ func goDtUnbox(rt *jsrt, v interface{}, want string) interface{} {
 	return v
 }
 
+// goDtReg is, per runtime, the box descriptor of every defined type fmt prints
+// through Error() or String() (js_godtreg), by type name.
+var goDtReg = struct {
+	sync.Mutex
+	m map[*jsrt]map[string]*jsObject
+}{m: map[*jsrt]map[string]*jsObject{}}
+
+// goSlotBox is an element of a composite as fmt reaches it: boxed when its slot's
+// type ty is registered, so fmt calls ty's method on it. goSlotCls answers the
+// registered descriptor (nil for none) and goSlotIn boxes in it. Twins: goSlotBox
+// in languages/go-interpreter.abnf and lib/go-rt.metajs.
+func (rt *jsrt) goSlotBox(v interface{}, ty string) interface{} {
+	return goSlotIn(v, rt.goSlotCls(ty))
+}
+
+func (rt *jsrt) goSlotCls(ty string) *jsObject {
+	if ty == "" {
+		return nil
+	}
+	goDtReg.Lock()
+	defer goDtReg.Unlock()
+	return goDtReg.m[rt][ty]
+}
+
+func goSlotIn(v interface{}, cls *jsObject) interface{} {
+	if cls == nil {
+		return v
+	}
+	if _, isBox := goDtVal(v); isBox || goIsStructVal(v) {
+		return v
+	}
+	o := newJSObject()
+	o.set("__class", cls)
+	o.set("__dv", v)
+	return o
+}
+
+// goMapTys is a map's key and value types, "" when it records none.
+func goMapTys(o *jsObject) (string, string) {
+	mt, _ := o.props["mty"].(string)
+	if mt == "" {
+		return "", ""
+	}
+	kt := gopMapKeyTy(mt)
+	return kt, mt[len(kt)+5:]
+}
+
+// goFieldTys is a struct descriptor's declared field types.
+func (rt *jsrt) goFieldTys(cls *jsObject) []string {
+	ft, ok := cls.props["__ftypes"].(*jsArray)
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(ft.elems))
+	for i, t := range ft.elems {
+		out[i] = rt.toString(t)
+	}
+	return out
+}
+
+func goTyAt(tys []string, i int) string {
+	if i < len(tys) {
+		return tys[i]
+	}
+	return ""
+}
+
 // gopAddrs is gfAddr's table, one per runtime: the referents %p has met, in order.
 var gopAddrs = struct {
 	sync.Mutex
@@ -1501,6 +1572,7 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 		return rt.gopList(f, v, verb, depth, noMeth)
 	case "map":
 		keys, vals, _ := dictParts(v)
+		kt, vt := goMapTys(v.(*jsObject))
 		var b strings.Builder
 		b.WriteString("map[")
 		for n, i := range gopKeyOrder(keys.elems) {
@@ -1511,15 +1583,16 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 			if i < len(vals.elems) {
 				val = vals.elems[i]
 			}
-			b.WriteString(rt.gopArg(f, keys.elems[i], verb, depth+1, noMeth))
+			b.WriteString(rt.gopArg(f, rt.goSlotBox(keys.elems[i], kt), verb, depth+1, noMeth))
 			b.WriteByte(':')
-			b.WriteString(rt.gopArg(f, val, verb, depth+1, noMeth))
+			b.WriteString(rt.gopArg(f, rt.goSlotBox(val, vt), verb, depth+1, noMeth))
 		}
 		b.WriteByte(']')
 		return b.String()
 	case "struct":
 		o := v.(*jsObject)
 		flds := goClassOf(v).props["__fields"].(*jsArray)
+		fts := rt.goFieldTys(goClassOf(v))
 		var b strings.Builder
 		b.WriteByte('{')
 		for n, fl := range flds.elems {
@@ -1534,7 +1607,7 @@ func (rt *jsrt) gopArg(f gopFlags, v interface{}, verb rune, depth int, noMeth b
 			if x, ok := o.props[name]; ok {
 				fv = x
 			}
-			b.WriteString(rt.gopArg(f, fv, verb, depth+1, noMeth || !goNameExported(name)))
+			b.WriteString(rt.gopArg(f, rt.goSlotBox(fv, goTyAt(fts, n)), verb, depth+1, noMeth || !goNameExported(name)))
 		}
 		b.WriteByte('}')
 		return b.String()
@@ -1620,8 +1693,14 @@ func (rt *jsrt) gopList(f gopFlags, v interface{}, verb rune, depth int, noMeth 
 				es = append(es, e)
 			}
 		}
-		if et, ok := o.props["et"].(string); ok && (et == "byte" || et == "uint8") {
+		et, _ := o.props["et"].(string)
+		if et == "byte" || et == "uint8" {
 			isBytes = true
+		}
+		if ec := rt.goSlotCls(et); ec != nil {
+			for i, e := range es {
+				es[i] = goSlotIn(e, ec)
+			}
 		}
 	}
 	if !isBytes && len(es) > 0 {
@@ -2326,6 +2405,18 @@ func init() {
 			o.set("__class", u(a[1]))
 			o.set("__dv", v)
 			return w(o)
+		}
+		// js_godtreg(cls): cls is the box descriptor of a type fmt prints through
+		// its method inside a composite (goSlotBox).
+		m["js_godtreg"] = func(a []uint64) uint64 {
+			cls, _ := u(a[0]).(*jsObject)
+			goDtReg.Lock()
+			if goDtReg.m[rt] == nil {
+				goDtReg.m[rt] = map[string]*jsObject{}
+			}
+			goDtReg.m[rt][rt.toString(cls.props["__name"])] = cls
+			goDtReg.Unlock()
+			return 0
 		}
 		m["js_godtas"] = func(a []uint64) uint64 {
 			v := u(a[0])

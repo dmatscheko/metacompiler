@@ -436,7 +436,7 @@ Defer       <~~ push(makeDefer(takeAll())) ~~>
 // suffixes and the primary is restricted to the forms a callee can take.
 DeferTarget <~~ push({dfn: pop()}) ~~>
             = DeferChain ;
-DeferChain  <~~ push(foldCallMember(takeAll())) ~~>
+DeferChain  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = DeferPrim { FieldSfx | IndexSfx } ;
 DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
@@ -493,7 +493,7 @@ AssertOk    <~~ push(makeAssertOk(cAssertOkC(takeAll()))) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
               AssertBase "." "(" AssertType ")" NotComma ;
-AssertBase  <~~ push(foldCallMember(takeAll())) ~~>
+AssertBase  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
 AssertType  <~~ push({at: firstType(up.in)}) ~~>
             = Type ;
@@ -507,7 +507,7 @@ MapOk       <~~ push(makeMapOk(goMapOkC(takeAll()))) ~~>
 // 'v, ok := st.mp["a"]' and 'v, ok := outer[a][b]' reach MapOk rather than ShortDecl
 // (which would destructure the ONE value it finds). An IndexSfx is taken here only
 // when ANOTHER suffix is glued to it, so the last '[k]' is always left for MapOk.
-MapBase     <~~ push(foldCallMember(takeAll())); push({mbty: stChainTy(up.in)}) ~~>
+MapBase     <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))); push({mbty: stChainTy(up.in)}) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx SfxGlued | SameLine CallSfx | TypeAssertSfx } ;
 // Anchored to the very NEXT byte, so it is a script and not a lookahead: a '.', '['
@@ -862,7 +862,7 @@ Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | Flo
 // equal. So a computed argument calls $panicf, which marks the panic fresh.
 PanicCall   = "panic" KwEnd "(" ( PanicPlain ")" | PanicFresh [ "," ] ")" ) ;
 PanicPlain  <~~ push(makeCall(["panic", pop()])) ~~> = PanicOperand [ "," ] ;
-PanicOperand <~~ push(foldCallMember(takeAll())) ~~>
+PanicOperand <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = ( ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit | BinLit | LegOctLit | DecULit
               | DqString | RawString | RuneLit | GoDecLit | True | False | Nil | VarRef ) { FieldSfx | IndexSfx } ;
 PanicFresh  <~~ push(makeCall(["$panicf", pop()])) ~~> = Expression ;
@@ -1629,7 +1629,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // A sized integer prints its digits, unsigned where it is unsigned - so a
         // uint64 above 2^63 is 18446744073709551615 and not -1.
         if (szIs(v)) { return szStr(v) }
-        if (isSl(v)) { return gstr(slElems(v)) }
+        if (isSl(v)) { return gstr(goSlotsBox(slElems(v), v.et)) }
         if (Array.isArray(v)) {
             var out = "["
             for (var i = 0; i < v.length; i++) {
@@ -1642,10 +1642,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // fmt prints a map with its keys SORTED (go 1.12 and later); the value
             // model keeps insertion order, so the order is computed here.
             var ord = gKeyOrder(v.keys)
+            var mts = goMapTys(v)
             var outm = "map["
             for (var j = 0; j < ord.length; j++) {
                 if (j > 0) outm += " "
-                outm += gstr(v.keys[ord[j]]) + ":" + gstr(v.vals[ord[j]])
+                outm += gstr(goSlotBox(v.keys[ord[j]], mts[0])) + ":" + gstr(goSlotBox(v.vals[ord[j]], mts[1]))
             }
             return outm + "]"
         }
@@ -1674,6 +1675,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (v.__class.__dt === true) { return goDtStr(v) }
             var out2 = "{"
             var fs = v.__class.__fields
+            var fts = gfHFTypes(v)
             for (var k = 0; k < fs.length; k++) {
                 if (k > 0) out2 += " "
                 // AN UNEXPORTED FIELD IS NOT INTERFACEABLE, so fmt never reaches its
@@ -1686,7 +1688,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 // transitivity: depth only ever grows on the way down.
                 var savedD = gStrDepth
                 if (!isExported(fs[k]) && gStrDepth < 32) { gStrDepth = 32 }
-                out2 += gstr(v[fs[k]])
+                out2 += gstr(k < fts.length ? goSlotBox(v[fs[k]], fts[k]) : v[fs[k]])
                 gStrDepth = savedD
             }
             return out2 + "}"
@@ -1741,22 +1743,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gfHNum(v) { return szIs(v) ? szNum(v) : gNumF(v) }
     function gfHF32(v) { return isF32(v) }
     function gfHCx(v) { return [gNumF(v.re), gNumF(v.im)] }
-    function gfHElems(v) { return isSl(v) ? slElems(v) : v }
+    function gfHElems(v) { return isSl(v) ? goSlotsBox(slElems(v), v.et) : v }
     function gfHIsBytes(v) {
         if (isSl(v) && (v.et == "byte" || v.et == "uint8")) { return true }
         return gfAllBytes(gfHElems(v))
     }
     function gfHMapKV(v) {
         var ord = gKeyOrder(v.keys)
+        var mts = goMapTys(v)
         var ks = []
         var vs = []
-        for (var i = 0; i < ord.length; i++) { ks.push(v.keys[ord[i]]); vs.push(v.vals[ord[i]]) }
+        for (var i = 0; i < ord.length; i++) { ks.push(goSlotBox(v.keys[ord[i]], mts[0])); vs.push(goSlotBox(v.vals[ord[i]], mts[1])) }
         return [ks, vs]
     }
     function gfHFields(v) {
         var fs = v.__class.__fields
+        var fts = gfHFTypes(v)
         var vs = []
-        for (var i = 0; i < fs.length; i++) { vs.push(v[fs[i]]) }
+        for (var i = 0; i < fs.length; i++) { vs.push(i < fts.length ? goSlotBox(v[fs[i]], fts[i]) : v[fs[i]]) }
         return [fs, vs]
     }
     // Does fmt call v's method name? A struct VALUE's method set lacks a pointer
@@ -1922,6 +1926,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return goMvArgs(argv)
     }
+    // The plan of an .m(args) or .m suffix, made at its first run, read in the package
+    // it is written in (goWalkPkg, go-constfold.js).
+    function goSfxPlan(s) {
+        var sw = goWalkPkg
+        goWalkPkg = s.pkg == null ? "" : s.pkg
+        s.dt = goDtPlan(s.rc, s.name)
+        if (s.kind == "field") { s.me = goDtMethExpr(s.rc, s.name) }
+        s.dtk = true
+        goWalkPkg = sw
+    }
     // Go's suffix chain: the shared core knows .m(), .field and [i]; the plain call
     // and the slice expression are added here.
     foldCallMember = function(items) {
@@ -1934,7 +1948,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
-                    if (!s.dtk) { s.dt = goDtPlan(s.rc, s.name); s.dtk = true }
+                    if (!s.dtk) { goSfxPlan(s) }
                     cur = s.dt === null ? mcall(cur, s.name, callArgs(s)) : goDtCall(cur, s, callArgs(s))
                 }
                 else if (s.kind == "field") {
@@ -1942,7 +1956,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     // abort, so `defer func(){ recover() }()` around `p.X` on a nil p
                     // recovers. All three engines raise goNilDeref's one wording.
                     if (cur === undefined || cur === null) { goNilDeref() }
-                    if (!s.dtk) { s.dt = goDtPlan(s.rc, s.name); s.me = goDtMethExpr(s.rc, s.name); s.dtk = true }
+                    if (!s.dtk) { goSfxPlan(s) }
                     if (s.me != "") { cur = goDtFns[goDtKey(s.pkg, s.me)] }
                     else { cur = (s.dt === null || s.dt.dyn) ? goField(cur, s.name) : goDtBind(cur, s) }
                 }
@@ -2624,6 +2638,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goDtBoxThunk(t, ty) {
         if (ty == "") { return t }
         return function() { return goDtBox(t(), ty) }
+    }
+    // An element of a composite as fmt reaches it: boxed when its slot's type ty
+    // prints through a method (go-constfold.js, goDtPrints). goSlotsBox boxes a list
+    // of them; goMapTys splits a map type into its key and value types. Twins:
+    // goSlotBox in abnf/jsrtgolang.go and lib/go-rt.metajs.
+    function goSlotBox(v, ty) { return (typeof ty == "string" && ty != "" && goDtPrints(ty)) ? goDtBox(v, ty) : v }
+    function goSlotsBox(vs, ty) {
+        if (typeof ty != "string" || ty == "" || !goDtPrints(ty)) { return vs }
+        var out = []
+        for (var i = 0; i < vs.length; i++) { out.push(goDtBox(vs[i], ty)) }
+        return out
+    }
+    function goMapTys(m) {
+        if (typeof m.mty != "string") { return ["", ""] }
+        var kt = gfMapKeyTy(m.mty)
+        return [kt, m.mty.substring(kt.length + 5)]
     }
     // v as type ty once a type test has matched: the value inside ty's box.
     function goDtUnbox(v, ty) { return (isDtBox(v) && v.__class.__name == ty) ? v.__dv : v }
@@ -5702,7 +5732,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var text = lib != "" ? load(lib) : c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         var savedPkg = curPkgName
+        var savedWalk = goWalkPkg
         curPkgName = pname
+        goWalkPkg = pname
         c.pushSource(file, text)
         goPrescanPkg(text, pname)
         // constByPos and convByPos are keyed by a source OFFSET, and an imported file is
@@ -5757,6 +5789,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cSwMarks = savedSwMarks
         c.popSource()
         curPkgName = savedPkg
+        goWalkPkg = savedWalk
         // THE PACKAGE SCOPE IS THE PACKAGE OBJECT, so every top-level name of the
         // package - exported const and var included - is reachable as pkg.Name, LIVE
         // rather than a snapshot (a write to the package's own variable is seen through

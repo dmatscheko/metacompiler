@@ -31,6 +31,11 @@ type Kind int
 
 func (k Kind) String() string { return "mainkind" }
 
+// Names vecbox declares too, with other underlying types and method sets.
+type Lvl int
+
+type Tag int
+
 func kindOf(v any) string {
 	switch x := v.(type) {
 	case vecbox.Kind:
@@ -142,6 +147,10 @@ func main() {
 	kk, ok := ka.(vecbox.Kind)
 	checkS("comma-ok assertion to an imported defined type", fmt.Sprint(kk, ok), "kind5 true")
 	checkS("type switch on an imported defined type", kindOf(k)+kindOf(Kind(1))+kindOf(3), "Skind3 Mmainkind ?")
+	// A package type named like a main-file type keeps its own methods and
+	// underlying type, and lends neither to the main file's.
+	checkS("main type without the package type's String", fmt.Sprint(Lvl(1), []Lvl{2}, vecbox.Lvl(3)), "1 [2] lvl3")
+	checkS("package type over another underlying type", vecbox.TagText("x")+fmt.Sprint(Tag(4)), "x!4")
 
 	if fails == 0 {
 		fmt.Println("go multifile test passed")

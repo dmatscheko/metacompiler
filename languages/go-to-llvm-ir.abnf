@@ -453,7 +453,7 @@ Defer       <~~ push(makeDefer(takeAll())) ~~>
 // suffixes and the primary is restricted to the forms a callee can take.
 DeferTarget <~~ push({dfn: pop()}) ~~>
             = DeferChain ;
-DeferChain  <~~ push(foldCallMember(takeAll())) ~~>
+DeferChain  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = DeferPrim { FieldSfx | IndexSfx } ;
 DeferPrim   = "(" Expression ")" | FuncLit | VarRef ;
 
@@ -511,7 +511,7 @@ MapOk       <~~ push(makeMapOk(goMapOkC(takeAll()))) ~~>
 // 'v, ok := st.mp["a"]' and 'v, ok := outer[a][b]' reach MapOk. An IndexSfx is
 // taken here only when ANOTHER suffix is glued to it, so the last '[k]' is always
 // left for MapOk itself. Twin of MapBase in go-interpreter.abnf.
-MapBase     <~~ push(foldCallMember(takeAll())); push({mbty: stChainTy(up.in)}) ~~>
+MapBase     <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))); push({mbty: stChainTy(up.in)}) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx SfxGlued | SameLine CallSfx | TypeAssertSfx } ;
 // Anchored to the very NEXT byte, so it is a script and not a lookahead: a '.', '['
@@ -532,7 +532,7 @@ TypeOk      <~~ push(makeTypeOk(cAssertOkC(takeAll()))) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
               AssertBase "." "(" AssertType ")" NotComma ;
-AssertBase  <~~ push(foldCallMember(takeAll())) ~~>
+AssertBase  <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx } ;
 AssertType  <~~ push({at: firstType(up.in)}) ~~> = Type ;
 // An expression statement is NOT a declaration, so it clears the pending
@@ -624,7 +624,7 @@ TypeSwitch  <~~ push(makeTypeSwitch(takeAll())); cSwExit() ~~>
             = "switch" KwEnd TypeSwAhead [ Id <~~ push({tsname: cTsName(cPoisonName(up.in))}) ~~> ":=" ]
               CondOn TSSubject CondOff "." "(" "type" KwEnd ")"
               "{" CSwOn { TypeCase | Statement } "}" ;
-TSSubject   <~~ push(foldCallMember(takeAll())) ~~>
+TSSubject   <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx } ;
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
@@ -887,7 +887,7 @@ Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | Flo
 // equal. So a computed argument calls $panicf, which marks the panic fresh.
 PanicCall   = "panic" KwEnd "(" ( PanicPlain ")" | PanicFresh [ "," ] ")" ) ;
 PanicPlain  <~~ push(makeCall(["panic", pop()])) ~~> = PanicOperand [ "," ] ;
-PanicOperand <~~ push(foldCallMember(takeAll())) ~~>
+PanicOperand <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start)))) ~~>
             = ( ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit | BinLit | LegOctLit | DecULit
               | DqString | RawString | RuneLit | GoDecLit | True | False | Nil | VarRef ) { FieldSfx | IndexSfx } ;
 PanicFresh  <~~ push(makeCall(["$panicf", pop()])) ~~> = Expression ;
@@ -2068,13 +2068,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // `type Q Point` -> "Point"), the compiler's mirror of the interpreter's table.
     var definedUnder = {}
     // Follow a chain of defined types to a spelling that is not itself a defined name.
-    // Bounded, so a cyclic declaration cannot hang the compile.
+    // Bounded, so a cyclic declaration cannot hang the compile. Inside a package's code
+    // (goWalkPkg) its own "p.T" wins over a main-file T of the same name.
     function resolveDefined(name) {
         var t = name
         var hops = 0
         // A bare read: there is no hasOwn in compile-core, and only a type NAME is
         // ever stored, so a hit that is not a string is an inherited member.
-        while (typeof definedUnder[t] == "string" && hops < 16) { t = definedUnder[t]; hops++ }
+        while (hops < 16) {
+            if (goWalkPkg != "" && typeof definedUnder[goWalkPkg + "." + t] == "string") { t = definedUnder[goWalkPkg + "." + t] }
+            else if (typeof definedUnder[t] == "string") { t = definedUnder[t] }
+            else { break }
+            hops++
+        }
         return t
     }
     // Does this type text spell a composite (slice, array or map) rather than a name?
@@ -5574,7 +5580,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isIface(ty) || goDtBoxTy(ty) == "") { return v }
         return callExt(b, "js_godtas", [v, emitStr(b, ty), emitStr(b, ty)])
     }
+    // A type whose box fmt needs inside a composite (goDtPrints) is declared whether
+    // or not the walk boxed it, and handed to the printers' registry (js_godtreg).
     function declDtClasses(b) {
+        var pm = ["$Error", "$String"]
+        for (var p = 0; p < pm.length; p++) {
+            var rs = goMethRecv[pm[p]]
+            for (var r = 0; rs !== undefined && r < rs.length; r++) { if (goDtPrints(rs[r])) { goDtNote(rs[r]) } }
+        }
         for (var i = 0; i < goDtUsed.length; i++) {
             var ty = goDtUsed[i]
             var clsV = callExt(b, "js_obj_new", [])
@@ -5590,6 +5603,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 }
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$dt$" + ty), clsV])
+            if (goDtPrints(ty)) { callExt(b, "js_godtreg", [clsV]) }
         }
         return b
     }
@@ -5773,8 +5787,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // The emit-time package, for sFields/sFTypes: a struct literal inside an
             // imported function is emitted HERE, when curPkgName is long since null.
             curEmitPkg = (typeof pn == "string") ? pn : null
+            goWalkPkg = (typeof pn == "string") ? pn : ""
             for (var ii = 0; ii < g.items.length; ii++) { b = g.items[ii](b) }
             curEmitPkg = null
+            goWalkPkg = ""
             c.popSource()
             curScopeV = mainScope
         }
@@ -5852,7 +5868,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (pkgExports["$" + pname] == undefined) { pkgExports["$" + pname] = []; pkgOrder.push(pname) }
         importPkgOfFile["$" + file] = pname
         var savedPkg = curPkgName
+        var savedWalk = goWalkPkg
         curPkgName = pname
+        goWalkPkg = pname
         var text = lib != "" ? load(lib) : c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
@@ -5890,6 +5908,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         importDepth = importDepth - 1
         c.popSource()
         curPkgName = savedPkg
+        goWalkPkg = savedWalk
         return true
     }
 
