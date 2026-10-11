@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-410** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-411** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,13 +107,12 @@ not change the renderer.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-405 swift: lazy static lets; implicit members in sub-expressions · P1 · SW · IN PROGRESS (SW worker, round 19) [V]
-`struct S { var n: Int; static let zero = S(n: 0) }; print(S.zero.n)`: swiftc 0;
-interpreter "unknown name: S", compiled "call of a non function value: undefined" -
-static initialisers run eagerly while the type is built (Swift: lazily, on first
-access). Implicit members still use the single-owner heuristic in array/dictionary
-literal elements, call arguments, ternary branches and closures typed only by their
-slot (`let f: () -> T = { .make(8) }`: swiftc t8, ours nil).
+### T-410 swift: `Self` as a value; expected types through `==`, generics and receivers · P1 · SW · IN PROGRESS (SW worker, round 20) [V]
+`static func b() -> Int { Self.num }` / `func c() { Self.num }`: swiftc 5; interpreter
+"unknown name: Self", compiled "variable not defined: Self". With T and U both
+declaring `one`: `tj[0] == .one` false (swiftc true); `func gen<X>(_ x: X) -> X; let g:
+T = gen(.make(5))` nil (swiftc 5); `arr.append(.zero)` with `arr: [T]` uses the
+single-owner guess.
 
 ---
 
@@ -484,6 +483,7 @@ T-401 the php ratchet's -frozen run is at ~94M of the 100M step brake — DONE c
 T-400 php: array pointer functions, ini_set, object ids, anonymous class names — DONE 4a852b8d (php-src corpus: interp 807→842, compiled 928→964, no losses)
 T-392 the C floor's `str_to_num` reads "Inf…" as Infinity — DONE 56400ff3 (floor = strconv.ParseFloat; python float(str) validates the whole string)
 T-394 python: complex from negative ** fractional; augmented-assignment errors; hash; views — DONE 40c43710 060190f5 fe27ddbc
+T-405 swift: lazy static lets; implicit members in sub-expressions — DONE a577592b 51b679b0
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
