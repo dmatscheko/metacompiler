@@ -6673,7 +6673,7 @@ KwContinue  = "continue" KwEnd ;
         // Any other return type adopts nothing; its text is only for swFnRetOf.
         else if (items[k] != undefined && items[k].otype != undefined) { ret = items[k].otype; k++ }
         if (ret == "") { ret = rty }
-        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret}
+        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels, rtype: rty, ret: ret, pos: up.start}
     }
     // The inout parameters of the function whose body is currently being emitted:
     // their final values are copied back into their caller's boxes before every ret.
@@ -6742,6 +6742,7 @@ KwContinue  = "continue" KwEnd ;
         var slot = f.name + "$" + lst.length
         return function(b) {
             var idx = emitFunc(f.params, f.body, false, false, f.rlabels, f.rtype)
+            defPos(b, f.pos)
             var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), cloV])
             if (lst.length == 1) {
@@ -7562,6 +7563,7 @@ KwContinue  = "continue" KwEnd ;
                 seen["$init"] = n + 1
             } else { n = ovNext(tname, false, mth.name) }
             var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
+            defPos(b, mth.pos)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
             noteOverload(ovNames, ovCands, mth.name, n, mth.params, tname, false)
@@ -8201,6 +8203,7 @@ KwContinue  = "continue" KwEnd ;
             if (mth.name == "init") { n = initIdxs[nInit]; nInit++ }
             else { n = ovNext(tname, false, mth.name) }
             var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels, mth.rtype)
+            defPos(b, mth.pos)
             callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
                                   callExt(b, "js_closure", [handle(idx), curScopeV])])
             noteOverload(ovNames, ovCands, mth.name, n, mth.params, tname, false)

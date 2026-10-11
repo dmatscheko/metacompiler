@@ -5554,7 +5554,7 @@ KwLet       = "let" KwEnd ;
         if (isStatic && items[3].ext == true) { csExt[name] = curClassName }
         csRegParams(name, items[3])
         return {kind: "method", name: name, statik: isStatic, params: params,
-                body: body, retTy: rty, pinfo: items[3], hides: hides}
+                body: body, retTy: rty, pinfo: items[3], hides: hides, pos: up.start}
     }
     // A member declared without a body (abstract, or an interface method with no default):
     // it contributes no callable member, but its NAME is a member of the class, so an
@@ -6308,6 +6308,7 @@ KwLet       = "let" KwEnd ;
                         b = csEmitOneWithBase(b, clsV, name, m2, csMSigOf(name, m2.name))
                     } else {
                         var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, false, m2.pinfo, m2.retTy)
+                        defPos(b, m2.pos)
                         callExt(b, "js_set", [clsV, emitStr(b, m2.name),
                                               csGenWrap(b, callExt(b, "js_closure", [handle(idx), curScopeV]))])
                     }

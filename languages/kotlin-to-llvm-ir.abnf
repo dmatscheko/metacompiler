@@ -5839,12 +5839,13 @@ KwContract  = "contract" KwEnd ;
         // A non-local return somewhere inside marked this function's return-target entry;
         // its body then needs the catch wrapper that delivers the marker as a return.
         if (retEntry != null && retEntry.nl == true) { body = wrapNonLocal(body) }
-        return {name: items[0], params: params, sig: sig, body: body}
+        return {name: items[0], params: params, sig: sig, body: body, pos: up.start}
     }
     function makeFunStmt(f) {
         funNames["$" + f.name] = true
         return function(b) {
             var idx = emitFunc(f.params, f.body, false, false, f.sig)
+            defPos(b, f.pos)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b
@@ -5858,6 +5859,7 @@ KwContract  = "contract" KwEnd ;
         extFunNames["$" + f.name] = true
         return function(b) {
             var idx = emitFunc(f.params, f.body, true, false, f.sig)
+            defPos(b, f.pos)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ext$" + f.name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b

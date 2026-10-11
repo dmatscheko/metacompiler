@@ -5041,6 +5041,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             i++
         }
         var body = items[i]
+        var at = up.start
         if (recv != null) {
             // recv = [name, {byptr}?, typeName]
             var byPtr = recv.length > 2
@@ -5048,6 +5049,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var rType = recv[recv.length - 1]
             return function(b) {
                 var idx = emitFunc(params, body, rName, rets, rtys)
+                defPos(b, at)
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rType)])
                 callExt(b, "js_set", [clsV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
                 if (byPtr) { callExt(b, "js_set", [clsV, emitStr(b, "__ptr$" + name), hTrue]) }
@@ -5059,6 +5061,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         notePkgName(name)
         return function(b) {
             var idx = emitFunc(params, body, null, rets, rtys)
+            defPos(b, at)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b

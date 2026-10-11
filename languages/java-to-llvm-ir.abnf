@@ -4163,7 +4163,7 @@ HasStatic   = :script(~~
         var body = items[3]
         var isStatic = false
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
-        return {kind: "method", name: name, statik: isStatic, params: params, ptys: items[2].ptys, body: body}
+        return {kind: "method", name: name, statik: isStatic, params: params, ptys: items[2].ptys, body: body, pos: up.start}
     }
     // super(args) / this(args) as the first statement of a constructor body. The
     // marker travels inside CtorBody's item list; makeCtor lifts it out.
@@ -4821,6 +4821,7 @@ HasStatic   = :script(~~
                     var m2Var = m2.params.length > 0 && typeof m2.params[m2.params.length - 1] != "string"
                     var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined, null, false, null,
                                        jBoundTys(m2.name, m2.ptys, m2Var))
+                    defPos(b, m2.pos)
                     var mclo = callExt(b, "js_closure", [handle(idx), curScopeV])
                     if (jOvNeedsSlot(m2.name)) {
                         callExt(b, "js_set", [clsV, emitStr(b, m2.name + "#" + jOvRawOf(m2.ptys, m2Var)), mclo])

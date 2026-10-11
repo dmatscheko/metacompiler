@@ -26,9 +26,9 @@
 # carry a marker differs per language.
 #
 # 3. -callgraph names each definition by its HEADER line, not by its body's
-#    first statement (DEF_CASES). kotlin, java, csharp, swift and go are not
-#    listed: their function declarations are not statements, so no marker
-#    precedes the closure and the graph still falls back to the body's line.
+#    first statement (DEF_CASES): every header line is reported. Extra lines are
+#    allowed, as above - go's function body is a closure of its own, named by
+#    its first statement.
 #
 # A language in the list below that emits NO markers at all is a FAILURE: the
 # list is exactly the handle-IR compilers, all of which are supposed to have
@@ -146,6 +146,11 @@ DEF_CASES=(
     "metajs:metajs:1 5"
     "lua:lua:1"
     "dart:dart:1 5"
+    "kotlin:kt:1 5"
+    "java:java:2 6"
+    "csharp:cs:3 7"
+    "swift:swift:1"
+    "go:go:3 8"
 )
 def_src_for() {
     case "$1" in
@@ -156,6 +161,11 @@ def_src_for() {
     metajs) printf 'function f(a) {\n    var b = a\n    return b\n}\nfunction main() {\n    f(1)\n}\n' ;;
     lua)    printf 'local function f(a)\n  local b = a\n  return b\nend\nf(1)\n' ;;
     dart)   printf 'int f(int a) {\n  var b = a;\n  return b;\n}\nvoid main() {\n  f(1);\n}\n' ;;
+    kotlin) printf 'fun f(a: Int): Int {\n    val b = a\n    return b\n}\nfun main() {\n    f(1)\n}\n' ;;
+    java)   printf 'public class Main {\n  static int f(int a) {\n    int b = a;\n    return b;\n  }\n  public static void main(String[] x) {\n    f(1);\n  }\n}\n' ;;
+    csharp) printf 'using System;\nclass Program {\n  static int F(int a) {\n    int b = a;\n    return b;\n  }\n  static void Main() {\n    F(1);\n  }\n}\n' ;;
+    swift)  printf 'func f(_ a: Int) -> Int {\n    let b = a\n    return b\n}\nlet r = f(1)\n' ;;
+    go)     printf 'package main\n\nfunc f(a int) int {\n\tb := a\n\treturn b\n}\n\nfunc main() {\n\tf(1)\n}\n' ;;
     esac
 }
 for c in "${DEF_CASES[@]}"; do
@@ -173,7 +183,11 @@ for c in "${DEF_CASES[@]}"; do
         fail=$((fail+1)); continue
     fi
     got=$(grep '"ev":"sdef"' "$cg" | grep -o '"line":[0-9]*' | sed 's/"line"://' | sort -n -u | paste -sd' ' -)
-    if [ "$got" = "$want" ]; then
+    missing=""
+    for w in $want; do
+        case " $got " in *" $w "*) ;; *) missing="$missing $w" ;; esac
+    done
+    if [ -z "$missing" ]; then
         pass=$((pass+1))
         [ $VERBOSE = 1 ] && echo "ok    $lang: definitions on [$want], -callgraph says [$got]"
     else

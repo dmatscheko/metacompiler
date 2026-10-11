@@ -188,11 +188,14 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	// before the js_closure in the creating function. That statement is the
 	// definition (`def f`, `function f`), so its line names the function rather
 	// than the first statement of its body. Not when another closure came between
-	// them, nor for a closure stored into an object member: a class statement
-	// creates all its methods after ONE marker, its own.
+	// them, nor for a closure stored into an object member - a class statement
+	// creates all its methods after ONE marker, its own - unless the marker is
+	// ADJACENT to the closure (nothing but string constants between): a
+	// declaration's own marker (defPos in lib/compile-core.js).
 	type cgSite struct {
 		in  *ir.Func
 		pos int
+		adj bool
 	}
 	closureSite := map[string]cgSite{}
 
@@ -211,19 +214,23 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	// Pass 1: string literals and closure creations (values compare by pointer).
 	var posFn *ir.Func
 	lastPos := -1
+	adj := false
 	forEachCall(func(f *ir.Func, call *ir.InstCall, callee string) {
 		if f != posFn {
-			posFn, lastPos = f, -1
+			posFn, lastPos, adj = f, -1, false
 		}
 		switch callee {
 		case "js_str_mem":
 			if s, ok := decodeStrMem(call); ok {
 				strOf[call] = s
 			}
+			return
 		case "js_srcpos":
 			if len(call.Args) > 0 {
 				if ci, ok := call.Args[0].(*constant.Int); ok {
 					lastPos = int(ci.X.Int64())
+					adj = true
+					return
 				}
 			}
 		case "js_closure":
@@ -232,12 +239,13 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					fn := fmt.Sprintf("jsf_%d", ci.X.Int64())
 					closureFn[call] = fn
 					if _, seen := closureSite[fn]; !seen && lastPos >= 0 {
-						closureSite[fn] = cgSite{f, lastPos}
+						closureSite[fn] = cgSite{f, lastPos, adj}
 					}
 					lastPos = -1
 				}
 			}
 		}
+		adj = false
 	})
 
 	// Pass 2: name reads, and the source names of the IR functions (a closure
@@ -272,7 +280,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 		case "js_tdecl", "js_scope_decl", "js_pyset_var", "js_tset", "js_scope_set", "js_kset", "js_set":
 			if len(call.Args) >= 3 {
 				if fn, ok := closureFn[call.Args[2]]; ok {
-					if callee == "js_set" {
+					if callee == "js_set" && !closureSite[fn].adj {
 						delete(closureSite, fn)
 					}
 					if s, ok2 := strOf[call.Args[1]]; ok2 {

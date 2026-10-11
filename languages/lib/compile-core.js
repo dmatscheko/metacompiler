@@ -481,6 +481,14 @@ function stmtPos(t) {
     }
 }
 
+// defPos marks where a declaration begins (its tag's up.start) right before the
+// js_closure that declaration creates, for a declaration that is not itself a
+// marked statement (a method, a hoisted function): -callgraph names a closure by
+// the last marker before it. Only when c.tracing, like stmtPos.
+function defPos(b, pos) {
+    if (c.tracing && pos != undefined) { callExt(b, "js_srcpos", [handle(pos)]) }
+}
+
 function deadBlock() {
     deadCount++
     return curF.NewBlock("dead" + deadCount)
