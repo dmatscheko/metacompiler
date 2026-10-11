@@ -66,11 +66,11 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-311 python: ordering across kinds does not raise · P1 · PY · OPEN [V]
+### T-311 python: ordering across kinds does not raise · P1 · PY · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
 `sorted([1, "a"])`, `[1] < ["a"]`, `1 < "a"`: CPython TypeError "'<' not supported
 between instances of 'str' and 'int'"; all engines answer.
 
-### T-312 python: `str.split(sep=)`, `str.encode()`, no-argument constructors · P1 · PY · OPEN [V]
+### T-312 python: `str.split(sep=)`, `str.encode()`, no-argument constructors · P1 · PY · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
 `"bob".split(sep="o")` ignores the keyword (CPython `['b', 'b']`; check every str
 method's keywords). `str.encode()` returns the str (`len("é".encode())` 1, CPython 2;
 `.encode().decode()` fails). `float()` prints `[object Object]` (interpreter) / `nan`
@@ -260,7 +260,7 @@ static String.fromCharCode(s) (the interpreter has no `String` name).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-313 php: partial application of a method declared with different arities · P1 · PHP · OPEN [V spec-only]
+### T-313 php: partial application of a method declared with different arities · P1 · PHP · IN PROGRESS (PY+PHP+LUA worker, round 6) [V spec-only]
 Compiler only: with `class A{function m($x,$y)}`, `class B{function m()}`, `class
 C{function m()}`, `($a->m(?,2))(1)` prints "m"; spec "m12". Also: the bare `$GLOBALS`
 array (iteration, var_dump) is unsupported.
@@ -269,13 +269,13 @@ array (iteration, var_dump) is unsupported.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-314 lua: `next()` is a stub compiled; `tostring`/`tonumber`/`type`/`table.concat` missing · P1 · LUA · OPEN [V]
+### T-314 lua: `next()` is a stub compiled; `tostring`/`tonumber`/`type`/`table.concat` missing · P1 · LUA · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
 Compiled `next()` covers only the array part and returns only the key: `next({a=1})`
 nil (lua `a 1`), `next({10,20})` 1 (lua `1 10`). `tostring`, `tonumber`, `type`,
 `table.concat` are missing in all engines - sweep the whole base/table/math library
 against lua 5.5 while there.
 
-### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA · OPEN [V]
+### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA · IN PROGRESS (PY+PHP+LUA worker, round 6) [V]
 lua writes the raw bytes. (math.log/log10/sin/atan last-digit differences vs C libm:
 see T-293.)
 
