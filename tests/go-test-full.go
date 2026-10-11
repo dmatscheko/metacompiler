@@ -3570,6 +3570,65 @@ func s57() {
 	check("sty7", len(p) == 3 && p[2] == 3)
 }
 
+// ===== SECTION 58: values of defined types as interface map keys and in type tests =====
+type mi58 int
+type ms58 string
+
+func (s ms58) String() string { return "S(" + string(s) + ")" }
+
+type am58 map[any]int
+
+type hold58 struct{ m map[any]string }
+
+type c58 int
+
+func (c c58) String() string { return "c58" }
+
+func sw58(v any) string {
+	switch x := v.(type) {
+	case ms58:
+		return x.String()
+	case c58:
+		return x.String()
+	}
+	return "?"
+}
+
+func s58() {
+	m := map[any]int{mi58(1): 1, 1: 2}
+	var k mi58 = 1
+	check("mk1", len(m) == 2 && m[k] == 1 && m[1] == 2 && m[mi58(1)] == 1)
+	m[k] = 10
+	m[ms58("a")] = 3
+	m["a"] = 4
+	_, ok := m[mi58(2)]
+	_, ok2 := m[k]
+	check("mk2", len(m) == 4 && m[mi58(1)] == 10 && m[1] == 2 && m[ms58("a")] == 3 && m["a"] == 4 && !ok && ok2)
+	delete(m, k)
+	m[k]++
+	m[k] += 5
+	check("mk3", len(m) == 4 && m[mi58(1)] == 6 && m[1] == 2)
+	am := am58{mi58(1): 1, 1: 2}
+	h := hold58{m: map[any]string{}}
+	h.m[k] = "boxed"
+	h.m[1] = "plain"
+	nested := map[string]map[any]int{"o": {mi58(1): 1}}
+	nested["o"][1] = 2
+	nested["o"][mi58(1)] += 10
+	check("mk4", len(am) == 2 && am[mi58(1)] == 1 && len(h.m) == 2 && h.m[k] == "boxed" && nested["o"][mi58(1)] == 11 && nested["o"][1] == 2)
+	keyTy := ""
+	for kk := range map[any]bool{mi58(3): true} {
+		keyTy = fmt.Sprintf("%v %T", kk, kk)
+	}
+	sm := map[fmt.Stringer]int{ms58("x"): 1}
+	sm[ms58("y")] = 2
+	check("mk5", keyTy == "3 main.mi58" && len(sm) == 2 && sm[ms58("x")] == 1)
+	var a any = ms58("q")
+	t1, ok3 := a.(ms58)
+	t2 := a.(ms58)
+	check("ty58", fmt.Sprint(t1, ok3, t2) == "S(q)trueS(q)" && sw58(c58(1))+sw58(ms58("w"))+sw58(2) == "c58S(w)?")
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -3628,6 +3687,7 @@ func main() {
 	s55() // SECTION-CALL 55
 	s56() // SECTION-CALL 56
 	s57() // SECTION-CALL 57
+	s58() // SECTION-CALL 58
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

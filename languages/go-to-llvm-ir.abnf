@@ -503,15 +503,15 @@ ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.p
 NotComma    = !"," ;
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
-MapOk       <~~ push(makeMapOk(takeAll())) ~~>
+MapOk       <~~ push(makeMapOk(goMapOkC(takeAll()))) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
-              MapBase "[" Expression "]" NotComma ;
+              MapBase "[" IdxE "]" NotComma ;
 // The map being indexed is a whole postfix expression MINUS its final index, so
 // 'v, ok := st.mp["a"]' and 'v, ok := outer[a][b]' reach MapOk. An IndexSfx is
 // taken here only when ANOTHER suffix is glued to it, so the last '[k]' is always
 // left for MapOk itself. Twin of MapBase in go-interpreter.abnf.
-MapBase     <~~ push(foldCallMember(takeAll())) ~~>
+MapBase     <~~ push(foldCallMember(takeAll())); push({mbty: stChainTy(up.in)}) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx SfxGlued | SameLine CallSfx | TypeAssertSfx } ;
 // Anchored to the very NEXT byte, so it is a script and not a lookahead: a '.', '['
@@ -528,7 +528,7 @@ SfxGlued    = :script(~~
 // two-name ShortDecl of one value, which destructures the value itself. Its base is
 // the ordinary postfix chain MINUS TypeAssertSfx, so the '.(T)' is left for this
 // rule - the interpreter half's AssertBase.
-TypeOk      <~~ push(makeTypeOk(takeAll())) ~~>
+TypeOk      <~~ push(makeTypeOk(cAssertOkC(takeAll()))) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
               AssertBase "." "(" AssertType ")" NotComma ;
@@ -569,8 +569,10 @@ TgtParen    <~~ push(makeTargetRef(takeAll())) ~~>
             = "(" TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ")"
               { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(cAssignName(up.in)) ~~> ;
-TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+TIndex      <~~ var tks = pop().ksty; push({idx: pop(), ksty: tks}) ~~>
+            = "[" IdxE "]" ;
+// An index or map key reports its static type after it (goKeyBoxTy).
+IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos)}) ~~> = Expression ;
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
@@ -619,12 +621,12 @@ Switch      = TypeSwitch | ValueSwitch ;
 // takes the subject's value inside the matching case body. Tried before the value
 // switch so its subject's '.(type)' is not mistaken for a value plus a type assertion.
 TypeSwitch  <~~ push(makeTypeSwitch(takeAll())); cSwExit() ~~>
-            = "switch" KwEnd TypeSwAhead [ Id <~~ push({tsname: cPoisonName(up.in)}) ~~> ":=" ]
+            = "switch" KwEnd TypeSwAhead [ Id <~~ push({tsname: cTsName(cPoisonName(up.in))}) ~~> ":=" ]
               CondOn TSSubject CondOff "." "(" "type" KwEnd ")"
               "{" CSwOn { TypeCase | Statement } "}" ;
 TSSubject   <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx } ;
-TypeCase    <~~ push(makeTypeCase(takeAll())) ~~>
+TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
               | "default" KwEnd ) ":" ;
 CaseType    <~~ push({ct: up.in}) ~~>
@@ -856,8 +858,8 @@ MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null}) ~~>
             = "." Id <~~ push({fname: up.in}) ~~> ;
-IndexSfx    <~~ push({kind:"index", idx: pop(), at: up.start, rc: null}) ~~>
-            = "[" Expression "]" ;
+IndexSfx    <~~ var iks = pop().ksty; push({kind:"index", idx: pop(), ksty: iks, at: up.start, rc: null}) ~~>
+            = "[" IdxE "]" ;
 // x.(T): a type assertion. The value is unchanged, but it is CHECKED, and a value
 // that does not hold the target type panics the way Go does: js_goifas by method set
 // for an interface, js_goassert by dynamic type for a predeclared scalar or a
@@ -1038,7 +1040,11 @@ SeqElem     <~~ push(makeSeqElem(takeAll())) ~~>
 // A key may be a bare brace group here too, which is what a NESTED map literal with a
 // struct key needs: `[]Named{{{1, 2}: "p"}}` and `map[string]Named{"x": {{1, 2}: "p"}}`.
 // Disjoint from Expression: no Go expression starts with '{'.
-SeqKey      <~~ push({ekey: pop(), ektext: firstWord(up.in)}) ~~> = ( SeqNest | Expression ) ":" ;
+SeqKey      <~~ var ska = pop()
+                if (ska.ksty !== undefined) { push({ekey: pop(), ektext: firstWord(up.in), eksty: ska.ksty}) }
+                else { push({ekey: ska, ektext: firstWord(up.in), eksty: ""}) } ~~>
+            = ( SeqNest | SeqKeyE ) ":" ;
+SeqKeyE     <~~ var ske = pop(); push(ske); push({ksty: goLitKeySty(stAt(up.pos))}) ~~> = Expression ;
 SeqVal      = SeqNest | SeqExpr ;
 // An element reports its static type after it, so one going into an interface
 // element is boxed (goDtBoxTo). Twin of CompExpr in go-interpreter.abnf.
@@ -1097,7 +1103,8 @@ MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
 // A KEY may be a bare brace group built against the map's KEY type, which is what a
 // struct-keyed literal is written with: map[Pair]string{{1, 2}: "p"}. No Go expression
 // starts with '{', so trying the group first is unambiguous.
-MapKey      = SeqNest | Expression ;
+MapKey      = SeqNest | MapKeyE ;
+MapKeyE     <~~ push({mkt: pop(), ksty: stAt(up.pos)}) ~~> = Expression ;
 // A value may be a bare brace group built against the map's VALUE type, as in
 // map[string][]int{"a": {1, 2}}.
 MapVal      = SeqNest | MapValE ;
@@ -1170,7 +1177,7 @@ KeyedElem   = KeyAhead LitKey ":" LitVal ;
 // this rule is the named-type one, which goes through StructLit because the type is a
 // bare name.) No Go expression starts with '{', so the group is disjoint from
 // Expression and the ordered choice cannot strand a later alternative.
-LitKey      <~~ push({fkey: firstWord(up.in), fkeyT: pop()}) ~~> = SeqNest | Expression ;
+LitKey      <~~ push({fkey: firstWord(up.in), fkeyT: pop(), ksty: goLitKeySty(stAt(up.pos))}) ~~> = SeqNest | Expression ;
 LitVal      = SeqNest | LitExpr ;
 // An element expression reports its static type in a {lesty} marker after it, which
 // a field of interface type boxes it by (litSplit, emitStructVal).
@@ -2120,7 +2127,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function emitDtCall(b, cur, s, p, argsV) {
         var rr = emitDtRecv(b, cur, s, p)
         b = rr.b
-        var fV = p.fn == "" ? hUndef : callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.fn)])
+        var fV = p.fn == "" ? hUndef : emitDtFn(b, curScopeV, p.fn)
         return {b: b, v: callExt(b, "js_godtcall", [rr.v, emitStr(b, s.name), argsV, fV, p.dyn ? hTrue : hFalse])}
     }
     // A METHOD VALUE of a defined type (`f := c.String`): the receiver is evaluated and
@@ -2128,7 +2135,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function emitDtBind(b, cur, s, p) {
         var rr = emitDtRecv(b, cur, s, p)
         b = rr.b
-        return {b: b, v: callExt(b, "js_godtbind", [rr.v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.fn)])])}
+        return {b: b, v: callExt(b, "js_godtbind", [rr.v, emitDtFn(b, curScopeV, p.fn)])}
+    }
+    // The function "T.M" of a defined type's method, seen from scope scV. An imported
+    // package's "p.T.M" is the package's own "T.M", read off the package object.
+    function emitDtFn(b, scV, fn) {
+        var d = fn.indexOf(".")
+        if (d > 0 && fn.indexOf(".", d + 1) > 0) {
+            return callExt(b, "js_gofield", [callExt(b, "js_scope_get", [scV, emitStr(b, fn.substring(0, d))]),
+                                             emitStr(b, fn.substring(d + 1))])
+        }
+        return callExt(b, "js_scope_get", [scV, emitStr(b, fn)])
     }
     function emitDtRecv(b, cur, s, p) {
         var r = cur
@@ -2319,11 +2336,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // indexed, or a nested brace group built against the element type), and only the
     // result differs - a slice gets a header over the array, an array IS the array.
     function makeSeqElem(items) {
-        var e = {ekey: null, ektext: null, eval: null, enest: null, esty: ""}
+        var e = {ekey: null, ektext: null, eksty: "", eval: null, enest: null, esty: ""}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { e.eval = it }
-            else if (it.ekey != undefined) { e.ekey = it.ekey; e.ektext = it.ektext }
+            else if (it.ekey != undefined) { e.ekey = it.ekey; e.ektext = it.ektext; e.eksty = it.eksty }
             else if (it.enest != undefined) { e.enest = it.enest }
             else if (it.esty != undefined) { e.esty = it.esty; if (goDtBoxTy(it.esty) != "") { goDtNote(goDtBoxTy(it.esty)) } }
         }
@@ -2426,6 +2443,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // map's declared KEY type - see MapKey and LitKey.
             var rk = emitMapKey(b, e.ekey, kty)
             b = rk.b
+            var kbt = goDtBoxTo(e.eksty, kty)
+            if (kbt != "") { rk = {b: b, v: emitDtBox(b, rk.v, kbt)} }
             var rv = emitElemVal(b, e, zero)
             b = rv.b
             callExt(b, "js_gisetat", [mV, rk.v, rv.v])
@@ -2502,6 +2521,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var ei = 0; ei < entries.length; ei++) {
             var em = entries[ei].mv
             if (typeof em != "function" && em.mvt != undefined) { entries[ei].mv = goDtBoxThunk(em.mvt, goDtBoxTo(em.esty, zero)) }
+            var ek = entries[ei].mk
+            if (typeof ek != "function" && ek.mkt != undefined) { entries[ei].mk = goKeyBoxC(ek.mkt, mty, ek.ksty) }
         }
         return function(b) {
             var mV = emitMapNew(b, zero, mty)
@@ -2688,6 +2709,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // The literal of a defined SLICE, ARRAY or MAP type, whose elements arrived in the
     // struct literal's shape (a bare thunk, or a {fkey} marker followed by one).
+    // A keyed element's key type, noted for its box now: the literal's own type is
+    // resolved only at emission (emitDefinedSeq), after the box classes are declared.
+    function goLitKeySty(ksty) {
+        if (goDtBoxTy(ksty) != "") { goDtNote(goDtBoxTy(ksty)) }
+        return ksty
+    }
     function emitDefinedSeq(b, under, args) {
         if (under.indexOf("map[") == 0) {
             var zero = mapValTy(under)
@@ -2706,6 +2733,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var ma = args[mi + 1]
                 var rk = emitMapKey(b, ka.fkeyT, kty)
                 b = rk.b
+                var kbt = goDtBoxTo(ka.ksty, kty)
+                if (kbt != "") { rk = {b: b, v: emitDtBox(b, rk.v, kbt)} }
                 var rv = emitElemVal(b, {ekey: null,
                                          eval: (typeof ma == "function") ? ma : null,
                                          enest: (typeof ma == "function") ? null : ma.enest}, zero)
@@ -3752,7 +3781,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var k = 0; k <= ref.path.length; k++) {
             ref.tys.push(goRefTy({name: ref.name, path: ref.path.slice(0, k), stars: i}))
         }
-        return ref
+        return goRefKeysC(ref)
     }
     // The value of a starred target's base: the variable, dereferenced stars - 1 times.
     function emitStarBase(b, ref) {
@@ -5572,7 +5601,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var fb = f.NewBlock("entry")
         var a0 = fb.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(0)])
         callExt(fb, "js_pyset", [f.Params[1], emitNum(fb, 0), callExt(fb, "js_get", [a0, emitStr(fb, "__dv")])])
-        var fV = callExt(fb, "js_scope_get", [f.Params[0], emitStr(fb, fn)])
+        var fV = emitDtFn(fb, f.Params[0], fn)
         fb.NewRet(callExt(fb, "js_call", [fV, hUndef, f.Params[1]]))
         return idx
     }
@@ -5827,7 +5856,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var text = lib != "" ? load(lib) : c.readFile(file)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
-        goPrescanPkg(text)
+        goPrescanPkg(text, pname)
         importDepth = importDepth + 1
         // constByPos and convByPos are keyed by a source OFFSET, and an imported file is
         // parsed with its own offsets starting at zero, so each file gets its own tables

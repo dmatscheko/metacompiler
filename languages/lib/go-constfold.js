@@ -1023,6 +1023,21 @@ function stHeadLen(text) {
 function stChainFrom(head, hty, loc, text) {
     var i = head.length
     var ty = stBare(hty)
+    // pkg.T(x) converts to the package's type and pkg.F(x) has F's result type.
+    if (ty == "" && !loc && goPkgNames["$" + head] === true && i < text.length && text.charAt(i) == ".") {
+        var pe = i + 1
+        while (pe < text.length && cIsIdCh(text.charCodeAt(pe))) { pe = pe + 1 }
+        if (pe < text.length && text.charAt(pe) == "(") {
+            var qn = text.substring(0, pe)
+            if (goPkgTys["$" + qn] === true) { ty = qn }
+            else if (goFnRty["$" + qn] !== undefined) { ty = goFnRty["$" + qn] }
+            if (ty != "") {
+                i = stClose(text, pe)
+                if (i < 0) { return "" }
+                i = i + 1
+            }
+        }
+    }
     if (ty == "" && i < text.length && text.charAt(i) == "(") {
         if (goIsDefTy(head) || goDtWide["$" + head] === true) { ty = head }
         else if (!loc && goFnRty["$" + head] !== undefined) { ty = goFnRty["$" + head] }
@@ -1036,6 +1051,14 @@ function stChainFrom(head, hty, loc, text) {
         var ch = text.charAt(i)
         if (ch == ".") {
             var j = i + 1
+            // x.(T) has type T.
+            if (j < text.length && text.charAt(j) == "(") {
+                var ae = stClose(text, j)
+                if (ae < 0) { return "" }
+                ty = text.substring(j + 1, ae)
+                i = ae + 1
+                continue
+            }
             while (j < text.length && cIsIdCh(text.charCodeAt(j))) { j = j + 1 }
             if (j == i + 1) { return "" }
             var sn = ty.charAt(0) == "*" ? ty.substring(1) : ty
@@ -1106,11 +1129,21 @@ var goMethRty = {}    // "$T.M" -> M's single result type ("" for none or severa
 var goMethPtr = {}    // "$T.M" -> true for a pointer receiver
 var goMethRecv = {}   // "$M" -> every receiver type that declares M
 function goNoteDefTy(name) {
+    // The main file is prescanned first, and its own T keeps the bare name.
+    if (goPreForeign && goDefTys["$" + name] !== true) { goDtForeign["$" + name] = true }
     goDefTys["$" + name] = true
-    if (goPreForeign) { goDtForeign["$" + name] = true }
+    if (goPrePkg != "") { goDefTys["$" + goPrePkg + "." + name] = true }
 }
 function goIsDefTy(t) { return goDefTys["$" + t] === true }
 function goNoteMeth(rt, name, byPtr, rtys) {
+    goNoteMeth1(rt, name, byPtr, rtys)
+    if (goPrePkg == "") { return }
+    var qs = []
+    var i = 0
+    while (i < rtys.length) { qs.push(goPkgQual(goPrePkg, rtys[i])); i = i + 1 }
+    goNoteMeth1(goPrePkg + "." + rt, name, byPtr, qs)
+}
+function goNoteMeth1(rt, name, byPtr, rtys) {
     var k = "$" + rt + "." + name
     var seen = goMethRty[k] !== undefined
     goMethRty[k] = rtys.length == 1 ? rtys[0] : ""
@@ -1283,6 +1316,50 @@ function goSwBoxC(items) {
     }
     return items
 }
+// ----- MAP KEYS OF A DEFINED TYPE -----
+// A key reaching a map whose key type is an interface is boxed by its static type,
+// as any value reaching an interface is (goDtBoxTo): map[any]int{MyInt(1): 1, 1: 2}
+// holds two keys. Every site that names a key boxes it the same way - the literal,
+// m[k] read and written, the comma-ok form and delete - so the map's own key search
+// finds a box by its type and value.
+function stMapKeyTy(t) {
+    var d = 0
+    var i = 3
+    while (i < t.length) {
+        var ch = t.charAt(i)
+        if (ch == "[") { d = d + 1 }
+        if (ch == "]") { d = d - 1; if (d == 0) { return t.substring(4, i) } }
+        i = i + 1
+    }
+    return ""
+}
+// The box a key of static type ksty takes in a map of static type mty, or "".
+function goKeyBoxTy(mty, ksty) {
+    if (ksty == "" || mty == "") { return "" }
+    var t = stBare(mty)
+    if (t.indexOf("map[") != 0) { t = resolveDefined(t) }
+    if (t.indexOf("map[") != 0) { return "" }
+    return goDtBoxTo(ksty, stMapKeyTy(t))
+}
+function goKeyBoxC(t, mty, ksty) { return goDtBoxThunk(t, goKeyBoxTy(mty, ksty)) }
+// The index steps of an assignment target, each typed through the steps before it.
+function goRefKeysC(ref) {
+    if (ref.stars > 0) { return ref }
+    var k = 0
+    while (k < ref.path.length) {
+        var p = ref.path[k]
+        if (p != null && typeof p == "object" && p.idx !== undefined && p.ksty !== undefined) {
+            p.idx = goKeyBoxC(p.idx, goRefTy({name: ref.name, path: ref.path.slice(0, k), stars: 0}), p.ksty)
+        }
+        k = k + 1
+    }
+    return ref
+}
+// items = [v, ok, {decl}, base, {mbty}, key, {ksty}] of `v, ok := m[k]`, handed on
+// as [v, ok, {decl}, base, key].
+function goMapOkC(items) {
+    return [items[0], items[1], items[2], items[3], goKeyBoxC(items[5], items[4].mbty, items[6].ksty)]
+}
 // items = [name, (argThunk, {aty})..., {spread}?] of a call `name(args)`: the
 // arguments boxed where the parameter is an interface, the {aty} markers dropped.
 function goCallBoxC(items) {
@@ -1292,6 +1369,9 @@ function goCallBoxC(items) {
     if (name == "append" && sp.atys.length > 0) { pts = ["", "..." + stElemTy(sp.atys[0])] }
     else if (goFnPTys["$" + name] !== undefined && !cIsLocal(name)) { pts = goFnPTys["$" + name] }
     var out = [name]
+    if (name == "delete" && sp.args.length == 2 && !sp.spread) {
+        sp.args[1] = goKeyBoxC(sp.args[1], sp.atys[0], sp.atys[1])
+    }
     var j = 0
     while (j < sp.args.length) {
         var t = sp.args[j]
@@ -1374,14 +1454,53 @@ function cIsLocal(name) {
 // field types, with the whitespace taken out as up.in takes it out of a type the
 // walk captures.
 var goPreFld = {}     // "$S.f" -> the type of field f of struct S
-// An imported file's declarations: its defined types are not boxed (goDtBoxTy),
-// since their methods live in the package's own scope.
+// An imported file's declarations. Inside the package they keep their own names,
+// and its defined types are not boxed there (goDtBoxTy), since their methods live
+// in the package's own scope. Seen from outside they are QUALIFIED, as the source
+// spells them: package pname's type T is "pname.T", a function F's result type
+// reads "pname.T" for its T, and a method or defined type is noted under that name
+// as well - so `k := shapes.Make()` binds k as a shapes.Kind, k.String() calls the
+// package's method and fmt boxes k like a defined type of the main file.
 var goPreForeign = false
 var goDtForeign = {}
-function goPrescanPkg(text) {
+var goPrePkg = ""
+var goPkgNames = {}   // "$p" -> true: an imported package's name
+var goPkgTys = {}     // "$p.T" -> true: a type declared in package p
+function goPrescanPkg(text, pname) {
+    goPkgNames["$" + pname] = true
+    var i = 0
+    while (i < text.length) {
+        if (text.substring(i, i + 5) == "type ") {
+            var j = stSkipWs(text, i + 5)
+            var e = j
+            while (e < text.length && cIsIdCh(text.charCodeAt(e))) { e = e + 1 }
+            if (e > j) { goPkgTys["$" + pname + "." + text.substring(j, e)] = true }
+        }
+        var nl = text.indexOf("\n", i)
+        if (nl < 0) { break }
+        i = nl + 1
+    }
     goPreForeign = true
+    goPrePkg = pname
     goPrescan(text)
     goPreForeign = false
+    goPrePkg = ""
+}
+// Type text t as written in package pkg, seen from outside: each name of a type
+// that pkg declares gets the qualifier.
+function goPkgQual(pkg, t) {
+    var out = ""
+    var i = 0
+    while (i < t.length) {
+        var j = i
+        while (j < t.length && cIsIdCh(t.charCodeAt(j))) { j = j + 1 }
+        if (j == i) { out = out + t.charAt(i); i = i + 1; continue }
+        var id = t.substring(i, j)
+        var dotted = (i > 0 && t.charAt(i - 1) == ".") || (j < t.length && t.charAt(j) == ".")
+        out = out + ((!dotted && goPkgTys["$" + pkg + "." + id] === true) ? pkg + "." + id : id)
+        i = j
+    }
+    return out
 }
 function goPrescan(text) {
     var i = 0
@@ -1470,7 +1589,10 @@ function goPreFunc(text, i) {
     var cb = ob < 0 ? -1 : stClose(text, ob)
     if (cb > 0) { goNoteFnText(recv != "" ? "." + name : name, text.substring(ob, cb + 1)) }
     if (recv != "") { goNoteMeth(recv, name, ptr, rtys) }
-    else if (goFnRty["$" + name] === undefined) { goFnRty["$" + name] = nres == 1 ? rty : "" }
+    else {
+        if (goFnRty["$" + name] === undefined) { goFnRty["$" + name] = nres == 1 ? rty : "" }
+        if (goPrePkg != "") { goFnRty["$" + goPrePkg + "." + name] = nres == 1 ? goPkgQual(goPrePkg, rty) : "" }
+    }
 }
 function goPreType(text, i) {
     i = stSkipWs(text, i)
@@ -1670,7 +1792,10 @@ function goRecvsC(items, start) {
     var i = 1
     while (i < items.length) {
         var s = items[i]
-        if (s != null && typeof s == "object" && (s.kind == "mcall" || s.kind == "field" || s.kind == "index") && s.at != undefined) { s.rc = goRecvC(start, s.at) }
+        if (s != null && typeof s == "object" && (s.kind == "mcall" || s.kind == "field" || s.kind == "index") && s.at != undefined) {
+            s.rc = goRecvC(start, s.at)
+            if (s.kind == "index") { s.idx = goKeyBoxC(s.idx, stChainFrom(s.rc.head, s.rc.hty, s.rc.loc, s.rc.text), s.ksty) }
+        }
         i = i + 1
     }
     return items
@@ -1691,13 +1816,14 @@ function goRecvC(start, at) {
 }
 // How rc.M() is called: null for an ordinary method call, else {fn: "T.M" (or ""
 // when several defined types declare M), ty: T, ptr, dyn}. dyn = the static type
-// is unknown, so a struct's own method still wins at run time.
+// is unknown, so a struct's own method still wins at run time. An imported
+// package's type is a candidate once, as its "p.T".
 function goDtPlan(rc, name) {
     var rs = goMethRecv["$" + name]
     if (rs === undefined) { return null }
     var cands = []
     var i = 0
-    while (i < rs.length) { if (goIsDefTy(rs[i])) { cands.push(rs[i]) } i = i + 1 }
+    while (i < rs.length) { if (goIsDefTy(rs[i]) && goDtForeign["$" + rs[i]] !== true) { cands.push(rs[i]) } i = i + 1 }
     if (cands.length == 0) { return null }
     var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
     var bt = (t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t
@@ -1889,7 +2015,7 @@ function goRangeC(pos) {
 
 // The switch body's mark: its frame DEPTH as well as its length, so a truncation
 // that would land in the wrong frame does nothing at all instead.
-function cSwEnter() { cSwMarks.push({d: cScopes.length, k: cTop().n.length}) }
+function cSwEnter() { cSwMarks.push({d: cScopes.length, k: cTop().n.length, ts: cTsPend}); cTsPend = "" }
 function cSwTrunc(m) {
     if (cScopes.length !== m.d) { return }
     var f = cTop()
@@ -1897,6 +2023,33 @@ function cSwTrunc(m) {
 }
 function cSwCase() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks[cSwMarks.length - 1]) } }
 function cSwExit() { if (cSwMarks.length > 0) { cSwTrunc(cSwMarks.pop()) } }
+// `v, ok := x.(T)` declares v a T; items are the comma-ok rule's [v, ok, {decl},
+// base, {at}].
+function cAssertOkC(items) {
+    if (items.length > 4 && items[2].decl === true && items[4].at !== undefined) { cBindTy(items[0], items[4].at) }
+    return items
+}
+// The name a type switch binds (`switch x := v.(type)`), held for the cSwEnter of
+// its body. In a clause that lists exactly ONE type the name has that type; in any
+// other clause it has the subject's, which is not known here. items are the
+// clause's {ct} type texts.
+var cTsPend = ""
+function cTsName(name) { cTsPend = name; return name }
+function cTsCase(items) {
+    if (cSwMarks.length == 0) { return items }
+    var nm = cSwMarks[cSwMarks.length - 1].ts
+    if (nm == "" || nm == "_") { return items }
+    var n = 0
+    var ty = ""
+    var i = 0
+    while (i < items.length) {
+        if (items[i] != null && typeof items[i] == "object" && items[i].ct !== undefined) { n = n + 1; ty = items[i].ct }
+        i = i + 1
+    }
+    cBindConst(nm, null)
+    if (n == 1 && ty != "nil") { cBindTy(nm, ty) }
+    return items
+}
 // The spec index INSIDE the current const group, which is what `iota` means, and
 // the group's last seen expression list as functions of it. CGrpOn resets both at
 // every `const`, grouped or not; CSpecOn steps the index once per spec.

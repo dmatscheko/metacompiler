@@ -489,7 +489,7 @@ NotComma    = !"," ;
 // The two-result type assertion: v, ok := x.(T) yields the zero value and false
 // instead of panicking. Its base must NOT take the .(T) suffix itself, so the chain
 // here is the ordinary one minus TypeAssertSfx.
-AssertOk    <~~ push(makeAssertOk(takeAll())) ~~>
+AssertOk    <~~ push(makeAssertOk(cAssertOkC(takeAll()))) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
               AssertBase "." "(" AssertType ")" NotComma ;
@@ -499,15 +499,15 @@ AssertType  <~~ push({at: firstType(up.in)}) ~~>
             = Type ;
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
-MapOk       <~~ push(makeMapOk(takeAll())) ~~>
+MapOk       <~~ push(makeMapOk(goMapOkC(takeAll()))) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
-              MapBase "[" Expression "]" NotComma ;
+              MapBase "[" IdxE "]" NotComma ;
 // The map being indexed is a whole postfix expression MINUS its final index, so
 // 'v, ok := st.mp["a"]' and 'v, ok := outer[a][b]' reach MapOk rather than ShortDecl
 // (which would destructure the ONE value it finds). An IndexSfx is taken here only
 // when ANOTHER suffix is glued to it, so the last '[k]' is always left for MapOk.
-MapBase     <~~ push(foldCallMember(takeAll())) ~~>
+MapBase     <~~ push(foldCallMember(takeAll())); push({mbty: stChainTy(up.in)}) ~~>
             = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
                       | SameLine IndexSfx SfxGlued | SameLine CallSfx | TypeAssertSfx } ;
 // Anchored to the very NEXT byte, so it is a script and not a lookahead: a '.', '['
@@ -554,8 +554,10 @@ TgtParen    <~~ push(makeTargetRef(takeAll())) ~~>
             = "(" TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ")"
               { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(cAssignName(up.in)) ~~> ;
-TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+TIndex      <~~ var tks = pop().ksty; push({idx: pop(), ksty: tks}) ~~>
+            = "[" IdxE "]" ;
+// An index or map key reports its static type after it (goKeyBoxTy).
+IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos)}) ~~> = Expression ;
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
@@ -603,10 +605,10 @@ Switch      = TypeSwitch | ValueSwitch ;
 // subject's value inside the matching case body. Tried before the value switch so
 // its subject's '.(type)' is not mistaken for a value plus a type assertion.
 TypeSwitch  <~~ push(makeTypeSwitch(takeAll())); cSwExit() ~~>
-            = "switch" KwEnd TypeSwAhead [ InitAhead FInit ";" ] [ Id <~~ push({tsname: cPoisonName(up.in)}) ~~> ":=" ]
+            = "switch" KwEnd TypeSwAhead [ InitAhead FInit ";" ] [ Id <~~ push({tsname: cTsName(cPoisonName(up.in))}) ~~> ":=" ]
               CondOn AssertBase CondOff "." "(" "type" KwEnd ")"
               "{" CSwOn { TypeCase | Statement } "}" ;
-TypeCase    <~~ push(makeTypeCase(takeAll())) ~~>
+TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
             = CCaseOn ( "case" KwEnd CaseType { "," CaseType }
               | "default" KwEnd ) ":" ;
 CaseType    <~~ push({ct: up.in}) ~~>
@@ -825,13 +827,13 @@ TypeArgsKw   = "[" NonExprT "]" ;
 NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
-FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null, dt: null, dtk: false, me: ""}) ~~>
+FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null, dt: null, dtk: false, me: "", pkg: curPkgName}) ~~>
             = "." Id <~~ push({fname: up.in}) ~~> ;
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
             = "[" [ Expression <~~ push({lo: pop()}) ~~> ] ":" [ Expression <~~ push({hi: pop()}) ~~> ]
               [ ":" Expression <~~ push({mx: pop()}) ~~> ] "]" ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+IndexSfx    <~~ var iks = pop().ksty; push({kind:"index", idx: pop(), ksty: iks, at: up.start, rc: null}) ~~>
+            = "[" IdxE "]" ;
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 Spread      <~~ push({spread: true}) ~~> = "..." ;
@@ -901,8 +903,11 @@ CompElem    <~~ push(makeCompElem(takeAll())) ~~>
 // A KEY may be a bare brace group built against the map's KEY type, which is what a
 // struct-keyed literal is written with: map[Pair]string{{1, 2}: "p"}. No Go expression
 // starts with '{', so trying the group first is unambiguous.
-CompKey     <~~ push({ckey: pop(), ktext: firstWord(up.in)}) ~~>
-            = ( CompNested | Expression ) ":" ;
+CompKey     <~~ var cka = pop()
+                if (cka.ksty !== undefined) { push({ckey: pop(), ktext: firstWord(up.in), ksty: cka.ksty}) }
+                else { push({ckey: cka, ktext: firstWord(up.in), ksty: ""}) } ~~>
+            = ( CompNested | CKeyE ) ":" ;
+CKeyE       <~~ var ke = pop(); push(ke); push({ksty: stAt(up.pos)}) ~~> = Expression ;
 CompValue   = CompNested | CompExpr ;
 // An element reports its static type after it, so one going into an interface
 // element is boxed (goDtBoxTo).
@@ -1894,7 +1899,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // The twin is makeMethodSfx in go-to-llvm-ir.abnf.
     function makeMethodSfx(name, items, at) {
         var c = makeCallSfx(items)
-        return {kind: "mcall", name: name, args: c.args, atys: c.atys, spread: c.spread, at: at, rc: null, dt: null, dtk: false}
+        return {kind: "mcall", name: name, args: c.args, atys: c.atys, spread: c.spread, at: at, rc: null, dt: null, dtk: false,
+                pkg: curPkgName}
     }
     function makeSliceSfx(items) {
         var lo = null, hi = null, mx = null
@@ -1937,7 +1943,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     // recovers. All three engines raise goNilDeref's one wording.
                     if (cur === undefined || cur === null) { goNilDeref() }
                     if (!s.dtk) { s.dt = goDtPlan(s.rc, s.name); s.me = goDtMethExpr(s.rc, s.name); s.dtk = true }
-                    if (s.me != "") { cur = goDtFns["$" + s.me] }
+                    if (s.me != "") { cur = goDtFns[goDtKey(s.pkg, s.me)] }
                     else { cur = (s.dt === null || s.dt.dyn) ? goField(cur, s.name) : goDtBind(cur, s) }
                 }
                 else if (s.kind == "call") {
@@ -2563,7 +2569,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // reaches the caller; a value receiver reads through a cell and is copied by
     // the method closure. Twins: js_godtcall in lib/go-rt.metajs and
     // abnf/jsrtgolang.go.
+    // goDtFns holds "T.M" for the main file and "p.T.M" for package p, whose code
+    // names its own types unqualified: a call site keeps the package it is in (pkg),
+    // and goDtKey qualifies a one-dot name with it. The compiler half needs none of
+    // this, its package scopes already hold "T.M" apart.
     var goDtFns = {}
+    function goDtKey(pkg, fn) {
+        var d = fn.indexOf(".")
+        if (pkg == null || pkg == undefined || fn.indexOf(".", d + 1) > 0) { return "$" + fn }
+        return "$" + pkg + "." + fn
+    }
     // The box a value of defined type ty gets in an interface (go-constfold.js,
     // goDtBoxTy): an instance of the type's descriptor, built on first use, whose
     // methods call the type's own on the value inside. Twins: emitDtBox in
@@ -2618,7 +2633,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (goHasMethod(recv, s.name)) { return mcall(recv, s.name, args) }
             if (p.fn == "") { return mcall(recv, s.name, args) }
         }
-        return goDtFns["$" + p.fn].apply(undefined, concat2impl([goDtRecv(recv, s)], args))
+        return goDtFns[goDtKey(s.pkg, p.fn)].apply(undefined, concat2impl([goDtRecv(recv, s)], args))
     }
     function goDtRecv(recv, s) {
         var p = s.dt
@@ -2632,7 +2647,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A METHOD VALUE of a defined type (`f := c.String`): the receiver is evaluated
     // and copied NOW, as goField does for a struct. Twin of js_godtbind in
     // abnf/jsrtgolang.go and lib/go-rt.metajs.
-    function goDtBind(recv, s) { return bindMethod(goDtRecv(recv, s), goDtFns["$" + s.dt.fn]) }
+    function goDtBind(recv, s) { return bindMethod(goDtRecv(recv, s), goDtFns[goDtKey(s.pkg, s.dt.fn)]) }
     function mcall(target, name, args) {
         if (target === undefined || target === null) { goNilDeref() }   // recoverable; see goNilDeref
         if (typeof target == "object" && target.__class != undefined) {
@@ -3578,8 +3593,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             i = 1
         }
         var v = items[i]
-        if (typeof v == "function") { return {ekey: key, ekeyn: keyn, ektext: ktext, eval: v, esty: items[i + 1].esty} }
-        return {ekey: key, ekeyn: keyn, ektext: ktext, enest: v.cnested.celems}
+        var eksty = i == 1 && items[0].ksty !== undefined ? items[0].ksty : ""
+        if (typeof v == "function") { return {ekey: key, ekeyn: keyn, ektext: ktext, eksty: eksty, eval: v, esty: items[i + 1].esty} }
+        return {ekey: key, ekeyn: keyn, ektext: ktext, eksty: eksty, enest: v.cnested.celems}
     }
     // The zero value of a type text, used for the untouched slots of [5]int{0: 1}.
     function zeroOfType2(t) { return goZeroTy(t) }
@@ -3686,7 +3702,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // One map-literal KEY: the ordinary key thunk, or an elided brace group built
     // against the map's declared KEY type (map[Pair]string{{1, 2}: "p"}).
     function litKeyOf(e, kty) {
-        if (e.ekeyn == undefined || e.ekeyn == null) { return e.ekey() }
+        if (e.ekeyn == undefined || e.ekeyn == null) {
+            var kbt = goDtBoxTo(e.eksty == undefined ? "" : e.eksty, kty)
+            return kbt != "" ? goDtBox(e.ekey(), kbt) : e.ekey()
+        }
         return buildLit(descOfTypeText(kty), e.ekeyn)
     }
     // Builds one composite literal value. `desc` is the type descriptor pushed by
@@ -4082,7 +4101,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     makeTargetRef = function(items) {
         var i = 0
         while (i < items.length && typeof items[i] != "string") { i++ }
-        return {name: items[i], path: items.slice(i + 1), stars: i}
+        return goRefKeysC({name: items[i], path: items.slice(i + 1), stars: i})
     }
     function assignRef(ref, v) {
         if (ref.path.length == 0) {
@@ -5685,7 +5704,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedPkg = curPkgName
         curPkgName = pname
         c.pushSource(file, text)
-        goPrescanPkg(text)
+        goPrescanPkg(text, pname)
         // constByPos and convByPos are keyed by a source OFFSET, and an imported file is
         // parsed with its own offsets starting at zero - so a literal in the import would
         // otherwise be read back as the constant (or conversion) of whatever the MAIN
@@ -5772,7 +5791,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var mfn = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params,
                                      body: mm.body, rets: mm.rets, rtys: mm.rtys, variadic: mm.variadic, byPtr: byPtr,
                                      ptypes: mm.ptypes, env: mm.env})
-        if (cls == undefined && goIsDefTy(recvType)) { goDtFns["$" + recvType + "." + mm.name] = mfn; continue }
+        if (cls == undefined && goIsDefTy(recvType)) {
+            goDtFns[goDtKey(mm.pkg, recvType + "." + mm.name)] = mfn
+            continue
+        }
         if (cls == undefined) fail("method receiver type not found: " + recvType)
         cls["__ptr$" + mm.name] = byPtr
         cls[mm.name] = mfn

@@ -31,3 +31,17 @@ func Bump() int {
 	Counter = Counter + 1
 	return Counter
 }
+
+// A DEFINED NON-STRUCT TYPE with methods. Seen from the main file it is vecbox.Kind,
+// and tests/go-test-multifile.go declares a Kind of its own beside it.
+type Kind int
+
+func (k Kind) String() string { return "kind" + string(rune('0'+int(k))) }
+
+func (k Kind) Twice() Kind { return k * 2 }
+
+func (k *Kind) Inc() { *k = *k + 1 }
+
+func Make() Kind { return Kind(2) }
+
+func Describe(k Kind) string { return "d:" + k.String() }

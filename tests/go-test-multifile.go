@@ -26,6 +26,21 @@ var Base = 1
 
 func helper() int { return 999 }
 
+// The same defined type name vecbox declares, with a different String().
+type Kind int
+
+func (k Kind) String() string { return "mainkind" }
+
+func kindOf(v any) string {
+	switch x := v.(type) {
+	case vecbox.Kind:
+		return "S" + x.String() + " "
+	case Kind:
+		return "M" + x.String() + " "
+	}
+	return "?"
+}
+
 func check(name string, got int, want int) {
 	if got != want {
 		fmt.Println("FAIL", name, "got", got, "want", want)
@@ -111,6 +126,22 @@ func main() {
 	check("qualified type as a map value", qm["a"].Norm(), 13)
 	// A keyed NESTED struct element.
 	check("keyed nested element", qs[1].X*10+qs[1].Y, 70)
+
+	// AN IMPORTED DEFINED TYPE is vecbox.Kind to this file: a value of it calls the
+	// package's methods, prints through String(), and is told apart from this file's
+	// own Kind, in fmt, in a type switch and in the package's own code.
+	k := vecbox.Make()
+	checkS("imported defined type method", k.String(), "kind2")
+	checkS("imported defined type in fmt", fmt.Sprint(k, k.Twice()), "kind2 kind4")
+	var k2 vecbox.Kind = 5
+	checkS("declared imported defined type", fmt.Sprintf("%v %d %T", k2, k2, k2), "kind5 5 vecbox.Kind")
+	k.Inc()
+	checkS("pointer method of an imported defined type", fmt.Sprint(k), "kind3")
+	checkS("same defined type name in main", fmt.Sprint(Kind(7))+" "+vecbox.Describe(k), "mainkind d:kind3")
+	var ka any = k2
+	kk, ok := ka.(vecbox.Kind)
+	checkS("comma-ok assertion to an imported defined type", fmt.Sprint(kk, ok), "kind5 true")
+	checkS("type switch on an imported defined type", kindOf(k)+kindOf(Kind(1))+kindOf(3), "Skind3 Mmainkind ?")
 
 	if fails == 0 {
 		fmt.Println("go multifile test passed")
