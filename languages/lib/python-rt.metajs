@@ -1502,12 +1502,38 @@ function pyGetAttr(obj, name) {
     if (pyIsObj(obj)) {
         if (obj[name] !== undefined) { return obj[name] }
     }
+    var na = pyNumAttr(obj, name)
+    if (na !== undefined) { return na }
     var mv = pyGetMember(obj, name)
     if (mv === undefined || mv === null) {
         pyRaiseExc("AttributeError",
                    "'" + pyTypeName(obj) + "' object has no attribute '" + name + "'")
     }
     return mv
+}
+
+// The attributes every real Python number carries. An int - a bool and an
+// arbitrary precision int too - is its own .real and .numerator AS AN INT
+// (True.real is 1), with .imag 0 and .denominator 1; a float is its own .real with
+// .imag 0.0 and has no numerator. undefined: not one of these.
+// Twin of pyNumAttr in abnf/jsrt.go and languages/python-interpreter.abnf.
+function pyNumAttr(o, name) {
+    if (pyIsFlo(o)) {
+        if (name == "real") { return o }
+        if (name == "imag") { return pyMkFlo(0) }
+        return undefined
+    }
+    if (typeof o != "number" && typeof o != "boolean" && !pyIsBig(o)) { return undefined }
+    if (name == "real" || name == "numerator") {
+        if (typeof o == "boolean") {
+            if (o) { return 1 }
+            return 0
+        }
+        return o
+    }
+    if (name == "imag") { return 0 }
+    if (name == "denominator") { return 1 }
+    return undefined
 }
 
 // rt.getMember for the shapes this value model builds. A dict answers its own
@@ -4560,6 +4586,7 @@ function pyDHasAttr(obj, name) {
     // EVERY value has (None.__class__ is NoneType).
     if (name == "__class__") { return true }
     if (pyDBuiltinAttr(obj, name)) { return true }
+    if (pyNumAttr(obj, name) !== undefined) { return true }
     // hasattr must answer exactly what the getattr above can answer, or the
     // three-argument getattr - which asks this first - hands back its default for
     // a name that IS readable. Both tables, in the same order. The synthetic
@@ -7201,6 +7228,13 @@ function pyDMethodCall(target, name, args, kw) {
     if (pyIsArr(target)) {
         if (pyIsListMethod(name)) { return pyListMethod(target, name, args, kw) }
     }
+    // conjugate() of a number: a real one is its own .real, a complex flips the
+    // sign of its imaginary part.
+    if (name == "conjugate") {
+        if (pyIsCplx(target)) { return pyNewCplx(pyCplxRe(target), -pyCplxIm(target)) }
+        var cj = pyNumAttr(target, "real")
+        if (cj !== undefined) { return cj }
+    }
     if (pyDForeign(target, name)) {
         // A REAL, catchable AttributeError and not fail(): CPython's is
         // catchable, and both other engines raise one (pyMethodCall in
@@ -7822,6 +7856,8 @@ function pyDBuiltinAttr(obj, name) {
     var els = pySetElemsOf(obj)
     if (els !== null && els !== undefined) { return pyIsSetMethod(name) && !(pySetFrozen(obj) && pySetMutator(name)) }
     if (pyIsDict(obj)) { return pyIsDictMethod(name) }
+    // Every number's one method.
+    if (name == "conjugate") { return pyIsCplx(obj) || pyNumAttr(obj, "real") !== undefined }
     return false
 }
 

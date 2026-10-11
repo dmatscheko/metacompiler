@@ -3887,6 +3887,23 @@ def s69():
     b |= {9}
     check("fzs11", a == {1, 2} and b == {1, 2, 9} and type(b).__name__ == "frozenset")
 
+# ===== SECTION 70: the attributes every number carries =====
+# An int (a bool and a big int too) is its own .real and .numerator as an int,
+# with .imag 0 and .denominator 1; a float is its own .real with .imag 0.0 and no
+# numerator; conjugate() of a real number is its .real.
+def s70():
+    v = [7, 2.5, True, 10**30, 3+4j, -0.0]
+    check("nat1", [repr(x.real) for x in v[:4]] == ["7", "2.5", "1", "1000000000000000000000000000000"] and repr(v[1].imag) == "0.0" and v[0].imag == 0)
+    check("nat2", v[2].numerator == 1 and type(v[2].real).__name__ == "int" and v[3].denominator == 1 and v[0].numerator == 7)
+    check("nat3", [repr(x.conjugate()) for x in v] == ["7", "2.5", "1", "1000000000000000000000000000000", "(3-4j)", "-0.0"])
+    check("nat4", "{0.real}|{0.imag}".format(v[0]) == "7|0" and f"{v[1].imag}" == "0.0" and getattr(v[2], "denominator") == 1)
+    check("nat5", hasattr(v[0], "numerator") and not hasattr(v[1], "numerator") and hasattr(v[1], "conjugate") and getattr(v[1], "conjugate")() == 2.5)
+    try:
+        msg = str(v[1].numerator)
+    except AttributeError as e:
+        msg = str(e)
+    check("nat6", msg == "'float' object has no attribute 'numerator'")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -3957,5 +3974,6 @@ def main():
     s67() # SECTION-CALL 67
     s68() # SECTION-CALL 68
     s69() # SECTION-CALL 69
+    s70() # SECTION-CALL 70
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

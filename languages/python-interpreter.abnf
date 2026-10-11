@@ -2107,6 +2107,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // __class__, which EVERY value has (None.__class__ is NoneType).
         if (name == "__class__") { return true }
         if (pyBuiltinAttr(o, name)) { return true }
+        if (pyNumAttr(o, name) !== undefined) { return true }
         // A SET's internal keys/vals arrays are not attributes (Go's set object
         // carries them under different names, so hasattr(s, "keys") must be False
         // in every engine).
@@ -2148,6 +2149,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A set is a dict whose keys are its members, so it is asked FIRST.
         if (isSet(o)) { return pyIsSetMethod(name) && !(o.__frozen === true && pySetMutator(name)) }
         if (isDict(o)) { return pyIsDictMethod(name) }
+        // Every number's one method.
+        if (name == "conjugate") { return isCplx(o) || pyNumAttr(o, "real") !== undefined }
         return false
     }
     // What getattr() hands back for one of those names: CPython's `<built-in
@@ -5109,6 +5112,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (target !== null && target !== undefined && typeof target == "object" && target.__isclass == true) {
             var bcm = pyBuiltinClsMethod(target, name)
             if (bcm != null) { return bcm.apply(undefined, args) }
+        }
+        // conjugate() of a number: a real one is its own .real, a complex flips the
+        // sign of its imaginary part.
+        if (name == "conjugate") {
+            if (isCplx(target)) { return pyCplx(target.real, -target.imag) }
+            var cj = pyNumAttr(target, "real")
+            if (cj !== undefined) { return cj }
         }
         if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
         fail("method call ." + name + "() on " + pstr(target))
@@ -9873,12 +9883,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // engines raise.
             pyAttrErr(o, name)
         }
-        // Every Python number carries .real / .imag; a complex answers them from its
-        // own fields further down, an ordinary number is its own real part.
-        if (typeof o == "number") {
-            if (name == "real") { return o }
-            if (name == "imag") { return 0 }
-        }
+        // A complex's parts are floats; an int's and a float's are pyNumAttr's,
+        // answered where an attribute read would otherwise fail.
         if (isCplx(o) && (name == "real" || name == "imag")) { return pyFlo(o[name]) }
         // A super() proxy: the lookup starts AFTER its class in the instance's MRO,
         // and a function found there comes back bound to the instance.
@@ -10027,11 +10033,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (fi >= 0) { return fa.vals[fi] }
             if (name == "__dict__" && pyTypeOf(o).__name == "function") { return pyFnAttrs(o, true) }
         }
+        var na = pyNumAttr(o, name)
+        if (na !== undefined) { return na }
         // CPython names the TYPE as well as the attribute: "'list' object has no
         // attribute 'nope'", not "'nope'". Both compiled halves say the long
         // form.
         pyRaise(pyMakeExc("AttributeError",
                           ["'" + pyTypeOf(o).__name + "' object has no attribute '" + name + "'"]))
+    }
+    // The attributes every real Python number carries. An int - a bool and an
+    // arbitrary precision int too - is its own .real and .numerator AS AN INT
+    // (True.real is 1), with .imag 0 and .denominator 1; a float is its own .real
+    // with .imag 0.0 and has no numerator. undefined: not one of these.
+    // Twin of pyNumAttr in abnf/jsrt.go and languages/lib/python-rt.metajs.
+    function pyNumAttr(o, name) {
+        if (isFlo(o)) {
+            if (name == "real") { return o }
+            if (name == "imag") { return pyFlo(0) }
+            return undefined
+        }
+        if (typeof o != "number" && typeof o != "boolean" && !bigIsBig(o)) { return undefined }
+        if (name == "real" || name == "numerator") {
+            if (typeof o == "boolean") { return o ? 1 : 0 }
+            return o
+        }
+        if (name == "imag") { return 0 }
+        if (name == "denominator") { return 1 }
+        return undefined
     }
     // The instance attribute dict. pySetAttr records the order it created names in.
     function instDict(o) {

@@ -19531,12 +19531,51 @@ func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
 			return v
 		}
 	}
+	if v, ok := pyNumAttr(obj, name); ok {
+		return v
+	}
 	v := rt.getMember(obj, name)
 	if isUndefOrNull(v) {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+pyTypeName(rt, obj)+"' object has no attribute '"+name+"'")})
 	}
 	return v
+}
+
+// pyNumAttr answers the attributes every real Python number carries. An int - a
+// bool and an arbitrary precision int too - is its own .real and .numerator AS AN
+// INT (True.real is 1), with .imag 0 and .denominator 1; a float is its own .real
+// with .imag 0.0 and has no numerator. Twin of pyNumAttr in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func pyNumAttr(v interface{}, name string) (interface{}, bool) {
+	switch t := v.(type) {
+	case *jsPyFlo:
+		switch name {
+		case "real":
+			return t, true
+		case "imag":
+			return &jsPyFlo{f: 0}, true
+		}
+		return nil, false
+	case bool:
+		if t {
+			v = 1.0
+		} else {
+			v = 0.0
+		}
+	case float64, *jsBigInt:
+	default:
+		return nil, false
+	}
+	switch name {
+	case "real", "numerator":
+		return v, true
+	case "imag":
+		return 0.0, true
+	case "denominator":
+		return 1.0, true
+	}
+	return nil, false
 }
 
 // pyInstanceDict renders an instance's own attributes as a Python dict.
@@ -19924,6 +19963,16 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	// flat name switch would break both. The same table is pyDForeign in
 	// languages/lib/python-rt.metajs, which is what keeps llvm.Run and the
 	// native binary agreeing.
+	// conjugate() of a number: a real one is its own .real, a complex flips the
+	// sign of its imaginary part.
+	if name == "conjugate" {
+		if re, im, ok := pyComplexParts(target); ok {
+			return newPyComplex(re, -im)
+		}
+		if v, ok := pyNumAttr(target, "real"); ok {
+			return v
+		}
+	}
 	if pyForeignMethod(target, name) {
 		// A REAL, catchable AttributeError and not rt.fail: CPython's is catchable,
 		// the interpreter half raises one (pyAttrErr in
@@ -20584,6 +20633,11 @@ func (rt *jsrt) pyBuiltinAttr(target interface{}, name string) bool {
 	if _, _, isDict := dictParts(target); isDict {
 		return pyIsDictMethod(name)
 	}
+	// Every number's one method.
+	if name == "conjugate" {
+		_, isNum := pyNumAttr(target, "real")
+		return isNum || isPyComplex(target)
+	}
 	return false
 }
 
@@ -21060,6 +21114,9 @@ func (rt *jsrt) pyHasAttr(obj interface{}, name string) bool {
 	// The BUILT-IN methods of str / list / dict / set, and
 	// __class__, which EVERY value has (None.__class__ is NoneType).
 	if name == "__class__" || rt.pyBuiltinAttr(obj, name) {
+		return true
+	}
+	if _, ok := pyNumAttr(obj, name); ok {
 		return true
 	}
 	if bi := pyBoundOf(obj); bi != nil {
