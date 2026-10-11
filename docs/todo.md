@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-353** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-355** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,11 +66,10 @@ its report; anything structural there is a CORE ticket.
 ### T-011 python: `d.items()` renders pairs as lists · P2 · PY · OPEN [V]
 Same root cause as T-170 (no tuple type). Close together with T-170.
 
-### T-344 python: str.format conversion errors; ord()/chr() errors uncatchable · P1 · PY · IN PROGRESS (PY+PHP worker, round 8) [V]
-`"{0!z}".format(1)` prints 1 (CPython ValueError "Unknown conversion specifier z");
-`"{0:".format(1)` says "Single '{' encountered" (CPython "unmatched '{' in format
-spec"). `ord(1)` aborts "TypeError: ord() expected string of length 1, but int found"
-(CPython catchable); same for chr() domain errors.
+### T-354 python: `int.real` compiled · P1 · PY · OPEN [V]
+`x = 7; x.real` and `"{0.real}".format(7)`: llvm.Run and native "AttributeError: 'int'
+object has no attribute 'real'"; interpreter and CPython 7. Check imag, numerator,
+denominator, conjugate() on int/float/bool too.
 
 ---
 
@@ -209,14 +208,12 @@ boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-345 php: hoisting, by-ref closure calls, string indexing, math library · P1 · PHP · IN PROGRESS (PY+PHP worker, round 8) [V spec-only]
-Top-level functions are not hoisted (a call above the declaration: "Call to undefined
-function"). Compiler: a dynamic call of a closure passes a VALUE to a by-reference
-parameter (`$f = function(&$x){$x++;}; $f($a)`; the interpreter is right, so
-array_walk by-ref differs between halves). `$s[$i]` on non-ASCII: interpreter and layer
-2 index UTF-16 units, the Go twin bytes ("héllo"[1] "é" vs "Ã") - a halves divergence;
-PHP indexes bytes. A lone byte >=128 is held as U+0080..U+00FF, so `ord(chr(200))` is
-195. The math library (round, floor, ceil, sqrt, pow, intval, abs, ...) is missing.
+### T-353 php: echo of a lone byte prints U+FFFD · P1 · PHP · OPEN [V spec-only]
+`echo chr(200)` prints EF BF BD in all engines (PHP writes 0xC8): lone bytes are held
+as U+DC80..U+DCFF and every print path cleans them. Use the `writeBytes` host global
+(added for lua) for php's echo/print of such strings. Also: a program naming any stdlib
+function compiles ~0.25 s slower (php-stdlib.php compiled whole) - consider compiling
+only the functions reached.
 
 ---
 
@@ -525,6 +522,8 @@ T-340 swift: String.Index, removeSubrange/replaceSubrange, `append(contentsOf:)`
 T-339 dart: RegExp; List.map/where/toList/first — DONE 678af39 (spec-only; the charAt lone-surrogate item is T-352)
 T-338 bash: `@A/@a/@K/@k` on `$@`/`$*`; `${x:-"$@"}` under a null IFS; `${!e*}` — DONE 06ec98b
 T-336 go: struct values alias; pointer identity — PARTIAL 46dd880 e5648d0 0458aa4 (struct value semantics and pointer ==); rest is T-350
+T-344 python: str.format conversion errors; ord()/chr() errors uncatchable — DONE 5b40343 1da292b
+T-345 php: hoisting, by-ref closure calls, string indexing, math library — DONE 5d85943 (spec-only; raw-byte echo is T-353)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
