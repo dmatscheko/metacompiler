@@ -2209,6 +2209,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // binds the property's own storage.
             var cells = it
             if (isObj(it)) { cells = it.p; it = phpObjArr(it, true, ctxSelf()) }
+            // By value, an array is walked as it was when the loop started: the
+            // body's writes to it go to the variable, not to what is iterated.
+            // Twin of js_phfeobj in abnf/jsrtphp.go and lib/php-rt.metajs.
+            else if (!byref && isArr(it)) { it = arrSnap(it) }
             var n = phpRangeLen(it)
             for (var i = 0; i < n; i++) {
                 var k = anytype
@@ -2689,6 +2693,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         a.keys = ks
         a.vals = vs
         a.__idx = null
+    }
+    // A shallow copy that is only ever read: its keys and slots as they are now.
+    function arrSnap(a) {
+        var ks = []
+        var vs = []
+        for (var i = 0; i < a.keys.length; i++) { ks.push(a.keys[i]); vs.push(a.vals[i]) }
+        var out = newArr()
+        out.keys = ks
+        out.vals = vs
+        return out
     }
     function arrCopy(a) {
         var out = newArr()

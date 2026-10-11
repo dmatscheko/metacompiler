@@ -2198,11 +2198,22 @@ func init() {
 			return w(st)
 		}
 		// js_phfeobj(v, scope, byref): what foreach iterates - an object's properties
-		// visible from the class scope (null outside a class), anything else as is.
+		// visible from the class scope (null outside a class), by value an array
+		// as it is now, anything else as is.
 		m["js_phfeobj"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			for phpIsObj(v) && rt.phpIsA(v, "IteratorAggregate") {
 				v = rt.memberCall(v, "getIterator", nil)
+			}
+			// By value, an array is walked as it was when the loop started: the
+			// body's writes to it go to the variable, not to what is iterated.
+			if keys, vals, isArr := phpArrParts(v); isArr && !rt.phpTest(u(a[2])) {
+				out := phpNewArr()
+				ok2, _ := out.props["keys"].(*jsArray)
+				ov, _ := out.props["vals"].(*jsArray)
+				ok2.elems = append(ok2.elems, keys.elems...)
+				ov.elems = append(ov.elems, vals.elems...)
+				return w(out)
 			}
 			o, ok := v.(*jsObject)
 			if !ok || !phpIsObj(o) || rt.phpIsA(o, "Iterator") {

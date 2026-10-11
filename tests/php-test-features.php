@@ -705,6 +705,16 @@ foreach (new FeAgg() as $k => $v) { $fr .= "$k:$v "; }
 foreach (new FeGenAgg() as $k => $v) { $fr .= "$k:$v"; }
 check("foreach-iterator", [$fr, $fl, $fi->log], ["k0=1 k1=2 k2=3 1 3 k0:7 k1:8 g:9", "rvcknvcknvcknv", "rvcnvcnvc"]);
 
+// foreach by value walks the array as it was when the loop started; by
+// reference it walks the live one (tests/foreach/bug68215.phpt).
+$fsa = ["x" => 1, "y" => 2];
+$fsi = 1;
+foreach ($fsa as $k => $v) { $fsa[$fsi] = $v; unset($fsa[$k]); $fsi++; }
+$fsb = [1, 2];
+$fsn = "";
+foreach ($fsb as $v) { $fsb[] = $v; $fsb[1] = 9; $fsn .= $v; }
+check("foreach-snapshot", [$fsa, $fsn, count($fsb)], [[1 => 1, 2 => 2], "12", 4]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

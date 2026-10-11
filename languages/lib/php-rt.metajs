@@ -1523,13 +1523,31 @@ function js_phfestep(it, first, needKey) {
     return st
 }
 
-// foreach's iterable: an object's properties visible from the class scope,
-// anything else as is; for `as &$v` each one is its property's storage cell.
+// foreach's iterable: an object's properties visible from the class scope (for
+// `as &$v` each one its property's storage cell), by value an array as it is
+// now, anything else as is.
 // Twin of m["js_phfeobj"] in abnf/jsrtphp.go.
 function js_phfeobj(v, scope, byref) {
     var o = anytype
     o = v
     while (phIsObj(o) && phIsA(o, "IteratorAggregate")) { o = js_phmcall(o, "getIterator", []) }
+    // By value, an array is walked as it was when the loop started: the body's
+    // writes to it go to the variable, not to what is iterated.
+    if (byref !== true) {
+        var ap = phArrParts(o)
+        if (ap !== undefined) {
+            var snap = phNewArr()
+            var sk = snap["keys"]
+            var sv = snap["vals"]
+            var j = 0
+            while (j < ap.k.length) {
+                sk.push(ap.k[j])
+                sv.push(ap.v[j])
+                j = j + 1
+            }
+            return snap
+        }
+    }
     if (!phIsObj(o) || phIsGen(o) || phIsA(o, "Iterator")) { return o }
     var out = phObjArr(o, true, scope)
     if (byref !== true) { return out }
