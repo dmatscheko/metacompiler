@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-433** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-434** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -127,11 +127,13 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-429 php: is_a/is_subclass_of/get_parent_class; object arithmetic TypeError; small reflection tails · P2 · PHP · IN PROGRESS (PHP worker, round 22) [V]
-Spec answers, all engines: (a) `is_a`, `is_subclass_of`, `get_parent_class` undefined. (b) `new stdClass + 1` coerces
-to 0; PHP: TypeError "Unsupported operand types: stdClass + int". (c) `get_debug_type()` of a closure answers
-"unknown" (PHP "Closure"). (d) `class_exists('\Foo')` with a leading backslash answers false (PHP strips it).
-(e) `'SELF::m'` callables in another case are rejected (js_phclassmiss compares "self" exactly).
+### T-433 php: non-numeric string / object unary TypeErrors; closures as objects; stdlib wrappers · P2 · PHP · IN PROGRESS (PHP worker, round 23) [V]
+Spec / corpus, all engines: (a) `"abc" + 1` gives 1; PHP 8 TypeError "Unsupported operand types: string + int"
+(lang/bug28800, operators/add_variationStr). (b) `is_object($closure)` / `get_class($closure)` false (PHP true /
+"Closure"); same for generators. (c) `$o++` on stdClass leaves 1 (8.3: TypeError "Cannot increment stdClass");
+`~$obj` gives -1 ("Cannot perform bitwise not on stdClass"). (d) builtin errors say "bool given"; 8.3 says
+"true given"/"false given". (e) `interface_exists('Throwable')` false. (f) `is_a`, `is_subclass_of`,
+`get_parent_class`, `class_exists`, `get_class` have no php-stdlib wrapper, so string callables naming them fail.
 
 ---
 
@@ -478,6 +480,7 @@ T-421 csharp: String.Format/standard numeric formats, StringComparison/SplitOpti
 T-426 php: array union, case-insensitive class names in catch/instanceof/extends, Name::class at compile time, early binding, Closure::fromCallable, builtin TypeErrors, relative callbacks in array_*, compile-time finally/break jump checks — DONE 97ee2042
 T-427 csharp: System.Math, re-enumerable iterators (fresh enumerator per GetEnumerator), foreach over user GetEnumerator, explicit-interface member shadowing — DONE 14b6e8f4
 T-419 python: object() and object's own methods/__new__, exact int**int past 4096, the 4300-digit int<->str limit, type | type unions; java/python ratchets split for the frozen step brake; __sizeof__ DECLINED (CPython allocator layout, not a rule); sys.set_int_max_str_digits moved to T-431 — DONE f43fa335
+T-429 php: is_a/is_subclass_of/get_parent_class, object-operand TypeErrors, Closure/Generator debug types, leading-backslash lookups, SELF/PARENT/STATIC in any case, compiled instanceof Throwable — DONE 23e6ad05
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
