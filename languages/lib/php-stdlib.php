@@ -36,8 +36,39 @@ const CASE_UPPER = 1;
 const STR_PAD_LEFT = 0;
 const STR_PAD_RIGHT = 1;
 const STR_PAD_BOTH = 2;
+const JSON_HEX_TAG = 1;
+const JSON_HEX_AMP = 2;
+const JSON_HEX_APOS = 4;
+const JSON_HEX_QUOT = 8;
+const JSON_FORCE_OBJECT = 16;
+const JSON_NUMERIC_CHECK = 32;
+const JSON_UNESCAPED_SLASHES = 64;
+const JSON_PRETTY_PRINT = 128;
+const JSON_UNESCAPED_UNICODE = 256;
+const JSON_PARTIAL_OUTPUT_ON_ERROR = 512;
+const JSON_PRESERVE_ZERO_FRACTION = 1024;
+const JSON_UNESCAPED_LINE_TERMINATORS = 2048;
+const JSON_OBJECT_AS_ARRAY = 1;
+const JSON_BIGINT_AS_STRING = 2;
+const JSON_INVALID_UTF8_IGNORE = 1048576;
+const JSON_INVALID_UTF8_SUBSTITUTE = 2097152;
+const JSON_THROW_ON_ERROR = 4194304;
+const JSON_ERROR_NONE = 0;
+const JSON_ERROR_DEPTH = 1;
+const JSON_ERROR_STATE_MISMATCH = 2;
+const JSON_ERROR_CTRL_CHAR = 3;
+const JSON_ERROR_SYNTAX = 4;
+const JSON_ERROR_UTF8 = 5;
+const JSON_ERROR_RECURSION = 6;
+const JSON_ERROR_INF_OR_NAN = 7;
+const JSON_ERROR_UNSUPPORTED_TYPE = 8;
+const JSON_ERROR_INVALID_PROPERTY_NAME = 9;
+const JSON_ERROR_UTF16 = 10;
+const JSON_ERROR_NON_BACKED_ENUM = 11;
 
 class ArgumentCountError extends TypeError {}
+class JsonException extends Exception {}
+interface JsonSerializable { public function jsonSerialize(): mixed; }
 
 // ----- the natives, as callable values ---------------------------------------
 function count($value, $mode = 0) { return count($value); }
@@ -1563,4 +1594,454 @@ function __mec_roundsig($sig, $exp, $places) {
     if ($int === "") { $int = "0"; }
     $frac = substr($frac . str_repeat("0", $places), 0, $places);
     return $places > 0 ? $int . "." . $frac : $int;
+}
+
+// ----- var_export and JSON ---------------------------------------------------
+// A float at serialize_precision=-1, which var_export and json_encode share with
+// var_dump: the shortest round-tripping digits laid out by zend_gcvt at 17
+// digits, with exponent marker $e; INF and NAN by name.
+function __mec_serfloat($num, $e) {
+    if (is_nan($num)) { return "NAN"; }
+    if (is_infinite($num)) { return $num < 0 ? "-INF" : "INF"; }
+    if ($num == 0) { return fdiv(1, $num) < 0 ? "-0" : "0"; }
+    $s = __mec_fmtfloat($num, "g", 17);
+    if ($e === "E") { $s = strtoupper($s); }
+    return $num < 0 ? "-" . $s : $s;
+}
+function var_export($value, $return = false) {
+    $s = __mec_export($value, 1);
+    if ($return) { return $s; }
+    echo $s;
+    return null;
+}
+// php_var_export_ex. $level counts from 1; an array element is indented
+// $level + 1 spaces, an object property $level + 2, and a nested array or object
+// starts on a new line indented $level - 1. A float always shows a fraction or an
+// exponent, and an object is rebuilt through __set_state ((object) for stdClass).
+function __mec_export($v, $level) {
+    if ($v === null) { return "NULL"; }
+    if ($v === true) { return "true"; }
+    if ($v === false) { return "false"; }
+    if (is_int($v)) { return $v == PHP_INT_MIN ? "-9223372036854775807-1" : (string)$v; }
+    if (is_float($v)) {
+        $s = __mec_serfloat($v, "E");
+        return is_finite($v) && strpos($s, ".") === false && strpos($s, "E") === false ? $s . ".0" : $s;
+    }
+    if (is_string($v)) { return __mec_exportstr($v); }
+    $close = $level > 1 ? str_repeat(" ", $level - 1) : "";
+    $out = $level > 1 ? "\n" . $close : "";
+    if (is_array($v)) {
+        $out .= "array (\n";
+        foreach ($v as $k => $e) {
+            $out .= str_repeat(" ", $level + 1) . (is_int($k) ? $k : __mec_exportstr($k)) . " => " . __mec_export($e, $level + 2) . ",\n";
+        }
+        return $out . $close . ")";
+    }
+    $std = get_class($v) === "stdClass";
+    $out .= $std ? "(object) array(\n" : "\\" . get_class($v) . "::__set_state(array(\n";
+    foreach ((array)$v as $k => $e) {
+        $out .= str_repeat(" ", $level + 2) . __mec_exportstr((string)$k) . " => " . __mec_export($e, $level + 2) . ",\n";
+    }
+    return $out . $close . ($std ? ")" : "))");
+}
+// A single-quoted literal: backslash and quote escaped, a NUL byte spliced in as "\0".
+function __mec_exportstr($s) {
+    return "'" . strtr($s, ["\\" => "\\\\", "'" => "\\'", "\0" => "' . \"\\0\" . '"]) . "'";
+}
+
+// The error of the last json_encode / json_decode call without
+// JSON_THROW_ON_ERROR; $code >= 0 records one.
+function __mec_jsonerr($code = -1) {
+    static $last = 0;
+    if ($code >= 0) { $last = $code; }
+    return $last;
+}
+function json_last_error() { return __mec_jsonerr(); }
+function json_last_error_msg() { return __mec_jsonmsg(__mec_jsonerr()); }
+function __mec_jsonmsg($code) {
+    $msgs = ["No error", "Maximum stack depth exceeded", "State mismatch (invalid or malformed JSON)",
+        "Control character error, possibly incorrectly encoded", "Syntax error",
+        "Malformed UTF-8 characters, possibly incorrectly encoded", "Recursion detected",
+        "Inf and NaN cannot be JSON encoded", "Type is not supported", "The decoded property name is invalid",
+        "Single unpaired UTF-16 surrogate in unicode escape", "Non-backed enums have no default serialization"];
+    return $msgs[$code] ?? "Unknown error";
+}
+// The end of a call: record the error, or throw it under JSON_THROW_ON_ERROR.
+function __mec_jsondone($code, $flags) {
+    if (!($flags & JSON_THROW_ON_ERROR)) { __mec_jsonerr($code); }
+    elseif ($code != 0) { throw new JsonException(__mec_jsonmsg($code), $code); }
+}
+// The code point of the well-formed UTF-8 sequence at byte $i of $s and its
+// length, or null for a malformed one (overlong forms, surrogates and values
+// past U+10FFFF included).
+function __mec_utf8at($s, $i, $n) {
+    $c = ord($s[$i]);
+    if ($c < 0x80) { return [$c, 1]; }
+    if ($c < 0xC2) { return null; }
+    $len = $c < 0xE0 ? 2 : ($c < 0xF0 ? 3 : ($c < 0xF5 ? 4 : 0));
+    if ($len == 0 || $i + $len > $n) { return null; }
+    $cp = $c & (0xFF >> ($len + 1));
+    for ($k = 1; $k < $len; $k++) {
+        $b = ord($s[$i + $k]);
+        if (($b & 0xC0) != 0x80) { return null; }
+        $cp = ($cp << 6) | ($b & 0x3F);
+    }
+    if (($len == 3 && ($cp < 0x800 || ($cp >= 0xD800 && $cp <= 0xDFFF))) || ($len == 4 && ($cp < 0x10000 || $cp > 0x10FFFF))) {
+        return null;
+    }
+    return [$cp, $len];
+}
+function __mec_utf8chr($cp) {
+    if ($cp < 0x80) { return chr($cp); }
+    if ($cp < 0x800) { return chr(0xC0 | ($cp >> 6)) . chr(0x80 | ($cp & 0x3F)); }
+    if ($cp < 0x10000) { return chr(0xE0 | ($cp >> 12)) . chr(0x80 | (($cp >> 6) & 0x3F)) . chr(0x80 | ($cp & 0x3F)); }
+    return chr(0xF0 | ($cp >> 18)) . chr(0x80 | (($cp >> 12) & 0x3F)) . chr(0x80 | (($cp >> 6) & 0x3F)) . chr(0x80 | ($cp & 0x3F));
+}
+
+// json_encode: php_json_encode_zval. $st carries the flags, the depth limit, the
+// error (the first one, or the last under JSON_PARTIAL_OUTPUT_ON_ERROR, which
+// substitutes for what failed and carries on) and the objects being encoded.
+function json_encode($value, $flags = 0, $depth = 512) {
+    $st = new stdClass();
+    $st->flags = $flags;
+    $st->depth = $depth;
+    $st->err = 0;
+    $st->open = [];
+    $out = __mec_jenc($value, $st, 0);
+    if ($flags & JSON_PARTIAL_OUTPUT_ON_ERROR) {
+        __mec_jsonerr($st->err);
+        return $out;
+    }
+    __mec_jsondone($st->err, $flags);
+    return $st->err == 0 ? $out : false;
+}
+function __mec_jfail($st, $code, $sub) {
+    $st->err = $code;
+    return $sub;
+}
+function __mec_jstop($st) { return $st->err != 0 && !($st->flags & JSON_PARTIAL_OUTPUT_ON_ERROR); }
+function __mec_jfloat($v, $flags) {
+    $s = __mec_serfloat($v, "e");
+    return ($flags & JSON_PRESERVE_ZERO_FRACTION) && strpos($s, ".") === false && strpos($s, "e") === false ? $s . ".0" : $s;
+}
+function __mec_jenc($v, $st, $level) {
+    if ($v === null) { return "null"; }
+    if ($v === true) { return "true"; }
+    if ($v === false) { return "false"; }
+    if (is_int($v)) { return (string)$v; }
+    if (is_float($v)) { return is_finite($v) ? __mec_jfloat($v, $st->flags) : __mec_jfail($st, JSON_ERROR_INF_OR_NAN, "0"); }
+    if (is_string($v)) {
+        if (($st->flags & JSON_NUMERIC_CHECK) && is_numeric($v)) {
+            $num = $v + 0;
+            if (is_int($num)) { return (string)$num; }
+            if (is_finite($num)) { return __mec_jfloat($num, $st->flags); }
+        }
+        return __mec_jstr($v, $st);
+    }
+    if (is_array($v)) { return __mec_jlist($v, !($st->flags & JSON_FORCE_OBJECT) && array_is_list($v), $st, $level); }
+    if (!is_object($v)) { return __mec_jfail($st, JSON_ERROR_UNSUPPORTED_TYPE, "null"); }
+    if (in_array($v, $st->open, true)) { return __mec_jfail($st, JSON_ERROR_RECURSION, "null"); }
+    $st->open[] = $v;
+    if ($v instanceof JsonSerializable) {
+        $r = $v->jsonSerialize();
+        $out = $r === $v ? __mec_jlist((array)$v, false, $st, $level) : __mec_jenc($r, $st, $level);
+    } else {
+        $out = __mec_jlist((array)$v, false, $st, $level);
+    }
+    array_pop($st->open);
+    return $out;
+}
+// An array or object's elements, as a JSON array ($list) or object. Pretty
+// printing puts each element on its own line, four spaces per level, and keeps
+// an empty one closed on the same line.
+function __mec_jlist($a, $list, $st, $level) {
+    $pretty = ($st->flags & JSON_PRETTY_PRINT) != 0;
+    $nl = $pretty ? "\n" . str_repeat("    ", $level + 1) : "";
+    $out = $list ? "[" : "{";
+    $first = true;
+    foreach ($a as $k => $e) {
+        $out .= ($first ? "" : ",") . $nl;
+        $first = false;
+        if (!$list) {
+            $out .= __mec_jstr((string)$k, $st) . ($pretty ? ": " : ":");
+            if (__mec_jstop($st)) { return ""; }
+        }
+        $out .= __mec_jenc($e, $st, $level + 1);
+        if (__mec_jstop($st)) { return ""; }
+    }
+    if ($level + 1 > $st->depth && !($st->flags & JSON_PARTIAL_OUTPUT_ON_ERROR)) { return __mec_jfail($st, JSON_ERROR_DEPTH, ""); }
+    if (!$first && $pretty) { $out .= "\n" . str_repeat("    ", $level); }
+    return $out . ($list ? "]" : "}");
+}
+// php_json_escape_string: '"', '\' and '/' escaped, the short escapes for
+// \b \f \n \r \t, any other control character and (unless
+// JSON_UNESCAPED_UNICODE) every non-ASCII character as \u with lowercase hex,
+// a character past the BMP as a surrogate pair. U+2028 and U+2029 stay escaped
+// unless JSON_UNESCAPED_LINE_TERMINATORS too.
+function __mec_jstr($s, $st) {
+    $f = $st->flags;
+    $n = strlen($s);
+    $out = "\"";
+    $from = 0;
+    $i = 0;
+    while ($i < $n) {
+        $c = ord($s[$i]);
+        $esc = null;
+        $len = 1;
+        if ($c >= 0x80) {
+            $u = __mec_utf8at($s, $i, $n);
+            if ($u === null) {
+                if ($f & JSON_INVALID_UTF8_IGNORE) { $esc = ""; }
+                elseif ($f & JSON_INVALID_UTF8_SUBSTITUTE) { $esc = $f & JSON_UNESCAPED_UNICODE ? "\u{FFFD}" : "\\ufffd"; }
+                else { return __mec_jfail($st, JSON_ERROR_UTF8, "null"); }
+            } else {
+                $len = $u[1];
+                $cp = $u[0];
+                if (!($f & JSON_UNESCAPED_UNICODE) || (($cp == 0x2028 || $cp == 0x2029) && !($f & JSON_UNESCAPED_LINE_TERMINATORS))) {
+                    if ($cp >= 0x10000) {
+                        $cp -= 0x10000;
+                        $esc = __mec_jhex(0xD800 | ($cp >> 10)) . __mec_jhex(0xDC00 | ($cp & 0x3FF));
+                    } else {
+                        $esc = __mec_jhex($cp);
+                    }
+                }
+            }
+        } elseif ($c == 34) { $esc = $f & JSON_HEX_QUOT ? "\\u0022" : "\\\""; }
+        elseif ($c == 92) { $esc = "\\\\"; }
+        elseif ($c == 47) { $esc = $f & JSON_UNESCAPED_SLASHES ? null : "\\/"; }
+        elseif ($c == 8) { $esc = "\\b"; }
+        elseif ($c == 12) { $esc = "\\f"; }
+        elseif ($c == 10) { $esc = "\\n"; }
+        elseif ($c == 13) { $esc = "\\r"; }
+        elseif ($c == 9) { $esc = "\\t"; }
+        elseif ($c < 32) { $esc = __mec_jhex($c); }
+        elseif ($c == 60 && ($f & JSON_HEX_TAG)) { $esc = "\\u003C"; }
+        elseif ($c == 62 && ($f & JSON_HEX_TAG)) { $esc = "\\u003E"; }
+        elseif ($c == 38 && ($f & JSON_HEX_AMP)) { $esc = "\\u0026"; }
+        elseif ($c == 39 && ($f & JSON_HEX_APOS)) { $esc = "\\u0027"; }
+        if ($esc !== null) {
+            $out .= substr($s, $from, $i - $from) . $esc;
+            $from = $i + $len;
+        }
+        $i += $len;
+    }
+    return $out . substr($s, $from) . "\"";
+}
+function __mec_jhex($u) { return "\\u" . str_pad(dechex($u), 4, "0", STR_PAD_LEFT); }
+
+// json_decode: a recursive descent over the bytes, to php_json_scanner.re's
+// token rules. $st carries the text, the position, the depth limit, the flags
+// and the first error; any error makes the answer null.
+function json_decode($json, $assoc = null, $depth = 512, $flags = 0) {
+    if ($depth <= 0) { throw new ValueError("json_decode(): Argument #3 (\$depth) must be greater than 0"); }
+    $st = new stdClass();
+    $st->s = (string)$json;
+    $st->n = strlen($st->s);
+    $st->i = 0;
+    $st->err = 0;
+    $st->depth = $depth;
+    $st->flags = $flags;
+    $st->assoc = $assoc === null ? ($flags & JSON_OBJECT_AS_ARRAY) != 0 : (bool)$assoc;
+    $v = null;
+    if ($st->n == 0) { $st->err = JSON_ERROR_SYNTAX; }
+    else {
+        $v = __mec_jdec($st, 0);
+        if ($st->err == 0) {
+            __mec_jws($st);
+            if ($st->i < $st->n) { __mec_jbad($st); }
+        }
+    }
+    __mec_jsondone($st->err, $flags);
+    return $st->err == 0 ? $v : null;
+}
+function __mec_jws($st) {
+    while ($st->i < $st->n) {
+        $c = $st->s[$st->i];
+        if ($c !== " " && $c !== "\t" && $c !== "\n" && $c !== "\r") { return; }
+        $st->i++;
+    }
+}
+// The scanner's verdict on an unexpected byte (or the end of the text): NUL is a
+// control character, a byte that starts no UTF-8 character is malformed UTF-8,
+// anything else a syntax error.
+function __mec_jbad($st) {
+    $c = $st->i < $st->n ? ord($st->s[$st->i]) : -1;
+    if ($c == 0) { $st->err = JSON_ERROR_CTRL_CHAR; }
+    elseif ($c >= 0x80 && __mec_utf8at($st->s, $st->i, $st->n) === null) { $st->err = JSON_ERROR_UTF8; }
+    else { $st->err = JSON_ERROR_SYNTAX; }
+    return null;
+}
+function __mec_jdec($st, $level) {
+    __mec_jws($st);
+    if ($st->i >= $st->n) { return __mec_jbad($st); }
+    $c = $st->s[$st->i];
+    if ($c === "{" || $c === "[") {
+        if ($level >= $st->depth) { return __mec_jfail($st, JSON_ERROR_DEPTH, null); }
+        $st->i++;
+        return $c === "[" ? __mec_jdecarr($st, $level + 1) : __mec_jdecobj($st, $level + 1);
+    }
+    if ($c === "\"") { return __mec_jdecstr($st); }
+    if ($c === "-" || ($c >= "0" && $c <= "9")) { return __mec_jdecnum($st); }
+    foreach (["true" => true, "false" => false, "null" => null] as $word => $val) {
+        if (substr($st->s, $st->i, strlen($word)) === $word) {
+            $st->i += strlen($word);
+            return $val;
+        }
+    }
+    return __mec_jbad($st);
+}
+// The byte after an element: true for the closing $close, false for a comma,
+// null (with the error set) for anything else.
+function __mec_jsep($st, $close) {
+    __mec_jws($st);
+    if ($st->i < $st->n && $st->s[$st->i] === $close) { $st->i++; return true; }
+    if ($st->i < $st->n && $st->s[$st->i] === ",") { $st->i++; return false; }
+    return __mec_jbad($st);
+}
+function __mec_jdecarr($st, $level) {
+    $out = [];
+    __mec_jws($st);
+    if ($st->i < $st->n && $st->s[$st->i] === "]") { $st->i++; return $out; }
+    while (true) {
+        $out[] = __mec_jdec($st, $level);
+        if ($st->err != 0) { return null; }
+        $end = __mec_jsep($st, "]");
+        if ($end === null) { return null; }
+        if ($end) { return $out; }
+    }
+}
+function __mec_jdecobj($st, $level) {
+    $out = $st->assoc ? [] : new stdClass();
+    __mec_jws($st);
+    if ($st->i < $st->n && $st->s[$st->i] === "}") { $st->i++; return $out; }
+    while (true) {
+        __mec_jws($st);
+        if ($st->i >= $st->n || $st->s[$st->i] !== "\"") { return __mec_jbad($st); }
+        $key = __mec_jdecstr($st);
+        if ($st->err != 0) { return null; }
+        __mec_jws($st);
+        if ($st->i >= $st->n || $st->s[$st->i] !== ":") { return __mec_jbad($st); }
+        $st->i++;
+        $v = __mec_jdec($st, $level);
+        if ($st->err != 0) { return null; }
+        if ($st->assoc) { $out[$key] = $v; }
+        elseif ($key !== "" && $key[0] === "\0") { return __mec_jfail($st, JSON_ERROR_INVALID_PROPERTY_NAME, null); }
+        else { $out->{$key} = $v; }
+        $end = __mec_jsep($st, "}");
+        if ($end === null) { return null; }
+        if ($end) { return $out; }
+    }
+}
+// -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?: an int when it has neither a
+// fraction nor an exponent and fits in 64 bits, otherwise a float (or the digits
+// themselves under JSON_BIGINT_AS_STRING).
+function __mec_jdecnum($st) {
+    $s = $st->s;
+    $n = $st->n;
+    $start = $st->i;
+    $i = $s[$start] === "-" ? $start + 1 : $start;
+    $digits = __mec_jdigits($s, $i, $n);
+    if ($digits == 0) {
+        $st->i = $i;
+        return __mec_jbad($st);
+    }
+    $i += $s[$i] === "0" ? 1 : $digits;
+    $isInt = true;
+    $fd = $i < $n && $s[$i] === "." ? __mec_jdigits($s, $i + 1, $n) : 0;
+    if ($fd > 0) {
+        $i += 1 + $fd;
+        $isInt = false;
+    }
+    if ($i < $n && ($s[$i] === "e" || $s[$i] === "E")) {
+        $j = $i + 1;
+        if ($j < $n && ($s[$j] === "+" || $s[$j] === "-")) { $j++; }
+        $ed = __mec_jdigits($s, $j, $n);
+        if ($ed > 0) {
+            $i = $j + $ed;
+            $isInt = false;
+        }
+    }
+    $st->i = $i;
+    $tok = substr($s, $start, $i - $start);
+    if (!$isInt) { return (float)$tok; }
+    $mag = $tok[0] === "-" ? substr($tok, 1) : $tok;
+    if (strlen($mag) > 19 || (strlen($mag) == 19 && strcmp($mag, "9223372036854775808") >= 0 && $tok !== "-9223372036854775808")) {
+        return $st->flags & JSON_BIGINT_AS_STRING ? $tok : (float)$tok;
+    }
+    return (int)$tok;
+}
+function __mec_jdigits($s, $i, $n) {
+    $k = $i;
+    while ($k < $n && $s[$k] >= "0" && $s[$k] <= "9") { $k++; }
+    return $k - $i;
+}
+// A string literal from its opening quote: the escapes decoded, \u to UTF-8 (a
+// surrogate pair to one character); a raw control character, an unterminated
+// literal or an unpaired surrogate is an error, and so is malformed UTF-8 unless
+// it is ignored or substituted.
+function __mec_jdecstr($st) {
+    $s = $st->s;
+    $n = $st->n;
+    $i = $st->i + 1;
+    $from = $i;
+    $out = "";
+    $short = ["\"" => "\"", "\\" => "\\", "/" => "/", "b" => "\x08", "f" => "\f", "n" => "\n", "r" => "\r", "t" => "\t"];
+    while (true) {
+        if ($i >= $n) { return __mec_jfail($st, JSON_ERROR_CTRL_CHAR, null); }
+        $c = ord($s[$i]);
+        if ($c == 34) {
+            $st->i = $i + 1;
+            return $out . substr($s, $from, $i - $from);
+        }
+        if ($c < 32) { return __mec_jfail($st, JSON_ERROR_CTRL_CHAR, null); }
+        if ($c >= 0x80) {
+            $u = __mec_utf8at($s, $i, $n);
+            if ($u !== null) {
+                $i += $u[1];
+                continue;
+            }
+            if (!($st->flags & (JSON_INVALID_UTF8_IGNORE | JSON_INVALID_UTF8_SUBSTITUTE))) { return __mec_jfail($st, JSON_ERROR_UTF8, null); }
+            $out .= substr($s, $from, $i - $from) . ($st->flags & JSON_INVALID_UTF8_IGNORE ? "" : "\u{FFFD}");
+            $i++;
+            $from = $i;
+            continue;
+        }
+        if ($c != 92) {
+            $i++;
+            continue;
+        }
+        $out .= substr($s, $from, $i - $from);
+        $e = substr($s, $i + 1, 1);
+        if (isset($short[$e])) {
+            $out .= $short[$e];
+            $i += 2;
+        } elseif ($e === "u") {
+            $cp = __mec_jhex4($s, $i + 2, $n);
+            if ($cp < 0) { return __mec_jfail($st, JSON_ERROR_SYNTAX, null); }
+            $i += 6;
+            if ($cp >= 0xD800 && $cp <= 0xDBFF) {
+                $lo = substr($s, $i, 2) === "\\u" ? __mec_jhex4($s, $i + 2, $n) : -1;
+                if ($lo < 0xDC00 || $lo > 0xDFFF) { return __mec_jfail($st, JSON_ERROR_UTF16, null); }
+                $cp = 0x10000 + (($cp - 0xD800) << 10) + ($lo - 0xDC00);
+                $i += 6;
+            } elseif ($cp >= 0xDC00 && $cp <= 0xDFFF) {
+                return __mec_jfail($st, JSON_ERROR_UTF16, null);
+            }
+            $out .= __mec_utf8chr($cp);
+        } else {
+            return __mec_jfail($st, JSON_ERROR_SYNTAX, null);
+        }
+        $from = $i;
+    }
+}
+// Four hex digits at byte $i as a number, or -1.
+function __mec_jhex4($s, $i, $n) {
+    if ($i + 4 > $n) { return -1; }
+    $v = 0;
+    for ($k = $i; $k < $i + 4; $k++) {
+        $d = strpos("0123456789abcdef", strtolower($s[$k]));
+        if ($d === false) { return -1; }
+        $v = $v * 16 + $d;
+    }
+    return $v;
 }

@@ -5668,6 +5668,19 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return b
     }
+    // stdClass: the empty class of `new stdClass`, an (object) cast and
+    // json_decode's objects. Twin of the stdClass declaration in
+    // php-interpreter.abnf.
+    function emitStdClass(b) {
+        var clsV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "stdClass")])
+        b = emitInitProps(b, clsV, "stdClass", "", [])
+        var ctor = emitFunc([], function(bb) { return bb }, true, false, "stdClass")
+        callExt(b, "js_set", [clsV, emitStr(b, "__construct"), callExt(b, "js_closure", [handle(ctor), curScopeV])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "stdClass"), clsV])
+        return b
+    }
     // A braced namespace body: emit its items where the declaration stands.
     function makeNs(items, pos) {
         for (var i = 0; i < items.length; i++) {
@@ -5733,6 +5746,7 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_NOTICE"), emitNum(b, 8)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_DEPRECATED"), emitNum(b, 8192)])
         b = emitExcClasses(b) // Exception / Error and their subclasses
+        b = emitStdClass(b)
         // The engine's own arithmetic errors (division by zero, a negative shift
         // count) are THROWN, and the class descriptors live in this scope - so the
         // runtime is handed them to raise with. See phpRaise in abnf/jsrtphp.go and
@@ -5744,7 +5758,8 @@ KwInstanceof = "instanceof" KwEnd ;
         // "Error" is here for the METHOD and NAME misses (js_phmcall / js_phmissname
         // in languages/lib/php-rt.metajs and abnf/jsrtphp.go), which PHP 8 raises as a
         // catchable Error.
-        var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error", "ValueError", "TypeError"]
+        // "stdClass" is the class of an (object) cast (js_phcast).
+        var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error", "ValueError", "TypeError", "stdClass"]
         for (var rc = 0; rc < rtCls.length; rc++) {
             callExt(b, "js_phset", [regV, emitStr(b, rtCls[rc]),
                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, rtCls[rc])])])

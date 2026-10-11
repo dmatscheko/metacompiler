@@ -1468,6 +1468,25 @@ function phObjPropsEq(a, b) {
 
 // ===================================================== casts ================
 
+// (object): an array's elements become the properties of a stdClass, any other
+// non-object the one property "scalar". Twin of phpCast in abnf/jsrtphp.go.
+function phObjCast(v) {
+    if (phIsObj(v)) { return v }
+    var o = {}
+    if (phRtClasses !== undefined) { o["__class"] = phRtClasses["stdClass"] }
+    var p = phArrParts(v)
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.k.length) {
+            o[phStr(p.k[i])] = phArrCopy(phDeref(p.v[i]))
+            i = i + 1
+        }
+        return o
+    }
+    if (!rtIsNil(v)) { o["scalar"] = v }
+    return o
+}
+
 function phCast(kind, v) {
     if (kind == "int" || kind == "integer") { return phToLong(v) }
     if (kind == "float" || kind == "double" || kind == "real") { return phMkFlo(phNumOf(phToNum(v))) }
@@ -1491,7 +1510,7 @@ function phCast(kind, v) {
         phArrPush(out, v)
         return out
     }
-    if (kind == "object") { return v }
+    if (kind == "object") { return phObjCast(v) }
     if (kind == "unset") { return null }
     return v
 }

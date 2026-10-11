@@ -44,6 +44,13 @@ function phpLibHas(ix, name) { return ix.fns["$" + name] !== undefined }
 // too when `base`. Line 0, the open tag, is always kept.
 function phpLibText(ix, name, base) {
     var span = ix.fns["$" + name]
+    if (!base) {
+        // Without the base only the function's own lines are kept, so the blanked
+        // lines before it are newlines and the ones after it can go.
+        var nl = "\n"
+        while (nl.length < span[0]) { nl = nl + nl }
+        return ix.lines[0] + nl.substring(0, span[0]) + ix.lines.slice(span[0], span[1] + 1).join("\n")
+    }
     var out = [ix.lines[0]]
     for (var i = 1; i < ix.lines.length; i++) {
         if ((i >= span[0] && i <= span[1]) || (base && !ix.inFn[i])) { out.push(ix.lines[i]) }

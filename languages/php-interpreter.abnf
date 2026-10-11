@@ -4827,8 +4827,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (v.__vdid == undefined) { dumpIds = dumpIds + 1; v.__vdid = dumpIds }
             var name = v.__class == null ? "stdClass" : v.__class.__name
             var o2 = pad + "object(" + name + ")#" + v.__vdid + " (" + v.p.keys.length + ") {\n"
+            // A property name is a string even where the property table folded a
+            // decimal one to an int key: ["0"]=>.
             for (var j = 0; j < v.p.keys.length; j++) {
-                o2 += dumpKey(v.p.keys[j], ind + 2)
+                o2 += dumpKey(phpStr(v.p.keys[j]), ind + 2)
                 o2 += dumpOf(deref(v.p.vals[j]), ind + 2)
             }
             return o2 + pad + "}\n"
@@ -5128,6 +5130,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             arrPush(a, v)
             return a
         }
+        // (object): an array's elements become the properties of a stdClass, any
+        // other non-object the one property "scalar". Twin of phCast in
+        // lib/php-rt.metajs and phpCast in abnf/jsrtphp.go.
+        if (kind == "object") {
+            if (isObj(v)) { return v }
+            var o = newObj(getVar("stdClass"))
+            if (isArr(v)) { o.p = arrCopy(v) }
+            else if (v !== null && v !== undefined) { arrSet(o.p, "scalar", v) }
+            return o
+        }
         if (kind == "unset") { return null }
         return v
     }
@@ -5163,6 +5175,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     declBuiltinClass("ValueError", "Error")
     declBuiltinClass("ArithmeticError", "Error")
     declBuiltinClass("DivisionByZeroError", "ArithmeticError")
+    // stdClass: the empty class of `new stdClass`, an (object) cast and
+    // json_decode's objects. Twin of emitStdClass in php-to-llvm-ir.abnf.
+    scopePut(globalScope, "stdClass", {__isclass: true, __name: "stdClass", __super: null, __props: [], __ifaces: [],
+                                       __constT: [], __constV: newArr(), __statics: newArr()})
     // A method call on something that is not an object. PHP 8 words it
     // `Call to a member function nope() on string`, with phpDebugType's names, as a
     // catchable Error. Twin of js_phmcall (languages/lib/php-rt.metajs and

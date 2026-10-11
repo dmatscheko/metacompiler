@@ -569,6 +569,63 @@ check("miss-magic-call-still-wins", $missM->anything(), "magic:anything");
 check("miss-live-method", $missObj->ok(), 7);
 check("miss-live-prop", $missObj->p, 1);
 
+// ----- stdClass, var_export and JSON -----
+// var_export is php_var_export_ex: floats at serialize_precision=-1 with a forced
+// fraction, a nested array or object on its own line after "=> ", object
+// properties three spaces in, objects rebuilt through \C::__set_state or
+// (object) array(...). json_encode escapes '/' and non-ASCII (\u, lowercase hex,
+// surrogate pairs) by default; json_decode answers null and records the error.
+class JxP { public $a = 1; public $b = [1.5, "x'y"]; }
+class JxS implements JsonSerializable {
+    public $q = 3;
+    public function jsonSerialize(): mixed { return ["q" => $this->q * 2]; }
+}
+$jo = (object)["x" => 1, "5" => "five"];
+$jn = new stdClass;
+$jn->k = [2];
+check("std-object-cast", [get_class($jo), $jo->x, (array)$jo], ["stdClass", 1, ["x" => 1, 5 => "five"]]);
+check("std-new", [$jn instanceof stdClass, (array)(object)null, ((object)7)->scalar], [true, [], 7]);
+$jv = [1.0, -0.0, 1e100, 0.1, PHP_INT_MIN, "a'b\\c", "n\0x", INF];
+$jx = [];
+foreach ($jv as $v) { $jx[] = var_export($v, true); }
+check("vexport-scalars", implode(" ", $jx), "1.0 -0.0 1.0E+100 0.1 -9223372036854775807-1 'a\\'b\\\\c' 'n' . \"\\0\" . 'x' INF");
+check("vexport-array", var_export([3 => "x", "k" => [true, null]], true),
+      "array (\n  3 => 'x',\n  'k' => \n  array (\n    0 => true,\n    1 => NULL,\n  ),\n)");
+check("vexport-object", var_export([new JxP()], true),
+      "array (\n  0 => \n  \\JxP::__set_state(array(\n     'a' => 1,\n     'b' => \n    array (\n      0 => 1.5,\n      1 => 'x\\'y',\n    ),\n  )),\n)");
+check("vexport-stdclass", var_export($jo, true), "(object) array(\n   'x' => 1,\n   '5' => 'five',\n)");
+check("json-encode-scalars", json_encode([null, true, 0, -7, $jv[0], $jv[1], $jv[2], $jv[3], "é/€ 😀\"\x01\t"]),
+      "[null,true,0,-7,1,-0,1.0e+100,0.1,\"\\u00e9\\/\\u20ac \\ud83d\\ude00\\\"\\u0001\\t\"]");
+check("json-encode-objects", json_encode(["a" => 1, "b" => [], "c" => new stdClass(), 1 => [1, 2]]) . json_encode(new JxP()) . json_encode(new JxS()),
+      "{\"a\":1,\"b\":[],\"c\":{},\"1\":[1,2]}{\"a\":1,\"b\":[1.5,\"x'y\"]}{\"q\":6}");
+check("json-encode-flags", json_encode(["é/<'", [1.0]], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG
+      | JSON_HEX_APOS | JSON_PRESERVE_ZERO_FRACTION) . json_encode([1, 2], JSON_FORCE_OBJECT)
+      . json_encode(["12", "1.5", "x"], JSON_NUMERIC_CHECK),
+      "[\"é/\\u003C\\u0027\",[1.0]]{\"0\":1,\"1\":2}[12,1.5,\"x\"]");
+check("json-encode-pretty", json_encode(["a" => [1, []]], JSON_PRETTY_PRINT), "{\n    \"a\": [\n        1,\n        []\n    ]\n}");
+$je = [json_encode($jv[7]), json_last_error(), json_encode("a\xC8"), json_last_error_msg(),
+       json_encode([[1]], 0, 1), json_last_error(), json_encode([1, $jv[7]], JSON_PARTIAL_OUTPUT_ON_ERROR)];
+try { json_encode($jv[7], JSON_THROW_ON_ERROR); } catch (JsonException $e) { $je[] = $e->getMessage() . "|" . $e->getCode(); }
+$je[] = json_last_error();
+check("json-encode-errors", $je, [false, 7, false, "Malformed UTF-8 characters, possibly incorrectly encoded", false, 1, "[1,0]",
+      "Inf and NaN cannot be JSON encoded|7", 7]);
+$jd = json_decode('{"a":1,"b":[1,2.5,"x"],"c":{"d":null},"0":true}');
+check("json-decode-object", [$jd instanceof stdClass, $jd->a, $jd->b, $jd->c->d, $jd->{"0"}, json_last_error()],
+      [true, 1, [1, 2.5, "x"], null, true, 0]);
+check("json-decode-assoc", json_decode('{"a":{"b":[1]},"5":2}', true), ["a" => ["b" => [1]], 5 => 2]);
+$jdocs = [" 12 ", "-0", "1E2", "\"\\u00e9\\ud83d\\ude00\\n\"", "9223372036854775807", "9223372036854775808"];
+$jr = [];
+foreach ($jdocs as $d) { $jr[] = json_decode($d); }
+$jr[] = json_decode("12345678901234567890", false, 512, JSON_BIGINT_AS_STRING);
+check("json-decode-scalars", $jr, [12, 0, 100.0, "é😀\n", PHP_INT_MAX, 9.2233720368547758E+18, "12345678901234567890"]);
+$jcodes = [];
+foreach (["[1,2", "", "01", "[1,]", "TRUE", "\"\\ud800\"", "\"a\x01\"", "\"abc", "[[1]]"] as $d) {
+    $jcodes[] = json_decode($d, false, 1) === null ? json_last_error() : -1;
+}
+try { json_decode("{", false, 512, JSON_THROW_ON_ERROR); } catch (JsonException $e) { $jcodes[] = $e->getMessage(); }
+$jcodes[] = json_last_error_msg();
+check("json-decode-errors", $jcodes, [4, 4, 4, 4, 4, 10, 3, 3, 1, "Syntax error", "Maximum stack depth exceeded"]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

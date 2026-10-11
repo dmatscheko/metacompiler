@@ -748,6 +748,19 @@ func (rt *jsrt) phpRaise(clsName, msg string) {
 // js_phmissname needs the object without the raise. nil means "no descriptor,
 // keep the fatal".
 func (rt *jsrt) phpMkErr(clsName, msg string) *jsObject {
+	cls := rt.phpRtClass(clsName)
+	if cls == nil {
+		return nil
+	}
+	o := newJSObject()
+	o.set("__class", cls)
+	o.set("message", msg)
+	o.set("code", float64(0))
+	return o
+}
+
+// phpRtClass is the class descriptor phpmain handed over under clsName, or nil.
+func (rt *jsrt) phpRtClass(clsName string) interface{} {
 	h, has := phpMainScope[rt]
 	if !has {
 		return nil
@@ -756,31 +769,20 @@ func (rt *jsrt) phpMkErr(clsName, msg string) *jsObject {
 	// over a PHP ARRAY of name => descriptor, which is a plain value the MetaJS
 	// runtime library can read too; a SCOPE (an older module's shape) is still
 	// accepted.
+	var found interface{}
 	if keys, vals, ok := phpArrParts(rt.unwrap(h)); ok {
-		var found interface{}
 		for i := range keys.elems {
 			if rt.phpStr(keys.elems[i]) == clsName {
 				found = phpDeref(vals.elems[i])
 			}
 		}
-		if found == nil || isNullish(found) {
-			return nil
-		}
-		o := newJSObject()
-		o.set("__class", found)
-		o.set("message", msg)
-		o.set("code", float64(0))
-		return o
+	} else {
+		found = rt.scopeGet(rt.scopeOf(h), clsName)
 	}
-	cls := rt.scopeGet(rt.scopeOf(h), clsName)
-	if cls == nil || isNullish(cls) {
+	if found == nil || isNullish(found) {
 		return nil
 	}
-	o := newJSObject()
-	o.set("__class", cls)
-	o.set("message", msg)
-	o.set("code", float64(0))
-	return o
+	return found
 }
 
 // phpFindMethod walks a class descriptor's __class/__super chain, the same single
@@ -1422,7 +1424,24 @@ func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 		rt.phpArrPush(out, v)
 		return out
 	case "object":
-		return v
+		// An array's elements become the properties of a stdClass, any other
+		// non-object the one property "scalar". Twin of phpCast in
+		// php-interpreter.abnf.
+		if phpIsObj(v) {
+			return v
+		}
+		o := newJSObject()
+		if cls := rt.phpRtClass("stdClass"); cls != nil {
+			o.set("__class", cls)
+		}
+		if keys, vals, ok := phpArrParts(v); ok {
+			for i := range keys.elems {
+				o.set(rt.phpStr(keys.elems[i]), rt.phpArrCopy(phpDeref(vals.elems[i])))
+			}
+		} else if !isNullish(v) {
+			o.set("scalar", v)
+		}
+		return o
 	case "unset":
 		return jsNull
 	}
