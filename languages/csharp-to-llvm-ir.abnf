@@ -1249,7 +1249,7 @@ MethodSfx   <~~ push({kind:"mcall", name: csDfltCall(popName(), up.start, up.pos
             = "." Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" ArgList ")" ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> [ TArgSkip GenStop ] ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: csCapNote(up.in)}) ~~> [ TArgSkip GenStop ] ;
 
 // A call's argument list. A NAMED argument ('S22Vol(1, d: 5)') keeps its parameter name
 // beside its thunk; csFixArgs turns the mixed list back into a positional one using the
@@ -3507,6 +3507,15 @@ KwLet       = "let" KwEnd ;
                     // An event that manages its own subscription list: the accessor takes
                     // the handler itself, not the combined delegate.
                     b = emitEvtCall(b, p.obj, p.keyName, op, v)
+                } else if (p.isField && p.keyName == "Capacity" && csPropAcc[p.keyName] == undefined) {
+                    // List<T>.Capacity's setter, or a member of that name (js_cscapset).
+                    if (op != "=") {
+                        var oldc = callExt(b, "js_csmcall", [p.obj, emitStr(b, "Capacity"), callExt(b, "js_arr_new", [])])
+                        var rcc = emitCompound(b, op, oldc, v)
+                        b = rcc.b
+                        v = rcc.v
+                    }
+                    callExt(b, "js_cscapset", [p.obj, v])
                 } else if (p.isField && csPropAcc[p.keyName] != undefined) {
                     // A property with a set accessor body ('b.W = 5').
                     if (op != "=") {
@@ -4461,7 +4470,8 @@ KwLet       = "let" KwEnd ;
                         var rcu = emitCurrent(b, cur)
                         b = rcu.b
                         cur = rcu.v
-                    } else if (s.name == "Count" || s.name == "Length" || s.name == "Keys" || s.name == "Values") {
+                    } else if (s.name == "Count" || s.name == "Length" || s.name == "Keys" || s.name == "Values"
+                               || s.name == "Capacity") {
                         var clr = emitCsLen(b, cur, s.name)
                         b = clr.b
                         cur = clr.v
@@ -5832,7 +5842,7 @@ KwLet       = "let" KwEnd ;
     // that is an instance or a class descriptor reads that member (`static int
     // Count`). Twin of core.getField's arm in csharp-interpreter.abnf.
     function emitCsStd(b, cur, name) {
-        if (name == "Keys" || name == "Values") {
+        if (name == "Keys" || name == "Values" || name == "Capacity") {
             return callExt(b, "js_csmcall", [cur, emitStr(b, name), callExt(b, "js_arr_new", [])])
         }
         return callExt(b, "js_cslen", [cur])
@@ -6969,6 +6979,8 @@ KwLet       = "let" KwEnd ;
         }
         b = emitValEqDecl(b)
         csDfltResolve()
+        // A program that names a List's capacity members has the runtime keep them.
+        if (csCapUsed) { callExt(b, "js_cscaptrack", []) }
         b = emitImported(b)
         b = makeSeq(items)(b)
         // The entry defaults to Program.Main but -main (c.mainName) can name another

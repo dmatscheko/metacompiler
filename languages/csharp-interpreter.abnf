@@ -1262,7 +1262,7 @@ MethodSfx   <~~ push({kind:"mcall", name: csDfltCall(popName(), up.start, up.pos
             = "." Id <~~ push({mname: up.in}) ~~> [ TArgSkip ] "(" ArgList ")" ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" ArgList ")" ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> [ TArgSkip GenStop ] ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: csCapNote(up.in)}) ~~> [ TArgSkip GenStop ] ;
 
 // A call's argument list. A NAMED argument ('S22Vol(1, d: 5)') keeps its parameter name
 // beside its thunk; csFixArgs turns the mixed list back into a positional one using the
@@ -3273,6 +3273,10 @@ KwLet       = "let" KwEnd ;
                     if (op != "=") { v = applyOp(op, core.getField(p.obj, p.key), v) }
                     var st = csFindAcc(p.obj, "__set_" + p.key)
                     if (p.obj.__isclass === true) { st(v) } else { st(p.obj, v) }
+                } else if (p.key == "Capacity" && p.isIndex != true && Array.isArray(p.obj)) {
+                    // List<T>.Capacity's setter (lib/csharp-collections.js).
+                    if (op != "=") { v = applyOp(op, csxListMethod(p.obj, "Capacity", []), v) }
+                    csxListMethod(p.obj, "set_Capacity", [v])
                 } else {
                     if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
                     if (elty != "") { v = csImplicitConv(elty, v) }
@@ -6260,6 +6264,7 @@ KwLet       = "let" KwEnd ;
         // Twin of emitCsLen in csharp-to-llvm-ir.abnf.
         if (!csIsUserObj(o)) {
             if (name == "Count" || name == "Length") return csLen(o)
+            if (name == "Capacity" && Array.isArray(o)) return csxListMethod(o, name, [])
             if ((name == "Keys" || name == "Values") && isDict(o)) return csxDictMethod(o, name, [])
         }
         if (hasOwn(o, name)) { return o[name] }
@@ -6693,6 +6698,7 @@ KwLet       = "let" KwEnd ;
 
     c.compile(c.asg)
     csDfltResolve()
+    csxCapOn = csCapUsed
 
     // The entry point defaults to the static Main of class Program, but the -main flag
     // (c.mainName) can name any other static method of Program.

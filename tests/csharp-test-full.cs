@@ -3299,6 +3299,38 @@ b";                                                   // verbatim keeps the newl
                 && string.Join(",", lit.Reverse()) == "9,3" && string.Join(",", lit) == "3,9");
         }
 
+        // ===== SECTION 53: List<T>.Capacity =====
+        //
+        // The List<T>.Capacity documentation's own example: an empty list has
+        // capacity 0, five Adds leave it 8, TrimExcess cuts it to the count (5) and
+        // Clear keeps it. The capacity constructor and the setter set it; a value
+        // below the count throws ArgumentOutOfRangeException; EnsureCapacity answers
+        // at least the capacity asked for. No C# toolchain here: the values follow
+        // from the docs.
+        static void S53()
+        {
+            int[] n = { 10, 20, 30, 2 };
+            List<string> dinosaurs = new List<string>();
+            int c0 = dinosaurs.Capacity;
+            dinosaurs.Add("Tyrannosaurus");
+            dinosaurs.Add("Amargasaurus");
+            dinosaurs.Add("Mamenchisaurus");
+            dinosaurs.Add("Deinonychus");
+            dinosaurs.Add("Compsognathus");
+            int c1 = dinosaurs.Capacity;
+            dinosaurs.TrimExcess();
+            int c2 = dinosaurs.Capacity;
+            dinosaurs.Clear();
+            Program.Check("s53d1", c0 == 0 && c1 == 8 && c2 == 5 && dinosaurs.Capacity == 5 && dinosaurs.Count == 0);
+            var l = new List<int>(n[0]);
+            int c3 = l.Capacity;
+            l.Capacity = n[1];
+            string ex = "";
+            l.Add(n[3]);
+            try { l.Capacity = 0; } catch (ArgumentOutOfRangeException) { ex = "aoor"; }
+            Program.Check("s53c1", c3 == 10 && l.Capacity == 20 && l.EnsureCapacity(n[2]) >= 30 && l.Capacity >= 30 && ex == "aoor");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3353,6 +3385,7 @@ b";                                                   // verbatim keeps the newl
             Program.S50(); // SECTION-CALL 50
             Program.S51(); // SECTION-CALL 51
             Program.S52(); // SECTION-CALL 52
+            Program.S53(); // SECTION-CALL 53
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

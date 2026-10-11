@@ -2160,6 +2160,17 @@ function csConsoleText(argv) {
 // The element type and List-ness a collection carries (lib/csharp-collections.js's
 // csxTyped / csxTypedAs).
 function js_cstyped(a, ety, isList) { return csxTyped(a, ety, isList == 1) }
+// A program that names a List's capacity members has them kept (csxCapOn).
+function js_cscaptrack() {
+    csxCapOn = true
+    return undefined
+}
+// `o.Capacity = v`: List<T>.Capacity's setter on a list, else the member.
+function js_cscapset(o, v) {
+    if (Array.isArray(o)) { return csxListMethod(o, "set_Capacity", [v]) }
+    o["Capacity"] = v
+    return undefined
+}
 function js_cstypedas(a, ety, isList) { return csxTypedAs(a, ety, isList == 1) }
 // An interpolation hole's ':format' (lib/csharp-strings.js's csxFmtValue).
 function js_csfmt(v, spec) {

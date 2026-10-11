@@ -229,6 +229,9 @@ func csxTyCode(ty string) int {
 			return i
 		}
 	}
+	if len(csxTyNames) == 1024 {
+		return 0
+	}
 	csxTyNames = append(csxTyNames, ty)
 	return len(csxTyNames) - 1
 }
@@ -239,6 +242,9 @@ func csxTyped(a *jsArray, ety string, isList bool) *jsArray {
 		k++
 	}
 	a.kind = k
+	if isList && csxCapOn {
+		csxCapAdds(a, len(a.elems))
+	}
 	return a
 }
 
@@ -247,10 +253,84 @@ func csxIsList(a *jsArray) bool { return a.kind%2 == 1 }
 func csxElemTy(a *jsArray) string {
 	csxTyMu.Lock()
 	defer csxTyMu.Unlock()
-	if i := a.kind / 2; i < len(csxTyNames) {
+	if i := (a.kind / 2) % 1024; i < len(csxTyNames) {
 		return csxTyNames[i]
 	}
 	return ""
+}
+
+// ----- List<T>.Capacity: lib/csharp-collections.js's -----
+
+var csxCapOn = false
+
+func csxCap(a *jsArray) int { return a.kind / 2048 }
+
+func csxCapSet(a *jsArray, c int) { a.kind = a.kind%2048 + 2048*c }
+
+func csxCapGrow(a *jsArray, need int) {
+	cp := csxCap(a)
+	if cp >= need {
+		return
+	}
+	nc := 2 * cp
+	if cp == 0 {
+		nc = 4
+	}
+	if nc < need {
+		nc = need
+	}
+	csxCapSet(a, nc)
+}
+
+func csxCapAdds(a *jsArray, n int) {
+	for k := len(a.elems) - n + 1; k <= len(a.elems); k++ {
+		csxCapGrow(a, k)
+	}
+}
+
+func csxSizedSrc(src interface{}) bool {
+	if _, ok := src.(*jsArray); ok {
+		return true
+	}
+	_, _, ok := dictParts(src)
+	return ok
+}
+
+func csxCapRange(a *jsArray, src interface{}, n int) {
+	if csxSizedSrc(src) {
+		if n > 0 {
+			csxCapGrow(a, len(a.elems)+n)
+		}
+		return
+	}
+	for k := 1; k <= n; k++ {
+		csxCapGrow(a, len(a.elems)+k)
+	}
+}
+
+func (rt *jsrt) csxCapMethod(a *jsArray, name string, args []interface{}) interface{} {
+	switch name {
+	case "Capacity":
+		return float64(csxCap(a))
+	case "set_Capacity":
+		c := rt.csxNum(argAt(args, 0))
+		if c < len(a.elems) {
+			rt.csxArgRange("capacity was less than the current size.", "value")
+		}
+		csxCapSet(a, c)
+		return jsUndef
+	case "TrimExcess":
+		if len(a.elems) < int(math.Floor(float64(csxCap(a))*0.9)) {
+			csxCapSet(a, len(a.elems))
+		}
+		return jsUndef
+	}
+	need := rt.csxNum(argAt(args, 0))
+	if need < 0 {
+		rt.csxArgRange(csxMsgNonNeg, "capacity")
+	}
+	csxCapGrow(a, need)
+	return float64(csxCap(a))
 }
 
 func csxElemDefault(a *jsArray) interface{} {
@@ -525,9 +605,20 @@ func (rt *jsrt) csxListCtor(a *jsArray, args []interface{}) interface{} {
 		if rt.csxNum(args[0]) < 0 {
 			rt.csxArgRange(csxMsgNonNeg, "capacity")
 		}
+		if csxCapOn {
+			csxCapSet(a, rt.csxNum(args[0]))
+		}
 		return a
 	}
-	csxInsertAll(a, 0, rt.csxElemsOf(args[0]))
+	els := rt.csxElemsOf(args[0])
+	csxInsertAll(a, 0, els)
+	if csxCapOn {
+		if csxSizedSrc(args[0]) {
+			csxCapSet(a, len(els))
+		} else {
+			csxCapAdds(a, len(els))
+		}
+	}
 	return a
 }
 
@@ -538,9 +629,14 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 	case "__ctor":
 		return rt.csxListCtor(a, args)
 	case "Add":
+		if csxCapOn {
+			csxCapGrow(a, len(a.elems)+1)
+		}
 		a.dropIdx()
 		a.elems = append(a.elems, arg(0))
 		return jsUndef
+	case "Capacity", "set_Capacity", "TrimExcess", "EnsureCapacity":
+		return rt.csxCapMethod(a, name, args)
 	case "Count":
 		if n > 0 {
 			return rt.csqMethod(a, name, args)
@@ -560,7 +656,11 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 		a.elems = nil
 		return jsUndef
 	case "AddRange":
-		csxInsertAll(a, len(a.elems), rt.csxElemsOf(arg(0)))
+		more := rt.csxElemsOf(arg(0))
+		if csxCapOn {
+			csxCapRange(a, arg(0), len(more))
+		}
+		csxInsertAll(a, len(a.elems), more)
 		return jsUndef
 	case "Insert", "InsertRange":
 		at := rt.csxNum(arg(0))
@@ -570,11 +670,15 @@ func (rt *jsrt) csxListMethod(a *jsArray, name string, args []interface{}) inter
 			}
 			rt.csxArgRange(csxMsgIdxLessEq, "index")
 		}
-		if name == "Insert" {
-			csxInsertAll(a, at, []interface{}{arg(1)})
-		} else {
-			csxInsertAll(a, at, rt.csxElemsOf(arg(1)))
+		ins := []interface{}{arg(1)}
+		var src interface{} = &jsArray{elems: ins}
+		if name == "InsertRange" {
+			ins, src = rt.csxElemsOf(arg(1)), arg(1)
 		}
+		if csxCapOn {
+			csxCapRange(a, src, len(ins))
+		}
+		csxInsertAll(a, at, ins)
 		return jsUndef
 	case "Remove":
 		i := rt.csxSearch(a.elems, arg(0), 0, len(a.elems))

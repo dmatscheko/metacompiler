@@ -647,6 +647,13 @@ function csDfltResolve() {
     }
     csDfltLater = []
 }
+// Whether the program names a List's capacity members, which is when the
+// runtime keeps capacities (csxCapOn, lib/csharp-collections.js).
+var csCapUsed = false
+function csCapNote(name) {
+    if (name == "Capacity" || name == "TrimExcess" || name == "EnsureCapacity") { csCapUsed = true }
+    return name
+}
 // A call's tag: its arguments wait for the parameter types (csDfltArgs). An
 // unqualified call names a member of the enclosing class; a member call's
 // receiver class is not known to the parse.
@@ -655,7 +662,7 @@ function csDfltSelfCall(name, start, end) {
     return name
 }
 function csDfltCall(name, start, end) {
-    csDfltArgs("", name, start, end)
+    csDfltArgs("", csCapNote(name), start, end)
     return name
 }
 function csDfltNew(items, start, end) {

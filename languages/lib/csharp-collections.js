@@ -116,9 +116,10 @@ function csxDefaultOf(ty) {
 // ----- the kind a List<T> or T[] carries -----
 //
 // Both are plain arrays. The array's kind number (arrKind) tells them apart and
-// names T where the program spelled it: bit 0 is set on a List, the bits above
-// it hold T's index in csxTyNames (0: not known). Twin: csxTyped in
-// abnf/jsrtcscoll.go.
+// names T where the program spelled it: bit 0 is set on a List, bits 1 to 10 hold
+// T's index in csxTyNames (0: not known), and the bits from 2048 up a List's
+// Capacity (csxCap). A List made with its elements has the capacity Adding them
+// one by one gives. Twin: csxTyped in abnf/jsrtcscoll.go.
 var csxTyNames = [""]
 function csxTyCode(ty) {
     var i = 0
@@ -126,15 +127,73 @@ function csxTyCode(ty) {
         if (csxTyNames[i] == ty) { return i }
         i = i + 1
     }
+    if (csxTyNames.length == 1024) { return 0 }
     csxTyNames.push(ty)
     return csxTyNames.length - 1
 }
 function csxTyped(a, ety, isList) {
     arrKindSet(a, (isList ? 1 : 0) + 2 * csxTyCode(ety))
+    if (isList && csxCapOn) { csxCapAdds(a, a.length) }
     return a
 }
 function csxIsList(a) { return arrKind(a) % 2 == 1 }
-function csxElemTy(a) { return csxTyNames[Math.floor(arrKind(a) / 2)] }
+function csxElemTy(a) { return csxTyNames[Math.floor(arrKind(a) / 2) % 1024] }
+
+// ----- List<T>.Capacity -----
+//
+// Kept only when the program names Capacity, TrimExcess or EnsureCapacity
+// (csxCapOn, set before it runs), so no other List.Add pays for it. The growth is
+// List<T>'s: an empty list holds 0, a full one grows to twice its capacity (4
+// from 0), or to the size needed when that is more; the documented example reads
+// 0, then 8 after five Adds, then 5 after TrimExcess, and Clear keeps it.
+var csxCapOn = false
+function csxCap(a) { return Math.floor(arrKind(a) / 2048) }
+function csxCapSet(a, c) { arrKindSet(a, arrKind(a) % 2048 + 2048 * c) }
+function csxCapGrow(a, need) {
+    var cap = csxCap(a)
+    if (cap >= need) { return }
+    var nc = cap == 0 ? 4 : 2 * cap
+    if (nc < need) { nc = need }
+    csxCapSet(a, nc)
+}
+// The capacity n more Adds leave, from a.length - n elements.
+function csxCapAdds(a, n) {
+    var k = a.length - n
+    while (k < a.length) {
+        k = k + 1
+        csxCapGrow(a, k)
+    }
+}
+// AddRange / InsertRange: a collection whose size is known grows the list once,
+// any other sequence one Add at a time.
+function csxCapRange(a, src, n) {
+    if (Array.isArray(src) || csxIsDictLike(src)) {
+        if (n > 0) { csxCapGrow(a, a.length + n) }
+        return
+    }
+    var k = 0
+    while (k < n) {
+        k = k + 1
+        csxCapGrow(a, a.length + k)
+    }
+}
+function csxCapMethod(a, name, args) {
+    if (name == "Capacity") { return csxCap(a) }
+    if (name == "set_Capacity") {
+        var c = csxkNum(args[0])
+        if (c < a.length) { csxArgRange("capacity was less than the current size.", "value") }
+        csxCapSet(a, c)
+        return undefined
+    }
+    if (name == "TrimExcess") {
+        if (a.length < Math.floor(csxCap(a) * 0.9)) { csxCapSet(a, a.length) }
+        return undefined
+    }
+    var need = csxkNum(args[0])
+    if (need < 0) { csxArgRange(csxMsgNonNeg(), "capacity") }
+    csxCapGrow(a, need)
+    return csxCap(a)
+}
 // default(T) for a's elements: by T when it is known, else the default of the
 // first element's own kind, else null.
 function csxElemDefault(a) { return csxDefaultFor(csxElemTy(a), a.length > 0, a.length > 0 ? a[0] : null) }
@@ -382,6 +441,7 @@ function csxListMethod(a, name, args) {
     // `__ctor` is the constructor call the compiler half emits (csxListCtor).
     if (name == "__ctor") { return csxListCtor(a, args) }
     if (name == "Add") {
+        if (csxCapOn) { csxCapGrow(a, a.length + 1) }
         a.push(args[0])
         return undefined
     }
@@ -394,7 +454,9 @@ function csxListMethod(a, name, args) {
         return undefined
     }
     if (name == "AddRange") {
-        csxInsertAll(a, a.length, csxElemsOf(args[0]))
+        var more = csxElemsOf(args[0])
+        if (csxCapOn) { csxCapRange(a, args[0], more.length) }
+        csxInsertAll(a, a.length, more)
         return undefined
     }
     if (name == "Insert" || name == "InsertRange") {
@@ -403,8 +465,13 @@ function csxListMethod(a, name, args) {
             if (name == "Insert") { csxArgRange("Index must be within the bounds of the List.", "index") }
             csxArgRange(csxMsgIdxLessEq(), "index")
         }
-        csxInsertAll(a, at, name == "Insert" ? [args[1]] : csxElemsOf(args[1]))
+        var ins = name == "Insert" ? [args[1]] : csxElemsOf(args[1])
+        if (csxCapOn) { csxCapRange(a, name == "Insert" ? ins : args[1], ins.length) }
+        csxInsertAll(a, at, ins)
         return undefined
+    }
+    if (name == "Capacity" || name == "set_Capacity" || name == "TrimExcess" || name == "EnsureCapacity") {
+        return csxCapMethod(a, name, args)
     }
     if (name == "Remove") {
         var ri = csxSearch(a, args[0], 0, a.length)
@@ -639,9 +706,15 @@ function csxListCtor(a, args) {
     var src = args[0]
     if (csxkIsNum(src)) {
         if (csxkNum(src) < 0) { csxArgRange(csxMsgNonNeg(), "capacity") }
+        if (csxCapOn) { csxCapSet(a, csxkNum(src)) }
         return a
     }
-    csxInsertAll(a, 0, csxElemsOf(src))
+    // A collection whose size is known sets the capacity to it.
+    var els = csxElemsOf(src)
+    csxInsertAll(a, 0, els)
+    if (csxCapOn) {
+        if (Array.isArray(src) || csxIsDictLike(src)) { csxCapSet(a, els.length) } else { csxCapAdds(a, els.length) }
+    }
     return a
 }
 function csxDictCtor(d, args) {

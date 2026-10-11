@@ -28,14 +28,14 @@
 // called with the element's index too exactly when it declares two parameters
 // (csxkArity), which is how C# picks Where((x, i) => ...) over Where(x => ...).
 //
-// Not modelled: default(T) of an EMPTY sequence (FirstOrDefault and the other
-// ...OrDefault members, DefaultIfEmpty, MinBy / MaxBy) - the value carries no
-// element type, so it is the default of the elements' own kind when there are
-// elements and null when there are none; OfType<T>, the IEqualityComparer
-// overloads other than StringComparer's, ToLookup, and a second enumeration of
-// a user iterator (it continues where the first stopped). An iterator body that
-// is itself driven by replay (the interpreter's model) re-reads its sources at
-// every step.
+// default(T) (FirstOrDefault and the other ...OrDefault members, DefaultIfEmpty)
+// is the source's element type's when the source carries one (csqElemTy: a typed
+// collection, through the operators that keep its elements), else the default of
+// the kind of an element seen, else null. Not modelled: MinBy / MaxBy of an empty
+// sequence, OfType<T>, the IEqualityComparer overloads other than
+// StringComparer's, ToLookup, and a second enumeration of a user iterator (it
+// continues where the first stopped). An iterator body that is itself driven by
+// replay (the interpreter's model) re-reads its sources at every step.
 
 function csqMsgEmpty() { return "Sequence contains no elements" }
 function csqNoMatch() { csxkThrow("InvalidOperationException", "Sequence contains no matching element") }

@@ -1503,6 +1503,22 @@ func init() {
 			}
 			return a[0]
 		}
+		// A program that names a List's capacity members has them kept, and
+		// `o.Capacity = v` is List<T>.Capacity's setter on a list: lib/csharp-rt.metajs's
+		// js_cscaptrack / js_cscapset.
+		m["js_cscaptrack"] = func(a []uint64) uint64 {
+			csxCapOn = true
+			return w(jsUndef)
+		}
+		m["js_cscapset"] = func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				return w(rt.csxListMethod(arr, "set_Capacity", []interface{}{u(a[1])}))
+			}
+			if o, ok := u(a[0]).(*jsObject); ok {
+				o.set("Capacity", u(a[1]))
+			}
+			return w(jsUndef)
+		}
 		m["js_cstypedas"] = func(a []uint64) uint64 {
 			if arr, ok := u(a[0]).(*jsArray); ok && arr.kind == 0 {
 				csxTyped(arr, rt.toString(u(a[1])), rt.toNumber(u(a[2])) == 1)
