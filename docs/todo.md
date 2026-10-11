@@ -106,7 +106,7 @@ compares bytes; `casecmp?` folds Unicode).
 
 # JS — JavaScript and TypeScript
 
-### T-047 js: a generator body's `this` is wrong in the NATIVE build only · P2 · JS · Shared: runtime.c · OPEN [V]
+### T-047 js: a generator body's `this` is wrong in the NATIVE build only · P2 · JS · Shared: runtime.c · IN PROGRESS (CORE worker, round 6) [V]
 `function* g(){ yield this }; g().next().value` gives the generator object natively,
 `undefined` in the other legs. `js_this` is one global slot in layer 2 and the emitter
 arms it with the receiver of `.next()`. Needs a per-coroutine `this` in the floor's
@@ -186,7 +186,7 @@ reduced.`, `Array has more than one element.` (all read from the 2.2.21 jar). An
 a Sequence, a values view and a List are one host array: needs the nominal kind of
 T-081 (jsArray in abnf/jsrt.go, the floor's array cell). reduceOrNull /
 reduceRightOrNull were added in b38a051.
-### T-081 boxed values know their KIND but not their declared class · P2 · KT + SW + CORE · OPEN [V]
+### T-081 boxed values know their KIND but not their declared class · P2 · KT + SW + CORE · IN PROGRESS (CORE worker, round 6) [V]
 Two boxed values of one primitive kind and different declared classes cannot be told
 apart: kotlin's mixed Float/Double set key, swift's `Int` vs `Int64` (`8 as Int64 is
 Int` is true where swiftc says false), kotlin's empty-range `first`, T-080, go's `%!s(uint64=...)` note (T-073) and T-240. One
@@ -254,7 +254,7 @@ what is missing.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA + CORE · OPEN [V]
+### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA + CORE · IN PROGRESS (CORE worker, round 6) [V]
 Needs ONE raw-byte output primitive in all engines (runtime.c host id, jsrtint.go
 binding, metajs-interpreter hostGlobals, the tag-script host); then js_luaout/luaOut
 become the identity. Emitting libc putchar from the compiler alone would split
@@ -308,13 +308,13 @@ ruby T-229 declined for this reason). Design: CORE-MATH-style double-double with
 Ziv rounding test, one MetaJS module (interpreter + layer 2) + Go port + runtime.c
 d_*. Cost it; implement or DECLINE.
 
-### T-324 layer 2 `Array.sort` with a comparator fails · P1 · CORE · OPEN [V]
+### T-324 layer 2 `Array.sort` with a comparator fails · P1 · CORE · IN PROGRESS (CORE worker, round 6) [V]
 In a lib/*-rt.metajs, `xs.sort(function(a, b) {...})` dies natively "call of a non
 function value: undefined". Fix the frozen/layer-2 builtin, assert it in the metajs
 ratchet. Also: `gofmt -l abnf/` lists jsrtswift.go (a doubled blank line) and the
 generated jsagrammar.go - make the generator gofmt-clean or exclude it knowingly.
 
-### T-328 Go twin: a lone-surrogate char renders as U+FFFD · P1 · CORE · OPEN [V]
+### T-328 Go twin: a lone-surrogate char renders as U+FFFD · P1 · CORE · IN PROGRESS (CORE worker, round 6) [V]
 llvm.Run only: `"" + c`, `String.valueOf(c)`, `new String(char[])` of surrogate halves,
 StringBuilder.append of chars print 65533 / `��` where java, the interpreter and
 native give 55357 / 😀. jsChar renders with string(rune(code)) in abnf/jsrt.go
