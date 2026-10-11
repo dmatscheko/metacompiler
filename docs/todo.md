@@ -210,7 +210,7 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-336 go: struct values alias; pointer identity · P1 · GO + CORE · OPEN [V]
+### T-336 go: struct values alias; pointer identity · P1 · GO + CORE · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
 All engines: `a := T{1}; b := a; b.a = 2; c := *p; c.a = 9; d := id(a)` prints
 `10 10 10 10 10` (go `1 2 9 2 1`) - struct assignment, deref, argument passing and
 return do not copy. And `&T{1} == &T{1}` is true (go false): go's == is goValueEq in
@@ -218,7 +218,7 @@ abnf/jsrt.go (CORE). Value semantics first (copy at store, the swift precedent),
 pointer identity (goValueEq, the map-key path near jsrt.go:3403). Supersedes the
 pointer half of T-266.
 
-### T-337 go: a deferred call that panics stops the remaining defers · P1 · GO · OPEN [V]
+### T-337 go: a deferred call that panics stops the remaining defers · P1 · GO · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
 Go runs the frame's other defers and reports the chain (`f got B`, then `panic: C` /
 tab `panic: C`); ours prints `panic: A` / tab `panic: B`. Also `panic(fmt.Sprint(r))`
 with equal text reads as "[recovered, repanicked]" (values compared by value, not
@@ -228,7 +228,7 @@ identity); go prints `[recovered]` and a second line.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-340 swift: String.Index, removeSubrange/replaceSubrange, `append(contentsOf:)` · P1 · SW · OPEN [V]
+### T-340 swift: String.Index, removeSubrange/replaceSubrange, `append(contentsOf:)` · P1 · SW · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
 `s.insert("x", at: s.startIndex)` aborts "unknown String method: index";
 removeSubrange/replaceSubrange missing; Array `append(contentsOf:)` appends the array
 as one element (`["a","b","c",["d","e"]]`).
@@ -237,7 +237,7 @@ as one element (`["a","b","c",["d","e"]]`).
 
 # DA — Dart  (no dart here: spec-only)
 
-### T-339 dart: RegExp; List.map/where/toList/first · P1 · DA · OPEN [V spec-only]
+### T-339 dart: RegExp; List.map/where/toList/first · P1 · DA · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V spec-only]
 No engine has a regex-backed Pattern (RegExp/Match in three places; lib/regex.js may
 serve). List.map, where, toList, first are unsupported ("unknown List method: map").
 Also: the shared interpreter host's `charAt` at a lone-surrogate index answers U+FFFD
@@ -272,7 +272,7 @@ see T-293.)
 bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
 bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
 
-### T-338 bash: `@A/@a/@K/@k` on `$@`/`$*`; `${x:-"$@"}` under a null IFS; `${!e*}` · P1 · SH · OPEN [V]
+### T-338 bash: `@A/@a/@K/@k` on `$@`/`$*`; `${x:-"$@"}` under a null IFS; `${!e*}` · P1 · SH · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
 `set -- a b; echo ${@@A}`: bash `set -- 'a' 'b'`; interpreter empty, compiled
 `@=$'\002a\001b\001'` (a halves divergence). `${x:-"$@"}` under a null IFS loses the
 empty field (bash <a b><c><><d>, ours <a b><c><d>: needs quoted-field marking in the
