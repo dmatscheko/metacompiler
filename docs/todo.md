@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-395** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-399** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -121,6 +121,14 @@ interpreter's type test (goTypeName answers "slice"), even `[]int`. A nested arr
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
+### T-395 swift: `a?.b = c`; inout closure parameters; literals typed by context · P1 · SW · IN PROGRESS (SW+PHP+SH worker, round 16) [V]
+Optional-chain assignment `a?.b = c` does not parse (common in real Swift; 2 corpus
+files). Both halves: `func ap(_ f: (inout Int)->()) -> Int { var v=4; f(&v); return v };
+ap { (x: inout Int) in x += 2 }` prints 4 (swiftc 6: inout never written back); `[1, 2]
+as [Double]` prints `[1, 2]` (swiftc `[1.0, 2.0]`); `let (a, b): (Double, Int) = (1,
+2)` prints `1 2` (swiftc `1.0 2`). Also unparsed: `$wrapper` names, `@const` + keypath,
+`case A<T>()`, macros, postfix custom operators, `for await`.
+
 ---
 
 # DA — Dart  (no dart here: spec-only)
@@ -138,6 +146,11 @@ aborts "range over a object" (compiler). `method_exists` undefined. `self::` out
 class aborts (bug66015.phpt). A decoded JSON key starting with `__` collides with
 hidden slots compiled.
 
+### T-397 php: foreach by value walks the live array · P1 · PHP · IN PROGRESS (SW+PHP+SH worker, round 16) [V spec-only]
+`$a=["x"=>1,"y"=>2]; $i=1; foreach($a as $k=>$v){$a[$i]=$v; unset($a[$k]); $i++;}`
+leaves `[y=>2, 2=>1]` in both halves; PHP iterates a snapshot (bug68215.expected:
+`[1=>1, 2=>2]`).
+
 ---
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
@@ -145,6 +158,11 @@ hidden slots compiled.
 ---
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
+
+### T-398 batch: `%~n0` inside `call :label`; native string arena · P2 · SH · IN PROGRESS (SW+PHP+SH worker, round 16) [V]
+Both halves: inside `call :label`, `%~n0` / `%~dp0` answer the label instead of the
+batch file (wine .exp line 988). Native only: batch-rt's 2 MB string arena is exhausted
+by tests/reference batch test_builtins.cmd after 726 lines (grow or collect).
 
 ---
 
@@ -160,15 +178,18 @@ runtime.c ~2390: `"Inf"`, `"-Inf"` and any 8-character string starting with "Inf
 Probe every language that converts strings through it (python float(), ruby to_f,
 php, lua tonumber, kotlin toDouble...) against its oracle and fix the floor.
 
-### T-181 corpus: other languages · P3 · per language · IN PROGRESS (CORPUS worker, round 13) [V]
-batch 0 of 2 wine files parse; swift 80% (an 18-file lexical tail: suppressed
-conformances, `@isolated(any)` in a type, `borrowing` as a bare type name, raw
-multi-line strings with 3+ pound levels, parameter packs, form feed and NBSP); dart
-96.6% (~53 of the remaining 117 are multitests whose surviving `//#` variants are
-labelled syntax errors); php / csharp / java / c long tails. python 92.9% and ruby
-98.1% are at their hard caps. Unicode identifier tables for swift/java/kotlin/csharp/
-python must each come from that language's own toolchain or spec (python3 is Unicode
-16.0, node 24 is 17.0).
+### T-396 corpus long tails: csharp, php, dart, java · P3 · per language · OPEN [V]
+Measured after round 13. csharp 78 fails (unsafe pointers 10, generic names as values 7,
+async/await 6, ref/out 6, switch-section labels 5, patterns 5, identifier escapes 5,
+array casts 5, interpolation spacing 4, initializers 3, tuples 2, ~17 singles). php 60
++ 2 timeouts (`${expr}`/`global $$k` 4, call result as assignment target ~8, `=&` to
+calls 4, `(void)` 3, print/yield as expressions 6, enum edges 4, `__halt_compiler` 2,
+`b"` heredocs 2); the php compiler half also fails 4 files the interpreter parses and
+hangs on 3 try/finally files. dart 110 + 4 timeouts (54 multitests, patterns ~18,
+primary constructors 6, generic tear-offs 4, optional function-typed params 4, metadata
+4, dot shorthands 2). java: 6 javac-accepted files (type annotations in method refs,
+semantic-only errors, 2 timeouts); `case null, default:` in a colon switch does not
+parse in the compiler half.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -453,6 +474,7 @@ T-391 ts: an exported `let`/`var` in a namespace is a snapshot compiled — DONE
 T-384 python: binary operators on mismatched builtin types; huge repeats; int ** float — DONE 65621bbd e76fcfa5
 T-170 a real tuple type for Python — DONE 93334360 (a tuple is an array of kind 16; no runtime.c change)
 T-011 python: `d.items()` renders pairs as lists — DONE 93334360
+T-181 corpus: other languages — PARTIAL 38b08481..4999997a (swift 115→118/123 swiftc-accepted, batch 0→2/2, c 213→217, java 4323→4329, php 2681→2691, dart 3336→3339, csharp +1; no must-parse file lost); remaining tail is T-395/T-396
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
