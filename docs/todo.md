@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-308** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-311** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -158,45 +158,19 @@ counts every section.
 
 # JV — Java
 
-### T-255 java: `instanceof` an interface · P1 · JV · Shared: interp-core.js · IN PROGRESS (JV+CS worker, round 4) [V]
-`class Impl implements Lst, Gen<String>` (Lst extends Col): java `true true true true`
-for Lst/Col/Gen/Impl; interpreter `false false false true` (rtIsType in interp-core.js
-walks only `__class`/`__super` and treats "List"/"Collection" as JS arrays); compiled
-`true true false true` (a second interface is missed). ArrayList.equals in
-java-util.java therefore cannot accept a user List.
+### T-308 java: astral characters in string literals become U+FFFD · P1 · JV · OPEN [V]
+`"😀"` (literal or `\uD83D\uDE00`): `(int) s.charAt(0)` prints 65533 in all legs;
+java 55357. Compare python T-200 / ruby T-187 (each fixed in its own grammar).
 
-### T-256 java: String identity · P2 · JV · IN PROGRESS (JV+CS worker, round 4) [V]
-`new String("ab") == "ab"` and `==` on a computed concatenation are true; java false.
-A String has no identity in the value model. Cost first; likely DECLINE unless cheap.
-
-### T-257 java: missing String API and core classes · P1 · JV · IN PROGRESS (JV+CS worker, round 4) [V]
-`String.valueOf`, `String.join`, `String.format` ("unknown name: String" interpreter,
-"unknown method 'valueOf'" compiled); the interpreter's String methods stop at length,
-charAt, equals, toString, substring, indexOf, isEmpty, toCharArray (`trim` fails);
-`getClass()`, `new Object()`, `StringBuilder` unknown; `s.toUpperCase()` raises "unknown
-String method" in all legs. Oracle: java 24. Consider
-java-util.java (compiled with the program) for StringBuilder.
-
-### T-258 java: overload residuals · P3 · JV · IN PROGRESS (JV+CS worker, round 4) [V]
-Where a static type is a type variable, a library type, or an ambiguous method result,
-a call still picks by the runtime value; an anonymous class's forwarding to its super
-constructor picks at runtime.
+### T-309 java: `super.toString()` on implicit Object; qualified `new java.util.ArrayList` · P1 · JV · OPEN [V]
+`super.toString()` aborts "unknown super method 'toString'" (java `A@...`); in the
+interpreter `super.toString().startsWith(...)` does not parse. `new
+java.util.ArrayList<>()` without an import: "unknown class: java.util.ArrayList"
+(interpreter).
 
 ---
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
-
-### T-110 csharp: overload resolution is not "most specific" · P2 · CS · IN PROGRESS (JV+CS worker, round 4) [V spec-only]
-Constructors, methods and operators pick the first declared candidate whose types pass
-`is`: with `O(object)` declared before `O(string)`, `new O("s")` picks object; C#
-picks string (ECMA-334 12.6.4 better function member). Implement betterness for the
-common cases (identity > numeric widening > reference conversion to base > object).
-
-### T-111 csharp: derived field initializers run after the base constructor · P2 · CS · IN PROGRESS (JV+CS worker, round 4) [V spec-only]
-C# runs a derived class's field initializers BEFORE calling the base constructor
-(ECMA-334 15.11.3). With a virtual `Get()` called from the base constructor C# prints
-the derived initializer's value; the interpreter aborts "unknown name: x" and the
-compiled halves print an empty line.
 
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
 `flt36`/`flt37` in tests/csharp-test-full.cs assert `1E+07`, `1E+20`,
@@ -205,10 +179,11 @@ digits and its switch to exponent notation may not be the fixed window `csFloStr
 implements (16777216f may print `16777216`). Settle with a real dotnet; until then do
 not change the renderer.
 
-### T-299 csharp: `(int)t[1]` on a string is 0; -frozen aborts · P1 · CS · IN PROGRESS (JV+CS worker, round 4) [V spec-only]
-`string t="AB"; (int)t[1]` prints 0 in every leg (C# spec: 66). On the same probe the
--frozen interpreter aborts "MetaJS: variable 'a' has type string and cannot hold a
-number" while goja runs - a live goja-vs-frozen divergence.
+### T-310 csharp: the string and char API · P1 · CS · OPEN [V spec-only]
+`char.IsDigit`/`char.IsLetter` unknown (interpreter); `ch.CompareTo('B')` fails in all
+legs (spec -1); `string.Concat`, `new string('A', 3)`, `s.ToCharArray()` fail; the
+interpreter has Substring/IndexOf/Equals while layer 2 has ToUpper/ToLower/Trim. Build
+one C# string/char surface for all three engines (cf. java's lib/java-strings.js).
 
 ---
 
@@ -598,6 +573,13 @@ T-274 ruby: Boolean `&`, `|`, `^` in the interpreter — DONE b793cb4
 T-275 ruby: a class's singleton `to_s` is ignored by rendering — DONE ce5b7d6
 T-276 ruby: compiled instances carry an `args` slot; no `instance_variables` — DONE 73f5b30 (class objects: T-307)
 T-277 ruby: `respond_to?(name, true)` ignores include_all — DONE da56e04 (visibility both ways)
+T-255 java: `instanceof` an interface — DONE d06ef17
+T-257 java: missing String API and core classes — DONE f7ed430 (java +1.78% paired, inside the gate; one-to-many case mapping is T-284)
+T-258 java: overload residuals — DONE 4ad7079 (a candidate over a type variable keeps the runtime pick, deliberately)
+T-256 java: String identity — DECLINED: needs a reference-string box in the JVM value model - ~60 java sites plus the shared floor (strict_eq, js_jadd, printing, dict keys, regex) and an unwrap on every string operation
+T-299 csharp: `(int)t[1]` on a string is 0; -frozen aborts — DONE c254d07 (spec-only)
+T-111 csharp: derived field initializers run after the base constructor — DONE 6d84bf8 (spec-only)
+T-110 csharp: overload resolution is not "most specific" — DONE d88e042 (spec-only)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
