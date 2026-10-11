@@ -150,7 +150,7 @@ NsExport    <~~ push(makeNsExport(pop(), claimVars(up.start, up.pos))) ~~>
             = KwExport ( NsExportVar | ExportBody ) ;
 // An exported VARIABLE statement, which tsc compiles differently from an exported
 // function or class: every reference to it becomes 'Ns.name'.
-NsExportVar <~~ push({nsvar: pop()}); nsMarkVars(up.start, up.pos) ~~>
+NsExportVar <~~ push({nsvar: pop(), names: nsMarkVars(up.start, up.pos)}) ~~>
             = VarDecl ;
 
 // An AMBIENT declaration ('declare ...') describes something that exists elsewhere, so it
@@ -2738,8 +2738,8 @@ NotFuncHead = :script(~~
         if (eo !== undefined) { return eo }
         if (!hasOwn(self, kk)) { return false }
         // A namespace object holds an exported variable, as undefined, before tsc creates
-        // the property (see nsExportDecl); its own properties are exactly its keys.
-        if (self[kk] === undefined && hasOwn(self, "__nsvars")) { return self["__keys"].indexOf(kk) >= 0 }
+        // the property (see makeNamespace); its own properties are exactly its keys.
+        if (self[kk] === undefined && hasOwn(self, "__nsobj")) { return self["__keys"].indexOf(kk) >= 0 }
         return true
     }
     // The receiver a Function.prototype shim armed for the call now running. The shims
@@ -7461,13 +7461,16 @@ NotFuncHead = :script(~~
     // 'namespace Ns {}' block reopens the object that is already bound - which is exactly
     // declaration merging.
     // An exported VARIABLE is a property tsc creates only when something is stored in it
-    // ('export let x;' creates none), and every reference to it is 'Ns.x': a store
+    // ('export let x;' creates none), and every reference to it is 'Ns.x', also one in a
+    // function that runs before the declaration does (makeNamespace binds it): a store
     // makes the key (nsTrackNames), and a call of it by bare name runs with the object
-    // as `this` (nsVarHome). The object lists its exported variables under "__nsvars".
+    // as `this` (nsVarHome). So does a call from another block of the namespace of an
+    // exported function, which tsc compiles to 'Ns.f()' as well.
     // The stores are found while building: a bare-name store built inside a namespace
     // body (nsDepth > 0) is wrapped by nsTracked, so no store anywhere else pays for it,
-    // and the wrapper does the work only when some namespace exports a variable of a
-    // name it stores to (nsVarNames, complete once the program is built).
+    // and the wrapper does the work only when some namespace exports a name it stores to
+    // (nsVarNames: the variables once the program is built, the others as their exports
+    // run, which is before any other block can reach them).
     // items = [{nspath: [names]}, bodyThunk].
     var nsExpFrame = anytype // The private scope whose exported declaration is running,
     var nsExpObj = anytype   // and its namespace object.
@@ -7476,48 +7479,62 @@ NotFuncHead = :script(~~
     var nsExpVar = false // The running exported declaration is a variable statement,
     var nsNoInit = false // and the declarator storing now has no initializer.
     var nsDepth = 0
-    var nsDeclRecs = [] // {name, at, file} of each declarator built inside a namespace body.
-    var nsVarNames = {} // Every name some namespace exports as a variable.
+    // {name, at, file, depth} of each declarator built inside a namespace body; depth is
+    // how many declaration statements enclose it, counting its own.
+    var nsDeclRecs = []
+    var nsVarNames = {} // Every name some namespace exports.
     var nsKeyEpoch = 0  // Counts the keys a delete has dropped (see nsStored).
     function nsNoteDecl(names, pos) {
         if (nsDepth == 0) { return }
-        for (var i = 0; i < names.length; i++) { nsDeclRecs.push({name: names[i], at: pos, file: c.curFile()}) }
+        for (var i = 0; i < names.length; i++) { nsDeclRecs.push({name: names[i], at: pos, file: c.curFile(), depth: declKinds.length}) }
     }
     // The tag of an exported variable statement: the declarators it holds name exported
     // variables. Nothing before its end can belong to a later one, so those go too.
+    // Answers the names the statement itself declares (not those of a declaration nested
+    // in an initializer), which makeNamespace binds on the object before the body runs.
     function nsMarkVars(from, to) {
         var file = c.curFile()
         var keep = []
+        var own = []
         for (var i = 0; i < nsDeclRecs.length; i++) {
             var r = nsDeclRecs[i]
             if (r.file !== file || r.at > to) { keep.push(r) }
-            else if (r.at >= from) { nsVarNames[r.name] = true }
+            else if (r.at >= from) {
+                nsVarNames[r.name] = true
+                if (r.depth == declKinds.length + 1) { own.push(r.name) }
+            }
         }
         nsDeclRecs = keep
+        return own
     }
     function makeNsExport(t, vars) {
         if (typeof t == "object" && t != null && t.nsvar != undefined) {
-            return {nsexp: t.nsvar, vars: vars, isvar: true}
+            return {nsexp: t.nsvar, vars: vars.concat(t.names), isvar: true}
         }
         return {nsexp: t, vars: vars, isvar: false}
     }
-    // The declaration half of declVar's redirect: the export lands on the object.
+    // The declaration half of declVar's redirect: the export lands on the object. An
+    // exported function, class, enum or namespace is also a binding of the private scope,
+    // as tsc declares it locally and copies it onto the object, so a store to its bare
+    // name rebinds the local alone. An exported variable has no local binding (every
+    // reference is 'Ns.x'), and 'export let x;' stores nothing: makeNamespace bound it.
+    // Twin of makeNamespace in typescript-to-llvm-ir.abnf.
     function nsExportDecl(name, value) {
+        if (!nsExpVar) {
+            scopePut(nsExpFrame, name, value)
+            nsVarNames[name] = true
+        } else if (nsNoInit) { return }
         scopePut(nsExpObj, name, value)
-        if (nsExpVar) { nsVarAdd(nsExpObj, name) }
-        if (!nsNoInit) { trackKey(nsExpObj, name) }
+        trackKey(nsExpObj, name)
     }
-    function nsVarAdd(obj, name) {
-        var vs = obj["__nsvars"]
-        if (vs.indexOf(name) < 0) { vs.push(name) }
-    }
-    // The innermost binding of `name`, when it is a namespace object's exported variable;
-    // else undefined.
+    // The namespace object holding the innermost binding of `name`, which tsc compiles to
+    // 'Ns.name' (a namespace object holds exports alone); null when a nearer scope binds
+    // it, undefined when nothing does.
     function nsVarHome(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (objHasOwn.call(scopes[i], name)) {
-                if (objHasOwn.call(scopes[i], "__nsvars") && scopes[i]["__nsvars"].indexOf(name) >= 0) { return scopes[i] }
-                return undefined
+                if (objHasOwn.call(scopes[i], "__nsobj")) { return scopes[i] }
+                return null
             }
         }
         return undefined
@@ -7527,18 +7544,17 @@ NotFuncHead = :script(~~
     function nsTrackNames(names) {
         var all = true
         for (var i = 0; i < names.length; i++) {
-            var home = anytype // A namespace object, or undefined.
+            var home = anytype // A namespace object, null or undefined (nsVarHome).
             home = nsVarHome(names[i])
-            if (home !== undefined) { trackKey(home, names[i]) } else { all = false }
+            if (home !== undefined && home !== null) { trackKey(home, names[i]) } else { all = false }
         }
         return all
     }
     // The record of one store or call site inside a namespace body. w.on is -1 until
-    // the site first runs, then 0 when none of its names is an exported variable
-    // (nsVarNames), 1 when they have to be looked up, and 2 once they were found: where
-    // a name is bound is fixed by where the site stands, so the namespace object (home)
-    // stays the same, and so do the keys made until a delete drops one (w.epoch against
-    // nsKeyEpoch).
+    // the site first runs, then 0 when none of its names is exported (nsVarNames), 1
+    // when they have to be looked up, and 2 once they were found: where a name is bound
+    // is fixed by where the site stands, so the namespace object (home) stays the same,
+    // and so do the keys made until a delete drops one (w.epoch against nsKeyEpoch).
     function nsSiteRec(names) {
         return {names: names, on: -1, epoch: 0, home: null}
     }
@@ -7575,13 +7591,19 @@ NotFuncHead = :script(~~
         }
         return w.on >= 1
     }
-    // The receiver of a call by bare name inside a namespace body (foldCallMember).
+    // The receiver of a call by bare name inside a namespace body (foldCallMember). A
+    // nearer binding that answers once answers every time (an exported function's own
+    // block calling it), so the site stops looking.
     // Twin of nsCallThis in typescript-to-llvm-ir.abnf.
     function nsCallRecv(w) {
         if (w.on == 2) { return w.home }
         if (!nsWatchOn(w)) { return undefined }
-        var home = anytype // A namespace object, or undefined.
+        var home = anytype // A namespace object, null or undefined (nsVarHome).
         home = nsVarHome(w.names[0])
+        if (home === null) {
+            w.on = 0
+            return undefined
+        }
         if (home !== undefined) {
             w.on = 2
             w.home = home
@@ -7609,7 +7631,6 @@ NotFuncHead = :script(~~
             var priv = {}
             for (var i = 0; i < expVars.length; i++) {
                 if (!objHasOwn.call(obj, expVars[i])) { scopePut(obj, expVars[i], undefined) }
-                nsVarAdd(obj, expVars[i])
             }
             for (var j = 0; j < vars.length; j++) { scopePut(priv, vars[j], undefined) }
             scopes.push(priv)
@@ -7670,7 +7691,7 @@ NotFuncHead = :script(~~
     function nsNewObj() {
         var o = {}
         o["__keys"] = []
-        o["__nsvars"] = []
+        o["__nsobj"] = true
         return o
     }
 

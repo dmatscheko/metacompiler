@@ -3606,6 +3606,41 @@ function s72() {
     check("ns72d", vars() === "later,opt,pair,loop,hoisted,cnt" && N72.cnt === 1);
 }
 
+// ===== SECTION 73: a namespace's exports, stored before declared, and rebound =====
+// tsc compiles every reference to an exported variable to a member of the namespace
+// object, also one in a function that runs before 'export let' does, so the store lands
+// on the object and nowhere else. An exported function or class is a LOCAL binding of
+// its block that tsc copies onto the object: a store to its bare name rebinds the local
+// and leaves 'N73.f' alone, while another block of the namespace reaches it as 'N73.f'
+// (calling it with the namespace object as `this`). A declaration list nested in an
+// exported list's initializer leaves the outer names exported. Values read off node 24
+// (through tsc 6.0.3's output).
+namespace N73 {
+    export function set(v: number): void { x73 = v; [y73, z73] = [v + 1, v + 2]; }
+    export function getW(): any { return w73; }
+    set(1);
+    export let x73: number, y73: number;
+    export let z73: number;
+    export const before = getW(), w73 = 7, after = (() => { let inner = 3; return inner + getW(); })();
+    export function f(): string { return "f"; }
+    export class K { static n = "K"; }
+    export enum E { A, B }
+    export function who(this: any): boolean { return this === N73; }
+    f = () => "g";
+    K = class { static n = "L"; };
+    export const local = f() + K.n + who();
+}
+namespace N73 {
+    export const other = f() + K.n + E.B + who();
+    f = () => "h";
+}
+function s73() {
+    check("nx73a", N73.x73 === 1 && N73.y73 === 2 && N73.z73 === 3 && typeof (globalThis as any).x73 === "undefined");
+    check("nx73b", N73.before === undefined && N73.w73 === 7 && N73.after === 10 && !("inner" in N73) &&
+        Object.keys(N73).join() === "set,getW,x73,y73,z73,before,w73,after,f,K,E,who,local,other");
+    check("nx73c", N73.local === "gLfalse" && N73.other === "fK1true" && N73.f() === "h" && N73.K.n === "K");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3681,6 +3716,7 @@ function main(): number {
     s70(); // SECTION-CALL 70
     s71(); // SECTION-CALL 71
     s72(); // SECTION-CALL 72
+    s73(); // SECTION-CALL 73
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

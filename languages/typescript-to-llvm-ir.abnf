@@ -4380,7 +4380,7 @@ NotFuncHead = :script(~~
         var pat = items[0]
         var init = items[1]
         var leaves = patNames(pat, [])
-        for (var li = 0; li < leaves.length; li++) { pendingNames.push(leaves[li]) } // what an enclosing export publishes
+        for (var li = 0; li < leaves.length; li++) { notePending(leaves[li]) } // what an enclosing export publishes
         var ext = "js_scope_decl"
         if (declIsVar()) {
             notePatVars(pat, pos)
@@ -5225,16 +5225,35 @@ NotFuncHead = :script(~~
     // pendingNames collects the declarators of one 'var/let/const' list, which
     // makeVarSeq then hands over in one piece ('export const a = 1, b = 2'), and
     // varSeqNames is that very list: an 'export' whose names ARE it exported variables.
+    // pendingDepths holds each name's declKinds depth, so that a list nested in an
+    // initializer ('export const a = 1, b = f(() => { let t })') takes only its own and
+    // leaves the enclosing list's earlier declarators pending.
     var exportNames = []
     var pendingNames = []
+    var pendingDepths = []
     var varSeqNames = []
+    function notePending(name) {
+        pendingNames.push(name)
+        pendingDepths.push(declKinds.length)
+    }
     // A type-layer declaration binds nothing at run time: it emits no code AND publishes
     // no name (an interface, a type alias, an ambient declaration, an overload signature).
     function tsNoop() { exportNames = []; return function(b) { return b } }
     function makeVarSeq(items) {
-        exportNames = pendingNames
-        varSeqNames = pendingNames
-        pendingNames = []
+        var own = []
+        var keepN = []
+        var keepD = []
+        for (var i = 0; i < pendingNames.length; i++) {
+            if (pendingDepths[i] >= declKinds.length) { own.push(pendingNames[i]) }
+            else {
+                keepN.push(pendingNames[i])
+                keepD.push(pendingDepths[i])
+            }
+        }
+        exportNames = own
+        varSeqNames = own
+        pendingNames = keepN
+        pendingDepths = keepD
         return makeSeq(items)
     }
     function makeNsExport(t) {
@@ -5254,15 +5273,20 @@ NotFuncHead = :script(~~
     // reached whether or not it exists yet ('export let x;' creates none, so an
     // undefined read is undefined, not a ReferenceError). The declaration itself stores
     // straight into the object (nsDeclStore).
+    // An exported function, class, enum or namespace has an accessor too: tsc declares it
+    // locally in its own block, where a reference is an ordinary scope read, and compiles
+    // a reference from another block of the namespace to 'N.f'.
     // nsBuild holds, per NamespaceDecl being built, the full key of each part of its
     // path ('namespace A.B' inside 'namespace O' is ["$O.A", "$O.A.B"]); nsEnter runs
     // before the body's tags, makeNamespace after them. nsVarExports maps a full key to
-    // the variables any block of that namespace exports, so it is complete before
+    // the names any block of that namespace exports, so it is complete before
     // anything is emitted. nsEmitKeys is the same chain while a body is being EMITTED,
-    // which is the lexical nesting, since a function body is emitted where it stands.
+    // which is the lexical nesting, since a function body is emitted where it stands, and
+    // nsEmitLocals holds, beside each key, the exports that block binds locally.
     var nsBuild = []
     var nsVarExports = {}
     var nsEmitKeys = []
+    var nsEmitLocals = []
     // While an exported variable declaration is emitted: the namespace object, and the
     // scope its declarators bind in.
     var nsExpObjV = anytype
@@ -5284,10 +5308,11 @@ NotFuncHead = :script(~~
         }
         nsBuild.push(keys)
     }
-    // Is `name`, referenced where it is being emitted, an exported variable of an
-    // enclosing namespace?
+    // Is `name`, referenced where it is being emitted, a member of an enclosing namespace
+    // object rather than a binding of its block?
     function nsIsVar(name) {
         for (var i = nsEmitKeys.length - 1; i >= 0; i--) {
+            if (nsEmitLocals[i].indexOf(name) >= 0) { return false }
             var vs = nsVarExports[nsEmitKeys[i]]
             if (vs != undefined && vs.indexOf(name) >= 0) { return true }
         }
@@ -5366,13 +5391,16 @@ NotFuncHead = :script(~~
         var stmts = []
         var leafKey = keys[keys.length - 1]
         if (nsVarExports[leafKey] == undefined) { nsVarExports[leafKey] = [] }
+        var locals = []
+        for (var lp = 1; lp < keys.length; lp++) { locals.push([]) }
+        var own = []
+        locals.push(own)
         for (var i = 0; i < body.length; i++) {
             var it = body[i]
             if (it != undefined && it.nsexport != undefined) {
-                if (it.nsvar) {
-                    for (var k = 0; k < it.nsexports.length; k++) {
-                        if (nsVarExports[leafKey].indexOf(it.nsexports[k]) < 0) { nsVarExports[leafKey].push(it.nsexports[k]) }
-                    }
+                for (var k = 0; k < it.nsexports.length; k++) {
+                    if (nsVarExports[leafKey].indexOf(it.nsexports[k]) < 0) { nsVarExports[leafKey].push(it.nsexports[k]) }
+                    if (!it.nsvar) { own.push(it.nsexports[k]) }
                 }
                 stmts.push(it)
             } else {
@@ -5391,6 +5419,7 @@ NotFuncHead = :script(~~
         return function(b) {
             var saved = curScopeV
             var savedKeys = nsEmitKeys
+            var savedLocals = nsEmitLocals
             var obj = anytype
             for (var p = 0; p < path.length; p++) {
                 if (p == 0) {
@@ -5415,6 +5444,7 @@ NotFuncHead = :script(~~
                 }
             }
             nsEmitKeys = savedKeys.concat(keys)
+            nsEmitLocals = savedLocals.concat(locals)
             if (vars.length > 0) { b = emitHoist(b, curScopeV, curScopeV, vars) }
             for (var i = 0; i < stmts.length; i++) {
                 var st = stmts[i]
@@ -5441,6 +5471,7 @@ NotFuncHead = :script(~~
                 }
             }
             nsEmitKeys = savedKeys
+            nsEmitLocals = savedLocals
             curScopeV = saved
             return b
         }
@@ -5746,7 +5777,7 @@ NotFuncHead = :script(~~
     // emits nothing at all. See the twin of this comment in js-to-llvm-ir.abnf.
     function makeDecl(items, txt, pos) {
         var name = items[0]
-        pendingNames.push(name) // what an enclosing 'export' would publish
+        notePending(name) // what an enclosing 'export' would publish
         // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
         if (declIsVar()) {
