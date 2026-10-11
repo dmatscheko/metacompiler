@@ -7265,6 +7265,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return hostGlobals["Object"]
     }
+    // NoMethodError for a name no method table answers, worded as MRI 2.6 does: the
+    // receiver's #inspect (its "#<Class>" form past 65 characters), then ":" and its
+    // class name unless that text already starts with "#". Twins: rubyNoMethod in
+    // abnf/jsrt.go, rbNoMethod in languages/lib/ruby-rt.metajs.
+    function noMethod(t, name) {
+        var cn = classOf(t).__name
+        var d = rinspect(t)
+        if (charCount(d) > 65) { d = "#<" + cn + ">" }
+        if (d.slice(0, 1) != "#") { d = d + ":" + cn }
+        raiseErr("NoMethodError", "undefined method `" + name + "' for " + d)
+    }
     // String#start_with? / #end_with?: true when ANY of the given prefixes/suffixes
     // matches. Twins: rbStartsWith/rbEndsWith of lib/ruby-rt.metajs and the
     // start_with?/end_with? arms of abnf/jsrt.go.
@@ -7609,7 +7620,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "integer?") { return false }
         if (name == "real") { return reOf(t) }
         if (name == "imaginary" || name == "imag") { return imOf(t) }
-        fail("unknown Numeric method: " + name)
+        noMethod(t, name)
     }
     function mcall(target, name, args, blk) {
         // Object#send / #__send__ / #public_send: the method NAME is the first
@@ -7715,7 +7726,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 || name == "succ" || name == "next") { return mkSym(rstr(mcall(target.s, name, args, null))) }
             if (name == "empty?") { return target.s == "" }
             if (name == "to_proc") { return function(x) { return mcall(x, target.s, [], null) } }
-            fail("unknown Symbol method: " + name)
+            noMethod(target, name)
         }
         if (isRange(target)) { return rangeMethod(target, name, args, blk) }
         if (isRegex(target)) {
@@ -7730,7 +7741,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "names") { return target.prog.names.slice(0) }
             if (name == "to_s") { return rstr(target) }
             if (name == "inspect") { return rinspect(target) }
-            fail("unknown Regexp method: " + name)
+            noMethod(target, name)
         }
         if (isMatchD(target)) {
             if (name == "[]") { return mdGet(target, args[0]) }
@@ -7752,7 +7763,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "size" || name == "length") { return target.rev.prog.ngroups + 1 }
             if (name == "to_s") { return rstr(target) }
             if (name == "inspect") { return rinspect(target) }
-            fail("unknown MatchData method: " + name)
+            noMethod(target, name)
         }
         if (typeof target == "number") {
             if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toF(args[0])) : intStr(target) }
@@ -7808,11 +7819,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var wi = target; wi >= toF(args[0]); wi--) { blockCall(blk, [wi]) }
                 return target
             }
-            fail("unknown Integer method: " + name)
+            noMethod(target, name)
         }
         if (target === true || target === false) {
             if (name == "to_s" || name == "inspect") { return target ? "true" : "false" }
-            fail("unknown Boolean method: " + name)
+            noMethod(target, name)
         }
         if (typeof target == "string") {
             // split and index take a plain string too, so they only route to the
@@ -7870,7 +7881,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // count / delete and their families) - see smMethod.
             var sx = strExtra(target, name, args, blk)
             if (sx.ok) { return sx.v }
-            fail("unknown String method: " + name)
+            noMethod(target, name)
         }
         if (isDict(target)) {
             if (name == "inspect") { return rinspect(target) }
@@ -8003,7 +8014,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 return arrayMethod(hp, name, args, blk)
             }
-            fail("unknown Hash method: " + name)
+            noMethod(target, name)
         }
         if (target === null || target === undefined) {
             // NilClass's conversions, as MRI answers them.
@@ -8012,7 +8023,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_a") { return [] }
             if (name == "to_i") { return 0 }
             if (name == "to_f") { return mkFlo(0) }
-            fail("method ." + name + " on nil")
+            noMethod(target, name)
         }
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
         if (isEnum(target)) { return enumMethod(target, name, args, blk) }
@@ -8090,7 +8101,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return ivarAccess(target, name == "instance_variable_set", args)
                 }
                 if (name == "instance_variables") { return ivarNames(target) }
-                fail("unknown method '" + name + "' on " + target.__class.__name)
+                noMethod(target, name)
             }
             // The block is BOTH put on blockStack (so `yield` in the body finds it) and
             // appended as the last positional argument, WRAPPED in the block marker so
@@ -8189,9 +8200,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 && (name == "format" || name == "sprintf" || name == "rand" || name == "srand")) {
                 return hostGlobals[name].apply(undefined, args)
             }
-            fail("unknown class method '" + name + "'")
+            noMethod(target, name)
         }
-        fail("unknown method '" + name + "'")
+        noMethod(target, name)
     }
     // ----- Array helpers: the sort / min / max / flatten / join family -----
     // Ruby's eql?: == that does NOT convert across classes, so `1.eql?(1.0)` is false
@@ -9038,7 +9049,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (blk != null) { return blockCall(blk, [args[0]]) }
             raiseErr("IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
         }
-        fail("unknown Array method: " + name)
+        noMethod(t, name)
     }
 
     // One .method(args) [block] suffix. A call that was handed a block also catches the

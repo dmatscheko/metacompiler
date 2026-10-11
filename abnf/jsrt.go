@@ -6790,6 +6790,49 @@ func (rt *jsrt) rubyRaiseErr(cls, msg string) {
 	panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass(cls), []interface{}{msg})})
 }
 
+// rubyNoMethod raises NoMethodError for a name no method table answers, worded as
+// MRI 2.6 does: the receiver's #inspect (its "#<Class>" form past 65 characters),
+// then ":" and its class name unless that text already starts with "#". Twins:
+// noMethod in ruby-interpreter.abnf, rbNoMethod in languages/lib/ruby-rt.metajs.
+func (rt *jsrt) rubyNoMethod(t interface{}, name string) {
+	cn := rt.rubyClassNameRT(t)
+	if o, isObj := t.(*jsObject); isObj && cn == "" {
+		cn = "Object"
+		if _, isCls := o.props["__isclass"]; isCls {
+			cn = "Class"
+			if isMod, _ := o.props["__ismodule"].(bool); isMod {
+				cn = "Module"
+			}
+		} else if c, hasCls := o.props["__class"].(*jsObject); hasCls {
+			cn, _ = c.props["__name"].(string)
+		}
+	}
+	d := rt.rubyInspect(t)
+	if rubyCharCount(d) > 65 {
+		d = "#<" + cn + ">"
+	}
+	if !strings.HasPrefix(d, "#") {
+		d += ":" + cn
+	}
+	rt.rubyRaiseErr("NoMethodError", "undefined method `"+name+"' for "+d)
+}
+
+// rubyMissMark is the sentinel rubyMemberCall registers as rt.missCall, so the
+// shared memberCall hands a miss back instead of aborting.
+var rubyMissMark = &jsObject{}
+
+// rubyMemberCall is the shared memberCall with a miss turned into NoMethodError.
+func (rt *jsrt) rubyMemberCall(target interface{}, name string, args []interface{}) interface{} {
+	saved := rt.missCall
+	rt.missCall = rubyMissMark
+	v := rt.memberCall(target, name, args)
+	rt.missCall = saved
+	if v == interface{}(rubyMissMark) {
+		rt.rubyNoMethod(target, name)
+	}
+	return v
+}
+
 // ---------------------------------------------------------------------------
 // Kernel#Integer / #Float / #String / #Array. Integer and Float are STRICT -
 // MRI raises ArgumentError on anything the whole string is not - which is what
@@ -9512,7 +9555,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "to_proc":
 			return rt.rubySymProc(o.s)
 		}
-		rt.fail("unknown Symbol method: %s", name)
+		rt.rubyNoMethod(target, name)
 	case string:
 		switch name {
 		case "length", "size":
@@ -9710,7 +9753,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if v, ok := rt.rubySmMethod(o, name, sargs, nargs); ok {
 			return v
 		}
-		rt.fail("unknown String method: %s", name)
+		rt.rubyNoMethod(target, name)
 	case *jsArray:
 		return rt.rubyArrayMethod(o, name, args)
 	case *jsObject:
@@ -9779,7 +9822,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			if v, handled := rt.rubyHashMethod(o, keys, vals, name, args); handled {
 				return v
 			}
-			rt.fail("unknown Hash method: %s", name)
+			rt.rubyNoMethod(target, name)
 		}
 		// The SINGLETON table comes first: `def obj.m', `class << obj' and an
 		// extended module all sit in front of the object's own class, for an
@@ -9964,12 +10007,12 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 		}
 		// A class instance or class object: the generic dispatch handles it.
-		return rt.memberCall(target, name, args)
+		return rt.rubyMemberCall(target, name, args)
 	}
 	if isUndefOrNull(target) {
-		rt.fail("method .%s on nil", name)
+		rt.rubyNoMethod(target, name)
 	}
-	return rt.memberCall(target, name, args)
+	return rt.rubyMemberCall(target, name, args)
 }
 
 // rubyRand is Kernel#rand. There is no random source in this project and there
@@ -11657,7 +11700,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		rt.rubyRaiseErr("IndexError", fmt.Sprintf("index %d outside of array bounds: %d...%d", fx, -n, n))
 	}
-	rt.fail("unknown Array method: %s", name)
+	rt.rubyNoMethod(t, name)
 	return nil
 }
 

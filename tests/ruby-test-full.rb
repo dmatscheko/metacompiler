@@ -3496,6 +3496,44 @@ def s76
                  ["b", "b", true, false, true, Regexp, "b", true, MatchData, []] && v[6].respond_to?(:send))
 end
 
+# ===== SECTION 77: an unknown method raises NoMethodError =====
+# A name no class answers is a NoMethodError (a NameError, a StandardError), so a
+# bare rescue catches it. Its message is "undefined method `m' for " and the
+# receiver's #inspect, then ":" and its class unless that text starts with "#".
+# Every right-hand side is /usr/bin/ruby 2.6.10's own answer. THIS SECTION RUNS
+# UNDER REAL RUBY.
+class S77A
+end
+def s77msg(r, m)
+  r.send(m)
+  "none"
+rescue NoMethodError => e
+  e.message
+end
+def s77
+  v = [5, "abc", nil, [1, 2], { a: 1 }, :sym, true, 1.5, S77A, S77A.new, 2**70]
+  msg = nil
+  begin
+    v[0].nope
+  rescue NoMethodError => e
+    msg = e.message
+  end
+  check("nm77a", msg == "undefined method `nope' for 5:Integer")
+  check("nm77b", v[1..8].map { |r| s77msg(r, :qq) } ==
+                 ["undefined method `qq' for \"abc\":String", "undefined method `qq' for nil:NilClass",
+                  "undefined method `qq' for [1, 2]:Array", "undefined method `qq' for {:a=>1}:Hash",
+                  "undefined method `qq' for :sym:Symbol", "undefined method `qq' for true:TrueClass",
+                  "undefined method `qq' for 1.5:Float", "undefined method `qq' for S77A:Class"] &&
+                 s77msg(v[10], :qq) == "undefined method `qq' for 1180591620717411303424:Integer")
+  k = nil
+  begin
+    v[9].zz(1)
+  rescue => e
+    k = [e.class, e.is_a?(NameError), e.is_a?(StandardError), e.message.start_with?("undefined method `zz' for #<S77A")]
+  end
+  check("nm77c", k == [NoMethodError, true, true, true])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -3534,5 +3572,6 @@ s73() # SECTION-CALL 73
 s74() # SECTION-CALL 74
 s75() # SECTION-CALL 75
 s76() # SECTION-CALL 76
+s77() # SECTION-CALL 77
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

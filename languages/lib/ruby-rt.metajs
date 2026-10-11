@@ -6338,7 +6338,7 @@ function rbArrayMethod(t, name, args) {
         if (blk !== null) { return rbCall1(blk, rbArgAt(args, 0)) }
         rbRaiseErr("IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
     }
-    fail("unknown Array method: " + name)
+    rbNoMethod(t, name)
     return null
 }
 
@@ -6367,13 +6367,13 @@ function rbMemberCall(target, name, args) {
                 }
                 cls = cls["__super"]
             }
-            fail("unknown method '" + name + "' on an instance")
+            rbNoMethod(target, name)
         }
         var own = target[name]
         if (own !== undefined && rbIsFn(own)) { return own.apply(undefined, args) }
-        fail("unknown method '" + name + "'")
+        rbNoMethod(target, name)
     }
-    fail("method call '" + name + "' on a " + typeof target)
+    rbNoMethod(target, name)
     return null
 }
 
@@ -6615,7 +6615,7 @@ function rbMethod(target, name, args) {
             || name == "succ" || name == "next") { return rbSym(rbStr(rbMethod(sn, name, args))) }
         if (name == "empty?") { return sn == "" }
         if (name == "to_proc") { return js_rsymproc(target) }
-        fail("unknown Symbol method: " + name)
+        rbNoMethod(target, name)
     }
     if (typeof target == "string") {
         if (name == "length" || name == "size") { return rbCharCount(target) }
@@ -6689,7 +6689,7 @@ function rbMethod(target, name, args) {
         // count / delete and their families).
         var sx = rbStrExtra(target, name, args)
         if (sx["ok"]) { return sx["v"] }
-        fail("unknown String method: " + name)
+        rbNoMethod(target, name)
     }
     if (rbIsArr(target)) { return rbArrayMethod(target, name, args) }
     if (rbIsEnum(target)) { return rbEnumMethod(target, name, args) }
@@ -6745,7 +6745,7 @@ function rbMethod(target, name, args) {
             }
             var hres = rbHashMethod(target, keys, vals, name, args)
             if (hres !== rbHashUnknown) { return hres }
-            fail("unknown Hash method: " + name)
+            rbNoMethod(target, name)
         }
         // The SINGLETON table comes first: `def obj.m', `class << obj' and an
         // extended module all sit in front of the object's own class, for an
@@ -6892,7 +6892,7 @@ function rbMethod(target, name, args) {
         }
         return rbMemberCall(target, name, args)
     }
-    if (rtIsNil(target)) { fail("method ." + name + " on nil") }
+    if (rtIsNil(target)) { rbNoMethod(target, name) }
     return rbMemberCall(target, name, args)
 }
 
@@ -7468,6 +7468,27 @@ function js_rnew(cls, args) {
 // of abnf/jsrt.go and raiseErr of ruby-interpreter.abnf.
 function rbRaiseErr(clsName, msg) {
     js_rraise(rbBuiltinClass(clsName), msg)
+}
+
+// NoMethodError for a name no method table answers. Twin of rubyNoMethod in
+// abnf/jsrt.go, which states the wording rule.
+function rbNoMethod(t, name) {
+    var cn = rbClassName(t)
+    if (cn == "") {
+        cn = "Object"
+        if (rbIsObj(t)) {
+            if (t["__isclass"] === true) {
+                cn = "Class"
+                if (t["__ismodule"] === true) { cn = "Module" }
+            } else if (rbIsObj(t["__class"])) {
+                cn = t["__class"]["__name"]
+            }
+        }
+    }
+    var d = rbInspect(t)
+    if (rbCharCount(d) > 65) { d = "#<" + cn + ">" }
+    if (d.slice(0, 1) != "#") { d = d + ":" + cn }
+    rbRaiseErr("NoMethodError", "undefined method `" + name + "' for " + d)
 }
 
 
