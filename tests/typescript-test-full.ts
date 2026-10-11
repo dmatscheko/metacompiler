@@ -3378,6 +3378,66 @@ function s64() {
         Symbol.for("a") === Symbol.for("a") && s1.description === "k");
 }
 
+// ===== SECTION 65: var is function scoped and hoisted =====
+// A var declared in any nested block is one binding of the whole function (method,
+// accessor, constructor, arrow, generator), bound to undefined from its entry; a
+// parameter of the same name keeps its argument and a default value's closure does not
+// see the body's vars. A for-in/of head without a keyword or with var assigns the
+// existing variable. A namespace body keeps its vars to itself. Values read off node 24
+// (the namespace through tsc 6.0.3's output).
+namespace N65 {
+    if (true) { var blockVar = 4; }
+    export const sum = blockVar + 1;
+}
+class C65 {
+    x: number;
+    constructor(n: number) { { var t = n * 2; } this.x = t; }
+    get dbl(): number { { var d = this.x * 2; } return d; }
+    m<T>(a: T): string { for (var key in { p: 1 }) {} return key + String(a); }
+}
+function s65() {
+    const f1 = function (): number { if (true) { var w: number = 3; } { var z = 4; } for (var i = 0; i < 2; i++) { var q = i; } return w + z + q + i; };
+    const f3 = function (a: any) { var r = typeof later; var a; var later = 1; var g = function () { return h; }; var h = 9; return r + a + g(); };
+    const f5 = function () { var n = 1; { var n = 2; } var n; return n; };
+    check("vh65a", f1() === 10 && f3(7) === "undefined79" && f5() === 2);
+    const f6 = function () { var k = 0; for (k of [5, 6]) {} let m = ""; for (m in { a: 1, b: 2 }) {} return k + m; };
+    const f7 = function () { for (var [a, b] of [[1, 2], [3, 4]]) {} var [c, { d }] = [5, { d: 6 }]; return a + b + c + d; };
+    const f9 = () => { { var av = 5; } return av; };
+    const dx = "outer";
+    const f10 = function (a = () => dx) { var dx = "inner"; return a() + "," + dx; };
+    const c = new C65(3);
+    check("vh65b", f6() === "6b" && f7() === 18 && f9() === 5 && f10() === "outer,inner" &&
+        c.x === 6 && c.dbl === 12 && c.m(9) === "p9" && N65.sum === 5);
+}
+
+// ===== SECTION 66: a symbol is a primitive ToString and ToNumber refuse =====
+// `"" + s`, `${s}`, `s * 1`, `-s` and `s < 1` throw where String(s) answers; a symbol is
+// == to itself alone. Object spread and Object.assign copy symbol-keyed properties, an
+// array's [Symbol.iterator]() is an iterator, and Symbol has the well-known symbols.
+// Values read off node 24.
+function s66() {
+    const err = (f: () => any): string => { try { return String(f()); } catch (e: any) { return e.constructor.name + ": " + e.message; } };
+    const v: any[] = [Symbol("k"), 1, "a", {}];
+    const str = "TypeError: Cannot convert a Symbol value to a string";
+    const num = "TypeError: Cannot convert a Symbol value to a number";
+    check("sy66a", err(() => "" + v[0]) === str && err(() => v[0] + v[3]) === str && err(() => `${v[0]}`) === str &&
+        err(() => v[0] + v[1]) === num && err(() => v[0] * v[1]) === num && err(() => v[0] < v[1]) === num &&
+        err(() => +v[0]) === num && err(() => -v[0]) === num && err(() => ~v[0]) === num &&
+        String(v[0]) === "Symbol(k)" && !(v[0] == "Symbol(k)") && v[0] == v[0]);
+    const k2 = Symbol("two");
+    const o: any = { a: 1, [v[0]]: 3 };
+    o[k2] = 2;
+    const sp = { ...o };
+    const as = Object.assign({}, o);
+    delete o[k2];
+    check("sy66b", sp[v[0]] === 3 && sp[k2] === 2 && Object.keys(sp).join() === "a" && as[k2] === 2 &&
+        { ...o }[k2] === undefined && !(k2 in o) && (v[0] in o));
+    const it = [7, 8][Symbol.iterator]();
+    const a1 = it.next().value;
+    check("sy66c", a1 === 7 && it.next().value === 8 && it.next().done === true &&
+        typeof (Symbol as any).toPrimitive === "symbol" && (Symbol as any).hasInstance.description === "Symbol.hasInstance");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3445,6 +3505,8 @@ function main(): number {
     s62(); // SECTION-CALL 62
     s63(); // SECTION-CALL 63
     s64(); // SECTION-CALL 64
+    s65(); // SECTION-CALL 65
+    s66(); // SECTION-CALL 66
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

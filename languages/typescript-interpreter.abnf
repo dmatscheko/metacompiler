@@ -101,8 +101,10 @@ Statement   = Block | ImportStmt | DecoratedExportClass | ExportStmt | AmbientDe
 // declaration is recognized and the BINDING is genuine - only the automatic dispose at
 // the end of the scope is missing. Tried before VarDecl, which has no 'using' keyword.
 UsingDecl   = UsingDeclCore [ ";" ] ;
-UsingDeclCore <~~ push(makeSeq(takeAll())) ~~>
-            = [ KwAwait ] KwUsing Declarator { "," Declarator } ;
+UsingDeclCore <~~ push(makeSeq(takeAll())); declKinds.pop() ~~>
+            = UsingKw Declarator { "," Declarator } ;
+UsingKw     <~~ declKinds.push("using") ~~>
+            = [ KwAwait ] KwUsing ;
 
 // --- The TypeScript-only declarations. ---
 
@@ -134,7 +136,7 @@ EnumName    = Id <~~ push({mname: idName(up.in)}) ~~> | StringLit <~~ push({mnam
 // nesting, dotted names ('namespace A.B {}') and MERGING (a second 'namespace A {}' block
 // reopens the very same object) for free. 'export' in front of a member is the
 // transparent prefix it is everywhere else.
-NamespaceDecl <~~ push(makeNamespace(takeAll())) ~~>
+NamespaceDecl <~~ push(makeNamespace(takeAll(), up.start, up.pos)) ~~>
             = ( KwNamespace | KwModule ) NamespaceName "{" NamespaceBody "}" ;
 NamespaceName <~~ push({nspath: takeAll()}) ~~>
             = Id <~~ push(idName(up.in)) ~~> { "." Id <~~ push(idName(up.in)) ~~> } ;
@@ -200,10 +202,19 @@ DefaultLabel <~~ push({isdflt: true}) ~~>
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
-// var, let and const all declare a block scoped variable in the current scope.
+// A function's body. Its `var` names are hoisted: bound (to undefined) in the
+// function's own scope on entry, whichever nested block declares them. Twin in
+// typescript-to-llvm-ir.abnf.
+FuncBody    <~~ push(makeFuncBody(pop(), up.start, up.pos)) ~~>
+            = Block ;
+
+// let and const declare a block scoped variable in the current scope; var assigns the
+// one its function body hoisted (makeFuncBody). DeclKw tells the declarators which.
 VarDecl     = VarDeclCore [ ";" ] ;
-VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
-            = KwVar Declarator { "," Declarator } ;
+VarDeclCore <~~ push(makeSeq(takeAll())); declKinds.pop() ~~>
+            = DeclKw Declarator { "," Declarator } ;
+DeclKw      <~~ declKinds.push(up.in) ~~>
+            = KwVar ;
 // A declarator is a name with an optional initializer, or a destructuring PATTERN with a
 // mandatory one. Sharing the declarator level is what makes 'var a = 1, [b, c] = d' and
 // 'for (var [a] = 1;;)' work - a pattern is not restricted to standing alone.
@@ -213,7 +224,7 @@ VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
 Declarator  = PatternDeclarator | NameDeclarator ;
 PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = DPattern [ TypeAnnot ] "=" AssignExpr ;
-NameDeclarator <~~ push(makeDecl(takeAll(), up.in)) ~~>
+NameDeclarator <~~ push(makeDecl(takeAll(), up.in, up.pos)) ~~>
             = NotBindName Id <~~ push(idName(up.in)) ~~> [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
@@ -258,7 +269,7 @@ Throw       <~~ push(excThrow(pop())) ~~>
 // The generic parameter list '<T>' and the return type are type-layer only and push
 // nothing, so the builder sees the same three items it does in plain JavaScript.
 FuncDecl    <~~ push(makeFuncDecl(takeAll())) ~~>
-            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
             = "(" [ ParamSeq ] ")" ;
@@ -654,7 +665,7 @@ AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
 // 'async function [*] [name](...) {}' as an expression. The optional name is bound only
 // inside its own body (fnSelf).
 AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
-            = KwAsync KwFunction [ GenMark ] [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwAsync KwFunction [ GenMark ] [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // The optional name of a function expression, in every one of its three forms. It
 // pushes {fname} rather than nothing: a named function expression keeps ITS OWN name in
 // `f.name` and never takes the one of the binding it is assigned to, which is the whole
@@ -663,7 +674,7 @@ AsyncFuncExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
 FnExprName  <~~ push({fname: idName(up.in)}) ~~>
             = NotBindName Id ;
 GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
-            = KwFunction GenMark [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction GenMark [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // See the twin of this comment in js-interpreter.abnf.
 ClassExpr   <~~ push(makeClassExprValue(takeAll())) ~~>
             = ClassDecorators [ KwAbstract ] KwClass [ ClassExprName ] [ TypeParams ]
@@ -679,7 +690,7 @@ ClassExprWidened <~~ push(makeClassValue(takeAll())) ~~>
 
 // The optional name of a function expression is bound only inside its own body (fnSelf).
 FunctionExpr <~~ push(makeFunctionExprItems(takeAll(), up.in)) ~~>
-            = KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 
 // See the twin of this comment in js-interpreter.abnf.
 ObjectLit   <~~ push(makeObject(takeAll())) ~~>
@@ -697,10 +708,10 @@ SpreadProp  <~~ push({spreadObj: true, t: pop()}) ~~>
 ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
             = "[" AssignExpr "]" ( ComputedValue | ComputedMethod ) ;
 ComputedValue <~~ push({pval: pop()}) ~~> = ":" AssignExpr ;
-ComputedMethod <~~ push({pfn: makeFunctionExprItems(takeAll())}) ~~> = [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+ComputedMethod <~~ push({pfn: makeFunctionExprItems(takeAll())}) ~~> = [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // See the twin of this comment in js-interpreter.abnf.
 GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
-            = ( GetterHead PropKeyAny GetterParams [ TypeAnnot ] | SetterHead PropKeyAny SetterParams [ TypeAnnot ] ) [ UseStrictMark ] Block ;
+            = ( GetterHead PropKeyAny GetterParams [ TypeAnnot ] | SetterHead PropKeyAny SetterParams [ TypeAnnot ] ) [ UseStrictMark ] FuncBody ;
 GetterHead  <~~ push({acc: "get"}) ~~> = "get" KwEnd ;
 SetterHead  <~~ push({acc: "set"}) ~~> = "set" KwEnd ;
 // "A 'get' accessor cannot have parameters" (1054) and "a 'set' accessor must have
@@ -714,7 +725,7 @@ SetterParams <~~ push(takeAll()) ~~> = "(" [ ParamSeq ] ")" ;
 // A shorthand method. The async and generator markers are kept, so 'async m() {}' and
 // '*m() {}' build the right kind of function value (see makeMethodProp).
 MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
-            = [ AsyncMark ] [ GenMark ] PropKeyAny [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = [ AsyncMark ] [ GenMark ] PropKeyAny [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // See the twin of this comment in js-interpreter.abnf.
 PropKeyAny  = PropKey | PropComputedKey ;
 PropComputedKey = "[" AssignExpr "]" ;
@@ -742,7 +753,7 @@ ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = [ TypeParams ] "(" [ ParamSeq ] ")" [ TypeAnnot ]
             | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
-ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = FuncBody ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
 
 // See the twin of this comment in js-interpreter.abnf.
@@ -765,17 +776,20 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // See the twin of this comment in js-interpreter.abnf.
 ForOf       = ForOfPattern | ForOfAPattern | ForOfName | ForOfMember | ForOfPath ;
 ForOfPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" [ KwVar ] DPattern ForOfOp Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForPatHead ForOfOp Expression ")" NestedStatement ;
 // The ASSIGNMENT-pattern form: 'for ([o.a] of xs)' writes through places that already
 // exist, so its leaves may be member targets, which a binding DPattern may not have.
 ForOfAPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" APattern ForOfOp Expression ")" NestedStatement ;
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" APattern <~~ push({asg: pop()}) ~~> ForOfOp Expression ")" NestedStatement ;
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfHead Expression ")" NestedStatement ;
 // See the twin of this comment in js-interpreter.abnf.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
-ForOfDecl   = [ KwAwait ] KwUsing NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ]
-            | KwVar NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
+// A pattern after let / const / using binds fresh names, after var or nothing it
+// assigns (forDeclTarget).
+ForPatHead  = DeclKw DPattern <~~ push(forDeclTarget(pop(), up.pos)) ~~> | DPattern <~~ push({asg: pop()}) ~~> ;
+ForOfDecl   = UsingKw NotBindName Id <~~ push(forDeclTarget({dtype: "id", name: idName(up.in)}, up.pos)) ~~> [ TypeAnnot ]
+            | DeclKw NotBindName Id <~~ push(forDeclTarget({dtype: "id", name: idName(up.in)}, up.pos)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
 // The Annex B for-IN initializer: 'for (var a = 1 in X)' is legal sloppy JavaScript. It
 // is parsed and dropped - the loop variable is rebound on every iteration anyway.
 // The spec parses it as AssignmentExpression[~In]: the 'in' that follows belongs to the
@@ -791,7 +805,7 @@ ForOfInit   <~~ pop() ~~> = "=" RelExpr ;
 // ForOfExtra pushes NOTHING: the name carries no tag and ForOfInit pops its own value,
 // so the run is item-neutral and makeForOf still sees exactly four items.
 ForOfExtra  = "," NotBindName Id [ TypeAnnot ] [ ForOfInit ] ;
-ForOfBare   = NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] ;
+ForOfBare   = NotBindName Id <~~ push({asg: {dtype: "id", name: idName(up.in)}}) ~~> [ TypeAnnot ] ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // See the twin of this comment in js-interpreter.abnf.
@@ -992,20 +1006,20 @@ ClassMember = ClassSemi | ClassStaticBlock | IndexSig | CtorDef | CtorSig | Clas
 ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
 // 'static { ... }' runs once, when the class is defined, with 'this' bound to the class.
 ClassStaticBlock <~~ push(makeStaticBlock(pop())) ~~>
-            = "static" KwEnd Block ;
+            = "static" KwEnd FuncBody ;
 // An index signature is pure type syntax. It has to be told apart from a computed member
 // key ('[expr]() {}'), which is what the 'Id ":"' shape does.
 IndexSig    <~~ takeAll(); push({skip: true}) ~~>
             = MemberDecorators MemberMods "[" Id TypeAnnot "]" TypeAnnot [ ";" ] ;
 // See the twin of this comment in js-interpreter.abnf.
 ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
-            = MemberDecorators MemberMods ( GetterHead MemberKey GetterParams [ TypeAnnot ] | SetterHead MemberKey SetterParams [ TypeAnnot ] ) Block ;
+            = MemberDecorators MemberMods ( GetterHead MemberKey GetterParams [ TypeAnnot ] | SetterHead MemberKey SetterParams [ TypeAnnot ] ) FuncBody ;
 // An abstract or ambient ACCESSOR signature ('abstract get x(): number;'): type-layer only.
 ClassGetSetSig <~~ takeAll(); push({skip: true}) ~~>
             = MemberDecorators MemberMods ( GetterHead MemberKey "(" ")" | SetterHead MemberKey SigParamList ) [ TypeAnnot ] [ ";" ] ;
 // An async or generator method: 'async m() {}', '*m() {}', 'async *m() {}'.
 ClassSpecialMethod <~~ push(makeMethod(takeAll())) ~~>
-            = MemberDecorators MemberMods ( AsyncMark [ GenMark ] | GenMark ) MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
+            = MemberDecorators MemberMods ( AsyncMark [ GenMark ] | GenMark ) MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] FuncBody ;
 // The key of a member, pushed as a descriptor so a literal name and a key that is only
 // known at run time are read the same way: {mk: "name"} or {mkT: keyThunk}.
 MemberKey   = MemberNameKey | MemberLitKey | MemberComputedKey ;
@@ -1025,7 +1039,7 @@ MemberComputedKey <~~ push({mkT: pop()}) ~~>
 // so the modifier is not dropped here - it turns the parameter into a {prop} descriptor
 // makeCtorClosure knows to write through to the instance.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
-            = MemberDecorators MemberMods KwConstructor CtorParams Block ;
+            = MemberDecorators MemberMods KwConstructor CtorParams FuncBody ;
 // The parameter list is the shared ParamSeq: PropParam is one of its item shapes, since
 // the modifier form has to PARSE everywhere before TypeScript's grammar check can refuse
 // it outside a constructor. Only here does the {prop} descriptor mean anything.
@@ -1050,7 +1064,7 @@ CtorSig     <~~ takeAll(); push({skip: true}) ~~>
 
 // A method (instance unless 'static').
 MethodDef   <~~ push(makeMethod(takeAll())) ~~>
-            = MemberDecorators MemberMods MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
+            = MemberDecorators MemberMods MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] FuncBody ;
 // An ABSTRACT or OVERLOAD method signature (no body): type-layer only.
 MethodSig   <~~ takeAll(); push({skip: true}) ~~>
             = MemberDecorators MemberMods MemberKey [ "?" ] [ TypeParams ] SigParamList [ TypeAnnot ] [ ";" ] ;
@@ -1274,9 +1288,9 @@ Debugger    <~~ push(function() {}) ~~>
 // name; the markers decide whether calling it runs the body (async, answering a Promise)
 // or returns a generator object (generator and async generator).
 AsyncFuncDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
-            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwAsync KwFunction [ GenMark ] NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 GenFuncDecl <~~ push(makeGenOrFuncDecl(takeAll())) ~~>
-            = KwFunction GenMark NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction GenMark NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 
 // ----- TypeScript type expressions: parsed exactly, and fully erased. -----
 // NOT ONE of these productions pushes onto the stack, so every value production that
@@ -2249,6 +2263,72 @@ NotFuncHead = :script(~~
         if (!hasOwn(jsSymWK, n)) { jsSymWK[n] = jsSymMake("Symbol." + n, "__#@" + n) }
         return jsSymWK[n]
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsSymWKNames = ["asyncIterator", "hasInstance", "isConcatSpreadable", "iterator", "match", "matchAll",
+                        "replace", "search", "species", "split", "toPrimitive", "toStringTag", "unscopables"]
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsSymConvErr(toStr) {
+        biRaise("TypeError: Cannot convert a Symbol value to a " + (toStr ? "string" : "number"))
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsIsSymKey(key) { return key.length >= 4 && key.substring(0, 4) == "__#@" }
+    function jsSymTrack(o, key) {
+        if (!jsIsSymKey(key)) { return }
+        if (!hasOwn(o, "__symkeys")) { o["__symkeys"] = [] }
+        if (o["__symkeys"].indexOf(key) < 0) { o["__symkeys"].push(key) }
+    }
+    function jsSymKeysOf(o) {
+        if (o == undefined || o == null || typeof o != "object" || !hasOwn(o, "__symkeys")) { return [] }
+        return o["__symkeys"].slice()
+    }
+    // delete o[sym]: the key leaves the list (the slot itself is set to undefined).
+    function jsSymUntrack(o, key) {
+        if (!jsIsSymKey(key) || !hasOwn(o, "__symkeys")) { return }
+        var keep = []
+        var ks = o["__symkeys"]
+        for (var i = 0; i < ks.length; i++) { if (ks[i] !== key) { keep.push(ks[i]) } }
+        o["__symkeys"] = keep
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsSeqIterFn(o) {
+        return function() {
+            var src = anytype // The array, or the string's code points.
+            src = o
+            if (typeof o == "string") {
+                var cps = []
+                var i = 0
+                while (i < o.length) {
+                    var c = o.charCodeAt(i)
+                    var w = 1
+                    if (c >= 55296 && c <= 56319 && i + 1 < o.length) {
+                        var t = o.charCodeAt(i + 1)
+                        if (t >= 56320 && t <= 57343) { w = 2 }
+                    }
+                    cps.push(o.substring(i, i + w))
+                    i = i + w
+                }
+                src = cps
+            }
+            var st = {i: 0}
+            var it = {}
+            it["__keys"] = []
+            it["next"] = function() {
+                var r = {}
+                r["__keys"] = ["value", "done"]
+                if (st.i < src.length) {
+                    r["value"] = src[st.i]
+                    r["done"] = false
+                    st.i = st.i + 1
+                } else {
+                    r["value"] = undefined
+                    r["done"] = true
+                }
+                return r
+            }
+            it["__#@iterator"] = function() { return it }
+            return it
+        }
+    }
     // The Symbol global: every call makes a new symbol.
     function jsSymbolFn() {
         var d = anytype
@@ -2314,6 +2394,8 @@ NotFuncHead = :script(~~
         var ao = jsIsObjLike(a)
         var bo = jsIsObjLike(b)
         if (ao && bo) { return a === b }
+        // A symbol is a primitive equal to itself alone.
+        if (jsIsSym(a) || jsIsSym(b)) { return false }
         if (ao) { return jsLooseEq(jsToPrim(a), b) }
         if (bo) { return jsLooseEq(a, jsToPrim(b)) }
         // '==' is the one comparison that crosses the BigInt/Number line, and it does
@@ -3130,6 +3212,8 @@ NotFuncHead = :script(~~
                 if (args[a] === undefined || args[a] === null) { continue }
                 var ka = jsOwnKeys(args[a])
                 for (var b = 0; b < ka.length; b++) { setMember(src, ka[b], getMember(args[a], ka[b])) }
+                var sa = jsSymKeysOf(args[a])
+                for (var c = 0; c < sa.length; c++) { setMember(src, sa[c], getMember(args[a], sa[c])) }
             }
             return {v: src}
         }
@@ -3615,7 +3699,8 @@ NotFuncHead = :script(~~
             if (items[i] != undefined && items[i].ustrict == true) { fileStrict = true; continue }
             out.push(items[i])
         }
-        return makeSeq(out)
+        // Every var no function body claimed is the program's own.
+        return hoistVars(claimVars(0, 2147483647), makeSeq(out))
     }
     // See the twin of this comment in js-interpreter.abnf.
     function itemsStrict(items) {
@@ -3778,6 +3863,7 @@ NotFuncHead = :script(~~
                 return undefined
             }
         }
+        if (k === "__#@iterator" && (typeof o == "string" || Array.isArray(o))) { return jsSeqIterFn(o) }
         return o[k]
     }
     // ================================================ the STATIC namespace ====
@@ -3921,7 +4007,7 @@ NotFuncHead = :script(~~
         if (g === jsPromiseFn) { gn = "Promise" }
         if (g === jsArrayFn) { gn = "Array" }
         if (g === jsSymbolFn) {
-            if (k === "iterator" || k === "asyncIterator") { return jsSymWellKnown(k) }
+            if (typeof k == "string" && jsSymWKNames.indexOf(k) >= 0) { return jsSymWellKnown(k) }
             gn = "Symbol"
         }
         if (gn == "" || typeof k != "string" || stNames[gn].indexOf(k) < 0) { return undefined }
@@ -4411,6 +4497,7 @@ NotFuncHead = :script(~~
             var v = anytype // A number or a BigInt.
             v = t()
             if (isBigInt(v)) { return biNeg(v) }
+            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
             return -v
         }
     }
@@ -4420,6 +4507,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { biRaise("TypeError: Cannot convert a BigInt value to a number") }
+            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
             return v - 0
         }
     }
@@ -4428,6 +4516,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { return biNot(v) }
+            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
             return ~v
         }
     }
@@ -5533,6 +5622,8 @@ NotFuncHead = :script(~~
             if (classStaticFind(o, "" + k) != undefined) { return true }
             return ("" + k) == "name"
         }
+        // A symbol key is listed in __symkeys (see jsSymTrack).
+        if (hasOwn(o, "__keys") && jsIsSymKey("" + k)) { return jsSymKeysOf(o).indexOf("" + k) >= 0 }
         // A mangled PRIVATE name is deliberately absent from __keys - nothing enumerates
         // one - so the brand check `#x in o` has to ask the slot itself.
         if (isPrivateKey("" + k) && hasOwn(o, "" + k)) { return true }
@@ -5613,7 +5704,10 @@ NotFuncHead = :script(~~
                 dfp = fnPropsOf(p.obj)
                 if (dfp !== undefined) { tgt = dfp }
             }
-            if (typeof tgt != "function") { scopePut(tgt, p.key, undefined) }
+            if (typeof tgt != "function") {
+                scopePut(tgt, p.key, undefined)
+                if (typeof p.key == "string") { jsSymUntrack(tgt, p.key) }
+            }
             if (tgt != undefined && tgt != null && typeof tgt != "function" && hasOwn(tgt, "__keys")) {
                 var ks = tgt["__keys"]
                 var at = ks.indexOf("" + p.key)
@@ -5654,21 +5748,27 @@ NotFuncHead = :script(~~
                 var key = (p.kt != undefined) ? jsKeyStr(p.kt()) : p.k
                 if (p.acc != undefined) { addAccessor(o, p.acc, key, p.fn()) }
                 else { scopePut(o, key, p.t()) }
-                if (!isInternalKey(key) && keys.indexOf(key) < 0) { keys.push(key) }
+                if (!isInternalKey(key)) { if (keys.indexOf(key) < 0) { keys.push(key) } }
+                else { jsSymTrack(o, key) }
             }
             o["__keys"] = keys
             return o
         }
     }
-    // '{...src}': copies src's own keys, in their own order, into the object being built.
-    // A key that is already there is overwritten in place and keeps its position, which
-    // is what JavaScript's property order does too.
+    // '{...src}': copies src's own keys, in their own order, into the object being built,
+    // then its symbol-keyed properties. A key that is already there is overwritten in
+    // place and keeps its position, which is what JavaScript's property order does too.
     function spreadInto(o, keys, src) {
         if (src == undefined || src == null) { return }
         var ks = ownKeys(src)
         for (var i = 0; i < ks.length; i++) {
             scopePut(o, ks[i], getMember(src, ks[i]))
             if (keys.indexOf(ks[i]) < 0) { keys.push(ks[i]) }
+        }
+        var sk = jsSymKeysOf(src)
+        for (var j = 0; j < sk.length; j++) {
+            scopePut(o, sk[j], getMember(src, sk[j]))
+            jsSymTrack(o, sk[j])
         }
     }
     // items = [valueThunk] or [valueThunk, {upd}]. Without the update tail this is a
@@ -5723,8 +5823,8 @@ NotFuncHead = :script(~~
     function trackKey(o, key) {
         if (o == undefined || o == null) { return }
         if (typeof key != "string") { return }
-        if (isInternalKey(key)) { return }
         if (!hasOwn(o, "__keys")) { return }
+        if (isInternalKey(key)) { jsSymTrack(o, key); return }
         // An Error instance's message and stack stay non-enumerable (see jsErrInit).
         if ((key === "message" || key === "stack") && hasOwn(o, "__errh")) { return }
         var ks = o["__keys"]
@@ -5789,6 +5889,7 @@ NotFuncHead = :script(~~
                 else {
                     var v = anytype // A substitution is an arbitrary expression.
                     v = items[i].expr()
+                    if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(true) }
                     out = out + jsStr(v)
                 }
             }
@@ -5805,7 +5906,8 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsIterOf(v) {
-        if (v == undefined || v == null || typeof v != "object") { return v }
+        // An array is read by index (its [Symbol.iterator] is the same walk).
+        if (v == undefined || v == null || typeof v != "object" || Array.isArray(v)) { return v }
         var f = anytype // The [Symbol.iterator] member, of any type at all.
         f = getMember(v, "__#@iterator")
         if (typeof f != "function") { return v }
@@ -6370,10 +6472,10 @@ NotFuncHead = :script(~~
                             : makeFunctionExpr(body, params, st, enm, txt), enm)
     }
 
-    // The loop variable of a for-of / for-in: a plain name declares, a destructuring
-    // pattern binds all of its leaves ('for (var [k, v] of pairs)').
+    // A loop target is a pattern node (declared afresh each iteration) or {asg: node}
+    // (assigned: a bare name, a var, an assignment pattern).
     function bindLoopTarget(target, value) {
-        if (typeof target == "string") { declVar(target, value) } else { bindPattern(target, value) }
+        if (target.asg != undefined) { bindPatternMode(target.asg, value, false) } else { bindPattern(target, value) }
     }
 
     // See the twin of this comment in js-interpreter.abnf.
@@ -6482,6 +6584,14 @@ NotFuncHead = :script(~~
     function makeDestructure(items, pos) {
         var pat = items[0]
         var init = items[1]
+        if (declIsVar()) {
+            notePatVars(pat, pos)
+            return function() {
+                var av = anytype // The initializer may be an array or an object.
+                av = init()
+                bindPatternMode(pat, av, false)
+            }
+        }
         return function() {
             var v = anytype // The initializer may be an array or an object.
             v = init()
@@ -7257,11 +7367,16 @@ NotFuncHead = :script(~~
     // declares Inner inside the outer object, and a SECOND 'namespace Ns {}' block simply
     // reopens the object that is already bound - which is exactly declaration merging.
     // items = [{nspath: [names]}, bodyThunk].
-    function makeNamespace(items) {
+    // The body's vars are hoisted into the namespace object, the scope it runs in.
+    function makeNamespace(items, from, to) {
         var names = items[0].nspath
         var bodyT = items[1]
+        var vars = claimVars(from, to)
         return function() {
             var obj = nsResolve(names)
+            for (var i = 0; i < vars.length; i++) {
+                if (!objHasOwn.call(obj, vars[i])) { scopePut(obj, vars[i], undefined) }
+            }
             scopes.push(obj)
             bodyT()
             scopes.pop()
@@ -7308,6 +7423,21 @@ NotFuncHead = :script(~~
         // and abnf/jsrtjsprint.go (js_jseq / js_jslt) for the compiler twin.
         if (op == "==") return jsLooseEq(l, r)
         if (op == "!=") return !jsLooseEq(l, r)
+        // See the twin of this comment in js-interpreter.abnf.
+        if (typeof l == "object" || typeof r == "object") {
+            if (jsIsSym(l) || jsIsSym(r)) {
+                if (op == "===") return l === r
+                if (op == "!==") return l !== r
+                if (op == "+") {
+                    var lp = anytype // The primitive form of each side.
+                    var rp = anytype
+                    lp = jsIsSym(l) ? l : jsToPrim(l)
+                    rp = jsIsSym(r) ? r : jsToPrim(r)
+                    jsSymConvErr(typeof lp == "string" || typeof rp == "string")
+                }
+                jsSymConvErr(false)
+            }
+        }
         // See the twin of this comment in js-interpreter.abnf.
         if (isBigInt(l) || isBigInt(r)) {
             // An OBJECT on the other side is still ToPrimitive'd first, so '1n + []'
@@ -7686,6 +7816,9 @@ NotFuncHead = :script(~~
     applyOp = function(op, a, b) {
         // A compound assignment is its operator applied to the current value, so it
         // takes the same BigInt path (and the same mixed-operand TypeError) as binOp.
+        if (typeof a == "object" || typeof b == "object") {
+            if (jsIsSym(a) || jsIsSym(b)) { return binOp(op.substring(0, op.length - 1), a, b) }
+        }
         if (isBigInt(a) || isBigInt(b)) {
             if (op == "+=" && (typeof a == "string" || typeof b == "string")) { return jsStr(a) + jsStr(b) }
             var br = biBinOp(op.substring(0, op.length - 1), a, b)
@@ -7817,6 +7950,7 @@ NotFuncHead = :script(~~
     // the +1 / -1 that ++ and -- perform, in whichever of the two types it got.
     function jsToNumeric(v) {
         if (isBigInt(v)) { return v }
+        if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
         return v - 0
     }
     function jsStep(v, delta) {
@@ -7842,13 +7976,100 @@ NotFuncHead = :script(~~
 
     // ----- Statement thunks: function() -> undefined | BRK | CONT | {isRet, v} -----
 
-    // items = [name] or [name, initThunk].
-    function makeDecl(items, txt) {
+    // items = [name] or [name, initThunk]. A var assigns the binding its function body
+    // hoisted, and without an initializer does nothing at all.
+    function makeDecl(items, txt, pos) {
         var name = items[0]
         var init = items.length > 1 ? items[1] : makeConst(undefined)
         // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
+        if (declIsVar()) {
+            varRecs.push({name: name, at: pos, file: c.curFile()})
+            if (items.length == 1) { return function() {} }
+            return function() { varSet(name, init()) }
+        }
         return function() { declVar(name, init()) }
+    }
+
+    // ----- var: hoisted to the function scope -----
+    // See the twin of this comment in js-interpreter.abnf. A namespace body claims the
+    // vars inside it as a function body does (makeNamespace).
+    var declKinds = []
+    var varRecs = []
+    function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
+    function claimVars(from, to) {
+        var file = c.curFile()
+        var names = []
+        var keep = []
+        for (var i = 0; i < varRecs.length; i++) {
+            var r = varRecs[i]
+            if (r.file === file && r.at >= from && r.at <= to) {
+                if (names.indexOf(r.name) < 0) { names.push(r.name) }
+            } else { keep.push(r) }
+        }
+        varRecs = keep
+        return names
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function hoistVars(names, bodyT) {
+        if (names.length == 0) { return bodyT }
+        return function() {
+            var sc = scopes[scopes.length - 1]
+            for (var i = 0; i < names.length; i++) {
+                if (!hasVar(names[i])) { scopePut(sc, names[i], undefined) }
+            }
+            return bodyT()
+        }
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function makeFuncBody(bodyT, from, to) {
+        var names = claimVars(from, to)
+        if (names.length == 0) { return bodyT }
+        return function() {
+            var ps = scopes[scopes.length - 1]
+            var vs = {}
+            for (var i = 0; i < names.length; i++) {
+                var v = anytype // A parameter's argument, or undefined.
+                v = objHasOwn.call(ps, names[i]) ? ps[names[i]] : undefined
+                scopePut(vs, names[i], v)
+            }
+            scopes.push(vs)
+            var r = bodyT()
+            scopes.pop()
+            return r
+        }
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function varSet(name, v) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (objHasOwn.call(scopes[i], name)) { scopePut(scopes[i], name, v); return }
+        }
+        declVar(name, v)
+    }
+    // The leaf names of a binding pattern.
+    function patNames(pat, out) {
+        if (pat.dtype == "id") { out.push(pat.name) }
+        else if (pat.dtype == "arr") {
+            for (var i = 0; i < pat.elems.length; i++) { patNames(pat.elems[i], out) }
+            if (pat.rest != null) { patNames(pat.rest, out) }
+        } else if (pat.dtype == "obj") {
+            for (var f = 0; f < pat.fields.length; f++) { patNames(pat.fields[f].pat, out) }
+            if (pat.rest != null) { patNames(pat.rest, out) }
+        }
+        return out
+    }
+    function notePatVars(pat, pos) {
+        var ns = patNames(pat, [])
+        for (var i = 0; i < ns.length; i++) { varRecs.push({name: ns[i], at: pos, file: c.curFile()}) }
+    }
+    // A for-in/of head with a declaration keyword: let / const / using bind the pattern
+    // afresh, var assigns the hoisted names.
+    function forDeclTarget(pat, pos) {
+        var isVar = declIsVar()
+        declKinds.pop()
+        if (!isVar) { return pat }
+        notePatVars(pat, pos)
+        return {asg: pat}
     }
     // ----- Labels -----
     // See the twin of this comment in js-interpreter.abnf.

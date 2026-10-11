@@ -930,12 +930,11 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // because an optional keeps what it matched: in 'for (let in a)' - a loop over the
 // ordinary variable named 'let' - KwVar would swallow the 'let' and leave no name.
 ForOf       = ForOfPat | ForOfName | ForOfPath | ForOfNoRef ;
-// A destructuring loop target: 'for (var [k, v] of pairs)'. The element is matched against
-// the pattern once per iteration, binding its leaves in the loop's own scope.
-// With 'var' the target is a BINDING pattern, without it an ASSIGNMENT pattern - so
-// 'for (var [a] of xs)' declares a while 'for ([o.a] of xs)' writes through a member. The
-// two are separate productions because makeForOf has to know WHICH: the leaves of the
-// assignment form are written, not declared, and the member leaf only exists there.
+// A destructuring loop target: 'for (const [k, v] of pairs)'. The element is matched
+// against the pattern once per iteration. After let / const it is a BINDING pattern whose
+// leaves are bound afresh in the loop's own scope; after var it assigns the function's
+// hoisted names (forDeclTarget); without a keyword it is an ASSIGNMENT pattern, whose
+// leaves may be members ('for ([o.a] of xs)'), which is why it is a production of its own.
 ForOfPat    = ForOfPatDecl | ForOfPatAssign ;
 ForOfPatDecl <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" DeclKw DPattern <~~ push(forDeclTarget(pop(), up.pos)) ~~> ForOfOp Expression ")" NestedStatement ;

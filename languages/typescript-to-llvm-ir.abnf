@@ -269,7 +269,7 @@ EnumKey     = Id <~~ push({mname: idName(up.in)}) ~~>
 // instead of creating one - decided at build time, in source order, by nsDeclared), and a
 // dotted name 'namespace A.B {}' nests one object inside the other. 'module X {}' is the
 // older spelling of the same thing.
-NamespaceDecl <~~ push(makeNamespace(takeAll())) ~~>
+NamespaceDecl <~~ push(makeNamespace(takeAll(), up.start, up.pos)) ~~>
             = ( KwNamespace | KwModule ) NsPath "{" { NsStatement } "}" ;
 NsPath      <~~ push({nspath: takeAll()}) ~~>
             = Id <~~ push(idName(up.in)) ~~> { "." Id <~~ push(idName(up.in)) ~~> }
@@ -404,17 +404,26 @@ DefaultLabel <~~ push({isdflt: true}) ~~>
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
-// var, let and const all declare a block scoped variable in the current scope.
+// A function's body. Its `var` names are hoisted: bound (to undefined) in the
+// function's own scope on entry, whichever nested block declares them. Twin in
+// typescript-interpreter.abnf.
+FuncBody    <~~ push(makeFuncBody(pop(), up.start, up.pos)) ~~>
+            = Block ;
+
+// let and const declare a block scoped variable in the current scope; var assigns the
+// one its function body hoisted (makeFuncBody). DeclKw tells the declarators which.
 VarDecl     = VarDeclCore [ ";" ] ;
-VarDeclCore <~~ push(makeVarSeq(takeAll())) ~~>
-            = KwVar Declarator { "," Declarator } ;
+VarDeclCore <~~ push(makeVarSeq(takeAll())); declKinds.pop() ~~>
+            = DeclKw Declarator { "," Declarator } ;
+DeclKw      <~~ declKinds.push(up.in) ~~>
+            = KwVar ;
 // One declaration list may MIX plain names and destructuring patterns
 // ('var a, [b] = 1'), and a pattern declarator is also what makes
 // 'for (var [d] = 1;;)' a legal for-loop initializer.
 // The DEFINITE ASSIGNMENT marker ('let later!: number') and the ': Type' annotation are
 // type-layer only: both are parsed and erased.
 Declarator  = PatternDeclarator | NameDeclarator ;
-NameDeclarator <~~ push(makeDecl(takeAll(), up.in)) ~~>
+NameDeclarator <~~ push(makeDecl(takeAll(), up.in, up.pos)) ~~>
             = NotBindName Id <~~ push(idName(up.in)) ~~> [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = DPattern [ TypeAnnot ] "=" AssignExpr ;
@@ -456,7 +465,7 @@ Throw       <~~ push(makeThrow(pop())) ~~>
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDeclStrict(takeAll())) ~~>
-            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
             = "(" [ ParamSeq ] ")" ;
@@ -760,7 +769,8 @@ NotSuffix   = :script(~~
     })()
 ~~) ;
 
-Neg         <~~ push(makeUnary(pop(), negExt())) ~~>
+// Unary minus is js_jsneg in both engines: a BigInt negates, a symbol throws.
+Neg         <~~ push(makeUnary(pop(), "js_jsneg")) ~~>
             = "-" UnaryExpr ;
 // Unary plus is ToNumber, not a no-op: '+"3"' is the number 3. It is tried after
 // PreIncDec so that '++x' stays an increment instead of '+(+x)'.
@@ -922,9 +932,9 @@ AsyncArrow  <~~ push(makeAsyncArrow(takeAll(), up.in)) ~~>
 // inside the body (fnSelf).
 AsyncFuncExpr = AsyncGenExpr | AsyncPlainExpr ;
 AsyncGenExpr <~~ push(makeAsyncGenExpr(takeAll(), up.in)) ~~>
-            = KwAsync KwFunction "*" [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwAsync KwFunction "*" [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 AsyncPlainExpr <~~ push(makeAsyncFuncExpr(takeAll(), up.in)) ~~>
-            = KwAsync KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwAsync KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // The optional name of a function expression, in every one of its three forms. It
 // pushes {fname} rather than nothing: a named function expression keeps ITS OWN name in
 // `f.name`, and never takes the one of the binding it is assigned to.
@@ -933,7 +943,7 @@ FnExprName  <~~ push({fname: up.in}) ~~>
 // 'function* () {}': the body is an ordinary IR function, and js_genfn turns the closure
 // into a generator function, so calling it produces a generator object.
 GenFuncExpr <~~ push(makeGenFuncExpr(takeAll(), up.in)) ~~>
-            = KwFunction "*" [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction "*" [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 ClassExpr   = DecoratedClassExpr | ClassExprLowered | ClassExprWidened ;
 // A decorated class EXPRESSION. The decorators run on the descriptor the expression
@@ -957,7 +967,7 @@ ClassExprWidened <~~ push(makeClassExpr(takeAll())) ~~>
 
 // The optional name of a function expression is bound only inside its own body (fnSelf).
 FunctionExpr <~~ push(makeFunctionExprItems(takeAll(), up.in)) ~~>
-            = KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
 ObjectLit   <~~ push(makeObject(takeAll())) ~~>
@@ -976,11 +986,11 @@ SpreadProp  <~~ push({spreadT: pop()}) ~~>
 // error even though the comma operator is fine inside 'a[b, c]'. The '(' form is the
 // computed shorthand METHOD '{[k](x) {}}'.
 ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
-            = "[" AssignExpr "]" ( ":" AssignExpr | [ TypeParams ] ParamList [ TypeAnnot ] Block ) ;
+            = "[" AssignExpr "]" ( ":" AssignExpr | [ TypeParams ] ParamList [ TypeAnnot ] FuncBody ) ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
             = ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams [ TypeAnnot ]
-              | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) [ UseStrictMark ] Block ;
+              | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) [ UseStrictMark ] FuncBody ;
 // "A 'get' accessor cannot have parameters" (1054) and "a 'set' accessor must have
 // exactly one parameter" (1049) are TypeScript GRAMMAR CHECKS, reported on a tree tsc has
 // already built - the conformance suite files 'var v = { set foo() { } }' and
@@ -991,7 +1001,7 @@ GetterParams <~~ takeAll() ~~> = "(" [ ParamSeq ] ")" ;
 SetterParams = "(" [ ParamSeq ] ")" ;
 // A shorthand method: '{ m(x) { ... } }', with the async and generator prefixes.
 MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
-            = [ AsyncMod ] [ GenMod ] MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = [ AsyncMod ] [ GenMod ] MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
 // '{ val }' is '{ val: val }'.
@@ -1011,7 +1021,7 @@ ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = [ TypeParams ] "(" [ ParamSeq ] ")" [ TypeAnnot ]
             | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
-ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = FuncBody ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
 
 // Template literals: `text ${expr} more`. Each ${...} is evaluated and coerced to
@@ -1042,14 +1052,13 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // See the twin of this comment in js-to-llvm-ir.abnf.
 ForOf       = ForOfPat | ForOfName | ForOfPath | ForOfNoRef ;
 ForOfPat    = ForOfPatDecl | ForOfPatAssign ;
-// A destructuring loop target: 'for (var [k, v] of pairs)'. The element is matched against
-// the pattern once per iteration, binding its leaves in the loop's own scope.
-// With 'var' the target is a BINDING pattern, without it an ASSIGNMENT pattern - so
-// 'for (var [a] of xs)' declares a while 'for ([o.a] of xs)' writes through a member.
-// The two are separate productions because makeForOf has to know WHICH: the leaves of
-// the assignment form are written, not declared, and the member leaf only exists there.
+// A destructuring loop target: 'for (const [k, v] of pairs)'. The element is matched
+// against the pattern once per iteration. After let / const it is a BINDING pattern whose
+// leaves are bound afresh in the loop's own scope; after var it assigns the function's
+// hoisted names (forDeclTarget); without a keyword it is an ASSIGNMENT pattern, whose
+// leaves may be members ('for ([o.a] of xs)'), which is why it is a production of its own.
 ForOfPatDecl <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" KwVar DPattern [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
+            = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" DeclKw DPattern <~~ push(forDeclTarget(pop(), up.pos)) ~~> [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
 ForOfPatAssign <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" ForOfAPat [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
 ForOfAPat   <~~ push({apat: pop()}) ~~>
@@ -1064,7 +1073,7 @@ ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
 // is parsed and dropped - the loop variable is rebound on every iteration anyway. The
 // spec parses it as AssignmentExpression[~In], so the initializer must be read at a level
 // that cannot consume the loop's own 'in': RelExpr sits directly below InExpr.
-ForOfDecl   = KwVar NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
+ForOfDecl   = DeclKw NotBindName Id <~~ push(forDeclTarget({dtype: "id", name: idName(up.in)}, up.pos)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
 ForOfInit   <~~ pop() ~~> = "=" RelExpr ;
 // "Only a single variable declaration is allowed in a 'for...in' statement" (1091) is a
 // GRAMMAR CHECK TypeScript reports on a tree it has built, not a parse error: the suite
@@ -1074,7 +1083,7 @@ ForOfInit   <~~ pop() ~~> = "=" RelExpr ;
 // ForOfExtra pushes NOTHING: the name carries no tag and ForOfInit pops its own value,
 // so the run is item-neutral and makeForOf still sees exactly the items it did.
 ForOfExtra  = "," NotBindName Id [ TypeAnnot ] [ ForOfInit ] ;
-ForOfBare   = NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] ;
+ForOfBare   = NotBindName Id <~~ push({apat: {dtype: "id", name: idName(up.in)}}) ~~> [ TypeAnnot ] ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // The widened member-path target. At least one suffix is required, otherwise this would
@@ -1093,8 +1102,8 @@ ForOfNoRef  <~~ takeAll(); push(notImplStmt("for-in/of over a non-reference", up
             = KwFor [ KwAwait <~~ push({fawait: true}) ~~> ] "(" [ KwVar ] CondExpr ( KwOf | KwIn ) Expression ")" NestedStatement ;
 
 // See the twin of this comment in js-to-llvm-ir.abnf.
-Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
-            = KwVar DPattern "=" AssignExpr [ ";" ] ;
+Destructure <~~ push(makeDestructure(takeAll(), up.pos)); declKinds.pop() ~~>
+            = DeclKw DPattern "=" AssignExpr [ ";" ] ;
 
 DPattern    = ArrPattern | ObjPattern ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -1246,7 +1255,7 @@ ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
 // 'static { ... }': a block that runs once, at class definition time, with 'this' bound
 // to the class itself.
 ClassStaticBlock <~~ push({kind: "sblock", body: pop()}) ~~>
-            = "static" KwEnd Block ;
+            = "static" KwEnd FuncBody ;
 // A decorated member: the decorators are collected in front of the ordinary member
 // production and attached to the descriptor it pushes (see makeDecoratedMember).
 DecoratedMember <~~ push(makeDecoratedMember(takeAll())) ~~>
@@ -1271,39 +1280,39 @@ AbstractMods = { MemberMod } ( "abstract" | "declare" ) KwEnd NotMemberEnd { Mem
 // member lookup follows the __class/__super chain to find it.
 ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
             = MemberMods ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams [ TypeAnnot ]
-                         | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams [ TypeAnnot ] ) Block ;
+                         | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams [ TypeAnnot ] ) FuncBody ;
 // 'async m() {}' and the generator forms. An async method's body is compiled as a
 // generator body driven by js_jsasyncfn (see makeAsyncFn); a generator method goes
 // through the generator lowering.
 ClassSpecialMethod <~~ push(makeClassSpecial(takeAll())) ~~>
-            = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey [ TypeParams ] ParamList [ TypeAnnot ] Block ;
+            = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey [ TypeParams ] ParamList [ TypeAnnot ] FuncBody ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 ClassPrivate <~~ push(makeClassPrivate(takeAll())) ~~>
             = MemberMods "#" Id <~~ push(privDeclare(idName(up.in))) ~~>
-              ( [ TypeParams ] ParamList [ TypeAnnot ] Block | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
+              ( [ TypeParams ] ParamList [ TypeAnnot ] FuncBody | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
 // A computed key: 'class A { ["a" + "b"]() {} }'. The key expression is evaluated once,
 // when the class is defined.
 ClassComputed <~~ push(makeClassComputed(takeAll())) ~~>
             = MemberMods "[" AssignExpr "]"
-              ( [ TypeParams ] ParamList [ TypeAnnot ] Block | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
+              ( [ TypeParams ] ParamList [ TypeAnnot ] FuncBody | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
 // A member whose key is a string or number literal - class a { 'constructor'() {} },
 // class a { 1 = 2 }. Tried before MethodDef/FieldDef, which only know the bare-Id form.
 ClassLiteralMember <~~ push(makeClassComputed(takeAll())) ~~>
             = MemberMods ( StringLit | NumberLit )
-              ( [ TypeParams ] ParamList [ TypeAnnot ] Block | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
+              ( [ TypeParams ] ParamList [ TypeAnnot ] FuncBody | [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ) ;
 // See the twin of this comment in js-to-llvm-ir.abnf.
 MemberKey   = "#" Id <~~ push(privDeclare(idName(up.in))) ~~>
             | Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit | "[" AssignExpr "]" ;
 
 // A constructor.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
-            = MemberMods KwConstructor CtorParams [ TypeAnnot ] Block ;
+            = MemberMods KwConstructor CtorParams [ TypeAnnot ] FuncBody ;
 CtorParams  <~~ push(takeAll()) ~~>
             = "(" [ ParamSeq ] [ "," ] ")" ;
 
 // A method (instance unless 'static').
 MethodDef   <~~ push(makeMethod(takeAll())) ~~>
-            = MemberMods Id <~~ push({mname: idName(up.in)}) ~~> [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
+            = MemberMods Id <~~ push({mname: idName(up.in)}) ~~> [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] FuncBody ;
 
 // A field (instance unless 'static'), with an optional initializer. The '?' / '!'
 // markers and the ': Type' annotation are type-layer only.
@@ -1445,11 +1454,11 @@ Debugger    <~~ push(function(b) { return b }) ~~>
 // The declaration forms of the same three: async, async generator and generator.
 AsyncFuncDecl = AsyncGenDecl | AsyncPlainDecl ;
 AsyncGenDecl <~~ push(makeAsyncGenDecl(takeAll())) ~~>
-            = KwAsync KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwAsync KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 AsyncPlainDecl <~~ push(makeAsyncFuncDecl(takeAll())) ~~>
-            = KwAsync KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwAsync KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
-            = KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] Block ;
+            = KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
@@ -2293,10 +2302,6 @@ NotFuncHead = :script(~~
         if (nativeBuild) { return "js_jssne" }
         return "js_sne"
     }
-    function negExt() {
-        if (nativeBuild) { return "js_jsneg" }
-        return "js_neg"
-    }
     function notExt() {
         if (nativeBuild) { return "js_jsnot" }
         return "js_not"
@@ -2654,7 +2659,7 @@ NotFuncHead = :script(~~
         b = r.b
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [saved])
-        var keysV = callExt(b, "js_jskeys", [r.v])
+        var keysV = callExt(b, "js_jsspreadkeys", [r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osk"), keysV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osrc"), r.v])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osi"), callExt(b, "js_num_i", [handle(0)])])
@@ -3980,7 +3985,7 @@ NotFuncHead = :script(~~
                 else {
                     var r = items[i].expr(b)
                     b = r.b
-                    pv = callExt(b, "js_jsstr", [r.v])
+                    pv = callExt(b, "js_jstplstr", [r.v])
                 }
                 v = callExt(b, "js_add", [v, pv])
             }
@@ -4363,10 +4368,84 @@ NotFuncHead = :script(~~
     function makeDestructure(items, pos) {
         var pat = items[0]
         var init = items[1]
+        var ext = "js_scope_decl"
+        if (declIsVar()) {
+            notePatVars(pat, pos)
+            ext = "js_scope_set"
+        }
         return function(b) {
             var r = init(b)
-            return bindPattern(r.b, pat, r.v, "js_scope_decl")
+            return bindPattern(r.b, pat, r.v, ext)
         }
+    }
+
+    // ----- var: hoisted to the function scope -----
+    // See the twin of this comment in js-to-llvm-ir.abnf. A namespace body claims the
+    // vars inside it as a function body does (makeNamespace).
+    var declKinds = []
+    var varRecs = []
+    function declIsVar() { return declKinds.length > 0 && declKinds[declKinds.length - 1] == "var" }
+    function claimVars(from, to) {
+        var file = c.curFile()
+        var names = []
+        var keep = []
+        for (var i = 0; i < varRecs.length; i++) {
+            var r = varRecs[i]
+            if (r.file === file && r.at >= from && r.at <= to) {
+                if (names.indexOf(r.name) < 0) { names.push(r.name) }
+            } else { keep.push(r) }
+        }
+        varRecs = keep
+        return names
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function emitHoist(b, sc, from, names) {
+        for (var i = 0; i < names.length; i++) {
+            var nm = emitStr(b, names[i])
+            callExt(b, "js_scope_decl", [sc, nm, callExt(b, "js_scope_own", [from, nm])])
+        }
+        return b
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function makeFuncBody(bodyT, from, to) {
+        var names = claimVars(from, to)
+        if (names.length == 0) { return bodyT }
+        return function(b) {
+            var fnScope = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [fnScope])
+            var endB = bodyT(emitHoist(b, curScopeV, fnScope, names))
+            curScopeV = fnScope
+            return endB
+        }
+    }
+    // The leaf names of a binding pattern.
+    function patNames(pat, out) {
+        if (pat.dtype == "id") { out.push(pat.name) }
+        else if (pat.dtype == "rest") { patNames(pat.pat, out) }
+        else if (pat.dtype == "arr") {
+            for (var i = 0; i < pat.elems.length; i++) { patNames(pat.elems[i], out) }
+        } else if (pat.dtype == "obj") {
+            for (var f = 0; f < pat.fields.length; f++) {
+                if (pat.fields[f].dtype == "orest") { out.push(pat.fields[f].name) } else { patNames(pat.fields[f].pat, out) }
+            }
+        }
+        return out
+    }
+    function notePatVars(pat, pos) {
+        var ns = patNames(pat, [])
+        for (var i = 0; i < ns.length; i++) { varRecs.push({name: ns[i], at: pos, file: c.curFile()}) }
+    }
+    // A for-in/of head with a declaration keyword: let / const bind the target afresh
+    // (a plain name in the loop's one slot), var assigns the hoisted names.
+    function forDeclTarget(pat, pos) {
+        var isVar = declIsVar()
+        declKinds.pop()
+        if (isVar) {
+            notePatVars(pat, pos)
+            return {apat: pat}
+        }
+        if (pat.dtype == "id") { return pat.name }
+        return pat
     }
     function makeDestructAssign(items) {
         var pat = items[0]
@@ -5145,7 +5224,9 @@ NotFuncHead = :script(~~
         return {nsexport: (names.length > 0) ? names[0] : "", nsexports: names, t: t}
     }
     // items = [{nspath}, (statement thunk | {nsexport, t})...].
-    function makeNamespace(items) {
+    // The body's vars are hoisted into the namespace's own scope.
+    function makeNamespace(items, from, to) {
+        var vars = claimVars(from, to)
         var path = items[0].nspath
         var body = items.slice(1)
         var exports = []
@@ -5188,6 +5269,7 @@ NotFuncHead = :script(~~
             }
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
+            if (vars.length > 0) { b = emitHoist(b, curScopeV, curScopeV, vars) }
             for (var i = 0; i < stmts.length; i++) { b = stmts[i](b) }
             for (var e = 0; e < exports.length; e++) {
                 callExt(b, memSetExt(), [obj, emitStr(b, exports[e]),
@@ -5494,11 +5576,22 @@ NotFuncHead = :script(~~
         return function(b) { return t(b).b }
     }
     // items = [name] or [name, initThunk].
-    function makeDecl(items, txt) {
+    // A var assigns the binding its function body hoisted, and without an initializer
+    // emits nothing at all. See the twin of this comment in js-to-llvm-ir.abnf.
+    function makeDecl(items, txt, pos) {
         var name = items[0]
         pendingNames.push(name) // what an enclosing 'export' would publish
         // NamedEvaluation: `const h = x => x` names the arrow "h".
         if (items.length > 1) { fnAnonName(name, "=", txt) }
+        if (declIsVar()) {
+            varRecs.push({name: name, at: pos, file: c.curFile()})
+            return function(b) {
+                if (items.length == 1) { return b }
+                var vr = items[1](b)
+                callExt(vr.b, "js_scope_set", [curScopeV, emitStr(vr.b, name), vr.v])
+                return vr.b
+            }
+        }
         return function(b) {
             var v = hUndef
             if (items.length > 1) {
@@ -5753,6 +5846,14 @@ NotFuncHead = :script(~~
             items.push(itemsIn[bi])
         }
         emitStrict = fileStrict
+        // Every var no function body claimed is the program's own, hoisted in front of
+        // its statements.
+        var topVars = claimVars(0, 2147483647)
+        if (topVars.length > 0) {
+            var hoisted = [function(hb) { return emitHoist(hb, curScopeV, curScopeV, topVars) }]
+            for (var hi = 0; hi < items.length; hi++) { hoisted.push(items[hi]) }
+            items = hoisted
+        }
         // The walk of an imported file ends here too (importDepth > 0): stash its
         // top-level statement thunks for the real jsrun instead of emitting a second one.
         if (importDepth > 0) {
