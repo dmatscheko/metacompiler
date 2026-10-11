@@ -1035,10 +1035,10 @@ ArgEnd      = :script(~~
         return abnf.newToken("\x01notlval", 0)
     })()
 ~~) ;
-NamedArg    <~~ push({aname: argLabel(up.in), pos: pop()}) ~~>
+NamedArg    <~~ push(placedArg({aname: argLabel(up.in), pos: pop()})) ~~>
             = ArgLabel Expression ;
 ArgLabel    = Id ":" !":" ;
-SpreadArg   <~~ push({aspread: pop()}) ~~>
+SpreadArg   <~~ push(placedArg({aspread: pop()})) ~~>
             = "..." Expression ;
 FccArg      <~~ push({fcc: true}) ~~>
             = "..." ;
@@ -1673,7 +1673,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // module-level helper does it, rather than an inline branch, so that every call
     // site stays a single-value expression.
     var probeF = undefined
-    function scopeProbe(b, nameV, dfltV) {
+    function scopeProbe(b, nameV, dfltV) { return b.NewCall(scopeProbeFn(), [curScopeV, nameV, dfltV]) }
+    function scopeProbeFn() {
         if (probeF == undefined) {
             probeF = m.NewFunc("php_scope_probe", i64,
                                [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64),
@@ -1686,7 +1687,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             missB.NewRet(probeF.Params[2])
             hitB.NewRet(callExt(hitB, "js_scope_get", [probeF.Params[0], probeF.Params[1]]))
         }
-        return b.NewCall(probeF, [curScopeV, nameV, dfltV])
+        return probeF
     }
     // $this inside a method, or undefined in a static one. A plain js_scope_get
     // would abort on the name.
@@ -1694,6 +1695,23 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // A class descriptor by name, or null when nothing of that name is declared
     // yet - an interface list must not abort on a forward reference.
     function phClsLookup(b, nameV) { return scopeProbe(b, nameV, hNull) }
+    // The base of a '::' whose base is a VALUE ($cn::make(), $obj::CONST): a class
+    // name held in a string is looked up, an object or a class passes as it is.
+    // Twin of classOfValue in php-interpreter.abnf.
+    var staticBaseF = undefined
+    function staticBaseV(b, v) {
+        if (staticBaseF == undefined) {
+            staticBaseF = m.NewFunc("php_static_base", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("v", i64)])
+            var eb = staticBaseF.NewBlock("entry")
+            var strB = staticBaseF.NewBlock("str")
+            var asIsB = staticBaseF.NewBlock("asis")
+            var bv = staticBaseF.Params[1]
+            eb.NewCondBr(truthy(eb, callExt(eb, "js_phis", [emitStr(eb, "string"), bv])), strB, asIsB)
+            strB.NewRet(strB.NewCall(scopeProbeFn(), [staticBaseF.Params[0], bv, hNull]))
+            asIsB.NewRet(bv)
+        }
+        return b.NewCall(staticBaseF, [curScopeV, v])
+    }
     // ----- variables: local to ONE frame ------------------------------------------
     //
     // PHP has no lexical variable scope: a `$name` lives in the frame of the function
@@ -3122,9 +3140,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = rl.b
             var rr = rhsT(b)
             b = rr.b
-            var argsV = argList(b, [rl.v])
             var rc = callableV(b, rr.v)
             b = rc.b
+            var argsV = dynPlaceArgs(b, rc.v, argList(b, [rl.v]), true)
             if (!magicInvoke) { return {b: b, v: callExt(b, "js_call", [rc.v, hUndef, argsV])} }
             var invB = curF.NewBlock("")
             var fnB = curF.NewBlock("")
@@ -3419,9 +3437,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (s.kind == "dyncall") {
                     var rn = s.nameT(b)
                     b = rn.b
-                    var ed = emitPhArgs(b, s.args, null)
+                    var dnV = callExt(b, "js_phstr", [rn.v])
+                    var ed = emitMethArgs(b, cur, dnV, null, s.args)
                     b = ed.b
-                    var rdm = emitMethodCall(b, cur, callExt(b, "js_phstr", [rn.v]), ed.v)
+                    var rdm = emitMethodCall(b, cur, dnV, ed.v)
                     b = rdm.b
                     cur = rdm.v
                 } else if (s.kind == "dynfield") {
@@ -3439,7 +3458,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         cur = rpm.v
                         continue
                     }
-                    var ea = emitPhArgs(b, s.args, methSigOf(s.name))
+                    var ea = emitMethArgs(b, cur, emitStr(b, s.name), s.name, s.args)
                     b = ea.b
                     var rm = emitMethodCall(b, cur, emitStr(b, s.name), ea.v)
                     b = rm.b
@@ -3459,17 +3478,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     }
                     var ea2 = anytype
                     var rc2 = anytype
-                    if (argsArePlain(s.args) && hasVarArg(s.args)) {
+                    var plain2 = argsArePlain(s.args)
+                    if (plain2 && hasVarArg(s.args)) {
                         // The callee is resolved first, so a variable argument can be
                         // handed over as a reference where its parameter takes one.
                         rc2 = callableV(b, cur)
                         ea2 = emitDynRefArgs(rc2.b, s.args, rc2.v)
                         b = ea2.b
                     } else {
-                        ea2 = emitPhArgs(b, s.args, null)
+                        ea2 = plain2 ? emitPhArgs(b, s.args, null) : emitArgTmp(b, s.args)
                         rc2 = callableV(ea2.b, cur)
                         b = rc2.b
                     }
+                    ea2 = {b: b, v: dynPlaceArgs(b, rc2.v, ea2.v, plain2)}
                     if (magicInvoke) {
                         // An INSTANCE used as a callable runs its __invoke method.
                         var invB = curF.NewBlock("")
@@ -3487,7 +3508,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     }
                 } else if (s.kind == "static") {
                     var curV = cur
-                    var rs = emitStaticAccess(function(bb) { return {b: bb, v: curV} }, s.sfxMem, s.sfxArgs)(b)
+                    var rs = emitStaticAccessV(function(bb) { return {b: bb, v: staticBaseV(bb, curV)} },
+                                               s.sfxMem, s.sfxArgs, s.sfxMemT, s.sfxMemProp, null)(b)
                     b = rs.b
                     cur = rs.v
                 } else {
@@ -3975,15 +3997,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function emitStaticAccess(baseT, mem, args) { return emitStaticAccessV(baseT, mem, args, null, false, null) }
     // baseText is the class as written (self, Foo), which a constant cycle names;
     // null when the base is a value.
+    // 'C::$m()' calls the static METHOD whose name the variable $m holds (PHP's
+    // static_member call form); without the parentheses it is the property.
     function emitStaticAccessV(baseT, mem, args, memT, memprop, baseText) {
+        var nameT = anytype
+        nameT = memT
+        if (nameT == null && args != null && mem.charAt(0) == "$") {
+            nameT = function(bb) { return readVarV(bb, emitStr(bb, mem)) }
+        }
         return function(b) {
             var rb = baseT(b)
             b = rb.b
-            if (memT != null) {
-                var rn8 = memNameV(b, mem, memT)
+            if (nameT != null) {
+                var rn8 = memNameV(b, mem, nameT)
                 b = rn8.b
                 if (args != null) {
-                    var ea8 = emitPhArgs(b, args, null)
+                    var ea8 = emitMethArgs(b, rb.v, rn8.v, null, args)
                     b = ea8.b
                     var th8 = phThis(b)
                     return {b: b, v: callExt(b, "js_phscall", [rb.v, rn8.v, th8, ea8.v])}
@@ -3996,7 +4025,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 // performs the static dispatch when it is finally called.
                 if (hasFcc(args)) { return {b: b, v: emitStaticFcc(b, rb.v, mem)} }
                 if (hasPlace(args)) { return emitPartialFor(b, rb.v, mem, "scall", "\x00pfacls", args, null) }
-                var ea = emitPhArgs(b, args, null)
+                var ea = emitMethArgs(b, rb.v, emitStr(b, mem), mem, args)
                 b = ea.b
                 var thisV = phThis(b)
                 return {b: b, v: callExt(b, "js_phscall", [rb.v, emitStr(b, mem), thisV, ea.v])}
@@ -4076,6 +4105,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeStaticExpr(items) {
         var p = staticParts(items)
         return emitStaticAccessV(p.base, p.mem, p.args, p.memT, p.memprop, p.baseText)
+    }
+    // A call through a VALUE ($f(...), $o->p(...)(...)) - or of a method whose
+    // parameter list depends on the receiver - cannot place named arguments or a
+    // variadic tail at compile time: js_phplace / js_phmplace do it at run time from
+    // the parameter list withSig recorded on the callee. The two flags (a named
+    // argument or a spread anywhere; a variadic parameter anywhere) are final before
+    // anything is emitted, since every tag runs first, so a program with neither
+    // records and places nothing.
+    var dynPlaceNamed = false
+    var dynPlaceVariadic = false
+    function placedArg(rec) {
+        dynPlaceNamed = true
+        return rec
+    }
+    // The argument list of a call through a value, placed for the callee fV: argsV is
+    // the runtime list of a plain call, else the PHP array emitArgTmp collected.
+    function dynPlaceArgs(b, fV, argsV, plain) {
+        if (plain && !dynPlaceVariadic) { return argsV }
+        return callExt(b, "js_phplace", [fV, argsV])
     }
     // As a chain suffix the base is whatever the chain produced so far.
     function makeStaticSfx(items) {
@@ -4248,7 +4296,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, byVal, byRef)
             // A Closure is an object to PHP and takes a handle (js_phoid).
-            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withRefMask(rc.b, closureV(rc.b, idx, rc.v), pl.byref)])}
+            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withSig(rc.b, closureV(rc.b, idx, rc.v), pl)])}
         }
     }
 
@@ -4273,7 +4321,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, captured, [])
-            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withRefMask(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl.byref)])}
+            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withSig(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl)])}
         }
     }
 
@@ -4776,9 +4824,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // (php-interpreter.abnf has no such problem: it binds named arguments in the
     // CALLEE, where the parameter list is always the right one.)
     var methSigs = {}
+    var methVariadic = {}
     function noteMethodSig(fn) {
         if (fn.name == undefined || fn.name == "") { return }
         var key = "$" + fn.name
+        if (fn.rest >= 0) { methVariadic[key] = true }
         var prev = methSigs[key]
         // Strict: null (already ambiguous) == undefined, and a third declaration
         // must not replace the null.
@@ -4798,6 +4848,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == undefined) { return null }
         var s3 = methSigs["$" + name]
         return s3 == undefined || s3 == null ? null : s3
+    }
+    // The argument list of a method call. Where the name's signature is not known
+    // here (two classes declare it differently, or the name is computed, name ==
+    // null) and there is something to place - a named argument, a spread, or a
+    // variadic method of that name - it is placed at run time for the method the
+    // call reaches (js_phmplace reads the parameter list withSig recorded on it).
+    function emitMethArgs(b, targetV, nameV, name, args) {
+        var sig = methSigOf(name)
+        if (sig != null) { return emitPhArgs(b, args, sig) }
+        var plain = argsArePlain(args)
+        var variadic = name == null ? dynPlaceVariadic : methVariadic["$" + name] === true
+        if (plain && !variadic) { return emitPhArgs(b, args, null) }
+        var ra = plain ? emitPhArgs(b, args, null) : emitArgTmp(b, args)
+        return {b: ra.b, v: callExt(ra.b, "js_phmplace", [targetV, nameV, ra.v])}
     }
     // "every argument is an ordinary positional one". A NAMED argument carries a
     // thunk under the same key, so it has to be excluded explicitly - without that
@@ -4824,7 +4888,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // The argument list of a call whose callee is only known at run time: a variable
     // argument is passed as its storage CELL exactly where the callee's parameter is
-    // by reference (js_phrefat reads the mask withRefMask recorded on the closure),
+    // by reference (js_phrefat reads the mask withSig recorded on the closure),
     // and as its value everywhere else.
     function emitDynRefArgs(b, args, fV) {
         var argsV = callExt(b, "js_arr_new", [])
@@ -4942,68 +5006,23 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // Read a collected PHP array back into the positional list the callee declared:
     // by position, else by parameter name, with the variadic tail gathered into one
-    // PHP array. Used by an ordinary call AND, inside a partial closure, by the call
-    // it finally makes - which is why it is a function of the collected array rather
-    // than of the argument records.
+    // PHP array (the remaining positions, then the named arguments no parameter
+    // took). Used by an ordinary call AND, inside a partial closure, by the call it
+    // finally makes - which is why it is a function of the collected array rather
+    // than of the argument records. js_phplacesig is the same placement js_phplace
+    // makes for a callee known only at run time, from the signature text here.
     function emitPlaceInto(b, tmp, sig) {
-        var outV = callExt(b, "js_arr_new", [])
-        if (sig == null) {
-            // No declared signature: hand the collected values over in order.
-            return {b: emitArgSpill(b, tmp, outV, 0), v: outV}
-        }
-        var fixed = sig.rest >= 0 ? sig.rest : sig.params.length
-        for (var pi = 0; pi < fixed; pi++) {
-            var byPos = callExt(b, "js_phget", [tmp, emitNum(b, pi)])
-            var nm = sig.params[pi]
-            var byName = callExt(b, "js_phget", [tmp, emitStr(b, nm.substring(1))])
-            var v = b.NewSelect(truthy(b, callExt(b, "js_phisset", [tmp, emitNum(b, pi)])), byPos,
-                                b.NewSelect(truthy(b, callExt(b, "js_phisset", [tmp, emitStr(b, nm.substring(1))])),
-                                            byName, hUndef))
-            callExt(b, "js_arr_push", [outV, v])
-        }
-        if (sig.rest >= 0) {
-            // The variadic tail: everything from the last declared position on,
-            // collected into one PHP array the callee sees as its '...$rest'.
-            var restV = callExt(b, "js_pharr", [])
-            b = emitRestCollect(b, tmp, restV, fixed)
-            callExt(b, "js_arr_push", [outV, restV])
-        }
-        return {b: b, v: outV}
+        var text = sig == null ? "" : sigText(sig.params, sig.rest)
+        return {b: b, v: callExt(b, "js_phplacesig", [emitStr(b, text), tmp])}
     }
-    // Copy tmp[from..len) into the runtime argument list, at run time.
-    function emitArgSpill(b, tmp, outV, from) {
-        return emitIdxLoop(b, tmp, from, function(bb, itV, iV) {
-            callExt(bb, "js_arr_push", [outV, callExt(bb, "js_phget", [itV, iV])])
-            return bb
-        })
-    }
-    function emitRestCollect(b, tmp, restV, from) {
-        return emitIdxLoop(b, tmp, from, function(bb, itV, iV) {
-            callExt(bb, "js_phpush", [restV, callExt(bb, "js_phget", [itV, iV])])
-            return bb
-        })
-    }
-    // for (i = from; i < count(arr); i++) body(arr, i), as real IR.
-    function emitIdxLoop(b, arrV, from, body) {
-        hidCount++
-        var iName = "\x00ai" + hidCount
-        var aName = "\x00aa" + hidCount
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), arrV])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, from)])
-        var headB = curF.NewBlock("")
-        var bodyB = curF.NewBlock("")
-        var exitB = curF.NewBlock("")
-        b.NewBr(headB)
-        var itV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_phlen", [itV])])), bodyB, exitB)
-        var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-        bodyB = body(bodyB, itB, iB)
-        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
-                                        intWrap(bodyB, callExt(bodyB, "js_jadd", [iB, emitNum(bodyB, 1)]))])
-        bodyB.NewBr(headB)
-        return exitB
+    // A parameter list as the runtime reads it: the names without '$', comma
+    // separated, the variadic one spelled "...name".
+    function sigText(params, rest) {
+        var s = ""
+        for (var j = 0; j < params.length; j++) {
+            s = s + (j > 0 ? "," : "") + (j == rest ? "..." : "") + params[j].substring(1)
+        }
+        return s
     }
 
     // ----- first-class callables and variable functions -------------------------
@@ -5035,7 +5054,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
-        return callExt(b, "js_closure", [handle(idx), env])
+        return bindMethodSig(b, callExt(b, "js_closure", [handle(idx), env]), recvV, emitStr(b, name))
+    }
+    // A closure that dispatches to a METHOD takes over that method's recorded
+    // parameter list (js_phbindsig), so a call through it places named arguments
+    // and a variadic tail exactly as a call of the method would.
+    function bindMethodSig(b, clo, recvV, nameV) {
+        if (!dynPlaceNamed && !dynPlaceVariadic) { return clo }
+        return callExt(b, "js_phbindsig", [clo, recvV, nameV])
     }
     // js_phscall wants its arguments as a PHP array; a call frame hands them over as
     // the runtime's plain list, so copy them across.
@@ -5109,33 +5135,83 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curFTag = savedTag
         return {b: b, v: callExt(b, "js_closure", [handle(idx), env])}
     }
-    // $name(...) where $name holds the STRING "s12area": PHP's variable function. A
-    // string callee is resolved against the scope; anything else is already callable.
-    // The probe is a round trip through the string cast, which is an identity only
-    // for a value that IS a string.
+    // A callee VALUE made callable: a closure (or an __invoke instance) as it is, a
+    // function NAME held in a string ($f = "s12area": PHP's variable function)
+    // resolved against the scope, and the method forms - 'C::m', [$obj, 'm'] and
+    // ['C', 'm'] - turned into a bound closure that performs the dispatch when it is
+    // called. ONE module-level helper (php_callable), so a call site stays a single
+    // call. A string naming nothing raises PHP 8's catchable `Error: Call to undefined
+    // function x()` rather than the floor's abort. Twin of phpInvoke in
+    // php-interpreter.abnf.
+    var callableF = undefined
     function callableV(b, v) {
-        var isStr = truthy(b, callExt(b, "js_phseq", [callExt(b, "js_phcast", [emitStr(b, "string"), v]), v]))
-        var strB = curF.NewBlock("")
-        var mergeB = curF.NewBlock("")
-        b.NewCondBr(isStr, strB, mergeB)
-        var looked = phClsLookup(strB, v)
-        // A STRING callable naming nothing: the probe answers null, and js_call would
-        // take the floor's uncatchable `call of a non function value` abort, where PHP 8
-        // (and the interpreter) raise `Error: Call to undefined function x()`. One
-        // compare on a path that has already decided the callee is a string.
-        var badB = curF.NewBlock("")
-        var okB = curF.NewBlock("")
-        strB.NewCondBr(strB.NewICmp(llvm.enum.IPredEQ, looked, hNull), badB, okB)
+        if (callableF == undefined) { callableF = emitCallableFn() }
+        return {b: b, v: b.NewCall(callableF, [curScopeV, v])}
+    }
+    function emitCallableFn() {
+        var f = m.NewFunc("php_callable", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("v", i64)])
+        var env = f.Params[0]
+        var v = f.Params[1]
+        var eb = f.NewBlock("entry")
+        var strB = f.NewBlock("str")
+        var notStrB = f.NewBlock("notstr")
+        eb.NewCondBr(truthy(eb, callExt(eb, "js_phis", [emitStr(eb, "string"), v])), strB, notStrB)
+        // A string: a function name first, then 'C::m'.
+        var looked = strB.NewCall(scopeProbeFn(), [env, v, hNull])
+        var foundB = f.NewBlock("found")
+        var missB = f.NewBlock("miss")
+        strB.NewCondBr(strB.NewICmp(llvm.enum.IPredEQ, looked, hNull), missB, foundB)
+        foundB.NewRet(looked)
+        var sepV = callExt(missB, "js_phstrpos", [v, emitStr(missB, "::"), hNull])
+        var sepB = f.NewBlock("sep")
+        var badB = f.NewBlock("bad")
+        missB.NewCondBr(truthy(missB, callExt(missB, "js_phis", [emitStr(missB, "int"), sepV])), sepB, badB)
         callExt(badB, "js_phraise",
                 [emitStr(badB, "Error"),
                  callExt(badB, "js_phcat",
                          [callExt(badB, "js_phcat", [emitStr(badB, "Call to undefined function "), v]),
                           emitStr(badB, "()")])])
-        badB.NewBr(mergeB) // never reached: js_phraise throws
-        okB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(v, b),
-                                             llvm.ir.NewIncoming(hNull, badB),
-                                             llvm.ir.NewIncoming(looked, okB)])}
+        badB.NewRet(hNull) // never reached: js_phraise throws
+        var clsS = sepB.NewCall(scopeProbeFn(), [env, callExt(sepB, "js_phsubstr", [v, emitNum(sepB, 0), sepV]), hNull])
+        var mnS = callExt(sepB, "js_phsubstr", [v, callExt(sepB, "js_phadd", [sepV, emitNum(sepB, 2)]), hNull])
+        sepB.NewRet(boundDyn(sepB, env, "scall", clsS, mnS))
+        // A two-element array: [$obj, 'm'] or ['C', 'm'].
+        var arrB = f.NewBlock("arr")
+        var asIsB = f.NewBlock("asis")
+        notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_phis", [emitStr(notStrB, "array"), v])), arrB, asIsB)
+        asIsB.NewRet(v)
+        var recvV = callExt(arrB, "js_phget", [v, emitNum(arrB, 0)])
+        var mnA = callExt(arrB, "js_phstr", [callExt(arrB, "js_phget", [v, emitNum(arrB, 1)])])
+        var objB = f.NewBlock("obj")
+        var clsB = f.NewBlock("cls")
+        arrB.NewCondBr(emitIsObj(arrB, recvV), objB, clsB)
+        objB.NewRet(boundDyn(objB, env, "mcall", recvV, mnA))
+        var clsA = clsB.NewCall(scopeProbeFn(), [env, callExt(clsB, "js_phstr", [recvV]), hNull])
+        clsB.NewRet(boundDyn(clsB, env, "scall", clsA, mnA))
+        return f
+    }
+    // The closure a method callable becomes: one shared emitted body per dispatch kind,
+    // reading its receiver (an object, or a class for a static call) and the method
+    // name from the scope it closes over.
+    var boundDynIdx = {}
+    function boundDyn(b, env, ext, recvV, nameV) {
+        if (boundDynIdx[ext] == undefined) {
+            funcCount++
+            var idx = funcCount
+            var bf = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var bb = bf.NewBlock("entry")
+            var selfV = callExt(bb, "js_scope_get", [bf.Params[0], emitStr(bb, "\x00dcrecv")])
+            var nmV = callExt(bb, "js_scope_get", [bf.Params[0], emitStr(bb, "\x00dcname")])
+            var res = anytype
+            if (ext == "mcall") { res = callExt(bb, "js_phmcall", [selfV, nmV, bf.Params[1]]) }
+            else { res = callExt(bb, "js_phscall", [selfV, nmV, hUndef, phListOf(bb, bf.Params[1])]) }
+            bb.NewRet(res)
+            boundDynIdx[ext] = idx
+        }
+        var holder = callExt(b, "js_scope_new", [env])
+        callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dcrecv"), recvV])
+        callExt(b, "js_scope_decl", [holder, emitStr(b, "\x00dcname"), nameV])
+        return bindMethodSig(b, callExt(b, "js_closure", [handle(boundDynIdx[ext]), holder]), recvV, nameV)
     }
 
     // ----- calls, defs, classes -----
@@ -5349,6 +5425,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 defs.push({name: params[params.length - 1], init: items[i].pdef})
             }
         }
+        if (rest >= 0) { dynPlaceVariadic = true }
         return {params: params, defs: defs, byref: byref, rest: rest}
     }
     // 'function f(...$rest)': the variadic parameter arrives as one argument holding
@@ -5446,14 +5523,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (genClosure) { clo = callExt(b, "js_genfn", [clo]) }
         return clo
     }
-    // A function with by-reference parameters carries their positions as a bit
-    // mask in the function value's meta slot (js_jsfnmeta's length), which a call
-    // through a variable reads back with js_phrefat.
-    function withRefMask(b, clo, byref) {
-        if (byref.length == 0) { return clo }
+    // A function value carries what a call through a VARIABLE needs to know about
+    // its parameters, in its meta slot (js_jsfnmeta): the positions of its
+    // by-reference parameters as a bit mask in the length, which js_phrefat reads
+    // back, and its parameter list in the name - the names without '$', comma
+    // separated, the variadic one spelled "...name" - which js_phplace places named
+    // arguments and a variadic tail by. The list is recorded only when the program
+    // has a call that needs it (dynPlaceNamed / dynPlaceVariadic below).
+    function withSig(b, fn, pl) {
         var mask = 0
-        for (var i = 0; i < byref.length; i++) { mask = mask + Math.pow(2, byref[i]) }
-        return callExt(b, "js_jsfnmeta", [clo, emitStr(b, ""), emitNum(b, mask)])
+        for (var i = 0; i < pl.byref.length; i++) { mask = mask + Math.pow(2, pl.byref[i]) }
+        var sig = (dynPlaceNamed || dynPlaceVariadic) ? sigText(pl.params, pl.rest) : ""
+        if (mask == 0 && sig == "") { return fn }
+        return callExt(b, "js_jsfnmeta", [fn, emitStr(b, sig), emitNum(b, mask)])
     }
     // A named function is GLOBAL wherever its declaration stands: one written inside
     // a function body is declared in the main frame when control reaches it, and
@@ -5463,7 +5545,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
             var gV = globalsFrameV(b)
-            callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), withRefMask(b, closureV(b, idx, gV), fn.byref)])
+            callExt(b, "js_scope_decl", [gV, emitStr(b, fn.name), withSig(b, closureV(b, idx, gV), fn)])
             return b
         }
     }
@@ -5894,7 +5976,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
                 // Stored under its declared name, its lower-cased name and every other
                 // spelling an ancestor declared (setMethod in php-interpreter.abnf).
-                callExt(b, "js_phmset", [clsV, emitStr(b, methods[k].name), closureV(b, idx, curScopeV)])
+                callExt(b, "js_phmset", [clsV, emitStr(b, methods[k].name), withSig(b, closureV(b, idx, curScopeV), methods[k])])
             }
             if (!hasCtor && ext == "") {
                 var emptyBody = function(bb) { return bb }

@@ -415,17 +415,95 @@ func phpClassFind(cls interface{}, name string) interface{} {
 	return nil
 }
 
+// phpPlaceArgs lays a call's arguments out in the parameter positions of a callee
+// known only at run time. sig is the parameter list the emitter recorded in the
+// function's meta name (withSig in php-to-llvm-ir.abnf): the names without '$',
+// comma separated, the variadic one spelled "...name"; "" when nothing was
+// recorded. args is the runtime list of a plain call, or the PHP array a call with
+// named arguments or a spread collected (positional entries under integer keys,
+// named ones under their names). A parameter takes its position's argument, else
+// the argument named for it, else undefined (its default); the variadic one
+// collects the remaining positions and every named argument no parameter took.
+// Twin of js_phplace in languages/lib/php-rt.metajs.
+func (rt *jsrt) phpPlaceArgs(sig string, args interface{}) interface{} {
+	list, isList := args.(*jsArray)
+	if isList && !strings.Contains(sig, "...") {
+		return list
+	}
+	keys, vals, ok := phpArrParts(args)
+	out := &jsArray{}
+	if !ok {
+		return out
+	}
+	// A runtime list may carry the CELL of a by-reference argument, which has to
+	// arrive as it is; a collected PHP array holds values.
+	at := func(i int) interface{} {
+		if isList {
+			return vals.elems[i]
+		}
+		return phpDeref(vals.elems[i])
+	}
+	if sig == "" {
+		for i, k := range keys.elems {
+			if _, isPos := k.(float64); isPos {
+				out.elems = append(out.elems, at(i))
+			}
+		}
+		return out
+	}
+	params := strings.Split(sig, ",")
+	taken := map[string]bool{}
+	for pi, p := range params {
+		if strings.HasPrefix(p, "...") {
+			rest := phpNewArr()
+			for i, k := range keys.elems {
+				if n, isPos := k.(float64); isPos && int(n) >= pi {
+					rt.phpArrPush(rest, at(i))
+				}
+			}
+			for i, k := range keys.elems {
+				if s, isName := k.(string); isName && !taken[s] {
+					rt.phpArrSet(rest, s, at(i))
+				}
+			}
+			out.elems = append(out.elems, rest)
+			return out
+		}
+		var v interface{} = jsUndef
+		if i := phpKeyIndex(keys, float64(pi)); i >= 0 {
+			v = at(i)
+		} else if i := phpKeyIndex(keys, p); i >= 0 {
+			v = at(i)
+			taken[p] = true
+		}
+		out.elems = append(out.elems, v)
+	}
+	// Positions past the declared parameters still travel (func_get_args).
+	for i, k := range keys.elems {
+		if n, isPos := k.(float64); isPos && int(n) >= len(params) {
+			out.elems = append(out.elems, at(i))
+		}
+	}
+	return out
+}
+
 // ----- numeric strings and arithmetic coercion -------------------------------
 
-// phpNumStrVal answers the number a fully numeric string denotes (an int as a
-// float64, a float as a jsPhpFlo), or nil when the string is not numeric.
-// Leading and trailing whitespace is allowed (PHP 8).
-func phpNumStrVal(s string) interface{} {
+func phpIsSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+}
+
+// phpNumScan reads the numeric PREFIX both readings of a string share: leading
+// whitespace, then an optionally signed decimal / float with its exponent. It
+// answers the number's span and whether it is a float; ok is false when no digit
+// was seen. Twin of numScan in php-interpreter.abnf and phNumScan in
+// languages/lib/php-rt.metajs.
+func phpNumScan(s string) (st, en int, isF, ok bool) {
 	i := 0
-	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\v' || s[i] == '\f') {
+	for i < len(s) && phpIsSpace(s[i]) {
 		i++
 	}
-	st := i
+	st = i
 	if i < len(s) && (s[i] == '+' || s[i] == '-') {
 		i++
 	}
@@ -434,7 +512,6 @@ func phpNumStrVal(s string) interface{} {
 		i++
 		digits++
 	}
-	isF := false
 	if i < len(s) && s[i] == '.' {
 		isF = true
 		i++
@@ -444,7 +521,7 @@ func phpNumStrVal(s string) interface{} {
 		}
 	}
 	if digits == 0 {
-		return nil
+		return 0, 0, false, false
 	}
 	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
 		save := i
@@ -463,13 +540,11 @@ func phpNumStrVal(s string) interface{} {
 			isF = true
 		}
 	}
-	en := i
-	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\v' || s[i] == '\f') {
-		i++
-	}
-	if i != len(s) {
-		return nil
-	}
+	return st, i, isF, true
+}
+
+// phpNumSpanVal is the number s[st:en] (a span phpNumScan accepted) denotes.
+func phpNumSpanVal(s string, st, en int, isF bool) interface{} {
 	if isF {
 		f, ok := phpStrtod(s[st:en])
 		if !ok {
@@ -478,6 +553,24 @@ func phpNumStrVal(s string) interface{} {
 		return phpMkFlo(f)
 	}
 	return phpIntStrVal(s[st:en])
+}
+
+// phpNumStrVal answers the number a fully numeric string denotes (an int as a
+// float64, a float as a jsPhpFlo), or nil when the string is not numeric.
+// Leading and trailing whitespace is allowed (PHP 8).
+func phpNumStrVal(s string) interface{} {
+	st, en, isF, ok := phpNumScan(s)
+	if !ok {
+		return nil
+	}
+	i := en
+	for i < len(s) && phpIsSpace(s[i]) {
+		i++
+	}
+	if i != len(s) {
+		return nil
+	}
+	return phpNumSpanVal(s, st, en, isF)
 }
 
 // phpStrtod reads a decimal number the caller has already scanned. A magnitude
@@ -511,43 +604,14 @@ func phpIntStrVal(txt string) interface{} {
 	return phpMkFlo(f)
 }
 
-// phpLeadingNum: a non-numeric string still contributes its numeric PREFIX
-// ("12abc" is 12 in an arithmetic context).
+// phpLeadingNum: a non-numeric string still contributes its numeric PREFIX,
+// exponent and leading whitespace included ("12abc" is 12, " 5e1 z" is 50.0).
 func phpLeadingNum(s string) interface{} {
-	i := 0
-	if i < len(s) && (s[i] == '+' || s[i] == '-') {
-		i++
-	}
-	d := 0
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-		d++
-	}
-	isF := false
-	if i < len(s) && s[i] == '.' {
-		j := i + 1
-		fd := 0
-		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
-			j++
-			fd++
-		}
-		if fd > 0 || d > 0 {
-			isF = true
-			i = j
-			d += fd
-		}
-	}
-	if d == 0 {
+	st, en, isF, ok := phpNumScan(s)
+	if !ok {
 		return float64(0)
 	}
-	if isF {
-		f, ok := phpStrtod(s[:i])
-		if !ok {
-			return float64(0)
-		}
-		return phpMkFlo(f)
-	}
-	if v := phpIntStrVal(s[:i]); v != nil {
+	if v := phpNumSpanVal(s, st, en, isF); v != nil {
 		return v
 	}
 	return float64(0)
@@ -843,6 +907,22 @@ func (rt *jsrt) phpFindMethod(cls interface{}, name string) interface{} {
 		cls = clsObj.props["__super"]
 	}
 	return nil
+}
+
+// phpMethodOf is the method `name` of target - an object, or a class for a static
+// method - with the lower-cased retry js_phmcall makes, or nil.
+func (rt *jsrt) phpMethodOf(target, nameV interface{}) interface{} {
+	cls := target
+	if o, isObj := target.(*jsObject); isObj {
+		if _, isClass := o.props["__isclass"]; !isClass {
+			cls = o.props["__class"]
+		}
+	}
+	name := rt.phpStr(nameV)
+	if meth := rt.phpFindMethod(cls, name); meth != nil {
+		return meth
+	}
+	return rt.phpFindMethod(cls, phpCase(name, false))
 }
 
 // ----- comparison ------------------------------------------------------------
@@ -2116,6 +2196,29 @@ func init() {
 		m["js_phrefat"] = func(a []uint64) uint64 {
 			i := int(rt.toNumber(u(a[1])))
 			return boolH((jsvFnMeta(u(a[0])).length>>uint(i))&1 == 1)
+		}
+		m["js_phplace"] = func(a []uint64) uint64 {
+			return w(rt.phpPlaceArgs(jsvFnMeta(u(a[0])).name, u(a[1])))
+		}
+		// (clo, target, name) -> clo, carrying the meta of the method `name` of
+		// target (an object, or a class for a static method): a closure that
+		// dispatches to a method places its arguments as the method would. Twin of
+		// js_phbindsig in languages/lib/php-rt.metajs.
+		m["js_phbindsig"] = func(a []uint64) uint64 {
+			if meth := rt.phpMethodOf(u(a[1]), u(a[2])); meth != nil {
+				mi := jsvFnMeta(meth)
+				jsvFnMetaSet(u(a[0]), mi.name, mi.length)
+			}
+			return a[0]
+		}
+		// (target, name, args) -> args placed for the method `name` of target, for
+		// a call site that cannot know which class's method it reaches. Twin of
+		// js_phmplace in languages/lib/php-rt.metajs.
+		m["js_phmplace"] = func(a []uint64) uint64 {
+			return w(rt.phpPlaceArgs(jsvFnMeta(rt.phpMethodOf(u(a[0]), u(a[1]))).name, u(a[2])))
+		}
+		m["js_phplacesig"] = func(a []uint64) uint64 {
+			return w(rt.phpPlaceArgs(rt.phpStr(u(a[0])), u(a[1])))
 		}
 		// The four that REPLACE a jsrt.go entry: each is exact 64 bit where the
 		// shared one is 32 bit or double based.

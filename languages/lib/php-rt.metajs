@@ -512,13 +512,13 @@ function phIsSpace(c) {
     return c == 12
 }
 
-// phNumStrVal answers the number a FULLY numeric string denotes (an int, or a
-// float box), or undefined when the string is not numeric. Leading and trailing
-// whitespace is allowed (PHP 8).
-function phNumStrVal(s) {
-    var i = 0
-    while (i < s.length && phIsSpace(s.charCodeAt(i))) { i = i + 1 }
-    var st = i
+// phNumScan reads the numeric PREFIX both readings of a string share: leading
+// whitespace, then an optionally signed decimal / float with its exponent. It
+// answers the END of the number times two, plus one when it is a float, or -1
+// when no digit was seen (one number, so the hot coercion allocates nothing).
+// Twin of phpNumScan in abnf/jsrtphp.go and numScan in php-interpreter.abnf.
+function phNumScan(s) {
+    var i = phSkipSpace(s, 0)
     if (i < s.length) {
         var c0 = s.charAt(i)
         if (c0 == "+" || c0 == "-") { i = i + 1 }
@@ -528,16 +528,16 @@ function phNumStrVal(s) {
         i = i + 1
         digits = digits + 1
     }
-    var isF = false
+    var isF = 0
     if (i < s.length && s.charAt(i) == ".") {
-        isF = true
+        isF = 1
         i = i + 1
         while (i < s.length && phIsDigit(s.charCodeAt(i))) {
             i = i + 1
             digits = digits + 1
         }
     }
-    if (digits == 0) { return undefined }
+    if (digits == 0) { return -1 }
     if (i < s.length && (s.charAt(i) == "e" || s.charAt(i) == "E")) {
         var save = i
         i = i + 1
@@ -550,14 +550,32 @@ function phNumStrVal(s) {
             i = i + 1
             ed = ed + 1
         }
-        if (ed == 0) { i = save } else { isF = true }
+        if (ed == 0) { i = save } else { isF = 1 }
     }
-    var en = i
+    return i * 2 + isF
+}
+
+function phSkipSpace(s, from) {
+    var i = from
     while (i < s.length && phIsSpace(s.charCodeAt(i))) { i = i + 1 }
-    if (i != s.length) { return undefined }
-    var body = s.substring(st, en)
-    if (isF) { return phMkFlo(phParseFlo(body)) }
+    return i
+}
+
+// The number the span phNumScan answered denotes.
+function phNumSpanVal(s, sc) {
+    var body = s.substring(phSkipSpace(s, 0), Math.floor(sc / 2))
+    if (sc % 2 == 1) { return phMkFlo(phParseFlo(body)) }
     return phIntStrVal(body)
+}
+
+// phNumStrVal answers the number a FULLY numeric string denotes (an int, or a
+// float box), or undefined when the string is not numeric. Leading and trailing
+// whitespace is allowed (PHP 8).
+function phNumStrVal(s) {
+    var sc = phNumScan(s)
+    if (sc < 0) { return undefined }
+    if (phSkipSpace(s, Math.floor(sc / 2)) != s.length) { return undefined }
+    return phNumSpanVal(s, sc)
 }
 
 // The double a decimal text denotes. parseFloat is a floor host builtin and is
@@ -605,36 +623,12 @@ function phIntStrVal(txt) {
     return acc
 }
 
-// phLeadingNum: a non-numeric string still contributes its numeric PREFIX
-// ("12abc" is 12 in an arithmetic context).
+// phLeadingNum: a non-numeric string still contributes its numeric PREFIX,
+// exponent and leading whitespace included ("12abc" is 12, " 5e1 z" is 50.0).
 function phLeadingNum(s) {
-    var i = 0
-    if (i < s.length) {
-        var c0 = s.charAt(i)
-        if (c0 == "+" || c0 == "-") { i = i + 1 }
-    }
-    var d = 0
-    while (i < s.length && phIsDigit(s.charCodeAt(i))) {
-        i = i + 1
-        d = d + 1
-    }
-    var isF = false
-    if (i < s.length && s.charAt(i) == ".") {
-        var j = i + 1
-        var fd = 0
-        while (j < s.length && phIsDigit(s.charCodeAt(j))) {
-            j = j + 1
-            fd = fd + 1
-        }
-        if (fd > 0 || d > 0) {
-            isF = true
-            i = j
-            d = d + fd
-        }
-    }
-    if (d == 0) { return 0 }
-    if (isF) { return phMkFlo(phParseFlo(s.substring(0, i))) }
-    return phIntStrVal(s.substring(0, i))
+    var sc = phNumScan(s)
+    if (sc < 0) { return 0 }
+    return phNumSpanVal(s, sc)
 }
 
 // phToNum is the arithmetic coercion: everything becomes an int or a float box.
@@ -2188,6 +2182,109 @@ function js_phisset(a, k) { return phArrHas(a, k) }
 // recorded in the function's meta slot (withRefMask in php-to-llvm-ir.abnf).
 // Twin of js_phrefat in abnf/jsrtphp.go.
 function js_phrefat(f, i) { return Math.floor(fnMeta(f, "length") / Math.pow(2, i)) % 2 == 1 }
+// A call's arguments laid out in the parameter positions of a callee known only at
+// run time, from the parameter list recorded in its meta name (withSig in
+// php-to-llvm-ir.abnf). Twin of phpPlaceArgs in abnf/jsrtphp.go, which documents
+// the rule.
+function js_phplace(f, args) {
+    var sig = anytype
+    sig = fnMeta(f, "name")
+    if (typeof sig != "string") { sig = "" }
+    return js_phplacesig(sig, args)
+}
+// clo, carrying the meta of the method `name` of target (an object, or a class for a
+// static method). Twin of js_phbindsig in abnf/jsrtphp.go.
+function js_phbindsig(clo, target, name) {
+    var mm = phMethodOf(target, name)
+    if (typeof mm == "function") { fnMetaSet(clo, fnMeta(mm, "name"), fnMeta(mm, "length")) }
+    return clo
+}
+// args placed for the method `name` of target, for a call site that cannot know
+// which class's method it reaches. Twin of js_phmplace in abnf/jsrtphp.go.
+function js_phmplace(target, name, args) {
+    var mm = phMethodOf(target, name)
+    if (typeof mm != "function") { return js_phplacesig("", args) }
+    return js_phplace(mm, args)
+}
+// The method `name` of target - an object, or a class for a static method - with
+// the lower-cased retry js_phmcall makes, or undefined. Twin of phpMethodOf in
+// abnf/jsrtphp.go.
+function phMethodOf(target, name) {
+    var cls = anytype
+    cls = target
+    if (target !== undefined && target !== null && typeof target == "object" && target["__isclass"] === undefined) {
+        cls = target["__class"]
+    }
+    if (cls === undefined || cls === null) { return undefined }
+    var mm = rtFindMethod(cls, name)
+    if (typeof mm != "function") { mm = rtFindMethod(cls, phsCase(phStr(name), false)) }
+    return mm
+}
+// The same placement, by a signature text the emitter knows at compile time.
+function js_phplacesig(sig, args) {
+    var isList = phIsList(args)
+    if (isList && sig.indexOf("...") < 0) { return args }
+    var out = []
+    var p = phArrParts(args)
+    if (p === undefined) { return out }
+    var i = 0
+    if (sig == "") {
+        while (i < p.k.length) {
+            if (typeof p.k[i] == "number") { out.push(phPlaceAt(p, i, isList)) }
+            i = i + 1
+        }
+        return out
+    }
+    var taken = {}
+    var pi = 0
+    var from = 0
+    while (from <= sig.length) {
+        var to = sig.indexOf(",", from)
+        if (to < 0) { to = sig.length }
+        var pn = sig.substring(from, to)
+        from = to + 1
+        if (pn.substring(0, 3) == "...") {
+            var rest = phNewArr()
+            i = 0
+            while (i < p.k.length) {
+                if (typeof p.k[i] == "number" && p.k[i] >= pi) { phArrPush(rest, phPlaceAt(p, i, isList)) }
+                i = i + 1
+            }
+            i = 0
+            while (i < p.k.length) {
+                if (typeof p.k[i] == "string" && taken["$" + p.k[i]] !== true) { phArrSet(rest, p.k[i], phPlaceAt(p, i, isList)) }
+                i = i + 1
+            }
+            out.push(rest)
+            return out
+        }
+        var v = anytype
+        v = undefined
+        var at = phKeyIndex(p.k, pi)
+        if (at >= 0) { v = phPlaceAt(p, at, isList) } else {
+            at = phKeyIndex(p.k, pn)
+            if (at >= 0) {
+                v = phPlaceAt(p, at, isList)
+                taken["$" + pn] = true
+            }
+        }
+        out.push(v)
+        pi = pi + 1
+    }
+    // Positions past the declared parameters still travel (func_get_args).
+    i = 0
+    while (i < p.k.length) {
+        if (typeof p.k[i] == "number" && p.k[i] >= pi) { out.push(phPlaceAt(p, i, isList)) }
+        i = i + 1
+    }
+    return out
+}
+// A runtime list may carry the CELL of a by-reference argument, which has to arrive
+// as it is; a collected PHP array holds values.
+function phPlaceAt(p, i, isList) {
+    if (isList) { return p.v[i] }
+    return phDeref(p.v[i])
+}
 function js_phcell(a, k) { return phElemCell(a, k) }
 function js_phderef(v) { return phDeref(v) }
 function js_phunset(a, k) { return phArrUnset(a, k) }

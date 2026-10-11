@@ -1627,14 +1627,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (isArr(sv)) {
                     for (var j = 0; j < sv.keys.length; j++) {
                         if (typeof sv.keys[j] == "number") { pos.push(deref(sv.vals[j])); tgts.push(null) }
-                        else { scopePut(named, "$" + sv.keys[j], deref(sv.vals[j])); hasNamed = true }
+                        else {
+                            if (!hasOwn(named, "$" + sv.keys[j])) { nkeys.push("$" + sv.keys[j]) }
+                            scopePut(named, "$" + sv.keys[j], deref(sv.vals[j]))
+                            hasNamed = true
+                        }
                     }
                 }
                 continue
             }
             if (a.argname != undefined) {
+                if (!hasOwn(named, "$" + a.argname)) { nkeys.push("$" + a.argname) }
                 scopePut(named, "$" + a.argname, a.argval())
-                nkeys.push("$" + a.argname)
                 hasNamed = true
                 continue
             }
@@ -1660,9 +1664,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var named = argset.named
         for (var i = 0; i < params.length; i++) {
             var p = params[i]
+            // The variadic parameter collects the remaining positions, then every
+            // named argument no earlier parameter took, under its name.
             if (p.variadic === true) {
                 var rest = newArr()
                 for (var j = i; j < pos.length; j++) { arrPush(rest, pos[j]) }
+                if (named != null) {
+                    for (var q = 0; q < argset.nkeys.length; q++) {
+                        var nk = argset.nkeys[q]
+                        var took = false
+                        for (var r = 0; r < i; r++) { if (params[r].name == nk) { took = true } }
+                        if (!took) { arrSet(rest, nk.substring(1), named[nk]) }
+                    }
+                }
                 declVar(p.name, rest)
                 return
             }
@@ -2016,11 +2030,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 
     // ----- numeric strings -----
     // A string is numeric when it is an optionally signed decimal / float, with
-    // leading and trailing whitespace allowed (PHP 8). numStrVal answers the number
-    // (int or float box) or null when the string is not numeric at all.
-    function numStrVal(s) {
+    // leading and trailing whitespace allowed (PHP 8). numScan reads the numeric
+    // PREFIX the two readings share: leading whitespace, then the number with its
+    // exponent, answering {st, en, isF} or null when no digit was seen. numStrVal
+    // answers the number (int or float box) or null when the string is not numeric
+    // at all. Twin of phpNumScan in abnf/jsrtphp.go and phNumScan in
+    // lib/php-rt.metajs.
+    function phpIsSpace(c) { return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12 }
+    function numScan(s) {
         var i = 0
-        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i++ }
+        while (i < s.length && phpIsSpace(s.charCodeAt(i))) { i++ }
         var st = i
         if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
         var digits = 0
@@ -2040,11 +2059,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++; ed++ }
             if (ed == 0) { i = save } else { isF = true }
         }
-        var en = i
-        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i++ }
+        return {st: st, en: i, isF: isF}
+    }
+    function numScanVal(s, sc) {
+        var txt = s.substring(sc.st, sc.en)
+        return sc.isF ? mkFlo(parseFloat(txt)) : intStrVal(txt)
+    }
+    function numStrVal(s) {
+        var sc = numScan(s)
+        if (sc == null) { return null }
+        var i = sc.en
+        while (i < s.length && phpIsSpace(s.charCodeAt(i))) { i++ }
         if (i != s.length) { return null }
-        var txt = s.substring(st, en)
-        return isF ? mkFlo(parseFloat(txt)) : intStrVal(txt)
+        return numScanVal(s, sc)
     }
     // The int a DIGIT RUN denotes, promoted to a float when it does not fit in 64
     // bits: is_numeric_string reports IS_DOUBLE for "9223372036854775808", so
@@ -2077,22 +2104,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isArr(v)) { fail("unsupported operand type: array used as a number") }
         return 0
     }
-    // A non-numeric string still contributes its numeric PREFIX ("12abc" -> 12).
+    // A non-numeric string still contributes its numeric PREFIX, exponent and
+    // leading whitespace included: "12abc" is 12, " 5e1 z" is 50.0.
     function leadingNum(s) {
-        var i = 0
-        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
-        var d = 0
-        while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++; d++ }
-        var isF = false
-        if (i < s.length && s.charAt(i) == ".") {
-            var j = i + 1
-            var fd = 0
-            while (j < s.length && s.charAt(j) >= "0" && s.charAt(j) <= "9") { j++; fd++ }
-            if (fd > 0 || d > 0) { isF = true; i = j; d += fd }
-        }
-        if (d == 0) { return 0 }
-        var txt = s.substring(0, i)
-        return isF ? mkFlo(parseFloat(txt)) : intStrVal(txt)
+        var sc = numScan(s)
+        if (sc == null) { return 0 }
+        return numScanVal(s, sc)
     }
 
     // ----- PHP truthiness: false, 0, 0.0, "", "0", [] and null are falsy. -----
@@ -3400,7 +3417,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     // Calling a value: a closure, a function NAME held in a string (PHP's variable
-    // functions), or an object with __invoke.
+    // functions), a static method named 'C::m', an [object, 'm'] or ['C', 'm'] pair,
+    // or an object with __invoke. Twin of php_callable in php-to-llvm-ir.abnf.
     function phpInvoke(cur, argset) {
         if (isPartial(argset)) {
             var pv = cur
@@ -3408,7 +3426,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (argset.fcc === true) { return asCallable(cur) }
         if (typeof cur == "function") { return cur(argset) }
-        if (typeof cur == "string") { return callNamed(cur, argset) }
+        if (typeof cur == "string") {
+            var sep = cur.indexOf("::")
+            if (sep > 0) {
+                var cn = cur.substring(0, sep)
+                return staticCall(resolveClassName(cn), cur.substring(sep + 2), argset, cn)
+            }
+            return callNamed(cur, argset)
+        }
+        if (isArr(cur) && cur.keys.length == 2) {
+            var recv = anytype
+            recv = arrGet(cur, 0)
+            var mname = phpStr(arrGet(cur, 1))
+            if (isObj(recv)) { return mcall(recv, mname, argset) }
+            var rn = phpStr(recv)
+            return staticCall(resolveClassName(rn), mname, argset, rn)
+        }
         if (isObj(cur)) {
             var m = classFind(cur.__class, "__invoke")
             if (m != null) { return m(cur, argset) }
@@ -3433,8 +3466,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function asCallable(cur) {
         if (typeof cur == "function") { return cur }
-        var nm = phpStr(cur)
-        return function(argset) { return callNamed(nm, argset) }
+        var cv = anytype
+        cv = cur
+        return function(argset) { return phpInvoke(cv, argset) }
     }
     function callNamed(name, argset) {
         if (hasOwn(phpBuiltins, name)) { return phpBuiltins[name].apply(undefined, argset.pos) }
@@ -3586,11 +3620,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A FORWARDING base (self / static / parent) hands $this and the current static::
     // binding on, which is what makes parent::describe() run against this object and
     // static::who() resolve in the called class.
+    // 'C::$m()' is not the static property called: the variable $m holds the
+    // METHOD name (PHP's static_member call form), so the call reads the variable.
     function staticAccess(cls, name, prop, args, baseText) {
-        var forwards = (baseText == "self" || baseText == "static" || baseText == "parent")
         if (prop != null) {
-            if (args != null) { fail("cannot call a static property") }
-            return deref(staticCell(cls, prop).v)
+            if (args == null) { return deref(staticCell(cls, prop).v) }
+            return staticCall(cls, phpStr(getVar("$" + prop)), evalArgs(args), baseText)
         }
         if (name == "class" && args == null) { return fullName(cls) }
         if (args == null) {
@@ -3598,7 +3633,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (cr != null) { return cr.v }
             fail("unknown class constant " + cls.__name + "::" + name)
         }
-        var argset = evalArgs(args)
+        return staticCall(cls, name, evalArgs(args), baseText)
+    }
+    // The call half of a '::' access, also reached by a callable that names a
+    // static method ('C::m' or ['C', 'm']).
+    function staticCall(cls, name, argset, baseText) {
+        var forwards = (baseText == "self" || baseText == "static" || baseText == "parent")
         var m = classFind(cls, name)
         if (m == null) { m = classFind(cls, phsCase(name, false)) }
         if (m == null && cls.__isenum === true) {

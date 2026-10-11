@@ -1965,6 +1965,50 @@ function s47() {
     check("ex14", $ap === [1, 5]);
 }
 
+// ===== SECTION 48: callable forms, calls through a value, numeric prefixes =====
+// A callable is a closure, a function name, 'C::m', [$obj, 'm'] or ['C', 'm']
+// (call_user_func / array_map take all of them). A call through a value places
+// named arguments and a variadic tail as a direct call does; the variadic
+// parameter also collects the named arguments no parameter took. '$cn::m()' calls
+// through a class NAME in a string, and 'C::$m()' calls the static METHOD named by
+// $m. A leading-numeric string contributes its whole numeric prefix, leading
+// whitespace and exponent included: "1.5e3abc" + 0 is 1500.0.
+class S48K {
+    public $v = 7;
+    static function s($a = 0) { return "s" . $a; }
+    function m($a = 1, $b = 2) { return "m" . $this->v . $a . $b; }
+    static function sum(...$xs) { return array_sum($xs); }
+    function isum(...$xs) { return array_sum($xs); }
+}
+function s48v($a, ...$r) { return $a . ":" . implode(",", $r) . ":" . implode(",", array_keys($r)); }
+function s48() {
+    $o = new S48K();
+    $f = ["S48K", "s"];
+    $g = [$o, "m"];
+    $h = "S48K::s";
+    check("dcl1", $f(1) === "s1" && $g() === "m712" && $h(3) === "s3");
+    check("dcl2", call_user_func($f, 4) === "s4" && call_user_func_array($g, [5]) === "m752" && call_user_func($h, 6) === "s6");
+    check("dcl3", array_map($f, [1, 2]) === ["s1", "s2"] && array_map($g, [1, 2]) === ["m712", "m722"]);
+    check("dcl4", call_user_func([$o, "isum"], 1, 2, 3) === 6 && call_user_func(["S48K", "sum"], 1, 2, 3) === 6
+        && call_user_func($g, b: 5) === "m715");
+    $c = function($x, $y = 7) { return $x * 10 + $y; };
+    check("dna1", $c(y: 5, x: 4) === 45 && $c(x: 4) === 47 && $c(4, y: 1) === 41);
+    $kw = ["y" => 2, "x" => 1];
+    check("dna2", $c(...$kw) === 12 && $c(...[3, "y" => 2]) === 32 && call_user_func($c, y: 6, x: 1) === 16);
+    $v = function($a, ...$r) { return $a . ":" . implode(",", $r) . ":" . implode(",", array_keys($r)); };
+    $n = "s48v";
+    check("dna3", $v(1, 2, 3) === "1:2,3:0,1" && $n(1, 2, 3) === "1:2,3:0,1" && $v(a: 9) === "9::");
+    check("dna4", s48v(1, ...["k" => 2]) === "1:2:k" && $v(1, ...["k" => 2]) === "1:2:k");
+    $fi = $o->isum(...);
+    check("dna5", S48K::sum(1, 2, 3) === 6 && S48K::s(a: 5) === "s5" && $fi(1, 2) === 3);
+    $t = "S48K";
+    $mn = "s";
+    check("dst1", $t::s(9) === "s9" && S48K::$mn(8) === "s8" && $t::sum(1, 2, 3) === 6);
+    $xs = ["1.5e3abc", "12e2x", " 5e1 z", "\t-2.5E-1q", "7e", ".5e1y"];
+    check("npf1", @($xs[0] + 0) === 1500.0 && @($xs[1] + 0) === 1200.0 && @($xs[2] + 0) === 50.0 && @($xs[3] + 0) === -0.25);
+    check("npf2", @($xs[4] + 0) === 7 && @($xs[5] + 0) === 5.0 && (int)$xs[0] === 1500 && (int)$xs[2] === 50);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2018,6 +2062,7 @@ function main() {
     s45(); // SECTION-CALL 45
     s46(); // SECTION-CALL 46
     s47(); // SECTION-CALL 47
+    s48(); // SECTION-CALL 48
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
