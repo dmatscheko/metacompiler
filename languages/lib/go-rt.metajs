@@ -1460,6 +1460,110 @@ function goErrUnwrap(err) {
     if (m !== undefined) { r = m(err) }
     return r
 }
+// `err == target` between two errors. A type whose Error method has a POINTER
+// receiver only implements error through a pointer, so two such errors are equal
+// only when they are the same object; anything else compares as goValueEq does.
+// Twin of goErrEq in languages/go-interpreter.abnf and abnf/jsrtgolang.go.
+function goErrEq(a, b) {
+    var ca = goClassOf(a)
+    if (ca !== undefined && ca === goClassOf(b) && ca["__ptr$Error"] === true) { return a === b }
+    return goValueEq(a, b)
+}
+
+// errors.Join over its non-nil operands: nil for none, else an *errors.joinError
+// whose text is theirs joined by newlines and whose Unwrap is the list. Twin of
+// goErrJoin in languages/go-interpreter.abnf and abnf/jsrtgolang.go.
+function goErrJoin(errs) {
+    if (errs.length == 0) { return null }
+    var msg = ""
+    var i = 0
+    while (i < errs.length) {
+        if (i > 0) { msg = msg + "\n" }
+        var em = goMeth(errs[i], "Error")
+        if (em !== undefined) { msg = msg + gopStr(em(errs[i])) } else { msg = msg + gopStr(errs[i]) }
+        i = i + 1
+    }
+    return goErrNew("*errors.joinError", {msg: msg, errs: errs})
+}
+
+// The scope along o's chain that holds the name k, or undefined.
+function goCellScope(o, k) {
+    var s = anytype
+    s = o
+    while (s !== undefined && !scopeHas(s, k)) { s = scopeParent(s) }
+    return s
+}
+
+// errors.As (errors/wrap.go): the first error in err's tree, depth first, that the
+// target's element type accepts - or whose As method takes the target - is stored
+// through the target. A pointer cell carries that type as `as` (makeAddrVar in
+// go-to-llvm-ir.abnf: "i:" and a method set, or "t:" and a type name), because a
+// nil pointer has none; a struct variable is its own target and takes the match's
+// fields. Twin of goErrAs in languages/go-interpreter.abnf and abnf/jsrtgolang.go.
+function goErrAs(err, target) {
+    if (target === undefined || target === null) { throw "errors: target cannot be nil" }
+    var want = ""
+    var cls = anytype
+    cls = undefined
+    var tc = goClassOf(target)
+    var cell = tc !== undefined && goStrOf(tc.__name) == "$ptr"
+    var sc = anytype
+    sc = undefined
+    var key = ""
+    if (cell) {
+        key = goStrOf(target.k)
+        sc = goCellScope(target.o, key)
+        if (goHas(target, "as")) { want = goStrOf(target.as) }
+        else if (sc !== undefined) { cls = goClassOf(scopeGet(sc, key)) }
+    } else {
+        cls = tc
+    }
+    if (want == "" && cls === undefined) { fail("errors.As: the target's type is not known here") }
+    var hit = goErrAsFind(err, want, cls, target)
+    if (hit === null) { return false }
+    if (hit.via) { return true }
+    if (cell) {
+        if (sc !== undefined) { scopeDecl(sc, key, hit.v) }
+        return true
+    }
+    var fs = tc.__fields
+    var i = 0
+    while (i < fs.length) {
+        target[fs[i]] = hit.v[fs[i]]
+        i = i + 1
+    }
+    return true
+}
+function goErrAsFind(err, want, cls, target) {
+    var cur = anytype
+    cur = err
+    while (cur !== undefined && cur !== null) {
+        var ok = false
+        if (cls !== undefined) { ok = goClassOf(cur) === cls }
+        else if (want.substring(0, 2) == "i:") { ok = goClassOf(cur) !== undefined && goMissingMethod(cur, want.substring(2, want.length)) == "" }
+        else { ok = goTypeIs(cur, want.substring(2, want.length)) == 1 }
+        if (ok) { return {v: cur, via: false} }
+        var am = goMeth(cur, "As")
+        if (am !== undefined && am(cur, target) === true) { return {v: cur, via: true} }
+        var u = anytype
+        u = goErrUnwrap(cur)
+        if (u === undefined || u === null) { return null }
+        var c = goClassOf(u)
+        if (c !== undefined && goStrOf(c.__name) == "$sl") { u = gfHElems(u) }
+        if (Array.isArray(u)) {
+            var i = 0
+            while (i < u.length) {
+                var h = goErrAsFind(u[i], want, cls, target)
+                if (h !== null) { return h }
+                i = i + 1
+            }
+            return null
+        }
+        cur = u
+    }
+    return null
+}
+
 // errors.Is (errors/wrap.go): err itself, its Is(target) method, then the errors it
 // wraps, depth first.
 function goErrIs(err, target) {
@@ -1467,7 +1571,7 @@ function goErrIs(err, target) {
     var cur = anytype
     cur = err
     while (true) {
-        if (goValueEq(cur, target)) { return true }
+        if (goErrEq(cur, target)) { return true }
         var im = goMeth(cur, "Is")
         if (im !== undefined && im(cur, target) === true) { return true }
         var u = anytype
@@ -1983,9 +2087,40 @@ var goPanics = []
 var goPanicSet = []
 var goDeferAt = []
 
+// Go keeps every panic that has started and not finished on a chain, and reports
+// an unrecovered one with all of them. goActiveAt / goActiveV are the panics whose
+// frames are running their deferred calls (js_gorundefers), oldest first: the
+// frame's goPanics index and the value. A panic's own chain ([{v, rec}], rec when
+// recovered by then) is the active list it was raised under, taken when it first
+// reaches a frame's defers or js_gotop - nothing between its raise and there
+// changes the list. goPanicChain / goPanicChainSet keep it per goPanics entry, and
+// between frames it travels in goFly while goFlyOn and goFlyExc is the value
+// thrown. Twins: goActive in languages/go-interpreter.abnf and goChains in
+// abnf/jsrtgolang.go.
+var goActiveAt = []
+var goActiveV = []
+var goPanicChain = []
+var goPanicChainSet = []
+var goFly = []
+var goFlyExc = anytype
+var goFlyOn = false
+
+function goChainNow() {
+    var out = []
+    var i = 0
+    while (i < goActiveAt.length) {
+        var at = goActiveAt[i]
+        out.push({v: goActiveV[i], rec: at >= goPanics.length || !goPanicSet[at]})
+        i = i + 1
+    }
+    return out
+}
+
 function js_gotry(fn) {
     goPanics.push(undefined)
     goPanicSet.push(false)
+    goPanicChain.push([])
+    goPanicChainSet.push(false)
     var res = anytype
     res = undefined
     try {
@@ -1993,6 +2128,11 @@ function js_gotry(fn) {
     } catch (e) {
         goPanics[goPanics.length - 1] = e
         goPanicSet[goPanicSet.length - 1] = true
+        if (goFlyOn && goFlyExc === e) {
+            goPanicChain[goPanicChain.length - 1] = goFly
+            goPanicChainSet[goPanicChainSet.length - 1] = true
+        }
+        goFlyOn = false
         res = undefined
     }
     return res
@@ -2022,21 +2162,63 @@ function js_gotop() {
     if (n < 0) { return undefined }
     var p = goPanics[n]
     var had = goPanicSet[n]
+    var ch = goPanicChain[n]
+    if (!goPanicChainSet[n]) { ch = goChainNow() }
     goPanics.pop()
     goPanicSet.pop()
+    goPanicChain.pop()
+    goPanicChainSet.pop()
     if (!had) { return undefined }
-    eprintln("panic: " + gopStr(p))
+    goPanicReport(ch, p)
     exit(2)
     return undefined
+}
+
+// An unrecovered panic as Go reports it, one line each: its chain comes first,
+// oldest first, each later one indented by a tab and a recovered one marked
+// " [recovered]". A panic raised again with the very value it aborted is printed
+// once, marked " [recovered, repanicked]" (go 1.23+). Twins: goPanicReport in
+// languages/go-interpreter.abnf and abnf/jsrtgolang.go.
+function goPanicReport(ch, p) {
+    var vs = []
+    var recs = []
+    var i = 0
+    while (i < ch.length) {
+        vs.push(ch[i].v)
+        recs.push(ch[i].rec)
+        i = i + 1
+    }
+    vs.push(p)
+    recs.push(false)
+    var k = 0
+    while (k < vs.length) {
+        if (k == 0 || vs[k] !== vs[k - 1]) {
+            var ln = "panic: " + gopStr(vs[k])
+            if (k > 0) { ln = "\t" + ln }
+            if (recs[k] && k + 1 < vs.length && vs[k + 1] === vs[k]) { ln = ln + " [recovered, repanicked]" }
+            else if (recs[k]) { ln = ln + " [recovered]" }
+            eprintln(ln)
+        }
+        k = k + 1
+    }
 }
 
 function js_gorepanic() {
     var n = goPanics.length - 1
     var p = goPanics[n]
     var had = goPanicSet[n]
+    var ch = goPanicChain[n]
+    var chSet = goPanicChainSet[n]
     goPanics.pop()
     goPanicSet.pop()
-    if (had) { throw p }
+    goPanicChain.pop()
+    goPanicChainSet.pop()
+    if (had) {
+        goFly = ch
+        goFlyExc = p
+        goFlyOn = chSet
+        throw p
+    }
     return undefined
 }
 
@@ -2236,11 +2418,12 @@ function js_gopanic(args) {
     v = undefined
     if (Array.isArray(args) && args.length > 0) { v = args[0] }
     if (v === undefined || v === null) { v = goPanicNil() }
+    goFlyOn = false
     throw v
 }
 
 // fmt.Errorf and the errors package: mode 0 errors.New, 1 fmt.Errorf, 2 errors.Is,
-// 3 errors.Unwrap (declared in buildMain, languages/go-to-llvm-ir.abnf). The twin is
+// 3 errors.Unwrap, 4 errors.As, 5 errors.Join (declared in buildMain, languages/go-to-llvm-ir.abnf). The twin is
 // js_goerrors in abnf/jsrtgolang.go.
 function js_goerrors(args, mode) {
     var m = goIdx(mode)
@@ -2252,6 +2435,16 @@ function js_goerrors(args, mode) {
         return goErrorf(msg, rest, wrap.idx)
     }
     if (m == 2) { return goErrIs(args[0], args[1]) }
+    if (m == 4) { return goErrAs(args[0], args[1]) }
+    if (m == 5) {
+        var js = []
+        var ji = 0
+        while (ji < args.length) {
+            if (args[ji] !== undefined && args[ji] !== null) { js.push(args[ji]) }
+            ji = ji + 1
+        }
+        return goErrJoin(js)
+    }
     var u = anytype
     u = goErrUnwrap(args[0])
     if (Array.isArray(u)) { return null }
@@ -2277,10 +2470,21 @@ function js_gorecover() {
 // Runs collected [f, args] pairs LIFO (Go defer). goDeferAt records WHICH frame
 // these defers belong to, for a recover() inside one of them, and is popped even
 // when a defer panics itself - MetaJS has no `finally` here, so the unwinding
-// path pops it explicitly and rethrows.
-function js_rundefers(list) {
-    if (!Array.isArray(list)) { fail("js_rundefers needs the defer list") }
-    goDeferAt.push(goPanics.length - 1)
+// path pops it explicitly and rethrows. While they run for the frame's own panic,
+// that panic is ACTIVE (goActiveAt).
+function js_gorundefers(list) {
+    if (!Array.isArray(list)) { fail("js_gorundefers needs the defer list") }
+    var at = goPanics.length - 1
+    goDeferAt.push(at)
+    var orig = at >= 0 && goPanicSet[at]
+    if (orig) {
+        if (!goPanicChainSet[at]) {
+            goPanicChain[at] = goChainNow()
+            goPanicChainSet[at] = true
+        }
+        goActiveAt.push(at)
+        goActiveV.push(goPanics[at])
+    }
     try {
         var i = list.length - 1
         while (i >= 0) {
@@ -2294,9 +2498,22 @@ function js_rundefers(list) {
         }
     } catch (e) {
         goDeferAt.pop()
+        if (orig) {
+            if (!(goFlyOn && goFlyExc === e)) {
+                goFly = goChainNow()
+                goFlyExc = e
+                goFlyOn = true
+            }
+            goActiveAt.pop()
+            goActiveV.pop()
+        }
         throw e
     }
     goDeferAt.pop()
+    if (orig) {
+        goActiveAt.pop()
+        goActiveV.pop()
+    }
     return undefined
 }
 

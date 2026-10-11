@@ -2927,6 +2927,56 @@ func s46() {
 	check("ef10", fmt.Sprintf("%q|%v", fmt.Errorf("q"), fmt.Errorf("%+w!", base46)) == "\"q\"|base!")
 }
 
+// ===== SECTION 47: errors.As and errors.Join, pointer errors, a spread method call =====
+// Every expected value was read off `go run` (go 1.27). errors.As stores the first
+// error in the tree its target's type accepts; the type of a nil pointer target is
+// its declaration's. An error type with a pointer-receiver Error method is only an
+// error as a pointer, so errors.Is compares those by identity.
+type NF47 struct{ Name string }
+
+func (e *NF47) Error() string { return "not found: " + e.Name }
+
+type T47 struct{ Code int }
+
+func (t T47) Error() string   { return fmt.Sprint("t", t.Code) }
+func (t T47) Temporary() bool { return true }
+
+type temp47 interface{ Temporary() bool }
+
+var nfs47 = []*NF47{{"a"}, {"b"}}
+
+func find47(i int) error { return nfs47[i] }
+
+type acc47 struct{ n int }
+
+func (a *acc47) add(xs ...int) int {
+	for _, x := range xs {
+		a.n += x
+	}
+	return a.n
+}
+
+func s47() {
+	ks := []int{0, 1, 2}
+	errs := []error{fmt.Errorf("l: %w", find47(ks[0])), fmt.Errorf("o: %w", fmt.Errorf("i: %w", T47{7})), errors.New("p")}
+	var nf *NF47
+	var tp T47
+	var tm temp47
+	var ee error
+	check("as1", errors.As(errs[0], &nf) && nf.Name == "a" && !errors.As(errs[1], &nf) && nf.Name == "a")
+	check("as2", errors.As(errs[1], &tp) && tp.Code == 7 && errors.As(errs[1], &tm) && tm.Temporary() && !errors.As(errs[2], &tm))
+	check("as3", errors.As(errs[2], &ee) && ee.Error() == "p")
+	j := errors.Join(errs[2], nil, nfs47[1])
+	var nf2 *NF47
+	check("jn1", j.Error() == "p\nnot found: b" && errors.As(j, &nf2) && nf2.Name == "b" && errors.Is(j, errs[2]))
+	check("jn2", errors.Join(nil, nil) == nil && errors.Unwrap(j) == nil)
+	check("ei1", errors.Is(errs[0], find47(ks[0])) && !errors.Is(errs[0], &NF47{"a"}) && !errors.Is(errs[0], find47(ks[1])))
+	ys := []any{1, "a", 2.5}
+	a := &acc47{}
+	ns := []int{4, 5}
+	check("sp1", fmt.Sprint(ys...) == fmt.Sprint(1, "a", 2.5) && a.add(ns...) == 9 && a.add() == 9)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -2974,6 +3024,7 @@ func main() {
 	s44() // SECTION-CALL 44
 	s45() // SECTION-CALL 45
 	s46() // SECTION-CALL 46
+	s47() // SECTION-CALL 47
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

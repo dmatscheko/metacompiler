@@ -816,7 +816,7 @@ TypeArgsSfx  = TypeArgsMany | TypeArgsKw ;
 TypeArgsMany = "[" Type "," Type { "," Type } "]" ;
 TypeArgsKw   = "[" NonExprT "]" ;
 NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
@@ -1443,6 +1443,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     hostGlobals["errors"] = {
         New: function(text) { return goErrNew("*errors.errorString", {msg: text}) },
         Is: function(err, target) { return goErrIs(err, target) },
+        As: function(err, target) { return goErrAs(err, target) },
+        Join: function() {
+            var errs = []
+            for (var i = 0; i < arguments.length; i++) {
+                if (arguments[i] !== undefined && arguments[i] !== null) { errs.push(arguments[i]) }
+            }
+            return goErrJoin(errs)
+        },
         Unwrap: function(err) {
             var u = goErrUnwrap(err)
             if (isSl(u) || Array.isArray(u)) { return null }
@@ -1828,6 +1836,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         return {kind: "call", args: args, spread: spread}
     }
+    // `.m(args)`, whose last argument may be spread too (`fmt.Println(ys...)`).
+    // The twin is makeMethodSfx in go-to-llvm-ir.abnf.
+    function makeMethodSfx(name, items) {
+        var c = makeCallSfx(items)
+        return {kind: "mcall", name: name, args: c.args, spread: c.spread}
+    }
     function makeSliceSfx(items) {
         var lo = null, hi = null, mx = null
         for (var i = 0; i < items.length; i++) {
@@ -2111,6 +2125,79 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (m !== undefined) { r = m(err) }
         return r
     }
+    // errors.Join over its non-nil operands: nil for none, else an *errors.joinError
+    // whose text is theirs joined by newlines and whose Unwrap is the list. Twin of
+    // goErrJoin in lib/go-rt.metajs and abnf/jsrtgolang.go.
+    function goErrJoin(errs) {
+        if (errs.length == 0) { return null }
+        var msg = ""
+        for (var i = 0; i < errs.length; i++) {
+            var em = goMeth(errs[i], "Error")
+            msg = msg + (i > 0 ? "\n" : "") + (em !== undefined ? em(errs[i]) : gstr(errs[i]))
+        }
+        return goErrNew("*errors.joinError", {msg: msg, errs: errs})
+    }
+    // `err == target` between two errors. A type whose Error method has a POINTER
+    // receiver only implements error through a pointer, so two such errors are
+    // pointers and equal only when they are the same one - here, the same object.
+    // Anything else compares as goEq does (a pointer and a value are one object in
+    // this value model). Twin of goErrEq in lib/go-rt.metajs and abnf/jsrtgolang.go.
+    function goErrEq(a, b) {
+        if (goIsInstance(a) && goIsInstance(b) && a.__class === b.__class && a.__class["__ptr$Error"] === true) { return a === b }
+        return goEq(a, b)
+    }
+    // errors.As (errors/wrap.go): the first error in err's tree, depth first, that
+    // the target's element type accepts - or whose As method takes the target - is
+    // stored through the target. That type is the target variable's DECLARED one
+    // (`var pe *E`, which makeAddrVar records on the cell as ty), because a nil
+    // pointer carries none; a struct variable is its own target and takes the
+    // match's fields. *E and E accept the same errors: a pointer and a value are one
+    // object in this value model. Twins: goErrAs in lib/go-rt.metajs and
+    // abnf/jsrtgolang.go.
+    function goErrAs(err, target) {
+        if (target === undefined || target === null) { throw {__gopanic: true, v: "errors: target cannot be nil"} }
+        var want = ""
+        var cls = anytype
+        cls = null
+        if (isPtr(target)) {
+            if (target.ty != undefined) { want = target.ty }
+            else if (goIsInstance(ptrGet(target))) { cls = ptrGet(target).__class }
+        } else if (goIsInstance(target)) { cls = target.__class }
+        if (want == "" && cls == null) { fail("errors.As: the target's type is not known here") }
+        var hit = goErrAsFind(err, want, cls, target)
+        if (hit == null) { return false }
+        if (hit.via) { return true }
+        if (isPtr(target)) { ptrSet(target, hit.v) } else {
+            var fs = target.__class.__fields
+            for (var i = 0; i < fs.length; i++) { target[fs[i]] = hit.v[fs[i]] }
+        }
+        return true
+    }
+    function goErrAsFind(err, want, cls, target) {
+        var cur = anytype
+        cur = err
+        while (cur !== undefined && cur !== null) {
+            var ok = false
+            if (cls != null) { ok = goIsInstance(cur) && cur.__class === cls }
+            else if (want.charAt(0) == "*") { ok = goTypeIs(cur, want.substring(1)) == 1 }
+            else { ok = typeMatches(want, cur) }
+            if (ok) { return {v: cur, via: false} }
+            var am = goMeth(cur, "As")
+            if (am !== undefined && am(cur, target) == true) { return {v: cur, via: true} }
+            var u = anytype
+            u = goErrUnwrap(cur)
+            if (isSl(u)) { u = slElems(u) }
+            if (Array.isArray(u)) {
+                for (var i = 0; i < u.length; i++) {
+                    var h = goErrAsFind(u[i], want, cls, target)
+                    if (h != null) { return h }
+                }
+                return null
+            }
+            cur = u
+        }
+        return null
+    }
     // errors.Is (errors/wrap.go): err itself, its Is(target) method, then the errors
     // it wraps, depth first.
     function goErrIs(err, target) {
@@ -2118,7 +2205,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var cur = anytype
         cur = err
         while (true) {
-            if (goEq(cur, target)) { return true }
+            if (goErrEq(cur, target)) { return true }
             var im = goMeth(cur, "Is")
             if (im !== undefined && im(cur, target) == true) { return true }
             var u = anytype
@@ -3767,13 +3854,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // &name. A value that is ALREADY a reference (a struct, a slice, a map) is its own
     // pointer, so only a scalar - and a pointer variable, for &p - gets a cell.
     function makeAddrVar(name) {
+        var dty = hasOwn(goDeclTys, "$" + name) ? goDeclTys["$" + name] : ""
         return function() {
             var v = getVar(name)
             // An ARRAY is a VALUE in Go, and every assignment of one copies it
             // (goVal). So &arr cannot be the array: `h := &arr` would hand h a copy
             // and `h[0] = 5` would be lost. It gets a real cell, like a scalar.
             if (v != undefined && v != null && typeof v == "object" && !isPtr(v) && !Array.isArray(v)) { return v }
-            return varCell(name)
+            var cell = varCell(name)
+            if (dty != "") { cell.ty = dty }
+            return cell
         }
     }
     function makeDeref(t) {
@@ -3924,6 +4014,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }
         return v
     }
+    // The type a `var x T` declaration wrote for each name, at walk time and by name
+    // (the latest declaration in the source wins). &x carries it for errors.As, which
+    // needs the static type of a nil pointer. Twin of goDeclTys in go-to-llvm-ir.abnf.
+    var goDeclTys = {}
     function makeVarDecl(items) {
         var names = []
         var i = 0
@@ -3933,6 +4027,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         var ty = ""
         if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
+        if (ty != "") { for (var dn = 0; dn < names.length; dn++) { goDeclTys["$" + names[dn]] = ty } }
         var inits = items.slice(i)
         return function() {
             if (inits.length == 0) {
@@ -4983,9 +5078,45 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     hostGlobals["recover"] = function() {
         if (!panicking) { return null }
         panicking = false
+        if (goActive.length > 0) { goActive[goActive.length - 1].rec = true }
         var v = panicVal
         panicVal = null
         return v
+    }
+    // Go keeps every panic that has started and not finished on a chain, and reports
+    // an unrecovered one with all of them. goActive is the panics whose frames are
+    // running their deferred calls, oldest first, as {v, rec} (rec once recovered). A
+    // panic's own chain is the goActive it was raised under, taken when it first
+    // reaches a frame's defers or the top - nothing between its raise and there can
+    // change goActive. Twins: goActive in lib/go-rt.metajs and in jsrtgolang.go.
+    var goActive = []
+    function goChainOf(e) {
+        if (e.chain == undefined || e.chain == null) { e.chain = goActive.slice(0) }
+        return e.chain
+    }
+    // An unrecovered panic as Go reports it, one line each: its chain comes first,
+    // oldest first, each later one indented by a tab and a recovered one
+    // marked " [recovered]". A panic raised again with the very value it aborted is
+    // printed once, marked " [recovered, repanicked]" (go 1.23+). Value identity
+    // stands in for Go's interface identity, so an equal string or number counts as
+    // the same value. Twins: goPanicReport in lib/go-rt.metajs and in
+    // abnf/jsrtgolang.go.
+    function goPanicReport(e) {
+        var ch = goChainOf(e)
+        var vs = []
+        var recs = []
+        for (var i = 0; i < ch.length; i++) { vs.push(ch[i].v); recs.push(ch[i].rec) }
+        vs.push(e.v)
+        recs.push(false)
+        var lines = []
+        for (var k = 0; k < vs.length; k++) {
+            if (k > 0 && vs[k] === vs[k - 1]) { continue }
+            var ln = (k > 0 ? "\t" : "") + "panic: " + gstr(vs[k])
+            if (recs[k] && k + 1 < vs.length && vs[k + 1] === vs[k]) { ln += " [recovered, repanicked]" }
+            else if (recs[k]) { ln += " [recovered]" }
+            lines.push(ln)
+        }
+        return lines
     }
     // The value an UNNAMED-result function answers when its body produced no return
     // signal: one zero, or an array of them, or undefined when it declares no result.
@@ -5042,13 +5173,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (rl.length == 1) { setVar(rl[0], res.v) }
             else { var rvs = goMvArr(res.v); for (var k = 0; k < rl.length; k++) { setVar(rl[k], rvs[k]) } }
         }
-        runDefers(frame)
+        if (caught == null) { runDefers(frame) } else {
+            goChainOf(caught)
+            goActive.push({v: caught.v, rec: false})
+            try {
+                runDefers(frame)
+            } catch (e2) {
+                if (e2 != undefined && e2 != null && e2.__gopanic == true) {
+                    goChainOf(e2)
+                    panicking = false
+                    panicVal = null
+                }
+                goActive.pop()
+                throw e2
+            }
+            goActive.pop()
+        }
         if (panicking) {
             panicking = false
             var pv = panicVal
             panicVal = null
             scopes = saved
-            throw {__gopanic: true, v: pv}
+            throw {__gopanic: true, v: pv, chain: caught == null ? null : caught.chain}
         }
         if (rl.length > 0) {
             if (rl.length == 1) { out = getVar(rl[0]) }
@@ -5253,7 +5399,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 // runtime panic's value already reads "runtime error: <msg>" (see
                 // goRTPanic). The twins are js_gotop in languages/lib/go-rt.metajs
                 // and in abnf/jsrtgolang.go.
-                eprintln("panic: " + gstr(e.v))
+                var pl = goPanicReport(e)
+                for (var li = 0; li < pl.length; li++) { eprintln(pl[li]) }
                 exit(2)
             }
             throw e

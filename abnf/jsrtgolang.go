@@ -109,6 +109,16 @@ func init() {
 				return rt.wrap(goErrorf(msg, rest, idx))
 			case 2:
 				return rt.wrap(rt.goErrIs(arg(0), arg(1)))
+			case 4:
+				return rt.wrap(rt.goErrAs(arg(0), arg(1)))
+			case 5:
+				var errs []interface{}
+				for _, e := range arr.elems {
+					if !isUndefOrNull(e) {
+						errs = append(errs, e)
+					}
+				}
+				return rt.wrap(rt.goErrJoin(errs))
 			default:
 				un := rt.goErrUnwrap(arg(0))
 				if _, isList := un.(*jsArray); isList || goIsSlice(un) {
@@ -735,6 +745,80 @@ func (rt *jsrt) gopBad(f gopFlags, verb rune, v interface{}) string {
 	g := f
 	g.plusV = false
 	return "%!" + string(verb) + "(" + rt.gopTyPrefix(v) + rt.gopArg(g, v, 'v', 0, true) + ")"
+}
+
+// Go keeps every panic that has started and not finished on a chain, and reports an
+// unrecovered one with all of them. goChains.active is, per runtime, the panics whose
+// frames are running their deferred calls (js_gorundefers), oldest first: the frame's
+// goPanics index and the thrown value. A panic's own chain is the active list it was
+// raised under, taken when it first reaches a frame's defers or js_gotop - nothing
+// between its raise and there changes the list - and kept by its thrown value, a
+// fresh *jsThrown per panic that is re-raised as itself. A goAbort is one entry,
+// rec when it was recovered by then. Twins: goActive in languages/go-interpreter.abnf
+// and lib/go-rt.metajs.
+type goAbort struct {
+	v   interface{}
+	rec bool
+}
+
+type goActiveEnt struct {
+	at   int
+	orig interface{}
+}
+
+var goChains = struct {
+	sync.Mutex
+	active map[*jsrt][]goActiveEnt
+	chain  map[*jsThrown][]goAbort
+}{active: map[*jsrt][]goActiveEnt{}, chain: map[*jsThrown][]goAbort{}}
+
+// goChainOf is the chain of the thrown value p, taken now if it has none yet. The
+// caller holds goChains.
+func (rt *jsrt) goChainOf(p interface{}) []goAbort {
+	t, isT := p.(*jsThrown)
+	if isT {
+		if c, has := goChains.chain[t]; has {
+			return c
+		}
+	}
+	act := goChains.active[rt]
+	c := make([]goAbort, len(act))
+	for i, e := range act {
+		v := e.orig
+		if et, ok := v.(*jsThrown); ok {
+			v = et.value
+		}
+		c[i] = goAbort{v: v, rec: e.at >= len(rt.goPanics) || rt.goPanics[e.at] == nil}
+	}
+	if isT {
+		goChains.chain[t] = c
+	}
+	return c
+}
+
+// goPanicReport is an unrecovered panic as Go reports it, its chain first (the last
+// entry is the unrecovered panic), oldest first: each later one indented by a tab and a
+// recovered one marked " [recovered]"; a panic raised again with the very value it
+// aborted is printed once, marked " [recovered, repanicked]" (go 1.23+). Twin of
+// goPanicReport in languages/go-interpreter.abnf and lib/go-rt.metajs.
+func (rt *jsrt) goPanicReport(ps []goAbort) string {
+	out := ""
+	for k, p := range ps {
+		if k > 0 && rt.strictEq(p.v, ps[k-1].v) {
+			continue
+		}
+		if k > 0 {
+			out += "\t"
+		}
+		out += "panic: " + rt.gopStr(p.v)
+		if p.rec && k+1 < len(ps) && rt.strictEq(ps[k+1].v, p.v) {
+			out += " [recovered, repanicked]"
+		} else if p.rec {
+			out += " [recovered]"
+		}
+		out += "\n"
+	}
+	return out
 }
 
 // gopAddrs is gfAddr's table, one per runtime: the referents %p has met, in order.
@@ -1852,6 +1936,15 @@ func init() {
 			if p == nil {
 				return 0
 			}
+			if t, ok := p.(*jsThrown); ok {
+				goChains.Lock()
+				chain := rt.goChainOf(t)
+				goChains.Unlock()
+				if len(chain) > 0 {
+					fmt.Fprint(warnWriter, wtf8Clean(rt.goPanicReport(append(chain[:len(chain):len(chain)], goAbort{v: t.value}))))
+					os.Exit(2)
+				}
+			}
 			// THE WORDING IS GO'S OWN (go 1.26.5, on stderr with exit status 2):
 			//
 			//     panic: abort probe
@@ -1872,6 +1965,36 @@ func init() {
 			fmt.Fprint(warnWriter, wtf8Clean("panic: "+text+"\n"))
 			os.Exit(2)
 			return 0
+		}
+		// The frame's deferred calls (the shared js_rundefers). While they run
+		// for the frame's own panic, that panic is ACTIVE (goChains).
+		baseRunDefers := m["js_rundefers"]
+		m["js_gorundefers"] = func(a []uint64) uint64 {
+			at := len(rt.goPanics) - 1
+			if at < 0 || rt.goPanics[at] == nil {
+				return baseRunDefers(a)
+			}
+			orig := rt.goPanics[at]
+			goChains.Lock()
+			rt.goChainOf(orig)
+			goChains.active[rt] = append(goChains.active[rt], goActiveEnt{at: at, orig: orig})
+			goChains.Unlock()
+			defer func() {
+				c := recover()
+				goChains.Lock()
+				if c != nil {
+					rt.goChainOf(c)
+				} else if t, ok := orig.(*jsThrown); ok && rt.goPanics[at] == nil {
+					delete(goChains.chain, t)
+				}
+				act := goChains.active[rt]
+				goChains.active[rt] = act[:len(act)-1]
+				goChains.Unlock()
+				if c != nil {
+					panic(c)
+				}
+			}()
+			return baseRunDefers(a)
 		}
 		// The DIVISOR of an integer '/' or '%', checked before the operator runs.
 		// Go's integer divide by zero is a recoverable run-time panic; the floor's
@@ -2269,7 +2392,7 @@ func goErrClassTable() map[string]*jsObject {
 			return jsNull
 		}}
 	}
-	for _, name := range []string{"*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors"} {
+	for _, name := range []string{"*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors", "*errors.joinError"} {
 		cls := newJSObject()
 		cls.set("__isclass", true)
 		cls.set("__name", name)
@@ -2292,7 +2415,7 @@ func goErrNew(name, msg string, err interface{}) *jsObject {
 	o.set("seq", float64(goErrSeq.Add(1)))
 	if name == "*fmt.wrapError" {
 		o.set("err", err)
-	} else if name == "*fmt.wrapErrors" {
+	} else if name == "*fmt.wrapErrors" || name == "*errors.joinError" {
 		o.set("errs", err)
 	}
 	return o
@@ -2363,6 +2486,132 @@ func (rt *jsrt) goErrUnwrap(err interface{}) interface{} {
 	return jsNull
 }
 
+// goErrEq is `err == target` between two errors. A type whose Error method has a
+// POINTER receiver only implements error through a pointer, so two such errors are
+// equal only when they are the same object; anything else compares as goValueEq
+// does. Twin of goErrEq in languages/go-interpreter.abnf and lib/go-rt.metajs.
+func (rt *jsrt) goErrEq(a, b interface{}) bool {
+	if ca := goClassOf(a); ca != nil && ca == goClassOf(b) && ca.props["__ptr$Error"] == true {
+		return a == b
+	}
+	return rt.goValueEq(a, b)
+}
+
+// goErrJoin is errors.Join over its non-nil operands: nil for none, else an
+// *errors.joinError whose text is theirs joined by newlines and whose Unwrap is the
+// list. Twin of goErrJoin in languages/go-interpreter.abnf and lib/go-rt.metajs.
+func (rt *jsrt) goErrJoin(errs []interface{}) interface{} {
+	if len(errs) == 0 {
+		return jsNull
+	}
+	msg := ""
+	for i, e := range errs {
+		if i > 0 {
+			msg += "\n"
+		}
+		if m := goMeth(e, "Error"); m != nil {
+			msg += rt.gopStr(rt.call(m, jsUndef, []interface{}{e}))
+		} else {
+			msg += rt.gopStr(e)
+		}
+	}
+	return goErrNew("*errors.joinError", msg, &jsArray{elems: errs})
+}
+
+// goErrAs is errors.As (errors/wrap.go): the first error in err's tree, depth
+// first, that the target's element type accepts - or whose As method takes the
+// target - is stored through the target. A pointer cell carries that type as `as`
+// (makeAddrVar in go-to-llvm-ir.abnf: "i:" and a method set, or "t:" and a type
+// name), because a nil pointer has none; a struct variable is its own target and
+// takes the match's fields. Twin of goErrAs in languages/go-interpreter.abnf and
+// lib/go-rt.metajs.
+func (rt *jsrt) goErrAs(err, target interface{}) bool {
+	if isUndefOrNull(target) {
+		panic(&jsThrown{value: "errors: target cannot be nil"})
+	}
+	tc := goClassOf(target)
+	to, _ := target.(*jsObject)
+	want := ""
+	var cls *jsObject
+	var sc *jsScope
+	key := ""
+	cell := tc != nil && tc.props["__name"] == "$ptr"
+	if cell {
+		key = rt.toString(to.props["k"])
+		sc, _ = to.props["o"].(*jsScope)
+		if as, ok := to.props["as"].(string); ok {
+			want = as
+		} else if sc != nil {
+			cls = goClassOf(rt.scopeGet(sc, key))
+		}
+	} else {
+		cls = tc
+	}
+	if want == "" && cls == nil {
+		rt.fail("errors.As: the target's type is not known here")
+	}
+	hit, via, ok := rt.goErrAsFind(err, want, cls, target)
+	if !ok {
+		return false
+	}
+	if via {
+		return true
+	}
+	if cell {
+		if sc != nil {
+			rt.scopeSet(sc, key, hit)
+		}
+		return true
+	}
+	if fs, isArr := tc.props["__fields"].(*jsArray); isArr {
+		ho, _ := hit.(*jsObject)
+		for _, f := range fs.elems {
+			k := rt.toString(f)
+			if ho != nil {
+				to.set(k, ho.props[k])
+			}
+		}
+	}
+	return true
+}
+
+func (rt *jsrt) goErrAsFind(err interface{}, want string, cls *jsObject, target interface{}) (interface{}, bool, bool) {
+	for !isUndefOrNull(err) {
+		ok := false
+		switch {
+		case cls != nil:
+			ok = goClassOf(err) == cls
+		case strings.HasPrefix(want, "i:"):
+			ok = goClassOf(err) != nil && goMissingMethod(rt, err, want[2:]) == ""
+		default:
+			ok = goTypeIs(rt, err, want[2:]) == 1
+		}
+		if ok {
+			return err, false, true
+		}
+		if m := goMeth(err, "As"); m != nil && rt.truthy(rt.call(m, jsUndef, []interface{}{err, target})) {
+			return err, true, true
+		}
+		un := rt.goErrUnwrap(err)
+		var list []interface{}
+		if l, isL := un.(*jsArray); isL {
+			list = l.elems
+		} else if goIsSlice(un) {
+			list, _, _ = rt.gopListParts(un)
+		} else {
+			err = un
+			continue
+		}
+		for _, e := range list {
+			if h, v, found := rt.goErrAsFind(e, want, cls, target); found {
+				return h, v, true
+			}
+		}
+		return nil, false, false
+	}
+	return nil, false, false
+}
+
 // goErrIs is errors.Is (errors/wrap.go): err itself, its Is(target) method, then
 // the errors it wraps, depth first.
 func (rt *jsrt) goErrIs(err, target interface{}) bool {
@@ -2370,7 +2619,7 @@ func (rt *jsrt) goErrIs(err, target interface{}) bool {
 		return rt.goValueEq(err, target)
 	}
 	for {
-		if rt.goValueEq(err, target) {
+		if rt.goErrEq(err, target) {
 			return true
 		}
 		if m := goMeth(err, "Is"); m != nil && rt.truthy(rt.call(m, jsUndef, []interface{}{err, target})) {

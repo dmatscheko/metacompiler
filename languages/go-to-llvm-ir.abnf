@@ -97,7 +97,7 @@ Maps are js_dict_new handles (two parallel key/value arrays keep the insertion o
 with their zero value stored on the map; indexing goes through the polymorphic
 js_map_get/js_pyset externals, range loops through js_range_len/key/val (one emission
 covers ints, slices and maps), and defer collects [f, args] pairs on a per function
-$defers list that js_rundefers runs LIFO before every return.
+$defers list that js_gorundefers runs LIFO before every return.
 The whole program becomes jsmain(env, args), which runs the top level and calls main().
 The entry point is func main(); self checking programs end with os.Exit(failures).
 The same language with the same semantics is interpreted directly by go-interpreter.abnf.") ;
@@ -2451,7 +2451,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // items = [fname, {mname}?, argThunks...]: the function value and the arguments
     // are evaluated at defer time and pushed as a [f, args] pair onto the innermost
-    // function's $defers list; js_rundefers runs them LIFO at every return.
+    // function's $defers list; js_gorundefers runs them LIFO at every return.
     function makeDefer(items) {
         var fnT = items[0].dfn
         var argTs = items.slice(1)
@@ -3417,13 +3417,28 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return emitDerefV(r.b, r.v)
         }
     }
+    // The cell of &x carries, as `as`, what errors.As accepts through it when x was
+    // declared `var x T`: "i:" and the method set for an interface T, else "t:" and
+    // the type name (*E and E alike: one object in this value model).
+    function goAsWant(ty) {
+        if (ty == "") { return "" }
+        if (isIface(ty)) { return "i:" + ifaceMethodCsv(ty) }
+        if (ty.charAt(0) == "*") { return "t:" + ty.substring(1) }
+        return "t:" + ty
+    }
     // &name. A value that is ALREADY a reference (a struct, a slice, a map) is its own
     // pointer, so only a scalar - and a pointer variable, for &p - gets a cell.
     function makeAddrVar(name) {
+        var dty = goDeclTys["$" + name] == undefined ? "" : goDeclTys["$" + name]
         return function(b) {
             var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var scopeV = curScopeV
-            var mkCell = function(cb) { return {b: cb, v: emitPtrCell(cb, scopeV, emitStr(cb, name))} }
+            var want = goAsWant(dty)
+            var mkCell = function(cb) {
+                var cv = emitPtrCell(cb, scopeV, emitStr(cb, name))
+                if (want != "") { callExt(cb, "js_set", [cv, emitStr(cb, "as"), emitStr(cb, want)]) }
+                return {b: cb, v: cv}
+            }
             return emitSelect(b, emitIsPtr(b, cur), mkCell, function(eb) {
                 // An ARRAY is a VALUE in Go and every assignment of one copies it, so
                 // &arr cannot be the array: `h := &arr` would hand h a copy and
@@ -3433,8 +3448,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 // header. Mirrors makeAddrVar in go-interpreter.abnf.
                 var isArr = callExt(eb, "js_is_type", [cur, emitStr(eb, "Array")])
                 return emitSelect(eb, isArr, mkCell, function(nb) {
+                    // nil (typeof "object" too) gets a cell: `var p *T; pp := &p`.
                     var isObj = callExt(nb, "js_seq", [callExt(nb, "js_typeof", [cur]), emitStr(nb, "object")])
-                    return emitSelect(nb, isObj, function(tb) { return {b: tb, v: cur} }, mkCell)
+                    return emitSelect(nb, isObj, function(ob) {
+                        return emitSelect(ob, callExt(ob, "js_seq", [cur, hNull]), mkCell, function(tb) { return {b: tb, v: cur} })
+                    }, mkCell)
                 })
             })
         }
@@ -3725,6 +3743,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return b
         }
     }
+    // The type a `var x T` declaration wrote for each name, at walk time and by name
+    // (the latest declaration in the source wins). &x carries it for errors.As, which
+    // needs the static type of a nil pointer. Twin of goDeclTys in
+    // go-interpreter.abnf.
+    var goDeclTys = {}
     function makeVarDecl(items) {
         var names = []
         var i = 0
@@ -3735,6 +3758,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var pk = 0; pk < names.length; pk++) { notePkgTopName(names[pk]) }
         var ty = ""
         if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
+        if (ty != "") { for (var dn = 0; dn < names.length; dn++) { goDeclTys["$" + names[dn]] = ty } }
         var inits = items.slice(i)
         return function(b) {
             var vals = []
@@ -4935,7 +4959,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var bidx = funcCount
         var bf = m.NewFunc("jsf_" + bidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var ctlV = callExt(b, "js_gotry", [callExt(b, "js_closure", [handle(bidx), curScopeV])])
-        callExt(b, "js_rundefers", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")])])
+        callExt(b, "js_gorundefers", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")])])
         callExt(b, "js_gorepanic", [])
         // Named results are read back AFTER the defers ran, so a deferred function that
         // assigns one is seen; without them the body's return signal carries the value.
@@ -5125,13 +5149,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declPrint(b, fmtV, "Printf", "js_goprint", 4)
         b = declPrint(b, fmtV, "Sprintf", "js_gostr", 4)
         // fmt.Errorf and the errors package share one extern, js_goerrors(args, mode):
-        // 0 errors.New, 1 fmt.Errorf, 2 errors.Is, 3 errors.Unwrap.
+        // 0 errors.New, 1 fmt.Errorf, 2 errors.Is, 3 errors.Unwrap, 4 errors.As,
+        // 5 errors.Join.
         b = declPrint(b, fmtV, "Errorf", "js_goerrors", 1)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "fmt"), fmtV])
         var errV = callExt(b, "js_obj_new", [])
         b = declPrint(b, errV, "New", "js_goerrors", 0)
         b = declPrint(b, errV, "Is", "js_goerrors", 2)
         b = declPrint(b, errV, "Unwrap", "js_goerrors", 3)
+        b = declPrint(b, errV, "As", "js_goerrors", 4)
+        b = declPrint(b, errV, "Join", "js_goerrors", 5)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "errors"), errV])
         // Go's two BUILTINS. They are not fmt: println separates every pair and ends
         // with a newline, print separates nothing and ends with none. Real Go writes
