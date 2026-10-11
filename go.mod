@@ -8,3 +8,6 @@ require (
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/llir/llvm v0.3.2
 )
+
+// goja at the pinned revision, in-tree so that it can carry local fixes.
+replace github.com/dop251/goja => ./third_party/goja
