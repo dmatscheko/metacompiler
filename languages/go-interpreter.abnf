@@ -4112,9 +4112,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // untyped constant's float64 box.
         // An integer constant beyond 2^53 arrives as a 64-bit box and rounds to the
         // nearest double, as go's constant conversion does.
-        if (goTyWord(ty) == "float32" && (typeof v == "number" || isFlo(v) || szIs(v))) { return gFlo32(szIs(v) ? szNum(v) : gNumF(v)) }
+        if (typeof v != "number" && !isFlo(v) && !szIs(v)) { return v }
+        // A DEFINED type adopts as what it is defined over: `type C float64; var t C =
+        // 37` holds 37.0. Twin of emitAdoptTy in go-to-llvm-ir.abnf.
+        var w = goTyWord(ty)
+        if (hasOwn(definedUnder, w)) { ty = resolveDefined(w); w = goTyWord(ty) }
+        if (w == "float32") { return gFlo32(szIs(v) ? szNum(v) : gNumF(v)) }
         if (isFloatTy(ty) && (typeof v == "number" || szIs(v))) { return gFlo(szNum(v)) }
-        var it = goIntTy(goTyWord(ty))
+        var it = goIntTy(w)
         if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }
         return v
     }

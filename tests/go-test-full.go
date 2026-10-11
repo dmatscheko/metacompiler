@@ -1423,6 +1423,11 @@ type base30 struct {
 }
 type alias30 base30
 type deep30 ints30
+type temp30 float64
+type byte30 uint8
+type rec30 struct{ t temp30 }
+
+func half30(t temp30) temp30 { return t / 2 }
 
 func sum30(p *[3]int) int {
 	t := 0
@@ -1509,6 +1514,15 @@ func s30() {
 	hh := &arr
 	hh[0] = 11
 	check("parr12", h[0] == 11)
+
+	// a slot of a DEFINED numeric type takes what it is defined over: a float, a width
+	var t temp30 = 37
+	r := rec30{t: 37}
+	ts := []temp30{3}
+	check("dfl19", t/2 == 18.5 && r.t/2 == 18.5 && half30(37) == 18.5 && ts[0]/2 == 1.5)
+	var by byte30 = 255
+	by++
+	check("dfl20", by == 0)
 }
 
 // ===== SECTION 31: local type declarations, and labels with no statement =====

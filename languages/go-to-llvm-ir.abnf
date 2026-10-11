@@ -1812,6 +1812,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // its initializer, and a sized integer slot converts to its width - which is
     // what puts the width on the value and makes the i8++ that follows wrap.
     function emitAdoptTy(b, ty, v) {
+        // A DEFINED type adopts as what it is defined over: `type C float64; var t C =
+        // 37` holds 37.0. Twin of gAdoptTy in go-interpreter.abnf.
+        var dw = goTyWord(ty)
+        if (typeof definedUnder[dw] == "string") { ty = resolveDefined(dw) }
         // A float32 SLOT rounds what is put in it - `var f float32 = 0.1` holds
         // 0.1 read at 24 bits - so it takes the 32-bit extern, not js_gflo.
         if (isF32Ty(ty)) { return callExt(b, "js_gflo32", [v]) }
