@@ -127,7 +127,7 @@ halves (BCL 1). A user member named Keys/Values is read as the dictionary call (
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-420 php: goto out of a try (compiled); named-arg / callable errors; scalar property writes · P2 · PHP + CORE · OPEN [V spec-only]
+### T-420 php: goto out of a try (compiled); named-arg / callable errors; scalar property writes · P2 · PHP + CORE · IN PROGRESS (PHP+CORE worker, round 19) [V spec-only]
 Compiled goto out of a try/finally is refused at compile time: carrying it needs a goto
 kind (4) in the js_ctl_* protocol (runtime.c js_ctl_goto, a jsCtl kind in jsrt.go,
 excDispatch in compile-core.js + refreeze). An unknown named argument raises nothing
