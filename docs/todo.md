@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-313** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-316** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -253,52 +253,24 @@ dart:core String API (spec-only).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-242 php: `$GLOBALS` is not modelled · P1 · PHP · IN PROGRESS (PHP+LUA worker, round 4) [V spec-only]
-Neither half supports `$GLOBALS['x']` read/write. A parse-time rewrite of
-`$GLOBALS[e]` needs a frame selector on every target reader in both grammars (the
-main frame is reachable through the hidden "\x00globals" name).
-
-### T-243 php: a function declared inside a function is not global · P1 · PHP · IN PROGRESS (PHP+LUA worker, round 4) [V spec-only]
-`function outer(){ function inner(){} } outer(); inner();` - "Call to undefined
-function inner()" in both halves; PHP: inner is global once outer() has run.
-
-### T-244 php: an arrow fn captures a reference variable's cell · P1 · PHP · IN PROGRESS (PHP+LUA worker, round 4) [V spec-only]
-`$x=1; $r=&$x; $f=fn()=>$x; $x=2; echo $f();` prints 2 in all engines; PHP captures by
-value at creation: 1. emitCapture / makeArrowFn in both grammars (the comment
-justifying the cell contradicts the spec).
+### T-313 php: partial application of a method declared with different arities · P1 · PHP · OPEN [V spec-only]
+Compiler only: with `class A{function m($x,$y)}`, `class B{function m()}`, `class
+C{function m()}`, `($a->m(?,2))(1)` prints "m"; spec "m12". Also: the bare `$GLOBALS`
+array (iteration, var_dump) is unsupported.
 
 ---
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
-### T-245 lua: the string library lacks `find`, `gsub` (and check `match`, `gmatch`, `format`, `byte`, `char`, `reverse`) · P1 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
-`print(string.find("abc","b",1,true), string.gsub("aa","a","b"))`: "attempt to call a
-nil value" in all engines; lua `2 2 bb 2`. Also `string.byte`. Lua patterns (not regex) - implement once,
-shared by the interpreter and layer 2 if possible. Also `select` (and `select('#')`).
+### T-314 lua: `next()` is a stub compiled; `tostring`/`tonumber`/`type`/`table.concat` missing · P1 · LUA · OPEN [V]
+Compiled `next()` covers only the array part and returns only the key: `next({a=1})`
+nil (lua `a 1`), `next({10,20})` 1 (lua `1 10`). `tostring`, `tonumber`, `type`,
+`table.concat` are missing in all engines - sweep the whole base/table/math library
+against lua 5.5 while there.
 
-### T-246 lua: errors lack lua 5.5's variable-name suffix · P2 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
-lua says `attempt to index a nil value (local 't')` / `(global 'x')` / `(upvalue 'u')` /
-`(field 'a')` / `(method 'm')` / `(constant '3')`; no engine does. Needs declared-name
-tracking in the emitter, the failing operand from js_luarith, and a top-level frame in
-the interpreter to tell top-level locals from globals.
-
-### T-247 lua: "bad argument" wording and argument checks · P1 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
-Ours `bad argument to 'floor' (number expected)`; lua `bad argument #1 to 'floor'
-(number expected, got string)` ('math.floor' when pcall calls it directly).
-`math.sqrt("x")` answers nan compiled where the interpreter raises.
-
-### T-248 lua: smaller error-semantics gaps · P2 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
-(a) a function that runs off its end returns nil instead of no value (`print(f())`
-prints "nil", lua an empty line; `pcall(function() end)` gives "true nil") - assertable
-once `select('#')` exists (T-245); (b) indexing a float holding an integer (`2.0`)
-answers nil compiled, lua raises; (c) errors are positioned at the statement's first
-line, lua uses the failing operation's line; (d) an error inside an xpcall handler
-propagates, lua answers "error in error handling". Also: the Lua native SHOULD ABORT
-matrix row could now compare all three engines.
-
-### T-249 lua: numeric table keys are very slow natively · P2 · LUA · IN PROGRESS (PHP+LUA worker, round 4) [V]
-`t[i%100] = i; s = s + t[i%50]` for 3,000,000 passes retires ~422e9 instructions
-(~140k per pass). Profile (`sample`) and fix; add a bench row if it is a common shape.
+### T-315 lua: print writes invalid UTF-8 bytes as code points · P3 · LUA · OPEN [V]
+lua writes the raw bytes. (math.log/log10/sin/atan last-digit differences vs C libm:
+see T-293.)
 
 ---
 
@@ -575,6 +547,14 @@ T-290 python: `sorted`/`min`/`max` with `key=` / `reverse=` — DONE 0a262d6 (li
 T-291 python: `sum()` of floats, `math.cbrt`, `int(x, base=)` keywords — DONE c178603 (math.cbrt within 1 ulp: macOS libm cbrt is not correctly rounded; see T-293)
 T-292 python: unpacking with the wrong count — DONE 9e9b395
 T-294 python: subclasses of builtins; `bytes.decode` — DONE 26691f0
+T-242 php: `$GLOBALS` is not modelled — DONE 5372fe2 (spec-only; `$GLOBALS[e]`, not the bare array)
+T-243 php: a function declared inside a function is not global — DONE b604c01 (spec-only)
+T-244 php: an arrow fn captures a reference variable's cell — DONE 702f36c (spec-only)
+T-245 lua: the string library lacks `find`, `gsub` (and check `match`, `gmatch`, `format`, `byte`, `char`, `reverse`) — DONE 2095ea9 5cc9efb (lib/lua-strlib.js, a port of lstrlib.c)
+T-246 lua: errors lack lua 5.5's variable-name suffix — DONE 73cffca 65efcb2 bd6a989
+T-247 lua: "bad argument" wording and argument checks — DONE 39f7fed
+T-248 lua: smaller error-semantics gaps — DONE 7842c78
+T-249 lua: numeric table keys are very slow natively — DONE 0d9b10d (-42% instructions on the ticket loop)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
