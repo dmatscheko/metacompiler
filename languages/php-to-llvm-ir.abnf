@@ -4403,6 +4403,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var rc = newClassV(b, target)
             b = rc.b
             var clsV = rc.v
+            callExt(b, "js_phsinit", [clsV])
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
             callExt(b, "js_phoid", [objV])
@@ -5956,9 +5957,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var outerSelf = bindDeclSelf(b, clsV)
             for (var c1 = 0; c1 < consts.length; c1++) { emitConstDecl(b, clsV, name, consts[c1]) }
             for (var s1 = 0; s1 < statics.length; s1++) {
-                var sv = hNull
-                if (statics[s1].init != null) { var rs2 = statics[s1].init(b); b = rs2.b; sv = rs2.v }
-                callExt(b, "js_set", [clsV, emitStr(b, "s:" + statics[s1].name), sv])
+                callExt(b, "js_set", [clsV, emitStr(b, "s:" + statics[s1].name), hNull])
+            }
+            if (consts.length > 0 || statics.length > 0) {
+                var siIdx = emitFunc([], classInitBody(consts, statics), true, false, name)
+                callExt(b, "js_set", [clsV, emitStr(b, "__sinit"), callExt(b, "js_closure", [handle(siIdx), curScopeV])])
             }
             b = emitInitProps(b, clsV, name, ext, props)
             for (var hp = 0; hp < props.length; hp++) {
@@ -6006,6 +6009,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_set", [cv, emitStr(b, "__lazyconst"), callExt(b, "js_closure", [handle(idx), curScopeV])])
         }
         callExt(b, "js_set", [clsV, emitStr(b, "k:" + rec.cname), cv])
+    }
+    // The body of a class's __sinit: its own constants read in declaration order as
+    // outermost reads, then its static property defaults. js_phsinit runs it when
+    // the class is first used (a static property access or `new`), parent first,
+    // and drops it once it succeeds. Twin of classInit in php-interpreter.abnf.
+    function classInitBody(consts, statics) {
+        return function(b) {
+            for (var c = 0; c < consts.length; c++) {
+                callExt(b, "js_phconst", [frameCls(b, "self"), emitStr(b, consts[c].cname), emitStr(b, "self")])
+            }
+            for (var s = 0; s < statics.length; s++) {
+                if (statics[s].init == null) { continue }
+                var rs = statics[s].init(b)
+                b = rs.b
+                callExt(b, "js_set", [frameCls(b, "self"), emitStr(b, "s:" + statics[s].name), rs.v])
+            }
+            return b
+        }
     }
     function bindDeclSelf(b, clsV) {
         var outer = scopeProbe(b, emitStr(b, frameClsName("self")), hNull)

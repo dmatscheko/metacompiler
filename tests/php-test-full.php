@@ -2014,6 +2014,28 @@ function s48() {
         && $w[4] < $w[2] && !($w[2] <= $w[4]) && $w[4] % -1 === 0);
 }
 
+// ===== SECTION 49: a class is initialized at its first use =====
+// A class's constants and static property defaults are evaluated when it is first
+// used - a static property access or `new` - not where it is declared
+// (zend_update_class_constants): its constants first, in declaration order, each
+// as an outermost read, then its statics. So a constant cycle reached from a
+// static default names the link the constant pass finds, a static may read a
+// constant define()d after the class, and a failed initialization runs again on
+// the next use.
+class S49F { const A = self::B; const B = self::A; public static $x = self::B; }
+class S49L { public static $x = S49_LATE; const K = S49_LATE * 2; }
+class S49B { const A = S49B::B; const B = S49B::A; public $p = 1; }
+function s49try($f) {
+    try { return $f(); } catch (Error $e) { return $e->getMessage(); }
+}
+function s49() {
+    check("cin1", s49try(fn() => S49F::$x) === "Cannot declare self-referencing constant self::B"
+        && s49try(fn() => S49F::$x) === "Cannot declare self-referencing constant self::B");
+    define("S49_LATE", 21);
+    check("cin2", S49L::$x === 21 && S49L::K === 42);
+    check("cin3", s49try(fn() => new S49B()) === "Cannot declare self-referencing constant S49B::B");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2068,6 +2090,7 @@ function main() {
     s46(); // SECTION-CALL 46
     s47(); // SECTION-CALL 47
     s48(); // SECTION-CALL 48
+    s49(); // SECTION-CALL 49
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

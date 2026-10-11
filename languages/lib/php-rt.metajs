@@ -2516,8 +2516,30 @@ function js_phconst(target, name, base) {
     return null
 }
 
+// A class's __sinit (its constants, then its static property defaults;
+// classInitBody in php-to-llvm-ir.abnf) runs the first time the class is used, its
+// parent's first; a failure leaves it to run again on the next use. Twin of
+// phpClassInit in abnf/jsrtphp.go.
+function phClassInit(cls) {
+    var sup = cls["__super"]
+    if (sup !== undefined && sup !== null && typeof sup == "object" && sup["__ready"] !== true) { phClassInit(sup) }
+    var f = cls["__sinit"]
+    if (f !== undefined && f !== null) {
+        f.apply(undefined, [null])
+        cls["__sinit"] = null
+    }
+    cls["__ready"] = true
+}
+// `new C`: the class is initialized before its first instance.
+function js_phsinit(target) {
+    var cls = phClassOf(target)
+    if (cls["__ready"] !== true) { phClassInit(cls) }
+    return undefined
+}
+
 function js_phsget(target, name) {
     var cls = phClassOf(target)
+    if (cls["__ready"] !== true) { phClassInit(cls) }
     var o = phOwner(cls, "s:" + name)
     if (o !== undefined) { return o["s:" + name] }
     return null
@@ -2525,6 +2547,7 @@ function js_phsget(target, name) {
 
 function js_phsset(target, name, v) {
     var cls = phClassOf(target)
+    if (cls["__ready"] !== true) { phClassInit(cls) }
     var o = phOwner(cls, "s:" + name)
     if (o === undefined) { o = cls }
     o["s:" + name] = v

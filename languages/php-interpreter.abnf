@@ -3600,9 +3600,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         scopes = saved
         return v
     }
+    // A class is initialized when it is first used - a static property is read or
+    // written, or an instance is made - not where it is declared: its parent first,
+    // then each of its own constants in declaration order, then its static property
+    // defaults (zend_update_class_constants). Each constant is read there as an
+    // OUTERMOST read, so a cycle among them names the link constFind finds marked
+    // whichever static started it. A failure leaves the class uninitialized, and the
+    // next use runs it again. Twin of js_phsinit in php-to-llvm-ir.abnf.
+    function classInit(cls) {
+        if (cls.__super != undefined && cls.__super != null && cls.__super.__ready !== true) { classInit(cls.__super) }
+        var pend = cls.__sinit
+        if (pend != undefined && pend != null) {
+            var ct = cls.__constT
+            for (var i = 0; i < ct.length; i++) { constFind(cls, ct[i].name, "self::" + ct[i].name) }
+            for (var j = 0; j < pend.length; j++) { pend[j].cell.v = phpCopy(constEval(cls, pend[j].rec)) }
+            cls.__sinit = null
+        }
+        cls.__ready = true
+    }
     // The CELL of a static property: the first declaration found walking up, so a
     // subclass reads and writes the same storage as its parent.
     function staticCell(cls, name) {
+        if (cls.__ready !== true) { classInit(cls) }
         var k = cls
         while (k != undefined && k != null) {
             var st = k.__statics
@@ -4609,6 +4628,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // declaration order, walking the base classes first so an override wins), then
     // the constructor runs.
     function instantiate(cls, argset) {
+        if (cls.__ready !== true) { classInit(cls) }
         var obj = newObj(cls)
         initProps(obj, cls)
         var ctor = classFind(cls, "__construct")
@@ -4778,24 +4798,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (base == undefined || base == null || base.__isclass !== true) { fail("unknown base class " + p.ext) }
             cls.__super = base
         }
+        // A static property is created once, here, and lives in a cell so that a
+        // subclass which does not redeclare it shares this very storage. Its
+        // initializer is a constant expression where self:: names this class, run
+        // when the class is first used (classInit).
+        var pend = []
         for (var ts = 0; ts < tm.statics.length; ts++) {
-            var tv = anytype
-            tv = phpCopy(constEval(cls, tm.statics[ts]))
-            dictSet(cls.__statics, tm.statics[ts].name, {__refcell: true, v: tv})
+            var tcell = {__refcell: true, v: null}
+            dictSet(cls.__statics, tm.statics[ts].name, tcell)
+            pend.push({cell: tcell, rec: tm.statics[ts]})
         }
         cls.__mlc = phpMethodList(tm.methods) + phpMethodList(p.methods).substring(1)
         cls.__pvis = phpVisList(name, props)
         for (var tmi = 0; tmi < tm.methods.length; tmi++) {
             setMethod(cls, tm.methods[tmi].name, makeMethodClosure(tm.methods[tmi], cls))
         }
-        // A static property is created once, here, and lives in a cell so that a
-        // subclass which does not redeclare it shares this very storage. Its
-        // initializer is a constant expression where self:: names this class.
         for (var s2 = 0; s2 < p.statics.length; s2++) {
-            var iv = anytype
-            iv = phpCopy(constEval(cls, p.statics[s2]))
-            dictSet(cls.__statics, p.statics[s2].name, {__refcell: true, v: iv})
+            var scell = {__refcell: true, v: null}
+            dictSet(cls.__statics, p.statics[s2].name, scell)
+            pend.push({cell: scell, rec: p.statics[s2]})
         }
+        cls.__sinit = pend
         for (var m2 = 0; m2 < p.methods.length; m2++) {
             setMethod(cls, p.methods[m2].name, makeMethodClosure(p.methods[m2], cls))
         }

@@ -1731,8 +1731,28 @@ func (rt *jsrt) phpConstIn(cls *jsObject, name, shown string, depth int) (interf
 	return nil, false
 }
 
+// phpClassInit runs a class's __sinit (its constants, then its static property
+// defaults; classInitBody in php-to-llvm-ir.abnf) the first time the class is
+// used, its parent's first. A failure leaves it to run again on the next use.
+// Twin of phClassInit in languages/lib/php-rt.metajs and classInit in
+// php-interpreter.abnf.
+func (rt *jsrt) phpClassInit(cls *jsObject) {
+	if cls.props["__ready"] == true {
+		return
+	}
+	if sup, ok := cls.props["__super"].(*jsObject); ok {
+		rt.phpClassInit(sup)
+	}
+	if f, has := cls.props["__sinit"]; has && isCallable(f) {
+		rt.call(f, jsUndef, []interface{}{jsNull})
+		cls.set("__sinit", jsNull)
+	}
+	cls.set("__ready", true)
+}
+
 func (rt *jsrt) phpStaticGet(target interface{}, name string) interface{} {
 	cls := rt.phpClassOf(target)
+	rt.phpClassInit(cls)
 	if o := phpOwner(cls, phpStaticPfx+name); o != nil {
 		return o.props[phpStaticPfx+name]
 	}
@@ -1741,6 +1761,7 @@ func (rt *jsrt) phpStaticGet(target interface{}, name string) interface{} {
 
 func (rt *jsrt) phpStaticSet(target interface{}, name string, v interface{}) {
 	cls := rt.phpClassOf(target)
+	rt.phpClassInit(cls)
 	o := phpOwner(cls, phpStaticPfx+name)
 	if o == nil {
 		o = cls // First write declares it here.
@@ -2216,6 +2237,11 @@ func init() {
 		// js_phmplace in languages/lib/php-rt.metajs.
 		m["js_phmplace"] = func(a []uint64) uint64 {
 			return w(rt.phpPlaceArgs(jsvFnMeta(rt.phpMethodOf(u(a[0]), u(a[1]))).name, u(a[2])))
+		}
+		// `new C`: the class is initialized before its first instance (phpClassInit).
+		m["js_phsinit"] = func(a []uint64) uint64 {
+			rt.phpClassInit(rt.phpClassOf(u(a[0])))
+			return 0
 		}
 		m["js_phplacesig"] = func(a []uint64) uint64 {
 			return w(rt.phpPlaceArgs(rt.phpStr(u(a[0])), u(a[1])))
