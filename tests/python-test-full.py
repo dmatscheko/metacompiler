@@ -1187,6 +1187,13 @@ def s27():
     check("bi9a", str(7 ** 60 // (10 ** 14 + 1)) == "5080218607396182851035808014693654659" and
                   str(7 ** 60 % (10 ** 21 - 1)) == "956125137757221055513" and
                   str(7 ** 60 // 3 ** 50) == "707651880141060459748108418")
+    # Quotient limbs of 9999 and a two-limb divisor whose second limb pulls the
+    # estimated limb off by one.
+    check("bi9b", str((10 ** 40 - 1) // (10 ** 20 - 1)) == "100000000000000000001" and
+                  str(10 ** 40 % (10 ** 20 - 1)) == "1" and
+                  str((10 ** 24 - 1) * (10 ** 12 - 1) // (10 ** 12 - 1)) == "999999999999999999999999" and
+                  str(2 ** 200 // (10 ** 8 + 9999)) == "16067773825885052509019244089195147402433260636096925" and
+                  str(2 ** 200 % (10 ** 8 + 9999)) == "2148301")
     # An unreached annotation followed by a reached one: the class must still
     # get its __annotations__ dict.
     check("an1", len(S27Ann.__annotations__) == 1 and "am_yes" in S27Ann.__annotations__)

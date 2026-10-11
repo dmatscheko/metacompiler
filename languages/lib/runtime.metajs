@@ -769,10 +769,23 @@ function rtABigMul(x, y) {
     return rtkABigNew(x["neg"] != y["neg"], rtABigNorm(out))
 }
 
+// floor(rem / b) for rem < b * 10000, estimated from the three leading limbs of
+// rem against the two of b, aligned on b's top limb. The dropped limbs move the
+// ratio by about one unit, so rtABigDivMag's correction loops run once or twice.
+// Twin of magQuotEst in python-interpreter.abnf and ruby-interpreter.abnf.
+function rtABigQuotEst(rem, b) {
+    var n = b.length
+    if (rem.length < n) { return 0 }
+    var r = ((n < rem.length) ? rem[n] : 0) * 10000 + rem[n - 1] + ((n >= 2) ? rem[n - 2] / 10000 : 0)
+    var dv = b[n - 1] + ((n >= 2) ? b[n - 2] / 10000 : 0)
+    var e = Math.floor(r / dv)
+    if (e > 9999) { return 9999 }
+    return e
+}
+
 // |a| divided by |b| -> {q, r}, both NORMALIZED limb arrays. Schoolbook long
-// division a limb at a time; the quotient limb is found by binary search over
-// 0..9999 because there is no wide-multiply primitive to estimate it with.
-// The caller has already rejected a zero divisor.
+// division a limb at a time (see rtABigQuotEst). The caller has already
+// rejected a zero divisor.
 function rtABigDivMag(a, b) {
     var qms = []
     var rem = [0]
@@ -788,20 +801,14 @@ function rtABigDivMag(a, b) {
             }
         }
         rem = rtABigNorm(shifted)
-        var lo = 0
-        var hi = 9999
         var d = 0
-        while (lo <= hi) {
-            var mid = Math.floor((lo + hi) / 2)
-            if (rtABigCmpMag(rtABigMulSmall(b, mid), rem) <= 0) {
-                d = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
+        if (rtABigCmpMag(rem, b) >= 0) {
+            d = rtABigQuotEst(rem, b)
+            while (d > 0 && rtABigCmpMag(rtABigMulSmall(b, d), rem) > 0) { d = d - 1 }
+            while (d < 9999 && rtABigCmpMag(rtABigMulSmall(b, d + 1), rem) <= 0) { d = d + 1 }
         }
-        qms.push(d)
-        rem = rtABigSubMag(rem, rtABigMulSmall(b, d))
+    qms.push(d)
+        if (d > 0) { rem = rtABigSubMag(rem, rtABigMulSmall(b, d)) }
         i = i - 1
     }
     // qms came out most-significant first; the representation is little-endian.
