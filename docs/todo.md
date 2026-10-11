@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-350** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-353** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -178,32 +178,22 @@ func has no signature; `%T` of `&n` is a bad verb and native prints `&<nil>` whe
 llvm.Run prints `&5`. An uncaught `panic(T{1})` prints `{1}` (go `panic: (main.T)
 0x...`, `panic: main.MyInt(3)`). Value-model; see T-081.
 
-### T-336 go: struct values alias; pointer identity · P1 · GO + CORE · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
-All engines: `a := T{1}; b := a; b.a = 2; c := *p; c.a = 9; d := id(a)` prints
-`10 10 10 10 10` (go `1 2 9 2 1`) - struct assignment, deref, argument passing and
-return do not copy. And `&T{1} == &T{1}` is true (go false): go's == is goValueEq in
-abnf/jsrt.go (CORE). Value semantics first (copy at store, the swift precedent), then
-pointer identity (goValueEq, the map-key path near jsrt.go:3403). Supersedes the
-pointer half of T-266.
-
-### T-337 go: a deferred call that panics stops the remaining defers · P1 · GO · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
-Go runs the frame's other defers and reports the chain (`f got B`, then `panic: C` /
-tab `panic: C`); ours prints `panic: A` / tab `panic: B`. Also `panic(fmt.Sprint(r))`
-with equal text reads as "[recovered, repanicked]" (values compared by value, not
-identity); go prints `[recovered]` and a second line.
-
 ### T-349 go: a method on a defined non-struct type aborts · P1 · GO · OPEN [V]
 `type Celsius float64; func (c Celsius) String() string {...}` aborts all legs
 ("method receiver type not found" / "cannot set field 'String' on *abnf.jsClosure").
 
+### T-350 go: pointer map keys; value-receiver copies; native struct map keys · P1 · GO + CORE · OPEN [V]
+(a) `map[*K]` with two `&K{1}` keys: interp/run `1 2 2`, native `2 1 1`, go `2 1 2`
+(keys compare by value; needs a key-type flag on the map's lookup path). (b) A value
+receiver's copy deep-copies pointer fields in all engines: `func (u U) touch(){
+u.p.a=5 }` leaves 1 (go 5) - rt.goCopyVal / goMethod in abnf/jsrt.go. (c) Values whose
+static type the front end cannot see (a call result's field, range over an array) are
+not copied. (d) Native: `v:=map[K]int{}; v[K{1}]=1; v[K{1}]=2; len(v)` is 2 (interp,
+run, go: 1) - a run-vs-native divergence in layer 2's struct-key hashing.
+
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
-
-### T-340 swift: String.Index, removeSubrange/replaceSubrange, `append(contentsOf:)` · P1 · SW · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
-`s.insert("x", at: s.startIndex)` aborts "unknown String method: index";
-removeSubrange/replaceSubrange missing; Array `append(contentsOf:)` appends the array
-as one element (`["a","b","c",["d","e"]]`).
 
 ### T-346 swift: `Int64 is Int`; `type(of:)` · P1 · SW · OPEN [V]
 `Int64 is Int` and `Int is Int64` are true (swiftc false); `as? Int` succeeds on an
@@ -214,12 +204,6 @@ boxed and flagged; UInt64 flagged), no floor change. `type(of:)` is unsupported
 ---
 
 # DA — Dart  (no dart here: spec-only)
-
-### T-339 dart: RegExp; List.map/where/toList/first · P1 · DA · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V spec-only]
-No engine has a regex-backed Pattern (RegExp/Match in three places; lib/regex.js may
-serve). List.map, where, toList, first are unsupported ("unknown List method: map").
-Also: the shared interpreter host's `charAt` at a lone-surrogate index answers U+FFFD
-(dart's dxQuote uses charAt) - CORE.
 
 ---
 
@@ -246,11 +230,9 @@ PHP indexes bytes. A lone byte >=128 is held as U+0080..U+00FF, so `ord(chr(200)
 bash 5.3 gives "éσia" for "ÉΣİa" (simple mapping, per character); both halves and
 bash-to-llvm-ir's `${x@L}` leave Σ and İ. Use the shared simple mapping (unicodeCase).
 
-### T-338 bash: `@A/@a/@K/@k` on `$@`/`$*`; `${x:-"$@"}` under a null IFS; `${!e*}` · P1 · SH · IN PROGRESS (GO+SH+SW+DA worker, round 8) [V]
-`set -- a b; echo ${@@A}`: bash `set -- 'a' 'b'`; interpreter empty, compiled
-`@=$'\002a\001b\001'` (a halves divergence). `${x:-"$@"}` under a null IFS loses the
-empty field (bash <a b><c><><d>, ours <a b><c><d>: needs quoted-field marking in the
-word model). `e=()` is not listed by `${!e*}`.
+### T-351 bash: `declare -p` of an empty or declared-only array · P1 · SH · OPEN [V]
+`ea=(); declare -a eb; declare -p ea eb`: bash `declare -a ea=()` / `declare -a eb`;
+both engines "bash: declare: ea: not found".
 
 ---
 
@@ -281,6 +263,11 @@ sin/cos/atan/atan2; our Go-port legs are 1-9 ulps off on many rows (python T-265
 ruby T-229 declined for this reason). Design: CORE-MATH-style double-double with a
 Ziv rounding test, one MetaJS module (interpreter + layer 2) + Go port + runtime.c
 d_*. Cost it; implement or DECLINE.
+
+### T-352 interpreter host `charAt` at a lone-surrogate index answers U+FFFD · P2 · CORE · OPEN [V]
+goja and -frozen: `s.charAt(i)` where s[i] is a lone surrogate gives U+FFFD, while
+substring keeps the unit (dart's dxQuote uses charAt). Make charAt keep the unit in both
+hosts.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -533,6 +520,11 @@ T-324 layer 2 `Array.sort` with a comparator fails — DONE 75153cf (gofmt-clean
 T-315 lua: print writes invalid UTF-8 bytes as code points — DONE cfad758 (writeBytes host global; an uncaught error's text still leaves through the text channels)
 T-047 js: a generator body's `this` is wrong in the NATIVE build only — DONE a39d475 (every generator/async body, in the emitter only)
 T-081 boxed values know their KIND but not their declared class — DECLINED as a shared mechanism: the box id is cheap (go +1.10% inside spread, +128 B) but the cost is static typing - go needs a constant type checker, kotlin needs literals typed by their expected type, swift can flag its own box. Split into T-346..T-348 and T-240
+T-337 go: a deferred call that panics stops the remaining defers — DONE 814a459
+T-340 swift: String.Index, removeSubrange/replaceSubrange, `append(contentsOf:)` — DONE 21e46e1
+T-339 dart: RegExp; List.map/where/toList/first — DONE 678af39 (spec-only; the charAt lone-surrogate item is T-352)
+T-338 bash: `@A/@a/@K/@k` on `$@`/`$*`; `${x:-"$@"}` under a null IFS; `${!e*}` — DONE 06ec98b
+T-336 go: struct values alias; pointer identity — PARTIAL 46dd880 e5648d0 0458aa4 (struct value semantics and pointer ==); rest is T-350
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
