@@ -145,7 +145,7 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 }
 
 // jsvProtoTag is Object.prototype.toString's answer for a value.
-func jsvProtoTag(v interface{}) string {
+func (rt *jsrt) jsvProtoTag(v interface{}) string {
 	switch v.(type) {
 	case nil, jsNullT:
 		return "[object Null]"
@@ -166,6 +166,10 @@ func jsvProtoTag(v interface{}) string {
 	// The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
 	// promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
 	if o, ok := v.(*jsObject); ok {
+		// A string [Symbol.toStringTag], own or inherited, names the object.
+		if t, isStr := rt.jsvSymMember(o, "__#@toStringTag").(string); isStr {
+			return "[object " + t + "]"
+		}
 		if _, has := o.props["__errh"]; has {
 			return "[object Error]"
 		}
@@ -198,7 +202,7 @@ func (rt *jsrt) jsvProtoApply(recv interface{}, name string, args []interface{})
 	case "propertyIsEnumerable":
 		return jsvPropEnum(recv, rt.toString(argAt(args, 0)))
 	case "toString":
-		return jsvProtoTag(recv)
+		return rt.jsvProtoTag(recv)
 	}
 	return recv
 }
@@ -291,10 +295,13 @@ func (rt *jsrt) jsvString(v interface{}) string {
 			}
 			return "Symbol(" + rt.toString(d) + ")"
 		}
+		if r, ok := rt.jsvExoticPrim(t, "string"); ok {
+			return rt.jsvString(r)
+		}
 		if r, ok := rt.jsvCallMethod(t, "toString"); ok {
 			return rt.toString(r)
 		}
-		return jsvProtoTag(t)
+		return rt.jsvProtoTag(t)
 	case *jsArray:
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
@@ -368,10 +375,12 @@ func jsvSymKeys(v interface{}) []string {
 	return out
 }
 
-// jsvSeqIter is [Symbol.iterator]() of an array or a string: an iterator over its
-// elements - a string's CODE POINTS - with a [Symbol.iterator] of its own. Twins:
-// jsSeqIterFn in js-interpreter.abnf, jvSeqIter in languages/lib/js-rt.metajs.
-func jsvSeqIter(src interface{}) *jsObject {
+// jsvSeqIter is the iterator [Symbol.iterator](), values(), keys() and entries()
+// answer over an array or a string: kind 1 yields the elements - a string's CODE
+// POINTS - kind 0 the indices and kind 2 [index, element] pairs. An array is read
+// live. Its own [Symbol.iterator] answers itself. Twins: jsSeqIter in
+// js-interpreter.abnf, jvSeqIter in languages/lib/js-rt.metajs.
+func jsvSeqIter(src interface{}, kind int) *jsObject {
 	var cps []interface{}
 	if s, isStr := src.(string); isStr {
 		u := strUnits(s)
@@ -393,7 +402,14 @@ func jsvSeqIter(src interface{}) *jsObject {
 		}
 		r := newJSObject()
 		if i < len(elems) {
-			r.set("value", elems[i])
+			switch kind {
+			case 0:
+				r.set("value", float64(i))
+			case 2:
+				r.set("value", &jsArray{elems: []interface{}{float64(i), elems[i]}})
+			default:
+				r.set("value", elems[i])
+			}
 			r.set("done", false)
 			i++
 		} else {
@@ -408,10 +424,14 @@ func jsvSeqIter(src interface{}) *jsObject {
 	return it
 }
 
-// jsvToPrimitive is ToPrimitive(v, default): valueOf first, then toString. It is the
-// step the shared js_eq / js_lt lack: `[1] == 1` and `[2] > 1` are true in node.
-func (rt *jsrt) jsvToPrimitive(v interface{}) interface{} {
+// jsvToPrimitive is ToPrimitive(v, hint) for the hints "default" and "number":
+// [Symbol.toPrimitive] first, then valueOf, then toString. It is the step the shared
+// js_eq / js_lt lack: `[1] == 1` and `[2] > 1` are true in node.
+func (rt *jsrt) jsvToPrimitive(v interface{}, hint string) interface{} {
 	if o, ok := v.(*jsObject); ok {
+		if r, ok := rt.jsvExoticPrim(o, hint); ok {
+			return r
+		}
 		if r, ok := rt.jsvCallMethod(o, "valueOf"); ok && !jsvIsObjLike(r) {
 			return r
 		}
@@ -421,6 +441,38 @@ func (rt *jsrt) jsvToPrimitive(v interface{}) interface{} {
 		return rt.jsvString(v)
 	}
 	return v
+}
+
+// jsvSymMember reads o's member under a symbol key: an own or accessor property, else
+// a method of its class, bound to o. nil when there is none.
+func (rt *jsrt) jsvSymMember(o *jsObject, key string) interface{} {
+	if _, isSym := o.props["__symkey"]; isSym {
+		return nil
+	}
+	if v := rt.getMember(o, key); !isUndefOrNull(v) {
+		return v
+	}
+	if fn, found := jsvFindClassMethod(o, key); found {
+		return jsHostFunc(key, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.call(fn, jsUndef, append([]interface{}{o}, args...))
+		})
+	}
+	return nil
+}
+
+// jsvExoticPrim is ToPrimitive's first step: o's [Symbol.toPrimitive], called with
+// the hint; an object result is node's TypeError. Twins: jsExoticPrim in
+// js-interpreter.abnf, jvExoticPrim in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvExoticPrim(o *jsObject, hint string) (interface{}, bool) {
+	f := rt.jsvSymMember(o, "__#@toPrimitive")
+	if !isCallable(f) {
+		return nil, false
+	}
+	r := rt.call(f, o, []interface{}{hint})
+	if jsvIsObjLike(r) {
+		panic(&jsThrown{value: rt.jsErrFromText("TypeError: Cannot convert object to primitive value")})
+	}
+	return r, true
 }
 
 // jsvLooseEq is the abstract equality comparison. null == undefined is true, both are
@@ -439,10 +491,10 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 		return false
 	}
 	if ao {
-		return rt.jsvLooseEq(rt.jsvToPrimitive(a), b)
+		return rt.jsvLooseEq(rt.jsvToPrimitive(a, "default"), b)
 	}
 	if bo {
-		return rt.jsvLooseEq(a, rt.jsvToPrimitive(b))
+		return rt.jsvLooseEq(a, rt.jsvToPrimitive(b, "default"))
 	}
 	return rt.looseEq(a, b)
 }
@@ -451,7 +503,7 @@ func (rt *jsrt) jsvLooseEq(a, b interface{}) bool {
 // the shared numeric/string ordering (2 means "NaN was involved", every relation false).
 func (rt *jsrt) jsvCompare(a, b interface{}) int {
 	rt.jsvSymOperand(a, b)
-	return rt.jsCompare(rt.jsvToPrimitive(a), rt.jsvToPrimitive(b))
+	return rt.jsCompare(rt.jsvToPrimitive(a, "number"), rt.jsvToPrimitive(b, "number"))
 }
 
 // ============================================================================
@@ -922,7 +974,7 @@ var jsvArrayMethods = map[string]bool{
 	"filter": true, "forEach": true, "reduce": true, "reduceRight": true,
 	"some": true, "every": true, "find": true, "findIndex": true,
 	"findLast": true, "findLastIndex": true, "flat": true, "flatMap": true,
-	"fill": true, "at": true, "toString": true,
+	"fill": true, "at": true, "toString": true, "keys": true, "values": true, "entries": true,
 }
 
 // jsvNumberMethods are a Number's methods read as a value (jsvBuiltinFam).
@@ -1594,6 +1646,12 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 	switch name {
 	case "toString":
 		return rt.jsvString(a), true
+	case "values":
+		return jsvSeqIter(a, 1), true
+	case "keys":
+		return jsvSeqIter(a, 0), true
+	case "entries":
+		return jsvSeqIter(a, 2), true
 	case "at":
 		i := jsToInt(rt.jsvNumArg(args, 0, 0))
 		if i < 0 {
@@ -2001,16 +2059,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if jsvIsSym(l) || jsvIsSym(r) {
 			lp, rp := l, r
 			if !jsvIsSym(l) {
-				lp = rt.jsvToPrimitive(l)
+				lp = rt.jsvToPrimitive(l, "default")
 			}
 			if !jsvIsSym(r) {
-				rp = rt.jsvToPrimitive(r)
+				rp = rt.jsvToPrimitive(r, "default")
 			}
 			_, lIsStr := lp.(string)
 			_, rIsStr := rp.(string)
 			rt.jsvSymConvErr(lIsStr || rIsStr)
 		}
-		lp, rp := rt.jsvToPrimitive(l), rt.jsvToPrimitive(r)
+		lp, rp := rt.jsvToPrimitive(l, "default"), rt.jsvToPrimitive(r, "default")
 		ls, lIsStr := lp.(string)
 		rs, rIsStr := rp.(string)
 		if lIsStr || rIsStr {
@@ -2226,6 +2284,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	baseInstanceof := m["js_instanceof"]
 	m["js_jsinstanceof"] = func(a []uint64) uint64 {
 		v, target := u(a[0]), u(a[1])
+		// A [Symbol.hasInstance] method on the right decides. Twins: instanceOf in
+		// js-interpreter.abnf, js_jsinstanceof in languages/lib/js-rt.metajs.
+		if _, isObj := target.(*jsObject); isObj || isCallable(target) {
+			if f := u(m["js_jsvget"]([]uint64{a[1], rt.wrapStr("__#@hasInstance")})); isCallable(f) {
+				return boolH(rt.truthy(rt.call(f, target, []interface{}{v})))
+			}
+		}
 		if jsvIsObjectGlobal(target) {
 			return boolH(jsvIsObjLike(v) || isCallable(v))
 		}
@@ -2302,7 +2367,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// *-interpreter.abnf start scripts.
 		proto := newJSObject()
 		proto.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jsvProtoTag(u(this))
+			return rt.jsvProtoTag(u(this))
 		}))
 		proto.set("valueOf", jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return u(this)
@@ -2639,6 +2704,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		r := vget(a)
 		if !isUndefOrNull(u(r)) {
 			return r
+		}
+		// A string's [Symbol.iterator], which the iteration sites probe under the key it
+		// stands for (emitIterOf): code points, not UTF-16 units.
+		if s, isStr := u(a[0]).(string); isStr && rt.toString(u(a[1])) == "__#@iterator" {
+			return w(jsHostFunc("[Symbol.iterator]", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return jsvSeqIter(s, 1)
+			}))
 		}
 		// Object.prototype's four methods, off a plain object or an instance.
 		if recv, isObj := u(a[0]).(*jsObject); isObj && !isClassDesc(recv) && !rxIsRegexObj(recv) {
@@ -3152,7 +3224,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		m[name] = func(a []uint64) uint64 {
 			if k, isSym := symKey(u(a[1])); isSym {
 				// [Symbol.iterator] of an array or a string, read as a value (bound to
-				// the receiver) or called.
+				// the receiver) or called; a generator's answers the generator.
 				if recv := u(a[0]); k == "__#@iterator" {
 					_, isArr := recv.(*jsArray)
 					_, isStr := recv.(string)
@@ -3160,10 +3232,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 						switch name {
 						case "js_jsvget", "js_jsmget":
 							return w(jsHostFunc("[Symbol.iterator]", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-								return jsvSeqIter(recv)
+								return jsvSeqIter(recv, 1)
 							}))
 						case "js_jsmcall":
-							return w(jsvSeqIter(recv))
+							return w(jsvSeqIter(recv, 1))
+						}
+					}
+					if _, isGen := recv.(*jsGenerator); isGen {
+						switch name {
+						case "js_jsvget", "js_jsmget":
+							return w(jsHostFunc("[Symbol.iterator]", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+								return recv
+							}))
+						case "js_jsmcall":
+							return w(recv)
 						}
 					}
 				}

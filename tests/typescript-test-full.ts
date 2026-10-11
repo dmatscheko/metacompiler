@@ -3438,6 +3438,39 @@ function s66() {
         typeof (Symbol as any).toPrimitive === "symbol" && (Symbol as any).hasInstance.description === "Symbol.hasInstance");
 }
 
+// ===== SECTION 67: the iteration protocol and the well-known symbols consulted =====
+// A string iterates by code point; an array's values() / keys() / entries() are live
+// iterators and a generator object's [Symbol.iterator]() is itself. [Symbol.toPrimitive]
+// is asked with the hint, [Symbol.hasInstance] decides instanceof and
+// [Symbol.toStringTag] names the object. Values read off node 24.
+class D67 { [Symbol.toPrimitive](h: string): any { return h === "number" ? 7 : "D:" + h; } }
+class Even67 { static [Symbol.hasInstance](n: any): boolean { return n % 2 === 0; } }
+class T67 { get [Symbol.toStringTag](): string { return "T67"; } }
+function s67() {
+    const strs: string[] = ["a\u{1F600}b", "\uD800z"];
+    const lens: number[] = [];
+    for (const ch of strs[0]) { lens.push(ch.length); }
+    const [p, q] = strs[0];
+    check("it67a", lens.join() === "1,2,1" && [...strs[0]].length === 3 && Array.from(strs[0]).length === 3 &&
+        p === "a" && q.length === 2 && [...strs[1]].length === 2);
+    const a: number[] = [7, 8];
+    const v: any = a.values();
+    const r1 = v.next();
+    a.push(9);
+    const ent: string[] = [];
+    for (const [i, x] of a.entries()) { ent.push(i + "=" + x); }
+    function* g(): Generator<number> { yield 1; yield 2; }
+    const go: any = g();
+    check("it67b", r1.value === 7 && v.next().value === 8 && v.next().value === 9 && v.next().done === true &&
+        [...a.keys()].join() === "0,1,2" && ent.join() === "0=7,1=8,2=9" && go[Symbol.iterator]() === go &&
+        Array.from(g()).join() === "1,2");
+    const d: any = [new D67()][0];
+    const tagged: any = { [Symbol.toStringTag]: "Tagged" };
+    check("tp67c", `${d}` === "D:string" && String(d) === "D:string" && d + 1 === "D:default1" && d == "D:default" &&
+        d < 8 && (2 instanceof (Even67 as any)) && !(3 instanceof (Even67 as any)) &&
+        Object.prototype.toString.call(tagged) === "[object Tagged]" && String(new T67()) === "[object T67]");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -3507,6 +3540,7 @@ function main(): number {
     s64(); // SECTION-CALL 64
     s65(); // SECTION-CALL 65
     s66(); // SECTION-CALL 66
+    s67(); // SECTION-CALL 67
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

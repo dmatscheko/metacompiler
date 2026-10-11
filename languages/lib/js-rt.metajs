@@ -404,10 +404,12 @@ function jvSymUntrack(o, k) {
     o["__symkeys"] = keep
     return undefined
 }
-// [Symbol.iterator]() of an array or a string: an iterator over its elements - a
-// string's CODE POINTS - with a [Symbol.iterator] of its own. Twins: jsvSeqIter in
-// abnf/jsrtjsprint.go, jsSeqIterFn in js-interpreter.abnf.
-function jvSeqIter(o) {
+// The iterator [Symbol.iterator](), values(), keys() and entries() answer over an
+// array or a string: kind 1 yields the elements - a string's CODE POINTS - kind 0 the
+// indices and kind 2 [index, element] pairs. An array is read live. Its own
+// [Symbol.iterator] answers itself. Twins: jsvSeqIter in abnf/jsrtjsprint.go,
+// jsSeqIter in js-interpreter.abnf.
+function jvSeqIter(o, kind) {
     var src = anytype
     src = o
     if (typeof o == "string") {
@@ -430,7 +432,11 @@ function jvSeqIter(o) {
     it["next"] = function () {
         var r = {}
         if (st["i"] < src.length) {
-            r["value"] = src[st["i"]]
+            var v = anytype
+            v = src[st["i"]]
+            if (kind == 0) { v = st["i"] }
+            if (kind == 2) { v = [st["i"], src[st["i"]]] }
+            r["value"] = v
             r["done"] = false
             st["i"] = st["i"] + 1
         } else {
@@ -443,7 +449,14 @@ function jvSeqIter(o) {
     return it
 }
 // The same, read as a value: bound to the receiver it was read from.
-function jvSeqIterFn(o) { return function () { return jvSeqIter(o) } }
+function jvSeqIterFn(o) { return function () { return jvSeqIter(o, 1) } }
+// [Symbol.iterator] read off a receiver with a built-in one: an array's or a string's,
+// or a generator's, which answers the generator itself. undefined for any other.
+function jvBuiltinIterFn(o) {
+    if (Array.isArray(o) || typeof o == "string") { return jvSeqIterFn(o) }
+    if (isGenerator(o)) { return function () { return o } }
+    return undefined
+}
 // The Symbol global: every call makes a new symbol.
 function js_jssymbolfn() {
     if (jvSymbolFn === undefined) {
@@ -718,6 +731,11 @@ function jvStr(v) {
     if (jxIsRe(v)) { return jxStr(v) }
     if (jvIsObj(v)) {
         if (v["__symkey"] !== undefined) { return jvSymStr(v) }
+        if (jvSymOn) {
+            var ex = anytype
+            ex = jvExoticPrim(v, "string")
+            if (ex !== jvMiss) { return jvStr(ex) }
+        }
         var r = jvCallMethod(v, "toString")
         if (r !== jvMiss) {
             if (typeof r == "string") { return r }
@@ -747,9 +765,14 @@ function jvToNumber(v) {
 }
 
 // jsvToPrimitive: valueOf first, then toString.
-function jvToPrimitive(v) {
+function jvToPrimitive(v, hint) {
     if (jbIsBig(v)) { return v }
     if (jvIsObj(v)) {
+        if (jvSymOn) {
+            var ex = anytype
+            ex = jvExoticPrim(v, hint)
+            if (ex !== jvMiss) { return ex }
+        }
         var r = jvCallMethod(v, "valueOf")
         if (r !== jvMiss) {
             if (!jvIsObjLike(r)) { return r }
@@ -760,11 +783,26 @@ function jvToPrimitive(v) {
     return v
 }
 
+// ToPrimitive's first step: v's [Symbol.toPrimitive], called with the hint; an
+// object result is node's TypeError. jvMiss when v has none. The callers ask it only
+// once jvSymOn is armed. Twins: jsvExoticPrim in abnf/jsrtjsprint.go, jsExoticPrim in
+// js-interpreter.abnf.
+function jvExoticPrim(v, hint) {
+    if (v["__symkey"] !== undefined) { return jvMiss }
+    var f = anytype
+    f = js_jsvget(v, "__#@toPrimitive")
+    if (!jvIsCallable(f)) { return jvMiss }
+    var r = anytype
+    r = jvCallT(f, v, [hint])
+    if (jvIsObjLike(r)) { throw jvErrFromText("TypeError: Cannot convert object to primitive value") }
+    return r
+}
+
 // The primitive form of an operand of ==, <, > or +. A BigInt box is already a
 // primitive and must NOT be run through jvStr.
-function jvPrim(v) {
+function jvPrim(v, hint) {
     if (jbIsBig(v)) { return v }
-    return jvToPrimitive(v)
+    return jvToPrimitive(v, hint)
 }
 
 // jsvLooseEq: the abstract equality comparison.
@@ -772,7 +810,7 @@ function jvLooseEq(a, b) {
     if (typeof a != "object") {
         if (typeof b != "object") { return a == b }   // see js_jsadd's fast path
     }
-    if (jbIsBig(a) || jbIsBig(b)) { return jbEq(jvPrim(a), jvPrim(b)) }
+    if (jbIsBig(a) || jbIsBig(b)) { return jbEq(jvPrim(a, "default"), jvPrim(b, "default")) }
     if (jvUndefOrNull(a) || jvUndefOrNull(b)) {
         if (jvUndefOrNull(a)) { return jvUndefOrNull(b) }
         return false
@@ -787,9 +825,9 @@ function jvLooseEq(a, b) {
         if (jvIsSym(a) || jvIsSym(b)) { return false }
     }
     if (ao) {
-        return jvLooseEq(jvToPrimitive(a), b)
+        return jvLooseEq(jvToPrimitive(a, "default"), b)
     }
-    if (bo) { return jvLooseEq(a, jvToPrimitive(b)) }
+    if (bo) { return jvLooseEq(a, jvToPrimitive(b, "default")) }
     return a == b
 }
 
@@ -818,8 +856,8 @@ function jvCompare(a, b) {
         if (typeof b != "object") { return jvCmpPrim(a, b) }   // see js_jsadd
     }
     if (jvSymOn) { jvSymOperand(a, b) }
-    var pa = jvPrim(a)
-    var pb = jvPrim(b)
+    var pa = jvPrim(a, "number")
+    var pb = jvPrim(b, "number")
     if (jbIsBig(pa) || jbIsBig(pb)) { return jbCmp(pa, pb) }
     return jvCmpPrim(pa, pb)
 }
@@ -836,7 +874,7 @@ function js_jsadd(a, b) {
     if (typeof a != "object") {
         if (typeof b != "object") { return a + b }
     }
-    if (jbIsBig(a) || jbIsBig(b)) { return jbAdd(jvPrim(a), jvPrim(b)) }
+    if (jbIsBig(a) || jbIsBig(b)) { return jbAdd(jvPrim(a, "default"), jvPrim(b, "default")) }
     if (!jvIsObjLike(a)) {
         if (!jvIsObjLike(b)) { return a + b }
     }
@@ -848,13 +886,13 @@ function js_jsadd(a, b) {
             var sr = anytype
             sl = a
             sr = b
-            if (!jvIsSym(a)) { sl = jvToPrimitive(a) }
-            if (!jvIsSym(b)) { sr = jvToPrimitive(b) }
+            if (!jvIsSym(a)) { sl = jvToPrimitive(a, "default") }
+            if (!jvIsSym(b)) { sr = jvToPrimitive(b, "default") }
             jvSymConvErr(typeof sl == "string" || typeof sr == "string")
         }
     }
-    var lp = jvToPrimitive(a)
-    var rp = jvToPrimitive(b)
+    var lp = jvToPrimitive(a, "default")
+    var rp = jvToPrimitive(b, "default")
     if (typeof lp == "string") { return lp + jvStr(rp) }
     if (typeof rp == "string") { return jvStr(lp) + rp }
     if (jbIsBig(lp) || jbIsBig(rp)) { return jbAdd(lp, rp) }
@@ -1314,6 +1352,9 @@ function jvSeedMethodNames() {
     jvArrM["fill"] = 1
     jvArrM["at"] = 1
     jvArrM["toString"] = 1
+    jvArrM["keys"] = 1
+    jvArrM["values"] = 1
+    jvArrM["entries"] = 1
     return undefined
 }
 
@@ -1471,7 +1512,11 @@ function js_jsmget(o, key) {
     if (jvSymN > 0) {
         if (typeof key == "object") {
             if (jvIsSym(key)) {
-                if (key["__symkey"] == "__#@iterator") { if (Array.isArray(o) || typeof o == "string") { return jvSeqIterFn(o) } }
+                if (key["__symkey"] == "__#@iterator") {
+                    var bi = anytype
+                    bi = jvBuiltinIterFn(o)
+                    if (bi !== undefined) { return bi }
+                }
                 return js_jsmget(o, key["__symkey"])
             }
         }
@@ -1717,7 +1762,11 @@ function js_jsvget(o, key) {
     if (jvSymN > 0) {
         if (typeof key == "object") {
             if (jvIsSym(key)) {
-                if (key["__symkey"] == "__#@iterator") { if (Array.isArray(o) || typeof o == "string") { return jvSeqIterFn(o) } }
+                if (key["__symkey"] == "__#@iterator") {
+                    var bi = anytype
+                    bi = jvBuiltinIterFn(o)
+                    if (bi !== undefined) { return bi }
+                }
                 return js_jsvget(o, key["__symkey"])
             }
         }
@@ -1769,6 +1818,11 @@ function jvValueMiss(o, key) {
         }
     }
     if (key == "prototype") { return jvBuiltinProto(o) }
+    // A string's [Symbol.iterator], which the iteration sites probe under the key it
+    // stands for (emitIterOf): code points, not UTF-16 units.
+    if (typeof o == "string") {
+        if (key == "__#@iterator") { return jvSeqIterFn(o) }
+    }
     return jvStaticValue(o, key)
 }
 
@@ -2306,6 +2360,15 @@ function jvChainHas(v, d) {
 }
 
 function js_jsinstanceof(v, c) {
+    // A [Symbol.hasInstance] method on the right decides. Twins: instanceOf in
+    // js-interpreter.abnf, js_jsinstanceof in abnf/jsrtjsprint.go.
+    if (jvSymOn) {
+        if (jvIsObj(c) || jvIsCallable(c)) {
+            var hi = anytype
+            hi = js_jsvget(c, "__#@hasInstance")
+            if (jvIsCallable(hi)) { return !js_jsnot(jvCallT(hi, c, [v])) }
+        }
+    }
     if (jvIsObjectGlobal(c)) {
         if (jvIsObjLike(v)) { return true }
         return jvIsCallable(v)
@@ -2594,6 +2657,12 @@ function jvProtoTag(v) {
     // The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
     // promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
     if (jvIsObj(v)) {
+        // A string [Symbol.toStringTag], own or inherited, names the object.
+        if (jvSymOn) {
+            var st = anytype
+            st = js_jsvget(v, "__#@toStringTag")
+            if (typeof st == "string") { return "[object " + st + "]" }
+        }
         if (v["__errh"] === true) { return "[object Error]" }
         var tag = anytype
         tag = v["__strtag"]
@@ -3308,6 +3377,9 @@ function jvArrMethod(a, name, args) {
     var n = a.length
     var cb = jvArg(args, 0)
     if (name == "toString") { return jvStr(a) }
+    if (name == "values") { return jvSeqIter(a, 1) }
+    if (name == "keys") { return jvSeqIter(a, 0) }
+    if (name == "entries") { return jvSeqIter(a, 2) }
     if (name == "at") {
         var ai = jvToInt(jvNumArg(args, 0, 0))
         if (ai < 0) { ai = ai + n }
@@ -3907,7 +3979,10 @@ function js_jsmcall(recv, key, args) {
     if (jvSymN > 0) {
         if (typeof key == "object") {
             if (jvIsSym(key)) {
-                if (key["__symkey"] == "__#@iterator") { if (Array.isArray(recv) || typeof recv == "string") { return jvSeqIter(recv) } }
+                if (key["__symkey"] == "__#@iterator") {
+                    if (Array.isArray(recv) || typeof recv == "string") { return jvSeqIter(recv, 1) }
+                    if (isGenerator(recv)) { return recv }
+                }
                 return js_jsmcall(recv, key["__symkey"], args)
             }
         }
@@ -4726,8 +4801,8 @@ function jbBinary(op, l, r) {
 // rule can fire: `1n + []` is the string "1", not a TypeError.
 function jbAdd(l, r) {
     if (!jbIsBig(l) && !jbIsBig(r)) { return jbMiss }
-    var lp = jvToPrimitive(l)
-    var rp = jvToPrimitive(r)
+    var lp = jvToPrimitive(l, "default")
+    var rp = jvToPrimitive(r, "default")
     // The concatenation is finished HERE rather than handed back as a miss: once
     // either operand is a BigInt this arm owns the answer, and a caller that
     // treats every jbAdd result as final (js_jsadd does) would
@@ -4739,8 +4814,8 @@ function jbAdd(l, r) {
 // The BigInt arm of '=='. It compares MATHEMATICALLY across the type line:
 // 1n == 1 and 1n == "1" hold, 1n == "1.0" does not.
 function jbEq(a, b) {
-    var ap = jvToPrimitive(a)
-    var bp = jvToPrimitive(b)
+    var ap = jvToPrimitive(a, "default")
+    var bp = jvToPrimitive(b, "default")
     var abig = jbIsBig(ap)
     var bbig = jbIsBig(bp)
     if (!abig && !bbig) { return jbMiss }
@@ -4789,8 +4864,8 @@ function jbRelNum(v) {
 // goes through the double value, the one place a value past 2^53 could round -
 // languages/js-interpreter.abnf's biRel does the same, so both halves agree.
 function jbCmp(a, b) {
-    var ap = jvToPrimitive(a)
-    var bp = jvToPrimitive(b)
+    var ap = jvToPrimitive(a, "number")
+    var bp = jvToPrimitive(b, "number")
     var abig = jbIsBig(ap)
     var bbig = jbIsBig(bp)
     if (!abig && !bbig) { return jbMiss }

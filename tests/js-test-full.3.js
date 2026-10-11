@@ -1698,6 +1698,52 @@ function s75() {
         err(() => ~v[0]) === num && -v[1] === -1 && Object.is(-(-0), 0))
 }
 
+// ===== SECTION 76: the iteration protocol and the well-known symbols consulted =====
+// for-of, spread, Array.from, array destructuring and yield* walk a string by code
+// point (a surrogate pair is one element, a lone surrogate one of its own). An array's
+// values() / keys() / entries() are iterators reading it live, and a generator object's
+// [Symbol.iterator]() is itself. [Symbol.toPrimitive] is asked with the hint ("string"
+// for a template and String(), "default" for + and ==, "number" for <), an object
+// result is a TypeError; [Symbol.hasInstance] decides instanceof and
+// [Symbol.toStringTag] names the object in Object.prototype.toString. Values read off
+// node 24.
+function s76() {
+    const strs = ["a\u{1F600}b", "\uD800z"]
+    const s0 = strs[0]
+    const lens = []
+    for (const ch of s0) { lens.push(ch.length) }
+    const [p, q] = strs[0]
+    function* gs() { yield* strs[0] }
+    check("it76a", lens.join() === "1,2,1" && [...s0].length === 3 && Array.from(s0).length === 3 &&
+        q.length === 2 && p === "a" && [...gs()].length === 3 && [...strs[1]].length === 2)
+    const a = [7, 8]
+    const v = a.values()
+    const r1 = v.next()
+    a.push(9)
+    const ent = []
+    for (const [i, x] of a.entries()) { ent.push(i + "=" + x) }
+    check("it76b", typeof v.next === "function" && r1.value === 7 && r1.done === false && v.next().value === 8 &&
+        v.next().value === 9 && v.next().done === true && v[Symbol.iterator]() === v &&
+        [...a.keys()].join() === "0,1,2" && ent.join() === "0=7,1=8,2=9" && JSON.stringify([1].entries().next()) === '{"value":[0,1],"done":false}')
+    function* g() { yield 1; yield 2 }
+    const go = g()
+    check("it76c", typeof go[Symbol.iterator] === "function" && go[Symbol.iterator]() === go &&
+        Array.from(g()).join() === "1,2")
+    class D { [Symbol.toPrimitive](h) { return h === "number" ? 7 : "D:" + h } }
+    const d = [new D()][0]
+    let acc = d
+    acc += "x"
+    const err = (f) => { try { return String(f()) } catch (e) { return e.constructor.name + ": " + e.message } }
+    check("tp76d", `${d}` === "D:string" && String(d) === "D:string" && d + 1 === "D:default1" && d == "D:default" &&
+        d < 8 && !(d > 7) && [d].join() === "D:string" && acc === "D:defaultx" &&
+        err(() => "" + { [Symbol.toPrimitive]() { return {} } }) === "TypeError: Cannot convert object to primitive value")
+    class Even { static [Symbol.hasInstance](n) { return n % 2 === 0 } }
+    class T2 { get [Symbol.toStringTag]() { return "T2" } }
+    const tagged = { [Symbol.toStringTag]: "Tagged" }
+    check("wk76e", (2 instanceof Even) && !(3 instanceof Even) && Object.prototype.toString.call(tagged) === "[object Tagged]" &&
+        String(tagged) === "[object Tagged]" && Object.prototype.toString.call(new T2()) === "[object T2]" && `${new T2()}` === "[object T2]")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1731,6 +1777,7 @@ function main() {
     s73() // SECTION-CALL 73
     s74() // SECTION-CALL 74
     s75() // SECTION-CALL 75
+    s76() // SECTION-CALL 76
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

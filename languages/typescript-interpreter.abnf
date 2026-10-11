@@ -2290,45 +2290,50 @@ NotFuncHead = :script(~~
         o["__symkeys"] = keep
     }
     // See the twin of this comment in js-interpreter.abnf.
-    function jsSeqIterFn(o) {
-        return function() {
-            var src = anytype // The array, or the string's code points.
-            src = o
-            if (typeof o == "string") {
-                var cps = []
-                var i = 0
-                while (i < o.length) {
-                    var c = o.charCodeAt(i)
-                    var w = 1
-                    if (c >= 55296 && c <= 56319 && i + 1 < o.length) {
-                        var t = o.charCodeAt(i + 1)
-                        if (t >= 56320 && t <= 57343) { w = 2 }
-                    }
-                    cps.push(o.substring(i, i + w))
-                    i = i + w
-                }
-                src = cps
+    function jsCodePoints(s) {
+        var cps = []
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            var w = 1
+            if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+                var t = s.charCodeAt(i + 1)
+                if (t >= 56320 && t <= 57343) { w = 2 }
             }
-            var st = {i: 0}
-            var it = {}
-            it["__keys"] = []
-            it["next"] = function() {
-                var r = {}
-                r["__keys"] = ["value", "done"]
-                if (st.i < src.length) {
-                    r["value"] = src[st.i]
-                    r["done"] = false
-                    st.i = st.i + 1
-                } else {
-                    r["value"] = undefined
-                    r["done"] = true
-                }
-                return r
-            }
-            it["__#@iterator"] = function() { return it }
-            return it
+            cps.push(s.substring(i, i + w))
+            i = i + w
         }
+        return cps
     }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsSeqIter(o, kind) {
+        var src = anytype // The array, or the string's code points.
+        src = o
+        if (typeof o == "string") { src = jsCodePoints(o) }
+        var st = {i: 0}
+        var it = {}
+        it["__keys"] = []
+        it["next"] = function() {
+            var r = {}
+            r["__keys"] = ["value", "done"]
+            if (st.i < src.length) {
+                var v = anytype // An element, an index or a pair.
+                v = src[st.i]
+                if (kind == 0) { v = st.i }
+                if (kind == 2) { v = [st.i, src[st.i]] }
+                r["value"] = v
+                r["done"] = false
+                st.i = st.i + 1
+            } else {
+                r["value"] = undefined
+                r["done"] = true
+            }
+            return r
+        }
+        it["__#@iterator"] = function() { return it }
+        return it
+    }
+    function jsSeqIterFn(o) { return function() { return jsSeqIter(o, 1) } }
     // The Symbol global: every call makes a new symbol.
     function jsSymbolFn() {
         var d = anytype
@@ -2366,6 +2371,8 @@ NotFuncHead = :script(~~
         }
         if (typeof v == "object") {
             if (jsIsSym(v)) { return jsSymStr(v) }
+            var ex = jsExoticPrim(v, "string")
+            if (ex != null) { return jsStr(ex.v) }
             var r = jsCallMethod(v, "toString")
             if (r != null) { return "" + r.v }
             return jsProtoTag(v)
@@ -2373,15 +2380,29 @@ NotFuncHead = :script(~~
         return "" + v
     }
 
-    // ToPrimitive(v, default): valueOf first, then toString ('[1] == 1' is true).
-    function jsToPrim(v) {
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsToPrim(v, hint) {
         if (Array.isArray(v)) { return jsStr(v) }
         if (jsIsObjLike(v)) {
+            var ex = jsExoticPrim(v, hint)
+            if (ex != null) { return ex.v }
             var r = jsCallMethod(v, "valueOf")
             if (r != null && !jsIsObjLike(r.v)) { return r.v }
             return jsStr(v)
         }
         return v
+    }
+
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsExoticPrim(v, hint) {
+        if (!hasOwn(jsSymWK, "toPrimitive")) { return null }
+        var f = anytype // The method, if there is one.
+        f = getMember(v, "__#@toPrimitive")
+        if (typeof f != "function") { return null }
+        var r = anytype
+        r = callWithThis(f, v, [hint])
+        if (jsIsObjLike(r)) { biRaise("TypeError: Cannot convert object to primitive value") }
+        return {v: r}
     }
 
     // The abstract equality comparison. null == undefined is true and neither is equal
@@ -2396,8 +2417,8 @@ NotFuncHead = :script(~~
         if (ao && bo) { return a === b }
         // A symbol is a primitive equal to itself alone.
         if (jsIsSym(a) || jsIsSym(b)) { return false }
-        if (ao) { return jsLooseEq(jsToPrim(a), b) }
-        if (bo) { return jsLooseEq(a, jsToPrim(b)) }
+        if (ao) { return jsLooseEq(jsToPrim(a, "default"), b) }
+        if (bo) { return jsLooseEq(a, jsToPrim(b, "default")) }
         // '==' is the one comparison that crosses the BigInt/Number line, and it does
         // it MATHEMATICALLY: 1n == 1 and 1n == "1" are true, 1n == "1.0" is false
         // (StringToBigInt has no value for a string that is not an integer literal).
@@ -2633,6 +2654,12 @@ NotFuncHead = :script(~~
         if (typeof v == "function" || v === jsObjectGlobal) { return "[object Function]" }
         // See the twin of this comment in js-interpreter.abnf.
         if (typeof v == "object") {
+            // A string [Symbol.toStringTag], own or inherited, names the object.
+            if (hasOwn(jsSymWK, "toStringTag")) {
+                var tg = anytype // The tag, if there is one.
+                tg = getMember(v, "__#@toStringTag")
+                if (typeof tg == "string") { return "[object " + tg + "]" }
+            }
             if (hasOwn(v, "__errh")) { return "[object Error]" }
             if (hasOwn(v, "__strtag")) { return "[object " + v.__strtag + "]" }
             if (jpIs(v)) { return "[object Promise]" }
@@ -3341,6 +3368,9 @@ NotFuncHead = :script(~~
         var n = a.length
         var cb = args[0]
         if (name == "toString") { return {v: jsJoin(a, ",")} }
+        if (name == "values") { return {v: jsSeqIter(a, 1)} }
+        if (name == "keys") { return {v: jsSeqIter(a, 0)} }
+        if (name == "entries") { return {v: jsSeqIter(a, 2)} }
         if (name == "join") { return {v: jsJoin(a, (args.length > 0 && args[0] !== undefined && args[0] !== null) ? jsStr(args[0]) : ",")} }
         if (name == "at") {
             var ai = Math.floor(jsArgNum(args, 0, 0))
@@ -4050,7 +4080,8 @@ NotFuncHead = :script(~~
     bvSeed(bvArr, ["push", "pop", "shift", "unshift", "slice", "splice", "indexOf", "lastIndexOf",
                    "includes", "join", "concat", "reverse", "sort", "map", "filter", "forEach",
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
-                   "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf"])
+                   "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf",
+                   "keys", "values", "entries"])
     bvSeed(bvNum, ["toFixed", "toString", "valueOf"])
     // "s" / "a" / "n" when `k` is a builtin method of the receiver's kind, else "".
     function builtinFam(o, k) {
@@ -4497,7 +4528,7 @@ NotFuncHead = :script(~~
             var v = anytype // A number or a BigInt.
             v = t()
             if (isBigInt(v)) { return biNeg(v) }
-            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
+            if (typeof v == "object") { v = jsNumPrim(v) }
             return -v
         }
     }
@@ -4507,7 +4538,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { biRaise("TypeError: Cannot convert a BigInt value to a number") }
-            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
+            if (typeof v == "object") { v = jsNumPrim(v) }
             return v - 0
         }
     }
@@ -4516,7 +4547,7 @@ NotFuncHead = :script(~~
             var v = anytype
             v = t()
             if (isBigInt(v)) { return biNot(v) }
-            if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
+            if (typeof v == "object") { v = jsNumPrim(v) }
             return ~v
         }
     }
@@ -5643,6 +5674,14 @@ NotFuncHead = :script(~~
         return false
     }
     function instanceOf(v, cls) {
+        // See the twin of this comment in js-interpreter.abnf.
+        if (hasOwn(jsSymWK, "hasInstance") && cls != undefined && cls != null) {
+            if (typeof cls == "object" || typeof cls == "function") {
+                var hi = anytype // The method, if there is one.
+                hi = getMember(cls, "__#@hasInstance")
+                if (typeof hi == "function") { return jsTruthy(callWithThis(hi, cls, [v])) }
+            }
+        }
         if (v == undefined || v == null) { return false }
         // The two host constructors a program may legitimately test against. There is no
         // prototype chain here, so they are answered from the value's own shape.
@@ -5906,15 +5945,18 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsIterOf(v) {
-        // An array is read by index (its [Symbol.iterator] is the same walk).
+        // An array is read by index (its [Symbol.iterator] is the same walk); a string
+        // is iterated by code point.
+        if (typeof v == "string") { return jsSeqIter(v, 1) }
         if (v == undefined || v == null || typeof v != "object" || Array.isArray(v)) { return v }
         var f = anytype // The [Symbol.iterator] member, of any type at all.
         f = getMember(v, "__#@iterator")
         if (typeof f != "function") { return v }
         return callWithThis(f, v, [])
     }
-    function iterArr(v, n) {
-        v = jsIterOf(v)
+    function iterArr(src, n) {
+        var v = anytype // A string becomes its iterator, so the type changes.
+        v = jsIterOf(src)
         var nx = anytype
         nx = (v != undefined && v != null && typeof v == "object") ? getMember(v, "next") : undefined
         if (typeof nx != "function") { return v }
@@ -6212,7 +6254,9 @@ NotFuncHead = :script(~~
         }
         return s
     }
-    function doYield(star, v) {
+    function doYield(star, yv) {
+        var v = anytype // A string delegate becomes its iterator, so the type changes.
+        v = yv
         var run = genRuns[genRuns.length - 1]
         if (run == undefined) fail("yield outside a generator")
         if (star) {
@@ -6368,6 +6412,8 @@ NotFuncHead = :script(~~
             tv = (arguments.length > 0) ? arguments[0] : undefined
             return genThrow(st, params, bodyT, env, self, args, tv)
         }
+        // A generator is an iterable whose [Symbol.iterator]() is itself.
+        g["__#@iterator"] = function() { return g }
         return g
     }
     // See the twin of this comment in js-interpreter.abnf.
@@ -7431,11 +7477,18 @@ NotFuncHead = :script(~~
                 if (op == "+") {
                     var lp = anytype // The primitive form of each side.
                     var rp = anytype
-                    lp = jsIsSym(l) ? l : jsToPrim(l)
-                    rp = jsIsSym(r) ? r : jsToPrim(r)
+                    lp = jsIsSym(l) ? l : jsToPrim(l, "default")
+                    rp = jsIsSym(r) ? r : jsToPrim(r, "default")
                     jsSymConvErr(typeof lp == "string" || typeof rp == "string")
                 }
                 jsSymConvErr(false)
+            }
+            // Every other operator but '+' and identity converts an object operand with
+            // hint number.
+            if (op != "+" && op != "===" && op != "!==" && !isBigInt(l) && !isBigInt(r)) {
+                if (jsIsObjLike(l) || jsIsObjLike(r)) {
+                    return binOp(op, jsIsObjLike(l) ? jsToPrim(l, "number") : l, jsIsObjLike(r) ? jsToPrim(r, "number") : r)
+                }
             }
         }
         // See the twin of this comment in js-interpreter.abnf.
@@ -7443,7 +7496,8 @@ NotFuncHead = :script(~~
             // An OBJECT on the other side is still ToPrimitive'd first, so '1n + []'
             // concatenates with "" the way it does in node.
             if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "+") {
-                if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l), jsToPrim(r)) }
+                var bh = (op == "+") ? "default" : "number"
+                if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l, bh), jsToPrim(r, bh)) }
             }
             if (op == "<" || op == ">" || op == "<=" || op == ">=") {
                 var c = biRel(l, r)
@@ -7459,8 +7513,8 @@ NotFuncHead = :script(~~
             var br = biBinOp(op, l, r)
             if (br != null) { return br.v }
         }
-        if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "+") {
-            if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l), jsToPrim(r)) }
+        if (op == "+") {
+            if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l, "default"), jsToPrim(r, "default")) }
         }
         // The arithmetic arms sit BELOW the BigInt dispatch: a BigInt is a record to the
         // host engine, so a '+' fast path in front of it would spell 1n + 1 "[object Object]1".
@@ -7816,8 +7870,12 @@ NotFuncHead = :script(~~
     applyOp = function(op, a, b) {
         // A compound assignment is its operator applied to the current value, so it
         // takes the same BigInt path (and the same mixed-operand TypeError) as binOp.
+        // A symbol or an object operand converts as binOp converts it.
         if (typeof a == "object" || typeof b == "object") {
             if (jsIsSym(a) || jsIsSym(b)) { return binOp(op.substring(0, op.length - 1), a, b) }
+            if (op != "**=" && !isBigInt(a) && !isBigInt(b) && (jsIsObjLike(a) || jsIsObjLike(b))) {
+                return binOp(op.substring(0, op.length - 1), a, b)
+            }
         }
         if (isBigInt(a) || isBigInt(b)) {
             if (op == "+=" && (typeof a == "string" || typeof b == "string")) { return jsStr(a) + jsStr(b) }
@@ -7950,8 +8008,14 @@ NotFuncHead = :script(~~
     // the +1 / -1 that ++ and -- perform, in whichever of the two types it got.
     function jsToNumeric(v) {
         if (isBigInt(v)) { return v }
-        if (typeof v == "object" && jsIsSym(v)) { jsSymConvErr(false) }
+        if (typeof v == "object") { return jsNumPrim(v) - 0 }
         return v - 0
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsNumPrim(v) {
+        if (jsIsSym(v)) { jsSymConvErr(false) }
+        if (jsIsObjLike(v)) { return jsToPrim(v, "number") }
+        return v
     }
     function jsStep(v, delta) {
         if (isBigInt(v)) { return biAdd(v, biFromNum(delta)) }

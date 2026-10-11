@@ -363,7 +363,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 			_, lok := bigOf(l)
 			_, rok := bigOf(r)
 			if lok || rok {
-				lp, rp := rt.jsvToPrimitive(l), rt.jsvToPrimitive(r)
+				lp, rp := rt.jsvToPrimitive(l, "default"), rt.jsvToPrimitive(r, "default")
 				_, lIsStr := lp.(string)
 				_, rIsStr := rp.(string)
 				if !lIsStr && !rIsStr {
@@ -472,13 +472,13 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	// array stringifies to "1" and StringToBigInt reads it back.
 	eqBase, neBase := m["js_jseq"], m["js_jsne"]
 	m["js_jseq"] = func(a []uint64) uint64 {
-		if r, ok := bigLooseEq(rt.jsvToPrimitive(u(a[0])), rt.jsvToPrimitive(u(a[1]))); ok {
+		if r, ok := bigLooseEq(rt.jsvToPrimitive(u(a[0]), "default"), rt.jsvToPrimitive(u(a[1]), "default")); ok {
 			return boolH(r)
 		}
 		return eqBase(a)
 	}
 	m["js_jsne"] = func(a []uint64) uint64 {
-		if r, ok := bigLooseEq(rt.jsvToPrimitive(u(a[0])), rt.jsvToPrimitive(u(a[1]))); ok {
+		if r, ok := bigLooseEq(rt.jsvToPrimitive(u(a[0]), "default"), rt.jsvToPrimitive(u(a[1]), "default")); ok {
 			return boolH(!r)
 		}
 		return neBase(a)
@@ -486,7 +486,7 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	rel := func(name string, want func(int) bool) {
 		base := m[name]
 		m[name] = func(a []uint64) uint64 {
-			if c, ok := bigCompare(rt.jsvToPrimitive(u(a[0])), rt.jsvToPrimitive(u(a[1]))); ok {
+			if c, ok := bigCompare(rt.jsvToPrimitive(u(a[0]), "number"), rt.jsvToPrimitive(u(a[1]), "number")); ok {
 				if c == 2 {
 					return jsHFalse
 				}
