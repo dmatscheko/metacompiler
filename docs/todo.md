@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-426** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-429** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -87,6 +87,13 @@ type objects; the `object` type object is bare. The java ratchet's -frozen peak 
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
+### T-427 csharp: System.Math; iterator re-enumeration; foreach over GetEnumerator · P1 · CS · OPEN [V spec-only]
+(a) `Math.Max(1, 2)`: "unknown name: Math" (interp) / "unknown method 'Max'" (llvm.Run); System.Math is absent.
+(b) interpreter: an iterator whose body foreach-es another iterator object (`Evens(Nat())`) yields "0 4" instead of
+"0 2 4 6" (compiled right). Compiled generators are one-shot: enumerating the same IEnumerable twice resumes where
+it stopped; C# restarts with a fresh enumerator (affects foreach, LINQ, string.Join, all engines).
+(c) foreach over a user class with GetEnumerator(): interpreter visits nothing; compiled dies "len() of a object".
+
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
 `flt36`/`flt37` in tests/csharp-test-full.cs assert `1E+07`, `1E+20`,
 `3.4028235E+38` for `float.ToString()`. .NET Core 3.0+ prints the shortest round-trip
@@ -124,16 +131,15 @@ crashes. LINQ extension methods unavailable on lists.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-425 php: callable/dispatch error tails · P2 · PHP · IN PROGRESS (PHP worker, round 20) [V]
-Spec / php-src corpus answers: (a) `$o()` on a non-invokable object is uncatchable in all engines (PHP: Error
-'Object of type P is not callable'). (b) callable class names are case-sensitive ('testclass::staticmethod',
-dynamic_call/bug68475). (c) compiled `Test::{$x}()` with an unknown class says "Call to undefined function Test()"
-(interpreter/PHP: 'Class "Test" not found'). (d) compiled `array_filter($a, 'is_int')` — string callable naming a
-builtin raises "Call to undefined function is_int()". (e) goto out of a finally body should be a compile error
-("jump out of a finally block is disallowed"). (f) compiled 'parent::m' via a callable binds static:: to the parent,
-PHP forwards the caller's class. (g) invalid callbacks to internal functions should raise TypeError
-"call_user_func(): Argument #1 ($callback) must be a valid callback, ...". (h) numeric_strings/neg_num_string:
-interpolated "$a[0x0]", "$a[9223372036854775808]" wrong; "$a[-9223372036854775808]" differs interp vs compiled.
+### T-426 php: array union, case-insensitive class checks, hoisting, builtin TypeErrors · P2 · PHP · OPEN [V]
+Spec / php-src corpus answers, both engines unless noted: (a) array union `$a + $b` aborts ("unsupported operand
+type: array used as a number"; blocks dynamic_call_freeing). (b) `catch (exception $e)`, `instanceof`,
+`method_exists`/`class_exists` compare class names case-sensitively. (c) `Nope::class` of an undeclared class raises
+'Class "Nope" not found' (PHP: "Nope" at compile time). (d) classes are not hoisted: use before declaration fails.
+(e) `Closure::fromCallable` missing. (f) `count(" Ab")`, `abs(" Ab")` should raise TypeError; `array_values("str")`
+crashes the interpreter in its own JS and returns [] compiled. (g) relative callables ('self::m') passed to
+array_map & co resolve in the stdlib function's frame. (h) `break`/`continue` out of finally (try_finally_009) and
+goto into finally (finally_goto_001/002/004) are not compile errors.
 
 ---
 
@@ -150,6 +156,13 @@ interpolated "$a[0x0]", "$a[9223372036854775808]" wrong; "$a[-922337203685477580
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-428 core: GC marking cost scales with layer-2 module size · P2 · CORE · OPEN [V]
+Adding ~104 top-level functions to csharp-rt (LINQ, formatter) made the csharp bench +1.8% (5/5 paired) although
+the bench runs none of them: with MEC_GC=off the delta is +100M, with the collector +336M over 2,345 collections,
+i.e. the collector re-marks module-level function objects / globals each cycle. Every language pays for its
+runtime library's size. Investigate: treat immutable module-level function objects as permanent (not traced), or
+mark them once. Measure on csharp, java, python, php benches.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -468,6 +481,7 @@ T-422 swift: lazy Sequence iteration (sequence(), user Sequence/IteratorProtocol
 T-423 swift: [Double]() element typing on append; inout through field/element — DONE 103a47c1
 T-420 php: named-argument errors, class-relative callables, scalar property writes, compiled goto out of try/catch (js_ctl_goto), hashed key index for long arrays (n=4000: 643G→3.4G) — DONE 47a950f6
 T-424 swift: member shadows global, line-start paren, closure defer, Array + literal typing, print(to:) through a path, inout write-back after defer/catch — DONE 89d8a44c
+T-425 php: non-callable Error, case-insensitive class names, missing-class errors, builtin string callables, goto-out-of-finally compile error, LSB forwarding through callables, callback TypeErrors, numeral interpolation keys — DONE 5921cef7
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
