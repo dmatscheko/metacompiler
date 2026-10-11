@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-383** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-384** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -161,27 +161,14 @@ and `case T:` / `x.(T)` qualification inside packages.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-158 frame elimination on arithmetic predicates · P3 · CORE + PY + RB · IN PROGRESS (CORE worker, round 8) [V]
-`rtTag`'s −13.9% on python came from removing ONE scope frame from ONE predicate.
-The same `!pyIsObj(v)`-then-field-test shape sits at `pyIsFlo`, `pyIsNumeric`,
-`pyInstClassOf`, `rbUserObj`, `rbIsClassObj`. Each needs its own call-site sizing and
-a measurement against a dead-code matched control (tests/bench.sh header). Never
-introduce a delegating wrapper on a hot path: that cost python +41% once.
-
-### T-363 pow is up to 421 ulps off in every leg that uses math.Pow / d_pow · P1 · CORE · IN PROGRESS (CORE worker, round 8) [V]
-600-row probe: 544/600 not correctly rounded (max 421 ulps); node, CPython and Apple
-libm 0/600. `1.9687173381259235 ** 596.2128067674018` gives 2.48822920238156e+175 in
-every leg (node 2.488229202381568e+175). Python's float `**` with an integral exponent
-is up to 4 ulps off too: `10.0 ** 300` prints 1.0000000000000006e+300 (CPython 1e+300). Design: double-double pow with a Ziv test,
-~250 lines per engine (MetaJS module for interpreter + layer 2, Go port, runtime.c
-d_pow), routed for python, ruby, js, lua, php (java stays on fdlibm, go on its Go port).
-
-### T-364 coroutines: a stackful context switch in the floor · P3 · CORE · IN PROGRESS (CORE worker, round 8) [V]
-Native next() costs ~83k extra instructions / ~8.5 µs; a parked generator ~21.4 KB
-(pthread + condvar). Replace with hand-written IR inline asm for arm64 and x86-64 that
-saves callee-saved registers and swaps sp (~350 lines: asm, gen_resume rewrite, a
-gc_sweep hook freeing unreachable coroutine stacks); extern surface, emitters and Go
-twin unchanged. Native-only, one hand-written file in lib. Cost, implement or DECLINE.
+### T-383 goja prints some doubles with the wrong digits in the interpreter legs · P1 · CORE · IN PROGRESS (CORE worker, round 9) [V]
+`repr`/`String`/`printf("%.17g")` of `0.0015425378683206609` prints
+`0.001542537868320661` (a different double) under goja in the python, js and php
+interpreters; -frozen and the compiled legs are right - a live goja-vs-frozen
+divergence (manual ch. 4: goja's Number→String is not always shortest/round-trip).
+Find every interpreter path that takes a double's digits from the host and route it
+through the round-trip choice (floPrec / coreDecDigits), or fix the goja host's
+Number→String once for all grammars.
 
 ### T-170 a real tuple type for Python · P3 · PY + CORE · OPEN [V]
 `set_member` (runtime.c) accepts a named key only on tag 6; on tag 5 (array) it
@@ -191,13 +178,6 @@ box - manual 7.6). Atomic: any subset is a `--cross` divergence. Sites: python
 interpreter 17 `Array.isArray` + 49 tuple refs, python-rt.metajs 42 `pyIsArr`, python
 compiler 54 tuple refs, jsrt.go `*jsArray`. Unblocks T-011, `%`-formatting arity (`"%d %d" % (1,2,3)` must say "not all arguments converted during string formatting"; `"%s" % [1, 2]` must stay `[1, 2]`),
 `BaseException.__str__`, hashability as a real rule.
-
-### T-172 a catchable `GeneratorExit` · P3 · CORE + PY · IN PROGRESS (CORE worker, round 8) [V]
-`js_try`'s `pending != GEN_EXIT` guard is shared with fifteen languages (where a close
-is a return completion and must not be catchable); `GEN_EXIT` has no Python class, so
-`except Exception` (must not catch) and bare `except:` (must) cannot be told apart;
-the floor needs `gen_close(g, sentinel)` reached through the tag-15 `return` member,
-which has nowhere to pass one. New extern → three engines → plus coro-poc.
 
 ### T-181 corpus: other languages · P3 · per language · IN PROGRESS (CORPUS worker, round 13) [V]
 batch 0 of 2 wine files parse; swift 80% (an 18-file lexical tail: suppressed
@@ -474,6 +454,10 @@ T-369 js: `var` is block-scoped; for-of/in reuse an outer variable; symbol limit
 T-376 go: `len`/`cap`/index/append pay ~19k instructions in `js_is_type` — DONE 44b773a3 (bench go 384M → 100M instructions, output checked against go run)
 T-375 go: `map[any]` keys of defined types; imported packages' defined types — DONE b44a5741
 T-381 go: a slice of a defined type prints its elements raw — DONE f29be2a6
+T-363 pow is up to 421 ulps off in every leg that uses math.Pow / d_pow — DONE faeecc87 (530/650 → 0/650 not correctly rounded; ~236k instructions per native pow)
+T-172 a catchable `GeneratorExit` — DONE 6077a025 (close() is throw(GeneratorExit()); no floor change)
+T-158 frame elimination on arithmetic predicates — DONE c545f6c8 (pyIsFlo + pyInstClassOf inlined: python -3.78%, 15/15 pairs; rbUserObj/rbIsClassObj measured no gain, left)
+T-364 coroutines: a stackful context switch in the floor — DONE d9d59b6a (lib/coro-switch.S: 83k → 52k instructions per next(), pthread/dlopen gone; native-full on arm64 and x86-64)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
@@ -521,7 +505,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
