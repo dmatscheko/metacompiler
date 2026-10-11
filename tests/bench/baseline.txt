@@ -4,7 +4,7 @@
 # Native -exe binaries built from tests/bench/mod.*. Re-record with
 # tests/bench.sh --record when you land an intended change, and say in the commit
 # message which rows moved and why.
-# recorded at commit 28c5341, 9 draws, min of 3 runs; the go row on top of 78bb180, 5 draws; the python row on top of e36738c1, 5 draws.
+# recorded at commit 28c5341, 9 draws, min of 3 runs; the go row on top of 78bb180, 5 draws; the python row on top of e36738c1, 5 draws; the php row on top of cb1ad8d0, 5 draws.
 bash       52735738         -          -
 batch      33827395         -          -
 c          10778282         -          -
@@ -16,7 +16,7 @@ js         1155867857       11577456   131
 kotlin     15128556208      11627376   1880
 lua        1408903406       10498176   121
 metajs     221403632        11537792   4
-php        7048943096       11560816   968
+php        911109733        11581296   96
 python     12353717031      12678000   1573
 ruby       5071919899       11622256   466
 swift      4035881746       11556976   470

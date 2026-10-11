@@ -1990,7 +1990,11 @@ function js_range_val(v, i) {
 // MetaJS `false` would come back as the HANDLE of false, which is 2, and 2 != 0,
 // so every condition in the program would be taken. See the header of
 // languages/metajs-to-llvm-ir.abnf's export scanner.
-function js_phtruthy__raw(v) { return phTest(v) }
+// A comparison's boolean is the common operand, so it answers before phTest's call.
+function js_phtruthy__raw(v) {
+    if (typeof v == "boolean") { return v }
+    return phTest(v)
+}
 
 function js_phbool(v) { return phTest(v) }
 function js_phnot(v) { return !phTest(v) }
@@ -2014,16 +2018,48 @@ function js_phne(l, r) { return !phLoose(l, r) }
 function js_phseq(l, r) { return phIdentical(l, r) }
 function js_phsne(l, r) { return !phIdentical(l, r) }
 function js_phcmp(l, r) { return phCmp(l, r) }
-function js_phlt(l, r) { return phCmp(l, r) < 0 }
-function js_phgt(l, r) { return phCmp(r, l) < 0 }
-function js_phle(l, r) { return phCmp(l, r) <= 0 }
-function js_phge(l, r) { return phCmp(r, l) <= 0 }
+// The int32 FAST PATHS. In MetaJS a call opens a scope and declares its
+// parameters, so phCmp / phArith cost many times the operation itself, and a PHP
+// loop counter pays that on every '<' and '+'. Two operands inside the int32
+// window are plain ints (the model boxes every float and makes a sized integer
+// only past 2^53, which the window rejects), so the exact answer is one machine
+// operation; everything else takes the general path. The guard is written out
+// inline in each entry on purpose: a shared helper would be the call it avoids.
+// The same window as js_luarith in lib/lua-rt.metajs.
+function js_phlt(l, r) {
+    if (typeof l == "number" && typeof r == "number" && l > -2147483649 && l < 2147483648 && r > -2147483649 && r < 2147483648) { return l < r }
+    return phCmp(l, r) < 0
+}
+function js_phgt(l, r) {
+    if (typeof l == "number" && typeof r == "number" && l > -2147483649 && l < 2147483648 && r > -2147483649 && r < 2147483648) { return l > r }
+    return phCmp(r, l) < 0
+}
+function js_phle(l, r) {
+    if (typeof l == "number" && typeof r == "number" && l > -2147483649 && l < 2147483648 && r > -2147483649 && r < 2147483648) { return l <= r }
+    return phCmp(l, r) <= 0
+}
+function js_phge(l, r) {
+    if (typeof l == "number" && typeof r == "number" && l > -2147483649 && l < 2147483648 && r > -2147483649 && r < 2147483648) { return l >= r }
+    return phCmp(r, l) <= 0
+}
 
-function js_phadd(l, r) { return phArith("+", l, r) }
-function js_phsub(l, r) { return phArith("-", l, r) }
+function js_phadd(l, r) {
+    if (typeof l == "number" && typeof r == "number" && l > -2147483649 && l < 2147483648 && r > -2147483649 && r < 2147483648) { return l + r }
+    return phArith("+", l, r)
+}
+function js_phsub(l, r) {
+    if (typeof l == "number" && typeof r == "number" && l > -2147483649 && l < 2147483648 && r > -2147483649 && r < 2147483648) { return l - r }
+    return phArith("-", l, r)
+}
 function js_phmul(l, r) { return phArith("*", l, r) }
 function js_phdiv(l, r) { return phArith("/", l, r) }
-function js_phmod(l, r) { return phArith("%", l, r) }
+// The integer remainder phArith takes too (sintOp, not the double '%', which is a
+// software fmod here and answers -0 for -4 % 2); a zero divisor takes the general
+// path, which raises.
+function js_phmod(l, r) {
+    if (typeof l == "number" && typeof r == "number" && l > -2147483649 && l < 2147483648 && r > -2147483649 && r < 2147483648 && r != 0) { return sintOp(4, l, r) }
+    return phArith("%", l, r)
+}
 function js_phpow(l, r) { return phArith("**", l, r) }
 function js_phneg(v) { return phNeg(v) }
 
@@ -2288,7 +2324,11 @@ function phPlaceAt(p, i, isList) {
 function js_phcell(a, k) { return phElemCell(a, k) }
 function js_phderef(v) { return phDeref(v) }
 function js_phunset(a, k) { return phArrUnset(a, k) }
-function js_phcopy(v) { return phArrCopy(v) }
+// Only an array is copied; a scalar answers before phArrCopy's call.
+function js_phcopy(v) {
+    if (typeof v != "object") { return v }
+    return phArrCopy(v)
+}
 function js_phlen(v) { return phLen(v) }
 
 // [...$a]: integer keys renumber, string keys stay.

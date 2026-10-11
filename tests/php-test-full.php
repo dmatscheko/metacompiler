@@ -2007,6 +2007,11 @@ function s48() {
     $xs = ["1.5e3abc", "12e2x", " 5e1 z", "\t-2.5E-1q", "7e", ".5e1y"];
     check("npf1", @($xs[0] + 0) === 1500.0 && @($xs[1] + 0) === 1200.0 && @($xs[2] + 0) === 50.0 && @($xs[3] + 0) === -0.25);
     check("npf2", @($xs[4] + 0) === 7 && @($xs[5] + 0) === 5.0 && (int)$xs[0] === 1500 && (int)$xs[2] === 50);
+    // The edges of the int32 window the native arithmetic answers inline: a result
+    // past it is still an exact int.
+    $w = [-4, 2, 2147483647, 1, -2147483648];
+    check("fpi1", $w[0] % $w[1] === 0 && $w[2] + $w[3] === 2147483648 && $w[4] - $w[3] === -2147483649
+        && $w[4] < $w[2] && !($w[2] <= $w[4]) && $w[4] % -1 === 0);
 }
 
 // ===== END SECTIONS =====
