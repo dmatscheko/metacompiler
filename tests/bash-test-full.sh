@@ -1951,6 +1951,36 @@ s35() {
   check pp15 "$(printf '<%s>' x "$@" y "${@:1}" "${@+set}" "${*-un}")" '<x><y><un>'
 }
 
+# ===== SECTION 36: @A/@a/@K/@k on $@ and $*, a ${x-w} word's own quoting, `e=()` =====
+# ${@@A} is the `set -- 'a' 'b c'` that would recreate the parameters, a FIELD LIST
+# split like ${a[@]@A}'s `declare -a a=`; @K and @k quote each parameter as @Q
+# does and @a is each one's (empty) attributes. The word of ${x:-w} is expanded with
+# its OWN quoting when the ${...} stands unquoted: its quoted parts are not split
+# and the fields it makes are not split again. An array assigned `()` is set.
+# Every expected value is bash 5.3's.
+s36() {
+  set -- a "b c"
+  check xa1 "$(printf '<%s>' "${@@A}")" "<set><--><'a'><'b c'>"
+  check xa2 "$(printf '<%s>' "${*@A}" ${*@A})" "<set -- 'a' 'b c'><set><--><'a'><'b><c'>"
+  check xa3 "$(IFS=:; printf '<%s>' "${*@A}" ${@@A})" "<set -- 'a':'b c'><set -- 'a'><'b c'>"
+  check xa4 "$(printf '<%s>' "${@@K}" "${@@k}" "${*@K}")" "<'a'><'b c'><'a'><'b c'><'a' 'b c'>"
+  check xa5 "$(printf '<%s>' "${@@a}" "${*@a}")" '<><>< >'
+  check xa6 "$(set --; printf '<%s>' x "${@@A}" "${*@A}" "${@@K}" y)" '<x><><y>'
+  set -- "a b" c "" d
+  local x36="" y36="p q"
+  check dw1 "$(printf '<%s>' ${x36:-"$@"})" '<a b><c><><d>'
+  check dw2 "$(IFS=; printf '<%s>' ${x36:-"$@"} ${x36:-$@})" '<a b><c><><d><a b><c><d>'
+  check dw3 "$(printf '<%s>' ${x36:-"$y36"} ${x36:-$y36} w${x36:-"$@"}v)" '<p q><p><q><wa b><c><><dv>'
+  check dw4 "$(printf '<%s>' ${y36:+"$@"} ${x36:-a" "b} ${x36:-a b})" '<a b><c><><d><a b><a><b>'
+  check dw5 "$(f36() { echo $#; }; f36 ${x36:-""}; f36 $x36"$@"$x36)" '1
+4'
+  local e36a=() e36d=(1)
+  declare -a e36b
+  unset 'e36d[0]'
+  check ea1 "${!e36*}" 'e36a e36d'
+}
+
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -1986,5 +2016,6 @@ s32   # SECTION-CALL 32
 s33   # SECTION-CALL 33
 s34   # SECTION-CALL 34
 s35   # SECTION-CALL 35
+s36   # SECTION-CALL 36
 echo "full: $checks checks, $fails failures"
 exit $fails

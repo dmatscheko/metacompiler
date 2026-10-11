@@ -452,7 +452,11 @@ PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
-BraceWord   <~~ push(mkWord(takeAll())) ~~> = BraceSeg { BraceSeg } ;
+BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
+BraceWSeg   = SqSeg | DqSeg | BraceUq | EscSeg ;
+// The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
+// (see mkBraceWord).
+BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
 BraceSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
@@ -1263,12 +1267,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtShq = rtDecl("rt_shq", true, [1, 0])
     var rtDeclAsg = rtDecl("rt_declasg", true, [1, 1, 1, 0])
     var rtDeclXa = rtDecl("rt_declxa", true, [1, 1, 1, 0, 0, 1, 0])
+    var rtDeclPos = rtDecl("rt_declpos", true, [1, 1, 0])
     var rtKvq = rtDecl("rt_kvq", true, [1, 0])
     var rtKvp = rtDecl("rt_kvp", true, [1, 1, 0])
     var rtAttrf = rtDecl("rt_attrf", true, [1, 1, 1, 0])
     var rtPrompt = rtDecl("rt_prompt", true, [1])
     var rtArrNext = rtDecl("rt_arr_nextidx", false, [1])
     var rtArrClear = rtDecl("rt_arr_clear", false, [1])
+    var rtArrMark = rtDecl("rt_arr_mark", false, [1])
+    var rtFinList = rtDecl("rt_finlist", true, [1])
     var rtArrAppend = rtDecl("rt_arr_append", false, [1, 1])
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
     var rtGlobEsc = rtDecl("rt_globescape", true, [1])
@@ -1479,12 +1486,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // $@ and $* WITH AN OPERATOR are the positional parameters as a LIST, as
         // ${a[@]} / ${a[*]} are an array's, so they take the subscripted path below with
         // "@"/"*" as both the name and the subscript (rt_sc_count / rt_sc_get /
-        // rt_sc_has / rt_sc_list answer the parameters for those names). @A, @a, @K and
-        // @k describe a VARIABLE and stay out. Twin of the same routing in
-        // bash-interpreter.abnf.
+        // rt_sc_has / rt_sc_list answer the parameters for those names), every
+        // @-transform included (rt_declpos has @A's own form). Twin of the same routing
+        // in bash-interpreter.abnf.
         if (!hasIdx && (name == "@" || name == "*") && !lenp && !indp
-            && (pe == "substr" || isPatOp(pe) || op != "" || xf == "Q" || xf == "E" || xf == "P"
-                || xf == "U" || xf == "L" || xf == "u")) {
+            && (pe == "substr" || isPatOp(pe) || op != "" || xf != "")) {
             hasIdx = true
             var posWords = [makeConst(name)]
             for (var pw = 0; pw < words.length; pw++) { posWords.push(words[pw]) }
@@ -1686,7 +1692,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // and @a repeats the attribute letters once per element (`a a`).
                 if (xf != "" && op == "") {
                     var wholeV = null
-                    if (xf == "A") {
+                    // On $@ / $*, @A is rt_declpos, @K and @k quote each parameter as @Q
+                    // does, and @a (rt_attrf) is once per parameter.
+                    var posXf = (name == "@" || name == "*") && (xf == "K" || xf == "k") ? "Q" : xf
+                    if (xf == "A" && (name == "@" || name == "*")) {
+                        var starXp = uqStarEmit ? starArg(b, one) : starA
+                        wholeV = b.NewCall(rtDeclPos, [ifsValue(b), ifsFirstValue(b), starXp])
+                    } else if (posXf == "Q" && xf != "Q") {
+                        var allQ = b.NewCall(rtScList, [nmOf(b), ifsFirstValue(b), zero, zero])
+                        wholeV = b.NewCall(rtMapf, [allQ, llvm.constant.NewInt(i32, xfMapKind("Q")),
+                                                    emptyPtr(b), emptyPtr(b), zero, ifsFirstValue(b), starA])
+                    } else if (xf == "A") {
                         // Unquoted, [@] is the [*] string too, split like any other value.
                         var starXa = uqStarEmit ? starArg(b, one) : starA
                         wholeV = b.NewCall(rtDeclXa, [nmOf(b), attrLetters(b, nmOf(b)), one1, elemSet,
@@ -2348,6 +2364,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitArrayLit(b, name, litItems, append, assoc) {
         var nm = gepStr(b, name)
         if (!append) { b.NewCall(rtArrClear, nm) }
+        // A literal makes the name a SET array even with no element (rt_arr_mark).
+        b.NewCall(rtArrMark, nm)
         var i
         var pendKey = null    // an assoc literal's bare words pair up; this is the odd one
         for (i = 0; i < litItems.length; i++) {
@@ -2598,11 +2616,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return cont
     }
 
-    // THE WORD OF ${v-w} / ${v+w} EXPANDS IN THE CONTEXT OF THE ${...} ITSELF: its fields
-    // survive ("${x:-$@}" is still a list) and, unquoted under a null IFS, a $* in it stays
-    // fields as an unquoted $* does. So, unlike evalWord, uqStarEmit is kept and nothing
-    // is joined; the expansion is marked f. Twin of dfltWord in bash-interpreter.abnf.
-    function dfltWordEmit(b, w) { return w.fn(b) }
+    // THE WORD OF ${v-w} / ${v+w} IS EXPANDED WITH ITS OWN QUOTING. Quoted, the ${...} is
+    // one more quoted text and its fields survive ("${x:-$@}" is still a list). Unquoted,
+    // the word's unquoted parts are split and its quoted parts are not (its `spw` form,
+    // mkBraceWord), and the fields that makes are FINAL: rt_finlist marks the list so
+    // the enclosing word does not split it again (rt_uqlist). The expansion is marked f.
+    // Twin of dfltWord in bash-interpreter.abnf.
+    function dfltWordEmit(b, w) {
+        if (!uqStarEmit || w.spw == undefined) { return w.fn(b) }
+        var r = w.spw.fn(b)
+        return {b: r.b, v: r.b.NewCall(rtFinList, [r.v])}
+    }
+    // A ${v-w} word: the unsplit word every use reads, carrying in `spw` the form whose
+    // unquoted parts (BraceUq) split, for dfltWordEmit.
+    function mkBraceWord(items) {
+        var ns = []
+        var sp = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.uq != undefined) { ns.push(it.uq); sp.push(mkSplittable(it.uq)) }
+            else { ns.push(it); sp.push(it) }
+        }
+        var w = mkWord(ns)
+        return {s: w.s, f: w.f, c: w.c, fn: w.fn, spw: mkWord(sp)}
+    }
     // Evaluate ONE word to a single string: a word that can produce several fields is
     // flattened (space-joined), which is what every builtin with a fixed argument list wants.
     function evalWord(b, w) {

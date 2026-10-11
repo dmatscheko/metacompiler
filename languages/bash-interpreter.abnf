@@ -505,7 +505,11 @@ PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
-BraceWord   <~~ push(mkWord(takeAll())) ~~> = BraceSeg { BraceSeg } ;
+BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
+BraceWSeg   = SqSeg | DqSeg | BraceUq | LineCont | EscSeg ;
+// The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
+// (see mkBraceWord).
+BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
 BraceSeg    = SqSeg | DqSeg | ExpSeg | LineCont | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
@@ -1136,7 +1140,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
         fr.push({name: name, had: isSetVar(name), val: getVarVal(name),
                  ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                 hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}}})
+                 hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false}})
     }
 
     function allDigits(s) {
@@ -1470,13 +1474,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nm = varNames[i]
             if (nm.length >= p.length && nm.slice(0, p.length) == p && isSetVar(nm)) { out.push(nm) }
         }
-        // An array with an element is set too (declare -A h=([k]=1); "${!h*}" is h).
-        // A declared one with none is not; neither is `e=()` here, which bash lists -
-        // the store keeps no record of an empty array being assigned.
+        // An array with an element is set too (declare -A h=([k]=1); "${!h*}" is h), and
+        // so is one assigned a literal with none (`e=()`, its `lit` flag); a declared one
+        // with neither is not. Twin of rt_arr_mark in languages/lib/bash-rt.c.
         for (i = 0; i < stNames.length; i++) {
             var an = stNames[i]
             if (an.length >= p.length && an.slice(0, p.length) == p && isArr(an) && !isSetVar(an)
-                && arrValList(an).length > 0) { out.push(an) }
+                && (arrValList(an).length > 0 || arrs[arrKey(an)].lit)) { out.push(an) }
         }
         // Insertion sort: Array.prototype.sort is outside the -frozen JS subset.
         var j
@@ -1621,6 +1625,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!isset) { return "" }
         return shellQuote(v)
     }
+    // ${@@A} / ${*@A}: the command that would recreate the positional parameters,
+    // `set -- 'a' 'b c'` (bash 5.3). It takes the shape ${a[@]@A} does: the [*] form is
+    // the one string, the values joined by IFS's first character; the [@] form is a
+    // FIELD LIST, the text `set -- ` split on IFS (a null IFS counting as the default)
+    // and glued to the first value unless it ends in a delimiter, then one field per
+    // further value. With no parameters [@] is no field and [*] the empty string.
+    // Twin of rt_declpos in languages/lib/bash-rt.c.
+    function posDeclA(sub) {
+        var qv = []
+        for (var i = 0; i < posParams.length; i++) { qv.push(shellQuote(posParams[i])) }
+        if ((sub == "*" || uqStar) && !starFields()) { return qv.length == 0 ? "" : "set -- " + joinList(qv, ifsFirst()) }
+        if (qv.length == 0) { return encFields([]) }
+        var fs = ["set", "--"]
+        if (ifsFirst() != "") {
+            fs = splitIFS("set -- ")
+            if (fs.length > 0 && !ifsTrail("set -- ")) { fs[fs.length - 1] = fs[fs.length - 1] + qv[0]; qv = qv.slice(1) }
+        }
+        for (var j = 0; j < qv.length; j++) { fs.push(qv[j]) }
+        return encFields(fs)
+    }
     function promptBase(p) {
         var i
         var last = -1
@@ -1681,12 +1705,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // ${a[@]} / ${a[*]} are an array's: `set -- "a b" c "" d; printf '<%s>' "${@:2}"`
         // is <c><><d> and "${*/c/C}" replaces in each parameter before the join. So they
         // take the subscripted path below with "@"/"*" as both the name and the
-        // subscript (scValList, scGet and scHas answer the parameters for those names).
-        // @A, @a, @K and @k describe a VARIABLE and stay out. Twin of the same routing
-        // in languages/bash-to-llvm-ir.abnf.
+        // subscript (scValList, scGet and scHas answer the parameters for those names),
+        // every @-transform included (posDeclA has @A's own form). Twin of the same
+        // routing in languages/bash-to-llvm-ir.abnf.
         if (!hasIdx && (name == "@" || name == "*") && !lenp && !indp
-            && (pe == "substr" || isPatOp(pe) || op != "" || xf == "Q" || xf == "E" || xf == "P"
-                || xf == "U" || xf == "L" || xf == "u")) {
+            && (pe == "substr" || isPatOp(pe) || op != "" || xf != "")) {
             var posSub = name
             hasIdx = true
             var posArgs = [function() { return posSub }]
@@ -1772,6 +1795,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // IFS==. The [*] form is the one string `declare -a a=(...)` whatever
                     // IFS holds, except unquoted under a null IFS (see starFields). Twin of
                     // rt_declxa in languages/lib/bash-rt.c.
+                    if (idxXf == "A" && isPosName(idxName)) { return posDeclA(sub) }
                     if (idxXf == "A" && declIsArr(idxName)) {
                         var dflag = "-" + varAttrs(idxName)
                         var dasg = declArrAssign(idxName)
@@ -1784,7 +1808,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         if (dfs.length == 0 || ifsTrail(dtxt)) { dfs.push(dval) } else { dfs[dfs.length - 1] = dfs[dfs.length - 1] + dval }
                         return encFields(dfs)
                     }
-                    if (idxXf == "A" || idxXf == "K" || idxXf == "k") {
+                    // On $@ / $*, @K and @k quote each parameter as @Q does, and @a is
+                    // each one's (empty) attributes - the per-element walk below.
+                    if ((idxXf == "A" || idxXf == "K" || idxXf == "k") && !isPosName(idxName)) {
                         if (!isArr(idxName)) {
                             return xformOne(scGet(idxName, "0"), idxXf, idxName, scHas(idxName, "0"))
                         }
@@ -2255,19 +2281,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // languages/bash-to-llvm-ir.abnf.
     var uqStar = false
     function starFields() { return uqStar && ifsFirst() == "" }
-    // THE WORD OF ${v-w} / ${v+w} EXPANDS IN THE CONTEXT OF THE ${...} ITSELF: its fields
-    // survive ("${x:-$@}" is still a list) and, unquoted under a null IFS, a $* in it
-    // stays fields as an unquoted $* does (`IFS=; printf '<%s>' ${x:-$*}` is <a b><c><d>
-    // for the parameters "a b" c "" d). dfltWord sets uqKeep for that one word, whose
-    // mkWord then keeps uqStar instead of clearing it. Twin of dfltWordEmit in
+    // THE WORD OF ${v-w} / ${v+w} IS EXPANDED WITH ITS OWN QUOTING. Quoted, the ${...} is
+    // one more quoted text. Unquoted, the word's unquoted parts are split and its quoted
+    // parts are not, and the fields that makes are final - the ${...} is not split
+    // again (bash 5.3: `set -- "a b" c "" d; printf '<%s>' ${x:-"$@"}` is
+    // <a b><c><><d> under any IFS, `y="a b"; ... ${x:-"$y"}` is <a b>, and
+    // ${x:-$y} is <a><b>). So the unquoted case answers {fin: fields}, which only
+    // mkWord's splitting loop receives. Twin of dfltWordEmit in
     // languages/bash-to-llvm-ir.abnf.
-    var uqKeep = false
     function dfltWord(wordT) {
         if (wordT == null) { return "" }
-        uqKeep = true
-        var r = wordT()
-        uqKeep = false
-        return r
+        if (!uqStar) { return wordT() }
+        var r = anytype
+        r = wordT(true)
+        return {fin: isFields(r) ? decFields(r) : [r]}
+    }
+    // A ${v-w} word: called with true, the form whose unquoted parts (BraceUq) split,
+    // otherwise the unsplit one every other use of the word reads.
+    function mkBraceWord(items) {
+        var ns = []
+        var sp = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it != "function" && it.uq != undefined) { ns.push(it.uq); sp.push(mkSplittable(it.uq)) }
+            else { ns.push(it); sp.push(it) }
+        }
+        var nsW = mkWord(ns)
+        var spW = mkWord(sp)
+        return function(split) {
+            if (split === true) { return spW() }
+            return nsW()
+        }
     }
     function starJoin(list) {
         if (starFields()) { return encFields(list) }
@@ -2312,7 +2356,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nm = stNames[i]
             var ak = arrKey(nm)
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
-            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}},
+            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, lit: false},
                       ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm)})
         }
         return out
@@ -2352,7 +2396,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arrNew(name, assoc) {
         touchState(name)
-        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}}
+        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, lit: false}
         return arrs[arrKey(name)]
     }
     function arrEnsure(name, assoc) {
@@ -2389,7 +2433,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A shallow copy of one array store, for `local`'s save entry.
     function arrCopy(a) {
-        var c2 = {assoc: a.assoc, keys: [], vals: {}}
+        var c2 = {assoc: a.assoc, keys: [], vals: {}, lit: a.lit}
         var i
         for (i = 0; i < a.keys.length; i++) {
             var kk = a.keys[i]
@@ -2714,9 +2758,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var open = ""
                 var opened = false
                 var svq = uqStar
-                var svk = uqKeep
-                if (!uqKeep) { uqStar = false }
-                uqKeep = false
+                uqStar = false
                 var k
                 for (k = 0; k < segThunks.length; k++) {
                     var v = segThunks[k]()
@@ -2731,7 +2773,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     } else { open = open + v; opened = true }
                 }
                 uqStar = svq
-                uqKeep = svk
                 if (opened) { res.push(open) }
                 if (res.length == 1) { return res[0] }
                 return encFields(res)
@@ -2760,26 +2801,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k
             for (k = 0; k < segThunks.length; k++) {
                 var sg = segThunks[k]
-                if (typeof sg == "function") { open = open + sg(); opened = true }
-                else {
+                var f = anytype
+                var lead = false
+                var trail = false
+                var raw = anytype
+                if (typeof sg == "function") {
+                    // A quoted segment is text, or - "$@" - fields joined at the edges.
+                    raw = sg()
+                    if (!isFields(raw)) { open = open + raw; opened = true; continue }
+                    f = decFields(raw)
+                } else {
                     var svq = uqStar
                     uqStar = true
-                    var v = uqList(sg.sp())
+                    raw = sg.sp()
                     uqStar = svq
-                    var f = anytype
-                    var lead = false
-                    var trail = false
-                    if (isFields(v)) { f = decFields(v) }
-                    else { f = splitIFS(v); lead = ifsLead(v); trail = ifsTrail(v) }
-                    if (lead && opened) { res.push(open); open = ""; opened = false }
-                    if (f.length > 0) {
-                        open = open + f[0]
-                        var j
-                        for (j = 1; j < f.length; j++) { res.push(open); open = f[j] }
-                        opened = true
+                    if (typeof raw == "object") { f = raw.fin } else {
+                        var v = uqList(raw)
+                        if (isFields(v)) { f = decFields(v) }
+                        else { f = splitIFS(v); lead = ifsLead(v); trail = ifsTrail(v) }
                     }
-                    if (trail && opened) { res.push(open); open = ""; opened = false }
                 }
+                if (lead && opened) { res.push(open); open = ""; opened = false }
+                if (f.length > 0) {
+                    open = open + f[0]
+                    var j
+                    for (j = 1; j < f.length; j++) { res.push(open); open = f[j] }
+                    opened = true
+                }
+                if (trail && opened) { res.push(open); open = ""; opened = false }
             }
             if (opened) { res.push(open) }
             if (res.length == 1) { return res[0] }
@@ -3072,6 +3121,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         touchState(name)
         if (!append) { arrNew(name, assoc) }
         else { arrEnsure(name, assoc) }
+        arrs[arrKey(name)].lit = true
         var plain = []
         var i
         for (i = 0; i < pairs.length; i++) {

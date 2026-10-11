@@ -60,6 +60,7 @@ char *varnames[1024];
 int ls_id[512];
 char *ls_val[512];
 int ls_acnt[512];
+int ls_amark[512];   /* the binding's empty-array mark (rt_arr_mark), restored too */
 int ls_top;
 
 /* The array save stack the entries above index into. LASMAX = 4096. */
@@ -190,6 +191,7 @@ char *rt_shq(char *v, int isset);
 int rt_isset(char *v);
 char *rt_declasg(char *nm, char *at, char *v, int isset);
 char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *ifs, int star);
+char *rt_declpos(char *ifs, char *sep, int star);
 char *rt_kvq(char *nm, int assoc, char *v, int isset);
 char *rt_kvp(char *nm, char *sep, int star, char *v, int isset);
 char *rt_attrf(char *nm, char *at, char *sep, int star);
@@ -203,6 +205,9 @@ char *rt_params0(void);
 char *rt_pfxnames(char *p, char *sep, int star);
 int rt_arr_nextidx(char *nm);
 int rt_arr_clear(char *nm);
+int rt_arr_mark(char *nm);
+char *rt_finlist(char *v);
+int rt_isfin(char *v);
 int rt_arr_append(char *nm, char *f);
 char *rt_slicefields(char *f, int off, int n, char *sep, int star);
 char *rt_globescape(char *s);
@@ -1620,7 +1625,7 @@ char *rt_uqlist(char *l, char *ifs) {
     int i = 1;
     int o = 0;
     char *dst;
-    if ((int)(unsigned char)l[0] != 2) return l;
+    if ((int)(unsigned char)l[0] != 2 || rt_isfin(l) != 0) return l;
     if (len < 2) return sep == 0 ? "\x02" : &empty[0];
     dst = rt_bump(len + 1);
     if (sep == 0) {
@@ -1981,11 +1986,54 @@ int rt_arr_nextidx(char *nm) {
     return mx;
 }
 
-/* i32 rt_arr_clear(i8* nm): drop every entry of one array. */
+/* The FINAL fields of an unquoted ${v-w} / ${v+w}: the word was split by its own
+ * quoting, so the word around the ${...} takes the list as it is instead of
+ * splitting it again (bash 5.3: `set -- "a b" ""; printf '<%s>' ${x:-"$@"}` is
+ * <a b><>). The list is a fresh copy and is known by its ADDRESS, the last one
+ * made, which nothing else can hand on; rt_uqlist returns it untouched. Twin of
+ * dfltWord's {fin} in bash-interpreter.abnf. */
+char *fin_last;
+char *rt_finlist(char *v) {
+    if ((int)(unsigned char)v[0] == 2) fin_last = rt_strcat(v, empty);
+    else fin_last = rt_strcat(rt_strcat("\002", v), "\001");
+    return fin_last;
+}
+
+int rt_isfin(char *v) {
+    return v == fin_last ? 1 : 0;
+}
+
+/* AN ARRAY ASSIGNED A LITERAL IS SET EVEN WITH NO ELEMENT: bash 5.3 lists `e=()`
+ * in ${!e*} and not `declare -a e`. A row store keeps nothing for an empty array,
+ * so the literal leaves a mark - one row of the array named "\003NAME" - which
+ * rt_arr_clear drops with the rows and the subshell snapshot copies with them.
+ * Twin of the `lit` flag of an array in bash-interpreter.abnf. */
+int rt_arr_mark(char *nm) {
+    return rt_arr_set(rt_strcat("\003", nm), empty, empty);
+}
+
+/* Is the row name rn NAME's mark? */
+int rt_ismark(char *rn, char *nm) {
+    int i = 0;
+    if ((int)(unsigned char)rn[0] != 3) return 0;
+    while (nm[i] != 0 && rn[i + 1] == nm[i]) i = i + 1;
+    return nm[i] == 0 && rn[i + 1] == 0;
+}
+
+int rt_arr_marked(char *nm) {
+    int i = 0;
+    while (i < arr_n) {
+        if (rt_ismark(arr_nm[i], nm) != 0) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* i32 rt_arr_clear(i8* nm): drop every entry of one array, and its mark. */
 int rt_arr_clear(char *nm) {
     int i = 0, o = 0;
     while (i < arr_n) {
-        int same = rt_streq(nm, arr_nm[i]) != 0;
+        int same = rt_streq(nm, arr_nm[i]) != 0 || rt_ismark(arr_nm[i], nm) != 0;
         if (!same) {
             arr_nm[o] = arr_nm[i];
             arr_k[o] = arr_k[i];
@@ -2079,8 +2127,8 @@ char *rt_params0(void) {
 }
 
 /* ${!p*} / ${!p@}: the names of the SET variables starting with p, sorted - a
- * scalar that is not the unset marker, or an array with an element (arrays live
- * in arr_nm, not among the scalar slots). Joined with sep when star is set, a
+ * scalar that is not the unset marker, or an array with an element or a literal
+ * (rt_arr_mark; arrays live in arr_nm, not among the scalar slots). Joined with sep when star is set, a
  * field list otherwise. Twin of varNamesWithPrefix in
  * languages/bash-interpreter.abnf. */
 char *rt_pfxnames(char *p, char *sep, int star) {
@@ -2096,8 +2144,10 @@ char *rt_pfxnames(char *p, char *sep, int star) {
     char *t;
     while (i < total) {
         v = i < nvars ? varnames[i] : arr_nm[i - nvars];
+        if ((int)(unsigned char)v[0] == 3) v = rt_substr(v, 1, rt_strlen(v) - 1);
         int ok = rt_strlen(v) >= pl && rt_streq(rt_substr(v, 0, pl), p) != 0;
-        if (ok && rt_getvar_byname(v) == &unset_marker[0] && rt_arr_count(v) == 0) ok = 0;
+        if (ok && rt_getvar_byname(v) == &unset_marker[0] && rt_arr_count(v) == 0
+            && rt_arr_marked(v) == 0) ok = 0;
         dup = 0;
         j = 0;
         while (ok && j < n) {
@@ -2332,6 +2382,54 @@ char *rt_declxa(char *nm, char *at, char *v, int isset, int assoc, char *ifs, in
     return rt_strcat(rt_strcat(rt_substr(fs, 0, n - 1), val), "\001");
 }
 
+/* ${@@A} / ${*@A}: the command that would recreate the positional parameters,
+ * `set -- 'a' 'b c'` (bash 5.3), in the shape rt_declxa gives an array: the [*]
+ * form is the one string, the values joined by sep (IFS's first character); the
+ * [@] form is a FIELD LIST, the text `set -- ` split on IFS (a null IFS counting
+ * as the default) and glued to the first value unless it ends in a delimiter,
+ * then one field per further value. With no parameters [@] is no field and [*]
+ * the empty string. Twin of posDeclA in bash-interpreter.abnf. */
+char *rt_declpos(char *ifs, char *sep, int star) {
+    int cnt = frame_n;
+    int i = 0;
+    char *out;
+    char *fs;
+    int n;
+    if (star != 0) {
+        if (cnt == 0) return empty;
+        out = "set -- ";
+        while (i < cnt) {
+            if (i > 0) out = rt_strcat(out, sep);
+            out = rt_strcat(out, rt_shquote(argv[frame_base + i]));
+            i = i + 1;
+        }
+        return out;
+    }
+    if (cnt == 0) return "\002";
+    if (ifs[0] == 0) {
+        out = "\002set\001--\001";
+    } else {
+        fs = rt_splitifs("set -- ", ifs);
+        n = rt_strlen(fs);
+        if ((int)(unsigned char)fs[0] != 2) {
+            out = rt_strcat(rt_strcat("\002", fs), rt_shquote(argv[frame_base]));
+            out = rt_strcat(out, "\001");
+            i = 1;
+        } else if (n < 2 || rt_ifstrail("set -- ", ifs) != 0) {
+            out = fs;
+        } else {
+            out = rt_strcat(rt_substr(fs, 0, n - 1), rt_shquote(argv[frame_base]));
+            out = rt_strcat(out, "\001");
+            i = 1;
+        }
+    }
+    while (i < cnt) {
+        out = rt_strcat(rt_strcat(out, rt_shquote(argv[frame_base + i])), "\001");
+        i = i + 1;
+    }
+    return out;
+}
+
 /* ${a[@]@K}: `key "value"` pairs as ONE field, with the trailing space bash
  * writes for the associative form only. */
 char *rt_kvq(char *nm, int assoc, char *v, int isset) {
@@ -2380,12 +2478,16 @@ char *rt_kvp(char *nm, char *sep, int star, char *v, int isset) {
 }
 
 /* ${a[@]@a}: the attribute letters, ONCE PER ELEMENT - `a=(pa pb)` answers
- * `a a`. */
+ * `a a`, and ${@@a} once per positional parameter (none for none). */
 char *rt_attrf(char *nm, char *at, char *sep, int star) {
     int n = rt_arr_count(nm);
     char *out;
     int i = 0;
-    if (n == 0) n = 1;
+    if (rt_isposnm(nm) != 0) {
+        n = frame_n;
+    } else if (n == 0) {
+        n = 1;
+    }
     out = star != 0 ? empty : "\002";
     while (i < n) {
         if (star != 0) {
@@ -2945,8 +3047,10 @@ int rt_push_local(int id)
      * program has no array live, which is the common case and is why `local`
      * in a hot recursive function does not pay for this. */
     int cnt = 0;
+    ls_amark[t] = 0;
     if (arr_n > 0) {
         char *nm = varnames[id];
+        ls_amark[t] = rt_arr_marked(nm);
         int i = 0;
         while (i < arr_n) {
             if (rt_streq(nm, arr_nm[i]) != 0) {
@@ -2984,6 +3088,7 @@ int rt_pop_locals(int d)
                 rt_arr_set(nm, las_k[i], las_v[i]);
                 i = i + 1;
             }
+            if (ls_amark[t] != 0) rt_arr_mark(nm);
         }
         las_top = las_top - cnt;
         t = ls_top;
