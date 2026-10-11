@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-389** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-391** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -126,12 +126,11 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-382 go: arrays of defined types; a package's own defined types inside its code · P2 · GO · IN PROGRESS (PHP+GO worker, round 14) [V]
-`[2]Kind{2, 4}` prints `[2 4]` (go `[kind2 kind4]`) and `%T` `[2]int` (go
-`[2]main.Kind`): a plain host array records no element type. Inside package pk, its own
-`Kind` is never boxed (goDtForeign): `pk.Show(4)` gives `4 [4]` (go `pk4 [pk4]`) and
-`%T` of `pk.Kinds()` is `[]main.Kind` (go `[]pk.Kind`). Needs qualified et/mty/__ftypes
-and `case T:` / `x.(T)` qualification inside packages.
+### T-390 go: static type of arithmetic on defined types; `case []T:`; nested arrays · P1 · GO · OPEN [V]
+`fmt.Println(y[0]+y[2])`, `kk+1` print `4`/`6` (go `kind4`/`kind6`): arithmetic on a
+defined type loses its static type (all legs). `case []T:` never matches a slice in the
+interpreter's type test (goTypeName answers "slice"), even `[]int`. A nested array
+(`[2][2]Kind`) or an array in a struct field prints elements raw.
 
 ---
 
@@ -145,8 +144,14 @@ and `case T:` / `x.(T)` qualification inside packages.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-388 php: `var_export`, `json_encode` / `json_decode` · P1 · PHP · IN PROGRESS (PHP+GO worker, round 14) [V spec-only]
-"Call to undefined function" in all engines.
+### T-389 php: string/number comparison, visibility, foreach over objects, method_exists · P1 · PHP · OPEN [V spec-only]
+php-src corpus: `NAN == "NAN"` true (expected false); `1.75 <=> "1.75abc"` 0 (expected
+-1) (Zend/tests/string_to_number_comparison, type_coercion/nan_comp_op). var_dump of
+non-public properties lacks `:protected`/`:private` (visibility not modelled; json_encode
+and (array) include them). `foreach` over an object prints nothing (interpreter) /
+aborts "range over a object" (compiler). `method_exists` undefined. `self::` outside a
+class aborts (bug66015.phpt). A decoded JSON key starting with `__` collides with
+hidden slots compiled.
 
 ---
 
@@ -457,6 +462,8 @@ T-378 kotlin: literal adoption remainder; HashMap; Char.toInt in the interpreter
 T-379 ts: port var hoisting and symbol conversions to TypeScript — DONE 5d7ec9cc
 T-380 js: string iteration by code point; Array values()/entries(); generator @@iterator — DONE 39d20f9b (compiled object→number conversion is T-385)
 T-383 goja prints some doubles with the wrong digits in the interpreter legs — DONE 38b10604 4d01c067 (goja vendored at its pinned revision under third_party/goja with one patched file; 411,923 doubles agree with node)
+T-388 php: `var_export`, `json_encode` / `json_decode` — DONE 7558be65 d5669a63 (spec-only; php-src corpus .phpt blocks match)
+T-382 go: arrays of defined types; a package's own defined types inside its code — DONE e38dafcc (nested arrays / arrays in struct fields: T-390)
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
