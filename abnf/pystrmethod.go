@@ -752,36 +752,25 @@ func (e *pyStrEnv) kwGet(kw interface{}, nm string) interface{} {
 	return jsUndef
 }
 
-// One replacement field's body, without the braces. `auto` is the automatic field
-// counter, threaded through so a nested width field takes the next argument.
-func (e *pyStrEnv) fmtOne(body string, args []interface{}, kw interface{}, auto int) (string, int) {
-	nm, conv, spec := "", "", ""
-	part, depth := 0, 0
-	n := e.sLen(body)
-	for k := 0; k < n; k++ {
-		c := e.sAt(body, k)
-		if part < 2 {
-			if c == "[" {
-				depth++
-			} else if c == "]" {
-				depth--
-			} else if depth == 0 && c == "!" && part == 0 && k+1 < n && e.sAt(body, k+1) != "=" {
-				part = 1
-				continue
-			} else if depth == 0 && c == ":" {
-				part = 2
-				continue
-			}
-		}
-		switch part {
-		case 0:
-			nm += c
-		case 1:
-			conv += c
-		default:
-			spec += c
-		}
+// badConv is do_conversion's refusal of a conversion other than r, s and a: a
+// printable ASCII character is named as itself, anything else as \x and its hex
+// code. Twin of pySBadConv.
+func (e *pyStrEnv) badConv(conv string) {
+	cp := e.sCode(conv, 0)
+	if e.sLen(conv) == 2 {
+		cp = (cp-55296)*1024 + e.sCode(conv, 1) - 56320 + 65536
 	}
+	name := conv
+	if cp <= 32 || cp >= 127 {
+		name = "\\x" + strconv.FormatInt(int64(cp), 16)
+	}
+	e.raise("ValueError", "Unknown conversion specifier "+name)
+}
+
+// fmtOne renders one parsed replacement field: its name, conversion ("" for
+// none) and spec. `auto` is the automatic field counter, threaded through so a
+// nested width field takes the next argument. Twin of pySFmtOne.
+func (e *pyStrEnv) fmtOne(nm, conv, spec string, args []interface{}, kw interface{}, auto, depth int) (string, int) {
 	at := auto
 	head := ""
 	nl := e.sLen(nm)
@@ -835,45 +824,26 @@ func (e *pyStrEnv) fmtOne(body string, args []interface{}, kw interface{}, auto 
 			p++
 		}
 	}
+	if conv != "" && conv != "r" && conv != "s" && conv != "a" {
+		e.badConv(conv)
+	}
 	if e.sIndex(spec, "{") >= 0 {
-		spec, at = e.formatGo(spec, args, kw, at)
+		spec, at = e.formatGo(spec, args, kw, at, depth-1)
 	}
 	return e.fmt1(v, spec, conv), at
 }
 
-func (e *pyStrEnv) formatGo(s string, args []interface{}, kw interface{}, auto int) (string, int) {
+// formatGo is CPython's MarkupIterator_next and parse_field; `depth` is
+// build_string's recursion budget. Twin of pySFormatGo.
+func (e *pyStrEnv) formatGo(s string, args []interface{}, kw interface{}, auto, depth int) (string, int) {
+	if depth <= 0 {
+		e.raise("ValueError", "Max string recursion exceeded")
+	}
 	out := ""
 	at := auto
 	n := e.sLen(s)
 	for i := 0; i < n; {
 		ch := e.sAt(s, i)
-		if ch == "{" {
-			if i+1 < n && e.sAt(s, i+1) == "{" {
-				out += "{"
-				i += 2
-				continue
-			}
-			depth, j := 1, i+1
-			for ; j < n; j++ {
-				c2 := e.sAt(s, j)
-				if c2 == "{" {
-					depth++
-				} else if c2 == "}" {
-					depth--
-					if depth == 0 {
-						break
-					}
-				}
-			}
-			if depth != 0 {
-				e.raise("ValueError", "Single '{' encountered in format string")
-			}
-			var text string
-			text, at = e.fmtOne(e.sSub(s, i+1, j), args, kw, at)
-			out += text
-			i = j + 1
-			continue
-		}
 		if ch == "}" {
 			if i+1 < n && e.sAt(s, i+1) == "}" {
 				out += "}"
@@ -882,8 +852,80 @@ func (e *pyStrEnv) formatGo(s string, args []interface{}, kw interface{}, auto i
 			}
 			e.raise("ValueError", "Single '}' encountered in format string")
 		}
-		out += ch
-		i++
+		if ch != "{" {
+			out += ch
+			i++
+			continue
+		}
+		if i+1 >= n {
+			e.raise("ValueError", "Single '{' encountered in format string")
+		}
+		if e.sAt(s, i+1) == "{" {
+			out += "{"
+			i += 2
+			continue
+		}
+		j, c := i+1, ""
+		for j < n {
+			c = e.sAt(s, j)
+			j++
+			if c == "{" {
+				e.raise("ValueError", "unexpected '{' in field name")
+			}
+			if c == "[" {
+				for j < n && e.sAt(s, j) != "]" {
+					j++
+				}
+				continue
+			}
+			if c == "}" || c == ":" || c == "!" {
+				break
+			}
+		}
+		nm := e.sSub(s, i+1, j-1)
+		conv, spec := "", ""
+		if c == "!" || c == ":" {
+			closed := false
+			if c == "!" {
+				if j >= n {
+					e.raise("ValueError", "end of string while looking for conversion specifier")
+				}
+				w := e.cpw(s, j)
+				conv = e.sSub(s, j, j+w)
+				j += w
+				if j < n {
+					c3 := e.sAt(s, j)
+					j++
+					if c3 == "}" {
+						closed = true
+					} else if c3 != ":" {
+						e.raise("ValueError", "expected ':' after conversion specifier")
+					}
+				}
+			}
+			if !closed {
+				from, d := j, 1
+				for j < n && d > 0 {
+					c4 := e.sAt(s, j)
+					j++
+					if c4 == "{" {
+						d++
+					} else if c4 == "}" {
+						d--
+					}
+				}
+				if d > 0 {
+					e.raise("ValueError", "unmatched '{' in format spec")
+				}
+				spec = e.sSub(s, from, j-1)
+			}
+		} else if c != "}" {
+			e.raise("ValueError", "expected '}' before end of string")
+		}
+		var text string
+		text, at = e.fmtOne(nm, conv, spec, args, kw, at, depth)
+		out += text
+		i = j
 	}
 	return out, at
 }
@@ -1416,10 +1458,10 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		return s
 
 	case "format":
-		text, _ := e.formatGo(s, args, kw, 0)
+		text, _ := e.formatGo(s, args, kw, 0, 2)
 		return text
 	case "format_map":
-		text, _ := e.formatGo(s, []interface{}{}, pysArgAt(args, 0), 0)
+		text, _ := e.formatGo(s, []interface{}{}, pysArgAt(args, 0), 0, 2)
 		return text
 	}
 	e.fail("unknown String method: " + name)

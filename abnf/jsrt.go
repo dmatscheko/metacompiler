@@ -16582,16 +16582,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// A Go string is UTF-8 here while the other two engines hold UTF-16, so
 		// the CODE POINT is what the three have in common: ord answers the single
 		// rune's value (ord("\U0001F600") is 128512, not a surrogate) and chr
-		// builds the rune. The domain errors use rt.fail with CPython's wording,
-		// as every other builtin here reports one.
+		// builds the rune. The domain errors are catchable exceptions in CPython's
+		// wording.
 		"js_pyord": func(a []uint64) uint64 {
 			v := u(a[0])
 			s, isStr := v.(string)
 			if !isStr {
-				rt.fail("TypeError: ord() expected string of length 1, but %s found", pyTypeName(rt, v))
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "ord() expected string of length 1, but "+pyTypeName(rt, v)+" found")})
 			}
 			if n := utf8.RuneCountInString(s); n != 1 {
-				rt.fail("TypeError: ord() expected a character, but string of length %d found", n)
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "ord() expected a character, but string of length "+strconv.Itoa(n)+" found")})
 			}
 			r, _ := utf8.DecodeRuneInString(s)
 			return rt.wrapNum(float64(r))
@@ -16606,11 +16606,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return rt.wrapStr("\x00")
 			}
 			if _, isNum := v.(float64); !isNum {
-				rt.fail("TypeError: '%s' object cannot be interpreted as an integer", pyTypeName(rt, v))
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+pyTypeName(rt, v)+"' object cannot be interpreted as an integer")})
 			}
 			n := math.Trunc(rt.toNumber(v))
 			if n < 0 || n > 1114111 {
-				rt.fail("ValueError: chr() arg not in range(0x110000)")
+				panic(&jsThrown{value: rt.pyExcInstance("ValueError", "chr() arg not in range(0x110000)")})
 			}
 			return rt.wrapStr(string(rune(int64(n))))
 		},

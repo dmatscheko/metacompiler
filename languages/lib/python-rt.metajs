@@ -4018,15 +4018,15 @@ function js_pyrange(a, b, c) {
 // surrogate PAIR of code units and ONE character to Python: js_pyord decodes the
 // pair (ord("\U0001F600") is 128512, not the high surrogate) and js_pychr
 // re-encodes it. Length is pyStrLen, which counts CODE POINTS. The domain errors
-// use `fail` with CPython's own wording, the way pySFail reports one.
+// are catchable exceptions in CPython's own wording.
 function js_pyord(s) {
     if (!pyIsStr(s)) {
-        fail("TypeError: ord() expected string of length 1, but " + pyTypeName(s) + " found")
+        pyRaiseExc("TypeError", "ord() expected string of length 1, but " + pyTypeName(s) + " found")
         return 0
     }
     var n = pyStrLen(s)
     if (n != 1) {
-        fail("TypeError: ord() expected a character, but string of length " + n + " found")
+        pyRaiseExc("TypeError", "ord() expected a character, but string of length " + n + " found")
         return 0
     }
     var c = s.charCodeAt(0)
@@ -4044,11 +4044,11 @@ function js_pychr(n) {
     if (typeof n == "boolean") { v = n ? 1 : 0 }
     else if (typeof n == "number") { v = Math.trunc(n) }
     else {
-        fail("TypeError: '" + pyTypeName(n) + "' object cannot be interpreted as an integer")
+        pyRaiseExc("TypeError", "'" + pyTypeName(n) + "' object cannot be interpreted as an integer")
         return ""
     }
     if (v < 0 || v > 1114111) {
-        fail("ValueError: chr() arg not in range(0x110000)")
+        pyRaiseExc("ValueError", "chr() arg not in range(0x110000)")
         return ""
     }
     return pyBCodePoint(v)
@@ -10021,36 +10021,29 @@ function pySAllDigits(t) {
     return true
 }
 
-// One replacement field's body, without the braces. `auto` is the automatic
-// field counter, threaded through so that a nested width field ({:{}}) takes the
-// next argument the way CPython's does.
-function pySFmtOne(body, args, kw, auto) {
-    var nm = ""
-    var conv = ""
-    var spec = ""
-    var part = 0
-    var depth = 0
-    var k = 0
-    while (k < body.length) {
-        var c = body.charAt(k)
-        if (part < 2) {
-            if (c == "[") { depth = depth + 1 }
-            else if (c == "]") { depth = depth - 1 }
-            else if (depth == 0 && c == "!" && part == 0 && k + 1 < body.length && body.charAt(k + 1) != "=") {
-                part = 1
-                k = k + 1
-                continue
-            } else if (depth == 0 && c == ":") {
-                part = 2
-                k = k + 1
-                continue
-            }
+// do_conversion's refusal of a conversion other than r, s and a: a printable
+// ASCII character is named as itself, anything else as \x and its hex code.
+function pySBadConv(conv) {
+    var cp = conv.charCodeAt(0)
+    if (conv.length == 2) { cp = (cp - 55296) * 1024 + conv.charCodeAt(1) - 56320 + 65536 }
+    var name = conv
+    if (cp <= 32 || cp >= 127) {
+        name = ""
+        while (cp > 0 || name == "") {
+            var q = Math.floor(cp / 16)
+            name = "0123456789abcdef".charAt(cp - q * 16) + name
+            cp = q
         }
-        if (part == 0) { nm = nm + c }
-        else if (part == 1) { conv = conv + c }
-        else { spec = spec + c }
-        k = k + 1
+        name = "\\x" + name
     }
+    pySRaise("ValueError", "Unknown conversion specifier " + name)
+}
+
+// One parsed replacement field: its name, conversion ("" for none) and spec.
+// `auto` is the automatic field counter, threaded through so that a nested width
+// field ({:{}}) takes the next argument the way CPython's does. The field is
+// looked up before the conversion is checked, and the spec is expanded after.
+function pySFmtOne(nm, conv, spec, args, kw, auto, depth) {
     var at = auto
     // The head: empty (automatic), all digits (positional) or a keyword.
     var head = ""
@@ -10097,9 +10090,10 @@ function pySFmtOne(body, args, kw, auto) {
             p = p + 1
         }
     }
+    if (conv != "" && conv != "r" && conv != "s" && conv != "a") { pySBadConv(conv) }
     // A spec may itself carry replacement fields ("{:{w}}").
     if (spec.indexOf("{") >= 0) {
-        var inner = pySFormatGo(spec, args, kw, at)
+        var inner = pySFormatGo(spec, args, kw, at, depth - 1)
         spec = inner["text"]
         at = inner["auto"]
     }
@@ -10109,36 +10103,18 @@ function pySFmtOne(body, args, kw, auto) {
     return res
 }
 
-function pySFormatGo(s, args, kw, auto) {
+// CPython's MarkupIterator_next and parse_field. A field is scanned over the
+// rest of the string, not up to a balanced brace: the character after '!' is
+// the conversion whatever it is, and a spec ends at the '}' that balances it.
+// `depth` is build_string's recursion budget (2 at the top, so a spec's own
+// spec may not nest further).
+function pySFormatGo(s, args, kw, auto, depth) {
+    if (depth <= 0) { pySRaise("ValueError", "Max string recursion exceeded") }
     var out = ""
     var i = 0
     var at = auto
     while (i < s.length) {
         var ch = s.charAt(i)
-        if (ch == "{") {
-            if (i + 1 < s.length && s.charAt(i + 1) == "{") {
-                out = out + "{"
-                i = i + 2
-                continue
-            }
-            var depth = 1
-            var j = i + 1
-            while (j < s.length) {
-                var c2 = s.charAt(j)
-                if (c2 == "{") { depth = depth + 1 }
-                else if (c2 == "}") {
-                    depth = depth - 1
-                    if (depth == 0) { break }
-                }
-                j = j + 1
-            }
-            if (depth != 0) { pySRaise("ValueError", "Single '{' encountered in format string") }
-            var r = pySFmtOne(s.substring(i + 1, j), args, kw, at)
-            out = out + r["text"]
-            at = r["auto"]
-            i = j + 1
-            continue
-        }
         if (ch == "}") {
             if (i + 1 < s.length && s.charAt(i + 1) == "}") {
                 out = out + "}"
@@ -10147,8 +10123,66 @@ function pySFormatGo(s, args, kw, auto) {
             }
             pySRaise("ValueError", "Single '}' encountered in format string")
         }
-        out = out + ch
-        i = i + 1
+        if (ch != "{") {
+            out = out + ch
+            i = i + 1
+            continue
+        }
+        if (i + 1 >= s.length) { pySRaise("ValueError", "Single '{' encountered in format string") }
+        if (s.charAt(i + 1) == "{") {
+            out = out + "{"
+            i = i + 2
+            continue
+        }
+        // The field name runs to '}', ':' or '!'; a [key] may hold any of them.
+        var j = i + 1
+        var c = ""
+        while (j < s.length) {
+            c = s.charAt(j)
+            j = j + 1
+            if (c == "{") { pySRaise("ValueError", "unexpected '{' in field name") }
+            if (c == "[") {
+                while (j < s.length && s.charAt(j) != "]") { j = j + 1 }
+                continue
+            }
+            if (c == "}" || c == ":" || c == "!") { break }
+        }
+        var nm = s.substring(i + 1, j - 1)
+        var conv = ""
+        var spec = ""
+        if (c == "!" || c == ":") {
+            var closed = false
+            if (c == "!") {
+                if (j >= s.length) { pySRaise("ValueError", "end of string while looking for conversion specifier") }
+                var w = pySCPW(s, j)
+                conv = s.substring(j, j + w)
+                j = j + w
+                if (j < s.length) {
+                    var c3 = s.charAt(j)
+                    j = j + 1
+                    if (c3 == "}") { closed = true }
+                    else if (c3 != ":") { pySRaise("ValueError", "expected ':' after conversion specifier") }
+                }
+            }
+            if (!closed) {
+                var from = j
+                var d = 1
+                while (j < s.length && d > 0) {
+                    var c4 = s.charAt(j)
+                    j = j + 1
+                    if (c4 == "{") { d = d + 1 }
+                    else if (c4 == "}") { d = d - 1 }
+                }
+                if (d > 0) { pySRaise("ValueError", "unmatched '{' in format spec") }
+                spec = s.substring(from, j - 1)
+            }
+        } else if (c != "}") {
+            pySRaise("ValueError", "expected '}' before end of string")
+        }
+        var r = pySFmtOne(nm, conv, spec, args, kw, at, depth)
+        out = out + r["text"]
+        at = r["auto"]
+        i = j
     }
     var res = {}
     res["text"] = out
@@ -10585,11 +10619,11 @@ function pyStrMethod(s, name, args, kw) {
         return s
     }
 
-    if (name == "format") { return pySFormatGo(s, args, kw, 0)["text"] }
+    if (name == "format") { return pySFormatGo(s, args, kw, 0, 2)["text"] }
     if (name == "format_map") {
         var mp = undefined
         if (args.length > 0) { mp = args[0] }
-        return pySFormatGo(s, [], mp, 0)["text"]
+        return pySFormatGo(s, [], mp, 0, 2)["text"]
     }
     pySFail("unknown String method: " + name)
     return ""

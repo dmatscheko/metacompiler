@@ -1654,6 +1654,35 @@ def s31():
     check("str32", "{0:>6}".format(v[2]) == "   abc" and "{0:*^7}".format(v[2]) == "**abc**")
     check("str33", "{0[1]}".format([7, 8]) == "8" and "{0:{1}}".format(v[2], ">5") == "  abc")
     check("str34", "{0!r}".format(v[2]) == "'abc'")
+    # A malformed field is a catchable ValueError in CPython's parse_field wording;
+    # the character after '!' is the conversion whatever it is, and it is checked
+    # only after the field has been looked up.
+    def fmterr(f, *a):
+        try:
+            return f.format(*a)
+        except Exception as e:
+            return type(e).__name__ + ":" + str(e)
+    check("str35", fmterr("{0!z}", 1) == "ValueError:Unknown conversion specifier z" and
+                   fmterr("{0!}}", 1) == "ValueError:Unknown conversion specifier }" and
+                   fmterr("{0!\x01}", 1) == "ValueError:Unknown conversion specifier \\x1")
+    check("str36", fmterr("{0:", 1) == "ValueError:unmatched '{' in format spec" and
+                   fmterr("{0!", 1) == "ValueError:end of string while looking for conversion specifier" and
+                   fmterr("{0!rr}", 1) == "ValueError:expected ':' after conversion specifier")
+    check("str37", fmterr("{0[}", v[2]) == "ValueError:expected '}' before end of string" and
+                   fmterr("{a{}", 1) == "ValueError:unexpected '{' in field name" and
+                   fmterr("{:{:{}}}", 1, 2, 3) == "ValueError:Max string recursion exceeded" and
+                   fmterr("{5!z}", 1) == "IndexError:Replacement index 5 out of range for positional args tuple")
+    # ord() and chr() refuse their domain with catchable exceptions.
+    def bierr(f, x):
+        try:
+            return f(x)
+        except Exception as e:
+            return type(e).__name__ + ":" + str(e)
+    check("str38", bierr(ord, 1) == "TypeError:ord() expected string of length 1, but int found" and
+                   bierr(ord, v[2]) == "TypeError:ord() expected a character, but string of length 3 found")
+    check("str39", bierr(chr, -1) == "ValueError:chr() arg not in range(0x110000)" and
+                   bierr(chr, v[2]) == "TypeError:'str' object cannot be interpreted as an integer" and
+                   bierr(chr, 65) == "A")
 
 
 # ===== SECTION 32: integer arithmetic PROMOTES past 2**53 =====
