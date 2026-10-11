@@ -114,7 +114,7 @@ not change the renderer.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-404 swift: `.init(...)` as an implicit member; ambiguous static names · P2 · SW · OPEN [V]
+### T-404 swift: `.init(...)` as an implicit member; ambiguous static names · P2 · SW · IN PROGRESS (SW worker, round 18) [V]
 `let s: S = .init(n: 3)` unsupported; a static member name declared in two types falls
 back to an enum case (Swift picks by the expected type - needs the declared type at
 the use site, which `let s: S` gives).
