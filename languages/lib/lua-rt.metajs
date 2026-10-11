@@ -1171,9 +1171,8 @@ function js_luminint() { return luNorm(luMinPair()) }
 // (RuneError, 1) answer makes the Go twin do.
 //
 // luChar is BYTE-IDENTICAL to swift-rt.metajs's js_char, and deliberately not
-// shared: lua-rt.metajs does not import lib/runtime.metajs (it would bring
-// externs and rtk* hooks Lua does not want), and lib/runtime.metajs's own js_char
-// has a different contract (the {__char} box). Keep the two texts in step by hand.
+// shared: lib/runtime.metajs's own js_char has a different contract (the {__char}
+// box). Keep the two texts in step by hand.
 function luChar(cp) {
     if (cp < 65536) { return String.fromCharCode(cp) }
     var v = cp - 65536
@@ -1304,7 +1303,7 @@ function luCheckNum(fn, n, args) {
 function luCheckInt(fn, n, args) {
     var a = luCheckNum(fn, n, args)
     var d = luNumOf(a)
-    if (!luIsInt(a) && (d - d !== 0 || Math.floor(d) !== d)) { luArgErr(fn, n, "number has no integer representation") }
+    if (!luIsInt(a) && (d - d !== 0 || Math.floor(d) !== d || luI64(d) === undefined)) { luArgErr(fn, n, "number has no integer representation") }
     return d
 }
 function luOptInt(fn, n, args, dflt) {
@@ -1416,6 +1415,39 @@ function js_lurep(args) {
     return lsRep(s, n, luOptStr("string.rep", 3, args, ""))
 }
 function js_lureverse(args) { return lsReverse(luCheckStr("string.reverse", 1, args)) }
+
+// string.format, and its hooks (lib/lua-strlib.js). Twins in lua-interpreter.abnf.
+// The exact decimal of a double is lib/runtime.metajs's: Lua imports that file for
+// its hook-free decimal helpers only, so it defines none of the rtk* hooks.
+import "./runtime.metajs"
+function js_luformat(args) { return lsFormat(args) }
+function lsFmtArgErr(n, msg) { luArgErr("string.format", n, msg) }
+function lsFmtCheckStr(args, n) { return luCheckStr("string.format", n, args) }
+function lsFmtNum(args, n) { return luNumOf(luCheckNum("string.format", n, args)) }
+function lsFmtInt(args, n) {
+    luCheckInt("string.format", n, args)
+    var v = luToNum(args[n - 1])
+    if (luIsInt(v)) { return luPair(v) }
+    return luPair(luI64(luNumOf(v)))
+}
+function lsFmtToStr(args, n) {
+    var v = luArgAt(args, n)
+    if (typeof v == "string") { return v }
+    if (luIsNum(v)) { return js_lustr(v) }
+    if (v === undefined || v === null) { return "nil" }
+    if (v === true) { return "true" }
+    if (v === false) { return "false" }
+    return luTypeName(v)
+}
+function lsFmtLitKind(args, n) {
+    var v = luArgAt(args, n)
+    if (typeof v == "string") { return "s" }
+    if (luIsNum(v)) { return luIsInt(v) ? "i" : "f" }
+    if (v === undefined || v === null || v === true || v === false) { return "t" }
+    return "x"
+}
+function lsExactDec(a) { return rtExactDec(a) }
+function lsRoundHalfEven(ds, k) { return rtRoundHalfEven(ds, k) }
 // select(n, ...): the arguments from the n-th on, a negative n counting from the
 // end, or their count for select('#', ...).
 function js_luselect(args) {

@@ -23,7 +23,8 @@
 -- max/min) plus the five names through which Lua 5.3+ makes the integer
 -- subtype visible at all - math.type/tointeger/fmod/maxinteger/mininteger,
 -- without which sections 21 and 22 could not be written - and the pattern
--- half of the string library with select (SECTION 30). That rules out setmetatable - so metatables, the operator
+-- half of the string library with select (SECTION 30) and string.format
+-- (SECTION 35). That rules out setmetatable - so metatables, the operator
 -- metamethods and the <close> attribute (needs __close) stay untested - and
 -- likewise tostring and coroutine.* (library calls, not syntax). error/pcall/xpcall are in, because
 -- without them no error is observable at all (SECTION 27). Lua has no
@@ -1417,6 +1418,38 @@ function s34()
     check("mv5", -three4() .. (three4() < 4 and "<" or ">="), "-3<")
 end
 
+-- ===== SECTION 35: string.format =====
+-- lstrlib's str_format over C's printf: flags, width and precision of at most two
+-- digits, integers as exact 64 bit values (%x reads the bit pattern), floats from
+-- their exact decimal rounded half to even, %q as a literal lua reads back. Every
+-- expected text was printed by lua 5.5 (on macOS, whose %a rounding is its own).
+function s35()
+    local v = {255, -1, 42, 3.14159, 0.15, 2.675, 1e22, 1/3, 1.5, math.mininteger, 0.1, 99.5}
+    check("sf1", string.format("%d|%5d|%-5d|%05d|%+d|% d", v[3], v[3], v[3], v[3], v[3], v[3]), "42|   42|42   |00042|+42| 42")
+    check("sf2", string.format("%x|%X|%#x|%o|%#o|%u", v[1], v[1], v[1], v[1], v[1], v[2]), "ff|FF|0xff|377|0377|18446744073709551615")
+    check("sf3", string.format("%x|%d", v[2], v[10]), "ffffffffffffffff|-9223372036854775808")
+    check("sf4", string.format("%.2f|%10.3f|%-8.1f|%+.0f", v[4], v[4], v[4], v[4]), "3.14|     3.142|3.1     |+3")
+    check("sf5", string.format("%.1f|%.2f|%.0f|%#.0f", v[5], v[6], 2.5, 2.5), "0.1|2.67|2|2.")
+    check("sf6", string.format("%e|%.3E|%g|%g|%.3g", v[7], v[4], v[8], v[7], v[4]), "1.000000e+22|3.142E+00|0.333333|1e+22|3.14")
+    check("sf7", string.format("%.20f", v[11]), "0.10000000000000000555")
+    check("sf8", string.format("%a|%A|%.0a|%.1a", v[9], v[1], v[12], 0x1.f8p0), "0x1.8p+0|0X1.FEP+7|0x1p+6|0x1.fp+0")
+    check("sf9", string.format("%s|%5s|%-5s|%.2s", 1.5, "ab", "ab", "abc"), "1.5|   ab|ab   |ab")
+    check("sf10", string.format("%c%c%c|%5c|%%", 76, 117, 97, 65), "Lua|    A|%")
+    check("sf11", string.format("%q", "a\nb\"c\0001\r"), "\"a\\\nb\\\"c\\0001\\13\"")
+    check("sf12", string.format("%q|%q|%q|%q", 1, 1.5, v[10], 1/0), "1|0x1.8p+0|0x8000000000000000|1e9999")
+    local function msg(f, ...)
+        local ok, m = pcall(f, ...)
+        if ok then return "no error" end
+        return (string.gsub(m, "^.-:%d+: ", ""))
+    end
+    check("sf13", msg(string.format, "%d", 1.5), "bad argument #2 to 'string.format' (number has no integer representation)")
+    check("sf14", msg(string.format, "%d"), "bad argument #2 to 'string.format' (no value)")
+    check("sf15", msg(string.format, "%y", 1), "invalid conversion '%y' to 'format'")
+    check("sf16", msg(string.format, "%100d", 1), "invalid conversion specification: '%100d'")
+    check("sf17", msg(string.format, "%10q", "x"), "specifier '%q' cannot have modifiers")
+    check("sf18", msg(function() return ("%d"):format("x") end), "bad argument #1 to 'format' (number expected, got string)")
+end
+
 s25() -- SECTION-CALL 25
 s26() -- SECTION-CALL 26
 s27() -- SECTION-CALL 27
@@ -1427,5 +1460,6 @@ s31() -- SECTION-CALL 31
 s32() -- SECTION-CALL 32
 s33() -- SECTION-CALL 33
 s34() -- SECTION-CALL 34
+s35() -- SECTION-CALL 35
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

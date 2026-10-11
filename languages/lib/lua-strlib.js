@@ -1,6 +1,6 @@
 // lua-strlib.js -- Lua's pattern matching and the byte-level string library:
-// string.find, match, gmatch, gsub, byte, reverse, sub, rep, upper and lower, as
-// lstrlib.c (Lua 5.5) does them. Lua patterns are NOT regular expressions: no alternation, a
+// string.find, match, gmatch, gsub, byte, reverse, sub, rep, upper, lower and
+// format, as lstrlib.c (Lua 5.5) does them. Lua patterns are NOT regular expressions: no alternation, a
 // quantifier applies to one character class only, and %b, %f and back-references
 // (%1) exist instead. The names below follow lstrlib.c.
 //
@@ -509,6 +509,365 @@ function lsCase(s, up) {
         if (up && c >= 97 && c <= 122) { c = c - 32 }
         else if (!up && c >= 65 && c <= 90) { c = c + 32 }
         out = out + String.fromCharCode(c)
+    }
+    return out
+}
+
+// ----- string.format -----
+// str_format of lstrlib.c over C's printf, as lua 5.5 on this platform (macOS
+// libc) prints it. The parts that touch a Lua value are the includer's HOOKS:
+//   lsFmtArgErr(n, msg)    raise "bad argument #n to 'format' (msg)"
+//   lsFmtCheckStr(args, n) luaL_checklstring of argument n (1-based)
+//   lsFmtNum(args, n)      luaL_checknumber, as a double
+//   lsFmtInt(args, n)      luaL_checkinteger, as the 64 bit pair {h, l} of the
+//                          includer's i64 layer (i64StrU, i64Neg and i64ShrU are
+//                          the includer's too)
+//   lsFmtToStr(args, n)    luaL_tolstring
+//   lsFmtLitKind(args, n)  for %q: "s" a string, "i" an integer, "f" a float, "t"
+//                          nil or a boolean, "x" anything else
+//   lsExactDec(a)          the exact decimal of a finite a >= 0 as {i, f}
+//   lsRoundHalfEven(ds, k) the digit string rounded to k digits, half to even
+// Twin of fmtFormat in abnf/jsrtluastr.go.
+
+var LS_FMT_F = "-+ #0"   // a A e E f g G
+var LS_FMT_X = "-#0"     // o x X
+var LS_FMT_I = "-+ 0"    // d i
+var LS_FMT_U = "-0"      // u
+var LS_FMT_C = "-"       // c s
+var LS_HEX = "0123456789abcdef"
+
+function lsIndexOfCh(set, c) { return set.indexOf(String.fromCharCode(c)) >= 0 }
+function lsGet2Digits(form, i) {
+    var j = i
+    if (j < form.length && lsIsDigit(form.charCodeAt(j))) {
+        j = j + 1
+        if (j < form.length && lsIsDigit(form.charCodeAt(j))) { j = j + 1 }
+    }
+    return j
+}
+// checkformat: the flags this conversion allows, a width and (if allowed) a
+// precision of at most two digits each, then the conversion letter.
+function lsFormCh(form, i) { return i < form.length ? form.charCodeAt(i) : 0 }
+function lsCheckFormat(form, flags, precision) {
+    var i = 1
+    while (i < form.length && lsIndexOfCh(flags, form.charCodeAt(i))) { i = i + 1 }
+    if (lsFormCh(form, i) !== 48) {
+        i = lsGet2Digits(form, i)
+        if (lsFormCh(form, i) === 46 && precision) { i = lsGet2Digits(form, i + 1) }
+    }
+    if (!lsIsAlpha(lsFormCh(form, i))) { lsFail("invalid conversion specification: '" + form + "'") }
+}
+// The parsed spec of a checked form: its flags, width and precision (-1 none).
+function lsSpec(form) {
+    var sp = {left: false, plus: false, space: false, alt: false, zero: false, width: 0, prec: 0 - 1}
+    var i = 1
+    while (i < form.length) {
+        var c = form.charCodeAt(i)
+        if (c === 45) { sp.left = true }
+        else if (c === 43) { sp.plus = true }
+        else if (c === 32) { sp.space = true }
+        else if (c === 35) { sp.alt = true }
+        else if (c === 48) { sp.zero = true }
+        else { break }
+        i = i + 1
+    }
+    var w = 0
+    while (i < form.length && lsIsDigit(form.charCodeAt(i))) { w = w * 10 + form.charCodeAt(i) - 48; i = i + 1 }
+    sp.width = w
+    if (i < form.length && form.charCodeAt(i) === 46) {
+        i = i + 1
+        var p = 0
+        while (i < form.length && lsIsDigit(form.charCodeAt(i))) { p = p * 10 + form.charCodeAt(i) - 48; i = i + 1 }
+        sp.prec = p
+    }
+    return sp
+}
+// Pads `body` (after `sign`, which zero padding goes behind) to the width.
+function lsPad(sp, sign, body, zeroOk) {
+    var n = sign.length + body.length
+    if (n >= sp.width) { return sign + body }
+    var fill = ""
+    var k = n
+    while (k < sp.width) { fill = fill + (sp.zero && zeroOk && !sp.left ? "0" : " "); k = k + 1 }
+    if (sp.left) { return sign + body + fill }
+    if (sp.zero && zeroOk) { return sign + fill + body }
+    return fill + sign + body
+}
+function lsZeros(n) {
+    var s = ""
+    var k = 0
+    while (k < n) { s = s + "0"; k = k + 1 }
+    return s
+}
+function lsUpper(s) { return lsCase(s, true) }
+// The digits a 64 bit pair prints with: its sign and magnitude (d), and its bit
+// pattern read unsigned in base 10, 16 and 8.
+function lsIntDigits(p) {
+    var neg = (p.h & 0x80000000) !== 0
+    var x = ""
+    var o = ""
+    var k = 0
+    while (k < 16) {
+        var nib = k < 8 ? (p.l >>> (k * 4)) & 15 : (p.h >>> ((k - 8) * 4)) & 15
+        x = LS_HEX.charAt(nib) + x
+        k = k + 1
+    }
+    var q = 0
+    while (q < 22) {
+        o = LS_HEX.charAt(i64ShrU(p, q * 3).l & 7) + o
+        q = q + 1
+    }
+    while (x.length > 1 && x.charCodeAt(0) === 48) { x = x.substring(1) }
+    while (o.length > 1 && o.charCodeAt(0) === 48) { o = o.substring(1) }
+    return {neg: neg, d: i64StrU(neg ? i64Neg(p) : p), u: i64StrU(p), x: x, o: o}
+}
+
+// %d %i %u %o %x %X
+function lsFmtIntConv(sp, conv, iv) {
+    var digits = iv.d
+    var sign = ""
+    if (conv === 117) { digits = iv.u }
+    else if (conv === 111) { digits = iv.o }
+    else if (conv === 120) { digits = iv.x }
+    else if (conv === 88) { digits = lsUpper(iv.x) }
+    else if (iv.neg) { sign = "-" }
+    else if (sp.plus) { sign = "+" }
+    else if (sp.space) { sign = " " }
+    var zero = digits == "0"
+    if (sp.prec >= 0) {
+        if (sp.prec === 0 && zero) { digits = "" }
+        if (digits.length < sp.prec) { digits = lsZeros(sp.prec - digits.length) + digits }
+    }
+    if (sp.alt && conv === 111 && digits.charCodeAt(0) !== 48) { digits = "0" + digits }
+    if (sp.alt && !zero && conv === 120) { sign = "0x" }
+    if (sp.alt && !zero && conv === 88) { sign = "0X" }
+    return lsPad(sp, sign, digits, sp.prec < 0)
+}
+
+// The decimal digits of a finite a > 0 rounded to `n` significant digits, and
+// the exponent of the first: {ds, e}.
+function lsSigDigits(a, n) {
+    var dec = lsExactDec(a)
+    var all = dec.i + dec.f
+    var e = dec.i.length - 1
+    var lead = 0
+    while (lead < all.length && all.charCodeAt(lead) === 48) { lead = lead + 1 }
+    e = e - lead
+    var ds = lsRoundHalfEven(all.substring(lead), n)
+    if (ds.length > n) { ds = ds.substring(0, n); e = e + 1 }
+    return {ds: ds, e: e}
+}
+function lsExpText(e) {
+    var a = e < 0 ? 0 - e : e
+    var s = "" + a
+    if (s.length < 2) { s = "0" + s }
+    return (e < 0 ? "-" : "+") + s
+}
+// %e of a finite a >= 0 with `prec` digits after the point.
+function lsFmtE(a, prec, alt) {
+    var ds = ""
+    var e = 0
+    if (a === 0) { ds = lsZeros(prec + 1) } else {
+        var r = lsSigDigits(a, prec + 1)
+        ds = r.ds
+        e = r.e
+    }
+    var body = ds.substring(0, 1)
+    if (prec > 0 || alt) { body = body + "." + ds.substring(1) }
+    return body + "e" + lsExpText(e)
+}
+// %f of a finite a >= 0.
+function lsFmtF(a, prec, alt) {
+    var dec = lsExactDec(a)
+    var kept = lsRoundHalfEven(dec.i + dec.f, dec.i.length + prec)
+    var ilen = dec.i.length
+    if (kept.length > dec.i.length + prec) { ilen = ilen + 1 }
+    var ints = kept.substring(0, ilen)
+    if (ints == "") { ints = "0" }
+    if (prec > 0) { return ints + "." + kept.substring(ilen) }
+    return alt ? ints + "." : ints
+}
+// %g: %e or %f by the exponent the value has at P significant digits, trailing
+// zeros (and a bare point) removed unless '#'.
+function lsFmtG(a, prec, alt) {
+    var P = prec < 0 ? 6 : (prec === 0 ? 1 : prec)
+    var x = 0
+    if (a !== 0) { x = lsSigDigits(a, P).e }
+    var s = ""
+    if (x < 0 - 4 || x >= P) { s = lsFmtE(a, P - 1, alt) } else { s = lsFmtF(a, P - 1 - x, alt) }
+    if (alt) { return s }
+    var ei = s.indexOf("e")
+    var mant = ei < 0 ? s : s.substring(0, ei)
+    var tail = ei < 0 ? "" : s.substring(ei)
+    if (mant.indexOf(".") >= 0) {
+        var k = mant.length
+        while (k > 0 && mant.charCodeAt(k - 1) === 48) { k = k - 1 }
+        if (k > 0 && mant.charCodeAt(k - 1) === 46) { k = k - 1 }
+        mant = mant.substring(0, k)
+    }
+    return mant + tail
+}
+// %a of a finite a >= 0: 0x1.<hex>p<exp>, normalized (a subnormal too). With a
+// precision the hex digits are cut and rounded as this platform's libc rounds
+// them, which reads only the next two dropped digits: up from 0x90, down below
+// 0x80, and in between up exactly when the second digit is odd (measured over
+// every two-digit tail); a carry makes the lead digit 2.
+function lsFmtA(a, prec, alt) {
+    var lead = "1"
+    var ds = ""
+    var e = 0
+    if (a === 0) { lead = "0" } else {
+        var m = a
+        while (m >= 2) { m = m / 2; e = e + 1 }
+        while (m < 1) { m = m * 2; e = e - 1 }
+        var f = m - 1
+        while (f > 0) {
+            f = f * 16
+            var d = Math.floor(f)
+            ds = ds + LS_HEX.charAt(d)
+            f = f - d
+        }
+    }
+    if (prec >= 0) {
+        if (ds.length > prec) {
+            var next = LS_HEX.indexOf(ds.charAt(prec)) * 16
+            if (prec + 1 < ds.length) { next = next + LS_HEX.indexOf(ds.charAt(prec + 1)) }
+            var up = next >= 144 || (next >= 128 && next % 2 === 1)
+            ds = ds.substring(0, prec)
+            if (up) {
+                var codes = []
+                for (var i = 0; i < ds.length; i++) { codes.push(LS_HEX.indexOf(ds.charAt(i))) }
+                var at = codes.length - 1
+                var carry = true
+                while (at >= 0 && carry) {
+                    if (codes[at] === 15) { codes[at] = 0 } else { codes[at] = codes[at] + 1; carry = false }
+                    at = at - 1
+                }
+                ds = ""
+                for (var j = 0; j < codes.length; j++) { ds = ds + LS_HEX.charAt(codes[j]) }
+                if (carry) { lead = lead == "0" ? "1" : "2" }
+            }
+        }
+        while (ds.length < prec) { ds = ds + "0" }
+    }
+    var body = "0x" + lead
+    if (ds.length > 0 || alt) { body = body + "." + ds }
+    return body + "p" + (e < 0 ? "-" : "+") + (e < 0 ? 0 - e : e)
+}
+// A float conversion: the sign, inf / nan (which take no zero padding, and nan no
+// sign at all), the digits, the case.
+function lsFmtFloat(sp, conv, v) {
+    var lowc = conv >= 97 ? conv : conv + 32
+    var neg = v < 0 || (v === 0 && 1 / v < 0)
+    var a = neg ? 0 - v : v
+    var sign = ""
+    if (v !== v) { neg = false }
+    else if (neg) { sign = "-" }
+    else if (sp.plus) { sign = "+" }
+    else if (sp.space) { sign = " " }
+    var body = ""
+    var finite = v === v && a - a === 0
+    if (!finite) { body = v !== v ? "nan" : "inf" }
+    else if (lowc === 101) { body = lsFmtE(a, sp.prec < 0 ? 6 : sp.prec, sp.alt) }
+    else if (lowc === 102) { body = lsFmtF(a, sp.prec < 0 ? 6 : sp.prec, sp.alt) }
+    else if (lowc === 103) { body = lsFmtG(a, sp.prec, sp.alt) }
+    else { body = lsFmtA(a, sp.prec, sp.alt) }
+    if (conv < 97) { body = lsUpper(body) }
+    if (finite && lowc === 97 && sp.zero && !sp.left) {
+        // The zero padding of %a goes behind the "0x".
+        return sign + body.substring(0, 2) + lsZeros(sp.width - sign.length - body.length) + body.substring(2)
+    }
+    return lsPad(sp, sign, body, finite)
+}
+// %q of a string: lstrlib's addquoted.
+function lsQuoted(s) {
+    var out = "\""
+    for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i)
+        if (c === 34 || c === 92 || c === 10) { out = out + "\\" + s.charAt(i) }
+        else if (lsIsCntrl(c)) {
+            var nx = i + 1 < s.length ? s.charCodeAt(i + 1) : 0
+            var ds = "" + c
+            if (lsIsDigit(nx)) { while (ds.length < 3) { ds = "0" + ds } }
+            out = out + "\\" + ds
+        }
+        else { out = out + s.charAt(i) }
+    }
+    return out + "\""
+}
+// %q of argument n: a literal Lua reads back as the same value.
+function lsLiteral(args, n) {
+    var kind = lsFmtLitKind(args, n)
+    if (kind == "s") { return lsQuoted(lsFmtCheckStr(args, n)) }
+    if (kind == "i") {
+        var iv = lsIntDigits(lsFmtInt(args, n))
+        // math.mininteger has no decimal literal: its negation does not fit.
+        if (iv.neg && iv.x == "8000000000000000") { return "0x8000000000000000" }
+        return (iv.neg ? "-" : "") + iv.d
+    }
+    if (kind == "f") {
+        var v = lsFmtNum(args, n)
+        if (v !== v) { return "(0/0)" }
+        if (v - v !== 0) { return v > 0 ? "1e9999" : "-1e9999" }
+        var neg = v < 0 || (v === 0 && 1 / v < 0)
+        return (neg ? "-" : "") + lsFmtA(neg ? 0 - v : v, 0 - 1, false)
+    }
+    if (kind == "t") { return lsFmtToStr(args, n) }
+    lsFmtArgErr(n, "value has no literal form")
+    return ""
+}
+function lsFormat(args) {
+    var fmt = lsFmtCheckStr(args, 1)
+    var out = ""
+    var arg = 1
+    var i = 0
+    while (i < fmt.length) {
+        var c = fmt.charCodeAt(i)
+        if (c !== 37) { out = out + fmt.charAt(i); i = i + 1; continue }
+        i = i + 1
+        if (i < fmt.length && fmt.charCodeAt(i) === 37) { out = out + "%"; i = i + 1; continue }
+        arg = arg + 1
+        if (arg > args.length) { lsFmtArgErr(arg, "no value") }
+        // getformat: the span of flags, digits and points, then one more character.
+        var j = i
+        while (j < fmt.length && (lsIndexOfCh("-+ #0123456789.", fmt.charCodeAt(j)))) { j = j + 1 }
+        if (j - i + 1 >= 22) { lsFail("invalid format string to 'format'") }
+        var form = "%" + fmt.substring(i, j + 1)
+        var conv = j < fmt.length ? fmt.charCodeAt(j) : 0
+        i = j + 1
+        if (conv === 99) {
+            // %c prints the low byte of the integer (C converts it to unsigned char).
+            var hx = lsIntDigits(lsFmtInt(args, arg)).x
+            lsCheckFormat(form, LS_FMT_C, false)
+            var code = LS_HEX.indexOf(hx.charAt(hx.length - 1))
+            if (hx.length > 1) { code = code + 16 * LS_HEX.indexOf(hx.charAt(hx.length - 2)) }
+            out = out + lsPad(lsSpec(form), "", String.fromCharCode(code), false)
+        } else if (conv === 100 || conv === 105 || conv === 117 || conv === 111 || conv === 120 || conv === 88) {
+            var iv2 = lsIntDigits(lsFmtInt(args, arg))
+            var fl = LS_FMT_X
+            if (conv === 100 || conv === 105) { fl = LS_FMT_I } else if (conv === 117) { fl = LS_FMT_U }
+            lsCheckFormat(form, fl, true)
+            out = out + lsFmtIntConv(lsSpec(form), conv, iv2)
+        } else if (conv === 97 || conv === 65 || conv === 101 || conv === 69 || conv === 102 || conv === 103 || conv === 71) {
+            var fv = lsFmtNum(args, arg)
+            lsCheckFormat(form, LS_FMT_F, true)
+            out = out + lsFmtFloat(lsSpec(form), conv, fv)
+        } else if (conv === 113) {
+            if (form.length > 2) { lsFail("specifier '%q' cannot have modifiers") }
+            out = out + lsLiteral(args, arg)
+        } else if (conv === 115) {
+            var s = lsFmtToStr(args, arg)
+            if (form.length == 2) { out = out + s } else {
+                lsCheckFormat(form, LS_FMT_C, true)
+                var sp = lsSpec(form)
+                if (sp.prec < 0 && s.length >= 100) { out = out + s } else {
+                    if (sp.prec >= 0 && s.length > sp.prec) { s = s.substring(0, sp.prec) }
+                    out = out + lsPad(sp, "", s, false)
+                }
+            }
+        } else {
+            lsFail("invalid conversion '" + form + "' to 'format'")
+        }
     }
     return out
 }

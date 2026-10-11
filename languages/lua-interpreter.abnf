@@ -2411,7 +2411,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var a = anytype
         a = luaCheckNum(qual, n, v, nargs)
         var d = numOf(a)
-        if (!isInt(a) && (d - d !== 0 || Math.floor(d) !== d)) { luaArgErr(qual, n, "number has no integer representation") }
+        if (!isInt(a) && (d - d !== 0 || Math.floor(d) !== d || luaI64(d) === undefined)) { luaArgErr(qual, n, "number has no integer representation") }
         return d
     }
     function luaOptInt(qual, n, v, nargs, dflt) {
@@ -2601,6 +2601,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- patterns: lib/lua-strlib.js, shared with layer 2 -----
     include("lib/lua-strlib.js")
     lsFail = function(msg) { fail(msg) }
+    // string.format's hooks (lib/lua-strlib.js). Twins in languages/lib/lua-rt.metajs.
+    function lsFmtArgErr(n, msg) { luaArgErr("string.format", n, msg) }
+    function lsFmtCheckStr(args, n) { return luaCheckStr("string.format", n, args[n - 1], args.length) }
+    function lsFmtNum(args, n) { return numOf(luaCheckNum("string.format", n, args[n - 1], args.length)) }
+    function lsFmtInt(args, n) {
+        luaCheckInt("string.format", n, args[n - 1], args.length)
+        var a = anytype
+        a = luaIntOf(toNumV(args[n - 1]))
+        if (szIs(a)) { return szPair(a) }
+        return i64FromNum(a)
+    }
+    function lsFmtToStr(args, n) { return luaToStr(args[n - 1]) }
+    function lsFmtLitKind(args, n) {
+        var v = anytype
+        v = args[n - 1]
+        if (typeof v == "string") { return "s" }
+        if (isNum(v)) { return isInt(v) ? "i" : "f" }
+        if (v === undefined || v === null || v === true || v === false) { return "t" }
+        return "x"
+    }
+    function lsExactDec(a) { return coreExactDec(a) }
+    function lsRoundHalfEven(ds, k) { return coreRoundHalfEven(ds, k) }
     // string.find / string.match: the result list, or nil.
     function luaFind(args, find) {
         var fn = find ? "string.find" : "string.match"
@@ -2710,7 +2732,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return out
         },
-        reverse: function(s) { return lsReverse(luaCheckStr("string.reverse", 1, s, arguments.length)) }
+        reverse: function(s) { return lsReverse(luaCheckStr("string.reverse", 1, s, arguments.length)) },
+        format: function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return lsFormat(args)
+        }
     }
 
     // table.*: insert appends at the sequence border (#t + 1); remove drops and returns

@@ -12,6 +12,7 @@ package abnf
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -91,7 +92,7 @@ func (rt *jsrt) luCheckNum(fn string, n int, args []interface{}) interface{} {
 func (rt *jsrt) luCheckInt(fn string, n int, args []interface{}) float64 {
 	v := rt.luCheckNum(fn, n, args)
 	d := luNumOf(v)
-	if !luIsInt(v) && (d-d != 0 || d != float64(int64(d))) {
+	if !luIsInt(v) && (d-d != 0 || d != math.Trunc(d) || d >= luMinIntF || d < -luMinIntF) {
 		rt.luArgErr(fn, n, "number has no integer representation")
 	}
 	return d

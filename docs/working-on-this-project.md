@@ -959,11 +959,13 @@ declaration allows it to become.**
 ## 7.13 Who imports what
 
 ```
-runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt
+runtime.metajs            <- csharp go dart java php kotlin ruby python swift metajs-rt lua
+                             (lua for the hook-free exact decimal only)
 regex.js                  <- js python ruby kotlin java
-lua-rt.metajs             <- imports lua-strlib.js ONLY
-lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns; Go
-                             twin: abnf/jsrtluastr.go)
+lua-rt.metajs             <- imports lua-strlib.js and runtime.metajs ONLY
+lua-strlib.js             <- lua-rt.metajs, lua interpreter (Lua patterns and
+                             string.format; Go twins: abnf/jsrtluastr.go,
+                             abnf/jsrtluafmt.go)
 js-rt.metajs              <- imports regex.js and json.js ONLY
 json.js                   <- js-rt.metajs, js and typescript interpreters
                              (Go twin: abnf/jsrtjson.go)
