@@ -657,18 +657,13 @@ func (rt *jsrt) pyUserIter(v interface{}) (interface{}, bool) {
 	return nil, false
 }
 
-// pyDrainIter is what an __iter__ answered, as a slice: a builtin iterable, or
-// an instance whose __next__ is called until it raises StopIteration.
+// pyDrainIter is what an __iter__ answered, as a slice: a generator or a
+// cursor, or an instance whose __next__ is called until it raises StopIteration.
 func (rt *jsrt) pyDrainIter(it interface{}) []interface{} {
-	_, cls, ok := pyInstance(it)
-	if !ok {
-		return rt.pyElemsOf(it)
+	if _, _, ok := pyInstance(it); !ok {
+		return rt.pyElemsOf(rt.pyBuiltinIterator(it))
 	}
-	nx, found := pyLookup(cls, "__next__")
-	if !found || !isCallable(nx) {
-		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-			"iter() returned non-iterator of type '"+pyTypeName(rt, it)+"'")})
-	}
+	nx := rt.pyUserNextFn(it)
 	var out []interface{}
 	for {
 		v, stop := rt.pyNextOrStop(nx, it)
@@ -677,6 +672,59 @@ func (rt *jsrt) pyDrainIter(it interface{}) []interface{} {
 		}
 		out = append(out, v)
 	}
+}
+
+// pyNonIterator is CPython's TypeError for an __iter__ that answered something
+// that is not an iterator.
+func (rt *jsrt) pyNonIterator(it interface{}) {
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+		"iter() returned non-iterator of type '"+pyTypeName(rt, it)+"'")})
+}
+
+// pyBuiltinIterator is a non-instance __iter__ result when it is an iterator (a
+// generator or a cursor), and CPython's TypeError otherwise.
+func (rt *jsrt) pyBuiltinIterator(it interface{}) interface{} {
+	if _, ok := it.(*jsGenerator); !ok && pyIterName(rt, it) == "" {
+		rt.pyNonIterator(it)
+	}
+	return it
+}
+
+// pyUserNextFn is the __next__ of an instance an __iter__ answered.
+func (rt *jsrt) pyUserNextFn(it interface{}) interface{} {
+	_, cls, _ := pyInstance(it)
+	nx, found := pyLookup(cls, "__next__")
+	if !found || !isCallable(nx) {
+		rt.pyNonIterator(it)
+	}
+	return nx
+}
+
+// pyUserStepper is what an __iter__ answered, as something a compiled loop can
+// step one value at a time: a generator or a cursor is its own, and a user
+// iterator gets a cursor-shaped wrapper whose "next" runs ONE __next__, so an
+// endless one ends at a `break`. The __pyit name is the instance's type, which
+// is what a send() into a `yield from` over it names (js_pyyfsend). Twin of
+// pyAUserStepper in languages/lib/python-rt.metajs; the interpreter steps the
+// instance directly (pyUserStep).
+func (rt *jsrt) pyUserStepper(it interface{}) interface{} {
+	if _, _, ok := pyInstance(it); !ok {
+		return rt.pyBuiltinIterator(it)
+	}
+	nx := rt.pyUserNextFn(it)
+	ad := newJSObject()
+	ad.set("__pyit", pyTypeName(rt, it))
+	ad.set("next", jsHostFunc("pyuser.next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		out := newJSObject()
+		v, stop := rt.pyNextOrStop(nx, it)
+		if stop {
+			v = jsUndef
+		}
+		out.set("value", v)
+		out.set("done", stop)
+		return out
+	}))
+	return ad
 }
 
 func (rt *jsrt) pyNextOrStop(nx, it interface{}) (v interface{}, stop bool) {

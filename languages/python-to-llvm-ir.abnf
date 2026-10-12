@@ -281,8 +281,9 @@ TypeAlias   <~~ push(makeTypeAlias(takeAll())) ~~>
 // Python also allows the inline form 'if c: x = 1' - a ':' followed by a single
 // line of small statements; it is tried second (a real block has a NEWLINE right
 // after the ':', so the indented alternative fails fast on the inline form).
-Suite       <~~ push(makeSeq(takeAll())) ~~>
-            = ":" ( NL Indent Statement { SameLevel Statement } Dedent | SmallLine ) ;
+Suite       <~~ push(pySuite(takeAll())) ~~>
+            = ":" ( NL Indent "" <~~ push(up.pos) ~~> Statement { SameLevel Statement } Dedent
+                  | "" <~~ push(up.pos) ~~> SmallLine ) ;
 
 // match SUBJECT: case PATTERN [if GUARD]: SUITE ... - the structural pattern match
 // of PEP 634. `match` and `case` are soft keywords, so a Match only commits once the
@@ -753,7 +754,7 @@ TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
 // An expression statement may be a bare TUPLE - `1, 2, 3` on a line of its own is legal
 // Python (and test_grammar checks exactly that), so this takes an expression LIST. Assign
 // is tried before it, so `a = 1` is unaffected.
-ExprSmall   <~~ push(exprToStmt(pop())) ~~>
+ExprSmall   <~~ push(pyExprStmt(pop(), up.start, up.pos)) ~~>
             = ExprList ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
@@ -1124,7 +1125,7 @@ ListSpread  <~~ push({lspread: pop()}) ~~> = "*" Expression ;
 // Triple-quoted pieces are tried before the single-quoted ones so """...""" is not
 // misread as an empty "" string; their body may span newlines and contain lone or
 // doubled quotes, and only three quotes in a row close it.
-StringLit   <~~ push(makeStrConcat(takeAll())) ~~>
+StringLit   <~~ push(pyNoteStr(makeStrConcat(takeAll()), up.start, up.pos)) ~~>
             = StrPiece { StrPiece } ;
 StrPiece    = FString | TextPiece ;
 TextPiece   <~~ push(makeStrPiece(up.in)) ~~>
@@ -2068,6 +2069,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (allConst) {
             var lit = ""
             for (var k = 0; k < items.length; k++) { lit += items[k].str }
+            walkStrConst = true
+            walkStrText = lit
             return makeConst(lit)
         }
         return function(b) {
@@ -3112,31 +3115,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vName = "$v" + hidCount
             var r = listT(b)
             b = r.b
-            // LAZY ITERATION over a generator. js_pyiterof MATERIALIZES its argument,
-            // which never ends for `for x in endless(): ... break`. A GENERATOR is
-            // therefore kept raw and STEPPED, one value per iteration, through the
+            // LAZY ITERATION. Materializing never ends for `for x in endless(): ...
+            // break`, so js_pyforsrc keeps a generator or a cursor raw, wraps a user
+            // iterator so one __next__ runs per step, and materializes everything
+            // else (js_pyiterof: a dict's keys, a string's characters). A steppable
+            // source is STEPPED, one value per iteration, through the
             // js_get(g, "next") / {value, done} protocol the coroutine primitive
-            // already answers; everything else still goes through js_pyiterof, which
-            // normalizes a dict to its keys and a string to its characters. C# lowers
-            // foreach the same way - see csharp-to-llvm-ir.abnf's makeForEach.
+            // already answers. C# lowers foreach the same way - see
+            // csharp-to-llvm-ir.abnf's makeForEach.
             //
             // Which of the two the loop is on is decided ONCE, into a hidden slot,
             // and the head tests it with an ICmp against the `true` handle - no
             // extern call and no re-probe per iteration.
+            var srcV = callExt(b, "js_pyforsrc", [r.v])
             var isGenV = callExt(b, "js_seq",
-                [callExt(b, "js_typeof", [callExt(b, "js_get", [r.v, emitStr(b, "next")])]),
+                [callExt(b, "js_typeof", [callExt(b, "js_get", [srcV, emitStr(b, "next")])]),
                  emitStr(b, "function")])
-            var genB = curF.NewBlock("")
-            var arrB = curF.NewBlock("")
             var headB = curF.NewBlock("")
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, gName), isGenV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, isGenV, handle(3)), genB, arrB)
-            callExt(genB, "js_scope_decl", [curScopeV, emitStr(genB, aName), r.v])
-            genB.NewBr(headB)
-            callExt(arrB, "js_scope_decl", [curScopeV, emitStr(arrB, aName), callExt(arrB, "js_pyiterof", [r.v])])
-            arrB.NewBr(headB)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), srcV])
+            b.NewBr(headB)
             var gHeadB = curF.NewBlock("")
             var gSetB = curF.NewBlock("")
             var aHeadB = curF.NewBlock("")
@@ -3265,12 +3265,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // value of the expression is the delegate's return value. The shape is
             // js-to-llvm-ir.abnf's makeYieldStar.
             //
-            // js_pyiterfn is iter(): a generator and a cursor are their own, and
-            // everything else is materialized into a cursor - a list is finite, so
-            // only the GENERATOR case needed laziness.
+            // js_pyyfsrc is iter(): a generator and a cursor are their own, a user
+            // iterator is wrapped to step one __next__ at a time, and everything
+            // else is materialized into a cursor.
             hidCount++
             var pfx = "$yf" + hidCount
-            var dV = callExt(b, "js_pyiterfn", [v])
+            var dV = callExt(b, "js_pyyfsrc", [v])
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pfx + "src"), dV])
@@ -3985,6 +3985,72 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return {b: b, env: env}
     }
+    // ----- Docstrings, recognized at WALK time -----
+    // A def's or a class's __doc__ is its body's FIRST statement when that is a
+    // string literal and nothing else. A thunk loses its identity crossing the tag
+    // stack under goja, so the three tags involved match by SOURCE POSITION:
+    // StringLit notes the span of a constant string, ExprSmall notes the start of
+    // a statement spanning exactly that string, and Suite, handed the start of its
+    // first statement, looks it up. A def's or a class's body is the last Suite
+    // walked before its own tag runs, so makeDef / makeClass read walkSuiteDoc.
+    // Twin of the same helpers in python-interpreter.abnf.
+    var walkStrConst = false
+    var walkStrText = ""
+    var walkStrFrom = 0 - 1
+    var walkStrTo = 0 - 1
+    var walkDocs = {}
+    var walkSuiteDoc = anytype
+    walkSuiteDoc = null
+    function pyNoteStr(t, from, to) {
+        walkStrFrom = walkStrConst ? from : 0 - 1
+        walkStrTo = to
+        walkStrConst = false
+        return t
+    }
+    function pyExprStmt(e, from, to) {
+        if (from == walkStrFrom && to == walkStrTo) { walkDocs["$" + from] = pyCleanDoc(walkStrText) }
+        return exprToStmt(e)
+    }
+    // CPython (3.13 on) cleans a docstring at compile time: tabs expanded, the
+    // first line's leading spaces dropped, and the smallest indentation of the
+    // later non-blank lines removed from each of them (_PyCompile_CleanDoc).
+    function pyCleanDoc(s) {
+        var t = ""
+        var col = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "\t") {
+                var n = 8 - col % 8
+                for (var k = 0; k < n; k++) { t += " " }
+                col = col + n
+            } else {
+                t += ch
+                col = (ch == "\n" || ch == "\r") ? 0 : col + 1
+            }
+        }
+        var lines = t.split("\n")
+        var margin = 0 - 1
+        var j
+        for (j = 1; j < lines.length; j++) {
+            var sp = 0
+            while (sp < lines[j].length && lines[j].charAt(sp) == " ") { sp++ }
+            if (sp < lines[j].length && (margin < 0 || sp < margin)) { margin = sp }
+        }
+        var fs = 0
+        while (fs < lines[0].length && lines[0].charAt(fs) == " ") { fs++ }
+        var out = lines[0].substring(fs)
+        for (j = 1; j < lines.length; j++) {
+            var cut = 0
+            while (cut < margin && cut < lines[j].length && lines[j].charAt(cut) == " ") { cut++ }
+            out += "\n" + lines[j].substring(cut)
+        }
+        return out
+    }
+    function pySuite(items) {
+        var d = walkDocs["$" + items[0]]
+        walkSuiteDoc = (d === undefined) ? null : d
+        return makeSeq(items.slice(1))
+    }
     // A def pushes {dname, dstmt}: the name is what a decorator chain rebinds.
     // js_pyfnname remembers it on the closure so f.__name__ can answer.
     function makeDef(bodyT, plist, name, pos) {
@@ -3993,6 +4059,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         plist.locals = sbPop()
         plist.qual = sbQual
         sbName(name)
+        var doc = walkSuiteDoc
         return {dname: name, dstmt: function(b) {
             var idx = emitClosure(plist, bodyT, false)
             var er = emitDefaultsEnv(b, plist)
@@ -4004,6 +4071,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isGen) { clo = callExt(b, "js_genfn", [clo]) }
             clo = emitSig(b, clo, plist)
             clo = callExt(b, "js_pyfnname", [clo, emitStr(b, name)])
+            if (doc != null) { clo = callExt(b, "js_pyfndoc", [clo, emitStr(b, doc)]) }
             pySetVar(b, curScopeV, name, clo)
             return b
         }}
@@ -4028,6 +4096,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         sbPop()
         var qual = sbQual
         sbName(name)
+        var doc = walkSuiteDoc
         return {dname: name, dstmt: function(b) {
             var basesV = callExt(b, "js_arr_new", [])
             for (var j = 0; j < bases.length; j++) {
@@ -4041,6 +4110,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // CPython seeds the body namespace with __module__, so a body binding
             // of its own overrides it; pyString prefixes the class repr with it.
             callExt(b, "js_set", [cls, emitStr(b, "__module__"), emitStr(b, modName)])
+            // __doc__ is the class's OWN, None without a docstring - it is not
+            // inherited.
+            callExt(b, "js_pyclsdoc", [cls, doc == null ? hUndef : emitStr(b, doc)])
             var savedSuperCls = pySuperCls
             var saved = curScopeV
             // A class body is a namespace of its own: what it binds becomes a

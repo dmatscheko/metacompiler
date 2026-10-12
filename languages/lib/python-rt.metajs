@@ -1318,6 +1318,8 @@ function pyLookupVal(c, name) {
     for (var i = 0; i < mro.length; i++) {
         var v = pyClassMember(mro[i], name)
         if (v !== undefined) { return v }
+        // A member bound to None SHADOWS a base class's (pyLookupHas).
+        if (mro[i]["__nonek"] !== undefined && pyNoneBound(mro[i], name)) { return undefined }
     }
     return undefined
 }
@@ -1696,15 +1698,12 @@ function pyAUserIter(v) {
     return pyCallSelf(pyLookupVal(cls, "__iter__"), v, [])
 }
 
-// Go: rt.pyDrainIter. What an __iter__ answered, as a list: a builtin iterable,
-// or an instance whose __next__ is called until it raises StopIteration.
+// Go: rt.pyDrainIter. What an __iter__ answered, as a list: a generator or a
+// cursor, or an instance whose __next__ is called until it raises StopIteration.
 function pyADrainIter(it) {
     var cls = pyInstClassOf(it)
-    if (cls === null) { return pyElemsOf(it) }
-    if (!pyLookupHas(cls, "__next__")) {
-        pyRaiseExc("TypeError", "iter() returned non-iterator of type '" + pyTypeName(it) + "'")
-    }
-    var nx = pyLookupVal(cls, "__next__")
+    if (cls === null) { return pyElemsOf(pyABuiltinIterator(it)) }
+    var nx = pyAUserNextFn(cls, it)
     var out = []
     var going = true
     while (going) {
@@ -1715,6 +1714,62 @@ function pyADrainIter(it) {
         }
     }
     return out
+}
+
+// Go: rt.pyBuiltinIterator. A non-instance __iter__ result when it is an
+// iterator (a generator or a cursor), and CPython's TypeError otherwise.
+function pyABuiltinIterator(it) {
+    if (!pyIsGen(it) && !pyIsIter(it)) {
+        pyRaiseExc("TypeError", "iter() returned non-iterator of type '" + pyTypeName(it) + "'")
+    }
+    return it
+}
+
+// Go: rt.pyUserNextFn. The __next__ of an instance an __iter__ answered.
+function pyAUserNextFn(cls, it) {
+    if (!pyLookupHas(cls, "__next__")) {
+        pyRaiseExc("TypeError", "iter() returned non-iterator of type '" + pyTypeName(it) + "'")
+    }
+    return pyLookupVal(cls, "__next__")
+}
+
+// Go: rt.pyUserStepper. What an __iter__ answered, as something a compiled loop
+// steps one value at a time: a generator or a cursor is its own, and a user
+// iterator gets a cursor-shaped wrapper whose "next" runs ONE __next__.
+function pyAUserStepper(it) {
+    var cls = pyInstClassOf(it)
+    if (cls === null) { return pyABuiltinIterator(it) }
+    var nx = pyAUserNextFn(cls, it)
+    var ad = {__pyit: pyTypeName(it)}
+    ad["next"] = function() { return pyAUserStep(nx, it) }
+    return ad
+}
+
+function pyAUserStep(nx, it) {
+    var v = anytype
+    try { v = pyCallSelf(nx, it, []) }
+    catch (e) {
+        if (!pyDIsInstance(e, pyExcClass("StopIteration"))) { throw e }
+        return {value: undefined, done: true}
+    }
+    return {value: v, done: false}
+}
+
+// js_pyforsrc: what a compiled for loop runs over - a generator or a cursor,
+// stepped; a user iterable's iterator, stepped; anything else materialized by
+// js_pyiterof. js_pyyfsrc: the `yield from` delegate, always stepped - iter(),
+// with a user iterator wrapped. Go: the same names in abnf/jsrt.go.
+function js_pyforsrc(v) {
+    if (pyIsGen(v) || pyIsIter(v)) { return v }
+    var it = pyAUserIter(v)
+    if (it !== undefined) { return pyAUserStepper(it) }
+    return js_pyiterof(v)
+}
+
+function js_pyyfsrc(v) {
+    var it = pyAUserIter(v)
+    if (it !== undefined) { return pyAUserStepper(it) }
+    return js_pyiterfn(v)
 }
 
 // pyIsDescriptor: an instance whose class defines the given hook.
@@ -2016,14 +2071,17 @@ function pyGetAttrRaw(obj, name) {
                 }
                 return pyBMTab[bmj + 3]
             }
+            // A user method's __doc__ is its function's.
+            if (name == "__doc__" && pyBMTab[bmj + 3] !== null) { return pyGetAttr(pyBMTab[bmj + 3], name) }
         }
     }
-    // Not answered: __doc__ and a function's __module__ (an AttributeError, like
-    // any other absent attribute). __doc__ needs a def's leading string statement
-    // recorded in three engines AND CPython's own text for every builtin; a
-    // function's __module__ needs the defining module recorded at every def site.
+    // Not answered: a builtin's __doc__ and a function's __module__ (an
+    // AttributeError, like any other absent attribute). A builtin's needs
+    // CPython's own text for every builtin; a function's __module__ needs the
+    // defining module recorded at every def site.
     // A function's own attributes, and the dict holding them: first, so an
-    // assigned __name__ or __qualname__ is the one read back.
+    // assigned __name__, __qualname__ or __doc__ is the one read back. A user
+    // function's __doc__ is otherwise its def's docstring, else None.
     if (typeof obj == "function") {
         var fad = pyFnAttrs(pyFnOwner(obj), false)
         if (fad !== undefined) {
@@ -2031,6 +2089,11 @@ function pyGetAttrRaw(obj, name) {
             if (fai >= 0) { return fad["vals"][fai] }
         }
         if (name == "__dict__" && pyTypeName(obj) == "function") { return pyFnAttrs(obj, true) }
+        if (name == "__doc__" && pyTypeName(obj) == "function") {
+            var fdoc = rtPairGet(pyBFnDocObjs, pyBFnDocs, obj)
+            if (fdoc !== undefined) { return fdoc }
+            return undefined
+        }
     }
     // A user function's __qualname__ is its signature's; a builtin's rides with
     // __name__ below.
@@ -5928,6 +5991,16 @@ function js_pynext(args) {
         if (st["done"] === true) { return pyStopIter(args, st["value"]) }
         return st["value"]
     }
+    // An instance whose class defines __next__ is an iterator: its
+    // StopIteration ends it, re-raised as it was unless there is a default.
+    var cls = pyInstClassOf(it)
+    if (cls !== null && pyLookupHas(cls, "__next__")) {
+        var nx = pyLookupVal(cls, "__next__")
+        if (args.length < 2) { return pyCallSelf(nx, it, []) }
+        var us = pyAUserStep(nx, it)
+        if (us["done"] === true) { return args[1] }
+        return us["value"]
+    }
     throw pyExcInstance("TypeError", "'" + pyTypeName(it) + "' object is not an iterator")
 }
 
@@ -6454,6 +6527,24 @@ function js_pyfnname(fn, name) {
     pyBFnObjs.push(fn)
     pyBFnNames.push(nm)
     return fn
+}
+
+// The docstring of each def that has one, which f.__doc__ answers: the same
+// identity-keyed side table. Go: js_pyfndoc / rt.pyFuncDocs.
+var pyBFnDocObjs = []
+var pyBFnDocs = []
+function js_pyfndoc(fn, doc) {
+    pyBFnDocObjs.push(fn)
+    pyBFnDocs.push(doc)
+    return fn
+}
+
+// A class's own __doc__, None included (a present slot, so a subclass does not
+// inherit its base's), kept out of the definition order C.__dict__ lists.
+// Go: js_pyclsdoc.
+function js_pyclsdoc(cls, doc) {
+    pyPutAttr(cls, "__doc__", doc)
+    return undefined
 }
 
 // ----- the BUILTIN render table ----------------------------------------------
@@ -9204,6 +9295,11 @@ function pyDMethodCall(target, name, args, kw) {
                 var md = pyDDescGet(m, icls, name)
                 return pyCall(md, pyBindCall(md, args, kw))
             }
+            // A descriptor instance (functools.lru_cache on a method, a class
+            // with __get__) is called through what __get__ answers, exactly as
+            // pyGetAttr reads it.
+            var mget = pyDescriptor(m, "__get__")
+            if (mget !== undefined) { return pyDCallPyValue(mget.apply(undefined, [m, target, icls]), args, kw) }
             // A builtin type's method reached by a subclass instance takes its
             // keywords straight to the builtin dispatcher.
             if (target["__val"] !== undefined && pyIsBDelMethod(m)) {

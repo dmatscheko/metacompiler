@@ -5804,6 +5804,174 @@ def s112():
           and random.getrandbits(0) == 0 and type(random).__name__ == "module" and random.randint.__name__ == "randint"
           and S112Random.__name__ == "Random")
 
+# ===== SECTION 113: one-shot sources in generators, user iterators, descriptor methods, docstrings =====
+# A generator stepping an iterator made OUTSIDE it pulls each value once, even
+# interleaved with the driver's own pulls and through a generator pipeline; a
+# user class with __next__ is an iterator to next(), and a for loop or a
+# `yield from` steps it one __next__ at a time, so an endless one stops at a
+# break; a descriptor instance on a class is called through its __get__; a def's
+# or a class's leading string is its __doc__ (cleaned as CPython 3.13+ does);
+# a lone surrogate reprs as an escape. Rows from CPython 3.14.
+from functools import lru_cache as s113_lru
+
+def s113_g(it):
+    for x in it:
+        yield x
+
+def s113_dbl(it):
+    for y in s113_g(it):
+        yield y * 2
+
+def s113_pairs(it):
+    for a in it:
+        yield (a, next(it, None))
+
+def s113_rest(it):
+    yield next(it)
+    yield list(it)
+
+class S113Count:
+    def __init__(self, k):
+        self.n = 0
+        self.k = k
+    def __iter__(self):
+        return self
+    def __next__(self):
+        self.n += 1
+        if self.n > self.k:
+            raise StopIteration
+        return self.n
+
+class S113Endless:
+    def __init__(self):
+        self.i = 0
+    def __iter__(self):
+        return self
+    def __next__(self):
+        self.i += 1
+        return self.i
+
+class S113Bag:
+    def __iter__(self):
+        return S113Count(2)
+
+class S113Bad:
+    def __iter__(self):
+        return [1]
+
+class S113Stop:
+    def __next__(self):
+        raise StopIteration("why")
+
+def s113_loop_bad():
+    for v in S113Bad():
+        pass
+
+def s113_yf(src):
+    yield from src
+    yield "end"
+
+class S113Desc:
+    def __init__(self, f):
+        self.f = f
+    def __get__(self, obj, typ=None):
+        if obj is None:
+            return self
+        def bound(*a):
+            return ("bound", self.f(obj, *a))
+        return bound
+
+class S113A:
+    def __init__(self, k):
+        self.k = k
+    @S113Desc
+    def m(self, x):
+        return self.k + x
+    @s113_lru(maxsize=None)
+    def sq(self, n):
+        return n * n + self.k
+
+def s113_doc():
+    # a comment comes first
+    """Doc line.
+
+    Indented line."""
+    return 1
+
+def s113_nodoc():
+    x = 1
+    "not a docstring"
+    return x
+
+def s113_inline(): "inline"; return 2
+
+class S113Base:
+    "Base doc"
+    def m(self):
+        "m doc"
+
+class S113Sub(S113Base):
+    def m(self):
+        pass
+
+class S113Shadow(S113Base):
+    m = None
+
+def s113():
+    src = iter(range(10))
+    gg = s113_g(src)
+    seq = [next(gg), next(src), next(gg), next(src), next(gg)]
+    check("it1", list(s113_g(iter([5, 6, 7, 8]))) == [5, 6, 7, 8]
+          and list(s113_dbl(iter([1, 2, 3]))) == [2, 4, 6] and seq == [0, 1, 2, 3, 4])
+    check("it2", list(s113_pairs(iter([1, 2, 3, 4, 5]))) == [(1, 2), (3, 4), (5, None)]
+          and list(s113_rest(iter("abc"))) == ["a", ["b", "c"]])
+    c = S113Count(4)
+    check("it3", list(s113_g(c)) == [1, 2, 3, 4] and c.n == 5)
+    c2 = S113Count(3)
+    first = [next(c2), next(c2)]
+    check("it4", first == [1, 2] and list(c2) == [3] and next(c2, "d") == "d" and iter(c2) is c2)
+    stop = []
+    try:
+        next(S113Stop())
+    except StopIteration as e:
+        stop.append(e.args)
+    check("it5", stop == [("why",)])
+    out = []
+    for v in S113Endless():
+        if v > 3:
+            break
+        out.append(v)
+    e = S113Endless()
+    pre = [next(e), next(e)]
+    for v in e:
+        out.append(v)
+        break
+    check("it6", out == [1, 2, 3, 3] and pre == [1, 2] and next(e) == 4)
+    nest = []
+    for a in S113Count(2):
+        for b in S113Bag():
+            nest.append(a * 10 + b)
+    check("it7", nest == [11, 12, 21, 22] and list(s113_yf(S113Count(2))) == [1, 2, "end"])
+    errs = []
+    for f in [lambda: [v for v in S113Bad()], s113_loop_bad, lambda: next(5)]:
+        try:
+            f()
+        except TypeError as te:
+            errs.append(str(te))
+    check("it8", errs == ["iter() returned non-iterator of type 'list'", "iter() returned non-iterator of type 'list'",
+                          "'int' object is not an iterator"])
+    a = S113A(10)
+    f = a.m
+    check("desc1", a.m(5) == ("bound", 15) and f(6) == ("bound", 16)
+          and a.sq(3) == 19 and a.sq(3) == 19 and S113A.sq(a, 5) == 35)
+    check("doc1", s113_doc.__doc__ == "Doc line.\n\nIndented line." and s113_nodoc.__doc__ is None
+          and s113_inline.__doc__ == "inline" and (lambda: 0).__doc__ is None)
+    check("doc2", S113Base.__doc__ == "Base doc" and S113Sub.__doc__ is None and S113Sub().__doc__ is None
+          and S113Base().m.__doc__ == "m doc" and S113Sub().m.__doc__ is None and S113Base.m.__doc__ == "m doc")
+    check("doc3", S113Shadow.m is None and S113Shadow().m is None)
+    check("sur1", repr(chr(0xd800)) == "'\\ud800'" and repr("a" + chr(0xdfff) + "b") == "'a\\udfffb'"
+          and len(chr(0xdc00)) == 1 and ord(chr(0xdbff)) == 0xdbff)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5914,5 +6082,6 @@ def main():
     s110() # SECTION-CALL 110
     s111() # SECTION-CALL 111
     s112() # SECTION-CALL 112
+    s113() # SECTION-CALL 113
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

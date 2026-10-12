@@ -50,6 +50,11 @@ Known deviations, all deliberate:
     state therefore lands more than once - a list a generator appends to before
     its first yield ends up [1, 1, 2] where CPython leaves [1, 2].
 
+    VALUES are not affected by that repetition where they come from a one-shot
+    source: a step of an iterator, a generator or a user __next__ object the
+    replay did not create is logged on the first run and answered from the log
+    by every replay (genPull), so a generator over iter(xs) yields every element.
+
     ORDER IS NOT AFFECTED: an interleaving probe that numbers every driver event
     and every generator event into one log gives, after collapsing repeats,
     CPython's sequence - for two generators driven alternately, for a generator
@@ -208,8 +213,9 @@ SmallStmt   = Import | FromImport | TypeAliasStmt | Return | Break | Continue | 
 // A suite is either an indented block - ':' NEWLINE INDENT statements DEDENT, every
 // further statement at the same level - or the ONE-LINE form, ':' followed by small
 // statements on the same line (def f(self): return 1, if c: t = 5).
-Suite       <~~ push(makeSeq(takeAll())) ~~>
-            = ":" ( NL Indent Statement { SameLevel Statement } Dedent | SmallLine ) ;
+Suite       <~~ push(pySuite(takeAll())) ~~>
+            = ":" ( NL Indent "" <~~ push(up.pos) ~~> Statement { SameLevel Statement } Dedent
+                  | "" <~~ push(up.pos) ~~> SmallLine ) ;
 
 // match SUBJECT: case PATTERN [if GUARD]: SUITE ... - the structural pattern match of
 // PEP 634. `match` and `case` are soft keywords, so a Match only commits once the
@@ -645,7 +651,7 @@ TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
 // An expression statement may be a bare TUPLE - `1, 2, 3` on a line of its own is legal
 // Python (and test_grammar checks exactly that), so this takes an expression LIST. Assign
 // is tried before it, so `a = 1` is unaffected.
-ExprSmall   <~~ push(exprToStmt(pop())) ~~>
+ExprSmall   <~~ push(pyExprStmt(pop(), up.start, up.pos)) ~~>
             = ExprList ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
@@ -949,7 +955,7 @@ StarItem    <~~ push({splat: pop()}) ~~>
 // `f` prefix is an f-string (its {expressions} are parsed); every other piece is a
 // constant whose PREFIX decides how it is decoded: `r` keeps the backslashes, `b`
 // makes it a bytes value (a list of byte numbers), `u` is accepted and ignored.
-StringLit   <~~ push(makeStrConcat(takeAll())) ~~>
+StringLit   <~~ push(pyNoteStr(makeStrConcat(takeAll()), up.start, up.pos)) ~~>
             = StrPiece { StrPiece } ;
 StrPiece    = FString | TextPiece ;
 TextPiece   <~~ push(makeStrPiece(up.in)) ~~>
@@ -2104,9 +2110,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyMkIter(name, arr) {
         var it = {__pyit: name, __a: arr, __i: 0}
         it.next = function() { return pyItStep(it) }
+        if (genRuns.length > 0) { genStamp(it) }
         return it
     }
+    // A step, or a drain, of a cursor an active replay did not create is a
+    // logged pull (genPull).
     function pyItStep(it) {
+        if (genRuns.length > 0) {
+            var gi = genExtRun(it)
+            if (gi >= 0) { return genPull(gi, function() { return pyItAdvance(it) }) }
+        }
+        return pyItAdvance(it)
+    }
+    function pyItAdvance(it) {
         if (it.__i >= it.__a.length) { return {value: undefined, done: true} }
         var v = it.__a[it.__i]
         it.__i = it.__i + 1
@@ -2118,6 +2134,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // What is LEFT of an iterator, which the read then EXHAUSTS - so next(it)
     // followed by list(it) does not repeat an element.
     function pyItRest(it) {
+        if (genRuns.length > 0) {
+            var gi = genExtRun(it)
+            if (gi >= 0) { return genPull(gi, function() { return pyItDrain(it) }).slice(0) }
+        }
+        return pyItDrain(it)
+    }
+    function pyItDrain(it) {
         var out = []
         for (var i = it.__i; i < it.__a.length; i++) { out.push(it.__a[i]) }
         it.__i = it.__a.length
@@ -2169,6 +2192,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyRaise(exc)
             }
             return s.value
+        }
+        // An instance whose class defines __next__ is an iterator: its
+        // StopIteration ends it, re-raised as it was unless there is a default.
+        if (pyUser(g) && clsFind(g.__class, "__next__") != null) {
+            var us = pyUserStep(g, clsFind(g.__class, "__next__"))
+            if (!us.done) { return us.value }
+            if (arguments.length > 1) { return d }
+            throw us.stop
         }
         pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(g).__name + "' object is not an iterator"]))
     }
@@ -4025,19 +4056,51 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // What an __iter__ answered, as a list: a builtin iterable, or an instance
     // whose __next__ is called until it raises StopIteration.
     function pyDrainIter(it) {
-        if (!pyUser(it)) { return iterToList(it) }
-        var nx = clsFind(it.__class, "__next__")
-        if (nx == null) { pyListErr("TypeError", "iter() returned non-iterator of type '" + it.__class.__name + "'") }
+        if (!pyUser(it)) { return iterToList(pyBuiltinIterator(it)) }
+        var nx = pyUserNextFn(it)
         var out = []
         while (true) {
-            var saved = scopes
-            try { out.push(nx(it)) }
-            catch (e) {
-                scopes = saved
-                if (e != null && e != undefined && e.__exc === true && pyUser(e.v)
-                    && clsIsSub(e.v.__class, hostGlobals["StopIteration"])) { return out }
-                throw e
-            }
+            var s = pyUserStep(it, nx)
+            if (s.done) { return out }
+            out.push(s.value)
+        }
+        return out
+    }
+    // The __next__ of what an __iter__ answered, or CPython's TypeError.
+    function pyUserNextFn(it) {
+        var nx = clsFind(it.__class, "__next__")
+        if (nx == null) { pyNonIterator(it) }
+        return nx
+    }
+    // A non-instance __iter__ result when it is an iterator (a generator or a
+    // cursor), and CPython's TypeError otherwise. Twin of pyBuiltinIterator in
+    // abnf/jsrtpysub.go and pyABuiltinIterator in lib/python-rt.metajs.
+    function pyBuiltinIterator(it) {
+        if (!isGen(it) && !isPyIt(it)) { pyNonIterator(it) }
+        return it
+    }
+    function pyNonIterator(it) {
+        pyListErr("TypeError", "iter() returned non-iterator of type '" + pyTypeOf(it).__name + "'")
+    }
+    // One step of a user iterator, in the {value, done} shape: done carries the
+    // StopIteration __next__ raised, which next() re-raises unchanged. Stepping
+    // one an active replay did not create is a logged pull (genPull).
+    function pyUserStep(it, nx) {
+        if (genRuns.length > 0) {
+            var gi = genExtRun(it)
+            if (gi >= 0) { return genPull(gi, function() { return pyUserAdvance(it, nx) }) }
+        }
+        return pyUserAdvance(it, nx)
+    }
+    function pyUserAdvance(it, nx) {
+        var saved = scopes
+        var out = anytype
+        try { out = {value: nx(it), done: false, stop: null} }
+        catch (e) {
+            scopes = saved
+            if (e != null && e != undefined && e.__exc === true && pyUser(e.v)
+                && clsIsSub(e.v.__class, hostGlobals["StopIteration"])) { return {value: undefined, done: true, stop: e} }
+            throw e
         }
         return out
     }
@@ -8877,6 +8940,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (allConst) {
             var lit = ""
             for (var k = 0; k < items.length; k++) { lit += items[k].str }
+            walkStrConst = true
+            walkStrText = lit
             return makeConst(lit)
         }
         return function() {
@@ -9360,6 +9425,60 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // :description header). genRuns is the stack of active replays, innermost last, so
     // a generator driven from inside another one still finds its own run.
     var genRuns = []
+    // THE PULL LOG. Re-running a body is only sound if every value it reads comes
+    // out the same, and a ONE-SHOT source does not: `for x in it` over an iterator
+    // made outside the generator would be pulled again by every replay, so the
+    // generator over iter([5,6,7,8]) would answer [5, 7]. So a pull on an iterator
+    // the replay did NOT create - a cursor, a generator or a user __next__ object
+    // born before the run began - is answered from the generator's log when a
+    // previous run already made it, and made live (and logged) otherwise.
+    //
+    // "Born before the run" is a serial: an iterator made while any replay is
+    // active is stamped (__genborn), each run records the serial it started at
+    // (floor), and anything with no stamp was made outside every run. The pull is
+    // logged by EVERY active run it is external to, because an inner generator
+    // the outer one created is re-created by the outer's replay and must find the
+    // same answers in the outer log.
+    var genSerial = 0
+    function genStamp(o) {
+        genSerial = genSerial + 1
+        o.__genborn = genSerial
+    }
+    // The outermost active run o is external to, or -1 when no run is.
+    function genExtRun(o) {
+        var born = 0
+        if (o.__genborn !== undefined) { born = o.__genborn }
+        for (var i = 0; i < genRuns.length; i++) {
+            if (born <= genRuns[i].floor) { return i }
+        }
+        return 0 - 1
+    }
+    // One logged pull for the runs from index i in: the log entry a run already
+    // holds at this position, else live() - its value or what it raised.
+    function genPull(i, live) {
+        var hit = anytype
+        hit = null
+        var j
+        for (j = i; j < genRuns.length; j++) {
+            if (hit == null && genRuns[j].lp < genRuns[j].log.length) { hit = genRuns[j].log[genRuns[j].lp] }
+        }
+        if (hit == null) {
+            var saved = scopes
+            try { hit = {raised: false, v: live()} }
+            catch (e) {
+                if (isGenSuspend(e)) { throw e }
+                scopes = saved
+                hit = {raised: true, v: e}
+            }
+        }
+        for (j = i; j < genRuns.length; j++) {
+            var rn = genRuns[j]
+            if (rn.lp == rn.log.length) { rn.log.push(hit) }
+            rn.lp = rn.lp + 1
+        }
+        if (hit.raised) { throw hit.v }
+        return hit.v
+    }
     // The walk-time marker: a `yield` anywhere in a def's body makes it a generator.
     var genFlags = []
     function genPush() { genFlags.push(false) }
@@ -9487,10 +9606,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function isThrowIn(s) { return s != undefined && s != null && s.__genThrowIn == true }
     // The delegate of a `yield from`, as something steppable. A generator and an
     // iterator object are their own - which is what keeps `yield from endless()`
-    // lazy - and everything else is materialized into a cursor, exactly as iter()
-    // does it.
+    // lazy - a user iterable's iterator is stepped one __next__ at a time
+    // ({__udeleg}), and everything else is materialized into a cursor, exactly as
+    // iter() does it.
     function pyDelegOf(v) {
         if (isGen(v) || isPyIt(v)) { return v }
+        if (pyUser(v) && clsFind(v.__class, "__iter__") != null) {
+            var it = anytype
+            it = clsFind(v.__class, "__iter__")(v)
+            if (!pyUser(it)) { return pyBuiltinIterator(it) }
+            return {__udeleg: it, nx: pyUserNextFn(it)}
+        }
         return pyMkIter(pyItKind(v), iterToList(v).slice(0))
     }
     // One step of a delegate, in the {done, value} shape. When it reports done the
@@ -9507,8 +9633,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The twin is js_pyyfsend, emitted by python-to-llvm-ir.abnf's makeYield at
         // the same point.
         if (sent !== undefined && sent !== null) {
-            pyRaise(pyMakeExc("AttributeError",
-                ["'" + d.__pyit + "' object has no attribute 'send'"]))
+            var dn = (d.__udeleg !== undefined) ? pyTypeOf(d.__udeleg).__name : d.__pyit
+            pyRaise(pyMakeExc("AttributeError", ["'" + dn + "' object has no attribute 'send'"]))
+        }
+        if (d.__udeleg !== undefined) {
+            var us = pyUserStep(d.__udeleg, d.nx)
+            return {done: us.done, value: us.value}
         }
         var s = pyItStep(d)
         return {done: s.done, value: s.value}
@@ -9583,16 +9713,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() { return doYield(isFrom, vt()) }
     }
     function newGenObject(bodyT, defScopes, plist, dflts, args, named) {
-        return {__gen: true, st: {sent: [], count: 0, done: false, ret: undefined},
-                body: bodyT, env: defScopes, plist: plist, dflts: dflts, args: args, named: named}
+        var g = {__gen: true, st: {sent: [], count: 0, done: false, ret: undefined, log: []},
+                 body: bodyT, env: defScopes, plist: plist, dflts: dflts, args: args, named: named}
+        if (genRuns.length > 0) { genStamp(g) }
+        return g
     }
     // One step. Returns {yielded, value}; when the body runs to completion the
     // generator is done and its return value is kept for the StopIteration.
+    // Stepping a generator an active replay did not create is a logged pull.
     function genStep(g, sendv) {
+        if (genRuns.length > 0) {
+            var gi = genExtRun(g)
+            if (gi >= 0) { return genPull(gi, function() { return genRun(g, sendv) }) }
+        }
+        return genRun(g, sendv)
+    }
+    function genRun(g, sendv) {
         var st = g.st
         if (st.done) { return {yielded: false, value: st.ret} }
         st.sent.push(sendv)
-        var run = {target: st.count, k: 0, sent: st.sent}
+        var run = {target: st.count, k: 0, sent: st.sent, log: st.log, lp: 0, floor: genSerial}
         genRuns.push(run)
         var saved = scopes
         var out = anytype
@@ -10419,8 +10559,31 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bodyT = items[2]
         var elseT = (items.length > 3 && items[3] != undefined && items[3].loopelse != undefined) ? items[3].loopelse : null
         return function() {
-            var src = listT()
+            var src = anytype
+            src = listT()
             var broke = false
+            // A user iterable is iterated through what its __iter__ answers, and a
+            // user ITERATOR is stepped one __next__ per iteration, so an endless
+            // one ends at a `break` as it does in CPython.
+            if (pyUser(src) && clsFind(src.__class, "__iter__") != null) {
+                src = clsFind(src.__class, "__iter__")(src)
+                if (!pyUser(src)) { pyBuiltinIterator(src) }
+                else {
+                    var unx = pyUserNextFn(src)
+                    while (true) {
+                        var ur = pyUserStep(src, unx)
+                        if (ur.done) { break }
+                        writeTarget(tgt, ur.value)
+                        var ru = bodyT()
+                        if (ru != undefined) {
+                            if (ru === BRK) { broke = true; break }
+                            if (ru !== CONT) return ru
+                        }
+                    }
+                    if (!broke && elseT != null) { return elseT() }
+                    return undefined
+                }
+            }
             // LAZY ITERATION over a generator. iterToList DRAINS, which never ends
             // for `for x in endless(): ... break`, so a generator is STEPPED, one
             // value per iteration; everything else is normalized by iterToList.
@@ -10958,6 +11121,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var baseArgs = null
         var modName = pyCurMod
         var bodyT = items[items.length - 1]
+        var doc = walkSuiteDoc
         for (var i = 1; i < items.length - 1; i++) {
             if (items[i] != undefined && items[i] != null && items[i].bases != undefined) { baseArgs = items[i].bases }
         }
@@ -10977,6 +11141,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             bodyT()
             scopes.pop()
             var cls = {__isclass: true, __name: name, __bases: bases, __module__: modName, __qual: qual}
+            // __doc__ is the class's OWN, None without a docstring - it is not
+            // inherited.
+            cls.__doc__ = doc == null ? undefined : doc
             clsSetMRO(cls, bases)
             // The __class__ cell, exactly as CPython builds one: the class body's
             // namespace is what every method in it closes over (makeDef captures
@@ -11040,6 +11207,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return made
         }
         var obj = {__class: cls}
+        if (genRuns.length > 0) { genStamp(obj) }
         // A subclass of a builtin type: str/int/float build their value from the
         // arguments (their __new__), list/dict start empty and are filled by
         // __init__ (list.__init__ unless the subclass overrides it).
@@ -11342,27 +11510,30 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     }
                     return pyBMTab[bmj + 3]
                 }
+                // A user method's __doc__ is its function's.
+                if (name == "__doc__" && pyBMTab[bmj + 3] !== null) { return pyattr(pyBMTab[bmj + 3], name) }
             }
         }
         // The BUILTIN table is asked first, exactly as prender
         // asks it, so len.__name__ is 'len' rather than the '<lambda>' fnName
         // answers for a function no `def` ever named. The two tables are keyed
         // by identity, so a user `def len(...)` still answers its own name.
-        // NOT ANSWERED, on purpose: __doc__ and a function's __module__ stay
-        // unanswered (an AttributeError, like any other absent attribute).
-        // __doc__ needs a def's leading string statement recorded in three
-        // engines AND CPython's own text for every builtin, which this project
-        // will never carry; a function's __module__ needs the defining module
-        // recorded at every def site.
-        // A function's own attributes come first, so an assigned __name__ or
-        // __qualname__ is the one read back. A user function's __qualname__ is
-        // otherwise the one its def or lambda recorded; a builtin's rides with
-        // __name__.
+        // NOT ANSWERED, on purpose: a builtin's __doc__ and a function's
+        // __module__ stay unanswered (an AttributeError, like any other absent
+        // attribute). A builtin's needs CPython's own text for every builtin,
+        // which this project will never carry; a function's __module__ needs the
+        // defining module recorded at every def site.
+        // A function's own attributes come first, so an assigned __name__,
+        // __qualname__ or __doc__ is the one read back. A user function's
+        // __qualname__ is otherwise the one its def or lambda recorded; a
+        // builtin's rides with __name__. A user function's __doc__ is its def's
+        // docstring, else None.
         if (typeof o == "function") {
             var fa = pyFnAttrs(pyFnOwner(o), false)
             var fi = fa == null ? -1 : dictFind(fa, name)
             if (fi >= 0) { return fa.vals[fi] }
             if (name == "__dict__" && pyTypeOf(o).__name == "function") { return pyFnAttrs(o, true) }
+            if (name == "__doc__" && pyTypeOf(o).__name == "function") { return fnDoc(o) }
         }
         if (typeof o == "function" && (name == "__name__" || name == "__qualname__")) {
             var bfnm = bfnName(o)
@@ -11635,6 +11806,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyListErr("TypeError", "object.__new__(" + cls.__name + ") is not safe, use " + sb.__name + ".__new__()")
         }
         var obj = {__class: cls}
+        if (genRuns.length > 0) { genStamp(obj) }
         if (clsIsSub(cls, hostGlobals["BaseException"])) {
             var rest = []
             for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
@@ -11865,8 +12037,81 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Function objects have no expando slot under the frozen engine, so a def records
     // its name in a side table keyed by an identity scan of the known functions.
-    var fnNames = {fns: [], names: [], quals: []}
-    function fnNameSet(f, n, q) { fnNames.fns.push(f); fnNames.names.push(n); fnNames.quals.push(q) }
+    var fnNames = {fns: [], names: [], quals: [], docs: []}
+    function fnNameSet(f, n, q, d) { fnNames.fns.push(f); fnNames.names.push(n); fnNames.quals.push(q); fnNames.docs.push(d) }
+    // A user function's __doc__: the docstring its def recorded, else None.
+    function fnDoc(f) {
+        for (var i = fnNames.fns.length - 1; i >= 0; i--) {
+            if (fnNames.fns[i] === f) { return fnNames.docs[i] == null ? undefined : fnNames.docs[i] }
+        }
+        return undefined
+    }
+    // ----- Docstrings, recognized at WALK time -----
+    // A def's or a class's __doc__ is its body's FIRST statement when that is a
+    // string literal and nothing else. A thunk loses its identity crossing the tag
+    // stack under goja, so the three tags involved match by SOURCE POSITION:
+    // StringLit notes the span of a constant string, ExprSmall notes the start of
+    // a statement spanning exactly that string, and Suite, handed the start of its
+    // first statement, looks it up. A def's or a class's body is the last Suite
+    // walked before its own tag runs, so makeDef / makeClass read walkSuiteDoc.
+    // Twin of the same helpers in python-to-llvm-ir.abnf.
+    var walkStrConst = false
+    var walkStrText = ""
+    var walkStrFrom = 0 - 1
+    var walkStrTo = 0 - 1
+    var walkDocs = {}
+    var walkSuiteDoc = anytype
+    walkSuiteDoc = null
+    function pyNoteStr(t, from, to) {
+        walkStrFrom = walkStrConst ? from : 0 - 1
+        walkStrTo = to
+        walkStrConst = false
+        return t
+    }
+    function pyExprStmt(e, from, to) {
+        if (from == walkStrFrom && to == walkStrTo) { walkDocs["$" + from] = pyCleanDoc(walkStrText) }
+        return exprToStmt(e)
+    }
+    // CPython (3.13 on) cleans a docstring at compile time: tabs expanded, the
+    // first line's leading spaces dropped, and the smallest indentation of the
+    // later non-blank lines removed from each of them (_PyCompile_CleanDoc).
+    function pyCleanDoc(s) {
+        var t = ""
+        var col = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "\t") {
+                var n = 8 - col % 8
+                for (var k = 0; k < n; k++) { t += " " }
+                col = col + n
+            } else {
+                t += ch
+                col = (ch == "\n" || ch == "\r") ? 0 : col + 1
+            }
+        }
+        var lines = t.split("\n")
+        var margin = 0 - 1
+        var j
+        for (j = 1; j < lines.length; j++) {
+            var sp = 0
+            while (sp < lines[j].length && lines[j].charAt(sp) == " ") { sp++ }
+            if (sp < lines[j].length && (margin < 0 || sp < margin)) { margin = sp }
+        }
+        var fs = 0
+        while (fs < lines[0].length && lines[0].charAt(fs) == " ") { fs++ }
+        var out = lines[0].substring(fs)
+        for (j = 1; j < lines.length; j++) {
+            var cut = 0
+            while (cut < margin && cut < lines[j].length && lines[j].charAt(cut) == " ") { cut++ }
+            out += "\n" + lines[j].substring(cut)
+        }
+        return out
+    }
+    function pySuite(items) {
+        var d = walkDocs["$" + items[0]]
+        walkSuiteDoc = (d === undefined) ? null : d
+        return makeSeq(items.slice(1))
+    }
     function fnName(f) {
         for (var i = fnNames.fns.length - 1; i >= 0; i--) { if (fnNames.fns[i] === f) { return fnNames.names[i] } }
         return "<lambda>"
@@ -12360,6 +12605,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         plist.locals = sbPop()
         plist.qual = sbQual
         sbName(name)
+        var doc = walkSuiteDoc
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
@@ -12382,7 +12628,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 try { r = bodyT() } finally { scopes = saved }
                 return (r != undefined && r.isRet) ? r.v : undefined
             }
-            fnNameSet(fn, name, plist.qual)
+            fnNameSet(fn, name, plist.qual, doc)
             pySet(name, fn)
         }
     }
@@ -12439,7 +12685,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             // Only a NESTED lambda's qualname ('f.<locals>.<lambda>') differs
             // from what fnName and fnQual answer for an unrecorded function.
-            if (plist.qual != "<lambda>") { fnNameSet(lf, "<lambda>", plist.qual) }
+            if (plist.qual != "<lambda>") { fnNameSet(lf, "<lambda>", plist.qual, null) }
             return lf
         }
     }

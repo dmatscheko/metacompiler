@@ -566,6 +566,8 @@ type jsrt struct {
 	// for every grammar that never compiles Python.
 	pyTypes     map[string]*jsObject
 	pyFuncNames map[interface{}]string
+	// pyFuncDocs is the docstring of each def that has one (js_pyfndoc).
+	pyFuncDocs map[interface{}]string
 	// pyFuncAttrTab holds a user function's own attributes (f.k = 4) as the
 	// Python dict f.__dict__ answers, keyed by the closure value.
 	pyFuncAttrTab map[interface{}]*jsObject
@@ -3663,7 +3665,14 @@ func pyStrRepr(s string) string {
 		quote = "\""
 	}
 	out := quote
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		// A lone surrogate is held as its WTF-8 bytes (strFromUnits), which a
+		// range over the string would read as U+FFFD.
+		r, n := wtf8Surrogate(s[i:]), 3
+		if r == 0 {
+			r, n = utf8.DecodeRuneInString(s[i:])
+		}
+		i += n
 		switch {
 		case string(r) == quote || r == '\\':
 			out += "\\" + string(r)
@@ -16725,6 +16734,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.pyFuncNames[u(a[0])] = rt.toString(u(a[1]))
 			return a[0]
 		},
+		// Remember a def's docstring, which f.__doc__ answers. Twin of
+		// js_pyfndoc in languages/lib/python-rt.metajs.
+		"js_pyfndoc": func(a []uint64) uint64 { // (closure, docstring) -> closure
+			if rt.pyFuncDocs == nil {
+				rt.pyFuncDocs = map[interface{}]string{}
+			}
+			rt.pyFuncDocs[u(a[0])] = rt.toString(u(a[1]))
+			return a[0]
+		},
+		// A class's own __doc__, None included (a present slot, so a subclass
+		// does not inherit its base's), kept out of the definition order
+		// C.__dict__ lists. Twin of js_pyclsdoc in languages/lib/python-rt.metajs.
+		"js_pyclsdoc": func(a []uint64) uint64 { // (class, docstring or None)
+			if o, ok := u(a[0]).(*jsObject); ok {
+				o.set("__doc__", u(a[1]))
+			}
+			return jsHUndefined
+		},
 		// Unary - / ~ / + with the __neg__ / __invert__ / __pos__ fallback, and
 		// CPython's TypeError for an operand the operator does not serve.
 		"js_pyunary": func(a []uint64) uint64 { // (operator, value)
@@ -17083,6 +17110,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if n < 0 || n > 1114111 {
 				panic(&jsThrown{value: rt.pyExcInstance("ValueError", "chr() arg not in range(0x110000)")})
 			}
+			// A surrogate code point is a lone UTF-16 unit, held as WTF-8
+			// (strFromUnits); string(rune) would make it U+FFFD.
+			if isSurrogate(rune(n)) {
+				return rt.wrapStr(strFromUnits([]uint16{uint16(n)}))
+			}
 			return rt.wrapStr(string(rune(int64(n))))
 		},
 		// ---- More python builtins. ----
@@ -17178,6 +17210,19 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return rt.pyStopIter(args, jsUndef)
 				}
 				return w(st.props["value"])
+			}
+			// An instance whose class defines __next__ is an iterator: its
+			// StopIteration ends it, re-raised as it was unless there is a default.
+			if _, cls, ok := pyInstance(it); ok {
+				if nx, found := pyLookup(cls, "__next__"); found && isCallable(nx) {
+					if len(args) < 2 {
+						return w(rt.call(nx, jsUndef, []interface{}{it}))
+					}
+					if v, stop := rt.pyNextOrStop(nx, it); !stop {
+						return w(v)
+					}
+					return w(args[1])
+				}
 			}
 			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 				"'"+pyTypeName(rt, it)+"' object is not an iterator")})
@@ -20231,16 +20276,21 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 					"'builtin_function_or_method' object has no attribute '__func__'")})
 			}
 			return bi.fn
+		case "__doc__":
+			// A user method's __doc__ is its function's.
+			if bi.fn != nil {
+				return rt.pyGetAttr(bi.fn, name)
+			}
 		}
 	}
-	// DECLINED, and it is worth saying where: __doc__ and a function's
-	// __module__ stay unanswered (an AttributeError, like any other absent
-	// attribute). __doc__ needs a def's leading string statement recorded in
-	// three engines AND CPython's own text for every builtin, which this project
-	// will never carry; a function's __module__ needs the defining module
-	// recorded at every def site.
+	// DECLINED, and it is worth saying where: a builtin's __doc__ and a
+	// function's __module__ stay unanswered (an AttributeError, like any other
+	// absent attribute). A builtin's needs CPython's own text for every builtin,
+	// which this project will never carry; a function's __module__ needs the
+	// defining module recorded at every def site.
 	// A function's own attributes, and the dict holding them: first, so an
-	// assigned __name__ or __qualname__ is the one read back.
+	// assigned __name__, __qualname__ or __doc__ is the one read back. A user
+	// function's __doc__ is otherwise its def's docstring, else None.
 	if isCallable(obj) {
 		if d, i := rt.pyFuncAttrIdx(obj, name); i >= 0 {
 			_, vals, _ := dictParts(d)
@@ -20248,6 +20298,12 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		}
 		if name == "__dict__" && pyTypeName(rt, obj) == "function" {
 			return rt.pyFuncAttrs(obj, true)
+		}
+		if name == "__doc__" && pyTypeName(rt, obj) == "function" {
+			if d, ok := rt.pyFuncDocs[obj]; ok {
+				return d
+			}
+			return jsUndef
 		}
 	}
 	// A user function's __qualname__ is its signature's; a builtin's rides with
@@ -20944,6 +21000,12 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			if pyDescKind(m) != "" {
 				d := rt.pyDescGet(m, cls, name)
 				return rt.call(d, jsUndef, rt.pyBindCall(d, args, kw))
+			}
+			// A descriptor instance (functools.lru_cache on a method, a class
+			// with __get__) is called through what __get__ answers, exactly as
+			// pyGetAttrRaw reads it. Twin of the same arm in lib/python-rt.metajs.
+			if get, isDesc := pyIsDescriptor(m, "__get__"); isDesc {
+				return rt.callPyValue(rt.call(get, jsUndef, []interface{}{m, target, cls}), args, kw)
 			}
 			// A builtin type's method reached by a subclass instance takes its
 			// keywords straight to the builtin dispatcher.
@@ -21924,6 +21986,27 @@ func init() {
 					"'"+pyTypeName(rt, v)+"' object is not iterable")})
 			}
 			return m["js_pyiter"](a)
+		}
+		// js_pyforsrc is what a compiled for loop runs over: a generator or a
+		// cursor, stepped; a user iterable's iterator, stepped (pyUserStepper);
+		// anything else materialized by js_pyiterof. js_pyyfsrc is the same for a
+		// `yield from`, whose delegate is always stepped: iter(), with a user
+		// iterator wrapped. Twins of the same names in lib/python-rt.metajs.
+		m["js_pyforsrc"] = func(a []uint64) uint64 {
+			v := rt.unwrap(a[0])
+			if _, ok := v.(*jsGenerator); ok || pyIterName(rt, v) != "" {
+				return a[0]
+			}
+			if it, ok := rt.pyUserIter(v); ok {
+				return rt.wrap(rt.pyUserStepper(it))
+			}
+			return m["js_pyiterof"](a)
+		}
+		m["js_pyyfsrc"] = func(a []uint64) uint64 {
+			if it, ok := rt.pyUserIter(rt.unwrap(a[0])); ok {
+				return rt.wrap(rt.pyUserStepper(it))
+			}
+			return m["js_pyiterfn"](a)
 		}
 		m["js_pyunpack"] = func(a []uint64) uint64 { // (value, target count, has a *rest)
 			v := rt.unwrap(a[0])
