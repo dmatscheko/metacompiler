@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-457** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-462** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,15 +63,10 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-455 python: interpreter generators replay one-shot iterators (silent wrong answer); user iterators; descriptor method calls · P1 · PY · IN PROGRESS (PY worker, round 24) [V]
-python3 3.14: (a) interpreter only: `def g(it): for x in it: yield x` over `iter([5,6,7,8])` gives [5, 7] (CPython and
-both compiled halves [5, 6, 7, 8]) — the replay model re-pulls a one-shot input. Silent wrong answer; fix the
-interpreter's generator model (or snapshot consumed items) rather than document it. (b) `next(obj)` on a user class with
-`__next__` raises "'X' object is not an iterator" in all engines; a for-loop over a user `__iter__` reads eagerly, so an
-endless user iterator hangs. (c) compiled halves: `obj.m(x)` where m is a descriptor instance (e.g. @lru_cache on a
-method) skips `__get__` ("missing 1 required positional argument"). (d) Go twin: `repr(chr(0xd800))` prints the
-replacement char (CPython/interp/native `'\ud800'`). (e) `f.__doc__` AttributeError. Not done from T-449 and left open
-here as P3: `time` (needs a host clock in runtime.c), re flags as RegexFlag (needs an int subclass), typing/abc contents.
+### T-458 python: repr escapes for unassigned code points · P3 · PY · OPEN [V]
+`repr(chr(0xd7ff))` prints the character; CPython escapes it (`'\ud7ff'`) — pyReprEsc treats only surrogates/controls
+as non-printable, not unassigned code points (needs the Unicode "printable" table, Cn/Co/Cs/Zl/Zp/Zs≠space/Cc/Cf).
+Known model limit (not a ticket): a surrogate pair is one code point of length 1 (UTF-16 strings).
 
 ---
 
@@ -81,18 +76,22 @@ here as P3: `time` (needs a host clock in runtime.c), re flags as RegexFlag (nee
 
 # JS — JavaScript and TypeScript
 
+### T-459 js: interpreter generators may replay one-shot iterators · P1 · JS · IN PROGRESS (JS worker, round 9) [U]
+The JS interpreter's generators use the same replay model the Python interpreter had (fixed there in T-455 with a
+per-generator pull log): a generator iterating an iterator passed in from outside likely re-pulls it on each replay,
+skipping elements (python showed [5, 7] for [5,6,7,8]). Probe against node first: `function* g(it){ for (const x of it)
+yield x }` over `[5,6,7,8][Symbol.iterator]()`, interleaved next() on generator and source.
+
 ---
 
 # JV — Java
 
-### T-456 java: instanceof on boxed primitives; wrapper members; array clone(); streams · P1 · JV · IN PROGRESS (JV worker, round 15) [V]
-javac/java 24: (a) instanceof on boxes is wrong and diverges between halves: probe `{3,"b",2.5,'c',7L,true,1.5f,(short)2,
-(byte)1}` classified N/S/D/C/L/B/F/N/N gives java `NSDCLBFNN`, interp `DS???B???`, llvm.Run/native `DS?C?B???`
-(`Object o = 3; o instanceof Double` is true) — shared rtIsType / isTypeName. Silent wrong answer + half divergence.
-(b) `Number.doubleValue()/longValue()` on an Object, `Character.compare`/`Boolean.compare`, `Character.valueOf`,
-`Boolean.TRUE` missing. (c) array `clone()` unsupported (JLS 10.7). (d) java.util.stream: Arrays.stream, IntStream
-(range, sum, map, filter, boxed), Stream (of, map, filter, collect, forEach, reduce, sorted, count), Collectors (toList,
-joining, groupingBy, counting), OptionalInt — may be PARTIAL. Declined: ArrayStoreException (no element types).
+### T-460 java: static self-typed field init (compiled); unbound method refs on built-ins; array clone type; Short/Byte compare · P2 · JV · IN PROGRESS (JV worker, round 16) [V]
+javac/java 24: (a) compiled only: `final class Opt { static final Opt EMPTY = new Opt(7); }` fails "call of a non function
+value: undefined" (interp/java print 7). (b) `String::length` (e.g. `groupingBy(String::length)`) fails in all engines;
+static refs like `Integer::sum` work. (c) `String[] s = {"x", null}; Object[] c = s.clone(); c.getClass().getSimpleName()`
+gives `Object[]` (java `String[]`). (d) unprobed: `Short.compare`/`Byte.compare` return the sign in Go twin/layer 2
+(java x - y); the interpreter lacks them. Also missing: DoubleStream/LongStream, HashSet/toSet, Comparator.naturalOrder.
 
 ---
 
@@ -126,12 +125,12 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-454 php: method visibility; typed-property coercion/TypeError; typed statics; per-class private slots · P2 · PHP · IN PROGRESS (PHP worker, round 30) [V]
-php-src / corpus, both engines: (a) method visibility is not enforced (instance, static, callables, first-class
-callables, __call fallback): bug76869, access_modifiers_008, first_class_callable_errors. Keep public dispatch free of
-new calls. (b) typed-property writes do no coercion/TypeError (typed_properties_093/096, failed_assign_is_not_init).
-(c) typed static properties do not start uninitialised (typed_properties_069). (d) one slot per property name: writing
-an inherited private from outside overwrites the parent's slot; PHP creates a separate dynamic property.
+### T-457 php: static call of a non-static method; first-class callable creation (compiled); is_callable · P2 · PHP · IN PROGRESS (PHP worker, round 31) [V]
+Spec / corpus: (a) calling a non-static method statically from outside raises nothing in both engines (PHP: Error
+"Non-static method C::m() cannot be called statically"; first_class_callable_errors). (b) compiled only:
+`(new stdClass)->doesNotExist(...)` / `[$o,'nope'](...)` do not raise at creation ("Call to undefined method
+stdClass::doesNotExist()"); the interpreter does — keep public first-class callables free of new calls. (c) `is_callable()`
+missing in both engines. Not modelled (note only): deprecation output, typed-reference type sources.
 
 ---
 
@@ -149,11 +148,11 @@ an inherited private from outside overwrites the parent's slot; PHP creates a se
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-451 core: layer-2 per-call / per-statement cost dominates native time · P2 · CORE · IN PROGRESS (CORE worker, round 22) [V]
-Measured by the CORE r21 worker: native java `t += k` in a loop ~165K instructions per iteration, `a[j] = j + k` ~170K;
-~540 small allocations per iteration (layer-2 scopes, argument arrays, boxed numbers). Profile one hot statement end to
-end (emitted IR -> layer-2 calls -> floor) and cut the biggest per-call costs (scope allocation per call, argument
-arrays, number boxing) without changing output. Measure every bench row.
+### T-461 core: compiled MetaJS array callbacks diverge from the interpreter · P2 · CORE · IN PROGRESS (CORE worker, round 23) [V]
+`var fs=[]; for (...) fs.push(function(){...}); fs.map(function(h){ return h(); })` works in the MetaJS interpreter but
+the compiled halves (llvm.Run and native) fail "call of a non function value: undefined" (same on main before T-451).
+Find which Array method / callback form the compiled MetaJS runtime lacks and close the gap (or make the interpreter
+reject it too, per the MetaJS dialect spec).
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -502,6 +501,10 @@ T-452 java: System.arraycopy in all engines; ArrayList shifts/grows/copies with 
 T-450 php: property visibility (instance + static, magic fallback), uninitialised typed properties, per-object magic recursion guards, by-reference ??= targets, property_exists, ?? with BP_VAR_IS magic — DONE d835b006
 T-449 python: json/itertools/functools/string/os.path/random (MT19937) written in Python, star imports, runtime modules unbound until imported, module-function keywords; time/RegexFlag/typing contents moved to T-455 — PARTIAL 558e0c91
 T-453 java: java.util.Arrays (no stream), wrapper compareTo, fail-fast ArrayList iterators (modCount), typed enhanced-for variables, fmt1-3 correct under en_US (oracle command in the header); ArrayStoreException DECLINED (no element types) — DONE 3b814d6d
+T-451 core: MetaJS compiler SSA locals, cached global reads (js_scope_cget), js_call0..3 without argument arrays, guarded direct calls, host_call switch; layer-2 bench rows -55..-80% (java 5.98G -> 1.35G); baseline re-recorded — DONE edd1755f
+T-454 php: method visibility (all call forms, callbacks, ctor, traits), typed-property coercion/TypeError incl. strict_types, typed statics uninitialised, per-class private slots — DONE b0aab707
+T-455 python: replayed generators log one-shot pulls, user __next__/__iter__ laziness (next(), for, yield from), descriptor method calls (compiled), surrogate repr (Go twin), __doc__ — DONE 2785aca2
+T-456 java: instanceof on boxes (java-specific test), wrapper members, array clone, java.util.stream (Stream/IntStream/Collectors/Optional), HashMap in java's order, qualified type names — DONE c6905a87
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
