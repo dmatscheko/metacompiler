@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-541** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-556** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,6 +63,102 @@ its report; anything structural there is a CORE ticket.
 ---
 
 # PY — Python
+
+### T-541 python: float `//`, `%`, `divmod` use the naive formula instead of CPython's float_divmod · P1 · PY · OPEN [V]
+xs=[1.0,3.0,9007199254740992,3.0,-0.0], ys=[0.1,0.1,-1.5,-1.5,1.5]: `1.0 // 0.1` → all legs 10.0 (python 9.0, so `q*b + r != a`);
+`3.0 // 0.1` → 30.0 (29.0); `9007199254740992 // -1.5` → -6004799503160661.0 (-6004799503160662.0); a zero remainder keeps the
+dividend's sign: `3.0 % -1.5` → 0.0 (python -0.0), `-0.0 % 1.5` → -0.0 (0.0). Port float_divmod (fmod, sign fix-up, floor,
+copysign) to every site: python-interpreter.abnf fdiv/fmod (~6787), lib/python-rt.metajs `pyAFloorMod` (~3542) and the `//`
+site, abnf/jsrt.go `pyFloorMod` and `js_pydivmod`.
+
+### T-542 python compiler: `divmod()` with a big-int operand returns (NaN, NaN) · P1 · PY · OPEN [V]
+`divmod(2**53+1, 3)` → run/native `(NaN, NaN)`, interp and python `(3002399751580331, 0)`; also `divmod(10**20, 3)`,
+`divmod(7, 2**61)` (python `(0, 7)`), `divmod(7.5, 10**20+1)` → `(nan, nan)` (python `(0.0, 7.5)`). `//` and `%` on the same
+operands are right. `js_pydivmod` (python-rt.metajs ~6213, jsrt.go ~17343) goes through `pyNum`/`rt.toNumber` instead of
+the int-op path.
+
+### T-543 python: three-argument `pow()` is wrong in all three engines, each differently · P1 · PY · OPEN [V]
+| call | interp = native | llvm.Run | python |
+|---|---|---|---|
+| `pow(2,-1,7)` | 1 | 4 | 4 |
+| `pow(3,-2,13)` | 1 | 3 | 3 |
+| `pow(2,-1,-7)` | 1 | 4 | -3 |
+| `pow(2,3,0)` | ZeroDivisionError | 8 | ValueError "pow() 3rd argument cannot be 0" |
+| `pow(2,-1,8)` | 1 | Go nil-pointer panic, exit 1 | ValueError "base is not invertible for the given modulus" |
+| `pow(5,0,1)` | 1 | 0 (finder) | 0 |
+
+Layer 2 `js_pypow` (python-rt.metajs ~6270) and the interpreter skip the loop for e ≤ 0 and return an unreduced 1; the twin's
+`big.Int.Exp` returns nil without an inverse, answers in [0,|m|) ignoring the modulus sign, and treats m = 0 as plain pow.
+
+### T-544 python: `abs`/`round`/`float`/`int` of a non-number answer garbage instead of TypeError · P1 · PY · OPEN [V]
+`abs("s")` → interp `'s'`, compiled `NaN` (python TypeError "bad operand type for abs(): 'str'"); `round("s")` → ValueError
+(python TypeError "type str doesn't define __round__ method"); finder: `abs([1])` → `[1]` / NaN, `float(None)` →
+`[object Object]` / nan, `float([1])` → 1.0 / nan, `float({})` → `-inf` / nan, `int([1])` → 1 / NaN, `int({})` → NaN, `round(None)`
+→ ValueError / 0, `round(1j)` → ValueError / NaN. JavaScript ToNumber leaks; `float("s")`/`int("s")` are right. Every site:
+interpreter builtins, python-rt.metajs, the twin.
+
+### T-545 python: repr of a self-containing list or dict never finishes · P1 · PY · OPEN [V]
+`a=[1,2]; a.append(a); print(a)` → interp hangs (killed), llvm.Run Go "goroutine stack exceeds 1000000000-byte limit"
+exit 2, native SIGSEGV exit 139; python `[1, 2, [...]]` (dict: `{'k': 1, 'self': {...}}`). No recursion guard in prepr,
+layer-2 repr or the twin; CPython's Py_ReprEnter set is the model.
+
+### T-546 python: a generator that re-enters itself never finishes · P1 · PY · OPEN [V]
+A generator body doing `yield next(me)` → interp hangs, llvm.Run "fatal error: all goroutines are asleep - deadlock!" in
+`jsGenerator.step` exit 2, native SIGSEGV; python `ValueError: generator already executing`. Files: abnf/jsrt.go jsGenerator,
+the floor's coroutine switch, the interpreter's generator — each needs a running flag.
+
+### T-547 python interp: slice-assigning a list into itself · P1 · PY · OPEN [V]
+`z=[1,2,3,4]; z[::-1]=z` → interp `[1, 2, 2, 1]`, others `[4, 3, 2, 1]`; `y=[1,2,3]; y[1:1]=y` → interp hangs, others
+`[1, 1, 2, 3, 2, 3]`. `iterToList(v)` returns the target itself, which grows while it is copied (python-interpreter.abnf
+~10150): copy first.
+
+### T-548 python: slice ValueErrors are uncatchable · P1 · PY · OPEN [V]
+`try: x[::z[0]]` (z[0] = 0) / `x[::2] = []` `except ValueError` → interp `python interpreter error: ValueError: slice step cannot
+be zero` exit 1, run/native `js runtime error: slice step cannot be zero` exit 1, no output; python `caught slice step cannot be
+zero`, `caught attempt to assign sequence of size 0 to extended slice of size 2`, `end`. Sites raise with `fail()` instead of a
+Python exception: python-interpreter.abnf ~9965 and ~10161, python-rt.metajs ~3051 and ~7851, abnf/jsrt.go ~16160 and
+~18825.
+
+### T-549 python: mutation during iteration is never detected (dict, set, `sort(key=)`) · P1 · PY · OPEN [V]
+Adding keys in `for k in d` → all legs `{1: 1, 2: 2, 11: 0, 12: 0}` (python `RuntimeError: dictionary changed size during
+iteration`); `s.add` in `for k in s` (`Set changed size during iteration`); `del d2[k]` in `for k in d2`; likewise `.items()`,
+`.values()` and pop-then-add ("dictionary keys changed during iteration"). A `sort(key=)` whose key appends to the list →
+interp and native hang (killed), llvm.Run `[1, 2, 3]`, python `ValueError: list modified during sort`.
+
+### T-550 python: generator expressions are eager lists; `zip(it, it)` over one iterator yields nothing · P1 · PY · OPEN [V]
+`g=(x*10 for x in src); print(sum(g), sum(g))` → all legs `60 60` (python `60 0`); `next((x for x in src))` → `'list' object is
+not an iterator` (python 1). `GenExpParen`/`GenExpArg` call `makeListComp` (python-interpreter.abnf ~804-809, mirrored in the
+compiler), so a genexp is never lazy (side effects run early, an infinite source never finishes) — a value-model change.
+`it=iter([1,2,3,4]); list(zip(it,it)), list(it)` → interp and native `[] []`, llvm.Run `[] [1, 2, 3, 4]`, python
+`[(1, 2), (3, 4)] []`; next/list/for/enumerate/map/filter/reversed over the same iterator are right.
+
+### T-551 python: `zip(..., strict=)` — compiled treats the keyword as an argument, the interpreter ignores it · P1 · PY · OPEN [V]
+`zip([1,2], [3,4,5], strict=X)`: run/native `[(1, 3, 'strict')]` for both values; interp `[(1, 3), (2, 4)]` for both; python
+`[(1, 3), (2, 4)]` and, for True, `ValueError: zip() argument 2 is longer than argument 1`.
+
+### T-552 python interp: unpacking in a comprehension target does not check the count · P1 · PY · OPEN [V]
+`[a for a, b in [(1,2,3)]]` → interp `[1]`; `{a: b for a, b in [(1,)]}` → `{1: None}`; run, native and python raise
+"too many values to unpack (expected 2, got 3)" / "not enough values to unpack (expected 2, got 1)". A plain `for a, b` is right.
+
+### T-553 python: an int can carry negative zero · P2 · PY · OPEN [V]
+`float(int(v)), float(round(v)), float(math.floor(v+0.4)), float(math.ceil(v)), float(math.trunc(v))` for v = -0.5: interp
+`0.0 -0.0 -1.0 -0.0 -0.0`, run/native `-0.0 -0.0 -1.0 -0.0 -0.0`, python `0.0 0.0 -1.0 0.0 0.0`; for v = -0.0 every leg gives
+`-0.0` where python gives `0.0`. `int()`, `round()`, `math.ceil()`, `math.trunc()` return an int holding -0.0 (shows through
+`float()` and `x*1.0`); for `int(-0.5)` the halves also disagree. Normalise at every float→int site.
+
+### T-554 python: `int.to_bytes` returns a list; `format(x, "%")` overflow prints `+Inf`; `%a` and f-string `!a` do not escape · P1 · PY · OPEN [V]
+`(255).to_bytes(2, "big", signed=True)` → all legs `[0, 255]` (python `b'\x00\xff'`); `(-1).to_bytes(2, ...)` → `[255, 255]`.
+`format(1e307, "%")` → `+Inf%` (python `inf%`), `format(-1e308, ".1%")` → `-+Inf%` (`-inf%`): the inf check precedes `a*100`
+(python-interpreter.abnf ~9100) and `pyFixed(Infinity)` renders Go's "+Inf". `"%a" % (s,)` and `f"{s!a}"` with s = "é" →
+`'é'` and `é` (python `'\xe9'` both): `%a` falls back to repr (`pyPctOne` ~8517), and f-string `!a` without a spec does no
+conversion (`makeFField` ~8970, compiler ~2127); `ascii()` and `str.format`'s `!a` are right. All legs.
+
+### T-555 python: format/messages and missing str methods · P3 · PY · OPEN [V]
+`(1,2)[5]` → "list index out of range" (python "tuple index out of range"). `"%*d" % (5, 42)` and `"%.*f"` → every leg aborts
+"unsupported format character '*'" (python `   42`, `3.142`). Finder: `format("ab","z")`/`format(65,"z")` accepted (python
+"Negative zero coercion (z) not allowed"); `format(x, ",_")` says "Unknown format code ','" (python "Cannot specify both ','
+and '_'."); `g(a, b, k=f(), *[f()])` evaluates the keyword before the star (CPython star first); `str.isidentifier`,
+`str.translate`/`maketrans`, `__import__` missing.
 
 ---
 

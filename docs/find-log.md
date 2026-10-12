@@ -9,7 +9,7 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 
 | Cell | Last run | Commit | Covered | Tickets / numbers |
 |---|---|---|---|---|
-| A python | never | | | |
+| A python | 2026-10-13 | fda7a2b6 | format mini-language (560 rows), %-formatting, f-strings, int/float arithmetic, divmod/pow, int()/float() parsing, slicing (648 combos), str methods (694 rows), sorted/min/max, dict/set mutation, generators, iterators, eval order | 15: T-541..T-555 |
 | A java | 2026-10-13 | fda7a2b6 | int/long arithmetic and casts, Double/Float text, String.format, String/StringBuilder, HashMap order, collections, switch, exceptions, null/NPE, ternary typing, eval order | 12: T-494..T-504, T-506 (+T-505 CORE) |
 | A js | 2026-10-13 | fda7a2b6 | number formatting, parseInt/Float, Math, bitwise, Array/String methods, own-key order, regex replace, JSON, Map/Set, labels/try-finally, generators, coercion tables, eval order | 16: T-478..T-493 |
 | A typescript | never | | | |
