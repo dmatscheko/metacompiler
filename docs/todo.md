@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-451** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-453** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -83,6 +83,11 @@ splitext. Write them in Python like python-collections.py where possible. Edges:
 ---
 
 # JV — Java
+
+### T-452 java: ArrayList.remove(0) costs ~73M instructions natively · P3 · JV · OPEN [V]
+With 300 elements one remove(0) costs ~73M instructions (1,700 removes: 124G instructions, 15,770 collections): the
+element-shift loop in languages/lib/java-util.java runs at the interpreted per-statement cost. Use a bulk primitive
+(array splice / copyWithin-style) in java-util.java; oracle javac/java 24.
 
 ---
 
@@ -141,20 +146,11 @@ with a reference-returning `function &foo()` leaves `$foo` NULL (assign_coalesce
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-445 core: str_intern probes by literal address — layer-2 layout changes cost up to +1.7% · P2 · CORE · IN PROGRESS (CORE worker, round 21) [V]
-`str_intern` in runtime.c is an open-addressing table keyed by the literal's address with linear probing. A layer-2
-change that moves literal addresses made php's bench +1.68% (10/10 paired): the parameter-name literal "r" of
-js_phadd/js_phlt/js_phmod probes 21-42 steps per loop iteration (840k-1.68M steps total vs 100-40k before). Fix: key
-by content, or one interned literal per distinct text per module resolved at boot, so lookups are O(1) regardless of
-layout. Instrumentation: scratchpad r26/instr.py, smc.sh (PHP r26 worker).
-
-### T-440 core: native collector triggers every ~31 iterations with a tiny live set · P2 · CORE · IN PROGRESS (CORE worker, round 21) [V]
-Native java: `for (i < 400000) { s = s + (i % 10); if (i % 64 == 63) s = ""; }` with -exe takes 4.9 s (~12 us/iter);
-`MEC_GC_STATS=1`: collections=12818 live=225024 heap=12783664 — a collection every ~31 iterations although the live
-set is ~225 KB. The same per-call cost shows for user-class methods and StringBuilder.append (1M appends 29.6 s).
-Check the collection-trigger policy in runtime.c (threshold vs. live size after the permanent-region change, and
-whether string concatenation allocates large raw buffers that count toward the trigger) and the per-collection
-fixed cost. Measure all bench rows.
+### T-451 core: layer-2 per-call / per-statement cost dominates native time · P2 · CORE · OPEN [V]
+Measured by the CORE r21 worker: native java `t += k` in a loop ~165K instructions per iteration, `a[j] = j + k` ~170K;
+~540 small allocations per iteration (layer-2 scopes, argument arrays, boxed numbers). Profile one hot statement end to
+end (emitted IR -> layer-2 calls -> floor) and cut the biggest per-call costs (scope allocation per call, argument
+arrays, number boxing) without changing output. Measure every bench row.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -497,6 +493,8 @@ T-444 php: echo writes per operand, magic methods in any case, ??= reads with is
 T-446 python: aliased and module-qualified imports of the Python-written library modules bind where they run; ImportError for missing names — DONE 5860929b
 T-448 python: runtime stdlib modules bound on import with aliases and from-imports (math/re/sys/builtins objects; others bare), re/sys functions as values — DONE f3aab379
 T-447 php: declared properties take precedence over magic (compiled presence test), __unset in both engines, isset() asks __isset only, realpath (js_realpath in the C floor, Go twin, interpreter host hook) — DONE 6b675553
+T-440 core: bitmap allocator (sweep = bitmap swap, cursor allocation) + 4 MB trigger floor; native bench rows -3..-21% (java -18%, python -21%), ~+3 MB heap — DONE e8607d6e
+T-445 core: literal cache home slot by multiplicative hash, hits migrate home, frame-less hit leaf; another -4..-7.5% per row; baseline re-recorded — DONE cdf85b85
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
