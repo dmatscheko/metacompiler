@@ -4573,15 +4573,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return {obj: o, last: last}
     }
     function storeAt(p, v) {
-        if (p.last.key == undefined && phpIsAA(p.obj)) {
-            mcall(p.obj, "offsetSet", argsOf([p.last.append === true ? null : p.last.idx(), v]))
+        if (p.last.append === true) {
+            if (!isArr(p.obj) && phpIsAA(p.obj)) { mcall(p.obj, "offsetSet", argsOf([null, v])) } else { arrPush(p.obj, v) }
             return
         }
-        if (p.last.append === true) { arrPush(p.obj, v); return }
         if (p.last.key != undefined) { phpSetProp(p.obj, p.last.key, v); return }
         var key = anytype
         key = p.last.idx()
         if (isArr(p.obj)) { arrSet(p.obj, key, v); return }
+        if (phpIsAA(p.obj)) { mcall(p.obj, "offsetSet", argsOf([key, v])); return }
         if (isObj(p.obj)) { phpSetProp(p.obj, phpStr(key), v); return }
         fail("cannot assign into this value")
     }
