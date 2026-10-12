@@ -2962,6 +2962,40 @@ func init() {
 			}
 			return jsHFalse
 		}
+		// js_phifaces(v): the interfaces the class of the object v, or the class
+		// descriptor v, names itself, by declared name; false for anything else
+		// (null: a string that named no class). Twin of phpIfaceNames in
+		// languages/php-interpreter.abnf.
+		m["js_phifaces"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			out := phpNewArr()
+			if _, isGen := v.(*jsGenerator); isGen {
+				rt.phpArrPush(out, "Iterator")
+				return w(out)
+			}
+			if isCallable(v) {
+				return w(out)
+			}
+			cls, _ := v.(*jsObject)
+			if cls != nil && cls.props["__isclass"] != true {
+				if !phpIsObj(cls) {
+					return jsHFalse
+				}
+				cls, _ = cls.props["__class"].(*jsObject)
+			}
+			if cls == nil {
+				return jsHFalse
+			}
+			if _, vals, ok := phpArrParts(cls.props["__ifaces"]); ok {
+				for _, iv := range vals.elems {
+					if io, isO := iv.(*jsObject); isO {
+						iv = io.props["__name"]
+					}
+					rt.phpArrPush(out, iv)
+				}
+			}
+			return w(out)
+		}
 		// js_phmexists(objOrCls, name): method_exists over the __mlc lists of the
 		// class chain. Twin of phpMethodExists in languages/php-interpreter.abnf.
 		m["js_phmexists"] = func(a []uint64) uint64 {

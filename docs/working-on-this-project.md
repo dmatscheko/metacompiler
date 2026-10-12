@@ -1036,8 +1036,8 @@ conversion and static overload selection), `java-util.java` (both java grammars:
 java.util's list types WRITTEN IN JAVA and compiled with a program that imports
 them, so one implementation serves all three engines), `java-lang.java` (the
 same for java.lang's StringBuilder, compiled when a program creates one),
-`php-stdlib.php` (both php grammars: PHP's array and string library WRITTEN IN
-PHP, compiled with a program that names one of its functions),
+`php-stdlib.php` (both php grammars: PHP's array and string library and SPL WRITTEN IN
+PHP, compiled with a program that names one of its functions or classes),
 `kotlin-decltypes.js` (both kotlin grammars: the static types an integer literal
 adopts - type arguments, declared and inferred names, class properties - read at
 walk time, and which `==` has an integer literal operand and so compares across

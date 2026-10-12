@@ -1,18 +1,18 @@
 <?php
-// php-stdlib.php -- PHP's array and string library, written in PHP.
+// php-stdlib.php -- PHP's array and string library and SPL, written in PHP.
 //
 // Both php grammars compile this file into a program that names one of its
-// functions (phpLibRef), so the interpreter half, llvm.Run and the native binary
+// functions or classes (phpLibRef), so the interpreter half, llvm.Run and the native binary
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
-// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and six
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and seven
 // intrinsics: __mec_fmtfloat for sprintf's float conversions ("r" is the
 // shortest digits serialize_precision=-1 lays out), __mec_math for
 // the math library's double operations, __mec_aptr for the internal array
 // pointer, __mec_precision for the precision setting, __mec_oid for an
-// object's handle and __mec_callable for the TypeError of an invalid callback
-// argument. A native also gets a
+// object's handle, __mec_callable for the TypeError of an invalid callback
+// argument and __mec_ifaces for the interfaces a class names. A native also gets a
 // wrapper here of the same name, which is what a string callable or f(...)
 // reaches: a direct call never does, since the call is lowered to the native
 // first.
@@ -2195,4 +2195,399 @@ function ini_set($option, $value) {
 function ini_get($option) {
     if ($option !== "precision") { return false; }
     return (string) __mec_precision(null);
+}
+
+// An object's handle as spl_object_hash spells it: 16 hex digits, then 16 zeros
+// (php_spl_object_hash).
+function spl_object_hash($object) {
+    if (!is_object($object)) {
+        throw new TypeError("spl_object_hash(): Argument #1 (\$object) must be of type object, " . __mec_vname($object) . " given");
+    }
+    return sprintf("%016x0000000000000000", __mec_oid($object));
+}
+
+// ----- SPL: the iterator functions, class_implements ------------------------
+function iterator_to_array($iterator, $preserve_keys = true) {
+    if (is_array($iterator)) { return $preserve_keys ? $iterator : array_values($iterator); }
+    if (!($iterator instanceof Traversable)) {
+        throw new TypeError("iterator_to_array(): Argument #1 (\$iterator) must be of type Traversable|array, " . __mec_vname($iterator) . " given");
+    }
+    $out = [];
+    foreach ($iterator as $k => $v) {
+        if ($preserve_keys) { $out[$k] = $v; } else { $out[] = $v; }
+    }
+    return $out;
+}
+function iterator_count($iterator) {
+    if (is_array($iterator)) { return count($iterator); }
+    if (!($iterator instanceof Traversable)) {
+        throw new TypeError("iterator_count(): Argument #1 (\$iterator) must be of type Traversable|array, " . __mec_vname($iterator) . " given");
+    }
+    $n = 0;
+    foreach ($iterator as $v) { $n++; }
+    return $n;
+}
+// The callback runs once per element until it answers a falsy value; the count
+// includes that last call (spl_iterator_func_apply).
+function iterator_apply($iterator, $callback, $args = null) {
+    $n = 0;
+    foreach ($iterator as $v) {
+        $n++;
+        if (!($args === null ? $callback() : $callback(...$args))) { break; }
+    }
+    return $n;
+}
+// class_implements(): the class's interface list (__mec_ifacelist), each name
+// keyed by itself; false for a string that names no class.
+function class_implements($object_or_class, $autoload = true) {
+    if (!is_object($object_or_class) && !is_string($object_or_class)) {
+        throw new TypeError("class_implements(): Argument #1 (\$object_or_class) must be of type object|string, " . __mec_vname($object_or_class) . " given");
+    }
+    $list = __mec_ifacelist($object_or_class);
+    if ($list === false) { return false; }
+    $out = [];
+    foreach ($list as $i) { $out[$i] = $i; }
+    return $out;
+}
+// class_parents(): the parent chain, nearest first, each name keyed by itself.
+function class_parents($object_or_class, $autoload = true) {
+    if (!is_object($object_or_class) && !is_string($object_or_class)) {
+        throw new TypeError("class_parents(): Argument #1 (\$object_or_class) must be of type object|string, " . __mec_vname($object_or_class) . " given");
+    }
+    if (__mec_ifaces($object_or_class) === false) { return false; }
+    $out = [];
+    for ($p = get_parent_class($object_or_class); $p !== false; $p = get_parent_class($p)) { $out[$p] = $p; }
+    return $out;
+}
+// The interface list of a class or an interface, ce->interfaces: the parent's,
+// then the ones the class names (a parent's skipped), then for each of those the
+// ones it extends, taken from the END of its own list; a class that names none
+// takes its parent's whole list, also from the end (zend_do_implement_interfaces,
+// zend_do_inherit_interfaces). False when $c denotes neither.
+function __mec_ifacelist($c) {
+    $own = __mec_ifaces($c);
+    if ($own === false) {
+        if (is_string($c) && interface_exists($c)) { return array_slice(__mec_coreiface($c), 1); }
+        return false;
+    }
+    $p = get_parent_class($c);
+    $list = $p === false ? [] : __mec_ifacelist($p);
+    if (count($own) == 0) { return array_reverse($list); }
+    $named = [];
+    foreach ($own as $i) {
+        $nm = __mec_ifaces($i) === false ? __mec_coreiface($i)[0] : $i;
+        if (!in_array($nm, $list, true)) {
+            $list[] = $nm;
+            $named[] = $nm;
+        }
+    }
+    foreach ($named as $nm) {
+        $sub = __mec_ifacelist($nm);
+        for ($k = count($sub) - 1; $k >= 0; $k--) {
+            if (!in_array($sub[$k], $list, true)) { $list[] = $sub[$k]; }
+        }
+    }
+    return $list;
+}
+// The engine's own interfaces have no declaration: each one's spelling, then the
+// list of the ones it extends.
+function __mec_coreiface($name) {
+    switch (strtolower($name)) {
+        case "traversable": return ["Traversable"];
+        case "iterator": return ["Iterator", "Traversable"];
+        case "iteratoraggregate": return ["IteratorAggregate", "Traversable"];
+        case "arrayaccess": return ["ArrayAccess"];
+        case "countable": return ["Countable"];
+        case "serializable": return ["Serializable"];
+        case "stringable": return ["Stringable"];
+        case "throwable": return ["Throwable", "Stringable"];
+        case "jsonserializable": return ["JsonSerializable"];
+        case "unitenum": return ["UnitEnum"];
+        case "backedenum": return ["BackedEnum", "UnitEnum"];
+    }
+    return [$name];
+}
+
+// ----- SPL: the data structures and their exceptions -------------------------
+// Written on arrays. var_dump shows each one's private storage property, named
+// as its get_debug_info handler names it; an iteration position is the
+// array's own internal pointer. An implements list spells out the interfaces
+// the ones it names extend, in the order an engine class registers them
+// (zend_class_implements: each one, then the ones it extends from the end of
+// its own list), which is what class_implements answers.
+interface SeekableIterator extends Iterator {
+    public function seek(int $offset): void;
+}
+class OutOfBoundsException extends RuntimeException {}
+class OutOfRangeException extends LogicException {}
+class UnexpectedValueException extends RuntimeException {}
+class UnderflowException extends RuntimeException {}
+class OverflowException extends RuntimeException {}
+class RangeException extends RuntimeException {}
+class LengthException extends LogicException {}
+class DomainException extends LogicException {}
+class BadFunctionCallException extends LogicException {}
+class BadMethodCallException extends BadFunctionCallException {}
+class ArrayIterator implements SeekableIterator, Traversable, Iterator, ArrayAccess, Serializable, Countable {
+    const STD_PROP_LIST = 1;
+    const ARRAY_AS_PROPS = 2;
+    private $storage;
+    public function __construct($array = [], int $flags = 0) { $this->storage = ArrayObject::__mec_array($array); }
+    // True for a key holding null too, unlike isset.
+    public function offsetExists($key): bool { return array_key_exists($key, $this->storage); }
+    public function offsetGet($key): mixed { return $this->storage[$key]; }
+    public function offsetSet($key, $value): void {
+        if ($key === null) { $this->storage[] = $value; } else { $this->storage[$key] = $value; }
+    }
+    public function offsetUnset($key): void { unset($this->storage[$key]); }
+    public function append($value): void { $this->storage[] = $value; }
+    public function getArrayCopy(): array { return $this->storage; }
+    public function count(): int { return count($this->storage); }
+    public function getFlags(): int { return 0; }
+    public function setFlags(int $flags): void {}
+    public function asort(int $flags = SORT_REGULAR): bool { return asort($this->storage, $flags); }
+    public function ksort(int $flags = SORT_REGULAR): bool { return ksort($this->storage, $flags); }
+    public function uasort($callback): bool { return uasort($this->storage, $callback); }
+    public function uksort($callback): bool { return uksort($this->storage, $callback); }
+    public function natsort(): bool { return natsort($this->storage); }
+    public function natcasesort(): bool { return natcasesort($this->storage); }
+    public function rewind(): void { reset($this->storage); }
+    public function valid(): bool { return key($this->storage) !== null; }
+    public function current(): mixed { return key($this->storage) === null ? null : current($this->storage); }
+    public function key(): string|int|null { return key($this->storage); }
+    public function next(): void { next($this->storage); }
+    public function seek(int $offset): void {
+        if ($offset < 0 || $offset >= count($this->storage)) {
+            throw new OutOfBoundsException("Seek position " . $offset . " is out of range");
+        }
+        reset($this->storage);
+        for ($i = 0; $i < $offset; $i++) { next($this->storage); }
+    }
+}
+class ArrayObject implements IteratorAggregate, Traversable, ArrayAccess, Serializable, Countable {
+    const STD_PROP_LIST = 1;
+    const ARRAY_AS_PROPS = 2;
+    private $storage;
+    public function __construct($array = [], int $flags = 0, string $iteratorClass = "ArrayIterator") {
+        $this->storage = self::__mec_array($array);
+    }
+    // The array one is made over: an array, another one's array, or an object's
+    // properties.
+    public static function __mec_array($array) {
+        if ($array instanceof ArrayObject || $array instanceof ArrayIterator) { return $array->getArrayCopy(); }
+        if (is_object($array)) { return (array) $array; }
+        if (!is_array($array)) {
+            throw new TypeError("ArrayObject::__construct(): Argument #1 (\$array) must be of type array, " . __mec_vname($array) . " given");
+        }
+        return $array;
+    }
+    public function offsetExists($key): bool { return array_key_exists($key, $this->storage); }
+    public function offsetGet($key): mixed { return $this->storage[$key]; }
+    public function offsetSet($key, $value): void {
+        if ($key === null) { $this->storage[] = $value; } else { $this->storage[$key] = $value; }
+    }
+    public function offsetUnset($key): void { unset($this->storage[$key]); }
+    public function append($value): void { $this->storage[] = $value; }
+    public function getArrayCopy(): array { return $this->storage; }
+    // Answers the array it replaces.
+    public function exchangeArray($array): array {
+        $old = $this->storage;
+        $this->storage = self::__mec_array($array);
+        return $old;
+    }
+    public function count(): int { return count($this->storage); }
+    public function getFlags(): int { return 0; }
+    public function setFlags(int $flags): void {}
+    public function getIterator(): Iterator { return new ArrayIterator($this->storage); }
+    public function getIteratorClass(): string { return "ArrayIterator"; }
+    public function asort(int $flags = SORT_REGULAR): bool { return asort($this->storage, $flags); }
+    public function ksort(int $flags = SORT_REGULAR): bool { return ksort($this->storage, $flags); }
+    public function uasort($callback): bool { return uasort($this->storage, $callback); }
+    public function uksort($callback): bool { return uksort($this->storage, $callback); }
+    public function natsort(): bool { return natsort($this->storage); }
+    public function natcasesort(): bool { return natcasesort($this->storage); }
+}
+// A list, iterated front to back, or back to front under IT_MODE_LIFO, and
+// consumed under IT_MODE_DELETE (spl_dllist.c). flags also carries the bit 4
+// that freezes the direction, which SplStack and SplQueue set; MEC_MODE is the
+// mode a class iterates in even before its constructor has run.
+class SplDoublyLinkedList implements Iterator, Traversable, Countable, ArrayAccess, Serializable {
+    const IT_MODE_LIFO = 2;
+    const IT_MODE_FIFO = 0;
+    const IT_MODE_DELETE = 1;
+    const IT_MODE_KEEP = 0;
+    const MEC_MODE = 0;
+    private $flags = 0;
+    private $dllist = [];
+    public function push($value): void { $this->dllist[] = $value; }
+    public function unshift($value): void { array_unshift($this->dllist, $value); }
+    public function pop(): mixed {
+        if (count($this->dllist) == 0) { throw new RuntimeException("Can't pop from an empty datastructure"); }
+        return array_pop($this->dllist);
+    }
+    public function shift(): mixed {
+        if (count($this->dllist) == 0) { throw new RuntimeException("Can't shift from an empty datastructure"); }
+        return array_shift($this->dllist);
+    }
+    public function top(): mixed {
+        if (count($this->dllist) == 0) { throw new RuntimeException("Can't peek at an empty datastructure"); }
+        return $this->dllist[count($this->dllist) - 1];
+    }
+    public function bottom(): mixed {
+        if (count($this->dllist) == 0) { throw new RuntimeException("Can't peek at an empty datastructure"); }
+        return $this->dllist[0];
+    }
+    public function isEmpty(): bool { return count($this->dllist) == 0; }
+    public function count(): int { return count($this->dllist); }
+    public function toArray(): array { return $this->dllist; }
+    public function offsetExists($index): bool { return is_numeric($index) && $index >= 0 && $index < count($this->dllist); }
+    public function offsetGet($index): mixed {
+        $this->checkIndex("offsetGet", $index);
+        return $this->dllist[$index];
+    }
+    public function offsetSet($index, $value): void {
+        if ($index === null) {
+            $this->dllist[] = $value;
+            return;
+        }
+        $this->checkIndex("offsetSet", $index);
+        $this->dllist[$index] = $value;
+    }
+    public function offsetUnset($index): void {
+        $this->checkIndex("offsetUnset", $index);
+        array_splice($this->dllist, $index, 1);
+    }
+    public function add($index, $value): void {
+        if (!is_numeric($index) || $index < 0 || $index > count($this->dllist)) {
+            throw new OutOfRangeException("SplDoublyLinkedList::add(): Argument #1 (\$index) is out of range");
+        }
+        array_splice($this->dllist, $index, 0, [$value]);
+    }
+    private function checkIndex($method, $index) {
+        if (!is_numeric($index)) {
+            throw new OutOfRangeException("SplDoublyLinkedList::" . $method . "(): Argument #1 (\$index) is an invalid offset");
+        }
+        if ($index < 0 || $index >= count($this->dllist)) {
+            throw new OutOfRangeException("SplDoublyLinkedList::" . $method . "(): Argument #1 (\$index) is out of range");
+        }
+    }
+    public function setIteratorMode(int $mode): int {
+        $f = $this->flags | static::MEC_MODE;
+        if (($f & 4) && ($f & 2) != ($mode & 2)) {
+            throw new RuntimeException("Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen");
+        }
+        $this->flags = ($mode & 3) | ($f & 4);
+        return $this->flags;
+    }
+    public function getIteratorMode(): int { return $this->flags | static::MEC_MODE; }
+    public function rewind(): void {
+        if (($this->flags | static::MEC_MODE) & 2) { end($this->dllist); } else { reset($this->dllist); }
+    }
+    public function valid(): bool { return key($this->dllist) !== null; }
+    public function current(): mixed { return key($this->dllist) === null ? null : current($this->dllist); }
+    public function key(): int { return (int) key($this->dllist); }
+    public function next(): void { $this->step($this->flags | static::MEC_MODE); }
+    public function prev(): void { $this->step(($this->flags | static::MEC_MODE) ^ 2); }
+    private function step($flags) {
+        if ($flags & 1) {
+            if ($flags & 2) {
+                array_pop($this->dllist);
+                end($this->dllist);
+            } else {
+                array_shift($this->dllist);
+                reset($this->dllist);
+            }
+        } elseif ($flags & 2) {
+            prev($this->dllist);
+        } else {
+            next($this->dllist);
+        }
+    }
+}
+class SplQueue extends SplDoublyLinkedList {
+    const MEC_MODE = 4;
+    public function __construct() { $this->setIteratorMode(0); }
+    public function enqueue($value): void { $this->push($value); }
+    public function dequeue(): mixed { return $this->shift(); }
+}
+class SplStack extends SplDoublyLinkedList {
+    const MEC_MODE = 6;
+    public function __construct() { $this->setIteratorMode(2); }
+}
+// A set of objects, each with its data: storage is the list var_dump shows,
+// [obj, inf] pairs in insertion order (spl_object_storage_debug_info), searched
+// by identity.
+class SplObjectStorage implements Countable, SeekableIterator, Traversable, Iterator, Serializable, ArrayAccess {
+    private $storage = [];
+    public function attach(object $object, mixed $info = null): void {
+        $at = $this->place($object);
+        if ($at === null) {
+            $this->storage[] = ["obj" => $object, "inf" => $info];
+        } else {
+            $this->storage[$at]["inf"] = $info;
+        }
+    }
+    public function detach(object $object): void {
+        $at = $this->place($object);
+        if ($at !== null) {
+            array_splice($this->storage, $at, 1);
+            reset($this->storage);
+        }
+    }
+    public function contains(object $object): bool { return $this->place($object) !== null; }
+    public function addAll(SplObjectStorage $storage): int {
+        foreach ($storage->storage as $e) { $this->attach($e["obj"], $e["inf"]); }
+        return count($this->storage);
+    }
+    public function removeAll(SplObjectStorage $storage): int {
+        foreach ($storage->storage as $e) { $this->detach($e["obj"]); }
+        return count($this->storage);
+    }
+    public function removeAllExcept(SplObjectStorage $storage): int {
+        foreach ($this->storage as $e) {
+            if (!$storage->contains($e["obj"])) { $this->detach($e["obj"]); }
+        }
+        return count($this->storage);
+    }
+    public function getInfo(): mixed {
+        $k = key($this->storage);
+        return $k === null ? null : $this->storage[$k]["inf"];
+    }
+    public function setInfo(mixed $info): void {
+        $k = key($this->storage);
+        if ($k !== null) { $this->storage[$k]["inf"] = $info; }
+    }
+    public function getHash(object $object): string { return spl_object_hash($object); }
+    public function count(int $mode = COUNT_NORMAL): int { return count($this->storage); }
+    public function offsetExists($object): bool { return $this->contains($object); }
+    public function offsetGet($object): mixed {
+        $at = $this->place($object);
+        if ($at === null) { throw new UnexpectedValueException("Object not found"); }
+        return $this->storage[$at]["inf"];
+    }
+    public function offsetSet($object, mixed $info = null): void { $this->attach($object, $info); }
+    public function offsetUnset($object): void { $this->detach($object); }
+    public function rewind(): void { reset($this->storage); }
+    public function valid(): bool { return key($this->storage) !== null; }
+    public function key(): int { return (int) key($this->storage); }
+    public function current(): object {
+        $k = key($this->storage);
+        if ($k === null) { throw new RuntimeException("Called current() on invalid iterator"); }
+        return $this->storage[$k]["obj"];
+    }
+    public function next(): void { next($this->storage); }
+    public function seek(int $offset): void {
+        if ($offset < 0 || $offset >= count($this->storage)) {
+            throw new OutOfBoundsException("Seek position " . $offset . " is out of range");
+        }
+        reset($this->storage);
+        for ($i = 0; $i < $offset; $i++) { next($this->storage); }
+    }
+    // The object's place in storage, or null.
+    private function place($object) {
+        foreach ($this->storage as $i => $e) {
+            if ($e["obj"] === $object) { return $i; }
+        }
+        return null;
+    }
 }

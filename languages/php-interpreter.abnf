@@ -4002,6 +4002,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return out
     }
     function makeConstRef(name) {
+        if (name == "__FUNCTION__" || name == "__METHOD__") {
+            var magic = cloMagic(name == "__METHOD__")
+            return function() { return magic }
+        }
         return function() {
             var lo = name.toLowerCase()
             if (lo == "true") { return true }
@@ -4009,7 +4013,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (lo == "null") { return null }
             // A bare 'exit' / 'die' is the language construct, not a constant.
             if (lo == "exit" || lo == "die") { return phpBuiltins["exit"]() }
-            if (name == "__FUNCTION__" || name == "__METHOD__") { return varExists(FN_KEY) ? getVar(FN_KEY) : "" }
             if (name == "__CLASS__") { var s = ctxSelf(); return s == null ? "" : s.__name }
             if (name == "PHP_EOL") { return "\n" }
             // PHP's int is 64 bit two's complement on every build this project
@@ -4169,16 +4172,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function cloNoteClass(n) { cloClass = stripWs(n); return n }
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
     function cloEnterFn(n, method) {
-        cloScopes.push({name: (method ? cloClass + "::" : "") + stripWs(n) + "()", self: method})
+        var meth = (method ? cloClass + "::" : "") + stripWs(n)
+        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
         var line = "" + c.lineOf(pos)
-        cloScopes.push({name: "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}",
-                        self: top != null && top.self && !cloStatic, line: line})
+        var name = "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}"
+        cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
+                        fn: name, meth: name})
         cloStatic = false
     }
     function cloLeave() { return cloScopes.pop() }
+    // __FUNCTION__ / __METHOD__ are compile-time constants of the function being
+    // walked (zend_try_ct_eval_magic_const): its name, "Class::name" for __METHOD__
+    // in a method, the closure's own name for both inside a closure, "" at the top
+    // level. Twin of cloMagic in php-to-llvm-ir.abnf.
+    function cloMagic(method) {
+        if (cloScopes.length == 0) { return "" }
+        var top = cloScopes[cloScopes.length - 1]
+        return method ? top.meth : top.fn
+    }
     // The $this a closure created here binds, when its scope entry says it can.
     function cloThis(self) {
         if (self === true && varExists("$this")) { return getVar("$this") }
@@ -5599,6 +5613,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return old
         },
         "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where)) },
+        "__mec_ifaces": function(v) { return phpIfaceNames(v) },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         "array_key_exists": function(k, a) {
             if (!isArr(a)) {
@@ -5745,6 +5760,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (onlySub && sameClassName(phpDebugType(v), name)) { return false }
         return phpIsA(v, name)
+    }
+    // The interfaces a class names itself (implements, or extends for an
+    // interface), each by its declared name when it has a declaration: of the class
+    // of the object v, or of the class the string v names; false when v names no
+    // class. A generator's class names Iterator, a closure's none. What
+    // class_implements (lib/php-stdlib.php) is built on. Twin of js_phifaces in
+    // abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpIfaceNames(v) {
+        var out = newArr()
+        if (typeof v == "function") { return out }
+        if (isGen(v)) { arrPush(out, "Iterator"); return out }
+        var k = anytype
+        k = null
+        if (isObj(v)) { k = v.__class }
+        else if (typeof v == "string") { k = findClass(v) }
+        if (k == null || k == undefined) { return false }
+        var ifs = k.__ifaces
+        for (var i = 0; ifs != undefined && ifs != null && i < ifs.length; i++) {
+            var d = findClass(ifs[i])
+            arrPush(out, d == null ? ifs[i] : d.__name)
+        }
+        return out
     }
     // get_parent_class(): the parent of v's class, or of the class the string v
     // names; anything else is a TypeError. Twin of js_phparent in abnf/jsrtphp.go
@@ -6404,6 +6441,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (importedFiles["$" + file] == true) { return true }
         importedFiles["$" + file] = true
         var text = c.readFile(file)
+        phpLibClasses(text)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
         var outerDefs = topDefs
@@ -6429,16 +6467,29 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // mention, the way `require` compiles a file, so it is global before the
     // program runs; the functions it names follow the same way
     // (lib/php-stdlib-index.js). An engine native is reached directly here, so
-    // naming one does not load it. Twin of phpLibRef in php-to-llvm-ir.abnf.
+    // naming one does not load it. A library class is compiled before the walk of
+    // any text that spells its name: the program, an included file, a library
+    // piece (phpLibClasses). Twin of phpLibRef in php-to-llvm-ir.abnf.
     var phpLib = null
     var phpLibDone = {}
     var phpLibBase = true
     function phpLibRef(name) {
         if (hasOwn(phpBuiltins, name)) { return name }
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
-        if (!phpLibHas(phpLib, name) || phpLibDone["$" + name] === true) { return name }
-        phpLibDone["$" + name] = true
-        var text = phpLibText(phpLib, name, phpLibBase)
+        phpLibLoad(phpLibKey(phpLib, name))
+        return name
+    }
+    function phpLibClasses(text) {
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        var ks = phpLibClassesIn(phpLib, text)
+        for (var i = 0; i < ks.length; i++) { phpLibLoad(ks[i]) }
+    }
+    function phpLibLoad(key) {
+        if (key == "" || phpLib.fns[key] === undefined || phpLibDone[key] === true) { return }
+        phpLibDone[key] = true
+        var base = phpLib.bases[key]
+        if (base !== undefined) { phpLibLoad(base) }
+        var text = phpLibText(phpLib, key, phpLibBase)
         phpLibBase = false
         var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
         c.pushSource("php-stdlib.php", text)
@@ -6446,6 +6497,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var outerClasses = topClasses
         var outerHoisted = hoisted
         var outerJumps = jw
+        var outerClass = cloClass
         topDefs = []
         topClasses = []
         hoisted = {}
@@ -6455,10 +6507,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         topClasses = outerClasses
         hoisted = outerHoisted
         jw = outerJumps
+        cloClass = outerClass
         c.popSource()
-        return name
+        phpLibClasses(phpLibText(phpLib, key, false))
     }
 
+    phpLibClasses(c.srcSlice(0, 2147483647))
     c.compile(c.asg)
 
     println("php interpreter: program finished")

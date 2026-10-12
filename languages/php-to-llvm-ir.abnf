@@ -2044,10 +2044,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return b
         }
     }
-    // The name of the function whose body is being WALKED. The tag on a declaration's
-    // name fires before the body's tags, so a __FUNCTION__ inside it sees the right
-    // name. A closure keeps the enclosing name (PHP says "{closure}"), the one
-    // deviation.
+    // The name of the function whose body is being WALKED, which keys its static
+    // variables. The tag on a declaration's name fires before the body's tags.
     var walkFnName = ""
     function noteFnName(n) { walkFnName = n; return n }
     // A bareword: a magic constant, or a global / already-declared constant.
@@ -2068,7 +2066,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // Twin of makeConstRef in php-interpreter.abnf.
         var lo = name.toLowerCase()
         if (lo == "exit" || lo == "die") { return makeCall(["exit"]) }
-        if (name == "__FUNCTION__" || name == "__METHOD__") { return makeConst(walkFnName) }
+        if (name == "__FUNCTION__" || name == "__METHOD__") { return makeConst(cloMagic(name == "__METHOD__")) }
         if (name == "__CLASS__") {
             return function(b) {
                 return {b: b, v: callExt(b, "js_get", [frameCls(b, "self"), emitStr(b, "__name")])}
@@ -4550,16 +4548,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function cloNoteClass(n) { cloClass = stripWs(n); return n }
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
     function cloEnterFn(n, method) {
-        cloScopes.push({name: (method ? cloClass + "::" : "") + stripWs(n) + "()", self: method})
+        var meth = (method ? cloClass + "::" : "") + stripWs(n)
+        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
         var line = "" + c.lineOf(pos)
-        cloScopes.push({name: "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}",
-                        self: top != null && top.self && !cloStatic, line: line})
+        var name = "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}"
+        cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
+                        fn: name, meth: name})
         cloStatic = false
     }
     function cloLeave() { return cloScopes.pop() }
+    // __FUNCTION__ / __METHOD__: twin of cloMagic in php-interpreter.abnf.
+    function cloMagic(method) {
+        if (cloScopes.length == 0) { return "" }
+        var top = cloScopes[cloScopes.length - 1]
+        return method ? top.meth : top.fn
+    }
     // The debug record (phsCloDesc) of the closure cloLeave answered sc for: its
     // static variables, then its parameter list.
     function cloDesc(sc, statics, pl) {
@@ -5635,7 +5641,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             || name == "is_a" || name == "is_subclass_of" || name == "get_parent_class"
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
-            || name == "__mec_callable"
+            || name == "__mec_callable" || name == "__mec_ifaces"
     }
     // The natives lib/php-stdlib.php is written on, each ONE extern taking its
     // arguments in order, an absent optional one as null (abnf/jsrtphpstr.go,
@@ -5743,6 +5749,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var inst = phClsArg(b, vs[0])
             var allowV = vs.length > 2 ? vs[2] : sub
             return {b: inst.b, v: callExt(inst.b, "js_phisaof", [vs[0], inst.v, vs[1], allowV, sub])}
+        }
+        if (name == "__mec_ifaces") {
+            var ia = phClsArg(b, vs[0])
+            return {b: ia.b, v: callExt(ia.b, "js_phifaces", [ia.v])}
         }
         if (name == "get_parent_class") {
             if (vs.length > 0) {
@@ -6606,6 +6616,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (importedFiles["$" + file] == true) { return true }
         importedFiles["$" + file] = true
         var text = c.readFile(file)
+        phpLibClasses(text)
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
         importDepth = importDepth + 1
@@ -6633,7 +6644,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // program's code; the functions it names follow the same way
     // (lib/php-stdlib-index.js). A direct call of a native is lowered inline and
     // does not load it; a native taken as a VALUE (a string callable, f(...)) is
-    // the library's wrapper function of the same name. Twin of phpLibRef in
+    // the library's wrapper function of the same name. A library class is compiled
+    // before the walk of any text that spells its name. Twin of phpLibRef in
     // php-interpreter.abnf.
     var phpLib = null
     var phpLibDone = {}
@@ -6641,9 +6653,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function phpLibRef(name, viaCall) {
         if (viaCall && hasBuiltin(name)) { return name }
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
-        if (!phpLibHas(phpLib, name) || phpLibDone["$" + name] === true) { return name }
-        phpLibDone["$" + name] = true
-        var text = phpLibText(phpLib, name, phpLibBase)
+        phpLibLoad(phpLibKey(phpLib, name))
+        return name
+    }
+    function phpLibClasses(text) {
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        var ks = phpLibClassesIn(phpLib, text)
+        for (var i = 0; i < ks.length; i++) { phpLibLoad(ks[i]) }
+    }
+    function phpLibLoad(key) {
+        if (key == "" || phpLib.fns[key] === undefined || phpLibDone[key] === true) { return }
+        phpLibDone[key] = true
+        var base = phpLib.bases[key]
+        if (base !== undefined) { phpLibLoad(base) }
+        var text = phpLibText(phpLib, key, phpLibBase)
         phpLibBase = false
         var asg = c.parse(c.agrammar, text, null, "php-stdlib.php")
         c.pushSource("php-stdlib.php", text)
@@ -6652,6 +6675,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var outerClasses = topClasses
         var outerHoisted = hoisted
         var outerJumps = jw
+        var outerClass = cloClass
         topDefs = []
         topClasses = []
         hoisted = {}
@@ -6661,9 +6685,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         topClasses = outerClasses
         hoisted = outerHoisted
         jw = outerJumps
+        cloClass = outerClass
         importDepth = importDepth - 1
         c.popSource()
-        return name
+        phpLibClasses(phpLibText(phpLib, key, false))
     }
     // ----- the built-in exception hierarchy -----
     // A namespace-qualified name (\RuntimeException, App\Boom) resolves on its last
@@ -6886,6 +6911,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
 
     core.scopeGetExt = "js_scope_get"
 
+    phpLibClasses(c.srcSlice(0, 2147483647))
     c.compile(c.asg)
 
     // ----- the native build -----

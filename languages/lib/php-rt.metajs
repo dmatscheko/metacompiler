@@ -2449,6 +2449,36 @@ function js_phparent(v, found) {
     if (sup === undefined || sup === null || typeof sup != "object") { return false }
     return phStr(sup["__name"])
 }
+// The interfaces the class of the object v, or the class descriptor v, names
+// itself, by declared name; false for anything else. Twin of phpIfaceNames in
+// languages/php-interpreter.abnf.
+function js_phifaces(v) {
+    var out = phNewArr()
+    if (phIsGen(v)) {
+        phArrPush(out, "Iterator")
+        return out
+    }
+    if (typeof v == "function") { return out }
+    if (v === undefined || v === null || typeof v != "object") { return false }
+    var cls = anytype
+    cls = v
+    if (v["__isclass"] === undefined) {
+        if (!phIsObj(v)) { return false }
+        cls = v["__class"]
+        if (cls === undefined || cls === null) { return false }
+    }
+    var p = phArrParts(cls["__ifaces"])
+    if (p !== undefined) {
+        var i = 0
+        while (i < p.v.length) {
+            var iv = p.v[i]
+            if (iv !== undefined && iv !== null && typeof iv == "object") { phArrPush(out, iv["__name"]) }
+            else { phArrPush(out, iv) }
+            i = i + 1
+        }
+    }
+    return out
+}
 // get_class(): the class of an object, a closure or a generator; anything else is
 // a TypeError. Twin of phpGetClass in php-interpreter.abnf.
 function js_phgetclass(v) {

@@ -2555,6 +2555,116 @@ function s58dump() {
     var_dump((new S58Self)->arm());
 }
 
+// ===== SECTION 59: magic names in closures, SPL's classes and iterator functions =====
+// __FUNCTION__ and __METHOD__ are compile-time constants: in a closure both are
+// the closure's own name "{closure:<scope>:<line>}", in a method __METHOD__ is
+// "Class::name" (zend_try_ct_eval_magic_const). SPL is always loaded: its data
+// structures, iterator_to_array / iterator_count / iterator_apply over them, and
+// class_implements, whose order is ce->interfaces (zend_do_implement_interfaces,
+// zend_do_inherit_interfaces: the parent's, the ones named, then each one's own
+// from the end; a class naming none takes its parent's from the end).
+function s59err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s59f() {
+    $c = function () { return __FUNCTION__ . "|" . __METHOD__; };
+    $d = fn() => __FUNCTION__;
+    $e = function () { $g = fn() => __FUNCTION__; return $g(); };
+    return [__FUNCTION__, $c(), $d(), $e(), __METHOD__];
+}
+class S59C {
+    function m() {
+        $c = function () { return __FUNCTION__ . "|" . __METHOD__ . "|" . __CLASS__; };
+        return [$c(), __FUNCTION__, __METHOD__];
+    }
+}
+interface S59I {}
+interface S59J extends S59I {}
+class S59A implements S59J, Countable { function count(): int { return 3; } }
+class S59B extends S59A {}
+class S59It extends ArrayIterator {
+    function current(): mixed { return parent::current() * 10; }
+}
+function s59() {
+    $f = s59f();
+    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2570}|{closure:s59f():2570}"
+        && $f[2] === "{closure:s59f():2571}" && $f[3] === "{closure:{closure:s59f():2572}:2572}"
+        && $f[4] === "s59f");
+    $m = (new S59C)->m();
+    check("mag2", $m[0] === "{closure:S59C::m():2577}|{closure:S59C::m():2577}|S59C"
+        && $m[1] === "m" && $m[2] === "S59C::m");
+    check("spl1", class_exists('ArrayIterator') && class_exists('arrayobject') && class_exists("SplStack")
+        && class_exists('SplObjectStorage') && interface_exists('SeekableIterator')
+        && !class_exists('SeekableIterator') && is_subclass_of('SplQueue', 'SplDoublyLinkedList'));
+    $it = new ArrayIterator(["a" => 1, "b" => 2, 7 => 3]);
+    $s = "";
+    foreach ($it as $k => $v) { $s .= $k . "=" . $v . ";"; }
+    check("spl2", $s === "a=1;b=2;7=3;" && count($it) === 3 && $it instanceof Traversable
+        && iterator_to_array($it) === ["a" => 1, "b" => 2, 7 => 3]
+        && iterator_to_array($it, false) === [1, 2, 3] && iterator_count($it) === 3);
+    $it->seek(1);
+    check("spl3", $it->key() === "b" && $it->current() === 2 && $it->offsetExists(7)
+        && $it->offsetGet("a") === 1 && s59err(fn() => $it->seek(3)) === "OutOfBoundsException: Seek position 3 is out of range");
+    $ao = new ArrayObject([3, 1]);
+    $ao->append(2);
+    $ao->offsetSet("k", 9);
+    $ao->offsetUnset(0);
+    check("spl4", count($ao) === 3 && $ao->getArrayCopy() === [1 => 1, 2 => 2, "k" => 9]
+        && iterator_to_array($ao) === [1 => 1, 2 => 2, "k" => 9]
+        && $ao->getIterator() instanceof ArrayIterator && $ao->exchangeArray([5]) === [1 => 1, 2 => 2, "k" => 9]
+        && $ao->getArrayCopy() === [5]);
+    check("spl5", iterator_to_array(new S59It([1, 2])) === [10, 20]);
+    $st = new SplStack();
+    $st->push(1);
+    $st->push(2);
+    $st->push(3);
+    check("spl6", iterator_to_array($st) === [2 => 3, 1 => 2, 0 => 1] && $st->top() === 3
+        && $st->pop() === 3 && count($st) === 2 && $st->getIteratorMode() === 6
+        && s59err(fn() => $st->setIteratorMode(SplDoublyLinkedList::IT_MODE_FIFO))
+            === "RuntimeException: Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen"
+        && s59err(fn() => (new SplStack)->pop()) === "RuntimeException: Can't pop from an empty datastructure"
+        && s59err(fn() => $st->offsetGet(5)) === "OutOfRangeException: SplDoublyLinkedList::offsetGet(): Argument #1 (\$index) is out of range");
+    $q = new SplQueue();
+    $q->enqueue("x");
+    $q->enqueue("y");
+    $q->setIteratorMode(SplDoublyLinkedList::IT_MODE_DELETE);
+    $s = "";
+    foreach ($q as $k => $v) { $s .= $k . "=" . $v . ";"; }
+    check("spl7", $s === "0=x;0=y;" && count($q) === 0 && $q->isEmpty());
+    $os = new SplObjectStorage();
+    $o1 = new stdClass;
+    $o2 = new stdClass;
+    $os->attach($o1, "one");
+    $os->attach($o2);
+    $os->attach($o1, "uno");
+    $s = "";
+    foreach ($os as $i => $o) { $s .= $i . ":" . ($o === $o1 ? "o1" : "o2") . ":" . var_export($os->getInfo(), true) . ";"; }
+    check("spl8", count($os) === 2 && $os->contains($o2) && $os->offsetGet($o1) === "uno"
+        && $s === "0:o1:'uno';1:o2:NULL;" && iterator_count($os) === 2);
+    $os->detach($o1);
+    check("spl9", count($os) === 1 && !$os->contains($o1)
+        && s59err(fn() => $os->offsetGet($o1)) === "UnexpectedValueException: Object not found");
+    check("spl10", iterator_apply(new ArrayIterator([1, 2, 3]), fn() => false) === 1
+        && iterator_apply(new ArrayIterator([1, 2, 3]), fn() => true) === 3);
+    check("imp1", array_keys(class_implements('S59A')) === ["S59J", "Countable", "S59I"]
+        && array_keys(class_implements(new S59B)) === ["S59I", "Countable", "S59J"]
+        && class_implements('S59I') === [] && class_implements('S59J') === ["S59I" => "S59I"]
+        && class_implements('NoSuchClass') === false
+        && array_keys(class_implements('ArrayIterator'))
+            === ["SeekableIterator", "Traversable", "Iterator", "ArrayAccess", "Serializable", "Countable"]
+        && array_keys(class_implements(new SplStack))
+            === ["Serializable", "ArrayAccess", "Countable", "Traversable", "Iterator"]
+        && class_parents(new SplStack) === ["SplDoublyLinkedList" => "SplDoublyLinkedList"]);
+}
+function s59dump() {
+    $st = new SplStack();
+    $st->push("a");
+    var_dump($st, new ArrayIterator([1]));
+    $os = new SplObjectStorage();
+    $os->attach(new stdClass, 5);
+    var_dump($os);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2620,6 +2730,8 @@ function main() {
     s57(); // SECTION-CALL 57
     s58(); // SECTION-CALL 58
     s58dump(); // SECTION-CALL 58
+    s59(); // SECTION-CALL 59
+    s59dump(); // SECTION-CALL 59
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
