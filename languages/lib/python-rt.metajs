@@ -1941,7 +1941,7 @@ function pyIsNumMethod(o, name) {
 
 // An int as its magnitude bits, and back.
 function pyIntBits(v) {
-    if (pyIsBig(v)) { return pyABitsFromLimbs(v["limbs"]) }
+    if (pyIsBig(v)) { return pynLimbsToBits(v["limbs"], 10000) }
     return pynNumBits(pyNum(v))
 }
 function pyIntNeg(v) {
@@ -2975,32 +2975,6 @@ function pyABigBin(op, x, y) {
 // this; the cap keeps `1 << 10**9` from asking for a gigabyte of limbs.
 var PY_BIT_SHIFT_MAX = 1048576
 
-// The magnitude of a bignum as little-endian BITS, by repeated halving of a copy
-// of the limbs. Zero answers the empty array.
-function pyABitsFromLimbs(limbs) {
-    var ls = []
-    var i = 0
-    while (i < limbs.length) {
-        ls.push(limbs[i])
-        i = i + 1
-    }
-    var bits = []
-    while (!(ls.length == 1 && ls[0] == 0)) {
-        var rem = 0
-        var j = ls.length - 1
-        while (j >= 0) {
-            var cur = rem * 10000 + ls[j]
-            var q = Math.floor(cur / 2)
-            ls[j] = q
-            rem = cur - q * 2
-            j = j - 1
-        }
-        while (ls.length > 1 && ls[ls.length - 1] == 0) { ls.pop() }
-        bits.push(rem)
-    }
-    return bits
-}
-
 // bits - 1, IN PLACE; the caller only ever hands this a magnitude of at least 1.
 function pyABitsDec(bits) {
     var i = 0
@@ -3023,17 +2997,8 @@ function pyABitsInc(bits) {
     return bits
 }
 
-// A bit array back to a bignum, by the schoolbook doubling the limbs already have.
-function pyABitsToBig(neg, bits) {
-    var limbs = [0]
-    var j = bits.length - 1
-    while (j >= 0) {
-        limbs = rtABigMulSmall(limbs, 2)
-        if (bits[j] == 1) { limbs = rtABigAddMag(limbs, [1]) }
-        j = j - 1
-    }
-    return rtkABigNew(neg, limbs)
-}
+// A bit array back to a bignum.
+function pyABitsToBig(neg, bits) { return rtkABigNew(neg, rtABigNorm(pynBitsToLimbs(bits, 10000))) }
 
 // A SHIFT COUNT as a plain number. Anything past the cap answers a value the
 // caller will reject, so an absurd count never allocates.
@@ -3054,8 +3019,8 @@ function pyABitsToNum(bits) {
 function pyABitBin(op, x, y) {
     var an = x["neg"]
     var bn = y["neg"]
-    var a = pyABitsFromLimbs(x["limbs"])
-    var b = pyABitsFromLimbs(y["limbs"])
+    var a = pynLimbsToBits(x["limbs"], 10000)
+    var b = pynLimbsToBits(y["limbs"], 10000)
     if (op == "<<" || op == ">>") {
         // Go: rt.pyBitBin. A negative count is CPython's ValueError; past the
         // cap, >> is 0 or -1 and << of a nonzero int is too large to hold.
@@ -4681,8 +4646,11 @@ function pyParseInt(s, base) {
     // A base that is not a power of two converts at most 4300 digits
     // (sys.get_int_max_str_digits()); the text is still validated first.
     var nd = pyIntDigitsOver(t, b)
-    var acc = anytype
-    acc = 0
+    // The digits gather into chunks below 1e8, each folded into the limbs by
+    // one multiply-add.
+    var ls = []
+    var chunk = 0
+    var cm = 1
     var prevDigit = prefixed
     var i = 0
     while (i < t.length && ok) {
@@ -4696,11 +4664,18 @@ function pyParseInt(s, base) {
         var d = "0123456789abcdefghijklmnopqrstuvwxyz".indexOf(ch.toLowerCase())
         if (d < 0 || d >= b) { ok = false }
         else if (nd == 0) {
-            if (typeof acc == "number" && acc <= (9007199254740992 - d) / b) { acc = acc * b + d }
-            else { acc = js_pybin("+", js_pybin("*", acc, b), d) }
+            chunk = chunk * b + d
+            cm = cm * b
+            if (cm * b > 100000000) {
+                pynLimbsMulAdd(ls, cm, chunk, 10000)
+                chunk = 0
+                cm = 1
+            }
         }
         prevDigit = true
     }
+    pynLimbsMulAdd(ls, cm, chunk, 10000)
+    var acc = rtABigNarrow(rtkABigNew(false, rtABigNorm(ls)))
     if (!ok || !prevDigit) {
         pyRaiseExc("ValueError", "invalid literal for int() with base " + pyIntStr(base) + ": " + pyStrRepr(s))
     }
@@ -5823,21 +5798,8 @@ function pyRadixOf(n, base, prefix) {
                             "'" + pyTypeName(n) + "' object cannot be interpreted as an integer")
     }
     var sign = ""
-    var v = anytype
-    v = pyABigOperand(n)                        // Promotes a plain int too.
-    if (rtABigCmp(v, rtABigFromNum(0)) < 0) {
-        sign = "-"
-        v = rtABigNeg(v)
-    }
-    var digits = "0123456789abcdef"
-    var out = ""
-    var bb = rtABigFromNum(base)
-    if (rtABigIsZero(v)) { out = "0" }
-    while (!rtABigIsZero(v)) {
-        out = digits.charAt(Math.trunc(pyNum(rtABigNarrow(pyABigRem(v, bb))))) + out
-        v = pyABigQuo(v, bb)
-    }
-    return sign + prefix + out
+    if (pyIntNeg(n)) { sign = "-" }
+    return sign + prefix + pynBitsRadix(pyIntBits(n), base)
 }
 
 // INTEGER *, //, % over operands of either width, with a POSITIVE divisor - the

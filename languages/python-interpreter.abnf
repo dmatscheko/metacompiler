@@ -1686,8 +1686,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A base that is not a power of two converts at most 4300 digits
         // (sys.get_int_max_str_digits()); the text is still validated first.
         var nd = pyIntDigitsOver(t, b)
-        var acc = anytype
-        acc = 0
+        // The digits gather into chunks below 1e8, each folded into the limbs
+        // by one multiply-add.
+        var ls = []
+        var chunk = 0
+        var cm = 1
         var prevDigit = prefixed
         for (var i = 0; i < t.length && ok; i++) {
             var ch = t.charAt(i)
@@ -1699,11 +1702,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var d = "0123456789abcdefghijklmnopqrstuvwxyz".indexOf(ch.toLowerCase())
             if (d < 0 || d >= b) { ok = false }
             else if (nd == 0) {
-                if (typeof acc == "number" && acc <= (bigMaxNum - d) / b) { acc = acc * b + d }
-                else { acc = binOp("+", binOp("*", acc, b), d) }
+                chunk = chunk * b + d
+                cm = cm * b
+                if (cm * b > 100000000) {
+                    pynLimbsMulAdd(ls, cm, chunk, bigBase)
+                    chunk = 0
+                    cm = 1
+                }
             }
             prevDigit = true
         }
+        pynLimbsMulAdd(ls, cm, chunk, bigBase)
+        var acc = bigOut(bigOb(1, ls))
         if (!ok || !prevDigit) {
             pyListErr("ValueError", "invalid literal for int() with base " + base + ": " + pyStrRepr(s))
         }
@@ -2224,18 +2234,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyRaise(pyMakeExc("TypeError",
                 ["'" + pyTypeOf(n).__name + "' object cannot be interpreted as an integer"]))
         }
-        var sign = ""
-        var v = anytype
-        v = n
-        if (pytruthy(binOp("<", v, 0))) { sign = "-"; v = binOp("-", 0, v) }
-        var digits = "0123456789abcdef"
-        var out = ""
-        if (pytruthy(binOp("==", v, 0))) { out = "0" }
-        while (pytruthy(binOp(">", v, 0))) {
-            out = digits.charAt(Math.trunc(bigToNum(binOp("%", v, base)))) + out
-            v = binOp("//", v, base)
-        }
-        return sign + prefix + out
+        var ib = pyIntBits(n)
+        return (ib.neg ? "-" : "") + prefix + pynBitsRadix(ib.bits, base)
     }
     // divmod(a, b) is the pair (a // b, a % b): FLOOR division and the floored
     // remainder, so divmod(-7, 2) is (-4, 1).
@@ -7543,23 +7543,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // And/Or/Xor/Lsh/Rsh, which implement exactly this.
     var bitShiftMax = 1048576
     // The magnitude as little-endian BITS, by repeated halving of a copy.
-    function bitsOfMag(limbs) {
-        var ls = []
-        for (var i = 0; i < limbs.length; i++) { ls.push(limbs[i]) }
-        var bits = []
-        while (ls.length > 0) {
-            var rem = 0
-            for (var j = ls.length - 1; j >= 0; j = j - 1) {
-                var cur = rem * bigBase + ls[j]
-                var q = Math.floor(cur / 2)
-                ls[j] = q
-                rem = cur - q * 2
-            }
-            ls = magTrim(ls)
-            bits.push(rem)
-        }
-        return bitsTrim(bits)
-    }
     function bitsTrim(bits) {
         var n = bits.length
         while (n > 0 && bits[n - 1] === 0) { n = n - 1 }
@@ -7612,15 +7595,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = k; i < bits.length; i++) { out.push(bits[i]) }
         return bitsTrim(out)
     }
-    // A bit array back to a big, by the schoolbook doubling magMulSmall already is.
-    function bigFromBits(sign, bits) {
-        var limbs = []
-        for (var j = bits.length - 1; j >= 0; j = j - 1) {
-            limbs = magMulSmall(limbs, 2)
-            if (bits[j] == 1) { limbs = magAdd(limbs, [1]) }
-        }
-        return bigOb(sign, limbs)
-    }
+    // A bit array back to a big.
+    function bigFromBits(sign, bits) { return bigOb(sign, pynBitsToLimbs(bits, bigBase)) }
     // A shift count as a plain number; anything absurd answers past the cap.
     function bitsToNum(bits) {
         if (bits.length > 40) { return bitShiftMax + 1 }
@@ -7639,8 +7615,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function bigBitBin(op, x, y) {
         var an = x.sign < 0 && !bigIsZero(x)
         var bn = y.sign < 0 && !bigIsZero(y)
-        var a = bitsOfMag(x.limbs)
-        var b = bitsOfMag(y.limbs)
+        var a = pynLimbsToBits(x.limbs, bigBase)
+        var b = pynLimbsToBits(y.limbs, bigBase)
         if (op == "<<" || op == ">>") {
             if (bn) { pyListErr("ValueError", "negative shift count") }
             var k = bitsToNum(b)
@@ -11126,7 +11102,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // An int as its sign and magnitude bits, and back.
     function pyIntBits(v) {
-        if (bigIsBig(v)) { return {neg: v.sign < 0, bits: bitsOfMag(v.limbs)} }
+        if (bigIsBig(v)) { return {neg: v.sign < 0, bits: pynLimbsToBits(v.limbs, bigBase)} }
         var n = floVal(v)
         return {neg: n < 0, bits: pynNumBits(n)}
     }

@@ -1,12 +1,12 @@
-# Full-syntax test: Python (3.12 core grammar) - part 2 of 2, sections 90-91.
+# Full-syntax test: Python (3.12 core grammar) - part 2 of 2, sections 90, 91 and 97.
 #
 # THE PYTHON RATCHET IS TWO FILES, so that neither -frozen interpreter leg comes
-# near the IR interpreter's step brake (-max-steps, 100M per call). Sections 90-91
-# build ints of thousands of digits, which the interpreter's arbitrary precision
+# near the IR interpreter's step brake (-max-steps, 100M per call). Sections 90, 91
+# and 97 build ints of thousands of digits, which the interpreter's arbitrary precision
 # arithmetic makes the costliest rows of all, so they have a file of their own:
 #
 #   tests/python-test-full.py     every other section
-#   tests/python-test-full.2.py   sections 90-91
+#   tests/python-test-full.2.py   sections 90, 91 and 97
 #
 # The section NUMBERS are global, the two files together run the assertions, and
 # ./test.sh --full reports them as the units python and python2. Add a new section
@@ -96,8 +96,22 @@ def s91():
           and msgs[4] == "invalid literal for int() with base 10: '1x1111111")
     check("isd5", int("0" * 4300) == 0 and int("0_" * 2200 + "0") == 0 and int("0" * 5000, 16) == 0 and int("0" * 4400, 32) == 0)
 
+# ===== SECTION 97: thousand-digit ints through their bits and digits =====
+# bin/oct/hex/format, bit_length, the shifts and bitwise operators, and int()
+# of a long text, at sizes whose conversions between decimal and binary are the
+# whole cost. Rows from CPython 3.14.
+def s97():
+    ns = [10, 3, 7, 4300, 4097, 5000, 4499, 1000003]
+    x = ns[0] ** ns[3]
+    check("bigb1", (len(hex(x)), hex(x)[:14], (ns[1] ** ns[4]).bit_length(), (ns[0] ** 4299).bit_length()) == (3574, "0x1392bd7c2a1a", 6494, 14281))
+    check("bigb2", (ns[2] ** ns[5] >> ns[6]) % ns[7] == 298323 and ((-(ns[1] ** 3000)) >> 4000) % ns[7] == 890152
+          and ((ns[1] ** 3000) & (2 ** 4700 - 1)) % ns[7] == 9200 and ((ns[1] ** 2500) << 333).bit_length() == 4296)
+    check("bigb3", int("123456789" * 450) % ns[7] == 840758 and int("f" * 3000, 16) % ns[7] == 653740)
+    check("bigb4", (len(bin(ns[0] ** 1000)), format(ns[0] ** 1000, "o")[:10], hex(-(ns[1] ** 2000))[-8:]) == (3324, "1716155437", "85e07a41"))
+
 def main():
     s90() # SECTION-CALL 90
     s91() # SECTION-CALL 91
+    s97() # SECTION-CALL 97
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

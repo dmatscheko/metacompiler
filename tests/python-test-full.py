@@ -1,12 +1,12 @@
 # Full-syntax test: Python (3.12 core grammar) - part 1 of 2.
 #
 # THE PYTHON RATCHET IS TWO FILES, so that neither -frozen interpreter leg comes
-# near the IR interpreter's step brake (-max-steps, 100M per call). Sections 90-91
-# build ints of thousands of digits, which the interpreter's arbitrary precision
+# near the IR interpreter's step brake (-max-steps, 100M per call). Sections 90, 91
+# and 97 build ints of thousands of digits, which the interpreter's arbitrary precision
 # arithmetic makes the costliest rows of all, so they have a file of their own:
 #
 #   tests/python-test-full.py     every other section
-#   tests/python-test-full.2.py   sections 90-91
+#   tests/python-test-full.2.py   sections 90, 91 and 97
 #
 # The section NUMBERS are global, the two files together run the assertions, and
 # ./test.sh --full reports them as the units python and python2. Add a new section

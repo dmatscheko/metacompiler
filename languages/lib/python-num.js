@@ -23,6 +23,103 @@ function pynNumBits(n) {
     return bits
 }
 
+// A bigint magnitude crosses between its DECIMAL limbs (little-endian, base
+// LB: 10000 in python-rt.metajs, 1e7 in the interpreter) and its bits sixteen
+// bits per pass over the limbs: one short division by 2^16, or one
+// multiply-add by it, keeps every intermediate below 2^53 for either base.
+
+// The magnitude bits of LIMBS (left untouched); zero answers the empty array.
+function pynLimbsToBits(limbs, lb) {
+    var ls = []
+    var i = 0
+    while (i < limbs.length) {
+        ls.push(limbs[i])
+        i = i + 1
+    }
+    while (ls.length > 0 && ls[ls.length - 1] == 0) { ls.pop() }
+    var bits = []
+    while (ls.length > 0) {
+        var rem = 0
+        var j = ls.length - 1
+        while (j >= 0) {
+            var cur = rem * lb + ls[j]
+            var q = Math.floor(cur / 65536)
+            ls[j] = q
+            rem = cur - q * 65536
+            j = j - 1
+        }
+        while (ls.length > 0 && ls[ls.length - 1] == 0) { ls.pop() }
+        var k = 0
+        while (k < 16) {
+            var b = rem % 2
+            bits.push(b)
+            rem = (rem - b) / 2
+            k = k + 1
+        }
+    }
+    while (bits.length > 0 && bits[bits.length - 1] == 0) { bits.pop() }
+    return bits
+}
+
+// LS = LS * m + a, IN PLACE, for m * LB below 2^53.
+function pynLimbsMulAdd(ls, m, a, lb) {
+    var carry = a
+    var i = 0
+    while (i < ls.length) {
+        var cur = ls[i] * m + carry
+        var q = Math.floor(cur / lb)
+        ls[i] = cur - q * lb
+        carry = q
+        i = i + 1
+    }
+    while (carry > 0) {
+        var q2 = Math.floor(carry / lb)
+        ls.push(carry - q2 * lb)
+        carry = q2
+    }
+}
+
+// The decimal limbs of a magnitude given as BITS; zero answers [].
+function pynBitsToLimbs(bits, lb) {
+    var ls = []
+    var top = bits.length - 1
+    while (top >= 0) {
+        var g = 0
+        var m = 1
+        var low = top - 15
+        if (low < 0) { low = 0 }
+        var j = top
+        while (j >= low) {
+            g = g * 2 + bits[j]
+            m = m * 2
+            j = j - 1
+        }
+        pynLimbsMulAdd(ls, m, g, lb)
+        top = low - 1
+    }
+    return ls
+}
+
+// The digits of a magnitude given as BITS in base 2, 8 or 16; "0" for zero.
+function pynBitsRadix(bits, base) {
+    var w = base == 16 ? 4 : (base == 8 ? 3 : 1)
+    if (bits.length == 0) { return "0" }
+    var out = ""
+    var g = Math.floor((bits.length - 1) / w)
+    while (g >= 0) {
+        var d = 0
+        var k = w - 1
+        while (k >= 0) {
+            var at = g * w + k
+            d = d * 2 + (at < bits.length ? bits[at] : 0)
+            k = k - 1
+        }
+        out = out + "0123456789abcdef".charAt(d)
+        g = g - 1
+    }
+    return out
+}
+
 // The bits of 2^k.
 function pynPow2Bits(k) {
     var bits = []
