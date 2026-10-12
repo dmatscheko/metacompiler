@@ -2280,15 +2280,23 @@ var phpDumping = map[*jsrt][]interface{}{}
 func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
 	if phpIsObj(v) {
 		o := v.(*jsObject)
+		cls, _ := o.props["__class"].(*jsObject)
+		// The count leaves out an uninitialised typed property, which is then listed
+		// as uninitialized(type); an emptied untyped one is not listed (php_var_dump).
 		names := []string{}
+		cnt := 0
 		for _, k := range o.keys {
 			if !phpHiddenProp(k) {
+				if o.props[k] != jsUndef {
+					cnt++
+				} else if _, _, t := rt.phpPropDecl(cls, phpPropName(k)); t == "" {
+					continue
+				}
 				names = append(names, k)
 			}
 		}
 		out := pad + "object(" + rt.phpClassName(v) + ")#" + strconv.Itoa(rt.phpDumpID(o)) +
-			" (" + strconv.Itoa(len(names)) + ") {\n"
-		cls, _ := o.props["__class"].(*jsObject)
+			" (" + strconv.Itoa(cnt) + ") {\n"
 		for _, k := range names {
 			name := phpPropName(k)
 			switch vis := rt.phpVisOf(cls, name); vis {
@@ -2298,6 +2306,11 @@ func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
 				out += pad + "  [\"" + name + "\":protected]=>\n"
 			default:
 				out += pad + "  [\"" + name + "\":\"" + vis + "\":private]=>\n"
+			}
+			if o.props[k] == jsUndef {
+				_, _, t := rt.phpPropDecl(cls, name)
+				out += pad + "  uninitialized(" + t + ")\n"
+				continue
 			}
 			out += rt.phpDump(phpDeref(o.props[k]), ind+2)
 		}
@@ -2353,21 +2366,214 @@ func phpPropName(key string) string {
 }
 
 // phpVisOf is a property's visibility on an instance of cls: "" public, "*"
-// protected, or the declaring class of a private one, read off the __pvis lists
-// of the class chain. Twin of phpVisOf in languages/php-interpreter.abnf.
+// protected, or the declaring class of a private one. Twin of phpVisOf in
+// languages/php-interpreter.abnf.
 func (rt *jsrt) phpVisOf(cls *jsObject, name string) string {
+	_, vis, _ := rt.phpPropDecl(cls, name)
+	return vis
+}
+
+// phpPropDecl is the nearest declaration of an instance property along the class
+// chain, off the ",name=V:T," entries of each __pvis: the declaring class (nil for
+// an undeclared one), its visibility and its declared type. Twin of phpPropDecl in
+// languages/php-interpreter.abnf.
+func (rt *jsrt) phpPropDecl(cls *jsObject, name string) (*jsObject, string, string) {
 	key := "," + name + "="
 	for cls != nil {
 		if l, ok := cls.props["__pvis"]; ok {
 			s := rt.phpStr(l)
 			if at := strings.Index(s, key); at >= 0 {
 				rest := s[at+len(key):]
-				return rest[:strings.IndexByte(rest, ',')]
+				rest = rest[:strings.IndexByte(rest, ',')]
+				c := strings.IndexByte(rest, ':')
+				return cls, rest[:c], rest[c+1:]
 			}
 		}
 		cls, _ = cls.props["__super"].(*jsObject)
 	}
-	return ""
+	return nil, "", ""
+}
+
+// phpPropAccess: may code in class scope (nil outside every class) touch property
+// name of o? 0 yes, 1 no, 2 it is a private of a base class, which the scope
+// cannot see at all and PHP treats as undeclared. Twin of phpPropAccess in
+// languages/php-interpreter.abnf.
+// A protected property is judged by its first declaration up the chain (the
+// prototype), and a scope reaches its own private property on an instance of a
+// subclass that redeclares the name (ZEND_ACC_CHANGED).
+func (rt *jsrt) phpPropAccess(cls *jsObject, name string, scope *jsObject) int {
+	k, vis, _ := rt.phpPropDecl(cls, name)
+	if k == nil || vis == "" || k == scope {
+		return 0
+	}
+	if scope != nil {
+		scopeName := rt.phpStr(scope.props["__name"])
+		if sk, svis, _ := rt.phpPropDecl(scope, name); sk == scope && svis == scopeName && rt.phpIsA(cls, scopeName) {
+			return 0
+		}
+	}
+	if vis != "*" {
+		if k == cls {
+			return 1
+		}
+		return 2
+	}
+	root := k
+	for {
+		sup, _ := root.props["__super"].(*jsObject)
+		up, upVis, _ := rt.phpPropDecl(sup, name)
+		if up == nil || upVis != "*" {
+			break
+		}
+		root = up
+	}
+	if scope != nil && (rt.phpIsA(root, rt.phpStr(scope.props["__name"])) || rt.phpIsA(scope, rt.phpStr(root.props["__name"]))) {
+		return 0
+	}
+	return 1
+}
+
+func (rt *jsrt) phpBadAccess(cls *jsObject, name string) {
+	w := "private"
+	if rt.phpVisOf(cls, name) == "*" {
+		w = "protected"
+	}
+	rt.phpRaise("Error", "Cannot access "+w+" property "+rt.phpStr(cls.props["__name"])+"::$"+name)
+}
+
+// phpInUn: did unset() empty this typed property (o's __un list)? Such a one is
+// offered to the magic methods; one never initialised is not.
+func (rt *jsrt) phpInUn(o *jsObject, name string) bool {
+	l, ok := o.props["__un"].(string)
+	return ok && strings.Contains(l, ","+name+",")
+}
+
+// phpMagicCall runs one magic method under zend_get_property_guard's guard: while
+// __get (g), __set (s), __isset (i) or __unset (u) runs for one property of one
+// object, the same access inside it reaches the plain property. The __mg slot
+// lists the running ones. Twin of phpMagicCall in languages/php-interpreter.abnf.
+func (rt *jsrt) phpMagicCall(o *jsObject, kind, name string, args ...interface{}) (interface{}, bool) {
+	m := map[string]string{"g": "__get", "s": "__set", "i": "__isset", "u": "__unset"}[kind]
+	cls := o.props["__class"]
+	if rt.phpFindMethod(cls, m) == nil {
+		return nil, false
+	}
+	saved, _ := o.props["__mg"].(string)
+	if saved == "" {
+		saved = ","
+	}
+	if strings.Contains(saved, ","+kind+name+",") {
+		return nil, false
+	}
+	o.set("__mg", saved+kind+name+",")
+	defer o.set("__mg", saved)
+	return rt.memberCall(o, m, args), true
+}
+
+// phpStaticVisOf is the visibility class k gives its own static property name,
+// off its __svis list: "" public, "*" protected, else the class (private).
+func (rt *jsrt) phpStaticVisOf(k *jsObject, name string) string {
+	if k == nil {
+		return ""
+	}
+	s, _ := k.props["__svis"].(string)
+	key := "," + name + "="
+	at := strings.Index(s, key)
+	if at < 0 {
+		return ""
+	}
+	rest := s[at+len(key):]
+	return rest[:strings.IndexByte(rest, ',')]
+}
+
+// phpObjDel removes a key from an object, as js_del does.
+func phpObjDel(o *jsObject, key string) {
+	if _, had := o.props[key]; !had {
+		return
+	}
+	delete(o.props, key)
+	for i, k := range o.keys {
+		if k == key {
+			o.keys = append(o.keys[:i], o.keys[i+1:]...)
+			return
+		}
+	}
+}
+
+// phpInstance is o as a class instance, nil for anything else.
+func phpInstance(v interface{}) (*jsObject, *jsObject) {
+	o, ok := v.(*jsObject)
+	if !ok || !phpIsObj(o) {
+		return nil, nil
+	}
+	cls, _ := o.props["__class"].(*jsObject)
+	if cls == nil {
+		return nil, nil
+	}
+	return o, cls
+}
+
+// phpPropRead is $o->p past the emitter's plain read (js_phprop): visibility from
+// scope (true when the emitter already knows the access is allowed), the
+// uninitialised typed property, and the guarded __isset / __get fallbacks. isMode
+// is the read of '??' (BP_VAR_IS). Twin of phpGetProp / phpPropMiss in
+// languages/php-interpreter.abnf.
+func (rt *jsrt) phpPropRead(ov interface{}, key string, scopeV interface{}, isMode bool) interface{} {
+	o, cls := phpInstance(ov)
+	if o == nil {
+		return phpDeref(rt.getMember(ov, key))
+	}
+	name := phpPropName(key)
+	c := 0
+	if scopeV != true {
+		scope, _ := scopeV.(*jsObject)
+		c = rt.phpPropAccess(cls, name, scope)
+	}
+	var d *jsObject
+	typ := ""
+	if c == 0 {
+		if v := phpDeref(o.props[key]); v != nil && v != jsUndef {
+			return v
+		}
+		d, _, typ = rt.phpPropDecl(cls, name)
+	}
+	typed := d != nil && typ != ""
+	uninit := func() {
+		rt.phpRaise("Error", "Typed property "+rt.phpStr(d.props["__name"])+"::$"+name+" must not be accessed before initialization")
+	}
+	if typed && !rt.phpInUn(o, name) {
+		if isMode {
+			return jsNull
+		}
+		uninit()
+	}
+	hasGet := rt.phpFindMethod(cls, "__get") != nil
+	if c == 1 && !hasGet && !isMode {
+		rt.phpBadAccess(cls, name)
+	}
+	if isMode {
+		if r, ran := rt.phpMagicCall(o, "i", name, name); ran {
+			if !rt.phpTest(r) {
+				return jsNull
+			}
+			// A property __isset created is read rather than asked of __get (GH-12695).
+			if v := phpDeref(o.props[key]); c == 0 && v != nil && v != jsUndef {
+				return v
+			}
+		}
+	}
+	if hasGet {
+		if r, ran := rt.phpMagicCall(o, "g", name, name); ran {
+			return r
+		}
+		if c == 1 {
+			rt.phpBadAccess(cls, name)
+		}
+	}
+	if typed && !isMode {
+		uninit()
+	}
+	return jsNull
 }
 
 // phpObjArr is an object's properties as an array: a non-public name mangled
@@ -2379,6 +2585,10 @@ func (rt *jsrt) phpObjArr(o *jsObject, iter bool, scope *jsObject) *jsObject {
 	cls, _ := o.props["__class"].(*jsObject)
 	for _, k := range o.keys {
 		if phpHiddenProp(k) {
+			continue
+		}
+		// An uninitialised typed property is not listed.
+		if o.props[k] == jsUndef {
 			continue
 		}
 		name := phpPropName(k)
@@ -3003,6 +3213,119 @@ func init() {
 			return 0
 		}
 		m["js_phdump"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDump(u(a[0]), 0)) }
+		// The slow halves of a property access, for a name some class restricts or
+		// types and for a miss with a magic method about: (o, key, scope[, ...]),
+		// scope being the running class (null outside one) or true for an access the
+		// emitter knows is allowed. Twins in languages/lib/php-rt.metajs; the
+		// interpreter's are phpGetProp, phpSetProp, phpPropIsset and phpUnsetProp.
+		m["js_phprop"] = func(a []uint64) uint64 {
+			return w(rt.phpPropRead(u(a[0]), rt.phpStr(u(a[1])), u(a[2]), u(a[3]) == true))
+		}
+		m["js_phpropset"] = func(a []uint64) uint64 {
+			ov, key, val := u(a[0]), rt.phpStr(u(a[1])), u(a[3])
+			o, cls := phpInstance(ov)
+			if o == nil {
+				rt.setMember(ov, key, val)
+				return 0
+			}
+			name := phpPropName(key)
+			c := 0
+			if sv := u(a[2]); sv != true {
+				scope, _ := sv.(*jsObject)
+				c = rt.phpPropAccess(cls, name, scope)
+			}
+			if c == 1 {
+				if _, ran := rt.phpMagicCall(o, "s", name, name, val); !ran {
+					rt.phpBadAccess(cls, name)
+				}
+				return 0
+			}
+			raw := o.props[key]
+			if c == 2 {
+				raw = jsUndef
+			}
+			// __set is for a property the instance does not have. An uninitialised
+			// typed one it has, and the write initialises it; one unset() emptied
+			// is offered to __set again.
+			if raw == jsUndef || raw == nil {
+				if _, has := o.props[key]; !has || c == 2 || rt.phpInUn(o, name) {
+					if _, ran := rt.phpMagicCall(o, "s", name, name, val); ran {
+						return 0
+					}
+				}
+			}
+			if cell := phpCellOf(raw); cell != nil {
+				cell.set("v", val)
+			} else {
+				o.set(key, val)
+			}
+			return 0
+		}
+		m["js_phpropisset"] = func(a []uint64) uint64 {
+			ov, key := u(a[0]), rt.phpStr(u(a[1]))
+			o, cls := phpInstance(ov)
+			if o == nil {
+				return boolH(rt.phpArrHas(ov, key))
+			}
+			name := phpPropName(key)
+			c := 0
+			if sv := u(a[2]); sv != true {
+				scope, _ := sv.(*jsObject)
+				c = rt.phpPropAccess(cls, name, scope)
+			}
+			if c == 0 {
+				raw, has := o.props[key]
+				if v := phpDeref(raw); has && v != jsUndef {
+					return boolH(v != jsNull)
+				}
+				if has && !rt.phpInUn(o, name) {
+					return jsHFalse
+				}
+			}
+			r, ran := rt.phpMagicCall(o, "i", name, name)
+			return boolH(ran && rt.phpTest(r))
+		}
+		m["js_phpropunset"] = func(a []uint64) uint64 {
+			ov, key := u(a[0]), rt.phpStr(u(a[1]))
+			o, cls := phpInstance(ov)
+			if o == nil {
+				if obj, ok := ov.(*jsObject); ok {
+					phpObjDel(obj, key)
+				}
+				return 0
+			}
+			name := phpPropName(key)
+			c := 0
+			if sv := u(a[2]); sv != true {
+				scope, _ := sv.(*jsObject)
+				c = rt.phpPropAccess(cls, name, scope)
+			}
+			if c == 0 {
+				if raw, has := o.props[key]; has {
+					_, _, typ := rt.phpPropDecl(cls, name)
+					if raw != jsUndef || (typ != "" && !rt.phpInUn(o, name)) {
+						if typ == "" {
+							phpObjDel(o, key)
+							return 0
+						}
+						// A typed property keeps its slot, uninitialised again.
+						o.props[key] = jsUndef
+						if !rt.phpInUn(o, name) {
+							l, _ := o.props["__un"].(string)
+							if l == "" {
+								l = ","
+							}
+							o.set("__un", l+name+",")
+						}
+						return 0
+					}
+				}
+			}
+			if _, ran := rt.phpMagicCall(o, "u", name, name); !ran && c == 1 {
+				rt.phpBadAccess(cls, name)
+			}
+			return 0
+		}
 		// echo v: PHP writes the string's BYTES, so a held byte goes out as that
 		// one byte. Twin of phsEcho in languages/lib/php-strings.js.
 		m["js_phecho"] = func(a []uint64) uint64 {
@@ -3138,6 +3461,80 @@ func init() {
 					return jsHTrue
 				}
 				o, _ = o.props["__super"].(*jsObject)
+			}
+			return jsHFalse
+		}
+		// js_phsvis(cls, name, scope, quiet): may code in class scope (null outside
+		// one) touch static property name of cls? True when it may; otherwise false
+		// when quiet (isset, '??'), else PHP's Error. Twin of phpStaticVis in
+		// languages/php-interpreter.abnf.
+		m["js_phsvis"] = func(a []uint64) uint64 {
+			cls, _ := u(a[0]).(*jsObject)
+			name := rt.phpStr(u(a[1]))
+			scope, _ := u(a[2]).(*jsObject)
+			key := "s:" + name
+			k := cls
+			for k != nil {
+				if _, has := k.props[key]; has {
+					break
+				}
+				k, _ = k.props["__super"].(*jsObject)
+			}
+			vis := rt.phpStaticVisOf(k, name)
+			if k == nil || vis == "" || k == scope {
+				return jsHTrue
+			}
+			if vis == "*" && scope != nil {
+				root := k
+				for {
+					sup, _ := root.props["__super"].(*jsObject)
+					for sup != nil {
+						if _, has := sup.props[key]; has {
+							break
+						}
+						sup, _ = sup.props["__super"].(*jsObject)
+					}
+					if sup == nil || rt.phpStaticVisOf(sup, name) != "*" {
+						break
+					}
+					root = sup
+				}
+				if rt.phpIsA(root, rt.phpStr(scope.props["__name"])) || rt.phpIsA(scope, rt.phpStr(root.props["__name"])) {
+					return jsHTrue
+				}
+			}
+			if u(a[3]) == true {
+				return jsHFalse
+			}
+			w := "private"
+			if vis == "*" {
+				w = "protected"
+			}
+			rt.phpRaise("Error", "Cannot access "+w+" property "+rt.phpStr(cls.props["__name"])+"::$"+name)
+			return 0
+		}
+		// js_phpexists(v, found, name): property_exists - a property the class chain
+		// of found (an object's class, or the class a string named) declares, static
+		// or not and whatever its visibility, or one the object v has, null or not.
+		// Twin of phpPropExists in languages/php-interpreter.abnf.
+		m["js_phpexists"] = func(a []uint64) uint64 {
+			name := rt.phpStr(u(a[2]))
+			if o, ok := u(a[0]).(*jsObject); ok && phpIsObj(o) {
+				if _, has := o.props[phpPropKey(name)]; has {
+					return jsHTrue
+				}
+			}
+			k, _ := u(a[1]).(*jsObject)
+			if k != nil && k.props["__isclass"] != true {
+				k, _ = k.props["__class"].(*jsObject)
+			}
+			if d, _, _ := rt.phpPropDecl(k, name); d != nil {
+				return jsHTrue
+			}
+			for ; k != nil; k, _ = k.props["__super"].(*jsObject) {
+				if _, has := k.props["s:"+name]; has {
+					return jsHTrue
+				}
 			}
 			return jsHFalse
 		}

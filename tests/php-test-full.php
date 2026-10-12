@@ -2894,6 +2894,133 @@ function s62() {
         && realpath(__FILE__ . "/..") === false && realpath(__DIR__ . "/no-such-dir/..") === false);
 }
 
+// ===== SECTION 63: visibility, uninitialised typed properties, magic guards =====
+// A private property is reachable only from its declaring class, a protected one
+// from any class related to the one that first declared it (zend_get_property_offset,
+// is_protected_compatible_scope). Out of reach, a read goes to __get and a write to
+// __set when the class has one, else both are "Cannot access ... property" Errors;
+// isset() answers false, or __isset's answer. A private of a base class is invisible
+// to a subclass scope, which sees the name as undeclared. Static properties are
+// checked the same way, and isset() / '??' answer false / null for one out of reach.
+// A typed property without a default starts UNINITIALISED: reading it is an Error
+// that skips __get, isset() is false without __isset, '??' takes its right side,
+// listings leave it out and var_dump prints uninitialized(type); a write
+// initialises it without __set. unset() puts a typed property back in that state,
+// and then the magic methods are offered it. While __get / __set / __isset /
+// __unset runs for one property of one object, the same access inside it reaches
+// the plain property (zend_get_property_guard). A function declared to return by
+// reference hands its variable to a '??=' written through its call.
+class S63A {
+    private $a = 1;
+    protected $b = 2;
+    public $c = 3;
+    private static $sa = 4;
+    protected static $sb = 5;
+    function getA() { return $this->a; }
+    function readA($o) { return $o->a; }
+    static function sa() { return self::$sa; }
+}
+class S63B extends S63A {
+    function getB() { return $this->b; }
+    function setB($v) { $this->b = $v; }
+    function seeA() { return isset($this->a); }
+    static function sb() { return static::$sb; }
+}
+class S63C extends S63A { function peekB($o) { return $o->b; } }
+class S63M {
+    private $p = 5;
+    public $log = "";
+    function __get($n) { $this->log .= "g" . $n; return "m" . $n; }
+    function __set($n, $v) { $this->log .= "s" . $n; }
+}
+class S63T {
+    public int $x;
+    public ?string $s;
+    public $u;
+    public int $d = 3;
+}
+class S63G {
+    public int $t;
+    public $log = "";
+    function __get($n) { $this->log .= "g" . $n; return $this->$n ?? "-"; }
+    function __set($n, $v) { $this->log .= "s" . $n; $this->$n = $v; }
+    function __isset($n) { $this->log .= "i" . $n; return isset($this->$n); }
+    function __unset($n) { $this->log .= "u" . $n; unset($this->$n); }
+}
+function s63err($f) {
+    try { $f(); } catch (Error $e) { return $e->getMessage(); }
+    return "none";
+}
+function &s63ref() { global $s63v; return $s63v; }
+function s63val() { global $s63v; return $s63v; }
+function s63() {
+    $o = new S63A;
+    $b = new S63B;
+    check("vis1", $o->c === 3 && $o->getA() === 1 && $o->readA(new S63A) === 1 && $b->getB() === 2
+        && (new S63C)->peekB($b) === 2 && !$b->seeA());
+    check("vis2", s63err(function() use ($o) { return $o->a; }) === "Cannot access private property S63A::\$a"
+        && s63err(function() use ($o) { return $o->b; }) === "Cannot access protected property S63A::\$b"
+        && s63err(function() use ($o) { $o->a = 9; }) === "Cannot access private property S63A::\$a"
+        && s63err(function() use ($o) { unset($o->b); }) === "Cannot access protected property S63A::\$b"
+        && !isset($o->a) && isset($o->c) && $o->getA() === 1);
+    $n = "a";
+    $b->setB(7);
+    check("vis3", s63err(function() use ($o, $n) { return $o->$n; }) === "Cannot access private property S63A::\$a"
+        && $b->getB() === 7);
+    $m = new S63M;
+    $r = [$m->p];
+    $m->p = 1;
+    check("vis4", $r === ["mp"] && $m->log === "gpsp");
+    check("vis5", S63A::sa() === 4 && S63B::sb() === 5
+        && s63err(function() { return S63A::$sa; }) === "Cannot access private property S63A::\$sa"
+        && s63err(function() { S63A::$sb = 1; }) === "Cannot access protected property S63A::\$sb"
+        && !isset(S63A::$sa) && (S63A::$sb ?? "n") === "n");
+    $t = new S63T;
+    $r = [s63err(function() use ($t) { return $t->x; }), isset($t->x), $t->x ?? "d", count((array) $t)];
+    $keys = [];
+    foreach ($t as $k => $v) { $keys[] = $k; }
+    check("uni1", $r === ["Typed property S63T::\$x must not be accessed before initialization", false, "d", 2]
+        && $keys === ["u", "d"] && print_r($t, true) === "S63T Object\n(\n    [u] => \n    [d] => 3\n)\n");
+    $t->x = 5;
+    $r = [$t->x, isset($t->x)];
+    unset($t->x, $t->u);
+    $r[] = s63err(function() use ($t) { return $t->x; });
+    $c = clone $t;
+    $c->x = 9;
+    check("uni2", $r === [5, true, "Typed property S63T::\$x must not be accessed before initialization"]
+        && $c->x === 9 && array_keys((array) $t) === ["d"] && array_keys((array) $c) === ["x", "d"]);
+    $g = new S63G;
+    $r = [s63err(function() use ($g) { return $g->t; }), isset($g->t)];
+    $g->t = 1;
+    $r[] = $g->t;
+    check("grd1", $r === ["Typed property S63G::\$t must not be accessed before initialization", false, 1]
+        && $g->log === "");
+    unset($g->t);
+    $r = [$g->t, isset($g->t)];
+    $g->t = 2;
+    check("grd2", $r === ["-", false] && $g->t === 2 && $g->log === "gtititst");
+    $g->log = "";
+    $g->dyn = 3;
+    $r = [$g->dyn, isset($g->dyn), isset($g->zz), $g->zz];
+    unset($g->dyn);
+    unset($g->dyn);
+    check("grd3", $r === [3, true, false, "-"] && $g->log === "sdynizzgzzizzudyn" && !property_exists($g, "dyn"));
+    check("pex1", property_exists($g, "t") && property_exists("S63A", "a") && property_exists("S63B", "b")
+        && property_exists("S63A", "sa") && !property_exists("S63A", "zz") && property_exists($m, "log"));
+    global $s63v;
+    s63ref()["k"] ??= 1;
+    s63ref()["k"] ??= 2;
+    s63val()["v"] ??= 3;
+    check("rrt1", $s63v === ["k" => 1]);
+}
+function s63dump() {
+    $t = new S63T;
+    $t->s = null;
+    var_dump($t);
+    unset($t->d);
+    var_dump($t);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2964,6 +3091,8 @@ function main() {
     s60(); // SECTION-CALL 60
     s61(); // SECTION-CALL 61
     s62(); // SECTION-CALL 62
+    s63(); // SECTION-CALL 63
+    s63dump(); // SECTION-CALL 63
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

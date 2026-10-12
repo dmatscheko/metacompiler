@@ -1699,18 +1699,32 @@ function phDumpObj(v, ind, pad) {
         // the internal __-prefixed slots - phpHiddenProp's rule in the Go twin - so
         // no filtering is needed here.
         var names = keysOf(v)
-        var oout = pad + "object(" + phClassName(v) + ")#" + phStr(phDumpID(v)) +
-                   " (" + phStr(names.length) + ") {\n"
         var cls = v["__class"]
+        // The count leaves out an uninitialised typed property, which is then listed
+        // as uninitialized(type) (php_var_dump).
+        var cnt = 0
+        var ci = 0
+        while (ci < names.length) {
+            if (v[names[ci]] !== undefined) { cnt = cnt + 1 }
+            ci = ci + 1
+        }
+        var oout = pad + "object(" + phClassName(v) + ")#" + phStr(phDumpID(v)) +
+                   " (" + phStr(cnt) + ") {\n"
         var j = 0
         while (j < names.length) {
             var pname = phPropName(names[j])
-            var vis = phVisOf(cls, pname)
-            var mark = ""
-            if (vis == "*") { mark = ":protected" }
-            else if (vis != "") { mark = ":\"" + vis + "\":private" }
-            oout = oout + pad + "  [\"" + pname + "\"" + mark + "]=>\n"
-            oout = oout + phDump(phDeref(v[names[j]]), ind + 2)
+            var d = phPropDecl(cls, pname)
+            var raw = v[names[j]]
+            if (raw !== undefined || (d !== undefined && d["typ"] != "")) {
+                var vis = ""
+                if (d !== undefined) { vis = d["vis"] }
+                var mark = ""
+                if (vis == "*") { mark = ":protected" }
+                else if (vis != "") { mark = ":\"" + vis + "\":private" }
+                oout = oout + pad + "  [\"" + pname + "\"" + mark + "]=>\n"
+                if (raw === undefined) { oout = oout + pad + "  uninitialized(" + d["typ"] + ")\n" }
+                else { oout = oout + phDump(phDeref(raw), ind + 2) }
+            }
             j = j + 1
         }
         return oout + pad + "}\n"
@@ -1744,20 +1758,229 @@ function js_phpkey(v) { return phPropKey(phStr(v)) }
 function js_phpname(k) { return phPropName(phStr(k)) }
 
 // A property's visibility on an instance of cls: "" public, "*" protected, or
-// the declaring class of a private one, off the __pvis lists of the class chain.
-// Twin of phpVisOf in languages/php-interpreter.abnf.
+// the declaring class of a private one. Twin of phpVisOf in
+// languages/php-interpreter.abnf.
 function phVisOf(cls, name) {
+    var d = phPropDecl(cls, name)
+    if (d === undefined) { return "" }
+    return d["vis"]
+}
+
+// The nearest declaration of an instance property along the class chain, off the
+// ",name=V:T," entries of each __pvis: {k: declaring class, vis, typ}, undefined
+// for an undeclared one. Twin of phpPropDecl in languages/php-interpreter.abnf.
+function phPropDecl(cls, name) {
     var key = "," + name + "="
     var k = cls
     while (k !== undefined && k !== null) {
         var l = k["__pvis"]
         if (typeof l == "string") {
             var at = l.indexOf(key)
-            if (at >= 0) { return l.substring(at + key.length, l.indexOf(",", at + key.length)) }
+            if (at >= 0) {
+                var c = l.indexOf(":", at + key.length)
+                return {k: k, vis: l.substring(at + key.length, c), typ: l.substring(c + 1, l.indexOf(",", c))}
+            }
         }
         k = k["__super"]
     }
-    return ""
+    return undefined
+}
+
+// May code in class scope (null outside every class, true for an access the
+// emitter already knows is allowed) touch property name of o? 0 yes, 1 no, 2 it
+// is a private of a base class, which the scope cannot see at all and PHP treats
+// as undeclared. A protected property is judged by its first declaration up the
+// chain (the prototype), and a scope reaches its own private property on an
+// instance of a subclass that redeclares the name (ZEND_ACC_CHANGED). Twin of
+// phpPropAccess in languages/php-interpreter.abnf.
+function phPropAccess(o, name, scope) {
+    if (scope === true) { return 0 }
+    var cls = o["__class"]
+    var d = phPropDecl(cls, name)
+    if (d === undefined) { return 0 }
+    var vis = phStr(d["vis"])
+    if (vis == "" || d["k"] === scope) { return 0 }
+    var hasScope = !rtIsNil(scope)
+    if (hasScope) {
+        var sn = phStr(scope["__name"])
+        var sd = phPropDecl(scope, name)
+        if (sd !== undefined && sd["k"] === scope && phStr(sd["vis"]) == sn && phIsA(cls, sn)) { return 0 }
+    }
+    if (vis != "*") {
+        if (d["k"] === cls) { return 1 }
+        return 2
+    }
+    var root = d["k"]
+    var up = phPropDecl(root["__super"], name)
+    while (up !== undefined && phStr(up["vis"]) == "*") {
+        root = up["k"]
+        up = phPropDecl(root["__super"], name)
+    }
+    if (!hasScope) { return 1 }
+    if (phIsA(root, phStr(scope["__name"])) || phIsA(scope, phStr(root["__name"]))) { return 0 }
+    return 1
+}
+
+function phBadAccess(o, name) {
+    var w = "private"
+    if (phVisOf(o["__class"], name) == "*") { w = "protected" }
+    phRaise("Error", "Cannot access " + w + " property " + phClassName(o) + "::$" + name)
+}
+
+// Did unset() empty this typed property (o's __un list)? Such a one is offered to
+// the magic methods; one never initialised is not.
+function phInUn(o, name) {
+    var l = o["__un"]
+    return typeof l == "string" && l.indexOf("," + name + ",") >= 0
+}
+
+// Is key one of o's own property keys, even one holding undefined?
+function phHasKey(o, key) {
+    var ks = keysOf(o)
+    var i = 0
+    while (i < ks.length) {
+        if (ks[i] == key) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// One magic method run under zend_get_property_guard's guard: while __get (g),
+// __set (s), __isset (i) or __unset (u) runs for one property of one object, the
+// same access inside it reaches the plain property. The __mg slot lists the
+// running ones. Answers {r} when it ran, undefined when the class has no such
+// method or it is already running. Twin of phpMagicCall in abnf/jsrtphp.go.
+function phMagicCall(o, kind, name, args) {
+    var mn = "__get"
+    if (kind == "s") { mn = "__set" }
+    else if (kind == "i") { mn = "__isset" }
+    else if (kind == "u") { mn = "__unset" }
+    var m = rtFindMethod(o["__class"], mn)
+    if (typeof m != "function") { return undefined }
+    var saved = ","
+    if (typeof o["__mg"] == "string") { saved = o["__mg"] }
+    if (saved.indexOf("," + kind + name + ",") >= 0) { return undefined }
+    o["__mg"] = saved + kind + name + ","
+    var out = {}
+    try {
+        out["r"] = m.apply(undefined, rtPrepend(o, args))
+    } finally {
+        o["__mg"] = saved
+    }
+    return out
+}
+
+function phUninitErr(d, name) {
+    phRaise("Error", "Typed property " + phStr(d["k"]["__name"]) + "::$" + name + " must not be accessed before initialization")
+}
+
+// The slow halves of a property access, for a name some class restricts or types
+// and for a miss with a magic method about: (o, key, scope, ...), scope being the
+// running class (null outside one) or true for an access the emitter knows is
+// allowed. Twins: the js_phprop family in abnf/jsrtphp.go; the interpreter's are
+// phpGetProp, phpSetProp, phpPropIsset and phpUnsetProp.
+function phInstance(o) { return phIsObj(o) && typeof o["__class"] == "object" && o["__class"] !== null }
+
+function js_phprop(o, key, scope, isMode) {
+    if (!phInstance(o)) { return phDeref(o[key]) }
+    var name = phPropName(phStr(key))
+    var c = phPropAccess(o, name, scope)
+    var d = undefined
+    if (c == 0) {
+        var v = phDeref(o[key])
+        if (v !== undefined) { return v }
+        d = phPropDecl(o["__class"], name)
+        if (d !== undefined && d["typ"] == "") { d = undefined }
+    }
+    if (d !== undefined && !phInUn(o, name)) {
+        if (isMode === true) { return null }
+        phUninitErr(d, name)
+    }
+    var hasGet = typeof rtFindMethod(o["__class"], "__get") == "function"
+    if (c == 1 && !hasGet && isMode !== true) { phBadAccess(o, name) }
+    if (isMode === true) {
+        var ri = phMagicCall(o, "i", name, [name])
+        if (ri !== undefined) {
+            if (!phTest(ri["r"])) { return null }
+            // A property __isset created is read rather than asked of __get (GH-12695).
+            if (c == 0 && o[key] !== undefined) { return phDeref(o[key]) }
+        }
+    }
+    if (hasGet) {
+        var rg = phMagicCall(o, "g", name, [name])
+        if (rg !== undefined) { return rg["r"] }
+        if (c == 1) { phBadAccess(o, name) }
+    }
+    if (d !== undefined && isMode !== true) { phUninitErr(d, name) }
+    return null
+}
+
+function js_phpropset(o, key, scope, val) {
+    if (!phInstance(o)) {
+        o[key] = val
+        return undefined
+    }
+    var name = phPropName(phStr(key))
+    var c = phPropAccess(o, name, scope)
+    if (c == 1) {
+        if (phMagicCall(o, "s", name, [name, val]) === undefined) { phBadAccess(o, name) }
+        return undefined
+    }
+    var raw = undefined
+    if (c == 0) { raw = o[key] }
+    // __set is for a property the instance does not have. An uninitialised typed
+    // one it has, and the write initialises it; one unset() emptied is offered to
+    // __set again.
+    if (raw === undefined) {
+        if (c == 2 || phInUn(o, name) || !phHasKey(o, key)) {
+            if (phMagicCall(o, "s", name, [name, val]) !== undefined) { return undefined }
+        }
+    }
+    var cell = phCellOf(raw)
+    if (cell !== undefined) { cell["v"] = val } else { o[key] = val }
+    return undefined
+}
+
+function js_phpropisset(o, key, scope) {
+    if (!phInstance(o)) { return phArrHas(o, key) }
+    var name = phPropName(phStr(key))
+    var c = phPropAccess(o, name, scope)
+    if (c == 0) {
+        var v = phDeref(o[key])
+        if (v !== undefined) { return v !== null }
+        if (!phInUn(o, name) && phHasKey(o, key)) { return false }
+    }
+    var r = phMagicCall(o, "i", name, [name])
+    return r !== undefined && phTest(r["r"])
+}
+
+function js_phpropunset(o, key, scope) {
+    if (!phInstance(o)) {
+        if (typeof o == "object" && !rtIsNil(o)) { delKey(o, phStr(key)) }
+        return undefined
+    }
+    var name = phPropName(phStr(key))
+    var c = phPropAccess(o, name, scope)
+    if (c == 0 && phHasKey(o, key)) {
+        var d = phPropDecl(o["__class"], name)
+        var typed = d !== undefined && d["typ"] != ""
+        if (o[key] !== undefined || (typed && !phInUn(o, name))) {
+            if (!typed) {
+                delKey(o, phStr(key))
+                return undefined
+            }
+            // A typed property keeps its slot, uninitialised again.
+            o[key] = undefined
+            if (!phInUn(o, name)) {
+                var l = ","
+                if (typeof o["__un"] == "string") { l = o["__un"] }
+                o["__un"] = l + name + ","
+            }
+            return undefined
+        }
+    }
+    if (phMagicCall(o, "u", name, [name]) === undefined && c == 1) { phBadAccess(o, name) }
+    return undefined
 }
 
 // An object's properties as an array - keysOf's own non-hidden keys in
@@ -1770,12 +1993,15 @@ function phObjArr(v, iter, scope) {
     var ks = keysOf(v)
     var i = 0
     while (i < ks.length) {
-        var name = phPropName(ks[i])
-        var vis = phVisOf(cls, name)
-        if (vis == "") { phArrSet(out, name, v[ks[i]]) }
-        else if (iter) {
-            if (phVisible(v, vis, scope)) { phArrSet(out, name, v[ks[i]]) }
-        } else { phArrSet(out, "\x00" + vis + "\x00" + name, v[ks[i]]) }
+        // An uninitialised typed property is not listed.
+        if (v[ks[i]] !== undefined) {
+            var name = phPropName(ks[i])
+            var vis = phVisOf(cls, name)
+            if (vis == "") { phArrSet(out, name, v[ks[i]]) }
+            else if (iter) {
+                if (phVisible(v, vis, scope)) { phArrSet(out, name, v[ks[i]]) }
+            } else { phArrSet(out, "\x00" + vis + "\x00" + name, v[ks[i]]) }
+        }
         i = i + 1
     }
     return out
@@ -2463,6 +2689,54 @@ function js_phmexists(v, m) {
         k = k["__super"]
     }
     return false
+}
+// js_phsvis(cls, name, scope, quiet): may code in class scope (null outside one)
+// touch static property name of cls? True when it may; otherwise false when
+// quiet (isset, '??'), else PHP's Error. Twin of m["js_phsvis"] in
+// abnf/jsrtphp.go.
+function phStaticVisOf(k, name) {
+    if (rtIsNil(k)) { return "" }
+    var l = k["__svis"]
+    if (typeof l != "string") { return "" }
+    var key = "," + name + "="
+    var at = l.indexOf(key)
+    if (at < 0) { return "" }
+    return l.substring(at + key.length, l.indexOf(",", at + key.length))
+}
+function js_phsvis(cls, n, scope, quiet) {
+    var name = phStr(n)
+    var key = "s:" + name
+    var k = phOwner(cls, key)
+    var vis = phStaticVisOf(k, name)
+    if (k === undefined || vis == "" || k === scope) { return true }
+    if (vis == "*" && !rtIsNil(scope)) {
+        var root = k
+        var sup = phOwner(root["__super"], key)
+        while (sup !== undefined && phStaticVisOf(sup, name) == "*") {
+            root = sup
+            sup = phOwner(root["__super"], key)
+        }
+        if (phIsA(root, phStr(scope["__name"])) || phIsA(scope, phStr(root["__name"]))) { return true }
+    }
+    if (quiet === true) { return false }
+    var w = "private"
+    if (vis == "*") { w = "protected" }
+    phRaise("Error", "Cannot access " + w + " property " + phStr(cls["__name"]) + "::$" + name)
+    return false
+}
+
+// property_exists: a property the class chain of found (an object's class, or
+// the class a string named) declares, static or not and whatever its
+// visibility, or one the object v has, null or not. Twin of js_phpexists in
+// abnf/jsrtphp.go.
+function js_phpexists(v, found, n) {
+    var name = phStr(n)
+    if (phIsObj(v) && phHasKey(v, phPropKey(name))) { return true }
+    if (found === undefined || found === null || typeof found != "object") { return false }
+    var k = found
+    if (k["__isclass"] === undefined) { k = found["__class"] }
+    if (phPropDecl(k, name) !== undefined) { return true }
+    return phOwner(k, "s:" + name) !== undefined
 }
 // is_a / is_subclass_of; found is the descriptor a string v names (null when
 // none). Twin of phpIsAOf in languages/php-interpreter.abnf.

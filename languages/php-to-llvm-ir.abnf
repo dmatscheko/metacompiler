@@ -181,8 +181,10 @@ CloseAhead  = :script(~~
 
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
-Def         <~~ push(makeFun(takeAll())) ~~>
-            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(noteFnName(up.in)); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
+// 'function &name()' returns by REFERENCE (DefAmp, refFnEnter).
+Def         <~~ push(makeFun(takeAll())); refFnStack.pop() ~~>
+            = [ AttrGrp ] KwFunction [ DefAmp ] Name <~~ push(noteFnName(up.in)); refFnEnter(up.in); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
+DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
@@ -339,7 +341,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 // {propdecl} per name rather than exactly one, and every name inherits the shared
 // modifiers and type hint.
 PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length; pi++) { push({propdecl: pds[pi]}) } ~~>
-            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName <~~ cloNoteProp(up.in) ~~> [ "=" Expression ]
+            = [ AttrGrp ] { PropMod } [ PropType ] DollarName <~~ cloNoteProp(up.in) ~~> [ "=" Expression ]
               { "," DollarName [ "=" Expression ] } ( ";" | PropHooks ) ;
 // PHP 8.4 property hooks: 'public int $x = 1 { get => e; set { ... } }' (and the
 // bodyless 'get;' / 'set;' of an abstract or interface property, which declares a hook
@@ -359,9 +361,14 @@ HookArrow   <~~ push({harrow: pop()}) ~~> = [ ParamList ] "=>" Expression ";" ;
 HookBlock   <~~ push({hblock: pop().body}) ~~> = [ ParamList ] Block ;
 
 PropMod     <~~ push({mod: up.in}) ~~> = Modifier ;
+// A property's declared type. A typed property without a default starts
+// UNINITIALISED - its slot holds undefined, not null - and var_dump names the type
+// (uninitialized(?Foo\C)), so the text is kept.
+PropType    <~~ push({ptype: propTypeText(up.in)}) ~~> = TypeHint ;
+
 // 'private(set)' / 'protected(set)' is PHP 8.4 asymmetric visibility: the setter is
-// more restricted than the getter. Visibility is not enforced in this subset, so the
-// '(set)' suffix is simply accepted.
+// more restricted than the getter. Only the plain visibility is enforced; the
+// '(set)' suffix is accepted and leaves writes at that visibility.
 Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd [ SetVis ] ;
 SetVis      = "(" "set" ")" ;
 
@@ -539,7 +546,7 @@ ForeachV2T  <~~ push({v2: pop()}) ~~>
 // value.
 FeRef       <~~ noteRef(); push({feref: true}) ~~> = "&" ;
 
-Return      <~~ push(makeReturn(takeAll())) ~~>
+Return      <~~ push(makeReturn(takeAll(), refRetVar(up.in))) ~~>
             = KwReturn [ Expression ] Semi ;
 // 'break 2' / 'continue 2' leave that many enclosing loops (and switches). The level
 // is a literal integer in PHP - it has to be known where the jump is emitted - so it
@@ -657,13 +664,13 @@ TgtOnly     <~~ push(makeTargetRef(takeAll())) ~~>
 TStep       = ArrowField | ArrowDyn | TIndex | TAppend ;
 // A CALL is an assignable head ('foo()->bar[1] = "123"'). Twin of CallHead in
 // php-interpreter.abnf; see there.
-CallHead    <~~ push({headT: pop()}) ~~>
+CallHead    <~~ push({headT: pop(), headFn: callHeadName(up.in)}) ~~>
             = Call ;
 // A member CHAIN that ends in a call. Twin of ChainHead in php-interpreter.abnf;
 // see there.
-ChainHead   <~~ push({headT: pop()}) ~~>
+ChainHead   <~~ push({headT: pop(), headFn: callHeadName(up.in)}) ~~>
             = ChainExpr ;
-ChainExpr   <~~ push(foldCallMember(takeAll())) ~~>
+ChainExpr   <~~ push(foldCallMember(takeAll(), phThisHead(up.in))) ~~>
             = Primary ChainSeg { ChainSeg } | ChainCall0 { ChainSeg } ;
 ChainCall0  = Call | StaticExpr | "(" Expression ")" ;
 ChainSeg    = { ChainPlain } ( MethodSfx | DynMethodSfx | CallSfx | StaticSfx ) ;
@@ -990,7 +997,7 @@ IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
 OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
-CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+CallMember  <~~ push(foldCallMember(takeAll(), phThisHead(up.in))) ~~>
             = Primary { MethodSfx | DynMethodSfx | FieldSfx | DynFieldSfx | IndexSfx | CallSfx | StaticSfx } ;
 // '->' and the NULLSAFE '?->'. A '?->' whose receiver is null makes the WHOLE chain
 // yield null without evaluating anything to its right - including the arguments of
@@ -2491,13 +2498,64 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     function makeConstStmt() { return function(b) { return b } }
-    function makeReturn(items) {
+    function makeReturn(items, rv) {
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hNull
             if (t != null) { var r = t(b); b = r.b; v = r.v }
+            // In a function returning by reference: the variable's cell, or null for a
+            // value that is no variable, is left in the globals frame's \x00refret for
+            // a caller that writes through the result (memoRefV).
+            if (rv != null) {
+                var cv = hNull
+                if (rv != "") {
+                    var rc = varCell(b, rv)
+                    b = rc.b
+                    cv = rc.v
+                }
+                callExt(b, "js_scope_decl", [globalsFrameV(b), emitStr(b, "\x00refret"), cv])
+            }
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
+    }
+    // 'function &f()': the functions declared to return by reference, by lower-cased
+    // name, and for each function being parsed whether it is one (refFnStack).
+    // Twins of refFns / refRetVar / callHeadName in php-interpreter.abnf.
+    var refFns = {}
+    var refFnStack = []
+    var defAmp = false
+    function refFnEnter(name) {
+        refFnStack.push(defAmp)
+        if (defAmp) {
+            refFns["$" + phsCase(stripWs(name), false)] = true
+            noteRef()
+        }
+        defAmp = false
+    }
+    function refRetVar(t) {
+        if (refFnStack.length == 0 || refFnStack[refFnStack.length - 1] !== true) { return null }
+        var e = t.substring(6, t.length - 1)
+        if (e.length < 2 || e.charAt(0) != "$" || e == "$this") { return "" }
+        for (var i = 1; i < e.length; i++) {
+            var ch = e.charAt(i)
+            if (!(isNameStart(ch) || (ch >= "0" && ch <= "9"))) { return "" }
+        }
+        return e
+    }
+    function callHeadName(t) {
+        var i = 0
+        while (i < t.length && (isNameStart(t.charAt(i)) || t.charAt(i) == "\\" || (i > 0 && t.charAt(i) >= "0" && t.charAt(i) <= "9"))) { i++ }
+        if (i == 0 || i >= t.length || t.charAt(i) != "(") { return "" }
+        // The argument list must close the text: 'f()->g()' is a chain, not f's call.
+        var depth = 0
+        for (var j = i; j < t.length; j++) {
+            if (t.charAt(j) == "(") { depth++ }
+            else if (t.charAt(j) == ")") {
+                depth--
+                if (depth == 0 && j != t.length - 1) { return "" }
+            }
+        }
+        return lastSeg(phsCase(t.substring(0, i), false))
     }
     // break / continue go through emitBreak / emitContinue so a jump that leaves a try
     // body (with no loop of its own) becomes a control signal instead of an invalid
@@ -3574,7 +3632,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var pn = prop.substring(2)
             return function(b) {
                 var rov = makeVarRef(name)(b)
-                return emitPropGet(rov.b, rov.v, propKey(rov.b, pn), pn)
+                return emitPropGet(rov.b, rov.v, propKey(rov.b, pn), pn, name == "$this", false)
             }
         }
         return makeVarRef(name)
@@ -3645,7 +3703,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // A chain emitted with coalIs is the left operand of '??' (makeCoalesce), and
     // its element reads are emitIsFetch.
-    foldCallMember = function(items) {
+    // thisHead says the chain starts at '$this' as written (phThisHead).
+    foldCallMember = function(items, thisHead) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -3681,7 +3740,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 } else if (s.kind == "dynfield") {
                     var rf = s.nameT(b)
                     b = rf.b
-                    var rdf = emitPropGet(b, cur, callExt(b, "js_phpkey", [rf.v]), null)
+                    var rdf = emitPropGet(b, cur, callExt(b, "js_phpkey", [rf.v]), null, false, mode === coalIs)
                     b = rdf.b
                     cur = rdf.v
                 } else if (s.kind == "mcall") {
@@ -3699,7 +3758,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     b = rm.b
                     cur = rm.v
                 } else if (s.kind == "field") {
-                    var rg = emitPropGet(b, cur, propKey(b, s.name), s.name)
+                    var rg = emitPropGet(b, cur, propKey(b, s.name), s.name, i == 0 && thisHead, mode === coalIs)
                     b = rg.b
                     cur = rg.v
                 } else if (s.kind == "call") {
@@ -3868,7 +3927,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // $o->p, with a property HOOK in front of it (when p is a hooked name anywhere in
     // the program) and __get as the fallback for a property the instance does not have.
-    function emitPropGet(b, objV, keyV, name) {
+    // name is null for a computed one; thisLex says the receiver is '$this' as
+    // written; isMode is the read of '??' (BP_VAR_IS).
+    function emitPropGet(b, objV, keyV, name, thisLex, isMode) {
         if (isHooked(name)) {
             var hn = emitStr(b, "__hget_" + name)
             var hm = emitHasMethod(b, objV, hn)
@@ -3879,12 +3940,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b.NewCondBr(truthy(b, hm.v), hookB, plainB)
             var hv = callExt(hookB, "js_phmcall", [objV, hn, callExt(hookB, "js_arr_new", [])])
             hookB.NewBr(joinB)
-            var pr = emitPropGetPlain(plainB, objV, keyV)
+            var pr = emitPropGetPlain(plainB, objV, keyV, name, thisLex, isMode)
             pr.b.NewBr(joinB)
             return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hv, hookB),
                                                llvm.ir.NewIncoming(pr.v, pr.b)])}
         }
-        return emitPropGetPlain(b, objV, keyV)
+        return emitPropGetPlain(b, objV, keyV, name, thisLex, isMode)
     }
     // emitPropGet for a step of the NON-CREATING walk: isset() and unset() must not
     // diagnose anything, so a nullish receiver answers null instead of reaching
@@ -3895,13 +3956,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // ONLY the non-creating walk gets it. An ordinary `$null->p` READ aborts, because
     // php-interpreter.abnf aborts there too ("property ->p of null"); answering PHP 8's
     // warn-and-null in this half alone would make the two halves diverge.
-    function emitPropGetSafe(b, objV, keyV, name) {
+    function emitPropGetSafe(b, objV, keyV, name, thisLex) {
         var nullB = curF.NewBlock("")
         var liveB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
         b.NewCondBr(isNullishHandle(b, objV), nullB, liveB)
         nullB.NewBr(joinB)
-        var r = emitPropGet(liveB, objV, keyV, name)
+        var r = emitPropGet(liveB, objV, keyV, name, thisLex, true)
         r.b.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nullB),
                                            llvm.ir.NewIncoming(r.v, r.b)])}
@@ -3917,29 +3978,32 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // The magic fallbacks run only for a property the instance does not HAVE: a
     // declared `public $p;` holds null, is present, and is read, written and isset()
     // without __get / __set / __isset (zend_std_read_property and friends find the
-    // slot first). Absent is the floor's undefined - js_del removes the key on unset().
+    // slot first). Absent is the floor's undefined - js_del removes the key on unset() -
+    // and so is an uninitialised typed property, which the runtime tells apart.
     // Twin of the dictFind presence test in php-interpreter.abnf's phpGetProp.
     function propPresent(b, raw) { return b.NewICmp(llvm.enum.IPredNE, raw, hUndef) }
-    function emitPropGetPlain(b, objV, keyV) {
-        if (!magicGet) { return phDeref(b, callExt(b, "js_get", [objV, keyV])) }
+    // A name some class makes private or protected is read through js_phprop, which
+    // checks the running class. Any other read is a plain js_get, and only a value
+    // that is absent (undefined) takes js_phprop for the magic fallback or the
+    // uninitialised typed property - and only in a program that has one of those.
+    // Twin of phpGetProp in php-interpreter.abnf.
+    function emitPropGetPlain(b, objV, keyV, name, thisLex, isMode) {
+        var modeV = isMode === true ? hTrue : hFalse
+        if (needsVis(name, thisLex)) { return {b: b, v: callExt(b, "js_phprop", [objV, keyV, visScope(b), modeV])} }
+        if (!magicGet && !mayUninit(name) && !(isMode === true && magicIsset)) {
+            return phDeref(b, callExt(b, "js_get", [objV, keyV]))
+        }
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         var raw = callExt(b, "js_get", [objV, keyV])
         b.NewCondBr(propPresent(b, raw), haveB, missB)
         var hp = phDeref(haveB, raw)
-        var plainV = hp.v
         hp.b.NewBr(mergeB)
-        var hm = emitHasMethod(missB, objV, emitStr(missB, "__get"))
-        var magB = curF.NewBlock("")
-        var rawB = curF.NewBlock("")
-        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        var magV = callExt(magB, "js_phmcall", [objV, emitStr(magB, "__get"), argList(magB, [callExt(magB, "js_phpname", [keyV])])])
-        magB.NewBr(mergeB)
-        rawB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plainV, hp.b),
-                                             llvm.ir.NewIncoming(magV, magB),
-                                             llvm.ir.NewIncoming(hUndef, rawB)])}
+        var missV = callExt(missB, "js_phprop", [objV, keyV, hTrue, modeV])
+        missB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(hp.v, hp.b),
+                                             llvm.ir.NewIncoming(missV, missB)])}
     }
     // $o->p = v, with the property's set HOOK in front of it and __set as the fallback.
     // A receiver that is not an object (null, an int, a string, an array...) raises
@@ -3971,10 +4035,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b.NewCondBr(truthy(b, hm.v), hookB, plainB)
             callExt(hookB, "js_phmcall", [objV, hn, argList(hookB, [valV])])
             hookB.NewBr(joinB)
-            emitPropSetPlain(plainB, objV, keyV, valV).NewBr(joinB)
+            emitPropSetPlain(plainB, objV, keyV, valV, name, isObj).NewBr(joinB)
             return joinB
         }
-        return emitPropSetPlain(b, objV, keyV, valV)
+        return emitPropSetPlain(b, objV, keyV, valV, name, isObj)
     }
     // Writing a property whose slot holds a reference CELL has to write through it.
     // Emitted only for a program that writes a '&' somewhere; otherwise this is a
@@ -4006,20 +4070,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         makeB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
     }
-    function emitPropSetPlain(b, objV, keyV, valV) {
+    // Twin of phpSetProp in php-interpreter.abnf; js_phpropset is the checking and
+    // magic half, as js_phprop is for a read.
+    function emitPropSetPlain(b, objV, keyV, valV, name, thisLex) {
+        if (needsVis(name, thisLex)) {
+            callExt(b, "js_phpropset", [objV, keyV, visScope(b), valV])
+            return b
+        }
         if (!magicSet) { return emitPropStore(b, objV, keyV, valV) }
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         b.NewCondBr(propPresent(b, callExt(b, "js_get", [objV, keyV])), haveB, missB)
         emitPropStore(haveB, objV, keyV, valV).NewBr(mergeB)
-        var hm = emitHasMethod(missB, objV, emitStr(missB, "__set"))
-        var magB = curF.NewBlock("")
-        var rawB = curF.NewBlock("")
-        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        callExt(magB, "js_phmcall", [objV, emitStr(magB, "__set"), argList(magB, [callExt(magB, "js_phpname", [keyV]), valV])])
-        magB.NewBr(mergeB)
-        emitPropStore(rawB, objV, keyV, valV).NewBr(mergeB)
+        callExt(missB, "js_phpropset", [objV, keyV, hTrue, valV])
+        missB.NewBr(mergeB)
         return mergeB
     }
     // isset($o->p), with __isset as the fallback.
@@ -4029,7 +4094,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // while PHP 8 answers false for `isset($undef->p)` and never diagnoses inside
     // isset(). Two integer compares against the interned handles, no runtime call -
     // isSetHandle's trick.
-    function emitPropIsset(b, objV, keyV) {
+    function emitPropIsset(b, objV, keyV, name, thisLex) {
+        if (needsVis(name, thisLex)) { return {b: b, v: callExt(b, "js_phpropisset", [objV, keyV, visScope(b)])} }
         var plain = callExt(b, "js_phisset", [objV, keyV])
         if (!magicIsset) { return {b: b, v: plain} }
         var chkB = curF.NewBlock("")
@@ -4037,21 +4103,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var mergeB = curF.NewBlock("")
         b.NewCondBr(b.NewOr(truthy(b, plain), isNullishHandle(b, objV)), mergeB, chkB)
         chkB.NewCondBr(propPresent(chkB, callExt(chkB, "js_get", [objV, keyV])), mergeB, missB)
-        var hm = emitHasMethod(missB, objV, emitStr(missB, "__isset"))
-        var magB = curF.NewBlock("")
-        var rawB = curF.NewBlock("")
-        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
-        var magV = callExt(magB, "js_phbool", [callExt(magB, "js_phmcall", [objV, emitStr(magB, "__isset"), argList(magB, [callExt(magB, "js_phpname", [keyV])])])])
-        magB.NewBr(mergeB)
-        rawB.NewBr(mergeB)
+        var magV = callExt(missB, "js_phpropisset", [objV, keyV, hTrue])
+        missB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plain, b),
                                              llvm.ir.NewIncoming(hFalse, chkB),
-                                             llvm.ir.NewIncoming(magV, magB),
-                                             llvm.ir.NewIncoming(hFalse, rawB)])}
+                                             llvm.ir.NewIncoming(magV, missB)])}
     }
     // unset($o->p), with __unset as the fallback for a property the instance does
-    // not have. Twin of phpUnsetProp in php-interpreter.abnf.
-    function emitPropUnset(b, objV, keyV) {
+    // not have. A typed property keeps its slot, uninitialised again, so a name some
+    // class types goes to js_phpropunset too. Twin of phpUnsetProp in
+    // php-interpreter.abnf.
+    function emitPropUnset(b, objV, keyV, name, thisLex) {
+        var vis = needsVis(name, thisLex)
+        if (vis || mayUninit(name)) {
+            callExt(b, "js_phpropunset", [objV, keyV, vis ? visScope(b) : hTrue])
+            return b
+        }
         if (!magicUnset) { callExt(b, "js_del", [objV, keyV]); return b }
         var delB = curF.NewBlock("")
         var missB = curF.NewBlock("")
@@ -4059,11 +4126,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         b.NewCondBr(propPresent(b, callExt(b, "js_get", [objV, keyV])), delB, missB)
         callExt(delB, "js_del", [objV, keyV])
         delB.NewBr(mergeB)
-        var hm = emitHasMethod(missB, objV, emitStr(missB, "__unset"))
-        var magB = curF.NewBlock("")
-        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, mergeB)
-        callExt(magB, "js_phmcall", [objV, emitStr(magB, "__unset"), argList(magB, [callExt(magB, "js_phpname", [keyV])])])
-        magB.NewBr(mergeB)
+        callExt(missB, "js_phpropunset", [objV, keyV, hTrue])
+        missB.NewBr(mergeB)
         return mergeB
     }
     // $o->m(args), with __call($name, $args) as the fallback for a method the class
@@ -4135,7 +4199,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = rb.b
                 var rs3 = sNameV(b, ref)
                 b = rs3.b
-                return {b: b, v: isSetHandle(b, callExt(b, "js_phsget", [rb.v, rs3.v]))}
+                return {b: b, v: isSetHandle(b, sGetV(b, rb.v, rs3.v, sRefName(ref), true))}
             }
             if (ref.gkey != undefined) {
                 var gr = globalsRawV(b, ref)
@@ -4149,7 +4213,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var p = emitRefPathIs(b, ref)
         b = p.b
         if (p.kind == "append") { return {b: b, v: hFalse} }
-        if (p.kind == "field") { return emitPropIsset(b, p.obj, p.key) }
+        if (p.kind == "field") { return emitPropIsset(b, p.obj, p.key, p.keyName, p.thisObj) }
         return {b: b, v: callExt(b, "js_phaisset", [p.obj, p.key])}
     }
     function makeIsset(refs) {
@@ -4179,7 +4243,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (ref.sbase != undefined) {
                     var rb = ref.sbase(b)
                     var rs = sNameV(rb.b, ref)
-                    r0 = {b: rs.b, v: callExt(rs.b, "js_phsget", [rb.v, rs.v])}
+                    r0 = {b: rs.b, v: sGetV(rs.b, rb.v, rs.v, sRefName(ref), true)}
                 } else if (ref.gkey != undefined) {
                     var gr = globalsRawV(b, ref)
                     r0 = readRawV(gr.b, gr.v)
@@ -4193,7 +4257,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = p.b
             if (p.kind == "append") { return {b: b, v: hTrue} }
             var is = anytype
-            if (p.kind == "field") { is = emitPropIsset(b, p.obj, p.key) }
+            if (p.kind == "field") { is = emitPropIsset(b, p.obj, p.key, p.keyName, p.thisObj) }
             else { is = {b: b, v: callExt(b, "js_phaisset", [p.obj, p.key])} }
             b = is.b
             var setB = curF.NewBlock("")
@@ -4235,7 +4299,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         var liveB = curF.NewBlock("")
                         var skipB = curF.NewBlock("")
                         b.NewCondBr(isNullishHandle(b, p.obj), skipB, liveB)
-                        emitPropUnset(liveB, p.obj, p.key).NewBr(skipB)
+                        emitPropUnset(liveB, p.obj, p.key, p.keyName, p.thisObj).NewBr(skipB)
                         b = skipB
                     }
                 }
@@ -4313,7 +4377,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // what $c(...) yields. Twin of the same arm in php-interpreter.abnf.
         var fromCb = memT == null && args != null && args.length > 0 && args[0].pos != undefined && baseText != null
             && phsCase(baseText, false) == "closure" && phsCase(mem, false) == "fromcallable"
-        return function(b) {
+        // mode is coalIs as the left operand of '??', where a static property the
+        // scope may not see reads null (sGetV's quiet).
+        return function(b, mode) {
             if (lit != null) { return {b: b, v: emitStr(b, lit)} }
             if (fromCb) {
                 var rcb = args[0].pos(b)
@@ -4330,7 +4396,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     var th8 = phThis(b)
                     return {b: b, v: callExt(b, "js_phscall", [rb.v, rn8.v, th8, ea8.v, fwdLsb(baseText)])}
                 }
-                if (memprop) { return {b: b, v: callExt(b, "js_phsget", [rb.v, rn8.v])} }
+                if (memprop) { return {b: b, v: sGetV(b, rb.v, rn8.v, null, mode === coalIs)} }
                 return {b: b, v: callExt(b, "js_phconst", [rb.v, rn8.v, baseText == null ? hNull : emitStr(b, baseText)])}
             }
             if (args != null) {
@@ -4344,7 +4410,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 return {b: b, v: callExt(b, "js_phscall", [rb.v, emitStr(b, mem), thisV, ea.v, fwdLsb(baseText)])}
             }
             if (mem.charAt(0) == "$") {
-                return {b: b, v: callExt(b, "js_phsget", [rb.v, emitStr(b, mem.substring(1))])}
+                return {b: b, v: sGetV(b, rb.v, emitStr(b, mem.substring(1)), mem.substring(1), mode === coalIs)}
             }
             // C::class is the class NAME, not a constant lookup.
             if (mem == "class") { return {b: b, v: callExt(b, "js_phcname", [rb.v])} }
@@ -4863,7 +4929,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // thunk. See CallHead in php-interpreter.abnf.
         if (head.headT != undefined) {
             return {name: null, nameT: null, path: items.slice(1), sbase: undefined, sname: undefined,
-                    snameT: null, headT: head.headT}
+                    snameT: null, headT: head.headT, headFn: head.headFn}
         }
         if (head.gkey != undefined) {
             noteRef()
@@ -4885,7 +4951,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (ref.sbase != undefined) {
             var rb = ref.sbase(b)
             var rs4 = sNameV(rb.b, ref)
-            return {b: rs4.b, v: callExt(rs4.b, "js_phsget", [rb.v, rs4.v])}
+            return {b: rs4.b, v: sGetV(rs4.b, rb.v, rs4.v, sRefName(ref), !viv)}
         }
         if (!viv && ref.gkey != undefined) {
             var gr = globalsRawV(b, ref)
@@ -4894,6 +4960,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var rn = refNameV(b, ref)
         if (!viv) { return phDeref(rn.b, rawVarV(rn.b, rn.v)) }
         return {b: rn.b, v: rawVarV(rn.b, rn.v)}
+    }
+    // The container a write through a by-reference call head starts from: the
+    // returned variable's value, made an array in its cell when it is null; a head
+    // that is no cell is the ordinary temporary.
+    function refCellRootV(b, o) {
+        var cellB = curF.NewBlock("")
+        var tmpB = curF.NewBlock("")
+        var vivB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isCellV(b, o), cellB, tmpB)
+        var cv = callExt(cellB, "js_get", [o, emitStr(cellB, "v")])
+        cellB.NewCondBr(isNullishHandle(cellB, cv), vivB, mergeB)
+        var na = callExt(vivB, "js_pharr", [])
+        callExt(vivB, "js_set", [o, emitStr(vivB, "v"), na])
+        vivB.NewBr(mergeB)
+        var rd = phDeref(tmpB, o)
+        var tv = callExt(rd.b, "js_phvivroot", [callExt(rd.b, "js_phcopy", [rd.v])])
+        rd.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(cv, cellB), llvm.ir.NewIncoming(na, vivB),
+                                             llvm.ir.NewIncoming(tv, rd.b)])}
     }
     // An index or '[]' write into a null or undefined variable makes it an array
     // (`$u[0] = 1`, `$u[] = 1`; PHP converts null silently). `v` is the variable's
@@ -4928,6 +5014,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var rr = refRootV(b, ref, viv)
         b = rr.b
         var o = rr.v
+        // A by-reference call head (memoRefV) may hold the returned variable's cell.
+        if (ref.headRef === true && !viv) {
+            var rdh = phDeref(b, o)
+            b = rdh.b
+            o = rdh.v
+        }
         // A target on a null variable makes that variable an array, and the answer is
         // written back so a $x that is a REFERENCE gets it through its cell. A
         // one-step '->p' target is left alone: PHP raises on a property of null.
@@ -4944,6 +5036,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var rv1 = vivRootV(rn8.b, rn8.v, rd1.v)
             b = rv1.b
             o = rv1.v
+        } else if (viv && ref.headRef === true) {
+            var rc = refCellRootV(b, o)
+            b = rc.b
+            o = rc.v
         } else if (viv && ref.headT != undefined && ref.path[0].key == undefined && ref.path[0].keyT == undefined) {
             // A call result written through '[...]' is a TEMPORARY: a by-value array is
             // copied, and null becomes a fresh array. Twin of resolveRefPhpV in
@@ -4952,14 +5048,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = rd2.b
             o = callExt(b, "js_phvivroot", [callExt(b, "js_phcopy", [rd2.v])])
         }
+        var refIsThis = ref.headT == undefined && ref.sbase == undefined && ref.gkey == undefined &&
+                        (ref.nameT == null || ref.nameT == undefined) && ref.name == "$this"
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             // '$c[]["p"] = 7' appends a fresh array and descends into it. '[]' is not
             // legal in a READ position at all, so the non-creating walk answers null.
             if (s.append === true) { o = viv ? callExt(b, "js_phvivpush", [o]) : hNull }
             else if (s.key != undefined) {
-                var rs = viv ? emitPropGet(b, o, propKey(b, s.key), s.key)
-                             : emitPropGetSafe(b, o, propKey(b, s.key), s.key)
+                var rs = viv ? emitPropGet(b, o, propKey(b, s.key), s.key, i == 0 && refIsThis, false)
+                             : emitPropGetSafe(b, o, propKey(b, s.key), s.key, i == 0 && refIsThis)
                 b = rs.b
                 o = rs.v
             }
@@ -4970,8 +5068,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (s.keyT != undefined) {
                 var rt = s.keyT(b)
                 b = rt.b
-                var rs2 = viv ? emitPropGet(b, o, callExt(b, "js_phpkey", [rt.v]), null)
-                              : emitPropGetSafe(b, o, callExt(b, "js_phpkey", [rt.v]), null)
+                var rs2 = viv ? emitPropGet(b, o, callExt(b, "js_phpkey", [rt.v]), null, false, false)
+                              : emitPropGetSafe(b, o, callExt(b, "js_phpkey", [rt.v]), null, false)
                 b = rs2.b
                 o = rs2.v
             }
@@ -5008,7 +5106,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // Reading a slot can BRANCH (a property read falls back to __get), so it answers
     // the block to continue in as well as the value.
     function readRefSlot(b, p) {
-        if (p.kind == "field") { return emitPropGet(b, p.obj, p.key, p.keyName) }
+        if (p.kind == "field") { return emitPropGet(b, p.obj, p.key, p.keyName, p.thisObj, false) }
         if (p.kind == "index") { return {b: b, v: callExt(b, "js_phget", [p.obj, p.key])} }
         return {b: b, v: hNull}
     }
@@ -5036,8 +5134,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var rs5 = sNameV(b, ref)
                 b = rs5.b
                 var snV = rs5.v
-                if (op != "=") { v = emitBin(b, op, callExt(b, "js_phsget", [rb.v, snV]), v) }
-                callExt(b, "js_phsset", [rb.v, snV, v])
+                if (op != "=") { v = emitBin(b, op, sGetV(b, rb.v, snV, sRefName(ref), false), v) }
+                sSetV(b, rb.v, snV, sRefName(ref), v)
             } else if (ref.path.length == 0) {
                 var rn4 = refNameV(b, ref)
                 b = rn4.b
@@ -5101,7 +5199,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (m.sbase != undefined) {
                 var rb = m.sbase(b)
                 var rs = sNameV(rb.b, m)
-                ro = {b: rs.b, v: callExt(rs.b, "js_phsget", [rb.v, rs.v])}
+                ro = {b: rs.b, v: sGetV(rs.b, rb.v, rs.v, sRefName(m), true)}
             } else if (m.gkey != undefined) {
                 var gr = globalsRawV(b, m)
                 ro = readRawV(gr.b, gr.v)
@@ -5114,7 +5212,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (p.kind == "index") { ro = emitIsFetch(p.b, p.obj, p.key) }
             else if (p.kind == "append") { ro = {b: p.b, v: hNull} }
             else {
-                var is = emitPropIsset(p.b, p.obj, p.key)
+                var is = emitPropIsset(p.b, p.obj, p.key, p.keyName, p.thisObj)
                 var getB = curF.NewBlock("")
                 var gotB = curF.NewBlock("")
                 is.b.NewCondBr(truthy(is.b, is.v), getB, gotB)
@@ -5137,7 +5235,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var wb = m.sbase(sb)
             var ws = sNameV(wb.b, m)
             sb = ws.b
-            callExt(sb, "js_phsset", [wb.v, ws.v, v])
+            sSetV(sb, wb.v, ws.v, sRefName(m), v)
         } else {
             var wn = refNameV(sb, m)
             sb = setVarV(wn.b, wn.v, v)
@@ -5155,9 +5253,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                  snameT: null, headT: undefined}
         var r = anytype
         if (ref.headT != undefined) {
+            // A call to a function returning by reference hands over the variable it
+            // returned (\x00refret): the target is written through that cell.
+            var byRef = ref.headFn != undefined && refFns["$" + ref.headFn] == true
+            var slotV = hNull
+            if (byRef) { callExt(b, "js_scope_decl", [globalsFrameV(b), emitStr(b, "\x00refret"), hNull]) }
             r = ref.headT(b)
             b = r.b
-            m.headT = constThunkV(r.v)
+            var hv = r.v
+            if (byRef) {
+                slotV = callExt(b, "js_scope_get", [globalsFrameV(b), emitStr(b, "\x00refret")])
+                hv = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, slotV, hNull), r.v, slotV)
+                m.headRef = true
+            }
+            m.headT = constThunkV(hv)
         }
         if (ref.sbase != undefined) {
             r = ref.sbase(b)
@@ -5205,9 +5314,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var rs6 = sNameV(b, ref)
             b = rs6.b
             var snV = rs6.v
-            var oldS = callExt(b, "js_phsget", [rb.v, snV])
+            var oldS = sGetV(b, rb.v, snV, sRefName(ref), false)
             var newS = callExt(b, ext, [oldS])
-            callExt(b, "js_phsset", [rb.v, snV, newS])
+            sSetV(b, rb.v, snV, sRefName(ref), newS)
             return {b: b, v: isPre ? newS : oldS}
         }
         if (ref.path.length == 0) {
@@ -5826,7 +5935,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return name == "count" || name == "strlen"
             || name == "array_push" || name == "array_values" || name == "intdiv" || name == "abs"
             || name == "var_dump" || name == "gettype" || name == "get_debug_type" || name == "get_class"
-            || name == "method_exists" || name == "class_exists" || name == "interface_exists"
+            || name == "method_exists" || name == "property_exists" || name == "class_exists" || name == "interface_exists"
             || name == "is_a" || name == "is_subclass_of" || name == "get_parent_class"
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
@@ -5932,6 +6041,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "method_exists") {
             var tgt = phClsArg(b, vs[0])
             return {b: tgt.b, v: callExt(tgt.b, "js_phmexists", [tgt.v, vs[1]])}
+        }
+        // property_exists: the same receiver, to js_phpexists.
+        if (name == "property_exists") {
+            var ptgt = phClsArg(b, vs[0])
+            return {b: ptgt.b, v: callExt(ptgt.b, "js_phpexists", [vs[0], ptgt.v, vs[1]])}
         }
         // is_a / is_subclass_of: allow_string defaults to false for is_a and to true
         // for is_subclass_of.
@@ -6055,6 +6169,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // curFTag is saved/restored for EVERY function so a return inside a function defined
     // inside a try body targets that inner function, not the try (this is the only
     // function-body emitter in this grammar).
+    // The class whose method body is being emitted ("" outside one); a closure keeps
+    // its method's.
+    var curSelfName = ""
     function emitFunc(params, bodyStmt, isMethod, isCtl, selfName) {
         funcCount++
         var idx = funcCount
@@ -6095,8 +6212,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                          callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
         }
         var savedSaw = sawYield
+        var savedSelf = curSelfName
+        if (isMethod) { curSelfName = selfName == undefined ? "" : selfName }
         sawYield = false
         var endB = bodyStmt(b)
+        curSelfName = savedSelf
         endB.NewRet(hNull)
         genClosure = sawYield
         sawYield = savedSaw
@@ -6334,20 +6454,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var out = []
         var isStatic = false
         var vis = ""
+        var typ = ""
         var cur = null
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (typeof it == "string") {
-                cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: [], vis: vis}
+                cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: [], vis: vis, typ: typ}
                 out.push(cur)
+                if (isStatic && vis != "") { sVisNames["$" + cur.name] = true; anySVis = true }
             }
+            else if (it.ptype != undefined) { typ = it.ptype }
             else if (it.mod != undefined) {
                 if (hasWord(it.mod, "static")) { isStatic = true }
                 if (phVisWord(it.mod) != "") { vis = phVisWord(it.mod) }
             }
             else if (it.hooks != undefined) {
                 if (cur != null) {
+                    // A hooked property's slot is the hooks' business: it keeps null.
+                    cur.typ = ""
                     cur.hooks = it.hooks
                     for (var k = 0; k < it.hooks.length; k++) {
                         if (it.hooks[k].hempty != true) { noteHooked(cur.name) }
@@ -6364,19 +6489,117 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var s = stripWs(mod)
         return (s == "protected" || s == "private") ? s : ""
     }
-    // A class's __pvis: its non-public instance properties as ",name=*,"
-    // (protected) and ",name=Class," (private, naming the declaring class). Twin
-    // of phpVisList in php-interpreter.abnf.
+    // A class's __pvis: every instance property it declares, as ",name=V:T,": V is
+    // empty for public, "*" for protected and the declaring class for private, T the
+    // declared type (empty for none). Twin of phpVisList in php-interpreter.abnf.
     function phVisList(cname, props) {
         var out = ","
-        for (var i = 0; i < props.length; i++) { out = out + phVisItem(cname, props[i].name, props[i].vis) }
+        for (var i = 0; i < props.length; i++) {
+            var vis = props[i].vis
+            var t = props[i].typ
+            out = out + props[i].name + "=" + (vis == "protected" ? "*" : (vis == "private" ? cname : "")) + ":" +
+                  (t == undefined ? "" : t) + ","
+        }
         return out
     }
-    function phVisItem(cname, pname, vis) {
-        if (vis == "protected") { return pname + "=*," }
-        if (vis == "private") { return pname + "=" + cname + "," }
-        return ""
+    // A declared type as var_dump prints it: no leading backslash on a name.
+    // Twin of propTypeText in php-interpreter.abnf.
+    function propTypeText(t) {
+        var out = ""
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "\\" && (i == 0 || "?|&(".indexOf(t.charAt(i - 1)) >= 0)) { continue }
+            out = out + ch
+        }
+        return out
     }
+    // What the walk learned about instance properties, for the emitter to decide
+    // which accesses need the slow, checking path (emitPropGetPlain):
+    // visNames - a name some class declares private or protected;
+    // typedNames - a name some class declares with a type (it can be uninitialised);
+    // classDecl - per class, its own declared names with their visibility, and
+    // classExt its parent, so '$this->p' inside a class that can see p skips the check.
+    var visNames = {}
+    var typedNames = {}
+    var anyVis = false
+    var anyTyped = false
+    var classDecl = {}
+    var classExt = {}
+    function noteClassProps(name, ext, props) {
+        var own = {}
+        for (var i = 0; i < props.length; i++) {
+            var p = props[i]
+            own["$" + p.name] = p.vis == undefined ? "" : p.vis
+            if (p.vis != undefined && p.vis != "") { visNames["$" + p.name] = true; anyVis = true }
+            if (p.typ != undefined && p.typ != "") { typedNames["$" + p.name] = true; anyTyped = true }
+        }
+        classDecl["$" + phsCase(name, false)] = own
+        classExt["$" + phsCase(name, false)] = ext
+    }
+    // Does the class whose method is being emitted see its own property name?
+    // Declared by that class, or non-private by a base class it names.
+    function selfSees(name) {
+        if (curSelfName == "" || name == null) { return false }
+        var k = phsCase(curSelfName, false)
+        var guard = 0
+        while (k != "" && guard < 64) {
+            guard++
+            var own = classDecl["$" + k]
+            if (own == undefined) { return false }
+            var v = own["$" + name]
+            if (v != undefined) { return guard == 1 || v != "private" }
+            var e = classExt["$" + k]
+            k = e == undefined ? "" : phsCase(e, false)
+        }
+        return false
+    }
+    // Must this access take the checking path? A name nobody restricts never does,
+    // and neither does '$this->p' where the class itself can see p.
+    function needsVis(name, thisLex) {
+        if (!anyVis) { return false }
+        if (name == null) { return true }
+        if (visNames["$" + name] != true) { return false }
+        return !(thisLex === true && selfSees(name))
+    }
+    // A class's __svis: its non-public static properties as ",name=V," (V as in
+    // __pvis). Twin of phpStaticVisList in php-interpreter.abnf.
+    function phStaticVisList(cname, statics) {
+        var out = ","
+        for (var i = 0; i < statics.length; i++) {
+            var vis = statics[i].vis
+            if (vis == "protected") { out = out + statics[i].name + "=*," }
+            else if (vis == "private") { out = out + statics[i].name + "=" + cname + "," }
+        }
+        return out
+    }
+    // sVisNames: a static property name some class declares private or protected.
+    var sVisNames = {}
+    var anySVis = false
+    // C::$p read: a restricted name is checked against the running class first
+    // (js_phsvis). quiet is the read of isset(), empty() and '??', which answers
+    // null for a property the scope may not see instead of raising.
+    function sGetV(b, clsV, nameV, name, quiet) {
+        if (!anySVis || (name != null && sVisNames["$" + name] != true)) {
+            return callExt(b, "js_phsget", [clsV, nameV])
+        }
+        var ok = callExt(b, "js_phsvis", [clsV, nameV, visScope(b), quiet ? hTrue : hFalse])
+        var g = callExt(b, "js_phsget", [clsV, nameV])
+        if (!quiet) { return g }
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ok, hTrue), g, hNull)
+    }
+    function sSetV(b, clsV, nameV, name, v) {
+        if (anySVis && (name == null || sVisNames["$" + name] == true)) {
+            callExt(b, "js_phsvis", [clsV, nameV, visScope(b), hFalse])
+        }
+        callExt(b, "js_phsset", [clsV, nameV, v])
+    }
+    function sRefName(ref) { return (ref.snameT != undefined && ref.snameT != null) ? null : ref.sname }
+    function mayUninit(name) { return name == null ? anyTyped : typedNames["$" + name] == true }
+    // Does a member chain's source text (whitespace already stripped) start at
+    // '$this->' or '$this?->'?
+    function phThisHead(t) { return t.substring(0, 7) == "$this->" || t.substring(0, 8) == "$this?->" }
+    // The running class for an access check: the frame's self, null outside a class.
+    function visScope(b) { return scopeProbe(b, emitStr(b, frameClsName("self")), hNull) }
     function hasWord(s, w) {
         for (var i = 0; i + w.length <= s.length; i++) {
             if (s.substring(i, i + w.length) == w) { return true }
@@ -6398,7 +6621,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             var thisV = phThis(bb)
             for (var k = 0; k < props.length; k++) {
-                var pv = hNull
+                // A typed property without a default starts uninitialised (undefined).
+                var pv = props[k].typ != undefined && props[k].typ != "" ? hUndef : hNull
                 if (props[k].init != null) {
                     var r = props[k].init(bb)
                     bb = r.b
@@ -6708,6 +6932,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (methods[mi].name == "__construct") { ctorSigs["$" + name] = {params: methods[mi].params, byref: methods[mi].byref, rest: methods[mi].rest} }
         }
         var shown = anon ? anonClassName(extRaw, ifacesRaw) : name
+        noteClassProps(name, ext, props)
         lastClassDecl = {name: name, ext: ext, plain: ifaces.length == 0 && uses.length == 0}
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
@@ -6728,6 +6953,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             // self::OTHER, and they are evaluated here, in declaration order.
             var outerSelf = bindDeclSelf(b, clsV)
             for (var c1 = 0; c1 < consts.length; c1++) { emitConstDecl(b, clsV, name, consts[c1]) }
+            var svl = phStaticVisList(shown, statics)
+            if (svl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__svis"), emitStr(b, svl)]) }
             for (var s1 = 0; s1 < statics.length; s1++) {
                 callExt(b, "js_set", [clsV, emitStr(b, "s:" + statics[s1].name), hNull])
             }
