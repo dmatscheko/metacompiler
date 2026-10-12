@@ -1712,11 +1712,15 @@ KwLet       = "let" KwEnd ;
     hostGlobals["StringComparison"] = csxEnumType("StringComparison")
     hostGlobals["StringSplitOptions"] = csxEnumType("StringSplitOptions")
     hostGlobals["NormalizationForm"] = csxEnumType("NormalizationForm")
+    hostGlobals["MidpointRounding"] = csxEnumType("MidpointRounding")
     hostGlobals["StringComparer"] = csxStrComparerType()
     // System.Linq.Enumerable's static members (lib/csharp-linq.js's csqStatic).
     hostGlobals["Enumerable"] = {__cstype: "Enumerable"}
-    // System.Math's static members (lib/csharp-math.js's csmStatic) and constants.
+    // System.Math's and System.MathF's static members (lib/csharp-math.js's
+    // csmStatic) and constants.
     hostGlobals["Math"] = {__cstype: "Math", PI: {__flo: Math.PI}, E: {__flo: Math.E}, Tau: {__flo: 2 * Math.PI}}
+    hostGlobals["MathF"] = {__cstype: "MathF", PI: {__flo: coreF32Round(Math.PI), __f32: true},
+                            E: {__flo: coreF32Round(Math.E), __f32: true}, Tau: {__flo: coreF32Round(2 * Math.PI), __f32: true}}
 
     // The integral type NAMES as expression primaries, so `int.MaxValue` and
     // `ulong.MaxValue` resolve. Each keyword and its System alias name the same
@@ -1775,7 +1779,15 @@ KwLet       = "let" KwEnd ;
         box.wb(csFlo(f === null ? 0 : f))
         return f !== null
     }
-    hostGlobals["double"] = {Parse: csDoubleParse, TryParse: csDoubleTryParse}
+    // Its constants and IsNaN / IsInfinity / ...: csmDoubleConst and csmDoubleIs in
+    // lib/csharp-math.js.
+    var csDoubleT = {Parse: csDoubleParse, TryParse: csDoubleTryParse}
+    function csDoubleIsFn(n) { return function(x) { return csmDoubleIs(n, csxkDbl(x)) } }
+    var csDblNames = csmDoubleConstNames()
+    for (var cdi = 0; cdi < csDblNames.length; cdi++) { csDoubleT[csDblNames[cdi]] = {__flo: csmDoubleConst(csDblNames[cdi])} }
+    csDblNames = csmDoubleIsNames()
+    for (var cdj = 0; cdj < csDblNames.length; cdj++) { csDoubleT[csDblNames[cdj]] = csDoubleIsFn(csDblNames[cdj]) }
+    hostGlobals["double"] = csDoubleT
     hostGlobals["Double"] = hostGlobals["double"]
 
     // The class whose body is currently being built (for base calls), and the stack that
@@ -2750,11 +2762,12 @@ KwLet       = "let" KwEnd ;
     function csxkRefSet(box, v) { if (csIsRefBox(box)) { box.wb(v) } }
     // ----- System.Linq (lib/csharp-linq.js) -----
     function csxkIsGen(v) { return csIsGen(v) }
-    function csxkGenOpen(v) { return csNewGen(v.invoke) }
+    // A user IEnumerable<T> answers its GetEnumerator (csForSrc), stepped as foreach steps it.
+    function csxkGenOpen(v) { return csIsGen(v) ? csNewGen(v.invoke) : csForSrc(v) }
     function csxkGenNext(it) {
         var g = it.g
-        if (!csGenStep(g)) { return false }
-        it.cur = g.cur
+        if (!csEnumMove(g)) { return false }
+        it.cur = csEnumCur(g)
         return true
     }
     // makeLambda records a two-parameter lambda's arity (fnMetaSet).
@@ -2770,6 +2783,12 @@ KwLet       = "let" KwEnd ;
     function csxkAdd(a, b) { return csAdd(a, b) }
     // ----- System.Math (lib/csharp-math.js) -----
     function csxkArith(op, a, b) { return csArith(op, a, b) }
+    function csxkIntType(v) {
+        if (typeof v == "number") { return 32 }
+        if (szIs(v)) { return v.w + (v.u ? 1 : 0) }
+        return csIsChar(v) ? 17 : 0
+    }
+    function csxkToInt(v, t) { return csConvTo(v, t - t % 2, t % 2 == 1) }
 
     // ----- iterators ('yield return'), driven by REPLAY -----
     // A method whose body contains a yield is an ITERATOR: calling it runs NOTHING and
@@ -3051,7 +3070,7 @@ KwLet       = "let" KwEnd ;
         if (csIsChar(target)) { return csxCharMethod(target, name, args) }
         if (target !== null && typeof target == "object" && target.__cstype !== undefined) {
             if (target.__cstype == "Enumerable") { return csqStatic(name, args) }
-            if (target.__cstype == "Math") { return csmStatic(name, args) }
+            if (target.__cstype == "Math" || target.__cstype == "MathF") { return csmStatic(name, args, target.__cstype == "MathF") }
             return target.__cstype == "char" ? csxCharStatic(name, args) : csxStringStatic(name, args)
         }
         if (csqIsQuery(target)) { return csqMethod(target, name, args) }
@@ -3100,6 +3119,8 @@ KwLet       = "let" KwEnd ;
                     if (dg != undefined) { dv = dg(target) }
                 }
                 if (csIsDelegVal(dv)) { return csDelegInvoke(dv, args) }
+                // An Enumerable extension method on a user IEnumerable<T>.
+                if (csqIsUserSeq(target)) { return csqMethod(target, name, args) }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
             }
             return m.apply(undefined, concat2impl([target], args))

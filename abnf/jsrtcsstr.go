@@ -495,9 +495,10 @@ func csxParts(args []interface{}, k int) []interface{} {
 	return args[k:]
 }
 
-// csxSeqParts: one LINQ query or iterator argument is its elements.
+// csxSeqParts: one LINQ query, iterator or user IEnumerable<T> argument is its
+// elements.
 func (rt *jsrt) csxSeqParts(args []interface{}, k int) []interface{} {
-	if len(args) == k+1 && csqIsLazy(args[k]) {
+	if len(args) == k+1 && rt.csqIsLazy(args[k]) {
 		return rt.csqToArray(args[k])
 	}
 	return csxParts(args, k)
@@ -680,6 +681,8 @@ func csxEnumNames(ty string) []string {
 			"InvariantCultureIgnoreCase", "Ordinal", "OrdinalIgnoreCase"}
 	case "StringSplitOptions":
 		return []string{"None", "RemoveEmptyEntries", "TrimEntries"}
+	case "MidpointRounding":
+		return []string{"ToEven", "AwayFromZero", "ToZero", "ToNegativeInfinity", "ToPositiveInfinity"}
 	}
 	return []string{"FormC", "FormD", "FormKC", "FormKD"}
 }
@@ -690,6 +693,8 @@ func csxEnumVals(ty string) []int {
 		return []int{0, 1, 2, 3, 4, 5}
 	case "StringSplitOptions":
 		return []int{0, 1, 2}
+	case "MidpointRounding":
+		return []int{0, 1, 2, 3, 4}
 	}
 	return []int{1, 2, 5, 6}
 }

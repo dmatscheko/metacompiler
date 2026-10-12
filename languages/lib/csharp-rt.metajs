@@ -196,7 +196,8 @@ function csxkRefSet(box, v) {
 function csxkIsGen(v) { return isGenerator(v) || csIsSeq(v) }
 function csxkGenOpen(v) {
     if (csIsSeq(v)) { return csSeqOpen(v) }
-    return v
+    if (isGenerator(v)) { return v }
+    return csEnumSrc(js_csmcall(v, "GetEnumerator", []))
 }
 function csxkGenNext(it) {
     var g = it["g"]
@@ -222,6 +223,14 @@ function csxkAdd(a, b) { return js_csadd2(a, b) }
 
 // ----- System.Math (lib/csharp-math.js) --------------------------------------
 function csxkArith(op, a, b) { return csArith(op, a, b) }
+// A sized integer answers "number" to typeof here, so it is tested first.
+function csxkIntType(v) {
+    if (sintIs(v)) { return sintWidth(v) + (sintUns(v) ? 1 : 0) }
+    if (floIs(v)) { return 0 }
+    if (typeof v == "number") { return 32 }
+    return csIsChar(v) ? 17 : 0
+}
+function csxkToInt(v, t) { return csConvTo(v, t - t % 2, t % 2 == 1) }
 // A lambda declaring two parameters: the LINQ overloads that also pass the
 // element's index are chosen by it. Twin of the fnMetaSet in the interpreter's
 // makeLambda.
@@ -1220,9 +1229,11 @@ function csDoubleTryParse(s, box) {
     return f !== null
 }
 
+function csDoubleIsFn(n) { return function(x) { return csmDoubleIs(n, rtjNum(x)) } }
+
 // csTypeObject: one of the integral type NAMES as an expression primary, so that
-// `int.MaxValue`, `ulong.MaxValue` and `int.Parse(s)` resolve; double's two
-// parsers too.
+// `int.MaxValue`, `ulong.MaxValue` and `int.Parse(s)` resolve; double's parsers,
+// constants and classification members too.
 function csTypeObject(name0) {
     var o = {}
     if (name0 == "char" || name0 == "Char") {
@@ -1239,9 +1250,22 @@ function csTypeObject(name0) {
     if (name0 == "double" || name0 == "Double") {
         o["Parse"] = csDoubleParse
         o["TryParse"] = csDoubleTryParse
+        // Its constants and IsNaN / IsInfinity / ...: lib/csharp-math.js.
+        var cn = csmDoubleConstNames()
+        var i = 0
+        while (i < cn.length) {
+            o[cn[i]] = flo(csmDoubleConst(cn[i]), 2)
+            i = i + 1
+        }
+        cn = csmDoubleIsNames()
+        i = 0
+        while (i < cn.length) {
+            o[cn[i]] = csDoubleIsFn(cn[i])
+            i = i + 1
+        }
         return o
     }
-    if (name0 == "StringComparison" || name0 == "StringSplitOptions" || name0 == "NormalizationForm") {
+    if (name0 == "StringComparison" || name0 == "StringSplitOptions" || name0 == "NormalizationForm" || name0 == "MidpointRounding") {
         return csxEnumType(name0)
     }
     if (name0 == "StringComparer") { return csxStrComparerType() }
@@ -1254,6 +1278,13 @@ function csTypeObject(name0) {
         o["PI"] = flo(Math.PI, 2)
         o["E"] = flo(Math.E, 2)
         o["Tau"] = flo(2 * Math.PI, 2)
+        return o
+    }
+    if (name0 == "MathF") {
+        o["__cstype"] = "MathF"
+        o["PI"] = csxkFlo32(Math.PI)
+        o["E"] = csxkFlo32(Math.E)
+        o["Tau"] = csxkFlo32(2 * Math.PI)
         return o
     }
     var name = csTypeAlias(name0)
@@ -1566,7 +1597,7 @@ function js_mcall(recv, name, args) {
     if (cst !== undefined) {
         if (cst == "char") { return csxCharStatic(name, args) }
         if (cst == "Enumerable") { return csqStatic(name, args) }
-        if (cst == "Math") { return csmStatic(name, args) }
+        if (cst == "Math" || cst == "MathF") { return csmStatic(name, args, cst == "MathF") }
         return csxStringStatic(name, args)
     }
     var cls = recv["__class"]
@@ -1574,6 +1605,8 @@ function js_mcall(recv, name, args) {
         // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs.
         var mm = rtFindMethod(cls, name)
         if (csIsFn(mm)) { return mm.apply(undefined, rtPrepend(recv, args)) }
+        // An Enumerable extension method on a user IEnumerable<T>.
+        if (csqIsUserSeq(recv)) { return csqMethod(recv, name, args) }
         fail("unknown method '" + name + "' on an instance")
         return undefined
     }

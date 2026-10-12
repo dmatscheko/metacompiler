@@ -7062,14 +7062,15 @@ KwLet       = "let" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
         // The integral type NAMES as expression primaries, so `int.MaxValue` and
         // `ulong.MaxValue` resolve, double for double.Parse / TryParse, and the BCL enums
-        // and comparers a String member takes, Enumerable and Math. ulong.MaxValue is 18446744073709551615, which
+        // and comparers a String member takes, Enumerable, Math, MathF and MidpointRounding. ulong.MaxValue is 18446744073709551615, which
         // no double holds, so they arrive as runtime objects (js_cstype in
         // abnf/jsrtcsharp.go) rather than as emitted literals.
         var csTypeIdents = ["sbyte", "SByte", "byte", "Byte", "short", "Int16",
                             "ushort", "UInt16", "int", "Int32", "uint", "UInt32",
                             "long", "Int64", "ulong", "UInt64", "char", "Char", "string", "String",
                             "double", "Double", "StringComparison", "StringSplitOptions",
-                            "NormalizationForm", "StringComparer", "Enumerable", "Math"]
+                            "NormalizationForm", "StringComparer", "Enumerable", "Math", "MathF",
+                            "MidpointRounding"]
         for (var cti = 0; cti < csTypeIdents.length; cti++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, csTypeIdents[cti]),
                                          callExt(b, "js_cstype", [emitStr(b, csTypeIdents[cti])])])

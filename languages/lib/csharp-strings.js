@@ -376,8 +376,8 @@ function csxParts(args, k) {
     }
     return out
 }
-// Concat's and Join's IEnumerable<T> parameter: one LINQ query or iterator
-// argument is its elements (lib/csharp-linq.js).
+// Concat's and Join's IEnumerable<T> parameter: one LINQ query, iterator or user
+// IEnumerable<T> argument is its elements (lib/csharp-linq.js).
 function csxSeqParts(args, k) {
     if (args.length == k + 1 && csqIsLazy(args[k])) { return csqToArray(args[k]) }
     return csxParts(args, k)
@@ -521,7 +521,7 @@ function csxNumWs(c) { return c == 32 || (c >= 9 && c <= 13) }
 // ----- the BCL enums a String member takes -----
 //
 // StringComparison, StringSplitOptions and NormalizationForm, with their
-// documented values. A member is a box {__csbcl: type name, v: value, __t: the
+// documented values, and Math.Round's MidpointRounding. A member is a box {__csbcl: type name, v: value, __t: the
 // type object}, interned on the type object, so == compares it by identity and
 // an overload can tell it from an int: Split(',', 2) is a count,
 // Split(',', StringSplitOptions.RemoveEmptyEntries) the options.
@@ -531,11 +531,15 @@ function csxEnumNames(ty) {
                 "InvariantCultureIgnoreCase", "Ordinal", "OrdinalIgnoreCase"]
     }
     if (ty == "StringSplitOptions") { return ["None", "RemoveEmptyEntries", "TrimEntries"] }
+    if (ty == "MidpointRounding") {
+        return ["ToEven", "AwayFromZero", "ToZero", "ToNegativeInfinity", "ToPositiveInfinity"]
+    }
     return ["FormC", "FormD", "FormKC", "FormKD"]
 }
 function csxEnumVals(ty) {
     if (ty == "StringComparison") { return [0, 1, 2, 3, 4, 5] }
     if (ty == "StringSplitOptions") { return [0, 1, 2] }
+    if (ty == "MidpointRounding") { return [0, 1, 2, 3, 4] }
     return [1, 2, 5, 6]
 }
 function csxEnumMake(t, v) {

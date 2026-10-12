@@ -3,9 +3,10 @@
 // Go twin's port; the three must answer alike. It sits on lib/csharp-strings.js's
 // and lib/csharp-collections.js's hooks and adds these:
 //   csxkIsGen(v)       is v a user iterator (a method with 'yield return')
-//   csxkGenOpen(v)     a fresh enumeration of the user iterator v
-//   csxkGenNext(it)    step it.g, a user iterator: false at its end, else true with
-//                      the value in it.cur
+//   csxkGenOpen(v)     a fresh enumeration of the user iterator v, or of an object
+//                      whose class declares GetEnumerator (IEnumerable<T>)
+//   csxkGenNext(it)    step it.g, what csxkGenOpen answered: false at its end, else
+//                      true with the value in it.cur
 //   csxkArity(f)       2 for a lambda declaring two parameters, else 0 (the
 //                      overloads whose delegate also takes the element's index)
 //   csxkNumKind(v)     "i" an int, "l" a sized integer, "d" a double, "f" a float
@@ -43,8 +44,12 @@ function csqIsQuery(v) {
     if (v === null || v === undefined || typeof v != "object" || Array.isArray(v)) { return false }
     return typeof v["__linq"] == "string"
 }
+// An instance of a user class implementing IEnumerable<T>: the Enumerable
+// operators are extension methods on that interface, so they apply to it and
+// read it through its own GetEnumerator.
+function csqIsUserSeq(v) { return csxkHasMethod(v, "GetEnumerator") }
 // A value LINQ can enumerate that is not already an array.
-function csqIsLazy(v) { return csqIsQuery(v) || csxkIsGen(v) }
+function csqIsLazy(v) { return csqIsQuery(v) || csxkIsGen(v) || csqIsUserSeq(v) }
 function csqMake(op, src) {
     var q = {}
     q["__linq"] = op
@@ -72,11 +77,12 @@ function csqArrIt(a) {
     return it
 }
 // An iterator over any enumerable value: an array (List<T> and T[]), a string's
-// chars, a dictionary's KeyValuePairs, a query, a user iterator.
+// chars, a dictionary's KeyValuePairs, a query, a user iterator, a user
+// IEnumerable<T>.
 function csqOpen(v) {
     if (Array.isArray(v)) { return csqArrIt(v) }
     if (csqIsQuery(v)) { return csqOpenQuery(v) }
-    if (csxkIsGen(v)) {
+    if (csxkIsGen(v) || csqIsUserSeq(v)) {
         var it = {}
         it["k"] = "g"
         it["g"] = csxkGenOpen(v)

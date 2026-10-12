@@ -16,7 +16,11 @@ func csqIsQuery(v interface{}) (*jsObject, bool) {
 	return o, ok
 }
 
-func csqIsLazy(v interface{}) bool {
+// csqIsUserSeq: an instance of a user class implementing IEnumerable<T>, which
+// the Enumerable extension methods read through its own GetEnumerator.
+func (rt *jsrt) csqIsUserSeq(v interface{}) bool { return rt.csUserMethod(v, "GetEnumerator") != nil }
+
+func (rt *jsrt) csqIsLazy(v interface{}) bool {
 	if _, ok := csqIsQuery(v); ok {
 		return true
 	}
@@ -24,7 +28,7 @@ func csqIsLazy(v interface{}) bool {
 		return true
 	}
 	_, ok := v.(*jsGenerator)
-	return ok
+	return ok || rt.csqIsUserSeq(v)
 }
 
 func csqMake(op string, src interface{}) *jsObject {
@@ -66,6 +70,7 @@ type csqIter struct {
 	q    *jsObject
 	a    []interface{} // "a": the elements
 	g    *jsGenerator  // "g": a user iterator
+	e    interface{}   // "e": a user enumerator's next() adapter (csEnumSrc)
 	s, t *csqIter      // the source, and a second sequence or an inner one
 	i    int
 	cur  interface{}
@@ -89,6 +94,13 @@ func (rt *jsrt) csqOpen(v interface{}) *csqIter {
 	}
 	if sq, ok := csSeqOf(v); ok {
 		return &csqIter{k: "g", g: rt.csSeqOpen(sq)}
+	}
+	if rt.csqIsUserSeq(v) {
+		src := rt.csEnumSrc(rt.csxMcall(v, "GetEnumerator", nil))
+		if g, ok := src.(*jsGenerator); ok {
+			return &csqIter{k: "g", g: g}
+		}
+		return &csqIter{k: "e", e: src}
 	}
 	rt.csqSrcChk(v, "source")
 	_, isStr := v.(string)
@@ -188,8 +200,13 @@ func (rt *jsrt) csqNext(it *csqIter) bool {
 		it.cur = it.a[it.i]
 		it.i++
 		return true
-	case "g":
-		st, _ := it.g.step(rt, jsUndef).(*jsObject)
+	case "g", "e":
+		var st *jsObject
+		if it.k == "g" {
+			st, _ = it.g.step(rt, jsUndef).(*jsObject)
+		} else {
+			st, _ = rt.call(rt.getMember(it.e, "next"), jsUndef, nil).(*jsObject)
+		}
 		if st == nil || st.props["done"] == true {
 			return false
 		}

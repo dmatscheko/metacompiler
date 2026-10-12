@@ -540,7 +540,7 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 		return o
 	}
 	switch name {
-	case "StringComparison", "StringSplitOptions", "NormalizationForm":
+	case "StringComparison", "StringSplitOptions", "NormalizationForm", "MidpointRounding":
 		return csxEnumType(name)
 	case "StringComparer":
 		return csxStrComparerType()
@@ -552,6 +552,12 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 		o.set("PI", jsJFlo{f: math.Pi, sty: floCS})
 		o.set("E", jsJFlo{f: math.E, sty: floCS})
 		o.set("Tau", jsJFlo{f: 2 * math.Pi, sty: floCS})
+		return o
+	case "MathF":
+		o.set("__cstype", "MathF")
+		o.set("PI", jsJFlo{f: float64(float32(math.Pi)), sty: floCSF})
+		o.set("E", jsJFlo{f: float64(float32(math.E)), sty: floCSF})
+		o.set("Tau", jsJFlo{f: float64(float32(2 * math.Pi)), sty: floCSF})
 		return o
 	}
 	// double.Parse / double.TryParse: csxParseDouble over the string; TryParse's
@@ -582,6 +588,17 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 			}
 			return ok
 		}))
+		// Its constants and IsNaN / IsInfinity / ...: csmDoubleConst and
+		// csmDoubleIs in abnf/jsrtcsmath.go.
+		for _, c := range csmDoubleConstNames {
+			o.set(c, jsJFlo{f: csmDoubleConst(c), sty: floCS})
+		}
+		for _, c := range csmDoubleIsNames {
+			c := c
+			o.set(c, jsHostFunc(c, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return csmDoubleIs(c, rt.toNumber(argAt(args, 0)))
+			}))
+		}
 		return o
 	}
 	alias := map[string]string{"SByte": "sbyte", "Byte": "byte", "Int16": "short",
@@ -1493,14 +1510,18 @@ func init() {
 					return w(rt.csxStringStatic(name, elems))
 				case "Enumerable":
 					return w(rt.csqStatic(name, elems))
-				case "Math":
-					return w(rt.csmStatic(name, elems))
+				case "Math", "MathF":
+					return w(rt.csmStatic(name, elems, r.props["__cstype"] == "MathF"))
 				}
 				if _, isQuery := csqIsQuery(r); isQuery {
 					return w(rt.csqMethod(r, name, elems))
 				}
 				if _, _, isDict := dictParts(r); isDict {
 					return w(rt.csxDictMethod(r, name, elems))
+				}
+				// An Enumerable extension method on a user IEnumerable<T>.
+				if rt.csUserMethod(r, name) == nil && rt.csqIsUserSeq(r) {
+					return w(rt.csqMethod(r, name, elems))
 				}
 			}
 			return baseCsMcall(a)

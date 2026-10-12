@@ -3510,6 +3510,161 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s56p1", bag == "456" && tens == "10;20;30;" && wr == "pq" && cs == "10;20;");
         }
 
+        // ===== SECTION 57: System.Double's constants and classification members =====
+        //
+        // NaN, the infinities, Epsilon (the least positive subnormal, 2^-1074) and
+        // MaxValue / MinValue (+-(2^53 - 1) * 2^971), rendered by the shortest
+        // round-tripping "R" form .NET Core 3.0 on uses: 5E-324 and
+        // 1.7976931348623157E+308. Epsilon / 2 is a tie that rounds to even, zero.
+        // No C# toolchain here: the values are IEEE 754 binary64's and were
+        // cross-checked with python3 (math.ulp(0.0), sys.float_info.max).
+        static void S57()
+        {
+            double[] d = { 0.0, 1.0, -1.0, 2.0 };
+            double nan = double.NaN;
+            Program.Check("s57c1", nan != nan && double.IsNaN(nan) && !double.IsNaN(d[1]) && "" + nan == "NaN"
+                && double.PositiveInfinity == d[1] / d[0] && double.NegativeInfinity == d[2] / d[0]
+                && "" + double.PositiveInfinity + double.NegativeInfinity == "Infinity-Infinity");
+            Program.Check("s57c2", "" + double.Epsilon == "5E-324" && double.Epsilon / d[3] == d[0] && double.Epsilon > d[0]
+                && "" + double.MaxValue == "1.7976931348623157E+308" && double.MinValue == -double.MaxValue
+                && double.MaxValue * d[3] == double.PositiveInfinity && Double.MaxValue == double.MaxValue);
+            Program.Check("s57i1", double.IsInfinity(double.NegativeInfinity) && double.IsPositiveInfinity(d[1] / d[0])
+                && !double.IsPositiveInfinity(double.NegativeInfinity) && double.IsNegativeInfinity(d[2] / d[0])
+                && double.IsFinite(double.MaxValue) && !double.IsFinite(nan) && !double.IsInfinity(nan));
+        }
+
+        // ===== SECTION 58: System.Linq over a user class implementing IEnumerable<T> =====
+        //
+        // The Enumerable operators are extension methods on IEnumerable<T>
+        // (ECMA-334 12.8.10.3), so they apply to any class implementing it and read
+        // it through its own GetEnumerator - an iterator, or a hand-written
+        // enumerator stepped by MoveNext / Current. string.Join and string.Concat
+        // take it as their IEnumerable<T> parameter, the better conversion than
+        // params object[] (12.6.4.5). The values follow from the docs.
+        class S58Bag : IEnumerable<int>
+        {
+            List<int> items = new List<int>();
+            public void Add(int x) { items.Add(x); }
+            public IEnumerator<int> GetEnumerator() { foreach (int x in items) { yield return x; } }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() { return GetEnumerator(); }
+        }
+        class S58Cur : IEnumerator<string>
+        {
+            string[] a;
+            int i = -1;
+            public S58Cur(string[] a) { this.a = a; }
+            public string Current { get { return a[i]; } }
+            object System.Collections.IEnumerator.Current { get { return a[i]; } }
+            public bool MoveNext() { i++; return i < a.Length; }
+            public void Reset() { i = -1; }
+            public void Dispose() { }
+        }
+        class S58Words : IEnumerable<string>
+        {
+            string[] a;
+            public S58Words(string[] a) { this.a = a; }
+            public IEnumerator<string> GetEnumerator() { return new S58Cur(a); }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() { return GetEnumerator(); }
+        }
+        class S58Nat : IEnumerable<int>
+        {
+            public IEnumerator<int> GetEnumerator() { int i = 0; while (true) { yield return i; i++; } }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() { return GetEnumerator(); }
+        }
+        static void S58()
+        {
+            int[] n = { 3, 1, 4, 1, 5 };
+            var bag = new S58Bag();
+            foreach (int x in n) { bag.Add(x); }
+            Program.Check("s58l1", string.Join(",", bag) == "3,1,4,1,5" && bag.Sum() == 14 && bag.Count() == 5 && bag.Max() == 5
+                && string.Join(",", bag.Where(x => x > 1)) == "3,4,5" && bag.First() == 3 && bag.Contains(4)
+                && string.Join(",", bag.OrderBy(x => x).Select(x => x * 2)) == "2,2,6,8,10" && string.Join(",", bag.Distinct()) == "3,1,4,5");
+            var l = new List<int>(bag);
+            l.AddRange(bag.Take(2));
+            Program.Check("s58l2", l.Count == 7 && bag.ToList().Count == 5 && Enumerable.Sum(bag) == 14);
+            var w = new S58Words(new[] { "pear", "fig", "apple" });
+            Program.Check("s58e1", string.Join("-", w) == "pear-fig-apple" && string.Concat(w) == "pearfigapple" && w.Count(s => s.Length > 3) == 2
+                && string.Join(",", w.Select((s, i) => i + s)) == "0pear,1fig,2apple" && w.Aggregate((a, b) => a + "+" + b) == "pear+fig+apple"
+                && w.Last() == "apple" && w.ElementAt(1) == "fig");
+            var nat = new S58Nat();
+            Program.Check("s58e2", string.Join(",", nat.Where(x => x % 2 == 1).Take(3)) == "1,3,5" && nat.First(x => x > 4) == 5
+                && string.Join(",", w.Zip(nat, (s, i) => s + i)) == "pear0,fig1,apple2");
+        }
+
+        // ===== SECTION 59: System.Math's integral overloads, MidpointRounding, MathF, BigMul, DivRem, CopySign =====
+        //
+        // Overload resolution picks Math's integral overload (ECMA-334 12.6.4): the
+        // narrowest parameter type every argument converts to implicitly (10.2.3),
+        // so Max(uint, long) is a long, Max(sbyte, byte) a short, Max(char, char) a
+        // ushort, Abs(byte) a short and Abs(uint) a long; Abs of short.MinValue and
+        // sbyte.MinValue overflows at the overload's width. Round's MidpointRounding
+        // modes scale by 10^digits as the two-argument Round does; MathF answers
+        // floats and scales in float (MathF.Round(2.135f, 2) is 2.14, where the
+        // double 2.135 gives 2.13). BigMul is the exact product (the high and low
+        // 64 bits for two longs), DivRem truncates. No C# toolchain here: the values
+        // follow the BCL docs and were cross-checked with python3's integers and
+        // floats (struct.pack('f') for the float steps).
+        static string S59T(object o)
+        {
+            return o is sbyte ? "sbyte" : o is byte ? "byte" : o is short ? "short" : o is ushort ? "ushort" : o is int ? "int"
+                : o is uint ? "uint" : o is long ? "long" : o is ulong ? "ulong" : o is float ? "float" : o is double ? "double" : "?";
+        }
+        static void S59()
+        {
+            uint[] u = { 5, 4000000000 };
+            long[] l = { 3, long.MaxValue, -3, 123456789012345, long.MinValue };
+            short[] s = { 7, short.MinValue };
+            byte[] b = { 9, 200, 7 };
+            sbyte[] sb = { -4, sbyte.MinValue };
+            ushort[] us = { 6 };
+            char[] c = { 'a', 'b' };
+            int[] i = { -2, 123456789, 46341 };
+            Program.Check("s59o1", S59T(Math.Max(u[0], l[0])) + Math.Max(u[0], l[0]) == "long5" && S59T(Math.Min(u[0], i[0])) == "long"
+                && S59T(Math.Max(s[0], b[0])) == "short" && S59T(Math.Max(sb[0], b[0])) == "short" && S59T(Math.Max(b[0], us[0])) == "ushort"
+                && S59T(Math.Max(b[0], b[1])) == "byte" && S59T(Math.Max(c[0], c[1])) + Math.Max(c[0], c[1]) == "ushort98"
+                && S59T(Math.Clamp(b[1], sb[0], s[0])) + Math.Clamp(b[1], sb[0], s[0]) == "short7");
+            Program.Check("s59a1", S59T(Math.Abs(b[0])) == "short" && S59T(Math.Abs(us[0])) == "int" && S59T(Math.Abs(u[0])) == "long"
+                && S59T(Math.Abs(sb[0])) + Math.Abs(sb[0]) == "sbyte4" && S59T(Math.Abs(c[0])) + Math.Abs(c[0]) == "int97");
+            string ex = "";
+            try { Math.Abs(s[1]); } catch (OverflowException) { ex += "s"; }
+            try { Math.Abs(sb[1]); } catch (OverflowException) { ex += "b"; }
+            Program.Check("s59a2", ex == "sb");
+            double[] d = { 2.5, -2.5, -0.3, 2.135, -1.005, 3.14159 };
+            Program.Check("s59r1", "" + Math.Round(d[0], MidpointRounding.AwayFromZero) + Math.Round(d[1], MidpointRounding.AwayFromZero) == "3-3"
+                && "" + Math.Round(d[0], MidpointRounding.ToEven) + Math.Round(d[2], MidpointRounding.AwayFromZero) == "2-0"
+                && "" + Math.Round(d[1], MidpointRounding.ToZero) + Math.Round(d[1], MidpointRounding.ToNegativeInfinity) == "-2-3"
+                && "" + Math.Round(d[1], MidpointRounding.ToPositiveInfinity) == "-2" && "" + MidpointRounding.ToZero == "ToZero");
+            Program.Check("s59r2", Math.Round(d[3], 2, MidpointRounding.AwayFromZero) == 2.13 && Math.Round(d[4], 2, MidpointRounding.ToNegativeInfinity) == -1.01
+                && Math.Round(d[5], 2, MidpointRounding.ToPositiveInfinity) == 3.15 && Math.Round(d[3], 2, MidpointRounding.ToZero) == 2.13);
+            float[] f = { 2.135f, -0.125f, 2f };
+            Program.Check("s59f1", S59T(MathF.Round(f[0], 2)) + MathF.Round(f[0], 2) == "float2.14" && "" + MathF.Round(f[1], 1, MidpointRounding.AwayFromZero) == "-0.1"
+                && "" + MathF.PI + ";" + MathF.E == "3.1415927;2.7182817" && "" + MathF.Sqrt(f[2]) == "1.4142135" && S59T(MathF.Max(i[0], i[2])) == "float"
+                && S59T(MathF.Abs(i[0])) == "float");
+            Program.Check("s59c1", "" + Math.CopySign(d[5], -0.0) + ";" + Math.CopySign(d[1], d[0]) + ";" + Math.CopySign(0.0, d[1]) == "-3.14159;2.5;-0"
+                && S59T(MathF.CopySign(f[2], f[1])) + MathF.CopySign(f[2], f[1]) == "float-2");
+            Program.Check("s59m1", S59T(Math.BigMul(i[1], -987654)) + Math.BigMul(i[1], -987654) == "long-121932591483006"
+                && Math.BigMul(i[2], i[2]) == 2147488281L && S59T(Math.BigMul(u[1], u[1])) + Math.BigMul(u[1], u[1]) == "ulong16000000000000000000");
+            long lo;
+            string m = "" + Math.BigMul(l[1], l[1], out lo) + " " + lo;
+            m += ";" + Math.BigMul(l[2], l[3], out lo) + " " + lo;
+            m += ";" + Math.BigMul(l[4], l[4], out lo) + " " + lo;
+            ulong ulo;
+            m += ";" + Math.BigMul(ulong.MaxValue, 12345678901234567890UL, out ulo) + " " + ulo;
+            Program.Check("s59m2", m == "4611686018427387903 1;-1 -370370367037035;4611686018427387904 0;12345678901234567889 6101065172474983726");
+            int rem;
+            long lrem;
+            int q = Math.DivRem(i[1], -1000, out rem);
+            long lq = Math.DivRem(l[3], 7L, out lrem);
+            var t = Math.DivRem(-17, i[2] - 46336);
+            var tb = Math.DivRem(b[1], b[2]);
+            Program.Check("s59d1", q == -123456 && rem == 789 && lq == 17636684144620L && lrem == 5 && S59T(lq) == "long"
+                && t.Quotient == -3 && t.Remainder == -2 && t.Item1 == -3 && S59T(tb.Quotient) + tb.Quotient + tb.Remainder == "byte284");
+            string dz = "";
+            try { Math.DivRem(i[1], 0, out rem); } catch (DivideByZeroException) { dz += "z"; }
+            try { MathF.Round(f[0], 7); } catch (ArgumentOutOfRangeException) { dz += "r"; }
+            Program.Check("s59d2", dz == "zr");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3568,6 +3723,9 @@ b";                                                   // verbatim keeps the newl
             Program.S54(); // SECTION-CALL 54
             Program.S55(); // SECTION-CALL 55
             Program.S56(); // SECTION-CALL 56
+            Program.S57(); // SECTION-CALL 57
+            Program.S58(); // SECTION-CALL 58
+            Program.S59(); // SECTION-CALL 59
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
