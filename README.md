@@ -719,9 +719,14 @@ Full detail, including the traps that cost real time:
 What is still open is [docs/todo.md](docs/todo.md): a ticket tracker with stable `T-NNN`
 IDs grouped by language, a closed list naming the commit that closed each ticket, and a
 "Settled" section of decisions that should not be re-opened.
-[docs/master-prompt.md](docs/master-prompt.md) describes the multi-agent workflow that
-works the tracker: a master agent assigns tickets to per-language workers in separate
-worktrees, verifies each branch against the real toolchain, and merges it.
+Two prompts drive the multi-agent workflow, and the user starts each one:
+[docs/master-prompt-work-tickets.md](docs/master-prompt-work-tickets.md) works the tracker
+(a master agent assigns tickets to per-language workers in separate worktrees, verifies
+each branch against the real toolchain, and merges it), and
+[docs/master-prompt-find-tickets.md](docs/master-prompt-find-tickets.md) finds new
+tickets (wrong-answer hunts, consolidation audits, corpus sweeps, guard reviews, small
+open-source programs, performance scans), with [docs/find-log.md](docs/find-log.md)
+recording which of those ran when.
 
 ### High level overview
 

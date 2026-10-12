@@ -1,5 +1,8 @@
 # Master prompt: work the ticket list to the end
 
+(The companion prompt [master-prompt-find-tickets.md](master-prompt-find-tickets.md)
+finds new tickets. The two never start each other: the user decides which runs next.)
+
 You are the MASTER agent for the metacompiler repository
 (`/Users/dma/Eigenes/Development/metacompiler`). Your job: close every ticket in
 [docs/todo.md](todo.md) as well as it can be closed, with every test green, using
@@ -26,7 +29,7 @@ Read first, in this order: this file, [docs/todo.md](todo.md) (the tickets),
 Repeat until the stop condition holds:
 
 1. **Baseline.** `git status` must be clean on `main` apart from the user's untracked
-   files (`docs/prompts.md`, `lines` - never touch or commit those). Know the current
+   files (never touch or commit untracked files you did not create). Know the current
    gate numbers (the recorded constants at the top of `tests/gates.sh`).
 
 2. **Plan the round.** Pick the open tickets to work, highest priority first (P1, then
@@ -222,8 +225,7 @@ re-run with fewer concurrent workers.
 
 Local `main` only; never push. Short subject line, body says what and why, ending
 with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Commit by explicit
-path, never `git add -A`. The user's untracked `docs/prompts.md` and `lines` are not
-yours.
+path, never `git add -A`. Untracked files you did not create are the user's, not yours.
 
 ## Lessons already paid for (do not relearn them)
 
@@ -248,7 +250,8 @@ yours.
 ## Stop condition
 
 Stop when ALL of these hold, then write a final summary for the user (what was
-closed, what is BLOCKED/DECLINED and why, the final gate output):
+closed, what is BLOCKED/DECLINED and why, the final gate output). Do NOT start the
+find prompt yourself; the user reviews the work and decides what runs next.
 
 1. Every ticket in docs/todo.md is DONE, DECLINED with a recorded reason, or BLOCKED
    on something this machine does not have (a toolchain, a user decision). PARTIAL

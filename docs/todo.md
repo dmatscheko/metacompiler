@@ -1,7 +1,8 @@
 # Tickets
 
 This file is the single list of everything still to fix, and the tracker the master
-agent works from ([master-prompt.md](master-prompt.md) says how). The manual —
+agent works from ([master-prompt-work-tickets.md](master-prompt-work-tickets.md) says
+how; [master-prompt-find-tickets.md](master-prompt-find-tickets.md) files new tickets). The manual —
 architecture, building, testing, traps — is
 [working-on-this-project.md](working-on-this-project.md).
 
