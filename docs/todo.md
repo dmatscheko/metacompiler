@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-443** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-444** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,12 +63,14 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-441 python: qualnames, dunder/exception `__dict__`, "Did you mean", dir/copy/dataclasses · P2 · PY · IN PROGRESS (PY worker, round 19) [V]
-python3 3.14: (a) `C.m.__qualname__` is `'m'` (should be `'C.m'`); nested classes print `'N'` not `'C.N'` in
-AttributeError texts. (b) compiled only: `o.__x__ = 5` missing from `o.__dict__` (`__`-prefix filter);
-`vars(ValueError("v"))` gives `{'args': ...}` (python3 `{}`). (c) property error messages use the accessed name; CPython
-uses `__set_name__`/fget's name (`'<lambda>'` for a late `G.q = property(lambda s: 1)`). (d) "unexpected keyword
-argument 'kk'. Did you mean 'k'?" suffix absent. (e) `dir()`, `copy`, `dataclasses` absent.
+### T-443 python: user __hash__/__eq__ in dict/set; descriptor __get__ on class access; type() 3-arg; collections · P1 · PY · IN PROGRESS (PY worker, round 20) [V]
+python3 3.14, all engines unless noted: (a) dict/set ignore a user `__hash__`/`__eq__`: `{K(1): "one"}[K(1)]` raises
+KeyError (CPython "one"); breaks frozen dataclasses as keys. Silent wrong answers possible (`K(1) in s`). (b) `K.a` with a
+descriptor defining `__get__` returns the descriptor instead of `__get__(None, K)`. (c) `type("Q", (), {"a": 1})` returns
+the str class (both halves). (d) `f.g(3)` with a function stored as an attribute of function f fails as a method call.
+(e) `BaseException.add_note` missing. (f) `collections.deque`, `defaultdict`, `OrderedDict`, `Counter`, `bytearray`,
+`SystemExit` raise NameError — write deque/defaultdict/OrderedDict/Counter in Python like python-copy.py.
+(g) arity errors ignore an assigned `__qualname__` (minor).
 
 ---
 
@@ -484,6 +486,7 @@ T-435 php: engine interfaces extend Traversable/UnitEnum/Stringable, Closure/Gen
 T-438 java: StringBuilder appends onto a short tail + 32-level join counter (-frozen ~6.7K -> ~1.5K steps per append); java ratchet one file again — DONE 148fc8d1
 T-437 python: CPython arity TypeErrors (missing/too many/multiple values/unexpected keyword/positional-only) in all engines, live instance __dict__, property builtin + decorator evaluation order; `int | "s"` is a TypeError in CPython too (not a defect) — DONE 7cedc576
 T-439 php: SPL in php-stdlib (ArrayIterator/ArrayObject/SplDoublyLinkedList/Stack/Queue/ObjectStorage, iterator_*, class_implements/parents, spl_object_hash), __FUNCTION__/__METHOD__ as compile-time constants, yield from an Iterator, ArrayAccess dispatch — DONE e6c70cfa
+T-441 python: qualnames, dunder/exception __dict__, property names via __set_name__, CPython "Did you mean" suggestions, copy + dataclasses modules (slots/kw_only/InitVar/make_dataclass raise NotImplementedError), dir() of classes/instances — DONE c0828553
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
