@@ -2620,10 +2620,8 @@ def s39():
 
     bi = Bm()
     bnd = getattr(bi, mnames[3] + "th")
-    # CPython qualifies a class defined inside a function as
-    # 's39.<locals>.Bm.mth'; no engine here records the DEFINING scope, so the
-    # row asserts the SUFFIX, which is exact in CPython and in all three engines.
-    check("it59", bnd.__name__ == "mth" and bnd.__qualname__.endswith("Bm.mth"))
+    # A class defined inside a function is qualified by it.
+    check("it59", bnd.__name__ == "mth" and bnd.__qualname__ == "s39.<locals>.Bm.mth")
     check("it60", bnd.__self__ is bi and type(bnd).__name__ == "method")
     check("it61", bnd.__func__ is Bm.mth and bnd(1) == 2)
     # How the two forms PRINT. CPython appends the receiver's address to both and
@@ -2631,13 +2629,23 @@ def s39():
     # and <map object> already follow. The rest is byte-for-byte CPython.
     check("it62", str(bl).startswith("<built-in method count of list object"))
     check("it63", str(bnd).startswith("<bound method ") and "Bm.mth of <" in str(bnd))
-    # __qualname__ of a plain function and of a class: EXACT for a module-level
-    # def, a lambda, a builtin and a builtin type. The one shape it is wrong for
-    # is a function read off a class body - CPython says 'Bm.mth' and this says
-    # 'mth' - because no engine records the DEFINING scope at a def site.
-    check("it64", sorted_like.__qualname__.endswith("sorted_like") and lam.__qualname__.endswith("<lambda>"))
+    # __qualname__ of a plain function and of a class names the scopes it was
+    # defined in; a builtin's is its name.
+    check("it64", sorted_like.__qualname__ == "s39.<locals>.sorted_like" and lam.__qualname__ == "s39.<locals>.<lambda>")
     check("it65", len.__qualname__ == "len" and str.__qualname__ == "str" and map.__qualname__ == "map")
-    check("it66", Bm.__qualname__.endswith("Bm") and Bm.mth.__qualname__.endswith("mth"))
+    check("it66", Bm.__qualname__ == "s39.<locals>.Bm" and Bm.mth.__qualname__ == "s39.<locals>.Bm.mth")
+
+    class Outer:
+        class Inner:
+            def f(self):
+                return 0
+    class Sub(Outer.Inner):
+        pass
+    oq = Outer.Inner.__qualname__
+    check("it67", oq == "s39.<locals>.Outer.Inner" and Outer.Inner.__name__ == "Inner"
+          and Sub().f.__qualname__ == oq + ".f" and repr(Outer.Inner).endswith("." + oq + "'>")
+          and str(Outer.Inner.f).startswith("<function " + oq + ".f")
+          and str(Sub().f).startswith("<bound method " + oq + ".f of "))
 
     # ----- an attribute a value does NOT have raises, catchably -----
     # It raises CPython's exact text, catchably, for a builtin value and for a
@@ -3542,6 +3550,27 @@ def s62():
                            "TypeError: sorted expected 1 argument, got 2",
                            "TypeError: sort() got an unexpected keyword argument 'kk'",
                            "TypeError: sort() got an unexpected keyword argument 'kk'"])
+    # A keyword close enough to a parameter's name is suggested: CPython's
+    # edit distance, a case flip costing half an edit, within a third of the
+    # characters involved.
+    def kwf(alpha=0, *, value=0, Name=0):
+        return alpha
+    msgs = []
+    for kw in ["alpah", "valeu", "name", "NAME", "zz", "vlue"]:
+        try:
+            kwf(**{kw: 1})
+        except TypeError as e:
+            msgs.append(str(e).split("argument ")[1])
+    for f in [lambda: sorted([1], keyy=1), lambda: print(1, sepp=""), lambda: int("1", bas=2)]:
+        try:
+            f()
+        except TypeError as e:
+            msgs.append(str(e))
+    check("srt9", msgs == ["'alpah'. Did you mean 'alpha'?", "'valeu'. Did you mean 'value'?",
+                           "'name'. Did you mean 'Name'?", "'NAME'. Did you mean 'Name'?", "'zz'", "'vlue'. Did you mean 'value'?",
+                           "sort() got an unexpected keyword argument 'keyy'. Did you mean 'key'?",
+                           "print() got an unexpected keyword argument 'sepp'. Did you mean 'sep'?",
+                           "int() got an unexpected keyword argument 'bas'. Did you mean 'base'?"])
 
 
 # ===== SECTION 63: sum() of floats, math.cbrt, int() with a base, conversion keywords =====
@@ -4941,6 +4970,21 @@ def s99():
     except AttributeError as e:
         msg = str(e)
     check("dict8", o2.cv == 9 and msg == "'S99P' object has no attribute 'b'")
+    # A __-named attribute is the program's like any other, in write order;
+    # an exception keeps args and its chaining attributes out of __dict__.
+    o3 = S99P(a=1)
+    o3.__x__ = 2
+    o3.b = 3
+    del o3.a
+    o3.a = 4
+    check("dict9", vars(o3) == {"__x__": 2, "b": 3, "a": 4} and list(vars(o3)) == ["__x__", "b", "a"])
+    o3.__dict__["__y__"] = 5
+    del o3.__dict__["__x__"]
+    check("dict10", o3.__y__ == 5 and not hasattr(o3, "__x__") and list(vars(o3)) == ["b", "a", "__y__"])
+    e = ValueError("v")
+    e.__cause__ = KeyError("k")
+    e.n = 1
+    check("dict11", vars(ValueError("v")) == {} and e.__dict__ == {"n": 1} and e.args == ("v",))
 
 # ===== SECTION 100: property =====
 # property(fget, fset, fdel, doc) is a data descriptor: an instance read,
@@ -5004,6 +5048,28 @@ def s100():
     p = property(lambda s: 42)
     S100C.q = p
     check("prop8", S100C().q == 42 and S100C.q is p and property(fget=S100C.gety, doc="g").__doc__ == "g")
+    # A property's name in these errors is its own: the class-body name
+    # __set_name__ gave it, else its getter's __name__, else none at all.
+    S100C.q2 = property(lambda s: 1)
+    S100C.q3 = S100C.y
+    S100C.q4 = property()
+    check("prop9", err(lambda: setattr(c, "q2", 1)) == "property '<lambda>' of 'S100C' object has no setter"
+          and err(lambda: setattr(c, "q3", 1)) == "property 'y' of 'S100C' object has no setter"
+          and err(lambda: c.q4) == "property of 'S100C' object has no getter"
+          and S100C.y.__name__ == "y" and p.__name__ == "<lambda>")
+    # Any other class-body member whose type defines __set_name__ is told its
+    # owner and name once the class exists, in body order; a later class
+    # attribute is not.
+    log = []
+    class Named:
+        def __set_name__(self, owner, name):
+            log.append(owner.__name__ + "." + name)
+    class Own:
+        a = Named()
+        b = 1
+        c = Named()
+    Own.d = Named()
+    check("prop10", log == ["Own.a", "Own.c"])
 
 def main():
     s01() # SECTION-CALL 01

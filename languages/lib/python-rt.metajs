@@ -97,6 +97,8 @@ import "./runtime.metajs"
 // and float.fromhex's numeral (hex-float.js).
 import "./hex-float.js"
 import "./python-num.js"
+// "Did you mean" for an unexpected keyword argument.
+import "./python-suggest.js"
 
 // sin, cos, tan and atan2 (math and the complex power), as the interpreter's.
 import "./fdlibm.js"
@@ -674,7 +676,7 @@ function pyStr(v) {
     var cn = pyClassName(v)
     if (cn !== null) {
         var cmod = v["__module__"]
-        if (typeof cmod == "string") { return "<class '" + cmod + "." + cn + "'>" }
+        if (typeof cmod == "string") { return "<class '" + cmod + "." + pyClsQual(v) + "'>" }
         return "<class '" + cn + "'>"
     }
     if (Array.isArray(v)) {
@@ -817,6 +819,8 @@ function pyFuncRender(v) {
     // two tables cannot collide by identity even when they collide by name.
     var bc = rtPairGet(pyBBFnObjs, pyBBFnCodes, v)
     if (bc !== undefined) { return pyBBFnRender(pyToStr(bc)) }
+    var q = pyFnQual(v)
+    if (q !== undefined) { return "<function " + q + ">" }
     var n = rtPairGet(pyBFnObjs, pyBFnNames, v)
     if (n === undefined) { return "<function <lambda>>" }
     return "<function " + pyToStr(n) + ">"
@@ -981,6 +985,7 @@ function pyUserRender(v, cls, wantRepr) {
         }
         return out + ")"
     }
+    if (typeof cls["__name"] == "string") { nm = pyClsQual(cls) }
     return "<" + nm + " object>"
 }
 
@@ -1077,6 +1082,23 @@ function pyTypeName(v) {
 // __qualname__ of a builtin type object are the SHORT name in CPython
 // (type(re.compile('a')).__name__ is 'Pattern') while the type object itself
 // renders and reports as 're.Pattern'.
+// A class's __qualname__: the emitter records __qual for a class nested in a
+// class or a function ('A.N', 'f.<locals>.L'); any other class's is its name.
+// Go: rt.pyClsQual.
+function pyClsQual(c) {
+    var q = c["__qual"]
+    if (typeof q == "string") { return q }
+    return pyShortName(pyToStr(c["__name"]))
+}
+
+// A user function's __qualname__, the one its signature carries (js_pysig), or
+// undefined for a builtin. Go: rt.pyFnQual.
+function pyFnQual(f) {
+    var si = pyDSigIndex(f)
+    if (si < 0 || pyDSigQual[si] == "") { return undefined }
+    return pyDSigQual[si]
+}
+
 function pyShortName(n) {
     var cut = -1
     for (var i = 0; i < n.length; i++) { if (n.charAt(i) == ".") { cut = i } }
@@ -1659,8 +1681,10 @@ function pyDescriptor(v, hook) {
 
 // An instance's own attributes as a Python dict (pyInstanceDict): ONE dict,
 // cached as __pydict, kept in step both ways (Go: rt.pyInstanceDict, which
-// explains the scheme). The __-prefixed slots are internal and are skipped,
-// which is what Go does with inst.keys.
+// explains the scheme). keysOf hides every __-prefixed key, the program's
+// `o.__x__` with the runtime's own slots, so the first such attribute written
+// starts __ord: the instance's attribute names in write order, kept from then
+// on by pyOrdNote and pyDDelAttr. Go reads the raw key order instead.
 function pyInstanceDict(inst) {
     var d = inst["__pydict"]
     if (d === undefined) {
@@ -1681,12 +1705,50 @@ function pyInstDictPull(inst) {
         dv.pop()
     }
     var ks = keysOf(inst)
-    for (var i = 0; i < ks.length; i++) {
+    var ord = inst["__ord"]
+    var exc = pyIsExcClass(pyInstClassOf(inst))
+    var i = 0
+    if (ord !== undefined) {
+        for (i = 0; i < ord.length; i++) {
+            var ok = ord[i]
+            if (!(exc && pyExcSlot(ok)) && (pyIsDunderKey(ok) || pyStrAt(ks, ok) >= 0)) {
+                dk.push(ok)
+                dv.push(inst[ok])
+            }
+        }
+    }
+    for (i = 0; i < ks.length; i++) {
         var k = ks[i]
-        if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
+        if ((exc && k == "args") || (ord !== undefined && pyStrAt(ord, k) >= 0)) { continue }
         dk.push(k)
         dv.push(inst[k])
     }
+    return undefined
+}
+
+function pyIsDunderKey(k) { return k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_" }
+
+function pyStrAt(xs, s) {
+    for (var i = 0; i < xs.length; i++) { if (xs[i] === s) { return i } }
+    return 0 - 1
+}
+
+// BaseException keeps these in C slots, not in its instances' __dict__.
+// Go: pyExcSlot.
+function pyExcSlot(k) {
+    return k == "args" || k == "__cause__" || k == "__context__" || k == "__traceback__" ||
+           k == "__suppress_context__"
+}
+
+// Records name in the instance's __ord (pyInstanceDict), starting it at the
+// first __-prefixed attribute.
+function pyOrdNote(obj, name) {
+    var ord = obj["__ord"]
+    if (ord === undefined) {
+        ord = keysOf(obj)
+        obj["__ord"] = ord
+    }
+    if (pyStrAt(ord, name) < 0) { ord.push(name) }
     return undefined
 }
 
@@ -1701,11 +1763,19 @@ function pyInstDictPush(d) {
         if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
         delKey(inst, k)
     }
+    var ord = inst["__ord"]
+    if (ord !== undefined) {
+        for (var oi = 0; oi < ord.length; oi++) { if (pyIsDunderKey(ord[oi])) { delKey(inst, ord[oi]) } }
+        delKey(inst, "__ord")
+    }
     if (inst["__nonek"] !== undefined) { inst["__nonek"] = [] }
     var dk = d["keys"]
     var dv = d["vals"]
     for (var j = 0; j < dk.length; j++) {
-        if (typeof dk[j] == "string") { pyPutAttr(inst, dk[j], dv[j]) }
+        if (typeof dk[j] == "string") {
+            if (inst["__ord"] !== undefined || pyIsDunderKey(dk[j])) { pyOrdNote(inst, dk[j]) }
+            pyPutAttr(inst, dk[j], dv[j])
+        }
     }
     return undefined
 }
@@ -1750,10 +1820,8 @@ function pyGetAttrRaw(obj, name) {
     }
     if (pyIsSuper(obj)) { return pySuperAttr(obj, name) }
     if (pyIsClass(obj)) {
-        // __qualname__ of a class is its __name__ for every class this subset can
-        // write: CPython qualifies only a NESTED class, and a nested `class` here
-        // is bound by the same name as a top-level one.
-        if (name == "__name__" || name == "__qualname__") { return pyShortName(pyToStr(obj["__name"])) }
+        if (name == "__name__") { return pyShortName(pyToStr(obj["__name"])) }
+        if (name == "__qualname__") { return pyClsQual(obj) }
         if (name == "__mro__" || name == "__bases__") { return pyTup(pyMroAttr(obj, name)) }
         if (pyLookupHas(obj, name)) {
             var cv = pyLookupVal(obj, name)
@@ -1780,7 +1848,7 @@ function pyGetAttrRaw(obj, name) {
         if (pyNoneBound(obj, name)) { return undefined }
         if (pyLookupHas(cls, name)) {
             var v = pyLookupVal(cls, name)
-            if (pyDIsProp(v)) { return pyDPropGet(v, obj, cls, name) }
+            if (pyDIsProp(v)) { return pyDPropGet(v, obj, cls) }
             // staticmethod / classmethod, before every other arm: a static one
             // must NOT pick up the instance as self, and a class one binds to the
             // receiver's OWN class, so D().c() passes D.
@@ -1833,11 +1901,9 @@ function pyGetAttrRaw(obj, name) {
         if (bdd !== undefined) { return bdd }
         if (name == "__hash__" && pyBHashNone(dtn0)) { return undefined }
     }
-    // A BOUND METHOD knows its own name, receiver and underlying function.
-    // __qualname__ is answered HERE and nowhere else on purpose: 'list.count' and
-    // 'C.m' are exactly CPython's answers and both fall out of the record, while a
-    // plain function's qualname would need the DEFINING scope recorded at every
-    // def site in four places.
+    // A BOUND METHOD knows its own name, receiver and underlying function: a
+    // user method's __qualname__ is its function's, a builtin's is the
+    // receiver's type name and its own ('list.count').
     if (typeof obj == "function") {
         var bmj = pyBMFind(obj)
         if (bmj >= 0) {
@@ -1848,6 +1914,8 @@ function pyGetAttrRaw(obj, name) {
                 // module function's qualname is its bare name.
                 if (bmk == "d") { return pyToStr(pyBMTab[bmj + 2]["__name"]) + "." + pyToStr(pyBMTab[bmj + 1]) }
                 if (bmk == "m") { return pyBMTab[bmj + 1] }
+                var bfq = pyFnQual(pyBMTab[bmj + 3])
+                if (bfq !== undefined) { return bfq }
                 return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyToStr(pyBMTab[bmj + 1])
             }
             // CPython gives a method DESCRIPTOR no __self__ at all - it is not
@@ -1872,15 +1940,17 @@ function pyGetAttrRaw(obj, name) {
     // any other absent attribute). __doc__ needs a def's leading string statement
     // recorded in three engines AND CPython's own text for every builtin; a
     // function's __module__ needs the defining module recorded at every def site.
-    // __qualname__ rides with __name__ below. It is EXACT for a module-level
-    // def, a lambda, a builtin function and a builtin type, and wrong for exactly
-    // one shape: a function read off a class body, where CPython says 'C.m' and
-    // this says 'm'. The bound-method arm above already answers 'C.m'.
+    // A user function's __qualname__ is its signature's; a builtin's rides with
+    // __name__ below.
     // len.__self__ is the builtins MODULE in CPython, not a receiver - the
     // builtin functions are that module's members.
     if (name == "__self__" && typeof obj == "function") {
         var bsc = rtPairGet(pyBBFnObjs, pyBBFnCodes, obj)
         if (bsc !== undefined && pyDBuiltinsMod !== null) { return pyDBuiltinsMod }
+    }
+    if (name == "__qualname__" && typeof obj == "function") {
+        var ufq = pyFnQual(obj)
+        if (ufq !== undefined) { return ufq }
     }
     if (name == "__name__" || name == "__qualname__") {
         // A synthetic class object for a BUILTIN type (what type(3) hands out)
@@ -2220,7 +2290,7 @@ function pySetAttrRaw(obj, name, v) {
         if (pyLookupHas(cls, name)) {
             var cur = pyLookupVal(cls, name)
             if (pyDIsProp(cur)) {
-                pyDPropCall(cur, "fset", cls, name, [obj, v])
+                pyDPropCall(cur, "fset", cls, [obj, v])
                 return v
             }
             var set = pyDescriptor(cur, "__set__")
@@ -2230,6 +2300,9 @@ function pySetAttrRaw(obj, name, v) {
             }
         }
         if (!pySlotsAllow(cls, name)) { pyAttrError(cls, name) }
+        if (obj["__ord"] !== undefined || (name.length >= 2 && name.charAt(0) == "_" && name.charAt(1) == "_")) {
+            pyOrdNote(obj, name)
+        }
         pyPutAttr(obj, name, v)
         if (obj["__pydict"] !== undefined) { pyInstDictPull(obj) }
         return v
@@ -2530,7 +2603,11 @@ function pyObjHash(a) {
     var s = pynWSigned(pyHashId(a))
     return pyIntOfBits(s["neg"], s["bits"])
 }
-function pyObjRepr(a) { return "<" + pyBMOwner(a) + " object>" }
+function pyObjRepr(a) {
+    var c = pyInstClassOf(a)
+    if (c !== null && c !== undefined) { return "<" + pyClsQual(c) + " object>" }
+    return "<" + pyTypeName(a) + " object>"
+}
 function pyObjStr(a) { return pyRepr(a) }
 function pyObjFormat(a, spec) {
     if (spec !== undefined && spec !== null && pyToStr(spec) != "") {
@@ -4901,7 +4978,7 @@ function pyKwPos(fname, pos, kw, names, nposonly) {
             if (names[j] == kn) { at = j }
             j = j + 1
         }
-        if (at < 0) { pyRaiseExc("TypeError", fname + "() got an unexpected keyword argument '" + kn + "'") }
+        if (at < 0) { pyRaiseExc("TypeError", fname + "() got an unexpected keyword argument '" + kn + "'" + pyDidYouMean(kn, names.slice(nposonly, names.length))) }
         if (at < pos.length) {
             pyRaiseExc("TypeError", "argument for " + fname + "() given by name ('" + kn + "') and position (" + pyIntStr(at + 1) + ")")
         }
@@ -6235,7 +6312,7 @@ function js_pyprint(args) {
     if (!pyIsArr(args) || args.length != 6) { fail("js_pyprint needs a bound argument array") }
     var kw = args[5]
     if (pyIsDict(kw) && kw["keys"].length > 0) {
-        pyRaiseExc("TypeError", "print() got an unexpected keyword argument '" + pyToStr(kw["keys"][0]) + "'")
+        pyRaiseExc("TypeError", "print() got an unexpected keyword argument '" + pyToStr(kw["keys"][0]) + "'" + pyDidYouMean(pyToStr(kw["keys"][0]), ["sep", "end", "file", "flush"]))
     }
     var sep = pyPrintText(args[0], "sep", " ")
     var end = pyPrintText(args[1], "end", "\n")
@@ -7880,7 +7957,7 @@ function pySuperAttr(s, name) {
     // path in pySuperMCall.
     if (pyDIsStatic(m) || pyDIsClsM(m)) { return pyDDescGet(m, pyDSuperOwner(s), name) }
     if (pyDIsProp(m) && pyInstClassOf(s["__sobj"]) !== null) {
-        return pyDPropGet(m, s["__sobj"], pyInstClassOf(s["__sobj"]), name)
+        return pyDPropGet(m, s["__sobj"], pyInstClassOf(s["__sobj"]))
     }
     // __new__ is a static method: super().__new__(cls) passes cls itself.
     if (pyIsCallable(m) && name != "__new__") { return pyDBindMethod(s["__sobj"], m, name) }
@@ -7976,7 +8053,9 @@ function pyBMRender(i) {
         if (pySlotDunder(nm)) { return "<method-wrapper '" + nm + "' of " + pyBMOwner(self) + " object>" }
         return "<built-in method " + nm + " of " + pyBMOwner(self) + " object>"
     }
-    return "<bound method " + pyBMOwner(self) + "." + nm + " of " + pyRepr(self) + ">"
+    var fq = pyFnQual(pyBMTab[i + 3])
+    if (fq === undefined) { fq = pyBMOwner(self) + "." + nm }
+    return "<bound method " + fq + " of " + pyRepr(self) + ">"
 }
 
 // Go: pySlotDunder. A builtin type's dunder that CPython implements as a type
@@ -8212,7 +8291,7 @@ function pyDDelAttr(obj, name) {
     else if (pyLookupHas(dcls, pyToStr(name))) {
         var dp = pyLookupVal(dcls, pyToStr(name))
         if (pyDIsProp(dp)) {
-            pyDPropCall(dp, "fdel", dcls, pyToStr(name), [obj])
+            pyDPropCall(dp, "fdel", dcls, [obj])
             return undefined
         }
     }
@@ -8227,6 +8306,11 @@ function pyDDelAttr(obj, name) {
         if (dcls !== null) { pyRaiseExc("AttributeError", "'" + pyTypeName(obj) + "' object has no attribute '" + dname + "'") }
     }
     delKey(obj, dname)
+    var dord = obj["__ord"]
+    if (dord !== undefined) {
+        var doi = pyStrAt(dord, dname)
+        if (doi >= 0) { pyCRemoveAt(dord, doi) }
+    }
     var nk = obj["__nonek"]
     if (nk !== undefined) {
         var ni = 0
@@ -8497,7 +8581,8 @@ function pyDArityCheck(si, given, kn) {
                 j = j + 1
             }
             if (po != "") { pyDArityFail(si, "got some positional-only arguments passed as keyword arguments: '" + po + "'") }
-            pyDArityFail(si, "got an unexpected keyword argument '" + kn[k] + "'")
+            pyDArityFail(si, "got an unexpected keyword argument '" + kn[k] + "'" +
+                             pyDidYouMean(kn[k], names.slice(nposonly, names.length)))
         }
         if (at >= 0 && at < npos && at < given) { pyDArityFail(si, "got multiple values for argument '" + kn[k] + "'") }
         k = k + 1
@@ -8891,7 +8976,7 @@ function pyDMethodCall(target, name, args, kw) {
         }
         if (pyLookupHas(icls, name)) {
             var m = pyLookupVal(icls, name)
-            if (pyDIsProp(m)) { return pyDCallPyValue(pyDPropGet(m, target, icls, name), args, kw) }
+            if (pyDIsProp(m)) { return pyDCallPyValue(pyDPropGet(m, target, icls), args, kw) }
             // inst.s(...) on a staticmethod gets NO self, and inst.c(...) on a
             // classmethod gets the receiver's own class - checked before the
             // callable arm, which would otherwise prepend the instance.
@@ -9221,7 +9306,7 @@ function pyKwOnly(kw, fname, a, b) {
     var i = 0
     while (i < ks.length) {
         if (ks[i] != a && ks[i] != b) {
-            pyRaiseExc("TypeError", fname + "() got an unexpected keyword argument '" + ks[i] + "'")
+            pyRaiseExc("TypeError", fname + "() got an unexpected keyword argument '" + ks[i] + "'" + pyDidYouMean(pyToStr(ks[i]), [a, b]))
         }
         i = i + 1
     }
@@ -9639,7 +9724,30 @@ function js_pystaticmethod(f) { return {__pysm: f} }
 // A data descriptor the class-member lookups run. Go: newPyProp and pyProp* in
 // abnf/jsrtpydesc.go, which explain the scheme.
 function pyDNewProp(fget, fset, fdel, doc) {
-    return {__pyprop: true, fget: fget, fset: fset, fdel: fdel, doc: doc}
+    return {__pyprop: true, fget: fget, fset: fset, fdel: fdel, doc: doc, pname: undefined}
+}
+
+// The name the class body gave the property (pyDSetNames), else its getter's
+// __name__, else undefined. Go: rt.pyPropName.
+function pyDPropName(p) {
+    if (p["pname"] !== undefined) { return p["pname"] }
+    if (typeof p["fget"] == "function") { return pyToStr(pyGetAttr(p["fget"], "__name__")) }
+    return undefined
+}
+
+// The __set_name__ pass over a filled class body. Go: rt.pySetNames, which
+// explains it.
+function js_pysetnames(cls) {
+    var ks = keysOf(cls)
+    for (var i = 0; i < ks.length; i++) {
+        var v = cls[ks[i]]
+        if (pyDIsProp(v)) { v["pname"] = ks[i] }
+        else {
+            var sn = pyDescriptor(v, "__set_name__")
+            if (sn !== undefined) { pyCall(sn, [v, cls, ks[i]]) }
+        }
+    }
+    return undefined
 }
 
 function pyDIsProp(v) {
@@ -9656,26 +9764,31 @@ function js_pyproperty(a) {
 
 // Run accessor `which` (fget / fset / fdel) on args, or raise CPython's
 // AttributeError for the one the property lacks.
-function pyDPropCall(p, which, cls, name, args) {
+function pyDPropCall(p, which, cls, args) {
     var f = p[which]
     if (f === undefined) {
         var what = "getter"
         if (which == "fset") { what = "setter" }
         if (which == "fdel") { what = "deleter" }
-        pyRaiseExc("AttributeError", "property '" + name + "' of '" + pyToStr(cls["__name"]) + "' object has no " + what)
+        var pn = pyDPropName(p)
+        var head = "property "
+        if (pn !== undefined) { head = head + "'" + pn + "' " }
+        pyRaiseExc("AttributeError", head + "of '" + pyToStr(cls["__name"]) + "' object has no " + what)
     }
     return js_pycall(f, args, undefined)
 }
 
-function pyDPropGet(p, obj, cls, name) { return pyDPropCall(p, "fget", cls, name, [obj]) }
+function pyDPropGet(p, obj, cls) { return pyDPropCall(p, "fget", cls, [obj]) }
 
 // An attribute of the property object itself.
 function pyDPropAttr(p, name) {
     if (name == "fget" || name == "fset" || name == "fdel") { return p[name] }
     if (name == "__doc__") { return p["doc"] }
+    if (name == "__name__" && pyDPropName(p) !== undefined) { return pyDPropName(p) }
     if (name == "getter" || name == "setter" || name == "deleter") {
         return function(f) {
             var q = pyDNewProp(p["fget"], p["fset"], p["fdel"], p["doc"])
+            q["pname"] = p["pname"]
             q["f" + name.substring(0, 3)] = f
             return q
         }
@@ -9683,7 +9796,7 @@ function pyDPropAttr(p, name) {
     if (name == "__get__") {
         return function(obj) {
             if (obj === undefined) { return p }
-            return pyDPropGet(p, obj, pyInstClassOf(obj), "")
+            return pyDPropGet(p, obj, pyInstClassOf(obj))
         }
     }
     pyRaiseExc("AttributeError", "'property' object has no attribute '" + name + "'")

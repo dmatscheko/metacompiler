@@ -4015,6 +4015,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // an UnboundLocalError. Its frame is closed and DISCARDED - only the class's
         // own name binds in the scope around it.
         sbPop()
+        var qual = sbQual
         sbName(name)
         return {dname: name, dstmt: function(b) {
             var basesV = callExt(b, "js_arr_new", [])
@@ -4024,6 +4025,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 callExt(b, "js_arr_push", [basesV, rb.v])
             }
             var cls = callExt(b, "js_pyclass_new", [emitStr(b, name), basesV])
+            // A nested class's __qualname__ (pyClsQual in lib/python-rt.metajs).
+            if (qual != name) { callExt(b, "js_set", [cls, emitStr(b, "__qual"), emitStr(b, qual)]) }
             // CPython seeds the body namespace with __module__, so a body binding
             // of its own overrides it; pyString prefixes the class repr with it.
             callExt(b, "js_set", [cls, emitStr(b, "__module__"), emitStr(b, modName)])
@@ -4046,6 +4049,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = bodyT(b)
             pySuperCls = savedSuperCls
             b = pyClassFill(b, cls, bodyScope, pyBindSink)
+            callExt(b, "js_pysetnames", [cls])
             // SETUP_ANNOTATIONS: the body HELD an annotation, so the class has an
             // __annotations__ dict whether or not the annotated statement ran.
             if (pyAnnotHere) { b = pyEnsureAnnot(b, cls) }

@@ -999,6 +999,9 @@ kotlin-math.js            <- kotlin-rt.metajs, kotlin interpreter (kotlin.math
 python-num.js             <- python-rt.metajs, python interpreter (int's and
                              float's own methods at the bit and double level;
                              Go twin: abnf/jsrtpynum.go)
+python-suggest.js         <- python-rt.metajs, python interpreter (the "Did you
+                             mean" of an unexpected keyword argument; Go twin:
+                             abnf/jsrtpysuggest.go)
 java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
                              csharp interpreter (Go twin: abnf/jsrtjavachars.go)
 java-strings.js           <- java-rt.metajs, java interpreter (String's methods

@@ -1052,6 +1052,9 @@ func pyObjMethodBody(name string) func(rt *jsrt, this uint64, args []interface{}
 		}
 	case "__repr__":
 		return func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if _, cls, ok := pyInstance(arg(args, 0)); ok {
+				return "<" + rt.pyClsQual(cls) + " object>"
+			}
 			return "<" + rt.pyOwnerName(arg(args, 0)) + " object>"
 		}
 	case "__str__":
@@ -1331,7 +1334,7 @@ func (rt *jsrt) pyDelAttrRaw(obj interface{}, name string) {
 		panic(&jsThrown{value: rt.pyAttrError(cls, name)})
 	} else if m, found := pyLookup(cls, name); found {
 		if p, isProp := pyPropOf(m); isProp {
-			rt.pyPropDel(p, obj, cls, name)
+			rt.pyPropDel(p, obj, cls)
 			return
 		}
 	}

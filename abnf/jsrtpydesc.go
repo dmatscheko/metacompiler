@@ -108,31 +108,68 @@ func pyPropOf(v interface{}) (*jsObject, bool) {
 	return o, has
 }
 
-// pyPropErr is CPython's AttributeError for an accessor the property lacks.
-func (rt *jsrt) pyPropErr(cls *jsObject, name, what string) {
-	panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
-		"property '"+name+"' of '"+rt.toString(cls.props["__name"])+"' object has no "+what)})
+// pyPropName is CPython's name of a property: the class-body name
+// __set_name__ gave it (pySetNames), else its getter's __name__, else none.
+func (rt *jsrt) pyPropName(p *jsObject) (string, bool) {
+	if n, ok := p.props["pname"].(string); ok {
+		return n, true
+	}
+	if f := p.props["fget"]; isCallable(f) {
+		return rt.toString(rt.pyGetAttr(f, "__name__")), true
+	}
+	return "", false
 }
 
-func (rt *jsrt) pyPropGet(p *jsObject, obj interface{}, cls *jsObject, name string) interface{} {
+// pyPropErr is CPython's AttributeError for an accessor the property lacks.
+func (rt *jsrt) pyPropErr(p, cls *jsObject, what string) {
+	head := "property "
+	if n, ok := rt.pyPropName(p); ok {
+		head += "'" + n + "' "
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+		head+"of '"+rt.toString(cls.props["__name"])+"' object has no "+what)})
+}
+
+func (rt *jsrt) pyPropGet(p *jsObject, obj interface{}, cls *jsObject) interface{} {
 	if isUndefOrNull(p.props["fget"]) {
-		rt.pyPropErr(cls, name, "getter")
+		rt.pyPropErr(p, cls, "getter")
 	}
 	return rt.callPyValue(p.props["fget"], []interface{}{obj}, jsUndef)
 }
 
-func (rt *jsrt) pyPropSet(p *jsObject, obj interface{}, cls *jsObject, name string, v interface{}) {
+func (rt *jsrt) pyPropSet(p *jsObject, obj interface{}, cls *jsObject, v interface{}) {
 	if isUndefOrNull(p.props["fset"]) {
-		rt.pyPropErr(cls, name, "setter")
+		rt.pyPropErr(p, cls, "setter")
 	}
 	rt.callPyValue(p.props["fset"], []interface{}{obj, v}, jsUndef)
 }
 
-func (rt *jsrt) pyPropDel(p *jsObject, obj interface{}, cls *jsObject, name string) {
+func (rt *jsrt) pyPropDel(p *jsObject, obj interface{}, cls *jsObject) {
 	if isUndefOrNull(p.props["fdel"]) {
-		rt.pyPropErr(cls, name, "deleter")
+		rt.pyPropErr(p, cls, "deleter")
 	}
 	rt.callPyValue(p.props["fdel"], []interface{}{obj}, jsUndef)
+}
+
+// pySetNames is the __set_name__ pass type.__new__ runs once a class body is
+// a class: a property member learns its name, and a member whose class
+// defines __set_name__ is called with (owner, name). __-prefixed members are
+// skipped, because layer 2's keysOf cannot list them. Twin of pyDSetNames in
+// lib/python-rt.metajs and pySetNames in python-interpreter.abnf.
+func (rt *jsrt) pySetNames(cls *jsObject) {
+	for _, k := range append([]string{}, cls.keys...) {
+		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+			continue
+		}
+		v := cls.props[k]
+		if p, isProp := pyPropOf(v); isProp {
+			p.set("pname", k)
+		} else if _, vcls, isInst := pyInstance(v); isInst {
+			if f, ok := pyLookup(vcls, "__set_name__"); ok {
+				rt.callPyValue(f, []interface{}{v, cls, k}, jsUndef)
+			}
+		}
+	}
 }
 
 // pyPropAttr is an attribute of the property object itself.
@@ -142,9 +179,16 @@ func (rt *jsrt) pyPropAttr(p *jsObject, name string) interface{} {
 		return p.props[name]
 	case "__doc__":
 		return p.props["doc"]
+	case "__name__":
+		if n, ok := rt.pyPropName(p); ok {
+			return n
+		}
 	case "getter", "setter", "deleter":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			q := newPyProp(p.props["fget"], p.props["fset"], p.props["fdel"], p.props["doc"])
+			if n, ok := p.props["pname"]; ok {
+				q.set("pname", n)
+			}
 			q.set("f"+name[:3], argAt(args, 0))
 			return q
 		})
@@ -155,7 +199,7 @@ func (rt *jsrt) pyPropAttr(p *jsObject, name string) interface{} {
 				return p
 			}
 			_, cls, _ := pyInstance(obj)
-			return rt.pyPropGet(p, obj, cls, "")
+			return rt.pyPropGet(p, obj, cls)
 		})
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("AttributeError", "'property' object has no attribute '"+name+"'")})

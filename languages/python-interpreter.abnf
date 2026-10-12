@@ -1101,6 +1101,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // and float.fromhex's numeral (lib/hex-float.js).
     include("lib/hex-float.js")
     include("lib/python-num.js")
+    // "Did you mean" for an unexpected keyword argument.
+    include("lib/python-suggest.js")
 
     // sin, cos, tan and atan2 are fdlibm's (lib/fdlibm.js), which agree with the
     // platform libm CPython calls where the host's Math does not: cos(pi/2) is
@@ -1147,7 +1149,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (kn == "end") { endV = named.vals[k] }
                 else if (kn == "file") { file = named.vals[k] }
                 else if (kn == "flush") { flush = named.vals[k] }
-                else { pyListErr("TypeError", "print() got an unexpected keyword argument '" + kn + "'") }
+                else { pyListErr("TypeError", "print() got an unexpected keyword argument '" + kn + "'" + pyDidYouMean(kn, ["sep", "end", "file", "flush"])) }
             }
         }
         var sep = pyPrintText(sepV, "sep", " ")
@@ -1388,7 +1390,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // <class 'int'>. Twin of rt.pyClassName in abnf/jsrt.go and pyClassName in
     // languages/lib/python-rt.metajs.
     function pyClsQualName(c) {
-        if (hasOwn(c, "__module__") && typeof c.__module__ == "string") { return c.__module__ + "." + c.__name }
+        if (hasOwn(c, "__module__") && typeof c.__module__ == "string") { return c.__module__ + "." + pyClsQual(c) }
         return c.__name
     }
     // The last component of a possibly module-qualified type name. Keep in step
@@ -1588,7 +1590,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var kn = named.keys[k]
             var at = 0 - 1
             for (var j = nposonly; j < names.length; j++) { if (names[j] == kn) { at = j } }
-            if (at < 0) { pyListErr("TypeError", fname + "() got an unexpected keyword argument '" + kn + "'") }
+            if (at < 0) { pyListErr("TypeError", fname + "() got an unexpected keyword argument '" + kn + "'" + pyDidYouMean(kn, names.slice(nposonly, names.length))) }
             if (at < args.length) {
                 pyListErr("TypeError", "argument for " + fname + "() given by name ('" + kn + "') and position (" + (at + 1) + ")")
             }
@@ -2379,25 +2381,50 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // itself. getter / setter / deleter answer a COPY with one accessor
     // replaced, which is what makes `@x.setter def x(...)` rebind x. Twin of
     // newPyProp / pyProp* in abnf/jsrtpydesc.go and lib/python-rt.metajs.
-    function pyPropNew(fget, fset, fdel, doc) { return {__pyprop: true, fget: fget, fset: fset, fdel: fdel, doc: doc} }
+    function pyPropNew(fget, fset, fdel, doc) { return {__pyprop: true, fget: fget, fset: fset, fdel: fdel, doc: doc, pname: undefined} }
     function pyIsProp(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyprop === true }
+    // The name the class body gave the property (pySetNames), else its
+    // getter's __name__, else undefined.
+    function pyPropName(p) {
+        if (p.pname !== undefined) { return p.pname }
+        if (typeof p.fget == "function") { return "" + pyattr(p.fget, "__name__") }
+        return undefined
+    }
     // Run accessor `which` on args, or raise CPython's AttributeError for the
     // one the property lacks.
-    function pyPropCall(p, which, cls, name, args) {
+    function pyPropCall(p, which, cls, args) {
         var f = p[which]
         if (f === undefined || f === null) {
             var what = which == "fget" ? "getter" : (which == "fset" ? "setter" : "deleter")
-            pyRaise(pyMakeExc("AttributeError", ["property '" + name + "' of '" + cls.__name + "' object has no " + what]))
+            var pn = pyPropName(p)
+            var head = pn === undefined ? "property " : "property '" + pn + "' "
+            pyRaise(pyMakeExc("AttributeError", [head + "of '" + cls.__name + "' object has no " + what]))
         }
         return pyCall(f, args, null)
+    }
+    // The __set_name__ pass type.__new__ runs once a class body is a class.
+    // Twin of rt.pySetNames in abnf/jsrtpydesc.go, which explains it.
+    function pySetNames(cls, names) {
+        for (var i = 0; i < names.length; i++) {
+            var k = names[i]
+            if (k.length >= 2 && k.charAt(0) == "_" && k.charAt(1) == "_") { continue }
+            var v = cls[k]
+            if (pyIsProp(v)) { v.pname = k }
+            else if (pyUser(v)) {
+                var sn = clsFind(v.__class, "__set_name__")
+                if (sn != null) { pyCall(sn, [v, cls, k], null) }
+            }
+        }
     }
     // An attribute of the property object itself.
     function pyPropAttr(p, name) {
         if (name == "fget" || name == "fset" || name == "fdel") { return p[name] }
         if (name == "__doc__") { return p.doc }
+        if (name == "__name__" && pyPropName(p) !== undefined) { return pyPropName(p) }
         if (name == "getter" || name == "setter" || name == "deleter") {
             return function(f) {
                 var q = pyPropNew(p.fget, p.fset, p.fdel, p.doc)
+                q.pname = p.pname
                 q["f" + name.substring(0, 3)] = f
                 return q
             }
@@ -2405,7 +2432,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "__get__") {
             return function(obj) {
                 if (obj === undefined || obj === null) { return p }
-                return pyPropCall(p, "fget", obj.__class, "", [obj])
+                return pyPropCall(p, "fget", obj.__class, [obj])
             }
         }
         pyRaise(pyMakeExc("AttributeError", ["'property' object has no attribute '" + name + "'"]))
@@ -2727,7 +2754,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pySlotDunder(nm)) { return "<method-wrapper '" + nm + "' of " + pyBMOwner(self) + " object>" }
             return "<built-in method " + nm + " of " + pyBMOwner(self) + " object>"
         }
-        return "<bound method " + pyBMOwner(self) + "." + nm + " of " + prepr(self) + ">"
+        var fq = fnQual(pyBMTab[i + 3])
+        if (fq === undefined) { fq = pyBMOwner(self) + "." + nm }
+        return "<bound method " + fq + " of " + prepr(self) + ">"
     }
     // A builtin type's dunder that CPython implements as a type SLOT binds as a
     // method-wrapper ((5).__add__); the few that are ordinary methods
@@ -3307,7 +3336,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (bmi >= 0) { return pyBMRender(bmi) }
             var bft = bfnText(v)
             if (bft !== undefined) { return bft }
-            return "<function " + fnName(v) + ">"
+            return "<function " + (fnQual(v) !== undefined ? fnQual(v) : fnName(v)) + ">"
         }
         if (typeof v == "object" && v.__pyconst !== undefined) { return v.__pyconst }
         return "" + v
@@ -3346,7 +3375,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < v.args.length; i++) { if (i > 0) { out4 += ", " }; out4 += prepr(v.args[i]) }
             return out4 + ")"
         }
-        return "<" + v.__class.__name + " object>"
+        return "<" + pyClsQual(v.__class) + " object>"
     }
     // Is this class KeyError, or a subclass of it? KeyError is the one builtin
     // exception whose __str__ differs from BaseException's, and a subclass
@@ -6172,7 +6201,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (kw === null || kw === undefined) { return }
         for (var i = 0; i < kw.keys.length; i++) {
             if (kw.keys[i] != a && kw.keys[i] != b) {
-                pyListErr("TypeError", fname + "() got an unexpected keyword argument '" + kw.keys[i] + "'")
+                pyListErr("TypeError", fname + "() got an unexpected keyword argument '" + kw.keys[i] + "'" + pyDidYouMean(kw.keys[i], [a, b]))
             }
         }
     }
@@ -10065,7 +10094,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyUser(o)) {
             var dp = clsFind(o.__class, name)
             if (pyIsProp(dp)) {
-                pyPropCall(dp, "fdel", o.__class, name, [o])
+                pyPropCall(dp, "fdel", o.__class, [o])
                 return
             }
         }
@@ -10767,6 +10796,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // an UnboundLocalError. Its frame is therefore closed and DISCARDED - only
         // the class's own name binds in the scope around it.
         sbPop()
+        var qual = sbQual
         sbName(name)
         var baseArgs = null
         var modName = pyCurMod
@@ -10789,7 +10819,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             scopes.push(ns)
             bodyT()
             scopes.pop()
-            var cls = {__isclass: true, __name: name, __bases: bases, __module__: modName}
+            var cls = {__isclass: true, __name: name, __bases: bases, __module__: modName, __qual: qual}
             clsSetMRO(cls, bases)
             // The __class__ cell, exactly as CPython builds one: the class body's
             // namespace is what every method in it closes over (makeDef captures
@@ -10802,6 +10832,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 scopePut(cls, ns.__nskeys[k], ns[ns.__nskeys[k]])
                 pyNoteHook(ns.__nskeys[k])
             }
+            pySetNames(cls, ns.__nskeys)
             var ann = newDict()
             if (hasOwn(ns, "__annots")) {
                 for (var a2 = 0; a2 < ns.__annots.names.length; a2++) {
@@ -10964,7 +10995,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cls != undefined && cls != null) {
             var d = clsFind(cls, name)
             if (pyIsProp(d)) {
-                pyPropCall(d, "fset", cls, name, [o, v])
+                pyPropCall(d, "fset", cls, [o, v])
                 return
             }
             if (d != null && pyUser(d)) {
@@ -11000,10 +11031,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // and a function found there comes back bound to the instance.
         if (typeof o == "object" && o.__pysup == true) { return pySuperAttr(o, name) }
         if (typeof o == "object" && o.__isclass == true) {
-            // __qualname__ of a class is its __name__ for every class this subset
-            // can write: CPython qualifies only a NESTED class, and a nested
-            // `class` here is bound by the same name as a top-level one.
-            if (name == "__name__" || name == "__qualname__") { return pyShortName(o.__name) }
+            if (name == "__name__") { return pyShortName(o.__name) }
+            if (name == "__qualname__") { return pyClsQual(o) }
             if (name == "__mro__" || name == "__bases__") { return pyTup(pyMroAttr(o, name)) }
             var cv = clsFind(o, name)
             if (cv != null) {
@@ -11076,7 +11105,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__class__") { return o.__class }
             var m = clsFind(o.__class, name)
             if (m != null) {
-                if (pyIsProp(m)) { return pyPropCall(m, "fget", o.__class, name, [o]) }
+                if (pyIsProp(m)) { return pyPropCall(m, "fget", o.__class, [o]) }
                 // staticmethod / classmethod, before the plain-function arm: a
                 // static one must NOT pick up the instance as self, and a class
                 // one binds to the receiver's OWN class, so D().c() passes D.
@@ -11093,11 +11122,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iom = pyObjectMethod(name)
             if (iom != null) { return pyBindObjectMethod(o, iom, name) }
         }
-        // A BOUND METHOD knows its own name, receiver and underlying function.
-        // __qualname__ is answered HERE and nowhere else on
-        // purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
-        // fall out of the record, while a plain function's qualname would need
-        // the DEFINING scope recorded at every def site in four places.
+        // A BOUND METHOD knows its own name, receiver and underlying function: a
+        // user method's __qualname__ is its function's, a builtin's is the
+        // receiver's type name and its own ('list.count').
         if (typeof o == "function") {
             var bmj = pyBMFind(o)
             if (bmj >= 0) {
@@ -11109,6 +11136,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // function's qualname is its bare name.
                     if (bmk == "d") { return pyBMTab[bmj + 2].__name + "." + pyBMTab[bmj + 1] }
                     if (bmk == "m") { return pyBMTab[bmj + 1] }
+                    var bfq = fnQual(pyBMTab[bmj + 3])
+                    if (bfq !== undefined) { return bfq }
                     return pyBMOwner(pyBMTab[bmj + 2]) + "." + pyBMTab[bmj + 1]
                 }
                 // CPython gives a method DESCRIPTOR no __self__ at all - it is not
@@ -11139,15 +11168,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // engines AND CPython's own text for every builtin, which this project
         // will never carry; a function's __module__ needs the defining module
         // recorded at every def site.
-        // __qualname__ rides with __name__ here. It is EXACT for a module-level
-        // def, a lambda, a builtin function and a builtin type, and wrong for
-        // exactly one shape: a function read off a class body, where CPython
-        // says 'C.m' and this says 'm'. Closing that one needs the DEFINING
-        // scope recorded at every def site in three engines and the emitter; the
-        // bound-method arm above already answers 'C.m'.
+        // A user function's __qualname__ is the one its def or lambda recorded; a
+        // builtin's rides with __name__.
         if (typeof o == "function" && (name == "__name__" || name == "__qualname__")) {
             var bfnm = bfnName(o)
             if (bfnm !== undefined) { return bfnm }
+            if (name == "__qualname__" && fnQual(o) !== undefined) { return fnQual(o) }
             return fnName(o)
         }
         // len.__self__ is the builtins MODULE in CPython, not a receiver - the
@@ -11307,7 +11333,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         d.vals = []
         d.__idx = null
         var ks = hasOwn(o, "__attrs") ? o.__attrs : []
-        for (var k = 0; k < ks.length; k++) { if (o[ks[k]] !== pyDeleted) { dictSet(d, ks[k], o[ks[k]]) } }
+        var exc = clsIsSub(o.__class, hostGlobals["BaseException"])
+        for (var k = 0; k < ks.length; k++) {
+            if (o[ks[k]] !== pyDeleted && !(exc && pyExcSlot(ks[k]))) { dictSet(d, ks[k], o[ks[k]]) }
+        }
+    }
+    // BaseException keeps these in C slots, not in its instances' __dict__.
+    // Twin of pyExcSlot in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyExcSlot(k) {
+        return k == "args" || k == "__cause__" || k == "__context__" || k == "__traceback__" ||
+               k == "__suppress_context__"
     }
     function pyInstDictPush(d) {
         var o = d.__owner
@@ -11437,7 +11472,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var s = pynWSigned(pyHashId(a))
         return pyIntOfBits(s.neg, s.bits)
     }
-    function pyObjRepr(a) { return "<" + pyTypeOf(a).__name + " object>" }
+    function pyObjRepr(a) { return "<" + (pyUser(a) ? pyClsQual(a.__class) : pyTypeOf(a).__name) + " object>" }
     function pyObjStr(a) { return prepr(a) }
     function pyObjFormat(a, spec) {
         if (spec !== undefined && spec !== "") {
@@ -11591,7 +11626,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // C.who() must still pass C - and s.__sobj is exactly that when the
         // frame's first argument was a class.
         if (pyIsStatic(r.v) || pyIsClsM(r.v)) { return pyDescGet(r.v, pySuperOwner(s), name) }
-        if (pyIsProp(r.v) && pyUser(s.__sobj)) { return pyPropCall(r.v, "fget", s.__sobj.__class, name, [s.__sobj]) }
+        if (pyIsProp(r.v) && pyUser(s.__sobj)) { return pyPropCall(r.v, "fget", s.__sobj.__class, [s.__sobj]) }
         // __new__ is a static method: super().__new__(cls) passes cls itself.
         if (typeof r.v == "function" && name != "__new__") { return bindMethod(s.__sobj, r.v, name) }
         return r.v
@@ -11633,12 +11668,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Function objects have no expando slot under the frozen engine, so a def records
     // its name in a side table keyed by an identity scan of the known functions.
-    var fnNames = {fns: [], names: []}
-    function fnNameSet(f, n) { fnNames.fns.push(f); fnNames.names.push(n) }
+    var fnNames = {fns: [], names: [], quals: []}
+    function fnNameSet(f, n, q) { fnNames.fns.push(f); fnNames.names.push(n); fnNames.quals.push(q) }
     function fnName(f) {
         for (var i = fnNames.fns.length - 1; i >= 0; i--) { if (fnNames.fns[i] === f) { return fnNames.names[i] } }
         return "<lambda>"
     }
+    // A user function's __qualname__, or undefined for one no def or nested
+    // lambda recorded. Twin of pyFnQual in lib/python-rt.metajs.
+    function fnQual(f) {
+        for (var i = fnNames.fns.length - 1; i >= 0; i--) { if (fnNames.fns[i] === f) { return fnNames.quals[i] } }
+        return undefined
+    }
+    // A class's __qualname__ (pyClsQual in lib/python-rt.metajs).
+    function pyClsQual(c) { return hasOwn(c, "__qual") ? c.__qual : pyShortName(c.__name) }
 
     // ----- Decorators -----
     // items = [{deco}..., defThunk]: the def/class statement runs, then each decorator
@@ -12062,7 +12105,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (po.length > 0) {
                     pyArityFail(plist, "got some positional-only arguments passed as keyword arguments: '" + po.join(", ") + "'")
                 }
-                pyArityFail(plist, "got an unexpected keyword argument '" + kn[k] + "'")
+                var cands = []
+                for (var c2 = 0; c2 < slots.length; c2++) { if (!slots[c2].posonly) { cands.push(slots[c2].name) } }
+                pyArityFail(plist, "got an unexpected keyword argument '" + kn[k] + "'" + pyDidYouMean(kn[k], cands))
             }
             if (at < npos && at < given) { pyArityFail(plist, "got multiple values for argument '" + kn[k] + "'") }
         }
@@ -12132,7 +12177,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 try { r = bodyT() } finally { scopes = saved }
                 return (r != undefined && r.isRet) ? r.v : undefined
             }
-            fnNameSet(fn, name)
+            fnNameSet(fn, name, plist.qual)
             pySet(name, fn)
         }
     }
@@ -12175,7 +12220,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
-            return function() {
+            var lf = function() {
                 var argv = arguments
                 var named = kTakeNamed()
                 var args = []
@@ -12187,6 +12232,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 try { r = exprT() } finally { scopes = saved }
                 return r
             }
+            // Only a NESTED lambda's qualname ('f.<locals>.<lambda>') differs
+            // from what fnName and fnQual answer for an unrecorded function.
+            if (plist.qual != "<lambda>") { fnNameSet(lf, "<lambda>", plist.qual) }
+            return lf
         }
     }
 

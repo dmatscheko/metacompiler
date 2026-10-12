@@ -3739,7 +3739,29 @@ func (rt *jsrt) pyUserRender(o *jsObject, cls *jsObject, wantRepr bool) string {
 		}
 		return out + ")"
 	}
-	return "<" + rt.pyClsName(cls) + " object>"
+	return "<" + rt.pyClsQual(cls) + " object>"
+}
+
+// pyClsQual is a class's __qualname__: the emitter records __qual for a class
+// nested in a class or a function ('A.N', 'f.<locals>.L'); any other class's
+// is its name. Twin of pyClsQual in lib/python-rt.metajs.
+func (rt *jsrt) pyClsQual(cls *jsObject) string {
+	if q, ok := cls.props["__qual"].(string); ok {
+		return q
+	}
+	return pyShortName(rt.pyClsName(cls))
+}
+
+// pyFnQual is a user function's __qualname__, the one its signature carries
+// (js_pysig); ok is false for a builtin.
+func (rt *jsrt) pyFnQual(f interface{}) (string, bool) {
+	if f == nil || rt.pySigs == nil {
+		return "", false
+	}
+	if sig, ok := rt.pySigs[f]; ok && sig.qual != "" {
+		return sig.qual, true
+	}
+	return "", false
 }
 
 // pyClsName is a class object's __name, or "object" when it has none.
@@ -3799,7 +3821,7 @@ func (rt *jsrt) pyString(v interface{}) string {
 			// A class a `class` statement made carries its defining module in
 			// an own __module__ (<class '__main__.B'>); a builtin has none.
 			if mod, ok := t.props["__module__"].(string); ok {
-				name = mod + "." + name
+				name = mod + "." + rt.pyClsQual(t)
 			}
 			return "<class '" + name + "'>"
 		}
@@ -3918,7 +3940,11 @@ func (rt *jsrt) pyFuncRender(v interface{}) string {
 			}
 			return "<built-in method " + bi.name + " of " + bi.typ + " object>"
 		}
-		return "<bound method " + bi.typ + "." + bi.name + " of " + rt.pyRepr(bi.self) + ">"
+		q, ok := rt.pyFnQual(bi.fn)
+		if !ok {
+			q = bi.typ + "." + bi.name
+		}
+		return "<bound method " + q + " of " + rt.pyRepr(bi.self) + ">"
 	}
 	// A BUILTIN prints its own way, and its table is asked FIRST: a user
 	// `def len(...)` records its own name against its own closure object, so the
@@ -3932,6 +3958,9 @@ func (rt *jsrt) pyFuncRender(v interface{}) string {
 			return "<slot wrapper '" + c[1:] + "' of 'object' objects>"
 		}
 		return "<built-in function " + c + ">"
+	}
+	if q, ok := rt.pyFnQual(v); ok {
+		return "<function " + q + ">"
 	}
 	if n, ok := rt.pyFuncNames[v]; ok {
 		return "<function " + n + ">"
@@ -15788,6 +15817,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pysuper": func(a []uint64) uint64 { // (defining class|undef, instance|undef)
 			return w(pySuperNew(u(a[0]), u(a[1])))
 		},
+		// The __set_name__ pass over a filled class body (pySetNames).
+		"js_pysetnames": func(a []uint64) uint64 {
+			if cls, ok := u(a[0]).(*jsObject); ok {
+				rt.pySetNames(cls)
+			}
+			return w(jsUndef)
+		},
 		// The class body is a suite: it runs in a scope of its own and every name
 		// it bound (methods, class attributes, __slots__) becomes a class member.
 		"js_pyclass_fill": func(a []uint64) uint64 { // (class, class-body scope)
@@ -17362,7 +17398,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			el := args.elems
 			if keys, _, isDict := dictParts(el[5]); isDict && len(keys.elems) > 0 {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-					"print() got an unexpected keyword argument '"+rt.toString(keys.elems[0])+"'")})
+					"print() got an unexpected keyword argument '"+rt.toString(keys.elems[0])+"'"+pyDidYouMean(rt.toString(keys.elems[0]), []string{"sep", "end", "file", "flush"}))})
 			}
 			sep := rt.pyPrintText(el[0], "sep", " ")
 			end := rt.pyPrintText(el[1], "end", "\n")
@@ -19708,7 +19744,7 @@ func (rt *jsrt) pySuperAttr(s *jsObject, name string) interface{} {
 	}
 	if p, isProp := pyPropOf(m); isProp {
 		if _, cls, isInst := pyInstance(s.props["__sobj"]); isInst {
-			return rt.pyPropGet(p, s.props["__sobj"], cls, name)
+			return rt.pyPropGet(p, s.props["__sobj"], cls)
 		}
 	}
 	// __new__ is a static method: super().__new__(cls) passes cls itself.
@@ -19838,10 +19874,12 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	}
 	if cls, ok := pyClassObj(obj); ok {
 		switch name {
-		// __qualname__ of a class is its __name__ for every class this subset can
-		// write: CPython qualifies only a NESTED class, and a nested `class` here
-		// is bound by the same name as a top-level one.
-		case "__name__", "__qualname__":
+		case "__qualname__":
+			if _, ok := cls.props["__name"].(string); ok {
+				return rt.pyClsQual(cls)
+			}
+			return cls.props["__name"]
+		case "__name__":
 			if n, ok := cls.props["__name"].(string); ok {
 				return pyShortName(n)
 			}
@@ -19887,7 +19925,7 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		}
 		if v, found := pyLookup(cls, name); found {
 			if p, isProp := pyPropOf(v); isProp {
-				return rt.pyPropGet(p, obj, cls, name)
+				return rt.pyPropGet(p, obj, cls)
 			}
 			// staticmethod / classmethod, before every other arm: a static one
 			// must NOT pick up the instance as self, and a class one binds to
@@ -19958,19 +19996,19 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		}
 	}
 	// A BOUND METHOD knows its own name, receiver and underlying function.
-	// Asked before the two name tables because a bound method
-	// is in neither of them. __qualname__ is answered HERE and nowhere else on
-	// purpose: 'list.count' and 'C.m' are exactly CPython's answers and both
-	// fall out of the record, while a plain function's qualname would need the
-	// DEFINING scope recorded at every def site in four places - see the note on
-	// pyBoundInfo and the declined rows in tests/python-test-full.py.
+	// Asked before the two name tables because a bound method is in neither of
+	// them.
 	if bi := pyBoundOf(obj); bi != nil {
 		switch name {
 		case "__name__":
 			return bi.name
 		case "__qualname__":
-			// A module-level builtin's qualname is its bare name; the other two
-			// kinds are TYPE.NAME, which bi.typ already holds.
+			// A user method's qualname is its function's; a module-level
+			// builtin's is its bare name; the other two kinds are TYPE.NAME,
+			// which bi.typ already holds.
+			if q, ok := rt.pyFnQual(bi.fn); ok {
+				return q
+			}
 			if bi.kind == "m" {
 				return bi.name
 			}
@@ -20002,13 +20040,13 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	// three engines AND CPython's own text for every builtin, which this project
 	// will never carry; a function's __module__ needs the defining module
 	// recorded at every def site.
-	// __qualname__ rides with __name__ everywhere below. It is EXACT for a
-	// module-level def, a lambda, a builtin function and a builtin type, and it
-	// is wrong for exactly one shape: a function read off a class body, where
-	// CPython says 'C.m' and this says 'm'. Closing that one needs the DEFINING
-	// scope recorded at every def site in the emitter, the interpreter and layer
-	// 2; the bound-method arm above already answers 'C.m' because a bound method
-	// knows its receiver.
+	// A user function's __qualname__ is its signature's; a builtin's rides with
+	// __name__ below.
+	if name == "__qualname__" {
+		if q, ok := rt.pyFnQual(obj); ok {
+			return q
+		}
+	}
 	// len.__self__ is the builtins MODULE in CPython, not a receiver - the
 	// builtin functions are that module's members.
 	if name == "__self__" {
@@ -20155,16 +20193,61 @@ func (rt *jsrt) pyInstanceDict(inst *jsObject) interface{} {
 	return d
 }
 
+// A __-prefixed key is the runtime's own slot unless the program wrote it
+// (pyNoteDunder records those in __dk). BaseException keeps args and the
+// chaining attributes in C slots, outside its instances' __dict__. Twin of
+// pyInstDictPull / __ord in lib/python-rt.metajs.
 func pyInstDictPull(inst, d *jsObject) {
 	keys, vals, _ := dictParts(d)
 	keys.dropIdx()
 	keys.elems, vals.elems = nil, nil
+	exc := false
+	if cls, ok := inst.props["__class"].(*jsObject); ok {
+		exc = pyIsExcClass(cls)
+	}
 	for _, k := range inst.keys {
-		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+		if len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(inst, k) {
+			continue
+		}
+		if exc && pyExcSlot(k) {
 			continue
 		}
 		dictAppend(keys, vals, k, inst.props[k])
 	}
+}
+
+func pyExcSlot(k string) bool {
+	switch k {
+	case "args", "__cause__", "__context__", "__traceback__", "__suppress_context__":
+		return true
+	}
+	return false
+}
+
+// pyNoteDunder records that the program wrote the __-prefixed attribute name.
+func pyNoteDunder(inst *jsObject, name string) {
+	if len(name) < 2 || name[0] != '_' || name[1] != '_' || pyIsNotedDunder(inst, name) {
+		return
+	}
+	dk, ok := inst.props["__dk"].(*jsArray)
+	if !ok {
+		dk = &jsArray{}
+		inst.set("__dk", dk)
+	}
+	dk.elems = append(dk.elems, name)
+}
+
+func pyIsNotedDunder(inst *jsObject, name string) bool {
+	dk, ok := inst.props["__dk"].(*jsArray)
+	if !ok {
+		return false
+	}
+	for _, e := range dk.elems {
+		if e == name {
+			return true
+		}
+	}
+	return false
 }
 
 // pyInstDictPush is the other direction, for a dict that is an instance's
@@ -20180,7 +20263,7 @@ func pyInstDictPush(dv interface{}) {
 	}
 	kept := inst.keys[:0]
 	for _, k := range inst.keys {
-		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+		if len(k) >= 2 && k[0] == '_' && k[1] == '_' && !pyIsNotedDunder(inst, k) {
 			kept = append(kept, k)
 		} else {
 			delete(inst.props, k)
@@ -20190,6 +20273,7 @@ func pyInstDictPush(dv interface{}) {
 	keys, vals, _ := dictParts(d)
 	for i, k := range keys.elems {
 		if ks, isStr := k.(string); isStr {
+			pyNoteDunder(inst, ks)
 			inst.set(ks, vals.elems[i])
 		}
 	}
@@ -20211,7 +20295,7 @@ func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 	if inst, cls, ok := pyInstance(obj); ok {
 		if cur, found := pyLookup(cls, name); found {
 			if p, isProp := pyPropOf(cur); isProp {
-				rt.pyPropSet(p, obj, cls, name, v)
+				rt.pyPropSet(p, obj, cls, v)
 				return
 			}
 			if set, isDesc := pyIsDescriptor(cur, "__set__"); isDesc {
@@ -20222,6 +20306,7 @@ func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 		if !rt.pySlotsAllow(cls, name) {
 			panic(&jsThrown{value: rt.pyAttrError(cls, name)})
 		}
+		pyNoteDunder(inst, name)
 		inst.set(name, v)
 		if d, has := inst.props["__pydict"].(*jsObject); has {
 			pyInstDictPull(inst, d)
@@ -20524,7 +20609,7 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		}
 		if m, found := pyLookup(cls, name); found {
 			if p, isProp := pyPropOf(m); isProp {
-				return rt.callPyValue(rt.pyPropGet(p, target, cls, name), args, kw)
+				return rt.callPyValue(rt.pyPropGet(p, target, cls), args, kw)
 			}
 			// inst.s(...) on a staticmethod gets NO self, and inst.c(...) on a
 			// classmethod gets the receiver's OWN class - checked before the
@@ -20834,7 +20919,7 @@ func (rt *jsrt) pyKwOnly(kw interface{}, fname, a, b string) {
 	for _, k := range keys.elems {
 		if n := rt.toString(k); n != a && n != b {
 			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-				fname+"() got an unexpected keyword argument '"+n+"'")})
+				fname+"() got an unexpected keyword argument '"+n+"'"+pyDidYouMean(n, []string{a, b}))})
 		}
 	}
 }
@@ -22662,7 +22747,7 @@ func (rt *jsrt) pyArityCheck(sig *pySig, given int, kn []string) {
 			if len(po) > 0 {
 				fail("got some positional-only arguments passed as keyword arguments: '" + strings.Join(po, ", ") + "'")
 			}
-			fail("got an unexpected keyword argument '" + k + "'")
+			fail("got an unexpected keyword argument '" + k + "'" + pyDidYouMean(k, names[sig.nposonly:]))
 		}
 		if at < npos && at < given {
 			fail("got multiple values for argument '" + k + "'")
@@ -22816,7 +22901,7 @@ func (rt *jsrt) pyKwPos(fname string, pos []interface{}, kw interface{}, names [
 		}
 		if at < 0 {
 			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-				fname+"() got an unexpected keyword argument '"+kn+"'")})
+				fname+"() got an unexpected keyword argument '"+kn+"'"+pyDidYouMean(kn, names[nposonly:]))})
 		}
 		if at < len(pos) {
 			panic(&jsThrown{value: rt.pyExcInstance("TypeError",
