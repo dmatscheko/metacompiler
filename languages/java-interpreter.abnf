@@ -43,7 +43,10 @@ bitwise and shift operators with Java int semantics, and the compound assignment
 The enhanced for runs over an array or any Iterable. Importing java.util's
 ArrayList, AbstractList, List, Collection, Iterator or Arrays compiles lib/java-util.java
 with the program (shared with java-to-llvm-ir.abnf): an ArrayList and List.of in
-Java's own terms, and an AbstractList a user List extends. java.lang.String's
+Java's own terms, and an AbstractList a user List extends; Optional, OptionalInt
+and OptionalDouble come from the same file. A java.util.stream import, or a call
+of a method named stream, compiles lib/java-stream.java too: sequential Stream
+and IntStream pipelines and Collectors' toList, joining and counting. java.lang.String's
 methods and String.valueOf / join / format are lib/java-strings.js (the regex ones
 over lib/regex.js), StringBuilder is lib/java-lang.java, compiled the same way, and
 Object and getClass() are built in. Math's and StrictMath's transcendentals are
@@ -865,8 +868,8 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = InstOf { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> InstOf } ;
 
-// x instanceof Type [binding]: a genuine dynamic type test (rtIsType: numbers,
-// strings, booleans, arrays, user classes via __class/__super). The optional
+// x instanceof Type [binding]: a genuine dynamic type test (jIsType: the boxed
+// primitives by their wrapper class, arrays, user classes via __class/__super). The optional
 // pattern variable binds the operand in the enclosing scope - looser than
 // Java's flow scoping, which only admits it where the test held.
 InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
@@ -2759,6 +2762,8 @@ HasStatic   = :script(~~
         o.toLowerCase = function(v) { return like(v, jxChLo(code(v))) }
         o.getNumericValue = function(v) { return jcNumericValue(code(v)) }
         o.digit = function(v, radix) { var d = jcDigitVal(code(v)); return d < jNum(radix) ? d : 0 - 1 }
+        o.compare = function(a, b) { return code(a) - code(b) }
+        o.valueOf = function(v) { return v }
     }
     jCharMembers(hostGlobals["Character"])
     // Java's Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0.
@@ -2801,9 +2806,16 @@ HasStatic   = :script(~~
     }
     hostGlobals["Double"] = jFloType(false)
     hostGlobals["Float"] = jFloType(true)
+    // Boolean.compare orders false before true. Twin of the "Boolean" arm of
+    // jvBoxType in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
     hostGlobals["Boolean"] = {TRUE: true, FALSE: false,
                               valueOf: function(v) { return jBoolOf(v) },
-                              parseBoolean: function(v) { return jBoolOf(v) }}
+                              parseBoolean: function(v) { return jBoolOf(v) },
+                              compare: function(a, b) { return a === b ? 0 : (a === true ? 1 : 0 - 1) },
+                              logicalAnd: function(a, b) { return a === true && b === true },
+                              logicalOr: function(a, b) { return a === true || b === true },
+                              logicalXor: function(a, b) { return a !== b },
+                              toString: function(v) { return v === true ? "true" : "false" }}
 
     // ----- char: a boxed {__char: code} value -----
     // Java's char is an integral type that renders as a glyph, so it can be neither a
@@ -3460,22 +3472,64 @@ HasStatic   = :script(~~
         if (c == "S") { return "short[]" }
         return "byte[]"
     }
+    // The java.lang wrapper class a boxed primitive (or a String) belongs to, or ""
+    // for any other value. Twin of jvBoxName in abnf/jsrtjavastr.go and
+    // languages/lib/java-rt.metajs.
+    function jBoxName(v) {
+        if (typeof v == "string") { return "String" }
+        if (typeof v == "boolean") { return "Boolean" }
+        if (typeof v == "number") { return "Integer" }
+        if (v !== null && v !== undefined && typeof v == "object") {
+            if (v.__char !== undefined) { return "Character" }
+            if (v.__flo !== undefined) { return v.__f32 === true ? "Float" : "Double" }
+            if (v.__sz === true) { return v.w == 64 ? "Long" : (v.w == 16 ? "Short" : "Byte") }
+        }
+        return ""
+    }
     function jGetClass(v) {
         if (v === null || v === undefined) { fail("method call .getClass() on null") }
-        if (typeof v == "string") { return jLangClass("String") }
-        if (typeof v == "boolean") { return jLangClass("Boolean") }
-        if (typeof v == "number") { return jLangClass("Integer") }
+        var bn = jBoxName(v)
+        if (bn != "") { return jLangClass(bn) }
         if (Array.isArray(v)) {
             var tag = jArrayTag(v)
             return jClassOf(tag, jArraySimple(tag))
         }
-        if (typeof v == "object") {
-            if (v.__char !== undefined) { return jLangClass("Character") }
-            if (v.__flo !== undefined) { return jLangClass(v.__f32 === true ? "Float" : "Double") }
-            if (v.__sz === true) { return jLangClass(v.w == 64 ? "Long" : (v.w == 16 ? "Short" : "Byte")) }
-            if (v.__class != undefined) { return jClassOf(jClassBin(v.__class), v.__class.__name) }
-        }
+        if (typeof v == "object" && v.__class != undefined) { return jClassOf(jClassBin(v.__class), v.__class.__name) }
         fail("getClass() of a value with no class")
+    }
+    // Number's intValue() ... doubleValue(), Character's charValue() and Boolean's
+    // booleanValue() on a boxed primitive: the primitive conversion to the named
+    // type (JLS 5.1.2, 5.1.3), so Double 2.75's intValue() is 2 and Long 2^40's is
+    // 0. undefined for any other receiver or name, which leaves a user class's
+    // method of the same name to ordinary dispatch. Twin of jvUnbox in
+    // abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+    function jUnbox(v, name) {
+        var bn = jBoxName(v)
+        if (bn == "" || bn == "String") { return undefined }
+        if (name == "intValue") { return jNarrow(v, 32) }
+        if (name == "longValue") { return jNarrow(v, 64) }
+        if (name == "doubleValue") { return jFlo(jNumD(v)) }
+        if (name == "floatValue") { return jFlo32(jNumD(v)) }
+        if (name == "shortValue") { return jNarrow(v, 16) }
+        if (name == "byteValue") { return jNarrow(v, 8) }
+        if (name == "charValue" || name == "booleanValue") { return v }
+        return undefined
+    }
+    // `v instanceof T`: a boxed primitive is an instance of its own wrapper class
+    // and of that class's supertypes (Number for the six numeric ones, CharSequence
+    // for String, Comparable and Serializable for all eight and String), never of
+    // another wrapper - `(Object) 3 instanceof Double` is false (JLS 15.20.2).
+    // Every other value goes to the shared rtIsType. Twin of js_jvis in
+    // abnf/jsrtjavastr.go and languages/lib/java-rt.metajs.
+    function jIsType(v, tname) {
+        if (v === null || v === undefined) { return false }
+        var t = tname.split("<")[0]
+        if (t.indexOf("java.lang.") == 0) { t = t.substring(10) }
+        var bn = jBoxName(v)
+        if (bn == "") { return rtIsType(v, t) }
+        if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable" || t == "java.io.Serializable") { return true }
+        if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
+        return t == "CharSequence" && bn == "String"
     }
 
     // ----- java.lang.String's methods and statics (lib/java-strings.js) -----
@@ -3647,8 +3701,11 @@ HasStatic   = :script(~~
                 return jNum(oc) === target.__char
             }
             if (name == "toString") { return String.fromCharCode(target.__char) }
-            if (name == "charValue") { return target }
             if (name == "compareTo") { return (target.__char - jNum(args[0])) | 0 }
+        }
+        if (args.length == 0) {
+            var ub = jUnbox(target, name)
+            if (ub !== undefined) { return ub }
         }
         // compareTo on the other boxed primitives (java.lang.Comparable):
         // Integer and Long answer the sign, Short and Byte the difference,
@@ -3662,6 +3719,10 @@ HasStatic   = :script(~~
             if (jIsFlo(target)) { return jDblCompare(jNumD(target), jNumD(args[0])) }
             if (typeof target == "boolean") { return target === args[0] ? 0 : (target ? 1 : jNegOne) }
         }
+        // An array's clone() is a new array of the same length holding the same
+        // elements, a shallow copy (JLS 10.7). Twin of js_jvclone in
+        // abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+        if (name == "clone" && args.length == 0 && Array.isArray(target)) { return target.slice(0) }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
             // The lookup follows the __super chain and the interfaces along it. Own
@@ -4021,7 +4082,7 @@ HasStatic   = :script(~~
         }
         return coreApplyOp(op, a, b)
     }
-    // x instanceof Type [binding]: rtIsType decides; a pattern variable binds
+    // x instanceof Type [binding]: jIsType decides; a pattern variable binds
     // the operand (whatever the outcome - Java's flow scoping is stricter, but
     // code that compiles under javac only reads it where the test held).
     // A single item (no instanceof tail) is a transparent pass-through.
@@ -4041,7 +4102,7 @@ HasStatic   = :script(~~
         return function() {
             var v = operand()
             if (tail.bind != undefined) { declVar(tail.bind, v) }
-            return rtIsType(v, tail.tname)
+            return jIsType(v, tail.tname)
         }
     }
 
@@ -4064,7 +4125,7 @@ HasStatic   = :script(~~
             || t == "char" || t == "float" || t == "double" || t == "boolean"
     }
     function jMatchPat(p, v) {
-        if (!jPatAny(p.ptype) && !rtIsType(v, p.ptype)) { return false }
+        if (!jPatAny(p.ptype) && !jIsType(v, p.ptype)) { return false }
         if (p.prec) {
             if (v === null || v === undefined || typeof v != "object") { return false }
             var comps = (v.__class != undefined && v.__class != null) ? v.__class.__record : undefined
@@ -5931,8 +5992,11 @@ HasStatic   = :script(~~
     // lib/java-lang.java is compiled the same way, after the program's walk,
     // when the program creates one of its types (jLangWants), and so is
     // lib/java-util.java when a FULLY QUALIFIED `new java.util.ArrayList<>()`
-    // names one of its types without an import (JLS 6.5.5.2).
+    // names one of its types without an import (JLS 6.5.5.2). lib/java-stream.java
+    // and the java-util.java it builds on are compiled at a java.util.stream
+    // import or after the walk when the program calls a method named stream.
     var jUtilLoaded = false
+    var jStreamLoaded = false
     var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
@@ -5946,9 +6010,14 @@ HasStatic   = :script(~~
         jPkgPrefix = ""
     }
     function jImport(path, pos) {
-        if (!jUtilLoaded && jUtilWants(stripWs(path))) {
+        var ip = stripWs(path)
+        if (!jUtilLoaded && (jUtilWants(ip) || jStreamWants(ip))) {
             jUtilLoaded = true
             jLoadLib("lib/java-util.java", "java.util.")
+        }
+        if (!jStreamLoaded && jStreamWants(ip)) {
+            jStreamLoaded = true
+            jLoadLib("lib/java-stream.java", "java.util.stream.")
         }
         resolveImport(path, pos)
     }
@@ -6343,9 +6412,13 @@ HasStatic   = :script(~~
     }
 
     c.compile(c.asg)
-    if (jUtilWant && !jUtilLoaded) {
+    if ((jUtilWant || jStreamWant) && !jUtilLoaded) {
         jUtilLoaded = true
         jLoadLib("lib/java-util.java", "java.util.")
+    }
+    if (jStreamWant && !jStreamLoaded) {
+        jStreamLoaded = true
+        jLoadLib("lib/java-stream.java", "java.util.stream.")
     }
     if (jLangWant) { jLoadLib("lib/java-lang.java", "java.lang.") }
     jWalkDone = true

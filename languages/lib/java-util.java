@@ -22,6 +22,9 @@ interface Collection<E> {
     boolean remove(Object o);
     void clear();
     Iterator<E> iterator();
+
+    // A sequential stream over the elements (lib/java-stream.java).
+    default java.util.stream.Stream<E> stream() { return Stream.ofCollection(this); }
 }
 
 interface List<E> extends Collection<E> {
@@ -512,6 +515,10 @@ class Arrays {
     @SafeVarargs
     public static <T> List<T> asList(T... a) { return new ArrayView<T>(a); }
 
+    // A sequential stream over the array (lib/java-stream.java).
+    public static <T> java.util.stream.Stream<T> stream(T[] a) { return Stream.of(a); }
+    public static java.util.stream.IntStream stream(int[] a) { return IntStream.of(a); }
+
     // asList's fixed-size list: reads and set write through to the array, and
     // the size never changes, so add and remove throw.
     private static class ArrayView<E> extends AbstractList<E> {
@@ -528,4 +535,112 @@ class Arrays {
             return old;
         }
     }
+}
+
+// Optional, OptionalInt and OptionalDouble: a value or none. The empty one of
+// each kind is a single instance, as java's is, made at its first use.
+final class Optional<T> {
+    static Optional<?> none;
+    T value;
+    Optional(T value) { this.value = value; }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Optional<T> empty() {
+        if (none == null) { none = new Optional<Object>(null); }
+        return (Optional<T>) none;
+    }
+    public static <T> Optional<T> of(T value) {
+        if (value == null) { throw new NullPointerException(); }
+        return new Optional<T>(value);
+    }
+    public static <T> Optional<T> ofNullable(T value) { return value == null ? empty() : new Optional<T>(value); }
+
+    public boolean isPresent() { return value != null; }
+    public boolean isEmpty() { return value == null; }
+    public T get() { return orElseThrow(); }
+    public T orElseThrow() {
+        if (value == null) { throw new NoSuchElementException("No value present"); }
+        return value;
+    }
+    public T orElse(T other) { return value != null ? value : other; }
+    public T orElseGet(java.util.function.Supplier<? extends T> f) { return value != null ? value : f.get(); }
+    public void ifPresent(java.util.function.Consumer<? super T> f) {
+        if (value != null) { f.accept(value); }
+    }
+    public <U> Optional<U> map(java.util.function.Function<? super T, ? extends U> f) {
+        return value == null ? empty() : ofNullable(f.apply(value));
+    }
+    public Optional<T> filter(java.util.function.Predicate<? super T> p) {
+        return value == null || p.test(value) ? this : empty();
+    }
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof Optional)) { return false; }
+        Object v = ((Optional<?>) o).value;
+        return value == null ? v == null : value.equals(v);
+    }
+    public int hashCode() { return value == null ? 0 : value.hashCode(); }
+    public String toString() { return value == null ? "Optional.empty" : "Optional[" + value + "]"; }
+}
+
+final class OptionalInt {
+    static OptionalInt none;
+    boolean present;
+    int value;
+    OptionalInt(boolean present, int value) {
+        this.present = present;
+        this.value = value;
+    }
+
+    public static OptionalInt empty() {
+        if (none == null) { none = new OptionalInt(false, 0); }
+        return none;
+    }
+    public static OptionalInt of(int value) { return new OptionalInt(true, value); }
+
+    public boolean isPresent() { return present; }
+    public boolean isEmpty() { return !present; }
+    public int getAsInt() { return orElseThrow(); }
+    public int orElseThrow() {
+        if (!present) { throw new NoSuchElementException("No value present"); }
+        return value;
+    }
+    public int orElse(int other) { return present ? value : other; }
+    public void ifPresent(java.util.function.IntConsumer f) {
+        if (present) { f.accept(value); }
+    }
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof OptionalInt)) { return false; }
+        OptionalInt b = (OptionalInt) o;
+        return present ? b.present && value == b.value : !b.present;
+    }
+    public int hashCode() { return present ? value : 0; }
+    public String toString() { return present ? "OptionalInt[" + value + "]" : "OptionalInt.empty"; }
+}
+
+final class OptionalDouble {
+    static OptionalDouble none;
+    boolean present;
+    double value;
+    OptionalDouble(boolean present, double value) {
+        this.present = present;
+        this.value = value;
+    }
+
+    public static OptionalDouble empty() {
+        if (none == null) { none = new OptionalDouble(false, 0.0); }
+        return none;
+    }
+    public static OptionalDouble of(double value) { return new OptionalDouble(true, value); }
+
+    public boolean isPresent() { return present; }
+    public boolean isEmpty() { return !present; }
+    public double getAsDouble() { return orElseThrow(); }
+    public double orElseThrow() {
+        if (!present) { throw new NoSuchElementException("No value present"); }
+        return value;
+    }
+    public double orElse(double other) { return present ? value : other; }
+    public String toString() { return present ? "OptionalDouble[" + value + "]" : "OptionalDouble.empty"; }
 }

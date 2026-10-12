@@ -616,6 +616,39 @@ func jvCharMembers(o *jsObject) {
 		}
 		return float64(-1)
 	}))
+	o.set("compare", jsHostFunc("compare", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return float64(code(rt, argAt(args, 0)) - code(rt, argAt(args, 1)))
+	}))
+	o.set("valueOf", jsHostFunc("valueOf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return argAt(args, 0)
+	}))
+}
+
+// jvUnbox is Number's intValue() ... doubleValue(), Character's charValue() and
+// Boolean's booleanValue() on a boxed primitive: the primitive conversion to the
+// named type (JLS 5.1.2, 5.1.3). ok is false for any other receiver or name.
+// Twin of jUnbox in java-interpreter.abnf and languages/lib/java-rt.metajs.
+func (rt *jsrt) jvUnbox(v interface{}, name string) (r interface{}, ok bool) {
+	if bn := jvBoxName(v); bn == "" || bn == "String" {
+		return nil, false
+	}
+	switch name {
+	case "intValue":
+		return jvNarrow(rt, v, 32), true
+	case "longValue":
+		return jvNarrow(rt, v, 64), true
+	case "doubleValue":
+		return jvmMkFlo(rt.toNumber(v)), true
+	case "floatValue":
+		return jsJFlo{f: jvmFround(rt.toNumber(v)), sty: floJavaF}, true
+	case "shortValue":
+		return jvNarrow(rt, v, 16), true
+	case "byteValue":
+		return jvNarrow(rt, v, 8), true
+	case "charValue", "booleanValue":
+		return v, true
+	}
+	return nil, false
 }
 
 // Character.toUpperCase / toLowerCase: the simple mapping of one unit. Twin of
@@ -1202,6 +1235,31 @@ func (rt *jsrt) jvBoxType(name string) *jsObject {
 		})
 		o.set("valueOf", bv)
 		o.set("parseBoolean", bv)
+		bin := func(name string, f func(a, b bool) interface{}) {
+			o.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				a, _ := argAt(args, 0).(bool)
+				b, _ := argAt(args, 1).(bool)
+				return f(a, b)
+			}))
+		}
+		bin("compare", func(a, b bool) interface{} {
+			if a == b {
+				return float64(0)
+			}
+			if a {
+				return float64(1)
+			}
+			return float64(-1)
+		})
+		bin("logicalAnd", func(a, b bool) interface{} { return a && b })
+		bin("logicalOr", func(a, b bool) interface{} { return a || b })
+		bin("logicalXor", func(a, b bool) interface{} { return a != b })
+		o.set("toString", jsHostFunc("toString", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			if b, _ := argAt(args, 0).(bool); b {
+				return "true"
+			}
+			return "false"
+		}))
 	}
 	return o
 }
@@ -1376,6 +1434,16 @@ func init() {
 		}
 		// String.toCharArray: one char per UTF-16 unit. Anything else is an
 		// ordinary call of a method by that name.
+		// An array's clone() is a new array of the same length holding the same
+		// elements, a shallow copy (JLS 10.7); any other receiver dispatches.
+		// Twin of the clone arm of mcall in java-interpreter.abnf and js_jvclone
+		// in languages/lib/java-rt.metajs.
+		m["js_jvclone"] = func(a []uint64) uint64 {
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				return w(&jsArray{elems: append([]interface{}(nil), arr.elems...)})
+			}
+			return baseMcall([]uint64{a[0], w("clone"), w(&jsArray{})})
+		}
 		m["js_jvchars"] = func(a []uint64) uint64 {
 			if s, ok := u(a[0]).(string); ok {
 				units := strUnits(s)

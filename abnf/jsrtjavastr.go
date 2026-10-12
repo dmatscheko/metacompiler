@@ -734,6 +734,62 @@ func jxStrArr(parts []string) *jsArray {
 // js_jvexc like the other runtime-raised classes.
 var jvIaeCls *jsObject
 
+// jvBoxName is the java.lang wrapper class a boxed primitive (or a String)
+// belongs to, or "" for any other value. Twin of jBoxName in
+// java-interpreter.abnf and jvBoxName in languages/lib/java-rt.metajs.
+func jvBoxName(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return "String"
+	case bool:
+		return "Boolean"
+	case float64:
+		return "Integer"
+	case jsChar:
+		return "Character"
+	case jsJFlo:
+		if jvmIs32(t.sty) {
+			return "Float"
+		}
+		return "Double"
+	case jsGInt:
+		switch t.w {
+		case 64:
+			return "Long"
+		case 16:
+			return "Short"
+		}
+		return "Byte"
+	}
+	return ""
+}
+
+// jvIsType is `v instanceof T` (extern js_jvis): a boxed primitive is an
+// instance of its own wrapper class and its supertypes only, never of another
+// wrapper (JLS 15.20.2); every other value goes to isTypeName. Twin of jIsType
+// in java-interpreter.abnf and js_jvis in languages/lib/java-rt.metajs.
+func (rt *jsrt) jvIsType(v interface{}, t string) bool {
+	switch v.(type) {
+	case nil, jsUndefT, jsNullT:
+		return false
+	}
+	if i := strings.IndexByte(t, '<'); i >= 0 {
+		t = t[:i]
+	}
+	t = strings.TrimPrefix(t, "java.lang.")
+	bn := jvBoxName(v)
+	if bn == "" {
+		return rt.isTypeName(v, t)
+	}
+	switch t {
+	case bn, "Object", "Comparable", "Serializable", "java.io.Serializable":
+		return true
+	case "Number":
+		return bn != "String" && bn != "Boolean" && bn != "Character"
+	}
+	return t == "CharSequence" && bn == "String"
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
@@ -770,28 +826,10 @@ func init() {
 		}
 		lang := func(simple string) *jsObject { return classOf("java.lang."+simple, simple) }
 		m["js_jvgetclass"] = func(a []uint64) uint64 {
+			if bn := jvBoxName(u(a[0])); bn != "" {
+				return w(lang(bn))
+			}
 			switch t := u(a[0]).(type) {
-			case string:
-				return w(lang("String"))
-			case bool:
-				return w(lang("Boolean"))
-			case float64:
-				return w(lang("Integer"))
-			case jsChar:
-				return w(lang("Character"))
-			case jsJFlo:
-				if jvmIs32(t.sty) {
-					return w(lang("Float"))
-				}
-				return w(lang("Double"))
-			case jsGInt:
-				switch t.w {
-				case 64:
-					return w(lang("Long"))
-				case 16:
-					return w(lang("Short"))
-				}
-				return w(lang("Byte"))
 			case *jsArray:
 				tag := jvpArrayTag(t)
 				return w(classOf(tag, jxArraySimple(tag)))
@@ -805,15 +843,24 @@ func init() {
 			rt.fail("getClass() of a value with no class")
 			return 0
 		}
-		// A java.lang.String method on a string receiver, compareTo on a boxed
-		// primitive too; any other receiver is an ordinary call of a method by
+		m["js_jvis"] = func(a []uint64) uint64 {
+			return w(rt.jvIsType(u(a[0]), rt.toString(u(a[1]))))
+		}
+		// A java.lang.String method on a string receiver, compareTo and the
+		// unboxing members on a boxed primitive too; any other receiver is an ordinary call of a method by
 		// that name. Twin of jStrMethod in java-interpreter.abnf and js_jvstrm in
 		// languages/lib/java-rt.metajs.
 		m["js_jvstrm"] = func(a []uint64) uint64 {
 			s, isStr := u(a[0]).(string)
 			if !isStr {
-				if args, _ := u(a[2]).(*jsArray); args != nil && len(args.elems) == 1 && rt.toString(u(a[1])) == "compareTo" {
+				args, _ := u(a[2]).(*jsArray)
+				if args != nil && len(args.elems) == 1 && rt.toString(u(a[1])) == "compareTo" {
 					if r, ok := rt.jvWrapCompare(u(a[0]), args.elems[0]); ok {
+						return w(r)
+					}
+				}
+				if args == nil || len(args.elems) == 0 {
+					if r, ok := rt.jvUnbox(u(a[0]), rt.toString(u(a[1]))); ok {
 						return w(r)
 					}
 				}

@@ -856,7 +856,16 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalDouble,".indexOf("," + rest + ",") >= 0
+}
+
+// Does this import name a java.util.stream type? Then the grammar compiles
+// lib/java-stream.java, and lib/java-util.java it builds on, with the program.
+// A call of a method named stream (Arrays.stream, a Collection's stream()) sets
+// jStreamWant instead (jMcallSfx), because neither needs an import.
+var jStreamWant = false
+function jStreamWants(path) {
+    return path == "java.util.stream.*" || (path.length > 17 && path.substring(0, 17) == "java.util.stream.")
 }
 
 // Does `new cls(...)` create a type lib/java-lang.java declares? Then the
@@ -1314,6 +1323,7 @@ function jRecvTy(t) {
 }
 // A `.name(args)` suffix record, with its text and its arguments' static types.
 function jMcallSfx(name, args, text) {
+    if (name == "stream") { jStreamWant = true }
     return {kind: "mcall", name: name, args: args, stext: text, atys: jCallArgTys(text, args.length)}
 }
 // Gives each `.m(...)` suffix of a member chain `rty`, its receiver's static

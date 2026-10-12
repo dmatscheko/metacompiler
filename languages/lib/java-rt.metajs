@@ -779,6 +779,18 @@ function jvBoxType(name) {
         o["FALSE"] = false
         o["valueOf"] = function(v) { return jvBoolOf(v) }
         o["parseBoolean"] = function(v) { return jvBoolOf(v) }
+        o["compare"] = function(a, b) {
+            if (a === b) { return 0 }
+            if (a === true) { return 1 }
+            return 0 - 1
+        }
+        o["logicalAnd"] = function(a, b) { return a === true && b === true }
+        o["logicalOr"] = function(a, b) { return a === true || b === true }
+        o["logicalXor"] = function(a, b) { return a !== b }
+        o["toString"] = function(v) {
+            if (v === true) { return "true" }
+            return "false"
+        }
         return o
     }
     return o
@@ -1878,6 +1890,22 @@ function js_jvnewstr(args) {
     }
     return out
 }
+// An array's clone() is a new array of the same length holding the same
+// elements, a shallow copy (JLS 10.7); any other receiver dispatches. Twin of
+// js_jvclone in abnf/jsrtjava.go and the clone arm of mcall in
+// java-interpreter.abnf.
+function js_jvclone(v) {
+    if (Array.isArray(v)) {
+        var out = []
+        var i = 0
+        while (i < v.length) {
+            out.push(v[i])
+            i = i + 1
+        }
+        return out
+    }
+    return js_mcall(v, "clone", [])
+}
 function js_jvchars(v) {
     if (typeof v == "string") {
         var out = []
@@ -1941,25 +1969,65 @@ function jvArraySimple(tag) {
     if (c == "S") { return "short[]" }
     return "byte[]"
 }
+// The java.lang wrapper class a boxed primitive (or a String) belongs to, or ""
+// for any other value. Twin of jvBoxName in abnf/jsrtjavastr.go and jBoxName in
+// java-interpreter.abnf.
+function jvBoxName(v) {
+    if (typeof v == "string") { return "String" }
+    if (typeof v == "boolean") { return "Boolean" }
+    if (jvIsChar(v)) { return "Character" }
+    if (floIs(v)) {
+        if (floStyle(v) == 3) { return "Float" }
+        return "Double"
+    }
+    if (sintIs(v)) {
+        var w = sintWidth(v)
+        if (w == 64) { return "Long" }
+        if (w == 16) { return "Short" }
+        return "Byte"
+    }
+    if (typeof v == "number") { return "Integer" }
+    return ""
+}
+// Number's intValue() ... doubleValue(), Character's charValue() and Boolean's
+// booleanValue() on a boxed primitive: the primitive conversion to the named
+// type (JLS 5.1.2, 5.1.3); undefined for any other receiver or name. Twin of
+// jvUnbox in abnf/jsrtjava.go and jUnbox in java-interpreter.abnf.
+function jvUnbox(v, name) {
+    var bn = jvBoxName(v)
+    if (bn == "" || bn == "String") { return undefined }
+    if (name == "intValue") { return jvNarrow(v, 32) }
+    if (name == "longValue") { return jvNarrow(v, 64) }
+    if (name == "doubleValue") { return flo(rtjNum(v), 0) }
+    if (name == "floatValue") { return js_jflo32(v) }
+    if (name == "shortValue") { return jvNarrow(v, 16) }
+    if (name == "byteValue") { return jvNarrow(v, 8) }
+    if (name == "charValue" || name == "booleanValue") { return v }
+    return undefined
+}
+// `v instanceof T`: a boxed primitive is an instance of its own wrapper class and
+// its supertypes only, never of another wrapper (JLS 15.20.2); every other value
+// goes to the shared js_is_type. Twin of jvIsType in abnf/jsrtjavastr.go and
+// jIsType in java-interpreter.abnf.
+function js_jvis(v, t0) {
+    if (v === undefined || v === null) { return false }
+    var t = t0
+    var lt = t.indexOf("<")
+    if (lt >= 0) { t = t.substring(0, lt) }
+    if (t.indexOf("java.lang.") == 0) { t = t.substring(10, t.length) }
+    var bn = jvBoxName(v)
+    if (bn == "") { return js_is_type(v, t) }
+    if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable" || t == "java.io.Serializable") { return true }
+    if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
+    return t == "CharSequence" && bn == "String"
+}
 function js_jvgetclass(v) {
     if (v === undefined || v === null) {
         fail("method call .getClass() on null")
         return undefined
     }
-    if (typeof v == "string") { return jvLangClass("String") }
-    if (typeof v == "boolean") { return jvLangClass("Boolean") }
-    if (jvIsChar(v)) { return jvLangClass("Character") }
-    if (floIs(v)) {
-        if (floStyle(v) == 3) { return jvLangClass("Float") }
-        return jvLangClass("Double")
-    }
-    if (sintIs(v)) {
-        var w = sintWidth(v)
-        if (w == 64) { return jvLangClass("Long") }
-        if (w == 16) { return jvLangClass("Short") }
-        return jvLangClass("Byte")
-    }
-    if (typeof v == "number") { return jvLangClass("Integer") }
+    var bn = jvBoxName(v)
+    if (bn != "") { return jvLangClass(bn) }
     if (Array.isArray(v)) {
         var tag = jpArrayTag(v)
         return jvClassOf(tag, jvArraySimple(tag))
@@ -2016,15 +2084,19 @@ function jvArgInt(args, i, dflt) {
     return dflt
 }
 
-// A java.lang.String method on a string receiver, compareTo on a boxed
-// primitive too; any other receiver is an ordinary call of a method by that
-// name. Twin of js_jvstrm in abnf/jsrtjavastr.go and jStrMethod in
-// java-interpreter.abnf.
+// A java.lang.String method on a string receiver, compareTo and the unboxing
+// members on a boxed primitive too; any other receiver is an ordinary call of a
+// method by that name. Twin of js_jvstrm in abnf/jsrtjavastr.go and jStrMethod
+// in java-interpreter.abnf.
 function js_jvstrm(s, name, args) {
     if (typeof s != "string") {
         if (name == "compareTo" && args.length == 1) {
             var r = jvWrapCompare(s, args[0])
             if (r !== undefined) { return r }
+        }
+        if (args.length == 0) {
+            var ub = jvUnbox(s, name)
+            if (ub !== undefined) { return ub }
         }
         return js_mcall(s, name, args)
     }
@@ -2762,6 +2834,8 @@ function jvCharMembers(o) {
         if (d < rtjNum(radix)) { return d }
         return 0 - 1
     }
+    o["compare"] = function(a, b) { return jvCharCode(a) - jvCharCode(b) }
+    o["valueOf"] = function(v) { return v }
 }
 
 // Math.max / Math.min on doubles: NaN wins, and -0.0 is below 0.0. Twin of

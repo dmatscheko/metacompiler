@@ -41,6 +41,12 @@ import java.util.Arrays;
 import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 class Main {
     static int failures = 0;
@@ -109,6 +115,8 @@ class Main {
         S52.run(); // SECTION-CALL 52
         S53.run(); // SECTION-CALL 53
         S54.run(); // SECTION-CALL 54
+        S55.run(); // SECTION-CALL 55
+        S56.run(); // SECTION-CALL 56
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3154,5 +3162,120 @@ class S54 {
         ArrayList<Integer> n = new ArrayList<>(List.of(5, 6, 7));
         Main.check("cme54", first.equals("cme") && second == 8 && each.equals("cme") && ("" + l).equals("[8, 1]")
             && cme(m, 6).equals("[5, 7]") && cme(n, 5).equals("cme"));
+    }
+}
+
+// ===== SECTION 55: instanceof a boxed primitive, the wrappers' members, array clone =====
+//
+// A boxed primitive is an instance of its own wrapper class and that class's
+// supertypes only (JLS 15.20.2): an Integer is a Number and a Comparable but not
+// a Double, a char is a Character and not a Number. Number's xxxValue() is the
+// primitive conversion to that type, and an array's clone() is a shallow copy
+// (JLS 10.7). Every expected value is java 24.0.2's.
+class S55 {
+    static String kinds(Object o) {
+        return (o instanceof Integer ? "I" : "") + (o instanceof Long ? "L" : "") + (o instanceof Short ? "S" : "")
+            + (o instanceof Byte ? "Y" : "") + (o instanceof Double ? "D" : "") + (o instanceof Float ? "F" : "")
+            + (o instanceof Character ? "C" : "") + (o instanceof Boolean ? "B" : "") + (o instanceof String ? "T" : "")
+            + (o instanceof Number ? "N" : "") + (o instanceof Comparable ? "c" : "") + (o instanceof Object ? "O" : "");
+    }
+    static String sw(Object o) {
+        return switch (o) {
+            case Integer i -> "int " + (i + 1);
+            case Double d -> "double " + d;
+            case Character c -> "char " + c;
+            default -> "other";
+        };
+    }
+    static void run() {
+        Object[] xs = { 3, "b", 2.5, 'c', 7L, true, 1.5f, (short) 2, (byte) 1 };
+        String all = "";
+        for (Object o : xs) { all = all + kinds(o) + " "; }
+        Main.check("io55a", all.equals("INcO TcO DNcO CcO LNcO BcO FNcO SNcO YNcO "));
+        Object q = 4.0;
+        Object n = null;
+        Main.check("io55b", !(q instanceof Integer) && q instanceof Double d && d == 4.0 && !(n instanceof Object)
+            && sw(4).equals("int 5") && sw(4.0).equals("double 4.0") && sw('z').equals("char z") && sw(4L).equals("other"));
+        Object[] ns = { 3, 2.75, 7L, 1.5f, (short) -2, (byte) -1, -0.0, 1e20, 1L << 40 };
+        String vals = "";
+        for (Object o : ns) {
+            Number x = (Number) o;
+            vals = vals + x.intValue() + "/" + x.longValue() + "/" + x.doubleValue() + "/" + x.floatValue() + "/"
+                + x.shortValue() + "/" + x.byteValue() + " ";
+        }
+        Main.check("wr55a", vals.equals("3/3/3.0/3.0/3/3 2/2/2.75/2.75/2/2 7/7/7.0/7.0/7/7 1/1/1.5/1.5/1/1 -2/-2/-2.0/-2.0/-2/-2 "
+            + "-1/-1/-1.0/-1.0/-1/-1 0/0/-0.0/-0.0/0/0 2147483647/9223372036854775807/1.0E20/1.0E20/-1/-1 "
+            + "0/1099511627776/1.099511627776E12/1.0995116E12/0/0 "));
+        Integer i5 = 5;
+        Character cq = Character.valueOf('q');
+        Boolean yes = Boolean.TRUE;
+        Main.check("wr55b", i5.doubleValue() == 5.0 && ("" + i5.doubleValue()).equals("5.0") && cq.charValue() == 'q'
+            && yes.booleanValue() && !Boolean.FALSE && Character.compare('a', 'z') == -25 && Character.compare('b', 'a') == 1
+            && Boolean.compare(true, false) == 1 && Boolean.compare(false, true) == -1 && Boolean.compare(true, true) == 0
+            && Boolean.logicalXor(true, false) && !Boolean.logicalAnd(true, false) && Boolean.logicalOr(false, true)
+            && Boolean.toString(false).equals("false") && ("" + Character.valueOf('x')).equals("x"));
+        int[] a = { 3, 1, 2 };
+        int[] b = a.clone();
+        b[0] = 9;
+        int[][] m = { { 1, 2 }, { 3 } };
+        int[][] mc = m.clone();
+        mc[0][0] = 7;
+        mc[1] = new int[] { 8 };
+        long[] ls = { 1L << 40 };
+        Main.check("cl55", Arrays.toString(a).equals("[3, 1, 2]") && Arrays.toString(b).equals("[9, 1, 2]") && a != b
+            && m[0][0] == 7 && m[1][0] == 3 && m[0] == mc[0] && ls.clone()[0] * 2 == 2199023255552L
+            && new char[0].clone().length == 0 && "hey".toCharArray().clone().getClass().getName().equals("[C"));
+    }
+}
+
+// ===== SECTION 56: java.util.stream and Optional =====
+//
+// A sequential stream runs each element through the whole pipeline before it
+// reads the next, so the lambdas' side effects interleave, a short-circuiting
+// operation reads no further than it needs, and sorted() first drains what is
+// upstream of it; a stream can be operated upon once. Collectors.toList,
+// joining and counting; IntStream's sum wraps as int arithmetic does. Every
+// expected value is java 24.0.2's.
+class S56 {
+    static String trace = "";
+    static void run() {
+        Main.check("st56a", Arrays.stream(new int[] { 1, 2, 3 }).sum() == 6 && IntStream.range(0, 4).sum() == 6
+            && IntStream.rangeClosed(1, 5).map(x -> x * x).filter(x -> x % 2 == 1).boxed().collect(Collectors.toList()).toString().equals("[1, 9, 25]")
+            && IntStream.of(Integer.MAX_VALUE, 1).sum() == Integer.MIN_VALUE
+            && IntStream.rangeClosed(Integer.MAX_VALUE - 1, Integer.MAX_VALUE).count() == 2);
+        Main.check("st56b", Stream.of("a", "bb", "ccc").map(s -> s.toUpperCase()).collect(Collectors.joining(", ", "[", "]")).equals("[A, BB, CCC]")
+            && Stream.of(5, 3, 9, 1).sorted().map(x -> x * 10).reduce(0, (x, y) -> x + y) == 180 && Stream.of(1, 2, 3).count() == 3
+            && Arrays.stream(new String[] { "q", "r" }).collect(Collectors.joining()).equals("qr")
+            && IntStream.range(0, 3).mapToObj(i -> "i" + i).collect(Collectors.joining("-")).equals("i0-i1-i2"));
+        List<String> w = List.of("pear", "fig", "apple");
+        Object cnt = Stream.of(1, 2).collect(Collectors.counting());
+        Main.check("st56c", w.stream().filter(s -> s.length() > 3).count() == 2 && w.stream().sorted().toList().toString().equals("[apple, fig, pear]")
+            && cnt instanceof Long && Stream.of("bb", "a", "ccc").sorted((x, y) -> y.length() - x.length()).toList().toString().equals("[ccc, bb, a]")
+            && Stream.of(1, 1, 2, 1, 3).distinct().toList().toString().equals("[1, 2, 3]") && Stream.of("x", "yy").mapToInt(s -> s.length()).sum() == 3
+            && Arrays.toString(IntStream.range(0, 3).toArray()).equals("[0, 1, 2]") && IntStream.range(0, 5).skip(2).limit(2).boxed().toList().toString().equals("[2, 3]"));
+        Main.check("st56d", ("" + IntStream.of(4, 9, 2).max()).equals("OptionalInt[9]") && ("" + IntStream.empty().max()).equals("OptionalInt.empty")
+            && ("" + IntStream.of(1, 2).average()).equals("OptionalDouble[1.5]") && ("" + IntStream.of(5, 6).reduce((x, y) -> x * y)).equals("OptionalInt[30]")
+            && Stream.of(3, 1, 2).max((x, y) -> x - y).get() == 3 && Stream.of(3, 1).min(Integer::compare).get() == 1
+            && Stream.of(1, 2, 3).anyMatch(x -> x > 2) && !Stream.of(1, 2, 3).allMatch(x -> x > 2) && IntStream.of(1, 2).noneMatch(x -> x > 5)
+            && Stream.of("x", "y").findFirst().get().equals("x") && ("" + IntStream.range(0, 0).findFirst()).equals("OptionalInt.empty"));
+        Stream.of(1, 2, 3, 4).filter(x -> { trace = trace + "f" + x; return x % 2 == 0; })
+            .map(x -> { trace = trace + "m" + x; return x; }).limit(1).forEach(x -> trace = trace + "e" + x);
+        trace = trace + "|";
+        Stream.of(3, 1, 2).peek(x -> trace = trace + "p" + x).sorted().forEach(x -> trace = trace + "s" + x);
+        Stream<Integer> once = Stream.of(1);
+        once.count();
+        String ise = "";
+        try { once.count(); } catch (IllegalStateException e) { ise = e.getMessage(); }
+        ArrayList<Integer> al = new ArrayList<>(List.of(1, 2));
+        Stream<Integer> late = al.stream();
+        al.add(3);
+        Main.check("st56e", trace.equals("f1f2m2e2|p3p1p2s1s2s3") && ise.equals("stream has already been operated upon or closed")
+            && late.map(x -> x + 1).toList().toString().equals("[2, 3, 4]"));
+        Optional<String> o = Optional.of("x");
+        String nse = "";
+        try { Optional.empty().get(); } catch (NoSuchElementException e) { nse = e.getMessage(); }
+        Main.check("op56", o.get().equals("x") && ("" + o).equals("Optional[x]") && ("" + Optional.empty()).equals("Optional.empty")
+            && o.map(s -> s + "!").orElse("no").equals("x!") && !Optional.ofNullable(null).isPresent() && nse.equals("No value present")
+            && Optional.empty() == Optional.empty() && OptionalInt.of(3).getAsInt() == 3 && OptionalInt.empty().orElse(7) == 7);
     }
 }

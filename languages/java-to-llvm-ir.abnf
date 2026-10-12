@@ -21,7 +21,9 @@ and the partial new int[a][], bare initializers like {1, 2}, C style declarators
 a.length, indexing), varargs (a trailing array parameter, fed either by the extra
 arguments or by an array), the enhanced for loop
 (for (var x : arr), and over any Iterable), the java.util ArrayList / AbstractList / List / Arrays of an
-import (lib/java-util.java, compiled with the program), new String(...),
+import (lib/java-util.java, compiled with the program), Optional and the
+sequential Stream / IntStream / Collectors of java.util.stream (lib/java-stream.java,
+compiled at a java.util.stream import or a call of a method named stream), new String(...),
 Math's and StrictMath's transcendentals as fdlibm answers them,
 int / boolean / char / String / var / class types (types are
 parsed; the semantics are dynamic, but char is a value of its own that prints as its
@@ -843,8 +845,8 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = InstOf { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> InstOf } ;
 
-// x instanceof Type [binding]: a genuine dynamic type test (js_is_type:
-// numbers, strings, booleans, arrays, user classes via __class/__super). The
+// x instanceof Type [binding]: a genuine dynamic type test (js_jvis: the boxed
+// primitives by their wrapper class, arrays, user classes via __class/__super). The
 // optional pattern variable binds the operand in the function scope - looser
 // than Java's flow scoping, which only admits it where the test held.
 InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
@@ -2781,7 +2783,7 @@ HasStatic   = :script(~~
         if (op == "!=") return callExt(b, "js_not", [callExt(b, "js_jvchareq", [l, r])])
         return coreEmitBin(b, op, l, r)
     }
-    // x instanceof Type [binding]: js_is_type decides; a pattern variable binds
+    // x instanceof Type [binding]: js_jvis decides; a pattern variable binds
     // the operand (whatever the outcome - Java's flow scoping is stricter, but
     // code that compiles under javac only reads it where the test held).
     // A single item (no instanceof tail) is a transparent pass-through.
@@ -2807,7 +2809,7 @@ HasStatic   = :script(~~
             if (tail.bind != undefined) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tail.bind), r.v])
             }
-            return {b: b, v: callExt(b, "js_is_type", [r.v, emitStr(b, tail.tname)])}
+            return {b: b, v: callExt(b, "js_jvis", [r.v, emitStr(b, tail.tname)])}
         }
     }
     // new C(args): set __class, then run the constructor with [obj, args...].
@@ -3472,13 +3474,15 @@ HasStatic   = :script(~~
     // known (jSfxSig in lib/java-decltypes.js), the ordinary js_mcall otherwise.
     // A java.lang.String method name goes to js_jvstrm when the receiver may be a
     // String (its static type is String or unread); js_jvstrm hands any other
-    // receiver on to js_mcall. compareTo always goes there, because js_jvstrm
-    // also answers it for a boxed primitive, whatever its static type says.
+    // receiver on to js_mcall. compareTo and the no-argument unboxing members
+    // (intValue, doubleValue, ...) always go there, because js_jvstrm also
+    // answers them for a boxed primitive, whatever its static type says.
     function jEmitMcall(b, recv, s, argsV) {
         var sig = jSfxSig(s)
         if (sig != "") { return callExt(b, "js_jvsigcall", [recv, emitStr(b, s.name), emitStr(b, sig), argsV]) }
-        if (jStrMethods["$" + s.name] == true && (s.rty == undefined || s.rty == "" || jOvBare(s.rty) == "String"
-                                                  || s.rty.substring(0, 8) == "static?:" || s.name == "compareTo")) {
+        if ((jUnboxNames["$" + s.name] == true && s.args.length == 0)
+            || (jStrMethods["$" + s.name] == true && (s.rty == undefined || s.rty == "" || jOvBare(s.rty) == "String"
+                                                      || s.rty.substring(0, 8) == "static?:" || s.name == "compareTo"))) {
             return callExt(b, "js_jvstrm", [recv, emitStr(b, s.name), argsV])
         }
         return callExt(b, "js_mcall", [recv, emitStr(b, s.name), argsV])
@@ -3489,6 +3493,8 @@ HasStatic   = :script(~~
                           "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing",
                           "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern"]
     for (var jsm = 0; jsm < jStrMethodList.length; jsm++) { jStrMethods["$" + jStrMethodList[jsm]] = true }
+    var jUnboxNames = {"$intValue": true, "$longValue": true, "$doubleValue": true, "$floatValue": true,
+                       "$shortValue": true, "$byteValue": true, "$charValue": true, "$booleanValue": true}
     foldCallMember = function(items, text) {
         if (items.length == 1) return items[0]
         var primary = items[0]
@@ -3547,11 +3553,14 @@ HasStatic   = :script(~~
                     // CLAMPS. js_jvsub is java-only, exactly like js_jcharat: the
                     // Go extern table is SHARED across languages, so a wrapper on
                     // js_mcall would make a C# Substring raise java's message.
-                    // String.toCharArray (js_jvchars) is java-only for the same reason.
+                    // String.toCharArray (js_jvchars) is java-only for the same reason,
+                    // and so is an array's clone() (js_jvclone).
                     var mv = (s.name == "substring")
                              ? callExt(mcallB, "js_jvsub", [cur, ea.v])
                              : ((s.name == "toCharArray" && s.args.length == 0)
                              ? callExt(mcallB, "js_jvchars", [cur])
+                             : ((s.name == "clone" && s.args.length == 0)
+                             ? callExt(mcallB, "js_jvclone", [cur])
                              : ((s.name == "charAt")
                              ? callExt(mcallB, "js_jcharat", [cur, ea.v])
                              : ((s.name == "getClass" && s.args.length == 0)
@@ -3562,7 +3571,7 @@ HasStatic   = :script(~~
                                    ? callExt(mcallB, "js_jvstr", [cur])
                                    : ((s.name == "equals" && s.args.length == 1)
                                       ? callExt(mcallB, "js_jvaleq", [cur, callExt(mcallB, "js_arg", [ea.v, handle(0)])])
-                                      : jEmitMcall(mcallB, cur, s, ea.v)))))))
+                                      : jEmitMcall(mcallB, cur, s, ea.v))))))))
                     mcallB.NewBr(mergeB)
                     cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
                     b = mergeB
@@ -4403,8 +4412,11 @@ HasStatic   = :script(~~
     // of its types (jLangWants): at the end of the walk, by buildMain, so its
     // classes are stashed with the imported ones. lib/java-util.java is loaded
     // the same way when a FULLY QUALIFIED `new java.util.ArrayList<>()` names
-    // one of its types without an import (JLS 6.5.5.2).
+    // one of its types without an import (JLS 6.5.5.2). lib/java-stream.java and
+    // the java-util.java it builds on are compiled at a java.util.stream import
+    // or by buildMain when the program calls a method named stream.
     var jUtilLoaded = false
+    var jStreamLoaded = false
     var jUtilWant = false
     var jLangWant = false
     var jPkgPrefix = ""
@@ -4420,9 +4432,14 @@ HasStatic   = :script(~~
         jPkgPrefix = ""
     }
     function jImport(path, pos) {
-        if (!jUtilLoaded && jUtilWants(stripWs(path))) {
+        var ip = stripWs(path)
+        if (!jUtilLoaded && (jUtilWants(ip) || jStreamWants(ip))) {
             jUtilLoaded = true
             jLoadLib("lib/java-util.java", "java.util.")
+        }
+        if (!jStreamLoaded && jStreamWants(ip)) {
+            jStreamLoaded = true
+            jLoadLib("lib/java-stream.java", "java.util.stream.")
         }
         resolveImport(path, pos)
     }
@@ -5303,7 +5320,7 @@ HasStatic   = :script(~~
     function emitPattern(b, val, pat, failB) {
         if (patNeedsTest(pat.ty)) {
             var okB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [val, emitStr(b, pat.ty)])), okB, failB)
+            b.NewCondBr(truthy(b, callExt(b, "js_jvis", [val, emitStr(b, pat.ty)])), okB, failB)
             b = okB
         }
         if (pat.bind != null) {
@@ -5439,9 +5456,13 @@ HasStatic   = :script(~~
             stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
-        if (jUtilWant && !jUtilLoaded) {
+        if ((jUtilWant || jStreamWant) && !jUtilLoaded) {
             jUtilLoaded = true
             jLoadLib("lib/java-util.java", "java.util.")
+        }
+        if (jStreamWant && !jStreamLoaded) {
+            jStreamLoaded = true
+            jLoadLib("lib/java-stream.java", "java.util.stream.")
         }
         if (jLangWant) {
             jLangWant = false
