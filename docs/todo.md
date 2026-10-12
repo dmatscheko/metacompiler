@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-441** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-442** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,14 +63,12 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-437 python: missing required argument is silent (compiled); live `__dict__`; `property` · P1 · PY · IN PROGRESS (PY worker, round 18) [V]
-(a) `def f(a, b=2)`; `f()` / `f(b=3)`: python3 `TypeError: f() missing 1 required positional argument: 'a'`; the
-interpreter says "missing required argument: 'a'" (wrong text); the compiled halves silently bind None. Silent wrong
-answer. Also check the plural / keyword-only forms ("missing 2 required positional arguments: 'a' and 'b'",
-"missing 1 required keyword-only argument: 'k'") and "takes N positional arguments but M were given".
-(b) instance `__dict__` is a snapshot in all engines: `o.__dict__["x"]=1; hasattr(o,"x")` False (python3 True);
-`d=o.__dict__; o.z=3; d` misses z. (c) no `property` builtin (NameError): getter/setter/deleter, decorator forms.
-(d) a str beside a union (`int | "s"`, ForwardRef) still TypeError — DECLINE unless cheap.
+### T-441 python: qualnames, dunder/exception `__dict__`, "Did you mean", dir/copy/dataclasses · P2 · PY · OPEN [V]
+python3 3.14: (a) `C.m.__qualname__` is `'m'` (should be `'C.m'`); nested classes print `'N'` not `'C.N'` in
+AttributeError texts. (b) compiled only: `o.__x__ = 5` missing from `o.__dict__` (`__`-prefix filter);
+`vars(ValueError("v"))` gives `{'args': ...}` (python3 `{}`). (c) property error messages use the accessed name; CPython
+uses `__set_name__`/fget's name (`'<lambda>'` for a late `G.q = property(lambda s: 1)`). (d) "unexpected keyword
+argument 'kk'. Did you mean 'k'?" suffix absent. (e) `dir()`, `copy`, `dataclasses` absent.
 
 ---
 
@@ -478,6 +476,7 @@ T-431 python: explicit None no longer takes a default (compiled), attribute hook
 T-432 python: big-int <-> bits 16 at a time (hex(10**4300) native 29.8s -> 0.7s); java StringBuilder part moved to T-438 — DONE 44e2ba60
 T-435 php: engine interfaces extend Traversable/UnitEnum/Stringable, Closure/Generator as classes, ~bool/~null TypeErrors, PHP 8.4 closure var_dump layout, *RECURSION* guard — DONE 3bd31a96
 T-438 java: StringBuilder appends onto a short tail + 32-level join counter (-frozen ~6.7K -> ~1.5K steps per append); java ratchet one file again — DONE 148fc8d1
+T-437 python: CPython arity TypeErrors (missing/too many/multiple values/unexpected keyword/positional-only) in all engines, live instance __dict__, property builtin + decorator evaluation order; `int | "s"` is a TypeError in CPython too (not a defect) — DONE 7cedc576
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
