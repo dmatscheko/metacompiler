@@ -63,7 +63,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-458 python: repr escapes for unassigned code points · P3 · PY · OPEN [V]
+### T-458 python: repr escapes for unassigned code points · P3 · PY · IN PROGRESS (PY worker, round 25) [V]
 `repr(chr(0xd7ff))` prints the character; CPython escapes it (`'\ud7ff'`) — pyReprEsc treats only surrogates/controls
 as non-printable, not unassigned code points (needs the Unicode "printable" table, Cn/Co/Cs/Zl/Zp/Zs≠space/Cc/Cf).
 Known model limit (not a ticket): a surrogate pair is one code point of length 1 (UTF-16 strings).
