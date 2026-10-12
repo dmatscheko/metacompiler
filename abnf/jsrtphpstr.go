@@ -199,6 +199,94 @@ func phpCoreIface(n string) bool {
 	return false
 }
 
+// phpCoreIfaceExtends is phsCoreIfaceExtends: does the engine's own interface
+// iface extend the interface name?
+func phpCoreIfaceExtends(iface, name string) bool {
+	p := phpCase(strings.TrimPrefix(iface, "\\"), false)
+	switch phpCase(strings.TrimPrefix(name, "\\"), false) {
+	case "traversable":
+		return p == "iterator" || p == "iteratoraggregate"
+	case "unitenum":
+		return p == "backedenum"
+	case "stringable":
+		return p == "throwable"
+	}
+	return false
+}
+
+// phpCoreClassIs is phsCoreClassIs: is the engine's own class cls ("closure" or
+// "generator") the class name, or an implementor of it?
+func phpCoreClassIs(cls, name string) bool {
+	q := phpCase(strings.TrimPrefix(name, "\\"), false)
+	return q == cls || (cls == "generator" && (q == "iterator" || q == "traversable"))
+}
+
+// phpCloSplit is phsCloSplit: s cut at every sep, "" being no fields at all.
+func phpCloSplit(s, sep string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, sep)
+}
+
+// phpCloStatics is phsCloStatics: the static variable names of closure record d.
+func phpCloStatics(d string) []string { return phpCloSplit(strings.Split(d, "\n")[3], ",") }
+
+// phpCloDump is phsCloDump: var_dump of a closure literal from its record d, its
+// handle, the dumps of its static variables' values and of its bound $this.
+func phpCloDump(d string, id int, ind int, statDumps []string, thisDump string) string {
+	f := strings.Split(d, "\n")
+	st, ps := phpCloSplit(f[3], ","), phpCloSplit(f[4], ",")
+	nreq, _ := strconv.Atoi(f[5])
+	pad := strings.Repeat(" ", ind)
+	p2, p4 := pad+"  ", pad+"    "
+	n := 3
+	if len(st) > 0 {
+		n++
+	}
+	if thisDump != "" {
+		n++
+	}
+	if len(ps) > 0 {
+		n++
+	}
+	out := pad + "object(Closure)#" + strconv.Itoa(id) + " (" + strconv.Itoa(n) + ") {\n"
+	out += p2 + "[\"name\"]=>\n" + p2 + "string(" + strconv.Itoa(len(phpRaw(f[0]))) + ") \"" + f[0] + "\"\n"
+	out += p2 + "[\"file\"]=>\n" + p2 + "string(" + strconv.Itoa(len(phpRaw(f[1]))) + ") \"" + f[1] + "\"\n"
+	out += p2 + "[\"line\"]=>\n" + p2 + "int(" + f[2] + ")\n"
+	if len(st) > 0 {
+		out += p2 + "[\"static\"]=>\n" + p2 + "array(" + strconv.Itoa(len(st)) + ") {\n"
+		for i, s := range st {
+			out += p4 + "[\"" + s[1:] + "\"]=>\n" + statDumps[i]
+		}
+		out += p2 + "}\n"
+	}
+	if thisDump != "" {
+		out += p2 + "[\"this\"]=>\n" + thisDump
+	}
+	if len(ps) > 0 {
+		out += p2 + "[\"parameter\"]=>\n" + p2 + "array(" + strconv.Itoa(len(ps)) + ") {\n"
+		for j, p := range ps {
+			req := "<optional>"
+			if j < nreq {
+				req = "<required>"
+			}
+			out += p4 + "[\"" + p + "\"]=>\n" + p4 + "string(10) \"" + req + "\"\n"
+		}
+		out += p2 + "}\n"
+	}
+	return out + pad + "}\n"
+}
+
+// phpCoreClass is phsCoreClass: the lower-case name of the engine's own class n
+// denotes, or "".
+func phpCoreClass(n string) string {
+	if k := phpCase(strings.TrimPrefix(n, "\\"), false); k == "closure" || k == "generator" {
+		return k
+	}
+	return ""
+}
+
 // phpBitOp is phsBitOp: &, |, ^ of two strings byte by byte ('|' to the longer,
 // the others to the shorter), and "~" every byte of a inverted.
 func phpBitOp(op string, a, b string) string {
@@ -432,11 +520,29 @@ func init() {
 			rt.phpStamp(o)
 			return a[0]
 		}
-		// An object's handle; a Closure keeps none and answers 0. Twin of __mec_oid
-		// in php-interpreter.abnf.
+		// (desc, sig, env, this) -> the record of a closure literal being made,
+		// which takes the next handle: its debug record (phsCloDesc), the signature
+		// js_phplace reads, the scope its captures live in and its bound $this.
+		// The emitter stores it in the closure's meta (js_jsfnmeta). Twin of
+		// js_phclo in lib/php-rt.metajs and closureBody in php-interpreter.abnf.
+		m["js_phclo"] = func(a []uint64) uint64 {
+			rt.phpStamp(nil)
+			rec := newJSObject()
+			rec.set("d", u(a[0]))
+			rec.set("s", u(a[1]))
+			rec.set("e", rt.scopeOf(a[2]))
+			rec.set("t", u(a[3]))
+			rec.set("i", float64(phpHandles[rt]))
+			return w(rec)
+		}
+		// An object's handle, or a closure literal's; any other Closure keeps none
+		// and answers 0. Twin of __mec_oid in php-interpreter.abnf.
 		m["js_phoidof"] = func(a []uint64) uint64 {
 			if o, ok := u(a[0]).(*jsObject); ok && phpIsObj(o) {
 				return rt.wrapNum(float64(rt.phpDumpID(o)))
+			}
+			if rec := jsvFnMeta(u(a[0])).rec; rec != nil {
+				return rt.wrapNum(rec.props["i"].(float64))
 			}
 			return rt.wrapNum(0)
 		}

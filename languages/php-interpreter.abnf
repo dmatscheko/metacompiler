@@ -189,7 +189,7 @@ CloseAhead  = :script(~~
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(up.in); genPush(); fnEnter() ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(up.in); genPush(); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
@@ -211,7 +211,7 @@ ReturnType  = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
+            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(cloNoteClass(up.in)) ~~> [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
 ExtBase     <~~ push({ext: lastSeg(stripWs(up.in)), raw: stripWs(up.in)}) ~~> = ExtName ;
 ClassMod    = ( CiAbstract | CiFinal | CiReadonly ) KwEnd ;
 CiAbstract  = CiA :whitespace() CiB CiS CiT CiR CiA CiC CiT :whitespace(Whitespace) ;
@@ -224,7 +224,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: modifiers and a reference-return '&' are accepted and ignored; an
 // abstract/interface method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = [ AttrGrp ] { PropMod } KwFunction [ "&" ] MethodName <~~ push(up.in); genPush(); fnEnter() ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { PropMod } KwFunction [ "&" ] MethodName <~~ push(up.in); genPush(); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: const A = 1, B = 2; with an optional TYPE before the first name
 // (the typed class constants of PHP 8.3). The typed form has to be its own
 // alternative and be tried FIRST - writing it as an optional [ TypeHint ] would let
@@ -261,11 +261,11 @@ TraitAlias  <~~ push({talias: stripWs(up.in)}) ~~> = MemberName ;
 // but instanceof and the implements list need the name to exist at run time.
 TypeDecl    = InterfaceDecl | TraitDecl ;
 InterfaceDecl <~~ push(makeIfaceStmt(takeAll())) ~~>
-            = [ AttrGrp ] KwInterface Name <~~ push(up.in) ~~> [ KwExtends ImplList ] "{" { Member } "}" ;
+            = [ AttrGrp ] KwInterface Name <~~ push(cloNoteClass(up.in)) ~~> [ KwExtends ImplList ] "{" { Member } "}" ;
 // A trait is a bag of members to be COPIED into a class (it has no instances and no
 // place in the inheritance chain), so its descriptor just carries its parsed parts.
 TraitDecl   <~~ push(makeTraitStmt(takeAll())) ~~>
-            = [ AttrGrp ] KwTrait Name <~~ push(up.in) ~~> "{" { Member } "}" ;
+            = [ AttrGrp ] KwTrait Name <~~ push(cloNoteClass(up.in)) ~~> "{" { Member } "}" ;
 // namespace N; and the BRACED form namespace N { ... } (and the global 'namespace {}').
 // Names are not qualified in this subset, so the declaration itself stays a no-op -
 // but the braced body is a top level of its own and its items are simply run in
@@ -292,7 +292,7 @@ UsePath     = [ "\\" ] Id { "\\" Id } [ KwAs Id ] ;
 // why E::A works with no extra machinery) and carrying ->name and, for a backed
 // enum, ->value. EnumCase has to precede MethodDecl: both can start at a modifier.
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = [ AttrGrp ] KwEnum Name <~~ push(up.in) ~~> [ ":" TypeAtom ] [ KwImplements ImplList ] "{" { EnumMember } "}" ;
+            = [ AttrGrp ] KwEnum Name <~~ push(cloNoteClass(up.in)) ~~> [ ":" TypeAtom ] [ KwImplements ImplList ] "{" { EnumMember } "}" ;
 EnumMember  = EnumCase | MethodDecl | ClassConst | UseTrait ;
 EnumCase    <~~ push({ecase: makeConstRec(takeAll())}) ~~>
             = [ AttrGrp ] KwCase ConstName [ PlainEq Expression ] ";" ;
@@ -1101,7 +1101,7 @@ NewDyn      <~~ push({clsdyn: pop()}) ~~> = VarRef ;
 // real class body (Member), not a balanced skip, and the constructor arguments are
 // labelled so makeNewAnon can tell them from the members.
 NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
-            = KwNew [ AttrGrp ] KwClass <~~ push({anonAt: up.pos}) ~~> [ AnonArgs ] [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
+            = KwNew [ AttrGrp ] KwClass <~~ push({anonAt: cloNoteAnon(up.pos)}) ~~> [ AnonArgs ] [ KwExtends ExtBase ] [ KwImplements ImplList ] "{" { Member } "}" ;
 AnonArgs    <~~ push({sargs: takeAll()}) ~~>
             = "(" [ ArgList ] ")" ;
 
@@ -1109,7 +1109,7 @@ AnonArgs    <~~ push({sargs: takeAll()}) ~~>
 // variables its body mentions BY VALUE at creation time (changing $m afterwards
 // cannot change what an already-created fn sees), which is what makeArrowFn snapshots.
 ArrowFn     <~~ push(makeArrowFn(takeAll())) ~~>
-            = [ AttrGrp ] [ "static" KwEnd ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
+            = [ AttrGrp ] [ CloStatic ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
 ArrowBody   <~~ push({body: arrowBody(pop())}) ~~>
             = Expression ;
 // match (subject) { c1, c2 => e, default => e } : an EXPRESSION whose arms are
@@ -1177,7 +1177,9 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
-            = [ AttrGrp ] [ "static" KwEnd ] KwFunction <~~ genPush(); fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+            = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); genPush(); fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+// A static closure (or arrow function) binds no $this (cloEnter).
+CloStatic   <~~ cloStatic = true ~~> = "static" KwEnd ;
 UseClause   = KwUse "(" [ UseVar { "," UseVar } [ "," ] ] ")" ;
 // use ($v) captures the VALUE at creation; use (&$v) shares the variable itself.
 UseVar      = UseRef | UseVal ;
@@ -1512,7 +1514,7 @@ KwMatch     = CiM :whitespace() CiA CiT CiC CiH :whitespace(Whitespace) KwEnd ;
 // The tag fires BEFORE the parameter and body tags (they are further right in the
 // sequence), so it records where this arrow function's variable references start -
 // exactly as in php-to-llvm-ir.abnf, so both engines capture the same set.
-KwFn        <~~ push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
+KwFn        <~~ cloEnter(up.pos); push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
 KwClone     = CiC :whitespace() CiL CiO CiN CiE :whitespace(Whitespace) KwEnd ;
 KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace(Whitespace) KwEnd ;
 KwIsset     = CiI :whitespace() CiS CiS CiE CiT :whitespace(Whitespace) KwEnd ;
@@ -4135,13 +4137,64 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // captured variables (env) are copied into each call's frame, a fresh copy per
     // call (phpCopy keeps a cell shared). Twin of capturePrologue in
     // php-to-llvm-ir.abnf.
-    // A Closure is an object to PHP and takes a handle (objHandles).
-    function closureBody(params, body, captured, env, isGen) {
+    // A Closure is an object to PHP and takes a handle (objHandles). What var_dump
+    // shows of it is its record: the debug record d (phsCloDesc), the handle, the
+    // captured variables and the bound $this. The frozen engine cannot carry a
+    // property on a closure, so the closure ANSWERS its record when called with
+    // cloProbe, and fnMeta's name marks the closures that do (cloRecOf).
+    var cloProbe = {probe: true}
+    function closureBody(params, body, captured, env, isGen, desc, self) {
         objHandles = objHandles + 1
-        return function(argset) {
+        var rec = {d: desc, i: objHandles, e: env, t: self}
+        return fnMetaSet(function(argset) {
+            if (argset === cloProbe) { return rec }
             if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset)) }
             return runClosureRun(params, body, captured, env, argset)()
+        }, "closure", 0)
+    }
+    function cloRecOf(v) {
+        if (typeof v != "function" || fnMeta(v, "name") != "closure") { return null }
+        return v(cloProbe)
+    }
+    // A closure is named for where it is written (zend_begin_func_decl):
+    // "{closure:<scope>:<line>}", the scope being the enclosing function "f()",
+    // method "C::m()" or closure (its own name), or the file at the top level.
+    // cloScopes holds one {name, self} per function being walked, self telling
+    // whether a $this can be bound there: in a method, or in a closure that is not
+    // static inside one. The line is that of the function / fn keyword.
+    // Twin of the same walk in php-to-llvm-ir.abnf.
+    var cloScopes = []
+    var cloClass = ""
+    var cloStatic = false
+    function cloNoteClass(n) { cloClass = stripWs(n); return n }
+    function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
+    function cloEnterFn(n, method) {
+        cloScopes.push({name: (method ? cloClass + "::" : "") + stripWs(n) + "()", self: method})
+    }
+    function cloEnter(pos) {
+        var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
+        var line = "" + c.lineOf(pos)
+        cloScopes.push({name: "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}",
+                        self: top != null && top.self && !cloStatic, line: line})
+        cloStatic = false
+    }
+    function cloLeave() { return cloScopes.pop() }
+    // The $this a closure created here binds, when its scope entry says it can.
+    function cloThis(self) {
+        if (self === true && varExists("$this")) { return getVar("$this") }
+        return null
+    }
+    // The debug record of the closure cloLeave answered sc for.
+    function cloDesc(sc, statics, params) {
+        var pn = []
+        var pr = []
+        var po = []
+        for (var i = 0; i < params.length; i++) {
+            pn.push(params[i].name)
+            pr.push(params[i].byref === true)
+            po.push(params[i].variadic === true || params[i].def != null)
         }
+        return phsCloDesc(sc.name, c.file, sc.line, statics, pn, pr, po)
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
     function runClosureRun(params, body, captured, env, argset) {
@@ -4179,17 +4232,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makeClosure(items) {
         var isGen = genPop()
         fnLeave()
+        var sc = cloLeave()
         var d = splitClosure(items)
         var params = d.params
         var body = d.body
         var byval = d.byval
         var byref = d.byref
+        var uses = []
+        for (var k = 0; k < items.length; k++) {
+            if (items[k].useval != undefined) { uses.push(items[k].useval) }
+            else if (items[k].useref != undefined) { uses.push(items[k].useref) }
+        }
+        var desc = cloDesc(sc, uses, params)
+        var self = sc.self
         return function() {
             var captured = scopes.slice(0)
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
             for (var j = 0; j < byref.length; j++) { scopePut(env, byref[j], varCell(byref[j])) }
-            return closureBody(params, body, captured, env, isGen)
+            return closureBody(params, body, captured, env, isGen, desc, cloThis(self))
         }
     }
     // An arrow function's body: its one expression, returned.
@@ -4217,12 +4278,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var names = ["$this"]
         for (var k = 0; k < params.length; k++) { names.push(params[k].name) }
         var captured = varsSince(mark, names)
+        var sc = cloLeave()
+        var desc = cloDesc(sc, captured, params)
+        var self = sc.self
         return function() {
             var env = {}
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
-            return closureBody(params, body, scopes.slice(0), env)
+            return closureBody(params, body, scopes.slice(0), env, false, desc, cloThis(self))
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
@@ -4845,6 +4909,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // because a static method must run with no $this.
     function makeFun(items) {
         fnLeave()
+        cloLeave()
         var isGen = genPop()
         var name = ""
         var params = []
@@ -5412,6 +5477,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     if (sameClassName(ifs[i], name)) { return true }
                     var iv = findClass(ifs[i])
                     if (iv != null && classIs(iv, name)) { return true }
+                    if (iv == null && phsCoreIfaceExtends(ifs[i], name)) { return true }
                 }
             }
             k = k.__super
@@ -5419,12 +5485,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return false
     }
     function phpIsA(v, name) {
-        // A closure is an instance of PHP's final class Closure, and of nothing else;
-        // a generator of Generator, which is an Iterator and so a Traversable.
-        if (typeof v == "function") { return sameClassName(name, "Closure") }
-        if (isGen(v)) {
-            return sameClassName(name, "Generator") || sameClassName(name, "Iterator") || sameClassName(name, "Traversable")
-        }
+        // A closure is an instance of PHP's final class Closure, a generator of
+        // Generator (phsCoreClassIs).
+        if (typeof v == "function") { return phsCoreClassIs("closure", name) }
+        if (isGen(v)) { return phsCoreClassIs("generator", name) }
         if (!isObj(v)) { return false }
         return classIs(v.__class, name)
     }
@@ -5520,8 +5584,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return phsFmtFloat(a, conv, p, coreExactDec, coreRoundHalfEven)
         },
-        // An object's handle (newObj); a Closure keeps none and answers 0.
-        "__mec_oid": function(o) { return isObj(o) ? o.__vdid : 0 },
+        // An object's handle (newObj), a closure literal's (closureBody); any other
+        // Closure keeps none and answers 0.
+        "__mec_oid": function(o) {
+            if (isObj(o)) { return o.__vdid }
+            var cr = cloRecOf(o)
+            return cr == null ? 0 : cr.i
+        },
         // The precision setting: answers the old value, and sets a new one unless p
         // is null (ini_get).
         "__mec_precision": function(p) {
@@ -5646,18 +5715,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // class_exists() / interface_exists(): the name denotes, in any letter case, a
     // class (not an interface or a trait) / an interface, the engine's own
-    // interfaces (phsCoreIface) included. Twin of js_phclsexists in
-    // abnf/jsrtphp.go and lib/php-rt.metajs.
+    // classes (phsCoreClass) and interfaces (phsCoreIface) included. Twin of
+    // js_phclsexists in abnf/jsrtphp.go and lib/php-rt.metajs.
     function phpClassExists(n, iface) {
         var c = findClass(phpStr(n))
-        if (c == null) { return iface && phsCoreIface(phpStr(n)) }
+        if (c == null) { return iface ? phsCoreIface(phpStr(n)) : phsCoreClass(phpStr(n)) != "" }
         if (iface) { return c.__isiface === true }
         return c.__isiface !== true && c.__istrait !== true
     }
     // is_a() / is_subclass_of(), zend's is_a_impl: v is an object or, when allowStr,
     // a class name, tested as instanceof against the class cls names (any letter
-    // case, a leading "\" dropped); a name that denotes no class answers false, and
-    // is_subclass_of leaves the class itself out. Twin of js_phisaof in
+    // case, a leading "\" dropped); a name that denotes no class, declared or the
+    // engine's own (phsCoreClass), answers false, and is_subclass_of leaves the
+    // class itself out. Twin of js_phisaof in
     // abnf/jsrtphp.go and lib/php-rt.metajs.
     function phpIsAOf(v, cls, allowStr, onlySub) {
         var name = phpStr(cls)
@@ -5665,7 +5735,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof v == "string") {
             if (!allowStr) { return false }
             var k = findClass(v)
-            if (k == null) { return false }
+            if (k == null) {
+                var core = phsCoreClass(v)
+                if (core == "" || (onlySub && phsCoreClass(name) == core)) { return false }
+                return phsCoreClassIs(core, name)
+            }
             if (onlySub && sameClassName(k.__name, name)) { return false }
             return classIs(k, name)
         }
@@ -5827,6 +5901,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return out + pad + "}\n"
         }
+        if (isObj(v) || cloRecOf(v) != null) {
+            for (var di = 0; di < dumping.length; di++) {
+                if (dumping[di] === v) { return pad + "*RECURSION*\n" }
+            }
+            dumping.push(v)
+            var dv = dumpObj(v, ind, pad)
+            dumping.pop()
+            return dv
+        }
+        return pad + "NULL\n"
+    }
+    // The objects (and closures) var_dump is inside of: one reached again prints
+    // *RECURSION* (php_var_dump's Z_IS_RECURSIVE). Twin of phDumping in
+    // lib/php-rt.metajs and phpDumping in abnf/jsrtphp.go.
+    var dumping = []
+    function dumpObj(v, ind, pad) {
         if (isObj(v)) {
             var name = v.__class == null ? "stdClass" : v.__class.__name
             var o2 = pad + "object(" + name + ")#" + v.__vdid + " (" + v.p.keys.length + ") {\n"
@@ -5841,7 +5931,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             return o2 + pad + "}\n"
         }
-        return pad + "NULL\n"
+        var cr = cloRecOf(v)
+        var sn = phsCloStatics(cr.d)
+        var sd = []
+        for (var k = 0; k < sn.length; k++) { sd.push(dumpOf(deref(cr.e[sn[k]]), ind + 4)) }
+        return phsCloDump(cr.d, "" + cr.i, ind, sd, cr.t == null ? "" : dumpOf(cr.t, ind + 2))
     }
     function dumpKey(k, ind) {
         if (typeof k == "string") { return dumpInd(ind) + "[\"" + k + "\"]=>\n" }
@@ -6129,12 +6223,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function makePos(t) { return function() { return phpArith("*", t(), 1) } }
     makeNot = function(t) { return function() { return !phptest(t()) } }
     function makeBitNot(t) { return function() { return phpBitNot(t()) } }
-    // ~ inverts a string's bytes and an int's bits (a float's int reading); an
-    // array or an object is a TypeError. Twin of js_phbnot in lib/php-rt.metajs
-    // and abnf/jsrtphp.go.
+    // ~ inverts a string's bytes and an int's bits (a float's int reading); any
+    // other operand, null and a bool included, is a TypeError naming it as
+    // zend_zval_value_name does (bitwise_not_function). Twin of js_phbnot in
+    // lib/php-rt.metajs and abnf/jsrtphp.go.
     function phpBitNot(v) {
         if (typeof v == "string") { return phsBitOp("~", v, v) }
-        if (noNum(v)) { phpRaise("TypeError", "Cannot perform bitwise not on " + phpDebugType(v)) }
+        if (v === null || v === undefined || typeof v == "boolean" || noNum(v)) {
+            phpRaise("TypeError", "Cannot perform bitwise not on " + phpValueName(v))
+        }
         return mkInt(i64Not(toLongP(v)))
     }
     function foldPow(items) {

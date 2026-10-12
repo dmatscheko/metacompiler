@@ -2482,6 +2482,79 @@ function s57() {
         && call_user_func('interface_exists', 'Throwable') === true);
 }
 
+// ===== SECTION 58: Traversable, the engine's own classes, ~ of a bool or null, closures dumped =====
+// A class implementing Iterator or IteratorAggregate (or an interface extending
+// one) is a Traversable, a backed enum a UnitEnum and an Exception a Stringable:
+// the engine's own interfaces extend those (zend_interfaces.c, zend_enum.c,
+// zend_exceptions.c). Closure and Generator are classes class_exists() knows and
+// is_a() / is_subclass_of() test by name. ~ of a bool or null is a TypeError
+// naming the value as zend_zval_value_name does (bitwise_not_function). A
+// closure literal takes a handle where it is made, and var_dump shows
+// zend_closure_get_debug_info's record - name "{closure:<scope>:<line>}", file,
+// line, static, this, parameter - which s58dump puts in the transcript, with an
+// object reached again inside its own dump printed as *RECURSION*.
+class S58It implements Iterator {
+    private $i = 0;
+    function current(): mixed { return $this->i; }
+    function key(): mixed { return $this->i; }
+    function next(): void { $this->i++; }
+    function rewind(): void { $this->i = 0; }
+    function valid(): bool { return $this->i < 2; }
+}
+class S58Ag implements IteratorAggregate {
+    function getIterator(): Iterator { return new S58It; }
+}
+interface S58Seq extends Iterator {}
+abstract class S58Sub implements S58Seq {}
+enum S58E: string { case A = "a"; }
+function s58err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s58() {
+    check("trv1", new S58It instanceof Traversable && new S58Ag instanceof \Traversable
+        && is_subclass_of('S58It', 'Traversable') && is_subclass_of(new S58Ag, 'traversable')
+        && is_subclass_of('S58Sub', 'Traversable') && is_a('S58Sub', 'Iterator', true)
+        && !(new S58It instanceof IteratorAggregate));
+    check("trv2", S58E::A instanceof UnitEnum && S58E::A instanceof BackedEnum
+        && new Exception("m") instanceof Stringable && !(new S58It instanceof Stringable));
+    check("cls1", class_exists('Closure') && class_exists('\Generator') && class_exists('closure')
+        && !interface_exists('Closure') && !class_exists('Traversable'));
+    check("cls2", is_a('Generator', 'Traversable', true) && is_subclass_of('Generator', 'Iterator')
+        && !is_subclass_of('Generator', 'Generator') && is_a('Closure', 'Closure', true)
+        && !is_a('Closure', 'Closure') && !is_subclass_of('Closure', 'Iterator')
+        && function() {} instanceof \Closure);
+    $v = [true, false, null];
+    check("bnt1", s58err(fn() => ~$v[0]) === "TypeError: Cannot perform bitwise not on true"
+        && s58err(fn() => ~$v[1]) === "TypeError: Cannot perform bitwise not on false"
+        && s58err(fn() => ~$v[2]) === "TypeError: Cannot perform bitwise not on null");
+    $c = function() {};
+    $o = new stdClass;
+    check("cid1", spl_object_id($c) > 0 && spl_object_id($o) === spl_object_id($c) + 1);
+}
+class S58Box {
+    public $n = 1;
+    function bound() { return function() {}; }
+    function unbound() { return static fn() => 1; }
+}
+function s58inner() { return function() { return fn() => 2; }; }
+class S58Self {
+    public $me;
+    public $cb;
+    function arm() { $this->cb = function() {}; $this->me = $this; return $this; }
+}
+function s58dump() {
+    $k = 5;
+    $m = [1];
+    var_dump(function($a, &$b, $c = 2, ...$rest) use ($k, &$m) {});
+    $m = [2];
+    var_dump(fn($x) => $x + $k);
+    $b = new S58Box;
+    var_dump($b->bound(), $b->unbound());
+    var_dump(s58inner(), s58inner()());
+    // An object reached again inside its own dump is *RECURSION*.
+    var_dump((new S58Self)->arm());
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2545,6 +2618,8 @@ function main() {
     s55(); // SECTION-CALL 55
     s56(); // SECTION-CALL 56
     s57(); // SECTION-CALL 57
+    s58(); // SECTION-CALL 58
+    s58dump(); // SECTION-CALL 58
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

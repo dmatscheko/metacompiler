@@ -182,7 +182,7 @@ CloseAhead  = :script(~~
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(noteFnName(up.in)); fnEnter() ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(noteFnName(up.in)); fnEnter(); cloEnterFn(up.in, false) ~~> ParamList [ ReturnType ] Block ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
@@ -215,7 +215,7 @@ ReturnType  = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ] [ KwImplements ImplNames ] "{" { Member } "}" ;
+            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(cloNoteClass(up.in)) ~~> [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ] [ KwImplements ImplNames ] "{" { Member } "}" ;
 // The implements list of a real class declaration, captured by name (ImplList itself
 // stays item-neutral: interface/trait/enum/anonymous-class all reference it and pop a
 // fixed number of items).
@@ -230,7 +230,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: modifiers and a reference-return '&' are accepted and ignored; an
 // abstract/interface method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = [ AttrGrp ] { Modifier } KwFunction [ "&" ] MethodName <~~ push(noteFnName(up.in)); fnEnter() ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { Modifier } KwFunction [ "&" ] MethodName <~~ push(noteFnName(up.in)); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: 'const A = 1, B = 2;', with PHP 8.3's typed form ('const int
 // SIZE = 4') and any modifier (final/public/...). They are published on the class
 // descriptor under a 'k:' key and resolved by walking __super, so a subclass and an
@@ -279,12 +279,12 @@ KwInsteadof = CiI :whitespace() CiN CiS CiT CiE CiA CiD CiO CiF :whitespace(Whit
 // into every using class - see TraitDecl and UseTrait below.
 TypeDecl    = IfaceDecl | TraitDecl ;
 IfaceDecl   <~~ push(makeIfaceStmt(takeAll())) ~~>
-            = [ AttrGrp ] KwInterface Name <~~ push(up.in) ~~> [ KwExtends ImplNames ] "{" { Member } "}" ;
+            = [ AttrGrp ] KwInterface Name <~~ push(cloNoteClass(up.in)) ~~> [ KwExtends ImplNames ] "{" { Member } "}" ;
 // trait T { ... }: a compile-time bag of members, with no descriptor of its own -
 // PHP traits are a copy/paste unit, not a type - so the declaration emits nothing and
 // only records its member list for the classes that 'use' it.
 TraitDecl   <~~ push(makeTraitDecl(takeAll())) ~~>
-            = [ AttrGrp ] KwTrait Name <~~ push(up.in) ~~> "{" { Member } "}" ;
+            = [ AttrGrp ] KwTrait Name <~~ push(cloNoteClass(up.in)) ~~> "{" { Member } "}" ;
 // namespace N; and the BRACED form namespace N { ... } (and the global 'namespace {}').
 // Names are not qualified in this subset, so the declaration itself stays a no-op -
 // but the braced body is a top level of its own and its items are simply emitted in
@@ -310,7 +310,7 @@ UsePath     = [ "\\" ] Id { "\\" Id } [ KwAs Id ] ;
 // makes an enum usable as a match arm) and the methods, constants and interfaces are
 // the ordinary class machinery. cases() answers them in declaration order.
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = [ AttrGrp ] KwEnum Name <~~ push(up.in) ~~> [ ":" TypeAtom ] [ KwImplements ImplNames ]
+            = [ AttrGrp ] KwEnum Name <~~ push(cloNoteClass(up.in)) ~~> [ ":" TypeAtom ] [ KwImplements ImplNames ]
               "{" { EnumMember } "}" ;
 EnumMember  = EnumCase | Member ;
 EnumCase    <~~ push(makeEnumCase(takeAll())) ~~>
@@ -1184,7 +1184,7 @@ NewName     <~~ push({cls: lastSeg(stripWs(up.in))}) ~~> = QName ;
 // generated name, and the instantiation follows it.
 // 'new #[A1(7)] class () { }' attaches an attribute group to the anonymous class.
 NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
-            = KwNew [ AttrGrp ] KwClass <~~ push({anonAt: up.pos}) ~~> [ "(" [ ArgList ] ")" ] [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ]
+            = KwNew [ AttrGrp ] KwClass <~~ push({anonAt: cloNoteAnon(up.pos)}) ~~> [ "(" [ ArgList ] ")" ] [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ]
               [ KwImplements ImplNames ] "{" { Member } "}" ;
 
 // fn (params) => expr : an arrow function. It is a closure whose body is a single
@@ -1194,7 +1194,7 @@ NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
 // 'return expr' body. The body must be marked: ParamList pushes {param} records and
 // the body pushes a bare thunk, and makeArrowFn has to tell them apart.
 ArrowFn     <~~ push(makeArrowFn(takeAll())) ~~>
-            = [ AttrGrp ] [ "static" KwEnd ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
+            = [ AttrGrp ] [ CloStatic ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
 ArrowBody   <~~ push({arrowbody: pop()}) ~~>
             = Expression ;
 // match (subject) { c1, c2 => e, default => e } : PHP 8's match EXPRESSION. Each arm
@@ -1241,7 +1241,9 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
-            = [ AttrGrp ] [ "static" KwEnd ] KwFunction <~~ fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+            = [ AttrGrp ] [ CloStatic ] KwFunction <~~ cloEnter(up.pos); fnEnter() ~~> [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
+// A static closure (or arrow function) binds no $this (cloEnter).
+CloStatic   <~~ cloStatic = true ~~> = "static" KwEnd ;
 UseClause   = KwUse "(" [ UseVar { "," UseVar } ] [ "," ] ")" ;
 // 'use ($x)' captures by VALUE - a snapshot taken where the closure is created, so a
 // later write to $x outside is not visible inside. 'use (&$x)' captures by REFERENCE,
@@ -1569,7 +1571,7 @@ KwDeclare   = CiD :whitespace() CiE CiC CiL CiA CiR CiE :whitespace(Whitespace) 
 KwMatch     = CiM :whitespace() CiA CiT CiC CiH :whitespace(Whitespace) KwEnd ;
 // The tag fires BEFORE the parameter and body tags (they are further right in the
 // sequence), so it records where this arrow function's variable references start.
-KwFn        <~~ push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
+KwFn        <~~ cloEnter(up.pos); push({vmark: varMark()}) ~~> = CiF :whitespace() CiN :whitespace(Whitespace) KwEnd ;
 KwClone     = CiC :whitespace() CiL CiO CiN CiE :whitespace(Whitespace) KwEnd ;
 KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace(Whitespace) KwEnd ;
 
@@ -4535,28 +4537,69 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
 
     // ----- closures (IR function closed over the defining scope via js_closure) -----
+    // A closure is named for where it is written (zend_begin_func_decl):
+    // "{closure:<scope>:<line>}", the scope being the enclosing function "f()",
+    // method "C::m()" or closure (its own name), or the file at the top level.
+    // cloScopes holds one {name, self, line} per function being walked, self
+    // telling whether a $this can be bound there: in a method, or in a closure that
+    // is not static inside one. The line is that of the function / fn keyword.
+    // Twin of the same walk in php-interpreter.abnf.
+    var cloScopes = []
+    var cloClass = ""
+    var cloStatic = false
+    function cloNoteClass(n) { cloClass = stripWs(n); return n }
+    function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
+    function cloEnterFn(n, method) {
+        cloScopes.push({name: (method ? cloClass + "::" : "") + stripWs(n) + "()", self: method})
+    }
+    function cloEnter(pos) {
+        var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
+        var line = "" + c.lineOf(pos)
+        cloScopes.push({name: "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}",
+                        self: top != null && top.self && !cloStatic, line: line})
+        cloStatic = false
+    }
+    function cloLeave() { return cloScopes.pop() }
+    // The debug record (phsCloDesc) of the closure cloLeave answered sc for: its
+    // static variables, then its parameter list.
+    function cloDesc(sc, statics, pl) {
+        var pr = []
+        var po = []
+        for (var i = 0; i < pl.params.length; i++) {
+            var opt = i == pl.rest
+            for (var j = 0; j < pl.defs.length; j++) { if (pl.defs[j].name == pl.params[i]) { opt = true } }
+            var ref = false
+            for (var k = 0; k < pl.byref.length; k++) { if (pl.byref[k] == i) { ref = true } }
+            pr.push(ref)
+            po.push(opt)
+        }
+        return phsCloDesc(sc.name, c.file, sc.line, statics, pl.params, pr, po)
+    }
     function makeClosure(items) {
         fnLeave()
+        var sc = cloLeave()
         var pl = paramList(items)
         var body = null
         var byVal = []
         var byRef = []
         var pendingUseRef = false
+        var uses = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].useref != undefined) { pendingUseRef = true; noteRef() }
             else if (items[i].use != undefined) {
                 if (pendingUseRef) { byRef.push(items[i].use) }
                 else { byVal.push(items[i].use) }
+                uses.push(items[i].use)
                 pendingUseRef = false
             }
         }
+        var desc = cloDesc(sc, uses, pl)
         body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal.concat(byRef), body)))
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, byVal, byRef)
-            // A Closure is an object to PHP and takes a handle (js_phoid).
-            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withSig(rc.b, closureV(rc.b, idx, rc.v), pl)])}
+            return {b: rc.b, v: withClosureRec(rc.b, closureV(rc.b, idx, rc.v), pl, desc, rc.v, sc.self)}
         }
     }
 
@@ -4578,10 +4621,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // resolves through the defining scope, as in every closure.
         var captured = varsSince(mark, pl.params.concat(["$this"]))
         var body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, makeBody([makeReturn([bodyT])]))))
+        var sc = cloLeave()
+        var desc = cloDesc(sc, captured, pl)
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, captured, [])
-            return {b: rc.b, v: callExt(rc.b, "js_phoid", [withSig(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl)])}
+            return {b: rc.b, v: withClosureRec(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl, desc, rc.v, sc.self)}
         }
     }
 
@@ -5895,6 +5940,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function variadicPrologue(pl, body) { return body }
     function makeFun(items) {
         fnLeave()
+        cloLeave()
         var name = items[0]
         var pl = paramList(items.slice(1))
         var params = pl.params
@@ -5994,11 +6040,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // arguments and a variadic tail by. The list is recorded only when the program
     // has a call that needs it (dynPlaceNamed / dynPlaceVariadic below).
     function withSig(b, fn, pl) {
-        var mask = 0
-        for (var i = 0; i < pl.byref.length; i++) { mask = mask + Math.pow(2, pl.byref[i]) }
-        var sig = (dynPlaceNamed || dynPlaceVariadic) ? sigText(pl.params, pl.rest) : ""
+        var mask = refMask(pl)
+        var sig = plSig(pl)
         if (mask == 0 && sig == "") { return fn }
         return callExt(b, "js_jsfnmeta", [fn, emitStr(b, sig), emitNum(b, mask)])
+    }
+    function refMask(pl) {
+        var mask = 0
+        for (var i = 0; i < pl.byref.length; i++) { mask = mask + Math.pow(2, pl.byref[i]) }
+        return mask
+    }
+    function plSig(pl) { return (dynPlaceNamed || dynPlaceVariadic) ? sigText(pl.params, pl.rest) : "" }
+    // A closure literal keeps its record (js_phclo: the debug record desc, the
+    // signature withSig would record, the scope its captures live in and the bound
+    // $this) in the name half of its meta slot, which also takes it a handle. The
+    // C floor's slot holds any handle; layer 2 and the Go twin read the signature
+    // back out of the record.
+    function withClosureRec(b, fn, pl, desc, envV, self) {
+        var thisV = self ? phThis(b) : hUndef
+        var rec = callExt(b, "js_phclo", [emitStr(b, desc), emitStr(b, plSig(pl)), envV, thisV])
+        return callExt(b, "js_jsfnmeta", [fn, rec, emitNum(b, refMask(pl))])
     }
     // A named function is GLOBAL wherever its declaration stands: one written inside
     // a function body is declared in the main frame when control reaches it, and

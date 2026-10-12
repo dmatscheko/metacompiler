@@ -690,6 +690,9 @@ var jsvFnProps = map[interface{}]*jsObject{}
 type jsvFnInfo struct {
 	name   string
 	length int
+	// rec is an object js_jsfnmeta was handed in place of a name, as the C floor's
+	// name slot holds any handle (php's closure record, js_phclo).
+	rec *jsObject
 }
 
 // jsvFnMeta answers ""/0 for a function that was never named and for a non-function.
@@ -705,6 +708,16 @@ func jsvFnMeta(v interface{}) jsvFnInfo {
 		}
 	}
 	return jsvFnInfo{}
+}
+
+// jsvFnRecSet puts rec in the meta jsvFnMetaSet just recorded on v.
+func jsvFnRecSet(v interface{}, rec *jsObject) {
+	switch f := v.(type) {
+	case *jsClosure:
+		f.meta.rec = rec
+	case *hostFunc:
+		f.meta.rec = rec
+	}
 }
 
 // jsvFnMetaSet records the pair on a function value; any other value is ignored.
@@ -3248,7 +3261,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// pattern exactly. A repeat for the same value overwrites.
 	m["js_jsfnmeta"] = func(a []uint64) uint64 {
 		if v := u(a[0]); jsvIsFnLike(v) {
-			jsvFnMetaSet(v, rt.toString(u(a[1])), int(rt.toNumber(u(a[2]))))
+			if rec, ok := u(a[1]).(*jsObject); ok {
+				jsvFnMetaSet(v, "", int(rt.toNumber(u(a[2]))))
+				jsvFnRecSet(v, rec)
+			} else {
+				jsvFnMetaSet(v, rt.toString(u(a[1])), int(rt.toNumber(u(a[2]))))
+			}
 		}
 		return a[0]
 	}

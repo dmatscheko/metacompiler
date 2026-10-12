@@ -2172,8 +2172,8 @@ function __mec_jhex4($s, $i, $n) {
 }
 
 // ----- objects ---------------------------------------------------------------
-// An object's handle, var_dump's #id. A Closure takes a handle but does not keep
-// it here, and answers 0.
+// An object's handle, var_dump's #id; a closure literal keeps its handle too, and
+// any other Closure answers 0.
 function spl_object_id($object) {
     if (!is_object($object)) {
         throw new TypeError("spl_object_id(): Argument #1 (\$object) must be of type object, " . __mec_vname($object) . " given");

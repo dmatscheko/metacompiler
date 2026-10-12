@@ -375,6 +375,36 @@ function phsCoreIface(n) {
         k == "unitenum" || k == "backedenum" || k == "jsonserializable"
 }
 
+// Does the engine's own interface iface extend the interface name (both any
+// letter case, a leading "\" allowed)? Iterator and IteratorAggregate extend
+// Traversable, BackedEnum extends UnitEnum and Throwable extends Stringable
+// (zend_interfaces.c, zend_enum.c, zend_exceptions.c).
+function phsCoreIfaceExtends(iface, name) {
+    var q = phsCase(name.charCodeAt(0) == 92 ? name.substring(1) : name, false)
+    if (q != "traversable" && q != "unitenum" && q != "stringable") { return false }
+    var p = phsCase(iface.charCodeAt(0) == 92 ? iface.substring(1) : iface, false)
+    if (q == "traversable") { return p == "iterator" || p == "iteratoraggregate" }
+    if (q == "unitenum") { return p == "backedenum" }
+    return p == "throwable"
+}
+
+// The engine's own final classes whose instances carry no descriptor: is the
+// class cls ("closure" or "generator") the class name, or an implementor of it?
+// A Generator implements Iterator, and so Traversable.
+function phsCoreClassIs(cls, name) {
+    var q = phsCase(name.charCodeAt(0) == 92 ? name.substring(1) : name, false)
+    if (q == cls) { return true }
+    return cls == "generator" && (q == "iterator" || q == "traversable")
+}
+
+// Is the class name n one of those classes, which class_exists reports though no
+// program declares them? Answers its lower-case name, or "".
+function phsCoreClass(n) {
+    var k = phsCase(n.charCodeAt(0) == 92 ? n.substring(1) : n, false)
+    if (k == "closure" || k == "generator") { return k }
+    return ""
+}
+
 // a & b, a | b, a ^ b of two strings, byte by byte: '|' runs to the longer
 // string and keeps its tail, '&' and '^' stop at the shorter. ~s is
 // phsBitOp("~", s, s): every byte inverted.
@@ -512,4 +542,95 @@ function phsFmtFloat(a, conv, prec, exact, round) {
     if (prec > 0) { m = m + "." + d.substring(1, d.length) }
     if (e10 < 0) { return m + "e-" + (0 - e10) }
     return m + "e+" + e10
+}
+
+// A closure literal's debug record (zend_closure_get_debug_info), fixed where the
+// closure is written: its name, file and line, the names of its static variables
+// (the use list, or an arrow function's captures, in order, with "$"), its
+// parameters as var_dump keys ("$a", "&$b") and how many of them are required
+// (up to the last one with no default that is not variadic). One string, the
+// fields separated by newlines and the lists by commas.
+function phsCloDesc(name, file, line, statics, pnames, pref, popt) {
+    var nreq = 0
+    var ps = ""
+    var i = 0
+    while (i < pnames.length) {
+        if (!popt[i]) { nreq = i + 1 }
+        ps = ps + (i > 0 ? "," : "") + (pref[i] ? "&" : "") + pnames[i]
+        i = i + 1
+    }
+    var ss = ""
+    var j = 0
+    while (j < statics.length) {
+        ss = ss + (j > 0 ? "," : "") + statics[j]
+        j = j + 1
+    }
+    return name + "\n" + file + "\n" + line + "\n" + ss + "\n" + ps + "\n" + nreq
+}
+
+// s cut at every unit sep; "" is no fields at all.
+function phsCloSplit(s, sep) {
+    var out = []
+    if (s == "") { return out }
+    var from = 0
+    var i = 0
+    while (i <= s.length) {
+        if (i == s.length || s.charCodeAt(i) == sep) {
+            out.push(s.substring(from, i))
+            from = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The static variable names of record d, with "$".
+function phsCloStatics(d) { return phsCloSplit(phsCloSplit(d, 10)[3], 44) }
+
+// var_dump of a closure literal at indent ind: record d, handle id, the dumps of
+// its static variables' values (at ind + 4) and of its bound $this (at ind + 2;
+// "" for none), in zend_closure_get_debug_info's order: name, file, line,
+// static, this, parameter.
+function phsCloDump(d, id, ind, statDumps, thisDump) {
+    var f = phsCloSplit(d, 10)
+    var st = phsCloSplit(f[3], 44)
+    var ps = phsCloSplit(f[4], 44)
+    var nreq = 0
+    var k = 0
+    while (k < f[5].length) {
+        nreq = nreq * 10 + f[5].charCodeAt(k) - 48
+        k = k + 1
+    }
+    var pad = ""
+    while (pad.length < ind) { pad = pad + " " }
+    var p2 = pad + "  "
+    var p4 = p2 + "  "
+    var n = 3
+    if (st.length > 0) { n = n + 1 }
+    if (thisDump != "") { n = n + 1 }
+    if (ps.length > 0) { n = n + 1 }
+    var out = pad + "object(Closure)#" + id + " (" + n + ") {\n"
+    out = out + p2 + "[\"name\"]=>\n" + p2 + "string(" + phsLen(f[0]) + ") \"" + f[0] + "\"\n"
+    out = out + p2 + "[\"file\"]=>\n" + p2 + "string(" + phsLen(f[1]) + ") \"" + f[1] + "\"\n"
+    out = out + p2 + "[\"line\"]=>\n" + p2 + "int(" + f[2] + ")\n"
+    if (st.length > 0) {
+        out = out + p2 + "[\"static\"]=>\n" + p2 + "array(" + st.length + ") {\n"
+        var i = 0
+        while (i < st.length) {
+            out = out + p4 + "[\"" + st[i].substring(1) + "\"]=>\n" + statDumps[i]
+            i = i + 1
+        }
+        out = out + p2 + "}\n"
+    }
+    if (thisDump != "") { out = out + p2 + "[\"this\"]=>\n" + thisDump }
+    if (ps.length > 0) {
+        out = out + p2 + "[\"parameter\"]=>\n" + p2 + "array(" + ps.length + ") {\n"
+        var j = 0
+        while (j < ps.length) {
+            out = out + p4 + "[\"" + ps[j] + "\"]=>\n" + p4 + "string(10) \"" + (j < nreq ? "<required>" : "<optional>") + "\"\n"
+            j = j + 1
+        }
+        out = out + p2 + "}\n"
+    }
+    return out + pad + "}\n"
 }

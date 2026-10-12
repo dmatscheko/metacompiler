@@ -1963,11 +1963,11 @@ func (rt *jsrt) phpIsA(v interface{}, name string) bool {
 	// it carries no descriptor to walk - the name is answered directly, which also
 	// gives the compiler a safe "is this a generator" probe for foreach.
 	if _, isGen := v.(*jsGenerator); isGen {
-		return phpSameName(name, "Generator") || phpSameName(name, "Traversable") || phpSameName(name, "Iterator")
+		return phpCoreClassIs("generator", name)
 	}
-	// A closure is an instance of PHP's final class Closure, and of nothing else.
+	// A closure is an instance of PHP's final class Closure.
 	if isCallable(v) {
-		return phpSameName(name, "Closure")
+		return phpCoreClassIs("closure", name)
 	}
 	o, ok := v.(*jsObject)
 	if !ok {
@@ -1993,7 +1993,7 @@ func (rt *jsrt) phpIsA(v interface{}, name string) bool {
 						if rt.phpIsA(io, name) {
 							return true
 						}
-					} else if phpSameName(rt.phpStr(iv), name) {
+					} else if in := rt.phpStr(iv); phpSameName(in, name) || phpCoreIfaceExtends(in, name) {
 						return true
 					}
 				}
@@ -2056,7 +2056,8 @@ func phpIsHole(v interface{}) bool {
 
 // phpHandles counts the object handles a run has handed out: every object takes
 // the next one when it is made (js_phoid), stored in its hidden __oid slot, and
-// that is var_dump's #id. A closure takes one too, uncounted on any object. PHP
+// that is var_dump's #id. A closure literal takes one too, kept in its record
+// (js_phclo). PHP
 // also hands a freed handle to the next object, which this model, without
 // refcounts, cannot see. Twin of objHandles in php-interpreter.abnf.
 var phpHandles = map[*jsrt]int{}
@@ -2202,6 +2203,26 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 		}
 		return out + pad + "}\n"
 	}
+	if phpIsObj(v) || jsvFnMeta(v).rec != nil {
+		for _, d := range phpDumping[rt] {
+			if d == v {
+				return pad + "*RECURSION*\n"
+			}
+		}
+		phpDumping[rt] = append(phpDumping[rt], v)
+		out := rt.phpDumpObj(v, ind, pad)
+		phpDumping[rt] = phpDumping[rt][:len(phpDumping[rt])-1]
+		return out
+	}
+	return pad + "NULL\n"
+}
+
+// phpDumping holds the objects (and closures) var_dump is inside of: one reached
+// again prints *RECURSION* (php_var_dump's Z_IS_RECURSIVE). Twin of dumping in
+// php-interpreter.abnf and phDumping in lib/php-rt.metajs.
+var phpDumping = map[*jsrt][]interface{}{}
+
+func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
 	if phpIsObj(v) {
 		o := v.(*jsObject)
 		names := []string{}
@@ -2227,7 +2248,35 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 		}
 		return out + pad + "}\n"
 	}
-	return pad + "NULL\n"
+	rec := jsvFnMeta(v).rec
+	d := rt.phpStr(rec.props["d"])
+	env, _ := rec.props["e"].(*jsScope)
+	var sd []string
+	for _, n := range phpCloStatics(d) {
+		var sv interface{} = jsNull
+		if env != nil {
+			if x, ok := env.get(n); ok {
+				sv = x
+			}
+		}
+		sd = append(sd, rt.phpDump(phpDeref(sv), ind+4))
+	}
+	this := ""
+	if t := rec.props["t"]; t != jsUndef && t != jsNull && t != nil {
+		this = rt.phpDump(t, ind+2)
+	}
+	return phpCloDump(d, int(rec.props["i"].(float64)), ind, sd, this)
+}
+
+// phpSigOf is the parameter list a function value's meta records (withSig in
+// php-to-llvm-ir.abnf), which a closure literal keeps in its record (js_phclo).
+// Twin of phSigOf in lib/php-rt.metajs.
+func (rt *jsrt) phpSigOf(f interface{}) string {
+	mi := jsvFnMeta(f)
+	if mi.rec != nil {
+		return rt.phpStr(mi.rec.props["s"])
+	}
+	return mi.name
 }
 
 // phpPropKey is the key property name is stored under on an object: one
@@ -2440,7 +2489,7 @@ func init() {
 			if _, isObj := f.(*jsObject); isObj {
 				f = rt.phpMethodOf(f, "__invoke")
 			}
-			return w(rt.phpPlaceArgs(jsvFnMeta(f).name, u(a[1])))
+			return w(rt.phpPlaceArgs(rt.phpSigOf(f), u(a[1])))
 		}
 		// A non-string callee: true for an array callback (which must have two
 		// elements), false for a value the call runs as it is (a closure, an object
@@ -2580,8 +2629,7 @@ func init() {
 		// js_phbindsig in languages/lib/php-rt.metajs.
 		m["js_phbindsig"] = func(a []uint64) uint64 {
 			if meth := rt.phpMethodOf(u(a[1]), u(a[2])); meth != nil {
-				mi := jsvFnMeta(meth)
-				jsvFnMetaSet(u(a[0]), mi.name, mi.length)
+				jsvFnMetaSet(u(a[0]), rt.phpSigOf(meth), jsvFnMeta(meth).length)
 			}
 			return a[0]
 		}
@@ -2589,7 +2637,7 @@ func init() {
 		// a call site that cannot know which class's method it reaches. Twin of
 		// js_phmplace in languages/lib/php-rt.metajs.
 		m["js_phmplace"] = func(a []uint64) uint64 {
-			return w(rt.phpPlaceArgs(jsvFnMeta(rt.phpMethodOf(u(a[0]), u(a[1]))).name, u(a[2])))
+			return w(rt.phpPlaceArgs(rt.phpSigOf(rt.phpMethodOf(u(a[0]), u(a[1]))), u(a[2])))
 		}
 		// (name, self, static) -> the class a run-time class name the scope did not
 		// declare denotes: self / static / parent through the frame's classes (null
@@ -2640,15 +2688,16 @@ func init() {
 		// The four that REPLACE a jsrt.go entry: each is exact 64 bit where the
 		// shared one is 32 bit or double based.
 		m["js_phneg"] = func(a []uint64) uint64 { return w(rt.phpNeg(u(a[0]))) }
-		// ~: a string's bytes or an int's bits; an array or an object is a
-		// TypeError. Twin of phpBitNot in php-interpreter.abnf.
+		// ~: a string's bytes or an int's bits; any other operand, null and a
+		// bool included, is a TypeError. Twin of phpBitNot in php-interpreter.abnf.
 		m["js_phbnot"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if s, ok := v.(string); ok {
 				return w(phpBitOp("~", s, s))
 			}
-			if phpNoNum(v) {
-				rt.phpRaise("TypeError", "Cannot perform bitwise not on "+rt.phpDebugType(v))
+			_, isBool := v.(bool)
+			if v == jsUndef || v == jsNull || isBool || phpNoNum(v) {
+				rt.phpRaise("TypeError", "Cannot perform bitwise not on "+rt.phpValueName(v))
 			}
 			return w(phpMkInt(^rt.phpToLong(v)))
 		}
@@ -2850,7 +2899,10 @@ func init() {
 		m["js_phclsexists"] = func(a []uint64) uint64 {
 			o, _ := u(a[0]).(*jsObject)
 			if o == nil || o.props["__isclass"] != true {
-				return boolH(rt.phpTest(u(a[2])) && phpCoreIface(rt.phpStr(u(a[1]))))
+				if rt.phpTest(u(a[2])) {
+					return boolH(phpCoreIface(rt.phpStr(u(a[1]))))
+				}
+				return boolH(phpCoreClass(rt.phpStr(u(a[1]))) != "")
 			}
 			if rt.phpTest(u(a[2])) {
 				return boolH(o.props["__isiface"] == true)
@@ -2866,8 +2918,15 @@ func init() {
 			own := rt.phpDebugType(v)
 			if _, isStr := v.(string); isStr {
 				cls, ok := u(a[1]).(*jsObject)
-				if !rt.phpTest(u(a[3])) || !ok {
+				if !rt.phpTest(u(a[3])) {
 					return jsHFalse
+				}
+				if !ok {
+					core := phpCoreClass(v.(string))
+					if core == "" || (rt.phpTest(u(a[4])) && phpCoreClass(name) == core) {
+						return jsHFalse
+					}
+					return boolH(phpCoreClassIs(core, name))
 				}
 				v, own = cls, rt.phpStr(cls.props["__name"])
 			}

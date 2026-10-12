@@ -1443,14 +1443,11 @@ function phConstIn(cls, name, shown, depth) {
 // phIsA is the runtime type test behind instanceof and a typed catch: a name
 // matches the class itself, any base class, and any implemented interface.
 function phIsA(v, name) {
-    if (phIsGen(v)) {
-        var gn = phsCase(name, false)
-        return gn == "generator" || gn == "traversable" || gn == "iterator"
-    }
+    if (phIsGen(v)) { return phsCoreClassIs("generator", name) }
     if (v === undefined) { return false }
     if (v === null) { return false }
-    // A closure is an instance of PHP's final class Closure, and of nothing else.
-    if (typeof v == "function") { return name.length == 7 && phsCase(name, false) == "closure" }
+    // A closure is an instance of PHP's final class Closure.
+    if (typeof v == "function") { return phsCoreClassIs("closure", name) }
     if (typeof v != "object") { return false }
     var cls = anytype
     if (v["__isclass"] !== undefined) { cls = v } else { cls = v["__class"] }
@@ -1477,6 +1474,7 @@ function phIsA(v, name) {
                     } else {
                         var inm = phStr(iv)
                         if (inm == name || (inm.length == name.length && phsCase(inm, false) == phsCase(name, false))) { return true }
+                        if (phsCoreIfaceExtends(inm, name)) { return true }
                     }
                     i = i + 1
                 }
@@ -1567,10 +1565,30 @@ function js_phoid(v) {
     return v
 }
 
-// An object's handle; a Closure keeps none and answers 0. Twin of __mec_oid in
+// The record of a closure literal being made, which takes the next handle: its
+// debug record (phsCloDesc), the signature js_phplace reads, the scope its
+// captures live in and its bound $this. The emitter stores it in the closure's
+// meta (js_jsfnmeta). Twin of js_phclo in abnf/jsrtphpstr.go and closureBody in
 // php-interpreter.abnf.
+function js_phclo(d, s, e, t) {
+    phStamp(undefined)
+    return {d: d, s: s, e: e, t: t, i: phHandles}
+}
+// A closure literal's record, or undefined.
+function phCloRec(v) {
+    if (typeof v != "function") { return undefined }
+    var r = anytype
+    r = fnMeta(v, "name")
+    if (typeof r == "object" && r !== null) { return r }
+    return undefined
+}
+
+// An object's handle, or a closure literal's; any other Closure keeps none and
+// answers 0. Twin of __mec_oid in php-interpreter.abnf.
 function js_phoidof(v) {
     if (phIsObj(v)) { return phDumpID(v) }
+    var r = phCloRec(v)
+    if (r !== undefined) { return r["i"] }
     return 0
 }
 
@@ -1606,6 +1624,26 @@ function phDump(v, ind) {
         }
         return out + pad + "}\n"
     }
+    if (phIsObj(v) || phCloRec(v) !== undefined) {
+        var di = 0
+        while (di < phDumping.length) {
+            if (phDumping[di] === v) { return pad + "*RECURSION*\n" }
+            di = di + 1
+        }
+        phDumping.push(v)
+        var dv = phDumpObj(v, ind, pad)
+        phDumping.pop()
+        return dv
+    }
+    return pad + "NULL\n"
+}
+
+// The objects (and closures) var_dump is inside of: one reached again prints
+// *RECURSION* (php_var_dump's Z_IS_RECURSIVE). Twin of dumping in
+// php-interpreter.abnf and phpDumping in abnf/jsrtphp.go.
+var phDumping = []
+
+function phDumpObj(v, ind, pad) {
     if (phIsObj(v)) {
         // keysOf answers an object's OWN keys in INSERTION order, already skipping
         // the internal __-prefixed slots - phpHiddenProp's rule in the Go twin - so
@@ -1627,7 +1665,17 @@ function phDump(v, ind) {
         }
         return oout + pad + "}\n"
     }
-    return pad + "NULL\n"
+    var cr = phCloRec(v)
+    var sn = phsCloStatics(cr["d"])
+    var sd = []
+    var k = 0
+    while (k < sn.length) {
+        sd.push(phDump(phDeref(scopeGet(cr["e"], sn[k])), ind + 4))
+        k = k + 1
+    }
+    var th = ""
+    if (!rtIsNil(cr["t"])) { th = phDump(cr["t"], ind + 2) }
+    return phsCloDump(cr["d"], phStr(cr["i"]), ind, sd, th)
 }
 
 // The key a property name is stored under on an object: one starting "__"
@@ -2187,12 +2235,14 @@ function js_phbor(l, r) { return phBit("|", l, r) }
 function js_phbxor(l, r) { return phBit("^", l, r) }
 function js_phshl(l, r) { return phBit("<<", l, r) }
 function js_phshr(l, r) { return phBit(">>", l, r) }
-// ~ inverts a string's bytes and an int's bits (a float's int reading); an
-// array or an object is a TypeError. Twin of phpBitNot in php-interpreter.abnf
-// and js_phbnot in abnf/jsrtphp.go.
+// ~ inverts a string's bytes and an int's bits (a float's int reading); any
+// other operand, null and a bool included, is a TypeError. Twin of phpBitNot in
+// php-interpreter.abnf and js_phbnot in abnf/jsrtphp.go.
 function js_phbnot(v) {
     if (typeof v == "string") { return phsBitOp("~", v, v) }
-    if (phNoNum(v)) { phRaise("TypeError", "Cannot perform bitwise not on " + phDebugType(v)) }
+    if (rtIsNil(v) || typeof v == "boolean" || phNoNum(v)) {
+        phRaise("TypeError", "Cannot perform bitwise not on " + phValueName(v))
+    }
     return sintOp(7, phToLong(v), 0 - 1)
 }
 
@@ -2339,7 +2389,10 @@ function js_phdump(v) { return phDump(v, 0) }
 // class_exists / interface_exists over the descriptor the name n was looked up
 // to (null when none). Twin of phpClassExists in languages/php-interpreter.abnf.
 function js_phclsexists(v, n, iface) {
-    if (v === undefined || v === null || typeof v != "object") { return phTest(iface) && phsCoreIface(phStr(n)) }
+    if (v === undefined || v === null || typeof v != "object") {
+        if (phTest(iface)) { return phsCoreIface(phStr(n)) }
+        return phsCoreClass(phStr(n)) != ""
+    }
     if (v["__isclass"] !== true) { return false }
     if (phTest(iface)) { return v["__isiface"] === true }
     return v["__isiface"] !== true && v["__istrait"] !== true
@@ -2366,7 +2419,11 @@ function js_phisaof(v, found, cls, allow, onlySub) {
     var own = ""
     if (typeof v == "string") {
         if (!phTest(allow)) { return false }
-        if (found === undefined || found === null || typeof found != "object") { return false }
+        if (found === undefined || found === null || typeof found != "object") {
+            var core = phsCoreClass(v)
+            if (core == "" || (phTest(onlySub) && phsCoreClass(name) == core)) { return false }
+            return phsCoreClassIs(core, name)
+        }
         inst = found
         own = phStr(found["__name"])
     } else { own = phDebugType(v) }
@@ -2452,11 +2509,17 @@ function js_phrefat(f, i) { return Math.floor(fnMeta(f, "length") / Math.pow(2, 
 // the rule.
 // An object called as a function places its arguments for its __invoke.
 function js_phplace(f, args) {
+    if (typeof f == "object" && f !== null) { return js_phplacesig(phSigOf(phMethodOf(f, "__invoke")), args) }
+    return js_phplacesig(phSigOf(f), args)
+}
+// The parameter list a function value's meta records, which a closure literal
+// keeps in its record (js_phclo). Twin of phpSigOf in abnf/jsrtphp.go.
+function phSigOf(f) {
     var sig = anytype
-    if (typeof f == "object" && f !== null) { sig = fnMeta(phMethodOf(f, "__invoke"), "name") }
-    else { sig = fnMeta(f, "name") }
-    if (typeof sig != "string") { sig = "" }
-    return js_phplacesig(sig, args)
+    sig = fnMeta(f, "name")
+    if (typeof sig == "string") { return sig }
+    if (typeof sig == "object" && sig !== null) { return sig["s"] }
+    return ""
 }
 // A non-string callee: true for an array callback (which must have two elements),
 // false for a value the call runs as it is (a closure, an object with __invoke),
@@ -2499,7 +2562,7 @@ function js_phcbarr(v, where) {
 // static method). Twin of js_phbindsig in abnf/jsrtphp.go.
 function js_phbindsig(clo, target, name) {
     var mm = phMethodOf(target, name)
-    if (typeof mm == "function") { fnMetaSet(clo, fnMeta(mm, "name"), fnMeta(mm, "length")) }
+    if (typeof mm == "function") { fnMetaSet(clo, phSigOf(mm), fnMeta(mm, "length")) }
     return clo
 }
 // args placed for the method `name` of target, for a call site that cannot know
