@@ -148,12 +148,6 @@ missing in both engines. Not modelled (note only): deprecation output, typed-ref
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-461 core: compiled MetaJS array callbacks diverge from the interpreter · P2 · CORE · IN PROGRESS (CORE worker, round 23) [V]
-`var fs=[]; for (...) fs.push(function(){...}); fs.map(function(h){ return h(); })` works in the MetaJS interpreter but
-the compiled halves (llvm.Run and native) fail "call of a non function value: undefined" (same on main before T-451).
-Find which Array method / callback form the compiled MetaJS runtime lacks and close the gap (or make the interpreter
-reject it too, per the MetaJS dialect spec).
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -505,6 +499,7 @@ T-451 core: MetaJS compiler SSA locals, cached global reads (js_scope_cget), js_
 T-454 php: method visibility (all call forms, callbacks, ctor, traits), typed-property coercion/TypeError incl. strict_types, typed statics uninitialised, per-class private slots — DONE b0aab707
 T-455 python: replayed generators log one-shot pulls, user __next__/__iter__ laziness (next(), for, yield from), descriptor method calls (compiled), surrogate repr (Go twin), __doc__ — DONE 2785aca2
 T-456 java: instanceof on boxes (java-specific test), wrapper members, array clone, java.util.stream (Stream/IntStream/Collectors/Optional), HashMap in java's order, qualified type names — DONE c6905a87
+T-461 core: the goja-hosted MetaJS interpreter leaked JavaScript prototype members (array map/forEach, function bind, ...); it now answers only the floor's members, like -frozen, llvm.Run and native — DONE f04d906f
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
