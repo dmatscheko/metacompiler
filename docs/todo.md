@@ -114,7 +114,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-462 php: callbacks and dynamic calls of non-static methods; compiled __call reach; static closures; Closure methods · P2 · PHP · OPEN [V]
+### T-462 php: callbacks and dynamic calls of non-static methods; compiled __call reach; static closures; Closure methods · P2 · PHP · IN PROGRESS (PHP worker, round 32) [V]
 php-src semantics, both engines unless noted: (a) a callback naming a non-static method through its class from a
 compatible instance (`call_user_func(['A','foo'])`, `array_map(['B','twice'],…)` inside a B instance) runs without $this
 (PHP binds the frame's $this: "foo:B"). (b) `['C','m']()` / `'C::m'()` of a non-static method should always be an Error
