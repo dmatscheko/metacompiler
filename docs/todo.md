@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-465** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-517** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,6 +72,112 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
+### T-478 js: a `let`/`const` in a loop head is one shared binding, not one per iteration · P1 · JS · OPEN [V]
+`var f1=[]; for (let i=0;i<3;i++) f1.push(()=>i)` → all legs `3,3,3`, node `0,1,2`. Same for `for (let x of src)` (`9,9,9`
+vs `7,8,9`), `for (let k in {a:1,b:2})` (`b,b` vs `a,b`), `for (const x of src)`, `for (let x of src) { ... }` with a block
+body, `for (let [a,b] of [[1,2],[3,4]])` (`7,7` vs `3,7`). A `let` inside the body and `while`+`let` are right. Interp
+also: `for (let i=0, get=()=>i; i<2; i++) fs.push(get)` gives `2,2`, node `0,0` (the head closure sees the FIRST copy). No
+test uses `for (let`. Files: for / for-of / for-in lowering in js-interpreter.abnf and js-to-llvm-ir.abnf (check
+typescript-*.abnf too, which shares the shape).
+
+### T-479 assignment evaluates the RHS before the LHS reference; compound assignment reads the LHS after the RHS (js, java) · P1 · JS · OPEN [V]
+ECMA-262 13.15.2 and JLS 15.26 both evaluate the left-hand reference (object, key/index) first and, for `op=`, read the
+old value before the RHS. All legs agree and are wrong in BOTH languages (go has the tuple-assign variant, T-466).
+js vs node: `o[f("k")] = f("v")` logs `vk` (node `kv`); `a[i++] = i` → `0,2` (node `1,2`); `x += (x=5,10)` → 15 (node 11);
+`ar[k++] += k` on `[10,20,30]` → unchanged (node `[11,20,30]`); `obj[key] = (key="b",5)` → `{"a":1,"b":5}` (node `{"a":5}`).
+java vs javac/java 24 (operands from arrays): `j += j++ * 2` 16 (java 15); `a[k++] = k++` `[0,0,0]` (java `[1,0,0]`);
+`b[k] = k = 2` `[0,0,2]` (java `[2,0,0]`); `arr(c)[f("i",1)] += f("v",5)` logs `vAi` (java `Aiv`); `y -= (y = 1)` 0 (java 2);
+`s += (s = "b") + s` `bbb` (java `abb`); `e[idx] += (idx = 1) * 100` `[1, 102]` (java `[101, 2]`). Files: the assignment /
+compound-assignment builders of js-*, typescript-* and java-* grammars; check lib/interp-core.js and lib/compile-core.js
+first in case the order lives in a shared helper, and probe the other languages' compound assignment while there.
+Shared: JV (java grammars) — a worker taking this needs both groups' files.
+
+### T-480 js interp: a non-string computed key (`o[1]=v`, `o[true]`, `o[null]`) is stored but not tracked as an own key · P1 · JS · OPEN [V]
+`var o={}; o[ks[i]]="v"` with `ks=[1,"s",true,null]` then `Object.keys(o).length, for-in count, JSON.stringify(o), o[ks[i]]`:
+interp `key 1 0 0 {} v` (goja and -frozen), run/native/node `key 1 1 1 {"1":"v"} v`; `p[2]="x"; p["k"]="y"` keys: interp `k`,
+others `2|k`. `setMember` (js-interpreter.abnf ~5812) calls `trackKey(o, k)` with the raw key and `trackKey` (~7528) returns
+early on `typeof key != "string"`.
+
+### T-481 js: own-key order ignores the array-index rule (indices ascending first, then strings in insertion order) · P2 · JS · OPEN [V]
+Keys inserted `b,2,a,1,-1,01,4294967295,4294967294,1.5,0,10,1e3," 3",9007199254740993,3`: all legs print insertion order;
+node `0|1|2|3|10|4294967294|b|a|-1|01|4294967295|1.5|1e3| 3|9007199254740993` — affects `Object.keys`, `for-in`,
+`JSON.stringify`, entries/values. Literal `{z:1,5:2,y:3,0:4,"-0":5}`: ours `z|5|y|0|-0`, node `0|5|z|y|-0`.
+`JSON.parse('{"b":1,"a":2,"1":3}')` re-stringified: ours `{"b":1,"a":2,"1":3}`, node `{"1":3,"b":1,"a":2}`. Manual 7.9 records
+insertion-order `keysOf` but nothing exempts js from ECMA-262 OrdinaryOwnPropertyKeys. Interp only, same probe: `numkeys`
+(keys from numbers/booleans/null) prints nothing — T-480. Files: interp `__keys`, `js_keys` in runtime.c / jsrt.go /
+js-rt.metajs; decide whether the order is applied at enumeration (cheap) or kept at insertion.
+
+### T-482 js compiler: labeled break/continue out of `try`/`finally` inside a loop loops forever or fails to build · P1 · JS · OPEN [V]
+`bl: for (var i=0;i<3;i++){ try { if (i===1) break bl; lt.push("t"+i); } finally { lt.push("f"+i); } }` → interp and node
+`t0,f0,f1`; llvm.Run hits the step brake (endless loop); `-exe` fails to link: unresolved `js_jsxcall` (finder also saw
+`use of undefined value '%55'` in a larger module). `continue label` from an inner loop through a finally is the same.
+Unlabelled break/continue through finally is fine. File: js-to-llvm-ir.abnf (labels crossing the control-signal path;
+check typescript-to-llvm-ir.abnf, and why the module references an extern nothing defines).
+
+### T-483 js compiler: `for-of` over an array mutated during iteration uses the starting length · P1 · JS · OPEN [V]
+`a=[1,2,3,4]; for (x of a) { out.push(x); if (x===2) a.shift(); }` → run/native `1,2,4,undefined`, interp/node `1,2,4`;
+pop while iterating `[1,2,3]` → `1,2,undefined` vs `1,2`; push while iterating `[1,2]` → `1,2` vs `1,2,10,20`. The array
+iterator re-reads `length` every step. File: js-to-llvm-ir.abnf (array fast path of for-of), typescript likewise.
+
+### T-484 js: string `<`/`>` and default `sort()` compare code points, not UTF-16 code units · P1 · JS · OPEN [V]
+s = ["", "\ud800", "\udc00x", "𝄞", "￿"]: node orders by code units, so `"𝄞" < ""`. run, native and
+interp -frozen: `"𝄞" < ""` false; default sort `d800,e000,ffff,d834` (node `d800,d834,e000,ffff`). Interp under goja
+gets astral right but a lone surrogate wrong (`"" < "\ud800"` true; sort `e000,d800,ffff,d834`). Files: `jsCompare` in
+abnf/jsrt.go (~2333, Go string `<`), `js_compare` in runtime.c (~2881), the interp sort comparator. Check which other
+languages share these comparators before changing them (java/kotlin/csharp/dart compare UTF-16 too; python/go/swift do not).
+
+### T-485 js: the Go twin's `Math.max`/`Math.min` drop NaN next to ±Infinity · P1 · JS · OPEN [V]
+`Math.max(NaN, Infinity)`, `Math.min(-Infinity, NaN)`, `Math.max.apply(null,[1,NaN,Infinity])`: interp (goja and -frozen)
+and llvm.Run `Infinity`/`-Infinity`, native and node `NaN`. abnf/jsrt.go ~17604 folds with Go's `math.Max`/`math.Min`,
+which define Max(x,+Inf)=+Inf even for NaN x. Check go's min/max (T-470) and other languages that route through it.
+
+### T-486 js: parseInt edge cases, a different leg wrong per case · P1 · JS · OPEN [V]
+node: `parseInt("-0")`, `"-00"`, `"-0x0"` → -0 (interp goja and native give 0: runtime.c `js_parse_int` does `0.0 - val`);
+`parseInt(" 7")`, `"  9"`, `"　10"` → 7, 9, 10 (native NaN: `is_space` is ASCII-only); `parseInt("﻿8")` → 8
+(run and interp -frozen NaN: Go `strings.TrimSpace` does not trim U+FEFF); `parseInt("11", 37)` → NaN (run/-frozen 38: no
+2..36 check); radix is ToInt32, so `parseInt("11", 4294967312)` → 17 (native NaN, run 4294967313). P3 tail: large-radix
+results differ in the last digit across legs (`parseInt("9007199254740993", 36)`). Files: abnf/jsrt.go `jsParseInt`
+(~17885), runtime.c `js_parse_int` (~5986), goja's parseInt for the interp.
+
+### T-487 js interp (goja): ToInt32/ToUint32 of |x| ≥ 2^63 saturates · P1 · JS · OPEN [V]
+`x = 1e21`: interp `x|0 = -1`, `x>>>0 = 4294967295`, `~x = 0`, `1<<x = -2147483648`; run, native, interp -frozen and node
+`-559939584 3735027712 559939583 1`. 2^63 and 2^64+2^33 also wrong. Cause: third_party/goja/runtime.go:946 and :961
+`int32(int64(f))` — Go saturates on arm64. A goja patch like the ftoa one (manual ch. 4); add a cross-host pin test.
+
+### T-488 js: TypeError/RangeError raised by runtime builtins is uncatchable; `repeat(Infinity)` hangs or panics · P1 · JS · OPEN [V]
+`try { "a".repeat(-1) } catch(e) {...}` and `try { [].reduce((a,b)=>a+b) } catch(e)`: every leg ends the program with
+`js runtime error: Invalid count value: -1` / `Reduce of empty array with no initial value`, exit 1; node catches a
+RangeError / TypeError. `"ab".repeat(Infinity)` in a try: interp and native run until killed, run panics in Go
+(`strings: Repeat output length overflow`); node RangeError. `new Array(-1)` is already catchable — copy its path.
+Files: the builtin error raise in jsrt.go / runtime.c / js-rt.metajs / js-interpreter.abnf.
+
+### T-489 js: fromIndex and separator arguments of includes / lastIndexOf / join · P1 · JS · OPEN [V]
+`arr=[1,2,1]`: `arr.includes(1,5)`, `arr.includes(1,3)` → true (node false: fromIndex ignored); `arr.lastIndexOf(1,-5)` → 2
+(node -1); `"abcabc".lastIndexOf("a",-1)` → 3 (node 0, also for -5); `[1,2].join(null)` → `1,2` (node `1null2`). All legs.
+
+### T-490 js: regex `replace` replacement patterns `` $` `` `$'` and literal `$n`/`$<x>` · P1 · JS · OPEN [V]
+`"xabcx".replace(/b/, "$\`")` → `xa$\`cx` (node `xaxacx`); `"$'"` → `xa$'cx` (node `xacxcx`); finder also: `"$<x>"` with no named
+groups → `xacx` (node `xa$<x>cx`), `"$2"` with no group 2 → `xacx` (node `xa$2cx`), `"$10"` → `xa0cx` (node `xa$10cx`). The
+string-pattern form is right. All legs. Files: the regex replace expander (lib/regex.js and its twins).
+
+### T-491 js interp: index arguments are not ToIntegerOrInfinity'd (NaN, fractions) · P1 · JS · OPEN [V]
+`"abc".at(NaN)`, `"abc".substr(NaN,1)`, `[5,6].at(NaN)` → interp `""`, `""`, `undefined`; run/native/node `a`, `a`, `5`. For
+`-0.5`: interp `charAt ""`, `charCodeAt NaN`, `at "c"`, `substr "c"`, `[5,6].at → 6`; node `a 97 a a 5`.
+`"abc".indexOf("c", NaN)` → NaN (node 2). File: js-interpreter.abnf string/array builtins.
+
+### T-492 js: missing TypeErrors — const assignment, `in` on a primitive, `instanceof` a non-object · P2 · JS · OPEN [V]
+`const c=1; c=2;` accepted (node TypeError "Assignment to constant variable."); `"a" in "abc"` → false (node TypeError
+"Cannot use 'in' operator to search for 'a' in abc"); `({}) instanceof 5` → false (node TypeError "Right-hand side of
+'instanceof' is not an object"). P3 wording: TDZ says "q is not defined" (node "Cannot access 'q' before initialization"),
+toString radix message, JSON.parse syntax-error text is older V8 wording. All legs.
+
+### T-493 js: low-value divergences and gaps · P3 · JS · OPEN [V finder only]
+`(1e21).toString(36)` / `(2**60).toString(7)`: interp and compiler disagree (implementation-defined, but the halves must
+agree). Tagged template `s.raw` undefined in the compiler (`s.raw.join is not a function`). `arguments[0]=9` in a
+zero-arg call makes `arguments.length` 1 (node 0). `JSON.parse('{"__proto__":1}')` → `{}` (node keeps the key). Missing in
+every leg: `copyWithin`, `toSorted`/`toReversed`/`with`/`toSpliced`, `String.fromCodePoint`; `normalize` missing in the
+compiler.
+
 ---
 
 # JV — Java
@@ -83,6 +189,80 @@ dispatch (`q.describe()` answers `square 2.25null`, java `area 2.25`) — overlo
 a String picks Shape; java Object). (c) one-dimensional Object[] stays untagged: `new Object[]{"a"}` reports String[],
 `Arrays.copyOf(s, 3)` Object[], `toArray()` String[]; needs Class.getComponentType / Array.newInstance in all engines.
 (d) `thenComparing(Function)` (one-arg key form) not provided — indistinguishable from the Comparator form at run time.
+
+### T-494 java: null dereference and unboxing never raise a catchable NullPointerException · P1 · JV · OPEN [V]
+18 cases, each in `try { ... } catch (NullPointerException e)`, operands from `static Object[] nulls = {null}`; java prints
+"k NPE" for all. Ours: `b.v`, `b.get()`, `a.length`, `s.length()`, `l.size()`, `b.v = 5`, `s.toCharArray()`, for-each over a
+null List ABORT the program (interp "java interpreter error: field .v of null", run/native "js runtime error: member 'v' of
+null"); silent wrong values: `(Integer)null + 1` → 1, switch on a null String → default, `Integer i = null; i == 3` → false,
+`if ((Boolean)null)` → else, `o.hashCode()` → 0, `throw null` caught as "other"; halves disagree: `s.equals("x")` (interp
+aborts, compiled false), `o.toString()` (aborts / "null"), `a[0] = 1` on a null int[] (interp aborts, compiled NPE — right),
+`Double d = null; double e = d` (interp null, compiled 0.0). Also `int v = new HashMap<String,Integer>().get("q")` → null and
+`"abc".compareTo(null)` → -13 (java NPE). Files: member/call/field paths in java-interpreter.abnf (core.getIndex ~6283
+already raises), java-to-llvm-ir.abnf, the twin, lib/java-rt.metajs unboxing.
+
+### T-495 java: casts never throw ClassCastException · P1 · JV · OPEN [V]
+`Object o = "x"; Integer i = (Integer) o; System.out.println(i);` prints `x` in all legs; java throws `ClassCastException:
+class java.lang.String cannot be cast to class java.lang.Integer (...)`; `(String)` of an Integer is silent too. Files: cast
+lowering in both java grammars (the value model carries the type, manual 7.15).
+
+### T-496 java: the conditional operator ignores binary numeric promotion (JLS 15.25) · P1 · JV · OPEN [V]
+t from `boolean[]{true,false}`: `t ? cv : iv` (char/int) prints `b` (java 98); `t ? iv : 2.5` → 7 (7.0); `t ? boxed : 1.5` → 4
+(4.0); `Object o = t ? iv : 2.0` → 7 (7.0); `t ? 1f : iv` → 7 (7.0); `!t ? 1.0 : iv` → 7 (7.0); `!t ? 'x' : 0` → `0` (java
+char NUL); `true ? 1 : 'a'` → 1 (java char U+0001). All legs. Assignment conversion is right. Files: conditional typing in
+both java grammars (java-decltypes.js).
+
+### T-497 java interp: a static field initialised with a prelude class (HashMap, StringBuilder) fails · P1 · JV · OPEN [V]
+`public class Main { static Map<String,Integer> mp = new HashMap<>(); ... }` → interp `java interpreter error: unknown class:
+HashMap`, exit 1; run, native, java `[1] {k=2}`. Same for `static StringBuilder sb2 = new StringBuilder("o")` in any class;
+`static List<Integer> lst = new ArrayList<>()` works. Static initialisers run before the java-util.java prelude is installed.
+File: java-interpreter.abnf (static-init order vs prelude install).
+
+### T-498 java: try-with-resources lets close()'s exception replace the body's · P1 · JV · OPEN [V]
+`try (Res r1 = new Res("bad")) { throw new RuntimeException("body-ex"); } catch (RuntimeException e) { println("caught " + e); }`
+with close() throwing `IllegalStateException("close-bad")`: all legs `caught java.lang.IllegalStateException: close-bad`;
+java `caught java.lang.RuntimeException: body-ex` with close-bad suppressed (`getSuppressed` is also missing). Files:
+try-with-resources lowering in both grammars.
+
+### T-499 java: Formatter exceptions are uncatchable; `%#.0f` drops the point · P1 · JV · OPEN [V]
+`try { String.format("%d", v) } catch (Exception e)` with v = "str" or 3.0: every leg ends the program ("java interpreter
+error: IllegalFormatConversionException: d != str", compiled "js runtime error: ..."); java catches
+`IllegalFormatConversionException: d != java.lang.String` (note the class name in the message). Same for
+MissingFormatArgument / UnknownFormatConversion; java also has IllegalFormatPrecision (`%.2d`), MissingFormatWidth (`%-d`),
+IllegalFormatCodePoint (`%c` 0x110000). `String.format("%#.0f", 2.5)` → `2` (java `2.`). Cause: `jxkFail` in
+languages/lib/java-strings.js (~269, ~333) is a host failure, not a Java throw; abnf/jsrtjavastr.go and java-rt mirror it.
+
+### T-500 java compiler: `(char)` of a double outside the int range wraps instead of saturating first · P1 · JV · OPEN [V]
+`(int)(char) d` for d in {1e10, -1e10, 3e9, -3e9}: interp and java `65535 0 65535 0`; run and native `58368 7168 24064 41472`.
+JLS 5.1.3 narrows double → int (saturating) → char. Files: java-to-llvm-ir.abnf ~3309 (`js_jvchar`), its twin, java-rt.metajs.
+
+### T-501 java: `StringBuilder.append(char[])` appends the array identity · P1 · JV · OPEN [V]
+`sb.append(new char[]{'x','y'})` → `...[C@1a2b3c01...`, java `...xy...` (all legs; `String.valueOf(char[])` and
+`new String(char[])` are right). File: languages/lib/java-lang.java StringBuilder.append.
+
+### T-502 java: varargs forwarding and a homogeneous Object[] break String.format · P1 · JV · OPEN [V]
+Symptom of T-464(c) that raises its priority: `Object[] one = {3}; String.format("%s", one)` → `[I@1a2b3c01` (java `3`);
+`static String g(String fmt, Object... xs) { return String.format(fmt, xs); }`: `g("%d", 8)` aborts
+`IllegalFormatConversionException: d != obj`, `g("%s|%s", 8, 9)` aborts MissingFormatArgument (java `8`, `8|9`). Mixed element
+types work. Cause: the array is tagged from its CONTENTS (Object[] of ints becomes `[I`) and `jxFormat`'s spread test
+(`k1 == "L" || "["`, java-interpreter.abnf ~3681) rejects it. The forwarding idiom is very common. Fix with T-464(c).
+
+### T-503 java: Throwable.toString ignores an overridden getMessage(); message and Unicode details · P3 · JV · OPEN [V]
+`class Sub extends MyEx { public String getMessage() { return "sub-msg"; } }`, `println(e)` → `Sub` (java `Sub: sub-msg`).
+`Integer.parseInt(null)` → `For input string: "null"` (java `Cannot parse null string`); `List.of(1,2).get(5)` → `Index 5 out
+of bounds for length 2` (java `Index: 5 Size: 2`); `"a😀".compareToIgnoreCase("a￿")` → -10178 (java 62977, code points
+since JDK 16); a lone surrogate printed → U+FFFD (java `?`). All legs.
+
+### T-504 java: Integer identity outside the -128..127 cache · P3 · JV · OPEN [V finder only]
+`Integer a3 = 128, a4 = 128; a3 == a4` → true (java false; also -129). Same value-model class as T-256 (String identity,
+DECLINED): decide whether it is declined for the same reason before working it.
+
+### T-506 java: commonly hit missing API · P3 · JV · OPEN [V finder only]
+`System.out.printf`, `java.util.Collections`, `Objects`, `TreeMap`, `ArrayDeque`, `Throwable.getCause` and the (msg, cause)
+constructor are what real programs hit most; also String.formatted/regionMatches/codePointCount/codePoints/chars/lines,
+`%a`/`%h`, Integer.parseUnsignedInt/toUnsignedString/divideUnsigned/reverse/reverseBytes/rotateLeft,
+Math.multiplyHigh/ulp/IEEEremainder, Double.hashCode/doubleToLongBits, Float.floatToIntBits, Character.toChars, ArrayList
+Iterator.remove/replaceAll/subList, HashMap.computeIfPresent.
 
 ---
 
@@ -104,9 +284,160 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
+### T-465 go: the Go twin answers `>`/`>=` true when either side is NaN · P1 · GO · OPEN [V]
+`a := zs[0]/zs[0]; b := zs[1]` (zs = []float64{0,1}): `a > b, a >= b, b > a, b >= a` — llvm.Run `true true true true`, interp,
+native and `go run` all `false`. A NaN-seeded running max ends at 2 instead of NaN. `rel()` in abnf/jsrtint.go (~807-822)
+feeds `rt.jsCompare`'s NaN marker 2 into `c > 0`/`c >= 0`; the shared `js_gt` tests `== 1` and the floor's `si_rel` is right.
+Only go uses `js_gi*`. Engine wrong: the Go twin.
+
+### T-466 go: tuple assignment does not evaluate LHS index/pointer operands before assigning · P1 · GO · OPEN [V]
+Go evaluates every LHS index expression and pointer indirection, then every RHS, then assigns left to right. All three of our
+legs agree and are wrong: `i := 0; i, a[i] = 1, 9` on `[1 2 3]` gives `1 [1 9 3]` (go `1 [9 2 3]`); `n := 1; n, m[n] = 5, n`
+gives `map[5:1]` (go `map[1:1]`); `s, s[0] = []int{9}, 100` writes the NEW slice (go writes the old backing array);
+`ps, ps.v[0] = &S{...}, 42` likewise; `d[idx(0)], d[idx(1)] = val(5), val(6)` calls val before idx (go: idx 0, idx 1, val 5,
+val 6); `k, c[k], c[k+1] = 2, c[k+2], c[k]` on len 3 panics index out of range (go `2 [30 10 30]`). Files: the tuple-assign
+lowering in go-interpreter.abnf and go-to-llvm-ir.abnf.
+
+### T-467 go: `copy` with overlapping slices copies forward and smears · P1 · GO · OPEN [V]
+`x := []int{1,2,3,4,5}; n := copy(x[1:], x)` — all legs `4 [1 1 1 1 1]`, go `4 [1 1 2 3 4]` (memmove semantics);
+`b := []byte("abcde"); copy(b[2:], b)` ours `ababa`, go `ababc`. All three legs wrong. Files: the copy builtin in both go
+grammars, lib/go-rt.metajs, the Go twin.
+
+### T-468 go: deleting map entries during `for range` · P1 · GO · OPEN [V]
+10 entries `m[i]=i*i`; `for k := range m { delete(m,k); delete(m,9-k); cnt++ }; Println(cnt, len(m), m)`: go `5 0 map[]`
+(an entry deleted before it is reached is never produced, so 5 is deterministic); interp and native `10 0 map[]` (they range
+over a snapshot); llvm.Run `10 2 map[3:9 6:36]` — deletes are LOST and a nested range sees `<nil>` keys. Also
+`for k := range m3 { delete(m3,k); m3[k] = 5 }` on `{1:1,2:2}`: go `map[1:5 2:5]`, run `map[1:5 2:2]`. Hypothesis for run:
+`js_map_del` (abnf/jsrt.go ~15054) shifts `keys.elems`/`vals.elems` in place, corrupting a range snapshot that shares the
+backing array. Engines wrong: twin badly; interp and native via snapshot semantics.
+
+### T-469 go: interface equality and `map[interface{}]` keys ignore the dynamic type for int vs float64 · P1 · GO · OPEN [V]
+`var a interface{} = fs[0]` (float64 1), `var b interface{} = is[0]` (int 1): `a == b` — all legs `true`, go `false`
+(`%T` is right everywhere). `m[a]="float"; m[b]="int"; len(m), m[a], m[b]`: interp `2 float int` (right), llvm.Run and native
+`1 int int`. int64 vs int is already right. Files: strict_eq / `goMapKeyIdx` with the float box (manual 7.6), the go-rt map
+key lookup, the twin.
+
+### T-470 go: `clear(slice)` writes integer 0; `min`/`max` on NaN and -0; interp `min` of sized ints · P1 · GO · OPEN [V]
+`clear([]string{"a","b"})` → all legs `['\x00' '\x00']`, `s[0]==""` false (go `["" ""] true`); `[]bool` → `[0]`, structs → `[0]`,
+`[]*P` element not `nil`. `max(nan,1), max(1,nan), min(nan,1), min(1,nan)`: interp `NaN 1 NaN 1`, run/native `1 NaN NaN 1`,
+go `NaN NaN NaN NaN`. `max(0,-0), max(-0,0), min(0,-0), min(-0,0)`: interp `0 -0 0 -0`, run/native `-0 0 0 -0`, go `0 0 -0 -0`.
+Interp only: `min(int8(3), int8(-2))` prints `3` (a sized-int box never wins in `gNumF`). Files: go-interpreter.abnf
+hostGlobals clear/min/max (~1581-1599), lib/go-rt.metajs `js_gominmax` / `js_goclear`, abnf/jsrt.go twin. `clear` needs the
+element type's zero value.
+
+### T-471 go: channel and `make` runtime panics missing or wrong; a floor runtime error is unrecoverable natively · P1 · GO · OPEN [V]
+Each case wrapped in `defer func(){ fmt.Printf("recovered: %v\n", recover()) }()`. Close of a closed channel: all legs
+print "after" and recover nil (go `close of closed channel`). `make([]int, 3, 2)` (operands from a slice): interp an
+uncatchable "go interpreter error: make: capacity smaller than length", run/native `3 2 [0 0 <nil>]`, go
+`runtime error: makeslice: cap out of range`. Finder also saw (not re-run by the master): `close(nilChan)` and send on a
+closed channel are uncatchable in interp, recoverable "js runtime error: ..." under run, and kill the native binary with exit
+1 WITHOUT running defers; `make([]int,-1)` no panic (interp/native) vs "cap out of range" (run), go `makeslice: len out of
+range`; `make([]int,0,-1)`; `make(chan int,-1)` (go `makechan: size out of range`). General pattern: a floor-raised js
+runtime error is a recoverable panic under llvm.Run but a fatal exit natively. Files: chan close/send and make in
+lib/go-rt.metajs, abnf/jsrt.go, both go grammars, the native panic path.
+
+### T-472 go: runes and bytes produced by literals, range and indexing have dynamic type `int` · P2 · GO · OPEN [V]
+`fmt.Printf("%T", c)` for `c` from `range "az"`, and `%T` of `'z'`, `[]rune(s)[0]`, `s[0]`: all legs `int int int int`,
+go `int32 int32 int32 uint8`. A type switch therefore takes `case int` for a rune. `var r rune` / `var b byte` are already
+right. Not T-071 (rune vs int32 naming): here the value loses its sized type. Files: rune literal, range-over-string and
+string-index typing in both go grammars.
+
+### T-473 go: map key semantics — composite-key print order, and interp float keys NaN / -0 · P1 · GO · OPEN [V]
+`fmt.Println(map[K]int{{1,"a"}:1,{0,"b"}:2,{1,""}:3,{-1,"z"}:4,{10,"a"}:5,{2,"a"}:6})` (K struct{A int; B string}): go sorts
+field-wise `map[{-1 z}:4 {0 b}:2 {1 }:3 {1 a}:1 {2 a}:6 {10 a}:5]`; interp and run print insertion order; native sorts by the
+RENDERED string (`{1 a}` before `{1 }`, `{10 a}` before `{2 a}`) — three different answers. Array keys likewise (finder:
+interp `[1 1] [1 2] [10 0] [2 1]`, go `[1 1] [1 2] [2 1] [10 0]`). Interp only: `fn[nan]=1; fn[nan]=2; fn[0.0]=3; fn[-0.0]=4;
+len(fn), fn[0], fn[nan]` → `3 0 2`, go/run/native `3 4 0` (-0 must hit the 0 key; a NaN lookup never finds). Files: fmt map
+printing in all three engines (go-rt.metajs, twin, interpreter), the interpreter's float-key map index.
+
+### T-474 go: `[]T(nil)` conversion crashes the compiled legs · P2 · GO · OPEN [V]
+`z := []int(nil); fmt.Println(z == nil, len(z))`: interp `true 0` (right), llvm.Run panics `js runtime error: member
+'length' of null`, native dies with the same message, exit 1. Finder: in interp `append(z, e...) == nil` with empty `e`
+is false (go true). Files: conversion lowering in go-to-llvm-ir.abnf, go-rt nil-slice handling.
+
+### T-475 go: interp `string(rune(r))` of an invalid code point is not U+FFFD · P1 · GO · OPEN [V]
+`string(rune(r))` for r = -1, 0xD800, 0x110000 printed `%q %x`: interp `"￿" efbfbf`, `"\ud800" eda080`,
+`"\udc00\udc00" edb080edb080`; run, native and go `"�" efbfbd` each. File: goConvert string(rune) in go-interpreter.abnf.
+
+### T-476 go: Unicode case — titlecase digraphs and simple-fold orbits · P3 · GO · OPEN [V]
+`strings.ToUpper("ǅungla")`, `ToLower`: all legs `ǅUNGLA ǅungla`, go `ǄUNGLA ǆungla` (U+01C5 has upper and lower mappings).
+`strings.EqualFold("ǅ","ǆ")`: ours false, go true (finder also reports `EqualFold("K","K")` with the Kelvin sign false; the
+master's ASCII re-run was true). Files: abnf/casemap.go, runtime.c case_str, go EqualFold.
+
+### T-477 go: features where the engines disagree on support · P3 · GO · OPEN [V finder only]
+`make(map[K]V, hint)` parses in interp but not in the compiler; `fmt.Sprintln`, `fmt.Fprintf(&strings.Builder)` unknown
+method; `strings.Title` unknown in interp only; `math.*` unknown name in both. Missing-feature tickets: fix where cheap.
+
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
+
+### T-507 swift: a literal typed by context is not adopted, so Double arithmetic runs as Int · P1 · SW · OPEN [V]
+`let t1 = flag[1] ? 1.5 : 3; print(t1 / 2)` → all legs `1`, swiftc `1.5`. Same for `[1.5, 3][1] / 2`, `(nilDouble ?? 3) / 2`,
+`enum K { case b(Double) }; K.b(3)` payload `/ 2`, `["a": 1.5, "b": 3]["b"]! / 2`. Printing shows it too: `[1.5, 2]` (swiftc
+`[1.5, 2.0]`), `[2, 1.5]` (`[2.0, 1.5]`), `K.b(x: 2)` (`b(x: 2.0)`), `Double(s) ?? -999` → `-999` (`-999.0`), `max(1, v)` with v
+Double → `1` (`1.0`). Already right: annotated `let`, struct field, default argument, return value, `reduce(0, +)`, typed
+closure, tuple. Missing contexts: ternary arms, heterogeneous array/dictionary literals, the RHS of `??`, enum payloads,
+`min`/`max` arguments. Files: swAdopt* in swift-interpreter.abnf and swift-to-llvm-ir.abnf.
+
+### T-508 swift: `rounded(_:)` ignores its rule; `.sign` is never `.minus` · P1 · SW · OPEN [V]
+d from a [Double]: `d.rounded(.down/.towardZero/.toNearestOrEven/.up/.awayFromZero)` all return half-away rounding:
+1.5 → down/tz 2.0 (swiftc 1.0); 2.5 → even/down/tz 3.0 (2.0); -2.5 → even/up/tz -3.0 (-2.0); 1e-05 → up/afz 0.0 (1.0);
+4.35 → up/afz 4.0 (5.0). `(-0.0).sign == .minus`, `(-2.5).sign == .minus` → false (true). Files: swift-interpreter.abnf ~4071,
+lib/swift-rt.metajs ~2857 (`swRound`), abnf/jsrtswift.go ~1309 — all return `swRoundHalfAway` regardless of the argument;
+`sign` has no handler (the silent-nil member read, T-514).
+
+### T-509 swift: `init(clamping:)`/`init(exactly:)` truncate; `radix:` is ignored · P1 · SW · OPEN [V]
+Operands from an [Int]: `UInt8(clamping: 256)` → 0 (255), `UInt8(clamping: -1)` → 255 (0), `Int8(clamping: 255)` → -1 (127),
+`Int8(clamping: -129)` → 127 (-128); `UInt8(exactly: 256)` → 0 (nil), `Int8(exactly: 255)` → -1 (nil), `UInt8(exactly: -1)` → 255
+(nil); finder: `Int64(exactly: 3.9)` → 3 (nil). `Int("ff", radix: 16) ?? -1` → -1 (255), `Int("-101", radix: 2)` → -101 (-5),
+`Int("z", radix: 36)` → nil (35), `String(42, radix: 16)` → 42 (2a), `String(-255, radix: 2)` → -255 (-11111111); finder:
+`uppercase: true` ignored. All legs. Files: integer-init path near swIntBounds (swift-interpreter.abnf ~2990),
+swift-to-llvm-ir.abnf, lib/swift-rt.metajs, abnf/jsrtswift.go.
+
+### T-510 swift: `for v in arr` does not iterate a copy; interp and compiler disagree · P1 · SW · OPEN [V]
+`var it = [1,2,3]; for v in it { if v == 1 { it.append(10) }; if v == 2 { it.removeAll() }; print("iter \(v) count=\(it.count)") }`
+then `var d = [5,6]; for v in d { d[1] = 99; print("d \(v)") }`: swiftc `iter 1`, `iter 2`, `iter 3 count=0`, `d 5`, `d 6`;
+interp `iter 1`, `iter 2`, `iter nil count=0`, `d 5`, `d 99` (original count, live elements); run/native stop after `iter 2`
+and print `d 99` (live array; finder: an append is iterated). Value semantics (copy-at-store) is not applied to the for-in
+sequence operand. Files: for-in lowering in both swift grammars.
+
+### T-511 swift: array subscript — a negative index wraps; interp grows the array on a write past the end · P2 · SW · OPEN [V]
+`var a = [1,2]; let idx = [2,5,-1]; print(a[idx[2]]); a[idx[2]] = 9; print(a)` → all legs `2`, `[1, 9]`, exit 0; swiftc
+`Fatal error: Index out of range`, exit 133. Finder: `a[2] = 9` / `a[5] = 9` → interp `[1, 2, 9]` / `[1, 2, nil, nil, nil, 9]`,
+run `Fatal error: Error raised at top level: IndexError`, native `list assignment index out of range` (python's setter
+wording). A positive out-of-range READ is right. Files: swift subscript get/set in both grammars (the compiled write goes
+through a python-style setter).
+
+### T-512 swift: `switch` patterns on `Int.min`/`Int.max` · P1 · SW · OPEN [V]
+n from `[Int.min, -5, Int.max]`: `case Int.min:` never matches (all legs `other`, swiftc `min`); `case Int.max:` never matches
+(swiftc `max`); `case ..<0:` with Int.min → interp `other`, run/native and swiftc `neg`; `case 0...:` after `case Int.max` →
+interp `other`, run/native `nonneg`, swiftc `max`. `n == Int.min` and `n < 0` are right. Files: matchPat / emitMatchPat in the
+two swift grammars (the sized-int box is not compared via the `==` arm; interp range patterns do not unbox).
+
+### T-513 swift: grapheme clusters — ZWJ only in the interpreter; RI pairs, CR LF, emoji modifiers, Hangul never; prefix/contains/`<` not grapheme-aware · P1 · SW · OPEN [V]
+`.count`: 👨‍👩‍👧 interp 1, run/native 5, swiftc 1 (also `first` and `reversed()` split it); 🏳️‍🌈 interp 1, compiled 3. All legs:
+🇩🇪🇫🇷 4 (2), `"\r\n"` 2 (1), 👍🏽 2 (1), Hangul L+V+T 3 (1). `"e\u{301}".hasPrefix("e")` and `.contains("e")` true (false);
+`"e\u{301}" < "f"` true (false), `"e\u{301}" < "\u{e9}"` true (false — they are equal; `==` already uses canonical
+equivalence). The interpreter's `swGraphemeCount`/`swGraphemes` (~2456) has the 0x200D arm; the compiler's `rtGSplit`
+(swift-to-llvm-ir.abnf ~3573-3720) and `sw_gcount` lack it. Implement UAX #29 once (shared), not per site.
+
+### T-514 swift: an unimplemented member read answers nil silently; `?? default` then disagrees between legs · P2 · SW · OPEN [V]
+`Character` `.isLetter/.isUppercase/.isNumber/.isWhitespace/.asciiValue/.wholeNumberValue/.isASCII` all print `nil` in every
+leg (swiftc real values, e.g. `[a] letter=true upper=false num=false ws=false ascii=97 whole=-1 isASCII=true`);
+`ch.asciiValue ?? 0` → interp 0, run/native `nil` (`undefined ?? 0` does not fire in the compiled legs). Also `Double.sign`
+(T-508) and `Dir.allCases` (`nil`; `.count` → "field .count of nil"). Unknown METHODS fail loudly; unknown PROPERTIES must
+too, and these Character properties should be implemented. Files: member-read fallback in both swift grammars.
+
+### T-515 swift: debug-description escapes and trap wording · P3 · SW · OPEN [V finder only]
+`print(["bel\u{7}", "del\u{7F}"])` prints raw control bytes (swiftc `"bel\u{07}"`, `"del\u{7F}"`); a Character `'` in an
+array prints `"'"` (swiftc `"\'"`); `String(reflecting: "s")` → `s` (`"s"`); `a % 0` → `Fatal error: Division by zero` (swiftc
+`... in remainder operation`).
+
+### T-516 swift: missing features that fail loudly · P3 · SW · OPEN [V finder only]
+`s.utf16.count` ("field .count of nil"); Range `.map/.filter/.reduce/.contains`; `Int.signum()`, `isMultiple(of:)`,
+`quotientAndRemainder(dividingBy:)`; `Double.remainder(dividingBy:)`; `Optional.map` on a `firstIndex(of:)` result ("method
+call 'map' on a number"); `(..<0).contains(n)` does not parse.
 
 ---
 
@@ -147,6 +478,11 @@ A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclu
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
+
+### T-505 java (and probably every language): unbounded recursion kills the process instead of raising · P2 · CORE · OPEN [V finder only]
+`static void rec(int n){ rec(n+1); }` inside `try { } catch (StackOverflowError e)`: interp and run die with Go "fatal
+error: stack overflow" (exit 2), native SIGSEGV (exit 139); java catches it. Needs a depth limit in the engines; probe the
+other languages' equivalents (python RecursionError, js RangeError "Maximum call stack size exceeded", kotlin, csharp).
 
 ---
 

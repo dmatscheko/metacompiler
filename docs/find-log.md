@@ -10,11 +10,11 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | Cell | Last run | Commit | Covered | Tickets / numbers |
 |---|---|---|---|---|
 | A python | never | | | |
-| A java | never | | | |
-| A js | never | | | |
+| A java | 2026-10-13 | fda7a2b6 | int/long arithmetic and casts, Double/Float text, String.format, String/StringBuilder, HashMap order, collections, switch, exceptions, null/NPE, ternary typing, eval order | 12: T-494..T-504, T-506 (+T-505 CORE) |
+| A js | 2026-10-13 | fda7a2b6 | number formatting, parseInt/Float, Math, bitwise, Array/String methods, own-key order, regex replace, JSON, Map/Set, labels/try-finally, generators, coercion tables, eval order | 16: T-478..T-493 |
 | A typescript | never | | | |
-| A go | never | | | |
-| A swift | never | | | |
+| A go | 2026-10-13 | fda7a2b6 | sized ints, fmt verbs, strings pkg, panics/recover, slices/append/copy, maps, closures, channels, conversions, min/max/clear | 13: T-465..T-477 |
+| A swift | 2026-10-13 | fda7a2b6 | integers/shifts/conversions, Double rounding and text, graphemes, value semantics, for-in, switch patterns, Character properties, literal type adoption | 10: T-507..T-516 |
 | A ruby | never | | | |
 | A lua | never | | | |
 | A bash | never | | | |
