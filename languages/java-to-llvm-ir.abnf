@@ -29,7 +29,7 @@ glyph and computes on its code), String concatenation with +, java.lang.String's
 methods (lib/java-strings.js, the regex ones over lib/regex.js; charAt yields a
 char, so it prints as its glyph and computes on its code), String.valueOf / join /
 format, Object and getClass(), StringBuilder (lib/java-lang.java),
-System.out.println/print, System.exit, Math.abs/max/min,
+System.out.println/print, System.exit, System.arraycopy, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
 (fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
 expr/block, no fallthrough), switch as an EXPRESSION with yield in both forms, type
@@ -4978,7 +4978,7 @@ HasStatic   = :script(~~
     // So each is gated on the FEATURE, not on the type name: the flags below are
     // set by the grammar actions, which run while the file is walked and are
     // therefore complete before emitBuiltinExc runs.
-    var jUsesIdx = false        // any `a[i]`      -> AIOOBE + NullPointerException
+    var jUsesIdx = false        // any `a[i]`, System.arraycopy -> AIOOBE + NullPointerException
     var jUsesStrIdx = false     // charAt/substring -> StringIndexOutOfBoundsException
     var jUsesNewArr = false     // new T[n]         -> NegativeArraySizeException
     var jUsesParse = false      // parseInt/parseDouble/valueOf ... -> NumberFormatException
@@ -4988,6 +4988,7 @@ HasStatic   = :script(~~
         if (sfx.name == "charAt" || sfx.name == "substring" || sfx.name == "codePointAt"
             || sfx.name == "subSequence") { jUsesStrIdx = true }
         if (sfx.name == "repeat") { jUsesRepeat = true }
+        if (sfx.name == "arraycopy") { jUsesIdx = true }
         if (sfx.name == "parseInt" || sfx.name == "parseLong" || sfx.name == "parseDouble"
             || sfx.name == "parseFloat" || sfx.name == "valueOf") { jUsesParse = true }
         return sfx
@@ -5447,7 +5448,7 @@ HasStatic   = :script(~~
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
-        // System.out.println / System.out.print / System.exit from the host globals.
+        // System.out.println / System.out.print / System.exit / System.arraycopy.
         var sysV = callExt(b, "js_obj_new", [])
         var outV = callExt(b, "js_obj_new", [])
         // println/print are NOT the shared host functions, which hand the raw
@@ -5465,6 +5466,12 @@ HasStatic   = :script(~~
             bb.NewRet(hUndef)
             return deadBlock()
         }, false, null)
+        var jvArraycopyF = emitFunc([], function(bb) {
+            callExt(bb, "js_jvarraycopy", [curF.Params[1]])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        callExt(b, "js_set", [sysV, emitStr(b, "arraycopy"), callExt(b, "js_closure", [handle(jvArraycopyF), curScopeV])])
         callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, "js_closure", [handle(jvPrintlnF), curScopeV])])
         callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, "js_closure", [handle(jvPrintF), curScopeV])])
         callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])

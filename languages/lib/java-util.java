@@ -63,8 +63,7 @@ class ArrayList<E> implements List<E> {
     }
     public ArrayList(Collection<? extends E> c) {
         elems = new Object[c.size()];
-        Iterator<? extends E> it = c.iterator();
-        while (it.hasNext()) { add(it.next()); }
+        addAll(c);
     }
 
     void writable() {
@@ -77,7 +76,7 @@ class ArrayList<E> implements List<E> {
     }
     void grow() {
         Object[] more = new Object[elems.length * 2 + 1];
-        for (int i = 0; i < count; i++) { more[i] = elems[i]; }
+        System.arraycopy(elems, 0, more, 0, count);
         elems = more;
     }
 
@@ -122,7 +121,7 @@ class ArrayList<E> implements List<E> {
             throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + count);
         }
         if (count == elems.length) { grow(); }
-        for (int i = count; i > index; i--) { elems[i] = elems[i - 1]; }
+        System.arraycopy(elems, index, elems, index + 1, count - index);
         elems[index] = e;
         count++;
     }
@@ -131,7 +130,7 @@ class ArrayList<E> implements List<E> {
         writable();
         checkIndex(index);
         E old = (E) elems[index];
-        for (int i = index; i < count - 1; i++) { elems[i] = elems[i + 1]; }
+        System.arraycopy(elems, index + 1, elems, index, count - index - 1);
         count--;
         elems[count] = null;
         return old;
@@ -154,16 +153,14 @@ class ArrayList<E> implements List<E> {
         int n = 0;
         Iterator<? extends E> it = c.iterator();
         while (it.hasNext()) { all[n] = it.next(); n++; }
-        for (int i = 0; i < n; i++) {
-            if (count == elems.length) { grow(); }
-            elems[count] = all[i];
-            count++;
-        }
+        while (elems.length - count < n) { grow(); }
+        System.arraycopy(all, 0, elems, count, n);
+        count = count + n;
         return n > 0;
     }
     public Object[] toArray() {
         Object[] out = new Object[count];
-        for (int i = 0; i < count; i++) { out[i] = elems[i]; }
+        System.arraycopy(elems, 0, out, 0, count);
         return out;
     }
     public Iterator<E> iterator() { return new ArrayListItr<E>(this); }

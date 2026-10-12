@@ -1675,6 +1675,49 @@ function js_jvnewlen(n) {
     return v
 }
 
+// System.arraycopy(src, srcPos, dest, destPos, length), its argument array
+// whole. The checks run in hotspot's order and the messages are java 24.0.2's;
+// an overlapping copy within one array reads as if through a temporary, so a
+// rightward move runs backwards. A non-array argument (ArrayStoreException in
+// java) is not supported. lib/java-util.java's ArrayList shifts with it, which
+// is why the move is one extern rather than a loop in the program. Twin of
+// js_jvarraycopy in abnf/jsrtjava.go and System.arraycopy in
+// java-interpreter.abnf.
+function js_jvarraycopy(args) {
+    var src = args[0]
+    var dst = args[2]
+    if (src === undefined || src === null || dst === undefined || dst === null) { jvThrowCls(jvNpeCls, null) }
+    if (!Array.isArray(src) || !Array.isArray(dst)) { fail("java: System.arraycopy of a non-array is not supported") }
+    var sp = rtjNum(args[1])
+    var dp = rtjNum(args[3])
+    var n = rtjNum(args[4])
+    if (sp < 0) { jvThrowCls(jvAioobeCls, "arraycopy: source index " + sp + " out of bounds for " + jvAcType(src)) }
+    if (dp < 0) { jvThrowCls(jvAioobeCls, "arraycopy: destination index " + dp + " out of bounds for " + jvAcType(dst)) }
+    if (n < 0) { jvThrowCls(jvAioobeCls, "arraycopy: length " + n + " is negative") }
+    if (sp + n > src.length) { jvThrowCls(jvAioobeCls, "arraycopy: last source index " + (sp + n) + " out of bounds for " + jvAcType(src)) }
+    if (dp + n > dst.length) { jvThrowCls(jvAioobeCls, "arraycopy: last destination index " + (dp + n) + " out of bounds for " + jvAcType(dst)) }
+    var d = dp - sp
+    var i = sp
+    var e = sp + n
+    if (src === dst && d > 0) {
+        i = e - 1
+        while (i >= sp) { dst[i + d] = src[i]; i = i - 1 }
+        return undefined
+    }
+    while (i < e) { dst[i + d] = src[i]; i = i + 1 }
+    return undefined
+}
+
+// An array as System.arraycopy's messages name it: "int[5]", "object array[5]".
+// The element type is jpArrayTag's inference.
+function jvAcType(a) {
+    var tag = jpArrayTag(a)
+    var k = tag.charAt(1)
+    var t = "object array"
+    if (k == "I") { t = "int" } else if (k == "J") { t = "long" } else if (k == "S") { t = "short" } else if (k == "B") { t = "byte" } else if (k == "F") { t = "float" } else if (k == "D") { t = "double" } else if (k == "C") { t = "char" } else if (k == "Z") { t = "boolean" }
+    return t + "[" + a.length + "]"
+}
+
 // One binary integral operator. A double operand keeps the FLOAT path, which is
 // where the two boxes meet.
 function js_jvarith(op, l, r) {

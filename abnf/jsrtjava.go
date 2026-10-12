@@ -1598,6 +1598,35 @@ func init() {
 			fmt.Fprint(outWriter, wtf8Clean(jvpFirst(rt, u(a[0]))))
 			return 0
 		}
+		// System.arraycopy(src, srcPos, dest, destPos, length), its argument
+		// array whole. Twin of js_jvarraycopy in languages/lib/java-rt.metajs,
+		// which documents the checks.
+		m["js_jvarraycopy"] = func(a []uint64) uint64 {
+			args := u(a[0]).(*jsArray).elems
+			src, sok := args[0].(*jsArray)
+			dst, dok := args[2].(*jsArray)
+			if isUndefOrNull(args[0]) || isUndefOrNull(args[2]) {
+				rt.jvThrowCls(jvNpeCls, jsNull)
+			}
+			if !sok || !dok {
+				rt.fail("java: System.arraycopy of a non-array is not supported")
+			}
+			sp, dp, n := int(jvToLong(rt, args[1])), int(jvToLong(rt, args[3])), int(jvToLong(rt, args[4]))
+			switch {
+			case sp < 0:
+				rt.jvThrowCls(jvAioobeCls, fmt.Sprintf("arraycopy: source index %d out of bounds for %s", sp, jvAcType(src)))
+			case dp < 0:
+				rt.jvThrowCls(jvAioobeCls, fmt.Sprintf("arraycopy: destination index %d out of bounds for %s", dp, jvAcType(dst)))
+			case n < 0:
+				rt.jvThrowCls(jvAioobeCls, fmt.Sprintf("arraycopy: length %d is negative", n))
+			case sp+n > len(src.elems):
+				rt.jvThrowCls(jvAioobeCls, fmt.Sprintf("arraycopy: last source index %d out of bounds for %s", sp+n, jvAcType(src)))
+			case dp+n > len(dst.elems):
+				rt.jvThrowCls(jvAioobeCls, fmt.Sprintf("arraycopy: last destination index %d out of bounds for %s", dp+n, jvAcType(dst)))
+			}
+			copy(dst.elems[dp:dp+n], src.elems[sp:sp+n])
+			return 0
+		}
 		// ONE record component of two record instances, compared the way JLS
 		// 8.10.3 says a record's canonical equals compares it - which is NOT ===
 		// in either direction:
@@ -2177,6 +2206,17 @@ func jvpArrayTag(a *jsArray) string {
 		return "[Ljava.lang.Object;"
 	}
 	return tag
+}
+
+// jvAcType names an array the way System.arraycopy's messages do: "int[5]",
+// "object array[5]". Twin of jvAcType in languages/lib/java-rt.metajs.
+func jvAcType(a *jsArray) string {
+	names := map[byte]string{'I': "int", 'J': "long", 'S': "short", 'B': "byte", 'F': "float", 'D': "double", 'C': "char", 'Z': "boolean"}
+	t, ok := names[jvpArrayTag(a)[1]]
+	if !ok {
+		t = "object array"
+	}
+	return fmt.Sprintf("%s[%d]", t, len(a.elems))
 }
 
 func jvpElemTag(v interface{}) string {

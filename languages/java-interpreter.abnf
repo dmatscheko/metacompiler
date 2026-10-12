@@ -2238,7 +2238,26 @@ HasStatic   = :script(~~
             println: function(x) { println(arguments.length == 0 ? "" : jstr(x)) },
             print: function(x) { print(jstr(x)) }
         },
-        exit: function(code) { exit(code | 0) }
+        exit: function(code) { exit(code | 0) },
+        // Twin of js_jvarraycopy in lib/java-rt.metajs, which documents the checks.
+        arraycopy: function(src, spv, dst, dpv, nv) {
+            if (src === undefined || src === null || dst === undefined || dst === null) { jThrowExc("NullPointerException", null) }
+            if (!Array.isArray(src) || !Array.isArray(dst)) { fail("java: System.arraycopy of a non-array is not supported") }
+            var sp = jNum(spv)
+            var dp = jNum(dpv)
+            var n = jNum(nv)
+            var aioobe = "ArrayIndexOutOfBoundsException"
+            if (sp < 0) { jThrowExc(aioobe, "arraycopy: source index " + sp + " out of bounds for " + jAcType(src)) }
+            if (dp < 0) { jThrowExc(aioobe, "arraycopy: destination index " + dp + " out of bounds for " + jAcType(dst)) }
+            if (n < 0) { jThrowExc(aioobe, "arraycopy: length " + n + " is negative") }
+            if (sp + n > src.length) { jThrowExc(aioobe, "arraycopy: last source index " + (sp + n) + " out of bounds for " + jAcType(src)) }
+            if (dp + n > dst.length) { jThrowExc(aioobe, "arraycopy: last destination index " + (dp + n) + " out of bounds for " + jAcType(dst)) }
+            if (src === dst && sp < dp) {
+                for (var i = n - 1; i >= 0; i--) { dst[dp + i] = src[sp + i] }
+            } else {
+                for (var j = 0; j < n; j++) { dst[dp + j] = src[sp + j] }
+            }
+        }
     }
     // Math.abs/max/min keep the argument type: a double in, a double out (Java has
     // an int and a double overload of each).
@@ -3346,6 +3365,12 @@ HasStatic   = :script(~~
         }
         if (tag == "") { return "[Ljava.lang.Object;" }
         return tag
+    }
+    // An array as System.arraycopy's messages name it: "int[5]", "object array[5]".
+    var jAcNames = {I: "int", J: "long", S: "short", B: "byte", F: "float", D: "double", C: "char", Z: "boolean"}
+    function jAcType(a) {
+        var t = jAcNames[jArrayTag(a).charAt(1)]
+        return (t === undefined ? "object array" : t) + "[" + a.length + "]"
     }
     function jClassBin(cls) {
         if (cls.__bname != undefined && cls.__bname != "") { return cls.__bname }

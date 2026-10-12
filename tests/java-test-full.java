@@ -101,6 +101,7 @@ class Main {
         S50.run(); // SECTION-CALL 50
         S51.run(); // SECTION-CALL 51
         S52.run(); // SECTION-CALL 52
+        S53.run(); // SECTION-CALL 53
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -2992,5 +2993,54 @@ class S52 {
         int 𐐀abc = 1;
         Main.check("id52a", café + £x == 6 && π == 3.5 && 𐐀abc == 1 && café == 2);
         Main.check("id52b", ignorable((char) 65) == 65);
+    }
+}
+
+// ===== SECTION 53: System.arraycopy, and the ArrayList moves built on it =====
+//
+// An overlapping copy within one array reads as if through a temporary; the
+// bounds are checked source index, destination index, length, last source
+// index, last destination index, in that order; ArrayList's add(int, E),
+// remove(int), addAll, toArray and growth move its elements with it. Every
+// expected string is java 24.0.2's.
+class S53 {
+    static String copy(Object src, int sp, Object dst, int dp, int n) {
+        try { System.arraycopy(src, sp, dst, dp, n); return "ok"; }
+        catch (ArrayIndexOutOfBoundsException e) { return e.getMessage(); }
+        catch (NullPointerException e) { return "npe"; }
+    }
+    static String join(int[] a) {
+        String s = "";
+        for (int x : a) { s = s + x; }
+        return s;
+    }
+    static void run() {
+        int[] a = { 1, 2, 3, 4, 5 };
+        System.arraycopy(a, 0, a, 1, 4);
+        String right = join(a);
+        System.arraycopy(a, 1, a, 0, 4);
+        String left = join(a);
+        int[] b = new int[3];
+        System.arraycopy(a, 2, b, 1, 2);
+        Main.check("ac53a", right.equals("11234") && left.equals("12344") && join(b).equals("034"));
+        Object[] o = new Object[2];
+        Main.check("ac53b", copy(a, -1, a, 0, 1).equals("arraycopy: source index -1 out of bounds for int[5]")
+            && copy(a, 0, a, -2, 1).equals("arraycopy: destination index -2 out of bounds for int[5]")
+            && copy(a, 0, a, 0, -1).equals("arraycopy: length -1 is negative")
+            && copy(a, 3, a, 0, 3).equals("arraycopy: last source index 6 out of bounds for int[5]")
+            && copy(o, 0, o, 1, 2).equals("arraycopy: last destination index 3 out of bounds for object array[2]")
+            && copy(null, 0, a, 0, 1).equals("npe") && copy(a, 5, a, 0, 0).equals("ok"));
+        ArrayList<Integer> xs = new ArrayList<>(0);
+        for (int i = 0; i < 40; i++) { xs.add(0, i); }
+        int front = xs.remove(0);
+        int mid = xs.remove(19);
+        xs.add(20, 99);
+        int last = xs.remove(xs.size() - 1);
+        ArrayList<Integer> ys = new ArrayList<>(xs);
+        ys.addAll(List.of(7, 8));
+        Object[] arr = ys.toArray();
+        Main.check("al53a", front == 39 && mid == 19 && last == 0 && xs.size() == 38 && xs.get(18) == 20
+            && xs.get(19) == 18 && xs.get(20) == 99 && xs.get(37) == 1 && ys.size() == 40
+            && ys.get(39) == 8 && arr.length == 40 && arr[38].equals(7));
     }
 }
