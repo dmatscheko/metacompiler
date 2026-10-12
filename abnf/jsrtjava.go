@@ -709,6 +709,42 @@ func jvDoubleCompare(a, b float64) float64 {
 	return 0
 }
 
+// jvWrapCompare is compareTo on a boxed primitive (java.lang.Comparable):
+// Integer and Long answer the sign, Short, Byte and Character the difference,
+// Double and Float Double.compare, Boolean false < true. ok is false for any
+// other receiver. Twin of the compareTo arm of mcall in java-interpreter.abnf
+// and jvWrapCompare in languages/lib/java-rt.metajs.
+func (rt *jsrt) jvWrapCompare(x, y interface{}) (r float64, ok bool) {
+	switch v := x.(type) {
+	case jsJFlo:
+		return jvDoubleCompare(v.f, rt.toNumber(y)), true
+	case bool:
+		if yb, _ := y.(bool); v == yb {
+			return 0, true
+		}
+		if v {
+			return 1, true
+		}
+		return -1, true
+	case jsChar:
+		return float64(int64(v.code) - giVal(rt, y)), true
+	case jsGInt:
+		if v.w < 32 {
+			return float64(v.v - giVal(rt, y)), true
+		}
+	case float64:
+	default:
+		return 0, false
+	}
+	if rt.jvCmp("<", x, y) {
+		return -1, true
+	}
+	if rt.jvCmp(">", x, y) {
+		return 1, true
+	}
+	return 0, true
+}
+
 // jvParseDbl is Double.parseDouble's text: String.trim, an optional sign, then
 // NaN, Infinity, or decimal digits with an optional point, exponent and
 // f/F/d/D suffix. Anything else throws NumberFormatException with java

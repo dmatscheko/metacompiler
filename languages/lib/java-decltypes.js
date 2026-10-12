@@ -29,6 +29,16 @@ function jVarTy(dtext) {
     if (t == "" || t == "null" || t == "fn") { return "var" }
     return t
 }
+// An enhanced for's variable is declared with its FeType (`for (Integer x :
+// l)` makes l.remove(x) the remove(Object) overload); dims written after the
+// name (`for (int r[] : m)`) extend it.
+var jFeTy = ""
+var jFeName = ""
+function jFeDecl(name) {
+    jFeName = name
+    jTyDecl(name, jFeTy)
+}
+function jFeDims(text) { jTyDecl(jFeName, jFeTy + jDimsOf(text)) }
 // A field's type, by NAME across the whole program: "?" once two
 // declarations of the name disagree, and then no conversion is made. The
 // grammars read it once the walk has seen every field.
@@ -846,7 +856,7 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,AbstractList,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,".indexOf("," + rest + ",") >= 0
 }
 
 // Does `new cls(...)` create a type lib/java-lang.java declares? Then the
@@ -1273,7 +1283,8 @@ function jOvStaticSig(rty, mname, atys, wantStatic) {
     // A candidate declared over a type variable (List<E>.add(int, E)) is
     // overridden under its SUBSTITUTED signature (add(int, String)), which no
     // "name#sig" slot connects to it, so such a call keeps the runtime pick.
-    for (var c = 0; c < cands.length; c++) {
+    // A static method is never overridden, so its slot is the declared one.
+    for (var c = 0; c < cands.length && cands[0].statik != true; c++) {
         for (var p = 0; p < cands[c].ptys.length; p++) {
             var pb = jOvBare(cands[c].ptys[p])
             while (jOvIsArr(pb)) { pb = pb.substring(0, pb.length - 2) }

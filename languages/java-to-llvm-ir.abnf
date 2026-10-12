@@ -20,7 +20,7 @@ object creation with new, arrays (new int[n], the multi dimensional new int[a][b
 and the partial new int[a][], bare initializers like {1, 2}, C style declarators,
 a.length, indexing), varargs (a trailing array parameter, fed either by the extra
 arguments or by an array), the enhanced for loop
-(for (var x : arr), and over any Iterable), the java.util ArrayList / AbstractList / List of an
+(for (var x : arr), and over any Iterable), the java.util ArrayList / AbstractList / List / Arrays of an
 import (lib/java-util.java, compiled with the program), new String(...),
 Math's and StrictMath's transcendentals as fdlibm answers them,
 int / boolean / char / String / var / class types (types are
@@ -566,10 +566,12 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop(), pop(), pop())) ~~>
-            = KwFor "(" [ LeadMods ] FeType Id <~~ push(up.in); jTyDecl(up.in, "") ~~> [ CDims ] ":" ConvExpr ")" SubStmt ;
+            = KwFor "(" [ LeadMods ] FeType Id <~~ push(up.in); jFeDecl(up.in) ~~> [ FeDims ] ":" ConvExpr ")" SubStmt ;
 // The loop variable's declared type: each element converts to it (JLS 14.14.2).
-FeType      <~~ push({fety: stripWs(up.in)}) ~~>
+FeType      <~~ push({fety: stripWs(up.in)}); jFeTy = stripWs(up.in) ~~>
             = Type ;
+FeDims      <~~ jFeDims(stripWs(up.in)) ~~>
+            = CDims ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" SubStmt ;
@@ -3470,12 +3472,13 @@ HasStatic   = :script(~~
     // known (jSfxSig in lib/java-decltypes.js), the ordinary js_mcall otherwise.
     // A java.lang.String method name goes to js_jvstrm when the receiver may be a
     // String (its static type is String or unread); js_jvstrm hands any other
-    // receiver on to js_mcall.
+    // receiver on to js_mcall. compareTo always goes there, because js_jvstrm
+    // also answers it for a boxed primitive, whatever its static type says.
     function jEmitMcall(b, recv, s, argsV) {
         var sig = jSfxSig(s)
         if (sig != "") { return callExt(b, "js_jvsigcall", [recv, emitStr(b, s.name), emitStr(b, sig), argsV]) }
         if (jStrMethods["$" + s.name] == true && (s.rty == undefined || s.rty == "" || jOvBare(s.rty) == "String"
-                                                  || s.rty.substring(0, 8) == "static?:")) {
+                                                  || s.rty.substring(0, 8) == "static?:" || s.name == "compareTo")) {
             return callExt(b, "js_jvstrm", [recv, emitStr(b, s.name), argsV])
         }
         return callExt(b, "js_mcall", [recv, emitStr(b, s.name), argsV])

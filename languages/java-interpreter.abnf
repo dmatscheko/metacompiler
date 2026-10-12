@@ -41,7 +41,7 @@ references (static, bound, unbound and constructor) that become real values of t
 functional interface they are assigned to, the full operator set including the
 bitwise and shift operators with Java int semantics, and the compound assignments.
 The enhanced for runs over an array or any Iterable. Importing java.util's
-ArrayList, AbstractList, List, Collection or Iterator compiles lib/java-util.java
+ArrayList, AbstractList, List, Collection, Iterator or Arrays compiles lib/java-util.java
 with the program (shared with java-to-llvm-ir.abnf): an ArrayList and List.of in
 Java's own terms, and an AbstractList a user List extends. java.lang.String's
 methods and String.valueOf / join / format are lib/java-strings.js (the regex ones
@@ -581,10 +581,12 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop(), pop(), pop())) ~~>
-            = KwFor "(" { Annotation | "final" KwEnd } FeType Id <~~ push(up.in); jTyDecl(up.in, "") ~~> [ CDims ] ":" ConvExpr ")" SubStmt ;
+            = KwFor "(" { Annotation | "final" KwEnd } FeType Id <~~ push(up.in); jFeDecl(up.in) ~~> [ FeDims ] ":" ConvExpr ")" SubStmt ;
 // The loop variable's declared type: each element converts to it (JLS 14.14.2).
-FeType      <~~ push({fety: stripWs(up.in)}) ~~>
+FeType      <~~ push({fety: stripWs(up.in)}); jFeTy = stripWs(up.in) ~~>
             = Type ;
+FeDims      <~~ jFeDims(stripWs(up.in)) ~~>
+            = CDims ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" SubStmt ;
@@ -3647,6 +3649,18 @@ HasStatic   = :script(~~
             if (name == "toString") { return String.fromCharCode(target.__char) }
             if (name == "charValue") { return target }
             if (name == "compareTo") { return (target.__char - jNum(args[0])) | 0 }
+        }
+        // compareTo on the other boxed primitives (java.lang.Comparable):
+        // Integer and Long answer the sign, Short and Byte the difference,
+        // Double and Float Double.compare, Boolean false < true. Twin of
+        // jvWrapCompare in abnf/jsrtjava.go and languages/lib/java-rt.metajs.
+        if (name == "compareTo" && args.length == 1) {
+            if (typeof target == "number" || jIsSz(target)) {
+                if (jIsSz(target) && target.w < 32) { return jI(target) - jI(args[0]) }
+                return jCmp("<", target, args[0]) ? jNegOne : (jCmp(">", target, args[0]) ? 1 : 0)
+            }
+            if (jIsFlo(target)) { return jDblCompare(jNumD(target), jNumD(args[0])) }
+            if (typeof target == "boolean") { return target === args[0] ? 0 : (target ? 1 : jNegOne) }
         }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {

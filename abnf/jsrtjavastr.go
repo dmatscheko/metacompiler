@@ -805,12 +805,18 @@ func init() {
 			rt.fail("getClass() of a value with no class")
 			return 0
 		}
-		// A java.lang.String method on a string receiver; any other receiver is an
-		// ordinary call of a method by that name. Twin of jStrMethod in
-		// java-interpreter.abnf and js_jvstrm in languages/lib/java-rt.metajs.
+		// A java.lang.String method on a string receiver, compareTo on a boxed
+		// primitive too; any other receiver is an ordinary call of a method by
+		// that name. Twin of jStrMethod in java-interpreter.abnf and js_jvstrm in
+		// languages/lib/java-rt.metajs.
 		m["js_jvstrm"] = func(a []uint64) uint64 {
 			s, isStr := u(a[0]).(string)
 			if !isStr {
+				if args, _ := u(a[2]).(*jsArray); args != nil && len(args.elems) == 1 && rt.toString(u(a[1])) == "compareTo" {
+					if r, ok := rt.jvWrapCompare(u(a[0]), args.elems[0]); ok {
+						return w(r)
+					}
+				}
 				return baseMcall(a)
 			}
 			name := rt.toString(u(a[1]))

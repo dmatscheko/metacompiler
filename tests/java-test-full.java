@@ -19,9 +19,13 @@
 //   - main prints the summary line 'full: <checks> checks, <failures> failures'
 //     and exits with the failure count (exit 0 == full support, verified)
 //
+// Oracle: `java -Duser.language=en -Duser.country=US tests/java-test-full.java`
+// (java 24.0.2). String.format follows the default locale, so fmt1-fmt3 fail
+// under another one (a German locale writes 1.234.567 and 1,01).
+//
 // Deliberately out of scope (not core syntax, or unrunnable in this harness):
 // packages, and the standard library beyond the java.lang implicits (String,
-// Math, StrictMath, System and friends) and the java.util list types imported
+// Math, StrictMath, System and friends) and the java.util types imported
 // below; the functional interfaces here are declared locally instead of
 // importing java.util.function. Also out: modules - a module-info.java IS parsed
 // (see ModuleDecl in the grammar) but is a file of its own, so it cannot be a
@@ -33,6 +37,8 @@
 
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 import java.util.List;
 
@@ -102,6 +108,7 @@ class Main {
         S51.run(); // SECTION-CALL 51
         S52.run(); // SECTION-CALL 52
         S53.run(); // SECTION-CALL 53
+        S54.run(); // SECTION-CALL 54
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3046,5 +3053,106 @@ class S53 {
         boolean empty = ys.isEmpty() && ("" + ys).equals("[]");
         ys.add(5);
         Main.check("al53b", empty && ys.size() == 1 && ys.get(0) == 5 && ("" + ys).equals("[5]") && ys.indexOf(null) == -1);
+    }
+}
+
+// ===== SECTION 54: java.util.Arrays, Comparable wrappers, fail-fast iterators =====
+//
+// Arrays' sort is stable and orders a double[] as Double.compare does; a typed
+// overload decides the zero a copy pads with and what a fill converts its value
+// to; asList writes through to its array and cannot change size. An
+// ArrayList's iterator and forEach throw once the list changed size behind
+// them, and a for-each variable declared Integer makes remove(x) the
+// remove(Object) overload. Every expected string is java 24.0.2's.
+class S54 {
+    static <T> String g(T[] a) { return "T[]"; }
+    static String g(int[] a) { return "int[]"; }
+    static double[] none() { return new double[0]; }
+    static String cme(ArrayList<Integer> l, int victim) {
+        try {
+            for (Integer x : l) { if (x == victim) { l.remove(x); } }
+            return "" + l;
+        } catch (ConcurrentModificationException e) { return "cme"; }
+    }
+    static void run() {
+        int[] a = { 3, 1, 2 };
+        Arrays.sort(a);
+        double[] d = { 2.5, -0.0, 0.0, Double.NaN, -1 };
+        Arrays.sort(d);
+        String[] s = { "pear", "apple", "fig", "kiwi" };
+        Arrays.sort(s, (x, y) -> x.length() - y.length());
+        long[] ls = { 5L, 1L << 40, -7L };
+        Arrays.sort(ls);
+        Main.check("ar54a", Arrays.toString(a).equals("[1, 2, 3]") && Arrays.toString(d).equals("[-1.0, -0.0, 0.0, 2.5, NaN]")
+            && Arrays.toString(s).equals("[fig, pear, kiwi, apple]") && Arrays.toString(ls).equals("[-7, 5, 1099511627776]"));
+        int[] part = { 5, -3, 9, 0, 2 };
+        Arrays.sort(part, 1, 4);
+        Integer[] boxed = { 4, 1, 3 };
+        Arrays.sort(boxed);
+        char[] cs = { 'z', 'a', 'm' };
+        Arrays.sort(cs);
+        Main.check("ar54b", Arrays.toString(part).equals("[5, -3, 0, 9, 2]") && Arrays.toString(boxed).equals("[1, 3, 4]")
+            && Arrays.toString(cs).equals("[a, m, z]") && Arrays.binarySearch(a, 2) == 1 && Arrays.binarySearch(a, 0) == -1
+            && Arrays.binarySearch(a, 9) == -4);
+        double[] f = new double[2];
+        Arrays.fill(f, 1);
+        long[] lf = new long[2];
+        Arrays.fill(lf, 7);
+        int[] g = new int[5];
+        Arrays.fill(g, 1, 3, 9);
+        Main.check("ar54c", Arrays.toString(f).equals("[1.0, 1.0]") && lf[0] * 1000000000 * 10 == 70000000000L
+            && Arrays.toString(g).equals("[0, 9, 9, 0, 0]"));
+        Main.check("ar54d", Arrays.toString(Arrays.copyOf(a, 5)).equals("[1, 2, 3, 0, 0]") && Arrays.copyOf(a, 2).length == 2
+            && Arrays.toString(Arrays.copyOf(s, 5)).equals("[fig, pear, kiwi, apple, null]")
+            && Arrays.toString(Arrays.copyOf(none(), 2)).equals("[0.0, 0.0]")
+            && Arrays.toString(Arrays.copyOf(new boolean[] { true }, 2)).equals("[true, false]")
+            && Arrays.toString(Arrays.copyOfRange(part, 3, 7)).equals("[9, 2, 0, 0]") && g(new int[0]).equals("int[]"));
+        Main.check("ar54e", Arrays.equals(a, new int[] { 1, 2, 3 }) && !Arrays.equals(a, new int[] { 1, 2 })
+            && Arrays.equals(new double[] { Double.NaN }, new double[] { Double.NaN })
+            && !Arrays.equals(new double[] { 0.0 }, new double[] { -0.0 }) && Arrays.hashCode(a) == 30817
+            && Arrays.hashCode(s) == -2070968051 && Arrays.hashCode(new double[] { 1.5 }) == 1073217567);
+        String[] backing = { "p", "q" };
+        List<String> v = Arrays.asList(backing);
+        v.set(0, "P");
+        backing[1] = "Q";
+        String uoe = "";
+        try { v.add("r"); } catch (UnsupportedOperationException e) { uoe = "uoe"; }
+        List<Integer> copy = new ArrayList<>(Arrays.asList(3, 4));
+        copy.add(5);
+        Main.check("ar54f", ("" + v).equals("[P, Q]") && uoe.equals("uoe") && Arrays.asList("x", "y").indexOf("y") == 1
+            && copy.equals(Arrays.asList(3, 4, 5)) && Arrays.asList(3, 4, 5).equals(copy));
+        String msgs = "";
+        try { Arrays.copyOfRange(a, 2, 1); } catch (IllegalArgumentException e) { msgs = msgs + e.getMessage() + "|"; }
+        try { Arrays.fill(g, 3, 1, 0); } catch (IllegalArgumentException e) { msgs = msgs + e.getMessage() + "|"; }
+        try { Arrays.sort(g, 0, 9); } catch (ArrayIndexOutOfBoundsException e) { msgs = msgs + e.getMessage(); }
+        int[] nul = null;
+        Main.check("ar54g", msgs.equals("2 > 1|fromIndex(3) > toIndex(1)|Array index out of range: 9")
+            && Arrays.toString(nul).equals("null"));
+        Integer i3 = 3;
+        Double d15 = 1.5;
+        Boolean yes = true;
+        Character c = 'c';
+        Short sh = (short) 3;
+        Float nan = Float.NaN;
+        Main.check("cmp54", i3.compareTo(4) == -1 && d15.compareTo(-2.0) == 1 && yes.compareTo(false) == 1 && c.compareTo('a') == 2
+            && sh.compareTo((short) 10) == -7 && nan.compareTo(1f) == 1 && yes.compareTo(true) == 0);
+        ArrayList<Integer> l = new ArrayList<>();
+        l.add(1);
+        l.add(2);
+        l.add(3);
+        Iterator<Integer> it = l.iterator();
+        l.clear();
+        l.add(5);
+        String first = "";
+        try { first = "" + it.next(); } catch (ConcurrentModificationException e) { first = "cme"; }
+        Iterator<Integer> it2 = l.iterator();
+        l.set(0, 8);
+        int second = it2.next();
+        String each = "";
+        try { l.forEach(x -> { if (x == 8) { l.add(1); } }); } catch (ConcurrentModificationException e) { each = "cme"; }
+        ArrayList<Integer> m = new ArrayList<>(List.of(5, 6, 7));
+        ArrayList<Integer> n = new ArrayList<>(List.of(5, 6, 7));
+        Main.check("cme54", first.equals("cme") && second == 8 && each.equals("cme") && ("" + l).equals("[8, 1]")
+            && cme(m, 6).equals("[5, 7]") && cme(n, 5).equals("cme"));
     }
 }
