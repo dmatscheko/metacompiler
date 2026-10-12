@@ -91,12 +91,6 @@ slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-436 csharp: record ToString; user extension vs applicable instance method · P2 · CS · IN PROGRESS (CS worker, round 25) [V spec-only]
-(a) `record P(int X, int Y)` prints `P`; C# synthesises `P { X = 1, Y = 2 }` (also record class/struct, nested records,
-inherited members first). (b) user extension methods: the compiler always prefers a same-named extension over an
-instance method (`csExt[s.name]` in foldCallMember); the interpreter prefers the instance method without an
-applicability check. C# rule: an applicable instance method wins; otherwise extensions. Probe both halves first.
-
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
 `flt36`/`flt37` in tests/csharp-test-full.cs assert `1E+07`, `1E+20`,
 `3.4028235E+38` for `float.ToString()`. .NET Core 3.0+ prints the shortest round-trip
@@ -474,6 +468,7 @@ T-428 core: permanent unmarked region for boot/layer-2 top level/interned litera
 T-430 csharp: double constants and IsNaN family, LINQ/Join/Concat over a user IEnumerable, Math overload result types, Abs overflow, MidpointRounding, MathF, BigMul, DivRem, CopySign — DONE f557ea80
 T-433 php: non-numeric string TypeErrors, string bitwise ops, Perl-style increments and inc/dec TypeErrors, closures/generators as objects, "true given" names, built-in interfaces, stdlib class-function wrappers — DONE 137aa3c7
 T-434 csharp: tuple ToString, float/Single type object, BCL enum casts, extension fallback for inapplicable instance groups — DONE 36feec21
+T-436 csharp: synthesized record ToString (positional, public fields/properties, base first); applicable instance method beats extension (count-only applicability; user PrintMembers and derived-of-ToString-base not modelled) — DONE 6ade117e
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
