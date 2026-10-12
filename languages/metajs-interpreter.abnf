@@ -10,7 +10,8 @@ import './file.js' of a project file (its top level runs into the shared global 
 numbers (doubles, hex 0x literals included), strings with the methods length/charAt/
 charCodeAt/indexOf/replace/slice/substring/split/toUpperCase/toLowerCase/trim,
 booleans, null, undefined,
-arrays (push/pop/shift/unshift/slice/indexOf/join/concat), object literals, member
+arrays (push/pop/shift/unshift/reverse/slice/indexOf/join/concat/sort; nothing else -
+no map/forEach), object literals, member
 access (.name and [expr]), method calls, assignment (= += -= *= /= %=) as an expression
 (the target may reach through calls: findScope(name)[name] = v), prefix and postfix
 ++/--, the
@@ -1179,13 +1180,32 @@ KwDefault   = "default" KwEnd ;
         }
     }
 
+    // The members a receiver answers are the floor's (get_member in
+    // languages/lib/runtime.c, getMember in abnf/jsrt.go): an array or a string
+    // its length, indices and the methods listed here, a function apply and call,
+    // an object its own properties. The goja host's prototypes answer far more
+    // (map, forEach, toString, bind), so a value an EMPTY receiver of the same
+    // kind answers too is inherited and hidden. Under -frozen o[k] is already the
+    // floor's answer and the checks below change nothing.
+    var arrMembers = {length: 1, push: 1, pop: 1, shift: 1, unshift: 1, reverse: 1,
+                      slice: 1, indexOf: 1, join: 1, concat: 1, sort: 1}
+    var strMembers = {length: 1, charCodeAt: 1, charAt: 1, indexOf: 1, replace: 1, slice: 1,
+                      substring: 1, split: 1, toUpperCase: 1, toLowerCase: 1, trim: 1}
+    var emptyArr = []
+    var emptyObj = {}
     function getMember(o, k) {
         if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
         // The key list keysOf keeps is not a property of the program's object:
         // the other two halves have no such slot, and js_keys skips every
         // __-prefixed key, so it must not be readable here either.
         if (k === "__ik") return undefined
-        return o[k]
+        var v = anytype
+        v = o[k]
+        if (v === undefined) return v
+        if (typeof o == "function") return (k === "apply" || k === "call") ? v : undefined
+        if (typeof o == "string") return (strMembers[k] === 1 || v !== ""[k]) ? v : undefined
+        if (Array.isArray(o)) return (arrMembers[k] === 1 || v !== emptyArr[k]) ? v : undefined
+        return v !== emptyObj[k] ? v : undefined
     }
 
     // ----- Expression thunks: function() -> value -----

@@ -1829,6 +1829,29 @@ function s33() {
     check("sn10", zs[0] * 1 !== zs[0] * 1 && zs[1] * 1 === 12)
 }
 
+// ===== SECTION 34: the members a receiver answers =====
+// An array answers length, its indices and push/pop/shift/unshift/reverse/slice/
+// indexOf/join/concat/sort; a string length, its indices and the ten string
+// methods; a function apply and call; an object its own properties. Nothing else:
+// map, forEach, toString and bind are JavaScript's prototypes, not MetaJS.
+function s34() {
+    var fs = []
+    for (var i = 0; i < 3; i++) { fs.push(function () { return 7 }) }
+    var a = [3, 1]
+    check("rm01", a.map === undefined && fs.forEach === undefined && a.filter === undefined)
+    check("rm02", a.toString === undefined && a.constructor === undefined && a.length === 2)
+    check("rm03", typeof a.sort === "function" && typeof a.concat === "function" && a.sort().join(",") === "1,3")
+    var s = "ab"
+    check("rm04", s.concat === undefined && s.padStart === undefined && s.toString === undefined)
+    check("rm05", typeof s.trim === "function" && s.length === 2 && s[1] === "b")
+    var o = { length: 0, own: fs[0] }
+    check("rm06", o.toString === undefined && o.hasOwnProperty === undefined && o.constructor === undefined)
+    check("rm07", o.length === 0 && o.own() === 7)
+    var f = fs[1]
+    check("rm08", f.bind === undefined && f.length === undefined && f.name === undefined)
+    check("rm09", f.call(undefined) === 7 && f.apply(undefined, []) === 7)
+}
+
 function main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -1863,6 +1886,7 @@ function main() {
     s31() // SECTION-CALL 31
     s32() // SECTION-CALL 32
     s33() // SECTION-CALL 33
+    s34() // SECTION-CALL 34
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
