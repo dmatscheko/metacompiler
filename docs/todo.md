@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-446** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-447** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,14 +63,10 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-443 python: user __hash__/__eq__ in dict/set; descriptor __get__ on class access; type() 3-arg; collections · P1 · PY · IN PROGRESS (PY worker, round 20) [V]
-python3 3.14, all engines unless noted: (a) dict/set ignore a user `__hash__`/`__eq__`: `{K(1): "one"}[K(1)]` raises
-KeyError (CPython "one"); breaks frozen dataclasses as keys. Silent wrong answers possible (`K(1) in s`). (b) `K.a` with a
-descriptor defining `__get__` returns the descriptor instead of `__get__(None, K)`. (c) `type("Q", (), {"a": 1})` returns
-the str class (both halves). (d) `f.g(3)` with a function stored as an attribute of function f fails as a method call.
-(e) `BaseException.add_note` missing. (f) `collections.deque`, `defaultdict`, `OrderedDict`, `Counter`, `bytearray`,
-`SystemExit` raise NameError — write deque/defaultdict/OrderedDict/Counter in Python like python-copy.py.
-(g) arity errors ignore an assigned `__qualname__` (minor).
+### T-446 python: aliased imports of Python-written library modules · P2 · PY · IN PROGRESS (PY worker, round 21) [V]
+`from dataclasses import dataclass as X` raises NameError in both halves (CPython binds X); likewise `import copy as c`,
+`from collections import Counter as C`. Imports of python-copy.py / python-dataclasses.py / python-collections.py are
+flat, so `import collections; collections.deque` and module-qualified access should be checked too.
 
 ---
 
@@ -490,6 +486,7 @@ T-437 python: CPython arity TypeErrors (missing/too many/multiple values/unexpec
 T-439 php: SPL in php-stdlib (ArrayIterator/ArrayObject/SplDoublyLinkedList/Stack/Queue/ObjectStorage, iterator_*, class_implements/parents, spl_object_hash), __FUNCTION__/__METHOD__ as compile-time constants, yield from an Iterator, ArrayAccess dispatch — DONE e6c70cfa
 T-441 python: qualnames, dunder/exception __dict__, property names via __set_name__, CPython "Did you mean" suggestions, copy + dataclasses modules (slots/kw_only/InitVar/make_dataclass raise NotImplementedError), dir() of classes/instances — DONE c0828553
 T-442 php: __FILE__/__LINE__/__DIR__, automatic Stringable, generator keys after yield from (compiled), BP_VAR_IS fetches for ?? and isset/empty on ArrayAccess, ArrayObject isset of null, engine exception interface order, ArrayAccess by reference; SplObjectStorage isset(null) is true in php-src (asserted) — DONE 27c9ccfc
+T-443 python: user __hash__/__eq__ dict/set keys, class-level descriptor __get__, 3-arg type(), function attributes as callables, add_note, collections (deque/defaultdict/OrderedDict/Counter), sys.exit/SystemExit, bytearray as byte list — DONE cf92473b
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
