@@ -17,7 +17,7 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | A swift | 2026-10-13 | fda7a2b6 | integers/shifts/conversions, Double rounding and text, graphemes, value semantics, for-in, switch patterns, Character properties, literal type adoption | 10: T-507..T-516 |
 | A ruby | never | | | |
 | A lua | never | | | |
-| A bash | never | | | |
+| A bash | 2026-10-13 | fda7a2b6 | arithmetic, parameter expansion, word splitting/IFS, indexed and sparse arrays, [[ ]] tests and =~, case, return codes, printf, command-substitution depth | 15: T-517..T-529, T-531 (+T-530 CORE, probe.sh) |
 | A c | never | | | |
 | A kotlin | never | | | |
 | A php | never | | | |

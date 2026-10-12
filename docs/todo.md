@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-517** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-532** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -465,6 +465,99 @@ from a compatible B instance — php-src suggests static:: is B, ours gives A. (
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
+### T-517 bash: indexed-array subscripts are not arithmetic; array elements inside `$(( ))`; negative subscripts · P1 · SH · OPEN [V]
+`a=(a0 a1 a2 a3 a4); i=2; echo "${a[i]} ${a[i+1]} ${a[$i+1]}"; a[i+2]=W; echo "${a[*]}"` → all legs `a0 a0 a2` / `W a1 a2 a3 a4`,
+bash `a2 a3 a3` / `a0 a1 a2 a3 W` (the subscript is literal text through strToInt, though bash-interpreter.abnf:456 says
+"read as an arithmetic index"; `arr[i++]=X` and `${arr[n++]}` lose the side effect). `nums=(3 4 5); echo "sum=$(( nums[0] +
+nums[2] ))"; echo after` → interp `command not found: nums[0]` and the WHOLE program exits 127; run/native
+`sum=<path>: command not found: nums[0]` then `after`; bash `sum=8`, `after` (also `(( m[p]++ ))`). `a=(p q r s); echo
+"[${a[-1]}] [${a[-2]}]"; a[-1]=S; echo "${!a[*]} = ${a[*]}"` → `[] []`, -1 stored as a new key (interp `-1 0 1 2 3 = S p q r s`,
+compiled `0 1 2 3 -1 = p q r s S`); bash `[s] [r]` / `0 1 2 3 = p q r S`. Files: IdxWord / arr* paths in
+bash-interpreter.abnf, subscript normalisation and the arithmetic grammar in bash-to-llvm-ir.abnf, bash-rt.c rt_arr_*.
+
+### T-518 bash: sparse indexed arrays — compiler keeps insertion order; `([k]=v w)` continues from the wrong index; `${a[@]:off:len}` counts positions · P1 · SH · OPEN [V]
+`a=(); a[5]=x; a[2]=y; echo "${!a[*]} = ${a[*]}"` → interp and bash `2 5 = y x`, run/native `5 2 = x y`.
+`b=([3]=c [1]=a b)` → interp `1 3 4 = a c b`, compiled `3 1 4 = c a b`, bash `1 2 3 = a b c` (an unindexed element takes the
+last explicit index + 1). `sp[2]=x; sp[5]=y; sp[9]=z; echo "[${sp[*]:3}] [${sp[*]:1:1}] [${sp[*]: -4}]"` → all legs
+`[] [y] []`, bash `[y z] [x] [z]` (offset = first index ≥ off; a negative offset is relative to max index + 1). Files:
+bash-rt.c rt_arr_* key order, both grammars' compound assignment and array slicing.
+
+### T-519 bash: quoted or escaped glob characters stay active in case patterns, `${v#p}`/`${v%p}`/`${v/p/r}`, and `=~` · P1 · SH · OPEN [V]
+For s in `x`, `*`: `case $s in '*') c=star ;; *) c=other ;; esac` → `star` for BOTH (bash `other` for x); `${s#\*}` on `*` →
+`*` (bash empty); `p='?'; ${s%"$p"}` → empty (bash keeps s); `${s/'*'/R}` on `x` → `R` (bash `x`). `[[ abc =~ "a.c" ]]` and
+`[[ abc =~ a"."c ]]` → rc 0 (bash 1: a quoted part of the regex is literal). `[[ x == "$p" ]]` is already right — copy its
+quoting-aware word building. All legs. Files: case / pattern-operand word building in both grammars, rt_glob /
+rt_strip / rt_replace, the =~ regex builder.
+
+### T-520 bash: INT32_MIN prints as `-`; the compiler's shift by ≥ 32 or negative is IR poison · P1 · SH · OPEN [V]
+`v=(-2147483648 2147483647); m=${v[0]}; x=${v[1]}; echo "[$(( m ))] [$(( x + 1 ))] [$(( 1 << 31 ))]"` → all legs `[-] [-] [-]`;
+rt_int2str (bash-rt.c ~425) and numToStr (bash-interpreter.abnf ~943) cannot negate INT_MIN; a later `printf %d` of it prints
+0. Shifts `$(( 1 << s )) $(( -8 >> s ))` for s in 32, 33, -1: interp and native wrap mod 32 (`1`, `-8`; `2`, `-4`; `-`, `-1`),
+llvm.Run gives `0 -1` / `0 -1` / `0 -1` — the emitted `shl`/`ashr` (bash-to-llvm-ir.abnf ~2306-2307) is unmasked, poison per
+LangRef. Bash (64-bit): `4294967296 -1`, `8589934592 -1`, `-9223372036854775808 -1` — see T-521 for the width.
+
+### T-521 bash: the arithmetic model is 32-bit, bash's is 64-bit · P2 · SH · OPEN [V]
+`t=10; big=3000000000; h=65536` (from an array): `$(( t ** t )) $(( big + 0 )) $(( h * h ))` → all legs
+`1410065408 -1294967296 0`, bash `10000000000 3000000000 4294967296`; literals above 2^31 wrap. The source says so
+(bash-interpreter.abnf ~3308) but manual 7.9 records only the `printf %x` consequence. Decide: widen to i64 in both
+halves and bash-rt.c, or record the whole model as a permanent divergence in 7.9.
+
+### T-522 bash: arithmetic `&&`/`||` do not short-circuit; the compiler's `?:` evaluates both arms; a variable's value is not evaluated as an expression · P1 · SH · OPEN [V]
+`z=0; echo "$(( z && (z = 9) )) z=$z"` → `0 z=9` (bash `0 z=0`); `$(( 1 || (z = 9) ))` → z=9 (bash 0). All legs.
+`k=1; echo "$(( k == 1 ? k++ : k-- )) k=$k"` → interp and bash `1 k=2`, run/native `1 k=1` (a select instead of branches).
+`r=a; a=7; echo "$(( r + 1 ))"` → `1` (bash 8: a name's value is itself evaluated); `e="1 + 2"; echo "$(( e * 2 )) $(( $e * 2 ))"`
+→ `2 2` (bash `6 5`: `$e` is substituted textually and re-parsed). All legs. The last two meet manual 7.9's "the compiler
+has no arithmetic evaluator at runtime"; the interpreter can do it, and the compiler's answer should at least be an error
+rather than a silent 1. Files: arithmetic evaluation in both grammars.
+
+### T-523 bash: `return N` is not reduced mod 256; the compiler ignores `;&` and leaves `$?` after a case · P1 · SH · OPEN [V]
+`f(){ return 300; }; f; echo $?` → 300 (bash 44); `g(){ return -1; }` → -1 (bash 255). All legs.
+`case "$1" in a) echo -n "A;" ;& b) echo -n "B;" ;; esac` with `a` → interp and bash `A;B;`, run/native `A;`.
+`false; case x in y) ;; esac; echo $?` and `false; case x in x) ;; esac; echo $?` → interp and bash 0 0, compiled 1 1.
+Files: return and case lowering in bash-to-llvm-ir.abnf; return in both grammars.
+
+### T-524 bash: `[[ A -eq B ]]` operands are not arithmetic · P1 · SH · OPEN [V]
+`[[ 2+3 -eq 5 ]]`, `[[ 010 -eq 8 ]]`, `x=4; [[ x -eq 4 ]]` → rc 1 1 1 in all legs, bash 0 0 0 (the numeric tests evaluate both
+sides as arithmetic expressions; octal included). Same for -ne/-lt/-le/-gt/-ge. Files: [[ ]] numeric tests in both grammars.
+
+### T-525 bash: `${N-word}`/`${N+word}` on positional parameters; `${!ref}` through an array element · P1 · SH · OPEN [V]
+`f(){ echo "[${2-unset}] [${3:-dflt}] [${1+set}]"; }; f; f one` → interp `[unset] [dflt] []` twice (wrong for `${1+set}` when
+$1 is set), run/native `[] [dflt] [set]` twice, bash `[unset] [dflt] []` / `[unset] [dflt] [set]`. `arr=(x y z); r1='arr[1]';
+r2=arr; echo "[${!r1}] [${!r2}]"` → interp `[] [x]`, compiled `[] []`, bash `[y] [x]`. Files: parameter expansion in both
+grammars.
+
+### T-526 bash: printf flags, operands and escapes · P1 · SH · OPEN [V]
+All legs: `%05d` of -7 → `000-7` (bash `-0007`); `%#05x` 255 → `00xff` (`0x0ff`); `%+d`, `% d` ignored (`+5`, ` 5`); `%-+4d` 3 →
+`3   ` (`+3  `); `"'A"` / `"'a"` operands → 0 0 (65 97); `%*d` / `%.*s` unsupported (`<5d><42s>`, bash `<   42><ab>`);
+`printf -- fmt` treats `--` as the format. Finder also: escapes in the FORMAT (`\101`, `\x41`) left literal; `%b` of `\0101`
+(interp ^H1, compiled empty, bash A); `%b`'s `\c` not honoured; the compiler's `%b` ignores `\xHH`, `\NNN` and unknown escapes
+(interp right); rc stays 0 on an invalid number. Files: printfBuiltin (bash-interpreter.abnf ~3305), printf lowering in
+bash-to-llvm-ir.abnf, bash-rt.c rt_pad / rt_unescape.
+
+### T-527 bash: `${v/p/r}` details — `&` in the replacement, an empty subject, extglob without shopt; the compiler's `${v%?}` splits UTF-8 · P1 · SH · OPEN [V]
+`k=hello; echo "[${k/l/<&>}] [${k//l/&&}]"` → `[he<&>lo] [he&&&&o]` (bash 5.2+ patsub_replacement: `[he<l>lo] [hellllo]`).
+`e=""; echo "[${e/*/R}] [${e//*/R}]"` → `[] []` (bash `[R] [R]`). `s=aXa; echo "[${s#@(a|X)}] [${s//@(a|X)/-}]"` → `[Xa] [---]`
+(bash without `shopt -s extglob`: `[aXa] [aXa]`). These three in all legs. `v=hé; echo "[${v%?}]"` → interp and bash `[h]`,
+run/native `[h\xC3]` (bash-rt.c rt_strip suffix branch; `${v#?}` is right).
+
+### T-528 bash: `${x:?msg}` in a subshell, and silent arithmetic / substring errors · P1 · SH · OPEN [V]
+`(: ${u:?custom}) 2>/dev/null; echo "rc=$?"; echo after` → interp prints `bash interpreter error: u: custom` and the WHOLE
+program exits 2; run/native `rc=0` (no error at all); bash `rc=1`, `after`. `f(){ echo "r=$(( 7 / d ))"; echo after; }` with
+d=0, `$(( 2 ** -1 ))`, `${s:1:-3}` on `abc` → all legs answer `r=0`, `pow=1`, `sub=[]` and carry on; bash reports division by 0
+/ negative exponent / substring expression < 0 and aborts the command (`st=1`). Files: error paths in both grammars and
+bash-rt.c.
+
+### T-529 bash: command substitution nests at most 8 deep natively · P2 · SH · OPEN [V]
+`d(){ if [ "$1" -le 0 ]; then echo 0; return; fi; echo $(( 1 + $(d $(( $1 - 1 ))) )); }; echo $(d 6); echo $(d 7); echo $(d 8)`
+→ interp and bash `6 7 8`; native `6 7` then `bash-rt: subshell nesting exhausted ... 8 of 8`, exit 70; llvm.Run no output at
+all (rt_die's `write` is undefined under llvm.Run). Ordinary recursive functions (fib 10) hit it. `SSDEPTH 8` in
+bash-rt.c ~3037: grow the save stack dynamically.
+
+### T-531 bash compiler: `break N` beyond the loop depth is a compile error · P3 · SH · OPEN [V]
+`for i in 1 2; do for j in 1 2; do break 5; done; echo never; done; echo "done rc=$?"` → interp and bash `done rc=0`; the
+compiler stops with `break used outside a loop` (bash breaks every enclosing loop). Finder also hit compiler rejects
+`unset "d[$((i+1))]"` ("unset needs a literal name") and a non-literal printf format.
+
 ---
 
 # C — C subset
@@ -483,6 +576,13 @@ believed to be the modern VM's. Leave as is unless a real dart run settles it.
 `static void rec(int n){ rec(n+1); }` inside `try { } catch (StackOverflowError e)`: interp and run die with Go "fatal
 error: stack overflow" (exit 2), native SIGSEGV (exit 139); java catches it. Needs a depth limit in the engines; probe the
 other languages' equivalents (python RecursionError, js RangeError "Maximum call stack size exceeded", kotlin, csharp).
+
+### T-530 probe.sh reports a false "step brake" for any module that CONTAINS the brake's wording · P2 · CORE · OPEN [V]
+`tests/probe.sh bash m.sh` with `[[ abc =~ b ]]; echo "rc=$?"` marks the run leg `BROKEN: hit the IR step brake - output is
+TRUNCATED`, though `mec languages/bash-to-llvm-ir.abnf m.sh -qq` prints `rc=0` and is complete: the grep for `step limit
+exceeded` (tests/probe.sh ~275) scans run.raw, which holds the IR module, and bash's module carries the string constant
+"bash: [[: regular expression step limit exceeded". It blinds every bash probe that uses `=~`. Grep only the program's
+output or stderr, after the module (clang-check.sh `module_only()` splits them).
 
 ---
 
