@@ -84,7 +84,7 @@ splitext. Write them in Python like python-collections.py where possible. Edges:
 
 # JV — Java
 
-### T-453 java: java.util.Arrays; fail-fast iterators; fmt1-3 vs real java · P2 · JV · OPEN [V]
+### T-453 java: java.util.Arrays; fail-fast iterators; fmt1-3 vs real java · P2 · JV · IN PROGRESS (JV worker, round 14) [V]
 javac/java 24: (a) `java.util.Arrays` is absent in all engines ("variable not defined: Arrays"): toString, sort, fill,
 asList, copyOf, copyOfRange, equals, stream basics. (b) ArrayList's iterator is not fail-fast: iterator, clear(), add(5),
 next() returns 5; java 24 throws ConcurrentModificationException (no modCount in ArrayListItr). (c) `java
