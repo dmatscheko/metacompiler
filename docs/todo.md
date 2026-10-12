@@ -63,7 +63,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-448 python: aliases of runtime-provided stdlib modules · P2 · PY · OPEN [V]
+### T-448 python: aliases of runtime-provided stdlib modules · P2 · PY · IN PROGRESS (PY worker, round 22) [V]
 `import math as m; m.sqrt(16)` and `from math import sqrt as s` raise NameError in both halves (CPython 4.0); same for
 every module in core.stdlibImports (re, json, ...). They have no module object to bind; give them one (or alias the
 flat names). Python-written modules (copy/dataclasses/collections) already bind correctly.
@@ -112,7 +112,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-447 php: realpath; declared-null properties vs magic (compiled); __unset · P2 · PHP · OPEN [V]
+### T-447 php: realpath; declared-null properties vs magic (compiled); __unset · P2 · PHP · IN PROGRESS (PHP worker, round 28) [V]
 (a) `realpath` needs a file-system primitive (getcwd + realpath(3)) in runtime.c, the Go twin and an interpreter host
 hook; none exists. (b) compiled only: with `public $prop;` (null) plus `__set`/`__isset`, `$f->prop = 1` calls `__set`
 and `isset($f->prop)` calls `__isset`; PHP sees the declared slot and runs no magic (emitPropSetPlain/GetPlain/Isset use
