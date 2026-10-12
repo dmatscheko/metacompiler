@@ -2598,8 +2598,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "object" && o.__pymod != undefined) {
             if (hasOwn(o, name)) { return true }
             if (o.__pymod == "builtins") { return hasOwn(hostGlobals, name) }
-            if (o.__pymod == "math") { return pyMathHas(name) }
-            return false
+            return pyModHas(o.__pymod, name)
         }
         // The BUILT-IN methods of str / list / dict / set, and
         // __class__, which EVERY value has (None.__class__ is NoneType).
@@ -4471,18 +4470,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return bigOut(acc)
     }
-    // Is `name` a function this math module offers? One list, consulted by the
-    // attribute read (`f = math.sqrt`) and by hasattr; the CALL path does not
-    // need it, because pyMathCall's own fall-through raises the AttributeError.
-    // Keep in step with pyMHas in languages/lib/python-rt.metajs and pyMathHas
-    // in abnf/jsrtpymath.go.
+    // Is `name` a function the runtime module `mod` (math, re or sys) offers? One
+    // list per module, consulted by the attribute read (`f = math.sqrt`, `from re
+    // import sub`) and by hasattr; the CALL path does not need it, because each
+    // module's call dispatch raises the AttributeError itself. Keep in step with
+    // pyMHas in languages/lib/python-rt.metajs and pyModHas in abnf/jsrtpymath.go.
     var pyMathNames = ["sqrt", "cbrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
                        "fabs", "fmod", "copysign", "atan2", "hypot", "sin", "cos", "tan",
                        "asin", "acos", "atan", "sinh", "cosh", "tanh", "degrees", "radians",
                        "floor", "ceil", "trunc", "gcd", "lcm", "factorial",
                        "isnan", "isinf", "isfinite", "isclose"]
-    function pyMathHas(name) {
-        for (var i = 0; i < pyMathNames.length; i++) { if (pyMathNames[i] == name) { return true } }
+    var pyReFnNames = ["compile", "search", "match", "fullmatch", "findall", "finditer",
+                       "sub", "subn", "split", "escape", "purge"]
+    var pySysFnNames = ["exit", "get_int_max_str_digits", "set_int_max_str_digits"]
+    function pyModHas(mod, name) {
+        var names = mod == "math" ? pyMathNames : mod == "re" ? pyReFnNames : mod == "sys" ? pySysFnNames : []
+        for (var i = 0; i < names.length; i++) { if (names[i] == name) { return true } }
         return false
     }
     // CPython's math_1 overflow rule for exp, expm1, sinh and cosh: an infinite result
@@ -11222,13 +11225,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // A MODULE object. `builtins.len` resolves straight through hostGlobals,
         // which is what makes `builtins.len is len` hold rather than answering a
-        // copy; a math function becomes a first-class value the same way `re`'s
-        // constants already were readable. Ahead of the own-property arm because
+        // copy; a math, re or sys function becomes a first-class value the same way
+        // `re`'s constants already were readable. Ahead of the own-property arm because
         // the math module's own slots (pi, e, ...) are read there and must win.
         if (o !== null && o !== undefined && typeof o == "object" && o.__pymod != undefined
             && !hasOwn(o, name)) {
             if (o.__pymod == "builtins" && hasOwn(hostGlobals, name)) { return hostGlobals[name] }
-            if (o.__pymod == "math" && pyMathHas(name)) { return pyModuleFn(o, name) }
+            if (pyModHas(o.__pymod, name)) { return pyModuleFn(o, name) }
             pyRaise(pyMakeExc("AttributeError",
                               ["module '" + o.__pymod + "' has no attribute '" + name + "'"]))
         }
@@ -12565,6 +12568,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so os.path resolves against "os").
     core.stdlibImports = ["sys", "os", "math", "collections.abc", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "abc", "builtins"]
+    // Each top-level module of that list has a module object, bound as
+    // _mec_mod_<name> like a library module's: the host global for the modules
+    // that have one (math, re, sys, builtins), else a bare module whose every
+    // attribute is an AttributeError. Twin of the _mec_mod_ boot loop in
+    // python-to-llvm-ir.abnf.
+    for (var smi = 0; smi < core.stdlibImports.length; smi++) {
+        var smn = core.stdlibImports[smi]
+        if (smn.indexOf(".") >= 0) { continue }
+        hostGlobals["_mec_mod_" + smn] = hasOwn(hostGlobals, smn) ? hostGlobals[smn] : {__pymod: smn}
+    }
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
     // the -i roots (c.findImport). The file is parsed with this grammar and
@@ -12621,17 +12634,39 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A library module's file binds its module object as _mec_mod_<name>: `import
     // M [as A]` binds A (else M) to it, and `from M import N [as A]` binds A (else
     // N) to its attribute N, raising CPython's ImportError when there is none. A
-    // project file has no module object; its names are bound flat already, so only
-    // an `as` alias needs a binding. Each binding is Python source compiled by this
-    // grammar, so it follows the assignment and scoping rules of any other.
+    // runtime module (pyRtMod) binds the same way, except that a name it does not
+    // provide stays unbound instead of failing the import: its surface is a subset
+    // of CPython's, and `from typing import List` for an annotation must not
+    // abort. `import os.path` binds os, and `import os.path as A` binds A only
+    // when the module has the attribute. A project file has no module object; its
+    // names are bound flat already, so only an `as` alias needs a binding. Each
+    // binding is Python source compiled by this grammar, so it follows the
+    // assignment and scoping rules of any other.
     // Twin of the same functions in python-to-llvm-ir.abnf.
     var pyImportKind = ""
     function pyImportStmt(src, rule) {
         return c.compile(c.parseFrom(c.agrammar, src, rule)).stack[0]
     }
+    // The runtime module a stdlib import path names (its first component), or "".
+    function pyRtMod(path) {
+        if (pyImportKind != "") { return "" }
+        var top = path.split(".")[0]
+        for (var i = 0; i < core.stdlibImports.length; i++) {
+            if (core.stdlibImports[i] == top) { return top }
+        }
+        return ""
+    }
     function pyImportMod(items, pos) {
         pyImportKind = ""
         resolveImport(items[0], pos)
+        var rtm = pyRtMod(items[0])
+        if (rtm != "" && items.length > 1 && items[0] != rtm) {
+            return pyImportStmt("try: " + items[1] + " = _mec_mod_" + items[0] + "\n" +
+                                "except AttributeError: pass\n", "TryStmt")
+        }
+        if (rtm != "") {
+            return pyImportStmt((items.length > 1 ? items[1] : rtm) + " = _mec_mod_" + rtm + "\n", "SmallLine")
+        }
         if (pyImportKind != "lib") { return null }
         var bound = items.length > 1 ? items[1] : items[0]
         return pyImportStmt(bound + " = _mec_mod_" + items[0] + "\n", "SmallLine")
@@ -12640,11 +12675,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyImportKind = ""
         resolveImport(items[0], pos)
         var mod = items[0]
+        var rtm = pyRtMod(mod)
         var binds = []
         for (var i = 1; i < items.length; i++) {
             var name = items[i][0]
             var bound = items[i].length > 1 ? items[i][1] : name
-            if (pyImportKind == "lib") {
+            if (rtm != "") {
+                binds.push(pyImportStmt("try: " + bound + " = _mec_mod_" + mod + "." + name + "\n" +
+                    "except AttributeError: pass\n", "TryStmt"))
+            } else if (pyImportKind == "lib") {
                 binds.push(pyImportStmt("try: " + bound + " = _mec_mod_" + mod + "." + name + "\n" +
                     "except AttributeError: raise ImportError(\"cannot import name '" + name + "' from '" + mod +
                     "' (unknown location)\") from None\n", "TryStmt"))

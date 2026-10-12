@@ -4531,6 +4531,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_set", [bmodV, emitStr(b, "Exception"), excBase])
         callExt(b, "js_set", [bmodV, emitStr(b, "BaseException"), excRoot])
         }
+        // The runtime modules the program imports (pyRtMod), bound as
+        // _mec_mod_<name> like a library module's: the global module object where
+        // there is one, read back so `m is math` holds after `import math as m`,
+        // else a bare module whose every attribute is an AttributeError. Only the
+        // imported ones, so a program pays nothing for the rest. Twin of the
+        // _mec_mod_ loop in python-interpreter.abnf.
+        for (var rm0 = 0; rm0 < pyRtModsUsed.length; rm0++) {
+            var rmn = pyRtModsUsed[rm0]
+            var rmV = hUndef
+            if (rmn == "math" || rmn == "re" || rmn == "sys" || rmn == "builtins") {
+                rmV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rmn)])
+            } else {
+                rmV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [rmV, emitStr(b, "__pymod"), emitStr(b, rmn)])
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_" + rmn), rmV])
+        }
 
         // ----- the recoverable-name hook ----------------------------------------
         //
@@ -4731,17 +4748,45 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A library module's file binds its module object as _mec_mod_<name>: `import
     // M [as A]` binds A (else M) to it, and `from M import N [as A]` binds A (else
     // N) to its attribute N, raising CPython's ImportError when there is none. A
-    // project file has no module object; its names are bound flat already, so only
-    // an `as` alias needs a binding. Each binding is Python source compiled by this
-    // grammar, so it follows the assignment and scoping rules of any other.
+    // runtime module (pyRtMod) binds the same way, except that a name it does not
+    // provide stays unbound instead of failing the import: its surface is a subset
+    // of CPython's, and `from typing import List` for an annotation must not
+    // abort. `import os.path` binds os, and `import os.path as A` binds A only
+    // when the module has the attribute. A project file has no module object; its
+    // names are bound flat already, so only an `as` alias needs a binding. Each
+    // binding is Python source compiled by this grammar, so it follows the
+    // assignment and scoping rules of any other.
     // Twin of the same functions in python-interpreter.abnf.
     var pyImportKind = ""
+    // The runtime modules imported anywhere, in first-import order; the boot block
+    // binds each one's _mec_mod_<name>.
+    var pyRtModsUsed = []
     function pyImportStmt(src, rule) {
         return c.compile(c.parseFrom(c.agrammar, src, rule)).stack[0]
+    }
+    // The runtime module a stdlib import path names (its first component), or "".
+    function pyRtMod(path) {
+        if (pyImportKind != "") { return "" }
+        var top = path.split(".")[0]
+        for (var i = 0; i < core.stdlibImports.length; i++) {
+            if (core.stdlibImports[i] != top) { continue }
+            if (pyRtModsUsed.indexOf(top) < 0) { pyRtModsUsed.push(top) }
+            if (top == "builtins") { pySawBuiltins = true }
+            return top
+        }
+        return ""
     }
     function pyImportMod(items, pos) {
         pyImportKind = ""
         resolveImport(items[0], pos)
+        var rtm = pyRtMod(items[0])
+        if (rtm != "" && items.length > 1 && items[0] != rtm) {
+            return pyImportStmt("try: " + items[1] + " = _mec_mod_" + items[0] + "\n" +
+                                "except AttributeError: pass\n", "TryStmt")
+        }
+        if (rtm != "") {
+            return pyImportStmt((items.length > 1 ? items[1] : rtm) + " = _mec_mod_" + rtm + "\n", "SmallLine")
+        }
         if (pyImportKind != "lib") { return null }
         var bound = items.length > 1 ? items[1] : items[0]
         return pyImportStmt(bound + " = _mec_mod_" + items[0] + "\n", "SmallLine")
@@ -4750,11 +4795,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyImportKind = ""
         resolveImport(items[0], pos)
         var mod = items[0]
+        var rtm = pyRtMod(mod)
         var binds = []
         for (var i = 1; i < items.length; i++) {
             var name = items[i][0]
             var bound = items[i].length > 1 ? items[i][1] : name
-            if (pyImportKind == "lib") {
+            if (rtm != "") {
+                binds.push(pyImportStmt("try: " + bound + " = _mec_mod_" + mod + "." + name + "\n" +
+                    "except AttributeError: pass\n", "TryStmt"))
+            } else if (pyImportKind == "lib") {
                 binds.push(pyImportStmt("try: " + bound + " = _mec_mod_" + mod + "." + name + "\n" +
                     "except AttributeError: raise ImportError(\"cannot import name '" + name + "' from '" + mod +
                     "' (unknown location)\") from None\n", "TryStmt"))

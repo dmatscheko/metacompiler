@@ -1951,13 +1951,13 @@ function pyGetAttrRaw(obj, name) {
     if (pyDIsProp(obj)) { return pyDPropAttr(obj, name) }
     // A MODULE object. `builtins.len` resolves through the module's own slot,
     // which the emitter filled with the very binding the global name resolves to,
-    // so `builtins.len is len` holds rather than answering a copy; a math
-    // function becomes a first-class value the same way `re`'s constants already
+    // so `builtins.len is len` holds rather than answering a copy; a math, re or
+    // sys function becomes a first-class value the same way `re`'s constants already
     // were readable. Placed before the bound-builtin arm because a module's own
     // data slots (math.pi) must win.
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined && obj[name] === undefined) {
-            if (obj["__pymod"] === "math" && pyMHas(name)) { return pyDModuleFn(obj, name) }
+            if (pyMHas(obj["__pymod"], name)) { return pyDModuleFn(obj, name) }
             pyRaiseExc("AttributeError",
                        "module '" + pyToStr(obj["__pymod"]) + "' has no attribute '" + name + "'")
         }
@@ -6333,8 +6333,7 @@ function pyDHasAttr(obj, name) {
     if (pyIsObj(obj)) {
         if (obj["__pymod"] !== undefined) {
             if (obj[name] !== undefined) { return true }
-            if (obj["__pymod"] === "math") { return pyMHas(name) }
-            return false
+            return pyMHas(obj["__pymod"], name)
         }
     }
     // What pyGetAttr answers on a builtin TYPE OBJECT: dict.fromkeys, and the
@@ -11155,12 +11154,21 @@ function js_pybuiltins_module() {
     return pyDBuiltinsMod
 }
 
-// Is `name` a function this math module offers? One list, consulted by the
-// attribute read (`f = math.sqrt`) and by hasattr; the CALL path does not need
-// it, because pyMathCall's own fall-through raises the AttributeError. Keep in
-// step with pyMathNames in languages/python-interpreter.abnf and pyMathHas in
-// abnf/jsrtpymath.go.
-function pyMHas(name) {
+// Is `name` a function the runtime module `mod` (math, re or sys) offers? One
+// list per module, consulted by the attribute read (`f = math.sqrt`, `from re
+// import sub`) and by hasattr; the CALL path does not need it, because each
+// module's call dispatch raises the AttributeError itself. Keep in step with
+// pyModHas in languages/python-interpreter.abnf and in abnf/jsrtpymath.go.
+function pyMHas(mod, name) {
+    if (mod == "re") {
+        if (name == "compile" || name == "search" || name == "match" || name == "fullmatch") { return true }
+        if (name == "findall" || name == "finditer" || name == "sub" || name == "subn") { return true }
+        return name == "split" || name == "escape" || name == "purge"
+    }
+    if (mod == "sys") {
+        return name == "exit" || name == "get_int_max_str_digits" || name == "set_int_max_str_digits"
+    }
+    if (mod != "math") { return false }
     if (name == "sqrt" || name == "exp" || name == "expm1" || name == "log") { return true }
     if (name == "log1p" || name == "log2" || name == "log10" || name == "pow") { return true }
     if (name == "fabs" || name == "fmod" || name == "copysign" || name == "atan2") { return true }

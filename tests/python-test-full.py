@@ -5504,6 +5504,57 @@ def s105():
           and Error.__name__ == "Error" and errs == ["replace() does not support int objects", "cannot import name 'S105nosuch' from 'copy'",
                        "ImportError cannot import name 'S105Nope' from 'collections'"])
 
+# ===== SECTION 106: aliased imports of the runtime-provided modules =====
+# math, re, sys, builtins and the other stdlib modules the runtime provides bind
+# a module object like any other: `import M as A` binds A to it, `from M import N
+# as A` binds A to its attribute, and a module function read off the module is a
+# first-class value. An unbound name counts as a failed row, not an abort.
+# Rows from CPython 3.14.
+import math as S106m
+from typing import List as S106List
+
+def S106first(xs: S106List[int]) -> int:
+    return xs[0]
+
+def S106chk(name, fn):
+    try:
+        ok = fn()
+    except (NameError, AttributeError):
+        ok = False
+    check(name, ok)
+
+def s106():
+    import math
+    import re as r
+    import sys as system
+    import builtins as bi
+    import json, os.path
+    import json as j2
+    from math import sqrt as sq, floor, pi
+    from re import sub, findall as fa, IGNORECASE, compile as rc
+    from sys import get_int_max_str_digits as gimd
+    from builtins import abs as ab
+    xs = [2.0, 9.0, 0.25]
+    S106chk("impst1", lambda: S106m.sqrt(16) == 4.0 and S106m is math and type(S106m).__name__ == "module"
+            and sq(25) == 5.0 and floor(2.5) == 2 and pi == 3.141592653589793
+            and [S106m.sqrt(x) for x in xs] == [2.0 ** 0.5, 3.0, 0.5] and S106m.sqrt.__name__ == "sqrt")
+    S106chk("impst2", lambda: r.sub("a", "b", "aaa") == "bbb" and r.I == r.IGNORECASE == IGNORECASE
+            and sub("x", "y", "xx") == "yy" and fa("[a-z]", "a1b") == ["a", "b"]
+            and rc("ab").search("zab").group(0) == "ab" and hasattr(r, "sub") and not hasattr(r, "S106nosuch")
+            and hasattr(system, "exit"))
+    S106chk("impst3", lambda: system.get_int_max_str_digits() == 4300 and gimd() == 4300 and bi.len([1, 2]) == 2
+            and bi.len is len and ab(-3) == 3)
+    def inner():
+        import math as S106mm
+        return S106mm.floor(9.5)
+    errs = []
+    try:
+        S106mm
+    except NameError as e:
+        errs.append(str(e))
+    S106chk("impst4", lambda: type(json).__name__ == "module" and type(os).__name__ == "module" and j2 is json
+            and S106first([7, 8]) == 7 and inner() == 9 and errs == ["name 'S106mm' is not defined"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5607,5 +5658,6 @@ def main():
     s103() # SECTION-CALL 103
     s104() # SECTION-CALL 104
     s105() # SECTION-CALL 105
+    s106() # SECTION-CALL 106
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

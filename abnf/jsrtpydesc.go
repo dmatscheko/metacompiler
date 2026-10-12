@@ -302,7 +302,7 @@ func (rt *jsrt) pyModuleAttr(mod *jsObject, name string) (interface{}, bool) {
 	if v, has := mod.props[name]; has {
 		return v, true
 	}
-	if rt.toString(mod.props["__pymod"]) == "math" && pyMathHas(name) {
+	if pyModHas(rt.toString(mod.props["__pymod"]), name) {
 		return rt.pyModuleFn(mod, name), true
 	}
 	return nil, false

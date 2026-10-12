@@ -20133,8 +20133,8 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 	}
 	// A MODULE object. `builtins.len` resolves through the module's own slot,
 	// which the emitter filled with the very binding the global name resolves
-	// to, so `builtins.len is len` holds rather than answering a copy; a math
-	// function becomes a first-class value the same way `re`'s constants are
+	// to, so `builtins.len is len` holds rather than answering a copy; a math, re
+	// or sys function becomes a first-class value the same way `re`'s constants are
 	// readable. Ahead of the builtin arms because a module's own data slots
 	// (math.pi) must win. See abnf/jsrtpydesc.go.
 	if mod, isMod := pyIsModule(obj); isMod {

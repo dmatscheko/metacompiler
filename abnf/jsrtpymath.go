@@ -129,19 +129,34 @@ func pyMathGcd(a, b float64) float64 {
 	return a
 }
 
-// pyMathHas says whether `name` is a function this math module offers. It exists
-// for the ATTRIBUTE read (`f = math.sqrt`) and for hasattr; the call path does
-// not need it, because pyMathCall's own fall-through raises the AttributeError.
-// Keep in step with pyMHas in languages/lib/python-rt.metajs and pyMathNames in
+// pyModHas says whether `name` is a function the runtime module `mod` (math, re
+// or sys) offers. It exists for the ATTRIBUTE read (`f = math.sqrt`, `from re
+// import sub`) and for hasattr; the call path does not need it, because each
+// module's call dispatch raises the AttributeError itself. Keep in step with
+// pyMHas in languages/lib/python-rt.metajs and pyModHas in
 // languages/python-interpreter.abnf.
-func pyMathHas(name string) bool {
-	switch name {
-	case "sqrt", "cbrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
-		"fabs", "fmod", "copysign", "atan2", "hypot",
-		"sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
-		"degrees", "radians", "floor", "ceil", "trunc",
-		"gcd", "lcm", "factorial", "isnan", "isinf", "isfinite", "isclose":
-		return true
+func pyModHas(mod, name string) bool {
+	switch mod {
+	case "math":
+		switch name {
+		case "sqrt", "cbrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
+			"fabs", "fmod", "copysign", "atan2", "hypot",
+			"sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
+			"degrees", "radians", "floor", "ceil", "trunc",
+			"gcd", "lcm", "factorial", "isnan", "isinf", "isfinite", "isclose":
+			return true
+		}
+	case "re":
+		switch name {
+		case "compile", "search", "match", "fullmatch", "findall", "finditer",
+			"sub", "subn", "split", "escape", "purge":
+			return true
+		}
+	case "sys":
+		switch name {
+		case "exit", "get_int_max_str_digits", "set_int_max_str_digits":
+			return true
+		}
 	}
 	return false
 }
