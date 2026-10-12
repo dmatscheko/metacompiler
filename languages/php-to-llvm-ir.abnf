@@ -1021,7 +1021,7 @@ FieldSfx    <~~ push(makeFieldSfx(takeAll())) ~~>
             = Arrow MethodName <~~ push({fname: up.in}) ~~> ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
+CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" [ ArgList ] ")" ;
 // An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
 // first-class callable placeholder (strlen(...)), with an optional trailing comma.
@@ -3446,7 +3446,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = rl.b
             var rr = rhsT(b)
             b = rr.b
-            var rc = callableV(b, rr.v)
+            var rc = callableV(b, rr.v, false)
             b = rc.b
             var argsV = dynPlaceArgs(b, rc.v, argList(b, [rl.v]), true)
             if (!magicInvoke) { return {b: b, v: callExt(b, "js_call", [rc.v, hUndef, argsV])} }
@@ -3462,6 +3462,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     function makePipe(items) {
+        nsUsed = true
         var cur = items[0]
         for (var i = 1; i < items.length; i++) { cur = pipeStep(cur, items[i]) }
         return cur
@@ -3705,7 +3706,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return undefined
     }
     function makeMethodSfx(items) {
-        return {kind: "mcall", name: sfxNamed(items, "mname"), args: sfxRest(items), nullsafe: sfxNs(items)}
+        var name = sfxNamed(items, "mname")
+        var lc = phsCase(name, false)
+        if (lc == "bindto" || lc == "call") { cloRebind = true }
+        return {kind: "mcall", name: name, args: sfxRest(items), nullsafe: sfxNs(items)}
+    }
+    // A call of a value may name a method through its class, which php_callable
+    // checks against the class's non-static methods (nsUsed).
+    function makeCallSfx(items) {
+        nsUsed = true
+        return {kind: "call", args: items}
     }
     function makeFieldSfx(items) {
         return {kind: "field", name: sfxNamed(items, "fname"), nullsafe: sfxNs(items)}
@@ -3792,14 +3802,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 } else if (s.kind == "call") {
                     // $f(...): the value made callable, its method resolved here.
                     if (hasFcc(s.args)) {
-                        var rcf = callableV(b, cur)
+                        var rcf = callableV(b, cur, false)
                         b = rcf.b
                         cur = rcf.v
                         continue
                     }
                     // $f(1, ?) : a partial over whatever the chain has produced.
                     if (hasPlace(s.args)) {
-                        var rcv0 = callableV(b, cur)
+                        var rcv0 = callableV(b, cur, false)
                         var rpv = emitPartialFor(rcv0.b, rcv0.v, "", "call", "\x00pfafn", s.args, null)
                         b = rpv.b
                         cur = rpv.v
@@ -3811,12 +3821,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     if (plain2 && hasVarArg(s.args)) {
                         // The callee is resolved first, so a variable argument can be
                         // handed over as a reference where its parameter takes one.
-                        rc2 = callableV(b, cur)
+                        rc2 = callableV(b, cur, false)
                         ea2 = emitDynRefArgs(rc2.b, s.args, rc2.v)
                         b = ea2.b
                     } else {
                         ea2 = plain2 ? emitPhArgs(b, s.args, null) : emitArgTmp(b, s.args)
-                        rc2 = callableV(ea2.b, cur)
+                        rc2 = callableV(ea2.b, cur, false)
                         b = rc2.b
                     }
                     ea2 = {b: b, v: dynPlaceArgs(b, rc2.v, ea2.v, plain2)}
@@ -4246,6 +4256,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var gd = phDeref(gr.b, gr.v)
                 return {b: gd.b, v: isSetHandle(gd.b, gd.v)}
             }
+            // $this is no local: a closure reads it up its scope chain.
+            if ((ref.nameT == null || ref.nameT == undefined) && ref.name == "$this") { return {b: b, v: isSetHandle(b, phThis(b))} }
             var rn2 = refNameV(b, ref)
             var rd = phDeref(rn2.b, rawVarV(rn2.b, rn2.v))
             return {b: rd.b, v: isSetHandle(rd.b, rd.v)}
@@ -4422,13 +4434,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // what $c(...) yields. Twin of the same arm in php-interpreter.abnf.
         var fromCb = memT == null && args != null && args.length > 0 && args[0].pos != undefined && baseText != null
             && phsCase(baseText, false) == "closure" && phsCase(mem, false) == "fromcallable"
+        // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
+        var cloBindAt = memT == null && args != null && args.length > 0 && argsArePlain(args) && baseText != null
+            && phsCase(baseText, false) == "closure" && phsCase(mem, false) == "bind"
+        if (cloBindAt) { cloRebind = true }
         // mode is coalIs as the left operand of '??', where a static property the
         // scope may not see reads null (sGetV's quiet).
         return function(b, mode) {
             if (lit != null) { return {b: b, v: emitStr(b, lit)} }
+            if (cloBindAt) {
+                var bvs = []
+                for (var bi = 0; bi < args.length; bi++) {
+                    var rbi = args[bi].pos(b)
+                    b = rbi.b
+                    bvs.push(rbi.v)
+                }
+                return {b: b, v: callExt(b, "js_phmcall", [bvs[0], emitStr(b, "bindTo"), argList(b, bvs.slice(1))])}
+            }
             if (fromCb) {
                 var rcb = args[0].pos(b)
-                return callableV(rcb.b, cbCheckV(rcb.b, rcb.v, emitStr(rcb.b, "Failed to create closure from callable:"), true))
+                return callableV(rcb.b, cbCheckV(rcb.b, rcb.v, emitStr(rcb.b, "Failed to create closure from callable:"), true), true)
             }
             var rb = baseT(b)
             b = rb.b
@@ -4737,10 +4762,79 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var line = "" + c.lineOf(pos)
         var name = "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}"
         cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
-                        fn: name, meth: name})
+                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self})
         cloStatic = false
     }
     function cloLeave() { return cloScopes.pop() }
+    // A static closure written where a $this is in reach (cloEnter's hide) sees
+    // none: its frame declares $this undefined, as a static method's has none.
+    // Twin of cloChain in php-interpreter.abnf.
+    function cloHideThis(sc, body) {
+        if (sc.hide !== true) { return body }
+        return function(b) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$this"), hUndef])
+            return body(b)
+        }
+    }
+    // cloRebind: the program can rebind a closure (->bindTo, ->call, Closure::bind),
+    // so every closure literal's record carries what that needs (cloRebindRec).
+    var cloRebind = false
+    // The record fields a rebind reads: the literal's FACTORY (cloFactory), its class
+    // scope, and st for a static one.
+    function cloRebindRec(b, rec, facIdx, envV, sc, scopeV) {
+        callExt(b, "js_set", [rec, emitStr(b, "f"), callExt(b, "js_closure", [handle(facIdx), envV])])
+        callExt(b, "js_set", [rec, emitStr(b, "sc"), scopeV])
+        if (sc.st === true) { callExt(b, "js_set", [rec, emitStr(b, "st"), hTrue]) }
+    }
+    // A closure literal's factory: called with ($this, scope) from js_phmcall's
+    // Closure arm (phCloBind), it makes the same closure over a scope that copies
+    // the captured names and declares $this, self and static anew, so the body,
+    // which reads them up its scope chain, sees the new ones
+    // (zend_create_closure_ex). A scope given as a class NAME is looked up here,
+    // and one no class has answers null, as PHP does. Twin of cloBind in
+    // php-interpreter.abnf.
+    function cloFactory(idx, names, pl, desc, sc) {
+        funcCount++
+        var facIdx = funcCount
+        var savedF = curF
+        var savedScope = curScopeV
+        var f = m.NewFunc("jsf_" + facIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = f
+        curScopeV = f.Params[0]
+        var env = f.Params[0]
+        var b = f.NewBlock("entry")
+        var thisV = callExt(b, "js_arg", [f.Params[1], handle(0)])
+        var sArg = callExt(b, "js_arg", [f.Params[1], handle(1)])
+        var strB = f.NewBlock("")
+        var missB = f.NewBlock("")
+        var joinB = f.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), sArg])), strB, joinB)
+        var looked = phClsFind(strB, sArg)
+        strB.NewCondBr(strB.NewICmp(llvm.enum.IPredEQ, looked, hNull), missB, joinB)
+        missB.NewRet(hNull)
+        var scopeV = joinB.NewPhi([llvm.ir.NewIncoming(sArg, b), llvm.ir.NewIncoming(looked, strB)])
+        var L = callExt(joinB, "js_scope_new", [env])
+        for (var i = 0; i < names.length; i++) {
+            var nV = emitStr(joinB, names[i])
+            callExt(joinB, "js_scope_decl", [L, nV, callExt(joinB, "js_scope_own", [env, nV])])
+        }
+        callExt(joinB, "js_scope_decl", [L, emitStr(joinB, "$this"), thisV])
+        callExt(joinB, "js_scope_decl", [L, emitStr(joinB, frameClsName("self")), scopeV])
+        // static:: is the class of the new $this, else the new scope.
+        var objB = f.NewBlock("")
+        var lsbB = f.NewBlock("")
+        joinB.NewCondBr(emitIsObj(joinB, thisV), objB, lsbB)
+        var thisCls = callExt(objB, "js_get", [thisV, emitStr(objB, "__class")])
+        objB.NewBr(lsbB)
+        var lsbV = lsbB.NewPhi([llvm.ir.NewIncoming(scopeV, joinB), llvm.ir.NewIncoming(thisCls, objB)])
+        callExt(lsbB, "js_scope_decl", [L, emitStr(lsbB, frameClsName("static")), lsbV])
+        var rec = callExt(lsbB, "js_phclo", [emitStr(lsbB, desc), emitStr(lsbB, plSig(pl)), env, thisV])
+        cloRebindRec(lsbB, rec, facIdx, env, sc, scopeV)
+        lsbB.NewRet(callExt(lsbB, "js_jsfnmeta", [closureV(lsbB, idx, L), rec, emitNum(lsbB, refMask(pl))]))
+        curF = savedF
+        curScopeV = savedScope
+        return facIdx
+    }
     // A property hook's name: twin of cloEnterHook in php-interpreter.abnf.
     var cloProp = ""
     function cloNoteProp(n) { cloProp = stripWs(n) }
@@ -4790,11 +4884,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
         }
         var desc = cloDesc(sc, uses, pl)
-        body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal.concat(byRef), body)))
+        body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal.concat(byRef), body))))
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, byVal, byRef)
-            return {b: rc.b, v: withClosureRec(rc.b, closureV(rc.b, idx, rc.v), pl, desc, rc.v, sc.self)}
+            return {b: rc.b, v: withClosureRec(rc.b, closureV(rc.b, idx, rc.v), pl, desc, rc.v, sc, idx, byVal.concat(byRef))}
         }
     }
 
@@ -4815,13 +4909,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // to one of them outside is not visible inside. `$this` is not captured: it
         // resolves through the defining scope, as in every closure.
         var captured = varsSince(mark, pl.params.concat(["$this"]))
-        var body = paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, makeBody([makeReturn([bodyT])]))))
         var sc = cloLeave()
+        var body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, makeBody([makeReturn([bodyT])])))))
         var desc = cloDesc(sc, captured, pl)
         return function(b) {
             var idx = emitFunc(pl.params, body, false)
             var rc = emitCapture(b, captured, [])
-            return {b: rc.b, v: withClosureRec(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl, desc, rc.v, sc.self)}
+            return {b: rc.b, v: withClosureRec(rc.b, callExt(rc.b, "js_closure", [handle(idx), rc.v]), pl, desc, rc.v, sc, idx, captured)}
         }
     }
 
@@ -5007,6 +5101,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var gr = globalsRawV(b, ref)
             return phDeref(gr.b, gr.v)
         }
+        if (!curThisOwn && (ref.nameT == null || ref.nameT == undefined) && ref.name == "$this") { return {b: b, v: phThis(b)} }
         var rn = refNameV(b, ref)
         if (!viv) { return phDeref(rn.b, rawVarV(rn.b, rn.v)) }
         return {b: rn.b, v: rawVarV(rn.b, rn.v)}
@@ -5860,12 +5955,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // ['C', 'm'] - turned into a bound closure that performs the dispatch when it is
     // called. ONE module-level helper (php_callable), so a call site stays a single
     // call. A string naming nothing raises PHP 8's catchable `Error: Call to undefined
-    // function x()` rather than the floor's abort. Twin of phpInvoke in
-    // php-interpreter.abnf.
+    // function x()` rather than the floor's abort. cb says v is a CALLBACK resolved
+    // where it is handed over, which binds a non-static method named through its
+    // class to this frame's $this; otherwise it is a dynamic call, which binds none
+    // (js_phcbns). Twin of phpInvoke and cbResolve in php-interpreter.abnf.
     var callableF = undefined
-    function callableV(b, v) {
+    function callableV(b, v, cb) {
         if (callableF == undefined) { callableF = emitCallableFn() }
-        return {b: b, v: b.NewCall(callableF, [curScopeV, v])}
+        return {b: b, v: b.NewCall(callableF, [curScopeV, v, cb ? hTrue : hFalse])}
     }
     // A function named at run time may be fully qualified: on a miss, one leading
     // "\" is dropped and the name looked up again (zend_is_callable_check_func).
@@ -5883,7 +5980,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return missB
     }
     function emitCallableFn() {
-        var f = m.NewFunc("php_callable", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("v", i64)])
+        var f = m.NewFunc("php_callable", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("v", i64),
+                                                llvm.ir.NewParam("cb", i64)])
         var env = f.Params[0]
         var v = f.Params[1]
         var eb = f.NewBlock("entry")
@@ -5910,7 +6008,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var cnS = callExt(sepB, "js_phsubstr", [v, emitNum(sepB, 0), sepV])
         var clsS = sepB.NewCall(classNamedFn(), [env, cnS, hUndef])
         var mnS = callExt(sepB, "js_phsubstr", [v, callExt(sepB, "js_phadd", [sepV, emitNum(sepB, 2)]), hNull])
-        sepB.NewRet(boundStatic(sepB, env, cnS, clsS, mnS))
+        sepB.NewRet(boundStatic(sepB, env, cnS, clsS, mnS, f.Params[2]))
         // A two-element array: [$obj, 'm'] or ['C', 'm']. js_phcbarr raises PHP's
         // Error for a value that cannot be called at all.
         var arrB = f.NewBlock("arr")
@@ -5925,18 +6023,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         objB.NewRet(boundDyn(objB, env, "mcall", recvV, mnA, hUndef, hUndef))
         var cnA = callExt(clsB, "js_phstr", [recvV])
         var clsA = clsB.NewCall(classNamedFn(), [env, cnA, hUndef])
-        clsB.NewRet(boundStatic(clsB, env, cnA, clsA, mnA))
+        clsB.NewRet(boundStatic(clsB, env, cnA, clsA, mnA, f.Params[2]))
         return f
     }
     // A static method callable. A relative class name (self / parent / static)
     // forwards the late-static-binding class and $this of the frame that resolves it,
-    // which js_phfwd reads here, in that frame.
-    function boundStatic(b, env, cnV, clsV, mnV) {
+    // which js_phfwd reads here, in that frame. A class named outright forwards
+    // nothing, except the $this a callback (cbV true) binds a non-static method to,
+    // whose class is then the late-static-binding one; for a dynamic call (cbV
+    // false) js_phcbns raises on a non-static method instead.
+    function boundStatic(b, env, cnV, clsV, mnV, cbV) {
         var thisV = b.NewCall(scopeProbeFn(), [env, emitStr(b, "$this"), hUndef])
         var selfV = b.NewCall(scopeProbeFn(), [env, emitStr(b, frameClsName("self")), hNull])
         var lsbV = callExt(b, "js_phfwd", [cnV, thisV, selfV])
-        var fwdThis = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, lsbV, hUndef), hUndef, thisV)
-        return boundDyn(b, env, "scall", clsV, mnV, fwdThis, lsbV)
+        var nsThis = callExt(b, "js_phcbns", [cbV, clsV, cnV, mnV, thisV, selfV])
+        var named = b.NewICmp(llvm.enum.IPredEQ, lsbV, hUndef)
+        var fwdThis = b.NewSelect(named, nsThis, thisV)
+        var fwdLsb = b.NewSelect(named, b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, nsThis, hUndef), hUndef, hTrue), lsbV)
+        return boundDyn(b, env, "scall", clsV, mnV, fwdThis, fwdLsb)
     }
     // A callback handed to an internal function is checked where it is handed over:
     // anything that is not a valid callback is a TypeError worded as
@@ -6155,7 +6259,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         if (name == "gettype") { return {b: b, v: callExt(b, "js_phtype", [vs[0]])} }
         // __mec_callable($callback, $where): the library's callback check.
-        if (name == "__mec_callable") { return {b: b, v: cbCheckV(b, vs[0], vs[1], false)} }
+        if (name == "__mec_callable") { return {b: b, v: cbCheckV(b, vs[0], vs[1], true)} }
         if (name == "get_debug_type") { return {b: b, v: callExt(b, "js_phdtype", [vs[0]])} }
         if (name == "get_class") {
             if (vs.length > 0) { return {b: b, v: callExt(b, "js_phgetclass", [vs[0]])} }
@@ -6241,7 +6345,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return {pos: function(b) {
             var r = a.pos(b)
             var where = emitStr(r.b, name + "(): Argument #1 ($callback) must be a valid callback")
-            return callableV(r.b, cbCheckV(r.b, r.v, where, true))
+            return callableV(r.b, cbCheckV(r.b, r.v, where, true), true)
         }}
     }
     // is_callable($v): the check call_user_func makes, in this frame, inside a try
@@ -6275,14 +6379,31 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // ['parent', 'm'], 'static::m') is resolved in the caller's frame too
     // (js_phrelcb): a method the class answers becomes the bound closure
     // php_callable makes here, anything else the absolute 'C::m' the library's own
-    // check reports on. Twin of libCallable in php-interpreter.abnf.
+    // check reports on. So is a non-static method named outright that this frame's
+    // $this may call; the library's check (__mec_callable) rejects any other one.
+    // Twin of libCallable in php-interpreter.abnf.
     function libCallable(a) {
         return {pos: function(b) {
             var r = a.pos(b)
             b = r.b
             var selfV = b.NewCall(scopeProbeFn(), [curScopeV, emitStr(b, frameClsName("self")), hNull])
             var statV = b.NewCall(scopeProbeFn(), [curScopeV, emitStr(b, frameClsName("static")), hNull])
-            var relV = callExt(b, "js_phrelcb", [r.v, selfV, statV])
+            // A class named outright is looked up here, for its non-static methods.
+            var thisV = hUndef
+            var clsV = hNull
+            if (anyNs) {
+                thisV = phThis(b)
+                var hdV = callExt(b, "js_phcbhead", [r.v])
+                var hlB = curF.NewBlock("")
+                var hjB = curF.NewBlock("")
+                var hb0 = b
+                b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), hdV])), hlB, hjB)
+                var hcV = phClsFind(hlB, hdV)
+                hlB.NewBr(hjB)
+                clsV = hjB.NewPhi([llvm.ir.NewIncoming(hNull, hb0), llvm.ir.NewIncoming(hcV, hlB)])
+                b = hjB
+            }
+            var relV = callExt(b, "js_phrelcb", [r.v, selfV, statV, clsV, thisV])
             var bindB = curF.NewBlock("")
             var joinB = curF.NewBlock("")
             if (anyMVis) {
@@ -6302,7 +6423,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             var fromB = b
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, relV, hUndef), bindB, joinB)
-            var bound = callableV(bindB, r.v)
+            var bound = callableV(bindB, r.v, true)
             bound.b.NewBr(joinB)
             return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(relV, fromB), llvm.ir.NewIncoming(bound.v, bound.b)])}
         }}
@@ -6322,8 +6443,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var cbAt = libCbArg["$" + name] == undefined ? -1 : libCbArg["$" + name]
         if (cbAt >= 0 && args.length > cbAt && args[cbAt].pos != undefined && args[cbAt].aname == undefined
             && argsArePlain(args.slice(0, cbAt + 1))) {
+            nsUsed = true
             args[cbAt] = libCallable(args[cbAt])
         }
+        if (name == "__mec_callable") { nsUsed = true }
         return function(b) {
             // strlen(...): PHP 8.1's first-class callable syntax. The value of the
             // expression IS the function, so there is nothing to call here.
@@ -6349,6 +6472,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // The class whose method body is being emitted ("" outside one); a closure keeps
     // its method's.
     var curSelfName = ""
+    // Whether the body being emitted declares $this in its own frame (a method, and
+    // the try bodies inside one); a closure reads it up its scope chain.
+    var curThisOwn = false
     function emitFunc(params, bodyStmt, isMethod, isCtl, selfName) {
         funcCount++
         var idx = funcCount
@@ -6391,9 +6517,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var savedSaw = sawYield
         var savedSelf = curSelfName
         if (isMethod) { curSelfName = selfName == undefined ? "" : selfName }
+        // A closure that may be rebound to another class scope (cloRebind) cannot
+        // know its class at compile time, so its property accesses take the check.
+        else if (!isCtl && cloRebind) { curSelfName = "" }
+        var savedOwn = curThisOwn
+        if (!isCtl) { curThisOwn = isMethod }
         sawYield = false
         var endB = bodyStmt(b)
         curSelfName = savedSelf
+        curThisOwn = savedOwn
         endB.NewRet(hNull)
         genClosure = sawYield
         sawYield = savedSaw
@@ -6623,9 +6755,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // $this) in the name half of its meta slot, which also takes it a handle. The
     // C floor's slot holds any handle; layer 2 and the Go twin read the signature
     // back out of the record.
-    function withClosureRec(b, fn, pl, desc, envV, self) {
-        var thisV = self ? phThis(b) : hUndef
+    // In a program that can rebind a closure the record also carries the literal's
+    // factory (cloFactory over function idx and the captured names) and the class
+    // scope it is made in.
+    function withClosureRec(b, fn, pl, desc, envV, sc, idx, names) {
+        var thisV = sc.self ? phThis(b) : hUndef
         var rec = callExt(b, "js_phclo", [emitStr(b, desc), emitStr(b, plSig(pl)), envV, thisV])
+        if (cloRebind) { cloRebindRec(b, rec, cloFactory(idx, names, pl, desc, sc), envV, sc, visScope(b)) }
         return callExt(b, "js_jsfnmeta", [fn, rec, emitNum(b, refMask(pl))])
     }
     // A named function is GLOBAL wherever its declaration stands: one written inside

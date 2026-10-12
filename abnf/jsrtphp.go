@@ -1099,6 +1099,69 @@ func (rt *jsrt) phpMethodOf(target, nameV interface{}) interface{} {
 	return rt.phpFindMethod(cls, phpCase(name, false))
 }
 
+// phpCloCall is a method call on a Closure: __invoke calls it, bindTo rebinds
+// it, call rebinds it to an object and that object's class and calls it at
+// once. Twin of phCloCall in languages/lib/php-rt.metajs and cloMethod in
+// php-interpreter.abnf.
+func (rt *jsrt) phpCloCall(f interface{}, name string, args []interface{}) interface{} {
+	var nthis, sv interface{} = jsNull, jsNull
+	if len(args) > 0 {
+		nthis = args[0]
+	}
+	if len(args) > 1 {
+		sv = args[1]
+	}
+	switch phpCase(name, false) {
+	case "__invoke":
+		return rt.call(f, jsUndef, args)
+	case "bindto":
+		if len(args) < 2 {
+			return rt.phpCloBind(f, nthis, jsNull, true)
+		}
+		if s, ok := sv.(string); ok && phpCase(s, false) == "static" {
+			return rt.phpCloBind(f, nthis, jsNull, true)
+		}
+		if o, ok := sv.(*jsObject); ok && phpIsObj(o) {
+			return rt.phpCloBind(f, nthis, o.props["__class"], false)
+		}
+		return rt.phpCloBind(f, nthis, sv, false)
+	case "call":
+		var scope interface{} = jsNull
+		if o, ok := nthis.(*jsObject); ok && phpIsObj(o) {
+			scope = o.props["__class"]
+		}
+		bf := rt.phpCloBind(f, nthis, scope, false)
+		if isNullish(bf) {
+			return jsNull
+		}
+		return rt.call(bf, jsUndef, args[1:])
+	}
+	rt.phpRaise("Error", "Call to undefined method Closure::"+name+"()")
+	return jsUndef
+}
+
+// phpCloBind is f with its $this and class scope replaced (zend_create_closure_ex),
+// made by the factory a closure literal's record keeps (cloFactory in
+// php-to-llvm-ir.abnf), which also resolves a class NAME. keep leaves the class
+// scope the record holds. No instance binds to a static closure: PHP warns (not
+// modelled) and answers null. Twin of phCloBind in languages/lib/php-rt.metajs
+// and cloBind in php-interpreter.abnf.
+func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
+	rec := jsvFnMeta(f).rec
+	if rec == nil || rec.props["f"] == nil {
+		rt.fail("binding a Closure that is not a closure literal is not modelled")
+	}
+	if !phpIsObj(nthis) {
+		nthis = jsNull
+	} else if rec.props["st"] == true {
+		return jsNull
+	}
+	if keep {
+		scope = rec.props["sc"]
+	}
+	return rt.call(rec.props["f"], jsUndef, []interface{}{nthis, scope})
+}
+
 // ----- comparison ------------------------------------------------------------
 
 // phpIdentical is ===: the same type, and for arrays the same keys in the same
@@ -3174,6 +3237,14 @@ func init() {
 						if lc := phpCase(name, false); lc != name && rt.phpFindMethod(cls, lc) != nil {
 							return w(rt.memberCall(recv, lc, args.elems))
 						}
+						// A method the class does not declare is its __call's.
+						if c, ok := cls.(*jsObject); ok && phpOwner(c, "__call") != nil {
+							inner := phpNewArr()
+							for _, e := range args.elems {
+								rt.phpArrPush(inner, e)
+							}
+							return w(rt.memberCall(recv, "__call", []interface{}{name, inner}))
+						}
 						// PHP 8, and CATCHABLE: `catch (Error $e)` recovers.
 						rt.phpRaise("Error", "Call to undefined method "+rt.phpClassName(recv)+"::"+name+"()")
 					}
@@ -3182,6 +3253,9 @@ func init() {
 				if f, has := o.props[name]; has && isCallable(f) {
 					return w(rt.memberCall(recv, name, args.elems))
 				}
+			}
+			if isCallable(recv) {
+				return w(rt.phpCloCall(recv, name, args.elems))
 			}
 			// A string, an int, null, an array - everything PHP will not let you
 			// call a method on. phpDebugType spells the type as PHP 8 does.
@@ -3253,30 +3327,59 @@ func init() {
 			}
 			return jsHUndefined
 		}
-		// js_phcbns(where, cls, cn, mn, this, scope): the callback check's
-		// non-static rule (zend_is_callable_check_func): a method named through its
-		// class cn needs an object - the frame's $this, when the frame's class scope
-		// is an instance of cls, or for a relative name any $this. Twin of
-		// js_phcbns in languages/lib/php-rt.metajs.
+		// js_phcbns(where, cls, cn, mn, this, scope): the non-static rule for a
+		// method named through its class cn (zend_is_callable_check_class). A
+		// callback binds the frame's $this when the frame's class scope is an
+		// instance of cls, and a relative name forwards any $this. where is the
+		// callback check's argument, which raises its TypeError for a method
+		// nothing binds; true answers the $this a callback binds (undefined for
+		// none); false is a DYNAMIC call ('C::m'(), ['C', 'm']()), which binds none
+		// and so raises PHP's Error for a non-static method, and for a missing one
+		// that __call would take for this (get_static_method_fallback). Twin of
+		// js_phcbns in languages/lib/php-rt.metajs and cbNonStatic / cbThis /
+		// dynNonStatic in php-interpreter.abnf.
 		m["js_phcbns"] = func(a []uint64) uint64 {
 			cls, ok := u(a[1]).(*jsObject)
 			if !ok {
 				return jsHUndefined
 			}
+			this := u(a[4])
+			switch phpCase(strings.TrimPrefix(rt.phpStr(u(a[2])), "\\"), false) {
+			case "self", "parent", "static":
+				if phpIsObj(this) || u(a[0]) == false || u(a[0]) == true {
+					return jsHUndefined
+				}
+			}
 			mn := rt.phpStr(u(a[3]))
+			if u(a[0]) == false {
+				ns := ""
+				if rt.phpMethodOf(cls, mn) != nil {
+					ns = rt.phpNonStatic(cls, phpCase(mn, false))
+				} else if o, ok := this.(*jsObject); ok && phpOwner(cls, "__call") != nil && rt.phpIsA(this, rt.phpStr(cls.props["__name"])) {
+					if k, _ := rt.phpMethodDecl(o.props["__class"].(*jsObject), "__call"); k != nil {
+						ns = rt.phpStr(k.props["__name"]) + "::" + mn
+					}
+				}
+				if ns != "" {
+					rt.phpRaise("Error", "Non-static method "+ns+"() cannot be called statically")
+				}
+				return jsHUndefined
+			}
 			ns := rt.phpNonStatic(cls, phpCase(mn, false))
 			if ns == "" {
 				return jsHUndefined
 			}
-			if this := u(a[4]); phpIsObj(this) {
-				switch phpCase(strings.TrimPrefix(rt.phpStr(u(a[2])), "\\"), false) {
-				case "self", "parent", "static":
-					return jsHUndefined
-				}
+			if phpIsObj(this) {
 				if scope, ok := u(a[5]).(*jsObject); ok && rt.phpIsA(this, rt.phpStr(scope.props["__name"])) &&
 					rt.phpIsA(scope, rt.phpStr(cls.props["__name"])) {
+					if u(a[0]) == true {
+						return a[4]
+					}
 					return jsHUndefined
 				}
+			}
+			if u(a[0]) == true {
+				return jsHUndefined
 			}
 			rt.phpCbFail(rt.phpStr(u(a[0])), "non-static method "+rt.phpStr(cls.props["__name"])+"::"+ns[strings.Index(ns, "::")+2:]+"() cannot be called statically")
 			return jsHUndefined
@@ -3482,13 +3585,16 @@ func init() {
 			rt.phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, "+rt.phpValueName(v)+" given")
 			return jsHUndefined
 		}
-		// js_phrelcb(v, self, static): a library function's callback named RELATIVE
+		// js_phrelcb(v, self, static, cls, this): a library function's callback named RELATIVE
 		// to the class scope ('self::m', ['parent', 'm'], 'static::m'), resolved
 		// against the caller's frame classes. undefined when the class answers the
 		// method (the caller binds it), the absolute "C::m" when it does not (the
 		// library's own check reports on that), v itself when it is no relative
-		// callable or the caller has no class scope. Twin of js_phrelcb in
-		// languages/lib/php-rt.metajs and libCallable in php-interpreter.abnf.
+		// callable or the caller has no class scope. A non-static method named
+		// outright through cls (the class its name denotes, which the caller looks
+		// up) answers undefined too when the frame's this binds it (js_phcbns).
+		// Twin of js_phrelcb in languages/lib/php-rt.metajs and libCallable in
+		// php-interpreter.abnf.
 		m["js_phrelcb"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			var cn, mn interface{}
@@ -3505,6 +3611,14 @@ func init() {
 				return a[0]
 			}
 			cls := self
+			switch phpCase(c, false) {
+			case "self", "static", "parent":
+			default:
+				if m["js_phcbns"]([]uint64{jsHTrue, a[3], w(c), w(mname), a[4], a[1]}) != jsHUndefined {
+					return jsHUndefined
+				}
+				return a[0]
+			}
 			switch phpCase(c, false) {
 			case "self":
 			case "static":

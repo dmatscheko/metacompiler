@@ -3181,6 +3181,92 @@ function s65() {
     check("isc2", $o->inside() === [true, true, true, false]);
 }
 
+// ===== SECTION 66: callbacks and dynamic calls of instance methods, static closures, Closure's methods =====
+// A callback naming a non-static method through its class binds the $this of the
+// frame it is handed over in, when that frame's class is the method's or a
+// subclass (zend_is_callable_check_class), and is a TypeError anywhere else. A
+// DYNAMIC call ('C::m'(), ['C', 'm']()) binds none, so it is always an Error, even
+// when __call would take the name for the frame's $this
+// (zend_init_dynamic_call_array). [$o, 'm'] and $o->m(...) reach __call. A static
+// closure has no $this. bindTo / call / Closure::bind replace a closure's $this and
+// class scope (zend_create_closure_ex); no instance binds to a static closure.
+class S66A {
+    function foo() { return "foo:" . get_class($this); }
+    static function sfoo() { return "sfoo"; }
+    function stat() {
+        $f = static function() { return isset($this); };
+        $g = static fn() => isset($this);
+        $h = function() { return isset($this); };
+        $k = fn() => isset($this);
+        return [$f(), $g(), $h(), $k(), s66err(static fn() => S66A::foo()), s66err(fn() => S66A::foo())];
+    }
+}
+class S66B extends S66A {
+    function twice($x) { return $x * 2 . ":" . get_class($this); }
+    function cbs() {
+        return [call_user_func(['S66A', 'foo']), call_user_func('S66A::foo'), array_map(['S66B', 'twice'], [1, 2]),
+                call_user_func_array(['S66A', 'foo'], []), Closure::fromCallable(['S66A', 'foo'])()];
+    }
+    function dyn() {
+        try { ['S66A', 'foo'](); } catch (Error $e) { return $e->getMessage(); }
+        return "none";
+    }
+}
+class S66M {
+    function __call($n, $a) { return "call:" . $n . ":" . implode(",", $a); }
+    function dyn() {
+        try { ['S66M', 'bar'](); } catch (Error $e) { return $e->getMessage(); }
+        return "none";
+    }
+}
+class S66P {
+    private $v = 7;
+    public $n = 0;
+    function getter() { return function() { return $this->v; }; }
+    function counter() { return function() { $this->n += 2; return ++$this->n; }; }
+}
+class S66Q { private $v = 9; }
+function s66err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s66() {
+    $b = new S66B;
+    check("cbn1", $b->cbs() === ["foo:S66B", "foo:S66B", ["2:S66B", "4:S66B"], "foo:S66B", "foo:S66B"]
+        && call_user_func(['S66A', 'sfoo']) === "sfoo");
+    check("cbn2", s66err(fn() => array_map(['S66A', 'foo'], [1]))
+            === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, non-static method S66A::foo() cannot be called statically"
+        && s66err(fn() => usort($b, 'S66A::foo'))
+            === "TypeError: usort(): Argument #2 (\$callback) must be a valid callback, non-static method S66A::foo() cannot be called statically");
+    $ns = "Error: Non-static method S66A::foo() cannot be called statically";
+    $fs = 'S66A::foo';
+    check("dyn1", s66err(fn() => ['S66A', 'foo']()) === $ns && s66err(fn() => $fs()) === $ns
+        && $b->dyn() === "Non-static method S66A::foo() cannot be called statically"
+        && ['S66A', 'sfoo']() === "sfoo" && 'S66A::sfoo'() === "sfoo");
+    $m = new S66M;
+    check("dyn2", $m->dyn() === "Non-static method S66M::bar() cannot be called statically"
+        && s66err(fn() => ['S66M', 'bar']()) === "Error: Call to undefined method S66M::bar()");
+    $s = 'w';
+    check("mcl1", [$m, 'x'](1, 2) === "call:x:1,2" && $m->y(...)(3) === "call:y:3" && $m->$s(4) === "call:w:4"
+        && call_user_func([$m, 'z']) === "call:z:");
+    check("stc1", (new S66A)->stat() === [false, false, true, true, $ns, "foo:S66A"]);
+    $get = function() { return $this->v; };
+    $add = function($a, $b) { return $a + $b; };
+    $cls = function() { return static::class; };
+    $u = 3;
+    $uf = function() use ($u) { return $u; };
+    $bq = $get->bindTo(new S66Q, 'S66Q');
+    check("clo1", Closure::bind($get, new S66P, S66P::class)() === 7 && $bq() === 9 && $bq !== $get
+        && $get->call(new S66Q) === 9 && (new S66P)->getter()->bindTo(new S66Q, 'S66Q')() === 9
+        && (new S66P)->getter()->bindTo(new S66P)() === 7 && $uf->bindTo(null, null)() === 3);
+    check("clo2", $add->__invoke(2, 3) === 5 && $add->call(new S66P, 4, 5) === 9
+        && Closure::bind($cls, null, 'S66Q')() === "S66Q" && $cls->call(new S66P) === "S66P"
+        && (static function() { return 1; })->bindTo(new S66P) === null);
+    check("clo3", s66err(fn() => (new S66P)->getter()->bindTo(new S66Q)()) === "Error: Cannot access private property S66Q::\$v"
+        && s66err(fn() => $add->nope()) === "Error: Call to undefined method Closure::nope()");
+    $cnt = (new S66P)->counter();
+    check("clo4", $cnt() === 3 && $cnt() === 6);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3255,6 +3341,7 @@ function main() {
     s63dump(); // SECTION-CALL 63
     s64(); // SECTION-CALL 64
     s65(); // SECTION-CALL 65
+    s66(); // SECTION-CALL 66
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

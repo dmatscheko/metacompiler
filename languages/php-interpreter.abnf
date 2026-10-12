@@ -3821,6 +3821,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             phpRaise("Error", "Call to undefined method " + target.__class.__name + "::" + name + "()")
         }
         if (isGen(target)) { return genMethod(target, name, args) }
+        if (typeof target == "function") { return cloMethod(target, name, args) }
         phpMissMethod(target, name)
     }
     // A chain called with coalIs is the left operand of '??' (makeCoalesce): its
@@ -3866,7 +3867,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // A 'C::m' string resolves its method here, as an array callable does.
             if (typeof cur == "string" && cur.indexOf("::") >= 0) {
                 var fcn = relName(cur.substring(0, cur.indexOf("::")))
-                return staticCall(resolveClassName(fcn), cur.substring(cur.indexOf("::") + 2), argset, fcn)
+                return dynStatic(fcn, cur.substring(cur.indexOf("::") + 2), argset)
             }
             if (typeof cur == "string" && !hasOwn(phpBuiltins, fnName(cur))
                 && !(varExists(fnName(cur)) && typeof getVar(fnName(cur)) == "function")) {
@@ -3879,7 +3880,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var sep = cur.indexOf("::")
             if (sep >= 0) {
                 var cn = relName(cur.substring(0, sep))
-                return staticCall(resolveClassName(cn), cur.substring(sep + 2), argset, cn)
+                return dynStatic(cn, cur.substring(sep + 2), argset)
             }
             return callNamed(cur, argset)
         }
@@ -3890,7 +3891,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var mname = phpStr(arrGet(cur, 1))
             if (isObj(recv)) { return mcall(recv, mname, argset) }
             var rn = relName(phpStr(recv))
-            return staticCall(resolveClassName(rn), mname, argset, rn)
+            return dynStatic(rn, mname, argset)
         }
         if (isObj(cur)) {
             var m = classFind(cur.__class, "__invoke")
@@ -3898,6 +3899,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             phpRaise("Error", "Object of type " + phpDebugType(cur) + " is not callable")
         }
         phpRaise("Error", "Value of type " + phpDebugType(cur) + " is not callable")
+    }
+    // A value call of a method named through its class, checked by dynNonStatic.
+    function dynStatic(cn, mname, argset) {
+        var cls = resolveClassName(cn)
+        dynNonStatic(cls, mname, cn)
+        return staticCall(cls, mname, argset, cn)
     }
     // '|>' folds LEFT: makePipe receives [v, f1, f2, ...] and builds f2(f1(v)).
     // pipeStep is a named function rather than an inline closure so each step
@@ -4020,15 +4027,40 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function cbNonStatic(where, cls, mname, cn) {
         var ns = phpNonStatic(cls, phsCase(mname, false))
         if (ns == "") { return }
+        var rn = relName(cn)
+        if ((rn == "self" || rn == "parent" || rn == "static") && varExists("$this") && isObj(getVar("$this"))) { return }
+        if (cbThis(cls, mname) != null) { return }
+        cbFail(where, "non-static method " + cls.__name + "::" + ns.substring(ns.indexOf("::") + 2) + "() cannot be called statically")
+    }
+    // The $this a non-static method of cls binds as a callback named through
+    // its class: the frame's, when the frame's class scope is an instance of cls
+    // (zend_is_callable_check_class), else null - as for a static method.
+    function cbThis(cls, mname) {
+        if (phpNonStatic(cls, phsCase(mname, false)) == "") { return null }
         var tv = anytype
         tv = varExists("$this") ? getVar("$this") : null
-        if (isObj(tv)) {
-            var rn = relName(cn)
-            if (rn == "self" || rn == "parent" || rn == "static") { return }
-            var fs = ctxSelf()
-            if (fs != null && classIs(tv.__class, fs.__name) && classIs(fs, cls.__name)) { return }
+        if (!isObj(tv)) { return null }
+        var fs = ctxSelf()
+        if (fs != null && classIs(tv.__class, fs.__name) && classIs(fs, cls.__name)) { return tv }
+        return null
+    }
+    // A DYNAMIC call of a method named through its class ('C::m'(), ['C', 'm']())
+    // binds no $this, so a non-static method is an Error, and so is a missing one
+    // that __call would take for the frame's $this (zend_init_dynamic_call_array,
+    // get_static_method_fallback). A relative name forwards as a '::' call does.
+    // Twin of js_phcbns in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function dynNonStatic(cls, mname, cn) {
+        var rn = relName(cn)
+        if (rn == "self" || rn == "parent" || rn == "static") { return }
+        var lc = phsCase(mname, false)
+        var ns = ""
+        if (classFind(cls, mname) != null || classFind(cls, lc) != null) { ns = phpNonStatic(cls, lc) }
+        else if (classFind(cls, "__call") != null && varExists("$this")) {
+            var tv = anytype
+            tv = getVar("$this")
+            if (isObj(tv) && classIs(tv.__class, cls.__name)) { ns = phpMethodDecl(tv.__class, "__call").k.__name + "::" + mname }
         }
-        cbFail(where, "non-static method " + cls.__name + "::" + ns.substring(ns.indexOf("::") + 2) + "() cannot be called statically")
+        if (ns != "") { phpRaise("Error", "Non-static method " + ns + "() cannot be called statically") }
     }
     // is_callable($v): the check call_user_func makes, in the caller's frame, whose
     // TypeError answers false. syntax_only and callable_name are not modelled.
@@ -4491,8 +4523,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 cb = evalArgs(fa).pos[0]
                 var fc = anytype
                 fc = phpCheckCallback(cb, "Failed to create closure from callable:", true)
-                var fb = visBound(fc)
-                return typeof fb == "function" ? fb : asCallable(fc)
+                return asCallable(cbResolve(fc))
+            }
+        }
+        // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
+        if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "bind") {
+            var ba = p.args
+            return function() {
+                var bp = evalArgs(ba).pos
+                var bt = anytype
+                bt = bp.length > 1 ? bp[1] : null
+                return cloRebind(bp[0], bt, bp.length > 2, bp.length > 2 ? bp[2] : null)
             }
         }
         // As the left operand of '??' (coalIs) a static property the scope may not
@@ -4542,10 +4583,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // captured variables and the bound $this. The frozen engine cannot carry a
     // property on a closure, so the closure ANSWERS its record when called with
     // cloProbe, and fnMeta's name marks the closures that do (cloRecOf).
+    // The record also keeps what cloBind rebuilds the closure from: its
+    // parameters, body, captured chain and generator flag, and st for a static one.
     var cloProbe = {probe: true}
-    function closureBody(params, body, captured, env, isGen, desc, self) {
+    function closureBody(params, body, captured, env, isGen, desc, self, st) {
         objHandles = objHandles + 1
-        var rec = {d: desc, i: objHandles, e: env, t: self}
+        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st}
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
             if (isGen === true) { return newGen(runClosureRun(params, body, captured, env, argset)) }
@@ -4576,8 +4619,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
         var line = "" + c.lineOf(pos)
         var name = "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}"
+        // A static closure where a $this is in reach hides it (hide); st marks one
+        // that no instance can be bound to (cloBind).
         cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
-                        fn: name, meth: name})
+                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self})
         cloStatic = false
     }
     function cloLeave() { return cloScopes.pop() }
@@ -4666,12 +4711,80 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var desc = cloDesc(sc, uses, params)
         var self = sc.self
         return function() {
-            var captured = scopes.slice(0)
+            var captured = cloChain(sc)
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
             for (var j = 0; j < byref.length; j++) { scopePut(env, byref[j], varCell(byref[j])) }
-            return closureBody(params, body, captured, env, isGen, desc, cloThis(self))
+            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st)
         }
+    }
+    // The scope chain a closure made here captures. A static closure written where
+    // a $this is in reach (cloEnter's hide) sees none: it reads as unset, as in a
+    // static method. Twin of cloHideThis in php-to-llvm-ir.abnf.
+    var cloNoThis = null
+    function cloChain(sc) {
+        var ch = scopes.slice(0)
+        if (sc.hide === true) {
+            if (cloNoThis == null) {
+                cloNoThis = {}
+                scopePut(cloNoThis, "$this", UNSET)
+            }
+            ch.push(cloNoThis)
+        }
+        return ch
+    }
+    // Closure::bind / bindTo / call: the same closure with its $this and class
+    // scope replaced, both read through one overlay scope over what it captured
+    // (zend_create_closure_ex); keep leaves the class scope as it is. No instance
+    // binds to a static closure: PHP warns (not modelled) and answers null.
+    // Twin of js_phclobind in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function cloBind(f, nthis, scope, keep) {
+        var r = cloRecOf(f)
+        if (r == null) { fail("binding a Closure that is not a closure literal is not modelled") }
+        if (r.st === true && isObj(nthis)) { return null }
+        var sc = anytype
+        sc = scope
+        if (keep) {
+            var saved = scopes
+            scopes = r.c
+            sc = ctxSelf()
+            scopes = saved
+        }
+        var ov = {}
+        scopePut(ov, "$this", isObj(nthis) ? nthis : UNSET)
+        scopePut(ov, SELF_KEY, sc == null ? UNSET : sc)
+        scopePut(ov, STATIC_KEY, isObj(nthis) ? nthis.__class : (sc == null ? UNSET : sc))
+        var ch = r.c.slice(0)
+        ch.push(ov)
+        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st)
+    }
+    // bindTo's $newScope: an object's class, a class name, null for none, and
+    // "static" (the default) for the closure's own. A name no class has binds
+    // nothing: PHP warns and answers null.
+    function cloRebind(f, nthis, hasScope, sv) {
+        if (!hasScope || (typeof sv == "string" && phsCase(sv, false) == "static")) { return cloBind(f, nthis, null, true) }
+        if (isObj(sv)) { return cloBind(f, nthis, sv.__class, false) }
+        if (sv === null || sv === undefined) { return cloBind(f, nthis, null, false) }
+        var cls = findClass(phpStr(sv))
+        if (cls == null) { return null }
+        return cloBind(f, nthis, cls, false)
+    }
+    // The methods a Closure answers: __invoke calls it, bindTo rebinds it, call
+    // rebinds it to an object and that object's class and calls it at once. Twin
+    // of phCloCall in lib/php-rt.metajs and abnf/jsrtphp.go.
+    function cloMethod(f, name, args) {
+        var lc = phsCase(name, false)
+        if (lc == "__invoke") { return f(args) }
+        var pos = args.pos
+        var nthis = anytype
+        nthis = pos.length > 0 ? pos[0] : null
+        if (lc == "bindto") { return cloRebind(f, nthis, pos.length > 1, pos.length > 1 ? pos[1] : null) }
+        if (lc == "call") {
+            var bf = cloBind(f, nthis, isObj(nthis) ? nthis.__class : null, false)
+            if (bf == null) { return null }
+            return bf(argsOf(pos.slice(1)))
+        }
+        phpRaise("Error", "Call to undefined method Closure::" + name + "()")
     }
     // An arrow function's body: its one expression, returned.
     function arrowBody(t) { return function() { return {ret: true, v: t()} } }
@@ -4706,7 +4819,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
-            return closureBody(params, body, scopes.slice(0), env, false, desc, cloThis(self))
+            return closureBody(params, body, cloChain(sc), env, false, desc, cloThis(self), sc.st)
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
@@ -5326,7 +5439,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // ['parent', 'm'], 'static::m') is resolved in the caller's frame too: a method
     // the class answers becomes a closure bound like callerCallable's, anything else
     // the absolute 'C::m' the library's own check reports on. With no class scope
-    // the callback is left to that check. Twin of js_phrelcb in abnf/jsrtphp.go and
+    // the callback is left to that check. A non-static method named outright is
+    // bound here when this frame's $this may call it (cbThis); otherwise the
+    // library's check rejects it. Twin of js_phrelcb in abnf/jsrtphp.go and
     // lib/php-rt.metajs.
     function libCallable(cur) {
         var vb = visBound(cur)
@@ -5344,7 +5459,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (typeof cn != "string" || typeof mn != "string") { return cur }
         cn = relName(cn)
-        if (cn != "self" && cn != "static" && cn != "parent") { return cur }
+        if (cn != "self" && cn != "static" && cn != "parent") {
+            var nc = findClass(cn)
+            if (nc != null && cbThis(nc, mn) != null) { return boundStatic(nc, mn, cn, false) }
+            return cur
+        }
         var s = ctxSelf()
         if (s == null || (cn == "parent" && (s.__super == null || s.__super == undefined))) { return cur }
         var cls = resolveClassName(cn)
@@ -5391,17 +5510,30 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The closure a static callable becomes. A relative name forwards the CALLER's
     // late-static-binding class and $this, which the library function's frame no
-    // longer has; checked says the caller's scope may call the method.
+    // longer has, and a non-static method named outright binds the caller's $this
+    // where cbThis allows it; checked says the caller's scope may call the method.
     function boundStatic(cls, mn, cn, checked) {
         var bound = anytype
         bound = undefined
+        var tv = anytype
+        tv = null
         if (cn == "self" || cn == "static" || cn == "parent") {
             bound = {self: varExists("$this") ? getVar("$this") : null, bind: ctxStatic(), ok: checked}
-        } else if (checked) { bound = {self: null, bind: cls, ok: true} }
+        } else {
+            tv = cbThis(cls, mn)
+            if (tv != null) { bound = {self: tv, bind: tv.__class, ok: checked} }
+            else if (checked) { bound = {self: null, bind: cls, ok: true} }
+        }
         return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
     }
     function callerCallable(cur, fname) {
         phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback", true)
+        return cbResolve(cur)
+    }
+    // A checked callback bound in the frame it is handed over in: a method some
+    // class restricts as visBound binds it, a method named through its class as
+    // boundStatic does, anything else as it is.
+    function cbResolve(cur) {
         var vb = visBound(cur)
         if (typeof vb == "function") { return vb }
         var cn = ""
@@ -6215,7 +6347,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (p !== null && p !== undefined) { phpPrecision = phpInt(p) }
             return old
         },
-        "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), false) },
+        "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), true) },
         "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },

@@ -1633,6 +1633,50 @@ function phCloRec(v) {
     return undefined
 }
 
+// A method call on a Closure: __invoke calls it, bindTo rebinds it, call rebinds
+// it to an object and that object's class and calls it at once. Twin of
+// phpCloCall in abnf/jsrtphp.go and cloMethod in php-interpreter.abnf.
+function phCloCall(f, name, args) {
+    var lc = phsCase(name, false)
+    if (lc == "__invoke") { return f.apply(undefined, args) }
+    var nthis = anytype
+    nthis = args.length > 0 ? args[0] : null
+    if (lc == "bindto") {
+        if (args.length < 2) { return phCloBind(f, nthis, null, true) }
+        var sv = anytype
+        sv = args[1]
+        if (typeof sv == "string" && phsCase(sv, false) == "static") { return phCloBind(f, nthis, null, true) }
+        if (phIsObj(sv)) { return phCloBind(f, nthis, sv["__class"], false) }
+        return phCloBind(f, nthis, sv, false)
+    }
+    if (lc == "call") {
+        var scope = anytype
+        scope = phIsObj(nthis) ? nthis["__class"] : null
+        var bf = phCloBind(f, nthis, scope, false)
+        if (rtIsNil(bf)) { return null }
+        return bf.apply(undefined, args.slice(1))
+    }
+    phRaise("Error", "Call to undefined method Closure::" + name + "()")
+    return undefined
+}
+// f with its $this and class scope replaced (zend_create_closure_ex), made by the
+// factory a closure literal's record keeps (cloFactory in php-to-llvm-ir.abnf),
+// which also resolves a class NAME. keep leaves the class scope the record holds.
+// No instance binds to a static closure: PHP warns (not modelled) and answers
+// null. Twin of phpCloBind in abnf/jsrtphp.go and cloBind in
+// php-interpreter.abnf.
+function phCloBind(f, nthis, scope, keep) {
+    var r = phCloRec(f)
+    if (r === undefined || r["f"] === undefined) { fail("binding a Closure that is not a closure literal is not modelled") }
+    var t = anytype
+    t = nthis
+    if (!phIsObj(t)) { t = null }
+    else if (r["st"] === true) { return null }
+    var sc = anytype
+    sc = keep ? r["sc"] : scope
+    return r["f"].apply(undefined, [t, sc])
+}
+
 // An object's handle, or a closure literal's; any other Closure keeps none and
 // answers 0. Twin of __mec_oid in php-interpreter.abnf.
 function js_phoidof(v) {
@@ -2664,6 +2708,16 @@ function js_phmcall(recv, name, args) {
             // its lower-cased name (js_phmset), which a miss retries.
             if (typeof mm != "function") { mm = rtFindMethod(cls, phsCase(phStr(name), false)) }
             if (typeof mm == "function") { return mm.apply(undefined, rtPrepend(recv, args)) }
+            // A method the class does not declare is its __call's.
+            if (phOwner(cls, "__call") !== undefined) {
+                var inner = phNewArr()
+                var i = 0
+                while (i < args.length) {
+                    phArrPush(inner, args[i])
+                    i = i + 1
+                }
+                return rtFindMethod(cls, "__call").apply(undefined, [recv, name, inner])
+            }
             // PHP 8: `Error: Call to undefined method Foo::nope()`, and it is an
             // Error rather than a fatal - `catch (Error $e)` recovers.
             phRaise("Error", "Call to undefined method " + phClassName(recv) + "::" + name + "()")
@@ -2671,6 +2725,7 @@ function js_phmcall(recv, name, args) {
         var f = recv[name]
         if (typeof f == "function") { return f.apply(recv, args) }
     }
+    if (typeof recv == "function") { return phCloCall(recv, phStr(name), args) }
     // Everything that is not an object: a string, an int, null, an array. PHP 8
     // spells it `Call to a member function nope() on string`, with phDebugType's
     // names (null / bool / int / float / string / array), and it is catchable.
@@ -2752,22 +2807,39 @@ function js_phnscheck(target, name, self, scope) {
     }
     return undefined
 }
-// The callback check's non-static rule (zend_is_callable_check_func): a method
-// named through its class cn needs an object - the frame's $this, when the
-// frame's class scope is an instance of cls, or for a relative name any $this.
-// Twin of m["js_phcbns"] in abnf/jsrtphp.go.
+// The non-static rule for a method named through its class cn
+// (zend_is_callable_check_class). A callback binds the frame's $this when the
+// frame's class scope is an instance of cls, and a relative name forwards any
+// $this. where is the callback check's argument, which raises its TypeError for a
+// method nothing binds; true answers the $this a callback binds (undefined for
+// none); false is a DYNAMIC call, which binds none and so raises PHP's Error for
+// a non-static method, and for a missing one that __call would take for self
+// (get_static_method_fallback). Twin of m["js_phcbns"] in abnf/jsrtphp.go.
 function js_phcbns(where, cls, cn, mn, self, scope) {
     if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
-    var ns = phNonStatic(cls, phsCase(phStr(mn), false))
-    if (ns == "") { return undefined }
-    if (phIsObj(self)) {
-        var rn = phStr(cn)
-        if (rn.length > 0 && rn.charCodeAt(0) == 92) { rn = rn.substring(1) }
-        rn = phsCase(rn, false)
-        if (rn == "self" || rn == "parent" || rn == "static") { return undefined }
-        if (scope !== undefined && scope !== null && typeof scope == "object" && phIsA(self, phStr(scope["__name"]))
-            && phIsA(scope, phStr(cls["__name"]))) { return undefined }
+    var rn = phStr(cn)
+    if (rn.length > 0 && rn.charCodeAt(0) == 92) { rn = rn.substring(1) }
+    rn = phsCase(rn, false)
+    if ((rn == "self" || rn == "parent" || rn == "static") && (phIsObj(self) || typeof where == "boolean")) { return undefined }
+    var m = phStr(mn)
+    if (where === false) {
+        var dn = ""
+        if (typeof phMethodOf(cls, m) == "function") { dn = phNonStatic(cls, phsCase(m, false)) }
+        else if (phOwner(cls, "__call") !== undefined && phIsObj(self) && phIsA(self, phStr(cls["__name"]))) {
+            var d = phMethodDecl(self["__class"], "__call")
+            if (d !== undefined) { dn = phStr(d["k"]["__name"]) + "::" + m }
+        }
+        if (dn != "") { phRaise("Error", "Non-static method " + dn + "() cannot be called statically") }
+        return undefined
     }
+    var ns = phNonStatic(cls, phsCase(m, false))
+    if (ns == "") { return undefined }
+    if (phIsObj(self) && scope !== undefined && scope !== null && typeof scope == "object" && phIsA(self, phStr(scope["__name"]))
+        && phIsA(scope, phStr(cls["__name"]))) {
+        if (where === true) { return self }
+        return undefined
+    }
+    if (where === true) { return undefined }
     phCbFail(where, "non-static method " + phStr(cls["__name"]) + "::" + ns.substring(ns.indexOf("::") + 2) + "() cannot be called statically")
     return undefined
 }
@@ -3765,9 +3837,11 @@ function js_phcbfail(where, reason) { return phCbFail(where, phStr(reason)) }
 // ['parent', 'm'], 'static::m'), resolved against the caller's frame classes:
 // undefined when the class answers the method (the caller binds it), the absolute
 // "C::m" when it does not (the library's own check reports on that), v itself
-// when it is no relative callable or the caller has no class scope. Twin of
-// m["js_phrelcb"] in abnf/jsrtphp.go.
-function js_phrelcb(v, self, stat) {
+// when it is no relative callable or the caller has no class scope. A non-static
+// method named outright through ncls (the class its name denotes, which the
+// caller looks up) answers undefined too when the frame's thisv binds it
+// (js_phcbns). Twin of m["js_phrelcb"] in abnf/jsrtphp.go.
+function js_phrelcb(v, self, stat, ncls, thisv) {
     var cn = anytype
     var mn = anytype
     cn = undefined
@@ -3795,7 +3869,10 @@ function js_phrelcb(v, self, stat) {
     } else if (cn == "parent") {
         cls = self["__super"]
         if (cls === undefined || cls === null || typeof cls != "object") { return v }
-    } else if (cn != "self") { return v }
+    } else if (cn != "self") {
+        if (js_phcbns(true, ncls, cn, mn, thisv, self) !== undefined) { return undefined }
+        return v
+    }
     if (typeof phMethodOf(cls, mn) == "function") { return undefined }
     if (typeof phMethodOf(cls, "__callStatic") == "function") { return undefined }
     return phStr(cls["__name"]) + "::" + mn
