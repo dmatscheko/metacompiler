@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-454** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-455** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -125,14 +125,12 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-450 php: property visibility; uninitialised typed properties; magic recursion guard; ref-returning ??= target · P2 · PHP · IN PROGRESS (PHP worker, round 29) [V]
-php-src semantics, both engines: (a) visibility is not enforced: `class T { private $a = 1; } (new T)->a` gives 1; PHP
-"Cannot access private property T::$a", and with `__get` declared, `__get` is called (typed_properties_100 fails
-compiled since T-447 for this reason; the interpreter always did). Includes protected access from subclasses, static
-props, and method visibility if cheap. (b) `public int $x;` is stored as null; PHP keeps it uninitialised (read is
-Error "must not be accessed before initialization", `__get` skipped). (c) no recursion guard for
-`__get`/`__set`/`__isset`/`__unset` on the same property (PHP falls back to the plain slot). (d) `foo(bar())['bar'] ??= 42`
-with a reference-returning `function &foo()` leaves `$foo` NULL (assign_coalesce_008).
+### T-454 php: method visibility; typed-property coercion/TypeError; typed statics; per-class private slots · P2 · PHP · IN PROGRESS (PHP worker, round 30) [V]
+php-src / corpus, both engines: (a) method visibility is not enforced (instance, static, callables, first-class
+callables, __call fallback): bug76869, access_modifiers_008, first_class_callable_errors. Keep public dispatch free of
+new calls. (b) typed-property writes do no coercion/TypeError (typed_properties_093/096, failed_assign_is_not_init).
+(c) typed static properties do not start uninitialised (typed_properties_069). (d) one slot per property name: writing
+an inherited private from outside overwrites the parent's slot; PHP creates a separate dynamic property.
 
 ---
 
@@ -500,6 +498,7 @@ T-447 php: declared properties take precedence over magic (compiled presence tes
 T-440 core: bitmap allocator (sweep = bitmap swap, cursor allocation) + 4 MB trigger floor; native bench rows -3..-21% (java -18%, python -21%), ~+3 MB heap — DONE e8607d6e
 T-445 core: literal cache home slot by multiplicative hash, hits migrate home, frame-less hit leaf; another -4..-7.5% per row; baseline re-recorded — DONE cdf85b85
 T-452 java: System.arraycopy in all engines; ArrayList shifts/grows/copies with it (1,700 remove(0)+add on 300 elements: 93.7G -> 2.8G native); clear() reallocates — DONE 3e47ce3b
+T-450 php: property visibility (instance + static, magic fallback), uninitialised typed properties, per-object magic recursion guards, by-reference ??= targets, property_exists, ?? with BP_VAR_IS magic — DONE d835b006
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
