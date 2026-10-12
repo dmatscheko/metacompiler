@@ -1546,6 +1546,10 @@ func (rt *jsrt) phpArrSet(av interface{}, k, v interface{}) {
 			arr.elems[i] = v
 			return
 		}
+		if rt.phpIsAA(av) {
+			rt.memberCall(av, "offsetSet", []interface{}{k, v})
+			return
+		}
 		rt.fail("cannot use a %s as an array", rt.typeOf(av))
 	}
 	keys, _ := o.props["keys"].(*jsArray)
@@ -1575,6 +1579,10 @@ func (rt *jsrt) phpArrPush(av interface{}, v interface{}) {
 		arr.elems = append(arr.elems, v)
 		return
 	}
+	if rt.phpIsAA(av) {
+		rt.memberCall(av, "offsetSet", []interface{}{jsNull, v})
+		return
+	}
 	rt.fail("cannot append to a %s", rt.typeOf(av))
 }
 
@@ -1593,13 +1601,25 @@ func (rt *jsrt) phpArrGet(av interface{}, k interface{}) interface{} {
 	if isNullish(av) {
 		return jsNull
 	}
-	if o, ok := av.(*jsObject); ok { // ArrayAccess-ish: read the property
+	if rt.phpIsAA(av) {
+		return rt.memberCall(av, "offsetGet", []interface{}{k})
+	}
+	if o, ok := av.(*jsObject); ok { // a non-ArrayAccess object: read the property
 		if pv, has := o.props[rt.phpStr(k)]; has {
 			return pv
 		}
 		return jsNull
 	}
 	return jsNull
+}
+
+// phpIsAA: an object whose class implements ArrayAccess, which $o[k] reads
+// through offsetGet, writes through offsetSet (a null key for $o[] = v) and
+// unsets through offsetUnset; isset($o[k]) asks offsetExists (js_phaisset).
+// Twin of phpIsAA in languages/php-interpreter.abnf and phIsAA in
+// lib/php-rt.metajs.
+func (rt *jsrt) phpIsAA(v interface{}) bool {
+	return phpIsObj(v) && rt.phpIsA(v, "ArrayAccess")
 }
 
 func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
@@ -1632,6 +1652,9 @@ func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
 func (rt *jsrt) phpArrUnset(av interface{}, k interface{}) {
 	o, ok := phpAsArr(av)
 	if !ok {
+		if rt.phpIsAA(av) {
+			rt.memberCall(av, "offsetUnset", []interface{}{k})
+		}
 		return
 	}
 	keys, _ := o.props["keys"].(*jsArray)
@@ -2961,6 +2984,14 @@ func init() {
 				return rt.wrapStr(rt.phpStr(sup.props["__name"]))
 			}
 			return jsHFalse
+		}
+		// js_phaisset(a, k): isset($a[k]) - offsetExists for an ArrayAccess
+		// object, js_phisset's answer for anything else.
+		m["js_phaisset"] = func(a []uint64) uint64 {
+			if rt.phpIsAA(u(a[0])) {
+				return boolH(rt.phpTest(rt.memberCall(u(a[0]), "offsetExists", []interface{}{u(a[1])})))
+			}
+			return boolH(rt.phpArrHas(u(a[0]), u(a[1])))
 		}
 		// js_phifaces(v): the interfaces the class of the object v, or the class
 		// descriptor v, names itself, by declared name; false for anything else

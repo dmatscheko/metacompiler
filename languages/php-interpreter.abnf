@@ -2785,12 +2785,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function refExists(ref) {
         var v = anytype
-        v = refProbe(ref)
+        v = refProbe(ref, true)
         return v !== null && v !== undefined
     }
     // The value at a storage location, or null when any step of it is missing -
     // the walk isset() and empty() share, which never diagnoses.
-    function refProbe(ref) {
+    // For isset an ArrayAccess object's last step asks offsetExists alone (true
+    // stands in for the value); for empty it asks offsetExists, then offsetGet
+    // (zend_std_has_dimension).
+    function refProbe(ref, isset) {
         var o = anytype
         // A CALL head has no variable to probe: the call runs and the walk starts
         // from what it returned.
@@ -2830,6 +2833,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var k = anytype
             k = st.idx()
             if (isArr(o)) { if (!arrHas(o, k)) { return null } }
+            else if (phpIsAA(o)) {
+                if (!phptest(mcall(o, "offsetExists", argsOf([k])))) { return null }
+                if (isset && i == ref.path.length - 1) { return true }
+            }
             // A STRING OFFSET is a containment question too: phpIndex answers "" for
             // an offset outside the string, which is not null, so the walk alone would
             // say true. PHP 8 says false for an out-of-range, a too-negative and a
@@ -2859,7 +2866,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return n < phsLen(s)
     }
     function makeEmpty(t) { return function() { return !phptest(t()) } }
-    function makeEmptyTgt(ref) { return function() { return !phptest(refProbe(ref)) } }
+    function makeEmptyTgt(ref) { return function() { return !phptest(refProbe(ref, false)) } }
     function makeUnset(items) {
         var refs = []
         for (var i = 0; i < items.length; i++) { if (items[i].istgt != undefined) { refs.push(items[i].istgt) } }
@@ -2888,6 +2895,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var p = resolveRefPhpV(ref, false)
                 if (p.last.key != undefined) { if (isObj(p.obj)) { arrDel(p.obj.p, p.last.key) } }
                 else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }
+                else if (p.last.append !== true && phpIsAA(p.obj)) { mcall(p.obj, "offsetUnset", argsOf([p.last.idx()])) }
             }
             return null
         }
@@ -3463,9 +3471,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isArr(o)) { return arrGet(o, i) }
         if (typeof o == "string") { return phsOffset(o, trunc(numOf(toNumV(i)))) }
         if (o === null || o === undefined) { return null }
+        if (phpIsAA(o)) { return mcall(o, "offsetGet", argsOf([i])) }
         if (isObj(o)) { return phpGetProp(o, phpStr(i)) }
         return null
     }
+    // An object whose class implements ArrayAccess: $o[k] reads offsetGet, a write
+    // calls offsetSet (with a null key for $o[] = v), isset() offsetExists and
+    // unset() offsetUnset. Twin of phpIsAA in abnf/jsrtphp.go and phIsAA in
+    // lib/php-rt.metajs.
+    function phpIsAA(o) { return isObj(o) && classIs(o.__class, "ArrayAccess") }
 
     // ----- objects ---------------------------------------------------------------
     // An instance is {__obj, __class, p} with its properties in an ordered map, so
@@ -4550,6 +4564,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return {obj: o, last: last}
     }
     function storeAt(p, v) {
+        if (p.last.key == undefined && phpIsAA(p.obj)) {
+            mcall(p.obj, "offsetSet", argsOf([p.last.append === true ? null : p.last.idx(), v]))
+            return
+        }
         if (p.last.append === true) { arrPush(p.obj, v); return }
         if (p.last.key != undefined) { phpSetProp(p.obj, p.last.key, v); return }
         var key = anytype

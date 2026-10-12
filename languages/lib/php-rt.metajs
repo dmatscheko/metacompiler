@@ -1183,6 +1183,10 @@ function phArrSet(av, k, v) {
             av[i] = v
             return undefined
         }
+        if (phIsAA(av)) {
+            js_phmcall(av, "offsetSet", [k, v])
+            return undefined
+        }
         fail("cannot use this value as an array")
     }
     var keys = av["keys"]
@@ -1213,6 +1217,10 @@ function phArrPush(av, v) {
         av.push(v)
         return undefined
     }
+    if (phIsAA(av)) {
+        js_phmcall(av, "offsetSet", [null, v])
+        return undefined
+    }
     fail("cannot append to this value")
     return undefined
 }
@@ -1227,6 +1235,7 @@ function phArrGet(av, k) {
     }
     if (typeof av == "string") { return phsOffset(av, phNumOf(phToLong(k))) }
     if (rtIsNil(av)) { return null }
+    if (phIsAA(av)) { return js_phmcall(av, "offsetGet", [k]) }
     if (typeof av == "object") {
         var pv = av[phStr(k)]
         if (pv !== undefined) { return pv }
@@ -1265,10 +1274,24 @@ function phArrHas(av, k) {
     return false
 }
 
+// An object whose class implements ArrayAccess, which $o[k] reads through
+// offsetGet, writes through offsetSet (a null key for $o[] = v) and unsets
+// through offsetUnset. Twin of phpIsAA in abnf/jsrtphp.go.
+function phIsAA(v) { return phIsObj(v) && phIsA(v, "ArrayAccess") }
+// isset($a[k]): offsetExists for an ArrayAccess object. Twin of js_phaisset in
+// abnf/jsrtphp.go.
+function js_phaisset(a, k) {
+    if (phIsAA(a)) { return phTest(js_phmcall(a, "offsetExists", [k])) }
+    return phArrHas(a, k)
+}
+
 // The frozen subset has no splice, so a removal REBUILDS both arrays. They are
 // the two the __dict object holds, so the new ones are stored back.
 function phArrUnset(av, k) {
-    if (!phIsDict(av)) { return undefined }
+    if (!phIsDict(av)) {
+        if (phIsAA(av)) { js_phmcall(av, "offsetUnset", [k]) }
+        return undefined
+    }
     var keys = av["keys"]
     var vals = av["vals"]
     var at = phDictFind(av, phNormKey(k))

@@ -4064,9 +4064,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                            b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, v, hUndef), hFalse, hTrue))
     }
     // isset() of ONE storage location. A plain variable is read with the non-aborting
-    // scope probe (an undeclared name answers null, not an error); an element and a
-    // property go through js_phisset, which is false for a missing key AND for a null
-    // value - PHP's rule.
+    // scope probe (an undeclared name answers null, not an error); an element goes
+    // through js_phaisset and a property through js_phisset, false for a missing key
+    // AND for a null value - PHP's rule - while an ArrayAccess object's element is
+    // what its offsetExists answers.
     function emitIssetOne(b, ref) {
         if (ref.path.length == 0) {
             if (ref.sbase != undefined) {
@@ -4089,7 +4090,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         b = p.b
         if (p.kind == "append") { return {b: b, v: hFalse} }
         if (p.kind == "field") { return emitPropIsset(b, p.obj, p.key) }
-        return {b: b, v: callExt(b, "js_phisset", [p.obj, p.key])}
+        return {b: b, v: callExt(b, "js_phaisset", [p.obj, p.key])}
     }
     function makeIsset(refs) {
         return function(b) {
@@ -4133,7 +4134,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (p.kind == "append") { return {b: b, v: hTrue} }
             var is = anytype
             if (p.kind == "field") { is = emitPropIsset(b, p.obj, p.key) }
-            else { is = {b: b, v: callExt(b, "js_phisset", [p.obj, p.key])} }
+            else { is = {b: b, v: callExt(b, "js_phaisset", [p.obj, p.key])} }
             b = is.b
             var setB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")

@@ -2587,6 +2587,17 @@ function s59g() {
     yield from new ArrayIterator(["a" => 2, "b" => 3]);
     yield from new ArrayObject([4]);
 }
+class S59Log implements ArrayAccess {
+    public $d = [];
+    public $log = "";
+    function offsetExists($k): bool { $this->log .= "e" . $k; return isset($this->d[$k]); }
+    function offsetGet($k): mixed { $this->log .= "g" . $k; return $this->d[$k] ?? null; }
+    function offsetSet($k, $v): void {
+        $this->log .= "s" . ($k ?? "_");
+        if ($k === null) { $this->d[] = $v; } else { $this->d[$k] = $v; }
+    }
+    function offsetUnset($k): void { $this->log .= "u" . $k; unset($this->d[$k]); }
+}
 class S59It extends ArrayIterator {
     function current(): mixed { return parent::current() * 10; }
 }
@@ -2622,6 +2633,30 @@ function s59() {
     $s = "";
     foreach (s59g() as $k => $v) { $s .= $k . "=" . $v . ";"; }
     check("spl11", $s === "0=1;a=2;b=3;0=4;");
+    // ArrayAccess: a read is offsetGet, a write offsetSet (null key for []), a
+    // compound write both, isset() offsetExists alone, empty() offsetExists then
+    // offsetGet, unset() offsetUnset (zend_std_*_dimension).
+    $l = new S59Log;
+    $l["a"] = 1;
+    $l[] = 2;
+    $l["a"] += 5;
+    $r = [$l["a"], isset($l["a"]), isset($l["z"]), empty($l["a"])];
+    unset($l["a"]);
+    [$x] = $l;
+    check("arr1", $r === [6, true, false, false] && $x === 2 && $l->log === "sas_gasagaeaezeagauag0");
+    $ao = new ArrayObject([]);
+    $ao["x"] = 1;
+    $ao[] = 5;
+    $os = new SplObjectStorage;
+    $o = new stdClass;
+    $os[$o] = "data";
+    check("arr2", $ao["x"] === 1 && $ao[0] === 5 && isset($ao["x"]) && !isset($ao["y"]) && count($ao) === 2
+        && $os[$o] === "data" && isset($os[$o]) && count($os) === 1);
+    unset($ao["x"], $os[$o]);
+    $st = new SplStack;
+    $st[] = "p";
+    $st[] = "q";
+    check("arr3", $ao->getArrayCopy() === [0 => 5] && count($os) === 0 && $st[1] === "q" && $st->top() === "q");
     $st = new SplStack();
     $st->push(1);
     $st->push(2);
