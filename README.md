@@ -202,6 +202,12 @@ or, to parse a C file with the full C99 grammar:
 go run . languages/c99-parser.abnf tests/c99-test-1.c -q
 ```
 
+The JavaScript engine that runs the grammars' tag scripts, [goja](https://github.com/dop251/goja),
+is vendored in `third_party/goja` at its pinned revision (wired in by a `replace` line in
+`go.mod`), with one local patch: Number-to-String conversion yields the shortest digits that
+round-trip, as ECMAScript requires.
+Building native executables (`-exe`) additionally needs `clang`.
+
 ### Editor support
 
 [`editor/vscode-abnf/`](editor/vscode-abnf/) is a VSCode extension that syntax
@@ -268,9 +274,16 @@ tests/gates.sh --freeze     # also: is the frozen snapshot a fixed point?
 | `./test.sh --full` | the full-syntax ratchets. A language GAP is informational and exits 0, so the summary line is not a verdict - the gate is the `BUT -frozen\|VACUOUS\|MISMATCH\|FROZEN-DIFF\|RUN-FAILED` grep, which `gates.sh` does for you. **A KILLED run exits 1**, because a killed probe records no count and the total is then a smaller number with holes in it rather than an answer. |
 | `./test.sh --cross` | each language's two halves diffed against each other |
 | `tests/clang-check.sh` | every emitted module handed to a real clang, then run |
-| `tests/native-full.sh` | all fifteen ratchets built and run as **native binaries** |
+| `tests/native-full.sh` | every ratchet and feature file built and run as **native binaries** (43 programs, 22 languages) |
 | `tests/gen-all.sh --check` | the fifteen generated `.ll` files still reproduce from source (parallel, one shared binary) |
 | `go test ./abnf/` | the Go core |
+| `tools/shape-scan` | layer-2 function bodies duplicated across languages (a ratchet on their number) |
+| `tools/metajs-lint` | MetaJS constructs in the grammars' tag scripts that do not mean what they appear to |
+| `-freeze` (with `--freeze`) | the frozen bootstrap snapshot is a fixed point: freezing twice gives identical output |
+
+Each gate has a recorded floor or ceiling at the top of `tests/gates.sh` (assertion
+count, matrix entries, clang-agreeing modules, duplicate groups); a run that beats one
+says so, and the floor is raised in the same commit.
 
 **`clang-check.sh` and `native-full.sh` are the only two gates that can see
 `languages/lib/*-rt.metajs`** - everything else runs `llvm.Run`, which resolves the
@@ -293,23 +306,28 @@ its output filename; see the header of `tests/bench/baseline.txt`.
 #### The second test group: full-syntax ratchets (`--full`)
 
 The goal is to support the **full** languages, and `tests/<lang>-test-full.<ext>` is the
-measure: one hand-written file per language that walks the whole practical syntax of the
-modern language (organized after its official spec, in self-contained `SECTION` chunks —
-see the anatomy notes in [tests/js-test-full.js](tests/js-test-full.js)). These files are
-**not** part of the default matrix; today the grammars abort on them by design.
+measure: hand-written, self-checking files that walk the whole practical syntax and the
+standard library of the modern language (organized after its official spec, in
+self-contained `SECTION` chunks - see the anatomy notes in
+[tests/js-test-full.js](tests/js-test-full.js)). Every language with a real-world
+counterpart has one, and every one of them runs green today: the ratchet holds about
+12,400 assertions across both halves, and `tests/gates.sh` refuses a tree that loses any.
+A language whose file grew past the `-frozen` step brake is split into numbered files
+(`js-test-full.2.js`, `.3.js`, `.4.mjs`, `python-test-full.2.py`).
 
 ```
-./test.sh --full             # per grammar: every language area that does not work yet
+./test.sh --full             # per grammar: assertions, and every area that does not work
 ./test.sh --full --filter js # probe a single language
 ```
 
 The probe runs each grammar over its file and, whenever the grammar chokes, removes the
-section around the error and retries — so the report lists *every* unsupported area, and
-distinguishes "does not parse" from "parses, but not implemented: X". A file that runs
-green untouched is reported `FULL` and cross-checked goja vs `-frozen`: that language is
-ready to graduate into the default matrix. The self-defined languages (metajs, tinyc,
-lisp, calculator, brainfuck) have no `-full` file — their feature tests already cover
-their entire spec.
+section around the error and retries - so a regression is reported as the exact area that
+broke, distinguishing "does not parse" from "parses, but not implemented: X". A file that
+runs green untouched is reported `FULL` and cross-checked goja vs `-frozen`. Each new
+assertion is written against the real toolchain (node, CPython, javac, swiftc, go, ruby,
+lua, bash, tsc) or, where none is installed (C#, Dart, PHP), against the specification
+and the php-src test corpus. MetaJS has its own full file; tinyc, lisp, calculator and
+brainfuck are covered entirely by their feature tests.
 
 #### The example languages in languages/
 
@@ -327,51 +345,48 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | Brainfuck    | brainfuck-interpreter.abnf                                   | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt        |
 | TinyC        | tinyc-interpreter.abnf                                       | tinyc-to-llvm-ir.abnf        | tinyc-test-1.txt, tinyc-test-2.txt                |
 | Lisp         | lisp-interpreter.abnf                                        | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                                   |
-| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js, metajs-test-2.js, metajs-fail-test.js, metajs-fail-test-undeclared.js, metajs-fail-test-anytype.js |
-| C (subset)   | c-interpreter.abnf                                           | c-to-llvm-ir.abnf            | c-test-1.c                                        |
-| Java         | java-interpreter.abnf                                        | java-to-llvm-ir.abnf         | java-test-1.java                                  |
-| Kotlin       | kotlin-interpreter.abnf                                      | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                                  |
-| Go           | go-interpreter.abnf                                          | go-to-llvm-ir.abnf           | go-test-1.go                                      |
-| Python       | python-interpreter.abnf                                      | python-to-llvm-ir.abnf       | python-test-1.py                                  |
-| JavaScript   | js-interpreter.abnf                                          | js-to-llvm-ir.abnf           | js-test-1.js, js-test-classes.js                  |
-| TypeScript   | typescript-interpreter.abnf                                  | typescript-to-llvm-ir.abnf   | typescript-test-1.ts                              |
-| Lua          | lua-interpreter.abnf                                         | lua-to-llvm-ir.abnf          | lua-test-1.lua                                    |
-| Ruby         | ruby-interpreter.abnf                                        | ruby-to-llvm-ir.abnf         | ruby-test-1.rb                                    |
-| PHP          | php-interpreter.abnf                                         | php-to-llvm-ir.abnf          | php-test-1.php                                    |
-| C#           | csharp-interpreter.abnf                                      | csharp-to-llvm-ir.abnf       | csharp-test-1.cs                                  |
-| Dart         | dart-interpreter.abnf                                        | dart-to-llvm-ir.abnf         | dart-test-1.dart                                  |
-| Swift        | swift-interpreter.abnf                                       | swift-to-llvm-ir.abnf        | swift-test-1.swift                                |
+| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js, metajs-test-2.js, metajs-test-features.js, metajs-test-full.js, metajs-fail-test*.js |
+| C (subset)   | c-interpreter.abnf                                           | c-to-llvm-ir.abnf            | c-test-1.c, c-test-features.c, c-test-full.c |
+| Java         | java-interpreter.abnf                                        | java-to-llvm-ir.abnf         | java-test-1.java, java-test-features.java, java-test-full.java |
+| Kotlin       | kotlin-interpreter.abnf                                      | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt, kotlin-test-features.kt, kotlin-test-full.kt |
+| Go           | go-interpreter.abnf                                          | go-to-llvm-ir.abnf           | go-test-1.go, go-test-features.go, go-test-full.go |
+| Python       | python-interpreter.abnf                                      | python-to-llvm-ir.abnf       | python-test-1.py, python-test-features.py, python-test-full.py, python-test-full.2.py |
+| JavaScript   | js-interpreter.abnf                                          | js-to-llvm-ir.abnf           | js-test-1.js, js-test-classes.js, js-test-features.js, js-test-full.js (.2.js, .3.js, .4.mjs) |
+| TypeScript   | typescript-interpreter.abnf                                  | typescript-to-llvm-ir.abnf   | typescript-test-1.ts, typescript-test-features.ts, typescript-test-full.ts |
+| Lua          | lua-interpreter.abnf                                         | lua-to-llvm-ir.abnf          | lua-test-1.lua, lua-test-features.lua, lua-test-full.lua |
+| Ruby         | ruby-interpreter.abnf                                        | ruby-to-llvm-ir.abnf         | ruby-test-1.rb, ruby-test-features.rb, ruby-test-full.rb |
+| PHP          | php-interpreter.abnf                                         | php-to-llvm-ir.abnf          | php-test-1.php, php-test-features.php, php-test-full.php |
+| C#           | csharp-interpreter.abnf                                      | csharp-to-llvm-ir.abnf       | csharp-test-1.cs, csharp-test-features.cs, csharp-test-full.cs |
+| Dart         | dart-interpreter.abnf                                        | dart-to-llvm-ir.abnf         | dart-test-1.dart, dart-test-features.dart, dart-test-full.dart |
+| Swift        | swift-interpreter.abnf                                       | swift-to-llvm-ir.abnf        | swift-test-1.swift, swift-test-features.swift, swift-test-full.swift |
+| Bash         | bash-interpreter.abnf                                        | bash-to-llvm-ir.abnf         | bash-test-1.sh, bash-test-features.sh, bash-test-full.sh |
+| Batch (cmd)  | batch-interpreter.abnf                                       | batch-to-llvm-ir.abnf        | batch-test-1.bat, batch-test-features.cmd, batch-test-full.cmd |
 | C preproc.   | c-preprocessor.abnf (source-to-source, via `-pipe`)          | -                            | c-test-preprocess.c                               |
 | C99          | c99-parser.abnf (parses only)                                | -                            | c99-test-1.c                                      |
 
-Every language is a well chosen executable subset; the exact feature list and the
-deliberate deviations are documented in the :description() of each interpreter grammar.
-The test programs are valid programs of the real languages: c-test-1.c compiles and
-passes under clang, go-test-1.go under go run, python-test-1.py under python3,
-java-test-1.java under javac/java, and metajs-test-1.js under node (with println/printf
-shims) - all with exit code 0, matching both of our engines.
+Each language aims at the full modern language, and the `-full` ratchets measure how
+close it is; the deliberate deviations (for example PHP object ids that are never reused,
+or Python's `__sizeof__`) are documented in the :description() of each interpreter grammar
+and in the "Settled" section of [docs/todo.md](docs/todo.md). The test programs are valid
+programs of the real languages and are checked against the real toolchains wherever one is
+installed (clang, go, python3, javac/java, node, tsc, swiftc, ruby, lua, bash); C#, Dart
+and PHP are checked against their specifications and, for PHP, the php-src test corpus.
+Beyond the core syntax this includes a good part of each standard library - for example
+Java's collections, `Arrays` and streams, Python's `json`, `itertools`, `functools`,
+`random`, `dataclasses` and `collections`, C#'s LINQ and `string.Format`, PHP's array,
+string and SPL library, and JavaScript's `JSON`, `Symbol` and BigInt.
 The C subset has real pointers, arrays, globals, structs (nested values, self
-referencing pointers for linked lists, . and -> along whole paths) and a switch with
-real fallthrough, and
-compiles to plain integer LLVM IR (llvm.Run) - member access is a getelementptr into a
-real LLVM struct type. The object and dynamic languages (Java with
-classes/records/single inheritance/switch on int and String, Kotlin with when/string
-templates/properties/elvis/safe calls/lambdas with map/filter/sumOf and
-until/downTo/step ranges,
-Go with structs/methods/multiple returns/switch/maps/function literals with
-closures/defer, Python with real INDENT/DEDENT
-significant indentation/f-strings/dicts/slices/list comprehensions, MetaJS with the
-JS switch and prefix ++/--) compile to handle threaded
-IR on the MetaJS runtime (llvm.RunJS): objects, strings, lists and closures live behind
-i64 handles, methods dispatch through the shared class descriptor convention (js_mcall,
-with a __super chain for Java's inheritance). Go maps and Python dicts share one handle
-shape (two parallel key/value arrays, so the insertion order is deterministic in both
-engines).
-The same handle runtime backs the dynamic and scripting family - JavaScript (with
-classes/for-in/destructuring), its type-erasing sibling TypeScript, Ruby, Lua, PHP, C#,
-Dart and Swift - which all reuse the shared class descriptor, closures (js_closure) and
-deterministic key enumeration (js_keys, powering for-in / pairs / range-over-map). None
-of them needed a new runtime primitive.
+referencing pointers for linked lists, . and -> along whole paths), a preprocessor with
+function-like macros and a switch with real fallthrough, and compiles to plain integer
+LLVM IR - member access is a getelementptr into a real LLVM struct type. The object and
+dynamic languages (Java, Kotlin, Go, Python, JavaScript, TypeScript, Ruby, Lua, PHP, C#,
+Dart, Swift and MetaJS) compile to handle threaded IR on the MetaJS runtime: objects,
+strings, lists and closures live behind i64 handles, methods dispatch through a shared
+class descriptor convention (js_mcall, with a __super chain for inheritance), and keys
+enumerate deterministically (js_keys, powering for-in / pairs / range-over-map). Shared
+semantics live in shared externals, and language-specific ones in each language's own
+family of externals (`js_py*`, `js_ph*`, `js_jv*`, ...), implemented once in Go and once
+in MetaJS (see the runtime section below).
 MetaJS pins types: every variable must be declared (var/let/const) before use, and a
 variable's type class is pinned by the first non-undefined, non-null value it holds -
 enforced by both engines, positively tested by metajs-test-2.js and demonstrated by
@@ -670,7 +685,8 @@ nothing else:
 
 | layer | what it is | compiled by |
 |---|---|---|
-| `languages/lib/runtime.c` | ~35 irreducible primitives, a mark/sweep GC, coroutines | our own `c-to-llvm-ir.abnf` |
+| `languages/lib/runtime.c` | the irreducible primitives, the garbage collector, coroutines | our own `c-to-llvm-ir.abnf` |
+| `languages/lib/coro-switch.S` | the one stack switch coroutines need (arm64 and x86-64) | clang, at link time |
 | `languages/lib/<lang>-rt.metajs` | each language's semantics, written in MetaJS; shared parts in `runtime.metajs` and friends | our own `metajs-to-llvm-ir.abnf`, via `-rt-lib` |
 | `languages/<lang>-to-llvm-ir.abnf` | the emitter | - |
 
@@ -679,9 +695,33 @@ The `.ll` files are generated artifacts, checked in and regenerated by
 redundancy to be eliminated - it is the project's main instrument, because when they
 disagree, one of them is wrong. Retiring the Go one was measured and declined.
 
+What makes the native binaries fast enough to matter:
+
+- **The collector** is a mark/sweep collector over size-classed chunks with bitmap
+  allocation: a sweep swaps the mark and allocation bitmaps instead of visiting every slot,
+  and allocation walks a cursor to the next free bit. Everything that lives as long as the
+  program - the boot values, each layer 2's top level, interned literals, small integers -
+  goes into a permanent region that is scanned as a root but never marked or swept. A
+  collection runs after max(live, 4 MB) of new allocation.
+- **The MetaJS compiler** (which builds every layer 2) keeps locals that are never
+  reassigned or captured as SSA values instead of scope slots, caches reads of module
+  globals, passes up to three arguments without building an argument array, and calls a
+  top-level function directly after a guard checks it has not been rebound.
+- **The string-literal cache** is hashed by address with hits migrated to their home slot,
+  so its cost does not depend on how a module happens to be laid out.
+
+`tests/bench.sh` measures every language's native benchmark in instructions retired and
+gates each row against `tests/bench/baseline.txt`. The details, and the measurements behind
+each decision, are in sections 7.8 and 7.16 of the manual.
+
 Full detail, including the traps that cost real time:
 [docs/working-on-this-project.md](docs/working-on-this-project.md) — the manual.
-What is still open is [docs/todo.md](docs/todo.md).
+What is still open is [docs/todo.md](docs/todo.md): a ticket tracker with stable `T-NNN`
+IDs grouped by language, a closed list naming the commit that closed each ticket, and a
+"Settled" section of decisions that should not be re-opened.
+[docs/master-prompt.md](docs/master-prompt.md) describes the multi-agent workflow that
+works the tracker: a master agent assigns tickets to per-language workers in separate
+worktrees, verifies each branch against the real toolchain, and merges it.
 
 ### High level overview
 
