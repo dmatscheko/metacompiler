@@ -2721,6 +2721,85 @@ function js_phscallv(target, name, self, args, lsb, scope) {
     return js_phscall(target, name, self, args, lsb)
 }
 function js_phmvis(target, name, scope, where) { return phMethodVis(target, phStr(name), scope, where) }
+// "Class::name" - the declaring class and the method as declared, off its __mns -
+// when the nearest declaration of method lc is not static, else "". Twin of
+// phpNonStatic in abnf/jsrtphp.go.
+function phNonStatic(cls, lc) {
+    var d = phMethodDecl(cls, lc)
+    if (d === undefined) { return "" }
+    var k = d["k"]
+    var l = k["__mns"]
+    if (typeof l != "string") { return "" }
+    var key = "," + lc + ":"
+    var at = l.indexOf(key)
+    if (at < 0) { return "" }
+    var from = at + key.length
+    return phStr(k["__name"]) + "::" + l.substring(from, l.indexOf(",", from))
+}
+// C::m() or C::m(...) of a non-static method needs a $this that is an instance of
+// C; scope, when given, defers a method it may not call to js_phscallv. Twin of
+// m["js_phnscheck"] in abnf/jsrtphp.go.
+function js_phnscheck(target, name, self, scope) {
+    var cls = phClassOf(target)
+    var lc = phsCase(phStr(name), false)
+    if (scope !== undefined) {
+        var acc = phMethodAccess(cls, lc, scope, false)
+        if (acc == 1 || acc == 2) { return undefined }
+    }
+    var ns = phNonStatic(cls, lc)
+    if (ns != "" && !(phIsObj(self) && phIsA(self, phStr(cls["__name"])))) {
+        phRaise("Error", "Non-static method " + ns + "() cannot be called statically")
+    }
+    return undefined
+}
+// The callback check's non-static rule (zend_is_callable_check_func): a method
+// named through its class cn needs an object - the frame's $this, when the
+// frame's class scope is an instance of cls, or for a relative name any $this.
+// Twin of m["js_phcbns"] in abnf/jsrtphp.go.
+function js_phcbns(where, cls, cn, mn, self, scope) {
+    if (cls === undefined || cls === null || typeof cls != "object") { return undefined }
+    var ns = phNonStatic(cls, phsCase(phStr(mn), false))
+    if (ns == "") { return undefined }
+    if (phIsObj(self)) {
+        var rn = phStr(cn)
+        if (rn.length > 0 && rn.charCodeAt(0) == 92) { rn = rn.substring(1) }
+        rn = phsCase(rn, false)
+        if (rn == "self" || rn == "parent" || rn == "static") { return undefined }
+        if (scope !== undefined && scope !== null && typeof scope == "object" && phIsA(self, phStr(scope["__name"]))
+            && phIsA(scope, phStr(cls["__name"]))) { return undefined }
+    }
+    phCbFail(where, "non-static method " + phStr(cls["__name"]) + "::" + ns.substring(ns.indexOf("::") + 2) + "() cannot be called statically")
+    return undefined
+}
+// js_scope_decl of the receiver a method callable is bound to, which must answer
+// name where the callable is made: an instance its method or __call, a class its
+// method or __callStatic. A generator and a closure are left to the call. name
+// undefined is the key's tail after its ':'. Twin of m["js_phfccdecl"] in
+// abnf/jsrtphp.go.
+function js_phfccdecl(env, key, recv, name) {
+    scopeDecl(env, key, recv)
+    var nm = anytype
+    nm = name === undefined ? key.substring(key.indexOf(":") + 1) : phStr(name)
+    if (phIsGen(recv) || typeof recv == "function") { return undefined }
+    if (recv !== undefined && recv !== null && typeof recv == "object") {
+        if (recv["__isclass"] !== undefined) {
+            if (typeof phMethodOf(recv, nm) != "function" && typeof phMethodOf(recv, "__callstatic") != "function") {
+                phRaise("Error", "Call to undefined method " + phStr(recv["__name"]) + "::" + nm + "()")
+            }
+            return undefined
+        }
+        var cls = recv["__class"]
+        if (cls !== undefined && cls !== null) {
+            if (typeof phMethodOf(recv, nm) != "function" && typeof phMethodOf(recv, "__call") != "function") {
+                phRaise("Error", "Call to undefined method " + phClassName(recv) + "::" + nm + "()")
+            }
+            return undefined
+        }
+        if (typeof recv[nm] == "function") { return undefined }
+    }
+    phRaise("Error", "Call to a member function " + nm + "() on " + phDebugType(recv))
+    return undefined
+}
 // The class name a 'C::m' or ['C', 'm'] callable starts with, else null. Twin of
 // m["js_phcbhead"] in abnf/jsrtphp.go.
 function js_phcbhead(v) {

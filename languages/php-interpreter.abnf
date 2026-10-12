@@ -3863,6 +3863,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (typeof cur != "function" && typeof cur != "string" && !isObj(cur)) {
                 phpRaise("Error", "Value of type " + phpDebugType(cur) + " is not callable")
             }
+            // A 'C::m' string resolves its method here, as an array callable does.
+            if (typeof cur == "string" && cur.indexOf("::") >= 0) {
+                var fcn = relName(cur.substring(0, cur.indexOf("::")))
+                return staticCall(resolveClassName(fcn), cur.substring(cur.indexOf("::") + 2), argset, fcn)
+            }
+            if (typeof cur == "string" && !hasOwn(phpBuiltins, fnName(cur))
+                && !(varExists(fnName(cur)) && typeof getVar(fnName(cur)) == "function")) {
+                phpRaise("Error", "Call to undefined function " + cur + "()")
+            }
             return asCallable(cur)
         }
         if (typeof cur == "function") { return cur(argset) }
@@ -3912,12 +3921,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cv = cur
         return function(argset) { return phpInvoke(cv, argset) }
     }
-    function callNamed(name, argset) {
+    function callNamed(cname, argset) {
+        var name = fnName(cname)
         if (hasOwn(phpBuiltins, name)) { return phpBuiltins[name].apply(undefined, argset.pos) }
         var f = getVar(name)
         if (typeof f != "function") { fail("call of an undefined function: " + name) }
         return f(argset)
     }
+    // A function named at run time may be fully qualified: one leading "\" is
+    // dropped (zend_is_callable_check_func). Twin of fnRetry in php-to-llvm-ir.abnf.
+    function fnName(n) { return n.charCodeAt(0) == 92 ? n.substring(1) : n }
     // ----- statics: class constants, static properties and '::' -------------------
     // A class descriptor carries three more ordered maps beside its methods:
     //   __constT   the DECLARED constants as {name, init} records. The initializer is
@@ -3991,13 +4004,43 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (where.charAt(where.length - 1) == ":") { phpRaise("TypeError", where + " " + reason) }
         phpRaise("TypeError", where + ", " + reason)
     }
-    function cbMethod(where, cls, mname) {
+    function cbMethod(where, cls, mname, cn, ns) {
         if (classFind(cls, mname) != null || classFind(cls, phsCase(mname, false)) != null) {
+            if (ns) { cbNonStatic(where, cls, mname, cn) }
             cbVis(where, cls, mname, "__callstatic", false)
             return null
         }
         if (classFind(cls, "__callstatic") != null) { return null }
         cbFail(where, "class " + cls.__name + " does not have a method \"" + mname + "\"")
+    }
+    // A non-static method named through its class cn is no valid callback without
+    // an object: the frame's $this, when the frame's class scope is an instance of
+    // cls, or for a relative name any $this (zend_is_callable_check_func). Twin of
+    // js_phcbns in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function cbNonStatic(where, cls, mname, cn) {
+        var ns = phpNonStatic(cls, phsCase(mname, false))
+        if (ns == "") { return }
+        var tv = anytype
+        tv = varExists("$this") ? getVar("$this") : null
+        if (isObj(tv)) {
+            var rn = relName(cn)
+            if (rn == "self" || rn == "parent" || rn == "static") { return }
+            var fs = ctxSelf()
+            if (fs != null && classIs(tv.__class, fs.__name) && classIs(fs, cls.__name)) { return }
+        }
+        cbFail(where, "non-static method " + cls.__name + "::" + ns.substring(ns.indexOf("::") + 2) + "() cannot be called statically")
+    }
+    // is_callable($v): the check call_user_func makes, in the caller's frame, whose
+    // TypeError answers false. syntax_only and callable_name are not modelled.
+    // Twin of makeIsCallable in php-to-llvm-ir.abnf.
+    function phpIsCallable(v) {
+        try {
+            phpCheckCallback(v, "is_callable()", true)
+        } catch (e) {
+            if (excIsUser(e) && isObj(e.v) && e.v.__class.__name == "TypeError") { return false }
+            throw e
+        }
+        return true
     }
     // A method the calling scope may not call is no valid callback, unless the
     // magic fallback takes it (zend_is_callable_check_func). The class named is
@@ -4009,15 +4052,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cbFail(where, "cannot access " + (acc == 1 ? "private" : "protected") + " method " + cls.__name + "::" + mname + "()")
         }
     }
-    function phpCheckCallback(cur, where) {
+    // ns says the check runs in the frame the callback is named in (cbNonStatic); a
+    // library function's own check runs in its frame and leaves that to the caller's.
+    function phpCheckCallback(cur, where, ns) {
         if (typeof cur == "function") { return cur }
         if (typeof cur == "string") {
             var sep = cur.indexOf("::")
             if (sep >= 0) {
-                cbMethod(where, resolveClassName(cur.substring(0, sep), where), cur.substring(sep + 2))
+                var scn = cur.substring(0, sep)
+                cbMethod(where, resolveClassName(scn, where), cur.substring(sep + 2), scn, ns)
                 return cur
             }
-            if (hasOwn(phpBuiltins, cur) || (varExists(cur) && typeof getVar(cur) == "function")) { return cur }
+            var fnm = fnName(cur)
+            if (hasOwn(phpBuiltins, fnm) || (varExists(fnm) && typeof getVar(fnm) == "function")) { return cur }
             cbFail(where, "function \"" + cur + "\" not found or invalid function name")
         }
         if (isArr(cur)) {
@@ -4036,7 +4083,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 cbVis(where, recv.__class, mn, "__call", true)
                 return cur
             }
-            cbMethod(where, resolveClassName(recv, where), mn)
+            cbMethod(where, resolveClassName(recv, where), mn, recv, ns)
             return cur
         }
         if (isObj(cur) && classFind(cur.__class, "__invoke") != null) { return cur }
@@ -4197,7 +4244,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (sc.v === undefined && sc.st != undefined) { phpStaticUninit(sc) }
                 return deref(sc.v)
             }
-            return staticCall(cls, phpStr(getVar("$" + prop)), evalArgs(args), baseText)
+            var dn = phpStr(getVar("$" + prop))
+            return staticCall(cls, dn, evalArgs(args), baseText, phpNsThis(cls, dn))
         }
         if (name == "class" && args == null) { return fullName(cls) }
         if (args == null) {
@@ -4205,7 +4253,24 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (cr != null) { return cr.v }
             fail("unknown class constant " + cls.__name + "::" + name)
         }
-        return staticCall(cls, name, evalArgs(args), baseText)
+        var nt = phpNsThis(cls, name)
+        return staticCall(cls, name, evalArgs(args), baseText, nt)
+    }
+    // A '::' call of a non-static method runs on $this, which must be an instance
+    // of the class (zend_non_static_method_call): answers the {self, bind} that
+    // staticCall binds, or undefined for a static method. A method the scope may
+    // not call is left to staticCall's visibility check, which PHP makes first.
+    function phpNsThis(cls, name) {
+        var lc = phsCase(name, false)
+        if (mVisNames["$" + lc] === true && phpMethodAccess(cls, lc, ctxSelf(), false) != 0) { return undefined }
+        var ns = phpNonStatic(cls, lc)
+        if (ns == "") { return undefined }
+        var tv = anytype
+        tv = varExists("$this") ? getVar("$this") : null
+        if (!isObj(tv) || !classIs(tv.__class, cls.__name)) {
+            phpRaise("Error", "Non-static method " + ns + "() cannot be called statically")
+        }
+        return {self: tv, bind: tv.__class, ok: false}
     }
     // The call half of a '::' access, also reached by a callable that names a
     // static method ('C::m' or ['C', 'm']).
@@ -4244,7 +4309,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return makePartial(function(a2) { pendingStatic = pbind; return pm(pself, a2) }, argset)
         }
         if (argset.fcc === true) {
-            if (m == null) { phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()") }
+            if (m == null) {
+                var fcs = classFind(cls, "__callstatic")
+                if (fcs == null) { phpRaise("Error", "Call to undefined method " + cls.__name + "::" + name + "()") }
+                var fbind = bind
+                var fname = name
+                return function(a3) { pendingStatic = fbind; return fcs(null, argsOf([fname, arrOf(a3.pos)])) }
+            }
             var mm = m
             var bs = bind
             var fself = self
@@ -4419,7 +4490,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var cb = anytype
                 cb = evalArgs(fa).pos[0]
                 var fc = anytype
-                fc = phpCheckCallback(cb, "Failed to create closure from callable:")
+                fc = phpCheckCallback(cb, "Failed to create closure from callable:", true)
                 var fb = visBound(fc)
                 return typeof fb == "function" ? fb : asCallable(fc)
             }
@@ -5330,7 +5401,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
     }
     function callerCallable(cur, fname) {
-        phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback")
+        phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback", true)
         var vb = visBound(cur)
         if (typeof vb == "function") { return vb }
         var cn = ""
@@ -5814,6 +5885,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pend.push({cell: tcell, rec: tm.statics[ts]})
         }
         cls.__mlc = phpMethodList(tm.methods) + phpMethodList(p.methods).substring(1)
+        cls.__mns = phpNonStaticList(tm.methods) + phpNonStaticList(p.methods).substring(1)
         cls.__svis = phpStaticVisList(name, tm.statics) + phpStaticVisList(name, p.statics).substring(1)
         cls.__pvis = phpVisList(name, props)
         var mvl = phpMethodVisList(p.methods, ",") + phpMethodVisList(tm.methods, phpMethodList(p.methods)).substring(1)
@@ -6143,7 +6215,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (p !== null && p !== undefined) { phpPrecision = phpInt(p) }
             return old
         },
-        "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where)) },
+        "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), false) },
+        "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         "array_key_exists": function(k, a) {
@@ -6770,6 +6843,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var out = ","
         for (var i = 0; i < ms.length; i++) { out += phsCase(ms[i].name, false) + "," }
         return out
+    }
+    // A class's __mns: its non-static methods as ",lc:Name,", the name lower-cased
+    // and as declared, which is how PHP's Error spells it. Twin of phNonStaticList
+    // in php-to-llvm-ir.abnf.
+    function phpNonStaticList(ms) {
+        var out = ","
+        for (var i = 0; i < ms.length; i++) {
+            if (ms[i].isStatic !== true) { out += phsCase(ms[i].name, false) + ":" + ms[i].name + "," }
+        }
+        return out
+    }
+    // "Class::name" - the declaring class and the method as declared - when the
+    // nearest declaration of method lc is not static, else "". Twin of
+    // phpNonStatic in abnf/jsrtphp.go and phNonStatic in lib/php-rt.metajs.
+    function phpNonStatic(cls, lc) {
+        var d = phpMethodDecl(cls, lc)
+        if (d == null || typeof d.k.__mns != "string") { return "" }
+        var key = "," + lc + ":"
+        var at = d.k.__mns.indexOf(key)
+        if (at < 0) { return "" }
+        var from = at + key.length
+        return d.k.__name + "::" + d.k.__mns.substring(from, d.k.__mns.indexOf(",", from))
     }
     // gettype()'s historical spellings; get_debug_type() is the modern one.
     function phpTypeName(v) {

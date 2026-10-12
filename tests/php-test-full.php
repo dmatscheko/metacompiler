@@ -3125,6 +3125,62 @@ function s64() {
     check("pslot2", $k->getX() === 1 && !isset($k->x));
 }
 
+// ===== SECTION 65: static calls of instance methods, callables made where they stand, is_callable =====
+// A '::' call of a non-static method runs on $this, which must be an instance of
+// the class named, else it is an Error naming the declaring class and the method
+// as declared (zend_non_static_method_call); a callback naming one through its
+// class needs the same object, from the frame that hands it over
+// (zend_is_callable_check_func). 'm(...)' resolves its method where it stands: a
+// missing one is the Error the call would raise. is_callable() answers whether
+// that callback check passes in the calling frame.
+trait S65T { function tm() { return "tm"; } }
+class S65A {
+    use S65T;
+    function Foo() { return "foo:" . get_class($this); }
+    static function sfoo() { return "sfoo"; }
+    private function priv() { return "priv"; }
+    function inside() {
+        return [is_callable([$this, 'priv']), is_callable(['S65A', 'foo']), is_callable('S65A::foo'), is_callable('nope')];
+    }
+}
+class S65B extends S65A {
+    function viaA() { return S65A::foo(); }
+    function viaFcc() { $f = parent::foo(...); return $f(); }
+}
+class S65C { function other() { return S65A::foo(); } }
+class S65M { static function __callStatic($n, $a) { return "static:" . $n; } function __call($n, $a) { return "call:" . $n; } }
+function s65err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s65() {
+    $ns = "Error: Non-static method S65A::Foo() cannot be called statically";
+    check("nsc1", s65err(fn() => S65A::foo()) === $ns && s65err(fn() => S65A::FOO()) === $ns
+        && s65err(fn() => (new S65C)->other()) === $ns && s65err(fn() => S65A::foo(...)) === $ns
+        && s65err(fn() => S65B::tm()) === "Error: Non-static method S65A::tm() cannot be called statically"
+        && S65A::sfoo() === "sfoo" && S65A::sfoo(...)() === "sfoo");
+    check("nsc2", s65err(fn() => call_user_func(['S65A', 'foo']))
+            === "TypeError: call_user_func(): Argument #1 (\$callback) must be a valid callback, non-static method S65A::Foo() cannot be called statically"
+        && s65err(fn() => Closure::fromCallable('S65A::foo'))
+            === "TypeError: Failed to create closure from callable: non-static method S65A::Foo() cannot be called statically");
+    $b = new S65B;
+    check("nsc3", $b->viaA() === "foo:S65B" && $b->viaFcc() === "foo:S65B");
+    $o = new S65A;
+    $n = null;
+    check("fcc1", s65err(fn() => $o->nope(...)) === "Error: Call to undefined method S65A::nope()"
+        && s65err(fn() => [$o, 'nope'](...)) === "Error: Call to undefined method S65A::nope()"
+        && s65err(fn() => 'S65A::nope'(...)) === "Error: Call to undefined method S65A::nope()"
+        && s65err(fn() => $n->m(...)) === "Error: Call to a member function m() on null"
+        && s65err(fn() => (new stdClass)->nope(...)) === "Error: Call to undefined method stdClass::nope()");
+    $m = new S65M;
+    check("fcc2", [$o, 'foo'](...)() === "foo:S65A" && 'strtoupper'(...)('x') === "X" && 'S65A::sfoo'(...)() === "sfoo"
+        && S65M::zz(...)() === "static:zz" && $m->zz(...) instanceof Closure);
+    check("isc1", [is_callable('S65A::foo'), is_callable('S65A::sfoo'), is_callable([$o, 'foo']), is_callable('strlen'),
+                   is_callable('\strlen'), is_callable('S65A'), is_callable('nope'), is_callable(fn() => 1),
+                   is_callable(42), is_callable(['S65A', 'nope']), is_callable([$o, 'priv']), is_callable([$m, 'any'])]
+        === [false, true, true, true, true, false, false, true, false, false, false, true]);
+    check("isc2", $o->inside() === [true, true, true, false]);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3198,6 +3254,7 @@ function main() {
     s63(); // SECTION-CALL 63
     s63dump(); // SECTION-CALL 63
     s64(); // SECTION-CALL 64
+    s65(); // SECTION-CALL 65
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

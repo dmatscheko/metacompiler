@@ -2725,6 +2725,27 @@ func (rt *jsrt) phpMethodDecl(cls *jsObject, lc string) (*jsObject, string) {
 	return nil, ""
 }
 
+// phpNonStatic is "Class::name" - the declaring class and the method as declared,
+// off its __mns - when the nearest declaration of method lc is not static, else
+// "". Twin of phpNonStatic in languages/php-interpreter.abnf.
+func (rt *jsrt) phpNonStatic(cls *jsObject, lc string) string {
+	k, _ := rt.phpMethodDecl(cls, lc)
+	if k == nil {
+		return ""
+	}
+	l, ok := k.props["__mns"]
+	if !ok {
+		return ""
+	}
+	s, key := rt.phpStr(l), ","+lc+":"
+	at := strings.Index(s, key)
+	if at < 0 {
+		return ""
+	}
+	rest := s[at+len(key):]
+	return rt.phpStr(k.props["__name"]) + "::" + rest[:strings.Index(rest, ",")]
+}
+
 // phpMethodAccess: may code in class scope (nil outside every class) call method
 // lc on cls? 0 yes, 1 no (private), 2 no (protected), 3 call the scope's own
 // private method instead. Twin of phpMethodAccess in
@@ -3213,6 +3234,88 @@ func init() {
 				return m["js_phscall"]([]uint64{a[0], rt.wrapStr("__callstatic"), a[2], w(fwd), a[4]})
 			}
 			return m["js_phscall"](a[:5])
+		}
+		// js_phnscheck(target, name, this, scope): C::m() or C::m(...) of a
+		// non-static method needs a $this that is an instance of C; scope, when
+		// given, defers a method it may not call to js_phscallv. Twin of
+		// js_phnscheck in languages/lib/php-rt.metajs.
+		m["js_phnscheck"] = func(a []uint64) uint64 {
+			cls := rt.phpClassOf(u(a[0]))
+			lc := phpCase(rt.phpStr(u(a[1])), false)
+			if u(a[3]) != jsUndef {
+				scope, _ := u(a[3]).(*jsObject)
+				if acc := rt.phpMethodAccess(cls, lc, scope, false); acc == 1 || acc == 2 {
+					return jsHUndefined
+				}
+			}
+			if ns := rt.phpNonStatic(cls, lc); ns != "" && !(phpIsObj(u(a[2])) && rt.phpIsA(u(a[2]), rt.phpStr(cls.props["__name"]))) {
+				rt.phpRaise("Error", "Non-static method "+ns+"() cannot be called statically")
+			}
+			return jsHUndefined
+		}
+		// js_phcbns(where, cls, cn, mn, this, scope): the callback check's
+		// non-static rule (zend_is_callable_check_func): a method named through its
+		// class cn needs an object - the frame's $this, when the frame's class scope
+		// is an instance of cls, or for a relative name any $this. Twin of
+		// js_phcbns in languages/lib/php-rt.metajs.
+		m["js_phcbns"] = func(a []uint64) uint64 {
+			cls, ok := u(a[1]).(*jsObject)
+			if !ok {
+				return jsHUndefined
+			}
+			mn := rt.phpStr(u(a[3]))
+			ns := rt.phpNonStatic(cls, phpCase(mn, false))
+			if ns == "" {
+				return jsHUndefined
+			}
+			if this := u(a[4]); phpIsObj(this) {
+				switch phpCase(strings.TrimPrefix(rt.phpStr(u(a[2])), "\\"), false) {
+				case "self", "parent", "static":
+					return jsHUndefined
+				}
+				if scope, ok := u(a[5]).(*jsObject); ok && rt.phpIsA(this, rt.phpStr(scope.props["__name"])) &&
+					rt.phpIsA(scope, rt.phpStr(cls.props["__name"])) {
+					return jsHUndefined
+				}
+			}
+			rt.phpCbFail(rt.phpStr(u(a[0])), "non-static method "+rt.phpStr(cls.props["__name"])+"::"+ns[strings.Index(ns, "::")+2:]+"() cannot be called statically")
+			return jsHUndefined
+		}
+		// js_phfccdecl(env, key, recv, name): js_scope_decl of the receiver a
+		// method callable is bound to, which must answer name where the callable is
+		// made: an instance its method or __call, a class its method or
+		// __callStatic. A generator and a closure are left to the call. name
+		// undefined is the key's tail after its ':'. Twin of js_phfccdecl in
+		// languages/lib/php-rt.metajs.
+		m["js_phfccdecl"] = func(a []uint64) uint64 {
+			recv := u(a[2])
+			key := rt.toString(u(a[1]))
+			rt.scopeOf(a[0]).put(key, recv)
+			name := key[strings.Index(key, ":")+1:]
+			if u(a[3]) != jsUndef {
+				name = rt.phpStr(u(a[3]))
+			}
+			if o, ok := recv.(*jsObject); ok {
+				if _, isCls := o.props["__isclass"]; isCls {
+					if rt.phpMethodOf(o, name) == nil && rt.phpMethodOf(o, "__callstatic") == nil {
+						rt.phpRaise("Error", "Call to undefined method "+rt.phpStr(o.props["__name"])+"::"+name+"()")
+					}
+					return 0
+				}
+				if cls, has := o.props["__class"]; has && !isNullish(cls) {
+					if rt.phpMethodOf(o, name) == nil && rt.phpMethodOf(o, "__call") == nil {
+						rt.phpRaise("Error", "Call to undefined method "+rt.phpClassName(recv)+"::"+name+"()")
+					}
+					return 0
+				}
+				if f, has := o.props[name]; has && isCallable(f) {
+					return 0
+				}
+			} else if _, isGen := recv.(*jsGenerator); isGen || isCallable(recv) {
+				return 0
+			}
+			rt.phpRaise("Error", "Call to a member function "+name+"() on "+rt.phpDebugType(recv))
+			return 0
 		}
 		m["js_phmvis"] = func(a []uint64) uint64 {
 			scope, _ := u(a[2]).(*jsObject)
