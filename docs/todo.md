@@ -63,7 +63,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-441 python: qualnames, dunder/exception `__dict__`, "Did you mean", dir/copy/dataclasses · P2 · PY · OPEN [V]
+### T-441 python: qualnames, dunder/exception `__dict__`, "Did you mean", dir/copy/dataclasses · P2 · PY · IN PROGRESS (PY worker, round 19) [V]
 python3 3.14: (a) `C.m.__qualname__` is `'m'` (should be `'C.m'`); nested classes print `'N'` not `'C.N'` in
 AttributeError texts. (b) compiled only: `o.__x__ = 5` missing from `o.__dict__` (`__`-prefix filter);
 `vars(ValueError("v"))` gives `{'args': ...}` (python3 `{}`). (c) property error messages use the accessed name; CPython
