@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-450** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-451** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -116,13 +116,14 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-447 php: realpath; declared-null properties vs magic (compiled); __unset · P2 · PHP · IN PROGRESS (PHP worker, round 28) [V]
-(a) `realpath` needs a file-system primitive (getcwd + realpath(3)) in runtime.c, the Go twin and an interpreter host
-hook; none exists. (b) compiled only: with `public $prop;` (null) plus `__set`/`__isset`, `$f->prop = 1` calls `__set`
-and `isset($f->prop)` calls `__isset`; PHP sees the declared slot and runs no magic (emitPropSetPlain/GetPlain/Isset use
-js_phisset as "exists"; needs a presence extern). Blocks corpus assign_coalesce_008. (c) `__unset` magic not implemented
-in either engine (corpus magic_methods_001). Note only: both engines evaluate the RHS of `$n[k()] += v()` before the
-target's indexes; php-src evaluates k first, the manual calls it unspecified.
+### T-450 php: property visibility; uninitialised typed properties; magic recursion guard; ref-returning ??= target · P2 · PHP · IN PROGRESS (PHP worker, round 29) [V]
+php-src semantics, both engines: (a) visibility is not enforced: `class T { private $a = 1; } (new T)->a` gives 1; PHP
+"Cannot access private property T::$a", and with `__get` declared, `__get` is called (typed_properties_100 fails
+compiled since T-447 for this reason; the interpreter always did). Includes protected access from subclasses, static
+props, and method visibility if cheap. (b) `public int $x;` is stored as null; PHP keeps it uninitialised (read is
+Error "must not be accessed before initialization", `__get` skipped). (c) no recursion guard for
+`__get`/`__set`/`__isset`/`__unset` on the same property (PHP falls back to the plain slot). (d) `foo(bar())['bar'] ??= 42`
+with a reference-returning `function &foo()` leaves `$foo` NULL (assign_coalesce_008).
 
 ---
 
@@ -495,6 +496,7 @@ T-443 python: user __hash__/__eq__ dict/set keys, class-level descriptor __get__
 T-444 php: echo writes per operand, magic methods in any case, ??= reads with isset semantics (offsetExists/__isset, single evaluation), basename/dirname/pathinfo; realpath moved to T-447 — DONE 561511a7
 T-446 python: aliased and module-qualified imports of the Python-written library modules bind where they run; ImportError for missing names — DONE 5860929b
 T-448 python: runtime stdlib modules bound on import with aliases and from-imports (math/re/sys/builtins objects; others bare), re/sys functions as values — DONE f3aab379
+T-447 php: declared properties take precedence over magic (compiled presence test), __unset in both engines, isset() asks __isset only, realpath (js_realpath in the C floor, Go twin, interpreter host hook) — DONE 6b675553
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
