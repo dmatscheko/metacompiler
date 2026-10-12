@@ -3,8 +3,8 @@
 # grammars), so one implementation serves all three engines.
 #
 # Imports here are flat (the module's top-level names bind directly), so the
-# public names are bound as themselves and `dataclasses` is bound to a module
-# object carrying them; every helper carries the _mec_dc prefix so that a
+# public names are bound as themselves and the module object carrying them is
+# _mec_mod_dataclasses; every helper carries the _mec_dc prefix so that a
 # program's own names cannot replace it.
 #
 # The surface is Lib/dataclasses.py's common one: @dataclass with and without
@@ -446,4 +446,4 @@ class _mec_dc_module:
         return "<module 'dataclasses'>"
 
 
-dataclasses = _mec_dc_module()
+_mec_mod_dataclasses = _mec_dc_module()

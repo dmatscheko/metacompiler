@@ -2,16 +2,16 @@
 # program that imports it (core.importFile in both python grammars), so one
 # implementation serves all three engines.
 #
-# Imports here are flat (the module's top-level names bind directly), so
-# `import copy` and `from copy import copy` both reach the name `copy`: it is
-# bound to a module object that is also callable as copy.copy. Helpers carry
+# Imports here are flat (the module's top-level names bind directly), and the
+# module object is _mec_mod_copy, which `import copy` binds and `from copy
+# import` reads (core.importFile's callers in both grammars). Helpers carry
 # the _mec_cp prefix so that a program's own names cannot replace them.
 #
 # copy(x) and deepcopy(x, memo) follow Lib/copy.py: a class's __copy__ /
 # __deepcopy__ first, the immutable values as themselves, the builtin
 # containers element by element, an instance through cls.__new__ and its
 # __dict__, an exception through its args. Any other value raises copy.Error
-# rather than sharing state by accident; Error is reached as copy.Error only,
+# rather than sharing state by accident. Error lives on the module object only:
 # as a flat name it would replace a program's own Error.
 
 
@@ -102,8 +102,8 @@ def _mec_cp_deepcopy(x, memo=None):
     return y
 
 
-# copy.replace(obj, **changes) is the class's __replace__. It is reached as
-# copy.replace only: a flat `replace` would collide with dataclasses.replace.
+# copy.replace(obj, **changes) is the class's __replace__. It lives on the
+# module object only: a flat `replace` would collide with dataclasses.replace.
 def _mec_cp_replace(obj, /, **changes):
     func = getattr(obj.__class__, "__replace__", None)
     if func is None:
@@ -119,12 +119,9 @@ class _mec_cp_module:
     class Error(Exception):
         pass
 
-    def __call__(self, x):
-        return _mec_cp_copy(x)
-
     def __repr__(self):
         return "<module 'copy'>"
 
 
-copy = _mec_cp_module()
+_mec_mod_copy = _mec_cp_module()
 deepcopy = _mec_cp_deepcopy

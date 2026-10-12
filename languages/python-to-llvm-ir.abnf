@@ -187,20 +187,20 @@ KwEnd = :script(~~
 // The leading NL swallows any comment/blank lines at the top of the file.
 Program     <~~ buildMain(takeAll()) ~~>
             = [ NL ] { TopStmt } ;
-// Imports are module level (column 0) and yield no statement, so they are tried
-// at the TopStmt level (before Statement, outside the stmtPos wrapper) and push
-// nothing net - keeping the value stack balanced for buildMain(takeAll()).
+// Imports are module level (column 0), so they are tried at the TopStmt level
+// (before Statement, outside the stmtPos wrapper); an import that binds a name
+// pushes that binding's statement for buildMain(takeAll()).
 TopStmt     = SameLevel ( ImportLine | Statement ) ;
 ImportLine  = ( Import | FromImport ) NL ;
 
 // Module level imports. resolveImport (lib/compile-core.js) checks each module
 // path against core.stdlibImports; an unresolvable one aborts (or, under
-// -warn-imports, warns and continues). An import produces no statement thunk:
-// DottedName pushes the bare path and the resolving tag pops it (net zero).
+// -warn-imports, warns and continues). pyImportMod / pyFromImport push the
+// statement that binds the imported names, when there is one to bind.
 Import      = KwImport ImportMod { "," ImportMod } ;
-ImportMod   <~~ resolveImport(pop(), up.pos) ~~>
-            = DottedName [ KwAs Id ] ;
-FromImport  <~~ resolveImport(pop(), up.pos) ~~>
+ImportMod   <~~ var pyImS = pyImportMod(takeAll(), up.pos); if (pyImS != null) { push(pyImS) } ~~>
+            = DottedName [ KwAs ImportId ] ;
+FromImport  <~~ var pyFrS = pyFromImport(takeAll(), up.pos); if (pyFrS != null) { push(pyFrS) } ~~>
             = KwFrom RelName KwImport ( "*" | ImportParen | ImportName { "," ImportName } ) ;
 // from . import x / from ..pkg import y: the leading dots are the relative package
 // level, which this flat import model has nothing to resolve against, so they are
@@ -235,7 +235,10 @@ NotImportKw = :script(~~
 // The parenthesized (and therefore multi-line) form of the name list, which is how
 // CPython's own suite writes any import of more than two names.
 ImportParen = "(" :whitespace(WhitespaceNL) ImportName { "," ImportName } [ "," ] ")" :whitespace(Whitespace) ;
-ImportName  = Id [ KwAs Id ] ;
+ImportName  <~~ push(takeAll()) ~~>
+            = ImportId [ KwAs ImportId ] ;
+ImportId    <~~ push(up.in) ~~>
+            = Id ;
 DottedName  <~~ push(stripWs(up.in)) ~~>
             = Id { "." Id } ;
 KwImport    = "import" KwEnd ;
@@ -258,9 +261,8 @@ DefLike     <~~ push(pop().dstmt) ~~>
 SmallLine   <~~ push(makeSeq(takeAll())) ~~>
             = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
 // An import may sit inside a function, a try or an if (`try: import _testcapi` is a
-// common CPython idiom), so it is a SMALL statement too, not only a module level one. It
-// pushes nothing net, so a line holding only an import makes an empty (no-op) sequence,
-// which is what an import is to a flat module.
+// common CPython idiom), so it is a SMALL statement too, not only a module level one. A
+// line holding only an import that binds nothing makes an empty (no-op) sequence.
 SmallStmt   = Import | FromImport
             | Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del
             | TypeAlias | AugAssign | AnnAssign | Assign | ExprSmall ;
@@ -4478,7 +4480,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
                         "NotImplementedError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                        "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit"]
+                        "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
         excParent["IndexError"] = "LookupError"
@@ -4688,7 +4690,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         importDepth = importDepth + 1
         var outerMod = pyCurMod
         pyCurMod = modName
+        // An import inside a def walks the module there; its top-level names are
+        // the module's globals, not the def's locals.
+        var outerFrames = sbFrames
+        sbFrames = []
         c.compile(asg)
+        sbFrames = outerFrames
         pyCurMod = outerMod
         importDepth = importDepth - 1
         c.popSource()
@@ -4700,6 +4707,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (path == "copy" || path == "dataclasses" || path == "collections") {
             var lib = "lib/python-" + path + ".py"
             if (importedFiles["$" + lib] != true) { pyCompileModule(lib, load(lib), path) }
+            pyImportKind = "lib"
             return true
         }
         var rel = path.split(".").join("/")
@@ -4713,9 +4721,48 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (importedFiles["$" + file] != true) {
                 pyCompileModule(file, c.readFile(file), i == 0 ? path : path.substring(0, cut))
             }
+            pyImportKind = "file"
             return true
         }
         return false
+    }
+
+    // An import binds its names where it runs, so in a function they are locals.
+    // A library module's file binds its module object as _mec_mod_<name>: `import
+    // M [as A]` binds A (else M) to it, and `from M import N [as A]` binds A (else
+    // N) to its attribute N, raising CPython's ImportError when there is none. A
+    // project file has no module object; its names are bound flat already, so only
+    // an `as` alias needs a binding. Each binding is Python source compiled by this
+    // grammar, so it follows the assignment and scoping rules of any other.
+    // Twin of the same functions in python-interpreter.abnf.
+    var pyImportKind = ""
+    function pyImportStmt(src, rule) {
+        return c.compile(c.parseFrom(c.agrammar, src, rule)).stack[0]
+    }
+    function pyImportMod(items, pos) {
+        pyImportKind = ""
+        resolveImport(items[0], pos)
+        if (pyImportKind != "lib") { return null }
+        var bound = items.length > 1 ? items[1] : items[0]
+        return pyImportStmt(bound + " = _mec_mod_" + items[0] + "\n", "SmallLine")
+    }
+    function pyFromImport(items, pos) {
+        pyImportKind = ""
+        resolveImport(items[0], pos)
+        var mod = items[0]
+        var binds = []
+        for (var i = 1; i < items.length; i++) {
+            var name = items[i][0]
+            var bound = items[i].length > 1 ? items[i][1] : name
+            if (pyImportKind == "lib") {
+                binds.push(pyImportStmt("try: " + bound + " = _mec_mod_" + mod + "." + name + "\n" +
+                    "except AttributeError: raise ImportError(\"cannot import name '" + name + "' from '" + mod +
+                    "' (unknown location)\") from None\n", "TryStmt"))
+            } else if (pyImportKind == "file" && bound != name) {
+                binds.push(pyImportStmt(bound + " = " + name + "\n", "SmallLine"))
+            }
+        }
+        return binds.length == 0 ? null : makeSeq(binds)
     }
 
     c.compile(c.asg)

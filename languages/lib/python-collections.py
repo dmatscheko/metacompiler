@@ -3,8 +3,8 @@
 # python grammars), so one implementation serves all three engines.
 #
 # Imports here are flat (the module's top-level names bind directly), so
-# deque, defaultdict, OrderedDict and Counter are bound as themselves and
-# `collections` is bound to a module object carrying them; helpers carry the
+# deque, defaultdict, OrderedDict and Counter are bound as themselves and the
+# module object carrying them is _mec_mod_collections; helpers carry the
 # _mec_co prefix so that a program's own names cannot replace them.
 #
 # The behaviour is Lib/collections/__init__.py's, error texts included.
@@ -362,7 +362,7 @@ class _mec_co_module:
         return "<module 'collections'>"
 
 
-collections = _mec_co_module()
+_mec_mod_collections = _mec_co_module()
 _mec_co_module.deque = deque
 _mec_co_module.defaultdict = defaultdict
 _mec_co_module.OrderedDict = OrderedDict

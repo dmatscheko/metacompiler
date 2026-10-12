@@ -5,6 +5,7 @@
 # object), so the from-import style is the natural fit. math is a builtin no-op.
 import math
 from mypkg.helper import triple, label
+from mypkg.helper import triple as thrice
 
 fails = 0
 
@@ -15,6 +16,7 @@ def check(name, got, want):
         fails = fails + 1
 
 check("imported def", triple(14), 42)
+check("imported def under an alias", thrice(5), 15)
 check("imported f-string def", label("x", 7), "x=7")
 check("module top level ran", module_marker, "helper loaded")
 

@@ -5460,6 +5460,50 @@ def s104():
           and bmsgs == ["bytearray() takes at most 3 arguments (4 given)", "cannot convert 'NoneType' object to bytearray",
                         "byte must be in range(0, 256)", "bytes must be in range(0, 256)"])
 
+# ===== SECTION 105: aliased and module-qualified imports =====
+# `import M as A` binds A to the module object and `from M import N as A` binds
+# A to its attribute N, at the point the import runs - a local in a function.
+# copy.copy, copy.replace and copy.Error are the module's own names, and a name
+# the module lacks is an ImportError. Rows from CPython 3.14.
+from dataclasses import dataclass as S105dc, field as S105field
+import collections as S105co
+
+@S105dc
+class S105P:
+    a: int
+    b: list = S105field(default_factory=list)
+
+def s105():
+    import copy as cp
+    from collections import Counter as C, deque as D
+    from dataclasses import replace as rep, fields as flds, asdict
+    import dataclasses
+    import collections
+    p = S105P(1, [2])
+    check("impas1", repr(p) == "S105P(a=1, b=[2])" and cp.deepcopy(p) == p and cp.deepcopy(p).b is not p.b
+          and cp.copy(p).b is p.b and rep(p, a=5) == S105P(5, [2]) and [f.name for f in flds(p)] == ["a", "b"]
+          and asdict(p) == {"a": 1, "b": [2]} and dataclasses.is_dataclass(p) and dataclasses.astuple(p) == (1, [2]))
+    check("impas2", C("abca").most_common(1) == [("a", 2)] and repr(D([1, 2, 3], maxlen=2)) == "deque([2, 3], maxlen=2)"
+          and repr(S105co.OrderedDict(a=1)) == "OrderedDict({'a': 1})" and collections.Counter("xx")["x"] == 2
+          and repr(collections.deque([4])) == "deque([4])" and collections.defaultdict(int)["q"] == 0)
+    from copy import copy, Error, replace
+    errs = []
+    try:
+        replace(1)
+    except TypeError as err:
+        errs.append(str(err))
+    try:
+        from copy import S105nosuch
+    except ImportError as err:
+        errs.append(str(err).split(" (")[0])
+    try:
+        from collections import S105Nope as N
+    except ImportError as err:
+        errs.append(type(err).__name__ + " " + str(err).split(" (")[0])
+    check("impas3", copy([1, 2]) == [1, 2] and type(copy).__name__ == "function" and issubclass(Error, Exception)
+          and Error.__name__ == "Error" and errs == ["replace() does not support int objects", "cannot import name 'S105nosuch' from 'copy'",
+                       "ImportError cannot import name 'S105Nope' from 'collections'"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5562,5 +5606,6 @@ def main():
     s102() # SECTION-CALL 102
     s103() # SECTION-CALL 103
     s104() # SECTION-CALL 104
+    s105() # SECTION-CALL 105
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

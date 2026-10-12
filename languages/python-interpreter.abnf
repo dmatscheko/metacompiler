@@ -75,9 +75,10 @@ Known deviations, all deliberate:
   - Complex division is the textbook formula, not CPython's scaled (Smith)
     one, so a quotient can differ in the last digit.
   - An imported module binds its names flat, without a module object, so the
-    from-import style is the one that works. copy, dataclasses and collections
-    are written in Python (lib/python-copy.py, lib/python-dataclasses.py,
-    lib/python-collections.py) and bind a module object of their own besides;
+    from-import style is the one that works (`from m import f as g` binds g).
+    copy, dataclasses and collections are written in Python (lib/python-copy.py,
+    lib/python-dataclasses.py, lib/python-collections.py) and have a module
+    object besides, so `import copy as c` and `from copy import Error` work;
     collections offers deque, defaultdict, OrderedDict and Counter; dataclass
     refuses slots, kw_only, weakref_slot, KW_ONLY, InitVar and make_dataclass
     with NotImplementedError.
@@ -133,19 +134,19 @@ KwEnd = :script(~~
 // The leading NL swallows any comment/blank lines at the top of the file.
 Program     <~~ runProgram(takeAll()) ~~>
             = [ NL ] { TopStmt } ;
-// Imports are module level (column 0) and yield no statement, so they are tried
-// at the TopStmt level (before Statement) and push nothing net.
+// Imports are module level (column 0), so they are tried at the TopStmt level
+// (before Statement); an import that binds a name pushes that binding's statement.
 TopStmt     = SameLevel ( ImportLine | Statement ) ;
 ImportLine  = ( Import | FromImport ) NL ;
 
 // Module level imports. resolveImport (lib/interp-core.js) checks each module
 // path against core.stdlibImports; an unresolvable one aborts (or, under
-// -warn-imports, warns and continues). An import produces no statement thunk:
-// DottedName pushes the bare path and the resolving tag pops it (net zero).
+// -warn-imports, warns and continues). pyImportMod / pyFromImport push the
+// statement that binds the imported names, when there is one to bind.
 Import      = KwImport ImportMod { "," ImportMod } ;
-ImportMod   <~~ resolveImport(pop(), up.pos) ~~>
-            = DottedName [ KwAs Id ] ;
-FromImport  <~~ resolveImport(pop(), up.pos) ~~>
+ImportMod   <~~ var pyImS = pyImportMod(takeAll(), up.pos); if (pyImS != null) { push(pyImS) } ~~>
+            = DottedName [ KwAs ImportId ] ;
+FromImport  <~~ var pyFrS = pyFromImport(takeAll(), up.pos); if (pyFrS != null) { push(pyFrS) } ~~>
             = KwFrom RelName KwImport ( "*" | ImportParen | ImportName { "," ImportName } ) ;
 // from . import x / from ..pkg import y: the leading dots are the relative package
 // level, which this flat import model has nothing to resolve against, so they are
@@ -179,7 +180,10 @@ NotImportKw = :script(~~
 ~~) ;
 // The parenthesized (and therefore multi-line) form of the name list.
 ImportParen = "(" :whitespace(WhitespaceNL) ImportName { "," ImportName } [ "," ] ")" :whitespace(Whitespace) ;
-ImportName  = Id [ KwAs Id ] ;
+ImportName  <~~ push(takeAll()) ~~>
+            = ImportId [ KwAs ImportId ] ;
+ImportId    <~~ push(up.in) ~~>
+            = Id ;
 DottedName  <~~ push(stripWs(up.in)) ~~>
             = Id { "." Id } ;
 KwImport    = "import" KwEnd ;
@@ -10609,7 +10613,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit"]
+                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
     pyExcParent["ArithmeticError"] = "Exception"
@@ -10637,6 +10641,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["GeneratorExit"] = "BaseException"
     pyExcParent["MemoryError"] = "Exception"
     pyExcParent["SystemExit"] = "BaseException"
+    pyExcParent["ImportError"] = "Exception"
     function installExceptions() {
         for (var i = 0; i < pyExcNames.length; i++) {
             var n = pyExcNames[i]
@@ -12576,7 +12581,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         c.pushSource(file, text)
         var outerMod = pyCurMod
         pyCurMod = modName
+        // An import inside a def walks the module there; its top-level names are
+        // the module's globals, not the def's locals.
+        var outerFrames = sbFrames
+        sbFrames = []
         c.compile(asg)
+        sbFrames = outerFrames
         pyCurMod = outerMod
         c.popSource()
     }
@@ -12587,6 +12597,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (path == "copy" || path == "dataclasses" || path == "collections") {
             var lib = "lib/python-" + path + ".py"
             if (importedFiles["$" + lib] != true) { pyCompileModule(lib, load(lib), path) }
+            pyImportKind = "lib"
             return true
         }
         var rel = path.split(".").join("/")
@@ -12600,9 +12611,48 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (importedFiles["$" + file] != true) {
                 pyCompileModule(file, c.readFile(file), i == 0 ? path : path.substring(0, cut))
             }
+            pyImportKind = "file"
             return true
         }
         return false
+    }
+
+    // An import binds its names where it runs, so in a function they are locals.
+    // A library module's file binds its module object as _mec_mod_<name>: `import
+    // M [as A]` binds A (else M) to it, and `from M import N [as A]` binds A (else
+    // N) to its attribute N, raising CPython's ImportError when there is none. A
+    // project file has no module object; its names are bound flat already, so only
+    // an `as` alias needs a binding. Each binding is Python source compiled by this
+    // grammar, so it follows the assignment and scoping rules of any other.
+    // Twin of the same functions in python-to-llvm-ir.abnf.
+    var pyImportKind = ""
+    function pyImportStmt(src, rule) {
+        return c.compile(c.parseFrom(c.agrammar, src, rule)).stack[0]
+    }
+    function pyImportMod(items, pos) {
+        pyImportKind = ""
+        resolveImport(items[0], pos)
+        if (pyImportKind != "lib") { return null }
+        var bound = items.length > 1 ? items[1] : items[0]
+        return pyImportStmt(bound + " = _mec_mod_" + items[0] + "\n", "SmallLine")
+    }
+    function pyFromImport(items, pos) {
+        pyImportKind = ""
+        resolveImport(items[0], pos)
+        var mod = items[0]
+        var binds = []
+        for (var i = 1; i < items.length; i++) {
+            var name = items[i][0]
+            var bound = items[i].length > 1 ? items[i][1] : name
+            if (pyImportKind == "lib") {
+                binds.push(pyImportStmt("try: " + bound + " = _mec_mod_" + mod + "." + name + "\n" +
+                    "except AttributeError: raise ImportError(\"cannot import name '" + name + "' from '" + mod +
+                    "' (unknown location)\") from None\n", "TryStmt"))
+            } else if (pyImportKind == "file" && bound != name) {
+                binds.push(pyImportStmt(bound + " = " + name + "\n", "SmallLine"))
+            }
+        }
+        return binds.length == 0 ? null : makeSeq(binds)
     }
 
     c.compile(c.asg)
