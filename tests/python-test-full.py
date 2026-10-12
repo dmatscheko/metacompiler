@@ -4842,6 +4842,62 @@ def s96():
     check("sys3", sys.get_int_max_str_digits() == 0 and len(str(10**700)) == 701 and int("9" * 700) % 1000 == 999)
     sys.set_int_max_str_digits(4300)
 
+# ===== SECTION 98: a call that does not fit the signature =====
+# Every mismatch is a TypeError naming the function by its __qualname__, in
+# CPython's order: a keyword error, too many positionals, the missing
+# positional, the missing keyword-only parameters. A generator function checks
+# at the call, not at the first next(). Rows from CPython 3.14.
+class S98C:
+    def m(self, a):
+        return a
+    def __init__(self, x=1):
+        self.x = x
+
+def s98():
+    def err(fn):
+        try:
+            fn()
+        except TypeError as e:
+            return str(e)
+        return "no error"
+    def f(a, b=2):
+        return a
+    def g(a, b, c, d=1):
+        return a
+    def h(x, *, k, j):
+        return k
+    def q(a, b=1, *, k):
+        return a
+    def u():
+        return 0
+    def v(a, *rest):
+        return a
+    def p(a, b, /, c):
+        return a
+    def p3(a, /, **kw):
+        return kw
+    def gen(a):
+        yield a
+    lam = lambda x: x
+    check("arity1", err(lambda: f()) == "s98.<locals>.f() missing 1 required positional argument: 'a'"
+          and err(lambda: f(b=3)) == err(lambda: f()) and err(lambda: v()) == "s98.<locals>.v() missing 1 required positional argument: 'a'")
+    check("arity2", err(lambda: g(1)) == "s98.<locals>.g() missing 2 required positional arguments: 'b' and 'c'"
+          and err(lambda: g()) == "s98.<locals>.g() missing 3 required positional arguments: 'a', 'b', and 'c'")
+    check("arity3", err(lambda: h(1)) == "s98.<locals>.h() missing 2 required keyword-only arguments: 'k' and 'j'"
+          and err(lambda: h(1, j=2)) == "s98.<locals>.h() missing 1 required keyword-only argument: 'k'")
+    check("arity4", err(lambda: u(1)) == "s98.<locals>.u() takes 0 positional arguments but 1 was given"
+          and err(lambda: f(1, 2, 3)) == "s98.<locals>.f() takes from 1 to 2 positional arguments but 3 were given"
+          and err(lambda: lam(1, 2)) == "s98.<locals>.<lambda>() takes 1 positional argument but 2 were given")
+    check("arity5", err(lambda: q(1, 2, 3, k=1)) == "s98.<locals>.q() takes from 1 to 2 positional arguments but 3 positional arguments (and 1 keyword-only argument) were given")
+    check("arity6", err(lambda: f(1, a=2)) == "s98.<locals>.f() got multiple values for argument 'a'"
+          and err(lambda: f(1, z=2)) == "s98.<locals>.f() got an unexpected keyword argument 'z'"
+          and err(lambda: p(b=1, a=2, c=3)) == "s98.<locals>.p() got some positional-only arguments passed as keyword arguments: 'a, b'"
+          and err(lambda: p3(a=1)) == "s98.<locals>.p3() missing 1 required positional argument: 'a'" and p3(1, a=2) == {"a": 2})
+    check("arity7", err(lambda: S98C().m()) == "S98C.m() missing 1 required positional argument: 'a'"
+          and err(lambda: S98C(1, 2)) == "S98C.__init__() takes from 1 to 2 positional arguments but 3 were given")
+    check("arity8", err(lambda: gen()) == "s98.<locals>.gen() missing 1 required positional argument: 'a'"
+          and err(lambda: f(None)) == "no error" and err(lambda: h(None, k=None, j=None)) == "no error")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4937,5 +4993,6 @@ def main():
     s94() # SECTION-CALL 94
     s95() # SECTION-CALL 95
     s96() # SECTION-CALL 96
+    s98() # SECTION-CALL 98
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

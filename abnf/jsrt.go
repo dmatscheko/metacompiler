@@ -15862,7 +15862,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(rt.call(callee, jsUndef, bound))
 		},
 		// Register a def's parameter shape, so a keyword call can be bound to it.
-		"js_pysig": func(a []uint64) uint64 { // (closure, name array, kw-only count, extended?, defaulted flags)
+		// qual is the def's __qualname__ (undefined for a builtin, which is never
+		// arity-checked); flags is 1 for a *args, 2 for a **kwargs, plus 4 times
+		// the positional-only count.
+		"js_pysig": func(a []uint64) uint64 { // (closure, name array, kw-only count, extended?, defaulted flags, qualname, flags)
 			if rt.pySigs == nil {
 				rt.pySigs = map[interface{}]*pySig{}
 			}
@@ -15876,6 +15879,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if fl, ok := u(a[4]).(*jsArray); ok {
 				for _, d := range fl.elems {
 					sig.dflt = append(sig.dflt, rt.truthy(d))
+				}
+			}
+			if q, ok := u(a[5]).(string); ok {
+				fl := int(rt.toNumber(u(a[6])))
+				sig.qual, sig.rest, sig.kwrest, sig.nposonly = q, fl&1 != 0, fl&2 != 0, fl>>2
+				for sig.nreq < len(sig.names)-sig.nkwonly && !sig.dflt[sig.nreq] {
+					sig.nreq++
 				}
 			}
 			rt.pySigs[u(a[0])] = sig
@@ -22420,6 +22430,14 @@ type pySig struct {
 	nkwonly int // The LAST nkwonly names are keyword-only.
 	ext     bool
 	dflt    []bool // Which names have a default; nil for a builtin.
+	// The arity check: qual is the def's __qualname__, empty for a builtin,
+	// which is never checked. nreq counts the leading positional parameters
+	// without a default; nposonly those before a `/`.
+	qual     string
+	rest     bool
+	kwrest   bool
+	nposonly int
+	nreq     int
 }
 
 // pyBindCall turns (positional, keyword dict) into the callee's argument array.
@@ -22452,10 +22470,22 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 		return pos, false
 	}
 	if !sig.ext && !hasKw {
+		if len(pos) < sig.nreq || (!sig.rest && len(pos) > len(sig.names) && sig.qual != "") {
+			rt.pyArityCheck(sig, len(pos), nil)
+		}
 		return pos, false
 	}
 	n := len(sig.names)
 	npos := n - sig.nkwonly
+	if sig.qual != "" {
+		var kn []string
+		if hasKw {
+			for _, k := range kwKeys.elems {
+				kn = append(kn, rt.toString(k))
+			}
+		}
+		rt.pyArityCheck(sig, len(pos), kn)
+	}
 	out := make([]interface{}, n)
 	for i := range out {
 		out[i] = jsUndef
@@ -22468,7 +22498,7 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	}
 	used := map[string]bool{}
 	fromKw := func(i int) {
-		if !hasKw {
+		if !hasKw || i < sig.nposonly {
 			return
 		}
 		for j, k := range kwKeys.elems {
@@ -22504,6 +22534,135 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	}
 	left := &jsObject{props: map[string]interface{}{"__dict": true, "keys": lk, "vals": lv}}
 	return append(out, rest, left), true
+}
+
+// pyArityCheck raises CPython's TypeError for a call that does not fit sig:
+// given positional arguments plus the keyword names kn. The order is
+// CPython's initialize_locals: each keyword in turn (a positional-only name
+// given by keyword, an unknown one, one already filled by position), then too
+// many positionals, then the missing positional, then the missing
+// keyword-only parameters. Twin of pyDArityCheck in lib/python-rt.metajs and
+// pyArityCheck in python-interpreter.abnf.
+func (rt *jsrt) pyArityCheck(sig *pySig, given int, kn []string) {
+	names := sig.names
+	npos := len(names) - sig.nkwonly
+	fail := func(msg string) {
+		panic(&jsThrown{value: rt.pyExcInstance("TypeError", sig.qual+"() "+msg)})
+	}
+	hasKw := func(n string) bool {
+		for _, k := range kn {
+			if k == n {
+				return true
+			}
+		}
+		return false
+	}
+	dflt := func(i int) bool { return i < len(sig.dflt) && sig.dflt[i] }
+	for _, k := range kn {
+		at := -1
+		for j := sig.nposonly; j < len(names); j++ {
+			if names[j] == k {
+				at = j
+			}
+		}
+		if at < 0 {
+			if sig.kwrest {
+				continue
+			}
+			var po []string
+			for j := 0; j < sig.nposonly; j++ {
+				if hasKw(names[j]) {
+					po = append(po, names[j])
+				}
+			}
+			if len(po) > 0 {
+				fail("got some positional-only arguments passed as keyword arguments: '" + strings.Join(po, ", ") + "'")
+			}
+			fail("got an unexpected keyword argument '" + k + "'")
+		}
+		if at < npos && at < given {
+			fail("got multiple values for argument '" + k + "'")
+		}
+	}
+	if !sig.rest && given > npos {
+		ndef, kwGiven := 0, 0
+		for i := 0; i < npos; i++ {
+			if dflt(i) {
+				ndef++
+			}
+		}
+		for i := npos; i < len(names); i++ {
+			if hasKw(names[i]) {
+				kwGiven++
+			}
+		}
+		fail(pyTooManyMsg(npos, ndef, given, kwGiven))
+	}
+	var miss []string
+	for i := given; i < npos; i++ {
+		if !dflt(i) && (i < sig.nposonly || !hasKw(names[i])) {
+			miss = append(miss, names[i])
+		}
+	}
+	if len(miss) > 0 {
+		fail(pyMissingMsg(miss, "positional"))
+	}
+	for i := npos; i < len(names); i++ {
+		if !dflt(i) && !hasKw(names[i]) {
+			miss = append(miss, names[i])
+		}
+	}
+	if len(miss) > 0 {
+		fail(pyMissingMsg(miss, "keyword-only"))
+	}
+}
+
+// CPython's too_many_positional: a def with npos positional parameters, ndef
+// of them defaulted, called with given positional and kwGiven keyword-only
+// arguments.
+func pyTooManyMsg(npos, ndef, given, kwGiven int) string {
+	sig, plural := strconv.Itoa(npos), npos != 1
+	if ndef > 0 {
+		sig, plural = "from "+strconv.Itoa(npos-ndef)+" to "+strconv.Itoa(npos), true
+	}
+	msg := "takes " + sig + " positional argument"
+	if plural {
+		msg += "s"
+	}
+	msg += " but " + strconv.Itoa(given)
+	if kwGiven > 0 {
+		msg += " positional argument" + pyPluralS(given) + " (and " + strconv.Itoa(kwGiven) +
+			" keyword-only argument" + pyPluralS(kwGiven) + ")"
+	}
+	if given == 1 && kwGiven == 0 {
+		return msg + " was given"
+	}
+	return msg + " were given"
+}
+
+// CPython's missing_arguments, listing 'a' / 'a' and 'b' / 'a', 'b', and 'c'.
+func pyMissingMsg(miss []string, kind string) string {
+	list := ""
+	for i, m := range miss {
+		if i > 0 && len(miss) > 2 {
+			list += ","
+		}
+		if i > 0 && i == len(miss)-1 {
+			list += " and"
+		}
+		if i > 0 {
+			list += " "
+		}
+		list += "'" + m + "'"
+	}
+	return "missing " + strconv.Itoa(len(miss)) + " required " + kind + " argument" + pyPluralS(len(miss)) + ": " + list
+}
+
+func pyPluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // pyMinMax is max/min(iterable, *, key=None, default=...) and max/min(a, b,

@@ -8187,6 +8187,12 @@ var pyDSigNames = []
 var pyDSigKwOnly = []
 var pyDSigExt = []
 var pyDSigDflt = []
+// The arity check (Go: pySig.qual / rest / kwrest / nposonly / nreq): the
+// qualname, "" for a builtin, which is never checked; the js_pysig flags; the
+// count of leading positional parameters without a default.
+var pyDSigQual = []
+var pyDSigFlags = []
+var pyDSigNreq = []
 
 // Fills a defaulted parameter's slot that a keyword call left unbound, so
 // js_pyargd can tell it from an explicit None. Go: pyAbsentArg.
@@ -8206,10 +8212,13 @@ function pyDSigIndex(callee) {
 // ([p0..pn-1, *args list, **kwargs dict]) over layout A (a flat positional
 // array). `dflt` flags the defaulted names (undefined for a builtin). Go
 // overwrites a duplicate map entry; so does this.
-function js_pysig(clo, names, nkwonly, ext, dflt) {
+function js_pysig(clo, names, nkwonly, ext, dflt, qual, flags) {
     var ns = []
     var ds = []
     var i = 0
+    var q = ""
+    var fl = 0
+    var nreq = 0
     if (pyIsArr(names)) {
         while (i < names.length) {
             ns.push(pyToStr(names[i]))
@@ -8223,6 +8232,11 @@ function js_pysig(clo, names, nkwonly, ext, dflt) {
             i = i + 1
         }
     }
+    if (typeof qual == "string") {
+        q = qual
+        fl = pyNum(flags)
+        while (nreq < ns.length - pyNum(nkwonly) && !ds[nreq]) { nreq = nreq + 1 }
+    }
     var at = pyDSigIndex(clo)
     if (at < 0) {
         pyDSigFn.push(clo)
@@ -8230,11 +8244,17 @@ function js_pysig(clo, names, nkwonly, ext, dflt) {
         pyDSigKwOnly.push(pyNum(nkwonly))
         pyDSigExt.push(pyDTruthy(ext))
         pyDSigDflt.push(ds)
+        pyDSigQual.push(q)
+        pyDSigFlags.push(fl)
+        pyDSigNreq.push(nreq)
     } else {
         pyDSigNames[at] = ns
         pyDSigKwOnly[at] = pyNum(nkwonly)
         pyDSigExt[at] = pyDTruthy(ext)
         pyDSigDflt[at] = ds
+        pyDSigQual[at] = q
+        pyDSigFlags[at] = fl
+        pyDSigNreq[at] = nreq
     }
     return clo
 }
@@ -8285,9 +8305,28 @@ function pyBindCall(callee, pos, kw) {
     var nkwonly = pyDSigKwOnly[si]
     var ext = pyDSigExt[si]
     var dflt = pyDSigDflt[si]
-    if (!ext && !hasKw) { return pos }
+    var qual = pyDSigQual[si]
+    var flags = pyDSigFlags[si]
+    if (!ext && !hasKw) {
+        if (pos.length < pyDSigNreq[si] || (flags % 2 == 0 && pos.length > names.length && qual != "")) {
+            pyDArityCheck(si, pos.length, [])
+        }
+        return pos
+    }
     var n = names.length
     var npos = n - nkwonly
+    var nposonly = (flags - flags % 4) / 4
+    if (qual != "") {
+        var kn = []
+        if (hasKw) {
+            i = 0
+            while (i < kwKeys.length) {
+                kn.push(pyToStr(kwKeys[i]))
+                i = i + 1
+            }
+        }
+        pyDArityCheck(si, pos.length, kn)
+    }
     i = 0
     while (i < n) {
         if (i < dflt.length && dflt[i]) {
@@ -8307,7 +8346,7 @@ function pyBindCall(callee, pos, kw) {
     var used = []
     // Go's fromKw(i) closure, inlined at both of its call sites: the LAST
     // matching keyword wins, because Go keeps assigning as it scans.
-    i = 0
+    i = nposonly
     while (i < npos) {
         if (i >= pos.length) {
             if (hasKw) {
@@ -8367,6 +8406,90 @@ function pyBindCall(callee, pos, kw) {
     out.push(extra)
     out.push(left)
     return out
+}
+
+// CPython's TypeError for a call that does not fit signature si: given
+// positionals plus the keyword names kn. Go: rt.pyArityCheck, which documents
+// the order.
+function pyDArityCheck(si, given, kn) {
+    var names = pyDSigNames[si]
+    var dflt = pyDSigDflt[si]
+    var flags = pyDSigFlags[si]
+    var npos = names.length - pyDSigKwOnly[si]
+    var nposonly = (flags - flags % 4) / 4
+    var k = 0
+    var j = 0
+    while (k < kn.length) {
+        var at = -1
+        j = nposonly
+        while (j < names.length) {
+            if (names[j] == kn[k]) { at = j }
+            j = j + 1
+        }
+        if (at < 0 && (flags - flags % 2) % 4 == 0) {
+            var po = ""
+            j = 0
+            while (j < nposonly) {
+                if (pyDUsed(kn, names[j])) { po = po == "" ? names[j] : po + ", " + names[j] }
+                j = j + 1
+            }
+            if (po != "") { pyDArityFail(si, "got some positional-only arguments passed as keyword arguments: '" + po + "'") }
+            pyDArityFail(si, "got an unexpected keyword argument '" + kn[k] + "'")
+        }
+        if (at >= 0 && at < npos && at < given) { pyDArityFail(si, "got multiple values for argument '" + kn[k] + "'") }
+        k = k + 1
+    }
+    if (flags % 2 == 0 && given > npos) {
+        var ndef = 0
+        var kwGiven = 0
+        j = 0
+        while (j < names.length) {
+            if (j < npos && j < dflt.length && dflt[j]) { ndef = ndef + 1 }
+            if (j >= npos && pyDUsed(kn, names[j])) { kwGiven = kwGiven + 1 }
+            j = j + 1
+        }
+        var sig = "" + npos
+        var plural = npos != 1
+        if (ndef > 0) {
+            sig = "from " + (npos - ndef) + " to " + npos
+            plural = true
+        }
+        var msg = "takes " + sig + " positional argument" + (plural ? "s" : "") + " but " + given
+        if (kwGiven > 0) {
+            msg = msg + " positional argument" + (given == 1 ? "" : "s") + " (and " + kwGiven
+                + " keyword-only argument" + (kwGiven == 1 ? "" : "s") + ")"
+        }
+        pyDArityFail(si, msg + (given == 1 && kwGiven == 0 ? " was given" : " were given"))
+    }
+    var miss = []
+    j = given
+    while (j < npos) {
+        if (!(j < dflt.length && dflt[j]) && (j < nposonly || !pyDUsed(kn, names[j]))) { miss.push(names[j]) }
+        j = j + 1
+    }
+    if (miss.length > 0) { pyDArityFail(si, pyDMissingMsg(miss, "positional")) }
+    j = npos
+    while (j < names.length) {
+        if (!(j < dflt.length && dflt[j]) && !pyDUsed(kn, names[j])) { miss.push(names[j]) }
+        j = j + 1
+    }
+    if (miss.length > 0) { pyDArityFail(si, pyDMissingMsg(miss, "keyword-only")) }
+}
+
+function pyDArityFail(si, msg) { pyRaiseExc("TypeError", pyDSigQual[si] + "() " + msg) }
+
+// CPython's missing_arguments, listing 'a' / 'a' and 'b' / 'a', 'b', and 'c'.
+function pyDMissingMsg(miss, kind) {
+    var list = ""
+    var i = 0
+    while (i < miss.length) {
+        if (i > 0 && miss.length > 2) { list = list + "," }
+        if (i > 0 && i == miss.length - 1) { list = list + " and" }
+        if (i > 0) { list = list + " " }
+        list = list + "'" + miss[i] + "'"
+        i = i + 1
+    }
+    return "missing " + miss.length + " required " + kind + " argument" + (miss.length == 1 ? "" : "s") + ": " + list
 }
 
 function pyDUsed(used, name) {

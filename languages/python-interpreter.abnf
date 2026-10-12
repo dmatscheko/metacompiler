@@ -268,7 +268,7 @@ For         <~~ push(makeForStmt(takeAll())) ~~>
 // genPush/genPop bracket the body so makeYield can mark the def as a GENERATOR
 // function (calling it then yields a generator object rather than running the body).
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
-            = "def" KwEnd Id <~~ push(up.in); genPush(); sbPush() ~~> [ SkipBracket ] ParamList [ "->" DiscardType ] Suite ;
+            = "def" KwEnd Id <~~ push(up.in); genPush(); sbPush("d", up.in) ~~> [ SkipBracket ] ParamList [ "->" DiscardType ] Suite ;
 // A parameter list may span lines; annotations parse and are ignored.
 ParamList   <~~ push(makeParamList(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) [ Param { "," Param } [ "," ] ] ")" :whitespace(Whitespace) ;
@@ -298,7 +298,7 @@ Decorator   <~~ push({deco: pop()}) ~~>
 // namespace scope, so plain statements (loops, conditionals) inside a class body work
 // and every name it binds - including its defs - becomes a class attribute.
 Class       <~~ push(makeClass(takeAll())) ~~>
-            = "class" KwEnd Id <~~ push(up.in); sbPush() ~~> [ SkipBracket ] [ ClassBases ] Suite ;
+            = "class" KwEnd Id <~~ push(up.in); sbPush("c", up.in) ~~> [ SkipBracket ] [ ClassBases ] Suite ;
 ClassBases  <~~ push({bases: takeAll()}) ~~>
             = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 // A PEP 695 type-parameter list, [T], [A, B] - parsed and dropped (types are erased).
@@ -645,7 +645,7 @@ NamedTest   = Expression ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
-            = "lambda" KwEnd <~~ sbPush() ~~> [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
+            = "lambda" KwEnd <~~ sbPush("d", "<lambda>") ~~> [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
 // Lambda parameters take no annotation (the ':' ends the header); defaults,
 // *args and **kwargs work like in def.
 LamParam    = LamDblStar | LamStar | LamSlash | LamNamed ;
@@ -9163,12 +9163,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // CompTarget itself and never reaches a collector, which is right, because a
     // comprehension is its own scope in CPython (`[i for i in r]` leaves no `i`).
     var sbFrames = []
-    function sbPush() { sbFrames.push({names: [], decl: []}) }
+    // Each frame also carries the __qualname__ of the def, lambda ("d") or class
+    // ("c") it opens: the enclosing frame's, then "." (".<locals>." after a
+    // function's), then its own name. sbPop leaves the closed frame's in sbQual.
+    var sbQual = ""
+    function sbPush(kind, name) {
+        var q = name
+        if (sbFrames.length > 0) {
+            var outer = sbFrames[sbFrames.length - 1]
+            q = outer.qual + (outer.kind == "d" ? ".<locals>." : ".") + name
+        }
+        sbFrames.push({names: [], decl: [], kind: kind, qual: q})
+    }
     // The names of the frame just closed, de-duplicated, minus anything a `global`
     // or `nonlocal` declaration in the same body claimed for another scope.
     function sbPop() {
         if (sbFrames.length == 0) { return [] }
         var f = sbFrames.pop()
+        sbQual = f.qual
         var out = []
         for (var i = 0; i < f.names.length; i++) {
             var n = f.names[i]
@@ -11817,11 +11829,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 dflts.push(it.pdflt != undefined ? it.pdflt : null)
             }
         }
+        // What pyArgsFit tests a call against without a scan: the positional
+        // slot count, the required leading ones, and whether a keyword-only slot
+        // is required.
+        var npos = 0
+        while (npos < slots.length && !slots[npos].kwonly) { npos++ }
+        var nreq = 0
+        while (nreq < npos && dflts[nreq] == null) { nreq++ }
+        var kwreq = false
+        for (var r = npos; r < slots.length; r++) { if (dflts[r] == null) { kwreq = true } }
         // `locals` is the STATIC binding analysis of the body this parameter list
         // belongs to, filled in by makeDef / makeLambda once the body has parsed
         // (sbPop). It travels on the parameter list because that is the one record a
         // call, and a generator resumption, both already carry - see callScopes.
-        return {slots: slots, dflts: dflts, rest: rest, kwrest: kwrest, locals: []}
+        return {slots: slots, dflts: dflts, rest: rest, kwrest: kwrest, locals: [],
+                npos: npos, nreq: nreq, kwreq: kwreq, qual: ""}
     }
     function makeNamedParam(items) {
         if (items.length > 1) { return {pname: items[0], pdflt: items[1].pdefault} }
@@ -11881,12 +11903,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     setAdd(used, sl.name)
                 }
             }
-            if (!got) {
-                if (dflts[p] === undefined && plist.dflts[p] == null) {
-                    pyRaise(pyMakeExc("TypeError", ["missing required argument: '" + sl.name + "'"]))
-                }
-                v = dflts[p]
-            }
+            if (!got) { v = dflts[p] }
             scopePut(fscope, sl.name, v)
             // The frame's first positional slot, which is what a zero-argument
             // super() reads as its instance - CPython reads f_localsplus[0] for
@@ -11912,11 +11929,80 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         chain.push(fscope)
         return chain
     }
+    // A call that does not fit plist raises CPython's TypeError, BEFORE the
+    // body or a generator object exists. Only a keyword call, a required
+    // keyword-only slot or a positional count outside the slot range is scanned.
+    function pyArgsFit(plist, args, named) {
+        if (named != null || plist.kwreq || args.length < plist.nreq
+            || (plist.rest == null && args.length > plist.npos)) { pyArityCheck(plist, args.length, named) }
+    }
+    // CPython's initialize_locals order: each keyword in turn (a positional-only
+    // name given by keyword, an unknown one, one already filled by position),
+    // then too many positionals, then the missing positional, then the missing
+    // keyword-only slots. Twin of pyArityCheck in abnf/jsrt.go.
+    function pyArityCheck(plist, given, named) {
+        var slots = plist.slots
+        var kn = named == null ? [] : named.keys
+        var npos = plist.npos
+        for (var k = 0; k < kn.length; k++) {
+            var at = -1
+            for (var j = 0; j < slots.length; j++) { if (!slots[j].posonly && slots[j].name == kn[k]) { at = j } }
+            if (at < 0) {
+                if (plist.kwrest != null) { continue }
+                var po = []
+                for (var q = 0; q < slots.length; q++) {
+                    if (slots[q].posonly && kn.indexOf(slots[q].name) >= 0) { po.push(slots[q].name) }
+                }
+                if (po.length > 0) {
+                    pyArityFail(plist, "got some positional-only arguments passed as keyword arguments: '" + po.join(", ") + "'")
+                }
+                pyArityFail(plist, "got an unexpected keyword argument '" + kn[k] + "'")
+            }
+            if (at < npos && at < given) { pyArityFail(plist, "got multiple values for argument '" + kn[k] + "'") }
+        }
+        if (plist.rest == null && given > npos) {
+            var ndef = 0
+            var kwGiven = 0
+            for (var i = 0; i < npos; i++) { if (plist.dflts[i] != null) { ndef++ } }
+            for (var i2 = npos; i2 < slots.length; i2++) { if (kn.indexOf(slots[i2].name) >= 0) { kwGiven++ } }
+            var sig = "" + npos
+            var plural = npos != 1
+            if (ndef > 0) { sig = "from " + (npos - ndef) + " to " + npos; plural = true }
+            var msg = "takes " + sig + " positional argument" + (plural ? "s" : "") + " but " + given
+            if (kwGiven > 0) {
+                msg = msg + " positional argument" + (given == 1 ? "" : "s") + " (and " + kwGiven
+                    + " keyword-only argument" + (kwGiven == 1 ? "" : "s") + ")"
+            }
+            pyArityFail(plist, msg + (given == 1 && kwGiven == 0 ? " was given" : " were given"))
+        }
+        var miss = []
+        for (var m = given; m < npos; m++) {
+            if (plist.dflts[m] == null && (slots[m].posonly || kn.indexOf(slots[m].name) < 0)) { miss.push(slots[m].name) }
+        }
+        if (miss.length > 0) { pyArityFail(plist, pyMissingMsg(miss, "positional")) }
+        for (var m2 = npos; m2 < slots.length; m2++) {
+            if (plist.dflts[m2] == null && kn.indexOf(slots[m2].name) < 0) { miss.push(slots[m2].name) }
+        }
+        if (miss.length > 0) { pyArityFail(plist, pyMissingMsg(miss, "keyword-only")) }
+    }
+    function pyArityFail(plist, msg) { pyRaise(pyMakeExc("TypeError", [plist.qual + "() " + msg])) }
+    // CPython's missing_arguments, listing 'a' / 'a' and 'b' / 'a', 'b', and 'c'.
+    function pyMissingMsg(miss, kind) {
+        var list = ""
+        for (var i = 0; i < miss.length; i++) {
+            if (i > 0 && miss.length > 2) { list = list + "," }
+            if (i > 0 && i == miss.length - 1) { list = list + " and" }
+            if (i > 0) { list = list + " " }
+            list = list + "'" + miss[i] + "'"
+        }
+        return "missing " + miss.length + " required " + kind + " argument" + (miss.length == 1 ? "" : "s") + ": " + list
+    }
     function makeDef(bodyT, plist, name, pos) {
         var isGenFn = genPop()
         // The body's frame closes here; the def's own NAME binds in the scope
         // AROUND it, so sbName runs after sbPop.
         plist.locals = sbPop()
+        plist.qual = sbQual
         sbName(name)
         return function() {
             var defScopes = scopes.slice()
@@ -11930,6 +12016,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var named = kTakeNamed()
                 var args = []
                 for (var i = 0; i < argv.length; i++) args.push(argv[i])
+                pyArgsFit(plist, args, named)
                 // A generator function runs nothing on call: it captures the arguments
                 // and hands back a generator object.
                 if (isGenFn) { return newGenObject(bodyT, defScopes, plist, dflts, args, named) }
@@ -11978,6 +12065,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // capture, defaults and call scoping as def.
     function makeLambda(exprT, plist, pos) {
         plist.locals = sbPop()
+        plist.qual = sbQual
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
@@ -11986,6 +12074,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var named = kTakeNamed()
                 var args = []
                 for (var i = 0; i < argv.length; i++) args.push(argv[i])
+                pyArgsFit(plist, args, named)
                 var saved = scopes
                 scopes = callScopes(defScopes, plist, dflts, args, named)
                 var r = anytype
