@@ -726,6 +726,7 @@ function pyStr(v) {
     // its own and cannot be matched, so it is left off rather than invented, and
     // all three engines print this same short form.
     if (pyIsIter(v)) { return "<" + pyToStr(v["__pyit"]) + " object>" }
+    if (pyDIsProp(v)) { return "<property object>" }
     // A MODULE object. CPython prints <module 'builtins' (built-in)> for a
     // built-in module and, for an extension module like math, the .so PATH it was
     // loaded from - machine-specific and unmatchable, so every module here takes
@@ -1055,6 +1056,7 @@ function pyTypeName(v) {
         if (v["__pymatch"] === true) { return "re.Match" }
         if (v["__pysm"] !== undefined) { return "staticmethod" }
         if (v["__pycm"] !== undefined) { return "classmethod" }
+        if (v["__pyprop"] !== undefined) { return "property" }
         if (v["__pymod"] !== undefined) { return "module" }
         if (v["__pyunion"] !== undefined) { return "typing.Union" }
         if (v["__galias"] !== undefined) { return "types.GenericAlias" }
@@ -1778,6 +1780,7 @@ function pyGetAttrRaw(obj, name) {
         if (pyNoneBound(obj, name)) { return undefined }
         if (pyLookupHas(cls, name)) {
             var v = pyLookupVal(cls, name)
+            if (pyDIsProp(v)) { return pyDPropGet(v, obj, cls, name) }
             // staticmethod / classmethod, before every other arm: a static one
             // must NOT pick up the instance as self, and a class one binds to the
             // receiver's OWN class, so D().c() passes D.
@@ -1795,6 +1798,7 @@ function pyGetAttrRaw(obj, name) {
         pyRaiseExc("AttributeError",
                    "'" + pyToStr(cls["__name"]) + "' object has no attribute '" + name + "'")
     }
+    if (pyDIsProp(obj)) { return pyDPropAttr(obj, name) }
     // A MODULE object. `builtins.len` resolves through the module's own slot,
     // which the emitter filled with the very binding the global name resolves to,
     // so `builtins.len is len` holds rather than answering a copy; a math
@@ -2176,12 +2180,12 @@ function pyDHookGet(obj, name) {
     if (!missed) { return r }
     return pyCall(gf, [obj, name])
 }
-// hasattr() of an instance whose class has a read hook: whether the read
-// raises AttributeError.
+// hasattr() of an instance whose class has a read hook or whose member is a
+// property: whether the read raises AttributeError.
 function pyDHookHas(obj, name) {
     var has = true
     try {
-        pyDHookGet(obj, name)
+        pyGetAttr(obj, name)
     } catch (e) {
         if (!pyDIsInstance(e, pyExcClass("AttributeError"))) { throw e }
         has = false
@@ -2215,6 +2219,10 @@ function pySetAttrRaw(obj, name, v) {
     if (cls != null) {
         if (pyLookupHas(cls, name)) {
             var cur = pyLookupVal(cls, name)
+            if (pyDIsProp(cur)) {
+                pyDPropCall(cur, "fset", cls, name, [obj, v])
+                return v
+            }
             var set = pyDescriptor(cur, "__set__")
             if (set !== undefined) {
                 set.apply(undefined, [cur, obj, v])
@@ -6038,6 +6046,8 @@ function pyDHasAttr(obj, name) {
     if (cls !== null && cls !== undefined) {
         if (name == "__class__" || name == "__dict__" || name == "__new__") { return true }
         if (obj[name] !== undefined || pyNoneBound(obj, name)) { return true }
+        // A property answers what its getter does (Go: pyHasAttrRaw).
+        if (pyLookupHas(cls, name) && pyDIsProp(pyLookupVal(cls, name))) { return pyDHookHas(obj, name) }
         return pyLookupHas(cls, name) || pyObjectMethod(name) !== null
     }
     // A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
@@ -7869,6 +7879,9 @@ function pySuperAttr(s, name) {
     // A staticmethod / classmethod found through super(), same rule as the call
     // path in pySuperMCall.
     if (pyDIsStatic(m) || pyDIsClsM(m)) { return pyDDescGet(m, pyDSuperOwner(s), name) }
+    if (pyDIsProp(m) && pyInstClassOf(s["__sobj"]) !== null) {
+        return pyDPropGet(m, s["__sobj"], pyInstClassOf(s["__sobj"]), name)
+    }
     // __new__ is a static method: super().__new__(cls) passes cls itself.
     if (pyIsCallable(m) && name != "__new__") { return pyDBindMethod(s["__sobj"], m, name) }
     return m
@@ -8196,6 +8209,13 @@ function pyDDelAttr(obj, name) {
     var dcls = pyInstClassOf(obj)
     if (dcls === null) { pyNoDictAttr(obj, pyToStr(name)) }
     else if (dcls["__mro"] === undefined && dcls["__name"] == "object") { pyAttrError(dcls, pyToStr(name)) }
+    else if (pyLookupHas(dcls, pyToStr(name))) {
+        var dp = pyLookupVal(dcls, pyToStr(name))
+        if (pyDIsProp(dp)) {
+            pyDPropCall(dp, "fdel", dcls, pyToStr(name), [obj])
+            return undefined
+        }
+    }
     if (obj === null || obj === undefined || typeof obj != "object") {
         fail("attribute deletion on a " + pyTypeName(obj))
     }
@@ -8834,6 +8854,7 @@ function pyDMethodCall(target, name, args, kw) {
             if (dfb !== null) { return pyDCallPyValue(dfb, args, kw) }
         }
     }
+    if (pyDIsProp(target)) { return pyDCallPyValue(pyDPropAttr(target, name), args, kw) }
     var cls = pyClassOf(target)
     if (cls !== null) {
         if (pyLookupHas(cls, name)) {
@@ -8870,6 +8891,7 @@ function pyDMethodCall(target, name, args, kw) {
         }
         if (pyLookupHas(icls, name)) {
             var m = pyLookupVal(icls, name)
+            if (pyDIsProp(m)) { return pyDCallPyValue(pyDPropGet(m, target, icls, name), args, kw) }
             // inst.s(...) on a staticmethod gets NO self, and inst.c(...) on a
             // classmethod gets the receiver's own class - checked before the
             // callable arm, which would otherwise prepend the instance.
@@ -9611,6 +9633,62 @@ function pyDBoundBuiltin(target, name) {
 // The wrapper is a plain object with a __-prefixed slot, so keysOf hides it and
 // it never reaches __dict__ or a class's member enumeration.
 function js_pystaticmethod(f) { return {__pysm: f} }
+
+// ----- property ------------------------------------------------------------------
+//
+// A data descriptor the class-member lookups run. Go: newPyProp and pyProp* in
+// abnf/jsrtpydesc.go, which explain the scheme.
+function pyDNewProp(fget, fset, fdel, doc) {
+    return {__pyprop: true, fget: fget, fset: fset, fdel: fdel, doc: doc}
+}
+
+function pyDIsProp(v) {
+    if (!pyIsObj(v)) { return false }
+    return v["__pyprop"] === true
+}
+
+// property(...), bound as [positionals, keywords].
+function js_pyproperty(a) {
+    var args = pyKwPos("property", a[0], a[1], ["fget", "fset", "fdel", "doc"], 0)
+    while (args.length < 4) { args.push(undefined) }
+    return pyDNewProp(args[0], args[1], args[2], args[3])
+}
+
+// Run accessor `which` (fget / fset / fdel) on args, or raise CPython's
+// AttributeError for the one the property lacks.
+function pyDPropCall(p, which, cls, name, args) {
+    var f = p[which]
+    if (f === undefined) {
+        var what = "getter"
+        if (which == "fset") { what = "setter" }
+        if (which == "fdel") { what = "deleter" }
+        pyRaiseExc("AttributeError", "property '" + name + "' of '" + pyToStr(cls["__name"]) + "' object has no " + what)
+    }
+    return js_pycall(f, args, undefined)
+}
+
+function pyDPropGet(p, obj, cls, name) { return pyDPropCall(p, "fget", cls, name, [obj]) }
+
+// An attribute of the property object itself.
+function pyDPropAttr(p, name) {
+    if (name == "fget" || name == "fset" || name == "fdel") { return p[name] }
+    if (name == "__doc__") { return p["doc"] }
+    if (name == "getter" || name == "setter" || name == "deleter") {
+        return function(f) {
+            var q = pyDNewProp(p["fget"], p["fset"], p["fdel"], p["doc"])
+            q["f" + name.substring(0, 3)] = f
+            return q
+        }
+    }
+    if (name == "__get__") {
+        return function(obj) {
+            if (obj === undefined) { return p }
+            return pyDPropGet(p, obj, pyInstClassOf(obj), "")
+        }
+    }
+    pyRaiseExc("AttributeError", "'property' object has no attribute '" + name + "'")
+    return undefined
+}
 function js_pyclassmethod(f) { return {__pycm: f} }
 
 function pyDIsStatic(v) {

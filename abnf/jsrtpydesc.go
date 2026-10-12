@@ -79,6 +79,88 @@ func (rt *jsrt) pyDescGet(v interface{}, owner interface{}, name string) interfa
 	return rt.pyBindMethod(owner, o.props["__pycm"], name)
 }
 
+// ---------------------------------------------------------------- property --
+
+// property(fget=None, fset=None, fdel=None, doc=None) is a data descriptor: a
+// plain object marked __pyprop holding the three accessors and the doc. The
+// class-member lookups of an instance read, write, delete and method call run
+// the accessor (pyPropGet / pyPropSet / pyPropDel); read off the CLASS it is
+// the property object itself, whose own attributes pyPropAttr answers.
+// getter / setter / deleter answer a COPY with one accessor replaced, which is
+// what makes the decorator chain `@x.setter def x(...)` rebind x. Twin of
+// pyProp* in lib/python-rt.metajs and python-interpreter.abnf.
+func newPyProp(fget, fset, fdel, doc interface{}) *jsObject {
+	p := newJSObject()
+	p.set("__pyprop", true)
+	p.set("fget", fget)
+	p.set("fset", fset)
+	p.set("fdel", fdel)
+	p.set("doc", doc)
+	return p
+}
+
+func pyPropOf(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	_, has := o.props["__pyprop"]
+	return o, has
+}
+
+// pyPropErr is CPython's AttributeError for an accessor the property lacks.
+func (rt *jsrt) pyPropErr(cls *jsObject, name, what string) {
+	panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
+		"property '"+name+"' of '"+rt.toString(cls.props["__name"])+"' object has no "+what)})
+}
+
+func (rt *jsrt) pyPropGet(p *jsObject, obj interface{}, cls *jsObject, name string) interface{} {
+	if isUndefOrNull(p.props["fget"]) {
+		rt.pyPropErr(cls, name, "getter")
+	}
+	return rt.callPyValue(p.props["fget"], []interface{}{obj}, jsUndef)
+}
+
+func (rt *jsrt) pyPropSet(p *jsObject, obj interface{}, cls *jsObject, name string, v interface{}) {
+	if isUndefOrNull(p.props["fset"]) {
+		rt.pyPropErr(cls, name, "setter")
+	}
+	rt.callPyValue(p.props["fset"], []interface{}{obj, v}, jsUndef)
+}
+
+func (rt *jsrt) pyPropDel(p *jsObject, obj interface{}, cls *jsObject, name string) {
+	if isUndefOrNull(p.props["fdel"]) {
+		rt.pyPropErr(cls, name, "deleter")
+	}
+	rt.callPyValue(p.props["fdel"], []interface{}{obj}, jsUndef)
+}
+
+// pyPropAttr is an attribute of the property object itself.
+func (rt *jsrt) pyPropAttr(p *jsObject, name string) interface{} {
+	switch name {
+	case "fget", "fset", "fdel":
+		return p.props[name]
+	case "__doc__":
+		return p.props["doc"]
+	case "getter", "setter", "deleter":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			q := newPyProp(p.props["fget"], p.props["fset"], p.props["fdel"], p.props["doc"])
+			q.set("f"+name[:3], argAt(args, 0))
+			return q
+		})
+	case "__get__":
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			obj := argAt(args, 0)
+			if isUndefOrNull(obj) {
+				return p
+			}
+			_, cls, _ := pyInstance(obj)
+			return rt.pyPropGet(p, obj, cls, "")
+		})
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("AttributeError", "'property' object has no attribute '"+name+"'")})
+}
+
 // ------------------------------------------------- the unbound descriptor --
 
 // pyDescTypeSample answers a VALUE of the named builtin type, so the existing
@@ -211,6 +293,12 @@ func init() {
 		w := rt.wrap
 		m["js_pystaticmethod"] = func(a []uint64) uint64 { return w(pyStaticWrap(u(a[0]))) }
 		m["js_pyclassmethod"] = func(a []uint64) uint64 { return w(pyClassWrap(u(a[0]))) }
+		// property(...), bound as [positionals, keywords].
+		m["js_pyproperty"] = func(a []uint64) uint64 {
+			el := u(a[0]).(*jsArray).elems
+			args := rt.pyKwPos("property", el[0].(*jsArray).elems, el[1], []string{"fget", "fset", "fdel", "doc"}, 0)
+			return w(newPyProp(argAt(args, 0), argAt(args, 1), argAt(args, 2), argAt(args, 3)))
+		}
 		m["js_pybuiltins_module"] = func(a []uint64) uint64 { return w(rt.pyBuiltinsModule()) }
 	})
 }

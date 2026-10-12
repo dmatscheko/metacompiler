@@ -34,7 +34,7 @@
 # already leans on plus type/str/int/isinstance and the Exception hierarchy
 # (ExceptionGroup appears once: except* cannot be exercised without it).
 # Parent methods are therefore called explicitly (Base.m(self)) instead of via
-# super(), and property/staticmethod/classmethod are replaced by a hand-rolled
+# super(), and staticmethod/classmethod are replaced by a hand-rolled
 # descriptor and plain functions. The ONE stdlib module used is `re` (section 22),
 # which the shared regular-expression engine backs. Complex literals ARE included: they are core
 # literals needing no library. Async SYNTAX is covered; running it needs an
@@ -4930,6 +4930,80 @@ def s99():
     check("dict6", o.__dict__ == {} and not hasattr(o, "b") and o.cv == 9)
     o.k = 1
     check("dict7", d == {"k": 1} and type(d).__name__ == "dict" and S99P(i=1).__dict__ is not d)
+    # A deleted attribute is absent: the class member of that name shows
+    # through, and a name the class lacks is a catchable AttributeError.
+    o2 = S99P(cv=1, b=2)
+    del o2.cv
+    del o2.__dict__["b"]
+    try:
+        o2.b
+        msg = "no error"
+    except AttributeError as e:
+        msg = str(e)
+    check("dict8", o2.cv == 9 and msg == "'S99P' object has no attribute 'b'")
+
+# ===== SECTION 100: property =====
+# property(fget, fset, fdel, doc) is a data descriptor: an instance read,
+# write, delete or method call runs the accessor, a missing one is CPython's
+# AttributeError naming the attribute and the class, and hasattr is a getattr
+# that catches it. Read off the class it is the property object, whose
+# getter / setter / deleter answer a copy with one accessor replaced. The
+# decorator expressions are evaluated before the def rebinds the name, which
+# is what `@x.setter def x` relies on. Rows from CPython 3.14.
+class S100C:
+    def __init__(self):
+        self._x = 1
+    @property
+    def x(self):
+        return self._x
+    @x.setter
+    def x(self, v):
+        self._x = v * 2
+    @x.deleter
+    def x(self):
+        del self._x
+    def gety(self):
+        return 10
+    y = property(gety)
+    z = property(doc="zz")
+    @property
+    def fn(self):
+        return lambda a: a + self._x
+
+class S100D(S100C):
+    @S100C.x.getter
+    def x(self):
+        return -self._x
+    @property
+    def y(self):
+        return super().y + 1
+
+def s100():
+    def err(fn):
+        try:
+            fn()
+        except AttributeError as e:
+            return str(e)
+        return "no error"
+    c = S100C()
+    check("prop1", c.x == 1 and c.y == 10 and c.fn(1) == 2)
+    c.x = 5
+    check("prop2", c.x == 10 and c._x == 10)
+    del c.x
+    check("prop3", not hasattr(c, "_x") and not hasattr(c, "x") and hasattr(c, "y") and not hasattr(c, "z"))
+    check("prop4", err(lambda: setattr(c, "y", 1)) == "property 'y' of 'S100C' object has no setter"
+          and err(lambda: c.z) == "property 'z' of 'S100C' object has no getter"
+          and err(lambda: delattr(c, "y")) == "property 'y' of 'S100C' object has no deleter")
+    check("prop5", type(S100C.x).__name__ == "property" and isinstance(S100C.x, property) and type(S100C.z) is property
+          and S100C.y.fget is S100C.gety and S100C.y.fset is None and S100C.z.__doc__ == "zz" and S100C.y.__doc__ is None)
+    c.x = 3
+    check("prop6", S100C.x.__get__(c, S100C) == 6 and S100C.x.__get__(None, S100C) is S100C.x and getattr(c, "z", "d") == "d")
+    d = S100D()
+    d.x = 4
+    check("prop7", d.x == -8 and d._x == 8 and d.y == 11 and S100C().x == 1)
+    p = property(lambda s: 42)
+    S100C.q = p
+    check("prop8", S100C().q == 42 and S100C.q is p and property(fget=S100C.gety, doc="g").__doc__ == "g")
 
 def main():
     s01() # SECTION-CALL 01
@@ -5028,5 +5102,6 @@ def main():
     s96() # SECTION-CALL 96
     s98() # SECTION-CALL 98
     s99() # SECTION-CALL 99
+    s100() # SECTION-CALL 100
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

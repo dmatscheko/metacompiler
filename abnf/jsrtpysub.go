@@ -1329,6 +1329,11 @@ func (rt *jsrt) pyDelAttrRaw(obj interface{}, name string) {
 		rt.pyNoDictAttr(obj, name)
 	} else if pyIsObjectCls(cls) {
 		panic(&jsThrown{value: rt.pyAttrError(cls, name)})
+	} else if m, found := pyLookup(cls, name); found {
+		if p, isProp := pyPropOf(m); isProp {
+			rt.pyPropDel(p, obj, cls, name)
+			return
+		}
 	}
 	o, ok := obj.(*jsObject)
 	if !ok {

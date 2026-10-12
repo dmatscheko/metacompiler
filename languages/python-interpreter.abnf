@@ -1209,7 +1209,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // isinstance(x, str), type(x) is Dog and the class patterns of `match` all go
     // through the same machinery.
     var pyTypeNames = ["object", "type", "str", "int", "float", "bool", "list", "tuple",
-                       "dict", "set", "frozenset", "bytes", "function", "NoneType", "complex"]
+                       "dict", "set", "frozenset", "bytes", "function", "NoneType", "complex", "property"]
     for (var pti = 0; pti < pyTypeNames.length; pti++) {
         hostGlobals[pyTypeNames[pti]] = {__isclass: true, __name: pyTypeNames[pti], __bases: [], __builtin: true}
     }
@@ -1286,6 +1286,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The two decorator wrappers and a module object are
         // their own CPython types.
         if (hasOwn(v, "__pysm")) { return pyBuiltinTypeObj("staticmethod") }
+        if (pyIsProp(v)) { return hostGlobals["property"] }
         if (hasOwn(v, "__pycm")) { return pyBuiltinTypeObj("classmethod") }
         if (v.__pymod != undefined) { return pyBuiltinTypeObj("module") }
         if (v.__pyunion !== undefined) { return pyBuiltinTypeObj("typing.Union") }
@@ -1504,6 +1505,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 pyListErr("TypeError", "object() takes no arguments")
             }
             return {__class: hostGlobals["object"]}
+        }
+        if (name == "property") {
+            var pa = named != null ? pyKwPos("property", args, named, ["fget", "fset", "fdel", "doc"], 0) : args
+            return pyPropNew(pyArgAt(pa, 0), pyArgAt(pa, 1), pyArgAt(pa, 2), pyArgAt(pa, 3))
         }
         if (named != null && named.keys.length > 0) {
             if (name == "int") { return pyIntNew(pyKwPos("int", args, named, ["x", "base"], 1)) }
@@ -2367,6 +2372,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["classmethod"] = function(f) { return {__pycm: f} }
     function pyIsStatic(v) { return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__pysm") }
     function pyIsClsM(v) { return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__pycm") }
+    // ----- property --------------------------------------------------------
+    //
+    // A data descriptor the class-member lookups of an instance read, write,
+    // delete and method call run; read off the CLASS it is the property object
+    // itself. getter / setter / deleter answer a COPY with one accessor
+    // replaced, which is what makes `@x.setter def x(...)` rebind x. Twin of
+    // newPyProp / pyProp* in abnf/jsrtpydesc.go and lib/python-rt.metajs.
+    function pyPropNew(fget, fset, fdel, doc) { return {__pyprop: true, fget: fget, fset: fset, fdel: fdel, doc: doc} }
+    function pyIsProp(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyprop === true }
+    // Run accessor `which` on args, or raise CPython's AttributeError for the
+    // one the property lacks.
+    function pyPropCall(p, which, cls, name, args) {
+        var f = p[which]
+        if (f === undefined || f === null) {
+            var what = which == "fget" ? "getter" : (which == "fset" ? "setter" : "deleter")
+            pyRaise(pyMakeExc("AttributeError", ["property '" + name + "' of '" + cls.__name + "' object has no " + what]))
+        }
+        return pyCall(f, args, null)
+    }
+    // An attribute of the property object itself.
+    function pyPropAttr(p, name) {
+        if (name == "fget" || name == "fset" || name == "fdel") { return p[name] }
+        if (name == "__doc__") { return p.doc }
+        if (name == "getter" || name == "setter" || name == "deleter") {
+            return function(f) {
+                var q = pyPropNew(p.fget, p.fset, p.fdel, p.doc)
+                q["f" + name.substring(0, 3)] = f
+                return q
+            }
+        }
+        if (name == "__get__") {
+            return function(obj) {
+                if (obj === undefined || obj === null) { return p }
+                return pyPropCall(p, "fget", obj.__class, "", [obj])
+            }
+        }
+        pyRaise(pyMakeExc("AttributeError", ["'property' object has no attribute '" + name + "'"]))
+    }
     // The member as the attribute read should hand it back. `owner` is the class
     // a classmethod binds to: the receiver's own class for an instance access,
     // the class itself for a class access.
@@ -2487,6 +2530,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "object" && hasOwn(o, name)) { return o[name] !== pyDeleted }
         if (pyUser(o)) {
             if (name == "__dict__" || name == "__class__" || name == "__new__") { return true }
+            // A property answers what its getter does: hasattr is a getattr that
+            // catches AttributeError.
+            if (pyIsProp(clsFind(o.__class, name))) { return pyHookHas(o, name) }
             return clsFind(o.__class, name) != null || clsHas(o.__class, name) || pyObjectMethod(name) != null
         }
         if (typeof o == "function") {
@@ -3246,6 +3292,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // 0x...>; neither the address nor the generating function's name is
         // recoverable from the value, so the short form is printed.
         if (isGen(v)) { return "<generator object>" }
+        if (pyIsProp(v)) { return "<property object>" }
         // A FUNCTION. CPython prints <function fn at 0x...>; the address is its own
         // and cannot be matched, so it is left off rather than invented - the same
         // rule the iterator line above follows, and all three engines print this
@@ -5743,6 +5790,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // `builtins.len` answering the same function.
             if (target.__pymod != undefined) { return pyCall(pyattr(target, name), args, kw) }
             if (target.__pyre === true) { return pyReMethod(target, name, args) }
+            if (pyIsProp(target)) { return pyCall(pyPropAttr(target, name), args, kw) }
             if (target.__pymatch === true) { return pyMatchMethod(target, name, args) }
         }
         // A CURSOR (iter(), map(), zip(), ...) is NOT a generator, but it
@@ -10014,6 +10062,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         pyNoDictAttr(o, name)
+        if (pyUser(o)) {
+            var dp = clsFind(o.__class, name)
+            if (pyIsProp(dp)) {
+                pyPropCall(dp, "fdel", o.__class, name, [o])
+                return
+            }
+        }
         // Only an OWN attribute can be deleted: a class's member is not the
         // instance's, nor a base's the subclass's. Twin of rt.pyDelAttr in
         // abnf/jsrtpysub.go and js_pydel_attr in lib/python-rt.metajs.
@@ -10908,6 +10963,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var cls = o.__class
         if (cls != undefined && cls != null) {
             var d = clsFind(cls, name)
+            if (pyIsProp(d)) {
+                pyPropCall(d, "fset", cls, name, [o, v])
+                return
+            }
             if (d != null && pyUser(d)) {
                 var st = clsFind(d.__class, "__set__")
                 if (st != null) { st(d, o, v); return }
@@ -11008,15 +11067,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return pyBoundBuiltin(o, name) }
         if (name == "__class__") { return pyTypeOf(o) }
         if (isSet(o)) { pyAttrErr(o, name) }
-        if (typeof o == "object" && hasOwn(o, name)) {
-            if (o[name] === pyDeleted) { fail("AttributeError: '" + name + "'") }
-            return o[name]
-        }
+        if (pyIsProp(o)) { return pyPropAttr(o, name) }
+        // A deleted attribute is absent: the class's member of that name, if
+        // any, shows through again.
+        if (typeof o == "object" && hasOwn(o, name) && o[name] !== pyDeleted) { return o[name] }
         if (pyUser(o)) {
             if (name == "__dict__") { return instDict(o) }
             if (name == "__class__") { return o.__class }
             var m = clsFind(o.__class, name)
             if (m != null) {
+                if (pyIsProp(m)) { return pyPropCall(m, "fget", o.__class, name, [o]) }
                 // staticmethod / classmethod, before the plain-function arm: a
                 // static one must NOT pick up the instance as self, and a class
                 // one binds to the receiver's OWN class, so D().c() passes D.
@@ -11531,6 +11591,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // C.who() must still pass C - and s.__sobj is exactly that when the
         // frame's first argument was a class.
         if (pyIsStatic(r.v) || pyIsClsM(r.v)) { return pyDescGet(r.v, pySuperOwner(s), name) }
+        if (pyIsProp(r.v) && pyUser(s.__sobj)) { return pyPropCall(r.v, "fget", s.__sobj.__class, name, [s.__sobj]) }
         // __new__ is a static method: super().__new__(cls) passes cls itself.
         if (typeof r.v == "function" && name != "__new__") { return bindMethod(s.__sobj, r.v, name) }
         return r.v
@@ -11586,18 +11647,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var decos = []
         var defT = items[items.length - 1]
         for (var i = 0; i < items.length - 1; i++) { decos.push(items[i].deco) }
+        // The decorator EXPRESSIONS are evaluated top-down BEFORE the def binds
+        // its name, so `@x.setter def x(...)` reads the previous x.
         return function() {
+            var ds = []
+            for (var k = 0; k < decos.length; k++) { ds.push(decos[k]()) }
             lastBound = null
             defT()
             var name = lastBound
             if (name == null) { return }
             var v = anytype
             v = getVar(name)
-            for (var k = decos.length - 1; k >= 0; k--) {
-                var d = anytype
-                d = decos[k]()
-                v = pyCall(d, [v], null)
-            }
+            for (var a = ds.length - 1; a >= 0; a--) { v = pyCall(ds[a], [v], null) }
             pySet(name, v)
         }
     }

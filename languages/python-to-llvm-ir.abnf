@@ -4066,16 +4066,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (items[i].deco != undefined) { decos.push(items[i].deco) }
             else { target = items[i] }
         }
+        // The decorator EXPRESSIONS are evaluated top-down BEFORE the def binds
+        // its name (twin of makeDecorated in python-interpreter.abnf).
         return function(b) {
-            b = target.dstmt(b)
-            for (var j = decos.length - 1; j >= 0; j--) {
-                var rd = decos[j](b)
+            var dvs = []
+            for (var k = 0; k < decos.length; k++) {
+                var rd = decos[k](b)
                 b = rd.b
+                dvs.push(rd.v)
+            }
+            b = target.dstmt(b)
+            for (var j = dvs.length - 1; j >= 0; j--) {
                 var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target.dname)])
                 var av = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [av, cur])
                 pySetVar(b, curScopeV, target.dname,
-                                            callExt(b, "js_pycall", [rd.v, av, hUndef]))
+                                            callExt(b, "js_pycall", [dvs[j], av, hUndef]))
             }
             return b
         }
@@ -4146,6 +4152,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the same js_pytype forwarder, through __conv.
     pyTypeBuiltin["$type"] = true
     pyTypeBuiltin["$object"] = true
+    pyTypeBuiltin["$property"] = true
     // The six builtins CPython prints as CLASSES that are NOT in pyTypeBuiltin
     // above: they answer a cursor rather than convert, so binding them to a class
     // object would change what CALLING them does, and only their RENDERING is at
@@ -4392,6 +4399,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // in languages/lib/python-rt.metajs.
         b = declBuiltin(b, "staticmethod", "js_pystaticmethod", 1)
         b = declBuiltin(b, "classmethod", "js_pyclassmethod", 1)
+        // property(fget, fset, fdel, doc): a data descriptor the class-member
+        // lookups run (newPyProp in abnf/jsrtpydesc.go).
+        b = declKwBuiltin(b, "property", "js_pyproperty", [])
         // The builtin TYPE names that carry no conversion function. The
         // interpreter's pyTypeNames has fourteen and declBuiltin/pyTypeBuiltin
         // only reaches the ones that are callable; these are the rest, so

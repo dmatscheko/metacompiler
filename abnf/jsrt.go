@@ -3845,6 +3845,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 		if n := pyIterName(rt, t); n != "" {
 			return "<" + n + " object>"
 		}
+		if _, isProp := pyPropOf(t); isProp {
+			return "<property object>"
+		}
 		// A compiled PATTERN and a MATCH render the way CPython's repr does.
 		if s, ok := rxPyRepr(t); ok {
 			return s
@@ -19703,6 +19706,11 @@ func (rt *jsrt) pySuperAttr(s *jsObject, name string) interface{} {
 	if pyDescKind(m) != "" {
 		return rt.pyDescGet(m, rt.pySuperOwner(s), name)
 	}
+	if p, isProp := pyPropOf(m); isProp {
+		if _, cls, isInst := pyInstance(s.props["__sobj"]); isInst {
+			return rt.pyPropGet(p, s.props["__sobj"], cls, name)
+		}
+	}
 	// __new__ is a static method: super().__new__(cls) passes cls itself.
 	if isCallable(m) && name != "__new__" {
 		return rt.pyBindMethod(s.props["__sobj"], m, name)
@@ -19878,6 +19886,9 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 			return v
 		}
 		if v, found := pyLookup(cls, name); found {
+			if p, isProp := pyPropOf(v); isProp {
+				return rt.pyPropGet(p, obj, cls, name)
+			}
 			// staticmethod / classmethod, before every other arm: a static one
 			// must NOT pick up the instance as self, and a class one binds to
 			// the receiver's OWN class, so D().c() passes D.
@@ -19901,6 +19912,9 @@ func (rt *jsrt) pyGetAttrRaw(obj interface{}, name string) interface{} {
 		}
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+rt.toString(cls.props["__name"])+"' object has no attribute '"+name+"'")})
+	}
+	if p, isProp := pyPropOf(obj); isProp {
+		return rt.pyPropAttr(p, name)
 	}
 	// A MODULE object. `builtins.len` resolves through the module's own slot,
 	// which the emitter filled with the very binding the global name resolves
@@ -20196,6 +20210,10 @@ func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
 func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 	if inst, cls, ok := pyInstance(obj); ok {
 		if cur, found := pyLookup(cls, name); found {
+			if p, isProp := pyPropOf(cur); isProp {
+				rt.pyPropSet(p, obj, cls, name, v)
+				return
+			}
 			if set, isDesc := pyIsDescriptor(cur, "__set__"); isDesc {
 				rt.call(set, jsUndef, []interface{}{cur, obj, v})
 				return
@@ -20450,6 +20468,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if m, ok := rt.pyBuiltinClsMethod(target, name); ok {
 		return rt.call(m, jsUndef, rt.pyBindCall(m, args, kw))
 	}
+	if p, isProp := pyPropOf(target); isProp {
+		return rt.callPyValue(rt.pyPropAttr(p, name), args, kw)
+	}
 	// list.count(xs, 2) - the UNBOUND descriptor CALLED straight off the type
 	// object rather than read as a value. The emitter routes a method call
 	// through js_pyrxmcall and never through pyGetAttr, so the arm has to exist
@@ -20502,6 +20523,9 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw)) // A plain function in an attribute.
 		}
 		if m, found := pyLookup(cls, name); found {
+			if p, isProp := pyPropOf(m); isProp {
+				return rt.callPyValue(rt.pyPropGet(p, target, cls, name), args, kw)
+			}
 			// inst.s(...) on a staticmethod gets NO self, and inst.c(...) on a
 			// classmethod gets the receiver's OWN class - checked before the
 			// callable arm, which would otherwise prepend the instance.
@@ -21817,7 +21841,12 @@ func (rt *jsrt) pyHasAttrRaw(obj interface{}, name string) bool {
 		if _, found := inst.props[name]; found {
 			return true
 		}
-		_, found := pyLookup(cls, name)
+		m, found := pyLookup(cls, name)
+		// A property answers what its getter does: hasattr is a getattr that
+		// catches AttributeError.
+		if _, isProp := pyPropOf(m); found && isProp {
+			return rt.pyHookHas(obj, name)
+		}
 		return found || rt.pyObjectMethod(name) != nil
 	}
 	// A MODULE object, mirroring pyGetAttr's module arm - hasattr(math, "sqrt")
@@ -22211,6 +22240,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 			return "staticmethod"
 		} else if k == "c" {
 			return "classmethod"
+		}
+		if _, isProp := pyPropOf(t); isProp {
+			return "property"
 		}
 		if _, isMod := t.props["__pymod"]; isMod {
 			return "module"
