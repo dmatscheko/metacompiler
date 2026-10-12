@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-444** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-446** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -116,17 +116,12 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-442 php: magic file constants, automatic Stringable, generator keys after yield from, ArrayAccess edge cases · P2 · PHP · IN PROGRESS (PHP worker, round 26) [V]
-Spec / php-src: (a) `__FILE__`, `__LINE__`, `__DIR__` raise "Undefined constant" in both halves (anon/bug77652).
-(b) a class declaring `__toString` is not automatically Stringable (magic_methods/stringable_automatic_implementation).
-(c) compiled only: after `yield from`, the next keyless yield's key counts the delegated keys (`yield 1; yield from
-[7,8]; yield 5;` gives key 2 for 5, php.net/interp: 1) — jsGenerator.step in jsrt.go and layer 2 phGenStep.
-(d) `??` on an ArrayAccess element calls offsetGet without offsetExists. (e) isset() on a lib ArrayObject /
-SplObjectStorage element holding null answers true. (f) class_implements on engine-derived exceptions comes out in
-user-class order. (g) `$aa[$k]` by reference vs offsetGet identity (ArrayAccess/bug39297). Unverified, no corpus row:
-the class_implements order of SPL classes was derived from php-src's interface walk (zend_inheritance.c), not observed.
-Bench: php +1.24% paired (5/5) after the SPL commits although mod.php calls none of the changed layer-2 functions —
-re-measure at the final bench.
+### T-444 php: echo argument order; case-insensitive __toString; ??= on ArrayAccess; basename & path functions · P2 · PHP · OPEN [V]
+Spec: (a) `echo a, b, c` prints each argument as it is evaluated (one ZEND_ECHO per operand); all engines evaluate
+every operand first, so side effects interleave wrongly (`echo $o['a'] ?? 'd', " ", $o['b'] ?? 'd'` prints
+`E(a) G(a) E(b) 1 d`, PHP `E(a) G(a) 1 E(b) d`). (b) `function __TOSTRING()` is not found by string conversion
+(interp aborts, compiler prints `aObject`); method names are case-insensitive. (c) `??=` on an ArrayAccess element
+reads without offsetExists (BP_VAR_IS). (d) `basename`, `dirname`, `pathinfo`, `realpath` undefined.
 
 ---
 
@@ -143,6 +138,13 @@ re-measure at the final bench.
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-445 core: str_intern probes by literal address — layer-2 layout changes cost up to +1.7% · P2 · CORE · OPEN [V]
+`str_intern` in runtime.c is an open-addressing table keyed by the literal's address with linear probing. A layer-2
+change that moves literal addresses made php's bench +1.68% (10/10 paired): the parameter-name literal "r" of
+js_phadd/js_phlt/js_phmod probes 21-42 steps per loop iteration (840k-1.68M steps total vs 100-40k before). Fix: key
+by content, or one interned literal per distinct text per module resolved at boot, so lookups are O(1) regardless of
+layout. Instrumentation: scratchpad r26/instr.py, smc.sh (PHP r26 worker).
 
 ### T-440 core: native collector triggers every ~31 iterations with a tiny live set · P2 · CORE · IN PROGRESS (CORE worker, round 21) [V]
 Native java: `for (i < 400000) { s = s + (i % 10); if (i % 64 == 63) s = ""; }` with -exe takes 4.9 s (~12 us/iter);
@@ -487,6 +489,7 @@ T-438 java: StringBuilder appends onto a short tail + 32-level join counter (-fr
 T-437 python: CPython arity TypeErrors (missing/too many/multiple values/unexpected keyword/positional-only) in all engines, live instance __dict__, property builtin + decorator evaluation order; `int | "s"` is a TypeError in CPython too (not a defect) — DONE 7cedc576
 T-439 php: SPL in php-stdlib (ArrayIterator/ArrayObject/SplDoublyLinkedList/Stack/Queue/ObjectStorage, iterator_*, class_implements/parents, spl_object_hash), __FUNCTION__/__METHOD__ as compile-time constants, yield from an Iterator, ArrayAccess dispatch — DONE e6c70cfa
 T-441 python: qualnames, dunder/exception __dict__, property names via __set_name__, CPython "Did you mean" suggestions, copy + dataclasses modules (slots/kw_only/InitVar/make_dataclass raise NotImplementedError), dir() of classes/instances — DONE c0828553
+T-442 php: __FILE__/__LINE__/__DIR__, automatic Stringable, generator keys after yield from (compiled), BP_VAR_IS fetches for ?? and isset/empty on ArrayAccess, ArrayObject isset of null, engine exception interface order, ArrayAccess by reference; SplObjectStorage isset(null) is true in php-src (asserted) — DONE 27c9ccfc
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
