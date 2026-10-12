@@ -5,73 +5,88 @@
 // engines. The exception messages are java 24.0.2's.
 package java.lang;
 
-// The text is kept as appended pieces that are joined - pairwise, so a loop of
-// n appends costs O(n log n) rather than O(n^2) - only when it is read.
+// The text is `text`, then the levels of a binary counter, then `tail`. An
+// append concatenates onto tail, which stays short: once it holds 64 chars it
+// is carried into the counter, where parts[k] holds 2^k carried tails joined,
+// present exactly when bit k of ncarried is set, a higher level holding older
+// text. A carry ripples through the levels the way an increment does through
+// the bits, so over n appends a character is copied at most 64 times in the
+// tail and O(log n) times in the counter. Few statements per append matter:
+// the interpreter runs this file statement by statement. A level
+// whose bit is clear may hold a stale piece that is never read. before is the
+// length of everything ahead of tail.
 final class StringBuilder {
     String text;
+    String tail;
     String[] parts;
-    int nparts;
-    int count;
+    int ncarried;
+    int before;
 
-    public StringBuilder() { text = ""; parts = new String[8]; }
+    public StringBuilder() {
+        parts = new String[32];
+        set("");
+    }
     public StringBuilder(int capacity) {
         if (capacity < 0) { throw new NegativeArraySizeException("" + capacity); }
-        text = "";
-        parts = new String[8];
+        parts = new String[32];
+        set("");
     }
     public StringBuilder(String str) {
-        text = str;
-        parts = new String[8];
-        count = str.length();
+        parts = new String[32];
+        set(str);
     }
     public StringBuilder(CharSequence seq) {
-        text = seq.toString();
-        parts = new String[8];
-        count = text.length();
+        parts = new String[32];
+        set(seq.toString());
     }
 
-    String flat() {
-        if (nparts == 0) { return text; }
-        int k = nparts;
-        while (k > 1) {
-            int j = 0;
-            for (int i = 0; i < k; i += 2) {
-                parts[j] = i + 1 < k ? parts[i] + parts[i + 1] : parts[i];
-                j++;
-            }
-            k = j;
+    void carry() {
+        String s = tail;
+        tail = "";
+        before = before + s.length();
+        int n = ncarried;
+        ncarried = n + 1;
+        int k = 0;
+        while ((n & 1) != 0) {
+            s = parts[k] + s;
+            k++;
+            n = n >> 1;
         }
-        text = text + parts[0];
-        for (int i = 0; i < nparts; i++) { parts[i] = null; }
-        nparts = 0;
+        parts[k] = s;
+    }
+    String flat() {
+        if (ncarried == 0 && tail.length() == 0) { return text; }
+        String r = tail;
+        int k = 0;
+        for (int n = ncarried; n != 0; n = n >> 1) {
+            if ((n & 1) != 0) { r = parts[k] + r; }
+            k++;
+        }
+        set(text + r);
         return text;
     }
     void set(String s) {
-        flat();
         text = s;
-        count = s.length();
+        tail = "";
+        ncarried = 0;
+        before = s.length();
     }
     void checkIndex(int index) {
+        int count = length();
         if (index < 0 || index >= count) {
             throw new StringIndexOutOfBoundsException("Index " + index + " out of bounds for length " + count);
         }
     }
     void checkRange(int start, int end) {
+        int count = length();
         if (start < 0 || start > end || end > count) {
             throw new StringIndexOutOfBoundsException("Range [" + start + ", " + end + ") out of bounds for length " + count);
         }
     }
 
     public StringBuilder append(Object o) {
-        String s = "" + o;
-        if (nparts == parts.length) {
-            String[] more = new String[parts.length * 2];
-            for (int i = 0; i < nparts; i++) { more[i] = parts[i]; }
-            parts = more;
-        }
-        parts[nparts] = s;
-        nparts++;
-        count += s.length();
+        tail = tail + o;
+        if (tail.length() >= 64) { carry(); }
         return this;
     }
     public StringBuilder append(CharSequence s, int start, int end) {
@@ -79,19 +94,19 @@ final class StringBuilder {
         return append(t.substring(start, end));
     }
     public StringBuilder insert(int offset, Object o) {
-        checkRange(offset, count);
+        checkRange(offset, length());
         String s = flat();
         set(s.substring(0, offset) + o + s.substring(offset));
         return this;
     }
-    public int length() { return count; }
-    public boolean isEmpty() { return count == 0; }
+    public int length() { return before + tail.length(); }
+    public boolean isEmpty() { return length() == 0; }
     public char charAt(int index) {
         checkIndex(index);
         return flat().charAt(index);
     }
     public String toString() { return flat(); }
-    public String substring(int start) { return substring(start, count); }
+    public String substring(int start) { return substring(start, length()); }
     public String substring(int start, int end) {
         checkRange(start, end);
         return flat().substring(start, end);
@@ -113,6 +128,7 @@ final class StringBuilder {
         return this;
     }
     public StringBuilder delete(int start, int end) {
+        int count = length();
         int e = end > count ? count : end;
         checkRange(start, e);
         String s = flat();
@@ -120,6 +136,7 @@ final class StringBuilder {
         return this;
     }
     public StringBuilder replace(int start, int end, String str) {
+        int count = length();
         int e = end > count ? count : end;
         checkRange(start, e);
         String s = flat();
@@ -129,10 +146,10 @@ final class StringBuilder {
     public void setLength(int n) {
         if (n < 0) { throw new StringIndexOutOfBoundsException("String index out of range: " + n); }
         String s = flat();
-        if (n <= count) {
+        if (n <= s.length()) {
             set(s.substring(0, n));
         } else {
-            char[] zeros = new char[n - count];
+            char[] zeros = new char[n - s.length()];
             set(s + new String(zeros));
         }
     }
