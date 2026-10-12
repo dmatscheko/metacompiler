@@ -78,3 +78,11 @@ after storing agrammar without references and creating them in the parser on loa
 ParseWithGrammar took 1.7339967s
 CompileASG took 3.8861034s
 
+
+
+2026-10-12, commit e54b6e63, Apple M4 Max, go 1.27.0 (./mec languages/abnf-of-abnf.abnf -speed 100):
+(-speed now does one untimed warm-up first; abnf-of-abnf.abnf is 169 lines / 9,312 bytes, was 132 / 6,574;
+ three runs, median shown, spread under 3%)
+
+ParseWithGrammar took 138.1ms
+CompileASG took 458.6ms
