@@ -1622,6 +1622,23 @@ func (rt *jsrt) phpIsAA(v interface{}) bool {
 	return phpIsObj(v) && rt.phpIsA(v, "ArrayAccess")
 }
 
+// phpAAIsset: isset($o[k]) on an ArrayAccess object - offsetExists, or the
+// library's __mec_isset when the class declaring offsetExists declares that too.
+// Twin of phpAAIsset in languages/php-interpreter.abnf.
+func (rt *jsrt) phpAAIsset(o interface{}, k interface{}) bool {
+	c, _ := o.(*jsObject).props["__class"].(*jsObject)
+	for guard := 0; c != nil && guard < 64; guard++ {
+		if _, ok := c.props["__ms:offsetexists"].(string); ok {
+			if _, ok := c.props["__ms:__mec_isset"].(string); ok {
+				return rt.phpTest(rt.memberCall(o, "__mec_isset", []interface{}{k}))
+			}
+			break
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	return rt.phpTest(rt.memberCall(o, "offsetExists", []interface{}{k}))
+}
+
 func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
 	if keys, vals, ok := phpArrParts(av); ok {
 		i := rt.phpKeyIndex(keys, k)
@@ -1677,6 +1694,9 @@ func (rt *jsrt) phpArrUnset(av interface{}, k interface{}) {
 // element every time: building a fresh one per '&' silently detaches every alias
 // taken earlier, so `$x = &$a[0]; $y = &$a[0]; $y = 9;` left $x behind.
 func (rt *jsrt) phpElemCell(av interface{}, k interface{}) interface{} {
+	if rt.phpIsAA(av) {
+		return rt.phpAACell(av, k)
+	}
 	keys, vals, ok := phpArrParts(av)
 	if !ok {
 		return jsNull
@@ -1701,6 +1721,16 @@ func (rt *jsrt) phpElemCell(av interface{}, k interface{}) interface{} {
 	cell.set("__refcell", true)
 	cell.set("v", vals.elems[i])
 	vals.elems[i] = cell
+	return cell
+}
+
+// phpAACell: an ArrayAccess element fetched for writing is offsetGet's answer in
+// a temporary cell (zend_std_read_dimension). Twin of phAACell in
+// languages/lib/php-rt.metajs and of targetCell's arm in php-interpreter.abnf.
+func (rt *jsrt) phpAACell(av interface{}, k interface{}) interface{} {
+	cell := newJSObject()
+	cell.set("__refcell", true)
+	cell.set("v", rt.memberCall(av, "offsetGet", []interface{}{k}))
 	return cell
 }
 
@@ -2989,7 +3019,7 @@ func init() {
 		// object, js_phisset's answer for anything else.
 		m["js_phaisset"] = func(a []uint64) uint64 {
 			if rt.phpIsAA(u(a[0])) {
-				return boolH(rt.phpTest(rt.memberCall(u(a[0]), "offsetExists", []interface{}{u(a[1])})))
+				return boolH(rt.phpAAIsset(u(a[0]), u(a[1])))
 			}
 			return boolH(rt.phpArrHas(u(a[0]), u(a[1])))
 		}

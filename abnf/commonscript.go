@@ -386,8 +386,10 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		// grammar-mapped relative path ("a/b/C.kt"), readFile loads it, and
 		// pushSource/popSource swap the file/line attribution around the
 		// imported file's nested c.parse + c.compile walk. curFile is the
-		// dynamic variant of "file" (which is snapshotted at map creation).
+		// dynamic variant of "file" (which is snapshotted at map creation), and
+		// curFileAbs its absolute path with symlinks resolved.
 		"curFile":        func() string { return traceSrcName },
+		"curFileAbs":     func() string { return curSrcAbs() },
 		"findImport":     func(relPath string) string { return findImportFile(relPath) },
 		"readFile":       func(path string) string { return readImportFile(path) },
 		"pushSource":     func(name, text string) { pushTraceSource(name, text) },

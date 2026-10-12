@@ -720,9 +720,9 @@ func (g *jsGenerator) step(rt *jsrt, sent interface{}) interface{} {
 		g.lastValue, g.lastKey = genSplitKV(st.value, g.autoKey)
 		// The next automatic key follows the largest integer key used so far,
 		// a keyless yield's or an explicit one's (PHP's largest_used_integer_key);
-		// a string key leaves it alone. Twin of the "auto" step in
-		// languages/lib/php-rt.metajs.
-		if n, isNum := g.lastKey.(float64); isNum && n >= g.autoKey {
+		// a string key, and any key a 'yield from' delegated (a __genfrom record),
+		// leave it alone. Twin of the "auto" step in languages/lib/php-rt.metajs.
+		if n, isNum := g.lastKey.(float64); isNum && n >= g.autoKey && !genDelegated(st.value) {
 			g.autoKey = n + 1
 		}
 	}
@@ -742,6 +742,15 @@ func genSplitKV(v interface{}, auto float64) (interface{}, interface{}) {
 		}
 	}
 	return v, auto
+}
+
+// genDelegated reports whether a yielded value is a {__genkv, __genfrom} record:
+// an element a 'yield from' passed through with its own key.
+func genDelegated(v interface{}) bool {
+	if o, ok := v.(*jsObject); ok {
+		return o.props["__genfrom"] == true
+	}
+	return false
 }
 
 // prime runs the body up to its first yield when it has not started, so that

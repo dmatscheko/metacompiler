@@ -1140,7 +1140,7 @@ IncDyn      <~~ push({incdyn: pop()}) ~~>
 // A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
 // M_PI, __DIR__, __LINE__, ...), resolved by makeConstRef. Placed last so calls,
 // statics and keywords are matched first.
-ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
+ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)), up.pos)) ~~>
             = QName ;
 // A qualified name: \Foo, Foo\Bar, \Foo\Bar. Names are not qualified in this subset,
 // so only the LAST segment carries meaning - which is also what PHP itself falls back
@@ -1686,8 +1686,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 hasNamed = true
                 continue
             }
-            pos.push(a.argval())
-            tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here))
+            var av = anytype
+            av = a.argval()
+            pos.push(av)
+            tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here, {v: av}))
         }
         return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, fcc: fcc, holes: holes}
     }
@@ -1709,11 +1711,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // A by-reference parameter needs the CALLER's cell, but binding happens after
     // the frame switch - so the maker restores the caller's chain for the lookup.
-    function mkCellMaker(ref, here) {
+    // read is {v} of the value the argument was already read as (targetCell).
+    function mkCellMaker(ref, here, read) {
         return function() {
             var saved = scopes
             scopes = here
-            var cell = targetCell(ref)
+            var cell = targetCell(ref, read)
             scopes = saved
             return cell
         }
@@ -2720,14 +2723,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     // a ?? b ?? c : first operand that is not null (left fold; associative for '??').
+    // Every operand but the last is fetched for isset (BP_VAR_IS): an operand that is
+    // a member chain takes coalIs, and any other thunk ignores it.
+    var coalIs = {coalIs: true}
     function makeCoalesce(items) {
         if (items.length == 1) { return items[0] }
         return function() {
             var v = anytype
-            v = items[0]()
+            v = items[0](coalIs)
             for (var i = 1; i < items.length; i++) {
                 if (v !== null && v !== undefined) { return v }
-                v = items[i]()
+                v = i == items.length - 1 ? items[i]() : items[i](coalIs)
             }
             return v
         }
@@ -2790,9 +2796,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The value at a storage location, or null when any step of it is missing -
     // the walk isset() and empty() share, which never diagnoses.
-    // For isset an ArrayAccess object's last step asks offsetExists alone (true
-    // stands in for the value); for empty it asks offsetExists, then offsetGet
-    // (zend_std_has_dimension).
+    // For isset an ArrayAccess object's last step asks phpAAIsset alone (true
+    // stands in for the value); for empty and every earlier step it asks
+    // phpAAIsset, then offsetGet (zend_std_has_dimension, zend_std_read_dimension).
     function refProbe(ref, isset) {
         var o = anytype
         // A CALL head has no variable to probe: the call runs and the walk starts
@@ -2834,7 +2840,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             k = st.idx()
             if (isArr(o)) { if (!arrHas(o, k)) { return null } }
             else if (phpIsAA(o)) {
-                if (!phptest(mcall(o, "offsetExists", argsOf([k])))) { return null }
+                if (!phpAAIsset(o, k)) { return null }
                 if (isset && i == ref.path.length - 1) { return true }
             }
             // A STRING OFFSET is a containment question too: phpIndex answers "" for
@@ -3480,6 +3486,32 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // unset() offsetUnset. Twin of phpIsAA in abnf/jsrtphp.go and phIsAA in
     // lib/php-rt.metajs.
     function phpIsAA(o) { return isObj(o) && classIs(o.__class, "ArrayAccess") }
+    // isset($o[k]) on an ArrayAccess object: what offsetExists answers - unless the
+    // class declaring it also declares __mec_isset, the library's own has_dimension
+    // handler (ArrayObject's isset() wants a non-null value, while a direct call of
+    // its offsetExists only asks for the key: spl_array_has_dimension_ex). A
+    // subclass overriding offsetExists is asked alone. Twin of phpAAIsset in
+    // abnf/jsrtphp.go and phAAIsset in lib/php-rt.metajs.
+    function phpAAIsset(o, k) {
+        var c = o.__class
+        while (c != undefined && c != null) {
+            if (typeof c["__ms:offsetexists"] == "string") {
+                if (typeof c["__ms:__mec_isset"] == "string") { return phptest(c["__mec_isset"](o, argsOf([k]))) }
+                break
+            }
+            c = c.__super
+        }
+        return phptest(mcall(o, "offsetExists", argsOf([k])))
+    }
+    // The element read of a '??' operand (BP_VAR_IS): an ArrayAccess object is asked
+    // phpAAIsset before offsetGet, and a string offset out of range is null rather
+    // than "" (zend_fetch_dimension_address_read). Twin of the IS arm of
+    // foldCallMember in php-to-llvm-ir.abnf.
+    function phpIndexIs(o, k) {
+        if (phpIsAA(o)) { return phpAAIsset(o, k) ? mcall(o, "offsetGet", argsOf([k])) : null }
+        if (typeof o == "string" && !strOffsetExists(o, k)) { return null }
+        return phpIndex(o, k)
+    }
 
     // ----- objects ---------------------------------------------------------------
     // An instance is {__obj, __class, p} with its properties in an ordered map, so
@@ -3592,11 +3624,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isGen(target)) { return genMethod(target, name, args) }
         phpMissMethod(target, name)
     }
+    // A chain called with coalIs is the left operand of '??' (makeCoalesce): its
+    // element reads are phpIndexIs.
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
-        return function() {
+        return function(mode) {
             var cur = anytype
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
@@ -3610,6 +3644,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 else if (s.kind == "dfield") { cur = phpGetProp(cur, phpStr(s.name())) }
                 else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args)) }
                 else if (s.kind == "static") { cur = s.run(cur) }
+                else if (mode === coalIs) { cur = phpIndexIs(cur, s.idx()) }
                 else { cur = phpIndex(cur, s.idx()) }
             }
             return cur
@@ -4028,11 +4063,26 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return out
     }
-    function makeConstRef(name) {
+    // __LINE__, __FILE__ and __DIR__ are compile-time constants of the file being
+    // walked (zend_try_ct_eval_magic_const): the token's line, the file's absolute
+    // path, and that path's directory.
+    // Twin of magicFileConst in php-to-llvm-ir.abnf.
+    function magicFileConst(name, pos) {
+        if (name == "__LINE__") { return c.lineOf(pos) }
+        if (name != "__FILE__" && name != "__DIR__") { return undefined }
+        var f = c.curFileAbs()
+        if (name == "__FILE__") { return f }
+        var cut = 0
+        for (var i = 0; i < f.length; i++) { if (f.charCodeAt(i) == 47) { cut = i } }
+        return cut == 0 ? "/" : f.substring(0, cut)
+    }
+    function makeConstRef(name, pos) {
         if (name == "__FUNCTION__" || name == "__METHOD__") {
             var magic = cloMagic(name == "__METHOD__")
             return function() { return magic }
         }
+        var fileConst = magicFileConst(name, pos)
+        if (fileConst != undefined) { return makeConst(fileConst) }
         return function() {
             var lo = name.toLowerCase()
             if (lo == "true") { return true }
@@ -4774,10 +4824,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // The storage CELL a target denotes: a plain variable, a static property, or an
     // array element.
-    function targetCell(ref) {
+    function targetCell(ref, read) {
         if (ref.path.length == 0 && ref.sref != null) { return ref.sref() }
         if (ref.path.length == 0) { return varCell(refName(ref)) }
         var p = resolveRefPhp(ref)
+        // An ArrayAccess element is no storage location: fetched for writing it
+        // reads offsetGet, and the reference binds to a temporary holding the answer
+        // (zend_std_read_dimension). An argument has read it already (read, from
+        // evalArgs), and that read is the one offsetGet call. Twin of phpAACell in
+        // abnf/jsrtphp.go.
+        if (p.last.key == undefined && phpIsAA(p.obj)) {
+            if (read != undefined && read.v !== APPEND_READ) { return {__refcell: true, v: read.v} }
+            return {__refcell: true, v: mcall(p.obj, "offsetGet", argsOf([p.last.append === true ? null : p.last.idx()]))}
+        }
         if (p.last.append === true) { arrPush(p.obj, null); return arrCell(p.obj, p.obj.__next - 1) }
         // An object PROPERTY is a storage location too: the property map is the same
         // ordered map an array is, so its element cell is the same mechanism.
@@ -5215,7 +5274,26 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 p.rawNames.push(it.raw)
             }
         }
+        p.ifaces = addStringable(p.ifaces, p.methods)
         return p
+    }
+    // A class declaring __toString implements Stringable without naming it, after
+    // the interfaces it names (add_stringable_interface in zend_compile.c); one
+    // using a trait's __toString does too (zend_do_bind_traits). Answers ifaces,
+    // or a copy with "Stringable" appended. Twin of addStringable in php-to-llvm-ir.abnf.
+    function addStringable(ifaces, methods) {
+        var has = false
+        for (var i = 0; i < methods.length; i++) {
+            if (phsCase(methods[i].name, false) == "__tostring") { has = true }
+        }
+        if (!has) { return ifaces }
+        var out = []
+        for (var j = 0; j < ifaces.length; j++) {
+            if (phsCase(lastSeg(ifaces[j]), false) == "stringable") { return ifaces }
+            out.push(ifaces[j])
+        }
+        out.push("Stringable")
+        return out
     }
     // One 'use T1, T2 { ... }' clause: the traits it names, the insteadof exclusions
     // (loser trait + method name) and the aliases it introduces.
@@ -5312,7 +5390,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var consts = []
         for (var tc = 0; tc < tm.consts.length; tc++) { consts.push(tm.consts[tc]) }
         for (var oc = 0; oc < p.consts.length; oc++) { consts.push(p.consts[oc]) }
-        var cls = {__isclass: true, __name: name, __super: null, __props: props, __ifaces: p.ifaces,
+        var cls = {__isclass: true, __name: name, __super: null, __props: props, __ifaces: addStringable(p.ifaces, tm.methods),
                    __constT: consts, __constV: newArr(), __statics: newArr()}
         if (p.ext != null) {
             var base = findClass(p.ext)
@@ -6397,9 +6475,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return false
     }
     // The engine's exception hierarchy, far enough for user classes to extend it.
+    // Only the two roots name Throwable; a derived engine class names nothing and
+    // takes its parent's interfaces from the end, as a user class does
+    // (zend_do_inheritance_ex). Twin of emitExcClass in php-to-llvm-ir.abnf.
     function declBuiltinClass(name, superName) {
         var sup = superName == null ? null : getVar(superName)
-        var cls = {__isclass: true, __name: name, __super: sup, __props: [], __ifaces: ["Throwable"]}
+        var cls = {__isclass: true, __name: name, __super: sup, __props: [], __ifaces: sup == null ? ["Throwable"] : []}
         cls["__construct"] = function(self, argset) {
             dictSet(self.p, "message", argset.pos.length > 0 ? argset.pos[0] : "")
             dictSet(self.p, "code", argset.pos.length > 1 ? argset.pos[1] : 0)

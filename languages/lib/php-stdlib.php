@@ -2333,8 +2333,11 @@ class ArrayIterator implements SeekableIterator, Traversable, Iterator, ArrayAcc
     const ARRAY_AS_PROPS = 2;
     private $storage;
     public function __construct($array = [], int $flags = 0) { $this->storage = ArrayObject::__mec_array($array); }
-    // True for a key holding null too, unlike isset.
+    // True for a key holding null too, unlike isset($it[$key]), which the engine
+    // answers through __mec_isset while offsetExists is not overridden
+    // (spl_array_has_dimension_ex).
     public function offsetExists($key): bool { return array_key_exists($key, $this->storage); }
+    public function __mec_isset($key): bool { return isset($this->storage[$key]); }
     public function offsetGet($key): mixed { return $this->storage[$key]; }
     public function offsetSet($key, $value): void {
         if ($key === null) { $this->storage[] = $value; } else { $this->storage[$key] = $value; }
@@ -2381,7 +2384,9 @@ class ArrayObject implements IteratorAggregate, Traversable, ArrayAccess, Serial
         }
         return $array;
     }
+    // As ArrayIterator's.
     public function offsetExists($key): bool { return array_key_exists($key, $this->storage); }
+    public function __mec_isset($key): bool { return isset($this->storage[$key]); }
     public function offsetGet($key): mixed { return $this->storage[$key]; }
     public function offsetSet($key, $value): void {
         if ($key === null) { $this->storage[] = $value; } else { $this->storage[$key] = $value; }

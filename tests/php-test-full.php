@@ -2713,6 +2713,83 @@ function s59dump() {
     var_dump($os);
 }
 
+// ===== SECTION 60: magic file constants, automatic Stringable, fetches for isset =====
+// __LINE__ is the line of its token, __FILE__ the script's absolute path and __DIR__
+// that path's directory (zend_try_ct_eval_magic_const). A class declaring
+// __toString implements Stringable after the interfaces it names
+// (add_stringable_interface), and so does one taking it from a trait. A value
+// 'yield from' delegates keeps its own key and leaves the generator's auto key
+// alone. '??' fetches its operand for isset (BP_VAR_IS): an ArrayAccess element
+// asks offsetExists before offsetGet, a string offset out of range is null.
+// isset() on an ArrayObject / ArrayIterator element wants a non-null value unless
+// offsetExists is overridden, while SplObjectStorage's asks only for the object
+// (spl_array_has_dimension_ex, spl_object_storage_has_dimension). An engine
+// exception class that extends another takes its parent's interfaces from the end
+// (zend_do_inheritance_ex). An ArrayAccess element passed by reference is
+// offsetGet's answer, read once.
+interface S60I {}
+class S60A { function __toString(): string { return "a"; } }
+class S60B extends S60A { function __toString(): string { return "b"; } }
+class S60C implements S60I { function __toString(): string { return "c"; } }
+trait S60T { function __toString(): string { return "t"; } }
+class S60D implements S60I { use S60T; }
+function s60g() { yield 1; yield from [7, 8]; yield 5; }
+function s60h() { yield 0; yield from s60g(); yield 3; }
+class S60L implements ArrayAccess {
+    public $d = ["a" => 1, "n" => null];
+    public $log = "";
+    function offsetExists($k): bool { $this->log .= "e" . $k; return array_key_exists($k, $this->d); }
+    function offsetGet($k): mixed { $this->log .= "g" . $k; return $this->d[$k] ?? null; }
+    function offsetSet($k, $v): void { $this->d[$k] = $v; }
+    function offsetUnset($k): void { unset($this->d[$k]); }
+}
+class S60O extends ArrayObject { function offsetExists($k): bool { return true; } }
+class S60P extends ArrayObject {}
+class S60E extends RuntimeException {}
+function s60same(&$a, &$b) { return $a === $b; }
+function s60() {
+    $ls = [__LINE__,
+        __LINE__];
+    check("fil1", $ls[1] - $ls[0] === 1 && is_int($ls[0]) && __DIR__[0] === "/"
+        && __DIR__ . "/" . substr(__FILE__, strlen(__DIR__) + 1) === __FILE__ && str_ends_with(__FILE__, ".php"));
+    check("str1", new S60A instanceof Stringable && new S60B instanceof Stringable && new S60D instanceof Stringable
+        && !(new stdClass instanceof Stringable)
+        && array_keys(class_implements('S60A')) === ["Stringable"] && array_keys(class_implements('S60B')) === ["Stringable"]
+        && array_keys(class_implements('S60C')) === ["S60I", "Stringable"]
+        && array_keys(class_implements('S60D')) === ["S60I", "Stringable"]);
+    $s = "";
+    foreach (s60h() as $k => $v) { $s .= $k . "=" . $v . ";"; }
+    check("gen1", $s === "0=0;0=1;0=7;1=8;1=5;1=3;");
+    $l = new S60L;
+    $r = [$l["a"] ?? "d", $l["z"] ?? "d", $l["n"] ?? "d"];
+    $str = "abc";
+    check("coa1", $r === [1, "d", "d"] && $l->log === "eagaezengn"
+        && ($str[5] ?? "d") === "d" && ($str[1] ?? "d") === "b" && ($str[-9] ?? "d") === "d");
+    $n = new S60L;
+    $n->d["s"] = new S60L;
+    $q = [isset($n["z"]["a"]), isset($n["s"]["a"]), $n["z"]["a"] ?? 4];
+    check("coa2", $q === [false, true, 4] && $n->log === "ezesgsez" && $n->d["s"]->log === "ea");
+    $ao = new ArrayObject(["a" => 1, "n" => null]);
+    $ai = new ArrayIterator(["n" => null]);
+    $ov = new S60O(["n" => null]);
+    $sub = new S60P(["n" => null, "z" => 0]);
+    $os = new SplObjectStorage;
+    $o = new stdClass;
+    $os[$o] = null;
+    check("ais1", isset($ao["a"]) && !isset($ao["n"]) && !isset($ao["z"]) && $ao->offsetExists("n") && empty($ao["n"])
+        && ($ao["n"] ?? "d") === "d" && !isset($ai["n"]) && $ai->offsetExists("n")
+        && isset($ov["n"]) && isset($ov["q"]) && !isset($sub["n"]) && isset($sub["z"])
+        && isset($os[$o]) && empty($os[$o]));
+    check("imp2", array_keys(class_implements('Exception')) === ["Throwable", "Stringable"]
+        && array_keys(class_implements('RuntimeException')) === ["Stringable", "Throwable"]
+        && array_keys(class_implements('InvalidArgumentException')) === ["Throwable", "Stringable"]
+        && array_keys(class_implements(new TypeError)) === ["Stringable", "Throwable"]
+        && array_keys(class_implements('S60E')) === ["Throwable", "Stringable"]);
+    $l->log = "";
+    $l["k"] = $o;
+    check("aar1", s60same($l["k"], $o) && $l->log === "gk");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2780,6 +2857,7 @@ function main() {
     s58dump(); // SECTION-CALL 58
     s59(); // SECTION-CALL 59
     s59dump(); // SECTION-CALL 59
+    s60(); // SECTION-CALL 60
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

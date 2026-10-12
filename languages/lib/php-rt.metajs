@@ -1281,8 +1281,24 @@ function phIsAA(v) { return phIsObj(v) && phIsA(v, "ArrayAccess") }
 // isset($a[k]): offsetExists for an ArrayAccess object. Twin of js_phaisset in
 // abnf/jsrtphp.go.
 function js_phaisset(a, k) {
-    if (phIsAA(a)) { return phTest(js_phmcall(a, "offsetExists", [k])) }
+    if (phIsAA(a)) { return phAAIsset(a, k) }
     return phArrHas(a, k)
+}
+// offsetExists, or the library's __mec_isset when the class declaring
+// offsetExists declares that too. Twin of phpAAIsset in abnf/jsrtphp.go.
+function phAAIsset(o, k) {
+    var c = anytype
+    c = o["__class"]
+    var guard = 0
+    while (guard < 64 && rtIsObj(c)) {
+        guard = guard + 1
+        if (typeof c["__ms:offsetexists"] == "string") {
+            if (typeof c["__ms:__mec_isset"] == "string") { return phTest(js_phmcall(o, "__mec_isset", [k])) }
+            break
+        }
+        c = c["__super"]
+    }
+    return phTest(js_phmcall(o, "offsetExists", [k]))
 }
 
 // The frozen subset has no splice, so a removal REBUILDS both arrays. They are
@@ -1317,6 +1333,7 @@ function phArrUnset(av, k) {
 // answer the SAME cell for the same element every time: building a fresh one per
 // '&' silently detaches every alias taken earlier.
 function phElemCell(av, k) {
+    if (phIsAA(av)) { return phAACell(av, k) }
     var p = phArrParts(av)
     if (p === undefined) { return null }
     var nk = phNormKey(k)
@@ -1334,6 +1351,16 @@ function phElemCell(av, k) {
     cell["__refcell"] = true
     cell["v"] = p.v[i]
     p.v[i] = cell
+    return cell
+}
+
+// An ArrayAccess element is no storage location: fetched for writing it reads
+// offsetGet, and a reference binds to a temporary holding what that answered
+// (zend_std_read_dimension). Twin of phpAACell in abnf/jsrtphp.go.
+function phAACell(av, k) {
+    var cell = {}
+    cell["__refcell"] = true
+    cell["v"] = js_phmcall(av, "offsetGet", [k])
     return cell
 }
 
@@ -1982,7 +2009,11 @@ function phGenStep(g, sent) {
     var raw = anytype
     raw = r["value"]
     var kv = false
-    if (raw !== undefined && raw !== null && typeof raw == "object") { kv = raw["__genkv"] === true }
+    var from = false
+    if (raw !== undefined && raw !== null && typeof raw == "object") {
+        kv = raw["__genkv"] === true
+        from = raw["__genfrom"] === true
+    }
     if (kv) {
         st["key"] = raw["k"]
         st["last"] = raw["v"]
@@ -1992,10 +2023,11 @@ function phGenStep(g, sent) {
     }
     // The next automatic key follows the largest integer key used so far, a
     // keyless yield's or an explicit one's (PHP's largest_used_integer_key); a
-    // string key leaves it alone. Twin of jsGenerator.step in abnf/jsrt.go.
+    // string key, and a key a 'yield from' delegated, leave it alone. Twin of
+    // jsGenerator.step in abnf/jsrt.go.
     var ky = anytype
     ky = st["key"]
-    if (typeof ky == "number" && ky >= st["auto"]) { st["auto"] = ky + 1 }
+    if (!from && typeof ky == "number" && ky >= st["auto"]) { st["auto"] = ky + 1 }
     return r
 }
 

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -44,6 +45,18 @@ var (
 // definition lines.
 func TraceMarkersWanted() bool {
 	return TraceOutPath != "" || CFGOutPath != "" || CallgraphOutPath != "" || WhyEnabled
+}
+
+// curSrcAbs is the current source's absolute path with symlinks resolved (the
+// tag scripts' c.curFileAbs, PHP's __FILE__). A name that is no file on disk is
+// answered as given.
+func curSrcAbs() string {
+	if a, err := filepath.Abs(traceSrcName); err == nil && traceSrcName != "" {
+		if r, err := filepath.EvalSymlinks(a); err == nil {
+			return r
+		}
+	}
+	return traceSrcName
 }
 
 // SetTraceSource registers the program source, so events and CFG labels can

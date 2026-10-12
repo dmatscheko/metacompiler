@@ -1143,7 +1143,7 @@ QName       = [ "\\" ] [ KwNamespace "\\" ] Name { "\\" MethodName } ;
 // A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
 // M_PI, __DIR__, __LINE__, ...), resolved by makeConstRef. Placed last so calls,
 // statics and keywords are matched first.
-ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
+ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)), up.pos)) ~~>
             = QName ;
 
 // isset($a, $b["k"], $o->p): true when every operand is set AND not null. It is a
@@ -2061,12 +2061,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // variable so the tag script never carries an escaped quote inside a string
     // literal, which the two script hosts do not agree on.
     var dq = String.fromCharCode(34)
-    function makeConstRef(name) {
+    // __LINE__ / __FILE__ / __DIR__: twin of magicFileConst in php-interpreter.abnf.
+    function magicFileConst(name, pos) {
+        if (name == "__LINE__") { return c.lineOf(pos) }
+        if (name != "__FILE__" && name != "__DIR__") { return undefined }
+        var f = c.curFileAbs()
+        if (name == "__FILE__") { return f }
+        var cut = 0
+        for (var i = 0; i < f.length; i++) { if (f.charCodeAt(i) == 47) { cut = i } }
+        return cut == 0 ? "/" : f.substring(0, cut)
+    }
+    function makeConstRef(name, pos) {
         // A bare 'exit' / 'die' is the language construct exit(), not a constant.
         // Twin of makeConstRef in php-interpreter.abnf.
         var lo = name.toLowerCase()
         if (lo == "exit" || lo == "die") { return makeCall(["exit"]) }
         if (name == "__FUNCTION__" || name == "__METHOD__") { return makeConst(cloMagic(name == "__METHOD__")) }
+        var fileConst = magicFileConst(name, pos)
+        if (fileConst != undefined) { return makeConst(fileConst) }
         if (name == "__CLASS__") {
             return function(b) {
                 return {b: b, v: callExt(b, "js_get", [frameCls(b, "self"), emitStr(b, "__name")])}
@@ -3077,8 +3089,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         aBody.NewBr(bindB)
         var keyV = bindB.NewPhi([llvm.ir.NewIncoming(gK, joinB), llvm.ir.NewIncoming(aK, aBody)])
         var valV = bindB.NewPhi([llvm.ir.NewIncoming(gV, joinB), llvm.ir.NewIncoming(aV, aBody)])
+        // A delegated value keeps its own key and leaves the generator's running
+        // index alone (__genfrom): `yield 1; yield from [7, 8]; yield 5;` keys 5 by 1.
         var pair = callExt(bindB, "js_obj_new", [])
         callExt(bindB, "js_set", [pair, emitStr(bindB, "__genkv"), hTrue])
+        callExt(bindB, "js_set", [pair, emitStr(bindB, "__genfrom"), hTrue])
         callExt(bindB, "js_set", [pair, emitStr(bindB, "k"), keyV])
         callExt(bindB, "js_set", [pair, emitStr(bindB, "v"), valV])
         callExt(bindB, "js_yield", [pair])
@@ -3226,10 +3241,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // a ?? b : the first operand that is not null (left fold; associative for '??').
+    // Every operand but the last is fetched for isset: a member chain takes coalIs
+    // (foldCallMember), and any other thunk ignores it.
+    var coalIs = {coalIs: true}
     function makeCoalesce(items) {
         if (items.length == 1) { return items[0] }
         return function(b) {
-            var r = items[0](b)
+            var r = items[0](b, coalIs)
             b = r.b
             var v = r.v
             for (var i = 1; i < items.length; i++) {
@@ -3237,7 +3255,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var mergeB = curF.NewBlock("")
                 var isNull = b.NewICmp(llvm.enum.IPredEQ, v, hNull)
                 b.NewCondBr(isNull, rightB, mergeB)
-                var r2 = items[i](rightB)
+                var r2 = i == items.length - 1 ? items[i](rightB) : items[i](rightB, coalIs)
                 r2.b.NewBr(mergeB)
                 var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(r2.v, r2.b)])
                 b = mergeB
@@ -3620,6 +3638,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeDynFieldSfx(items) {
         return {kind: "dynfield", nameT: sfxNamed(items, "dynname"), nullsafe: sfxNs(items)}
     }
+    // An element fetched for isset (BP_VAR_IS): js_phaisset first, null when that
+    // says no - so an ArrayAccess object is asked offsetExists before offsetGet, and
+    // a string offset out of range is null. Twin of phpIndexIs in
+    // php-interpreter.abnf.
+    function emitIsFetch(b, objV, keyV) {
+        var getB = curF.NewBlock("")
+        var endB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phaisset", [objV, keyV])), getB, endB)
+        var gv = callExt(getB, "js_phget", [objV, keyV])
+        getB.NewBr(endB)
+        return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(hNull, b), llvm.ir.NewIncoming(gv, getB)])}
+    }
+    // A chain emitted with coalIs is the left operand of '??' (makeCoalesce), and
+    // its element reads are emitIsFetch.
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
@@ -3628,7 +3660,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         for (var q = 0; q < suffixes.length; q++) {
             if (suffixes[q].nullsafe === true) { hasNs = true }
         }
-        return function(b) {
+        return function(b, mode) {
             var r = primary(b)
             b = r.b
             var cur = r.v
@@ -3722,6 +3754,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                                s.sfxMem, s.sfxArgs, s.sfxMemT, s.sfxMemProp, null)(b)
                     b = rs.b
                     cur = rs.v
+                } else if (mode === coalIs) {
+                    var iri = s.idx(b)
+                    var rif = emitIsFetch(iri.b, cur, iri.v)
+                    b = rif.b
+                    cur = rif.v
                 } else {
                     var ir = s.idx(b)
                     b = ir.b
@@ -4086,7 +4123,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var rd = phDeref(rn2.b, rawVarV(rn2.b, rn2.v))
             return {b: rd.b, v: isSetHandle(rd.b, rd.v)}
         }
-        var p = emitRefPath(b, ref)
+        var p = emitRefPathIs(b, ref)
         b = p.b
         if (p.kind == "append") { return {b: b, v: hFalse} }
         if (p.kind == "field") { return emitPropIsset(b, p.obj, p.key) }
@@ -4129,7 +4166,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 }
                 return {b: r0.b, v: callExt(r0.b, "js_phnot", [r0.v])}
             }
-            var p = emitRefPath(b, ref)
+            var p = emitRefPathIs(b, ref)
             b = p.b
             if (p.kind == "append") { return {b: b, v: hTrue} }
             var is = anytype
@@ -4861,8 +4898,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // The creating steps are exactly the interpreter's: an index or a '[]' step whose
     // container is a PHP array. A '->name' step is left alone (the interpreter's guard
     // is isArr(o), and an object is not one), and so is a static-property root.
-    function emitRefPath(b, ref) { return emitRefPathV(b, ref, false) }
-    function emitRefPathV(b, ref, viv) {
+    // The non-creating walk; isset() and empty() fetch each step before the last
+    // for isset (emitIsFetch, zend_fetch_dimension_address_read with BP_VAR_IS).
+    function emitRefPath(b, ref) { return emitRefPathV(b, ref, false, false) }
+    function emitRefPathIs(b, ref) { return emitRefPathV(b, ref, false, true) }
+    function emitRefPathV(b, ref, viv, isf) {
         var rr = refRootV(b, ref, viv)
         b = rr.b
         var o = rr.v
@@ -4916,7 +4956,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else {
                 var ri = s.idx(b)
                 b = ri.b
-                o = callExt(b, viv ? "js_phviv" : "js_phget", [o, ri.v])
+                if (isf === true) {
+                    var rif = emitIsFetch(b, o, ri.v)
+                    b = rif.b
+                    o = rif.v
+                } else { o = callExt(b, viv ? "js_phviv" : "js_phget", [o, ri.v]) }
             }
         }
         var last = ref.path[ref.path.length - 1]
@@ -6443,6 +6487,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         return "\x00" + c.file + ":" + c.lineOf(pos) + "$" + hex
     }
+    // A class declaring __toString implements Stringable without naming it, after
+    // the interfaces it names (add_stringable_interface in zend_compile.c); one
+    // using a trait's __toString does too (zend_do_bind_traits). Answers ifaces,
+    // or a copy with "Stringable" appended. Twin of addStringable in php-interpreter.abnf.
+    function addStringable(ifaces, methods) {
+        var has = false
+        for (var i = 0; i < methods.length; i++) {
+            if (phsCase(methods[i].name, false) == "__tostring") { has = true }
+        }
+        if (!has) { return ifaces }
+        var out = []
+        for (var j = 0; j < ifaces.length; j++) {
+            if (phsCase(lastSeg(ifaces[j]), false) == "stringable") { return ifaces }
+            out.push(ifaces[j])
+        }
+        out.push("Stringable")
+        return out
+    }
     function makeClassStmt(items) {
         var name = items[0]
         srcClasses["$" + name] = true
@@ -6507,6 +6569,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             for (var d = 0; d < tm.statics.length; d++) { statics.push(tm.statics[d]) }
             for (var e = 0; e < tm.consts.length; e++) { consts.push(tm.consts[e]) }
         }
+        ifaces = addStringable(ifaces, methods)
         // A root class with no constructor takes no arguments, so a named one raises.
         if (ext == "") { ctorSigs["$" + name] = noParams }
         for (var mi = 0; mi < methods.length; mi++) {
