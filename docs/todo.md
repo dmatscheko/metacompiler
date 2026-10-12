@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-447** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-449** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,10 +63,10 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-446 python: aliased imports of Python-written library modules · P2 · PY · IN PROGRESS (PY worker, round 21) [V]
-`from dataclasses import dataclass as X` raises NameError in both halves (CPython binds X); likewise `import copy as c`,
-`from collections import Counter as C`. Imports of python-copy.py / python-dataclasses.py / python-collections.py are
-flat, so `import collections; collections.deque` and module-qualified access should be checked too.
+### T-448 python: aliases of runtime-provided stdlib modules · P2 · PY · OPEN [V]
+`import math as m; m.sqrt(16)` and `from math import sqrt as s` raise NameError in both halves (CPython 4.0); same for
+every module in core.stdlibImports (re, json, ...). They have no module object to bind; give them one (or alias the
+flat names). Python-written modules (copy/dataclasses/collections) already bind correctly.
 
 ---
 
@@ -112,12 +112,13 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-444 php: echo argument order; case-insensitive __toString; ??= on ArrayAccess; basename & path functions · P2 · PHP · IN PROGRESS (PHP worker, round 27) [V]
-Spec: (a) `echo a, b, c` prints each argument as it is evaluated (one ZEND_ECHO per operand); all engines evaluate
-every operand first, so side effects interleave wrongly (`echo $o['a'] ?? 'd', " ", $o['b'] ?? 'd'` prints
-`E(a) G(a) E(b) 1 d`, PHP `E(a) G(a) 1 E(b) d`). (b) `function __TOSTRING()` is not found by string conversion
-(interp aborts, compiler prints `aObject`); method names are case-insensitive. (c) `??=` on an ArrayAccess element
-reads without offsetExists (BP_VAR_IS). (d) `basename`, `dirname`, `pathinfo`, `realpath` undefined.
+### T-447 php: realpath; declared-null properties vs magic (compiled); __unset · P2 · PHP · OPEN [V]
+(a) `realpath` needs a file-system primitive (getcwd + realpath(3)) in runtime.c, the Go twin and an interpreter host
+hook; none exists. (b) compiled only: with `public $prop;` (null) plus `__set`/`__isset`, `$f->prop = 1` calls `__set`
+and `isset($f->prop)` calls `__isset`; PHP sees the declared slot and runs no magic (emitPropSetPlain/GetPlain/Isset use
+js_phisset as "exists"; needs a presence extern). Blocks corpus assign_coalesce_008. (c) `__unset` magic not implemented
+in either engine (corpus magic_methods_001). Note only: both engines evaluate the RHS of `$n[k()] += v()` before the
+target's indexes; php-src evaluates k first, the manual calls it unspecified.
 
 ---
 
@@ -487,6 +488,8 @@ T-439 php: SPL in php-stdlib (ArrayIterator/ArrayObject/SplDoublyLinkedList/Stac
 T-441 python: qualnames, dunder/exception __dict__, property names via __set_name__, CPython "Did you mean" suggestions, copy + dataclasses modules (slots/kw_only/InitVar/make_dataclass raise NotImplementedError), dir() of classes/instances — DONE c0828553
 T-442 php: __FILE__/__LINE__/__DIR__, automatic Stringable, generator keys after yield from (compiled), BP_VAR_IS fetches for ?? and isset/empty on ArrayAccess, ArrayObject isset of null, engine exception interface order, ArrayAccess by reference; SplObjectStorage isset(null) is true in php-src (asserted) — DONE 27c9ccfc
 T-443 python: user __hash__/__eq__ dict/set keys, class-level descriptor __get__, 3-arg type(), function attributes as callables, add_note, collections (deque/defaultdict/OrderedDict/Counter), sys.exit/SystemExit, bytearray as byte list — DONE cf92473b
+T-444 php: echo writes per operand, magic methods in any case, ??= reads with isset semantics (offsetExists/__isset, single evaluation), basename/dirname/pathinfo; realpath moved to T-447 — DONE 561511a7
+T-446 python: aliased and module-qualified imports of the Python-written library modules bind where they run; ImportError for missing names — DONE 5860929b
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
