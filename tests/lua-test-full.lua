@@ -907,6 +907,31 @@ function s25()
     cnt()
     gcPad("u", churn)
     check("gc07", cnt(), 3)
+
+    -- swept slots handed out again BETWEEN live blocks of the same size: every
+    -- third table of each size is held, the churn frees the rest, and a second
+    -- round of the same sizes refills the gaps
+    local held = {}
+    for i = 1, 300 do
+        local t = {}
+        for j = 1, i % 5 + 1 do t[j] = i * 10 + j end
+        if i % 3 == 0 then held[#held + 1] = t end
+    end
+    gcPad("r", churn)
+    local refill = 0
+    for i = 1, 300 do
+        local t = {}
+        for j = 1, i % 5 + 1 do t[j] = -j end
+        refill = refill + #t
+    end
+    local bad = 0
+    for k = 1, #held do
+        local i = k * 3
+        local t = held[k]
+        if #t ~= i % 5 + 1 then bad = bad + 1 end
+        for j = 1, #t do if t[j] ~= i * 10 + j then bad = bad + 1 end end
+    end
+    check("gc08", bad + refill, 900)
 end
 
 -- ===== END SECTIONS =====

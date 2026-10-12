@@ -681,9 +681,9 @@ memory to the OS**, is stop-the-world, and **only `runtime.c` has one** —
   `js_gc_pin`** — the emitted module has globals the floor cannot see. `js_gc_pin`
   is the identity in both halves.
 - **`MEC_GC` is the only reason those defects were findable**: `off`, default
-  (collect when bytes-since-last > live set, floor 1 MB), `stress`, `poison`
-  (retire and fill every swept block, so a missed root is a wrong answer rather
-  than lucky bytes), plus `MEC_GC_STATS=1`. `poison` is deliberately **not** also
+  (collect when bytes-since-last > live set, floor 4 MB, the first collection
+  at 1 MB), `stress`, `poison` (retire and fill every swept block, so a missed
+  root is a wrong answer rather than lucky bytes), plus `MEC_GC_STATS=1`. `poison` is deliberately **not** also
   `stress` — that combination is quadratic. **`stress` is a correctness tool, not
   a benchmark mode**: it collects at every allocation, so size the program in
   hundreds of iterations, not tens of thousands.

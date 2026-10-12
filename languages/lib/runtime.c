@@ -332,7 +332,8 @@ long to_uint32(long bits) {
  * address; there is nothing in front of it.
  *
  *   chunk: [0] next chunk   [1] block size   [2] slot count   [3] slots bumped
- *          [4] alloc bitmap [5] mark bitmap  [6] kind (1 = cells)  [7] unused
+ *          [4] alloc bitmap [5] mark bitmap  [6] kind (1 = cells)
+ *          [7] next chunk of the same partition
  *          then 128 bytes of header padding, and the blocks
  *
  * A block over 1024 bytes gets a chunk of its own (one slot), so the scheme is
@@ -341,11 +342,20 @@ long to_uint32(long bits) {
  *
  * The mark bitmap is CLEARED at the start of a collection rather than carrying
  * an epoch: clearing is heap/bsize/8 bytes - 6 KB for a 3 MB heap of cells.
+ *
+ * THERE ARE NO FREE LISTS for the small classes. After the mark, the set of
+ * allocated blocks IS the set of marked ones, so the sweep swaps the two bitmap
+ * pointers instead of visiting a slot, and the allocator hands out the next
+ * clear alloc bit at or after a per-partition cursor, walking the partition's
+ * chunks in order (the cursors rewind at every collection). A collection costs
+ * the live set plus a few words per chunk, not the heap; an allocation is a
+ * bitmap probe in address order rather than a chunk lookup per free-list pop.
  */
 
 long AR_CHUNKS;      /* head of the chunk list */
-long AR_PART[130];   /* the current bump chunk per partition = class * 2 + kind */
-long GC_FREE[130];   /* free lists by partition; the next pointer is in the payload */
+long AR_PART[130];   /* the chunk a partition (class * 2 + kind) allocates from */
+long AR_CUR[130];    /* the slot in AR_PART to resume the search at */
+long AR_PHEAD[130];  /* the partition's first chunk; [7] links the rest */
 long GC_BIG;         /* free blocks over 1024 bytes: [0] next, [1] size, first fit */
 long GC_ON;          /* 0 during boot and inside a collection */
 long GC_MODE;        /* 0 auto, 1 never, 2 at every allocation, 3 = 2 + poison */
@@ -464,11 +474,6 @@ void bit_set(long bm, long i) {
 	long one = 1;
 	b[i >> 3] = (char)(((long)b[i >> 3] & 255) | (one << (i & 7)));
 }
-void bit_clr(long bm, long i) {
-	char *b = (char *)bm;
-	long one = 1;
-	b[i >> 3] = (char)(((long)b[i >> 3] & 255) & (255 - (one << (i & 7))));
-}
 int bit_get(long bm, long i) {
 	char *b = (char *)bm;
 	return (int)(((((long)b[i >> 3]) & 255) >> (i & 7)) & 1);
@@ -584,9 +589,10 @@ long chunk_new(long bsize, long nblk, long kind) {
 /* Which chunk holds address v, or 0. */
 long chunk_of(long v) { return ar_ix_find(v); }
 
-/* A block of exactly `need` bytes and kind `kind`: the partition's free list,
- * then a bump in the partition's current chunk, then a new chunk. A block over
- * 1024 bytes comes from the big free list or a chunk of its own. */
+/* A block of exactly `need` bytes and kind `kind`: the first clear alloc bit
+ * at or after the partition's cursor, in its chunks in list order, then a new
+ * chunk at the end of the list. A whole byte of set bits is skipped at once. A
+ * block over 1024 bytes comes from the big free list or a chunk of its own. */
 long ar_block(long need, long kind) {
 	long cls = need >> 4;
 	long b;
@@ -616,24 +622,29 @@ long ar_block(long need, long kind) {
 	}
 	{
 		long part = cls * 2 + kind;
-		long cur;
-		b = GC_FREE[part];
-		if (b != 0) {
-			long c = chunk_of(b);
-			long *cw = (long *)c;
-			{ long *fw = (long *)b; GC_FREE[part] = fw[0]; }
-			bit_set(cw[4], (b - c - 128) / need);
-			return b;
-		}
-		cur = AR_PART[part];
-		if (cur != 0) {
+		long cur = AR_PART[part];
+		long one = 1;
+		while (cur != 0) {
 			long *cw = (long *)cur;
-			if (cw[3] < cw[2]) {
-				long idx = cw[3];
-				cw[3] = idx + 1;
-				bit_set(cw[4], idx);
-				return cur + 128 + idx * need;
+			char *bm = (char *)cw[4];
+			long n = cw[2];
+			long i = AR_CUR[part];
+			while (i < n) {
+				long by = (long)bm[i >> 3] & 255;
+				if (by == 255) { i = (i | 7) + 1; }
+				else if (((by >> (i & 7)) & 1) != 0) { i = i + 1; }
+				else {
+					bm[i >> 3] = (char)(by | (one << (i & 7)));
+					if (i >= cw[3]) { cw[3] = i + 1; }
+					AR_CUR[part] = i + 1;
+					return cur + 128 + i * need;
+				}
 			}
+			AR_CUR[part] = n;
+			if (cw[7] == 0) { break; }
+			cur = cw[7];
+			AR_PART[part] = cur;
+			AR_CUR[part] = 0;
 		}
 		{
 			/* 1 MB of blocks per partition. The pages are only touched as the
@@ -642,7 +653,10 @@ long ar_block(long need, long kind) {
 			long nblk = 1048576 / need;
 			long c = chunk_new(need, nblk, kind);
 			long *cw = (long *)c;
+			if (cur == 0) { AR_PHEAD[part] = c; }
+			else { long *pw = (long *)cur; pw[7] = c; }
 			AR_PART[part] = c;
+			AR_CUR[part] = 1;
 			cw[3] = 1;
 			bit_set(cw[4], 0);
 			return c + 128;
@@ -693,11 +707,11 @@ void ar_init(void) {
 	AR_IX = 0; AR_IX_N = 0; AR_IX_CAP = 0;
 	AR_LO = 9223372036854775807; AR_HI = 0;
 	GC_ALLOCED = 0; GC_LIVE = 0; GC_HEAP = 0; GC_COUNT = 0; PIN_N = 0;
-	/* The same floor a collection leaves behind, so a short program still gets
-	 * one collection instead of running the whole matrix without ever entering
-	 * the collector. */
+	/* A quarter of the floor a collection leaves behind, so a short program
+	 * still gets one collection instead of running the whole matrix without
+	 * ever entering the collector. */
 	GC_THRESH = 1048576;
-	while (i < 130) { GC_FREE[i] = 0; AR_PART[i] = 0; i = i + 1; }
+	while (i < 130) { AR_PART[i] = 0; AR_CUR[i] = 0; AR_PHEAD[i] = 0; i = i + 1; }
 	GC_MSTACK = (long)malloc(65536 * 8);
 	GC_MTOP = 0;
 	GC_MCAP = 65536;
@@ -917,36 +931,37 @@ void gc_clear_marks(void) {
 	}
 }
 
+/* Allocated := marked, by swapping the two bitmaps; the old alloc bitmap is the
+ * next collection's (cleared) mark bitmap. Only a block over 1024 bytes and
+ * poison mode need to see each freed slot. */
 void gc_sweep(void) {
 	long c = AR_CHUNKS;
 	while (c != 0) {
 		long *cw = (long *)c;
 		long n = cw[3];
 		long bs = cw[1];
-		long part = (bs >> 4) * 2 + cw[6];
 		long i = 0;
+		if (GC_MODE != 3 && bs <= 1024) { n = 0; }
 		while (i < n) {
 			if (bit_get(cw[4], i) != 0 && bit_get(cw[5], i) == 0) {
 				long b = c + 128 + i * bs;
 				long *pw = (long *)b;
-				bit_clr(cw[4], i);
 				if (GC_MODE == 3) {
-					/* Poison mode: the block is RETIRED - its allocation bit stays
-					 * clear and it goes on no free list, so it is never handed out
-					 * again - and its payload is filled with a value that is neither
-					 * a tag nor a handle, so a root the mark pass FAILED to reach
-					 * shows up as a deterministic wrong answer instead of a rare
-					 * use-after-free. */
+					/* Poison mode: the block is RETIRED - its allocation bit is
+					 * clear and the cursors never rewind in this mode, so it is
+					 * never handed out again - and its payload is filled with a
+					 * value that is neither a tag nor a handle, so a root the mark
+					 * pass FAILED to reach shows up as a deterministic wrong answer
+					 * instead of a rare use-after-free. */
 					long q = 0;
 					while (q * 8 < bs) { pw[q] = 195948557; q = q + 1; }
-				} else if (bs > 1024) {
-					pw[0] = GC_BIG; pw[1] = bs; GC_BIG = b;
 				} else {
-					pw[0] = GC_FREE[part]; GC_FREE[part] = b;
+					pw[0] = GC_BIG; pw[1] = bs; GC_BIG = b;
 				}
 			}
 			i = i + 1;
 		}
+		{ long t = cw[4]; cw[4] = cw[5]; cw[5] = t; }
 		c = cw[0];
 	}
 }
@@ -977,12 +992,20 @@ void gc_collect(void) {
 	gc_scan_range(lo, GC_STACK_BASE);
 	gc_drain();
 	gc_sweep();
+	if (GC_MODE != 3) {
+		i = 0;
+		while (i < 130) { AR_PART[i] = AR_PHEAD[i]; AR_CUR[i] = 0; i = i + 1; }
+	}
 	GC_ALLOCED = 0;
 	/* The permanent region is live by definition; counting it keeps the
 	 * threshold what it would be had those objects been marked. */
 	GC_LIVE = GC_LIVE + perm_used();
+	/* The next collection comes after as many bytes as are live now, but not
+	 * before 4 MB: below that a collection's fixed cost (the roots, the
+	 * permanent region, the bitmaps) outweighs what it frees, and a program
+	 * with a small live set would collect every few hundred calls. */
 	GC_THRESH = GC_LIVE;
-	if (GC_THRESH < 1048576) { GC_THRESH = 1048576; }
+	if (GC_THRESH < 4194304) { GC_THRESH = 4194304; }
 	GC_COUNT = GC_COUNT + 1;
 	GC_ON = 1;
 }
