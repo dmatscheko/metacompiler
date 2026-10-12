@@ -3593,8 +3593,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // what makes `$r = &$o->p; $o->p = 5;` visible through $r.
         arrSet(o.p, name, v)
     }
+    // A magic method is found under its lower-cased name, which setMethod stores for
+    // every method whatever its spelling: '__TOSTRING' is __toString. Twin of
+    // js_phstr in abnf/jsrtphp.go and phStr in lib/php-rt.metajs.
     function objToString(o) {
-        var m = classFind(o.__class, "__toString")
+        var m = classFind(o.__class, "__tostring")
         if (m != null) { return phpStr(m(o, argsOf([]))) }
         fail("object of class " + o.__class.__name + " could not be converted to string")
     }
@@ -3787,7 +3790,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function cbMethod(where, cls, mname) {
         if (classFind(cls, mname) != null || classFind(cls, phsCase(mname, false)) != null) { return null }
-        if (classFind(cls, "__callStatic") != null) { return null }
+        if (classFind(cls, "__callstatic") != null) { return null }
         cbFail(where, "class " + cls.__name + " does not have a method \"" + mname + "\"")
     }
     function phpCheckCallback(cur, where) {
@@ -4016,7 +4019,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pendingStatic = bind
             return m(self, argset)
         }
-        var cs = classFind(cls, "__callStatic")
+        var cs = classFind(cls, "__callstatic")
         if (cs != null) {
             pendingStatic = bind
             return cs(null, argsOf([name, arrOf(argset.pos)]))
@@ -4191,10 +4194,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return staticAccess(classOfValue(cur), stName(p), stProp(p), p.args, "")
         }}
     }
-    function makeStaticRef(items) {
-        var p = splitStatic(items)
-        return function() { return staticCell(resolveClassName(p.base), stProp(p)) }
-    }
+    function staticRefOf(p) { return function() { return staticCell(resolveClassName(p.base), stProp(p)) } }
 
     // include / require: a single-quoted literal path is resolved to a project file
     // (resolveImport -> core.importFile below, so the file's defs register during the walk);
@@ -4489,12 +4489,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var one = makeConst(phpIntLit("1"))
         return function() { st(); return one() }
     }
+    // 'echo a, b' is one ZEND_ECHO per operand: each is evaluated, converted and
+    // written before the next is evaluated, so their side effects interleave.
+    // Twin of makeEcho in php-to-llvm-ir.abnf.
     function makeEcho(items) {
         var args = items.slice(1)
         return function() {
-            var out = ""
-            for (var i = 0; i < args.length; i++) { out += phpStr(args[i]()) }
-            phsEcho(out)
+            for (var i = 0; i < args.length; i++) { phsEcho(phpStr(args[i]())) }
             return null
         }
     }
@@ -4512,7 +4513,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // it carries a resolver instead of name/nameT; every reader below tests sref
         // first.
         if (head.staticvar != undefined) {
-            return {name: null, nameT: null, sref: makeStaticRef(head.staticvar), headT: null, path: items.slice(1)}
+            var sp = splitStatic(head.staticvar)
+            return {name: null, nameT: null, sref: staticRefOf(sp), sp: sp, headT: null, path: items.slice(1)}
         }
         if (head.gkey != undefined) {
             return {name: null, nameT: null, sref: globalsCell(head.gkey), gkey: head.gkey, headT: null, path: items.slice(1)}
@@ -4738,16 +4740,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        if (op == "??=") { return function() { return coalesceAssign(ref, valT) } }
         return function() {
             var v = anytype
             v = phpCopy(valT())          // arrays assign BY VALUE
             if (ref.path.length == 0 && ref.sref != null) {
                 var cell = ref.sref()
-                if (op == "??=") {
-                    if (deref(cell.v) !== null) { return deref(cell.v) }
-                    cell.v = v
-                    return v
-                }
                 if (op != "=") { v = applyPhp(op, deref(cell.v), v) }
                 cell.v = v
                 return v
@@ -4755,27 +4753,58 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (op == "=" && strOffsetSet(ref, v)) { return v }
             if (ref.path.length == 0) {
                 var nm = refName(ref)
-                if (op == "??=") {
-                    if (varExists(nm) && getVar(nm) !== null) { return getVar(nm) }
-                    phpSet(nm, v)
-                    return v
-                }
                 if (op != "=") { v = applyPhp(op, getVar(nm), v) }
                 phpSet(nm, v)
             } else {
-                var p = resolveRefPhp(ref)
-                if (op == "??=") {
-                    var old = readAt(p)
-                    if (old !== null && old !== undefined) { return old }
-                    storeAt(p, v)
-                    return v
-                }
+                var p = resolveRefPhp(op == "=" ? ref : memoRef(ref))
                 if (op != "=") { v = applyPhp(op, readAt(p), v) }
                 storeAt(p, v)
             }
             return v
         }
     }
+    // '$t ??= e' fetches $t for isset (BP_VAR_IS: an ArrayAccess level asks
+    // offsetExists before offsetGet, a missing property __isset) and, only when that
+    // is null, evaluates e and walks $t again to store it - e short-circuits as the
+    // right operand of '??' does. Twin of emitCoalesceAssign in php-to-llvm-ir.abnf.
+    function coalesceAssign(ref, valT) {
+        var m = memoRef(ref)
+        var old = anytype
+        old = refProbe(m, false)
+        if (old !== null && old !== undefined) { return old }
+        var v = anytype
+        v = phpCopy(valT())
+        if (m.path.length > 0) { storeAt(resolveRefPhp(m), v) }
+        else if (m.sref != null) { m.sref().v = v }
+        else { phpSet(refName(m), v) }
+        return v
+    }
+    // A target walked twice (read, then written) evaluates its call head, variable
+    // name and every index and property-name expression once, in source order, before
+    // either walk: PHP compiles them ahead of the delayed fetches, and '??=' memoizes
+    // them for its second walk. Twin of memoRefV in php-to-llvm-ir.abnf.
+    function memoRef(ref) {
+        var m = {name: ref.name, nameT: null, sref: ref.sref, headT: null, path: []}
+        if (ref.headT != null && ref.headT != undefined) { m.headT = constThunk(ref.headT()) }
+        if (ref.nameT != null && ref.nameT != undefined) { m.nameT = constThunk(ref.nameT()) }
+        if (ref.gkey != undefined) {
+            m.gkey = constThunk(ref.gkey())
+            m.sref = globalsCell(m.gkey)
+        }
+        if (ref.sp != undefined) {
+            var cls = anytype
+            cls = resolveClassName(ref.sp.base)
+            var pn = stProp(ref.sp)
+            m.sref = function() { return staticCell(cls, pn) }
+        }
+        for (var i = 0; i < ref.path.length; i++) {
+            var st = ref.path[i]
+            if (st.idx != undefined) { m.path.push({idx: constThunk(st.idx())}) }
+            else { m.path.push(stepOf(st)) }
+        }
+        return m
+    }
+    function constThunk(v) { return function() { return v } }
     // $s[0] = "H" : a string is mutable through an offset in PHP but immutable in the
     // host language, so the whole string is rebuilt and stored back over the variable.
     // Answers false (and does nothing) whenever the target is not a string offset, so
@@ -4939,7 +4968,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var s = ctxSelf()
         if (s == null || (cn == "parent" && (s.__super == null || s.__super == undefined))) { return cur }
         var cls = resolveClassName(cn)
-        if (classFind(cls, mn) == null && classFind(cls, phsCase(mn, false)) == null && classFind(cls, "__callStatic") == null) {
+        if (classFind(cls, mn) == null && classFind(cls, phsCase(mn, false)) == null && classFind(cls, "__callstatic") == null) {
             return cls.__name + "::" + mn
         }
         return boundStatic(cls, mn, cn)

@@ -3464,13 +3464,6 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (op == "<=>") {
             return callExt(b, "js_phcmp", [l, r])
         }
-        // '$a ??= $b' keeps $a when it is set and not null. The right-hand side is
-        // already evaluated at this point, so - unlike PHP - it is not short-circuited;
-        // a side-effecting right operand of '??=' therefore still runs.
-        if (op == "??=") {
-            return b.NewSelect(truthy(b, callExt(b, "js_seq", [l, hNull])), r,
-                               b.NewSelect(truthy(b, callExt(b, "js_seq", [l, hUndef])), r, l))
-        }
         var v = callExt(b, binExt[op], [l, r])
         if (wraps[op] == 1) { v = intWrap(b, v) }
         return v
@@ -3782,7 +3775,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var magicIsset = false
     var magicCall = false
     var magicInvoke = false
-    function noteMagic(name) {
+    // Method names are case-insensitive: '__GET' declares __get.
+    function noteMagic(declName) {
+        var name = declName.toLowerCase()
         if (name == "__get") { magicGet = true }
         else if (name == "__set") { magicSet = true }
         else if (name == "__isset") { magicIsset = true }
@@ -5003,6 +4998,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        if (op == "??=") { return function(b) { return emitCoalesceAssign(b, ref, valT) } }
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -5064,6 +5060,113 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return {b: b, v: v}
         }
     }
+
+    // '$t ??= e' fetches $t for isset (BP_VAR_IS: an ArrayAccess level asks
+    // offsetExists before offsetGet, a missing property __isset) and, only when that
+    // is null, evaluates e and walks $t again to store it - e short-circuits as the
+    // right operand of '??' does. Twin of coalesceAssign in php-interpreter.abnf.
+    function emitCoalesceAssign(b, ref, valT) {
+        var mr = memoRefV(b, ref)
+        var m = mr.ref
+        b = mr.b
+        var ro = anytype
+        if (m.path.length == 0) {
+            if (m.sbase != undefined) {
+                var rb = m.sbase(b)
+                var rs = sNameV(rb.b, m)
+                ro = {b: rs.b, v: callExt(rs.b, "js_phsget", [rb.v, rs.v])}
+            } else if (m.gkey != undefined) {
+                var gr = globalsRawV(b, m)
+                ro = readRawV(gr.b, gr.v)
+            } else {
+                var rn = refNameV(b, m)
+                ro = readVarV(rn.b, rn.v)
+            }
+        } else {
+            var p = emitRefPathIs(b, m)
+            if (p.kind == "index") { ro = emitIsFetch(p.b, p.obj, p.key) }
+            else if (p.kind == "append") { ro = {b: p.b, v: hNull} }
+            else {
+                var is = emitPropIsset(p.b, p.obj, p.key)
+                var getB = curF.NewBlock("")
+                var gotB = curF.NewBlock("")
+                is.b.NewCondBr(truthy(is.b, is.v), getB, gotB)
+                var rg = readRefSlot(getB, p)
+                rg.b.NewBr(gotB)
+                ro = {b: gotB, v: gotB.NewPhi([llvm.ir.NewIncoming(hNull, is.b), llvm.ir.NewIncoming(rg.v, rg.b)])}
+            }
+        }
+        b = ro.b
+        var setB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isNullishHandle(b, ro.v), setB, mergeB)
+        var r = valT(setB)
+        var sb = r.b
+        var v = callExt(sb, "js_phcopy", [r.v])
+        if (m.path.length > 0) {
+            var pw = emitRefPathV(sb, m, true)
+            sb = writeRefSlot(pw.b, pw, v)
+        } else if (m.sbase != undefined) {
+            var wb = m.sbase(sb)
+            var ws = sNameV(wb.b, m)
+            sb = ws.b
+            callExt(sb, "js_phsset", [wb.v, ws.v, v])
+        } else {
+            var wn = refNameV(sb, m)
+            sb = setVarV(wn.b, wn.v, v)
+        }
+        sb.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ro.v, b), llvm.ir.NewIncoming(v, sb)])}
+    }
+    // A target walked twice (read, then written) evaluates its call head, variable
+    // name, class, and every index and property-name expression once, in source
+    // order, before either walk: PHP compiles them ahead of the delayed fetches, and
+    // '??=' memoizes them for its second walk. Twin of memoRef in
+    // php-interpreter.abnf.
+    function memoRefV(b, ref) {
+        var m = {name: ref.name, nameT: null, gkey: undefined, path: [], sbase: undefined, sname: ref.sname,
+                 snameT: null, headT: undefined}
+        var r = anytype
+        if (ref.headT != undefined) {
+            r = ref.headT(b)
+            b = r.b
+            m.headT = constThunkV(r.v)
+        }
+        if (ref.sbase != undefined) {
+            r = ref.sbase(b)
+            b = r.b
+            m.sbase = constThunkV(r.v)
+        }
+        if (ref.snameT != undefined && ref.snameT != null) {
+            r = ref.snameT(b)
+            b = r.b
+            m.snameT = constThunkV(r.v)
+        }
+        if (ref.nameT != undefined && ref.nameT != null) {
+            r = ref.nameT(b)
+            b = r.b
+            m.nameT = constThunkV(r.v)
+        }
+        if (ref.gkey != undefined) {
+            r = ref.gkey(b)
+            b = r.b
+            m.gkey = constThunkV(r.v)
+        }
+        for (var i = 0; i < ref.path.length; i++) {
+            var st = ref.path[i]
+            if (st.idx != undefined) {
+                r = st.idx(b)
+                b = r.b
+                m.path.push({idx: constThunkV(r.v)})
+            } else if (st.keyT != undefined) {
+                r = st.keyT(b)
+                b = r.b
+                m.path.push({keyT: constThunkV(r.v)})
+            } else { m.path.push(st) }
+        }
+        return {b: b, ref: m}
+    }
+    function constThunkV(v) { return function(b) { return {b: b, v: v} } }
 
     // ++ / -- (postfix yields the old value, prefix the new one). js_phinc /
     // js_phdec are PHP's increment_function and decrement_function.

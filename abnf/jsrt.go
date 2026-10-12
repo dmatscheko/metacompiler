@@ -14668,7 +14668,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if owner == nil {
 				// __callStatic($name, $args) is PHP's fallback for a missing
 				// static method, exactly as __call is for an instance method.
-				if cs := phpOwner(cls, "__callStatic"); cs != nil {
+				if cs := phpOwner(cls, "__callstatic"); cs != nil {
 					args := &jsArray{}
 					if _, vals, ok := phpArrParts(u(a[3])); ok {
 						args.elems = append(args.elems, vals.elems...)
@@ -14676,7 +14676,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					saved := rt.phpLsb
 					rt.phpLsb = bind
 					defer func() { rt.phpLsb = saved }()
-					return w(rt.call(cs.props["__callStatic"], jsUndef,
+					return w(rt.call(cs.props["__callstatic"], jsUndef,
 						[]interface{}{u(a[2]), name, args}))
 				}
 				rt.phpRaise("Error", "Call to undefined method "+rt.phpStr(cls.props["__name"])+"::"+name+"()")

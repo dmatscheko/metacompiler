@@ -40,6 +40,10 @@ const CASE_UPPER = 1;
 const STR_PAD_LEFT = 0;
 const STR_PAD_RIGHT = 1;
 const STR_PAD_BOTH = 2;
+const PATHINFO_DIRNAME = 1;
+const PATHINFO_BASENAME = 2;
+const PATHINFO_EXTENSION = 4;
+const PATHINFO_FILENAME = 8;
 const JSON_HEX_TAG = 1;
 const JSON_HEX_AMP = 2;
 const JSON_HEX_APOS = 4;
@@ -1005,6 +1009,59 @@ function trim($string, $characters = " \n\r\t\v\x00") { return __mec_trim($strin
 function ltrim($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, true, false); }
 function rtrim($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, false, true); }
 function chop($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, false, true); }
+
+// ----- strings: paths ---------------------------------------------------------
+// php_basename and zend_dirname on a POSIX system: '/' is the only separator,
+// trailing slashes do not count, and the file system is never consulted.
+function basename($path, $suffix = "") {
+    $path = (string)$path;
+    $end = strlen($path);
+    while ($end > 0 && substr($path, $end - 1, 1) === "/") { $end--; }
+    $start = $end;
+    while ($start > 0 && substr($path, $start - 1, 1) !== "/") { $start--; }
+    $n = strlen($suffix);
+    if ($n > 0 && $n < $end - $start && substr($path, $end - $n, $n) === (string)$suffix) { $end -= $n; }
+    return substr($path, $start, $end - $start);
+}
+// One level up: "" stays "", a path of slashes is "/", a bare name is ".".
+function __mec_dirname($path) {
+    if ($path === "") { return ""; }
+    $end = strlen($path);
+    while ($end > 0 && substr($path, $end - 1, 1) === "/") { $end--; }
+    if ($end == 0) { return "/"; }
+    while ($end > 0 && substr($path, $end - 1, 1) !== "/") { $end--; }
+    if ($end == 0) { return "."; }
+    while ($end > 0 && substr($path, $end - 1, 1) === "/") { $end--; }
+    if ($end == 0) { return "/"; }
+    return substr($path, 0, $end);
+}
+// More levels stop early once a level no longer shortens the path.
+function dirname($path, $levels = 1) {
+    $path = (string)$path;
+    if ($levels < 1) { throw new ValueError("dirname(): Argument #2 (\$levels) must be greater than or equal to 1"); }
+    do {
+        $n = strlen($path);
+        $path = __mec_dirname($path);
+        $levels--;
+    } while ($levels > 0 && strlen($path) < $n);
+    return $path;
+}
+// The extension follows the basename's last '.', and the filename precedes it.
+// "dirname" is left out only for the empty path. With one flag the answer is
+// that element, or "" when it is absent; with several, the first one present.
+function pathinfo($path, $flags = 15) {
+    $path = (string)$path;
+    $out = [];
+    if (($flags & PATHINFO_DIRNAME) != 0 && $path !== "") { $out["dirname"] = __mec_dirname($path); }
+    $base = basename($path);
+    if (($flags & PATHINFO_BASENAME) != 0) { $out["basename"] = $base; }
+    $dot = strrpos($base, ".");
+    if (($flags & PATHINFO_EXTENSION) != 0 && $dot !== false) { $out["extension"] = substr($base, $dot + 1); }
+    if (($flags & PATHINFO_FILENAME) != 0) { $out["filename"] = $dot === false ? $base : substr($base, 0, $dot); }
+    if ($flags == 15) { return $out; }
+    foreach ($out as $v) { return $v; }
+    return "";
+}
 
 // ----- strings: replacing ----------------------------------------------------
 // One search string, every non-overlapping occurrence left to right; $ci folds

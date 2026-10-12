@@ -16,3 +16,7 @@ var_dump(chr(200));
 echo strlen(chr(200)), "\n";
 echo "a" . chr(0xE2) . chr(0x82), "\n";
 echo "\xC8\xFF", substr("é", 0, 1), "\n";
+// 'echo a, b, c' is one ZEND_ECHO per operand: a is written before b is
+// evaluated, so what b's evaluation writes lands between a and b.
+function bytesSide($s) { echo "[", $s, "]"; return $s; }
+echo "a", bytesSide("b"), "c\n";

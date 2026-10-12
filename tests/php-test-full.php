@@ -2790,6 +2790,61 @@ function s60() {
     check("aar1", s60same($l["k"], $o) && $l->log === "gk");
 }
 
+// ===== SECTION 61: magic methods in any case, ??= reads for isset, paths =====
+// Method names are case-insensitive, magic ones included.
+// '$t ??= e' fetches $t for isset (BP_VAR_IS: offsetExists before offsetGet at
+// every level), and only when that is null does e run and $t get walked again for
+// writing; every index on the path is evaluated once, before either walk. basename / dirname / pathinfo are php_basename and zend_dirname:
+// '/' is the separator and trailing slashes do not count.
+class S61S { public static $log = ""; public static $q; }
+class S61U { function __TOSTRING() { return "u"; } }
+class S61V { static function __CALLSTATIC($n, $a) { return $n . count($a); } }
+class S61W { function __GET($n) { return "g" . $n; } }
+class S61L implements ArrayAccess {
+    public $d = ["a" => 1, "n" => null];
+    public $log = "";
+    function offsetExists($k): bool { $this->log .= "e" . $k; return array_key_exists($k, $this->d); }
+    function offsetGet($k): mixed { $this->log .= "g" . $k; return $this->d[$k] ?? null; }
+    function offsetSet($k, $v): void { $this->log .= "s" . $k; $this->d[$k] = $v; }
+    function offsetUnset($k): void { unset($this->d[$k]); }
+}
+function s61k($k) { S61S::$log .= "k" . $k; return $k; }
+function s61() {
+    check("cim1", (string) new S61U === "u" && "x" . new S61U === "xu" && S61V::zz(1, 2) === "zz2"
+        && (new S61W)->foo === "gfoo");
+    $l = new S61L;
+    $r = [$l["a"] ??= 5, $l["z"] ??= 7, $l["n"] ??= 8];
+    check("caa1", $r === [1, 7, 8] && $l->log === "eagaezszengnsn" && $l->d["z"] === 7);
+    $l2 = new S61L;
+    $l2->d["s"] = new S61L;
+    $l2["s"]["k"] ??= 9;
+    $l2["s"]["k"] ??= 10;
+    check("caa3", $l2->log === "esgsgsesgs" && $l2->d["s"]->log === "ekskekgk" && $l2->d["s"]->d["k"] === 9);
+    $a = ["x" => 1];
+    $a[s61k("x")] ??= s61k("v");
+    $a[s61k("y")] ??= s61k("w");
+    $a[s61k("y")] .= "t";
+    $u ??= s61k("u");
+    $u ??= s61k("U");
+    S61S::${s61k("q")} ??= "z";
+    check("caa2", S61S::$log === "kxkykwkykukq" && $a === ["x" => 1, "y" => "wt"] && $u === "u"
+        && S61S::$q === "z");
+    check("pth1", basename("/etc/sudoers.d", ".d") === "sudoers" && basename("/etc/") === "etc"
+        && basename("/") === "" && basename(".d", ".d") === ".d" && basename("a/b.php/", ".php") === "b"
+        && dirname("/etc/passwd") === "/etc" && dirname("/etc/") === "/" && dirname("a") === "."
+        && dirname("") === "" && dirname("//a//b//") === "//a" && dirname("/usr/local/lib", 2) === "/usr"
+        && dirname("a/b/c", 9) === ".");
+    check("pth2", pathinfo("/www/inc/lib.inc.php") === ["dirname" => "/www/inc", "basename" => "lib.inc.php",
+            "extension" => "php", "filename" => "lib.inc"]
+        && pathinfo("") === ["basename" => "", "filename" => ""]
+        && pathinfo("/p/.test") === ["dirname" => "/p", "basename" => ".test", "extension" => "test", "filename" => ""]
+        && pathinfo("a.b", PATHINFO_EXTENSION) === "b" && pathinfo("ab", PATHINFO_EXTENSION) === ""
+        && pathinfo("/x/a.b", PATHINFO_FILENAME | PATHINFO_EXTENSION) === "b");
+    $e = "";
+    try { dirname("a", 0); } catch (ValueError $x) { $e = $x->getMessage(); }
+    check("pth3", $e === "dirname(): Argument #2 (\$levels) must be greater than or equal to 1");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2858,6 +2913,7 @@ function main() {
     s59(); // SECTION-CALL 59
     s59dump(); // SECTION-CALL 59
     s60(); // SECTION-CALL 60
+    s61(); // SECTION-CALL 61
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

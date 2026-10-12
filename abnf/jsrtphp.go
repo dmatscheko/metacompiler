@@ -379,12 +379,13 @@ func (rt *jsrt) phpStr(v interface{}) string {
 		return "Array"
 	}
 	if phpIsObj(v) {
-		// __toString, when the class declares one (php-interpreter.abnf's
-		// objToString); otherwise PHP raises, and the compiler prints the
-		// same placeholder the JS runtime would.
+		// __toString, found under its lower-cased name, when the class
+		// declares one (php-interpreter.abnf's objToString); otherwise PHP
+		// raises, and the compiler prints the same placeholder the JS
+		// runtime would.
 		if o, ok := v.(*jsObject); ok {
 			if cls, has := o.props["__class"]; has {
-				if m := phpClassFind(cls, "__toString"); m != nil {
+				if m := phpClassFind(cls, "__tostring"); m != nil {
 					return rt.phpStr(rt.call(m, jsUndef, []interface{}{v}))
 				}
 			}

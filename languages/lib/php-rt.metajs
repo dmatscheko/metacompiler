@@ -471,7 +471,7 @@ function phStr(v) {
     if (phIsObj(v)) {
         var cls = v["__class"]
         if (cls !== undefined) {
-            var mm = phClassFind(cls, "__toString")
+            var mm = phClassFind(cls, "__tostring")
             if (mm !== undefined) { return phStr(mm.apply(undefined, [v])) }
         }
         return "Object"
@@ -3202,7 +3202,7 @@ function js_phscall(target, name, self, args, lsb) {
     if (owner === undefined) {
         // __callStatic($name, $args) is PHP's fallback for a missing static
         // method, exactly as __call is for an instance method.
-        var cs = phOwner(cls, "__callStatic")
+        var cs = phOwner(cls, "__callstatic")
         if (cs === undefined) {
             phLsb = saved
             phRaise("Error", "Call to undefined method " + phStr(cls["__name"]) + "::" + phStr(name) + "()")
@@ -3218,7 +3218,7 @@ function js_phscall(target, name, self, args, lsb) {
             }
         }
         try {
-            out = cs["__callStatic"].apply(undefined, [self, name, ar])
+            out = cs["__callstatic"].apply(undefined, [self, name, ar])
         } finally {
             phLsb = saved
         }
