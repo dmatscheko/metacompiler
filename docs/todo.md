@@ -91,7 +91,7 @@ slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-436 csharp: record ToString; user extension vs applicable instance method · P2 · CS · OPEN [V spec-only]
+### T-436 csharp: record ToString; user extension vs applicable instance method · P2 · CS · IN PROGRESS (CS worker, round 25) [V spec-only]
 (a) `record P(int X, int Y)` prints `P`; C# synthesises `P { X = 1, Y = 2 }` (also record class/struct, nested records,
 inherited members first). (b) user extension methods: the compiler always prefers a same-named extension over an
 instance method (`csExt[s.name]` in foldCallMember); the interpreter prefers the instance method without an
@@ -125,7 +125,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-435 php: Traversable for user Iterators; var_dump of closures; Closure/Generator class_exists; ~bool/~null · P2 · PHP · OPEN [V]
+### T-435 php: Traversable for user Iterators; var_dump of closures; Closure/Generator class_exists; ~bool/~null · P2 · PHP · IN PROGRESS (PHP worker, round 24) [V]
 All engines: (a) a user class implementing Iterator fails `instanceof Traversable` and `is_subclass_of('It','Traversable')`
 (PHP true). (b) `var_dump(function(){})` prints NULL (PHP `object(Closure)#N (0) {}`). (c) `class_exists('Closure')`,
 `class_exists('Generator')` false. (d) `~true` / `~null` answer -2 / -1; PHP 8 throws "Cannot perform bitwise not on
