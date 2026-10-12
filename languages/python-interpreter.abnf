@@ -1129,6 +1129,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/python-suggest.js")
     // The fixed names dir() of a user class answers.
     include("lib/python-dir.js")
+    // Unicode printability: repr() of a str and str.isprintable().
+    include("lib/python-printable.js")
     // The module tables of the import statements.
     include("lib/python-import.js")
 
@@ -3275,17 +3277,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // becomes \xNN (below U+0100), \uNNNN (below U+10000) or \UNNNNNNNN.
     // Everything printable - "café" and an emoji included - is emitted literally.
     //
-    // "Printable" is Unicode's: NOT in the categories Cc Cf Cs Co Cn Zl Zp Zs,
-    // with U+0020 itself excepted. The Cn (UNASSIGNED) half of that needs the
-    // Unicode database, which nothing in this project carries, so pyReprEsc
-    // knows the CLOSED sets instead - C0/C1, the two Latin-1 strays U+00A0 and
-    // U+00AD, the separators, the format characters, the surrogates and the
-    // private-use planes - and leaves an unassigned code point literal. Every
-    // ASSIGNED character is exact, and the whole of Latin-1 (the only range
-    // \xNN can ever come from) is exact by construction.
-    //
-    // The same three functions are pyStrRepr / pyReprEsc / pyHexPad in
-    // languages/lib/python-rt.metajs and pyStrRepr / pyReprEsc in abnf/jsrt.go.
+    // "Printable" is pyIsPrintable in lib/python-printable.js. The same two
+    // functions are pyStrRepr / pyHexPad in languages/lib/python-rt.metajs and
+    // pyStrRepr in abnf/jsrt.go.
     function pyHexPad(v, n) {
         var digits = "0123456789abcdef"
         var out = ""
@@ -3298,34 +3292,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             i = i + 1
         }
         return out
-    }
-    function pyReprEsc(cp) {
-        if (cp < 32) { return true }
-        if (cp == 127) { return true }
-        if (cp >= 128 && cp <= 160) { return true }         // C1 plus U+00A0 NBSP
-        if (cp == 173) { return true }                      // U+00AD SOFT HYPHEN
-        if (cp < 256) { return false }
-        if (cp >= 1536 && cp <= 1541) { return true }       // U+0600..U+0605
-        if (cp == 1564 || cp == 1757 || cp == 1807) { return true }
-        if (cp == 2192 || cp == 2193 || cp == 2274) { return true }
-        if (cp == 5760 || cp == 6158) { return true }       // U+1680, U+180E
-        if (cp >= 8192 && cp <= 8207) { return true }       // U+2000..U+200F
-        if (cp >= 8232 && cp <= 8239) { return true }       // U+2028..U+202F
-        if (cp >= 8287 && cp <= 8303) { return true }       // U+205F..U+206F
-        if (cp == 12288) { return true }                    // U+3000
-        if (cp >= 55296 && cp <= 57343) { return true }     // surrogates (Cs)
-        if (cp >= 57344 && cp <= 63743) { return true }     // U+E000..U+F8FF (Co)
-        if (cp == 65279) { return true }                    // U+FEFF
-        if (cp >= 65529 && cp <= 65531) { return true }     // U+FFF9..U+FFFB
-        if (cp == 69821 || cp == 69837) { return true }     // U+110BD, U+110CD
-        if (cp >= 78896 && cp <= 78911) { return true }     // U+13430..U+1343F
-        if (cp >= 113824 && cp <= 113827) { return true }   // U+1BCA0..U+1BCA3
-        if (cp >= 119155 && cp <= 119162) { return true }   // U+1D173..U+1D17A
-        if (cp == 917505) { return true }                   // U+E0001
-        if (cp >= 917536 && cp <= 917631) { return true }   // U+E0020..U+E007F
-        if (cp >= 983040 && cp <= 1048573) { return true }  // U+F0000..U+FFFFD
-        if (cp >= 1048576 && cp <= 1114109) { return true } // U+100000..U+10FFFD
-        return false
     }
     function pyStrRepr(s) {
         var quote = "'"
@@ -3361,7 +3327,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (cp == 9) { out = out + "\\t" }
             else if (cp == 10) { out = out + "\\n" }
             else if (cp == 13) { out = out + "\\r" }
-            else if (!pyReprEsc(cp)) { out = out + ch }
+            else if (pyIsPrintable(cp)) { out = out + ch }
             else if (cp < 256) { out = out + "\\x" + pyHexPad(cp, 2) }
             else if (cp < 65536) { out = out + "\\u" + pyHexPad(cp, 4) }
             else { out = out + "\\U" + pyHexPad(cp, 8) }
@@ -5717,6 +5683,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "isdigit" || name == "isdecimal" || name == "isnumeric") { return true }
         if (name == "isalpha" || name == "isalnum" || name == "isspace") { return true }
         if (name == "islower" || name == "isupper" || name == "istitle" || name == "isascii") { return true }
+        if (name == "isprintable") { return true }
         if (name == "center" || name == "ljust" || name == "rjust" || name == "zfill") { return true }
         if (name == "expandtabs" || name == "encode") { return true }
         if (name == "partition" || name == "rpartition") { return true }
@@ -5955,6 +5922,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "isupper") { return pySCaseAll(s, true) }
         if (name == "istitle") { return pySIsTitle(s) }
         if (name == "isascii") { return pySIsAscii(s) }
+        if (name == "isprintable") { return pyStrIsPrintable(s) }
 
         if (name == "center") { return pySCenter(s, pySIntArg(args, 0, 0, false), pySFillArg(args, 1)) }
         if (name == "ljust") { return pySJust(s, pySIntArg(args, 0, 0, false), pySFillArg(args, 1), false) }

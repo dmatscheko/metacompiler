@@ -5972,6 +5972,27 @@ def s113():
     check("sur1", repr(chr(0xd800)) == "'\\ud800'" and repr("a" + chr(0xdfff) + "b") == "'a\\udfffb'"
           and len(chr(0xdc00)) == 1 and ord(chr(0xdbff)) == 0xdbff)
 
+# ===== SECTION 114: Unicode printability in repr and str.isprintable =====
+# A code point is printable unless its category is Cc, Cf, Cs, Co, Cn, Zl, Zp,
+# or Zs other than U+0020; repr escapes every other one, so an UNASSIGNED code
+# point (Cn) escapes too, and str.isprintable asks the same question of every
+# code point ("" is True). The code points come out of an array so no constant
+# folder answers. Rows from CPython 3.14 (Unicode 16.0.0).
+def s114():
+    cps = [0xd7ff, 0x378, 0x1fffe, 0xe0100, 0x1f600, 0x20ac, 0xa0, 0xd800, 0x10ffff, 0x30000, 0x2fa1e, 0x9]
+    ch = [chr(c) for c in cps]
+    check("upr1", repr(ch[0]) == "'\\ud7ff'" and repr(ch[1]) == "'\\u0378'"
+          and repr(ch[2]) == "'\\U0001fffe'" and repr(ch[8]) == "'\\U0010ffff'"
+          and repr(ch[10]) == "'\\U0002fa1e'")
+    check("upr2", repr(ch[3]) == "'" + ch[3] + "'" and repr(ch[4]) == "'" + ch[4] + "'"
+          and repr(ch[9]) == "'" + ch[9] + "'")
+    check("upr3", repr("a" + ch[1] + "é" + ch[2]) == "'a\\u0378é\\U0001fffe'")
+    check("upr4", "".isprintable() and "a b".isprintable() and (ch[4] + ch[5] + ch[3]).isprintable()
+          and ch[9].isprintable())
+    check("upr5", not ch[0].isprintable() and not ch[1].isprintable() and not ch[6].isprintable()
+          and not ch[7].isprintable() and not ch[8].isprintable() and not ("ok" + ch[11]).isprintable()
+          and not ("ok" + ch[2]).isprintable())
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -6083,5 +6104,6 @@ def main():
     s111() # SECTION-CALL 111
     s112() # SECTION-CALL 112
     s113() # SECTION-CALL 113
+    s114() # SECTION-CALL 114
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

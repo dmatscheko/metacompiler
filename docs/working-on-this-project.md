@@ -1033,6 +1033,9 @@ python-suggest.js         <- python-rt.metajs, python interpreter (the "Did you
 python-dir.js             <- python-rt.metajs, python interpreter (the fixed
                              names dir() of a user class answers; Go twin:
                              pyDirObject in abnf/jsrt.go)
+python-printable.js       <- python-rt.metajs, python interpreter (Unicode
+                             printability for repr() and str.isprintable(); Go
+                             twin: abnf/pyprintable.go)
 java-chars.js             <- java-rt.metajs, java interpreter, csharp-rt.metajs,
                              csharp interpreter (Go twin: abnf/jsrtjavachars.go)
 java-strings.js           <- java-rt.metajs, java interpreter (String's methods

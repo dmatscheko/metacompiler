@@ -3607,57 +3607,13 @@ func (rt *jsrt) pySliceRange(lo, hi interface{}, n int) (int, int) {
 	return from, to
 }
 
-// pyReprEsc answers whether a code point must be ESCAPED by repr(). "Printable"
-// is Unicode's: NOT in the categories Cc Cf Cs Co Cn Zl Zp Zs, with U+0020
-// itself excepted. The Cn (UNASSIGNED) half of that needs the Unicode database,
-// which nothing in this project carries, so this knows the CLOSED sets instead -
-// C0/C1, the two Latin-1 strays U+00A0 and U+00AD, the separators, the format
-// characters, the surrogates and the private-use planes - and leaves an
-// unassigned code point literal. Every ASSIGNED character is exact, and the
-// whole of Latin-1 (the only range \xNN can ever come from) is exact by
-// construction. Same table as pyReprEsc in languages/python-interpreter.abnf and
-// languages/lib/python-rt.metajs.
-func pyReprEsc(cp rune) bool {
-	switch {
-	case cp < 0x20, cp == 0x7f:
-		return true
-	case cp >= 0x80 && cp <= 0xa0, cp == 0xad: // C1, NBSP, SOFT HYPHEN
-		return true
-	case cp < 0x100:
-		return false
-	case cp >= 0x600 && cp <= 0x605, cp == 0x61c, cp == 0x6dd, cp == 0x70f:
-		return true
-	case cp == 0x890, cp == 0x891, cp == 0x8e2:
-		return true
-	case cp == 0x1680, cp == 0x180e:
-		return true
-	case cp >= 0x2000 && cp <= 0x200f, cp >= 0x2028 && cp <= 0x202f:
-		return true
-	case cp >= 0x205f && cp <= 0x206f, cp == 0x3000:
-		return true
-	case cp >= 0xd800 && cp <= 0xdfff, cp >= 0xe000 && cp <= 0xf8ff:
-		return true
-	case cp == 0xfeff, cp >= 0xfff9 && cp <= 0xfffb:
-		return true
-	case cp == 0x110bd, cp == 0x110cd, cp >= 0x13430 && cp <= 0x1343f:
-		return true
-	case cp >= 0x1bca0 && cp <= 0x1bca3, cp >= 0x1d173 && cp <= 0x1d17a:
-		return true
-	case cp == 0xe0001, cp >= 0xe0020 && cp <= 0xe007f:
-		return true
-	case cp >= 0xf0000 && cp <= 0xffffd, cp >= 0x100000 && cp <= 0x10fffd:
-		return true
-	}
-	return false
-}
-
 // pyStrRepr is CPython's unicode_repr. The quote is ' unless the string holds a
 // ' and no " (then it is "), so repr("it's") reads "it's" while
 // repr(`both ' and "`) reads 'both \' and "'. Inside, the quote in force and a
 // backslash DOUBLE UP, \t \n \r have their short forms, and every other
 // non-printable code point becomes \xNN (below U+0100), \uNNNN (below U+10000)
-// or \UNNNNNNNN. Everything printable - "café" and an emoji included - is
-// emitted literally. It is pyStrRepr in languages/python-interpreter.abnf and
+// or \UNNNNNNNN. Everything printable (pyIsPrintable) - "café" and an emoji
+// included - is emitted literally. It is pyStrRepr in languages/python-interpreter.abnf and
 // languages/lib/python-rt.metajs, one for one.
 func pyStrRepr(s string) string {
 	quote := "'"
@@ -3682,7 +3638,7 @@ func pyStrRepr(s string) string {
 			out += "\\n"
 		case r == '\r':
 			out += "\\r"
-		case !pyReprEsc(r):
+		case pyIsPrintable(r):
 			out += string(r)
 		case r < 0x100:
 			out += fmt.Sprintf("\\x%02x", r)

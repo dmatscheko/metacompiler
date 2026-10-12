@@ -1120,7 +1120,7 @@ func pysIsStrMethod(name string) bool {
 		"split", "rsplit", "splitlines", "join", "replace",
 		"find", "rfind", "index", "rindex", "count", "startswith", "endswith",
 		"isdigit", "isdecimal", "isnumeric", "isalpha", "isalnum", "isspace",
-		"islower", "isupper", "istitle", "isascii",
+		"islower", "isupper", "istitle", "isascii", "isprintable",
 		"center", "ljust", "rjust", "zfill", "expandtabs", "encode",
 		"partition", "rpartition", "removeprefix", "removesuffix",
 		"format", "format_map":
@@ -1420,6 +1420,8 @@ func (e *pyStrEnv) call(s, name string, args []interface{}, kw interface{}) inte
 		return e.isTitle(s)
 	case "isascii":
 		return e.isAscii(s)
+	case "isprintable":
+		return pyStrIsPrintable(s)
 
 	case "center":
 		return e.center(s, e.intArg(args, 0, 0, false), e.fillArg(args, 1))
