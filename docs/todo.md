@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-456** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-457** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -85,14 +85,14 @@ here as P3: `time` (needs a host clock in runtime.c), re flags as RegexFlag (nee
 
 # JV — Java
 
-### T-453 java: java.util.Arrays; fail-fast iterators; fmt1-3 vs real java · P2 · JV · IN PROGRESS (JV worker, round 14) [V]
-javac/java 24: (a) `java.util.Arrays` is absent in all engines ("variable not defined: Arrays"): toString, sort, fill,
-asList, copyOf, copyOfRange, equals, stream basics. (b) ArrayList's iterator is not fail-fast: iterator, clear(), add(5),
-next() returns 5; java 24 throws ConcurrentModificationException (no modCount in ArrayListItr). (c) `java
-tests/java-test-full.java` under java 24 reports FAIL fmt1/fmt2/fmt3 (locale-dependent; earlier runs used
--Duser.language=en -Duser.country=US) — confirm the assertions are right under an en_US locale and note the oracle
-command in the file header. (d) arraycopy of int[] into Object[] succeeds (java: ArrayStoreException); the value model
-has no element types — DECLINE unless cheap.
+### T-456 java: instanceof on boxed primitives; wrapper members; array clone(); streams · P1 · JV · IN PROGRESS (JV worker, round 15) [V]
+javac/java 24: (a) instanceof on boxes is wrong and diverges between halves: probe `{3,"b",2.5,'c',7L,true,1.5f,(short)2,
+(byte)1}` classified N/S/D/C/L/B/F/N/N gives java `NSDCLBFNN`, interp `DS???B???`, llvm.Run/native `DS?C?B???`
+(`Object o = 3; o instanceof Double` is true) — shared rtIsType / isTypeName. Silent wrong answer + half divergence.
+(b) `Number.doubleValue()/longValue()` on an Object, `Character.compare`/`Boolean.compare`, `Character.valueOf`,
+`Boolean.TRUE` missing. (c) array `clone()` unsupported (JLS 10.7). (d) java.util.stream: Arrays.stream, IntStream
+(range, sum, map, filter, boxed), Stream (of, map, filter, collect, forEach, reduce, sorted, count), Collectors (toList,
+joining, groupingBy, counting), OptionalInt — may be PARTIAL. Declined: ArrayStoreException (no element types).
 
 ---
 
@@ -501,6 +501,7 @@ T-445 core: literal cache home slot by multiplicative hash, hits migrate home, f
 T-452 java: System.arraycopy in all engines; ArrayList shifts/grows/copies with it (1,700 remove(0)+add on 300 elements: 93.7G -> 2.8G native); clear() reallocates — DONE 3e47ce3b
 T-450 php: property visibility (instance + static, magic fallback), uninitialised typed properties, per-object magic recursion guards, by-reference ??= targets, property_exists, ?? with BP_VAR_IS magic — DONE d835b006
 T-449 python: json/itertools/functools/string/os.path/random (MT19937) written in Python, star imports, runtime modules unbound until imported, module-function keywords; time/RegexFlag/typing contents moved to T-455 — PARTIAL 558e0c91
+T-453 java: java.util.Arrays (no stream), wrapper compareTo, fail-fast ArrayList iterators (modCount), typed enhanced-for variables, fmt1-3 correct under en_US (oracle command in the header); ArrayStoreException DECLINED (no element types) — DONE 3b814d6d
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
