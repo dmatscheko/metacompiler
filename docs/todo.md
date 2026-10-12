@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-439** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-440** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -121,11 +121,11 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-435 php: Traversable for user Iterators; var_dump of closures; Closure/Generator class_exists; ~bool/~null · P2 · PHP · IN PROGRESS (PHP worker, round 24) [V]
-All engines: (a) a user class implementing Iterator fails `instanceof Traversable` and `is_subclass_of('It','Traversable')`
-(PHP true). (b) `var_dump(function(){})` prints NULL (PHP `object(Closure)#N (0) {}`). (c) `class_exists('Closure')`,
-`class_exists('Generator')` false. (d) `~true` / `~null` answer -2 / -1; PHP 8 throws "Cannot perform bitwise not on
-bool|null" — settle the exact type name from php-src (zend_operators.c) before changing.
+### T-439 php: SPL basics; `__FUNCTION__` in closures · P3 · PHP · OPEN [V]
+All engines: `class_implements()` undefined; `class_exists('ArrayIterator')` false (SPL is always available:
+ArrayIterator, ArrayObject, SplStack, SplObjectStorage, iterator_to_array over them). PHP 8.4+ `__FUNCTION__` inside a
+closure answers `{closure:...}`; ours answers the enclosing function. Known modelling limit, not a ticket: object
+`#ids` drift once PHP would reuse a freed handle.
 
 ---
 
@@ -473,6 +473,7 @@ T-434 csharp: tuple ToString, float/Single type object, BCL enum casts, extensio
 T-436 csharp: synthesized record ToString (positional, public fields/properties, base first); applicable instance method beats extension (count-only applicability; user PrintMembers and derived-of-ToString-base not modelled) — DONE 6ade117e
 T-431 python: explicit None no longer takes a default (compiled), attribute hooks, own-attribute delete + delattr, GenericAlias repr, unions of values, exact 0/±1 powers, sys digit limit — DONE 6ea7f2a6
 T-432 python: big-int <-> bits 16 at a time (hex(10**4300) native 29.8s -> 0.7s); java StringBuilder part moved to T-438 — DONE 44e2ba60
+T-435 php: engine interfaces extend Traversable/UnitEnum/Stringable, Closure/Generator as classes, ~bool/~null TypeErrors, PHP 8.4 closure var_dump layout, *RECURSION* guard — DONE 3bd31a96
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
