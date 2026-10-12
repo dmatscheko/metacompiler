@@ -457,6 +457,10 @@ func csConvTo(rt *jsrt, v interface{}, w uint8, u bool) interface{} {
 		}
 		return csNorm(p, w, u)
 	}
+	// A BCL enum member converts to its underlying int (ECMA-334 10.3.3).
+	if b, isEnum := csxIsEnumBox(v); isEnum {
+		v = b.props["v"]
+	}
 	return csNorm(giVal(rt, v), w, u)
 }
 
@@ -561,9 +565,18 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 		return o
 	}
 	// double.Parse / double.TryParse: csxParseDouble over the string; TryParse's
-	// out argument is a reference box, written 0 on a failure. Twins: the double
-	// type object in csharp-interpreter.abnf and lib/csharp-rt.metajs.
-	if name == "double" || name == "Double" {
+	// out argument is a reference box, written 0 on a failure. float (System.Single)
+	// is the same type object over binary32: its parse result is rounded to float and
+	// its constants are the binary32 ones. Twins: csFloatTypeObj in
+	// csharp-interpreter.abnf and csTypeObject in lib/csharp-rt.metajs.
+	if name == "double" || name == "Double" || name == "float" || name == "Single" {
+		f32 := name == "float" || name == "Single"
+		box := func(f float64) jsJFlo {
+			if f32 {
+				return jsJFlo{f: jvmFround(f), sty: floCSF}
+			}
+			return jsJFlo{f: f, sty: floCS}
+		}
 		o.set("Parse", jsHostFunc("Parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			v := argAt(args, 0)
 			if isUndefOrNull(v) {
@@ -573,7 +586,7 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 			if !ok {
 				rt.csThrow("FormatException", "The input string was not in a correct format.")
 			}
-			return jsJFlo{f: f, sty: floCS}
+			return box(f)
 		}))
 		o.set("TryParse", jsHostFunc("TryParse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			f, ok := 0.0, false
@@ -583,15 +596,15 @@ func (rt *jsrt) csTypeObject(name string) *jsObject {
 					f = 0
 				}
 			}
-			if box, isObj := argAt(args, 1).(*jsObject); isObj {
-				rt.call(box.props["wb"], jsUndef, []interface{}{jsJFlo{f: f, sty: floCS}})
+			if ref, isObj := argAt(args, 1).(*jsObject); isObj {
+				rt.call(ref.props["wb"], jsUndef, []interface{}{box(f)})
 			}
 			return ok
 		}))
 		// Its constants and IsNaN / IsInfinity / ...: csmDoubleConst and
 		// csmDoubleIs in abnf/jsrtcsmath.go.
 		for _, c := range csmDoubleConstNames {
-			o.set(c, jsJFlo{f: csmDoubleConst(c), sty: floCS})
+			o.set(c, box(csmDoubleConst(c, f32)))
 		}
 		for _, c := range csmDoubleIsNames {
 			c := c
@@ -1696,6 +1709,20 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 	// KeyValuePair<TKey,TValue>.ToString(): "[key, value]".
 	if csxIsKvp(o) {
 		return "[" + rt.cspRender(o.props["Key"], depth+1) + ", " + rt.cspRender(o.props["Value"], depth+1) + "]", true
+	}
+	// ValueTuple.ToString(): "(" + the items joined by ", " + ")". Twin of csTupStr in
+	// languages/csharp-interpreter.abnf, where the citation lives.
+	if n, isTup := o.props["__tuple"]; isTup {
+		var sb strings.Builder
+		sb.WriteString("(")
+		for i := 0; i < int(rt.toNumber(n)); i++ {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(rt.cspRender(o.props[fmt.Sprintf("Item%d", i+1)], depth+1))
+		}
+		sb.WriteString(")")
+		return sb.String(), true
 	}
 	// A user ToString() override wins over every built-in rendering, exactly as
 	// the virtual System.Object.ToString() does in C#.

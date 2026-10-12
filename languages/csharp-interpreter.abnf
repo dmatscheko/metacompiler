@@ -1763,32 +1763,34 @@ KwLet       = "let" KwEnd ;
     hostGlobals["String"] = hostGlobals["string"]
     // double.Parse / double.TryParse read a string as csxParseDouble in
     // lib/csharp-strings.js does. TryParse's out argument is a reference box
-    // (csRefArg), written 0 on a failure. Twins: csTypeObject in
-    // lib/csharp-rt.metajs and abnf/jsrtcsharp.go.
-    function csDoubleParse(s) {
-        if (s === null || s === undefined) { csThrowExc("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
-        var f = anytype
-        f = csxParseDouble("" + s)
-        if (f === null) { csThrowExc("FormatException", "The input string was not in a correct format.") }
-        return csFlo(f)
-    }
-    function csDoubleTryParse(s, box) {
-        var f = anytype
-        f = null
-        if (typeof s == "string") { f = csxParseDouble(s) }
-        box.wb(csFlo(f === null ? 0 : f))
-        return f !== null
-    }
-    // Its constants and IsNaN / IsInfinity / ...: csmDoubleConst and csmDoubleIs in
-    // lib/csharp-math.js.
-    var csDoubleT = {Parse: csDoubleParse, TryParse: csDoubleTryParse}
+    // (csRefArg), written 0 on a failure. float (System.Single) is the same type object
+    // over binary32: Parse rounds to float and the constants are the binary32 ones.
+    // Twins: csTypeObject in lib/csharp-rt.metajs and abnf/jsrtcsharp.go.
     function csDoubleIsFn(n) { return function(x) { return csmDoubleIs(n, csxkDbl(x)) } }
-    var csDblNames = csmDoubleConstNames()
-    for (var cdi = 0; cdi < csDblNames.length; cdi++) { csDoubleT[csDblNames[cdi]] = {__flo: csmDoubleConst(csDblNames[cdi])} }
-    csDblNames = csmDoubleIsNames()
-    for (var cdj = 0; cdj < csDblNames.length; cdj++) { csDoubleT[csDblNames[cdj]] = csDoubleIsFn(csDblNames[cdj]) }
-    hostGlobals["double"] = csDoubleT
-    hostGlobals["Double"] = hostGlobals["double"]
+    function csFloatTypeObj(f32) {
+        var o = {}
+        o["Parse"] = function(s) {
+            if (s === null || s === undefined) { csThrowExc("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
+            var f = anytype
+            f = csxParseDouble("" + s)
+            if (f === null) { csThrowExc("FormatException", "The input string was not in a correct format.") }
+            return csFloRes(f, f32)
+        }
+        o["TryParse"] = function(s, box) {
+            var f = anytype
+            f = null
+            if (typeof s == "string") { f = csxParseDouble(s) }
+            box.wb(csFloRes(f === null ? 0 : f, f32))
+            return f !== null
+        }
+        // Its constants and IsNaN / IsInfinity / ...: csmDoubleConst and csmDoubleIs in
+        // lib/csharp-math.js.
+        var names = csmDoubleConstNames()
+        for (var i = 0; i < names.length; i++) { o[names[i]] = csFloRes(csmDoubleConst(names[i], f32), f32) }
+        names = csmDoubleIsNames()
+        for (var j = 0; j < names.length; j++) { o[names[j]] = csDoubleIsFn(names[j]) }
+        return o
+    }
 
     // The class whose body is currently being built (for base calls), and the stack that
     // restores the outer name when a nested class ends.
@@ -1854,6 +1856,10 @@ KwLet       = "let" KwEnd ;
         return csIsF32(l) || csIsF32(r)
     }
     function csFloRes(f, f32) { return f32 ? csFlo32(f) : csFlo(f) }
+    hostGlobals["double"] = csFloatTypeObj(false)
+    hostGlobals["float"] = csFloatTypeObj(true)
+    hostGlobals["Single"] = hostGlobals["float"]
+    hostGlobals["Double"] = hostGlobals["double"]
     // THE SIGN OF A ZERO PRODUCT OR QUOTIENT, put back by hand. The tag engine
     // keeps an integral value as an INTEGER, so `-14447655.0 * 0.0` would come
     // back +0 where IEEE-754 says -0.0 (the `x * 0` trap of
@@ -2074,6 +2080,10 @@ KwLet       = "let" KwEnd ;
             else { p = i64FromNum(csTruncF(n)) }
             return csNorm(p, w, u)
         }
+        // A BCL enum member converts to its underlying int (ECMA-334 10.3.3, the
+        // explicit enumeration conversions). Twin of csConvTo in abnf/jsrtcsharp.go
+        // and lib/csharp-rt.metajs.
+        if (csxIsEnumBox(v)) { return csNorm(i64FromNum(v["v"]), w, u) }
         var q = szIs(v) ? v.p : i64FromNum(csNumD(v))
         return csNorm(q, w, u)
     }
@@ -2577,6 +2587,17 @@ KwLet       = "let" KwEnd ;
         }
         return undefined
     }
+    // ValueTuple.ToString() is "(" + each item's ToString() joined by ", " + ")": the
+    // element NAMES do not appear, a nested tuple recurses, and a null item contributes
+    // the empty string (System.ValueTuple`N.ToString, BCL).
+    function csTupStr(v, d) {
+        var s = "("
+        for (var i = 0; i < v.__tuple; i++) {
+            if (i > 0) { s = s + ", " }
+            s = s + csStrD(v["Item" + (i + 1)], d + 1)
+        }
+        return s + ")"
+    }
     function csStr(v) { return csStrD(v, 0) }
     function csStrD(v, d) {
         if (d > 32) return "..."
@@ -2591,6 +2612,7 @@ KwLet       = "let" KwEnd ;
         if (typeof v == "object" && v.__sz === true) return szStr(v)
         if (Array.isArray(v)) return csArrayName(v)
         if (csxIsKvp(v)) return "[" + csStrD(v.Key, d + 1) + ", " + csStrD(v.Value, d + 1) + "]"
+        if (csIsTuple(v)) return csTupStr(v, d)
         if (csxIsEnumBox(v)) return csxEnumStr(v)
         if (typeof v == "object") {
             var m = csFindToStr(v)
@@ -3105,7 +3127,22 @@ KwLet       = "let" KwEnd ;
             // only: a bare c[name] resolved inherited Object.prototype members
             // (toString, valueOf, ...) under a host JS engine.
             var m = undefined
-            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
+            var mc = undefined
+            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) {
+                if (hasOwn(c, name)) {
+                    m = c[name]
+                    mc = c
+                }
+            }
+            // A method group with no member accepting this many arguments is not
+            // applicable, so a user IEnumerable<T> falls through to the Enumerable
+            // extension (csxSigsAccept). __msig on the declaring class lists the whole
+            // candidate set, inherited ones included. Twin of csEmitInstOrExt in
+            // csharp-to-llvm-ir.abnf.
+            if (typeof m == "function" && mc.__msig != undefined && hasOwn(mc.__msig, name)
+                && !csxSigsAccept(mc.__msig[name].sigs, args.length) && csqIsUserSeq(target)) {
+                return csqMethod(target, name, args)
+            }
             if (typeof m != "function") {
                 // A DELEGATE FIELD called like a method: `this.E(5)` and `k.E(5)` parse
                 // as method calls, and C# resolves the invocation against the field's

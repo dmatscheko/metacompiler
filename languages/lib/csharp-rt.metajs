@@ -585,6 +585,8 @@ function csConvTo(v, w, u) {
         if (n < 0 - 9223372036854775808) { return csNorm(rtjMinL(), w, u) }
         return csNorm(csFromDouble(Math.trunc(n)), w, u)
     }
+    // A BCL enum member converts to its underlying int (ECMA-334 10.3.3).
+    if (csxIsEnumBox(v)) { return csNorm(v["v"], w, u) }
     return csNorm(v, w, u)
 }
 
@@ -802,8 +804,8 @@ function cpRender(v, depth) {
 }
 
 // The Go twin's fallthrough for an object shape it does not know is rt.toString,
-// which is JavaScript's "[object Object]" - a Dictionary and a tuple land here, and
-// both halves already agreed there.
+// which is JavaScript's "[object Object]" - a Dictionary lands here, and both halves
+// already agreed there.
 function cpPlainObj(o) { return "[object Object]" }
 
 // cpObjStr renders the object shapes the two C# grammars build, and answers
@@ -812,6 +814,16 @@ function cpObjStr(o, depth) {
     if (csxIsEnumBox(o)) { return csxEnumStr(o) }
     // KeyValuePair<TKey,TValue>.ToString(): "[key, value]".
     if (csxIsKvp(o)) { return "[" + cpRender(o["Key"], depth + 1) + ", " + cpRender(o["Value"], depth + 1) + "]" }
+    // ValueTuple.ToString(). Twin of csTupStr in languages/csharp-interpreter.abnf.
+    if (o["__tuple"] !== undefined) {
+        var n = o["__tuple"]
+        var s = "("
+        for (var i = 0; i < n; i++) {
+            if (i > 0) { s = s + ", " }
+            s = s + cpRender(o["Item" + (i + 1)], depth + 1)
+        }
+        return s + ")"
+    }
     // A user ToString() override wins over every built-in rendering, exactly as the
     // virtual System.Object.ToString() does in C#.
     // The __class/__super walk is SHARED - rtFindMethod, lib/runtime.metajs.
@@ -1211,22 +1223,30 @@ function csParseInt(s, w, u) {
 }
 
 // double.Parse / double.TryParse: csxParseDouble (lib/csharp-strings.js) over the
-// string; TryParse's out argument is a reference box, written 0 on a failure.
-// Twins: the double type object in csharp-interpreter.abnf and csTypeObject in
-// abnf/jsrtcsharp.go.
-function csDoubleParse(s) {
-    if (s === null || s === undefined) { csThrow("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
-    var f = anytype
-    f = csxParseDouble(cpStr(s))
-    if (f === null) { csThrow("FormatException", "The input string was not in a correct format.") }
+// string; TryParse's out argument is a reference box, written 0 on a failure. float
+// (System.Single) is the same type object over binary32 (csFloBox). Twins:
+// csFloatTypeObj in csharp-interpreter.abnf and csTypeObject in abnf/jsrtcsharp.go.
+function csFloBox(f, f32) {
+    if (f32) { return flo(rtF32Round(f), 5) }
     return flo(f, 2)
 }
-function csDoubleTryParse(s, box) {
-    var f = anytype
-    f = null
-    if (typeof s == "string") { f = csxParseDouble(s) }
-    js_csrefwr(box, flo(f === null ? 0 : f, 2))
-    return f !== null
+function csDoubleParseFn(f32) {
+    return function(s) {
+        if (s === null || s === undefined) { csThrow("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
+        var f = anytype
+        f = csxParseDouble(cpStr(s))
+        if (f === null) { csThrow("FormatException", "The input string was not in a correct format.") }
+        return csFloBox(f, f32)
+    }
+}
+function csDoubleTryParseFn(f32) {
+    return function(s, box) {
+        var f = anytype
+        f = null
+        if (typeof s == "string") { f = csxParseDouble(s) }
+        js_csrefwr(box, csFloBox(f === null ? 0 : f, f32))
+        return f !== null
+    }
 }
 
 function csDoubleIsFn(n) { return function(x) { return csmDoubleIs(n, rtjNum(x)) } }
@@ -1247,14 +1267,15 @@ function csTypeObject(name0) {
         o["__cstype"] = "string"
         return o
     }
-    if (name0 == "double" || name0 == "Double") {
-        o["Parse"] = csDoubleParse
-        o["TryParse"] = csDoubleTryParse
+    if (name0 == "double" || name0 == "Double" || name0 == "float" || name0 == "Single") {
+        var f32 = name0 == "float" || name0 == "Single"
+        o["Parse"] = csDoubleParseFn(f32)
+        o["TryParse"] = csDoubleTryParseFn(f32)
         // Its constants and IsNaN / IsInfinity / ...: lib/csharp-math.js.
         var cn = csmDoubleConstNames()
         var i = 0
         while (i < cn.length) {
-            o[cn[i]] = flo(csmDoubleConst(cn[i]), 2)
+            o[cn[i]] = csFloBox(csmDoubleConst(cn[i], f32), f32)
             i = i + 1
         }
         cn = csmDoubleIsNames()

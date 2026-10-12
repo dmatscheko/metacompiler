@@ -3665,6 +3665,58 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s59d2", dz == "zr");
         }
 
+        // ===== SECTION 60: tuple ToString, the float type, BCL enum casts, instance vs extension =====
+        //
+        // ValueTuple.ToString is "(" + each item's ToString joined by ", " + ")": the
+        // element names do not print, a nested tuple recurses and a null item is empty.
+        // float (System.Single) carries the binary32 MaxValue / Epsilon / NaN and a
+        // Parse that answers a float. An explicit cast of a BCL enum member is its
+        // underlying value (ECMA-334 10.3.3): StringComparison.Ordinal is 4,
+        // StringSplitOptions.RemoveEmptyEntries 1, MidpointRounding.ToPositiveInfinity
+        // 4. An instance method group with no member taking the call's argument count
+        // is not applicable, so `w.Count(pred)` on a class declaring only `Count()`
+        // is Enumerable.Count (12.8.10.2). No C# toolchain here: the values follow the
+        // BCL docs.
+        class S60Words : IEnumerable<string>
+        {
+            string[] a;
+            public S60Words(string[] a) { this.a = a; }
+            public int Count() { return a.Length * 100; }
+            public IEnumerator<string> GetEnumerator() { foreach (string s in a) { yield return s; } }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() { return GetEnumerator(); }
+        }
+        class S60More : S60Words
+        {
+            public S60More(string[] a) : base(a) { }
+            public int Count(Func<string, bool> p) { return -1; }
+        }
+        static void S60()
+        {
+            int[] n = { 1, 2, -17, 5 };
+            string nul = null;
+            var t = (n[0], n[1]);
+            var named = (lo: n[3], hi: "x");
+            Program.Check("s60t1", t.ToString() == "(1, 2)" && "" + t == "(1, 2)" && $"{t}" == "(1, 2)" && "" + named == "(5, x)"
+                && "" + Math.DivRem(n[2], n[3]) == "(-3, -2)" && "" + ((n[0], n[1]), 3.5, 'c', true) == "((1, 2), 3.5, c, True)"
+                && "" + (n[0], nul) == "(1, )");
+            string[] fs = { "1.1", "2.5", "x" };
+            float f2;
+            Program.Check("s60f1", "" + float.MaxValue == "3.4028235E+38" && "" + float.MinValue == "-3.4028235E+38"
+                && "" + float.Epsilon == "1E-45" && float.IsNaN(float.NaN) && "" + Single.MaxValue == "3.4028235E+38"
+                && float.Parse(fs[0]) == 1.1f && "" + (double)float.Parse(fs[0]) == "1.100000023841858"
+                && float.TryParse(fs[1], out f2) && f2 == 2.5f && !float.TryParse(fs[2], out f2) && float.IsInfinity(float.MaxValue * n[1]));
+            var mr = MidpointRounding.AwayFromZero;
+            Program.Check("s60e1", (int)StringComparison.Ordinal == 4 && (int)StringSplitOptions.RemoveEmptyEntries == 1
+                && (int)MidpointRounding.ToPositiveInfinity == 4 && (long)StringComparison.OrdinalIgnoreCase == 5L
+                && (int)(StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) == 3 && (int)mr + n[0] == 2);
+            string[] ws = { "a", "tree", "house", "ox" };
+            var w = new S60Words(ws);
+            var m = new S60More(ws);
+            var l = new List<string>(ws);
+            Program.Check("s60x1", w.Count() == 400 && w.Count(s => s.Length > 3) == 2 && m.Count(s => s.Length > 3) == -1
+                && m.Count() == 400 && l.Count(s => s.Length > 1) == 3);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3726,6 +3778,7 @@ b";                                                   // verbatim keeps the newl
             Program.S57(); // SECTION-CALL 57
             Program.S58(); // SECTION-CALL 58
             Program.S59(); // SECTION-CALL 59
+            Program.S60(); // SECTION-CALL 60
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

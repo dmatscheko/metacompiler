@@ -300,7 +300,11 @@ var csmUnary = map[string]func(float64) float64{
 
 var csmDoubleConstNames = []string{"NaN", "PositiveInfinity", "NegativeInfinity", "Epsilon", "MaxValue", "MinValue"}
 
-func csmDoubleConst(name string) float64 {
+func csmDoubleConst(name string, f32 bool) float64 {
+	tiny, huge := math.SmallestNonzeroFloat64, math.MaxFloat64
+	if f32 {
+		tiny, huge = math.SmallestNonzeroFloat32, math.MaxFloat32
+	}
 	switch name {
 	case "NaN":
 		return math.NaN()
@@ -309,11 +313,11 @@ func csmDoubleConst(name string) float64 {
 	case "NegativeInfinity":
 		return math.Inf(-1)
 	case "Epsilon":
-		return math.SmallestNonzeroFloat64
+		return tiny
 	case "MaxValue":
-		return math.MaxFloat64
+		return huge
 	}
-	return -math.MaxFloat64
+	return -huge
 }
 
 var csmDoubleIsNames = []string{"IsNaN", "IsInfinity", "IsPositiveInfinity", "IsNegativeInfinity", "IsFinite"}

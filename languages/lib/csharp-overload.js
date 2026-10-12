@@ -79,6 +79,19 @@ function csxMore(ta, tb) {
     }
     return strict
 }
+// Does any candidate of a csCtorSigs list accept n arguments at all (its required
+// count up to its arity, or anything from a `params` tail's index on)? An instance
+// method group none of whose members does is not APPLICABLE, so C# goes on to the
+// extension methods (ECMA-334 12.8.10.2), which is how `seq.Count(pred)` reaches
+// Enumerable.Count on a class declaring only `Count()`.
+function csxSigsAccept(sigs, n) {
+    for (var i = 0; i < sigs.length; i++) {
+        var s = sigs[i]
+        if (s.va >= 0) { if (n >= s.va) { return true } }
+        else if (n >= s.req && n <= s.n) { return true }
+    }
+    return false
+}
 // The pass-1 order of a csCtorSigs list (both grammars build the same records:
 // tys, typed). The first `own` candidates are the receiver class' own and are
 // tried before the inherited rest, each part in its own order: an applicable

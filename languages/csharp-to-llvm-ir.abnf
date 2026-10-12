@@ -4357,6 +4357,12 @@ KwLet       = "let" KwEnd ;
     function emitCsMcall(b, recvV, name, argsV) {
         return {b: b, v: callExt(b, "js_csmcall", [recvV, emitStr(b, name), argsV])}
     }
+    // The ordinary dispatch of `recv.name(args)`: a name some class also uses for a
+    // field may be a delegate field invoked like a method.
+    function csEmitInstCall(b, recvV, name, argsV) {
+        if (csDataNames[name] === true) { return emitDelegFieldCall(b, recvV, name, argsV) }
+        return emitCsMcall(b, recvV, name, argsV)
+    }
     // '.HasValue' / '.Value' on a value that carries no such member: the nullable reading
     // (a null test, and the value itself). A real member of that name wins, so a user
     // class with a Value field keeps working; a null receiver takes the nullable reading.
@@ -4506,16 +4512,12 @@ KwLet       = "let" KwEnd ;
                         var dir = emitDelegCall(eai.b, cur, eai.v)
                         b = dir.b
                         cur = dir.v
-                    } else if (csDataNames[s.name] === true) {
-                        var ea3 = emitArgs(b, sfxArgs[i])
-                        b = ea3.b
-                        var dfr = emitDelegFieldCall(b, cur, s.name, ea3.v)
-                        b = dfr.b
-                        cur = dfr.v
                     } else {
-                        var ea2 = emitArgs(b, sfxArgs[i])
-                        b = ea2.b
-                        var cmr = emitCsMcall(b, cur, s.name, ea2.v)
+                        var cmr = csEmitInstOrExt(b, cur, s.name, sfxArgs[i])
+                        if (cmr == null) {
+                            var ea2 = emitArgs(b, sfxArgs[i])
+                            cmr = csEmitInstCall(ea2.b, cur, s.name, ea2.v)
+                        }
                         b = cmr.b
                         cur = cmr.v
                     }
@@ -6599,6 +6601,7 @@ KwLet       = "let" KwEnd ;
     // class' entry is complete before a class that extends it is read - the same
     // order the interpreter's descriptors are built in.
     var csMSig = {}
+    var csMSigCls = []
     function csNoteMethodSigs(clsName, members) {
         var tbl = {}
         var seen = {}
@@ -6637,6 +6640,51 @@ KwLet       = "let" KwEnd ;
             tbl[m.name] = {sigs: all, own: sigs.length, base: baseCls, statik: grp[0].statik}
         }
         csMSig[clsName] = tbl
+        csMSigCls.push(clsName)
+    }
+    // `recv.M(args)` where some class's INSTANCE group M has no member accepting this
+    // many arguments (csxSigsAccept): on an instance of such a class the group is not
+    // applicable and C# goes on to the extension methods, here Enumerable's
+    // (ECMA-334 12.8.10.2). There is no static receiver type, so the receiver's class
+    // is tested at run time - the accepting classes first, since a subclass may add an
+    // accepting overload - and anything else keeps the ordinary dispatch. null when no
+    // class's group rejects the count, which is the plain js_csmcall. Twin of the
+    // csxSigsAccept test in mcall0, csharp-interpreter.abnf.
+    function csEmitInstOrExt(b, recvV, name, argThunks) {
+        var acc = []
+        var rej = []
+        var i
+        for (i = 0; i < csMSigCls.length; i++) {
+            var e = csMSigOf(csMSigCls[i], name)
+            if (e == null || e.statik === true) { continue }
+            if (csxSigsAccept(e.sigs, argThunks.length)) { acc.push(csMSigCls[i]) } else { rej.push(csMSigCls[i]) }
+        }
+        if (rej.length == 0) { return null }
+        var ea = emitArgs(b, argThunks)
+        b = ea.b
+        var instB = curF.NewBlock("")
+        var extB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        var tests = acc.concat(rej)
+        for (i = 0; i < tests.length; i++) {
+            var nextB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [recvV, emitStr(b, tests[i])])),
+                        i < acc.length ? instB : extB, nextB)
+            b = nextB
+        }
+        b.NewBr(instB)
+        var ir = csEmitInstCall(instB, recvV, name, ea.v)
+        ir.b.NewBr(mergeB)
+        // Enumerable.M(recv, args...): the static form csqStatic reads.
+        var xargs = callExt(extB, "js_arr_new", [])
+        callExt(extB, "js_arr_push", [xargs, recvV])
+        for (i = 0; i < argThunks.length; i++) {
+            callExt(extB, "js_arr_push", [xargs, callExt(extB, "js_pyget", [ea.v, emitNum(extB, i)])])
+        }
+        var enumV = callExt(extB, "js_scope_get", [curScopeV, emitStr(extB, "Enumerable")])
+        var extV = callExt(extB, "js_csmcall", [enumV, emitStr(extB, name), xargs])
+        extB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ir.v, ir.b), llvm.ir.NewIncoming(extV, extB)])}
     }
     function csMSigOf(clsName, mname) {
         var t = csMSig[clsName]
@@ -7061,14 +7109,14 @@ KwLet       = "let" KwEnd ;
         var consoleV = callExt(b, "js_csconsole", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
         // The integral type NAMES as expression primaries, so `int.MaxValue` and
-        // `ulong.MaxValue` resolve, double for double.Parse / TryParse, and the BCL enums
+        // `ulong.MaxValue` resolve, double and float for Parse / TryParse, and the BCL enums
         // and comparers a String member takes, Enumerable, Math, MathF and MidpointRounding. ulong.MaxValue is 18446744073709551615, which
         // no double holds, so they arrive as runtime objects (js_cstype in
         // abnf/jsrtcsharp.go) rather than as emitted literals.
         var csTypeIdents = ["sbyte", "SByte", "byte", "Byte", "short", "Int16",
                             "ushort", "UInt16", "int", "Int32", "uint", "UInt32",
                             "long", "Int64", "ulong", "UInt64", "char", "Char", "string", "String",
-                            "double", "Double", "StringComparison", "StringSplitOptions",
+                            "double", "Double", "float", "Single", "StringComparison", "StringSplitOptions",
                             "NormalizationForm", "StringComparer", "Enumerable", "Math", "MathF",
                             "MidpointRounding"]
         for (var cti = 0; cti < csTypeIdents.length; cti++) {

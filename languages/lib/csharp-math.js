@@ -285,12 +285,14 @@ function csmUnary(name, d) {
 // System.Double's constants: NaN, the two infinities, Epsilon (the least
 // positive subnormal, 2^-1074) and MaxValue / MinValue (+-(2^53 - 1) * 2^971).
 function csmDoubleConstNames() { return ["NaN", "PositiveInfinity", "NegativeInfinity", "Epsilon", "MaxValue", "MinValue"] }
-function csmDoubleConst(name) {
+// System.Single's (f32) are the binary32 extremes: Epsilon 2^-149, MaxValue
+// (2^24-1)*2^104.
+function csmDoubleConst(name, f32) {
     if (name == "NaN") { return 0 / 0 }
     if (name == "PositiveInfinity") { return Math.pow(2, 1024) }
     if (name == "NegativeInfinity") { return 0 - Math.pow(2, 1024) }
-    if (name == "Epsilon") { return Math.pow(2, 0 - 1074) }
-    var m = (Math.pow(2, 53) - 1) * Math.pow(2, 971)
+    if (name == "Epsilon") { return f32 ? Math.pow(2, 0 - 149) : Math.pow(2, 0 - 1074) }
+    var m = f32 ? (Math.pow(2, 24) - 1) * Math.pow(2, 104) : (Math.pow(2, 53) - 1) * Math.pow(2, 971)
     return name == "MaxValue" ? m : 0 - m
 }
 // System.Double's classification members, each of one double.
