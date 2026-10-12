@@ -1101,27 +1101,50 @@ long mk_str(const char *p, long n) {
 }
 /* js_str_mem is called once per evaluation of every string literal, so the
  * (pointer, length) pair is cached - the same thing abnf/jsrt.go's strMemCache
- * does.
- *
- * NOT DIRECT-MAPPED ON `p >> 3`: string literals are laid out CONTIGUOUSLY in
- * the module, most of them a handful of bytes long, so `p >> 3` would map every
- * literal inside an eight-byte window onto the same slot and thrash, and each
- * miss is a fresh string cell plus a fresh byte buffer. Open addressing on the
- * low pointer bits with linear probing and NO eviction gives exactly one
+ * does. Open addressing with linear probing and NO eviction gives exactly one
  * allocation per distinct literal for the lifetime of the program. The probe is
  * bounded, so a table that somehow fills degrades to allocating instead of
- * looping. */
+ * looping.
+ *
+ * THE HOME SLOT IS A MULTIPLICATIVE HASH of the address (bits 19..31 of
+ * k * 2654435761, Knuth's 2^32/phi). Literals sit contiguously in each module,
+ * a few bytes apart, so a hash that keeps the low address bits maps a whole
+ * module onto one band of slots, and the bands of runtime.c, layer 2 and the
+ * program overlap wherever their addresses happen to fall: a hot literal then
+ * probes dozens of slots on every call, and how many depends on the link
+ * layout.
+ *
+ * A HIT AFTER PROBING TAKES OVER ITS HOME SLOT, so a literal a loop evaluates
+ * is found by str_intern's one compare from its second lookup on, whatever was
+ * inserted first; only two hot literals with the same home keep trading the
+ * slot. That is sound for linear probing without deletion: the entry it
+ * displaces lands further along the same unbroken run it was in, so its own
+ * probe from its home still reaches it. */
 long SMC_PTR[8192];
 long SMC_LEN[8192];
 long SMC_VAL[8192];
 
-long str_intern(const char *p, long n) {
+/* The lookup when the literal is not in its home slot: the probe, the takeover
+ * of the home slot, the insertion. Kept out of str_intern so the hit at home
+ * is a leaf with no frame to build. */
+long smc_miss(const char *p, long n, long home) {
 	long k = (long)p;
-	long slot = (k ^ (k >> 13) ^ (k >> 26)) & 8191;
+	long slot = home;
 	long probes = 0;
 	long h;
 	while (SMC_PTR[slot] != 0 && probes < 64) {
-		if (SMC_PTR[slot] == k && SMC_LEN[slot] == n) { return SMC_VAL[slot]; }
+		if (SMC_PTR[slot] == k && SMC_LEN[slot] == n) {
+			h = SMC_VAL[slot];
+			if (probes != 0) {
+				SMC_PTR[slot] = SMC_PTR[home];
+				SMC_LEN[slot] = SMC_LEN[home];
+				SMC_VAL[slot] = SMC_VAL[home];
+				SMC_PTR[home] = k;
+				SMC_LEN[home] = n;
+				SMC_VAL[home] = h;
+			}
+			return h;
+		}
 		slot = (slot + 1) & 8191;
 		probes = probes + 1;
 	}
@@ -1135,6 +1158,12 @@ long str_intern(const char *p, long n) {
 	SMC_LEN[slot] = n;
 	SMC_VAL[slot] = h;
 	return h;
+}
+
+long str_intern(const char *p, long n) {
+	long home = (((long)p * 2654435761) >> 19) & 8191;
+	if (SMC_PTR[home] == (long)p && SMC_LEN[home] == n) { return SMC_VAL[home]; }
+	return smc_miss(p, n, home);
 }
 
 const char *str_ptr(long h) { return (const char *)fa(h); }

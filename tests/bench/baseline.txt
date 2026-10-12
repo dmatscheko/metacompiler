@@ -4,19 +4,19 @@
 # Native -exe binaries built from tests/bench/mod.*. Re-record with
 # tests/bench.sh --record when you land an intended change, and say in the commit
 # message which rows moved and why.
-# recorded on top of 29293761 with the runtime.c of the commit that wrote this line, 5 draws, min of 3 runs.
-bash       52815025         -          -
-batch      34152884         -          -
-c          10976408         -          -
-csharp     15913316534      11750880   587
-dart       2912009339       7517872    112
-go         93984768         10681808   1
-java       6319061518       13831984   264
-js         852653286        13894592   26
-kotlin     11611300983      10790016   470
-lua        1264537818       7515920    31
-metajs     218005276        7426912    1
-php        764197018        10683056   24
-python     9196715490       14092128   394
-ruby       4315006435       13914928   117
-swift      3376658258       10637888   118
+# recorded with the runtime.c of the commit that wrote this line, 5 draws, min of 3 runs.
+bash       52823549         -          -
+batch      34232962         -          -
+c          11043953         -          -
+csharp     15072868265      11750880   587
+dart       2729489274       7517872    112
+go         89986331         10681808   1
+java       5975832842       13831984   264
+js         797200728        13894592   26
+kotlin     10860521097      10790016   470
+lua        1189655413       7515920    31
+metajs     214809738        7426912    1
+php        715051278        10683776   24
+python     8639192403       14101520   394
+ruby       4032412605       13914928   117
+swift      3178155538       10637888   118
