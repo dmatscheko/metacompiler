@@ -1352,7 +1352,7 @@ var jsThroughArgs = map[string]uint32{
 	"js_kget": 1 << 0, "js_kset": 1 << 0, "js_tdecl": 1 << 0, "js_tset": 1 << 0,
 	"js_pyset_var": 1 << 0, "js_pyglobal": 1 << 0, "js_pynonlocal": 1 << 0,
 
-	"js_arr_push": 1 << 0, "js_arg": 1 << 0, "js_pyrest": 1 << 0,
+	"js_arr_push": 1 << 0, "js_arg": 1 << 0, "js_pyargd": 1 << 0, "js_pyrest": 1 << 0,
 	"js_pyprint": 1 << 0, "js_pyexc": 1 << 1,
 	"js_call": 1 << 2, "js_mcall": 1 << 2, "js_rmcall": 1 << 2, "js_supercall": 1 << 3,
 }
@@ -13279,6 +13279,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.setMember(u(a[1]), u(a[2]), u(a[3]))
 			return 0
 		},
+		// A defaulted parameter's argument: the default when the call supplied
+		// none (past the end, or left absent by pyBindCall). Twin of js_pyargd in
+		// lib/python-rt.metajs.
+		"js_pyargd": func(a []uint64) uint64 { // (args array, index, default)
+			arr := u(a[0]).(*jsArray)
+			if i := int(rt.toNumber(u(a[1]))); i < len(arr.elems) && arr.elems[i] != pyAbsentArg {
+				return w(arr.elems[i])
+			}
+			return a[2]
+		},
 		"js_arg": func(a []uint64) uint64 { // (args array, index) -> value
 			arr := u(a[0]).(*jsArray)
 			if int(a[1]) < len(arr.elems) {
@@ -15828,7 +15838,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(rt.call(callee, jsUndef, bound))
 		},
 		// Register a def's parameter shape, so a keyword call can be bound to it.
-		"js_pysig": func(a []uint64) uint64 { // (closure, name array, kw-only count, extended?)
+		"js_pysig": func(a []uint64) uint64 { // (closure, name array, kw-only count, extended?, defaulted flags)
 			if rt.pySigs == nil {
 				rt.pySigs = map[interface{}]*pySig{}
 			}
@@ -15837,6 +15847,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if names != nil {
 				for _, n := range names.elems {
 					sig.names = append(sig.names, rt.toString(n))
+				}
+			}
+			if fl, ok := u(a[4]).(*jsArray); ok {
+				for _, d := range fl.elems {
+					sig.dflt = append(sig.dflt, rt.truthy(d))
 				}
 			}
 			rt.pySigs[u(a[0])] = sig
@@ -22293,6 +22308,7 @@ type pySig struct {
 	names   []string
 	nkwonly int // The LAST nkwonly names are keyword-only.
 	ext     bool
+	dflt    []bool // Which names have a default; nil for a builtin.
 }
 
 // pyBindCall turns (positional, keyword dict) into the callee's argument array.
@@ -22332,6 +22348,9 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	out := make([]interface{}, n)
 	for i := range out {
 		out[i] = jsUndef
+		if i < len(sig.dflt) && sig.dflt[i] {
+			out[i] = pyAbsentArg
+		}
 	}
 	for i := 0; i < npos && i < len(pos); i++ {
 		out[i] = pos[i]
@@ -22709,6 +22728,12 @@ func (rt *jsrt) pySeqOrder(op string, l, r []interface{}) interface{} {
 type pyDeletedT struct{}
 
 var pyDeleted interface{} = pyDeletedT{}
+
+// pyAbsentArgT fills a defaulted parameter's slot that a keyword call left
+// unbound, so js_pyargd can tell it from an explicit None (which is undefined).
+type pyAbsentArgT struct{}
+
+var pyAbsentArg interface{} = pyAbsentArgT{}
 
 // pyExcInstance builds a builtin exception instance - the {__class:{__name},
 // args} shape the except clauses match - for a runtime error the program is

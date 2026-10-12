@@ -8053,6 +8053,11 @@ var pyDSigFn = []
 var pyDSigNames = []
 var pyDSigKwOnly = []
 var pyDSigExt = []
+var pyDSigDflt = []
+
+// Fills a defaulted parameter's slot that a keyword call left unbound, so
+// js_pyargd can tell it from an explicit None. Go: pyAbsentArg.
+var pyDAbsent = {}
 
 function pyDSigIndex(callee) {
     var i = 0
@@ -8066,13 +8071,22 @@ function pyDSigIndex(callee) {
 // Register a def's parameter shape, so a keyword call can be bound to it.
 // The LAST nkwonly names are keyword-only; `ext` selects prologue layout B
 // ([p0..pn-1, *args list, **kwargs dict]) over layout A (a flat positional
-// array). Go overwrites a duplicate map entry; so does this.
-function js_pysig(clo, names, nkwonly, ext) {
+// array). `dflt` flags the defaulted names (undefined for a builtin). Go
+// overwrites a duplicate map entry; so does this.
+function js_pysig(clo, names, nkwonly, ext, dflt) {
     var ns = []
+    var ds = []
+    var i = 0
     if (pyIsArr(names)) {
-        var i = 0
         while (i < names.length) {
             ns.push(pyToStr(names[i]))
+            i = i + 1
+        }
+    }
+    if (pyIsArr(dflt)) {
+        i = 0
+        while (i < dflt.length) {
+            ds.push(pyDTruthy(dflt[i]))
             i = i + 1
         }
     }
@@ -8082,12 +8096,24 @@ function js_pysig(clo, names, nkwonly, ext) {
         pyDSigNames.push(ns)
         pyDSigKwOnly.push(pyNum(nkwonly))
         pyDSigExt.push(pyDTruthy(ext))
+        pyDSigDflt.push(ds)
     } else {
         pyDSigNames[at] = ns
         pyDSigKwOnly[at] = pyNum(nkwonly)
         pyDSigExt[at] = pyDTruthy(ext)
+        pyDSigDflt[at] = ds
     }
     return clo
+}
+
+// A defaulted parameter's argument: the default when the call supplied none
+// (past the end, or left absent by pyBindCall). Go: js_pyargd.
+function js_pyargd(args, i, d) {
+    if (i < args.length) {
+        var v = args[i]
+        if (v !== pyDAbsent) { return v }
+    }
+    return d
 }
 
 // pyBindCall turns (positional, keyword dict) into the callee's argument array.
@@ -8125,12 +8151,17 @@ function pyBindCall(callee, pos, kw) {
     var names = pyDSigNames[si]
     var nkwonly = pyDSigKwOnly[si]
     var ext = pyDSigExt[si]
+    var dflt = pyDSigDflt[si]
     if (!ext && !hasKw) { return pos }
     var n = names.length
     var npos = n - nkwonly
     i = 0
     while (i < n) {
-        out.push(undefined)
+        if (i < dflt.length && dflt[i]) {
+            out.push(pyDAbsent)
+        } else {
+            out.push(undefined)
+        }
         i = i + 1
     }
     i = 0

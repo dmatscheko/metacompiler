@@ -4671,6 +4671,30 @@ def s93():
     check("obj8", object.__lt__(1, 2) is NotImplemented and o.__lt__(o) is NotImplemented and o.__ge__(1) is NotImplemented
           and object.__lt__ is not object.__le__ and str(object.__gt__) == "<slot wrapper '__gt__' of 'object' objects>")
 
+# ===== SECTION 94: an explicit None is an argument =====
+# A defaulted parameter takes its default only when the call supplies no
+# argument: None passed by position or by keyword is a value like any other.
+# Rows from CPython 3.14.
+class S94C:
+    def m(self, x=3, *, y=4):
+        return (x, y)
+
+def s94():
+    def k(a=5):
+        return a
+    def k2(a, b=None, *c, d=7, **e):
+        return [a, b, c, d, e]
+    def k3(a=5, b=6):
+        return (a, b)
+    def g(a=1):
+        yield a
+    nn = [None]
+    f = lambda x=4: x
+    check("none1", k(nn[0]) is None and k() == 5 and f(nn[0]) is None and f() == 4 and list(g(nn[0])) == [None])
+    check("none2", k2(1, nn[0], d=nn[0]) == [1, None, (), None, {}] and k2(1) == [1, None, (), 7, {}])
+    check("none3", k3(b=nn[0]) == (5, None) and k3(nn[0], nn[0]) == (None, None) and k3(a=nn[0]) == (None, 6))
+    check("none4", S94C().m(nn[0]) == (None, 4) and S94C().m(y=nn[0]) == (3, None) and S94C().m() == (3, 4))
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4763,5 +4787,6 @@ def main():
     s89() # SECTION-CALL 89
     s92() # SECTION-CALL 92
     s93() # SECTION-CALL 93
+    s94() # SECTION-CALL 94
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

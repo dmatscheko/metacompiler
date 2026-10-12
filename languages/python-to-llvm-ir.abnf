@@ -3812,16 +3812,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {pname: items[0], pkw: true}
     }
     // Register a def's parameter shape on its closure, so a keyword call can be
-    // bound to it (js_pysig; the runtime side is pyBindCall).
+    // bound to it (js_pysig; the runtime side is pyBindCall). The flags array
+    // marks the defaulted parameters, whose unfilled slots pyBindCall leaves
+    // ABSENT rather than None (see js_pyargd).
     function emitSig(b, clo, plist) {
         var namesV = callExt(b, "js_arr_new", [])
+        var dfltV = callExt(b, "js_arr_new", [])
         for (var i = 0; i < plist.params.length; i++) {
             callExt(b, "js_arr_push", [namesV, emitStr(b, plist.params[i])])
+            var hasD = i < plist.dflts.length && plist.dflts[i] != null
+            callExt(b, "js_arr_push", [dfltV, hasD ? hTrue : hFalse])
         }
         var nk = plist.nkwonly != undefined ? plist.nkwonly : 0
         var ex = hFalse
         if (plist.ext == true) { ex = hTrue }
-        return callExt(b, "js_pysig", [clo, namesV, emitNum(b, nk), ex])
+        return callExt(b, "js_pysig", [clo, namesV, emitNum(b, nk), ex, dfltV])
     }
 
     // def: an own IR function; the body shares one function scope (no block scopes).
@@ -3886,11 +3891,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
         }
+        // A defaulted parameter cannot test its argument against None: an explicit
+        // None is a value, and only a missing argument takes the default.
         for (var i = 0; i < params.length; i++) {
-            var argV = callExt(fb, "js_arg", [f.Params[1], handle(i)])
+            var argV = null
             if (i < dflts.length && dflts[i] != null) {
                 var dfltV = callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "dflt*" + params[i])])
-                argV = fb.NewSelect(truthy(fb, callExt(fb, "js_seq", [argV, hUndef])), dfltV, argV)
+                argV = callExt(fb, "js_pyargd", [f.Params[1], emitNum(fb, i), dfltV])
+            } else {
+                argV = callExt(fb, "js_arg", [f.Params[1], handle(i)])
             }
             callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, params[i]), argV])
         }
@@ -4218,7 +4227,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var namesV = callExt(b, "js_arr_new", [])
         for (var i = 0; i < kwNames.length; i++) { callExt(b, "js_arr_push", [namesV, emitStr(b, kwNames[i])]) }
         var clo = callExt(b, "js_pysig", [callExt(b, "js_closure", [handle(idx), curScopeV]), namesV,
-                                          emitNum(b, kwNames.length), hTrue])
+                                          emitNum(b, kwNames.length), hTrue, hUndef])
         pyKwBound["$" + name] = true
         return declBind(b, name, clo)
     }
