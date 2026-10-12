@@ -975,7 +975,8 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
-Pos         = "+" UnaryExpr ;
+Pos         <~~ push(makePos(pop())) ~~>
+            = "+" UnaryExpr ;
 // See SuppressExpr: '@' as a prefix INSIDE an expression ('$x = @foo() + 1').
 Suppress    = "@" UnaryExpr ;
 
@@ -3402,6 +3403,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return {b: r.b, v: callExt(r.b, "js_phneg", [r.v])}
         }
     }
+    // PHP compiles +$x as $x * 1: "5" becomes int(5) and "abc" is a TypeError.
+    function makePos(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_phmul", [r.v, emitNum(r.b, 1)])}
+        }
+    }
     // '!' is PHP truthiness, not JS truthiness ('!"0"' is true).
     makeNot = function(t) {
         return function(b) {
@@ -3455,7 +3463,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return {b: rr.b, v: emitBin(rr.b, "**", rl.v, rr.v)}
         }
     }
-    // ~x on PHP's own integer coercion (phpBit in the interpreter).
+    // ~x: a string's bytes or an int's bits (phpBitNot in the interpreter).
     function makeBitNot(t) {
         return function(b) {
             var r = t(b)
@@ -4947,17 +4955,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
 
-    // ++ / -- (postfix yields the old value, prefix the new one).
+    // ++ / -- (postfix yields the old value, prefix the new one). js_phinc /
+    // js_phdec are PHP's increment_function and decrement_function.
     function incDec(b, ref, isPre, isInc) {
-        var ext = isInc ? "js_phadd" : "js_phsub"
+        var ext = isInc ? "js_phinc" : "js_phdec"
         if (ref.sbase != undefined && ref.path.length == 0) {
             var rb = ref.sbase(b)
             b = rb.b
             var rs6 = sNameV(b, ref)
             b = rs6.b
             var snV = rs6.v
-            var oldS = callExt(b, "js_phnum", [callExt(b, "js_phsget", [rb.v, snV])])
-            var newS = callExt(b, ext, [oldS, emitNum(b, 1)])
+            var oldS = callExt(b, "js_phsget", [rb.v, snV])
+            var newS = callExt(b, ext, [oldS])
             callExt(b, "js_phsset", [rb.v, snV, newS])
             return {b: b, v: isPre ? newS : oldS}
         }
@@ -4965,8 +4974,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var rn5 = refNameV(b, ref)
             var rcur = readVarV(rn5.b, rn5.v)
             b = rcur.b
-            var oldV = callExt(b, "js_phnum", [rcur.v])
-            var newV = callExt(b, ext, [oldV, emitNum(b, 1)])
+            var oldV = rcur.v
+            var newV = callExt(b, ext, [oldV])
             b = setVarV(b, rn5.v, newV)
             return {b: b, v: isPre ? newV : oldV}
         }
@@ -4974,8 +4983,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         b = p.b
         var rslot = readRefSlot(b, p)
         b = rslot.b
-        var oldM = callExt(b, "js_phnum", [rslot.v])
-        var newM = callExt(b, ext, [oldM, emitNum(b, 1)])
+        var oldM = rslot.v
+        var newM = callExt(b, ext, [oldM])
         b = writeRefSlot(b, p, newM)
         return {b: b, v: isPre ? newM : oldM}
     }
@@ -5637,7 +5646,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var okB = curF.NewBlock("")
             var badB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "array"), vs[0]])), okB, badB)
-            var gotV = callExt(badB, "js_phcat", [callExt(badB, "js_phdtype", [vs[0]]), emitStr(badB, " given")])
+            var gotV = callExt(badB, "js_phcat", [callExt(badB, "js_phvname", [vs[0]]), emitStr(badB, " given")])
             callExt(badB, "js_phraise", [emitStr(badB, "TypeError"),
                 callExt(badB, "js_phcat", [emitStr(badB, "array_values(): Argument #1 ($array) must be of type array, "), gotV])])
             badB.NewBr(okB) // never taken: js_phraise throws
@@ -5664,7 +5673,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // __mec_callable($callback, $where): the library's callback check.
         if (name == "__mec_callable") { return {b: b, v: cbCheckV(b, vs[0], vs[1])} }
         if (name == "get_debug_type") { return {b: b, v: callExt(b, "js_phdtype", [vs[0]])} }
-        if (name == "get_class") { return {b: b, v: callExt(b, "js_phgetclass", [vs[0]])} }
+        if (name == "get_class") {
+            if (vs.length > 0) { return {b: b, v: callExt(b, "js_phgetclass", [vs[0]])} }
+            // With no argument, the class scope of the caller (deprecated since 8.3),
+            // an Error outside one. Twin of phpSelfClass in php-interpreter.abnf.
+            var gcSelf = scopeProbe(b, emitStr(b, frameClsName("self")), hNull)
+            var gcIn = curF.NewBlock("")
+            var gcOut = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, gcSelf, hNull), gcOut, gcIn)
+            callExt(gcOut, "js_phraise", [emitStr(gcOut, "Error"), emitStr(gcOut, "get_class() without arguments must be called from within a class")])
+            gcOut.NewBr(gcIn) // never taken: js_phraise throws
+            return {b: gcIn, v: callExt(gcIn, "js_phcname", [gcSelf])}
+        }
         // method_exists: an object, or a class named by a string (null when it names
         // none), goes to js_phmexists.
         if (name == "method_exists") {
@@ -5696,8 +5716,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // class_exists / interface_exists: the descriptor the name denotes, in any
         // letter case, is a class (not an interface or a trait) / an interface.
         if (name == "class_exists" || name == "interface_exists") {
-            var found = phClsFind(b, callExt(b, "js_phstr", [vs[0]]))
-            return {b: b, v: callExt(b, "js_phclsexists", [found, name == "interface_exists" ? hTrue : hFalse])}
+            var cnV = callExt(b, "js_phstr", [vs[0]])
+            var found = phClsFind(b, cnV)
+            return {b: b, v: callExt(b, "js_phclsexists", [found, cnV, name == "interface_exists" ? hTrue : hFalse])}
         }
         // define() writes the SAME scope a `const` does, which is what makes a
         // defined constant readable through a bare name.

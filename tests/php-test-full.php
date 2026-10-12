@@ -2409,6 +2409,79 @@ function s56() {
         && S56A::viaCuf('SELF::m') === "A" && S56A::viaCuf(['Self', 'm']) === "A");
 }
 
+// ===== SECTION 57: non-numeric strings, increments, closures as objects, value names =====
+// A string with no numeric prefix ("abc", "") in an arithmetic or shift operator is a
+// TypeError naming both operand types, where "5 apples" reads its prefix
+// (lang/bug28800, lang/operators/*_variationStr); +$x is $x * 1. Two strings under &,
+// | and ^ combine byte by byte ('|' to the longer one) and ~ inverts a string's bytes.
+// ++ and -- follow increment_function: null++ is 1, null-- stays null, a bool does not
+// change, "" becomes "1" or -1, a non-numeric string increments Perl-style and does
+// not decrement, and an object or an array is a TypeError, as is ~ of one
+// (tests/in-de-crement/object_cannot_incdec). A closure and a generator are objects
+// of the classes Closure and Generator; get_class() with no argument names the
+// caller's class. An argument TypeError names a bool by its value ("true given").
+// interface_exists() knows the engine's own interfaces, and get_class, is_a,
+// is_subclass_of, get_parent_class, class_exists and interface_exists are callable
+// by name.
+class S57K { function me() { return get_class(); } }
+class S57P {}
+class S57Q extends S57P {}
+function s57gen() { yield 1; }
+function s57err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s57() {
+    $s = ["abc", "5 apples", "", " 12", "ab", "cd", "a5.9", 3];
+    check("nns1", s57err(fn() => $s[0] + 1) === "TypeError: Unsupported operand types: string + int"
+        && s57err(fn() => 1 - $s[2]) === "TypeError: Unsupported operand types: int - string"
+        && s57err(fn() => $s[6] * 1.5) === "TypeError: Unsupported operand types: string * float"
+        && s57err(fn() => $s[0] % $s[7]) === "TypeError: Unsupported operand types: string % int"
+        && s57err(fn() => $s[0] << 1) === "TypeError: Unsupported operand types: string << int"
+        && s57err(fn() => $s[0] & 1) === "TypeError: Unsupported operand types: string & int"
+        && s57err(fn() => -$s[0]) === "TypeError: Unsupported operand types: string * int"
+        && s57err(fn() => +$s[2]) === "TypeError: Unsupported operand types: string * int"
+        && s57err(function() use ($s) { $x = $s[0]; $x += 1; return $x; }) === "TypeError: Unsupported operand types: string + int");
+    check("nns2", $s[1] + 1 === 6 && $s[1] * 2 === 10 && $s[3] + 1 === 13 && +"5" === 5 && +"1.5" === 1.5 && +$s[1] === 5);
+    check("sbw1", ($s[4] & $s[5]) === "a`" && ($s[4] | "  x") === "abx" && ($s[4] ^ "  ") === "AB"
+        && ("12" & "3") === "1" && bin2hex(~$s[4]) === "9e9d" && ~5 === -6);
+    $v = [null, true, "", "Az", "zz", "a9", "5", "5.5", "a!", 2147483647];
+    $r = [];
+    foreach ($v as $x) { $y = $x; $y++; $r[] = $y; }
+    check("inc1", $r === [1, true, "1", "Ba", "aaa", "b0", 6, 6.5, "a!", 2147483648]);
+    $r = [];
+    foreach ($v as $x) { $y = $x; $y--; $r[] = $y; }
+    check("inc2", $r === [null, true, -1, "Az", "zz", "a9", 4, 4.5, "a!", 2147483646]);
+    $old = $v[6];
+    $was = $old++;
+    check("inc3", $was === "5" && $old === 6);
+    $o = [new S57K, [1], function() {}];
+    check("inc4", s57err(function() use ($o) { $x = $o[0]; $x++; }) === "TypeError: Cannot increment S57K"
+        && s57err(function() use ($o) { $x = $o[0]; --$x; }) === "TypeError: Cannot decrement S57K"
+        && s57err(function() use ($o) { $x = $o[1]; $x--; }) === "TypeError: Cannot decrement array"
+        && s57err(function() use ($o) { $x = $o[2]; ++$x; }) === "TypeError: Cannot increment Closure"
+        && s57err(fn() => ~$o[0]) === "TypeError: Cannot perform bitwise not on S57K"
+        && s57err(fn() => ~$o[1]) === "TypeError: Cannot perform bitwise not on array");
+    $g = s57gen();
+    check("clo1", is_object($o[2]) && is_object($g) && is_object(strlen(...)) && get_class($o[2]) === "Closure"
+        && get_class($g) === "Generator" && (array)$o[2] === [] && (object)$o[2] === $o[2]);
+    check("clo2", s57err(fn() => get_class($v[1])) === "TypeError: get_class(): Argument #1 (\$object) must be of type object, true given"
+        && s57err(fn() => get_class($v[0])) === "TypeError: get_class(): Argument #1 (\$object) must be of type object, null given"
+        && (new S57K)->me() === "S57K");
+    check("vnm1", s57err(fn() => count($v[1])) === "TypeError: count(): Argument #1 (\$value) must be of type Countable|array, true given"
+        && s57err(fn() => array_values(false)) === "TypeError: array_values(): Argument #1 (\$array) must be of type array, false given"
+        && s57err(fn() => array_key_exists(0, true)) === "TypeError: array_key_exists(): Argument #2 (\$array) must be of type array, true given"
+        && s57err(fn() => implode(",", false)) === "TypeError: implode(): Argument #2 (\$array) must be of type ?array, false given");
+    check("ifx1", interface_exists('Throwable') && interface_exists('\Countable') && interface_exists('arrayaccess')
+        && interface_exists('Traversable') && interface_exists('Stringable') && !class_exists('Throwable')
+        && !interface_exists('Exception') && !interface_exists('S57Nope'));
+    check("cbn1", array_map('get_class', [new S57K, new S57Q]) === ["S57K", "S57Q"]
+        && array_map('get_parent_class', [new S57Q]) === ["S57P"]
+        && array_map('is_a', [new S57Q, new S57K], ['S57P', 'S57P']) === [true, false]
+        && array_map('is_subclass_of', ['S57Q'], ['S57P']) === [true]
+        && array_map('class_exists', ['S57K', 'S57Nope']) === [true, false]
+        && call_user_func('interface_exists', 'Throwable') === true);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2471,6 +2544,7 @@ function main() {
     s54(); // SECTION-CALL 54
     s55(); // SECTION-CALL 55
     s56(); // SECTION-CALL 56
+    s57(); // SECTION-CALL 57
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

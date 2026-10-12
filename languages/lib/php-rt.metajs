@@ -734,13 +734,15 @@ function phArrArith(op, l, r) {
     return undefined
 }
 
-// phNoNum: a value with no number reading - an array, an object, a closure or a
-// generator. Twin of noNum in php-interpreter.abnf and phpNoNum in
-// abnf/jsrtphp.go.
+// phNoNum: a value with no number reading - an array, an object, a closure, a
+// generator or a string with no numeric prefix (PHP 8's TypeError, where
+// "5 apples" still reads 5). Twin of noNum in php-interpreter.abnf and phpNoNum
+// in abnf/jsrtphp.go.
 function phNoNum(v) {
     if (rtIsNil(v)) { return false }
     var t = typeof v
     if (t == "function") { return true }
+    if (t == "string") { return phNumScan(v) < 0 }
     if (t != "object") { return false }
     return v["__pf"] === undefined
 }
@@ -821,7 +823,9 @@ function phIntArith(op, x, y) {
 // The bitwise operators are exact 64 bit and cast their operands to int. Unlike
 // the arithmetic ones they WRAP - PHP_INT_MAX << 1 is int(-2), not a float - and
 // a negative shift count is an ArithmeticError rather than a shift the other way.
+// Two strings under &, | or ^ combine byte by byte (phsBitOp) and stay a string.
 function phBit(op, l, r) {
+    if (typeof l == "string" && typeof r == "string" && op != "<<" && op != ">>") { return phsBitOp(op, l, r) }
     if (phNoNum(l) || phNoNum(r)) { phBinopErr(op, l, r) }
     var x = phToLong(l)
     if (op == "&") { return sintOp(5, x, phToLong(r)) }
@@ -1521,6 +1525,16 @@ function phDebugType(v) {
     return "unknown"
 }
 
+// zend_zval_value_name, the "X given" of PHP 8.3's argument TypeErrors: a bool is
+// named by its value ("true given"), anything else as get_debug_type does. Twin
+// of phpValueName in php-interpreter.abnf and abnf/jsrtphp.go.
+function phValueName(v) {
+    if (v === true) { return "true" }
+    if (v === false) { return "false" }
+    return phDebugType(v)
+}
+function js_phvname(v) { return phValueName(v) }
+
 // ===================================================== var_dump =============
 //
 // A float goes through phFloDump (serialize_precision=-1), NOT through the
@@ -1770,7 +1784,7 @@ function phObjPropsEq(a, b) {
 // (object): an array's elements become the properties of a stdClass, any other
 // non-object the one property "scalar". Twin of phpCast in abnf/jsrtphp.go.
 function phObjCast(v) {
-    if (phIsObj(v)) { return v }
+    if (phIsObj(v) || typeof v == "function" || phIsGen(v)) { return v }
     var o = {}
     if (phRtClasses !== undefined) { o["__class"] = phRtClasses["stdClass"] }
     phStamp(o)
@@ -1797,6 +1811,8 @@ function phCast(kind, v) {
         var out = phNewArr()
         if (rtIsNil(v)) { return out }
         if (phIsObj(v)) { return phObjArr(v, false, null) }
+        // A Closure or a Generator is an object with no properties.
+        if (typeof v == "function" || phIsGen(v)) { return out }
         phArrPush(out, v)
         return out
     }
@@ -2115,7 +2131,6 @@ function js_phcat(l, r) {
     return phsJoin(a, b)
 }
 function js_phflo(n) { return phMkFlo(phNumOf(phToNum(n))) }
-function js_phnum(v) { return phToNum(v) }
 
 function js_pheq(l, r) { return phLoose(l, r) }
 function js_phne(l, r) { return !phLoose(l, r) }
@@ -2172,7 +2187,51 @@ function js_phbor(l, r) { return phBit("|", l, r) }
 function js_phbxor(l, r) { return phBit("^", l, r) }
 function js_phshl(l, r) { return phBit("<<", l, r) }
 function js_phshr(l, r) { return phBit(">>", l, r) }
-function js_phbnot(v) { return sintOp(7, phToLong(v), 0 - 1) }
+// ~ inverts a string's bytes and an int's bits (a float's int reading); an
+// array or an object is a TypeError. Twin of phpBitNot in php-interpreter.abnf
+// and js_phbnot in abnf/jsrtphp.go.
+function js_phbnot(v) {
+    if (typeof v == "string") { return phsBitOp("~", v, v) }
+    if (phNoNum(v)) { phRaise("TypeError", "Cannot perform bitwise not on " + phDebugType(v)) }
+    return sintOp(7, phToLong(v), 0 - 1)
+}
+
+// ++ and -- with the int32 fast path js_phadd has; everything else is phIncDec.
+function js_phinc(v) {
+    if (typeof v == "number" && v > -2147483649 && v < 2147483648) { return v + 1 }
+    return phIncDec(v, true)
+}
+function js_phdec(v) {
+    if (typeof v == "number" && v > -2147483649 && v < 2147483648) { return v - 1 }
+    return phIncDec(v, false)
+}
+// PHP 8.3's increment_function / decrement_function: a number steps by one;
+// null++ is 1 and null-- stays null; a bool does not change; "" becomes "1" or
+// -1; a numeric string steps as its number; any other string increments
+// Perl-style (phsIncr) and does not decrement. An array or an object is a
+// TypeError. Twin of phpIncDec in php-interpreter.abnf and abnf/jsrtphp.go.
+function phIncDec(v, inc) {
+    var op = inc ? "+" : "-"
+    if (rtIsNil(v)) {
+        if (inc) { return 1 }
+        return null
+    }
+    if (typeof v == "boolean") { return v }
+    if (typeof v == "string") {
+        if (v == "") {
+            if (inc) { return "1" }
+            return 0 - 1
+        }
+        var n = phNumStrVal(v)
+        if (n === undefined) {
+            if (inc) { return phsIncr(v) }
+            return v
+        }
+        return phArith(op, n, 1)
+    }
+    if (phNoNum(v)) { phRaise("TypeError", "Cannot " + (inc ? "increment " : "decrement ") + phDebugType(v)) }
+    return phArith(op, v, 1)
+}
 
 function js_phintdiv(l, r) {
     var y = phToLong(r)
@@ -2191,7 +2250,7 @@ function js_phabs(v) {
     if (typeof v == "string") { bad = phNumScan(v) < 0 }
     else if (typeof v == "function") { bad = true }
     else if (typeof v == "object" && v !== null && !phIsFlo(v) && !sintIs(v)) { bad = true }
-    if (bad) { phRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, " + phDebugType(v) + " given") }
+    if (bad) { phRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, " + phValueName(v) + " given") }
     var n = phToNum(v)
     var f = phFloOf(n)
     if (f !== undefined) {
@@ -2252,7 +2311,9 @@ function js_phis(kind, v) {
     if (kind == "string") { return typeof v == "string" }
     if (kind == "bool") { return typeof v == "boolean" }
     if (kind == "array") { return phIsArr(v) }
-    if (kind == "object") { return phIsObj(v) }
+    // A closure and a generator are objects, of the final classes Closure and
+    // Generator.
+    if (kind == "object") { return phIsObj(v) || typeof v == "function" || phIsGen(v) }
     if (kind == "null") { return rtIsNil(v) }
     if (kind == "numeric") {
         if (typeof v == "string") { return phNumStrVal(v) !== undefined }
@@ -2275,10 +2336,10 @@ function js_phdump(v) { return phDump(v, 0) }
 
 // method_exists over the __mlc lists of the class chain; v is an object, a class
 // descriptor or null. Twin of phpMethodExists in languages/php-interpreter.abnf.
-// class_exists / interface_exists over the descriptor a name was looked up to
-// (null when none). Twin of phpClassExists in languages/php-interpreter.abnf.
-function js_phclsexists(v, iface) {
-    if (v === undefined || v === null || typeof v != "object") { return false }
+// class_exists / interface_exists over the descriptor the name n was looked up
+// to (null when none). Twin of phpClassExists in languages/php-interpreter.abnf.
+function js_phclsexists(v, n, iface) {
+    if (v === undefined || v === null || typeof v != "object") { return phTest(iface) && phsCoreIface(phStr(n)) }
     if (v["__isclass"] !== true) { return false }
     if (phTest(iface)) { return v["__isiface"] === true }
     return v["__isiface"] !== true && v["__istrait"] !== true
@@ -2325,22 +2386,23 @@ function js_phparent(v, found) {
         if (cls === undefined || cls === null) { return false }
     } else if (typeof v == "function" || phIsGen(v)) { return false }
     if (cls === undefined || cls === null || typeof cls != "object") {
-        var given = phDebugType(v)
-        if (v === true) { given = "true" }
-        if (v === false) { given = "false" }
-        phRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, " + given + " given")
+        phRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, " + phValueName(v) + " given")
     }
     var sup = cls["__super"]
     if (sup === undefined || sup === null || typeof sup != "object") { return false }
     return phStr(sup["__name"])
 }
+// get_class(): the class of an object, a closure or a generator; anything else is
+// a TypeError. Twin of phpGetClass in php-interpreter.abnf.
 function js_phgetclass(v) {
     if (phIsObj(v)) {
         var cls = v["__class"]
         if (cls !== undefined) { return phFullName(cls) }
         return phClassName(v)
     }
-    return false
+    if (typeof v == "function" || phIsGen(v)) { return phDebugType(v) }
+    phRaise("TypeError", "get_class(): Argument #1 ($object) must be of type object, " + phValueName(v) + " given")
+    return undefined
 }
 // The name get_class and ::class answer. Twin of phpFullName in abnf/jsrtphp.go.
 function phFullName(cls) {
@@ -2571,7 +2633,7 @@ function js_phcount(v) {
     var p = phArrParts(v)
     if (p !== undefined) { return p.k.length }
     if (phIsObj(v) && phIsA(v, "Countable")) { return js_phmcall(v, "count", []) }
-    phRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phDebugType(v) + " given")
+    phRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phValueName(v) + " given")
     return undefined
 }
 
@@ -2669,7 +2731,7 @@ function js_phmath(op, x, y) { return phMkFlo(phsMath(phStr(op), phNumOf(phToNum
 function js_phkeyexists(k, a) {
     var p = phArrParts(a)
     if (p === undefined) {
-        phRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phDebugType(a) + " given")
+        phRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phValueName(a) + " given")
     }
     return phFind(a, p, phNormKey(k)) >= 0
 }

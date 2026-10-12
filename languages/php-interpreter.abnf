@@ -950,11 +950,12 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
-Pos         = "+" UnaryExpr ;
+Pos         <~~ push(makePos(pop())) ~~>
+            = "+" UnaryExpr ;
 // '@expr' is PHP's error-suppression operator: it evaluates its operand and throws
 // away any DIAGNOSTIC the evaluation would have produced. This subset does not model
 // the diagnostic channel at all, so the operator is a pass-through and the rule is
-// deliberately item-NEUTRAL (no tag) exactly like Pos.
+// deliberately item-NEUTRAL (no tag).
 Suppress    = "@" UnaryExpr ;
 
 // An assignment is also an OPERAND: '1 + $a = 1', 'null !== $k = key($a)',
@@ -4692,22 +4693,40 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function makeIncDec(items) {
         var ref = items[0]
-        var op = (items[1] == "++") ? "+" : "-"
+        var inc = items[1] == "++"
         return function() {
-            var n = anytype
-            n = toNumV(readTargetVal(ref))
-            writeTargetVal(ref, phpArith(op, n, 1))
-            return n
+            var old = anytype
+            old = readTargetVal(ref)
+            writeTargetVal(ref, phpIncDec(old, inc))
+            return old
         }
     }
     function makePreIncDec(ref, op) {
-        var bop = (op == "++") ? "+" : "-"
+        var inc = op == "++"
         return function() {
             var n = anytype
-            n = phpArith(bop, toNumV(readTargetVal(ref)), 1)
+            n = phpIncDec(readTargetVal(ref), inc)
             writeTargetVal(ref, n)
             return n
         }
+    }
+    // PHP 8.3's increment_function / decrement_function: a number steps by one;
+    // null++ is 1 and null-- stays null; a bool does not change; "" becomes "1"
+    // or -1; a numeric string steps as its number; any other string increments
+    // Perl-style (phsIncr) and does not decrement. An array or an object is a
+    // TypeError. Twin of phIncDec in lib/php-rt.metajs and phpIncDec in
+    // abnf/jsrtphp.go.
+    function phpIncDec(v, inc) {
+        if (v === null || v === undefined) { return inc ? 1 : null }
+        if (typeof v == "boolean") { return v }
+        if (typeof v == "string") {
+            if (v == "") { return inc ? "1" : 0 - 1 }
+            var n = numStrVal(v)
+            if (n == null) { return inc ? phsIncr(v) : v }
+            return phpArith(inc ? "+" : "-", n, 1)
+        }
+        if (noNum(v)) { phpRaise("TypeError", "Cannot " + (inc ? "increment " : "decrement ") + phpDebugType(v)) }
+        return phpArith(inc ? "+" : "-", v, 1)
     }
 
     // ----- calls, defs, classes -----
@@ -5460,7 +5479,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return a.keys.length
         },
         "array_values": function(d) {
-            if (!isArr(d)) { phpRaise("TypeError", "array_values(): Argument #1 ($array) must be of type array, " + phpDebugType(d) + " given") }
+            if (!isArr(d)) { phpRaise("TypeError", "array_values(): Argument #1 ($array) must be of type array, " + phpValueName(d) + " given") }
             return arrOf(derefAll(d.vals))
         },
         // A scalar coerces as arithmetic does; an array, an object or a string with
@@ -5468,7 +5487,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // lib/php-rt.metajs.
         "abs": function(n) {
             var bad = isArr(n) || isObj(n) || typeof n == "function" || (typeof n == "string" && numScan(n) == null)
-            if (bad) { phpRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, " + phpDebugType(n) + " given") }
+            if (bad) { phpRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, " + phpValueName(n) + " given") }
             var v = toNumV(n)
             if (isFlo(v)) { return v.f < 0 ? mkFlo(-v.f) : v }
             return i64IsNeg(iPairOf(v)) ? phpNeg(v) : v
@@ -5514,7 +5533,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         "array_key_exists": function(k, a) {
             if (!isArr(a)) {
-                phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpDebugType(a) + " given")
+                phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpValueName(a) + " given")
             }
             return arrHas(a, k)
         },
@@ -5573,7 +5592,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "is_string": function(v) { return typeof v == "string" },
         "is_bool": function(v) { return typeof v == "boolean" },
         "is_array": function(v) { return isArr(v) },
-        "is_object": function(v) { return isObj(v) },
+        // A closure and a generator are objects, of the final classes Closure and
+        // Generator.
+        "is_object": function(v) { return isObj(v) || typeof v == "function" || isGen(v) },
         "is_null": function(v) { return v === null || v === undefined },
         "is_numeric": function(v) { return isNum(v) || (typeof v == "string" && numStrVal(v) != null) },
         // define() puts a name in the SAME table `const` writes, which is what makes
@@ -5584,7 +5605,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // The diagnostics level is not modelled (every engine error here is fatal),
         // so error_reporting() accepts and reports a level without acting on it.
         "error_reporting": function(v) { return 32767 },
-        "get_class": function(v) { return isObj(v) ? fullName(v.__class) : false },
+        "get_class": function(v) { return arguments.length == 0 ? phpSelfClass() : phpGetClass(v) },
         "method_exists": function(v, m) { return phpMethodExists(v, m) },
         "is_a": function(v, cls, allow) { return phpIsAOf(v, cls, phptest(allow), false) },
         "is_subclass_of": function(v, cls, allow) { return phpIsAOf(v, cls, allow === undefined || phptest(allow), true) },
@@ -5600,6 +5621,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     function phpInt(v) { return trunc(numOf(toNumV(v))) }
+    // get_class(): the class of an object, a closure or a generator; anything else
+    // is a TypeError. Twin of js_phgetclass in lib/php-rt.metajs and
+    // abnf/jsrtphp.go.
+    function phpGetClass(v) {
+        if (isObj(v)) { return fullName(v.__class) }
+        if (typeof v == "function" || isGen(v)) { return phpDebugType(v) }
+        phpRaise("TypeError", "get_class(): Argument #1 ($object) must be of type object, " + phpValueName(v) + " given")
+    }
+    // get_class() with no argument: the class scope of the caller (deprecated
+    // since 8.3), an Error outside one. Twin of get_class in emitBuiltin
+    // (php-to-llvm-ir.abnf).
+    function phpSelfClass() {
+        var k = ctxSelf()
+        if (k == null) { phpRaise("Error", "get_class() without arguments must be called from within a class") }
+        return fullName(k)
+    }
     function phpPosResult(name, at) {
         if (at == 0 - 2) {
             phpRaise("ValueError", name + "(): Argument #3 ($offset) must be contained in argument #1 ($haystack)")
@@ -5608,11 +5645,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return at
     }
     // class_exists() / interface_exists(): the name denotes, in any letter case, a
-    // class (not an interface or a trait) / an interface. Twin of js_phclsexists in
+    // class (not an interface or a trait) / an interface, the engine's own
+    // interfaces (phsCoreIface) included. Twin of js_phclsexists in
     // abnf/jsrtphp.go and lib/php-rt.metajs.
     function phpClassExists(n, iface) {
         var c = findClass(phpStr(n))
-        if (c == null) { return false }
+        if (c == null) { return iface && phsCoreIface(phpStr(n)) }
         if (iface) { return c.__isiface === true }
         return c.__isiface !== true && c.__istrait !== true
     }
@@ -5635,9 +5673,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phpIsA(v, name)
     }
     // get_parent_class(): the parent of v's class, or of the class the string v
-    // names; anything else is a TypeError naming the value as zend_zval_value_name
-    // does ("true", not "bool"). Twin of js_phparent in abnf/jsrtphp.go and
-    // lib/php-rt.metajs.
+    // names; anything else is a TypeError. Twin of js_phparent in abnf/jsrtphp.go
+    // and lib/php-rt.metajs.
     function phpParentClass(v) {
         if (isObj(v)) { return phpParentOf(v.__class) }
         if (typeof v == "function" || isGen(v)) { return false }
@@ -5645,9 +5682,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         k = null
         if (typeof v == "string") { k = findClass(v) }
         if (k == null) {
-            var given = v === true ? "true" : (v === false ? "false" : phpDebugType(v))
             phpRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, "
-                + given + " given")
+                + phpValueName(v) + " given")
         }
         return phpParentOf(k)
     }
@@ -5758,6 +5794,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isGen(v)) { return "Generator" }
         return "unknown"
     }
+    // zend_zval_value_name, the "X given" of PHP 8.3's argument TypeErrors: a bool
+    // is named by its value ("true given"), anything else as get_debug_type does.
+    // Twin of phValueName in lib/php-rt.metajs and phpValueName in
+    // abnf/jsrtphp.go.
+    function phpValueName(v) {
+        if (v === true) { return "true" }
+        if (v === false) { return "false" }
+        return phpDebugType(v)
+    }
     // var_dump's rendering. A float goes through floDump (serialize_precision=-1),
     // NOT through the precision=14 renderer echo uses - that is the trap the two
     // renderers exist to keep apart. An object's #id is its handle (newObj).
@@ -5807,7 +5852,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function phpCount(v) {
         if (isArr(v)) { return v.keys.length }
         if (isObj(v) && phpIsA(v, "Countable")) { return mcall(v, "count", argsOf([])) }
-        phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phpDebugType(v) + " given")
+        phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phpValueName(v) + " given")
     }
 
     phpBuiltins["exit"] = function(code) { exit(code === undefined ? 0 : trunc(numOf(toNumV(code)))) }
@@ -5960,11 +6005,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isFlo(a) || isFlo(b)) { return phpFloArith(op, numOf(a), numOf(b)) }
         return phpIntArith(op, iPairOf(a), iPairOf(b))
     }
-    // A value with no number reading: an array, an object, a closure or a
-    // generator. Twin of phNoNum in lib/php-rt.metajs and phpNoNum in
-    // abnf/jsrtphp.go.
+    // A value with no number reading: an array, an object, a closure, a generator
+    // or a string with no numeric prefix ("abc", ""). PHP 8 throws a TypeError
+    // for such a string in arithmetic, where a leading-numeric one ("5 apples")
+    // still reads its prefix. Twin of phNoNum in lib/php-rt.metajs and phpNoNum
+    // in abnf/jsrtphp.go.
     function noNum(v) {
         if (typeof v == "function") { return true }
+        if (typeof v == "string") { return numScan(v) == null }
         if (v === null || v === undefined || typeof v != "object") { return false }
         return !isFlo(v) && !szIs(v)
     }
@@ -6041,7 +6089,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // the arithmetic ones they WRAP - `PHP_INT_MAX << 1` is int(-2), not a float
     // (lang/operators/bitwiseShiftLeft_basiclong_64bit.phpt) - and a negative shift
     // count is an error rather than a shift the other way.
+    // Two strings under &, | or ^ combine byte by byte (phsBitOp) and stay a
+    // string.
     function phpBit(op, l, r) {
+        if (typeof l == "string" && typeof r == "string" && op != "<<" && op != ">>") { return phsBitOp(op, l, r) }
         if (noNum(l) || noNum(r)) { phpBinopErr(op, l, r) }
         var x = toLongP(l)
         if (op == "&") { return mkInt(i64And(x, toLongP(r))) }
@@ -6074,9 +6125,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (i64Eq(p, I64_MIN_P)) { return mkFlo(-i64ToNumS(p)) }
         return mkInt(i64Neg(p))
     }
+    // PHP compiles +$x as $x * 1: "5" becomes int(5) and "abc" is a TypeError.
+    function makePos(t) { return function() { return phpArith("*", t(), 1) } }
     makeNot = function(t) { return function() { return !phptest(t()) } }
-    function makeBitNot(t) {
-        return function() { return mkInt(i64Not(toLongP(t()))) }
+    function makeBitNot(t) { return function() { return phpBitNot(t()) } }
+    // ~ inverts a string's bytes and an int's bits (a float's int reading); an
+    // array or an object is a TypeError. Twin of js_phbnot in lib/php-rt.metajs
+    // and abnf/jsrtphp.go.
+    function phpBitNot(v) {
+        if (typeof v == "string") { return phsBitOp("~", v, v) }
+        if (noNum(v)) { phpRaise("TypeError", "Cannot perform bitwise not on " + phpDebugType(v)) }
+        return mkInt(i64Not(toLongP(v)))
     }
     function foldPow(items) {
         if (items.length == 1) { return items[0] }
@@ -6133,6 +6192,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (isArr(v)) { return v }
             if (v === null || v === undefined) { return newArr() }
             if (isObj(v)) { return phpObjArr(v, false, null) }
+            // A Closure or a Generator is an object with no properties.
+            if (typeof v == "function" || isGen(v)) { return newArr() }
             var a = newArr()
             arrPush(a, v)
             return a
@@ -6141,7 +6202,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // other non-object the one property "scalar". Twin of phCast in
         // lib/php-rt.metajs and phpCast in abnf/jsrtphp.go.
         if (kind == "object") {
-            if (isObj(v)) { return v }
+            if (isObj(v) || typeof v == "function" || isGen(v)) { return v }
             var o = newObj(getVar("stdClass"))
             if (isArr(v)) { o.p = arrCopy(v) }
             else if (v !== null && v !== undefined) { arrSet(o.p, "scalar", v) }

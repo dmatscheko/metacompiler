@@ -189,6 +189,86 @@ func phpCase(s string, up bool) string {
 	return string(b)
 }
 
+// phpCoreIface is phsCoreIface: one of the interfaces the engine itself declares.
+func phpCoreIface(n string) bool {
+	switch phpCase(strings.TrimPrefix(n, "\\"), false) {
+	case "traversable", "iterator", "iteratoraggregate", "arrayaccess", "countable", "serializable",
+		"stringable", "throwable", "unitenum", "backedenum", "jsonserializable":
+		return true
+	}
+	return false
+}
+
+// phpBitOp is phsBitOp: &, |, ^ of two strings byte by byte ('|' to the longer,
+// the others to the shorter), and "~" every byte of a inverted.
+func phpBitOp(op string, a, b string) string {
+	x, y := phpRaw(a), phpRaw(b)
+	n := len(x)
+	if (op == "|") == (len(y) > n) {
+		n = len(y)
+	}
+	out := make([]byte, n)
+	for i := range out {
+		var p, q byte
+		if i < len(x) {
+			p = x[i]
+		}
+		if i < len(y) {
+			q = y[i]
+		}
+		switch op {
+		case "&":
+			out[i] = p & q
+		case "|":
+			out[i] = p | q
+		case "^":
+			out[i] = p ^ q
+		default:
+			out[i] = ^p
+		}
+	}
+	return phpBytesText(string(out))
+}
+
+// phpIncr is phsIncr: Perl's increment of a non-numeric string's trailing
+// alphanumeric run.
+func phpIncr(s string) string {
+	if s == "" {
+		return "1"
+	}
+	b := []byte(phpRaw(s))
+	carry, last := false, byte(0)
+	for pos := len(b) - 1; pos >= 0; pos-- {
+		c := b[pos]
+		var lo, hi byte
+		switch {
+		case c >= 'a' && c <= 'z':
+			lo, hi, last = 'a', 'z', 'a'
+		case c >= 'A' && c <= 'Z':
+			lo, hi, last = 'A', 'Z', 'A'
+		case c >= '0' && c <= '9':
+			lo, hi, last = '0', '9', '1'
+		default:
+			carry = false
+		}
+		if hi == 0 {
+			break
+		}
+		carry = c == hi
+		if carry {
+			b[pos] = lo
+		} else {
+			b[pos] = c + 1
+			break
+		}
+	}
+	t := phpBytesText(string(b))
+	if carry {
+		return string(last) + t
+	}
+	return t
+}
+
 // phpFmtFloat is phsFmtFloat: sprintf's %f / %e of a non-negative finite double,
 // exact and rounded half to even, with php_conv_fp's unpadded exponent.
 func phpFmtFloat(a float64, conv string, prec int) string {
@@ -377,7 +457,7 @@ func init() {
 			keys, _, ok := phpArrParts(u(a[1]))
 			if !ok {
 				rt.phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, "+
-					rt.phpDebugType(u(a[1]))+" given")
+					rt.phpValueName(u(a[1]))+" given")
 			}
 			return w(rt.phpKeyIndex(keys, u(a[0])) >= 0)
 		}

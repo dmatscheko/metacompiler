@@ -364,6 +364,91 @@ function phsCase(s, up) {
     return out
 }
 
+// Is the class name n (a leading "\" allowed, any letter case) one of the
+// interfaces the engine itself declares - zend_interfaces.c, zend_exceptions.c,
+// zend_enum.c and ext/json - which interface_exists reports though no program
+// declares them?
+function phsCoreIface(n) {
+    var k = phsCase(n.charCodeAt(0) == 92 ? n.substring(1) : n, false)
+    return k == "traversable" || k == "iterator" || k == "iteratoraggregate" || k == "arrayaccess" ||
+        k == "countable" || k == "serializable" || k == "stringable" || k == "throwable" ||
+        k == "unitenum" || k == "backedenum" || k == "jsonserializable"
+}
+
+// a & b, a | b, a ^ b of two strings, byte by byte: '|' runs to the longer
+// string and keeps its tail, '&' and '^' stop at the shorter. ~s is
+// phsBitOp("~", s, s): every byte inverted.
+function phsBitOp(op, a, b) {
+    var x = phsBytes(a)
+    var y = phsBytes(b)
+    var n = x.length
+    if (op == "|") {
+        if (y.length > n) { n = y.length }
+    } else if (y.length < n) {
+        n = y.length
+    }
+    var out = []
+    var i = 0
+    while (i < n) {
+        var p = i < x.length ? x[i] : 0
+        var q = i < y.length ? y[i] : 0
+        var r = 0
+        var bit = 128
+        while (bit >= 1) {
+            var pb = p >= bit
+            var qb = q >= bit
+            if (pb) { p = p - bit }
+            if (qb) { q = q - bit }
+            var on = false
+            if (op == "&") { on = pb && qb }
+            else if (op == "|") { on = pb || qb }
+            else if (op == "^") { on = pb != qb }
+            else { on = !pb }
+            if (on) { r = r + bit }
+            bit = bit / 2
+        }
+        out.push(r)
+        i = i + 1
+    }
+    return phsText(out, 0, out.length)
+}
+
+// $s++ on a string that is not numeric: Perl's increment over the trailing
+// alphanumeric run - 'z' wraps to 'a', 'Z' to 'A' and '9' to '0' with a carry,
+// and a carry out of the first character prepends '1', 'A' or 'a' after its
+// kind. The run stops at the first other byte, so "a!" stays "a!". "" is "1".
+// zend_operators.c increment_string.
+function phsIncr(s) {
+    if (s.length == 0) { return "1" }
+    var bs = phsBytes(s)
+    var pos = bs.length - 1
+    var carry = false
+    var last = 0
+    while (pos >= 0) {
+        var c = bs[pos]
+        if (c >= 97 && c <= 122) {
+            last = 97
+            carry = c == 122
+            bs[pos] = carry ? 97 : c + 1
+        } else if (c >= 65 && c <= 90) {
+            last = 65
+            carry = c == 90
+            bs[pos] = carry ? 65 : c + 1
+        } else if (c >= 48 && c <= 57) {
+            last = 49
+            carry = c == 57
+            bs[pos] = carry ? 48 : c + 1
+        } else {
+            carry = false
+        }
+        if (!carry) { break }
+        pos = pos - 1
+    }
+    var t = phsText(bs, 0, bs.length)
+    if (carry) { return String.fromCharCode(last) + t }
+    return t
+}
+
 // The significant digits of a positive finite double a correctly rounded to nd
 // (half to even on the exact decimal, as zend_dtoa's mode 2 rounds), trailing
 // zeros dropped, and the decimal point's position: a ~= 0.<d> * 10^<e>. A value

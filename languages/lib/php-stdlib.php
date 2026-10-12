@@ -110,6 +110,17 @@ function is_null($value) { return is_null($value); }
 function is_numeric($value) { return is_numeric($value); }
 function gettype($value) { return gettype($value); }
 function get_debug_type($value) { return get_debug_type($value); }
+function get_class($object) { return get_class($object); }
+function get_parent_class($object_or_class) { return get_parent_class($object_or_class); }
+function is_a($object_or_class, $class, $allow_string = false) { return is_a($object_or_class, $class, $allow_string); }
+function is_subclass_of($object_or_class, $class, $allow_string = true) { return is_subclass_of($object_or_class, $class, $allow_string); }
+function class_exists($class, $autoload = true) { return class_exists($class); }
+function interface_exists($interface, $autoload = true) { return interface_exists($interface); }
+function method_exists($object_or_class, $method) { return method_exists($object_or_class, $method); }
+
+// zend_zval_value_name, the "X given" of PHP 8.3's argument TypeErrors: a bool is
+// named by its value ("true given"), anything else as get_debug_type does.
+function __mec_vname($v) { return $v === true ? "true" : ($v === false ? "false" : get_debug_type($v)); }
 
 // ----- comparison helpers ----------------------------------------------------
 // The sort flags' orderings: SORT_REGULAR is PHP's standard comparison (<=>),
@@ -622,7 +633,7 @@ function array_product($array) {
 function max($value, ...$values) {
     if (count($values) == 0) {
         if (!is_array($value)) {
-            throw new TypeError("max(): Argument #1 (\$value) must be of type array, " . get_debug_type($value) . " given");
+            throw new TypeError("max(): Argument #1 (\$value) must be of type array, " . __mec_vname($value) . " given");
         }
         if (count($value) == 0) { throw new ValueError("max(): Argument #1 (\$value) must contain at least one element"); }
         $values = $value;
@@ -640,7 +651,7 @@ function max($value, ...$values) {
 function min($value, ...$values) {
     if (count($values) == 0) {
         if (!is_array($value)) {
-            throw new TypeError("min(): Argument #1 (\$value) must be of type array, " . get_debug_type($value) . " given");
+            throw new TypeError("min(): Argument #1 (\$value) must be of type array, " . __mec_vname($value) . " given");
         }
         if (count($value) == 0) { throw new ValueError("min(): Argument #1 (\$value) must contain at least one element"); }
         $values = $value;
@@ -660,12 +671,12 @@ function min($value, ...$values) {
 function implode($separator, $array = null) {
     if ($array === null) {
         if (!is_array($separator)) {
-            throw new TypeError("implode(): Argument #2 (\$array) must be of type ?array, " . get_debug_type($array) . " given");
+            throw new TypeError("implode(): Argument #2 (\$array) must be of type ?array, " . __mec_vname($array) . " given");
         }
         $array = $separator;
         $separator = "";
     } elseif (!is_array($array)) {
-        throw new TypeError("implode(): Argument #2 (\$array) must be of type ?array, " . get_debug_type($array) . " given");
+        throw new TypeError("implode(): Argument #2 (\$array) must be of type ?array, " . __mec_vname($array) . " given");
     }
     $out = "";
     $first = true;
@@ -738,6 +749,17 @@ function chunk_split($string, $length = 76, $separator = "\r\n") {
 function strrev($string) {
     $out = "";
     for ($i = strlen($string) - 1; $i >= 0; $i--) { $out .= substr($string, $i, 1); }
+    return $out;
+}
+function bin2hex($string) {
+    $hex = "0123456789abcdef";
+    $out = "";
+    $string = (string)$string;
+    $n = strlen($string);
+    for ($i = 0; $i < $n; $i++) {
+        $b = ord(substr($string, $i, 1));
+        $out .= $hex[$b >> 4] . $hex[$b & 15];
+    }
     return $out;
 }
 
@@ -1345,7 +1367,7 @@ function __mec_num($fn, $n, $name, $v, $type) {
     if (is_bool($v) || $v === null || (is_string($v) && is_numeric($v))) {
         return $type == "float" ? (float)$v : $v + 0;
     }
-    throw new TypeError($fn . "(): Argument #" . $n . " (\$" . $name . ") must be of type " . $type . ", " . get_debug_type($v) . " given");
+    throw new TypeError($fn . "(): Argument #" . $n . " (\$" . $name . ") must be of type " . $type . ", " . __mec_vname($v) . " given");
 }
 function __mec_f1($fn, $num) { return __mec_math($fn, __mec_num($fn, 1, "num", $num, "float"), 0.0); }
 function floor($num) { return __mec_math("floor", __mec_num("floor", 1, "num", $num, "int|float"), 0.0); }
@@ -2154,7 +2176,7 @@ function __mec_jhex4($s, $i, $n) {
 // it here, and answers 0.
 function spl_object_id($object) {
     if (!is_object($object)) {
-        throw new TypeError("spl_object_id(): Argument #1 (\$object) must be of type object, " . get_debug_type($object) . " given");
+        throw new TypeError("spl_object_id(): Argument #1 (\$object) must be of type object, " . __mec_vname($object) . " given");
     }
     return __mec_oid($object);
 }

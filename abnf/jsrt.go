@@ -14446,7 +14446,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_phbnot": func(a []uint64) uint64 {
 			return rt.wrapNum(float64(^int32(int64(phpTrunc(phpNumOf(rt.phpToNum(u(a[0]))))))))
 		},
-		"js_phnum":  func(a []uint64) uint64 { return w(rt.phpToNum(u(a[0]))) },
 		"js_phcast": func(a []uint64) uint64 { return w(rt.phpCast(rt.toString(u(a[0])), u(a[1]))) },
 		// The one array type: an ordered key->value map with __next, the next
 		// automatic integer key. The shape is the runtime's __dict, so js_range_len /

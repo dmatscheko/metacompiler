@@ -672,13 +672,17 @@ func (rt *jsrt) phpToNum(v interface{}) interface{} {
 	return float64(0)
 }
 
-// phpNoNum: a value with no number reading - an array, an object, a closure or a
-// generator. Twin of noNum in php-interpreter.abnf and phNoNum in
-// lib/php-rt.metajs.
+// phpNoNum: a value with no number reading - an array, an object, a closure, a
+// generator or a string with no numeric prefix (PHP 8's TypeError, where
+// "5 apples" still reads 5). Twin of noNum in php-interpreter.abnf and phNoNum
+// in lib/php-rt.metajs.
 func phpNoNum(v interface{}) bool {
-	switch v.(type) {
-	case float64, jsGInt, jsPhpFlo, bool, jsUndefT, jsNullT, string:
+	switch t := v.(type) {
+	case float64, jsGInt, jsPhpFlo, bool, jsUndefT, jsNullT:
 		return false
+	case string:
+		_, _, _, ok := phpNumScan(t)
+		return !ok
 	}
 	return true
 }
@@ -853,6 +857,12 @@ func (rt *jsrt) phpIntArith(op string, x, y int64) interface{} {
 // (lang/operators/bitwiseShiftLeft_basiclong_64bit.phpt) - and a negative shift
 // count is an ArithmeticError rather than a shift the other way.
 func (rt *jsrt) phpBit(op string, l, r interface{}) interface{} {
+	// Two strings under &, | or ^ combine byte by byte and stay a string.
+	if ls, ok := l.(string); ok && op != "<<" && op != ">>" {
+		if rs, ok := r.(string); ok {
+			return phpBitOp(op, ls, rs)
+		}
+	}
 	if phpNoNum(l) || phpNoNum(r) {
 		rt.phpBinopErr(op, l, r)
 	}
@@ -882,6 +892,51 @@ func (rt *jsrt) phpBit(op string, l, r interface{}) interface{} {
 	}
 	rt.fail("unknown bit operator %s", op)
 	return nil
+}
+
+// phpIncDec is PHP 8.3's increment_function / decrement_function: a number steps
+// by one; null++ is 1 and null-- stays null; a bool does not change; "" becomes
+// "1" or -1; a numeric string steps as its number; any other string increments
+// Perl-style (phpIncr) and does not decrement. An array or an object is a
+// TypeError. Twin of phpIncDec in php-interpreter.abnf and phIncDec in
+// lib/php-rt.metajs.
+func (rt *jsrt) phpIncDec(v interface{}, inc bool) interface{} {
+	op := "-"
+	if inc {
+		op = "+"
+	}
+	switch t := v.(type) {
+	case jsUndefT, jsNullT:
+		if inc {
+			return float64(1)
+		}
+		return jsNull
+	case bool:
+		return t
+	case string:
+		if t == "" {
+			if inc {
+				return "1"
+			}
+			return float64(-1)
+		}
+		n := phpNumStrVal(t)
+		if n == nil {
+			if inc {
+				return phpIncr(t)
+			}
+			return t
+		}
+		return rt.phpArith(op, n, float64(1))
+	}
+	if phpNoNum(v) {
+		verb := "decrement "
+		if inc {
+			verb = "increment "
+		}
+		rt.phpRaise("TypeError", "Cannot "+verb+rt.phpDebugType(v))
+	}
+	return rt.phpArith(op, v, float64(1))
 }
 
 // phpNeg is unary minus. It keeps the operand's TYPE (so -0.0 stays -0), and the
@@ -1689,13 +1744,17 @@ func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 		if o, ok := v.(*jsObject); ok && phpIsObj(v) {
 			return rt.phpObjArr(o, false, nil)
 		}
+		// A Closure or a Generator is an object with no properties.
+		if phpIsGenOrClosure(v) {
+			return out
+		}
 		rt.phpArrPush(out, v)
 		return out
 	case "object":
 		// An array's elements become the properties of a stdClass, any other
 		// non-object the one property "scalar". Twin of phpCast in
 		// php-interpreter.abnf.
-		if phpIsObj(v) {
+		if phpIsObj(v) || phpIsGenOrClosure(v) {
 			return v
 		}
 		o := newJSObject()
@@ -2082,6 +2141,17 @@ func (rt *jsrt) phpDebugType(v interface{}) string {
 	return "unknown"
 }
 
+// phpValueName is zend_zval_value_name, the "X given" of PHP 8.3's argument
+// TypeErrors: a bool is named by its value ("true given"), anything else as
+// get_debug_type does. Twin of phpValueName in php-interpreter.abnf and
+// phValueName in lib/php-rt.metajs.
+func (rt *jsrt) phpValueName(v interface{}) string {
+	if b, ok := v.(bool); ok {
+		return strconv.FormatBool(b)
+	}
+	return rt.phpDebugType(v)
+}
+
 // phpFullName is the name get_class and ::class answer: an anonymous class's
 // carries the "\0file:line$n" suffix every display leaves off (anonSuffix in
 // php-to-llvm-ir.abnf).
@@ -2440,7 +2510,7 @@ func init() {
 			if phpIsObj(v) && rt.phpIsA(v, "Countable") {
 				return w(rt.memberCall(v, "count", nil))
 			}
-			rt.phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, "+rt.phpDebugType(v)+" given")
+			rt.phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, "+rt.phpValueName(v)+" given")
 			return jsHUndefined
 		}
 		// js_phrelcb(v, self, static): a library function's callback named RELATIVE
@@ -2570,7 +2640,20 @@ func init() {
 		// The four that REPLACE a jsrt.go entry: each is exact 64 bit where the
 		// shared one is 32 bit or double based.
 		m["js_phneg"] = func(a []uint64) uint64 { return w(rt.phpNeg(u(a[0]))) }
-		m["js_phbnot"] = func(a []uint64) uint64 { return w(phpMkInt(^rt.phpToLong(u(a[0])))) }
+		// ~: a string's bytes or an int's bits; an array or an object is a
+		// TypeError. Twin of phpBitNot in php-interpreter.abnf.
+		m["js_phbnot"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if s, ok := v.(string); ok {
+				return w(phpBitOp("~", s, s))
+			}
+			if phpNoNum(v) {
+				rt.phpRaise("TypeError", "Cannot perform bitwise not on "+rt.phpDebugType(v))
+			}
+			return w(phpMkInt(^rt.phpToLong(v)))
+		}
+		m["js_phinc"] = func(a []uint64) uint64 { return w(rt.phpIncDec(u(a[0]), true)) }
+		m["js_phdec"] = func(a []uint64) uint64 { return w(rt.phpIncDec(u(a[0]), false)) }
 		m["js_phintdiv"] = func(a []uint64) uint64 {
 			y := rt.phpToLong(u(a[1]))
 			if y == 0 {
@@ -2596,7 +2679,7 @@ func init() {
 				bad = true
 			}
 			if bad {
-				rt.phpRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, "+rt.phpDebugType(u(a[0]))+" given")
+				rt.phpRaise("TypeError", "abs(): Argument #1 ($num) must be of type int|float, "+rt.phpValueName(u(a[0]))+" given")
 			}
 			n := rt.phpToNum(u(a[0]))
 			if f, isF := n.(jsPhpFlo); isF {
@@ -2632,7 +2715,7 @@ func init() {
 			case "array":
 				return boolH(phpIsArr(v))
 			case "object":
-				return boolH(phpIsObj(v))
+				return boolH(phpIsObj(v) || phpIsGenOrClosure(v))
 			case "null":
 				return boolH(isNullish(v))
 			case "numeric":
@@ -2761,15 +2844,15 @@ func init() {
 			}
 			return w(jsUndef)
 		}
-		// js_phclsexists(found, iface): class_exists / interface_exists over the
-		// descriptor a name was looked up to (null when none). Twin of
+		// js_phclsexists(found, name, iface): class_exists / interface_exists over
+		// the descriptor the name was looked up to (null when none). Twin of
 		// phpClassExists in languages/php-interpreter.abnf.
 		m["js_phclsexists"] = func(a []uint64) uint64 {
 			o, _ := u(a[0]).(*jsObject)
 			if o == nil || o.props["__isclass"] != true {
-				return jsHFalse
+				return boolH(rt.phpTest(u(a[2])) && phpCoreIface(rt.phpStr(u(a[1]))))
 			}
-			if rt.phpTest(u(a[1])) {
+			if rt.phpTest(u(a[2])) {
 				return boolH(o.props["__isiface"] == true)
 			}
 			return boolH(o.props["__isiface"] != true && o.props["__istrait"] != true)
@@ -2813,11 +2896,7 @@ func init() {
 				}
 			}
 			if cls == nil {
-				given := rt.phpDebugType(v)
-				if b, isB := v.(bool); isB {
-					given = strconv.FormatBool(b)
-				}
-				rt.phpRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, "+given+" given")
+				rt.phpRaise("TypeError", "get_parent_class(): Argument #1 ($object_or_class) must be an object or a valid class name, "+rt.phpValueName(v)+" given")
 			}
 			if sup, ok := cls.props["__super"].(*jsObject); ok {
 				return rt.wrapStr(rt.phpStr(sup.props["__name"]))
@@ -2921,8 +3000,13 @@ func init() {
 				}
 				return rt.wrapStr(rt.phpClassName(o))
 			}
-			return jsHFalse
+			if v := u(a[0]); phpIsGenOrClosure(v) {
+				return rt.wrapStr(rt.phpDebugType(v))
+			}
+			rt.phpRaise("TypeError", "get_class(): Argument #1 ($object) must be of type object, "+rt.phpValueName(u(a[0]))+" given")
+			return 0
 		}
+		m["js_phvname"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpValueName(u(a[0]))) }
 		// js_phmset(cls, name, closure): a method declaration. Twin of setMethod
 		// in php-interpreter.abnf, which says why every recorded spelling is set.
 		m["js_phmset"] = func(a []uint64) uint64 {
