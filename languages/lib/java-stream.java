@@ -6,7 +6,8 @@
 // stream (jStreamWants in lib/java-decltypes.js). One implementation serves
 // all three engines. What it answers is java 24.0.2's for a SEQUENTIAL stream.
 //
-// Stream and IntStream are classes here, not interfaces, and Collector is one
+// Stream, IntStream, LongStream and DoubleStream are classes here, not
+// interfaces, and Collector is one
 // class holding its three functions. Every stage of a pipeline is an Iterator
 // over the elements it passes on, so pulling an element from the last stage
 // pulls it through every stage before it: each element passes the whole chain
@@ -33,19 +34,26 @@ class StreamOfArray implements Iterator<Object> {
     }
 }
 
-// IntStream.range / rangeClosed: the counter is a long, so a range ending at
-// Integer.MAX_VALUE stops instead of wrapping.
+// IntStream and LongStream's range / rangeClosed: from up to and including
+// last, which ends a range at Long.MAX_VALUE without wrapping. An IntStream's
+// elements are ints.
 class StreamOfRange implements Iterator<Object> {
     long cur;
-    long end;
-    StreamOfRange(long from, long end) {
+    long last;
+    boolean done;
+    boolean ints;
+    StreamOfRange(long from, long last, boolean ints) {
         cur = from;
-        this.end = end;
+        this.last = last;
+        done = from > last;
+        this.ints = ints;
     }
-    public boolean hasNext() { return cur < end; }
+    public boolean hasNext() { return !done; }
     public Object next() {
-        cur++;
-        return (int) (cur - 1);
+        long v = cur;
+        if (v == last) { done = true; } else { cur++; }
+        if (ints) { return (int) v; }
+        return v;
     }
 }
 
@@ -65,22 +73,28 @@ class StreamOfCollection implements Iterator<Object> {
     }
 }
 
-// map / mapToObj (Function.apply, IntFunction.apply) and mapToInt / IntStream's
-// map (ToIntFunction.applyAsInt, IntUnaryOperator.applyAsInt).
+// map and its mapToX forms. The function's method is named after the element
+// type it answers: apply (kind OBJ), applyAsInt, applyAsLong, applyAsDouble.
 class StreamMap implements Iterator<Object> {
+    static final int OBJ = 0;
+    static final int INT = 1;
+    static final int LONG = 2;
+    static final int DOUBLE = 3;
     Iterator<Object> up;
     Object f;
-    boolean asInt;
-    StreamMap(Iterator<Object> up, Object f, boolean asInt) {
+    int kind;
+    StreamMap(Iterator<Object> up, Object f, int kind) {
         this.up = up;
         this.f = f;
-        this.asInt = asInt;
+        this.kind = kind;
     }
     public boolean hasNext() { return up.hasNext(); }
     @SuppressWarnings("unchecked")
     public Object next() {
         Object x = up.next();
-        if (asInt) { return ((java.util.function.ToIntFunction<Object>) f).applyAsInt(x); }
+        if (kind == INT) { return ((java.util.function.ToIntFunction<Object>) f).applyAsInt(x); }
+        if (kind == LONG) { return ((java.util.function.ToLongFunction<Object>) f).applyAsLong(x); }
+        if (kind == DOUBLE) { return ((java.util.function.ToDoubleFunction<Object>) f).applyAsDouble(x); }
         return ((java.util.function.Function<Object, Object>) f).apply(x);
     }
 }
@@ -218,6 +232,24 @@ class StreamPipes {
     static void checkCount(long n) {
         if (n < 0) { throw new IllegalArgumentException(Long.toString(n)); }
     }
+    // DoubleStream's sum and average: Kahan summation, as java's
+    // Collectors.sumWithCompensation and computeFinalSum do it. acc is
+    // {sum, compensation, count, plain sum}; the plain sum answers when the
+    // compensated one is NaN from adding opposite infinities.
+    static void addCompensated(double[] acc, double v) {
+        double tmp = v - acc[1];
+        double sum = acc[0];
+        double velvel = sum + tmp;
+        acc[1] = (velvel - sum) - tmp;
+        acc[0] = velvel;
+        acc[2]++;
+        acc[3] += v;
+    }
+    static double finalSum(double[] acc) {
+        double tmp = acc[0] - acc[1];
+        if (Double.isNaN(tmp) && Double.isInfinite(acc[3])) { return acc[3]; }
+        return tmp;
+    }
 }
 
 // What both kinds of stream share: the last stage, and the single-use check
@@ -230,6 +262,15 @@ abstract class BaseStream {
         linked = true;
         return it;
     }
+    public long count() {
+        Iterator<Object> i = take();
+        long n = 0;
+        while (i.hasNext()) {
+            i.next();
+            n++;
+        }
+        return n;
+    }
 }
 
 class Stream<T> extends BaseStream {
@@ -240,8 +281,10 @@ class Stream<T> extends BaseStream {
     public static <T> Stream<T> empty() { return new Stream<T>(new StreamOfArray(new Object[0], 0, 0)); }
     static <T> Stream<T> ofCollection(Collection<T> c) { return new Stream<T>(new StreamOfCollection(c)); }
 
-    public <R> Stream<R> map(java.util.function.Function<? super T, ? extends R> f) { return new Stream<R>(new StreamMap(take(), f, false)); }
-    public IntStream mapToInt(java.util.function.ToIntFunction<? super T> f) { return new IntStream(new StreamMap(take(), f, true)); }
+    public <R> Stream<R> map(java.util.function.Function<? super T, ? extends R> f) { return new Stream<R>(new StreamMap(take(), f, StreamMap.OBJ)); }
+    public IntStream mapToInt(java.util.function.ToIntFunction<? super T> f) { return new IntStream(new StreamMap(take(), f, StreamMap.INT)); }
+    public LongStream mapToLong(java.util.function.ToLongFunction<? super T> f) { return new LongStream(new StreamMap(take(), f, StreamMap.LONG)); }
+    public DoubleStream mapToDouble(java.util.function.ToDoubleFunction<? super T> f) { return new DoubleStream(new StreamMap(take(), f, StreamMap.DOUBLE)); }
     @SuppressWarnings("unchecked")
     public Stream<T> filter(java.util.function.Predicate<? super T> p) { return new Stream<T>(new StreamFilter(take(), (java.util.function.Predicate<Object>) p)); }
     @SuppressWarnings("unchecked")
@@ -263,15 +306,6 @@ class Stream<T> extends BaseStream {
     public void forEach(java.util.function.Consumer<? super T> f) {
         Iterator<Object> i = take();
         while (i.hasNext()) { f.accept((T) i.next()); }
-    }
-    public long count() {
-        Iterator<Object> i = take();
-        long n = 0;
-        while (i.hasNext()) {
-            i.next();
-            n++;
-        }
-        return n;
     }
     @SuppressWarnings("unchecked")
     public T reduce(T identity, java.util.function.BinaryOperator<T> op) {
@@ -345,11 +379,15 @@ class IntStream extends BaseStream {
 
     public static IntStream of(int... a) { return new IntStream(new StreamOfArray(Arrays.elems(a), 0, a.length)); }
     public static IntStream empty() { return new IntStream(new StreamOfArray(new Object[0], 0, 0)); }
-    public static IntStream range(int from, int to) { return new IntStream(new StreamOfRange(from, to)); }
-    public static IntStream rangeClosed(int from, int to) { return new IntStream(new StreamOfRange(from, (long) to + 1)); }
+    public static IntStream range(int from, int to) { return new IntStream(new StreamOfRange(from, (long) to - 1, true)); }
+    public static IntStream rangeClosed(int from, int to) { return new IntStream(new StreamOfRange(from, to, true)); }
 
-    public IntStream map(java.util.function.IntUnaryOperator f) { return new IntStream(new StreamMap(take(), f, true)); }
-    public <U> Stream<U> mapToObj(java.util.function.IntFunction<? extends U> f) { return new Stream<U>(new StreamMap(take(), f, false)); }
+    public IntStream map(java.util.function.IntUnaryOperator f) { return new IntStream(new StreamMap(take(), f, StreamMap.INT)); }
+    public <U> Stream<U> mapToObj(java.util.function.IntFunction<? extends U> f) { return new Stream<U>(new StreamMap(take(), f, StreamMap.OBJ)); }
+    public LongStream mapToLong(java.util.function.IntToLongFunction f) { return new LongStream(new StreamMap(take(), f, StreamMap.LONG)); }
+    public DoubleStream mapToDouble(java.util.function.IntToDoubleFunction f) { return new DoubleStream(new StreamMap(take(), f, StreamMap.DOUBLE)); }
+    public LongStream asLongStream() { return mapToLong(x -> (long) x); }
+    public DoubleStream asDoubleStream() { return mapToDouble(x -> (double) x); }
     public Stream<Integer> boxed() { return new Stream<Integer>(take()); }
     @SuppressWarnings("unchecked")
     public IntStream filter(java.util.function.IntPredicate p) { return new IntStream(new StreamFilter(take(), (java.util.function.Predicate<Object>) (Object) p)); }
@@ -375,15 +413,6 @@ class IntStream extends BaseStream {
         int s = 0;
         while (i.hasNext()) { s += (int) i.next(); }
         return s;
-    }
-    public long count() {
-        Iterator<Object> i = take();
-        long n = 0;
-        while (i.hasNext()) {
-            i.next();
-            n++;
-        }
-        return n;
     }
     public OptionalDouble average() {
         Iterator<Object> i = take();
@@ -444,6 +473,174 @@ class IntStream extends BaseStream {
     }
 }
 
+class LongStream extends BaseStream {
+    LongStream(Iterator<Object> it) { this.it = it; }
+
+    public static LongStream of(long... a) { return new LongStream(new StreamOfArray(Arrays.elems(a), 0, a.length)); }
+    public static LongStream empty() { return new LongStream(new StreamOfArray(new Object[0], 0, 0)); }
+    public static LongStream range(long from, long to) {
+        if (from >= to) { return empty(); }
+        return new LongStream(new StreamOfRange(from, to - 1, false));
+    }
+    public static LongStream rangeClosed(long from, long to) { return new LongStream(new StreamOfRange(from, to, false)); }
+
+    public LongStream map(java.util.function.LongUnaryOperator f) { return new LongStream(new StreamMap(take(), f, StreamMap.LONG)); }
+    public <U> Stream<U> mapToObj(java.util.function.LongFunction<? extends U> f) { return new Stream<U>(new StreamMap(take(), f, StreamMap.OBJ)); }
+    public IntStream mapToInt(java.util.function.LongToIntFunction f) { return new IntStream(new StreamMap(take(), f, StreamMap.INT)); }
+    public DoubleStream mapToDouble(java.util.function.LongToDoubleFunction f) { return new DoubleStream(new StreamMap(take(), f, StreamMap.DOUBLE)); }
+    public DoubleStream asDoubleStream() { return mapToDouble(x -> (double) x); }
+    public Stream<Long> boxed() { return new Stream<Long>(take()); }
+    @SuppressWarnings("unchecked")
+    public LongStream filter(java.util.function.LongPredicate p) { return new LongStream(new StreamFilter(take(), (java.util.function.Predicate<Object>) (Object) p)); }
+    @SuppressWarnings("unchecked")
+    public LongStream peek(java.util.function.LongConsumer f) { return new LongStream(new StreamPeek(take(), (java.util.function.Consumer<Object>) (Object) f)); }
+    public LongStream limit(long n) {
+        StreamPipes.checkCount(n);
+        return new LongStream(new StreamSlice(take(), 0, n));
+    }
+    public LongStream skip(long n) {
+        StreamPipes.checkCount(n);
+        return new LongStream(new StreamSlice(take(), n, -1));
+    }
+    public LongStream sorted() { return new LongStream(new StreamSort(take(), null)); }
+    public LongStream distinct() { return new LongStream(new StreamDistinct(take())); }
+
+    public void forEach(java.util.function.LongConsumer f) {
+        Iterator<Object> i = take();
+        while (i.hasNext()) { f.accept((long) i.next()); }
+    }
+    public long sum() { return reduce(0L, (x, y) -> x + y); }
+    public OptionalDouble average() {
+        Iterator<Object> i = take();
+        long s = 0;
+        long n = 0;
+        while (i.hasNext()) {
+            s += (long) i.next();
+            n++;
+        }
+        if (n == 0) { return OptionalDouble.empty(); }
+        return OptionalDouble.of((double) s / n);
+    }
+    public OptionalLong min() { return reduce((x, y) -> Math.min(x, y)); }
+    public OptionalLong max() { return reduce((x, y) -> Math.max(x, y)); }
+    public long reduce(long identity, java.util.function.LongBinaryOperator op) {
+        Iterator<Object> i = take();
+        long r = identity;
+        while (i.hasNext()) { r = op.applyAsLong(r, (long) i.next()); }
+        return r;
+    }
+    public OptionalLong reduce(java.util.function.LongBinaryOperator op) {
+        Iterator<Object> i = take();
+        if (!i.hasNext()) { return OptionalLong.empty(); }
+        long r = (long) i.next();
+        while (i.hasNext()) { r = op.applyAsLong(r, (long) i.next()); }
+        return OptionalLong.of(r);
+    }
+    public long[] toArray() {
+        Object[] all = StreamPipes.drain(take());
+        long[] out = new long[all.length];
+        System.arraycopy(all, 0, out, 0, all.length);
+        return out;
+    }
+    public OptionalLong findFirst() {
+        Iterator<Object> i = take();
+        if (!i.hasNext()) { return OptionalLong.empty(); }
+        return OptionalLong.of((long) i.next());
+    }
+    public boolean anyMatch(java.util.function.LongPredicate p) { return match(p, true); }
+    public boolean allMatch(java.util.function.LongPredicate p) { return !match(p, false); }
+    public boolean noneMatch(java.util.function.LongPredicate p) { return !match(p, true); }
+    boolean match(java.util.function.LongPredicate p, boolean want) {
+        Iterator<Object> i = take();
+        while (i.hasNext()) {
+            if (p.test((long) i.next()) == want) { return true; }
+        }
+        return false;
+    }
+}
+
+// min and max are Math.min / Math.max, so NaN wins and -0.0 is below 0.0;
+// sorted() is Double.compare's order.
+class DoubleStream extends BaseStream {
+    DoubleStream(Iterator<Object> it) { this.it = it; }
+
+    public static DoubleStream of(double... a) { return new DoubleStream(new StreamOfArray(Arrays.elems(a), 0, a.length)); }
+    public static DoubleStream empty() { return new DoubleStream(new StreamOfArray(new Object[0], 0, 0)); }
+
+    public DoubleStream map(java.util.function.DoubleUnaryOperator f) { return new DoubleStream(new StreamMap(take(), f, StreamMap.DOUBLE)); }
+    public <U> Stream<U> mapToObj(java.util.function.DoubleFunction<? extends U> f) { return new Stream<U>(new StreamMap(take(), f, StreamMap.OBJ)); }
+    public IntStream mapToInt(java.util.function.DoubleToIntFunction f) { return new IntStream(new StreamMap(take(), f, StreamMap.INT)); }
+    public LongStream mapToLong(java.util.function.DoubleToLongFunction f) { return new LongStream(new StreamMap(take(), f, StreamMap.LONG)); }
+    public Stream<Double> boxed() { return new Stream<Double>(take()); }
+    @SuppressWarnings("unchecked")
+    public DoubleStream filter(java.util.function.DoublePredicate p) { return new DoubleStream(new StreamFilter(take(), (java.util.function.Predicate<Object>) (Object) p)); }
+    @SuppressWarnings("unchecked")
+    public DoubleStream peek(java.util.function.DoubleConsumer f) { return new DoubleStream(new StreamPeek(take(), (java.util.function.Consumer<Object>) (Object) f)); }
+    public DoubleStream limit(long n) {
+        StreamPipes.checkCount(n);
+        return new DoubleStream(new StreamSlice(take(), 0, n));
+    }
+    public DoubleStream skip(long n) {
+        StreamPipes.checkCount(n);
+        return new DoubleStream(new StreamSlice(take(), n, -1));
+    }
+    public DoubleStream sorted() { return new DoubleStream(new StreamSort(take(), null)); }
+    public DoubleStream distinct() { return new DoubleStream(new StreamDistinct(take())); }
+
+    public void forEach(java.util.function.DoubleConsumer f) {
+        Iterator<Object> i = take();
+        while (i.hasNext()) { f.accept((double) i.next()); }
+    }
+    double[] sums() {
+        Iterator<Object> i = take();
+        double[] acc = new double[4];
+        while (i.hasNext()) { StreamPipes.addCompensated(acc, (double) i.next()); }
+        return acc;
+    }
+    public double sum() { return StreamPipes.finalSum(sums()); }
+    public OptionalDouble average() {
+        double[] acc = sums();
+        if (acc[2] == 0) { return OptionalDouble.empty(); }
+        return OptionalDouble.of(StreamPipes.finalSum(acc) / acc[2]);
+    }
+    public OptionalDouble min() { return reduce((x, y) -> Math.min(x, y)); }
+    public OptionalDouble max() { return reduce((x, y) -> Math.max(x, y)); }
+    public double reduce(double identity, java.util.function.DoubleBinaryOperator op) {
+        Iterator<Object> i = take();
+        double r = identity;
+        while (i.hasNext()) { r = op.applyAsDouble(r, (double) i.next()); }
+        return r;
+    }
+    public OptionalDouble reduce(java.util.function.DoubleBinaryOperator op) {
+        Iterator<Object> i = take();
+        if (!i.hasNext()) { return OptionalDouble.empty(); }
+        double r = (double) i.next();
+        while (i.hasNext()) { r = op.applyAsDouble(r, (double) i.next()); }
+        return OptionalDouble.of(r);
+    }
+    public double[] toArray() {
+        Object[] all = StreamPipes.drain(take());
+        double[] out = new double[all.length];
+        System.arraycopy(all, 0, out, 0, all.length);
+        return out;
+    }
+    public OptionalDouble findFirst() {
+        Iterator<Object> i = take();
+        if (!i.hasNext()) { return OptionalDouble.empty(); }
+        return OptionalDouble.of((double) i.next());
+    }
+    public boolean anyMatch(java.util.function.DoublePredicate p) { return match(p, true); }
+    public boolean allMatch(java.util.function.DoublePredicate p) { return !match(p, false); }
+    public boolean noneMatch(java.util.function.DoublePredicate p) { return !match(p, true); }
+    boolean match(java.util.function.DoublePredicate p, boolean want) {
+        Iterator<Object> i = take();
+        while (i.hasNext()) {
+            if (p.test((double) i.next()) == want) { return true; }
+        }
+        return false;
+    }
+}
+
 // A mutable reduction: a new container from supplier, each element folded in
 // by accumulator, the result read out by finisher.
 final class Collector<T, A, R> {
@@ -481,6 +678,10 @@ final class Collectors {
     @SuppressWarnings("unchecked")
     public static <T> Collector<T, ?, List<T>> toList() {
         return new Collector<T, Object, List<T>>(() -> new ArrayList<Object>(), (l, x) -> ((ArrayList<Object>) l).add(x), l -> l);
+    }
+    @SuppressWarnings("unchecked")
+    public static <T> Collector<T, ?, Set<T>> toSet() {
+        return new Collector<T, Object, Set<T>>(() -> new HashSet<Object>(), (h, x) -> ((HashSet<Object>) h).add(x), h -> h);
     }
     public static Collector<CharSequence, ?, String> joining() { return joining("", "", ""); }
     public static Collector<CharSequence, ?, String> joining(CharSequence delim) { return joining(delim, "", ""); }

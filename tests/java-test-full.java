@@ -38,16 +38,21 @@
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.ConcurrentModificationException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.DoubleStream;
 import java.util.stream.IntStream;
+import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 class Main {
@@ -121,6 +126,7 @@ class Main {
         S56.run(); // SECTION-CALL 56
         S57.run(); // SECTION-CALL 57
         S58.run(); // SECTION-CALL 58
+        S59.run(); // SECTION-CALL 59
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3403,5 +3409,48 @@ class S58 {
         String cmp = "";
         for (int i = 0; i < 4; i++) { cmp = cmp + Short.compare(hs[i], hs[3 - i]) + " " + Byte.compare(bs[i], bs[3 - i]) + " "; }
         Main.check("sc58", cmp.equals("32771 131 -32772 -132 32772 132 -32771 -131 "));
+    }
+}
+
+// ===== SECTION 59: LongStream, DoubleStream, HashSet, Collectors.toSet, Comparator =====
+//
+// DoubleStream's sum and average are compensated (Kahan) sums, so ten 0.1s
+// sum to 1.0 where a loop gets 0.9999999999999999; its min and max are
+// Math.min / Math.max. A LongStream range may end at Long.MAX_VALUE. A HashSet
+// is a HashMap's key set and iterates in its table's order. Comparator's
+// statics order by compareTo, and a comparator they return answers reversed()
+// and thenComparing(). Every expected value is java 24.0.2's.
+class S59 {
+    static void run() {
+        double[] tenth = new double[10];
+        Arrays.fill(tenth, 0.1);
+        double loop = 0;
+        for (double d : tenth) { loop += d; }
+        Main.check("ds59", DoubleStream.of(tenth).sum() == 1.0 && loop != 1.0 && Arrays.stream(tenth).average().getAsDouble() == 0.1
+            && ("" + DoubleStream.of(0.0, -0.0).min() + DoubleStream.of(3.0, Double.NaN).max()).equals("OptionalDouble[-0.0]OptionalDouble[NaN]")
+            && Arrays.toString(DoubleStream.of(3.0, -0.0, Double.NaN, 0.0).sorted().toArray()).equals("[-0.0, 0.0, 3.0, NaN]")
+            && Double.isInfinite(DoubleStream.of(1.0, Double.POSITIVE_INFINITY).sum()) && ("" + DoubleStream.empty().average()).equals("OptionalDouble.empty")
+            && DoubleStream.of(1, 2, 3).map(x -> x / 2).mapToObj(x -> "" + x).collect(Collectors.joining(",")).equals("0.5,1.0,1.5"));
+        Main.check("ls59", LongStream.rangeClosed(Long.MAX_VALUE - 2, Long.MAX_VALUE).count() == 3 && LongStream.range(0, 5).sum() == 10
+            && LongStream.of(Long.MAX_VALUE, 1).sum() == Long.MIN_VALUE && ("" + LongStream.of(4, 9).max()).equals("OptionalLong[9]")
+            && ("" + LongStream.of(1, 2).average()).equals("OptionalDouble[1.5]") && IntStream.of(3, 4).asLongStream().map(x -> x * 3000000000L).sum() == 21000000000L
+            && Stream.of("a", "bb").mapToDouble(String::length).sum() == 3.0 && IntStream.rangeClosed(Integer.MAX_VALUE - 1, Integer.MAX_VALUE).count() == 2);
+        Set<String> hs = new HashSet<>(List.of("banana", "apple", "cherry", "date", "elderberry", "fig", "grape"));
+        HashSet<Integer> hi = new HashSet<>();
+        for (int i = 0; i < 20; i++) { hi.add(i * 37 % 50 - 10); }
+        hi.removeIf(x -> x % 3 == 0);
+        Set<Integer> t = Stream.of(3, 2, 1, 3).collect(Collectors.toSet());
+        Main.check("hs59", hs.toString().equals("[banana, date, apple, cherry, fig, grape, elderberry]") && hs.hashCode() == -1879343967
+            && hi.toString().equals("[-1, 32, 1, 34, -5, 38, -7, 8, -10, 10, 14, 19, 23, 25]") && !hi.add(32) && hi.remove(32) && !hi.contains(32)
+            && t.equals(new HashSet<>(List.of(1, 2, 3))) && t.size() == 3 && !t.equals(hi));
+        List<String> ws = new ArrayList<>(List.of("pear", "fig", "apple", "kiwi", "date"));
+        ws.sort(Comparator.naturalOrder());
+        String nat = ws.toString();
+        ws.sort(Comparator.comparingInt(String::length).reversed());
+        String rev = ws.toString();
+        ws.sort(Comparator.comparing(String::length).thenComparing(Comparator.reverseOrder()));
+        Main.check("cm59", nat.equals("[apple, date, fig, kiwi, pear]") && rev.equals("[apple, date, kiwi, pear, fig]")
+            && ws.toString().equals("[fig, pear, kiwi, date, apple]")
+            && Stream.of(5, 3, 9).sorted(Comparator.reverseOrder()).toList().toString().equals("[9, 5, 3]"));
     }
 }

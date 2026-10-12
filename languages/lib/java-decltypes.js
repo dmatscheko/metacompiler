@@ -912,7 +912,7 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalDouble,Map,HashMap,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,Collection,Comparator,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalLong,OptionalDouble,Map,HashMap,".indexOf("," + rest + ",") >= 0
 }
 
 // Does this import, or the class a `new` creates, name a type lib/java-map.java
@@ -923,7 +923,8 @@ function jUtilWants(path) {
 var jMapWant = false
 function jMapWants(path) {
     return path == "java.util.Map" || path == "java.util.HashMap" || path == "java.util.Map.Entry"
-        || path == "HashMap" || path == "java.base"
+        || path == "java.util.Set" || path == "java.util.HashSet"
+        || path == "HashMap" || path == "HashSet" || path == "java.base"
 }
 
 // Does this import name a java.util.stream type? Then the grammar compiles

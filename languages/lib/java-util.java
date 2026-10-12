@@ -14,6 +14,49 @@ interface Iterator<E> {
     E next();
 }
 
+// java.util.Comparator: naturalOrder, reverseOrder and comparing order by
+// Comparable's compareTo, as java's do. Each comparator is built in a local of
+// type Comparator, which makes the lambda an instance of this interface, so a
+// chained reversed() or thenComparing() reaches the defaults. The members java
+// overloads on a functional-interface parameter are left out: a lambda carries
+// no parameter types to pick the overload by at run time.
+interface Comparator<T> {
+    int compare(T a, T b);
+
+    @SuppressWarnings("unchecked")
+    static <T extends Comparable<? super T>> Comparator<T> naturalOrder() {
+        Comparator<T> c = (a, b) -> ((Comparable<Object>) a).compareTo(b);
+        return c;
+    }
+    @SuppressWarnings("unchecked")
+    static <T extends Comparable<? super T>> Comparator<T> reverseOrder() {
+        Comparator<T> c = (a, b) -> ((Comparable<Object>) b).compareTo(a);
+        return c;
+    }
+    @SuppressWarnings("unchecked")
+    static <T, U extends Comparable<? super U>> Comparator<T> comparing(java.util.function.Function<? super T, ? extends U> key) {
+        Comparator<T> c = (a, b) -> ((Comparable<Object>) key.apply(a)).compareTo(key.apply(b));
+        return c;
+    }
+    static <T> Comparator<T> comparingInt(java.util.function.ToIntFunction<? super T> key) {
+        Comparator<T> c = (a, b) -> Integer.compare(key.applyAsInt(a), key.applyAsInt(b));
+        return c;
+    }
+    default Comparator<T> reversed() {
+        Comparator<T> self = this;
+        Comparator<T> c = (a, b) -> self.compare(b, a);
+        return c;
+    }
+    default Comparator<T> thenComparing(Comparator<? super T> other) {
+        Comparator<T> self = this;
+        Comparator<T> c = (a, b) -> {
+            int r = self.compare(a, b);
+            return r != 0 ? r : other.compare(a, b);
+        };
+        return c;
+    }
+}
+
 interface Collection<E> {
     int size();
     boolean isEmpty();
@@ -524,6 +567,8 @@ class Arrays {
     // A sequential stream over the array (lib/java-stream.java).
     public static <T> java.util.stream.Stream<T> stream(T[] a) { return Stream.of(a); }
     public static java.util.stream.IntStream stream(int[] a) { return IntStream.of(a); }
+    public static java.util.stream.LongStream stream(long[] a) { return LongStream.of(a); }
+    public static java.util.stream.DoubleStream stream(double[] a) { return DoubleStream.of(a); }
 
     // asList's fixed-size list: reads and set write through to the array, and
     // the size never changes, so add and remove throw.
@@ -623,6 +668,32 @@ final class OptionalInt {
     }
     public int hashCode() { return present ? value : 0; }
     public String toString() { return present ? "OptionalInt[" + value + "]" : "OptionalInt.empty"; }
+}
+
+final class OptionalLong {
+    static OptionalLong none;
+    boolean present;
+    long value;
+    OptionalLong(boolean present, long value) {
+        this.present = present;
+        this.value = value;
+    }
+
+    public static OptionalLong empty() {
+        if (none == null) { none = new OptionalLong(false, 0L); }
+        return none;
+    }
+    public static OptionalLong of(long value) { return new OptionalLong(true, value); }
+
+    public boolean isPresent() { return present; }
+    public boolean isEmpty() { return !present; }
+    public long getAsLong() { return orElseThrow(); }
+    public long orElseThrow() {
+        if (!present) { throw new NoSuchElementException("No value present"); }
+        return value;
+    }
+    public long orElse(long other) { return present ? value : other; }
+    public String toString() { return present ? "OptionalLong[" + value + "]" : "OptionalLong.empty"; }
 }
 
 final class OptionalDouble {

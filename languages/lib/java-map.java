@@ -1,7 +1,8 @@
-// java-map.java -- java.util's Map and HashMap, written in Java and compiled
-// with the program: java-interpreter.abnf and java-to-llvm-ir.abnf load it (after
-// lib/java-util.java, which it builds on) when the program imports or creates one
-// of its types, or uses java.util.stream (jMapWants in lib/java-decltypes.js).
+// java-map.java -- java.util's Map, HashMap, Set and HashSet, written in Java
+// and compiled with the program: java-interpreter.abnf and java-to-llvm-ir.abnf
+// load it (after lib/java-util.java, which it builds on) when the program
+// imports or creates one of its types, or uses java.util.stream (jMapWants in
+// lib/java-decltypes.js).
 // One implementation serves all three engines.
 //
 // A HashMap iterates in java 24.0.2's order because it IS java's table: the
@@ -461,6 +462,95 @@ class HashMapView<E> implements Collection<E> {
         Iterator<E> it = iterator();
         while (it.hasNext()) {
             Object e = it.next();
+            if (s.length() > 1) { s = s + ", "; }
+            s = s + (e == this ? "(this Collection)" : "" + e);
+        }
+        return s + "]";
+    }
+}
+
+interface Set<E> extends Collection<E> {
+}
+
+// java.util.HashSet: the keys of a HashMap, as java's is, so it iterates in
+// java's order. A collection's copy starts at the capacity java 24 picks,
+// HashMap.newHashMap(max(size, 12)).
+class HashSet<E> implements Set<E> {
+    HashMap<E, Object> map;
+
+    public HashSet() { map = new HashMap<E, Object>(); }
+    public HashSet(int initialCapacity) { map = new HashMap<E, Object>(initialCapacity); }
+    public HashSet(Collection<? extends E> c) {
+        map = new HashMap<E, Object>((Math.max(c.size(), 12) * 4 + 2) / 3);
+        addAll(c);
+    }
+
+    public int size() { return map.size(); }
+    public boolean isEmpty() { return map.isEmpty(); }
+    public boolean contains(Object o) { return map.containsKey(o); }
+    public boolean add(E e) { return map.put(e, Boolean.TRUE) == null; }
+    public boolean remove(Object o) { return map.remove(o) != null; }
+    public void clear() { map.clear(); }
+    public Iterator<E> iterator() { return map.keySet().iterator(); }
+    public boolean addAll(Collection<? extends E> c) {
+        boolean changed = false;
+        Iterator<? extends E> it = c.iterator();
+        while (it.hasNext()) {
+            if (add(it.next())) { changed = true; }
+        }
+        return changed;
+    }
+    public boolean containsAll(Collection<?> c) {
+        Iterator<?> it = c.iterator();
+        while (it.hasNext()) {
+            if (!contains(it.next())) { return false; }
+        }
+        return true;
+    }
+    public boolean removeIf(java.util.function.Predicate<? super E> filter) {
+        boolean any = false;
+        Iterator<E> it = iterator();
+        Object[] gone = new Object[size()];
+        int n = 0;
+        while (it.hasNext()) {
+            E e = it.next();
+            if (filter.test(e)) { gone[n] = e; n++; }
+        }
+        for (int i = 0; i < n; i++) { map.remove(gone[i]); any = true; }
+        return any;
+    }
+    public void forEach(java.util.function.Consumer<? super E> action) {
+        Iterator<E> it = iterator();
+        while (it.hasNext()) { action.accept(it.next()); }
+    }
+    public Object[] toArray() {
+        Object[] out = new Object[size()];
+        Iterator<E> it = iterator();
+        for (int i = 0; it.hasNext(); i++) { out[i] = it.next(); }
+        return out;
+    }
+
+    // Any Set is equal to one holding the same elements.
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof Set)) { return false; }
+        Set<?> s = (Set<?>) o;
+        return s.size() == size() && containsAll(s);
+    }
+    public int hashCode() {
+        int h = 0;
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            E e = it.next();
+            if (e != null) { h += e.hashCode(); }
+        }
+        return h;
+    }
+    public String toString() {
+        String s = "[";
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            E e = it.next();
             if (s.length() > 1) { s = s + ", "; }
             s = s + (e == this ? "(this Collection)" : "" + e);
         }
