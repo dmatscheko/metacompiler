@@ -16,7 +16,7 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | A go | 2026-10-13 | fda7a2b6 | sized ints, fmt verbs, strings pkg, panics/recover, slices/append/copy, maps, closures, channels, conversions, min/max/clear | 13: T-465..T-477 |
 | A swift | 2026-10-13 | fda7a2b6 | integers/shifts/conversions, Double rounding and text, graphemes, value semantics, for-in, switch patterns, Character properties, literal type adoption | 10: T-507..T-516 |
 | A ruby | never | | | |
-| A lua | never | | | |
+| A lua | 2026-10-13 | fda7a2b6 | int/float arithmetic and printing, string.format, patterns, string/table library, pcall/error, goto, numeric/generic for, closures, multiple assignment, int-float comparison, recursion | 9: T-532..T-540 (+lua evidence on T-505) |
 | A bash | 2026-10-13 | fda7a2b6 | arithmetic, parameter expansion, word splitting/IFS, indexed and sparse arrays, [[ ]] tests and =~, case, return codes, printf, command-substitution depth | 15: T-517..T-529, T-531 (+T-530 CORE, probe.sh) |
 | A c | never | | | |
 | A kotlin | never | | | |
