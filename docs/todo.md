@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-449** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-450** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,10 +63,14 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-448 python: aliases of runtime-provided stdlib modules · P2 · PY · IN PROGRESS (PY worker, round 22) [V]
-`import math as m; m.sqrt(16)` and `from math import sqrt as s` raise NameError in both halves (CPython 4.0); same for
-every module in core.stdlibImports (re, json, ...). They have no module object to bind; give them one (or alias the
-flat names). Python-written modules (copy/dataclasses/collections) already bind correctly.
+### T-449 python: stdlib module contents (json, itertools, functools, os.path, string, random, time); import edges · P2 · PY · OPEN [V]
+python3 3.14: json, itertools, functools, os(.path), typing, random, string, time, abc, collections.abc are empty
+module objects ("module 'json' has no attribute 'dumps'"). Priority: json.dumps/loads (with indent, sort_keys,
+separators), itertools (chain, product, permutations, combinations, accumulate, groupby, islice, count, cycle, repeat,
+zip_longest), functools (reduce, partial, lru_cache/cache, wraps, cmp_to_key), string constants, os.path.join/basename/
+splitext. Write them in Python like python-collections.py where possible. Edges: `from math import *` binds nothing;
+`import collections.abc` does not bind `collections`; re flags print as ints (no RegexFlag); module function values
+(`f = re.sub`) drop keyword arguments; math/re/sys/builtins are visible without an import (CPython: NameError).
 
 ---
 
@@ -490,6 +494,7 @@ T-442 php: __FILE__/__LINE__/__DIR__, automatic Stringable, generator keys after
 T-443 python: user __hash__/__eq__ dict/set keys, class-level descriptor __get__, 3-arg type(), function attributes as callables, add_note, collections (deque/defaultdict/OrderedDict/Counter), sys.exit/SystemExit, bytearray as byte list — DONE cf92473b
 T-444 php: echo writes per operand, magic methods in any case, ??= reads with isset semantics (offsetExists/__isset, single evaluation), basename/dirname/pathinfo; realpath moved to T-447 — DONE 561511a7
 T-446 python: aliased and module-qualified imports of the Python-written library modules bind where they run; ImportError for missing names — DONE 5860929b
+T-448 python: runtime stdlib modules bound on import with aliases and from-imports (math/re/sys/builtins objects; others bare), re/sys functions as values — DONE f3aab379
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
