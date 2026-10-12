@@ -121,7 +121,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-439 php: SPL basics; `__FUNCTION__` in closures · P3 · PHP · OPEN [V]
+### T-439 php: SPL basics; `__FUNCTION__` in closures · P3 · PHP · IN PROGRESS (PHP worker, round 25) [V]
 All engines: `class_implements()` undefined; `class_exists('ArrayIterator')` false (SPL is always available:
 ArrayIterator, ArrayObject, SplStack, SplObjectStorage, iterator_to_array over them). PHP 8.4+ `__FUNCTION__` inside a
 closure answers `{closure:...}`; ours answers the enclosing function. Known modelling limit, not a ticket: object
