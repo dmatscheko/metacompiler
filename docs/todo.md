@@ -151,13 +151,6 @@ Spec / corpus, all engines: (a) `"abc" + 1` gives 1; PHP 8 TypeError "Unsupporte
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-428 core: GC marking cost scales with layer-2 module size · P2 · CORE · IN PROGRESS (CORE worker, round 20) [V]
-Adding ~104 top-level functions to csharp-rt (LINQ, formatter) made the csharp bench +1.8% (5/5 paired) although
-the bench runs none of them: with MEC_GC=off the delta is +100M, with the collector +336M over 2,345 collections,
-i.e. the collector re-marks module-level function objects / globals each cycle. Every language pays for its
-runtime library's size. Investigate: treat immutable module-level function objects as permanent (not traced), or
-mark them once. Measure on csharp, java, python, php benches.
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -481,6 +474,7 @@ T-426 php: array union, case-insensitive class names in catch/instanceof/extends
 T-427 csharp: System.Math, re-enumerable iterators (fresh enumerator per GetEnumerator), foreach over user GetEnumerator, explicit-interface member shadowing — DONE 14b6e8f4
 T-419 python: object() and object's own methods/__new__, exact int**int past 4096, the 4300-digit int<->str limit, type | type unions; java/python ratchets split for the frozen step brake; __sizeof__ DECLINED (CPython allocator layout, not a rule); sys.set_int_max_str_digits moved to T-431 — DONE f43fa335
 T-429 php: is_a/is_subclass_of/get_parent_class, object-operand TypeErrors, Closure/Generator debug types, leading-backslash lookups, SELF/PARENT/STATIC in any case, compiled instanceof Throwable — DONE 23e6ad05
+T-428 core: permanent unmarked region for boot/layer-2 top level/interned literals/small ints; collector cost per unused library function 611 -> ~200 instr per collection; every handle-IR bench row -3..-7% — DONE 6b2f74d6
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
