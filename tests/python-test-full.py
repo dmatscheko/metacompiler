@@ -4790,6 +4790,58 @@ def s95():
         msgs.append(str(e))
     check("hook4", msgs[-1] == "bad" and object.__getattribute__(ga, "v") == 1)
 
+# ===== SECTION 96: generic aliases, unions of values, huge exponents, sys =====
+# list[int] is a types.GenericAlias: printed as written (a tuple subscript is
+# the argument list, a class module-qualified, ... and None by name), its
+# __args__ a tuple, and calling it calls list. A union takes any value but a
+# tuple beside it (int | str | 1.5); a type alone does not. 0, 1 and -1 raised
+# to an int past 2^53 are exact. sys.set_int_max_str_digits moves the limit
+# str() and int() enforce. Rows from CPython 3.14.
+class S96C:
+    pass
+
+def s96():
+    ts = [int, str, list, dict, tuple, S96C, None, 1.5, (1, 2), 3, 3.0]
+    a = ts[2][ts[0]]
+    check("gal1", (repr(a), str(ts[3][ts[1], ts[0]]), repr(ts[4][ts[0], ...]), repr(ts[2][ts[5]]))
+          == ("list[int]", "dict[str, int]", "tuple[int, ...]", "list[__main__.S96C]"))
+    check("gal2", (repr(ts[2][ts[6]]), repr(ts[2][ts[9]]), repr(ts[2]["x"]), repr(ts[3][ts[1], a]), repr(ts[4][()]))
+          == ("list[None]", "list[3]", "list['x']", "dict[str, list[int]]", "tuple[()]"))
+    check("gal3", a.__args__ == (int,) and ts[3][ts[1], ts[0]].__args__ == (str, int) and a.__origin__ is list
+          and a == ts[2][ts[0]] and a != ts[2][ts[1]] and repr(type(a)) == "<class 'types.GenericAlias'>"
+          and type(a).__name__ == "GenericAlias" and a() == [] and f"{[a]}" == "[list[int]]")
+    u = ts[0] | ts[1]
+    check("uni7", (repr(u | ts[7]), repr(ts[9] | u), repr(u | ts[9] | ts[10]), (u | ts[7]).__args__)
+          == ("int | str | 1.5", "3 | int | str", "int | str | 3", (int, str, 1.5)))
+    check("uni8", (repr(ts[0] | a), repr(a | ts[6]), repr(ts[2][ts[0] | ts[6]])) == ("int | list[int]", "list[int] | None", "list[int | None]"))
+    msgs = []
+    for x, y in [(u, ts[8]), (ts[0], ts[7]), (a, ts[9])]:
+        try:
+            x | y
+        except TypeError as e:
+            msgs.append(str(e))
+    check("uni9", msgs == ["Union[arg, ...]: each arg must be a type. Got (1, 2).", "unsupported operand type(s) for |: 'type' and 'float'",
+                           "unsupported operand type(s) for |: 'types.GenericAlias' and 'int'"])
+    es = [10**20 + 1, 10**20, 2**53 + 1, 2**53 + 2, 10**30 + 7]
+    check("pow1", [(-1) ** e for e in es] == [-1, 1, -1, 1, -1] and [b ** es[0] for b in [0, 1, True]] == [0, 1, 1]
+          and pow(-1, es[0]) == -1 and (-1) ** (2**64 + 1) == -1)
+    import sys
+    check("sys1", sys.get_int_max_str_digits() == 4300)
+    sys.set_int_max_str_digits(640)
+    try:
+        str(10**700)
+    except ValueError as e:
+        msgs.append(str(e))
+    try:
+        sys.set_int_max_str_digits(639)
+    except ValueError as e:
+        msgs.append(str(e))
+    check("sys2", msgs[-2:] == ["Exceeds the limit (640 digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit",
+                                "maxdigits must be >= 640 or 0 for unlimited"] and len(str(-10**639)) == 641)
+    sys.set_int_max_str_digits(maxdigits=0)
+    check("sys3", sys.get_int_max_str_digits() == 0 and len(str(10**700)) == 701 and int("9" * 700) % 1000 == 999)
+    sys.set_int_max_str_digits(4300)
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -4884,5 +4936,6 @@ def main():
     s93() # SECTION-CALL 93
     s94() # SECTION-CALL 94
     s95() # SECTION-CALL 95
+    s96() # SECTION-CALL 96
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

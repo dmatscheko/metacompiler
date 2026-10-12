@@ -4302,6 +4302,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // therefore raises the catchable NameError any unbound name gets, which is a
         // truthful answer, rather than a fake `open` that pretends to read.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "math"), callExt(b, "js_pymath_module", [])])
+        // `sys`, as far as sys.get_int_max_str_digits / set_int_max_str_digits
+        // (pySysCall in abnf/jsrtpynum.go and lib/python-rt.metajs).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sys"), callExt(b, "js_pysys_module", [])])
         b = declKwBuiltin(b, "str", "js_pystrnew", [])
         b = declKwBuiltin(b, "int", "js_pyint", [])
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)

@@ -614,26 +614,58 @@ func pySameValue(a, b interface{}) bool {
 }
 
 // pyBigDec is an int's decimal text as Python shows it. CPython refuses one
-// longer than sys.get_int_max_str_digits(), 4300 by default (the setter is not
-// modelled). Twin of pyBigDec in languages/python-interpreter.abnf and
-// languages/lib/python-rt.metajs.
+// longer than sys.get_int_max_str_digits(). Twin of pyBigDec in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
 func (rt *jsrt) pyBigDec(v *big.Int) string {
 	s := v.String()
-	if n := len(s); n > 4300 && (v.Sign() >= 0 || n-1 > 4300) {
-		rt.pyRaise("ValueError", "Exceeds the limit (4300 digits) for integer string conversion; "+
+	lim := rt.pyIntMaxDigits()
+	if n := len(s); lim > 0 && n > lim && (v.Sign() >= 0 || n-1 > lim) {
+		rt.pyRaise("ValueError", "Exceeds the limit ("+strconv.Itoa(lim)+" digits) for integer string conversion; "+
 			"use sys.set_int_max_str_digits() to increase the limit")
 	}
 	return s
 }
 
-// pyIntDigitsOver is the digit count of t in base b when CPython's int()
-// refuses it for its length, else 0. Twin of pyIntDigitsOver in
+// pyIntMaxDigits is sys.get_int_max_str_digits(): 4300 until the program sets
+// it, 0 for no limit.
+func (rt *jsrt) pyIntMaxDigits() int {
+	if !rt.pyMaxDigitsSet {
+		return 4300
+	}
+	return rt.pyMaxDigits
+}
+
+// pySysCall is a call of one of sys's functions; the module offers
+// get_int_max_str_digits and set_int_max_str_digits. Twin of pySysCall in
 // languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
-func pyIntDigitsOver(t string, b int) int {
-	if len(t) <= 4300 || b&(b-1) == 0 {
+func (rt *jsrt) pySysCall(name string, args []interface{}, kw interface{}) interface{} {
+	switch name {
+	case "get_int_max_str_digits":
+		return float64(rt.pyIntMaxDigits())
+	case "set_int_max_str_digits":
+		v := rt.pyKwArg(kw, "maxdigits")
+		if len(args) > 0 {
+			v = args[0]
+		}
+		n := int(rt.pyRangeArg(v))
+		if n != 0 && n < 640 {
+			rt.pyRaise("ValueError", "maxdigits must be >= 640 or 0 for unlimited")
+		}
+		rt.pyMaxDigits, rt.pyMaxDigitsSet = n, true
+		return jsUndef
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("AttributeError", "module 'sys' has no attribute '"+name+"'")})
+}
+
+// pyIntDigitsOver is the digit count of t in base b when CPython's int()
+// refuses it for its length under the limit lim (0: none), else 0. Twin of
+// pyIntDigitsOver in
+// languages/python-interpreter.abnf and languages/lib/python-rt.metajs.
+func pyIntDigitsOver(t string, b, lim int) int {
+	if lim == 0 || len(t) <= lim || b&(b-1) == 0 {
 		return 0
 	}
-	if n := len(t) - strings.Count(t, "_"); n > 4300 {
+	if n := len(t) - strings.Count(t, "_"); n > lim {
 		return n
 	}
 	return 0

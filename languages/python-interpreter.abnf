@@ -1289,6 +1289,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (hasOwn(v, "__pycm")) { return pyBuiltinTypeObj("classmethod") }
         if (v.__pymod != undefined) { return pyBuiltinTypeObj("module") }
         if (v.__pyunion !== undefined) { return pyBuiltinTypeObj("typing.Union") }
+        if (v.__genalias === true) { return pyBuiltinTypeObj("types.GenericAlias") }
         if (v.__pyconst !== undefined) { return pyBuiltinTypeObj(v.__pyconst == "Ellipsis" ? "ellipsis" : v.__pyconst + "Type") }
         return hostGlobals["object"]
     }
@@ -1301,19 +1302,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === null || v === undefined) { return [hostGlobals["NoneType"]] }
         if (typeof v != "object") { return null }
         if (v.__pyunion !== undefined) { return v.__pyunion }
-        if (v.__isclass === true) { return [v] }
+        if (v.__isclass === true || v.__genalias === true) { return [v] }
         return null
+    }
+    // What the operand beside a UNION contributes when it is not a type: any
+    // value but a tuple (and a str, which CPython makes a ForwardRef this value
+    // model has no type for).
+    function pyUnionOther(v) {
+        if (isTup(v)) { pyListErr("TypeError", "Union[arg, ...]: each arg must be a type. Got " + prepr(v) + ".") }
+        if (typeof v == "string") { return null }
+        return [v]
     }
     function pyUnion(l, r) {
         if ((l === null || l === undefined) && (r === null || r === undefined)) { return null }
         var a = pyUnionArgs(l)
         var b = pyUnionArgs(r)
+        if (a === null && pyIsUnion(r)) { a = pyUnionOther(l) }
+        if (b === null && pyIsUnion(l)) { b = pyUnionOther(r) }
         if (a === null || b === null) { return null }
         var out = []
         var all = a.concat(b)
         for (var i = 0; i < all.length; i++) {
             var seen = false
-            for (var j = 0; j < out.length; j++) { if (out[j] === all[i]) { seen = true } }
+            for (var j = 0; j < out.length; j++) { if (out[j] === all[i] || pyEq(out[j], all[i])) { seen = true } }
             if (!seen) { out.push(all[i]) }
         }
         var res = anytype
@@ -1322,15 +1333,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return res
     }
     function pyIsUnion(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyunion !== undefined }
-    // int | None renders as such: each argument by its class name, NoneType as None.
+    // int | None renders as such: each argument as pyTypeArgRepr prints it.
     function pyUnionStr(u) {
         var s = ""
         for (var i = 0; i < u.__pyunion.length; i++) {
-            var c = u.__pyunion[i]
             if (i > 0) { s += " | " }
-            s += c === hostGlobals["NoneType"] ? "None" : pyClsQualName(c)
+            s += pyTypeArgRepr(u.__pyunion[i])
         }
         return s
+    }
+    // How an argument prints inside list[...] or X | Y: None and ... by name, a
+    // type by its qualified name, an alias or a union as itself, anything else
+    // by repr. Twin of rt.pyTypeArgRepr in abnf/jsrt.go and pyTypeArgRepr in
+    // lib/python-rt.metajs.
+    function pyTypeArgRepr(c) {
+        if (c === null || c === undefined || c === hostGlobals["NoneType"]) { return "None" }
+        if (c === pyEllipsis) { return "..." }
+        if (typeof c == "object" && c.__isclass === true) { return pyClsQualName(c) }
+        if (typeof c == "object" && c.__genalias === true) { return c.__galias }
+        if (pyIsUnion(c)) { return pyUnionStr(c) }
+        return prepr(c)
+    }
+    // list[int]: CPython's types.GenericAlias, {__genalias, origin, targs (the
+    // arguments), __galias (its repr)}, one object per repr so the same written
+    // alias is the same value. Twin of rt.pyGenericAlias in abnf/jsrt.go and
+    // pyCGenericAlias in lib/python-rt.metajs.
+    var pyGenAliases = {}
+    function pyGenAlias(origin, targs) {
+        var inner = targs.length == 0 ? "()" : ""
+        for (var i = 0; i < targs.length; i++) {
+            if (i > 0) { inner += ", " }
+            inner += pyTypeArgRepr(targs[i])
+        }
+        var key = pyTypeArgRepr(origin) + "[" + inner + "]"
+        if (hasOwn(pyGenAliases, "$" + key)) { return pyGenAliases["$" + key] }
+        var a = {__genalias: true, origin: origin, targs: targs, __galias: key}
+        pyGenAliases["$" + key] = a
+        return a
     }
     // Two unions are equal when they hold the same types, in any order.
     function pyUnionEq(a, b) {
@@ -1669,7 +1708,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pyListErr("ValueError", "invalid literal for int() with base " + base + ": " + pyStrRepr(s))
         }
         if (nd > 0) {
-            pyListErr("ValueError", "Exceeds the limit (4300 digits) for integer string conversion: value has " + nd +
+            pyListErr("ValueError", "Exceeds the limit (" + pyMaxDigits + " digits) for integer string conversion: value has " + nd +
                                     " digits; use sys.set_int_max_str_digits() to increase the limit")
         }
         if (neg) { return binOp("-", 0, acc) }
@@ -1679,10 +1718,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // length, else 0. Twin of pyIntDigitsOver in abnf/jsrtpynum.go and
     // lib/python-rt.metajs.
     function pyIntDigitsOver(t, b) {
-        if (t.length <= 4300 || b == 2 || b == 4 || b == 8 || b == 16 || b == 32) { return 0 }
+        if (pyMaxDigits == 0 || t.length <= pyMaxDigits || b == 2 || b == 4 || b == 8 || b == 16 || b == 32) { return 0 }
         var n = 0
         for (var i = 0; i < t.length; i++) { if (t.charAt(i) != "_") { n = n + 1 } }
-        return n > 4300 ? n : 0
+        return n > pyMaxDigits ? n : 0
+    }
+    // sys.get_int_max_str_digits(): 0 for no limit.
+    var pyMaxDigits = 4300
+    // A call of one of sys's functions; the module offers get_int_max_str_digits
+    // and set_int_max_str_digits. Twin of rt.pySysCall in abnf/jsrtpynum.go and
+    // pySysCall in lib/python-rt.metajs.
+    function pySysCall(name, args, kw) {
+        if (name == "get_int_max_str_digits") { return pyMaxDigits }
+        if (name == "set_int_max_str_digits") {
+            var v = anytype
+            v = undefined
+            var ki = kw != null && kw != undefined ? dictFind(kw, "maxdigits") : -1
+            if (ki >= 0) { v = kw.vals[ki] }
+            if (args.length > 0) { v = args[0] }
+            var n = 0
+            if (typeof v == "boolean") { n = v ? 1 : 0 }
+            else if (typeof v == "number") { n = v }
+            else { pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object cannot be interpreted as an integer") }
+            if (n != 0 && n < 640) { pyListErr("ValueError", "maxdigits must be >= 640 or 0 for unlimited") }
+            pyMaxDigits = n
+            return undefined
+        }
+        pyRaise(pyMakeExc("AttributeError", ["module 'sys' has no attribute '" + name + "'"]))
     }
     // int(x) of a number: an arbitrary precision integer stays itself and every
     // other number TRUNCATES towards zero (int(-2.9) is -2).
@@ -3131,6 +3193,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return "<class '" + pyClsQualName(v) + "'>"
         }
         if (pyIsUnion(v)) { return pyUnionStr(v) }
+        if (v !== null && v !== undefined && typeof v == "object" && v.__genalias === true) { return v.__galias }
         // A compiled pattern and a match render the way CPython's repr does.
         if (isPyRe(v)) { return "re.compile(" + prepr(v.pattern) + ")" }
         if (isPyMatch(v)) {
@@ -3693,7 +3756,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A subscripted TYPE is a generic alias (list[int]); types are erased, so the
         // alias is only a value to compare and inspect.
         if (o != null && o != undefined && typeof o == "object" && o.__isclass == true) {
-            return {__genalias: true, origin: o, targs: Array.isArray(i) ? i : [i]}
+            return pyGenAlias(o, isTup(i) ? i.slice(0) : [i])
         }
         // A subscript MISS is a catchable exception (`try: d[k] / except KeyError`),
         // not an abort. The KeyError carries the KEY ITSELF, never its repr:
@@ -4170,6 +4233,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the literal is the same value. The FUNCTION BODIES in this chapter are safe
     // by construction: they run at program time, long after the whole script has
     // been evaluated.
+    hostGlobals["sys"] = {__pymod: "sys"}
     hostGlobals["math"] = {__pymod: "math",
                            pi: {__flo: 3.141592653589793},
                            e: {__flo: 2.718281828459045},
@@ -5672,6 +5736,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (target.__pysup == true) { return pySuperMCall(target, name, args, kw) }
             if (target.__pymod == "re") { return pyReModCall(name, args) }
             if (target.__pymod == "math") { return pyMathCall(name, args) }
+            if (target.__pymod == "sys") { return pySysCall(name, args, kw) }
             // Any other module object - `builtins.len(xs)`. A method call does
             // not go through pyattr in this half, so the module's own member is
             // read here and called, which keeps `builtins.len(xs)` and
@@ -7245,8 +7310,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lib/python-rt.metajs.
     function pyBigDec(a) {
         var s = bigStr(a)
-        if (s.length > 4300 && s.length - (a.sign < 0 ? 1 : 0) > 4300) {
-            pyListErr("ValueError", "Exceeds the limit (4300 digits) for integer string conversion; " +
+        if (pyMaxDigits > 0 && s.length > pyMaxDigits && s.length - (a.sign < 0 ? 1 : 0) > pyMaxDigits) {
+            pyListErr("ValueError", "Exceeds the limit (" + pyMaxDigits + " digits) for integer string conversion; " +
                                     "use sys.set_int_max_str_digits() to increase the limit")
         }
         return s
@@ -7727,6 +7792,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {v: pyFlo(bigTrueDiv(a, b))}
         }
         if (op == "**") {
+            // 0, 1 and -1 answer any exponent, one past 2^53 (no double holds
+            // it) too. The limbs are decimal, so the lowest one's parity is the
+            // value's.
+            if (b.sign > 0 && (a.limbs.length == 0 || (a.limbs.length == 1 && a.limbs[0] == 1))) {
+                if (bigIsZero(b) || (a.sign < 0 && b.limbs[0] % 2 == 0)) { return {v: 1} }
+                return {v: bigOut(a)}
+            }
             var e = bigToNum(r)
             if (e < 0) { return {v: pyFlo(pyPowF(bigIsBig(l) ? bigToFlo(l) : bigToNum(l), e))} }
             // Exact at any exponent a double counts exactly, as in rt.pyBin's
@@ -9435,7 +9507,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     for (var i = 0; i < parts.length; i++) {
                         targs.push(hasOwn(hostGlobals, parts[i]) ? hostGlobals[parts[i]] : parts[i])
                     }
-                    return {__genalias: true, origin: hostGlobals[base], targs: targs}
+                    return pyGenAlias(hostGlobals[base], targs)
                 }
             }
             return text
@@ -10924,6 +10996,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // d.keys is the method. x.__class__ is the same class object type(x)
         // hands out, so `[].__class__ is list` holds.
         if (pyIsUnion(o) && name == "__args__") { return pyTup(o.__pyunion.slice(0)) }
+        if (o !== null && o !== undefined && typeof o == "object" && o.__genalias === true) {
+            if (name == "__args__") { return pyTup(o.targs.slice(0)) }
+            if (name == "__origin__") { return o.origin }
+        }
         if (name == "__hash__" && pyValHashNone(o)) { return undefined }
         if (pyBuiltinAttr(o, name) || pyValDunder(o, name) != null) { return pyBoundBuiltin(o, name) }
         if (name == "__class__") { return pyTypeOf(o) }
@@ -11541,6 +11617,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var c2 = clsFind(f.__class, "__call__")
                 if (c2 != null) { kSetNamed(named); return c2.apply(undefined, concat2impl([f], args)) }
             }
+            // A generic alias calls its origin: list[int]() is [].
+            if (f != null && f != undefined && typeof f == "object" && f.__genalias === true) { return pyCall(f.origin, args, named) }
             pyListErr("TypeError", "'" + pyTypeOf(f).__name + "' object is not callable")
         }
         kSetNamed(named)

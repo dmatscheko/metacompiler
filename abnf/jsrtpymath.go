@@ -354,5 +354,10 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		m["js_pymath_module"] = func(a []uint64) uint64 { return rt.wrap(pyMathModule(rt)) }
+		m["js_pysys_module"] = func(a []uint64) uint64 {
+			o := newJSObject()
+			o.set("__pymod", "sys")
+			return rt.wrap(o)
+		}
 	})
 }

@@ -733,6 +733,7 @@ function pyStr(v) {
     if (pyIsObj(v)) {
         if (v["__pymod"] !== undefined) { return "<module '" + pyToStr(v["__pymod"]) + "' (built-in)>" }
         if (v["__pyunion"] !== undefined) { return pyUnionStr(v["__pyunion"]) }
+        if (v["__galias"] !== undefined) { return pyToStr(v["__galias"]) }
     }
     // A GENERATOR, on the same rule. CPython says <generator object gen at
     // 0x...>; neither the address nor the generating function's name is
@@ -756,28 +757,53 @@ function pyStr(v) {
 }
 
 // An int's decimal text as Python shows it. CPython refuses one longer than
-// sys.get_int_max_str_digits(), 4300 by default (the setter is not modelled).
-// Go: rt.pyBigDec in abnf/jsrtpynum.go.
+// sys.get_int_max_str_digits(). Go: rt.pyBigDec in abnf/jsrtpynum.go.
 function pyBigDec(v) {
     var s = rtABigStr(v)
-    if (s.length > 4300 && (!v["neg"] || s.length - 1 > 4300)) {
-        pyRaiseExc("ValueError", "Exceeds the limit (4300 digits) for integer string conversion; " +
+    var lim = pyDMaxDigits
+    if (lim > 0 && s.length > lim && (!v["neg"] || s.length - 1 > lim)) {
+        pyRaiseExc("ValueError", "Exceeds the limit (" + pyIntStr(lim) + " digits) for integer string conversion; " +
                    "use sys.set_int_max_str_digits() to increase the limit")
     }
     return s
 }
 
+// sys.get_int_max_str_digits(): 0 for no limit. Go: rt.pyIntMaxDigits.
+var pyDMaxDigits = 4300
+
+// A call of one of sys's functions; the module offers get_int_max_str_digits
+// and set_int_max_str_digits. Go: rt.pySysCall in abnf/jsrtpynum.go.
+function pySysCall(name, args, kw) {
+    if (name == "get_int_max_str_digits") { return pyDMaxDigits }
+    if (name == "set_int_max_str_digits") {
+        var v = pyKwArg(kw, "maxdigits")
+        if (args.length > 0) { v = args[0] }
+        var n = 0
+        if (typeof v == "boolean") { n = v ? 1 : 0 }
+        else if (typeof v == "number") { n = v }
+        else { pyRaiseExc("TypeError", "'" + pyTypeName(v) + "' object cannot be interpreted as an integer") }
+        if (n != 0 && n < 640) { pyRaiseExc("ValueError", "maxdigits must be >= 640 or 0 for unlimited") }
+        pyDMaxDigits = n
+        return undefined
+    }
+    pyRaiseExc("AttributeError", "module 'sys' has no attribute '" + name + "'")
+    return undefined
+}
+
+function js_pysys_module() { return {__pymod: "sys"} }
+
 // The digit count of T in base B when CPython's int() refuses it for its
 // length, else 0. Go: pyIntDigitsOver in abnf/jsrtpynum.go.
 function pyIntDigitsOver(t, b) {
-    if (t.length <= 4300 || b == 2 || b == 4 || b == 8 || b == 16 || b == 32) { return 0 }
+    var lim = pyDMaxDigits
+    if (lim == 0 || t.length <= lim || b == 2 || b == 4 || b == 8 || b == 16 || b == 32) { return 0 }
     var n = 0
     var i = 0
     while (i < t.length) {
         if (t.charAt(i) != "_") { n = n + 1 }
         i = i + 1
     }
-    if (n > 4300) { return n }
+    if (n > lim) { return n }
     return 0
 }
 
@@ -1031,6 +1057,7 @@ function pyTypeName(v) {
         if (v["__pycm"] !== undefined) { return "classmethod" }
         if (v["__pymod"] !== undefined) { return "module" }
         if (v["__pyunion"] !== undefined) { return "typing.Union" }
+        if (v["__galias"] !== undefined) { return "types.GenericAlias" }
         // An instance of a user class is a "'C' object" in every message.
         var ic = pyInstClassOf(v)
         if (ic !== null && ic["__name"] !== undefined) { return pyToStr(ic["__name"]) }
@@ -2254,7 +2281,16 @@ function pyUnionArgs(v) {
     var u = pyUnionOf(v)
     if (u !== null) { return u }
     if (pyClassName(v) !== null) { return [v] }
+    if (pyIsObj(v) && v["__galias"] !== undefined) { return [v] }
     return null
+}
+// What the operand beside a UNION contributes when it is not a type: any value
+// but a tuple (and a str, which CPython makes a ForwardRef this value model has
+// no type for). Go: rt.pyUnionOther.
+function pyUnionOther(v) {
+    if (pyIsTup(v)) { pyRaiseExc("TypeError", "Union[arg, ...]: each arg must be a type. Got " + pyRepr(v) + ".") }
+    if (typeof v == "string") { return null }
+    return [v]
 }
 function pyUnion(l, r) {
     var res = anytype
@@ -2262,33 +2298,54 @@ function pyUnion(l, r) {
     if ((l === null || l === undefined) && (r === null || r === undefined)) { return res }
     var a = pyUnionArgs(l)
     var b = pyUnionArgs(r)
+    if (a === null && pyUnionOf(r) !== null) { a = pyUnionOther(l) }
+    if (b === null && pyUnionOf(l) !== null) { b = pyUnionOther(r) }
     if (a === null || b === null) { return res }
     var out = []
     var i = 0
     while (i < a.length + b.length) {
         var t = i < a.length ? a[i] : b[i - a.length]
-        if (!pyIdIn(out, t)) { out.push(t) }
+        var seen = false
+        var j = 0
+        while (j < out.length) {
+            if (out[j] === t || pyEqual(out[j], t)) { seen = true }
+            j = j + 1
+        }
+        if (!seen) { out.push(t) }
         i = i + 1
     }
     res = out[0]
     if (out.length > 1) { res = {__pyunion: out} }
     return res
 }
-// int | None: each argument by its class name, NoneType as None.
+// int | None: each argument as pyTypeArgRepr prints it.
 function pyUnionStr(u) {
     var s = ""
     var i = 0
     while (i < u.length) {
         if (i > 0) { s = s + " | " }
-        var c = u[i]
-        if (c === pyBuiltinClass("NoneType")) { s = s + "None" } else {
-            var cmod = c["__module__"]
-            if (typeof cmod == "string") { s = s + cmod + "." }
-            s = s + pyClassName(c)
-        }
+        s = s + pyTypeArgRepr(u[i])
         i = i + 1
     }
     return s
+}
+// How an argument prints inside list[...] or X | Y: None and ... by name, a type
+// by its qualified name, an alias or a union as itself, anything else by repr.
+// Go: rt.pyTypeArgRepr.
+function pyTypeArgRepr(c) {
+    if (c === null || c === undefined || c === pyBuiltinClass("NoneType")) { return "None" }
+    if (pyIsObj(c)) {
+        if (c["__galias"] !== undefined) { return pyToStr(c["__galias"]) }
+        if (c["__pyconst"] === "Ellipsis") { return "..." }
+        if (c["__pyunion"] !== undefined) { return pyUnionStr(c["__pyunion"]) }
+        var cn = pyClassName(c)
+        if (cn !== null) {
+            var cmod = c["__module__"]
+            if (typeof cmod == "string") { return cmod + "." + cn }
+            return cn
+        }
+    }
+    return pyRepr(c)
 }
 function pyIdIn(xs, v) {
     var i = 0
@@ -2875,6 +2932,13 @@ function pyABigBin(op, x, y) {
     }
     if (op == "**") {
         if (y["neg"]) { return null }
+        // 0, 1 and -1 answer any exponent, one past 2^53 (no double holds it)
+        // too. The limbs are decimal, so the lowest one's parity is the value's.
+        var xl = x["limbs"]
+        if (xl.length == 1 && xl[0] <= 1) {
+            if (rtABigIsZero(y) || (x["neg"] && y["limbs"][0] % 2 == 0)) { return rtABigFromNum(1) }
+            return x
+        }
         var e = rtABigNarrow(y)
         if (typeof e != "number") { return null }
         return rtABigPow(x, e)
@@ -4641,7 +4705,7 @@ function pyParseInt(s, base) {
         pyRaiseExc("ValueError", "invalid literal for int() with base " + pyIntStr(base) + ": " + pyStrRepr(s))
     }
     if (nd > 0) {
-        pyRaiseExc("ValueError", "Exceeds the limit (4300 digits) for integer string conversion: value has " +
+        pyRaiseExc("ValueError", "Exceeds the limit (" + pyIntStr(pyDMaxDigits) + " digits) for integer string conversion: value has " +
                    pyIntStr(nd) + " digits; use sys.set_int_max_str_digits() to increase the limit")
     }
     if (neg) { return js_pybin("-", 0, acc) }
@@ -6992,14 +7056,10 @@ function pyCRemoveAt(arr, i) {
     return undefined
 }
 
-// rt.pyGenericAlias: the memoized list[int]-style alias of a
-// type object. Keyed by the origin's NAME and the rendered parameter, so the
-// same written alias is the same value twice and `type X = list[int]` compares
-// equal.
-//
-// Go recovers a closure's name from rt.pyFuncNames, the side table js_pyfnname
-// fills; here the name is read back through the prelude's pyGetAttr, whose
-// "__name__" arm reads that same table - the same answer by a different route.
+// rt.pyGenericAlias: the memoized list[int]-style alias of a type object,
+// CPython's types.GenericAlias, {__galias: its repr, __origin__, __args__}. A
+// tuple subscript is the argument list. Keyed by the repr, so the same written
+// alias is the same value twice and `type X = list[int]` compares equal.
 function pyCGenericAlias(origin, param) {
     var isObj = pyIsObj(origin)
     if (!isObj && !pyIsFn(origin)) { return undefined }
@@ -7007,18 +7067,21 @@ function pyCGenericAlias(origin, param) {
     // an array is neither (Array.isArray is excluded by pyIsObj).
     if (pyIsDict(origin)) { return undefined }
     if (pyTypeName(origin) != "type") { return undefined } // Only a type takes parameters.
-    var name = pyStr(origin)
-    if (isObj && origin["__name"] !== undefined) {
-        name = pyToStr(origin["__name"])
-    } else if (!isObj) {
-        var fnName = pyGetAttr(origin, "__name__")
-        if (typeof fnName == "string") { name = fnName }
+    var args = [param]
+    if (pyIsTup(param)) { args = rtCopyArr(param) }
+    var inner = "()"
+    if (args.length > 0) { inner = "" }
+    var i = 0
+    while (i < args.length) {
+        if (i > 0) { inner = inner + ", " }
+        inner = inner + pyTypeArgRepr(args[i])
+        i = i + 1
     }
-    var key = "$" + name + "[" + pyStr(param) + "]"
-    var got = pyCAliases[key]
+    var name = pyTypeArgRepr(origin) + "[" + inner + "]"
+    var got = pyCAliases["$" + name]
     if (got !== undefined) { return got }
-    var alias = {__name: name + "[" + pyStr(param) + "]", __origin__: origin, __args__: [param]}
-    pyCAliases[key] = alias
+    var alias = {__galias: name, __origin__: origin, __args__: pyTup(args)}
+    pyCAliases["$" + name] = alias
     return alias
 }
 
@@ -8382,7 +8445,11 @@ function js_pycall(callee, pos, kw) {
             }
         }
     }
-    if (typeof callee != "function") { pyNotCallable(callee) }
+    if (typeof callee != "function") {
+        // A generic alias calls its origin: list[int]() is [].
+        if (pyIsObj(callee) && callee["__galias"] !== undefined) { return js_pycall(callee["__origin__"], pos, kw) }
+        pyNotCallable(callee)
+    }
     var bound = pyBindCall(callee, pos, kw)
     // Go asks rt.pyBindCallR whether binding built a NEW array, and passes the
     // caller's own argument HANDLE through when it did not - an identity
@@ -10449,9 +10516,13 @@ function js_pyrxmcall(target, name, args, kw) {
     // extern the python emitter routes every method call through, and a module
     // object is not an instance, a class, a dict or a list, so nothing further
     // down js_pymcall would find it.
-    if (pyMIsMathMod(target)) {
-        if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
-        return pyMathCall(pyToStr(name), args)
+    if (pyIsObj(target)) {
+        var pm = target["__pymod"]
+        if (pm === "math") {
+            if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
+            return pyMathCall(pyToStr(name), args)
+        }
+        if (pm === "sys") { return pySysCall(pyToStr(name), args, kw) }
     }
     if (pyERxIsMod(target) || pyERxIsRe(target) || pyERxIsMatch(target)) {
         if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }

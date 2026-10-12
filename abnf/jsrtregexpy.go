@@ -666,6 +666,9 @@ func init() {
 				}
 				return w(rt.pyMathCall(rt.toString(u(a[1])), arr.elems))
 			}
+			if o, ok := target.(*jsObject); ok && o.props["__pymod"] == "sys" {
+				return w(rt.pySysCall(rt.toString(u(a[1])), rt.argArray(u(a[2])), u(a[3])))
+			}
 			if rxPyIsMod(target) || rxPyIsRe(target) || rxPyIsMatch(target) {
 				arr, ok := u(a[2]).(*jsArray)
 				if !ok {

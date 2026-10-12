@@ -866,8 +866,8 @@ func init() {
 }
 
 // pyUnionArgs is what an operand of X | Y contributes to a union: None stands
-// as NoneType, a union its own arguments, a type object itself; nil for
-// anything else.
+// as NoneType, a union its own arguments, a type object or a generic alias
+// itself; nil for anything else.
 func (rt *jsrt) pyUnionArgs(v interface{}) []interface{} {
 	if isUndefOrNull(v) {
 		return []interface{}{rt.pyBuiltinClass("NoneType")}
@@ -878,7 +878,23 @@ func (rt *jsrt) pyUnionArgs(v interface{}) []interface{} {
 	if _, isCls := rt.pyClassName(v); isCls {
 		return []interface{}{v}
 	}
+	if o, ok := v.(*jsObject); ok && o.props["__galias"] != nil {
+		return []interface{}{v}
+	}
 	return nil
+}
+
+// pyUnionOther is what the operand beside a UNION contributes when it is not a
+// type: CPython's Union[...] takes any value as an argument but a tuple (and a
+// str, which it would make a ForwardRef this value model has no type for).
+func (rt *jsrt) pyUnionOther(v interface{}) []interface{} {
+	if pyIsTup(v) {
+		rt.pyRaise("TypeError", "Union[arg, ...]: each arg must be a type. Got "+rt.pyRepr(v)+".")
+	}
+	if _, isStr := v.(string); isStr {
+		return nil
+	}
+	return []interface{}{v}
 }
 
 // pyUnion is X | Y over type objects and None, CPython's typing.Union: an
@@ -891,6 +907,12 @@ func (rt *jsrt) pyUnion(l, r interface{}) interface{} {
 		return nil
 	}
 	a, b := rt.pyUnionArgs(l), rt.pyUnionArgs(r)
+	if _, isU := pyUnionOf(r); a == nil && isU {
+		a = rt.pyUnionOther(l)
+	}
+	if _, isU := pyUnionOf(l); b == nil && isU {
+		b = rt.pyUnionOther(r)
+	}
 	if a == nil || b == nil {
 		return nil
 	}
@@ -898,7 +920,7 @@ func (rt *jsrt) pyUnion(l, r interface{}) interface{} {
 	for _, t := range append(append([]interface{}{}, a...), b...) {
 		seen := false
 		for _, s := range out {
-			seen = seen || s == t
+			seen = seen || s == t || rt.pyEqual(s, t)
 		}
 		if !seen {
 			out = append(out, t)
@@ -925,12 +947,7 @@ func pyUnionOf(v interface{}) (*jsArray, bool) {
 func (rt *jsrt) pyUnionStr(u *jsArray) string {
 	parts := make([]string, len(u.elems))
 	for i, c := range u.elems {
-		if c == rt.pyBuiltinClass("NoneType") {
-			parts[i] = "None"
-			continue
-		}
-		s := rt.pyString(c)
-		parts[i] = s[len("<class '") : len(s)-2]
+		parts[i] = rt.pyTypeArgRepr(c)
 	}
 	return strings.Join(parts, " | ")
 }

@@ -580,6 +580,9 @@ type jsrt struct {
 	pyEllipsis      *jsObject
 	// pyHooks counts the attribute hooks class bodies have defined (pyNoteHook).
 	pyHooks int
+	// sys.set_int_max_str_digits: the limit, once the program has set one.
+	pyMaxDigits    int
+	pyMaxDigitsSet bool
 	// pyAliases memoizes the list[int]-style generic aliases, so the same written
 	// alias is the same value every time (see pyGenericAlias).
 	pyAliases map[string]*jsObject
@@ -3789,6 +3792,9 @@ func (rt *jsrt) pyString(v interface{}) string {
 		if u, ok := pyUnionOf(t); ok {
 			return rt.pyUnionStr(u)
 		}
+		if s, ok := t.props["__galias"].(string); ok {
+			return s
+		}
 		if name, ok := rt.pyClassName(t); ok {
 			// A class a `class` statement made carries its defining module in
 			// an own __module__ (<class '__main__.B'>); a builtin has none.
@@ -5155,7 +5161,19 @@ func pyBigBin(op string, x, y *big.Int) (*big.Int, bool) {
 			out = r
 		}
 	case "**":
-		if y.Sign() < 0 || !y.IsInt64() || y.Int64() > 4096 {
+		if y.Sign() < 0 {
+			return nil, false
+		}
+		// 0, 1 and -1 answer any exponent, one past 2^53 (no double holds it)
+		// too. Twin of pyABigBin in lib/python-rt.metajs and boxOp in
+		// python-interpreter.abnf.
+		if x.IsInt64() && x.Int64() >= -1 && x.Int64() <= 1 {
+			if y.Sign() == 0 || (x.Sign() < 0 && y.Bit(0) == 0) {
+				return big.NewInt(1), true
+			}
+			return new(big.Int).Set(x), true
+		}
+		if !y.IsInt64() || y.Int64() > 4096 {
 			return nil, false
 		}
 		out.Exp(x, y, nil)
@@ -15833,6 +15851,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return w(rt.call(m, jsUndef, rt.pyBindCall(m, self, kw)))
 				}
 			}
+			if org, ok := pyAliasOrigin(callee); ok {
+				return w(rt.callPyValue(org, args.elems, kw))
+			}
 			rt.pyCheckCallable(callee)
 			bound, rebound := rt.pyBindCallR(callee, args.elems, kw)
 			if !rebound {
@@ -18560,9 +18581,12 @@ func (rt *jsrt) pyFloatToInt(f float64) interface{} {
 }
 
 // pyGenericAlias answers the memoized list[int]-style alias of a type object (a
-// class, or a builtin such as list bound to a closure). It is keyed by the origin
-// and the rendered parameter, so the same written alias is the same value twice -
-// which is what lets a PEP 695 'type X = list[int]' be compared for equality.
+// class, or a builtin such as list bound to a closure): CPython's
+// types.GenericAlias, {__galias: its repr, __origin__, __args__}. A tuple
+// subscript is the argument list. It is keyed by the repr, so the same written
+// alias is the same value twice - which is what lets a PEP 695
+// 'type X = list[int]' be compared for equality. Twin of pyGenAlias in
+// python-interpreter.abnf and pyCGenericAlias in lib/python-rt.metajs.
 func (rt *jsrt) pyGenericAlias(origin, param interface{}) (interface{}, bool) {
 	switch origin.(type) {
 	case *jsObject, *jsClosure, *hostFunc, *boundMethod:
@@ -18578,24 +18602,54 @@ func (rt *jsrt) pyGenericAlias(origin, param interface{}) (interface{}, bool) {
 	if rt.pyAliases == nil {
 		rt.pyAliases = map[string]*jsObject{}
 	}
-	name := rt.pyString(origin)
-	if o, isObj := origin.(*jsObject); isObj {
-		if n, has := o.props["__name"]; has {
-			name = rt.toString(n)
-		}
-	} else if n, has := rt.pyFuncNames[origin]; has {
-		name = n
+	args := []interface{}{param}
+	if pyIsTup(param) {
+		args = append([]interface{}{}, param.(*jsArray).elems...)
 	}
-	key := name + "[" + rt.pyString(param) + "]"
+	parts := make([]string, len(args))
+	for i, x := range args {
+		parts[i] = rt.pyTypeArgRepr(x)
+	}
+	inner := strings.Join(parts, ", ")
+	if len(args) == 0 {
+		inner = "()"
+	}
+	key := rt.pyTypeArgRepr(origin) + "[" + inner + "]"
 	if a, has := rt.pyAliases[key]; has {
 		return a, true
 	}
 	a := newJSObject()
-	a.set("__name", key)
+	a.set("__galias", key)
 	a.set("__origin__", origin)
-	a.set("__args__", &jsArray{elems: []interface{}{param}})
+	a.set("__args__", pyTup(&jsArray{elems: args}))
 	rt.pyAliases[key] = a
 	return a, true
+}
+
+// pyTypeArgRepr is how an argument prints inside list[...] or X | Y: None and
+// ... by name, a type by its qualified name, an alias or a union as itself,
+// anything else by repr. Twin of pyTypeArgRepr in python-interpreter.abnf and
+// pyTypeArgRepr in lib/python-rt.metajs.
+func (rt *jsrt) pyTypeArgRepr(v interface{}) string {
+	if isUndefOrNull(v) || v == rt.pyBuiltinClass("NoneType") {
+		return "None"
+	}
+	if o, ok := v.(*jsObject); ok {
+		if s, ok := o.props["__galias"].(string); ok {
+			return s
+		}
+		if o.props["__pyconst"] == "Ellipsis" {
+			return "..."
+		}
+		if u, ok := pyUnionOf(o); ok {
+			return rt.pyUnionStr(u)
+		}
+	}
+	if _, isCls := rt.pyClassName(v); isCls {
+		s := rt.pyString(v)
+		return s[len("<class '") : len(s)-2]
+	}
+	return rt.pyRepr(v)
 }
 
 // pySliceIndices is Python's slice index computation: it answers, in order, the
@@ -21307,8 +21361,20 @@ func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) i
 			return rt.call(m, jsUndef, rt.pyBindCall(m, self, kw))
 		}
 	}
+	if org, ok := pyAliasOrigin(v); ok {
+		return rt.callPyValue(org, args, kw)
+	}
 	rt.pyCheckCallable(v)
 	return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw))
+}
+
+// pyAliasOrigin is the type a generic alias was made from: calling list[int]
+// calls list.
+func pyAliasOrigin(v interface{}) (interface{}, bool) {
+	if o, ok := v.(*jsObject); ok && o.props["__galias"] != nil {
+		return o.props["__origin__"], true
+	}
+	return nil, false
 }
 
 // pyCheckCallable raises CPython's TypeError for a call of a value that is not a
@@ -22090,6 +22156,9 @@ func pyTypeName(rt *jsrt, v interface{}) string {
 		if _, isU := pyUnionOf(t); isU {
 			return "typing.Union"
 		}
+		if _, isA := t.props["__galias"]; isA {
+			return "types.GenericAlias"
+		}
 		// An instance of a user class is a "'C' object" in every message.
 		if _, cls, isInst := pyInstance(t); isInst {
 			if n, has := cls.props["__name"]; has {
@@ -22596,7 +22665,7 @@ func (rt *jsrt) pyParseInt(s string, base int) interface{} {
 	}
 	// A base that is not a power of two converts at most 4300 digits
 	// (sys.get_int_max_str_digits()); the text is still validated first.
-	nd := pyIntDigitsOver(t, b)
+	nd := pyIntDigitsOver(t, b, rt.pyIntMaxDigits())
 	acc := new(big.Int)
 	prevDigit := prefixed
 	for i := 0; i < len(t) && ok; i++ {
@@ -22625,8 +22694,8 @@ func (rt *jsrt) pyParseInt(s string, base int) interface{} {
 			fmt.Sprintf("invalid literal for int() with base %d: %s", base, pyStrRepr(s)))})
 	}
 	if nd > 0 {
-		panic(&jsThrown{value: rt.pyExcInstance("ValueError", fmt.Sprintf("Exceeds the limit (4300 digits) for "+
-			"integer string conversion: value has %d digits; use sys.set_int_max_str_digits() to increase the limit", nd))})
+		panic(&jsThrown{value: rt.pyExcInstance("ValueError", fmt.Sprintf("Exceeds the limit (%d digits) for "+
+			"integer string conversion: value has %d digits; use sys.set_int_max_str_digits() to increase the limit", rt.pyIntMaxDigits(), nd))})
 	}
 	if neg {
 		acc.Neg(acc)
