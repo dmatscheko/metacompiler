@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-440** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-441** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -83,11 +83,6 @@ answer. Also check the plural / keyword-only forms ("missing 2 required position
 ---
 
 # JV — Java
-
-### T-438 java: frozen interpreter StringBuilder.append costs ~5-10K steps · P3 · JV · IN PROGRESS (JV worker, round 12) [V]
-2000 appends need 10-20M -frozen steps (measured by the PY worker); the java ratchet's section 49 alone needs 53M
-of the 100M step brake (now split into tests/java-test-full.2.java). The cost is in java-interpreter.abnf /
-languages/lib/java-lang.java. Profile and make append amortized O(len).
 
 ---
 
@@ -142,6 +137,14 @@ closure answers `{closure:...}`; ours answers the enclosing function. Known mode
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-440 core: native collector triggers every ~31 iterations with a tiny live set · P2 · CORE · IN PROGRESS (CORE worker, round 21) [V]
+Native java: `for (i < 400000) { s = s + (i % 10); if (i % 64 == 63) s = ""; }` with -exe takes 4.9 s (~12 us/iter);
+`MEC_GC_STATS=1`: collections=12818 live=225024 heap=12783664 — a collection every ~31 iterations although the live
+set is ~225 KB. The same per-call cost shows for user-class methods and StringBuilder.append (1M appends 29.6 s).
+Check the collection-trigger policy in runtime.c (threshold vs. live size after the permanent-region change, and
+whether string concatenation allocates large raw buffers that count toward the trigger) and the per-collection
+fixed cost. Measure all bench rows.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -474,6 +477,7 @@ T-436 csharp: synthesized record ToString (positional, public fields/properties,
 T-431 python: explicit None no longer takes a default (compiled), attribute hooks, own-attribute delete + delattr, GenericAlias repr, unions of values, exact 0/±1 powers, sys digit limit — DONE 6ea7f2a6
 T-432 python: big-int <-> bits 16 at a time (hex(10**4300) native 29.8s -> 0.7s); java StringBuilder part moved to T-438 — DONE 44e2ba60
 T-435 php: engine interfaces extend Traversable/UnitEnum/Stringable, Closure/Generator as classes, ~bool/~null TypeErrors, PHP 8.4 closure var_dump layout, *RECURSION* guard — DONE 3bd31a96
+T-438 java: StringBuilder appends onto a short tail + 32-level join counter (-frozen ~6.7K -> ~1.5K steps per append); java ratchet one file again — DONE 148fc8d1
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
