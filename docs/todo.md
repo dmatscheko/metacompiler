@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-463** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-465** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -75,12 +75,13 @@ its report; anything structural there is a CORE ticket.
 
 # JV — Java
 
-### T-460 java: static self-typed field init (compiled); unbound method refs on built-ins; array clone type; Short/Byte compare · P2 · JV · IN PROGRESS (JV worker, round 16) [V]
-javac/java 24: (a) compiled only: `final class Opt { static final Opt EMPTY = new Opt(7); }` fails "call of a non function
-value: undefined" (interp/java print 7). (b) `String::length` (e.g. `groupingBy(String::length)`) fails in all engines;
-static refs like `Integer::sum` work. (c) `String[] s = {"x", null}; Object[] c = s.clone(); c.getClass().getSimpleName()`
-gives `Object[]` (java `String[]`). (d) unprobed: `Short.compare`/`Byte.compare` return the sign in Go twin/layer 2
-(java x - y); the interpreter lacks them. Also missing: DoubleStream/LongStream, HashSet/toSet, Comparator.naturalOrder.
+### T-464 java: interface default overload hiding; functional-interface overload choice; Object[] element types · P2 · JV · OPEN [V]
+javac/java 24: (a) a class overriding one overload of an interface default hides the other overloads under dynamic
+dispatch (`q.describe()` answers `square 2.25null`, java `area 2.25`) — overload candidates must walk the interfaces.
+(b) overload choice treats a functional-interface parameter as accepting any reference (`kind(Shape)` vs `kind(Object)` with
+a String picks Shape; java Object). (c) one-dimensional Object[] stays untagged: `new Object[]{"a"}` reports String[],
+`Arrays.copyOf(s, 3)` Object[], `toArray()` String[]; needs Class.getComponentType / Array.newInstance in all engines.
+(d) `thenComparing(Function)` (one-arg key form) not provided — indistinguishable from the Comparator form at run time.
 
 ---
 
@@ -114,14 +115,15 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-462 php: callbacks and dynamic calls of non-static methods; compiled __call reach; static closures; Closure methods · P2 · PHP · IN PROGRESS (PHP worker, round 32) [V]
-php-src semantics, both engines unless noted: (a) a callback naming a non-static method through its class from a
-compatible instance (`call_user_func(['A','foo'])`, `array_map(['B','twice'],…)` inside a B instance) runs without $this
-(PHP binds the frame's $this: "foo:B"). (b) `['C','m']()` / `'C::m'()` of a non-static method should always be an Error
-(zend_init_dynamic_call_*; dynamic_call/dynamic_call_non_static, needs the __call trampoline). (c) compiled only: `__call`
-is not reached through `[$o,'x']()` or through `$o->x(...)`. (d) `static function(){ A::foo(); }` inside a method still
-sees $this (PHP: Error). (e) `$closure->bindTo(...)`, `->call(...)`, `->__invoke(...)` unsupported ("Call to a member
-function ... on Closure").
+### T-463 php: $this outside object context; bind/call on non-literal closures; binding warnings; S63T var_dump id divergence · P2 · PHP · OPEN [V]
+php-src semantics: (a) `$this` in a static method or static closure should raise Error "Using $this when not in object
+context"; the interpreter stops with "unknown name: $this" or reads null, the compiler aborts "member 'x' of undefined".
+(b) `bindTo`/`call` on a non-literal closure (first-class callable, fromCallable result) aborts "not modelled"
+(closure_call_bind). (c) binding warnings are not printed; "Cannot unbind $this of closure using $this" is not enforced.
+(d) compiled `$closure->__invoke($n)` passes a by-reference parameter by value (closure_invoke_case_insensitive).
+(e) dynamic calls to an inaccessible method do not route to __call/__callStatic. (f) unverified: `call_user_func(['A','s'])`
+from a compatible B instance — php-src suggests static:: is B, ours gives A. (g) the full ratchet's var_dump of S63T shows
+#470 interp vs #469 compiled (object-id model; the suite does not compare it — check why the s63dump comparison misses it).
 
 ---
 
@@ -494,6 +496,8 @@ T-461 core: the goja-hosted MetaJS interpreter leaked JavaScript prototype membe
 T-459 js, ts: interpreter generators log pulls on outside iterators (shared js-genlog.js), replayed from the log; was [5,7] for [5,6,7,8] — DONE 0f734f33
 T-458 python: Unicode 16 printable table (736 runs, shared JS + Go twin) for repr and str.isprintable, all BMP code points verified against python3 — DONE f3549e3c
 T-457 php: non-static methods called statically (Error / callback TypeError, $this forwarding), compiled first-class callables resolve at creation, is_callable — DONE 5b15f6f1
+T-462 php: non-static callbacks bind the frame's $this, dynamic calls of non-static methods raise, compiled __call on miss paths, static closures hide $this, Closure bindTo/call/__invoke/bind — DONE 3ab97e6a
+T-460 java: static initializers after installation (compiled), unbound built-in method refs, typed array classes (Object[] untagged, see T-464), Short/Byte.compare, Long/DoubleStream, HashSet/toSet, Comparator, interface overload dispatch — DONE 0accbdc4
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
