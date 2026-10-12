@@ -63,11 +63,6 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-458 python: repr escapes for unassigned code points · P3 · PY · IN PROGRESS (PY worker, round 25) [V]
-`repr(chr(0xd7ff))` prints the character; CPython escapes it (`'\ud7ff'`) — pyReprEsc treats only surrogates/controls
-as non-printable, not unassigned code points (needs the Unicode "printable" table, Cn/Co/Cs/Zl/Zp/Zs≠space/Cc/Cf).
-Known model limit (not a ticket): a surrogate pair is one code point of length 1 (UTF-16 strings).
-
 ---
 
 # RB — Ruby
@@ -75,12 +70,6 @@ Known model limit (not a ticket): a surrogate pair is one code point of length 1
 ---
 
 # JS — JavaScript and TypeScript
-
-### T-459 js: interpreter generators may replay one-shot iterators · P1 · JS · IN PROGRESS (JS worker, round 9) [U]
-The JS interpreter's generators use the same replay model the Python interpreter had (fixed there in T-455 with a
-per-generator pull log): a generator iterating an iterator passed in from outside likely re-pulls it on each replay,
-skipping elements (python showed [5, 7] for [5,6,7,8]). Probe against node first: `function* g(it){ for (const x of it)
-yield x }` over `[5,6,7,8][Symbol.iterator]()`, interleaved next() on generator and source.
 
 ---
 
@@ -500,6 +489,8 @@ T-454 php: method visibility (all call forms, callbacks, ctor, traits), typed-pr
 T-455 python: replayed generators log one-shot pulls, user __next__/__iter__ laziness (next(), for, yield from), descriptor method calls (compiled), surrogate repr (Go twin), __doc__ — DONE 2785aca2
 T-456 java: instanceof on boxes (java-specific test), wrapper members, array clone, java.util.stream (Stream/IntStream/Collectors/Optional), HashMap in java's order, qualified type names — DONE c6905a87
 T-461 core: the goja-hosted MetaJS interpreter leaked JavaScript prototype members (array map/forEach, function bind, ...); it now answers only the floor's members, like -frozen, llvm.Run and native — DONE f04d906f
+T-459 js, ts: interpreter generators log pulls on outside iterators (shared js-genlog.js), replayed from the log; was [5,7] for [5,6,7,8] — DONE 0f734f33
+T-458 python: Unicode 16 printable table (736 runs, shared JS + Go twin) for repr and str.isprintable, all BMP code points verified against python3 — DONE f3549e3c
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
