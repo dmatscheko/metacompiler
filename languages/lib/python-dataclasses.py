@@ -430,6 +430,8 @@ def replace(obj, /, **changes):
 
 
 class _mec_dc_module:
+    __all__ = ["dataclass", "field", "Field", "FrozenInstanceError", "MISSING", "fields", "asdict", "astuple",
+               "make_dataclass", "replace", "is_dataclass"]
     dataclass = staticmethod(dataclass)
     field = staticmethod(field)
     fields = staticmethod(_mec_dc_fields)
@@ -446,4 +448,5 @@ class _mec_dc_module:
         return "<module 'dataclasses'>"
 
 
-_mec_mod_dataclasses = _mec_dc_module()
+_mec_mod_dataclasses = type("module", (_mec_dc_module,), {})()
+_mec_mod_dataclasses.__name__ = "dataclasses"

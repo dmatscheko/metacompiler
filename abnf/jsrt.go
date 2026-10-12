@@ -22961,7 +22961,12 @@ func (rt *jsrt) pyBindCallR(callee interface{}, pos []interface{}, kw interface{
 	if sig == nil {
 		// A builtin (no declared signature) takes the keyword dict as one extra
 		// trailing argument - which is exactly what dict(a=1) / dict(**m) want.
+		// A module function (pyModuleFn) gets pyKwMark before it, since its
+		// positionals may end in a dict.
 		if hasKw {
+			if h, ok := callee.(*hostFunc); ok && h.pybm != nil && h.pybm.kind == "m" {
+				return append(append([]interface{}{}, pos...), pyKwMark, kw), true
+			}
 			return append(append([]interface{}{}, pos...), kw), true
 		}
 		return pos, false
@@ -23506,6 +23511,11 @@ var pyDeleted interface{} = pyDeletedT{}
 type pyAbsentArgT struct{}
 
 var pyAbsentArg interface{} = pyAbsentArgT{}
+
+// pyKwMarkT separates a module function's positionals from its keyword dict.
+type pyKwMarkT struct{}
+
+var pyKwMark interface{} = pyKwMarkT{}
 
 // pyExcInstance builds a builtin exception instance - the {__class:{__name},
 // args} shape the except clauses match - for a runtime error the program is

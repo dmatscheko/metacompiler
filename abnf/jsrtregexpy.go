@@ -526,6 +526,42 @@ func rxPyIntArg(args []interface{}, i int) int {
 	return 0
 }
 
+// pyReKwArgs is a call's arguments with its keyword arguments moved into their
+// positional slots, by the parameter names of re.NAME (mod) or of Pattern.NAME.
+// Twin of pyReKwArgs in python-interpreter.abnf and pyERxKwArgs in
+// lib/python-rt.metajs.
+func (rt *jsrt) pyReKwArgs(name string, args []interface{}, kw interface{}, mod bool) []interface{} {
+	if keys, _, ok := dictParts(kw); !ok || len(keys.elems) == 0 {
+		return args
+	}
+	var names []string
+	switch name {
+	case "sub", "subn":
+		names = []string{"repl", "string", "count"}
+	case "split":
+		names = []string{"string", "maxsplit"}
+	default:
+		names = []string{"string", "pos", "endpos"}
+	}
+	if mod {
+		switch name {
+		case "compile":
+			names = []string{"pattern", "flags"}
+		case "escape":
+			names = []string{"pattern"}
+		case "purge":
+			names = nil
+		case "sub", "subn":
+			names = []string{"pattern", "repl", "string", "count", "flags"}
+		case "split":
+			names = []string{"pattern", "string", "maxsplit", "flags"}
+		default:
+			names = []string{"pattern", "string", "flags"}
+		}
+	}
+	return rt.pyKwPos(name, args, kw, names, 0)
+}
+
 // rxPyModCall is re.f(pattern, ...). Every one of those is the compiled pattern's
 // own method with the pattern dropped, so the two entry points share one body; the
 // only difference is where the optional flags argument sits.
@@ -664,7 +700,8 @@ func init() {
 				if !ok {
 					rt.fail("js_pyrxmcall args must be an array")
 				}
-				return w(rt.pyMathCall(rt.toString(u(a[1])), arr.elems))
+				name := rt.toString(u(a[1]))
+				return w(rt.pyMathCall(name, rt.pyMathKwArgs(name, arr.elems, u(a[3]))))
 			}
 			if o, ok := target.(*jsObject); ok && o.props["__pymod"] == "sys" {
 				return w(rt.pySysCall(rt.toString(u(a[1])), rt.argArray(u(a[2])), u(a[3])))
@@ -676,10 +713,10 @@ func init() {
 				}
 				name := rt.toString(u(a[1]))
 				if rxPyIsMod(target) {
-					return w(rt.rxPyModCall(name, arr.elems))
+					return w(rt.rxPyModCall(name, rt.pyReKwArgs(name, arr.elems, u(a[3]), true)))
 				}
 				if rxPyIsRe(target) {
-					return w(rt.rxPyReMethod(target.(*jsObject), name, arr.elems))
+					return w(rt.rxPyReMethod(target.(*jsObject), name, rt.pyReKwArgs(name, arr.elems, u(a[3]), false)))
 				}
 				return w(rt.rxPyMatchMethod(target, name, arr.elems))
 			}

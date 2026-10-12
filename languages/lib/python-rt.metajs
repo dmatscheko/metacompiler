@@ -8548,6 +8548,9 @@ var pyDSigNreq = []
 // Fills a defaulted parameter's slot that a keyword call left unbound, so
 // js_pyargd can tell it from an explicit None. Go: pyAbsentArg.
 var pyDAbsent = {}
+// Separates a module function's positionals from its keyword dict (pyBindCall,
+// pyDModuleFn). Go: pyKwMark.
+var pyDKwMark = {}
 
 function pyDSigIndex(callee) {
     var i = 0
@@ -8641,12 +8644,16 @@ function pyBindCall(callee, pos, kw) {
     if (si < 0) {
         // A builtin (no declared signature) takes the keyword dict as one extra
         // trailing argument - which is exactly what dict(a=1) / dict(**m) want.
+        // A module function (pyDModuleFn) gets pyDKwMark before it, since its
+        // positionals may end in a dict.
         if (hasKw) {
             i = 0
             while (i < pos.length) {
                 out.push(pos[i])
                 i = i + 1
             }
+            var bmi = pyBMFind(callee)
+            if (bmi >= 0 && pyBMTab[bmi + 4] === "m") { out.push(pyDKwMark) }
             out.push(kw)
             return out
         }
@@ -10110,7 +10117,14 @@ function pyDModuleFn(mod, name) {
             args.push(arguments[i])
             i = i + 1
         }
-        return js_pyrxmcall(mod, name, args, undefined)
+        var kw = anytype
+        kw = undefined
+        var n = args.length
+        if (n >= 2 && args[n - 2] === pyDKwMark) {
+            kw = args[n - 1]
+            args = args.slice(0, n - 2)
+        }
+        return js_pyrxmcall(mod, name, args, kw)
     }
     return pyBMSetK(f, name, mod, null, "m")
 }
@@ -11024,6 +11038,25 @@ function pyERxModCall(name, args) {
     return pyERxReMethod(rv, name, rest)
 }
 
+// pyERxKwArgs is Go (*jsrt).pyReKwArgs: the keyword arguments moved into their
+// positional slots, by the parameter names of re.NAME (mod) or Pattern.NAME.
+function pyERxKwArgs(name, args, kw, mod) {
+    if (!pyIsDict(kw)) { return args }
+    if (kw["keys"].length == 0) { return args }
+    var names = ["string", "pos", "endpos"]
+    if (name == "sub" || name == "subn") { names = ["repl", "string", "count"] }
+    if (name == "split") { names = ["string", "maxsplit"] }
+    if (mod) {
+        names = ["pattern", "string", "flags"]
+        if (name == "compile") { names = ["pattern", "flags"] }
+        if (name == "escape") { names = ["pattern"] }
+        if (name == "purge") { names = [] }
+        if (name == "sub" || name == "subn") { names = ["pattern", "repl", "string", "count", "flags"] }
+        if (name == "split") { names = ["pattern", "string", "maxsplit", "flags"] }
+    }
+    return pyKwPos(name, args, kw, names, 0)
+}
+
 // pyERxReMethod is Go (*jsrt).rxPyReMethod.
 function pyERxReMethod(rv, name, a) {
     if (name == "search") { return pyERxSearch(rv, pyToStr(pyEArgAt(a, 0)), pyERxIntArg(a, 1)) }
@@ -11093,9 +11126,9 @@ function pyERxRepr(v) {
 // ----- The externs -----
 
 // js_pyrxmcall is the method-call wrapper: the re module, a compiled pattern and
-// a match dispatch here, everything else goes straight on to js_pymcall. The
-// keyword dict is carried through untouched, exactly as the Go twin does - no re
-// method takes a keyword argument in this dialect.
+// a match dispatch here, everything else goes straight on to js_pymcall. A
+// module function's or a pattern method's keyword arguments are moved into
+// their positional slots (pyERxKwArgs, pyMathKwArgs), as the Go twin does.
 function js_pyrxmcall(target, name, args, kw) {
     // The `math` module rides the same dispatcher: js_pyrxmcall is the ONE
     // extern the python emitter routes every method call through, and a module
@@ -11105,15 +11138,16 @@ function js_pyrxmcall(target, name, args, kw) {
         var pm = target["__pymod"]
         if (pm === "math") {
             if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
-            return pyMathCall(pyToStr(name), args)
+            var mn = pyToStr(name)
+            return pyMathCall(mn, pyMathKwArgs(mn, args, kw))
         }
         if (pm === "sys") { return pySysCall(pyToStr(name), args, kw) }
     }
     if (pyERxIsMod(target) || pyERxIsRe(target) || pyERxIsMatch(target)) {
         if (!pyIsArr(args)) { fail("js_pyrxmcall args must be an array") }
         var nm = pyToStr(name)
-        if (pyERxIsMod(target)) { return pyERxModCall(nm, args) }
-        if (pyERxIsRe(target)) { return pyERxReMethod(target, nm, args) }
+        if (pyERxIsMod(target)) { return pyERxModCall(nm, pyERxKwArgs(nm, args, kw, true)) }
+        if (pyERxIsRe(target)) { return pyERxReMethod(target, nm, pyERxKwArgs(nm, args, kw, false)) }
         return pyERxMatchMethod(target, nm, args)
     }
     return js_pymcall(target, name, args, kw)
@@ -11205,6 +11239,25 @@ function pyMIsMathMod(v) {
 function pyMArg(args, i) {
     if (i >= args.length) { fail("math: missing argument") }
     return pyNum(args[i])
+}
+
+// Go: rt.pyMathKwArgs. math.NAME's arguments with its keyword arguments placed:
+// only isclose takes any, rel_tol and abs_tol, which land third and fourth.
+function pyMathKwArgs(name, args, kw) {
+    if (!pyIsDict(kw)) { return args }
+    var ks = kw["keys"]
+    if (ks.length == 0 || !pyMHas("math", name)) { return args }
+    if (name != "isclose") { pyRaiseExc("TypeError", "math." + name + "() takes no keyword arguments") }
+    var out = [pyEArgAt(args, 0), pyEArgAt(args, 1), pyMkFlo(0.000000001), 0]
+    var i = 0
+    while (i < ks.length) {
+        var kn = pyToStr(ks[i])
+        if (kn == "rel_tol") { out[2] = kw["vals"][i] }
+        else if (kn == "abs_tol") { out[3] = kw["vals"][i] }
+        else { pyRaiseExc("TypeError", "isclose() got an unexpected keyword argument '" + kn + "'") }
+        i = i + 1
+    }
+    return out
 }
 
 // CPython 3.14's own domain-error texts, which quote the offending operand as a
@@ -11421,11 +11474,17 @@ function pyMathCall(name, args) {
     if (name == "isclose") {
         var ca = pyMArg(args, 0)
         var cb = pyMArg(args, 1)
+        var crel = 0.000000001
+        var cabs = 0
+        if (args.length > 2) { crel = pyMArg(args, 2) }
+        if (args.length > 3) { cabs = pyMArg(args, 3) }
+        if (crel < 0 || cabs < 0) { pyRaiseExc("ValueError", "tolerances must be non-negative") }
         if (ca === cb) { return true }
         if (ca !== ca || cb !== cb) { return false }
         if (ca === pyMInf() || ca === 0 - pyMInf()) { return false }
         if (cb === pyMInf() || cb === 0 - pyMInf()) { return false }
-        return Math.abs(ca - cb) <= 0.000000001 * Math.max(Math.abs(ca), Math.abs(cb))
+        var cd = Math.abs(ca - cb)
+        return cd <= Math.abs(crel * cb) || cd <= Math.abs(crel * ca) || cd <= cabs
     }
     pyRaiseExc("AttributeError", "module 'math' has no attribute '" + name + "'")
 }

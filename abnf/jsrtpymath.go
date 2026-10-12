@@ -172,6 +172,31 @@ func pyMathModule(rt *jsrt) *jsObject {
 	return o
 }
 
+// pyMathKwArgs is math.NAME's arguments with its keyword arguments placed: only
+// isclose takes any, rel_tol and abs_tol, which land third and fourth. Twin of
+// pyMathKwArgs in python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyMathKwArgs(name string, args []interface{}, kw interface{}) []interface{} {
+	keys, vals, ok := dictParts(kw)
+	if !ok || len(keys.elems) == 0 || !pyModHas("math", name) {
+		return args
+	}
+	if name != "isclose" {
+		rt.pyRaise("TypeError", "math."+name+"() takes no keyword arguments")
+	}
+	out := []interface{}{argAt(args, 0), argAt(args, 1), pyMathFlo(1e-09), float64(0)}
+	for i, k := range keys.elems {
+		switch rt.toString(k) {
+		case "rel_tol":
+			out[2] = vals.elems[i]
+		case "abs_tol":
+			out[3] = vals.elems[i]
+		default:
+			rt.pyRaise("TypeError", "isclose() got an unexpected keyword argument '"+rt.toString(k)+"'")
+		}
+	}
+	return out
+}
+
 // pyMathCall is math.<name>(args...). The dispatcher is by name rather than by
 // twenty-five stored closures because the same shape has to exist in MetaJS
 // layer 2, where a closure per member would be twenty-five floor cells held
@@ -350,9 +375,20 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 		f := pyMathArg(rt, args, 0)
 		return !math.IsNaN(f) && !math.IsInf(f, 0)
 	case "isclose":
-		// CPython's default tolerances, and its rule that two infinities of the
-		// same sign are close while a NaN is close to nothing.
+		// CPython's tolerances (rel_tol and abs_tol, placed by pyMathKwArgs),
+		// and its rule that two infinities of the same sign are close while a
+		// NaN is close to nothing.
 		a, b := pyMathArg(rt, args, 0), pyMathArg(rt, args, 1)
+		rel, abs := 1e-09, 0.0
+		if len(args) > 2 {
+			rel = pyMathArg(rt, args, 2)
+		}
+		if len(args) > 3 {
+			abs = pyMathArg(rt, args, 3)
+		}
+		if rel < 0 || abs < 0 {
+			rt.pyRaise("ValueError", "tolerances must be non-negative")
+		}
 		if a == b {
 			return true
 		}
@@ -360,7 +396,7 @@ func (rt *jsrt) pyMathCall(name string, args []interface{}) interface{} {
 			return false
 		}
 		d := math.Abs(a - b)
-		return d <= 1e-09*math.Max(math.Abs(a), math.Abs(b)) || d <= 0.0
+		return d <= math.Abs(rel*b) || d <= math.Abs(rel*a) || d <= abs
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 		"module 'math' has no attribute '"+name+"'")})

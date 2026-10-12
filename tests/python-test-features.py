@@ -8,6 +8,7 @@
 
 import math
 import re
+import builtins
 
 fails = [0]
 checks = [0]
@@ -2513,6 +2514,37 @@ check("fmt-str", [fm("abcdef", ".2"), fm("ab", "^6"), fm("ab", "=5"), fm("ab", "
        "ValueError: Sign not allowed in string format specifier"])
 check("fmt-strformat-fstring", ["{:>6,}".format(fm_vals[4]), f"{fm_vals[0]:08.3f}", "{0!r:>5}".format("a")],
       ["1,234,567", "0002.700", "  'a'"])
+
+# ----- import edges -----
+# `from M import *` binds a runtime module's public names and a library
+# module's __all__, `import P.S` binds P, and a module function keeps its
+# keyword arguments, called directly or read off as a value. Last in the file,
+# because the star import rebinds pow and e. Rows from CPython 3.14.
+from math import *
+from os.path import *
+import collections.abc
+
+def kw_err(f):
+    try:
+        f()
+    except (TypeError, ValueError) as e:
+        return type(e).__name__ + ": " + str(e)
+    return "no error"
+
+kw_sub = re.sub
+kw_close = math.isclose
+check("star-runtime-module", [sqrt(16), floor(2.5), pi, isclose(1.0, 1.05, rel_tol=0.1)], [4.0, 2, 3.141592653589793, True])
+check("star-library-module", [join("a", "b"), splitext("x.py"), sep], ["a/b", ("x", ".py"), "/"])
+check("import-submodule-binds-parent", [type(collections).__name__, list(collections.deque([1]))], ["module", [1]])
+check("module-fn-keywords", [re.sub("a", "b", "aaa", count=1), kw_sub("a", "b", "aaa", count=2),
+                             re.split(",", "a,b,c", maxsplit=1), re.findall("A", "aA", flags=re.I),
+                             kw_close(1.0, 1.05, rel_tol=0.1), re.compile(",").split("a,b,c", maxsplit=1),
+                             math.isclose(0.0, 1e-10, abs_tol=1e-9)],
+      ["baa", "bba", ["a", "b,c"], ["a", "A"], True, ["a", "b,c"], True])
+check("module-fn-keyword-errors", [kw_err(lambda: math.sqrt(x=4)), kw_err(lambda: kw_close(1, 2, foo=1)),
+                                   kw_err(lambda: math.isclose(1, 2, rel_tol=-1)), kw_err(lambda: re.sub("a", "b", "c", cnt=1))],
+      ["TypeError: math.sqrt() takes no keyword arguments", "TypeError: isclose() got an unexpected keyword argument 'foo'",
+       "ValueError: tolerances must be non-negative", "TypeError: sub() got an unexpected keyword argument 'cnt'"])
 
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

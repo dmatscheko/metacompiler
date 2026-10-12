@@ -358,6 +358,8 @@ def _mec_co_count(pair):
 
 
 class _mec_co_module:
+    __all__ = ["Counter", "OrderedDict", "defaultdict", "deque"]
+
     def __repr__(self):
         return "<module 'collections'>"
 

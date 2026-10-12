@@ -150,7 +150,9 @@ Import      = KwImport ImportMod { "," ImportMod } ;
 ImportMod   <~~ var pyImS = pyImportMod(takeAll(), up.pos); if (pyImS != null) { push(pyImS) } ~~>
             = DottedName [ KwAs ImportId ] ;
 FromImport  <~~ var pyFrS = pyFromImport(takeAll(), up.pos); if (pyFrS != null) { push(pyFrS) } ~~>
-            = KwFrom RelName KwImport ( "*" | ImportParen | ImportName { "," ImportName } ) ;
+            = KwFrom RelName KwImport ( StarImport | ImportParen | ImportName { "," ImportName } ) ;
+StarImport  <~~ push(["*"]) ~~>
+            = "*" ;
 // from . import x / from ..pkg import y: the leading dots are the relative package
 // level, which this flat import model has nothing to resolve against, so they are
 // accepted and the name that follows (if any) decides.
@@ -1120,6 +1122,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/python-suggest.js")
     // The fixed names dir() of a user class answers.
     include("lib/python-dir.js")
+    // The module tables of the import statements.
+    include("lib/python-import.js")
 
     // sin, cos, tan and atan2 are fdlibm's (lib/fdlibm.js), which agree with the
     // platform libm CPython calls where the host's Math does not: cos(pi/2) is
@@ -2514,7 +2518,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // holds. Both fall out of one object whose attribute read goes straight to
     // hostGlobals, so the identity is not a copy but the very binding the global
     // name resolves to.
-    hostGlobals["builtins"] = {__pymod: "builtins"}
+    hostGlobals["_mec_mod_builtins"] = {__pymod: "builtins"}
 
     // ----- the BUILTIN render table ----------------------------------------
     //
@@ -2739,9 +2743,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // module-heavy benchmark past a threshold.
     function pyModuleFn(mod, name) {
         var f = function() {
+            var kw = kTakeNamed()
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
-            return mcall(mod, name, args, undefined)
+            return mcall(mod, name, args, kw)
         }
         return pyBMSetK(f, name, mod, null, "m")
     }
@@ -4311,6 +4316,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The module surface. Every re.f(pattern, ...) is the compiled pattern's own
     // method with the pattern dropped, so the two entry points share one body; the
     // only difference is where the optional flags argument sits.
+    // A call's keyword arguments moved into their positional slots, by the
+    // parameter names of re.NAME (mod) or of Pattern.NAME. Twin of rt.pyReKwArgs
+    // in abnf/jsrtregexpy.go and pyERxKwArgs in lib/python-rt.metajs.
+    function pyReKwArgs(name, args, kw, mod) {
+        if (kw === null || kw === undefined || kw.keys.length == 0) { return args }
+        var names = name == "sub" || name == "subn" ? ["repl", "string", "count"]
+                  : name == "split" ? ["string", "maxsplit"] : ["string", "pos", "endpos"]
+        if (mod) {
+            names = name == "compile" ? ["pattern", "flags"] : name == "escape" ? ["pattern"] : name == "purge" ? []
+                  : name == "sub" || name == "subn" ? ["pattern", "repl", "string", "count", "flags"]
+                  : name == "split" ? ["pattern", "string", "maxsplit", "flags"] : ["pattern", "string", "flags"]
+        }
+        return pyKwPos(name, args, kw, names, 0)
+    }
     function pyReModCall(name, args) {
         if (name == "escape") { return pyReEscape("" + args[0]) }
         if (name == "purge") { return undefined }
@@ -4362,10 +4381,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "expand") { return rxExpand(md.prog, md.string, md.m, pyReTemplate("" + a[0])) }
         fail("unknown Match method: " + name)
     }
-    // `import re` binds no module object in this flat import model, so the module
-    // is a host global: an ordinary record, which pyattr reads re.I / re.DOTALL out
-    // of and mcall dispatches re.search(...) on.
-    hostGlobals["re"] = {__pymod: "re", NOFLAG: 0,
+    // The `re` module object, which `import re` binds (core.stdlibImports): an
+    // ordinary record, which pyattr reads re.I / re.DOTALL out of and mcall
+    // dispatches re.search(...) on.
+    hostGlobals["_mec_mod_re"] = {__pymod: "re", NOFLAG: 0,
                          A: PY_RE_A, ASCII: PY_RE_A, I: PY_RE_I, IGNORECASE: PY_RE_I,
                          L: PY_RE_L, LOCALE: PY_RE_L, M: PY_RE_M, MULTILINE: PY_RE_M,
                          S: PY_RE_S, DOTALL: PY_RE_S, U: PY_RE_U, UNICODE: PY_RE_U,
@@ -4381,9 +4400,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Go twin: abnf/jsrtpymath.go. Layer 2: js_pymath_module / pyMathCall in
     // languages/lib/python-rt.metajs.
     //
-    // `import math` binds no module object in this flat import model, so the
-    // module is a host global - exactly what `re` above already is, and the
-    // deviation is the same one: `math` is always there, imported or not.
+    // The module object is a host record bound as _mec_mod_math, exactly what
+    // `re` above is, and `import math` binds it.
     //
     // SCOPE. Everything here is a pure function of doubles or of integers, which
     // is what this value model carries exactly. DELIBERATELY ABSENT: the complex
@@ -4410,8 +4428,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the literal is the same value. The FUNCTION BODIES in this chapter are safe
     // by construction: they run at program time, long after the whole script has
     // been evaluated.
-    hostGlobals["sys"] = {__pymod: "sys"}
-    hostGlobals["math"] = {__pymod: "math",
+    hostGlobals["_mec_mod_sys"] = {__pymod: "sys"}
+    hostGlobals["_mec_mod_math"] = {__pymod: "math",
                            pi: {__flo: 3.141592653589793},
                            e: {__flo: 2.718281828459045},
                            tau: {__flo: 6.283185307179586},
@@ -4422,6 +4440,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyMArg(args, i) {
         if (i >= args.length) { fail("math: missing argument") }
         return floVal(args[i])
+    }
+    // math.NAME's arguments with its keyword arguments placed: only isclose takes
+    // any, rel_tol and abs_tol, which land third and fourth. Twin of pyMathKwArgs
+    // in abnf/jsrtpymath.go and lib/python-rt.metajs.
+    function pyMathKwArgs(name, args, kw) {
+        if (kw === null || kw === undefined || kw.keys.length == 0 || !pyModHas("math", name)) { return args }
+        if (name != "isclose") { pyListErr("TypeError", "math." + name + "() takes no keyword arguments") }
+        var out = [args[0], args[1], pyFlo(0.000000001), 0]
+        for (var i = 0; i < kw.keys.length; i++) {
+            var at = kw.keys[i] == "rel_tol" ? 2 : kw.keys[i] == "abs_tol" ? 3 : 0
+            if (at == 0) { pyListErr("TypeError", "isclose() got an unexpected keyword argument '" + kw.keys[i] + "'") }
+            out[at] = kw.vals[i]
+        }
+        return out
     }
     // CPython 3.14's own domain-error texts, which quote the offending operand as
     // a FLOAT repr ("expected a nonnegative input, got -1.0"). Taken from the
@@ -4474,18 +4506,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return bigOut(acc)
     }
     // Is `name` a function the runtime module `mod` (math, re or sys) offers? One
-    // list per module, consulted by the attribute read (`f = math.sqrt`, `from re
-    // import sub`) and by hasattr; the CALL path does not need it, because each
-    // module's call dispatch raises the AttributeError itself. Keep in step with
-    // pyMHas in languages/lib/python-rt.metajs and pyModHas in abnf/jsrtpymath.go.
-    var pyMathNames = ["sqrt", "cbrt", "exp", "expm1", "log", "log1p", "log2", "log10", "pow",
-                       "fabs", "fmod", "copysign", "atan2", "hypot", "sin", "cos", "tan",
-                       "asin", "acos", "atan", "sinh", "cosh", "tanh", "degrees", "radians",
-                       "floor", "ceil", "trunc", "gcd", "lcm", "factorial",
-                       "isnan", "isinf", "isfinite", "isclose"]
-    var pyReFnNames = ["compile", "search", "match", "fullmatch", "findall", "finditer",
-                       "sub", "subn", "split", "escape", "purge"]
-    var pySysFnNames = ["exit", "get_int_max_str_digits", "set_int_max_str_digits"]
+    // list per module (lib/python-import.js), consulted by the attribute read
+    // (`f = math.sqrt`, `from re import sub`) and by hasattr; the CALL path does
+    // not need it, because each module's call dispatch raises the AttributeError
+    // itself.
     function pyModHas(mod, name) {
         var names = mod == "math" ? pyMathNames : mod == "re" ? pyReFnNames : mod == "sys" ? pySysFnNames : []
         for (var i = 0; i < names.length; i++) { if (names[i] == name) { return true } }
@@ -4656,11 +4680,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "isclose") {
             var ca = pyMArg(args, 0)
             var cb = pyMArg(args, 1)
+            var crel = args.length > 2 ? pyMArg(args, 2) : 0.000000001
+            var cabs = args.length > 3 ? pyMArg(args, 3) : 0
+            if (crel < 0 || cabs < 0) { pyListErr("ValueError", "tolerances must be non-negative") }
             if (ca === cb) { return true }
             if (ca !== ca || cb !== cb) { return false }
             if (ca === pyMInf() || ca === 0 - pyMInf()) { return false }
             if (cb === pyMInf() || cb === 0 - pyMInf()) { return false }
-            return Math.abs(ca - cb) <= 0.000000001 * Math.max(Math.abs(ca), Math.abs(cb))
+            var cd = Math.abs(ca - cb)
+            return cd <= Math.abs(crel * cb) || cd <= Math.abs(crel * ca) || cd <= cabs
         }
         pyRaise(pyMakeExc("AttributeError", ["module 'math' has no attribute '" + name + "'"]))
         return undefined
@@ -5915,15 +5943,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // on one (docs/abnf-dialect-gotchas.md).
         if (target !== null && target !== undefined && typeof target == "object" && !Array.isArray(target)) {
             if (target.__pysup == true) { return pySuperMCall(target, name, args, kw) }
-            if (target.__pymod == "re") { return pyReModCall(name, args) }
-            if (target.__pymod == "math") { return pyMathCall(name, args) }
+            if (target.__pymod == "re") { return pyReModCall(name, pyReKwArgs(name, args, kw, true)) }
+            if (target.__pymod == "math") { return pyMathCall(name, pyMathKwArgs(name, args, kw)) }
             if (target.__pymod == "sys") { return pySysCall(name, args, kw) }
             // Any other module object - `builtins.len(xs)`. A method call does
             // not go through pyattr in this half, so the module's own member is
             // read here and called, which keeps `builtins.len(xs)` and
             // `builtins.len` answering the same function.
             if (target.__pymod != undefined) { return pyCall(pyattr(target, name), args, kw) }
-            if (target.__pyre === true) { return pyReMethod(target, name, args) }
+            if (target.__pyre === true) { return pyReMethod(target, name, pyReKwArgs(name, args, kw, false)) }
             if (pyIsProp(target)) { return pyCall(pyPropAttr(target, name), args, kw) }
             if (target.__pymatch === true) { return pyMatchMethod(target, name, args) }
         }
@@ -11344,7 +11372,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // len.__self__ is the builtins MODULE in CPython, not a receiver - the
         // builtin functions are that module's members.
         if (typeof o == "function" && name == "__self__" && bfnCode(o) !== undefined) {
-            return hostGlobals["builtins"]
+            return hostGlobals["_mec_mod_builtins"]
         }
         var na = pyNumAttr(o, name)
         if (na !== undefined) { return na }
@@ -12573,14 +12601,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // parent). The modules written in Python are pyLibMods.
     core.stdlibImports = ["sys", "math", "collections.abc", "re", "typing", "random", "time", "abc", "builtins"]
     // Each top-level module of that list has a module object, bound as
-    // _mec_mod_<name> like a library module's: the host global for the modules
-    // that have one (math, re, sys, builtins), else a bare module whose every
+    // _mec_mod_<name> like a library module's and only there, so a module name
+    // is unbound until an import binds it: the host record for the modules that
+    // have one (math, re, sys, builtins), else a bare module whose every
     // attribute is an AttributeError. Twin of the _mec_mod_ boot loop in
     // python-to-llvm-ir.abnf.
     for (var smi = 0; smi < core.stdlibImports.length; smi++) {
         var smn = core.stdlibImports[smi]
-        if (smn.indexOf(".") >= 0) { continue }
-        hostGlobals["_mec_mod_" + smn] = hasOwn(hostGlobals, smn) ? hostGlobals[smn] : {__pymod: smn}
+        if (smn.indexOf(".") >= 0 || hasOwn(hostGlobals, "_mec_mod_" + smn)) { continue }
+        hostGlobals["_mec_mod_" + smn] = {__pymod: smn}
     }
     // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
     // look for mypkg/helper.py, then mypkg.py under the program's directory and
@@ -12607,9 +12636,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pyCurMod = outerMod
         c.popSource()
     }
-    // The modules (and submodules) lib/python-<top>.py provides.
-    var pyLibMods = ["copy", "dataclasses", "collections", "json", "itertools",
-                     "functools", "string", "os", "os.path"]
     core.importFile = function(path, pos) {
         // A library module is written in Python (lib/python-<name>.py, a
         // submodule in its parent's file) and compiled like a project file.
@@ -12689,6 +12715,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         resolveImport(items[0], pos)
         var mod = items[0]
         var rtm = pyRtMod(mod)
+        // `from M import *` binds the names pyStarNames lists, a project file's
+        // having been bound flat already.
+        if (items.length == 2 && items[1][0] == "*") {
+            if (pyImportKind == "file") { return null }
+            var star = pyStarNames(mod, pyImportKind == "lib" ? load("lib/python-" + mod.split(".")[0] + ".py") : "")
+            if (star.length == 0) { return null }
+            var vals = []
+            for (var si = 0; si < star.length; si++) { vals.push("_mec_mod_" + mod + "." + star[si]) }
+            return pyImportStmt(star.join(", ") + " = " + vals.join(", ") + "\n", "SmallLine")
+        }
         var binds = []
         for (var i = 1; i < items.length; i++) {
             var name = items[i][0]

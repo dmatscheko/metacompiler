@@ -5763,6 +5763,24 @@ def s110():
     check("osp2", errs == ["expected str, bytes or os.PathLike object, not int"] and os.sep == "/" and os.path.sep == "/"
           and os.name == "posix" and op.__name__ == "posixpath" and type(os).__name__ == "module")
 
+# ===== SECTION 111: a module is unbound until imported =====
+# math and builtins are imported nowhere at this file's top level, so reading
+# either name is a NameError, as it is in CPython; an import inside a function
+# binds a local. Rows from CPython 3.14.
+def S111name(f):
+    try:
+        f()
+    except NameError as e:
+        return str(e)
+    return "bound"
+
+def s111():
+    def inner():
+        import math
+        return math.floor(2.5)
+    check("modvis1", [S111name(lambda: math.sqrt(4)), S111name(lambda: builtins.len), inner(), S111name(lambda: math)]
+          == ["name 'math' is not defined", "name 'builtins' is not defined", 2, "name 'math' is not defined"])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -5871,5 +5889,6 @@ def main():
     s108() # SECTION-CALL 108
     s109() # SECTION-CALL 109
     s110() # SECTION-CALL 110
+    s111() # SECTION-CALL 111
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

@@ -201,7 +201,9 @@ Import      = KwImport ImportMod { "," ImportMod } ;
 ImportMod   <~~ var pyImS = pyImportMod(takeAll(), up.pos); if (pyImS != null) { push(pyImS) } ~~>
             = DottedName [ KwAs ImportId ] ;
 FromImport  <~~ var pyFrS = pyFromImport(takeAll(), up.pos); if (pyFrS != null) { push(pyFrS) } ~~>
-            = KwFrom RelName KwImport ( "*" | ImportParen | ImportName { "," ImportName } ) ;
+            = KwFrom RelName KwImport ( StarImport | ImportParen | ImportName { "," ImportName } ) ;
+StarImport  <~~ push(["*"]) ~~>
+            = "*" ;
 // from . import x / from ..pkg import y: the leading dots are the relative package
 // level, which this flat import model has nothing to resolve against, so they are
 // accepted and the name that follows (if any) decides.
@@ -1228,6 +1230,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Shared emitter machinery (module, handle constants, externs, loopStack
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
+    // The module tables of the import statements.
+    include("lib/python-import.js")
 
     // resolveImport / notImpl (lib/compile-core.js) call fail; each compiler
     // defines it. Bare early returns are braced (MetaJS has no ASI).
@@ -4323,20 +4327,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBind(b, "type", callExt(b, "js_closure", [handle(tyIdx), curScopeV]))
         // object(): the whole argument array, which must be empty.
         b = declBuiltin(b, "object", "js_pyobjnew", 0)
-        // The `re` module. `import re` binds no module object in this flat import
-        // model, so the module is an ordinary global holding the flag constants:
-        // js_pygetattr reads re.I / re.DOTALL straight out of it, and js_pyrxmcall
-        // dispatches re.search(...) on it (abnf/jsrtregexpy.go).
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "re"), callExt(b, "js_pyre_module", [])])
+        // The `re` module object, bound as _mec_mod_re for `import re` to bind
+        // (pyImportMod): js_pygetattr reads re.I / re.DOTALL straight out of it,
+        // and js_pyrxmcall dispatches re.search(...) on it (abnf/jsrtregexpy.go).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_re"), callExt(b, "js_pyre_module", [])])
         // The two named singletons.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "NotImplemented"), callExt(b, "js_pynotimpl", [])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Ellipsis"), callExt(b, "js_pyellipsis", [])])
-        // The `math` module, bound the same way and for the same reason: `import
-        // math` binds nothing in this flat import model, so the module object is
-        // simply always there. js_pygetattr reads math.pi / math.inf straight out of
-        // it and js_pyrxmcall dispatches math.sqrt(2) on it - abnf/jsrtpymath.go for
-        // the Go twin, js_pymath_module in languages/lib/python-rt.metajs for the
-        // native build.
+        // The `math` module object, bound the same way: js_pygetattr reads
+        // math.pi / math.inf straight out of it and js_pyrxmcall dispatches
+        // math.sqrt(2) on it - abnf/jsrtpymath.go for the Go twin,
+        // js_pymath_module in languages/lib/python-rt.metajs for the native build.
         // ----- `open` and file I/O: not implemented ------------------------------
         //
         // There is no file I/O primitive in this project's runtime:
@@ -4348,10 +4349,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // metajs-interpreter.abnf) plus the whole file-object surface. `open(...)`
         // therefore raises the catchable NameError any unbound name gets, which is a
         // truthful answer, rather than a fake `open` that pretends to read.
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "math"), callExt(b, "js_pymath_module", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_math"), callExt(b, "js_pymath_module", [])])
         // `sys`, as far as sys.get_int_max_str_digits / set_int_max_str_digits
         // (pySysCall in abnf/jsrtpynum.go and lib/python-rt.metajs).
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sys"), callExt(b, "js_pysys_module", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_sys"), callExt(b, "js_pysys_module", [])])
         b = declKwBuiltin(b, "str", "js_pystrnew", [])
         b = declKwBuiltin(b, "int", "js_pyint", [])
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
@@ -4518,7 +4519,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // pySawBuiltins: ungated, its module text alone steps the arena by a
         // whole chunk for programs that never mention the module.
         var bmodV = callExt(b, "js_pybuiltins_module", [])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "builtins"), bmodV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_builtins"), bmodV])
         if (pySawBuiltins) {
         for (var bn0 = 0; bn0 < pyBuiltinNameList.length; bn0++) {
             var bnm = pyBuiltinNameList[bn0]
@@ -4531,21 +4532,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_set", [bmodV, emitStr(b, "Exception"), excBase])
         callExt(b, "js_set", [bmodV, emitStr(b, "BaseException"), excRoot])
         }
-        // The runtime modules the program imports (pyRtMod), bound as
-        // _mec_mod_<name> like a library module's: the global module object where
-        // there is one, read back so `m is math` holds after `import math as m`,
-        // else a bare module whose every attribute is an AttributeError. Only the
-        // imported ones, so a program pays nothing for the rest. Twin of the
-        // _mec_mod_ loop in python-interpreter.abnf.
+        // The other runtime modules the program imports (pyRtMod), bound as
+        // _mec_mod_<name> like a library module's and only there, so a module
+        // name is unbound until an import binds it: a bare module whose every
+        // attribute is an AttributeError. Only the imported ones, so a program
+        // pays nothing for the rest. Twin of the _mec_mod_ loop in
+        // python-interpreter.abnf.
         for (var rm0 = 0; rm0 < pyRtModsUsed.length; rm0++) {
             var rmn = pyRtModsUsed[rm0]
-            var rmV = hUndef
-            if (rmn == "math" || rmn == "re" || rmn == "sys" || rmn == "builtins") {
-                rmV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rmn)])
-            } else {
-                rmV = callExt(b, "js_obj_new", [])
-                callExt(b, "js_set", [rmV, emitStr(b, "__pymod"), emitStr(b, rmn)])
-            }
+            if (rmn == "math" || rmn == "re" || rmn == "sys" || rmn == "builtins") { continue }
+            var rmV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [rmV, emitStr(b, "__pymod"), emitStr(b, rmn)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_" + rmn), rmV])
         }
 
@@ -4717,9 +4714,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         importDepth = importDepth - 1
         c.popSource()
     }
-    // The modules (and submodules) lib/python-<top>.py provides.
-    var pyLibMods = ["copy", "dataclasses", "collections", "json", "itertools",
-                     "functools", "string", "os", "os.path"]
     core.importFile = function(path, pos) {
         // A library module is written in Python (lib/python-<name>.py, a
         // submodule in its parent's file) and compiled like a project file.
@@ -4805,6 +4799,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         resolveImport(items[0], pos)
         var mod = items[0]
         var rtm = pyRtMod(mod)
+        // `from M import *` binds the names pyStarNames lists, a project file's
+        // having been bound flat already.
+        if (items.length == 2 && items[1][0] == "*") {
+            if (pyImportKind == "file") { return null }
+            var star = pyStarNames(mod, pyImportKind == "lib" ? load("lib/python-" + mod.split(".")[0] + ".py") : "")
+            if (star.length == 0) { return null }
+            var vals = []
+            for (var si = 0; si < star.length; si++) { vals.push("_mec_mod_" + mod + "." + star[si]) }
+            return pyImportStmt(star.join(", ") + " = " + vals.join(", ") + "\n", "SmallLine")
+        }
         var binds = []
         for (var i = 1; i < items.length; i++) {
             var name = items[i][0]

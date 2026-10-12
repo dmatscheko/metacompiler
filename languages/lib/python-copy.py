@@ -112,6 +112,7 @@ def _mec_cp_replace(obj, /, **changes):
 
 
 class _mec_cp_module:
+    __all__ = ["Error", "copy", "deepcopy", "replace"]
     copy = staticmethod(_mec_cp_copy)
     deepcopy = staticmethod(_mec_cp_deepcopy)
     replace = staticmethod(_mec_cp_replace)
@@ -123,5 +124,6 @@ class _mec_cp_module:
         return "<module 'copy'>"
 
 
-_mec_mod_copy = _mec_cp_module()
+_mec_mod_copy = type("module", (_mec_cp_module,), {})()
+_mec_mod_copy.__name__ = "copy"
 deepcopy = _mec_cp_deepcopy

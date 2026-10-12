@@ -277,14 +277,19 @@ func (rt *jsrt) pyBoundBuiltinCall(recv interface{}, name string, args []interfa
 
 // pyModuleFn mints `math.sqrt` as a VALUE. It re-enters js_pyrxmcall, the one
 // extern the python emitter routes every method call through, so a value read
-// off the module and a call made through it run the very same body.
+// off the module and a call made through it run the very same body. A keyword
+// call arrives as the positionals, pyKwMark and the keyword dict (pyBindCallR).
 func (rt *jsrt) pyModuleFn(mod *jsObject, name string) interface{} {
 	mname := rt.toString(mod.props["__pymod"])
 	h := jsHostFunc("pymod."+mname+"."+name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		var kw interface{} = jsUndef
+		if n := len(args); n >= 2 && args[n-2] == pyKwMark {
+			args, kw = args[:n-2], args[n-1]
+		}
 		if m := pyExternMaps[rt]; m != nil {
 			if f := m["js_pyrxmcall"]; f != nil {
 				return rt.unwrap(f([]uint64{rt.wrap(mod), rt.wrap(name),
-					rt.wrap(&jsArray{elems: args}), rt.wrap(jsUndef)}))
+					rt.wrap(&jsArray{elems: args}), rt.wrap(kw)}))
 			}
 		}
 		rt.fail("module function %s.%s is not reachable", mname, name)
