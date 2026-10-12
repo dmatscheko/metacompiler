@@ -3042,5 +3042,9 @@ class S53 {
         Main.check("al53a", front == 39 && mid == 19 && last == 0 && xs.size() == 38 && xs.get(18) == 20
             && xs.get(19) == 18 && xs.get(20) == 99 && xs.get(37) == 1 && ys.size() == 40
             && ys.get(39) == 8 && arr.length == 40 && arr[38].equals(7));
+        ys.clear();
+        boolean empty = ys.isEmpty() && ("" + ys).equals("[]");
+        ys.add(5);
+        Main.check("al53b", empty && ys.size() == 1 && ys.get(0) == 5 && ("" + ys).equals("[5]") && ys.indexOf(null) == -1);
     }
 }

@@ -144,7 +144,7 @@ class ArrayList<E> implements List<E> {
     }
     public void clear() {
         writable();
-        for (int i = 0; i < count; i++) { elems[i] = null; }
+        elems = new Object[elems.length];
         count = 0;
     }
     public boolean addAll(Collection<? extends E> c) {
