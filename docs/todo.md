@@ -84,7 +84,7 @@ answer. Also check the plural / keyword-only forms ("missing 2 required position
 
 # JV — Java
 
-### T-438 java: frozen interpreter StringBuilder.append costs ~5-10K steps · P3 · JV · OPEN [V]
+### T-438 java: frozen interpreter StringBuilder.append costs ~5-10K steps · P3 · JV · IN PROGRESS (JV worker, round 12) [V]
 2000 appends need 10-20M -frozen steps (measured by the PY worker); the java ratchet's section 49 alone needs 53M
 of the 100M step brake (now split into tests/java-test-full.2.java). The cost is in java-interpreter.abnf /
 languages/lib/java-lang.java. Profile and make append amortized O(len).
