@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-442** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-443** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,11 +114,17 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-439 php: SPL basics; `__FUNCTION__` in closures · P3 · PHP · IN PROGRESS (PHP worker, round 25) [V]
-All engines: `class_implements()` undefined; `class_exists('ArrayIterator')` false (SPL is always available:
-ArrayIterator, ArrayObject, SplStack, SplObjectStorage, iterator_to_array over them). PHP 8.4+ `__FUNCTION__` inside a
-closure answers `{closure:...}`; ours answers the enclosing function. Known modelling limit, not a ticket: object
-`#ids` drift once PHP would reuse a freed handle.
+### T-442 php: magic file constants, automatic Stringable, generator keys after yield from, ArrayAccess edge cases · P2 · PHP · IN PROGRESS (PHP worker, round 26) [V]
+Spec / php-src: (a) `__FILE__`, `__LINE__`, `__DIR__` raise "Undefined constant" in both halves (anon/bug77652).
+(b) a class declaring `__toString` is not automatically Stringable (magic_methods/stringable_automatic_implementation).
+(c) compiled only: after `yield from`, the next keyless yield's key counts the delegated keys (`yield 1; yield from
+[7,8]; yield 5;` gives key 2 for 5, php.net/interp: 1) — jsGenerator.step in jsrt.go and layer 2 phGenStep.
+(d) `??` on an ArrayAccess element calls offsetGet without offsetExists. (e) isset() on a lib ArrayObject /
+SplObjectStorage element holding null answers true. (f) class_implements on engine-derived exceptions comes out in
+user-class order. (g) `$aa[$k]` by reference vs offsetGet identity (ArrayAccess/bug39297). Unverified, no corpus row:
+the class_implements order of SPL classes was derived from php-src's interface walk (zend_inheritance.c), not observed.
+Bench: php +1.24% paired (5/5) after the SPL commits although mod.php calls none of the changed layer-2 functions —
+re-measure at the final bench.
 
 ---
 
@@ -477,6 +483,7 @@ T-432 python: big-int <-> bits 16 at a time (hex(10**4300) native 29.8s -> 0.7s)
 T-435 php: engine interfaces extend Traversable/UnitEnum/Stringable, Closure/Generator as classes, ~bool/~null TypeErrors, PHP 8.4 closure var_dump layout, *RECURSION* guard — DONE 3bd31a96
 T-438 java: StringBuilder appends onto a short tail + 32-level join counter (-frozen ~6.7K -> ~1.5K steps per append); java ratchet one file again — DONE 148fc8d1
 T-437 python: CPython arity TypeErrors (missing/too many/multiple values/unexpected keyword/positional-only) in all engines, live instance __dict__, property builtin + decorator evaluation order; `int | "s"` is a TypeError in CPython too (not a defect) — DONE 7cedc576
+T-439 php: SPL in php-stdlib (ArrayIterator/ArrayObject/SplDoublyLinkedList/Stack/Queue/ObjectStorage, iterator_*, class_implements/parents, spl_object_hash), __FUNCTION__/__METHOD__ as compile-time constants, yield from an Iterator, ArrayAccess dispatch — DONE e6c70cfa
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
