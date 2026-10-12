@@ -3021,6 +3021,110 @@ function s63dump() {
     var_dump($t);
 }
 
+// ===== SECTION 64: method visibility, typed-property coercion, private slots =====
+// A private method is callable only from its declaring class, a protected one from
+// any class related to its root - the first declaration up the chain that is not
+// private (zend_std_get_method, zend_check_protected). Code in a class reaches its
+// own private method even on an instance of a subclass that declares the name
+// again. Out of reach, __call / __callStatic stand in, else the call is an Error;
+// a callback is checked from the scope that hands it over, and a constructor out
+// of reach makes `new` an Error. A typed property takes a value of one of its
+// types; any other scalar (or a __toString object, for string) is coerced to the
+// first of int, float, string and bool the type has that accepts it, a numeric
+// string choosing int or float by its own form, else the write is a TypeError and
+// leaves the property as it was (zend_verify_property_type, union types RFC). A
+// typed static property without a default starts uninitialised. A base class's
+// private property is invisible from outside it, so a write there makes a
+// separate dynamic property of the same name.
+class S64A {
+    private function f() { return "A::f"; }
+    protected function p() { return "A::p"; }
+    function test() { return $this->f() . " " . $this->p(); }
+    function viaMap() { return implode(",", array_map([$this, 'f'], [1])); }
+    function fcc() { return $this->f(...); }
+    private static function ps() { return "A::ps"; }
+    static function callPs() { return static::ps(); }
+    static function viaStatic() { return implode(",", array_map([self::class, 'ps'], [1])); }
+}
+class S64B extends S64A {
+    public function f() { return "B::f"; }
+    protected function p() { return "B::p"; }
+}
+class S64Sib extends S64A { function poke(S64A $o) { return $o->p(); } }
+class S64M {
+    private function hid() { return "hid"; }
+    function __call($n, $a) { return "call:" . $n . count($a); }
+    private static function shid() { return "shid"; }
+    static function __callStatic($n, $a) { return "static:" . $n; }
+}
+trait S64T { function tm() { return "tm"; } }
+class S64U { use S64T { tm as protected; } function viaT() { return $this->tm(); } }
+class S64Ctor {
+    protected function __construct() {}
+    static function make() { return new static(); }
+}
+class S64P {
+    public int $i;
+    public ?float $f;
+    public string|int $si;
+    public int|float $n;
+    public ?S64P $self;
+    public static int $st;
+    public static ?string $ss = null;
+}
+class S64Priv {
+    private $x = 1;
+    function getX() { return $this->x; }
+}
+class S64Kid extends S64Priv {}
+function s64err($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s64() {
+    $b = new S64B;
+    $g = $b->fcc();
+    check("mvis1", $b->test() === "A::f B::p" && $b->f() === "B::f" && $b->viaMap() === "A::f" && $g() === "A::f"
+        && (new S64Sib)->poke($b) === "B::p" && S64B::callPs() === "A::ps" && S64A::viaStatic() === "A::ps");
+    check("mvis2", s64err(fn() => $b->p()) === "Error: Call to protected method S64B::p() from global scope"
+        && s64err(fn() => S64A::ps()) === "Error: Call to private method S64A::ps() from global scope"
+        && s64err(fn() => (new S64U)->tm()) === "Error: Call to protected method S64U::tm() from global scope"
+        && (new S64U)->viaT() === "tm");
+    check("mvis3", (new S64M)->hid(1, 2) === "call:hid2" && S64M::shid() === "static:shid"
+        && s64err(fn() => new S64Ctor) === "Error: Call to protected S64Ctor::__construct() from global scope"
+        && S64Ctor::make() instanceof S64Ctor);
+    check("mvis4", s64err(fn() => $b->p(...)) === "Error: Call to protected method S64B::p() from global scope"
+        && s64err(fn() => call_user_func([$b, 'p']))
+            === "TypeError: call_user_func(): Argument #1 (\$callback) must be a valid callback, cannot access protected method S64B::p()"
+        && s64err(fn() => array_map([$b, 'p'], [1]))
+            === "TypeError: array_map(): Argument #1 (\$callback) must be a valid callback or null, cannot access protected method S64B::p()");
+    $o = new S64P;
+    $o->i = "42";
+    $o->f = 3;
+    $o->si = 1e100;
+    $o->n = "1e3";
+    check("tpc1", $o->i === 42 && $o->f === 3.0 && $o->si === "1.0E+100" && $o->n === 1000.0);
+    $p = new S64P;
+    check("tpc2", s64err(function () use ($p) { $p->i = "4x"; }) === "TypeError: Cannot assign string to property S64P::\$i of type int"
+        && s64err(fn() => $p->i) === "Error: Typed property S64P::\$i must not be accessed before initialization"
+        && s64err(function () use ($p) { $p->self = 5; }) === "TypeError: Cannot assign int to property S64P::\$self of type ?S64P"
+        && s64err(function () use ($p) { $p->si = []; }) === "TypeError: Cannot assign array to property S64P::\$si of type string|int");
+    $r = "9";
+    $q = new S64P;
+    $q->i =& $r;
+    check("tpr1", $q->i === 9 && $r === 9);
+    check("tst1", s64err(fn() => S64P::$st) === "Error: Typed static property S64P::\$st must not be accessed before initialization"
+        && s64err(function () { S64P::$st = "x"; }) === "TypeError: Cannot assign string to property S64P::\$st of type int"
+        && !isset(S64P::$st));
+    S64P::$st = "7";
+    S64P::$ss = 5;
+    check("tst2", S64P::$st === 7 && S64P::$ss === "5");
+    $k = new S64Kid;
+    $k->x = 2;
+    check("pslot1", $k->getX() === 1 && $k->x === 2 && count((array) $k) === 2);
+    unset($k->x);
+    check("pslot2", $k->getX() === 1 && !isset($k->x));
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3093,6 +3197,7 @@ function main() {
     s62(); // SECTION-CALL 62
     s63(); // SECTION-CALL 63
     s63dump(); // SECTION-CALL 63
+    s64(); // SECTION-CALL 64
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

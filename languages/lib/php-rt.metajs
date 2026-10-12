@@ -1712,12 +1712,13 @@ function phDumpObj(v, ind, pad) {
                    " (" + phStr(cnt) + ") {\n"
         var j = 0
         while (j < names.length) {
-            var pname = phPropName(names[j])
-            var d = phPropDecl(cls, pname)
+            var kv = phKeyVis(cls, names[j])
+            var pname = phStr(kv.n)
+            var d = undefined
+            if (pname == phPropName(names[j])) { d = phPropDecl(cls, pname) }
             var raw = v[names[j]]
             if (raw !== undefined || (d !== undefined && d["typ"] != "")) {
-                var vis = ""
-                if (d !== undefined) { vis = d["vis"] }
+                var vis = phStr(kv.vis)
                 var mark = ""
                 if (vis == "*") { mark = ":protected" }
                 else if (vis != "") { mark = ":\"" + vis + "\":private" }
@@ -1827,6 +1828,90 @@ function phBadAccess(o, name) {
     phRaise("Error", "Cannot access " + w + " property " + phClassName(o) + "::$" + name)
 }
 
+// A class's own entry for method lc in its __mvis (",name=V,": "*" protected,
+// "-" private), "" for none.
+function phMethodVisOf(k, lc) {
+    if (k === undefined || k === null) { return "" }
+    var l = k["__mvis"]
+    if (typeof l != "string") { return "" }
+    var key = "," + lc + "="
+    var at = l.indexOf(key)
+    if (at < 0) { return "" }
+    return l.substring(at + key.length, at + key.length + 1)
+}
+// The nearest declaration of method lc along the class chain, off each class's
+// __mlc: {k: declaring class, vis}, undefined for none. Twin of phpMethodDecl in
+// languages/php-interpreter.abnf.
+function phMethodDecl(cls, lc) {
+    var key = "," + lc + ","
+    var k = cls
+    while (k !== undefined && k !== null) {
+        var l = k["__mlc"]
+        if (typeof l == "string" && l.indexOf(key) >= 0) { return {k: k, vis: phMethodVisOf(k, lc)} }
+        k = k["__super"]
+    }
+    return undefined
+}
+// May code in class scope (null outside every class) call method lc on cls? 0
+// yes, 1 no (private), 2 no (protected), 3 call the scope's own private method
+// instead. Twin of phpMethodAccess in languages/php-interpreter.abnf, which
+// explains the rules.
+function phMethodAccess(cls, lc, scope, inst) {
+    var d = phMethodDecl(cls, lc)
+    if (d === undefined) { return 0 }
+    var hasScope = !rtIsNil(scope) && typeof scope == "object"
+    var vis = phStr(d["vis"])
+    if (inst && hasScope && d["k"] !== scope && phMethodVisOf(scope, lc) == "-" && phIsA(cls, phStr(scope["__name"]))) { return 3 }
+    if (vis == "" || d["k"] === scope) { return 0 }
+    if (vis == "-") { return 1 }
+    var root = d["k"]
+    if (lc != "__construct") {
+        var up = phMethodDecl(root["__super"], lc)
+        while (up !== undefined && phStr(up["vis"]) != "-") {
+            root = up["k"]
+            up = phMethodDecl(root["__super"], lc)
+        }
+    }
+    if (!hasScope) { return 2 }
+    if (phIsA(root, phStr(scope["__name"])) || phIsA(scope, phStr(root["__name"]))) { return 0 }
+    return 2
+}
+// zend_bad_method_call's Error, or zend_bad_constructor_call's when ctor. Twin of
+// phpBadMethod in languages/php-interpreter.abnf.
+function phBadMethod(cls, name, scope, ctor) {
+    var d = phMethodDecl(cls, phsCase(name, false))
+    var w = "protected"
+    if (phStr(d["vis"]) == "-") { w = "private" }
+    if (!ctor) { w = w + " method" }
+    var from = "global scope"
+    if (!rtIsNil(scope) && typeof scope == "object") { from = "scope " + phStr(scope["__name"]) }
+    phRaise("Error", "Call to " + w + " " + phStr(d["k"]["__name"]) + "::" + name + "() from " + from)
+}
+// A call of method name on target (an object, or a class for a static call) from
+// class scope: where undefined is a call, false a `new`, a string the callback
+// check it words. A method the scope may not call raises, unless the magic method
+// that stands in for a missing one is there. Twin of phpMethodVis in
+// abnf/jsrtphp.go.
+function phMethodVis(target, name, scope, where) {
+    var cls = phClassOf(target)
+    var inst = phIsObj(target)
+    var acc = phMethodAccess(cls, phsCase(name, false), scope, inst)
+    if (acc != 1 && acc != 2) { return undefined }
+    if (typeof where == "string") {
+        var magic = "__callStatic"
+        if (inst) { magic = "__call" }
+        if (typeof phMethodOf(target, magic) == "function") { return undefined }
+        var w = "protected"
+        if (acc == 1) { w = "private" }
+        phCbFail(where, "cannot access " + w + " method " + phStr(cls["__name"]) + "::" + name + "()")
+    }
+    if (where === false) { phBadMethod(cls, name, scope, true) }
+    var lmagic = "__callstatic"
+    if (inst) { lmagic = "__call" }
+    if (phOwner(cls, lmagic) === undefined) { phBadMethod(cls, name, scope, false) }
+    return undefined
+}
+
 // Did unset() empty this typed property (o's __un list)? Such a one is offered to
 // the magic methods; one never initialised is not.
 function phInUn(o, name) {
@@ -1892,6 +1977,10 @@ function js_phprop(o, key, scope, isMode) {
         d = phPropDecl(o["__class"], name)
         if (d !== undefined && d["typ"] == "") { d = undefined }
     }
+    if (c == 2) {
+        var sv = o[phShadowKey(name)]
+        if (sv !== undefined) { return phDeref(sv) }
+    }
     if (d !== undefined && !phInUn(o, name)) {
         if (isMode === true) { return null }
         phUninitErr(d, name)
@@ -1926,29 +2015,232 @@ function js_phpropset(o, key, scope, val) {
         if (phMagicCall(o, "s", name, [name, val]) === undefined) { phBadAccess(o, name) }
         return undefined
     }
-    var raw = undefined
-    if (c == 0) { raw = o[key] }
+    var wkey = anytype
+    wkey = key
+    if (c == 2) { wkey = phShadowKey(name) }
+    var raw = o[wkey]
     // __set is for a property the instance does not have. An uninitialised typed
     // one it has, and the write initialises it; one unset() emptied is offered to
     // __set again.
     if (raw === undefined) {
-        if (c == 2 || phInUn(o, name) || !phHasKey(o, key)) {
+        if (phInUn(o, name) || !phHasKey(o, wkey)) {
             if (phMagicCall(o, "s", name, [name, val]) !== undefined) { return undefined }
         }
     }
+    var sv = anytype
+    sv = val
+    if (c == 0) { sv = phPropFit(o["__class"], name, val) }
     var cell = phCellOf(raw)
-    if (cell !== undefined) { cell["v"] = val } else { o[key] = val }
+    if (cell !== undefined) { cell["v"] = sv } else { o[wkey] = sv }
     return undefined
+}
+// A base class's private property is invisible outside that class, so a write
+// from there makes a separate dynamic property of the same name (PHP keys a
+// private one by its class). That one is kept under phShadowKey, which no
+// property key can start with, and is listed as the public name. Twin of
+// phpShadowKey in abnf/jsrtphp.go.
+function phShadowKey(name) { return "\x02" + name }
+// The property name an object key lists under, and its visibility.
+function phKeyVis(cls, key) {
+    var k = phStr(key)
+    if (k.charAt(0) == "\x02") { return {n: k.substring(1), vis: ""} }
+    var name = phPropName(k)
+    return {n: name, vis: phVisOf(cls, name)}
+}
+// v as the declared type of property key of o takes it, or PHP's TypeError.
+// Twin of m["js_phptyped"] in abnf/jsrtphp.go.
+function js_phptyped(o, key, v) {
+    if (!phInstance(o)) { return v }
+    return phPropFit(o["__class"], phPropName(phStr(key)), v)
+}
+// declare(strict_types=1) in the program: a typed slot takes only its own
+// types, and an int for a float.
+var phStrictTypes = false
+function js_phstrict() {
+    phStrictTypes = true
+    return undefined
+}
+// The alternatives of a declared type: '?T' is T|null, and '(A&B)|C' splits at
+// the top-level bars only. Twin of phpTypeAlts in languages/php-interpreter.abnf.
+function phTypeAlts(typ) {
+    var out = []
+    var t = typ
+    if (t.charAt(0) == "?") {
+        out.push("null")
+        t = t.substring(1)
+    }
+    var depth = 0
+    var from = 0
+    var i = 0
+    while (i <= t.length) {
+        var ch = "|"
+        if (i < t.length) { ch = t.charAt(i) }
+        if (ch == "(") { depth = depth + 1 }
+        else if (ch == ")") { depth = depth - 1 }
+        else if (ch == "|" && depth == 0) {
+            var a = t.substring(from, i)
+            if (a.charAt(0) == "(") { a = a.substring(1, a.length - 1) }
+            out.push(a)
+            from = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+// Does v belong to the single (non-union) type a, with no coercion? self is the
+// class that declared the type. Twin of phpTypeIs in
+// languages/php-interpreter.abnf.
+function phTypeIs(a, v, self) {
+    var amp = a.indexOf("&")
+    if (amp >= 0) { return phTypeIs(a.substring(0, amp), v, self) && phTypeIs(a.substring(amp + 1), v, self) }
+    var lc = phsCase(a, false)
+    if (lc == "mixed") { return true }
+    if (lc == "null") { return v === null }
+    if (lc == "int") { return phIsInt(v) }
+    if (lc == "float") { return phIsFlo(v) }
+    if (lc == "string") { return typeof v == "string" }
+    if (lc == "bool") { return typeof v == "boolean" }
+    if (lc == "false") { return v === false }
+    if (lc == "true") { return v === true }
+    if (lc == "array") { return phIsArr(v) }
+    if (lc == "iterable") { return phIsArr(v) || phIsA(v, "Traversable") }
+    if (lc == "object") { return phIsObj(v) || typeof v == "function" || phIsGen(v) }
+    if (lc == "self") { return phIsA(v, phStr(self["__name"])) }
+    if (lc == "parent") {
+        var sup = self["__super"]
+        if (rtIsNil(sup)) { return false }
+        return phIsA(v, phStr(sup["__name"]))
+    }
+    return phIsA(v, a)
+}
+// The value a slot of declared type typ holds once v is written to it, or
+// phTypeBad when v neither belongs to the type nor coerces to it. Twin of
+// phpTypeFit in languages/php-interpreter.abnf, which states the rules.
+var phTypeBad = {bad: true}
+function phTypeFit(typ, v, self) {
+    var alts = phTypeAlts(typ)
+    var mask = ""
+    var i = 0
+    while (i < alts.length) {
+        if (phTypeIs(alts[i], v, self)) { return v }
+        var lc = phsCase(alts[i], false)
+        if (lc == "int" || lc == "float" || lc == "string" || lc == "bool") { mask = mask + lc.charAt(0) }
+        i = i + 1
+    }
+    if (rtIsNil(v) || phIsArr(v)) { return phTypeBad }
+    if (phStrictTypes) {
+        if (mask.indexOf("f") >= 0 && phIsInt(v)) { return phMkFlo(phNumOf(v)) }
+        return phTypeBad
+    }
+    if (mask.indexOf("i") >= 0) {
+        if (mask.indexOf("f") >= 0 && typeof v == "string") {
+            var ns = phNumStrVal(v)
+            if (ns !== undefined) { return ns }
+        } else {
+            var n = phWeakInt(v)
+            if (n !== undefined) { return n }
+        }
+    }
+    if (mask.indexOf("f") >= 0) {
+        if (phIsInt(v)) { return phMkFlo(phNumOf(v)) }
+        if (v === true) { return phMkFlo(1) }
+        if (v === false) { return phMkFlo(0) }
+        if (typeof v == "string") {
+            var nf = phNumStrVal(v)
+            if (nf !== undefined) { return phMkFlo(phNumOf(nf)) }
+        }
+    }
+    if (mask.indexOf("s") >= 0) {
+        if (phIsNum(v) || typeof v == "boolean") { return phStr(v) }
+        if (phIsObj(v) && typeof phMethodOf(v, "__toString") == "function") { return phStr(v) }
+    }
+    if (mask.indexOf("b") >= 0 && (phIsNum(v) || typeof v == "string")) { return phTest(v) }
+    return phTypeBad
+}
+// zend_parse_arg_long_weak: a float that fits (its fraction dropped), a numeric
+// string read the same way, a bool as 0 or 1; undefined for anything else. Twin
+// of phpWeakInt in languages/php-interpreter.abnf.
+function phWeakInt(v) {
+    var f = anytype
+    f = v
+    if (typeof v == "string") { f = phNumStrVal(v) }
+    if (f === undefined) { return undefined }
+    if (f === true) { return 1 }
+    if (f === false) { return 0 }
+    if (phIsInt(f)) { return f }
+    if (!phIsFlo(f)) { return undefined }
+    var d = phNumOf(f)
+    var lim = Math.pow(2, 63)
+    if (d != d || d >= lim || d < 0 - lim) { return undefined }
+    return phCast("int", f)
+}
+// A declared type as PHP prints it (zend_type_to_string). Twin of phpTypeText in
+// languages/php-interpreter.abnf.
+function phTypeText(typ) {
+    var alts = phTypeAlts(typ)
+    var order = ["object", "array", "string", "int", "float", "bool", "false", "true"]
+    var builtin = ",object,array,string,int,float,bool,false,true,"
+    var s = ""
+    var n = 0
+    var hasNull = false
+    var i = 0
+    while (i < alts.length) {
+        var lc = phsCase(alts[i], false)
+        if (lc == "null") { hasNull = true }
+        else if (builtin.indexOf("," + lc + ",") < 0) {
+            if (n > 0) { s = s + "|" }
+            if (alts[i].indexOf("&") >= 0 && alts.length > 1) { s = s + "(" + alts[i] + ")" } else { s = s + alts[i] }
+            n = n + 1
+        }
+        i = i + 1
+    }
+    var o = 0
+    while (o < order.length) {
+        var j = 0
+        while (j < alts.length) {
+            if (phsCase(alts[j], false) == order[o]) {
+                if (n > 0) { s = s + "|" }
+                s = s + order[o]
+                n = n + 1
+            }
+            j = j + 1
+        }
+        o = o + 1
+    }
+    if (!hasNull) { return s }
+    if (n == 1 && s.indexOf("&") < 0 && phsCase(s, false) != "mixed") { return "?" + s }
+    if (n == 0) { return "null" }
+    return s + "|null"
+}
+// v as the declared type of property name on an instance of cls takes it, or
+// PHP's TypeError. Twin of phpPropFit in languages/php-interpreter.abnf.
+function phPropFit(cls, name, v) {
+    var d = phPropDecl(cls, name)
+    if (d === undefined) { return v }
+    var typ = phStr(d["typ"])
+    if (typ == "") { return v }
+    return phSlotFit(d["k"], name, typ, v)
+}
+// v checked against the type of property name declared by k, instance or static.
+function phSlotFit(k, name, typ, v) {
+    var r = phTypeFit(typ, v, k)
+    if (r === phTypeBad) {
+        phRaise("TypeError", "Cannot assign " + phValueName(v) + " to property " + phStr(k["__name"]) + "::$" + name + " of type " + phTypeText(typ))
+    }
+    return r
 }
 
 function js_phpropisset(o, key, scope) {
     if (!phInstance(o)) { return phArrHas(o, key) }
     var name = phPropName(phStr(key))
     var c = phPropAccess(o, name, scope)
-    if (c == 0) {
-        var v = phDeref(o[key])
+    if (c == 0 || c == 2) {
+        var ikey = anytype
+        ikey = key
+        if (c == 2) { ikey = phShadowKey(name) }
+        var v = phDeref(o[ikey])
         if (v !== undefined) { return v !== null }
-        if (!phInUn(o, name) && phHasKey(o, key)) { return false }
+        if (!phInUn(o, name) && phHasKey(o, ikey)) { return false }
     }
     var r = phMagicCall(o, "i", name, [name])
     return r !== undefined && phTest(r["r"])
@@ -1979,6 +2271,10 @@ function js_phpropunset(o, key, scope) {
             return undefined
         }
     }
+    if (c == 2 && phHasKey(o, phShadowKey(name))) {
+        delKey(o, phShadowKey(name))
+        return undefined
+    }
     if (phMagicCall(o, "u", name, [name]) === undefined && c == 1) { phBadAccess(o, name) }
     return undefined
 }
@@ -1995,8 +2291,9 @@ function phObjArr(v, iter, scope) {
     while (i < ks.length) {
         // An uninitialised typed property is not listed.
         if (v[ks[i]] !== undefined) {
-            var name = phPropName(ks[i])
-            var vis = phVisOf(cls, name)
+            var kv = phKeyVis(cls, ks[i])
+            var name = phStr(kv.n)
+            var vis = phStr(kv.vis)
             if (vis == "") { phArrSet(out, name, v[ks[i]]) }
             else if (iter) {
                 if (phVisible(v, vis, scope)) { phArrSet(out, name, v[ks[i]]) }
@@ -2379,6 +2676,99 @@ function js_phmcall(recv, name, args) {
     // names (null / bool / int / float / string / array), and it is catchable.
     phRaise("Error", "Call to a member function " + name + "() on " + phDebugType(recv))
     return undefined
+}
+
+// $o->m() for a method name some class restricts, judged from class scope: the
+// scope's own private method when the instance redeclares it, __call or an Error
+// for one it may not call, js_phmcall otherwise. Twin of m["js_phmcallv"] in
+// abnf/jsrtphp.go.
+function js_phmcallv(recv, name, args, scope) {
+    if (phIsObj(recv)) {
+        var cls = recv["__class"]
+        if (cls !== undefined) {
+            var nm = phStr(name)
+            var lc = phsCase(nm, false)
+            var acc = phMethodAccess(cls, lc, scope, true)
+            if (acc == 3) { return scope[lc].apply(undefined, rtPrepend(recv, args)) }
+            if (acc == 1 || acc == 2) {
+                if (phOwner(cls, "__call") === undefined) { phBadMethod(cls, nm, scope, false) }
+                var inner = phNewArr()
+                var i = 0
+                while (i < args.length) {
+                    phArrPush(inner, args[i])
+                    i = i + 1
+                }
+                return js_phmcall(recv, "__call", [nm, inner])
+            }
+        }
+    }
+    return js_phmcall(recv, name, args)
+}
+// C::m() for a method name some class restricts: __callStatic or an Error for
+// one the scope may not call, js_phscall otherwise. Twin of m["js_phscallv"] in
+// abnf/jsrtphp.go.
+function js_phscallv(target, name, self, args, lsb, scope) {
+    var cls = phClassOf(target)
+    var nm = phStr(name)
+    var acc = phMethodAccess(cls, phsCase(nm, false), scope, false)
+    if (acc == 1 || acc == 2) {
+        if (phOwner(cls, "__callstatic") === undefined) { phBadMethod(cls, nm, scope, false) }
+        var fwd = phNewArr()
+        phArrPush(fwd, nm)
+        phArrPush(fwd, args)
+        return js_phscall(target, "__callstatic", self, fwd, lsb)
+    }
+    return js_phscall(target, name, self, args, lsb)
+}
+function js_phmvis(target, name, scope, where) { return phMethodVis(target, phStr(name), scope, where) }
+// The class name a 'C::m' or ['C', 'm'] callable starts with, else null. Twin of
+// m["js_phcbhead"] in abnf/jsrtphp.go.
+function js_phcbhead(v) {
+    if (typeof v == "string") {
+        var at = v.indexOf("::")
+        if (at >= 0) { return v.substring(0, at) }
+        return null
+    }
+    var p = phArrParts(v)
+    if (p !== undefined && p.v.length == 2) {
+        var c = phDeref(p.v[0])
+        if (typeof c == "string") { return c }
+    }
+    return null
+}
+// A method callback some class restricts, on cls (the class a named callable
+// denotes) or the object of [$obj, 'm']. With where a string it is the callback
+// check, raising its TypeError for a method scope may not call; otherwise it
+// answers whether scope may call one, i.e. the callable must be bound in scope.
+// Twin of m["js_phcbvis"] in abnf/jsrtphp.go.
+function js_phcbvis(v, cls, scope, where) {
+    var target = anytype
+    var mn = anytype
+    target = undefined
+    mn = undefined
+    if (typeof v == "string") {
+        var at = v.indexOf("::")
+        if (at >= 0) { mn = v.substring(at + 2) }
+    } else {
+        var p = phArrParts(v)
+        if (p !== undefined && p.v.length == 2) {
+            target = phDeref(p.v[0])
+            mn = phDeref(p.v[1])
+        }
+    }
+    if (!rtIsNil(cls) && typeof cls == "object") { target = cls }
+    if (typeof mn != "string" || rtIsNil(target) || typeof target != "object") { return false }
+    if (!phIsObj(target) && target["__isclass"] === undefined) { return false }
+    var tcls = phClassOf(target)
+    var lc = phsCase(mn, false)
+    var d = phMethodDecl(tcls, lc)
+    if (d === undefined) { return false }
+    if (typeof where == "string") {
+        phMethodVis(target, mn, scope, where)
+        return false
+    }
+    var acc = phMethodAccess(tcls, lc, scope, phIsObj(target))
+    return acc == 3 || (acc == 0 && phStr(d["vis"]) != "")
 }
 
 // The RECOVERABLE-NAME hook's php half, registered through the floor's
@@ -3354,15 +3744,31 @@ function js_phsget(target, name) {
     if (cls["__ready"] !== true) { phClassInit(cls) }
     var o = phOwner(cls, "s:" + name)
     if (o !== undefined) { return o["s:" + name] }
+    // A typed static property holds undefined, so no "s:" owner, until written.
+    if (phOwner(cls, "t:" + name) !== undefined) { return undefined }
     return null
+}
+// v, the value just read of a typed static property, or PHP's Error when it is
+// still uninitialised. Twin of m["js_phsready"] in abnf/jsrtphp.go.
+function js_phsready(target, name, v) {
+    if (v !== undefined) { return v }
+    var t = phOwner(phClassOf(target), "t:" + name)
+    if (t !== undefined) {
+        phRaise("Error", "Typed static property " + phStr(t["__name"]) + "::$" + phStr(name) + " must not be accessed before initialization")
+    }
+    return v
 }
 
 function js_phsset(target, name, v) {
     var cls = phClassOf(target)
     if (cls["__ready"] !== true) { phClassInit(cls) }
     var o = phOwner(cls, "s:" + name)
+    // A typed static property is keyed by its type under "t:" on the class that
+    // declares it, and holds undefined - so no "s:" owner - until it is written.
+    if (o === undefined) { o = phOwner(cls, "t:" + name) }
     if (o === undefined) { o = cls }
-    o["s:" + name] = v
+    var t = o["t:" + name]
+    if (t !== undefined) { o["s:" + name] = phSlotFit(o, phStr(name), phStr(t), v) } else { o["s:" + name] = v }
     return undefined
 }
 

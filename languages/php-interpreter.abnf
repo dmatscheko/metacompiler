@@ -223,8 +223,9 @@ ExtName     = [ "\\" ] Id { "\\" Id } ;
 ImplList    = ImplName { "," ImplName } ;
 ImplName    <~~ push({impl: lastSeg(stripWs(up.in)), raw: stripWs(up.in)}) ~~> = ExtName ;
 Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
-// A method: modifiers and a reference-return '&' are accepted and ignored; an
-// abstract/interface method has no body (';' instead of a block -> empty method).
+// A method: of its modifiers only 'static' and the visibility are kept, and a reference-return
+// '&' is accepted and ignored; an abstract/interface method has no body (';'
+// instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
             = [ AttrGrp ] { PropMod } KwFunction [ "&" ] MethodName <~~ push(up.in); genPush(); fnEnter(); cloEnterFn(up.in, true) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: const A = 1, B = 2; with an optional TYPE before the first name
@@ -414,15 +415,14 @@ FinallyClause <~~ push({finbody: finBody(finLeave(pop().body))}) ~~>
             = KwFinally <~~ finEnter() ~~> Block ;
 Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression Semi ;
-// declare(strict_types=1); / declare(ticks=1) { ... }. None of PHP's three directives
-// changes anything this subset models - there is no type coercion to tighten, no tick
-// handler and no alternate source encoding - so the declaration itself is a no-op and
-// the BRACED form simply runs its body where it stands. The one visible consequence:
-// under strict_types real PHP raises a TypeError for a mismatched argument, and this
-// subset does not check parameter types at all, so it accepts the call instead.
+// declare(strict_types=1); / declare(ticks=1) { ... }. strict_types=1 turns off the
+// scalar coercion of a write to a typed property (strictTypes); there is no tick
+// handler and no alternate source encoding, and the BRACED form simply runs its body
+// where it stands. Parameter types are not checked at all, so under strict_types a
+// mismatched argument is accepted where real PHP raises a TypeError.
 Declare     <~~ push(makeDeclare(takeAll())) ~~>
             = KwDeclare "(" DeclDirective { "," DeclDirective } [ "," ] ")" ( Semi | Block ) ;
-DeclDirective <~~ takeAll() ~~> = Id "=" Expression ;
+DeclDirective <~~ takeAll(); if (stripWs(up.in) == "strict_types=1") { strictTypes = true } ~~> = Id "=" Expression ;
 // const NAME = expr; at file level: a global constant. Unlike a class constant it
 // takes no type, and its initializer is evaluated once, where the declaration stands.
 // A top-level 'const' may carry an attribute group, exactly as a class constant
@@ -3638,7 +3638,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (v !== undefined) { return v }
             }
         }
+        if (c == 2) {
+            var si = dictFind(o.p, PROP_SHADOW + name)
+            if (si >= 0) { return deref(o.p.vals[si]) }
+        }
         return phpPropMiss(o, name, c, isMode === true)
+    }
+    // A base class's private property is invisible outside that class, so a write
+    // from there makes a separate dynamic property of the same name (PHP keys a
+    // private one by its class). That one is kept under PROP_SHADOW + name, which
+    // no property name can start with, and is listed as the public name. Twins:
+    // phpShadowKey in abnf/jsrtphp.go, phShadowKey in lib/php-rt.metajs.
+    var PROP_SHADOW = "\x02"
+    // The property name a property-table key lists under; a shadow lists as public.
+    function phpKeyName(k) {
+        var s = phpStr(k)
+        return s.charAt(0) == PROP_SHADOW ? s.substring(1) : s
     }
     // A read that found no value, with c from phpPropAccess: zend_std_read_property
     // past the slot. Twin of phPropMiss in lib/php-rt.metajs and phpPropMiss in
@@ -3672,8 +3687,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // never for an uninitialised typed property (zend_std_has_property).
     function phpPropIsset(o, name) {
         var c = visNames["$" + name] === true ? phpPropAccess(o, name, ctxSelf()) : 0
-        if (c == 0) {
-            var i = dictFind(o.p, phpKey(name))
+        if (c == 0 || c == 2) {
+            var i = dictFind(o.p, c == 2 ? PROP_SHADOW + name : phpKey(name))
             if (i >= 0) {
                 var v = anytype
                 v = deref(o.p.vals[i])
@@ -3720,14 +3735,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // __set is for a property the instance does not have. An uninitialised typed
         // one it has, and the write initialises it; one unset() emptied is offered to
         // __set again.
-        var i = c == 0 ? dictFind(o.p, phpKey(name)) : -1
+        var key = anytype
+        key = c == 2 ? PROP_SHADOW + name : name
+        var i = dictFind(o.p, phpKey(key))
         if (i < 0 || (o.p.vals[i] === undefined && phpInUn(o, name))) {
             s = classFind(o.__class, "__set")
             if (s != null && !phpGuarded(o, "s", name)) { phpMagicCall(o, "s", name, s, [name, v]); return }
         }
         // arrSet, not dictSet: a slot holding a cell is written THROUGH, which is
         // what makes `$r = &$o->p; $o->p = 5;` visible through $r.
-        arrSet(o.p, name, v)
+        var sv = anytype
+        sv = c == 0 && typedNames["$" + name] === true ? phpPropFit(o, name, v) : v
+        arrSet(o.p, key, sv)
     }
     // unset($o->p): a property the instance has goes away - a typed one back to
     // uninitialised, keeping its slot; one it does not have is handed to __unset
@@ -3747,6 +3766,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     return
                 }
             }
+        }
+        if (c == 2 && dictFind(o.p, PROP_SHADOW + name) >= 0) {
+            arrDel(o.p, PROP_SHADOW + name)
+            return
         }
         var un = classFind(o.__class, "__unset")
         if (un != null && !phpGuarded(o, "u", name)) { phpMagicCall(o, "u", name, un, [name]); return }
@@ -3772,6 +3795,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isObj(target)) {
             var m = classFind(target.__class, name)
             if (m == null) { m = classFind(target.__class, phsCase(name, false)) }
+            if (m != null && mVisNames["$" + phsCase(name, false)] === true) {
+                var scope = ctxSelf()
+                var acc = phpMethodAccess(target.__class, phsCase(name, false), scope, true)
+                if (acc == 3) { m = scope[phsCase(name, false)] }
+                else if (acc != 0) {
+                    // An inaccessible method is __call's, like a missing one.
+                    if (classFind(target.__class, "__call") == null) { phpBadMethod(target.__class, name, scope, false) }
+                    m = null
+                }
+            }
             if (args.fcc === true && m != null) {
                 var fm = m
                 return function(a2) { return fm(target, a2) }
@@ -3780,6 +3813,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // A closure stored in a property is callable through ->name() only via
             // __call in real PHP; the magic method is the documented door.
             var mc = classFind(target.__class, "__call")
+            if (mc != null && args.fcc === true) {
+                var fmc = mc
+                return function(a3) { return fmc(target, argsOf([name, arrOf(a3.pos)])) }
+            }
             if (mc != null) { return mc(target, argsOf([name, arrOf(args.pos)])) }
             phpRaise("Error", "Call to undefined method " + target.__class.__name + "::" + name + "()")
         }
@@ -3820,7 +3857,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var pv = cur
             return makePartial(function(a2) { return phpInvoke(pv, a2) }, argset)
         }
-        if (argset.fcc === true) { return asCallable(cur) }
+        // An [object, 'm'] pair resolves its method where 'f(...)' stands, as a
+        // direct call would (mcall / staticCall); anything else is bound as it is.
+        if (argset.fcc === true && !isArr(cur)) {
+            if (typeof cur != "function" && typeof cur != "string" && !isObj(cur)) {
+                phpRaise("Error", "Value of type " + phpDebugType(cur) + " is not callable")
+            }
+            return asCallable(cur)
+        }
         if (typeof cur == "function") { return cur(argset) }
         if (typeof cur == "string") {
             var sep = cur.indexOf("::")
@@ -3948,9 +3992,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         phpRaise("TypeError", where + ", " + reason)
     }
     function cbMethod(where, cls, mname) {
-        if (classFind(cls, mname) != null || classFind(cls, phsCase(mname, false)) != null) { return null }
+        if (classFind(cls, mname) != null || classFind(cls, phsCase(mname, false)) != null) {
+            cbVis(where, cls, mname, "__callstatic", false)
+            return null
+        }
         if (classFind(cls, "__callstatic") != null) { return null }
         cbFail(where, "class " + cls.__name + " does not have a method \"" + mname + "\"")
+    }
+    // A method the calling scope may not call is no valid callback, unless the
+    // magic fallback takes it (zend_is_callable_check_func). The class named is
+    // the callback's own, not the declaring one.
+    function cbVis(where, cls, mname, magic, inst) {
+        if (mVisNames["$" + phsCase(mname, false)] !== true || classFind(cls, magic) != null) { return }
+        var acc = phpMethodAccess(cls, phsCase(mname, false), ctxSelf(), inst)
+        if (acc == 1 || acc == 2) {
+            cbFail(where, "cannot access " + (acc == 1 ? "private" : "protected") + " method " + cls.__name + "::" + mname + "()")
+        }
     }
     function phpCheckCallback(cur, where) {
         if (typeof cur == "function") { return cur }
@@ -3976,6 +4033,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     && classFind(recv.__class, "__call") == null) {
                     cbFail(where, "class " + recv.__class.__name + " does not have a method \"" + mn + "\"")
                 }
+                cbVis(where, recv.__class, mn, "__call", true)
                 return cur
             }
             cbMethod(where, resolveClassName(recv, where), mn)
@@ -4098,7 +4156,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (pend != undefined && pend != null) {
             var ct = cls.__constT
             for (var i = 0; i < ct.length; i++) { constFind(cls, ct[i].name, "self::" + ct[i].name) }
-            for (var j = 0; j < pend.length; j++) { pend[j].cell.v = phpCopy(constEval(cls, pend[j].rec)) }
+            for (var j = 0; j < pend.length; j++) {
+                // A typed static property without a default starts uninitialised.
+                if (pend[j].cell.st == undefined || pend[j].rec.init != null) { pend[j].cell.v = phpCopy(constEval(cls, pend[j].rec)) }
+            }
             cls.__sinit = null
         }
         cls.__ready = true
@@ -4131,7 +4192,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // METHOD name (PHP's static_member call form), so the call reads the variable.
     function staticAccess(cls, name, prop, args, baseText) {
         if (prop != null) {
-            if (args == null) { return deref(staticCell(cls, prop).v) }
+            if (args == null) {
+                var sc = staticCell(cls, prop)
+                if (sc.v === undefined && sc.st != undefined) { phpStaticUninit(sc) }
+                return deref(sc.v)
+            }
             return staticCall(cls, phpStr(getVar("$" + prop)), evalArgs(args), baseText)
         }
         if (name == "class" && args == null) { return fullName(cls) }
@@ -4150,6 +4215,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var forwards = (baseText == "self" || baseText == "static" || baseText == "parent")
         var m = classFind(cls, name)
         if (m == null) { m = classFind(cls, phsCase(name, false)) }
+        if (m != null && mVisNames["$" + phsCase(name, false)] === true && !(bound != undefined && bound.ok === true)) {
+            var scope = ctxSelf()
+            if (phpMethodAccess(cls, phsCase(name, false), scope, false) != 0) {
+                // An inaccessible method is __callStatic's, like a missing one.
+                if (classFind(cls, "__callstatic") == null) { phpBadMethod(cls, name, scope, false) }
+                m = null
+            }
+        }
         if (m == null && cls.__isenum === true) {
             var er = enumStatic(cls, name, argset)
             if (er != null) { return er.v }
@@ -4345,7 +4418,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return function() {
                 var cb = anytype
                 cb = evalArgs(fa).pos[0]
-                return asCallable(phpCheckCallback(cb, "Failed to create closure from callable:"))
+                var fc = anytype
+                fc = phpCheckCallback(cb, "Failed to create closure from callable:")
+                var fb = visBound(fc)
+                return typeof fb == "function" ? fb : asCallable(fc)
             }
         }
         // As the left operand of '??' (coalIs) a static property the scope may not
@@ -4852,6 +4928,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (typeof it == "string") {
                 cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: [], vis: vis, typ: typ}
                 out.push(cur)
+                if (typ != "" && !isStatic) { typedNames["$" + cur.name] = true }
                 if (vis != "") {
                     if (isStatic) { sVisNames["$" + cur.name] = true } else { visNames["$" + cur.name] = true }
                 }
@@ -4873,6 +4950,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // an access to one of them pays for the visibility check (phpPropAccess).
     var visNames = {}
     var sVisNames = {}
+    // The lower-cased names some class declares a non-public method under: only a
+    // call of one of them pays for the visibility check (phpMethodAccess).
+    var mVisNames = {}
     // A declared type as var_dump prints it: no leading backslash on a name.
     // Twin of propTypeText in php-to-llvm-ir.abnf.
     function propTypeText(t) {
@@ -4943,6 +5023,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (ref.path.length == 0 && ref.sref != null) {
                 var cell = ref.sref()
                 if (op != "=") { v = applyPhp(op, deref(cell.v), v) }
+                if (cell.st != undefined) { v = phpStaticFit(cell, v) }
                 cell.v = v
                 return v
             }
@@ -5049,12 +5130,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // ++ / -- (prefix yields the new value, postfix the old one).
     function readTargetVal(ref) {
-        if (ref.path.length == 0 && ref.sref != null) { return deref(ref.sref().v) }
+        if (ref.path.length == 0 && ref.sref != null) {
+            var rc = ref.sref()
+            if (rc.v === undefined && rc.st != undefined) { phpStaticUninit(rc) }
+            return deref(rc.v)
+        }
         if (ref.path.length == 0) { return getVar(refName(ref)) }
         return readAt(resolveRefPhp(ref))
     }
     function writeTargetVal(ref, v) {
-        if (ref.path.length == 0 && ref.sref != null) { ref.sref().v = v; return }
+        if (ref.path.length == 0 && ref.sref != null) {
+            var wc = ref.sref()
+            wc.v = wc.st != undefined ? phpStaticFit(wc, v) : v
+            return
+        }
         if (ref.path.length == 0) { phpSet(refName(ref), v); return }
         storeAt(resolveRefPhp(ref), v)
     }
@@ -5094,6 +5183,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (lhs.path.length == 0 && lhs.gkey != undefined) { scopePut(globalScope, globalsName(lhs.gkey), cell); return cell.v }
             if (lhs.path.length == 0) { scopePut(scopes[scopes.length - 1], refName(lhs), cell); return cell.v }
             var p = resolveRefPhp(lhs)
+            // A typed property bound to a reference takes the referenced value as it
+            // would an assigned one, and coerces it in place.
+            if (p.last.key != undefined && isObj(p.obj)) {
+                if (typedNames["$" + p.last.key] === true) { cell.v = phpPropFit(p.obj, p.last.key, deref(cell.v)) }
+                var po = p.obj.p
+                if (dictFind(po, p.last.key) < 0) { dictSet(po, p.last.key, null) }
+                var pvs = po.vals
+                pvs[dictFind(po, p.last.key)] = cell
+                po.vals = pvs
+                return cell.v
+            }
             if (p.last.append === true) { arrPush(p.obj, null); p.obj.vals[p.obj.keys.length - 1] = cell }
             else if (isArr(p.obj)) {
                 var k = phpKey(p.last.idx())
@@ -5158,6 +5258,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // the callback is left to that check. Twin of js_phrelcb in abnf/jsrtphp.go and
     // lib/php-rt.metajs.
     function libCallable(cur) {
+        var vb = visBound(cur)
+        if (typeof vb == "function") { return vb }
         var cn = anytype
         var mn = anytype
         cn = null
@@ -5178,21 +5280,59 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (classFind(cls, mn) == null && classFind(cls, phsCase(mn, false)) == null && classFind(cls, "__callstatic") == null) {
             return cls.__name + "::" + mn
         }
-        return boundStatic(cls, mn, cn)
+        return boundStatic(cls, mn, cn, false)
+    }
+    // A method callable whose method some class restricts, which the CALLER's class
+    // scope may call, as a closure that calls it: the library function that calls
+    // it later has no class scope. Anything else is answered unchanged, for the
+    // library's own check to judge.
+    function visBound(cur) {
+        var recv = anytype
+        var mn = anytype
+        recv = null
+        mn = null
+        if (typeof cur == "string" && cur.indexOf("::") >= 0) {
+            recv = cur.substring(0, cur.indexOf("::"))
+            mn = cur.substring(cur.indexOf("::") + 2)
+        } else if (isArr(cur) && cur.keys.length == 2) {
+            recv = arrGet(cur, 0)
+            mn = arrGet(cur, 1)
+        }
+        if (typeof mn != "string" || mVisNames["$" + phsCase(mn, false)] !== true) { return cur }
+        var lc = phsCase(mn, false)
+        var scope = ctxSelf()
+        if (isObj(recv)) {
+            var acc = phpMethodAccess(recv.__class, lc, scope, true)
+            var m = anytype
+            m = acc == 3 ? scope[lc] : classFind(recv.__class, lc)
+            if (acc == 1 || acc == 2 || m == null || m == undefined) { return cur }
+            var o = recv
+            return function(a2) { return m(o, a2) }
+        }
+        if (typeof recv != "string") { return cur }
+        var cn = relName(recv)
+        var rel = cn == "self" || cn == "static" || cn == "parent"
+        if (!rel && findClass(cn) == null) { return cur }
+        if (rel && (scope == null || (cn == "parent" && (scope.__super == null || scope.__super == undefined)))) { return cur }
+        var cls = resolveClassName(cn)
+        if (classFind(cls, lc) == null || phpMethodAccess(cls, lc, scope, false) != 0) { return cur }
+        return boundStatic(cls, mn, cn, true)
     }
     // The closure a static callable becomes. A relative name forwards the CALLER's
     // late-static-binding class and $this, which the library function's frame no
-    // longer has.
-    function boundStatic(cls, mn, cn) {
+    // longer has; checked says the caller's scope may call the method.
+    function boundStatic(cls, mn, cn, checked) {
         var bound = anytype
         bound = undefined
         if (cn == "self" || cn == "static" || cn == "parent") {
-            bound = {self: varExists("$this") ? getVar("$this") : null, bind: ctxStatic()}
-        }
+            bound = {self: varExists("$this") ? getVar("$this") : null, bind: ctxStatic(), ok: checked}
+        } else if (checked) { bound = {self: null, bind: cls, ok: true} }
         return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
     }
     function callerCallable(cur, fname) {
         phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback")
+        var vb = visBound(cur)
+        if (typeof vb == "function") { return vb }
         var cn = ""
         var mn = ""
         if (typeof cur == "string" && cur.indexOf("::") >= 0) {
@@ -5203,7 +5343,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             mn = phpStr(arrGet(cur, 1))
         } else { return cur }
         cn = relName(cn)
-        return boundStatic(resolveClassName(cn), mn, cn)
+        return boundStatic(resolveClassName(cn), mn, cn, false)
     }
     function makeCall(items) {
         var name = phpLibRef(items[0])
@@ -5266,16 +5406,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var params = []
         var body = null
         var isStatic = false
+        var vis = ""
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") { name = it }
             else if (it == null || it == undefined) { continue }
             else if (it.body != undefined) { body = it.body }
             else if (it.param != undefined) { params.push(it.param) }
-            else if (it.mod != undefined) { if (it.mod == "static") { isStatic = true } }
+            else if (it.mod != undefined) {
+                if (it.mod == "static") { isStatic = true }
+                if (it.mod == "protected" || it.mod == "private") { vis = it.mod }
+            }
         }
+        if (vis != "") { mVisNames["$" + phsCase(name, false)] = true }
         return {name: name, params: params, body: body != null ? body : makeBody([]),
-                isStatic: isStatic, isGen: isGen}
+                isStatic: isStatic, isGen: isGen, vis: vis}
     }
     // A braced namespace body: run its items where the declaration stands.
     function makeNs(items, pos) {
@@ -5448,6 +5593,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var obj = newObj(cls)
         initProps(obj, cls)
         var ctor = classFind(cls, "__construct")
+        if (ctor != null && mVisNames["$__construct"] === true && phpMethodAccess(cls, "__construct", ctxSelf(), false) != 0) {
+            phpBadMethod(cls, "__construct", ctxSelf(), true)
+        }
         if (ctor != null) { ctor(obj, argset) }
         else if (argset.named != null) { checkNamedArgs([], argset) }
         return obj
@@ -5557,10 +5705,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (it.tas != undefined) {
                 var a = traitRefOf(it.tas)
                 var alias = a.meth
+                var tvis = anytype
+                tvis = null
                 for (var k = 0; k < it.tas.length; k++) {
                     if (it.tas[k].talias != undefined) { alias = it.tas[k].talias }
+                    if (it.tas[k].tvis != undefined) { tvis = it.tas[k].tvis == "public" ? "" : it.tas[k].tvis }
                 }
-                u.aliases.push({owner: a.owner, meth: a.meth, alias: alias})
+                if (tvis != null && tvis != "") { mVisNames["$" + phsCase(alias, false)] = true }
+                u.aliases.push({owner: a.owner, meth: a.meth, alias: alias, vis: tvis})
             }
         }
         return u
@@ -5595,6 +5747,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var u = uses[i]
             for (var n = 0; n < u.names.length; n++) {
                 var tp = traitParts(u.names[n])
+                // A trait that uses traits brings their members along; its own
+                // methods come after them and so win.
+                if (tp.uses.length > 0) {
+                    var nested = traitMembers(tp.uses)
+                    for (var nm = 0; nm < nested.methods.length; nm++) {
+                        if (traitExcluded(u, u.names[n], nested.methods[nm].name)) { continue }
+                        out.methods.push(nested.methods[nm])
+                    }
+                    for (var nq = 0; nq < nested.props.length; nq++) { out.props.push(nested.props[nq]) }
+                    for (var ns = 0; ns < nested.statics.length; ns++) { out.statics.push(nested.statics[ns]) }
+                    for (var nc = 0; nc < nested.consts.length; nc++) { out.consts.push(nested.consts[nc]) }
+                }
                 for (var m = 0; m < tp.methods.length; m++) {
                     if (traitExcluded(u, u.names[n], tp.methods[m].name)) { continue }
                     out.methods.push(tp.methods[m])
@@ -5616,7 +5780,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     if (src != null) { break }
                 }
                 if (src == null) { fail("unknown trait method " + u.aliases[a].meth) }
-                out.methods.push({name: u.aliases[a].alias, params: src.params, body: src.body, isStatic: src.isStatic})
+                out.methods.push({name: u.aliases[a].alias, params: src.params, body: src.body, isStatic: src.isStatic,
+                                  vis: u.aliases[a].vis == null ? src.vis : u.aliases[a].vis})
             }
         }
         return out
@@ -5651,11 +5816,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cls.__mlc = phpMethodList(tm.methods) + phpMethodList(p.methods).substring(1)
         cls.__svis = phpStaticVisList(name, tm.statics) + phpStaticVisList(name, p.statics).substring(1)
         cls.__pvis = phpVisList(name, props)
+        var mvl = phpMethodVisList(p.methods, ",") + phpMethodVisList(tm.methods, phpMethodList(p.methods)).substring(1)
+        if (mvl != ",") { cls.__mvis = mvl }
         for (var tmi = 0; tmi < tm.methods.length; tmi++) {
             setMethod(cls, tm.methods[tmi].name, makeMethodClosure(tm.methods[tmi], cls))
         }
         for (var s2 = 0; s2 < p.statics.length; s2++) {
-            var scell = {__refcell: true, v: null}
+            var scell = anytype
+            scell = {__refcell: true, v: null}
+            var st = p.statics[s2].typ
+            if (st != undefined && st != "") { scell = {__refcell: true, v: undefined, st: st, sk: cls, sn: p.statics[s2].name} }
             dictSet(cls.__statics, p.statics[s2].name, scell)
             pend.push({cell: scell, rec: p.statics[s2]})
         }
@@ -6233,13 +6403,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         for (var i = 0; i < ks.length; i++) {
             // An uninitialised typed property is not listed.
             if (o.p.vals[i] === undefined) { continue }
-            var pn = phpStr(ks[i])
-            var vis = phpVisOf(o.__class, pn)
+            var pn = phpKeyName(ks[i])
+            var vis = pn == phpStr(ks[i]) ? phpVisOf(o.__class, pn) : ""
             var pv = anytype
             pv = phpCopy(deref(o.p.vals[i]))
             if (iter) {
-                if (vis == "" || phpVisible(o, vis, scope)) { arrSet(out, ks[i], pv) }
-            } else if (vis == "") { arrSet(out, ks[i], pv) }
+                if (vis == "" || phpVisible(o, vis, scope)) { arrSet(out, pn, pv) }
+            } else if (vis == "") { arrSet(out, pn, pv) }
             else { arrSet(out, "\x00" + vis + "\x00" + pn, pv) }
         }
         return out
@@ -6365,6 +6535,236 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function phpUninitErr(d, pname) {
         phpRaise("Error", "Typed property " + d.k.__name + "::$" + pname + " must not be accessed before initialization")
     }
+    // declare(strict_types=1): a typed slot then takes only its own types, and an
+    // int for a float.
+    var strictTypes = false
+    // The names some class declares a typed instance property under: only a write
+    // of one of them pays for the type check (phpPropFit).
+    var typedNames = {}
+    var phpTypeBad = {bad: true}
+    // The alternatives of a declared type: '?T' is T|null, '(A&B)|C' splits at
+    // the top-level bars only.
+    function phpTypeAlts(typ) {
+        var out = []
+        var t = typ
+        if (t.charAt(0) == "?") {
+            out.push("null")
+            t = t.substring(1)
+        }
+        var depth = 0
+        var from = 0
+        for (var i = 0; i <= t.length; i++) {
+            var ch = i < t.length ? t.charAt(i) : "|"
+            if (ch == "(") { depth++ }
+            else if (ch == ")") { depth-- }
+            else if (ch == "|" && depth == 0) {
+                var a = t.substring(from, i)
+                if (a.charAt(0) == "(") { a = a.substring(1, a.length - 1) }
+                out.push(a)
+                from = i + 1
+            }
+        }
+        return out
+    }
+    // Does v belong to the single (non-union) type a as it stands, with no
+    // coercion? self is the class that declared the type.
+    function phpTypeIs(a, v, self) {
+        var amp = a.indexOf("&")
+        if (amp >= 0) { return phpTypeIs(a.substring(0, amp), v, self) && phpTypeIs(a.substring(amp + 1), v, self) }
+        var lc = phsCase(a, false)
+        if (lc == "mixed") { return true }
+        if (lc == "null") { return v === null }
+        if (lc == "int") { return isInt(v) }
+        if (lc == "float") { return isFlo(v) }
+        if (lc == "string") { return typeof v == "string" }
+        if (lc == "bool") { return typeof v == "boolean" }
+        if (lc == "false") { return v === false }
+        if (lc == "true") { return v === true }
+        if (lc == "array") { return isArr(v) }
+        if (lc == "iterable") { return isArr(v) || phpIsA(v, "Traversable") }
+        if (lc == "object") { return isObj(v) || typeof v == "function" || isGen(v) }
+        if (lc == "self") { return phpIsA(v, self.__name) }
+        if (lc == "parent") { return self.__super != null && self.__super != undefined && phpIsA(v, self.__super.__name) }
+        return phpIsA(v, a)
+    }
+    // The value a slot of declared type typ holds once v is written to it, or
+    // phpTypeBad when v neither belongs to the type nor coerces to it
+    // (zend_verify_property_type). Outside strict_types a scalar - or an object
+    // with __toString, for string - coerces to the first of int, float, string and
+    // bool the type has that accepts it (zend_verify_weak_scalar_type_hint), an
+    // int|float type taking a numeric string as int or float by its own form.
+    // Twin of phTypeFit in lib/php-rt.metajs and phpTypeFit in abnf/jsrtphp.go.
+    function phpTypeFit(typ, v, self) {
+        var alts = phpTypeAlts(typ)
+        var mask = ""
+        for (var i = 0; i < alts.length; i++) {
+            if (phpTypeIs(alts[i], v, self)) { return v }
+            var lc = phsCase(alts[i], false)
+            if (lc == "int" || lc == "float" || lc == "string" || lc == "bool") { mask += lc.charAt(0) }
+        }
+        if (v === null || v === undefined || isArr(v)) { return phpTypeBad }
+        if (strictTypes) { return mask.indexOf("f") >= 0 && isInt(v) ? mkFlo(numOf(v)) : phpTypeBad }
+        if (mask.indexOf("i") >= 0) {
+            if (mask.indexOf("f") >= 0 && typeof v == "string") {
+                var ns = numStrVal(v)
+                if (ns != null) { return ns }
+            } else {
+                var n = phpWeakInt(v)
+                if (n != null) { return n }
+            }
+        }
+        if (mask.indexOf("f") >= 0) {
+            if (isInt(v)) { return mkFlo(numOf(v)) }
+            if (typeof v == "boolean") { return mkFlo(v ? 1 : 0) }
+            if (typeof v == "string") {
+                var nf = numStrVal(v)
+                if (nf != null) { return mkFlo(numOf(nf)) }
+            }
+        }
+        if (mask.indexOf("s") >= 0) {
+            if (isNum(v) || typeof v == "boolean") { return phpStr(v) }
+            if (isObj(v) && classFind(v.__class, "__tostring") != null) { return phpStr(v) }
+        }
+        if (mask.indexOf("b") >= 0 && (isNum(v) || typeof v == "string")) { return phptest(v) }
+        return phpTypeBad
+    }
+    // zend_parse_arg_long_weak: a float that fits (its fraction dropped), a
+    // numeric string read the same way, a bool as 0 or 1; null for anything else.
+    function phpWeakInt(v) {
+        var f = anytype
+        f = v
+        if (typeof v == "string") { f = numStrVal(v) }
+        if (f == null || f == undefined) { return null }
+        if (isInt(f)) { return f }
+        if (typeof f == "boolean") { return f ? 1 : 0 }
+        if (!isFlo(f)) { return null }
+        var d = f.f
+        var lim = Math.pow(2, 63)
+        if (d != d || d >= lim || d < 0 - lim) { return null }
+        return phpCast("int", f)
+    }
+    // A declared type as PHP prints it (zend_type_to_string): class names first,
+    // then the builtin types in PHP's order, and null as a '?' prefix on a lone
+    // type or as a last '|null'. Twin of phTypeText in lib/php-rt.metajs and
+    // phpTypeText in abnf/jsrtphp.go.
+    function phpTypeText(typ) {
+        var alts = phpTypeAlts(typ)
+        var order = ["object", "array", "string", "int", "float", "bool", "false", "true"]
+        var builtin = ",object,array,string,int,float,bool,false,true,"
+        var s = ""
+        var n = 0
+        var hasNull = false
+        for (var i = 0; i < alts.length; i++) {
+            var lc = phsCase(alts[i], false)
+            if (lc == "null") { hasNull = true }
+            else if (builtin.indexOf("," + lc + ",") < 0) {
+                s += (n > 0 ? "|" : "") + (alts[i].indexOf("&") >= 0 && alts.length > 1 ? "(" + alts[i] + ")" : alts[i])
+                n++
+            }
+        }
+        for (var o = 0; o < order.length; o++) {
+            for (var j = 0; j < alts.length; j++) {
+                if (phsCase(alts[j], false) == order[o]) {
+                    s += (n > 0 ? "|" : "") + order[o]
+                    n++
+                }
+            }
+        }
+        if (!hasNull) { return s }
+        if (n == 1 && s.indexOf("&") < 0 && phsCase(s, false) != "mixed") { return "?" + s }
+        return n == 0 ? "null" : s + "|null"
+    }
+    function phpTypeErr(k, pname, v, typ) {
+        phpRaise("TypeError", "Cannot assign " + phpValueName(v) + " to property " + k.__name + "::$" + pname + " of type " + phpTypeText(typ))
+    }
+    // A write of v to property pname of o: v as its declared type takes it.
+    function phpPropFit(o, pname, v) {
+        var d = phpPropDecl(o.__class, pname)
+        if (d == null || d.typ == "") { return v }
+        var r = anytype
+        r = phpTypeFit(d.typ, v, d.k)
+        if (r === phpTypeBad) { phpTypeErr(d.k, pname, v, d.typ) }
+        return r
+    }
+    // The same for a typed static property, whose cell carries its type (st), its
+    // declaring class (sk) and its name (sn).
+    function phpStaticFit(cell, v) {
+        var r = anytype
+        r = phpTypeFit(cell.st, v, cell.sk)
+        if (r === phpTypeBad) { phpTypeErr(cell.sk, cell.sn, v, cell.st) }
+        return r
+    }
+    function phpStaticUninit(cell) {
+        phpRaise("Error", "Typed static property " + cell.sk.__name + "::$" + cell.sn + " must not be accessed before initialization")
+    }
+    // A class's __mvis: its non-public methods as ",name=V,", the name lower-cased
+    // and V "*" for protected, "-" for private. ms is read from its END, so a trait
+    // alias that only changes a method's visibility wins over the method it copies;
+    // a name already in seen (",a,b,") is skipped. Twin of phMethodVisList in
+    // php-to-llvm-ir.abnf.
+    function phpMethodVisList(ms, seen) {
+        var out = ","
+        var done = seen
+        for (var i = ms.length - 1; i >= 0; i--) {
+            var lc = phsCase(ms[i].name, false)
+            if (done.indexOf("," + lc + ",") >= 0) { continue }
+            done += lc + ","
+            if (ms[i].vis == "protected") { out += lc + "=*," }
+            else if (ms[i].vis == "private") { out += lc + "=-," }
+        }
+        return out
+    }
+    function phpMethodVisOf(k, lc) {
+        if (k == null || k == undefined || typeof k.__mvis != "string") { return "" }
+        var key = "," + lc + "="
+        var at = k.__mvis.indexOf(key)
+        return at < 0 ? "" : k.__mvis.substring(at + key.length, at + key.length + 1)
+    }
+    // The nearest declaration of a method along the class chain: {k: declaring
+    // class, vis}, or null. Twin of phMethodDecl in lib/php-rt.metajs and
+    // phpMethodDecl in abnf/jsrtphp.go.
+    function phpMethodDecl(cls, lc) {
+        var key = "," + lc + ","
+        var k = cls
+        while (k != undefined && k != null) {
+            if (typeof k.__mlc == "string" && k.__mlc.indexOf(key) >= 0) { return {k: k, vis: phpMethodVisOf(k, lc)} }
+            k = k.__super
+        }
+        return null
+    }
+    // May code in class scope (null outside every class) call method lc on cls
+    // (zend_std_get_method / zend_std_get_static_method)? 0 yes, 1 no: it is
+    // private, 2 no: it is protected, 3 call the SCOPE's own private method instead:
+    // on an instance of a subclass that declares the name again, an ancestor's code
+    // still reaches its own private method (ZEND_ACC_CHANGED). A protected method is
+    // judged by its root, the first declaration up the chain that is not private
+    // (zend_get_function_root_class); a constructor has no such chain. Twin of
+    // phMethodAccess in lib/php-rt.metajs and phpMethodAccess in abnf/jsrtphp.go.
+    function phpMethodAccess(cls, lc, scope, inst) {
+        var d = phpMethodDecl(cls, lc)
+        if (d == null) { return 0 }
+        var hasScope = scope != null && scope != undefined
+        if (inst && hasScope && d.k !== scope && phpMethodVisOf(scope, lc) == "-" && classIs(cls, scope.__name)) { return 3 }
+        if (d.vis == "" || d.k === scope) { return 0 }
+        if (d.vis == "-") { return 1 }
+        var root = d.k
+        if (lc != "__construct") {
+            var up = phpMethodDecl(root.__super, lc)
+            while (up != null && up.vis != "-") {
+                root = up.k
+                up = phpMethodDecl(root.__super, lc)
+            }
+        }
+        if (hasScope && (classIs(root, scope.__name) || classIs(scope, root.__name))) { return 0 }
+        return 2
+    }
+    // zend_bad_method_call's Error, or zend_bad_constructor_call's, which names no
+    // "method" ("Call to private C::__construct() from global scope").
+    function phpBadMethod(cls, name, scope, ctor) {
+        var d = phpMethodDecl(cls, phsCase(name, false))
+        phpRaise("Error", "Call to " + (d.vis == "-" ? "private" : "protected") + (ctor ? " " : " method ") +
+                 d.k.__name + "::" + name + "() from " + (scope == null || scope == undefined ? "global scope" : "scope " + scope.__name))
+    }
     // A class's __mlc: its declared method names, lower-cased, each between commas.
     function phpMethodList(ms) {
         var out = ","
@@ -6455,8 +6855,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // A property name is a string even where the property table folded a
             // decimal one to an int key: ["0"]=>.
             for (var j = 0; j < v.p.keys.length; j++) {
-                var pn = phpStr(v.p.keys[j])
-                var pd = phpPropDecl(v.__class, pn)
+                var pn = phpKeyName(v.p.keys[j])
+                var pd = anytype
+                pd = pn == phpStr(v.p.keys[j]) ? phpPropDecl(v.__class, pn) : null
                 var pv = pd == null ? "" : pd.vis
                 if (v.p.vals[j] === undefined && (pd == null || pd.typ == "")) { continue }
                 if (pv == "") { o2 += dumpKey(pn, ind + 2) }

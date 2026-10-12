@@ -1499,6 +1499,18 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-features.php", "-q"]
         },
         {
+            "name": "PHP strict_types typed properties (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-strict.php", "-q"]
+        },
+        {
+            "name": "PHP strict_types typed properties (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-strict.php", "-q"]
+        },
+        {
             "name": "PHP echo writes raw bytes (interpreter)",
             "type": "go",
             "request": "launch",
