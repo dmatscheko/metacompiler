@@ -63,7 +63,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-449 python: stdlib module contents (json, itertools, functools, os.path, string, random, time); import edges · P2 · PY · OPEN [V]
+### T-449 python: stdlib module contents (json, itertools, functools, os.path, string, random, time); import edges · P2 · PY · IN PROGRESS (PY worker, round 23) [V]
 python3 3.14: json, itertools, functools, os(.path), typing, random, string, time, abc, collections.abc are empty
 module objects ("module 'json' has no attribute 'dumps'"). Priority: json.dumps/loads (with indent, sort_keys,
 separators), itertools (chain, product, permutations, combinations, accumulate, groupby, islice, count, cycle, repeat,
