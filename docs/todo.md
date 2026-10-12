@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-453** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-454** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -84,10 +84,14 @@ splitext. Write them in Python like python-collections.py where possible. Edges:
 
 # JV — Java
 
-### T-452 java: ArrayList.remove(0) costs ~73M instructions natively · P3 · JV · IN PROGRESS (JV worker, round 13) [V]
-With 300 elements one remove(0) costs ~73M instructions (1,700 removes: 124G instructions, 15,770 collections): the
-element-shift loop in languages/lib/java-util.java runs at the interpreted per-statement cost. Use a bulk primitive
-(array splice / copyWithin-style) in java-util.java; oracle javac/java 24.
+### T-453 java: java.util.Arrays; fail-fast iterators; fmt1-3 vs real java · P2 · JV · OPEN [V]
+javac/java 24: (a) `java.util.Arrays` is absent in all engines ("variable not defined: Arrays"): toString, sort, fill,
+asList, copyOf, copyOfRange, equals, stream basics. (b) ArrayList's iterator is not fail-fast: iterator, clear(), add(5),
+next() returns 5; java 24 throws ConcurrentModificationException (no modCount in ArrayListItr). (c) `java
+tests/java-test-full.java` under java 24 reports FAIL fmt1/fmt2/fmt3 (locale-dependent; earlier runs used
+-Duser.language=en -Duser.country=US) — confirm the assertions are right under an en_US locale and note the oracle
+command in the file header. (d) arraycopy of int[] into Object[] succeeds (java: ArrayStoreException); the value model
+has no element types — DECLINE unless cheap.
 
 ---
 
@@ -495,6 +499,7 @@ T-448 python: runtime stdlib modules bound on import with aliases and from-impor
 T-447 php: declared properties take precedence over magic (compiled presence test), __unset in both engines, isset() asks __isset only, realpath (js_realpath in the C floor, Go twin, interpreter host hook) — DONE 6b675553
 T-440 core: bitmap allocator (sweep = bitmap swap, cursor allocation) + 4 MB trigger floor; native bench rows -3..-21% (java -18%, python -21%), ~+3 MB heap — DONE e8607d6e
 T-445 core: literal cache home slot by multiplicative hash, hits migrate home, frame-less hit leaf; another -4..-7.5% per row; baseline re-recorded — DONE cdf85b85
+T-452 java: System.arraycopy in all engines; ArrayList shifts/grows/copies with it (1,700 remove(0)+add on 300 elements: 93.7G -> 2.8G native); clear() reallocates — DONE 3e47ce3b
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
