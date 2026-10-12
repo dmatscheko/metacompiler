@@ -2664,6 +2664,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     genDrive(src, function(ik, iv) { genEmit(buf, ik, iv, false); return null })
                     return null
                 }
+                // An Iterator is driven through its methods, the way foreach drives
+                // one (an IteratorAggregate hands over its iterator first).
+                while (isObj(src) && classIs(src.__class, "IteratorAggregate")) { src = mcall(src, "getIterator", argsOf([])) }
+                if (isObj(src) && classIs(src.__class, "Iterator")) {
+                    mcall(src, "rewind", argsOf([]))
+                    while (phptest(mcall(src, "valid", argsOf([])))) {
+                        var cv = anytype
+                        cv = mcall(src, "current", argsOf([]))
+                        genEmit(buf, mcall(src, "key", argsOf([])), cv, false)
+                        mcall(src, "next", argsOf([]))
+                    }
+                    return null
+                }
                 var n = phpRangeLen(src)
                 for (var j = 0; j < n; j++) { genEmit(buf, phpRangeKey(src, j), phpRangeVal(src, j), false) }
                 return null

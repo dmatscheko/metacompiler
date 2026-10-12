@@ -2582,6 +2582,11 @@ interface S59I {}
 interface S59J extends S59I {}
 class S59A implements S59J, Countable { function count(): int { return 3; } }
 class S59B extends S59A {}
+function s59g() {
+    yield 1;
+    yield from new ArrayIterator(["a" => 2, "b" => 3]);
+    yield from new ArrayObject([4]);
+}
 class S59It extends ArrayIterator {
     function current(): mixed { return parent::current() * 10; }
 }
@@ -2614,6 +2619,9 @@ function s59() {
         && $ao->getIterator() instanceof ArrayIterator && $ao->exchangeArray([5]) === [1 => 1, 2 => 2, "k" => 9]
         && $ao->getArrayCopy() === [5]);
     check("spl5", iterator_to_array(new S59It([1, 2])) === [10, 20]);
+    $s = "";
+    foreach (s59g() as $k => $v) { $s .= $k . "=" . $v . ";"; }
+    check("spl11", $s === "0=1;a=2;b=3;0=4;");
     $st = new SplStack();
     $st->push(1);
     $st->push(2);

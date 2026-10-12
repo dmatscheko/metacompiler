@@ -3011,6 +3011,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // indistinguishable from the one it delegates to. SRC may be an array or another
     // GENERATOR, so the loop is the same dual walk foreach uses: an array by index, a
     // generator through its next() handshake (so a delegated-to generator stays lazy).
+    // In a program with iterators an Iterator (or an IteratorAggregate's) is walked
+    // the way foreach walks one (feStep).
     // Deviation: the expression's own value (a sub-generator's return) is not
     // propagated, exactly as in php-interpreter.abnf.
     function emitYieldFrom(b, srcV) {
@@ -3020,7 +3022,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var stN = "\x00ys" + hidCount
         var gnN = "\x00yg" + hidCount
         var lnN = "\x00yl" + hidCount
+        if (usesIter) { srcV = callExt(b, "js_phfeobj", [srcV, hNull, hFalse]) }
         var isGen = callExt(b, "js_phisa", [srcV, emitStr(b, "Generator")])
+        if (usesIter) {
+            isGen = b.NewSelect(truthy(b, isGen), hTrue, callExt(b, "js_phisa", [srcV, emitStr(b, "Iterator")]))
+        }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itN), srcV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ixN), emitNum(b, 0)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stN), hUndef])
@@ -3030,7 +3036,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var startA = curF.NewBlock("")
         var headB = curF.NewBlock("")
         b.NewCondBr(truthy(b, isGen), startG, startA)
-        callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), genNext(startG, srcV)])
+        callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, srcV, hTrue, hTrue)])
         startG.NewBr(headB)
         callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
                                          callExt(startA, "js_range_len", [srcV])])
@@ -3083,7 +3089,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var gPost = curF.NewBlock("")
         postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
         var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
-        callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), genNext(gPost, itP)])
+        callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, hFalse, hTrue)])
         gPost.NewBr(headB)
         return exitB
     }
