@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-435** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-437** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -91,13 +91,11 @@ slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
-### T-434 csharp: tuple ToString; float type object; BCL enum casts; extension vs inapplicable instance method · P1 · CS · IN PROGRESS (CS worker, round 24) [V spec-only]
-(a) every tuple prints `[object Object]` in all engines: `var t = (1, 2); Console.WriteLine(t)`, `"" + t`, `$"{t}"`,
-`Math.DivRem(-17, 5)` (C#: `(1, 2)`, `(-3, -2)`; ValueTuple.ToString, named elements print positionally).
-(b) `float` has no type object: `float.MaxValue`, `float.NaN`, `float.Parse` die ("unknown name: float").
-(c) `(int)StringComparison.Ordinal`, `(int)StringSplitOptions.RemoveEmptyEntries`, `(int)MidpointRounding.ToPositiveInfinity`
-print 0 (C#: 4, 1, 4). (d) a user IEnumerable class's parameterless `Count()` wins over the LINQ extension for
-`w.Count(s => s.Length > 3)`; C# overload resolution only considers applicable instance methods first.
+### T-436 csharp: record ToString; user extension vs applicable instance method · P2 · CS · OPEN [V spec-only]
+(a) `record P(int X, int Y)` prints `P`; C# synthesises `P { X = 1, Y = 2 }` (also record class/struct, nested records,
+inherited members first). (b) user extension methods: the compiler always prefers a same-named extension over an
+instance method (`csExt[s.name]` in foldCallMember); the interpreter prefers the instance method without an
+applicability check. C# rule: an applicable instance method wins; otherwise extensions. Probe both halves first.
 
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
 `flt36`/`flt37` in tests/csharp-test-full.cs assert `1E+07`, `1E+20`,
@@ -127,13 +125,11 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-433 php: non-numeric string / object unary TypeErrors; closures as objects; stdlib wrappers · P2 · PHP · IN PROGRESS (PHP worker, round 23) [V]
-Spec / corpus, all engines: (a) `"abc" + 1` gives 1; PHP 8 TypeError "Unsupported operand types: string + int"
-(lang/bug28800, operators/add_variationStr). (b) `is_object($closure)` / `get_class($closure)` false (PHP true /
-"Closure"); same for generators. (c) `$o++` on stdClass leaves 1 (8.3: TypeError "Cannot increment stdClass");
-`~$obj` gives -1 ("Cannot perform bitwise not on stdClass"). (d) builtin errors say "bool given"; 8.3 says
-"true given"/"false given". (e) `interface_exists('Throwable')` false. (f) `is_a`, `is_subclass_of`,
-`get_parent_class`, `class_exists`, `get_class` have no php-stdlib wrapper, so string callables naming them fail.
+### T-435 php: Traversable for user Iterators; var_dump of closures; Closure/Generator class_exists; ~bool/~null · P2 · PHP · OPEN [V]
+All engines: (a) a user class implementing Iterator fails `instanceof Traversable` and `is_subclass_of('It','Traversable')`
+(PHP true). (b) `var_dump(function(){})` prints NULL (PHP `object(Closure)#N (0) {}`). (c) `class_exists('Closure')`,
+`class_exists('Generator')` false. (d) `~true` / `~null` answer -2 / -1; PHP 8 throws "Cannot perform bitwise not on
+bool|null" — settle the exact type name from php-src (zend_operators.c) before changing.
 
 ---
 
@@ -476,6 +472,8 @@ T-419 python: object() and object's own methods/__new__, exact int**int past 409
 T-429 php: is_a/is_subclass_of/get_parent_class, object-operand TypeErrors, Closure/Generator debug types, leading-backslash lookups, SELF/PARENT/STATIC in any case, compiled instanceof Throwable — DONE 23e6ad05
 T-428 core: permanent unmarked region for boot/layer-2 top level/interned literals/small ints; collector cost per unused library function 611 -> ~200 instr per collection; every handle-IR bench row -3..-7% — DONE 6b2f74d6
 T-430 csharp: double constants and IsNaN family, LINQ/Join/Concat over a user IEnumerable, Math overload result types, Abs overflow, MidpointRounding, MathF, BigMul, DivRem, CopySign — DONE f557ea80
+T-433 php: non-numeric string TypeErrors, string bitwise ops, Perl-style increments and inc/dec TypeErrors, closures/generators as objects, "true given" names, built-in interfaces, stdlib class-function wrappers — DONE 137aa3c7
+T-434 csharp: tuple ToString, float/Single type object, BCL enum casts, extension fallback for inapplicable instance groups — DONE 36feec21
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
