@@ -116,7 +116,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-444 php: echo argument order; case-insensitive __toString; ??= on ArrayAccess; basename & path functions · P2 · PHP · OPEN [V]
+### T-444 php: echo argument order; case-insensitive __toString; ??= on ArrayAccess; basename & path functions · P2 · PHP · IN PROGRESS (PHP worker, round 27) [V]
 Spec: (a) `echo a, b, c` prints each argument as it is evaluated (one ZEND_ECHO per operand); all engines evaluate
 every operand first, so side effects interleave wrongly (`echo $o['a'] ?? 'd', " ", $o['b'] ?? 'd'` prints
 `E(a) G(a) E(b) 1 d`, PHP `E(a) G(a) 1 E(b) d`). (b) `function __TOSTRING()` is not found by string conversion
@@ -139,7 +139,7 @@ reads without offsetExists (BP_VAR_IS). (d) `basename`, `dirname`, `pathinfo`, `
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-445 core: str_intern probes by literal address — layer-2 layout changes cost up to +1.7% · P2 · CORE · OPEN [V]
+### T-445 core: str_intern probes by literal address — layer-2 layout changes cost up to +1.7% · P2 · CORE · IN PROGRESS (CORE worker, round 21) [V]
 `str_intern` in runtime.c is an open-addressing table keyed by the literal's address with linear probing. A layer-2
 change that moves literal addresses made php's bench +1.68% (10/10 paired): the parameter-name literal "r" of
 js_phadd/js_phlt/js_phmod probes 21-42 steps per loop iteration (840k-1.68M steps total vs 100-40k before). Fix: key
