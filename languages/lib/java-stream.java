@@ -1,6 +1,7 @@
 // java-stream.java -- the part of java.util.stream both java grammars provide,
 // written in Java and compiled with the program: java-interpreter.abnf and
-// java-to-llvm-ir.abnf load it (with lib/java-util.java, which it builds on)
+// java-to-llvm-ir.abnf load it (after lib/java-util.java and lib/java-map.java,
+// which it builds on)
 // when the program imports a java.util.stream type or calls a method named
 // stream (jStreamWants in lib/java-decltypes.js). One implementation serves
 // all three engines. What it answers is java 24.0.2's for a SEQUENTIAL stream.
@@ -16,11 +17,11 @@
 package java.util.stream;
 
 // The source of Stream.of / IntStream.of / Arrays.stream: a[from..to).
-class ArrayPipe implements Iterator<Object> {
+class StreamOfArray implements Iterator<Object> {
     Object[] a;
     int i;
     int to;
-    ArrayPipe(Object[] a, int from, int to) {
+    StreamOfArray(Object[] a, int from, int to) {
         this.a = a;
         i = from;
         this.to = to;
@@ -34,10 +35,10 @@ class ArrayPipe implements Iterator<Object> {
 
 // IntStream.range / rangeClosed: the counter is a long, so a range ending at
 // Integer.MAX_VALUE stops instead of wrapping.
-class RangePipe implements Iterator<Object> {
+class StreamOfRange implements Iterator<Object> {
     long cur;
     long end;
-    RangePipe(long from, long end) {
+    StreamOfRange(long from, long end) {
         cur = from;
         this.end = end;
     }
@@ -50,10 +51,10 @@ class RangePipe implements Iterator<Object> {
 
 // Collection.stream(): the collection's iterator is taken at the first read,
 // not when the stream is made, as a late-binding spliterator does.
-class LazyPipe implements Iterator<Object> {
+class StreamOfCollection implements Iterator<Object> {
     Collection<?> c;
     Iterator<?> it;
-    LazyPipe(Collection<?> c) { this.c = c; }
+    StreamOfCollection(Collection<?> c) { this.c = c; }
     public boolean hasNext() {
         if (it == null) { it = c.iterator(); }
         return it.hasNext();
@@ -66,11 +67,11 @@ class LazyPipe implements Iterator<Object> {
 
 // map / mapToObj (Function.apply, IntFunction.apply) and mapToInt / IntStream's
 // map (ToIntFunction.applyAsInt, IntUnaryOperator.applyAsInt).
-class MapPipe implements Iterator<Object> {
+class StreamMap implements Iterator<Object> {
     Iterator<Object> up;
     Object f;
     boolean asInt;
-    MapPipe(Iterator<Object> up, Object f, boolean asInt) {
+    StreamMap(Iterator<Object> up, Object f, boolean asInt) {
         this.up = up;
         this.f = f;
         this.asInt = asInt;
@@ -86,12 +87,12 @@ class MapPipe implements Iterator<Object> {
 
 // filter (Predicate.test / IntPredicate.test): hasNext reads ahead to the next
 // element that passes and holds it.
-class FilterPipe implements Iterator<Object> {
+class StreamFilter implements Iterator<Object> {
     Iterator<Object> up;
     java.util.function.Predicate<Object> p;
     Object held;
     boolean holding;
-    FilterPipe(Iterator<Object> up, java.util.function.Predicate<Object> p) {
+    StreamFilter(Iterator<Object> up, java.util.function.Predicate<Object> p) {
         this.up = up;
         this.p = p;
     }
@@ -113,10 +114,10 @@ class FilterPipe implements Iterator<Object> {
 }
 
 // peek (Consumer.accept / IntConsumer.accept).
-class PeekPipe implements Iterator<Object> {
+class StreamPeek implements Iterator<Object> {
     Iterator<Object> up;
     java.util.function.Consumer<Object> f;
-    PeekPipe(Iterator<Object> up, java.util.function.Consumer<Object> f) {
+    StreamPeek(Iterator<Object> up, java.util.function.Consumer<Object> f) {
         this.up = up;
         this.f = f;
     }
@@ -129,11 +130,11 @@ class PeekPipe implements Iterator<Object> {
 }
 
 // limit(n) and skip(n). skip reads past its first n elements at the first read.
-class SlicePipe implements Iterator<Object> {
+class StreamSlice implements Iterator<Object> {
     Iterator<Object> up;
     long skip;
     long left;
-    SlicePipe(Iterator<Object> up, long skip, long limit) {
+    StreamSlice(Iterator<Object> up, long skip, long limit) {
         this.up = up;
         this.skip = skip;
         left = limit;
@@ -154,18 +155,18 @@ class SlicePipe implements Iterator<Object> {
 
 // sorted() and sorted(Comparator): the first read drains the upstream stages
 // and sorts what they produced, stably (Arrays.sort's merge sort).
-class SortPipe implements Iterator<Object> {
+class StreamSort implements Iterator<Object> {
     Iterator<Object> up;
     java.util.Comparator<Object> c;
     Object[] all;
     int i;
-    SortPipe(Iterator<Object> up, java.util.Comparator<Object> c) {
+    StreamSort(Iterator<Object> up, java.util.Comparator<Object> c) {
         this.up = up;
         this.c = c;
     }
     public boolean hasNext() {
         if (all == null) {
-            all = Streams.drain(up);
+            all = StreamPipes.drain(up);
             if (c == null) { Arrays.sort(all); } else { Arrays.sort(all, c); }
         }
         return i < all.length;
@@ -178,12 +179,12 @@ class SortPipe implements Iterator<Object> {
 }
 
 // distinct(): the first occurrence of each element by equals, in encounter order.
-class DistinctPipe implements Iterator<Object> {
+class StreamDistinct implements Iterator<Object> {
     Iterator<Object> up;
     ArrayList<Object> seen = new ArrayList<Object>();
     Object held;
     boolean holding;
-    DistinctPipe(Iterator<Object> up) { this.up = up; }
+    StreamDistinct(Iterator<Object> up) { this.up = up; }
     public boolean hasNext() {
         while (!holding && up.hasNext()) {
             Object x = up.next();
@@ -202,8 +203,8 @@ class DistinctPipe implements Iterator<Object> {
     }
 }
 
-class Streams {
-    private Streams() {}
+class StreamPipes {
+    private StreamPipes() {}
     static Object[] drain(Iterator<Object> it) {
         Object[] buf = new Object[16];
         int n = 0;
@@ -235,28 +236,28 @@ class Stream<T> extends BaseStream {
     Stream(Iterator<Object> it) { this.it = it; }
 
     @SafeVarargs
-    public static <T> Stream<T> of(T... a) { return new Stream<T>(new ArrayPipe(a, 0, a.length)); }
-    public static <T> Stream<T> empty() { return new Stream<T>(new ArrayPipe(new Object[0], 0, 0)); }
-    static <T> Stream<T> ofCollection(Collection<T> c) { return new Stream<T>(new LazyPipe(c)); }
+    public static <T> Stream<T> of(T... a) { return new Stream<T>(new StreamOfArray(a, 0, a.length)); }
+    public static <T> Stream<T> empty() { return new Stream<T>(new StreamOfArray(new Object[0], 0, 0)); }
+    static <T> Stream<T> ofCollection(Collection<T> c) { return new Stream<T>(new StreamOfCollection(c)); }
 
-    public <R> Stream<R> map(java.util.function.Function<? super T, ? extends R> f) { return new Stream<R>(new MapPipe(take(), f, false)); }
-    public IntStream mapToInt(java.util.function.ToIntFunction<? super T> f) { return new IntStream(new MapPipe(take(), f, true)); }
+    public <R> Stream<R> map(java.util.function.Function<? super T, ? extends R> f) { return new Stream<R>(new StreamMap(take(), f, false)); }
+    public IntStream mapToInt(java.util.function.ToIntFunction<? super T> f) { return new IntStream(new StreamMap(take(), f, true)); }
     @SuppressWarnings("unchecked")
-    public Stream<T> filter(java.util.function.Predicate<? super T> p) { return new Stream<T>(new FilterPipe(take(), (java.util.function.Predicate<Object>) p)); }
+    public Stream<T> filter(java.util.function.Predicate<? super T> p) { return new Stream<T>(new StreamFilter(take(), (java.util.function.Predicate<Object>) p)); }
     @SuppressWarnings("unchecked")
-    public Stream<T> peek(java.util.function.Consumer<? super T> f) { return new Stream<T>(new PeekPipe(take(), (java.util.function.Consumer<Object>) f)); }
+    public Stream<T> peek(java.util.function.Consumer<? super T> f) { return new Stream<T>(new StreamPeek(take(), (java.util.function.Consumer<Object>) f)); }
     public Stream<T> limit(long n) {
-        Streams.checkCount(n);
-        return new Stream<T>(new SlicePipe(take(), 0, n));
+        StreamPipes.checkCount(n);
+        return new Stream<T>(new StreamSlice(take(), 0, n));
     }
     public Stream<T> skip(long n) {
-        Streams.checkCount(n);
-        return new Stream<T>(new SlicePipe(take(), n, -1));
+        StreamPipes.checkCount(n);
+        return new Stream<T>(new StreamSlice(take(), n, -1));
     }
-    public Stream<T> sorted() { return new Stream<T>(new SortPipe(take(), null)); }
+    public Stream<T> sorted() { return new Stream<T>(new StreamSort(take(), null)); }
     @SuppressWarnings("unchecked")
-    public Stream<T> sorted(java.util.Comparator<? super T> c) { return new Stream<T>(new SortPipe(take(), (java.util.Comparator<Object>) c)); }
-    public Stream<T> distinct() { return new Stream<T>(new DistinctPipe(take())); }
+    public Stream<T> sorted(java.util.Comparator<? super T> c) { return new Stream<T>(new StreamSort(take(), (java.util.Comparator<Object>) c)); }
+    public Stream<T> distinct() { return new Stream<T>(new StreamDistinct(take())); }
 
     @SuppressWarnings("unchecked")
     public void forEach(java.util.function.Consumer<? super T> f) {
@@ -302,7 +303,7 @@ class Stream<T> extends BaseStream {
         l.frozen = true;
         return l;
     }
-    public Object[] toArray() { return Streams.drain(take()); }
+    public Object[] toArray() { return StreamPipes.drain(take()); }
     @SuppressWarnings("unchecked")
     public Optional<T> findFirst() {
         Iterator<Object> i = take();
@@ -342,28 +343,28 @@ class Stream<T> extends BaseStream {
 class IntStream extends BaseStream {
     IntStream(Iterator<Object> it) { this.it = it; }
 
-    public static IntStream of(int... a) { return new IntStream(new ArrayPipe(Arrays.elems(a), 0, a.length)); }
-    public static IntStream empty() { return new IntStream(new ArrayPipe(new Object[0], 0, 0)); }
-    public static IntStream range(int from, int to) { return new IntStream(new RangePipe(from, to)); }
-    public static IntStream rangeClosed(int from, int to) { return new IntStream(new RangePipe(from, (long) to + 1)); }
+    public static IntStream of(int... a) { return new IntStream(new StreamOfArray(Arrays.elems(a), 0, a.length)); }
+    public static IntStream empty() { return new IntStream(new StreamOfArray(new Object[0], 0, 0)); }
+    public static IntStream range(int from, int to) { return new IntStream(new StreamOfRange(from, to)); }
+    public static IntStream rangeClosed(int from, int to) { return new IntStream(new StreamOfRange(from, (long) to + 1)); }
 
-    public IntStream map(java.util.function.IntUnaryOperator f) { return new IntStream(new MapPipe(take(), f, true)); }
-    public <U> Stream<U> mapToObj(java.util.function.IntFunction<? extends U> f) { return new Stream<U>(new MapPipe(take(), f, false)); }
+    public IntStream map(java.util.function.IntUnaryOperator f) { return new IntStream(new StreamMap(take(), f, true)); }
+    public <U> Stream<U> mapToObj(java.util.function.IntFunction<? extends U> f) { return new Stream<U>(new StreamMap(take(), f, false)); }
     public Stream<Integer> boxed() { return new Stream<Integer>(take()); }
     @SuppressWarnings("unchecked")
-    public IntStream filter(java.util.function.IntPredicate p) { return new IntStream(new FilterPipe(take(), (java.util.function.Predicate<Object>) (Object) p)); }
+    public IntStream filter(java.util.function.IntPredicate p) { return new IntStream(new StreamFilter(take(), (java.util.function.Predicate<Object>) (Object) p)); }
     @SuppressWarnings("unchecked")
-    public IntStream peek(java.util.function.IntConsumer f) { return new IntStream(new PeekPipe(take(), (java.util.function.Consumer<Object>) (Object) f)); }
+    public IntStream peek(java.util.function.IntConsumer f) { return new IntStream(new StreamPeek(take(), (java.util.function.Consumer<Object>) (Object) f)); }
     public IntStream limit(long n) {
-        Streams.checkCount(n);
-        return new IntStream(new SlicePipe(take(), 0, n));
+        StreamPipes.checkCount(n);
+        return new IntStream(new StreamSlice(take(), 0, n));
     }
     public IntStream skip(long n) {
-        Streams.checkCount(n);
-        return new IntStream(new SlicePipe(take(), n, -1));
+        StreamPipes.checkCount(n);
+        return new IntStream(new StreamSlice(take(), n, -1));
     }
-    public IntStream sorted() { return new IntStream(new SortPipe(take(), null)); }
-    public IntStream distinct() { return new IntStream(new DistinctPipe(take())); }
+    public IntStream sorted() { return new IntStream(new StreamSort(take(), null)); }
+    public IntStream distinct() { return new IntStream(new StreamDistinct(take())); }
 
     public void forEach(java.util.function.IntConsumer f) {
         Iterator<Object> i = take();
@@ -421,7 +422,7 @@ class IntStream extends BaseStream {
         return OptionalInt.of(r);
     }
     public int[] toArray() {
-        Object[] all = Streams.drain(take());
+        Object[] all = StreamPipes.drain(take());
         int[] out = new int[all.length];
         System.arraycopy(all, 0, out, 0, all.length);
         return out;
@@ -458,11 +459,11 @@ final class Collector<T, A, R> {
 }
 
 // joining's container: the text so far and whether an element was added.
-class Joiner {
+class StreamJoiner {
     String delim;
     String text = "";
     boolean any;
-    Joiner(String delim) { this.delim = delim; }
+    StreamJoiner(String delim) { this.delim = delim; }
     void add(Object x) {
         text = any ? text + delim + x : "" + x;
         any = true;
@@ -470,7 +471,7 @@ class Joiner {
 }
 
 // counting's container.
-class Counter {
+class StreamCounter {
     long n;
 }
 
@@ -487,10 +488,29 @@ final class Collectors {
         String d = delim.toString();
         String p = prefix.toString();
         String s = suffix.toString();
-        return new Collector<CharSequence, Object, String>(() -> new Joiner(d), (j, x) -> ((Joiner) j).add(x),
-                                                           j -> p + ((Joiner) j).text + s);
+        return new Collector<CharSequence, Object, String>(() -> new StreamJoiner(d), (j, x) -> ((StreamJoiner) j).add(x),
+                                                           j -> p + ((StreamJoiner) j).text + s);
+    }
+    public static <T, K> Collector<T, ?, Map<K, List<T>>> groupingBy(java.util.function.Function<? super T, ? extends K> f) {
+        return groupingBy(f, toList());
+    }
+    // Each element goes into its key's downstream container, made by
+    // computeIfAbsent at the key's first element - which decides the HashMap's
+    // order - and the downstream finisher then replaces every container by its
+    // result.
+    @SuppressWarnings("unchecked")
+    public static <T, K, A, D> Collector<T, ?, Map<K, D>> groupingBy(java.util.function.Function<? super T, ? extends K> f,
+                                                                     Collector<? super T, A, D> ds) {
+        return new Collector<T, Object, Map<K, D>>(() -> new HashMap<Object, Object>(), (m, x) -> {
+            Object k = f.apply((T) x);
+            if (k == null) { throw new NullPointerException("element cannot be mapped to a null key"); }
+            ds.accumulator.accept(((HashMap<Object, Object>) m).computeIfAbsent(k, key -> ds.supplier.get()), x);
+        }, m -> {
+            ((HashMap<Object, Object>) m).replaceAll((k, v) -> ds.finisher.apply(v));
+            return m;
+        });
     }
     public static <T> Collector<T, ?, Long> counting() {
-        return new Collector<T, Object, Long>(() -> new Counter(), (k, x) -> ((Counter) k).n++, k -> (long) ((Counter) k).n);
+        return new Collector<T, Object, Long>(() -> new StreamCounter(), (k, x) -> ((StreamCounter) k).n++, k -> (long) ((StreamCounter) k).n);
     }
 }

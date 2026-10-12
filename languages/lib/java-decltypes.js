@@ -856,13 +856,25 @@ function jUtilWants(path) {
     var rest = path.substring(10)
     var dot = rest.indexOf(".")
     if (dot >= 0) { rest = rest.substring(0, dot) }
-    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalDouble,".indexOf("," + rest + ",") >= 0
+    return ",ArrayList,List,Collection,Iterator,NoSuchElementException,ConcurrentModificationException,AbstractList,Arrays,Optional,OptionalInt,OptionalDouble,Map,HashMap,".indexOf("," + rest + ",") >= 0
+}
+
+// Does this import, or the class a `new` creates, name a type lib/java-map.java
+// declares? Then the grammar compiles it, after lib/java-util.java, with the
+// program. A java.util.* import alone does not: the program then creates a
+// HashMap (makeNew asks with the simple name) or uses java.util.stream, which
+// wants it too, before it can hold one.
+var jMapWant = false
+function jMapWants(path) {
+    return path == "java.util.Map" || path == "java.util.HashMap" || path == "java.util.Map.Entry"
+        || path == "HashMap" || path == "java.base"
 }
 
 // Does this import name a java.util.stream type? Then the grammar compiles
-// lib/java-stream.java, and lib/java-util.java it builds on, with the program.
-// A call of a method named stream (Arrays.stream, a Collection's stream()) sets
-// jStreamWant instead (jMcallSfx), because neither needs an import.
+// lib/java-stream.java, and lib/java-util.java and lib/java-map.java it builds
+// on, with the program. A call of a method named stream (Arrays.stream, a
+// Collection's stream()) sets jStreamWant instead (jMcallSfx), because neither
+// needs an import.
 var jStreamWant = false
 function jStreamWants(path) {
     return path == "java.util.stream.*" || (path.length > 17 && path.substring(0, 17) == "java.util.stream.")

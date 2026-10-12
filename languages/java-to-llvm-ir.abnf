@@ -21,7 +21,8 @@ and the partial new int[a][], bare initializers like {1, 2}, C style declarators
 a.length, indexing), varargs (a trailing array parameter, fed either by the extra
 arguments or by an array), the enhanced for loop
 (for (var x : arr), and over any Iterable), the java.util ArrayList / AbstractList / List / Arrays of an
-import (lib/java-util.java, compiled with the program), Optional and the
+import (lib/java-util.java, compiled with the program), Map and HashMap
+(lib/java-map.java, in java's iteration order), Optional and the
 sequential Stream / IntStream / Collectors of java.util.stream (lib/java-stream.java,
 compiled at a java.util.stream import or a call of a method named stream), new String(...),
 Math's and StrictMath's transcendentals as fdlibm answers them,
@@ -3142,6 +3143,7 @@ HasStatic   = :script(~~
         noteTypeUse(clsName)
         if (jLangWants(clsName)) { jLangWant = true }
         if (jUtilWants(qual)) { jUtilWant = true }
+        if (jMapWants(clsName) || jMapWants(qual)) { jMapWant = true }
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
         if (clsName == "String") { jUsesStrIdx = true }
@@ -3815,6 +3817,12 @@ HasStatic   = :script(~~
     }
 
     // The bare name of a declared type: "Fetch<Integer>" -> "Fetch", "int[]" -> "int".
+    // "java.util.Map.Entry" -> "Entry". The frozen host has no lastIndexOf.
+    function jSimpleName(t) {
+        var from = 0
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) == ".") { from = i + 1 } }
+        return t.substring(from)
+    }
     function baseTypeName(s) {
         var out = ""
         for (var i = 0; i < s.length; i++) {
@@ -4412,10 +4420,11 @@ HasStatic   = :script(~~
     // of its types (jLangWants): at the end of the walk, by buildMain, so its
     // classes are stashed with the imported ones. lib/java-util.java is loaded
     // the same way when a FULLY QUALIFIED `new java.util.ArrayList<>()` names
-    // one of its types without an import (JLS 6.5.5.2). lib/java-stream.java and
-    // the java-util.java it builds on are compiled at a java.util.stream import
-    // or by buildMain when the program calls a method named stream.
+    // one of its types without an import (JLS 6.5.5.2). lib/java-map.java and
+    // lib/java-stream.java are compiled the same ways (jMapWants and
+    // jStreamWants).
     var jUtilLoaded = false
+    var jMapLoaded = false
     var jStreamLoaded = false
     var jUtilWant = false
     var jLangWant = false
@@ -4431,16 +4440,25 @@ HasStatic   = :script(~~
         c.popSource()
         jPkgPrefix = ""
     }
-    function jImport(path, pos) {
-        var ip = stripWs(path)
-        if (!jUtilLoaded && (jUtilWants(ip) || jStreamWants(ip))) {
+    // lib/java-util.java, lib/java-map.java and lib/java-stream.java, each once,
+    // each after the files it builds on.
+    function jLoadLibs(util, map, stream) {
+        if (!jUtilLoaded && (util || map || stream)) {
             jUtilLoaded = true
             jLoadLib("lib/java-util.java", "java.util.")
         }
-        if (!jStreamLoaded && jStreamWants(ip)) {
+        if (!jMapLoaded && (map || stream)) {
+            jMapLoaded = true
+            jLoadLib("lib/java-map.java", "java.util.")
+        }
+        if (!jStreamLoaded && stream) {
             jStreamLoaded = true
             jLoadLib("lib/java-stream.java", "java.util.stream.")
         }
+    }
+    function jImport(path, pos) {
+        var ip = stripWs(path)
+        jLoadLibs(jUtilWants(ip), jMapWants(ip), jStreamWants(ip))
         resolveImport(path, pos)
     }
     function jEnterClass(n) {
@@ -4747,7 +4765,9 @@ HasStatic   = :script(~~
                 }
                 if (members[i].impls != undefined) {
                     for (var q = 0; q < members[i].impls.length; q++) {
-                        var iname = baseTypeName(members[i].impls[q])
+                        // A nested interface named by its qualified name (Map.Entry)
+                        // is registered under its simple one.
+                        var iname = jSimpleName(baseTypeName(members[i].impls[q]))
                         if (interfaceNames["$" + iname] == true) { impls.push(iname) }
                     }
                 }
@@ -5456,14 +5476,7 @@ HasStatic   = :script(~~
             stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
-        if ((jUtilWant || jStreamWant) && !jUtilLoaded) {
-            jUtilLoaded = true
-            jLoadLib("lib/java-util.java", "java.util.")
-        }
-        if (jStreamWant && !jStreamLoaded) {
-            jStreamLoaded = true
-            jLoadLib("lib/java-stream.java", "java.util.stream.")
-        }
+        jLoadLibs(jUtilWant, jMapWant, jStreamWant)
         if (jLangWant) {
             jLangWant = false
             jLoadLib("lib/java-lang.java", "java.lang.")

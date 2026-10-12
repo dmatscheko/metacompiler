@@ -39,8 +39,10 @@ import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.ConcurrentModificationException;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -117,6 +119,7 @@ class Main {
         S54.run(); // SECTION-CALL 54
         S55.run(); // SECTION-CALL 55
         S56.run(); // SECTION-CALL 56
+        S57.run(); // SECTION-CALL 57
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -3277,5 +3280,68 @@ class S56 {
         Main.check("op56", o.get().equals("x") && ("" + o).equals("Optional[x]") && ("" + Optional.empty()).equals("Optional.empty")
             && o.map(s -> s + "!").orElse("no").equals("x!") && !Optional.ofNullable(null).isPresent() && nse.equals("No value present")
             && Optional.empty() == Optional.empty() && OptionalInt.of(3).getAsInt() == 3 && OptionalInt.empty().orElse(7) == 7);
+    }
+}
+
+// ===== SECTION 57: HashMap, Map.Entry, Collectors.groupingBy, qualified type names =====
+//
+// A HashMap iterates in its table's order: the spread hash picks the bin, a
+// put appends to its bin while computeIfAbsent / merge / compute insert at the
+// head and grow the table before inserting, and a resize splits every bin in
+// order - so the printed order below is java's own. groupingBy collects into a
+// HashMap through computeIfAbsent. A qualified type name (Map.Entry, an
+// Outer.Inner) works in instanceof, in implements and as a static qualifier.
+// Every expected value is java 24.0.2's.
+interface S57Outer {
+    interface S57Lid { static int m() { return 42; } }
+    class S57Cup implements S57Outer.S57Lid { }
+}
+class S57 {
+    static void run() {
+        HashMap<Integer, String> h = new HashMap<>();
+        h.computeIfAbsent(1, k -> "a");
+        h.computeIfAbsent(17, k -> "b");
+        h.put(33, "c");
+        h.merge(49, "d", (x, y) -> x + y);
+        h.compute(65, (k, v) -> "e");
+        HashMap<Integer, Integer> a = new HashMap<>();
+        HashMap<Integer, Integer> b = new HashMap<>();
+        for (int i = 0; i < 13; i++) {
+            int k = (i % 2 == 0) ? i : i + 16;
+            a.put(k, i);
+            b.computeIfAbsent(k, x -> 0);
+        }
+        Main.check("hm57a", h.toString().equals("{65=e, 49=d, 17=b, 1=a, 33=c}")
+            && a.keySet().toString().equals("[0, 2, 4, 6, 8, 10, 12, 17, 19, 21, 23, 25, 27]")
+            && b.keySet().toString().equals("[0, 17, 2, 19, 4, 21, 6, 23, 8, 25, 10, 27, 12]"));
+        HashMap<String, Integer> s = new HashMap<>();
+        for (String w : "the quick brown fox jumps over the lazy dog again and again".split(" ")) { s.merge(w, 1, Integer::sum); }
+        Map.Entry<String, Integer> first = s.entrySet().iterator().next();
+        Main.check("hm57b", s.toString().equals("{over=1, the=2, quick=1, and=1, lazy=1, again=2, jumps=1, brown=1, dog=1, fox=1}")
+            && s.get("again") == 2 && s.getOrDefault("cat", 0) == 0 && s.containsKey("fox") && !s.containsKey("cat")
+            && first.toString().equals("over=1") && first instanceof Map.Entry && s.equals(new HashMap<>(s)));
+        s.remove("the");
+        s.put(null, 0);
+        Main.check("hm57c", s.hashCode() == 403228852 && s.get(null) == 0 && s.size() == 10
+            && s.values().toString().equals("[1, 0, 1, 1, 1, 2, 1, 1, 1, 1]")
+            && s.entrySet().stream().filter(e -> e.getKey() != null).sorted(Map.Entry.comparingByKey()).limit(3).toList().toString()
+                .equals("[again=2, and=1, brown=1]"));
+        HashMap<Integer, Integer> big = new HashMap<>();
+        for (int i = 0; i < 100; i++) { big.put(i * 37 % 101, i); }
+        String cme = "";
+        try { for (Integer k : big.keySet()) { big.put(k + 1000, 0); } } catch (ConcurrentModificationException e) { cme = "cme"; }
+        Main.check("hm57d", big.keySet().stream().limit(3).toList().toString().equals("[0, 1, 2]") && cme.equals("cme"));
+        List<String> words = List.of("apple", "avocado", "banana", "blueberry", "cherry", "kiwi", "fig", "date", "plum", "pear");
+        String npe = "";
+        try { Stream.of("a", null).collect(Collectors.groupingBy(x -> x)); } catch (NullPointerException e) { npe = e.getMessage(); }
+        Main.check("gb57", words.stream().collect(Collectors.groupingBy(w -> w.length())).toString()
+                .equals("{3=[fig], 4=[kiwi, date, plum, pear], 5=[apple], 6=[banana, cherry], 7=[avocado], 9=[blueberry]}")
+            && words.stream().collect(Collectors.groupingBy(w -> w.charAt(0), Collectors.counting())).toString()
+                .equals("{p=2, a=2, b=2, c=1, d=1, f=1, k=1}")
+            && npe.equals("element cannot be mapped to a null key"));
+        Object box = new S57Outer.S57Cup();
+        Main.check("qn57", S57Outer.S57Lid.m() == 42 && box instanceof S57Outer.S57Lid && box instanceof S57Outer.S57Cup
+            && "s" instanceof java.lang.String && !(box instanceof java.lang.Number)
+            && new String[] { "a", "b" }.getClass().getSimpleName().equals("String[]"));
     }
 }

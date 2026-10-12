@@ -44,9 +44,11 @@ The enhanced for runs over an array or any Iterable. Importing java.util's
 ArrayList, AbstractList, List, Collection, Iterator or Arrays compiles lib/java-util.java
 with the program (shared with java-to-llvm-ir.abnf): an ArrayList and List.of in
 Java's own terms, and an AbstractList a user List extends; Optional, OptionalInt
-and OptionalDouble come from the same file. A java.util.stream import, or a call
-of a method named stream, compiles lib/java-stream.java too: sequential Stream
-and IntStream pipelines and Collectors' toList, joining and counting. java.lang.String's
+and OptionalDouble come from the same file. Map and HashMap (in java's own
+iteration order) are lib/java-map.java, compiled when the program imports or
+creates one. A java.util.stream import, or a call of a method named stream,
+compiles lib/java-stream.java too: sequential Stream and IntStream pipelines and
+Collectors' toList, joining, counting and groupingBy. java.lang.String's
 methods and String.valueOf / join / format are lib/java-strings.js (the regex ones
 over lib/regex.js), StringBuilder is lib/java-lang.java, compiled the same way, and
 Object and getClass() are built in. Math's and StrictMath's transcendentals are
@@ -3461,7 +3463,7 @@ HasStatic   = :script(~~
     function jLangClass(simple) { return jClassOf("java.lang." + simple, simple) }
     // An array's simple name from its (inferred) binary name: [I is int[].
     function jArraySimple(tag) {
-        if (tag.charAt(1) == "L") { return tag.substring(tag.lastIndexOf(".") + 1, tag.length - 1) + "[]" }
+        if (tag.charAt(1) == "L") { return jSimpleName(tag.substring(0, tag.length - 1)) + "[]" }
         var c = tag.charAt(1)
         if (c == "I") { return "int[]" }
         if (c == "J") { return "long[]" }
@@ -3497,6 +3499,12 @@ HasStatic   = :script(~~
         if (typeof v == "object" && v.__class != undefined) { return jClassOf(jClassBin(v.__class), v.__class.__name) }
         fail("getClass() of a value with no class")
     }
+    // "java.util.Map.Entry" -> "Entry". The frozen host has no lastIndexOf.
+    function jSimpleName(t) {
+        var from = 0
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) == ".") { from = i + 1 } }
+        return t.substring(from)
+    }
     // Number's intValue() ... doubleValue(), Character's charValue() and Boolean's
     // booleanValue() on a boxed primitive: the primitive conversion to the named
     // type (JLS 5.1.2, 5.1.3), so Double 2.75's intValue() is 2 and Long 2^40's is
@@ -3519,15 +3527,16 @@ HasStatic   = :script(~~
     // and of that class's supertypes (Number for the six numeric ones, CharSequence
     // for String, Comparable and Serializable for all eight and String), never of
     // another wrapper - `(Object) 3 instanceof Double` is false (JLS 15.20.2).
-    // Every other value goes to the shared rtIsType. Twin of js_jvis in
-    // abnf/jsrtjavastr.go and languages/lib/java-rt.metajs.
+    // Every other value goes to the shared rtIsType. A qualified name
+    // (java.lang.Integer, Main.Box, Map.Entry) is tested by its simple name, the
+    // one a class descriptor carries. Twin of js_jvis in abnf/jsrtjavastr.go and
+    // languages/lib/java-rt.metajs.
     function jIsType(v, tname) {
         if (v === null || v === undefined) { return false }
-        var t = tname.split("<")[0]
-        if (t.indexOf("java.lang.") == 0) { t = t.substring(10) }
+        var t = jSimpleName(tname.split("<")[0])
         var bn = jBoxName(v)
         if (bn == "") { return rtIsType(v, t) }
-        if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable" || t == "java.io.Serializable") { return true }
+        if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable") { return true }
         if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
         return t == "CharSequence" && bn == "String"
     }
@@ -4254,6 +4263,7 @@ HasStatic   = :script(~~
         var clsName = items[0]
         if (jLangWants(clsName)) { jLangWant = true }
         if (jUtilWants(clsName)) { jUtilWant = true }
+        if (jMapWants(clsName)) { jMapWant = true }
         var args = items.slice(1)
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
         var sig = anytype // the static constructor signature, resolved at the first run
@@ -5992,10 +6002,11 @@ HasStatic   = :script(~~
     // lib/java-lang.java is compiled the same way, after the program's walk,
     // when the program creates one of its types (jLangWants), and so is
     // lib/java-util.java when a FULLY QUALIFIED `new java.util.ArrayList<>()`
-    // names one of its types without an import (JLS 6.5.5.2). lib/java-stream.java
-    // and the java-util.java it builds on are compiled at a java.util.stream
-    // import or after the walk when the program calls a method named stream.
+    // names one of its types without an import (JLS 6.5.5.2). lib/java-map.java
+    // and lib/java-stream.java are compiled the same ways (jMapWants and
+    // jStreamWants).
     var jUtilLoaded = false
+    var jMapLoaded = false
     var jStreamLoaded = false
     var jUtilWant = false
     var jLangWant = false
@@ -6009,16 +6020,25 @@ HasStatic   = :script(~~
         c.popSource()
         jPkgPrefix = ""
     }
-    function jImport(path, pos) {
-        var ip = stripWs(path)
-        if (!jUtilLoaded && (jUtilWants(ip) || jStreamWants(ip))) {
+    // lib/java-util.java, lib/java-map.java and lib/java-stream.java, each once,
+    // each after the files it builds on.
+    function jLoadLibs(util, map, stream) {
+        if (!jUtilLoaded && (util || map || stream)) {
             jUtilLoaded = true
             jLoadLib("lib/java-util.java", "java.util.")
         }
-        if (!jStreamLoaded && jStreamWants(ip)) {
+        if (!jMapLoaded && (map || stream)) {
+            jMapLoaded = true
+            jLoadLib("lib/java-map.java", "java.util.")
+        }
+        if (!jStreamLoaded && stream) {
             jStreamLoaded = true
             jLoadLib("lib/java-stream.java", "java.util.stream.")
         }
+    }
+    function jImport(path, pos) {
+        var ip = stripWs(path)
+        jLoadLibs(jUtilWants(ip), jMapWants(ip), jStreamWants(ip))
         resolveImport(path, pos)
     }
     function jEnterClass(n) {
@@ -6195,9 +6215,16 @@ HasStatic   = :script(~~
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "java"
     core.add = jadd
+    // A nested type read through its enclosing one (`Outer.Inner.m()`) is no
+    // member of the descriptor: jExitClass registered it under its qualified name.
+    // The compiler half stores it on the descriptor instead.
     core.getField = function(o, name) {
         if (name == "length" && Array.isArray(o)) { return o.length }
         if (hasOwn(o, name)) { return o[name] }
+        if (typeof o == "object" && o.__isclass === true) {
+            var q = o.__name + "." + name
+            if (hasOwn(globalScope, q)) { return globalScope[q] }
+        }
         return undefined
     }
     // `a[i]` on an array is bounds-checked (jArrIdx). A null reference throws
@@ -6412,14 +6439,7 @@ HasStatic   = :script(~~
     }
 
     c.compile(c.asg)
-    if ((jUtilWant || jStreamWant) && !jUtilLoaded) {
-        jUtilLoaded = true
-        jLoadLib("lib/java-util.java", "java.util.")
-    }
-    if (jStreamWant && !jStreamLoaded) {
-        jStreamLoaded = true
-        jLoadLib("lib/java-stream.java", "java.util.stream.")
-    }
+    jLoadLibs(jUtilWant, jMapWant, jStreamWant)
     if (jLangWant) { jLoadLib("lib/java-lang.java", "java.lang.") }
     jWalkDone = true
 

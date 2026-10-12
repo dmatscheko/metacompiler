@@ -2007,17 +2007,22 @@ function jvUnbox(v, name) {
 }
 // `v instanceof T`: a boxed primitive is an instance of its own wrapper class and
 // its supertypes only, never of another wrapper (JLS 15.20.2); every other value
-// goes to the shared js_is_type. Twin of jvIsType in abnf/jsrtjavastr.go and
-// jIsType in java-interpreter.abnf.
+// goes to the shared js_is_type. A qualified name is tested by its simple name.
+// Twin of jvIsType in abnf/jsrtjavastr.go and jIsType in java-interpreter.abnf.
 function js_jvis(v, t0) {
     if (v === undefined || v === null) { return false }
-    var t = t0
-    var lt = t.indexOf("<")
-    if (lt >= 0) { t = t.substring(0, lt) }
-    if (t.indexOf("java.lang.") == 0) { t = t.substring(10, t.length) }
+    var end = t0.indexOf("<")
+    if (end < 0) { end = t0.length }
+    var from = 0
+    var i = 0
+    while (i < end) {
+        if (t0.charAt(i) == ".") { from = i + 1 }
+        i = i + 1
+    }
+    var t = t0.substring(from, end)
     var bn = jvBoxName(v)
     if (bn == "") { return js_is_type(v, t) }
-    if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable" || t == "java.io.Serializable") { return true }
+    if (t == bn || t == "Object" || t == "Comparable" || t == "Serializable") { return true }
     if (t == "Number") { return bn != "String" && bn != "Boolean" && bn != "Character" }
     return t == "CharSequence" && bn == "String"
 }

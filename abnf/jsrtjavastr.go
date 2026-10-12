@@ -766,8 +766,9 @@ func jvBoxName(v interface{}) string {
 
 // jvIsType is `v instanceof T` (extern js_jvis): a boxed primitive is an
 // instance of its own wrapper class and its supertypes only, never of another
-// wrapper (JLS 15.20.2); every other value goes to isTypeName. Twin of jIsType
-// in java-interpreter.abnf and js_jvis in languages/lib/java-rt.metajs.
+// wrapper (JLS 15.20.2); every other value goes to isTypeName. A qualified name
+// is tested by its simple name. Twin of jIsType in java-interpreter.abnf and
+// js_jvis in languages/lib/java-rt.metajs.
 func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 	switch v.(type) {
 	case nil, jsUndefT, jsNullT:
@@ -776,13 +777,13 @@ func (rt *jsrt) jvIsType(v interface{}, t string) bool {
 	if i := strings.IndexByte(t, '<'); i >= 0 {
 		t = t[:i]
 	}
-	t = strings.TrimPrefix(t, "java.lang.")
+	t = t[strings.LastIndexByte(t, '.')+1:]
 	bn := jvBoxName(v)
 	if bn == "" {
 		return rt.isTypeName(v, t)
 	}
 	switch t {
-	case bn, "Object", "Comparable", "Serializable", "java.io.Serializable":
+	case bn, "Object", "Comparable", "Serializable":
 		return true
 	case "Number":
 		return bn != "String" && bn != "Boolean" && bn != "Character"

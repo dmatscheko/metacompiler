@@ -1,0 +1,469 @@
+// java-map.java -- java.util's Map and HashMap, written in Java and compiled
+// with the program: java-interpreter.abnf and java-to-llvm-ir.abnf load it (after
+// lib/java-util.java, which it builds on) when the program imports or creates one
+// of its types, or uses java.util.stream (jMapWants in lib/java-decltypes.js).
+// One implementation serves all three engines.
+//
+// A HashMap iterates in java 24.0.2's order because it IS java's table: the
+// spread hash h ^ (h >>> 16), a power-of-two table made at the first insert,
+// doubled when the size passes three quarters of it with every bin split in
+// order, put appending to its bin while computeIfAbsent, compute and merge
+// insert at the head and resize BEFORE inserting rather than after. The one
+// departure is that a bin is never made a tree: java's order differs from this
+// one only once eight keys share a bin of a table of 64 or more.
+package java.util;
+
+interface Map<K, V> {
+    int size();
+    boolean isEmpty();
+    V get(Object key);
+    V put(K key, V value);
+    V remove(Object key);
+    boolean containsKey(Object key);
+    void clear();
+    Collection<Map.Entry<K, V>> entrySet();
+
+    interface Entry<K, V> {
+        K getKey();
+        V getValue();
+        V setValue(V value);
+
+        @SuppressWarnings("unchecked")
+        static <K, V> java.util.Comparator<Map.Entry<K, V>> comparingByKey() {
+            return (a, b) -> ((Comparable<Object>) a.getKey()).compareTo(b.getKey());
+        }
+        @SuppressWarnings("unchecked")
+        static <K, V> java.util.Comparator<Map.Entry<K, V>> comparingByValue() {
+            return (a, b) -> ((Comparable<Object>) a.getValue()).compareTo(b.getValue());
+        }
+    }
+}
+
+class HashMapNode<K, V> implements Map.Entry<K, V> {
+    int hash;
+    K key;
+    V value;
+    HashMapNode<K, V> next;
+    HashMapNode(int hash, K key, V value, HashMapNode<K, V> next) {
+        this.hash = hash;
+        this.key = key;
+        this.value = value;
+        this.next = next;
+    }
+    public K getKey() { return key; }
+    public V getValue() { return value; }
+    public V setValue(V v) {
+        V old = value;
+        value = v;
+        return old;
+    }
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof Map.Entry)) { return false; }
+        Map.Entry<?, ?> e = (Map.Entry<?, ?>) o;
+        return HashMap.same(key, e.getKey()) && HashMap.same(value, e.getValue());
+    }
+    public int hashCode() { return (key == null ? 0 : key.hashCode()) ^ (value == null ? 0 : value.hashCode()); }
+    public String toString() { return key + "=" + value; }
+}
+
+class HashMap<K, V> implements Map<K, V> {
+    HashMapNode<K, V>[] table;
+    int size;
+    int threshold;
+    int modCount;
+
+    public HashMap() {}
+    public HashMap(int initialCapacity) {
+        if (initialCapacity < 0) { throw new IllegalArgumentException("Illegal initial capacity: " + initialCapacity); }
+        threshold = sizeFor(initialCapacity);
+    }
+    public HashMap(Map<? extends K, ? extends V> m) { putAll(m); }
+
+    static int sizeFor(int cap) {
+        int n = 1;
+        while (n < cap) { n = n << 1; }
+        return n;
+    }
+    static int hash(Object key) {
+        if (key == null) { return 0; }
+        int h = key.hashCode();
+        return h ^ (h >>> 16);
+    }
+    static boolean same(Object a, Object b) { return a == null ? b == null : a.equals(b); }
+
+    @SuppressWarnings("unchecked")
+    HashMapNode<K, V>[] resize() {
+        HashMapNode<K, V>[] old = table;
+        int oldCap = old == null ? 0 : old.length;
+        int newCap;
+        int newThr = 0;
+        if (oldCap > 0) {
+            newCap = oldCap << 1;
+            if (oldCap >= 16) { newThr = threshold << 1; }
+        } else if (threshold > 0) {
+            newCap = threshold;
+        } else {
+            newCap = 16;
+            newThr = 12;
+        }
+        if (newThr == 0) { newThr = newCap * 3 / 4; }
+        threshold = newThr;
+        HashMapNode<K, V>[] tab = (HashMapNode<K, V>[]) new HashMapNode[newCap];
+        table = tab;
+        for (int j = 0; j < oldCap; j++) {
+            HashMapNode<K, V> e = old[j];
+            if (e == null) { continue; }
+            HashMapNode<K, V> loHead = null;
+            HashMapNode<K, V> loTail = null;
+            HashMapNode<K, V> hiHead = null;
+            HashMapNode<K, V> hiTail = null;
+            while (e != null) {
+                HashMapNode<K, V> nx = e.next;
+                e.next = null;
+                if ((e.hash & oldCap) == 0) {
+                    if (loTail == null) { loHead = e; } else { loTail.next = e; }
+                    loTail = e;
+                } else {
+                    if (hiTail == null) { hiHead = e; } else { hiTail.next = e; }
+                    hiTail = e;
+                }
+                e = nx;
+            }
+            tab[j] = loHead;
+            tab[j + oldCap] = hiHead;
+        }
+        return tab;
+    }
+    // java makes a bin of eight or more a tree once the table holds 64 bins;
+    // below that it grows the table instead, which is the part that moves keys.
+    void longBin() {
+        if (table.length < 64) { resize(); }
+    }
+
+    HashMapNode<K, V> find(Object key) {
+        if (table == null) { return null; }
+        int h = hash(key);
+        HashMapNode<K, V> e = table[h & (table.length - 1)];
+        while (e != null) {
+            if (e.hash == h && same(key, e.key)) { return e; }
+            e = e.next;
+        }
+        return null;
+    }
+
+    V putVal(K key, V value, boolean onlyIfAbsent) {
+        int h = hash(key);
+        if (table == null) { resize(); }
+        int i = h & (table.length - 1);
+        HashMapNode<K, V> p = table[i];
+        if (p == null) {
+            table[i] = new HashMapNode<K, V>(h, key, value, null);
+        } else {
+            int count = 0;
+            while (true) {
+                if (p.hash == h && same(key, p.key)) {
+                    V old = p.value;
+                    if (!onlyIfAbsent || old == null) { p.value = value; }
+                    return old;
+                }
+                if (p.next == null) {
+                    p.next = new HashMapNode<K, V>(h, key, value, null);
+                    if (count >= 7) { longBin(); }
+                    break;
+                }
+                p = p.next;
+                count++;
+            }
+        }
+        modCount++;
+        size++;
+        if (size > threshold) { resize(); }
+        return null;
+    }
+
+    // The first steps computeIfAbsent, compute and merge share: grow the table
+    // if it is due, and find the key's bin.
+    int binFor(int h) {
+        if (size > threshold || table == null) { resize(); }
+        return h & (table.length - 1);
+    }
+    // Inserts at the head of bin i, as those three do; `count` is how many keys
+    // the bin held.
+    void addFirst(int i, int h, K key, V value, int count) {
+        table[i] = new HashMapNode<K, V>(h, key, value, table[i]);
+        if (count >= 7) { longBin(); }
+        modCount++;
+        size++;
+    }
+    static int binCount(HashMapNode<?, ?> e) {
+        int n = 0;
+        while (e != null) {
+            n++;
+            e = e.next;
+        }
+        return n;
+    }
+
+    V removeKey(Object key) {
+        if (table == null) { return null; }
+        int h = hash(key);
+        int i = h & (table.length - 1);
+        HashMapNode<K, V> prev = null;
+        HashMapNode<K, V> e = table[i];
+        while (e != null) {
+            if (e.hash == h && same(key, e.key)) {
+                if (prev == null) { table[i] = e.next; } else { prev.next = e.next; }
+                modCount++;
+                size--;
+                return e.value;
+            }
+            prev = e;
+            e = e.next;
+        }
+        return null;
+    }
+
+    public int size() { return size; }
+    public boolean isEmpty() { return size == 0; }
+    public V get(Object key) {
+        HashMapNode<K, V> e = find(key);
+        return e == null ? null : e.value;
+    }
+    public V getOrDefault(Object key, V dflt) {
+        HashMapNode<K, V> e = find(key);
+        return e == null ? dflt : e.value;
+    }
+    public boolean containsKey(Object key) { return find(key) != null; }
+    public boolean containsValue(Object value) {
+        HashMapItr<K, V> it = new HashMapItr<K, V>(this, 1);
+        while (it.hasNext()) {
+            if (same(value, it.next())) { return true; }
+        }
+        return false;
+    }
+    public V put(K key, V value) { return putVal(key, value, false); }
+    public V putIfAbsent(K key, V value) { return putVal(key, value, true); }
+    // Sized for m's entries up front - an unmade table for ceil(size / 0.75),
+    // rounded up to a power of two - then filled in m's own order.
+    @SuppressWarnings("unchecked")
+    public void putAll(Map<? extends K, ? extends V> m) {
+        int s = m.size();
+        if (s == 0) { return; }
+        if (table == null) {
+            int t = (int) Math.ceil(s / 0.75);
+            if (t > threshold) { threshold = sizeFor(t); }
+        } else {
+            while (s > threshold) { resize(); }
+        }
+        Iterator<?> it = m.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<K, V> e = (Map.Entry<K, V>) it.next();
+            putVal(e.getKey(), e.getValue(), false);
+        }
+    }
+    public V remove(Object key) { return removeKey(key); }
+    public void clear() {
+        modCount++;
+        if (table != null && size > 0) {
+            size = 0;
+            for (int i = 0; i < table.length; i++) { table[i] = null; }
+        }
+    }
+
+    public V computeIfAbsent(K key, java.util.function.Function<? super K, ? extends V> f) {
+        int h = hash(key);
+        int i = binFor(h);
+        HashMapNode<K, V> old = null;
+        int count = 0;
+        for (HashMapNode<K, V> e = table[i]; e != null; e = e.next) {
+            if (e.hash == h && same(key, e.key)) {
+                old = e;
+                break;
+            }
+            count++;
+        }
+        if (old != null && old.value != null) { return old.value; }
+        int mc = modCount;
+        V v = f.apply(key);
+        if (mc != modCount) { throw new ConcurrentModificationException(); }
+        if (v == null) { return null; }
+        if (old != null) {
+            old.value = v;
+            return v;
+        }
+        addFirst(i, h, key, v, count);
+        return v;
+    }
+    public V compute(K key, java.util.function.BiFunction<? super K, ? super V, ? extends V> f) {
+        int h = hash(key);
+        int i = binFor(h);
+        HashMapNode<K, V> old = null;
+        for (HashMapNode<K, V> e = table[i]; e != null; e = e.next) {
+            if (e.hash == h && same(key, e.key)) {
+                old = e;
+                break;
+            }
+        }
+        int mc = modCount;
+        V v = f.apply(key, old == null ? null : old.value);
+        if (mc != modCount) { throw new ConcurrentModificationException(); }
+        if (old != null) {
+            if (v != null) { old.value = v; } else { removeKey(key); }
+        } else if (v != null) {
+            addFirst(i, h, key, v, binCount(table[i]));
+        }
+        return v;
+    }
+    public V merge(K key, V value, java.util.function.BiFunction<? super V, ? super V, ? extends V> f) {
+        if (value == null || f == null) { throw new NullPointerException(); }
+        int h = hash(key);
+        int i = binFor(h);
+        HashMapNode<K, V> old = null;
+        for (HashMapNode<K, V> e = table[i]; e != null; e = e.next) {
+            if (e.hash == h && same(key, e.key)) {
+                old = e;
+                break;
+            }
+        }
+        if (old == null) {
+            addFirst(i, h, key, value, binCount(table[i]));
+            return value;
+        }
+        V v = value;
+        if (old.value != null) {
+            int mc = modCount;
+            v = f.apply(old.value, value);
+            if (mc != modCount) { throw new ConcurrentModificationException(); }
+        }
+        if (v != null) { old.value = v; } else { removeKey(key); }
+        return v;
+    }
+    public void forEach(java.util.function.BiConsumer<? super K, ? super V> f) {
+        int mc = modCount;
+        if (table != null) {
+            for (int i = 0; i < table.length && modCount == mc; i++) {
+                for (HashMapNode<K, V> e = table[i]; e != null; e = e.next) { f.accept(e.key, e.value); }
+            }
+        }
+        if (modCount != mc) { throw new ConcurrentModificationException(); }
+    }
+    public void replaceAll(java.util.function.BiFunction<? super K, ? super V, ? extends V> f) {
+        int mc = modCount;
+        if (table != null) {
+            for (int i = 0; i < table.length; i++) {
+                for (HashMapNode<K, V> e = table[i]; e != null; e = e.next) { e.value = f.apply(e.key, e.value); }
+            }
+        }
+        if (modCount != mc) { throw new ConcurrentModificationException(); }
+    }
+
+    public Collection<K> keySet() { return new HashMapView<K>(this, 0); }
+    public Collection<V> values() { return new HashMapView<V>(this, 1); }
+    public Collection<Map.Entry<K, V>> entrySet() { return new HashMapView<Map.Entry<K, V>>(this, 2); }
+
+    public boolean equals(Object o) {
+        if (o == this) { return true; }
+        if (!(o instanceof Map)) { return false; }
+        Map<?, ?> m = (Map<?, ?>) o;
+        if (m.size() != size) { return false; }
+        HashMapItr<K, V> it = new HashMapItr<K, V>(this, 2);
+        while (it.hasNext()) {
+            HashMapNode<?, ?> e = (HashMapNode<?, ?>) it.next();
+            if (e.value == null ? !(m.get(e.key) == null && m.containsKey(e.key)) : !e.value.equals(m.get(e.key))) { return false; }
+        }
+        return true;
+    }
+    public int hashCode() {
+        int h = 0;
+        HashMapItr<K, V> it = new HashMapItr<K, V>(this, 2);
+        while (it.hasNext()) { h += it.next().hashCode(); }
+        return h;
+    }
+    public String toString() {
+        String s = "{";
+        HashMapItr<K, V> it = new HashMapItr<K, V>(this, 2);
+        while (it.hasNext()) {
+            HashMapNode<?, ?> e = (HashMapNode<?, ?>) it.next();
+            if (s.length() > 1) { s = s + ", "; }
+            s = s + (e.key == this ? "(this Map)" : "" + e.key) + "=" + (e.value == this ? "(this Map)" : "" + e.value);
+        }
+        return s + "}";
+    }
+}
+
+// The table in bin order, each bin front to back; kind 0 answers the keys, 1 the
+// values, 2 the entries. Fail-fast, as java's is.
+class HashMapItr<K, V> implements Iterator<Object> {
+    HashMap<K, V> map;
+    int kind;
+    int expected;
+    HashMapNode<K, V> nextNode;
+    int index;
+    HashMapItr(HashMap<K, V> map, int kind) {
+        this.map = map;
+        this.kind = kind;
+        expected = map.modCount;
+        advance(null);
+    }
+    void advance(HashMapNode<K, V> from) {
+        nextNode = from;
+        HashMapNode<K, V>[] t = map.table;
+        while (nextNode == null && t != null && index < t.length) {
+            nextNode = t[index];
+            index++;
+        }
+    }
+    public boolean hasNext() { return nextNode != null; }
+    public Object next() {
+        if (map.modCount != expected) { throw new ConcurrentModificationException(); }
+        HashMapNode<K, V> e = nextNode;
+        if (e == null) { throw new NoSuchElementException(); }
+        advance(e.next);
+        return kind == 0 ? e.key : (kind == 1 ? (Object) e.value : e);
+    }
+}
+
+// keySet(), values() and entrySet(): live views of the map. Removing through a
+// view removes the mapping; adding throws, as java's views do.
+class HashMapView<E> implements Collection<E> {
+    HashMap<?, ?> map;
+    int kind;
+    HashMapView(HashMap<?, ?> map, int kind) {
+        this.map = map;
+        this.kind = kind;
+    }
+    public int size() { return map.size; }
+    public boolean isEmpty() { return map.size == 0; }
+    @SuppressWarnings("unchecked")
+    public Iterator<E> iterator() { return (Iterator<E>) new HashMapItr(map, kind); }
+    // The entry of this view holding o, or null.
+    HashMapNode<?, ?> entryOf(Object o) {
+        if (kind == 0) { return map.find(o); }
+        HashMapItr<?, ?> it = new HashMapItr(map, 2);
+        while (it.hasNext()) {
+            HashMapNode<?, ?> e = (HashMapNode<?, ?>) it.next();
+            if (kind == 1 ? HashMap.same(o, e.value) : e.equals(o)) { return e; }
+        }
+        return null;
+    }
+    public boolean contains(Object o) { return entryOf(o) != null; }
+    public boolean remove(Object o) {
+        HashMapNode<?, ?> e = entryOf(o);
+        if (e == null) { return false; }
+        map.removeKey(e.key);
+        return true;
+    }
+    public boolean add(E e) { throw new UnsupportedOperationException(); }
+    public void clear() { map.clear(); }
+    public String toString() {
+        String s = "[";
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            Object e = it.next();
+            if (s.length() > 1) { s = s + ", "; }
+            s = s + (e == this ? "(this Collection)" : "" + e);
+        }
+        return s + "]";
+    }
+}
