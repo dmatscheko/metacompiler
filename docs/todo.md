@@ -32,7 +32,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-437** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-439** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -63,17 +63,14 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-431 python: explicit None to a defaulted parameter (compiled); attribute protocol hooks · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
-(a) compiled halves: `def k(a=5): return a; k(None)` returns 5 (python3/interp: None) — the emitter tests "argument
-absent" with `js_seq(arg, undefined)` and None is undefined. Serious: silent wrong answer. (b) all engines: `del c.missing`
-succeeds silently (python3: AttributeError "'C' object has no attribute 'missing'"). (c) a user class's `__setattr__`,
-`__getattribute__`, `__getattr__` are never dispatched. (d) `repr(list[int])` prints `[object Object]` (python3
-`list[int]`). (e) `(-1) ** (10**20+1)` gives 1 (exponents > 2^53 go through doubles). (f) `(int | str) | 1.5` raises
-TypeError (3.14: `int | str | 1.5`). (g) `sys` binds no module: `sys.set_int_max_str_digits`/`get_int_max_str_digits`.
-
-### T-432 python: big-int performance (thousands of digits) · P3 · PY · IN PROGRESS (PY worker, round 17) [V]
-Frozen interpreter: `(3**4097).bit_length()` ~100M steps; `y >> 4499` costly; int(str) parse quadratic; bin()/format()
-slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per StringBuilder.append.
+### T-437 python: missing required argument is silent (compiled); live `__dict__`; `property` · P1 · PY · IN PROGRESS (PY worker, round 18) [V]
+(a) `def f(a, b=2)`; `f()` / `f(b=3)`: python3 `TypeError: f() missing 1 required positional argument: 'a'`; the
+interpreter says "missing required argument: 'a'" (wrong text); the compiled halves silently bind None. Silent wrong
+answer. Also check the plural / keyword-only forms ("missing 2 required positional arguments: 'a' and 'b'",
+"missing 1 required keyword-only argument: 'k'") and "takes N positional arguments but M were given".
+(b) instance `__dict__` is a snapshot in all engines: `o.__dict__["x"]=1; hasattr(o,"x")` False (python3 True);
+`d=o.__dict__; o.z=3; d` misses z. (c) no `property` builtin (NameError): getter/setter/deleter, decorator forms.
+(d) a str beside a union (`int | "s"`, ForwardRef) still TypeError — DECLINE unless cheap.
 
 ---
 
@@ -86,6 +83,11 @@ slow. Native: `hex(10**4300)` > 100 s. Java frozen interpreter: ~10.7K steps per
 ---
 
 # JV — Java
+
+### T-438 java: frozen interpreter StringBuilder.append costs ~5-10K steps · P3 · JV · OPEN [V]
+2000 appends need 10-20M -frozen steps (measured by the PY worker); the java ratchet's section 49 alone needs 53M
+of the 100M step brake (now split into tests/java-test-full.2.java). The cost is in java-interpreter.abnf /
+languages/lib/java-lang.java. Profile and make append amortized O(len).
 
 ---
 
@@ -469,6 +471,8 @@ T-430 csharp: double constants and IsNaN family, LINQ/Join/Concat over a user IE
 T-433 php: non-numeric string TypeErrors, string bitwise ops, Perl-style increments and inc/dec TypeErrors, closures/generators as objects, "true given" names, built-in interfaces, stdlib class-function wrappers — DONE 137aa3c7
 T-434 csharp: tuple ToString, float/Single type object, BCL enum casts, extension fallback for inapplicable instance groups — DONE 36feec21
 T-436 csharp: synthesized record ToString (positional, public fields/properties, base first); applicable instance method beats extension (count-only applicability; user PrintMembers and derived-of-ToString-base not modelled) — DONE 6ade117e
+T-431 python: explicit None no longer takes a default (compiled), attribute hooks, own-attribute delete + delattr, GenericAlias repr, unions of values, exact 0/±1 powers, sys digit limit — DONE 6ea7f2a6
+T-432 python: big-int <-> bits 16 at a time (hex(10**4300) native 29.8s -> 0.7s); java StringBuilder part moved to T-438 — DONE 44e2ba60
 T-020 ruby: `String#to_i` is a three-way divergence — DONE 4102cd8
 T-021 ruby: `print`/`puts` emit earlier arguments before a later one raises — DONE 8c8066e
 T-022 ruby: `defined?` kind classification residues — DONE 7fc500f
